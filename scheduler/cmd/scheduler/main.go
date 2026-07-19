@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/pubsub"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/client"
@@ -70,6 +71,14 @@ func main() {
 	// Run database migrations
 	if err := runMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
+	}
+	if err := teamquota.ValidateRegionStateIdentityInPostgreSQL(
+		ctx,
+		pool,
+		cfg.RegionID,
+		cfg.TeamQuotaStateID,
+	); err != nil {
+		logger.Fatal("Failed to validate Team Quota region state identity", zap.Error(err))
 	}
 
 	// Initialize clock for cross-cluster time synchronization
@@ -166,6 +175,9 @@ func main() {
 func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
 	logger.Info("Running database migrations")
 
+	if err := teamquota.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
+		return fmt.Errorf("migrate Team Quota: %w", err)
+	}
 	if err := migrate.Up(ctx, pool, ".",
 		migrate.WithBaseFS(templmigrations.FS),
 		migrate.WithLogger(observability.NewMigrateLogger(logger)),

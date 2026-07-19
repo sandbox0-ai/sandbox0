@@ -215,7 +215,16 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 		return nil, err
 	}
 	cfg.DatabaseURL = dsn
-	if err := redissvc.ApplyGatewayRateLimitConfig(ctx, r.Resources.Client, infra, &cfg.GatewayConfig); err != nil {
+	if err := redissvc.ApplyGatewayRedisConfig(ctx, r.Resources.Client, infra, &cfg.GatewayConfig); err != nil {
+		return nil, err
+	}
+	if err := redissvc.ApplyOverloadGuardConfig(
+		ctx,
+		r.Resources.Client,
+		infra,
+		"global-gateway",
+		&cfg.OverloadGuard,
+	); err != nil {
 		return nil, err
 	}
 
@@ -419,23 +428,42 @@ func applyConfigDefaults(cfg *apiconfig.GlobalGatewayConfig) {
 	if cfg.JWTRefreshTokenTTL.Duration == 0 {
 		cfg.JWTRefreshTokenTTL = metav1.Duration{Duration: 168 * time.Hour}
 	}
-	if cfg.RateLimitRPS == 0 {
-		cfg.RateLimitRPS = 100
+	cfg.OverloadGuard = apiconfig.NormalizeOverloadGuardConfig(cfg.OverloadGuard)
+	if cfg.IdentityResourceGuard.MaxTeamsOwnedPerUser == 0 {
+		cfg.IdentityResourceGuard.MaxTeamsOwnedPerUser = 10
 	}
-	if cfg.RateLimitBurst == 0 {
-		cfg.RateLimitBurst = 200
+	if cfg.IdentityResourceGuard.MaxMembersPerTeam == 0 {
+		cfg.IdentityResourceGuard.MaxMembersPerTeam = 256
 	}
-	if cfg.RateLimitCleanupInterval.Duration == 0 {
-		cfg.RateLimitCleanupInterval = metav1.Duration{Duration: 10 * time.Minute}
+	if cfg.IdentityResourceGuard.MaxTeamMembershipsPerUser == 0 {
+		cfg.IdentityResourceGuard.MaxTeamMembershipsPerUser = 32
+	}
+	if cfg.IdentityResourceGuard.MaxLinkedIdentitiesPerUser == 0 {
+		cfg.IdentityResourceGuard.MaxLinkedIdentitiesPerUser = 8
+	}
+	if cfg.IdentityResourceGuard.MaxActiveRefreshTokensPerUser == 0 {
+		cfg.IdentityResourceGuard.MaxActiveRefreshTokensPerUser = 16
+	}
+	if cfg.IdentityResourceGuard.MaxActiveWebLoginCodesPerUser == 0 {
+		cfg.IdentityResourceGuard.MaxActiveWebLoginCodesPerUser = 3
+	}
+	if cfg.IdentityResourceGuard.MaxActiveDeviceAuthSessions == 0 {
+		cfg.IdentityResourceGuard.MaxActiveDeviceAuthSessions = 10_000
+	}
+	if cfg.IdentityResourceGuard.MaxPendingOIDCStates == 0 {
+		cfg.IdentityResourceGuard.MaxPendingOIDCStates = 10_000
+	}
+	if cfg.IdentityResourceGuard.SessionCleanupInterval.Duration == 0 {
+		cfg.IdentityResourceGuard.SessionCleanupInterval = metav1.Duration{Duration: time.Minute}
+	}
+	if cfg.IdentityResourceGuard.SessionCleanupBatchSize == 0 {
+		cfg.IdentityResourceGuard.SessionCleanupBatchSize = 1_000
 	}
 	if strings.TrimSpace(cfg.DefaultTeamName) == "" {
 		cfg.DefaultTeamName = "Personal Team"
 	}
 	if cfg.OIDCStateTTL.Duration == 0 {
 		cfg.OIDCStateTTL = metav1.Duration{Duration: 10 * time.Minute}
-	}
-	if cfg.OIDCStateCleanupInterval.Duration == 0 {
-		cfg.OIDCStateCleanupInterval = metav1.Duration{Duration: 5 * time.Minute}
 	}
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		cfg.BaseURL = "http://localhost:8080"

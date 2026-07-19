@@ -10,10 +10,60 @@ import (
 
 // CreateUserIdentity creates a new user identity.
 func (r *Repository) CreateUserIdentity(ctx context.Context, identity *UserIdentity) error {
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO user_identities (user_id, provider, subject, raw_claims)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, created_at, updated_at
+	if err := validateIdentityBytesSize(
+		"raw_claims",
+		identity.RawClaims,
+		MaxIdentityRawClaimsBytes,
+	); err != nil {
+		return err
+	}
+	limits, guarded := r.identityResourceLimits()
+	if !guarded {
+		return insertUserIdentity(ctx, r.pool, identity)
+	}
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin create user identity: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockIdentityScopesTx(ctx, tx, identityUserScope(identity.UserID)); err != nil {
+		return err
+	}
+	var count int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM user_identities
+		WHERE user_id = $1
+	`, identity.UserID).Scan(&count); err != nil {
+		return fmt.Errorf("count linked user identities: %w", err)
+	}
+	if count >= limits.MaxLinkedIdentitiesPerUser {
+		return &IdentityResourceLimitExceededError{
+			Scope:    "user",
+			ScopeID:  identity.UserID,
+			Resource: IdentityLimitResourceLinkedIdentities,
+			Limit:    limits.MaxLinkedIdentitiesPerUser,
+		}
+	}
+	if err := insertUserIdentity(ctx, tx, identity); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit create user identity: %w", err)
+	}
+	return nil
+}
+
+type identityInsertQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func insertUserIdentity(ctx context.Context, q identityInsertQuerier, identity *UserIdentity) error {
+	err := q.QueryRow(ctx, `
+			INSERT INTO user_identities (user_id, provider, subject, raw_claims)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id, created_at, updated_at
 	`, identity.UserID, identity.Provider, identity.Subject, identity.RawClaims,
 	).Scan(&identity.ID, &identity.CreatedAt, &identity.UpdatedAt)
 	if err != nil {
@@ -74,6 +124,9 @@ func (r *Repository) GetUserIdentitiesByUserID(ctx context.Context, userID strin
 
 // UpdateUserIdentityClaims updates the raw claims for an identity.
 func (r *Repository) UpdateUserIdentityClaims(ctx context.Context, id string, rawClaims []byte) error {
+	if err := validateIdentityBytesSize("raw_claims", rawClaims, MaxIdentityRawClaimsBytes); err != nil {
+		return err
+	}
 	result, err := r.pool.Exec(ctx, `
 		UPDATE user_identities SET raw_claims = $2 WHERE id = $1
 	`, id, rawClaims)

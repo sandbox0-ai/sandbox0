@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	sharedssh "github.com/sandbox0-ai/sandbox0/pkg/sshgateway"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 )
 
@@ -43,6 +44,9 @@ func (s *Server) getSandboxDetail(c *gin.Context) {
 
 	sandbox, statusCode, err := s.getAuditedSandboxDetailFromClusterGateway(c, targetURL, sandboxID, authCtx)
 	if err != nil {
+		if coreteamquota.IsUnavailable(err) {
+			c.Header("Retry-After", "1")
+		}
 		s.logger.Warn("Failed to fetch sandbox detail from cluster-gateway",
 			zap.String("sandbox_id", sandboxID),
 			zap.String("team_id", authCtx.TeamID),
@@ -77,9 +81,17 @@ func (s *Server) getAuditedSandboxDetailFromClusterGateway(c *gin.Context, clust
 	if err != nil {
 		return nil, http.StatusInternalServerError, fmt.Errorf("create audited cluster-gateway sandbox request: %w", err)
 	}
-	token, err := s.generateInternalToken(authCtx, internalauth.ServiceClusterGateway)
+	token, err := s.generateForwardingInternalToken(
+		authCtx,
+		internalauth.ServiceClusterGateway,
+		req,
+	)
 	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("generate audited cluster-gateway token: %w", err)
+		status := http.StatusInternalServerError
+		if coreteamquota.IsUnavailable(err) {
+			status = http.StatusServiceUnavailable
+		}
+		return nil, status, fmt.Errorf("generate audited cluster-gateway token: %w", err)
 	}
 	req.Header.Set(internalauth.DefaultTokenHeader, token)
 	req, cancel := proxy.ApplyRequestTimeout(req, s.cfg.ProxyTimeout.Duration)

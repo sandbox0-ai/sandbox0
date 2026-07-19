@@ -32,6 +32,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -153,6 +154,35 @@ func TestClaimIdlePodReservationPreventsStaleCacheReuse(t *testing.T) {
 	if pod != nil {
 		t.Fatalf("second claimIdlePod() = %s, want nil while stale idle pod is reserved", pod.Name)
 	}
+}
+
+func TestClaimSandboxRejectsTeamTemplateWithoutOwnerAnnotation(t *testing.T) {
+	teamID := "team-a"
+	templateID := "template-a"
+	namespace, err := naming.TemplateNamespaceForTeam(teamID)
+	require.NoError(t, err)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      naming.TemplateNameForCluster(naming.ScopeTeam, teamID, templateID),
+			Namespace: namespace,
+			Labels: map[string]string{
+				controller.LabelTemplateScope:     naming.ScopeTeam,
+				controller.LabelTemplateLogicalID: templateID,
+			},
+		},
+	}
+	svc := &SandboxService{
+		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		logger:         zap.NewNop(),
+	}
+
+	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{
+		Template: templateID,
+		TeamID:   teamID,
+		UserID:   "user-a",
+	})
+	require.ErrorContains(t, err, "invalid team-scoped template ownership")
+	require.ErrorContains(t, err, controller.AnnotationTemplateTeamID)
 }
 
 func TestClaimIdlePodSkipsReservedPod(t *testing.T) {
@@ -968,6 +998,8 @@ func TestClaimSandboxDeletesColdPodAfterNetworkApplyFailure(t *testing.T) {
 		templateLister:       staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
 		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
 		networkProvider:      &assertingNetworkProvider{applyErr: applyErr},
+		teamQuotaStore:       &permissiveTeamQuotaCapacityStore{},
+		teamQuotaRateLimiter: permissiveTeamQuotaRateLimiter{},
 		clock:                systemTime{},
 		logger:               zap.NewNop(),
 	}
@@ -1015,6 +1047,54 @@ func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
 	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
+	}
+}
+
+func TestCreateNewPodReturnsObservedPodAfterAmbiguousCreate(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		create := action.(k8stesting.CreateAction)
+		pod := create.GetObject().(*corev1.Pod).DeepCopy()
+		pod.UID = types.UID("created-after-timeout")
+		err := client.Tracker().Create(
+			corev1.SchemeGroupVersion.WithResource("pods"),
+			pod,
+			pod.Namespace,
+		)
+		if err != nil {
+			t.Fatalf("persist ambiguous create result: %v", err)
+		}
+		return true, nil, apierrors.NewTimeoutError("create response timed out", 1)
+	})
+	svc := &SandboxService{
+		k8sClient:    client,
+		secretLister: newClaimTestSecretLister(t),
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
+		TeamID:            "team-a",
+		UserID:            "user-a",
+		SandboxID:         "sandbox-a",
+		RuntimeGeneration: 1,
+	})
+	if err == nil {
+		t.Fatal("createNewPod() error = nil, want ambiguous create error")
+	}
+	if pod == nil || pod.UID != types.UID("created-after-timeout") {
+		t.Fatalf("createNewPod() pod = %+v, want observed created pod", pod)
 	}
 }
 
@@ -1250,6 +1330,8 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 		secretLister:           newClaimTestSecretLister(t),
 		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
 		sandboxStore:           store,
+		teamQuotaStore:         &permissiveTeamQuotaCapacityStore{},
+		teamQuotaRateLimiter:   permissiveTeamQuotaRateLimiter{},
 		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
 		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
 		internalTokenGenerator: staticTokenGenerator{},
@@ -2276,7 +2358,7 @@ func newClaimTestPod(namespace, name, templateID string, ready bool) *corev1.Pod
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name: "procd",
-				Resources: v1alpha1.BuildResourceRequirements(v1alpha1.ResourceQuota{
+				Resources: v1alpha1.BuildResourceRequirements(v1alpha1.SandboxResourceLimits{
 					CPU: resource.MustParse("150m"),
 				}),
 			}},

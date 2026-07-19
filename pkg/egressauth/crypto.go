@@ -66,9 +66,9 @@ func (c *AESGCMCodec) Encrypt(_ context.Context, aad []byte, spec CredentialSour
 	if c == nil {
 		return nil, fmt.Errorf("secret codec is not configured")
 	}
-	plaintext, err := json.Marshal(spec)
+	plaintext, err := CanonicalCredentialSourceSpec(spec)
 	if err != nil {
-		return nil, fmt.Errorf("marshal credential source spec: %w", err)
+		return nil, err
 	}
 	key := c.keys[c.activeKeyID]
 	block, err := aes.NewCipher(key)
@@ -95,12 +95,18 @@ func (c *AESGCMCodec) Encrypt(_ context.Context, aad []byte, spec CredentialSour
 	if err != nil {
 		return nil, fmt.Errorf("marshal encrypted payload: %w", err)
 	}
+	if err := ValidateCredentialEnvelope(payload); err != nil {
+		return nil, err
+	}
 	return payload, nil
 }
 
 func (c *AESGCMCodec) Decrypt(_ context.Context, aad []byte, payload json.RawMessage) (CredentialSourceSecretSpec, error) {
 	if c == nil {
 		return CredentialSourceSecretSpec{}, fmt.Errorf("secret codec is not configured")
+	}
+	if err := ValidateCredentialEnvelope(payload); err != nil {
+		return CredentialSourceSecretSpec{}, err
 	}
 	var envelope encryptedSpecEnvelope
 	if err := json.Unmarshal(payload, &envelope); err != nil {
@@ -139,6 +145,9 @@ func (c *AESGCMCodec) Decrypt(_ context.Context, aad []byte, payload json.RawMes
 	var spec CredentialSourceSecretSpec
 	if err := json.Unmarshal(plaintext, &spec); err != nil {
 		return CredentialSourceSecretSpec{}, fmt.Errorf("unmarshal credential source spec: %w", err)
+	}
+	if err := ValidateCredentialSourceSpecSize(spec); err != nil {
+		return CredentialSourceSecretSpec{}, err
 	}
 	return spec, nil
 }

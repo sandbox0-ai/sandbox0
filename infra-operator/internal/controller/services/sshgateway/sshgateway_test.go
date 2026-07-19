@@ -42,6 +42,20 @@ func TestBuildConfigUsesRegionalGatewayURL(t *testing.T) {
 	if cfg.InternalAuthCaller != "ssh-gateway" {
 		t.Fatalf("InternalAuthCaller = %q, want ssh-gateway", cfg.InternalAuthCaller)
 	}
+	if cfg.RegionID == "" {
+		t.Fatal("RegionID is empty")
+	}
+	if cfg.TeamQuotaDistributedEnforcement.RedisURL == "" {
+		t.Fatal("Team Quota RedisURL is empty")
+	}
+	if cfg.PlatformMaxConcurrentHandshakes != 128 ||
+		cfg.PlatformMaxConcurrentChannelsPerConnection != 16 {
+		t.Fatalf(
+			"platform SSH guards = handshakes %d channels %d, want 128 16",
+			cfg.PlatformMaxConcurrentHandshakes,
+			cfg.PlatformMaxConcurrentChannelsPerConnection,
+		)
+	}
 }
 
 func TestReconcileCreatesSSHGatewayResources(t *testing.T) {
@@ -106,6 +120,16 @@ func TestReconcileCreatesSSHGatewayResources(t *testing.T) {
 	if !strings.Contains(configYAML, "ssh_port: 2222") {
 		t.Fatalf("config.yaml missing ssh_port: %s", configYAML)
 	}
+	for _, expected := range []string{
+		"team_quota_distributed_enforcement:",
+		"redis_url: redis://demo-redis.sandbox0-system.svc:6379/0",
+		"platform_max_concurrent_handshakes: 128",
+		"platform_max_concurrent_channels_per_connection: 16",
+	} {
+		if !strings.Contains(configYAML, expected) {
+			t.Fatalf("config.yaml missing %q: %s", expected, configYAML)
+		}
+	}
 
 	hostKeySecret := &corev1.Secret{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "demo-ssh-gateway-host-key", Namespace: infra.Namespace}, hostKeySecret); err != nil {
@@ -146,6 +170,10 @@ func newTestSSHGatewayInfra() *infrav1alpha1.Sandbox0Infra {
 	return &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Region: "test-region",
+			Redis: &infrav1alpha1.RedisConfig{
+				Type: infrav1alpha1.RedisTypeBuiltin,
+			},
 			Database: &infrav1alpha1.DatabaseConfig{
 				Type: infrav1alpha1.DatabaseTypeExternal,
 				External: &infrav1alpha1.ExternalDatabaseConfig{

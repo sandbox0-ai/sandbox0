@@ -25,15 +25,21 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/activeconnections"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/concurrency"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/storageoperations"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota"
 	storagevolume "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -62,6 +68,24 @@ var (
 	rootFSObjectCacheMinFreeBytes  = "0"
 	rootFSObjectCacheMaxAge        time.Duration
 	rootFSObjectCacheSweepInterval = time.Minute
+	rootFSStagingMaxBytes          = "8Gi"
+	rootFSStagingMaxTotalBytes     = "32Gi"
+	rootFSStagingMaxEntries        = 64
+	rootFSStagingMaxTeamBytes      = "8Gi"
+	rootFSStagingMaxTeamEntries    = 8
+	rootFSStagingMinFreeBytes      = "5Gi"
+	rootFSStagingMaxConcurrent     = 2
+	rootFSStagingMaxPerTeam        = 1
+	rootFSStagingTTL               = 15 * time.Minute
+	rootFSStagingSweepInterval     = time.Minute
+	rootFSBaselineMaxBytes         = "8Gi"
+	rootFSBaselineMaxTotalBytes    = "16Gi"
+	rootFSBaselineMaxEntries       = 64
+	rootFSBaselineMaxTeamBytes     = "8Gi"
+	rootFSBaselineMaxTeamEntries   = 8
+	rootFSBaselineMinFreeBytes     = "5Gi"
+	rootFSBaselineTTL              = time.Hour
+	rootFSBaselineSweepInterval    = time.Minute
 	podName                        = os.Getenv("POD_NAME")
 	podNamespace                   = os.Getenv("POD_NAMESPACE")
 	haSlot                         = os.Getenv("CTLD_HA_SLOT")
@@ -98,6 +122,24 @@ func main() {
 	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
 	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
 	flag.DurationVar(&rootFSObjectCacheSweepInterval, "rootfs-object-cache-sweep-interval", time.Minute, "interval for node-local rootfs object cache garbage collection")
+	flag.StringVar(&rootFSStagingMaxBytes, "rootfs-staging-max-bytes", "8Gi", "hard maximum for one prepared rootfs snapshot artifact")
+	flag.StringVar(&rootFSStagingMaxTotalBytes, "rootfs-staging-max-total-bytes", "32Gi", "maximum node-local bytes reserved by prepared rootfs snapshots")
+	flag.IntVar(&rootFSStagingMaxEntries, "rootfs-staging-max-entries", 64, "maximum retained prepared rootfs snapshot entries on one node")
+	flag.StringVar(&rootFSStagingMaxTeamBytes, "rootfs-staging-max-team-bytes", "8Gi", "maximum node-local prepared rootfs snapshot bytes for one team")
+	flag.IntVar(&rootFSStagingMaxTeamEntries, "rootfs-staging-max-team-entries", 8, "maximum retained prepared rootfs snapshot entries for one team on one node")
+	flag.StringVar(&rootFSStagingMinFreeBytes, "rootfs-staging-min-free-bytes", "5Gi", "minimum filesystem free bytes preserved before preparing a rootfs snapshot")
+	flag.IntVar(&rootFSStagingMaxConcurrent, "rootfs-staging-max-concurrent", 2, "maximum concurrent rootfs snapshot preparations on one node")
+	flag.IntVar(&rootFSStagingMaxPerTeam, "rootfs-staging-max-per-team", 1, "maximum concurrent rootfs snapshot preparations for one team on one node")
+	flag.DurationVar(&rootFSStagingTTL, "rootfs-staging-ttl", 15*time.Minute, "maximum lifetime for an unconsumed prepared rootfs snapshot")
+	flag.DurationVar(&rootFSStagingSweepInterval, "rootfs-staging-sweep-interval", time.Minute, "interval for prepared rootfs snapshot garbage collection")
+	flag.StringVar(&rootFSBaselineMaxBytes, "rootfs-baseline-cache-max-bytes", "8Gi", "hard maximum for one disposable rootfs baseline cache entry")
+	flag.StringVar(&rootFSBaselineMaxTotalBytes, "rootfs-baseline-cache-max-total-bytes", "16Gi", "maximum bytes used by disposable rootfs baseline cache entries on one node")
+	flag.IntVar(&rootFSBaselineMaxEntries, "rootfs-baseline-cache-max-entries", 64, "maximum disposable rootfs baseline cache entries on one node")
+	flag.StringVar(&rootFSBaselineMaxTeamBytes, "rootfs-baseline-cache-max-team-bytes", "8Gi", "maximum disposable rootfs baseline cache bytes for one team on one node")
+	flag.IntVar(&rootFSBaselineMaxTeamEntries, "rootfs-baseline-cache-max-team-entries", 8, "maximum disposable rootfs baseline cache entries for one team on one node")
+	flag.StringVar(&rootFSBaselineMinFreeBytes, "rootfs-baseline-cache-min-free-bytes", "5Gi", "minimum filesystem free bytes preserved by the rootfs baseline cache")
+	flag.DurationVar(&rootFSBaselineTTL, "rootfs-baseline-cache-ttl", time.Hour, "maximum idle age for a disposable rootfs baseline cache entry")
+	flag.DurationVar(&rootFSBaselineSweepInterval, "rootfs-baseline-cache-sweep-interval", time.Minute, "interval for disposable rootfs baseline cache garbage collection")
 	flag.StringVar(&haSlot, "ha-slot", os.Getenv("CTLD_HA_SLOT"), "stable ctld HA deployment slot")
 	flag.StringVar(&haProbe, "ha-probe", "", "run one ctld HA probe (live or ready) and exit")
 	flag.StringVar(&haProbeSocket, "ha-probe-socket", "/run/sandbox0/ctld-ha.sock", "container-local ctld HA probe socket")
@@ -206,16 +248,72 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	ctldCfg := apiconfig.LoadCtldConfig()
 	storageCfg := &ctldCfg.StorageProxyConfig
 	var repo *storagedb.Repository
+	var storageQuota *storagequota.Service
 	var dbPool *pgxpool.Pool
-	if storageCfg.DatabaseURL != "" {
-		dbPool, err = initPortalDatabase(ctx, storageCfg, obsProvider)
-		if err != nil {
-			log.Printf("ctld volume registry disabled: %v", err)
-		} else {
-			repo = storagedb.NewRepository(dbPool)
-			defer dbPool.Close()
-		}
+	if strings.TrimSpace(storageCfg.DatabaseURL) == "" {
+		return fmt.Errorf("ctld volume portals require the region PostgreSQL database")
 	}
+	dbPool, err = initPortalDatabase(ctx, storageCfg, obsProvider)
+	if err != nil {
+		return fmt.Errorf("initialize ctld volume portal database: %w", err)
+	}
+	defer dbPool.Close()
+	if err := teamquota.RunMigrations(ctx, dbPool, nil); err != nil {
+		return fmt.Errorf("run ctld volume portal Team Quota migrations: %w", err)
+	}
+	stateIdentity, err := teamquota.ClaimRegionStateIdentity(
+		ctx,
+		dbPool,
+		teamquota.RegionStateIdentityConfig{
+			RegionID:        storageCfg.RegionID,
+			ExpectedStateID: storageCfg.TeamQuotaDistributedEnforcement.StateID,
+			RedisURL:        storageCfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix:  storageCfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:    storageCfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("validate ctld Team Quota region state identity: %w", err)
+	}
+	storageCfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix = stateIdentity.KeyPrefix
+	repo = storagedb.NewRepository(dbPool)
+	teamQuotaRepo := teamquota.NewRepository(dbPool)
+	storageQuota = storagequota.New(
+		teamQuotaRepo,
+		storagequota.RegionRecoveryScope(storageCfg.RegionID),
+	)
+	storageOperationQuota, err := storageoperations.NewRedis(
+		ctx,
+		teamQuotaRepo,
+		storageoperations.Config{
+			RegionID:       storageCfg.RegionID,
+			RedisURL:       storageCfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix: storageCfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:   storageCfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+			PolicyCacheTTL: storageCfg.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("initialize ctld storage operation Team Quota: %w", err)
+	}
+	defer storageOperationQuota.Close()
+	activeConnectionQuota, err := activeconnections.NewRedis(
+		ctx,
+		teamQuotaRepo,
+		concurrency.Config{
+			RegionID:       storageCfg.RegionID,
+			RedisURL:       storageCfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix: storageCfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:   storageCfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+			PolicyCacheTTL: storageCfg.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration,
+			LeaseTTL:       storageCfg.TeamQuotaDistributedEnforcement.LeaseTTL.Duration,
+			RenewInterval:  storageCfg.TeamQuotaDistributedEnforcement.RenewInterval.Duration,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("initialize ctld storage active connection Team Quota: %w", err)
+	}
+	defer activeConnectionQuota.Close()
 
 	podUIDLister := activePodUIDLister(k8sClient, nodeName)
 	portalManager := ctldportal.NewManager(ctldportal.Config{
@@ -225,6 +323,9 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		Logger:             zapLogger,
 		StorageConfig:      storageCfg,
 		StorageObserver:    newPortalStorageObserver(storageCfg, repo, dbPool),
+		StorageQuota:       storageQuota,
+		StorageOperations:  storageOperationQuota,
+		ActiveConnections:  activeConnectionQuota,
 		Repository:         repo,
 		PodName:            podName,
 		PodNamespace:       podNamespace,
@@ -302,15 +403,22 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 
 	podCache := buildNodePodCache(ctx, k8sClient)
 	probeController := buildProbeController(k8sClient, obsProvider, podCache)
-	containerdRuntime := buildContainerdRuntime()
+	containerdRuntime, err := buildContainerdRuntime(ctx)
+	if err != nil {
+		return err
+	}
 	defer containerdRuntime.Close()
 	runtimeMetricsHandle := startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)
+	authValidator, err := buildCtldInternalAuthValidator()
+	if err != nil {
+		return err
+	}
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: probeController,
 		Portal:     portalManager,
 		RootFS:     buildRootFSController(ctx, storageCfg, portalManager, containerdRuntime),
 		ReadyCheck: serviceReady,
-	})
+	}, authValidator)
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
 		httpServer.ConnState = httpobs.NewConnStateTracker(obsProvider.HTTPServerConfig(nil)).Wrap(httpServer.ConnState)
@@ -425,8 +533,22 @@ func networkRuntimeExitError(parentErr, networkErr error) (error, bool) {
 	return fmt.Errorf("ctld network runtime: %w", networkErr), true
 }
 
-func newHTTPServer(addr string, controller ctldserver.Controller) *http.Server {
-	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller)}
+func newHTTPServer(addr string, controller ctldserver.Controller, validators ...*internalauth.Validator) *http.Server {
+	return &http.Server{Addr: addr, Handler: ctldserver.NewMux(controller, validators...)}
+}
+
+func buildCtldInternalAuthValidator() (*internalauth.Validator, error) {
+	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"load ctld internal auth public key from %s: %w",
+			internalauth.DefaultInternalJWTPublicKeyPath,
+			err,
+		)
+	}
+	config := internalauth.DefaultValidatorConfig(internalauth.ServiceCtld, publicKey)
+	config.AllowedCallers = internalauth.CtldAllowedCallers()
+	return internalauth.NewValidator(config), nil
 }
 
 func buildProbeController(k8sClient kubernetes.Interface, obsProvider *observability.Provider, podCache *ctldpower.PodCache) ctldserver.Controller {
@@ -503,17 +625,94 @@ func buildRootFSController(ctx context.Context, storageCfg *apiconfig.StoragePro
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
 	objectCache := buildRootFSObjectCache(ctx)
-	return ctldrootfs.NewController(ctldrootfs.Config{
-		Runtime:        runtime,
-		Store:          store,
-		PortalResolver: portalResolver,
-		SnapshotDir:    filepath.Join(portalRoot, "rootfs", "prepared"),
-		ObjectCache:    objectCache,
+	stagingMaxBytes, err := parseByteQuantity(rootFSStagingMaxBytes)
+	if err != nil || stagingMaxBytes <= 0 {
+		log.Printf("ctld rootfs controller disabled: invalid staging artifact limit %q: %v", rootFSStagingMaxBytes, err)
+		return nil
+	}
+	stagingMaxTotalBytes, err := parseByteQuantity(rootFSStagingMaxTotalBytes)
+	if err != nil || stagingMaxTotalBytes < stagingMaxBytes {
+		log.Printf("ctld rootfs controller disabled: invalid staging total limit %q: %v", rootFSStagingMaxTotalBytes, err)
+		return nil
+	}
+	stagingMaxTeamBytes, err := parseByteQuantity(rootFSStagingMaxTeamBytes)
+	if err != nil || stagingMaxTeamBytes < stagingMaxBytes {
+		log.Printf("ctld rootfs controller disabled: invalid staging team limit %q: %v", rootFSStagingMaxTeamBytes, err)
+		return nil
+	}
+	stagingMinFreeBytes, err := parseByteQuantity(rootFSStagingMinFreeBytes)
+	if err != nil {
+		log.Printf("ctld rootfs controller disabled: invalid staging free-space floor %q: %v", rootFSStagingMinFreeBytes, err)
+		return nil
+	}
+	if rootFSStagingMaxEntries <= 0 || rootFSStagingMaxTeamEntries <= 0 ||
+		rootFSStagingMaxTeamEntries > rootFSStagingMaxEntries ||
+		rootFSStagingMaxConcurrent <= 0 || rootFSStagingMaxPerTeam <= 0 ||
+		rootFSStagingMaxPerTeam > rootFSStagingMaxConcurrent ||
+		rootFSStagingTTL <= 0 || rootFSStagingSweepInterval <= 0 {
+		log.Printf("ctld rootfs controller disabled: invalid staging concurrency or retention configuration")
+		return nil
+	}
+	controller := ctldrootfs.NewController(ctldrootfs.Config{
+		Runtime:                        runtime,
+		Store:                          store,
+		PortalResolver:                 portalResolver,
+		SnapshotDir:                    filepath.Join(portalRoot, "rootfs", "prepared"),
+		ObjectCache:                    objectCache,
+		PreparedSnapshotMaxBytes:       stagingMaxBytes,
+		PreparedSnapshotMaxTotalBytes:  stagingMaxTotalBytes,
+		PreparedSnapshotMaxEntries:     rootFSStagingMaxEntries,
+		PreparedSnapshotMaxTeamBytes:   stagingMaxTeamBytes,
+		PreparedSnapshotMaxTeamEntries: rootFSStagingMaxTeamEntries,
+		PreparedSnapshotMinFreeBytes:   stagingMinFreeBytes,
+		PreparedSnapshotMaxConcurrent:  rootFSStagingMaxConcurrent,
+		PreparedSnapshotMaxPerTeam:     rootFSStagingMaxPerTeam,
+		PreparedSnapshotTTL:            rootFSStagingTTL,
+		PreparedSnapshotSweepInterval:  rootFSStagingSweepInterval,
 	})
+	if err := controller.Start(ctx); err != nil {
+		log.Printf("ctld rootfs controller disabled: initialize prepared snapshot staging: %v", err)
+		return nil
+	}
+	log.Printf(
+		"ctld rootfs staging enabled: max_bytes=%d max_total_bytes=%d max_entries=%d max_team_bytes=%d max_team_entries=%d min_free_bytes=%d max_concurrent=%d max_per_team=%d ttl=%s sweep_interval=%s",
+		stagingMaxBytes,
+		stagingMaxTotalBytes,
+		rootFSStagingMaxEntries,
+		stagingMaxTeamBytes,
+		rootFSStagingMaxTeamEntries,
+		stagingMinFreeBytes,
+		rootFSStagingMaxConcurrent,
+		rootFSStagingMaxPerTeam,
+		rootFSStagingTTL,
+		rootFSStagingSweepInterval,
+	)
+	return controller
 }
 
-func buildContainerdRuntime() *ctldrootfs.ContainerdRuntime {
-	return ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
+func buildContainerdRuntime(ctx context.Context) (*ctldrootfs.ContainerdRuntime, error) {
+	baselineMaxBytes, err := parseByteQuantity(rootFSBaselineMaxBytes)
+	if err != nil || baselineMaxBytes <= 0 {
+		return nil, fmt.Errorf("invalid rootfs baseline cache entry limit %q: %w", rootFSBaselineMaxBytes, valueOrValidationError(err))
+	}
+	baselineMaxTotalBytes, err := parseByteQuantity(rootFSBaselineMaxTotalBytes)
+	if err != nil || baselineMaxTotalBytes < baselineMaxBytes {
+		return nil, fmt.Errorf("invalid rootfs baseline cache total limit %q: %w", rootFSBaselineMaxTotalBytes, valueOrValidationError(err))
+	}
+	baselineMinFreeBytes, err := parseByteQuantity(rootFSBaselineMinFreeBytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid rootfs baseline cache free-space floor %q: %w", rootFSBaselineMinFreeBytes, err)
+	}
+	baselineMaxTeamBytes, err := parseByteQuantity(rootFSBaselineMaxTeamBytes)
+	if err != nil || baselineMaxTeamBytes < baselineMaxBytes {
+		return nil, fmt.Errorf("invalid rootfs baseline cache team limit %q: %w", rootFSBaselineMaxTeamBytes, valueOrValidationError(err))
+	}
+	if rootFSBaselineMaxEntries <= 0 || rootFSBaselineMaxTeamEntries <= 0 ||
+		rootFSBaselineMaxTeamEntries > rootFSBaselineMaxEntries ||
+		rootFSBaselineTTL <= 0 || rootFSBaselineSweepInterval <= 0 {
+		return nil, fmt.Errorf("invalid rootfs baseline cache count or retention configuration")
+	}
+	runtime := ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
 		CRIEndpoint:            criEndpoint,
 		ContainerdEndpoint:     containerdEndpoint,
 		ContainerdRoot:         containerdRoot,
@@ -522,7 +721,37 @@ func buildContainerdRuntime() *ctldrootfs.ContainerdRuntime {
 		ContainerdHostDataRoot: containerdHostDataRoot,
 		RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
 		Namespace:              containerdNamespace,
+		BaselineMaxBytes:       baselineMaxBytes,
+		BaselineMaxTotalBytes:  baselineMaxTotalBytes,
+		BaselineMaxEntries:     rootFSBaselineMaxEntries,
+		BaselineMaxTeamBytes:   baselineMaxTeamBytes,
+		BaselineMaxTeamEntries: rootFSBaselineMaxTeamEntries,
+		BaselineMinFreeBytes:   baselineMinFreeBytes,
+		BaselineTTL:            rootFSBaselineTTL,
+		BaselineSweepInterval:  rootFSBaselineSweepInterval,
 	})
+	if err := runtime.StartBaselineCache(ctx); err != nil {
+		return nil, fmt.Errorf("initialize rootfs baseline cache: %w", err)
+	}
+	log.Printf(
+		"ctld rootfs baseline cache enabled: max_bytes=%d max_total_bytes=%d max_entries=%d max_team_bytes=%d max_team_entries=%d min_free_bytes=%d ttl=%s sweep_interval=%s",
+		baselineMaxBytes,
+		baselineMaxTotalBytes,
+		rootFSBaselineMaxEntries,
+		baselineMaxTeamBytes,
+		rootFSBaselineMaxTeamEntries,
+		baselineMinFreeBytes,
+		rootFSBaselineTTL,
+		rootFSBaselineSweepInterval,
+	)
+	return runtime, nil
+}
+
+func valueOrValidationError(err error) error {
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("value is outside the supported range")
 }
 
 func buildRootFSObjectCache(ctx context.Context) *ctldrootfs.ObjectCache {
@@ -776,13 +1005,6 @@ func (c combinedController) InspectRootFS(r *http.Request, req ctldapi.InspectRo
 		return ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"}, http.StatusNotImplemented
 	}
 	return c.RootFS.InspectRootFS(r, req)
-}
-
-func (c combinedController) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
-	if c.RootFS == nil {
-		return ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"}, http.StatusNotImplemented
-	}
-	return c.RootFS.SaveRootFS(r, req)
 }
 
 func (c combinedController) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {

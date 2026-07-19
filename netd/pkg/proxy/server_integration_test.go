@@ -159,15 +159,19 @@ func TestHandleUDPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 		cfg: &config.NetdConfig{
 			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
 		},
-		logger:         zap.NewNop(),
-		udpHTTPConn:    proxyConn,
-		adapters:       registry,
-		auditor:        newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
-		udpReplyDialer: dialUDPEphemeralForTest,
+		logger:            zap.NewNop(),
+		udpHTTPConn:       proxyConn,
+		adapters:          registry,
+		auditor:           newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		udpReplyDialer:    dialUDPEphemeralForTest,
+		activeConnections: newFakeActiveConnectionQuota(-1),
 	}
 
 	payload := []byte("udp-payload")
-	compiled := &policy.CompiledPolicy{Mode: v1alpha1.NetworkModeAllowAll}
+	compiled := &policy.CompiledPolicy{
+		Mode:   v1alpha1.NetworkModeAllowAll,
+		TeamID: "team-1",
+	}
 	req := &adapterRequest{
 		Server:     server,
 		Compiled:   compiled,
@@ -257,15 +261,19 @@ func TestHandleUDPDecisionPassThroughReusesUDPSession(t *testing.T) {
 		cfg: &config.NetdConfig{
 			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
 		},
-		logger:         zap.NewNop(),
-		udpHTTPConn:    proxyConn,
-		adapters:       registry,
-		auditor:        newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
-		udpReplyDialer: dialUDPEphemeralForTest,
+		logger:            zap.NewNop(),
+		udpHTTPConn:       proxyConn,
+		adapters:          registry,
+		auditor:           newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		udpReplyDialer:    dialUDPEphemeralForTest,
+		activeConnections: newFakeActiveConnectionQuota(-1),
 	}
 	defer server.closeUDPSessions()
 
-	compiled := &policy.CompiledPolicy{Mode: v1alpha1.NetworkModeAllowAll}
+	compiled := &policy.CompiledPolicy{
+		Mode:   v1alpha1.NetworkModeAllowAll,
+		TeamID: "team-1",
+	}
 	payloads := [][]byte{[]byte("udp-one"), []byte("udp-two")}
 	for _, payload := range payloads {
 		req := &adapterRequest{

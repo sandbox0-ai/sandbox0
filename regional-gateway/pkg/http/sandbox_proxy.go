@@ -60,10 +60,13 @@ func (s *Server) proxySandbox(c *gin.Context) {
 		return
 	}
 
-	token, err := s.generateInternalToken(authCtx, "cluster-gateway")
+	token, err := s.generateForwardingInternalToken(
+		authCtx,
+		internalauth.ServiceClusterGateway,
+		c.Request,
+	)
 	if err != nil {
-		s.logger.Error("Failed to generate internal token for cluster-gateway", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
+		s.abortForwardingTokenError(c, internalauth.ServiceClusterGateway, err)
 		return
 	}
 
@@ -81,10 +84,13 @@ func (s *Server) proxyToScheduler(c *gin.Context, authCtx *authn.AuthContext) {
 		return
 	}
 
-	token, err := s.generateInternalToken(authCtx, "scheduler")
+	token, err := s.generateForwardingInternalToken(
+		authCtx,
+		internalauth.ServiceScheduler,
+		c.Request,
+	)
 	if err != nil {
-		s.logger.Error("Failed to generate internal token for scheduler", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
+		s.abortForwardingTokenError(c, internalauth.ServiceScheduler, err)
 		return
 	}
 
@@ -102,10 +108,13 @@ func (s *Server) proxyToDefaultClusterGateway(c *gin.Context) {
 		return
 	}
 
-	token, err := s.generateInternalToken(authCtx, "cluster-gateway")
+	token, err := s.generateForwardingInternalToken(
+		authCtx,
+		internalauth.ServiceClusterGateway,
+		c.Request,
+	)
 	if err != nil {
-		s.logger.Error("Failed to generate internal token for cluster-gateway", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
+		s.abortForwardingTokenError(c, internalauth.ServiceClusterGateway, err)
 		return
 	}
 

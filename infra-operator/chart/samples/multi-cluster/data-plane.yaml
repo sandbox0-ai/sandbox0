@@ -31,6 +31,24 @@ spec:
     enabled: false
     rootDomain: sandbox0.app
     regionId: aws-us-east-1
+  # Point every data-plane cluster at the same region Redis used by the
+  # control plane. Consumers intentionally do not configure quota defaults.
+  redis:
+    type: external
+    external:
+      urlSecret:
+        name: redis-credentials
+        key: url
+  # This resource is a distributed policy consumer, not the region policy
+  # owner. It may configure enforcement timings but must not copy defaults.
+  teamQuota:
+    # Export SANDBOX0_TEAM_QUOTA_STATE_ID from the region owner's
+    # status.teamQuota.stateId, then apply this sample through envsubst.
+    stateId: "${SANDBOX0_TEAM_QUOTA_STATE_ID}"
+    distributedEnforcement:
+      policyCacheTtl: 5s
+      leaseTtl: 15s
+      renewInterval: 5s
   storage:
     # Data plane storage (choose s3 or oss for production).
     type: s3

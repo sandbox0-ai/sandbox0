@@ -30,7 +30,7 @@ func TestAcceptLoopTracksActiveTCPProxyConnectionsByListener(t *testing.T) {
 
 	handlerStarted := make(chan struct{}, 2)
 	releaseHandlers := make(chan struct{})
-	handler := func(conn net.Conn) {
+	handler := func(_ context.Context, conn net.Conn) {
 		defer conn.Close()
 		handlerStarted <- struct{}{}
 		<-releaseHandlers

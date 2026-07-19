@@ -20,6 +20,52 @@ type CompactionResult struct {
 	ReclaimableBytes  uint64
 }
 
+// PlannedCompactionStorageUsage returns the exact complete state usage that
+// Compact would publish from an already materialized engine. A dirty engine
+// must first pass through quota-aware materialization so compaction cannot hide
+// an unadmitted intermediate representation.
+func (e *Engine) PlannedCompactionStorageUsage(ctx context.Context, opts CompactionOptions) (StorageUsage, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return StorageUsage{}, false, err
+	}
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
+
+	e.mu.RLock()
+	if err := e.checkOpen(); err != nil {
+		e.mu.RUnlock()
+		return StorageUsage{}, false, err
+	}
+	if e.materializer == nil || !e.materializer.Enabled() {
+		e.mu.RUnlock()
+		return StorageUsage{}, false, nil
+	}
+	if e.dirty {
+		e.mu.RUnlock()
+		return StorageUsage{}, false, fmt.Errorf("%w: compaction planning requires materialized state", ErrInvalidInput)
+	}
+	state := cloneState(e.currentStateLocked())
+	expectedManifestSeq := e.lastCommittedManifest
+	if state.NextSeq <= expectedManifestSeq+1 {
+		state.NextSeq = expectedManifestSeq + 2
+	}
+	materializer := e.materializer
+	e.mu.RUnlock()
+
+	manifest, _, _, err := materializer.planCompaction(ctx, state, expectedManifestSeq, opts)
+	if err != nil {
+		return StorageUsage{}, false, err
+	}
+	if manifest == nil || manifest.State == nil {
+		return StorageUsage{}, false, nil
+	}
+	usage, err := StateStorageUsage(manifest.State)
+	if err != nil {
+		return StorageUsage{}, false, err
+	}
+	return usage, true, nil
+}
+
 func (e *Engine) Compact(ctx context.Context, opts CompactionOptions) (*Manifest, *CompactionResult, error) {
 	if _, err := e.SyncMaterialize(ctx); err != nil {
 		return nil, nil, err
@@ -74,35 +120,9 @@ func (m *Materializer) Compact(ctx context.Context, state *SnapshotState, expect
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	if !m.Enabled() {
-		return nil, nil, nil
-	}
-	inline := cloneState(state)
-	normalizeState(inline)
-	defaultSegmentVolumeIDs(inline, m.volumeID)
-	if inline.NextSeq <= expectedManifestSeq+1 {
-		inline.NextSeq = expectedManifestSeq + 2
-	}
-	nextSeq := checkpointSequence(inline)
-	if nextSeq <= expectedManifestSeq {
-		return nil, nil, fmt.Errorf("%w: compact manifest seq %d must advance beyond %d", ErrCommittedHeadConflict, nextSeq, expectedManifestSeq)
-	}
-
-	selected, result := planCompactionSegments(inline, opts)
-	if len(selected) == 0 && !hasInlineSegments(inline) {
-		return nil, result, nil
-	}
-	manifestState, segments, err := buildCompactedState(ctx, m, nextSeq, m.volumeID, inline, selected, opts.SegmentTargetSize)
-	if err != nil {
-		return nil, nil, err
-	}
-	manifest := &Manifest{
-		Version:       1,
-		VolumeID:      m.volumeID,
-		ManifestSeq:   nextSeq,
-		CheckpointSeq: checkpointSequence(inline),
-		CreatedAt:     time.Now().UTC(),
-		State:         manifestState,
+	manifest, result, segments, err := m.planCompaction(ctx, state, expectedManifestSeq, opts)
+	if err != nil || manifest == nil {
+		return manifest, result, err
 	}
 	for _, segment := range segments {
 		storedSegmentPayload, segmentEncryption, err := m.encryption.encryptSegment(m.volumeID, segment)
@@ -118,7 +138,7 @@ func (m *Materializer) Compact(ctx context.Context, state *SnapshotState, expect
 		}
 		m.cache.put(segmentCacheKey(segment.VolumeID, segment.Key), segment.Payload)
 	}
-	if err := m.putJSON(ctx, manifestKey(nextSeq), manifest); err != nil {
+	if err := m.putJSON(ctx, manifestKey(manifest.ManifestSeq), manifest); err != nil {
 		return nil, nil, err
 	}
 	if m.headStore != nil {
@@ -136,6 +156,47 @@ func (m *Materializer) Compact(ctx context.Context, state *SnapshotState, expect
 		return nil, nil, err
 	}
 	return manifest, result, nil
+}
+
+// planCompaction builds the exact complete state that Compact will publish
+// without writing object storage.
+func (m *Materializer) planCompaction(
+	ctx context.Context,
+	state *SnapshotState,
+	expectedManifestSeq uint64,
+	opts CompactionOptions,
+) (*Manifest, *CompactionResult, []*materializedSegment, error) {
+	if !m.Enabled() {
+		return nil, nil, nil, nil
+	}
+	inline := cloneState(state)
+	normalizeState(inline)
+	defaultSegmentVolumeIDs(inline, m.volumeID)
+	if inline.NextSeq <= expectedManifestSeq+1 {
+		inline.NextSeq = expectedManifestSeq + 2
+	}
+	nextSeq := checkpointSequence(inline)
+	if nextSeq <= expectedManifestSeq {
+		return nil, nil, nil, fmt.Errorf("%w: compact manifest seq %d must advance beyond %d", ErrCommittedHeadConflict, nextSeq, expectedManifestSeq)
+	}
+
+	selected, result := planCompactionSegments(inline, opts)
+	if len(selected) == 0 && !hasInlineSegments(inline) {
+		return nil, result, nil, nil
+	}
+	manifestState, segments, err := buildCompactedState(ctx, m, nextSeq, m.volumeID, inline, selected, opts.SegmentTargetSize)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	manifest := &Manifest{
+		Version:       1,
+		VolumeID:      m.volumeID,
+		ManifestSeq:   nextSeq,
+		CheckpointSeq: checkpointSequence(inline),
+		CreatedAt:     time.Now().UTC(),
+		State:         manifestState,
+	}
+	return manifest, result, segments, nil
 }
 
 func planCompactionSegments(state *SnapshotState, opts CompactionOptions) (map[string]struct{}, *CompactionResult) {

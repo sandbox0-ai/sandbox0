@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"sync"
@@ -286,8 +287,8 @@ func (e *Engine) CreateFileWithOwner(parent uint64, name string, mode uint32, ui
 }
 
 func (e *Engine) Symlink(parent uint64, name, target string, mode uint32) (*Node, error) {
-	if target == "" {
-		return nil, fmt.Errorf("%w: symlink target is required", ErrInvalidInput)
+	if err := validateSymlinkTarget(target); err != nil {
+		return nil, err
 	}
 	return e.create(parent, name, TypeSymlink, mode, target, CreateOptions{})
 }
@@ -301,8 +302,8 @@ func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, er
 	if err := e.checkOpen(); err != nil {
 		return nil, err
 	}
-	if newName == "" {
-		return nil, fmt.Errorf("%w: empty link name", ErrInvalidInput)
+	if err := validateName(newName); err != nil {
+		return nil, err
 	}
 	node, ok := e.nodes[inode]
 	if !ok || node == nil {
@@ -407,8 +408,11 @@ func (e *Engine) Rename(oldParent uint64, oldName string, newParent uint64, newN
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
-	if oldName == "" || newName == "" {
-		return fmt.Errorf("%w: empty rename component", ErrInvalidInput)
+	if err := validateName(oldName); err != nil {
+		return err
+	}
+	if err := validateName(newName); err != nil {
+		return err
 	}
 	if _, err := e.lookupLocked(oldParent, oldName); err != nil {
 		return err
@@ -599,6 +603,38 @@ func (e *Engine) SnapshotState() *SnapshotState {
 	return cloneState(e.currentStateLocked())
 }
 
+// StorageBytes returns the exact logical payload bytes currently referenced by
+// the engine without cloning file payloads.
+func (e *Engine) StorageBytes() (int64, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return 0, err
+	}
+	return StateStorageBytes(e.currentStateLocked()), nil
+}
+
+// StorageUsage returns exact quota-relevant payload and object cardinality.
+// Pending WAL records are counted in addition to the current state because
+// they grow independently until a successful materialization resets the WAL.
+func (e *Engine) StorageUsage() (StorageUsage, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return StorageUsage{}, err
+	}
+	usage, err := StateStorageUsage(e.currentStateLocked())
+	if err != nil {
+		return StorageUsage{}, err
+	}
+	pending := e.wal.records()
+	if pending > math.MaxInt64-usage.Objects {
+		return StorageUsage{}, fmt.Errorf("%w: s0fs object count overflow", ErrInvalidInput)
+	}
+	usage.Objects += pending
+	return usage, nil
+}
+
 // SnapshotReferenceState returns a metadata snapshot for retaining live object
 // references during GC. Inline payload bytes may be shared with the engine and
 // must be treated as read-only by callers.
@@ -619,6 +655,48 @@ func (e *Engine) ExportState() (*SnapshotState, error) {
 
 func (e *Engine) SyncMaterialize(ctx context.Context) (*Manifest, error) {
 	return e.syncMaterialize(ctx, false)
+}
+
+// PlannedMaterializationStorageUsage returns the exact complete state usage
+// that the next materialization would publish. It uses the same plan builder as
+// Materialize and performs no object-store writes.
+func (e *Engine) PlannedMaterializationStorageUsage(ctx context.Context, force bool) (StorageUsage, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return StorageUsage{}, false, err
+	}
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
+
+	e.mu.RLock()
+	if err := e.checkOpen(); err != nil {
+		e.mu.RUnlock()
+		return StorageUsage{}, false, err
+	}
+	if e.materializer == nil || !e.materializer.Enabled() || (!e.dirty && (!force || !e.needsMaterializationLocked())) {
+		e.mu.RUnlock()
+		return StorageUsage{}, false, nil
+	}
+	state, err := e.materializeStateLocked()
+	if err != nil {
+		e.mu.RUnlock()
+		return StorageUsage{}, false, err
+	}
+	expectedManifestSeq := e.lastCommittedManifest
+	materializer := e.materializer
+	e.mu.RUnlock()
+
+	manifest, _, err := materializer.planMaterialization(state, expectedManifestSeq)
+	if err != nil {
+		return StorageUsage{}, false, err
+	}
+	if manifest == nil || manifest.State == nil {
+		return StorageUsage{}, false, nil
+	}
+	usage, err := StateStorageUsage(manifest.State)
+	if err != nil {
+		return StorageUsage{}, false, err
+	}
+	return usage, true, nil
 }
 
 // EnsureMaterialized writes any inline file data to immutable segments even if
@@ -862,9 +940,9 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 		e.mu.Unlock()
 		return nil, err
 	}
-	if name == "" {
+	if err := validateName(name); err != nil {
 		e.mu.Unlock()
-		return nil, fmt.Errorf("%w: empty name", ErrInvalidInput)
+		return nil, err
 	}
 	if err := e.ensureDirLocked(parent); err != nil {
 		e.mu.Unlock()
@@ -1082,8 +1160,16 @@ func (e *Engine) apply(record walRecord) error {
 }
 
 func (e *Engine) applyCreate(record walRecord) error {
-	if record.Inode == 0 || record.Parent == 0 || record.Name == "" {
+	if record.Inode == 0 || record.Parent == 0 {
 		return fmt.Errorf("%w: invalid create record", ErrInvalidInput)
+	}
+	if err := validateName(record.Name); err != nil {
+		return err
+	}
+	if record.Type == TypeSymlink {
+		if err := validateSymlinkTarget(record.Target); err != nil {
+			return err
+		}
 	}
 	if err := e.ensureDirLocked(record.Parent); err != nil {
 		return err
@@ -1119,8 +1205,11 @@ func (e *Engine) applyCreate(record walRecord) error {
 }
 
 func (e *Engine) applyLink(record walRecord) error {
-	if record.Inode == 0 || record.NewParent == 0 || record.NewName == "" {
+	if record.Inode == 0 || record.NewParent == 0 {
 		return fmt.Errorf("%w: invalid link record", ErrInvalidInput)
+	}
+	if err := validateName(record.NewName); err != nil {
+		return err
 	}
 	node := e.nodes[record.Inode]
 	if node == nil {
@@ -1169,6 +1258,12 @@ func (e *Engine) applyWrite(record walRecord) error {
 }
 
 func (e *Engine) applyRename(record walRecord) error {
+	if err := validateName(record.Name); err != nil {
+		return err
+	}
+	if err := validateName(record.NewName); err != nil {
+		return err
+	}
 	inode, err := e.lookupLocked(record.Parent, record.Name)
 	if err != nil {
 		return err

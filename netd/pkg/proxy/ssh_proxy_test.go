@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -20,7 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
+func TestSSHProxyChargesUpstreamOnWireBytesOnceWithPlatformCredential(t *testing.T) {
 	fakeSigner, fakeAuthorizedKey, _ := mustTestSSHSigner(t)
 	upstreamSigner, _, upstreamPrivateKeyPEM := mustTestSSHSigner(t)
 	upstreamHostSigner, _, _ := mustTestSSHSigner(t)
@@ -35,7 +36,13 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 	}
 	defer netdLn.Close()
 
-	server := &Server{cfg: &config.NetdConfig{ProxyUpstreamTimeout: metav1.Duration{Duration: 5 * time.Second}}}
+	usage := &credentialUsageRecorder{}
+	teamLimiter := &credentialTeamBandwidthLimiter{}
+	server := &Server{
+		cfg:           &config.NetdConfig{ProxyUpstreamTimeout: metav1.Duration{Duration: 5 * time.Second}},
+		usageRecorder: usage,
+	}
+	server.bandwidthLimiter = newBandwidthLimiter(server.cfg, teamLimiter)
 	done := make(chan error, 1)
 	go func() {
 		conn, err := netdLn.Accept()
@@ -45,7 +52,9 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 		}
 		defer conn.Close()
 		done <- server.runAdapter(&sshAdapter{}, &adapterRequest{
+			Context:  context.Background(),
 			Server:   server,
+			Compiled: &policy.CompiledPolicy{SandboxID: "sandbox-1", TeamID: "team-1"},
 			Conn:     conn,
 			DestIP:   net.ParseIP(upstreamHost),
 			DestPort: upstreamPort,
@@ -95,6 +104,13 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("proxy did not exit")
 	}
+	assertOnWireQuotaMatchesUsage(
+		t,
+		usage,
+		teamLimiter,
+		int64(len("git-upload-pack 'repo.git'")),
+		int64(len("exec: git-upload-pack 'repo.git'\n")),
+	)
 }
 
 func TestBridgeSSHChannelDelaysExitStatusUntilUpstreamStreamsDrain(t *testing.T) {
@@ -109,7 +125,7 @@ func TestBridgeSSHChannelDelaysExitStatusUntilUpstreamStreamsDrain(t *testing.T)
 
 	done := make(chan struct{})
 	go func() {
-		bridgeSSHChannel(nil, downstream, downstreamRequests, upstream, upstreamRequests)
+		bridgeSSHChannel(downstream, downstreamRequests, upstream, upstreamRequests)
 		close(done)
 	}()
 

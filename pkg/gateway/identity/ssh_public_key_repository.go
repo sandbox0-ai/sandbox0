@@ -5,22 +5,53 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 )
 
 // CreateUserSSHPublicKey stores one SSH public key for a user in a team.
 func (r *Repository) CreateUserSSHPublicKey(ctx context.Context, key *UserSSHPublicKey) error {
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO user_ssh_public_keys (team_id, user_id, name, public_key, key_type, fingerprint_sha256, comment)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	if err := ValidateUserSSHPublicKey(key); err != nil {
+		return err
+	}
+	key.ID = uuid.NewString()
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin ssh public key transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockSSHPublicKeyUser(ctx, tx, key.UserID); err != nil {
+		return err
+	}
+	quotaRef, err := teamquota.ReserveControlPlaneObjectTargetTx(
+		ctx,
+		r.teamQuotaStore,
+		tx,
+		teamquota.ControlPlaneObjectOwner(key.TeamID, teamquota.ControlPlaneOwnerKindSSHPublicKey, key.ID),
+		"create_ssh_public_key",
+		1,
+	)
+	if err != nil {
+		return err
+	}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO user_ssh_public_keys (id, team_id, user_id, name, public_key, key_type, fingerprint_sha256, comment)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, created_at, updated_at
-	`, key.TeamID, key.UserID, key.Name, key.PublicKey, key.KeyType, key.FingerprintSHA256, key.Comment,
+	`, key.ID, key.TeamID, key.UserID, key.Name, key.PublicKey, key.KeyType, key.FingerprintSHA256, key.Comment,
 	).Scan(&key.ID, &key.CreatedAt, &key.UpdatedAt)
 	if err != nil {
 		if isDuplicateKeyError(err) {
 			return ErrSSHPublicKeyAlreadyExists
 		}
 		return fmt.Errorf("insert ssh public key: %w", err)
+	}
+	if err := teamquota.CommitControlPlaneObjectTargetTx(ctx, r.teamQuotaStore, tx, quotaRef); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit ssh public key: %w", err)
 	}
 	return nil
 }
@@ -127,7 +158,27 @@ func (r *Repository) GetUserSSHPublicKeyByFingerprint(ctx context.Context, finge
 
 // DeleteUserSSHPublicKeyByTeamAndUserID deletes one SSH public key owned by a user in a team.
 func (r *Repository) DeleteUserSSHPublicKeyByTeamAndUserID(ctx context.Context, teamID, userID, keyID string) error {
-	result, err := r.pool.Exec(ctx, `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin ssh public key delete transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockSSHPublicKeyUser(ctx, tx, userID); err != nil {
+		return err
+	}
+	quotaRef, err := teamquota.BeginControlPlaneObjectReleaseTx(
+		ctx,
+		r.teamQuotaStore,
+		tx,
+		teamquota.ControlPlaneObjectOwner(teamID, teamquota.ControlPlaneOwnerKindSSHPublicKey, keyID),
+		"delete_ssh_public_key",
+		0,
+	)
+	if err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `
 		DELETE FROM user_ssh_public_keys
 		WHERE id = $1 AND team_id = $2 AND user_id = $3
 	`, keyID, teamID, userID)
@@ -136,6 +187,26 @@ func (r *Repository) DeleteUserSSHPublicKeyByTeamAndUserID(ctx context.Context, 
 	}
 	if result.RowsAffected() == 0 {
 		return ErrSSHPublicKeyNotFound
+	}
+	if err := teamquota.ConfirmControlPlaneObjectReleaseTx(ctx, r.teamQuotaStore, tx, quotaRef); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit ssh public key deletion: %w", err)
+	}
+	return nil
+}
+
+func lockSSHPublicKeyUser(ctx context.Context, tx pgx.Tx, userID string) error {
+	if _, err := tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"gateway:ssh-public-keys:user:"+userID,
+	); err != nil {
+		return &teamquota.UnavailableError{
+			Operation: "lock user ssh public key mutations",
+			Err:       err,
+		}
 	}
 	return nil
 }

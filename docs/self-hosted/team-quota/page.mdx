@@ -1,0 +1,279 @@
+# Team Quota
+
+Team Quota is Sandbox0's region-scoped noisy-neighbor boundary. It prevents one team from exhausting resources shared by other teams. It is deliberately separate from pricing, billing, metering, Kubernetes scheduling, and platform-wide overload protection.
+
+Every region has one complete set of 21 default policies. A team may override individual keys, but it can never become implicitly unlimited: a missing or malformed effective policy is an admission failure.
+
+The scope is deliberately precise:
+
+| Control | Scope | Purpose |
+| --- | --- | --- |
+| Team Quota | One team aggregated across every cluster in a region | Stop one tenant from exhausting region-shared resources |
+| Gateway overload guard | One gateway service, with a process-local first line and a shared Redis ceiling | Protect authentication and routing before a team can always be identified |
+| Manager claim-start limiter | One data-plane cluster | Bound aggregate Kubernetes startup pressure from all teams |
+| Network work admission and audit spool guards | One `ctld` process or node | Bound local goroutines, queues, memory, and disk |
+| Per-sandbox bandwidth limiter | One sandbox | Provide local traffic shaping independently of the team's regional byte quota |
+| Identity resource guard | The gateway that owns identity, with per-user and per-team bounds | Bound global identity state that does not belong to a regional data plane |
+
+Only the first row is configured or reported through Team Quota APIs. The other controls remain explicit overload, storage-safety, or quality-of-service boundaries and are not hidden quota aliases.
+
+This policy model is a breaking replacement for the former dimension-based quota table. Migration drops `quota.team_quota_limits` and does not translate its rows; configure the complete regional default set and any required team overrides in the new model.
+
+## Ownership and Data Flow
+
+| Responsibility | Owner |
+| --- | --- |
+| Reconcile region defaults and serve quota APIs | `regional-gateway`, or `cluster-gateway` in single-cluster fullmode |
+| Atomically admit capacity | Region PostgreSQL |
+| Enforce distributed rates and exact live concurrency | Region Redis |
+| Enforce sandbox lifecycle and warm pools | `manager` |
+| Enforce volume, snapshot, and storage-object capacity | Storage runtime |
+| Enforce persistent rootfs bytes and objects | `manager` |
+| Enforce team-owned control-plane objects | Gateway and scheduler repositories |
+| Enforce external API and Sandbox Service traffic | Regional or fullmode gateway |
+| Enforce sandbox-originated TCP/UDP traffic | `ctld` network runtime |
+| Enforce SSH connections, channels, and plaintext payload bytes | `ssh-gateway` |
+
+All data-plane clusters in the same region use the same PostgreSQL and Redis. A cluster-local quota database or token bucket would allow a team to multiply its allowance by spreading work across clusters, so neither is a supported topology. An external data-plane installation that points at a separate control plane must therefore configure `spec.database.type: external` and `spec.redis.type: external`, referencing the same region PostgreSQL and Redis from every cluster. Builtin per-cluster instances are rejected. The region owner publishes its identity in `status.teamQuota.stateId`; every consumer copies that value into `spec.teamQuota.stateId`, as described in [Region State Identity Guard](#region-state-identity-guard).
+
+ClickHouse is not on the admission path. Metering asynchronously builds historical usage projections for export and billing consumers; Team Quota uses PostgreSQL and Redis to make synchronous protection decisions.
+
+## Capacity Accounting
+
+Capacity admission uses a durable owner allocation and a two-phase mutation:
+
+1. Lock the team and reserve the complete target before changing an external resource.
+2. Perform the Kubernetes, filesystem, snapshot, or object-storage mutation.
+3. Commit the reservation after the mutation succeeds.
+4. Abort a reservation only when the mutation is known not to have started.
+
+A decrease follows the reverse safety rule. Sandbox0 records a pending release first, performs the physical deletion, and lowers committed usage only after it confirms that the resource has disappeared. An API timeout, process crash, or failed lookup therefore keeps capacity charged instead of making the ledger undercount reality.
+
+The quota status fields have precise meanings:
+
+| Field | Meaning |
+| --- | --- |
+| `source` | `default` when inherited from the region policy, or `override` when an explicit team policy is active |
+| `committed` | Capacity known to be physically allocated; zero for concurrency and rate policies |
+| `reserved` | Additional capacity held for an in-flight mutation; zero for concurrency and rate policies |
+| `used` | `committed + reserved` for capacity, or the exact live Redis lease count for concurrency |
+| `remaining` | `max(limit - used, 0)` for capacity and concurrency; `null` for rate policies |
+
+Startup and periodic recovery reconcile interrupted reservations, releases, warm-pool transfers, rootfs state, and the shared region storage catalog against external state. Recovery never releases capacity after an unavailable or ambiguous lookup.
+
+## Enforcement Matrix
+
+| Key | What consumes it | When it is released |
+| --- | --- | --- |
+| `sandbox_identity_count` | A claimed sandbox identity, including a paused sandbox | Sandbox deletion completes |
+| `sandbox_runtime_count` | A running sandbox or team-owned warm-pool Pod | The runtime Pod is confirmed gone or the sandbox pauses |
+| `sandbox_cpu_millicores` | Effective schedulable CPU for running sandbox and team-owned warm-pool Pods | The corresponding runtime is confirmed gone |
+| `sandbox_memory_bytes` | Effective schedulable memory for running sandbox and team-owned warm-pool Pods | The corresponding runtime is confirmed gone |
+| `sandbox_ephemeral_storage_bytes` | Effective schedulable ephemeral storage for running sandbox and team-owned warm-pool Pods | The corresponding runtime is confirmed gone |
+| `volume_storage_bytes` | Exact logical bytes in team volumes | A smaller exact size is observed or deletion succeeds |
+| `snapshot_storage_bytes` | Exact logical bytes retained by team snapshots | Snapshot deletion succeeds |
+| `rootfs_storage_bytes` | Exact persistent rootfs diff bytes | A smaller exact size is observed or rootfs deletion succeeds |
+| `template_image_storage_bytes` | Exact retained bytes for team-owned managed-template OCI image artifacts | Registry cleanup confirms the artifact is gone |
+| `storage_object_count` | Volume and snapshot catalog entries; S0FS metadata, directory entries, data/extents, segments, and pending WAL records; persistent rootfs objects and snapshots | The corresponding catalog, filesystem state, WAL record, or physical rootfs object is confirmed gone |
+| `control_plane_object_count` | Region-owned API keys, SSH keys, credential sources and their current versions, egress bindings, templates, and active template builds | The corresponding PostgreSQL object and any quota-owned external artifact are confirmed gone |
+| `active_connection_count` | Authenticated long-lived API connections, including the outer volume file watch WebSocket; each live volume file watch subscription; public Sandbox Service requests; SSH TCP connections and session channels; sandbox-originated TCP connections; and logical UDP sessions across the region | The connection/subscription/channel/session closes, or its short-lived Redis lease expires |
+| `active_request_count` | Authenticated external API requests and team-attributed sandbox observability ingest requests currently executing across the region, including requests stalled while reading or writing a body | The request completes, is canceled, or its fail-closed Redis lease expires |
+| `api_requests` | Authenticated external requests at the region entrypoint | Token-bucket refill |
+| `sandbox_service_requests` | Team aggregate public Sandbox Service invocations across the region | Token-bucket refill |
+| `sandbox_starts` | Admitted physical start pressure from cold starts, public-pool consumption, and team-owned warm-pool scale-up | Token-bucket refill |
+| `network_operations` | Sandbox-originated TCP connection attempts and UDP datagrams before protocol classification, audit, or upstream work | Token-bucket refill |
+| `storage_operations` | Team aggregate volume, snapshot, and file/storage API operations across the region | Token-bucket refill |
+| `observability_ingest_bytes` | Team aggregate sandbox observability payload bytes accepted for ingest | Token-bucket refill |
+| `network_ingress_bytes` | Team aggregate external ingress payload bytes: API request bodies and upgraded streams, public Sandbox Service traffic, sandbox network responses, and SSH client-to-sandbox channel data | Token-bucket refill |
+| `network_egress_bytes` | Team aggregate external egress payload bytes: API responses and upgraded streams, public Sandbox Service traffic, sandbox network requests, and SSH sandbox-to-client channel data | Token-bucket refill |
+
+CPU, memory, and ephemeral storage use the effective Kubernetes schedulable maximum, including restartable init containers, ordinary init phases, and Pod overhead. A sandbox resource resize reserves its new complete target before updating the Pod.
+
+Public-template idle pools are platform-owned and do not consume a team's capacity while idle. Claiming one does consume the claiming team's `sandbox_starts`, because detaching that Pod induces a platform-pool replacement; a public cold claim consumes the same single token rather than a second one. Team-owned warm pools consume capacity while idle. Their hot-claim handoff spans PostgreSQL, one Pod, and its ReplicaSet, so Sandbox0 first reserves one selected runtime of temporary transition headroom. It then detaches the Pod, atomically records and decrements the ReplicaSet commitment, waits for any replacement or terminating idle runtime created by the handoff race to disappear, and commits ownership to the sandbox. The transition reserve is released at commit, so there is no duplicate steady-state charge, but a team at its exact capacity limit cannot start this handoff without that temporary headroom. The subsequent pool replenishment is a separate physical start attempt and consumes the owning team's `sandbox_starts`; the hot transfer itself is not charged again. Replacing an unhealthy warm-pool Pod follows the same conservative overlap rule: Sandbox0 reserves the replacement while the old Pod is still active or terminating, then deletes the old Pod. A failed attempt may conservatively retain its rate token; rate tokens are not a durable capacity ledger.
+
+Managed-template publication uses the same conservative lifecycle. The worker first resolves the pinned base image and composes the final single-platform manifest without writing target-registry content. It charges the sum of every base-layer and captured-rootfs-layer descriptor size in that final manifest, plus the generated config descriptor and manifest descriptor sizes. Descriptor occurrences are counted as represented in the image; Sandbox0 does not reduce the charge when two descriptors happen to share a digest. It then durably reserves that exact `template_image_storage_bytes` value, records a push-started marker, pushes content with the manifest last, and commits the reservation together with publication of the digest-pinned template.
+
+A timeout or crash after the push-started marker is ambiguous and remains charged. Retried content-addressed pushes are idempotent, while cancellation releases an unpublished reservation only after deletion of the build tag or resolved manifest is confirmed. Logical deletion of a published template keeps both `template_image_storage_bytes` and `control_plane_object_count` committed until the durable OCI cleanup succeeds. Builtin and Harbor-compatible registries support this cleanup; an unsupported registry provider fails closed and remains charged. Registry blob garbage collection or lifecycle policy is still required to reclaim unreferenced blob storage after manifest deletion.
+
+Object-count quotas complement byte quotas. A zero-byte file, directory, hard link, snapshot, credential binding, or API key still consumes shared metadata and therefore cannot bypass admission. Storage request fields and upload bodies also have per-object size bounds. Those structural limits protect one object, while Team Quota limits the aggregate owned by one team.
+
+Cluster-gateway applies its aggregate platform overload guard before authenticating a sandbox observability ingest request, then acquires the team's `active_request_count` lease before reading the bounded request body. `Content-Length` can reject a structurally oversized body early, but it is not used as a quota charge: the exact body bytes read are charged once to `observability_ingest_bytes`, avoiding duplicate or inaccurate charges for interrupted and chunked requests.
+
+Rootfs publication reserves one `storage_object_count` slot in regional PostgreSQL before asking `ctld` to prepare a diff. After `ctld` reports the exact descriptor, manager atomically transfers that pre-stage allocation to the durable rootfs object and its exact `rootfs_storage_bytes` value. Ctld's node-local staging byte, entry, concurrency, TTL, and per-team guards are an additional disk-pressure boundary; they do not replace or multiply the region-shared team quota.
+
+Terminal capacity-operation history is retained for 24 hours with a bounded per-owner or per-team fallback. This provides a practical idempotency retry window without allowing arbitrary operation IDs to grow the admission database forever. Prepared work, recovery state, and the latest compact operation record for a live allocation are never pruned.
+
+## Distributed Rate and Concurrency Enforcement
+
+Rate policies use a region-shared Redis token bucket:
+
+- `tokens` are replenished every `interval_ms`.
+- `interval_ms` must be a whole number of milliseconds from `1` through `3,600,000` (`1ms` through `1h`).
+- `burst` is the maximum accumulated balance and must be at least `tokens`.
+- Policy revision changes clamp existing buckets to the new burst without granting a free refill.
+- Redis, PostgreSQL policy lookup, or effective-policy failure rejects the protected operation with `503`.
+- Discrete operations with exhausted tokens reject with `429` and `Retry-After`.
+
+Team Quota requires Redis 7 or newer and `maxmemory-policy: noeviction`. Every atomic rate grant, concurrency acquisition or renewal, proof consumption, and guard transition executes `INFO server memory stats` inside its Lua script before mutation. It requires the live `run_id`, `noeviction` policy, and cumulative `evicted_keys` counter to match the stable guard. A restart, failover, unsafe policy, or any observed eviction therefore fails closed before quota state changes. The policy owner advances the Redis generation, waits the concurrency and local-credit quarantine, and records a new eviction baseline before reopening admission.
+
+Every distributed Team Quota process verifies the same requirements at startup, and the policy owner repeats them in its coordination loop. For a managed Redis service, the runtime ACL must allow `EVAL`, `EVALSHA`, and `INFO` (including `server`, `memory`, and `stats`); these checks intentionally add one `INFO` operation and response parse to each distributed admission script. Use a dedicated, capacity-planned Redis endpoint rather than an eviction-backed cache. Do not run `CONFIG RESETSTAT`: resetting `evicted_keys` destroys the monotonic evidence used to detect a transient unsafe-policy eviction. Do not selectively delete the policy guard or individual Team Quota namespace keys: a completely new PostgreSQL state with no guard is treated as a fresh empty Redis namespace, so preserving old lease or bucket keys while deleting only the guard violates the recovery contract. Native Redis Cluster is not supported because one admission script spans the region guard, team marker, and quota state keys; use a single command domain or a managed endpoint that provides equivalent atomic semantics.
+
+The hot path reserves small, short-lived batches from Redis and spends them locally: up to 16 discrete operations or 64 KiB of byte traffic per grant. The default local-credit lifetime is 75ms and the hard maximum is 100ms. An expired, evicted, or unused remainder is burned rather than returned to Redis. Each local reservation is bound to the exact team, key, policy revision, enforcement epoch, and Redis generation.
+
+A policy writer first changes the shared Redis guard to `pending`, waits the full 100ms local-credit bound, and only then commits PostgreSQL and publishes the new stable epoch. Team deletion similarly publishes the disabled marker and waits 100ms before it can finish. Consequently `policyCacheTtl` controls ordinary PostgreSQL lookup reuse; it is not a delay before a lowered or deleted policy takes effect. The atomic Redis grant checks both the exact policy guard and the team's active marker before changing token state.
+
+The code boundary enforces the same ownership rule. The raw PostgreSQL repository implements only `PolicyReader`; only the region `PolicyCoordinator` implements `PolicyManager`. Gateways inject that manager only on the policy owner, so a read-only consumer or an accidentally supplied repository cannot mutate policies without the Redis guard and epoch transition.
+
+Active team markers do not expire. After Redis loss, the first request reconstructs a missing marker from the durable PostgreSQL tombstone; process-local singleflight, a Redis recovery lock, and a short negative recovery cache prevent a missing marker from creating a PostgreSQL request herd. Recovery failure, a corrupt marker, a pending or stale guard, or a disabled marker all fail closed.
+
+`network_ingress_bytes` and `network_egress_bytes` are stream traffic-shaping policies rather than discrete request counters. When their current token balance is exhausted, the byte limiter waits for refill and applies backpressure instead of returning a uniform `429` after a stream may already have started. Waiting is bounded to 4,096 calls per process, 256 calls per team, and five seconds by default. Saturation or timeout stops the owning request, connection, or stream; it never creates an unbounded goroutine or timer population. Policy lookup or Redis failure remains fail closed.
+
+An external API request consumes `api_requests` and one `active_request_count` lease once at the regional entrypoint. A signed admission proof binds the team, request identity, method, escaped path, an exact raw-query SHA-256 fingerprint, content length, transfer encoding, and stable semantic headers such as `Range`, `Content-Type`, `Content-Encoding`, `Accept`, `Idempotency-Key`, and `Last-Event-ID`. It includes a body digest only when the request already exposes a safely replayable body no larger than 1 MiB; streaming bodies are never read or buffered merely to create a proof, so the transport binding does not claim body-content equivalence in that case. Fixed-cost keys do not depend on body content.
+
+Each proof has a cryptographically random `proof_id`, binds the exact policy `enforcement_epoch` and Redis generation observed while signing, and can be consumed only once through the region-shared Redis store. Its validity is no longer than both the carrying internal token and two minutes, and scheduler re-signing preserves the original version and cannot extend it. Cluster-gateway consumes the proof after authentication and before any Team Quota middleware may trust its keys. A replay or policy-version mismatch receives no bypass and is charged normally. The consume script atomically checks the stable policy guard, its Redis reset fence, the exact proof version, the team's active marker, and `SET NX PX`; proofs issued at or before the current reset are not trusted, so losing Redis replay keys cannot revive an old proof. Redis or malformed, missing, or pending guard errors return fail-closed `503` with `Retry-After`. An internal token without an exact, first-use proof is charged normally instead of receiving a blanket bypass. System-admin policy-management routes bypass tenant request, network-byte, and live-concurrency admission so an administrator can repair any restrictive policy without using a database backdoor, but they still require system-admin authentication.
+
+Both concurrency keys use exact Redis sorted-set leases. `active_request_count` acquires one lease for the lifetime of each authenticated external request. `active_connection_count` acquires one lease per live connection, session, channel, or subscription. Consumers renew leases before their TTL:
+
+- `ssh-gateway` acquires one lease after authenticating the TCP connection and one for every active SSH session channel. The internal `procd` WebSocket is not counted again.
+- The network runtime acquires before reading or classifying a sandbox TCP stream, so a tenant cannot create unlimited slow classifier connections. A logical UDP source/destination session acquires once before its first upstream socket is created.
+- Authenticated gateway routes marked long-lived and public Sandbox Service requests acquire at their external region boundary. Trusted internal forwarding does not acquire a second lease.
+- Volume file watch has two explicit layers: the authenticated outer long-lived WebSocket holds the gateway lease above, and the owner storage runtime acquires one additional lease for every accepted live subscription on that socket. Proxy hops do not charge a subscription. Unsubscribe, socket close, event-stream close, write failure, or lease loss releases or cancels the corresponding subscription lease.
+- Redis loss, policy lookup failure, team deletion, a missing lease, or failed renewal actively cancels and closes the owning connection or session.
+- Lowering a concurrency limit does not grant an overlap window. Leases whose stable acquisition rank is outside the new limit are removed at renewal and their consumers close.
+
+Network byte policies count payload once at the external boundary. SSH counts plaintext channel data for shell, exec, SFTP, and SFTP-backed SCP; SSH handshake/control frames and the internal `procd` WebSocket are not counted. HTTP headers are not currently part of the byte cost.
+
+The manager's cluster-wide claim-start limiter remains a separate overload guard. It protects one cluster from aggregate startup pressure across all teams; `sandbox_starts` protects the region from one team's share of that pressure. Likewise, Sandbox Service route abuse guards and per-sandbox bandwidth limits are not Team Quota policies.
+
+### Region State Identity Guard
+
+On a region policy owner, infra-operator generates a canonical random UUID v4 once and persists it in `status.teamQuota.stateId`. Normal owner manifests must omit `spec.teamQuota.stateId`; this keeps copied samples and independent GitOps installations from silently reusing one identity. The status value survives operator restarts and ordinary spec updates. Deleting and recreating the owner without a bootstrap value creates a new identity.
+
+Consumer-only resources cannot generate the identity. Copy the owner's `status.teamQuota.stateId` unchanged into each consumer's `spec.teamQuota.stateId`. Never reuse the value for an independent PostgreSQL and Redis pair.
+
+An explicit owner `spec.teamQuota.stateId` is only a recovery bootstrap. Use it when the owner CR was lost but the same claimed PostgreSQL and Redis state plane was retained. On first reconciliation, infra-operator copies that canonical UUID v4 into status. Thereafter status is immutable: the spec value may be omitted or remain equal, but changing it is rejected. Record the owner status with the backend recovery material.
+
+For a multi-cluster installation, read the value from the reconciled control-plane resource, substitute the guarded placeholder in the data-plane sample, and apply the result to each data-plane cluster:
+
+```bash
+export SANDBOX0_TEAM_QUOTA_STATE_ID="$(
+    kubectl --context REGION_CONTROL_PLANE \
+        -n sandbox0-system get sandbox0infra s0cp \
+        -o jsonpath='{.status.teamQuota.stateId}'
+)"
+test -n "${SANDBOX0_TEAM_QUOTA_STATE_ID}"
+envsubst < infra-operator/chart/samples/multi-cluster/data-plane.yaml |
+    kubectl --context DATA_PLANE apply -f -
+```
+
+The region policy owner creates the same immutable state-plane claim in PostgreSQL and Redis. Consumer-only cluster-gateway, manager, the storage runtime, ctld volume portals, the network runtime, and `ssh-gateway` validate both stores before they create a limiter; they cannot initialize either claim. Scheduler does not use Redis, but validates the same state ID in PostgreSQL before it starts. Missing, corrupt, unreachable, or mismatched state fails startup.
+
+The durable PostgreSQL row is `quota.region_state_identity_claims`. Its fingerprint covers the trusted state ID, region ID, normalized Redis endpoint, Redis database, TLS-enabled mode, and normalized Team Quota base key prefix. Redis stores the same credential-free claim in the selected namespace. Redis usernames and passwords are deliberately excluded, so credential rotation does not change the identity or write credentials to either store. Changing an endpoint hostname, database, TLS mode, or key prefix is treated as a namespace migration even when two endpoints happen to reach the same server.
+
+This guard detects a partial PostgreSQL/Redis mismatch and rejects a consumer pointed at another independently initialized pair with a different state ID. It cannot distinguish a byte-for-byte clone that includes the claim, or an operator recovery that deliberately supplies a reused ID, without a third coordination authority. Operator generation for new owners, recovery-only bootstrap, non-reuse, and trusted distribution are therefore the deployment trust boundary; the value is an identity, not a secret.
+
+The owner writes the Redis claim before committing a new PostgreSQL claim. This is intentionally not described as a distributed transaction: a crash can leave only the Redis side, but no consumer will pass until PostgreSQL also matches, and the same owner can safely finish the claim on restart. The owner verifies both claims while holding the region policy-writer fence before every policy write and on every periodic repair pass. Recreating a missing matching Redis claim atomically removes the shared policy guard, because identity loss is treated as evidence of Redis state loss; a mismatch is never overwritten. Any definitive failed verification also removes the guard before releasing the writer fence, so already-running consumers fail closed and a second owner cannot race a stale guard publication after that invalidation. Once both claims are healthy again, the owner advances the Redis generation and completes the full lease and local-credit quarantine before reopening admission. A completely new PostgreSQL policy state and empty Redis namespace bootstrap generation one immediately because no earlier lease or local credit can exist.
+
+Use a maintenance window for an intentional state-plane or Redis namespace change:
+
+1. Stop every Team Quota consumer in the region, including scheduler, and stop new tenant traffic.
+2. Drain all live concurrency, including active requests and connections, and wait at least the configured `leaseTtl` after the last consumer stops. Ensure the target Redis Team Quota namespace is empty and is not shared with another state plane.
+3. Delete the PostgreSQL claim while all consumers remain stopped:
+
+    ```sql
+    BEGIN;
+    SELECT *
+    FROM quota.region_state_identity_claims
+    WHERE singleton = TRUE
+    FOR UPDATE;
+
+    DELETE FROM quota.region_state_identity_claims
+    WHERE singleton = TRUE;
+    COMMIT;
+    ```
+
+4. Remove the old Redis Team Quota namespace while it is still isolated and drained. Apply the new endpoint, database, TLS mode, or prefix. Retain the owner status identity only for a controlled migration of the same state plane. For an independent state plane, create a new owner lifecycle with `spec.teamQuota.stateId` omitted so infra-operator issues a fresh identity; do not edit the existing status value in place.
+5. Start the regional-gateway policy owner, or the policy-owning cluster-gateway in fullmode, so it creates both claims. Inspect the credential-free PostgreSQL row and only then start scheduler and consumer-only services.
+
+Do not delete or update either claim during a rolling deployment. Resetting live Redis buckets or leases under traffic could temporarily over-admit a team.
+
+## Configure Region Defaults
+
+Configure every key under `spec.teamQuota.defaults`. Partial sets are rejected by the operator:
+
+```yaml
+teamQuota:
+    # The region owner omits stateId. infra-operator publishes the generated
+    # value in status.teamQuota.stateId for consumers to copy.
+    defaults:
+        # Schema examples only. This is not a complete or directly applicable
+        # spec.teamQuota.defaults list.
+        - key: sandbox_runtime_count
+          kind: capacity
+          limit: 100
+        - key: active_request_count
+          kind: concurrency
+          limit: 500
+        - key: api_requests
+          kind: rate
+          tokens: 1000
+          interval: 1s
+          burst: 2000
+```
+
+The authoritative, directly applicable 21-key blocks live in the [single-cluster fullmode sample](https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/single-cluster/fullmode.yaml) and the [multi-cluster control-plane sample](https://github.com/sandbox0-ai/sandbox0/blob/main/infra-operator/chart/samples/multi-cluster/control-plane.yaml). Use one of those blocks rather than filling in an abbreviated example, so newly added mandatory keys are not missed.
+
+Only the region policy owner configures `defaults`. In a multi-cluster data-plane resource, omit it and configure only the distributed consumer timings when they differ from the defaults:
+
+```yaml
+spec:
+    teamQuota:
+        # Substitute the exact region-owner status.teamQuota.stateId.
+        stateId: "${SANDBOX0_TEAM_QUOTA_STATE_ID}"
+        distributedEnforcement:
+            policyCacheTtl: 5s
+            leaseTtl: 15s
+            renewInterval: 5s
+```
+
+Redis connection settings come from `spec.redis`; do not duplicate them under `teamQuota`.
+
+## Inspect and Override Policies
+
+A caller authenticated in the selected team with the `quota:read` permission can list its effective status. The built-in `admin`, `developer`, and `viewer` roles have this permission; `builder` does not:
+
+```bash
+curl -H "Authorization: Bearer ${TOKEN}" \
+    https://REGION_ENDPOINT/api/v1/quotas
+```
+
+Capacity rows report PostgreSQL-backed committed, reserved, used, and remaining values. Concurrency rows report current live lease usage. Rate rows describe policy only: the endpoint does not read or expose Redis token balances, so their committed, reserved, and used values are zero and remaining is `null`.
+
+A system administrator can inspect another team and replace one override:
+
+```bash
+curl -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    https://REGION_ENDPOINT/api/v1/teams/${TEAM_ID}/quotas
+
+curl -X PUT \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -H "Content-Type: application/json" \
+    https://REGION_ENDPOINT/api/v1/teams/${TEAM_ID}/quotas/sandbox_runtime_count \
+    -d '{"kind":"capacity","limit":25}'
+```
+
+Delete the override to inherit the region default again:
+
+```bash
+curl -X DELETE \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    https://REGION_ENDPOINT/api/v1/teams/${TEAM_ID}/quotas/sandbox_runtime_count
+```
+
+Lowering a capacity limit below current `used` does not delete resources. It makes `remaining` zero and rejects further increases until usage falls within the new limit. Lowering either concurrency limit removes excess live leases by stable acquisition rank at renewal, causing the corresponding requests, connections, sessions, channels, or subscriptions to close.
+
+## Failure Semantics
+
+Team Quota is fail-closed for operations that can increase shared-resource consumption. Capacity exhaustion returns `429`; unavailable admission state returns `503`. A failed decrease may temporarily overcount, but it must not undercount.
+
+Team deletion uses the same regional PostgreSQL lock. It first proves there are no live allocations or prepared transfers, then writes a durable admission tombstone before deleting identity state. The tombstone remains through the longest accepted access-token lifetime plus a safety margin and is pruned only after the identity directory reports the team absent and PostgreSQL proves no quota references remain. That cleanup also removes the non-expiring Redis disabled marker; if Redis cleanup fails, PostgreSQL pruning does not proceed. In a federated regional gateway, `jwtAccessTokenTTL` is the maximum accepted lifetime as well as the retention input; set it to at least the lifetime issued by the global gateway. Tokens with a longer declared lifetime are rejected. This blocks stale credentials and concurrent resource creation while bounding deleted-team metadata. See [Team Deletion](/docs/sandbox/self-hosted/team-deletion) for the current topology constraints.

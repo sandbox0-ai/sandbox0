@@ -28,8 +28,7 @@ type identityStore interface {
 	UpdateUserPassword(ctx context.Context, userID, passwordHash string) error
 	CountUsers(ctx context.Context) (int64, error)
 	CreateUser(ctx context.Context, user *identity.User) error
-	CreateTeam(ctx context.Context, team *identity.Team) error
-	AddTeamMember(ctx context.Context, member *identity.TeamMember) error
+	CreateTeamWithOwner(ctx context.Context, team *identity.Team) (*identity.TeamMember, error)
 	UpdateUser(ctx context.Context, user *identity.User) error
 }
 
@@ -225,19 +224,8 @@ func (p *Provider) EnsureInitUser(ctx context.Context) error {
 		}
 	}
 
-	if err := p.repo.CreateTeam(ctx, team); err != nil {
+	if _, err := p.repo.CreateTeamWithOwner(ctx, team); err != nil {
 		return fmt.Errorf("create initial team: %w", err)
-	}
-
-	// Add user to team
-	member := &identity.TeamMember{
-		TeamID: team.ID,
-		UserID: user.ID,
-		Role:   "admin",
-	}
-
-	if err := p.repo.AddTeamMember(ctx, member); err != nil {
-		return fmt.Errorf("add team member: %w", err)
 	}
 
 	return nil

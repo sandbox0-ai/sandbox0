@@ -14,11 +14,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -373,6 +376,110 @@ func snapshotSizeBytes(state *s0fs.SnapshotState) int64 {
 	return s0fs.StateStorageBytes(state)
 }
 
+func (m *Manager) createMaterializedS0FSVolume(
+	ctx context.Context,
+	vol *db.SandboxVolume,
+	state *s0fs.SnapshotState,
+	metadata *meteringpkg.StorageObservation,
+	operationKind string,
+) (*s0fs.Manifest, error) {
+	if vol == nil || state == nil {
+		return nil, fmt.Errorf("volume and state are required")
+	}
+	segmentTargetSize, err := volume.S0FSSegmentTargetSize(m.config)
+	if err != nil {
+		return nil, err
+	}
+	target, err := plannedMaterializedVolumeTarget(vol.ID, state, segmentTargetSize)
+	if err != nil {
+		return nil, err
+	}
+	zero := storagequota.VolumeTarget(0, 0)
+	var (
+		targetEngine *s0fs.Engine
+		closeTarget  func() error
+		manifest     *s0fs.Manifest
+		mutationRan  bool
+	)
+	err = m.mutateVolumeStorage(
+		ctx,
+		vol.TeamID,
+		vol.ID,
+		operationKind,
+		func() (teamquota.Values, error) {
+			return zero.Clone(), nil
+		},
+		targetAtLeast(target),
+		func() error {
+			mutationRan = true
+			if err := m.repo.WithTx(ctx, func(tx pgx.Tx) error {
+				if err := m.repo.CreateSandboxVolumeTx(ctx, tx, vol); err != nil {
+					return err
+				}
+				return m.appendStorageObservationTx(ctx, tx, applyStorageObservationMetadata(
+					m.volumeStorageObservation(ctx, vol, 0, vol.CreatedAt),
+					metadata,
+				))
+			}); err != nil {
+				return err
+			}
+			var err error
+			targetEngine, closeTarget, err = m.openS0FSEngine(ctx, vol.TeamID, vol.ID)
+			if err != nil {
+				return err
+			}
+			if err := targetEngine.ReplaceState(state); err != nil {
+				return err
+			}
+			manifest, err = targetEngine.SyncMaterialize(ctx)
+			return err
+		},
+		func() (teamquota.Values, error) {
+			return volumeEngineTarget(targetEngine)
+		},
+	)
+	if closeTarget != nil {
+		err = errors.Join(err, closeTarget())
+	}
+	if err == nil {
+		return manifest, nil
+	}
+	if !mutationRan {
+		return nil, err
+	}
+
+	cleanupErr := m.closeStorageObservation(
+		context.Background(),
+		applyStorageObservationMetadata(
+			m.volumeStorageObservation(context.Background(), vol, 0, time.Now().UTC()),
+			metadata,
+		),
+	)
+	cleanupErr = errors.Join(cleanupErr, cleanupS0FSVolume(vol.ID, m.config))
+	deleteErr := m.repo.WithTx(context.Background(), func(tx pgx.Tx) error {
+		err := m.repo.DeleteSandboxVolumeTx(context.Background(), tx, vol.ID)
+		if errors.Is(err, db.ErrNotFound) {
+			return nil
+		}
+		return err
+	})
+	cleanupErr = errors.Join(cleanupErr, deleteErr)
+	if cleanupErr == nil {
+		service, serviceErr := m.quotaService()
+		if serviceErr == nil {
+			serviceErr = service.Reconcile(
+				context.Background(),
+				service.VolumeOwner(vol.TeamID, vol.ID),
+				func() (teamquota.Values, error) {
+					return zero.Clone(), nil
+				},
+			)
+		}
+		cleanupErr = errors.Join(cleanupErr, serviceErr)
+	}
+	return nil, errors.Join(err, cleanupErr)
+}
+
 func (m *Manager) resolveS0FSForkState(ctx context.Context, teamID, sourceVolumeID string) (*s0fs.SnapshotState, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -456,28 +563,40 @@ func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotReq
 			_ = volCtx.FlushAll("")
 		}
 	}
-	if _, err := engine.EnsureMaterialized(ctx); err != nil {
+	service, err := m.quotaService()
+	if err != nil {
 		return nil, err
+	}
+	materializationVolume := &volume.VolumeContext{
+		VolumeID: req.VolumeID,
+		TeamID:   vol.TeamID,
+		Backend:  volume.BackendS0FS,
+		S0FS:     engine,
+	}
+	materializationVolume.SetStorageQuota(service)
+	materialization, err := materializationVolume.EnsureMaterialized(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if materialization.ObservationError != nil {
+		return nil, materialization.ObservationError
 	}
 
 	snapshotID := uuid.New().String()
-	state, err := engine.CreateSnapshot(snapshotID)
-	if err != nil {
-		return nil, err
-	}
+	candidateState := engine.SnapshotState()
 	cfg, err := m.s0fsConfig(vol.TeamID, req.VolumeID)
 	if err != nil {
-		_ = engine.DeleteSnapshot(snapshotID)
 		return nil, err
 	}
-	cleanupSnapshotState := func() {
+	physicalPresent := false
+	catalogCreated := false
+	cleanupSnapshotState := func() error {
 		if cleanupErr := s0fs.DeleteSnapshot(context.Background(), cfg, snapshotID); cleanupErr != nil && !errors.Is(cleanupErr, s0fs.ErrSnapshotNotFound) {
 			m.logger.WithError(cleanupErr).Warn("Failed to clean up uncommitted s0fs snapshot state")
+			return cleanupErr
 		}
-	}
-	if err := s0fs.PersistSnapshot(ctx, cfg, snapshotID, state); err != nil {
-		cleanupSnapshotState()
-		return nil, fmt.Errorf("persist snapshot state: %w", err)
+		physicalPresent = false
+		return nil
 	}
 	snapshot := &db.Snapshot{
 		ID:          snapshotID,
@@ -488,18 +607,47 @@ func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotReq
 		SourceInode: int64(s0fs.RootInode),
 		Name:        req.Name,
 		Description: req.Description,
-		SizeBytes:   snapshotSizeBytes(state),
+		SizeBytes:   snapshotSizeBytes(candidateState),
 		CreatedAt:   time.Now(),
 	}
-	if err := m.enforceStorageObservationQuota(ctx, applyStorageObservationMetadata(
-		m.snapshotStorageObservation(ctx, snapshot, snapshot.CreatedAt),
-		req.StorageMetadata,
-	)); err != nil {
-		cleanupSnapshotState()
+	snapshotTarget, err := snapshotStateTarget(candidateState)
+	if err != nil {
 		return nil, err
 	}
-	if err := m.repo.CreateSnapshot(ctx, snapshot); err != nil {
-		cleanupSnapshotState()
+	var state *s0fs.SnapshotState
+	if err := m.mutateSnapshotStorage(
+		ctx,
+		req.TeamID,
+		snapshotID,
+		"snapshot_create",
+		snapshotTarget,
+		func() error {
+			var err error
+			state, err = engine.CreateSnapshot(snapshotID)
+			if err != nil {
+				return err
+			}
+			physicalPresent = true
+			snapshot.SizeBytes = snapshotSizeBytes(state)
+			if err := s0fs.PersistSnapshot(ctx, cfg, snapshotID, state); err != nil {
+				return errors.Join(fmt.Errorf("persist snapshot state: %w", err), cleanupSnapshotState())
+			}
+			if err := m.repo.CreateSnapshot(ctx, snapshot); err != nil {
+				return errors.Join(err, cleanupSnapshotState())
+			}
+			catalogCreated = true
+			return nil
+		},
+		func() (teamquota.Values, error) {
+			if !physicalPresent && !catalogCreated {
+				return storagequota.SnapshotTarget(0, 0), nil
+			}
+			if state == nil {
+				return nil, fmt.Errorf("snapshot state is unavailable")
+			}
+			return snapshotStateTarget(state)
+		},
+	); err != nil {
 		return nil, err
 	}
 	if err := m.recordVolumeStorageState(ctx, vol, state, snapshot.CreatedAt); err != nil {
@@ -592,58 +740,19 @@ func (m *Manager) forkS0FSVolume(ctx context.Context, req *ForkVolumeRequest) (*
 		UpdatedAt:       now,
 	}
 
-	if err := m.repo.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := m.repo.CreateSandboxVolumeTx(ctx, tx, newVol); err != nil {
-			return err
-		}
-		if err := m.appendStorageObservationTx(ctx, tx, m.volumeStorageObservation(ctx, newVol, 0, newVol.CreatedAt)); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	success := false
-	defer func() {
-		if success {
-			return
-		}
-		_ = m.closeStorageObservation(context.Background(), m.volumeStorageObservation(context.Background(), newVol, 0, time.Now().UTC()))
-		_ = cleanupS0FSVolume(newVolumeID, m.config)
-		_ = m.repo.WithTx(context.Background(), func(tx pgx.Tx) error {
-			err := m.repo.DeleteSandboxVolumeTx(context.Background(), tx, newVolumeID)
-			if errors.Is(err, db.ErrNotFound) {
-				return nil
-			}
-			return err
-		})
-	}()
-
-	targetEngine, closeTarget, err := m.openS0FSEngine(ctx, req.TeamID, newVolumeID)
+	manifest, err := m.createMaterializedS0FSVolume(ctx, newVol, state, nil, "volume_fork")
 	if err != nil {
-		return nil, err
-	}
-	if err := targetEngine.ReplaceState(state); err != nil {
-		closeTarget()
-		return nil, err
-	}
-	manifest, err := targetEngine.SyncMaterialize(ctx)
-	if err != nil {
-		closeTarget()
 		return nil, err
 	}
 	if manifest != nil && manifest.State != nil {
 		if err := m.recordVolumeStorageState(ctx, newVol, manifest.State, time.Now().UTC()); err != nil {
-			closeTarget()
 			return nil, err
 		}
 	}
-	_ = closeTarget()
 
 	if err := m.appendMeteringEvent(ctx, volumeForkedEvent(m.regionID(), m.clusterID, newVol)); err != nil {
 		return nil, err
 	}
-	success = true
 	return newVol, nil
 }
 
@@ -712,61 +821,25 @@ func (m *Manager) createS0FSVolumeFromSnapshot(ctx context.Context, req *CreateV
 		UpdatedAt:       now,
 	}
 
-	if err := m.repo.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := m.repo.CreateSandboxVolumeTx(ctx, tx, newVol); err != nil {
-			return err
-		}
-		return m.appendStorageObservationTx(ctx, tx, applyStorageObservationMetadata(
-			m.volumeStorageObservation(ctx, newVol, 0, newVol.CreatedAt),
-			req.StorageMetadata,
-		))
-	}); err != nil {
-		return nil, err
-	}
-	success := false
-	defer func() {
-		if success {
-			return
-		}
-		_ = m.closeStorageObservation(context.Background(), applyStorageObservationMetadata(
-			m.volumeStorageObservation(context.Background(), newVol, 0, time.Now().UTC()),
-			req.StorageMetadata,
-		))
-		_ = cleanupS0FSVolume(newVolumeID, m.config)
-		_ = m.repo.WithTx(context.Background(), func(tx pgx.Tx) error {
-			err := m.repo.DeleteSandboxVolumeTx(context.Background(), tx, newVolumeID)
-			if errors.Is(err, db.ErrNotFound) {
-				return nil
-			}
-			return err
-		})
-	}()
-
-	targetEngine, closeTarget, err := m.openS0FSEngine(ctx, req.TeamID, newVolumeID)
+	manifest, err := m.createMaterializedS0FSVolume(
+		ctx,
+		newVol,
+		forkState,
+		req.StorageMetadata,
+		"volume_create_from_snapshot",
+	)
 	if err != nil {
-		return nil, err
-	}
-	if err := targetEngine.ReplaceState(forkState); err != nil {
-		closeTarget()
-		return nil, err
-	}
-	manifest, err := targetEngine.SyncMaterialize(ctx)
-	if err != nil {
-		closeTarget()
 		return nil, err
 	}
 	if manifest != nil && manifest.State != nil {
 		if err := m.recordVolumeStorageStateWithMetadata(ctx, newVol, manifest.State, time.Now().UTC(), req.StorageMetadata); err != nil {
-			closeTarget()
 			return nil, err
 		}
 	}
-	_ = closeTarget()
 
 	if err := m.appendMeteringEvent(ctx, volumeCreatedEvent(m.regionID(), m.clusterID, newVol)); err != nil {
 		return nil, err
 	}
-	success = true
 	return newVol, nil
 }
 
@@ -785,11 +858,32 @@ func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotR
 	}
 	defer closeFn()
 
-	if err := engine.RestoreState(state); err != nil {
+	desiredTarget, err := plannedMaterializedVolumeTarget(req.VolumeID, state, cfg.SegmentTargetSize)
+	if err != nil {
 		return err
 	}
-	manifest, err := engine.SyncMaterialize(ctx)
-	if err != nil {
+	var manifest *s0fs.Manifest
+	if err := m.mutateVolumeStorage(
+		ctx,
+		snapshot.TeamID,
+		req.VolumeID,
+		"volume_restore_snapshot",
+		func() (teamquota.Values, error) {
+			return volumeEngineTarget(engine)
+		},
+		targetAtLeast(desiredTarget),
+		func() error {
+			if err := engine.RestoreState(state); err != nil {
+				return err
+			}
+			var err error
+			manifest, err = engine.SyncMaterialize(ctx)
+			return err
+		},
+		func() (teamquota.Values, error) {
+			return volumeEngineTarget(engine)
+		},
+	); err != nil {
 		return err
 	}
 	if manifest != nil && manifest.State != nil {
@@ -831,12 +925,8 @@ func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotR
 	return m.appendMeteringEvent(ctx, snapshotRestoredEvent(m.regionID(), m.clusterID, snapshot, req.VolumeID, req.TeamID, req.UserID))
 }
 
-func (m *Manager) deleteS0FSSnapshot(ctx context.Context, volumeID, snapshotID string) error {
-	volumeRecord, err := m.repo.GetSandboxVolume(ctx, volumeID)
-	if err != nil {
-		return err
-	}
-	cfg, err := m.s0fsConfig(volumeRecord.TeamID, volumeID)
+func (m *Manager) deleteS0FSSnapshot(ctx context.Context, teamID, volumeID, snapshotID string) error {
+	cfg, err := m.s0fsConfig(teamID, volumeID)
 	if err != nil {
 		return err
 	}
@@ -858,8 +948,7 @@ func (m *Manager) DeleteVolumeObjectsIfUnreferenced(ctx context.Context, vol *db
 		return err
 	}
 	if !safe {
-		m.logger.WithField("volume_id", vol.ID).Info("Skipping s0fs volume object cleanup because references may still exist")
-		return nil
+		return ErrVolumeReferenced
 	}
 	store, err := m.s0fsObjectStore(vol.TeamID, vol.ID)
 	if err != nil {

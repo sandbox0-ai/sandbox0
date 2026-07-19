@@ -30,32 +30,58 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 )
 
+const teamDeletionRequiresRegionCoordination = "team deletion requires home-region coordination and is unavailable through global-gateway"
+
 // Server provides the global gateway HTTP API.
 type Server struct {
-	router          *gin.Engine
-	cfg             *config.GlobalGatewayConfig
-	pool            *pgxpool.Pool
-	identityRepo    *identity.Repository
-	regionRepo      *tenantdir.Repository
-	regionLookup    regionDirectory
-	authMiddleware  *gatewaymiddleware.AuthMiddleware
-	rateLimiter     *gatewaymiddleware.RateLimiter
-	requestLogger   *gatewaymiddleware.RequestLogger
-	builtinProvider *gatewaybuiltin.Provider
-	oidcManager     *gatewayoidc.Manager
-	jwtIssuer       *authn.Issuer
-	entitlements    licensing.Entitlements
-	obsProvider     *observability.Provider
-	logger          *zap.Logger
-	proxyTimeout    time.Duration
-	httpClient      *stdhttp.Client
-	regionProxies   map[string]*proxy.Router
-	regionProxiesMu sync.RWMutex
-	regionRoutes    *memcachepkg.Cache[string, tenantdir.Region]
+	router            *gin.Engine
+	cfg               *config.GlobalGatewayConfig
+	pool              *pgxpool.Pool
+	identityRepo      *identity.Repository
+	regionRepo        *tenantdir.Repository
+	regionLookup      regionDirectory
+	authMiddleware    *gatewaymiddleware.AuthMiddleware
+	overloadGuard     overloadGuard
+	requestLogger     *gatewaymiddleware.RequestLogger
+	builtinProvider   *gatewaybuiltin.Provider
+	oidcManager       *gatewayoidc.Manager
+	jwtIssuer         *authn.Issuer
+	entitlements      licensing.Entitlements
+	obsProvider       *observability.Provider
+	logger            *zap.Logger
+	proxyTimeout      time.Duration
+	httpClient        *stdhttp.Client
+	regionProxies     map[string]*proxy.Router
+	regionProxiesMu   sync.RWMutex
+	regionRoutes      *memcachepkg.Cache[string, tenantdir.Region]
+	parseAPIKeyRegion func(string) (string, error)
 }
 
 type regionDirectory interface {
 	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
+}
+
+type overloadGuard interface {
+	Admit() gin.HandlerFunc
+	Close() error
+}
+
+type overloadGuardFactory func(
+	context.Context,
+	config.OverloadGuardConfig,
+	*zap.Logger,
+) (overloadGuard, error)
+
+type ServerOption func(*serverOptions)
+
+type serverOptions struct {
+	overloadGuardFactory overloadGuardFactory
+}
+
+func withOverloadGuardFactoryForTest(factory overloadGuardFactory) ServerOption {
+	return func(options *serverOptions) {
+		options.overloadGuardFactory = factory
+	}
 }
 
 const regionRouteCacheTTL = 8 * time.Hour
@@ -67,6 +93,7 @@ func NewServer(
 	pool *pgxpool.Pool,
 	logger *zap.Logger,
 	obsProvider *observability.Provider,
+	opts ...ServerOption,
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is required")
@@ -77,18 +104,48 @@ func NewServer(
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
+	options := serverOptions{
+		overloadGuardFactory: func(
+			ctx context.Context,
+			cfg config.OverloadGuardConfig,
+			logger *zap.Logger,
+		) (overloadGuard, error) {
+			return gatewaymiddleware.NewSharedOverloadGuard(ctx, cfg, logger)
+		},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
 
-	identityRepo := identity.NewRepository(pool)
+	identityRepo := identity.NewRepository(
+		pool,
+		identity.WithIdentityResourceGuard(public.IdentityResourceGuardLimits(cfg.IdentityResourceGuard)),
+	)
 	regionRepo := tenantdir.NewRepository(pool)
 	jwtIssuer, err := authn.NewIssuerFromConfig(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTPrivateKeyPEM, cfg.JWTPublicKeyPEM, cfg.JWTPrivateKeyFile, cfg.JWTPublicKeyFile, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
 	if err != nil {
 		return nil, fmt.Errorf("create jwt issuer: %w", err)
 	}
 	authMiddleware := gatewaymiddleware.NewAuthMiddleware(nil, cfg.JWTSecret, jwtIssuer, logger)
-	rateLimiter, err := gatewaymiddleware.NewRateLimiterWithConfig(context.Background(), cfg.RateLimitRPS, cfg.RateLimitBurst, gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig), logger)
+	overloadGuard, err := options.overloadGuardFactory(
+		context.Background(),
+		gatewaymiddleware.SharedOverloadGuardConfig(
+			cfg.GatewayConfig,
+			"global-gateway",
+		),
+		logger,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("create rate limiter: %w", err)
+		return nil, fmt.Errorf("create overload guard: %w", err)
 	}
+	serverReady := false
+	defer func() {
+		if !serverReady {
+			_ = overloadGuard.Close()
+		}
+	}()
 	requestLogger := gatewaymiddleware.NewRequestLogger(logger)
 	builtinProvider := gatewaybuiltin.NewProvider(identityRepo, &cfg.BuiltInAuth, cfg.DefaultTeamName)
 
@@ -131,7 +188,7 @@ func NewServer(
 		regionRepo:      regionRepo,
 		regionLookup:    regionRepo,
 		authMiddleware:  authMiddleware,
-		rateLimiter:     rateLimiter,
+		overloadGuard:   overloadGuard,
 		requestLogger:   requestLogger,
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
@@ -146,8 +203,10 @@ func NewServer(
 			MaxSize: regionRouteCacheMaxEntries,
 			TTL:     regionRouteCacheTTL,
 		}),
+		parseAPIKeyRegion: apikey.ParseRegionIDFromKey,
 	}
 	server.setupRoutes()
+	serverReady = true
 	return server, nil
 }
 
@@ -168,24 +227,30 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	s.router.GET("/metadata", handlers.GatewayMetadata("global-gateway", handlers.GatewayModeGlobal))
 
+	var identityRequestAdmission gin.HandlerFunc
+	if s.overloadGuard != nil {
+		identityRequestAdmission = s.overloadGuard.Admit()
+	}
 	public.RegisterIdentityRoutes(s.router, public.Deps{
-		IdentityRepo:            s.identityRepo,
-		AuthMiddleware:          s.authMiddleware,
-		BuiltinProvider:         s.builtinProvider,
-		OIDCManager:             s.oidcManager,
-		Entitlements:            s.entitlements,
-		JWTIssuer:               s.jwtIssuer,
-		RegionRepo:              s.regionRepo,
-		RequireCreateHomeRegion: true,
-		Logger:                  s.logger,
+		IdentityRepo:                  s.identityRepo,
+		AuthMiddleware:                s.authMiddleware,
+		BuiltinProvider:               s.builtinProvider,
+		OIDCManager:                   s.oidcManager,
+		Entitlements:                  s.entitlements,
+		JWTIssuer:                     s.jwtIssuer,
+		RegionRepo:                    s.regionRepo,
+		RequireCreateHomeRegion:       true,
+		TeamDeletionUnavailableReason: teamDeletionRequiresRegionCoordination,
+		IdentityRequestAdmission:      identityRequestAdmission,
+		Logger:                        s.logger,
 	})
 
 	regionHandler := handlers.NewRegionHandler(s.regionRepo, s.logger)
 	regions := s.router.Group("/regions")
-	regions.Use(s.authMiddleware.Authenticate())
-	if s.rateLimiter != nil {
-		regions.Use(s.rateLimiter.RateLimit())
+	if s.overloadGuard != nil {
+		regions.Use(s.overloadGuard.Admit())
 	}
+	regions.Use(s.authMiddleware.Authenticate())
 	regions.Use(s.authMiddleware.RequireJWTAuth())
 	{
 		regions.GET("", regionHandler.ListRegions)
@@ -199,7 +264,29 @@ func (s *Server) setupRoutes() {
 		}
 	}
 
-	s.router.NoRoute(s.handleNoRoute)
+	s.registerNoRoute()
+}
+
+func (s *Server) registerNoRoute() {
+	if s.overloadGuard == nil {
+		s.router.NoRoute(s.handleNoRoute)
+		return
+	}
+	s.router.NoRoute(s.admitAPIKeyRegionProxyRequests(), s.handleNoRoute)
+}
+
+func (s *Server) admitAPIKeyRegionProxyRequests() gin.HandlerFunc {
+	admit := s.overloadGuard.Admit()
+	return func(c *gin.Context) {
+		if c == nil ||
+			c.Request == nil ||
+			c.Request.URL == nil ||
+			!shouldProxyAPIKeyRegionRequest(c.Request.Method, c.Request.URL.Path) {
+			c.Next()
+			return
+		}
+		admit(c)
+	}
 }
 
 func effectiveProxyTimeout(timeout time.Duration) time.Duration {
@@ -230,7 +317,11 @@ func (s *Server) handleAPIKeyRegionProxy(c *gin.Context) bool {
 		return false
 	}
 
-	regionID, err := apikey.ParseRegionIDFromKey(token)
+	parseRegion := s.parseAPIKeyRegion
+	if parseRegion == nil {
+		parseRegion = apikey.ParseRegionIDFromKey
+	}
+	regionID, err := parseRegion(token)
 	if err != nil {
 		c.AbortWithStatusJSON(stdhttp.StatusUnauthorized, gin.H{"error": "invalid api key"})
 		return true
@@ -374,6 +465,21 @@ func (s *Server) readinessCheck(c *gin.Context) {
 
 // Start starts the HTTP server and blocks until it exits or the context is canceled.
 func (s *Server) Start(ctx context.Context) error {
+	go s.identityRepo.RunIdentitySessionCleanup(
+		ctx,
+		s.cfg.IdentityResourceGuard.SessionCleanupInterval.Duration,
+		s.cfg.IdentityResourceGuard.SessionCleanupBatchSize,
+		func(err error) {
+			s.logger.Warn("Failed to clean up identity sessions", zap.Error(err))
+		},
+	)
+	if s.overloadGuard != nil {
+		defer func() {
+			if err := s.overloadGuard.Close(); err != nil {
+				s.logger.Warn("Failed to close overload guard", zap.Error(err))
+			}
+		}()
+	}
 	server := &stdhttp.Server{
 		Addr:         fmt.Sprintf(":%d", s.cfg.HTTPPort),
 		Handler:      s.router,

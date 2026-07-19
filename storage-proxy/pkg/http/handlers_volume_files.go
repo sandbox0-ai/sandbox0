@@ -13,6 +13,7 @@ import (
 	pathpkg "path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,7 +21,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	httpproxy "github.com/sandbox0-ai/sandbox0/pkg/proxy"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -352,6 +352,9 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 	if proxied {
 		return
 	}
+	if !s.admitStorageOperation(w, r, volumeRecord.TeamID) {
+		return
+	}
 	if s.eventHub == nil {
 		s.writeVolumeFileError(w, errVolumeFileUnavailable)
 		return
@@ -376,8 +379,10 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 
 	type watchSubscription struct {
 		cancel func()
+		active *atomic.Bool
 	}
 	watches := make(map[string]watchSubscription)
+	var activeSubscriptions atomic.Int64
 	var writeMu sync.Mutex
 	writeJSON := func(payload any) error {
 		writeMu.Lock()
@@ -409,12 +414,49 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 			_ = writeJSON(map[string]any{"type": "error", "error": err.Error()})
 			continue
 		}
+		for id, watch := range watches {
+			if watch.active != nil && !watch.active.Load() {
+				delete(watches, id)
+			}
+		}
 
 		switch req.Action {
 		case "subscribe":
 			cleanedPath, err := cleanVolumePath(req.Path, true)
 			if err != nil {
 				_ = writeJSON(map[string]any{"type": "error", "error": err.Error()})
+				continue
+			}
+			if activeSubscriptions.Load() >= maxVolumeFileWatchSubscriptionsPerConnection {
+				_ = writeJSON(map[string]any{
+					"type":  "error",
+					"error": "maximum watch subscriptions reached",
+				})
+				continue
+			}
+			releaseGuard, limit := s.watchSubscriptions.acquire()
+			if limit != volumeWatchSubscriptionAllowed {
+				_ = writeJSON(map[string]any{
+					"type":  "error",
+					"error": "process watch subscription limit reached",
+				})
+				continue
+			}
+			if err := s.admitStorageOperationForTeam(r.Context(), volumeRecord.TeamID); err != nil {
+				releaseGuard()
+				_ = writeJSON(map[string]any{
+					"type":  "error",
+					"error": err.Error(),
+				})
+				continue
+			}
+			lease, err := s.acquireVolumeWatchLease(r.Context(), volumeRecord.TeamID)
+			if err != nil {
+				releaseGuard()
+				_ = writeJSON(map[string]any{
+					"type":  "error",
+					"error": err.Error(),
+				})
 				continue
 			}
 
@@ -424,9 +466,28 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 				Recursive:   req.Recursive,
 				IncludeSelf: true,
 			})
-			watches[watchID] = watchSubscription{cancel: cancel}
+			active := &atomic.Bool{}
+			active.Store(true)
+			activeSubscriptions.Add(1)
+			var cancelOnce sync.Once
+			cancelSubscription := func() {
+				cancelOnce.Do(func() {
+					if cancel != nil {
+						cancel()
+					}
+					active.Store(false)
+					activeSubscriptions.Add(-1)
+					s.releaseVolumeWatchLease(lease, volumeRecord.TeamID)
+					releaseGuard()
+				})
+			}
+			watches[watchID] = watchSubscription{
+				cancel: cancelSubscription,
+				active: active,
+			}
 
 			go func(id string, events <-chan *pb.WatchEvent) {
+				defer cancelSubscription()
 				for event := range events {
 					if event == nil {
 						continue
@@ -442,6 +503,28 @@ func (s *Server) handleVolumeFileWatch(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}(watchID, ch)
+			go func(id string) {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-lease.Done():
+				}
+				if err := volumeWatchLeaseLossError(lease); err != nil {
+					cancelSubscription()
+					if s.logger != nil {
+						s.logger.WithError(err).
+							WithField("team_id", volumeRecord.TeamID).
+							WithField("volume_id", volumeID).
+							WithField("watch_id", id).
+							Warn("Volume watch Team Quota lease lost")
+					}
+					_ = writeJSON(map[string]any{
+						"type":     "error",
+						"watch_id": id,
+						"error":    err.Error(),
+					})
+				}
+			}(watchID)
 
 			_ = writeJSON(map[string]any{
 				"type":     "subscribed",
@@ -546,25 +629,16 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 			return
 		}
 
-		data, err := io.ReadAll(lockedReq.Body)
+		data, err := readVolumeFileBody(lockedReq.Body, maxVolumeFileSize)
 		if err != nil {
+			if errors.Is(err, errFileTooLarge) {
+				s.writeVolumeFileError(w, err)
+				return
+			}
 			_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
 		}
-		if len(data) > maxVolumeFileSize {
-			s.writeVolumeFileError(w, errFileTooLarge)
-			return
-		}
 
-		volumeRecord, err := s.loadAuthorizedVolume(lockedReq.Context(), volumeID)
-		if err != nil {
-			s.writeVolumeFileError(w, err)
-			return
-		}
-		if err := s.enforceVolumeStorageAdditionalQuota(lockedReq.Context(), volumeRecord, int64(len(data))); err != nil {
-			s.writeVolumeFileError(w, err)
-			return
-		}
 		lockedReq.Body = io.NopCloser(bytes.NewReader(data))
 		lockedReq.ContentLength = int64(len(data))
 
@@ -588,6 +662,23 @@ func (s *Server) writeVolumeFile(w http.ResponseWriter, r *http.Request, volumeI
 
 		_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"written": true})
 	})
+}
+
+func readVolumeFileBody(body io.Reader, maximum int64) ([]byte, error) {
+	if body == nil {
+		return nil, nil
+	}
+	if maximum < 0 {
+		return nil, errFileTooLarge
+	}
+	data, err := io.ReadAll(io.LimitReader(body, maximum+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maximum {
+		return nil, errFileTooLarge
+	}
+	return data, nil
 }
 
 func (s *Server) deleteVolumeFile(w http.ResponseWriter, r *http.Request, volumeID, logicalPath string) {
@@ -1486,6 +1577,9 @@ func translateVolumeRPCError(err error) error {
 }
 
 func (s *Server) writeVolumeFileError(w http.ResponseWriter, err error) {
+	if err != nil && s.writeStorageQuotaMutationError(w, err) {
+		return
+	}
 	switch {
 	case err == nil:
 		return
@@ -1509,8 +1603,8 @@ func (s *Server) writeVolumeFileError(w http.ResponseWriter, err error) {
 		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, err.Error())
 	case errors.Is(err, errInvalidPath), errors.Is(err, errInvalidArchive), errors.Is(err, errVolumeFileUnsupported):
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-	case quota.IsExceeded(err):
-		_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
+	case fserror.CodeOf(err) == fserror.Unavailable:
+		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 	default:
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, err.Error())
 	}

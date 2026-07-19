@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -145,6 +146,9 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 		zap.Error(err),
 	)
 	switch {
+	case errors.Is(err, service.ErrQuotaExceeded), teamquota.IsExceeded(err),
+		errors.Is(err, service.ErrTeamQuotaUnavailable), teamquota.IsUnavailable(err):
+		writeTeamQuotaMutationError(c, err)
 	case apierrors.IsNotFound(err), errors.Is(err, service.ErrSandboxRecordNotFound), errors.Is(err, service.ErrRootFSSnapshotNotFound):
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")
 	case apierrors.IsForbidden(err):

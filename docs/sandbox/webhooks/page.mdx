@@ -22,15 +22,17 @@ Webhooks are configured per-sandbox at creation time. Each sandbox can have its 
 
 ## Delivery Guarantees
 
-Webhook events are delivered at least once. Your endpoint should return a `2xx` status only after it has durably recorded the event, and should deduplicate by `event_id`.
+For a record accepted into the durable outbox, procd makes at least one delivery attempt. A successful delivery can be repeated, so your endpoint should return a `2xx` status only after it has durably recorded the event and should deduplicate by `event_id`.
 
-When a sandbox is created with a webhook, Sandbox0 creates a manager-owned SandboxVolume for webhook delivery state and mounts it at a reserved procd path outside the workspace. Procd writes signed delivery records to that volume before acknowledging the internal publish request, then retries delivery from the outbox until the endpoint accepts the event.
+When a sandbox is created with a webhook, Sandbox0 creates a manager-owned SandboxVolume for webhook delivery state and mounts it at a reserved procd path outside the workspace. Procd writes signed delivery records to that volume before acknowledging the internal publish request, then retries retryable failures according to the delivery policy. A non-retryable failure or exhausted retry budget moves the record to a bounded dead-letter directory; Sandbox0 does not guarantee that the endpoint eventually accepts every record.
 
 Sandbox deletion has an additional manager-level path. If the sandbox pod is deleted directly, or procd exits before it can emit `sandbox.killed`, manager emits `sandbox.deleted` from the pod finalizer cleanup path.
 
 <Callout variant="info">
 Webhook delivery is eventually consistent. Temporary endpoint outages, procd container restarts, and manager restarts can cause retries. Consumers must treat repeated `event_id` values as duplicate deliveries.
 </Callout>
+
+The durable outbox is intentionally bounded per sandbox: at most 256 pending records, 512 KiB per signed record, and 64 retained records in each dead-letter category. Dead letters expire after 24 hours. When the pending outbox or record-size limit is reached, procd rejects the new publish instead of consuming unbounded persistent storage; the producer may retry after delivery frees capacity.
 
 ---
 

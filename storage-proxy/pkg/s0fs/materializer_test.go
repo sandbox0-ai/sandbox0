@@ -224,6 +224,72 @@ func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
 	}
 }
 
+func TestPlannedMaterializationStorageUsageMatchesPublishedState(t *testing.T) {
+	ctx := context.Background()
+	engine, err := Open(ctx, Config{
+		VolumeID:          "planned-materialization",
+		WALPath:           filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore:       objectstore.NewMemoryStore(t.Name()),
+		SegmentTargetSize: 4,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "payload.bin", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, bytes.Repeat([]byte("x"), 32)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	before, err := engine.StorageUsage()
+	if err != nil {
+		t.Fatalf("StorageUsage(before) error = %v", err)
+	}
+	statePlan, err := PlanMaterializationStorageUsage(
+		"planned-materialization",
+		engine.SnapshotState(),
+		4,
+	)
+	if err != nil {
+		t.Fatalf("PlanMaterializationStorageUsage() error = %v", err)
+	}
+	planned, required, err := engine.PlannedMaterializationStorageUsage(ctx, false)
+	if err != nil {
+		t.Fatalf("PlannedMaterializationStorageUsage() error = %v", err)
+	}
+	if !required {
+		t.Fatal("PlannedMaterializationStorageUsage() required = false, want true")
+	}
+	if planned.Objects <= before.Objects+6 {
+		t.Fatalf(
+			"planned object count = %d, want more than fixed write bound %d",
+			planned.Objects,
+			before.Objects+6,
+		)
+	}
+	if statePlan != planned {
+		t.Fatalf("state plan = %+v, engine plan %+v", statePlan, planned)
+	}
+
+	manifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize() error = %v", err)
+	}
+	if manifest == nil || manifest.State == nil {
+		t.Fatal("SyncMaterialize() returned no state")
+	}
+	actual, err := engine.StorageUsage()
+	if err != nil {
+		t.Fatalf("StorageUsage(after) error = %v", err)
+	}
+	if actual != planned {
+		t.Fatalf("materialized usage = %+v, planned %+v", actual, planned)
+	}
+}
+
 func TestEngineMaterializeRetainsUnlinkedInodeWhenConfigured(t *testing.T) {
 	ctx := context.Background()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")

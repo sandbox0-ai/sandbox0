@@ -9,7 +9,6 @@ import (
 
 	policypkg "github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 )
 
 type fakeTxRecorder struct {
@@ -43,19 +42,6 @@ type fakeRecorder struct {
 	tx       *fakeTxRecorder
 	runCalls int
 	runErr   error
-}
-
-type fakeQuotaStore struct {
-	limit   *quota.Limit
-	current int64
-}
-
-func (f *fakeQuotaStore) GetLimit(context.Context, string, quota.Dimension) (*quota.Limit, error) {
-	return f.limit, nil
-}
-
-func (f *fakeQuotaStore) CurrentUsage(context.Context, string, quota.Dimension) (int64, error) {
-	return f.current, nil
 }
 
 func (f *fakeRecorder) RunInTx(ctx context.Context, fn func(tx txRecorder) error) error {
@@ -170,58 +156,5 @@ func TestAggregatorFlushFailureRetainsUsage(t *testing.T) {
 	}
 	if second.Value != 25 || !second.WindowStart.Equal(end) || !second.WindowEnd.Equal(nextEnd) {
 		t.Fatalf("residual window = %#v, want separate next interval", second)
-	}
-}
-
-func TestAggregatorAllowEgressRejectsAtQuotaLimit(t *testing.T) {
-	agg := NewAggregator(&fakeRecorder{}, "aws-us-east-1", "cluster-a", "node-1", nil)
-	agg.SetQuotaStore(&fakeQuotaStore{
-		limit: &quota.Limit{
-			TeamID:     "team-1",
-			Dimension:  quota.DimensionEgress,
-			LimitValue: 10,
-		},
-		current: 10,
-	})
-
-	err := agg.AllowEgress(&policypkg.CompiledPolicy{SandboxID: "sb-1", TeamID: "team-1"})
-	if !quota.IsExceeded(err) {
-		t.Fatalf("AllowEgress error = %v, want quota exceeded", err)
-	}
-}
-
-func TestAggregatorAllowEgressIncludesUnflushedUsage(t *testing.T) {
-	agg := NewAggregator(&fakeRecorder{}, "aws-us-east-1", "cluster-a", "node-1", nil)
-	agg.SetQuotaStore(&fakeQuotaStore{
-		limit: &quota.Limit{
-			TeamID:     "team-1",
-			Dimension:  quota.DimensionEgress,
-			LimitValue: 10,
-		},
-		current: 8,
-	})
-	compiled := &policypkg.CompiledPolicy{SandboxID: "sb-1", TeamID: "team-1"}
-	agg.RecordEgress(compiled, 2)
-
-	err := agg.AllowEgress(compiled)
-	if !quota.IsExceeded(err) {
-		t.Fatalf("AllowEgress error = %v, want quota exceeded", err)
-	}
-}
-
-func TestAggregatorAllowIngressRejectsAtQuotaLimit(t *testing.T) {
-	agg := NewAggregator(&fakeRecorder{}, "aws-us-east-1", "cluster-a", "node-1", nil)
-	agg.SetQuotaStore(&fakeQuotaStore{
-		limit: &quota.Limit{
-			TeamID:     "team-1",
-			Dimension:  quota.DimensionIngress,
-			LimitValue: 10,
-		},
-		current: 10,
-	})
-
-	err := agg.AllowIngress(&policypkg.CompiledPolicy{SandboxID: "sb-1", TeamID: "team-1"})
-	if !quota.IsExceeded(err) {
-		t.Fatalf("AllowIngress error = %v, want quota exceeded", err)
 	}
 }

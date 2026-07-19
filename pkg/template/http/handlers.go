@@ -19,6 +19,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
@@ -342,6 +343,9 @@ func rejectUnsupportedTemplateSpecFields(raw json.RawMessage) error {
 
 // CreateTemplate creates a new template.
 func (h *Handler) CreateTemplate(c *gin.Context) {
+	if !limitJSONRequestBody(c, "template request body", template.MaxObjectRequestBytes) {
+		return
+	}
 	var req struct {
 		TemplateID string          `json:"template_id"`
 		Spec       json.RawMessage `json:"spec"`
@@ -376,6 +380,13 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 	}
 	memoryPerCPU := configuredTemplateMemoryPerCPU()
 	deriveTemplateCPU(&templateSpec, memoryPerCPU)
+	if err := template.ValidateTemplateSpecSize(&templateSpec); err != nil {
+		if writeResourceTooLarge(c, err, "template spec") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
@@ -415,6 +426,16 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 	}
 
 	if err := h.Store.CreateTemplate(c.Request.Context(), tpl); err != nil {
+		if writeTeamQuotaMutationError(c, err) {
+			return
+		}
+		if writeResourceTooLarge(c, err, "template spec") {
+			return
+		}
+		if errors.Is(err, template.ErrTemplateImageCleanupPending) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+			return
+		}
 		h.Logger.Error("Failed to create template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
 		return
@@ -443,6 +464,9 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 
 // CreateTemplateFromSandbox creates a template and enqueues its image build.
 func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
+	if !limitJSONRequestBody(c, "template request body", template.MaxObjectRequestBytes) {
+		return
+	}
 	var req TemplateFromSandboxRequest
 	if err := decodeStrictJSON(c, &req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body: "+err.Error())
@@ -575,6 +599,13 @@ func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 	memoryPerCPU := configuredTemplateMemoryPerCPU()
 	templateSpec.MainContainer.Resources.CPU = resource.Quantity{}
 	deriveTemplateCPU(&templateSpec, memoryPerCPU)
+	if err := template.ValidateTemplateSpecSize(&templateSpec); err != nil {
+		if writeResourceTooLarge(c, err, "template spec") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "source template is not reusable: "+err.Error())
 		return
@@ -629,8 +660,11 @@ func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 	created, _, err := h.BuildStore.CreateTemplateBuild(c.Request.Context(), tpl, build)
 	if err != nil {
 		switch {
+		case writeTeamQuotaMutationError(c, err):
+		case writeResourceTooLarge(c, err, "template spec"):
 		case errors.Is(err, template.ErrTemplateAlreadyExists),
-			errors.Is(err, template.ErrTemplateIdempotencyConflict):
+			errors.Is(err, template.ErrTemplateIdempotencyConflict),
+			errors.Is(err, template.ErrTemplateImageCleanupPending):
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 		default:
 			h.Logger.Error("Failed to create template build", zap.Error(err))
@@ -728,6 +762,9 @@ func (h *Handler) writeTemplateSourceError(c *gin.Context, err error) {
 
 // UpdateTemplate updates an existing template.
 func (h *Handler) UpdateTemplate(c *gin.Context) {
+	if !limitJSONRequestBody(c, "template request body", template.MaxObjectRequestBytes) {
+		return
+	}
 	templateID := c.Param("id")
 	if templateID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template_id is required")
@@ -787,6 +824,13 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 	}
 	memoryPerCPU := configuredTemplateMemoryPerCPU()
 	deriveTemplateCPU(&templateSpec, memoryPerCPU)
+	if err := template.ValidateTemplateSpecSize(&templateSpec); err != nil {
+		if writeResourceTooLarge(c, err, "template spec") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
@@ -813,6 +857,9 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 	}
 
 	if err := h.Store.UpdateTemplate(c.Request.Context(), tpl); err != nil {
+		if writeResourceTooLarge(c, err, "template spec") {
+			return
+		}
 		h.Logger.Error("Failed to update template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update template")
 		return
@@ -918,12 +965,18 @@ func (h *Handler) DeleteTemplate(c *gin.Context) {
 
 	if existing.CreationBuildID != "" && h.BuildStore != nil {
 		if _, err := h.BuildStore.CancelTemplateBuildAndDeleteTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
+			if writeTeamQuotaMutationError(c, err) {
+				return
+			}
 			h.Logger.Error("Failed to cancel template build", zap.Error(err))
 			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
 			return
 		}
 	} else {
 		if err := h.Store.DeleteTemplate(c.Request.Context(), scope, teamID, templateID); err != nil {
+			if writeTeamQuotaMutationError(c, err) {
+				return
+			}
 			h.Logger.Error("Failed to delete template", zap.Error(err))
 			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete template")
 			return
@@ -950,4 +1003,18 @@ func (h *Handler) triggerReconcile() {
 		return
 	}
 	go h.Reconciler.TriggerReconcile(context.Background())
+}
+
+func writeTeamQuotaMutationError(c *gin.Context, err error) bool {
+	switch {
+	case teamquota.IsExceeded(err):
+		spec.JSONError(c, http.StatusTooManyRequests, spec.CodeQuotaExceeded, "team quota exceeded")
+		return true
+	case teamquota.IsUnavailable(err):
+		c.Header("Retry-After", "1")
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "team quota is unavailable")
+		return true
+	default:
+		return false
+	}
 }

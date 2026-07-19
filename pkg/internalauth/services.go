@@ -24,3 +24,9 @@ func ManagerAllowedCallers() []string {
 func ProcdAllowedCallers() []string {
 	return []string{ServiceClusterGateway, ServiceManager, ServiceSSHGateway}
 }
+
+// CtldAllowedCallers returns the services allowed to mutate node-local ctld
+// state through its authenticated internal HTTP surface.
+func CtldAllowedCallers() []string {
+	return []string{ServiceManager}
+}

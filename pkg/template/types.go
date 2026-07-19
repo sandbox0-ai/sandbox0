@@ -21,9 +21,11 @@ type Template struct {
 
 	// CreationBuildID and idempotency fields are control-plane state and are
 	// intentionally excluded from the public template representation.
-	CreationBuildID        string `json:"-"`
-	CreationIdempotencyKey string `json:"-"`
-	CreationRequestHash    string `json:"-"`
+	CreationBuildID               string `json:"-"`
+	CreationIdempotencyKey        string `json:"-"`
+	CreationRequestHash           string `json:"-"`
+	CreationImageClusterID        string `json:"-"`
+	CreationImageLogicalSizeBytes int64  `json:"-"`
 }
 
 // ReadyForClaim reports whether a template may be used to create sandboxes.
@@ -49,29 +51,54 @@ func (t *Template) ReadyForReconcile() bool {
 
 // TemplateBuild is one durable, cluster-targeted template image build.
 type TemplateBuild struct {
-	BuildID           string
-	Scope             string
-	TeamID            string
-	UserID            string
-	TemplateID        string
-	SourceSandboxID   string
-	TargetClusterID   string
-	DesiredSpec       v1alpha1.SandboxTemplateSpec
-	RequestHash       string
-	IdempotencyKey    string
-	Status            string
-	Stage             v1alpha1.TemplateCreationStage
-	SnapshotID        string
-	CaptureMetadata   json.RawMessage
-	OutputImage       string
-	AttemptCount      int
-	NextAttemptAt     time.Time
-	LeaseOwner        string
-	LeaseExpiresAt    time.Time
-	CancelRequestedAt time.Time
-	LastError         string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	BuildID               string
+	Scope                 string
+	TeamID                string
+	UserID                string
+	TemplateID            string
+	SourceSandboxID       string
+	TargetClusterID       string
+	DesiredSpec           v1alpha1.SandboxTemplateSpec
+	RequestHash           string
+	IdempotencyKey        string
+	Status                string
+	Stage                 v1alpha1.TemplateCreationStage
+	SnapshotID            string
+	CaptureMetadata       json.RawMessage
+	OutputImage           string
+	ImageManifestDigest   string
+	ImageLogicalSizeBytes int64
+	ImageQuotaReservedAt  time.Time
+	ImagePushStartedAt    time.Time
+	AttemptCount          int
+	NextAttemptAt         time.Time
+	LeaseOwner            string
+	LeaseExpiresAt        time.Time
+	CancelRequestedAt     time.Time
+	LastError             string
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+}
+
+// TemplateImageCleanup is a durable registry deletion job. Team template
+// object and managed-image byte quota remain committed until this job is
+// acknowledged after registry deletion.
+type TemplateImageCleanup struct {
+	CleanupID             string
+	Scope                 string
+	TeamID                string
+	TemplateID            string
+	TargetClusterID       string
+	OutputImage           string
+	ImageLogicalSizeBytes int64
+	Status                string
+	AttemptCount          int
+	NextAttemptAt         time.Time
+	LeaseOwner            string
+	LeaseExpiresAt        time.Time
+	LastError             string
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // SandboxTemplateSource is the durable template context captured when a
@@ -110,6 +137,9 @@ var (
 	ErrTemplateSourceNotReady = errors.New("template source sandbox is not ready")
 	// ErrTemplateSourceUnavailable indicates the owning data plane is unavailable.
 	ErrTemplateSourceUnavailable = errors.New("template source sandbox is unavailable")
+	// ErrTemplateImageCleanupPending prevents a logical template ID from being
+	// reused while its prior registry artifact is still being deleted.
+	ErrTemplateImageCleanupPending = errors.New("template image cleanup is pending")
 )
 
 // TemplateAllocation represents how a template is allocated to a cluster.

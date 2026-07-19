@@ -15,6 +15,8 @@ type proxyMetricsRegistry struct {
 	auditIngestEventsTotal    *prometheus.CounterVec
 	auditIngestBatchesTotal   *prometheus.CounterVec
 	proxyConnectionsActive    *prometheus.GaugeVec
+	proxyAdmissionDropped     *prometheus.CounterVec
+	networkOperationAdmission *prometheus.CounterVec
 }
 
 var proxyMetrics = newProxyMetricsRegistry()
@@ -62,11 +64,43 @@ func newProxyMetricsRegistry() *proxyMetricsRegistry {
 			Name: "netd_proxy_connections_active",
 			Help: "Current number of active downstream TCP proxy connections by listener.",
 		}, []string{"listener"}),
+		proxyAdmissionDropped: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "sandbox0",
+			Subsystem: "netd",
+			Name:      "proxy_admission_dropped_total",
+			Help:      "Traffic dropped by node-local proxy work bounds before tenant admission.",
+		}, []string{"transport", "reason"}),
+		networkOperationAdmission: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "sandbox0",
+			Subsystem: "netd",
+			Name:      "team_quota_network_operation_admission_total",
+			Help:      "Network operations admitted or rejected by region-shared Team Quota.",
+		}, []string{"transport", "outcome"}),
 	}
 	for _, listener := range []string{"http", "https"} {
 		registry.proxyConnectionsActive.WithLabelValues(listener)
 	}
 	return registry
+}
+
+func (m *proxyMetricsRegistry) RecordNetworkOperationAdmission(transport, outcome string) {
+	if m == nil || m.networkOperationAdmission == nil {
+		return
+	}
+	m.networkOperationAdmission.WithLabelValues(
+		metricValue(transport, "unknown"),
+		metricValue(outcome, "unknown"),
+	).Inc()
+}
+
+func (m *proxyMetricsRegistry) RecordProxyAdmissionDrop(transport, reason string) {
+	if m == nil || m.proxyAdmissionDropped == nil {
+		return
+	}
+	m.proxyAdmissionDropped.WithLabelValues(
+		metricValue(transport, "unknown"),
+		metricValue(reason, "unknown"),
+	).Inc()
 }
 
 func (m *proxyMetricsRegistry) IncProxyConnectionsActive(listener string) {

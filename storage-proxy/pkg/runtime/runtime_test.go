@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,6 +180,53 @@ func TestBuildDirectVolumeFileCleanupInterval(t *testing.T) {
 	if got := buildDirectVolumeFileCleanupInterval(cfg, 30*time.Second); got != time.Second {
 		t.Fatalf("cleanup interval = %s, want 1s", got)
 	}
+}
+
+func TestStorageQuotaRecoveryRetriesUntilContextCancellation(t *testing.T) {
+	reconciler := &recordingCatalogStorageReconciler{
+		called: make(chan int64, 4),
+	}
+	r := &Runtime{
+		logger:            zap.NewNop(),
+		storageReconciler: reconciler,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		r.runStorageQuotaRecovery(ctx, time.Millisecond)
+		close(done)
+	}()
+
+	for want := int64(1); want <= 2; want++ {
+		select {
+		case got := <-reconciler.called:
+			if got != want {
+				t.Fatalf("recovery call = %d, want %d", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("periodic recovery call %d did not run", want)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("periodic recovery did not stop")
+	}
+}
+
+type recordingCatalogStorageReconciler struct {
+	calls  atomic.Int64
+	called chan int64
+}
+
+func (r *recordingCatalogStorageReconciler) RecoverDueCatalogStorage(context.Context) error {
+	call := r.calls.Add(1)
+	r.called <- call
+	if call == 1 {
+		return errors.New("temporary catalog failure")
+	}
+	return nil
 }
 
 func newHTTPOnlyRuntimeForTest(handler http.Handler) *Runtime {

@@ -31,7 +31,7 @@ flowchart TB
 
 When a sandbox is claimed:
 1. The manager first tries to claim a ready idle pod (`claimIdlePod`)
-2. If successful (hot claim), the pod is relabeled to `active` and returned immediately; pool replenishment happens asynchronously via ReplicaSet reconcile
+2. If successful (hot claim), the pod is relabeled to `active`, detached from the ReplicaSet, and returned after its quota handoff is committed; pool replenishment happens asynchronously via ReplicaSet reconcile
 3. If no idle pod exists (cold claim), the manager directly creates a new active pod (`createNewPod`); the warm pool remains reconciled to `minIdle` and does not expand for the burst
 
 As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
@@ -47,7 +47,7 @@ Configure the pool strategy in your template spec under the `pool` key:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `minIdle` | integer | Minimum number of idle pods to maintain (ReplicaSet replicas). Claims always succeed instantly while idle pods are available. |
+| `minIdle` | integer | Minimum number of idle pods to maintain (ReplicaSet replicas). Admitted claims avoid a cold start while ready idle pods are available. |
 | `maxIdle` | integer | Compatibility ceiling for the pool contract. The current manager does not autoscale above `minIdle`; template status still reports `PoolHealthy=False` if idle pods exceed `maxIdle`. |
 
 ```yaml
@@ -86,6 +86,8 @@ Warm-pool capacity is counted from idle pods that are ready for claiming.
 <Callout variant="warning">
 Idle pods wait with a `128Mi` memory limit to reduce warm-pool cost. `mainContainer.resources.memory` remains the default sandbox memory contract; if `config.resources` is omitted during claim, Sandbox0 resizes the hot-claimed pod to the template default. Claim-time `config.resources.memory` overrides that default. Setting `minIdle` too high still consumes cluster capacity, image cache, ephemeral-storage headroom, and runtime overhead. Monitor your claim rate and set `minIdle` to match your typical concurrency.
 </Callout>
+
+For a team-owned template, Team Quota temporarily reserves one selected idle runtime during the cross-resource hot-claim handoff. This prevents a ReplicaSet replacement race from exceeding the team's regional capacity. The reserve is released when ownership commits, but the claim requires that temporary capacity headroom; see [Team Quota](/docs/sandbox/self-hosted/team-quota#enforcement-matrix).
 
 ---
 

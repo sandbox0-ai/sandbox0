@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
@@ -91,6 +93,280 @@ func TestAuditSpoolConcurrentPutPreservesEventIDCollision(t *testing.T) {
 	}
 	if len(events) != 1 || (events[0].Outcome != base.Outcome && events[0].Outcome != conflicting.Outcome) {
 		t.Fatalf("persisted events = %#v, want exactly one complete payload", events)
+	}
+}
+
+func TestAuditSpoolEnforcesPerTeamEntriesAndReleasesOnRemove(t *testing.T) {
+	limits := testAuditSpoolLimits()
+	limits.MaxEntries = 3
+	limits.MaxTeamEntries = 1
+	spool, err := newAuditSpoolWithLimits(t.TempDir(), limits)
+	if err != nil {
+		t.Fatalf("newAuditSpoolWithLimits() error = %v", err)
+	}
+
+	first := auditSpoolTestEvent("team-1")
+	if err := spool.Put(first); err != nil {
+		t.Fatalf("Put(first) error = %v", err)
+	}
+	sameTeam := auditSpoolTestEvent("team-1")
+	if err := spool.Put(sameTeam); !errors.Is(err, errAuditSpoolCapacity) {
+		t.Fatalf("Put(same team) error = %v, want capacity", err)
+	}
+	otherTeam := auditSpoolTestEvent("team-2")
+	if err := spool.Put(otherTeam); err != nil {
+		t.Fatalf("Put(other team) error = %v", err)
+	}
+	if err := spool.Remove(first.EventID); err != nil {
+		t.Fatalf("Remove(first) error = %v", err)
+	}
+	if err := spool.Put(sameTeam); err != nil {
+		t.Fatalf("Put(same team after release) error = %v", err)
+	}
+}
+
+func TestAuditSpoolEnforcesGlobalAndPerTeamBytes(t *testing.T) {
+	event := auditSpoolTestEvent("team-1")
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	recordBytes := int64(len(payload))
+
+	t.Run("per team", func(t *testing.T) {
+		limits := testAuditSpoolLimits()
+		limits.MaxBytes = 3 * recordBytes
+		limits.MaxTeamBytes = recordBytes
+		limits.MaxRecordBytes = recordBytes
+		spool, err := newAuditSpoolWithLimits(t.TempDir(), limits)
+		if err != nil {
+			t.Fatalf("newAuditSpoolWithLimits() error = %v", err)
+		}
+		if err := spool.Put(event); err != nil {
+			t.Fatalf("Put(first) error = %v", err)
+		}
+		if err := spool.Put(auditSpoolTestEvent("team-1")); !errors.Is(err, errAuditSpoolCapacity) {
+			t.Fatalf("Put(second team record) error = %v, want capacity", err)
+		}
+		if err := spool.Put(auditSpoolTestEvent("team-2")); err != nil {
+			t.Fatalf("Put(other team) error = %v", err)
+		}
+	})
+
+	t.Run("global", func(t *testing.T) {
+		limits := testAuditSpoolLimits()
+		limits.MaxBytes = 2 * recordBytes
+		limits.MaxTeamBytes = 2 * recordBytes
+		limits.MaxRecordBytes = recordBytes
+		spool, err := newAuditSpoolWithLimits(t.TempDir(), limits)
+		if err != nil {
+			t.Fatalf("newAuditSpoolWithLimits() error = %v", err)
+		}
+		for _, teamID := range []string{"team-1", "team-2"} {
+			if err := spool.Put(auditSpoolTestEvent(teamID)); err != nil {
+				t.Fatalf("Put(%s) error = %v", teamID, err)
+			}
+		}
+		if err := spool.Put(auditSpoolTestEvent("team-3")); !errors.Is(err, errAuditSpoolCapacity) {
+			t.Fatalf("Put(over global bytes) error = %v, want capacity", err)
+		}
+	})
+}
+
+func TestAuditSpoolConcurrentPutHonorsExactGlobalEntryLimit(t *testing.T) {
+	limits := testAuditSpoolLimits()
+	limits.MaxEntries = 5
+	limits.MaxTeamEntries = 5
+	spool, err := newAuditSpoolWithLimits(t.TempDir(), limits)
+	if err != nil {
+		t.Fatalf("newAuditSpoolWithLimits() error = %v", err)
+	}
+
+	const attempts = 32
+	start := make(chan struct{})
+	results := make(chan error, attempts)
+	for range attempts {
+		go func() {
+			<-start
+			results <- spool.Put(auditSpoolTestEvent("team-1"))
+		}()
+	}
+	close(start)
+
+	successes := 0
+	rejected := 0
+	for range attempts {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, errAuditSpoolCapacity):
+			rejected++
+		default:
+			t.Fatalf("Put() unexpected error = %v", err)
+		}
+	}
+	if successes != 5 || rejected != attempts-5 {
+		t.Fatalf(
+			"concurrent Put results = %d success, %d rejected; want 5, %d",
+			successes,
+			rejected,
+			attempts-5,
+		)
+	}
+}
+
+func TestAuditSpoolRebuildsUsageAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	limits := testAuditSpoolLimits()
+	limits.MaxEntries = 2
+	limits.MaxTeamEntries = 1
+	first, err := newAuditSpoolWithLimits(dir, limits)
+	if err != nil {
+		t.Fatalf("first newAuditSpoolWithLimits() error = %v", err)
+	}
+	existing := auditSpoolTestEvent("team-1")
+	if err := first.Put(existing); err != nil {
+		t.Fatalf("Put(existing) error = %v", err)
+	}
+
+	restarted, err := newAuditSpoolWithLimits(dir, limits)
+	if err != nil {
+		t.Fatalf("restarted newAuditSpoolWithLimits() error = %v", err)
+	}
+	replacement := auditSpoolTestEvent("team-1")
+	if err := restarted.Put(replacement); !errors.Is(err, errAuditSpoolCapacity) {
+		t.Fatalf("Put before startup usage release error = %v, want capacity", err)
+	}
+	if err := restarted.Remove(existing.EventID); err != nil {
+		t.Fatalf("Remove(existing) error = %v", err)
+	}
+	if err := restarted.Put(replacement); err != nil {
+		t.Fatalf("Put after startup usage release error = %v", err)
+	}
+}
+
+func TestAuditSpoolStartupRejectsOversizedRetainedRecord(t *testing.T) {
+	dir := t.TempDir()
+	event := auditSpoolTestEvent("team-1")
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	limits := testAuditSpoolLimits()
+	spool, err := newAuditSpoolWithLimits(dir, limits)
+	if err != nil {
+		t.Fatalf("newAuditSpoolWithLimits() error = %v", err)
+	}
+	if err := spool.Put(event); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+
+	limits.MaxRecordBytes = int64(len(payload)) - 1
+	if _, err := newAuditSpoolWithLimits(dir, limits); !errors.Is(err, errAuditSpoolCapacity) {
+		t.Fatalf(
+			"newAuditSpoolWithLimits() oversized startup error = %v, want capacity",
+			err,
+		)
+	}
+}
+
+func TestAuditSpoolStartupCleansIncompleteTempAndRejectsUnknownFiles(t *testing.T) {
+	dir := t.TempDir()
+	tempPath := filepath.Join(dir, ".audit-crash.tmp")
+	if err := os.WriteFile(tempPath, []byte("partial"), 0o600); err != nil {
+		t.Fatalf("WriteFile(temp) error = %v", err)
+	}
+	if _, err := newAuditSpoolWithLimits(dir, testAuditSpoolLimits()); err != nil {
+		t.Fatalf("newAuditSpoolWithLimits() temp cleanup error = %v", err)
+	}
+	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+		t.Fatalf("incomplete temp record remains or cannot be inspected: %v", err)
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(dir, "unexpected.bin"),
+		[]byte("untracked"),
+		0o600,
+	); err != nil {
+		t.Fatalf("WriteFile(unexpected) error = %v", err)
+	}
+	if _, err := newAuditSpoolWithLimits(
+		dir,
+		testAuditSpoolLimits(),
+	); !errors.Is(err, errAuditSpoolCorrupt) {
+		t.Fatalf("newAuditSpoolWithLimits() unknown file error = %v, want corrupt", err)
+	}
+}
+
+func TestAuditSpoolEnforcesRecordAndFilesystemHeadroom(t *testing.T) {
+	event := auditSpoolTestEvent("team-1")
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	recordBytes := int64(len(payload))
+
+	t.Run("record bytes", func(t *testing.T) {
+		limits := testAuditSpoolLimits()
+		limits.MaxRecordBytes = recordBytes - 1
+		spool, err := newAuditSpoolWithLimits(t.TempDir(), limits)
+		if err != nil {
+			t.Fatalf("newAuditSpoolWithLimits() error = %v", err)
+		}
+		if err := spool.Put(event); !errors.Is(err, errAuditSpoolCapacity) {
+			t.Fatalf("Put() error = %v, want capacity", err)
+		}
+	})
+
+	t.Run("minimum free bytes", func(t *testing.T) {
+		limits := testAuditSpoolLimits()
+		limits.MinFreeBytes = 100
+		spool, err := newAuditSpoolWithLimits(t.TempDir(), limits)
+		if err != nil {
+			t.Fatalf("newAuditSpoolWithLimits() error = %v", err)
+		}
+		spool.freeBytes = func(string) (int64, error) {
+			return recordBytes + limits.MinFreeBytes - 1, nil
+		}
+		if err := spool.Put(event); !errors.Is(err, errAuditSpoolCapacity) {
+			t.Fatalf("Put() below free-space floor error = %v, want capacity", err)
+		}
+		spool.freeBytes = func(string) (int64, error) {
+			return recordBytes + limits.MinFreeBytes, nil
+		}
+		if err := spool.Put(event); err != nil {
+			t.Fatalf("Put() at free-space floor error = %v", err)
+		}
+	})
+}
+
+func TestHTTPAuditSinkFailsClosedWithoutCanonicalFallbackAtSpoolCapacity(t *testing.T) {
+	limits := testAuditSpoolLimits()
+	limits.MaxEntries = 1
+	limits.MaxTeamEntries = 1
+	spool, err := newAuditSpoolWithLimits(t.TempDir(), limits)
+	if err != nil {
+		t.Fatalf("newAuditSpoolWithLimits() error = %v", err)
+	}
+	if err := spool.Put(auditSpoolTestEvent("team-1")); err != nil {
+		t.Fatalf("Put(existing) error = %v", err)
+	}
+	canonicalCalled := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		canonicalCalled <- struct{}{}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	sink := directHTTPAuditSink(server.URL, server.Client(), spool, zap.NewNop())
+	err = sink.WriteAuditEvent(auditSpoolTestEvent("team-1"))
+	if !errors.Is(err, errAuditSpoolCapacity) {
+		t.Fatalf("WriteAuditEvent() error = %v, want spool capacity", err)
+	}
+	select {
+	case <-canonicalCalled:
+		t.Fatal("spool capacity rejection bypassed the node-local guard")
+	default:
 	}
 }
 
@@ -397,7 +673,7 @@ func TestAuditSpoolRejectsMalformedFactsOnEveryReadWritePath(t *testing.T) {
 	}
 }
 
-func TestAuditSpoolLoadIgnoresRecordThatVanishedAfterDirectoryListing(t *testing.T) {
+func TestAuditSpoolLoadRejectsBrokenSymlink(t *testing.T) {
 	dir := t.TempDir()
 	spool, err := newAuditSpool(dir)
 	if err != nil {
@@ -407,12 +683,8 @@ func TestAuditSpoolLoadIgnoresRecordThatVanishedAfterDirectoryListing(t *testing
 		t.Fatalf("Symlink() error = %v", err)
 	}
 
-	events, err := spool.Load(10)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if len(events) != 0 {
-		t.Fatalf("Load() events = %#v, want none", events)
+	if _, err := spool.Load(10); !errors.Is(err, errAuditSpoolCorrupt) {
+		t.Fatalf("Load() broken symlink error = %v, want corrupt", err)
 	}
 }
 
@@ -480,4 +752,25 @@ func replaceNetdAuditSpoolDirectoryWithFile(t *testing.T, dir string) {
 	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", dir, err)
 	}
+}
+
+func testAuditSpoolLimits() auditSpoolLimits {
+	return auditSpoolLimits{
+		MaxBytes:       16 << 20,
+		MaxEntries:     100,
+		MaxTeamBytes:   8 << 20,
+		MaxTeamEntries: 50,
+		MaxRecordBytes: 1 << 20,
+	}
+}
+
+func auditSpoolTestEvent(teamID string) auditEvent {
+	event := newAuditDeliveryTestEvent(
+		uuid.NewString(),
+		sandboxobservability.EventPhaseResult,
+	)
+	event.Timestamp = time.Date(2026, 7, 1, 1, 2, 3, 123456789, time.UTC)
+	event.TeamID = teamID
+	event.Outcome = "completed"
+	return event
 }

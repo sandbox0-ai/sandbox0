@@ -4,16 +4,22 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/schedulerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	gatewayteamquota "github.com/sandbox0-ai/sandbox0/pkg/gateway/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/guard"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -150,5 +156,192 @@ func TestGenerateInternalTokenUsesSystemTokenWithoutSelectedTeam(t *testing.T) {
 	}
 	if claims.TeamID != "" {
 		t.Fatalf("TeamID = %q, want empty", claims.TeamID)
+	}
+}
+
+func TestGenerateForwardingInternalTokenSignsOnlyAdmittedKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	server := &Server{
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceRegionalGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		teamQuotaController: newAllowingTeamQuotaController(zap.NewNop()),
+	}
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/sandboxes?source=public",
+		nil,
+	)
+	if err := gatewayteamquota.RecordAdmittedKeys(
+		ginCtx,
+		coreteamquota.KeyNetworkEgressBytes,
+		coreteamquota.KeyAPIRequests,
+	); err != nil {
+		t.Fatalf("RecordAdmittedKeys() error = %v", err)
+	}
+	authCtx := &authn.AuthContext{
+		AuthMethod:  authn.AuthMethodAPIKey,
+		TeamID:      "team-a",
+		UserID:      "user-a",
+		OperationID: "operation-a",
+		RequestID:   "request-a",
+	}
+	token, err := server.generateForwardingInternalToken(
+		authCtx,
+		internalauth.ServiceScheduler,
+		ginCtx.Request,
+	)
+	if err != nil {
+		t.Fatalf("generateForwardingInternalToken() error = %v", err)
+	}
+	claims, err := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:    internalauth.ServiceScheduler,
+		PublicKey: publicKey,
+	}).Validate(token)
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if claims.QuotaAdmissionProof == nil {
+		t.Fatal("forwarding token omitted quota admission proof")
+	}
+	wantKeys := []coreteamquota.Key{
+		coreteamquota.KeyAPIRequests,
+		coreteamquota.KeyNetworkEgressBytes,
+	}
+	if !reflect.DeepEqual(
+		claims.QuotaAdmissionProof.Keys,
+		wantKeys,
+	) {
+		t.Fatalf(
+			"keys = %v, want %v",
+			claims.QuotaAdmissionProof.Keys,
+			wantKeys,
+		)
+	}
+	changedQuery := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/sandboxes?source=scheduler",
+		nil,
+	)
+	if claims.QuotaAdmissionProof.MatchesRequest(claims, changedQuery) {
+		t.Fatal("query-only rewrite unexpectedly retained forwarding proof")
+	}
+}
+
+func TestGenerateForwardingInternalTokenFailsClosedWhenProofVersionIsUnavailable(
+	t *testing.T,
+) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	controller := gatewayteamquota.NewController(
+		nil,
+		nil,
+		nil,
+		nil,
+		zap.NewNop(),
+		gatewayteamquota.WithAdmissionProofConsumer(failingProofVersionConsumer{}),
+	)
+	server := &Server{
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceRegionalGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+		teamQuotaController: controller,
+		logger:              zap.NewNop(),
+	}
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", nil)
+	if err := gatewayteamquota.RecordAdmittedKeys(
+		ginCtx,
+		coreteamquota.KeyAPIRequests,
+	); err != nil {
+		t.Fatalf("RecordAdmittedKeys() error = %v", err)
+	}
+	authCtx := &authn.AuthContext{
+		TeamID:      "team-a",
+		OperationID: "operation-a",
+		RequestID:   "request-a",
+	}
+	_, err = server.generateForwardingInternalToken(
+		authCtx,
+		internalauth.ServiceScheduler,
+		ginCtx.Request,
+	)
+	if !coreteamquota.IsUnavailable(err) {
+		t.Fatalf("generateForwardingInternalToken() error = %v, want unavailable", err)
+	}
+	server.abortForwardingTokenError(ginCtx, internalauth.ServiceScheduler, err)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1", got)
+	}
+}
+
+type failingProofVersionConsumer struct{}
+
+func (failingProofVersionConsumer) CurrentVersion(
+	context.Context,
+) (guard.Version, error) {
+	return guard.Version{}, errors.New("policy guard unavailable")
+}
+
+func (failingProofVersionConsumer) Consume(
+	context.Context,
+	string,
+	string,
+	int64,
+	int64,
+	guard.Version,
+) (bool, error) {
+	return false, nil
+}
+
+func (failingProofVersionConsumer) Close() error { return nil }
+
+func TestGenerateInternalTokenDoesNotInventQuotaAdmissionProof(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	server := &Server{
+		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{
+			Caller:     internalauth.ServiceRegionalGateway,
+			PrivateKey: privateKey,
+			TTL:        time.Minute,
+		}),
+	}
+	token, err := server.generateInternalToken(
+		&authn.AuthContext{
+			AuthMethod: authn.AuthMethodInternal,
+			TeamID:     "team-a",
+		},
+		internalauth.ServiceScheduler,
+	)
+	if err != nil {
+		t.Fatalf("generateInternalToken() error = %v", err)
+	}
+	claims, err := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:    internalauth.ServiceScheduler,
+		PublicKey: publicKey,
+	}).Validate(token)
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if claims.QuotaAdmissionProof != nil {
+		t.Fatalf("background token invented proof: %+v", claims.QuotaAdmissionProof)
 	}
 }

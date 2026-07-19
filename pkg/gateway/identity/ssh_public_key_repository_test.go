@@ -2,6 +2,8 @@ package identity
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +14,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/resourceguard"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	teamquotatestutil "github.com/sandbox0-ai/sandbox0/pkg/teamquota/testutil"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestUserSSHPublicKeyRepositoryLifecycle(t *testing.T) {
@@ -21,7 +27,7 @@ func TestUserSSHPublicKeyRepositoryLifecycle(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	repo := NewRepository(pool)
+	repo := NewRepository(pool, WithTeamQuotaStore(teamquotatestutil.NewPermissiveCapacityStore()))
 	user := &User{
 		Email: "ssh-user@example.com",
 		Name:  "SSH User",
@@ -89,7 +95,7 @@ func TestUserSSHPublicKeyRepositoryAllowsFederatedUserID(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	repo := NewRepository(pool)
+	repo := NewRepository(pool, WithTeamQuotaStore(teamquotatestutil.NewPermissiveCapacityStore()))
 	userID := uuid.NewString()
 	publicKey, keyType, fingerprint, comment, err := NormalizeAuthorizedSSHPublicKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5QO6t81jzbe5G4jrI2F+jbjL6TY8 sandbox0-e2e")
 	if err != nil {
@@ -118,6 +124,35 @@ func TestUserSSHPublicKeyRepositoryAllowsFederatedUserID(t *testing.T) {
 	}
 }
 
+func TestCreateUserSSHPublicKeyRejectsOversizedInputBeforePostgresWrite(t *testing.T) {
+	pool, _ := newGatewayIdentityTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	repo := NewRepository(pool, WithTeamQuotaStore(teamquotatestutil.NewPermissiveCapacityStore()))
+	var before int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM user_ssh_public_keys`).Scan(&before); err != nil {
+		t.Fatalf("count SSH public keys before rejected create: %v", err)
+	}
+
+	key := generatedSSHPublicKey(t, uuid.NewString(), uuid.NewString(), "oversized")
+	key.Name = strings.Repeat("n", int(MaxSSHPublicKeyNameBytes)+1)
+	err := repo.CreateUserSSHPublicKey(ctx, key)
+	if !resourceguard.IsTooLarge(err) {
+		t.Fatalf("CreateUserSSHPublicKey() error = %v, want TooLargeError", err)
+	}
+
+	var after int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM user_ssh_public_keys`).Scan(&after); err != nil {
+		t.Fatalf("count SSH public keys after rejected create: %v", err)
+	}
+	if after != before {
+		t.Fatalf("SSH public key count = %d, want unchanged %d", after, before)
+	}
+}
+
 func TestUserSSHPublicKeyRepositoryAllowsSameFingerprintAcrossTeams(t *testing.T) {
 	pool, _ := newGatewayIdentityTestPool(t)
 	if pool == nil {
@@ -125,7 +160,7 @@ func TestUserSSHPublicKeyRepositoryAllowsSameFingerprintAcrossTeams(t *testing.T
 	}
 
 	ctx := context.Background()
-	repo := NewRepository(pool)
+	repo := NewRepository(pool, WithTeamQuotaStore(teamquotatestutil.NewPermissiveCapacityStore()))
 	userID := uuid.NewString()
 	publicKey, keyType, fingerprint, comment, err := NormalizeAuthorizedSSHPublicKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4dLZLZOA/asaP+5QO6t81jzbe5G4jrI2F+jbjL6TY8 sandbox0-e2e")
 	if err != nil {
@@ -163,7 +198,7 @@ func TestDeleteUserRemovesSSHPublicKeys(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	repo := NewRepository(pool)
+	repo := NewRepository(pool, WithTeamQuotaStore(teamquotatestutil.NewPermissiveCapacityStore()))
 	user := &User{
 		Email: "delete-ssh-user@example.com",
 		Name:  "Delete SSH User",
@@ -197,6 +232,108 @@ func TestDeleteUserRemovesSSHPublicKeys(t *testing.T) {
 	}
 }
 
+func TestSSHPublicKeyControlPlaneQuotaReleasesOnDelete(t *testing.T) {
+	pool, _ := newGatewayIdentityTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	repo := NewRepository(pool)
+	teamID := "team-ssh-quota-" + uuid.NewString()
+	userID := uuid.NewString()
+	if err := teamquota.NewRepository(pool).UnsafePutTeamPolicyForTest(ctx, teamID, teamquota.Policy{
+		Key:   teamquota.KeyControlPlaneObjectCount,
+		Kind:  teamquota.KindCapacity,
+		Limit: 1,
+	}); err != nil {
+		t.Fatalf("set team quota: %v", err)
+	}
+
+	first := generatedSSHPublicKey(t, teamID, userID, "First")
+	if err := repo.CreateUserSSHPublicKey(ctx, first); err != nil {
+		t.Fatalf("create first ssh public key: %v", err)
+	}
+	second := generatedSSHPublicKey(t, teamID, userID, "Second")
+	if err := repo.CreateUserSSHPublicKey(ctx, second); !teamquota.IsExceeded(err) {
+		t.Fatalf("create second ssh public key error = %v, want quota exceeded", err)
+	}
+	if err := repo.DeleteUserSSHPublicKeyByTeamAndUserID(ctx, teamID, userID, first.ID); err != nil {
+		t.Fatalf("delete first ssh public key: %v", err)
+	}
+	if err := repo.CreateUserSSHPublicKey(ctx, second); err != nil {
+		t.Fatalf("create replacement ssh public key: %v", err)
+	}
+}
+
+func TestDeleteUserReleasesSSHPublicKeyControlPlaneQuota(t *testing.T) {
+	pool, _ := newGatewayIdentityTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	repo := NewRepository(pool)
+	quotaRepo := teamquota.NewRepository(pool)
+	teamID := "team-delete-user-quota-" + uuid.NewString()
+	if err := quotaRepo.UnsafePutTeamPolicyForTest(ctx, teamID, teamquota.Policy{
+		Key:   teamquota.KeyControlPlaneObjectCount,
+		Kind:  teamquota.KindCapacity,
+		Limit: 1,
+	}); err != nil {
+		t.Fatalf("set team quota: %v", err)
+	}
+	user := &User{
+		Email: "delete-user-quota-" + uuid.NewString() + "@example.com",
+		Name:  "Delete User Quota",
+	}
+	if err := repo.CreateUser(ctx, user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	key := generatedSSHPublicKey(t, teamID, user.ID, "Delete with user")
+	if err := repo.CreateUserSSHPublicKey(ctx, key); err != nil {
+		t.Fatalf("create ssh public key: %v", err)
+	}
+	if err := repo.DeleteUser(ctx, user.ID); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+	statuses, err := quotaRepo.ListStatus(ctx, teamID)
+	if err != nil {
+		t.Fatalf("list team quota status: %v", err)
+	}
+	for _, status := range statuses {
+		if status.Key == teamquota.KeyControlPlaneObjectCount && status.Committed != 0 {
+			t.Fatalf("committed control-plane objects = %d, want 0", status.Committed)
+		}
+	}
+}
+
+func generatedSSHPublicKey(t *testing.T, teamID, userID, name string) *UserSSHPublicKey {
+	t.Helper()
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 key: %v", err)
+	}
+	sshKey, err := ssh.NewPublicKey(public)
+	if err != nil {
+		t.Fatalf("convert ed25519 public key: %v", err)
+	}
+	authorizedKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshKey))) + " sandbox0-quota-test"
+	publicKey, keyType, fingerprint, comment, err := NormalizeAuthorizedSSHPublicKey(authorizedKey)
+	if err != nil {
+		t.Fatalf("normalize generated ssh public key: %v", err)
+	}
+	return &UserSSHPublicKey{
+		TeamID:            teamID,
+		UserID:            userID,
+		Name:              name,
+		PublicKey:         publicKey,
+		KeyType:           keyType,
+		FingerprintSHA256: fingerprint,
+		Comment:           comment,
+	}
+}
+
 func newGatewayIdentityTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
 
@@ -222,8 +359,10 @@ func newGatewayIdentityTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	}
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL: dbURL,
-		Schema:      schema,
+		DatabaseURL:     dbURL,
+		Schema:          schema,
+		DefaultMaxConns: 10,
+		DefaultMinConns: 1,
 	})
 	if err != nil {
 		t.Fatalf("connect schema-scoped pool: %v", err)
@@ -235,6 +374,15 @@ func newGatewayIdentityTestPool(t *testing.T) (*pgxpool.Pool, string) {
 
 	if err := migrate.Up(ctx, pool, ".", migrate.WithBaseFS(migrations.FS), migrate.WithSchema(schema)); err != nil {
 		t.Fatalf("migrate gateway schema: %v", err)
+	}
+	if err := teamquota.RunMigrations(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate team quota schema: %v", err)
+	}
+	if err := teamquota.NewRepository(pool).UnsafeReplaceDefaultPoliciesForTest(
+		ctx,
+		teamquotatestutil.CompleteDefaultPolicies(),
+	); err != nil {
+		t.Fatalf("configure team quota defaults: %v", err)
 	}
 
 	return pool, schema

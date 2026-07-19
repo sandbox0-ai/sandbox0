@@ -11,7 +11,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	DefaultNetdProxyMaxActiveTCPConnections = 4096
+	DefaultNetdProxyUDPWorkers              = 32
+	DefaultNetdProxyUDPQueueSize            = 1024
+	MaxNetdProxyMaxActiveTCPConnections     = 65536
+	MaxNetdProxyUDPWorkers                  = 256
+	MaxNetdProxyUDPQueueSize                = 8192
+)
+
 // NetdConfig holds configuration for the ctld network runtime.
+// +kubebuilder:validation:XValidation:rule="!has(self.proxyUdpWorkers) || !has(self.proxyUdpQueueSize) || self.proxyUdpWorkers <= self.proxyUdpQueueSize",message="proxyUdpWorkers must not exceed proxyUdpQueueSize"
 type NetdConfig struct {
 	// +optional
 	// +kubebuilder:default="info"
@@ -92,6 +102,27 @@ type NetdConfig struct {
 	ProxyHTTPSPort int `yaml:"proxy_https_port" json:"proxyHttpsPort"`
 	// +optional
 	ProxyHeaderLimit int64 `yaml:"proxy_header_limit" json:"proxyHeaderLimit"`
+	// ProxyMaxActiveTCPConnections bounds accepted TCP connections executing in
+	// one ctld network runtime before any tenant lookup or distributed quota
+	// call.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65536
+	// +kubebuilder:default=4096
+	ProxyMaxActiveTCPConnections int `yaml:"proxy_max_active_tcp_connections" json:"proxyMaxActiveTcpConnections"`
+	// ProxyUDPWorkers bounds concurrent datagram classification and forwarding.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=256
+	// +kubebuilder:default=32
+	ProxyUDPWorkers int `yaml:"proxy_udp_workers" json:"proxyUdpWorkers"`
+	// ProxyUDPQueueSize bounds all queued and executing datagrams. A full queue
+	// drops a datagram before allocating a per-datagram goroutine or audit.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8192
+	// +kubebuilder:default=1024
+	ProxyUDPQueueSize int `yaml:"proxy_udp_queue_size" json:"proxyUdpQueueSize"`
 	// +optional
 	// +kubebuilder:default="30s"
 	ProxyUpstreamTimeout metav1.Duration `yaml:"proxy_upstream_timeout" json:"proxyUpstreamTimeout"`
@@ -104,27 +135,9 @@ type NetdConfig struct {
 	// +optional
 	// Token bucket burst in bytes for bandwidth limiting. Zero uses one second of the configured rate.
 	BandwidthBurstBytes int64 `yaml:"bandwidth_burst_bytes" json:"bandwidthBurstBytes"`
-	// +optional
-	// Cluster-scoped per-team egress bandwidth limit in bytes per second. Requires Redis. Zero disables throttling.
-	TeamEgressBandwidthBytesPerSecond int64 `yaml:"team_egress_bandwidth_bytes_per_second" json:"teamEgressBandwidthBytesPerSecond"`
-	// +optional
-	// Cluster-scoped per-team ingress bandwidth limit in bytes per second. Requires Redis. Zero disables throttling.
-	TeamIngressBandwidthBytesPerSecond int64 `yaml:"team_ingress_bandwidth_bytes_per_second" json:"teamIngressBandwidthBytesPerSecond"`
-	// +optional
-	// Token bucket burst in bytes for team bandwidth limiting. Zero uses one second of the configured rate.
-	TeamBandwidthBurstBytes int64 `yaml:"team_bandwidth_burst_bytes" json:"teamBandwidthBurstBytes"`
-	// +optional
-	// RedisURL configures the Redis backend used by cluster-scoped team bandwidth limiting.
-	RedisURL string `yaml:"redis_url" json:"-"`
-	// +optional
-	// RedisKeyPrefix prefixes Redis keys used by the network runtime.
-	RedisKeyPrefix string `yaml:"redis_key_prefix" json:"-"`
-	// +optional
-	// RedisTimeout bounds each Redis operation.
-	RedisTimeout metav1.Duration `yaml:"redis_timeout" json:"-"`
-	// +optional
-	// RedisFailOpen allows traffic when Redis is temporarily unavailable.
-	RedisFailOpen bool `yaml:"redis_fail_open" json:"-"`
+	// TeamQuotaDistributedEnforcement configures region-shared network
+	// operation and byte rates plus active-connection concurrency admission.
+	TeamQuotaDistributedEnforcement TeamQuotaDistributedEnforcementConfig `yaml:"team_quota_distributed_enforcement" json:"teamQuotaDistributedEnforcement"`
 
 	// Ports and CIDRs
 	// +optional
@@ -183,6 +196,10 @@ type NetdConfig struct {
 	// SandboxObservabilityAuditSpoolDir is the fsync-backed node-local delivery
 	// spool. Records are removed only after cluster-gateway acknowledges them.
 	SandboxObservabilityAuditSpoolDir string `yaml:"sandbox_observability_audit_spool_dir" json:"sandboxObservabilityAuditSpoolDir"`
+	// SandboxObservabilityAuditSpoolLimits bounds the node-local audit delivery
+	// spool globally and per team. These are platform disk-safety guards, not
+	// Team Quota or billing policy.
+	SandboxObservabilityAuditSpoolLimits AuditSpoolLimitsConfig `yaml:"sandbox_observability_audit_spool_limits" json:"sandboxObservabilityAuditSpoolLimits"`
 	// SandboxObservabilityAuditDeliveryMode controls whether a durable local
 	// enqueue or canonical ClickHouse acknowledgement admits a new flow.
 	// +optional
@@ -220,7 +237,60 @@ func LoadNetdConfigFromPath(path string) (*NetdConfig, error) {
 		return nil, err
 	}
 	applyNetdDefaults(cfg)
+	if _, _, _, err := cfg.ProxyAdmissionLimits(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+// ProxyAdmissionLimits returns normalized node-local work bounds and rejects
+// configurations that could recreate an unbounded worker surface.
+func (c *NetdConfig) ProxyAdmissionLimits() (
+	maxTCPConnections int,
+	udpWorkers int,
+	udpQueueSize int,
+	err error,
+) {
+	if c == nil {
+		return 0, 0, 0, fmt.Errorf("network runtime config is required")
+	}
+	if c.ProxyMaxActiveTCPConnections < 0 ||
+		c.ProxyUDPWorkers < 0 ||
+		c.ProxyUDPQueueSize < 0 {
+		return 0, 0, 0, fmt.Errorf("proxy admission limits must be non-negative")
+	}
+	maxTCPConnections = c.ProxyMaxActiveTCPConnections
+	if maxTCPConnections <= 0 {
+		maxTCPConnections = DefaultNetdProxyMaxActiveTCPConnections
+	}
+	udpWorkers = c.ProxyUDPWorkers
+	if udpWorkers <= 0 {
+		udpWorkers = DefaultNetdProxyUDPWorkers
+	}
+	udpQueueSize = c.ProxyUDPQueueSize
+	if udpQueueSize <= 0 {
+		udpQueueSize = DefaultNetdProxyUDPQueueSize
+	}
+	switch {
+	case maxTCPConnections > MaxNetdProxyMaxActiveTCPConnections:
+		err = fmt.Errorf(
+			"proxy_max_active_tcp_connections must not exceed %d",
+			MaxNetdProxyMaxActiveTCPConnections,
+		)
+	case udpWorkers > MaxNetdProxyUDPWorkers:
+		err = fmt.Errorf(
+			"proxy_udp_workers must not exceed %d",
+			MaxNetdProxyUDPWorkers,
+		)
+	case udpQueueSize > MaxNetdProxyUDPQueueSize:
+		err = fmt.Errorf(
+			"proxy_udp_queue_size must not exceed %d",
+			MaxNetdProxyUDPQueueSize,
+		)
+	case udpWorkers > udpQueueSize:
+		err = fmt.Errorf("proxy_udp_workers must not exceed proxy_udp_queue_size")
+	}
+	return maxTCPConnections, udpWorkers, udpQueueSize, err
 }
 
 func loadNetdConfig(path string) (*NetdConfig, error) {
@@ -307,6 +377,15 @@ func applyNetdDefaults(cfg *NetdConfig) {
 	if cfg.ProxyHeaderLimit == 0 {
 		cfg.ProxyHeaderLimit = 64 * 1024
 	}
+	if cfg.ProxyMaxActiveTCPConnections == 0 {
+		cfg.ProxyMaxActiveTCPConnections = DefaultNetdProxyMaxActiveTCPConnections
+	}
+	if cfg.ProxyUDPWorkers == 0 {
+		cfg.ProxyUDPWorkers = DefaultNetdProxyUDPWorkers
+	}
+	if cfg.ProxyUDPQueueSize == 0 {
+		cfg.ProxyUDPQueueSize = DefaultNetdProxyUDPQueueSize
+	}
 	if cfg.ProcdPort == 0 {
 		cfg.ProcdPort = 49983
 	}
@@ -346,6 +425,7 @@ func applyNetdDefaults(cfg *NetdConfig) {
 	if cfg.SandboxObservabilityIngestQueueSize == 0 {
 		cfg.SandboxObservabilityIngestQueueSize = 1024
 	}
+	applyAuditSpoolLimitsDefaults(&cfg.SandboxObservabilityAuditSpoolLimits)
 	if cfg.SandboxObservabilityIngestBatchSize == 0 {
 		cfg.SandboxObservabilityIngestBatchSize = 100
 	}

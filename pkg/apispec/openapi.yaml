@@ -12,6 +12,7 @@ tags:
   - name: tenant
   - name: users
   - name: teams
+  - name: quotas
   - name: regions
   - name: api-keys
   - name: sandboxes
@@ -97,6 +98,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/login:
     post:
       tags: [auth]
@@ -132,6 +137,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/register:
     post:
       tags: [auth]
@@ -167,6 +176,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/refresh:
     post:
       tags: [auth]
@@ -196,6 +209,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/oidc/{provider}/login:
     get:
       tags: [auth]
@@ -228,6 +245,41 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
+  /auth/oidc/{provider}/logout:
+    get:
+      tags: [auth]
+      summary: Initiate OIDC logout
+      parameters:
+        - $ref: "#/components/parameters/OIDCProvider"
+        - name: return_url
+          in: query
+          schema:
+            type: string
+          required: false
+          description: URL to return to after the identity provider completes logout.
+      responses:
+        "302":
+          description: Redirect to the OIDC provider logout endpoint
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Provider not found or provider logout unsupported
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/oidc/{provider}/callback:
     get:
       tags: [auth]
@@ -265,6 +317,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/web-login/exchange:
     post:
       tags: [auth]
@@ -295,6 +351,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/oidc/{provider}/device/start:
     post:
       tags: [auth]
@@ -314,6 +374,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/oidc/{provider}/device/poll:
     post:
       tags: [auth]
@@ -351,6 +415,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/logout:
     post:
       tags: [auth]
@@ -364,6 +432,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMessageResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /auth/change-password:
     post:
       tags: [auth]
@@ -395,6 +467,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /users/me:
     get:
       tags: [users]
@@ -414,6 +490,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     put:
       tags: [users]
       summary: Update current user
@@ -444,6 +524,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /users/me/identities:
     get:
       tags: [users]
@@ -463,6 +547,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /users/me/identities/{id}:
     delete:
       tags: [users]
@@ -496,6 +584,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /users/me/ssh-keys:
     get:
       tags: [users]
@@ -515,6 +607,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [users]
       summary: Create a current user SSH public key
@@ -551,6 +647,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /users/me/ssh-keys/{id}:
     delete:
       tags: [users]
@@ -588,6 +688,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /teams:
     get:
       tags: [teams]
@@ -607,6 +711,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [teams]
       summary: Create a team
@@ -631,6 +739,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /regions:
     get:
       tags: [regions]
@@ -650,6 +762,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [regions]
       summary: Create a region in the global gateway
@@ -692,6 +808,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /regions/{id}:
     get:
       tags: [regions]
@@ -725,6 +845,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     put:
       tags: [regions]
       summary: Update a region in the global gateway
@@ -769,6 +893,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [regions]
       summary: Delete a region from the global gateway
@@ -807,6 +935,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /teams/{id}:
     get:
       tags: [teams]
@@ -834,6 +966,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     put:
       tags: [teams]
       summary: Update a team
@@ -879,9 +1015,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [teams]
       summary: Delete a team
+      description: |
+        Deletes a team through its home-region lifecycle coordinator. The
+        coordinator first installs a durable admission tombstone, then finalizes
+        Team Quota state before deleting identity data. The tombstone is retained
+        through the longest accepted access-token lifetime plus a safety margin,
+        and is pruned only after identity absence and quota-reference checks.
+        Global gateway deployments without home-region coordination reject this
+        operation with 503.
       security:
         - bearerAuth: []
       parameters:
@@ -911,6 +1059,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TeamDeleteConflictResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          description: Team deletion home-region coordination or Team Quota finalization is unavailable, or the applicable entrypoint admission backend failed closed
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /teams/{id}/owner:
     put:
       tags: [teams]
@@ -951,6 +1113,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /teams/{id}/members:
     get:
       tags: [teams]
@@ -978,6 +1144,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [teams]
       summary: Add team member
@@ -1016,6 +1186,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /teams/{id}/members/{userId}:
     put:
       tags: [teams]
@@ -1056,6 +1230,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [teams]
       summary: Remove team member
@@ -1089,6 +1267,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api-keys:
     get:
       tags: [api-keys]
@@ -1108,6 +1290,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [api-keys]
       summary: Create API key
@@ -1138,6 +1324,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api-keys/current:
     get:
       tags: [api-keys]
@@ -1158,6 +1348,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api-keys/{id}:
     delete:
       tags: [api-keys]
@@ -1185,6 +1379,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api-keys/{id}/deactivate:
     post:
       tags: [api-keys]
@@ -1212,6 +1410,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes:
     get:
       tags: [sandboxes]
@@ -1265,6 +1467,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [sandboxes]
       summary: Create (claim) a sandbox
@@ -1325,29 +1531,204 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-  /api/v1/quotas/{dimension}:
+  /api/v1/quotas:
     get:
       tags: [quotas]
-      summary: Get team quota
+      summary: List effective quotas for the current team
+      description: Requires quota:read. Returns every effective policy. Capacity rows include PostgreSQL-backed usage, concurrency rows include current live lease usage, and rate rows return committed, reserved, and used as zero with remaining null because distributed Redis token balances are not exposed.
       security:
         - bearerAuth: []
-      x-upstream-service: manager
-      x-upstream-path: /api/v1/quotas/{dimension}
-      parameters:
-        - $ref: "#/components/parameters/QuotaDimension"
+      x-upstream-service: regional-gateway
+      x-upstream-path: /api/v1/quotas
       responses:
         "200":
-          description: Team quota
+          description: Effective team quotas
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessTeamQuotaResponse"
-        "400":
-          description: Invalid request
+                $ref: "#/components/schemas/SuccessTeamQuotaListResponse"
+        "401":
+          description: Unauthorized
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
+  /api/v1/teams/{team_id}/quotas:
+    get:
+      tags: [quotas]
+      summary: List effective quotas for a team
+      description: System admin access is required. Returns explicit team overrides and inherited defaults as effective policies.
+      security:
+        - bearerAuth: []
+      x-upstream-service: regional-gateway
+      x-upstream-path: /api/v1/teams/{team_id}/quotas
+      parameters:
+        - $ref: "#/components/parameters/TeamQuotaTeamID"
+      responses:
+        "200":
+          description: Effective team quotas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessTeamQuotaListResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: System admin access required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Team not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Team directory or Team Quota policy store unavailable
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+  /api/v1/teams/{team_id}/quotas/{key}:
+    put:
+      tags: [quotas]
+      summary: Set a team quota policy
+      description: System admin access is required. Replaces the explicit override for one quota key. The request kind must match the canonical kind of the path key.
+      security:
+        - bearerAuth: []
+      x-upstream-service: regional-gateway
+      x-upstream-path: /api/v1/teams/{team_id}/quotas/{key}
+      parameters:
+        - $ref: "#/components/parameters/TeamQuotaTeamID"
+        - $ref: "#/components/parameters/TeamQuotaKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamQuotaPolicyWriteRequest"
+      responses:
+        "200":
+          description: Team quota policy replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessTeamQuotaPolicyResponse"
+        "400":
+          description: Invalid quota policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: System admin access required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Team not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Team directory or Team Quota policy store unavailable
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+    delete:
+      tags: [quotas]
+      summary: Delete a team quota policy
+      description: System admin access is required. The effective policy falls back to the region default after the override is deleted.
+      security:
+        - bearerAuth: []
+      x-upstream-service: regional-gateway
+      x-upstream-path: /api/v1/teams/{team_id}/quotas/{key}
+      parameters:
+        - $ref: "#/components/parameters/TeamQuotaTeamID"
+        - $ref: "#/components/parameters/TeamQuotaKey"
+      responses:
+        "200":
+          description: Team quota policy deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessageResponse"
+        "400":
+          description: Invalid quota key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: System admin access required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Team not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Team directory or Team Quota policy store unavailable
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
   /api/v1/sandboxes/{id}:
     get:
       tags: [sandboxes]
@@ -1377,6 +1758,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     put:
       tags: [sandboxes]
       summary: Update sandbox configuration
@@ -1411,6 +1796,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
     delete:
       tags: [sandboxes]
       summary: Delete (terminate) a sandbox
@@ -1439,6 +1828,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
   /api/v1/sandboxes/{id}/status:
     get:
       tags: [sandboxes]
@@ -1462,6 +1855,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/observability/events:
     get:
       tags: [observability]
@@ -1575,6 +1972,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
   /api/v1/sandboxes/{id}/observability/logs:
     get:
       tags: [observability]
@@ -1655,6 +2054,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
   /api/v1/sandboxes/{id}/metrics:
     get:
       operationId: getSandboxRuntimeMetrics
@@ -1733,6 +2134,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
   /api/v1/sandboxes/{id}/metrics/catalog:
     get:
       operationId: getSandboxRuntimeMetricsCatalog
@@ -1757,6 +2160,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/pause:
     post:
       tags: [sandboxes]
@@ -1780,6 +2187,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
         "504":
           description: Timed out waiting for the sandbox to pause
           content:
@@ -1787,7 +2196,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "503":
-          description: Sandbox pause requires ctld
+          description: Sandbox pause requires ctld or Team Quota admission is temporarily unavailable
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds for Team Quota admission
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
@@ -1822,11 +2237,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "429":
-          description: Resume would exceed active runtime quota
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
+          $ref: "#/components/responses/TeamQuotaExceeded"
         "504":
           description: Timed out waiting for the sandbox to resume
           content:
@@ -1834,7 +2245,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "503":
-          description: Sandbox resume is temporarily unavailable
+          description: Sandbox resume or Team Quota admission is temporarily unavailable
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
@@ -1879,8 +2296,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
         "503":
-          description: Running-source snapshot requires ctld checkpoint support
+          description: Running-source snapshot requires ctld checkpoint support or Team Quota admission is temporarily unavailable
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds for Team Quota admission
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
@@ -1913,6 +2338,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/rootfs/restore:
     post:
       tags: [sandbox-rootfs]
@@ -1948,6 +2377,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
   /api/v1/sandboxes/{id}/fork:
     post:
       tags: [sandbox-rootfs]
@@ -1982,8 +2415,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
         "503":
-          description: Running-source fork requires ctld checkpoint support
+          description: Running-source fork requires ctld checkpoint support or Team Quota admission is temporarily unavailable
+          headers:
+            Retry-After:
+              description: Suggested retry delay in seconds for Team Quota admission
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:
@@ -2017,6 +2458,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [sandbox-rootfs]
       summary: Delete sandbox rootfs snapshot
@@ -2039,6 +2484,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
   /api/v1/sandboxes/{id}/refresh:
     post:
       tags: [sandboxes]
@@ -2068,6 +2517,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/network:
     get:
       tags: [sandboxes]
@@ -2091,6 +2544,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     put:
       tags: [sandboxes]
       summary: Update sandbox network policy
@@ -2113,6 +2570,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxNetworkPolicyResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/services:
     get:
       tags: [sandboxes]
@@ -2137,6 +2598,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     put:
       tags: [sandboxes]
       summary: Replace sandbox services
@@ -2166,6 +2631,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/contexts:
     post:
       tags: [contexts]
@@ -2189,6 +2658,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessContextResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     get:
       tags: [contexts]
       summary: List contexts
@@ -2205,6 +2678,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessContextListResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/contexts/{ctx_id}:
     get:
       tags: [contexts]
@@ -2223,6 +2700,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessContextResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [contexts]
       summary: Delete context
@@ -2240,6 +2721,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessDeletedResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/contexts/{ctx_id}/restart:
     post:
       tags: [contexts]
@@ -2258,6 +2743,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessContextResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/contexts/{ctx_id}/input:
     post:
       tags: [contexts]
@@ -2283,6 +2772,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessWrittenResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/contexts/{ctx_id}/exec:
     post:
       tags: [contexts]
@@ -2308,6 +2801,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessContextExecResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/contexts/{ctx_id}/resize:
     post:
       tags: [contexts]
@@ -2332,6 +2829,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessResizedResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/contexts/{ctx_id}/signal:
     post:
       tags: [contexts]
@@ -2356,6 +2857,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSignaledResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/contexts/{ctx_id}/ws:
     get:
       tags: [contexts]
@@ -2386,6 +2891,10 @@ paths:
       responses:
         "101":
           description: Switching Protocols
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions:
     get:
       tags: [sessions]
@@ -2404,6 +2913,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessExecutionSessionListResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [sessions]
       summary: Create an execution session
@@ -2439,6 +2952,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessExecutionSessionResponse"
+        "429":
+          description: The sandbox already retains the maximum 1024 execution sessions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions/{session_id}:
     get:
       tags: [sessions]
@@ -2457,6 +2978,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessExecutionSessionResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     put:
       tags: [sessions]
       summary: Replace an execution session specification
@@ -2481,6 +3006,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessExecutionSessionResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [sessions]
       summary: Delete an execution session
@@ -2498,6 +3027,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessDeletedResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions/{session_id}/desired-state:
     put:
       tags: [sessions]
@@ -2522,6 +3055,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessExecutionSessionResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions/{session_id}/attempts:
     post:
       tags: [sessions]
@@ -2547,6 +3084,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessExecutionSessionResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions/{session_id}/inputs:
     post:
       tags: [sessions]
@@ -2572,6 +3113,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessExecutionSessionInputResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions/{session_id}/signals:
     post:
       tags: [sessions]
@@ -2596,6 +3141,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessAcceptedResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions/{session_id}/terminal:
     put:
       tags: [sessions]
@@ -2620,6 +3169,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessResizedResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions/{session_id}/events:
     get:
       tags: [sessions]
@@ -2660,6 +3213,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions/{session_id}/events/stream:
     get:
       tags: [sessions]
@@ -2691,6 +3248,10 @@ paths:
             text/event-stream:
               schema:
                 type: string
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/sessions/{session_id}/ws:
     get:
       tags: [sessions]
@@ -2718,6 +3279,10 @@ paths:
       responses:
         "101":
           description: Switching Protocols
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/files/move:
     post:
       tags: [files]
@@ -2741,6 +3306,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMovedResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/files/watch:
     get:
       tags: [files]
@@ -2769,6 +3338,10 @@ paths:
       responses:
         "101":
           description: Switching Protocols
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/files:
     get:
       tags: [files]
@@ -2800,6 +3373,10 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/FileContentResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [files]
       summary: Write file or create directory
@@ -2833,6 +3410,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessCreatedResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [files]
       summary: Delete file or directory
@@ -2850,6 +3431,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessDeletedResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/files/stat:
     get:
       tags: [files]
@@ -2871,6 +3456,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessFileStatResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxes/{id}/files/list:
     get:
       tags: [files]
@@ -2892,6 +3481,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessFileListResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/templates:
     get:
       tags: [templates]
@@ -2907,6 +3500,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessTemplateListResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [templates]
       summary: Create template
@@ -2927,6 +3524,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessTemplateResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/templates/from-sandbox:
     post:
       tags: [templates]
@@ -3018,6 +3619,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
   /api/v1/templates/{id}:
     get:
       tags: [templates]
@@ -3041,6 +3644,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     put:
       tags: [templates]
       summary: Update template
@@ -3075,6 +3682,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [templates]
       summary: Delete template
@@ -3091,6 +3702,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMessageResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/registry/credentials:
     post:
       tags: [registry]
@@ -3136,6 +3751,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/credential-sources:
     get:
       tags: [credential-sources]
@@ -3151,6 +3770,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessCredentialSourceListResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [credential-sources]
       summary: Create credential source
@@ -3177,6 +3800,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/credential-sources/{name}:
     get:
       tags: [credential-sources]
@@ -3204,6 +3831,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     put:
       tags: [credential-sources]
       summary: Update credential source
@@ -3243,6 +3874,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [credential-sources]
       summary: Delete credential source
@@ -3263,6 +3898,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMessageResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxvolumes:
     post:
       tags: [sandbox-volumes]
@@ -3284,6 +3923,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxVolumeResponse"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
     get:
       tags: [sandbox-volumes]
       summary: List sandbox volumes
@@ -3298,6 +3941,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSandboxVolumeListResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxvolumes/{id}:
     get:
       tags: [sandbox-volumes]
@@ -3321,6 +3968,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [sandbox-volumes]
       summary: Delete sandbox volume
@@ -3350,6 +4001,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
   /api/v1/sandboxvolumes/{id}/fork:
     post:
       tags: [sandbox-volumes]
@@ -3379,6 +4034,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
   /api/v1/sandboxvolumes/{id}/files/move:
     post:
       tags: [files]
@@ -3402,6 +4061,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessMovedResponse"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
   /api/v1/sandboxvolumes/{id}/files/watch:
     get:
       tags: [files]
@@ -3430,6 +4093,10 @@ paths:
       responses:
         "101":
           description: Switching Protocols
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxvolumes/{id}/files/archive:
     put:
       tags: [files]
@@ -3459,6 +4126,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessVolumeFileArchiveImportResponse"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
   /api/v1/sandboxvolumes/{id}/files:
     get:
       tags: [files]
@@ -3490,6 +4161,10 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/FileContentResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     post:
       tags: [files]
       summary: Write volume file or create directory
@@ -3523,6 +4198,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessCreatedResponse"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
     delete:
       tags: [files]
       summary: Delete volume file or directory
@@ -3540,6 +4219,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessDeletedResponse"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
   /api/v1/sandboxvolumes/{id}/files/stat:
     get:
       tags: [files]
@@ -3561,6 +4244,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessFileStatResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxvolumes/{id}/files/list:
     get:
       tags: [files]
@@ -3582,6 +4269,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessFileListResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxvolumes/{id}/snapshots:
     post:
       tags: [snapshots]
@@ -3611,6 +4302,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
     get:
       tags: [snapshots]
       summary: List snapshots
@@ -3627,6 +4322,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessSnapshotListResponse"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
   /api/v1/sandboxvolumes/{id}/snapshots/{snapshot_id}:
     get:
       tags: [snapshots]
@@ -3651,6 +4350,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/AdmissionRateLimited"
+        "503":
+          $ref: "#/components/responses/AdmissionUnavailable"
     delete:
       tags: [snapshots]
       summary: Delete snapshot
@@ -3668,6 +4371,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessDeletedResponse"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
   /api/v1/sandboxvolumes/{id}/snapshots/{snapshot_id}/restore:
     post:
       tags: [snapshots]
@@ -3686,7 +4393,71 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessRestoreResponse"
+        "429":
+          $ref: "#/components/responses/TeamQuotaExceeded"
+        "503":
+          $ref: "#/components/responses/TeamQuotaUnavailable"
 components:
+  responses:
+    AdmissionRateLimited:
+      description: |
+        The admission control applicable to this route and deployment topology
+        rejected the request. `error.code` is `quota_exceeded` for a
+        team-attributed Team Quota such as `active_request_count`,
+        `active_connection_count`, `api_requests`, or a traffic-byte rate,
+        `identity_limit_exceeded` for an IdentityResourceGuard cardinality
+        limit, or `rate_limited` for an aggregate overload guard. A given route
+        does not necessarily use every control.
+      headers:
+        Retry-After:
+          description: Suggested delay in seconds when token-bucket or overload admission provides one; identity cardinality rejections may omit it
+          schema:
+            type: integer
+            minimum: 0
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    AdmissionUnavailable:
+      description: |
+        The fail-closed admission backend applicable to this route is
+        unavailable. Depending on deployment topology, this is the region Team
+        Quota policy or Redis path, or the public identity entrypoint's shared
+        overload-guard backend; a given route does not necessarily use both.
+      headers:
+        Retry-After:
+          description: Suggested retry delay in seconds
+          schema:
+            type: integer
+            minimum: 0
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TeamQuotaExceeded:
+      description: The mutation would exceed an effective Team Quota policy
+      headers:
+        Retry-After:
+          description: Suggested retry delay in seconds when a rate policy was exceeded
+          schema:
+            type: integer
+            minimum: 0
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TeamQuotaUnavailable:
+      description: Team Quota admission is temporarily unavailable
+      headers:
+        Retry-After:
+          description: Suggested retry delay in seconds
+          schema:
+            type: integer
+            minimum: 0
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
   securitySchemes:
     bearerAuth:
       type: http
@@ -3801,12 +4572,18 @@ components:
       required: false
       schema:
         type: boolean
-    QuotaDimension:
-      name: dimension
+    TeamQuotaTeamID:
+      name: team_id
       in: path
       required: true
       schema:
-        $ref: "#/components/schemas/QuotaDimension"
+        type: string
+    TeamQuotaKey:
+      name: key
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/TeamQuotaKey"
   schemas:
     Error:
       type: object
@@ -3873,54 +4650,203 @@ components:
               properties:
                 message:
                   type: string
-    SuccessTeamQuotaResponse:
+    SuccessTeamQuotaListResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
           properties:
             data:
-              $ref: "#/components/schemas/TeamQuota"
-    QuotaDimension:
+              $ref: "#/components/schemas/TeamQuotaList"
+    SuccessTeamQuotaPolicyResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/TeamQuotaPolicy"
+    TeamQuotaKey:
       type: string
       enum:
-        - active_sandboxes
-        - cpu_millicpu
-        - memory_mib
-        - volume_storage_gb
-        - snapshot_storage_gb
-        - egress
-        - ingress
-    TeamQuota:
+        - sandbox_identity_count
+        - sandbox_runtime_count
+        - sandbox_cpu_millicores
+        - sandbox_memory_bytes
+        - sandbox_ephemeral_storage_bytes
+        - volume_storage_bytes
+        - snapshot_storage_bytes
+        - rootfs_storage_bytes
+        - template_image_storage_bytes
+        - storage_object_count
+        - control_plane_object_count
+        - active_connection_count
+        - active_request_count
+        - api_requests
+        - sandbox_service_requests
+        - sandbox_starts
+        - network_operations
+        - network_ingress_bytes
+        - network_egress_bytes
+        - storage_operations
+        - observability_ingest_bytes
+    TeamQuotaKind:
+      type: string
+      enum: [capacity, concurrency, rate]
+    TeamQuotaUnit:
+      type: string
+      enum: [count, millicores, bytes, requests, operations]
+    TeamQuotaPolicySource:
+      type: string
+      description: Identifies whether the effective policy is inherited from the region default or defined by an explicit team override.
+      enum: [default, override]
+      x-enum-varnames: [TeamQuotaPolicySourceDefault, TeamQuotaPolicySourceOverride]
+    TeamQuotaPolicy:
       type: object
+      description: Capacity and concurrency policies use limit. Rate policies use tokens, interval_ms, and burst.
       properties:
         team_id:
           type: string
-        dimension:
-          $ref: "#/components/schemas/QuotaDimension"
-        limit_value:
-          type: integer
-          format: int64
-          nullable: true
-        current:
+        key:
+          $ref: "#/components/schemas/TeamQuotaKey"
+        kind:
+          $ref: "#/components/schemas/TeamQuotaKind"
+        unit:
+          $ref: "#/components/schemas/TeamQuotaUnit"
+        revision:
           type: integer
           format: int64
           minimum: 0
+          readOnly: true
+        limit:
+          type: integer
+          format: int64
+          minimum: 0
+        tokens:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        interval_ms:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 3600000
+        burst:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+      required: [team_id, key, kind, unit]
+    TeamQuotaPolicyWriteRequest:
+      description: Capacity and concurrency policies require limit and prohibit rate fields. Rate policies require tokens, interval_ms, and burst and prohibit limit. Rate intervals are whole milliseconds in the inclusive range from 1ms to 1h. The runtime additionally requires burst to be at least tokens and kind to match the canonical kind of the path key because OpenAPI 3.0 cannot express those cross-field and path/body comparisons.
+      x-sandbox0-runtime-constraints:
+        - burst must be greater than or equal to tokens for rate policies
+        - kind must match the canonical kind of the path key
+      oneOf:
+        - $ref: "#/components/schemas/TeamQuotaCapacityPolicyWriteRequest"
+        - $ref: "#/components/schemas/TeamQuotaConcurrencyPolicyWriteRequest"
+        - $ref: "#/components/schemas/TeamQuotaRatePolicyWriteRequest"
+      discriminator:
+        propertyName: kind
+        mapping:
+          capacity: "#/components/schemas/TeamQuotaCapacityPolicyWriteRequest"
+          concurrency: "#/components/schemas/TeamQuotaConcurrencyPolicyWriteRequest"
+          rate: "#/components/schemas/TeamQuotaRatePolicyWriteRequest"
+    TeamQuotaCapacityPolicyWriteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [capacity]
+        limit:
+          type: integer
+          format: int64
+          minimum: 0
+      required: [kind, limit]
+    TeamQuotaConcurrencyPolicyWriteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [concurrency]
+        limit:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
+      required: [kind, limit]
+    TeamQuotaRatePolicyWriteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [rate]
+        tokens:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+        interval_ms:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 3600000
+        burst:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+      required: [kind, tokens, interval_ms, burst]
+    TeamQuotaStatus:
+      type: object
+      description: Capacity rows expose durable committed and reserved usage. Concurrency rows expose live lease usage. Rate rows expose policy but not distributed Redis token balance, so committed, reserved, and used are zero and remaining is null.
+      properties:
+        team_id:
+          type: string
+        key:
+          $ref: "#/components/schemas/TeamQuotaKey"
+        kind:
+          $ref: "#/components/schemas/TeamQuotaKind"
+        unit:
+          $ref: "#/components/schemas/TeamQuotaUnit"
+        source:
+          $ref: "#/components/schemas/TeamQuotaPolicySource"
+        policy:
+          $ref: "#/components/schemas/TeamQuotaPolicy"
+        committed:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Durable committed capacity usage; zero for concurrency and rate policies.
+        reserved:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Durable in-flight capacity reservation; zero for concurrency and rate policies.
+        used:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Committed plus reserved capacity usage, or current live concurrency usage; zero for rate policies.
         remaining:
           type: integer
           format: int64
           minimum: 0
           nullable: true
-        unlimited:
-          type: boolean
-        unit:
+          description: Remaining capacity or concurrency headroom; null for rate policies because token balance is not exposed.
+      required: [team_id, key, kind, unit, source, policy, committed, reserved, used, remaining]
+    TeamQuotaList:
+      type: object
+      properties:
+        team_id:
           type: string
-          enum:
-            - count
-            - millicpu
-            - MiB
-            - GB
-            - bytes
-      required: [team_id, dimension, limit_value, current, remaining, unlimited, unit]
+        quotas:
+          type: array
+          items:
+            $ref: "#/components/schemas/TeamQuotaStatus"
+      required: [team_id, quotas]
     SuccessRegistryCredentialsResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -4064,8 +4990,10 @@ components:
         email:
           type: string
           format: email
+          maxLength: 254
         password:
           type: string
+          maxLength: 4096
       required: [email, password]
     RegisterRequest:
       type: object
@@ -4073,13 +5001,17 @@ components:
         email:
           type: string
           format: email
+          maxLength: 254
         password:
           type: string
           minLength: 8
+          maxLength: 4096
         name:
           type: string
+          maxLength: 250
         home_region_id:
           type: string
+          maxLength: 128
           nullable: true
           description: Required in global-gateway mode because registration creates the user's initial team.
       required: [email, password, name]
@@ -4088,15 +5020,18 @@ components:
       properties:
         refresh_token:
           type: string
+          maxLength: 16384
       required: [refresh_token]
     WebLoginExchangeRequest:
       type: object
       properties:
         login_code:
           type: string
+          maxLength: 1024
           description: Short-lived one-time code returned to the web login callback.
         return_url:
           type: string
+          maxLength: 8192
           description: Exact return URL used when the login code was created.
       required: [login_code, return_url]
     ChangePasswordRequest:
@@ -4104,9 +5039,11 @@ components:
       properties:
         old_password:
           type: string
+          maxLength: 4096
         new_password:
           type: string
           minLength: 8
+          maxLength: 4096
       required: [old_password, new_password]
     LoginResponse:
       type: object
@@ -4133,6 +5070,7 @@ components:
       properties:
         device_login_id:
           type: string
+          maxLength: 128
         user_code:
           type: string
         verification_uri:
@@ -4157,6 +5095,7 @@ components:
       properties:
         device_login_id:
           type: string
+          maxLength: 128
       required: [device_login_id]
     DeviceLoginPollResponse:
       type: object
@@ -4187,10 +5126,13 @@ components:
         email:
           type: string
           format: email
+          maxLength: 254
         name:
           type: string
+          maxLength: 250
         avatar_url:
           type: string
+          maxLength: 8192
           nullable: true
         email_verified:
           type: boolean
@@ -4215,15 +5157,19 @@ components:
       properties:
         name:
           type: string
+          maxLength: 250
         avatar_url:
           type: string
+          maxLength: 8192
     CreateSSHPublicKeyRequest:
       type: object
       properties:
         name:
           type: string
+          maxLength: 128
         public_key:
           type: string
+          maxLength: 16384
       required: [name, public_key]
     SuccessUserResponse:
       allOf:
@@ -4239,14 +5185,17 @@ components:
           type: string
         name:
           type: string
+          maxLength: 128
         public_key:
           type: string
+          maxLength: 16384
         key_type:
           type: string
         fingerprint_sha256:
           type: string
         comment:
           type: string
+          maxLength: 1024
         created_at:
           type: string
           format: date-time
@@ -4303,13 +5252,16 @@ components:
           type: string
         name:
           type: string
+          maxLength: 255
         slug:
           type: string
+          maxLength: 255
         owner_id:
           type: string
           nullable: true
         home_region_id:
           type: string
+          maxLength: 128
           nullable: true
         created_at:
           type: string
@@ -4369,12 +5321,16 @@ components:
       properties:
         id:
           type: string
+          maxLength: 128
         display_name:
           type: string
+          maxLength: 256
         regional_gateway_url:
           type: string
+          maxLength: 8192
         metering_export_url:
           type: string
+          maxLength: 8192
           nullable: true
         enabled:
           type: boolean
@@ -4384,12 +5340,16 @@ components:
       properties:
         id:
           type: string
+          maxLength: 128
         display_name:
           type: string
+          maxLength: 256
         regional_gateway_url:
           type: string
+          maxLength: 8192
         metering_export_url:
           type: string
+          maxLength: 8192
           nullable: true
         enabled:
           type: boolean
@@ -4399,10 +5359,13 @@ components:
       properties:
         display_name:
           type: string
+          maxLength: 256
         regional_gateway_url:
           type: string
+          maxLength: 8192
         metering_export_url:
           type: string
+          maxLength: 8192
           nullable: true
         enabled:
           type: boolean
@@ -4455,10 +5418,13 @@ components:
       properties:
         name:
           type: string
+          maxLength: 255
         slug:
           type: string
+          maxLength: 255
         home_region_id:
           type: string
+          maxLength: 128
           nullable: true
       required: [name]
     UpdateTeamRequest:
@@ -4466,13 +5432,20 @@ components:
       properties:
         name:
           type: string
+          maxLength: 255
         slug:
           type: string
+          maxLength: 255
+        home_region_id:
+          type: string
+          maxLength: 128
+          nullable: true
     TransferTeamOwnerRequest:
       type: object
       properties:
         user_id:
           type: string
+          maxLength: 36
       required: [user_id]
     AddTeamMemberRequest:
       type: object
@@ -4480,6 +5453,7 @@ components:
         email:
           type: string
           format: email
+          maxLength: 254
         role:
           type: string
           enum: [admin, developer, builder, viewer]
@@ -4585,6 +5559,7 @@ components:
       properties:
         name:
           type: string
+          maxLength: 128
         scope:
           type: string
           description: "API key scope: team or platform. Defaults to team. platform keys grant system admin access, require a system admin user session, and do not support roles."
@@ -4687,6 +5662,7 @@ components:
           $ref: "#/components/schemas/SandboxConfig"
         mounts:
           type: array
+          maxItems: 256
           description: Optional claim-time Sandbox Volume bindings. A claim may bind any subset of template-declared mount points; omitted declared mount points remain writable rootfs-backed directories and are included in rootfs checkpoints.
           items:
             $ref: "#/components/schemas/ClaimMountRequest"
@@ -4704,8 +5680,10 @@ components:
       properties:
         env_vars:
           type: object
+          maxProperties: 256
           additionalProperties:
             type: string
+            maxLength: 32768
         resources:
           $ref: "#/components/schemas/SandboxResourceConfig"
         ttl:
@@ -4728,6 +5706,7 @@ components:
             (API or public exposure) must not auto resume the sandbox.
         services:
           type: array
+          maxItems: 256
           items:
             $ref: "#/components/schemas/SandboxAppService"
     SandboxResourceConfig:
@@ -4759,18 +5738,22 @@ components:
       properties:
         allowed_origins:
           type: array
+          maxItems: 256
           items:
             type: string
         allowed_methods:
           type: array
+          maxItems: 256
           items:
             type: string
         allowed_headers:
           type: array
+          maxItems: 256
           items:
             type: string
         expose_headers:
           type: array
+          maxItems: 256
           items:
             type: string
         allow_credentials:
@@ -4817,6 +5800,7 @@ components:
           description: Runtime strategy for restarting a service process.
         command:
           type: array
+          maxItems: 256
           items:
             type: string
           description: Process argv used when type is cmd.
@@ -4824,8 +5808,10 @@ components:
           type: string
         env_vars:
           type: object
+          maxProperties: 256
           additionalProperties:
             type: string
+            maxLength: 32768
         function:
           $ref: "#/components/schemas/SandboxFunction"
       required: [type]
@@ -4859,6 +5845,7 @@ components:
           description: Source transport. Only inline source is supported in this version.
         code:
           type: string
+          maxLength: 262144
           description: Inline source code. Limited to 256 KiB.
       required: [type, code]
     SandboxAppServiceIngress:
@@ -4868,6 +5855,7 @@ components:
           type: boolean
         routes:
           type: array
+          maxItems: 256
           items:
             $ref: "#/components/schemas/SandboxAppServiceRoute"
       required: [public]
@@ -4880,6 +5868,7 @@ components:
           type: string
         methods:
           type: array
+          maxItems: 256
           items:
             type: string
         rewrite_prefix:
@@ -4925,6 +5914,7 @@ components:
       properties:
         services:
           type: array
+          maxItems: 256
           items:
             $ref: "#/components/schemas/SandboxAppService"
       required: [services]
@@ -5082,8 +6072,10 @@ components:
       properties:
         env_vars:
           type: object
+          maxProperties: 256
           additionalProperties:
             type: string
+            maxLength: 32768
           description: |
             Sandbox-level environment variables used as defaults for new procd-managed
             processes. Omitting this field preserves the existing environment map; passing
@@ -5108,6 +6100,7 @@ components:
             (API or public exposure) must not auto resume the sandbox.
         services:
           type: array
+          maxItems: 256
           items:
             $ref: "#/components/schemas/SandboxAppService"
     SandboxUpdateRequest:
@@ -7098,12 +8091,16 @@ components:
       properties:
         description:
           type: string
+          maxLength: 8192
         displayName:
           type: string
+          maxLength: 256
         tags:
           type: array
+          maxItems: 64
           items:
             type: string
+            maxLength: 128
         pool:
           $ref: "#/components/schemas/PoolStrategy"
     TemplateUpdateRequest:
@@ -7188,12 +8185,16 @@ components:
       properties:
         description:
           type: string
+          maxLength: 8192
         displayName:
           type: string
+          maxLength: 256
         tags:
           type: array
+          maxItems: 64
           items:
             type: string
+            maxLength: 128
         mainContainer:
           $ref: "#/components/schemas/ContainerSpec"
         volumeMounts:
@@ -7208,8 +8209,10 @@ components:
           $ref: "#/components/schemas/PoolStrategy"
         envVars:
           type: object
+          maxProperties: 256
           additionalProperties:
             type: string
+            maxLength: 32768
         clusterId:
           type: string
     ContainerSpec:
@@ -7224,7 +8227,7 @@ components:
           items:
             $ref: "#/components/schemas/EnvVar"
         resources:
-          $ref: "#/components/schemas/ResourceQuota"
+          $ref: "#/components/schemas/SandboxResourceLimits"
         securityContext:
           $ref: "#/components/schemas/SecurityContext"
       required: [image, resources]
@@ -7246,7 +8249,7 @@ components:
         value:
           type: string
       required: [name, value]
-    ResourceQuota:
+    SandboxResourceLimits:
       type: object
       properties:
         memory:
@@ -7393,8 +8396,10 @@ components:
       properties:
         nodeSelector:
           type: object
+          maxProperties: 256
           additionalProperties:
             type: string
+            maxLength: 32768
         affinity:
           $ref: "#/components/schemas/Affinity"
         tolerations:
@@ -7499,8 +8504,10 @@ components:
       properties:
         matchLabels:
           type: object
+          maxProperties: 256
           additionalProperties:
             type: string
+            maxLength: 32768
         matchExpressions:
           type: array
           items:
@@ -7557,6 +8564,7 @@ components:
           $ref: "#/components/schemas/NetworkEgressPolicy"
         credentialBindings:
           type: array
+          maxItems: 64
           items:
             $ref: "#/components/schemas/CredentialBinding"
       required: [mode]
@@ -7571,42 +8579,49 @@ components:
       properties:
         allowedCidrs:
           type: array
+          maxItems: 256
           deprecated: true
           description: Legacy CIDR allowlist used only when mode is `block-all`. Use `trafficRules` instead.
           items:
             type: string
         allowedDomains:
           type: array
+          maxItems: 256
           deprecated: true
           description: Legacy domain allowlist used only when mode is `block-all`. Use `trafficRules` instead.
           items:
             type: string
         allowedPorts:
           type: array
+          maxItems: 256
           deprecated: true
           description: Legacy port/protocol allowlist used only when mode is `block-all`. Use `trafficRules` instead.
           items:
             $ref: "#/components/schemas/PortSpec"
         deniedDomains:
           type: array
+          maxItems: 256
           deprecated: true
           description: Legacy domain denylist used only when mode is `allow-all`. Use `trafficRules` instead.
           items:
             type: string
         deniedCidrs:
           type: array
+          maxItems: 256
           deprecated: true
           description: Legacy CIDR denylist used only when mode is `allow-all`. Use `trafficRules` instead.
           items:
             type: string
         deniedPorts:
           type: array
+          maxItems: 256
           deprecated: true
           description: Legacy port/protocol denylist used only when mode is `allow-all`. Use `trafficRules` instead.
           items:
             $ref: "#/components/schemas/PortSpec"
         trafficRules:
           type: array
+          maxItems: 256
           description: |
             Ordered egress allow/deny rules. The first matching rule wins and
             unmatched traffic falls back to `mode`.
@@ -7614,6 +8629,7 @@ components:
             $ref: "#/components/schemas/TrafficRule"
         protocolRules:
           type: array
+          maxItems: 256
           description: |
             Protocol-aware controls applied after traffic is allowed by
             `trafficRules` or legacy allow/deny fields.
@@ -7621,6 +8637,7 @@ components:
             $ref: "#/components/schemas/ProtocolRule"
         credentialRules:
           type: array
+          maxItems: 256
           description: |
             Structured egress auth injection rules resolved by the manager runtime egress auth path.
             These rules are orthogonal to allow/deny matching and are intended for
@@ -7657,21 +8674,25 @@ components:
           $ref: "#/components/schemas/TrafficRuleAction"
         cidrs:
           type: array
+          maxItems: 256
           description: CIDR match list for the rule.
           items:
             type: string
         domains:
           type: array
+          maxItems: 256
           description: Domain match list for the rule.
           items:
             type: string
         ports:
           type: array
+          maxItems: 256
           description: Port/protocol constraints for the rule.
           items:
             $ref: "#/components/schemas/PortSpec"
         appProtocols:
           type: array
+          maxItems: 256
           description: Classified application protocols matched by the rule.
           items:
             $ref: "#/components/schemas/TrafficRuleAppProtocol"
@@ -7704,11 +8725,13 @@ components:
           $ref: "#/components/schemas/ProtocolRuleProtocol"
         domains:
           type: array
+          maxItems: 256
           description: Domain match list for the rule.
           items:
             type: string
         ports:
           type: array
+          maxItems: 256
           description: Port/protocol constraints for the rule.
           items:
             $ref: "#/components/schemas/PortSpec"
@@ -7741,11 +8764,13 @@ components:
       properties:
         allowed:
           type: array
+          maxItems: 256
           description: When non-empty, only listed HTTP methods are allowed.
           items:
             type: string
         denied:
           type: array
+          maxItems: 256
           description: HTTP methods that are always denied before allowed is evaluated.
           items:
             type: string
@@ -7755,21 +8780,25 @@ components:
       properties:
         allowed:
           type: array
+          maxItems: 256
           description: When any allowed path list is non-empty, only listed exact paths are allowed.
           items:
             type: string
         denied:
           type: array
+          maxItems: 256
           description: Exact paths that are always denied before allowed is evaluated.
           items:
             type: string
         allowedPrefixes:
           type: array
+          maxItems: 256
           description: When any allowed path list is non-empty, only paths with listed prefixes are allowed.
           items:
             type: string
         deniedPrefixes:
           type: array
+          maxItems: 256
           description: Path prefixes that are always denied before allowed is evaluated.
           items:
             type: string
@@ -7785,11 +8814,13 @@ components:
       properties:
         allowed:
           type: array
+          maxItems: 256
           description: When non-empty, only listed tool names are allowed.
           items:
             type: string
         denied:
           type: array
+          maxItems: 256
           description: Tool names denied before the allowed list is evaluated.
           items:
             type: string
@@ -7814,11 +8845,13 @@ components:
           $ref: "#/components/schemas/EgressAuthFailurePolicy"
         domains:
           type: array
+          maxItems: 256
           description: Domain match list for the rule.
           items:
             type: string
         ports:
           type: array
+          maxItems: 256
           description: Port/protocol constraints for the rule.
           items:
             $ref: "#/components/schemas/PortSpec"
@@ -7831,26 +8864,31 @@ components:
       properties:
         methods:
           type: array
+          maxItems: 256
           description: HTTP methods matched case-insensitively after uppercasing.
           items:
             type: string
         paths:
           type: array
+          maxItems: 256
           description: Exact URL path matches.
           items:
             type: string
         pathPrefixes:
           type: array
+          maxItems: 256
           description: URL path prefix matches.
           items:
             type: string
         query:
           type: array
+          maxItems: 256
           description: Decoded query parameter matchers.
           items:
             $ref: "#/components/schemas/HTTPValueMatch"
         headers:
           type: array
+          maxItems: 256
           description: HTTP request header matchers.
           items:
             $ref: "#/components/schemas/HTTPValueMatch"
@@ -7862,6 +8900,7 @@ components:
           description: Header or query parameter name.
         values:
           type: array
+          maxItems: 256
           description: Accepted values. Empty with present=true requires only presence.
           items:
             type: string
@@ -7907,6 +8946,7 @@ components:
       properties:
         headers:
           type: array
+          maxItems: 256
           description: Outbound headers synthesized from the resolved credential source.
           items:
             $ref: "#/components/schemas/ProjectedHeader"
@@ -7915,6 +8955,7 @@ components:
       properties:
         replacements:
           type: array
+          maxItems: 256
           description: Placeholder replacements applied to outbound HTTP requests at the egress boundary.
           items:
             $ref: "#/components/schemas/PlaceholderReplacement"
@@ -7929,6 +8970,7 @@ components:
           description: Template rendered against the resolved credential source payload.
         locations:
           type: array
+          maxItems: 256
           description: HTTP request locations where this placeholder can be replaced.
           items:
             $ref: "#/components/schemas/PlaceholderSubstitutionLocation"
@@ -7948,6 +8990,7 @@ components:
       properties:
         sandboxPublicKeys:
           type: array
+          maxItems: 256
           description: Fake public keys accepted from sandbox-side SSH clients.
           items:
             type: string
@@ -7956,6 +8999,7 @@ components:
           description: Username used by netd when authenticating to the upstream SSH server.
         knownHosts:
           type: array
+          maxItems: 256
           description: OpenSSH known_hosts entries used to verify upstream host keys.
           items:
             type: string
@@ -7980,6 +9024,7 @@ components:
       properties:
         name:
           type: string
+          maxLength: 256
         resolverKind:
           $ref: "#/components/schemas/CredentialSourceResolverKind"
         currentVersion:
@@ -8001,6 +9046,7 @@ components:
       properties:
         name:
           type: string
+          maxLength: 256
         resolverKind:
           $ref: "#/components/schemas/CredentialSourceResolverKind"
         spec:
@@ -8026,20 +9072,25 @@ components:
         values:
           type: object
           writeOnly: true
+          maxProperties: 128
           additionalProperties:
             type: string
+            maxLength: 32768
     StaticTLSClientCertificateSourceSpec:
       type: object
       properties:
         certificatePem:
           type: string
           writeOnly: true
+          maxLength: 131072
         privateKeyPem:
           type: string
           writeOnly: true
+          maxLength: 131072
         caPem:
           type: string
           writeOnly: true
+          maxLength: 131072
       required: [certificatePem, privateKeyPem]
     StaticUsernamePasswordSourceSpec:
       type: object
@@ -8047,9 +9098,11 @@ components:
         username:
           type: string
           writeOnly: true
+          maxLength: 1024
         password:
           type: string
           writeOnly: true
+          maxLength: 65536
       required: [username, password]
     StaticSSHPrivateKeySourceSpec:
       type: object
@@ -8057,9 +9110,11 @@ components:
         privateKeyPem:
           type: string
           writeOnly: true
+          maxLength: 131072
         passphrase:
           type: string
           writeOnly: true
+          maxLength: 65536
       required: [privateKeyPem]
     EgressAuthProtocol:
       type: string

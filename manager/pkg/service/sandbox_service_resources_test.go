@@ -11,7 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,45 +25,45 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-func TestEffectiveSandboxResourceQuotaAppliesMinimumCPUToMemoryOverride(t *testing.T) {
+func TestEffectiveSandboxResourceLimitsAppliesMinimumCPUToMemoryOverride(t *testing.T) {
 	svc := &SandboxService{config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"}}
 	template := newSandboxResourceTestTemplate(t)
 
-	quota, err := svc.effectiveSandboxResourceQuota(template, &SandboxConfig{
+	limits, err := svc.effectiveSandboxResourceLimits(template, &SandboxConfig{
 		Resources: &SandboxResourceConfig{Memory: "128Mi"},
 	})
 	if err != nil {
-		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+		t.Fatalf("effectiveSandboxResourceLimits() error = %v", err)
 	}
-	assertQuantity(t, quota.Memory, "128Mi")
-	assertQuantity(t, quota.CPU, "150m")
+	assertQuantity(t, limits.Memory, "128Mi")
+	assertQuantity(t, limits.CPU, "150m")
 }
 
-func TestEffectiveSandboxResourceQuotaAppliesMinimumCPUToTemplateResources(t *testing.T) {
+func TestEffectiveSandboxResourceLimitsAppliesMinimumCPUToTemplateResources(t *testing.T) {
 	svc := &SandboxService{config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"}}
 	template := newSandboxResourceTestTemplate(t)
 	template.Spec.MainContainer.Resources.CPU = resource.MustParse("125m")
 	template.Spec.MainContainer.Resources.Memory = resource.MustParse("512Mi")
 
-	quota, err := svc.effectiveSandboxResourceQuota(template, nil)
+	limits, err := svc.effectiveSandboxResourceLimits(template, nil)
 	if err != nil {
-		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+		t.Fatalf("effectiveSandboxResourceLimits() error = %v", err)
 	}
-	assertQuantity(t, quota.Memory, "512Mi")
-	assertQuantity(t, quota.CPU, "150m")
+	assertQuantity(t, limits.Memory, "512Mi")
+	assertQuantity(t, limits.CPU, "150m")
 }
 
-func TestEffectiveSandboxResourceQuotaAppliesMinimumCPUToTemplateWithoutCPU(t *testing.T) {
+func TestEffectiveSandboxResourceLimitsAppliesMinimumCPUToTemplateWithoutCPU(t *testing.T) {
 	svc := &SandboxService{config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"}}
 	template := newSandboxResourceTestTemplate(t)
 	template.Spec.MainContainer.Resources.CPU = resource.Quantity{}
 
-	quota, err := svc.effectiveSandboxResourceQuota(template, nil)
+	limits, err := svc.effectiveSandboxResourceLimits(template, nil)
 	if err != nil {
-		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+		t.Fatalf("effectiveSandboxResourceLimits() error = %v", err)
 	}
-	assertQuantity(t, quota.Memory, "1Gi")
-	assertQuantity(t, quota.CPU, "150m")
+	assertQuantity(t, limits.Memory, "1Gi")
+	assertQuantity(t, limits.CPU, "150m")
 }
 
 func TestValidateSandboxMemoryBounds(t *testing.T) {
@@ -299,14 +299,14 @@ func TestResizeSandboxPodResourcesRetriesConflictWithFreshPod(t *testing.T) {
 		config:    SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
 		logger:    zap.NewNop(),
 	}
-	quota, err := svc.effectiveSandboxResourceQuota(template, &SandboxConfig{
+	limits, err := svc.effectiveSandboxResourceLimits(template, &SandboxConfig{
 		Resources: &SandboxResourceConfig{Memory: "2Gi"},
 	})
 	if err != nil {
-		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+		t.Fatalf("effectiveSandboxResourceLimits() error = %v", err)
 	}
 
-	resized, err := svc.resizeSandboxPodResources(context.Background(), pod, quota)
+	resized, err := svc.resizeSandboxPodResources(context.Background(), pod, limits)
 	if err != nil {
 		t.Fatalf("resizeSandboxPodResources() error = %v", err)
 	}
@@ -316,6 +316,82 @@ func TestResizeSandboxPodResourcesRetriesConflictWithFreshPod(t *testing.T) {
 	container := sandboxRuntimeContainer(t, resized)
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "2Gi")
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "500m")
+}
+
+func TestResizeSandboxTeamQuotaKeepsReservationAfterAmbiguousUpdate(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	pod := newSandboxResourceTestIdlePod(t, template, "sandbox-a")
+	pod.Labels[controller.LabelPoolType] = controller.PoolTypeActive
+	pod.Labels[controller.LabelSandboxID] = "sandbox-a"
+	pod.Annotations[controller.AnnotationTeamID] = "team-a"
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "1"
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		update := action.(k8stesting.UpdateAction)
+		updated := update.GetObject().(*corev1.Pod).DeepCopy()
+		if err := client.Tracker().Update(
+			corev1.SchemeGroupVersion.WithResource("pods"),
+			updated,
+			updated.Namespace,
+		); err != nil {
+			t.Fatalf("persist ambiguous resize: %v", err)
+		}
+		return true, nil, errors.New("resize response timed out")
+	})
+	quotaStore := &resizeAmbiguityCapacityStore{
+		recoveryQuotaTestStore: newRecoveryQuotaTestStore(),
+	}
+	svc := &SandboxService{
+		k8sClient:      client,
+		teamQuotaStore: quotaStore,
+		logger:         zap.NewNop(),
+	}
+
+	_, err := svc.resizeSandboxPodResourcesWithTeamQuota(
+		context.Background(),
+		pod,
+		template,
+		v1alpha1.SandboxResourceLimits{
+			CPU:    resource.MustParse("1"),
+			Memory: resource.MustParse("2Gi"),
+		},
+	)
+	if err == nil {
+		t.Fatal("resizeSandboxPodResourcesWithTeamQuota() error = nil")
+	}
+	if quotaStore.abortCalls != 0 {
+		t.Fatalf("quota abort calls = %d, want 0 for ambiguous mutation", quotaStore.abortCalls)
+	}
+	if quotaStore.reserveCalls != 1 {
+		t.Fatalf("quota reserve calls = %d, want 1", quotaStore.reserveCalls)
+	}
+}
+
+type resizeAmbiguityCapacityStore struct {
+	*recoveryQuotaTestStore
+	reserveCalls int
+	abortCalls   int
+}
+
+func (s *resizeAmbiguityCapacityStore) ReserveTarget(
+	_ context.Context,
+	request teamquota.ReserveRequest,
+) (*teamquota.Reservation, error) {
+	s.reserveCalls++
+	return &teamquota.Reservation{
+		Owner:     request.Owner,
+		Operation: request.Operation,
+		Target:    request.Target.Clone(),
+	}, nil
+}
+
+func (s *resizeAmbiguityCapacityStore) Abort(
+	context.Context,
+	teamquota.OperationRef,
+	string,
+) error {
+	s.abortCalls++
+	return nil
 }
 
 func TestClaimIdlePodRestoresIdlePodAfterResizeConflict(t *testing.T) {
@@ -391,6 +467,7 @@ func TestUpdateSandboxAppliesMinimumCPUResourcesAndPersistsConfig(t *testing.T) 
 		k8sClient:      client,
 		podLister:      corelisters.NewPodLister(indexer),
 		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
 		clock:          systemTime{},
 		config:         SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
 		logger:         zap.NewNop(),
@@ -454,36 +531,6 @@ func TestUpdatePausedSandboxValidatesAndPersistsMemory(t *testing.T) {
 	}
 }
 
-func TestUpdateSandboxMemoryQuotaUsesIncreaseOnly(t *testing.T) {
-	template := newSandboxResourceTestTemplate(t)
-	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
-	client := fake.NewSimpleClientset(pod.DeepCopy())
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	if err := indexer.Add(pod.DeepCopy()); err != nil {
-		t.Fatalf("add pod: %v", err)
-	}
-	svc := &SandboxService{
-		k8sClient:      client,
-		podLister:      corelisters.NewPodLister(indexer),
-		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		quotaStore: fakeQuotaLimitStore{
-			limit: &quota.Limit{TeamID: "team-a", Dimension: quota.DimensionMemory, LimitValue: 2048},
-			usage: 1024,
-		},
-		clock:  systemTime{},
-		config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
-		logger: zap.NewNop(),
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if _, err := svc.UpdateSandbox(ctx, "sandbox-1", &SandboxUpdateConfig{
-		Resources: &SandboxResourceConfig{Memory: "2Gi"},
-	}); err != nil {
-		t.Fatalf("UpdateSandbox() error = %v, want nil because only 1Gi increase is charged", err)
-	}
-}
-
 func newSandboxResourceTestTemplate(t *testing.T) *v1alpha1.SandboxTemplate {
 	t.Helper()
 	namespace, err := naming.TemplateNamespaceForTeam("team-a")
@@ -495,7 +542,7 @@ func newSandboxResourceTestTemplate(t *testing.T) *v1alpha1.SandboxTemplate {
 		Spec: v1alpha1.SandboxTemplateSpec{
 			MainContainer: v1alpha1.ContainerSpec{
 				Image: "busybox",
-				Resources: v1alpha1.ResourceQuota{
+				Resources: v1alpha1.SandboxResourceLimits{
 					CPU:    resource.MustParse("250m"),
 					Memory: resource.MustParse("1Gi"),
 				},

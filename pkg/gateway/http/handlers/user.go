@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/resourceguard"
 	"go.uber.org/zap"
 )
 
@@ -99,6 +100,9 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 		return
 	}
 
+	if !limitJSONRequestBody(c, "user update request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 	var req UpdateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
@@ -119,13 +123,23 @@ func (h *UserHandler) UpdateCurrentUser(c *gin.Context) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "name cannot be whitespace")
 			return
 		}
+		if !limitStringResource(c, "user name", name, identity.MaxIdentityNameBytes) {
+			return
+		}
 		user.Name = name
 	}
 	if req.AvatarURL != nil {
-		user.AvatarURL = strings.TrimSpace(*req.AvatarURL)
+		avatarURL := strings.TrimSpace(*req.AvatarURL)
+		if !limitStringResource(c, "avatar URL", avatarURL, identity.MaxIdentityAvatarURLBytes) {
+			return
+		}
+		user.AvatarURL = avatarURL
 	}
 
 	if err := h.repo.UpdateUser(c.Request.Context(), user); err != nil {
+		if writeIdentityResourceMutationError(c, err) {
+			return
+		}
 		h.logger.Error("Failed to update user", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update user")
 		return
@@ -292,6 +306,13 @@ func (h *UserHandler) CreateUserSSHPublicKey(c *gin.Context) {
 		return
 	}
 
+	if !limitJSONRequestBody(
+		c,
+		"SSH public key request body",
+		identity.MaxSSHPublicKeyRequestBytes,
+	) {
+		return
+	}
 	var req CreateSSHPublicKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
@@ -303,9 +324,23 @@ func (h *UserHandler) CreateUserSSHPublicKey(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "ssh public key name is required")
 		return
 	}
+	if err := resourceguard.String(
+		"ssh public key name",
+		name,
+		identity.MaxSSHPublicKeyNameBytes,
+	); err != nil {
+		if writeResourceTooLarge(c, err, "SSH public key request") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid ssh public key name")
+		return
+	}
 
 	publicKey, keyType, fingerprint, comment, err := identity.NormalizeAuthorizedSSHPublicKey(req.PublicKey)
 	if err != nil {
+		if writeResourceTooLarge(c, err, "SSH public key request") {
+			return
+		}
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid ssh public key")
 		return
 	}
@@ -322,6 +357,9 @@ func (h *UserHandler) CreateUserSSHPublicKey(c *gin.Context) {
 	if err := h.repo.CreateUserSSHPublicKey(c.Request.Context(), key); err != nil {
 		if errors.Is(err, identity.ErrSSHPublicKeyAlreadyExists) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "ssh public key already exists")
+			return
+		}
+		if writeTeamQuotaMutationError(c, err) {
 			return
 		}
 		h.logger.Error("Failed to create ssh public key", zap.Error(err))
@@ -357,6 +395,9 @@ func (h *UserHandler) DeleteUserSSHPublicKey(c *gin.Context) {
 	if err := h.repo.DeleteUserSSHPublicKeyByTeamAndUserID(c.Request.Context(), authCtx.TeamID, authCtx.UserID, keyID); err != nil {
 		if errors.Is(err, identity.ErrSSHPublicKeyNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "ssh public key not found")
+			return
+		}
+		if writeTeamQuotaMutationError(c, err) {
 			return
 		}
 		h.logger.Error("Failed to delete ssh public key", zap.Error(err))

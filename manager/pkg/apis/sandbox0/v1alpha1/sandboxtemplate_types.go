@@ -58,11 +58,11 @@ type SandboxTemplateSpec struct {
 }
 
 type ContainerSpec struct {
-	Image           string           `json:"image"`
-	ImagePullPolicy string           `json:"imagePullPolicy,omitempty"`
-	Env             []EnvVar         `json:"env,omitempty"`
-	Resources       ResourceQuota    `json:"resources"`
-	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
+	Image           string                `json:"image"`
+	ImagePullPolicy string                `json:"imagePullPolicy,omitempty"`
+	Env             []EnvVar              `json:"env,omitempty"`
+	Resources       SandboxResourceLimits `json:"resources"`
+	SecurityContext *SecurityContext      `json:"securityContext,omitempty"`
 }
 
 const (
@@ -229,8 +229,8 @@ type Toleration struct {
 
 const DefaultSandboxEphemeralStorage = "8Gi"
 
-// ResourceQuota defines resource quota (per template)
-type ResourceQuota struct {
+// SandboxResourceLimits defines the per-sandbox container resource limits.
+type SandboxResourceLimits struct {
 	CPU              resource.Quantity `json:"cpu,omitempty"`              // e.g. "2"
 	Memory           resource.Quantity `json:"memory,omitempty"`           // e.g. "4Gi"
 	EphemeralStorage resource.Quantity `json:"ephemeralStorage,omitempty"` // e.g. "8Gi"

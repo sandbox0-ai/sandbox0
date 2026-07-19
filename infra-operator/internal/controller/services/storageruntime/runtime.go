@@ -29,6 +29,7 @@ import (
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
+	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 )
@@ -72,6 +73,16 @@ func BuildRuntimeConfig(ctx context.Context, resources *common.ResourceManager, 
 	}
 	cfg.MetaURL = metaURL
 	cfg.RegionID = common.ResolveRegionID(infra)
+	cfg.TeamQuotaDistributedEnforcement =
+		runtimeconfig.ToTeamQuotaDistributedEnforcement(runtimeconfig.ResolveTeamQuotaSpec(infra))
+	if err := redissvc.ApplyTeamQuotaDistributedEnforcementConfig(
+		ctx,
+		resources.Client,
+		infra,
+		&cfg.TeamQuotaDistributedEnforcement,
+	); err != nil {
+		return nil, fmt.Errorf("apply Team Quota Redis config: %w", err)
+	}
 	if err := meteringsvc.ApplyStorageProxyConfig(ctx, resources.Client, infra, cfg); err != nil {
 		return nil, fmt.Errorf("apply metering config: %w", err)
 	}

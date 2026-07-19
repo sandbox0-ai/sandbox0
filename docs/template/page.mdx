@@ -91,7 +91,7 @@ spec:
     Spec: apispec.SandboxTemplateSpec{
         MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
             Image: "python:3.12-slim",
-            Resources: apispec.ResourceQuota{
+            Resources: apispec.SandboxResourceLimits{
                 Memory:           "4Gi",
                 EphemeralStorage: apispec.NewOptString("8Gi"),
             },
@@ -320,7 +320,11 @@ Creation progresses through these stages:
 
 With a zero-sized pool, `ready` does not mean the image has already been pulled into a sandbox node. The first claim still performs the normal image pull and sandbox startup.
 
-Deleting or cancelling a template releases Sandbox0's internal rootfs snapshot pin and build records. It does not synchronously delete OCI tags or blobs that may already have reached the configured registry. Operators should apply an appropriate retention or lifecycle policy to Sandbox0's team-scoped template repositories.
+Deleting or cancelling a managed template releases Sandbox0's internal rootfs snapshot pin and records a durable OCI cleanup job. For builtin and Harbor registries, a manager worker deletes the digest-pinned manifest and only then releases the template's `template_image_storage_bytes` and `control_plane_object_count` allocations. Registry errors are retried, and an unsupported registry provider fails closed: the cleanup row and both quota allocations remain until the artifact can be removed.
+
+Before publication, Sandbox0 composes the final manifest without pushing target-registry content and reserves its exact logical size. The charge includes every base and captured rootfs layer descriptor represented by the final manifest, plus the generated config and manifest descriptors; repeated descriptor digests are not deduplicated for quota accounting. Once push has durably started, a timeout or crash keeps the reservation charged until publication completes or deletion of the unpublished build tag or resolved manifest is confirmed.
+
+OCI Distribution manifest deletion is not blob garbage collection. Shared or now-unreferenced layer and config blobs remain subject to the registry's own garbage-collection or lifecycle policy, so operators must enable that policy for Sandbox0's team-scoped template repositories. Deletion is asynchronous and does not wait for blob storage to be reclaimed.
 
 SDK wait helpers only stop client-side polling when their context, abort signal, timeout, or caller interruption ends. They do not cancel the server-side build.
 
@@ -435,7 +439,7 @@ Updating a template does not affect already-running Sandboxes. New Sandboxes cla
     Spec: apispec.SandboxTemplateSpec{
         MainContainer: apispec.NewOptContainerSpec(apispec.ContainerSpec{
             Image: "python:3.12-slim",
-            Resources: apispec.ResourceQuota{
+            Resources: apispec.SandboxResourceLimits{
                 Memory:           "8Gi",
                 EphemeralStorage: apispec.NewOptString("8Gi"),
             },

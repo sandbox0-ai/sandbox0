@@ -76,6 +76,10 @@ type ClusterGatewayConfig struct {
 	// +optional
 	GatewayConfig `yaml:",inline" json:",inline"`
 
+	// TeamQuota carries distributed consumer settings. PolicyOwner and defaults
+	// are set only when cluster-gateway is the fullmode region entrypoint.
+	TeamQuota TeamQuotaConfig `yaml:"team_quota" json:"teamQuota"`
+
 	// SandboxObservability configures the per-sandbox historical observability
 	// query backend. It is separate from platform telemetry export.
 	// +optional
@@ -113,6 +117,10 @@ type SandboxObservabilityConfig struct {
 	// It is not an audit system of record.
 	// +optional
 	AuditSpoolDir string `yaml:"audit_spool_dir" json:"-"`
+	// AuditSpoolLimits bounds the cluster-gateway delivery backlog globally and
+	// per team. These are platform disk-safety guards, not Team Quota.
+	// +optional
+	AuditSpoolLimits AuditSpoolLimitsConfig `yaml:"audit_spool_limits" json:"auditSpoolLimits"`
 	// +optional
 	ClickHouse SandboxObservabilityClickHouseConfig `yaml:"clickhouse" json:"clickHouse"`
 }
@@ -207,4 +215,5 @@ func applyClusterGatewayDefaults(cfg *ClusterGatewayConfig) {
 		return
 	}
 	cfg.SandboxObservability.AuditDeliveryMode = sandboxobservability.NormalizeAuditDeliveryMode(cfg.SandboxObservability.AuditDeliveryMode)
+	applyAuditSpoolLimitsDefaults(&cfg.SandboxObservability.AuditSpoolLimits)
 }

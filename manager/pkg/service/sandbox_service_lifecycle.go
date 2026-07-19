@@ -35,12 +35,16 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 				if getErr != nil {
 					return fmt.Errorf("get sandbox record: %w", getErr)
 				}
-				if record != nil && record.Status != SandboxStatusDeleted {
+				if record != nil && record.CleanupCompletedAt.IsZero() {
 					if err := s.cleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record), false); err != nil {
 						return fmt.Errorf("cleanup deleted sandbox record: %w", err)
 					}
 				}
-				return s.sandboxStore.MarkSandboxDeleted(ctx, sandboxID, s.clock.Now())
+				completedAt := s.clock.Now()
+				if err := s.sandboxStore.MarkSandboxDeleted(ctx, sandboxID, completedAt); err != nil {
+					return err
+				}
+				return s.sandboxStore.MarkSandboxCleanupCompleted(ctx, sandboxID, completedAt)
 			}
 			return nil
 		}
@@ -56,7 +60,17 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 	if k8serrors.IsNotFound(err) {
 		s.logger.Info("Sandbox already terminated", zap.String("sandboxID", sandboxID))
 		if s.sandboxStore != nil {
-			return s.sandboxStore.MarkSandboxDeleted(ctx, sandboxID, s.clock.Now())
+			info, ok := sandboxLifecycleInfoFromPod(pod)
+			if ok {
+				if err := s.cleanupDeletedSandbox(ctx, info, false); err != nil {
+					return fmt.Errorf("cleanup deleted sandbox record: %w", err)
+				}
+			}
+			completedAt := s.clock.Now()
+			if err := s.sandboxStore.MarkSandboxDeleted(ctx, sandboxID, completedAt); err != nil {
+				return err
+			}
+			return s.sandboxStore.MarkSandboxCleanupCompleted(ctx, sandboxID, completedAt)
 		}
 		return nil
 	}
@@ -679,8 +693,8 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 
 // UpdateSandbox updates mutable sandbox configuration fields.
 func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cfg *SandboxUpdateConfig) (*Sandbox, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("sandbox config is required")
+	if err := ValidateSandboxUpdateConfigSize(cfg); err != nil {
+		return nil, err
 	}
 
 	var record *SandboxRecord
@@ -721,7 +735,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			return err
 		}
 
-		var resizeQuota *v1alpha1.ResourceQuota
+		var resizeLimits *v1alpha1.SandboxResourceLimits
 		updatedPod = current.DeepCopy()
 		if updatedPod.Annotations == nil {
 			updatedPod.Annotations = make(map[string]string)
@@ -768,15 +782,12 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			if template == nil {
 				return fmt.Errorf("template for sandbox pod not found")
 			}
-			resourceQuota, err := s.effectiveSandboxResourceQuota(template, &merged)
+			resourceLimits, err := s.effectiveSandboxResourceLimits(template, &merged)
 			if err != nil {
 				return err
 			}
-			if err := s.enforceSandboxResourceQuotaIncrease(ctx, teamID, current, resourceQuota); err != nil {
-				return err
-			}
-			resizeQuota = &resourceQuota
-			merged.Resources = &SandboxResourceConfig{Memory: resourceQuota.Memory.String()}
+			resizeLimits = &resourceLimits
+			merged.Resources = &SandboxResourceConfig{Memory: resourceLimits.Memory.String()}
 		}
 
 		if cfg.Network != nil {
@@ -789,6 +800,9 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			if cfg.Network != nil {
 				requestSpec = cfg.Network
 				merged.Network = sanitizedNetworkPolicyForPersistence(cfg.Network)
+			}
+			if err := ValidateSandboxConfigSize(&merged); err != nil {
+				return err
 			}
 			requestBindings := append([]v1alpha1.CredentialBinding(nil), cfg.Network.CredentialBindings...)
 			if cfg.Network.CredentialBindings == nil {
@@ -805,6 +819,9 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 				TemplateBindings: templateBindings,
 				RequestBindings:  requestBindings,
 			})
+			if err := ValidateCompiledNetworkPolicySize(policySpecFromState(networkState)); err != nil {
+				return err
+			}
 			rollbackBindings, err = s.syncCredentialBindings(ctx, updatedPod, teamID, networkState)
 			if err != nil {
 				return fmt.Errorf("stage credential bindings: %w", err)
@@ -818,14 +835,17 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			return fmt.Errorf("cannot set resume=true on public routes when sandbox auto_resume is disabled")
 		}
 
+		if err := ValidateSandboxConfigSize(&merged); err != nil {
+			return err
+		}
 		updatedConfigJSON, err := json.Marshal(merged)
 		if err != nil {
 			return fmt.Errorf("marshal sandbox config: %w", err)
 		}
 		updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
 
-		if resizeQuota != nil {
-			resizedPod, err := s.resizeSandboxPodResources(ctx, current, *resizeQuota)
+		if resizeLimits != nil {
+			resizedPod, err := s.resizeSandboxPodResourcesWithTeamQuota(ctx, current, s.templateForPod(updatedPod), *resizeLimits)
 			if err != nil {
 				if rollbackBindings != nil && !k8serrors.IsConflict(err) {
 					if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1256,6 +1276,7 @@ func sandboxLifecycleInfoFromRecord(record *SandboxRecord) SandboxLifecycleInfo 
 		PodName:              record.CurrentPodName,
 		SandboxID:            record.ID,
 		TeamID:               record.TeamID,
+		ClusterID:            naming.ClusterIDOrDefault(&record.ClusterID),
 		UserID:               record.UserID,
 		WebhookStateVolumeID: record.WebhookStateVolumeID,
 		RuntimeGeneration:    record.RuntimeGeneration,

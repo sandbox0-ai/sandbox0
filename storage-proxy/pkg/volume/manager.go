@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota"
 	"github.com/sirupsen/logrus"
 )
 
@@ -35,11 +36,13 @@ type VolumeContext struct {
 	CacheDir  string
 	Observer  StorageObserver
 
-	handleMu      sync.Mutex
-	nextHandleID  uint64
-	fileHandles   map[uint64]uint64
-	openFileCount map[uint64]int
-	unlinkedFiles map[uint64]struct{}
+	storageQuotaMu sync.RWMutex
+	storageQuota   *storagequota.Service
+	handleMu       sync.Mutex
+	nextHandleID   uint64
+	fileHandles    map[uint64]uint64
+	openFileCount  map[uint64]int
+	unlinkedFiles  map[uint64]struct{}
 
 	materializeCancel context.CancelFunc
 	materializeDone   chan struct{}
@@ -86,6 +89,7 @@ type Manager struct {
 	defaultBackend string
 	registrar      MountRegistrar // Optional: for distributed coordination
 	observer       StorageObserver
+	storageQuota   *storagequota.Service
 }
 
 // NewManager creates a new volume manager
@@ -131,6 +135,17 @@ func (m *Manager) SetStorageObserver(observer StorageObserver) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.observer = observer
+}
+
+// SetStorageQuota injects the region-shared capacity coordinator used by every
+// mounted volume, including background materialization and compaction.
+func (m *Manager) SetStorageQuota(service *storagequota.Service) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.storageQuota = service
+	for _, volCtx := range m.volumes {
+		volCtx.SetStorageQuota(service)
+	}
 }
 
 func (m *Manager) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
@@ -200,6 +215,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 		MountedAt:       sessionTime,
 		Metrics:         m.metrics,
 		StorageObserver: m.observer,
+		StorageQuota:    m.storageQuota,
 	})
 	if err != nil {
 		if registeredMount {

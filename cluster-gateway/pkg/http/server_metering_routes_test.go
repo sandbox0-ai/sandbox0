@@ -16,9 +16,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	gatewayteamquota "github.com/sandbox0-ai/sandbox0/pkg/gateway/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/guard"
 	"go.uber.org/zap"
 )
 
@@ -116,11 +119,11 @@ func TestSetupRoutesMountsControlPlaneEndpointsInInternalMode(t *testing.T) {
 	if !hasRoute(server.router, "POST", "/api/v1/templates/from-sandbox") {
 		t.Fatal("expected internal mode to mount template-from-sandbox route")
 	}
-	if !hasRoute(server.router, "PUT", "/internal/v1/teams/:team_id/quotas/:dimension") {
-		t.Fatal("expected internal mode to mount internal quota write route")
+	if hasRoute(server.router, "PUT", "/internal/v1/teams/:team_id/quotas/:dimension") {
+		t.Fatal("expected removed internal quota write proxy route to stay absent")
 	}
-	if !hasRoute(server.router, "DELETE", "/internal/v1/teams/:team_id/quotas/:dimension") {
-		t.Fatal("expected internal mode to mount internal quota delete route")
+	if hasRoute(server.router, "DELETE", "/internal/v1/teams/:team_id/quotas/:dimension") {
+		t.Fatal("expected removed internal quota delete proxy route to stay absent")
 	}
 }
 
@@ -242,6 +245,109 @@ func TestSandboxObservabilityRouteDoesNotRequireManagerUpstream(t *testing.T) {
 	}
 }
 
+func TestInternalAPIWithoutAdmissionProofChargesAPIRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, generator, _ := testMeteringRouteServer(t, authModeInternal)
+	controller, rateLimiter := newCountingTeamQuotaController(zap.NewNop())
+	server.teamQuotaController = controller
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	token, err := generator.Generate(
+		internalauth.ServiceClusterGateway,
+		"team-1",
+		"user-1",
+		internalauth.GenerateOptions{
+			Permissions: []string{authn.PermSandboxRead},
+		},
+	)
+	if err != nil {
+		t.Fatalf("generate internal token: %v", err)
+	}
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/sandboxes/sb-1/metrics/catalog",
+		nil,
+	)
+	request.Header.Set(internalauth.DefaultTokenHeader, token)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"status = %d, want 200; body=%s",
+			response.Code,
+			response.Body.String(),
+		)
+	}
+	if got := rateLimiter.calls.Load(); got != 1 {
+		t.Fatalf("api_requests admissions = %d, want 1", got)
+	}
+}
+
+func TestInternalAPIWithMatchingAdmissionProofSkipsAPIRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, generator, _ := testMeteringRouteServer(t, authModeInternal)
+	controller, rateLimiter := newCountingTeamQuotaController(zap.NewNop())
+	server.teamQuotaController = controller
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/sandboxes/sb-1/metrics/catalog",
+		nil,
+	)
+	proof, err := internalauth.NewQuotaAdmissionProof(
+		internalauth.QuotaAdmissionClassEdgeAdmitted,
+		request,
+		"team-1",
+		"operation-1",
+		"request-1",
+		internalauth.ServiceRegionalGateway,
+		[]coreteamquota.Key{coreteamquota.KeyAPIRequests},
+		guard.Version{EnforcementEpoch: 1, RedisGeneration: 1},
+	)
+	if err != nil {
+		t.Fatalf("NewQuotaAdmissionProof() error = %v", err)
+	}
+	token, err := generator.Generate(
+		internalauth.ServiceClusterGateway,
+		"team-1",
+		"user-1",
+		internalauth.GenerateOptions{
+			Permissions: []string{authn.PermSandboxRead},
+			Audit: &internalauth.AuditContext{
+				OperationID: "operation-1",
+				RequestID:   "request-1",
+				Origin:      internalauth.ServiceRegionalGateway,
+			},
+			QuotaAdmissionProof: proof,
+		},
+	)
+	if err != nil {
+		t.Fatalf("generate internal token: %v", err)
+	}
+	request.Header.Set(internalauth.DefaultTokenHeader, token)
+	response := httptest.NewRecorder()
+	server.router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"status = %d, want 200; body=%s",
+			response.Code,
+			response.Body.String(),
+		)
+	}
+	if got := rateLimiter.calls.Load(); got != 0 {
+		t.Fatalf("api_requests admissions = %d, want 0", got)
+	}
+}
+
 func TestSandboxAuditRouteRequiresEnterpriseFeatureWithoutBlockingOtherSignals(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -296,6 +402,10 @@ func TestSandboxRuntimeSampleIngestAcceptsCtldToken(t *testing.T) {
 		ClockSkewTolerance: 5 * time.Second,
 	})
 	server.sandboxObservabilityIngestAuthMiddleware = middleware.NewInternalAuthMiddleware(validator, zap.NewNop())
+	server.publicOverloadGuard = newSandboxObservabilityTestOverloadGuard(
+		t,
+		config.OverloadGuardConfig{},
+	)
 	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
 	server.obsProvider = newTestMeteringObservability(t)
 	server.setupRoutes()
@@ -420,7 +530,7 @@ func TestInternalAuthValidatorsRejectLegacyStorageProxyCaller(t *testing.T) {
 	}
 }
 
-func TestSetupRoutesExposesQuotaReadOnlyPublicAPI(t *testing.T) {
+func TestSetupRoutesExposesTeamQuotaPublicAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server, _, _ := testMeteringRouteServer(t, "public")
@@ -428,14 +538,108 @@ func TestSetupRoutesExposesQuotaReadOnlyPublicAPI(t *testing.T) {
 	server.obsProvider = newTestMeteringObservability(t)
 	server.setupRoutes()
 
-	if !hasRoute(server.router, "GET", "/api/v1/quotas/:dimension") {
-		t.Fatal("expected public quota read route")
+	if !hasRoute(server.router, "GET", "/api/v1/quotas") {
+		t.Fatal("expected current-team quota list route")
 	}
-	if hasRoute(server.router, "PUT", "/api/v1/quotas/:dimension") {
-		t.Fatal("expected public quota put route to be absent")
+	if hasRoute(server.router, "GET", "/api/v1/quotas/:dimension") {
+		t.Fatal("expected legacy dimension quota route to be absent")
 	}
-	if hasRoute(server.router, "DELETE", "/api/v1/quotas/:dimension") {
-		t.Fatal("expected public quota delete route to be absent")
+	if hasRoute(server.router, "PUT", "/internal/v1/teams/:team_id/quotas/:dimension") {
+		t.Fatal("expected legacy internal quota proxy to be absent")
+	}
+}
+
+func TestSetupRoutesExposesAdminTeamQuotaAPIOnlyForPolicyOwner(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, _ := testMeteringRouteServer(t, "public")
+	server.cfg.TeamQuota.PolicyOwner = true
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	for _, route := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/api/v1/teams/:team_id/quotas"},
+		{method: http.MethodPut, path: "/api/v1/teams/:team_id/quotas/:key"},
+		{method: http.MethodDelete, path: "/api/v1/teams/:team_id/quotas/:key"},
+	} {
+		if !hasRoute(server.router, route.method, route.path) {
+			t.Fatalf("expected fullmode Team Quota route %s %s", route.method, route.path)
+		}
+	}
+
+	consumer, _, _ := testMeteringRouteServer(t, "both")
+	consumer.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	consumer.obsProvider = newTestMeteringObservability(t)
+	consumer.setupRoutes()
+	if hasRoute(consumer.router, http.MethodPut, "/api/v1/teams/:team_id/quotas/:key") {
+		t.Fatal("expected regional data-plane consumer not to expose Team Quota admin writes")
+	}
+}
+
+func TestFullmodeAdminQuotaRepairBypassesTenantAdmission(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, issuer := testMeteringRouteServer(t, "public")
+	server.cfg.TeamQuota.PolicyOwner = true
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	rateLimiter := &countingTeamQuotaRateLimiter{}
+	networkLimiter := &countingTeamQuotaNetworkLimiter{}
+	server.teamQuotaController = gatewayteamquota.NewController(
+		nil,
+		nil,
+		rateLimiter,
+		nil,
+		zap.NewNop(),
+		gatewayteamquota.WithConcurrencyLimiter(allowingTeamQuotaConcurrencyLimiter{}),
+		gatewayteamquota.WithNetworkLimiter(networkLimiter),
+	)
+	server.setupRoutes()
+
+	tokens, err := issuer.IssueTokenPair(
+		"system-admin",
+		"system@example.com",
+		"System",
+		true,
+		[]authn.TeamGrant{{TeamID: "team-1", TeamRole: "admin"}},
+	)
+	if err != nil {
+		t.Fatalf("issue token pair: %v", err)
+	}
+	doRequest := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		request.Header.Set(internalauth.TeamIDHeader, "team-1")
+		recorder := httptest.NewRecorder()
+		server.router.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	adminResponse := doRequest("/api/v1/teams/team-1/quotas")
+	if adminResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("admin repair status = %d, want handler-level 503", adminResponse.Code)
+	}
+	if rateLimiter.calls.Load() != 0 || networkLimiter.Bytes() != 0 {
+		t.Fatalf(
+			"admin repair consumed tenant admission: rate=%d bytes=%d",
+			rateLimiter.calls.Load(),
+			networkLimiter.Bytes(),
+		)
+	}
+
+	currentResponse := doRequest("/api/v1/quotas")
+	if currentResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ordinary quota status = %d, want handler-level 503", currentResponse.Code)
+	}
+	if rateLimiter.calls.Load() != 1 {
+		t.Fatalf("ordinary request rate admissions = %d, want 1", rateLimiter.calls.Load())
+	}
+	if networkLimiter.Bytes() == 0 {
+		t.Fatal("ordinary request did not consume tenant network quota")
 	}
 }
 
@@ -533,8 +737,12 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 	sandboxObservabilityIngestAuth := middleware.NewInternalAuthMiddleware(sandboxObservabilityIngestValidator, zap.NewNop())
 
 	server := &Server{
-		router:                                   gin.New(),
-		cfg:                                      &config.ClusterGatewayConfig{AuthMode: authMode},
+		router: gin.New(),
+		cfg: &config.ClusterGatewayConfig{
+			AuthMode:      authMode,
+			ClusterID:     "cluster-1",
+			GatewayConfig: config.GatewayConfig{RegionID: "aws-us-east-1"},
+		},
 		authMiddleware:                           internalAuth,
 		sandboxAuditIngestAuthMiddleware:         sandboxObservabilityIngestAuth,
 		sandboxObservabilityIngestAuthMiddleware: sandboxObservabilityIngestAuth,
@@ -543,8 +751,16 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 		publicJWT:                                issuer,
 		logger:                                   zap.NewNop(),
 		meteringHandler:                          gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", zap.NewNop()),
-		observabilityHandler:                     gatewayhandlers.NewSandboxObservabilityHandler(nil, zap.NewNop()),
-		sandboxAuditEntitlements:                 licensing.NewStaticEntitlements(),
+		observabilityHandler: gatewayhandlers.NewSandboxObservabilityHandler(
+			nil,
+			zap.NewNop(),
+			gatewayhandlers.WithSandboxObservabilityIngestPolicy(gatewayhandlers.SandboxObservabilityIngestPolicy{
+				RegionID:  "aws-us-east-1",
+				ClusterID: "cluster-1",
+			}),
+		),
+		sandboxAuditEntitlements: licensing.NewStaticEntitlements(),
+		teamQuotaController:      newAllowingTeamQuotaController(zap.NewNop()),
 	}
 
 	return server, generator, issuer

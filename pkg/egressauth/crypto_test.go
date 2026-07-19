@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"strings"
 	"testing"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/resourceguard"
 )
 
 func TestAESGCMCodecRoundTrip(t *testing.T) {
@@ -58,5 +61,41 @@ func TestNormalizeAES256Key(t *testing.T) {
 				t.Fatalf("normalized key mismatch")
 			}
 		})
+	}
+}
+
+func TestAESGCMCodecRejectsOversizedPlaintextBeforeEncryption(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, 32)
+	codec, err := NewAESGCMCodec("v1", map[string][]byte{"v1": key})
+	if err != nil {
+		t.Fatalf("new codec: %v", err)
+	}
+	secretMarker := "do-not-leak-encryption-input"
+	_, err = codec.Encrypt(context.Background(), nil, CredentialSourceSecretSpec{
+		StaticUsernamePassword: &StaticUsernamePasswordSourceSpec{
+			Password: strings.Repeat("p", int(MaxCredentialSecretBytes)) + secretMarker,
+		},
+	})
+	if !resourceguard.IsTooLarge(err) {
+		t.Fatalf("Encrypt() error = %v, want TooLargeError", err)
+	}
+	if strings.Contains(err.Error(), secretMarker) {
+		t.Fatalf("encryption error leaked secret material: %v", err)
+	}
+}
+
+func TestAESGCMCodecRejectsOversizedEnvelopeBeforeDecode(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, 32)
+	codec, err := NewAESGCMCodec("v1", map[string][]byte{"v1": key})
+	if err != nil {
+		t.Fatalf("new codec: %v", err)
+	}
+	_, err = codec.Decrypt(
+		context.Background(),
+		nil,
+		bytes.Repeat([]byte("x"), int(MaxCredentialSourceEnvelopeBytes)+1),
+	)
+	if !resourceguard.IsTooLarge(err) {
+		t.Fatalf("Decrypt() error = %v, want TooLargeError", err)
 	}
 }

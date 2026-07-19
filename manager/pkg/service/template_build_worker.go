@@ -25,14 +25,24 @@ type templateBuildQueue interface {
 	ClaimTemplateBuild(ctx context.Context, targetClusterID, workerID string, leaseDuration time.Duration) (*template.TemplateBuild, error)
 	RenewTemplateBuildLease(ctx context.Context, buildID, workerID string, leaseDuration time.Duration) error
 	MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID, snapshotID string, captureMetadata json.RawMessage, capturedAt time.Time) error
-	PublishTemplateBuild(ctx context.Context, buildID, workerID string, spec v1alpha1.SandboxTemplateSpec, outputImage string) error
+	ReserveTemplateImageBuild(ctx context.Context, buildID, workerID, manifestDigest string, logicalSizeBytes int64) error
+	MarkTemplateImagePushStarted(ctx context.Context, buildID, workerID string) error
+	PublishTemplateBuild(ctx context.Context, buildID, workerID string, spec v1alpha1.SandboxTemplateSpec, outputImage, manifestDigest string, logicalSizeBytes int64) error
 	FailTemplateBuild(ctx context.Context, buildID, workerID, reason, message string) error
 	ReleaseTemplateBuild(ctx context.Context, buildID, workerID string, retryAt time.Time, lastError string) error
 	TemplateBuildCancelled(ctx context.Context, buildID string) (bool, error)
-	FinishTemplateBuild(ctx context.Context, buildID, workerID string) error
+	FinishTemplateBuild(ctx context.Context, buildID, workerID string, unpublishedImageDeleteConfirmed bool) error
+	ClaimTemplateImageCleanup(ctx context.Context, targetClusterID, workerID string, leaseDuration time.Duration) (*template.TemplateImageCleanup, error)
+	ReleaseTemplateImageCleanup(ctx context.Context, cleanupID, workerID string, retryAt time.Time, lastError string) error
+	FinishTemplateImageCleanup(ctx context.Context, cleanupID, workerID string) error
 }
 
-var _ templateBuildQueue = (templatestore.TemplateBuildStore)(nil)
+type templateBuildQueueStore interface {
+	templatestore.TemplateBuildStore
+	templatestore.TemplateImageCleanupStore
+}
+
+var _ templateBuildQueue = (templateBuildQueueStore)(nil)
 
 type templateBuildCapturer interface {
 	EnsureTemplateBuildCapture(ctx context.Context, sandboxID, teamID, snapshotID string, desiredSpec v1alpha1.SandboxTemplateSpec) (*TemplateBuildCaptureMetadata, error)
@@ -40,7 +50,9 @@ type templateBuildCapturer interface {
 }
 
 type templateImagePublisher interface {
-	Publish(ctx context.Context, req templateimage.BuildRequest) (*templateimage.Result, error)
+	Plan(ctx context.Context, req templateimage.BuildRequest) (*templateimage.Plan, error)
+	PublishPlan(ctx context.Context, plan *templateimage.Plan) (*templateimage.Result, error)
+	Delete(ctx context.Context, req templateimage.DeleteRequest) error
 }
 
 // TemplateBuildWorkerConfig controls one durable manager-side build worker.
@@ -141,6 +153,18 @@ func (w *TemplateBuildWorker) Run(ctx context.Context) error {
 
 // RunOnce claims and processes at most one build.
 func (w *TemplateBuildWorker) RunOnce(ctx context.Context) (bool, error) {
+	cleanup, err := w.queue.ClaimTemplateImageCleanup(
+		ctx,
+		w.config.ClusterID,
+		w.config.WorkerID,
+		w.config.LeaseDuration,
+	)
+	if err != nil {
+		return false, err
+	}
+	if cleanup != nil {
+		return true, w.processImageCleanup(ctx, cleanup)
+	}
 	build, err := w.queue.ClaimTemplateBuild(ctx, w.config.ClusterID, w.config.WorkerID, w.config.LeaseDuration)
 	if err != nil {
 		return false, err
@@ -149,6 +173,28 @@ func (w *TemplateBuildWorker) RunOnce(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return true, w.processClaim(ctx, build)
+}
+
+func (w *TemplateBuildWorker) processImageCleanup(ctx context.Context, cleanup *template.TemplateImageCleanup) error {
+	err := w.publisher.Delete(ctx, templateimage.DeleteRequest{
+		TeamID:         cleanup.TeamID,
+		TemplateID:     cleanup.TemplateID,
+		ImageReference: cleanup.OutputImage,
+	})
+	if err != nil {
+		retryAt := time.Now().UTC().Add(w.retryDelay(cleanup.AttemptCount))
+		if releaseErr := w.queue.ReleaseTemplateImageCleanup(
+			ctx,
+			cleanup.CleanupID,
+			w.config.WorkerID,
+			retryAt,
+			publicTemplateBuildError(err),
+		); releaseErr != nil {
+			return errors.Join(err, releaseErr)
+		}
+		return err
+	}
+	return w.queue.FinishTemplateImageCleanup(ctx, cleanup.CleanupID, w.config.WorkerID)
 }
 
 type templateBuildLeaseState struct {
@@ -187,10 +233,10 @@ func (w *TemplateBuildWorker) processClaim(ctx context.Context, build *template.
 	}
 	if cancelled || !build.CancelRequestedAt.IsZero() {
 		state.cancelled.Store(true)
-		return w.cleanupAndFinish(ctx, build)
+		return w.cleanupAndFinish(ctx, build, false)
 	}
 	if build.Stage == v1alpha1.TemplateCreationStageReconciling {
-		return w.cleanupAndFinish(ctx, build)
+		return w.cleanupAndFinish(ctx, build, true)
 	}
 
 	err = w.captureAndPublish(workCtx, build)
@@ -198,10 +244,10 @@ func (w *TemplateBuildWorker) processClaim(ctx context.Context, build *template.
 		return leaseErr
 	}
 	if state.cancelled.Load() {
-		return w.cleanupAndFinish(ctx, build)
+		return w.cleanupAndFinish(ctx, build, false)
 	}
 	if err == nil {
-		return w.cleanupAndFinish(ctx, build)
+		return w.cleanupAndFinish(ctx, build, true)
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -212,7 +258,7 @@ func (w *TemplateBuildWorker) processClaim(ctx context.Context, build *template.
 		if failErr := w.queue.FailTemplateBuild(ctx, build.BuildID, w.config.WorkerID, templateBuildFailureReason, message); failErr != nil {
 			return errors.Join(err, failErr)
 		}
-		if cleanupErr := w.cleanupAndFinish(ctx, build); cleanupErr != nil {
+		if cleanupErr := w.cleanupAndFinish(ctx, build, false); cleanupErr != nil {
 			return errors.Join(err, cleanupErr)
 		}
 		return err
@@ -230,7 +276,7 @@ func (w *TemplateBuildWorker) captureAndPublish(ctx context.Context, build *temp
 		return err
 	}
 	finalSpec := *build.DesiredSpec.DeepCopy()
-	result, err := w.publisher.Publish(ctx, templateimage.BuildRequest{
+	plan, err := w.publisher.Plan(ctx, templateimage.BuildRequest{
 		BuildID:         build.BuildID,
 		TeamID:          build.TeamID,
 		TemplateID:      build.TemplateID,
@@ -244,15 +290,52 @@ func (w *TemplateBuildWorker) captureAndPublish(ctx context.Context, build *temp
 	if err != nil {
 		return err
 	}
-	if result == nil || strings.TrimSpace(result.PullReference) == "" {
-		return fmt.Errorf("template image publisher returned no pull reference")
+	if plan == nil ||
+		strings.TrimSpace(plan.Result.PullReference) == "" ||
+		plan.Result.ManifestDigest == "" ||
+		plan.Result.LogicalSizeBytes < 0 {
+		return fmt.Errorf("template image publisher returned an invalid plan")
 	}
+	if err := w.queue.ReserveTemplateImageBuild(
+		ctx,
+		build.BuildID,
+		w.config.WorkerID,
+		plan.Result.ManifestDigest.String(),
+		plan.Result.LogicalSizeBytes,
+	); err != nil {
+		return err
+	}
+	build.ImageManifestDigest = plan.Result.ManifestDigest.String()
+	build.ImageLogicalSizeBytes = plan.Result.LogicalSizeBytes
+	build.ImageQuotaReservedAt = time.Now().UTC()
+	if err := w.queue.MarkTemplateImagePushStarted(ctx, build.BuildID, w.config.WorkerID); err != nil {
+		return err
+	}
+	build.ImagePushStartedAt = time.Now().UTC()
+	result, err := w.publisher.PublishPlan(ctx, plan)
+	if err != nil {
+		return err
+	}
+	if result == nil ||
+		strings.TrimSpace(result.PullReference) == "" ||
+		result.ManifestDigest != plan.Result.ManifestDigest ||
+		result.LogicalSizeBytes != plan.Result.LogicalSizeBytes {
+		return fmt.Errorf("template image publisher result does not match its reserved plan")
+	}
+	build.OutputImage = result.PullReference
 	finalSpec.MainContainer.Image = result.PullReference
-	if err := w.queue.PublishTemplateBuild(ctx, build.BuildID, w.config.WorkerID, finalSpec, result.PullReference); err != nil {
+	if err := w.queue.PublishTemplateBuild(
+		ctx,
+		build.BuildID,
+		w.config.WorkerID,
+		finalSpec,
+		result.PullReference,
+		result.ManifestDigest.String(),
+		result.LogicalSizeBytes,
+	); err != nil {
 		return err
 	}
 	build.Stage = v1alpha1.TemplateCreationStageReconciling
-	build.OutputImage = result.PullReference
 	return nil
 }
 
@@ -326,13 +409,35 @@ func validateTemplateBuildCapture(build *template.TemplateBuild, capture *Templa
 	return nil
 }
 
-func (w *TemplateBuildWorker) cleanupAndFinish(ctx context.Context, build *template.TemplateBuild) error {
+func (w *TemplateBuildWorker) cleanupAndFinish(
+	ctx context.Context,
+	build *template.TemplateBuild,
+	preservePublishedImage bool,
+) error {
+	imageDeleteConfirmed := false
+	if !preservePublishedImage &&
+		(!build.ImagePushStartedAt.IsZero() || strings.TrimSpace(build.OutputImage) != "") {
+		if err := w.publisher.Delete(ctx, templateimage.DeleteRequest{
+			TeamID:         build.TeamID,
+			TemplateID:     build.TemplateID,
+			BuildID:        build.BuildID,
+			ImageReference: build.OutputImage,
+		}); err != nil {
+			return fmt.Errorf("delete cancelled template image: %w", err)
+		}
+		imageDeleteConfirmed = true
+	}
 	if snapshotID := strings.TrimSpace(build.SnapshotID); snapshotID != "" {
 		if err := w.capturer.DeleteTemplateBuildCapture(ctx, snapshotID, build.TeamID); err != nil {
 			return fmt.Errorf("delete template build snapshot: %w", err)
 		}
 	}
-	return w.queue.FinishTemplateBuild(ctx, build.BuildID, w.config.WorkerID)
+	return w.queue.FinishTemplateBuild(
+		ctx,
+		build.BuildID,
+		w.config.WorkerID,
+		imageDeleteConfirmed,
+	)
 }
 
 func (w *TemplateBuildWorker) monitorLease(ctx context.Context, cancel context.CancelFunc, buildID string, state *templateBuildLeaseState, done chan<- struct{}) {

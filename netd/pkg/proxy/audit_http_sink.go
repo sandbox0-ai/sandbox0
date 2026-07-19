@@ -72,7 +72,18 @@ func newHTTPAuditSinkFromConfig(cfg *config.NetdConfig, logger *zap.Logger) (*ht
 		PrivateKey: privateKey,
 		TTL:        10 * time.Second,
 	})
-	spool, err := newAuditSpool(cfg.SandboxObservabilityAuditSpoolDir)
+	spoolLimits := cfg.SandboxObservabilityAuditSpoolLimits
+	spool, err := newAuditSpoolWithLimits(
+		cfg.SandboxObservabilityAuditSpoolDir,
+		auditSpoolLimits{
+			MaxBytes:       spoolLimits.MaxBytes,
+			MaxEntries:     spoolLimits.MaxEntries,
+			MaxTeamBytes:   spoolLimits.MaxTeamBytes,
+			MaxTeamEntries: spoolLimits.MaxTeamEntries,
+			MinFreeBytes:   spoolLimits.MinFreeBytes,
+			MaxRecordBytes: spoolLimits.MaxRecordBytes,
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +196,11 @@ func (s *httpAuditSink) WriteAuditEvent(event auditEvent) error {
 	}
 	if s.spool != nil {
 		if spoolErr := s.spool.Put(event); spoolErr != nil {
-			proxyMetrics.RecordAuditIngestEvents("persist_failed", 1)
+			result := "persist_failed"
+			if errors.Is(spoolErr, errAuditSpoolCapacity) {
+				result = "capacity_rejected"
+			}
+			proxyMetrics.RecordAuditIngestEvents(result, 1)
 			if !errors.Is(spoolErr, errAuditSpoolWrite) {
 				return fmt.Errorf("persist audit event: %w", spoolErr)
 			}

@@ -8,10 +8,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
@@ -39,6 +43,18 @@ type failAfterAuditWriter struct {
 
 type contextBlockingAuditWriter struct {
 	deadline chan time.Time
+}
+
+type atomicCountingAuditWriter struct {
+	calls atomic.Int64
+}
+
+func (w *atomicCountingAuditWriter) InsertEvents(
+	context.Context,
+	[]sandboxobservability.Event,
+) error {
+	w.calls.Add(1)
+	return nil
 }
 
 func testAuditConfig() *config.ClusterGatewayConfig {
@@ -342,6 +358,115 @@ func TestSandboxAuditMiddlewareRejectsOversizedResponseWithoutLeakingHeaders(t *
 	}
 	if writer.events[1].Request.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("overflow result status = %d, want 503", writer.events[1].Request.StatusCode)
+	}
+}
+
+func TestPublicExposurePreAdmissionRejectionsDoNotWriteDurableAudit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		zeroQuota  bool
+		routeAuth  *mgr.SandboxAppServiceRouteAuth
+		wantStatus int
+	}{
+		{
+			name: "invalid route credential",
+			routeAuth: &mgr.SandboxAppServiceRouteAuth{
+				Mode:              mgr.SandboxAppServiceRouteAuthModeBearer,
+				BearerTokenSHA256: sha256Hex("correct"),
+			},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "sandbox service request quota is zero",
+			zeroQuota:  true,
+			wantStatus: http.StatusTooManyRequests,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writer := &atomicCountingAuditWriter{}
+			delivery := mustNewAuditDelivery(t, writer)
+			key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+			manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = spec.WriteSuccess(w, http.StatusOK, &mgr.Sandbox{
+					ID:           "sb-demo",
+					TeamID:       "team-1",
+					InternalAddr: "http://127.0.0.1:1",
+					Services: []mgr.SandboxAppService{{
+						ID:   "api",
+						Port: 3000,
+						Ingress: mgr.SandboxAppServiceIngress{
+							Public: true,
+							Routes: []mgr.SandboxAppServiceRoute{{
+								ID:         "root",
+								PathPrefix: "/",
+								Auth:       tt.routeAuth,
+							}},
+						},
+					}},
+				})
+			}))
+			t.Cleanup(manager.Close)
+
+			teamQuotaController := newAllowingTeamQuotaController(zap.NewNop())
+			if tt.zeroQuota {
+				teamQuotaController = newZeroRateTeamQuotaController(zap.NewNop())
+			}
+			handler := newSandboxServiceExposureTestServerWithManagerURLQuotaAndConfigure(
+				t,
+				manager.URL,
+				teamQuotaController,
+				func(server *Server) {
+					server.cfg.RegionID = "region-1"
+					server.cfg.ClusterID = "cluster-1"
+					server.cfg.SandboxObservability = config.SandboxObservabilityConfig{
+						AuditEnabled: true,
+					}
+					server.auditSigningKey = key
+					server.auditDelivery = delivery
+				},
+			)
+
+			const requestCount = 32
+			var waitGroup sync.WaitGroup
+			failures := make(chan string, requestCount)
+			for range requestCount {
+				waitGroup.Add(1)
+				go func() {
+					defer waitGroup.Done()
+					recorder := httptest.NewRecorder()
+					request := httptest.NewRequest(http.MethodGet, "http://gateway/", nil)
+					request.Host = "sb-demo--p3000.aws-us-east-1.sandbox0.app"
+					request.Header.Set("Authorization", "Bearer wrong")
+					handler.ServeHTTP(recorder, request)
+					if recorder.Code != tt.wantStatus {
+						failures <- fmt.Sprintf(
+							"status = %d, want %d; body=%s",
+							recorder.Code,
+							tt.wantStatus,
+							recorder.Body.String(),
+						)
+					}
+				}()
+			}
+			waitGroup.Wait()
+			close(failures)
+			for failure := range failures {
+				t.Error(failure)
+			}
+
+			if calls := writer.calls.Load(); calls != 0 {
+				t.Fatalf("durable audit writer calls = %d, want 0", calls)
+			}
+			delivery.mu.Lock()
+			spooledEntries := delivery.usage.entries
+			delivery.mu.Unlock()
+			if spooledEntries != 0 {
+				t.Fatalf("durable audit spool entries = %d, want 0", spooledEntries)
+			}
+		})
 	}
 }
 

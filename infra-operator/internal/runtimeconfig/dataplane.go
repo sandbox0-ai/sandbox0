@@ -34,7 +34,6 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.SandboxMaxMemory = spec.SandboxMaxMemory
 	cfg.SandboxRuntimeClassName = spec.SandboxRuntimeClassName
 	cfg.ProcdBinImageRef = spec.ProcdBinImageRef
-	cfg.DefaultTeamQuotas = cloneTeamQuotaLimitConfigs(spec.DefaultTeamQuotas)
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout
 	cfg.NetdPolicyApplyPollInterval = spec.NetdPolicyApplyPollInterval
@@ -71,20 +70,6 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		ScaleDownPercent:        spec.Autoscaler.ScaleDownPercent,
 	}
 	return cfg
-}
-
-func cloneTeamQuotaLimitConfigs(in []infrav1alpha1.TeamQuotaLimitConfig) []apiconfig.TeamQuotaLimitConfig {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]apiconfig.TeamQuotaLimitConfig, 0, len(in))
-	for _, limit := range in {
-		out = append(out, apiconfig.TeamQuotaLimitConfig{
-			Dimension:  limit.Dimension,
-			LimitValue: limit.LimitValue,
-		})
-	}
-	return out
 }
 
 func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StorageProxyConfig {
@@ -132,8 +117,6 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 	cfg.HTTPReadTimeout = spec.HTTPReadTimeout
 	cfg.HTTPWriteTimeout = spec.HTTPWriteTimeout
 	cfg.HTTPIdleTimeout = spec.HTTPIdleTimeout
-	cfg.MaxOpsPerSecond = spec.MaxOpsPerSecond
-	cfg.MaxBytesPerSecond = spec.MaxBytesPerSecond
 	cfg.WatchEventsEnabled = spec.WatchEventsEnabled
 	cfg.WatchEventQueueSize = spec.WatchEventQueueSize
 	cfg.RestoreRemountTimeout = spec.RestoreRemountTimeout
@@ -164,13 +147,13 @@ func ToNetd(spec *infrav1alpha1.NetdConfig) *apiconfig.NetdConfig {
 	cfg.ProxyHTTPPort = spec.ProxyHTTPPort
 	cfg.ProxyHTTPSPort = spec.ProxyHTTPSPort
 	cfg.ProxyHeaderLimit = spec.ProxyHeaderLimit
+	cfg.ProxyMaxActiveTCPConnections = spec.ProxyMaxActiveTCPConnections
+	cfg.ProxyUDPWorkers = spec.ProxyUDPWorkers
+	cfg.ProxyUDPQueueSize = spec.ProxyUDPQueueSize
 	cfg.ProxyUpstreamTimeout = spec.ProxyUpstreamTimeout
 	cfg.EgressBandwidthBytesPerSecond = spec.EgressBandwidthBytesPerSecond
 	cfg.IngressBandwidthBytesPerSecond = spec.IngressBandwidthBytesPerSecond
 	cfg.BandwidthBurstBytes = spec.BandwidthBurstBytes
-	cfg.TeamEgressBandwidthBytesPerSecond = spec.TeamEgressBandwidthBytesPerSecond
-	cfg.TeamIngressBandwidthBytesPerSecond = spec.TeamIngressBandwidthBytesPerSecond
-	cfg.TeamBandwidthBurstBytes = spec.TeamBandwidthBurstBytes
 	cfg.DNSPort = spec.DNSPort
 	cfg.PlatformAllowedCIDRs = cloneStrings(spec.PlatformAllowedCIDRs)
 	cfg.PlatformDeniedCIDRs = cloneStrings(spec.PlatformDeniedCIDRs)
@@ -187,6 +170,14 @@ func ToNetd(spec *infrav1alpha1.NetdConfig) *apiconfig.NetdConfig {
 	cfg.AuditLogPath = spec.AuditLogPath
 	cfg.AuditLogMaxBytes = spec.AuditLogMaxBytes
 	cfg.AuditLogMaxBackups = spec.AuditLogMaxBackups
+	cfg.SandboxObservabilityAuditSpoolLimits = apiconfig.AuditSpoolLimitsConfig{
+		MaxBytes:       spec.AuditSpoolLimits.MaxBytes,
+		MaxEntries:     spec.AuditSpoolLimits.MaxEntries,
+		MaxTeamBytes:   spec.AuditSpoolLimits.MaxTeamBytes,
+		MaxTeamEntries: spec.AuditSpoolLimits.MaxTeamEntries,
+		MinFreeBytes:   spec.AuditSpoolLimits.MinFreeBytes,
+		MaxRecordBytes: spec.AuditSpoolLimits.MaxRecordBytes,
+	}
 	cfg.ShutdownDelay = spec.ShutdownDelay
 	return cfg
 }

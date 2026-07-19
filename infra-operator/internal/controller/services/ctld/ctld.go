@@ -122,6 +122,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "containerd-data", MountPath: containerdDataMountPath, ReadOnly: true},
 		{Name: netdsvc.RunVolumeName, MountPath: netdsvc.RunMountDirectory},
 	}
+	keySecretName, privateKeyKey, publicKeyKey := internalauthsvc.GetDataPlaneKeyRefs(infra)
+	volumeMounts = append(volumeMounts, corev1.VolumeMount{
+		Name:      "internal-jwt-public-key",
+		MountPath: pkginternalauth.DefaultInternalJWTPublicKeyPath,
+		SubPath:   "internal_jwt_public.key",
+		ReadOnly:  true,
+	})
 	volumes := []corev1.Volume{
 		{
 			Name: "config",
@@ -168,9 +175,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		},
 		{Name: netdsvc.RunVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{
+			Name: "internal-jwt-public-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: keySecretName,
+					Items: []corev1.KeyToPath{{
+						Key:  publicKeyKey,
+						Path: "internal_jwt_public.key",
+					}},
+				},
+			},
+		},
 	}
 	if strings.TrimSpace(config.SandboxObservabilityRuntimeSamplesIngestURL) != "" {
-		keySecretName, privateKeyKey, _ := internalauthsvc.GetDataPlaneKeyRefs(infra)
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "internal-jwt-private-key",
 			MountPath: pkginternalauth.DefaultInternalJWTPrivateKeyPath,

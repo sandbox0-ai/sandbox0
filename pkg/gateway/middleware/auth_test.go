@@ -80,6 +80,13 @@ func TestAuthMiddleware_JWTAccessToken(t *testing.T) {
 	if authCtx.UserID != "user-1" || authCtx.TeamID != "" {
 		t.Fatalf("unexpected auth context: user=%s team=%s", authCtx.UserID, authCtx.TeamID)
 	}
+	if len(authCtx.TeamGrants) != 2 {
+		t.Fatalf("team grants = %+v, want both signed grants", authCtx.TeamGrants)
+	}
+	grant, ok := authCtx.FindTeamGrant("team-2")
+	if !ok || grant.TeamRole != "developer" || grant.HomeRegionID != "aws-us-east-1" {
+		t.Fatalf("team-2 grant = %+v, %t", grant, ok)
+	}
 }
 
 func TestAuthMiddleware_JWTAccessTokenImplicitSingleTeamInDirectClusterMode(t *testing.T) {

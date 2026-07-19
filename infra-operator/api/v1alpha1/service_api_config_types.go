@@ -30,6 +30,8 @@ type GatewayConfig struct {
 	JWTPublicKeyFile string `json:"jwtPublicKeyFile,omitempty"`
 	// +optional
 	// +kubebuilder:default="15m"
+	// JWTAccessTokenTTL is also the maximum access-token lifetime accepted by
+	// verifier-only regional gateways.
 	JWTAccessTokenTTL metav1.Duration `json:"jwtAccessTokenTTL,omitempty"`
 	// +optional
 	// +kubebuilder:default="168h"
@@ -38,22 +40,6 @@ type GatewayConfig struct {
 	RedisURL       string          `json:"-"`
 	RedisKeyPrefix string          `json:"-"`
 	RedisTimeout   metav1.Duration `json:"-"`
-
-	// Rate limiting
-	// +optional
-	// +kubebuilder:default=100
-	RateLimitRPS int `json:"rateLimitRps,omitempty"`
-	// +optional
-	// +kubebuilder:default=200
-	RateLimitBurst int `json:"rateLimitBurst,omitempty"`
-	// +optional
-	// +kubebuilder:default="10m"
-	RateLimitCleanupInterval metav1.Duration `json:"rateLimitCleanupInterval,omitempty"`
-	RateLimitBackend         string          `json:"-"`
-	RateLimitRedisURL        string          `json:"-"`
-	RateLimitRedisKeyPrefix  string          `json:"-"`
-	RateLimitRedisTimeout    metav1.Duration `json:"-"`
-	RateLimitFailOpen        bool            `json:"-"`
 
 	// Identity and Teams
 	// +optional
@@ -65,15 +51,24 @@ type GatewayConfig struct {
 	// +kubebuilder:default={}
 	BuiltInAuth BuiltInAuthConfig `json:"builtInAuth,omitempty"`
 
+	// IdentityResourceGuard bounds identity graph and authentication session
+	// state at the gateway that owns the public identity surface.
+	// +optional
+	// +kubebuilder:default={}
+	IdentityResourceGuard IdentityResourceGuardConfig `json:"identityResourceGuard,omitempty"`
+
+	// OverloadGuard protects the complete public identity and authentication
+	// surface with one aggregate budget. It is independent from Team Quota.
+	// +optional
+	// +kubebuilder:default={}
+	OverloadGuard OverloadGuardConfig `json:"overloadGuard,omitempty"`
+
 	// OIDCProviders configures external identity providers.
 	// +optional
 	OIDCProviders []OIDCProviderConfig `json:"oidcProviders,omitempty"`
 	// +optional
 	// +kubebuilder:default="10m"
 	OIDCStateTTL metav1.Duration `json:"oidcStateTtl,omitempty"`
-	// +optional
-	// +kubebuilder:default="5m"
-	OIDCStateCleanupInterval metav1.Duration `json:"oidcStateCleanupInterval,omitempty"`
 
 	// BaseURL sets the external base URL used by browser-facing auth flows.
 	// +optional
@@ -224,6 +219,7 @@ type RegionalGatewayConfig struct {
 }
 
 // SSHGatewayConfig defines user-facing configuration for ssh-gateway.
+// +kubebuilder:validation:XValidation:rule="!has(self.platformHandshakeTimeout) || duration(self.platformHandshakeTimeout) > duration('0s')",message="platformHandshakeTimeout must be positive"
 type SSHGatewayConfig struct {
 	// +optional
 	// +kubebuilder:default=2222
@@ -243,6 +239,26 @@ type SSHGatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="ssh-gateway"
 	InternalAuthCaller string `json:"internalAuthCaller,omitempty"`
+	// PlatformMaxConcurrentHandshakes bounds unauthenticated handshakes in one
+	// ssh-gateway process. This is a platform overload guard, not Team Quota.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65536
+	// +kubebuilder:default=128
+	PlatformMaxConcurrentHandshakes int `json:"platformMaxConcurrentHandshakes,omitempty"`
+	// PlatformHandshakeTimeout bounds how long one unauthenticated client may
+	// occupy a handshake slot.
+	// +optional
+	// +kubebuilder:default="10s"
+	PlatformHandshakeTimeout metav1.Duration `json:"platformHandshakeTimeout,omitempty"`
+	// PlatformMaxConcurrentChannelsPerConnection bounds active session
+	// channels in one SSH connection. This guard is independent from Team
+	// Quota.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=256
+	// +kubebuilder:default=16
+	PlatformMaxConcurrentChannelsPerConnection int `json:"platformMaxConcurrentChannelsPerConnection,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"
 	ResumeTimeout metav1.Duration `json:"resumeTimeout,omitempty"`
@@ -411,6 +427,12 @@ type SandboxObservabilityAuditConfig struct {
 	// whose volume can be reattached after cross-node rescheduling.
 	// +optional
 	DeliveryPersistence *SandboxAuditDeliveryPersistenceConfig `json:"deliveryPersistence,omitempty"`
+
+	// SpoolLimits bounds cluster-gateway's durable audit delivery backlog
+	// globally and per team. These are platform disk-safety guards, not Team
+	// Quota or billing policy.
+	// +optional
+	SpoolLimits AuditSpoolLimitsConfig `json:"spoolLimits,omitempty"`
 }
 
 // SandboxAuditDeliveryPersistenceConfig configures cluster-gateway's audit
@@ -419,7 +441,7 @@ type SandboxObservabilityAuditConfig struct {
 type SandboxAuditDeliveryPersistenceConfig struct {
 	// Size specifies the delivery buffer capacity.
 	// +optional
-	// +kubebuilder:default="1Gi"
+	// +kubebuilder:default="3Gi"
 	Size resource.Quantity `json:"size,omitempty"`
 
 	// StorageClass selects a durable Kubernetes storage class. Empty uses the
@@ -901,13 +923,6 @@ type ManagerConfig struct {
 	// ProcdBinImageRef overrides the OCI image used for the procd binary image volume.
 	// +optional
 	ProcdBinImageRef string `json:"procdBinImageRef,omitempty"`
-	// DefaultTeamQuotas configures region-wide fallback team quota limits.
-	// Team-specific quota rows in the database override these defaults.
-	// +optional
-	// +kubebuilder:validation:MaxItems=7
-	// +listType=map
-	// +listMapKey=dimension
-	DefaultTeamQuotas []TeamQuotaLimitConfig `json:"defaultTeamQuotas,omitempty"`
 	// AllowColdStartWithoutReadyDataPlane lets cold claims create Pending pods
 	// when no sandbox data-plane-ready nodes exist yet. This is required for
 	// node autoscaler scale-from-zero deployments.
@@ -952,15 +967,6 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Autoscaler AutoscalerConfig `json:"autoscaler,omitempty"`
-}
-
-// TeamQuotaLimitConfig configures a fallback quota limit for teams without a
-// database override for the same dimension.
-type TeamQuotaLimitConfig struct {
-	// +kubebuilder:validation:Enum=active_sandboxes;cpu_millicpu;memory_mib;volume_storage_gb;snapshot_storage_gb;egress;ingress
-	Dimension string `json:"dimension"`
-	// +kubebuilder:validation:Minimum=0
-	LimitValue int64 `json:"limitValue"`
 }
 
 // StorageProxyConfig defines user-facing configuration for the manager storage runtime.
@@ -1082,12 +1088,6 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="60s"
 	HTTPIdleTimeout string `json:"httpIdleTimeout,omitempty"`
 	// +optional
-	// +kubebuilder:default=10000
-	MaxOpsPerSecond int `json:"maxOpsPerSecond,omitempty"`
-	// +optional
-	// +kubebuilder:default=1073741824
-	MaxBytesPerSecond int64 `json:"maxBytesPerSecond,omitempty"`
-	// +optional
 	// +kubebuilder:default=true
 	WatchEventsEnabled bool `json:"watchEventsEnabled,omitempty"`
 	// +optional
@@ -1101,6 +1101,7 @@ type StorageProxyConfig struct {
 }
 
 // NetdConfig defines user-facing configuration for the ctld network runtime.
+// +kubebuilder:validation:XValidation:rule="!has(self.proxyUdpWorkers) || !has(self.proxyUdpQueueSize) || self.proxyUdpWorkers <= self.proxyUdpQueueSize",message="proxyUdpWorkers must not exceed proxyUdpQueueSize"
 type NetdConfig struct {
 	// +optional
 	// +kubebuilder:default="info"
@@ -1150,6 +1151,26 @@ type NetdConfig struct {
 	ProxyHTTPSPort int `json:"proxyHttpsPort,omitempty"`
 	// +optional
 	ProxyHeaderLimit int64 `json:"proxyHeaderLimit,omitempty"`
+	// ProxyMaxActiveTCPConnections bounds accepted TCP connections executing in
+	// one ctld network runtime before tenant lookup or distributed admission.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65536
+	// +kubebuilder:default=4096
+	ProxyMaxActiveTCPConnections int `json:"proxyMaxActiveTcpConnections,omitempty"`
+	// ProxyUDPWorkers bounds concurrent datagram classification and forwarding.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=256
+	// +kubebuilder:default=32
+	ProxyUDPWorkers int `json:"proxyUdpWorkers,omitempty"`
+	// ProxyUDPQueueSize bounds queued and executing datagrams. A full queue
+	// drops a datagram before allocating per-datagram work.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8192
+	// +kubebuilder:default=1024
+	ProxyUDPQueueSize int `json:"proxyUdpQueueSize,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"
 	ProxyUpstreamTimeout metav1.Duration `json:"proxyUpstreamTimeout,omitempty"`
@@ -1165,18 +1186,6 @@ type NetdConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	// Token bucket burst in bytes for bandwidth limiting. Zero uses one second of the configured rate.
 	BandwidthBurstBytes int64 `json:"bandwidthBurstBytes,omitempty"`
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// Cluster-scoped per-team egress bandwidth limit in bytes per second. Requires spec.redis. Zero disables throttling.
-	TeamEgressBandwidthBytesPerSecond int64 `json:"teamEgressBandwidthBytesPerSecond,omitempty"`
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// Cluster-scoped per-team ingress bandwidth limit in bytes per second. Requires spec.redis. Zero disables throttling.
-	TeamIngressBandwidthBytesPerSecond int64 `json:"teamIngressBandwidthBytesPerSecond,omitempty"`
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// Token bucket burst in bytes for team bandwidth limiting. Zero uses one second of the configured rate.
-	TeamBandwidthBurstBytes int64 `json:"teamBandwidthBurstBytes,omitempty"`
 	// +optional
 	// +kubebuilder:default=53
 	DNSPort int `json:"dnsPort,omitempty"`
@@ -1215,7 +1224,43 @@ type NetdConfig struct {
 	// +optional
 	// +kubebuilder:default=5
 	AuditLogMaxBackups int `json:"auditLogMaxBackups,omitempty"`
+	// AuditSpoolLimits bounds each node-local network-audit delivery backlog.
+	// It is a platform disk-safety guard, not Team Quota.
+	// +optional
+	AuditSpoolLimits AuditSpoolLimitsConfig `json:"auditSpoolLimits,omitempty"`
 	// +optional
 	// +kubebuilder:default="2s"
 	ShutdownDelay metav1.Duration `json:"shutdownDelay,omitempty"`
+}
+
+// AuditSpoolLimitsConfig bounds retained audit delivery records globally and
+// per team within one spool.
+// +kubebuilder:validation:XValidation:rule="!has(self.maxTeamBytes) || !has(self.maxBytes) || self.maxTeamBytes <= self.maxBytes",message="maxTeamBytes must not exceed maxBytes"
+// +kubebuilder:validation:XValidation:rule="!has(self.maxTeamEntries) || !has(self.maxEntries) || self.maxTeamEntries <= self.maxEntries",message="maxTeamEntries must not exceed maxEntries"
+// +kubebuilder:validation:XValidation:rule="!has(self.maxRecordBytes) || !has(self.maxTeamBytes) || self.maxRecordBytes <= self.maxTeamBytes",message="maxRecordBytes must not exceed maxTeamBytes"
+type AuditSpoolLimitsConfig struct {
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1073741824
+	MaxBytes int64 `json:"maxBytes,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=100000
+	MaxEntries int64 `json:"maxEntries,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=268435456
+	MaxTeamBytes int64 `json:"maxTeamBytes,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=25000
+	MaxTeamEntries int64 `json:"maxTeamEntries,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1073741824
+	MinFreeBytes int64 `json:"minFreeBytes,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1048576
+	MaxRecordBytes int64 `json:"maxRecordBytes,omitempty"`
 }

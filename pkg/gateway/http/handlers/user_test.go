@@ -22,15 +22,16 @@ const (
 )
 
 type fakeUserRepository struct {
-	user                   *identity.User
-	identities             []*identity.UserIdentity
-	sshKeys                []*identity.UserSSHPublicKey
-	createSSHPublicKeyErr  error
-	listSSHPublicKeysErr   error
-	deleteSSHPublicKeyErr  error
-	lastDeletedSSHPublicID string
-	lastDeletedTeamID      string
-	lastDeletedUserID      string
+	user                    *identity.User
+	identities              []*identity.UserIdentity
+	sshKeys                 []*identity.UserSSHPublicKey
+	createSSHPublicKeyCalls int
+	createSSHPublicKeyErr   error
+	listSSHPublicKeysErr    error
+	deleteSSHPublicKeyErr   error
+	lastDeletedSSHPublicID  string
+	lastDeletedTeamID       string
+	lastDeletedUserID       string
 }
 
 func (f *fakeUserRepository) GetUserByID(_ context.Context, id string) (*identity.User, error) {
@@ -58,6 +59,7 @@ func (f *fakeUserRepository) DeleteUserIdentity(_ context.Context, _ string) err
 }
 
 func (f *fakeUserRepository) CreateUserSSHPublicKey(_ context.Context, key *identity.UserSSHPublicKey) error {
+	f.createSSHPublicKeyCalls++
 	if f.createSSHPublicKeyErr != nil {
 		return f.createSSHPublicKeyErr
 	}
@@ -342,5 +344,72 @@ func TestCreateUserSSHPublicKeyRejectsInvalidKey(t *testing.T) {
 	}
 	if !errors.Is(repo.createSSHPublicKeyErr, identity.ErrSSHPublicKeyAlreadyExists) && len(repo.sshKeys) != 0 {
 		t.Fatalf("expected no key to be stored on invalid input")
+	}
+}
+
+func TestCreateUserSSHPublicKeyRejectsOversizedBodyBeforeRepository(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := &fakeUserRepository{user: &identity.User{ID: "user-1"}}
+	handler := NewUserHandler(repo, zap.NewNop())
+	body := `{"name":"Laptop","public_key":"` + testSSHPublicKey +
+		`","padding":"` + strings.Repeat("x", int(identity.MaxSSHPublicKeyRequestBytes)) + `"}`
+	ctx, rec := newAuthenticatedUserContext(
+		t,
+		http.MethodPost,
+		"/users/me/ssh-keys",
+		body,
+	)
+
+	handler.CreateUserSSHPublicKey(ctx)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+	if repo.createSSHPublicKeyCalls != 0 {
+		t.Fatalf("repository create calls = %d, want 0", repo.createSSHPublicKeyCalls)
+	}
+}
+
+func TestCreateUserSSHPublicKeyRejectsOversizedFieldsBeforeRepository(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "name",
+			body: `{"name":"` + strings.Repeat("n", int(identity.MaxSSHPublicKeyNameBytes)+1) +
+				`","public_key":"` + testSSHPublicKey + `"}`,
+		},
+		{
+			name: "comment",
+			body: `{"name":"Laptop","public_key":"` +
+				strings.Split(testSSHPublicKey, " ")[0] + " " +
+				strings.Split(testSSHPublicKey, " ")[1] + " " +
+				strings.Repeat("c", int(identity.MaxSSHPublicKeyCommentBytes)+1) + `"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &fakeUserRepository{user: &identity.User{ID: "user-1"}}
+			handler := NewUserHandler(repo, zap.NewNop())
+			ctx, rec := newAuthenticatedUserContext(
+				t,
+				http.MethodPost,
+				"/users/me/ssh-keys",
+				tt.body,
+			)
+
+			handler.CreateUserSSHPublicKey(ctx)
+
+			if rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+			}
+			if repo.createSSHPublicKeyCalls != 0 {
+				t.Fatalf("repository create calls = %d, want 0", repo.createSSHPublicKeyCalls)
+			}
+		})
 	}
 }

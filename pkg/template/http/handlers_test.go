@@ -126,6 +126,77 @@ func TestCreateTemplate_RejectsPrivilegedFieldsForRegularTeam(t *testing.T) {
 	}
 }
 
+func TestCreateTemplateRejectsOversizedBodyBeforeStore(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := `{"template_id":"demo","spec":{},"padding":"` +
+		strings.Repeat("x", int(template.MaxObjectRequestBytes)) + `"}`
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/templates",
+		strings.NewReader(body),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+	if store.createCalled {
+		t.Fatal("store CreateTemplate was called for oversized body")
+	}
+}
+
+func TestCreateTemplateRejectsOversizedSpecBeforeStore(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	request := map[string]any{
+		"template_id": "demo",
+		"spec": map[string]any{
+			"description": strings.Repeat("d", int(template.MaxDescriptionBytes)+1),
+			"mainContainer": map[string]any{
+				"image":     "ubuntu:22.04",
+				"resources": map[string]any{"memory": "4Gi"},
+			},
+			"pool": map[string]any{"minIdle": 0, "maxIdle": 1},
+		},
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+	if store.createCalled {
+		t.Fatal("store CreateTemplate was called for oversized spec")
+	}
+}
+
 func TestCreateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 	t.Parallel()
 
@@ -832,7 +903,7 @@ func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 				Spec: v1alpha1.SandboxTemplateSpec{
 					MainContainer: v1alpha1.ContainerSpec{
 						Image: "ubuntu:22.04",
-						Resources: v1alpha1.ResourceQuota{
+						Resources: v1alpha1.SandboxResourceLimits{
 							CPU:    resource.MustParse("1"),
 							Memory: resource.MustParse("4Gi"),
 						},
@@ -964,7 +1035,7 @@ func TestUpdateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 				Spec: v1alpha1.SandboxTemplateSpec{
 					MainContainer: v1alpha1.ContainerSpec{
 						Image: "ubuntu:22.04",
-						Resources: v1alpha1.ResourceQuota{
+						Resources: v1alpha1.SandboxResourceLimits{
 							CPU:    resource.MustParse("1"),
 							Memory: resource.MustParse("4Gi"),
 						},
@@ -1047,7 +1118,7 @@ func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) 
 	spec := v1alpha1.SandboxTemplateSpec{
 		MainContainer: v1alpha1.ContainerSpec{
 			Image: "ubuntu:22.04",
-			Resources: v1alpha1.ResourceQuota{
+			Resources: v1alpha1.SandboxResourceLimits{
 				CPU:    resource.MustParse("1"),
 				Memory: resource.MustParse("4Gi"),
 			},
@@ -1097,7 +1168,7 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 		return v1alpha1.SandboxTemplateSpec{
 			MainContainer: v1alpha1.ContainerSpec{
 				Image: "ubuntu:22.04",
-				Resources: v1alpha1.ResourceQuota{
+				Resources: v1alpha1.SandboxResourceLimits{
 					CPU:    resource.MustParse("1"),
 					Memory: resource.MustParse("4Gi"),
 				},
@@ -1388,7 +1459,7 @@ func TestValidateTemplateSpecForClaims_RejectsMismatchedMainResources(t *testing
 	spec := v1alpha1.SandboxTemplateSpec{
 		MainContainer: v1alpha1.ContainerSpec{
 			Image: "ubuntu:22.04",
-			Resources: v1alpha1.ResourceQuota{
+			Resources: v1alpha1.SandboxResourceLimits{
 				CPU:    resource.MustParse("1"),
 				Memory: resource.MustParse("1Gi"),
 			},
@@ -1411,7 +1482,7 @@ func TestValidateTemplateSpecForClaims_RejectsSystemOwnedMismatchedMainResources
 	spec := v1alpha1.SandboxTemplateSpec{
 		MainContainer: v1alpha1.ContainerSpec{
 			Image: "ubuntu:22.04",
-			Resources: v1alpha1.ResourceQuota{
+			Resources: v1alpha1.SandboxResourceLimits{
 				CPU:    resource.MustParse("1"),
 				Memory: resource.MustParse("1Gi"),
 			},
@@ -1507,7 +1578,7 @@ func validTemplateSpec() v1alpha1.SandboxTemplateSpec {
 	return v1alpha1.SandboxTemplateSpec{
 		MainContainer: v1alpha1.ContainerSpec{
 			Image: "ubuntu:22.04",
-			Resources: v1alpha1.ResourceQuota{
+			Resources: v1alpha1.SandboxResourceLimits{
 				CPU:    resource.MustParse("1"),
 				Memory: resource.MustParse("4Gi"),
 			},

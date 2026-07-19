@@ -83,6 +83,11 @@ func (r *Reconciler) ReconcileManagerRBAC(ctx context.Context, infra *infrav1alp
 			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 		},
 		{
+			APIGroups: []string{"node.k8s.io"},
+			Resources: []string{"runtimeclasses"},
+			Verbs:     []string{"get", "list", "watch"},
+		},
+		{
 			APIGroups: []string{"coordination.k8s.io"},
 			Resources: []string{"leases"},
 			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},

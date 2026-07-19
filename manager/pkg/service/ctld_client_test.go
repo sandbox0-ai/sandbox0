@@ -103,18 +103,6 @@ func TestCtldClientRootFSMethods(t *testing.T) {
 			},
 		},
 		{
-			name: "save",
-			path: "/api/v1/rootfs/save",
-			call: func(client *CtldClient, address string) error {
-				_, err := client.SaveRootFS(context.Background(), address, ctldapi.SaveRootFSRequest{
-					Target:    ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
-					SandboxID: "sandbox-1",
-					TeamID:    "team-1",
-				})
-				return err
-			},
-		},
-		{
 			name: "apply",
 			path: "/api/v1/rootfs/apply",
 			call: func(client *CtldClient, address string) error {
@@ -136,8 +124,6 @@ func TestCtldClientRootFSMethods(t *testing.T) {
 				switch tt.name {
 				case "inspect":
 					_ = json.NewEncoder(w).Encode(ctldapi.InspectRootFSResponse{Info: ctldapi.RootFSInfo{Runtime: "runc"}})
-				case "save":
-					_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Descriptor: ctldapi.RootFSDiffDescriptor{ObjectKey: "rootfs/diff.tar"}})
 				case "apply":
 					_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
 				}
@@ -152,26 +138,26 @@ func TestCtldClientRootFSMethods(t *testing.T) {
 
 func TestCtldClientRootFSMethodsCanUseExtendedTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
+		assert.Equal(t, "/api/v1/rootfs/snapshots/prepare", r.URL.Path)
 		time.Sleep(80 * time.Millisecond)
-		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
+		_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+			Handle:     "prepared-handle",
 			Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:diff"},
 		})
 	}))
 	defer server.Close()
 
 	client := NewCtldClientWithHTTPClient(&http.Client{Timeout: 20 * time.Millisecond})
-	req := ctldapi.SaveRootFSRequest{
-		Target:    ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
-		SandboxID: "sandbox-1",
-		TeamID:    "team-1",
+	req := ctldapi.PrepareRootFSSnapshotRequest{
+		Target: ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
 	}
 
-	_, err := client.SaveRootFS(context.Background(), server.URL, req)
+	_, err := client.PrepareRootFSSnapshotWithTimeout(context.Background(), server.URL, req, 20*time.Millisecond)
 	require.Error(t, err)
 
-	resp, err := client.SaveRootFSWithTimeout(context.Background(), server.URL, req, time.Second)
+	resp, err := client.PrepareRootFSSnapshotWithTimeout(context.Background(), server.URL, req, time.Second)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
+	assert.Equal(t, "prepared-handle", resp.Handle)
 	assert.Equal(t, "sha256:diff", resp.Descriptor.Digest)
 }

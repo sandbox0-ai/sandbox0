@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -10,6 +11,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	clientsetfake "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/fake"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/resourceguard"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -127,6 +130,39 @@ func TestCreateTemplateEnsuresNamespaceBaseline(t *testing.T) {
 	assert.Equal(t, []string{expectedNamespace}, reconciler.calls)
 	_, err = k8sClient.CoreV1().Namespaces().Get(context.Background(), expectedNamespace, metav1.GetOptions{})
 	require.NoError(t, err)
+}
+
+func TestTemplateServiceRejectsOversizedSpecBeforeKubernetesWrites(t *testing.T) {
+	service, k8sClient := newTemplateServiceForTests(t)
+	crdClient, ok := service.crdClient.(*clientsetfake.Clientset)
+	if !ok {
+		t.Fatalf("CRD client type = %T, want fake clientset", service.crdClient)
+	}
+	k8sActionsBefore := len(k8sClient.Actions())
+	crdActionsBefore := len(crdClient.Actions())
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "oversized"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Description: strings.Repeat("d", int(templatepkg.MaxDescriptionBytes)+1),
+		},
+	}
+
+	if _, err := service.CreateTemplate(context.Background(), template); !resourceguard.IsTooLarge(err) {
+		t.Fatalf("CreateTemplate() error = %v, want TooLargeError", err)
+	}
+	if len(k8sClient.Actions()) != k8sActionsBefore {
+		t.Fatalf("Kubernetes actions changed from %d to %#v", k8sActionsBefore, k8sClient.Actions())
+	}
+	if len(crdClient.Actions()) != crdActionsBefore {
+		t.Fatalf("CRD actions changed from %d to %#v", crdActionsBefore, crdClient.Actions())
+	}
+
+	if _, err := service.UpdateTemplate(context.Background(), template); !resourceguard.IsTooLarge(err) {
+		t.Fatalf("UpdateTemplate() error = %v, want TooLargeError", err)
+	}
+	if len(crdClient.Actions()) != crdActionsBefore {
+		t.Fatalf("CRD actions after update changed from %d to %#v", crdActionsBefore, crdClient.Actions())
+	}
 }
 
 func TestCreateTeamTemplateEnsuresNamespaceBaseline(t *testing.T) {

@@ -74,7 +74,8 @@ spec:
                   imagePullPolicy:
                     type: string
                   resources:
-                    description: ResourceQuota defines resource quota (per template)
+                    description: SandboxResourceLimits defines the per-sandbox container
+                      resource limits.
                     properties:
                       cpu:
                         anyOf:

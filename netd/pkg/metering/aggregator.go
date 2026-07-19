@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	policypkg "github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 )
 
@@ -23,11 +22,6 @@ type txRecorder interface {
 
 type Recorder interface {
 	RunInTx(ctx context.Context, fn func(tx txRecorder) error) error
-}
-
-type quotaStore interface {
-	GetLimit(ctx context.Context, teamID string, dimension quota.Dimension) (*quota.Limit, error)
-	CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error)
 }
 
 type repository interface {
@@ -86,7 +80,6 @@ type Aggregator struct {
 	clusterID   string
 	nodeName    string
 	producer    string
-	quotaStore  quotaStore
 	logger      *zap.Logger
 	now         func() time.Time
 	mu          sync.Mutex
@@ -113,23 +106,6 @@ func NewAggregator(recorder Recorder, regionID, clusterID, nodeName string, logg
 	}
 	agg.windowStart = agg.now()
 	return agg
-}
-
-func (a *Aggregator) SetQuotaStore(store quotaStore) {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.quotaStore = store
-}
-
-func (a *Aggregator) AllowEgress(compiled *policypkg.CompiledPolicy) error {
-	return a.allowNetworkUsage(context.Background(), compiled, quota.DimensionEgress)
-}
-
-func (a *Aggregator) AllowIngress(compiled *policypkg.CompiledPolicy) error {
-	return a.allowNetworkUsage(context.Background(), compiled, quota.DimensionIngress)
 }
 
 func (a *Aggregator) RecordEgress(compiled *policypkg.CompiledPolicy, bytes int64) {
@@ -164,58 +140,6 @@ func (a *Aggregator) record(compiled *policypkg.CompiledPolicy, bytes int64, egr
 	} else {
 		entry.ingress += bytes
 	}
-}
-
-func (a *Aggregator) allowNetworkUsage(ctx context.Context, compiled *policypkg.CompiledPolicy, dimension quota.Dimension) error {
-	if a == nil || compiled == nil || compiled.TeamID == "" {
-		return nil
-	}
-	a.mu.Lock()
-	store := a.quotaStore
-	a.mu.Unlock()
-	if store == nil {
-		return nil
-	}
-	limit, err := store.GetLimit(ctx, compiled.TeamID, dimension)
-	if err != nil {
-		return err
-	}
-	if limit == nil {
-		return nil
-	}
-	current, err := store.CurrentUsage(ctx, compiled.TeamID, dimension)
-	if err != nil {
-		return err
-	}
-	a.mu.Lock()
-	current += a.localNetworkUsageLocked(compiled.TeamID, dimension)
-	a.mu.Unlock()
-	decision := quota.Check(compiled.TeamID, dimension, current, 1, limit)
-	return decision.Err()
-}
-
-func (a *Aggregator) localNetworkUsageLocked(teamID string, dimension quota.Dimension) int64 {
-	var total int64
-	add := func(usage *usageTotals) {
-		if usage == nil || usage.teamID != teamID {
-			return
-		}
-		switch dimension {
-		case quota.DimensionEgress:
-			total += usage.egress
-		case quota.DimensionIngress:
-			total += usage.ingress
-		}
-	}
-	for _, usage := range a.usage {
-		add(usage)
-	}
-	if a.pending != nil {
-		for _, usage := range a.pending.usage {
-			add(usage)
-		}
-	}
-	return total
 }
 
 func (a *Aggregator) Flush(ctx context.Context) error {

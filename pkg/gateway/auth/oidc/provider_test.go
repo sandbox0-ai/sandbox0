@@ -17,6 +17,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
 	"golang.org/x/oauth2"
 )
 
@@ -555,6 +556,7 @@ func TestProviderExchangeSendsPKCEVerifier(t *testing.T) {
 
 func TestManagerGenerateAuthURLStoresVerifierInState(t *testing.T) {
 	manager := &Manager{
+		repo: newFakeIdentityStore(),
 		providers: map[string]*Provider{
 			"supabase": {
 				id: "supabase",
@@ -567,10 +569,9 @@ func TestManagerGenerateAuthURLStoresVerifierInState(t *testing.T) {
 			},
 		},
 		stateTTL: time.Hour,
-		states:   map[string]*StateData{},
 	}
 
-	authURL, err := manager.GenerateAuthURL("supabase", "/")
+	authURL, err := manager.GenerateAuthURL(context.Background(), "supabase", "/")
 	if err != nil {
 		t.Fatalf("generate auth url: %v", err)
 	}
@@ -584,11 +585,53 @@ func TestManagerGenerateAuthURLStoresVerifierInState(t *testing.T) {
 		t.Fatal("expected state query parameter")
 	}
 
-	stateData, err := manager.ValidateState(state)
+	stateData, err := manager.ValidateState(context.Background(), state)
 	if err != nil {
 		t.Fatalf("validate state: %v", err)
 	}
 	if strings.TrimSpace(stateData.CodeVerifier) == "" {
 		t.Fatal("expected code verifier to be stored with state")
+	}
+}
+
+func TestManagerGenerateAuthURLBoundsAndPrunesPendingStates(t *testing.T) {
+	store := newFakeIdentityStore()
+	store.maxPendingOIDCStates = 1
+	manager := &Manager{
+		repo: store,
+		providers: map[string]*Provider{
+			"example": {
+				id: "example",
+				oauth2Config: &oauth2.Config{
+					ClientID: "client-id",
+					Endpoint: oauth2.Endpoint{
+						AuthURL: "https://issuer.example.com/oauth/authorize",
+					},
+				},
+			},
+		},
+		stateTTL: time.Minute,
+	}
+
+	authURL, err := manager.GenerateAuthURL(context.Background(), "example", "/")
+	if err != nil {
+		t.Fatalf("generate first auth URL: %v", err)
+	}
+	if _, err := manager.GenerateAuthURL(context.Background(), "example", "/"); !identity.IsIdentityResourceLimitExceeded(err) {
+		t.Fatalf("second pending state error = %v, want identity resource limit", err)
+	}
+	parsed, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatalf("parse auth URL: %v", err)
+	}
+	state := parsed.Query().Get("state")
+	if _, err := manager.ValidateState(context.Background(), state); err != nil {
+		t.Fatalf("consume first state: %v", err)
+	}
+	if _, err := manager.ValidateState(context.Background(), state); err != ErrInvalidState {
+		t.Fatalf("reuse state error = %v, want %v", err, ErrInvalidState)
+	}
+	if _, err := manager.GenerateAuthURL(context.Background(), "example", "/"); err != nil {
+		t.Fatalf("generate after consuming state: %v", err)
 	}
 }

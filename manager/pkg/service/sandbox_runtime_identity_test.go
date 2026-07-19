@@ -149,8 +149,6 @@ func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID str
 	}
 	record.Status = SandboxStatusDeleted
 	record.DeletedAt = deletedAt
-	record.CurrentPodName = ""
-	record.CurrentPodNamespace = ""
 	for _, txn := range s.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && sandboxLifecyclePhaseActive(txn.Phase) {
 			txn.Phase = SandboxLifecyclePhaseAborted
@@ -160,6 +158,25 @@ func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID str
 	}
 	delete(s.rootFSStates, sandboxID)
 	s.deletes = append(s.deletes, sandboxID)
+	return nil
+}
+
+func (s *memorySandboxStore) MarkSandboxCleanupCompleted(
+	_ context.Context,
+	sandboxID string,
+	completedAt time.Time,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.records[sandboxID]
+	if record == nil || record.Status != SandboxStatusDeleted || record.DeletedAt.IsZero() {
+		return nil
+	}
+	if record.CleanupCompletedAt.IsZero() {
+		record.CleanupCompletedAt = completedAt
+	}
+	record.CurrentPodName = ""
+	record.CurrentPodNamespace = ""
 	return nil
 }
 
@@ -762,12 +779,14 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 		return true, nil, errors.New("stop hot claim")
 	})
 	svc := &SandboxService{
-		k8sClient:    client,
-		podLister:    runtimeIdentityPodLister(t, idlePod),
-		sandboxStore: store,
-		config:       SandboxServiceConfig{ProcdPort: 49983},
-		clock:        fixedClock{now: time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)},
-		logger:       zap.NewNop(),
+		k8sClient:            client,
+		podLister:            runtimeIdentityPodLister(t, idlePod),
+		sandboxStore:         store,
+		teamQuotaStore:       &permissiveTeamQuotaCapacityStore{},
+		teamQuotaRateLimiter: permissiveTeamQuotaRateLimiter{},
+		config:               SandboxServiceConfig{ProcdPort: 49983},
+		clock:                fixedClock{now: time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)},
+		logger:               zap.NewNop(),
 	}
 
 	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
@@ -1114,6 +1133,7 @@ func TestTerminatePausedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 		webhookStateVolumes:    volumes,
 		deletionWebhookEmitter: emitter,
 		sandboxStore:           store,
+		teamQuotaStore:         &permissiveTeamQuotaCapacityStore{},
 		clock:                  systemTime{},
 		logger:                 zap.NewNop(),
 	}
@@ -1165,11 +1185,12 @@ func TestTerminateSandboxAbortsActivePauseTransaction(t *testing.T) {
 		},
 	}
 	svc := &SandboxService{
-		k8sClient:    fake.NewSimpleClientset(),
-		podLister:    runtimeIdentityPodLister(t),
-		sandboxStore: store,
-		clock:        fixedClock{now: now},
-		logger:       zap.NewNop(),
+		k8sClient:      fake.NewSimpleClientset(),
+		podLister:      runtimeIdentityPodLister(t),
+		sandboxStore:   store,
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
+		clock:          fixedClock{now: now},
+		logger:         zap.NewNop(),
 	}
 
 	if err := svc.TerminateSandbox(context.Background(), "sandbox-a"); err != nil {

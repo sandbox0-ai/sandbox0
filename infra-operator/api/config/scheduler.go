@@ -21,6 +21,10 @@ type SchedulerConfig struct {
 
 	// Database configuration
 	DatabaseURL string `yaml:"database_url" json:"-"`
+	// RegionID and TeamQuotaStateID bind this PostgreSQL-only consumer to the
+	// region Team Quota state plane.
+	RegionID         string `yaml:"region_id" json:"-"`
+	TeamQuotaStateID string `yaml:"team_quota_state_id" json:"-"`
 	// License file path used to unlock enterprise features.
 	LicenseFile string `yaml:"license_file" json:"-"`
 

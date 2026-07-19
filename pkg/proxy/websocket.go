@@ -79,6 +79,10 @@ func (p *WebSocketProxy) Proxy(targetURL *url.URL) gin.HandlerFunc {
 			return
 		}
 		defer upstreamConn.Close()
+		stopUpstreamClose := context.AfterFunc(outReq.Context(), func() {
+			_ = upstreamConn.Close()
+		})
+		defer stopUpstreamClose()
 
 		if err := writeUpstreamHandshake(upstreamConn, outReq); err != nil {
 			p.logger.Error("Failed to write upstream WebSocket handshake", zap.Error(err))
@@ -112,6 +116,10 @@ func (p *WebSocketProxy) Proxy(targetURL *url.URL) gin.HandlerFunc {
 			return
 		}
 		defer downstreamConn.Close()
+		stopDownstreamClose := context.AfterFunc(outReq.Context(), func() {
+			_ = downstreamConn.Close()
+		})
+		defer stopDownstreamClose()
 		if err := DisableConnectionDeadlines(downstreamConn); err != nil {
 			p.logger.Debug("Failed to clear hijacked downstream connection deadlines", zap.Error(err))
 		}
@@ -149,7 +157,7 @@ func dialWebSocketUpstream(ctx context.Context, targetURL *url.URL) (net.Conn, e
 		tlsConn := tls.Client(rawConn, &tls.Config{
 			ServerName: targetURL.Hostname(),
 		})
-		if err := tlsConn.Handshake(); err != nil {
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			rawConn.Close()
 			return nil, err
 		}

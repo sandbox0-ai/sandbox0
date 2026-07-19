@@ -13,13 +13,15 @@ const defaultCtldClientTimeout = ctldapi.DefaultRequestTimeout
 
 // CtldClientConfig holds configuration for the node-local ctld client.
 type CtldClientConfig struct {
-	Timeout time.Duration
+	Timeout             time.Duration
+	RootFSTokenProvider ctldapi.RootFSTokenProvider
 }
 
 // CtldClient is an HTTP client for node-local ctld APIs.
 type CtldClient struct {
-	httpClient *http.Client
-	api        *ctldapi.Client
+	httpClient          *http.Client
+	api                 *ctldapi.Client
+	rootFSTokenProvider ctldapi.RootFSTokenProvider
 }
 
 // NewCtldClient creates a new ctld client.
@@ -29,7 +31,11 @@ func NewCtldClient(config CtldClientConfig) *CtldClient {
 		timeout = defaultCtldClientTimeout
 	}
 	httpClient := &http.Client{Timeout: timeout}
-	return &CtldClient{httpClient: httpClient, api: ctldapi.NewClient(httpClient)}
+	return &CtldClient{
+		httpClient:          httpClient,
+		api:                 ctldapi.NewClientWithRootFSAuth(httpClient, config.RootFSTokenProvider),
+		rootFSTokenProvider: config.RootFSTokenProvider,
+	}
 }
 
 // NewCtldClientWithHTTPClient creates a ctld client with a custom HTTP client.
@@ -64,14 +70,6 @@ func (c *CtldClient) InspectRootFS(ctx context.Context, ctldAddress string, req 
 	return c.apiOrDefault().InspectRootFS(ctx, ctldAddress, req)
 }
 
-func (c *CtldClient) SaveRootFS(ctx context.Context, ctldAddress string, req ctldapi.SaveRootFSRequest) (*ctldapi.SaveRootFSResponse, error) {
-	return c.apiOrDefault().SaveRootFS(ctx, ctldAddress, req)
-}
-
-func (c *CtldClient) SaveRootFSWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.SaveRootFSRequest, timeout time.Duration) (*ctldapi.SaveRootFSResponse, error) {
-	return c.apiWithTimeout(timeout).SaveRootFS(ctx, ctldAddress, req)
-}
-
 func (c *CtldClient) PrepareRootFSSnapshotWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.PrepareRootFSSnapshotRequest, timeout time.Duration) (*ctldapi.PrepareRootFSSnapshotResponse, error) {
 	return c.apiWithTimeout(timeout).PrepareRootFSSnapshot(ctx, ctldAddress, req)
 }
@@ -97,7 +95,7 @@ func (c *CtldClient) apiOrDefault() *ctldapi.Client {
 		return c.api
 	}
 	if c != nil && c.httpClient != nil {
-		return ctldapi.NewClient(c.httpClient)
+		return ctldapi.NewClientWithRootFSAuth(c.httpClient, c.rootFSTokenProvider)
 	}
 	return ctldapi.NewClient(nil)
 }
@@ -109,7 +107,7 @@ func (c *CtldClient) apiWithTimeout(timeout time.Duration) *ctldapi.Client {
 	if c != nil && c.httpClient != nil {
 		clone := *c.httpClient
 		clone.Timeout = timeout
-		return ctldapi.NewClient(&clone)
+		return ctldapi.NewClientWithRootFSAuth(&clone, c.rootFSTokenProvider)
 	}
 	return ctldapi.NewClientWithTimeout(timeout)
 }

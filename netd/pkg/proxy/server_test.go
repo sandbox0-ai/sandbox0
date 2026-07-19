@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -382,6 +383,7 @@ func TestPipeWithReaderPropagatesCopyErrors(t *testing.T) {
 	wantErr := errors.New("write failed")
 
 	err := server.pipeWithReader(
+		context.Background(),
 		&stubConn{reader: bytes.NewReader(nil), writer: io.Discard},
 		&stubConn{reader: bytes.NewReader(nil), writer: errWriter{err: wantErr}},
 		bytes.NewReader([]byte("payload")),

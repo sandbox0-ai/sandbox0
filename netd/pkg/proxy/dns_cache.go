@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -530,9 +531,9 @@ func (w *dnsTCPResponseObserver) observe(data []byte) {
 	}
 }
 
-func (s *Server) pipeDNSOverTCP(client net.Conn, upstream net.Conn, upstreamWriter io.Reader, downstreamWriter io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit, sandboxIP string) error {
-	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(upstream, compiled, bandwidthEgress)}
-	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(client, compiled, bandwidthIngress)}
+func (s *Server) pipeDNSOverTCP(ctx context.Context, client net.Conn, upstream net.Conn, upstreamWriter io.Reader, downstreamWriter io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit, sandboxIP string) error {
+	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(ctx, upstream, compiled, bandwidthEgress)}
+	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(ctx, client, compiled, bandwidthIngress)}
 	dnsObserver := &dnsTCPResponseObserver{
 		writer:    clientCounter,
 		server:    s,
@@ -594,5 +595,5 @@ func (s *Server) proxyDNSTCP(req *adapterRequest) error {
 	if req.UpstreamPrefix != nil {
 		upstreamReader = io.MultiReader(req.UpstreamPrefix, upstream)
 	}
-	return s.pipeDNSOverTCP(req.Conn, upstream, reader, upstreamReader, req.Compiled, req.Audit, req.SrcIP)
+	return s.pipeDNSOverTCP(req.Context, req.Conn, upstream, reader, upstreamReader, req.Compiled, req.Audit, req.SrcIP)
 }

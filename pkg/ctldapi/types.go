@@ -1,6 +1,10 @@
 package ctldapi
 
-import "github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+import (
+	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+)
 
 // SandboxResourceUsage is the whole-sandbox usage view returned by ctld.
 type SandboxResourceUsage struct {
@@ -93,28 +97,19 @@ type InspectRootFSResponse struct {
 	Error string     `json:"error,omitempty"`
 }
 
-type SaveRootFSRequest struct {
+// PrepareRootFSSnapshotRequest is a manager-only internal contract. Ownership
+// is authenticated by the ctld internal endpoint and drives node-local
+// per-team staging admission; it must never be accepted from an end user.
+type PrepareRootFSSnapshotRequest struct {
 	Target                    RootFSContainerRef `json:"target"`
-	SandboxID                 string             `json:"sandbox_id"`
+	StageID                   string             `json:"stage_id"`
 	TeamID                    string             `json:"team_id"`
+	SandboxID                 string             `json:"sandbox_id"`
 	ExpectedRuntimeGeneration int64              `json:"expected_runtime_generation,omitempty"`
+	ExpiresAt                 time.Time          `json:"expires_at"`
 	ParentLayerID             string             `json:"parent_layer_id,omitempty"`
-	ObjectKey                 string             `json:"object_key,omitempty"`
 	ExcludedPaths             []string           `json:"excluded_paths,omitempty"`
 	PortalPaths               []RootFSPortalPath `json:"portal_paths,omitempty"`
-}
-
-type SaveRootFSResponse struct {
-	Info       RootFSInfo           `json:"info,omitempty"`
-	Descriptor RootFSDiffDescriptor `json:"descriptor,omitempty"`
-	Error      string               `json:"error,omitempty"`
-}
-
-type PrepareRootFSSnapshotRequest struct {
-	Target        RootFSContainerRef `json:"target"`
-	ParentLayerID string             `json:"parent_layer_id,omitempty"`
-	ExcludedPaths []string           `json:"excluded_paths,omitempty"`
-	PortalPaths   []RootFSPortalPath `json:"portal_paths,omitempty"`
 }
 
 type PrepareRootFSSnapshotResponse struct {
@@ -140,7 +135,10 @@ type PublishRootFSSnapshotResponse struct {
 }
 
 type AbortRootFSSnapshotRequest struct {
-	Handle string `json:"handle"`
+	Handle                    string `json:"handle"`
+	SandboxID                 string `json:"sandbox_id"`
+	TeamID                    string `json:"team_id"`
+	ExpectedRuntimeGeneration int64  `json:"expected_runtime_generation,omitempty"`
 }
 
 type AbortRootFSSnapshotResponse struct {
@@ -150,6 +148,8 @@ type AbortRootFSSnapshotResponse struct {
 
 type ApplyRootFSRequest struct {
 	Target                      RootFSContainerRef      `json:"target"`
+	TeamID                      string                  `json:"team_id"`
+	SandboxID                   string                  `json:"sandbox_id"`
 	ExpectedRuntime             string                  `json:"expected_runtime,omitempty"`
 	ExpectedRuntimeHandler      string                  `json:"expected_runtime_handler,omitempty"`
 	ExpectedSnapshotter         string                  `json:"expected_snapshotter,omitempty"`

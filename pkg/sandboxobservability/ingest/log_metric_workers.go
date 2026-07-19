@@ -15,8 +15,10 @@ func NewLogWorker(writer sandboxobservability.Writer, cfg Config) (*LogWorker, e
 	if writer == nil {
 		return nil, fmt.Errorf("writer is nil")
 	}
-	worker, err := newBatchWorker(func(ctx context.Context, logs []sandboxobservability.LogEntry) error {
+	worker, err := newGroupedBatchWorker(func(ctx context.Context, logs []sandboxobservability.LogEntry) error {
 		return writer.InsertLogs(ctx, logs)
+	}, func(log sandboxobservability.LogEntry) string {
+		return log.TeamID
 	}, cfg)
 	if err != nil {
 		return nil, err
@@ -48,8 +50,10 @@ func NewRuntimeSampleWorker(writer sandboxobservability.Writer, cfg Config) (*Ru
 	if writer == nil {
 		return nil, fmt.Errorf("writer is nil")
 	}
-	worker, err := newBatchWorker(func(ctx context.Context, samples []sandboxobservability.RuntimeSample) error {
+	worker, err := newGroupedBatchWorker(func(ctx context.Context, samples []sandboxobservability.RuntimeSample) error {
 		return writer.InsertRuntimeSamples(ctx, samples)
+	}, func(sample sandboxobservability.RuntimeSample) string {
+		return sample.TeamID
 	}, cfg)
 	if err != nil {
 		return nil, err

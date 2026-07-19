@@ -93,7 +93,7 @@ func TestSandboxObservabilityRoutesProxyToOwningCluster(t *testing.T) {
 		clusterGatewayRouter: defaultClusterRouter,
 		schedulerRouter:      schedulerRouter,
 		authMiddleware:       gatewaymiddleware.NewAuthMiddleware(nil, "secret", jwtIssuer, logger),
-		rateLimiter:          gatewaymiddleware.NewRateLimiter(100, 200, time.Minute, logger),
+		teamQuotaController:  newAllowingTeamQuotaController(logger),
 		requestLogger:        gatewaymiddleware.NewRequestLogger(logger),
 		logger:               logger,
 		internalAuthGen: internalauth.NewGenerator(internalauth.GeneratorConfig{

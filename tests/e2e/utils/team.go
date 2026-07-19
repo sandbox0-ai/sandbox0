@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
@@ -79,4 +80,42 @@ func (s *Session) DeleteTeam(ctx context.Context, t ContractT, teamID string) (i
 		return status, fmt.Errorf("delete team failed with status %d: %s", status, formatAPIError(body))
 	}
 	return status, nil
+}
+
+// DeleteTeamEventually retries the expected resource-inventory conflict while
+// asynchronous deletion of team-owned resources finishes.
+func (s *Session) DeleteTeamEventually(
+	ctx context.Context,
+	t ContractT,
+	teamID string,
+	timeout time.Duration,
+) error {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var lastErr error
+	for {
+		status, err := s.DeleteTeam(waitCtx, t, teamID)
+		if err == nil {
+			return nil
+		}
+		if status != http.StatusConflict {
+			if status == 0 && waitCtx.Err() != nil && lastErr != nil {
+				return fmt.Errorf("delete team did not become ready: %w: %v", waitCtx.Err(), lastErr)
+			}
+			return err
+		}
+		lastErr = err
+
+		timer := time.NewTimer(500 * time.Millisecond)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			return fmt.Errorf("delete team did not become ready: %w: %v", waitCtx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
 }

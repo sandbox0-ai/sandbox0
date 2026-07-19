@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 )
 
 var ErrRootFSHeadConflict = errors.New("rootfs filesystem head conflict")
@@ -84,13 +85,15 @@ type RootFSGarbageCollectionResult struct {
 }
 
 type DeletePendingRootFSObjectsOptions struct {
-	Limit           int
-	ClaimedBy       string
-	ClaimTTL        time.Duration
-	BackoffBase     time.Duration
-	BackoffMax      time.Duration
-	MaxAttempts     int
-	ContinueOnError bool
+	Limit              int
+	ClaimedBy          string
+	ClaimTTL           time.Duration
+	BackoffBase        time.Duration
+	BackoffMax         time.Duration
+	MaxAttempts        int
+	ContinueOnError    bool
+	ObjectQuotaStore   teamquota.CapacityTxStore
+	SnapshotQuotaStore teamquota.CapacityTxStore
 }
 
 type RootFSObjectDeletionQueueStats struct {
@@ -547,19 +550,28 @@ func (s *PGSandboxStore) SquashRootFSFilesystem(ctx context.Context, req *Squash
 	return nil
 }
 
-// GarbageCollectRootFSFilesystem removes unreferenced leaf layer metadata and
-// deletes the corresponding diff objects from durable object storage. Object
-// keys are durably queued before layer metadata is removed, so failed object
-// deletes can be retried without losing the key.
-func (s *PGSandboxStore) GarbageCollectRootFSFilesystem(ctx context.Context, deleter RootFSObjectDeleter, teamID string, limit int) (*RootFSGarbageCollectionResult, error) {
-	return s.GarbageCollectRootFSFilesystemWithOptions(ctx, deleter, teamID, limit, DeletePendingRootFSObjectsOptions{})
-}
-
+// GarbageCollectRootFSFilesystemWithOptions removes unreferenced leaf layer
+// metadata and deletes the corresponding diff objects from durable object
+// storage. Object keys are durably queued before layer metadata is removed, so
+// failed object deletes can be retried without losing the key. Both quota
+// stores are required because one pass can expire snapshots and physically
+// delete rootfs objects.
 func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.Context, deleter RootFSObjectDeleter, teamID string, limit int, opts DeletePendingRootFSObjectsOptions) (*RootFSGarbageCollectionResult, error) {
 	if deleter == nil {
 		return nil, fmt.Errorf("rootfs object deleter is required")
 	}
-	expiredSnapshots, err := s.DeleteExpiredRootFSSnapshots(ctx, teamID, limit)
+	if opts.SnapshotQuotaStore == nil || opts.ObjectQuotaStore == nil {
+		return nil, fmt.Errorf(
+			"%w: transactional capacity stores are required for rootfs garbage collection",
+			ErrTeamQuotaUnavailable,
+		)
+	}
+	expiredSnapshots, err := s.DeleteExpiredRootFSSnapshots(
+		ctx,
+		teamID,
+		limit,
+		opts.SnapshotQuotaStore,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -585,9 +597,20 @@ func (s *PGSandboxStore) GarbageCollectRootFSFilesystemWithOptions(ctx context.C
 	return result, nil
 }
 
-func (s *PGSandboxStore) DeleteExpiredRootFSSnapshots(ctx context.Context, teamID string, limit int) (int, error) {
+func (s *PGSandboxStore) DeleteExpiredRootFSSnapshots(
+	ctx context.Context,
+	teamID string,
+	limit int,
+	quotaStore teamquota.CapacityTxStore,
+) (int, error) {
 	if s == nil || s.pool == nil {
 		return 0, nil
+	}
+	if quotaStore == nil {
+		return 0, fmt.Errorf(
+			"%w: transactional capacity store is required for expired rootfs snapshot deletion",
+			ErrTeamQuotaUnavailable,
+		)
 	}
 	if limit <= 0 {
 		limit = defaultRootFSObjectDeleteLimit
@@ -595,25 +618,57 @@ func (s *PGSandboxStore) DeleteExpiredRootFSSnapshots(ctx context.Context, teamI
 	if limit > maxRootFSObjectDeleteLimit {
 		limit = maxRootFSObjectDeleteLimit
 	}
-	tag, err := s.pool.Exec(ctx, `
-		WITH expired AS (
-			SELECT snapshot_id
-			FROM manager.rootfs_snapshots
-			WHERE expires_at IS NOT NULL
-				AND expires_at <= NOW()
-				AND ($1 = '' OR team_id = $1)
-			ORDER BY expires_at ASC
-			LIMIT $2
-			FOR UPDATE SKIP LOCKED
-		)
-		DELETE FROM manager.rootfs_snapshots s
-		USING expired e
-		WHERE s.snapshot_id = e.snapshot_id
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("begin expired rootfs snapshot deletion tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		SELECT snapshot_id, team_id
+		FROM manager.rootfs_snapshots
+		WHERE expires_at IS NOT NULL
+			AND expires_at <= NOW()
+			AND ($1 = '' OR team_id = $1)
+		ORDER BY team_id, expires_at, snapshot_id
+		LIMIT $2
+		FOR UPDATE SKIP LOCKED
 	`, strings.TrimSpace(teamID), limit)
 	if err != nil {
-		return 0, fmt.Errorf("delete expired rootfs snapshots: %w", err)
+		return 0, fmt.Errorf("list expired rootfs snapshots: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	var expired []RootFSSnapshotInventory
+	for rows.Next() {
+		var snapshot RootFSSnapshotInventory
+		if err := rows.Scan(&snapshot.SnapshotID, &snapshot.TeamID); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan expired rootfs snapshot: %w", err)
+		}
+		expired = append(expired, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("iterate expired rootfs snapshots: %w", err)
+	}
+	rows.Close()
+	if len(expired) > 0 && quotaStore == nil {
+		return 0, fmt.Errorf("transactional team quota store is required to delete expired rootfs snapshots")
+	}
+	for _, snapshot := range expired {
+		if err := deleteRootFSSnapshotWithQuotaTx(
+			ctx,
+			tx,
+			quotaStore,
+			snapshot.SnapshotID,
+			snapshot.TeamID,
+		); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit expired rootfs snapshot deletions: %w", err)
+	}
+	return len(expired), nil
 }
 
 func (s *PGSandboxStore) DeleteUnreferencedRootFSFilesystems(ctx context.Context, teamID string, limit int) (int, error) {
@@ -997,12 +1052,14 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
 				l.base_image_digest, l.snapshotter, l.snapshot_parent,
 				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
-				l.diff_size, l.diff_object_key, l.created_at
+				l.diff_size, l.diff_object_key, l.platform_os, l.platform_architecture,
+				l.platform_variant, l.created_at
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
 			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, created_at
+			diff_size, diff_object_key, platform_os, platform_architecture,
+			platform_variant, created_at
 		FROM deleted
 		ORDER BY created_at ASC
 	`, strings.TrimSpace(teamID), limit)
@@ -1025,10 +1082,6 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 	return layers, nil
 }
 
-func (s *PGSandboxStore) DeletePendingRootFSObjects(ctx context.Context, deleter RootFSObjectDeleter, limit int) ([]string, error) {
-	return s.DeletePendingRootFSObjectsWithOptions(ctx, deleter, DeletePendingRootFSObjectsOptions{Limit: limit})
-}
-
 func (s *PGSandboxStore) QueueUncommittedRootFSObjectDeletion(ctx context.Context, state *SandboxRootFSState, notBefore time.Time) error {
 	if s == nil || s.pool == nil || state == nil || strings.TrimSpace(state.DiffObjectKey) == "" {
 		return nil
@@ -1042,6 +1095,33 @@ func (s *PGSandboxStore) QueueUncommittedRootFSObjectDeletion(ctx context.Contex
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := queueUncommittedRootFSObjectDeletionTx(ctx, tx, state, notBefore); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit uncommitted rootfs object deletion tx: %w", err)
+	}
+	return nil
+}
+
+func queueUncommittedRootFSObjectDeletionTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	state *SandboxRootFSState,
+	notBefore time.Time,
+) error {
+	if tx == nil {
+		return fmt.Errorf("rootfs object deletion transaction is required")
+	}
+	if err := validateRootFSState(state); err != nil {
+		return err
+	}
+	if state.DiffSize < 0 {
+		return fmt.Errorf("rootfs diff size must be non-negative")
+	}
+	if notBefore.IsZero() {
+		notBefore = time.Now().UTC()
+	}
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO manager.rootfs_objects (
 			object_key, team_id, diff_digest, diff_media_type, diff_size,
@@ -1054,6 +1134,10 @@ func (s *PGSandboxStore) QueueUncommittedRootFSObjectDeletion(ctx context.Contex
 			diff_digest = EXCLUDED.diff_digest,
 			diff_media_type = EXCLUDED.diff_media_type,
 			diff_size = EXCLUDED.diff_size,
+			first_layer_id = EXCLUDED.first_layer_id,
+			last_referenced_at = NOW(),
+			missing_at = NULL,
+			deleted_at = NULL,
 			last_error = '',
 			updated_at = NOW()
 		WHERE manager.rootfs_objects.team_id = EXCLUDED.team_id
@@ -1085,56 +1169,18 @@ func (s *PGSandboxStore) QueueUncommittedRootFSObjectDeletion(ctx context.Contex
 	`, state.DiffObjectKey, state.TeamID, notBefore.UTC()); err != nil {
 		return fmt.Errorf("queue uncommitted rootfs object deletion: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit uncommitted rootfs object deletion tx: %w", err)
-	}
-	return nil
-}
-
-func (s *PGSandboxStore) CompleteRootFSObjectDeletion(ctx context.Context, objectKey string) error {
-	if s == nil || s.pool == nil || strings.TrimSpace(objectKey) == "" {
-		return nil
-	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("begin rootfs object deletion completion tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `
-		UPDATE manager.rootfs_objects
-		SET deleted_at = NOW(),
-			missing_at = NULL,
-			last_error = '',
-			updated_at = NOW()
-		WHERE object_key = $1
-			AND NOT EXISTS (
-				SELECT 1
-				FROM manager.rootfs_layers
-				WHERE diff_object_key = $1
-			)
-	`, strings.TrimSpace(objectKey)); err != nil {
-		return fmt.Errorf("mark rootfs object deleted %q: %w", objectKey, err)
-	}
-	if _, err := tx.Exec(ctx, `
-		DELETE FROM manager.rootfs_object_deletions
-		WHERE object_key = $1
-			AND NOT EXISTS (
-				SELECT 1
-				FROM manager.rootfs_layers
-				WHERE diff_object_key = $1
-			)
-	`, strings.TrimSpace(objectKey)); err != nil {
-		return fmt.Errorf("clear rootfs object deletion %q: %w", objectKey, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit rootfs object deletion completion tx: %w", err)
-	}
 	return nil
 }
 
 func (s *PGSandboxStore) DeletePendingRootFSObjectsWithOptions(ctx context.Context, deleter RootFSObjectDeleter, opts DeletePendingRootFSObjectsOptions) ([]string, error) {
 	if s == nil || s.pool == nil || deleter == nil {
 		return nil, nil
+	}
+	if opts.ObjectQuotaStore == nil {
+		return nil, fmt.Errorf(
+			"%w: transactional capacity store is required for rootfs object deletion",
+			ErrTeamQuotaUnavailable,
+		)
 	}
 	opts = normalizeRootFSObjectDeletionOptions(opts)
 	claimed, err := s.claimPendingRootFSObjectDeletions(ctx, opts)
@@ -1148,39 +1194,32 @@ func (s *PGSandboxStore) DeletePendingRootFSObjectsWithOptions(ctx context.Conte
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
-		refs, err := s.rootFSObjectReferences(ctx, item.ObjectKey)
-		if err != nil {
-			return deleted, err
-		}
-		if refs.HasLayerReferences {
-			if err := s.clearRootFSObjectDeletion(ctx, item.ObjectKey, opts.ClaimedBy); err != nil {
-				return deleted, err
+		completed, physicalDeleteConfirmed, deleteErr := s.deleteClaimedRootFSObject(
+			ctx,
+			item,
+			opts.ClaimedBy,
+			deleter,
+			opts.ObjectQuotaStore,
+		)
+		if deleteErr != nil {
+			retryOpts := opts
+			if physicalDeleteConfirmed {
+				// Once physical deletion succeeds, never dead-letter the
+				// metadata/quota acknowledgement that makes the retry safe.
+				retryOpts.MaxAttempts = 0
 			}
-			continue
-		}
-		if refs.HasActiveLifecycleReferences {
-			if err := s.deferRootFSObjectDeletion(ctx, item.ObjectKey, opts.ClaimedBy, rootFSObjectActiveLifecycleRetry); err != nil {
-				return deleted, err
-			}
-			continue
-		}
-		if err := deleter.Delete(item.ObjectKey); err != nil {
-			if updateErr := s.recordRootFSObjectDeleteFailure(ctx, item, opts, err); updateErr != nil {
+			if updateErr := s.recordRootFSObjectDeleteFailure(ctx, item, retryOpts, deleteErr); updateErr != nil {
 				return deleted, updateErr
 			}
-			errs = append(errs, fmt.Errorf("delete rootfs object %q: %w", item.ObjectKey, err))
+			errs = append(errs, deleteErr)
 			if !opts.ContinueOnError {
 				return deleted, errors.Join(errs...)
 			}
 			continue
 		}
-		if err := s.markRootFSObjectDeleted(ctx, item.ObjectKey); err != nil {
-			return deleted, err
+		if completed {
+			deleted = append(deleted, item.ObjectKey)
 		}
-		if err := s.clearRootFSObjectDeletion(ctx, item.ObjectKey, opts.ClaimedBy); err != nil {
-			return deleted, err
-		}
-		deleted = append(deleted, item.ObjectKey)
 	}
 	return deleted, errors.Join(errs...)
 }
@@ -1188,78 +1227,6 @@ func (s *PGSandboxStore) DeletePendingRootFSObjectsWithOptions(ctx context.Conte
 type rootFSObjectReferenceState struct {
 	HasLayerReferences           bool
 	HasActiveLifecycleReferences bool
-}
-
-func (s *PGSandboxStore) rootFSObjectReferences(ctx context.Context, objectKey string) (rootFSObjectReferenceState, error) {
-	var refs rootFSObjectReferenceState
-	if err := s.pool.QueryRow(ctx, `
-		SELECT
-			EXISTS (
-				SELECT 1
-				FROM manager.rootfs_layers
-				WHERE diff_object_key = $1
-			) AS has_layer_references,
-			EXISTS (
-				SELECT 1
-				FROM manager.rootfs_objects o
-				JOIN manager.sandbox_lifecycle_txns t
-					ON t.prepared_head_layer_id = o.first_layer_id
-				WHERE o.object_key = $1
-					AND t.kind = 'pause'
-					AND t.phase IN ('preparing', 'barriered', 'publishing', 'committing')
-			) AS has_active_lifecycle_references
-	`, objectKey).Scan(&refs.HasLayerReferences, &refs.HasActiveLifecycleReferences); err != nil {
-		return refs, fmt.Errorf("check rootfs object references for %q: %w", objectKey, err)
-	}
-	return refs, nil
-}
-
-func (s *PGSandboxStore) markRootFSObjectDeleted(ctx context.Context, objectKey string) error {
-	if _, err := s.pool.Exec(ctx, `
-		UPDATE manager.rootfs_objects
-		SET deleted_at = NOW(),
-			missing_at = NULL,
-			last_error = '',
-			updated_at = NOW()
-		WHERE object_key = $1
-			AND NOT EXISTS (
-				SELECT 1
-				FROM manager.rootfs_layers
-				WHERE diff_object_key = $1
-			)
-	`, objectKey); err != nil {
-		return fmt.Errorf("mark rootfs object deleted %q: %w", objectKey, err)
-	}
-	return nil
-}
-
-func (s *PGSandboxStore) clearRootFSObjectDeletion(ctx context.Context, objectKey, claimedBy string) error {
-	if _, err := s.pool.Exec(ctx, `
-		DELETE FROM manager.rootfs_object_deletions
-		WHERE object_key = $1
-			AND claimed_by = $2
-	`, objectKey, claimedBy); err != nil {
-		return fmt.Errorf("clear rootfs object deletion %q: %w", objectKey, err)
-	}
-	return nil
-}
-
-func (s *PGSandboxStore) deferRootFSObjectDeletion(ctx context.Context, objectKey, claimedBy string, delay time.Duration) error {
-	if delay <= 0 {
-		delay = rootFSObjectActiveLifecycleRetry
-	}
-	if _, err := s.pool.Exec(ctx, `
-		UPDATE manager.rootfs_object_deletions
-		SET claimed_by = '',
-			claimed_until = NULL,
-			next_attempt_at = NOW() + ($3::int * INTERVAL '1 second'),
-			updated_at = NOW()
-		WHERE object_key = $1
-			AND claimed_by = $2
-	`, objectKey, claimedBy, durationSeconds(delay)); err != nil {
-		return fmt.Errorf("defer rootfs object deletion %q: %w", objectKey, err)
-	}
-	return nil
 }
 
 func (s *PGSandboxStore) RootFSObjectDeletionQueueStats(ctx context.Context) (*RootFSObjectDeletionQueueStats, error) {
@@ -1438,35 +1405,6 @@ func truncateRootFSError(message string) string {
 		return message
 	}
 	return message[:2048]
-}
-
-func DeleteRootFSObjects(ctx context.Context, deleter RootFSObjectDeleter, layers []*SandboxRootFSLayer) ([]string, error) {
-	if deleter == nil || len(layers) == 0 {
-		return nil, nil
-	}
-	seen := make(map[string]struct{}, len(layers))
-	deleted := make([]string, 0, len(layers))
-	for _, layer := range layers {
-		if layer == nil {
-			continue
-		}
-		key := strings.TrimSpace(layer.DiffObjectKey)
-		if key == "" {
-			continue
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		if err := ctx.Err(); err != nil {
-			return deleted, err
-		}
-		if err := deleter.Delete(key); err != nil {
-			return deleted, fmt.Errorf("delete rootfs object %q: %w", key, err)
-		}
-		deleted = append(deleted, key)
-	}
-	return deleted, nil
 }
 
 func (s *PGSandboxStore) rootFSForkNoRowsError(ctx context.Context, req *ForkRootFSFilesystemRequest) error {

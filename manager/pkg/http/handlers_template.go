@@ -8,6 +8,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"go.uber.org/zap"
 )
@@ -76,14 +77,27 @@ func (s *Server) getTemplateLegacy(c *gin.Context) {
 }
 
 func (s *Server) createTemplateLegacy(c *gin.Context) {
+	if !limitJSONRequestBody(c, "template request body", templatepkg.MaxObjectRequestBytes) {
+		return
+	}
 	var template v1alpha1.SandboxTemplate
 	if err := c.ShouldBindJSON(&template); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request: "+err.Error())
 		return
 	}
+	if err := templatepkg.ValidateTemplateSpecSize(&template.Spec); err != nil {
+		if writeResourceTooLarge(c, err, "template spec") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 
 	created, err := s.templateService.CreateTemplate(c.Request.Context(), &template)
 	if err != nil {
+		if writeResourceTooLarge(c, err, "template spec") {
+			return
+		}
 		s.logger.Error("Failed to create template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create template")
 		return
@@ -93,6 +107,9 @@ func (s *Server) createTemplateLegacy(c *gin.Context) {
 }
 
 func (s *Server) updateTemplateLegacy(c *gin.Context) {
+	if !limitJSONRequestBody(c, "template request body", templatepkg.MaxObjectRequestBytes) {
+		return
+	}
 	templateID := c.Param("id")
 	if templateID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template_id is required")
@@ -101,6 +118,13 @@ func (s *Server) updateTemplateLegacy(c *gin.Context) {
 	var template v1alpha1.SandboxTemplate
 	if err := c.ShouldBindJSON(&template); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request: "+err.Error())
+		return
+	}
+	if err := templatepkg.ValidateTemplateSpecSize(&template.Spec); err != nil {
+		if writeResourceTooLarge(c, err, "template spec") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 
@@ -112,6 +136,9 @@ func (s *Server) updateTemplateLegacy(c *gin.Context) {
 
 	updated, err := s.templateService.UpdateTemplate(c.Request.Context(), &template)
 	if err != nil {
+		if writeResourceTooLarge(c, err, "template spec") {
+			return
+		}
 		s.logger.Error("Failed to update template", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update template")
 		return

@@ -24,19 +24,26 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	gatewayteamquota "github.com/sandbox0-ai/sandbox0/pkg/gateway/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 )
 
 type ServerOption func(*serverOptions)
 
 type serverOptions struct {
-	meteringReader gatewayhandlers.MeteringReader
+	meteringReader          gatewayhandlers.MeteringReader
+	teamQuotaController     *gatewayteamquota.Controller
+	teamQuotaPolicyManager  coreteamquota.PolicyManager
+	publicOverloadGuard     *middleware.OverloadGuard
+	apiKeyRepositoryFactory func(*pgxpool.Pool) *apikey.Repository
 }
 
 func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
@@ -45,24 +52,58 @@ func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
 	}
 }
 
+// WithTeamQuotaController overrides Team Quota dependencies for tests.
+func WithTeamQuotaController(controller *gatewayteamquota.Controller) ServerOption {
+	return func(opts *serverOptions) {
+		opts.teamQuotaController = controller
+	}
+}
+
+// WithTeamQuotaPolicyManager supplies the serialized region policy owner used by
+// production admin writes.
+func WithTeamQuotaPolicyManager(manager coreteamquota.PolicyManager) ServerOption {
+	return func(opts *serverOptions) {
+		opts.teamQuotaPolicyManager = manager
+	}
+}
+
+// WithPublicOverloadGuard overrides the public identity and exposure guard for tests.
+func WithPublicOverloadGuard(guard *middleware.OverloadGuard) ServerOption {
+	return func(opts *serverOptions) {
+		opts.publicOverloadGuard = guard
+	}
+}
+
+func withAPIKeyRepositoryFactoryForTest(
+	factory func(*pgxpool.Pool) *apikey.Repository,
+) ServerOption {
+	return func(opts *serverOptions) {
+		opts.apiKeyRepositoryFactory = factory
+	}
+}
+
 // Server represents the HTTP server for regional-gateway
 type Server struct {
-	router               *gin.Engine
-	cfg                  *config.RegionalGatewayConfig
-	pool                 *pgxpool.Pool
-	identityRepo         *identity.Repository
-	apiKeyRepo           *apikey.Repository
-	clusterGatewayRouter *proxy.Router
-	schedulerRouter      *proxy.Router // Optional: proxy to scheduler for templates
-	authMiddleware       *middleware.AuthMiddleware
-	internalAuth         *internalmiddleware.InternalAuthMiddleware
-	rateLimiter          *middleware.RateLimiter
-	requestLogger        *middleware.RequestLogger
-	logger               *zap.Logger
-	internalAuthGen      *internalauth.Generator
-	meteringHandler      *gatewayhandlers.MeteringHandler
-	obsProvider          *observability.Provider
-	httpClient           *http.Client
+	router                  *gin.Engine
+	cfg                     *config.RegionalGatewayConfig
+	pool                    *pgxpool.Pool
+	identityRepo            *identity.Repository
+	apiKeyRepo              *apikey.Repository
+	ownsAPIKeyRepo          bool
+	clusterGatewayRouter    *proxy.Router
+	schedulerRouter         *proxy.Router // Optional: proxy to scheduler for templates
+	authMiddleware          *middleware.AuthMiddleware
+	internalAuth            *internalmiddleware.InternalAuthMiddleware
+	teamQuotaController     *gatewayteamquota.Controller
+	ownsTeamQuotaController bool
+	publicOverloadGuard     *middleware.OverloadGuard
+	ownsPublicOverloadGuard bool
+	requestLogger           *middleware.RequestLogger
+	logger                  *zap.Logger
+	internalAuthGen         *internalauth.Generator
+	meteringHandler         *gatewayhandlers.MeteringHandler
+	obsProvider             *observability.Provider
+	httpClient              *http.Client
 
 	clusterGatewayProxies   map[string]*proxy.Router
 	clusterGatewayProxiesMu sync.RWMutex
@@ -107,15 +148,37 @@ func NewServer(
 	router := gin.New()
 
 	// Create repository
-	identityRepo := identity.NewRepository(pool)
-	apiKeyRepo := apikey.NewRepository(pool)
+	selfHostedAuthEnabled := edgeAuthModeUsesSelfHostedIdentity(cfg.AuthMode)
+	if err := validateAcceptedAccessTokenTTL(cfg); err != nil {
+		return nil, err
+	}
+	identityOptions := []identity.RepositoryOption(nil)
+	if selfHostedAuthEnabled {
+		identityOptions = append(
+			identityOptions,
+			identity.WithIdentityResourceGuard(public.IdentityResourceGuardLimits(cfg.IdentityResourceGuard)),
+		)
+	}
+	identityRepo := identity.NewRepository(pool, identityOptions...)
+	apiKeyRepositoryFactory := options.apiKeyRepositoryFactory
+	if apiKeyRepositoryFactory == nil {
+		apiKeyRepositoryFactory = func(pool *pgxpool.Pool) *apikey.Repository {
+			return apikey.NewRepository(pool)
+		}
+	}
+	apiKeyRepo := apiKeyRepositoryFactory(pool)
+	apiKeyRepositoryReady := false
+	defer func() {
+		if !apiKeyRepositoryReady && apiKeyRepo != nil {
+			_ = apiKeyRepo.Close()
+		}
+	}()
 	registryProvider, err := registryprovider.NewProvider(cfg.Registry, nil, logger)
 	if err != nil {
 		logger.Warn("Registry provider disabled", zap.Error(err))
 	}
 	oidcConfigured := config.HasEnabledOIDCProviders(cfg.OIDCProviders)
 	schedulerConfigured := cfg.SchedulerEnabled && cfg.SchedulerURL != ""
-	selfHostedAuthEnabled := edgeAuthModeUsesSelfHostedIdentity(cfg.AuthMode)
 	enterpriseFeaturesEnabled := schedulerConfigured || (selfHostedAuthEnabled && oidcConfigured)
 
 	licenseEntitlements := licensing.NewStaticEntitlements()
@@ -206,9 +269,52 @@ func NewServer(
 		}
 	}
 	authMiddleware := middleware.NewAuthMiddleware(apiKeyRepo, cfg.JWTSecret, jwtIssuer, logger, authMiddlewareOptions...)
-	rateLimiter, err := middleware.NewRateLimiterWithConfig(ctx, cfg.RateLimitRPS, cfg.RateLimitBurst, middleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig), logger)
-	if err != nil {
-		return nil, fmt.Errorf("create rate limiter: %w", err)
+	teamQuotaController := options.teamQuotaController
+	ownsTeamQuotaController := teamQuotaController == nil
+	if teamQuotaController == nil {
+		policyManager := options.teamQuotaPolicyManager
+		var policyReader coreteamquota.PolicyReader = coreteamquota.NewRepository(pool)
+		if policyManager != nil {
+			policyReader = policyManager
+		}
+		distributedStore, ok := policyReader.(interface {
+			coreteamquota.PolicyReader
+			coreteamquota.TeamAdmissionStateResolver
+		})
+		if !ok {
+			return nil, fmt.Errorf("team quota policy reader does not support admission state")
+		}
+		teamQuotaController, err = gatewayteamquota.NewDistributedController(
+			ctx,
+			distributedStore,
+			identityRepo,
+			cfg.RegionID,
+			cfg.TeamQuota.DistributedEnforcement,
+			logger,
+			gatewayteamquota.WithPolicyManager(policyManager),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create distributed Team Quota controller: %w", err)
+		}
+	}
+	publicOverloadGuard := options.publicOverloadGuard
+	ownsPublicOverloadGuard := false
+	if publicOverloadGuard == nil {
+		publicOverloadGuard, err = middleware.NewSharedOverloadGuard(
+			ctx,
+			middleware.SharedOverloadGuardConfig(
+				cfg.GatewayConfig,
+				rediscache.JoinKeyPrefix("regional-gateway", cfg.RegionID),
+			),
+			logger,
+		)
+		if err != nil {
+			if ownsTeamQuotaController {
+				_ = teamQuotaController.Close()
+			}
+			return nil, fmt.Errorf("create public overload guard: %w", err)
+		}
+		ownsPublicOverloadGuard = true
 	}
 	requestLogger := middleware.NewRequestLogger(logger)
 
@@ -221,6 +327,12 @@ func NewServer(
 	// Initialize OIDC manager
 	if selfHostedAuthEnabled && oidcConfigured {
 		if err := licenseEntitlements.Require(licensing.FeatureSSO); err != nil {
+			if ownsPublicOverloadGuard && publicOverloadGuard != nil {
+				_ = publicOverloadGuard.Close()
+			}
+			if ownsTeamQuotaController && teamQuotaController != nil {
+				_ = teamQuotaController.Close()
+			}
 			return nil, fmt.Errorf("enterprise SSO feature is required when OIDC providers are configured: %w", err)
 		}
 	}
@@ -242,27 +354,31 @@ func NewServer(
 	}
 
 	server := &Server{
-		router:                router,
-		cfg:                   cfg,
-		pool:                  pool,
-		identityRepo:          identityRepo,
-		apiKeyRepo:            apiKeyRepo,
-		clusterGatewayRouter:  clusterGatewayRouter,
-		schedulerRouter:       schedulerRouter,
-		authMiddleware:        authMiddleware,
-		internalAuth:          internalAuth,
-		rateLimiter:           rateLimiter,
-		requestLogger:         requestLogger,
-		logger:                logger,
-		internalAuthGen:       internalAuthGen,
-		meteringHandler:       gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger),
-		obsProvider:           obsProvider,
-		httpClient:            httpClient,
-		clusterGatewayProxies: make(map[string]*proxy.Router),
-		clusterCache:          make(map[string]string),
-		entitlements:          publicEntitlements,
-		registry:              registryProvider,
-		teamMembership:        identityRepo,
+		router:                  router,
+		cfg:                     cfg,
+		pool:                    pool,
+		identityRepo:            identityRepo,
+		apiKeyRepo:              apiKeyRepo,
+		ownsAPIKeyRepo:          true,
+		clusterGatewayRouter:    clusterGatewayRouter,
+		schedulerRouter:         schedulerRouter,
+		authMiddleware:          authMiddleware,
+		internalAuth:            internalAuth,
+		teamQuotaController:     teamQuotaController,
+		ownsTeamQuotaController: ownsTeamQuotaController,
+		publicOverloadGuard:     publicOverloadGuard,
+		ownsPublicOverloadGuard: ownsPublicOverloadGuard,
+		requestLogger:           requestLogger,
+		logger:                  logger,
+		internalAuthGen:         internalAuthGen,
+		meteringHandler:         gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger),
+		obsProvider:             obsProvider,
+		httpClient:              httpClient,
+		clusterGatewayProxies:   make(map[string]*proxy.Router),
+		clusterCache:            make(map[string]string),
+		entitlements:            publicEntitlements,
+		registry:                registryProvider,
+		teamMembership:          identityRepo,
 
 		builtinProvider: builtinProvider,
 		oidcManager:     oidcManager,
@@ -271,6 +387,7 @@ func NewServer(
 
 	server.setupRoutes()
 
+	apiKeyRepositoryReady = true
 	return server, nil
 }
 
@@ -309,11 +426,30 @@ func (s *Server) setupRoutes() {
 	// ===== API Proxy Routes =====
 	// These routes proxy to cluster-gateway or scheduler after authentication.
 	api := s.router.Group("/api")
+	s.attachPublicAPIOverloadGuard(api)
 	{
-		// Apply auth and rate limiting to all API routes
+		// Authenticate first. System-admin policy repair routes intentionally
+		// bypass tenant Team Quota admission so a restrictive request, byte, or
+		// connection policy cannot make its own repair endpoint unreachable.
 		api.Use(s.authMiddleware.Authenticate())
 		api.Use(attachAuditCorrelation())
-		api.Use(s.rateLimiter.RateLimit())
+		api.Use(s.teamQuotaController.AdmitEdgeTraffic(false))
+		api.Use(s.teamQuotaController.AdmitActiveRequests(false))
+		api.Use(s.teamQuotaController.RateLimitAPIRequests(false))
+
+		adminQuotas := api.Group("/v1/teams")
+		adminQuotas.Use(s.authMiddleware.RequireSystemAdmin())
+		{
+			adminQuotas.GET("/:team_id/quotas", s.teamQuotaController.ListTeam)
+			adminQuotas.PUT("/:team_id/quotas/:key", s.teamQuotaController.PutTeamPolicy)
+			adminQuotas.DELETE("/:team_id/quotas/:key", s.teamQuotaController.DeleteTeamPolicy)
+		}
+
+		api.GET(
+			"/v1/quotas",
+			s.authMiddleware.RequirePermission(authn.PermQuotaRead),
+			s.teamQuotaController.ListCurrent,
+		)
 
 		// If scheduler is enabled, route /api/v1/templates* to scheduler
 		if s.schedulerRouter != nil {
@@ -365,6 +501,23 @@ func (s *Server) setupRoutes() {
 
 	// Unmatched API routes fall back to the default cluster-gateway. Everything
 	// else goes through the public exposure fallback.
+	s.setupNoRouteFallback()
+}
+
+func (s *Server) attachPublicAPIOverloadGuard(api *gin.RouterGroup) {
+	if s.publicOverloadGuard != nil {
+		api.Use(s.publicOverloadGuard.Admit())
+	}
+}
+
+func (s *Server) setupNoRouteFallback() {
+	if s.publicOverloadGuard != nil {
+		s.router.NoRoute(
+			s.admitPublicNoRouteOverload(),
+			s.handleNoRoute,
+		)
+		return
+	}
 	s.router.NoRoute(s.handleNoRoute)
 }
 
@@ -401,21 +554,33 @@ func (s *Server) setupMeteringRoutes() {
 
 func (s *Server) setupPublicRoutes() {
 	var teamDeletePreflight gatewayhandlers.TeamDeletePreflight
+	var teamDeletionLifecycle gatewayhandlers.TeamDeletionLifecycle
 	if s.pool != nil {
 		teamDeletePreflight = teamresources.NewRepository(s.pool)
+		teamDeletionLifecycle = coreteamquota.NewRepository(s.pool)
 	}
 
 	deps := public.Deps{
-		IdentityRepo:        s.identityRepo,
-		APIKeyRepo:          s.apiKeyRepo,
-		AuthMiddleware:      s.authMiddleware,
-		TeamDeletePreflight: teamDeletePreflight,
-		BuiltinProvider:     s.builtinProvider,
-		OIDCManager:         s.oidcManager,
-		Entitlements:        s.entitlements,
-		JWTIssuer:           s.jwtIssuer,
-		RegionID:            s.cfg.RegionID,
-		Logger:              s.logger,
+		IdentityRepo:          s.identityRepo,
+		APIKeyRepo:            s.apiKeyRepo,
+		AuthMiddleware:        s.authMiddleware,
+		TeamDeletePreflight:   teamDeletePreflight,
+		TeamDeletionLifecycle: teamDeletionLifecycle,
+		BuiltinProvider:       s.builtinProvider,
+		OIDCManager:           s.oidcManager,
+		Entitlements:          s.entitlements,
+		JWTIssuer:             s.jwtIssuer,
+		RegionID:              s.cfg.RegionID,
+		Logger:                s.logger,
+	}
+	if s.teamQuotaController != nil {
+		deps.TeamDistributedAdmissionDisabler = s.teamQuotaController
+		deps.TeamTrafficAdmission = s.teamQuotaController.AdmitEdgeTraffic(false)
+		deps.TeamActiveRequestAdmission = s.teamQuotaController.AdmitActiveRequests(false)
+		deps.TeamRequestAdmission = s.teamQuotaController.RateLimitAPIRequests(false)
+	}
+	if s.publicOverloadGuard != nil {
+		deps.IdentityRequestAdmission = s.publicOverloadGuard.Admit()
 	}
 
 	if edgeAuthModeUsesSelfHostedIdentity(s.cfg.AuthMode) {
@@ -438,6 +603,17 @@ func (s *Server) handleNoRoute(c *gin.Context) {
 	s.proxyPublicExposureNoRoute(c)
 }
 
+func (s *Server) admitPublicNoRouteOverload() gin.HandlerFunc {
+	admit := s.publicOverloadGuard.Admit()
+	return func(c *gin.Context) {
+		if !s.requestHostIsPublicExposure(c) && !requestPathIsAPI(c) {
+			c.Next()
+			return
+		}
+		admit(c)
+	}
+}
+
 func (s *Server) requestHostIsPublicExposure(c *gin.Context) bool {
 	if c == nil || c.Request == nil {
 		return false
@@ -450,17 +626,7 @@ func (s *Server) requestHostIsPublicExposure(c *gin.Context) bool {
 }
 
 func (s *Server) handleAPINoRoute(c *gin.Context) bool {
-	if c == nil {
-		return false
-	}
-	if c.Request == nil {
-		return false
-	}
-	if c.Request.URL == nil {
-		return false
-	}
-	path := c.Request.URL.Path
-	if path != "/api" && !strings.HasPrefix(path, "/api/") {
+	if !requestPathIsAPI(c) {
 		return false
 	}
 
@@ -478,23 +644,44 @@ func (s *Server) handleAPINoRoute(c *gin.Context) bool {
 	c.Set("auth_context", authCtx)
 	ctx := authn.WithAuthContext(c.Request.Context(), authCtx)
 	c.Request = c.Request.WithContext(ctx)
+	ensureAuditCorrelation(c, authCtx)
 
-	s.rateLimiter.RateLimit()(c)
-	if c.IsAborted() {
+	cleanup, ok := s.teamQuotaController.AttachEdgeTraffic(c, false)
+	if !ok {
+		return true
+	}
+	defer cleanup()
+	activeRequestCleanup, ok := s.teamQuotaController.AttachActiveRequest(c, false)
+	if !ok {
+		return true
+	}
+	defer activeRequestCleanup()
+	if !s.teamQuotaController.AdmitAPIRequest(c, false) {
 		return true
 	}
 	if rejectTeamScopedPlatformAPIKeyWithoutTeam(c, authCtx) {
 		return true
 	}
-	token, err := s.generateInternalToken(authCtx, "cluster-gateway")
+	token, err := s.generateForwardingInternalToken(
+		authCtx,
+		internalauth.ServiceClusterGateway,
+		c.Request,
+	)
 	if err != nil {
-		s.logger.Error("Failed to generate internal token for cluster-gateway fallback", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
+		s.abortForwardingTokenError(c, internalauth.ServiceClusterGateway, err)
 		return true
 	}
 	s.applyInternalHeaders(c, token, authCtx)
 	s.clusterGatewayRouter.ProxyToTarget(c)
 	return true
+}
+
+func requestPathIsAPI(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	path := c.Request.URL.Path
+	return path == "/api" || strings.HasPrefix(path, "/api/")
 }
 
 func (s *Server) requireTeamContextForTeamScopedAPI() gin.HandlerFunc {
@@ -534,13 +721,9 @@ func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
 		}
 
 		// Generate internal token for the target service
-		token, err := s.generateInternalToken(authCtx, target)
+		token, err := s.generateForwardingInternalToken(authCtx, target, c.Request)
 		if err != nil {
-			s.logger.Error("Failed to generate internal token",
-				zap.String("target", target),
-				zap.Error(err),
-			)
-			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
+			s.abortForwardingTokenError(c, target, err)
 			return
 		}
 
@@ -558,6 +741,45 @@ func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
 
 // Start starts the HTTP server
 func (s *Server) Start(ctx context.Context) error {
+	if s.ownsAPIKeyRepo && s.apiKeyRepo != nil {
+		defer func() {
+			if err := s.closeAPIKeyRepository(); err != nil {
+				s.logger.Warn("Failed to close API key repository", zap.Error(err))
+			}
+		}()
+	}
+	if s.ownsTeamQuotaController && s.teamQuotaController != nil {
+		if err := s.teamQuotaController.StartDeletedTeamTombstoneCleanup(
+			ctx,
+			gatewayteamquota.DeletedTeamTombstoneRetention(s.cfg.JWTAccessTokenTTL.Duration),
+		); err != nil {
+			return fmt.Errorf("start deleted Team Quota tombstone cleanup: %w", err)
+		}
+	}
+	if edgeAuthModeUsesSelfHostedIdentity(s.cfg.AuthMode) {
+		go s.identityRepo.RunIdentitySessionCleanup(
+			ctx,
+			s.cfg.IdentityResourceGuard.SessionCleanupInterval.Duration,
+			s.cfg.IdentityResourceGuard.SessionCleanupBatchSize,
+			func(err error) {
+				s.logger.Warn("Failed to clean up identity sessions", zap.Error(err))
+			},
+		)
+	}
+	if s.ownsTeamQuotaController && s.teamQuotaController != nil {
+		defer func() {
+			if err := s.teamQuotaController.Close(); err != nil {
+				s.logger.Warn("Failed to close Team Quota controller", zap.Error(err))
+			}
+		}()
+	}
+	if s.ownsPublicOverloadGuard && s.publicOverloadGuard != nil {
+		defer func() {
+			if err := s.publicOverloadGuard.Close(); err != nil {
+				s.logger.Warn("Failed to close public overload guard", zap.Error(err))
+			}
+		}()
+	}
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
 	s.logger.Info("Starting HTTP server",
 		zap.String("addr", addr),
@@ -591,6 +813,13 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errChan:
 		return err
 	}
+}
+
+func (s *Server) closeAPIKeyRepository() error {
+	if s == nil || !s.ownsAPIKeyRepo || s.apiKeyRepo == nil {
+		return nil
+	}
+	return s.apiKeyRepo.Close()
 }
 
 // Health check handlers
@@ -635,4 +864,17 @@ func normalizeEdgeAuthMode(mode string) string {
 
 func edgeAuthModeUsesSelfHostedIdentity(mode string) bool {
 	return normalizeEdgeAuthMode(mode) == edgeAuthModeSelfHosted
+}
+
+func validateAcceptedAccessTokenTTL(cfg *config.RegionalGatewayConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("regional gateway config is required")
+	}
+	if normalizeEdgeAuthMode(cfg.AuthMode) == edgeAuthModeFederatedGlobal &&
+		cfg.JWTAccessTokenTTL.Duration <= 0 {
+		return fmt.Errorf(
+			"federated regional gateway requires a positive jwt_access_token_ttl maximum accepted lifetime",
+		)
+	}
+	return nil
 }

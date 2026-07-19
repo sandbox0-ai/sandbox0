@@ -360,6 +360,8 @@ func (h *SessionHandler) writeSessionError(w http.ResponseWriter, action string,
 		writeError(w, http.StatusNotFound, "session_not_found", err.Error())
 	case errors.Is(err, session.ErrCursorExpired):
 		writeError(w, http.StatusGone, "event_cursor_expired", err.Error())
+	case errors.Is(err, session.ErrSessionLimitExceeded):
+		writeError(w, http.StatusTooManyRequests, "session_limit_exceeded", err.Error())
 	case errors.Is(err, session.ErrAttemptMismatch),
 		errors.Is(err, session.ErrSessionNotRunning),
 		errors.Is(err, session.ErrSessionExists),

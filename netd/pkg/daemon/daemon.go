@@ -28,7 +28,10 @@ import (
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/activeconnections"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/concurrency"
+	teamquotanetwork "github.com/sandbox0-ai/sandbox0/pkg/teamquota/network"
 	"go.uber.org/zap"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -181,26 +184,39 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			conntrackManager.Close()
 		}
 	}()
-	if d.cfg.DatabaseURL != "" {
-		pool, err := dbpool.New(ctx, dbpool.Options{
-			DatabaseURL:     d.cfg.DatabaseURL,
-			DefaultMaxConns: 5,
-			DefaultMinConns: 1,
-			ConfigModifier:  d.dbConfigModifier(),
-		})
-		if err != nil {
-			return fmt.Errorf("create ctld network runtime database pool: %w", err)
-		}
-		databasePool = pool
-		if err := quota.RunMigrations(ctx, databasePool, observability.NewMigrateLogger(d.logger)); err != nil {
-			return fmt.Errorf("run quota migrations: %w", err)
-		}
+	if strings.TrimSpace(d.cfg.DatabaseURL) == "" {
+		return fmt.Errorf("DATABASE_URL is required for network team quota enforcement")
 	}
+	pool, err := dbpool.New(ctx, dbpool.Options{
+		DatabaseURL:     d.cfg.DatabaseURL,
+		DefaultMaxConns: 5,
+		DefaultMinConns: 1,
+		ConfigModifier:  d.dbConfigModifier(),
+	})
+	if err != nil {
+		return fmt.Errorf("create ctld network runtime database pool: %w", err)
+	}
+	databasePool = pool
+	if err := teamquota.RunMigrations(ctx, databasePool, observability.NewMigrateLogger(d.logger)); err != nil {
+		return fmt.Errorf("run team quota migrations: %w", err)
+	}
+	stateIdentity, err := teamquota.ClaimRegionStateIdentity(
+		ctx,
+		databasePool,
+		teamquota.RegionStateIdentityConfig{
+			RegionID:        d.cfg.RegionID,
+			ExpectedStateID: d.cfg.TeamQuotaDistributedEnforcement.StateID,
+			RedisURL:        d.cfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix:  d.cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:    d.cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("validate Team Quota region state identity: %w", err)
+	}
+	d.cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix = stateIdentity.KeyPrefix
 	if d.cfg.Metering.Enabled {
-		if databasePool == nil {
-			return fmt.Errorf("DATABASE_URL is required when metering is enabled")
-		}
-		db, usageStore, err := d.openMetering(ctx)
+		db, err := d.openMetering(ctx)
 		if err != nil {
 			return err
 		}
@@ -212,11 +228,6 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			d.cfg.NodeName,
 			d.logger,
 		)
-		if databasePool != nil {
-			quotaRepo := quota.NewRepository(databasePool)
-			quotaRepo.SetUsageStore(usageStore)
-			usageAggregator.SetQuotaStore(quotaRepo)
-		}
 	}
 	syncTrigger := make(chan struct{}, 1)
 	triggerSync := func() {
@@ -259,7 +270,54 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		return err
 	}
 
-	proxyOpts := []proxy.ServerOption{}
+	if strings.TrimSpace(d.cfg.TeamQuotaDistributedEnforcement.RedisURL) == "" {
+		return fmt.Errorf("team quota Redis URL is required for network quota enforcement")
+	}
+	teamQuotaRepo := teamquota.NewRepository(databasePool)
+	networkLimiter, err := teamquotanetwork.NewRedis(
+		ctx,
+		teamQuotaRepo,
+		teamquotanetwork.Config{
+			RegionID:       d.cfg.RegionID,
+			RedisURL:       d.cfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix: d.cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:   d.cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+			PolicyCacheTTL: d.cfg.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create network team quota enforcer: %w", err)
+	}
+	networkQuota := &proxy.TeamNetworkQuota{Limiter: networkLimiter}
+	activeConnectionQuota, err := activeconnections.NewRedis(
+		ctx,
+		teamQuotaRepo,
+		concurrency.Config{
+			RegionID:       d.cfg.RegionID,
+			RedisURL:       d.cfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix: d.cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:   d.cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+			PolicyCacheTTL: d.cfg.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration,
+			LeaseTTL:       d.cfg.TeamQuotaDistributedEnforcement.LeaseTTL.Duration,
+			RenewInterval:  d.cfg.TeamQuotaDistributedEnforcement.RenewInterval.Duration,
+		},
+	)
+	if err != nil {
+		_ = networkQuota.Close()
+		return fmt.Errorf("create active connection team quota enforcer: %w", err)
+	}
+	networkQuotaOwnedByProxy := false
+	defer func() {
+		if !networkQuotaOwnedByProxy {
+			_ = networkQuota.Close()
+			_ = activeConnectionQuota.Close()
+		}
+	}()
+
+	proxyOpts := []proxy.ServerOption{
+		proxy.WithTeamNetworkQuota(networkQuota),
+		proxy.WithActiveConnectionQuota(activeConnectionQuota),
+	}
 	if d.cfg.EgressAuthResolverURL != "" {
 		privateKey, keyErr := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 		if keyErr != nil {
@@ -281,6 +339,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	if err != nil {
 		return err
 	}
+	networkQuotaOwnedByProxy = true
 	d.proxyServer = proxyServer
 	if d.cfg.EgressAuthResolverURL != "" && databasePool != nil {
 		startCredentialSourceRotationListener(ctx, databasePool, d.logger, proxyServer)
@@ -368,9 +427,9 @@ func (d *Daemon) dbConfigModifier() func(*pgxpool.Config) error {
 	return d.obsProvider.Pgx.ConfigModifier()
 }
 
-func (d *Daemon) openMetering(ctx context.Context) (*sql.DB, *meteringclickhouse.Repository, error) {
+func (d *Daemon) openMetering(ctx context.Context) (*sql.DB, error) {
 	if d == nil || d.cfg == nil || !d.cfg.Metering.Enabled {
-		return nil, nil, nil
+		return nil, nil
 	}
 	ch := d.cfg.Metering.ClickHouse
 	timeout := ch.ConnectTimeout.Duration
@@ -391,14 +450,14 @@ func (d *Daemon) openMetering(ctx context.Context) (*sql.DB, *meteringclickhouse
 		},
 		Migrate: !ch.SkipSchemaMigration,
 	}
-	db, repo, err := meteringclickhouse.Open(connectCtx, openConfig)
+	db, _, err := meteringclickhouse.Open(connectCtx, openConfig)
 	if err != nil {
-		deferredDB, deferredRepo, deferredErr := meteringclickhouse.OpenDeferred(openConfig)
+		deferredDB, _, deferredErr := meteringclickhouse.OpenDeferred(openConfig)
 		if deferredErr != nil {
-			return nil, nil, fmt.Errorf("initialize deferred clickhouse metering backend after %v: %w", err, deferredErr)
+			return nil, fmt.Errorf("initialize deferred clickhouse metering backend after %v: %w", err, deferredErr)
 		}
 		d.logger.Warn("Metering ClickHouse backend is unavailable; usage capture will continue in PostgreSQL", zap.Error(err))
-		return deferredDB, deferredRepo, nil
+		return deferredDB, nil
 	}
 	d.logger.Info("Metering ClickHouse backend initialized",
 		zap.String("database", ch.Database),
@@ -406,7 +465,7 @@ func (d *Daemon) openMetering(ctx context.Context) (*sql.DB, *meteringclickhouse
 		zap.String("windows_table", ch.WindowsTable),
 		zap.Bool("schema_migration", !ch.SkipSchemaMigration),
 	)
-	return db, repo, nil
+	return db, nil
 }
 
 func (d *Daemon) egressAuthHTTPClient() *http.Client {
@@ -566,12 +625,16 @@ func (d *Daemon) syncRedirect(
 		for _, podIP := range result.RemovedIPs {
 			if proxyServer != nil {
 				proxyServer.ForgetSandboxDNS(podIP)
+				proxyServer.ForgetSandboxUDPSessions(podIP)
 			}
 			cleanupTrackedFlows(ctx, tracker, conntrackManager, podIP)
 		}
 		for _, change := range result.Changed {
 			if change.Initial || change.PodIP == "" {
 				continue
+			}
+			if proxyServer != nil {
+				proxyServer.ForgetSandboxUDPSessions(change.PodIP)
 			}
 			cleanupDeniedTrackedFlows(ctx, tracker, conntrackManager, policyStore, change.PodIP)
 		}

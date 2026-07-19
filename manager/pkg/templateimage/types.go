@@ -2,11 +2,13 @@ package templateimage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	managerregistry "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
@@ -50,10 +52,65 @@ type BuildRequest struct {
 
 // Result identifies the published single-platform image.
 type Result struct {
-	PushReference  string
-	PullReference  string
-	ManifestDigest digest.Digest
-	Platform       ocispec.Platform
+	PushReference    string
+	PullReference    string
+	ManifestDigest   digest.Digest
+	LogicalSizeBytes int64
+	Platform         ocispec.Platform
+}
+
+// Plan is an immutable image publication plan. Planning resolves the pinned
+// base image and composes the final descriptors without writing to the target
+// registry. Callers can therefore reserve LogicalSizeBytes before PublishPlan
+// makes the first registry write.
+type Plan struct {
+	Result Result
+
+	publisher     *Publisher
+	request       BuildRequest
+	pusher        remotes.Pusher
+	base          *resolvedBase
+	configBytes   []byte
+	configDesc    ocispec.Descriptor
+	manifestBytes []byte
+	manifestDesc  ocispec.Descriptor
+}
+
+// DeleteRequest identifies a managed, digest-pinned template image.
+type DeleteRequest struct {
+	TeamID         string
+	TemplateID     string
+	BuildID        string
+	ImageReference string
+}
+
+// ErrRegistryDeleteUnsupported keeps cleanup jobs pending when the configured
+// provider has no proven deletion implementation.
+var ErrRegistryDeleteUnsupported = errors.New("registry image deletion is unsupported")
+
+func (r DeleteRequest) validate() (digest.Digest, error) {
+	if strings.TrimSpace(r.TeamID) == "" {
+		return "", fmt.Errorf("team_id is required")
+	}
+	if strings.TrimSpace(r.TemplateID) == "" {
+		return "", fmt.Errorf("template_id is required")
+	}
+	imageReference := strings.TrimSpace(r.ImageReference)
+	if imageReference == "" {
+		if strings.TrimSpace(r.BuildID) == "" {
+			return "", fmt.Errorf("managed template image requires image_reference or build_id")
+		}
+		return "", nil
+	}
+	parts := strings.SplitN(imageReference, "@", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+		return "", fmt.Errorf("managed template image must be digest-pinned")
+	}
+	imageDigest, err := digest.Parse(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return "", fmt.Errorf("parse managed template image digest: %w", err)
+	}
+	return imageDigest, nil
 }
 
 func (r BuildRequest) validate(allowLegacyDiffID bool) error {

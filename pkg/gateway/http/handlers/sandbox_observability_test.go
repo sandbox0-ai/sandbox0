@@ -758,8 +758,16 @@ func TestSandboxObservabilityHandlerIngestLogs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	repo := &fakeSandboxObservabilityRepo{}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/logs", handler.IngestLogs, `{"logs":[{"team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","stream":"stdout","message":"hello","cursor":"log:1"}]}`)
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop(), WithSandboxObservabilityIngestPolicy(SandboxObservabilityIngestPolicy{
+		RegionID: "trusted-region", ClusterID: "trusted-cluster",
+	}))
+	rec := serveSandboxObservabilityIngestRequestWithClaims(
+		t,
+		"/internal/v1/sandbox-observability/logs",
+		handler.IngestLogs,
+		`{"logs":[{"team_id":"team-1","sandbox_id":"sb-1","region_id":"spoofed","cluster_id":"spoofed","occurred_at":"2026-07-01T01:02:03Z","stream":"stdout","message":"hello","cursor":"log:1"}]}`,
+		&internalauth.Claims{Caller: internalauth.ServiceManager, TeamID: "team-1"},
+	)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -767,20 +775,59 @@ func TestSandboxObservabilityHandlerIngestLogs(t *testing.T) {
 	if !repo.ingestLogsCalled || len(repo.ingestLogs) != 1 {
 		t.Fatalf("ingest logs called=%v logs=%d", repo.ingestLogsCalled, len(repo.ingestLogs))
 	}
+	if got := repo.ingestLogs[0]; got.RegionID != "trusted-region" || got.ClusterID != "trusted-cluster" || got.IngestedAt.IsZero() {
+		t.Fatalf("normalized log identity = %+v", got)
+	}
 }
 
 func TestSandboxObservabilityHandlerIngestRuntimeSamples(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	repo := &fakeSandboxObservabilityRepo{}
-	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
-	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/runtime-samples", handler.IngestRuntimeSamples, `{"samples":[{"team_id":"team-1","sandbox_id":"sb-1","region_id":"region-1","cluster_id":"cluster-1","runtime_generation":2,"series_epoch":"epoch-1","observed_at":"2026-07-01T01:02:03Z","sample_id":"sample-1","cpu":{"usage":0.5}}]}`)
+	handler := NewSandboxObservabilityHandler(repo, zap.NewNop(), WithSandboxObservabilityIngestPolicy(SandboxObservabilityIngestPolicy{
+		RegionID: "trusted-region", ClusterID: "trusted-cluster",
+	}))
+	rec := serveSandboxObservabilityIngestRequestWithClaims(
+		t,
+		"/internal/v1/sandbox-observability/runtime-samples",
+		handler.IngestRuntimeSamples,
+		`{"samples":[{"team_id":"team-1","sandbox_id":"sb-1","region_id":"spoofed","cluster_id":"spoofed","runtime_generation":2,"series_epoch":"epoch-1","observed_at":"2026-07-01T01:02:03Z","sample_id":"sample-1","cpu":{"usage":0.5}}]}`,
+		&internalauth.Claims{Caller: internalauth.ServiceCtld, TeamID: "team-1"},
+	)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
 	if !repo.ingestRuntimeCalled || len(repo.ingestRuntime) != 1 {
 		t.Fatalf("ingest runtime called=%v samples=%d", repo.ingestRuntimeCalled, len(repo.ingestRuntime))
+	}
+	if got := repo.ingestRuntime[0]; got.RegionID != "trusted-region" || got.ClusterID != "trusted-cluster" || got.IngestedAt.IsZero() {
+		t.Fatalf("normalized runtime identity = %+v", got)
+	}
+}
+
+func TestSandboxObservabilityHandlerRejectsWrongOrSystemProducer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithSandboxObservabilityIngestPolicy(SandboxObservabilityIngestPolicy{
+		RegionID: "region-1", ClusterID: "cluster-1",
+	}))
+	body := `{"logs":[{"team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","message":"hello","cursor":"log:1"}]}`
+	for _, claims := range []*internalauth.Claims{
+		{Caller: internalauth.ServiceCtld, TeamID: "team-1"},
+		{Caller: internalauth.ServiceManager, IsSystem: true},
+		{Caller: internalauth.ServiceManager, TeamID: "team-2"},
+	} {
+		rec := serveSandboxObservabilityIngestRequestWithClaims(
+			t,
+			"/internal/v1/sandbox-observability/logs",
+			handler.IngestLogs,
+			body,
+			claims,
+		)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("claims=%+v status=%d body=%s, want 400", claims, rec.Code, rec.Body.String())
+		}
 	}
 }
 
@@ -812,9 +859,33 @@ func serveSandboxObservabilityRequest(t *testing.T, h gin.HandlerFunc, target st
 
 func serveSandboxObservabilityIngestRequest(t *testing.T, target string, h gin.HandlerFunc, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return serveSandboxObservabilityIngestRequestWithClaims(t, target, h, body, &internalauth.Claims{
+		Caller: internalauth.ServiceNetd, TeamID: "team-1", SandboxID: "sb-1",
+	})
+}
+
+func serveSandboxObservabilityIngestRequestWithClaims(
+	t *testing.T,
+	target string,
+	h gin.HandlerFunc,
+	body string,
+	claims *internalauth.Claims,
+) *httptest.ResponseRecorder {
+	t.Helper()
 
 	router := gin.New()
-	router.POST(target, withTestAuth(h))
+	router.POST(target, func(c *gin.Context) {
+		authCtx := &authn.AuthContext{
+			TeamID:      claims.TeamID,
+			UserID:      "user-1",
+			Permissions: []string{authn.PermSandboxObservabilityWrite},
+			Caller:      claims.Caller,
+			AuthMethod:  authn.AuthMethodInternal,
+		}
+		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), authCtx))
+		c.Request = c.Request.WithContext(internalauth.WithClaims(c.Request.Context(), claims))
+		h(c)
+	})
 
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

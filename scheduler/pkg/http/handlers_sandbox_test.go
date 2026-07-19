@@ -23,6 +23,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/guard"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	"go.uber.org/zap"
@@ -655,6 +657,178 @@ func TestCreateSandboxFallsBackWhenNoFreshSignalsExist(t *testing.T) {
 	}
 }
 
+func TestProxySandboxReSignsExactRegionalQuotaAdmissionProof(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ed25519 keypair: %v", err)
+	}
+	sandboxID, err := naming.SandboxName("home", "team-a-demo", "abcde")
+	if err != nil {
+		t.Fatalf("SandboxName() error = %v", err)
+	}
+	requestPath := "/api/v1/sandboxes/" + sandboxID
+	clusterValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             internalauth.ServiceClusterGateway,
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{internalauth.ServiceScheduler},
+		ClockSkewTolerance: 5 * time.Second,
+	})
+	var wantProofID string
+	var wantProofIssuedAtMS int64
+	var wantProofExpiresAtMS int64
+	var wantProofVersion guard.Version
+	clusterCalls := 0
+	cluster := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clusterCalls++
+		claims, err := clusterValidator.Validate(
+			r.Header.Get(internalauth.DefaultTokenHeader),
+		)
+		if err != nil {
+			t.Fatalf("validate scheduler token: %v", err)
+		}
+		if claims.QuotaAdmissionProof == nil {
+			t.Fatal("scheduler dropped valid regional quota admission proof")
+		}
+		if !claims.QuotaAdmissionProof.MatchesRequest(claims, r) {
+			t.Fatalf("re-signed proof does not match cluster request: %+v", claims.QuotaAdmissionProof)
+		}
+		wantKeys := []coreteamquota.Key{
+			coreteamquota.KeyAPIRequests,
+			coreteamquota.KeyNetworkEgressBytes,
+		}
+		if !reflect.DeepEqual(claims.QuotaAdmissionProof.Keys, wantKeys) {
+			t.Fatalf(
+				"proof keys = %v, want unchanged %v",
+				claims.QuotaAdmissionProof.Keys,
+				wantKeys,
+			)
+		}
+		if claims.QuotaAdmissionProof.ProofID != wantProofID ||
+			claims.QuotaAdmissionProof.IssuedAtMS != wantProofIssuedAtMS ||
+			claims.QuotaAdmissionProof.ExpiresAtMS != wantProofExpiresAtMS ||
+			claims.QuotaAdmissionProof.PolicyVersion() != wantProofVersion {
+			t.Fatalf(
+				"re-signed proof identity/validity = (%q, %d, %d, %+v), want (%q, %d, %d, %+v)",
+				claims.QuotaAdmissionProof.ProofID,
+				claims.QuotaAdmissionProof.IssuedAtMS,
+				claims.QuotaAdmissionProof.ExpiresAtMS,
+				claims.QuotaAdmissionProof.PolicyVersion(),
+				wantProofID,
+				wantProofIssuedAtMS,
+				wantProofExpiresAtMS,
+				wantProofVersion,
+			)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer cluster.Close()
+
+	server := newRoutingTestServer(
+		nil,
+		nil,
+		[]*template.Cluster{{
+			ClusterID:         "home",
+			ClusterGatewayURL: cluster.URL,
+			Enabled:           true,
+		}},
+		&fakeRoutingReconciler{},
+	)
+	server.clusterGatewayProxies = make(map[string]*proxy.Router)
+	server.authValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             internalauth.ServiceScheduler,
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{internalauth.ServiceRegionalGateway},
+		ClockSkewTolerance: 5 * time.Second,
+	})
+	server.internalAuthGen = internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     internalauth.ServiceScheduler,
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+	router := gin.New()
+	v1 := router.Group("/api/v1")
+	v1.Use(server.authMiddleware())
+	v1.Any("/sandboxes/:id", server.proxySandbox)
+	httpServer := httptest.NewServer(router)
+	defer httpServer.Close()
+
+	edgeRequest := httptest.NewRequest(http.MethodDelete, requestPath, nil)
+	proof, err := internalauth.NewQuotaAdmissionProof(
+		internalauth.QuotaAdmissionClassEdgeAdmitted,
+		edgeRequest,
+		"team-a",
+		"operation-a",
+		"request-a",
+		internalauth.ServiceRegionalGateway,
+		[]coreteamquota.Key{
+			coreteamquota.KeyAPIRequests,
+			coreteamquota.KeyNetworkEgressBytes,
+		},
+		guard.Version{EnforcementEpoch: 1, RedisGeneration: 1},
+	)
+	if err != nil {
+		t.Fatalf("NewQuotaAdmissionProof() error = %v", err)
+	}
+	regionalGenerator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     internalauth.ServiceRegionalGateway,
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+	regionalToken, err := regionalGenerator.Generate(
+		internalauth.ServiceScheduler,
+		"team-a",
+		"user-a",
+		internalauth.GenerateOptions{
+			Audit: &internalauth.AuditContext{
+				OperationID: "operation-a",
+				RequestID:   "request-a",
+				Origin:      internalauth.ServiceRegionalGateway,
+			},
+			QuotaAdmissionProof: proof,
+		},
+	)
+	if err != nil {
+		t.Fatalf("generate regional token: %v", err)
+	}
+	regionalClaims, err := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             internalauth.ServiceScheduler,
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{internalauth.ServiceRegionalGateway},
+		ClockSkewTolerance: 5 * time.Second,
+	}).Validate(regionalToken)
+	if err != nil {
+		t.Fatalf("validate regional token: %v", err)
+	}
+	if regionalClaims.QuotaAdmissionProof == nil {
+		t.Fatal("regional token omitted quota admission proof")
+	}
+	wantProofID = regionalClaims.QuotaAdmissionProof.ProofID
+	wantProofIssuedAtMS = regionalClaims.QuotaAdmissionProof.IssuedAtMS
+	wantProofExpiresAtMS = regionalClaims.QuotaAdmissionProof.ExpiresAtMS
+	wantProofVersion = regionalClaims.QuotaAdmissionProof.PolicyVersion()
+	request, err := http.NewRequest(
+		http.MethodDelete,
+		httpServer.URL+requestPath,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	request.Header.Set(internalauth.DefaultTokenHeader, regionalToken)
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", response.StatusCode)
+	}
+	if clusterCalls != 1 {
+		t.Fatalf("cluster calls = %d, want 1", clusterCalls)
+	}
+}
+
 func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -682,6 +856,12 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 		}
 		if claims.UserID != "user-a" {
 			t.Fatalf("claims.UserID = %q, want user-a", claims.UserID)
+		}
+		if claims.QuotaAdmissionProof != nil {
+			t.Fatalf(
+				"fan-out request propagated edge proof: %+v",
+				claims.QuotaAdmissionProof,
+			)
 		}
 		wantPerms := []string{gatewayauthn.PermSandboxRead}
 		if !reflect.DeepEqual(claims.Permissions, wantPerms) {
@@ -725,14 +905,47 @@ func TestListSandboxesRoutesTeamScopedToken(t *testing.T) {
 		PrivateKey: privateKey,
 		TTL:        time.Minute,
 	})
-	regionalToken, err := regionalGen.Generate("scheduler", "team-a", "user-a", internalauth.GenerateOptions{
-		Permissions: []string{gatewayauthn.PermSandboxRead},
-	})
+	edgeRequest := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/sandboxes?limit=50",
+		nil,
+	)
+	proof, err := internalauth.NewQuotaAdmissionProof(
+		internalauth.QuotaAdmissionClassEdgeAdmitted,
+		edgeRequest,
+		"team-a",
+		"operation-list",
+		"request-list",
+		internalauth.ServiceRegionalGateway,
+		[]coreteamquota.Key{coreteamquota.KeyAPIRequests},
+		guard.Version{EnforcementEpoch: 1, RedisGeneration: 1},
+	)
+	if err != nil {
+		t.Fatalf("NewQuotaAdmissionProof() error = %v", err)
+	}
+	regionalToken, err := regionalGen.Generate(
+		"scheduler",
+		"team-a",
+		"user-a",
+		internalauth.GenerateOptions{
+			Permissions: []string{gatewayauthn.PermSandboxRead},
+			Audit: &internalauth.AuditContext{
+				OperationID: "operation-list",
+				RequestID:   "request-list",
+				Origin:      internalauth.ServiceRegionalGateway,
+			},
+			QuotaAdmissionProof: proof,
+		},
+	)
 	if err != nil {
 		t.Fatalf("generate regional token: %v", err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/sandboxes", nil)
+	req, err := http.NewRequest(
+		http.MethodGet,
+		httpServer.URL+"/api/v1/sandboxes?limit=50",
+		nil,
+	)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}

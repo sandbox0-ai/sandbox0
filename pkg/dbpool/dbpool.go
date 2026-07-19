@@ -62,8 +62,12 @@ func New(ctx context.Context, opts Options) (*pgxpool.Pool, error) {
 		opts.MinConns = opts.DefaultMinConns
 	}
 
-	poolConfig.MaxConns = opts.MaxConns
-	poolConfig.MinConns = opts.MinConns
+	if opts.MaxConns != 0 {
+		poolConfig.MaxConns = opts.MaxConns
+	}
+	if opts.MinConns != 0 {
+		poolConfig.MinConns = opts.MinConns
+	}
 	if opts.MaxConnLifetime > 0 {
 		poolConfig.MaxConnLifetime = opts.MaxConnLifetime
 	}

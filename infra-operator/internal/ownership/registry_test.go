@@ -84,6 +84,16 @@ func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
 			owner:     "internal-auth",
 			consumers: []string{"ctld"},
 		},
+		{
+			path:      "spec.teamQuota.defaults.key",
+			owner:     "region-entrypoint",
+			consumers: []string{"regional-gateway", "cluster-gateway"},
+		},
+		{
+			path:      "spec.teamQuota.distributedEnforcement.policyCacheTtl",
+			owner:     "plan",
+			consumers: []string{"regional-gateway", "cluster-gateway", "manager", "ctld"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -98,6 +108,67 @@ func TestLookupTracksCrossServiceDerivedFields(t *testing.T) {
 			if !contains(entry.Consumers, consumer) {
 				t.Fatalf("%s: expected consumer %q in %#v", tc.path, consumer, entry.Consumers)
 			}
+		}
+	}
+}
+
+func TestRegistryTracksExactSharedStateConsumers(t *testing.T) {
+	cases := []struct {
+		path string
+		want []string
+	}{
+		{
+			path: "spec.database.external.host",
+			want: []string{
+				"cluster-gateway",
+				"ctld",
+				"database",
+				"global-gateway",
+				"manager",
+				"netd",
+				"regional-gateway",
+				"scheduler",
+				"ssh-gateway",
+				"storage-proxy",
+			},
+		},
+		{
+			path: "spec.redis.operationTimeout",
+			want: []string{
+				"cluster-gateway",
+				"ctld",
+				"global-gateway",
+				"manager",
+				"netd",
+				"regional-gateway",
+				"ssh-gateway",
+				"storage-proxy",
+			},
+		},
+		{
+			path: "spec.teamQuota.distributedEnforcement.policyCacheTtl",
+			want: []string{
+				"cluster-gateway",
+				"ctld",
+				"manager",
+				"netd",
+				"regional-gateway",
+				"ssh-gateway",
+				"storage-proxy",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		entry, ok := Lookup(tc.path)
+		if !ok {
+			t.Fatalf("expected ownership entry for %s", tc.path)
+		}
+		got := append([]string(nil), entry.Consumers...)
+		sort.Strings(got)
+		sort.Strings(tc.want)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s consumers = %#v, want %#v", tc.path, got, tc.want)
 		}
 	}
 }

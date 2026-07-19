@@ -15,7 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
@@ -215,6 +215,9 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "snapshot_id must not be blank")
 		return
 	}
+	if !s.admitStorageOperation(w, r, teamId) {
+		return
+	}
 
 	if snapshotID != "" {
 		if s.snapshotMgr == nil {
@@ -231,9 +234,10 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 			StorageMetadata: storageObservationMetadataFromHeaders(r.Header),
 		})
 		if err != nil {
+			if s.writeStorageQuotaMutationError(w, err) {
+				return
+			}
 			switch {
-			case quota.IsExceeded(err):
-				_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 			case errors.Is(err, snapshot.ErrSnapshotNotFound), errors.Is(err, snapshot.ErrVolumeNotFound):
 				_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "snapshot not found")
 			case errors.Is(err, snapshot.ErrInvalidAccessMode):
@@ -261,20 +265,21 @@ func (s *Server) createSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:       time.Now(),
 	}
 
-	if err := s.repo.WithTx(r.Context(), func(tx pgx.Tx) error {
-		if err := s.repo.CreateSandboxVolumeTx(r.Context(), tx, vol); err != nil {
-			return err
-		}
-		if err := s.appendStorageObservationTx(r.Context(), tx, s.volumeStorageObservation(vol, nil, 0, vol.CreatedAt)); err != nil {
-			return err
-		}
-		if err := s.appendMeteringEventTx(r.Context(), tx, volumeCreatedEvent(s.regionID, vol)); err != nil {
-			return err
-		}
-		return nil
+	if err := s.createVolumeWithQuota(r.Context(), vol, func() error {
+		return s.repo.WithTx(r.Context(), func(tx pgx.Tx) error {
+			if err := s.repo.CreateSandboxVolumeTx(r.Context(), tx, vol); err != nil {
+				return err
+			}
+			if err := s.appendStorageObservationTx(r.Context(), tx, s.volumeStorageObservation(vol, nil, 0, vol.CreatedAt)); err != nil {
+				return err
+			}
+			if err := s.appendMeteringEventTx(r.Context(), tx, volumeCreatedEvent(s.regionID, vol)); err != nil {
+				return err
+			}
+			return nil
+		})
 	}); err != nil {
-		if quota.IsExceeded(err) {
-			_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
+		if s.writeStorageQuotaMutationError(w, err) {
 			return
 		}
 		s.logger.WithError(err).Error("Failed to create sandbox volume")
@@ -297,6 +302,9 @@ func (s *Server) listSandboxVolumes(w http.ResponseWriter, r *http.Request) {
 	teamID := claims.TeamID
 	if teamID == "" {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required in token")
+		return
+	}
+	if !s.admitStorageOperation(w, r, teamID) {
 		return
 	}
 
@@ -325,6 +333,9 @@ func (s *Server) getSandboxVolume(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "id is required")
+		return
+	}
+	if !s.admitStorageOperation(w, r, claims.TeamID) {
 		return
 	}
 
@@ -467,77 +478,22 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "not found")
 		return
 	}
+	if !s.admitStorageOperation(w, r, claims.TeamID) {
+		return
+	}
 
-	// Check for active mounts via repository
-	// Using 15 seconds as heartbeat timeout (same as coordinator.HeartbeatTimeout)
-	const heartbeatTimeout = 15
 	force := r.URL.Query().Get("force") == "true"
-	if !force && s.volMgr != nil {
-		if _, err := s.volMgr.CleanupIdleDirectVolumeFileMount(r.Context(), id); err != nil {
-			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to cleanup idle direct volume mount before delete")
-		}
-	}
-	if !force {
-		if err := s.releaseReleasableCtldVolumeOwners(r.Context(), id); err != nil {
-			status, code := http.StatusInternalServerError, spec.CodeInternal
-			message := "failed to release ctld volume owner"
-			if errors.Is(err, errCtldOwnerBusy) {
-				status, code = http.StatusConflict, spec.CodeConflict
-				message = "volume has active mounts"
-			}
-			s.logger.WithError(err).WithField("volume_id", id).Warn("Failed to release ctld volume owner before delete")
-			_ = spec.WriteError(w, status, code, message)
-			return
-		}
-	}
-	mounts, err := s.repo.GetActiveMounts(r.Context(), id, heartbeatTimeout)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to check active mounts")
-		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to check active mounts")
-		return
-	}
-
-	if len(mounts) > 0 && !force {
-		// Volume has active mounts, cannot delete
-		s.logger.WithField("volume_id", id).WithField("active_mounts", len(mounts)).Warn("Attempted to delete volume with active mounts")
-		_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, "volume has active mounts", map[string]any{
-			"active_mounts": len(mounts),
-			"mounts":        mounts,
-			"hint":          "retry with force=true to remove orphan mount records",
-		})
-		return
-	}
-
-	if len(mounts) > 0 && force {
-		for _, mount := range mounts {
-			if err := s.repo.DeleteMount(r.Context(), id, mount.ClusterID, mount.PodID); err != nil {
-				s.logger.WithError(err).WithFields(map[string]any{
-					"volume_id":  id,
-					"cluster_id": mount.ClusterID,
-					"pod_id":     mount.PodID,
-				}).Error("Failed to delete mount during force delete")
-				_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to cleanup mount records")
-				return
-			}
-		}
-	}
-
-	// No active mounts, proceed with deletion
-	if err := s.repo.WithTx(r.Context(), func(tx pgx.Tx) error {
-		if err := s.repo.DeleteSandboxVolumeTx(r.Context(), tx, id); err != nil {
-			return err
-		}
-		deletedEvent := volumeDeletedEvent(s.regionID, vol)
-		if err := s.closeStorageObservationTx(r.Context(), tx, s.volumeStorageObservation(vol, nil, 0, deletedEvent.OccurredAt)); err != nil {
-			return err
-		}
-		if err := s.appendMeteringEventTx(r.Context(), tx, deletedEvent); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
+	if _, err := s.deleteSandboxVolumeRecord(r.Context(), id, force); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
+			return
+		}
+		if s.writeStorageQuotaMutationError(w, err) {
+			return
+		}
+		switch {
+		case errors.Is(err, errVolumeHasActiveMounts), errors.Is(err, snapshot.ErrVolumeReferenced):
+			_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, err.Error())
 			return
 		}
 		s.logger.WithError(err).Error("Failed to delete sandbox volume")
@@ -545,18 +501,43 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.cleanupDeletedSandboxVolumeObjects(r.Context(), vol)
 	s.logger.WithField("volume_id", id).WithField("team_id", vol.TeamID).Info("Sandbox volume deleted")
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
 func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force bool) (*db.SandboxVolume, error) {
+	if s.barrier == nil {
+		return s.deleteSandboxVolumeRecordLocked(ctx, id, force)
+	}
+	var volumeRecord *db.SandboxVolume
+	err := s.barrier.WithExclusive(ctx, id, func(runCtx context.Context) error {
+		var deleteErr error
+		volumeRecord, deleteErr = s.deleteSandboxVolumeRecordLocked(runCtx, id, force)
+		return deleteErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return volumeRecord, nil
+}
+
+func (s *Server) deleteSandboxVolumeRecordLocked(ctx context.Context, id string, force bool) (*db.SandboxVolume, error) {
 	vol, err := s.repo.GetSandboxVolume(ctx, id)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			return nil, db.ErrNotFound
 		}
 		return nil, fmt.Errorf("get sandbox volume: %w", err)
+	}
+	if s.snapshotMgr == nil {
+		return nil, fmt.Errorf("snapshot manager is not configured")
+	}
+	snapshots, err := s.snapshotMgr.ListSnapshots(ctx, id, vol.TeamID)
+	if err != nil {
+		return nil, fmt.Errorf("list volume snapshots before delete: %w", err)
+	}
+	if len(snapshots) > 0 {
+		return nil, snapshot.ErrVolumeReferenced
 	}
 
 	const heartbeatTimeout = 15
@@ -587,32 +568,48 @@ func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force
 			}
 		}
 	}
-	if err := s.repo.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.repo.DeleteSandboxVolumeTx(ctx, tx, id); err != nil {
+	if s.storageQuota == nil {
+		return nil, &teamquota.UnavailableError{
+			Operation: "delete volume quota allocation",
+			Err:       fmt.Errorf("storage quota service is not configured"),
+		}
+	}
+	release, err := s.storageQuota.BeginRelease(
+		ctx,
+		s.storageQuota.VolumeOwner(vol.TeamID, vol.ID),
+		"volume_delete",
+	)
+	if err != nil {
+		return nil, err
+	}
+	deleteCtx, cancelDelete := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancelDelete()
+	if deleteErr := s.snapshotMgr.DeleteVolumeObjectsIfUnreferenced(deleteCtx, vol); deleteErr != nil {
+		if abortErr := release.Abort(deleteCtx, deleteErr); abortErr != nil {
+			deleteErr = errors.Join(deleteErr, abortErr)
+		}
+		return nil, deleteErr
+	}
+	if err := s.repo.WithTx(deleteCtx, func(tx pgx.Tx) error {
+		if err := s.repo.DeleteSandboxVolumeTx(deleteCtx, tx, id); err != nil {
 			return err
 		}
 		deletedEvent := volumeDeletedEvent(s.regionID, vol)
-		if err := s.closeStorageObservationTx(ctx, tx, s.volumeStorageObservation(vol, nil, 0, deletedEvent.OccurredAt)); err != nil {
+		if err := s.closeStorageObservationTx(deleteCtx, tx, s.volumeStorageObservation(vol, nil, 0, deletedEvent.OccurredAt)); err != nil {
 			return err
 		}
-		if err := s.appendMeteringEventTx(ctx, tx, deletedEvent); err != nil {
+		if err := s.appendMeteringEventTx(deleteCtx, tx, deletedEvent); err != nil {
+			return err
+		}
+		if err := release.ConfirmTx(deleteCtx, tx); err != nil {
 			return err
 		}
 		return nil
 	}); err != nil {
+		release.KeepPending()
 		return nil, err
 	}
-	s.cleanupDeletedSandboxVolumeObjects(ctx, vol)
 	return vol, nil
-}
-
-func (s *Server) cleanupDeletedSandboxVolumeObjects(ctx context.Context, vol *db.SandboxVolume) {
-	if s == nil || s.snapshotMgr == nil || vol == nil {
-		return
-	}
-	if err := s.snapshotMgr.DeleteVolumeObjectsIfUnreferenced(ctx, vol); err != nil {
-		s.logger.WithError(err).WithField("volume_id", vol.ID).Warn("Failed to clean up deleted sandbox volume objects")
-	}
 }
 
 func (s *Server) isOwnedSandboxVolume(ctx context.Context, id string) bool {
@@ -663,12 +660,21 @@ func (s *Server) createOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if existing, err := s.repo.GetOwnedSandboxVolumeByOwner(r.Context(), req.ClusterID, req.SandboxID, req.Purpose); err == nil {
+	if existing, err := s.repo.GetOwnedSandboxVolumeByOwner(
+		r.Context(),
+		claims.TeamID,
+		req.ClusterID,
+		req.SandboxID,
+		req.Purpose,
+	); err == nil {
 		_ = spec.WriteSuccess(w, http.StatusOK, existing)
 		return
 	} else if !errors.Is(err, db.ErrNotFound) {
 		s.logger.WithError(err).Error("Failed to check existing owned sandbox volume")
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
+		return
+	}
+	if !s.admitStorageOperation(w, r, claims.TeamID) {
 		return
 	}
 
@@ -709,6 +715,7 @@ func (s *Server) createOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 	}
 	owner := &db.SandboxVolumeOwner{
 		VolumeID:       vol.ID,
+		TeamID:         claims.TeamID,
 		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
 		OwnerSandboxID: req.SandboxID,
 		OwnerClusterID: req.ClusterID,
@@ -717,23 +724,34 @@ func (s *Server) createOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 		UpdatedAt:      now,
 	}
 
-	if err := s.repo.WithTx(r.Context(), func(tx pgx.Tx) error {
-		if err := s.repo.CreateSandboxVolumeTx(r.Context(), tx, vol); err != nil {
-			return err
-		}
-		if err := s.repo.CreateSandboxVolumeOwnerTx(r.Context(), tx, owner); err != nil {
-			return err
-		}
-		if err := s.appendStorageObservationTx(r.Context(), tx, s.volumeStorageObservation(vol, owner, 0, vol.CreatedAt)); err != nil {
-			return err
-		}
-		if err := s.appendMeteringEventTx(r.Context(), tx, volumeCreatedEvent(s.regionID, vol)); err != nil {
-			return err
-		}
-		return nil
+	if err := s.createVolumeWithQuota(r.Context(), vol, func() error {
+		return s.repo.WithTx(r.Context(), func(tx pgx.Tx) error {
+			if err := s.repo.CreateSandboxVolumeTx(r.Context(), tx, vol); err != nil {
+				return err
+			}
+			if err := s.repo.CreateSandboxVolumeOwnerTx(r.Context(), tx, owner); err != nil {
+				return err
+			}
+			if err := s.appendStorageObservationTx(r.Context(), tx, s.volumeStorageObservation(vol, owner, 0, vol.CreatedAt)); err != nil {
+				return err
+			}
+			if err := s.appendMeteringEventTx(r.Context(), tx, volumeCreatedEvent(s.regionID, vol)); err != nil {
+				return err
+			}
+			return nil
+		})
 	}); err != nil {
-		if existing, getErr := s.repo.GetOwnedSandboxVolumeByOwner(r.Context(), req.ClusterID, req.SandboxID, req.Purpose); getErr == nil {
+		if existing, getErr := s.repo.GetOwnedSandboxVolumeByOwner(
+			r.Context(),
+			claims.TeamID,
+			req.ClusterID,
+			req.SandboxID,
+			req.Purpose,
+		); getErr == nil {
 			_ = spec.WriteSuccess(w, http.StatusOK, existing)
+			return
+		}
+		if s.writeStorageQuotaMutationError(w, err) {
 			return
 		}
 		s.logger.WithError(err).Error("Failed to create owned sandbox volume")
@@ -795,11 +813,34 @@ func (s *Server) markOwnedSandboxVolumesForCleanup(w http.ResponseWriter, r *htt
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id and cluster_id are required")
 		return
 	}
-	if !claims.IsSystemToken() && claims.SandboxID != "" && claims.SandboxID != req.SandboxID {
-		_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, "sandbox_id does not match token")
-		return
+	var (
+		marked int64
+		err    error
+	)
+	if claims.IsSystemToken() {
+		marked, err = s.repo.MarkOwnedSandboxVolumesForCleanup(
+			r.Context(),
+			req.ClusterID,
+			req.SandboxID,
+			strings.TrimSpace(req.Reason),
+		)
+	} else {
+		if claims.TeamID == "" {
+			_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, "team-scoped token is required")
+			return
+		}
+		if claims.SandboxID == "" || claims.SandboxID != req.SandboxID {
+			_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, "sandbox_id does not match token")
+			return
+		}
+		marked, err = s.repo.MarkTeamOwnedSandboxVolumesForCleanup(
+			r.Context(),
+			claims.TeamID,
+			req.ClusterID,
+			req.SandboxID,
+			strings.TrimSpace(req.Reason),
+		)
 	}
-	marked, err := s.repo.MarkOwnedSandboxVolumesForCleanup(r.Context(), req.ClusterID, req.SandboxID, strings.TrimSpace(req.Reason))
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to mark owned sandbox volumes for cleanup")
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
@@ -859,14 +900,40 @@ func (s *Server) deleteOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
 		return
 	}
-	if !claims.IsSystemToken() && claims.SandboxID != "" && claims.SandboxID != owner.OwnerSandboxID {
-		_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, "sandbox_id does not match token")
+	vol, err := s.repo.GetSandboxVolume(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
+			return
+		}
+		s.logger.WithError(err).Error("Failed to get owned sandbox volume")
+		_ = spec.WriteError(w, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
+		return
+	}
+	if !claims.IsSystemToken() {
+		if claims.TeamID == "" {
+			_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, "team-scoped token is required")
+			return
+		}
+		if vol.TeamID != claims.TeamID {
+			_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "not found")
+			return
+		}
+		if claims.SandboxID == "" || claims.SandboxID != owner.OwnerSandboxID {
+			_ = spec.WriteError(w, http.StatusForbidden, spec.CodeForbidden, "sandbox_id does not match token")
+			return
+		}
+	}
+	if !s.admitStorageOperation(w, r, vol.TeamID) {
 		return
 	}
 	if _, err := s.deleteSandboxVolumeRecord(r.Context(), id, false); err != nil {
 		_ = s.repo.MarkOwnedSandboxVolumeCleanupAttempt(r.Context(), id, err)
+		if s.writeStorageQuotaMutationError(w, err) {
+			return
+		}
 		status, code := http.StatusInternalServerError, spec.CodeInternal
-		if errors.Is(err, errVolumeHasActiveMounts) {
+		if errors.Is(err, errVolumeHasActiveMounts) || errors.Is(err, snapshot.ErrVolumeReferenced) {
 			status, code = http.StatusConflict, spec.CodeConflict
 		}
 		_ = spec.WriteError(w, status, code, err.Error())
@@ -996,6 +1063,9 @@ func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
+	if !s.admitStorageOperation(w, r, claims.TeamID) {
+		return
+	}
 
 	run := func(runCtx context.Context) (*db.SandboxVolume, error) {
 		if err := s.releaseReleasableCtldVolumeOwners(runCtx, id); err != nil {
@@ -1022,9 +1092,10 @@ func (s *Server) forkVolume(w http.ResponseWriter, r *http.Request) {
 		vol, err = run(r.Context())
 	}
 	if err != nil {
+		if s.writeStorageQuotaMutationError(w, err) {
+			return
+		}
 		switch {
-		case quota.IsExceeded(err):
-			_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 		case errors.Is(err, snapshot.ErrVolumeNotFound):
 			_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "volume not found")
 		case errors.Is(err, snapshot.ErrInvalidAccessMode):

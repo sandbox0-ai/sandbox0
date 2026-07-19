@@ -23,11 +23,11 @@ import (
 )
 
 const (
-	defaultSandboxObservabilityLimit = 100
-	maxSandboxObservabilityLimit     = 1000
-	maxSandboxAuditIngestBodyBytes   = 8 << 20
-	sandboxObservabilityWatchPoll    = time.Second
-	sandboxObservabilityHeartbeat    = 15 * time.Second
+	defaultSandboxObservabilityLimit   = 100
+	maxSandboxObservabilityLimit       = 1000
+	sandboxObservabilityWatchPoll      = time.Second
+	sandboxObservabilityHeartbeat      = 15 * time.Second
+	MaxSandboxObservabilityIngestBytes = 8 << 20
 )
 
 type sandboxObservabilityWatchLine struct {
@@ -45,6 +45,7 @@ type SandboxObservabilityHandler struct {
 	writer sandboxobservability.Writer
 	logger *zap.Logger
 	audit  *AuditIntegrityPolicy
+	ingest *SandboxObservabilityIngestPolicy
 }
 
 // AuditIntegrityPolicy defines cluster-gateway-owned audit identity, signing,
@@ -56,6 +57,14 @@ type AuditIntegrityPolicy struct {
 	SigningKey      ed25519.PrivateKey
 	VerificationKey ed25519.PublicKey
 	Now             func() time.Time
+}
+
+// SandboxObservabilityIngestPolicy defines gateway-owned identity for trusted
+// log and runtime-sample producers.
+type SandboxObservabilityIngestPolicy struct {
+	RegionID  string
+	ClusterID string
+	Now       func() time.Time
 }
 
 type SandboxObservabilityHandlerOption func(*SandboxObservabilityHandler)
@@ -79,6 +88,16 @@ func WithAuditIntegrityPolicy(policy AuditIntegrityPolicy) SandboxObservabilityH
 			copyPolicy.Now = func() time.Time { return time.Now().UTC() }
 		}
 		h.audit = &copyPolicy
+	}
+}
+
+func WithSandboxObservabilityIngestPolicy(policy SandboxObservabilityIngestPolicy) SandboxObservabilityHandlerOption {
+	return func(h *SandboxObservabilityHandler) {
+		copyPolicy := policy
+		if copyPolicy.Now == nil {
+			copyPolicy.Now = func() time.Time { return time.Now().UTC() }
+		}
+		h.ingest = &copyPolicy
 	}
 }
 
@@ -263,7 +282,7 @@ func (h *SandboxObservabilityHandler) IngestEvents(c *gin.Context) {
 	var req struct {
 		Events []sandboxobservability.Event `json:"events"`
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSandboxAuditIngestBodyBytes)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxSandboxObservabilityIngestBytes)
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
@@ -377,12 +396,23 @@ func (h *SandboxObservabilityHandler) IngestLogs(c *gin.Context) {
 	var req struct {
 		Logs []sandboxobservability.LogEntry `json:"logs"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxSandboxObservabilityIngestBytes)
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
 		return
 	}
 	if len(req.Logs) > maxSandboxObservabilityLimit {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "too many logs")
+		return
+	}
+	if err := h.normalizeLogs(c.Request.Context(), req.Logs); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 	if err := h.writer.InsertLogs(c.Request.Context(), req.Logs); err != nil {
@@ -400,7 +430,14 @@ func (h *SandboxObservabilityHandler) IngestRuntimeSamples(c *gin.Context) {
 	var req struct {
 		Samples []sandboxobservability.RuntimeSample `json:"samples"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxSandboxObservabilityIngestBytes)
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
 		return
 	}
@@ -408,11 +445,81 @@ func (h *SandboxObservabilityHandler) IngestRuntimeSamples(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "too many runtime samples")
 		return
 	}
+	if err := h.normalizeRuntimeSamples(c.Request.Context(), req.Samples); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 	if err := h.writer.InsertRuntimeSamples(c.Request.Context(), req.Samples); err != nil {
 		h.writeIngestError(c, err, "failed to ingest sandbox runtime samples", zap.Int("sample_count", len(req.Samples)))
 		return
 	}
 	spec.JSONSuccess(c, http.StatusAccepted, gin.H{"inserted": len(req.Samples)})
+}
+
+func (h *SandboxObservabilityHandler) normalizeLogs(ctx context.Context, logs []sandboxobservability.LogEntry) error {
+	claims, now, err := h.observabilityProducer(ctx, internalauth.ServiceManager)
+	if err != nil {
+		return err
+	}
+	for i := range logs {
+		entry := &logs[i]
+		if entry.TeamID != claims.TeamID || strings.TrimSpace(entry.SandboxID) == "" {
+			return fmt.Errorf("log %d is outside the authenticated team or has no sandbox", i)
+		}
+		if entry.OccurredAt.IsZero() || entry.OccurredAt.After(now.Add(5*time.Minute)) {
+			return fmt.Errorf("log %d has invalid occurred_at", i)
+		}
+		if strings.TrimSpace(entry.Cursor) == "" {
+			return fmt.Errorf("log %d has no cursor", i)
+		}
+		entry.RegionID = strings.TrimSpace(h.ingest.RegionID)
+		entry.ClusterID = strings.TrimSpace(h.ingest.ClusterID)
+		entry.IngestedAt = now
+	}
+	return nil
+}
+
+func (h *SandboxObservabilityHandler) normalizeRuntimeSamples(
+	ctx context.Context,
+	samples []sandboxobservability.RuntimeSample,
+) error {
+	claims, now, err := h.observabilityProducer(ctx, internalauth.ServiceCtld)
+	if err != nil {
+		return err
+	}
+	for i := range samples {
+		sample := &samples[i]
+		if sample.TeamID != claims.TeamID || strings.TrimSpace(sample.SandboxID) == "" {
+			return fmt.Errorf("runtime sample %d is outside the authenticated team or has no sandbox", i)
+		}
+		if sample.ObservedAt.IsZero() || sample.ObservedAt.After(now.Add(5*time.Minute)) {
+			return fmt.Errorf("runtime sample %d has invalid observed_at", i)
+		}
+		if strings.TrimSpace(sample.SeriesEpoch) == "" || strings.TrimSpace(sample.SampleID) == "" {
+			return fmt.Errorf("runtime sample %d has no series_epoch or sample_id", i)
+		}
+		sample.RegionID = strings.TrimSpace(h.ingest.RegionID)
+		sample.ClusterID = strings.TrimSpace(h.ingest.ClusterID)
+		sample.IngestedAt = now
+	}
+	return nil
+}
+
+func (h *SandboxObservabilityHandler) observabilityProducer(
+	ctx context.Context,
+	allowedCaller string,
+) (*internalauth.Claims, time.Time, error) {
+	if h.ingest == nil {
+		return nil, time.Time{}, fmt.Errorf("sandbox observability ingest policy is not configured")
+	}
+	claims := internalauth.ClaimsFromContext(ctx)
+	if claims == nil || claims.IsSystem || strings.TrimSpace(claims.TeamID) == "" {
+		return nil, time.Time{}, fmt.Errorf("sandbox observability ingest requires a team-scoped token")
+	}
+	if strings.TrimSpace(claims.Caller) != allowedCaller {
+		return nil, time.Time{}, fmt.Errorf("sandbox observability producer is not allowed")
+	}
+	return claims, h.ingest.Now().UTC(), nil
 }
 
 func (h *SandboxObservabilityHandler) watchEvents(c *gin.Context, query sandboxobservability.EventQuery) {

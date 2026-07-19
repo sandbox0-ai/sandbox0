@@ -14,8 +14,11 @@ import (
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/schedulerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	gatewayteamquota "github.com/sandbox0-ai/sandbox0/pkg/gateway/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"go.uber.org/zap"
 )
 
 func (s *Server) getClusterGatewayProxy(targetURL string) (*proxy.Router, error) {
@@ -147,6 +150,84 @@ func (s *Server) buildSchedulerClustersURL() (string, error) {
 }
 
 func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string) (string, error) {
+	return s.generateInternalTokenWithProof(authCtx, target, nil)
+}
+
+func (s *Server) generateForwardingInternalToken(
+	authCtx *authn.AuthContext,
+	target string,
+	request *http.Request,
+) (string, error) {
+	if authCtx == nil || authCtx.TeamID == "" || request == nil {
+		return s.generateInternalToken(authCtx, target)
+	}
+	keys := gatewayteamquota.AdmittedKeys(request.Context())
+	if len(keys) == 0 {
+		return s.generateInternalToken(authCtx, target)
+	}
+	if s.teamQuotaController == nil {
+		return "", &coreteamquota.UnavailableError{
+			Operation: "read forwarding admission proof version",
+			Err:       fmt.Errorf("team quota controller is not configured"),
+		}
+	}
+	version, err := s.teamQuotaController.AdmissionProofVersion(request.Context())
+	if err != nil {
+		return "", fmt.Errorf("read forwarding admission proof version: %w", err)
+	}
+	audit := delegatedAuditContext(authCtx, internalauth.ServiceRegionalGateway)
+	proof, err := internalauth.NewQuotaAdmissionProof(
+		internalauth.QuotaAdmissionClassEdgeAdmitted,
+		request,
+		authCtx.TeamID,
+		audit.OperationID,
+		audit.RequestID,
+		internalauth.ServiceRegionalGateway,
+		keys,
+		version,
+	)
+	if err != nil {
+		return "", fmt.Errorf("build quota admission proof: %w", err)
+	}
+	return s.generateInternalTokenWithProof(authCtx, target, proof)
+}
+
+func (s *Server) abortForwardingTokenError(
+	ginCtx *gin.Context,
+	target string,
+	err error,
+) {
+	ginCtx.Abort()
+	if s != nil && s.logger != nil {
+		s.logger.Error(
+			"Failed to generate forwarding internal token",
+			zap.String("target", target),
+			zap.Error(err),
+		)
+	}
+	if coreteamquota.IsUnavailable(err) {
+		ginCtx.Header("Retry-After", "1")
+		spec.JSONError(
+			ginCtx,
+			http.StatusServiceUnavailable,
+			spec.CodeUnavailable,
+			"team quota admission proof unavailable",
+		)
+		return
+	}
+	spec.JSONError(
+		ginCtx,
+		http.StatusInternalServerError,
+		spec.CodeInternal,
+		"internal authentication failed",
+	)
+}
+
+func (s *Server) generateInternalTokenWithProof(
+	authCtx *authn.AuthContext,
+	target string,
+	proof *internalauth.QuotaAdmissionProof,
+) (string, error) {
 	if s.internalAuthGen == nil {
 		return "", fmt.Errorf("internal auth generator not configured")
 	}
@@ -158,7 +239,11 @@ func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string
 			target,
 			internalauth.GenerateOptions{
 				Permissions: authCtx.Permissions,
-				Audit:       delegatedAuditContext(authCtx, "regional-gateway"),
+				Audit: delegatedAuditContext(
+					authCtx,
+					internalauth.ServiceRegionalGateway,
+				),
+				QuotaAdmissionProof: proof,
 			},
 		)
 	}
@@ -168,7 +253,11 @@ func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string
 		authCtx.UserID,
 		internalauth.GenerateOptions{
 			Permissions: authCtx.Permissions,
-			Audit:       delegatedAuditContext(authCtx, "regional-gateway"),
+			Audit: delegatedAuditContext(
+				authCtx,
+				internalauth.ServiceRegionalGateway,
+			),
+			QuotaAdmissionProof: proof,
 		},
 	)
 }
@@ -201,19 +290,24 @@ func delegatedAuditContext(authCtx *authn.AuthContext, origin string) *internala
 func attachAuditCorrelation() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := gatewaymiddleware.GetAuthContext(c)
-		if authCtx != nil {
-			if authCtx.OperationID == "" {
-				authCtx.OperationID = uuid.NewString()
-			}
-			requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
-			if len(requestID) > 128 {
-				requestID = requestID[:128]
-			}
-			if requestID == "" {
-				requestID = authCtx.OperationID
-			}
-			authCtx.RequestID = requestID
-		}
+		ensureAuditCorrelation(c, authCtx)
 		c.Next()
 	}
+}
+
+func ensureAuditCorrelation(c *gin.Context, authCtx *authn.AuthContext) {
+	if c == nil || authCtx == nil {
+		return
+	}
+	if authCtx.OperationID == "" {
+		authCtx.OperationID = uuid.NewString()
+	}
+	requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
+	if len(requestID) > 128 {
+		requestID = requestID[:128]
+	}
+	if requestID == "" {
+		requestID = authCtx.OperationID
+	}
+	authCtx.RequestID = requestID
 }

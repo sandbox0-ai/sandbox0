@@ -108,12 +108,6 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 				return err
 			}
 			template = resumeTemplate
-			if err := s.enforceActiveSandboxQuota(lockCtx, locked.TeamID); err != nil {
-				return err
-			}
-			if err := s.enforceSandboxResourceQuota(lockCtx, locked.TeamID, template, &locked.Config); err != nil {
-				return err
-			}
 			generation := locked.RuntimeGeneration + 1
 			record = cloneSandboxRecordForLifecycle(locked)
 			req = &ClaimRequest{
@@ -139,6 +133,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 				FromGeneration: locked.RuntimeGeneration,
 				ToGeneration:   generation,
 			}
+			req.OperationID = txn.ID
 			return tx.BeginLifecycleTxn(lockCtx, txn)
 		})
 		if err == nil && waitErr != nil {
@@ -173,23 +168,74 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			return nil, err
 		}
 	}
+
+	var quotaAdmission *sandboxTeamQuotaAdmission
+	teamQuotaFinalized := false
+	sandboxStartAdmitted := false
+	if pod == nil && record != nil && restoreNeeded {
+		var rateErr error
+		sandboxStartAdmitted, rateErr = s.admitSandboxStartBeforePoolClaim(ctx, req.TeamID, template)
+		if rateErr != nil {
+			if txn != nil {
+				_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, rateErr.Error())
+			}
+			return nil, rateErr
+		}
+		if !isTeamOwnedWarmPoolTemplate(template, req.TeamID) {
+			reservation, reserveErr := s.reserveSandboxTeamQuota(ctx, req, template, "resume")
+			if reserveErr != nil {
+				if txn != nil {
+					_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, reserveErr.Error())
+				}
+				return nil, reserveErr
+			}
+			quotaAdmission = &sandboxTeamQuotaAdmission{Reservation: reservation}
+		}
+		defer func() {
+			if !teamQuotaFinalized {
+				s.releaseFailedSandboxTeamQuotaAdmission(quotaAdmission, pod, "sandbox resume failed")
+			}
+		}()
+	}
 	if pod == nil {
 		if record == nil || !restoreNeeded {
 			return s.GetSandbox(ctx, sandboxID)
 		}
 		var err error
-		pod, err = s.claimIdlePod(ctx, template, req)
+		var hotQuotaAdmission *sandboxTeamQuotaAdmission
+		pod, hotQuotaAdmission, err = s.claimIdlePodWithTeamQuota(ctx, template, req)
+		if hotQuotaAdmission != nil {
+			quotaAdmission = hotQuotaAdmission
+		}
 		if err != nil {
 			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
 			return nil, fmt.Errorf("claim idle pod: %w", err)
 		}
 		if pod == nil {
 			claimType = "cold"
+			if !sandboxStartAdmitted {
+				if rateErr := s.admitSandboxStartTeamQuota(ctx, req.TeamID); rateErr != nil {
+					_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, rateErr.Error())
+					return nil, rateErr
+				}
+			}
+			if quotaAdmission == nil {
+				reservation, reserveErr := s.reserveSandboxTeamQuota(ctx, req, template, "resume")
+				if reserveErr != nil {
+					_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, reserveErr.Error())
+					return nil, reserveErr
+				}
+				quotaAdmission = &sandboxTeamQuotaAdmission{Reservation: reservation}
+			}
 			pod, err = s.createNewPod(ctx, template, req)
 			if err != nil {
 				_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
 				return nil, fmt.Errorf("create runtime pod: %w", err)
 			}
+		}
+		if err := s.finalizeSandboxTeamQuotaAdmission(ctx, quotaAdmission, pod); err != nil {
+			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
+			return nil, err
 		}
 		txn.ToPodNamespace = pod.Namespace
 		txn.ToPodName = pod.Name
@@ -221,6 +267,11 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			return nil, err
 		}
 	}
+	if err := s.finalizeSandboxTeamQuotaAdmission(ctx, quotaAdmission, restoredPod); err != nil {
+		s.requestSandboxDeletionAfterClaimFailure(restoredPod, "resumed runtime team quota commit failed")
+		return nil, err
+	}
+	teamQuotaFinalized = true
 	return s.GetSandbox(ctx, sandboxID)
 }
 
@@ -399,8 +450,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return pod, fmt.Errorf("load rootfs checkpoint: %w", err)
 	}
-	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState, "")
-	if err != nil {
+	if err = s.applySandboxRootFSCheckpoint(ctx, pod, rootFSState); err != nil {
 		return pod, err
 	}
 	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {

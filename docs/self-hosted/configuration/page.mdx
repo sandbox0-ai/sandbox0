@@ -11,7 +11,7 @@ A `Sandbox0Infra` spec is easier to reason about when you split it into six laye
 | Layer | Main fields | What it controls |
 |---|---|---|
 | Platform release | `infra-operator` chart / image version | Which sandbox0 component version to deploy |
-| Core dependencies | `spec.database`, `spec.metadataDatabase`, `spec.storage`, `spec.redis`, `spec.registry` | PostgreSQL, s0fs metadata, object storage, gateway rate-limit Redis, registry integration |
+| Core dependencies | `spec.database`, `spec.metadataDatabase`, `spec.storage`, `spec.redis`, `spec.registry` | PostgreSQL, s0fs metadata, object storage, Team Quota distributed admission and overload/service-abuse guard Redis, registry integration |
 | Topology | `spec.services.*`, `spec.controlPlane`, `spec.cluster`, `spec.region` | Single-cluster vs multi-cluster shape and service placement |
 | Data-plane runtimes | `spec.storage.runtime`, `spec.network`, `spec.sandboxNodePlacement` | Manager storage behavior and node-local ctld networking and placement |
 | Public routing | `spec.publicExposure`, `spec.internalAuth` | Public sandbox URLs and inter-service trust |
@@ -64,6 +64,8 @@ Sandbox0 Cloud handles the mutable-tag policy at the platform layer: managed-reg
 
 The single-cluster sample is always fullmode. `manager` hosts lifecycle control and the storage API runtime. Each sandbox node runs the `ctld-a` and `ctld-b` DaemonSets; the elected primary owns rootfs persistence, volume portals, and the network runtime, and the synchronized standby takes over after promotion. Configure storage behavior under `spec.storage.runtime`, network behavior under `spec.network`, and shared sandbox-node placement under `spec.sandboxNodePlacement`.
 
+Every data-plane cluster attached to the same external control plane must use `spec.database.type: external` and `spec.redis.type: external`, resolving the same region PostgreSQL and Redis endpoints. Infra-operator rejects builtin instances in this topology because per-cluster ledgers, token buckets, or lease sets would multiply Team Quota capacity, rate, or concurrency allowances by the number of clusters.
+
 ## Cold Claim Admission
 
 Manager enforces one cluster-wide admission budget for every sandbox claim that can trigger pod startup pressure: hot claims from warm pool, cold pod creates, and asynchronous warm-pool ReplicaSet replenishment. The default budget is `min(30 * N, 80)`, where `N` is the number of ready, schedulable sandbox nodes. Sandbox node eligibility follows the manager `sandboxPodPlacement` selector and tolerations, so ordinary control-plane or unschedulable nodes do not increase the claim budget.
@@ -74,7 +76,7 @@ Schedulers consume the manager cluster summary fields `claim_start_limit`, `clai
 
 ## Metering Boundary
 
-Sandbox0 records usage truth in the region usage ledger and exports it from the region-scoped metering endpoints. Metering is disabled by default. When `spec.metering.enabled` is `true`, metering requires `spec.clickHouse.type` to be `builtin` or `external`. ClickHouse is the long-term usage ledger and the only metering query/export backend. PostgreSQL holds only a compact transactional delivery outbox and producer projection state; it is not a second queryable usage ledger. Producers capture stable, idempotent ClickHouse operations in that outbox, storage mutations use the same PostgreSQL business transaction, and manager retries the oldest transaction batch until ClickHouse accepts it.
+Sandbox0 records usage truth in the region metering ledger and exports it from the region-scoped metering endpoints. Metering is disabled by default. When `spec.metering.enabled` is `true`, metering requires `spec.clickHouse.type` to be `builtin` or `external`. PostgreSQL is the producer-side persistence boundary: it stores current projection state and the transactional delivery outbox in the same business transaction as storage mutations. ClickHouse is the asynchronously built historical events/windows and aggregate query projection used by showback, export, and billing consumers; it is not an independently maintained second usage truth. Manager retries the oldest outbox transaction batch until ClickHouse accepts it.
 
 Metering export is therefore eventually consistent. Manager lifecycle events and storage mutations are normally visible after the projector poll (about two seconds). Network byte windows from ctld add `meteringReportInterval` (10 seconds by default), while periodic storage byte-hour windows add up to one minute. A ClickHouse outage increases this delay without discarding committed outbox operations; after the one-time projection-state bootstrap has completed, producers can also restart while ClickHouse is unavailable. The outbox is globally ordered, so the exported `complete_before` value is the greatest producer watermark that has reached ClickHouse; projecting it proves that every older committed batch has also been delivered, and historical producer instances do not pin the frontier. Monitor `manager_metering_outbox_pending_operations` and `manager_metering_outbox_oldest_pending_age_seconds` for delivery backlog. Billing systems should consume the exported watermark and rate usage windows outside the open-source data plane.
 
@@ -134,7 +136,14 @@ spec:
             enabled: true
             deliveryMode: durable_async
             deliveryPersistence:
-                size: 1Gi
+                size: 3Gi
+            spoolLimits:
+                maxBytes: 1073741824
+                maxEntries: 100000
+                maxTeamBytes: 268435456
+                maxTeamEntries: 25000
+                minFreeBytes: 1073741824
+                maxRecordBytes: 1048576
         retention:
             auditDays: 90
             logDays: 7
@@ -168,7 +177,7 @@ Audit retention is measured from the cluster-gateway-owned `ingested_at` timesta
 
 State-changing Sandbox API requests are always strict regardless of this setting. Cluster-gateway requires canonical acknowledgement for the attempt before execution, buffers the downstream response, and requires canonical acknowledgement for the signed result before returning that response. The delivery buffer is still used to preserve a pending fact for replay, but it never turns a mutation into a successful response before ClickHouse acknowledges the fact. If canonical admission fails after the attempt is durably buffered, cluster-gateway does not execute the downstream handler and attempts to append a correlated signed `failed` result with HTTP `503`, `execution_started=false`, `operation_executed=false`, `failure_stage=canonical_audit_admission`, and `failure_code=canonical_ack_unavailable`. When result custody succeeds, both facts become query-visible after replay. If the result buffer and canonical fallback both fail, the operation remains unexecuted, the response reports `audit_result=unrecorded`, and the surviving orphan attempt is an audit-completeness incident that requires investigation.
 
-During a ClickHouse outage, `durable_async` traffic can continue only while the local delivery buffer remains writable and durable; audit readers will lag until replay succeeds, with no fixed visibility bound during the outage. If the buffer cannot accept an event, Sandbox0 tries a synchronous canonical fallback and fails closed when neither path can take custody. `canonical_sync` traffic and all mutations fail closed on canonical timeout or outage. Choose `canonical_sync` when immediate canonical admission is worth the added latency and availability coupling; choose `durable_async` when durable capture with eventual canonical visibility is the preferred default.
+During a ClickHouse outage, `durable_async` traffic can continue only while the local delivery buffer remains writable and durable; audit readers will lag until replay succeeds, with no fixed visibility bound during the outage. A transient spool I/O failure may use synchronous canonical delivery as a custody fallback. A local spool resource guard rejection does not bypass its bound: the audited flow fails closed even if canonical delivery is currently reachable. `canonical_sync` traffic and all mutations fail closed on canonical timeout or outage. Choose `canonical_sync` when immediate canonical admission is worth the added latency and availability coupling; choose `durable_async` when durable capture with eventual canonical visibility is the preferred default.
 
 Use the external backend when you already operate ClickHouse:
 
@@ -196,7 +205,14 @@ spec:
             enabled: true
             deliveryMode: durable_async
             deliveryPersistence:
-                size: 1Gi
+                size: 3Gi
+            spoolLimits:
+                maxBytes: 1073741824
+                maxEntries: 100000
+                maxTeamBytes: 268435456
+                maxTeamEntries: 25000
+                minFreeBytes: 1073741824
+                maxRecordBytes: 1048576
         retention:
             auditDays: 90
             logDays: 7
@@ -205,13 +221,13 @@ spec:
         enabled: true
 ```
 
-Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep all historical APIs disabled. Leave `spec.sandboxObservability.audit.enabled` unset or `false` to keep canonical audit ingestion and event queries disabled while retaining historical logs and runtime metrics. Set `spec.metering.enabled` to `false` or omit `spec.metering` to keep metering producers, quota usage reads, and metering export readers disabled. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Disabling audit stops new facts but does not delete existing rows. `retention.auditDays` is the retention policy for the canonical ClickHouse audit table; set it to the period required by your organization before enabling audit in production. Metering remains a separate ledger.
+Set `spec.sandboxObservability.enabled` to `false` or omit the field to keep all historical APIs disabled. Leave `spec.sandboxObservability.audit.enabled` unset or `false` to keep canonical audit ingestion and event queries disabled while retaining historical logs and runtime metrics. Set `spec.metering.enabled` to `false` or omit `spec.metering` to keep metering producers and metering export readers disabled. This does not disable Team Quota: synchronous capacity admission remains in PostgreSQL, while distributed rate and concurrency admission remain in Redis. Legacy `spec.sandboxObservability.type` fields are still accepted for compatibility, but new installs should use `spec.clickHouse` for ClickHouse provisioning. Disabling audit stops new facts but does not delete existing rows. `retention.auditDays` is the retention policy for the canonical ClickHouse audit table; set it to the period required by your organization before enabling audit in production. Metering remains a separate ledger.
 
 When the backend is enabled, infra-operator injects bounded internal ingest endpoints into ctld for sandbox-wide CRI runtime samples and manager for historical logs. When licensed audit is also enabled, it injects the selected delivery mode and durable event-buffer configuration into cluster-gateway and the ctld network runtime. In `durable_async`, ctld opens an allowed upstream connection after its producer attempt is fsynced locally; cluster-gateway later normalizes and signs that event during canonical ingestion. In `canonical_sync`, ctld waits for cluster-gateway and ClickHouse to acknowledge the attempt. Gateway mutation responses are always held until their signed result is acknowledged; pending results return `503` and replay from disk.
 
-Audit currently requires `spec.services.clusterGateway.replicas: 1`. Infra-operator mounts a `ReadWriteOnce` audit-event delivery PVC and uses the `Recreate` deployment strategy so the same buffer is detached and reattached before a replacement gateway starts. In production, set `audit.deliveryPersistence.storageClass` to durable, encrypted storage that supports cross-node volume reattachment; the cluster default is used when it is omitted. Ctld network flow buffers remain node-local and survive same-node Pod restarts, but not permanent node loss. All delivery records are removed only after ClickHouse acknowledgement. Preserve the generated audit-signing Secret for the full retention period. Inline verification currently uses only the active public key, so events signed by a retained historical key report `signature_status=unavailable`; destructive key replacement therefore requires retaining previous public keys outside the cluster for historical offline verification.
+Audit currently requires `spec.services.clusterGateway.replicas: 1`. Infra-operator mounts a `ReadWriteOnce` audit-event delivery PVC and uses the `Recreate` deployment strategy so the same buffer is detached and reattached before a replacement gateway starts. The default PVC is 3 GiB so the default 1 GiB backlog and 1 GiB free-space floor can coexist with filesystem overhead; any custom persistence size must be strictly greater than `spoolLimits.maxBytes + spoolLimits.minFreeBytes`. In production, set `audit.deliveryPersistence.storageClass` to durable, encrypted storage that supports cross-node volume reattachment; the cluster default is used when it is omitted. Cluster-gateway reconstructs its exact retained bytes and entries per team at startup, removes incomplete temporary writes, and refuses to start on corrupt, unsafe, or already-over-limit retained records. It atomically enforces `sandboxObservability.audit.spoolLimits`; a resource-guard rejection never falls through to synchronous canonical delivery. Ctld network flow buffers remain node-local and survive same-node Pod restarts, but not permanent node loss. Each node independently reconstructs and enforces `network.config.auditSpoolLimits`. Both limit sets default to 1 GiB and 100,000 records globally, 256 MiB and 25,000 records per team, a 1 GiB filesystem free-space floor, and 1 MiB per record. Records are removed from counters only after their files are removed following ClickHouse acknowledgement. These local disk guards protect the platform and are not Team Quota or billable usage. Preserve the generated audit-signing Secret for the full retention period. Inline verification currently uses only the active public key, so events signed by a retained historical key report `signature_status=unavailable`; destructive key replacement therefore requires retaining previous public keys outside the cluster for historical offline verification.
 
-The ctld network runtime exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total`; alert on `persist_failed`, `corrupt`, `retrying`, `replay_failed`, and `ack_failed` results. Only `canonical_sync` admission adds a ClickHouse round trip to each new audited flow; the default `durable_async` path pays for local fsync and gains ClickHouse visibility asynchronously. HTTP requests multiplexed over one existing connection remain protocol operations beneath that flow rather than independent network connections.
+The ctld network runtime exports `sandbox0_netd_audit_ingest_events_total` and `sandbox0_netd_audit_ingest_batches_total`; alert on `capacity_rejected`, `persist_failed`, `corrupt`, `retrying`, `replay_failed`, and `ack_failed` results. Only `canonical_sync` admission adds a ClickHouse round trip to each new audited flow; the default `durable_async` path pays for local fsync and gains ClickHouse visibility asynchronously. HTTP requests multiplexed over one existing connection remain protocol operations beneath that flow rather than independent network connections.
 
 The built-in controls provide durable delivery, authenticated producer identity, tenant scoping, append-only application behavior, and tamper-evident row signatures. Regulatory certification still depends on deployment controls outside the process: highly available ClickHouse storage, restricted ClickHouse mutation credentials, encrypted backups, tested restore procedures, retention and legal-hold policy, clock synchronization, and independent preservation of signing public keys or exported checkpoints. A database administrator who can rewrite the complete table and its backups is outside the protection of a per-row signature alone.
 
@@ -426,9 +442,55 @@ spec:
 
 Cache contents are safe to delete. If a cached object is missing, corrupt, too old, or evicted to preserve free space, `ctld` downloads the rootfs object from configured object storage.
 
-### Shared Redis Rate Limiting
+Rootfs checkpoint creation has a separate prepared-artifact staging area. Before `ctld` starts diff generation, manager durably reserves one regional `storage_object_count` slot for the team. Ctld then enforces node-local limits for one artifact, total and per-team bytes and entries, free disk space, global and per-team concurrent preparations, and an unconsumed-artifact TTL. After `ctld` reports the exact descriptor, manager atomically transfers the pre-stage allocation to the durable rootfs object and its exact byte charge. A prepared artifact remains protected by an active file lock while it is consumed, so the sweeper cannot delete an in-use entry.
 
-Gateway request rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend. The ctld network runtime uses the same Redis backend when cluster-scoped team bandwidth limits are configured.
+Ctld also keeps a disposable, bounded baseline cache for incremental overlayfs diffs. Baselines have per-entry, node-total, per-team, free-space, count, and TTL bounds. Baseline capture is only an optimization: failure to populate this cache does not turn an otherwise successful rootfs apply into a failure. If the needed baseline is absent, manager retries with the bounded full-overlay checkpoint path.
+
+The staging and baseline bounds are currently `ctld` process flags (`--rootfs-staging-*` and `--rootfs-baseline-cache-*`); they are not `Sandbox0Infra` configuration fields. Their defaults are conservative node-local guards and are distinct from region-shared Team Quota. Mutating `ctld` rootfs prepare, publish, and abort routes accept only manager-issued internal JWTs. The token owner claims must match the team and sandbox in the request body, preventing another control-plane service or a mismatched request from consuming a team's node-local staging capacity.
+
+### Team Quota
+
+Team Quota is the region-scoped noisy-neighbor boundary that prevents one team from exhausting shared capacity. It is not billing or pricing. A multi-cluster region reconciles policy at regional-gateway; a fullmode installation reconciles it at cluster-gateway. The owner must configure exactly one complete default set containing all 21 keys. Scheduler and every distributed consumer share the region PostgreSQL policy state, while manager, the storage runtime, gateways, ctld, `ssh-gateway`, and the network runtime also share the region Redis enforcement state. None of these consumers owns or duplicates defaults.
+
+| Key | Kind | Canonical unit |
+| --- | --- | --- |
+| `sandbox_identity_count` | capacity | count |
+| `sandbox_runtime_count` | capacity | count |
+| `sandbox_cpu_millicores` | capacity | millicores |
+| `sandbox_memory_bytes` | capacity | bytes |
+| `sandbox_ephemeral_storage_bytes` | capacity | bytes |
+| `volume_storage_bytes` | capacity | bytes |
+| `snapshot_storage_bytes` | capacity | bytes |
+| `rootfs_storage_bytes` | capacity | bytes |
+| `template_image_storage_bytes` | capacity | bytes |
+| `storage_object_count` | capacity | count |
+| `control_plane_object_count` | capacity | count |
+| `active_connection_count` | concurrency | count |
+| `active_request_count` | concurrency | count |
+| `api_requests` | rate | requests |
+| `sandbox_service_requests` | rate | requests |
+| `sandbox_starts` | rate | count |
+| `network_operations` | rate | operations |
+| `storage_operations` | rate | operations |
+| `observability_ingest_bytes` | rate | bytes |
+| `network_ingress_bytes` | rate | bytes |
+| `network_egress_bytes` | rate | bytes |
+
+Capacity and concurrency defaults use `limit`. Rate defaults use `tokens`, `interval`, and `burst`; rate intervals must be whole milliseconds between `1ms` and `1h`, inclusive. Use the complete `teamQuota.defaults` block in the fullmode or multi-cluster control-plane sample as a starting point; partial default sets are rejected on a region policy owner.
+
+For a region policy owner, infra-operator generates `status.teamQuota.stateId` once; normal owner manifests omit `spec.teamQuota.stateId`. A consumer-only resource must copy that status value into `spec.teamQuota.stateId`. An owner may provide the spec field only to recover the same retained PostgreSQL and Redis state plane after its CR was lost; once status exists, a different spec value is rejected. Do not reuse an identity for an independent backend pair. The policy owner claims this identity in both stores; distributed consumers validate both claims, while scheduler validates PostgreSQL only. This detects partial backend mismatches and independently initialized pairs with different IDs. A clone that includes the same claim or deliberate recovery-value reuse requires a third authority to distinguish, so operator generation and trusted distribution are the deployment boundary. `teamQuota.distributedEnforcement` contains the shared policy-cache and live-lease timings. It is projected with the region Redis connection to gateways, manager, the storage runtime, ctld volume portals, `ssh-gateway`, and the network runtime; scheduler does not receive Redis settings. Redis must use `maxmemory-policy: noeviction`, and processes fail startup if they cannot verify it. Redis credential rotation leaves the credential-free state fingerprint unchanged. A consumer-only data-plane `Sandbox0Infra` may configure `distributedEnforcement` but must omit `defaults`; only regional-gateway or a public/fullmode cluster-gateway owns and reconciles the complete default set. The operator writes the runtime-only ownership fields explicitly. If cluster-gateway is launched directly without the operator, `team_quota.policy_owner: true` alone is not sufficient: also set the trusted `team_quota.distributed_enforcement.state_id`, a stable RFC 3339 Nano `defaults_owner_epoch`, a positive monotonically increasing `defaults_generation`, the complete defaults, and a positive whole-millisecond `distributed_enforcement.lease_ttl`. Keep the owner epoch stable for one owner lifetime and increment the generation for each newer defaults configuration so an older process cannot overwrite it. Public authentication mode alone never grants policy ownership. See [Team Quota](/docs/sandbox/self-hosted/team-quota#region-state-identity-guard) for consumer copy commands and the safe namespace migration procedure.
+
+The default live-lease settings are `leaseTtl: 15s` and `renewInterval: 5s`. Both values must use whole milliseconds, and twice the renewal interval must remain strictly below the TTL. A lost or over-limit renewal closes the owning connection instead of allowing it to run uncounted.
+
+The shipped default set gives team template images 1 TiB (`1099511627776` bytes), admits 1,000 storage operations per second with a 2,000-operation burst, and admits 8 MiB/s of observability ingest with a 16 MiB burst. These are noisy-neighbor defaults rather than billing entitlements; adjust the complete region policy set for the capacity of your installation.
+
+Authenticated team requests consume `api_requests` and one live `active_request_count` slot at the region entrypoint. The next internal hop skips only keys listed in a signed, request-bound admission proof, so one external request is charged once without granting a blanket internal bypass. System-admin policy repair routes under `/api/v1/teams/{'{team_id}'}/quotas` bypass tenant request, network-byte, and live-concurrency admission so a restrictive policy cannot lock out its own repair path, but they still require system-admin authentication. `GET /api/v1/quotas` returns the current team's effective policies and usage.
+
+### Redis-Backed Admission Controls
+
+Configure `spec.redis` for distributed, fail-closed admission. The regional entrypoint uses it for Team Quota rates and exact live-resource concurrency leases; manager, the storage runtime, `ssh-gateway`, and the network runtime use the same regional backend for their Team Quota consumers. Cluster-gateway also uses the Redis connection for each Sandbox Service route's separate public-traffic abuse guard.
+
+Team Quota and the Sandbox Service abuse guard are separate controls. They use distinct Redis key namespaces, policy sources, code paths, and metrics. Route `rate_limit` settings do not change a team's quota, and the route guard never falls back to process-local memory. Cluster-gateway refuses to start when it cannot initialize that guard.
 
 ```yaml
 spec:
@@ -461,10 +523,62 @@ spec:
             urlSecret:
                 name: redis-url
                 key: url
-        keyPrefix: sandbox0:ratelimit:prod
+        keyPrefix: sandbox0:prod
         operationTimeout: 100ms
-        failOpen: true
 ```
+
+### Identity and Overload Guards
+
+Identity state is owned by the gateway that exposes the public identity surface: global-gateway in a global deployment, regional-gateway in a self-hosted multi-cluster region, or cluster-gateway in fullmode. This state is deliberately outside region Team Quota because users, teams, memberships, and login sessions belong to the identity plane rather than to one region's data-plane capacity.
+
+`identityResourceGuard` bounds this PostgreSQL state across gateway replicas. Cardinality checks use PostgreSQL transaction locks, refresh-token rotation is single-use, OIDC pending state is stored and consumed atomically in PostgreSQL, and expired session rows are deleted in bounded `SKIP LOCKED` batches. The defaults are:
+
+| Field | Default | Scope |
+| --- | ---: | --- |
+| `maxTeamsOwnedPerUser` | 10 | user |
+| `maxMembersPerTeam` | 256 | team |
+| `maxTeamMembershipsPerUser` | 32 | user |
+| `maxLinkedIdentitiesPerUser` | 8 | user |
+| `maxActiveRefreshTokensPerUser` | 16 | user |
+| `maxActiveWebLoginCodesPerUser` | 3 | user |
+| `maxActiveDeviceAuthSessions` | 10000 | identity service |
+| `maxPendingOidcStates` | 10000 | identity service |
+| `sessionCleanupInterval` | 1m | cleanup worker |
+| `sessionCleanupBatchSize` | 1000 | one table per cleanup pass |
+
+An identity cardinality rejection returns `429` with `identity_limit_exceeded`. Oversized IdP claims, redirect URLs, device-auth fields, and OIDC state fields are also rejected before persistence.
+
+`overloadGuard` is a fixed-key aggregate safety valve for the complete public identity and authentication surface and public Sandbox Service routing. Global-gateway also applies it to region-directory and API-key region-routing traffic. It is not keyed by team and is not a Team Quota.
+
+Admission is ordered so shared infrastructure is not the first resource exposed to an unauthenticated flood: `maxInFlight` first bounds executing requests in one process, `localRequestsPerSecond` and `localBurst` then bound attempts from that process, and only locally admitted requests consume the region-shared `requestsPerSecond` and `burst` budget in Redis. The defaults are 512 in flight, 500 requests/second with a 1,000 local burst per process, and 100 requests/second with a 200 shared burst per service and region.
+
+Every gateway that owns a public identity or public Sandbox Service surface requires shared Redis. Infra-operator gives each guard an explicit namespace: `global-gateway` for the global service, `regional-gateway:<region-id>` for a self-hosted regional entrypoint, and `cluster-gateway:<region-id>` for a fullmode entrypoint. Replicas of one entrypoint therefore consume one distributed budget without merging the budgets of different services or regions. Startup fails when the shared Redis configuration is missing or unavailable, and request admission fails closed if Redis becomes unavailable later.
+
+```yaml
+spec:
+    redis:
+        type: builtin
+        builtin:
+            enabled: true
+    services:
+        clusterGateway:
+            config:
+                authMode: public
+                identityResourceGuard:
+                    maxTeamsOwnedPerUser: 10
+                    maxMembersPerTeam: 256
+                    maxPendingOidcStates: 10000
+                    sessionCleanupInterval: 1m
+                    sessionCleanupBatchSize: 1000
+                overloadGuard:
+                    requestsPerSecond: 100
+                    burst: 200
+                    localRequestsPerSecond: 500
+                    localBurst: 1000
+                    maxInFlight: 512
+```
+
+Place both `identityResourceGuard` and `overloadGuard` under whichever gateway owns identity: `globalGateway.config`, a self-hosted `regionalGateway.config`, or a public/fullmode `clusterGateway.config`. `DELETE /teams/:id` normally consumes `api_requests` like other authenticated team operations. Only deletion of the caller's own already-quota-disabled team uses the dedicated Redis-backed deletion retry lane (1 request/second with burst 3), so cleanup cannot be locked out or become an unbounded bypass; it still passes through `overloadGuard`. The manager claim-start limiter remains cluster-scoped, while Team Quota is the per-team region-scoped boundary.
 
 ### Credential Source Storage
 
@@ -510,7 +624,7 @@ spec:
                 - sandbox0/credential-sources/{{teamID}}/
 ```
 
-When `spec.credentialVault` is enabled, manager stores newly written credential sources in the configured Vault backend. Existing rows keep their recorded storage backend.
+When `spec.credentialVault` is enabled, manager stores newly written credential sources in the configured Vault backend. Sandbox0-managed values use one stable team/source path and configure KV v2 `max_versions: 1`, so repeated rotation cannot accumulate old secret versions indefinitely. Deleting a managed source removes its KV metadata and all versions before releasing the source's `control_plane_object_count` allocation. User-supplied external references remain externally owned and are never deleted by Sandbox0. Existing rows keep their recorded storage backend.
 
 ### Egress Auth Resolve TTL
 
@@ -566,7 +680,15 @@ spec:
                 port: 22
             config:
                 sshPort: 2222
+                # Per-process platform overload guards, independent from Team Quota.
+                platformMaxConcurrentHandshakes: 128
+                platformHandshakeTimeout: 10s
+                platformMaxConcurrentChannelsPerConnection: 16
 ```
+
+After public-key authentication resolves a team, the external TCP connection and every active SSH session channel consume `active_connection_count`. Shell, exec, SFTP, and SFTP-backed SCP channel payloads consume the region's `network_ingress_bytes` and `network_egress_bytes` policies exactly once. The gateway rejects new connections or channels at the exact team limit and actively closes them if their Redis lease cannot renew.
+
+The three `platform*` SSH settings are process-local overload guards, not per-team quota. The handshake capacity and deadline prevent anonymous slow handshakes from exhausting file descriptors and goroutines before a Team ID exists. The per-connection channel guard prevents one authenticated TCP connection from creating an unbounded number of channel goroutines.
 
 For local labs or kind-style environments, a `NodePort` is often simpler:
 
@@ -648,7 +770,9 @@ Examples:
 - `storage.runtime.cacheSizeLimit` and `logSizeLimit` cap storage cache and logs in the manager Pod; `volumePortalCacheSizeLimit` and `volumePortalRootMinFree` tune the volume portals used by ctld
 - `storage.runtime.objectEncryptionEnabled` controls application-layer encryption for S0FS object storage and node-local volume cache files; it is enabled by default
 - `network.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
-- `network.config.teamEgressBandwidthBytesPerSecond`, `teamIngressBandwidthBytesPerSecond`, and `teamBandwidthBurstBytes` apply cluster-scoped per-team aggregate throttling when set above zero and `spec.redis` is configured
+- `network.config.auditSpoolLimits` bounds the node-local network-audit delivery backlog globally and per team; these are platform disk-safety guards, not Team Quota
+- `sandboxObservability.audit.spoolLimits` independently bounds cluster-gateway's durable audit delivery backlog globally and per team
+- `spec.teamQuota.defaults` owns region-wide per-team aggregate network rates through `network_egress_bytes` and `network_ingress_bytes`; data-plane service config does not duplicate those limits
 - `network.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
 
 ```yaml
@@ -672,10 +796,19 @@ spec:
             egressBandwidthBytesPerSecond: 10485760
             ingressBandwidthBytesPerSecond: 10485760
             bandwidthBurstBytes: 10485760
-            teamEgressBandwidthBytesPerSecond: 104857600
-            teamIngressBandwidthBytesPerSecond: 104857600
-            teamBandwidthBurstBytes: 104857600
+            proxyMaxActiveTcpConnections: 4096
+            proxyUdpWorkers: 32
+            proxyUdpQueueSize: 1024
+            auditSpoolLimits:
+                maxBytes: 1073741824
+                maxEntries: 100000
+                maxTeamBytes: 268435456
+                maxTeamEntries: 25000
+                minFreeBytes: 1073741824
+                maxRecordBytes: 1048576
 ```
+
+The three `proxy*` admission fields are node-local safety bounds, not Team Quota. TCP connections above the active limit are closed before a handler goroutine starts. UDP keeps a fixed worker pool and a bounded queue; a full queue drops the datagram before classification, distributed quota calls, or durable audit work.
 
 Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods and the ctld HA pair. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready.
 

@@ -48,7 +48,7 @@ func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 // pre-mounted so hot claims can bind selected portals without recreating pods.
 func BuildIdlePodSpec(template *SandboxTemplate) corev1.PodSpec {
 	spec := BuildPodSpec(template)
-	applyIdleResourceQuotaToPodSpec(&spec, template)
+	applyIdleResourceLimitsToPodSpec(&spec, template)
 	return spec
 }
 
@@ -390,52 +390,52 @@ func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Conta
 	return container
 }
 
-func applyIdleResourceQuotaToPodSpec(spec *corev1.PodSpec, template *SandboxTemplate) {
+func applyIdleResourceLimitsToPodSpec(spec *corev1.PodSpec, template *SandboxTemplate) {
 	if spec == nil || template == nil {
 		return
 	}
-	quota := idleResourceQuota(template.Spec.MainContainer.Resources)
+	limits := idleResourceLimits(template.Spec.MainContainer.Resources)
 	for i := range spec.Containers {
 		if spec.Containers[i].Name != "procd" {
 			continue
 		}
-		spec.Containers[i].Resources = BuildResourceRequirements(quota)
+		spec.Containers[i].Resources = BuildResourceRequirements(limits)
 		return
 	}
 }
 
-func idleResourceQuota(templateQuota ResourceQuota) ResourceQuota {
-	quota := templateQuota.DeepCopy()
-	if quota == nil {
-		return ResourceQuota{}
+func idleResourceLimits(templateLimits SandboxResourceLimits) SandboxResourceLimits {
+	limits := templateLimits.DeepCopy()
+	if limits == nil {
+		return SandboxResourceLimits{}
 	}
-	if quota.Memory.Sign() > 0 {
+	if limits.Memory.Sign() > 0 {
 		idleMemory := *resource.NewQuantity(defaultIdleSandboxMemoryLimitBytes, resource.BinarySI)
-		if quota.Memory.Cmp(idleMemory) < 0 {
-			idleMemory = quota.Memory.DeepCopy()
+		if limits.Memory.Cmp(idleMemory) < 0 {
+			idleMemory = limits.Memory.DeepCopy()
 		}
-		quota.CPU = scaledCPUForMemory(quota.CPU, quota.Memory, idleMemory)
-		quota.Memory = idleMemory
+		limits.CPU = scaledCPUForMemory(limits.CPU, limits.Memory, idleMemory)
+		limits.Memory = idleMemory
 	}
-	return *quota
+	return *limits
 }
 
-// BuildResourceRequirements converts a sandbox resource quota into Kubernetes
+// BuildResourceRequirements converts sandbox resource limits into Kubernetes
 // container requests and limits.
-func BuildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {
+func BuildResourceRequirements(sandboxLimits SandboxResourceLimits) corev1.ResourceRequirements {
 	requests := corev1.ResourceList{}
 	limits := corev1.ResourceList{}
-	if quota.CPU.Sign() > 0 {
-		limit := quota.CPU.DeepCopy()
+	if sandboxLimits.CPU.Sign() > 0 {
+		limit := sandboxLimits.CPU.DeepCopy()
 		requests[corev1.ResourceCPU] = scaledCPURequest(limit)
 		limits[corev1.ResourceCPU] = limit
 	}
-	if quota.Memory.Sign() > 0 {
-		limit := quota.Memory.DeepCopy()
+	if sandboxLimits.Memory.Sign() > 0 {
+		limit := sandboxLimits.Memory.DeepCopy()
 		requests[corev1.ResourceMemory] = scaledMemoryRequest(limit)
 		limits[corev1.ResourceMemory] = limit
 	}
-	ephemeralLimit := quota.EphemeralStorage.DeepCopy()
+	ephemeralLimit := sandboxLimits.EphemeralStorage.DeepCopy()
 	if ephemeralLimit.Sign() <= 0 {
 		ephemeralLimit = resource.MustParse(DefaultSandboxEphemeralStorage)
 	}

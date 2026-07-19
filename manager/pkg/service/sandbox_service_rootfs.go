@@ -10,11 +10,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	godigest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -25,6 +24,8 @@ const sandboxRootFSOperationTimeout = 5 * time.Minute
 const sandboxRootFSSourceCheckpointLifecycleStaleAfter = sandboxRootFSOperationTimeout + time.Minute
 const sandboxRootFSUncommittedObjectDeleteDelay = 15 * time.Minute
 const sandboxRootFSUncommittedObjectDeleteTimeout = 30 * time.Second
+const rootFSPublishStageTTL = 10 * time.Minute
+const rootFSPublishStageReleaseGrace = 2 * time.Minute
 
 func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, tx SandboxStoreTx) error {
 	state, err := s.prepareSandboxRootFSCheckpoint(ctx, pod, record)
@@ -89,12 +90,17 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 			parentLayerID = expectedHeadLayerID
 		}
 	}
-	prepareReq := ctldapi.PrepareRootFSSnapshotRequest{
-		Target:        rootFSTargetForPod(pod),
-		ParentLayerID: parentLayerID,
-		ExcludedPaths: rootFSExcludedPathsForPod(pod),
-	}
 	layerID := uuid.NewString()
+	prepareReq := ctldapi.PrepareRootFSSnapshotRequest{
+		Target:                    rootFSTargetForPod(pod),
+		StageID:                   layerID,
+		TeamID:                    teamID,
+		SandboxID:                 sandboxID,
+		ExpectedRuntimeGeneration: generation,
+		ExpiresAt:                 s.now().Add(rootFSPublishStageTTL),
+		ParentLayerID:             parentLayerID,
+		ExcludedPaths:             rootFSExcludedPathsForPod(pod),
+	}
 	resp, err := s.prepareAndPublishSandboxRootFSSnapshot(ctx, ctldAddress, prepareReq, sandboxID, teamID, generation, layerID)
 	if err != nil && parentLayerID != "" && rootFSBaselineMissing(err, resp) {
 		parentLayerID = ""
@@ -102,9 +108,9 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 		resp, err = s.prepareAndPublishSandboxRootFSSnapshot(ctx, ctldAddress, prepareReq, sandboxID, teamID, generation, layerID)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, saveRootFSError(resp)))
+		return nil, fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, publishRootFSError(resp)))
 	}
-	state, err := rootFSStateFromSaveResponse(sandboxID, teamID, generation, resp)
+	state, err := rootFSStateFromPublishResponse(sandboxID, teamID, generation, resp)
 	if err != nil {
 		return nil, err
 	}
@@ -163,10 +169,28 @@ func (s *SandboxService) rootFSPlatformForPod(pod *corev1.Pod) ocispec.Platform 
 	return platform
 }
 
-func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Context, ctldAddress string, prepareReq ctldapi.PrepareRootFSSnapshotRequest, sandboxID, teamID string, generation int64, layerID string) (*ctldapi.SaveRootFSResponse, error) {
+func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Context, ctldAddress string, prepareReq ctldapi.PrepareRootFSSnapshotRequest, sandboxID, teamID string, generation int64, layerID string) (*ctldapi.PublishRootFSSnapshotResponse, error) {
+	if prepareReq.ExpiresAt.IsZero() {
+		prepareReq.ExpiresAt = s.now().Add(rootFSPublishStageTTL)
+	}
+	prepareReq.StageID = strings.TrimSpace(layerID)
+	prepareReq.TeamID = strings.TrimSpace(teamID)
+	prepareReq.SandboxID = strings.TrimSpace(sandboxID)
+	prepareReq.ExpectedRuntimeGeneration = generation
+	if err := s.prepareRootFSPublishStage(ctx, RootFSPublishStage{
+		StageID:           prepareReq.StageID,
+		TeamID:            prepareReq.TeamID,
+		SandboxID:         prepareReq.SandboxID,
+		CtldAddress:       ctldAddress,
+		RuntimeGeneration: generation,
+		ExpiresAt:         prepareReq.ExpiresAt,
+		ReleaseAfter:      prepareReq.ExpiresAt.Add(rootFSPublishStageReleaseGrace),
+	}); err != nil {
+		return &ctldapi.PublishRootFSSnapshotResponse{}, err
+	}
 	prepared, err := s.ctldClient.PrepareRootFSSnapshotWithTimeout(ctx, ctldAddress, prepareReq, sandboxRootFSOperationTimeout)
 	if err != nil {
-		resp := &ctldapi.SaveRootFSResponse{}
+		resp := &ctldapi.PublishRootFSSnapshotResponse{}
 		if prepared != nil {
 			resp.Info = prepared.Info
 			resp.Descriptor = prepared.Descriptor
@@ -176,13 +200,13 @@ func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Cont
 	}
 	objectKey, err := defaultSandboxRootFSObjectKey(teamID, sandboxID, generation, prepared.Descriptor.Digest)
 	if err != nil {
-		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
-		return &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}, err
+		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, rootFSAbortRequest(prepared.Handle, teamID, sandboxID, generation), sandboxRootFSOperationTimeout)
+		return &ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}, err
 	}
 	pendingState := rootFSStateFromPreparedSnapshot(sandboxID, teamID, generation, layerID, objectKey, prepared)
-	if err := s.queueUncommittedRootFSObjectDeletion(ctx, pendingState, s.now().Add(sandboxRootFSUncommittedObjectDeleteDelay)); err != nil {
-		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
-		return &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}, err
+	if err := s.prepareRootFSObjectPublish(ctx, prepareReq.StageID, pendingState, s.now().Add(sandboxRootFSUncommittedObjectDeleteDelay)); err != nil {
+		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, rootFSAbortRequest(prepared.Handle, teamID, sandboxID, generation), sandboxRootFSOperationTimeout)
+		return &ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}, err
 	}
 	published, err := s.ctldClient.PublishRootFSSnapshotWithTimeout(ctx, ctldAddress, ctldapi.PublishRootFSSnapshotRequest{
 		Handle:                    prepared.Handle,
@@ -192,9 +216,9 @@ func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Cont
 		ObjectKey:                 objectKey,
 	}, sandboxRootFSOperationTimeout)
 	if err != nil {
-		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
+		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, rootFSAbortRequest(prepared.Handle, teamID, sandboxID, generation), sandboxRootFSOperationTimeout)
 		s.deleteUncommittedRootFSObject(pendingState, "rootfs snapshot publish failed")
-		resp := &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}
+		resp := &ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}
 		if published != nil {
 			resp.Info = published.Info
 			resp.Descriptor = published.Descriptor
@@ -202,11 +226,16 @@ func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Cont
 		}
 		return resp, err
 	}
-	return &ctldapi.SaveRootFSResponse{
-		Info:       published.Info,
-		Descriptor: published.Descriptor,
-		Error:      published.Error,
-	}, nil
+	return published, nil
+}
+
+func rootFSAbortRequest(handle, teamID, sandboxID string, generation int64) ctldapi.AbortRootFSSnapshotRequest {
+	return ctldapi.AbortRootFSSnapshotRequest{
+		Handle:                    handle,
+		TeamID:                    strings.TrimSpace(teamID),
+		SandboxID:                 strings.TrimSpace(sandboxID),
+		ExpectedRuntimeGeneration: generation,
+	}
 }
 
 func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootFSState) (bool, string) {
@@ -253,6 +282,8 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 	}
 	req := ctldapi.ApplyRootFSRequest{
 		Target:                      rootFSTargetForPod(pod),
+		TeamID:                      state.TeamID,
+		SandboxID:                   state.SandboxID,
 		ExpectedRuntime:             state.Runtime,
 		ExpectedRuntimeHandler:      state.RuntimeHandler,
 		ExpectedSnapshotter:         state.Snapshotter,
@@ -316,121 +347,6 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	return out
 }
 
-func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState, fallbackStatus string) (*corev1.Pod, error) {
-	if state == nil {
-		return pod, nil
-	}
-	err := s.applySandboxRootFSCheckpoint(ctx, pod, state)
-	if err == nil {
-		return pod, nil
-	}
-	fallbackTemplate, fallbackErr := templateWithCheckpointBaseImage(template, state)
-	if fallbackErr != nil {
-		return pod, fmt.Errorf("%w; checkpoint base image fallback unavailable: %v", err, fallbackErr)
-	}
-	if s != nil && s.logger != nil {
-		s.logger.Warn("Rootfs force-apply failed; retrying with checkpoint base image",
-			zap.String("sandboxID", state.SandboxID),
-			zap.String("baseImageRef", state.BaseImageRef),
-			zap.String("baseImageDigest", state.BaseImageDigest),
-			zap.Error(err),
-		)
-	}
-	s.requestSandboxDeletionAfterClaimFailure(pod, "rootfs force-apply failed")
-
-	fallbackPod, fallbackErr := s.createNewPod(ctx, fallbackTemplate, req)
-	if fallbackErr != nil {
-		return pod, fmt.Errorf("%w; create checkpoint base image runtime: %v", err, fallbackErr)
-	}
-	networkPod, fallbackErr := s.waitForColdPodNetworkPolicy(ctx, fallbackPod, req.TeamID)
-	if fallbackErr != nil {
-		s.requestSandboxDeletionAfterClaimFailure(fallbackPod, "checkpoint base image network policy failed")
-		return fallbackPod, fmt.Errorf("%w; prepare checkpoint base image network policy: %v", err, fallbackErr)
-	}
-	fallbackPod = networkPod
-	readyPod, fallbackErr := s.waitForPodClaimReady(ctx, fallbackPod.Namespace, fallbackPod.Name)
-	if fallbackErr != nil {
-		s.requestSandboxDeletionAfterClaimFailure(fallbackPod, "checkpoint base image runtime readiness failed")
-		return fallbackPod, fmt.Errorf("%w; wait for checkpoint base image runtime: %v", err, fallbackErr)
-	}
-	if fallbackErr := s.applySandboxRootFSCheckpoint(ctx, readyPod, state); fallbackErr != nil {
-		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image rootfs apply failed")
-		return readyPod, fmt.Errorf("%w; checkpoint base image retry failed: %v", err, fallbackErr)
-	}
-	if strings.TrimSpace(fallbackStatus) != "" {
-		if fallbackErr := s.saveRestoredRuntimePod(ctx, readyPod, record, fallbackStatus); fallbackErr != nil {
-			s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image runtime persistence failed")
-			return readyPod, fallbackErr
-		}
-	}
-	return readyPod, nil
-}
-
-func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, status string) error {
-	if s == nil || s.sandboxStore == nil || pod == nil || record == nil {
-		return nil
-	}
-	sandboxID := strings.TrimSpace(record.ID)
-	if sandboxID == "" {
-		sandboxID = sandboxIDFromPod(pod)
-	}
-	if sandboxID == "" {
-		return fmt.Errorf("sandbox_id is required")
-	}
-	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
-		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, status, runtimeGenerationFromPod(pod), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt), sandboxRuntimeMetadataFromPod(pod))
-	})
-}
-
-func templateWithCheckpointBaseImage(template *v1alpha1.SandboxTemplate, state *SandboxRootFSState) (*v1alpha1.SandboxTemplate, error) {
-	if template == nil {
-		return nil, fmt.Errorf("template is required")
-	}
-	image, err := checkpointBaseImageRef(state)
-	if err != nil {
-		return nil, err
-	}
-	clone := template.DeepCopy()
-	clone.Spec.MainContainer.Image = image
-	clone.Spec.MainContainer.ImagePullPolicy = string(corev1.PullIfNotPresent)
-	return clone, nil
-}
-
-func checkpointBaseImageRef(state *SandboxRootFSState) (string, error) {
-	if state == nil {
-		return "", fmt.Errorf("rootfs state is required")
-	}
-	repo := imageRepositoryFromRef(state.BaseImageRef)
-	if repo == "" {
-		return "", fmt.Errorf("base image ref is required")
-	}
-	digestValue := strings.TrimSpace(state.BaseImageDigest)
-	if digestValue == "" {
-		return "", fmt.Errorf("base image digest is required")
-	}
-	parsed, err := godigest.Parse(digestValue)
-	if err != nil {
-		return "", fmt.Errorf("base image digest %q is invalid: %w", digestValue, err)
-	}
-	return repo + "@" + parsed.String(), nil
-}
-
-func imageRepositoryFromRef(ref string) string {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return ""
-	}
-	if idx := strings.LastIndex(ref, "@"); idx >= 0 {
-		ref = ref[:idx]
-	}
-	lastSlash := strings.LastIndex(ref, "/")
-	lastColon := strings.LastIndex(ref, ":")
-	if lastColon > lastSlash {
-		ref = ref[:lastColon]
-	}
-	return strings.TrimSpace(ref)
-}
-
 func rootFSLayerDescriptors(state *SandboxRootFSState) []ctldapi.RootFSLayerDescriptor {
 	if state == nil {
 		return nil
@@ -492,7 +408,7 @@ func rootFSTargetForPod(pod *corev1.Pod) ctldapi.RootFSContainerRef {
 	}
 }
 
-func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, resp *ctldapi.SaveRootFSResponse) (*SandboxRootFSState, error) {
+func rootFSStateFromPublishResponse(sandboxID, teamID string, generation int64, resp *ctldapi.PublishRootFSSnapshotResponse) (*SandboxRootFSState, error) {
 	if resp == nil {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: empty ctld response")
 	}
@@ -577,6 +493,116 @@ func (s *SandboxService) queueUncommittedRootFSObjectDeletion(ctx context.Contex
 	return store.QueueUncommittedRootFSObjectDeletion(ctx, state, notBefore)
 }
 
+func (s *SandboxService) prepareRootFSObjectPublish(
+	ctx context.Context,
+	stageID string,
+	state *SandboxRootFSState,
+	notBefore time.Time,
+) error {
+	if s == nil {
+		return fmt.Errorf("sandbox service is required for rootfs publish")
+	}
+	if s.teamQuotaStore == nil {
+		return fmt.Errorf("%w: capacity store is not configured for rootfs publish", ErrTeamQuotaUnavailable)
+	}
+	quotaStore, ok := s.teamQuotaStore.(teamquota.CapacityTxStore)
+	if !ok || quotaStore == nil {
+		return fmt.Errorf("%w: transactional capacity store is required for rootfs publish", ErrTeamQuotaUnavailable)
+	}
+	store, ok := s.sandboxStore.(interface {
+		PrepareRootFSObjectPublish(
+			context.Context,
+			string,
+			*SandboxRootFSState,
+			time.Time,
+			teamquota.CapacityTxStore,
+		) error
+	})
+	if !ok || store == nil {
+		return fmt.Errorf("%w: postgres rootfs object publish store is not configured", ErrTeamQuotaUnavailable)
+	}
+	return store.PrepareRootFSObjectPublish(ctx, stageID, state, notBefore, quotaStore)
+}
+
+func (s *SandboxService) prepareRootFSPublishStage(
+	ctx context.Context,
+	stage RootFSPublishStage,
+) error {
+	if s == nil {
+		return fmt.Errorf("sandbox service is required for rootfs publish staging")
+	}
+	quotaStore, ok := s.teamQuotaStore.(teamquota.CapacityTxStore)
+	if !ok || quotaStore == nil {
+		return fmt.Errorf("%w: transactional capacity store is required for rootfs publish staging", ErrTeamQuotaUnavailable)
+	}
+	store, ok := s.sandboxStore.(interface {
+		PrepareRootFSPublishStage(
+			context.Context,
+			RootFSPublishStage,
+			teamquota.CapacityTxStore,
+		) error
+	})
+	if !ok || store == nil {
+		return fmt.Errorf("%w: postgres rootfs publish stage store is not configured", ErrTeamQuotaUnavailable)
+	}
+	return store.PrepareRootFSPublishStage(ctx, stage, quotaStore)
+}
+
+func (s *SandboxService) recoverDueRootFSPublishStages(ctx context.Context, limit int) error {
+	if s == nil {
+		return fmt.Errorf("sandbox service is required for rootfs publish stage recovery")
+	}
+	store, ok := s.sandboxStore.(interface {
+		ListDueRootFSPublishStages(context.Context, int) ([]RootFSPublishStage, error)
+		ReleaseRootFSPublishStage(context.Context, string, teamquota.CapacityTxStore) (bool, error)
+	})
+	if !ok || store == nil {
+		return fmt.Errorf("%w: postgres rootfs publish stage recovery store is not configured", ErrTeamQuotaUnavailable)
+	}
+	stages, err := store.ListDueRootFSPublishStages(ctx, limit)
+	if err != nil {
+		return err
+	}
+	if len(stages) == 0 {
+		return nil
+	}
+	quotaStore, ok := s.teamQuotaStore.(teamquota.CapacityTxStore)
+	if !ok || quotaStore == nil {
+		return fmt.Errorf("%w: transactional capacity store is required for rootfs publish stage recovery", ErrTeamQuotaUnavailable)
+	}
+	if s.ctldClient == nil {
+		return fmt.Errorf("ctld client is required for rootfs publish stage recovery")
+	}
+	var recoveryErrs []error
+	for _, stage := range stages {
+		abortResp, abortErr := s.ctldClient.AbortRootFSSnapshotWithTimeout(
+			ctx,
+			stage.CtldAddress,
+			rootFSAbortRequest(stage.StageID, stage.TeamID, stage.SandboxID, stage.RuntimeGeneration),
+			sandboxRootFSOperationTimeout,
+		)
+		if abortErr != nil || abortResp == nil || !abortResp.Aborted {
+			if abortErr == nil {
+				abortErr = fmt.Errorf("ctld did not confirm rootfs stage removal")
+			}
+			recoveryErrs = append(recoveryErrs, fmt.Errorf(
+				"confirm rootfs publish stage %s absent on ctld: %w",
+				stage.StageID,
+				abortErr,
+			))
+			continue
+		}
+		if _, err := store.ReleaseRootFSPublishStage(ctx, stage.StageID, quotaStore); err != nil {
+			recoveryErrs = append(recoveryErrs, fmt.Errorf(
+				"release confirmed rootfs publish stage %s: %w",
+				stage.StageID,
+				err,
+			))
+		}
+	}
+	return errors.Join(recoveryErrs...)
+}
+
 func (s *SandboxService) deleteUncommittedRootFSObject(state *SandboxRootFSState, reason string) {
 	if state == nil || strings.TrimSpace(state.DiffObjectKey) == "" {
 		return
@@ -591,42 +617,9 @@ func (s *SandboxService) deleteUncommittedRootFSObject(state *SandboxRootFSState
 			zap.Error(err),
 		)
 	}
-	if s.rootFSObjectDeleter == nil {
-		if s.logger != nil {
-			s.logger.Warn("Uncommitted rootfs object deletion deferred; object deleter is not configured",
-				zap.String("sandboxID", state.SandboxID),
-				zap.String("objectKey", state.DiffObjectKey),
-				zap.String("reason", reason),
-			)
-		}
-		return
-	}
-	if err := s.rootFSObjectDeleter.Delete(state.DiffObjectKey); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("Failed to delete uncommitted rootfs object",
-				zap.String("sandboxID", state.SandboxID),
-				zap.String("objectKey", state.DiffObjectKey),
-				zap.String("reason", reason),
-				zap.Error(err),
-			)
-		}
-		return
-	}
-	store, ok := s.sandboxStore.(interface {
-		CompleteRootFSObjectDeletion(context.Context, string) error
-	})
-	if ok && store != nil {
-		if err := store.CompleteRootFSObjectDeletion(ctx, state.DiffObjectKey); err != nil && s.logger != nil {
-			s.logger.Warn("Failed to mark uncommitted rootfs object deleted",
-				zap.String("sandboxID", state.SandboxID),
-				zap.String("objectKey", state.DiffObjectKey),
-				zap.Error(err),
-			)
-		}
-	}
 }
 
-func saveRootFSError(resp *ctldapi.SaveRootFSResponse) string {
+func publishRootFSError(resp *ctldapi.PublishRootFSSnapshotResponse) string {
 	if resp == nil {
 		return ""
 	}
@@ -640,12 +633,12 @@ func applyRootFSError(resp *ctldapi.ApplyRootFSResponse) string {
 	return strings.TrimSpace(resp.Error)
 }
 
-func rootFSBaselineMissing(err error, resp *ctldapi.SaveRootFSResponse) bool {
+func rootFSBaselineMissing(err error, resp *ctldapi.PublishRootFSSnapshotResponse) bool {
 	var reqErr *ctldapi.RequestError
 	if !errors.As(err, &reqErr) || reqErr == nil || reqErr.StatusCode != http.StatusNotFound {
 		return false
 	}
-	message := strings.ToLower(saveRootFSError(resp))
+	message := strings.ToLower(publishRootFSError(resp))
 	return strings.Contains(message, "baseline") && strings.Contains(message, "not captured")
 }
 

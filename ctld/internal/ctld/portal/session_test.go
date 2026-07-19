@@ -17,9 +17,24 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota"
+	storagequotatest "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota/testutil"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
+
+type permissiveStorageOperationQuota struct{}
+
+func (permissiveStorageOperationQuota) Admit(context.Context, string) error { return nil }
+func (permissiveStorageOperationQuota) Close() error                        { return nil }
+
+func newTestLocalSession(
+	volumeID string,
+	manager *localVolumeManager,
+	quota *storagequota.Service,
+) *localSession {
+	return newLocalSession(volumeID, manager, quota, permissiveStorageOperationQuota{}, nil)
+}
 
 type rejectingHeadStore struct{}
 
@@ -82,7 +97,7 @@ func TestLocalSessionReadIntoUsesMountedS0FS(t *testing.T) {
 		RootInode: 1,
 		RootPath:  "/",
 	})
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 	openResp, err := session.Open(context.Background(), &pb.OpenRequest{
 		VolumeId: "ignored-by-local-session",
 		Inode:    node.Inode,
@@ -144,7 +159,7 @@ func TestLocalSessionRmdirPreservesENOTEMPTY(t *testing.T) {
 		RootInode: 1,
 		RootPath:  "/",
 	})
-	session := newLocalSession("vol-errno", mgr, nil)
+	session := newTestLocalSession("vol-errno", mgr, storagequotatest.NewService("test-region"))
 
 	_, err = session.Rmdir(context.Background(), &pb.RmdirRequest{
 		Parent: s0fs.RootInode,
@@ -185,7 +200,7 @@ func TestLocalSessionReadIntoRequiresTrackedHandleForCache(t *testing.T) {
 		RootPath:  "/",
 	}
 	mgr.add(volCtx)
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 	session.storeCompleteReadCache(volCtx, node.Inode, []byte("cached"))
 
 	buf := make([]byte, 16)
@@ -290,7 +305,7 @@ func TestLocalSessionMutationsWaitForSnapshotCheckpoint(t *testing.T) {
 		RootInode: 1,
 		RootPath:  "/",
 	})
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 
 	if err := mgr.prepareSnapshotCheckpoint(context.Background(), "vol-1"); err != nil {
 		t.Fatalf("prepareSnapshotCheckpoint() error = %v", err)
@@ -352,7 +367,7 @@ func TestLocalSessionReadCacheTracksSmallWrites(t *testing.T) {
 		RootPath:  "/",
 	}
 	mgr.add(volCtx)
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 
 	if _, err := session.Write(context.Background(), &pb.WriteRequest{
 		VolumeId: "ignored-by-local-session",
@@ -414,7 +429,7 @@ func TestLocalSessionReleaseSyncsDirtyWrites(t *testing.T) {
 		RootPath:  "/",
 	}
 	mgr.add(volCtx)
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 
 	createResp, err := session.Create(context.Background(), &pb.CreateRequest{
 		VolumeId: "ignored-by-local-session",
@@ -484,7 +499,7 @@ func TestLocalVolumeManagerUnmountKeepsVolumeOnMaterializeFailure(t *testing.T) 
 	defer engine.Close()
 
 	mgr := newLocalVolumeManager()
-	mgr.add(&volume.VolumeContext{
+	volCtx := &volume.VolumeContext{
 		VolumeID:  "vol-1",
 		TeamID:    "team-a",
 		Backend:   volume.BackendS0FS,
@@ -494,7 +509,9 @@ func TestLocalVolumeManagerUnmountKeepsVolumeOnMaterializeFailure(t *testing.T) 
 		RootInode: 1,
 		RootPath:  "/",
 		CacheDir:  cacheDir,
-	})
+	}
+	volCtx.SetStorageQuota(storagequotatest.NewService("test-region"))
+	mgr.add(volCtx)
 
 	if err := mgr.UnmountVolume(context.Background(), "vol-1", ""); !errors.Is(err, s0fs.ErrCommittedHeadConflict) {
 		t.Fatalf("UnmountVolume() error = %v, want %v", err, s0fs.ErrCommittedHeadConflict)
@@ -534,7 +551,7 @@ func TestLocalSessionReadCacheResizesOnTruncate(t *testing.T) {
 		RootPath:  "/",
 	}
 	mgr.add(volCtx)
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 
 	if _, err := session.Write(context.Background(), &pb.WriteRequest{
 		VolumeId: "ignored-by-local-session",
@@ -594,7 +611,7 @@ func TestLocalSessionReadCacheDisabledForRWX(t *testing.T) {
 		RootInode: 1,
 		RootPath:  "/",
 	})
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 
 	if _, err := session.Write(context.Background(), &pb.WriteRequest{
 		VolumeId: "ignored-by-local-session",
@@ -635,7 +652,7 @@ func TestLocalSessionOpenUsesMountedS0FS(t *testing.T) {
 		RootPath:  "/",
 	}
 	mgr.add(volCtx)
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 
 	resp, err := session.Open(context.Background(), &pb.OpenRequest{
 		VolumeId: "ignored-by-local-session",
@@ -707,7 +724,7 @@ func TestLocalSessionOpenUsesFSServerPermissions(t *testing.T) {
 		RootInode: 1,
 		RootPath:  "/",
 	})
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 
 	_, err = session.Open(context.Background(), &pb.OpenRequest{
 		VolumeId: "ignored-by-local-session",
@@ -737,7 +754,7 @@ func TestLocalSessionRestoresOpenUnlinkedS0FSHandle(t *testing.T) {
 		S0FS: firstEngine, Access: volume.AccessModeRWO, RootInode: 1, RootPath: "/", CacheDir: dir,
 	}
 	firstManager.add(firstVolume)
-	firstSession := newLocalSession("vol-1", firstManager, nil)
+	firstSession := newTestLocalSession("vol-1", firstManager, storagequotatest.NewService("test-region"))
 	firstSession.statePath = statePath
 	created, err := firstSession.Create(ctx, &pb.CreateRequest{Parent: s0fs.RootInode, Name: "transient.txt", Mode: 0o644})
 	if err != nil {
@@ -773,7 +790,7 @@ func TestLocalSessionRestoresOpenUnlinkedS0FSHandle(t *testing.T) {
 	secondEngine.PruneUnlinked(retainedUnlinkedInodes(handleState))
 	secondManager := newLocalVolumeManager()
 	secondManager.add(secondVolume)
-	secondSession := newLocalSession("vol-1", secondManager, nil)
+	secondSession := newTestLocalSession("vol-1", secondManager, storagequotatest.NewService("test-region"))
 	secondSession.statePath = statePath
 	read, err := secondSession.Read(ctx, &pb.ReadRequest{Inode: created.Inode, HandleId: created.HandleId, Size: 64})
 	if err != nil {
@@ -808,7 +825,7 @@ func TestLocalSessionPersistsFileHandlesIncrementallyAndSkipsDirectories(t *test
 		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS,
 		S0FS: engine, Access: volume.AccessModeRWO, RootInode: fsmeta.Ino(s0fs.RootInode), RootPath: "/",
 	})
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, nil)
 	session.statePath = filepath.Join(t.TempDir(), "handles.json")
 	defer session.Close()
 
@@ -880,7 +897,7 @@ func TestLocalSessionFallsBackToSnapshotForLegacyStandby(t *testing.T) {
 		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS,
 		S0FS: engine, Access: volume.AccessModeRWO, RootInode: fsmeta.Ino(s0fs.RootInode), RootPath: "/",
 	})
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, nil)
 	session.statePath = filepath.Join(t.TempDir(), "handles.json")
 	session.incrementalReady = func() bool { return false }
 	defer session.Close()
@@ -951,7 +968,7 @@ func TestLocalSessionRestoresOpenUnlinkedS0FSHandleAfterProcessKill(t *testing.T
 	engine.PruneUnlinked(retainedUnlinkedInodes(handleState))
 	mgr := newLocalVolumeManager()
 	mgr.add(volCtx)
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 	session.statePath = statePath
 
 	read, err := session.Read(context.Background(), &pb.ReadRequest{
@@ -991,7 +1008,7 @@ func TestLocalSessionS0FSProcessKillHelper(t *testing.T) {
 		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS,
 		S0FS: engine, Access: volume.AccessModeRWO, RootInode: 1, RootPath: "/", CacheDir: dir,
 	})
-	session := newLocalSession("vol-1", mgr, nil)
+	session := newTestLocalSession("vol-1", mgr, storagequotatest.NewService("test-region"))
 	session.statePath = filepath.Join(dir, "handles.json")
 	created, err := session.Create(context.Background(), &pb.CreateRequest{
 		Parent: s0fs.RootInode, Name: "transient.txt", Mode: 0o644,

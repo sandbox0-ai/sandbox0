@@ -21,7 +21,6 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 )
 
@@ -35,11 +34,13 @@ type Reconciler struct {
 	Resources *common.ResourceManager
 }
 
-type GatewayRedisConfig struct {
+// RuntimeRedisConfig is the region Redis connection shared by runtime
+// consumers. Service-specific key namespaces are derived by the consumer
+// injection helpers.
+type RuntimeRedisConfig struct {
 	URL       string
 	KeyPrefix string
 	Timeout   metav1.Duration
-	FailOpen  bool
 }
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -128,7 +129,11 @@ func (r *Reconciler) reconcileRedisDeployment(ctx context.Context, infra *infrav
 						{
 							Name:  componentName,
 							Image: cfg.Image,
-							Args:  []string{"--save", "", "--appendonly", "no"},
+							Args: []string{
+								"--save", "",
+								"--appendonly", "no",
+								"--maxmemory-policy", "noeviction",
+							},
 							Ports: []corev1.ContainerPort{
 								{Name: componentName, ContainerPort: cfg.Port},
 							},
@@ -221,7 +226,7 @@ func ApplyGatewayRedisConfig(ctx context.Context, c client.Client, infra *infrav
 	if cfg == nil {
 		return nil
 	}
-	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
+	redisCfg, ok, err := GetRuntimeRedisConfig(ctx, c, infra)
 	if err != nil {
 		return err
 	}
@@ -229,39 +234,14 @@ func ApplyGatewayRedisConfig(ctx context.Context, c client.Client, infra *infrav
 	return nil
 }
 
-// ApplyGatewayRateLimitConfig injects region-level Redis settings into gateway
-// process config. Without spec.redis, gateways keep memory rate limiting.
-func ApplyGatewayRateLimitConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.GatewayConfig) error {
+// ApplyTeamQuotaDistributedEnforcementConfig injects the region Redis
+// connection used by distributed Team Quota rate and concurrency enforcers.
+// Distributed admission is fail-closed.
+func ApplyTeamQuotaDistributedEnforcementConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.TeamQuotaDistributedEnforcementConfig) error {
 	if cfg == nil {
 		return nil
 	}
-	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
-	if err != nil {
-		return err
-	}
-	applyGatewayRedisConfig(cfg, redisCfg, ok)
-	if !ok {
-		cfg.RateLimitBackend = ratelimit.BackendMemory
-		cfg.RateLimitRedisURL = ""
-		cfg.RateLimitRedisKeyPrefix = ""
-		cfg.RateLimitRedisTimeout = metav1.Duration{}
-		return nil
-	}
-	cfg.RateLimitBackend = ratelimit.BackendRedis
-	cfg.RateLimitRedisURL = redisCfg.URL
-	cfg.RateLimitRedisKeyPrefix = rateLimitRedisKeyPrefix(infra, redisCfg)
-	cfg.RateLimitRedisTimeout = redisCfg.Timeout
-	cfg.RateLimitFailOpen = redisCfg.FailOpen
-	return nil
-}
-
-// ApplyNetdRedisConfig injects region-level Redis settings into the ctld
-// network runtime. Without spec.redis, bandwidth limiting remains local-only.
-func ApplyNetdRedisConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.NetdConfig) error {
-	if cfg == nil {
-		return nil
-	}
-	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
+	redisCfg, ok, err := GetRuntimeRedisConfig(ctx, c, infra)
 	if err != nil {
 		return err
 	}
@@ -269,17 +249,53 @@ func ApplyNetdRedisConfig(ctx context.Context, c client.Client, infra *infrav1al
 		cfg.RedisURL = ""
 		cfg.RedisKeyPrefix = ""
 		cfg.RedisTimeout = metav1.Duration{}
-		cfg.RedisFailOpen = false
 		return nil
 	}
 	cfg.RedisURL = redisCfg.URL
-	cfg.RedisKeyPrefix = redisCfg.KeyPrefix
+	cfg.RedisKeyPrefix = rediscache.JoinKeyPrefix(redisCfg.KeyPrefix, "teamquota")
 	cfg.RedisTimeout = redisCfg.Timeout
-	cfg.RedisFailOpen = redisCfg.FailOpen
 	return nil
 }
 
-func applyGatewayRedisConfig(cfg *apiconfig.GatewayConfig, redisCfg GatewayRedisConfig, ok bool) {
+// ApplyOverloadGuardConfig injects the shared platform Redis connection into
+// the aggregate overload guard. keyNamespace must identify the owning service
+// and, for region entrypoints, its region. This guard is independent from Team
+// Quota.
+func ApplyOverloadGuardConfig(
+	ctx context.Context,
+	c client.Client,
+	infra *infrav1alpha1.Sandbox0Infra,
+	keyNamespace string,
+	cfg *apiconfig.OverloadGuardConfig,
+) error {
+	if cfg == nil {
+		return nil
+	}
+	keyNamespace = strings.TrimSpace(keyNamespace)
+	if keyNamespace == "" {
+		return fmt.Errorf("overload guard key namespace is required")
+	}
+	redisCfg, ok, err := GetRuntimeRedisConfig(ctx, c, infra)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		cfg.RedisURL = ""
+		cfg.RedisKeyPrefix = ""
+		cfg.RedisTimeout = metav1.Duration{}
+		return nil
+	}
+	cfg.RedisURL = redisCfg.URL
+	cfg.RedisKeyPrefix = rediscache.JoinKeyPrefix(
+		redisCfg.KeyPrefix,
+		"overload-guard",
+		keyNamespace,
+	)
+	cfg.RedisTimeout = redisCfg.Timeout
+	return nil
+}
+
+func applyGatewayRedisConfig(cfg *apiconfig.GatewayConfig, redisCfg RuntimeRedisConfig, ok bool) {
 	if !ok {
 		cfg.RedisURL = ""
 		cfg.RedisKeyPrefix = ""
@@ -291,9 +307,11 @@ func applyGatewayRedisConfig(cfg *apiconfig.GatewayConfig, redisCfg GatewayRedis
 	cfg.RedisTimeout = redisCfg.Timeout
 }
 
-func GetGatewayRedisConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra) (GatewayRedisConfig, bool, error) {
+// GetRuntimeRedisConfig resolves the region Redis connection without assigning
+// a service-specific namespace or failure policy.
+func GetRuntimeRedisConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra) (RuntimeRedisConfig, bool, error) {
 	if infra == nil || !infrav1alpha1.IsRedisEnabled(infra) {
-		return GatewayRedisConfig{}, false, nil
+		return RuntimeRedisConfig{}, false, nil
 	}
 
 	var redisURL string
@@ -304,55 +322,25 @@ func GetGatewayRedisConfig(ctx context.Context, c client.Client, infra *infrav1a
 		var err error
 		redisURL, err = externalRedisURL(ctx, c, infra)
 		if err != nil {
-			return GatewayRedisConfig{}, false, err
+			return RuntimeRedisConfig{}, false, err
 		}
 	default:
-		return GatewayRedisConfig{}, false, fmt.Errorf("unsupported redis type: %s", infra.Spec.Redis.Type)
+		return RuntimeRedisConfig{}, false, fmt.Errorf("unsupported redis type: %s", infra.Spec.Redis.Type)
 	}
 
 	keyPrefix := strings.TrimSpace(infra.Spec.Redis.KeyPrefix)
-	if keyPrefix == "" || keyPrefix == ratelimit.DefaultRedisKeyPrefix {
+	if keyPrefix == "" {
 		keyPrefix = rediscache.DefaultKeyPrefix
 	}
 	timeout := infra.Spec.Redis.OperationTimeout
 	if timeout.Duration == 0 {
 		timeout.Duration = rediscache.DefaultTimeout
 	}
-	failOpen := true
-	if infra.Spec.Redis.FailOpen != nil {
-		failOpen = *infra.Spec.Redis.FailOpen
-	}
-	return GatewayRedisConfig{
+	return RuntimeRedisConfig{
 		URL:       redisURL,
 		KeyPrefix: keyPrefix,
 		Timeout:   timeout,
-		FailOpen:  failOpen,
 	}, true, nil
-}
-
-func GetRateLimitConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra) (GatewayRedisConfig, bool, error) {
-	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
-	if !ok || err != nil {
-		return redisCfg, ok, err
-	}
-	redisCfg.KeyPrefix = rateLimitRedisKeyPrefix(infra, redisCfg)
-	return redisCfg, true, nil
-}
-
-func rateLimitRedisKeyPrefix(infra *infrav1alpha1.Sandbox0Infra, redisCfg GatewayRedisConfig) string {
-	rawPrefix := ""
-	if infra != nil && infra.Spec.Redis != nil {
-		rawPrefix = strings.TrimSpace(infra.Spec.Redis.KeyPrefix)
-	}
-	if rawPrefix == "" {
-		return ratelimit.DefaultRedisKeyPrefix
-	}
-	for _, part := range strings.Split(rawPrefix, ":") {
-		if strings.TrimSpace(part) == "ratelimit" {
-			return rawPrefix
-		}
-	}
-	return rediscache.JoinKeyPrefix(redisCfg.KeyPrefix, "ratelimit")
 }
 
 func externalRedisURL(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra) (string, error) {

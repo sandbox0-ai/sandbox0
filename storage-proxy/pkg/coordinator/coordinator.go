@@ -42,8 +42,9 @@ const (
 	HeartbeatTimeout  = 15 // seconds - mounts older than this are considered stale
 
 	// Coordination settings
-	FlushTimeout    = 30 * time.Second
-	CleanupInterval = 60 * time.Second
+	FlushTimeout          = 30 * time.Second
+	CleanupInterval       = 60 * time.Second
+	CoordinationRetention = 24 * time.Hour
 )
 
 // Errors
@@ -796,9 +797,8 @@ func (c *Coordinator) updateHeartbeats(ctx context.Context) {
 	}
 }
 
-// runCleanup periodically cleans up stale mounts
+// runCleanup periodically cleans up stale mounts and expired coordination history.
 func (c *Coordinator) runCleanup(ctx context.Context) {
-	metrics := c.metrics
 	cleanupInterval, _ := time.ParseDuration(c.config.CleanupInterval)
 	if cleanupInterval == 0 {
 		cleanupInterval = CleanupInterval
@@ -817,48 +817,60 @@ func (c *Coordinator) runCleanup(ctx context.Context) {
 			close(c.doneCh)
 			return
 		case <-ticker.C:
-			mounts, err := c.repo.GetAllMounts(ctx)
-			if err != nil {
-				c.logger.WithError(err).Warn("Failed to list mounts for orphan cleanup")
-			} else {
-				var orphaned int64
-				seenPods := make(map[string]struct{}, len(mounts))
-				for _, mount := range mounts {
-					if !mountOwnerUsesPodLiveness(mount) {
-						continue
-					}
-					podKey := mount.ClusterID + "/" + mount.PodID
-					if _, ok := seenPods[podKey]; ok {
-						continue
-					}
-					seenPods[podKey] = struct{}{}
-					if c.podExists(ctx, mount.PodID) {
-						continue
-					}
-					if err := c.repo.DeleteMountByPodID(ctx, mount.ClusterID, mount.PodID); err != nil {
-						c.logger.WithError(err).WithFields(logrus.Fields{
-							"cluster_id": mount.ClusterID,
-							"pod_id":     mount.PodID,
-						}).Warn("Failed to delete orphaned mounts by pod")
-						continue
-					}
-					orphaned++
-				}
-				if orphaned > 0 {
-					c.logger.WithField("orphaned_pods", orphaned).Info("Cleaned up orphaned mounts by pod lookup")
-				}
-			}
-
-			deleted, err := c.repo.DeleteStaleMounts(ctx, heartbeatTimeout)
-			if err != nil {
-				c.logger.WithError(err).Warn("Failed to cleanup stale mounts")
-			} else if deleted > 0 {
-				if metrics != nil {
-					metrics.CoordinatorStaleMountsCleaned.Add(float64(deleted))
-				}
-				c.logger.WithField("deleted_count", deleted).Info("Cleaned up stale mounts")
-			}
+			c.runCleanupCycle(ctx, heartbeatTimeout)
 		}
+	}
+}
+
+func (c *Coordinator) runCleanupCycle(ctx context.Context, heartbeatTimeout int) {
+	mounts, err := c.repo.GetAllMounts(ctx)
+	if err != nil {
+		c.logger.WithError(err).Warn("Failed to list mounts for orphan cleanup")
+	} else {
+		var orphaned int64
+		seenPods := make(map[string]struct{}, len(mounts))
+		for _, mount := range mounts {
+			if !mountOwnerUsesPodLiveness(mount) {
+				continue
+			}
+			podKey := mount.ClusterID + "/" + mount.PodID
+			if _, ok := seenPods[podKey]; ok {
+				continue
+			}
+			seenPods[podKey] = struct{}{}
+			if c.podExists(ctx, mount.PodID) {
+				continue
+			}
+			if err := c.repo.DeleteMountByPodID(ctx, mount.ClusterID, mount.PodID); err != nil {
+				c.logger.WithError(err).WithFields(logrus.Fields{
+					"cluster_id": mount.ClusterID,
+					"pod_id":     mount.PodID,
+				}).Warn("Failed to delete orphaned mounts by pod")
+				continue
+			}
+			orphaned++
+		}
+		if orphaned > 0 {
+			c.logger.WithField("orphaned_pods", orphaned).Info("Cleaned up orphaned mounts by pod lookup")
+		}
+	}
+
+	deletedMounts, err := c.repo.DeleteStaleMounts(ctx, heartbeatTimeout)
+	if err != nil {
+		c.logger.WithError(err).Warn("Failed to cleanup stale mounts")
+	} else if deletedMounts > 0 {
+		if c.metrics != nil {
+			c.metrics.CoordinatorStaleMountsCleaned.Add(float64(deletedMounts))
+		}
+		c.logger.WithField("deleted_count", deletedMounts).Info("Cleaned up stale mounts")
+	}
+
+	deletedCoordinations, err := c.repo.DeleteExpiredCoordinations(ctx, CoordinationRetention)
+	if err != nil {
+		c.logger.WithError(err).Warn("Failed to cleanup expired snapshot coordinations")
+	} else if deletedCoordinations > 0 {
+		c.logger.WithField("deleted_count", deletedCoordinations).
+			Info("Cleaned up expired snapshot coordinations")
 	}
 }
 

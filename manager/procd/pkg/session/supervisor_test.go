@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,39 @@ func TestSupervisorConcurrentCreateDeduplicatesByKey(t *testing.T) {
 	}
 	if values := supervisor.List(); len(values) != 1 {
 		t.Fatalf("sessions = %d, want 1", len(values))
+	}
+}
+
+func TestSupervisorRejectsUnboundedPersistedSessionCardinality(t *testing.T) {
+	store, err := NewFileStore(filepath.Join(t.TempDir(), "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor, err := NewSupervisor(store, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		supervisor.mu.Lock()
+		supervisor.sessions = map[string]*managedSession{}
+		supervisor.mu.Unlock()
+		if err := supervisor.Close(); err != nil {
+			t.Errorf("close supervisor: %v", err)
+		}
+	}()
+
+	supervisor.mu.Lock()
+	for index := range maxPersistedSessions {
+		supervisor.sessions[fmt.Sprintf("ses-limit-%04d", index)] = &managedSession{}
+	}
+	supervisor.mu.Unlock()
+
+	_, _, err = supervisor.Create(SessionSpec{
+		Command:   []string{"/bin/true"},
+		Lifecycle: LifecycleSpec{DesiredState: DesiredStateStopped},
+	}, "")
+	if !errors.Is(err, ErrSessionLimitExceeded) {
+		t.Fatalf("Create() error = %v, want ErrSessionLimitExceeded", err)
 	}
 }
 

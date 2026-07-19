@@ -9,7 +9,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 )
 
@@ -55,6 +55,17 @@ func (s *Server) createSnapshot(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "name is required")
 		return
 	}
+	if len(name) > snapshot.MaxSnapshotNameBytes {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "name is too long")
+		return
+	}
+	if len(req.Description) > snapshot.MaxSnapshotDescriptionBytes {
+		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "description is too long")
+		return
+	}
+	if !s.admitStorageOperation(w, r, claims.TeamID) {
+		return
+	}
 
 	checkpoint, err := s.prepareVolumeSnapshotCheckpoint(r.Context(), volumeID, claims.TeamID)
 	if err != nil {
@@ -68,16 +79,25 @@ func (s *Server) createSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	snap, err := s.snapshotMgr.CreateSnapshotSimple(r.Context(), &snapshot.CreateSnapshotRequest{
-		VolumeID:                 volumeID,
-		Name:                     name,
-		Description:              req.Description,
-		TeamID:                   claims.TeamID,
-		UserID:                   claims.UserID,
-		ActiveCheckpointPrepared: checkpoint.Prepared(),
-		StorageMetadata:          storageObservationMetadataFromHeaders(r.Header),
-	})
-
+	var snap *db.Snapshot
+	create := func(runCtx context.Context) error {
+		var createErr error
+		snap, createErr = s.snapshotMgr.CreateSnapshotSimple(runCtx, &snapshot.CreateSnapshotRequest{
+			VolumeID:                 volumeID,
+			Name:                     name,
+			Description:              req.Description,
+			TeamID:                   claims.TeamID,
+			UserID:                   claims.UserID,
+			ActiveCheckpointPrepared: checkpoint.Prepared(),
+			StorageMetadata:          storageObservationMetadataFromHeaders(r.Header),
+		})
+		return createErr
+	}
+	if s.barrier != nil {
+		err = s.barrier.WithExclusive(r.Context(), volumeID, create)
+	} else {
+		err = create(r.Context())
+	}
 	if err != nil {
 		s.handleSnapshotError(w, err)
 		return
@@ -118,6 +138,9 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 	volumeID := r.PathValue("volume_id")
 	if volumeID == "" {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "volume_id is required")
+		return
+	}
+	if !s.admitStorageOperation(w, r, claims.TeamID) {
 		return
 	}
 
@@ -162,6 +185,9 @@ func (s *Server) getSnapshot(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "volume_id and snapshot_id are required")
 		return
 	}
+	if !s.admitStorageOperation(w, r, claims.TeamID) {
+		return
+	}
 
 	snap, err := s.snapshotMgr.GetSnapshot(r.Context(), volumeID, snapshotID, claims.TeamID)
 	if err != nil {
@@ -197,6 +223,9 @@ func (s *Server) restoreSnapshot(w http.ResponseWriter, r *http.Request) {
 	snapshotID := r.PathValue("snapshot_id")
 	if volumeID == "" || snapshotID == "" {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "volume_id and snapshot_id are required")
+		return
+	}
+	if !s.admitStorageOperation(w, r, claims.TeamID) {
 		return
 	}
 
@@ -244,8 +273,19 @@ func (s *Server) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
 		_ = spec.WriteError(w, http.StatusBadRequest, spec.CodeBadRequest, "volume_id and snapshot_id are required")
 		return
 	}
+	if !s.admitStorageOperation(w, r, claims.TeamID) {
+		return
+	}
 
-	err := s.snapshotMgr.DeleteSnapshot(r.Context(), volumeID, snapshotID, claims.TeamID)
+	deleteSnapshot := func(runCtx context.Context) error {
+		return s.snapshotMgr.DeleteSnapshot(runCtx, volumeID, snapshotID, claims.TeamID)
+	}
+	var err error
+	if s.barrier != nil {
+		err = s.barrier.WithExclusive(r.Context(), volumeID, deleteSnapshot)
+	} else {
+		err = deleteSnapshot(r.Context())
+	}
 	if err != nil {
 		if errors.Is(err, snapshot.ErrSnapshotNotFound) ||
 			errors.Is(err, snapshot.ErrSnapshotNotBelongToVolume) ||
@@ -262,9 +302,10 @@ func (s *Server) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
 
 // handleSnapshotError maps snapshot errors to HTTP responses
 func (s *Server) handleSnapshotError(w http.ResponseWriter, err error) {
+	if s.writeStorageQuotaMutationError(w, err) {
+		return
+	}
 	switch {
-	case quota.IsExceeded(err):
-		_ = spec.WriteError(w, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 	case errors.Is(err, snapshot.ErrVolumeNotFound):
 		_ = spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "volume not found")
 	case errors.Is(err, snapshot.ErrSnapshotNotFound):

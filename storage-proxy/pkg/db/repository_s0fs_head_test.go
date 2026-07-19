@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	storagemigrations "github.com/sandbox0-ai/sandbox0/storage-proxy/migrations"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
@@ -247,7 +249,7 @@ func TestAcquireMountRejectsConflictingRWOMount(t *testing.T) {
 		MountedAt:     time.Now().UTC(),
 		MountOptions:  mustMountOptionsRaw(t, "RWO"),
 	}
-	if err := repo.AcquireMount(ctx, second, 15); err != ErrConflict {
+	if err := repo.AcquireMount(ctx, second, 15); !errors.Is(err, ErrConflict) {
 		t.Fatalf("AcquireMount(second) err = %v, want %v", err, ErrConflict)
 	}
 }
@@ -314,8 +316,10 @@ func newS0FSCommittedHeadTestRepository(t *testing.T) *Repository {
 	ctx := context.Background()
 	schema := fmt.Sprintf("storage_proxy_s0fs_head_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
 	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL: dbURL,
-		Schema:      schema,
+		DatabaseURL:     dbURL,
+		Schema:          schema,
+		DefaultMaxConns: 10,
+		DefaultMinConns: 1,
 	})
 	if err != nil {
 		t.Fatalf("connect test database: %v", err)
@@ -327,6 +331,9 @@ func newS0FSCommittedHeadTestRepository(t *testing.T) *Repository {
 
 	if err := migrate.Up(ctx, pool, ".", migrate.WithBaseFS(storagemigrations.FS), migrate.WithSchema(schema)); err != nil {
 		t.Fatalf("migrate storage-proxy schema: %v", err)
+	}
+	if err := teamquota.RunMigrations(ctx, pool, nil); err != nil {
+		t.Fatalf("migrate team quota schema: %v", err)
 	}
 	return NewRepository(pool)
 }

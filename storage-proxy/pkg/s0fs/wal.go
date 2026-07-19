@@ -15,16 +15,17 @@ import (
 const walSyncCoalesceDelay = time.Millisecond
 
 type wal struct {
-	path       string
-	mu         sync.Mutex
-	syncCond   *sync.Cond
-	file       *os.File
-	volumeID   string
-	encryption *EncryptionConfig
-	onSync     func()
-	writeGen   uint64
-	syncedGen  uint64
-	syncing    bool
+	path        string
+	mu          sync.Mutex
+	syncCond    *sync.Cond
+	file        *os.File
+	volumeID    string
+	encryption  *EncryptionConfig
+	onSync      func()
+	writeGen    uint64
+	syncedGen   uint64
+	syncing     bool
+	recordCount int64
 }
 
 func openWAL(path, volumeID string, encryption *EncryptionConfig, onSync func()) (*wal, []walRecord, error) {
@@ -44,7 +45,14 @@ func openWAL(path, volumeID string, encryption *EncryptionConfig, onSync func())
 	if err != nil {
 		return nil, nil, fmt.Errorf("open wal: %w", err)
 	}
-	w := &wal{path: path, file: file, volumeID: volumeID, encryption: encryption, onSync: onSync}
+	w := &wal{
+		path:        path,
+		file:        file,
+		volumeID:    volumeID,
+		encryption:  encryption,
+		onSync:      onSync,
+		recordCount: int64(len(records)),
+	}
 	w.syncCond = sync.NewCond(&w.mu)
 	return w, records, nil
 }
@@ -124,7 +132,17 @@ func (w *wal) appendPrepared(payload []byte) error {
 		return fmt.Errorf("append wal record: %w", err)
 	}
 	w.writeGen++
+	w.recordCount++
 	return nil
+}
+
+func (w *wal) records() int64 {
+	if w == nil {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.recordCount
 }
 
 func (w *wal) beginSyncCurrent() (func() error, error) {
@@ -245,5 +263,6 @@ func (w *wal) reset() error {
 	w.file = file
 	w.writeGen = 0
 	w.syncedGen = 0
+	w.recordCount = 0
 	return nil
 }

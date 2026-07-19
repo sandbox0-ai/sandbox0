@@ -17,8 +17,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
+	storagequotatest "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota/testutil"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -44,10 +46,12 @@ func (m *captureForkSnapshotManager) ForkVolume(_ context.Context, req *snapshot
 func TestCreateSandboxVolumeStoresDefaultPosixIdentity(t *testing.T) {
 	repo := newFakeHTTPRepo()
 	server := &Server{
-		logger:       logrus.New(),
-		repo:         repo,
-		meteringRepo: &fakeHTTPMeteringRepository{},
-		snapshotMgr:  &fakeHTTPSnapshotManager{},
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      &fakeHTTPMeteringRepository{},
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	uid := int64(1001)
@@ -89,10 +93,12 @@ func TestCreateSandboxVolumeStoresDefaultPosixIdentity(t *testing.T) {
 func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 	repo := newFakeHTTPRepo()
 	server := &Server{
-		logger:       logrus.New(),
-		repo:         repo,
-		meteringRepo: &fakeHTTPMeteringRepository{},
-		snapshotMgr:  &fakeHTTPSnapshotManager{},
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      &fakeHTTPMeteringRepository{},
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{}`)))
@@ -116,6 +122,36 @@ func TestCreateSandboxVolumeDefaultsPosixIdentityToRoot(t *testing.T) {
 	}
 }
 
+func TestCreateEmptyS0FSVolumeChargesInitialMetadataObjects(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	server := &Server{
+		logger:      logrus.New(),
+		repo:        repo,
+		snapshotMgr: &fakeHTTPSnapshotManager{},
+		storageQuota: storagequotatest.NewLimitedService(
+			"test-region",
+			teamquota.KeyStorageObjectCount,
+			2,
+		),
+		storageOperations: newTestStorageOperationQuota(),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{}`)))
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.createSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if len(repo.createdVolumes) != 0 {
+		t.Fatalf("created volumes = %+v, want none", repo.createdVolumes)
+	}
+}
+
 func TestCreateSandboxVolumeStoresS3BackendConfigAndRedactsResponse(t *testing.T) {
 	repo := newFakeHTTPRepo()
 	server := &Server{
@@ -124,6 +160,8 @@ func TestCreateSandboxVolumeStoresS3BackendConfigAndRedactsResponse(t *testing.T
 		meteringRepo:      &fakeHTTPMeteringRepository{},
 		snapshotMgr:       &fakeHTTPSnapshotManager{},
 		s3CredentialCodec: testHTTPS3BackendCredentialCodec(t),
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewReader([]byte(`{
@@ -291,6 +329,7 @@ func TestCreateSandboxVolumeRejectsS3BackendWithoutCredentialCodec(t *testing.T)
 		logger:       logrus.New(),
 		repo:         repo,
 		meteringRepo: &fakeHTTPMeteringRepository{},
+		storageQuota: newTestStorageQuota(),
 		snapshotMgr:  &fakeHTTPSnapshotManager{},
 	}
 
@@ -359,8 +398,9 @@ func TestCreateSandboxVolumeRejectsNullOrBlankSnapshotID(t *testing.T) {
 
 func TestListSandboxVolumesReturnsEmptyArray(t *testing.T) {
 	server := &Server{
-		logger: logrus.New(),
-		repo:   newFakeHTTPRepo(),
+		logger:            logrus.New(),
+		repo:              newFakeHTTPRepo(),
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes", nil)
@@ -421,9 +461,10 @@ func TestListSandboxVolumesIncludesMeteredS0FSStorageUsage(t *testing.T) {
 		},
 	}
 	server := &Server{
-		logger:       logrus.New(),
-		repo:         repo,
-		meteringRepo: meteringRepo,
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      meteringRepo,
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes", nil)
@@ -472,8 +513,9 @@ func TestGetSandboxVolumeIncludesMeteredStorageUsage(t *testing.T) {
 	}
 	observedAt := time.Date(2026, 7, 18, 9, 0, 0, 0, time.UTC)
 	server := &Server{
-		logger: logrus.New(),
-		repo:   repo,
+		logger:            logrus.New(),
+		repo:              repo,
+		storageOperations: newTestStorageOperationQuota(),
 		meteringRepo: &fakeHTTPMeteringRepository{
 			storageStates: map[string]*metering.StorageProjectionState{
 				metering.SubjectTypeVolume + "/vol-1": {
@@ -520,8 +562,9 @@ func TestGetSandboxVolumeToleratesUnavailableMeteringState(t *testing.T) {
 		UserID: "user-1",
 	}
 	server := &Server{
-		logger: logrus.New(),
-		repo:   repo,
+		logger:            logrus.New(),
+		repo:              repo,
+		storageOperations: newTestStorageOperationQuota(),
 		meteringRepo: &fakeHTTPMeteringRepository{
 			storageReadErr: errors.New("metering unavailable"),
 		},
@@ -553,9 +596,10 @@ func TestCreateSandboxVolumeFromSnapshot(t *testing.T) {
 	repo := newFakeHTTPRepo()
 	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
-		repo:        repo,
-		snapshotMgr: snapshotMgr,
-		logger:      logrus.New(),
+		repo:              repo,
+		snapshotMgr:       snapshotMgr,
+		logger:            logrus.New(),
+		storageOperations: newTestStorageOperationQuota(),
 	}
 	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{
 		TeamID: "team-1",
@@ -585,8 +629,9 @@ func TestCreateSandboxVolumeFromSnapshot(t *testing.T) {
 
 func TestListSnapshotsReturnsEmptyArray(t *testing.T) {
 	server := &Server{
-		logger:      logrus.New(),
-		snapshotMgr: &fakeHTTPSnapshotManager{},
+		logger:            logrus.New(),
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/sandboxvolumes/vol-1/snapshots", nil)
@@ -614,6 +659,136 @@ func TestListSnapshotsReturnsEmptyArray(t *testing.T) {
 	}
 }
 
+func TestPublicStorageReadOperationsConsumeStorageOperation(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:     "vol-1",
+		TeamID: "team-1",
+		UserID: "user-1",
+	}
+	operations := newTestStorageOperationQuota()
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		storageOperations: operations,
+	}
+	claims := &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		invoke func(http.ResponseWriter, *http.Request)
+		values map[string]string
+	}{
+		{
+			name:   "list volumes",
+			method: http.MethodGet,
+			path:   "/sandboxvolumes",
+			invoke: server.listSandboxVolumes,
+		},
+		{
+			name:   "get volume",
+			method: http.MethodGet,
+			path:   "/sandboxvolumes/vol-1",
+			invoke: server.getSandboxVolume,
+			values: map[string]string{"id": "vol-1"},
+		},
+		{
+			name:   "list snapshots",
+			method: http.MethodGet,
+			path:   "/sandboxvolumes/vol-1/snapshots",
+			invoke: server.listSnapshots,
+			values: map[string]string{"volume_id": "vol-1"},
+		},
+		{
+			name:   "get snapshot",
+			method: http.MethodGet,
+			path:   "/sandboxvolumes/vol-1/snapshots/snap-1",
+			invoke: server.getSnapshot,
+			values: map[string]string{
+				"volume_id":   "vol-1",
+				"snapshot_id": "snap-1",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(test.method, test.path, nil)
+			for key, value := range test.values {
+				req.SetPathValue(key, value)
+			}
+			req = req.WithContext(internalauth.WithClaims(req.Context(), claims))
+			recorder := httptest.NewRecorder()
+
+			test.invoke(recorder, req)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+			}
+		})
+	}
+
+	if len(operations.teams) != len(tests) {
+		t.Fatalf("storage operation admissions = %d, want %d", len(operations.teams), len(tests))
+	}
+	for index, teamID := range operations.teams {
+		if teamID != "team-1" {
+			t.Fatalf("storage operation team[%d] = %q, want team-1", index, teamID)
+		}
+	}
+}
+
+func TestPublicStorageReadOperationsFailClosed(t *testing.T) {
+	operations := &testStorageOperationQuota{err: &teamquota.UnavailableError{
+		Operation: "admit storage operation",
+		Err:       errors.New("redis unavailable"),
+	}}
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              newFakeHTTPRepo(),
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		storageOperations: operations,
+	}
+	claims := &internalauth.Claims{TeamID: "team-1", UserID: "user-1"}
+
+	tests := []struct {
+		name   string
+		path   string
+		invoke func(http.ResponseWriter, *http.Request)
+		values map[string]string
+	}{
+		{name: "list volumes", path: "/sandboxvolumes", invoke: server.listSandboxVolumes},
+		{name: "get volume", path: "/sandboxvolumes/vol-1", invoke: server.getSandboxVolume, values: map[string]string{"id": "vol-1"}},
+		{name: "list snapshots", path: "/sandboxvolumes/vol-1/snapshots", invoke: server.listSnapshots, values: map[string]string{"volume_id": "vol-1"}},
+		{
+			name:   "get snapshot",
+			path:   "/sandboxvolumes/vol-1/snapshots/snap-1",
+			invoke: server.getSnapshot,
+			values: map[string]string{"volume_id": "vol-1", "snapshot_id": "snap-1"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, test.path, nil)
+			for key, value := range test.values {
+				req.SetPathValue(key, value)
+			}
+			req = req.WithContext(internalauth.WithClaims(req.Context(), claims))
+			recorder := httptest.NewRecorder()
+
+			test.invoke(recorder, req)
+
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestCreateSandboxVolumeRejectsPartialDefaultPosixIdentity(t *testing.T) {
 	server := &Server{
 		logger:       logrus.New(),
@@ -635,10 +810,13 @@ func TestCreateSandboxVolumeRejectsPartialDefaultPosixIdentity(t *testing.T) {
 
 func TestCreateOwnedSandboxVolumeStoresOwnerMetadata(t *testing.T) {
 	repo := newFakeHTTPRepo()
+	operations := newTestStorageOperationQuota()
 	server := &Server{
-		logger:       logrus.New(),
-		repo:         repo,
-		meteringRepo: &fakeHTTPMeteringRepository{},
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      &fakeHTTPMeteringRepository{},
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: operations,
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/internal/v1/sandboxvolumes/owned", bytes.NewReader([]byte(`{"sandbox_id":"sandbox-a","cluster_id":"cluster-a","purpose":"webhook-state"}`)))
@@ -663,17 +841,296 @@ func TestCreateOwnedSandboxVolumeStoresOwnerMetadata(t *testing.T) {
 	if owner == nil {
 		t.Fatalf("owner for volume %q was not stored", volumeID)
 	}
-	if owner.OwnerSandboxID != "sandbox-a" || owner.OwnerClusterID != "cluster-a" || owner.Purpose != "webhook-state" {
+	if owner.TeamID != "team-1" ||
+		owner.OwnerSandboxID != "sandbox-a" ||
+		owner.OwnerClusterID != "cluster-a" ||
+		owner.Purpose != "webhook-state" {
 		t.Fatalf("unexpected owner: %#v", owner)
+	}
+	if len(operations.teams) != 1 || operations.teams[0] != "team-1" {
+		t.Fatalf("storage operation teams = %#v, want [team-1]", operations.teams)
+	}
+}
+
+func TestCreateOwnedSandboxVolumeFailsClosedWhenStorageOperationAdmissionFails(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	server := &Server{
+		logger:       logrus.New(),
+		repo:         repo,
+		meteringRepo: &fakeHTTPMeteringRepository{},
+		storageQuota: newTestStorageQuota(),
+		storageOperations: &testStorageOperationQuota{err: &teamquota.UnavailableError{
+			Operation: "admit storage operation",
+			Err:       errors.New("redis unavailable"),
+		}},
+	}
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/internal/v1/sandboxvolumes/owned",
+		bytes.NewReader([]byte(`{"sandbox_id":"sandbox-a","cluster_id":"cluster-a","purpose":"webhook-state"}`)),
+	)
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller:    internalauth.ServiceManager,
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		SandboxID: "sandbox-a",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.createOwnedSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+	}
+	if len(repo.createdVolumes) != 0 {
+		t.Fatalf("created volumes = %d, want 0", len(repo.createdVolumes))
+	}
+}
+
+func TestCreateOwnedSandboxVolumeDoesNotReuseAnotherTeamsOwnerKey(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["team-1-volume"] = &db.SandboxVolume{
+		ID:     "team-1-volume",
+		TeamID: "team-1",
+		UserID: "user-1",
+	}
+	repo.owners["team-1-volume"] = &db.SandboxVolumeOwner{
+		VolumeID:       "team-1-volume",
+		TeamID:         "team-1",
+		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
+		OwnerSandboxID: "sandbox-a",
+		OwnerClusterID: "cluster-a",
+		Purpose:        "webhook-state",
+	}
+	operations := newTestStorageOperationQuota()
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      &fakeHTTPMeteringRepository{},
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: operations,
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/internal/v1/sandboxvolumes/owned",
+		bytes.NewReader([]byte(`{"sandbox_id":"sandbox-a","cluster_id":"cluster-a","purpose":"webhook-state"}`)),
+	)
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller:    internalauth.ServiceManager,
+		TeamID:    "team-2",
+		UserID:    "user-2",
+		SandboxID: "sandbox-a",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.createOwnedSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	if len(repo.createdVolumes) != 1 || repo.createdVolumes[0].TeamID != "team-2" {
+		t.Fatalf("created volumes = %#v, want one team-2 volume", repo.createdVolumes)
+	}
+	createdOwner := repo.owners[repo.createdVolumes[0].ID]
+	if createdOwner == nil || createdOwner.TeamID != "team-2" {
+		t.Fatalf("created owner = %#v, want team-2", createdOwner)
+	}
+	if len(operations.teams) != 1 || operations.teams[0] != "team-2" {
+		t.Fatalf("storage operation teams = %#v, want [team-2]", operations.teams)
+	}
+}
+
+func TestCreateOwnedSandboxVolumeFailureFallbackDoesNotReturnAnotherTeam(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.createOwnerErr = errors.New("create owner failed")
+	repo.volumes["team-1-volume"] = &db.SandboxVolume{
+		ID:     "team-1-volume",
+		TeamID: "team-1",
+		UserID: "user-1",
+	}
+	repo.owners["team-1-volume"] = &db.SandboxVolumeOwner{
+		VolumeID:       "team-1-volume",
+		TeamID:         "team-1",
+		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
+		OwnerSandboxID: "sandbox-a",
+		OwnerClusterID: "cluster-a",
+		Purpose:        "webhook-state",
+	}
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      &fakeHTTPMeteringRepository{},
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: newTestStorageOperationQuota(),
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/internal/v1/sandboxvolumes/owned",
+		bytes.NewReader([]byte(`{"sandbox_id":"sandbox-a","cluster_id":"cluster-a","purpose":"webhook-state"}`)),
+	)
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller:    internalauth.ServiceManager,
+		TeamID:    "team-2",
+		UserID:    "user-2",
+		SandboxID: "sandbox-a",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.createOwnedSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+	}
+	if len(repo.ownerLookupTeams) != 2 ||
+		repo.ownerLookupTeams[0] != "team-2" ||
+		repo.ownerLookupTeams[1] != "team-2" {
+		t.Fatalf("owner lookup teams = %#v, want [team-2 team-2]", repo.ownerLookupTeams)
+	}
+}
+
+func TestDeleteOwnedSandboxVolumeConsumesStorageOperation(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-owned"] = &db.SandboxVolume{
+		ID:     "vol-owned",
+		TeamID: "team-1",
+		UserID: "user-1",
+	}
+	repo.owners["vol-owned"] = &db.SandboxVolumeOwner{
+		VolumeID:       "vol-owned",
+		TeamID:         "team-1",
+		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
+		OwnerSandboxID: "sandbox-a",
+		OwnerClusterID: "cluster-a",
+		Purpose:        "webhook-state",
+	}
+	operations := newTestStorageOperationQuota()
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      &fakeHTTPMeteringRepository{},
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: operations,
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/internal/v1/sandboxvolumes/owned/vol-owned", nil)
+	req.SetPathValue("id", "vol-owned")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller:    internalauth.ServiceManager,
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		SandboxID: "sandbox-a",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.deleteOwnedSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if len(operations.teams) != 1 || operations.teams[0] != "team-1" {
+		t.Fatalf("storage operation teams = %#v, want [team-1]", operations.teams)
+	}
+}
+
+func TestDeleteOwnedSandboxVolumeRejectsAnotherTeam(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-owned"] = &db.SandboxVolume{
+		ID:     "vol-owned",
+		TeamID: "team-2",
+		UserID: "user-2",
+	}
+	repo.owners["vol-owned"] = &db.SandboxVolumeOwner{
+		VolumeID:       "vol-owned",
+		TeamID:         "team-2",
+		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
+		OwnerSandboxID: "sandbox-a",
+		OwnerClusterID: "cluster-a",
+		Purpose:        "webhook-state",
+	}
+	operations := newTestStorageOperationQuota()
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		storageOperations: operations,
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/internal/v1/sandboxvolumes/owned/vol-owned", nil)
+	req.SetPathValue("id", "vol-owned")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller:    internalauth.ServiceManager,
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		SandboxID: "sandbox-a",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.deleteOwnedSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusNotFound, recorder.Body.String())
+	}
+	if repo.volumes["vol-owned"] == nil || len(repo.deletedVolume) != 0 {
+		t.Fatalf("another team's volume was deleted: volumes=%#v deleted=%v", repo.volumes, repo.deletedVolume)
+	}
+	if len(operations.teams) != 0 {
+		t.Fatalf("storage operations = %#v, want none", operations.teams)
+	}
+}
+
+func TestDeleteOwnedSandboxVolumeSystemTokenBypassesScopeAndChargesOwnerTeam(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-owned"] = &db.SandboxVolume{
+		ID:     "vol-owned",
+		TeamID: "team-2",
+		UserID: "user-2",
+	}
+	repo.owners["vol-owned"] = &db.SandboxVolumeOwner{
+		VolumeID:       "vol-owned",
+		TeamID:         "team-2",
+		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
+		OwnerSandboxID: "sandbox-a",
+		OwnerClusterID: "cluster-a",
+		Purpose:        "webhook-state",
+	}
+	operations := newTestStorageOperationQuota()
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      &fakeHTTPMeteringRepository{},
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: operations,
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/internal/v1/sandboxvolumes/owned/vol-owned", nil)
+	req.SetPathValue("id", "vol-owned")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller:   internalauth.ServiceManager,
+		IsSystem: true,
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.deleteOwnedSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if len(operations.teams) != 1 || operations.teams[0] != "team-2" {
+		t.Fatalf("storage operation teams = %#v, want [team-2]", operations.teams)
 	}
 }
 
 func TestOwnedSandboxVolumeIsHiddenFromPublicVolumeAPI(t *testing.T) {
 	repo := newFakeHTTPRepo()
-	server := &Server{logger: logrus.New(), repo: repo}
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		storageOperations: newTestStorageOperationQuota(),
+	}
 	repo.volumes["vol-owned"] = &db.SandboxVolume{ID: "vol-owned", TeamID: "team-1", UserID: "user-1"}
 	repo.owners["vol-owned"] = &db.SandboxVolumeOwner{
 		VolumeID:       "vol-owned",
+		TeamID:         "team-1",
 		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
 		OwnerSandboxID: "sandbox-a",
 		OwnerClusterID: "cluster-a",
@@ -698,6 +1155,7 @@ func TestMarkOwnedSandboxVolumesForCleanupIsIdempotent(t *testing.T) {
 	repo.volumes["vol-owned"] = &db.SandboxVolume{ID: "vol-owned", TeamID: "team-1", UserID: "user-1"}
 	repo.owners["vol-owned"] = &db.SandboxVolumeOwner{
 		VolumeID:       "vol-owned",
+		TeamID:         "team-1",
 		OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
 		OwnerSandboxID: "sandbox-a",
 		OwnerClusterID: "cluster-a",
@@ -723,6 +1181,93 @@ func TestMarkOwnedSandboxVolumesForCleanupIsIdempotent(t *testing.T) {
 
 	if repo.owners["vol-owned"].CleanupRequestedAt == nil {
 		t.Fatal("cleanup_requested_at was not set")
+	}
+}
+
+func TestMarkOwnedSandboxVolumesForCleanupScopesNonSystemTokenToTeam(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	for _, teamID := range []string{"team-1", "team-2"} {
+		volumeID := teamID + "-volume"
+		repo.volumes[volumeID] = &db.SandboxVolume{
+			ID:     volumeID,
+			TeamID: teamID,
+			UserID: teamID + "-user",
+		}
+		repo.owners[volumeID] = &db.SandboxVolumeOwner{
+			VolumeID:       volumeID,
+			TeamID:         teamID,
+			OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
+			OwnerSandboxID: "sandbox-a",
+			OwnerClusterID: "cluster-a",
+			Purpose:        "webhook-state",
+		}
+	}
+	server := &Server{logger: logrus.New(), repo: repo}
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"/internal/v1/sandboxvolumes/owned/cleanup",
+		bytes.NewReader([]byte(`{"sandbox_id":"sandbox-a","cluster_id":"cluster-a","reason":"sandbox_deleted"}`)),
+	)
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller:    internalauth.ServiceManager,
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		SandboxID: "sandbox-a",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.markOwnedSandboxVolumesForCleanup(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if repo.owners["team-1-volume"].CleanupRequestedAt == nil {
+		t.Fatal("team-1 volume was not marked for cleanup")
+	}
+	if repo.owners["team-2-volume"].CleanupRequestedAt != nil {
+		t.Fatal("team-2 volume was marked by team-1 token")
+	}
+}
+
+func TestMarkOwnedSandboxVolumesForCleanupSystemTokenBypassesTeamScope(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	for _, teamID := range []string{"team-1", "team-2"} {
+		volumeID := teamID + "-volume"
+		repo.volumes[volumeID] = &db.SandboxVolume{
+			ID:     volumeID,
+			TeamID: teamID,
+			UserID: teamID + "-user",
+		}
+		repo.owners[volumeID] = &db.SandboxVolumeOwner{
+			VolumeID:       volumeID,
+			TeamID:         teamID,
+			OwnerKind:      db.SandboxVolumeOwnerKindSandbox,
+			OwnerSandboxID: "sandbox-a",
+			OwnerClusterID: "cluster-a",
+			Purpose:        "webhook-state",
+		}
+	}
+	server := &Server{logger: logrus.New(), repo: repo}
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"/internal/v1/sandboxvolumes/owned/cleanup",
+		bytes.NewReader([]byte(`{"sandbox_id":"sandbox-a","cluster_id":"cluster-a","reason":"reconcile"}`)),
+	)
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		Caller:   internalauth.ServiceManager,
+		IsSystem: true,
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.markOwnedSandboxVolumesForCleanup(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	for _, volumeID := range []string{"team-1-volume", "team-2-volume"} {
+		if repo.owners[volumeID].CleanupRequestedAt == nil {
+			t.Fatalf("%s was not marked by system token", volumeID)
+		}
 	}
 }
 
@@ -849,9 +1394,10 @@ func TestPrepareSandboxVolumeForPortalBindReleasesIdleCtldOwner(t *testing.T) {
 func TestForkVolumePassesDefaultPosixIdentity(t *testing.T) {
 	snapshotMgr := &captureForkSnapshotManager{fakeHTTPSnapshotManager: &fakeHTTPSnapshotManager{}}
 	server := &Server{
-		logger:      logrus.New(),
-		repo:        newFakeHTTPRepo(),
-		snapshotMgr: snapshotMgr,
+		logger:            logrus.New(),
+		repo:              newFakeHTTPRepo(),
+		snapshotMgr:       snapshotMgr,
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/fork", bytes.NewReader([]byte(`{"default_posix_uid":1001,"default_posix_gid":2002}`)))
@@ -881,9 +1427,10 @@ func TestForkVolumeReturnsConflictForMountedCtldOwner(t *testing.T) {
 		forkErr:                 snapshot.ErrMountedCtldOwner,
 	}
 	server := &Server{
-		logger:      logrus.New(),
-		repo:        newFakeHTTPRepo(),
-		snapshotMgr: snapshotMgr,
+		logger:            logrus.New(),
+		repo:              newFakeHTTPRepo(),
+		snapshotMgr:       snapshotMgr,
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/fork", bytes.NewReader([]byte(`{}`)))

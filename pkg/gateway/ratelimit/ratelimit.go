@@ -95,7 +95,10 @@ func RetryAfterSeconds(d time.Duration) int {
 	if d <= 0 {
 		return 1
 	}
-	seconds := int(d.Round(time.Second) / time.Second)
+	seconds := int(d / time.Second)
+	if d%time.Second != 0 {
+		seconds++
+	}
 	if seconds < 1 {
 		return 1
 	}

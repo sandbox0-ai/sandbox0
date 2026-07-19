@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,10 +23,15 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
+	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
+	gatewayteamquota "github.com/sandbox0-ai/sandbox0/pkg/gateway/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/tokenbucket"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -64,7 +71,15 @@ func newGatewayTestEnv(t *testing.T, managerURL, managerStorageURL string, sched
 	}
 
 	obsProvider := newTestObservability(t, "cluster-gateway-test")
-	server, err := gatewayhttp.NewServer(cfg, nil, zap.NewNop(), obsProvider)
+	server, err := gatewayhttp.NewServer(
+		cfg,
+		nil,
+		zap.NewNop(),
+		obsProvider,
+		gatewayhttp.WithSandboxServiceAbuseGuard(ratelimit.NewMemoryLimiter(ratelimit.MemoryConfig{})),
+		gatewayhttp.WithTeamQuotaController(newAllowingTeamQuotaController()),
+		gatewayhttp.WithPublicOverloadGuard(newTestPublicOverloadGuard(t)),
+	)
 	if err != nil {
 		t.Fatalf("create cluster-gateway server: %v", err)
 	}
@@ -108,7 +123,15 @@ func newGatewayPublicTestEnv(t *testing.T, managerURL, managerStorageURL string,
 	}
 
 	obsProvider := newTestObservability(t, "cluster-gateway-test")
-	server, err := gatewayhttp.NewServer(cfg, pool, zap.NewNop(), obsProvider)
+	server, err := gatewayhttp.NewServer(
+		cfg,
+		pool,
+		zap.NewNop(),
+		obsProvider,
+		gatewayhttp.WithSandboxServiceAbuseGuard(ratelimit.NewMemoryLimiter(ratelimit.MemoryConfig{})),
+		gatewayhttp.WithTeamQuotaController(newAllowingTeamQuotaController()),
+		gatewayhttp.WithPublicOverloadGuard(newTestPublicOverloadGuard(t)),
+	)
 	if err != nil {
 		t.Fatalf("create cluster-gateway server: %v", err)
 	}
@@ -122,6 +145,113 @@ func newGatewayPublicTestEnv(t *testing.T, managerURL, managerStorageURL string,
 		schedulerGen: schedulerGen,
 		publicKey:    keys.publicKey,
 	}
+}
+
+func newTestPublicOverloadGuard(t *testing.T) *gatewaymiddleware.OverloadGuard {
+	t.Helper()
+
+	redisServer := miniredis.RunT(t)
+	guard, err := gatewaymiddleware.NewSharedOverloadGuard(
+		context.Background(),
+		config.OverloadGuardConfig{
+			RedisURL:       "redis://" + redisServer.Addr(),
+			RedisKeyPrefix: "sandbox0:test:cluster-gateway:overload-guard",
+		},
+		zap.NewNop(),
+	)
+	if err != nil {
+		t.Fatalf("create test public overload guard: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := guard.Close(); err != nil {
+			t.Errorf("close test public overload guard: %v", err)
+		}
+	})
+	return guard
+}
+
+type allowingTeamQuotaRateLimiter struct{}
+
+func (allowingTeamQuotaRateLimiter) Take(
+	context.Context,
+	string,
+	coreteamquota.Key,
+	int64,
+) (tokenbucket.Decision, error) {
+	return tokenbucket.Decision{Allowed: true}, nil
+}
+
+func (allowingTeamQuotaRateLimiter) Invalidate(string, coreteamquota.Key) {}
+
+type allowingTeamQuotaConcurrencyLimiter struct{}
+
+func (allowingTeamQuotaConcurrencyLimiter) Acquire(
+	context.Context,
+	string,
+	coreteamquota.Key,
+) (gatewayteamquota.ConnectionLease, error) {
+	return newAllowingTeamQuotaLease(), nil
+}
+
+func (allowingTeamQuotaConcurrencyLimiter) Usage(
+	context.Context,
+	string,
+	coreteamquota.Key,
+) (int64, error) {
+	return 0, nil
+}
+
+func (allowingTeamQuotaConcurrencyLimiter) Invalidate(string, coreteamquota.Key) {}
+func (allowingTeamQuotaConcurrencyLimiter) Close() error                         { return nil }
+
+type allowingTeamQuotaLease struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newAllowingTeamQuotaLease() *allowingTeamQuotaLease {
+	return &allowingTeamQuotaLease{done: make(chan struct{})}
+}
+
+func (l *allowingTeamQuotaLease) Done() <-chan struct{} { return l.done }
+func (*allowingTeamQuotaLease) Err() error              { return nil }
+func (l *allowingTeamQuotaLease) Release(context.Context) error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+type allowingTeamQuotaNetworkLimiter struct{}
+
+func (allowingTeamQuotaNetworkLimiter) WaitN(
+	context.Context,
+	string,
+	coreteamquota.Key,
+	int,
+) error {
+	return nil
+}
+
+func (allowingTeamQuotaNetworkLimiter) Reader(
+	_ context.Context,
+	_ string,
+	_ coreteamquota.Key,
+	reader io.Reader,
+) io.Reader {
+	return reader
+}
+
+func (allowingTeamQuotaNetworkLimiter) Close() error { return nil }
+
+func newAllowingTeamQuotaController() *gatewayteamquota.Controller {
+	return gatewayteamquota.NewController(
+		nil,
+		nil,
+		allowingTeamQuotaRateLimiter{},
+		nil,
+		zap.NewNop(),
+		gatewayteamquota.WithConcurrencyLimiter(allowingTeamQuotaConcurrencyLimiter{}),
+		gatewayteamquota.WithNetworkLimiter(allowingTeamQuotaNetworkLimiter{}),
+	)
 }
 
 func requireTestDatabaseURL(t *testing.T) string {

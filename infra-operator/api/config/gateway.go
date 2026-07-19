@@ -22,12 +22,17 @@ type GatewayConfig struct {
 	JWTIssuer string `yaml:"jwt_issuer" json:"jwtIssuer"`
 	// +optional
 	// +kubebuilder:default="15m"
+	// JWTAccessTokenTTL is both the issuer lifetime and the maximum access-token
+	// lifetime accepted by verifier-only regional gateways.
 	JWTAccessTokenTTL metav1.Duration `yaml:"jwt_access_token_ttl" json:"jwtAccessTokenTTL"`
 	// +optional
 	// +kubebuilder:default="168h"
 	JWTRefreshTokenTTL metav1.Duration `yaml:"jwt_refresh_token_ttl" json:"jwtRefreshTokenTTL"`
 
-	// Shared Redis cache backend injected from Sandbox0Infra.spec.redis.
+	// Shared Redis connection injected from Sandbox0Infra.spec.redis. Each
+	// consumer owns a distinct namespace and failure policy. In particular,
+	// the sandbox public-service abuse guard is fail-closed and independent
+	// from Team Quota.
 	// +optional
 	RedisURL string `yaml:"redis_url" json:"-"`
 	// +optional
@@ -36,37 +41,6 @@ type GatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="100ms"
 	RedisTimeout metav1.Duration `yaml:"redis_timeout" json:"-"`
-
-	// Rate limiting
-	// +optional
-	// +kubebuilder:default=100
-	RateLimitRPS int `yaml:"rate_limit_rps" json:"rateLimitRPS"`
-	// +optional
-	// +kubebuilder:default=200
-	RateLimitBurst int `yaml:"rate_limit_burst" json:"rateLimitBurst"`
-	// +optional
-	// +kubebuilder:default="10m"
-	RateLimitCleanupInterval metav1.Duration `yaml:"rate_limit_cleanup_interval" json:"rateLimitCleanupInterval"`
-	// RateLimitBackend selects the rate limit backend. Supported values: "memory", "redis".
-	// +optional
-	// +kubebuilder:validation:Enum=memory;redis
-	// +kubebuilder:default="memory"
-	RateLimitBackend string `yaml:"rate_limit_backend" json:"-"`
-	// RateLimitRedisURL configures the Redis backend when RateLimitBackend is "redis".
-	// +optional
-	RateLimitRedisURL string `yaml:"rate_limit_redis_url" json:"-"`
-	// RateLimitRedisKeyPrefix prefixes Redis keys used by the rate limiter.
-	// +optional
-	// +kubebuilder:default="sandbox0:ratelimit"
-	RateLimitRedisKeyPrefix string `yaml:"rate_limit_redis_key_prefix" json:"-"`
-	// RateLimitRedisTimeout bounds each Redis rate limit operation.
-	// +optional
-	// +kubebuilder:default="100ms"
-	RateLimitRedisTimeout metav1.Duration `yaml:"rate_limit_redis_timeout" json:"-"`
-	// RateLimitFailOpen allows traffic when the configured backend is temporarily unavailable.
-	// +optional
-	// +kubebuilder:default=true
-	RateLimitFailOpen bool `yaml:"rate_limit_fail_open" json:"-"`
 
 	// Identity and Teams
 	// +optional
@@ -78,15 +52,24 @@ type GatewayConfig struct {
 	// +kubebuilder:default={}
 	BuiltInAuth BuiltInAuthConfig `yaml:"built_in_auth" json:"builtInAuth"`
 
+	// IdentityResourceGuard bounds the identity graph and authentication
+	// sessions at whichever gateway owns the public identity surface.
+	// +optional
+	// +kubebuilder:default={}
+	IdentityResourceGuard IdentityResourceGuardConfig `yaml:"identity_resource_guard" json:"identityResourceGuard"`
+
+	// OverloadGuard protects the complete public identity and authentication
+	// surface with one aggregate budget. It is independent from Team Quota.
+	// +optional
+	// +kubebuilder:default={}
+	OverloadGuard OverloadGuardConfig `yaml:"overload_guard" json:"overloadGuard"`
+
 	// OIDC Providers
 	// +optional
 	OIDCProviders []OIDCProviderConfig `yaml:"oidc_providers" json:"oidcProviders"`
 	// +optional
 	// +kubebuilder:default="10m"
 	OIDCStateTTL metav1.Duration `yaml:"oidc_state_ttl" json:"oidcStateTTL"`
-	// +optional
-	// +kubebuilder:default="5m"
-	OIDCStateCleanupInterval metav1.Duration `yaml:"oidc_state_cleanup_interval" json:"oidcStateCleanupInterval"`
 
 	// Base URL for OIDC callbacks
 	// +optional

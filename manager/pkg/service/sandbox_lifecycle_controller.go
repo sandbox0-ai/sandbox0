@@ -11,6 +11,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -30,6 +31,7 @@ import (
 const (
 	sandboxCleanupFinalizer             = "sandbox0.ai/sandbox-cleanup"
 	defaultSandboxLifecycleResyncPeriod = 30 * time.Second
+	sandboxDeletionRecoveryBatchSize    = 500
 
 	sandboxDeleteCleanupScopeSandboxDelete = "sandbox_delete"
 	sandboxDeleteCleanupScopeRuntimeOnly   = "runtime_only"
@@ -42,6 +44,7 @@ type SandboxLifecycleInfo struct {
 	PodName              string
 	SandboxID            string
 	TeamID               string
+	ClusterID            string
 	UserID               string
 	WebhookURL           string
 	WebhookSecret        string
@@ -65,11 +68,25 @@ type SandboxDeletionCleaner interface {
 	CleanupDeletedSandbox(ctx context.Context, info SandboxLifecycleInfo) error
 }
 
+type sandboxDeletionCompletionRecorder interface {
+	MarkSandboxCleanupCompleted(ctx context.Context, sandboxID string, completedAt time.Time) error
+}
+
+type sandboxDeletionRecoveryLister interface {
+	ListPendingSandboxDeletionCleanups(
+		ctx context.Context,
+		clusterID string,
+		afterSandboxID string,
+		limit int,
+	) ([]SandboxLifecycleInfo, error)
+}
+
 type sandboxLifecycleQueueItem struct {
 	Namespace            string
 	PodName              string
 	SandboxID            string
 	TeamID               string
+	ClusterID            string
 	UserID               string
 	WebhookURL           string
 	WebhookSecret        string
@@ -91,6 +108,8 @@ type SandboxLifecycleController struct {
 	metrics        *obsmetrics.ManagerMetrics
 	queue          workqueue.TypedRateLimitingInterface[sandboxLifecycleQueueItem]
 	resyncInterval time.Duration
+	clusterID      string
+	recoveryCursor string
 }
 
 func NewSandboxLifecycleController(
@@ -109,7 +128,17 @@ func NewSandboxLifecycleController(
 		logger:         logger,
 		queue:          workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[sandboxLifecycleQueueItem]()),
 		resyncInterval: defaultSandboxLifecycleResyncPeriod,
+		clusterID:      naming.DefaultClusterID,
 	}
+}
+
+// SetClusterID scopes durable deletion recovery to the data-plane cluster
+// whose Pods this controller can authoritatively inspect.
+func (c *SandboxLifecycleController) SetClusterID(clusterID string) {
+	if c == nil {
+		return
+	}
+	c.clusterID = naming.ClusterIDOrDefault(&clusterID)
 }
 
 func (c *SandboxLifecycleController) SetMetrics(metrics *obsmetrics.ManagerMetrics) {
@@ -143,6 +172,7 @@ func (c *SandboxLifecycleController) Run(ctx context.Context, workers int) error
 
 	c.logger.Info("Starting sandbox lifecycle controller", zap.Int("workers", workers))
 	c.enqueueActiveSandboxes()
+	c.enqueuePendingDeletionCleanups(ctx)
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, c.runWorker, time.Second)
 	}
@@ -156,6 +186,7 @@ func (c *SandboxLifecycleController) Run(ctx context.Context, workers int) error
 			return ctx.Err()
 		case <-ticker.C:
 			c.enqueueActiveSandboxes()
+			c.enqueuePendingDeletionCleanups(ctx)
 		}
 	}
 }
@@ -193,6 +224,40 @@ func (c *SandboxLifecycleController) enqueueActiveSandboxes() {
 	}
 }
 
+func (c *SandboxLifecycleController) enqueuePendingDeletionCleanups(ctx context.Context) {
+	if c == nil || c.cleaner == nil || c.queue == nil {
+		return
+	}
+	lister, ok := c.cleaner.(sandboxDeletionRecoveryLister)
+	if !ok || lister == nil {
+		return
+	}
+	infos, err := lister.ListPendingSandboxDeletionCleanups(
+		ctx,
+		naming.ClusterIDOrDefault(&c.clusterID),
+		c.recoveryCursor,
+		sandboxDeletionRecoveryBatchSize,
+	)
+	if err != nil {
+		c.logger.Warn("Failed to list pending sandbox deletion cleanups", zap.Error(err))
+		return
+	}
+	if len(infos) == 0 {
+		c.recoveryCursor = ""
+		return
+	}
+	for _, info := range infos {
+		if strings.TrimSpace(info.SandboxID) == "" {
+			continue
+		}
+		c.queue.Add(sandboxLifecycleItemFromInfo(info, true))
+		c.recoveryCursor = info.SandboxID
+	}
+	if len(infos) < sandboxDeletionRecoveryBatchSize {
+		c.recoveryCursor = ""
+	}
+}
+
 func (c *SandboxLifecycleController) runWorker(ctx context.Context) {
 	for c.processNextWorkItem(ctx) {
 	}
@@ -223,13 +288,22 @@ func (c *SandboxLifecycleController) reconcile(ctx context.Context, item sandbox
 		return nil
 	}
 	if item.Namespace == "" || item.PodName == "" {
+		if item.Deleted && strings.TrimSpace(item.SandboxID) != "" {
+			if err := c.cleanupDeletedSandbox(ctx, item); err != nil {
+				return err
+			}
+			return c.markSandboxCleanupCompleted(ctx, item.SandboxID)
+		}
 		return nil
 	}
 
 	pod, err := c.getCachedPod(ctx, item.Namespace, item.PodName)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			return c.cleanupDeletedSandbox(ctx, item)
+			if err := c.cleanupDeletedSandbox(ctx, item); err != nil {
+				return err
+			}
+			return c.markSandboxCleanupCompleted(ctx, item.SandboxID)
 		}
 		return fmt.Errorf("get sandbox pod: %w", err)
 	}
@@ -263,9 +337,32 @@ func (c *SandboxLifecycleController) reconcile(ctx context.Context, item sandbox
 	return nil
 }
 
+func (c *SandboxLifecycleController) markSandboxCleanupCompleted(
+	ctx context.Context,
+	sandboxID string,
+) error {
+	recorder, ok := c.cleaner.(sandboxDeletionCompletionRecorder)
+	if !ok || recorder == nil {
+		return nil
+	}
+	if err := recorder.MarkSandboxCleanupCompleted(
+		ctx,
+		strings.TrimSpace(sandboxID),
+		time.Now().UTC(),
+	); err != nil {
+		return fmt.Errorf("mark sandbox cleanup completed: %w", err)
+	}
+	return nil
+}
+
 func (c *SandboxLifecycleController) getCachedPod(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
 	if c.podLister != nil {
-		return c.podLister.Pods(namespace).Get(name)
+		pod, err := c.podLister.Pods(namespace).Get(name)
+		if err == nil || !k8serrors.IsNotFound(err) || c.k8sClient == nil {
+			return pod, err
+		}
+		// A cache miss is not sufficient proof that a Pod is physically absent.
+		// Confirm it against the API server before releasing durable quota state.
 	}
 	return c.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 }
@@ -298,6 +395,7 @@ func (c *SandboxLifecycleController) cleanupDeletedSandbox(ctx context.Context, 
 		PodName:              item.PodName,
 		SandboxID:            item.SandboxID,
 		TeamID:               item.TeamID,
+		ClusterID:            item.ClusterID,
 		UserID:               item.UserID,
 		WebhookURL:           item.WebhookURL,
 		WebhookSecret:        item.WebhookSecret,
@@ -359,6 +457,60 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	return s.cleanupDeletedSandbox(ctx, info, runtimePaused)
 }
 
+// MarkSandboxCleanupCompleted persists the controller's proof that the Pod is
+// absent after all deletion cleanup phases have succeeded.
+func (s *SandboxService) MarkSandboxCleanupCompleted(
+	ctx context.Context,
+	sandboxID string,
+	completedAt time.Time,
+) error {
+	if s == nil || s.sandboxStore == nil {
+		return nil
+	}
+	return s.sandboxStore.MarkSandboxCleanupCompleted(ctx, sandboxID, completedAt)
+}
+
+// ListPendingSandboxDeletionCleanups returns durable deleted identities whose
+// external cleanup completion has not yet been proven.
+func (s *SandboxService) ListPendingSandboxDeletionCleanups(
+	ctx context.Context,
+	clusterID string,
+	afterSandboxID string,
+	limit int,
+) ([]SandboxLifecycleInfo, error) {
+	if s == nil || s.sandboxStore == nil {
+		return nil, nil
+	}
+	lister, ok := s.sandboxStore.(interface {
+		ListPendingDeletedSandboxes(
+			context.Context,
+			string,
+			string,
+			int,
+		) ([]*SandboxRecord, error)
+	})
+	if !ok || lister == nil {
+		return nil, nil
+	}
+	records, err := lister.ListPendingDeletedSandboxes(
+		ctx,
+		naming.ClusterIDOrDefault(&clusterID),
+		strings.TrimSpace(afterSandboxID),
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]SandboxLifecycleInfo, 0, len(records))
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		infos = append(infos, sandboxLifecycleInfoFromRecord(record))
+	}
+	return infos, nil
+}
+
 func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info SandboxLifecycleInfo, runtimePaused bool) (cleanupErr error) {
 	logger := s.logger
 	if logger == nil {
@@ -396,6 +548,11 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 	}()
 
 	var errs []error
+	if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "begin_team_quota_release", func() error {
+		return s.beginDeletedSandboxTeamQuotaRelease(ctx, info, runtimePaused)
+	}); err != nil {
+		errs = append(errs, fmt.Errorf("begin team quota release: %w", err))
+	}
 	if !runtimePaused && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
 		_ = s.runSandboxDeleteCleanupPhase(ctx, info, scope, "emit_deletion_webhook", func() error {
 			return s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info)
@@ -613,6 +770,7 @@ func sandboxLifecycleItemFromInfo(info SandboxLifecycleInfo, deleted bool) sandb
 		PodName:              info.PodName,
 		SandboxID:            info.SandboxID,
 		TeamID:               info.TeamID,
+		ClusterID:            info.ClusterID,
 		UserID:               info.UserID,
 		WebhookURL:           info.WebhookURL,
 		WebhookSecret:        info.WebhookSecret,
@@ -660,12 +818,15 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 		return SandboxLifecycleInfo{}, false
 	}
 	teamID := ""
+	clusterID := naming.DefaultClusterID
 	userID := ""
 	webhookURL := ""
 	webhookSecret := ""
 	webhookStateVolumeID := ""
 	if pod.Annotations != nil {
 		teamID = strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
+		annotatedClusterID := strings.TrimSpace(pod.Annotations[controller.AnnotationClusterID])
+		clusterID = naming.ClusterIDOrDefault(&annotatedClusterID)
 		userID = strings.TrimSpace(pod.Annotations[controller.AnnotationUserID])
 		webhookStateVolumeID = strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
 		if configJSON := strings.TrimSpace(pod.Annotations[controller.AnnotationConfig]); configJSON != "" {
@@ -681,6 +842,7 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 		PodName:              pod.Name,
 		SandboxID:            sandboxID,
 		TeamID:               teamID,
+		ClusterID:            clusterID,
 		UserID:               userID,
 		WebhookURL:           webhookURL,
 		WebhookSecret:        webhookSecret,

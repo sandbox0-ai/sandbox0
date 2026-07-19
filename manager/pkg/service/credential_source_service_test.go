@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +18,8 @@ import (
 )
 
 type memorySourceStore struct {
-	records map[string]*egressauth.CredentialSourceMetadata
+	records  map[string]*egressauth.CredentialSourceMetadata
+	putCalls int
 }
 
 type nilListSourceStore struct {
@@ -43,6 +45,7 @@ func (s *memorySourceStore) GetSourceMetadata(_ context.Context, teamID, name st
 }
 
 func (s *memorySourceStore) PutSource(_ context.Context, teamID string, record *egressauth.CredentialSourceWriteRequest) (*egressauth.CredentialSourceMetadata, error) {
+	s.putCalls++
 	key := teamID + "/" + record.Name
 	current := s.records[key]
 	cloned := &egressauth.CredentialSourceMetadata{
@@ -337,6 +340,35 @@ func TestCredentialSourceServiceRejectsExternalRef(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected externalRef to be rejected")
+	}
+}
+
+func TestCredentialSourceServiceRejectsOversizedSecretBeforeStore(t *testing.T) {
+	store := newMemorySourceStore()
+	svc := NewCredentialSourceService(store, zap.NewNop())
+
+	secretMarker := "do-not-leak-service-secret"
+	_, err := svc.PutSource(context.Background(), "team-1", &egressauth.CredentialSourceWriteRequest{
+		Name:         "corp-proxy",
+		ResolverKind: "static_username_password",
+		Spec: egressauth.CredentialSourceSecretSpec{
+			StaticUsernamePassword: &egressauth.StaticUsernamePasswordSourceSpec{
+				Username: "alice",
+				Password: strings.Repeat("p", int(egressauth.MaxCredentialSecretBytes)) + secretMarker,
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected oversized credential secret to be rejected")
+	}
+	if strings.Contains(err.Error(), secretMarker) {
+		t.Fatalf("error leaked secret material: %v", err)
+	}
+	if store.putCalls != 0 {
+		t.Fatalf("store put calls = %d, want 0", store.putCalls)
+	}
+	if len(store.records) != 0 {
+		t.Fatalf("records = %d, want 0", len(store.records))
 	}
 }
 

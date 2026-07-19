@@ -152,8 +152,8 @@ func newCtldRuntimeMetricsProducer(cfg *config.CtldConfig, statsClient ctldrunti
 		RuntimeSamplesURL: cfg.SandboxObservabilityRuntimeSamplesIngestURL,
 		Client:            httpClient,
 		RequestTimeout:    cfg.SandboxObservabilityIngestRequestTimeout.Duration,
-		TokenProvider: func(context.Context) (string, error) {
-			return generator.GenerateSystem("cluster-gateway", internalauth.GenerateOptions{
+		TeamTokenProvider: func(_ context.Context, teamID string) (string, error) {
+			return generator.Generate(internalauth.ServiceClusterGateway, teamID, "", internalauth.GenerateOptions{
 				Permissions: []string{gatewayauthn.PermSandboxObservabilityWrite},
 			})
 		},

@@ -113,6 +113,7 @@ const (
 // system volumes.
 type SandboxVolumeOwner struct {
 	VolumeID             string     `json:"volume_id"`
+	TeamID               string     `json:"team_id"`
 	OwnerKind            string     `json:"owner_kind"`
 	OwnerSandboxID       string     `json:"owner_sandbox_id"`
 	OwnerClusterID       string     `json:"owner_cluster_id"`

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -35,6 +36,7 @@ type RootFSMaintenanceController struct {
 	metrics          *obsmetrics.ManagerMetrics
 	objectInspector  RootFSObjectInspector
 	meteringRecorder RootFSStorageMeteringRecorder
+	teamQuotaStore   teamquota.CapacityStore
 }
 
 func NewRootFSMaintenanceController(store *PGSandboxStore, deleter RootFSObjectDeleter, cfg RootFSMaintenanceControllerConfig, logger *zap.Logger, metrics *obsmetrics.ManagerMetrics) *RootFSMaintenanceController {
@@ -67,6 +69,15 @@ func (c *RootFSMaintenanceController) SetObjectInspector(inspector RootFSObjectI
 		return
 	}
 	c.objectInspector = inspector
+}
+
+// SetTeamQuotaStore injects transactional rootfs snapshot and object
+// accounting. Maintenance fails closed when it is not configured.
+func (c *RootFSMaintenanceController) SetTeamQuotaStore(store teamquota.CapacityStore) {
+	if c == nil {
+		return
+	}
+	c.teamQuotaStore = store
 }
 
 func (c *RootFSMaintenanceController) Run(ctx context.Context) error {
@@ -124,6 +135,15 @@ func (c *RootFSMaintenanceController) RunOnce(ctx context.Context) error {
 		opts := c.cfg.DeleteOptions
 		opts.Limit = c.cfg.BatchSize
 		opts.ContinueOnError = true
+		if c.teamQuotaStore != nil {
+			if quotaStore, ok := c.teamQuotaStore.(teamquota.CapacityTxStore); ok {
+				opts.ObjectQuotaStore = quotaStore
+				opts.SnapshotQuotaStore = quotaStore
+			} else {
+				status = "error"
+				return ErrTeamQuotaUnavailable
+			}
+		}
 		result, err := c.store.GarbageCollectRootFSFilesystemWithOptions(ctx, c.deleter, "", c.cfg.BatchSize, opts)
 		if result != nil {
 			totalLayers += len(result.Layers)
@@ -136,6 +156,13 @@ func (c *RootFSMaintenanceController) RunOnce(ctx context.Context) error {
 		}
 		if result == nil || (len(result.Layers) == 0 && len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0) {
 			break
+		}
+	}
+	pruneLimit := c.cfg.BatchSize * c.cfg.MaxBatchesPerRun
+	if _, err := c.store.PruneDeletedRootFSObjectTombstones(ctx, "", pruneLimit); err != nil {
+		status = "error"
+		if runErr == nil {
+			runErr = err
 		}
 	}
 	if err := c.auditRootFSObjects(ctx); err != nil {

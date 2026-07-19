@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -9,34 +10,42 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/activeconnections"
 	"go.uber.org/zap"
 )
 
 type udpSessionKey struct {
-	SrcIP    string
-	SrcPort  int
-	DestIP   string
-	DestPort int
+	TeamID    string
+	SandboxID string
+	SrcIP     string
+	SrcPort   int
+	DestIP    string
+	DestPort  int
 }
 
 type udpSession struct {
 	server *Server
 	key    udpSessionKey
+	ctx    context.Context
+	cancel context.CancelFunc
 
-	mu          sync.Mutex
-	compiled    *policy.CompiledPolicy
-	audit       *flowAudit
-	clientConn  *net.UDPConn
-	clientAddr  *net.UDPAddr
-	destIP      net.IP
-	destPort    int
-	upstream    *net.UDPConn
-	downstream  udpReplyConn
-	closed      bool
-	auditReq    *adapterRequest
-	decision    trafficDecision
-	adapter     proxyAdapter
-	terminalErr error
+	mu              sync.Mutex
+	compiled        *policy.CompiledPolicy
+	audit           *flowAudit
+	clientConn      *net.UDPConn
+	clientAddr      *net.UDPAddr
+	destIP          net.IP
+	destPort        int
+	upstream        *net.UDPConn
+	upstreamInit    bool
+	upstreamInitErr error
+	downstream      udpReplyConn
+	closed          bool
+	auditReq        *adapterRequest
+	decision        trafficDecision
+	adapter         proxyAdapter
+	terminalErr     error
+	connectionLease activeconnections.Lease
 
 	lastSeenUnixNano int64
 	closeOnce        sync.Once
@@ -54,10 +63,12 @@ func newUDPSessionKey(req *adapterRequest) (udpSessionKey, error) {
 		return udpSessionKey{}, fmt.Errorf("udp session requires source and destination")
 	}
 	return udpSessionKey{
-		SrcIP:    req.UDPSource.IP.String(),
-		SrcPort:  req.UDPSource.Port,
-		DestIP:   req.DestIP.String(),
-		DestPort: req.DestPort,
+		TeamID:    compiledTeamID(req.Compiled),
+		SandboxID: compiledSandboxID(req.Compiled),
+		SrcIP:     req.UDPSource.IP.String(),
+		SrcPort:   req.UDPSource.Port,
+		DestIP:    req.DestIP.String(),
+		DestPort:  req.DestPort,
 	}, nil
 }
 
@@ -66,9 +77,16 @@ func newUDPSession(server *Server, key udpSessionKey, req *adapterRequest) *udpS
 	if audit == nil && server != nil {
 		audit = server.newFlowAudit("udp")
 	}
+	parentCtx := req.Context
+	if parentCtx == nil {
+		parentCtx = context.TODO()
+	}
+	sessionCtx, cancel := context.WithCancel(parentCtx)
 	session := &udpSession{
 		server:     server,
 		key:        key,
+		ctx:        sessionCtx,
+		cancel:     cancel,
 		compiled:   req.Compiled,
 		audit:      audit,
 		clientConn: req.UDPConn,
@@ -100,6 +118,31 @@ func (s *Server) ensureUDPSession(req *adapterRequest) (*udpSession, error) {
 	s.udpSessionMu.Unlock()
 	session.update(req)
 	return session, nil
+}
+
+// ForgetSandboxUDPSessions closes every session originating from one sandbox
+// IP. Policy removal and replacement call this before the IP can be reused so
+// an upstream socket, reply route, or Team Quota lease cannot cross sandbox
+// identity boundaries.
+func (s *Server) ForgetSandboxUDPSessions(podIP string) {
+	if s == nil {
+		return
+	}
+	podIP = net.ParseIP(podIP).String()
+	if podIP == "<nil>" {
+		return
+	}
+	s.udpSessionMu.Lock()
+	sessions := make([]*udpSession, 0)
+	for key, session := range s.udpSessions {
+		if key.SrcIP == podIP {
+			sessions = append(sessions, session)
+		}
+	}
+	s.udpSessionMu.Unlock()
+	for _, session := range sessions {
+		session.close()
+	}
 }
 
 func (s *Server) removeUDPSession(session *udpSession) {
@@ -165,12 +208,13 @@ func (session *udpSession) Forward(payload []byte) error {
 	}
 	upstream, compiled, audit, err := session.ensureUpstream()
 	if err != nil {
+		session.closeWithError(err)
 		return err
 	}
 	session.touch()
 	_ = upstream.SetWriteDeadline(time.Now().Add(session.server.udpSessionIdleTimeout()))
 	if session.server != nil {
-		if err := session.server.waitBandwidth(compiled, bandwidthEgress, len(payload)); err != nil {
+		if err := session.server.waitBandwidth(session.ctx, compiled, bandwidthEgress, len(payload)); err != nil {
 			session.closeWithError(err)
 			return err
 		}
@@ -215,12 +259,45 @@ func (session *udpSession) ensureUpstream() (*net.UDPConn, *policy.CompiledPolic
 	if session.upstream != nil {
 		return session.upstream, session.compiled, session.audit, nil
 	}
+	if session.upstreamInit {
+		if session.upstreamInitErr != nil {
+			return nil, nil, nil, session.upstreamInitErr
+		}
+		return nil, nil, nil, fmt.Errorf(
+			"udp session upstream initialization did not complete",
+		)
+	}
+	session.upstreamInit = true
 	if session.destIP == nil || session.destPort <= 0 {
-		return nil, nil, nil, fmt.Errorf("udp session destination is missing")
+		session.upstreamInitErr = fmt.Errorf(
+			"udp session destination is missing",
+		)
+		return nil, nil, nil, session.upstreamInitErr
+	}
+	lease, err := session.server.acquireActiveConnectionLease(
+		session.ctx,
+		session.compiled,
+	)
+	if err != nil {
+		session.server.logActiveConnectionQuota(
+			"UDP session rejected by Team Quota",
+			"udp",
+			session.compiled,
+			err,
+		)
+		session.upstreamInitErr = err
+		return nil, nil, nil, session.upstreamInitErr
+	}
+	session.connectionLease = lease
+	go session.closeOnActiveConnectionLeaseLoss(lease)
+	if leaseLost(lease) {
+		session.upstreamInitErr = lease.Err()
+		return nil, nil, nil, session.upstreamInitErr
 	}
 	upstream, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: cloneIP(session.destIP), Port: session.destPort})
 	if err != nil {
-		return nil, nil, nil, err
+		session.upstreamInitErr = err
+		return nil, nil, nil, session.upstreamInitErr
 	}
 	session.upstream = upstream
 	go session.readLoop(upstream)
@@ -257,7 +334,7 @@ func (session *udpSession) readLoop(conn *net.UDPConn) {
 		}
 		compiled, audit := session.auditSnapshot()
 		if session.server != nil {
-			if err := session.server.waitBandwidth(compiled, bandwidthIngress, len(payload)); err != nil {
+			if err := session.server.waitBandwidth(session.ctx, compiled, bandwidthIngress, len(payload)); err != nil {
 				session.closeWithError(err)
 				return
 			}
@@ -371,6 +448,9 @@ func (session *udpSession) closeWithError(err error) {
 		return
 	}
 	session.closeOnce.Do(func() {
+		if session.cancel != nil {
+			session.cancel()
+		}
 		session.mu.Lock()
 		session.closed = true
 		upstream := session.upstream
@@ -383,8 +463,11 @@ func (session *udpSession) closeWithError(err error) {
 		adapter := session.adapter
 		audit := session.audit
 		terminalErr := session.terminalErr
+		connectionLease := session.connectionLease
+		compiled := session.compiled
 		session.upstream = nil
 		session.downstream = nil
+		session.connectionLease = nil
 		session.mu.Unlock()
 		if upstream != nil {
 			_ = upstream.Close()
@@ -393,6 +476,11 @@ func (session *udpSession) closeWithError(err error) {
 			_ = downstream.Close()
 		}
 		if session.server != nil {
+			session.server.releaseActiveConnectionLease(
+				connectionLease,
+				"udp",
+				compiled,
+			)
 			session.server.removeUDPSession(session)
 			if auditReq != nil {
 				duration := time.Duration(0)
@@ -403,6 +491,31 @@ func (session *udpSession) closeWithError(err error) {
 			}
 		}
 	})
+}
+
+func (session *udpSession) closeOnActiveConnectionLeaseLoss(
+	lease activeconnections.Lease,
+) {
+	if session == nil || lease == nil {
+		return
+	}
+	select {
+	case <-session.ctx.Done():
+		return
+	case <-lease.Done():
+	}
+	if err := lease.Err(); err != nil {
+		if session.server != nil {
+			compiled, _ := session.auditSnapshot()
+			session.server.logActiveConnectionQuota(
+				"UDP session Team Quota lease lost",
+				"udp",
+				compiled,
+				err,
+			)
+		}
+		session.closeWithError(err)
+	}
 }
 
 func cloneIP(ip net.IP) net.IP {

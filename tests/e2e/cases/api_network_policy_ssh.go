@@ -428,7 +428,7 @@ func assertSSHTransparentEgressAuthProxy(env *framework.ScenarioEnv, session *e2
 	Expect(err).NotTo(HaveOccurred())
 
 	sandbox = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
-	Expect(clearNetdRedisTeamBandwidthKeys(env, session.SelectedTeamID())).To(Succeed())
+	Expect(clearNetdTeamNetworkQuotaRateBuckets(env, session.SelectedTeamID())).To(Succeed())
 
 	sourceName := fmt.Sprintf("e2e-ssh-key-%d", time.Now().UnixNano())
 	refName := "api-ssh-proxy"

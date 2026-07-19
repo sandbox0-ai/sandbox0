@@ -562,7 +562,7 @@ For a paused sandbox, Sandbox0 creates a new runtime pod for the same sandbox id
 - Public traffic must match a route on a public service.
 - If `methods` is empty, all methods are allowed.
 - Route auth stores SHA-256 digests, not plaintext tokens.
-- Route rate limits use the gateway rate limit backend. Self-hosted deployments default to process-local memory; configure `Sandbox0Infra.spec.redis` for shared Redis-backed limits across gateway replicas.
+- Route rate limits are enforced by a distributed, fail-closed Sandbox Service abuse guard backed by `Sandbox0Infra.spec.redis`. This guard is independent from Team Quota and uses its own Redis namespace and metrics.
 
 ## Next Steps
 

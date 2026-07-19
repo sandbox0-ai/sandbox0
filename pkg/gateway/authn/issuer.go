@@ -92,7 +92,24 @@ func NewIssuerWithEd25519(issuerName string, privateKey ed25519.PrivateKey, acce
 
 // NewVerifierWithEd25519 creates a verifier-only JWT issuer backed by an Ed25519 public key.
 func NewVerifierWithEd25519(issuerName string, publicKey ed25519.PublicKey) *Issuer {
-	return newIssuerWithDeps(issuerName, jwt.SigningMethodEdDSA, nil, publicKey, 0, 0, time.Now, generateSessionID)
+	return newVerifierWithEd25519(issuerName, publicKey, 0)
+}
+
+func newVerifierWithEd25519(
+	issuerName string,
+	publicKey ed25519.PublicKey,
+	maxAccessTokenTTL time.Duration,
+) *Issuer {
+	return newIssuerWithDeps(
+		issuerName,
+		jwt.SigningMethodEdDSA,
+		nil,
+		publicKey,
+		maxAccessTokenTTL,
+		0,
+		time.Now,
+		generateSessionID,
+	)
 }
 
 // NewIssuerFromConfig builds an issuer or verifier from gateway config values.
@@ -113,7 +130,7 @@ func NewIssuerFromConfig(issuerName, secret, privateKeyPEM, publicKeyPEM, privat
 		return issuer, nil
 	}
 	if loadedPublicKey != nil {
-		return NewVerifierWithEd25519(issuerName, loadedPublicKey), nil
+		return newVerifierWithEd25519(issuerName, loadedPublicKey, accessTTL), nil
 	}
 	if strings.TrimSpace(secret) != "" {
 		return NewIssuer(issuerName, secret, accessTTL, refreshTTL), nil
@@ -301,6 +318,15 @@ func (i *Issuer) validateToken(tokenString string) (*Claims, error) {
 	claims, ok := token.Claims.(*Claims)
 	if !ok {
 		return nil, ErrInvalidToken
+	}
+	if claims.TokenType == "access" && i.accessTokenTTL > 0 {
+		if claims.IssuedAt == nil || claims.ExpiresAt == nil {
+			return nil, ErrInvalidToken
+		}
+		lifetime := claims.ExpiresAt.Sub(claims.IssuedAt.Time)
+		if lifetime <= 0 || lifetime > i.accessTokenTTL {
+			return nil, ErrInvalidToken
+		}
 	}
 	return claims, nil
 }

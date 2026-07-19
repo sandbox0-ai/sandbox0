@@ -34,6 +34,7 @@ import (
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 )
 
 type Reconciler struct {
@@ -264,7 +265,22 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 			return nil, nil, fmt.Errorf("apply metering config: %w", err)
 		}
 	}
-	if err := redissvc.ApplyGatewayRateLimitConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), &cfg.GatewayConfig); err != nil {
+	if err := redissvc.ApplyGatewayRedisConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), &cfg.GatewayConfig); err != nil {
+		return nil, nil, err
+	}
+	if err := redissvc.ApplyOverloadGuardConfig(
+		ctx,
+		r.Resources.Client,
+		compiledPlan.Scope.Owner(),
+		rediscache.JoinKeyPrefix(
+			"regional-gateway",
+			common.ResolveRegionID(compiledPlan.Scope.Owner()),
+		),
+		&cfg.OverloadGuard,
+	); err != nil {
+		return nil, nil, err
+	}
+	if err := redissvc.ApplyTeamQuotaDistributedEnforcementConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), &cfg.TeamQuota.DistributedEnforcement); err != nil {
 		return nil, nil, err
 	}
 	cfg.DefaultClusterGatewayURL = compiledPlan.RegionalGateway.DefaultClusterGatewayURL

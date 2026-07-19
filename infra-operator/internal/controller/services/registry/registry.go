@@ -528,6 +528,10 @@ func (r *Reconciler) reconcileRegistryDeployment(ctx context.Context, infra *inf
 			Value: "/var/lib/registry",
 		},
 		{
+			Name:  "REGISTRY_STORAGE_DELETE_ENABLED",
+			Value: "true",
+		},
+		{
 			Name:  "REGISTRY_AUTH",
 			Value: "htpasswd",
 		},

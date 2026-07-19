@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/router"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	storagequotatest "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota/testutil"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"google.golang.org/protobuf/proto"
@@ -458,6 +459,8 @@ func TestS0FSWatchEventsIncludePaths(t *testing.T) {
 			"vol-1": volCtx,
 		},
 	}, nil, nil, broadcaster, nil, nil)
+	server.SetStorageQuota(storagequotatest.NewService("test-cluster"))
+	server.SetStorageOperationQuota(permissiveStorageOperationQuota{})
 	ctx := authContext("team-a", "")
 
 	createResp, err := server.Create(ctx, &pb.CreateRequest{

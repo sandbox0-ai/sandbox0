@@ -147,11 +147,17 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	Network *NetworkConfig `json:"network,omitempty"`
 
-	// Redis configures a region-level Redis backend for shared services such as
-	// distributed gateway rate limiting. When omitted, gateway rate limiting
-	// uses process-local memory.
+	// Redis configures a region-level backend for Team Quota rate and
+	// concurrency enforcement, the public identity overload guard, and shared
+	// runtime caches. Distributed admission fails closed when Redis is not
+	// configured or unavailable.
 	// +optional
 	Redis *RedisConfig `json:"redis,omitempty"`
+
+	// TeamQuota configures region-level defaults and enforcement behavior used
+	// to keep a single team from exhausting shared system resources.
+	// +optional
+	TeamQuota *TeamQuotaConfig `json:"teamQuota,omitempty"`
 
 	// CredentialVault configures a Vault-compatible backend for credential
 	// sources that use hashicorp_vault storage or external references.
@@ -557,11 +563,6 @@ type RedisConfig struct {
 	// +optional
 	// +kubebuilder:default="100ms"
 	OperationTimeout metav1.Duration `json:"operationTimeout,omitempty"`
-
-	// FailOpen allows traffic when Redis is temporarily unavailable.
-	// +optional
-	// +kubebuilder:default=true
-	FailOpen *bool `json:"failOpen,omitempty"`
 }
 
 // BuiltinRedisConfig defines built-in Redis configuration.
@@ -1858,6 +1859,11 @@ type Sandbox0InfraStatus struct {
 	// InternalAuth contains internal authentication status
 	// +optional
 	InternalAuth *InternalAuthStatus `json:"internalAuth,omitempty"`
+
+	// TeamQuota contains the region policy owner's create-once Team Quota
+	// state-plane identity. Consumer-only resources do not populate it.
+	// +optional
+	TeamQuota *TeamQuotaStatus `json:"teamQuota,omitempty"`
 
 	// LastOperation contains the last operation information
 	// +optional

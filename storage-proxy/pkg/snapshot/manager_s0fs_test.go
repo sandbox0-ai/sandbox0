@@ -14,9 +14,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	storagequotatest "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota/testutil"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -82,6 +84,204 @@ func TestS0FSSnapshotCreateRestoreAndDelete(t *testing.T) {
 	}
 	if len(repo.deleted) != 1 || repo.deleted[0] != snap.ID {
 		t.Fatalf("deleted snapshots = %v", repo.deleted)
+	}
+}
+
+func TestS0FSEmptySnapshotChargesStateObjectsBeforeCreation(t *testing.T) {
+	mgr, repo, _, _ := newS0FSSnapshotTestManager(t, "vol-empty-snapshot-quota")
+	mgr.storageQuota = storagequotatest.NewLimitedService(
+		"test-cluster",
+		teamquota.KeyStorageObjectCount,
+		0,
+	)
+
+	_, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-empty-snapshot-quota",
+		Name:     "blocked",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if !teamquota.IsExceeded(err) {
+		t.Fatalf("CreateSnapshot() error = %v, want quota exceeded", err)
+	}
+	if len(repo.snapshots) != 0 {
+		t.Fatalf("catalog snapshots = %+v, want none", repo.snapshots)
+	}
+}
+
+func TestS0FSSnapshotMaterializationQuotaExceededWritesNoObjects(t *testing.T) {
+	const volumeID = "vol-snapshot-materialization-quota"
+	mgr, repo, _, engine := newS0FSSnapshotTestManagerWithSegmentTarget(t, volumeID, "4")
+	writeS0FSFile(t, engine, "payload.bin", strings.Repeat("x", 32))
+
+	before, err := volumeEngineTarget(engine)
+	if err != nil {
+		t.Fatalf("volumeEngineTarget() error = %v", err)
+	}
+	planned, err := plannedMaterializedVolumeTarget(volumeID, engine.SnapshotState(), 4)
+	if err != nil {
+		t.Fatalf("plannedMaterializedVolumeTarget() error = %v", err)
+	}
+	limit := before[teamquota.KeyStorageObjectCount] + 6
+	if planned[teamquota.KeyStorageObjectCount] <= limit {
+		t.Fatalf(
+			"planned object target = %d, want more than former fixed bound %d",
+			planned[teamquota.KeyStorageObjectCount],
+			limit,
+		)
+	}
+	mgr.storageQuota = storagequotatest.NewLimitedService(
+		"test-cluster",
+		teamquota.KeyStorageObjectCount,
+		limit,
+	)
+	cfg, err := mgr.s0fsConfig("team-1", volumeID)
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	keysBefore := listS0FSKeys(t, cfg.ObjectStore, "")
+
+	_, err = mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: volumeID,
+		Name:     "blocked",
+		TeamID:   "team-1",
+		UserID:   "user-1",
+	})
+	if !teamquota.IsExceeded(err) {
+		t.Fatalf("CreateSnapshot() error = %v, want quota exceeded", err)
+	}
+	if keysAfter := listS0FSKeys(t, cfg.ObjectStore, ""); !sameStrings(keysAfter, keysBefore) {
+		t.Fatalf("object keys after rejected materialization = %v, want %v", keysAfter, keysBefore)
+	}
+	if len(repo.snapshots) != 0 {
+		t.Fatalf("catalog snapshots = %+v, want none", repo.snapshots)
+	}
+}
+
+func TestCreateMaterializedS0FSVolumeQuotaExceededWritesNoObjects(t *testing.T) {
+	const (
+		sourceVolumeID = "vol-materialized-source"
+		targetVolumeID = "vol-materialized-target"
+	)
+	mgr, repo, _, engine := newS0FSSnapshotTestManagerWithSegmentTarget(t, sourceVolumeID, "4")
+	writeS0FSFile(t, engine, "payload.bin", strings.Repeat("x", 32))
+	state := engine.SnapshotState()
+
+	unmaterializedTarget, err := volumeStateTarget(state)
+	if err != nil {
+		t.Fatalf("volumeStateTarget() error = %v", err)
+	}
+	plannedTarget, err := plannedMaterializedVolumeTarget(targetVolumeID, state, 4)
+	if err != nil {
+		t.Fatalf("plannedMaterializedVolumeTarget() error = %v", err)
+	}
+	limit := unmaterializedTarget[teamquota.KeyStorageObjectCount]
+	if plannedTarget[teamquota.KeyStorageObjectCount] <= limit {
+		t.Fatalf(
+			"planned object target = %d, want more than unmaterialized target %d",
+			plannedTarget[teamquota.KeyStorageObjectCount],
+			limit,
+		)
+	}
+	mgr.storageQuota = storagequotatest.NewLimitedService(
+		"test-cluster",
+		teamquota.KeyStorageObjectCount,
+		limit,
+	)
+	targetCfg, err := mgr.s0fsConfig("team-1", targetVolumeID)
+	if err != nil {
+		t.Fatalf("s0fsConfig(target) error = %v", err)
+	}
+	keysBefore := listS0FSKeys(t, targetCfg.ObjectStore, "")
+	now := time.Now()
+	targetVolume := &db.SandboxVolume{
+		ID:         targetVolumeID,
+		TeamID:     "team-1",
+		UserID:     "user-2",
+		AccessMode: string(volume.AccessModeRWO),
+		Backend:    volume.BackendS0FS,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+
+	_, err = mgr.createMaterializedS0FSVolume(
+		context.Background(),
+		targetVolume,
+		state,
+		nil,
+		"volume_test_materialize",
+	)
+	if !teamquota.IsExceeded(err) {
+		t.Fatalf("createMaterializedS0FSVolume() error = %v, want quota exceeded", err)
+	}
+	if keysAfter := listS0FSKeys(t, targetCfg.ObjectStore, ""); !sameStrings(keysAfter, keysBefore) {
+		t.Fatalf("target object keys after rejected materialization = %v, want %v", keysAfter, keysBefore)
+	}
+	if _, exists := repo.volumes[targetVolumeID]; exists {
+		t.Fatalf("target volume %q was created despite rejected quota", targetVolumeID)
+	}
+}
+
+func TestRestoreS0FSSnapshotMaterializationQuotaExceededWritesNoObjects(t *testing.T) {
+	const volumeID = "vol-restore-materialization-quota"
+	mgr, _, _, engine := newS0FSSnapshotTestManagerWithSegmentTarget(t, volumeID, "4")
+	writeS0FSFile(t, engine, "payload.bin", strings.Repeat("d", 64))
+	desiredState := engine.SnapshotState()
+
+	cfg, err := mgr.s0fsConfig("team-1", volumeID)
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	snapshotRecord := &db.Snapshot{
+		ID:        "snapshot-materialization-quota",
+		VolumeID:  volumeID,
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		SizeBytes: snapshotSizeBytes(desiredState),
+		CreatedAt: time.Now(),
+	}
+	if err := s0fs.PersistSnapshot(context.Background(), cfg, snapshotRecord.ID, desiredState); err != nil {
+		t.Fatalf("PersistSnapshot() error = %v", err)
+	}
+	writeS0FSFile(t, engine, "payload.bin", "current")
+
+	before, err := volumeEngineTarget(engine)
+	if err != nil {
+		t.Fatalf("volumeEngineTarget() error = %v", err)
+	}
+	planned, err := plannedMaterializedVolumeTarget(volumeID, desiredState, 4)
+	if err != nil {
+		t.Fatalf("plannedMaterializedVolumeTarget() error = %v", err)
+	}
+	limit := before[teamquota.KeyStorageObjectCount]
+	if planned[teamquota.KeyStorageObjectCount] <= limit {
+		t.Fatalf(
+			"planned object target = %d, want more than current target %d",
+			planned[teamquota.KeyStorageObjectCount],
+			limit,
+		)
+	}
+	mgr.storageQuota = storagequotatest.NewLimitedService(
+		"test-cluster",
+		teamquota.KeyStorageObjectCount,
+		limit,
+	)
+	keysBefore := listS0FSKeys(t, cfg.ObjectStore, "")
+
+	err = mgr.restoreS0FSSnapshot(context.Background(), &RestoreSnapshotRequest{
+		VolumeID:   volumeID,
+		SnapshotID: snapshotRecord.ID,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+	}, snapshotRecord)
+	if !teamquota.IsExceeded(err) {
+		t.Fatalf("restoreS0FSSnapshot() error = %v, want quota exceeded", err)
+	}
+	if keysAfter := listS0FSKeys(t, cfg.ObjectStore, ""); !sameStrings(keysAfter, keysBefore) {
+		t.Fatalf("object keys after rejected restore = %v, want %v", keysAfter, keysBefore)
+	}
+	if got := readS0FSFile(t, engine, "payload.bin"); got != "current" {
+		t.Fatalf("payload after rejected restore = %q, want current", got)
 	}
 }
 
@@ -340,6 +540,28 @@ func TestS0FSForkVolumeUsesCopyOnWriteState(t *testing.T) {
 	defer freshForked.Close()
 	if got := readS0FSFile(t, freshForked, "fork.txt"); got != "forked" {
 		t.Fatalf("fresh forked file = %q, want forked", got)
+	}
+}
+
+func TestS0FSForkQuotaExceededLeavesNoChildCatalog(t *testing.T) {
+	mgr, repo, _, engine := newS0FSSnapshotTestManager(t, "vol-quota-source")
+	writeS0FSFile(t, engine, "seed.txt", "seed")
+	mgr.storageQuota = storagequotatest.NewLimitedService(
+		"test-cluster",
+		teamquota.KeyStorageObjectCount,
+		0,
+	)
+
+	_, err := mgr.ForkVolume(context.Background(), &ForkVolumeRequest{
+		SourceVolumeID: "vol-quota-source",
+		TeamID:         "team-1",
+		UserID:         "user-2",
+	})
+	if !teamquota.IsExceeded(err) {
+		t.Fatalf("ForkVolume() error = %v, want quota exceeded", err)
+	}
+	if len(repo.volumes) != 1 {
+		t.Fatalf("catalog volumes = %+v, want only source volume", repo.volumes)
 	}
 }
 
@@ -662,6 +884,14 @@ func TestExportSnapshotArchiveS0FSMissingLegacyStateRemainsNotFound(t *testing.T
 }
 
 func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeRepo, *fakeVolumeProvider, *s0fs.Engine) {
+	return newS0FSSnapshotTestManagerWithSegmentTarget(t, volumeID, "")
+}
+
+func newS0FSSnapshotTestManagerWithSegmentTarget(
+	t *testing.T,
+	volumeID string,
+	segmentTargetSize string,
+) (*Manager, *fakeRepo, *fakeVolumeProvider, *s0fs.Engine) {
 	t.Helper()
 
 	cacheDir := t.TempDir()
@@ -692,11 +922,13 @@ func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeR
 			RestoreRemountTimeout: "100ms",
 			ObjectStorageType:     "mem",
 			S3Bucket:              "snapshot-tests-" + sanitizeTestObjectStoreName(t.Name()),
+			S0FSSegmentTargetSize: segmentTargetSize,
 		},
-		logger:    logrus.New(),
-		clusterID: "test-cluster",
-		podID:     "test-pod",
-		locks:     make(map[string]time.Time),
+		logger:       logrus.New(),
+		clusterID:    "test-cluster",
+		podID:        "test-pod",
+		locks:        make(map[string]time.Time),
+		storageQuota: storagequotatest.NewService("test-cluster"),
 	}
 	cfg, err := mgr.s0fsConfig("team-1", volumeID)
 	if err != nil {
@@ -710,6 +942,7 @@ func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeR
 		_ = engine.Close()
 	})
 	volMgr.ctx.S0FS = engine
+	volMgr.ctx.SetStorageQuota(mgr.storageQuota)
 	return mgr, repo, volMgr, engine
 }
 

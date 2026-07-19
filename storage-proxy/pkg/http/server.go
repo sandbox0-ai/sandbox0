@@ -17,12 +17,14 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/activeconnections"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/storageoperations"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -38,11 +40,12 @@ type volumeRepository interface {
 	ListOwnedSandboxVolumes(ctx context.Context, clusterID string, cleanupRequested *bool) ([]*db.OwnedSandboxVolume, error)
 	GetSandboxVolume(ctx context.Context, id string) (*db.SandboxVolume, error)
 	GetSandboxVolumeOwner(ctx context.Context, volumeID string) (*db.SandboxVolumeOwner, error)
-	GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*db.OwnedSandboxVolume, error)
+	GetOwnedSandboxVolumeByOwner(ctx context.Context, teamID, clusterID, sandboxID, purpose string) (*db.OwnedSandboxVolume, error)
 	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error)
 	DeleteMount(ctx context.Context, volumeID, clusterID, podID string) error
 	DeleteSandboxVolumeTx(ctx context.Context, tx pgx.Tx, id string) error
 	MarkOwnedSandboxVolumesForCleanup(ctx context.Context, clusterID, sandboxID, reason string) (int64, error)
+	MarkTeamOwnedSandboxVolumesForCleanup(ctx context.Context, teamID, clusterID, sandboxID, reason string) (int64, error)
 	MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context, volumeID string, cleanupErr error) error
 }
 
@@ -122,6 +125,10 @@ type volumeEventHub interface {
 	Subscribe(req *pb.WatchRequest) (string, <-chan *pb.WatchEvent, func())
 }
 
+// maxVolumeFileWatchSubscriptionsPerConnection bounds the memory and
+// goroutines one admitted WebSocket can retain.
+const maxVolumeFileWatchSubscriptionsPerConnection = 64
+
 // Server provides HTTP management API for health checks and metrics
 type Server struct {
 	logger               *logrus.Logger
@@ -129,7 +136,9 @@ type Server struct {
 	cfg                  *config.StorageProxyConfig
 	repo                 volumeRepository
 	meteringRepo         meteringRepository
-	quotaRepo            *quota.Repository
+	storageQuota         *storagequota.Service
+	storageOperations    storageoperations.Quota
+	activeConnections    activeconnections.Quota
 	regionID             string
 	authenticator        *auth.HTTPAuthenticator
 	snapshotMgr          snapshotManager
@@ -144,10 +153,22 @@ type Server struct {
 	ctldHTTPClient       *http.Client
 	selfPodID            string
 	selfClusterID        string
+	watchSubscriptions   volumeWatchSubscriptionGuard
 }
 
-func (s *Server) SetQuotaRepository(repo *quota.Repository) {
-	s.quotaRepo = repo
+// SetStorageQuota wires the mandatory PostgreSQL TeamQuota coordinator.
+func (s *Server) SetStorageQuota(service *storagequota.Service) {
+	s.storageQuota = service
+}
+
+// SetStorageOperationQuota wires region-shared storage operation admission.
+func (s *Server) SetStorageOperationQuota(quota storageoperations.Quota) {
+	s.storageOperations = quota
+}
+
+// SetActiveConnectionQuota wires region-shared live subscription admission.
+func (s *Server) SetActiveConnectionQuota(quota activeconnections.Quota) {
+	s.activeConnections = quota
 }
 
 // NewServer creates a new HTTP server
@@ -326,9 +347,6 @@ func (s *Server) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, obse
 	writer, ok := configuredMeteringRepository(s.meteringRepo)
 	if !ok || observation == nil {
 		return nil
-	}
-	if err := s.enforceStorageObservationQuota(ctx, observation); err != nil {
-		return err
 	}
 	if err := writer.RecordStorageObservationTx(ctx, tx, observation); err != nil {
 		return err

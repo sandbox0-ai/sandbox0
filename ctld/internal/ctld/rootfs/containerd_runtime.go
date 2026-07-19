@@ -18,8 +18,6 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
-	crootfs "github.com/containerd/containerd/v2/pkg/rootfs"
-	"github.com/containerd/continuity/fs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -55,6 +53,14 @@ type ContainerdRuntimeConfig struct {
 	RootFSCacheDir         string
 	Namespace              string
 	DialTimeout            time.Duration
+	BaselineMaxBytes       int64
+	BaselineMaxTotalBytes  int64
+	BaselineMaxEntries     int
+	BaselineMaxTeamBytes   int64
+	BaselineMaxTeamEntries int
+	BaselineMinFreeBytes   int64
+	BaselineTTL            time.Duration
+	BaselineSweepInterval  time.Duration
 	CRIClient              criRuntimeService
 	CRIDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
 	ContainerdClient       containerdClient
@@ -70,6 +76,14 @@ type ContainerdRuntime struct {
 	rootFSCacheDir         string
 	namespace              string
 	dialTimeout            time.Duration
+	baselineMaxBytes       int64
+	baselineMaxTotalBytes  int64
+	baselineMaxEntries     int
+	baselineMaxTeamBytes   int64
+	baselineMaxTeamEntries int
+	baselineMinFreeBytes   int64
+	baselineTTL            time.Duration
+	baselineSweepInterval  time.Duration
 	criClient              criRuntimeService
 	criDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
 	criMu                  sync.Mutex
@@ -124,6 +138,34 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 	if timeout <= 0 {
 		timeout = defaultDialTimeout
 	}
+	baselineMaxBytes := cfg.BaselineMaxBytes
+	if baselineMaxBytes <= 0 {
+		baselineMaxBytes = defaultRootFSBaselineMaxBytes
+	}
+	baselineMaxTotalBytes := cfg.BaselineMaxTotalBytes
+	if baselineMaxTotalBytes <= 0 {
+		baselineMaxTotalBytes = defaultRootFSBaselineMaxTotalBytes
+	}
+	baselineMaxEntries := cfg.BaselineMaxEntries
+	if baselineMaxEntries <= 0 {
+		baselineMaxEntries = defaultRootFSBaselineMaxEntries
+	}
+	baselineMaxTeamBytes := cfg.BaselineMaxTeamBytes
+	if baselineMaxTeamBytes <= 0 {
+		baselineMaxTeamBytes = baselineMaxBytes
+	}
+	baselineMaxTeamEntries := cfg.BaselineMaxTeamEntries
+	if baselineMaxTeamEntries <= 0 {
+		baselineMaxTeamEntries = defaultRootFSBaselineMaxTeamEntries
+	}
+	baselineTTL := cfg.BaselineTTL
+	if baselineTTL <= 0 {
+		baselineTTL = defaultRootFSBaselineTTL
+	}
+	baselineSweepInterval := cfg.BaselineSweepInterval
+	if baselineSweepInterval <= 0 {
+		baselineSweepInterval = defaultRootFSBaselineSweepInterval
+	}
 	return &ContainerdRuntime{
 		criEndpoint:            criEndpoint,
 		containerdEndpoint:     containerdEndpoint,
@@ -134,6 +176,14 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		rootFSCacheDir:         rootFSCacheDir,
 		namespace:              namespace,
 		dialTimeout:            timeout,
+		baselineMaxBytes:       baselineMaxBytes,
+		baselineMaxTotalBytes:  baselineMaxTotalBytes,
+		baselineMaxEntries:     baselineMaxEntries,
+		baselineMaxTeamBytes:   baselineMaxTeamBytes,
+		baselineMaxTeamEntries: baselineMaxTeamEntries,
+		baselineMinFreeBytes:   max(cfg.BaselineMinFreeBytes, 0),
+		baselineTTL:            baselineTTL,
+		baselineSweepInterval:  baselineSweepInterval,
 		criClient:              cfg.CRIClient,
 		criDialContext:         cfg.CRIDialContext,
 		containerdClient:       cfg.ContainerdClient,
@@ -167,42 +217,19 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 
-	if desc, reader, ok, fastErr := r.createOverlayUpperDiff(ctx, client, info, excludedPaths, portalPaths); ok && fastErr == nil {
-		closeClient()
-		return desc, reader, nil
-	} else if ok && fastErr != nil {
-		desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
-		if err != nil {
-			closeClient()
-			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("overlayfs fast diff: %v; containerd diff: %w", fastErr, err)
-		}
-		rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
-		if err != nil {
-			closeClient()
-			return ctldapi.RootFSDiffDescriptor{}, nil, err
-		}
-		if !needsClient {
-			closeClient()
-			return rootDesc, reader, nil
-		}
-		return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
+	desc, reader, supported, err := r.createOverlayUpperDiff(ctx, client, info, excludedPaths, portalPaths)
+	closeClient()
+	if !supported {
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf(
+			"%w: rootfs checkpoints require the overlayfs direct-diff path; snapshotter %q is not supported",
+			ErrBadRequest,
+			info.Snapshotter,
+		)
 	}
-
-	desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
 	if err != nil {
-		closeClient()
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("create bounded overlayfs rootfs diff: %w", err)
 	}
-	rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
-	if err != nil {
-		closeClient()
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-	if !needsClient {
-		closeClient()
-		return rootDesc, reader, nil
-	}
-	return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
+	return desc, reader, nil
 }
 
 func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
@@ -228,6 +255,8 @@ func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctl
 	} else if !st.IsDir() {
 		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline path is not a directory", ErrConflict)
 	}
+	now := time.Now()
+	_ = os.Chtimes(filepath.Dir(baselineDir), now, now)
 	return writeOverlayUpperDiffFromBaseline(ctx, baselineDir, upperdir, excludedPaths, portalPaths)
 }
 
@@ -272,7 +301,7 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 	return descriptorFromOCI(applied), nil
 }
 
-func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error {
+func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, teamID, sandboxID, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error {
 	if strings.TrimSpace(baselineLayerID) == "" {
 		return fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
 	}
@@ -286,62 +315,15 @@ func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.Ro
 	if err != nil {
 		return err
 	}
-	target := r.rootFSBaselinePath(info, baselineLayerID)
-	parent := filepath.Dir(target)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return fmt.Errorf("create rootfs baseline parent: %w", err)
-	}
-	tmp, err := os.MkdirTemp(parent, ".baseline-*")
-	if err != nil {
-		return fmt.Errorf("create rootfs baseline temp dir: %w", err)
-	}
-	removeTmp := true
-	defer func() {
-		if removeTmp {
-			_ = os.RemoveAll(tmp)
-		}
-	}()
-	if err := fs.CopyDir(tmp, upperdir); err != nil {
-		return fmt.Errorf("copy rootfs baseline: %w", err)
-	}
-	if err := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths)).RemoveAll(tmp); err != nil {
-		return fmt.Errorf("filter rootfs baseline: %w", err)
-	}
-	if err := os.RemoveAll(target); err != nil {
-		return fmt.Errorf("replace rootfs baseline: %w", err)
-	}
-	if err := os.Rename(tmp, target); err != nil {
-		return fmt.Errorf("publish rootfs baseline: %w", err)
-	}
-	removeTmp = false
-	return nil
-}
-
-func rootFSDiffReaderFromContent(ctx context.Context, client containerdClient, desc ocispec.Descriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
-	rootDesc := descriptorFromOCI(desc)
-	diffID, err := images.GetDiffID(ctx, client.ContentStore(), desc)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, fmt.Errorf("resolve rootfs diff id: %w", err)
-	}
-	rootDesc.DiffID = diffID.String()
-	reader, err := content.BlobReadSeeker(ctx, client.ContentStore(), desc)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, err
-	}
-	if !shouldFilterRootFSDiffTar(rootDesc) {
-		return rootDesc, reader, true, nil
-	}
-
-	filteredDesc, filteredReader, err := filterRootFSDiffTarForSave(rootDesc, reader, excludedPaths, portalPaths)
-	closeErr := reader.Close()
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, err
-	}
-	if closeErr != nil {
-		_ = filteredReader.Close()
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, closeErr
-	}
-	return filteredDesc, filteredReader, false, nil
+	return r.captureRootFSBaseline(
+		ctx,
+		info,
+		strings.TrimSpace(teamID),
+		strings.TrimSpace(sandboxID),
+		baselineLayerID,
+		upperdir,
+		newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths)),
+	)
 }
 
 func (r *ContainerdRuntime) rootFSBaselinePath(info ctldapi.RootFSInfo, baselineLayerID string) string {
@@ -357,7 +339,7 @@ func (r *ContainerdRuntime) rootFSBaselinePath(info ctldapi.RootFSInfo, baseline
 		info.ContainerID,
 		strings.TrimSpace(baselineLayerID),
 	}, "\x00")))
-	return filepath.Join(root, "baselines", hex.EncodeToString(sum[:]))
+	return filepath.Join(root, "baselines", hex.EncodeToString(sum[:]), "data")
 }
 
 func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctldapi.RootFSContainerRef) (string, string, error) {
@@ -715,17 +697,4 @@ func normalizeCRIEndpoint(endpoint string) string {
 		return "unix://" + endpoint
 	}
 	return endpoint
-}
-
-type closeReadSeekWithFunc struct {
-	io.ReadSeekCloser
-	closeFunc func()
-}
-
-func (r closeReadSeekWithFunc) Close() error {
-	err := r.ReadSeekCloser.Close()
-	if r.closeFunc != nil {
-		r.closeFunc()
-	}
-	return err
 }

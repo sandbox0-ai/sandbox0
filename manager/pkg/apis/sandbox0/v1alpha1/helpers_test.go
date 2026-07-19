@@ -433,7 +433,7 @@ manager_image: sandbox0/manager:test
 }
 
 func TestBuildResourceRequirementsKeepsMinimumCPURequestDense(t *testing.T) {
-	resources := BuildResourceRequirements(ResourceQuota{
+	resources := BuildResourceRequirements(SandboxResourceLimits{
 		CPU:    resource.MustParse("150m"),
 		Memory: resource.MustParse("128Mi"),
 	})
@@ -451,7 +451,7 @@ manager_image: sandbox0/manager:test
 	t.Setenv("CONFIG_PATH", configPath)
 
 	template := newTestTemplate()
-	template.Spec.MainContainer.Resources = ResourceQuota{
+	template.Spec.MainContainer.Resources = SandboxResourceLimits{
 		CPU:    resource.MustParse("500m"),
 		Memory: resource.MustParse("2Gi"),
 	}
@@ -487,7 +487,7 @@ manager_image: sandbox0/manager:test
 	t.Setenv("CONFIG_PATH", configPath)
 
 	template := newTestTemplate()
-	template.Spec.MainContainer.Resources = ResourceQuota{
+	template.Spec.MainContainer.Resources = SandboxResourceLimits{
 		CPU:              resource.MustParse("5m"),
 		Memory:           resource.MustParse("32Mi"),
 		EphemeralStorage: resource.MustParse("32Mi"),
@@ -598,7 +598,7 @@ func newTestTemplate() *SandboxTemplate {
 		Spec: SandboxTemplateSpec{
 			MainContainer: ContainerSpec{
 				Image: "busybox:latest",
-				Resources: ResourceQuota{
+				Resources: SandboxResourceLimits{
 					CPU:    resource.MustParse("1"),
 					Memory: resource.MustParse("1Gi"),
 				},

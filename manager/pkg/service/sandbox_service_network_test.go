@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/resourceguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -29,11 +30,12 @@ import (
 )
 
 type memoryBindingStore struct {
-	records        map[string]*egressauth.BindingRecord
-	sourcesByRef   map[string]*egressauth.CredentialSource
-	sourceVersions map[string]*egressauth.CredentialSourceVersion
-	upsertCalls    int
-	deleteCalls    int
+	records          map[string]*egressauth.BindingRecord
+	sourcesByRef     map[string]*egressauth.CredentialSource
+	sourceVersions   map[string]*egressauth.CredentialSourceVersion
+	getBindingsCalls int
+	upsertCalls      int
+	deleteCalls      int
 }
 
 func newMemoryBindingStore() *memoryBindingStore {
@@ -45,6 +47,7 @@ func newMemoryBindingStore() *memoryBindingStore {
 }
 
 func (s *memoryBindingStore) GetBindings(_ context.Context, teamID, sandboxID string) (*egressauth.BindingRecord, error) {
+	s.getBindingsCalls++
 	return cloneBindingRecord(s.records[s.bindingKey(teamID, sandboxID)]), nil
 }
 
@@ -101,6 +104,34 @@ func (s *memoryBindingStore) addStaticHeadersSource(teamID, ref string, sourceID
 				Values: cloneStringMap(values),
 			},
 		},
+	}
+}
+
+func TestSyncCredentialBindingsRejectsOversizedEffectiveSetBeforeStoreRead(t *testing.T) {
+	store := newMemoryBindingStore()
+	svc := &SandboxService{credentialStore: store}
+	state := &BuildNetworkPolicyResult{
+		CredentialBindings: make(
+			[]v1alpha1.CredentialBinding,
+			egressauth.MaxCredentialBindingCount+1,
+		),
+	}
+	_, err := svc.syncCredentialBindings(
+		context.Background(),
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-1"}},
+		"team-1",
+		state,
+	)
+	if !resourceguard.IsTooLarge(err) {
+		t.Fatalf("syncCredentialBindings() error = %v, want TooLargeError", err)
+	}
+	if store.getBindingsCalls != 0 || store.upsertCalls != 0 || store.deleteCalls != 0 {
+		t.Fatalf(
+			"store calls get/upsert/delete = %d/%d/%d, want 0/0/0",
+			store.getBindingsCalls,
+			store.upsertCalls,
+			store.deleteCalls,
+		)
 	}
 }
 

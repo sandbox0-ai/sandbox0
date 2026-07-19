@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -160,13 +163,29 @@ func TestReleaseVolumeOwnerReturnsConflictForBusyOwner(t *testing.T) {
 }
 
 func TestCombinedControllerRoutesRootFSSnapshotAPI(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	validatorConfig := internalauth.DefaultValidatorConfig(internalauth.ServiceCtld, publicKey)
+	validatorConfig.AllowedCallers = internalauth.CtldAllowedCallers()
+	validator := internalauth.NewValidator(validatorConfig)
+	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller: internalauth.ServiceManager, PrivateKey: privateKey,
+	})
+	token, err := generator.Generate(
+		internalauth.ServiceCtld,
+		"team-1",
+		"",
+		internalauth.GenerateOptions{SandboxID: "sandbox-1"},
+	)
+	require.NoError(t, err)
 	server := newHTTPServer(":0", combinedController{
 		Controller: ctldserver.NotImplementedController{},
 		RootFS:     fakeRootFSHandler{},
-	})
+	}, validator)
 
 	t.Run("prepare", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/prepare", strings.NewReader(`{"target":{"namespace":"ns","pod_name":"pod","container_name":"sandbox"}}`))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/prepare", strings.NewReader(`{"target":{"namespace":"ns","pod_name":"pod","container_name":"sandbox"},"stage_id":"stage-1","team_id":"team-1","sandbox_id":"sandbox-1"}`))
+		req.Header.Set(internalauth.DefaultTokenHeader, token)
 		rec := httptest.NewRecorder()
 		server.Handler.ServeHTTP(rec, req)
 
@@ -178,6 +197,7 @@ func TestCombinedControllerRoutesRootFSSnapshotAPI(t *testing.T) {
 
 	t.Run("publish", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/publish", strings.NewReader(`{"handle":"snapshot-handle","sandbox_id":"sandbox-1","team_id":"team-1"}`))
+		req.Header.Set(internalauth.DefaultTokenHeader, token)
 		rec := httptest.NewRecorder()
 		server.Handler.ServeHTTP(rec, req)
 
@@ -189,7 +209,8 @@ func TestCombinedControllerRoutesRootFSSnapshotAPI(t *testing.T) {
 	})
 
 	t.Run("abort", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/abort", strings.NewReader(`{"handle":"snapshot-handle"}`))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/abort", strings.NewReader(`{"handle":"snapshot-handle","sandbox_id":"sandbox-1","team_id":"team-1"}`))
+		req.Header.Set(internalauth.DefaultTokenHeader, token)
 		rec := httptest.NewRecorder()
 		server.Handler.ServeHTTP(rec, req)
 
@@ -204,10 +225,6 @@ type fakeRootFSHandler struct{}
 
 func (fakeRootFSHandler) InspectRootFS(_ *http.Request, _ ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
 	return ctldapi.InspectRootFSResponse{}, http.StatusOK
-}
-
-func (fakeRootFSHandler) SaveRootFS(_ *http.Request, _ ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
-	return ctldapi.SaveRootFSResponse{}, http.StatusOK
 }
 
 func (fakeRootFSHandler) PrepareRootFSSnapshot(_ *http.Request, _ ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 )
 
@@ -30,7 +31,6 @@ type VolumePortalController interface {
 
 type RootFSController interface {
 	InspectRootFS(r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int)
-	SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int)
 	ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int)
 }
 
@@ -72,10 +72,6 @@ func (NotImplementedController) InspectRootFS(_ *http.Request, _ ctldapi.Inspect
 	return ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"}, http.StatusNotImplemented
 }
 
-func (NotImplementedController) SaveRootFS(_ *http.Request, _ ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
-	return ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"}, http.StatusNotImplemented
-}
-
 func (NotImplementedController) PrepareRootFSSnapshot(_ *http.Request, _ ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
 	return ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"}, http.StatusNotImplemented
 }
@@ -92,9 +88,13 @@ func (NotImplementedController) ApplyRootFS(_ *http.Request, _ ctldapi.ApplyRoot
 	return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
 }
 
-func NewMux(controller Controller) http.Handler {
+func NewMux(controller Controller, validators ...*internalauth.Validator) http.Handler {
 	if controller == nil {
 		controller = NotImplementedController{}
+	}
+	var authValidator *internalauth.Validator
+	if len(validators) > 0 {
+		authValidator = validators[0]
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -314,29 +314,7 @@ func NewMux(controller Controller) http.Handler {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
 	})
-	mux.HandleFunc("/api/v1/rootfs/save", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		rootFSController, ok := controller.(RootFSController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"})
-			return
-		}
-		var req ctldapi.SaveRootFSRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := rootFSController.SaveRootFS(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/snapshots/prepare", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/v1/rootfs/snapshots/prepare", managerRootFSHandler(authValidator, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -353,12 +331,15 @@ func NewMux(controller Controller) http.Handler {
 			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()})
 			return
 		}
+		if !authorizeRootFSOwner(w, r, req.TeamID, req.SandboxID) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := rootFSController.PrepareRootFSSnapshot(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/snapshots/publish", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.Handle("/api/v1/rootfs/snapshots/publish", managerRootFSHandler(authValidator, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -375,12 +356,15 @@ func NewMux(controller Controller) http.Handler {
 			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{Error: err.Error()})
 			return
 		}
+		if !authorizeRootFSOwner(w, r, req.TeamID, req.SandboxID) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := rootFSController.PublishRootFSSnapshot(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/snapshots/abort", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.Handle("/api/v1/rootfs/snapshots/abort", managerRootFSHandler(authValidator, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -397,12 +381,15 @@ func NewMux(controller Controller) http.Handler {
 			_ = json.NewEncoder(w).Encode(ctldapi.AbortRootFSSnapshotResponse{Error: err.Error()})
 			return
 		}
+		if !authorizeRootFSOwner(w, r, req.TeamID, req.SandboxID) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := rootFSController.AbortRootFSSnapshot(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/apply", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.Handle("/api/v1/rootfs/apply", managerRootFSHandler(authValidator, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -419,11 +406,14 @@ func NewMux(controller Controller) http.Handler {
 			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Error: err.Error()})
 			return
 		}
+		if !authorizeRootFSOwner(w, r, req.TeamID, req.SandboxID) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := rootFSController.ApplyRootFS(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
-	})
+	}))
 	mux.HandleFunc("/api/v1/sandboxes/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -475,4 +465,28 @@ func NewMux(controller Controller) http.Handler {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 	return mux
+}
+
+func managerRootFSHandler(validator *internalauth.Validator, next http.HandlerFunc) http.Handler {
+	if validator == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "ctld internal authentication is unavailable", http.StatusServiceUnavailable)
+		})
+	}
+	return internalauth.AuthMiddleware(validator, internalauth.DefaultExtractor())(next)
+}
+
+func authorizeRootFSOwner(w http.ResponseWriter, r *http.Request, teamID, sandboxID string) bool {
+	claims := internalauth.ClaimsFromContext(r.Context())
+	if claims == nil ||
+		claims.IsSystemToken() ||
+		claims.Caller != internalauth.ServiceManager ||
+		strings.TrimSpace(claims.TeamID) == "" ||
+		strings.TrimSpace(claims.TeamID) != strings.TrimSpace(teamID) ||
+		strings.TrimSpace(claims.SandboxID) == "" ||
+		strings.TrimSpace(claims.SandboxID) != strings.TrimSpace(sandboxID) {
+		http.Error(w, "rootfs ownership claims do not match request", http.StatusForbidden)
+		return false
+	}
+	return true
 }

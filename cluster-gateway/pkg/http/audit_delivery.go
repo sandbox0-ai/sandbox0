@@ -3,17 +3,21 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
@@ -27,10 +31,38 @@ var (
 	errAuditDeliveryPending = errors.New("canonical audit event is pending")
 	errAuditUnrecorded      = errors.New("audit event is unrecorded")
 	errAuditSpoolWrite      = errors.New("audit spool write failed")
+	errAuditSpoolCapacity   = errors.New("audit spool capacity exceeded")
+	errAuditSpoolCorrupt    = errors.New("audit spool is corrupt")
 )
 
 type auditEventInserter interface {
 	InsertEvents(context.Context, []sandboxobservability.Event) error
+}
+
+type auditDeliveryLimits struct {
+	maxBytes       int64
+	maxEntries     int64
+	maxTeamBytes   int64
+	maxTeamEntries int64
+	minFreeBytes   int64
+	maxRecordBytes int64
+}
+
+type auditDeliveryRecord struct {
+	teamID string
+	bytes  int64
+	digest [sha256.Size]byte
+}
+
+type auditDeliveryTeamUsage struct {
+	bytes   int64
+	entries int64
+}
+
+type auditDeliveryUsage struct {
+	bytes   int64
+	entries int64
+	teams   map[string]auditDeliveryTeamUsage
 }
 
 // auditDelivery is an fsync-backed delivery buffer. ClickHouse remains
@@ -41,6 +73,10 @@ type auditDelivery struct {
 	writer          auditEventInserter
 	logger          *zap.Logger
 	verificationKey ed25519.PublicKey
+	limits          auditDeliveryLimits
+	freeBytes       func(string) (int64, error)
+	records         map[string]auditDeliveryRecord
+	usage           auditDeliveryUsage
 	mu              sync.Mutex
 	once            sync.Once
 	wake            chan struct{}
@@ -48,12 +84,31 @@ type auditDelivery struct {
 }
 
 func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger, verificationKey ed25519.PublicKey) (*auditDelivery, error) {
+	return newAuditDeliveryWithLimits(
+		dir,
+		writer,
+		logger,
+		verificationKey,
+		defaultAuditDeliveryLimits(),
+	)
+}
+
+func newAuditDeliveryWithLimits(
+	dir string,
+	writer auditEventInserter,
+	logger *zap.Logger,
+	verificationKey ed25519.PublicKey,
+	limits auditDeliveryLimits,
+) (*auditDelivery, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return nil, fmt.Errorf("audit spool directory is required")
 	}
 	if writer == nil {
 		return nil, fmt.Errorf("audit writer is required")
+	}
+	if err := validateAuditDeliveryLimits(limits); err != nil {
+		return nil, err
 	}
 	if logger == nil {
 		logger = zap.NewNop()
@@ -66,13 +121,74 @@ func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger,
 		writer:          writer,
 		logger:          logger,
 		verificationKey: verificationKey,
-		wake:            make(chan struct{}, 1),
-		canonicalSlot:   make(chan struct{}, 1),
+		limits:          limits,
+		freeBytes:       auditDeliveryFilesystemFreeBytes,
+		records:         make(map[string]auditDeliveryRecord),
+		usage: auditDeliveryUsage{
+			teams: make(map[string]auditDeliveryTeamUsage),
+		},
+		wake:          make(chan struct{}, 1),
+		canonicalSlot: make(chan struct{}, 1),
 	}
-	if _, err := delivery.loadLocked(); err != nil {
+	if err := delivery.rebuildUsageLocked(); err != nil {
 		return nil, err
 	}
 	return delivery, nil
+}
+
+func defaultAuditDeliveryLimits() auditDeliveryLimits {
+	return auditDeliveryLimitsFromConfig(config.AuditSpoolLimitsConfig{})
+}
+
+func auditDeliveryLimitsFromConfig(configured config.AuditSpoolLimitsConfig) auditDeliveryLimits {
+	if configured.MaxBytes == 0 {
+		configured.MaxBytes = config.DefaultAuditSpoolMaxBytes
+	}
+	if configured.MaxEntries == 0 {
+		configured.MaxEntries = config.DefaultAuditSpoolMaxEntries
+	}
+	if configured.MaxTeamBytes == 0 {
+		configured.MaxTeamBytes = config.DefaultAuditSpoolMaxTeamBytes
+	}
+	if configured.MaxTeamEntries == 0 {
+		configured.MaxTeamEntries = config.DefaultAuditSpoolMaxTeamEntries
+	}
+	if configured.MinFreeBytes == 0 {
+		configured.MinFreeBytes = config.DefaultAuditSpoolMinFreeBytes
+	}
+	if configured.MaxRecordBytes == 0 {
+		configured.MaxRecordBytes = config.DefaultAuditSpoolMaxRecordBytes
+	}
+	return auditDeliveryLimits{
+		maxBytes:       configured.MaxBytes,
+		maxEntries:     configured.MaxEntries,
+		maxTeamBytes:   configured.MaxTeamBytes,
+		maxTeamEntries: configured.MaxTeamEntries,
+		minFreeBytes:   configured.MinFreeBytes,
+		maxRecordBytes: configured.MaxRecordBytes,
+	}
+}
+
+func validateAuditDeliveryLimits(limits auditDeliveryLimits) error {
+	if limits.maxBytes <= 0 {
+		return fmt.Errorf("audit spool max bytes must be positive")
+	}
+	if limits.maxEntries <= 0 {
+		return fmt.Errorf("audit spool max entries must be positive")
+	}
+	if limits.maxTeamBytes <= 0 || limits.maxTeamBytes > limits.maxBytes {
+		return fmt.Errorf("audit spool max team bytes must be positive and not exceed max bytes")
+	}
+	if limits.maxTeamEntries <= 0 || limits.maxTeamEntries > limits.maxEntries {
+		return fmt.Errorf("audit spool max team entries must be positive and not exceed max entries")
+	}
+	if limits.minFreeBytes < 0 {
+		return fmt.Errorf("audit spool minimum free bytes must be non-negative")
+	}
+	if limits.maxRecordBytes <= 0 || limits.maxRecordBytes > limits.maxTeamBytes {
+		return fmt.Errorf("audit spool max record bytes must be positive and not exceed max team bytes")
+	}
+	return nil
 }
 
 func (d *auditDelivery) Start(ctx context.Context) {
@@ -161,7 +277,7 @@ func (d *auditDelivery) spoolOrCanonical(ctx context.Context, event sandboxobser
 			zap.String("event_id", event.EventID),
 			zap.Error(spoolErr),
 		)
-		return false, fmt.Errorf("%w: durable spool rejected the event: %v", errAuditUnrecorded, spoolErr)
+		return false, fmt.Errorf("%w: durable spool rejected the event: %w", errAuditUnrecorded, spoolErr)
 	}
 
 	d.logger.Error("Failed to persist sandbox audit event to the durable spool; attempting canonical fallback",
@@ -264,18 +380,35 @@ func (d *auditDelivery) replay(ctx context.Context) error {
 }
 
 func (d *auditDelivery) pendingLocked(eventID string) (bool, error) {
-	if _, err := uuid.Parse(eventID); err != nil {
+	parsed, err := uuid.Parse(eventID)
+	if err != nil || parsed.String() != eventID {
 		return false, fmt.Errorf("audit event_id is invalid")
 	}
-	_, err := os.Stat(d.path(eventID))
-	switch {
-	case err == nil:
-		return true, nil
-	case os.IsNotExist(err):
-		return false, nil
-	default:
+	record, tracked := d.records[eventID]
+	payload, err := readAuditDeliveryPayload(d.path(eventID), d.limits.maxRecordBytes)
+	if !tracked {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return false, auditSpoolCorruptError("record %s exists on disk but is not tracked", eventID)
+	}
+	if os.IsNotExist(err) {
+		return false, auditSpoolCorruptError("tracked record %s is missing from disk", eventID)
+	}
+	if err != nil {
 		return false, err
 	}
+	event, decoded, err := d.decodeRecord(eventID+".json", payload)
+	if err != nil {
+		return false, err
+	}
+	if event.EventID != eventID || decoded != record {
+		return false, auditSpoolCorruptError("record %s differs from startup usage state", eventID)
+	}
+	return true, nil
 }
 
 func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
@@ -291,15 +424,48 @@ func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
 	if err != nil {
 		return fmt.Errorf("marshal audit event: %w", err)
 	}
+	recordBytes := int64(len(payload))
+	if recordBytes > d.limits.maxRecordBytes {
+		return auditSpoolCapacityError(
+			"record bytes %d exceed per-record maximum %d",
+			recordBytes,
+			d.limits.maxRecordBytes,
+		)
+	}
+	record := auditDeliveryRecord{
+		teamID: event.TeamID,
+		bytes:  recordBytes,
+		digest: sha256.Sum256(payload),
+	}
 	path := d.path(event.EventID)
-	if existing, readErr := os.ReadFile(path); readErr == nil {
+	existing, readErr := readAuditDeliveryPayload(path, d.limits.maxRecordBytes)
+	if readErr == nil {
 		if string(existing) != string(payload) {
 			return fmt.Errorf("audit event_id collision")
 		}
+		tracked, ok := d.records[event.EventID]
+		if !ok || tracked != record {
+			return auditSpoolCorruptError(
+				"record %s is not represented by startup usage state",
+				event.EventID,
+			)
+		}
 		return nil
-	} else if !os.IsNotExist(readErr) {
+	}
+	if !os.IsNotExist(readErr) {
+		if errors.Is(readErr, errAuditSpoolCapacity) ||
+			errors.Is(readErr, errAuditSpoolCorrupt) {
+			return readErr
+		}
 		return auditSpoolWriteError("read existing record", readErr)
 	}
+	if _, tracked := d.records[event.EventID]; tracked {
+		return auditSpoolCorruptError("tracked record %s is missing from disk", event.EventID)
+	}
+	if err := d.checkCapacityLocked(event.TeamID, recordBytes); err != nil {
+		return err
+	}
+
 	tmp, err := os.CreateTemp(d.dir, ".audit-*.tmp")
 	if err != nil {
 		return auditSpoolWriteError("create temp file", err)
@@ -327,15 +493,24 @@ func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return auditSpoolWriteError("commit record", err)
 	}
+	committed = true
+	d.addRecordLocked(event.EventID, record)
 	if err := syncAuditDirectory(d.dir); err != nil {
 		return auditSpoolWriteError("fsync directory", err)
 	}
-	committed = true
 	return nil
 }
 
 func auditSpoolWriteError(operation string, err error) error {
 	return fmt.Errorf("%w: %s: %v", errAuditSpoolWrite, operation, err)
+}
+
+func auditSpoolCapacityError(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errAuditSpoolCapacity, fmt.Sprintf(format, args...))
+}
+
+func auditSpoolCorruptError(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errAuditSpoolCorrupt, fmt.Sprintf(format, args...))
 }
 
 func (d *auditDelivery) loadLocked() ([]sandboxobservability.Event, error) {
@@ -349,34 +524,49 @@ func (d *auditDelivery) loadBatchLocked(limit int) ([]sandboxobservability.Event
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
-			names = append(names, entry.Name())
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
 		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, auditSpoolCorruptError("inspect record %s: %v", entry.Name(), err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, auditSpoolCorruptError("record path %s is not a regular file", entry.Name())
+		}
+		names = append(names, entry.Name())
+	}
+	if len(names) != len(d.records) {
+		return nil, auditSpoolCorruptError(
+			"record count on disk is %d but startup usage state tracks %d",
+			len(names),
+			len(d.records),
+		)
 	}
 	sort.Strings(names)
-	events := make([]sandboxobservability.Event, 0, len(names))
+	capacity := len(names)
+	if limit > 0 && limit < capacity {
+		capacity = limit
+	}
+	events := make([]sandboxobservability.Event, 0, capacity)
 	for _, name := range names {
 		if limit > 0 && len(events) >= limit {
 			break
 		}
-		payload, err := os.ReadFile(filepath.Join(d.dir, name))
+		payload, err := readAuditDeliveryPayload(
+			filepath.Join(d.dir, name),
+			d.limits.maxRecordBytes,
+		)
+		if err != nil {
+			return nil, auditSpoolCorruptError("read record %s: %v", name, err)
+		}
+		event, record, err := d.decodeRecord(name, payload)
 		if err != nil {
 			return nil, err
 		}
-		var event sandboxobservability.Event
-		if err := json.Unmarshal(payload, &event); err != nil || strings.TrimSpace(event.EventID) == "" {
-			return nil, fmt.Errorf("corrupt audit spool record %s", name)
-		}
-		if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
-			return nil, fmt.Errorf("invalid audit spool event %s: %w", name, err)
-		}
-		if name != event.EventID+".json" {
-			return nil, fmt.Errorf("corrupt audit spool identity %s", name)
-		}
-		if len(d.verificationKey) == ed25519.PublicKeySize {
-			if err := sandboxobservability.VerifyEventIntegrity(event, d.verificationKey); err != nil {
-				return nil, fmt.Errorf("invalid audit spool integrity %s: %w", name, err)
-			}
+		tracked, ok := d.records[event.EventID]
+		if !ok || tracked != record {
+			return nil, auditSpoolCorruptError("record %s differs from startup usage state", name)
 		}
 		events = append(events, event)
 	}
@@ -384,29 +574,357 @@ func (d *auditDelivery) loadBatchLocked(limit int) ([]sandboxobservability.Event
 }
 
 func (d *auditDelivery) removeLocked(eventID string) error {
-	if _, err := uuid.Parse(eventID); err != nil {
-		return fmt.Errorf("audit event_id is invalid")
+	return d.removeIDsLocked([]string{eventID})
+}
+
+func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) error {
+	eventIDs := make([]string, 0, len(events))
+	for _, event := range events {
+		eventIDs = append(eventIDs, event.EventID)
 	}
-	if err := os.Remove(d.path(eventID)); err != nil && !os.IsNotExist(err) {
-		return err
+	return d.removeIDsLocked(eventIDs)
+}
+
+func (d *auditDelivery) removeIDsLocked(eventIDs []string) error {
+	type removal struct {
+		eventID string
+		record  auditDeliveryRecord
+	}
+	removals := make([]removal, 0, len(eventIDs))
+	seen := make(map[string]struct{}, len(eventIDs))
+	for _, eventID := range eventIDs {
+		parsed, err := uuid.Parse(eventID)
+		if err != nil || parsed.String() != eventID {
+			return fmt.Errorf("audit event_id is invalid")
+		}
+		if _, duplicate := seen[eventID]; duplicate {
+			continue
+		}
+		seen[eventID] = struct{}{}
+		record, tracked := d.records[eventID]
+		payload, err := readAuditDeliveryPayload(d.path(eventID), d.limits.maxRecordBytes)
+		if !tracked {
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("inspect audit spool record: %w", err)
+			}
+			return auditSpoolCorruptError("record %s exists on disk but is not tracked", eventID)
+		}
+		if os.IsNotExist(err) {
+			return auditSpoolCorruptError("tracked record %s is missing from disk", eventID)
+		}
+		if err != nil {
+			return fmt.Errorf("read audit spool record before remove: %w", err)
+		}
+		if record.bytes != int64(len(payload)) || record.digest != sha256.Sum256(payload) {
+			return auditSpoolCorruptError("record %s changed before removal", eventID)
+		}
+		removals = append(removals, removal{eventID: eventID, record: record})
+	}
+	if len(removals) == 0 {
+		return nil
+	}
+	for _, removal := range removals {
+		if err := os.Remove(d.path(removal.eventID)); err != nil {
+			return errors.Join(
+				fmt.Errorf("remove audit spool record: %w", err),
+				syncAuditDirectory(d.dir),
+			)
+		}
+		d.removeRecordLocked(removal.eventID, removal.record)
 	}
 	return syncAuditDirectory(d.dir)
 }
 
-func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) error {
-	for _, event := range events {
-		if _, err := uuid.Parse(event.EventID); err != nil {
-			return fmt.Errorf("audit event_id is invalid")
+func (d *auditDelivery) rebuildUsageLocked() error {
+	entries, err := os.ReadDir(d.dir)
+	if err != nil {
+		return fmt.Errorf("read audit spool: %w", err)
+	}
+	removedTemporary := false
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() &&
+			strings.HasPrefix(name, ".audit-") &&
+			strings.HasSuffix(name, ".tmp") {
+			if err := os.Remove(filepath.Join(d.dir, name)); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove incomplete audit spool record %s: %w", name, err)
+			}
+			removedTemporary = true
+			continue
 		}
-		if err := os.Remove(d.path(event.EventID)); err != nil && !os.IsNotExist(err) {
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return auditSpoolCorruptError("inspect record %s: %v", name, err)
+		}
+		if !info.Mode().IsRegular() {
+			return auditSpoolCorruptError("record path %s is not a regular file", name)
+		}
+		payload, err := readAuditDeliveryPayload(
+			filepath.Join(d.dir, name),
+			d.limits.maxRecordBytes,
+		)
+		if err != nil {
+			if errors.Is(err, errAuditSpoolCapacity) ||
+				errors.Is(err, errAuditSpoolCorrupt) {
+				return err
+			}
+			return auditSpoolCorruptError("read record %s: %v", name, err)
+		}
+		event, record, err := d.decodeRecord(name, payload)
+		if err != nil {
+			return err
+		}
+		if _, duplicate := d.records[event.EventID]; duplicate {
+			return auditSpoolCorruptError("duplicate record for event_id %s", event.EventID)
+		}
+		d.addRecordLocked(event.EventID, record)
+		if err := d.checkRebuiltCapacityLocked(event.TeamID); err != nil {
 			return err
 		}
 	}
-	return syncAuditDirectory(d.dir)
+	if removedTemporary {
+		if err := syncAuditDirectory(d.dir); err != nil {
+			return auditSpoolWriteError("fsync directory after incomplete-record cleanup", err)
+		}
+	}
+	return nil
+}
+
+func (d *auditDelivery) decodeRecord(
+	name string,
+	payload []byte,
+) (sandboxobservability.Event, auditDeliveryRecord, error) {
+	var event sandboxobservability.Event
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return sandboxobservability.Event{}, auditDeliveryRecord{}, auditSpoolCorruptError(
+			"decode record %s: %v",
+			name,
+			err,
+		)
+	}
+	if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
+		return sandboxobservability.Event{}, auditDeliveryRecord{}, auditSpoolCorruptError(
+			"validate record %s: %v",
+			name,
+			err,
+		)
+	}
+	if name != event.EventID+".json" {
+		return sandboxobservability.Event{}, auditDeliveryRecord{}, auditSpoolCorruptError(
+			"record identity %s does not match event_id %s",
+			name,
+			event.EventID,
+		)
+	}
+	if len(d.verificationKey) == ed25519.PublicKeySize {
+		if err := sandboxobservability.VerifyEventIntegrity(event, d.verificationKey); err != nil {
+			return sandboxobservability.Event{}, auditDeliveryRecord{}, auditSpoolCorruptError(
+				"verify record %s integrity: %v",
+				name,
+				err,
+			)
+		}
+	}
+	return event, auditDeliveryRecord{
+		teamID: event.TeamID,
+		bytes:  int64(len(payload)),
+		digest: sha256.Sum256(payload),
+	}, nil
+}
+
+func readAuditDeliveryPayload(path string, maxRecordBytes int64) ([]byte, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !pathInfo.Mode().IsRegular() {
+		return nil, auditSpoolCorruptError(
+			"record path %s is not a regular file",
+			filepath.Base(path),
+		)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat audit spool record: %w", err)
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(pathInfo, info) {
+		return nil, auditSpoolCorruptError(
+			"record %s changed while it was opened",
+			filepath.Base(path),
+		)
+	}
+	if info.Size() < 0 || info.Size() > maxRecordBytes {
+		return nil, auditSpoolCapacityError(
+			"record %s has %d bytes, exceeding per-record maximum %d",
+			filepath.Base(path),
+			info.Size(),
+			maxRecordBytes,
+		)
+	}
+	readLimit := maxRecordBytes
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if readLimit < maxInt64 {
+		readLimit++
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, readLimit))
+	if err != nil {
+		return nil, fmt.Errorf("read audit spool record: %w", err)
+	}
+	if int64(len(payload)) > maxRecordBytes {
+		return nil, auditSpoolCapacityError(
+			"record %s grew beyond per-record maximum %d",
+			filepath.Base(path),
+			maxRecordBytes,
+		)
+	}
+	if int64(len(payload)) != info.Size() {
+		return nil, auditSpoolCorruptError(
+			"record %s changed while it was read",
+			filepath.Base(path),
+		)
+	}
+	return payload, nil
+}
+
+func (d *auditDelivery) checkCapacityLocked(teamID string, recordBytes int64) error {
+	if d.usage.entries >= d.limits.maxEntries {
+		return auditSpoolCapacityError(
+			"global entries %d reached maximum %d",
+			d.usage.entries,
+			d.limits.maxEntries,
+		)
+	}
+	if recordBytes > d.limits.maxBytes-d.usage.bytes {
+		return auditSpoolCapacityError(
+			"global bytes %d plus record bytes %d exceed maximum %d",
+			d.usage.bytes,
+			recordBytes,
+			d.limits.maxBytes,
+		)
+	}
+	team := d.usage.teams[teamID]
+	if team.entries >= d.limits.maxTeamEntries {
+		return auditSpoolCapacityError(
+			"team %s entries %d reached maximum %d",
+			teamID,
+			team.entries,
+			d.limits.maxTeamEntries,
+		)
+	}
+	if recordBytes > d.limits.maxTeamBytes-team.bytes {
+		return auditSpoolCapacityError(
+			"team %s bytes %d plus record bytes %d exceed maximum %d",
+			teamID,
+			team.bytes,
+			recordBytes,
+			d.limits.maxTeamBytes,
+		)
+	}
+	if d.limits.minFreeBytes > 0 {
+		freeBytes, err := d.freeBytes(d.dir)
+		if err != nil {
+			return auditSpoolCapacityError("check filesystem free bytes: %v", err)
+		}
+		if freeBytes < recordBytes ||
+			freeBytes-recordBytes < d.limits.minFreeBytes {
+			return auditSpoolCapacityError(
+				"projected filesystem free bytes %d are below minimum %d",
+				freeBytes-recordBytes,
+				d.limits.minFreeBytes,
+			)
+		}
+	}
+	return nil
+}
+
+func (d *auditDelivery) checkRebuiltCapacityLocked(teamID string) error {
+	if d.usage.entries > d.limits.maxEntries {
+		return auditSpoolCapacityError(
+			"startup global entries %d exceed maximum %d",
+			d.usage.entries,
+			d.limits.maxEntries,
+		)
+	}
+	if d.usage.bytes > d.limits.maxBytes {
+		return auditSpoolCapacityError(
+			"startup global bytes %d exceed maximum %d",
+			d.usage.bytes,
+			d.limits.maxBytes,
+		)
+	}
+	team := d.usage.teams[teamID]
+	if team.entries > d.limits.maxTeamEntries {
+		return auditSpoolCapacityError(
+			"startup team %s entries %d exceed maximum %d",
+			teamID,
+			team.entries,
+			d.limits.maxTeamEntries,
+		)
+	}
+	if team.bytes > d.limits.maxTeamBytes {
+		return auditSpoolCapacityError(
+			"startup team %s bytes %d exceed maximum %d",
+			teamID,
+			team.bytes,
+			d.limits.maxTeamBytes,
+		)
+	}
+	return nil
+}
+
+func (d *auditDelivery) addRecordLocked(eventID string, record auditDeliveryRecord) {
+	d.records[eventID] = record
+	d.usage.bytes += record.bytes
+	d.usage.entries++
+	team := d.usage.teams[record.teamID]
+	team.bytes += record.bytes
+	team.entries++
+	d.usage.teams[record.teamID] = team
+}
+
+func (d *auditDelivery) removeRecordLocked(eventID string, record auditDeliveryRecord) {
+	delete(d.records, eventID)
+	d.usage.bytes -= record.bytes
+	d.usage.entries--
+	team := d.usage.teams[record.teamID]
+	team.bytes -= record.bytes
+	team.entries--
+	if team.bytes == 0 && team.entries == 0 {
+		delete(d.usage.teams, record.teamID)
+		return
+	}
+	d.usage.teams[record.teamID] = team
 }
 
 func (d *auditDelivery) path(eventID string) string {
 	return filepath.Join(d.dir, eventID+".json")
+}
+
+func auditDeliveryFilesystemFreeBytes(path string) (int64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, err
+	}
+	blockSize := int64(stat.Bsize)
+	if blockSize <= 0 {
+		return 0, fmt.Errorf("filesystem block size is invalid")
+	}
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if uint64(stat.Bavail) > uint64(maxInt64)/uint64(blockSize) {
+		return 0, fmt.Errorf("filesystem free byte count overflows int64")
+	}
+	return int64(stat.Bavail) * blockSize, nil
 }
 
 func syncAuditDirectory(path string) error {

@@ -24,6 +24,7 @@ type RuntimeConfig struct {
 	DSN                         string
 	AuditEnabled                bool
 	AuditDeliveryMode           sandboxobstypes.AuditDeliveryMode
+	AuditSpoolLimits            infrav1alpha1.AuditSpoolLimitsConfig
 	Database                    string
 	EventsTable                 string
 	LogsTable                   string
@@ -74,6 +75,14 @@ func ApplyClusterGatewayConfig(ctx context.Context, c client.Client, infra *infr
 		Backend:           apiconfig.SandboxObservabilityBackendClickHouse,
 		AuditEnabled:      runtimeCfg.AuditEnabled,
 		AuditDeliveryMode: runtimeCfg.AuditDeliveryMode,
+		AuditSpoolLimits: apiconfig.AuditSpoolLimitsConfig{
+			MaxBytes:       runtimeCfg.AuditSpoolLimits.MaxBytes,
+			MaxEntries:     runtimeCfg.AuditSpoolLimits.MaxEntries,
+			MaxTeamBytes:   runtimeCfg.AuditSpoolLimits.MaxTeamBytes,
+			MaxTeamEntries: runtimeCfg.AuditSpoolLimits.MaxTeamEntries,
+			MinFreeBytes:   runtimeCfg.AuditSpoolLimits.MinFreeBytes,
+			MaxRecordBytes: runtimeCfg.AuditSpoolLimits.MaxRecordBytes,
+		},
 		ClickHouse: apiconfig.SandboxObservabilityClickHouseConfig{
 			DSN:                         runtimeCfg.DSN,
 			Database:                    runtimeCfg.Database,
@@ -176,6 +185,7 @@ func GetRuntimeConfig(ctx context.Context, c client.Client, infra *infrav1alpha1
 	}
 	if infra.Spec.SandboxObservability.Audit != nil {
 		cfg.AuditDeliveryMode = sandboxobstypes.NormalizeAuditDeliveryMode(infra.Spec.SandboxObservability.Audit.DeliveryMode)
+		cfg.AuditSpoolLimits = infra.Spec.SandboxObservability.Audit.SpoolLimits
 	}
 	applyRetentionConfig(infra, &cfg)
 	applyTableOverrides(infra, &cfg)

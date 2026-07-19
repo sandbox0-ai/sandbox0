@@ -3,6 +3,7 @@ package sshgateway
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -13,20 +14,24 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
 const (
-	defaultSSHPort             = 2222
-	defaultDatabaseMaxConns    = 30
-	defaultDatabaseMinConns    = 8
-	sshHostPrivateKeyKey       = "ssh_host_ed25519_key"
-	sshHostPublicKeyKey        = "ssh_host_ed25519_key.pub"
-	defaultSSHHostKeyMountPath = "/secrets/ssh_host_ed25519_key"
-	controlPlaneKeyMountPath   = "/secrets/control_plane_internal_jwt_private.key"
-	dataPlaneKeyMountPath      = "/secrets/data_plane_internal_jwt_private.key"
+	defaultSSHPort                                    = 2222
+	defaultDatabaseMaxConns                           = 30
+	defaultDatabaseMinConns                           = 8
+	defaultPlatformMaxConcurrentHandshakes            = 128
+	defaultPlatformHandshakeTimeout                   = 10 * time.Second
+	defaultPlatformMaxConcurrentChannelsPerConnection = 16
+	sshHostPrivateKeyKey                              = "ssh_host_ed25519_key"
+	sshHostPublicKeyKey                               = "ssh_host_ed25519_key.pub"
+	defaultSSHHostKeyMountPath                        = "/secrets/ssh_host_ed25519_key"
+	controlPlaneKeyMountPath                          = "/secrets/control_plane_internal_jwt_private.key"
+	dataPlaneKeyMountPath                             = "/secrets/data_plane_internal_jwt_private.key"
 )
 
 type Reconciler struct {
@@ -210,9 +215,35 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	if cfg.SSHHostKeyPath == "" {
 		cfg.SSHHostKeyPath = defaultSSHHostKeyMountPath
 	}
+	if cfg.PlatformMaxConcurrentHandshakes == 0 {
+		cfg.PlatformMaxConcurrentHandshakes =
+			defaultPlatformMaxConcurrentHandshakes
+	}
+	if cfg.PlatformHandshakeTimeout.Duration == 0 {
+		cfg.PlatformHandshakeTimeout.Duration = defaultPlatformHandshakeTimeout
+	}
+	if cfg.PlatformMaxConcurrentChannelsPerConnection == 0 {
+		cfg.PlatformMaxConcurrentChannelsPerConnection =
+			defaultPlatformMaxConcurrentChannelsPerConnection
+	}
 
 	if dsn, err := database.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
 		cfg.DatabaseURL = dsn
+	}
+	cfg.RegionID = common.ResolveRegionID(infra)
+	teamQuotaSpec := runtimeconfig.ResolveTeamQuotaSpec(infra)
+	if compiledPlan != nil {
+		teamQuotaSpec = compiledPlan.EffectiveTeamQuotaConfig()
+	}
+	cfg.TeamQuotaDistributedEnforcement =
+		runtimeconfig.ToTeamQuotaDistributedEnforcement(teamQuotaSpec)
+	if err := redissvc.ApplyTeamQuotaDistributedEnforcementConfig(
+		ctx,
+		r.Resources.Client,
+		infra,
+		&cfg.TeamQuotaDistributedEnforcement,
+	); err != nil {
+		return nil, err
 	}
 	if compiledPlan != nil {
 		cfg.RegionalGatewayURL = compiledPlan.Status.Endpoints.RegionalGatewayInternal
@@ -222,6 +253,14 @@ func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandb
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("database URL is required for ssh-gateway")
+	}
+	if cfg.RegionID == "" {
+		return nil, fmt.Errorf("region ID is required for ssh-gateway")
+	}
+	if cfg.TeamQuotaDistributedEnforcement.RedisURL == "" {
+		return nil, fmt.Errorf(
+			"region-shared Redis URL is required for ssh-gateway Team Quota",
+		)
 	}
 	return cfg, nil
 }

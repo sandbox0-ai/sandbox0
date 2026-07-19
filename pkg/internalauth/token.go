@@ -60,13 +60,14 @@ func (g *Generator) Generate(target, teamID, userID string, opts GenerateOptions
 	if g.config.NowFunc != nil {
 		now = g.config.NowFunc()
 	}
+	expiresAt := jwt.NewNumericDate(now.Add(ttl))
 
 	claims := &Claims{
 		Issuer:      g.config.Caller,
 		Subject:     teamID,
 		Audience:    target,
 		IssuedAt:    jwt.NewNumericDate(now),
-		ExpiresAt:   jwt.NewNumericDate(now.Add(ttl)),
+		ExpiresAt:   expiresAt,
 		ID:          generateJTI(),
 		Caller:      g.config.Caller,
 		Target:      target,
@@ -75,6 +76,10 @@ func (g *Generator) Generate(target, teamID, userID string, opts GenerateOptions
 		SandboxID:   opts.SandboxID,
 		Permissions: opts.Permissions,
 		Audit:       cloneAuditContext(opts.Audit),
+		QuotaAdmissionProof: prepareQuotaAdmissionProof(
+			opts.QuotaAdmissionProof,
+			expiresAt.Time,
+		),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
@@ -121,19 +126,24 @@ func (g *Generator) GenerateSystem(target string, opts GenerateOptions) (string,
 	if g.config.NowFunc != nil {
 		now = g.config.NowFunc()
 	}
+	expiresAt := jwt.NewNumericDate(now.Add(ttl))
 
 	claims := &Claims{
 		Issuer:      g.config.Caller,
 		Subject:     "system",
 		Audience:    target,
 		IssuedAt:    jwt.NewNumericDate(now),
-		ExpiresAt:   jwt.NewNumericDate(now.Add(ttl)),
+		ExpiresAt:   expiresAt,
 		ID:          generateJTI(),
 		Caller:      g.config.Caller,
 		Target:      target,
 		IsSystem:    true,
 		Permissions: opts.Permissions,
 		Audit:       cloneAuditContext(opts.Audit),
+		QuotaAdmissionProof: prepareQuotaAdmissionProof(
+			opts.QuotaAdmissionProof,
+			expiresAt.Time,
+		),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)

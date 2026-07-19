@@ -3,6 +3,7 @@ package plan
 import (
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -10,8 +11,236 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
+
+const testRegionStateID = "11111111-1111-4111-8111-111111111111"
+
+func TestCompileProjectsTeamQuotaDefaultsOnlyToRegionOwner(t *testing.T) {
+	limit := int64(25)
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Status: infrav1alpha1.Sandbox0InfraStatus{
+			TeamQuota: &infrav1alpha1.TeamQuotaStatus{StateID: testRegionStateID},
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			TeamQuota: &infrav1alpha1.TeamQuotaConfig{
+				Defaults: []infrav1alpha1.TeamQuotaPolicyConfig{
+					{
+						Key:   "sandbox_runtime_count",
+						Kind:  "capacity",
+						Limit: &limit,
+					},
+				},
+				DistributedEnforcement: infrav1alpha1.TeamQuotaDistributedEnforcementConfig{
+					PolicyCacheTTL: metav1.Duration{Duration: 7 * time.Second},
+				},
+			},
+			Network: &infrav1alpha1.NetworkConfig{},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+	if len(compiled.RegionalGateway.Config.TeamQuota.Defaults) != 1 {
+		t.Fatalf("regional gateway defaults = %#v, want one owner policy", compiled.RegionalGateway.Config.TeamQuota.Defaults)
+	}
+	if !compiled.RegionalGateway.Config.TeamQuota.PolicyOwner {
+		t.Fatal("expected regional gateway to own policy reconciliation")
+	}
+	if got := compiled.RegionalGateway.Config.TeamQuota.Defaults[0]; got.Limit == nil || *got.Limit != 25 {
+		t.Fatalf("regional gateway default = %#v, want sandbox runtime limit 25", got)
+	}
+	if compiled.Manager.Config.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration != 7*time.Second {
+		t.Fatalf("manager policy cache ttl = %s, want 7s", compiled.Manager.Config.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration)
+	}
+	if compiled.Manager.Config.TeamQuotaDistributedEnforcement.StateID != testRegionStateID {
+		t.Fatalf("manager state ID = %q, want %q", compiled.Manager.Config.TeamQuotaDistributedEnforcement.StateID, testRegionStateID)
+	}
+	if compiled.Network.Config.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration != 7*time.Second {
+		t.Fatalf("network policy cache ttl = %s, want 7s", compiled.Network.Config.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration)
+	}
+	if compiled.Network.Config.TeamQuotaDistributedEnforcement.StateID != testRegionStateID {
+		t.Fatalf("network state ID = %q, want %q", compiled.Network.Config.TeamQuotaDistributedEnforcement.StateID, testRegionStateID)
+	}
+}
+
+func TestCompileValidatesRegionOwnerStateIdentityLifecycle(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Region:    "region-1",
+			Database:  testExternalDatabase(),
+			Redis:     testExternalRedis(),
+			TeamQuota: &infrav1alpha1.TeamQuotaConfig{},
+			Services: &infrav1alpha1.ServicesConfig{
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+	const missingStatusMessage = "region Team Quota owner requires a canonical UUID v4 in status.teamQuota.stateId initialized by infra-operator"
+
+	compiled := Compile(infra)
+	if !containsString(compiled.Validation.FatalErrors, missingStatusMessage) {
+		t.Fatalf("owner without initialized status was accepted: %#v", compiled.Validation.FatalErrors)
+	}
+
+	infra.Status.TeamQuota = &infrav1alpha1.TeamQuotaStatus{StateID: testRegionStateID}
+	compiled = Compile(infra)
+	if containsString(compiled.Validation.FatalErrors, missingStatusMessage) {
+		t.Fatalf("canonical owner status was rejected: %#v", compiled.Validation.FatalErrors)
+	}
+	if got := compiled.RegionalGateway.Config.TeamQuota.DistributedEnforcement.StateID; got != testRegionStateID {
+		t.Fatalf("owner runtime state ID = %q, want status value %q", got, testRegionStateID)
+	}
+
+	infra.Spec.TeamQuota.StateID = testRegionStateID
+	compiled = Compile(infra)
+	if containsString(compiled.Validation.FatalErrors, "recovery input must match") {
+		t.Fatalf("matching recovery input was rejected: %#v", compiled.Validation.FatalErrors)
+	}
+
+	infra.Spec.TeamQuota.StateID = "4f54208d-4f01-42da-bdbc-88cc5793857b"
+	compiled = Compile(infra)
+	const mismatchMessage = "region Team Quota owner spec.teamQuota.stateId recovery input must match the immutable status.teamQuota.stateId"
+	if !containsString(compiled.Validation.FatalErrors, mismatchMessage) {
+		t.Fatalf("changed recovery input was accepted: %#v", compiled.Validation.FatalErrors)
+	}
+	if got := compiled.RegionalGateway.Config.TeamQuota.DistributedEnforcement.StateID; got != testRegionStateID {
+		t.Fatalf("mismatched spec overrode authoritative status: got %q, want %q", got, testRegionStateID)
+	}
+}
+
+func TestCompileProjectsConsumerOnlyTeamQuotaSettingsWithoutDefaults(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ControlPlane: &infrav1alpha1.ControlPlaneConfig{
+				URL: "https://region.example.com",
+				InternalAuthPublicKeySecret: infrav1alpha1.SecretKeyRef{
+					Name: "control-plane-public-key",
+					Key:  "public.key",
+				},
+			},
+			Database: testExternalDatabase(),
+			Redis:    testExternalRedis(),
+			TeamQuota: &infrav1alpha1.TeamQuotaConfig{
+				StateID: testRegionStateID,
+				DistributedEnforcement: infrav1alpha1.TeamQuotaDistributedEnforcementConfig{
+					PolicyCacheTTL: metav1.Duration{Duration: 7 * time.Second},
+					LeaseTTL:       metav1.Duration{Duration: 21 * time.Second},
+					RenewInterval:  metav1.Duration{Duration: 7 * time.Second},
+				},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+	joined := strings.Join(compiled.Validation.FatalErrors, "\n")
+	if strings.Contains(joined, "complete policy") || strings.Contains(joined, "must omit spec.teamQuota.defaults") {
+		t.Fatalf("consumer-only settings were rejected: %#v", compiled.Validation.FatalErrors)
+	}
+	distributed := compiled.Manager.Config.TeamQuotaDistributedEnforcement
+	if distributed.PolicyCacheTTL.Duration != 7*time.Second ||
+		distributed.LeaseTTL.Duration != 21*time.Second ||
+		distributed.RenewInterval.Duration != 7*time.Second ||
+		distributed.StateID != testRegionStateID {
+		t.Fatalf("manager distributed settings = %#v, want 7s/21s/7s", distributed)
+	}
+}
+
+func TestCompileRejectsDefaultsOnConsumerOnlyTeamQuota(t *testing.T) {
+	limit := int64(10)
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			ControlPlane: &infrav1alpha1.ControlPlaneConfig{
+				URL: "https://region.example.com",
+				InternalAuthPublicKeySecret: infrav1alpha1.SecretKeyRef{
+					Name: "control-plane-public-key",
+					Key:  "public.key",
+				},
+			},
+			Database: testExternalDatabase(),
+			Redis:    testExternalRedis(),
+			TeamQuota: &infrav1alpha1.TeamQuotaConfig{
+				StateID: testRegionStateID,
+				Defaults: []infrav1alpha1.TeamQuotaPolicyConfig{{
+					Key:   string(teamquota.KeySandboxRuntimeCount),
+					Kind:  string(teamquota.KindCapacity),
+					Limit: &limit,
+				}},
+			},
+			Services: &infrav1alpha1.ServicesConfig{
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+	if !containsString(compiled.Validation.FatalErrors, "consumer-only Team Quota configuration must omit spec.teamQuota.defaults") {
+		t.Fatalf("expected consumer-only defaults validation error, got %#v", compiled.Validation.FatalErrors)
+	}
+}
+
+func TestValidateTeamQuotaPolicyRateInterval(t *testing.T) {
+	tokens := int64(10)
+	burst := int64(20)
+	tests := []struct {
+		name     string
+		interval time.Duration
+		wantErr  bool
+	}{
+		{name: "minimum", interval: time.Millisecond},
+		{name: "maximum", interval: time.Hour},
+		{name: "zero", interval: 0, wantErr: true},
+		{name: "negative", interval: -time.Millisecond, wantErr: true},
+		{name: "fractional millisecond", interval: 1500 * time.Microsecond, wantErr: true},
+		{name: "above maximum", interval: time.Hour + time.Millisecond, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			interval := metav1.Duration{Duration: tt.interval}
+			err := validateTeamQuotaPolicy(infrav1alpha1.TeamQuotaPolicyConfig{
+				Key:      string(teamquota.KeyAPIRequests),
+				Kind:     string(teamquota.KindRate),
+				Tokens:   &tokens,
+				Interval: &interval,
+				Burst:    &burst,
+			})
+			if tt.wantErr && err == nil {
+				t.Fatalf("validateTeamQuotaPolicy(%s) error = nil, want error", tt.interval)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("validateTeamQuotaPolicy(%s) error = %v", tt.interval, err)
+			}
+		})
+	}
+}
 
 func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
@@ -318,6 +547,11 @@ func TestCompileDefaultsDataPlaneIdentityFromPublicExposure(t *testing.T) {
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
 				},
+				RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
 			},
 		},
 	}
@@ -341,6 +575,9 @@ func TestCompileDefaultsDataPlaneIdentityFromPublicExposure(t *testing.T) {
 	}
 	if got := compiled.Network.ClusterID; got != naming.DefaultClusterID {
 		t.Fatalf("network runtime cluster ID = %q, want %q", got, naming.DefaultClusterID)
+	}
+	if got := compiled.RegionalGateway.Config.RegionID; got != "aws-us-east-1" {
+		t.Fatalf("regional gateway config region ID = %q, want aws-us-east-1", got)
 	}
 }
 
@@ -932,6 +1169,429 @@ func TestCompileDisablesInitUserWhenDatabaseIsDisabled(t *testing.T) {
 }
 
 func TestCompileTracksValidationRequirements(t *testing.T) {
+	t.Run("global identity overload guard requires Redis", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Services: &infrav1alpha1.ServicesConfig{
+					GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(
+			compiled.Validation.FatalErrors,
+			"public identity overload guard requires spec.redis type builtin or external",
+		) {
+			t.Fatalf("expected overload guard Redis validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+
+		infra.Spec.Redis = testExternalRedis()
+		compiled = Compile(infra)
+		if containsString(
+			compiled.Validation.FatalErrors,
+			"public identity overload guard requires spec.redis type builtin or external",
+		) {
+			t.Fatalf("shared Redis was not accepted: %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("regional Team Quota owner requires complete defaults", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Redis: testExternalRedis(),
+				Services: &infrav1alpha1.ServicesConfig{
+					RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "region Team Quota owner requires spec.teamQuota with one complete policy for all 21 keys") {
+			t.Fatalf("expected Team Quota owner validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("Team Quota consumers require trusted region state ID", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Region:       "region-1",
+				ControlPlane: &infrav1alpha1.ControlPlaneConfig{},
+				Database:     testExternalDatabase(),
+				Redis:        testExternalRedis(),
+				Services: &infrav1alpha1.ServicesConfig{
+					Manager: &infrav1alpha1.ManagerServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+		const message = "Team Quota consumers require spec.teamQuota.stateId to be a canonical UUID v4 copied from the region owner's status.teamQuota.stateId"
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, message) {
+			t.Fatalf("expected missing state ID error, got %#v", compiled.Validation.FatalErrors)
+		}
+
+		infra.Spec.TeamQuota = &infrav1alpha1.TeamQuotaConfig{StateID: "not-a-uuid"}
+		compiled = Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, message) {
+			t.Fatalf("expected invalid state ID error, got %#v", compiled.Validation.FatalErrors)
+		}
+
+		infra.Spec.TeamQuota.StateID = testRegionStateID
+		compiled = Compile(infra)
+		if containsString(compiled.Validation.FatalErrors, message) {
+			t.Fatalf("valid state ID was rejected: %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("fullmode cluster gateway Team Quota owner requires complete defaults", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Redis: testExternalRedis(),
+				Services: &infrav1alpha1.ServicesConfig{
+					ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+						Config: &infrav1alpha1.ClusterGatewayConfig{AuthMode: "public"},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "region Team Quota owner requires spec.teamQuota with one complete policy for all 21 keys") {
+			t.Fatalf("expected fullmode Team Quota owner validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("Team Quota consumers require a region ID", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Database:  testExternalDatabase(),
+				Redis:     testExternalRedis(),
+				TeamQuota: testCompleteTeamQuota(),
+				Services: &infrav1alpha1.ServicesConfig{
+					ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+						Config: &infrav1alpha1.ClusterGatewayConfig{AuthMode: "public"},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		const message = "Team Quota consumers require a non-empty region ID from spec.region or spec.publicExposure.regionId"
+		if !containsString(compiled.Validation.FatalErrors, message) {
+			t.Fatalf("expected missing region ID error, got %#v", compiled.Validation.FatalErrors)
+		}
+
+		infra.Spec.Region = "private-region"
+		compiled = Compile(infra)
+		if containsString(compiled.Validation.FatalErrors, message) {
+			t.Fatalf("explicit canonical region ID was rejected: %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("local consumers require a policy owner", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Database: testExternalDatabase(),
+				Redis:    testExternalRedis(),
+				Services: &infrav1alpha1.ServicesConfig{
+					ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+						Config: &infrav1alpha1.ClusterGatewayConfig{AuthMode: "internal"},
+					},
+					Manager: &infrav1alpha1.ManagerServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(
+			compiled.Validation.FatalErrors,
+			"Team Quota consumers require a regional-gateway or fullmode cluster-gateway policy owner, or spec.controlPlane for an external region policy owner",
+		) {
+			t.Fatalf("expected missing Team Quota policy owner error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("scheduler is a PostgreSQL-only Team Quota consumer", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Region:    "region-1",
+				Database:  testExternalDatabase(),
+				TeamQuota: &infrav1alpha1.TeamQuotaConfig{StateID: testRegionStateID},
+				Services: &infrav1alpha1.ServicesConfig{
+					Scheduler: &infrav1alpha1.SchedulerServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		const ownerMessage = "Team Quota consumers require a regional-gateway or fullmode cluster-gateway policy owner, or spec.controlPlane for an external region policy owner"
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, ownerMessage) {
+			t.Fatalf("expected scheduler-only policy owner error, got %#v", compiled.Validation.FatalErrors)
+		}
+		if containsString(compiled.Validation.FatalErrors, "Team Quota distributed consumers require spec.redis type builtin or external") {
+			t.Fatalf("PostgreSQL-only scheduler incorrectly required Redis: %#v", compiled.Validation.FatalErrors)
+		}
+
+		infra.Spec.ControlPlane = &infrav1alpha1.ControlPlaneConfig{}
+		compiled = Compile(infra)
+		if containsString(compiled.Validation.FatalErrors, ownerMessage) {
+			t.Fatalf("external scheduler policy owner was not accepted: %#v", compiled.Validation.FatalErrors)
+		}
+		if containsString(compiled.Validation.FatalErrors, "Team Quota distributed consumers require spec.redis type builtin or external") {
+			t.Fatalf("external PostgreSQL-only scheduler incorrectly required Redis: %#v", compiled.Validation.FatalErrors)
+		}
+		if compiled.Scheduler.Config.RegionID != "region-1" ||
+			compiled.Scheduler.Config.TeamQuotaStateID != testRegionStateID {
+			t.Fatalf("scheduler state identity config = %#v", compiled.Scheduler.Config)
+		}
+
+		infra.Spec.Database = &infrav1alpha1.DatabaseConfig{
+			Type: infrav1alpha1.DatabaseTypeBuiltin,
+			Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+				Enabled: true,
+			},
+		}
+		compiled = Compile(infra)
+		if !containsString(
+			compiled.Validation.FatalErrors,
+			"consumer-only Team Quota services require spec.database.type external so they share the region PostgreSQL",
+		) {
+			t.Fatalf("expected scheduler shared PostgreSQL error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("external data plane omits owner defaults but requires Redis", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				ControlPlane: &infrav1alpha1.ControlPlaneConfig{},
+				Database:     testExternalDatabase(),
+				Redis:        testExternalRedis(),
+				Services: &infrav1alpha1.ServicesConfig{
+					Manager: &infrav1alpha1.ManagerServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if containsString(compiled.Validation.FatalErrors, "region Team Quota owner requires spec.teamQuota with one complete policy for all 21 keys") {
+			t.Fatalf("external data plane was incorrectly treated as policy owner: %#v", compiled.Validation.FatalErrors)
+		}
+		if containsString(compiled.Validation.FatalErrors, "Team Quota distributed consumers require spec.redis type builtin or external") {
+			t.Fatalf("external data plane Redis was not accepted: %#v", compiled.Validation.FatalErrors)
+		}
+		if containsString(compiled.Validation.FatalErrors, "consumer-only distributed Team Quota services require spec.redis.type external so they share the region Redis") {
+			t.Fatalf("external data plane shared Redis was not accepted: %#v", compiled.Validation.FatalErrors)
+		}
+		if containsString(compiled.Validation.FatalErrors, "consumer-only Team Quota services require spec.database.type external so they share the region PostgreSQL") {
+			t.Fatalf("external data plane shared PostgreSQL was not accepted: %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("external data plane rejects cluster-local builtin Redis", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				ControlPlane: &infrav1alpha1.ControlPlaneConfig{},
+				Database:     testExternalDatabase(),
+				Redis: &infrav1alpha1.RedisConfig{
+					Type: infrav1alpha1.RedisTypeBuiltin,
+					Builtin: &infrav1alpha1.BuiltinRedisConfig{
+						Enabled: true,
+					},
+				},
+				Services: &infrav1alpha1.ServicesConfig{
+					Manager: &infrav1alpha1.ManagerServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "consumer-only distributed Team Quota services require spec.redis.type external so they share the region Redis") {
+			t.Fatalf("expected shared external Redis validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("external data plane rejects cluster-local builtin PostgreSQL", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				ControlPlane: &infrav1alpha1.ControlPlaneConfig{},
+				Database: &infrav1alpha1.DatabaseConfig{
+					Type: infrav1alpha1.DatabaseTypeBuiltin,
+				},
+				Redis: testExternalRedis(),
+				Services: &infrav1alpha1.ServicesConfig{
+					Manager: &infrav1alpha1.ManagerServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "consumer-only Team Quota services require spec.database.type external so they share the region PostgreSQL") {
+			t.Fatalf("expected shared external PostgreSQL validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("Team Quota distributed consumer requires Redis", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				ControlPlane: &infrav1alpha1.ControlPlaneConfig{},
+				Database:     testExternalDatabase(),
+				Services: &infrav1alpha1.ServicesConfig{
+					Manager: &infrav1alpha1.ManagerServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "Team Quota distributed consumers require spec.redis type builtin or external") {
+			t.Fatalf("expected Team Quota Redis validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("Team Quota owner rejects a semantically invalid policy", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Redis:     testExternalRedis(),
+				TeamQuota: testCompleteTeamQuota(),
+				Services: &infrav1alpha1.ServicesConfig{
+					RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+		for index := range infra.Spec.TeamQuota.Defaults {
+			if infra.Spec.TeamQuota.Defaults[index].Kind == string(teamquota.KindCapacity) {
+				*infra.Spec.TeamQuota.Defaults[index].Limit = -1
+				break
+			}
+		}
+
+		compiled := Compile(infra)
+		joined := strings.Join(compiled.Validation.FatalErrors, "\n")
+		if !strings.Contains(joined, "default policy") || !strings.Contains(joined, "non-negative") {
+			t.Fatalf("expected semantic Team Quota policy error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("Team Quota owner rejects a negative policy cache TTL", func(t *testing.T) {
+		infra := &infrav1alpha1.Sandbox0Infra{
+			Spec: infrav1alpha1.Sandbox0InfraSpec{
+				Redis:     testExternalRedis(),
+				TeamQuota: testCompleteTeamQuota(),
+				Services: &infrav1alpha1.ServicesConfig{
+					RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+						},
+					},
+				},
+			},
+		}
+		infra.Spec.TeamQuota.DistributedEnforcement.PolicyCacheTTL.Duration = -time.Second
+
+		compiled := Compile(infra)
+		if !containsString(compiled.Validation.FatalErrors, "spec.teamQuota.distributedEnforcement.policyCacheTtl must be non-negative") {
+			t.Fatalf("expected Team Quota cache TTL validation error, got %#v", compiled.Validation.FatalErrors)
+		}
+	})
+
+	t.Run("Team Quota leases require whole milliseconds", func(t *testing.T) {
+		for _, test := range []struct {
+			name    string
+			mutate  func(*infrav1alpha1.TeamQuotaDistributedEnforcementConfig)
+			message string
+		}{
+			{
+				name: "lease TTL",
+				mutate: func(config *infrav1alpha1.TeamQuotaDistributedEnforcementConfig) {
+					config.LeaseTTL.Duration = 15*time.Millisecond + 500*time.Microsecond
+					config.RenewInterval.Duration = 5 * time.Millisecond
+				},
+				message: "spec.teamQuota.distributedEnforcement.leaseTtl must use whole milliseconds",
+			},
+			{
+				name: "renew interval",
+				mutate: func(config *infrav1alpha1.TeamQuotaDistributedEnforcementConfig) {
+					config.LeaseTTL.Duration = 15 * time.Millisecond
+					config.RenewInterval.Duration = 5*time.Millisecond + 500*time.Microsecond
+				},
+				message: "spec.teamQuota.distributedEnforcement.renewInterval must use whole milliseconds",
+			},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				infra := &infrav1alpha1.Sandbox0Infra{
+					Spec: infrav1alpha1.Sandbox0InfraSpec{
+						Region:    "test-region",
+						Database:  testExternalDatabase(),
+						Redis:     testExternalRedis(),
+						TeamQuota: testCompleteTeamQuota(),
+						Services: &infrav1alpha1.ServicesConfig{
+							RegionalGateway: &infrav1alpha1.RegionalGatewayServiceConfig{
+								WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+									EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+								},
+							},
+						},
+					},
+				}
+				test.mutate(&infra.Spec.TeamQuota.DistributedEnforcement)
+
+				compiled := Compile(infra)
+				if !containsString(compiled.Validation.FatalErrors, test.message) {
+					t.Fatalf("expected %q, got %#v", test.message, compiled.Validation.FatalErrors)
+				}
+			})
+		}
+	})
+
 	t.Run("control-plane public key is required when data-plane uses control-plane config", func(t *testing.T) {
 		infra := &infrav1alpha1.Sandbox0Infra{
 			Spec: infrav1alpha1.Sandbox0InfraSpec{
@@ -1112,6 +1772,116 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 			t.Fatalf("expected regional/cluster auth mode validation error, got %#v", compiled.Validation.FatalErrors)
 		}
 	})
+}
+
+func testExternalRedis() *infrav1alpha1.RedisConfig {
+	return &infrav1alpha1.RedisConfig{
+		Type: infrav1alpha1.RedisTypeExternal,
+		External: &infrav1alpha1.ExternalRedisConfig{
+			URLSecret: infrav1alpha1.RedisURLSecretRef{Name: "redis-url", Key: "url"},
+		},
+	}
+}
+
+func testExternalDatabase() *infrav1alpha1.DatabaseConfig {
+	return &infrav1alpha1.DatabaseConfig{
+		Type: infrav1alpha1.DatabaseTypeExternal,
+		External: &infrav1alpha1.ExternalDatabaseConfig{
+			Host:     "db.example.com",
+			Port:     5432,
+			Database: "sandbox0",
+			Username: "sandbox0",
+		},
+	}
+}
+
+func testCompleteTeamQuota() *infrav1alpha1.TeamQuotaConfig {
+	config := &infrav1alpha1.TeamQuotaConfig{
+		StateID:  testRegionStateID,
+		Defaults: make([]infrav1alpha1.TeamQuotaPolicyConfig, 0, len(teamquota.Keys())),
+	}
+	for _, key := range teamquota.Keys() {
+		kind, _ := teamquota.KindForKey(key)
+		policy := infrav1alpha1.TeamQuotaPolicyConfig{
+			Key:  string(key),
+			Kind: string(kind),
+		}
+		switch kind {
+		case teamquota.KindCapacity, teamquota.KindConcurrency:
+			value := int64(100)
+			policy.Limit = &value
+		case teamquota.KindRate:
+			tokens := int64(10)
+			burst := int64(20)
+			interval := metav1.Duration{Duration: time.Second}
+			policy.Tokens = &tokens
+			policy.Burst = &burst
+			policy.Interval = &interval
+		}
+		config.Defaults = append(config.Defaults, policy)
+	}
+	return config
+}
+
+func TestCompileStartsFullmodeTeamQuotaOwnerBeforeConsumers(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "fullmode",
+			Namespace: "sandbox0-system",
+		},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			PublicExposure: &infrav1alpha1.PublicExposureConfig{
+				RegionID: "aws-us-east-1",
+			},
+			Database: &infrav1alpha1.DatabaseConfig{
+				Type: infrav1alpha1.DatabaseTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+					Enabled: true,
+				},
+			},
+			Redis: &infrav1alpha1.RedisConfig{
+				Type: infrav1alpha1.RedisTypeBuiltin,
+				Builtin: &infrav1alpha1.BuiltinRedisConfig{
+					Enabled: true,
+				},
+			},
+			TeamQuota: testCompleteTeamQuota(),
+			Services: &infrav1alpha1.ServicesConfig{
+				ClusterGateway: &infrav1alpha1.ClusterGatewayServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+					Config: &infrav1alpha1.ClusterGatewayConfig{
+						AuthMode: "public",
+					},
+				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
+						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
+					},
+				},
+			},
+		},
+	}
+
+	compiled := Compile(infra)
+	names := workflowStepNames(compiled.Workflow.Steps)
+	clusterGatewayIndex := -1
+	managerIndex := -1
+	for index, name := range names {
+		switch name {
+		case "cluster-gateway":
+			clusterGatewayIndex = index
+		case "manager":
+			managerIndex = index
+		}
+	}
+	if clusterGatewayIndex < 0 || managerIndex < 0 {
+		t.Fatalf("missing fullmode workflow steps: %#v", names)
+	}
+	if clusterGatewayIndex >= managerIndex {
+		t.Fatalf("fullmode Team Quota owner must start before manager: %#v", names)
+	}
 }
 
 func TestCompileTracksWorkflowRequirements(t *testing.T) {

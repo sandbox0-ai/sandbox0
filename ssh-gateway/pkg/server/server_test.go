@@ -28,6 +28,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 	sshcrypto "golang.org/x/crypto/ssh"
@@ -93,8 +94,16 @@ func TestServerInteractiveShellBridge(t *testing.T) {
 		SSHHostKeyPath: hostKeyPath,
 	}
 	authorizer := &staticAuthorizer{target: &SessionTarget{SandboxID: "sb_123", UserID: "user-1", TeamID: "team-1", ProcdURL: procd.URL}}
+	networkQuota := newRecordingNetworkByteQuota()
 
-	server, err := NewServer(cfg, authorizer, internalAuthGen, zaptest.NewLogger(t))
+	server, err := NewServer(
+		cfg,
+		authorizer,
+		internalAuthGen,
+		zaptest.NewLogger(t),
+		WithActiveConnectionQuota(newFakeActiveConnectionQuota(-1)),
+		WithNetworkByteQuota(networkQuota),
+	)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
@@ -155,6 +164,12 @@ func TestServerInteractiveShellBridge(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if got := networkQuota.bytes(teamquota.KeyNetworkIngressBytes); got != int64(len("echo hi\n")) {
+		t.Fatalf("network ingress bytes = %d, want %d", got, len("echo hi\n"))
+	}
+	if got := networkQuota.bytes(teamquota.KeyNetworkEgressBytes); got != int64(len("ECHO HI\n")) {
+		t.Fatalf("network egress bytes = %d, want %d", got, len("ECHO HI\n"))
 	}
 }
 
@@ -359,7 +374,10 @@ func TestServeTracksActiveConnections(t *testing.T) {
 	metrics := obsmetrics.NewSSHGateway(registry)
 	server, err := NewServer(&config.SSHGatewayConfig{
 		SSHHostKeyPath: writeTestHostKey(t),
-	}, &staticAuthorizer{}, nil, zaptest.NewLogger(t), WithMetrics(metrics))
+	}, &staticAuthorizer{}, nil, zaptest.NewLogger(t), append(
+		permissiveTeamQuotaOptions(),
+		WithMetrics(metrics),
+	)...)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
@@ -430,7 +448,7 @@ func startTestSSHGateway(t *testing.T, hostKeyPath, procdURL string, internalAut
 	t.Helper()
 	server, err := NewServer(&config.SSHGatewayConfig{
 		SSHHostKeyPath: hostKeyPath,
-	}, &staticAuthorizer{target: &SessionTarget{SandboxID: "sb_123", UserID: "user-1", TeamID: "team-1", ProcdURL: procdURL}}, internalAuthGen, logger)
+	}, &staticAuthorizer{target: &SessionTarget{SandboxID: "sb_123", UserID: "user-1", TeamID: "team-1", ProcdURL: procdURL}}, internalAuthGen, logger, permissiveTeamQuotaOptions()...)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}

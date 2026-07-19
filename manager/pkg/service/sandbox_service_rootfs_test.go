@@ -3,12 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,8 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/sandbox0-ai/sandbox0/pkg/tokenbucket"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,9 +27,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	ktesting "k8s.io/client-go/testing"
 )
+
+func TestPrepareRootFSObjectPublishFailsClosedWithoutTeamQuotaStore(t *testing.T) {
+	service := &SandboxService{}
+	err := service.prepareRootFSObjectPublish(context.Background(), "stage-a", &SandboxRootFSState{
+		TeamID:        "team-a",
+		DiffObjectKey: "rootfs/team-a/object.tar",
+	}, time.Now())
+	if !errors.Is(err, ErrTeamQuotaUnavailable) {
+		t.Fatalf("prepareRootFSObjectPublish() error = %v, want ErrTeamQuotaUnavailable", err)
+	}
+}
 
 func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	saveCalled := false
@@ -125,14 +134,15 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	}}
 	enqueuer := &recordingPauseEnqueuer{}
 	svc := &SandboxService{
-		k8sClient:     k8sClient,
-		podLister:     newTestPodLister(t, pod),
-		sandboxStore:  store,
-		ctldClient:    NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config:        SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:         systemTime{},
-		logger:        zap.NewNop(),
-		pauseEnqueuer: enqueuer,
+		k8sClient:      k8sClient,
+		podLister:      newTestPodLister(t, pod),
+		sandboxStore:   store,
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
+		ctldClient:     NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:         SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:          systemTime{},
+		logger:         zap.NewNop(),
+		pauseEnqueuer:  enqueuer,
 	}
 	var procdCalls []string
 	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
@@ -238,13 +248,14 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 		},
 	}
 	svc := &SandboxService{
-		k8sClient:    fake.NewSimpleClientset(pod),
-		podLister:    newTestPodLister(t, pod),
-		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:        systemTime{},
-		logger:       zap.NewNop(),
+		k8sClient:      fake.NewSimpleClientset(pod),
+		podLister:      newTestPodLister(t, pod),
+		sandboxStore:   store,
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
+		ctldClient:     NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:         SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:          systemTime{},
+		logger:         zap.NewNop(),
 	}
 	defer attachRootFSTestProcd(t, pod, svc, nil)()
 	addRootFSTestPauseTxn(store, pod, SandboxLifecyclePhasePreparing)
@@ -323,6 +334,7 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 		k8sClient:           k8sClient,
 		podLister:           newTestPodLister(t, pod),
 		sandboxStore:        store,
+		teamQuotaStore:      &permissiveTeamQuotaCapacityStore{},
 		ctldClient:          NewCtldClient(CtldClientConfig{Timeout: time.Second}),
 		config:              SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
 		clock:               systemTime{},
@@ -337,7 +349,7 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 	assert.Nil(t, store.rootFSStates["sandbox-1"])
 	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
 	deleter := svc.rootFSObjectDeleter.(*recordingRootFSObjectDeleter)
-	assert.Equal(t, []string{"sandbox-rootfs/team-1/sandbox-1/3/sha256/stale.tar"}, deleter.keys)
+	assert.Empty(t, deleter.keys, "request path must not race durable rootfs GC")
 }
 
 func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
@@ -426,10 +438,11 @@ func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
 		},
 	}
 	svc := &SandboxService{
-		k8sClient:    fake.NewSimpleClientset(pod),
-		podLister:    newTestPodLister(t, pod),
-		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		k8sClient:      fake.NewSimpleClientset(pod),
+		podLister:      newTestPodLister(t, pod),
+		sandboxStore:   store,
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
+		ctldClient:     NewCtldClient(CtldClientConfig{Timeout: time.Second}),
 		config: SandboxServiceConfig{
 			CtldEnabled:               true,
 			CtldPort:                  ctldPort,
@@ -531,13 +544,14 @@ func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing
 		},
 	}
 	svc := &SandboxService{
-		k8sClient:    fake.NewSimpleClientset(pod),
-		podLister:    newTestPodLister(t, pod),
-		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:        systemTime{},
-		logger:       zap.NewNop(),
+		k8sClient:      fake.NewSimpleClientset(pod),
+		podLister:      newTestPodLister(t, pod),
+		sandboxStore:   store,
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
+		ctldClient:     NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:         SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:          systemTime{},
+		logger:         zap.NewNop(),
 	}
 	defer attachRootFSTestProcd(t, pod, svc, nil)()
 	addRootFSTestPauseTxn(store, pod, SandboxLifecyclePhasePreparing)
@@ -733,172 +747,104 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSLayerChain(t *testing.T) {
 	assert.Equal(t, "rootfs/child.tar", applyReq.Layers[1].Descriptor.ObjectKey)
 }
 
-func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T) {
-	withClaimTestPublicKey(t)
-
-	const checkpointDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	templateNamespace, err := naming.TemplateNamespaceForTeam("team-1")
-	require.NoError(t, err)
-
-	var applyTargets []string
+func TestRootFSCheckpointApplyFailureDoesNotCreateFallbackRuntime(t *testing.T) {
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/rootfs/apply":
-			var req ctldapi.ApplyRootFSRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-			applyTargets = append(applyTargets, req.Target.PodName)
-			assert.Equal(t, checkpointDigest, req.ExpectedBaseImageDigest)
-			if req.Target.PodName == "pod-current" {
-				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Error: "apply rootfs diff: simulated conflict"})
-				return
-			}
-			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
-		case strings.HasSuffix(r.URL.Path, "/probes/readiness"):
-			_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
-		case r.URL.Path == "/api/v1/volume-portals/check":
-			_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true})
-		default:
-			t.Fatalf("unexpected ctld path: %s", r.URL.Path)
-		}
+		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+		require.NoError(t, json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{
+			Error: "apply rootfs diff: simulated conflict",
+		}))
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
-	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/initialize", r.URL.Path)
-		require.Len(t, applyTargets, 2)
-		require.NoError(t, spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-1", TeamID: "team-1"}))
-	}))
-	defer procd.Close()
-	procdURL, procdPort := parsedTestServer(t, procd.URL)
-
-	currentPod := rootFSTestPod("pod-current", "sandbox-1", "team-1")
-	currentPod.Namespace = templateNamespace
-	currentPod.Status.HostIP = ctldURL.Hostname()
-	currentPod.Status.PodIP = procdURL.Hostname()
-	indexer := newClaimTestPodIndexer(t, currentPod)
-	k8sClient := fake.NewSimpleClientset(currentPod)
-	var fallbackImage string
-	k8sClient.PrependReactor("create", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
-		pod := action.(ktesting.CreateAction).GetObject().(*corev1.Pod).DeepCopy()
-		require.Len(t, pod.Spec.Containers, 1)
-		fallbackImage = pod.Spec.Containers[0].Image
-
-		readyPod := pod.DeepCopy()
-		readyPod.UID = types.UID("fallback-uid")
-		readyPod.Status.Phase = corev1.PodRunning
-		readyPod.Status.HostIP = ctldURL.Hostname()
-		readyPod.Status.PodIP = procdURL.Hostname()
-		readyPod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:  "procd",
-			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-		}}
-		require.NoError(t, indexer.Add(readyPod))
+	oldPod := rootFSTestPod("pod-current", "sandbox-1", "team-1")
+	oldPod.Status.HostIP = ctldURL.Hostname()
+	oldPod.Finalizers = []string{"sandbox0.ai/test-finalizer"}
+	k8sClient := fake.NewSimpleClientset(oldPod)
+	var deleteCalls atomic.Int64
+	var createCalls atomic.Int64
+	k8sClient.PrependReactor("delete", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		deleteCalls.Add(1)
 		return false, nil, nil
 	})
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "template-1",
-			Namespace: templateNamespace,
-		},
-		Spec: v1alpha1.SandboxTemplateSpec{
+	k8sClient.PrependReactor("create", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		createCalls.Add(1)
+		return false, nil, nil
+	})
+	rateLimiter := &recordingSandboxStartRateLimiter{
+		decision: tokenbucket.Decision{Allowed: true},
+	}
+	state := &SandboxRootFSState{
+		SandboxID:         "sandbox-1",
+		TeamID:            "team-1",
+		BaseImageRef:      "docker.io/library/busybox:1.36",
+		BaseImageDigest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		DiffDigest:        "sha256:diff",
+		DiffMediaType:     "application/vnd.oci.image.layer.v1.tar",
+		DiffObjectKey:     "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
+		RuntimeGeneration: 3,
+	}
+	record := &SandboxRecord{
+		ID:                "sandbox-1",
+		TeamID:            "team-1",
+		UserID:            "user-1",
+		TemplateID:        "template-1",
+		TemplateName:      "template-1",
+		TemplateNamespace: "default",
+		TemplateSpec: v1alpha1.SandboxTemplateSpec{
 			MainContainer: v1alpha1.ContainerSpec{Image: "docker.io/library/busybox:1.37"},
 		},
+		RuntimeGeneration: 3,
+		Status:            SandboxStatusPaused,
 	}
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
-			"sandbox-1": {
-				ID:                "sandbox-1",
-				TeamID:            "team-1",
-				UserID:            "user-1",
-				TemplateID:        "template-1",
-				TemplateName:      "template-1",
-				TemplateNamespace: templateNamespace,
-				TemplateSpec:      template.Spec,
-				RuntimeGeneration: 3,
-				Status:            SandboxStatusPaused,
-			},
-		},
-		rootFSStates: map[string]*SandboxRootFSState{
-			"sandbox-1": {
-				SandboxID:           "sandbox-1",
-				TeamID:              "team-1",
-				RuntimeGeneration:   3,
-				Runtime:             "runc",
-				RuntimeHandler:      "io.containerd.runc.v2",
-				BaseImageRef:        "docker.io/library/busybox:1.36",
-				BaseImageDigest:     checkpointDigest,
-				Snapshotter:         "overlayfs",
-				SnapshotParent:      "parent-1",
-				SnapshotParentChain: []string{"parent-1", "parent-0"},
-				DiffDigest:          "sha256:diff",
-				DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
-				DiffSize:            123,
-				DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
-			},
-		},
+		records:      map[string]*SandboxRecord{record.ID: record},
+		rootFSStates: map[string]*SandboxRootFSState{record.ID: state},
 	}
 	svc := &SandboxService{
-		k8sClient:              k8sClient,
-		podLister:              corelisters.NewPodLister(indexer),
-		secretLister:           newClaimTestSecretLister(t),
-		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		sandboxStore:           store,
-		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
-		internalTokenGenerator: staticTokenGenerator{},
+		k8sClient:            k8sClient,
+		teamQuotaRateLimiter: rateLimiter,
+		sandboxStore:         store,
+		ctldClient:           NewCtldClient(CtldClientConfig{Timeout: time.Second}),
 		config: SandboxServiceConfig{
-			CtldEnabled:      true,
-			CtldPort:         ctldPort,
-			ProcdPort:        procdPort,
-			ProcdInitTimeout: time.Second,
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
 		},
 		clock:  systemTime{},
 		logger: zap.NewNop(),
 	}
-	record := store.records["sandbox-1"]
 
-	restoredPod, err := svc.finishRestoredSandboxRuntime(context.Background(), currentPod, record, "hot")
+	restoredPod, err := svc.finishRestoredSandboxRuntime(
+		context.Background(),
+		oldPod,
+		record,
+		"hot",
+	)
 
-	require.NoError(t, err)
-	txn := &SandboxLifecycleTxn{
-		ID:             "resume-txn-sandbox-1",
-		SandboxID:      "sandbox-1",
-		Kind:           SandboxLifecycleKindResume,
-		Phase:          SandboxLifecyclePhasePreparing,
-		FromGeneration: 3,
-		ToGeneration:   runtimeGenerationFromPod(restoredPod),
-		ToPodNamespace: restoredPod.Namespace,
-		ToPodName:      restoredPod.Name,
-	}
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{txn.ID: txn}
-	require.NoError(t, svc.commitResumedSandboxRuntime(context.Background(), restoredPod, record, txn))
-	require.Len(t, applyTargets, 2)
-	assert.Equal(t, "pod-current", applyTargets[0])
-	assert.NotEqual(t, "pod-current", applyTargets[1])
-	assert.Equal(t, "docker.io/library/busybox@"+checkpointDigest, fallbackImage)
-	assert.Equal(t, applyTargets[1], store.records["sandbox-1"].CurrentPodName)
-	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated conflict")
+	assert.Equal(t, oldPod.UID, restoredPod.UID)
+	assert.Zero(t, deleteCalls.Load(), "apply failure cleanup belongs to the outer caller")
+	assert.Zero(t, createCalls.Load(), "apply failure must not create a second runtime")
+	assert.Zero(t, rateLimiter.calls, "no hidden replacement start may consume rate quota")
+	stillPresent, getErr := k8sClient.CoreV1().Pods(oldPod.Namespace).Get(
+		context.Background(),
+		oldPod.Name,
+		metav1.GetOptions{},
+	)
+	require.NoError(t, getErr)
+	assert.Equal(t, oldPod.UID, stillPresent.UID)
 }
 
-func TestCheckpointBaseImageRefPinsDigest(t *testing.T) {
-	ref, err := checkpointBaseImageRef(&SandboxRootFSState{
-		BaseImageRef:    "registry.example.com:5000/team/image:old-tag",
-		BaseImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, "registry.example.com:5000/team/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ref)
-}
-
-func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
-	var saveCalled atomic.Bool
+func TestRestoreFailureCleanupCanSkipRootFSCheckpointPublish(t *testing.T) {
+	var checkpointCalled atomic.Bool
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/rootfs/save" {
-			saveCalled.Store(true)
+		if r.URL.Path == "/api/v1/rootfs/snapshots/prepare" ||
+			r.URL.Path == "/api/v1/rootfs/snapshots/publish" {
+			checkpointCalled.Store(true)
 		}
-		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{})
+		_ = json.NewEncoder(w).Encode(map[string]any{})
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -931,7 +877,7 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 
 	require.NoError(t, svc.pauseSandboxRuntime(context.Background(), "sandbox-1", false))
 
-	assert.False(t, saveCalled.Load())
+	assert.False(t, checkpointCalled.Load())
 	assert.Equal(t, originalState.DiffObjectKey, store.rootFSStates["sandbox-1"].DiffObjectKey)
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 }

@@ -160,6 +160,9 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 		return
 	}
 
+	if !limitJSONRequestBody(c, "API key request body", apikey.MaxCreateRequestBytes) {
+		return
+	}
 	var req CreateAPIKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
@@ -168,6 +171,13 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "name is required")
+		return
+	}
+	if err := apikey.ValidateCreateInput(req.Name, req.Roles); err != nil {
+		if writeResourceTooLarge(c, err, "API key request") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid API key request")
 		return
 	}
 
@@ -248,6 +258,9 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 		expiresAt,
 	)
 	if err != nil {
+		if writeTeamQuotaMutationError(c, err) {
+			return
+		}
 		h.logger.Error("Failed to create API key", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create API key")
 		return
@@ -303,17 +316,17 @@ func (h *APIKeyHandler) DeleteAPIKey(c *gin.Context) {
 		return
 	}
 
-	// Verify the key belongs to the user's team
+	// The selected team owns both admission and the mutation. Cross-team key
+	// targets must be retried with that team selected.
 	if key.TeamID != authCtx.TeamID {
-		// Check if user is member of the key's team
-		_, err := h.identity.GetTeamMember(c.Request.Context(), key.TeamID, authCtx.UserID)
-		if err != nil {
-			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to delete this API key")
-			return
-		}
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to delete this API key")
+		return
 	}
 
 	if err := h.keys.DeleteAPIKey(c.Request.Context(), keyID); err != nil {
+		if writeTeamQuotaMutationError(c, err) {
+			return
+		}
 		h.logger.Error("Failed to delete API key", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete API key")
 		return
@@ -357,13 +370,11 @@ func (h *APIKeyHandler) DeactivateAPIKey(c *gin.Context) {
 		return
 	}
 
-	// Verify the key belongs to the user's team
+	// The selected team owns both admission and the mutation. Cross-team key
+	// targets must be retried with that team selected.
 	if key.TeamID != authCtx.TeamID {
-		_, err := h.identity.GetTeamMember(c.Request.Context(), key.TeamID, authCtx.UserID)
-		if err != nil {
-			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to deactivate this API key")
-			return
-		}
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to deactivate this API key")
+		return
 	}
 
 	if err := h.keys.DeactivateAPIKey(c.Request.Context(), keyID); err != nil {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -16,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,9 +29,19 @@ type updateSandboxRequest struct {
 
 // claimSandbox claims a sandbox
 func (s *Server) claimSandbox(c *gin.Context) {
+	if !limitJSONRequestBody(c, "sandbox claim request body", template.MaxObjectRequestBytes) {
+		return
+	}
 	var req service.ClaimRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if err := service.ValidateClaimRequestSize(&req); err != nil {
+		if writeResourceTooLarge(c, err, "sandbox claim") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 
@@ -40,6 +52,9 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	}
 	req.TeamID = claims.TeamID
 	req.UserID = claims.UserID
+	if claims.Audit != nil {
+		req.OperationID = claims.Audit.OperationID
+	}
 
 	if req.Template == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
@@ -69,6 +84,9 @@ func (s *Server) claimSandbox(c *gin.Context) {
 
 	resp, err := s.sandboxService.ClaimSandbox(c.Request.Context(), &req)
 	if err != nil {
+		if writeResourceTooLarge(c, err, "sandbox claim") {
+			return
+		}
 		if errors.Is(err, service.ErrInvalidClaimRequest) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
@@ -95,8 +113,7 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 			return
 		}
-		if errors.Is(err, service.ErrQuotaExceeded) {
-			spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
+		if writeTeamQuotaMutationError(c, err) {
 			return
 		}
 		s.logger.Error("Failed to claim sandbox",
@@ -309,6 +326,9 @@ func hasInternalGatewayWildcard(permissions []string) bool {
 
 // updateSandbox updates sandbox configuration
 func (s *Server) updateSandbox(c *gin.Context) {
+	if !limitJSONRequestBody(c, "sandbox update request body", template.MaxObjectRequestBytes) {
+		return
+	}
 	sandboxID := c.Param("id")
 	if sandboxID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
@@ -328,6 +348,13 @@ func (s *Server) updateSandbox(c *gin.Context) {
 	}
 	if req.Config == nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "config is required")
+		return
+	}
+	if err := service.ValidateSandboxUpdateConfigSize(req.Config); err != nil {
+		if writeResourceTooLarge(c, err, "sandbox update") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
 
@@ -360,12 +387,14 @@ func (s *Server) updateSandbox(c *gin.Context) {
 
 	updated, err := s.sandboxService.UpdateSandbox(c.Request.Context(), sandboxID, req.Config)
 	if err != nil {
+		if writeResourceTooLarge(c, err, "sandbox update") {
+			return
+		}
 		if errors.Is(err, service.ErrInvalidClaimRequest) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
 		}
-		if errors.Is(err, service.ErrQuotaExceeded) {
-			spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
+		if writeTeamQuotaMutationError(c, err) {
 			return
 		}
 		s.logger.Error("Failed to update sandbox",
@@ -451,6 +480,9 @@ func (s *Server) terminateSandbox(c *gin.Context) {
 
 	err = s.sandboxService.TerminateSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
+		if writeTeamQuotaMutationError(c, err) {
+			return
+		}
 		s.logger.Error("Failed to terminate sandbox",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),
@@ -547,8 +579,9 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s conflicts with another lifecycle operation", action))
 	case apierrors.IsNotFound(err):
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
-	case errors.Is(err, service.ErrQuotaExceeded):
-		spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
+	case errors.Is(err, service.ErrTeamQuotaUnavailable), errors.Is(err, service.ErrQuotaExceeded),
+		teamquota.IsUnavailable(err), teamquota.IsExceeded(err):
+		writeTeamQuotaMutationError(c, err)
 	case errors.Is(err, service.ErrSandboxCheckpointRequiresCtld):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox checkpoint pause requires ctld")
 	case errors.Is(err, context.DeadlineExceeded):
@@ -558,6 +591,21 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 	default:
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to %s sandbox: %v", action, err))
 	}
+}
+
+func setTeamQuotaRetryAfter(c *gin.Context, err error) {
+	if c == nil {
+		return
+	}
+	retryAfter := service.TeamQuotaRetryAfter(err)
+	if retryAfter <= 0 {
+		return
+	}
+	seconds := int((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	c.Header("Retry-After", strconv.Itoa(seconds))
 }
 
 // refreshSandbox refreshes sandbox TTL

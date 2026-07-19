@@ -125,10 +125,10 @@ func Up(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ...O
 		goose.SetLogger(options.Logger)
 	}
 
-	// Set custom table name if provided
-	if options.TableName != "" {
-		goose.SetTableName(options.TableName)
-	}
+	// Goose keeps the table name in package-global state. Always reset it so a
+	// prior migration with a custom table cannot redirect an unrelated schema's
+	// version history.
+	goose.SetTableName(migrationTableName(options.TableName))
 
 	// Set schema search_path if specified
 	if options.Schema != "" {
@@ -189,9 +189,7 @@ func Status(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts 
 		}
 	}
 
-	if options.TableName != "" {
-		goose.SetTableName(options.TableName)
-	}
+	goose.SetTableName(migrationTableName(options.TableName))
 
 	return goose.StatusContext(ctx, db, resolvedDir)
 }
@@ -241,15 +239,20 @@ func Down(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ..
 		}
 	}
 
-	if options.TableName != "" {
-		goose.SetTableName(options.TableName)
-	}
+	goose.SetTableName(migrationTableName(options.TableName))
 
 	if err := goose.DownContext(ctx, db, resolvedDir); err != nil {
 		return fmt.Errorf("run down migration: %w", err)
 	}
 
 	return nil
+}
+
+func migrationTableName(configured string) string {
+	if configured == "" {
+		return "goose_db_version"
+	}
+	return configured
 }
 
 // Create creates a new migration file in the specified directory.

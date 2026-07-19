@@ -13,31 +13,28 @@ import (
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 )
 
-func TestApplyGatewayRateLimitConfigUsesMemoryWithoutRedis(t *testing.T) {
+func TestApplyTeamQuotaDistributedEnforcementConfigClearsRuntimeRedisWithoutRedis(t *testing.T) {
 	client := newTestClient(t)
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 	}
-	cfg := &apiconfig.GatewayConfig{}
+	cfg := &apiconfig.TeamQuotaDistributedEnforcementConfig{
+		RedisURL:       "redis://stale",
+		RedisKeyPrefix: "stale",
+		RedisTimeout:   metav1.Duration{Duration: time.Second},
+	}
 
-	if err := ApplyGatewayRateLimitConfig(context.Background(), client, infra, cfg); err != nil {
-		t.Fatalf("ApplyGatewayRateLimitConfig() error = %v", err)
+	if err := ApplyTeamQuotaDistributedEnforcementConfig(context.Background(), client, infra, cfg); err != nil {
+		t.Fatalf("ApplyTeamQuotaDistributedEnforcementConfig() error = %v", err)
 	}
-	if cfg.RateLimitBackend != ratelimit.BackendMemory {
-		t.Fatalf("RateLimitBackend = %q, want memory", cfg.RateLimitBackend)
-	}
-	if cfg.RateLimitRedisURL != "" {
-		t.Fatalf("RateLimitRedisURL = %q, want empty", cfg.RateLimitRedisURL)
-	}
-	if cfg.RedisURL != "" {
-		t.Fatalf("RedisURL = %q, want empty", cfg.RedisURL)
+	if cfg.RedisURL != "" || cfg.RedisKeyPrefix != "" || cfg.RedisTimeout.Duration != 0 {
+		t.Fatalf("runtime Redis config = %#v, want empty", cfg)
 	}
 }
 
-func TestApplyGatewayRateLimitConfigUsesBuiltinRedis(t *testing.T) {
+func TestApplyTeamQuotaDistributedEnforcementConfigUsesBuiltinRedis(t *testing.T) {
 	client := newTestClient(t)
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
@@ -49,38 +46,23 @@ func TestApplyGatewayRateLimitConfigUsesBuiltinRedis(t *testing.T) {
 			},
 		},
 	}
-	cfg := &apiconfig.GatewayConfig{}
+	cfg := &apiconfig.TeamQuotaDistributedEnforcementConfig{}
 
-	if err := ApplyGatewayRateLimitConfig(context.Background(), client, infra, cfg); err != nil {
-		t.Fatalf("ApplyGatewayRateLimitConfig() error = %v", err)
-	}
-	if cfg.RateLimitBackend != ratelimit.BackendRedis {
-		t.Fatalf("RateLimitBackend = %q, want redis", cfg.RateLimitBackend)
-	}
-	if cfg.RateLimitRedisURL != "redis://demo-redis.sandbox0-system.svc:6379/0" {
-		t.Fatalf("RateLimitRedisURL = %q", cfg.RateLimitRedisURL)
+	if err := ApplyTeamQuotaDistributedEnforcementConfig(context.Background(), client, infra, cfg); err != nil {
+		t.Fatalf("ApplyTeamQuotaDistributedEnforcementConfig() error = %v", err)
 	}
 	if cfg.RedisURL != "redis://demo-redis.sandbox0-system.svc:6379/0" {
 		t.Fatalf("RedisURL = %q", cfg.RedisURL)
 	}
-	if cfg.RedisKeyPrefix != "sandbox0:ratelimit:test" {
-		t.Fatalf("RedisKeyPrefix = %q", cfg.RedisKeyPrefix)
+	if cfg.RedisKeyPrefix != "sandbox0:ratelimit:test:teamquota" {
+		t.Fatalf("RedisKeyPrefix = %q, want Team Quota namespace", cfg.RedisKeyPrefix)
 	}
 	if cfg.RedisTimeout.Duration != 250*time.Millisecond {
 		t.Fatalf("RedisTimeout = %s", cfg.RedisTimeout.Duration)
 	}
-	if cfg.RateLimitRedisKeyPrefix != "sandbox0:ratelimit:test" {
-		t.Fatalf("RateLimitRedisKeyPrefix = %q", cfg.RateLimitRedisKeyPrefix)
-	}
-	if cfg.RateLimitRedisTimeout.Duration != 250*time.Millisecond {
-		t.Fatalf("RateLimitRedisTimeout = %s", cfg.RateLimitRedisTimeout.Duration)
-	}
-	if !cfg.RateLimitFailOpen {
-		t.Fatal("RateLimitFailOpen = false, want true by default")
-	}
 }
 
-func TestApplyGatewayRateLimitConfigUsesExternalRedisURLSecret(t *testing.T) {
+func TestApplyTeamQuotaDistributedEnforcementConfigUsesExternalRedisURLSecret(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "redis-url", Namespace: "sandbox0-system"},
 		Data: map[string][]byte{
@@ -88,7 +70,6 @@ func TestApplyGatewayRateLimitConfigUsesExternalRedisURLSecret(t *testing.T) {
 		},
 	}
 	client := newTestClient(t, secret)
-	failOpen := false
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
@@ -97,62 +78,97 @@ func TestApplyGatewayRateLimitConfigUsesExternalRedisURLSecret(t *testing.T) {
 				External: &infrav1alpha1.ExternalRedisConfig{
 					URLSecret: infrav1alpha1.RedisURLSecretRef{Name: "redis-url"},
 				},
-				FailOpen: &failOpen,
 			},
 		},
 	}
-	cfg := &apiconfig.GatewayConfig{}
+	cfg := &apiconfig.TeamQuotaDistributedEnforcementConfig{}
 
-	if err := ApplyGatewayRateLimitConfig(context.Background(), client, infra, cfg); err != nil {
-		t.Fatalf("ApplyGatewayRateLimitConfig() error = %v", err)
-	}
-	if cfg.RateLimitBackend != ratelimit.BackendRedis {
-		t.Fatalf("RateLimitBackend = %q, want redis", cfg.RateLimitBackend)
-	}
-	if cfg.RateLimitRedisURL != "rediss://:password@redis.example:6379/0" {
-		t.Fatalf("RateLimitRedisURL = %q", cfg.RateLimitRedisURL)
+	if err := ApplyTeamQuotaDistributedEnforcementConfig(context.Background(), client, infra, cfg); err != nil {
+		t.Fatalf("ApplyTeamQuotaDistributedEnforcementConfig() error = %v", err)
 	}
 	if cfg.RedisURL != "rediss://:password@redis.example:6379/0" {
 		t.Fatalf("RedisURL = %q", cfg.RedisURL)
 	}
-	if cfg.RedisKeyPrefix != "sandbox0" {
-		t.Fatalf("RedisKeyPrefix = %q", cfg.RedisKeyPrefix)
+	if cfg.RedisKeyPrefix != "sandbox0:teamquota" {
+		t.Fatalf("RedisKeyPrefix = %q, want Team Quota namespace", cfg.RedisKeyPrefix)
 	}
 	if cfg.RedisTimeout.Duration != 100*time.Millisecond {
 		t.Fatalf("RedisTimeout = %s", cfg.RedisTimeout.Duration)
 	}
-	if cfg.RateLimitRedisKeyPrefix != ratelimit.DefaultRedisKeyPrefix {
-		t.Fatalf("RateLimitRedisKeyPrefix = %q", cfg.RateLimitRedisKeyPrefix)
+}
+
+func TestApplyOverloadGuardConfigUsesDedicatedPrefix(t *testing.T) {
+	client := newTestClient(t)
+	infra := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Redis: &infrav1alpha1.RedisConfig{
+				Type:             infrav1alpha1.RedisTypeBuiltin,
+				KeyPrefix:        "sandbox0:test",
+				OperationTimeout: metav1.Duration{Duration: 250 * time.Millisecond},
+			},
+		},
 	}
-	if cfg.RateLimitRedisTimeout.Duration != ratelimit.DefaultRedisTimeout {
-		t.Fatalf("RateLimitRedisTimeout = %s", cfg.RateLimitRedisTimeout.Duration)
+	cfg := &apiconfig.OverloadGuardConfig{}
+
+	if err := ApplyOverloadGuardConfig(
+		context.Background(),
+		client,
+		infra,
+		"regional-gateway:aws-us-east-1",
+		cfg,
+	); err != nil {
+		t.Fatalf("ApplyOverloadGuardConfig() error = %v", err)
 	}
-	if cfg.RateLimitFailOpen {
-		t.Fatal("RateLimitFailOpen = true, want false")
+	if cfg.RedisURL != "redis://demo-redis.sandbox0-system.svc:6379/0" {
+		t.Fatalf("RedisURL = %q", cfg.RedisURL)
+	}
+	if cfg.RedisKeyPrefix != "sandbox0:test:overload-guard:regional-gateway:aws-us-east-1" {
+		t.Fatalf("RedisKeyPrefix = %q", cfg.RedisKeyPrefix)
+	}
+	if cfg.RedisTimeout.Duration != 250*time.Millisecond {
+		t.Fatalf("RedisTimeout = %s", cfg.RedisTimeout.Duration)
+	}
+
+	globalCfg := &apiconfig.OverloadGuardConfig{}
+	if err := ApplyOverloadGuardConfig(
+		context.Background(),
+		client,
+		infra,
+		"global-gateway",
+		globalCfg,
+	); err != nil {
+		t.Fatalf("ApplyOverloadGuardConfig(global) error = %v", err)
+	}
+	if globalCfg.RedisKeyPrefix != "sandbox0:test:overload-guard:global-gateway" {
+		t.Fatalf("global RedisKeyPrefix = %q", globalCfg.RedisKeyPrefix)
+	}
+	if globalCfg.RedisKeyPrefix == cfg.RedisKeyPrefix {
+		t.Fatalf("service namespaces collided at %q", cfg.RedisKeyPrefix)
 	}
 }
 
-func TestApplyGatewayRateLimitConfigNormalizesLegacyDefaultPrefix(t *testing.T) {
+func TestGetRuntimeRedisConfigPreservesCustomBasePrefix(t *testing.T) {
 	client := newTestClient(t)
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			Redis: &infrav1alpha1.RedisConfig{
 				Type:      infrav1alpha1.RedisTypeBuiltin,
-				KeyPrefix: ratelimit.DefaultRedisKeyPrefix,
+				KeyPrefix: "sandbox0:custom",
 			},
 		},
 	}
-	cfg := &apiconfig.GatewayConfig{}
 
-	if err := ApplyGatewayRateLimitConfig(context.Background(), client, infra, cfg); err != nil {
-		t.Fatalf("ApplyGatewayRateLimitConfig() error = %v", err)
+	cfg, ok, err := GetRuntimeRedisConfig(context.Background(), client, infra)
+	if err != nil {
+		t.Fatalf("GetRuntimeRedisConfig() error = %v", err)
 	}
-	if cfg.RedisKeyPrefix != "sandbox0" {
-		t.Fatalf("RedisKeyPrefix = %q", cfg.RedisKeyPrefix)
+	if !ok {
+		t.Fatal("GetRuntimeRedisConfig() ok = false, want true")
 	}
-	if cfg.RateLimitRedisKeyPrefix != ratelimit.DefaultRedisKeyPrefix {
-		t.Fatalf("RateLimitRedisKeyPrefix = %q", cfg.RateLimitRedisKeyPrefix)
+	if cfg.KeyPrefix != "sandbox0:custom" {
+		t.Fatalf("KeyPrefix = %q, want sandbox0:custom", cfg.KeyPrefix)
 	}
 }
 

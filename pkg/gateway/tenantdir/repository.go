@@ -24,6 +24,9 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 
 // CreateRegion creates a region directory entry.
 func (r *Repository) CreateRegion(ctx context.Context, region *Region) error {
+	if err := validateRegion(region); err != nil {
+		return err
+	}
 	regionID := strings.TrimSpace(region.ID)
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO regions (id, display_name, regional_gateway_url, metering_export_url, enabled)
@@ -84,6 +87,9 @@ func (r *Repository) ListRegions(ctx context.Context) ([]*Region, error) {
 
 // UpdateRegion updates a region directory entry.
 func (r *Repository) UpdateRegion(ctx context.Context, region *Region) error {
+	if err := validateRegion(region); err != nil {
+		return err
+	}
 	storedID, err := r.resolveStoredRegionID(ctx, region.ID)
 	if err != nil {
 		return err

@@ -87,6 +87,9 @@ type RegionalGatewayConfig struct {
 	// +optional
 	GatewayConfig `yaml:",inline" json:",inline"`
 
+	// TeamQuota is owned by the region entrypoint.
+	TeamQuota TeamQuotaConfig `yaml:"team_quota" json:"teamQuota"`
+
 	// Metering configures the optional region usage ledger.
 	// +optional
 	Metering MeteringConfig `yaml:"metering" json:"metering"`

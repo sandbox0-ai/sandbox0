@@ -8,6 +8,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 )
 
@@ -46,6 +47,9 @@ func (s *Server) listSandboxServices(c *gin.Context) {
 }
 
 func (s *Server) updateSandboxServices(c *gin.Context) {
+	if !limitJSONRequestBody(c, "sandbox services request body", template.MaxObjectRequestBytes) {
+		return
+	}
 	sandboxID := c.Param("id")
 	if sandboxID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
@@ -69,6 +73,15 @@ func (s *Server) updateSandboxServices(c *gin.Context) {
 		return
 	}
 	services := *req.Services
+	if err := service.ValidateSandboxUpdateConfigSize(&service.SandboxUpdateConfig{
+		Services: services,
+	}); err != nil {
+		if writeResourceTooLarge(c, err, "sandbox services") {
+			return
+		}
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
 
 	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
@@ -89,6 +102,9 @@ func (s *Server) updateSandboxServices(c *gin.Context) {
 		Services: services,
 	})
 	if err != nil {
+		if writeResourceTooLarge(c, err, "sandbox services") {
+			return
+		}
 		s.logger.Error("Failed to update sandbox services",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),

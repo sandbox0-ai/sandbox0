@@ -109,6 +109,11 @@ type Claims struct {
 	// Audit carries the original authenticated actor across trusted gateway
 	// hops. It is independent from the authorization subject above.
 	Audit *AuditContext `json:"audit,omitempty"`
+
+	// QuotaAdmissionProof binds quota keys admitted by an earlier
+	// trusted hop to this exact request identity. Receivers must treat an
+	// absent or semantically invalid proof as untrusted and charge normally.
+	QuotaAdmissionProof *QuotaAdmissionProof `json:"quota_admission_proof,omitempty"`
 }
 
 // AuditActor is the signed, transport-independent origin principal.

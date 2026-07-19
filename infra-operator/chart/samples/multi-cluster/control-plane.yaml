@@ -32,6 +32,101 @@ spec:
     enabled: true
     rootDomain: sandbox0.app
     regionId: aws-us-east-1
+  # Use one region-shared Redis service across the control and data planes.
+  redis:
+    type: external
+    external:
+      urlSecret:
+        name: redis-credentials
+        key: url
+  # regional-gateway owns this complete region default set. Data-plane
+  # Sandbox0Infra resources consume the persisted policies and omit defaults.
+  teamQuota:
+    # infra-operator generates status.teamQuota.stateId once for this owner.
+    defaults:
+      - key: sandbox_identity_count
+        kind: capacity
+        limit: 1000
+      - key: sandbox_runtime_count
+        kind: capacity
+        limit: 100
+      - key: sandbox_cpu_millicores
+        kind: capacity
+        limit: 100000
+      - key: sandbox_memory_bytes
+        kind: capacity
+        limit: 274877906944
+      - key: sandbox_ephemeral_storage_bytes
+        kind: capacity
+        limit: 1099511627776
+      - key: volume_storage_bytes
+        kind: capacity
+        limit: 1099511627776
+      - key: snapshot_storage_bytes
+        kind: capacity
+        limit: 1099511627776
+      - key: rootfs_storage_bytes
+        kind: capacity
+        limit: 1099511627776
+      - key: template_image_storage_bytes
+        kind: capacity
+        limit: 1099511627776
+      - key: storage_object_count
+        kind: capacity
+        limit: 1000000
+      - key: control_plane_object_count
+        kind: capacity
+        limit: 10000
+      - key: active_connection_count
+        kind: concurrency
+        limit: 2000
+      - key: active_request_count
+        kind: concurrency
+        limit: 500
+      - key: api_requests
+        kind: rate
+        tokens: 1000
+        interval: 1s
+        burst: 2000
+      - key: sandbox_service_requests
+        kind: rate
+        tokens: 1000
+        interval: 1s
+        burst: 2000
+      - key: sandbox_starts
+        kind: rate
+        tokens: 100
+        interval: 1s
+        burst: 150
+      - key: network_operations
+        kind: rate
+        tokens: 10000
+        interval: 1s
+        burst: 20000
+      - key: network_ingress_bytes
+        kind: rate
+        tokens: 104857600
+        interval: 1s
+        burst: 209715200
+      - key: network_egress_bytes
+        kind: rate
+        tokens: 104857600
+        interval: 1s
+        burst: 209715200
+      - key: storage_operations
+        kind: rate
+        tokens: 1000
+        interval: 1s
+        burst: 2000
+      - key: observability_ingest_bytes
+        kind: rate
+        tokens: 8388608
+        interval: 1s
+        burst: 16777216
+    distributedEnforcement:
+      policyCacheTtl: 5s
+      leaseTtl: 15s
+      renewInterval: 5s
   registry:
     # Must match the data-plane registry config in this region.
     # regional-gateway issues upload credentials from this config.
@@ -71,6 +166,15 @@ spec:
         port: 30080
       config:
         authMode: federated_global
+        # When this regional gateway owns identity instead, use
+        # authMode: self_hosted and configure overloadGuard. The region-shared
+        # Redis above then backs one budget across all regional-gateway replicas.
+        # overloadGuard:
+        #   requestsPerSecond: 100
+        #   burst: 200
+        #   localRequestsPerSecond: 500
+        #   localBurst: 1000
+        #   maxInFlight: 512
         # jwtIssuer: https://api.sandbox0.ai
         # jwtPublicKeyPEM: |
         #   -----BEGIN PUBLIC KEY-----

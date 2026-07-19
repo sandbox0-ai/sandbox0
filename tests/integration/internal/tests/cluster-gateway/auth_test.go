@@ -3,6 +3,7 @@ package clustergateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -235,7 +236,7 @@ func TestClusterGatewayIntegration_PublicAuthAPIKey(t *testing.T) {
 	}
 }
 
-func TestClusterGatewayIntegration_APIKeyCanBeCreatedWithoutLocalTeamOrUserRow(t *testing.T) {
+func TestClusterGatewayIntegration_APIKeyCannotAuthenticateAfterLocalTeamRemoval(t *testing.T) {
 	dbPool, identityRepo, apiKeyRepo, _ := newGatewayTestDB(t)
 
 	user := &gatewayidentity.User{
@@ -271,12 +272,8 @@ func TestClusterGatewayIntegration_APIKeyCanBeCreatedWithoutLocalTeamOrUserRow(t
 		t.Fatalf("expected region id aws-us-east-1, got %s", got)
 	}
 
-	validated, err := apiKeyRepo.ValidateAPIKey(ctx, keyValue)
-	if err != nil {
-		t.Fatalf("validate api key: %v", err)
-	}
-	if validated.TeamID != team.ID {
-		t.Fatalf("expected validated team id %s, got %s", team.ID, validated.TeamID)
+	if _, err := apiKeyRepo.ValidateAPIKey(ctx, keyValue); !errors.Is(err, gatewayapikey.ErrInvalidKey) {
+		t.Fatalf("validate API key after team removal error = %v, want %v", err, gatewayapikey.ErrInvalidKey)
 	}
 }
 
@@ -315,8 +312,7 @@ func TestClusterGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHome
 		t.Fatalf("issue token pair: %v", err)
 	}
 
-	resp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodGet, env.server.URL+"/users/me", tokens.AccessToken, nil)
-	defer resp.Body.Close()
+	resp, responseBody := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodGet, env.server.URL+"/users/me", tokens.AccessToken, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected ok, got %d", resp.StatusCode)
 	}
@@ -327,7 +323,7 @@ func TestClusterGatewayIntegration_PublicAuthUserResponseIncludesDefaultTeamHome
 			Email string `json:"email"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(responseBody, &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if body.Data.ID != user.ID {
@@ -370,11 +366,10 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 		t.Fatalf("issue token pair: %v", err)
 	}
 
-	resp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodPost, env.server.URL+"/teams", tokens.AccessToken, map[string]any{
+	resp, responseBody := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodPost, env.server.URL+"/teams", tokens.AccessToken, map[string]any{
 		"name":           "Regional Team",
 		"home_region_id": "aws-us-east-1",
 	})
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected created, got %d", resp.StatusCode)
 	}
@@ -385,17 +380,26 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 			HomeRegionID *string `json:"home_region_id"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&createBody); err != nil {
+	if err := json.Unmarshal(responseBody, &createBody); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
 	if createBody.Data.HomeRegionID == nil || *createBody.Data.HomeRegionID != "aws-us-east-1" {
 		t.Fatalf("expected created team home region aws-us-east-1, got %#v", createBody.Data.HomeRegionID)
 	}
 
-	updateResp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodPut, env.server.URL+"/teams/"+createBody.Data.ID, tokens.AccessToken, map[string]any{
+	// Target-team routes are attributed from signed grants before Team Quota
+	// admission. A real client refreshes its access token after creating a team.
+	targetTokens, err := issuer.IssueTokenPair(user.ID, user.Email, user.Name, user.IsAdmin, []authn.TeamGrant{
+		{TeamID: team.ID, TeamRole: "admin"},
+		{TeamID: createBody.Data.ID, TeamRole: "admin", HomeRegionID: "aws-us-east-1"},
+	})
+	if err != nil {
+		t.Fatalf("issue refreshed token pair: %v", err)
+	}
+
+	updateResp, updateResponseBody := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodPut, env.server.URL+"/teams/"+createBody.Data.ID, targetTokens.AccessToken, map[string]any{
 		"home_region_id": "aws-us-west-2",
 	})
-	defer updateResp.Body.Close()
 	if updateResp.StatusCode != http.StatusConflict {
 		t.Fatalf("expected conflict, got %d", updateResp.StatusCode)
 	}
@@ -405,15 +409,14 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(updateResp.Body).Decode(&updateBody); err != nil {
+	if err := json.Unmarshal(updateResponseBody, &updateBody); err != nil {
 		t.Fatalf("decode update response: %v", err)
 	}
 	if updateBody.Error.Message != "team home region cannot be changed after creation" {
 		t.Fatalf("expected immutable home region error, got %#v", updateBody.Error.Message)
 	}
 
-	getResp, _ := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodGet, env.server.URL+"/teams/"+createBody.Data.ID, tokens.AccessToken, nil)
-	defer getResp.Body.Close()
+	getResp, getResponseBody := doGatewayRequestWithBearer(t, env.server.Client(), http.MethodGet, env.server.URL+"/teams/"+createBody.Data.ID, targetTokens.AccessToken, nil)
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected get team ok, got %d", getResp.StatusCode)
 	}
@@ -423,7 +426,7 @@ func TestClusterGatewayIntegration_PublicAuthTeamsAcceptHomeRegionID(t *testing.
 			HomeRegionID *string `json:"home_region_id"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(getResp.Body).Decode(&getBody); err != nil {
+	if err := json.Unmarshal(getResponseBody, &getBody); err != nil {
 		t.Fatalf("decode get response: %v", err)
 	}
 	if getBody.Data.HomeRegionID == nil || *getBody.Data.HomeRegionID != "aws-us-east-1" {

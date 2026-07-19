@@ -40,6 +40,12 @@ func New(code Code, message string) error {
 	return &Error{code: code, message: message}
 }
 
+// Wrap creates a filesystem error while preserving a typed cause for local
+// callers. Binary transports still observe the stable high-level code.
+func Wrap(code Code, message string, cause error) error {
+	return &Error{code: code, message: message, cause: cause}
+}
+
 // NewErrno creates a filesystem error that retains its POSIX errno while also
 // exposing the closest high-level error code to non-FUSE callers.
 func NewErrno(errno syscall.Errno, message string) error {

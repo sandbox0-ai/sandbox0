@@ -10,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 )
 
@@ -57,6 +58,9 @@ func (s *Server) getNetworkPolicy(c *gin.Context) {
 
 // updateNetworkPolicy updates the network policy for a sandbox.
 func (s *Server) updateNetworkPolicy(c *gin.Context) {
+	if !limitJSONRequestBody(c, "network policy request body", template.MaxObjectRequestBytes) {
+		return
+	}
 	sandboxID := c.Param("id")
 	if sandboxID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
@@ -69,6 +73,13 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 		return
 	}
 	if err := validateSandboxNetworkPolicyMode(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+		return
+	}
+	if err := service.ValidateSandboxNetworkPolicySize(&req); err != nil {
+		if writeResourceTooLarge(c, err, "sandbox network policy") {
+			return
+		}
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
@@ -96,8 +107,14 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 
 	updated, err := s.sandboxService.UpdateNetworkPolicy(c.Request.Context(), sandboxID, &req)
 	if err != nil {
+		if writeResourceTooLarge(c, err, "sandbox network policy") {
+			return
+		}
 		if errors.Is(err, service.ErrInvalidNetworkPolicy) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
+		if writeTeamQuotaMutationError(c, err) {
 			return
 		}
 		s.logger.Error("Failed to update network policy",

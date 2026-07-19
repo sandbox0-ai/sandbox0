@@ -64,7 +64,7 @@ func TestValidateResourceRatio(t *testing.T) {
 
 	spec := v1alpha1.SandboxTemplateSpec{
 		MainContainer: v1alpha1.ContainerSpec{
-			Resources: v1alpha1.ResourceQuota{
+			Resources: v1alpha1.SandboxResourceLimits{
 				CPU:    resource.MustParse("1"),
 				Memory: resource.MustParse("4Gi"),
 			},

@@ -21,7 +21,10 @@ import (
 	"go.uber.org/zap"
 )
 
-const maxInputReceipts = 1024
+const (
+	maxInputReceipts     = 1024
+	maxPersistedSessions = 1024
+)
 
 type attemptRuntime struct {
 	attemptID       string
@@ -271,6 +274,10 @@ func (s *Supervisor) Create(spec SessionSpec, creationKey string) (*Session, boo
 			}
 			return &snapshot, true, nil
 		}
+	}
+	if len(s.sessions) >= maxPersistedSessions {
+		s.mu.Unlock()
+		return nil, false, ErrSessionLimitExceeded
 	}
 
 	now := time.Now().UTC()

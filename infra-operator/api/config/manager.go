@@ -66,6 +66,10 @@ type ManagerConfig struct {
 	// +optional
 	RedisTimeout metav1.Duration `yaml:"redis_timeout" json:"-"`
 
+	// TeamQuotaDistributedEnforcement configures the region-shared sandbox-start rate
+	// admission. Capacity policies remain in PostgreSQL.
+	TeamQuotaDistributedEnforcement TeamQuotaDistributedEnforcementConfig `yaml:"team_quota_distributed_enforcement" json:"teamQuotaDistributedEnforcement"`
+
 	// Cleanup Controller
 	// +optional
 	// +kubebuilder:default="60s"
@@ -105,10 +109,6 @@ type ManagerConfig struct {
 	SandboxMaxMemory string `yaml:"sandbox_max_memory" json:"sandboxMaxMemory"`
 	// +optional
 	SandboxRuntimeClassName string `yaml:"sandbox_runtime_class_name" json:"sandboxRuntimeClassName"`
-	// DefaultTeamQuotas configures region-wide fallback team quota limits.
-	// Team-specific quota rows in the database override these defaults.
-	// +optional
-	DefaultTeamQuotas []TeamQuotaLimitConfig `yaml:"default_team_quotas" json:"defaultTeamQuotas"`
 	// AllowColdStartWithoutReadyDataPlane lets cold claims create Pending pods
 	// when no sandbox data-plane-ready nodes exist yet. This is required for
 	// node autoscaler scale-from-zero deployments.
@@ -232,13 +232,6 @@ type ManagerConfig struct {
 	// starts. Defaults to min(30 * ready sandbox nodes, 80).
 	// +optional
 	ClaimStartLimiter ClaimStartLimiterConfig `yaml:"claim_start_limiter" json:"-"`
-}
-
-// TeamQuotaLimitConfig configures a fallback quota limit for teams without a
-// database override for the same dimension.
-type TeamQuotaLimitConfig struct {
-	Dimension  string `yaml:"dimension" json:"dimension"`
-	LimitValue int64  `yaml:"limit_value" json:"limitValue"`
 }
 
 // StaticEgressAuthConfig defines a static auth directive for runtime egress auth injection.

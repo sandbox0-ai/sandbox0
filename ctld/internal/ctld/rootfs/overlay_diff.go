@@ -136,18 +136,18 @@ func rebasePath(path, fromRoot, toRoot string) (string, bool) {
 
 func writeOverlayUpperDiff(ctx context.Context, upperdir string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
-	desc, reader, err := writeOverlayDiffTar(upperdir, filter, func(changeFn fs.ChangeFunc) error {
+	desc, reader, err := writeOverlayDiffTar(ctx, upperdir, filter, func(changeFn fs.ChangeFunc) error {
 		return walkOverlayUpper(ctx, upperdir, filter, changeFn)
 	})
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
-	return appendPortalRootFSToDiff(desc, reader, portalPaths)
+	return appendPortalRootFSToDiff(ctx, desc, reader, portalPaths)
 }
 
 func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdir string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
-	desc, reader, err := writeOverlayDiffTar(upperdir, filter, func(changeFn fs.ChangeFunc) error {
+	desc, reader, err := writeOverlayDiffTar(ctx, upperdir, filter, func(changeFn fs.ChangeFunc) error {
 		return fs.Changes(ctx, baselineDir, upperdir, func(kind fs.ChangeKind, path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -187,10 +187,10 @@ func writeOverlayUpperDiffFromBaseline(ctx context.Context, baselineDir, upperdi
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
-	return appendPortalRootFSToDiff(desc, reader, portalPaths)
+	return appendPortalRootFSToDiff(ctx, desc, reader, portalPaths)
 }
 
-func writeOverlayDiffTar(source string, filter rootFSPathFilter, walkChanges func(fs.ChangeFunc) error) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func writeOverlayDiffTar(ctx context.Context, source string, filter rootFSPathFilter, walkChanges func(fs.ChangeFunc) error) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	tmp, err := os.CreateTemp("", "sandbox0-rootfs-overlay-diff-*.tar")
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
@@ -204,7 +204,7 @@ func writeOverlayDiffTar(source string, filter rootFSPathFilter, walkChanges fun
 	}()
 
 	digester := digest.Canonical.Digester()
-	writer := io.MultiWriter(tmp, digester.Hash())
+	writer := io.MultiWriter(limitedRootFSDiffWriter(ctx, tmp), digester.Hash())
 	cw := archive.NewChangeWriter(writer, source)
 	if err := walkChanges(filter.ChangeFunc(cw.HandleChange)); err != nil {
 		_ = cw.Close()
@@ -457,14 +457,6 @@ func filterRootFSDiffTar(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, ex
 	return desc, removeOnCloseFile{File: tmp}, nil
 }
 
-func filterRootFSDiffTarForSave(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
-	filteredDesc, filteredReader, err := filterRootFSDiffTar(desc, reader, rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-	return appendPortalRootFSToDiff(filteredDesc, filteredReader, portalPaths)
-}
-
 func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	portalPaths = filterRootFSPortalPaths(portalPaths, excludedPaths)
 	if !shouldFilterRootFSDiffTar(desc) {
@@ -542,7 +534,7 @@ func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Re
 	return desc, removeOnCloseFile{File: tmp}, nil
 }
 
-func appendPortalRootFSToDiff(desc ctldapi.RootFSDiffDescriptor, reader io.ReadSeekCloser, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func appendPortalRootFSToDiff(ctx context.Context, desc ctldapi.RootFSDiffDescriptor, reader io.ReadSeekCloser, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	portalPaths = filterRootFSPortalPaths(portalPaths, nil)
 	if len(portalPaths) == 0 {
 		return desc, reader, nil
@@ -562,7 +554,7 @@ func appendPortalRootFSToDiff(desc ctldapi.RootFSDiffDescriptor, reader io.ReadS
 	}()
 
 	digester := digest.Canonical.Digester()
-	writer := io.MultiWriter(tmp, digester.Hash())
+	writer := io.MultiWriter(limitedRootFSDiffWriter(ctx, tmp), digester.Hash())
 	tarWriter := tar.NewWriter(writer)
 	tarReader := tar.NewReader(reader)
 	for {

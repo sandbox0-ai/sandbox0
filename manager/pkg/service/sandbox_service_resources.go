@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -19,34 +18,34 @@ const (
 	defaultSandboxMaxMemory = "32Gi"
 )
 
-func (s *SandboxService) effectiveSandboxResourceQuota(template *v1alpha1.SandboxTemplate, cfg *SandboxConfig) (v1alpha1.ResourceQuota, error) {
+func (s *SandboxService) effectiveSandboxResourceLimits(template *v1alpha1.SandboxTemplate, cfg *SandboxConfig) (v1alpha1.SandboxResourceLimits, error) {
 	if template == nil {
-		return v1alpha1.ResourceQuota{}, fmt.Errorf("%w: template is required", ErrInvalidClaimRequest)
+		return v1alpha1.SandboxResourceLimits{}, fmt.Errorf("%w: template is required", ErrInvalidClaimRequest)
 	}
-	quota := *template.Spec.MainContainer.Resources.DeepCopy()
+	limits := *template.Spec.MainContainer.Resources.DeepCopy()
 	if cfg != nil && cfg.Resources != nil {
 		memory, err := s.validateSandboxMemory(cfg.Resources.Memory)
 		if err != nil {
-			return v1alpha1.ResourceQuota{}, err
+			return v1alpha1.SandboxResourceLimits{}, err
 		}
-		quota.Memory = memory
-		quota.CPU = s0template.CPUForMemory(memory, s.sandboxMemoryPerCPU())
+		limits.Memory = memory
+		limits.CPU = s0template.CPUForMemory(memory, s.sandboxMemoryPerCPU())
 	}
 	minCPU := *resource.NewMilliQuantity(v1alpha1.MinimumClaimedSandboxCPULimitMilli, resource.DecimalSI)
-	if quota.CPU.Cmp(minCPU) < 0 {
-		quota.CPU = minCPU
+	if limits.CPU.Cmp(minCPU) < 0 {
+		limits.CPU = minCPU
 	}
-	return quota, nil
+	return limits, nil
 }
 
-func (s *SandboxService) applySandboxResourceQuota(pod *corev1.Pod, quota v1alpha1.ResourceQuota) error {
+func (s *SandboxService) applySandboxResourceLimits(pod *corev1.Pod, limits v1alpha1.SandboxResourceLimits) error {
 	if pod == nil {
 		return fmt.Errorf("%w: pod is required", ErrInvalidClaimRequest)
 	}
-	return applySandboxResourceQuotaToPodSpec(&pod.Spec, quota)
+	return applySandboxResourceLimitsToPodSpec(&pod.Spec, limits)
 }
 
-func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *corev1.Pod, quota v1alpha1.ResourceQuota) (*corev1.Pod, error) {
+func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *corev1.Pod, limits v1alpha1.SandboxResourceLimits) (*corev1.Pod, error) {
 	if s == nil || s.k8sClient == nil {
 		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)
 	}
@@ -62,7 +61,7 @@ func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *cor
 			return err
 		}
 		resized := current.DeepCopy()
-		if err := s.applySandboxResourceQuota(resized, quota); err != nil {
+		if err := s.applySandboxResourceLimits(resized, limits); err != nil {
 			return err
 		}
 		result, err := s.k8sClient.CoreV1().Pods(namespace).UpdateResize(ctx, name, resized, metav1.UpdateOptions{})
@@ -108,7 +107,7 @@ func cloneMetadataMap(in map[string]string) map[string]string {
 	return out
 }
 
-func applySandboxResourceQuotaToPodSpec(spec *corev1.PodSpec, quota v1alpha1.ResourceQuota) error {
+func applySandboxResourceLimitsToPodSpec(spec *corev1.PodSpec, limits v1alpha1.SandboxResourceLimits) error {
 	if spec == nil {
 		return fmt.Errorf("%w: pod spec is required", ErrInvalidClaimRequest)
 	}
@@ -116,21 +115,21 @@ func applySandboxResourceQuotaToPodSpec(spec *corev1.PodSpec, quota v1alpha1.Res
 		if spec.Containers[i].Name != "procd" {
 			continue
 		}
-		spec.Containers[i].Resources = v1alpha1.BuildResourceRequirements(quota)
+		spec.Containers[i].Resources = v1alpha1.BuildResourceRequirements(limits)
 		ensureSandboxResizePolicy(&spec.Containers[i])
 		return nil
 	}
 	return fmt.Errorf("%w: sandbox runtime container not found", ErrInvalidClaimRequest)
 }
 
-func sandboxPodNeedsResourceResize(pod *corev1.Pod, quota v1alpha1.ResourceQuota) bool {
-	if quota.CPU.Sign() <= 0 && quota.Memory.Sign() <= 0 {
+func sandboxPodNeedsResourceResize(pod *corev1.Pod, limits v1alpha1.SandboxResourceLimits) bool {
+	if limits.CPU.Sign() <= 0 && limits.Memory.Sign() <= 0 {
 		return false
 	}
 	if pod == nil {
 		return true
 	}
-	desired := v1alpha1.BuildResourceRequirements(quota)
+	desired := v1alpha1.BuildResourceRequirements(limits)
 	for _, container := range pod.Spec.Containers {
 		if container.Name != "procd" {
 			continue
@@ -224,83 +223,4 @@ func sandboxMemoryQuantityOrDefault(value, fallback string) resource.Quantity {
 		return parsed
 	}
 	return resource.MustParse(fallback)
-}
-
-func (s *SandboxService) enforceSandboxResourceQuota(ctx context.Context, teamID string, template *v1alpha1.SandboxTemplate, cfg *SandboxConfig) error {
-	quota, err := s.effectiveSandboxResourceQuota(template, cfg)
-	if err != nil {
-		return err
-	}
-	if err := s.enforceSandboxCPUQuota(ctx, teamID, quota); err != nil {
-		return err
-	}
-	return s.enforceSandboxMemoryQuota(ctx, teamID, quota)
-}
-
-func (s *SandboxService) enforceSandboxResourceQuotaIncrease(ctx context.Context, teamID string, current *corev1.Pod, next v1alpha1.ResourceQuota) error {
-	currentCPU, currentMemoryBytes := podContainerResourceAllocation(current)
-	oldCPU, oldMemoryBytes, ok := podRuntimeContainerResourceAllocation(current)
-	if !ok {
-		return fmt.Errorf("%w: sandbox runtime container not found", ErrInvalidClaimRequest)
-	}
-	nextCPU := currentCPU - oldCPU + next.CPU.MilliValue()
-	nextMemoryMiB := bytesToMiBRoundUp(currentMemoryBytes - oldMemoryBytes + next.Memory.Value())
-	currentMemoryMiB := bytesToMiBRoundUp(currentMemoryBytes)
-	if delta := nextCPU - currentCPU; delta > 0 {
-		if err := s.enforceQuota(ctx, teamID, quota.DimensionCPU, delta); err != nil {
-			return err
-		}
-	}
-	if delta := nextMemoryMiB - currentMemoryMiB; delta > 0 {
-		if err := s.enforceQuota(ctx, teamID, quota.DimensionMemory, delta); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func podContainerResourceAllocation(pod *corev1.Pod) (int64, int64) {
-	if pod == nil {
-		return 0, 0
-	}
-	var cpuMillis int64
-	var memoryBytes int64
-	for _, container := range pod.Spec.Containers {
-		cpuMillis += resourceListCPU(container.Resources)
-		memoryBytes += resourceListMemory(container.Resources)
-	}
-	return cpuMillis, memoryBytes
-}
-
-func podRuntimeContainerResourceAllocation(pod *corev1.Pod) (int64, int64, bool) {
-	if pod == nil {
-		return 0, 0, false
-	}
-	for _, container := range pod.Spec.Containers {
-		if container.Name != "procd" {
-			continue
-		}
-		return resourceListCPU(container.Resources), resourceListMemory(container.Resources), true
-	}
-	return 0, 0, false
-}
-
-func resourceListCPU(requirements corev1.ResourceRequirements) int64 {
-	if quantity, ok := requirements.Limits[corev1.ResourceCPU]; ok && !quantity.IsZero() {
-		return quantity.MilliValue()
-	}
-	if quantity, ok := requirements.Requests[corev1.ResourceCPU]; ok && !quantity.IsZero() {
-		return quantity.MilliValue()
-	}
-	return 0
-}
-
-func resourceListMemory(requirements corev1.ResourceRequirements) int64 {
-	if quantity, ok := requirements.Limits[corev1.ResourceMemory]; ok && !quantity.IsZero() {
-		return quantity.Value()
-	}
-	if quantity, ok := requirements.Requests[corev1.ResourceMemory]; ok && !quantity.IsZero() {
-		return quantity.Value()
-	}
-	return 0
 }

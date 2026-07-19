@@ -2,8 +2,12 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
+	"context"
+	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +15,84 @@ import (
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+type credentialUsageRecorder struct {
+	ingress atomic.Int64
+	egress  atomic.Int64
+}
+
+func (r *credentialUsageRecorder) RecordEgress(_ *policy.CompiledPolicy, bytes int64) {
+	r.egress.Add(bytes)
+}
+
+func (r *credentialUsageRecorder) RecordIngress(_ *policy.CompiledPolicy, bytes int64) {
+	r.ingress.Add(bytes)
+}
+
+type credentialTeamBandwidthLimiter struct {
+	ingress atomic.Int64
+	egress  atomic.Int64
+	err     error
+}
+
+func (l *credentialTeamBandwidthLimiter) waitN(
+	_ context.Context,
+	_ string,
+	direction bandwidthDirection,
+	bytes int,
+) error {
+	switch direction {
+	case bandwidthIngress:
+		l.ingress.Add(int64(bytes))
+	case bandwidthEgress:
+		l.egress.Add(int64(bytes))
+	}
+	return l.err
+}
+
+func (*credentialTeamBandwidthLimiter) maxChunkBytes(
+	context.Context,
+	string,
+	bandwidthDirection,
+) (int, error) {
+	return 1 << 20, nil
+}
+
+func (*credentialTeamBandwidthLimiter) Close() error {
+	return nil
+}
+
+func TestCredentialIngressReaderDoesNotExposeBytesAfterAdmissionFailure(t *testing.T) {
+	admissionErr := errors.New("team quota unavailable")
+	usage := &credentialUsageRecorder{}
+	teamLimiter := &credentialTeamBandwidthLimiter{err: admissionErr}
+	server := &Server{
+		cfg:           &config.NetdConfig{},
+		usageRecorder: usage,
+	}
+	server.bandwidthLimiter = newBandwidthLimiter(server.cfg, teamLimiter)
+	req := &adapterRequest{
+		Context:  context.Background(),
+		Server:   server,
+		Compiled: &policy.CompiledPolicy{TeamID: "team-1"},
+	}
+	reader := newCredentialIngressReader(req, bytes.NewBufferString("+OK\r\n"))
+	payload := make([]byte, len("+OK\r\n"))
+
+	n, err := reader.Read(payload)
+	if !errors.Is(err, admissionErr) {
+		t.Fatalf("Read() error = %v, want %v", err, admissionErr)
+	}
+	if n != 0 {
+		t.Fatalf("Read() bytes = %d, want 0 so protocol parsers cannot consume denied bytes", n)
+	}
+	if got, want := usage.ingress.Load(), int64(len("+OK\r\n")); got != want {
+		t.Fatalf("recorded ingress bytes = %d, want %d", got, want)
+	}
+	if got, want := teamLimiter.ingress.Load(), int64(len("+OK\r\n")); got != want {
+		t.Fatalf("team quota attempted ingress bytes = %d, want %d", got, want)
+	}
+}
 
 func TestRewriteMQTTConnectPacketInjectsUsernamePassword(t *testing.T) {
 	rewritten, err := rewriteMQTTConnectPacket(buildMQTTConnectPacket(), "alice", "secret")
@@ -314,20 +396,25 @@ func TestProxyRedisSessionInjectsUsernamePassword(t *testing.T) {
 	clientConn, proxyConn := net.Pipe()
 	defer proxyConn.Close()
 
+	usage := &credentialUsageRecorder{}
+	teamLimiter := &credentialTeamBandwidthLimiter{}
 	server := &Server{
 		cfg: &config.NetdConfig{
 			ProxyUpstreamTimeout: metav1.Duration{Duration: time.Second},
 		},
+		usageRecorder: usage,
 	}
+	server.bandwidthLimiter = newBandwidthLimiter(server.cfg, teamLimiter)
 
 	proxyDone := make(chan error, 1)
 	go func() {
 		proxyDone <- server.proxyRedisSession(&adapterRequest{
+			Context:  context.Background(),
 			Server:   server,
 			Conn:     proxyConn,
 			DestIP:   net.ParseIP("127.0.0.1"),
 			DestPort: upstreamListener.Addr().(*net.TCPAddr).Port,
-			Compiled: &policy.CompiledPolicy{},
+			Compiled: &policy.CompiledPolicy{TeamID: "team-1"},
 			EgressAuth: &egressAuthContext{
 				ResolvedUsernamePassword: &resolvedUsernamePassword{
 					Username: "alice",
@@ -356,6 +443,13 @@ func TestProxyRedisSessionInjectsUsernamePassword(t *testing.T) {
 	}
 	if err := <-upstreamDone; err != nil {
 		t.Fatalf("upstream redis session: %v", err)
+	}
+	const expectedIngress = int64(len("+OK\r\n") + len("+PONG\r\n"))
+	if got := usage.ingress.Load(); got != expectedIngress {
+		t.Fatalf("recorded ingress bytes = %d, want %d", got, expectedIngress)
+	}
+	if got := teamLimiter.ingress.Load(); got != expectedIngress {
+		t.Fatalf("team quota ingress bytes = %d, want %d", got, expectedIngress)
 	}
 }
 

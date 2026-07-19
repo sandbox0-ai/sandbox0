@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"go.uber.org/zap"
 )
@@ -137,6 +138,37 @@ func TestRequireCredentialSourceCapability(t *testing.T) {
 }
 
 func TestRequireNetworkPolicyInBody(t *testing.T) {
+	t.Run("rejects oversized request before handler", func(t *testing.T) {
+		server := newTestServerForCapability(t, testProvider("netd"))
+		body := `{"template":"default","padding":"` +
+			strings.Repeat("x", int(templatepkg.MaxObjectRequestBytes)) + `"}`
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+
+		called := false
+		engine := gin.New()
+		engine.Use(server.requireNetworkPolicyInBody(func() any { return &claimSandboxCapabilityRequest{} }))
+		engine.POST("/api/v1/sandboxes", func(c *gin.Context) {
+			called = true
+			c.Status(http.StatusCreated)
+		})
+
+		engine.ServeHTTP(recorder, req)
+
+		if called {
+			t.Fatal("handler was called for oversized sandbox request")
+		}
+		if recorder.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf(
+				"status = %d, want %d body=%s",
+				recorder.Code,
+				http.StatusRequestEntityTooLarge,
+				recorder.Body.String(),
+			)
+		}
+	})
+
 	t.Run("allows request without network config", func(t *testing.T) {
 		server := newTestServerForCapability(t, network.NewNoopProvider())
 		body := `{"template":"default","config":{"ttl":300}}`

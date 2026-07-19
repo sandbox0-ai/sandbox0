@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -71,5 +72,81 @@ func TestWebSocketProxyRewritesUntrustedForwardedHeaders(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for upstream headers")
+	}
+}
+
+func TestWebSocketProxyRequestCancellationClosesBothConnections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamAccepted := make(chan struct{}, 1)
+	upstreamClosed := make(chan error, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		upstreamAccepted <- struct{}{}
+		_, _, err = conn.ReadMessage()
+		upstreamClosed <- err
+	}))
+	defer upstream.Close()
+
+	targetURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(requestCtx)
+		c.Next()
+	})
+	engine.GET("/ws", NewWebSocketProxy(zap.NewNop()).Proxy(targetURL))
+	server := httptest.NewServer(engine)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	downstream, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("Dial() error = %v status=%d", err, status)
+	}
+	defer downstream.Close()
+
+	select {
+	case <-upstreamAccepted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for upstream WebSocket")
+	}
+
+	downstreamClosed := make(chan error, 1)
+	go func() {
+		_, _, err := downstream.ReadMessage()
+		downstreamClosed <- err
+	}()
+	cancelRequest()
+
+	select {
+	case err := <-downstreamClosed:
+		if err == nil {
+			t.Fatal("downstream read succeeded after request cancellation, want connection close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("downstream WebSocket remained open after request cancellation")
+	}
+	select {
+	case err := <-upstreamClosed:
+		if err == nil {
+			t.Fatal("upstream read succeeded after request cancellation, want connection close")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream WebSocket remained open after request cancellation")
 	}
 }

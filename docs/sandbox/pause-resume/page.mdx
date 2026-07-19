@@ -28,7 +28,7 @@ Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/
 
 The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. It is different from a Sandbox Volume: it is tied to sandbox rootfs lifecycle and does not provide volume sharing or direct Volume file APIs. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
 
-On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
+On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. This is the supported bounded checkpoint path. A different snapshotter, or an overlayfs upperdir that `ctld` cannot resolve and read, fails the checkpoint; Sandbox0 does not fall back to containerd's potentially unbounded built-in diff path.
 
 ## Pause A Sandbox
 

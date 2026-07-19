@@ -21,6 +21,14 @@ spec:
       passwordSecret:
         name: db-credentials
         key: password
+  # All global-gateway replicas use one distributed overload budget.
+  redis:
+    type: external
+    external:
+      urlSecret:
+        name: redis-credentials
+        key: url
+    keyPrefix: sandbox0:global
   services:
     globalGateway:
       enabled: true
@@ -39,6 +47,12 @@ spec:
         builtInAuth:
           enabled: true
           allowRegistration: false
+        overloadGuard:
+          requestsPerSecond: 100
+          burst: 200
+          localRequestsPerSecond: 500
+          localBurst: 1000
+          maxInFlight: 512
   initUser:
     email: "admin@example.com"
     # passwordSecret:

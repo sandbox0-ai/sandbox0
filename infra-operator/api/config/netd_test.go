@@ -46,6 +46,20 @@ func TestLoadNetdConfigFromPathAppliesDefaults(t *testing.T) {
 	if cfg.MetricsPort != 9091 {
 		t.Fatalf("metrics port = %d, want default 9091", cfg.MetricsPort)
 	}
+	if cfg.ProxyMaxActiveTCPConnections != DefaultNetdProxyMaxActiveTCPConnections ||
+		cfg.ProxyUDPWorkers != DefaultNetdProxyUDPWorkers ||
+		cfg.ProxyUDPQueueSize != DefaultNetdProxyUDPQueueSize {
+		t.Fatalf("proxy admission defaults = %#v", cfg)
+	}
+	limits := cfg.SandboxObservabilityAuditSpoolLimits
+	if limits.MaxBytes != DefaultAuditSpoolMaxBytes ||
+		limits.MaxEntries != DefaultAuditSpoolMaxEntries ||
+		limits.MaxTeamBytes != DefaultAuditSpoolMaxTeamBytes ||
+		limits.MaxTeamEntries != DefaultAuditSpoolMaxTeamEntries ||
+		limits.MinFreeBytes != DefaultAuditSpoolMinFreeBytes ||
+		limits.MaxRecordBytes != DefaultAuditSpoolMaxRecordBytes {
+		t.Fatalf("audit spool limits = %#v, want defaults", limits)
+	}
 }
 
 func TestApplyNetdDefaultsAuditDeliveryMode(t *testing.T) {
@@ -64,6 +78,42 @@ func TestApplyNetdDefaultsAuditDeliveryMode(t *testing.T) {
 			t.Fatalf("audit delivery mode = %q, want canonical_sync", cfg.SandboxObservabilityAuditDeliveryMode)
 		}
 	})
+}
+
+func TestNetdProxyAdmissionLimitsRejectUnsafeConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  NetdConfig
+	}{
+		{
+			name: "TCP maximum",
+			cfg: NetdConfig{
+				ProxyMaxActiveTCPConnections: MaxNetdProxyMaxActiveTCPConnections + 1,
+			},
+		},
+		{
+			name: "UDP worker maximum",
+			cfg:  NetdConfig{ProxyUDPWorkers: MaxNetdProxyUDPWorkers + 1},
+		},
+		{
+			name: "UDP queue maximum",
+			cfg:  NetdConfig{ProxyUDPQueueSize: MaxNetdProxyUDPQueueSize + 1},
+		},
+		{
+			name: "workers above queue",
+			cfg: NetdConfig{
+				ProxyUDPWorkers:   3,
+				ProxyUDPQueueSize: 2,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, _, err := tt.cfg.ProxyAdmissionLimits(); err == nil {
+				t.Fatal("ProxyAdmissionLimits() error = nil, want rejection")
+			}
+		})
+	}
 }
 
 func TestNetdConfigValidateListenerPorts(t *testing.T) {

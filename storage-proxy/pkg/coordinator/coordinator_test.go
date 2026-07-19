@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -20,20 +21,21 @@ import (
 
 // Mock implementations using simple Go structs
 type MockRepository struct {
-	acquireMountFunc             func(ctx context.Context, mount *db.VolumeMount, heartbeatTimeout int) error
-	createMountFunc              func(ctx context.Context, mount *db.VolumeMount) error
-	updateMountHeartbeatFunc     func(ctx context.Context, volumeID, clusterID, podID string) error
-	deleteMountFunc              func(ctx context.Context, volumeID, clusterID, podID string) error
-	deleteMountByPodIDFunc       func(ctx context.Context, clusterID, podID string) error
-	getActiveMountsFunc          func(ctx context.Context, volumeID string, timeout int) ([]*db.VolumeMount, error)
-	getAllMountsFunc             func(ctx context.Context) ([]*db.VolumeMount, error)
-	deleteStaleMountsFunc        func(ctx context.Context, timeout int) (int64, error)
-	createCoordinationFunc       func(ctx context.Context, coord *db.SnapshotCoordination) error
-	getCoordinationFunc          func(ctx context.Context, id string) (*db.SnapshotCoordination, error)
-	updateCoordinationStatusFunc func(ctx context.Context, id, status string) error
-	createFlushResponseFunc      func(ctx context.Context, resp *db.FlushResponse) error
-	countCompletedFlushesFunc    func(ctx context.Context, coordID string) (int, error)
-	getFlushResponsesFunc        func(ctx context.Context, coordID string) ([]*db.FlushResponse, error)
+	acquireMountFunc               func(ctx context.Context, mount *db.VolumeMount, heartbeatTimeout int) error
+	createMountFunc                func(ctx context.Context, mount *db.VolumeMount) error
+	updateMountHeartbeatFunc       func(ctx context.Context, volumeID, clusterID, podID string) error
+	deleteMountFunc                func(ctx context.Context, volumeID, clusterID, podID string) error
+	deleteMountByPodIDFunc         func(ctx context.Context, clusterID, podID string) error
+	getActiveMountsFunc            func(ctx context.Context, volumeID string, timeout int) ([]*db.VolumeMount, error)
+	getAllMountsFunc               func(ctx context.Context) ([]*db.VolumeMount, error)
+	deleteStaleMountsFunc          func(ctx context.Context, timeout int) (int64, error)
+	createCoordinationFunc         func(ctx context.Context, coord *db.SnapshotCoordination) error
+	getCoordinationFunc            func(ctx context.Context, id string) (*db.SnapshotCoordination, error)
+	updateCoordinationStatusFunc   func(ctx context.Context, id, status string) error
+	createFlushResponseFunc        func(ctx context.Context, resp *db.FlushResponse) error
+	countCompletedFlushesFunc      func(ctx context.Context, coordID string) (int, error)
+	getFlushResponsesFunc          func(ctx context.Context, coordID string) ([]*db.FlushResponse, error)
+	deleteExpiredCoordinationsFunc func(ctx context.Context, retention time.Duration) (int64, error)
 }
 
 func (m *MockRepository) AcquireMount(ctx context.Context, mount *db.VolumeMount, heartbeatTimeout int) error {
@@ -135,6 +137,16 @@ func (m *MockRepository) GetFlushResponses(ctx context.Context, coordID string) 
 		return m.getFlushResponsesFunc(ctx, coordID)
 	}
 	return nil, nil
+}
+
+func (m *MockRepository) DeleteExpiredCoordinations(
+	ctx context.Context,
+	retention time.Duration,
+) (int64, error) {
+	if m.deleteExpiredCoordinationsFunc != nil {
+		return m.deleteExpiredCoordinationsFunc(ctx, retention)
+	}
+	return 0, nil
 }
 
 type MockVolumeContext struct {
@@ -608,6 +620,28 @@ func TestMountOwnerUsesPodLiveness(t *testing.T) {
 				t.Fatalf("mountOwnerUsesPodLiveness() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRunCleanupCycleDeletesExpiredCoordinationHistory(t *testing.T) {
+	coord, mockRepo, _ := newTestCoordinator(t)
+	var gotRetention time.Duration
+	mockRepo.deleteExpiredCoordinationsFunc = func(
+		_ context.Context,
+		retention time.Duration,
+	) (int64, error) {
+		gotRetention = retention
+		return 2, nil
+	}
+
+	coord.runCleanupCycle(context.Background(), HeartbeatTimeout)
+
+	if gotRetention != CoordinationRetention {
+		t.Fatalf(
+			"DeleteExpiredCoordinations() retention = %s, want %s",
+			gotRetention,
+			CoordinationRetention,
+		)
 	}
 }
 

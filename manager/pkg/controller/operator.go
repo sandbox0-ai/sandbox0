@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -75,6 +76,71 @@ func (op *Operator) SetClaimStartLimiter(limiter *startlimiter.Limiter) {
 		return
 	}
 	op.poolManager.SetClaimStartLimiter(limiter)
+}
+
+// SetTeamQuotaStore enables region-wide accounting for team-owned warm pools.
+func (op *Operator) SetTeamQuotaStore(
+	store teamquota.CapacityStore,
+	resources func(*corev1.PodSpec) teamquota.Values,
+) {
+	if op == nil || op.poolManager == nil {
+		return
+	}
+	op.poolManager.SetTeamQuotaStore(store, resources)
+}
+
+// SetTeamQuotaRateLimiter enables region-shared start-rate admission for
+// team-owned warm-pool replenishment.
+func (op *Operator) SetTeamQuotaRateLimiter(limiter TeamQuotaRateLimiter) {
+	if op == nil || op.poolManager == nil {
+		return
+	}
+	op.poolManager.SetTeamQuotaRateLimiter(limiter)
+}
+
+// ValidateTeamQuotaReady verifies that team-owned warm pools cannot bypass
+// either capacity accounting or sandbox-start rate admission.
+func (op *Operator) ValidateTeamQuotaReady() error {
+	if op == nil || op.poolManager == nil {
+		return fmt.Errorf("team quota warm-pool controller is unavailable")
+	}
+	if op.poolManager.teamQuotaStore == nil || op.poolManager.quotaResources == nil {
+		return fmt.Errorf("team quota warm-pool capacity accounting is not configured")
+	}
+	if _, ok := op.poolManager.teamQuotaStore.(teamQuotaInventoryStore); !ok {
+		return fmt.Errorf("revision-fenced team quota warm-pool inventory accounting is not configured")
+	}
+	if _, ok := op.poolManager.teamQuotaStore.(teamquota.ObservedExactCapacityStore); !ok {
+		return fmt.Errorf("observed exact team quota warm-pool accounting is not configured")
+	}
+	if op.poolManager.teamQuotaLimiter == nil {
+		return fmt.Errorf("team quota warm-pool rate limiter is not configured")
+	}
+	if op.poolManager.claimStartLimiter == nil {
+		return fmt.Errorf("cluster claim-start limiter is not configured")
+	}
+	return nil
+}
+
+// ReconcileExistingTeamWarmPoolQuota adopts current ReplicaSet commitments
+// before the manager starts serving sandbox claims.
+func (op *Operator) ReconcileExistingTeamWarmPoolQuota(ctx context.Context) error {
+	if op == nil || op.poolManager == nil {
+		return nil
+	}
+	templates, err := op.templateLister.List()
+	if err != nil {
+		return fmt.Errorf("list templates for team warm-pool quota reconciliation: %w", err)
+	}
+	for _, template := range templates {
+		if _, ok := TeamWarmPoolQuotaOwner(template); !ok {
+			continue
+		}
+		if _, err := op.poolManager.reconcileCommittedTeamWarmPoolQuota(ctx, template); err != nil {
+			return fmt.Errorf("reconcile template %s team warm-pool quota: %w", template.Name, err)
+		}
+	}
+	return nil
 }
 
 // TemplateListerImpl implements TemplateLister

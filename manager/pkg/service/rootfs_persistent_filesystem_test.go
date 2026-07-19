@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -108,51 +107,6 @@ func TestSaveRootFSStateMapsObjectMetadataConflict(t *testing.T) {
 	require.ErrorIs(t, err, ErrRootFSObjectConflict)
 	require.Len(t, exec.sqls, 1)
 	assert.Contains(t, exec.sqls[0], "INSERT INTO manager.rootfs_objects")
-}
-
-func TestDeleteRootFSObjectsDedupesAndSkipsEmptyKeys(t *testing.T) {
-	deleter := &recordingRootFSObjectDeleter{}
-
-	deleted, err := DeleteRootFSObjects(context.Background(), deleter, []*SandboxRootFSLayer{
-		{DiffObjectKey: " rootfs/a.tar "},
-		nil,
-		{DiffObjectKey: ""},
-		{DiffObjectKey: "rootfs/a.tar"},
-		{DiffObjectKey: "rootfs/b.tar"},
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, []string{"rootfs/a.tar", "rootfs/b.tar"}, deleted)
-	assert.Equal(t, []string{"rootfs/a.tar", "rootfs/b.tar"}, deleter.keys)
-}
-
-func TestDeleteRootFSObjectsReturnsDeletedKeysBeforeFailure(t *testing.T) {
-	deleteErr := errors.New("delete failed")
-	deleter := &recordingRootFSObjectDeleter{failKey: "rootfs/b.tar", err: deleteErr}
-
-	deleted, err := DeleteRootFSObjects(context.Background(), deleter, []*SandboxRootFSLayer{
-		{DiffObjectKey: "rootfs/a.tar"},
-		{DiffObjectKey: "rootfs/b.tar"},
-		{DiffObjectKey: "rootfs/c.tar"},
-	})
-
-	require.ErrorIs(t, err, deleteErr)
-	assert.Equal(t, []string{"rootfs/a.tar"}, deleted)
-	assert.Equal(t, []string{"rootfs/a.tar", "rootfs/b.tar"}, deleter.keys)
-}
-
-func TestDeleteRootFSObjectsHonorsCancelledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	deleter := &recordingRootFSObjectDeleter{}
-
-	deleted, err := DeleteRootFSObjects(ctx, deleter, []*SandboxRootFSLayer{
-		{DiffObjectKey: "rootfs/a.tar"},
-	})
-
-	require.ErrorIs(t, err, context.Canceled)
-	assert.Empty(t, deleted)
-	assert.Empty(t, deleter.keys)
 }
 
 type recordingRootFSObjectDeleter struct {

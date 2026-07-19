@@ -6,8 +6,11 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +26,174 @@ import (
 	managerregistry "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
+
+func TestPublisherDeleteManifestWithRegistryAuthentication(t *testing.T) {
+	t.Parallel()
+
+	teamID := "team-1"
+	imageDigest := digest.FromString("managed-template-image")
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		username, password, ok := r.BasicAuth()
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Sandbox0 Registry"`)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		if username != "builder" || password != "secret" {
+			http.Error(w, "invalid credentials", http.StatusForbidden)
+			return
+		}
+		wantPath := "/v2/" + naming.TeamImageRepositoryPrefix(teamID) + "/" +
+			outputRepository("template-1") + "/manifests/" + imageDigest.String()
+		if r.Method != http.MethodDelete || r.URL.Path != wantPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	credentials := &fakeCredentialProvider{credential: &managerregistry.Credential{
+		Provider:     "builtin",
+		PushRegistry: server.URL,
+		PullRegistry: server.URL,
+		Username:     "builder",
+		Password:     "secret",
+	}}
+	publisher, err := NewPublisher(
+		&fakeObjectReader{},
+		credentials,
+		managerconfig.RegistryConfig{
+			Provider:         "builtin",
+			InternalRegistry: server.URL,
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewPublisher() error = %v", err)
+	}
+
+	err = publisher.Delete(context.Background(), DeleteRequest{
+		TeamID:         teamID,
+		TemplateID:     "template-1",
+		ImageReference: server.URL + "/unused@" + imageDigest.String(),
+	})
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("registry requests = %d, want challenge plus authenticated delete", requests)
+	}
+}
+
+func TestPublisherDeleteManifestNotFoundIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "manifest unknown", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	publisher, err := NewPublisher(
+		&fakeObjectReader{},
+		&fakeCredentialProvider{credential: &managerregistry.Credential{
+			Provider:     "builtin",
+			PushRegistry: server.URL,
+			PullRegistry: server.URL,
+		}},
+		managerconfig.RegistryConfig{
+			Provider:         "builtin",
+			InternalRegistry: server.URL,
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewPublisher() error = %v", err)
+	}
+	err = publisher.Delete(context.Background(), DeleteRequest{
+		TeamID:         "team-1",
+		TemplateID:     "template-1",
+		ImageReference: "registry.example.com/template@" + digest.FromString("missing").String(),
+	})
+	if err != nil {
+		t.Fatalf("Delete() error = %v, want idempotent success", err)
+	}
+}
+
+func TestPublisherDeleteResolvesBuildTagAfterPublishCheckpointCrash(t *testing.T) {
+	t.Parallel()
+
+	teamID := "team-1"
+	buildID := "20D888E6-EAED-4E83-9A76-270BC3BF1503"
+	imageDigest := digest.FromString("published-before-checkpoint")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := "/v2/" + naming.TeamImageRepositoryPrefix(teamID) + "/" +
+			outputRepository("template-1") + "/manifests/" + imageDigest.String()
+		if r.Method != http.MethodDelete || r.URL.Path != wantPath {
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	resolver := &fakeResolver{root: ocispec.Descriptor{Digest: imageDigest}}
+	publisher, err := NewPublisher(
+		&fakeObjectReader{},
+		&fakeCredentialProvider{credential: &managerregistry.Credential{
+			Provider:     "builtin",
+			PushRegistry: server.URL,
+			PullRegistry: server.URL,
+		}},
+		managerconfig.RegistryConfig{
+			Provider:         "builtin",
+			InternalRegistry: server.URL,
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewPublisher() error = %v", err)
+	}
+	publisher.newResolver = func(resolverOptions) remotes.Resolver {
+		return resolver
+	}
+	err = publisher.Delete(context.Background(), DeleteRequest{
+		TeamID:     teamID,
+		TemplateID: "template-1",
+		BuildID:    buildID,
+	})
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	wantTag := ":" + "build-" + strings.ToLower(buildID)
+	if !strings.HasSuffix(resolver.resolvedRef, wantTag) {
+		t.Fatalf("resolved reference = %q, want suffix %q", resolver.resolvedRef, wantTag)
+	}
+}
+
+func TestPublisherDeleteUnsupportedProviderFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	credentials := &fakeCredentialProvider{}
+	publisher, err := NewPublisher(
+		&fakeObjectReader{},
+		credentials,
+		managerconfig.RegistryConfig{Provider: "aws"},
+	)
+	if err != nil {
+		t.Fatalf("NewPublisher() error = %v", err)
+	}
+	err = publisher.Delete(context.Background(), DeleteRequest{
+		TeamID:         "team-1",
+		TemplateID:     "template-1",
+		ImageReference: "registry.example.com/template@" + digest.FromString("managed").String(),
+	})
+	if !errors.Is(err, ErrRegistryDeleteUnsupported) {
+		t.Fatalf("Delete() error = %v, want ErrRegistryDeleteUnsupported", err)
+	}
+	if len(credentials.requests) != 0 {
+		t.Fatalf("credential requests = %#v, want none for unsupported provider", credentials.requests)
+	}
+}
 
 func TestPublisherPublishComposesPlatformImageAndStreamsRootFSLayers(t *testing.T) {
 	t.Parallel()
@@ -160,7 +331,22 @@ func TestPublisherPublishComposesPlatformImageAndStreamsRootFSLayers(t *testing.
 			},
 		},
 	}
-	result, err := publisher.Publish(context.Background(), req)
+	plan, err := publisher.Plan(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if len(targetPusher.order) != 0 || len(targetPusher.blobs) != 0 {
+		t.Fatalf("Plan() wrote target registry content: order=%v blobs=%d", targetPusher.order, len(targetPusher.blobs))
+	}
+	wantLogicalSizeBytes := baseLayerDesc.Size +
+		int64(len(uncompressedLayer)) +
+		int64(len(compressedLayer)) +
+		plan.configDesc.Size +
+		plan.manifestDesc.Size
+	if plan.Result.LogicalSizeBytes != wantLogicalSizeBytes {
+		t.Fatalf("planned logical size = %d, want %d", plan.Result.LogicalSizeBytes, wantLogicalSizeBytes)
+	}
+	result, err := publisher.PublishPlan(context.Background(), plan)
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
@@ -271,6 +457,48 @@ func TestPublisherPublishComposesPlatformImageAndStreamsRootFSLayers(t *testing.
 	if got := objects.gets; len(got) != 2 || got[0].offset != 0 || got[1].offset != 0 {
 		t.Fatalf("rootfs object reads = %#v, want one streaming read per layer", got)
 	}
+
+	firstPushOrder := append([]digest.Digest(nil), targetPusher.order...)
+	firstObjectReads := len(objects.gets)
+	retried, err := publisher.PublishPlan(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("retry PublishPlan() error = %v", err)
+	}
+	if retried.ManifestDigest != result.ManifestDigest {
+		t.Fatalf("retry manifest digest = %s, want %s", retried.ManifestDigest, result.ManifestDigest)
+	}
+	if got := targetPusher.order; fmt.Sprint(got) != fmt.Sprint(firstPushOrder) {
+		t.Fatalf("retry committed duplicate registry content: got order %v, want %v", got, firstPushOrder)
+	}
+	if got := len(objects.gets); got != firstObjectReads {
+		t.Fatalf("retry re-read %d rootfs objects, want no reads after AlreadyExists", got-firstObjectReads)
+	}
+}
+
+func TestImageLogicalSizeBytesCountsFinalDescriptorOccurrencesWithoutDeduplication(t *testing.T) {
+	t.Parallel()
+
+	sharedBase := ocispec.Descriptor{
+		Digest: digest.FromString("shared-base"),
+		Size:   5,
+	}
+	sharedRootFS := Layer{
+		Digest: digest.FromString("shared-rootfs").String(),
+		Size:   7,
+	}
+	got, err := imageLogicalSizeBytes(
+		[]ocispec.Descriptor{sharedBase, sharedBase},
+		[]Layer{sharedRootFS, sharedRootFS},
+		ocispec.Descriptor{Size: 11},
+		ocispec.Descriptor{Size: 13},
+	)
+	if err != nil {
+		t.Fatalf("imageLogicalSizeBytes() error = %v", err)
+	}
+	const want int64 = 5 + 5 + 7 + 7 + 11 + 13
+	if got != want {
+		t.Fatalf("imageLogicalSizeBytes() = %d, want descriptor-occurrence sum %d", got, want)
+	}
 }
 
 func TestPublisherUsesRealProviderTeamScopeExactlyOnce(t *testing.T) {
@@ -328,7 +556,7 @@ func TestPublisherUsesRealProviderTeamScopeExactlyOnce(t *testing.T) {
 		return source
 	}
 
-	result, err := publisher.Publish(context.Background(), BuildRequest{
+	plan, err := publisher.Plan(context.Background(), BuildRequest{
 		BuildID:         "20d888e6-eaed-4e83-9a76-270bc3bf1503",
 		TeamID:          teamID,
 		TemplateID:      "contract",
@@ -345,6 +573,10 @@ func TestPublisherUsesRealProviderTeamScopeExactlyOnce(t *testing.T) {
 			Size:      int64(len(rootFSLayer)),
 		}},
 	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	result, err := publisher.PublishPlan(context.Background(), plan)
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
@@ -432,7 +664,7 @@ func TestPublisherPublishRewritesAdvertisedBuiltinBaseToInternalRegistry(t *test
 		return source
 	}
 
-	result, err := publisher.Publish(context.Background(), BuildRequest{
+	plan, err := publisher.Plan(context.Background(), BuildRequest{
 		BuildID:         "20d888e6-eaed-4e83-9a76-270bc3bf1504",
 		TeamID:          teamID,
 		TemplateID:      "recursive",
@@ -449,6 +681,10 @@ func TestPublisherPublishRewritesAdvertisedBuiltinBaseToInternalRegistry(t *test
 			Size:      int64(len(rootFSLayer)),
 		}},
 	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	result, err := publisher.PublishPlan(context.Background(), plan)
 	if err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}

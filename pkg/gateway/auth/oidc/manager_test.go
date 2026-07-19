@@ -3,7 +3,9 @@ package oidc
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
@@ -11,18 +13,23 @@ import (
 )
 
 type fakeIdentityStore struct {
-	usersByID           map[string]*identity.User
-	usersByEmail        map[string]*identity.User
-	identitiesByKey     map[string]*identity.UserIdentity
-	createUserCalls     int
-	createIdentityCalls int
+	usersByID            map[string]*identity.User
+	usersByEmail         map[string]*identity.User
+	identitiesByKey      map[string]*identity.UserIdentity
+	pendingOIDCStates    map[string]*identity.OIDCPendingState
+	maxPendingOIDCStates int64
+	pendingOIDCMu        sync.Mutex
+	createUserCalls      int
+	createIdentityCalls  int
 }
 
 func newFakeIdentityStore() *fakeIdentityStore {
 	return &fakeIdentityStore{
-		usersByID:       map[string]*identity.User{},
-		usersByEmail:    map[string]*identity.User{},
-		identitiesByKey: map[string]*identity.UserIdentity{},
+		usersByID:            map[string]*identity.User{},
+		usersByEmail:         map[string]*identity.User{},
+		identitiesByKey:      map[string]*identity.UserIdentity{},
+		pendingOIDCStates:    map[string]*identity.OIDCPendingState{},
+		maxPendingOIDCStates: identity.DefaultMaxPendingOIDCStates,
 	}
 }
 
@@ -85,6 +92,49 @@ func (f *fakeIdentityStore) CreateUserIdentity(_ context.Context, record *identi
 	copied := *record
 	f.identitiesByKey[identityKey(record.Provider, record.Subject)] = &copied
 	return nil
+}
+
+func (f *fakeIdentityStore) CreateOIDCPendingState(_ context.Context, state *identity.OIDCPendingState) error {
+	f.pendingOIDCMu.Lock()
+	defer f.pendingOIDCMu.Unlock()
+
+	now := time.Now()
+	active := int64(0)
+	for hash, pending := range f.pendingOIDCStates {
+		if pending.ExpiresAt.After(now) {
+			active++
+			continue
+		}
+		delete(f.pendingOIDCStates, hash)
+	}
+	if active >= f.maxPendingOIDCStates {
+		return &identity.IdentityResourceLimitExceededError{
+			Scope:    "platform",
+			Resource: identity.IdentityLimitResourceOIDCStates,
+			Limit:    f.maxPendingOIDCStates,
+		}
+	}
+	copied := *state
+	if copied.CreatedAt.IsZero() {
+		copied.CreatedAt = now
+	}
+	f.pendingOIDCStates[copied.StateHash] = &copied
+	*state = copied
+	return nil
+}
+
+func (f *fakeIdentityStore) ConsumeOIDCPendingState(_ context.Context, stateHash string) (*identity.OIDCPendingState, error) {
+	f.pendingOIDCMu.Lock()
+	defer f.pendingOIDCMu.Unlock()
+
+	pending, ok := f.pendingOIDCStates[stateHash]
+	if !ok || !pending.ExpiresAt.After(time.Now()) {
+		delete(f.pendingOIDCStates, stateHash)
+		return nil, identity.ErrOIDCPendingStateNotFound
+	}
+	delete(f.pendingOIDCStates, stateHash)
+	copied := *pending
+	return &copied, nil
 }
 
 func TestManagerFindOrCreateUserAutoProvisionCreatesUserWithoutDefaultTeam(t *testing.T) {

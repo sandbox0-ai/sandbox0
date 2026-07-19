@@ -7,9 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -58,6 +62,7 @@ type Publisher struct {
 	registry    managerconfig.RegistryConfig
 	newResolver resolverFactory
 	readFile    func(string) ([]byte, error)
+	httpClient  *http.Client
 }
 
 // NewPublisher creates a template image publisher.
@@ -81,7 +86,8 @@ func NewPublisher(objects ObjectReader, credentials CredentialProvider, registry
 				PlainHTTP:   opts.plainHTTP,
 			})
 		},
-		readFile: os.ReadFile,
+		readFile:   os.ReadFile,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 
@@ -94,10 +100,9 @@ type resolvedBase struct {
 	fetcher    remotes.Fetcher
 }
 
-// Publish streams the base image and captured rootfs layers to the configured
-// registry. The output is digest-pinned even though an idempotent build tag is
-// also written for operational inspection.
-func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, error) {
+// Plan resolves the pinned base image and composes the final OCI descriptors
+// without writing to the target registry.
+func (p *Publisher) Plan(ctx context.Context, req BuildRequest) (*Plan, error) {
 	if p == nil {
 		return nil, fmt.Errorf("template image publisher is required")
 	}
@@ -186,6 +191,46 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 		return nil, err
 	}
 
+	logicalSizeBytes, err := imageLogicalSizeBytes(base.manifest.Layers, req.Layers, configDesc, manifestDesc)
+	if err != nil {
+		return nil, err
+	}
+	return &Plan{
+		Result: Result{
+			PushReference:    joinImageReference(pushRegistry, repository) + "@" + manifestDesc.Digest.String(),
+			PullReference:    pullRepositoryRef + "@" + manifestDesc.Digest.String(),
+			ManifestDigest:   manifestDesc.Digest,
+			LogicalSizeBytes: logicalSizeBytes,
+			Platform:         platforms.Normalize(req.Platform),
+		},
+		publisher:     p,
+		request:       req,
+		pusher:        pusher,
+		base:          base,
+		configBytes:   configBytes,
+		configDesc:    configDesc,
+		manifestBytes: manifestBytes,
+		manifestDesc:  manifestDesc,
+	}, nil
+}
+
+// PublishPlan streams a previously composed plan. Callers must durably reserve
+// plan.Result.LogicalSizeBytes before invoking this method.
+func (p *Publisher) PublishPlan(ctx context.Context, plan *Plan) (*Result, error) {
+	if p == nil {
+		return nil, fmt.Errorf("template image publisher is required")
+	}
+	if plan == nil || plan.publisher != p || plan.pusher == nil || plan.base == nil {
+		return nil, fmt.Errorf("template image publication plan is invalid")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	req := plan.request
+	base := plan.base
+	pusher := plan.pusher
+	pushRegistry := registryFromImageReference(plan.Result.PushReference)
 	targetHost := registryHostname(pushRegistry)
 	for _, layer := range base.manifest.Layers {
 		pushDesc := layer
@@ -213,21 +258,208 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 			return nil, fmt.Errorf("push rootfs layer %d (%s): %w", i, desc.Digest, err)
 		}
 	}
-	if err := pushBytes(ctx, pusher, configDesc, configBytes); err != nil {
+	if err := pushBytes(ctx, pusher, plan.configDesc, plan.configBytes); err != nil {
 		return nil, fmt.Errorf("push image config: %w", err)
 	}
 	// The manifest is intentionally last. A failed build can leave only
 	// unreferenced blobs and never expose a partially composed image.
-	if err := pushBytes(ctx, pusher, manifestDesc, manifestBytes); err != nil {
+	if err := pushBytes(ctx, pusher, plan.manifestDesc, plan.manifestBytes); err != nil {
 		return nil, fmt.Errorf("push image manifest: %w", err)
 	}
 
-	return &Result{
-		PushReference:  joinImageReference(pushRegistry, repository) + "@" + manifestDesc.Digest.String(),
-		PullReference:  pullRepositoryRef + "@" + manifestDesc.Digest.String(),
-		ManifestDigest: manifestDesc.Digest,
-		Platform:       platforms.Normalize(req.Platform),
-	}, nil
+	result := plan.Result
+	return &result, nil
+}
+
+func imageLogicalSizeBytes(
+	baseLayers []ocispec.Descriptor,
+	rootFSLayers []Layer,
+	configDesc, manifestDesc ocispec.Descriptor,
+) (int64, error) {
+	total := int64(0)
+	add := func(name string, size int64) error {
+		if size < 0 {
+			return fmt.Errorf("%s size must not be negative", name)
+		}
+		if size > math.MaxInt64-total {
+			return fmt.Errorf("template image logical size overflows int64")
+		}
+		total += size
+		return nil
+	}
+	for i, layer := range baseLayers {
+		if err := add(fmt.Sprintf("base layer %d", i), layer.Size); err != nil {
+			return 0, err
+		}
+	}
+	for i, layer := range rootFSLayers {
+		if err := add(fmt.Sprintf("rootfs layer %d", i), layer.Size); err != nil {
+			return 0, err
+		}
+	}
+	if err := add("image config", configDesc.Size); err != nil {
+		return 0, err
+	}
+	if err := add("image manifest", manifestDesc.Size); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func registryFromImageReference(reference string) string {
+	reference = strings.TrimSpace(reference)
+	if named, err := distref.ParseNormalizedNamed(reference); err == nil {
+		return distref.Domain(named)
+	}
+	if before, _, ok := strings.Cut(reference, "/"); ok {
+		return before
+	}
+	return reference
+}
+
+// Delete removes a managed manifest by digest. Providers without a proven OCI
+// Distribution delete path fail closed so their durable cleanup job and quota
+// fence remain pending.
+func (p *Publisher) Delete(ctx context.Context, req DeleteRequest) error {
+	if p == nil {
+		return fmt.Errorf("template image publisher is required")
+	}
+	imageDigest, err := req.validate()
+	if err != nil {
+		return err
+	}
+	provider := strings.ToLower(strings.TrimSpace(p.registry.Provider))
+	switch provider {
+	case "builtin", "harbor":
+	default:
+		return fmt.Errorf("%w: provider %q", ErrRegistryDeleteUnsupported, provider)
+	}
+
+	repository := outputRepository(req.TemplateID)
+	tag := "build-" + strings.ToLower(strings.TrimSpace(req.BuildID))
+	targetImage := repository + ":" + tag
+	if imageDigest != "" {
+		targetImage = repository + "@" + imageDigest.String()
+	}
+	credential, err := p.credentials.GetPushCredentials(ctx, managerregistry.PushCredentialsRequest{
+		TeamID:      req.TeamID,
+		TargetImage: targetImage,
+	})
+	if err != nil {
+		return fmt.Errorf("get registry delete credentials: %w", err)
+	}
+	if credential == nil {
+		return fmt.Errorf("registry credential provider returned no credentials")
+	}
+	pushRegistry, _, plainHTTP, err := publicationEndpoints(
+		credential,
+		p.registry.InternalRegistry,
+		req.TeamID,
+	)
+	if err != nil {
+		return err
+	}
+	if imageDigest == "" {
+		pushTagRef := joinImageReference(pushRegistry, repository) + ":" + tag
+		resolver := p.newResolver(resolverOptions{
+			purpose:   resolverPurposeTarget,
+			plainHTTP: plainHTTP,
+			credentials: staticCredentials(
+				pushRegistry,
+				credential.Username,
+				credential.Password,
+			),
+		})
+		_, descriptor, err := resolver.Resolve(ctx, pushTagRef)
+		if err != nil {
+			if errdefs.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("resolve managed template image tag: %w", err)
+		}
+		imageDigest = descriptor.Digest
+		if err := imageDigest.Validate(); err != nil {
+			return fmt.Errorf("resolve managed template image digest: %w", err)
+		}
+	}
+	return p.deleteManifest(
+		ctx,
+		pushRegistry,
+		repository,
+		imageDigest,
+		plainHTTP,
+		credential.Username,
+		credential.Password,
+	)
+}
+
+func (p *Publisher) deleteManifest(
+	ctx context.Context,
+	registry, repository string,
+	imageDigest digest.Digest,
+	plainHTTP bool,
+	username, password string,
+) error {
+	client := p.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	authority := registryAuthority(registry)
+	if authority == "" {
+		return fmt.Errorf("registry delete endpoint is invalid")
+	}
+	repository = joinRepositoryPath(registryRepositoryPrefix(registry), repository)
+	if repository == "" {
+		return fmt.Errorf("registry delete repository is invalid")
+	}
+	scheme := "https"
+	if plainHTTP {
+		scheme = "http"
+	}
+	endpoint := &url.URL{
+		Scheme: scheme,
+		Host:   authority,
+		Path:   path.Join("/v2", repository, "manifests", imageDigest.String()),
+	}
+	authorizer := docker.NewDockerAuthorizer(
+		docker.WithAuthClient(client),
+		docker.WithAuthCreds(staticCredentials(registry, username, password)),
+	)
+	for attempt := 0; attempt < 2; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint.String(), nil)
+		if err != nil {
+			return fmt.Errorf("create registry delete request: %w", err)
+		}
+		if err := authorizer.Authorize(ctx, request); err != nil {
+			return fmt.Errorf("authorize registry delete request: %w", err)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			return fmt.Errorf("delete registry manifest: %w", err)
+		}
+		if response.StatusCode == http.StatusUnauthorized && attempt == 0 {
+			authErr := authorizer.AddResponses(ctx, []*http.Response{response})
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+			_ = response.Body.Close()
+			if authErr != nil {
+				return fmt.Errorf("handle registry authentication challenge: %w", authErr)
+			}
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		_ = response.Body.Close()
+		switch response.StatusCode {
+		case http.StatusAccepted, http.StatusOK, http.StatusNotFound:
+			return nil
+		default:
+			return fmt.Errorf(
+				"delete registry manifest returned %d: %s",
+				response.StatusCode,
+				strings.TrimSpace(string(body)),
+			)
+		}
+	}
+	return fmt.Errorf("delete registry manifest authentication did not converge")
 }
 
 func publicationEndpoints(

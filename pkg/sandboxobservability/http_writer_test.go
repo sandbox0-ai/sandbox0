@@ -37,8 +37,8 @@ func TestHTTPWriterPostsLogsAndRuntimeSamples(t *testing.T) {
 	writer := NewHTTPWriter(HTTPWriterOptions{
 		LogsURL:           server.URL + "/logs",
 		RuntimeSamplesURL: server.URL + "/runtime-samples",
-		TokenProvider: func(context.Context) (string, error) {
-			return "internal-token", nil
+		TeamTokenProvider: func(_ context.Context, teamID string) (string, error) {
+			return "internal-token-" + teamID, nil
 		},
 		RequestTimeout: time.Second,
 	})
@@ -67,7 +67,7 @@ func TestHTTPWriterPostsLogsAndRuntimeSamples(t *testing.T) {
 
 	require.Len(t, requests, 2)
 	assert.Equal(t, "/logs", requests[0].path)
-	assert.Equal(t, "internal-token", requests[0].token)
+	assert.Equal(t, "internal-token-team-1", requests[0].token)
 	var logsBody struct {
 		Logs []LogEntry `json:"logs"`
 	}
@@ -76,7 +76,7 @@ func TestHTTPWriterPostsLogsAndRuntimeSamples(t *testing.T) {
 	assert.Equal(t, "hello", logsBody.Logs[0].Message)
 
 	assert.Equal(t, "/runtime-samples", requests[1].path)
-	assert.Equal(t, "internal-token", requests[1].token)
+	assert.Equal(t, "internal-token-team-1", requests[1].token)
 	var metricsBody struct {
 		Samples []RuntimeSample `json:"samples"`
 	}
@@ -91,7 +91,18 @@ func TestHTTPWriterPostsLogsAndRuntimeSamples(t *testing.T) {
 func TestHTTPWriterReturnsBackendDisabledWhenEndpointMissing(t *testing.T) {
 	writer := NewHTTPWriter(HTTPWriterOptions{})
 
-	err := writer.InsertLogs(context.Background(), []LogEntry{{Message: "hello"}})
+	err := writer.InsertLogs(context.Background(), []LogEntry{{TeamID: "team-1", Message: "hello"}})
 
 	assert.True(t, errors.Is(err, ErrBackendDisabled))
+}
+
+func TestHTTPWriterRejectsCrossTeamBatch(t *testing.T) {
+	writer := NewHTTPWriter(HTTPWriterOptions{LogsURL: "http://unused.invalid/logs"})
+
+	err := writer.InsertLogs(context.Background(), []LogEntry{
+		{TeamID: "team-1", Message: "one"},
+		{TeamID: "team-2", Message: "two"},
+	})
+
+	require.ErrorContains(t, err, "spans multiple teams")
 }

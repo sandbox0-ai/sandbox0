@@ -6,28 +6,54 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
 )
+
+type countingByteReader struct {
+	reads int64
+}
+
+func (r *countingByteReader) Read(p []byte) (int, error) {
+	for index := range p {
+		p[index] = 'x'
+	}
+	r.reads += int64(len(p))
+	return len(p), nil
+}
+
+func TestReadVolumeFileBodyStopsAtConfiguredLimit(t *testing.T) {
+	reader := &countingByteReader{}
+	data, err := readVolumeFileBody(reader, 8)
+	if !errors.Is(err, errFileTooLarge) {
+		t.Fatalf("readVolumeFileBody() error = %v, want errFileTooLarge", err)
+	}
+	if data != nil {
+		t.Fatalf("readVolumeFileBody() returned %d bytes on overflow", len(data))
+	}
+	if reader.reads != 9 {
+		t.Fatalf("reader consumed %d bytes, want 9", reader.reads)
+	}
+}
 
 type fakeHTTPVolumeMountManager struct {
 	acquireCalls      int
@@ -63,74 +89,77 @@ type fakeVolumeFilePodResolver struct {
 	urls map[string]string
 }
 
+type fakeVolumeWatchHub struct {
+	mu            sync.Mutex
+	subscriptions int
+	cancellations int
+	closers       []func()
+}
+
+func (h *fakeVolumeWatchHub) Subscribe(_ *pb.WatchRequest) (string, <-chan *pb.WatchEvent, func()) {
+	h.mu.Lock()
+	h.subscriptions++
+	watchID := fmt.Sprintf("watch-%d", h.subscriptions)
+	events := make(chan *pb.WatchEvent)
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			h.mu.Lock()
+			h.cancellations++
+			h.mu.Unlock()
+			close(events)
+		})
+	}
+	h.closers = append(h.closers, cancel)
+	h.mu.Unlock()
+	return watchID, events, cancel
+}
+
+func (h *fakeVolumeWatchHub) counts() (int, int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.subscriptions, h.cancellations
+}
+
+func (h *fakeVolumeWatchHub) closeSubscription(index int) {
+	h.mu.Lock()
+	if index < 0 || index >= len(h.closers) {
+		h.mu.Unlock()
+		return
+	}
+	closeSubscription := h.closers[index]
+	h.mu.Unlock()
+	closeSubscription()
+}
+
+type stagedStorageOperationQuota struct {
+	mu           sync.Mutex
+	allowedCalls int
+	calls        int
+}
+
+func (q *stagedStorageOperationQuota) Admit(_ context.Context, _ string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.calls++
+	if q.calls > q.allowedCalls {
+		return errors.New("storage operation rejected")
+	}
+	return nil
+}
+
+func (*stagedStorageOperationQuota) Close() error { return nil }
+
+func (q *stagedStorageOperationQuota) callCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.calls
+}
+
 type fakeHTTPSharedVolumeBarrier struct {
 	sharedCalls    int
 	exclusiveCalls int
 	lastVolumeID   string
-}
-
-type fakeQuotaDB struct {
-	limit *quota.Limit
-}
-
-type fakeQuotaRow struct {
-	values []any
-	err    error
-}
-
-func (db *fakeQuotaDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, nil
-}
-
-func (db *fakeQuotaDB) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
-	switch {
-	case strings.Contains(sql, "quota.team_quota_limits"):
-		if db.limit == nil {
-			return fakeQuotaRow{err: pgx.ErrNoRows}
-		}
-		return fakeQuotaRow{values: []any{db.limit.TeamID, db.limit.Dimension, db.limit.LimitValue}}
-	default:
-		return fakeQuotaRow{err: errors.New("unexpected quota query")}
-	}
-}
-
-type fakeQuotaUsageStore struct {
-	projectedGB  int64
-	additionalGB int64
-}
-
-func (s fakeQuotaUsageStore) CurrentUsage(context.Context, string, quota.Dimension) (int64, error) {
-	return 0, nil
-}
-
-func (s fakeQuotaUsageStore) ProjectedStorageUsageGB(context.Context, string, quota.Dimension, string, string, int64) (int64, error) {
-	return s.projectedGB, nil
-}
-
-func (s fakeQuotaUsageStore) AdditionalStorageUsageGB(context.Context, string, quota.Dimension, string, int64) (int64, error) {
-	return s.additionalGB, nil
-}
-
-func (r fakeQuotaRow) Scan(dest ...any) error {
-	if r.err != nil {
-		return r.err
-	}
-	if len(dest) != len(r.values) {
-		return errors.New("unexpected scan destination count")
-	}
-	for i, value := range r.values {
-		switch target := dest[i].(type) {
-		case *string:
-			*target = value.(string)
-		case *quota.Dimension:
-			*target = value.(quota.Dimension)
-		case *int64:
-			*target = value.(int64)
-		default:
-			return errors.New("unexpected scan destination type")
-		}
-	}
-	return nil
 }
 
 func mustMountOptionsRaw(t *testing.T, opts volume.MountOptions) *json.RawMessage {
@@ -382,6 +411,451 @@ func newVolumeFileTestServerWithBarrier(fileRPC *fakeHTTPVolumeFileRPC, barrier 
 		selfClusterID: "cluster-a",
 	}
 	return server, volMgr
+}
+
+func startVolumeWatchTestServer(t *testing.T, server *Server) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /sandboxvolumes/{id}/files/watch", func(w http.ResponseWriter, r *http.Request) {
+		teamID := strings.TrimSpace(r.Header.Get(volumeFileAffinityTeamHeader))
+		if teamID == "" {
+			teamID = strings.TrimSpace(r.URL.Query().Get("team"))
+		}
+		r = r.WithContext(internalauth.WithClaims(r.Context(), &internalauth.Claims{TeamID: teamID}))
+		server.handleVolumeFileWatch(w, r)
+	})
+	return httptest.NewServer(mux)
+}
+
+func dialVolumeWatch(
+	t *testing.T,
+	httpServer *httptest.Server,
+	volumeID string,
+	teamID string,
+) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") +
+		"/sandboxvolumes/" + url.PathEscape(volumeID) + "/files/watch?team=" + url.QueryEscape(teamID)
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if response != nil {
+			t.Fatalf("dial volume watch: %v (status %d)", err, response.StatusCode)
+		}
+		t.Fatalf("dial volume watch: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+	})
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set volume watch read deadline: %v", err)
+	}
+	return conn
+}
+
+type volumeWatchResponse struct {
+	Type    string `json:"type"`
+	WatchID string `json:"watch_id"`
+	Error   string `json:"error"`
+}
+
+func subscribeVolumeWatch(t *testing.T, conn *websocket.Conn, path string) volumeWatchResponse {
+	t.Helper()
+	if err := conn.WriteJSON(map[string]any{
+		"action":    "subscribe",
+		"path":      path,
+		"recursive": true,
+	}); err != nil {
+		t.Fatalf("write volume watch subscribe: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set volume watch read deadline: %v", err)
+	}
+	var response volumeWatchResponse
+	if err := conn.ReadJSON(&response); err != nil {
+		t.Fatalf("read volume watch subscribe response: %v", err)
+	}
+	return response
+}
+
+func unsubscribeVolumeWatch(t *testing.T, conn *websocket.Conn, watchID string) volumeWatchResponse {
+	t.Helper()
+	if err := conn.WriteJSON(map[string]any{
+		"action":   "unsubscribe",
+		"watch_id": watchID,
+	}); err != nil {
+		t.Fatalf("write volume watch unsubscribe: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set volume watch read deadline: %v", err)
+	}
+	var response volumeWatchResponse
+	if err := conn.ReadJSON(&response); err != nil {
+		t.Fatalf("read volume watch unsubscribe response: %v", err)
+	}
+	return response
+}
+
+func waitForVolumeWatchCount(
+	t *testing.T,
+	guard *volumeWatchSubscriptionGuard,
+	want int,
+) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		count := guard.count()
+		if count == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watch subscription count = %d, want %d", count, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestHandleVolumeFileWatchProxyAdmitsOnlyOnOwner(t *testing.T) {
+	ownerRepo := newFakeHTTPRepo()
+	ownerRepo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-a"}
+	ownerOperations := newTestStorageOperationQuota()
+	ownerConnections := &testWatchActiveConnectionQuota{}
+	ownerHub := &fakeVolumeWatchHub{}
+	owner := &Server{
+		logger:            logrus.New(),
+		repo:              ownerRepo,
+		storageOperations: ownerOperations,
+		activeConnections: ownerConnections,
+		eventHub:          ownerHub,
+	}
+	ownerHTTP := startVolumeWatchTestServer(t, owner)
+	defer ownerHTTP.Close()
+
+	sourceRepo := newFakeHTTPRepo()
+	sourceRepo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-a"}
+	sourceRepo.activeMounts["vol-1"] = []*db.VolumeMount{{
+		VolumeID:  "vol-1",
+		ClusterID: "cluster-a",
+		PodID:     "owner-pod",
+		MountedAt: time.Unix(10, 0),
+	}}
+	sourceOperations := newTestStorageOperationQuota()
+	source := &Server{
+		logger:            logrus.New(),
+		cfg:               &config.StorageProxyConfig{HeartbeatTimeout: 15},
+		repo:              sourceRepo,
+		storageOperations: sourceOperations,
+		podResolver: &fakeVolumeFilePodResolver{
+			urls: map[string]string{"owner-pod": ownerHTTP.URL},
+		},
+		selfPodID:     "source-pod",
+		selfClusterID: "cluster-a",
+	}
+	sourceHTTP := startVolumeWatchTestServer(t, source)
+	defer sourceHTTP.Close()
+
+	conn := dialVolumeWatch(t, sourceHTTP, "vol-1", "team-a")
+	response := subscribeVolumeWatch(t, conn, "/docs")
+	if response.Type != "subscribed" || response.WatchID == "" {
+		t.Fatalf("subscribe response = %+v, want subscribed", response)
+	}
+
+	if teams := sourceOperations.admittedTeams(); len(teams) != 0 {
+		t.Fatalf("source admissions = %#v, want none", teams)
+	}
+	if teams := ownerOperations.admittedTeams(); len(teams) != 2 || teams[0] != "team-a" || teams[1] != "team-a" {
+		t.Fatalf("owner admissions = %#v, want two team-a admissions", teams)
+	}
+	if ownerConnections.acquisitionCount() != 1 || ownerConnections.usage("team-a") != 1 {
+		t.Fatalf(
+			"owner active connection state = acquisitions %d usage %d, want 1 and 1",
+			ownerConnections.acquisitionCount(),
+			ownerConnections.usage("team-a"),
+		)
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close proxied watch: %v", err)
+	}
+	waitForVolumeWatchCount(t, &owner.watchSubscriptions, 0)
+	if ownerConnections.usage("team-a") != 0 {
+		t.Fatalf("owner active connection usage = %d, want 0", ownerConnections.usage("team-a"))
+	}
+	_, cancellations := ownerHub.counts()
+	if cancellations != 1 {
+		t.Fatalf("owner watch cancellations = %d, want 1", cancellations)
+	}
+}
+
+func TestHandleVolumeFileWatchSubscriptionAdmissionFailsClosedAndReleasesGuard(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-a"}
+	operations := &stagedStorageOperationQuota{allowedCalls: 1}
+	connections := &testWatchActiveConnectionQuota{}
+	hub := &fakeVolumeWatchHub{}
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		storageOperations: operations,
+		activeConnections: connections,
+		eventHub:          hub,
+	}
+	httpServer := startVolumeWatchTestServer(t, server)
+	defer httpServer.Close()
+
+	conn := dialVolumeWatch(t, httpServer, "vol-1", "team-a")
+	response := subscribeVolumeWatch(t, conn, "/docs")
+	if response.Type != "error" || !strings.Contains(response.Error, "storage operation rejected") {
+		t.Fatalf("subscribe response = %+v, want storage operation error", response)
+	}
+	if operations.callCount() != 2 {
+		t.Fatalf("storage operation calls = %d, want 2", operations.callCount())
+	}
+	if subscriptions, _ := hub.counts(); subscriptions != 0 {
+		t.Fatalf("hub subscriptions = %d, want 0", subscriptions)
+	}
+	if connections.acquisitionCount() != 0 {
+		t.Fatalf("active connection acquisitions = %d, want 0", connections.acquisitionCount())
+	}
+	waitForVolumeWatchCount(t, &server.watchSubscriptions, 0)
+}
+
+func TestHandleVolumeFileWatchEnforcesPerConnectionLimit(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-a"}
+	operations := newTestStorageOperationQuota()
+	connections := &testWatchActiveConnectionQuota{}
+	hub := &fakeVolumeWatchHub{}
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		storageOperations: operations,
+		activeConnections: connections,
+		eventHub:          hub,
+	}
+	httpServer := startVolumeWatchTestServer(t, server)
+	defer httpServer.Close()
+
+	conn := dialVolumeWatch(t, httpServer, "vol-1", "team-a")
+	for index := 0; index < maxVolumeFileWatchSubscriptionsPerConnection; index++ {
+		response := subscribeVolumeWatch(t, conn, fmt.Sprintf("/path-%d", index))
+		if response.Type != "subscribed" {
+			t.Fatalf("subscribe %d response = %+v, want subscribed", index, response)
+		}
+	}
+	response := subscribeVolumeWatch(t, conn, "/one-too-many")
+	if response.Type != "error" || !strings.Contains(response.Error, "maximum watch subscriptions") {
+		t.Fatalf("overflow response = %+v, want connection-limit error", response)
+	}
+	if teams := operations.admittedTeams(); len(teams) != 1+maxVolumeFileWatchSubscriptionsPerConnection {
+		t.Fatalf(
+			"storage operation admissions = %d, want %d",
+			len(teams),
+			1+maxVolumeFileWatchSubscriptionsPerConnection,
+		)
+	}
+	if subscriptions, _ := hub.counts(); subscriptions != maxVolumeFileWatchSubscriptionsPerConnection {
+		t.Fatalf("hub subscriptions = %d, want %d", subscriptions, maxVolumeFileWatchSubscriptionsPerConnection)
+	}
+	if connections.acquisitionCount() != maxVolumeFileWatchSubscriptionsPerConnection {
+		t.Fatalf(
+			"active connection acquisitions = %d, want %d",
+			connections.acquisitionCount(),
+			maxVolumeFileWatchSubscriptionsPerConnection,
+		)
+	}
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close watch: %v", err)
+	}
+	waitForVolumeWatchCount(t, &server.watchSubscriptions, 0)
+	if connections.usage("team-a") != 0 {
+		t.Fatalf("active connection usage = %d, want 0", connections.usage("team-a"))
+	}
+	_, cancellations := hub.counts()
+	if cancellations != maxVolumeFileWatchSubscriptionsPerConnection {
+		t.Fatalf("watch cancellations = %d, want %d", cancellations, maxVolumeFileWatchSubscriptionsPerConnection)
+	}
+}
+
+func TestHandleVolumeFileWatchEnforcesCrossConnectionTeamAndProcessLimits(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-a"] = &db.SandboxVolume{ID: "vol-a", TeamID: "team-a"}
+	repo.volumes["vol-b"] = &db.SandboxVolume{ID: "vol-b", TeamID: "team-b"}
+	repo.volumes["vol-c"] = &db.SandboxVolume{ID: "vol-c", TeamID: "team-c"}
+	hub := &fakeVolumeWatchHub{}
+	connections := &testWatchActiveConnectionQuota{maxPerTeam: 2}
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		storageOperations: newTestStorageOperationQuota(),
+		activeConnections: connections,
+		eventHub:          hub,
+		watchSubscriptions: volumeWatchSubscriptionGuard{
+			maxGlobal: 3,
+		},
+	}
+	httpServer := startVolumeWatchTestServer(t, server)
+	defer httpServer.Close()
+
+	teamAFirst := dialVolumeWatch(t, httpServer, "vol-a", "team-a")
+	firstA := subscribeVolumeWatch(t, teamAFirst, "/first")
+	if firstA.Type != "subscribed" {
+		t.Fatalf("first team-a response = %+v, want subscribed", firstA)
+	}
+	teamASecond := dialVolumeWatch(t, httpServer, "vol-a", "team-a")
+	secondA := subscribeVolumeWatch(t, teamASecond, "/second")
+	if secondA.Type != "subscribed" {
+		t.Fatalf("second team-a response = %+v, want subscribed", secondA)
+	}
+	teamLimit := subscribeVolumeWatch(t, teamASecond, "/team-overflow")
+	if teamLimit.Type != "error" || !strings.Contains(teamLimit.Error, "active_connection_count") {
+		t.Fatalf("team-limit response = %+v, want active connection quota limit", teamLimit)
+	}
+
+	teamB := dialVolumeWatch(t, httpServer, "vol-b", "team-b")
+	firstB := subscribeVolumeWatch(t, teamB, "/third-global")
+	if firstB.Type != "subscribed" {
+		t.Fatalf("team-b response = %+v, want subscribed", firstB)
+	}
+	teamC := dialVolumeWatch(t, httpServer, "vol-c", "team-c")
+	processLimit := subscribeVolumeWatch(t, teamC, "/global-overflow")
+	if processLimit.Type != "error" || !strings.Contains(processLimit.Error, "process watch subscription limit") {
+		t.Fatalf("process-limit response = %+v, want process limit", processLimit)
+	}
+
+	if err := teamAFirst.Close(); err != nil {
+		t.Fatalf("close first team-a connection: %v", err)
+	}
+	waitForVolumeWatchCount(t, &server.watchSubscriptions, 2)
+	if connections.usage("team-a") != 1 {
+		t.Fatalf("team-a active connection usage = %d, want 1", connections.usage("team-a"))
+	}
+	replacement := subscribeVolumeWatch(t, teamC, "/replacement")
+	if replacement.Type != "subscribed" {
+		t.Fatalf("replacement response = %+v, want subscribed", replacement)
+	}
+
+	unsubscribed := unsubscribeVolumeWatch(t, teamASecond, secondA.WatchID)
+	if unsubscribed.Type != "unsubscribed" || unsubscribed.WatchID != secondA.WatchID {
+		t.Fatalf("unsubscribe response = %+v, want watch %q removed", unsubscribed, secondA.WatchID)
+	}
+	waitForVolumeWatchCount(t, &server.watchSubscriptions, 2)
+	if connections.usage("team-a") != 0 {
+		t.Fatalf("team-a active connection usage = %d, want 0", connections.usage("team-a"))
+	}
+}
+
+func TestHandleVolumeFileWatchLeaseLossClosesSubscriptionAndAllowsReplacement(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-a"}
+	hub := &fakeVolumeWatchHub{}
+	connections := &testWatchActiveConnectionQuota{}
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		storageOperations: newTestStorageOperationQuota(),
+		activeConnections: connections,
+		eventHub:          hub,
+	}
+	httpServer := startVolumeWatchTestServer(t, server)
+	defer httpServer.Close()
+
+	conn := dialVolumeWatch(t, httpServer, "vol-1", "team-a")
+	first := subscribeVolumeWatch(t, conn, "/first")
+	if first.Type != "subscribed" {
+		t.Fatalf("first subscribe response = %+v, want subscribed", first)
+	}
+	lease := connections.leaseAt(0)
+	if lease == nil {
+		t.Fatal("first active connection lease is nil")
+	}
+	lease.lose(errors.New("redis lease lost"))
+
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set lease-loss read deadline: %v", err)
+	}
+	var lost volumeWatchResponse
+	if err := conn.ReadJSON(&lost); err != nil {
+		t.Fatalf("read lease-loss response: %v", err)
+	}
+	if lost.Type != "error" || lost.WatchID != first.WatchID || !strings.Contains(lost.Error, "redis lease lost") {
+		t.Fatalf("lease-loss response = %+v, want watch-specific error", lost)
+	}
+	waitForVolumeWatchCount(t, &server.watchSubscriptions, 0)
+	if connections.usage("team-a") != 0 {
+		t.Fatalf("active connection usage after lease loss = %d, want 0", connections.usage("team-a"))
+	}
+	if _, cancellations := hub.counts(); cancellations != 1 {
+		t.Fatalf("watch cancellations after lease loss = %d, want 1", cancellations)
+	}
+
+	replacement := subscribeVolumeWatch(t, conn, "/replacement")
+	if replacement.Type != "subscribed" {
+		t.Fatalf("replacement response = %+v, want subscribed", replacement)
+	}
+	if connections.acquisitionCount() != 2 {
+		t.Fatalf("active connection acquisitions = %d, want 2", connections.acquisitionCount())
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close volume watch connection: %v", err)
+	}
+	waitForVolumeWatchCount(t, &server.watchSubscriptions, 0)
+	if usage := connections.usage("team-a"); usage != 0 {
+		t.Fatalf("active connection usage after connection close = %d, want 0", usage)
+	}
+}
+
+func TestHandleVolumeFileWatchHubClosureReleasesSubscription(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-a"}
+	hub := &fakeVolumeWatchHub{}
+	releaseStarted := make(chan struct{})
+	releaseGate := make(chan struct{})
+	connections := &testWatchActiveConnectionQuota{
+		nextReleaseStarted: releaseStarted,
+		nextReleaseGate:    releaseGate,
+	}
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		storageOperations: newTestStorageOperationQuota(),
+		activeConnections: connections,
+		eventHub:          hub,
+	}
+	httpServer := startVolumeWatchTestServer(t, server)
+	defer httpServer.Close()
+
+	conn := dialVolumeWatch(t, httpServer, "vol-1", "team-a")
+	first := subscribeVolumeWatch(t, conn, "/first")
+	if first.Type != "subscribed" {
+		t.Fatalf("first subscribe response = %+v, want subscribed", first)
+	}
+
+	hub.closeSubscription(0)
+	select {
+	case <-releaseStarted:
+	case <-time.After(time.Second):
+		t.Fatal("active connection lease release did not start")
+	}
+	if subscriptions := server.watchSubscriptions.count(); subscriptions != 1 {
+		t.Fatalf("watch subscription guard during lease release = %d, want 1", subscriptions)
+	}
+	if usage := connections.usage("team-a"); usage != 1 {
+		t.Fatalf("active connection usage during lease release = %d, want 1", usage)
+	}
+	close(releaseGate)
+	waitForVolumeWatchCount(t, &server.watchSubscriptions, 0)
+	if connections.usage("team-a") != 0 {
+		t.Fatalf("active connection usage after hub close = %d, want 0", connections.usage("team-a"))
+	}
+
+	replacement := subscribeVolumeWatch(t, conn, "/replacement")
+	if replacement.Type != "subscribed" {
+		t.Fatalf("replacement response = %+v, want subscribed", replacement)
+	}
+	if connections.acquisitionCount() != 2 {
+		t.Fatalf("active connection acquisitions = %d, want 2", connections.acquisitionCount())
+	}
 }
 
 func volumeDirAttr() *pb.GetAttrResponse {
@@ -733,61 +1207,6 @@ func TestWriteVolumeFileSkipsSyncWhenContentUnchanged(t *testing.T) {
 	}
 	if volMgr.syncCalls != 0 {
 		t.Fatalf("SyncDirectVolumeFileMount() calls = %d, want 0", volMgr.syncCalls)
-	}
-}
-
-func TestWriteVolumeFileChecksQuotaBeforeProxyingToOwner(t *testing.T) {
-	remoteSeen := make(chan struct{}, 1)
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case remoteSeen <- struct{}{}:
-		default:
-		}
-		_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"written": true})
-	}))
-	defer remote.Close()
-
-	fileRPC := &fakeHTTPVolumeFileRPC{}
-	server, volMgr := newVolumeFileTestServer(fileRPC)
-	quotaRepo := quota.NewRepositoryWithDB(&fakeQuotaDB{
-		limit: &quota.Limit{
-			TeamID:     "team-a",
-			Dimension:  quota.DimensionVolumeStorageGB,
-			LimitValue: 0,
-		},
-	})
-	quotaRepo.SetUsageStore(fakeQuotaUsageStore{additionalGB: 1})
-	server.quotaRepo = quotaRepo
-	repo := server.repo.(*fakeHTTPRepo)
-	repo.activeMounts["vol-1"] = []*db.VolumeMount{
-		{
-			VolumeID:  "vol-1",
-			ClusterID: "cluster-a",
-			PodID:     "remote-pod",
-			MountedAt: time.Unix(10, 0),
-		},
-	}
-	server.podResolver = &fakeVolumeFilePodResolver{
-		urls: map[string]string{"remote-pod": remote.URL},
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/files?path=/quota.txt", bytes.NewReader([]byte("quota")))
-	req.SetPathValue("id", "vol-1")
-	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{TeamID: "team-a"}))
-	recorder := httptest.NewRecorder()
-
-	server.handleVolumeFileOperation(recorder, req)
-
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
-	}
-	if volMgr.acquireCalls != 0 {
-		t.Fatalf("AcquireDirectVolumeFileMount() calls = %d, want 0", volMgr.acquireCalls)
-	}
-	select {
-	case <-remoteSeen:
-		t.Fatal("quota exceeded write was proxied to owner")
-	default:
 	}
 }
 

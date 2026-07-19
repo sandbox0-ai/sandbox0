@@ -188,6 +188,7 @@ func (m *AuthMiddleware) authenticateJWT(c *gin.Context, tokenString string) (*a
 		TeamID:        teamID,
 		UserID:        claims.UserID,
 		TeamRole:      teamRole,
+		TeamGrants:    append([]authn.TeamGrant(nil), claims.TeamGrants...),
 		IsSystemAdmin: claims.IsAdmin,
 		Permissions:   permissions,
 	}, nil
@@ -260,6 +261,29 @@ func (m *AuthMiddleware) resolveSelectedTeam(ctx context.Context, headerTeamID s
 		return selectedTeamID, strings.TrimSpace(grant.TeamRole), nil
 	}
 	return "", "", ErrSelectedTeamForbidden
+}
+
+// ResolveJWTTeamGrant resolves a signed grant and applies this gateway's
+// regional team boundary.
+func (m *AuthMiddleware) ResolveJWTTeamGrant(
+	authCtx *authn.AuthContext,
+	teamID string,
+) (authn.TeamGrant, error) {
+	teamID = strings.TrimSpace(teamID)
+	if m == nil ||
+		authCtx == nil ||
+		authCtx.AuthMethod != authn.AuthMethodJWT ||
+		teamID == "" {
+		return authn.TeamGrant{}, ErrSelectedTeamForbidden
+	}
+	grant, ok := authCtx.FindTeamGrant(teamID)
+	if !ok {
+		return authn.TeamGrant{}, ErrSelectedTeamForbidden
+	}
+	if err := m.validateTeamGrantRegion(grant); err != nil {
+		return authn.TeamGrant{}, err
+	}
+	return grant, nil
 }
 
 func (m *AuthMiddleware) validateTeamGrantRegion(grant authn.TeamGrant) error {

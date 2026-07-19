@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -32,8 +33,8 @@ const (
 	defaultNetdHTTPFixtureImageRef = "sandbox0ai/otemplates:default-v0.2.0"
 	netdHTTPFixturePort            = 8080
 	netdHTTPFixtureLargeBytes      = 256 * 1024
-	netdRedisBandwidthMinElapsed   = 3 * time.Second
-	defaultNetdBandwidthKeyPrefix  = "sandbox0:netd:bandwidth"
+	netdTeamNetworkQuotaMinElapsed = 3 * time.Second
+	netdTeamNetworkQuotaByteTokens = 64 * 1024
 )
 
 type netdHTTPFixture struct {
@@ -112,18 +113,18 @@ func assertNetdClusterDNSUDP(env *framework.ScenarioEnv, session *e2eutils.Sessi
 	}).WithTimeout(60 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 }
 
-func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eutils.Session, adminPassword string) {
+func assertNetdTeamNetworkByteQuotaLimit(env *framework.ScenarioEnv, session *e2eutils.Session, adminPassword string) {
 	assertCtldNetworkRuntimeRollout(env)
-	if !netdRedisTeamBandwidthConfigured(env) {
-		Skip("ctld network-runtime team bandwidth limit is not configured for this scenario")
+	if !netdTeamNetworkQuotaConfigured(env) {
+		Skip("ctld Team Network Quota enforcement is not configured for this scenario")
 	}
 
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	team, status, err := session.CreateTeam(
 		env.TestCtx.Context,
 		GinkgoT(),
-		"E2E bandwidth "+suffix,
-		"e2e-bandwidth-"+suffix,
+		"E2E network quota "+suffix,
+		"e2e-network-quota-"+suffix,
 		nil,
 	)
 	Expect(err).NotTo(HaveOccurred())
@@ -136,7 +137,7 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 		defer session.SelectTeam(originalTeamID)
 		session.SelectTeam(team.Id)
 		var cleanupErrs []error
-		if err := clearNetdRedisTeamBandwidthKeys(env, team.Id); err != nil {
+		if err := clearNetdTeamNetworkQuotaRateBuckets(env, team.Id); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
 		}
 		for _, id := range sandboxIDs {
@@ -144,7 +145,12 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 				cleanupErrs = append(cleanupErrs, err)
 			}
 		}
-		if _, err := session.DeleteTeam(env.TestCtx.Context, GinkgoT(), team.Id); err != nil {
+		if err := session.DeleteTeamEventually(
+			env.TestCtx.Context,
+			GinkgoT(),
+			team.Id,
+			time.Minute,
+		); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
 		}
 		Expect(errors.Join(cleanupErrs...)).NotTo(HaveOccurred())
@@ -152,6 +158,19 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 
 	Expect(session.Login(env.TestCtx.Context, GinkgoT(), "admin@example.com", adminPassword)).To(Succeed())
 	session.SelectTeam(team.Id)
+	for _, key := range []apispec.TeamQuotaKey{apispec.NetworkIngressBytes, apispec.NetworkEgressBytes} {
+		_, status, err := session.PutTeamQuota(
+			env.TestCtx.Context,
+			key,
+			e2eutils.RateTeamQuotaPolicy(
+				netdTeamNetworkQuotaByteTokens,
+				time.Second.Milliseconds(),
+				netdTeamNetworkQuotaByteTokens,
+			),
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status).To(Equal(http.StatusOK))
+	}
 
 	first := claimSandboxEventually(env, session, "default")
 	sandboxIDs = append(sandboxIDs, first.SandboxId)
@@ -191,17 +210,19 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 		Expect(<-errCh).NotTo(HaveOccurred())
 	}
 	elapsed := time.Since(started)
-	Expect(elapsed).To(BeNumerically(">=", netdRedisBandwidthMinElapsed), "expected two same-team downloads to share the cluster-scoped bandwidth bucket")
-	Expect(clearNetdRedisTeamBandwidthKeys(env, team.Id)).To(Succeed())
+	Expect(elapsed).To(
+		BeNumerically(">=", netdTeamNetworkQuotaMinElapsed),
+		"expected two same-team downloads to share the region-scoped network byte quota",
+	)
+	Expect(clearNetdTeamNetworkQuotaRateBuckets(env, team.Id)).To(Succeed())
 }
 
-func netdRedisTeamBandwidthConfigured(env *framework.ScenarioEnv) bool {
-	cfg, ok := netdRedisTeamBandwidthConfig(env)
-	return ok && strings.TrimSpace(cfg.RedisURL) != "" &&
-		(cfg.TeamEgressBandwidthBytesPerSecond > 0 || cfg.TeamIngressBandwidthBytesPerSecond > 0)
+func netdTeamNetworkQuotaConfigured(env *framework.ScenarioEnv) bool {
+	cfg, ok := netdTeamNetworkQuotaConfig(env)
+	return ok && strings.TrimSpace(cfg.TeamQuotaDistributedEnforcement.RedisURL) != ""
 }
 
-func netdRedisTeamBandwidthConfig(env *framework.ScenarioEnv) (*apiconfig.NetdConfig, bool) {
+func netdTeamNetworkQuotaConfig(env *framework.ScenarioEnv) (*apiconfig.NetdConfig, bool) {
 	if env == nil || env.Infra.Name == "" || env.Infra.Namespace == "" {
 		return nil, false
 	}
@@ -265,9 +286,9 @@ func assertCtldNetworkRuntimeRollout(env *framework.ScenarioEnv) {
 	}
 }
 
-func clearNetdRedisTeamBandwidthKeys(env *framework.ScenarioEnv, teamID string) error {
-	cfg, ok := netdRedisTeamBandwidthConfig(env)
-	if !ok || strings.TrimSpace(cfg.RedisURL) == "" || strings.TrimSpace(teamID) == "" {
+func clearNetdTeamNetworkQuotaRateBuckets(env *framework.ScenarioEnv, teamID string) error {
+	cfg, ok := netdTeamNetworkQuotaConfig(env)
+	if !ok || strings.TrimSpace(cfg.TeamQuotaDistributedEnforcement.RedisURL) == "" || strings.TrimSpace(teamID) == "" {
 		return nil
 	}
 
@@ -291,7 +312,7 @@ func clearNetdRedisTeamBandwidthKeys(env *framework.ScenarioEnv, teamID string) 
 		return fmt.Errorf("redis port-forward did not return a host")
 	}
 
-	options, err := redis.ParseURL(cfg.RedisURL)
+	options, err := redis.ParseURL(cfg.TeamQuotaDistributedEnforcement.RedisURL)
 	if err != nil {
 		return err
 	}
@@ -302,39 +323,43 @@ func clearNetdRedisTeamBandwidthKeys(env *framework.ScenarioEnv, teamID string) 
 
 	ctx, cancel := context.WithTimeout(env.TestCtx.Context, 10*time.Second)
 	defer cancel()
-	keys := netdRedisTeamBandwidthKeys(cfg, teamID)
+	keys := netdTeamNetworkQuotaRedisBucketKeys(cfg, teamID)
 	if err := client.Del(ctx, keys...).Err(); err != nil {
 		return err
 	}
 	return nil
 }
 
-func netdRedisTeamBandwidthKeys(cfg *apiconfig.NetdConfig, teamID string) []string {
-	return []string{
-		netdRedisTeamBandwidthKey(cfg, teamID, "egress"),
-		netdRedisTeamBandwidthKey(cfg, teamID, "ingress"),
+func netdTeamNetworkQuotaRedisBucketKeys(cfg *apiconfig.NetdConfig, teamID string) []string {
+	keys := []teamquota.Key{
+		teamquota.KeyNetworkEgressBytes,
+		teamquota.KeyNetworkIngressBytes,
+		teamquota.KeyNetworkOperations,
 	}
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, netdTeamNetworkQuotaRedisBucketKey(cfg, teamID, key))
+	}
+	return result
 }
 
-func netdRedisTeamBandwidthKey(cfg *apiconfig.NetdConfig, teamID, direction string) string {
-	keyPrefix := defaultNetdBandwidthKeyPrefix
+func netdTeamNetworkQuotaRedisBucketKey(cfg *apiconfig.NetdConfig, teamID string, key teamquota.Key) string {
+	keyPrefix := teamquota.DefaultRedisKeyPrefix
 	if cfg != nil {
-		basePrefix := strings.TrimSpace(cfg.RedisKeyPrefix)
-		if basePrefix == "" {
-			basePrefix = rediscache.DefaultKeyPrefix
-		}
-		keyPrefix = rediscache.JoinKeyPrefix(basePrefix, "netd", "bandwidth")
-		if keyPrefix == "" {
-			keyPrefix = defaultNetdBandwidthKeyPrefix
-		}
+		keyPrefix = teamquota.NormalizeTeamQuotaRedisKeyPrefix(
+			cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+		)
 	}
-	raw := rediscache.JoinKeyPrefix(
-		"region", netdRedisValueOrUnknown(cfgRegionID(cfg)),
-		"cluster", netdRedisValueOrUnknown(cfgClusterID(cfg)),
-		"team", teamID,
-		"direction", direction,
+	regionID := cfgRegionID(cfg)
+	raw := fmt.Sprintf(
+		"team-quota:v1:%d:%s:%d:%s:%s",
+		len(regionID),
+		regionID,
+		len(teamID),
+		teamID,
+		key,
 	)
-	return rediscache.HashedKey(keyPrefix, raw)
+	return rediscache.HashedKey(rediscache.JoinKeyPrefix(keyPrefix, "guarded"), raw)
 }
 
 func cfgRegionID(cfg *apiconfig.NetdConfig) string {
@@ -342,21 +367,6 @@ func cfgRegionID(cfg *apiconfig.NetdConfig) string {
 		return ""
 	}
 	return cfg.RegionID
-}
-
-func cfgClusterID(cfg *apiconfig.NetdConfig) string {
-	if cfg == nil {
-		return ""
-	}
-	return cfg.ClusterID
-}
-
-func netdRedisValueOrUnknown(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "unknown"
-	}
-	return value
 }
 
 func applyNetdFixtureAllowPolicy(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID, namespace, podName, allowIP string) {

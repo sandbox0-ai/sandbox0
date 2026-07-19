@@ -21,11 +21,14 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/fuseportal"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/activeconnections"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/storageoperations"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/zap"
@@ -46,6 +49,9 @@ type Manager struct {
 	logrus                 *logrus.Logger
 	storage                *apiconfig.StorageProxyConfig
 	storageObserver        volume.StorageObserver
+	storageQuota           *storagequota.Service
+	storageOperations      storageoperations.Quota
+	activeConnections      activeconnections.Quota
 	s3CredentialCodec      *volume.S3BackendCredentialCodec
 	s3CredentialCodecErr   error
 	repo                   *db.Repository
@@ -126,6 +132,9 @@ type Config struct {
 	Logger                  *zap.Logger
 	StorageConfig           *apiconfig.StorageProxyConfig
 	StorageObserver         volume.StorageObserver
+	StorageQuota            *storagequota.Service
+	StorageOperations       storageoperations.Quota
+	ActiveConnections       activeconnections.Quota
 	Repository              *db.Repository
 	PodName                 string
 	PodNamespace            string
@@ -185,6 +194,9 @@ func NewManager(cfg Config) *Manager {
 		logrus:                 l,
 		storage:                storageConfig,
 		storageObserver:        cfg.StorageObserver,
+		storageQuota:           cfg.StorageQuota,
+		storageOperations:      cfg.StorageOperations,
+		activeConnections:      cfg.ActiveConnections,
 		s3CredentialCodec:      s3CredentialCodec,
 		s3CredentialCodecErr:   s3CredentialCodecErr,
 		repo:                   cfg.Repository,
@@ -208,7 +220,15 @@ func NewManager(cfg Config) *Manager {
 		boundVolumes:           make(map[string]*boundVolume),
 		volumes:                newLocalVolumeManager(),
 	}
-	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
+	manager.volumeAPI = newMountedVolumeAPIHandler(
+		storageConfig,
+		cfg.Repository,
+		manager.volumes,
+		cfg.StorageQuota,
+		cfg.StorageOperations,
+		cfg.ActiveConnections,
+		l,
+	)
 	return manager
 }
 
@@ -1015,7 +1035,7 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 	volCtx := m.newS0FSVolumeContext(req.SandboxVolumeID, volumeRecord.TeamID, engine, accessMode, mountedAt, cacheDir)
 	volCtx.RestoreHandleState(handleState)
 	engine.PruneUnlinked(retainedUnlinkedInodes(handleState))
-	session := newLocalSession(req.SandboxVolumeID, m.volumes, m.logrus)
+	session := newLocalSession(req.SandboxVolumeID, m.volumes, m.storageQuota, m.storageOperations, m.logrus)
 	session.statePath = statePath
 	session.incrementalReady = m.incrementalS0FSHandleRecoveryReady
 	if err := compactS0FSHandleState(statePath, req.SandboxVolumeID, volCtx.SnapshotHandleState(), true, nil); err != nil {
@@ -1245,7 +1265,7 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 		mountedAt: mountedAt,
 		refCount:  0,
 		volCtx:    volCtx,
-		session:   newLocalSession(req.SandboxVolumeID, m.volumes, m.logrus),
+		session:   newLocalSession(req.SandboxVolumeID, m.volumes, m.storageQuota, m.storageOperations, m.logrus),
 	}
 	m.boundVolumes[req.SandboxVolumeID] = bound
 	m.volumes.add(volCtx)
@@ -1826,7 +1846,7 @@ func (m *Manager) attachPortalLocked(pm *portalMount, bound *boundVolume, mounte
 	if pm.fs != nil {
 		session := bound.session
 		if session == nil {
-			session = newLocalSession(bound.volumeID, m.volumes, m.logrus)
+			session = newLocalSession(bound.volumeID, m.volumes, m.storageQuota, m.storageOperations, m.logrus)
 			if local, ok := session.(*localSession); ok {
 				local.statePath = bound.statePath
 				local.incrementalReady = m.incrementalS0FSHandleRecoveryReady

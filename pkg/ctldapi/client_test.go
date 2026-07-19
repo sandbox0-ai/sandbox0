@@ -116,18 +116,6 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 			},
 		},
 		{
-			name: "save",
-			path: "/api/v1/rootfs/save",
-			call: func(client *Client, address string) error {
-				_, err := client.SaveRootFS(context.Background(), address, SaveRootFSRequest{
-					Target:    RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "sandbox"},
-					SandboxID: "sandbox-1",
-					TeamID:    "team-1",
-				})
-				return err
-			},
-		},
-		{
 			name: "apply",
 			path: "/api/v1/rootfs/apply",
 			call: func(client *Client, address string) error {
@@ -155,8 +143,6 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 				switch tt.name {
 				case "inspect":
 					_ = json.NewEncoder(w).Encode(InspectRootFSResponse{Info: RootFSInfo{Runtime: "runc"}})
-				case "save":
-					_ = json.NewEncoder(w).Encode(SaveRootFSResponse{Descriptor: RootFSDiffDescriptor{ObjectKey: "rootfs/diff.tar"}})
 				case "apply":
 					_ = json.NewEncoder(w).Encode(ApplyRootFSResponse{Applied: true})
 				}
@@ -167,6 +153,38 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 				t.Fatalf("%s returned error: %v", tt.name, err)
 			}
 		})
+	}
+}
+
+func TestClientRootFSMutationInjectsScopedInternalToken(t *testing.T) {
+	t.Parallel()
+
+	var gotToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.Header.Get("X-Internal-Token")
+		_ = json.NewEncoder(w).Encode(AbortRootFSSnapshotResponse{Aborted: true})
+	}))
+	defer server.Close()
+
+	client := NewClientWithRootFSAuth(server.Client(), func(_ context.Context, teamID, sandboxID string) (string, error) {
+		if teamID != "team-1" || sandboxID != "sandbox-1" {
+			t.Fatalf("token owner = %s/%s, want team-1/sandbox-1", teamID, sandboxID)
+		}
+		return "signed-token", nil
+	})
+	resp, err := client.AbortRootFSSnapshot(context.Background(), server.URL, AbortRootFSSnapshotRequest{
+		Handle:    "stage-1",
+		TeamID:    "team-1",
+		SandboxID: "sandbox-1",
+	})
+	if err != nil {
+		t.Fatalf("AbortRootFSSnapshot() error = %v", err)
+	}
+	if resp == nil || !resp.Aborted {
+		t.Fatalf("response = %#v, want aborted", resp)
+	}
+	if gotToken != "signed-token" {
+		t.Fatalf("X-Internal-Token = %q, want signed-token", gotToken)
 	}
 }
 

@@ -617,7 +617,7 @@ func TestTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T) {
 	}
 }
 
-func TestTLSAdapterInterceptsGRPCAndInjectsMetadata(t *testing.T) {
+func TestHTTP2TLSProxyChargesUpstreamOnWireBytesOnceAndInjectsMetadata(t *testing.T) {
 	mitmCertPEM, mitmKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-mitm", time.Hour)
 	if err != nil {
 		t.Fatalf("new mitm ca: %v", err)
@@ -681,14 +681,18 @@ func TestTLSAdapterInterceptsGRPCAndInjectsMetadata(t *testing.T) {
 	}
 	defer proxyListener.Close()
 
+	usage := &credentialUsageRecorder{}
+	teamLimiter := &credentialTeamBandwidthLimiter{}
 	server := &Server{
 		cfg: &config.NetdConfig{
 			ProxyUpstreamTimeout: metav1.Duration{Duration: 3 * time.Second},
 		},
 		logger:            zap.NewNop(),
+		usageRecorder:     usage,
 		tlsAuthority:      mitmAuthority,
 		upstreamTLSConfig: &tls.Config{RootCAs: upstreamRootPool, NextProtos: []string{"h2"}},
 	}
+	server.bandwidthLimiter = newBandwidthLimiter(server.cfg, teamLimiter)
 
 	done := make(chan error, 1)
 	go func() {
@@ -699,6 +703,7 @@ func TestTLSAdapterInterceptsGRPCAndInjectsMetadata(t *testing.T) {
 		}
 		defer conn.Close()
 		req := &adapterRequest{
+			Context:  context.Background(),
 			Server:   server,
 			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123", Mode: v1alpha1.NetworkModeAllowAll},
 			SrcIP:    "10.0.0.2",
@@ -763,6 +768,7 @@ func TestTLSAdapterInterceptsGRPCAndInjectsMetadata(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("tls adapter handle: %v", err)
 	}
+	assertOnWireQuotaMatchesUsage(t, usage, teamLimiter, 0, 0)
 }
 
 func TestTLSAdapterFailOpenRelaysRawTLSWhenMITMCAIsMissing(t *testing.T) {
@@ -913,7 +919,7 @@ func TestTLSAdapterReturnsErrorWhenMITMCAIsMissing(t *testing.T) {
 	}
 }
 
-func TestTLSAdapterTerminatesTLSAndPresentsClientCertificate(t *testing.T) {
+func TestTLSProxyChargesUpstreamOnWireBytesOnceWithClientCertificate(t *testing.T) {
 	mitmCertPEM, mitmKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-mitm", time.Hour)
 	if err != nil {
 		t.Fatalf("new mitm ca: %v", err)
@@ -995,14 +1001,18 @@ func TestTLSAdapterTerminatesTLSAndPresentsClientCertificate(t *testing.T) {
 	}
 	defer proxyListener.Close()
 
+	usage := &credentialUsageRecorder{}
+	teamLimiter := &credentialTeamBandwidthLimiter{}
 	server := &Server{
 		cfg: &config.NetdConfig{
 			ProxyUpstreamTimeout: metav1.Duration{Duration: 3 * time.Second},
 		},
 		logger:            zap.NewNop(),
+		usageRecorder:     usage,
 		tlsAuthority:      mitmAuthority,
 		upstreamTLSConfig: &tls.Config{RootCAs: upstreamRootPool},
 	}
+	server.bandwidthLimiter = newBandwidthLimiter(server.cfg, teamLimiter)
 
 	done := make(chan error, 1)
 	go func() {
@@ -1013,6 +1023,7 @@ func TestTLSAdapterTerminatesTLSAndPresentsClientCertificate(t *testing.T) {
 		}
 		defer conn.Close()
 		req := &adapterRequest{
+			Context:  context.Background(),
 			Server:   server,
 			Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123", Mode: v1alpha1.NetworkModeAllowAll},
 			SrcIP:    "10.0.0.2",
@@ -1074,6 +1085,7 @@ func TestTLSAdapterTerminatesTLSAndPresentsClientCertificate(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("tls adapter handle: %v", err)
 	}
+	assertOnWireQuotaMatchesUsage(t, usage, teamLimiter, int64(len("hello over tls")), int64(len("secure reply")))
 }
 
 func newSelfSignedClientCertificate(commonName string, validity time.Duration) ([]byte, []byte, error) {

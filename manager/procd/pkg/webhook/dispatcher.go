@@ -62,11 +62,15 @@ type Config struct {
 
 // Options controls dispatcher behavior.
 type Options struct {
-	QueueSize      int
-	MaxRetries     int
-	BaseBackoff    time.Duration
-	RequestTimeout time.Duration
-	OutboxDir      string
+	QueueSize            int
+	MaxRetries           int
+	BaseBackoff          time.Duration
+	RequestTimeout       time.Duration
+	OutboxDir            string
+	MaxPendingRecords    int
+	MaxDeadLetterRecords int
+	MaxRecordBytes       int64
+	DeadLetterRetention  time.Duration
 }
 
 // Dispatcher sends webhook events asynchronously. When OutboxDir is configured,
@@ -92,6 +96,15 @@ type Dispatcher struct {
 var (
 	ErrDispatcherClosed = errors.New("webhook dispatcher closed")
 	ErrQueueFull        = errors.New("webhook queue full")
+	ErrOutboxFull       = errors.New("webhook durable outbox full")
+	ErrEventTooLarge    = errors.New("webhook event exceeds durable record limit")
+)
+
+const (
+	defaultMaxPendingRecords          = 256
+	defaultMaxDeadLetterRecords       = 64
+	defaultMaxRecordBytes       int64 = 512 << 10
+	defaultDeadLetterRetention        = 24 * time.Hour
 )
 
 type deliveryRecord struct {
@@ -119,6 +132,18 @@ func NewDispatcher(options Options, logger *zap.Logger) *Dispatcher {
 	}
 	if options.RequestTimeout <= 0 {
 		options.RequestTimeout = 5 * time.Second
+	}
+	if options.MaxPendingRecords <= 0 {
+		options.MaxPendingRecords = defaultMaxPendingRecords
+	}
+	if options.MaxDeadLetterRecords <= 0 {
+		options.MaxDeadLetterRecords = defaultMaxDeadLetterRecords
+	}
+	if options.MaxRecordBytes <= 0 {
+		options.MaxRecordBytes = defaultMaxRecordBytes
+	}
+	if options.DeadLetterRetention <= 0 {
+		options.DeadLetterRetention = defaultDeadLetterRetention
 	}
 
 	d := &Dispatcher{
@@ -342,6 +367,16 @@ func (d *Dispatcher) writeRecord(record deliveryRecord) error {
 	if err != nil {
 		return err
 	}
+	if int64(len(data)) > d.options.MaxRecordBytes {
+		return ErrEventTooLarge
+	}
+	count, err := countJSONRecords(d.options.OutboxDir)
+	if err != nil {
+		return fmt.Errorf("count webhook outbox records: %w", err)
+	}
+	if count >= d.options.MaxPendingRecords {
+		return ErrOutboxFull
+	}
 	tmp, err := os.CreateTemp(d.options.OutboxDir, "."+record.Event.EventID+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("create webhook outbox temp: %w", err)
@@ -484,8 +519,7 @@ func (d *Dispatcher) moveBadRecord(path string, cause error) {
 			zap.Error(cause),
 		)
 	}
-	_ = os.MkdirAll(filepath.Join(d.options.OutboxDir, "bad"), 0o700)
-	_ = os.Rename(path, filepath.Join(d.options.OutboxDir, "bad", filepath.Base(path)))
+	d.moveDeadLetter(path, "bad")
 }
 
 func (d *Dispatcher) moveFailedRecord(path string, record deliveryRecord, status int, cause error) {
@@ -500,8 +534,102 @@ func (d *Dispatcher) moveFailedRecord(path string, record deliveryRecord, status
 		}
 		d.logger.Warn("Webhook delivery permanently failed", fields...)
 	}
-	_ = os.MkdirAll(filepath.Join(d.options.OutboxDir, "failed"), 0o700)
-	_ = os.Rename(path, filepath.Join(d.options.OutboxDir, "failed", filepath.Base(path)))
+	d.moveDeadLetter(path, "failed")
+}
+
+func (d *Dispatcher) moveDeadLetter(path, kind string) {
+	dir := filepath.Join(d.options.OutboxDir, kind)
+	if err := pruneDeadLetterDir(
+		dir,
+		d.options.MaxDeadLetterRecords,
+		d.options.DeadLetterRetention,
+	); err != nil {
+		if d.logger != nil {
+			d.logger.Warn(
+				"Failed to prune webhook dead letters",
+				zap.String("kind", kind),
+				zap.Error(err),
+			)
+		}
+		return
+	}
+	if err := os.Rename(path, filepath.Join(dir, filepath.Base(path))); err != nil &&
+		d.logger != nil {
+		d.logger.Warn(
+			"Failed to move webhook dead letter",
+			zap.String("kind", kind),
+			zap.String("path", path),
+			zap.Error(err),
+		)
+	}
+}
+
+func countJSONRecords(dir string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func pruneDeadLetterDir(dir string, maxRecords int, retention time.Duration) error {
+	if maxRecords <= 0 {
+		return fmt.Errorf("dead-letter record limit must be positive")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	type deadLetter struct {
+		path    string
+		modTime time.Time
+	}
+	now := time.Now()
+	retained := make([]deadLetter, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if retention > 0 && now.Sub(info.ModTime()) >= retention {
+			if removeErr := os.Remove(path); removeErr != nil &&
+				!errors.Is(removeErr, os.ErrNotExist) {
+				return removeErr
+			}
+			continue
+		}
+		retained = append(retained, deadLetter{
+			path:    path,
+			modTime: info.ModTime(),
+		})
+	}
+	sort.Slice(retained, func(i, j int) bool {
+		if retained[i].modTime.Equal(retained[j].modTime) {
+			return retained[i].path < retained[j].path
+		}
+		return retained[i].modTime.Before(retained[j].modTime)
+	})
+	for len(retained) >= maxRecords {
+		if err := os.Remove(retained[0].path); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		retained = retained[1:]
+	}
+	return nil
 }
 
 func (d *Dispatcher) recordPath(eventID string) string {

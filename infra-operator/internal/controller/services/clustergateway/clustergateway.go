@@ -19,6 +19,7 @@ package clustergateway
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -39,6 +40,7 @@ import (
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 )
 
 type Reconciler struct {
@@ -47,7 +49,7 @@ type Reconciler struct {
 
 const (
 	defaultClusterGatewayHTTPPort      = 8443
-	defaultAuditResultSpoolPVCSize     = "1Gi"
+	defaultAuditResultSpoolPVCSize     = "3Gi"
 	auditResultSpoolVolumeName         = "audit-result-spool"
 	auditResultSpoolContainerMountPath = "/var/lib/sandbox0/cluster-gateway"
 )
@@ -322,9 +324,33 @@ func auditResultSpoolPVCName(infraName string) string {
 }
 
 func (r *Reconciler) reconcileAuditResultSpoolPVC(ctx context.Context, scope common.ObjectScope) error {
+	size := resource.MustParse(defaultAuditResultSpoolPVCSize)
+	storageClass := ""
+	var audit *infrav1alpha1.SandboxObservabilityAuditConfig
+	if owner := scope.Owner(); owner != nil && owner.Spec.SandboxObservability != nil {
+		audit = owner.Spec.SandboxObservability.Audit
+	}
+	if audit != nil && audit.DeliveryPersistence != nil {
+		if !audit.DeliveryPersistence.Size.IsZero() {
+			size = audit.DeliveryPersistence.Size
+		}
+		storageClass = strings.TrimSpace(audit.DeliveryPersistence.StorageClass)
+	}
+	requiredBytes, err := auditSpoolBacklogAndHeadroomBytes(audit)
+	if err != nil {
+		return err
+	}
+	if size.Value() <= requiredBytes {
+		return fmt.Errorf(
+			"audit delivery persistence size %s must exceed configured backlog plus free-space floor %s",
+			size.String(),
+			resource.NewQuantity(requiredBytes, resource.BinarySI).String(),
+		)
+	}
+
 	name := auditResultSpoolPVCName(scope.Name)
 	current := &corev1.PersistentVolumeClaim{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, current)
+	err = r.Resources.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, current)
 	if err == nil {
 		return nil
 	}
@@ -332,16 +358,6 @@ func (r *Reconciler) reconcileAuditResultSpoolPVC(ctx context.Context, scope com
 		return err
 	}
 
-	size := resource.MustParse(defaultAuditResultSpoolPVCSize)
-	storageClass := ""
-	if owner := scope.Owner(); owner != nil && owner.Spec.SandboxObservability != nil && owner.Spec.SandboxObservability.Audit != nil {
-		if persistence := owner.Spec.SandboxObservability.Audit.DeliveryPersistence; persistence != nil {
-			if !persistence.Size.IsZero() {
-				size = persistence.Size
-			}
-			storageClass = strings.TrimSpace(persistence.StorageClass)
-		}
-	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: scope.Namespace},
 		Spec: corev1.PersistentVolumeClaimSpec{
@@ -361,6 +377,26 @@ func (r *Reconciler) reconcileAuditResultSpoolPVC(ctx context.Context, scope com
 		return err
 	}
 	return nil
+}
+
+func auditSpoolBacklogAndHeadroomBytes(audit *infrav1alpha1.SandboxObservabilityAuditConfig) (int64, error) {
+	maxBytes := apiconfig.DefaultAuditSpoolMaxBytes
+	minFreeBytes := apiconfig.DefaultAuditSpoolMinFreeBytes
+	if audit != nil {
+		if audit.SpoolLimits.MaxBytes != 0 {
+			maxBytes = audit.SpoolLimits.MaxBytes
+		}
+		if audit.SpoolLimits.MinFreeBytes != 0 {
+			minFreeBytes = audit.SpoolLimits.MinFreeBytes
+		}
+	}
+	if maxBytes <= 0 || minFreeBytes < 0 {
+		return 0, fmt.Errorf("audit spool byte limits are invalid")
+	}
+	if maxBytes > math.MaxInt64-minFreeBytes {
+		return 0, fmt.Errorf("audit spool backlog plus free-space floor overflows int64")
+	}
+	return maxBytes + minFreeBytes, nil
 }
 
 func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.InfraPlan) (*apiconfig.ClusterGatewayConfig, error) {
@@ -386,12 +422,40 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 		cfg.HTTPPort = defaultClusterGatewayHTTPPort
 	}
 	cfg.AuthMode = deriveClusterGatewayAuthMode(cfg.AuthMode, compiledPlan)
+	owner := compiledPlan.Scope.Owner()
+	teamQuota := runtimeconfig.ToTeamQuota(compiledPlan.EffectiveTeamQuotaConfig())
+	runtimeconfig.SetTeamQuotaOwnerVersion(&teamQuota, owner)
+	teamQuota.PolicyOwner = !compiledPlan.RegionalGateway.Enabled &&
+		owner != nil &&
+		owner.Spec.ControlPlane == nil &&
+		clusterGatewayPublicAuthEnabled(cfg.AuthMode)
+	if !teamQuota.PolicyOwner {
+		teamQuota.Defaults = nil
+		teamQuota.DefaultsOwnerEpoch = ""
+		teamQuota.DefaultsGeneration = 0
+	}
+	cfg.TeamQuota = teamQuota
 	resolvedRegionID := strings.TrimSpace(cfg.RegionID)
 
 	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		cfg.DatabaseURL = dsn
 	}
-	if err := redissvc.ApplyGatewayRateLimitConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), &cfg.GatewayConfig); err != nil {
+	if err := redissvc.ApplyGatewayRedisConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), &cfg.GatewayConfig); err != nil {
+		return nil, err
+	}
+	if err := redissvc.ApplyOverloadGuardConfig(
+		ctx,
+		r.Resources.Client,
+		compiledPlan.Scope.Owner(),
+		rediscache.JoinKeyPrefix(
+			"cluster-gateway",
+			common.ResolveRegionID(compiledPlan.Scope.Owner()),
+		),
+		&cfg.OverloadGuard,
+	); err != nil {
+		return nil, err
+	}
+	if err := redissvc.ApplyTeamQuotaDistributedEnforcementConfig(ctx, r.Resources.Client, compiledPlan.Scope.Owner(), &cfg.TeamQuota.DistributedEnforcement); err != nil {
 		return nil, err
 	}
 	if owner := compiledPlan.Scope.Owner(); owner != nil {

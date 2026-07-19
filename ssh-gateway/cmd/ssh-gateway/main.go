@@ -21,6 +21,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/activeconnections"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/concurrency"
+	teamquotanetwork "github.com/sandbox0-ai/sandbox0/pkg/teamquota/network"
 	sshserver "github.com/sandbox0-ai/sandbox0/ssh-gateway/pkg/server"
 	"go.uber.org/zap"
 )
@@ -57,6 +61,21 @@ func main() {
 	if err := runMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
+	stateIdentity, err := teamquota.ClaimRegionStateIdentity(
+		ctx,
+		pool,
+		teamquota.RegionStateIdentityConfig{
+			RegionID:        cfg.RegionID,
+			ExpectedStateID: cfg.TeamQuotaDistributedEnforcement.StateID,
+			RedisURL:        cfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix:  cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:    cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+		},
+	)
+	if err != nil {
+		logger.Fatal("Failed to validate Team Quota region state identity", zap.Error(err))
+	}
+	cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix = stateIdentity.KeyPrefix
 
 	controlPlaneKeyPath := cfg.ControlPlanePrivateKeyPath
 	if controlPlaneKeyPath == "" {
@@ -87,10 +106,29 @@ func main() {
 	})
 
 	repo := identity.NewRepository(pool)
+	activeConnectionQuota, networkByteQuota, err := initTeamQuota(
+		ctx,
+		cfg,
+		teamquota.NewRepository(pool),
+	)
+	if err != nil {
+		logger.Fatal("Failed to initialize SSH Team Quota", zap.Error(err))
+	}
+	defer activeConnectionQuota.Close()
+	defer networkByteQuota.Close()
+
 	resolver := sshserver.NewRegionalSandboxResolver(cfg.RegionalGatewayURL, controlPlaneAuthGen, logger, cfg.ResumeTimeout.Duration)
 	resolver.SetHTTPClient(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ResumeTimeout.Duration}))
 	authorizer := sshserver.NewAuthenticator(repo, resolver, cfg.ResumeTimeout.Duration, cfg.ResumePollInterval.Duration, logger)
-	server, err := sshserver.NewServer(cfg, authorizer, dataPlaneAuthGen, logger, sshserver.WithMetrics(sshGatewayMetrics))
+	server, err := sshserver.NewServer(
+		cfg,
+		authorizer,
+		dataPlaneAuthGen,
+		logger,
+		sshserver.WithMetrics(sshGatewayMetrics),
+		sshserver.WithActiveConnectionQuota(activeConnectionQuota),
+		sshserver.WithNetworkByteQuota(networkByteQuota),
+	)
 	if err != nil {
 		logger.Fatal("Failed to create ssh-gateway server", zap.Error(err))
 	}
@@ -175,6 +213,79 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
 	}
+	if err := teamquota.RunMigrations(
+		ctx,
+		pool,
+		observability.NewMigrateLogger(logger),
+	); err != nil {
+		return fmt.Errorf("migrate team quota: %w", err)
+	}
 	logger.Info("Database migrations completed successfully")
 	return nil
+}
+
+func initTeamQuota(
+	ctx context.Context,
+	cfg *config.SSHGatewayConfig,
+	resolver concurrency.Resolver,
+) (
+	*activeconnections.RedisQuota,
+	*teamquotanetwork.Limiter,
+	error,
+) {
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("ssh-gateway config is required")
+	}
+	if resolver == nil {
+		return nil, nil, fmt.Errorf("team quota resolver is required")
+	}
+	distributed := cfg.TeamQuotaDistributedEnforcement
+	if cfg.RegionID == "" {
+		return nil, nil, fmt.Errorf(
+			"region ID is required for SSH Team Quota enforcement",
+		)
+	}
+	if distributed.RedisURL == "" {
+		return nil, nil, fmt.Errorf(
+			"region-shared Redis URL is required for SSH Team Quota enforcement",
+		)
+	}
+	networkQuota, err := teamquotanetwork.NewRedis(
+		ctx,
+		resolver,
+		teamquotanetwork.Config{
+			RegionID:       cfg.RegionID,
+			RedisURL:       distributed.RedisURL,
+			RedisKeyPrefix: distributed.RedisKeyPrefix,
+			RedisTimeout:   distributed.RedisTimeout.Duration,
+			PolicyCacheTTL: distributed.PolicyCacheTTL.Duration,
+		},
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"create SSH network byte quota: %w",
+			err,
+		)
+	}
+	activeQuota, err := activeconnections.NewRedis(
+		ctx,
+		resolver,
+		concurrency.Config{
+			RegionID:       cfg.RegionID,
+			RedisURL:       distributed.RedisURL,
+			RedisKeyPrefix: distributed.RedisKeyPrefix,
+			RedisTimeout:   distributed.RedisTimeout.Duration,
+			PolicyCacheTTL: distributed.PolicyCacheTTL.Duration,
+			LeaseTTL:       distributed.LeaseTTL.Duration,
+			RenewInterval:  distributed.RenewInterval.Duration,
+		},
+	)
+	if err != nil {
+		_ = networkQuota.Close()
+		return nil, nil, fmt.Errorf(
+			"create SSH active connection quota: %w",
+			err,
+		)
+	}
+	return activeQuota, networkQuota, nil
 }

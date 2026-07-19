@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,9 +15,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -95,6 +96,13 @@ var (
 	ErrMountedCtldOwner             = errors.New("snapshot operations require ctld-mounted volumes to be unmounted")
 	ErrActiveRWXSnapshotUnsupported = errors.New("active RWX volume snapshots are not supported")
 	ErrUnsupportedBackend           = errors.New("volume backend does not support snapshots")
+	ErrVolumeReferenced             = errors.New("volume still has physical references")
+	ErrInvalidSnapshotMetadata      = errors.New("invalid snapshot metadata")
+)
+
+const (
+	MaxSnapshotNameBytes        = 255
+	MaxSnapshotDescriptionBytes = 4096
 )
 
 // Manager handles snapshot operations for SandboxVolumes
@@ -111,7 +119,7 @@ type Manager struct {
 	podID             string
 	eventPublisher    eventPublisher
 	meteringRepo      meteringRecorder
-	quotaRepo         *quota.Repository
+	storageQuota      *storagequota.Service
 	metrics           *obsmetrics.StorageProxyMetrics
 	volumeObserver    *volume.VolumeStorageObserver
 }
@@ -156,10 +164,11 @@ func (m *Manager) SetMeteringRepository(repo meteringRecorder) {
 	m.meteringRepo = repo
 }
 
-func (m *Manager) SetQuotaRepository(repo *quota.Repository) {
+// SetStorageQuota wires the mandatory PostgreSQL TeamQuota coordinator.
+func (m *Manager) SetStorageQuota(service *storagequota.Service) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.quotaRepo = repo
+	m.storageQuota = service
 }
 
 func (m *Manager) appendMeteringEvent(ctx context.Context, event *meteringpkg.Event) error {
@@ -185,12 +194,12 @@ func (m *Manager) appendMeteringEventTx(ctx context.Context, tx pgx.Tx, event *m
 }
 
 func (m *Manager) appendStorageObservation(ctx context.Context, observation *meteringpkg.StorageObservation) error {
-	recorder, ok := configuredMeteringRecorder(m.meteringRepo)
-	if !ok || observation == nil {
+	if observation == nil {
 		return nil
 	}
-	if err := m.enforceStorageObservationQuota(ctx, observation); err != nil {
-		return err
+	recorder, ok := configuredMeteringRecorder(m.meteringRepo)
+	if !ok {
+		return nil
 	}
 	return volume.RecordStorageObservation(ctx, recorder, observation)
 }
@@ -199,9 +208,6 @@ func (m *Manager) appendStorageObservationTx(ctx context.Context, tx pgx.Tx, obs
 	recorder, ok := configuredMeteringRecorder(m.meteringRepo)
 	if !ok || observation == nil {
 		return nil
-	}
-	if err := m.enforceStorageObservationQuota(ctx, observation); err != nil {
-		return err
 	}
 	if err := recorder.RecordStorageObservationTx(ctx, tx, observation); err != nil {
 		return err
@@ -281,6 +287,15 @@ type CreateVolumeFromSnapshotRequest struct {
 
 // CreateSnapshot creates a new snapshot of a volume using the s0fs snapshot engine.
 func (m *Manager) CreateSnapshot(ctx context.Context, req *CreateSnapshotRequest) (*db.Snapshot, error) {
+	if req == nil {
+		return nil, ErrInvalidSnapshotMetadata
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" ||
+		len(req.Name) > MaxSnapshotNameBytes ||
+		len(req.Description) > MaxSnapshotDescriptionBytes {
+		return nil, ErrInvalidSnapshotMetadata
+	}
 	startTime := time.Now()
 	metrics := m.metrics
 	m.logger.WithFields(logrus.Fields{
@@ -541,43 +556,84 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		"snapshot_id": snapshotID,
 	}).Info("Deleting snapshot")
 
-	// Execute within a transaction to ensure atomicity
-	err := m.repo.WithTx(ctx, func(tx pgx.Tx) error {
-		// 1. Get snapshot with FOR UPDATE NOWAIT lock to ensure exclusive access
-		// This prevents concurrent delete/restore operations on the same snapshot
-		snapshot, err := m.repo.GetSnapshotForUpdate(ctx, tx, snapshotID)
-		if err != nil {
-			if errors.Is(err, db.ErrNotFound) {
-				return ErrSnapshotNotFound
+	snapshotRecord, err := m.repo.GetSnapshot(ctx, snapshotID)
+	if err == nil && (snapshotRecord.VolumeID != volumeID || snapshotRecord.TeamID != teamID) {
+		err = ErrSnapshotNotBelongToVolume
+	}
+	if errors.Is(err, db.ErrNotFound) {
+		err = ErrSnapshotNotFound
+	}
+	if err == nil {
+		service, serviceErr := m.quotaService()
+		if serviceErr != nil {
+			err = serviceErr
+		} else {
+			release, releaseErr := service.BeginRelease(
+				ctx,
+				service.SnapshotOwner(teamID, snapshotID),
+				"snapshot_delete",
+			)
+			if releaseErr != nil {
+				err = releaseErr
+			} else {
+				// Once deletion starts, use an independent bounded context so a
+				// disconnected client cannot strand a physically deleted object
+				// with an unconfirmed allocation transition.
+				deleteCtx, cancelDelete := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				defer cancelDelete()
+				physicalDeleted := false
+				err = m.repo.WithTx(deleteCtx, func(tx pgx.Tx) error {
+					snapshot, lockErr := m.repo.GetSnapshotForUpdate(deleteCtx, tx, snapshotID)
+					if lockErr != nil {
+						if errors.Is(lockErr, db.ErrNotFound) {
+							return ErrSnapshotNotFound
+						}
+						var pgErr *pgconn.PgError
+						if errors.As(lockErr, &pgErr) && pgErr.Code == "55P03" {
+							return ErrVolumeBusy
+						}
+						return fmt.Errorf("get snapshot: %w", lockErr)
+					}
+					if snapshot.VolumeID != volumeID || snapshot.TeamID != teamID {
+						return ErrSnapshotNotBelongToVolume
+					}
+					if deleteErr := m.deleteS0FSSnapshot(deleteCtx, teamID, volumeID, snapshotID); deleteErr != nil {
+						return fmt.Errorf("delete physical snapshot state: %w", deleteErr)
+					}
+					physicalDeleted = true
+					deletedEvent := snapshotDeletedEvent(m.regionID(), m.clusterID, snapshot)
+					if deleteErr := m.repo.DeleteSnapshotTx(deleteCtx, tx, snapshotID); deleteErr != nil {
+						return fmt.Errorf("delete snapshot record: %w", deleteErr)
+					}
+					if closeErr := m.closeStorageObservationTx(deleteCtx, tx, m.snapshotStorageObservation(deleteCtx, snapshot, deletedEvent.OccurredAt)); closeErr != nil {
+						return fmt.Errorf("close snapshot storage observation: %w", closeErr)
+					}
+					if eventErr := m.appendMeteringEventTx(deleteCtx, tx, deletedEvent); eventErr != nil {
+						return fmt.Errorf("append metering event: %w", eventErr)
+					}
+					if confirmErr := release.ConfirmTx(deleteCtx, tx); confirmErr != nil {
+						return confirmErr
+					}
+					return nil
+				})
+				if err != nil {
+					if physicalDeleted {
+						release.KeepPending()
+					} else if abortErr := release.Abort(deleteCtx, err); abortErr != nil {
+						err = errors.Join(err, abortErr)
+					}
+				} else if gcResult, gcErr := m.garbageCollectS0FSVolumeObjects(deleteCtx, volumeID, teamID); gcErr != nil {
+					m.logger.WithError(gcErr).Warn("Failed to garbage collect unreferenced s0fs objects")
+				} else if gcResult != nil && (len(gcResult.DeletedSegments) > 0 || len(gcResult.DeletedManifests) > 0) {
+					m.logger.WithFields(logrus.Fields{
+						"volume_id": volumeID,
+						"segments":  len(gcResult.DeletedSegments),
+						"manifests": len(gcResult.DeletedManifests),
+					}).Info("Garbage collected unreferenced s0fs objects after snapshot delete")
+				}
 			}
-			// Check for lock timeout
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
-				return ErrVolumeBusy
-			}
-			return fmt.Errorf("get snapshot: %w", err)
 		}
-
-		// Verify ownership
-		if snapshot.VolumeID != volumeID || snapshot.TeamID != teamID {
-			return ErrSnapshotNotBelongToVolume
-		}
-		deletedEvent := snapshotDeletedEvent(m.regionID(), m.clusterID, snapshot)
-
-		// 2. Delete database record first within the transaction
-		// This ensures that even if S0FS cleanup fails, the snapshot is marked as deleted
-		if err := m.repo.DeleteSnapshotTx(ctx, tx, snapshotID); err != nil {
-			return fmt.Errorf("delete snapshot record: %w", err)
-		}
-		if err := m.closeStorageObservationTx(ctx, tx, m.snapshotStorageObservation(ctx, snapshot, deletedEvent.OccurredAt)); err != nil {
-			return fmt.Errorf("close snapshot storage observation: %w", err)
-		}
-		if err := m.appendMeteringEventTx(ctx, tx, deletedEvent); err != nil {
-			return fmt.Errorf("append metering event: %w", err)
-		}
-
-		return nil
-	})
+	}
 	if err != nil {
 		if metrics != nil {
 			metrics.SnapshotOperationsTotal.WithLabelValues("delete", "failure").Inc()
@@ -598,25 +654,6 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		}
 
 		return err
-	}
-
-	// 3. Clean up snapshot state outside the transaction.
-	// This is done after the DB transaction to avoid long-running transactions.
-	// Once the catalog deletion commits, cleanup must not inherit a canceled
-	// client request or it can permanently strand the canonical object.
-	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancelCleanup()
-	if cleanupErr := m.deleteS0FSSnapshot(cleanupCtx, volumeID, snapshotID); cleanupErr != nil {
-		m.logger.WithError(cleanupErr).Warn("Failed to delete s0fs snapshot state")
-	}
-	if gcResult, gcErr := m.garbageCollectS0FSVolumeObjects(cleanupCtx, volumeID, teamID); gcErr != nil {
-		m.logger.WithError(gcErr).Warn("Failed to garbage collect unreferenced s0fs objects")
-	} else if gcResult != nil && (len(gcResult.DeletedSegments) > 0 || len(gcResult.DeletedManifests) > 0) {
-		m.logger.WithFields(logrus.Fields{
-			"volume_id": volumeID,
-			"segments":  len(gcResult.DeletedSegments),
-			"manifests": len(gcResult.DeletedManifests),
-		}).Info("Garbage collected unreferenced s0fs objects after snapshot delete")
 	}
 
 	// Record success metrics

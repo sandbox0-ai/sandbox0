@@ -110,6 +110,9 @@ func (r *Reconciler) BuildRuntimeAssets(ctx context.Context, compiledPlan *infra
 	if config.ProxyHTTPSPort == 0 {
 		config.ProxyHTTPSPort = 18443
 	}
+	if _, _, _, err := config.ProxyAdmissionLimits(); err != nil {
+		return nil, err
+	}
 	if err := config.ValidateListenerPorts(map[int]string{8095: "ctld HTTP port"}); err != nil {
 		return nil, err
 	}
@@ -120,7 +123,7 @@ func (r *Reconciler) BuildRuntimeAssets(ctx context.Context, compiledPlan *infra
 		}
 		config.ClusterDNSCIDR = cidr
 	}
-	if err := redissvc.ApplyNetdRedisConfig(ctx, r.Resources.Client, scope.Owner(), config); err != nil {
+	if err := redissvc.ApplyTeamQuotaDistributedEnforcementConfig(ctx, r.Resources.Client, scope.Owner(), &config.TeamQuotaDistributedEnforcement); err != nil {
 		return nil, err
 	}
 	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {

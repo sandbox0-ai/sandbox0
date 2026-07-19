@@ -5,6 +5,7 @@ package apispec
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/oapi-codegen/runtime"
@@ -209,17 +210,6 @@ const (
 	ProtocolRuleProtocolMcp  ProtocolRuleProtocol = "mcp"
 )
 
-// Defines values for QuotaDimension.
-const (
-	ActiveSandboxes   QuotaDimension = "active_sandboxes"
-	CpuMillicpu       QuotaDimension = "cpu_millicpu"
-	Egress            QuotaDimension = "egress"
-	Ingress           QuotaDimension = "ingress"
-	MemoryMib         QuotaDimension = "memory_mib"
-	SnapshotStorageGb QuotaDimension = "snapshot_storage_gb"
-	VolumeStorageGb   QuotaDimension = "volume_storage_gb"
-)
-
 // Defines values for REPLReadyMode.
 const (
 	PromptToken  REPLReadyMode = "prompt_token"
@@ -379,12 +369,12 @@ const (
 
 // Defines values for SandboxRuntimeMetricStatistic.
 const (
-	Auto    SandboxRuntimeMetricStatistic = "auto"
-	Average SandboxRuntimeMetricStatistic = "average"
-	Last    SandboxRuntimeMetricStatistic = "last"
-	Maximum SandboxRuntimeMetricStatistic = "maximum"
-	Minimum SandboxRuntimeMetricStatistic = "minimum"
-	Rate    SandboxRuntimeMetricStatistic = "rate"
+	SandboxRuntimeMetricStatisticAuto    SandboxRuntimeMetricStatistic = "auto"
+	SandboxRuntimeMetricStatisticAverage SandboxRuntimeMetricStatistic = "average"
+	SandboxRuntimeMetricStatisticLast    SandboxRuntimeMetricStatistic = "last"
+	SandboxRuntimeMetricStatisticMaximum SandboxRuntimeMetricStatistic = "maximum"
+	SandboxRuntimeMetricStatisticMinimum SandboxRuntimeMetricStatistic = "minimum"
+	SandboxRuntimeMetricStatisticRate    SandboxRuntimeMetricStatistic = "rate"
 )
 
 // Defines values for SandboxRuntimeMetricUnit.
@@ -707,9 +697,14 @@ const (
 	SuccessTeamMemberResponseSuccessTrue SuccessTeamMemberResponseSuccess = true
 )
 
-// Defines values for SuccessTeamQuotaResponseSuccess.
+// Defines values for SuccessTeamQuotaListResponseSuccess.
 const (
-	SuccessTeamQuotaResponseSuccessTrue SuccessTeamQuotaResponseSuccess = true
+	SuccessTeamQuotaListResponseSuccessTrue SuccessTeamQuotaListResponseSuccess = true
+)
+
+// Defines values for SuccessTeamQuotaPolicyResponseSuccess.
+const (
+	SuccessTeamQuotaPolicyResponseSuccessTrue SuccessTeamQuotaPolicyResponseSuccess = true
 )
 
 // Defines values for SuccessTeamResponseSuccess.
@@ -739,16 +734,69 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
+)
+
+// Defines values for TeamQuotaCapacityPolicyWriteRequestKind.
+const (
+	Capacity TeamQuotaCapacityPolicyWriteRequestKind = "capacity"
+)
+
+// Defines values for TeamQuotaConcurrencyPolicyWriteRequestKind.
+const (
+	Concurrency TeamQuotaConcurrencyPolicyWriteRequestKind = "concurrency"
+)
+
+// Defines values for TeamQuotaKey.
+const (
+	ActiveConnectionCount        TeamQuotaKey = "active_connection_count"
+	ActiveRequestCount           TeamQuotaKey = "active_request_count"
+	ApiRequests                  TeamQuotaKey = "api_requests"
+	ControlPlaneObjectCount      TeamQuotaKey = "control_plane_object_count"
+	NetworkEgressBytes           TeamQuotaKey = "network_egress_bytes"
+	NetworkIngressBytes          TeamQuotaKey = "network_ingress_bytes"
+	NetworkOperations            TeamQuotaKey = "network_operations"
+	ObservabilityIngestBytes     TeamQuotaKey = "observability_ingest_bytes"
+	RootfsStorageBytes           TeamQuotaKey = "rootfs_storage_bytes"
+	SandboxCpuMillicores         TeamQuotaKey = "sandbox_cpu_millicores"
+	SandboxEphemeralStorageBytes TeamQuotaKey = "sandbox_ephemeral_storage_bytes"
+	SandboxIdentityCount         TeamQuotaKey = "sandbox_identity_count"
+	SandboxMemoryBytes           TeamQuotaKey = "sandbox_memory_bytes"
+	SandboxRuntimeCount          TeamQuotaKey = "sandbox_runtime_count"
+	SandboxServiceRequests       TeamQuotaKey = "sandbox_service_requests"
+	SandboxStarts                TeamQuotaKey = "sandbox_starts"
+	SnapshotStorageBytes         TeamQuotaKey = "snapshot_storage_bytes"
+	StorageObjectCount           TeamQuotaKey = "storage_object_count"
+	StorageOperations            TeamQuotaKey = "storage_operations"
+	TemplateImageStorageBytes    TeamQuotaKey = "template_image_storage_bytes"
+	VolumeStorageBytes           TeamQuotaKey = "volume_storage_bytes"
+)
+
+// Defines values for TeamQuotaKind.
+const (
+	TeamQuotaKindCapacity    TeamQuotaKind = "capacity"
+	TeamQuotaKindConcurrency TeamQuotaKind = "concurrency"
+	TeamQuotaKindRate        TeamQuotaKind = "rate"
+)
+
+// Defines values for TeamQuotaPolicySource.
+const (
+	TeamQuotaPolicySourceDefault  TeamQuotaPolicySource = "default"
+	TeamQuotaPolicySourceOverride TeamQuotaPolicySource = "override"
+)
+
+// Defines values for TeamQuotaRatePolicyWriteRequestKind.
+const (
+	Rate TeamQuotaRatePolicyWriteRequestKind = "rate"
 )
 
 // Defines values for TeamQuotaUnit.
 const (
-	TeamQuotaUnitBytes    TeamQuotaUnit = "bytes"
-	TeamQuotaUnitCount    TeamQuotaUnit = "count"
-	TeamQuotaUnitGB       TeamQuotaUnit = "GB"
-	TeamQuotaUnitMiB      TeamQuotaUnit = "MiB"
-	TeamQuotaUnitMillicpu TeamQuotaUnit = "millicpu"
+	TeamQuotaUnitBytes      TeamQuotaUnit = "bytes"
+	TeamQuotaUnitCount      TeamQuotaUnit = "count"
+	TeamQuotaUnitMillicores TeamQuotaUnit = "millicores"
+	TeamQuotaUnitOperations TeamQuotaUnit = "operations"
+	TeamQuotaUnitRequests   TeamQuotaUnit = "requests"
 )
 
 // Defines values for TemplateCreationStatusStage.
@@ -910,11 +958,11 @@ type ClaimResponse struct {
 
 // ContainerSpec defines model for ContainerSpec.
 type ContainerSpec struct {
-	Env             *[]EnvVar        `json:"env,omitempty"`
-	Image           string           `json:"image"`
-	ImagePullPolicy *string          `json:"imagePullPolicy,omitempty"`
-	Resources       ResourceQuota    `json:"resources"`
-	SecurityContext *SecurityContext `json:"securityContext,omitempty"`
+	Env             *[]EnvVar             `json:"env,omitempty"`
+	Image           string                `json:"image"`
+	ImagePullPolicy *string               `json:"imagePullPolicy,omitempty"`
+	Resources       SandboxResourceLimits `json:"resources"`
+	SecurityContext *SecurityContext      `json:"securityContext,omitempty"`
 }
 
 // ContextExecResponse defines model for ContextExecResponse.
@@ -1873,9 +1921,6 @@ type ProtocolRule struct {
 // ProtocolRuleProtocol defines model for ProtocolRuleProtocol.
 type ProtocolRuleProtocol string
 
-// QuotaDimension defines model for QuotaDimension.
-type QuotaDimension string
-
 // REPLConfig defines model for REPLConfig.
 type REPLConfig struct {
 	Candidates  []ExecCandidate   `json:"candidates"`
@@ -1963,15 +2008,6 @@ type RegistryCredentialsRequest struct {
 type ResizeContextRequest struct {
 	Cols int32 `json:"cols"`
 	Rows int32 `json:"rows"`
-}
-
-// ResourceQuota defines model for ResourceQuota.
-type ResourceQuota struct {
-	// EphemeralStorage Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 8Gi when omitted.
-	EphemeralStorage *string `json:"ephemeralStorage,omitempty"`
-
-	// Memory Memory limit used by default when a sandbox claim does not provide a memory override. Sandbox0 derives the internal CPU limit from platform configuration.
-	Memory string `json:"memory"`
 }
 
 // ResourceUsage defines model for ResourceUsage.
@@ -2404,6 +2440,15 @@ type SandboxRefreshRequest struct {
 type SandboxResourceConfig struct {
 	// Memory Sandbox memory limit. Must be at least 128Mi and no more than the platform sandbox maximum, which defaults to 32Gi.
 	Memory *string `json:"memory,omitempty"`
+}
+
+// SandboxResourceLimits defines model for SandboxResourceLimits.
+type SandboxResourceLimits struct {
+	// EphemeralStorage Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 8Gi when omitted.
+	EphemeralStorage *string `json:"ephemeralStorage,omitempty"`
+
+	// Memory Memory limit used by default when a sandbox claim does not provide a memory override. Sandbox0 derives the internal CPU limit from platform configuration.
+	Memory string `json:"memory"`
 }
 
 // SandboxResourceUsage defines model for SandboxResourceUsage.
@@ -3321,14 +3366,24 @@ type SuccessTeamMemberResponse struct {
 // SuccessTeamMemberResponseSuccess defines model for SuccessTeamMemberResponse.Success.
 type SuccessTeamMemberResponseSuccess bool
 
-// SuccessTeamQuotaResponse defines model for SuccessTeamQuotaResponse.
-type SuccessTeamQuotaResponse struct {
-	Data    *TeamQuota                      `json:"data,omitempty"`
-	Success SuccessTeamQuotaResponseSuccess `json:"success"`
+// SuccessTeamQuotaListResponse defines model for SuccessTeamQuotaListResponse.
+type SuccessTeamQuotaListResponse struct {
+	Data    *TeamQuotaList                      `json:"data,omitempty"`
+	Success SuccessTeamQuotaListResponseSuccess `json:"success"`
 }
 
-// SuccessTeamQuotaResponseSuccess defines model for SuccessTeamQuotaResponse.Success.
-type SuccessTeamQuotaResponseSuccess bool
+// SuccessTeamQuotaListResponseSuccess defines model for SuccessTeamQuotaListResponse.Success.
+type SuccessTeamQuotaListResponseSuccess bool
+
+// SuccessTeamQuotaPolicyResponse defines model for SuccessTeamQuotaPolicyResponse.
+type SuccessTeamQuotaPolicyResponse struct {
+	// Data Capacity and concurrency policies use limit. Rate policies use tokens, interval_ms, and burst.
+	Data    *TeamQuotaPolicy                      `json:"data,omitempty"`
+	Success SuccessTeamQuotaPolicyResponseSuccess `json:"success"`
+}
+
+// SuccessTeamQuotaPolicyResponseSuccess defines model for SuccessTeamQuotaPolicyResponse.Success.
+type SuccessTeamQuotaPolicyResponseSuccess bool
 
 // SuccessTeamResponse defines model for SuccessTeamResponse.
 type SuccessTeamResponse struct {
@@ -3452,18 +3507,94 @@ type TeamMember struct {
 	UserId string  `json:"user_id"`
 }
 
-// TeamQuota defines model for TeamQuota.
-type TeamQuota struct {
-	Current    int64          `json:"current"`
-	Dimension  QuotaDimension `json:"dimension"`
-	LimitValue *int64         `json:"limit_value"`
-	Remaining  *int64         `json:"remaining"`
-	TeamId     string         `json:"team_id"`
-	Unit       TeamQuotaUnit  `json:"unit"`
-	Unlimited  bool           `json:"unlimited"`
+// TeamQuotaCapacityPolicyWriteRequest defines model for TeamQuotaCapacityPolicyWriteRequest.
+type TeamQuotaCapacityPolicyWriteRequest struct {
+	Kind  TeamQuotaCapacityPolicyWriteRequestKind `json:"kind"`
+	Limit int64                                   `json:"limit"`
 }
 
-// TeamQuotaUnit defines model for TeamQuota.Unit.
+// TeamQuotaCapacityPolicyWriteRequestKind defines model for TeamQuotaCapacityPolicyWriteRequest.Kind.
+type TeamQuotaCapacityPolicyWriteRequestKind string
+
+// TeamQuotaConcurrencyPolicyWriteRequest defines model for TeamQuotaConcurrencyPolicyWriteRequest.
+type TeamQuotaConcurrencyPolicyWriteRequest struct {
+	Kind  TeamQuotaConcurrencyPolicyWriteRequestKind `json:"kind"`
+	Limit int64                                      `json:"limit"`
+}
+
+// TeamQuotaConcurrencyPolicyWriteRequestKind defines model for TeamQuotaConcurrencyPolicyWriteRequest.Kind.
+type TeamQuotaConcurrencyPolicyWriteRequestKind string
+
+// TeamQuotaKey defines model for TeamQuotaKey.
+type TeamQuotaKey string
+
+// TeamQuotaKind defines model for TeamQuotaKind.
+type TeamQuotaKind string
+
+// TeamQuotaList defines model for TeamQuotaList.
+type TeamQuotaList struct {
+	Quotas []TeamQuotaStatus `json:"quotas"`
+	TeamId string            `json:"team_id"`
+}
+
+// TeamQuotaPolicy Capacity and concurrency policies use limit. Rate policies use tokens, interval_ms, and burst.
+type TeamQuotaPolicy struct {
+	Burst      *int64        `json:"burst,omitempty"`
+	IntervalMs *int64        `json:"interval_ms,omitempty"`
+	Key        TeamQuotaKey  `json:"key"`
+	Kind       TeamQuotaKind `json:"kind"`
+	Limit      *int64        `json:"limit,omitempty"`
+	Revision   *int64        `json:"revision,omitempty"`
+	TeamId     string        `json:"team_id"`
+	Tokens     *int64        `json:"tokens,omitempty"`
+	Unit       TeamQuotaUnit `json:"unit"`
+}
+
+// TeamQuotaPolicySource Identifies whether the effective policy is inherited from the region default or defined by an explicit team override.
+type TeamQuotaPolicySource string
+
+// TeamQuotaPolicyWriteRequest Capacity and concurrency policies require limit and prohibit rate fields. Rate policies require tokens, interval_ms, and burst and prohibit limit. Rate intervals are whole milliseconds in the inclusive range from 1ms to 1h. The runtime additionally requires burst to be at least tokens and kind to match the canonical kind of the path key because OpenAPI 3.0 cannot express those cross-field and path/body comparisons.
+type TeamQuotaPolicyWriteRequest struct {
+	union json.RawMessage
+}
+
+// TeamQuotaRatePolicyWriteRequest defines model for TeamQuotaRatePolicyWriteRequest.
+type TeamQuotaRatePolicyWriteRequest struct {
+	Burst      int64                               `json:"burst"`
+	IntervalMs int64                               `json:"interval_ms"`
+	Kind       TeamQuotaRatePolicyWriteRequestKind `json:"kind"`
+	Tokens     int64                               `json:"tokens"`
+}
+
+// TeamQuotaRatePolicyWriteRequestKind defines model for TeamQuotaRatePolicyWriteRequest.Kind.
+type TeamQuotaRatePolicyWriteRequestKind string
+
+// TeamQuotaStatus Capacity rows expose durable committed and reserved usage. Concurrency rows expose live lease usage. Rate rows expose policy but not distributed Redis token balance, so committed, reserved, and used are zero and remaining is null.
+type TeamQuotaStatus struct {
+	// Committed Durable committed capacity usage; zero for concurrency and rate policies.
+	Committed int64         `json:"committed"`
+	Key       TeamQuotaKey  `json:"key"`
+	Kind      TeamQuotaKind `json:"kind"`
+
+	// Policy Capacity and concurrency policies use limit. Rate policies use tokens, interval_ms, and burst.
+	Policy TeamQuotaPolicy `json:"policy"`
+
+	// Remaining Remaining capacity or concurrency headroom; null for rate policies because token balance is not exposed.
+	Remaining *int64 `json:"remaining"`
+
+	// Reserved Durable in-flight capacity reservation; zero for concurrency and rate policies.
+	Reserved int64 `json:"reserved"`
+
+	// Source Identifies whether the effective policy is inherited from the region default or defined by an explicit team override.
+	Source TeamQuotaPolicySource `json:"source"`
+	TeamId string                `json:"team_id"`
+	Unit   TeamQuotaUnit         `json:"unit"`
+
+	// Used Committed plus reserved capacity usage, or current live concurrency usage; zero for rate policies.
+	Used int64 `json:"used"`
+}
+
+// TeamQuotaUnit defines model for TeamQuotaUnit.
 type TeamQuotaUnit string
 
 // Template defines model for Template.
@@ -3592,8 +3723,9 @@ type UpdateTeamMemberRequestRole string
 
 // UpdateTeamRequest defines model for UpdateTeamRequest.
 type UpdateTeamRequest struct {
-	Name *string `json:"name,omitempty"`
-	Slug *string `json:"slug,omitempty"`
+	HomeRegionId *string `json:"home_region_id"`
+	Name         *string `json:"name,omitempty"`
+	Slug         *string `json:"slug,omitempty"`
 }
 
 // UpdateUserRequest defines model for UpdateUserRequest.
@@ -3707,11 +3839,26 @@ type SnapshotID = string
 // TeamID defines model for TeamID.
 type TeamID = string
 
+// TeamQuotaTeamID defines model for TeamQuotaTeamID.
+type TeamQuotaTeamID = string
+
 // TemplateID defines model for TemplateID.
 type TemplateID = string
 
 // UserID defines model for UserID.
 type UserID = string
+
+// AdmissionRateLimited defines model for AdmissionRateLimited.
+type AdmissionRateLimited = ErrorEnvelope
+
+// AdmissionUnavailable defines model for AdmissionUnavailable.
+type AdmissionUnavailable = ErrorEnvelope
+
+// TeamQuotaExceeded defines model for TeamQuotaExceeded.
+type TeamQuotaExceeded = ErrorEnvelope
+
+// TeamQuotaUnavailable defines model for TeamQuotaUnavailable.
+type TeamQuotaUnavailable = ErrorEnvelope
 
 // GetApiV1SandboxesParams defines parameters for GetApiV1Sandboxes.
 type GetApiV1SandboxesParams struct {
@@ -3911,6 +4058,12 @@ type GetAuthOidcProviderLoginParams struct {
 	WebLogin *bool `form:"web_login,omitempty" json:"web_login,omitempty"`
 }
 
+// GetAuthOidcProviderLogoutParams defines parameters for GetAuthOidcProviderLogout.
+type GetAuthOidcProviderLogoutParams struct {
+	// ReturnUrl URL to return to after the identity provider completes logout.
+	ReturnUrl *string `form:"return_url,omitempty" json:"return_url,omitempty"`
+}
+
 // GetTeamsIdMembersParams defines parameters for GetTeamsIdMembers.
 type GetTeamsIdMembersParams struct {
 	// Query Search by member email, display name, or user ID.
@@ -4003,6 +4156,9 @@ type PostApiV1SandboxvolumesIdForkJSONRequestBody = ForkVolumeRequest
 
 // PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody defines body for PostApiV1SandboxvolumesIdSnapshots for application/json ContentType.
 type PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody = CreateSnapshotRequest
+
+// PutApiV1TeamsTeamIdQuotasKeyJSONRequestBody defines body for PutApiV1TeamsTeamIdQuotasKey for application/json ContentType.
+type PutApiV1TeamsTeamIdQuotasKeyJSONRequestBody = TeamQuotaPolicyWriteRequest
 
 // PostApiV1TemplatesJSONRequestBody defines body for PostApiV1Templates for application/json ContentType.
 type PostApiV1TemplatesJSONRequestBody = TemplateCreateRequest
@@ -4116,6 +4272,125 @@ func (t SandboxObservabilityWatchLine_Data) MarshalJSON() ([]byte, error) {
 }
 
 func (t *SandboxObservabilityWatchLine_Data) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTeamQuotaCapacityPolicyWriteRequest returns the union data inside the TeamQuotaPolicyWriteRequest as a TeamQuotaCapacityPolicyWriteRequest
+func (t TeamQuotaPolicyWriteRequest) AsTeamQuotaCapacityPolicyWriteRequest() (TeamQuotaCapacityPolicyWriteRequest, error) {
+	var body TeamQuotaCapacityPolicyWriteRequest
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTeamQuotaCapacityPolicyWriteRequest overwrites any union data inside the TeamQuotaPolicyWriteRequest as the provided TeamQuotaCapacityPolicyWriteRequest
+func (t *TeamQuotaPolicyWriteRequest) FromTeamQuotaCapacityPolicyWriteRequest(v TeamQuotaCapacityPolicyWriteRequest) error {
+	v.Kind = "capacity"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTeamQuotaCapacityPolicyWriteRequest performs a merge with any union data inside the TeamQuotaPolicyWriteRequest, using the provided TeamQuotaCapacityPolicyWriteRequest
+func (t *TeamQuotaPolicyWriteRequest) MergeTeamQuotaCapacityPolicyWriteRequest(v TeamQuotaCapacityPolicyWriteRequest) error {
+	v.Kind = "capacity"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTeamQuotaConcurrencyPolicyWriteRequest returns the union data inside the TeamQuotaPolicyWriteRequest as a TeamQuotaConcurrencyPolicyWriteRequest
+func (t TeamQuotaPolicyWriteRequest) AsTeamQuotaConcurrencyPolicyWriteRequest() (TeamQuotaConcurrencyPolicyWriteRequest, error) {
+	var body TeamQuotaConcurrencyPolicyWriteRequest
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTeamQuotaConcurrencyPolicyWriteRequest overwrites any union data inside the TeamQuotaPolicyWriteRequest as the provided TeamQuotaConcurrencyPolicyWriteRequest
+func (t *TeamQuotaPolicyWriteRequest) FromTeamQuotaConcurrencyPolicyWriteRequest(v TeamQuotaConcurrencyPolicyWriteRequest) error {
+	v.Kind = "concurrency"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTeamQuotaConcurrencyPolicyWriteRequest performs a merge with any union data inside the TeamQuotaPolicyWriteRequest, using the provided TeamQuotaConcurrencyPolicyWriteRequest
+func (t *TeamQuotaPolicyWriteRequest) MergeTeamQuotaConcurrencyPolicyWriteRequest(v TeamQuotaConcurrencyPolicyWriteRequest) error {
+	v.Kind = "concurrency"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTeamQuotaRatePolicyWriteRequest returns the union data inside the TeamQuotaPolicyWriteRequest as a TeamQuotaRatePolicyWriteRequest
+func (t TeamQuotaPolicyWriteRequest) AsTeamQuotaRatePolicyWriteRequest() (TeamQuotaRatePolicyWriteRequest, error) {
+	var body TeamQuotaRatePolicyWriteRequest
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTeamQuotaRatePolicyWriteRequest overwrites any union data inside the TeamQuotaPolicyWriteRequest as the provided TeamQuotaRatePolicyWriteRequest
+func (t *TeamQuotaPolicyWriteRequest) FromTeamQuotaRatePolicyWriteRequest(v TeamQuotaRatePolicyWriteRequest) error {
+	v.Kind = "rate"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTeamQuotaRatePolicyWriteRequest performs a merge with any union data inside the TeamQuotaPolicyWriteRequest, using the provided TeamQuotaRatePolicyWriteRequest
+func (t *TeamQuotaPolicyWriteRequest) MergeTeamQuotaRatePolicyWriteRequest(v TeamQuotaRatePolicyWriteRequest) error {
+	v.Kind = "rate"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t TeamQuotaPolicyWriteRequest) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"kind"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t TeamQuotaPolicyWriteRequest) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "capacity":
+		return t.AsTeamQuotaCapacityPolicyWriteRequest()
+	case "concurrency":
+		return t.AsTeamQuotaConcurrencyPolicyWriteRequest()
+	case "rate":
+		return t.AsTeamQuotaRatePolicyWriteRequest()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t TeamQuotaPolicyWriteRequest) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *TeamQuotaPolicyWriteRequest) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }

@@ -108,6 +108,9 @@ func validateCredentialSourceWriteRequest(record *egressauth.CredentialSourceWri
 	if record == nil {
 		return fmt.Errorf("credential source record is required")
 	}
+	if err := egressauth.ValidateCredentialSourceWriteSize(record); err != nil {
+		return err
+	}
 	if strings.TrimSpace(record.Name) == "" {
 		return fmt.Errorf("credential source name is required")
 	}

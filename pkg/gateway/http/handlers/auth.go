@@ -49,6 +49,7 @@ func WithCreateHomeRegionRequiredForAuth(regionLookup TeamRegionLookup) AuthHand
 
 type authRepository interface {
 	CreateRefreshToken(ctx context.Context, token *identity.RefreshToken) error
+	RotateRefreshToken(ctx context.Context, currentTokenHash string, replacement *identity.RefreshToken) error
 	ValidateRefreshToken(ctx context.Context, tokenHash string) (*identity.RefreshToken, error)
 	RevokeAllUserRefreshTokens(ctx context.Context, userID string) error
 	CreateWebLoginCode(ctx context.Context, code *identity.WebLoginCode) error
@@ -121,9 +122,16 @@ type DeviceLoginPollResponse struct {
 
 // Login handles email/password login
 func (h *AuthHandler) Login(c *gin.Context) {
+	if !limitJSONRequestBody(c, "login request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if !limitStringResource(c, "email", req.Email, identity.MaxIdentityEmailBytes) ||
+		!limitStringResource(c, "password", req.Password, identity.MaxIdentityPasswordBytes) {
 		return
 	}
 
@@ -179,13 +187,25 @@ type RegisterRequest struct {
 
 // Register handles user registration
 func (h *AuthHandler) Register(c *gin.Context) {
+	if !limitJSONRequestBody(c, "registration request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
 		return
 	}
+	if !limitStringResource(c, "email", req.Email, identity.MaxIdentityEmailBytes) ||
+		!limitStringResource(c, "password", req.Password, identity.MaxIdentityPasswordBytes) ||
+		!limitStringResource(c, "user name", req.Name, identity.MaxIdentityNameBytes) {
+		return
+	}
 
 	homeRegionID := normalizeOptionalString(req.HomeRegionID)
+	if homeRegionID != nil &&
+		!limitStringResource(c, "home region id", *homeRegionID, identity.MaxIdentityHomeRegionIDBytes) {
+		return
+	}
 	if err := validateNormalizedHomeRegionID(homeRegionID); err != nil {
 		status, code, message := resolveHomeRegionValidationError(err)
 		spec.JSONError(c, status, code, message)
@@ -204,6 +224,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	user, err := h.builtinProvider.Register(c.Request.Context(), req.Email, req.Password, req.Name, homeRegionID)
 	if err != nil {
+		if writeIdentityResourceMutationError(c, err) {
+			return
+		}
 		status := http.StatusBadRequest
 		if errors.Is(err, builtin.ErrRegistrationDisabled) || errors.Is(err, builtin.ErrBuiltInAuthDisabled) {
 			status = http.StatusForbidden
@@ -258,9 +281,15 @@ type WebLoginExchangeRequest struct {
 
 // RefreshToken refreshes an access token
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
+	if !limitJSONRequestBody(c, "refresh request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 	var req RefreshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if !limitStringResource(c, "refresh token", req.RefreshToken, identity.MaxIdentityTokenBytes) {
 		return
 	}
 
@@ -292,10 +321,29 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Issue new tokens
-	tokens, err := h.issueAndPersistTokenPair(c.Request.Context(), user, teamGrants)
+	// Issue and atomically rotate the single-use refresh token.
+	tokens, err := h.issueTokenPair(user, teamGrants)
 	if err != nil {
 		h.logger.Error("Failed to issue tokens", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to issue tokens")
+		return
+	}
+	if err := h.repo.RotateRefreshToken(
+		c.Request.Context(),
+		tokenHash,
+		&identity.RefreshToken{
+			UserID:    user.ID,
+			TokenHash: authn.HashRefreshToken(tokens.RefreshToken),
+			ExpiresAt: tokens.RefreshExpiresAt,
+		},
+	); err != nil {
+		if errors.Is(err, identity.ErrTokenNotFound) ||
+			errors.Is(err, identity.ErrTokenRevoked) ||
+			errors.Is(err, identity.ErrTokenExpired) {
+			spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "invalid refresh token")
+			return
+		}
+		h.logger.Error("Failed to rotate refresh token", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to issue tokens")
 		return
 	}
@@ -310,9 +358,16 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 
 // WebLoginExchange exchanges a short-lived OIDC browser handoff code for Sandbox0 tokens.
 func (h *AuthHandler) WebLoginExchange(c *gin.Context) {
+	if !limitJSONRequestBody(c, "web login exchange request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 	var req WebLoginExchangeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if !limitStringResource(c, "web login code", req.LoginCode, identity.MaxIdentityLoginCodeBytes) ||
+		!limitStringResource(c, "return URL", req.ReturnURL, identity.MaxIdentityReturnURLBytes) {
 		return
 	}
 	if h.oidcManager == nil || !h.oidcManager.IsAllowedWebReturnURL(req.ReturnURL) {
@@ -366,9 +421,16 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 
+	if !limitJSONRequestBody(c, "password change request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if !limitStringResource(c, "old password", req.OldPassword, identity.MaxIdentityPasswordBytes) ||
+		!limitStringResource(c, "new password", req.NewPassword, identity.MaxIdentityPasswordBytes) {
 		return
 	}
 
@@ -445,8 +507,15 @@ func (h *AuthHandler) OIDCLogin(c *gin.Context) {
 	if isTruthyQuery(c.Query("web_login")) {
 		authOpts = append(authOpts, oidc.WithWebLoginHandoff())
 	}
-	authURL, err := h.oidcManager.GenerateAuthURL(providerID, returnURL, authOpts...)
+	authURL, err := h.oidcManager.GenerateAuthURL(c.Request.Context(), providerID, returnURL, authOpts...)
 	if err != nil {
+		if writeIdentityResourceMutationError(c, err) {
+			return
+		}
+		if identity.IsIdentityPayloadTooLarge(err) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
 		status := http.StatusBadRequest
 		if errors.Is(err, oidc.ErrProviderNotFound) {
 			status = http.StatusNotFound
@@ -513,6 +582,13 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 
 	callback, err := h.oidcManager.HandleCallback(c.Request.Context(), providerID, code, state)
 	if err != nil {
+		if writeIdentityResourceMutationError(c, err) {
+			return
+		}
+		if identity.IsIdentityPayloadTooLarge(err) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		}
 		h.logger.Warn("OIDC callback failed",
 			zap.String("provider", providerID),
 			zap.Error(err),
@@ -533,6 +609,13 @@ func (h *AuthHandler) OIDCCallback(c *gin.Context) {
 	if callback.WebLoginHandoff {
 		loginCode, expiresAt, err := h.createWebLoginCode(c.Request.Context(), user, returnURL)
 		if err != nil {
+			if writeIdentityResourceMutationError(c, err) {
+				return
+			}
+			if identity.IsIdentityPayloadTooLarge(err) {
+				spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+				return
+			}
 			h.logger.Error("Failed to create web login code", zap.Error(err))
 			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to complete oidc login")
 			return
@@ -645,6 +728,13 @@ func (h *AuthHandler) OIDCDeviceStart(c *gin.Context) {
 		ExpiresAt:               time.Now().Add(time.Duration(deviceAuth.ExpiresIn) * time.Second),
 	}
 	if err := h.repo.CreateDeviceAuthSession(c.Request.Context(), session); err != nil {
+		if writeIdentityResourceMutationError(c, err) {
+			return
+		}
+		if identity.IsIdentityPayloadTooLarge(err) {
+			spec.JSONError(c, http.StatusBadGateway, spec.CodeUnavailable, "identity provider response is too large")
+			return
+		}
 		h.logger.Error("Failed to persist device auth session", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to start device login")
 		return
@@ -667,9 +757,20 @@ func (h *AuthHandler) OIDCDevicePoll(c *gin.Context) {
 		return
 	}
 
+	if !limitJSONRequestBody(c, "device login poll request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 	var req DeviceLoginPollRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if !limitStringResource(
+		c,
+		"device login id",
+		req.DeviceLoginID,
+		identity.MaxIdentityDeviceLoginIDBytes,
+	) {
 		return
 	}
 
@@ -766,13 +867,7 @@ func (h *AuthHandler) buildLoginResponse(ctx context.Context, user *identity.Use
 }
 
 func (h *AuthHandler) issueAndPersistTokenPair(ctx context.Context, user *identity.User, teamGrants []authn.TeamGrant) (*authn.TokenPair, error) {
-	tokens, err := h.jwtIssuer.IssueTokenPair(
-		user.ID,
-		user.Email,
-		user.Name,
-		user.IsAdmin,
-		teamGrants,
-	)
+	tokens, err := h.issueTokenPair(user, teamGrants)
 	if err != nil {
 		return nil, err
 	}
@@ -780,6 +875,16 @@ func (h *AuthHandler) issueAndPersistTokenPair(ctx context.Context, user *identi
 		return nil, err
 	}
 	return tokens, nil
+}
+
+func (h *AuthHandler) issueTokenPair(user *identity.User, teamGrants []authn.TeamGrant) (*authn.TokenPair, error) {
+	return h.jwtIssuer.IssueTokenPair(
+		user.ID,
+		user.Email,
+		user.Name,
+		user.IsAdmin,
+		teamGrants,
+	)
 }
 
 func (h *AuthHandler) persistRefreshToken(ctx context.Context, userID string, tokens *authn.TokenPair) error {

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -12,17 +13,20 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 )
 
 type teamRepository interface {
 	GetTeamsByUserID(ctx context.Context, userID string) ([]*identity.Team, error)
-	CreateTeam(ctx context.Context, team *identity.Team) error
+	CreateTeamWithOwner(ctx context.Context, team *identity.Team) (*identity.TeamMember, error)
 	GetTeamMember(ctx context.Context, teamID, userID string) (*identity.TeamMember, error)
 	GetTeamByID(ctx context.Context, id string) (*identity.Team, error)
 	UpdateTeam(ctx context.Context, team *identity.Team) error
-	DeleteTeam(ctx context.Context, id string) error
-	TransferTeamOwner(ctx context.Context, teamID, userID string) (*identity.Team, error)
+	FenceTeamDeletionOwnedBy(ctx context.Context, id, expectedOwnerID string) error
+	UnfenceTeamDeletionOwnedBy(ctx context.Context, id, expectedOwnerID string) error
+	DeleteTeamOwnedBy(ctx context.Context, id, expectedOwnerID string) error
+	TransferTeamOwner(ctx context.Context, teamID, expectedOwnerID, userID string) (*identity.Team, error)
 	GetTeamMembers(ctx context.Context, teamID string) ([]*identity.TeamMemberWithUser, error)
 	SearchTeamMembers(ctx context.Context, teamID, query string) ([]*identity.TeamMemberWithUser, error)
 	GetUserByEmail(ctx context.Context, email string) (*identity.User, error)
@@ -36,6 +40,24 @@ type TeamDeletePreflight interface {
 	GetTeamResourceInventory(ctx context.Context, teamID string) (*teamresources.Inventory, error)
 }
 
+// TeamDeletionLifecycle owns the durable PostgreSQL admission tombstone and
+// idempotent quota-state finalization.
+type TeamDeletionLifecycle interface {
+	DisableTeamAdmission(ctx context.Context, teamID string) error
+	DisableTeamAdmissionWithFinalCheck(
+		ctx context.Context,
+		teamID string,
+		finalCheck func(context.Context) error,
+	) error
+	FinalizeTeamDeletion(ctx context.Context, teamID string) error
+}
+
+// TeamDistributedAdmissionDisabler publishes the distributed Redis tombstone before
+// identity state is removed.
+type TeamDistributedAdmissionDisabler interface {
+	DisableTeamDistributedAdmission(ctx context.Context, teamID string) error
+}
+
 // TeamRegionLookup resolves region directory entries for team validation.
 type TeamRegionLookup interface {
 	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
@@ -43,11 +65,14 @@ type TeamRegionLookup interface {
 
 // TeamHandler handles team endpoints
 type TeamHandler struct {
-	repo                      teamRepository
-	logger                    *zap.Logger
-	requireHomeRegionOnCreate bool
-	regionLookup              TeamRegionLookup
-	deletePreflight           TeamDeletePreflight
+	repo                         teamRepository
+	logger                       *zap.Logger
+	requireHomeRegionOnCreate    bool
+	regionLookup                 TeamRegionLookup
+	deletePreflight              TeamDeletePreflight
+	deletionLifecycle            TeamDeletionLifecycle
+	distributedAdmissionDisabler TeamDistributedAdmissionDisabler
+	teamDeletionUnavailable      string
 }
 
 // TeamHandlerOption configures TeamHandler behavior.
@@ -65,6 +90,28 @@ func WithCreateHomeRegionRequired(regionLookup TeamRegionLookup) TeamHandlerOpti
 func WithTeamDeletePreflight(preflight TeamDeletePreflight) TeamHandlerOption {
 	return func(h *TeamHandler) {
 		h.deletePreflight = preflight
+	}
+}
+
+// WithTeamDeletionLifecycle configures the durable PostgreSQL deletion state.
+func WithTeamDeletionLifecycle(lifecycle TeamDeletionLifecycle) TeamHandlerOption {
+	return func(h *TeamHandler) {
+		h.deletionLifecycle = lifecycle
+	}
+}
+
+// WithTeamDistributedAdmissionDisabler configures the distributed admission tombstone.
+func WithTeamDistributedAdmissionDisabler(disabler TeamDistributedAdmissionDisabler) TeamHandlerOption {
+	return func(h *TeamHandler) {
+		h.distributedAdmissionDisabler = disabler
+	}
+}
+
+// WithTeamDeletionUnavailable makes team deletion fail closed when the
+// deployment cannot coordinate the owning region's deletion tombstone.
+func WithTeamDeletionUnavailable(message string) TeamHandlerOption {
+	return func(h *TeamHandler) {
+		h.teamDeletionUnavailable = strings.TrimSpace(message)
 	}
 }
 
@@ -113,6 +160,9 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 		return
 	}
 
+	if !limitJSONRequestBody(c, "team create request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 	var req CreateTeamRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
@@ -123,6 +173,10 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team name is required")
 		return
 	}
+	if !limitStringResource(c, "team name", name, identity.MaxIdentityTeamNameBytes) ||
+		!limitStringResource(c, "team slug", req.Slug, identity.MaxIdentityTeamSlugBytes) {
+		return
+	}
 	slug, err := normalizeExplicitTeamSlug(req.Slug)
 	if err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
@@ -130,6 +184,10 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 	}
 
 	homeRegionID := normalizeOptionalString(req.HomeRegionID)
+	if homeRegionID != nil &&
+		!limitStringResource(c, "home region id", *homeRegionID, identity.MaxIdentityHomeRegionIDBytes) {
+		return
+	}
 	if err := validateNormalizedHomeRegionID(homeRegionID); err != nil {
 		status, code, message := resolveHomeRegionValidationError(err)
 		spec.JSONError(c, status, code, message)
@@ -153,24 +211,17 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 		HomeRegionID: homeRegionID,
 	}
 
-	if err := h.repo.CreateTeam(c.Request.Context(), team); err != nil {
+	if _, err := h.repo.CreateTeamWithOwner(c.Request.Context(), team); err != nil {
 		if errors.Is(err, identity.ErrTeamAlreadyExists) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team with this slug already exists")
+			return
+		}
+		if writeIdentityResourceMutationError(c, err) {
 			return
 		}
 		h.logger.Error("Failed to create team", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create team")
 		return
-	}
-
-	// Add creator as admin member
-	member := &identity.TeamMember{
-		TeamID: team.ID,
-		UserID: authCtx.UserID,
-		Role:   "admin",
-	}
-	if err := h.repo.AddTeamMember(c.Request.Context(), member); err != nil {
-		h.logger.Warn("Failed to add creator as member", zap.Error(err))
 	}
 
 	spec.JSONSuccess(c, http.StatusCreated, team)
@@ -234,6 +285,9 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	if rejectInvalidUUID(c, "team id", teamID) {
 		return
 	}
+	if !limitJSONRequestBody(c, "team update request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 
 	// Verify user is admin of the team
 	member, err := h.repo.GetTeamMember(c.Request.Context(), teamID, authCtx.UserID)
@@ -255,6 +309,10 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	var req UpdateTeamRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if !limitStringResource(c, "team name", req.Name, identity.MaxIdentityTeamNameBytes) ||
+		!limitStringResource(c, "team slug", req.Slug, identity.MaxIdentityTeamSlugBytes) {
 		return
 	}
 
@@ -287,6 +345,10 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	}
 	if req.HomeRegionID != nil {
 		nextHomeRegionID := normalizeOptionalString(req.HomeRegionID)
+		if nextHomeRegionID != nil &&
+			!limitStringResource(c, "home region id", *nextHomeRegionID, identity.MaxIdentityHomeRegionIDBytes) {
+			return
+		}
 		if err := validateNormalizedHomeRegionID(nextHomeRegionID); err != nil {
 			status, code, message := resolveHomeRegionValidationError(err)
 			spec.JSONError(c, status, code, message)
@@ -302,6 +364,9 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	if err := h.repo.UpdateTeam(c.Request.Context(), team); err != nil {
 		if errors.Is(err, identity.ErrTeamAlreadyExists) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team with this slug already exists")
+			return
+		}
+		if writeIdentityResourceMutationError(c, err) {
 			return
 		}
 		h.logger.Error("Failed to update team", zap.Error(err))
@@ -369,6 +434,10 @@ func (h *TeamHandler) DeleteTeam(c *gin.Context) {
 	if rejectInvalidUUID(c, "team id", teamID) {
 		return
 	}
+	if h.teamDeletionUnavailable != "" {
+		h.abortTeamDeletionUnavailable(c, h.teamDeletionUnavailable, nil, teamID)
+		return
+	}
 
 	// Verify user is owner of the team
 	team, err := h.repo.GetTeamByID(c.Request.Context(), teamID)
@@ -387,26 +456,152 @@ func (h *TeamHandler) DeleteTeam(c *gin.Context) {
 		return
 	}
 
-	if h.deletePreflight != nil {
-		inventory, err := h.deletePreflight.GetTeamResourceInventory(c.Request.Context(), teamID)
-		if err != nil {
-			h.logger.Error("Failed to check team resources before deletion", zap.Error(err), zap.String("team_id", teamID))
-			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to check team resources")
+	if h.deletePreflight == nil || h.deletionLifecycle == nil || h.distributedAdmissionDisabler == nil {
+		h.abortTeamDeletionUnavailable(c, "team deletion coordination is unavailable", nil, teamID)
+		return
+	}
+	inventory, err := h.deletePreflight.GetTeamResourceInventory(c.Request.Context(), teamID)
+	if err != nil {
+		h.logger.Error("Failed to check team resources before deletion", zap.Error(err), zap.String("team_id", teamID))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to check team resources")
+		return
+	}
+	if inventory.HasBlockingResources() {
+		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team has resources that must be removed before deletion", inventory)
+		return
+	}
+	if err := h.repo.FenceTeamDeletionOwnedBy(
+		c.Request.Context(),
+		teamID,
+		authCtx.UserID,
+	); err != nil {
+		switch {
+		case errors.Is(err, identity.ErrTeamNotFound):
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "team not found")
+		case errors.Is(err, identity.ErrTeamOwnerChanged):
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team owner changed during deletion")
+		default:
+			h.logger.Error("Failed to fence team identity deletion", zap.Error(err), zap.String("team_id", teamID))
+			spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to fence team deletion")
+		}
+		return
+	}
+	var finalInventory *teamresources.Inventory
+	finalCheckFailedSafely := false
+	err = h.deletionLifecycle.DisableTeamAdmissionWithFinalCheck(
+		c.Request.Context(),
+		teamID,
+		func(ctx context.Context) error {
+			checked, checkErr := h.deletePreflight.GetTeamResourceInventory(ctx, teamID)
+			if checkErr != nil {
+				finalCheckFailedSafely = true
+				return fmt.Errorf("final team resource inventory: %w", checkErr)
+			}
+			finalInventory = checked
+			if checked.HasBlockingResources() {
+				finalCheckFailedSafely = true
+				return errTeamResourcesChangedDuringDeletion
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		if finalCheckFailedSafely || teamquota.IsDeletionConflict(err) {
+			if unfenceErr := h.repo.UnfenceTeamDeletionOwnedBy(
+				c.Request.Context(),
+				teamID,
+				authCtx.UserID,
+			); unfenceErr != nil {
+				h.abortTeamDeletionUnavailable(
+					c,
+					"failed to release team deletion fence",
+					unfenceErr,
+					teamID,
+				)
+				return
+			}
+		}
+		if errors.Is(err, errTeamResourcesChangedDuringDeletion) {
+			spec.JSONError(
+				c,
+				http.StatusConflict,
+				spec.CodeConflict,
+				"team resources changed during deletion; remove them and retry",
+				finalInventory,
+			)
 			return
 		}
-		if inventory.HasBlockingResources() {
-			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team has resources that must be removed before deletion", inventory)
+		if teamquota.IsDeletionConflict(err) {
+			writeTeamQuotaDeletionConflict(c, inventory, err)
 			return
 		}
+		h.abortTeamDeletionUnavailable(c, "failed to disable team quota admission", err, teamID)
+		return
+	}
+	if err := h.distributedAdmissionDisabler.DisableTeamDistributedAdmission(c.Request.Context(), teamID); err != nil {
+		h.abortTeamDeletionUnavailable(c, "failed to publish team quota deletion marker", err, teamID)
+		return
+	}
+	if err := h.deletionLifecycle.FinalizeTeamDeletion(c.Request.Context(), teamID); err != nil {
+		if teamquota.IsDeletionConflict(err) {
+			writeTeamQuotaDeletionConflict(c, inventory, err)
+			return
+		}
+		h.abortTeamDeletionUnavailable(c, "failed to finalize team quota deletion", err, teamID)
+		return
 	}
 
-	if err := h.repo.DeleteTeam(c.Request.Context(), teamID); err != nil {
+	if err := h.repo.DeleteTeamOwnedBy(c.Request.Context(), teamID, authCtx.UserID); err != nil {
+		if errors.Is(err, identity.ErrTeamOwnerChanged) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team owner changed during deletion")
+			return
+		}
+		if errors.Is(err, identity.ErrTeamDeletionNotFenced) {
+			h.abortTeamDeletionUnavailable(c, "team deletion fence was lost", err, teamID)
+			return
+		}
 		h.logger.Error("Failed to delete team", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to delete team")
 		return
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "team deleted"})
+}
+
+var errTeamResourcesChangedDuringDeletion = errors.New("team resources changed during deletion")
+
+func writeTeamQuotaDeletionConflict(c *gin.Context, inventory *teamresources.Inventory, err error) {
+	if inventory == nil {
+		inventory = &teamresources.Inventory{}
+	}
+	var conflict *teamquota.TeamDeletionConflictError
+	if errors.As(err, &conflict) && conflict != nil {
+		if inventory.TeamID == "" {
+			inventory.TeamID = conflict.TeamID
+		}
+		inventory.AddBlocking("team_quota_live_allocations", conflict.LiveAllocations)
+		inventory.AddBlocking("team_quota_prepared_transfers", conflict.PreparedTransfers)
+		inventory.AddBlocking("team_quota_nonzero_usage", conflict.NonzeroUsageRows)
+	}
+	spec.JSONError(
+		c,
+		http.StatusConflict,
+		spec.CodeConflict,
+		"team has live quota state that must be released before deletion",
+		inventory,
+	)
+}
+
+func (h *TeamHandler) abortTeamDeletionUnavailable(c *gin.Context, message string, err error, teamID string) {
+	if h != nil && h.logger != nil {
+		h.logger.Error(
+			"Team deletion coordination unavailable",
+			zap.Error(err),
+			zap.String("team_id", teamID),
+		)
+	}
+	c.Header("Retry-After", "1")
+	spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, message)
 }
 
 // TransferTeamOwnerRequest is the request body for transferring team ownership.
@@ -427,6 +622,9 @@ func (h *TeamHandler) TransferTeamOwner(c *gin.Context) {
 		return
 	}
 
+	if !limitJSONRequestBody(c, "team owner transfer request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 	var req TransferTeamOwnerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
@@ -456,7 +654,7 @@ func (h *TeamHandler) TransferTeamOwner(c *gin.Context) {
 		return
 	}
 
-	team, err = h.repo.TransferTeamOwner(c.Request.Context(), teamID, req.UserID)
+	team, err = h.repo.TransferTeamOwner(c.Request.Context(), teamID, authCtx.UserID, req.UserID)
 	if err != nil {
 		if errors.Is(err, identity.ErrMemberNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "member not found")
@@ -464,6 +662,17 @@ func (h *TeamHandler) TransferTeamOwner(c *gin.Context) {
 		}
 		if errors.Is(err, identity.ErrTeamNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "team not found")
+			return
+		}
+		if errors.Is(err, identity.ErrTeamOwnerChanged) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team owner changed; retry with current owner")
+			return
+		}
+		if errors.Is(err, identity.ErrTeamDeletionInProgress) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team deletion is in progress")
+			return
+		}
+		if writeIdentityResourceMutationError(c, err) {
 			return
 		}
 		h.logger.Error("Failed to transfer team owner", zap.Error(err))
@@ -500,6 +709,9 @@ func (h *TeamHandler) ListTeamMembers(c *gin.Context) {
 	}
 
 	query := strings.TrimSpace(c.Query("query"))
+	if !limitStringResource(c, "team member search query", query, identity.MaxIdentityMemberSearchBytes) {
+		return
+	}
 	var members []*identity.TeamMemberWithUser
 	if query == "" {
 		members, err = h.repo.GetTeamMembers(c.Request.Context(), teamID)
@@ -536,6 +748,9 @@ func (h *TeamHandler) AddTeamMember(c *gin.Context) {
 	if rejectInvalidUUID(c, "team id", teamID) {
 		return
 	}
+	if !limitJSONRequestBody(c, "team member create request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 
 	// Verify user is admin of the team
 	member, err := h.repo.GetTeamMember(c.Request.Context(), teamID, authCtx.UserID)
@@ -557,6 +772,10 @@ func (h *TeamHandler) AddTeamMember(c *gin.Context) {
 	var req AddTeamMemberRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if !limitStringResource(c, "email", req.Email, identity.MaxIdentityEmailBytes) ||
+		!limitStringResource(c, "team member role", req.Role, identity.MaxIdentityTeamRoleBytes) {
 		return
 	}
 
@@ -582,6 +801,9 @@ func (h *TeamHandler) AddTeamMember(c *gin.Context) {
 	if err := h.repo.AddTeamMember(c.Request.Context(), newMember); err != nil {
 		if errors.Is(err, identity.ErrAlreadyMember) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "user is already a member")
+			return
+		}
+		if writeIdentityResourceMutationError(c, err) {
 			return
 		}
 		h.logger.Error("Failed to add member", zap.Error(err))
@@ -610,6 +832,9 @@ func (h *TeamHandler) UpdateTeamMember(c *gin.Context) {
 	if rejectInvalidUUID(c, "team id", teamID) || rejectInvalidUUID(c, "user id", userID) {
 		return
 	}
+	if !limitJSONRequestBody(c, "team member update request body", identity.MaxIdentityRequestBodyBytes) {
+		return
+	}
 
 	// Verify user is admin of the team
 	member, err := h.repo.GetTeamMember(c.Request.Context(), teamID, authCtx.UserID)
@@ -631,6 +856,9 @@ func (h *TeamHandler) UpdateTeamMember(c *gin.Context) {
 	var req UpdateTeamMemberRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
+		return
+	}
+	if !limitStringResource(c, "team member role", req.Role, identity.MaxIdentityTeamRoleBytes) {
 		return
 	}
 
@@ -674,6 +902,17 @@ func (h *TeamHandler) UpdateTeamMember(c *gin.Context) {
 	if err := h.repo.UpdateTeamMemberRole(c.Request.Context(), teamID, userID, req.Role); err != nil {
 		if errors.Is(err, identity.ErrMemberNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "member not found")
+			return
+		}
+		if errors.Is(err, identity.ErrCannotDemoteTeamOwner) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team owner must remain an admin")
+			return
+		}
+		if errors.Is(err, identity.ErrCannotRemoveLastTeamAdmin) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "cannot remove the last admin")
+			return
+		}
+		if writeIdentityResourceMutationError(c, err) {
 			return
 		}
 		h.logger.Error("Failed to update member", zap.Error(err))
@@ -840,6 +1079,14 @@ func (h *TeamHandler) RemoveTeamMember(c *gin.Context) {
 	if err := h.repo.RemoveTeamMember(c.Request.Context(), teamID, userID); err != nil {
 		if errors.Is(err, identity.ErrMemberNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "member not found")
+			return
+		}
+		if errors.Is(err, identity.ErrCannotRemoveTeamOwner) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "cannot remove team owner")
+			return
+		}
+		if errors.Is(err, identity.ErrCannotRemoveLastTeamAdmin) {
+			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "cannot remove the last admin")
 			return
 		}
 		h.logger.Error("Failed to remove member", zap.Error(err))

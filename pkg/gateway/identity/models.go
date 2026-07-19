@@ -108,3 +108,15 @@ type WebLoginCode struct {
 	ConsumedAt *time.Time `json:"consumed_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 }
+
+// OIDCPendingState stores the server-side half of an OIDC authorization state.
+// StateHash is a digest of the opaque state returned to the browser.
+type OIDCPendingState struct {
+	StateHash       string    `json:"-"`
+	Provider        string    `json:"provider"`
+	CodeVerifier    string    `json:"-"`
+	ReturnURL       string    `json:"return_url"`
+	WebLoginHandoff bool      `json:"web_login_handoff"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	CreatedAt       time.Time `json:"created_at"`
+}

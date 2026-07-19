@@ -18,6 +18,20 @@ func TestApplyGatewayConfigCopiesJWTKeyFields(t *testing.T) {
 			JWTPrivateKeyFile: "/runtime/secrets/jwt_private_key.pem",
 			JWTPublicKeyFile:  "/runtime/secrets/jwt_public_key.pem",
 			JWTAccessTokenTTL: metav1.Duration{Duration: 15 * time.Minute},
+			OverloadGuard: infrav1alpha1.OverloadGuardConfig{
+				RequestsPerSecond:      321,
+				Burst:                  654,
+				LocalRequestsPerSecond: 777,
+				LocalBurst:             888,
+				MaxInFlight:            222,
+				CleanupInterval:        metav1.Duration{Duration: 2 * time.Minute},
+			},
+			IdentityResourceGuard: infrav1alpha1.IdentityResourceGuardConfig{
+				MaxTeamsOwnedPerUser:          7,
+				MaxActiveRefreshTokensPerUser: 11,
+				SessionCleanupInterval:        metav1.Duration{Duration: 45 * time.Second},
+				SessionCleanupBatchSize:       321,
+			},
 		},
 	}
 
@@ -36,6 +50,76 @@ func TestApplyGatewayConfigCopiesJWTKeyFields(t *testing.T) {
 	}
 	if cfg.JWTPublicKeyFile != src.JWTPublicKeyFile {
 		t.Fatalf("expected public key file to be copied")
+	}
+	if cfg.IdentityResourceGuard.MaxTeamsOwnedPerUser != 7 ||
+		cfg.IdentityResourceGuard.MaxActiveRefreshTokensPerUser != 11 {
+		t.Fatalf("identity resource guard was not copied: %+v", cfg.IdentityResourceGuard)
+	}
+	if cfg.IdentityResourceGuard.SessionCleanupInterval.Duration != 45*time.Second ||
+		cfg.IdentityResourceGuard.SessionCleanupBatchSize != 321 {
+		t.Fatalf("identity cleanup config was not copied: %+v", cfg.IdentityResourceGuard)
+	}
+	if cfg.OverloadGuard.RequestsPerSecond != 321 ||
+		cfg.OverloadGuard.Burst != 654 ||
+		cfg.OverloadGuard.LocalRequestsPerSecond != 777 ||
+		cfg.OverloadGuard.LocalBurst != 888 ||
+		cfg.OverloadGuard.MaxInFlight != 222 ||
+		cfg.OverloadGuard.CleanupInterval.Duration != 2*time.Minute {
+		t.Fatalf("overload guard was not copied: %+v", cfg.OverloadGuard)
+	}
+}
+
+func TestPublicGatewayConfigsCopySharedOverloadGuard(t *testing.T) {
+	shared := infrav1alpha1.GatewayConfig{
+		OverloadGuard: infrav1alpha1.OverloadGuardConfig{
+			RequestsPerSecond:      75,
+			Burst:                  125,
+			LocalRequestsPerSecond: 375,
+			LocalBurst:             625,
+			MaxInFlight:            222,
+			CleanupInterval:        metav1.Duration{Duration: 3 * time.Minute},
+		},
+	}
+
+	regional := ToRegionalGateway(&infrav1alpha1.RegionalGatewayConfig{
+		GatewayConfig: shared,
+	})
+	cluster := ToClusterGateway(&infrav1alpha1.ClusterGatewayConfig{
+		GatewayConfig: shared,
+	})
+	for name, cfg := range map[string]struct {
+		rps         int
+		burst       int
+		localRPS    int
+		localBurst  int
+		maxInFlight int
+		cleanup     time.Duration
+	}{
+		"regional": {
+			rps:         regional.OverloadGuard.RequestsPerSecond,
+			burst:       regional.OverloadGuard.Burst,
+			localRPS:    regional.OverloadGuard.LocalRequestsPerSecond,
+			localBurst:  regional.OverloadGuard.LocalBurst,
+			maxInFlight: regional.OverloadGuard.MaxInFlight,
+			cleanup:     regional.OverloadGuard.CleanupInterval.Duration,
+		},
+		"cluster": {
+			rps:         cluster.OverloadGuard.RequestsPerSecond,
+			burst:       cluster.OverloadGuard.Burst,
+			localRPS:    cluster.OverloadGuard.LocalRequestsPerSecond,
+			localBurst:  cluster.OverloadGuard.LocalBurst,
+			maxInFlight: cluster.OverloadGuard.MaxInFlight,
+			cleanup:     cluster.OverloadGuard.CleanupInterval.Duration,
+		},
+	} {
+		if cfg.rps != 75 ||
+			cfg.burst != 125 ||
+			cfg.localRPS != 375 ||
+			cfg.localBurst != 625 ||
+			cfg.maxInFlight != 222 ||
+			cfg.cleanup != 3*time.Minute {
+			t.Fatalf("%s overload guard = %+v", name, cfg)
+		}
 	}
 }
 

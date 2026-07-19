@@ -15,6 +15,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 )
 
+// RootFSTokenProvider signs one short-lived, team-scoped token for ctld's
+// manager-only rootfs mutation surface.
+type RootFSTokenProvider func(ctx context.Context, teamID, sandboxID string) (string, error)
+
 // DefaultRequestTimeout is the default timeout for node-local ctld HTTP calls.
 const DefaultRequestTimeout = 15 * time.Second
 
@@ -28,7 +32,6 @@ const (
 	pathVolumeSnapshotComplete   = "/api/v1/volume-portals/snapshot-checkpoints/complete"
 	pathVolumeSnapshotAbort      = "/api/v1/volume-portals/snapshot-checkpoints/abort"
 	pathRootFSInspect            = "/api/v1/rootfs/inspect"
-	pathRootFSSave               = "/api/v1/rootfs/save"
 	pathRootFSSnapshotPrepare    = "/api/v1/rootfs/snapshots/prepare"
 	pathRootFSSnapshotPublish    = "/api/v1/rootfs/snapshots/publish"
 	pathRootFSSnapshotAbort      = "/api/v1/rootfs/snapshots/abort"
@@ -39,7 +42,8 @@ var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
 
 // Client calls node-local ctld APIs.
 type Client struct {
-	httpClient *http.Client
+	httpClient          *http.Client
+	rootFSTokenProvider RootFSTokenProvider
 }
 
 // NewClient returns a ctld API client using httpClient or the package default.
@@ -48,6 +52,14 @@ func NewClient(httpClient *http.Client) *Client {
 		httpClient = defaultHTTPClient
 	}
 	return &Client{httpClient: httpClient}
+}
+
+// NewClientWithRootFSAuth returns a client that authenticates every mutating
+// rootfs request with a freshly generated manager token.
+func NewClientWithRootFSAuth(httpClient *http.Client, provider RootFSTokenProvider) *Client {
+	client := NewClient(httpClient)
+	client.rootFSTokenProvider = provider
+	return client
 }
 
 // NewClientWithTimeout returns a ctld API client with a dedicated HTTP timeout.
@@ -126,24 +138,40 @@ func (c *Client) InspectRootFS(ctx context.Context, ctldAddress string, req Insp
 	return PostJSON[InspectRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSInspect, req)
 }
 
-func (c *Client) SaveRootFS(ctx context.Context, ctldAddress string, req SaveRootFSRequest) (*SaveRootFSResponse, error) {
-	return PostJSON[SaveRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSave, req)
-}
-
 func (c *Client) PrepareRootFSSnapshot(ctx context.Context, ctldAddress string, req PrepareRootFSSnapshotRequest) (*PrepareRootFSSnapshotResponse, error) {
-	return PostJSON[PrepareRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotPrepare, req)
+	return postRootFSJSON[PrepareRootFSSnapshotResponse](ctx, c, ctldAddress, pathRootFSSnapshotPrepare, req.TeamID, req.SandboxID, req)
 }
 
 func (c *Client) PublishRootFSSnapshot(ctx context.Context, ctldAddress string, req PublishRootFSSnapshotRequest) (*PublishRootFSSnapshotResponse, error) {
-	return PostJSON[PublishRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotPublish, req)
+	return postRootFSJSON[PublishRootFSSnapshotResponse](ctx, c, ctldAddress, pathRootFSSnapshotPublish, req.TeamID, req.SandboxID, req)
 }
 
 func (c *Client) AbortRootFSSnapshot(ctx context.Context, ctldAddress string, req AbortRootFSSnapshotRequest) (*AbortRootFSSnapshotResponse, error) {
-	return PostJSON[AbortRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotAbort, req)
+	return postRootFSJSON[AbortRootFSSnapshotResponse](ctx, c, ctldAddress, pathRootFSSnapshotAbort, req.TeamID, req.SandboxID, req)
 }
 
 func (c *Client) ApplyRootFS(ctx context.Context, ctldAddress string, req ApplyRootFSRequest) (*ApplyRootFSResponse, error) {
-	return PostJSON[ApplyRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSApply, req)
+	return postRootFSJSON[ApplyRootFSResponse](ctx, c, ctldAddress, pathRootFSApply, req.TeamID, req.SandboxID, req)
+}
+
+func postRootFSJSON[T any](
+	ctx context.Context,
+	client *Client,
+	baseURL, path, teamID, sandboxID string,
+	request any,
+) (*T, error) {
+	var token string
+	if client != nil && client.rootFSTokenProvider != nil {
+		var err error
+		token, err = client.rootFSTokenProvider(ctx, strings.TrimSpace(teamID), strings.TrimSpace(sandboxID))
+		if err != nil {
+			return nil, fmt.Errorf("generate ctld rootfs internal token: %w", err)
+		}
+		if strings.TrimSpace(token) == "" {
+			return nil, fmt.Errorf("generate ctld rootfs internal token: empty token")
+		}
+	}
+	return postJSONWithToken[T](ctx, client.httpClientOrDefault(), baseURL, path, request, token)
 }
 
 func (c *Client) httpClientOrDefault() *http.Client {
@@ -155,6 +183,10 @@ func (c *Client) httpClientOrDefault() *http.Client {
 
 // PostJSON sends a JSON POST request to ctld and decodes the response.
 func PostJSON[T any](ctx context.Context, httpClient *http.Client, baseURL, path string, request any) (*T, error) {
+	return postJSONWithToken[T](ctx, httpClient, baseURL, path, request, "")
+}
+
+func postJSONWithToken[T any](ctx context.Context, httpClient *http.Client, baseURL, path string, request any, token string) (*T, error) {
 	if httpClient == nil {
 		httpClient = defaultHTTPClient
 	}
@@ -173,6 +205,9 @@ func PostJSON[T any](ctx context.Context, httpClient *http.Client, baseURL, path
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("X-Internal-Token", token)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -220,8 +255,6 @@ func responseError(resp any) string {
 	case *UnbindVolumePortalResponse:
 		return strings.TrimSpace(typed.Error)
 	case *InspectRootFSResponse:
-		return strings.TrimSpace(typed.Error)
-	case *SaveRootFSResponse:
 		return strings.TrimSpace(typed.Error)
 	case *PrepareRootFSSnapshotResponse:
 		return strings.TrimSpace(typed.Error)

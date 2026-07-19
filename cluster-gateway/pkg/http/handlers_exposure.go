@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
@@ -21,6 +22,9 @@ import (
 
 const (
 	defaultPublicRootDomain = "sandbox0.app"
+
+	forwardedExposureSandboxIDHeader = "X-Sandbox-ID"
+	forwardedExposurePortHeader      = "X-Exposure-Port"
 )
 
 func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
@@ -53,24 +57,20 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		}
 		return
 	}
+	// Ownership is authoritative after the manager lookup. Keep Team Quota
+	// admission ahead of route and policy checks so rejected requests cannot
+	// bypass request, connection, or network accounting.
+	releaseTeamQuota, ok := s.teamQuotaController.AdmitPublicExposure(c, sandbox.TeamID)
+	if !ok {
+		return
+	}
+	defer releaseTeamQuota()
 	match := matchSandboxServiceRoute(sandbox.Services, port, c.Request.URL.Path, c.Request.Method)
 	if !match.pathMatched {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "route is not exposed")
 		return
 	}
 	route := match.route
-	finishAudit, ok := s.beginExposureAudit(c, sandbox, match.service, route)
-	if !ok {
-		return
-	}
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			c.Set(exposureAuditPanickedKey, true)
-			finishAudit()
-			panic(recovered)
-		}
-		finishAudit()
-	}()
 	if c.Request.Method == http.MethodOptions && route.CORS != nil {
 		if !s.enforceSandboxServiceRoute(c, sandboxID, sandbox.TeamID, route) {
 			return
@@ -83,6 +83,18 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 	if !s.enforceSandboxServiceRoute(c, sandboxID, sandbox.TeamID, route) {
 		return
 	}
+	finishAudit, ok := s.beginExposureAudit(c, sandbox, match.service, route)
+	if !ok {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.Set(exposureAuditPanickedKey, true)
+			finishAudit()
+			panic(recovered)
+		}
+		finishAudit()
+	}()
 	if route.Resume && !clientServiceHasRestartableRuntime(match.service) {
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "resume-enabled route requires a restartable service runtime")
 		return
@@ -162,13 +174,27 @@ func clientServiceHasRestartableRuntime(service *mgr.SandboxAppService) bool {
 }
 
 func (s *Server) resolveExposureFromRequest(c *gin.Context) (sandboxID string, port int, _ string, err error) {
-	if sb := strings.TrimSpace(c.GetHeader("X-Sandbox-ID")); sb != "" {
-		p := strings.TrimSpace(c.GetHeader("X-Exposure-Port"))
+	forwardedSandboxID := strings.TrimSpace(c.GetHeader(forwardedExposureSandboxIDHeader))
+	forwardedPort := strings.TrimSpace(c.GetHeader(forwardedExposurePortHeader))
+	hasForwardedIdentity := forwardedSandboxID != "" || forwardedPort != ""
+	trustedForward := hasForwardedIdentity && s.isTrustedRegionalExposureForward(c)
+
+	// Forwarding identity and its proof are hop-by-hop metadata. Never let
+	// client-supplied values reach the exposed sandbox service.
+	c.Request.Header.Del(forwardedExposureSandboxIDHeader)
+	c.Request.Header.Del(forwardedExposurePortHeader)
+	c.Request.Header.Del(internalauth.DefaultTokenHeader)
+
+	if trustedForward {
+		if forwardedSandboxID == "" {
+			return "", 0, "", fmt.Errorf("missing forwarded sandbox id")
+		}
+		p := forwardedPort
 		parsedPort, convErr := strconv.Atoi(p)
 		if convErr != nil || parsedPort <= 0 || parsedPort > 65535 {
 			return "", 0, "", fmt.Errorf("invalid forwarded exposure port")
 		}
-		return sb, parsedPort, "", nil
+		return forwardedSandboxID, parsedPort, "", nil
 	}
 
 	host := hostWithoutPort(c.Request.Host)
@@ -195,6 +221,17 @@ func (s *Server) resolveExposureFromRequest(c *gin.Context) (sandboxID string, p
 		return "", 0, "", err
 	}
 	return sandboxID, port, label, nil
+}
+
+func (s *Server) isTrustedRegionalExposureForward(c *gin.Context) bool {
+	if s == nil || s.authMiddleware == nil || c == nil {
+		return false
+	}
+	_, claims, err := s.authMiddleware.AuthenticateRequest(c)
+	return err == nil &&
+		claims != nil &&
+		claims.IsSystem &&
+		claims.Caller == internalauth.ServiceRegionalGateway
 }
 
 func withPort(raw string, port int) (*url.URL, error) {

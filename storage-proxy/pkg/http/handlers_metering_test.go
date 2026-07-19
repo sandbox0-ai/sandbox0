@@ -20,13 +20,15 @@ import (
 )
 
 type fakeHTTPRepo struct {
-	volumes        map[string]*db.SandboxVolume
-	owners         map[string]*db.SandboxVolumeOwner
-	activeMounts   map[string][]*db.VolumeMount
-	getActiveFunc  func(context.Context, string, int) ([]*db.VolumeMount, error)
-	deletedMounts  []db.VolumeMount
-	createdVolumes []*db.SandboxVolume
-	deletedVolume  []string
+	volumes          map[string]*db.SandboxVolume
+	owners           map[string]*db.SandboxVolumeOwner
+	activeMounts     map[string][]*db.VolumeMount
+	getActiveFunc    func(context.Context, string, int) ([]*db.VolumeMount, error)
+	deletedMounts    []db.VolumeMount
+	createdVolumes   []*db.SandboxVolume
+	deletedVolume    []string
+	createOwnerErr   error
+	ownerLookupTeams []string
 }
 
 func newFakeHTTPRepo() *fakeHTTPRepo {
@@ -48,6 +50,9 @@ func (r *fakeHTTPRepo) CreateSandboxVolumeTx(ctx context.Context, tx pgx.Tx, vol
 }
 
 func (r *fakeHTTPRepo) CreateSandboxVolumeOwnerTx(ctx context.Context, tx pgx.Tx, owner *db.SandboxVolumeOwner) error {
+	if r.createOwnerErr != nil {
+		return r.createOwnerErr
+	}
 	r.owners[owner.VolumeID] = owner
 	return nil
 }
@@ -96,9 +101,20 @@ func (r *fakeHTTPRepo) GetSandboxVolumeOwner(ctx context.Context, volumeID strin
 	return owner, nil
 }
 
-func (r *fakeHTTPRepo) GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*db.OwnedSandboxVolume, error) {
+func (r *fakeHTTPRepo) GetOwnedSandboxVolumeByOwner(
+	ctx context.Context,
+	teamID string,
+	clusterID string,
+	sandboxID string,
+	purpose string,
+) (*db.OwnedSandboxVolume, error) {
+	r.ownerLookupTeams = append(r.ownerLookupTeams, teamID)
 	for volumeID, owner := range r.owners {
-		if owner.OwnerClusterID == clusterID && owner.OwnerSandboxID == sandboxID && owner.Purpose == purpose && owner.CleanupRequestedAt == nil {
+		if owner.TeamID == teamID &&
+			owner.OwnerClusterID == clusterID &&
+			owner.OwnerSandboxID == sandboxID &&
+			owner.Purpose == purpose &&
+			owner.CleanupRequestedAt == nil {
 			volume := r.volumes[volumeID]
 			if volume == nil {
 				continue
@@ -133,10 +149,27 @@ func (r *fakeHTTPRepo) DeleteSandboxVolumeTx(ctx context.Context, tx pgx.Tx, id 
 }
 
 func (r *fakeHTTPRepo) MarkOwnedSandboxVolumesForCleanup(ctx context.Context, clusterID, sandboxID, reason string) (int64, error) {
+	return r.markOwnedSandboxVolumesForCleanup("", clusterID, sandboxID, reason)
+}
+
+func (r *fakeHTTPRepo) MarkTeamOwnedSandboxVolumesForCleanup(
+	ctx context.Context,
+	teamID string,
+	clusterID string,
+	sandboxID string,
+	reason string,
+) (int64, error) {
+	return r.markOwnedSandboxVolumesForCleanup(teamID, clusterID, sandboxID, reason)
+}
+
+func (r *fakeHTTPRepo) markOwnedSandboxVolumesForCleanup(teamID, clusterID, sandboxID, reason string) (int64, error) {
 	now := time.Now().UTC()
 	var marked int64
 	for _, owner := range r.owners {
-		if owner.OwnerClusterID != clusterID || owner.OwnerSandboxID != sandboxID || owner.CleanupRequestedAt != nil {
+		if (teamID != "" && owner.TeamID != teamID) ||
+			owner.OwnerClusterID != clusterID ||
+			owner.OwnerSandboxID != sandboxID ||
+			owner.CleanupRequestedAt != nil {
 			continue
 		}
 		owner.CleanupRequestedAt = &now
@@ -229,6 +262,7 @@ type fakeHTTPSnapshotManager struct {
 	compatibilityIssues  []pathnorm.CompatibilityIssue
 	deletedSnapshot      []string
 	cleanedVolumeObjects []string
+	listedSnapshots      []*db.Snapshot
 }
 
 func (f *fakeHTTPSnapshotManager) CreateSnapshotSimple(ctx context.Context, req *snapshot.CreateSnapshotRequest) (*db.Snapshot, error) {
@@ -248,7 +282,7 @@ func (f *fakeHTTPSnapshotManager) CreateSnapshotSimple(ctx context.Context, req 
 }
 
 func (f *fakeHTTPSnapshotManager) ListSnapshots(ctx context.Context, volumeID, teamID string) ([]*db.Snapshot, error) {
-	return nil, nil
+	return f.listedSnapshots, nil
 }
 
 func (f *fakeHTTPSnapshotManager) GetSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) (*db.Snapshot, error) {
@@ -318,11 +352,13 @@ func TestCreateSandboxVolumeRecordsMetering(t *testing.T) {
 	meteringWriter := &fakeHTTPMeteringRepository{}
 	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
-		logger:       logrus.New(),
-		repo:         repo,
-		meteringRepo: meteringWriter,
-		regionID:     "aws-us-east-1",
-		snapshotMgr:  snapshotMgr,
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      meteringWriter,
+		regionID:          "aws-us-east-1",
+		snapshotMgr:       snapshotMgr,
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes", bytes.NewBufferString(`{}`))
@@ -395,11 +431,13 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 	meteringWriter := &fakeHTTPMeteringRepository{}
 	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
-		logger:       logrus.New(),
-		repo:         repo,
-		meteringRepo: meteringWriter,
-		regionID:     "aws-us-east-1",
-		snapshotMgr:  snapshotMgr,
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      meteringWriter,
+		regionID:          "aws-us-east-1",
+		snapshotMgr:       snapshotMgr,
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1?force=true", nil)
@@ -445,6 +483,45 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 	}
 }
 
+func TestDeleteSandboxVolumeRejectsCatalogSnapshotsBeforeQuotaRelease(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:     "vol-1",
+		TeamID: "team-1",
+		UserID: "user-1",
+	}
+	snapshotMgr := &fakeHTTPSnapshotManager{
+		listedSnapshots: []*db.Snapshot{{
+			ID:       "snapshot-1",
+			VolumeID: "vol-1",
+			TeamID:   "team-1",
+		}},
+	}
+	server := &Server{
+		logger:            logrus.New(),
+		repo:              repo,
+		snapshotMgr:       snapshotMgr,
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: newTestStorageOperationQuota(),
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1?force=true", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.deleteSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusConflict)
+	}
+	if len(repo.deletedVolume) != 0 || len(snapshotMgr.cleanedVolumeObjects) != 0 {
+		t.Fatalf("delete progressed: deleted=%v cleaned=%v", repo.deletedVolume, snapshotMgr.cleanedVolumeObjects)
+	}
+}
+
 func TestDeleteSandboxVolumeCleansIdleDirectMountBeforeDelete(t *testing.T) {
 	repo := newFakeHTTPRepo()
 	repo.volumes["vol-1"] = &db.SandboxVolume{
@@ -475,12 +552,14 @@ func TestDeleteSandboxVolumeCleansIdleDirectMountBeforeDelete(t *testing.T) {
 	}
 	meteringWriter := &fakeHTTPMeteringRepository{}
 	server := &Server{
-		logger:       logrus.New(),
-		repo:         repo,
-		meteringRepo: meteringWriter,
-		regionID:     "aws-us-east-1",
-		snapshotMgr:  &fakeHTTPSnapshotManager{},
-		volMgr:       volMgr,
+		logger:            logrus.New(),
+		repo:              repo,
+		meteringRepo:      meteringWriter,
+		regionID:          "aws-us-east-1",
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		volMgr:            volMgr,
+		storageQuota:      newTestStorageQuota(),
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1", nil)
@@ -523,11 +602,12 @@ func TestDeleteSandboxVolumeReturnsConflictWhenDirectMountStillInflight(t *testi
 		},
 	}
 	server := &Server{
-		logger:      logrus.New(),
-		repo:        repo,
-		regionID:    "aws-us-east-1",
-		snapshotMgr: &fakeHTTPSnapshotManager{},
-		volMgr:      volMgr,
+		logger:            logrus.New(),
+		repo:              repo,
+		regionID:          "aws-us-east-1",
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		volMgr:            volMgr,
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1", nil)

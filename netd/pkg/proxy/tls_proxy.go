@@ -137,7 +137,7 @@ func (s *Server) proxyTLSStream(req *adapterRequest) error {
 		return err
 	}
 	defer upstream.Close()
-	return s.pipeWithReader(downstreamTLS, upstream, downstreamTLS, req.Compiled, req.Audit)
+	return pipeTerminatedProtocol(downstreamTLS, upstream, downstreamTLS)
 }
 
 func downstreamTLSNextProtos(req *adapterRequest) []string {
@@ -198,12 +198,13 @@ func (s *Server) dialUpstreamTLS(req *adapterRequest) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial upstream tls: %w", err)
 	}
-	conn := tls.Client(rawConn, cfg)
+	onWireConn := s.wrapUpstreamOnWireConn(req.Context, rawConn, req.Compiled, req.Audit)
+	conn := tls.Client(onWireConn, cfg)
 	if err := conn.Handshake(); err != nil {
-		_ = rawConn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("handshake upstream tls: %w", err)
 	}
-	return &countingConn{Conn: conn}, nil
+	return conn, nil
 }
 
 func (s *Server) proxyHTTPFromConn(downstream net.Conn, req *adapterRequest, upstream net.Conn) error {
@@ -250,15 +251,10 @@ func (s *Server) proxyHTTPFromConn(downstream net.Conn, req *adapterRequest, ups
 	}); err != nil {
 		return err
 	}
-	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(upstream, req.Compiled, bandwidthEgress)}
-	if err := httpReq.Write(upstreamCounter); err != nil {
-		s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
+	if err := httpReq.Write(upstream); err != nil {
 		return fmt.Errorf("write upstream http request: %w", err)
 	}
-	s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
-	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(downstream, req.Compiled, bandwidthIngress)}
-	n, err := io.Copy(clientCounter, upstream)
-	s.recordIngressBytes(req.Compiled, n, req.Audit)
+	_, err = io.Copy(downstream, upstream)
 	return normalizeRelayError(err)
 }
 

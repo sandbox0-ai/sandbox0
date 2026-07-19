@@ -258,7 +258,12 @@ func (s *SandboxService) DeleteTemplateBuildCapture(ctx context.Context, snapsho
 	if err != nil {
 		return err
 	}
-	err = store.DeleteRootFSSnapshot(ctx, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID))
+	err = s.deleteRootFSSnapshotWithQuota(
+		ctx,
+		store,
+		strings.TrimSpace(snapshotID),
+		strings.TrimSpace(teamID),
+	)
 	if errors.Is(err, ErrRootFSSnapshotNotFound) {
 		return nil
 	}

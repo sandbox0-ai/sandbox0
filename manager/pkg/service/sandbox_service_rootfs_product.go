@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,6 +37,15 @@ type sandboxRootFSSnapshotCreator interface {
 	CreateRootFSSnapshot(ctx context.Context, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error)
 }
 
+type sandboxRootFSSnapshotQuotaDeleter interface {
+	DeleteRootFSSnapshotWithQuota(
+		ctx context.Context,
+		snapshotID string,
+		teamID string,
+		quotaStore teamquota.CapacityTxStore,
+	) error
+}
+
 type sandboxRootFSRestorer interface {
 	RestoreRootFSFromSnapshot(ctx context.Context, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error)
 }
@@ -44,6 +56,10 @@ type sandboxRootFSForker interface {
 
 type sandboxRecordUpserter interface {
 	UpsertSandbox(ctx context.Context, record *SandboxRecord) error
+}
+
+type sandboxTeamQuotaTxProvider interface {
+	TeamQuotaTx() pgx.Tx
 }
 
 type CreateSandboxRootFSSnapshotRequest struct {
@@ -228,7 +244,35 @@ func (s *SandboxService) DeleteSandboxRootFSSnapshot(ctx context.Context, snapsh
 	if err != nil {
 		return err
 	}
-	return store.DeleteRootFSSnapshot(ctx, snapshotID, strings.TrimSpace(teamID))
+	return s.deleteRootFSSnapshotWithQuota(ctx, store, snapshotID, strings.TrimSpace(teamID))
+}
+
+func (s *SandboxService) deleteRootFSSnapshotWithQuota(
+	ctx context.Context,
+	store SandboxRootFSProductStore,
+	snapshotID string,
+	teamID string,
+) error {
+	if s == nil || s.teamQuotaStore == nil {
+		return fmt.Errorf("%w: capacity store is not configured for rootfs snapshot deletion", ErrTeamQuotaUnavailable)
+	}
+	quotaStore, ok := s.teamQuotaStore.(teamquota.CapacityTxStore)
+	if !ok || quotaStore == nil {
+		return fmt.Errorf("%w: transactional capacity store is required for rootfs snapshot deletion", ErrTeamQuotaUnavailable)
+	}
+	deleter, ok := store.(sandboxRootFSSnapshotQuotaDeleter)
+	if !ok || deleter == nil {
+		return fmt.Errorf("%w: rootfs snapshot store cannot coordinate quota deletion", ErrTeamQuotaUnavailable)
+	}
+	if err := deleter.DeleteRootFSSnapshotWithQuota(
+		ctx,
+		strings.TrimSpace(snapshotID),
+		strings.TrimSpace(teamID),
+		quotaStore,
+	); err != nil {
+		return classifyTeamQuotaAdmissionError(err)
+	}
+	return nil
 }
 
 func (s *SandboxService) RestoreSandboxRootFS(ctx context.Context, sandboxID, teamID string, req *RestoreSandboxRootFSRequest) (*RestoreSandboxRootFSResponse, error) {
@@ -558,6 +602,13 @@ func (s *SandboxService) prepareRunningRootFSSourceCheckpoint(ctx context.Contex
 }
 
 func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store SandboxRootFSProductStore, sandboxID, teamID, snapshotID, name, description string, expiresAt time.Time, checkpoint *rootFSSourceCheckpoint) (*RootFSSnapshot, error) {
+	if s == nil || s.teamQuotaStore == nil {
+		return nil, fmt.Errorf("%w: capacity store is not configured for rootfs snapshot", ErrTeamQuotaUnavailable)
+	}
+	quotaStore, ok := s.teamQuotaStore.(teamquota.CapacityTxStore)
+	if !ok || quotaStore == nil {
+		return nil, fmt.Errorf("%w: transactional capacity store is required for rootfs snapshot", ErrTeamQuotaUnavailable)
+	}
 	var snapshot *RootFSSnapshot
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		if err := validateRootFSSourceSandboxRecord(record, sandboxID, teamID, s.now()); err != nil {
@@ -586,6 +637,19 @@ func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store Sandbox
 			if record.Status != SandboxStatusPaused {
 				return errSandboxLifecycleRootFSCheckpointing
 			}
+		}
+		quotaTxProvider, ok := tx.(sandboxTeamQuotaTxProvider)
+		if !ok || quotaTxProvider == nil {
+			return fmt.Errorf("%w: sandbox transaction cannot coordinate rootfs snapshot quota", ErrTeamQuotaUnavailable)
+		}
+		if err := reserveRootFSSnapshotQuotaTx(
+			lockCtx,
+			quotaTxProvider.TeamQuotaTx(),
+			quotaStore,
+			teamID,
+			snapshotID,
+		); err != nil {
+			return classifyTeamQuotaAdmissionError(err)
 		}
 
 		creator := sandboxRootFSSnapshotCreator(store)
@@ -624,9 +688,20 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 	if target == nil {
 		return fmt.Errorf("target sandbox record is required")
 	}
+	if s == nil || s.teamQuotaStore == nil {
+		return fmt.Errorf("%w: capacity store is not configured for sandbox fork", ErrTeamQuotaUnavailable)
+	}
+	quotaStore, ok := s.teamQuotaStore.(teamquota.CapacityTxStore)
+	if !ok || quotaStore == nil {
+		return fmt.Errorf("%w: transactional capacity store is required for sandbox fork", ErrTeamQuotaUnavailable)
+	}
 	err := s.sandboxStore.WithSandboxLock(ctx, sourceSandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
 		if err := validateRootFSSourceSandboxRecord(record, sourceSandboxID, teamID, s.now()); err != nil {
 			return err
+		}
+		quotaTxProvider, ok := tx.(sandboxTeamQuotaTxProvider)
+		if !ok || quotaTxProvider == nil {
+			return fmt.Errorf("%w: sandbox transaction cannot coordinate fork quota", ErrTeamQuotaUnavailable)
 		}
 		activeTxn, err := tx.GetActiveLifecycleTxn(lockCtx, sourceSandboxID)
 		if err != nil {
@@ -653,6 +728,24 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 			}
 		}
 
+		owner := teamquota.Owner{
+			TeamID:    strings.TrimSpace(target.TeamID),
+			Kind:      "sandbox",
+			ID:        strings.TrimSpace(target.ID),
+			ClusterID: naming.ClusterIDOrDefault(&target.ClusterID),
+		}
+		operation := teamquota.Operation{
+			ID:   "fork_identity:" + owner.ID,
+			Kind: "fork_identity",
+		}
+		if _, err := quotaStore.ReserveTargetTx(lockCtx, quotaTxProvider.TeamQuotaTx(), teamquota.ReserveRequest{
+			Owner:     owner,
+			Operation: operation,
+			Target:    pausedSandboxTeamQuotaTarget(),
+		}); err != nil {
+			return classifyTeamQuotaAdmissionError(err)
+		}
+
 		upserter := sandboxRecordUpserter(s.sandboxStore)
 		txBacked := false
 		if txUpserter, ok := tx.(sandboxRecordUpserter); ok {
@@ -675,11 +768,32 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 			if txBacked {
 				return err
 			}
-			if cleanupErr := s.sandboxStore.MarkSandboxDeleted(lockCtx, target.ID, s.now().UTC()); cleanupErr != nil && s.logger != nil {
-				s.logger.Warn("Failed to clean up sandbox record after rootfs fork failure",
-					zap.String("sandboxID", target.ID),
-					zap.Error(cleanupErr),
-				)
+			completedAt := s.now().UTC()
+			if cleanupErr := s.sandboxStore.MarkSandboxDeleted(lockCtx, target.ID, completedAt); cleanupErr != nil {
+				if s.logger != nil {
+					s.logger.Warn("Failed to mark sandbox deleted after rootfs fork failure",
+						zap.String("sandboxID", target.ID),
+						zap.Error(cleanupErr),
+					)
+				}
+				return errors.Join(err, cleanupErr)
+			}
+			info := sandboxLifecycleInfoFromRecord(target)
+			if cleanupErr := s.cleanupDeletedSandbox(lockCtx, info, false); cleanupErr != nil {
+				if s.logger != nil {
+					s.logger.Warn("Failed to clean up sandbox after rootfs fork failure",
+						zap.String("sandboxID", target.ID),
+						zap.Error(cleanupErr),
+					)
+				}
+				return errors.Join(err, cleanupErr)
+			}
+			if cleanupErr := s.sandboxStore.MarkSandboxCleanupCompleted(
+				lockCtx,
+				target.ID,
+				completedAt,
+			); cleanupErr != nil {
+				return errors.Join(err, cleanupErr)
 			}
 			return err
 		}
@@ -691,6 +805,13 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 			if err := tx.CommitLifecycleTxn(lockCtx, checkpoint.txn.ID, preparedHead); err != nil {
 				return err
 			}
+		}
+		if err := quotaStore.CommitTx(
+			lockCtx,
+			quotaTxProvider.TeamQuotaTx(),
+			teamquota.Ref(owner, operation),
+		); err != nil {
+			return classifyTeamQuotaAdmissionError(err)
 		}
 		return nil
 	})

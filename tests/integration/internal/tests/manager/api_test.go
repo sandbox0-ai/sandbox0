@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
@@ -29,6 +30,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	teamquotatest "github.com/sandbox0-ai/sandbox0/pkg/teamquota/testutil"
+	"github.com/sandbox0-ai/sandbox0/pkg/tokenbucket"
 	"github.com/sandbox0-ai/sandbox0/tests/integration/internal/utils"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -160,6 +164,8 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		logger,
 		managerMetrics,
 	)
+	sandboxService.SetTeamQuotaStore(teamquotatest.NewPermissiveCapacityStore())
+	sandboxService.SetTeamQuotaRateLimiter(permissiveManagerTeamQuotaRateLimiter{})
 	if opts.procdClient != nil {
 		sandboxService.SetProcdClient(opts.procdClient)
 	}
@@ -235,6 +241,17 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		podIndexer: podIndexer,
 		k8sClient:  k8sClient,
 	}
+}
+
+type permissiveManagerTeamQuotaRateLimiter struct{}
+
+func (permissiveManagerTeamQuotaRateLimiter) Take(
+	context.Context,
+	string,
+	teamquota.Key,
+	int64,
+) (tokenbucket.Decision, error) {
+	return tokenbucket.Decision{Allowed: true}, nil
 }
 
 func createInternalKeys() (internalauth.PrivateKeyType, internalauth.PublicKeyType, error) {
@@ -722,6 +739,13 @@ func addIdleReadyPodForTemplate(t *testing.T, env *managerTestEnv, template *v1a
 	t.Helper()
 	templateHash, err := controller.TemplateSpecHash(template)
 	utils.RequireNoError(t, err, "compute template spec hash")
+	// These HTTP integration tests use the fake Kubernetes client, which does
+	// not implement the asynchronous pod resize status handshake. Keep the
+	// fixture at claimed resources so the test remains focused on claim API
+	// orchestration rather than the separately tested resize controller.
+	podSpec := v1alpha1.BuildPodSpec(template)
+	podSpec.NodeName = nodeName
+	podSpec.ReadinessGates = nil
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -736,10 +760,17 @@ func addIdleReadyPodForTemplate(t *testing.T, env *managerTestEnv, template *v1a
 			},
 			ResourceVersion: "1",
 		},
-		Spec: corev1.PodSpec{NodeName: nodeName},
+		Spec: podSpec,
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			PodIP: podIP,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "procd",
+				Ready: true,
+				State: corev1.ContainerState{
+					Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()},
+				},
+			}},
 			Conditions: []corev1.PodCondition{{
 				Type:   corev1.PodReady,
 				Status: corev1.ConditionTrue,
@@ -1000,6 +1031,28 @@ func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.C
 	return nil
 }
 
+func (s *memorySandboxStoreForManagerIntegration) MarkSandboxCleanupCompleted(
+	_ context.Context,
+	sandboxID string,
+	completedAt time.Time,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.records[sandboxID]
+	if record == nil {
+		return service.ErrSandboxRecordNotFound
+	}
+	if record.Status != service.SandboxStatusDeleted || record.DeletedAt.IsZero() {
+		return nil
+	}
+	if record.CleanupCompletedAt.IsZero() {
+		record.CleanupCompletedAt = completedAt
+	}
+	record.CurrentPodName = ""
+	record.CurrentPodNamespace = ""
+	return nil
+}
+
 func (s *memorySandboxStoreForManagerIntegration) SaveRootFSState(_ context.Context, state *service.SandboxRootFSState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1081,6 +1134,15 @@ func (s *memorySandboxStoreForManagerIntegration) DeleteRootFSSnapshot(_ context
 	}
 	delete(s.rootFSSnapshots, snapshotID)
 	return nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) DeleteRootFSSnapshotWithQuota(
+	ctx context.Context,
+	snapshotID string,
+	teamID string,
+	_ teamquota.CapacityTxStore,
+) error {
+	return s.DeleteRootFSSnapshot(ctx, snapshotID, teamID)
 }
 
 func (s *memorySandboxStoreForManagerIntegration) ForkRootFSFilesystem(_ context.Context, req *service.ForkRootFSFilesystemRequest) (*service.RootFSFilesystem, error) {
@@ -1166,6 +1228,10 @@ func (s *memorySandboxStoreForManagerIntegration) WithSandboxLock(ctx context.Co
 
 type memorySandboxStoreTxForManagerIntegration struct {
 	store *memorySandboxStoreForManagerIntegration
+}
+
+func (memorySandboxStoreTxForManagerIntegration) TeamQuotaTx() pgx.Tx {
+	return nil
 }
 
 func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata service.SandboxRuntimeMetadata) error {

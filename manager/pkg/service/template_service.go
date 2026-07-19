@@ -13,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -98,6 +99,12 @@ func (s *TemplateService) RegistryHosts() []string {
 
 // CreateTemplate creates a new template
 func (s *TemplateService) CreateTemplate(ctx context.Context, template *v1alpha1.SandboxTemplate) (*v1alpha1.SandboxTemplate, error) {
+	if template == nil {
+		return nil, fmt.Errorf("template is required")
+	}
+	if err := templatepkg.ValidateTemplateSpecSize(&template.Spec); err != nil {
+		return nil, err
+	}
 	s.logger.Info("Creating template", zap.String("name", template.Name))
 
 	namespace, err := s.resolveTemplateNamespace(template)
@@ -161,6 +168,12 @@ func (s *TemplateService) ListTemplates(ctx context.Context) ([]*v1alpha1.Sandbo
 
 // UpdateTemplate updates an existing template
 func (s *TemplateService) UpdateTemplate(ctx context.Context, template *v1alpha1.SandboxTemplate) (*v1alpha1.SandboxTemplate, error) {
+	if template == nil {
+		return nil, fmt.Errorf("template is required")
+	}
+	if err := templatepkg.ValidateTemplateSpecSize(&template.Spec); err != nil {
+		return nil, err
+	}
 	s.logger.Info("Updating template", zap.String("name", template.Name))
 
 	// Helper to get current version for optimistic locking

@@ -36,6 +36,9 @@ type BuildNetworkPolicyResult struct {
 // BuildNetworkPolicyAnnotation builds the network policy annotation JSON.
 func (s *NetworkPolicyService) BuildNetworkPolicyAnnotation(req *BuildNetworkPolicyRequest) (string, error) {
 	result := s.BuildNetworkPolicyState(req)
+	if err := ValidateCompiledNetworkPolicySize(result.PolicySpec); err != nil {
+		return "", err
+	}
 	return v1alpha1.NetworkPolicyToAnnotation(result.PolicySpec)
 }
 

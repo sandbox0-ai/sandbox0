@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -18,6 +19,20 @@ import (
 
 const exposureRouteAuthenticatedKey = "sandbox0_exposure_route_authenticated"
 const exposureAuditPanickedKey = "sandbox0_exposure_audit_panicked"
+
+var sandboxServiceAbuseGuardDecisions = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "sandbox0",
+		Subsystem: "cluster_gateway",
+		Name:      "sandbox_service_abuse_guard_decisions_total",
+		Help:      "Sandbox public-service abuse-guard decisions; this guard is independent from Team Quota.",
+	},
+	[]string{"outcome"},
+)
+
+func init() {
+	prometheus.MustRegister(sandboxServiceAbuseGuardDecisions)
+}
 
 type sandboxServiceMatch struct {
 	service       *mgr.SandboxAppService
@@ -99,20 +114,26 @@ func (s *Server) enforceSandboxServiceRoute(c *gin.Context, sandboxID, teamID st
 	if !s.authorizeSandboxServiceRoute(c, route) {
 		return false
 	}
-	allowed, err := s.allowSandboxServiceRate(c, sandboxID, teamID, route)
+	allowed, err := s.admitSandboxServiceRequest(c, sandboxID, teamID, route)
 	if err != nil {
-		s.logger.Warn("Sandbox service rate limiter failed",
+		sandboxServiceAbuseGuardDecisions.WithLabelValues("error").Inc()
+		s.logger.Warn("Sandbox service abuse guard failed",
 			zap.String("sandbox_id", sandboxID),
 			zap.String("team_id", teamID),
 			zap.String("route_id", route.ID),
 			zap.Error(err),
 		)
-		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "rate limiter unavailable")
+		c.Header("Retry-After", "1")
+		spec.JSONError(c, nethttp.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox service abuse guard unavailable")
 		return false
 	}
 	if !allowed {
-		spec.JSONError(c, nethttp.StatusTooManyRequests, spec.CodeUnavailable, "rate limit exceeded")
+		sandboxServiceAbuseGuardDecisions.WithLabelValues("limited").Inc()
+		spec.JSONError(c, nethttp.StatusTooManyRequests, spec.CodeRateLimited, "rate limit exceeded")
 		return false
+	}
+	if route.RateLimit != nil {
+		sandboxServiceAbuseGuardDecisions.WithLabelValues("allowed").Inc()
 	}
 	if route.RewritePrefix != nil {
 		rewriteSandboxServicePath(c, route.PathPrefix, *route.RewritePrefix)
@@ -240,12 +261,12 @@ func sha256HexMatches(value, expectedHex string) bool {
 	return subtle.ConstantTimeCompare(sum[:], expected) == 1
 }
 
-func (s *Server) allowSandboxServiceRate(c *gin.Context, sandboxID, teamID string, route *mgr.SandboxAppServiceRoute) (bool, error) {
+func (s *Server) admitSandboxServiceRequest(c *gin.Context, sandboxID, teamID string, route *mgr.SandboxAppServiceRoute) (bool, error) {
 	if route.RateLimit == nil {
 		return true, nil
 	}
-	key := "sandbox-service:team:" + teamID + ":sandbox:" + sandboxID + ":route:" + route.ID
-	decision, err := s.sandboxServiceLimiter.Allow(c.Request.Context(), key, ratelimit.Limit{
+	key := "sandbox-service-abuse-guard:v1:team:" + teamID + ":sandbox:" + sandboxID + ":route:" + route.ID
+	decision, err := s.sandboxServiceAbuseGuard.Allow(c.Request.Context(), key, ratelimit.Limit{
 		RPS:   route.RateLimit.RPS,
 		Burst: route.RateLimit.Burst,
 	})

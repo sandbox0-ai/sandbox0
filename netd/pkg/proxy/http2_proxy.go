@@ -10,58 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 
-	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 )
-
-type countingTLSConn struct {
-	*tls.Conn
-	read           int64
-	written        int64
-	limiter        *bandwidthLimiter
-	compiled       *policy.CompiledPolicy
-	readDirection  bandwidthDirection
-	writeDirection bandwidthDirection
-}
-
-func (c *countingTLSConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
-	if n > 0 && c.limiter != nil {
-		if waitErr := c.limiter.wait(c.compiled, c.readDirection, n); waitErr != nil && err == nil {
-			err = waitErr
-		}
-	}
-	atomic.AddInt64(&c.read, int64(n))
-	return n, err
-}
-
-func (c *countingTLSConn) Write(p []byte) (int, error) {
-	if len(p) > 0 && c.limiter != nil {
-		if err := c.limiter.wait(c.compiled, c.writeDirection, len(p)); err != nil {
-			return 0, err
-		}
-	}
-	n, err := c.Conn.Write(p)
-	atomic.AddInt64(&c.written, int64(n))
-	return n, err
-}
-
-func (c *countingTLSConn) ReadBytes() int64 {
-	if c == nil {
-		return 0
-	}
-	return atomic.LoadInt64(&c.read)
-}
-
-func (c *countingTLSConn) WrittenBytes() int64 {
-	if c == nil {
-		return 0
-	}
-	return atomic.LoadInt64(&c.written)
-}
 
 type flushWriter struct {
 	http.ResponseWriter
@@ -95,16 +47,8 @@ func (s *Server) proxyHTTP2FromConn(downstream *tls.Conn, req *adapterRequest) e
 		return fmt.Errorf("http2 proxy requires downstream connection and request")
 	}
 
-	downstreamCounter := &countingTLSConn{
-		Conn:           downstream,
-		limiter:        s.bandwidthLimiter,
-		compiled:       req.Compiled,
-		readDirection:  bandwidthEgress,
-		writeDirection: bandwidthIngress,
-	}
-	var upstreamCounter *countingConn
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := s.handleHTTP2ProxyRequest(w, r, req, &upstreamCounter); err != nil {
+		if err := s.handleHTTP2ProxyRequest(w, r, req); err != nil {
 			if errors.Is(err, errProtocolPolicyDenied) {
 				return
 			}
@@ -118,26 +62,25 @@ func (s *Server) proxyHTTP2FromConn(downstream *tls.Conn, req *adapterRequest) e
 	})
 
 	server := &http2.Server{}
-	server.ServeConn(downstreamCounter, &http2.ServeConnOpts{
-		Context: context.Background(),
+	serveCtx := req.Context
+	if serveCtx == nil {
+		serveCtx = context.TODO()
+	}
+	server.ServeConn(downstream, &http2.ServeConnOpts{
+		Context: serveCtx,
 		Handler: handler,
 	})
-
-	if upstreamCounter != nil {
-		s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
-		s.recordIngressBytes(req.Compiled, upstreamCounter.ReadBytes(), req.Audit)
-	}
 	return nil
 }
 
-func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *http.Request, req *adapterRequest, upstreamCounter **countingConn) error {
+func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *http.Request, req *adapterRequest) error {
 	if s == nil {
 		return fmt.Errorf("server is nil")
 	}
 	if w == nil || downstreamReq == nil || req == nil {
 		return fmt.Errorf("http2 proxy request is incomplete")
 	}
-	transport := s.newHTTP2Transport(req, upstreamCounter)
+	transport := s.newHTTP2Transport(req)
 	defer transport.CloseIdleConnections()
 
 	requestScoped := *req
@@ -200,7 +143,7 @@ func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *h
 	return nil
 }
 
-func (s *Server) newHTTP2Transport(req *adapterRequest, upstreamCounter **countingConn) *http2.Transport {
+func (s *Server) newHTTP2Transport(req *adapterRequest) *http2.Transport {
 	cfg := cloneTLSConfig(s.upstreamTLSConfig)
 	if cfg.ServerName == "" {
 		cfg.ServerName = req.Host
@@ -216,22 +159,13 @@ func (s *Server) newHTTP2Transport(req *adapterRequest, upstreamCounter **counti
 			if err != nil {
 				return nil, fmt.Errorf("dial upstream http2 tls: %w", err)
 			}
-			conn := tls.Client(rawConn, cfg)
+			onWireConn := s.wrapUpstreamOnWireConn(ctx, rawConn, req.Compiled, req.Audit)
+			conn := tls.Client(onWireConn, cfg)
 			if err := conn.HandshakeContext(ctx); err != nil {
-				_ = rawConn.Close()
+				_ = conn.Close()
 				return nil, fmt.Errorf("handshake upstream http2 tls: %w", err)
 			}
-			wrapped := &countingConn{
-				Conn:           conn,
-				limiter:        s.bandwidthLimiter,
-				compiled:       req.Compiled,
-				readDirection:  bandwidthIngress,
-				writeDirection: bandwidthEgress,
-			}
-			if upstreamCounter != nil && *upstreamCounter == nil {
-				*upstreamCounter = wrapped
-			}
-			return wrapped, nil
+			return conn, nil
 		},
 	}
 }

@@ -51,6 +51,13 @@ func (s *Server) getCredentialSource(c *gin.Context) {
 }
 
 func (s *Server) createCredentialSource(c *gin.Context) {
+	if !limitJSONRequestBody(
+		c,
+		"credential source request body",
+		egressauth.MaxCredentialSourceRequestBytes,
+	) {
+		return
+	}
 	var req egressauth.CredentialSourceWriteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
@@ -69,6 +76,15 @@ func (s *Server) createCredentialSource(c *gin.Context) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "credential source already exists")
 			return
 		}
+		if writeCredentialSourceConflict(c, err) {
+			return
+		}
+		if writeTeamQuotaMutationError(c, err) {
+			return
+		}
+		if writeResourceTooLarge(c, err, "credential source request") {
+			return
+		}
 		s.logger.Error("Failed to create credential source", zap.String("teamID", claims.TeamID), zap.String("name", req.Name), zap.Error(err))
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("failed to create credential source: %v", err))
 		return
@@ -77,6 +93,13 @@ func (s *Server) createCredentialSource(c *gin.Context) {
 }
 
 func (s *Server) updateCredentialSource(c *gin.Context) {
+	if !limitJSONRequestBody(
+		c,
+		"credential source request body",
+		egressauth.MaxCredentialSourceRequestBytes,
+	) {
+		return
+	}
 	var req egressauth.CredentialSourceWriteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
@@ -102,6 +125,15 @@ func (s *Server) updateCredentialSource(c *gin.Context) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "credential source not found")
 			return
 		}
+		if writeCredentialSourceConflict(c, err) {
+			return
+		}
+		if writeTeamQuotaMutationError(c, err) {
+			return
+		}
+		if writeResourceTooLarge(c, err, "credential source request") {
+			return
+		}
 		s.logger.Error("Failed to update credential source", zap.String("teamID", claims.TeamID), zap.String("name", req.Name), zap.Error(err))
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("failed to update credential source: %v", err))
 		return
@@ -123,8 +155,26 @@ func (s *Server) deleteCredentialSource(c *gin.Context) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "credential source is still referenced by sandbox bindings")
 			return
 		}
+		if writeCredentialSourceConflict(c, err) {
+			return
+		}
+		if writeTeamQuotaMutationError(c, err) {
+			return
+		}
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to delete credential source: %v", err))
 		return
 	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"deleted": true})
+}
+
+func writeCredentialSourceConflict(c *gin.Context, err error) bool {
+	if !errors.Is(err, egressauth.ErrCredentialSourceResolverKindImmutable) &&
+		!errors.Is(err, egressauth.ErrCredentialSourceStorageKindImmutable) &&
+		!errors.Is(err, egressauth.ErrCredentialSourceManagementModeImmutable) &&
+		!errors.Is(err, egressauth.ErrCredentialSourceLifecycleConflict) &&
+		!errors.Is(err, egressauth.ErrCredentialSourceUnavailable) {
+		return false
+	}
+	spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+	return true
 }

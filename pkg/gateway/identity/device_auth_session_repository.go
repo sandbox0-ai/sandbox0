@@ -11,8 +11,76 @@ import (
 
 // CreateDeviceAuthSession persists a pending device authorization session.
 func (r *Repository) CreateDeviceAuthSession(ctx context.Context, session *DeviceAuthSession) error {
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO device_auth_sessions (
+	if err := validateIdentityFieldSize(
+		"device_code",
+		session.DeviceCode,
+		MaxIdentityDeviceCodeBytes,
+	); err != nil {
+		return err
+	}
+	if err := validateIdentityFieldSize(
+		"verification_uri",
+		session.VerificationURI,
+		MaxIdentityVerificationURIBytes,
+	); err != nil {
+		return err
+	}
+	if err := validateIdentityFieldSize(
+		"verification_uri_complete",
+		session.VerificationURIComplete,
+		MaxIdentityVerificationURIBytes,
+	); err != nil {
+		return err
+	}
+	if r.identityResourceGuard == nil {
+		return insertDeviceAuthSession(ctx, r.pool, session)
+	}
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin create device auth session: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockIdentityScopesTx(ctx, tx, identityDeviceSessionsScope); err != nil {
+		return err
+	}
+	var active int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM device_auth_sessions
+		WHERE consumed_at IS NULL
+		  AND expires_at > NOW()
+	`).Scan(&active); err != nil {
+		return fmt.Errorf("count active device auth sessions: %w", err)
+	}
+	if active >= r.identityResourceGuard.MaxActiveDeviceAuthSessions {
+		return &IdentityResourceLimitExceededError{
+			Scope:    "platform",
+			ScopeID:  "identity",
+			Resource: IdentityLimitResourceDeviceSessions,
+			Limit:    r.identityResourceGuard.MaxActiveDeviceAuthSessions,
+		}
+	}
+	if err := insertDeviceAuthSession(ctx, tx, session); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit create device auth session: %w", err)
+	}
+	return nil
+}
+
+type deviceAuthSessionInsertQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func insertDeviceAuthSession(
+	ctx context.Context,
+	q deviceAuthSessionInsertQuerier,
+	session *DeviceAuthSession,
+) error {
+	err := q.QueryRow(ctx, `
+			INSERT INTO device_auth_sessions (
 			provider,
 			device_code,
 			user_code,
@@ -103,10 +171,30 @@ func (r *Repository) MarkDeviceAuthSessionConsumed(ctx context.Context, id strin
 
 // CleanupExpiredDeviceAuthSessions removes expired or consumed device auth sessions.
 func (r *Repository) CleanupExpiredDeviceAuthSessions(ctx context.Context) (int64, error) {
+	return r.CleanupExpiredDeviceAuthSessionsBatch(ctx, 1_000)
+}
+
+// CleanupExpiredDeviceAuthSessionsBatch deletes one multi-replica-safe batch.
+func (r *Repository) CleanupExpiredDeviceAuthSessionsBatch(
+	ctx context.Context,
+	batchSize int,
+) (int64, error) {
+	if batchSize <= 0 {
+		batchSize = 1_000
+	}
 	result, err := r.pool.Exec(ctx, `
-		DELETE FROM device_auth_sessions
-		WHERE expires_at < NOW() OR consumed_at IS NOT NULL
-	`)
+		WITH doomed AS (
+			SELECT id
+			FROM device_auth_sessions
+			WHERE expires_at <= NOW() OR consumed_at IS NOT NULL
+			ORDER BY created_at, id
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		DELETE FROM device_auth_sessions session
+		USING doomed
+		WHERE session.id = doomed.id
+	`, batchSize)
 	if err != nil {
 		return 0, fmt.Errorf("cleanup device auth sessions: %w", err)
 	}

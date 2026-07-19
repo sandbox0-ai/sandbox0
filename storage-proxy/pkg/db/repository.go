@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 )
 
 var (
@@ -37,6 +39,7 @@ type CoordinatorRepository interface {
 	CreateFlushResponse(ctx context.Context, resp *FlushResponse) error
 	CountCompletedFlushes(ctx context.Context, coordID string) (int, error)
 	GetFlushResponses(ctx context.Context, coordID string) ([]*FlushResponse, error)
+	DeleteExpiredCoordinations(ctx context.Context, retention time.Duration) (int64, error)
 }
 
 type mountOptionsEnvelope struct {
@@ -149,11 +152,19 @@ func (r *Repository) WithTx(ctx context.Context, fn func(pgx.Tx) error) error {
 
 // CreateSandboxVolume creates a new sandbox volume record
 func (r *Repository) CreateSandboxVolume(ctx context.Context, volume *SandboxVolume) error {
-	return r.createSandboxVolume(ctx, r.pool, volume)
+	return r.WithTx(ctx, func(tx pgx.Tx) error {
+		return r.CreateSandboxVolumeTx(ctx, tx, volume)
+	})
 }
 
 // CreateSandboxVolumeTx creates a new sandbox volume record within a transaction.
 func (r *Repository) CreateSandboxVolumeTx(ctx context.Context, tx pgx.Tx, volume *SandboxVolume) error {
+	if volume == nil {
+		return fmt.Errorf("sandbox volume is required")
+	}
+	if err := teamquota.AdmitTeamMutationTx(ctx, tx, volume.TeamID); err != nil {
+		return err
+	}
 	return r.createSandboxVolume(ctx, tx, volume)
 }
 
@@ -268,9 +279,24 @@ func (r *Repository) UpdateSandboxVolume(ctx context.Context, volume *SandboxVol
 	return nil
 }
 
-// ListSandboxVolumesByTeam retrieves all volumes for a team
+// ListSandboxVolumes retrieves every catalog volume, including
+// manager-owned system volumes. It is used by startup reconciliation.
+func (r *Repository) ListSandboxVolumes(ctx context.Context) ([]*SandboxVolume, error) {
+	return r.listSandboxVolumes(ctx, `
+		SELECT
+				id, team_id, user_id,
+				source_volume_id,
+				default_posix_uid, default_posix_gid,
+				access_mode, backend, backend_config,
+				created_at, updated_at
+		FROM sandbox_volumes
+		ORDER BY created_at DESC
+	`)
+}
+
+// ListSandboxVolumesByTeam retrieves all public volumes for a team.
 func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string) ([]*SandboxVolume, error) {
-	rows, err := r.pool.Query(ctx, `
+	return r.listSandboxVolumes(ctx, `
 		SELECT
 				id, team_id, user_id,
 				source_volume_id,
@@ -285,6 +311,10 @@ func (r *Repository) ListSandboxVolumesByTeam(ctx context.Context, teamID string
 			)
 		ORDER BY created_at DESC
 	`, teamID)
+}
+
+func (r *Repository) listSandboxVolumes(ctx context.Context, query string, args ...any) ([]*SandboxVolume, error) {
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query sandbox volumes: %w", err)
 	}
@@ -381,18 +411,25 @@ func (r *Repository) deleteSandboxVolume(ctx context.Context, db DB, id string) 
 
 // CreateSandboxVolumeOwnerTx creates durable ownership metadata for a system volume.
 func (r *Repository) CreateSandboxVolumeOwnerTx(ctx context.Context, tx pgx.Tx, owner *SandboxVolumeOwner) error {
+	if owner == nil {
+		return fmt.Errorf("sandbox volume owner is required")
+	}
+	owner.TeamID = strings.TrimSpace(owner.TeamID)
+	if owner.TeamID == "" {
+		return fmt.Errorf("sandbox volume owner team id is required")
+	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO sandbox_volume_owners (
-			volume_id, owner_kind, owner_sandbox_id, owner_cluster_id, purpose,
+			volume_id, team_id, owner_kind, owner_sandbox_id, owner_cluster_id, purpose,
 			created_at, cleanup_requested_at, cleanup_reason,
 			last_cleanup_attempt_at, last_cleanup_error, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5,
-			$6, $7, $8,
-			$9, $10, $11
+			$1, $2, $3, $4, $5, $6,
+			$7, $8, $9,
+			$10, $11, $12
 		)
 	`,
-		owner.VolumeID, owner.OwnerKind, owner.OwnerSandboxID, owner.OwnerClusterID, owner.Purpose,
+		owner.VolumeID, owner.TeamID, owner.OwnerKind, owner.OwnerSandboxID, owner.OwnerClusterID, owner.Purpose,
 		owner.CreatedAt, owner.CleanupRequestedAt, owner.CleanupReason,
 		owner.LastCleanupAttemptAt, owner.LastCleanupError, owner.UpdatedAt,
 	)
@@ -407,13 +444,13 @@ func (r *Repository) GetSandboxVolumeOwner(ctx context.Context, volumeID string)
 	var owner SandboxVolumeOwner
 	err := r.pool.QueryRow(ctx, `
 		SELECT
-			volume_id, owner_kind, owner_sandbox_id, owner_cluster_id, purpose,
+			volume_id, team_id, owner_kind, owner_sandbox_id, owner_cluster_id, purpose,
 			created_at, cleanup_requested_at, cleanup_reason,
 			last_cleanup_attempt_at, last_cleanup_error, updated_at
 		FROM sandbox_volume_owners
 		WHERE volume_id = $1
 	`, volumeID).Scan(
-		&owner.VolumeID, &owner.OwnerKind, &owner.OwnerSandboxID, &owner.OwnerClusterID, &owner.Purpose,
+		&owner.VolumeID, &owner.TeamID, &owner.OwnerKind, &owner.OwnerSandboxID, &owner.OwnerClusterID, &owner.Purpose,
 		&owner.CreatedAt, &owner.CleanupRequestedAt, &owner.CleanupReason,
 		&owner.LastCleanupAttemptAt, &owner.LastCleanupError, &owner.UpdatedAt,
 	)
@@ -426,16 +463,28 @@ func (r *Repository) GetSandboxVolumeOwner(ctx context.Context, volumeID string)
 	return &owner, nil
 }
 
-// GetOwnedSandboxVolumeByOwner retrieves a live system volume for a sandbox and purpose.
-func (r *Repository) GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*OwnedSandboxVolume, error) {
+// GetOwnedSandboxVolumeByOwner retrieves a team's live system volume for a
+// sandbox and purpose.
+func (r *Repository) GetOwnedSandboxVolumeByOwner(
+	ctx context.Context,
+	teamID string,
+	clusterID string,
+	sandboxID string,
+	purpose string,
+) (*OwnedSandboxVolume, error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return nil, fmt.Errorf("team id is required")
+	}
 	rows, err := r.queryOwnedSandboxVolumes(ctx, `
-		WHERE o.owner_cluster_id = $1
-			AND o.owner_sandbox_id = $2
-			AND o.purpose = $3
-			AND o.cleanup_requested_at IS NULL
-		ORDER BY o.created_at DESC
-		LIMIT 1
-	`, clusterID, sandboxID, purpose)
+			WHERE o.owner_cluster_id = $1
+				AND o.owner_sandbox_id = $2
+				AND o.purpose = $3
+				AND o.team_id = $4
+				AND o.cleanup_requested_at IS NULL
+			ORDER BY o.created_at DESC
+			LIMIT 1
+	`, clusterID, sandboxID, purpose, teamID)
 	if err != nil {
 		return nil, err
 	}
@@ -485,16 +534,49 @@ func (r *Repository) ListOwnedSandboxVolumes(ctx context.Context, clusterID stri
 }
 
 // MarkOwnedSandboxVolumesForCleanup marks all live system volumes for a sandbox.
+// This unscoped form is reserved for system-token reconciliation.
 func (r *Repository) MarkOwnedSandboxVolumesForCleanup(ctx context.Context, clusterID, sandboxID, reason string) (int64, error) {
+	return r.markOwnedSandboxVolumesForCleanup(ctx, "", clusterID, sandboxID, reason)
+}
+
+// MarkTeamOwnedSandboxVolumesForCleanup marks only one team's live system
+// volumes for a sandbox.
+func (r *Repository) MarkTeamOwnedSandboxVolumesForCleanup(
+	ctx context.Context,
+	teamID string,
+	clusterID string,
+	sandboxID string,
+	reason string,
+) (int64, error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return 0, fmt.Errorf("team id is required")
+	}
+	return r.markOwnedSandboxVolumesForCleanup(ctx, teamID, clusterID, sandboxID, reason)
+}
+
+func (r *Repository) markOwnedSandboxVolumesForCleanup(
+	ctx context.Context,
+	teamID string,
+	clusterID string,
+	sandboxID string,
+	reason string,
+) (int64, error) {
+	teamFilter := ""
+	args := []any{clusterID, sandboxID, reason}
+	if teamID != "" {
+		teamFilter = " AND team_id = $4"
+		args = append(args, teamID)
+	}
 	cmdTag, err := r.pool.Exec(ctx, `
-		UPDATE sandbox_volume_owners
-		SET cleanup_requested_at = COALESCE(cleanup_requested_at, NOW()),
-			cleanup_reason = COALESCE(NULLIF($3, ''), cleanup_reason),
-			updated_at = NOW()
-		WHERE owner_cluster_id = $1
-			AND owner_sandbox_id = $2
-			AND cleanup_requested_at IS NULL
-	`, clusterID, sandboxID, reason)
+			UPDATE sandbox_volume_owners
+			SET cleanup_requested_at = COALESCE(cleanup_requested_at, NOW()),
+				cleanup_reason = COALESCE(NULLIF($3, ''), cleanup_reason),
+				updated_at = NOW()
+			WHERE owner_cluster_id = $1
+				AND owner_sandbox_id = $2
+				AND cleanup_requested_at IS NULL
+		`+teamFilter, args...)
 	if err != nil {
 		return 0, fmt.Errorf("mark owned sandbox volumes for cleanup: %w", err)
 	}
@@ -532,11 +614,11 @@ func (r *Repository) queryOwnedSandboxVolumes(ctx context.Context, suffix string
 				v.default_posix_uid, v.default_posix_gid,
 				v.access_mode, v.backend, v.backend_config,
 				v.created_at, v.updated_at,
-			o.volume_id, o.owner_kind, o.owner_sandbox_id, o.owner_cluster_id, o.purpose,
+			o.volume_id, o.team_id, o.owner_kind, o.owner_sandbox_id, o.owner_cluster_id, o.purpose,
 			o.created_at, o.cleanup_requested_at, o.cleanup_reason,
 			o.last_cleanup_attempt_at, o.last_cleanup_error, o.updated_at
 		FROM sandbox_volume_owners o
-		JOIN sandbox_volumes v ON v.id = o.volume_id
+		JOIN sandbox_volumes v ON v.id = o.volume_id AND v.team_id = o.team_id
 		`+suffix, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query owned sandbox volumes: %w", err)
@@ -552,7 +634,7 @@ func scanOwnedSandboxVolume(rows pgx.Rows) (*OwnedSandboxVolume, error) {
 		&item.Volume.DefaultPosixUID, &item.Volume.DefaultPosixGID,
 		&item.Volume.AccessMode, &item.Volume.Backend, &item.Volume.BackendConfig,
 		&item.Volume.CreatedAt, &item.Volume.UpdatedAt,
-		&item.Owner.VolumeID, &item.Owner.OwnerKind, &item.Owner.OwnerSandboxID, &item.Owner.OwnerClusterID, &item.Owner.Purpose,
+		&item.Owner.VolumeID, &item.Owner.TeamID, &item.Owner.OwnerKind, &item.Owner.OwnerSandboxID, &item.Owner.OwnerClusterID, &item.Owner.Purpose,
 		&item.Owner.CreatedAt, &item.Owner.CleanupRequestedAt, &item.Owner.CleanupReason,
 		&item.Owner.LastCleanupAttemptAt, &item.Owner.LastCleanupError, &item.Owner.UpdatedAt,
 	)
@@ -655,9 +737,23 @@ func (r *Repository) getSnapshot(ctx context.Context, db DB, id string, forUpdat
 	return &s, nil
 }
 
-// ListSnapshotsByVolume retrieves all snapshots for a volume
+// ListSnapshots retrieves every snapshot in the storage catalog. It is used by
+// startup reconciliation.
+func (r *Repository) ListSnapshots(ctx context.Context) ([]*Snapshot, error) {
+	return r.listSnapshots(ctx, `
+		SELECT
+			id, volume_id, team_id, user_id,
+			root_inode, source_inode,
+			name, description, size_bytes,
+			created_at, expires_at
+		FROM sandbox_volume_snapshots
+		ORDER BY created_at DESC
+	`)
+}
+
+// ListSnapshotsByVolume retrieves all snapshots for a volume.
 func (r *Repository) ListSnapshotsByVolume(ctx context.Context, volumeID string) ([]*Snapshot, error) {
-	rows, err := r.pool.Query(ctx, `
+	return r.listSnapshots(ctx, `
 		SELECT
 			id, volume_id, team_id, user_id,
 			root_inode, source_inode,
@@ -667,6 +763,10 @@ func (r *Repository) ListSnapshotsByVolume(ctx context.Context, volumeID string)
 		WHERE volume_id = $1
 		ORDER BY created_at DESC
 	`, volumeID)
+}
+
+func (r *Repository) listSnapshots(ctx context.Context, query string, args ...any) ([]*Snapshot, error) {
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query snapshots: %w", err)
 	}
@@ -1079,4 +1179,24 @@ func (r *Repository) GetFlushResponses(ctx context.Context, coordID string) ([]*
 	}
 
 	return responses, nil
+}
+
+// DeleteExpiredCoordinations removes coordination history only after its
+// deadline has been expired for the requested retention period. Flush
+// responses are deleted by their ON DELETE CASCADE foreign key.
+func (r *Repository) DeleteExpiredCoordinations(
+	ctx context.Context,
+	retention time.Duration,
+) (int64, error) {
+	if retention <= 0 {
+		return 0, fmt.Errorf("coordination retention must be positive")
+	}
+	cmdTag, err := r.pool.Exec(ctx, `
+		DELETE FROM snapshot_coordinations
+		WHERE expires_at < NOW() - ($1 * INTERVAL '1 millisecond')
+	`, retention.Milliseconds())
+	if err != nil {
+		return 0, fmt.Errorf("delete expired coordinations: %w", err)
+	}
+	return cmdTag.RowsAffected(), nil
 }

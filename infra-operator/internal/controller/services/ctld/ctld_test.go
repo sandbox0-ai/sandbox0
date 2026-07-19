@@ -26,6 +26,7 @@ import (
 	netdsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
@@ -688,6 +689,8 @@ func TestReconcileDoesNotMountInternalJWTKeyWhenRuntimeSamplesDisabled(t *testin
 	ds := reconcileCtldDaemonSet(t, newCtldTestInfra())
 
 	assertNoContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "internal-jwt-private-key")
+	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "internal-jwt-public-key", pkginternalauth.DefaultInternalJWTPublicKeyPath)
+	assertSecretVolume(t, ds.Spec.Template.Spec.Volumes, "internal-jwt-public-key")
 }
 
 func TestReconcileInjectsRuntimeSampleProducerConfigAndJWTKey(t *testing.T) {
@@ -717,6 +720,8 @@ func TestReconcileInjectsRuntimeSampleProducerConfigAndJWTKey(t *testing.T) {
 	ctldContainer := ds.Spec.Template.Spec.Containers[0]
 	assertContainerVolumeMount(t, ctldContainer.VolumeMounts, "internal-jwt-private-key", "/secrets/internal_jwt_private.key")
 	assertSecretVolume(t, ds.Spec.Template.Spec.Volumes, "internal-jwt-private-key")
+	assertContainerVolumeMount(t, ctldContainer.VolumeMounts, "internal-jwt-public-key", pkginternalauth.DefaultInternalJWTPublicKeyPath)
+	assertSecretVolume(t, ds.Spec.Template.Spec.Volumes, "internal-jwt-public-key")
 
 	configMapName := ""
 	for _, volume := range ds.Spec.Template.Spec.Volumes {

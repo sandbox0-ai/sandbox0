@@ -69,3 +69,20 @@ func TestMemoryLimiterCleanupRemovesIdleKeys(t *testing.T) {
 		t.Fatal("stale limiter was not removed")
 	}
 }
+
+func TestRetryAfterSecondsRoundsUp(t *testing.T) {
+	tests := []struct {
+		duration time.Duration
+		want     int
+	}{
+		{duration: 0, want: 1},
+		{duration: time.Millisecond, want: 1},
+		{duration: time.Second, want: 1},
+		{duration: 1100 * time.Millisecond, want: 2},
+	}
+	for _, test := range tests {
+		if got := RetryAfterSeconds(test.duration); got != test.want {
+			t.Fatalf("RetryAfterSeconds(%s) = %d, want %d", test.duration, got, test.want)
+		}
+	}
+}

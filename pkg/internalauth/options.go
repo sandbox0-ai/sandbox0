@@ -90,6 +90,10 @@ type GenerateOptions struct {
 	// Audit preserves the original authenticated principal and correlation IDs
 	// across trusted service hops. It does not grant authorization.
 	Audit *AuditContext
+
+	// QuotaAdmissionProof records quota keys already admitted by a
+	// trusted upstream hop. It is signed into the token and request-bound.
+	QuotaAdmissionProof *QuotaAdmissionProof
 }
 
 // ValidateOptions holds optional parameters for token validation.

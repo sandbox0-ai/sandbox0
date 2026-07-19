@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -363,6 +364,366 @@ func TestAuditDeliveryRejectsInvalidSignedEventsBeforeCustody(t *testing.T) {
 	if got := writer.snapshotEvents(); len(got) != 0 {
 		t.Fatalf("invalid audit events reached canonical writer: %#v", got)
 	}
+}
+
+func TestAuditDeliveryEnforcesPerTeamEntriesAndReleasesAfterRemoval(t *testing.T) {
+	limits := testAuditDeliveryLimits()
+	limits.maxEntries = 3
+	limits.maxTeamEntries = 1
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDeliveryWithLimits(t.TempDir(), writer, zap.NewNop(), nil, limits)
+	if err != nil {
+		t.Fatalf("newAuditDeliveryWithLimits() error = %v", err)
+	}
+
+	first := testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-1")
+	if err := delivery.EnqueueDurable(context.Background(), first); err != nil {
+		t.Fatalf("EnqueueDurable(first) error = %v", err)
+	}
+	sameTeam := testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-1")
+	if err := delivery.EnqueueDurable(context.Background(), sameTeam); !errors.Is(err, errAuditSpoolCapacity) {
+		t.Fatalf("EnqueueDurable(same team) error = %v, want capacity", err)
+	}
+	if got := writer.snapshotEvents(); len(got) != 0 {
+		t.Fatalf("capacity rejection bypassed to canonical writer: %#v", got)
+	}
+	otherTeam := testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-2")
+	if err := delivery.EnqueueDurable(context.Background(), otherTeam); err != nil {
+		t.Fatalf("EnqueueDurable(other team) error = %v", err)
+	}
+
+	delivery.mu.Lock()
+	err = delivery.removeLocked(first.EventID)
+	delivery.mu.Unlock()
+	if err != nil {
+		t.Fatalf("removeLocked(first) error = %v", err)
+	}
+	if err := delivery.EnqueueDurable(context.Background(), sameTeam); err != nil {
+		t.Fatalf("EnqueueDurable(same team after release) error = %v", err)
+	}
+}
+
+func TestAuditDeliveryEnforcesGlobalAndPerTeamBytes(t *testing.T) {
+	event := testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-1")
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	recordBytes := int64(len(payload))
+
+	t.Run("per team", func(t *testing.T) {
+		limits := testAuditDeliveryLimits()
+		limits.maxBytes = 3 * recordBytes
+		limits.maxTeamBytes = recordBytes
+		limits.maxRecordBytes = recordBytes
+		delivery, err := newAuditDeliveryWithLimits(
+			t.TempDir(),
+			&auditDeliveryWriter{},
+			zap.NewNop(),
+			nil,
+			limits,
+		)
+		if err != nil {
+			t.Fatalf("newAuditDeliveryWithLimits() error = %v", err)
+		}
+		if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
+			t.Fatalf("EnqueueDurable(first) error = %v", err)
+		}
+		if err := delivery.EnqueueDurable(
+			context.Background(),
+			testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-1"),
+		); !errors.Is(err, errAuditSpoolCapacity) {
+			t.Fatalf("EnqueueDurable(same team) error = %v, want capacity", err)
+		}
+		if err := delivery.EnqueueDurable(
+			context.Background(),
+			testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-2"),
+		); err != nil {
+			t.Fatalf("EnqueueDurable(other team) error = %v", err)
+		}
+	})
+
+	t.Run("global", func(t *testing.T) {
+		limits := testAuditDeliveryLimits()
+		limits.maxBytes = 2 * recordBytes
+		limits.maxTeamBytes = 2 * recordBytes
+		limits.maxRecordBytes = recordBytes
+		delivery, err := newAuditDeliveryWithLimits(
+			t.TempDir(),
+			&auditDeliveryWriter{},
+			zap.NewNop(),
+			nil,
+			limits,
+		)
+		if err != nil {
+			t.Fatalf("newAuditDeliveryWithLimits() error = %v", err)
+		}
+		for _, teamID := range []string{"team-1", "team-2"} {
+			if err := delivery.EnqueueDurable(
+				context.Background(),
+				testAuditDeliveryEventForTeam(t, uuid.NewString(), teamID),
+			); err != nil {
+				t.Fatalf("EnqueueDurable(%s) error = %v", teamID, err)
+			}
+		}
+		if err := delivery.EnqueueDurable(
+			context.Background(),
+			testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-3"),
+		); !errors.Is(err, errAuditSpoolCapacity) {
+			t.Fatalf("EnqueueDurable(over global bytes) error = %v, want capacity", err)
+		}
+	})
+}
+
+func TestAuditDeliveryConcurrentEnqueueHonorsExactGlobalEntryLimit(t *testing.T) {
+	limits := testAuditDeliveryLimits()
+	limits.maxEntries = 5
+	limits.maxTeamEntries = 5
+	delivery, err := newAuditDeliveryWithLimits(
+		t.TempDir(),
+		&auditDeliveryWriter{},
+		zap.NewNop(),
+		nil,
+		limits,
+	)
+	if err != nil {
+		t.Fatalf("newAuditDeliveryWithLimits() error = %v", err)
+	}
+
+	const attempts = 32
+	events := make([]sandboxobservability.Event, 0, attempts)
+	for range attempts {
+		events = append(events, testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-1"))
+	}
+	start := make(chan struct{})
+	results := make(chan error, attempts)
+	for _, event := range events {
+		event := event
+		go func() {
+			<-start
+			results <- delivery.EnqueueDurable(context.Background(), event)
+		}()
+	}
+	close(start)
+
+	successes := 0
+	rejected := 0
+	for range attempts {
+		switch err := <-results; {
+		case err == nil:
+			successes++
+		case errors.Is(err, errAuditSpoolCapacity):
+			rejected++
+		default:
+			t.Fatalf("EnqueueDurable() unexpected error = %v", err)
+		}
+	}
+	if successes != 5 || rejected != attempts-5 {
+		t.Fatalf(
+			"concurrent enqueue results = %d success, %d rejected; want 5, %d",
+			successes,
+			rejected,
+			attempts-5,
+		)
+	}
+}
+
+func TestAuditDeliveryRebuildsBoundedUsageAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	limits := testAuditDeliveryLimits()
+	limits.maxEntries = 2
+	limits.maxTeamEntries = 1
+	first, err := newAuditDeliveryWithLimits(dir, &auditDeliveryWriter{}, zap.NewNop(), nil, limits)
+	if err != nil {
+		t.Fatalf("first newAuditDeliveryWithLimits() error = %v", err)
+	}
+	existing := testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-1")
+	if err := first.EnqueueDurable(context.Background(), existing); err != nil {
+		t.Fatalf("EnqueueDurable(existing) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".audit-incomplete.tmp"), []byte("partial"), 0o600); err != nil {
+		t.Fatalf("WriteFile(temp) error = %v", err)
+	}
+
+	restarted, err := newAuditDeliveryWithLimits(dir, &auditDeliveryWriter{}, zap.NewNop(), nil, limits)
+	if err != nil {
+		t.Fatalf("restart newAuditDeliveryWithLimits() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".audit-incomplete.tmp")); !os.IsNotExist(err) {
+		t.Fatalf("incomplete temp record remains after startup: %v", err)
+	}
+	replacement := testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-1")
+	if err := restarted.EnqueueDurable(context.Background(), replacement); !errors.Is(err, errAuditSpoolCapacity) {
+		t.Fatalf("EnqueueDurable before usage release error = %v, want capacity", err)
+	}
+	restarted.mu.Lock()
+	err = restarted.removeLocked(existing.EventID)
+	restarted.mu.Unlock()
+	if err != nil {
+		t.Fatalf("removeLocked(existing) error = %v", err)
+	}
+	if err := restarted.EnqueueDurable(context.Background(), replacement); err != nil {
+		t.Fatalf("EnqueueDurable after usage release error = %v", err)
+	}
+	if err := restarted.EnqueueDurable(
+		context.Background(),
+		testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-2"),
+	); err != nil {
+		t.Fatalf("EnqueueDurable(other team) error = %v", err)
+	}
+
+	tightened := limits
+	tightened.maxEntries = 1
+	tightened.maxTeamEntries = 1
+	if _, err := newAuditDeliveryWithLimits(
+		dir,
+		&auditDeliveryWriter{},
+		zap.NewNop(),
+		nil,
+		tightened,
+	); !errors.Is(err, errAuditSpoolCapacity) {
+		t.Fatalf("startup over-capacity error = %v, want capacity", err)
+	}
+}
+
+func TestAuditDeliveryEnforcesRecordSizeAndFilesystemHeadroom(t *testing.T) {
+	event := testAuditDeliveryEventForTeam(t, uuid.NewString(), "team-1")
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	recordBytes := int64(len(payload))
+
+	limits := testAuditDeliveryLimits()
+	limits.maxRecordBytes = recordBytes - 1
+	delivery, err := newAuditDeliveryWithLimits(
+		t.TempDir(),
+		&auditDeliveryWriter{},
+		zap.NewNop(),
+		nil,
+		limits,
+	)
+	if err != nil {
+		t.Fatalf("newAuditDeliveryWithLimits() error = %v", err)
+	}
+	if err := delivery.EnqueueDurable(context.Background(), event); !errors.Is(err, errAuditSpoolCapacity) {
+		t.Fatalf("EnqueueDurable(oversized) error = %v, want capacity", err)
+	}
+
+	limits = testAuditDeliveryLimits()
+	limits.minFreeBytes = 100
+	delivery, err = newAuditDeliveryWithLimits(
+		t.TempDir(),
+		&auditDeliveryWriter{},
+		zap.NewNop(),
+		nil,
+		limits,
+	)
+	if err != nil {
+		t.Fatalf("newAuditDeliveryWithLimits() error = %v", err)
+	}
+	delivery.freeBytes = func(string) (int64, error) {
+		return recordBytes + limits.minFreeBytes - 1, nil
+	}
+	if err := delivery.EnqueueDurable(context.Background(), event); !errors.Is(err, errAuditSpoolCapacity) {
+		t.Fatalf("EnqueueDurable(below free-space floor) error = %v, want capacity", err)
+	}
+	delivery.freeBytes = func(string) (int64, error) {
+		return recordBytes + limits.minFreeBytes, nil
+	}
+	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
+		t.Fatalf("EnqueueDurable(at free-space floor) error = %v", err)
+	}
+}
+
+func TestAuditDeliveryStartupRejectsUnsafeRecordTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		create func(*testing.T, string)
+	}{
+		{
+			name: "symlink",
+			create: func(t *testing.T, dir string) {
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+					t.Fatalf("WriteFile(target) error = %v", err)
+				}
+				if err := os.Symlink(target, filepath.Join(dir, uuid.NewString()+".json")); err != nil {
+					t.Fatalf("Symlink() error = %v", err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			create: func(t *testing.T, dir string) {
+				if err := os.Mkdir(filepath.Join(dir, uuid.NewString()+".json"), 0o700); err != nil {
+					t.Fatalf("Mkdir() error = %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.create(t, dir)
+			if _, err := newAuditDeliveryWithLimits(
+				dir,
+				&auditDeliveryWriter{},
+				zap.NewNop(),
+				nil,
+				testAuditDeliveryLimits(),
+			); !errors.Is(err, errAuditSpoolCorrupt) {
+				t.Fatalf("startup error = %v, want corrupt", err)
+			}
+		})
+	}
+}
+
+func TestAuditDeliveryRejectsInvalidLimits(t *testing.T) {
+	for _, mutate := range []func(*auditDeliveryLimits){
+		func(limits *auditDeliveryLimits) { limits.maxBytes = 0 },
+		func(limits *auditDeliveryLimits) { limits.maxEntries = 0 },
+		func(limits *auditDeliveryLimits) { limits.maxTeamBytes = limits.maxBytes + 1 },
+		func(limits *auditDeliveryLimits) { limits.maxTeamEntries = limits.maxEntries + 1 },
+		func(limits *auditDeliveryLimits) { limits.minFreeBytes = -1 },
+		func(limits *auditDeliveryLimits) { limits.maxRecordBytes = limits.maxTeamBytes + 1 },
+	} {
+		limits := testAuditDeliveryLimits()
+		mutate(&limits)
+		if _, err := newAuditDeliveryWithLimits(
+			t.TempDir(),
+			&auditDeliveryWriter{},
+			zap.NewNop(),
+			nil,
+			limits,
+		); err == nil {
+			t.Fatalf("newAuditDeliveryWithLimits(%+v) error = nil", limits)
+		}
+	}
+}
+
+func testAuditDeliveryLimits() auditDeliveryLimits {
+	return auditDeliveryLimits{
+		maxBytes:       8 << 20,
+		maxEntries:     100,
+		maxTeamBytes:   4 << 20,
+		maxTeamEntries: 50,
+		minFreeBytes:   0,
+		maxRecordBytes: 1 << 20,
+	}
+}
+
+func testAuditDeliveryEventForTeam(
+	t *testing.T,
+	eventID string,
+	teamID string,
+) sandboxobservability.Event {
+	t.Helper()
+	event := testAuditDeliveryEvent(t, eventID)
+	event.TeamID = teamID
+	if err := sandboxobservability.SignEvent(&event, auditDeliveryTestSigningKey); err != nil {
+		t.Fatalf("SignEvent() error = %v", err)
+	}
+	return event
 }
 
 func replaceAuditSpoolDirectoryWithFile(t *testing.T, dir string) {

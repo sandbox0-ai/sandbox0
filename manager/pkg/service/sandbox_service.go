@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -10,9 +11,11 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/tokenbucket"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -58,6 +61,7 @@ var ErrInvalidClaimRequest = errors.New("invalid claim request")
 var ErrClaimConflict = errors.New("claim conflict")
 var ErrDataPlaneNotReady = errors.New("data plane not ready")
 var ErrQuotaExceeded = errors.New("quota exceeded")
+var ErrTeamQuotaUnavailable = errors.New("team quota unavailable")
 var ErrInvalidNetworkPolicy = errors.New("invalid network policy")
 var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint requires ctld")
 var ErrClaimStartThrottled = startlimiter.ErrThrottled
@@ -90,6 +94,7 @@ type SandboxServiceConfig struct {
 	CtldPort                            int
 	CtldClientTimeout                   time.Duration
 	CtldHTTPClient                      *http.Client
+	CtldRootFSTokenProvider             ctldapi.RootFSTokenProvider
 	ProcdPort                           int
 	ProcdClientTimeout                  time.Duration
 	ProcdHTTPClient                     *http.Client
@@ -124,7 +129,8 @@ type SandboxService struct {
 	webhookStateVolumes                    SandboxSystemVolumeClient
 	volumeMetadata                         SandboxVolumeMetadataClient
 	deletionWebhookEmitter                 SandboxDeletionWebhookEmitter
-	quotaStore                             TeamQuotaLimitStore
+	teamQuotaStore                         teamquota.CapacityStore
+	teamQuotaRateLimiter                   TeamQuotaRateLimiter
 	sandboxStore                           SandboxStore
 	rootFSObjectDeleter                    RootFSObjectDeleter
 	templateImageBuildCapabilityConfigured bool
@@ -136,9 +142,9 @@ type SandboxService struct {
 	podWaiter                              *podEventWaiter
 }
 
-type TeamQuotaLimitStore interface {
-	GetLimit(ctx context.Context, teamID string, dimension quota.Dimension) (*quota.Limit, error)
-	CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error)
+// TeamQuotaRateLimiter is the distributed rate admission contract.
+type TeamQuotaRateLimiter interface {
+	Take(ctx context.Context, teamID string, key teamquota.Key, cost int64) (tokenbucket.Decision, error)
 }
 
 // SandboxPauseEnqueuer schedules durable pause transactions for background completion.
@@ -200,9 +206,16 @@ func NewSandboxService(
 	if networkProvider == nil {
 		networkProvider = network.NewNoopProvider()
 	}
-	ctldClient := NewCtldClient(CtldClientConfig{Timeout: config.CtldClientTimeout})
+	ctldClient := NewCtldClient(CtldClientConfig{
+		Timeout:             config.CtldClientTimeout,
+		RootFSTokenProvider: config.CtldRootFSTokenProvider,
+	})
 	if config.CtldHTTPClient != nil {
-		ctldClient = NewCtldClientWithHTTPClient(config.CtldHTTPClient)
+		ctldClient = &CtldClient{
+			httpClient:          config.CtldHTTPClient,
+			api:                 ctldapi.NewClientWithRootFSAuth(config.CtldHTTPClient, config.CtldRootFSTokenProvider),
+			rootFSTokenProvider: config.CtldRootFSTokenProvider,
+		}
 	}
 	procdClient := NewProcdClient(ProcdClientConfig{Timeout: config.ProcdClientTimeout})
 	if config.ProcdHTTPClient != nil {
@@ -308,9 +321,37 @@ func (s *SandboxService) SetDeletionWebhookEmitter(emitter SandboxDeletionWebhoo
 	s.deletionWebhookEmitter = emitter
 }
 
-// SetQuotaStore injects the team quota limit store. Nil disables quota checks.
-func (s *SandboxService) SetQuotaStore(store TeamQuotaLimitStore) {
-	s.quotaStore = store
+// SetTeamQuotaStore injects the region-wide, strongly consistent team quota
+// allocation store.
+func (s *SandboxService) SetTeamQuotaStore(store teamquota.CapacityStore) {
+	s.teamQuotaStore = store
+}
+
+// SetTeamQuotaRateLimiter injects region-shared token-bucket admission.
+func (s *SandboxService) SetTeamQuotaRateLimiter(limiter TeamQuotaRateLimiter) {
+	s.teamQuotaRateLimiter = limiter
+}
+
+// ValidateTeamQuotaReady verifies the mandatory production admission wiring.
+// Manager startup must fail before serving requests when either capacity or
+// rate enforcement is unavailable.
+func (s *SandboxService) ValidateTeamQuotaReady() error {
+	if s == nil {
+		return fmt.Errorf("%w: sandbox service is nil", ErrTeamQuotaUnavailable)
+	}
+	if s.teamQuotaStore == nil {
+		return fmt.Errorf("%w: capacity store is not configured", ErrTeamQuotaUnavailable)
+	}
+	if _, ok := s.teamQuotaStore.(teamquota.ObservedExactCapacityStore); !ok {
+		return fmt.Errorf("%w: observed exact capacity store is not configured", ErrTeamQuotaUnavailable)
+	}
+	if s.teamQuotaRateLimiter == nil {
+		return fmt.Errorf("%w: rate limiter is not configured", ErrTeamQuotaUnavailable)
+	}
+	if s.claimStartLimiter == nil {
+		return fmt.Errorf("%w: cluster claim-start limiter is not configured", ErrTeamQuotaUnavailable)
+	}
+	return nil
 }
 
 // SetSandboxStore injects durable sandbox identity storage.

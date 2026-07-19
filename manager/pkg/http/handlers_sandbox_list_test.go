@@ -282,6 +282,8 @@ func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T)
 		nil,
 	)
 	sandboxService.SetClaimStartLimiter(claimStartLimiter)
+	sandboxService.SetTeamQuotaStore(&permissiveTeamQuotaCapacityStore{})
+	sandboxService.SetTeamQuotaRateLimiter(permissiveTeamQuotaRateLimiter{})
 
 	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
 	recorder := httptest.NewRecorder()

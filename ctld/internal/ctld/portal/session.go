@@ -13,11 +13,14 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/storageoperations"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	fsserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsserver"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -298,32 +301,43 @@ func (m *localVolumeManager) GetVolume(volumeID string) (*volume.VolumeContext, 
 }
 
 type localSession struct {
-	volumeID         string
-	mgr              *localVolumeManager
-	fs               *fsserver.FileSystemServer
-	baseCtx          context.Context
-	readOnlyHandleMu sync.Mutex
-	readOnlyHandles  map[string]struct{}
-	readCacheMu      sync.RWMutex
-	readCache        map[string][]byte
-	readCacheBytes   int
-	statePath        string
-	stateMu          sync.Mutex
-	stateErr         error
-	recoveryJournal  *s0fsHandleStateJournal
-	incrementalReady func() bool
+	volumeID          string
+	mgr               *localVolumeManager
+	fs                *fsserver.FileSystemServer
+	storageOperations storageoperations.Quota
+	baseCtx           context.Context
+	readOnlyHandleMu  sync.Mutex
+	readOnlyHandles   map[string]struct{}
+	readCacheMu       sync.RWMutex
+	readCache         map[string][]byte
+	readCacheBytes    int
+	statePath         string
+	stateMu           sync.Mutex
+	stateErr          error
+	recoveryJournal   *s0fsHandleStateJournal
+	incrementalReady  func() bool
 }
 
-func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Logger) *localSession {
+func newLocalSession(
+	volumeID string,
+	mgr *localVolumeManager,
+	storageQuota *storagequota.Service,
+	storageOperations storageoperations.Quota,
+	logger *logrus.Logger,
+) *localSession {
 	if logger == nil {
 		logger = logrus.New()
 	}
+	fileServer := fsserver.NewFileSystemServer(mgr, nil, nil, nil, logger, nil)
+	fileServer.SetStorageQuota(storageQuota)
+	fileServer.SetStorageOperationQuota(storageOperations)
 	return &localSession{
-		volumeID:        volumeID,
-		mgr:             mgr,
-		fs:              fsserver.NewFileSystemServer(mgr, nil, nil, nil, logger, nil),
-		readOnlyHandles: make(map[string]struct{}),
-		readCache:       make(map[string][]byte),
+		volumeID:          volumeID,
+		mgr:               mgr,
+		fs:                fileServer,
+		storageOperations: storageOperations,
+		readOnlyHandles:   make(map[string]struct{}),
+		readCache:         make(map[string][]byte),
 		baseCtx: internalauth.WithClaims(context.Background(), &internalauth.Claims{
 			Caller:   internalauth.ServiceCtld,
 			Target:   internalauth.ServiceCtld,
@@ -656,6 +670,19 @@ func (s *localSession) ReadInto(ctx context.Context, req *pb.ReadRequest, dest [
 	}
 	if volCtx == nil {
 		return 0, false, fserror.New(fserror.Internal, "local ReadInto requires s0fs volume")
+	}
+	if s.storageOperations == nil {
+		err := &teamquota.UnavailableError{
+			Operation: "admit storage operation",
+			Err:       errors.New("storage operation quota is not configured"),
+		}
+		return 0, false, fserror.Wrap(fserror.Unavailable, err.Error(), err)
+	}
+	if err := s.storageOperations.Admit(s.ctx(ctx), volCtx.TeamID); err != nil {
+		if teamquota.IsRateExceeded(err) {
+			return 0, false, fserror.Wrap(fserror.ResourceExhausted, err.Error(), err)
+		}
+		return 0, false, fserror.Wrap(fserror.Unavailable, err.Error(), err)
 	}
 	if n, eof, ok := s.readCacheLookup(volCtx, req.Inode, uint64(req.Offset), dest); ok {
 		return n, eof, nil

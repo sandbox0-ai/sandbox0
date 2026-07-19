@@ -41,11 +41,14 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	teamquotadistributed "github.com/sandbox0-ai/sandbox0/pkg/teamquota/distributed"
+	teamquotarate "github.com/sandbox0-ai/sandbox0/pkg/teamquota/rate"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
+	"github.com/sandbox0-ai/sandbox0/pkg/tokenbucket"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	storageproxyruntime "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/runtime"
 	"github.com/sirupsen/logrus"
@@ -152,9 +155,24 @@ func main() {
 	if err := runTemplateMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run template migrations", zap.Error(err))
 	}
-	if err := runQuotaMigrations(ctx, pool, logger); err != nil {
-		logger.Fatal("Failed to run quota migrations", zap.Error(err))
+	if err := runTeamQuotaMigrations(ctx, pool, logger); err != nil {
+		logger.Fatal("Failed to run team quota migrations", zap.Error(err))
 	}
+	teamQuotaStateIdentity, err := teamquota.ClaimRegionStateIdentity(
+		ctx,
+		pool,
+		teamquota.RegionStateIdentityConfig{
+			RegionID:        cfg.RegionID,
+			ExpectedStateID: cfg.TeamQuotaDistributedEnforcement.StateID,
+			RedisURL:        cfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix:  cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:    cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+		},
+	)
+	if err != nil {
+		logger.Fatal("Failed to validate Team Quota region state identity", zap.Error(err))
+	}
+	cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix = teamQuotaStateIdentity.KeyPrefix
 	if err := runEgressAuthMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run egress auth migrations", zap.Error(err))
 	}
@@ -456,6 +474,7 @@ func main() {
 		CtldPort:                            cfg.CtldPort,
 		CtldClientTimeout:                   cfg.CtldClientTimeout.Duration,
 		CtldHTTPClient:                      obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.CtldClientTimeout.Duration}),
+		CtldRootFSTokenProvider:             service.NewCtldRootFSTokenProvider(internalAuthGen),
 		ProcdPort:                           cfg.ProcdConfig.HTTPPort,
 		ProcdClientTimeout:                  cfg.ProcdClientTimeout.Duration,
 		ProcdHTTPClient:                     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
@@ -484,18 +503,67 @@ func main() {
 		managerMetrics,
 	)
 	sandboxService.SetTemplateImageBuildAvailable(false)
-	var quotaUsageStore quota.UsageStore
-	if meteringSink != nil {
-		quotaUsageStore = meteringSink
-	}
-	quotaRepo, err := buildQuotaRepository(pool, cfg, quotaUsageStore)
+	teamQuotaRepo := teamquota.NewRepository(pool)
+	teamQuotaAdmissionMarker, err := teamquotadistributed.NewRedisAdmissionMarker(
+		ctx,
+		teamQuotaRepo,
+		teamquotadistributed.AdmissionMarkerConfig{
+			RegionID:  cfg.RegionID,
+			RedisURL:  cfg.TeamQuotaDistributedEnforcement.RedisURL,
+			KeyPrefix: cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			Timeout:   cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+		},
+	)
 	if err != nil {
-		logger.Fatal("Invalid quota configuration", zap.Error(err))
+		logger.Fatal("Failed to initialize team quota admission marker", zap.Error(err))
+	}
+	defer func() {
+		if err := teamQuotaAdmissionMarker.Close(); err != nil {
+			logger.Warn("Failed to close team quota admission marker", zap.Error(err))
+		}
+	}()
+	teamQuotaBucket, err := tokenbucket.NewRedisBucket(ctx, tokenbucket.RedisConfig{
+		URL:       cfg.TeamQuotaDistributedEnforcement.RedisURL,
+		KeyPrefix: cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+		Timeout:   cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+	})
+	if err != nil {
+		_ = teamQuotaAdmissionMarker.Close()
+		logger.Fatal("Failed to initialize team quota token bucket", zap.Error(err))
+	}
+	defer func() {
+		if err := teamQuotaBucket.Close(); err != nil {
+			logger.Warn("Failed to close team quota token bucket", zap.Error(err))
+		}
+	}()
+	teamQuotaRateLimiter, err := teamquotarate.NewLimiter(teamQuotaRepo, teamQuotaAdmissionMarker, teamQuotaBucket, teamquotarate.Config{
+		RegionID:       cfg.RegionID,
+		PolicyCacheTTL: cfg.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration,
+	})
+	if err != nil {
+		_ = teamQuotaBucket.Close()
+		_ = teamQuotaAdmissionMarker.Close()
+		logger.Fatal("Failed to initialize team quota rate limiter", zap.Error(err))
 	}
 	sandboxService.SetCredentialStore(credentialStore)
-	sandboxService.SetQuotaStore(quotaRepo)
+	sandboxService.SetTeamQuotaStore(teamQuotaRepo)
+	sandboxService.SetTeamQuotaRateLimiter(teamQuotaRateLimiter)
 	sandboxService.SetSandboxStore(sandboxStore)
 	sandboxService.SetClaimStartLimiter(claimStartLimiter)
+	operator.SetTeamQuotaStore(teamQuotaRepo, service.PodSpecTeamQuotaResources)
+	operator.SetTeamQuotaRateLimiter(teamQuotaRateLimiter)
+	if err := sandboxService.ValidateTeamQuotaReady(); err != nil {
+		logger.Fatal("Sandbox team quota admission is not ready", zap.Error(err))
+	}
+	if err := operator.ValidateTeamQuotaReady(); err != nil {
+		logger.Fatal("Warm-pool team quota admission is not ready", zap.Error(err))
+	}
+	if err := service.ReconcileRootFSObjectQuota(ctx, sandboxStore, teamQuotaRepo); err != nil {
+		logger.Fatal("Failed to reconcile rootfs object team quota", zap.Error(err))
+	}
+	if err := service.ReconcileRootFSSnapshotQuota(ctx, sandboxStore, teamQuotaRepo); err != nil {
+		logger.Fatal("Failed to reconcile rootfs snapshot team quota", zap.Error(err))
+	}
 	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg, managerStorageConfig)
 	if rootFSObjectStoreErr != nil {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
@@ -518,8 +586,18 @@ func main() {
 	sandboxService.SetDeletionWebhookEmitter(service.NewHTTPSandboxDeletionWebhookEmitter(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})))
 	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
 	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
+	sandboxLifecycleController.SetClusterID(cfg.DefaultClusterId)
 	sandboxLifecycleController.SetMetrics(managerMetrics)
 	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
+	teamQuotaRecoveryController := service.NewTeamQuotaRecoveryController(
+		sandboxService,
+		teamQuotaRepo,
+		service.TeamQuotaRecoveryConfig{
+			ClusterID: cfg.DefaultClusterId,
+			Interval:  cfg.ResyncPeriod.Duration,
+		},
+		logger,
+	)
 	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)
 	sandboxService.SetPauseEnqueuer(sandboxPauseController)
 	operator.SetSandboxProbeRunner(sandboxService)
@@ -676,8 +754,6 @@ func main() {
 		cfg.PublicRootDomain,
 		cfg.PublicRegionID,
 	)
-	httpServer.SetQuotaRepository(quotaRepo)
-
 	// Start metrics server
 	go startMetricsServer(cfg.MetricsPort, logger)
 
@@ -701,6 +777,14 @@ func main() {
 			logger.Info("CRD informer cache synced", zap.String("type", typ.String()))
 		}
 	}
+
+	if err := teamQuotaRecoveryController.RecoverStartup(ctx); err != nil {
+		logger.Fatal("Failed to recover interrupted team quota operations", zap.Error(err))
+	}
+	if err := operator.ReconcileExistingTeamWarmPoolQuota(ctx); err != nil {
+		logger.Fatal("Failed to reconcile existing team warm-pool quota", zap.Error(err))
+	}
+	logger.Info("Existing team quota allocations reconciled")
 
 	startSandboxObservabilityLogProducer(ctx, cfg, k8sClient, podLister, sandboxLogWorker, logger, clk)
 
@@ -736,6 +820,12 @@ func main() {
 	}()
 
 	go func() {
+		if err := teamQuotaRecoveryController.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("Team quota recovery controller stopped", zap.Error(err))
+		}
+	}()
+
+	go func() {
 		if err := sandboxPauseController.Run(ctx, 2); err != nil && err != context.Canceled {
 			logger.Error("Sandbox pause controller failed", zap.Error(err))
 		}
@@ -754,6 +844,7 @@ func main() {
 				managerMetrics,
 			)
 			rootFSMaintenanceController.SetObjectInspector(rootFSObjectStoreInspector{store: rootFSObjectStore})
+			rootFSMaintenanceController.SetTeamQuotaStore(teamQuotaRepo)
 			if meteringRepo != nil {
 				rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
 			}
@@ -919,14 +1010,14 @@ func runTemplateMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.
 	return nil
 }
 
-func runQuotaMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
-	logger.Info("Running quota migrations")
+func runTeamQuotaMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) error {
+	logger.Info("Running team quota migrations")
 
-	if err := quota.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
-		return fmt.Errorf("quota migrations: %w", err)
+	if err := teamquota.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
+		return fmt.Errorf("team quota migrations: %w", err)
 	}
 
-	logger.Info("Quota migrations completed successfully")
+	logger.Info("Team quota migrations completed successfully")
 	return nil
 }
 
@@ -980,31 +1071,6 @@ func initMetering(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Lo
 		zap.Bool("schema_migration", !ch.SkipSchemaMigration),
 	)
 	return db, repo, true, nil
-}
-
-func buildQuotaRepository(pool *pgxpool.Pool, cfg *config.ManagerConfig, usageStore quota.UsageStore) (*quota.Repository, error) {
-	repo, err := quota.NewRepositoryWithDefaults(pool, defaultTeamQuotaLimits(cfg))
-	if err != nil || repo == nil {
-		return repo, err
-	}
-	if usageStore != nil {
-		repo.SetUsageStore(usageStore)
-	}
-	return repo, nil
-}
-
-func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
-	if cfg == nil || len(cfg.DefaultTeamQuotas) == 0 {
-		return nil
-	}
-	limits := make([]quota.DefaultLimit, 0, len(cfg.DefaultTeamQuotas))
-	for _, limit := range cfg.DefaultTeamQuotas {
-		limits = append(limits, quota.DefaultLimit{
-			Dimension:  quota.Dimension(limit.Dimension),
-			LimitValue: limit.LimitValue,
-		})
-	}
-	return limits
 }
 
 func buildRootFSObjectStore(cfg *config.ManagerConfig, storageRuntimeCfg *config.StorageProxyConfig) (objectstore.Store, error) {

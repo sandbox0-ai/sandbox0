@@ -20,6 +20,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/conntrack"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/activeconnections"
 	"go.uber.org/zap"
 )
 
@@ -46,22 +48,32 @@ type Server struct {
 	upstreamTLSConfig *tls.Config
 	auditor           *auditLogger
 	bandwidthLimiter  *bandwidthLimiter
+	teamNetworkQuota  *TeamNetworkQuota
+	activeConnections activeconnections.Quota
 	metrics           *proxyMetricsRegistry
 	auditSeq          uint64
 	udpSessionMu      sync.Mutex
 	udpSessions       map[udpSessionKey]*udpSession
+	tcpAdmission      chan struct{}
+	udpAdmission      chan struct{}
+	udpDatagrams      chan udpDatagram
+	udpWorkers        int
+	udpHandler        func(context.Context, udpDatagram)
 	exitCh            chan error
 	exitOnce          sync.Once
+}
+
+type udpDatagram struct {
+	conn     *net.UDPConn
+	source   *net.UDPAddr
+	payload  []byte
+	destIP   net.IP
+	destPort int
 }
 
 type UsageRecorder interface {
 	RecordEgress(compiled *policy.CompiledPolicy, bytes int64)
 	RecordIngress(compiled *policy.CompiledPolicy, bytes int64)
-}
-
-type UsageQuotaChecker interface {
-	AllowEgress(compiled *policy.CompiledPolicy) error
-	AllowIngress(compiled *policy.CompiledPolicy) error
 }
 
 func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.Tracker, usageRecorder UsageRecorder, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
@@ -73,6 +85,10 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 	}
 	if tracker == nil {
 		return nil, fmt.Errorf("conntrack tracker is nil")
+	}
+	maxTCPConnections, udpWorkers, udpQueueSize, err := cfg.ProxyAdmissionLimits()
+	if err != nil {
+		return nil, fmt.Errorf("validate proxy work admission: %w", err)
 	}
 	if logger == nil {
 		logger = zap.NewNop()
@@ -149,43 +165,43 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 		}
 		return nil, err
 	}
-	bandwidthLimiter, err := newBandwidthLimiter(context.Background(), cfg)
-	if err != nil {
-		_ = httpLn.Close()
-		_ = httpsLn.Close()
-		_ = udpConn.Close()
-		if udpHTTPConn != nil && udpHTTPConn != udpConn {
-			_ = udpHTTPConn.Close()
-		}
-		if auditor != nil {
-			_ = auditor.Close()
-		}
-		return nil, err
-	}
 	server := &Server{
-		cfg:              cfg,
-		store:            store,
-		tracker:          tracker,
-		usageRecorder:    usageRecorder,
-		logger:           logger,
-		hostVerifier:     newDNSHostVerifier(),
-		httpListener:     httpLn,
-		httpsListener:    httpsLn,
-		udpHTTPConn:      udpHTTPConn,
-		udpHTTPSConn:     udpHTTPSConn,
-		reassembler:      newQuicReassembler(),
-		tcpClassifiers:   defaultTCPClassifiers(),
-		udpClassifiers:   defaultUDPClassifiers(),
-		adapters:         adapters,
-		authResolver:     noopEgressAuthResolver{},
-		authCache:        newMemoryEgressAuthCache(),
-		dnsCache:         newDNSHostCache(),
-		udpReplyDialer:   dialUDPTransparent,
-		auditor:          auditor,
-		bandwidthLimiter: bandwidthLimiter,
-		metrics:          proxyMetrics,
-		exitCh:           make(chan error, 1),
+		cfg:            cfg,
+		store:          store,
+		tracker:        tracker,
+		usageRecorder:  usageRecorder,
+		logger:         logger,
+		hostVerifier:   newDNSHostVerifier(),
+		httpListener:   httpLn,
+		httpsListener:  httpsLn,
+		udpHTTPConn:    udpHTTPConn,
+		udpHTTPSConn:   udpHTTPSConn,
+		reassembler:    newQuicReassembler(),
+		tcpClassifiers: defaultTCPClassifiers(),
+		udpClassifiers: defaultUDPClassifiers(),
+		adapters:       adapters,
+		authResolver:   noopEgressAuthResolver{},
+		authCache:      newMemoryEgressAuthCache(),
+		dnsCache:       newDNSHostCache(),
+		udpReplyDialer: dialUDPTransparent,
+		auditor:        auditor,
+		metrics:        proxyMetrics,
+		tcpAdmission: make(
+			chan struct{},
+			maxTCPConnections,
+		),
+		udpAdmission: make(
+			chan struct{},
+			udpQueueSize,
+		),
+		udpDatagrams: make(
+			chan udpDatagram,
+			udpQueueSize,
+		),
+		udpWorkers: udpWorkers,
+		exitCh:     make(chan error, 1),
 	}
+	server.udpHandler = server.handleQueuedUDPDatagram
 	if cfg.EgressAuthResolverURL != "" {
 		server.authResolver = NewHTTPEgressAuthResolver(cfg.EgressAuthResolverURL, cfg.EgressAuthResolverTimeout.Duration, nil)
 	}
@@ -210,6 +226,36 @@ func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.T
 			opt(server)
 		}
 	}
+	if server.teamNetworkQuota == nil ||
+		server.teamNetworkQuota.Limiter == nil {
+		_ = httpLn.Close()
+		_ = httpsLn.Close()
+		_ = udpConn.Close()
+		if udpHTTPConn != nil && udpHTTPConn != udpConn {
+			_ = udpHTTPConn.Close()
+		}
+		if auditor != nil {
+			_ = auditor.Close()
+		}
+		return nil, fmt.Errorf(
+			"region-shared network byte Team Quota is required",
+		)
+	}
+	if server.activeConnections == nil {
+		_ = httpLn.Close()
+		_ = httpsLn.Close()
+		_ = udpConn.Close()
+		if udpHTTPConn != nil && udpHTTPConn != udpConn {
+			_ = udpHTTPConn.Close()
+		}
+		if auditor != nil {
+			_ = auditor.Close()
+		}
+		return nil, fmt.Errorf(
+			"region-shared active connection Team Quota is required",
+		)
+	}
+	server.bandwidthLimiter = newBandwidthLimiter(cfg, server.teamNetworkQuota)
 	return server, nil
 }
 
@@ -223,6 +269,11 @@ func (s *Server) Start(ctx context.Context) {
 	go s.runLoop(ctx, "https accept loop", func() {
 		s.acceptLoop(ctx, "https", s.httpsListener, s.handleTCPConn)
 	})
+	for worker := 0; worker < s.udpWorkers; worker++ {
+		go s.runLoop(ctx, "udp worker", func() {
+			s.udpWorker(ctx)
+		})
+	}
 	if s.udpHTTPConn != nil {
 		go s.runLoop(ctx, "udp http handler", func() {
 			s.handleUDP(ctx, s.udpHTTPConn)
@@ -262,12 +313,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			err = closeErr
 		}
 	}
+	s.closeUDPSessions()
 	if s.bandwidthLimiter != nil {
 		if closeErr := s.bandwidthLimiter.Close(); closeErr != nil && err == nil {
 			err = closeErr
 		}
 	}
-	s.closeUDPSessions()
+	if s.activeConnections != nil {
+		if closeErr := s.activeConnections.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
 	return err
 }
 
@@ -304,7 +360,7 @@ func (s *Server) signalExit(err error) {
 	})
 }
 
-func (s *Server) acceptLoop(ctx context.Context, listener string, ln net.Listener, handler func(net.Conn)) {
+func (s *Server) acceptLoop(ctx context.Context, listener string, ln net.Listener, handler func(context.Context, net.Conn)) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -319,16 +375,40 @@ func (s *Server) acceptLoop(ctx context.Context, listener string, ln net.Listene
 			}
 			continue
 		}
+		if !s.tryAcquireTCPAdmission() {
+			s.metrics.RecordProxyAdmissionDrop("tcp", "active_limit")
+			_ = conn.Close()
+			continue
+		}
 		s.metrics.IncProxyConnectionsActive(listener)
 		go func() {
+			defer s.releaseTCPAdmission()
 			defer s.metrics.DecProxyConnectionsActive(listener)
-			handler(conn)
+			handler(ctx, conn)
 		}()
 	}
 }
 
-func (s *Server) handleTCPConn(conn net.Conn) {
+func (s *Server) handleTCPConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	srcIP := remoteIP(conn.RemoteAddr())
+	p := s.store.GetByIP(srcIP)
+	if p == nil || strings.TrimSpace(p.TeamID) == "" {
+		s.logActiveConnectionQuota(
+			"TCP connection rejected because resolved team policy is missing",
+			"tcp",
+			p,
+			&teamquota.UnavailableError{
+				Operation: "resolve active network connection owner",
+				Err:       fmt.Errorf("resolved policy team_id is required"),
+			},
+		)
+		return
+	}
+	if !s.admitNetworkOperation(ctx, p, "tcp") {
+		return
+	}
+
 	origIP, origPort, err := originalDst(conn)
 	if err != nil {
 		s.logger.Warn("Failed to get original dst",
@@ -339,9 +419,27 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		return
 	}
 
-	srcIP := remoteIP(conn.RemoteAddr())
-	p := s.store.GetByIP(srcIP)
-	ctx := &tcpClassifyContext{
+	connectionCtx, cancelConnection := context.WithCancel(ctx)
+	defer cancelConnection()
+	connectionLease, err := s.acquireActiveConnectionLease(connectionCtx, p)
+	if err != nil {
+		s.logActiveConnectionQuota(
+			"TCP connection rejected by Team Quota",
+			"tcp",
+			p,
+			err,
+		)
+		return
+	}
+	defer s.releaseActiveConnectionLease(connectionLease, "tcp", p)
+	go s.closeTCPConnectionOnLeaseLoss(
+		connectionCtx,
+		connectionLease,
+		conn,
+		p,
+		cancelConnection,
+	)
+	classifyCtx := &tcpClassifyContext{
 		Compiled:    p,
 		SrcIP:       srcIP,
 		OrigIP:      origIP,
@@ -349,12 +447,13 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		Conn:        conn,
 		HeaderLimit: int(s.cfg.ProxyHeaderLimit),
 	}
-	result, err := classifyTCP(s.tcpClassifiers, ctx)
+	result, err := classifyTCP(s.tcpClassifiers, classifyCtx)
 	if err != nil {
 		s.logger.Warn("Failed to classify TCP traffic", zap.Error(err))
 		return
 	}
 	req := &adapterRequest{
+		Context:  connectionCtx,
 		Server:   s,
 		Compiled: p,
 		SrcIP:    srcIP,
@@ -366,7 +465,7 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 	if result.Apply != nil {
 		result.Apply(req)
 	}
-	result.Classification, err = s.probeServerFirstSSH(req, result.Classification, ctx)
+	result.Classification, err = s.probeServerFirstSSH(req, result.Classification, classifyCtx)
 	if err != nil {
 		s.logger.Warn("Server-first SSH probe blocked", zap.Error(err))
 		return
@@ -374,6 +473,10 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 	result.Classification = s.applyCachedDNSHost(req, result.Classification)
 	result.Classification = verifyClassifiedHost(s.hostVerifier, p, result.Classification)
 	decision := decideTraffic(p, result.Classification)
+	if leaseLost(connectionLease) {
+		closeProbedUpstream(req)
+		return
+	}
 	fields := []zap.Field{}
 	if result.Error != nil {
 		fields = append(fields, zap.Error(result.Error))
@@ -405,19 +508,106 @@ func (s *Server) handleUDP(ctx context.Context, conn *net.UDPConn) {
 			s.logger.Error("UDP read failed", zap.Error(err))
 			continue
 		}
+		if !s.tryAcquireUDPAdmission() {
+			s.metrics.RecordProxyAdmissionDrop("udp", "queue_full")
+			continue
+		}
 		payload := make([]byte, n)
 		copy(payload, buffer[:n])
-		go s.handleUDPDatagram(conn, addr, payload, destIP, destPort)
+		datagram := udpDatagram{
+			conn:     conn,
+			source:   cloneUDPAddr(addr),
+			payload:  payload,
+			destIP:   cloneIP(destIP),
+			destPort: destPort,
+		}
+		select {
+		case s.udpDatagrams <- datagram:
+		default:
+			s.releaseUDPAdmission()
+			s.metrics.RecordProxyAdmissionDrop("udp", "queue_full")
+		}
 	}
 }
 
-func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload []byte, destIP net.IP, destPort int) {
+func (s *Server) tryAcquireTCPAdmission() bool {
+	if s == nil || s.tcpAdmission == nil {
+		return true
+	}
+	select {
+	case s.tcpAdmission <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseTCPAdmission() {
+	if s == nil || s.tcpAdmission == nil {
+		return
+	}
+	<-s.tcpAdmission
+}
+
+func (s *Server) tryAcquireUDPAdmission() bool {
+	if s == nil || s.udpAdmission == nil {
+		return true
+	}
+	select {
+	case s.udpAdmission <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseUDPAdmission() {
+	if s == nil || s.udpAdmission == nil {
+		return
+	}
+	<-s.udpAdmission
+}
+
+func (s *Server) udpWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case datagram := <-s.udpDatagrams:
+			func() {
+				defer s.releaseUDPAdmission()
+				if s.udpHandler != nil {
+					s.udpHandler(ctx, datagram)
+				}
+			}()
+		}
+	}
+}
+
+func (s *Server) handleQueuedUDPDatagram(
+	ctx context.Context,
+	datagram udpDatagram,
+) {
+	s.handleUDPDatagram(
+		ctx,
+		datagram.conn,
+		datagram.source,
+		datagram.payload,
+		datagram.destIP,
+		datagram.destPort,
+	)
+}
+
+func (s *Server) handleUDPDatagram(ctx context.Context, conn *net.UDPConn, src *net.UDPAddr, payload []byte, destIP net.IP, destPort int) {
 	if src == nil {
 		return
 	}
 	srcIP := src.IP.String()
 	p := s.store.GetByIP(srcIP)
-	ctx := &udpClassifyContext{
+	if !s.admitNetworkOperation(ctx, p, "udp") {
+		return
+	}
+	classifyCtx := &udpClassifyContext{
 		Compiled:    p,
 		SrcIP:       srcIP,
 		SrcAddr:     src,
@@ -426,12 +616,13 @@ func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload 
 		Payload:     payload,
 		Reassembler: s.reassembler,
 	}
-	result, err := classifyUDP(s.udpClassifiers, ctx)
+	result, err := classifyUDP(s.udpClassifiers, classifyCtx)
 	if err != nil {
 		s.logger.Warn("Failed to classify UDP traffic", zap.Error(err))
 		return
 	}
 	req := &adapterRequest{
+		Context:    ctx,
 		Server:     s,
 		Compiled:   p,
 		SrcIP:      srcIP,
@@ -450,13 +641,22 @@ func (s *Server) handleUDPDatagram(conn *net.UDPConn, src *net.UDPAddr, payload 
 	s.handleUDPDecision(req, decision, result.Host)
 }
 
-func (s *Server) pipeWithReader(client net.Conn, upstream net.Conn, reader io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) error {
-	return s.pipeWithReaders(client, upstream, reader, upstream, compiled, audit)
+func (s *Server) pipeWithReader(ctx context.Context, client net.Conn, upstream net.Conn, reader io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) error {
+	return s.pipeWithReaders(ctx, client, upstream, reader, upstream, compiled, audit)
 }
 
-func (s *Server) pipeWithReaders(client net.Conn, upstream net.Conn, upstreamWriter io.Reader, downstreamWriter io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) error {
-	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(upstream, compiled, bandwidthEgress)}
-	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(client, compiled, bandwidthIngress)}
+func (s *Server) pipeWithReaders(ctx context.Context, client net.Conn, upstream net.Conn, upstreamWriter io.Reader, downstreamWriter io.Reader, compiled *policy.CompiledPolicy, audit *flowAudit) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stopCloseOnCancel := context.AfterFunc(ctx, func() {
+		_ = client.Close()
+		_ = upstream.Close()
+	})
+	defer stopCloseOnCancel()
+
+	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(ctx, upstream, compiled, bandwidthEgress)}
+	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(ctx, client, compiled, bandwidthIngress)}
 	errCh := make(chan error, 2)
 	go func() {
 		n, err := io.Copy(upstreamCounter, upstreamWriter)
@@ -503,18 +703,6 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 			zap.String("auth_ref", decision.MatchedAuthRule.AuthRef),
 			zap.String("auth_rule", decision.MatchedAuthRule.Name),
 		)
-	}
-	if err := s.checkEgressQuota(req.Compiled, decision); err != nil {
-		closeProbedUpstream(req)
-		decision.Action = decisionActionDeny
-		decision.Reason = "egress_quota_exceeded"
-		baseFields = append(baseFields, zap.Error(err))
-	}
-	if err := s.checkIngressQuota(req.Compiled, decision); err != nil {
-		closeProbedUpstream(req)
-		decision.Action = decisionActionDeny
-		decision.Reason = "ingress_quota_exceeded"
-		baseFields = append(baseFields, zap.Error(err))
 	}
 	baseFields = append(baseFields, fields...)
 	switch decision.Action {
@@ -648,20 +836,11 @@ func (s *Server) relayTCPConnWithUpstream(
 	if upstreamPrefix != nil {
 		upstreamReader = io.MultiReader(upstreamPrefix, upstream)
 	}
-	return s.pipeWithReaders(client, upstream, reader, upstreamReader, compiled, audit)
+	return s.pipeWithReaders(requestContext(req), client, upstream, reader, upstreamReader, compiled, audit)
 }
 
 func (s *Server) probeServerFirstSSH(req *adapterRequest, classification trafficClassification, ctx *tcpClassifyContext) (trafficClassification, error) {
-	if s == nil || req == nil || ctx == nil {
-		return classification, nil
-	}
-	if classification.Transport != "tcp" || classification.UnknownReason == "" {
-		return classification, nil
-	}
-	if req.UpstreamConn != nil || req.DestIP == nil || req.DestPort <= 0 {
-		return classification, nil
-	}
-	if !policy.HasTrafficRuleAppProtocol(req.Compiled, "ssh") {
+	if !shouldProbeServerFirstSSH(req, classification, ctx) {
 		return classification, nil
 	}
 	if req.Audit == nil {
@@ -691,6 +870,24 @@ func (s *Server) probeServerFirstSSH(req *adapterRequest, classification traffic
 		return classifyKnownTraffic("tcp", "ssh", req.DestIP, req.DestPort, ""), nil
 	}
 	return classification, nil
+}
+
+func shouldProbeServerFirstSSH(
+	req *adapterRequest,
+	classification trafficClassification,
+	ctx *tcpClassifyContext,
+) bool {
+	if req == nil || ctx == nil {
+		return false
+	}
+	if classification.Transport != "tcp" ||
+		classification.UnknownReason == "" {
+		return false
+	}
+	if req.UpstreamConn != nil || req.DestIP == nil || req.DestPort <= 0 {
+		return false
+	}
+	return policy.HasTrafficRuleAppProtocol(req.Compiled, "ssh")
 }
 
 func (s *Server) probeTCPUpstreamForRequest(req *adapterRequest, headerLimit int, firstByteTimeout time.Duration, readTimeout time.Duration) (net.Conn, []byte, error) {
@@ -859,14 +1056,14 @@ func (s *Server) proxyHTTPRequest(req *adapterRequest) error {
 	}
 	defer upstream.Close()
 
-	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(upstream, req.Compiled, bandwidthEgress)}
+	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(req.Context, upstream, req.Compiled, bandwidthEgress)}
 	if err := httpReq.Write(upstreamCounter); err != nil {
 		s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
 		return fmt.Errorf("write upstream http request: %w", err)
 	}
 	s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
 
-	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(req.Conn, req.Compiled, bandwidthIngress)}
+	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(req.Context, req.Conn, req.Compiled, bandwidthIngress)}
 	n, err := io.Copy(clientCounter, upstream)
 	s.recordIngressBytes(req.Compiled, n, req.Audit)
 	return normalizeRelayError(err)
@@ -915,16 +1112,6 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 			zap.String("auth_ref", decision.MatchedAuthRule.AuthRef),
 			zap.String("auth_rule", decision.MatchedAuthRule.Name),
 		)
-	}
-	if err := s.checkEgressQuota(req.Compiled, decision); err != nil {
-		decision.Action = decisionActionDeny
-		decision.Reason = "egress_quota_exceeded"
-		fields = append(fields, zap.Error(err))
-	}
-	if err := s.checkIngressQuota(req.Compiled, decision); err != nil {
-		decision.Action = decisionActionDeny
-		decision.Reason = "ingress_quota_exceeded"
-		fields = append(fields, zap.Error(err))
 	}
 	switch decision.Action {
 	case decisionActionDeny:
@@ -1104,13 +1291,14 @@ func (s *Server) runPassThrough(adapter proxyAdapter, req *adapterRequest) error
 			return fmt.Errorf("udp pass-through requires source datagram")
 		}
 		s.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "udp", req.UDPSource.Port, req.Host, "unknown")
-		return s.forwardUDPDatagram(req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
+		return s.forwardUDPDatagram(req.Context, req.UDPConn, req.UDPSource, req.UDPPayload, req.DestIP, req.DestPort, req.Compiled, req.Audit)
 	default:
 		return fmt.Errorf("unsupported pass-through transport %q", adapter.Transport())
 	}
 }
 
 func (s *Server) forwardUDPDatagram(
+	ctx context.Context,
 	conn *net.UDPConn,
 	src *net.UDPAddr,
 	payload []byte,
@@ -1123,6 +1311,7 @@ func (s *Server) forwardUDPDatagram(
 		return fmt.Errorf("missing destination")
 	}
 	req := &adapterRequest{
+		Context:    ctx,
 		Server:     s,
 		Compiled:   compiled,
 		Audit:      audit,
@@ -1270,28 +1459,6 @@ func (s *Server) recordEgressBytes(compiled *policy.CompiledPolicy, bytes int64,
 	s.usageRecorder.RecordEgress(compiled, bytes)
 }
 
-func (s *Server) checkEgressQuota(compiled *policy.CompiledPolicy, decision trafficDecision) error {
-	if decision.Action == decisionActionDeny || s == nil || s.usageRecorder == nil {
-		return nil
-	}
-	checker, ok := s.usageRecorder.(UsageQuotaChecker)
-	if !ok {
-		return nil
-	}
-	return checker.AllowEgress(compiled)
-}
-
-func (s *Server) checkIngressQuota(compiled *policy.CompiledPolicy, decision trafficDecision) error {
-	if decision.Action == decisionActionDeny || s == nil || s.usageRecorder == nil {
-		return nil
-	}
-	checker, ok := s.usageRecorder.(UsageQuotaChecker)
-	if !ok {
-		return nil
-	}
-	return checker.AllowIngress(compiled)
-}
-
 func (s *Server) recordIngressBytes(compiled *policy.CompiledPolicy, bytes int64, audit *flowAudit) {
 	if bytes <= 0 {
 		return
@@ -1305,18 +1472,25 @@ func (s *Server) recordIngressBytes(compiled *policy.CompiledPolicy, bytes int64
 	s.usageRecorder.RecordIngress(compiled, bytes)
 }
 
-func (s *Server) bandwidthLimitedWriter(writer io.Writer, compiled *policy.CompiledPolicy, direction bandwidthDirection) io.Writer {
+func (s *Server) bandwidthLimitedWriter(ctx context.Context, writer io.Writer, compiled *policy.CompiledPolicy, direction bandwidthDirection) io.Writer {
 	if s == nil || s.bandwidthLimiter == nil {
 		return writer
 	}
-	return s.bandwidthLimiter.limitedWriter(writer, compiled, direction)
+	return s.bandwidthLimiter.limitedWriter(ctx, writer, compiled, direction)
 }
 
-func (s *Server) waitBandwidth(compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) error {
+func (s *Server) waitBandwidth(ctx context.Context, compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) error {
 	if s == nil || s.bandwidthLimiter == nil {
 		return nil
 	}
-	return s.bandwidthLimiter.wait(compiled, direction, bytes)
+	return s.bandwidthLimiter.wait(ctx, compiled, direction, bytes)
+}
+
+func requestContext(req *adapterRequest) context.Context {
+	if req == nil {
+		return nil
+	}
+	return req.Context
 }
 
 func (s *Server) newFlowAudit(transport string) *flowAudit {
@@ -1366,6 +1540,7 @@ func (c *countingWriter) WrittenBytes() int64 {
 
 type countingConn struct {
 	net.Conn
+	ctx            context.Context
 	read           int64
 	written        int64
 	limiter        *bandwidthLimiter
@@ -1375,23 +1550,31 @@ type countingConn struct {
 }
 
 func (c *countingConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
-	if n > 0 && c.limiter != nil {
-		if waitErr := c.limiter.wait(c.compiled, c.readDirection, n); waitErr != nil && err == nil {
-			err = waitErr
+	if len(p) > 0 && c.limiter != nil {
+		maxChunk, err := c.limiter.maxChunkBytes(c.ctx, c.compiled, c.readDirection)
+		if err != nil {
+			return 0, err
+		}
+		if maxChunk > 0 && maxChunk < len(p) {
+			p = p[:maxChunk]
 		}
 	}
+	n, err := c.Conn.Read(p)
 	atomic.AddInt64(&c.read, int64(n))
+	if n > 0 && c.limiter != nil {
+		if waitErr := c.limiter.wait(c.ctx, c.compiled, c.readDirection, n); waitErr != nil {
+			return 0, waitErr
+		}
+	}
 	return n, err
 }
 
 func (c *countingConn) Write(p []byte) (int, error) {
-	if len(p) > 0 && c.limiter != nil {
-		if err := c.limiter.wait(c.compiled, c.writeDirection, len(p)); err != nil {
-			return 0, err
-		}
+	writer := io.Writer(c.Conn)
+	if c.limiter != nil {
+		writer = c.limiter.limitedWriter(c.ctx, c.Conn, c.compiled, c.writeDirection)
 	}
-	n, err := c.Conn.Write(p)
+	n, err := writer.Write(p)
 	atomic.AddInt64(&c.written, int64(n))
 	return n, err
 }

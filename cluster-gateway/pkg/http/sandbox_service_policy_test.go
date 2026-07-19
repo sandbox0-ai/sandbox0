@@ -24,8 +24,10 @@ import (
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	gatewayteamquota "github.com/sandbox0-ai/sandbox0/pkg/gateway/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -83,6 +85,329 @@ func TestSandboxServiceProxiesAuthorizedRouteWithRewrite(t *testing.T) {
 	}
 	if upstreamHits != 1 {
 		t.Fatalf("upstream hits = %d, want 1", upstreamHits)
+	}
+}
+
+func TestSandboxServiceInvalidRouteCredentialConsumesTeamQuotaAndReleasesLease(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("upstream should not be called")
+	}))
+	defer upstream.Close()
+	port := serverPort(t, upstream.URL)
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/sandboxes/sb-demo" {
+			spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "not found")
+			return
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, &mgr.Sandbox{
+			ID:           "sb-demo",
+			TeamID:       "team-1",
+			InternalAddr: "http://127.0.0.1:1",
+			Services: []mgr.SandboxAppService{{
+				ID:   "api",
+				Port: port,
+				Ingress: mgr.SandboxAppServiceIngress{
+					Public: true,
+					Routes: []mgr.SandboxAppServiceRoute{{
+						ID:         "api",
+						PathPrefix: "/",
+						Auth: &mgr.SandboxAppServiceRouteAuth{
+							Mode:              mgr.SandboxAppServiceRouteAuthModeBearer,
+							BearerTokenSHA256: sha256Hex("correct"),
+						},
+					}},
+				},
+			}},
+		})
+	}))
+	defer manager.Close()
+	controller, rateLimiter, concurrencyLimiter, networkLimiter :=
+		newCountingPublicExposureTeamQuotaController(zap.NewNop())
+	gateway := newSandboxServiceExposureTestServerWithManagerURLAndQuota(
+		t,
+		manager.URL,
+		controller,
+	)
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+
+	request := newGatewayRequest(
+		t,
+		http.MethodPost,
+		gatewayServer.URL,
+		fmt.Sprintf("sb-demo--p%d.aws-us-east-1.sandbox0.app", port),
+		"/",
+	)
+	const requestBody = "rejected-request"
+	request.Body = io.NopCloser(strings.NewReader(requestBody))
+	request.ContentLength = int64(len(requestBody))
+	request.Header.Set("Authorization", "Bearer wrong")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", response.StatusCode)
+	}
+	assertRejectedSandboxServiceTeamQuota(
+		t,
+		rateLimiter,
+		concurrencyLimiter,
+		networkLimiter,
+		len(requestBody),
+		len(responseBody),
+	)
+}
+
+func TestSandboxServicePolicyRejectionsCannotBypassTeamQuota(t *testing.T) {
+	tests := []struct {
+		name           string
+		requestMethod  string
+		requestPath    string
+		configure      func(*Server)
+		configureReq   func(*http.Request)
+		configureRoute func(*mgr.SandboxAppServiceRoute)
+		observeAbuse   bool
+		wantStatus     int
+	}{
+		{
+			name:          "unmatched path",
+			requestMethod: http.MethodPost,
+			requestPath:   "/not-exposed",
+			configureRoute: func(route *mgr.SandboxAppServiceRoute) {
+				route.PathPrefix = "/api"
+			},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:          "disallowed method",
+			requestMethod: http.MethodPost,
+			requestPath:   "/api",
+			configureRoute: func(route *mgr.SandboxAppServiceRoute) {
+				route.PathPrefix = "/api"
+				route.Methods = []string{http.MethodGet}
+			},
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:          "rejected CORS preflight",
+			requestMethod: http.MethodOptions,
+			requestPath:   "/api",
+			configureReq: func(request *http.Request) {
+				request.Header.Set("Origin", "https://blocked.example")
+				request.Header.Set("Access-Control-Request-Method", http.MethodGet)
+			},
+			configureRoute: func(route *mgr.SandboxAppServiceRoute) {
+				route.PathPrefix = "/api"
+				route.Methods = []string{http.MethodGet}
+				route.CORS = &mgr.SandboxAppServiceRouteCORS{
+					AllowedOrigins: []string{"https://allowed.example"},
+					AllowedMethods: []string{http.MethodGet},
+				}
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:          "abuse guard rejection",
+			requestMethod: http.MethodPost,
+			requestPath:   "/api",
+			configureRoute: func(route *mgr.SandboxAppServiceRoute) {
+				route.PathPrefix = "/api"
+				route.RateLimit = &mgr.SandboxAppServiceRouteRateLimit{
+					RPS:   1,
+					Burst: 1,
+				}
+			},
+			observeAbuse: true,
+			wantStatus:   http.StatusTooManyRequests,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Fatal("upstream should not be called")
+			}))
+			defer upstream.Close()
+
+			port := serverPort(t, upstream.URL)
+			route := mgr.SandboxAppServiceRoute{
+				ID:         "api",
+				PathPrefix: "/",
+			}
+			test.configureRoute(&route)
+			manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/internal/v1/sandboxes/sb-demo" {
+					spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "not found")
+					return
+				}
+				_ = spec.WriteSuccess(w, http.StatusOK, &mgr.Sandbox{
+					ID:           "sb-demo",
+					TeamID:       "team-1",
+					InternalAddr: "http://127.0.0.1:1",
+					Services: []mgr.SandboxAppService{{
+						ID:   "api",
+						Port: port,
+						Ingress: mgr.SandboxAppServiceIngress{
+							Public: true,
+							Routes: []mgr.SandboxAppServiceRoute{route},
+						},
+					}},
+				})
+			}))
+			defer manager.Close()
+
+			controller, rateLimiter, concurrencyLimiter, networkLimiter :=
+				newCountingPublicExposureTeamQuotaController(zap.NewNop())
+			var rateAdmissionsDuringAbuse atomic.Int64
+			var activeConnectionsDuringAbuse atomic.Int64
+			configure := test.configure
+			if test.observeAbuse {
+				configure = func(server *Server) {
+					server.sandboxServiceAbuseGuard = &fakeSandboxServiceAbuseGuard{
+						decision: ratelimit.Decision{Allowed: false},
+						onAllow: func() {
+							rateAdmissionsDuringAbuse.Store(rateLimiter.calls.Load())
+							activeConnectionsDuringAbuse.Store(concurrencyLimiter.active.Load())
+						},
+					}
+				}
+			}
+			gateway := newSandboxServiceExposureTestServerWithManagerURLQuotaAndConfigure(
+				t,
+				manager.URL,
+				controller,
+				configure,
+			)
+			gatewayServer := httptest.NewServer(gateway)
+			defer gatewayServer.Close()
+
+			const requestBody = "rejected-request"
+			request := newGatewayRequest(
+				t,
+				test.requestMethod,
+				gatewayServer.URL,
+				fmt.Sprintf("sb-demo--p%d.aws-us-east-1.sandbox0.app", port),
+				test.requestPath,
+			)
+			request.Body = io.NopCloser(strings.NewReader(requestBody))
+			request.ContentLength = int64(len(requestBody))
+			if test.configureReq != nil {
+				test.configureReq(request)
+			}
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatalf("gateway request: %v", err)
+			}
+			defer response.Body.Close()
+			responseBody, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatalf("read response: %v", err)
+			}
+
+			if response.StatusCode != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", response.StatusCode, test.wantStatus, responseBody)
+			}
+			assertRejectedSandboxServiceTeamQuota(
+				t,
+				rateLimiter,
+				concurrencyLimiter,
+				networkLimiter,
+				len(requestBody),
+				len(responseBody),
+			)
+			if test.observeAbuse {
+				if got := rateAdmissionsDuringAbuse.Load(); got != 1 {
+					t.Fatalf("sandbox_service_requests admissions during abuse check = %d, want 1", got)
+				}
+				if got := activeConnectionsDuringAbuse.Load(); got != 1 {
+					t.Fatalf("active_connection_count leases during abuse check = %d, want 1", got)
+				}
+			}
+		})
+	}
+}
+
+func TestSandboxServiceTeamQuotaDenialPrecedesRouteResolution(t *testing.T) {
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/internal/v1/sandboxes/sb-demo" {
+			spec.WriteError(w, http.StatusNotFound, spec.CodeNotFound, "not found")
+			return
+		}
+		_ = spec.WriteSuccess(w, http.StatusOK, &mgr.Sandbox{
+			ID:     "sb-demo",
+			TeamID: "team-1",
+		})
+	}))
+	defer manager.Close()
+
+	gateway := newSandboxServiceExposureTestServerWithManagerURLAndQuota(
+		t,
+		manager.URL,
+		newZeroRateTeamQuotaController(zap.NewNop()),
+	)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "http://gateway/not-exposed", nil)
+	request.Host = "sb-demo--p3000.aws-us-east-1.sandbox0.app"
+	gateway.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf(
+			"status = %d, want quota rejection %d before route rejection; body=%s",
+			recorder.Code,
+			http.StatusTooManyRequests,
+			recorder.Body.String(),
+		)
+	}
+}
+
+func assertRejectedSandboxServiceTeamQuota(
+	t *testing.T,
+	rateLimiter *countingTeamQuotaRateLimiter,
+	concurrencyLimiter *countingTeamQuotaConcurrencyLimiter,
+	networkLimiter *countingTeamQuotaNetworkLimiter,
+	requestBytes int,
+	responseBytes int,
+) {
+	t.Helper()
+	if calls := rateLimiter.calls.Load(); calls != 1 {
+		t.Fatalf("sandbox_service_requests admissions = %d, want 1", calls)
+	}
+	if teamID := rateLimiter.lastTeamID.Load(); teamID != "team-1" {
+		t.Fatalf("sandbox_service_requests team = %v, want team-1", teamID)
+	}
+	if key := rateLimiter.lastKey.Load(); key != coreteamquota.KeySandboxServiceRequests {
+		t.Fatalf("rate quota key = %v, want %s", key, coreteamquota.KeySandboxServiceRequests)
+	}
+	if calls := concurrencyLimiter.acquireCalls.Load(); calls != 1 {
+		t.Fatalf("active_connection_count acquisitions = %d, want 1", calls)
+	}
+	if teamID := concurrencyLimiter.lastTeamID.Load(); teamID != "team-1" {
+		t.Fatalf("active_connection_count team = %v, want team-1", teamID)
+	}
+	if key := concurrencyLimiter.lastKey.Load(); key != coreteamquota.KeyActiveConnectionCount {
+		t.Fatalf("concurrency quota key = %v, want %s", key, coreteamquota.KeyActiveConnectionCount)
+	}
+	if calls := concurrencyLimiter.releaseCalls.Load(); calls != 1 {
+		t.Fatalf("active_connection_count releases = %d, want 1", calls)
+	}
+	if active := concurrencyLimiter.active.Load(); active != 0 {
+		t.Fatalf("active_connection_count live leases = %d, want 0", active)
+	}
+	if got := networkLimiter.BytesFor(coreteamquota.KeyNetworkIngressBytes); got != int64(requestBytes) {
+		t.Fatalf("network ingress bytes = %d, want %d", got, requestBytes)
+	}
+	if got := networkLimiter.BytesFor(coreteamquota.KeyNetworkEgressBytes); got != int64(responseBytes) {
+		t.Fatalf("network egress bytes = %d, want %d", got, responseBytes)
+	}
+	if got := networkLimiter.callsWithoutActiveLease.Load(); got != 0 {
+		t.Fatalf("network accounting calls without an active_connection_count lease = %d, want 0", got)
 	}
 }
 
@@ -186,7 +511,13 @@ func TestSandboxServiceExposureReturnsNotFoundForMissingSandbox(t *testing.T) {
 	}))
 	defer manager.Close()
 
-	gateway := newSandboxServiceExposureTestServerWithManagerURL(t, manager.URL)
+	controller, rateLimiter, concurrencyLimiter, networkLimiter :=
+		newCountingPublicExposureTeamQuotaController(zap.NewNop())
+	gateway := newSandboxServiceExposureTestServerWithManagerURLAndQuota(
+		t,
+		manager.URL,
+		controller,
+	)
 	gatewayServer := httptest.NewServer(gateway)
 	defer gatewayServer.Close()
 
@@ -199,6 +530,15 @@ func TestSandboxServiceExposureReturnsNotFoundForMissingSandbox(t *testing.T) {
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+	if calls := rateLimiter.calls.Load(); calls != 0 {
+		t.Fatalf("sandbox_service_requests admissions = %d, want 0 before ownership resolves", calls)
+	}
+	if calls := concurrencyLimiter.acquireCalls.Load(); calls != 0 {
+		t.Fatalf("active_connection_count acquisitions = %d, want 0 before ownership resolves", calls)
+	}
+	if bytes := networkLimiter.Bytes(); bytes != 0 {
+		t.Fatalf("network bytes = %d, want 0 before ownership resolves", bytes)
 	}
 }
 
@@ -963,6 +1303,32 @@ func newSandboxServiceExposureTestServer(t *testing.T, sandbox *mgr.Sandbox) htt
 }
 
 func newSandboxServiceExposureTestServerWithManagerURL(t *testing.T, managerURL string) http.Handler {
+	return newSandboxServiceExposureTestServerWithManagerURLAndQuota(
+		t,
+		managerURL,
+		newAllowingTeamQuotaController(zap.NewNop()),
+	)
+}
+
+func newSandboxServiceExposureTestServerWithManagerURLAndQuota(
+	t *testing.T,
+	managerURL string,
+	teamQuotaController *gatewayteamquota.Controller,
+) http.Handler {
+	return newSandboxServiceExposureTestServerWithManagerURLQuotaAndConfigure(
+		t,
+		managerURL,
+		teamQuotaController,
+		nil,
+	)
+}
+
+func newSandboxServiceExposureTestServerWithManagerURLQuotaAndConfigure(
+	t *testing.T,
+	managerURL string,
+	teamQuotaController *gatewayteamquota.Controller,
+	configure func(*Server),
+) http.Handler {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -975,6 +1341,8 @@ func newSandboxServiceExposureTestServerWithManagerURL(t *testing.T, managerURL 
 		PrivateKey: privateKey,
 		TTL:        time.Minute,
 	})
+	abuseGuard := ratelimit.NewMemoryLimiter(ratelimit.MemoryConfig{})
+	t.Cleanup(func() { _ = abuseGuard.Close() })
 
 	s := &Server{
 		cfg: &config.ClusterGatewayConfig{
@@ -985,14 +1353,18 @@ func newSandboxServiceExposureTestServerWithManagerURL(t *testing.T, managerURL 
 			},
 			ProxyTimeout: metav1.Duration{Duration: 10 * time.Second},
 		},
-		logger:                zap.NewNop(),
-		managerClient:         client.NewManagerClient(managerURL, gen, zap.NewNop(), time.Second),
-		internalAuthGen:       gen,
-		sandboxServiceLimiter: ratelimit.NewMemoryLimiter(ratelimit.MemoryConfig{}),
+		logger:                   zap.NewNop(),
+		managerClient:            client.NewManagerClient(managerURL, gen, zap.NewNop(), time.Second),
+		internalAuthGen:          gen,
+		teamQuotaController:      teamQuotaController,
+		sandboxServiceAbuseGuard: abuseGuard,
 	}
-	router := gin.New()
-	router.NoRoute(s.handlePublicExposureNoRoute)
-	return router
+	if configure != nil {
+		configure(s)
+	}
+	s.router = gin.New()
+	s.setupPublicExposureNoRoute()
+	return s.router
 }
 
 func serverPort(t *testing.T, rawURL string) int {

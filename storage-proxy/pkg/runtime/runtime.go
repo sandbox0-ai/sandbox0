@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,7 +29,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/activeconnections"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/concurrency"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/storageoperations"
 	spmigrations "github.com/sandbox0-ai/sandbox0/storage-proxy/migrations"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/coordinator"
@@ -37,6 +41,7 @@ import (
 	httpserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volumelock"
 	"github.com/sirupsen/logrus"
@@ -44,7 +49,14 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const defaultShutdownTimeout = 30 * time.Second
+const (
+	defaultShutdownTimeout              = 30 * time.Second
+	defaultStorageQuotaRecoveryInterval = 30 * time.Second
+)
+
+type catalogStorageReconciler interface {
+	RecoverDueCatalogStorage(context.Context) error
+}
 
 // Options provides process-owned dependencies to a manager storage Runtime.
 // The runtime owns resources it creates, but never closes the supplied loggers,
@@ -74,6 +86,9 @@ type Runtime struct {
 	meteringRepo       *meteringoutbox.Repository
 	volMgr             *volume.Manager
 	coordinator        *coordinator.Coordinator
+	storageOperations  storageoperations.Quota
+	activeConnections  activeconnections.Quota
+	storageReconciler  catalogStorageReconciler
 	httpHandler        http.Handler
 	httpServer         *http.Server
 	listener           net.Listener
@@ -99,6 +114,12 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	}
 	if err := opts.Config.Validate(); err != nil {
 		return nil, fmt.Errorf("validate manager storage config: %w", err)
+	}
+	if strings.TrimSpace(opts.Config.DatabaseURL) == "" {
+		return nil, fmt.Errorf("DATABASE_URL is required for storage TeamQuota enforcement")
+	}
+	if strings.TrimSpace(opts.Config.RegionID) == "" {
+		return nil, fmt.Errorf("region_id is required for storage TeamQuota recovery ownership")
 	}
 	if opts.Logger == nil {
 		return nil, fmt.Errorf("manager storage zap logger is required")
@@ -134,7 +155,7 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	var repo *db.Repository
 	var meteringRepo *meteringoutbox.Repository
 	var meteringSink *meteringclickhouse.Repository
-	var quotaRepo *quota.Repository
+	var teamQuotaRepo *teamquota.Repository
 	if r.cfg.DatabaseURL != "" {
 		pool, err := initDatabase(ctx, r.cfg.DatabaseURL, r.cfg, r.logger, r.observability)
 		if err != nil {
@@ -153,22 +174,35 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		if err := runMigrations(ctx, pool, r.cfg.DatabaseSchema, r.logger); err != nil {
 			return nil, fmt.Errorf("run manager storage migrations: %w", err)
 		}
+		if err := teamquota.RunMigrations(ctx, pool, observability.NewMigrateLogger(r.logger)); err != nil {
+			return nil, fmt.Errorf("run TeamQuota migrations: %w", err)
+		}
+		stateIdentity, err := teamquota.ClaimRegionStateIdentity(
+			ctx,
+			pool,
+			teamquota.RegionStateIdentityConfig{
+				RegionID:        r.cfg.RegionID,
+				ExpectedStateID: r.cfg.TeamQuotaDistributedEnforcement.StateID,
+				RedisURL:        r.cfg.TeamQuotaDistributedEnforcement.RedisURL,
+				RedisKeyPrefix:  r.cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+				RedisTimeout:    r.cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("validate Team Quota region state identity: %w", err)
+		}
+		r.cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix = stateIdentity.KeyPrefix
 		if r.cfg.Metering.Enabled {
-			if err := quota.RunMigrations(ctx, pool, observability.NewMigrateLogger(r.logger)); err != nil {
-				return nil, fmt.Errorf("run storage quota migrations: %w", err)
-			}
 			if err := meteringoutbox.RunMigrations(ctx, pool, observability.NewMigrateLogger(r.logger)); err != nil {
 				return nil, fmt.Errorf("run storage metering outbox migrations: %w", err)
 			}
 		}
 
 		repo = db.NewRepository(pool)
+		teamQuotaRepo = teamquota.NewRepository(pool)
 		if r.cfg.Metering.Enabled {
-			quotaRepo = quota.NewRepository(pool)
 			meteringRepo = meteringoutbox.NewRepository(pool)
 		}
-	} else {
-		r.logger.Warn("DATABASE_URL not set, running manager storage without database persistence")
 	}
 	if r.cfg.Metering.Enabled && r.pool == nil {
 		return nil, fmt.Errorf("DATABASE_URL is required when storage metering is enabled")
@@ -201,11 +235,42 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 			r.logger.Warn("Starting storage runtime with deferred ClickHouse delivery; projection bootstrap is complete")
 		}
 	}
-	if quotaRepo != nil {
-		quotaRepo.SetUsageStore(meteringSink)
+	storageQuota := storagequota.New(teamQuotaRepo, storagequota.RegionRecoveryScope(r.cfg.RegionID))
+	storageOperations, err := storageoperations.NewRedis(
+		ctx,
+		teamQuotaRepo,
+		storageoperations.Config{
+			RegionID:       r.cfg.RegionID,
+			RedisURL:       r.cfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix: r.cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:   r.cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+			PolicyCacheTTL: r.cfg.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("initialize storage operation Team Quota: %w", err)
 	}
+	r.storageOperations = storageOperations
+	activeConnections, err := activeconnections.NewRedis(
+		ctx,
+		teamQuotaRepo,
+		concurrency.Config{
+			RegionID:       r.cfg.RegionID,
+			RedisURL:       r.cfg.TeamQuotaDistributedEnforcement.RedisURL,
+			RedisKeyPrefix: r.cfg.TeamQuotaDistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:   r.cfg.TeamQuotaDistributedEnforcement.RedisTimeout.Duration,
+			PolicyCacheTTL: r.cfg.TeamQuotaDistributedEnforcement.PolicyCacheTTL.Duration,
+			LeaseTTL:       r.cfg.TeamQuotaDistributedEnforcement.LeaseTTL.Duration,
+			RenewInterval:  r.cfg.TeamQuotaDistributedEnforcement.RenewInterval.Duration,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("initialize storage active connection Team Quota: %w", err)
+	}
+	r.activeConnections = activeConnections
 
 	r.volMgr = volume.NewManager(r.logrusLogger, r.cfg, repo)
+	r.volMgr.SetStorageQuota(storageQuota)
 	r.volMgr.SetMetrics(storageProxyMetrics)
 	var volumeBarrier *volumelock.Locker
 	if r.pool != nil {
@@ -245,6 +310,8 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	httpAuthenticator := auth.NewHTTPAuthenticator(validator, r.logger)
 
 	fsServer := fsserver.NewFileSystemServer(r.volMgr, repo, eventHub, eventBroadcaster, r.logrusLogger, volumeBarrier)
+	fsServer.SetStorageQuota(storageQuota)
+	fsServer.SetStorageOperationQuota(storageOperations)
 	if r.sharedClock != nil {
 		fsServer.SetNowFunc(r.sharedClock.Now)
 	}
@@ -254,7 +321,11 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		return nil, fmt.Errorf("initialize snapshot manager: %w", err)
 	}
 	snapshotMgr.SetMeteringRepository(meteringRepo)
-	snapshotMgr.SetQuotaRepository(quotaRepo)
+	snapshotMgr.SetStorageQuota(storageQuota)
+	if err := snapshotMgr.ReconcileCatalogStorage(ctx); err != nil {
+		return nil, fmt.Errorf("reconcile storage catalog into TeamQuota: %w", err)
+	}
+	r.storageReconciler = snapshotMgr
 	r.volMgr.SetStorageObserver(snapshotMgr)
 	if eventBroadcaster != nil {
 		snapshotMgr.SetEventPublisher(eventBroadcaster)
@@ -264,7 +335,9 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	}
 
 	storageHTTP := httpserver.NewServer(r.logrusLogger, r.cfg, r.k8sClient, repo, meteringRepo, r.cfg.RegionID, httpAuthenticator, snapshotMgr, volumeBarrier, r.volMgr, fsServer, eventHub)
-	storageHTTP.SetQuotaRepository(quotaRepo)
+	storageHTTP.SetStorageQuota(storageQuota)
+	storageHTTP.SetStorageOperationQuota(storageOperations)
+	storageHTTP.SetActiveConnectionQuota(activeConnections)
 	r.httpHandler = storageHTTP
 	if r.observability != nil {
 		r.httpHandler = httpobs.ServerMiddleware(r.observability.HTTPServerConfig(nil))(r.httpHandler)
@@ -338,6 +411,9 @@ func (r *Runtime) Start(ctx context.Context) error {
 	if r.meteringRepo != nil {
 		r.workers.Add(1)
 	}
+	if r.storageReconciler != nil {
+		r.workers.Add(1)
+	}
 	r.started = true
 	r.mu.Unlock()
 
@@ -353,6 +429,15 @@ func (r *Runtime) Start(ctx context.Context) error {
 		go func() {
 			defer r.workers.Done()
 			runStorageMeteringFlushLoop(runCtx, r.meteringRepo, r.cfg.RegionID, r.logger)
+		}()
+	}
+	if r.storageReconciler != nil {
+		go func() {
+			defer r.workers.Done()
+			r.runStorageQuotaRecovery(
+				runCtx,
+				defaultStorageQuotaRecoveryInterval,
+			)
 		}()
 	}
 
@@ -444,6 +529,8 @@ func (r *Runtime) closeResources(ctx context.Context) error {
 	volMgr := r.volMgr
 	sharedClock := r.sharedClock
 	meteringDB := r.meteringDB
+	storageOperations := r.storageOperations
+	activeConnections := r.activeConnections
 	pool := r.pool
 	r.mu.Unlock()
 
@@ -484,6 +571,16 @@ func (r *Runtime) closeResources(ctx context.Context) error {
 	if meteringDB != nil {
 		if err := meteringDB.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close metering database: %w", err))
+		}
+	}
+	if storageOperations != nil {
+		if err := storageOperations.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close storage operation Team Quota: %w", err))
+		}
+	}
+	if activeConnections != nil {
+		if err := activeConnections.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close storage active connection Team Quota: %w", err))
 		}
 	}
 	if pool != nil {
@@ -530,6 +627,34 @@ func (r *Runtime) runDirectMountCleanup(ctx context.Context, idleTTL, cleanupInt
 		case <-ticker.C:
 			if errs := r.volMgr.CleanupIdleDirectVolumeFileMounts(ctx, idleTTL); len(errs) > 0 {
 				r.logger.Warn("Idle direct volume file cleanup reported errors", zap.Int("error_count", len(errs)))
+			}
+		}
+	}
+}
+
+func (r *Runtime) runStorageQuotaRecovery(
+	ctx context.Context,
+	interval time.Duration,
+) {
+	if r == nil || r.storageReconciler == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = defaultStorageQuotaRecoveryInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.storageReconciler.RecoverDueCatalogStorage(ctx); err != nil &&
+				!errors.Is(err, context.Canceled) {
+				r.logger.Error(
+					"Periodic storage TeamQuota recovery failed",
+					zap.Error(err),
+				)
 			}
 		}
 	}

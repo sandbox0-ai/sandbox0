@@ -8,8 +8,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"go.uber.org/zap"
 )
 
 func (s *Server) proxyPublicExposureNoRoute(c *gin.Context) {
@@ -29,6 +31,13 @@ func (s *Server) proxyPublicExposureNoRoute(c *gin.Context) {
 		return
 	}
 
+	token, err := s.generateInternalToken(nil, internalauth.ServiceClusterGateway)
+	if err != nil {
+		s.logger.Error("Failed to sign public exposure forward", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
+		return
+	}
+	c.Request.Header.Set(internalauth.DefaultTokenHeader, token)
 	c.Request.Header.Set("X-Sandbox-ID", sandboxID)
 	c.Request.Header.Set("X-Exposure-Port", strconv.Itoa(port))
 	c.Request = proxy.WithUpstreamTimeoutDisabledRequest(c.Request)

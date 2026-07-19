@@ -39,6 +39,7 @@ func (s *Server) proxySOCKS5Session(req *adapterRequest) error {
 		return err
 	}
 	defer upstream.Close()
+	upstreamIngress := newCredentialIngressReader(req, upstream)
 
 	clientMethods, greeting, err := readSOCKS5Greeting(reader)
 	if err != nil {
@@ -46,12 +47,12 @@ func (s *Server) proxySOCKS5Session(req *adapterRequest) error {
 	}
 	rewrittenGreeting, clientOfferedUserPass := ensureSOCKS5Method(greeting, clientMethods, socks5MethodUsernamePassword)
 	clientOfferedNoAuth := socks5MethodsContain(clientMethods, socks5MethodNoAuth)
-	if err := writeCounted(req, upstream, rewrittenGreeting, true); err != nil {
+	if err := writeCredentialUpstream(req, upstream, rewrittenGreeting); err != nil {
 		return fmt.Errorf("write socks5 greeting upstream: %w", err)
 	}
 
 	methodSelection := make([]byte, 2)
-	if _, err := io.ReadFull(upstream, methodSelection); err != nil {
+	if _, err := io.ReadFull(upstreamIngress, methodSelection); err != nil {
 		return fmt.Errorf("read socks5 method selection: %w", err)
 	}
 
@@ -60,15 +61,15 @@ func (s *Server) proxySOCKS5Session(req *adapterRequest) error {
 		if !clientOfferedUserPass && !clientOfferedNoAuth {
 			applyEgressAuthFailurePolicy(req.EgressAuth, "socks5", "client_auth_incompatible")
 			if req.EgressAuth.ShouldBypass() {
-				if err := writeCounted(req, req.Conn, methodSelection, false); err != nil {
+				if err := writeCredentialDownstream(req.Conn, methodSelection); err != nil {
 					return fmt.Errorf("write socks5 method selection to client: %w", err)
 				}
-				return s.pipeWithReader(req.Conn, upstream, reader, req.Compiled, req.Audit)
+				return s.pipeWithReader(req.Context, req.Conn, upstream, reader, req.Compiled, req.Audit)
 			}
 			return fmt.Errorf("socks5 client does not support an injectable auth method")
 		}
 		if clientOfferedUserPass {
-			if err := writeCounted(req, req.Conn, methodSelection, false); err != nil {
+			if err := writeCredentialDownstream(req.Conn, methodSelection); err != nil {
 				return fmt.Errorf("write socks5 method selection to client: %w", err)
 			}
 			if _, err := readSOCKS5UsernamePasswordRequest(reader); err != nil {
@@ -80,16 +81,16 @@ func (s *Server) proxySOCKS5Session(req *adapterRequest) error {
 		if err != nil {
 			return err
 		}
-		if err := writeCounted(req, upstream, authRequest, true); err != nil {
+		if err := writeCredentialUpstream(req, upstream, authRequest); err != nil {
 			return fmt.Errorf("write socks5 auth request upstream: %w", err)
 		}
 
 		authResponse := make([]byte, 2)
-		if _, err := io.ReadFull(upstream, authResponse); err != nil {
+		if _, err := io.ReadFull(upstreamIngress, authResponse); err != nil {
 			return fmt.Errorf("read socks5 auth response: %w", err)
 		}
 		if clientOfferedUserPass {
-			if err := writeCounted(req, req.Conn, authResponse, false); err != nil {
+			if err := writeCredentialDownstream(req.Conn, authResponse); err != nil {
 				return fmt.Errorf("write socks5 auth response to client: %w", err)
 			}
 		} else {
@@ -97,7 +98,7 @@ func (s *Server) proxySOCKS5Session(req *adapterRequest) error {
 			if authResponse[1] != 0x00 {
 				selection[1] = socks5MethodNoAcceptable
 			}
-			if err := writeCounted(req, req.Conn, selection, false); err != nil {
+			if err := writeCredentialDownstream(req.Conn, selection); err != nil {
 				return fmt.Errorf("write socks5 shim method selection to client: %w", err)
 			}
 		}
@@ -105,17 +106,17 @@ func (s *Server) proxySOCKS5Session(req *adapterRequest) error {
 			return fmt.Errorf("socks5 upstream rejected injected credentials")
 		}
 	default:
-		if err := writeCounted(req, req.Conn, methodSelection, false); err != nil {
+		if err := writeCredentialDownstream(req.Conn, methodSelection); err != nil {
 			return fmt.Errorf("write socks5 method selection to client: %w", err)
 		}
 		applyEgressAuthFailurePolicy(req.EgressAuth, "socks5", "upstream_auth_unavailable")
 		if req.EgressAuth.ShouldBypass() {
-			return s.pipeWithReader(req.Conn, upstream, reader, req.Compiled, req.Audit)
+			return s.pipeWithReader(req.Context, req.Conn, upstream, reader, req.Compiled, req.Audit)
 		}
 		return fmt.Errorf("socks5 upstream selected unsupported auth method %d", methodSelection[1])
 	}
 
-	return s.pipeWithReader(req.Conn, upstream, reader, req.Compiled, req.Audit)
+	return s.pipeWithReader(req.Context, req.Conn, upstream, reader, req.Compiled, req.Audit)
 }
 
 func (s *Server) proxyMQTTSession(req *adapterRequest) error {
@@ -145,10 +146,10 @@ func (s *Server) proxyMQTTSession(req *adapterRequest) error {
 	}
 	defer upstream.Close()
 
-	if err := writeCounted(req, upstream, rewritten, true); err != nil {
+	if err := writeCredentialUpstream(req, upstream, rewritten); err != nil {
 		return fmt.Errorf("write rewritten mqtt connect packet upstream: %w", err)
 	}
-	return s.pipeWithReader(req.Conn, upstream, reader, req.Compiled, req.Audit)
+	return s.pipeWithReader(req.Context, req.Conn, upstream, reader, req.Compiled, req.Audit)
 }
 
 func (s *Server) proxyRedisSession(req *adapterRequest) error {
@@ -173,7 +174,7 @@ func (s *Server) proxyRedisSession(req *adapterRequest) error {
 		return err
 	}
 	defer upstream.Close()
-	upstreamReader := bufio.NewReader(upstream)
+	upstreamReader := bufio.NewReader(newCredentialIngressReader(req, upstream))
 
 	authFrames := [][]byte{buildRedisAUTHCommand(req.EgressAuth.ResolvedUsernamePassword.Username, req.EgressAuth.ResolvedUsernamePassword.Password)}
 	if strings.EqualFold(req.EgressAuth.ResolvedUsernamePassword.Username, "default") {
@@ -182,7 +183,7 @@ func (s *Server) proxyRedisSession(req *adapterRequest) error {
 
 	authSucceeded := false
 	for _, authFrame := range authFrames {
-		if err := writeCounted(req, upstream, authFrame, true); err != nil {
+		if err := writeCredentialUpstream(req, upstream, authFrame); err != nil {
 			return fmt.Errorf("write redis auth command upstream: %w", err)
 		}
 		reply, err := readRESPFrame(upstreamReader)
@@ -202,12 +203,12 @@ func (s *Server) proxyRedisSession(req *adapterRequest) error {
 	}
 
 	if authSucceeded && isRedisAUTHCommand(firstFrame) {
-		return s.pipeWithReader(req.Conn, upstream, reader, req.Compiled, req.Audit)
+		return s.pipeWithReader(req.Context, req.Conn, upstream, reader, req.Compiled, req.Audit)
 	}
-	if err := writeCounted(req, upstream, firstFrame, true); err != nil {
+	if err := writeCredentialUpstream(req, upstream, firstFrame); err != nil {
 		return fmt.Errorf("write redis first command upstream: %w", err)
 	}
-	return s.pipeWithReader(req.Conn, upstream, reader, req.Compiled, req.Audit)
+	return s.pipeWithReader(req.Context, req.Conn, upstream, reader, req.Compiled, req.Audit)
 }
 
 func (s *Server) dialUpstreamTCP(req *adapterRequest) (*countingConn, error) {
@@ -228,7 +229,51 @@ func multiReader(prefix io.Reader, conn net.Conn) io.Reader {
 	return io.MultiReader(prefix, conn)
 }
 
-func writeCounted(req *adapterRequest, conn net.Conn, payload []byte, upstream bool) error {
+type credentialIngressReader struct {
+	req    *adapterRequest
+	reader io.Reader
+}
+
+func newCredentialIngressReader(req *adapterRequest, reader io.Reader) io.Reader {
+	if req == nil || req.Server == nil || reader == nil {
+		return reader
+	}
+	return &credentialIngressReader{req: req, reader: reader}
+}
+
+func (r *credentialIngressReader) Read(payload []byte) (int, error) {
+	if r == nil || r.reader == nil {
+		return 0, fmt.Errorf("credential ingress reader is not configured")
+	}
+	if len(payload) > 0 && r.req != nil && r.req.Server != nil && r.req.Server.bandwidthLimiter != nil {
+		maxChunk, err := r.req.Server.bandwidthLimiter.maxChunkBytes(
+			r.req.Context,
+			r.req.Compiled,
+			bandwidthIngress,
+		)
+		if err != nil {
+			return 0, err
+		}
+		if maxChunk > 0 && maxChunk < len(payload) {
+			payload = payload[:maxChunk]
+		}
+	}
+	n, err := r.reader.Read(payload)
+	if n <= 0 || r.req == nil || r.req.Server == nil {
+		return n, err
+	}
+	waitErr := r.req.Server.waitBandwidth(r.req.Context, r.req.Compiled, bandwidthIngress, n)
+	r.req.Server.recordIngressBytes(r.req.Compiled, int64(n), r.req.Audit)
+	if waitErr != nil {
+		// The upstream bytes were physically received and are therefore
+		// recorded, but exposing n > 0 would let buffered protocol parsers
+		// consume them before observing the admission failure.
+		return 0, waitErr
+	}
+	return n, err
+}
+
+func writeCredentialUpstream(req *adapterRequest, conn net.Conn, payload []byte) error {
 	if len(payload) == 0 {
 		return nil
 	}
@@ -236,23 +281,28 @@ func writeCounted(req *adapterRequest, conn net.Conn, payload []byte, upstream b
 	if counter, ok := conn.(*countingConn); ok {
 		before = counter.WrittenBytes()
 	}
+	writer := io.Writer(conn)
 	if req != nil && req.Server != nil {
-		direction := bandwidthIngress
-		if upstream {
-			direction = bandwidthEgress
-		}
-		if err := req.Server.waitBandwidth(req.Compiled, direction, len(payload)); err != nil {
-			return err
-		}
+		writer = req.Server.bandwidthLimitedWriter(req.Context, conn, req.Compiled, bandwidthEgress)
+	}
+	n, err := writer.Write(payload)
+	if counter, ok := conn.(*countingConn); ok && req != nil && req.Server != nil {
+		req.Server.recordEgressBytes(req.Compiled, counter.WrittenBytes()-before, req.Audit)
+	}
+	if err != nil {
+		return err
+	}
+	if n != len(payload) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+func writeCredentialDownstream(conn net.Conn, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
 	}
 	n, err := conn.Write(payload)
-	if upstream {
-		if counter, ok := conn.(*countingConn); ok {
-			req.Server.recordEgressBytes(req.Compiled, counter.WrittenBytes()-before, req.Audit)
-		}
-	} else {
-		req.Server.recordIngressBytes(req.Compiled, int64(n), req.Audit)
-	}
 	if err != nil {
 		return err
 	}

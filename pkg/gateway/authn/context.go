@@ -46,7 +46,10 @@ type AuthContext struct {
 	UserID     string
 	APIKeyID   string
 
-	TeamRole      string
+	TeamRole string
+	// TeamGrants contains the signed team grants from a human access token.
+	// Non-JWT authentication methods leave it empty.
+	TeamGrants    []TeamGrant
 	IsSystemAdmin bool
 	Permissions   []string
 
@@ -193,6 +196,19 @@ func (ac *AuthContext) HasPermission(permission string) bool {
 // HasRole checks if the auth context has a specific role.
 func (ac *AuthContext) HasRole(role string) bool {
 	return ac.TeamRole == role
+}
+
+// FindTeamGrant returns the signed JWT grant for teamID.
+func (ac *AuthContext) FindTeamGrant(teamID string) (TeamGrant, bool) {
+	if ac == nil {
+		return TeamGrant{}, false
+	}
+	for _, grant := range ac.TeamGrants {
+		if grant.TeamID == teamID {
+			return grant, true
+		}
+	}
+	return TeamGrant{}, false
 }
 
 // ExpandRolePermissions expands a team role into permissions.

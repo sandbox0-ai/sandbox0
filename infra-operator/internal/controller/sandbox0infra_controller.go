@@ -93,6 +93,7 @@ type Sandbox0InfraReconciler struct {
 //+kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses;networkpolicies,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=node.k8s.io,resources=runtimeclasses,verbs=get;list;watch
 //+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings;clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete;bind
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=storage.k8s.io,resources=csidrivers,verbs=get;list;watch;create;update;patch;delete
@@ -127,6 +128,12 @@ func (r *Sandbox0InfraReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Update(ctx, infra); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	if requeue, err := r.ensureTeamQuotaStateIdentity(ctx, infra); err != nil {
+		return ctrl.Result{}, err
+	} else if requeue {
 		return ctrl.Result{Requeue: true}, nil
 	}
 

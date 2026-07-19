@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -149,6 +150,9 @@ func (s *SandboxService) setNetworkPolicyAnnotations(pod *corev1.Pod, spec *v1al
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
+	if err := ValidateCompiledNetworkPolicySize(spec); err != nil {
+		return "", err
+	}
 	annotation, err := v1alpha1.NetworkPolicyToAnnotation(spec)
 	if err != nil {
 		return "", fmt.Errorf("serialize network policy: %w", err)
@@ -198,6 +202,11 @@ func (s *SandboxService) syncCredentialBindings(
 	teamID string,
 	state *BuildNetworkPolicyResult,
 ) (func(context.Context) error, error) {
+	if state != nil {
+		if err := templatepkg.ValidateCredentialBindingsSize(state.CredentialBindings); err != nil {
+			return nil, err
+		}
+	}
 	if s.credentialStore == nil || pod == nil || state == nil {
 		return noopCredentialBindingRollback, nil
 	}
@@ -629,6 +638,9 @@ func (s *SandboxService) UpdateNetworkPolicy(
 	if policy == nil {
 		return nil, fmt.Errorf("network policy is required")
 	}
+	if err := ValidateSandboxNetworkPolicySize(policy); err != nil {
+		return nil, err
+	}
 	if s.NetworkPolicyService == nil {
 		return nil, fmt.Errorf("network policy service not configured")
 	}
@@ -662,6 +674,27 @@ func (s *SandboxService) UpdateNetworkPolicy(
 			}
 		}
 
+		var storedConfig SandboxConfig
+		updateStoredConfig := false
+		if configJSON := current.Annotations[controller.AnnotationConfig]; configJSON != "" {
+			if err := json.Unmarshal([]byte(configJSON), &storedConfig); err != nil {
+				s.logger.Warn("Failed to parse sandbox config annotation",
+					zap.String("sandboxID", sandboxID),
+					zap.Error(err),
+				)
+			} else {
+				updateStoredConfig = true
+			}
+		} else {
+			updateStoredConfig = true
+		}
+		if updateStoredConfig {
+			storedConfig.Network = sanitizedNetworkPolicyForPersistence(policy)
+			if err := ValidateSandboxConfigSize(&storedConfig); err != nil {
+				return err
+			}
+		}
+
 		currentSandboxID := sandboxIDFromPod(current)
 		if currentSandboxID == "" {
 			currentSandboxID = current.Name
@@ -678,6 +711,9 @@ func (s *SandboxService) UpdateNetworkPolicy(
 			return fmt.Errorf("%w: %v", ErrInvalidNetworkPolicy, err)
 		}
 		networkState = s.NetworkPolicyService.BuildNetworkPolicyState(buildReq)
+		if err := ValidateCompiledNetworkPolicySize(policySpecFromState(networkState)); err != nil {
+			return err
+		}
 		rollbackBindings, err = s.syncCredentialBindings(ctx, current, teamID, networkState)
 		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)
@@ -691,23 +727,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 			return err
 		}
 
-		if configJSON := updatedPod.Annotations[controller.AnnotationConfig]; configJSON != "" {
-			var storedConfig SandboxConfig
-			if err := json.Unmarshal([]byte(configJSON), &storedConfig); err != nil {
-				s.logger.Warn("Failed to parse sandbox config annotation",
-					zap.String("sandboxID", sandboxID),
-					zap.Error(err),
-				)
-			} else {
-				storedConfig.Network = sanitizedNetworkPolicyForPersistence(policy)
-				updatedConfigJSON, err := json.Marshal(storedConfig)
-				if err != nil {
-					return fmt.Errorf("marshal sandbox config: %w", err)
-				}
-				updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
-			}
-		} else {
-			storedConfig := SandboxConfig{Network: sanitizedNetworkPolicyForPersistence(policy)}
+		if updateStoredConfig {
 			updatedConfigJSON, err := json.Marshal(storedConfig)
 			if err != nil {
 				return fmt.Errorf("marshal sandbox config: %w", err)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -45,6 +47,70 @@ func TestTemplateBuildWorkerReconcilingClaimOnlyCleansUp(t *testing.T) {
 	}
 	if !queue.finished {
 		t.Fatal("reconciling build queue row was not finished")
+	}
+}
+
+func TestTemplateBuildWorkerProcessesDurableImageCleanup(t *testing.T) {
+	t.Parallel()
+
+	cleanup := &template.TemplateImageCleanup{
+		CleanupID:    "cleanup-1",
+		TeamID:       "team-1",
+		TemplateID:   "template-1",
+		OutputImage:  "registry.example.com/template@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		AttemptCount: 1,
+	}
+	queue := &fakeTemplateBuildQueue{cleanup: cleanup}
+	publisher := &fakeTemplateImagePublisher{}
+	worker := newTemplateBuildWorkerForTest(t, queue, &fakeTemplateBuildCapturer{}, publisher, emptyTemplateObjectReader{})
+
+	worked, err := worker.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if !worked || publisher.deleteCalls != 1 || !queue.cleanupFinished {
+		t.Fatalf(
+			"cleanup state worked=%v delete_calls=%d finished=%v",
+			worked,
+			publisher.deleteCalls,
+			queue.cleanupFinished,
+		)
+	}
+	if queue.claimed {
+		t.Fatal("template build must not be claimed before pending image cleanup")
+	}
+	if queue.cleanupClaimClusterID != "cluster-1" {
+		t.Fatalf("cleanup claim cluster = %q, want cluster-1", queue.cleanupClaimClusterID)
+	}
+}
+
+func TestTemplateBuildWorkerRetriesFailedImageCleanupWithoutAck(t *testing.T) {
+	t.Parallel()
+
+	cleanup := &template.TemplateImageCleanup{
+		CleanupID:    "cleanup-1",
+		TeamID:       "team-1",
+		TemplateID:   "template-1",
+		OutputImage:  "registry.example.com/template@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		AttemptCount: 1000,
+	}
+	queue := &fakeTemplateBuildQueue{cleanup: cleanup}
+	publisher := &fakeTemplateImagePublisher{deleteErr: templateimage.ErrRegistryDeleteUnsupported}
+	worker := newTemplateBuildWorkerForTest(t, queue, &fakeTemplateBuildCapturer{}, publisher, emptyTemplateObjectReader{})
+
+	worked, err := worker.RunOnce(context.Background())
+	if !worked || !errors.Is(err, templateimage.ErrRegistryDeleteUnsupported) {
+		t.Fatalf("RunOnce() = worked %v, error %v", worked, err)
+	}
+	if !queue.cleanupReleased || queue.cleanupFinished {
+		t.Fatalf(
+			"failed cleanup released=%v finished=%v",
+			queue.cleanupReleased,
+			queue.cleanupFinished,
+		)
+	}
+	if delay := time.Until(queue.cleanupRetryAt); delay < 4*time.Minute+50*time.Second || delay > 5*time.Minute+time.Second {
+		t.Fatalf("cleanup retry delay = %s, want bounded at five minutes", delay)
 	}
 }
 
@@ -110,6 +176,44 @@ func TestTemplateBuildWorkerCapturesLegacyDiffIDPublishesAndCleansUp(t *testing.
 	}
 	if !queue.finished || len(capturer.deleted) != 1 {
 		t.Fatalf("cleanup state: finished=%v deleted=%#v", queue.finished, capturer.deleted)
+	}
+}
+
+func TestTemplateBuildWorkerQuotaRejectsBeforeRegistryPush(t *testing.T) {
+	t.Parallel()
+
+	build := templateBuildWorkerTestBuild()
+	queue := &fakeTemplateBuildQueue{
+		build: build,
+		reserveErr: &teamquota.ExceededError{
+			TeamID:    build.TeamID,
+			Key:       teamquota.KeyTemplateImageStorageBytes,
+			Limit:     1,
+			Requested: 2,
+		},
+	}
+	publisher := &fakeTemplateImagePublisher{result: &templateimage.Result{
+		PullReference:    "registry.internal/template@sha256:" + strings.Repeat("a", 64),
+		ManifestDigest:   digest.Digest("sha256:" + strings.Repeat("a", 64)),
+		LogicalSizeBytes: 2,
+	}}
+	worker := newTemplateBuildWorkerForTest(
+		t,
+		queue,
+		&fakeTemplateBuildCapturer{capture: templateBuildWorkerTestCapture(build)},
+		publisher,
+		emptyTemplateObjectReader{},
+	)
+
+	worked, err := worker.RunOnce(context.Background())
+	if !worked || !teamquota.IsExceeded(err) {
+		t.Fatalf("RunOnce() = worked %v, error %v; want quota exceeded", worked, err)
+	}
+	if publisher.calls != 0 {
+		t.Fatalf("registry publish calls = %d, want 0 before quota admission", publisher.calls)
+	}
+	if queue.imagePushStarted {
+		t.Fatal("push-start marker was written after rejected quota reservation")
 	}
 }
 
@@ -303,19 +407,57 @@ func templateBuildWorkerTestCapture(build *template.TemplateBuild) *TemplateBuil
 }
 
 type fakeTemplateBuildQueue struct {
-	mu                sync.Mutex
-	build             *template.TemplateBuild
-	claimed           bool
-	cancelAfterChecks int
-	cancelChecks      int
-	capturedMetadata  json.RawMessage
-	publishedSpec     v1alpha1.SandboxTemplateSpec
-	outputImage       string
-	finished          bool
-	released          bool
-	failed            bool
-	renewed           int
-	claimClusterID    string
+	mu                       sync.Mutex
+	build                    *template.TemplateBuild
+	claimed                  bool
+	cancelAfterChecks        int
+	cancelChecks             int
+	capturedMetadata         json.RawMessage
+	imageReserved            bool
+	imagePushStarted         bool
+	reservedDigest           string
+	reservedLogicalSizeBytes int64
+	reserveErr               error
+	publishedSpec            v1alpha1.SandboxTemplateSpec
+	outputImage              string
+	finished                 bool
+	released                 bool
+	failed                   bool
+	renewed                  int
+	claimClusterID           string
+	cleanup                  *template.TemplateImageCleanup
+	cleanupClaimed           bool
+	cleanupClaimClusterID    string
+	cleanupReleased          bool
+	cleanupRetryAt           time.Time
+	cleanupFinished          bool
+}
+
+func (q *fakeTemplateBuildQueue) ClaimTemplateImageCleanup(_ context.Context, clusterID, _ string, _ time.Duration) (*template.TemplateImageCleanup, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cleanupClaimClusterID = clusterID
+	if q.cleanup == nil || q.cleanupClaimed {
+		return nil, nil
+	}
+	q.cleanupClaimed = true
+	copy := *q.cleanup
+	return &copy, nil
+}
+
+func (q *fakeTemplateBuildQueue) ReleaseTemplateImageCleanup(_ context.Context, _, _ string, retryAt time.Time, _ string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cleanupReleased = true
+	q.cleanupRetryAt = retryAt
+	return nil
+}
+
+func (q *fakeTemplateBuildQueue) FinishTemplateImageCleanup(context.Context, string, string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.cleanupFinished = true
+	return nil
 }
 
 func (q *fakeTemplateBuildQueue) ClaimTemplateBuild(_ context.Context, clusterID, _ string, _ time.Duration) (*template.TemplateBuild, error) {
@@ -345,7 +487,33 @@ func (q *fakeTemplateBuildQueue) MarkTemplateBuildCaptured(_ context.Context, _,
 	return nil
 }
 
-func (q *fakeTemplateBuildQueue) PublishTemplateBuild(_ context.Context, _, _ string, spec v1alpha1.SandboxTemplateSpec, outputImage string) error {
+func (q *fakeTemplateBuildQueue) ReserveTemplateImageBuild(
+	_ context.Context,
+	_, _, manifestDigest string,
+	logicalSizeBytes int64,
+) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.imageReserved = true
+	q.reservedDigest = manifestDigest
+	q.reservedLogicalSizeBytes = logicalSizeBytes
+	return q.reserveErr
+}
+
+func (q *fakeTemplateBuildQueue) MarkTemplateImagePushStarted(context.Context, string, string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.imagePushStarted = true
+	return nil
+}
+
+func (q *fakeTemplateBuildQueue) PublishTemplateBuild(
+	_ context.Context,
+	_, _ string,
+	spec v1alpha1.SandboxTemplateSpec,
+	outputImage, _ string,
+	_ int64,
+) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.publishedSpec = spec
@@ -374,7 +542,7 @@ func (q *fakeTemplateBuildQueue) TemplateBuildCancelled(context.Context, string)
 	return q.cancelAfterChecks > 0 && q.cancelChecks >= q.cancelAfterChecks, nil
 }
 
-func (q *fakeTemplateBuildQueue) FinishTemplateBuild(context.Context, string, string) error {
+func (q *fakeTemplateBuildQueue) FinishTemplateBuild(context.Context, string, string, bool) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.finished = true
@@ -404,16 +572,40 @@ type fakeTemplateImagePublisher struct {
 	waitForCancellation bool
 	request             templateimage.BuildRequest
 	calls               int
+	deleteErr           error
+	deleteRequest       templateimage.DeleteRequest
+	deleteCalls         int
 }
 
-func (p *fakeTemplateImagePublisher) Publish(ctx context.Context, req templateimage.BuildRequest) (*templateimage.Result, error) {
-	p.calls++
+func (p *fakeTemplateImagePublisher) Plan(
+	_ context.Context,
+	req templateimage.BuildRequest,
+) (*templateimage.Plan, error) {
 	p.request = req
+	result := p.result
+	if result == nil {
+		result = &templateimage.Result{
+			PullReference:    "registry.internal/template@sha256:" + strings.Repeat("a", 64),
+			ManifestDigest:   digest.Digest("sha256:" + strings.Repeat("a", 64)),
+			LogicalSizeBytes: 1,
+		}
+	}
+	return &templateimage.Plan{Result: *result}, nil
+}
+
+func (p *fakeTemplateImagePublisher) PublishPlan(ctx context.Context, _ *templateimage.Plan) (*templateimage.Result, error) {
+	p.calls++
 	if p.waitForCancellation {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
 	return p.result, p.err
+}
+
+func (p *fakeTemplateImagePublisher) Delete(_ context.Context, req templateimage.DeleteRequest) error {
+	p.deleteCalls++
+	p.deleteRequest = req
+	return p.deleteErr
 }
 
 type emptyTemplateObjectReader struct{}

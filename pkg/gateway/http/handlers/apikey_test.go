@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -359,6 +360,49 @@ func TestDeleteAPIKeyRejectsPlatformKeyForTeamAdmin(t *testing.T) {
 	}
 }
 
+func TestAPIKeyMutationsRejectKeyFromDifferentSelectedTeam(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	const keyID = "66666666-6666-6666-6666-666666666666"
+	store := &fakeAPIKeyStore{
+		key: &apikey.APIKey{
+			ID:     keyID,
+			TeamID: "team-2",
+			Scope:  apikey.ScopeTeam,
+		},
+	}
+	authCtx := &authn.AuthContext{
+		AuthMethod:  authn.AuthMethodJWT,
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		TeamRole:    "admin",
+		Permissions: authn.ExpandRolePermissions("admin"),
+	}
+
+	deleteRec := performDeleteAPIKeyRequest(t, store, authCtx, keyID)
+	if deleteRec.Code != http.StatusForbidden {
+		t.Fatalf("delete status = %d, want %d body=%s", deleteRec.Code, http.StatusForbidden, deleteRec.Body.String())
+	}
+
+	deactivateRec := performDeactivateAPIKeyRequest(t, store, authCtx, keyID)
+	if deactivateRec.Code != http.StatusForbidden {
+		t.Fatalf(
+			"deactivate status = %d, want %d body=%s",
+			deactivateRec.Code,
+			http.StatusForbidden,
+			deactivateRec.Body.String(),
+		)
+	}
+	if store.deletedID != "" || store.deactivatedID != "" {
+		t.Fatalf(
+			"cross-team mutation ids = deleted:%q deactivated:%q, want empty",
+			store.deletedID,
+			store.deactivatedID,
+		)
+	}
+}
+
 func TestAPIKeyMutationsRejectMalformedID(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	gin.SetMode(gin.ReleaseMode)
@@ -489,6 +533,72 @@ func TestCreateAPIKeyRejectsUnsupportedRole(t *testing.T) {
 	}
 }
 
+func TestCreateAPIKeyRejectsOversizedBodyBeforeStore(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	authCtx := &authn.AuthContext{
+		AuthMethod:  authn.AuthMethodJWT,
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		TeamRole:    "admin",
+		Permissions: authn.ExpandRolePermissions("admin"),
+	}
+	store := &fakeAPIKeyStore{}
+	rec := performCreateAPIKeyRequestWithStore(t, store, authCtx, map[string]any{
+		"name":    "bounded",
+		"padding": strings.Repeat("x", int(apikey.MaxCreateRequestBytes)),
+	})
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+	if store.createCalls != 0 {
+		t.Fatalf("store create calls = %d, want 0", store.createCalls)
+	}
+}
+
+func TestCreateAPIKeyNameLimitShortCircuitsStore(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	authCtx := &authn.AuthContext{
+		AuthMethod:  authn.AuthMethodJWT,
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		TeamRole:    "admin",
+		Permissions: authn.ExpandRolePermissions("admin"),
+	}
+
+	t.Run("boundary", func(t *testing.T) {
+		store := &fakeAPIKeyStore{}
+		rec := performCreateAPIKeyRequestWithStore(t, store, authCtx, map[string]any{
+			"name":  strings.Repeat("n", int(apikey.MaxNameBytes)),
+			"roles": []string{"viewer"},
+		})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+		}
+		if store.createCalls != 1 {
+			t.Fatalf("store create calls = %d, want 1", store.createCalls)
+		}
+	})
+
+	t.Run("one byte over", func(t *testing.T) {
+		store := &fakeAPIKeyStore{}
+		rec := performCreateAPIKeyRequestWithStore(t, store, authCtx, map[string]any{
+			"name":  strings.Repeat("n", int(apikey.MaxNameBytes)+1),
+			"roles": []string{"viewer"},
+		})
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+		}
+		if store.createCalls != 0 {
+			t.Fatalf("store create calls = %d, want 0", store.createCalls)
+		}
+	})
+}
+
 func performCreateAPIKeyRequest(t *testing.T, authCtx *authn.AuthContext, body map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
 	return performCreateAPIKeyRequestWithStore(t, nil, authCtx, body)
@@ -582,6 +692,7 @@ func performListAPIKeysRequest(t *testing.T, store apiKeyStore, authCtx *authn.A
 
 type fakeAPIKeyStore struct {
 	key              *apikey.APIKey
+	createCalls      int
 	createdScope     string
 	createdRoles     []string
 	createdExpiresAt time.Time
@@ -590,6 +701,7 @@ type fakeAPIKeyStore struct {
 }
 
 func (s *fakeAPIKeyStore) CreateAPIKey(_ context.Context, teamID, _ string, userID, name, scope string, roles []string, expiresAt time.Time) (*apikey.APIKey, string, error) {
+	s.createCalls++
 	s.createdScope = scope
 	s.createdRoles = append([]string(nil), roles...)
 	s.createdExpiresAt = expiresAt

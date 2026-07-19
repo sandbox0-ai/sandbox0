@@ -95,6 +95,9 @@ func (r *VaultResolver) Resolve(ctx context.Context, teamID, resolverKind string
 	if r == nil {
 		return CredentialSourceSecretSpec{}, fmt.Errorf("vault resolver is not configured")
 	}
+	if err := ValidateCredentialSourceExternalRefSize(ref); err != nil {
+		return CredentialSourceSecretSpec{}, err
+	}
 	conn, err := r.connection(ref)
 	if err != nil {
 		return CredentialSourceSecretSpec{}, err
@@ -103,12 +106,31 @@ func (r *VaultResolver) Resolve(ctx context.Context, teamID, resolverKind string
 	if err != nil {
 		return CredentialSourceSecretSpec{}, err
 	}
-	return sourceSpecFromVaultValues(resolverKind, values, ref.Fields)
+	spec, err := sourceSpecFromVaultValues(resolverKind, values, ref.Fields)
+	if err != nil {
+		return CredentialSourceSecretSpec{}, err
+	}
+	if err := ValidateCredentialSourceSpecSize(spec); err != nil {
+		return CredentialSourceSecretSpec{}, err
+	}
+	return spec, nil
 }
 
-func (r *VaultResolver) Put(ctx context.Context, teamID, resolverKind string, ref *CredentialSourceExternalRefSpec, spec CredentialSourceSecretSpec) error {
+func (r *VaultResolver) Put(
+	ctx context.Context,
+	teamID, resolverKind string,
+	ref *CredentialSourceExternalRefSpec,
+	spec CredentialSourceSecretSpec,
+	managed bool,
+) error {
 	if r == nil {
 		return fmt.Errorf("vault resolver is not configured")
+	}
+	if err := ValidateCredentialSourceExternalRefSize(ref); err != nil {
+		return err
+	}
+	if err := ValidateCredentialSourceSpecSize(spec); err != nil {
+		return err
 	}
 	conn, err := r.connection(ref)
 	if err != nil {
@@ -119,7 +141,27 @@ func (r *VaultResolver) Put(ctx context.Context, teamID, resolverKind string, re
 		return err
 	}
 	values = applyVaultFieldMapping(values, ref.Fields)
+	if managed {
+		if err := conn.configureKV2Retention(ctx, teamID, ref, 1); err != nil {
+			return err
+		}
+	}
 	return conn.writeKV2(ctx, teamID, ref, values)
+}
+
+// Delete permanently removes every KV v2 version and its metadata.
+func (r *VaultResolver) Delete(ctx context.Context, teamID string, ref *CredentialSourceExternalRefSpec) error {
+	if r == nil {
+		return fmt.Errorf("vault resolver is not configured")
+	}
+	if err := ValidateCredentialSourceExternalRefSize(ref); err != nil {
+		return err
+	}
+	conn, err := r.connection(ref)
+	if err != nil {
+		return err
+	}
+	return conn.deleteKV2Metadata(ctx, teamID, ref)
 }
 
 func (r *VaultResolver) connection(ref *CredentialSourceExternalRefSpec) (*vaultConnection, error) {
@@ -177,6 +219,47 @@ func (c *vaultConnection) writeKV2(ctx context.Context, teamID string, ref *Cred
 	return c.doJSON(req, http.StatusOK, nil)
 }
 
+func (c *vaultConnection) configureKV2Retention(
+	ctx context.Context,
+	teamID string,
+	ref *CredentialSourceExternalRefSpec,
+	maxVersions int,
+) error {
+	if err := c.validateRef(teamID, ref); err != nil {
+		return err
+	}
+	reqURL, err := c.kv2MetadataURL(ref)
+	if err != nil {
+		return err
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, reqURL.String(), map[string]any{
+		"max_versions": maxVersions,
+	})
+	if err != nil {
+		return err
+	}
+	return c.doJSONStatuses(req, nil, http.StatusNoContent, http.StatusOK)
+}
+
+func (c *vaultConnection) deleteKV2Metadata(
+	ctx context.Context,
+	teamID string,
+	ref *CredentialSourceExternalRefSpec,
+) error {
+	if err := c.validateRef(teamID, ref); err != nil {
+		return err
+	}
+	reqURL, err := c.kv2MetadataURL(ref)
+	if err != nil {
+		return err
+	}
+	req, err := c.newRequest(ctx, http.MethodDelete, reqURL.String(), nil)
+	if err != nil {
+		return err
+	}
+	return c.doJSONStatuses(req, nil, http.StatusNoContent, http.StatusOK, http.StatusNotFound)
+}
+
 func (c *vaultConnection) validateRef(teamID string, ref *CredentialSourceExternalRefSpec) error {
 	if ref == nil {
 		return fmt.Errorf("vault reference is required")
@@ -205,6 +288,14 @@ func (c *vaultConnection) validateRef(teamID string, ref *CredentialSourceExtern
 }
 
 func (c *vaultConnection) kv2DataURL(ref *CredentialSourceExternalRefSpec) (*url.URL, error) {
+	return c.kv2URL(ref, "data")
+}
+
+func (c *vaultConnection) kv2MetadataURL(ref *CredentialSourceExternalRefSpec) (*url.URL, error) {
+	return c.kv2URL(ref, "metadata")
+}
+
+func (c *vaultConnection) kv2URL(ref *CredentialSourceExternalRefSpec, endpoint string) (*url.URL, error) {
 	base, err := url.Parse(c.cfg.Address)
 	if err != nil {
 		return nil, fmt.Errorf("parse vault address: %w", err)
@@ -213,7 +304,7 @@ func (c *vaultConnection) kv2DataURL(ref *CredentialSourceExternalRefSpec) (*url
 	if mount == "" {
 		mount = c.cfg.DefaultMount
 	}
-	base.Path = path.Join(base.Path, "v1", mount, "data", cleanVaultPath(ref.Path))
+	base.Path = path.Join(base.Path, "v1", mount, endpoint, cleanVaultPath(ref.Path))
 	return base, nil
 }
 
@@ -245,16 +336,27 @@ func (c *vaultConnection) newRequest(ctx context.Context, method, rawURL string,
 }
 
 func (c *vaultConnection) doJSON(req *http.Request, okStatus int, out any) error {
+	return c.doJSONStatuses(req, out, okStatus)
+}
+
+func (c *vaultConnection) doJSONStatuses(req *http.Request, out any, okStatuses ...int) error {
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("vault request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != okStatus {
+	ok := false
+	for _, status := range okStatuses {
+		if resp.StatusCode == status {
+			ok = true
+			break
+		}
+	}
+	if !ok {
 		return fmt.Errorf("vault request returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
-	if out == nil {
+	if out == nil || len(data) == 0 {
 		return nil
 	}
 	if err := json.Unmarshal(data, out); err != nil {

@@ -31,6 +31,7 @@ func TestReleaseReleasableCtldVolumeOwnersCallsOwningCtld(t *testing.T) {
 		repo:          repo,
 		podResolver:   &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
 		selfClusterID: "cluster-a",
+		storageQuota:  newTestStorageQuota(),
 	}
 
 	if err := server.releaseReleasableCtldVolumeOwners(context.Background(), "vol-1"); err != nil {
@@ -55,11 +56,12 @@ func TestRestoreSnapshotReleasesCtldOwnerBeforeRestore(t *testing.T) {
 	}
 	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
-		logger:        logrus.New(),
-		repo:          repo,
-		snapshotMgr:   snapshotMgr,
-		podResolver:   &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
-		selfClusterID: "cluster-a",
+		logger:            logrus.New(),
+		repo:              repo,
+		snapshotMgr:       snapshotMgr,
+		storageOperations: newTestStorageOperationQuota(),
+		podResolver:       &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
+		selfClusterID:     "cluster-a",
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots/snap-1/restore", nil)
@@ -95,11 +97,12 @@ func TestForkVolumeReleasesCtldOwnerBeforeFork(t *testing.T) {
 	}
 	snapshotMgr := &captureForkSnapshotManager{fakeHTTPSnapshotManager: &fakeHTTPSnapshotManager{}}
 	server := &Server{
-		logger:        logrus.New(),
-		repo:          repo,
-		snapshotMgr:   snapshotMgr,
-		podResolver:   &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
-		selfClusterID: "cluster-a",
+		logger:            logrus.New(),
+		repo:              repo,
+		snapshotMgr:       snapshotMgr,
+		storageOperations: newTestStorageOperationQuota(),
+		podResolver:       &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
+		selfClusterID:     "cluster-a",
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/fork", nil)
@@ -130,11 +133,12 @@ func TestCreateSnapshotPreparesCtldCheckpoint(t *testing.T) {
 	repo.activeMounts["vol-1"] = []*db.VolumeMount{ctldOwnerMount(t, "vol-1", "cluster-a", "sandbox0-system/ctld-a", ownerPort)}
 	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
-		logger:        logrus.New(),
-		repo:          repo,
-		snapshotMgr:   snapshotMgr,
-		podResolver:   &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
-		selfClusterID: "cluster-a",
+		logger:            logrus.New(),
+		repo:              repo,
+		snapshotMgr:       snapshotMgr,
+		storageOperations: newTestStorageOperationQuota(),
+		podResolver:       &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
+		selfClusterID:     "cluster-a",
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewReader([]byte(`{"name":" checkpoint "}`)))
@@ -189,11 +193,12 @@ func TestCreateSnapshotAbortsCtldCheckpointOnSnapshotError(t *testing.T) {
 	repo.volumes["vol-1"] = &db.SandboxVolume{ID: "vol-1", TeamID: "team-1", UserID: "user-1"}
 	repo.activeMounts["vol-1"] = []*db.VolumeMount{ctldOwnerMount(t, "vol-1", "cluster-a", "sandbox0-system/ctld-a", ownerPort)}
 	server := &Server{
-		logger:        logrus.New(),
-		repo:          repo,
-		snapshotMgr:   &fakeHTTPSnapshotManager{createErr: snapshot.ErrCloneFailed},
-		podResolver:   &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
-		selfClusterID: "cluster-a",
+		logger:            logrus.New(),
+		repo:              repo,
+		snapshotMgr:       &fakeHTTPSnapshotManager{createErr: snapshot.ErrCloneFailed},
+		storageOperations: newTestStorageOperationQuota(),
+		podResolver:       &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
+		selfClusterID:     "cluster-a",
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewReader([]byte(`{"name":"checkpoint"}`)))
@@ -222,9 +227,10 @@ func TestCreateSnapshotRejectsActiveRWXWritableMount(t *testing.T) {
 	}}
 	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
-		logger:      logrus.New(),
-		repo:        repo,
-		snapshotMgr: snapshotMgr,
+		logger:            logrus.New(),
+		repo:              repo,
+		snapshotMgr:       snapshotMgr,
+		storageOperations: newTestStorageOperationQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots", bytes.NewReader([]byte(`{"name":"rwx"}`)))
@@ -263,11 +269,13 @@ func TestDeleteSandboxVolumeReleasesCtldOwnerBeforeActiveMountCheck(t *testing.T
 		return []*db.VolumeMount{ctldOwnerMount(t, volumeID, "cluster-a", "sandbox0-system/ctld-a", ownerPort)}, nil
 	}
 	server := &Server{
-		logger:        logrus.New(),
-		repo:          repo,
-		snapshotMgr:   &fakeHTTPSnapshotManager{},
-		podResolver:   &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
-		selfClusterID: "cluster-a",
+		logger:            logrus.New(),
+		repo:              repo,
+		snapshotMgr:       &fakeHTTPSnapshotManager{},
+		storageOperations: newTestStorageOperationQuota(),
+		podResolver:       &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
+		selfClusterID:     "cluster-a",
+		storageQuota:      newTestStorageQuota(),
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1", nil)
@@ -296,11 +304,12 @@ func TestRestoreSnapshotReturnsConflictWhenCtldOwnerIsBusy(t *testing.T) {
 	repo.activeMounts["vol-1"] = []*db.VolumeMount{ctldOwnerMount(t, "vol-1", "cluster-a", "sandbox0-system/ctld-a", ownerPort)}
 	snapshotMgr := &fakeHTTPSnapshotManager{}
 	server := &Server{
-		logger:        logrus.New(),
-		repo:          repo,
-		snapshotMgr:   snapshotMgr,
-		podResolver:   &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
-		selfClusterID: "cluster-a",
+		logger:            logrus.New(),
+		repo:              repo,
+		snapshotMgr:       snapshotMgr,
+		storageOperations: newTestStorageOperationQuota(),
+		podResolver:       &fakeVolumeFilePodResolver{urls: map[string]string{"sandbox0-system/ctld-a": ctldServer.URL}},
+		selfClusterID:     "cluster-a",
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/sandboxvolumes/vol-1/snapshots/snap-1/restore", nil)

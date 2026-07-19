@@ -16,7 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.opentelemetry.io/otel/trace"
@@ -36,7 +36,6 @@ type Server struct {
 	templateStoreEnabled    bool
 	templateHandler         *templatehttp.Handler
 	clusterService          *service.ClusterService
-	quotaRepo               *quota.Repository
 	authValidator           *internalauth.Validator
 	logger                  *zap.Logger
 	port                    int
@@ -199,10 +198,6 @@ func (s *Server) setupRoutes() {
 			credentialSources.DELETE("/:name", s.deleteCredentialSource)
 		}
 
-		quotas := v1.Group("/quotas")
-		{
-			quotas.GET("/:dimension", s.getTeamQuota)
-		}
 	}
 
 	// Internal API v1 (for scheduler)
@@ -237,16 +232,7 @@ func (s *Server) setupRoutes() {
 			internalEgressAuth.POST("/resolve", s.resolveEgressAuth)
 		}
 
-		internalTeamQuotas := internal.Group("/teams/:team_id/quotas")
-		{
-			internalTeamQuotas.PUT("/:dimension", s.putTeamQuotaInternal)
-			internalTeamQuotas.DELETE("/:dimension", s.deleteTeamQuotaInternal)
-		}
 	}
-}
-
-func (s *Server) SetQuotaRepository(repo *quota.Repository) {
-	s.quotaRepo = repo
 }
 
 // Start starts the HTTP server
@@ -439,6 +425,14 @@ func (s *Server) requireCapabilityInBody(
 	message string,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !limitJSONRequestBody(
+			c,
+			"sandbox request body",
+			templatepkg.MaxObjectRequestBytes,
+		) {
+			c.Abort()
+			return
+		}
 		bodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "failed to read request body")

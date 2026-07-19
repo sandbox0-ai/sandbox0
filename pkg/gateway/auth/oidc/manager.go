@@ -3,12 +3,13 @@ package oidc
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -41,6 +42,8 @@ type identityStore interface {
 	GetUserByEmail(ctx context.Context, email string) (*identity.User, error)
 	CreateUser(ctx context.Context, user *identity.User) error
 	CreateUserIdentity(ctx context.Context, identity *identity.UserIdentity) error
+	CreateOIDCPendingState(ctx context.Context, state *identity.OIDCPendingState) error
+	ConsumeOIDCPendingState(ctx context.Context, stateHash string) (*identity.OIDCPendingState, error)
 }
 
 // Manager manages multiple OIDC providers
@@ -52,16 +55,15 @@ type Manager struct {
 	publicRootDomain string
 	defaultTeamName  string
 	stateTTL         time.Duration
-	cleanupInterval  time.Duration
 	logger           *zap.Logger
-
-	// State management (in-memory for simplicity, use Redis in production)
-	states   map[string]*StateData
-	statesMu sync.RWMutex
 }
 
 // NewManager creates a new OIDC manager
 func NewManager(ctx context.Context, cfg *config.GatewayConfig, repo *identity.Repository, logger *zap.Logger) (*Manager, error) {
+	stateTTL := cfg.OIDCStateTTL.Duration
+	if stateTTL <= 0 {
+		stateTTL = 10 * time.Minute
+	}
 	m := &Manager{
 		providers:        make(map[string]*Provider),
 		providerOrder:    make([]string, 0),
@@ -69,10 +71,8 @@ func NewManager(ctx context.Context, cfg *config.GatewayConfig, repo *identity.R
 		baseURL:          cfg.BaseURL,
 		publicRootDomain: cfg.PublicRootDomain,
 		defaultTeamName:  cfg.DefaultTeamName,
-		stateTTL:         cfg.OIDCStateTTL.Duration,
-		cleanupInterval:  cfg.OIDCStateCleanupInterval.Duration,
+		stateTTL:         stateTTL,
 		logger:           logger,
-		states:           make(map[string]*StateData),
 	}
 
 	// Initialize enabled providers
@@ -97,9 +97,6 @@ func NewManager(ctx context.Context, cfg *config.GatewayConfig, repo *identity.R
 			zap.String("name", providerCfg.Name),
 		)
 	}
-
-	// Start state cleanup goroutine
-	go m.cleanupStates(ctx)
 
 	return m, nil
 }
@@ -137,7 +134,12 @@ func WithWebLoginHandoff() AuthURLOption {
 }
 
 // GenerateAuthURL generates an OAuth authorization URL.
-func (m *Manager) GenerateAuthURL(providerID, returnURL string, opts ...AuthURLOption) (string, error) {
+func (m *Manager) GenerateAuthURL(
+	ctx context.Context,
+	providerID,
+	returnURL string,
+	opts ...AuthURLOption,
+) (string, error) {
 	provider, err := m.GetProvider(providerID)
 	if err != nil {
 		return "", err
@@ -151,6 +153,13 @@ func (m *Manager) GenerateAuthURL(providerID, returnURL string, opts ...AuthURLO
 	if cfg.webLoginHandoff && !m.IsAllowedWebReturnURL(returnURL) {
 		return "", ErrInvalidReturnURL
 	}
+	if len(returnURL) > identity.MaxIdentityReturnURLBytes {
+		return "", &identity.IdentityPayloadTooLargeError{
+			Field:       "return_url",
+			ActualBytes: len(returnURL),
+			MaxBytes:    identity.MaxIdentityReturnURLBytes,
+		}
+	}
 
 	// Generate state
 	stateBytes := make([]byte, 32)
@@ -160,17 +169,17 @@ func (m *Manager) GenerateAuthURL(providerID, returnURL string, opts ...AuthURLO
 	state := base64.URLEncoding.EncodeToString(stateBytes)
 	verifier := oauth2.GenerateVerifier()
 
-	// Store state
-	m.statesMu.Lock()
-	m.states[state] = &StateData{
+	now := time.Now()
+	if err := m.repo.CreateOIDCPendingState(ctx, &identity.OIDCPendingState{
+		StateHash:       hashOIDCState(state),
 		Provider:        providerID,
-		Nonce:           state,
 		CodeVerifier:    verifier,
 		ReturnURL:       returnURL,
 		WebLoginHandoff: cfg.webLoginHandoff,
-		CreatedAt:       time.Now(),
+		ExpiresAt:       now.Add(m.stateTTL),
+	}); err != nil {
+		return "", err
 	}
-	m.statesMu.Unlock()
 
 	return provider.AuthURL(state, verifier), nil
 }
@@ -233,31 +242,37 @@ func isLocalhost(host string) bool {
 	}
 }
 
-// ValidateState validates and consumes a state parameter
-func (m *Manager) ValidateState(state string) (*StateData, error) {
-	m.statesMu.Lock()
-	defer m.statesMu.Unlock()
-
-	data, ok := m.states[state]
-	if !ok {
+// ValidateState validates and atomically consumes a state parameter.
+func (m *Manager) ValidateState(ctx context.Context, state string) (*StateData, error) {
+	pending, err := m.repo.ConsumeOIDCPendingState(ctx, hashOIDCState(state))
+	if err != nil {
+		if errors.Is(err, identity.ErrOIDCPendingStateNotFound) {
+			return nil, ErrInvalidState
+		}
+		return nil, fmt.Errorf("consume OIDC state: %w", err)
+	}
+	if pending == nil {
 		return nil, ErrInvalidState
 	}
+	return &StateData{
+		Provider:        pending.Provider,
+		Nonce:           state,
+		CodeVerifier:    pending.CodeVerifier,
+		ReturnURL:       pending.ReturnURL,
+		WebLoginHandoff: pending.WebLoginHandoff,
+		CreatedAt:       pending.CreatedAt,
+	}, nil
+}
 
-	// Check expiration
-	if time.Since(data.CreatedAt) > m.stateTTL {
-		delete(m.states, state)
-		return nil, ErrInvalidState
-	}
-
-	// Consume state (one-time use)
-	delete(m.states, state)
-	return data, nil
+func hashOIDCState(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return hex.EncodeToString(sum[:])
 }
 
 // HandleCallback processes an OIDC callback.
 func (m *Manager) HandleCallback(ctx context.Context, providerID, code, state string) (*CallbackResult, error) {
 	// Validate state
-	stateData, err := m.ValidateState(state)
+	stateData, err := m.ValidateState(ctx, state)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +396,7 @@ func (m *Manager) findOrCreateUser(ctx context.Context, provider *Provider, user
 			RawClaims: userInfo.RawClaims,
 		}
 		if err := m.repo.CreateUserIdentity(ctx, identityRecord); err != nil {
-			m.logger.Warn("Failed to link identity", zap.Error(err))
+			return nil, fmt.Errorf("link user identity: %w", err)
 		}
 		return user, nil
 	}
@@ -416,32 +431,10 @@ func (m *Manager) findOrCreateUser(ctx context.Context, provider *Provider, user
 		RawClaims: userInfo.RawClaims,
 	}
 	if err := m.repo.CreateUserIdentity(ctx, identityRecord); err != nil {
-		m.logger.Warn("Failed to create identity", zap.Error(err))
+		return nil, fmt.Errorf("create user identity: %w", err)
 	}
 
 	return user, nil
-}
-
-// cleanupStates periodically cleans up expired states
-func (m *Manager) cleanupStates(ctx context.Context) {
-	ticker := time.NewTicker(m.cleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			m.statesMu.Lock()
-			now := time.Now()
-			for state, data := range m.states {
-				if now.Sub(data.CreatedAt) > m.stateTTL {
-					delete(m.states, state)
-				}
-			}
-			m.statesMu.Unlock()
-		}
-	}
 }
 
 // ProviderInfo contains public info about an OIDC provider

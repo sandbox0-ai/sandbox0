@@ -158,6 +158,8 @@ printf 'Session ID: %s\\n' "$SESSION_ID"`
 
 Creation defaults to `desired_state: running`, so the first attempt starts immediately. An `Idempotency-Key` lets a client safely retry the same creation request: the same key and normalized specification return the existing session, while reusing the key with a different specification returns a conflict.
 
+One sandbox retains at most 1024 supervised session identities. Delete sessions that are no longer needed to release their retained journals and slots. Creation at the limit returns `429` with `session_limit_exceeded`; stopping a session does not release its slot because the session and journal remain reconnectable.
+
 ## Follow Output And Reconnect
 
 Use the SDK event stream for one-way output consumption. The stream first replays retained events after the requested cursor and then continues with live events.

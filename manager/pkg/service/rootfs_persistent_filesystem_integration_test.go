@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,12 +49,24 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	require.Len(t, latest.LayerChain, 1)
 
 	deleter := &recordingRootFSObjectDeleter{}
-	gcResult, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
+	gcResult, err := store.GarbageCollectRootFSFilesystemWithOptions(
+		ctx,
+		deleter,
+		"team-1",
+		10,
+		rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{}),
+	)
 	require.NoError(t, err)
 	require.Len(t, gcResult.Layers, 1)
 	assert.Equal(t, "layer-child", gcResult.Layers[0].ID)
 	assert.Equal(t, []string{"rootfs/child.tar"}, gcResult.DeletedObjectKeys)
-	gcResult, err = store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
+	gcResult, err = store.GarbageCollectRootFSFilesystemWithOptions(
+		ctx,
+		deleter,
+		"team-1",
+		10,
+		rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{}),
+	)
 	require.NoError(t, err)
 	require.Len(t, gcResult.Layers, 1)
 	assert.Equal(t, "layer-root", gcResult.Layers[0].ID)
@@ -124,7 +137,13 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	assert.Equal(t, "layer-squash", restored.HeadLayerID)
 
 	failDeleter := &recordingRootFSObjectDeleter{failKey: "rootfs/fork.tar", err: assert.AnError}
-	gcResult, err = store.GarbageCollectRootFSFilesystem(ctx, failDeleter, "team-1", 10)
+	gcResult, err = store.GarbageCollectRootFSFilesystemWithOptions(
+		ctx,
+		failDeleter,
+		"team-1",
+		10,
+		rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{}),
+	)
 	require.ErrorIs(t, err, assert.AnError)
 	require.Len(t, gcResult.Layers, 1)
 	assert.Equal(t, "layer-fork", gcResult.Layers[0].ID)
@@ -137,7 +156,11 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 			claimed_until = NULL
 	`)
 	require.NoError(t, err)
-	deletedObjects, err := store.DeletePendingRootFSObjects(ctx, deleter, 10)
+	deletedObjects, err := store.DeletePendingRootFSObjectsWithOptions(
+		ctx,
+		deleter,
+		rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{Limit: 10}),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"rootfs/fork.tar"}, deletedObjects)
 	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
@@ -163,13 +186,16 @@ func TestRootFSObjectDeletionQueueClaimsBacksOffAndDeadLetters(t *testing.T) {
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
 
-	_, err := pool.Exec(ctx, `
-		INSERT INTO manager.rootfs_object_deletions (object_key, team_id, next_attempt_at)
-		VALUES
-			('rootfs/a.tar', 'team-1', NOW()),
-			('rootfs/b.tar', 'team-1', NOW())
-	`)
-	require.NoError(t, err)
+	require.NoError(t, store.QueueUncommittedRootFSObjectDeletion(
+		ctx,
+		rootFSTestStoreState("sandbox-a", "team-1", "layer-a", "", 1, "a"),
+		time.Now(),
+	))
+	require.NoError(t, store.QueueUncommittedRootFSObjectDeletion(
+		ctx,
+		rootFSTestStoreState("sandbox-b", "team-1", "layer-b", "", 1, "b"),
+		time.Now(),
+	))
 
 	claimed, err := store.claimPendingRootFSObjectDeletions(ctx, DeletePendingRootFSObjectsOptions{
 		Limit:     1,
@@ -197,14 +223,14 @@ func TestRootFSObjectDeletionQueueClaimsBacksOffAndDeadLetters(t *testing.T) {
 
 	deleteErr := assert.AnError
 	deleter := &recordingRootFSObjectDeleter{failKey: "rootfs/a.tar", err: deleteErr}
-	deleted, err := store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, DeletePendingRootFSObjectsOptions{
+	deleted, err := store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{
 		Limit:           2,
 		ClaimedBy:       "worker-c",
 		ClaimTTL:        time.Minute,
 		BackoffBase:     time.Minute,
 		BackoffMax:      time.Minute,
 		ContinueOnError: true,
-	})
+	}))
 	require.ErrorIs(t, err, deleteErr)
 	assert.Equal(t, []string{"rootfs/b.tar"}, deleted)
 	assert.ElementsMatch(t, []string{"rootfs/a.tar", "rootfs/b.tar"}, deleter.keys)
@@ -226,14 +252,14 @@ func TestRootFSObjectDeletionQueueClaimsBacksOffAndDeadLetters(t *testing.T) {
 		WHERE object_key = 'rootfs/a.tar'
 	`)
 	require.NoError(t, err)
-	_, err = store.DeletePendingRootFSObjectsWithOptions(ctx, &recordingRootFSObjectDeleter{failKey: "rootfs/a.tar", err: deleteErr}, DeletePendingRootFSObjectsOptions{
+	_, err = store.DeletePendingRootFSObjectsWithOptions(ctx, &recordingRootFSObjectDeleter{failKey: "rootfs/a.tar", err: deleteErr}, rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{
 		Limit:       1,
 		ClaimedBy:   "worker-d",
 		ClaimTTL:    time.Minute,
 		BackoffBase: time.Minute,
 		BackoffMax:  time.Minute,
 		MaxAttempts: 2,
-	})
+	}))
 	require.ErrorIs(t, err, deleteErr)
 
 	stats, err := store.RootFSObjectDeletionQueueStats(ctx)
@@ -244,68 +270,132 @@ func TestRootFSObjectDeletionQueueClaimsBacksOffAndDeadLetters(t *testing.T) {
 }
 
 func TestRootFSObjectDeletionSkipsActiveLifecyclePreparedHead(t *testing.T) {
-	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPool(t)
-	store := NewPGSandboxStore(pool)
+	for _, kind := range []string{
+		SandboxLifecycleKindPause,
+		SandboxLifecycleKindSnapshot,
+		SandboxLifecycleKindFork,
+	} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			pool := newSandboxStoreIntegrationPool(t)
+			store := NewPGSandboxStore(pool)
 
-	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-pending", "team-1")))
-	state := rootFSTestStoreState("sandbox-pending", "team-1", "layer-pending", "", 1, "pending")
-	require.NoError(t, store.QueueUncommittedRootFSObjectDeletion(ctx, state, time.Now().Add(-time.Minute)))
-	require.NoError(t, store.WithSandboxLock(ctx, "sandbox-pending", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
-		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
-			ID:                  "txn-pending",
-			SandboxID:           "sandbox-pending",
-			Kind:                SandboxLifecycleKindPause,
-			Phase:               SandboxLifecyclePhasePublishing,
-			Source:              SandboxLifecycleSourceAuto,
-			Cancelable:          true,
-			FromGeneration:      1,
-			PreparedHeadLayerID: "layer-pending",
+			require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-pending", "team-1")))
+			state := rootFSTestStoreState("sandbox-pending", "team-1", "layer-pending", "", 1, "pending")
+			require.NoError(t, store.QueueUncommittedRootFSObjectDeletion(ctx, state, time.Now().Add(-time.Minute)))
+			require.NoError(t, store.WithSandboxLock(ctx, "sandbox-pending", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+				return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+					ID:                  "txn-pending",
+					SandboxID:           "sandbox-pending",
+					Kind:                kind,
+					Phase:               SandboxLifecyclePhasePublishing,
+					Source:              SandboxLifecycleSourceAuto,
+					Cancelable:          true,
+					FromGeneration:      1,
+					PreparedHeadLayerID: "layer-pending",
+				})
+			}))
+
+			deleter := &recordingRootFSObjectDeleter{}
+			deleted, err := store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{
+				Limit:     1,
+				ClaimedBy: "worker-active-txn",
+				ClaimTTL:  time.Minute,
+			}))
+
+			require.NoError(t, err)
+			assert.Empty(t, deleted)
+			assert.Empty(t, deleter.keys)
+			assert.Equal(t, int64(1), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+
+			var claimedBy string
+			var nextAttemptAt time.Time
+			require.NoError(t, pool.QueryRow(ctx, `
+				SELECT claimed_by, next_attempt_at
+				FROM manager.rootfs_object_deletions
+				WHERE object_key = $1
+			`, state.DiffObjectKey).Scan(&claimedBy, &nextAttemptAt))
+			assert.Empty(t, claimedBy)
+			assert.True(t, nextAttemptAt.After(time.Now().Add(30*time.Second)))
+
+			require.NoError(t, store.WithSandboxLock(ctx, "sandbox-pending", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+				return tx.AbortLifecycleTxn(lockCtx, "txn-pending", "test cleanup")
+			}))
+			_, err = pool.Exec(ctx, `
+				UPDATE manager.rootfs_object_deletions
+				SET next_attempt_at = NOW()
+				WHERE object_key = $1
+			`, state.DiffObjectKey)
+			require.NoError(t, err)
+
+			deleted, err = store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{
+				Limit:     1,
+				ClaimedBy: "worker-aborted-txn",
+				ClaimTTL:  time.Minute,
+			}))
+
+			require.NoError(t, err)
+			assert.Equal(t, []string{state.DiffObjectKey}, deleted)
+			assert.Equal(t, []string{state.DiffObjectKey}, deleter.keys)
+			assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
 		})
-	}))
+	}
+}
 
-	deleter := &recordingRootFSObjectDeleter{}
-	deleted, err := store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, DeletePendingRootFSObjectsOptions{
-		Limit:     1,
-		ClaimedBy: "worker-active-txn",
-		ClaimTTL:  time.Minute,
-	})
+func TestRootFSObjectDeletionDoesNotLeakStaleSourceCheckpoint(t *testing.T) {
+	for _, kind := range []string{
+		SandboxLifecycleKindSnapshot,
+		SandboxLifecycleKindFork,
+	} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			pool := newSandboxStoreIntegrationPool(t)
+			store := NewPGSandboxStore(pool)
 
-	require.NoError(t, err)
-	assert.Empty(t, deleted)
-	assert.Empty(t, deleter.keys)
-	assert.Equal(t, int64(1), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+			require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-stale", "team-1")))
+			state := rootFSTestStoreState("sandbox-stale", "team-1", "layer-stale", "", 1, "stale")
+			require.NoError(t, store.QueueUncommittedRootFSObjectDeletion(ctx, state, time.Now().Add(-time.Minute)))
+			require.NoError(t, store.WithSandboxLock(ctx, "sandbox-stale", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+				return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+					ID:                  "txn-stale",
+					SandboxID:           "sandbox-stale",
+					Kind:                kind,
+					Phase:               SandboxLifecyclePhasePublishing,
+					Source:              SandboxLifecycleSourceManual,
+					FromGeneration:      1,
+					PreparedHeadLayerID: "layer-stale",
+				})
+			}))
+			_, err := pool.Exec(ctx, `
+				ALTER TABLE manager.sandbox_lifecycle_txns
+				DISABLE TRIGGER update_sandbox_lifecycle_txns_updated_at
+			`)
+			require.NoError(t, err)
+			_, err = pool.Exec(ctx, `
+				UPDATE manager.sandbox_lifecycle_txns
+				SET updated_at = NOW() - ($2::int * INTERVAL '1 second')
+				WHERE txn_id = $1
+			`, "txn-stale", durationSeconds(sandboxRootFSSourceCheckpointLifecycleStaleAfter+time.Minute))
+			require.NoError(t, err)
+			_, err = pool.Exec(ctx, `
+				ALTER TABLE manager.sandbox_lifecycle_txns
+				ENABLE TRIGGER update_sandbox_lifecycle_txns_updated_at
+			`)
+			require.NoError(t, err)
 
-	var claimedBy string
-	var nextAttemptAt time.Time
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT claimed_by, next_attempt_at
-		FROM manager.rootfs_object_deletions
-		WHERE object_key = $1
-	`, state.DiffObjectKey).Scan(&claimedBy, &nextAttemptAt))
-	assert.Empty(t, claimedBy)
-	assert.True(t, nextAttemptAt.After(time.Now().Add(30*time.Second)))
+			deleter := &recordingRootFSObjectDeleter{}
+			deleted, err := store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{
+				Limit:     1,
+				ClaimedBy: "worker-stale-txn",
+				ClaimTTL:  time.Minute,
+			}))
 
-	require.NoError(t, store.WithSandboxLock(ctx, "sandbox-pending", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
-		return tx.AbortLifecycleTxn(lockCtx, "txn-pending", "test cleanup")
-	}))
-	_, err = pool.Exec(ctx, `
-		UPDATE manager.rootfs_object_deletions
-		SET next_attempt_at = NOW()
-		WHERE object_key = $1
-	`, state.DiffObjectKey)
-	require.NoError(t, err)
-
-	deleted, err = store.DeletePendingRootFSObjectsWithOptions(ctx, deleter, DeletePendingRootFSObjectsOptions{
-		Limit:     1,
-		ClaimedBy: "worker-aborted-txn",
-		ClaimTTL:  time.Minute,
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, []string{state.DiffObjectKey}, deleted)
-	assert.Equal(t, []string{state.DiffObjectKey}, deleter.keys)
-	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+			require.NoError(t, err)
+			assert.Equal(t, []string{state.DiffObjectKey}, deleted)
+			assert.Equal(t, []string{state.DiffObjectKey}, deleter.keys)
+			assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
+		})
+	}
 }
 
 func TestRootFSObjectDeletionQueueClearedWhenObjectCommits(t *testing.T) {
@@ -322,7 +412,11 @@ func TestRootFSObjectDeletionQueueClearedWhenObjectCommits(t *testing.T) {
 	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
 
 	deleter := &recordingRootFSObjectDeleter{}
-	deleted, err := store.DeletePendingRootFSObjects(ctx, deleter, 10)
+	deleted, err := store.DeletePendingRootFSObjectsWithOptions(
+		ctx,
+		deleter,
+		rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{Limit: 10}),
+	)
 	require.NoError(t, err)
 	assert.Empty(t, deleted)
 	assert.Empty(t, deleter.keys)
@@ -380,7 +474,13 @@ func TestRootFSGCSkipsObjectDeleteWhenAnotherLayerReferencesSameKey(t *testing.T
 	require.NoError(t, store.MarkSandboxDeleted(ctx, "sandbox-stale", time.Now().UTC()))
 
 	deleter := &recordingRootFSObjectDeleter{}
-	result, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
+	result, err := store.GarbageCollectRootFSFilesystemWithOptions(
+		ctx,
+		deleter,
+		"team-1",
+		10,
+		rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{}),
+	)
 	require.NoError(t, err)
 	require.Len(t, result.Layers, 1)
 	assert.Equal(t, "layer-stale", result.Layers[0].ID)
@@ -445,14 +545,26 @@ func TestRootFSGCSkipsLayerStillReferencedByOrphanFilesystem(t *testing.T) {
 	require.NoError(t, err)
 
 	deleter := &recordingRootFSObjectDeleter{}
-	result, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 1)
+	result, err := store.GarbageCollectRootFSFilesystemWithOptions(
+		ctx,
+		deleter,
+		"team-1",
+		1,
+		rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{}),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.DeletedFilesystems)
 	require.Len(t, result.Layers, 1)
 	assert.Equal(t, "layer-orphan-a", result.Layers[0].ID)
 	assert.True(t, rootFSTestFilesystemExists(t, pool, "sandbox-orphan-b"))
 
-	result, err = store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 1)
+	result, err = store.GarbageCollectRootFSFilesystemWithOptions(
+		ctx,
+		deleter,
+		"team-1",
+		1,
+		rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{}),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.DeletedFilesystems)
 	require.Len(t, result.Layers, 1)
@@ -478,7 +590,13 @@ func TestRootFSGCExpiresSnapshotBeforeLayerCollection(t *testing.T) {
 	require.NoError(t, store.SaveRootFSState(ctx, full))
 
 	deleter := &recordingRootFSObjectDeleter{}
-	result, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
+	result, err := store.GarbageCollectRootFSFilesystemWithOptions(
+		ctx,
+		deleter,
+		"team-1",
+		10,
+		rootFSTestDeletionOptions(pool, DeletePendingRootFSObjectsOptions{}),
+	)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.ExpiredSnapshots)
 	require.Len(t, result.Layers, 1)
@@ -668,11 +786,28 @@ func newSandboxStoreIntegrationPool(t *testing.T) *pgxpool.Pool {
 	t.Cleanup(pool.Close)
 
 	_, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS manager CASCADE")
+	_, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS quota CASCADE")
 	t.Cleanup(func() {
 		_, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS manager CASCADE")
+		_, _ = pool.Exec(ctx, "DROP SCHEMA IF EXISTS quota CASCADE")
 	})
 	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+	require.NoError(t, teamquota.RunMigrations(ctx, pool, nil))
+	require.NoError(t, teamquota.NewRepository(pool).UnsafeReplaceDefaultPoliciesForTest(
+		ctx,
+		rootFSTestDefaultQuotaPolicies(1<<60),
+	))
 	return pool
+}
+
+func rootFSTestDeletionOptions(
+	pool *pgxpool.Pool,
+	opts DeletePendingRootFSObjectsOptions,
+) DeletePendingRootFSObjectsOptions {
+	quotaStore := teamquota.NewRepository(pool)
+	opts.ObjectQuotaStore = quotaStore
+	opts.SnapshotQuotaStore = quotaStore
+	return opts
 }
 
 func rootFSTestSandboxRecord(sandboxID, teamID string) *SandboxRecord {

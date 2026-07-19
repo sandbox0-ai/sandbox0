@@ -88,6 +88,10 @@ func (s *Server) createSandbox(c *gin.Context) {
 		internalauth.GenerateOptions{
 			Permissions: claims.Permissions,
 			Audit:       claims.Audit,
+			QuotaAdmissionProof: forwardedQuotaAdmissionProof(
+				claims,
+				c.Request,
+			),
 		},
 	)
 	if err != nil {
@@ -162,6 +166,10 @@ func (s *Server) proxySandbox(c *gin.Context) {
 		internalauth.GenerateOptions{
 			Permissions: claims.Permissions,
 			Audit:       claims.Audit,
+			QuotaAdmissionProof: forwardedQuotaAdmissionProof(
+				claims,
+				c.Request,
+			),
 		},
 	)
 	if err != nil {
@@ -624,6 +632,9 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		wg.Add(1)
 		go func(clusterID, clusterGatewayURL string) {
 			defer wg.Done()
+			// Fan-out is new scheduler work, not the original edge operation.
+			// ListSandboxes therefore intentionally issues tokens without the
+			// incoming edge admission proof.
 			resp, err := clusterGatewayClient.ListSandboxes(
 				c.Request.Context(),
 				clusterGatewayURL,

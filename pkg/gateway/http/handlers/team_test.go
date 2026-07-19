@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 )
 
@@ -28,28 +29,44 @@ const (
 )
 
 type stubTeamRepository struct {
-	createdTeam     *identity.Team
-	updatedTeam     *identity.Team
-	addedTeamMember *identity.TeamMember
-	teams           map[string]*identity.Team
-	members         map[string]*identity.TeamMember
-	memberLists     map[string][]*identity.TeamMemberWithUser
-	searchMembers   []*identity.TeamMemberWithUser
-	searchTeamID    string
-	searchQuery     string
-	deletedTeamID   string
+	createdTeam      *identity.Team
+	updatedTeam      *identity.Team
+	addedTeamMember  *identity.TeamMember
+	teams            map[string]*identity.Team
+	members          map[string]*identity.TeamMember
+	memberLists      map[string][]*identity.TeamMemberWithUser
+	searchMembers    []*identity.TeamMemberWithUser
+	searchTeamID     string
+	searchQuery      string
+	deletedTeamID    string
+	deletedOwnerID   string
+	fencedTeamID     string
+	fencedOwnerID    string
+	unfencedTeamID   string
+	unfencedOwnerID  string
+	fenceErr         error
+	unfenceErr       error
+	transferOwnerErr error
+	deleteErr        error
+	deletionOrder    *[]string
 }
 
 func (s *stubTeamRepository) GetTeamsByUserID(context.Context, string) ([]*identity.Team, error) {
 	return nil, nil
 }
 
-func (s *stubTeamRepository) CreateTeam(_ context.Context, team *identity.Team) error {
+func (s *stubTeamRepository) CreateTeamWithOwner(_ context.Context, team *identity.Team) (*identity.TeamMember, error) {
 	copyTeam := *team
 	copyTeam.ID = testTeamID
 	s.createdTeam = &copyTeam
 	team.ID = copyTeam.ID
-	return nil
+	member := &identity.TeamMember{
+		TeamID: team.ID,
+		UserID: *team.OwnerID,
+		Role:   "admin",
+	}
+	s.addedTeamMember = member
+	return member, nil
 }
 
 func (s *stubTeamRepository) GetTeamMember(_ context.Context, teamID, userID string) (*identity.TeamMember, error) {
@@ -82,21 +99,60 @@ func (s *stubTeamRepository) UpdateTeam(_ context.Context, team *identity.Team) 
 	return nil
 }
 
-func (s *stubTeamRepository) DeleteTeam(_ context.Context, id string) error {
+func (s *stubTeamRepository) FenceTeamDeletionOwnedBy(
+	_ context.Context,
+	id string,
+	expectedOwnerID string,
+) error {
+	s.fencedTeamID = id
+	s.fencedOwnerID = expectedOwnerID
+	if s.deletionOrder != nil {
+		*s.deletionOrder = append(*s.deletionOrder, "fence-identity")
+	}
+	return s.fenceErr
+}
+
+func (s *stubTeamRepository) UnfenceTeamDeletionOwnedBy(
+	_ context.Context,
+	id string,
+	expectedOwnerID string,
+) error {
+	s.unfencedTeamID = id
+	s.unfencedOwnerID = expectedOwnerID
+	if s.deletionOrder != nil {
+		*s.deletionOrder = append(*s.deletionOrder, "unfence-identity")
+	}
+	return s.unfenceErr
+}
+
+func (s *stubTeamRepository) DeleteTeamOwnedBy(_ context.Context, id, expectedOwnerID string) error {
+	s.deletedOwnerID = expectedOwnerID
+	if s.deletionOrder != nil {
+		*s.deletionOrder = append(*s.deletionOrder, "identity")
+	}
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	s.deletedTeamID = id
 	return nil
 }
 
 type stubTeamDeletePreflight struct {
-	teamID    string
-	inventory *teamresources.Inventory
-	err       error
+	teamID      string
+	inventory   *teamresources.Inventory
+	inventories []*teamresources.Inventory
+	calls       int
+	err         error
 }
 
 func (s *stubTeamDeletePreflight) GetTeamResourceInventory(_ context.Context, teamID string) (*teamresources.Inventory, error) {
 	s.teamID = teamID
+	s.calls++
 	if s.err != nil {
 		return nil, s.err
+	}
+	if s.calls <= len(s.inventories) && s.inventories[s.calls-1] != nil {
+		return s.inventories[s.calls-1], nil
 	}
 	if s.inventory != nil {
 		return s.inventory, nil
@@ -104,10 +160,68 @@ func (s *stubTeamDeletePreflight) GetTeamResourceInventory(_ context.Context, te
 	return &teamresources.Inventory{TeamID: teamID}, nil
 }
 
-func (s *stubTeamRepository) TransferTeamOwner(_ context.Context, teamID, userID string) (*identity.Team, error) {
+type stubTeamDeletionLifecycle struct {
+	disableTeamID  string
+	finalizeTeamID string
+	disableErr     error
+	finalizeErr    error
+	order          *[]string
+}
+
+func (s *stubTeamDeletionLifecycle) DisableTeamAdmission(_ context.Context, teamID string) error {
+	s.disableTeamID = teamID
+	if s.order != nil {
+		*s.order = append(*s.order, "disable-postgres")
+	}
+	return s.disableErr
+}
+
+func (s *stubTeamDeletionLifecycle) DisableTeamAdmissionWithFinalCheck(
+	ctx context.Context,
+	teamID string,
+	finalCheck func(context.Context) error,
+) error {
+	if err := s.DisableTeamAdmission(ctx, teamID); err != nil {
+		return err
+	}
+	if finalCheck != nil {
+		return finalCheck(ctx)
+	}
+	return nil
+}
+
+func (s *stubTeamDeletionLifecycle) FinalizeTeamDeletion(_ context.Context, teamID string) error {
+	s.finalizeTeamID = teamID
+	if s.order != nil {
+		*s.order = append(*s.order, "finalize-postgres")
+	}
+	return s.finalizeErr
+}
+
+type stubTeamDistributedAdmissionDisabler struct {
+	teamID string
+	err    error
+	order  *[]string
+}
+
+func (s *stubTeamDistributedAdmissionDisabler) DisableTeamDistributedAdmission(_ context.Context, teamID string) error {
+	s.teamID = teamID
+	if s.order != nil {
+		*s.order = append(*s.order, "disable-redis")
+	}
+	return s.err
+}
+
+func (s *stubTeamRepository) TransferTeamOwner(_ context.Context, teamID, expectedOwnerID, userID string) (*identity.Team, error) {
+	if s.transferOwnerErr != nil {
+		return nil, s.transferOwnerErr
+	}
 	team, ok := s.teams[teamID]
 	if !ok {
 		return nil, identity.ErrTeamNotFound
+	}
+	if team.OwnerID == nil || *team.OwnerID != expectedOwnerID {
+		return nil, identity.ErrTeamOwnerChanged
 	}
 	member, ok := s.members[teamMemberKey(teamID, userID)]
 	if !ok {
@@ -494,6 +608,35 @@ func TestTeamHandlerTransferTeamOwnerRequiresCurrentOwner(t *testing.T) {
 	}
 }
 
+func TestTeamHandlerTransferTeamOwnerRejectsDeletionFence(t *testing.T) {
+	ownerID := testOwnerUserID
+	nextOwnerID := testNextOwnerID
+	repo := newTeamManagementRepo(ownerID)
+	repo.transferOwnerErr = identity.ErrTeamDeletionInProgress
+	repo.members[teamMemberKey(testTeamID, nextOwnerID)] = &identity.TeamMember{
+		ID:     "member-next",
+		TeamID: testTeamID,
+		UserID: nextOwnerID,
+		Role:   "viewer",
+	}
+
+	rec := performTeamManagementRequest(
+		t,
+		repo,
+		ownerID,
+		http.MethodPut,
+		"/teams/"+testTeamID+"/owner",
+		map[string]any{"user_id": nextOwnerID},
+	)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if got := *repo.teams[testTeamID].OwnerID; got != ownerID {
+		t.Fatalf("owner changed to %q while deletion was fenced", got)
+	}
+}
+
 func TestTeamHandlerListTeamMembersUsesSearchQuery(t *testing.T) {
 	ownerID := testOwnerUserID
 	repo := newTeamManagementRepo(ownerID)
@@ -585,8 +728,18 @@ func TestTeamHandlerDeleteTeamReturnsConflictWhenResourcesExist(t *testing.T) {
 			RetentionPolicy: teamresources.MeteringRetentionPolicy,
 		},
 	}
+	lifecycle := &stubTeamDeletionLifecycle{}
+	distributedDisabler := &stubTeamDistributedAdmissionDisabler{}
 
-	rec := performTeamManagementRequestWithOptions(t, repo, ownerID, http.MethodDelete, "/teams/"+testTeamID, nil, WithTeamDeletePreflight(preflight))
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		coordinatedTeamDeletionOptions(preflight, lifecycle, distributedDisabler)...,
+	)
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
@@ -620,7 +773,15 @@ func TestTeamHandlerDeleteTeamReturnsInternalErrorWhenPreflightFails(t *testing.
 	repo := newTeamManagementRepo(ownerID)
 	preflight := &stubTeamDeletePreflight{err: errors.New("inventory failed")}
 
-	rec := performTeamManagementRequestWithOptions(t, repo, ownerID, http.MethodDelete, "/teams/"+testTeamID, nil, WithTeamDeletePreflight(preflight))
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		coordinatedTeamDeletionOptions(preflight, &stubTeamDeletionLifecycle{}, &stubTeamDistributedAdmissionDisabler{})...,
+	)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
@@ -630,18 +791,342 @@ func TestTeamHandlerDeleteTeamReturnsInternalErrorWhenPreflightFails(t *testing.
 	}
 }
 
+func TestTeamHandlerDeleteTeamFailsClosedWhenRegionCoordinationIsUnavailable(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		WithTeamDeletionUnavailable("team deletion requires home-region coordination"),
+	)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if repo.deletedTeamID != "" {
+		t.Fatalf("team was deleted without region coordination: %q", repo.deletedTeamID)
+	}
+	var payload spec.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Error == nil || payload.Error.Code != spec.CodeUnavailable {
+		t.Fatalf("error = %#v, want unavailable", payload.Error)
+	}
+}
+
 func TestTeamHandlerDeleteTeamRunsAfterEmptyPreflight(t *testing.T) {
 	ownerID := testOwnerUserID
 	repo := newTeamManagementRepo(ownerID)
 	preflight := &stubTeamDeletePreflight{}
+	order := make([]string, 0, 4)
+	repo.deletionOrder = &order
+	lifecycle := &stubTeamDeletionLifecycle{order: &order}
+	distributedDisabler := &stubTeamDistributedAdmissionDisabler{order: &order}
 
-	rec := performTeamManagementRequestWithOptions(t, repo, ownerID, http.MethodDelete, "/teams/"+testTeamID, nil, WithTeamDeletePreflight(preflight))
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		coordinatedTeamDeletionOptions(preflight, lifecycle, distributedDisabler)...,
+	)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
+	var response spec.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v; body=%q", err, rec.Body.String())
+	}
+	data, ok := response.Data.(map[string]any)
+	if !response.Success || !ok || data["message"] != "team deleted" {
+		t.Fatalf("response = %#v, want team deletion success", response)
+	}
 	if repo.deletedTeamID != testTeamID {
 		t.Fatalf("deleted team id = %q, want %q", repo.deletedTeamID, testTeamID)
+	}
+	if repo.deletedOwnerID != ownerID {
+		t.Fatalf("expected deletion owner = %q, want %q", repo.deletedOwnerID, ownerID)
+	}
+	if lifecycle.disableTeamID != testTeamID || lifecycle.finalizeTeamID != testTeamID {
+		t.Fatalf("lifecycle team IDs = (%q, %q), want %q", lifecycle.disableTeamID, lifecycle.finalizeTeamID, testTeamID)
+	}
+	if distributedDisabler.teamID != testTeamID {
+		t.Fatalf("rate tombstone team ID = %q, want %q", distributedDisabler.teamID, testTeamID)
+	}
+	wantOrder := []string{
+		"fence-identity",
+		"disable-postgres",
+		"disable-redis",
+		"finalize-postgres",
+		"identity",
+	}
+	if !equalStrings(order, wantOrder) {
+		t.Fatalf("deletion order = %#v, want %#v", order, wantOrder)
+	}
+}
+
+func TestTeamHandlerDeleteTeamRejectsOwnerChangeAtIdentityDelete(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	repo.deleteErr = identity.ErrTeamOwnerChanged
+
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		coordinatedTeamDeletionOptions(
+			&stubTeamDeletePreflight{},
+			&stubTeamDeletionLifecycle{},
+			&stubTeamDistributedAdmissionDisabler{},
+		)...,
+	)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if repo.deletedTeamID != "" {
+		t.Fatalf("team was deleted after owner changed: %q", repo.deletedTeamID)
+	}
+	if repo.deletedOwnerID != ownerID {
+		t.Fatalf("expected deletion owner = %q, want %q", repo.deletedOwnerID, ownerID)
+	}
+}
+
+func TestTeamHandlerDeleteTeamRejectsOwnerChangeBeforeQuotaTombstone(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	repo.fenceErr = identity.ErrTeamOwnerChanged
+	lifecycle := &stubTeamDeletionLifecycle{}
+	distributedDisabler := &stubTeamDistributedAdmissionDisabler{}
+
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		coordinatedTeamDeletionOptions(
+			&stubTeamDeletePreflight{},
+			lifecycle,
+			distributedDisabler,
+		)...,
+	)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if lifecycle.disableTeamID != "" ||
+		distributedDisabler.teamID != "" ||
+		repo.deletedTeamID != "" {
+		t.Fatalf(
+			"owner change reached quota deletion: disable=%q redis=%q identity=%q",
+			lifecycle.disableTeamID,
+			distributedDisabler.teamID,
+			repo.deletedTeamID,
+		)
+	}
+}
+
+func TestTeamHandlerDeleteTeamRejectsResourceCreatedBeforeExclusiveFence(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	preflight := &stubTeamDeletePreflight{
+		inventories: []*teamresources.Inventory{
+			{TeamID: testTeamID},
+			{
+				TeamID: testTeamID,
+				BlockingResources: []teamresources.ResourceCount{
+					{Category: "api_keys", Count: 1},
+				},
+			},
+		},
+	}
+	lifecycle := &stubTeamDeletionLifecycle{}
+	distributedDisabler := &stubTeamDistributedAdmissionDisabler{}
+
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		coordinatedTeamDeletionOptions(preflight, lifecycle, distributedDisabler)...,
+	)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if preflight.calls != 2 {
+		t.Fatalf("preflight calls = %d, want initial and fenced final checks", preflight.calls)
+	}
+	if lifecycle.finalizeTeamID != "" || distributedDisabler.teamID != "" || repo.deletedTeamID != "" {
+		t.Fatalf(
+			"deletion continued after final inventory: finalize=%q rate=%q identity=%q",
+			lifecycle.finalizeTeamID,
+			distributedDisabler.teamID,
+			repo.deletedTeamID,
+		)
+	}
+	if repo.unfencedTeamID != testTeamID || repo.unfencedOwnerID != ownerID {
+		t.Fatalf(
+			"released deletion fence = (%q, %q), want (%q, %q)",
+			repo.unfencedTeamID,
+			repo.unfencedOwnerID,
+			testTeamID,
+			ownerID,
+		)
+	}
+}
+
+func TestTeamHandlerDeleteTeamMapsQuotaDeletionConflictTo409(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	lifecycle := &stubTeamDeletionLifecycle{disableErr: &teamquota.TeamDeletionConflictError{
+		TeamID:          testTeamID,
+		LiveAllocations: 1,
+	}}
+	distributedDisabler := &stubTeamDistributedAdmissionDisabler{}
+
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		coordinatedTeamDeletionOptions(&stubTeamDeletePreflight{}, lifecycle, distributedDisabler)...,
+	)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	var payload struct {
+		Error struct {
+			Details teamresources.Inventory `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode conflict response: %v", err)
+	}
+	if len(payload.Error.Details.BlockingResources) != 1 ||
+		payload.Error.Details.BlockingResources[0].Category != "team_quota_live_allocations" ||
+		payload.Error.Details.BlockingResources[0].Count != 1 {
+		t.Fatalf("blocking quota resources = %#v", payload.Error.Details.BlockingResources)
+	}
+	if repo.deletedTeamID != "" {
+		t.Fatalf("team was deleted after quota conflict: %q", repo.deletedTeamID)
+	}
+	if distributedDisabler.teamID != "" || lifecycle.finalizeTeamID != "" {
+		t.Fatalf("deletion continued after conflict: rate=%q finalize=%q", distributedDisabler.teamID, lifecycle.finalizeTeamID)
+	}
+	if repo.unfencedTeamID != testTeamID {
+		t.Fatalf("quota conflict did not release identity deletion fence: %q", repo.unfencedTeamID)
+	}
+}
+
+func TestTeamHandlerDeleteTeamStopsWhenDistributedMarkerFails(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	lifecycle := &stubTeamDeletionLifecycle{}
+	distributedDisabler := &stubTeamDistributedAdmissionDisabler{err: errors.New("redis unavailable")}
+
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		coordinatedTeamDeletionOptions(&stubTeamDeletePreflight{}, lifecycle, distributedDisabler)...,
+	)
+
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("response = %d Retry-After=%q, want 503/1 body=%s", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
+	}
+	if lifecycle.disableTeamID != testTeamID || lifecycle.finalizeTeamID != "" || repo.deletedTeamID != "" {
+		t.Fatalf(
+			"state after marker failure = disable %q finalize %q identity %q",
+			lifecycle.disableTeamID,
+			lifecycle.finalizeTeamID,
+			repo.deletedTeamID,
+		)
+	}
+}
+
+func TestTeamHandlerDeleteTeamStopsWhenFinalizationFails(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	lifecycle := &stubTeamDeletionLifecycle{finalizeErr: errors.New("postgres unavailable")}
+	distributedDisabler := &stubTeamDistributedAdmissionDisabler{}
+
+	rec := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		coordinatedTeamDeletionOptions(&stubTeamDeletePreflight{}, lifecycle, distributedDisabler)...,
+	)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if distributedDisabler.teamID != testTeamID || repo.deletedTeamID != "" {
+		t.Fatalf("state after finalization failure = marker %q identity %q", distributedDisabler.teamID, repo.deletedTeamID)
+	}
+}
+
+func TestTeamHandlerDeleteTeamIdentityFailureIsRetryable(t *testing.T) {
+	ownerID := testOwnerUserID
+	repo := newTeamManagementRepo(ownerID)
+	repo.deleteErr = errors.New("identity transaction failed")
+	lifecycle := &stubTeamDeletionLifecycle{}
+	distributedDisabler := &stubTeamDistributedAdmissionDisabler{}
+	options := coordinatedTeamDeletionOptions(&stubTeamDeletePreflight{}, lifecycle, distributedDisabler)
+
+	first := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		options...,
+	)
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("first status = %d, want 500 body=%s", first.Code, first.Body.String())
+	}
+	if lifecycle.finalizeTeamID != testTeamID || distributedDisabler.teamID != testTeamID {
+		t.Fatalf("durable deletion state was not completed before identity failure")
+	}
+
+	repo.deleteErr = nil
+	second := performTeamManagementRequestWithOptions(
+		t,
+		repo,
+		ownerID,
+		http.MethodDelete,
+		"/teams/"+testTeamID,
+		nil,
+		options...,
+	)
+	if second.Code != http.StatusOK || repo.deletedTeamID != testTeamID {
+		t.Fatalf("retry = %d deleted=%q body=%s", second.Code, repo.deletedTeamID, second.Body.String())
 	}
 }
 
@@ -890,6 +1375,30 @@ func performTeamManagementRequestWithOptions(t *testing.T, repo *stubTeamReposit
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec
+}
+
+func coordinatedTeamDeletionOptions(
+	preflight TeamDeletePreflight,
+	lifecycle TeamDeletionLifecycle,
+	distributedDisabler TeamDistributedAdmissionDisabler,
+) []TeamHandlerOption {
+	return []TeamHandlerOption{
+		WithTeamDeletePreflight(preflight),
+		WithTeamDeletionLifecycle(lifecycle),
+		WithTeamDistributedAdmissionDisabler(distributedDisabler),
+	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func teamMemberKey(teamID, userID string) string {

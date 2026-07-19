@@ -7,6 +7,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
+	storagequotatest "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota/testutil"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -19,8 +20,16 @@ func authContext(teamID, sandboxID string) context.Context {
 }
 
 func newTestFileSystemServer(volMgr volumeManager, repo VolumeRepository, hub *notify.Hub) *FileSystemServer {
-	return NewFileSystemServer(volMgr, repo, hub, nil, logrus.New(), nil)
+	server := NewFileSystemServer(volMgr, repo, hub, nil, logrus.New(), nil)
+	server.SetStorageQuota(storagequotatest.NewService("test-cluster"))
+	server.SetStorageOperationQuota(permissiveStorageOperationQuota{})
+	return server
 }
+
+type permissiveStorageOperationQuota struct{}
+
+func (permissiveStorageOperationQuota) Admit(context.Context, string) error { return nil }
+func (permissiveStorageOperationQuota) Close() error                        { return nil }
 
 type fakeVolumeManager struct {
 	volumes        map[string]*volume.VolumeContext

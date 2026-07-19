@@ -62,6 +62,9 @@ func ToSSHGateway(spec *infrav1alpha1.SSHGatewayConfig) *apiconfig.SSHGatewayCon
 	cfg.DatabaseMinConns = spec.DatabaseMinConns
 	cfg.InternalAuthTTL = spec.InternalAuthTTL
 	cfg.InternalAuthCaller = spec.InternalAuthCaller
+	cfg.PlatformMaxConcurrentHandshakes = spec.PlatformMaxConcurrentHandshakes
+	cfg.PlatformHandshakeTimeout = spec.PlatformHandshakeTimeout
+	cfg.PlatformMaxConcurrentChannelsPerConnection = spec.PlatformMaxConcurrentChannelsPerConnection
 	cfg.ResumeTimeout = spec.ResumeTimeout
 	cfg.ResumePollInterval = spec.ResumePollInterval
 	cfg.ShutdownTimeout = spec.ShutdownTimeout
@@ -127,20 +130,32 @@ func applyGatewayConfig(dst *apiconfig.GatewayConfig, src infrav1alpha1.GatewayC
 	dst.RedisURL = src.RedisURL
 	dst.RedisKeyPrefix = src.RedisKeyPrefix
 	dst.RedisTimeout = src.RedisTimeout
-	dst.RateLimitRPS = src.RateLimitRPS
-	dst.RateLimitBurst = src.RateLimitBurst
-	dst.RateLimitCleanupInterval = src.RateLimitCleanupInterval
-	dst.RateLimitBackend = src.RateLimitBackend
-	dst.RateLimitRedisURL = src.RateLimitRedisURL
-	dst.RateLimitRedisKeyPrefix = src.RateLimitRedisKeyPrefix
-	dst.RateLimitRedisTimeout = src.RateLimitRedisTimeout
-	dst.RateLimitFailOpen = src.RateLimitFailOpen
 	dst.DefaultTeamName = src.DefaultTeamName
 	dst.BuiltInAuth = apiconfig.BuiltInAuthConfig{
 		Enabled:                   src.BuiltInAuth.Enabled,
 		AllowRegistration:         src.BuiltInAuth.AllowRegistration,
 		EmailVerificationRequired: src.BuiltInAuth.EmailVerificationRequired,
 		AdminOnly:                 src.BuiltInAuth.AdminOnly,
+	}
+	dst.IdentityResourceGuard = apiconfig.IdentityResourceGuardConfig{
+		MaxTeamsOwnedPerUser:          src.IdentityResourceGuard.MaxTeamsOwnedPerUser,
+		MaxMembersPerTeam:             src.IdentityResourceGuard.MaxMembersPerTeam,
+		MaxTeamMembershipsPerUser:     src.IdentityResourceGuard.MaxTeamMembershipsPerUser,
+		MaxLinkedIdentitiesPerUser:    src.IdentityResourceGuard.MaxLinkedIdentitiesPerUser,
+		MaxActiveRefreshTokensPerUser: src.IdentityResourceGuard.MaxActiveRefreshTokensPerUser,
+		MaxActiveWebLoginCodesPerUser: src.IdentityResourceGuard.MaxActiveWebLoginCodesPerUser,
+		MaxActiveDeviceAuthSessions:   src.IdentityResourceGuard.MaxActiveDeviceAuthSessions,
+		MaxPendingOIDCStates:          src.IdentityResourceGuard.MaxPendingOIDCStates,
+		SessionCleanupInterval:        src.IdentityResourceGuard.SessionCleanupInterval,
+		SessionCleanupBatchSize:       src.IdentityResourceGuard.SessionCleanupBatchSize,
+	}
+	dst.OverloadGuard = apiconfig.OverloadGuardConfig{
+		RequestsPerSecond:      src.OverloadGuard.RequestsPerSecond,
+		Burst:                  src.OverloadGuard.Burst,
+		LocalRequestsPerSecond: src.OverloadGuard.LocalRequestsPerSecond,
+		LocalBurst:             src.OverloadGuard.LocalBurst,
+		MaxInFlight:            src.OverloadGuard.MaxInFlight,
+		CleanupInterval:        src.OverloadGuard.CleanupInterval,
 	}
 	dst.OIDCProviders = make([]apiconfig.OIDCProviderConfig, 0, len(src.OIDCProviders))
 	for _, provider := range src.OIDCProviders {
@@ -167,7 +182,6 @@ func applyGatewayConfig(dst *apiconfig.GatewayConfig, src infrav1alpha1.GatewayC
 		})
 	}
 	dst.OIDCStateTTL = src.OIDCStateTTL
-	dst.OIDCStateCleanupInterval = src.OIDCStateCleanupInterval
 	dst.BaseURL = src.BaseURL
 }
 

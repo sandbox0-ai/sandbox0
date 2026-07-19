@@ -101,20 +101,19 @@ func (f *fakeIdentityStore) CreateUser(_ context.Context, user *identity.User) e
 	return nil
 }
 
-func (f *fakeIdentityStore) CreateTeam(_ context.Context, team *identity.Team) error {
+func (f *fakeIdentityStore) CreateTeamWithOwner(_ context.Context, team *identity.Team) (*identity.TeamMember, error) {
 	createdTeam := *team
 	createdTeam.ID = f.next("team")
 	f.teamsByID[createdTeam.ID] = &createdTeam
 	*team = createdTeam
-	return nil
-}
-
-func (f *fakeIdentityStore) AddTeamMember(_ context.Context, member *identity.TeamMember) error {
-	createdMember := *member
-	createdMember.ID = f.next("member")
-	f.members = append(f.members, &createdMember)
-	*member = createdMember
-	return nil
+	createdMember := &identity.TeamMember{
+		ID:     f.next("member"),
+		TeamID: createdTeam.ID,
+		UserID: *createdTeam.OwnerID,
+		Role:   "admin",
+	}
+	f.members = append(f.members, createdMember)
+	return createdMember, nil
 }
 
 func (f *fakeIdentityStore) UpdateUser(_ context.Context, user *identity.User) error {

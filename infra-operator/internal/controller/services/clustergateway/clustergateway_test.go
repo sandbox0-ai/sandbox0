@@ -124,6 +124,16 @@ func TestReconcileKeepsHTTPBackendForHTTPSBaseURL(t *testing.T) {
 	if hasVolume(deployment.Spec.Template.Spec.Volumes, "gateway-tls") {
 		t.Fatal("did not expect gateway-tls volume for ingress-terminated TLS")
 	}
+	configMap := &corev1.ConfigMap{}
+	if err := client.Get(context.Background(), types.NamespacedName{
+		Name:      configMapNameForVolume(t, deployment.Spec.Template.Spec.Volumes, "config"),
+		Namespace: infra.Namespace,
+	}, configMap); err != nil {
+		t.Fatalf("get cluster gateway configmap: %v", err)
+	}
+	if !strings.Contains(configMap.Data["config.yaml"], "policy_owner: true") {
+		t.Fatalf("expected fullmode cluster-gateway to own Team Quota policy, got config %q", configMap.Data["config.yaml"])
+	}
 }
 
 func TestReconcilePublicModeSkipsControlPlanePublicKeyMount(t *testing.T) {
@@ -314,6 +324,9 @@ func TestReconcileRegionalGatewayPublicModeUpgradesToBoth(t *testing.T) {
 	if !strings.Contains(configMap.Data["config.yaml"], "auth_mode: both") {
 		t.Fatalf("expected cluster-gateway auth_mode to be promoted to both, got config %q", configMap.Data["config.yaml"])
 	}
+	if !strings.Contains(configMap.Data["config.yaml"], "policy_owner: false") {
+		t.Fatalf("expected regional data-plane cluster not to own Team Quota defaults, got config %q", configMap.Data["config.yaml"])
+	}
 }
 
 func newClusterGatewayTestReconciler(t *testing.T, objects ...runtime.Object) (*Reconciler, ctrlclient.Client) {
@@ -350,6 +363,14 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
 					Enabled:      true,
 					DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
+					SpoolLimits: infrav1alpha1.AuditSpoolLimitsConfig{
+						MaxBytes:       2097152,
+						MaxEntries:     200,
+						MaxTeamBytes:   1048576,
+						MaxTeamEntries: 100,
+						MinFreeBytes:   524288,
+						MaxRecordBytes: 65536,
+					},
 				},
 				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
 					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
@@ -401,6 +422,14 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 		!cfg.SandboxObservability.AuditEnabled ||
 		cfg.SandboxObservability.AuditDeliveryMode != sandboxobservability.AuditDeliveryModeCanonicalSync ||
 		cfg.SandboxObservability.AuditSpoolDir != "/var/lib/sandbox0/cluster-gateway/audit-spool" ||
+		cfg.SandboxObservability.AuditSpoolLimits != (apiconfig.AuditSpoolLimitsConfig{
+			MaxBytes:       2097152,
+			MaxEntries:     200,
+			MaxTeamBytes:   1048576,
+			MaxTeamEntries: 100,
+			MinFreeBytes:   524288,
+			MaxRecordBytes: 65536,
+		}) ||
 		cfg.SandboxObservability.ClickHouse.Database != "sandbox0_obs" ||
 		cfg.SandboxObservability.ClickHouse.EventsTable != "events_v1" ||
 		cfg.SandboxObservability.ClickHouse.LogsTable != "logs_v1" ||
@@ -409,6 +438,43 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 		cfg.SandboxObservability.ClickHouse.LogsRetentionDays != 3 ||
 		cfg.SandboxObservability.ClickHouse.RuntimeSamplesRetentionDays != 30 {
 		t.Fatalf("sandbox observability config = %+v", cfg.SandboxObservability)
+	}
+}
+
+func TestDefaultAuditSpoolPVCHasRoomForBacklogAndFreeSpaceFloor(t *testing.T) {
+	pvcSize := resource.MustParse(defaultAuditResultSpoolPVCSize)
+	requiredBytes, err := auditSpoolBacklogAndHeadroomBytes(nil)
+	if err != nil {
+		t.Fatalf("auditSpoolBacklogAndHeadroomBytes() error = %v", err)
+	}
+	required := resource.NewQuantity(requiredBytes, resource.BinarySI)
+	if pvcSize.Cmp(*required) <= 0 {
+		t.Fatalf(
+			"default audit spool PVC %s must exceed backlog plus free-space floor %s",
+			pvcSize.String(),
+			required.String(),
+		)
+	}
+}
+
+func TestAuditSpoolPVCRequiresRoomBeyondConfiguredBounds(t *testing.T) {
+	audit := &infrav1alpha1.SandboxObservabilityAuditConfig{
+		SpoolLimits: infrav1alpha1.AuditSpoolLimitsConfig{
+			MaxBytes:     1 << 30,
+			MinFreeBytes: 1 << 30,
+		},
+	}
+	required, err := auditSpoolBacklogAndHeadroomBytes(audit)
+	if err != nil {
+		t.Fatalf("auditSpoolBacklogAndHeadroomBytes() error = %v", err)
+	}
+	exact := resource.NewQuantity(required, resource.BinarySI)
+	if exact.Value() != required {
+		t.Fatalf("quantity value = %d, want %d", exact.Value(), required)
+	}
+	defaultSize := resource.MustParse("3Gi")
+	if defaultSize.Value() <= required {
+		t.Fatal("3Gi must leave filesystem overhead beyond configured bounds")
 	}
 }
 
@@ -424,7 +490,7 @@ func TestReconcileAuditMountsSeparatedKeysAndResultSpool(t *testing.T) {
 				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
 					Enabled: true,
 					DeliveryPersistence: &infrav1alpha1.SandboxAuditDeliveryPersistenceConfig{
-						Size:         resource.MustParse("2Gi"),
+						Size:         resource.MustParse("4Gi"),
 						StorageClass: "durable-audit",
 					},
 				},
@@ -476,7 +542,7 @@ func TestReconcileAuditMountsSeparatedKeysAndResultSpool(t *testing.T) {
 	if err := client.Get(context.Background(), types.NamespacedName{Name: auditResultSpoolPVCName(infra.Name), Namespace: infra.Namespace}, pvc); err != nil {
 		t.Fatalf("get audit result spool PVC: %v", err)
 	}
-	wantSize := resource.MustParse("2Gi")
+	wantSize := resource.MustParse("4Gi")
 	gotSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 	if gotSize.Cmp(wantSize) != 0 {
 		t.Fatalf("audit result spool PVC size = %s, want %s", gotSize.String(), wantSize.String())
@@ -745,6 +811,12 @@ func TestBuildConfigSkipsInitUserForInternalOnlyClusterGateway(t *testing.T) {
 	if cfg.BuiltInAuth.InitUser != nil {
 		t.Fatalf("expected init user to be omitted for internal-only cluster gateway, got %#v", cfg.BuiltInAuth.InitUser)
 	}
+	if cfg.TeamQuota.PolicyOwner {
+		t.Fatal("expected internal-only data-plane cluster not to own Team Quota defaults")
+	}
+	if len(cfg.TeamQuota.Defaults) != 0 {
+		t.Fatalf("data-plane defaults = %#v, want none", cfg.TeamQuota.Defaults)
+	}
 }
 
 func TestBuildConfigLeavesInitUserPasswordEmptyForOIDCOnlyBootstrap(t *testing.T) {
@@ -819,6 +891,9 @@ func TestBuildConfigLeavesInitUserPasswordEmptyForOIDCOnlyBootstrap(t *testing.T
 	cfg, err := reconciler.buildConfig(context.Background(), infraplan.Compile(infra))
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
+	}
+	if !cfg.TeamQuota.PolicyOwner {
+		t.Fatal("expected fullmode public cluster gateway to own Team Quota defaults")
 	}
 	if cfg.BuiltInAuth.InitUser == nil {
 		t.Fatal("expected init user config")

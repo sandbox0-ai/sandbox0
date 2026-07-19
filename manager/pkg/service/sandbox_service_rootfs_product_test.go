@@ -10,6 +10,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -239,13 +240,14 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 		},
 	}
 	svc := &SandboxService{
-		k8sClient:    fake.NewSimpleClientset(pod),
-		podLister:    newTestPodLister(t, pod),
-		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:        systemTime{},
-		logger:       zap.NewNop(),
+		k8sClient:      fake.NewSimpleClientset(pod),
+		podLister:      newTestPodLister(t, pod),
+		sandboxStore:   store,
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
+		ctldClient:     NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:         SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:          systemTime{},
+		logger:         zap.NewNop(),
 	}
 	var procdCalls []string
 	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
@@ -351,13 +353,14 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 		},
 	}
 	svc := &SandboxService{
-		k8sClient:    fake.NewSimpleClientset(pod),
-		podLister:    newTestPodLister(t, pod),
-		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:        systemTime{},
-		logger:       zap.NewNop(),
+		k8sClient:      fake.NewSimpleClientset(pod),
+		podLister:      newTestPodLister(t, pod),
+		sandboxStore:   store,
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
+		ctldClient:     NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:         SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:          systemTime{},
+		logger:         zap.NewNop(),
 	}
 	var procdCalls []string
 	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
@@ -485,6 +488,29 @@ func TestSandboxRootFSProductForkSetsLifecycleExpirations(t *testing.T) {
 	require.NotNil(t, stored)
 	assert.Equal(t, wantExpiresAt, stored.ExpiresAt)
 	assert.Equal(t, wantHardExpiresAt, stored.HardExpiresAt)
+}
+
+func TestSandboxRootFSProductForkRejectsIdentityQuotaBeforeTargetCommit(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now),
+		},
+		rootFSStates: map[string]*SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		},
+	}
+	quotaStore := &rejectingForkTeamQuotaCapacityStore{}
+	svc := rootFSProductTestService(store)
+	svc.teamQuotaStore = quotaStore
+
+	_, err := svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-2", nil)
+
+	require.ErrorIs(t, err, ErrQuotaExceeded)
+	require.Len(t, quotaStore.requests, 1)
+	assert.Equal(t, int64(1), quotaStore.requests[0].Target[teamquota.KeySandboxIdentityCount])
+	assert.Len(t, store.records, 1)
+	assert.Len(t, store.rootFSStates, 1)
 }
 
 func TestSandboxRootFSProductForkOverridesLifecycleConfig(t *testing.T) {
@@ -729,6 +755,15 @@ func (s *memorySandboxStore) DeleteRootFSSnapshot(_ context.Context, snapshotID,
 	return nil
 }
 
+func (s *memorySandboxStore) DeleteRootFSSnapshotWithQuota(
+	ctx context.Context,
+	snapshotID string,
+	teamID string,
+	_ teamquota.CapacityTxStore,
+) error {
+	return s.DeleteRootFSSnapshot(ctx, snapshotID, teamID)
+}
+
 func (s *memorySandboxStore) ForkRootFSFilesystem(_ context.Context, req *ForkRootFSFilesystemRequest) (*RootFSFilesystem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -794,9 +829,10 @@ func (s *memorySandboxStore) RestoreRootFSFromSnapshot(_ context.Context, req *R
 
 func rootFSProductTestService(store *memorySandboxStore) *SandboxService {
 	return &SandboxService{
-		sandboxStore: store,
-		clock:        systemTime{},
-		logger:       zap.NewNop(),
+		sandboxStore:   store,
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
+		clock:          systemTime{},
+		logger:         zap.NewNop(),
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	metering "github.com/sandbox0-ai/sandbox0/pkg/metering"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 )
 
 const (
@@ -646,124 +645,6 @@ func (r *Repository) DeleteStorageProjectionState(ctx context.Context, state *me
 	return r.deleteStorageProjectionState(ctx, state, deletedAt)
 }
 
-func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error) {
-	switch dimension {
-	case quota.DimensionActiveSandboxes:
-		return r.currentScalar(ctx, fmt.Sprintf(`
-SELECT toInt64(COUNT())
-FROM %s FINAL
-WHERE team_id = ? AND claimed_at IS NOT NULL AND terminated_at IS NULL
-`, qualified(r.cfg.Database, r.cfg.SandboxStateTable)), teamID)
-	case quota.DimensionCPU:
-		return r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(resource_millicpu), 0)
-FROM %s FINAL
-WHERE team_id = ? AND claimed_at IS NOT NULL AND terminated_at IS NULL
-`, qualified(r.cfg.Database, r.cfg.SandboxStateTable)), teamID)
-	case quota.DimensionMemory:
-		return r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(resource_memory_mib), 0)
-FROM %s FINAL
-WHERE team_id = ? AND claimed_at IS NOT NULL AND terminated_at IS NULL
-`, qualified(r.cfg.Database, r.cfg.SandboxStateTable)), teamID)
-	case quota.DimensionVolumeStorageGB:
-		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeVolume)
-		return quota.BytesToGBRoundUp(current), err
-	case quota.DimensionSnapshotGB:
-		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeSnapshot)
-		return quota.BytesToGBRoundUp(current), err
-	case quota.DimensionEgress:
-		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxEgressBytes)
-	case quota.DimensionIngress:
-		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxIngressBytes)
-	default:
-		return 0, fmt.Errorf("unsupported quota usage dimension %q", dimension)
-	}
-}
-
-func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension quota.Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
-	if teamID == "" {
-		return 0, fmt.Errorf("team_id is required")
-	}
-	if subjectID == "" {
-		return 0, fmt.Errorf("subject_id is required")
-	}
-	if sizeBytes < 0 {
-		return 0, fmt.Errorf("size_bytes must be non-negative")
-	}
-	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
-		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
-	}
-	otherBytes, err := r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(size_bytes), 0)
-FROM %s FINAL
-WHERE deleted = 0 AND team_id = ? AND subject_type = ? AND subject_id != ?
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable)), teamID, subjectType, subjectID)
-	if err != nil {
-		return 0, fmt.Errorf("query projected storage quota usage: %w", err)
-	}
-	return quota.BytesToGBRoundUp(otherBytes + sizeBytes), nil
-}
-
-func (r *Repository) AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension quota.Dimension, subjectType string, additionalBytes int64) (int64, error) {
-	if additionalBytes < 0 {
-		return 0, fmt.Errorf("additional_bytes must be non-negative")
-	}
-	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
-		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
-	}
-	current, err := r.currentStorageUsageBytes(ctx, teamID, subjectType)
-	if err != nil {
-		return 0, err
-	}
-	return quota.BytesToGBRoundUp(current + additionalBytes), nil
-}
-
-func (r *Repository) currentStorageUsageBytes(ctx context.Context, teamID, subjectType string) (int64, error) {
-	return r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(size_bytes), 0)
-FROM %s FINAL
-WHERE deleted = 0 AND team_id = ? AND subject_type = ?
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable)), teamID, subjectType)
-}
-
-func (r *Repository) currentNetworkUsage(ctx context.Context, teamID string, windowTypes ...string) (int64, error) {
-	if len(windowTypes) == 0 {
-		return 0, fmt.Errorf("window type is required")
-	}
-	args := make([]any, 0, len(windowTypes)+1)
-	args = append(args, teamID)
-	placeholders := make([]string, 0, len(windowTypes))
-	for _, windowType := range windowTypes {
-		args = append(args, windowType)
-		placeholders = append(placeholders, "?")
-	}
-	return r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(value), 0)
-FROM %s FINAL
-WHERE team_id = ? AND window_type IN (%s)
-`, qualified(r.cfg.Database, r.cfg.WindowsTable), joinComma(placeholders)), args...)
-}
-
-func (r *Repository) currentScalar(ctx context.Context, query string, args ...any) (int64, error) {
-	var value int64
-	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&value); err != nil {
-		return 0, err
-	}
-	return value, nil
-}
-
-func storageDimensionMatchesSubjectType(dimension quota.Dimension, subjectType string) bool {
-	switch dimension {
-	case quota.DimensionVolumeStorageGB:
-		return subjectType == metering.SubjectTypeVolume
-	case quota.DimensionSnapshotGB:
-		return subjectType == metering.SubjectTypeSnapshot
-	default:
-		return false
-	}
-}
-
 func dateTime64NanoArg(value time.Time) int64 {
 	return value.UTC().UnixNano()
 }
@@ -799,15 +680,4 @@ func versionFrom(value time.Time) uint64 {
 		return 0
 	}
 	return uint64(nanos)
-}
-
-func joinComma(values []string) string {
-	out := ""
-	for i, value := range values {
-		if i > 0 {
-			out += ", "
-		}
-		out += value
-	}
-	return out
 }

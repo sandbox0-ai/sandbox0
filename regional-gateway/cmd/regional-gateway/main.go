@@ -11,8 +11,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
+	gatewayteamquota "github.com/sandbox0-ai/sandbox0/pkg/gateway/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/regional-gateway/pkg/http"
 	"go.uber.org/zap"
 )
@@ -59,6 +61,36 @@ func main() {
 	if err := runMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
+	cfg.TeamQuota.DistributedEnforcement.RedisKeyPrefix =
+		coreteamquota.NormalizeTeamQuotaRedisKeyPrefix(
+			cfg.TeamQuota.DistributedEnforcement.RedisKeyPrefix,
+		)
+	policyCoordinator, err := coreteamquota.NewPolicyCoordinator(
+		ctx,
+		pool,
+		coreteamquota.PolicyCoordinatorConfig{
+			RegionID:        cfg.RegionID,
+			ExpectedStateID: cfg.TeamQuota.DistributedEnforcement.StateID,
+			RedisURL:        cfg.TeamQuota.DistributedEnforcement.RedisURL,
+			RedisKeyPrefix:  cfg.TeamQuota.DistributedEnforcement.RedisKeyPrefix,
+			RedisTimeout:    cfg.TeamQuota.DistributedEnforcement.RedisTimeout.Duration,
+			LeaseTTL:        cfg.TeamQuota.DistributedEnforcement.LeaseTTL.Duration,
+		},
+	)
+	if err != nil {
+		logger.Fatal("Failed to initialize Team Quota policy coordinator", zap.Error(err))
+	}
+	defer policyCoordinator.Close()
+	if err := gatewayteamquota.ReplaceConfiguredDefaults(
+		ctx,
+		policyCoordinator,
+		cfg.TeamQuota,
+	); err != nil {
+		logger.Fatal("Failed to reconcile Team Quota defaults", zap.Error(err))
+	}
+	go policyCoordinator.RunRepair(ctx, func(err error) {
+		logger.Error("Failed to repair Team Quota policy guard", zap.Error(err))
+	})
 	meteringDB, meteringRepo, err := initMetering(ctx, cfg, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize metering backend", zap.Error(err))
@@ -68,7 +100,14 @@ func main() {
 	}
 
 	// Create HTTP server
-	server, err := http.NewServer(cfg, pool, logger, obsProvider, http.WithMeteringReader(meteringRepo))
+	server, err := http.NewServer(
+		cfg,
+		pool,
+		logger,
+		obsProvider,
+		http.WithMeteringReader(meteringRepo),
+		http.WithTeamQuotaPolicyManager(policyCoordinator),
+	)
 	if err != nil {
 		logger.Fatal("Failed to create HTTP server", zap.Error(err))
 	}
@@ -128,6 +167,13 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 		migrate.WithSchema("shared_gateway"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
+	}
+	if err := coreteamquota.RunMigrations(
+		ctx,
+		pool,
+		observability.NewMigrateLogger(logger),
+	); err != nil {
+		return err
 	}
 
 	logger.Info("Database migrations completed successfully")

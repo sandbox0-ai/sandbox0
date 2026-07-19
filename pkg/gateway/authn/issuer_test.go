@@ -165,3 +165,67 @@ func TestNewIssuerFromConfigSupportsKeyFiles(t *testing.T) {
 		t.Fatalf("unexpected user id: %q", claims.UserID)
 	}
 }
+
+func TestVerifierFromConfigRejectsAccessTokenBeyondConfiguredLifetime(t *testing.T) {
+	privateKeyPEM, publicKeyPEM, err := internalauth.GenerateEd25519KeyPair()
+	if err != nil {
+		t.Fatalf("generate key pair: %v", err)
+	}
+	issuer, err := NewIssuerFromConfig(
+		"global-gateway",
+		"",
+		string(privateKeyPEM),
+		string(publicKeyPEM),
+		"",
+		"",
+		2*time.Hour,
+		24*time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("create issuer: %v", err)
+	}
+	tokens, err := issuer.IssueTokenPair(
+		"user-1",
+		"user@example.com",
+		"User",
+		false,
+		[]TeamGrant{{TeamID: "team-1", TeamRole: "admin"}},
+	)
+	if err != nil {
+		t.Fatalf("issue token pair: %v", err)
+	}
+
+	shortVerifier, err := NewIssuerFromConfig(
+		"global-gateway",
+		"",
+		"",
+		string(publicKeyPEM),
+		"",
+		"",
+		15*time.Minute,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("create short verifier: %v", err)
+	}
+	if _, err := shortVerifier.ValidateAccessToken(tokens.AccessToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("long-lived token validation error = %v, want ErrInvalidToken", err)
+	}
+
+	matchingVerifier, err := NewIssuerFromConfig(
+		"global-gateway",
+		"",
+		"",
+		string(publicKeyPEM),
+		"",
+		"",
+		2*time.Hour,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("create matching verifier: %v", err)
+	}
+	if _, err := matchingVerifier.ValidateAccessToken(tokens.AccessToken); err != nil {
+		t.Fatalf("matching lifetime validation error = %v", err)
+	}
+}

@@ -74,16 +74,17 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 	}
 
 	volCtx := &VolumeContext{
-		VolumeID:  req.VolumeID,
-		TeamID:    req.TeamID,
-		Backend:   BackendS0FS,
-		S0FS:      engine,
-		Access:    req.AccessMode,
-		MountedAt: req.MountedAt,
-		RootInode: 1,
-		RootPath:  "/",
-		CacheDir:  cacheDir,
-		Observer:  req.StorageObserver,
+		VolumeID:     req.VolumeID,
+		TeamID:       req.TeamID,
+		Backend:      BackendS0FS,
+		S0FS:         engine,
+		Access:       req.AccessMode,
+		MountedAt:    req.MountedAt,
+		RootInode:    1,
+		RootPath:     "/",
+		CacheDir:     cacheDir,
+		Observer:     req.StorageObserver,
+		storageQuota: req.StorageQuota,
 	}
 	b.startMaterializer(volCtx)
 	return volCtx, nil

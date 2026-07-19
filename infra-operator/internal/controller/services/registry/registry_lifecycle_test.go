@@ -124,11 +124,25 @@ func TestReconcileCreatesRuntimeResourcesBeforeDeploymentReady(t *testing.T) {
 		t.Fatal("expected reconcile to wait for deployment readiness")
 	}
 
-	assertRegistryPresentObject(t, client, &appsv1.Deployment{}, "sandbox0-system", "demo-registry")
+	deployment := &appsv1.Deployment{}
+	assertRegistryPresentObject(t, client, deployment, "sandbox0-system", "demo-registry")
 	assertRegistryPresentObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-registry")
 	assertRegistryPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-auth")
 	assertRegistryPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-pull")
 	assertRegistryPresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-registry-data")
+	if len(deployment.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("expected one registry container, got %#v", deployment.Spec.Template.Spec.Containers)
+	}
+	deleteEnabled := false
+	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "REGISTRY_STORAGE_DELETE_ENABLED" && env.Value == "true" {
+			deleteEnabled = true
+			break
+		}
+	}
+	if !deleteEnabled {
+		t.Fatal("registry deployment must enable manifest deletion")
+	}
 
 	service := &corev1.Service{}
 	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "sandbox0-system", Name: "demo-registry"}, service); err != nil {

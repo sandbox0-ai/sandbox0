@@ -11,19 +11,70 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	templateImageQuotaOwnerKind       = "template_image"
+	templateImagePublishOperationKind = "template_image_publish"
+	templateImageDeleteOperationKind  = "template_image_delete"
+)
+
+func templateImageQuotaOwner(teamID, templateID string) teamquota.Owner {
+	return teamquota.Owner{
+		TeamID: strings.TrimSpace(teamID),
+		Kind:   templateImageQuotaOwnerKind,
+		ID:     strings.TrimSpace(templateID),
+	}
+}
+
+func templateImagePublishOperation(buildID string) teamquota.Operation {
+	return teamquota.Operation{
+		ID:   strings.TrimSpace(buildID) + ":image-publish",
+		Kind: templateImagePublishOperationKind,
+	}
+}
+
+func templateImageDeleteOperation(cleanupID string) teamquota.Operation {
+	return teamquota.Operation{
+		ID:   strings.TrimSpace(cleanupID) + ":image-delete",
+		Kind: templateImageDeleteOperationKind,
+	}
+}
+
 // Store implements template and allocation storage in PostgreSQL.
 type Store struct {
-	pool *pgxpool.Pool
+	pool           *pgxpool.Pool
+	teamQuotaStore teamquota.CapacityTxStore
+}
+
+// StoreOption customizes a template store.
+type StoreOption func(*Store)
+
+// WithTeamQuotaStore overrides the team quota store.
+func WithTeamQuotaStore(store teamquota.CapacityTxStore) StoreOption {
+	return func(templateStore *Store) {
+		templateStore.teamQuotaStore = store
+	}
 }
 
 // NewStore creates a new Store.
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+func NewStore(pool *pgxpool.Pool, opts ...StoreOption) *Store {
+	templateStore := &Store{
+		pool:           pool,
+		teamQuotaStore: teamquota.NewRepository(pool),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(templateStore)
+		}
+	}
+	return templateStore
 }
 
 // Ping checks database connectivity.
@@ -35,7 +86,8 @@ const templateSelectColumns = `
 	template_id, scope, team_id, user_id, spec, created_at, updated_at,
 	creation_build_id::text, creation_idempotency_key, creation_request_hash,
 	creation_state, creation_stage, creation_started_at, creation_captured_at,
-	creation_completed_at, creation_output_image, creation_reason, creation_message
+	creation_completed_at, creation_output_image, creation_reason, creation_message,
+	creation_image_cluster_id, creation_image_logical_size_bytes
 `
 
 type rowScanner interface {
@@ -47,8 +99,9 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 	var specJSON []byte
 	var buildID, idempotencyKey, requestHash *string
 	var creationState string
-	var creationStage, outputImage, reason, message *string
+	var creationStage, outputImage, reason, message, imageClusterID *string
 	var startedAt, capturedAt, completedAt *time.Time
+	var imageLogicalSizeBytes *int64
 	if err := row.Scan(
 		&tpl.TemplateID,
 		&tpl.Scope,
@@ -68,6 +121,8 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 		&outputImage,
 		&reason,
 		&message,
+		&imageClusterID,
+		&imageLogicalSizeBytes,
 	); err != nil {
 		return nil, err
 	}
@@ -78,6 +133,10 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 	tpl.CreationBuildID = stringValue(buildID)
 	tpl.CreationIdempotencyKey = stringValue(idempotencyKey)
 	tpl.CreationRequestHash = stringValue(requestHash)
+	tpl.CreationImageClusterID = stringValue(imageClusterID)
+	if imageLogicalSizeBytes != nil {
+		tpl.CreationImageLogicalSizeBytes = *imageLogicalSizeBytes
+	}
 	if buildID != nil {
 		tpl.Status = &v1alpha1.SandboxTemplateStatus{
 			Creation: &v1alpha1.TemplateCreationStatus{
@@ -102,6 +161,13 @@ func stringValue(value *string) string {
 	return *value
 }
 
+func int64Value(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
 func metaTime(value *time.Time) *metav1.Time {
 	if value == nil {
 		return nil
@@ -110,19 +176,148 @@ func metaTime(value *time.Time) *metav1.Time {
 	return &out
 }
 
+func lockTemplateLifecycleTx(ctx context.Context, tx pgx.Tx, scope, teamID, templateID string) error {
+	if scope == naming.ScopeTeam {
+		if err := teamquota.LockTeamMutationTx(ctx, tx, teamID); err != nil {
+			return err
+		}
+	}
+	lockKey := strings.Join([]string{"template-lifecycle", scope, teamID, templateID}, ":")
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		return fmt.Errorf("lock template lifecycle: %w", err)
+	}
+	return nil
+}
+
+func ensureNoTemplateImageCleanupTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope, teamID, templateID string,
+) error {
+	var pending bool
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			EXISTS (
+				SELECT 1
+				FROM scheduler_template_image_cleanups
+				WHERE scope = $1 AND team_id = $2 AND template_id = $3
+			)
+			OR EXISTS (
+				SELECT 1
+				FROM scheduler_template_builds
+				WHERE scope = $1 AND team_id = $2 AND template_id = $3
+			)
+	`, scope, teamID, templateID).Scan(&pending); err != nil {
+		return fmt.Errorf("check template image lifecycle cleanup: %w", err)
+	}
+	if pending {
+		return template.ErrTemplateImageCleanupPending
+	}
+	return nil
+}
+
+func templateImageCleanupPendingTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	scope, teamID, templateID string,
+) (bool, error) {
+	var pending bool
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			EXISTS (
+				SELECT 1
+				FROM scheduler_template_image_cleanups
+				WHERE scope = $1 AND team_id = $2 AND template_id = $3
+			)
+			OR EXISTS (
+				SELECT 1
+				FROM scheduler_template_builds
+				WHERE scope = $1 AND team_id = $2 AND template_id = $3
+			)
+	`, scope, teamID, templateID).Scan(&pending); err != nil {
+		return false, fmt.Errorf("check template image lifecycle cleanup: %w", err)
+	}
+	return pending, nil
+}
+
+func enqueueTemplateImageCleanupTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	cleanupID, scope, teamID, templateID, targetClusterID, outputImage string,
+	logicalSizeBytes int64,
+) error {
+	if strings.TrimSpace(cleanupID) == "" ||
+		strings.TrimSpace(targetClusterID) == "" ||
+		strings.TrimSpace(outputImage) == "" {
+		return fmt.Errorf("template image cleanup requires cleanup_id, target_cluster_id, and output_image")
+	}
+	if logicalSizeBytes < 0 {
+		return fmt.Errorf("template image cleanup logical size must not be negative")
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO scheduler_template_image_cleanups (
+			cleanup_id, template_id, scope, team_id, target_cluster_id,
+			output_image, image_logical_size_bytes
+		)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+	`, cleanupID, templateID, scope, teamID, targetClusterID, outputImage, logicalSizeBytes); err != nil {
+		return fmt.Errorf("enqueue template image cleanup: %w", err)
+	}
+	return nil
+}
+
 // CreateTemplate creates a new template.
 func (s *Store) CreateTemplate(ctx context.Context, tpl *template.Template) error {
+	if tpl == nil {
+		return fmt.Errorf("template is required")
+	}
+	if err := template.ValidateTemplateSpecSize(&tpl.Spec); err != nil {
+		return err
+	}
 	specJSON, err := json.Marshal(tpl.Spec)
 	if err != nil {
 		return fmt.Errorf("marshal spec: %w", err)
 	}
 
-	_, err = s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin template transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockTemplateLifecycleTx(ctx, tx, tpl.Scope, tpl.TeamID, tpl.TemplateID); err != nil {
+		return err
+	}
+	if err := ensureNoTemplateImageCleanupTx(ctx, tx, tpl.Scope, tpl.TeamID, tpl.TemplateID); err != nil {
+		return err
+	}
+	var quotaRef teamquota.OperationRef
+	if tpl.Scope == naming.ScopeTeam {
+		quotaRef, err = teamquota.ReserveControlPlaneObjectTargetTx(
+			ctx,
+			s.teamQuotaStore,
+			tx,
+			teamquota.ControlPlaneObjectOwner(tpl.TeamID, teamquota.ControlPlaneOwnerKindTemplate, tpl.TemplateID),
+			"create_template",
+			1,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO scheduler_templates (template_id, scope, team_id, user_id, spec)
 		VALUES ($1, $2, $3, $4, $5)
 	`, tpl.TemplateID, tpl.Scope, tpl.TeamID, tpl.UserID, specJSON)
 	if err != nil {
 		return fmt.Errorf("create template: %w", err)
+	}
+	if tpl.Scope == naming.ScopeTeam {
+		if err := teamquota.CommitControlPlaneObjectTargetTx(ctx, s.teamQuotaStore, tx, quotaRef); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit template: %w", err)
 	}
 	return nil
 }
@@ -131,6 +326,9 @@ func (s *Store) CreateTemplate(ctx context.Context, tpl *template.Template) erro
 func (s *Store) CreateTemplateBuild(ctx context.Context, tpl *template.Template, build *template.TemplateBuild) (*template.Template, bool, error) {
 	if tpl == nil || build == nil {
 		return nil, false, fmt.Errorf("template and build are required")
+	}
+	if err := template.ValidateTemplateSpecSize(&tpl.Spec); err != nil {
+		return nil, false, err
 	}
 	specJSON, err := json.Marshal(tpl.Spec)
 	if err != nil {
@@ -145,6 +343,26 @@ func (s *Store) CreateTemplateBuild(ctx context.Context, tpl *template.Template,
 		return nil, false, fmt.Errorf("begin template build transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockTemplateLifecycleTx(ctx, tx, tpl.Scope, tpl.TeamID, tpl.TemplateID); err != nil {
+		return nil, false, err
+	}
+	if err := ensureNoTemplateImageCleanupTx(ctx, tx, tpl.Scope, tpl.TeamID, tpl.TemplateID); err != nil {
+		return nil, false, err
+	}
+	var templateQuotaRef, buildQuotaRef teamquota.OperationRef
+	if tpl.Scope == naming.ScopeTeam {
+		templateQuotaRef, err = teamquota.ReserveControlPlaneObjectTargetTx(
+			ctx,
+			s.teamQuotaStore,
+			tx,
+			teamquota.ControlPlaneObjectOwner(tpl.TeamID, teamquota.ControlPlaneOwnerKindTemplate, tpl.TemplateID),
+			"create_template_from_sandbox",
+			1,
+		)
+		if err != nil {
+			return nil, false, err
+		}
+	}
 
 	now := time.Now().UTC()
 	if !tpl.CreatedAt.IsZero() {
@@ -154,18 +372,36 @@ func (s *Store) CreateTemplateBuild(ctx context.Context, tpl *template.Template,
 		INSERT INTO scheduler_templates (
 			template_id, scope, team_id, user_id, spec,
 			creation_build_id, creation_idempotency_key, creation_request_hash,
-			creation_state, creation_stage, creation_started_at
+			creation_state, creation_stage, creation_started_at,
+			creation_image_cluster_id
 		)
 		VALUES ($1, $2, $3, $4, $5, $6::uuid, NULLIF($7, ''), $8,
-			'creating', 'capturing', $9)
+			'creating', 'capturing', $9, $10)
 	`, tpl.TemplateID, tpl.Scope, tpl.TeamID, tpl.UserID, specJSON,
-		build.BuildID, build.IdempotencyKey, build.RequestHash, now)
+		build.BuildID, build.IdempotencyKey, build.RequestHash, now, build.TargetClusterID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			_ = tx.Rollback(ctx)
 			return s.resolveTemplateBuildConflict(ctx, tpl, build)
 		}
 		return nil, false, fmt.Errorf("create template for build: %w", err)
+	}
+	if tpl.Scope == naming.ScopeTeam {
+		buildQuotaRef, err = teamquota.ReserveControlPlaneObjectTargetTx(
+			ctx,
+			s.teamQuotaStore,
+			tx,
+			teamquota.ControlPlaneObjectOwner(
+				tpl.TeamID,
+				teamquota.ControlPlaneOwnerKindTemplateBuild,
+				build.BuildID,
+			),
+			"create_template_build",
+			1,
+		)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 
 	nextAttemptAt := build.NextAttemptAt
@@ -185,6 +421,14 @@ func (s *Store) CreateTemplateBuild(ctx context.Context, tpl *template.Template,
 		build.IdempotencyKey, build.SnapshotID, nextAttemptAt)
 	if err != nil {
 		return nil, false, fmt.Errorf("create template build: %w", err)
+	}
+	if tpl.Scope == naming.ScopeTeam {
+		if err := teamquota.CommitControlPlaneObjectTargetTx(ctx, s.teamQuotaStore, tx, templateQuotaRef); err != nil {
+			return nil, false, err
+		}
+		if err := teamquota.CommitControlPlaneObjectTargetTx(ctx, s.teamQuotaStore, tx, buildQuotaRef); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("commit template build: %w", err)
@@ -328,6 +572,12 @@ func (s *Store) ListVisibleTemplates(ctx context.Context, teamID string) ([]*tem
 
 // UpdateTemplate updates a template.
 func (s *Store) UpdateTemplate(ctx context.Context, tpl *template.Template) error {
+	if tpl == nil {
+		return fmt.Errorf("template is required")
+	}
+	if err := template.ValidateTemplateSpecSize(&tpl.Spec); err != nil {
+		return err
+	}
 	specJSON, err := json.Marshal(tpl.Spec)
 	if err != nil {
 		return fmt.Errorf("marshal spec: %w", err)
@@ -346,11 +596,89 @@ func (s *Store) UpdateTemplate(ctx context.Context, tpl *template.Template) erro
 
 // DeleteTemplate deletes a template.
 func (s *Store) DeleteTemplate(ctx context.Context, scope, teamID, templateID string) error {
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin template deletion: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockTemplateLifecycleTx(ctx, tx, scope, teamID, templateID); err != nil {
+		return err
+	}
+	var buildID, outputImage, imageClusterID *string
+	var imageLogicalSizeBytes *int64
+	err = tx.QueryRow(ctx, `
+		SELECT creation_build_id::text, creation_output_image,
+			creation_image_cluster_id, creation_image_logical_size_bytes
+		FROM scheduler_templates
+		WHERE scope = $1 AND team_id = $2 AND template_id = $3
+		FOR UPDATE
+	`, scope, teamID, templateID).Scan(&buildID, &outputImage, &imageClusterID, &imageLogicalSizeBytes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		pending, pendingErr := templateImageCleanupPendingTx(ctx, tx, scope, teamID, templateID)
+		if pendingErr != nil {
+			return pendingErr
+		}
+		if pending {
+			if err := tx.Commit(ctx); err != nil {
+				return fmt.Errorf("commit pending template deletion: %w", err)
+			}
+			return nil
+		}
+	} else if err != nil {
+		return fmt.Errorf("lock template for deletion: %w", err)
+	}
+
+	var quotaRef teamquota.OperationRef
+	releaseQuota := scope == naming.ScopeTeam
+	if outputImage != nil && strings.TrimSpace(*outputImage) != "" {
+		if buildID == nil || strings.TrimSpace(*buildID) == "" {
+			return fmt.Errorf("managed template image has no creation build id")
+		}
+		if imageClusterID == nil || strings.TrimSpace(*imageClusterID) == "" {
+			return fmt.Errorf("managed template image has no publishing cluster id")
+		}
+		if err := enqueueTemplateImageCleanupTx(
+			ctx,
+			tx,
+			*buildID,
+			scope,
+			teamID,
+			templateID,
+			*imageClusterID,
+			*outputImage,
+			int64Value(imageLogicalSizeBytes),
+		); err != nil {
+			return err
+		}
+		releaseQuota = false
+	}
+	if releaseQuota {
+		quotaRef, err = teamquota.BeginControlPlaneObjectReleaseTx(
+			ctx,
+			s.teamQuotaStore,
+			tx,
+			teamquota.ControlPlaneObjectOwner(teamID, teamquota.ControlPlaneOwnerKindTemplate, templateID),
+			"delete_template",
+			0,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(ctx, `
 		DELETE FROM scheduler_templates WHERE scope = $1 AND team_id = $2 AND template_id = $3
 	`, scope, teamID, templateID)
 	if err != nil {
 		return fmt.Errorf("delete template: %w", err)
+	}
+	if releaseQuota {
+		if err := teamquota.ConfirmControlPlaneObjectReleaseTx(ctx, s.teamQuotaStore, tx, quotaRef); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit template deletion: %w", err)
 	}
 	return nil
 }
@@ -359,15 +687,18 @@ const templateBuildSelectColumns = `
 	build_id::text, template_id, scope, team_id, user_id,
 	source_sandbox_id, target_cluster_id, request_hash, idempotency_key,
 	status, stage, snapshot_id, capture_metadata, output_image,
+	image_manifest_digest, image_logical_size_bytes, image_quota_reserved_at,
+	image_push_started_at,
 	attempt_count, next_attempt_at, lease_owner, lease_expires_at,
 	cancel_requested_at, last_error, created_at, updated_at
 `
 
 func scanTemplateBuild(row rowScanner) (*template.TemplateBuild, error) {
 	var build template.TemplateBuild
-	var idempotencyKey, snapshotID, outputImage, leaseOwner, lastError *string
+	var idempotencyKey, snapshotID, outputImage, imageManifestDigest, leaseOwner, lastError *string
 	var captureMetadata []byte
-	var leaseExpiresAt, cancelRequestedAt *time.Time
+	var imageLogicalSizeBytes *int64
+	var imageQuotaReservedAt, imagePushStartedAt, leaseExpiresAt, cancelRequestedAt *time.Time
 	var stage string
 	if err := row.Scan(
 		&build.BuildID,
@@ -384,6 +715,10 @@ func scanTemplateBuild(row rowScanner) (*template.TemplateBuild, error) {
 		&snapshotID,
 		&captureMetadata,
 		&outputImage,
+		&imageManifestDigest,
+		&imageLogicalSizeBytes,
+		&imageQuotaReservedAt,
+		&imagePushStartedAt,
 		&build.AttemptCount,
 		&build.NextAttemptAt,
 		&leaseOwner,
@@ -400,6 +735,14 @@ func scanTemplateBuild(row rowScanner) (*template.TemplateBuild, error) {
 	build.SnapshotID = stringValue(snapshotID)
 	build.CaptureMetadata = append([]byte(nil), captureMetadata...)
 	build.OutputImage = stringValue(outputImage)
+	build.ImageManifestDigest = stringValue(imageManifestDigest)
+	build.ImageLogicalSizeBytes = int64Value(imageLogicalSizeBytes)
+	if imageQuotaReservedAt != nil {
+		build.ImageQuotaReservedAt = imageQuotaReservedAt.UTC()
+	}
+	if imagePushStartedAt != nil {
+		build.ImagePushStartedAt = imagePushStartedAt.UTC()
+	}
 	build.LeaseOwner = stringValue(leaseOwner)
 	if leaseExpiresAt != nil {
 		build.LeaseExpiresAt = leaseExpiresAt.UTC()
@@ -413,8 +756,9 @@ func scanTemplateBuild(row rowScanner) (*template.TemplateBuild, error) {
 
 // ClaimTemplateBuild leases one build to a manager in the local region.
 // Capturing remains bound to the source cluster. Once capture is durable,
-// publishing, reconciliation cleanup, and cancellation cleanup may be taken
-// over by any manager that shares the region's PostgreSQL and object storage.
+// publishing and reconciliation cleanup may be taken over by another regional
+// manager. Publishing claims become the image-owning cluster; later image
+// deletion remains routed there.
 func (s *Store) ClaimTemplateBuild(ctx context.Context, targetClusterID, workerID string, leaseDuration time.Duration) (*template.TemplateBuild, error) {
 	if strings.TrimSpace(targetClusterID) == "" || strings.TrimSpace(workerID) == "" {
 		return nil, fmt.Errorf("target_cluster_id and worker_id are required")
@@ -445,7 +789,13 @@ func (s *Store) ClaimTemplateBuild(ctx context.Context, targetClusterID, workerI
 			WHERE b.next_attempt_at <= NOW()
 			  AND (b.lease_expires_at IS NULL OR b.lease_expires_at <= NOW())
 			  AND (
-				b.cancel_requested_at IS NOT NULL
+				(
+					b.cancel_requested_at IS NOT NULL
+					AND (
+						b.stage = 'capturing'
+						OR b.target_cluster_id = $1
+					)
+				)
 				OR (
 					b.cancel_requested_at IS NULL
 					AND t.creation_build_id IS NOT NULL
@@ -487,7 +837,12 @@ func (s *Store) ClaimTemplateBuild(ctx context.Context, targetClusterID, workerI
 		SET status = 'running',
 			lease_owner = $2,
 			lease_expires_at = NOW() + ($3 * INTERVAL '1 millisecond'),
-			attempt_count = attempt_count + 1
+			attempt_count = attempt_count + 1,
+			target_cluster_id = CASE
+				WHEN b.stage = 'publishing' AND b.cancel_requested_at IS NULL
+					THEN $1
+				ELSE b.target_cluster_id
+			END
 		FROM candidate
 		WHERE b.build_id = candidate.build_id
 		RETURNING `+templateBuildSelectColumnsWithAlias("b")+`
@@ -674,9 +1029,155 @@ func (s *Store) MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID
 	return nil
 }
 
+// ReserveTemplateImageBuild durably records the deterministic image plan and
+// reserves its exact logical bytes before the worker may write to a registry.
+func (s *Store) ReserveTemplateImageBuild(
+	ctx context.Context,
+	buildID, workerID, manifestDigest string,
+	logicalSizeBytes int64,
+) error {
+	parsedDigest, err := digest.Parse(strings.TrimSpace(manifestDigest))
+	if err != nil {
+		return fmt.Errorf("parse planned template image manifest digest: %w", err)
+	}
+	if logicalSizeBytes < 0 {
+		return fmt.Errorf("planned template image logical size must not be negative")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin reserve template image build: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var scope, teamID, templateID string
+	if err := tx.QueryRow(ctx, `
+		SELECT scope, team_id, template_id
+		FROM scheduler_template_builds
+		WHERE build_id = $1::uuid
+	`, buildID).Scan(&scope, &teamID, &templateID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return template.ErrTemplateBuildLeaseLost
+		}
+		return fmt.Errorf("load template build for image reservation: %w", err)
+	}
+	if err := lockTemplateLifecycleTx(ctx, tx, scope, teamID, templateID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE scheduler_template_builds
+		SET image_manifest_digest = COALESCE(image_manifest_digest, $3),
+			image_logical_size_bytes = COALESCE(image_logical_size_bytes, $4),
+			image_quota_reserved_at = COALESCE(image_quota_reserved_at, NOW())
+		WHERE build_id = $1::uuid
+		  AND lease_owner = $2
+		  AND status = 'running'
+		  AND stage = 'publishing'
+		  AND cancel_requested_at IS NULL
+		  AND (image_manifest_digest IS NULL OR image_manifest_digest = $3)
+		  AND (image_logical_size_bytes IS NULL OR image_logical_size_bytes = $4)
+	`, buildID, workerID, parsedDigest.String(), logicalSizeBytes)
+	if err != nil {
+		return fmt.Errorf("record planned template image: %w", err)
+	}
+	if err := requireBuildRow(result.RowsAffected()); err != nil {
+		return err
+	}
+	if scope == naming.ScopeTeam {
+		if s.teamQuotaStore == nil {
+			return &teamquota.UnavailableError{
+				Operation: "reserve template image storage quota",
+				Err:       fmt.Errorf("capacity store is not configured"),
+			}
+		}
+		owner := templateImageQuotaOwner(teamID, templateID)
+		operation := templateImagePublishOperation(buildID)
+		if _, err := s.teamQuotaStore.ReserveTargetTx(ctx, tx, teamquota.ReserveRequest{
+			Owner:     owner,
+			Operation: operation,
+			Target: teamquota.Values{
+				teamquota.KeyTemplateImageStorageBytes: logicalSizeBytes,
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit template image reservation: %w", err)
+	}
+	return nil
+}
+
+// MarkTemplateImagePushStarted persists the uncertainty boundary before the
+// publisher makes its first registry write.
+func (s *Store) MarkTemplateImagePushStarted(ctx context.Context, buildID, workerID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin template image push marker: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var scope, teamID, templateID string
+	if err := tx.QueryRow(ctx, `
+		SELECT scope, team_id, template_id
+		FROM scheduler_template_builds
+		WHERE build_id = $1::uuid
+	`, buildID).Scan(&scope, &teamID, &templateID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return template.ErrTemplateBuildLeaseLost
+		}
+		return fmt.Errorf("load template build for push marker: %w", err)
+	}
+	if err := lockTemplateLifecycleTx(ctx, tx, scope, teamID, templateID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE scheduler_template_builds
+		SET image_push_started_at = COALESCE(image_push_started_at, NOW())
+		WHERE build_id = $1::uuid
+		  AND lease_owner = $2
+		  AND status = 'running'
+		  AND stage = 'publishing'
+		  AND cancel_requested_at IS NULL
+		  AND image_manifest_digest IS NOT NULL
+		  AND image_logical_size_bytes IS NOT NULL
+		  AND image_quota_reserved_at IS NOT NULL
+	`, buildID, workerID)
+	if err != nil {
+		return fmt.Errorf("mark template image push started: %w", err)
+	}
+	if err := requireBuildRow(result.RowsAffected()); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit template image push marker: %w", err)
+	}
+	return nil
+}
+
 // PublishTemplateBuild atomically installs the digest-pinned image spec and
-// advances the public creation stage to reconciliation.
-func (s *Store) PublishTemplateBuild(ctx context.Context, buildID, workerID string, finalSpec v1alpha1.SandboxTemplateSpec, outputImage string) error {
+// advances the public creation stage to reconciliation while committing the
+// previously reserved image bytes.
+func (s *Store) PublishTemplateBuild(
+	ctx context.Context,
+	buildID, workerID string,
+	finalSpec v1alpha1.SandboxTemplateSpec,
+	outputImage, manifestDigest string,
+	logicalSizeBytes int64,
+) error {
+	parsedDigest, err := digest.Parse(strings.TrimSpace(manifestDigest))
+	if err != nil {
+		return fmt.Errorf("parse published template image manifest digest: %w", err)
+	}
+	if logicalSizeBytes < 0 {
+		return fmt.Errorf("published template image logical size must not be negative")
+	}
+	if err := template.ValidateTemplateSpecSize(&finalSpec); err != nil {
+		return err
+	}
+	outputParts := strings.SplitN(strings.TrimSpace(outputImage), "@", 2)
+	if len(outputParts) != 2 || strings.TrimSpace(outputParts[1]) != parsedDigest.String() {
+		return fmt.Errorf("published template image reference does not match planned manifest digest")
+	}
 	specJSON, err := json.Marshal(finalSpec)
 	if err != nil {
 		return fmt.Errorf("marshal published template spec: %w", err)
@@ -687,6 +1188,20 @@ func (s *Store) PublishTemplateBuild(ctx context.Context, buildID, workerID stri
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	var scope, teamID, templateID string
+	if err := tx.QueryRow(ctx, `
+		SELECT scope, team_id, template_id
+		FROM scheduler_template_builds
+		WHERE build_id = $1::uuid
+	`, buildID).Scan(&scope, &teamID, &templateID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return template.ErrTemplateBuildLeaseLost
+		}
+		return fmt.Errorf("load template build for publication: %w", err)
+	}
+	if err := lockTemplateLifecycleTx(ctx, tx, scope, teamID, templateID); err != nil {
+		return err
+	}
 	result, err := tx.Exec(ctx, `
 		UPDATE scheduler_template_builds
 		SET stage = 'reconciling', output_image = $3, last_error = NULL
@@ -696,7 +1211,11 @@ func (s *Store) PublishTemplateBuild(ctx context.Context, buildID, workerID stri
 			stage = 'publishing'
 			OR (stage = 'reconciling' AND output_image = $3)
 		  )
-	`, buildID, workerID, outputImage)
+		  AND image_manifest_digest = $4
+		  AND image_logical_size_bytes = $5
+		  AND image_quota_reserved_at IS NOT NULL
+		  AND image_push_started_at IS NOT NULL
+	`, buildID, workerID, outputImage, parsedDigest.String(), logicalSizeBytes)
 	if err != nil {
 		return fmt.Errorf("mark template build published: %w", err)
 	}
@@ -704,20 +1223,41 @@ func (s *Store) PublishTemplateBuild(ctx context.Context, buildID, workerID stri
 		return err
 	}
 	result, err = tx.Exec(ctx, `
-		UPDATE scheduler_templates
-		SET spec = $2,
+		UPDATE scheduler_templates t
+		SET spec = $3,
 			creation_stage = 'reconciling',
-			creation_output_image = $3,
+			creation_output_image = $4,
+			creation_image_cluster_id = b.target_cluster_id,
+			creation_image_logical_size_bytes = $5,
 			creation_message = NULL
-		WHERE creation_build_id = $1::uuid
-		  AND creation_state = 'creating'
-		  AND creation_stage IN ('publishing', 'reconciling')
-	`, buildID, specJSON, outputImage)
+		FROM scheduler_template_builds b
+		WHERE b.build_id = $1::uuid
+		  AND b.lease_owner = $2
+		  AND t.creation_build_id = b.build_id
+		  AND t.creation_state = 'creating'
+		  AND t.creation_stage IN ('publishing', 'reconciling')
+	`, buildID, workerID, specJSON, outputImage, logicalSizeBytes)
 	if err != nil {
 		return fmt.Errorf("install published template spec: %w", err)
 	}
 	if err := requireBuildRow(result.RowsAffected()); err != nil {
 		return err
+	}
+	if scope == naming.ScopeTeam {
+		if s.teamQuotaStore == nil {
+			return &teamquota.UnavailableError{
+				Operation: "commit template image storage quota",
+				Err:       fmt.Errorf("capacity store is not configured"),
+			}
+		}
+		owner := templateImageQuotaOwner(teamID, templateID)
+		if err := s.teamQuotaStore.CommitTx(
+			ctx,
+			tx,
+			teamquota.Ref(owner, templateImagePublishOperation(buildID)),
+		); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit published template build: %w", err)
@@ -806,16 +1346,323 @@ func (s *Store) TemplateBuildCancelled(ctx context.Context, buildID string) (boo
 	return cancelled, nil
 }
 
-// FinishTemplateBuild removes internal queue state after snapshot cleanup.
-func (s *Store) FinishTemplateBuild(ctx context.Context, buildID, workerID string) error {
-	result, err := s.pool.Exec(ctx, `
+// FinishTemplateBuild removes internal queue state after snapshot cleanup. A
+// prepared image reservation can be aborted only when no registry write began
+// or the caller has confirmed deletion of the unpublished build tag.
+func (s *Store) FinishTemplateBuild(
+	ctx context.Context,
+	buildID, workerID string,
+	unpublishedImageDeleteConfirmed bool,
+) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin finish template build: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var scope, teamID, templateID string
+	if err := tx.QueryRow(ctx, `
+		SELECT scope, team_id, template_id
+		FROM scheduler_template_builds
+		WHERE build_id = $1::uuid
+	`, buildID).Scan(&scope, &teamID, &templateID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return template.ErrTemplateBuildLeaseLost
+		}
+		return fmt.Errorf("load template build for finish: %w", err)
+	}
+	if err := lockTemplateLifecycleTx(ctx, tx, scope, teamID, templateID); err != nil {
+		return err
+	}
+	var stage string
+	var imageQuotaReservedAt, imagePushStartedAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT stage, image_quota_reserved_at, image_push_started_at
+		FROM scheduler_template_builds
+		WHERE build_id = $1::uuid AND lease_owner = $2
+		FOR UPDATE
+	`, buildID, workerID).Scan(
+		&stage,
+		&imageQuotaReservedAt,
+		&imagePushStartedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return template.ErrTemplateBuildLeaseLost
+		}
+		return fmt.Errorf("lock template build for finish: %w", err)
+	}
+	if scope == naming.ScopeTeam &&
+		imageQuotaReservedAt != nil &&
+		stage != string(v1alpha1.TemplateCreationStageReconciling) {
+		if imagePushStartedAt != nil && !unpublishedImageDeleteConfirmed {
+			return fmt.Errorf(
+				"template image registry deletion must be confirmed before releasing reserved bytes",
+			)
+		}
+		if s.teamQuotaStore == nil {
+			return &teamquota.UnavailableError{
+				Operation: "abort unpublished template image quota",
+				Err:       fmt.Errorf("capacity store is not configured"),
+			}
+		}
+		owner := templateImageQuotaOwner(teamID, templateID)
+		if err := s.teamQuotaStore.AbortTx(
+			ctx,
+			tx,
+			teamquota.Ref(owner, templateImagePublishOperation(buildID)),
+			"template image was not published",
+		); err != nil {
+			return err
+		}
+	}
+	var quotaRef teamquota.OperationRef
+	if scope == naming.ScopeTeam {
+		quotaRef, err = teamquota.BeginControlPlaneObjectReleaseTx(
+			ctx,
+			s.teamQuotaStore,
+			tx,
+			teamquota.ControlPlaneObjectOwner(teamID, teamquota.ControlPlaneOwnerKindTemplateBuild, buildID),
+			"finish_template_build",
+			0,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	result, err := tx.Exec(ctx, `
 		DELETE FROM scheduler_template_builds
 		WHERE build_id = $1::uuid AND lease_owner = $2
 	`, buildID, workerID)
 	if err != nil {
 		return fmt.Errorf("finish template build: %w", err)
 	}
+	if err := requireBuildRow(result.RowsAffected()); err != nil {
+		return err
+	}
+	if scope == naming.ScopeTeam {
+		if err := teamquota.ConfirmControlPlaneObjectReleaseTx(ctx, s.teamQuotaStore, tx, quotaRef); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit finish template build: %w", err)
+	}
+	return nil
+}
+
+const templateImageCleanupReturningColumns = `
+	c.cleanup_id::text, c.scope, c.team_id, c.template_id, c.target_cluster_id,
+	c.output_image, c.image_logical_size_bytes, c.status,
+	c.attempt_count, c.next_attempt_at, c.lease_owner, c.lease_expires_at,
+	c.last_error, c.created_at, c.updated_at
+`
+
+func scanTemplateImageCleanup(row rowScanner) (*template.TemplateImageCleanup, error) {
+	var cleanup template.TemplateImageCleanup
+	var leaseOwner, lastError *string
+	var leaseExpiresAt *time.Time
+	if err := row.Scan(
+		&cleanup.CleanupID,
+		&cleanup.Scope,
+		&cleanup.TeamID,
+		&cleanup.TemplateID,
+		&cleanup.TargetClusterID,
+		&cleanup.OutputImage,
+		&cleanup.ImageLogicalSizeBytes,
+		&cleanup.Status,
+		&cleanup.AttemptCount,
+		&cleanup.NextAttemptAt,
+		&leaseOwner,
+		&leaseExpiresAt,
+		&lastError,
+		&cleanup.CreatedAt,
+		&cleanup.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	cleanup.LeaseOwner = stringValue(leaseOwner)
+	cleanup.LastError = stringValue(lastError)
+	if leaseExpiresAt != nil {
+		cleanup.LeaseExpiresAt = leaseExpiresAt.UTC()
+	}
+	return &cleanup, nil
+}
+
+// ClaimTemplateImageCleanup leases one registry artifact cleanup. Expired
+// leases are recoverable by another manager after a crash.
+func (s *Store) ClaimTemplateImageCleanup(
+	ctx context.Context,
+	targetClusterID string,
+	workerID string,
+	leaseDuration time.Duration,
+) (*template.TemplateImageCleanup, error) {
+	if strings.TrimSpace(targetClusterID) == "" || strings.TrimSpace(workerID) == "" {
+		return nil, fmt.Errorf("target_cluster_id and worker_id are required")
+	}
+	if leaseDuration <= 0 {
+		return nil, fmt.Errorf("lease duration must be positive")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin template image cleanup claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	cleanup, err := scanTemplateImageCleanup(tx.QueryRow(ctx, `
+		WITH candidate AS (
+			SELECT cleanup_id
+			FROM scheduler_template_image_cleanups
+			WHERE target_cluster_id = $1
+			  AND next_attempt_at <= NOW()
+			  AND (
+				status = 'queued'
+				OR (status = 'running' AND lease_expires_at <= NOW())
+			  )
+			ORDER BY next_attempt_at, created_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE scheduler_template_image_cleanups c
+		SET status = 'running',
+			attempt_count = c.attempt_count + 1,
+			lease_owner = $2,
+			lease_expires_at = NOW() + $3::interval
+		FROM candidate
+		WHERE c.cleanup_id = candidate.cleanup_id
+		RETURNING `+templateImageCleanupReturningColumns,
+		targetClusterID,
+		workerID,
+		leaseDuration.String(),
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit empty template image cleanup claim: %w", err)
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim template image cleanup: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit template image cleanup claim: %w", err)
+	}
+	return cleanup, nil
+}
+
+// ReleaseTemplateImageCleanup schedules a failed registry deletion for retry.
+func (s *Store) ReleaseTemplateImageCleanup(
+	ctx context.Context,
+	cleanupID, workerID string,
+	retryAt time.Time,
+	lastError string,
+) error {
+	if retryAt.IsZero() {
+		retryAt = time.Now().UTC()
+	}
+	result, err := s.pool.Exec(ctx, `
+		UPDATE scheduler_template_image_cleanups
+		SET status = 'queued',
+			next_attempt_at = $3,
+			lease_owner = NULL,
+			lease_expires_at = NULL,
+			last_error = $4
+		WHERE cleanup_id = $1::uuid
+		  AND status = 'running'
+		  AND lease_owner = $2
+	`, cleanupID, workerID, retryAt, lastError)
+	if err != nil {
+		return fmt.Errorf("release template image cleanup: %w", err)
+	}
 	return requireBuildRow(result.RowsAffected())
+}
+
+// FinishTemplateImageCleanup acknowledges physical registry deletion and only
+// then releases both the managed image bytes and the template object.
+func (s *Store) FinishTemplateImageCleanup(ctx context.Context, cleanupID, workerID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin finish template image cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var scope, teamID, templateID string
+	if err := tx.QueryRow(ctx, `
+		SELECT scope, team_id, template_id
+		FROM scheduler_template_image_cleanups
+		WHERE cleanup_id = $1::uuid
+		  AND status = 'running'
+		  AND lease_owner = $2
+	`, cleanupID, workerID).Scan(&scope, &teamID, &templateID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return template.ErrTemplateBuildLeaseLost
+		}
+		return fmt.Errorf("load template image cleanup for finish: %w", err)
+	}
+	if err := lockTemplateLifecycleTx(ctx, tx, scope, teamID, templateID); err != nil {
+		return err
+	}
+	var imageQuotaRef, templateQuotaRef teamquota.OperationRef
+	if scope == naming.ScopeTeam {
+		if s.teamQuotaStore == nil {
+			return &teamquota.UnavailableError{
+				Operation: "release template image storage quota",
+				Err:       fmt.Errorf("capacity store is not configured"),
+			}
+		}
+		imageOwner := templateImageQuotaOwner(teamID, templateID)
+		imageOperation := templateImageDeleteOperation(cleanupID)
+		reservation, err := s.teamQuotaStore.BeginReleaseTx(ctx, tx, teamquota.ReleaseRequest{
+			Owner:     imageOwner,
+			Operation: imageOperation,
+			Target: teamquota.Values{
+				teamquota.KeyTemplateImageStorageBytes: 0,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		imageQuotaRef = teamquota.Ref(reservation.Owner, reservation.Operation)
+		templateQuotaRef, err = teamquota.BeginControlPlaneObjectReleaseTx(
+			ctx,
+			s.teamQuotaStore,
+			tx,
+			teamquota.ControlPlaneObjectOwner(teamID, teamquota.ControlPlaneOwnerKindTemplate, templateID),
+			"finish_template_image_cleanup",
+			0,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	result, err := tx.Exec(ctx, `
+		DELETE FROM scheduler_template_image_cleanups
+		WHERE cleanup_id = $1::uuid
+		  AND status = 'running'
+		  AND lease_owner = $2
+	`, cleanupID, workerID)
+	if err != nil {
+		return fmt.Errorf("finish template image cleanup: %w", err)
+	}
+	if err := requireBuildRow(result.RowsAffected()); err != nil {
+		return err
+	}
+	if scope == naming.ScopeTeam {
+		if err := s.teamQuotaStore.ConfirmReleaseTx(
+			ctx,
+			tx,
+			imageQuotaRef,
+			teamquota.RuntimeRef{},
+		); err != nil {
+			return err
+		}
+		if err := teamquota.ConfirmControlPlaneObjectReleaseTx(ctx, s.teamQuotaStore, tx, templateQuotaRef); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit template image cleanup finish: %w", err)
+	}
+	return nil
 }
 
 // CancelTemplateBuildAndDeleteTemplate atomically removes the visible template
@@ -827,18 +1674,83 @@ func (s *Store) CancelTemplateBuildAndDeleteTemplate(ctx context.Context, scope,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var buildID *string
+	if err := lockTemplateLifecycleTx(ctx, tx, scope, teamID, templateID); err != nil {
+		return false, err
+	}
+	var templateQuotaRef teamquota.OperationRef
+	var buildID, outputImage, imageClusterID *string
+	var imageLogicalSizeBytes *int64
 	err = tx.QueryRow(ctx, `
-		SELECT creation_build_id::text
+		SELECT creation_build_id::text, creation_output_image,
+			creation_image_cluster_id, creation_image_logical_size_bytes
 		FROM scheduler_templates
 		WHERE scope = $1 AND team_id = $2 AND template_id = $3
 		FOR UPDATE
-	`, scope, teamID, templateID).Scan(&buildID)
+	`, scope, teamID, templateID).Scan(&buildID, &outputImage, &imageClusterID, &imageLogicalSizeBytes)
 	if err == pgx.ErrNoRows {
+		pending, pendingErr := templateImageCleanupPendingTx(ctx, tx, scope, teamID, templateID)
+		if pendingErr != nil {
+			return false, pendingErr
+		}
+		if scope == naming.ScopeTeam && !pending {
+			templateQuotaRef, err = teamquota.BeginControlPlaneObjectReleaseTx(
+				ctx,
+				s.teamQuotaStore,
+				tx,
+				teamquota.ControlPlaneObjectOwner(teamID, teamquota.ControlPlaneOwnerKindTemplate, templateID),
+				"cancel_missing_template_build",
+				0,
+			)
+			if err != nil {
+				return false, err
+			}
+			if err := teamquota.ConfirmControlPlaneObjectReleaseTx(ctx, s.teamQuotaStore, tx, templateQuotaRef); err != nil {
+				return false, err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit missing template build cancellation: %w", err)
+		}
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("lock template for cancellation: %w", err)
+	}
+	releaseQuota := scope == naming.ScopeTeam
+	if outputImage != nil && strings.TrimSpace(*outputImage) != "" {
+		if buildID == nil || strings.TrimSpace(*buildID) == "" {
+			return false, fmt.Errorf("managed template image has no creation build id")
+		}
+		if imageClusterID == nil || strings.TrimSpace(*imageClusterID) == "" {
+			return false, fmt.Errorf("managed template image has no publishing cluster id")
+		}
+		if err := enqueueTemplateImageCleanupTx(
+			ctx,
+			tx,
+			*buildID,
+			scope,
+			teamID,
+			templateID,
+			*imageClusterID,
+			*outputImage,
+			int64Value(imageLogicalSizeBytes),
+		); err != nil {
+			return false, err
+		}
+		releaseQuota = false
+	}
+	if releaseQuota {
+		templateQuotaRef, err = teamquota.BeginControlPlaneObjectReleaseTx(
+			ctx,
+			s.teamQuotaStore,
+			tx,
+			teamquota.ControlPlaneObjectOwner(teamID, teamquota.ControlPlaneOwnerKindTemplate, templateID),
+			"cancel_template_build_and_delete_template",
+			0,
+		)
+		if err != nil {
+			return false, err
+		}
 	}
 	if buildID != nil {
 		if _, err := tx.Exec(ctx, `
@@ -856,6 +1768,11 @@ func (s *Store) CancelTemplateBuildAndDeleteTemplate(ctx context.Context, scope,
 		WHERE scope = $1 AND team_id = $2 AND template_id = $3
 	`, scope, teamID, templateID); err != nil {
 		return false, fmt.Errorf("delete template during build cancellation: %w", err)
+	}
+	if releaseQuota {
+		if err := teamquota.ConfirmControlPlaneObjectReleaseTx(ctx, s.teamQuotaStore, tx, templateQuotaRef); err != nil {
+			return false, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit template build cancellation: %w", err)
@@ -914,7 +1831,20 @@ func maxInt64(a, b int64) int64 {
 
 // UpsertAllocation creates or updates a template allocation.
 func (s *Store) UpsertAllocation(ctx context.Context, alloc *template.TemplateAllocation) error {
-	_, err := s.pool.Exec(ctx, `
+	if alloc == nil {
+		return fmt.Errorf("template allocation is required")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin allocation transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if alloc.Scope == naming.ScopeTeam {
+		if err := teamquota.AdmitTeamMutationTx(ctx, tx, alloc.TeamID); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO scheduler_template_allocations (template_id, scope, team_id, cluster_id, min_idle, max_idle, sync_status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (scope, team_id, template_id, cluster_id)
@@ -922,6 +1852,9 @@ func (s *Store) UpsertAllocation(ctx context.Context, alloc *template.TemplateAl
 	`, alloc.TemplateID, alloc.Scope, alloc.TeamID, alloc.ClusterID, alloc.MinIdle, alloc.MaxIdle, alloc.SyncStatus)
 	if err != nil {
 		return fmt.Errorf("upsert allocation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit allocation: %w", err)
 	}
 	return nil
 }

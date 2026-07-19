@@ -19,6 +19,7 @@ type HTTPWriterOptions struct {
 	RuntimeSamplesURL string
 	Client            *http.Client
 	TokenProvider     func(context.Context) (string, error)
+	TeamTokenProvider func(context.Context, string) (string, error)
 	RequestTimeout    time.Duration
 }
 
@@ -29,6 +30,7 @@ type HTTPWriter struct {
 	runtimeSamplesURL string
 	client            *http.Client
 	tokenProvider     func(context.Context) (string, error)
+	teamTokenProvider func(context.Context, string) (string, error)
 	requestTimeout    time.Duration
 }
 
@@ -43,6 +45,7 @@ func NewHTTPWriter(opts HTTPWriterOptions) *HTTPWriter {
 		runtimeSamplesURL: strings.TrimSpace(opts.RuntimeSamplesURL),
 		client:            client,
 		tokenProvider:     opts.TokenProvider,
+		teamTokenProvider: opts.TeamTokenProvider,
 		requestTimeout:    opts.RequestTimeout,
 	}
 }
@@ -53,28 +56,50 @@ func (w *HTTPWriter) InsertEvents(ctx context.Context, events []Event) error {
 	}
 	return w.post(ctx, w.eventsURL, struct {
 		Events []Event `json:"events"`
-	}{Events: events})
+	}{Events: events}, w.tokenProvider)
 }
 
 func (w *HTTPWriter) InsertLogs(ctx context.Context, logs []LogEntry) error {
 	if len(logs) == 0 {
 		return nil
 	}
+	teamID, err := logBatchTeamID(logs)
+	if err != nil {
+		return err
+	}
 	return w.post(ctx, w.logsURL, struct {
 		Logs []LogEntry `json:"logs"`
-	}{Logs: logs})
+	}{Logs: logs}, w.teamToken(teamID))
 }
 
 func (w *HTTPWriter) InsertRuntimeSamples(ctx context.Context, samples []RuntimeSample) error {
 	if len(samples) == 0 {
 		return nil
 	}
+	teamID, err := runtimeSampleBatchTeamID(samples)
+	if err != nil {
+		return err
+	}
 	return w.post(ctx, w.runtimeSamplesURL, struct {
 		Samples []RuntimeSample `json:"samples"`
-	}{Samples: samples})
+	}{Samples: samples}, w.teamToken(teamID))
 }
 
-func (w *HTTPWriter) post(ctx context.Context, endpoint string, body any) error {
+func (w *HTTPWriter) teamToken(teamID string) func(context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		if w == nil || w.teamTokenProvider == nil {
+			return "", fmt.Errorf("team token provider is not configured")
+		}
+		return w.teamTokenProvider(ctx, teamID)
+	}
+}
+
+func (w *HTTPWriter) post(
+	ctx context.Context,
+	endpoint string,
+	body any,
+	tokenProvider func(context.Context) (string, error),
+) error {
 	if w == nil || endpoint == "" {
 		return ErrBackendDisabled
 	}
@@ -94,8 +119,8 @@ func (w *HTTPWriter) post(ctx context.Context, endpoint string, body any) error 
 		return fmt.Errorf("create sandbox observability ingest request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if w.tokenProvider != nil {
-		token, err := w.tokenProvider(ctx)
+	if tokenProvider != nil {
+		token, err := tokenProvider(requestCtx)
 		if err != nil {
 			return fmt.Errorf("generate sandbox observability ingest token: %w", err)
 		}
@@ -112,4 +137,30 @@ func (w *HTTPWriter) post(ctx context.Context, endpoint string, body any) error 
 		return fmt.Errorf("%w: sandbox observability ingest returned status %d", ErrBackendUnavailable, resp.StatusCode)
 	}
 	return nil
+}
+
+func logBatchTeamID(logs []LogEntry) (string, error) {
+	teamID := strings.TrimSpace(logs[0].TeamID)
+	if teamID == "" {
+		return "", fmt.Errorf("sandbox observability log batch has empty team_id")
+	}
+	for i := 1; i < len(logs); i++ {
+		if strings.TrimSpace(logs[i].TeamID) != teamID {
+			return "", fmt.Errorf("sandbox observability log batch spans multiple teams")
+		}
+	}
+	return teamID, nil
+}
+
+func runtimeSampleBatchTeamID(samples []RuntimeSample) (string, error) {
+	teamID := strings.TrimSpace(samples[0].TeamID)
+	if teamID == "" {
+		return "", fmt.Errorf("sandbox runtime sample batch has empty team_id")
+	}
+	for i := 1; i < len(samples); i++ {
+		if strings.TrimSpace(samples[i].TeamID) != teamID {
+			return "", fmt.Errorf("sandbox runtime sample batch spans multiple teams")
+		}
+	}
+	return teamID, nil
 }

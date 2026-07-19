@@ -94,42 +94,9 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if !m.Enabled() {
-		return nil, nil
-	}
-	if m.volumeID == "" {
-		return nil, fmt.Errorf("%w: volume id is required", ErrInvalidInput)
-	}
-	if state == nil {
-		return nil, fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
-	}
-
-	inline := cloneStateForMaterialization(state)
-	normalizeState(inline)
-	defaultSegmentVolumeIDs(inline, m.volumeID)
-	if inline.NextSeq <= 1 {
-		inline.NextSeq = 2
-	}
-
-	nextSeq := checkpointSequence(inline)
-	if nextSeq == 0 {
-		return nil, fmt.Errorf("%w: manifest sequence must be non-zero", ErrInvalidInput)
-	}
-	if nextSeq <= expectedManifestSeq {
-		return nil, fmt.Errorf("%w: manifest seq %d must advance beyond %d", ErrCommittedHeadConflict, nextSeq, expectedManifestSeq)
-	}
-
-	manifestState, segments, err := buildMaterializedState(nextSeq, m.volumeID, inline, m.segmentTargetSize)
+	manifest, segments, err := m.planMaterialization(state, expectedManifestSeq)
 	if err != nil {
 		return nil, err
-	}
-	manifest := &Manifest{
-		Version:       1,
-		VolumeID:      m.volumeID,
-		ManifestSeq:   nextSeq,
-		CheckpointSeq: checkpointSequence(inline),
-		CreatedAt:     time.Now().UTC(),
-		State:         manifestState,
 	}
 
 	for _, segment := range segments {
@@ -146,7 +113,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		}
 		m.cache.put(segmentCacheKey(segment.VolumeID, segment.Key), segment.Payload)
 	}
-	if err := m.putJSON(ctx, manifestKey(nextSeq), manifest); err != nil {
+	if err := m.putJSON(ctx, manifestKey(manifest.ManifestSeq), manifest); err != nil {
 		return nil, err
 	}
 	if m.headStore != nil {
@@ -165,6 +132,72 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 	}
 
 	return manifest, nil
+}
+
+// planMaterialization builds the exact state that Materialize will publish
+// without writing object storage. Quota admission uses this same plan builder
+// so its complete-target bound cannot drift from the durable representation.
+func (m *Materializer) planMaterialization(state *SnapshotState, expectedManifestSeq uint64) (*Manifest, []*materializedSegment, error) {
+	if !m.Enabled() {
+		return nil, nil, nil
+	}
+	inline, nextSeq, err := prepareMaterializationInput(m.volumeID, state)
+	if err != nil {
+		return nil, nil, err
+	}
+	if nextSeq <= expectedManifestSeq {
+		return nil, nil, fmt.Errorf("%w: manifest seq %d must advance beyond %d", ErrCommittedHeadConflict, nextSeq, expectedManifestSeq)
+	}
+
+	manifestState, segments, err := buildMaterializedState(nextSeq, m.volumeID, inline, m.segmentTargetSize)
+	if err != nil {
+		return nil, nil, err
+	}
+	manifest := &Manifest{
+		Version:       1,
+		VolumeID:      m.volumeID,
+		ManifestSeq:   nextSeq,
+		CheckpointSeq: checkpointSequence(inline),
+		CreatedAt:     time.Now().UTC(),
+		State:         manifestState,
+	}
+	return manifest, segments, nil
+}
+
+// PlanMaterializationStorageUsage returns the exact complete state usage that
+// materializing state for volumeID would publish. It shares the plan builder
+// with Materialize and performs no object-store writes.
+func PlanMaterializationStorageUsage(volumeID string, state *SnapshotState, segmentTargetSize uint64) (StorageUsage, error) {
+	inline, nextSeq, err := prepareMaterializationInput(volumeID, state)
+	if err != nil {
+		return StorageUsage{}, err
+	}
+	manifestState, _, err := buildMaterializedState(nextSeq, volumeID, inline, segmentTargetSize)
+	if err != nil {
+		return StorageUsage{}, err
+	}
+	return StateStorageUsage(manifestState)
+}
+
+func prepareMaterializationInput(volumeID string, state *SnapshotState) (*SnapshotState, uint64, error) {
+	if volumeID == "" {
+		return nil, 0, fmt.Errorf("%w: volume id is required", ErrInvalidInput)
+	}
+	if state == nil {
+		return nil, 0, fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
+	}
+
+	inline := cloneStateForMaterialization(state)
+	normalizeState(inline)
+	defaultSegmentVolumeIDs(inline, volumeID)
+	if inline.NextSeq <= 1 {
+		inline.NextSeq = 2
+	}
+	nextSeq := checkpointSequence(inline)
+	if nextSeq == 0 {
+		return nil, 0, fmt.Errorf("%w: manifest sequence must be non-zero", ErrInvalidInput)
+	}
+	return inline, nextSeq, nil
 }
 
 func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]byte, error) {

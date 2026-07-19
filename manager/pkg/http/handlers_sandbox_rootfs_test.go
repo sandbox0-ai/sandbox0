@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 )
 
@@ -55,5 +57,60 @@ func TestWriteSandboxRootFSErrorMapsExpiredSnapshotToBadRequest(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestWriteSandboxRootFSErrorMapsTeamQuotaFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantRetry  string
+	}{
+		{
+			name: "capacity exceeded",
+			err: &teamquota.ExceededError{
+				Key:       teamquota.KeyRootFSStorageBytes,
+				Requested: 1,
+				Limit:     10,
+			},
+			wantStatus: http.StatusTooManyRequests,
+		},
+		{
+			name: "admission unavailable",
+			err: &teamquota.UnavailableError{
+				Operation: "publish rootfs object",
+				Err:       context.DeadlineExceeded,
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantRetry:  "1",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := &Server{logger: zap.NewNop()}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+
+			server.writeSandboxRootFSError(
+				ctx,
+				"create rootfs snapshot",
+				"sandbox-1",
+				test.err,
+			)
+
+			if recorder.Code != test.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d: %s",
+					recorder.Code,
+					test.wantStatus,
+					recorder.Body.String(),
+				)
+			}
+			if got := recorder.Header().Get("Retry-After"); got != test.wantRetry {
+				t.Fatalf("Retry-After = %q, want %q", got, test.wantRetry)
+			}
+		})
 	}
 }

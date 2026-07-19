@@ -18,6 +18,8 @@ SSH access targets the sandbox procd runtime in the main sandbox container.
 
 The gateway uses the SSH username to decide which sandbox to connect to. Your uploaded public key identifies the user, and the platform still enforces normal sandbox authorization before opening the session.
 
+After authentication, the TCP connection and every active shell, exec, or file-transfer channel consume the team's region-wide `active_connection_count` quota. Opening a new channel at the exact limit is rejected. If the backing quota lease is lost or cannot renew, the gateway closes the affected channel or connection instead of letting it continue uncounted.
+
 Use `s0 sandbox get` to read the connection info instead of hard-coding a region host:
 
 ```bash
@@ -127,6 +129,8 @@ sftp -i ~/.ssh/sandbox0_ed25519 -P "$SSH_PORT" "$SSH_USER@$SSH_HOST"
 - SSH authorization stays at the platform layer. You do not manage `authorized_keys` inside each sandbox.
 - Uploaded SSH public keys belong to the user account, not to one sandbox.
 - A key can access any sandbox that the user is authorized to access in that region.
+- SSH channel payload is included in the team's region-wide network byte quota. Client-to-sandbox data consumes `network_ingress_bytes`; sandbox-to-client data consumes `network_egress_bytes`.
+- Payload is counted once at the SSH channel boundary for shell, exec, SFTP, and SFTP-backed SCP. SSH handshake/control frames and the internal gateway-to-`procd` WebSocket are not charged again.
 - SSH is best for human shell access and standard file transfer. For programmatic process control, use [Contexts](/docs/sandbox/contexts), or use [Supervised Sessions](/docs/sandbox/session-supervisor) when reconnect and runtime recovery matter.
 
 ---

@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	godigest "github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
@@ -39,7 +41,7 @@ func TestControllerInspectRootFSRejectsInvalidTarget(t *testing.T) {
 	assert.Contains(t, resp.Error, "namespace is required")
 }
 
-func TestControllerSaveRootFSUploadsDiffWithDefaultObjectKey(t *testing.T) {
+func TestControllerPrepareAndPublishRootFSUploadsDiffWithDefaultObjectKey(t *testing.T) {
 	store := objectstore.NewMemoryStore(t.Name())
 	runtime := &fakeRuntime{
 		info: rootFSInfo("gvisor"),
@@ -50,16 +52,18 @@ func TestControllerSaveRootFSUploadsDiffWithDefaultObjectKey(t *testing.T) {
 		},
 		createContent: "rootfs diff",
 	}
-	controller := NewController(Config{Runtime: runtime, Store: store})
+	controller := NewController(Config{Runtime: runtime, Store: store, SnapshotDir: t.TempDir()})
 
-	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
-		Target:                    rootFSTarget(),
-		SandboxID:                 "sandbox-1",
-		TeamID:                    "team-1",
-		ExpectedRuntimeGeneration: 7,
-	})
-
-	require.Equal(t, http.StatusOK, status, resp.Error)
+	resp := prepareAndPublishRootFSTest(
+		t,
+		controller,
+		ctldapi.PrepareRootFSSnapshotRequest{Target: rootFSTarget()},
+		ctldapi.PublishRootFSSnapshotRequest{
+			SandboxID:                 "sandbox-1",
+			TeamID:                    "team-1",
+			ExpectedRuntimeGeneration: 7,
+		},
+	)
 	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/7/sha256/feedface.tar", resp.Descriptor.ObjectKey)
 	assert.Equal(t, rootFSInfo("gvisor"), runtime.createInfo)
 	assert.Empty(t, runtime.createExcludedPaths)
@@ -71,7 +75,7 @@ func TestControllerSaveRootFSUploadsDiffWithDefaultObjectKey(t *testing.T) {
 	assert.Equal(t, "rootfs diff", string(payload))
 }
 
-func TestControllerSaveRootFSUsesParentBaseline(t *testing.T) {
+func TestControllerPrepareAndPublishRootFSUsesParentBaseline(t *testing.T) {
 	store := objectstore.NewMemoryStore(t.Name())
 	runtime := &fakeRuntime{
 		info: rootFSInfo("runc"),
@@ -82,17 +86,21 @@ func TestControllerSaveRootFSUsesParentBaseline(t *testing.T) {
 		},
 		createBaselineContent: "child diff",
 	}
-	controller := NewController(Config{Runtime: runtime, Store: store})
+	controller := NewController(Config{Runtime: runtime, Store: store, SnapshotDir: t.TempDir()})
 
-	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
-		Target:        rootFSTarget(),
-		SandboxID:     "sandbox-1",
-		TeamID:        "team-1",
-		ParentLayerID: "layer-parent",
-		ExcludedPaths: []string{"/workspace/data"},
-	})
-
-	require.Equal(t, http.StatusOK, status, resp.Error)
+	resp := prepareAndPublishRootFSTest(
+		t,
+		controller,
+		ctldapi.PrepareRootFSSnapshotRequest{
+			Target:        rootFSTarget(),
+			ParentLayerID: "layer-parent",
+			ExcludedPaths: []string{"/workspace/data"},
+		},
+		ctldapi.PublishRootFSSnapshotRequest{
+			SandboxID: "sandbox-1",
+			TeamID:    "team-1",
+		},
+	)
 	assert.True(t, runtime.createBaselineCalled)
 	assert.False(t, runtime.createCalled)
 	assert.Equal(t, "layer-parent", runtime.createBaselineLayerID)
@@ -106,7 +114,7 @@ func TestControllerSaveRootFSUsesParentBaseline(t *testing.T) {
 	assert.Equal(t, "child diff", string(payload))
 }
 
-func TestControllerSaveRootFSResolvesUnboundPortalPaths(t *testing.T) {
+func TestControllerPrepareRootFSResolvesUnboundPortalPaths(t *testing.T) {
 	store := objectstore.NewMemoryStore(t.Name())
 	runtime := &fakeRuntime{
 		info: rootFSInfo("runc"),
@@ -118,18 +126,21 @@ func TestControllerSaveRootFSResolvesUnboundPortalPaths(t *testing.T) {
 		createContent: "rootfs diff",
 	}
 	controller := NewController(Config{
-		Runtime: runtime,
-		Store:   store,
+		Runtime:     runtime,
+		Store:       store,
+		SnapshotDir: t.TempDir(),
 		PortalResolver: fakePortalResolver{paths: []ctldapi.RootFSPortalPath{
 			{PortalName: "cache", MountPath: "/workspace/cache", BackingPath: "/tmp/cache"},
 			{PortalName: "data", MountPath: "/workspace/data", BackingPath: "/tmp/data"},
 		}},
 	})
 
-	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
+	resp, status := controller.PrepareRootFSSnapshot(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.PrepareRootFSSnapshotRequest{
 		Target:        rootFSTarget(),
-		SandboxID:     "sandbox-1",
+		StageID:       uuid.NewString(),
 		TeamID:        "team-1",
+		SandboxID:     "sandbox-1",
+		ExpiresAt:     time.Now().Add(time.Minute),
 		ExcludedPaths: []string{"/workspace/data"},
 	})
 
@@ -141,7 +152,7 @@ func TestControllerSaveRootFSResolvesUnboundPortalPaths(t *testing.T) {
 	}}, runtime.createPortalPaths)
 }
 
-func TestControllerSaveRootFSWarmsObjectCache(t *testing.T) {
+func TestControllerPublishRootFSWarmsObjectCache(t *testing.T) {
 	payload := "rootfs diff"
 	store := objectstore.NewMemoryStore(t.Name())
 	cache := NewObjectCache(ObjectCacheConfig{Dir: t.TempDir(), MaxBytes: 1 << 20})
@@ -150,15 +161,14 @@ func TestControllerSaveRootFSWarmsObjectCache(t *testing.T) {
 		createDesc:    rootFSDiffDescriptorForPayload("", payload),
 		createContent: payload,
 	}
-	controller := NewController(Config{Runtime: runtime, Store: store, ObjectCache: cache})
+	controller := NewController(Config{Runtime: runtime, Store: store, ObjectCache: cache, SnapshotDir: t.TempDir()})
 
-	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
-		Target:    rootFSTarget(),
-		SandboxID: "sandbox-1",
-		TeamID:    "team-1",
-	})
-
-	require.Equal(t, http.StatusOK, status, resp.Error)
+	resp := prepareAndPublishRootFSTest(
+		t,
+		controller,
+		ctldapi.PrepareRootFSSnapshotRequest{Target: rootFSTarget()},
+		ctldapi.PublishRootFSSnapshotRequest{SandboxID: "sandbox-1", TeamID: "team-1"},
+	)
 	reader, ok, err := cache.Open(resp.Descriptor)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -168,22 +178,55 @@ func TestControllerSaveRootFSWarmsObjectCache(t *testing.T) {
 	assert.Equal(t, payload, string(cached))
 }
 
-func TestControllerSaveRootFSRejectsUnsupportedRuntime(t *testing.T) {
+func TestControllerPrepareRootFSRejectsUnsupportedRuntime(t *testing.T) {
 	runtime := &fakeRuntime{
 		info:          rootFSInfo("kata"),
 		createContent: "rootfs diff",
 	}
-	controller := NewController(Config{Runtime: runtime, Store: objectstore.NewMemoryStore(t.Name())})
+	controller := NewController(Config{Runtime: runtime, Store: objectstore.NewMemoryStore(t.Name()), SnapshotDir: t.TempDir()})
 
-	resp, status := controller.SaveRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.SaveRootFSRequest{
+	resp, status := controller.PrepareRootFSSnapshot(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.PrepareRootFSSnapshotRequest{
 		Target:    rootFSTarget(),
-		SandboxID: "sandbox-1",
+		StageID:   uuid.NewString(),
 		TeamID:    "team-1",
+		SandboxID: "sandbox-1",
+		ExpiresAt: time.Now().Add(time.Minute),
 	})
 
 	require.Equal(t, http.StatusBadRequest, status)
 	assert.Contains(t, resp.Error, "runtime \"kata\" is not supported")
 	assert.False(t, runtime.createCalled)
+}
+
+func prepareAndPublishRootFSTest(
+	t *testing.T,
+	controller *Controller,
+	prepareReq ctldapi.PrepareRootFSSnapshotRequest,
+	publishReq ctldapi.PublishRootFSSnapshotRequest,
+) ctldapi.PublishRootFSSnapshotResponse {
+	t.Helper()
+	if prepareReq.StageID == "" {
+		prepareReq.StageID = uuid.NewString()
+	}
+	if prepareReq.TeamID == "" {
+		prepareReq.TeamID = publishReq.TeamID
+	}
+	if prepareReq.SandboxID == "" {
+		prepareReq.SandboxID = publishReq.SandboxID
+	}
+	prepareReq.ExpectedRuntimeGeneration = publishReq.ExpectedRuntimeGeneration
+	if prepareReq.ExpiresAt.IsZero() {
+		prepareReq.ExpiresAt = time.Now().Add(time.Minute)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+	prepared, status := controller.PrepareRootFSSnapshot(request, prepareReq)
+	require.Equal(t, http.StatusOK, status, prepared.Error)
+	require.NotEmpty(t, prepared.Handle)
+	publishReq.Handle = prepared.Handle
+	published, status := controller.PublishRootFSSnapshot(request, publishReq)
+	require.Equal(t, http.StatusOK, status, published.Error)
+	require.True(t, published.Published)
+	return published
 }
 
 func TestControllerApplyRootFSUsesObjectCache(t *testing.T) {
@@ -226,6 +269,8 @@ func TestControllerApplyRootFSDownloadsAndAppliesDiff(t *testing.T) {
 
 	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
 		Target:                      rootFSTarget(),
+		TeamID:                      "team-1",
+		SandboxID:                   "sandbox-1",
 		ExpectedRuntime:             "runc",
 		ExpectedRuntimeHandler:      "runc",
 		ExpectedSnapshotter:         "overlayfs",
@@ -266,6 +311,8 @@ func TestControllerApplyRootFSAppliesLayerChainAndCapturesBaseline(t *testing.T)
 
 	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
 		Target:                      rootFSTarget(),
+		TeamID:                      "team-1",
+		SandboxID:                   "sandbox-1",
 		ExpectedRuntime:             "runc",
 		ExpectedRuntimeHandler:      "runc",
 		ExpectedSnapshotter:         "overlayfs",
@@ -328,6 +375,8 @@ func TestControllerApplyRootFSForceAppliesBaseMismatch(t *testing.T) {
 
 	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
 		Target:                      rootFSTarget(),
+		TeamID:                      "team-1",
+		SandboxID:                   "sandbox-1",
 		ExpectedBaseImageDigest:     "sha256:other-base",
 		ExpectedSnapshotParent:      "other-parent",
 		ExpectedSnapshotParentChain: []string{"other-parent"},
@@ -360,6 +409,8 @@ func TestControllerApplyRootFSLayerChainReplaysBaseMismatch(t *testing.T) {
 
 	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
 		Target:                      rootFSTarget(),
+		TeamID:                      "team-1",
+		SandboxID:                   "sandbox-1",
 		ExpectedBaseImageDigest:     "sha256:other-base",
 		ExpectedSnapshotParent:      "other-parent",
 		ExpectedSnapshotParentChain: []string{"other-parent"},
@@ -381,6 +432,42 @@ func TestControllerApplyRootFSLayerChainReplaysBaseMismatch(t *testing.T) {
 	assert.Equal(t, "rootfs diff", runtime.applyContent)
 	assert.True(t, runtime.captureBaselineCalled)
 	assert.Equal(t, "layer-1", runtime.captureBaselineLayerID)
+}
+
+func TestControllerApplyRootFSDoesNotFailWhenDisposableBaselineCaptureFails(t *testing.T) {
+	store := objectstore.NewMemoryStore(t.Name())
+	require.NoError(t, store.Put("rootfs/diff.tar", strings.NewReader("rootfs diff")))
+	runtime := &fakeRuntime{
+		info:               rootFSInfo("runc"),
+		captureBaselineErr: errors.New("baseline cache is full"),
+		applyDesc: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:feedface",
+			Size:      int64(len("rootfs diff")),
+		},
+	}
+	controller := NewController(Config{Runtime: runtime, Store: store})
+
+	resp, status := controller.ApplyRootFS(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ApplyRootFSRequest{
+		Target:          rootFSTarget(),
+		TeamID:          "team-1",
+		SandboxID:       "sandbox-1",
+		BaselineLayerID: "layer-1",
+		Layers: []ctldapi.RootFSLayerDescriptor{{
+			LayerID: "layer-1",
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:feedface",
+				Size:      int64(len("rootfs diff")),
+				ObjectKey: "rootfs/diff.tar",
+			},
+		}},
+	})
+
+	require.Equal(t, http.StatusOK, status, resp.Error)
+	assert.True(t, resp.Applied)
+	assert.True(t, runtime.applyCalled)
+	assert.True(t, runtime.captureBaselineCalled)
 }
 
 func TestControllerApplyRootFSRejectsRuntimeMismatch(t *testing.T) {
@@ -542,7 +629,7 @@ func (r *fakeRuntime) ApplyDiff(_ context.Context, info ctldapi.RootFSInfo, desc
 	return r.applyDesc, nil
 }
 
-func (r *fakeRuntime) CaptureBaseline(_ context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error {
+func (r *fakeRuntime) CaptureBaseline(_ context.Context, info ctldapi.RootFSInfo, _, _ string, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error {
 	r.captureBaselineCalled = true
 	r.captureInfo = info
 	r.captureBaselineLayerID = baselineLayerID

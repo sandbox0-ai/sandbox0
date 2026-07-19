@@ -1,6 +1,9 @@
 package service
 
 import (
+	"context"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
 
@@ -21,6 +24,22 @@ func (g *InternalTokenGenerator) GenerateToken(teamID, userID, sandboxID string)
 	// Note: sandboxID is passed for logging/tracing purposes but not embedded in the token
 	// The token authenticates the manager to call procd, procd will use the X-Sandbox-ID header
 	return g.generator.Generate("procd", teamID, userID, internalauth.GenerateOptions{})
+}
+
+// NewCtldRootFSTokenProvider creates manager-scoped tokens whose signed
+// ownership claims are checked before ctld admits node-local rootfs work.
+func NewCtldRootFSTokenProvider(generator *internalauth.Generator) ctldapi.RootFSTokenProvider {
+	if generator == nil {
+		return nil
+	}
+	return func(_ context.Context, teamID, sandboxID string) (string, error) {
+		return generator.Generate(
+			internalauth.ServiceCtld,
+			teamID,
+			"",
+			internalauth.GenerateOptions{SandboxID: sandboxID},
+		)
+	}
 }
 
 // ManagerStorageAdminTokenGenerator generates manager tokens for volume lifecycle calls.

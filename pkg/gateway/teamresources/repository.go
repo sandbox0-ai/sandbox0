@@ -17,7 +17,6 @@ type SchemaConfig struct {
 	Scheduler    string
 	Manager      string
 	StorageProxy string
-	Quota        string
 }
 
 // DefaultSchemaConfig returns the deployment defaults used by sandbox0 services.
@@ -26,7 +25,6 @@ func DefaultSchemaConfig() SchemaConfig {
 		Scheduler:    "scheduler",
 		Manager:      "manager",
 		StorageProxy: "storage_proxy",
-		Quota:        "quota",
 	}
 }
 
@@ -161,8 +159,6 @@ func (r *Repository) blockingQueries() []countQuery {
 	storageSyncRetention := tableRef(r.schemas.StorageProxy, "sandbox_volume_sync_retention")
 	storageSyncNamespacePolicy := tableRef(r.schemas.StorageProxy, "sandbox_volume_sync_namespace_policy")
 
-	quotaLimits := tableRef(r.schemas.Quota, "team_quota_limits")
-
 	return []countQuery{
 		{
 			category: "api_keys",
@@ -213,6 +209,17 @@ func (r *Repository) blockingQueries() []countQuery {
 			category: "sandboxes",
 			table:    managerSandboxes,
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1 AND deleted_at IS NULL`, managerSandboxes),
+		},
+		{
+			category: "sandbox_cleanup_pending",
+			table:    managerSandboxes,
+			sql: fmt.Sprintf(`
+				SELECT COUNT(*)
+				FROM %s
+				WHERE team_id = $1
+				  AND deleted_at IS NOT NULL
+				  AND cleanup_completed_at IS NULL
+			`, managerSandboxes),
 		},
 		{
 			category: "sandbox_lifecycle_transactions",
@@ -371,11 +378,6 @@ func (r *Repository) blockingQueries() []countQuery {
 			table:    storageSyncNamespacePolicy,
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, storageSyncNamespacePolicy),
 		},
-		{
-			category: "team_quota_limits",
-			table:    quotaLimits,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, quotaLimits),
-		},
 	}
 }
 
@@ -458,7 +460,6 @@ func (r *Repository) blockingDiscoverySchemas(ctx context.Context) ([]string, er
 		r.schemas.Scheduler,
 		r.schemas.Manager,
 		r.schemas.StorageProxy,
-		r.schemas.Quota,
 	}, nil
 }
 
@@ -509,7 +510,20 @@ func compactSchemas(schemas []string) []string {
 	return out
 }
 
-func isIgnoredDiscoveredTable(_ string, table string) bool {
+func isIgnoredDiscoveredTable(schema string, table string) bool {
+	if schema == "quota" {
+		switch table {
+		case "region_default_policies",
+			"team_policies",
+			"team_states",
+			"team_usage",
+			"allocations",
+			"allocation_items",
+			"transfer_operations",
+			"transfer_items":
+			return true
+		}
+	}
 	switch table {
 	case "team_members":
 		return true

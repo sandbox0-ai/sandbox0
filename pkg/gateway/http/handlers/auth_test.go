@@ -63,6 +63,18 @@ func (m *mockAuthRepository) ValidateRefreshToken(_ context.Context, tokenHash s
 	return token, nil
 }
 
+func (m *mockAuthRepository) RotateRefreshToken(ctx context.Context, currentTokenHash string, replacement *identity.RefreshToken) error {
+	current, err := m.ValidateRefreshToken(ctx, currentTokenHash)
+	if err != nil {
+		return err
+	}
+	if current.UserID != replacement.UserID {
+		return identity.ErrTokenNotFound
+	}
+	delete(m.refreshTokens, currentTokenHash)
+	return m.CreateRefreshToken(ctx, replacement)
+}
+
 func (m *mockAuthRepository) RevokeAllUserRefreshTokens(_ context.Context, userID string) error {
 	for _, token := range m.refreshTokens {
 		if token.UserID == userID {

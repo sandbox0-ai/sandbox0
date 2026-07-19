@@ -23,6 +23,9 @@ type SSHGatewayConfig struct {
 	// +kubebuilder:default="info"
 	LogLevel string `yaml:"log_level" json:"logLevel"`
 
+	// RegionID namespaces region-shared Team Quota state.
+	RegionID string `yaml:"region_id" json:"-"`
+
 	// Database configuration for gateway identity data.
 	DatabaseURL string `yaml:"database_url" json:"-"`
 	// +optional
@@ -54,6 +57,26 @@ type SSHGatewayConfig struct {
 	// +optional
 	// +kubebuilder:default="/secrets/ssh_host_ed25519_key"
 	SSHHostKeyPath string `yaml:"ssh_host_key_path" json:"-"`
+
+	// TeamQuotaDistributedEnforcement configures region-shared active
+	// connection and network byte quota enforcement.
+	TeamQuotaDistributedEnforcement TeamQuotaDistributedEnforcementConfig `yaml:"team_quota_distributed_enforcement" json:"teamQuotaDistributedEnforcement"`
+
+	// PlatformMaxConcurrentHandshakes bounds unauthenticated SSH handshakes
+	// within one process. It is a platform overload guard, not Team Quota.
+	// +optional
+	// +kubebuilder:default=128
+	PlatformMaxConcurrentHandshakes int `yaml:"platform_max_concurrent_handshakes" json:"platformMaxConcurrentHandshakes"`
+	// PlatformHandshakeTimeout bounds how long an unauthenticated client may
+	// occupy a handshake slot.
+	// +optional
+	// +kubebuilder:default="10s"
+	PlatformHandshakeTimeout metav1.Duration `yaml:"platform_handshake_timeout" json:"platformHandshakeTimeout"`
+	// PlatformMaxConcurrentChannelsPerConnection bounds active SSH session
+	// channels within one connection. It is independent from Team Quota.
+	// +optional
+	// +kubebuilder:default=16
+	PlatformMaxConcurrentChannelsPerConnection int `yaml:"platform_max_concurrent_channels_per_connection" json:"platformMaxConcurrentChannelsPerConnection"`
 
 	// ResumeTimeout bounds how long ssh-gateway waits for a paused sandbox to
 	// become reachable after requesting resume.

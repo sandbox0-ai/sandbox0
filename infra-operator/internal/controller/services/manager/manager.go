@@ -397,7 +397,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 		if err := sandboxobssvc.ApplyManagerConfig(ctx, r.Resources.Client, owner, compiledPlan.Services.ClusterGateway.URL, cfg); err != nil {
 			return nil, fmt.Errorf("apply sandbox observability config: %w", err)
 		}
-		redisCfg, ok, err := redissvc.GetGatewayRedisConfig(ctx, r.Resources.Client, owner)
+		redisCfg, ok, err := redissvc.GetRuntimeRedisConfig(ctx, r.Resources.Client, owner)
 		if err != nil {
 			return nil, fmt.Errorf("resolve redis config: %w", err)
 		}
@@ -409,6 +409,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 			cfg.RedisURL = ""
 			cfg.RedisKeyPrefix = ""
 			cfg.RedisTimeout = metav1.Duration{}
+		}
+		if err := redissvc.ApplyTeamQuotaDistributedEnforcementConfig(ctx, r.Resources.Client, owner, &cfg.TeamQuotaDistributedEnforcement); err != nil {
+			return nil, fmt.Errorf("apply team quota distributed enforcement config: %w", err)
 		}
 	}
 

@@ -120,8 +120,8 @@ spec:
                             imagePullPolicy:
                               type: string
                             resources:
-                              description: ResourceQuota defines resource quota (per
-                                template)
+                              description: SandboxResourceLimits defines the per-sandbox
+                                container resource limits.
                               properties:
                                 cpu:
                                   anyOf:
@@ -1816,6 +1816,52 @@ spec:
                         type: integer
                       auditLogPath:
                         type: string
+                      auditSpoolLimits:
+                        description: |-
+                          AuditSpoolLimits bounds each node-local network-audit delivery backlog.
+                          It is a platform disk-safety guard, not Team Quota.
+                        properties:
+                          maxBytes:
+                            default: 1073741824
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          maxEntries:
+                            default: 100000
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          maxRecordBytes:
+                            default: 1048576
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          maxTeamBytes:
+                            default: 268435456
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          maxTeamEntries:
+                            default: 25000
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          minFreeBytes:
+                            default: 1073741824
+                            format: int64
+                            minimum: 1
+                            type: integer
+                        type: object
+                        x-kubernetes-validations:
+                        - message: maxTeamBytes must not exceed maxBytes
+                          rule: '!has(self.maxTeamBytes) || !has(self.maxBytes) ||
+                            self.maxTeamBytes <= self.maxBytes'
+                        - message: maxTeamEntries must not exceed maxEntries
+                          rule: '!has(self.maxTeamEntries) || !has(self.maxEntries)
+                            || self.maxTeamEntries <= self.maxEntries'
+                        - message: maxRecordBytes must not exceed maxTeamBytes
+                          rule: '!has(self.maxRecordBytes) || !has(self.maxTeamBytes)
+                            || self.maxRecordBytes <= self.maxTeamBytes'
                       bandwidthBurstBytes:
                         description: Token bucket burst in bytes for bandwidth limiting.
                           Zero uses one second of the configured rate.
@@ -1912,6 +1958,29 @@ spec:
                       proxyListenAddr:
                         default: 0.0.0.0
                         type: string
+                      proxyMaxActiveTcpConnections:
+                        default: 4096
+                        description: |-
+                          ProxyMaxActiveTCPConnections bounds accepted TCP connections executing in
+                          one ctld network runtime before tenant lookup or distributed admission.
+                        maximum: 65536
+                        minimum: 1
+                        type: integer
+                      proxyUdpQueueSize:
+                        default: 1024
+                        description: |-
+                          ProxyUDPQueueSize bounds queued and executing datagrams. A full queue
+                          drops a datagram before allocating per-datagram work.
+                        maximum: 8192
+                        minimum: 1
+                        type: integer
+                      proxyUdpWorkers:
+                        default: 32
+                        description: ProxyUDPWorkers bounds concurrent datagram classification
+                          and forwarding.
+                        maximum: 256
+                        minimum: 1
+                        type: integer
                       proxyUpstreamTimeout:
                         default: 30s
                         type: string
@@ -1921,26 +1990,6 @@ spec:
                       shutdownDelay:
                         default: 2s
                         type: string
-                      teamBandwidthBurstBytes:
-                        description: Token bucket burst in bytes for team bandwidth
-                          limiting. Zero uses one second of the configured rate.
-                        format: int64
-                        minimum: 0
-                        type: integer
-                      teamEgressBandwidthBytesPerSecond:
-                        description: Cluster-scoped per-team egress bandwidth limit
-                          in bytes per second. Requires spec.redis. Zero disables
-                          throttling.
-                        format: int64
-                        minimum: 0
-                        type: integer
-                      teamIngressBandwidthBytesPerSecond:
-                        description: Cluster-scoped per-team ingress bandwidth limit
-                          in bytes per second. Requires spec.redis. Zero disables
-                          throttling.
-                        format: int64
-                        minimum: 0
-                        type: integer
                       useEbpf:
                         type: boolean
                       useEdt:
@@ -1948,6 +1997,10 @@ spec:
                       vethPrefix:
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: proxyUdpWorkers must not exceed proxyUdpQueueSize
+                      rule: '!has(self.proxyUdpWorkers) || !has(self.proxyUdpQueueSize)
+                        || self.proxyUdpWorkers <= self.proxyUdpQueueSize'
                   mitmCaSecretName:
                     description: |-
                       MITMCASecretName overrides the operator-managed cluster-local MITM CA
@@ -2213,9 +2266,10 @@ spec:
                 type: object
               redis:
                 description: |-
-                  Redis configures a region-level Redis backend for shared services such as
-                  distributed gateway rate limiting. When omitted, gateway rate limiting
-                  uses process-local memory.
+                  Redis configures a region-level backend for Team Quota rate and
+                  concurrency enforcement, the public identity overload guard, and shared
+                  runtime caches. Distributed admission fails closed when Redis is not
+                  configured or unavailable.
                 properties:
                   builtin:
                     default: {}
@@ -2258,11 +2312,6 @@ spec:
                     required:
                     - urlSecret
                     type: object
-                  failOpen:
-                    default: true
-                    description: FailOpen allows traffic when Redis is temporarily
-                      unavailable.
-                    type: boolean
                   keyPrefix:
                     default: sandbox0
                     description: KeyPrefix prefixes keys used by sandbox0 Redis clients.
@@ -2794,7 +2843,7 @@ spec:
                             anyOf:
                             - type: integer
                             - type: string
-                            default: 1Gi
+                            default: 3Gi
                             description: Size specifies the delivery buffer capacity.
                             pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                             x-kubernetes-int-or-string: true
@@ -2812,6 +2861,53 @@ spec:
                         description: Enabled enables the enterprise sandbox_audit
                           feature.
                         type: boolean
+                      spoolLimits:
+                        description: |-
+                          SpoolLimits bounds cluster-gateway's durable audit delivery backlog
+                          globally and per team. These are platform disk-safety guards, not Team
+                          Quota or billing policy.
+                        properties:
+                          maxBytes:
+                            default: 1073741824
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          maxEntries:
+                            default: 100000
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          maxRecordBytes:
+                            default: 1048576
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          maxTeamBytes:
+                            default: 268435456
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          maxTeamEntries:
+                            default: 25000
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          minFreeBytes:
+                            default: 1073741824
+                            format: int64
+                            minimum: 1
+                            type: integer
+                        type: object
+                        x-kubernetes-validations:
+                        - message: maxTeamBytes must not exceed maxBytes
+                          rule: '!has(self.maxTeamBytes) || !has(self.maxBytes) ||
+                            self.maxTeamBytes <= self.maxBytes'
+                        - message: maxTeamEntries must not exceed maxEntries
+                          rule: '!has(self.maxTeamEntries) || !has(self.maxEntries)
+                            || self.maxTeamEntries <= self.maxEntries'
+                        - message: maxRecordBytes must not exceed maxTeamBytes
+                          rule: '!has(self.maxRecordBytes) || !has(self.maxTeamBytes)
+                            || self.maxRecordBytes <= self.maxTeamBytes'
                     type: object
                     x-kubernetes-validations:
                     - message: deliveryPersistence presence is immutable after creation
@@ -3099,8 +3195,57 @@ spec:
                           httpPort:
                             default: 8443
                             type: integer
+                          identityResourceGuard:
+                            default: {}
+                            description: |-
+                              IdentityResourceGuard bounds identity graph and authentication session
+                              state at the gateway that owns the public identity surface.
+                            properties:
+                              maxActiveDeviceAuthSessions:
+                                default: 10000
+                                minimum: 1
+                                type: integer
+                              maxActiveRefreshTokensPerUser:
+                                default: 16
+                                minimum: 1
+                                type: integer
+                              maxActiveWebLoginCodesPerUser:
+                                default: 3
+                                minimum: 1
+                                type: integer
+                              maxLinkedIdentitiesPerUser:
+                                default: 8
+                                minimum: 1
+                                type: integer
+                              maxMembersPerTeam:
+                                default: 256
+                                minimum: 1
+                                type: integer
+                              maxPendingOidcStates:
+                                default: 10000
+                                minimum: 1
+                                type: integer
+                              maxTeamMembershipsPerUser:
+                                default: 32
+                                minimum: 1
+                                type: integer
+                              maxTeamsOwnedPerUser:
+                                default: 10
+                                minimum: 1
+                                type: integer
+                              sessionCleanupBatchSize:
+                                default: 1000
+                                minimum: 1
+                                type: integer
+                              sessionCleanupInterval:
+                                default: 1m
+                                type: string
+                            type: object
                           jwtAccessTokenTTL:
                             default: 15m
+                            description: |-
+                              JWTAccessTokenTTL is also the maximum access-token lifetime accepted by
+                              verifier-only regional gateways.
                             type: string
                           jwtIssuer:
                             description: JWTIssuer sets the JWT issuer for gateway-issued
@@ -3178,25 +3323,53 @@ spec:
                                   type: string
                               type: object
                             type: array
-                          oidcStateCleanupInterval:
-                            default: 5m
-                            type: string
                           oidcStateTtl:
                             default: 10m
                             type: string
+                          overloadGuard:
+                            default: {}
+                            description: |-
+                              OverloadGuard protects the complete public identity and authentication
+                              surface with one aggregate budget. It is independent from Team Quota.
+                            properties:
+                              burst:
+                                default: 200
+                                maximum: 10000000
+                                minimum: 1
+                                type: integer
+                              cleanupInterval:
+                                default: 10m
+                                type: string
+                              localBurst:
+                                default: 1000
+                                maximum: 10000000
+                                minimum: 1
+                                type: integer
+                              localRequestsPerSecond:
+                                default: 500
+                                description: |-
+                                  LocalRequestsPerSecond bounds attempts made by one service process before
+                                  the region-shared Redis guard is consulted.
+                                maximum: 1000000
+                                minimum: 1
+                                type: integer
+                              maxInFlight:
+                                default: 512
+                                description: |-
+                                  MaxInFlight bounds requests concurrently executing in one service
+                                  process.
+                                maximum: 1000000
+                                minimum: 1
+                                type: integer
+                              requestsPerSecond:
+                                default: 100
+                                maximum: 1000000
+                                minimum: 1
+                                type: integer
+                            type: object
                           proxyTimeout:
                             default: 10s
                             type: string
-                          rateLimitBurst:
-                            default: 200
-                            type: integer
-                          rateLimitCleanupInterval:
-                            default: 10m
-                            type: string
-                          rateLimitRps:
-                            default: 100
-                            description: Rate limiting
-                            type: integer
                           schedulerPermissions:
                             default:
                             - '*:*'
@@ -3389,8 +3562,57 @@ spec:
                           httpPort:
                             default: 8080
                             type: integer
+                          identityResourceGuard:
+                            default: {}
+                            description: |-
+                              IdentityResourceGuard bounds identity graph and authentication session
+                              state at the gateway that owns the public identity surface.
+                            properties:
+                              maxActiveDeviceAuthSessions:
+                                default: 10000
+                                minimum: 1
+                                type: integer
+                              maxActiveRefreshTokensPerUser:
+                                default: 16
+                                minimum: 1
+                                type: integer
+                              maxActiveWebLoginCodesPerUser:
+                                default: 3
+                                minimum: 1
+                                type: integer
+                              maxLinkedIdentitiesPerUser:
+                                default: 8
+                                minimum: 1
+                                type: integer
+                              maxMembersPerTeam:
+                                default: 256
+                                minimum: 1
+                                type: integer
+                              maxPendingOidcStates:
+                                default: 10000
+                                minimum: 1
+                                type: integer
+                              maxTeamMembershipsPerUser:
+                                default: 32
+                                minimum: 1
+                                type: integer
+                              maxTeamsOwnedPerUser:
+                                default: 10
+                                minimum: 1
+                                type: integer
+                              sessionCleanupBatchSize:
+                                default: 1000
+                                minimum: 1
+                                type: integer
+                              sessionCleanupInterval:
+                                default: 1m
+                                type: string
+                            type: object
                           jwtAccessTokenTTL:
                             default: 15m
+                            description: |-
+                              JWTAccessTokenTTL is also the maximum access-token lifetime accepted by
+                              verifier-only regional gateways.
                             type: string
                           jwtIssuer:
                             description: JWTIssuer sets the JWT issuer for gateway-issued
@@ -3468,22 +3690,50 @@ spec:
                                   type: string
                               type: object
                             type: array
-                          oidcStateCleanupInterval:
-                            default: 5m
-                            type: string
                           oidcStateTtl:
                             default: 10m
                             type: string
-                          rateLimitBurst:
-                            default: 200
-                            type: integer
-                          rateLimitCleanupInterval:
-                            default: 10m
-                            type: string
-                          rateLimitRps:
-                            default: 100
-                            description: Rate limiting
-                            type: integer
+                          overloadGuard:
+                            default: {}
+                            description: |-
+                              OverloadGuard protects the complete public identity and authentication
+                              surface with one aggregate budget. It is independent from Team Quota.
+                            properties:
+                              burst:
+                                default: 200
+                                maximum: 10000000
+                                minimum: 1
+                                type: integer
+                              cleanupInterval:
+                                default: 10m
+                                type: string
+                              localBurst:
+                                default: 1000
+                                maximum: 10000000
+                                minimum: 1
+                                type: integer
+                              localRequestsPerSecond:
+                                default: 500
+                                description: |-
+                                  LocalRequestsPerSecond bounds attempts made by one service process before
+                                  the region-shared Redis guard is consulted.
+                                maximum: 1000000
+                                minimum: 1
+                                type: integer
+                              maxInFlight:
+                                default: 512
+                                description: |-
+                                  MaxInFlight bounds requests concurrently executing in one service
+                                  process.
+                                maximum: 1000000
+                                minimum: 1
+                                type: integer
+                              requestsPerSecond:
+                                default: 100
+                                maximum: 1000000
+                                minimum: 1
+                                type: integer
+                            type: object
                           serverIdleTimeout:
                             default: 120s
                             type: string
@@ -3697,38 +3947,6 @@ spec:
                           defaultSandboxTtl:
                             default: 0s
                             type: string
-                          defaultTeamQuotas:
-                            description: |-
-                              DefaultTeamQuotas configures region-wide fallback team quota limits.
-                              Team-specific quota rows in the database override these defaults.
-                            items:
-                              description: |-
-                                TeamQuotaLimitConfig configures a fallback quota limit for teams without a
-                                database override for the same dimension.
-                              properties:
-                                dimension:
-                                  enum:
-                                  - active_sandboxes
-                                  - cpu_millicpu
-                                  - memory_mib
-                                  - volume_storage_gb
-                                  - snapshot_storage_gb
-                                  - egress
-                                  - ingress
-                                  type: string
-                                limitValue:
-                                  format: int64
-                                  minimum: 0
-                                  type: integer
-                              required:
-                              - dimension
-                              - limitValue
-                              type: object
-                            maxItems: 7
-                            type: array
-                            x-kubernetes-list-map-keys:
-                            - dimension
-                            x-kubernetes-list-type: map
                           egressAuthDefaultResolveTtl:
                             default: 5m
                             description: |-
@@ -4007,6 +4225,52 @@ spec:
                           httpPort:
                             default: 8080
                             type: integer
+                          identityResourceGuard:
+                            default: {}
+                            description: |-
+                              IdentityResourceGuard bounds identity graph and authentication session
+                              state at the gateway that owns the public identity surface.
+                            properties:
+                              maxActiveDeviceAuthSessions:
+                                default: 10000
+                                minimum: 1
+                                type: integer
+                              maxActiveRefreshTokensPerUser:
+                                default: 16
+                                minimum: 1
+                                type: integer
+                              maxActiveWebLoginCodesPerUser:
+                                default: 3
+                                minimum: 1
+                                type: integer
+                              maxLinkedIdentitiesPerUser:
+                                default: 8
+                                minimum: 1
+                                type: integer
+                              maxMembersPerTeam:
+                                default: 256
+                                minimum: 1
+                                type: integer
+                              maxPendingOidcStates:
+                                default: 10000
+                                minimum: 1
+                                type: integer
+                              maxTeamMembershipsPerUser:
+                                default: 32
+                                minimum: 1
+                                type: integer
+                              maxTeamsOwnedPerUser:
+                                default: 10
+                                minimum: 1
+                                type: integer
+                              sessionCleanupBatchSize:
+                                default: 1000
+                                minimum: 1
+                                type: integer
+                              sessionCleanupInterval:
+                                default: 1m
+                                type: string
+                            type: object
                           internalAuthCaller:
                             default: regional-gateway
                             type: string
@@ -4015,6 +4279,9 @@ spec:
                             type: string
                           jwtAccessTokenTTL:
                             default: 15m
+                            description: |-
+                              JWTAccessTokenTTL is also the maximum access-token lifetime accepted by
+                              verifier-only regional gateways.
                             type: string
                           jwtIssuer:
                             description: JWTIssuer sets the JWT issuer for gateway-issued
@@ -4092,25 +4359,53 @@ spec:
                                   type: string
                               type: object
                             type: array
-                          oidcStateCleanupInterval:
-                            default: 5m
-                            type: string
                           oidcStateTtl:
                             default: 10m
                             type: string
+                          overloadGuard:
+                            default: {}
+                            description: |-
+                              OverloadGuard protects the complete public identity and authentication
+                              surface with one aggregate budget. It is independent from Team Quota.
+                            properties:
+                              burst:
+                                default: 200
+                                maximum: 10000000
+                                minimum: 1
+                                type: integer
+                              cleanupInterval:
+                                default: 10m
+                                type: string
+                              localBurst:
+                                default: 1000
+                                maximum: 10000000
+                                minimum: 1
+                                type: integer
+                              localRequestsPerSecond:
+                                default: 500
+                                description: |-
+                                  LocalRequestsPerSecond bounds attempts made by one service process before
+                                  the region-shared Redis guard is consulted.
+                                maximum: 1000000
+                                minimum: 1
+                                type: integer
+                              maxInFlight:
+                                default: 512
+                                description: |-
+                                  MaxInFlight bounds requests concurrently executing in one service
+                                  process.
+                                maximum: 1000000
+                                minimum: 1
+                                type: integer
+                              requestsPerSecond:
+                                default: 100
+                                maximum: 1000000
+                                minimum: 1
+                                type: integer
+                            type: object
                           proxyTimeout:
                             default: 10s
                             type: string
-                          rateLimitBurst:
-                            default: 200
-                            type: integer
-                          rateLimitCleanupInterval:
-                            default: 10m
-                            type: string
-                          rateLimitRps:
-                            default: 100
-                            description: Rate limiting
-                            type: integer
                           schedulerEnabled:
                             type: boolean
                           schedulerUrl:
@@ -4444,6 +4739,29 @@ spec:
                           logLevel:
                             default: info
                             type: string
+                          platformHandshakeTimeout:
+                            default: 10s
+                            description: |-
+                              PlatformHandshakeTimeout bounds how long one unauthenticated client may
+                              occupy a handshake slot.
+                            type: string
+                          platformMaxConcurrentChannelsPerConnection:
+                            default: 16
+                            description: |-
+                              PlatformMaxConcurrentChannelsPerConnection bounds active session
+                              channels in one SSH connection. This guard is independent from Team
+                              Quota.
+                            maximum: 256
+                            minimum: 1
+                            type: integer
+                          platformMaxConcurrentHandshakes:
+                            default: 128
+                            description: |-
+                              PlatformMaxConcurrentHandshakes bounds unauthenticated handshakes in one
+                              ssh-gateway process. This is a platform overload guard, not Team Quota.
+                            maximum: 65536
+                            minimum: 1
+                            type: integer
                           resumePollInterval:
                             default: 500ms
                             type: string
@@ -4457,6 +4775,10 @@ spec:
                             default: 2222
                             type: integer
                         type: object
+                        x-kubernetes-validations:
+                        - message: platformHandshakeTimeout must be positive
+                          rule: '!has(self.platformHandshakeTimeout) || duration(self.platformHandshakeTimeout)
+                            > duration(''0s'')'
                       enabled:
                         default: false
                         description: Enabled enables or disables the service
@@ -4808,13 +5130,6 @@ spec:
                       logSizeLimit:
                         default: 1Gi
                         type: string
-                      maxBytesPerSecond:
-                        default: 1073741824
-                        format: int64
-                        type: integer
-                      maxOpsPerSecond:
-                        default: 10000
-                        type: integer
                       metricsEnabled:
                         default: true
                         type: boolean
@@ -4909,6 +5224,184 @@ spec:
                     - gcs
                     type: string
                 type: object
+              teamQuota:
+                description: |-
+                  TeamQuota configures region-level defaults and enforcement behavior used
+                  to keep a single team from exhausting shared system resources.
+                properties:
+                  defaults:
+                    description: |-
+                      Defaults is the complete set of fallback policies for teams without an
+                      override for the same key. It is required on the region policy owner and
+                      must be omitted from consumer-only resources.
+                    items:
+                      description: |-
+                        TeamQuotaPolicyConfig defines one region-level default team quota policy.
+                        Capacity and concurrency policies use limit. Rate policies use tokens,
+                        interval, and burst.
+                        Exact whole-millisecond validation remains in the operator plan and runtime
+                        because expressing that conversion in CRD CEL exceeds API server cost limits.
+                      properties:
+                        burst:
+                          description: |-
+                            Burst is the maximum number of accumulated tokens. It is required for
+                            rate policies and must be at least tokens.
+                          format: int64
+                          maximum: 9007199254740991
+                          minimum: 1
+                          type: integer
+                        interval:
+                          description: |-
+                            Interval is the token replenishment interval. It is required for rate
+                            policies, must be between 1ms and 1h, and must use whole milliseconds.
+                          maxLength: 32
+                          type: string
+                        key:
+                          description: Key identifies the resource protected by this
+                            policy.
+                          enum:
+                          - sandbox_identity_count
+                          - sandbox_runtime_count
+                          - sandbox_cpu_millicores
+                          - sandbox_memory_bytes
+                          - sandbox_ephemeral_storage_bytes
+                          - volume_storage_bytes
+                          - snapshot_storage_bytes
+                          - rootfs_storage_bytes
+                          - template_image_storage_bytes
+                          - storage_object_count
+                          - control_plane_object_count
+                          - active_connection_count
+                          - active_request_count
+                          - api_requests
+                          - sandbox_service_requests
+                          - sandbox_starts
+                          - network_operations
+                          - network_ingress_bytes
+                          - network_egress_bytes
+                          - storage_operations
+                          - observability_ingest_bytes
+                          type: string
+                        kind:
+                          description: |-
+                            Kind selects capacity accounting, live concurrency, or token-bucket rate
+                            enforcement.
+                          enum:
+                          - capacity
+                          - concurrency
+                          - rate
+                          type: string
+                        limit:
+                          description: |-
+                            Limit is required for capacity and concurrency policies and must be
+                            omitted for rate policies. Concurrency limits must fit Redis's exact
+                            integer range.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        tokens:
+                          description: |-
+                            Tokens is the number of tokens replenished every interval. It is required
+                            for rate policies.
+                          format: int64
+                          maximum: 9007199254740991
+                          minimum: 1
+                          type: integer
+                      required:
+                      - key
+                      - kind
+                      type: object
+                      x-kubernetes-validations:
+                      - message: quota key and kind do not match
+                        rule: 'self.key in [''sandbox_identity_count'', ''sandbox_runtime_count'',
+                          ''sandbox_cpu_millicores'', ''sandbox_memory_bytes'', ''sandbox_ephemeral_storage_bytes'',
+                          ''volume_storage_bytes'', ''snapshot_storage_bytes'', ''rootfs_storage_bytes'',
+                          ''template_image_storage_bytes'', ''storage_object_count'',
+                          ''control_plane_object_count''] ? self.kind == ''capacity''
+                          : self.key in [''active_connection_count'', ''active_request_count'']
+                          ? self.kind == ''concurrency'' : self.kind == ''rate'''
+                      - message: capacity and concurrency policies require only limit;
+                          rate policies require tokens, interval, and burst
+                        rule: 'self.kind in [''capacity'', ''concurrency''] ? has(self.limit)
+                          && !has(self.tokens) && !has(self.interval) && !has(self.burst)
+                          : !has(self.limit) && has(self.tokens) && has(self.interval)
+                          && has(self.burst)'
+                      - message: concurrency limit exceeds the exact Redis integer
+                          range
+                        rule: self.kind != 'concurrency' || !has(self.limit) || self.limit
+                          <= 9007199254740991
+                      - message: rate policy burst must be greater than or equal to
+                          tokens
+                        rule: self.kind != 'rate' || !has(self.tokens) || !has(self.burst)
+                          || self.burst >= self.tokens
+                      - message: rate policy interval must be between 1ms and 1h
+                        rule: self.kind != 'rate' || !has(self.interval) || (duration(self.interval)
+                          >= duration('1ms') && duration(self.interval) <= duration('1h'))
+                    maxItems: 21
+                    minItems: 21
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - key
+                    x-kubernetes-list-type: map
+                  distributedEnforcement:
+                    default: {}
+                    description: |-
+                      DistributedEnforcement configures rate-policy lookup and live-concurrency
+                      lease behavior. Redis connection details are derived from spec.redis.
+                    properties:
+                      leaseTtl:
+                        default: 15s
+                        description: |-
+                          LeaseTTL bounds crash leakage for a concurrency member and must use
+                          whole milliseconds.
+                        type: string
+                      policyCacheTtl:
+                        default: 5s
+                        description: PolicyCacheTTL bounds how long an enforcer may
+                          cache an effective policy.
+                        type: string
+                      renewInterval:
+                        default: 5s
+                        description: |-
+                          RenewInterval is the heartbeat period for an active concurrency lease
+                          and must use whole milliseconds.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: policyCacheTtl must be non-negative
+                      rule: '!has(self.policyCacheTtl) || duration(self.policyCacheTtl)
+                        >= duration(''0s'')'
+                    - message: leaseTtl must be positive
+                      rule: '!has(self.leaseTtl) || duration(self.leaseTtl) > duration(''0s'')'
+                    - message: renewInterval must be positive
+                      rule: '!has(self.renewInterval) || duration(self.renewInterval)
+                        > duration(''0s'')'
+                    - message: renewInterval doubled must be less than leaseTtl
+                      rule: '!has(self.renewInterval) || !has(self.leaseTtl) || duration(self.renewInterval)
+                        + duration(self.renewInterval) < duration(self.leaseTtl)'
+                  stateId:
+                    description: |-
+                      StateID is required on consumer-only resources and must match the region
+                      owner's status.teamQuota.stateId. A region owner normally omits this
+                      field so the operator generates a fresh UUID v4 and persists it in
+                      status. Set it on a new owner only when recovering the same retained
+                      PostgreSQL and Redis state plane; after status is initialized, a
+                      different value is rejected.
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: when configured, defaults must contain every known team
+                    quota key exactly once
+                  rule: '!has(self.defaults) || [''sandbox_identity_count'', ''sandbox_runtime_count'',
+                    ''sandbox_cpu_millicores'', ''sandbox_memory_bytes'', ''sandbox_ephemeral_storage_bytes'',
+                    ''volume_storage_bytes'', ''snapshot_storage_bytes'', ''rootfs_storage_bytes'',
+                    ''template_image_storage_bytes'', ''storage_object_count'', ''control_plane_object_count'',
+                    ''active_connection_count'', ''active_request_count'', ''api_requests'',
+                    ''sandbox_service_requests'', ''sandbox_starts'', ''network_operations'',
+                    ''network_ingress_bytes'', ''network_egress_bytes'', ''storage_operations'',
+                    ''observability_ingest_bytes''].all(k, self.defaults.exists(p,
+                    p.key == k))'
             type: object
           status:
             description: Sandbox0InfraStatus defines the observed state of Sandbox0Infra
@@ -5110,6 +5603,21 @@ spec:
                   - name
                   type: object
                 type: array
+              teamQuota:
+                description: |-
+                  TeamQuota contains the region policy owner's create-once Team Quota
+                  state-plane identity. Consumer-only resources do not populate it.
+                properties:
+                  stateId:
+                    description: |-
+                      StateID is generated once by the operator, or initialized from the
+                      owner's explicit recovery value, and is copied to every consumer-only
+                      resource in the region.
+                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
+                    type: string
+                required:
+                - stateId
+                type: object
             type: object
         type: object
     served: true

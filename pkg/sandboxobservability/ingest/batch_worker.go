@@ -17,6 +17,7 @@ const shutdownFlushTimeout = 5 * time.Second
 
 type batchWorker[T any] struct {
 	insertBatch   func(context.Context, []T) error
+	groupKey      func(T) string
 	cfg           Config
 	queue         chan T
 	insertedCount atomic.Uint64
@@ -25,6 +26,14 @@ type batchWorker[T any] struct {
 }
 
 func newBatchWorker[T any](insertBatch func(context.Context, []T) error, cfg Config) (*batchWorker[T], error) {
+	return newGroupedBatchWorker(insertBatch, nil, cfg)
+}
+
+func newGroupedBatchWorker[T any](
+	insertBatch func(context.Context, []T) error,
+	groupKey func(T) string,
+	cfg Config,
+) (*batchWorker[T], error) {
 	if insertBatch == nil {
 		return nil, fmt.Errorf("insert batch function is nil")
 	}
@@ -34,6 +43,7 @@ func newBatchWorker[T any](insertBatch func(context.Context, []T) error, cfg Con
 	}
 	return &batchWorker[T]{
 		insertBatch: insertBatch,
+		groupKey:    groupKey,
 		cfg:         normalized,
 		queue:       make(chan T, normalized.QueueSize),
 	}, nil
@@ -63,12 +73,29 @@ func (w *batchWorker[T]) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	batch := make([]T, 0, w.cfg.BatchSize)
+	batchGroup := ""
 	flush := func(flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
 		w.flushBatch(flushCtx, batch)
 		batch = make([]T, 0, w.cfg.BatchSize)
+		batchGroup = ""
+	}
+	appendItem := func(flushCtx context.Context, item T) {
+		if w.groupKey != nil {
+			itemGroup := w.groupKey(item)
+			if len(batch) > 0 && itemGroup != batchGroup {
+				flush(flushCtx)
+			}
+			if len(batch) == 0 {
+				batchGroup = itemGroup
+			}
+		}
+		batch = append(batch, item)
+		if len(batch) >= w.cfg.BatchSize {
+			flush(flushCtx)
+		}
 	}
 
 	for {
@@ -78,10 +105,7 @@ func (w *batchWorker[T]) Run(ctx context.Context) {
 			for {
 				select {
 				case item := <-w.queue:
-					batch = append(batch, item)
-					if len(batch) >= w.cfg.BatchSize {
-						flush(shutdownCtx)
-					}
+					appendItem(shutdownCtx, item)
 				default:
 					flush(shutdownCtx)
 					cancel()
@@ -89,10 +113,7 @@ func (w *batchWorker[T]) Run(ctx context.Context) {
 				}
 			}
 		case item := <-w.queue:
-			batch = append(batch, item)
-			if len(batch) >= w.cfg.BatchSize {
-				flush(ctx)
-			}
+			appendItem(ctx, item)
 		case <-ticker.C:
 			flush(ctx)
 		}

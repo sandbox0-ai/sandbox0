@@ -14,6 +14,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	servicemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/service/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
 const sandboxStoreSchemaName = "manager"
@@ -22,6 +24,12 @@ var ErrSandboxRecordNotFound = errors.New("sandbox record not found")
 
 const (
 	SandboxStatusDeleted = "deleted"
+
+	sandboxHistoryRetention        = 24 * time.Hour
+	maxTerminalLifecycleTxns       = 32
+	maxDeletedSandboxesPerTeam     = 4096
+	lifecycleHistoryPruneBatchSize = 256
+	deletedSandboxPruneBatchSize   = 4096
 )
 
 // SandboxRecord is the durable sandbox identity and configuration.
@@ -47,6 +55,7 @@ type SandboxRecord struct {
 	ExpiresAt            time.Time
 	HardExpiresAt        time.Time
 	DeletedAt            time.Time
+	CleanupCompletedAt   time.Time
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 }
@@ -165,6 +174,7 @@ type SandboxStore interface {
 	GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error)
 	ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error)
 	MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error
+	MarkSandboxCleanupCompleted(ctx context.Context, sandboxID string, completedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
 	GetLatestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error)
 	WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error
@@ -236,9 +246,10 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			cluster_id, status, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
 			webhook_state_volume_id, owner_kind,
-			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
+			claimed_at, expires_at, hard_expires_at, deleted_at,
+			cleanup_completed_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, COALESCE($22, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, COALESCE($23, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -260,12 +271,14 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			expires_at = EXCLUDED.expires_at,
 			hard_expires_at = EXCLUDED.hard_expires_at,
 			deleted_at = EXCLUDED.deleted_at,
+			cleanup_completed_at = EXCLUDED.cleanup_completed_at,
 			updated_at = NOW()
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
-		record.ClusterID, record.Status, configJSON, mountsJSON, specJSON,
+		naming.ClusterIDOrDefault(&record.ClusterID), record.Status, configJSON, mountsJSON, specJSON,
 		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
 		strings.TrimSpace(record.WebhookStateVolumeID), strings.TrimSpace(record.OwnerKind),
-		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt))
+		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt),
+		nullableTime(record.DeletedAt), nullableTime(record.CleanupCompletedAt), nullableTime(record.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
 	}
@@ -304,6 +317,86 @@ func (s *PGSandboxStore) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate sandboxes: %w", err)
+	}
+	return records, nil
+}
+
+// ListTeamQuotaSandboxRecords returns live durable identities owned by one
+// cluster for startup quota adoption.
+func (s *PGSandboxStore) ListTeamQuotaSandboxRecords(
+	ctx context.Context,
+	clusterID string,
+) ([]*SandboxRecord, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, sandboxRecordSelectSQL()+`
+		WHERE (
+				cluster_id = $1
+				OR ($1 = $2 AND cluster_id = '')
+			)
+			AND deleted_at IS NULL
+		ORDER BY created_at ASC
+	`, naming.ClusterIDOrDefault(&clusterID), naming.DefaultClusterID)
+	if err != nil {
+		return nil, fmt.Errorf("list team quota sandbox records: %w", err)
+	}
+	defer rows.Close()
+	var records []*SandboxRecord
+	for rows.Next() {
+		record, err := scanSandboxRecordRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate team quota sandbox records: %w", err)
+	}
+	return records, nil
+}
+
+// ListPendingDeletedSandboxes pages through deletion tombstones that still
+// require an authoritative external-cleanup proof from their owning cluster.
+func (s *PGSandboxStore) ListPendingDeletedSandboxes(
+	ctx context.Context,
+	clusterID string,
+	afterSandboxID string,
+	limit int,
+) ([]*SandboxRecord, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, sandboxRecordSelectSQL()+`
+		WHERE (
+				cluster_id = $1
+				OR ($1 = $5 AND cluster_id = '')
+			)
+			AND status = $2
+			AND deleted_at IS NOT NULL
+			AND cleanup_completed_at IS NULL
+			AND sandbox_id > $3
+		ORDER BY sandbox_id
+		LIMIT $4
+	`, naming.ClusterIDOrDefault(&clusterID), SandboxStatusDeleted,
+		strings.TrimSpace(afterSandboxID), limit, naming.DefaultClusterID)
+	if err != nil {
+		return nil, fmt.Errorf("list pending deleted sandboxes: %w", err)
+	}
+	defer rows.Close()
+	var records []*SandboxRecord
+	for rows.Next() {
+		record, err := scanSandboxRecordRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending deleted sandboxes: %w", err)
 	}
 	return records, nil
 }
@@ -393,11 +486,20 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 		return fmt.Errorf("begin mark sandbox deleted tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var teamID string
+	if err := tx.QueryRow(ctx, `
+		SELECT team_id
+		FROM manager.sandboxes
+		WHERE sandbox_id = $1
+		FOR UPDATE
+	`, sandboxID).Scan(&teamID); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("lock sandbox for deletion: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET status = $2,
-			current_pod_name = '',
-			current_pod_namespace = '',
 			deleted_at = $3,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
@@ -414,6 +516,9 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
 	`, sandboxID, SandboxLifecyclePhaseAborted, "sandbox deleted"); err != nil {
 		return fmt.Errorf("abort sandbox lifecycle txns for deleted sandbox: %w", err)
+	}
+	if err := pruneSandboxLifecycleHistory(ctx, tx, sandboxID); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `
 		WITH removed AS (
@@ -450,6 +555,87 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit mark sandbox deleted tx: %w", err)
+	}
+	return nil
+}
+
+// MarkSandboxCleanupCompleted records the proof that the runtime is absent and
+// every synchronous external cleanup phase has completed. Only rows carrying
+// this fence are eligible for bounded hard-deletion.
+func (s *PGSandboxStore) MarkSandboxCleanupCompleted(
+	ctx context.Context,
+	sandboxID string,
+	completedAt time.Time,
+) error {
+	if s == nil || s.pool == nil || strings.TrimSpace(sandboxID) == "" {
+		return nil
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin sandbox cleanup completion tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var teamID string
+	if err := tx.QueryRow(ctx, `
+		SELECT team_id
+		FROM manager.sandboxes
+		WHERE sandbox_id = $1
+	`, sandboxID).Scan(&teamID); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("load sandbox cleanup team: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock(
+			hashtextextended('manager:sandbox-history:' || $1, 0)
+		)
+	`, teamID); err != nil {
+		return fmt.Errorf("lock team sandbox history: %w", err)
+	}
+
+	var lockedTeamID string
+	if err := tx.QueryRow(ctx, `
+		SELECT team_id
+		FROM manager.sandboxes
+		WHERE sandbox_id = $1
+		FOR UPDATE
+	`, sandboxID).Scan(&lockedTeamID); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("lock sandbox cleanup completion: %w", err)
+	}
+	if lockedTeamID != teamID {
+		return fmt.Errorf(
+			"sandbox %s team changed from %s to %s during cleanup completion",
+			sandboxID,
+			teamID,
+			lockedTeamID,
+		)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET cleanup_completed_at = COALESCE(cleanup_completed_at, $2),
+			current_pod_namespace = '',
+			current_pod_name = '',
+			updated_at = NOW()
+		WHERE sandbox_id = $1
+			AND status = $3
+			AND deleted_at IS NOT NULL
+	`, sandboxID, completedAt, SandboxStatusDeleted); err != nil {
+		return fmt.Errorf("mark sandbox cleanup completed: %w", err)
+	}
+	if err := pruneSandboxLifecycleHistory(ctx, tx, sandboxID); err != nil {
+		return err
+	}
+	if err := pruneDeletedSandboxHistory(ctx, tx, teamID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit sandbox cleanup completion: %w", err)
 	}
 	return nil
 }
@@ -554,6 +740,12 @@ func (s *PGSandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, 
 
 type sandboxStoreTx struct {
 	tx pgx.Tx
+}
+
+// TeamQuotaTx exposes the caller-owned PostgreSQL transaction so lifecycle
+// state and quota transitions can commit atomically.
+func (t sandboxStoreTx) TeamQuotaTx() pgx.Tx {
+	return t.tx
 }
 
 func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error {
@@ -785,7 +977,15 @@ func (t sandboxStoreTx) CommitLifecycleTxn(ctx context.Context, txnID, preparedH
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("active lifecycle txn %s not found", txnID)
 	}
-	return nil
+	var sandboxID string
+	if err := t.tx.QueryRow(ctx, `
+		SELECT sandbox_id
+		FROM manager.sandbox_lifecycle_txns
+		WHERE txn_id = $1
+	`, txnID).Scan(&sandboxID); err != nil {
+		return fmt.Errorf("load committed lifecycle sandbox: %w", err)
+	}
+	return pruneSandboxLifecycleHistory(ctx, t.tx, sandboxID)
 }
 
 func (t sandboxStoreTx) AbortLifecycleTxn(ctx context.Context, txnID, reason string) error {
@@ -808,7 +1008,15 @@ func (t sandboxStoreTx) AbortLifecycleTxn(ctx context.Context, txnID, reason str
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("active lifecycle txn %s not found", txnID)
 	}
-	return nil
+	var sandboxID string
+	if err := t.tx.QueryRow(ctx, `
+		SELECT sandbox_id
+		FROM manager.sandbox_lifecycle_txns
+		WHERE txn_id = $1
+	`, txnID).Scan(&sandboxID); err != nil {
+		return fmt.Errorf("load aborted lifecycle sandbox: %w", err)
+	}
+	return pruneSandboxLifecycleHistory(ctx, t.tx, sandboxID)
 }
 
 func (t sandboxStoreTx) UpsertSandbox(ctx context.Context, record *SandboxRecord) error {
@@ -821,7 +1029,8 @@ func sandboxRecordSelectSQL() string {
 			cluster_id, status, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
 			webhook_state_volume_id, owner_kind,
-			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
+			claimed_at, expires_at, hard_expires_at, deleted_at,
+			cleanup_completed_at, created_at, updated_at
 		FROM manager.sandboxes`
 }
 
@@ -1206,13 +1415,14 @@ func scanSandboxRecordRows(rows pgx.Rows) (*SandboxRecord, error) {
 func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error) {
 	var record SandboxRecord
 	var configJSON, mountsJSON, specJSON []byte
-	var claimedAt, expiresAt, hardExpiresAt, deletedAt *time.Time
+	var claimedAt, expiresAt, hardExpiresAt, deletedAt, cleanupCompletedAt *time.Time
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
 		&record.ClusterID, &record.Status, &configJSON, &mountsJSON, &specJSON,
 		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
 		&record.WebhookStateVolumeID, &record.OwnerKind,
-		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
+		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &cleanupCompletedAt,
+		&record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -1229,6 +1439,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	record.ExpiresAt = derefTime(expiresAt)
 	record.HardExpiresAt = derefTime(hardExpiresAt)
 	record.DeletedAt = derefTime(deletedAt)
+	record.CleanupCompletedAt = derefTime(cleanupCompletedAt)
 	return &record, nil
 }
 
@@ -1285,6 +1496,18 @@ func sandboxLifecyclePhaseActive(phase string) bool {
 }
 
 func marshalSandboxRecordJSON(record *SandboxRecord) ([]byte, []byte, []byte, error) {
+	if record == nil {
+		return nil, nil, nil, fmt.Errorf("sandbox record is required")
+	}
+	if err := ValidateClaimRequestSize(&ClaimRequest{
+		Config: &record.Config,
+		Mounts: record.Mounts,
+	}); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := templatepkg.ValidateTemplateSpecSize(&record.TemplateSpec); err != nil {
+		return nil, nil, nil, err
+	}
 	configJSON, err := json.Marshal(record.Config)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("marshal sandbox config: %w", err)

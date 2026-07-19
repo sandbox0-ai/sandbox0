@@ -6,10 +6,14 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 )
 
 // CreateUser creates a new user.
 func (r *Repository) CreateUser(ctx context.Context, user *User) error {
+	if err := validateUserForPersistence(user); err != nil {
+		return err
+	}
 	err := r.pool.QueryRow(ctx, `
 		INSERT INTO users (email, name, avatar_url, password_hash, email_verified, is_admin)
 		VALUES ($1, $2, $3, $4, $5, $6)
@@ -27,6 +31,13 @@ func (r *Repository) CreateUser(ctx context.Context, user *User) error {
 
 // CreateUserWithInitialTeam creates a user and an initial team in one transaction.
 func (r *Repository) CreateUserWithInitialTeam(ctx context.Context, user *User, teamName string, homeRegionID *string) (*Team, *TeamMember, error) {
+	if err := validateUserForPersistence(user); err != nil {
+		return nil, nil, err
+	}
+	initialTeam := &Team{Name: teamName, HomeRegionID: homeRegionID}
+	if err := validateTeamForPersistence(initialTeam); err != nil {
+		return nil, nil, err
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("begin tx: %w", err)
@@ -107,6 +118,9 @@ func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*User, e
 
 // UpdateUser updates a user.
 func (r *Repository) UpdateUser(ctx context.Context, user *User) error {
+	if err := validateUserForPersistence(user); err != nil {
+		return err
+	}
 	result, err := r.pool.Exec(ctx, `
 		UPDATE users
 		SET name = $2, avatar_url = $3,
@@ -124,6 +138,13 @@ func (r *Repository) UpdateUser(ctx context.Context, user *User) error {
 
 // UpdateUserPassword updates a user's password.
 func (r *Repository) UpdateUserPassword(ctx context.Context, userID, passwordHash string) error {
+	if err := validateIdentityFieldSize(
+		"password_hash",
+		passwordHash,
+		maxIdentityPasswordHashBytes,
+	); err != nil {
+		return err
+	}
 	result, err := r.pool.Exec(ctx, `
 		UPDATE users SET password_hash = $2 WHERE id = $1
 	`, userID, passwordHash)
@@ -144,6 +165,59 @@ func (r *Repository) DeleteUser(ctx context.Context, id string) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := lockSSHPublicKeyUser(ctx, tx, id); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id::text, COALESCE(team_id, '')
+		FROM user_ssh_public_keys
+		WHERE user_id = $1
+		ORDER BY team_id, id
+		FOR UPDATE
+	`, id)
+	if err != nil {
+		return fmt.Errorf("lock user ssh public keys: %w", err)
+	}
+	type sshKeyRelease struct {
+		keyID  string
+		teamID string
+		ref    teamquota.OperationRef
+	}
+	var releases []sshKeyRelease
+	for rows.Next() {
+		var release sshKeyRelease
+		if err := rows.Scan(&release.keyID, &release.teamID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan user ssh public key: %w", err)
+		}
+		releases = append(releases, release)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate user ssh public keys: %w", err)
+	}
+	rows.Close()
+	for i := range releases {
+		if releases[i].teamID == "" {
+			continue
+		}
+		releases[i].ref, err = teamquota.BeginControlPlaneObjectReleaseTx(
+			ctx,
+			r.teamQuotaStore,
+			tx,
+			teamquota.ControlPlaneObjectOwner(
+				releases[i].teamID,
+				teamquota.ControlPlaneOwnerKindSSHPublicKey,
+				releases[i].keyID,
+			),
+			"delete_ssh_public_key_with_user",
+			0,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
 	result, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete user: %w", err)
@@ -153,6 +227,14 @@ func (r *Repository) DeleteUser(ctx context.Context, id string) error {
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM user_ssh_public_keys WHERE user_id = $1`, id); err != nil {
 		return fmt.Errorf("delete user ssh public keys: %w", err)
+	}
+	for _, release := range releases {
+		if release.teamID == "" {
+			continue
+		}
+		if err := teamquota.ConfirmControlPlaneObjectReleaseTx(ctx, r.teamQuotaStore, tx, release.ref); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit tx: %w", err)

@@ -1,9 +1,15 @@
 # Team Deletion
 
-Team deletion is conservative. <code>DELETE /teams/{'{id}'}</code> first checks the current region for team-owned resources and returns `409 conflict` when resources still exist.
+Team deletion is conservative and region-coordinated. <code>DELETE /teams/{'{id}'}</code> first checks the current region for team-owned resources and returns `409 conflict` when resources still exist. It then atomically verifies that Team Quota has no live allocation or prepared transfer and writes a durable admission tombstone before deleting identity state.
 
 The conflict response includes `error.details.blocking_resources`, with one entry per category and a count. Clear those resources before retrying team deletion.
 
-Blocking categories include active sandbox records, scheduler templates and allocations, credential sources, egress credential bindings, API keys, team-scoped SSH public keys, sandbox volumes and snapshots, rootfs records, volume handoff state, team quota limits, and discovered non-metering tables with a `team_id` column. Team membership is removed by the final team delete once the preflight passes.
+Blocking categories include active sandbox records, scheduler templates and allocations, credential sources, egress credential bindings, API keys, team-scoped SSH public keys, sandbox volumes and snapshots, rootfs records, volume handoff state, live Team Quota allocations and transfers, and discovered non-metering tables with a `team_id` column. Team membership is removed by the final team delete once the preflight passes.
 
 Historical metering records are retained for usage truth and audit. They appear in `error.details.retained_resources` when present, but they do not block team deletion.
+
+The Team Quota tombstone is retained for at least the configured maximum accepted access-token lifetime plus a safety margin (with a one-hour minimum). In a federated regional gateway, `jwtAccessTokenTTL` is both the maximum accepted token lifetime and the retention input; it must be at least the lifetime issued by the global gateway. Cleanup also proves that the identity directory no longer contains the team and that no quota references remain under the PostgreSQL team lock. This bounds deleted-team metadata without allowing a stale JWT to recreate quota state. Policy and released-ledger cleanup is idempotent; if identity deletion fails, retrying the same request safely resumes the deletion.
+
+A self-team retry still passes ingress-byte admission while the request body is drained. Once the durable tombstone rejects normal API admission, only an empty, non-chunked `DELETE` may use the dedicated regional retry bucket and a bounded 16 KiB buffered response lane. Non-empty retries, missing retry controls, byte-admission failure, and oversized responses fail before the delete handler runs or are discarded with `503`. The platform overload guard also remains active.
+
+Global-gateway does not currently have a cross-region transaction that can acquire the home-region deletion lock. Its team deletion endpoint therefore returns `503 unavailable` instead of bypassing regional preflight. Fullmode deployments perform deletion through cluster-gateway. Multi-region deployments must keep team deletion disabled until home-region coordination is implemented.

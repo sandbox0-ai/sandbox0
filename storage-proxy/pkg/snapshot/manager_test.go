@@ -21,6 +21,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	storagequotatest "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota/testutil"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sirupsen/logrus"
 )
@@ -31,13 +32,35 @@ func newTestManager(repo *fakeRepo, volMgr volumeProvider) *Manager {
 		panic(err)
 	}
 	return &Manager{
-		repo:      repo,
-		volMgr:    volMgr,
-		config:    &config.StorageProxyConfig{DefaultClusterId: "test-cluster", CacheDir: cacheDir},
-		logger:    logrus.New(),
-		clusterID: "test-cluster",
-		podID:     "test-pod",
-		locks:     make(map[string]time.Time),
+		repo:         repo,
+		volMgr:       volMgr,
+		config:       &config.StorageProxyConfig{DefaultClusterId: "test-cluster", CacheDir: cacheDir},
+		logger:       logrus.New(),
+		clusterID:    "test-cluster",
+		podID:        "test-pod",
+		locks:        make(map[string]time.Time),
+		storageQuota: storagequotatest.NewService("test-cluster"),
+	}
+}
+
+func TestCreateSnapshotRejectsOversizedMetadataBeforeCatalogAccess(t *testing.T) {
+	manager := &Manager{}
+	for _, request := range []*CreateSnapshotRequest{
+		{
+			VolumeID: "volume-1",
+			TeamID:   "team-1",
+			Name:     strings.Repeat("n", MaxSnapshotNameBytes+1),
+		},
+		{
+			VolumeID:    "volume-1",
+			TeamID:      "team-1",
+			Name:        "snapshot",
+			Description: strings.Repeat("d", MaxSnapshotDescriptionBytes+1),
+		},
+	} {
+		if _, err := manager.CreateSnapshot(context.Background(), request); !errors.Is(err, ErrInvalidSnapshotMetadata) {
+			t.Fatalf("CreateSnapshot() error = %v, want ErrInvalidSnapshotMetadata", err)
+		}
 	}
 }
 
@@ -99,6 +122,22 @@ func (r *fakeRepo) CreateSandboxVolume(ctx context.Context, volume *db.SandboxVo
 
 func (r *fakeRepo) CreateSandboxVolumeTx(ctx context.Context, tx pgx.Tx, volume *db.SandboxVolume) error {
 	return r.CreateSandboxVolume(ctx, volume)
+}
+
+func (r *fakeRepo) ListSandboxVolumes(context.Context) ([]*db.SandboxVolume, error) {
+	volumes := make([]*db.SandboxVolume, 0, len(r.volumes))
+	for _, catalogVolume := range r.volumes {
+		volumes = append(volumes, catalogVolume)
+	}
+	return volumes, nil
+}
+
+func (r *fakeRepo) ListSnapshots(context.Context) ([]*db.Snapshot, error) {
+	snapshots := make([]*db.Snapshot, 0, len(r.snapshots))
+	for _, catalogSnapshot := range r.snapshots {
+		snapshots = append(snapshots, catalogSnapshot)
+	}
+	return snapshots, nil
 }
 
 func (r *fakeRepo) ListSnapshotsByVolume(ctx context.Context, volumeID string) ([]*db.Snapshot, error) {
@@ -1129,10 +1168,14 @@ func TestConfiguredMeteringRecorderRejectsTypedNil(t *testing.T) {
 
 func TestAppendStorageObservationIgnoresTypedNilMeteringRecorder(t *testing.T) {
 	var recorder *fakeMeteringRecorder
-	mgr := &Manager{}
+	mgr := &Manager{storageQuota: storagequotatest.NewService("test-cluster")}
 	mgr.SetMeteringRepository(recorder)
 
-	err := mgr.appendStorageObservation(context.Background(), &metering.StorageObservation{})
+	err := mgr.appendStorageObservation(context.Background(), &metering.StorageObservation{
+		SubjectType: metering.SubjectTypeVolume,
+		SubjectID:   "volume-1",
+		TeamID:      "team-1",
+	})
 	if err != nil {
 		t.Fatalf("appendStorageObservation() error = %v", err)
 	}

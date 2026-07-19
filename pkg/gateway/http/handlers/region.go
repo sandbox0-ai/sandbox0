@@ -13,6 +13,10 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	maxRegionRequestBodyBytes = 32 * 1024
+)
+
 type regionRepository interface {
 	ListRegions(ctx context.Context) ([]*tenantdir.Region, error)
 	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
@@ -69,6 +73,9 @@ func (h *RegionHandler) ListRegions(c *gin.Context) {
 
 // CreateRegion creates a new region.
 func (h *RegionHandler) CreateRegion(c *gin.Context) {
+	if !limitJSONRequestBody(c, "region create request body", maxRegionRequestBodyBytes) {
+		return
+	}
 	var req CreateRegionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid request body")
@@ -86,6 +93,12 @@ func (h *RegionHandler) CreateRegion(c *gin.Context) {
 		MeteringExportURL:  strings.TrimSpace(req.MeteringExportURL),
 		Enabled:            enabled,
 	}
+	if !limitStringResource(c, "region id", region.ID, tenantdir.MaxRegionIDBytes) ||
+		!limitStringResource(c, "region display name", region.DisplayName, tenantdir.MaxRegionDisplayNameBytes) ||
+		!limitStringResource(c, "regional gateway URL", region.RegionalGatewayURL, tenantdir.MaxRegionURLBytes) ||
+		!limitStringResource(c, "metering export URL", region.MeteringExportURL, tenantdir.MaxRegionURLBytes) {
+		return
+	}
 	if region.ID == "" || region.RegionalGatewayURL == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "region id and regional gateway url are required")
 		return
@@ -98,6 +111,9 @@ func (h *RegionHandler) CreateRegion(c *gin.Context) {
 	if err := h.repo.CreateRegion(c.Request.Context(), region); err != nil {
 		if errors.Is(err, tenantdir.ErrRegionAlreadyExists) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "region already exists")
+			return
+		}
+		if writeResourceTooLarge(c, err, "region") {
 			return
 		}
 		h.logger.Error("Failed to create region", zap.Error(err))
@@ -124,6 +140,9 @@ func (h *RegionHandler) GetRegion(c *gin.Context) {
 
 // UpdateRegion updates a region directory entry.
 func (h *RegionHandler) UpdateRegion(c *gin.Context) {
+	if !limitJSONRequestBody(c, "region update request body", maxRegionRequestBodyBytes) {
+		return
+	}
 	region, err := h.repo.GetRegion(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		if errors.Is(err, tenantdir.ErrRegionNotFound) {
@@ -152,6 +171,11 @@ func (h *RegionHandler) UpdateRegion(c *gin.Context) {
 	if req.Enabled != nil {
 		region.Enabled = *req.Enabled
 	}
+	if !limitStringResource(c, "region display name", region.DisplayName, tenantdir.MaxRegionDisplayNameBytes) ||
+		!limitStringResource(c, "regional gateway URL", region.RegionalGatewayURL, tenantdir.MaxRegionURLBytes) ||
+		!limitStringResource(c, "metering export URL", region.MeteringExportURL, tenantdir.MaxRegionURLBytes) {
+		return
+	}
 	if region.RegionalGatewayURL == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "regional gateway url is required")
 		return
@@ -160,6 +184,9 @@ func (h *RegionHandler) UpdateRegion(c *gin.Context) {
 	if err := h.repo.UpdateRegion(c.Request.Context(), region); err != nil {
 		if errors.Is(err, tenantdir.ErrRegionNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "region not found")
+			return
+		}
+		if writeResourceTooLarge(c, err, "region") {
 			return
 		}
 		h.logger.Error("Failed to update region", zap.Error(err))

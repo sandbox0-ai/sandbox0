@@ -1,6 +1,9 @@
 package teamresources
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestInventoryTracksBlockingResources(t *testing.T) {
 	inventory := &Inventory{TeamID: "team-1"}
@@ -25,8 +28,12 @@ func TestInventoryTracksBlockingResources(t *testing.T) {
 func TestRepositoryBlockingQueriesCoverTeamScopedStores(t *testing.T) {
 	repo := NewRepository(nil)
 	got := map[string]bool{}
+	var pendingCleanupSQL string
 	for _, query := range repo.blockingQueries() {
 		got[query.category] = true
+		if query.category == "sandbox_cleanup_pending" {
+			pendingCleanupSQL = query.sql
+		}
 	}
 
 	want := []string{
@@ -39,6 +46,7 @@ func TestRepositoryBlockingQueriesCoverTeamScopedStores(t *testing.T) {
 		"credential_source_versions",
 		"sandbox_egress_credential_bindings",
 		"sandboxes",
+		"sandbox_cleanup_pending",
 		"sandbox_lifecycle_transactions",
 		"sandbox_rootfs_states",
 		"sandbox_rootfs_heads",
@@ -62,11 +70,23 @@ func TestRepositoryBlockingQueriesCoverTeamScopedStores(t *testing.T) {
 		"sandbox_volume_sync_requests",
 		"sandbox_volume_sync_retention",
 		"sandbox_volume_sync_namespace_policy",
-		"team_quota_limits",
 	}
 	for _, category := range want {
 		if !got[category] {
 			t.Fatalf("missing blocking query category %q", category)
+		}
+	}
+	for category := range got {
+		if len(category) >= len("team_quota_") && category[:len("team_quota_")] == "team_quota_" {
+			t.Fatalf("quota-internal category %q must be checked by the atomic deletion lifecycle", category)
+		}
+	}
+	for _, predicate := range []string{
+		"deleted_at IS NOT NULL",
+		"cleanup_completed_at IS NULL",
+	} {
+		if !strings.Contains(pendingCleanupSQL, predicate) {
+			t.Fatalf("pending sandbox cleanup query %q is missing %q", pendingCleanupSQL, predicate)
 		}
 	}
 }

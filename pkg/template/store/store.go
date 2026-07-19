@@ -38,12 +38,21 @@ type TemplateBuildStore interface {
 	ClaimTemplateBuild(ctx context.Context, targetClusterID, workerID string, leaseDuration time.Duration) (*template.TemplateBuild, error)
 	RenewTemplateBuildLease(ctx context.Context, buildID, workerID string, leaseDuration time.Duration) error
 	MarkTemplateBuildCaptured(ctx context.Context, buildID, workerID, snapshotID string, captureMetadata json.RawMessage, capturedAt time.Time) error
-	PublishTemplateBuild(ctx context.Context, buildID, workerID string, spec v1alpha1.SandboxTemplateSpec, outputImage string) error
+	ReserveTemplateImageBuild(ctx context.Context, buildID, workerID, manifestDigest string, logicalSizeBytes int64) error
+	MarkTemplateImagePushStarted(ctx context.Context, buildID, workerID string) error
+	PublishTemplateBuild(ctx context.Context, buildID, workerID string, spec v1alpha1.SandboxTemplateSpec, outputImage, manifestDigest string, logicalSizeBytes int64) error
 	FailTemplateBuild(ctx context.Context, buildID, workerID, reason, message string) error
 	ReleaseTemplateBuild(ctx context.Context, buildID, workerID string, retryAt time.Time, lastError string) error
 	TemplateBuildCancelled(ctx context.Context, buildID string) (bool, error)
-	FinishTemplateBuild(ctx context.Context, buildID, workerID string) error
+	FinishTemplateBuild(ctx context.Context, buildID, workerID string, unpublishedImageDeleteConfirmed bool) error
 	CancelTemplateBuildAndDeleteTemplate(ctx context.Context, scope, teamID, templateID string) (bool, error)
+}
+
+// TemplateImageCleanupStore owns durable registry artifact deletion jobs.
+type TemplateImageCleanupStore interface {
+	ClaimTemplateImageCleanup(ctx context.Context, targetClusterID, workerID string, leaseDuration time.Duration) (*template.TemplateImageCleanup, error)
+	ReleaseTemplateImageCleanup(ctx context.Context, cleanupID, workerID string, retryAt time.Time, lastError string) error
+	FinishTemplateImageCleanup(ctx context.Context, cleanupID, workerID string) error
 }
 
 // TemplateBuildLifecycleStore terminates builds that can no longer capture

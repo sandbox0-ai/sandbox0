@@ -20,12 +20,13 @@ const (
 )
 
 var (
-	ErrSessionNotFound    = errors.New("session not found")
-	ErrSessionExists      = errors.New("session already exists")
-	ErrSessionNotRunning  = errors.New("session is not running")
-	ErrAttemptMismatch    = errors.New("session attempt mismatch")
-	ErrInputAlreadyExists = errors.New("input id was already used with different content")
-	ErrCursorExpired      = errors.New("event cursor expired")
+	ErrSessionNotFound      = errors.New("session not found")
+	ErrSessionExists        = errors.New("session already exists")
+	ErrSessionLimitExceeded = errors.New("sandbox session limit exceeded")
+	ErrSessionNotRunning    = errors.New("session is not running")
+	ErrAttemptMismatch      = errors.New("session attempt mismatch")
+	ErrInputAlreadyExists   = errors.New("input id was already used with different content")
+	ErrCursorExpired        = errors.New("event cursor expired")
 )
 
 type IOMode string

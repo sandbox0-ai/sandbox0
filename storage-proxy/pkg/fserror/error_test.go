@@ -57,3 +57,14 @@ func TestErrnoOfWrappedRawErrno(t *testing.T) {
 		t.Fatalf("ErrnoOf() = (%v, %v), want (%v, true)", got, ok, syscall.ENOTDIR)
 	}
 }
+
+func TestWrapPreservesTypedCauseAndCode(t *testing.T) {
+	cause := errors.New("quota unavailable")
+	err := Wrap(Unavailable, "storage quota unavailable", cause)
+	if CodeOf(err) != Unavailable {
+		t.Fatalf("CodeOf() = %v, want %v", CodeOf(err), Unavailable)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatal("Wrap() did not preserve typed cause")
+	}
+}

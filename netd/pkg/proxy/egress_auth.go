@@ -13,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota/activeconnections"
 )
 
 type egressAuthContext struct {
@@ -100,6 +101,26 @@ var errEgressAuthDirectiveUnsupported = errors.New("egress auth directives unsup
 var errEgressAuthMaterialUnavailable = errors.New("egress auth material unavailable")
 var errEgressAuthDirectiveInvalid = errors.New("egress auth directive invalid")
 var errEgressAuthStaleResolvedMaterial = errors.New("egress auth resolved material is older than known credential source version")
+
+// WithTeamNetworkQuota installs the mandatory region-shared operation and byte
+// quota enforcer for proxied network traffic.
+func WithTeamNetworkQuota(quota *TeamNetworkQuota) ServerOption {
+	return func(s *Server) {
+		if s != nil {
+			s.teamNetworkQuota = quota
+		}
+	}
+}
+
+// WithActiveConnectionQuota installs mandatory region-shared TCP and UDP
+// session leases.
+func WithActiveConnectionQuota(quota activeconnections.Quota) ServerOption {
+	return func(s *Server) {
+		if s != nil {
+			s.activeConnections = quota
+		}
+	}
+}
 
 func WithEgressAuthResolver(resolver egressAuthResolver) ServerOption {
 	return func(s *Server) {

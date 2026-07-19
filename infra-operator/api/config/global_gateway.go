@@ -64,35 +64,53 @@ type globalGatewayConfigYAML struct {
 	ServerWriteTimeout durationYAMLValue `yaml:"server_write_timeout"`
 	ServerIdleTimeout  durationYAMLValue `yaml:"server_idle_timeout"`
 
-	JWTSecret                string               `yaml:"jwt_secret"`
-	JWTPrivateKeyPEM         string               `yaml:"jwt_private_key_pem"`
-	JWTPublicKeyPEM          string               `yaml:"jwt_public_key_pem"`
-	JWTPrivateKeyFile        string               `yaml:"jwt_private_key_file"`
-	JWTPublicKeyFile         string               `yaml:"jwt_public_key_file"`
-	JWTIssuer                string               `yaml:"jwt_issuer"`
-	JWTAccessTokenTTL        durationYAMLValue    `yaml:"jwt_access_token_ttl"`
-	JWTRefreshTokenTTL       durationYAMLValue    `yaml:"jwt_refresh_token_ttl"`
-	RedisURL                 string               `yaml:"redis_url"`
-	RedisKeyPrefix           string               `yaml:"redis_key_prefix"`
-	RedisTimeout             durationYAMLValue    `yaml:"redis_timeout"`
-	RateLimitRPS             int                  `yaml:"rate_limit_rps"`
-	RateLimitBurst           int                  `yaml:"rate_limit_burst"`
-	RateLimitCleanupInterval durationYAMLValue    `yaml:"rate_limit_cleanup_interval"`
-	RateLimitBackend         string               `yaml:"rate_limit_backend"`
-	RateLimitRedisURL        string               `yaml:"rate_limit_redis_url"`
-	RateLimitRedisKeyPrefix  string               `yaml:"rate_limit_redis_key_prefix"`
-	RateLimitRedisTimeout    durationYAMLValue    `yaml:"rate_limit_redis_timeout"`
-	RateLimitFailOpen        bool                 `yaml:"rate_limit_fail_open"`
-	DefaultTeamName          string               `yaml:"default_team_name"`
-	BuiltInAuth              BuiltInAuthConfig    `yaml:"built_in_auth"`
-	OIDCProviders            []OIDCProviderConfig `yaml:"oidc_providers"`
-	OIDCStateTTL             durationYAMLValue    `yaml:"oidc_state_ttl"`
-	OIDCStateCleanupInterval durationYAMLValue    `yaml:"oidc_state_cleanup_interval"`
-	BaseURL                  string               `yaml:"base_url"`
-	RegionID                 string               `yaml:"region_id"`
-	PublicExposureEnabled    bool                 `yaml:"public_exposure_enabled"`
-	PublicRootDomain         string               `yaml:"public_root_domain"`
-	PublicRegionID           string               `yaml:"public_region_id"`
+	JWTSecret             string                    `yaml:"jwt_secret"`
+	JWTPrivateKeyPEM      string                    `yaml:"jwt_private_key_pem"`
+	JWTPublicKeyPEM       string                    `yaml:"jwt_public_key_pem"`
+	JWTPrivateKeyFile     string                    `yaml:"jwt_private_key_file"`
+	JWTPublicKeyFile      string                    `yaml:"jwt_public_key_file"`
+	JWTIssuer             string                    `yaml:"jwt_issuer"`
+	JWTAccessTokenTTL     durationYAMLValue         `yaml:"jwt_access_token_ttl"`
+	JWTRefreshTokenTTL    durationYAMLValue         `yaml:"jwt_refresh_token_ttl"`
+	RedisURL              string                    `yaml:"redis_url"`
+	RedisKeyPrefix        string                    `yaml:"redis_key_prefix"`
+	RedisTimeout          durationYAMLValue         `yaml:"redis_timeout"`
+	OverloadGuard         overloadGuardYAML         `yaml:"overload_guard"`
+	IdentityResourceGuard identityResourceGuardYAML `yaml:"identity_resource_guard"`
+	DefaultTeamName       string                    `yaml:"default_team_name"`
+	BuiltInAuth           BuiltInAuthConfig         `yaml:"built_in_auth"`
+	OIDCProviders         []OIDCProviderConfig      `yaml:"oidc_providers"`
+	OIDCStateTTL          durationYAMLValue         `yaml:"oidc_state_ttl"`
+	BaseURL               string                    `yaml:"base_url"`
+	RegionID              string                    `yaml:"region_id"`
+	PublicExposureEnabled bool                      `yaml:"public_exposure_enabled"`
+	PublicRootDomain      string                    `yaml:"public_root_domain"`
+	PublicRegionID        string                    `yaml:"public_region_id"`
+}
+
+type overloadGuardYAML struct {
+	RequestsPerSecond      int               `yaml:"requests_per_second"`
+	Burst                  int               `yaml:"burst"`
+	LocalRequestsPerSecond int               `yaml:"local_requests_per_second"`
+	LocalBurst             int               `yaml:"local_burst"`
+	MaxInFlight            int               `yaml:"max_in_flight"`
+	CleanupInterval        durationYAMLValue `yaml:"cleanup_interval"`
+	RedisURL               string            `yaml:"redis_url"`
+	RedisKeyPrefix         string            `yaml:"redis_key_prefix"`
+	RedisTimeout           durationYAMLValue `yaml:"redis_timeout"`
+}
+
+type identityResourceGuardYAML struct {
+	MaxTeamsOwnedPerUser          int               `yaml:"max_teams_owned_per_user"`
+	MaxMembersPerTeam             int               `yaml:"max_members_per_team"`
+	MaxTeamMembershipsPerUser     int               `yaml:"max_team_memberships_per_user"`
+	MaxLinkedIdentitiesPerUser    int               `yaml:"max_linked_identities_per_user"`
+	MaxActiveRefreshTokensPerUser int               `yaml:"max_active_refresh_tokens_per_user"`
+	MaxActiveWebLoginCodesPerUser int               `yaml:"max_active_web_login_codes_per_user"`
+	MaxActiveDeviceAuthSessions   int               `yaml:"max_active_device_auth_sessions"`
+	MaxPendingOIDCStates          int               `yaml:"max_pending_oidc_states"`
+	SessionCleanupInterval        durationYAMLValue `yaml:"session_cleanup_interval"`
+	SessionCleanupBatchSize       int               `yaml:"session_cleanup_batch_size"`
 }
 
 type durationYAMLValue string
@@ -182,12 +200,22 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	cfg.JWTIssuer = raw.JWTIssuer
 	cfg.RedisURL = raw.RedisURL
 	cfg.RedisKeyPrefix = raw.RedisKeyPrefix
-	cfg.RateLimitRPS = raw.RateLimitRPS
-	cfg.RateLimitBurst = raw.RateLimitBurst
-	cfg.RateLimitBackend = raw.RateLimitBackend
-	cfg.RateLimitRedisURL = raw.RateLimitRedisURL
-	cfg.RateLimitRedisKeyPrefix = raw.RateLimitRedisKeyPrefix
-	cfg.RateLimitFailOpen = raw.RateLimitFailOpen
+	cfg.OverloadGuard.RequestsPerSecond = raw.OverloadGuard.RequestsPerSecond
+	cfg.OverloadGuard.Burst = raw.OverloadGuard.Burst
+	cfg.OverloadGuard.LocalRequestsPerSecond = raw.OverloadGuard.LocalRequestsPerSecond
+	cfg.OverloadGuard.LocalBurst = raw.OverloadGuard.LocalBurst
+	cfg.OverloadGuard.MaxInFlight = raw.OverloadGuard.MaxInFlight
+	cfg.OverloadGuard.RedisURL = raw.OverloadGuard.RedisURL
+	cfg.OverloadGuard.RedisKeyPrefix = raw.OverloadGuard.RedisKeyPrefix
+	cfg.IdentityResourceGuard.MaxTeamsOwnedPerUser = raw.IdentityResourceGuard.MaxTeamsOwnedPerUser
+	cfg.IdentityResourceGuard.MaxMembersPerTeam = raw.IdentityResourceGuard.MaxMembersPerTeam
+	cfg.IdentityResourceGuard.MaxTeamMembershipsPerUser = raw.IdentityResourceGuard.MaxTeamMembershipsPerUser
+	cfg.IdentityResourceGuard.MaxLinkedIdentitiesPerUser = raw.IdentityResourceGuard.MaxLinkedIdentitiesPerUser
+	cfg.IdentityResourceGuard.MaxActiveRefreshTokensPerUser = raw.IdentityResourceGuard.MaxActiveRefreshTokensPerUser
+	cfg.IdentityResourceGuard.MaxActiveWebLoginCodesPerUser = raw.IdentityResourceGuard.MaxActiveWebLoginCodesPerUser
+	cfg.IdentityResourceGuard.MaxActiveDeviceAuthSessions = raw.IdentityResourceGuard.MaxActiveDeviceAuthSessions
+	cfg.IdentityResourceGuard.MaxPendingOIDCStates = raw.IdentityResourceGuard.MaxPendingOIDCStates
+	cfg.IdentityResourceGuard.SessionCleanupBatchSize = raw.IdentityResourceGuard.SessionCleanupBatchSize
 	cfg.DefaultTeamName = raw.DefaultTeamName
 	cfg.BuiltInAuth = raw.BuiltInAuth
 	cfg.OIDCProviders = raw.OIDCProviders
@@ -218,16 +246,20 @@ func applyGlobalGatewayYAML(cfg *GlobalGatewayConfig, raw globalGatewayConfigYAM
 	if err := applyOptionalDuration(&cfg.RedisTimeout, raw.RedisTimeout, "redis_timeout"); err != nil {
 		return err
 	}
-	if err := applyOptionalDuration(&cfg.RateLimitCleanupInterval, raw.RateLimitCleanupInterval, "rate_limit_cleanup_interval"); err != nil {
+	if err := applyOptionalDuration(&cfg.OverloadGuard.CleanupInterval, raw.OverloadGuard.CleanupInterval, "overload_guard.cleanup_interval"); err != nil {
 		return err
 	}
-	if err := applyOptionalDuration(&cfg.RateLimitRedisTimeout, raw.RateLimitRedisTimeout, "rate_limit_redis_timeout"); err != nil {
+	if err := applyOptionalDuration(&cfg.OverloadGuard.RedisTimeout, raw.OverloadGuard.RedisTimeout, "overload_guard.redis_timeout"); err != nil {
+		return err
+	}
+	if err := applyOptionalDuration(
+		&cfg.IdentityResourceGuard.SessionCleanupInterval,
+		raw.IdentityResourceGuard.SessionCleanupInterval,
+		"identity_resource_guard.session_cleanup_interval",
+	); err != nil {
 		return err
 	}
 	if err := applyOptionalDuration(&cfg.OIDCStateTTL, raw.OIDCStateTTL, "oidc_state_ttl"); err != nil {
-		return err
-	}
-	if err := applyOptionalDuration(&cfg.OIDCStateCleanupInterval, raw.OIDCStateCleanupInterval, "oidc_state_cleanup_interval"); err != nil {
 		return err
 	}
 

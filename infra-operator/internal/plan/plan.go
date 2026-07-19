@@ -3,7 +3,9 @@ package plan
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -13,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -200,6 +203,31 @@ func Compile(infra *infrav1alpha1.Sandbox0Infra) *InfraPlan {
 	return compiled
 }
 
+// TeamQuotaPolicyOwner reports whether this resource owns the region Team
+// Quota policy and state-plane identity.
+func (compiled *InfraPlan) TeamQuotaPolicyOwner() bool {
+	if compiled == nil {
+		return false
+	}
+	return teamQuotaPolicyOwnerEnabled(compiled.infra, compiled)
+}
+
+// EffectiveTeamQuotaConfig returns an isolated runtime copy of the Team Quota
+// configuration. A policy owner's create-once status identity is authoritative;
+// a consumer-only resource takes the identity from spec.
+func (compiled *InfraPlan) EffectiveTeamQuotaConfig() *infrav1alpha1.TeamQuotaConfig {
+	if compiled == nil || compiled.infra == nil || compiled.infra.Spec.TeamQuota == nil {
+		return nil
+	}
+	config := runtimeconfig.ResolveTeamQuotaSpec(compiled.infra)
+	if compiled.TeamQuotaPolicyOwner() &&
+		compiled.infra.Status.TeamQuota != nil &&
+		compiled.infra.Status.TeamQuota.StateID != "" {
+		config.StateID = compiled.infra.Status.TeamQuota.StateID
+	}
+	return config
+}
+
 func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableGlobalGateway := infrav1alpha1.IsGlobalGatewayEnabled(infra)
 	enableRegionalGateway := infrav1alpha1.IsRegionalGatewayEnabled(infra)
@@ -331,6 +359,10 @@ func compileSchedulerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPla
 	if svc.Config != nil {
 		schedulerPlan.Config = runtimeconfig.ToScheduler(svc.Config)
 	}
+	schedulerPlan.Config.RegionID = common.ResolveRegionID(infra)
+	if teamQuota := compiled.EffectiveTeamQuotaConfig(); teamQuota != nil {
+		schedulerPlan.Config.TeamQuotaStateID = teamQuota.StateID
+	}
 	if resolvedRegistry := registry.ResolveRegistryConfig(infra); resolvedRegistry != nil {
 		schedulerPlan.Config.RegistryPushRegistry = resolvedRegistry.PushRegistry
 		schedulerPlan.Config.RegistryPullRegistry = resolvedRegistry.PullRegistry
@@ -402,6 +434,8 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 				managerPlan.Config = runtimeconfig.ToManager(svc.Config)
 			}
 		}
+		managerPlan.Config.TeamQuotaDistributedEnforcement =
+			runtimeconfig.ToTeamQuotaDistributedEnforcement(compiled.EffectiveTeamQuotaConfig())
 		managerPlan.Replicas = managerReplicas(infra)
 		compileManagerRuntimeConfig(&managerPlan, infra)
 	}
@@ -554,6 +588,8 @@ func compileNetworkPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 		if runtimeConfig := infrav1alpha1.ResolveNetworkRuntimeConfig(infra); runtimeConfig != nil {
 			networkPlan.Config = runtimeconfig.ToNetd(runtimeConfig)
 		}
+		networkPlan.Config.TeamQuotaDistributedEnforcement =
+			runtimeconfig.ToTeamQuotaDistributedEnforcement(compiled.EffectiveTeamQuotaConfig())
 	}
 
 	if explicit := netdEgressAuthResolverURL(infra); explicit != "" {
@@ -576,6 +612,10 @@ func compileRegionalGatewayPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *In
 		plan.DefaultClusterGatewayURL = compiled.Services.ClusterGateway.URL
 	}
 	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.RegionalGateway == nil {
+		if infra != nil {
+			plan.Config.TeamQuota = runtimeconfig.ToTeamQuota(compiled.EffectiveTeamQuotaConfig())
+			runtimeconfig.SetTeamQuotaOwnerVersion(&plan.Config.TeamQuota, infra)
+		}
 		return plan
 	}
 
@@ -593,6 +633,8 @@ func compileRegionalGatewayPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *In
 	if svc.Config != nil {
 		plan.Config = runtimeconfig.ToRegionalGateway(svc.Config)
 	}
+	plan.Config.TeamQuota = runtimeconfig.ToTeamQuota(compiled.EffectiveTeamQuotaConfig())
+	runtimeconfig.SetTeamQuotaOwnerVersion(&plan.Config.TeamQuota, infra)
 	compileRegionalGatewayRuntimeConfig(&plan, infra, compiled)
 	return plan
 }
@@ -624,9 +666,7 @@ func compileRegionalGatewayRuntimeConfig(plan *RegionalGatewayPlan, infra *infra
 		cfg.SSHEndpointHost = sshHost
 		cfg.SSHEndpointPort = int(advertisedPort)
 	}
-	if strings.TrimSpace(infra.Spec.Region) != "" {
-		cfg.RegionID = infra.Spec.Region
-	}
+	cfg.RegionID = common.ResolveRegionID(infra)
 	if infra.Spec.PublicExposure != nil {
 		cfg.PublicExposureEnabled = infra.Spec.PublicExposure.Enabled
 		cfg.PublicRootDomain = infra.Spec.PublicExposure.RootDomain
@@ -702,8 +742,250 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	if infra.Spec.InitUser != nil && (compiled == nil || compiled.Components.EnableDatabase) && !initUserConsumerEnabled(infra) {
 		plan.FatalErrors = append(plan.FatalErrors, "initUser requires globalGateway, regionalGateway.authMode=self_hosted, or clusterGateway authMode public/both")
 	}
+	if publicIdentityOverloadGuardEnabled(infra, compiled) &&
+		(compiled == nil || !compiled.Components.EnableRedis) {
+		plan.FatalErrors = append(
+			plan.FatalErrors,
+			"public identity overload guard requires spec.redis type builtin or external",
+		)
+	}
+	teamQuotaOwner := teamQuotaPolicyOwnerEnabled(infra, compiled)
+	teamQuotaPostgresConsumer := teamQuotaPostgresConsumerEnabled(infra, compiled)
+	teamQuotaDistributedConsumer := teamQuotaDistributedConsumerEnabled(infra, compiled)
+	if teamQuotaOwner {
+		plan.FatalErrors = append(plan.FatalErrors, teamQuotaOwnerValidationErrors(infra.Spec.TeamQuota)...)
+	}
+	if teamQuotaPostgresConsumer {
+		plan.FatalErrors = append(
+			plan.FatalErrors,
+			teamQuotaStateIdentityValidationErrors(infra, teamQuotaOwner)...,
+		)
+	}
+	if teamQuotaDistributedConsumer {
+		plan.FatalErrors = append(plan.FatalErrors, teamQuotaDistributedValidationErrors(infra.Spec.TeamQuota)...)
+	}
+	if teamQuotaPostgresConsumer && common.ResolveRegionID(infra) == "" {
+		plan.FatalErrors = append(
+			plan.FatalErrors,
+			"Team Quota consumers require a non-empty region ID from spec.region or spec.publicExposure.regionId",
+		)
+	}
+	if teamQuotaPostgresConsumer && !teamQuotaOwner && infra.Spec.ControlPlane == nil {
+		plan.FatalErrors = append(
+			plan.FatalErrors,
+			"Team Quota consumers require a regional-gateway or fullmode cluster-gateway policy owner, or spec.controlPlane for an external region policy owner",
+		)
+	}
+	if teamQuotaPostgresConsumer && (compiled == nil || !compiled.Components.EnableDatabase) {
+		plan.FatalErrors = append(plan.FatalErrors, "Team Quota consumers require spec.database type builtin or external")
+	}
+	if teamQuotaPostgresConsumer &&
+		!teamQuotaOwner &&
+		infra.Spec.ControlPlane != nil &&
+		(infra.Spec.Database == nil || infra.Spec.Database.Type != infrav1alpha1.DatabaseTypeExternal) {
+		plan.FatalErrors = append(
+			plan.FatalErrors,
+			"consumer-only Team Quota services require spec.database.type external so they share the region PostgreSQL",
+		)
+	}
+	if teamQuotaDistributedConsumer && (compiled == nil || !compiled.Components.EnableRedis) {
+		plan.FatalErrors = append(plan.FatalErrors, "Team Quota distributed consumers require spec.redis type builtin or external")
+	}
+	if teamQuotaDistributedConsumer &&
+		!teamQuotaOwner &&
+		infra.Spec.ControlPlane != nil &&
+		(infra.Spec.Redis == nil || infra.Spec.Redis.Type != infrav1alpha1.RedisTypeExternal) {
+		plan.FatalErrors = append(
+			plan.FatalErrors,
+			"consumer-only distributed Team Quota services require spec.redis.type external so they share the region Redis",
+		)
+	}
 
 	return plan
+}
+
+func teamQuotaPolicyOwnerEnabled(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) bool {
+	if infra == nil || compiled == nil {
+		return false
+	}
+	if compiled.Components.EnableRegionalGateway {
+		return true
+	}
+	return compiled.Components.EnableClusterGateway &&
+		infra.Spec.ControlPlane == nil &&
+		clusterGatewayPublicAuthEnabled(clusterGatewayAuthMode(infra))
+}
+
+func teamQuotaPostgresConsumerEnabled(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) bool {
+	if infra == nil || compiled == nil {
+		return false
+	}
+	return teamQuotaDistributedConsumerEnabled(infra, compiled) ||
+		compiled.Components.EnableScheduler
+}
+
+func teamQuotaDistributedConsumerEnabled(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) bool {
+	if infra == nil || compiled == nil {
+		return false
+	}
+	if compiled.Components.EnableRegionalGateway ||
+		compiled.Components.EnableManager ||
+		compiled.Components.EnableSSHGateway ||
+		compiled.Components.EnableStorageRuntime ||
+		compiled.Components.EnableCtld ||
+		compiled.Components.EnableNetwork {
+		return true
+	}
+	return compiled.Components.EnableClusterGateway
+}
+
+func teamQuotaOwnerValidationErrors(config *infrav1alpha1.TeamQuotaConfig) []string {
+	requiredMessage := fmt.Sprintf(
+		"region Team Quota owner requires spec.teamQuota with one complete policy for all %d keys",
+		len(coreteamquota.Keys()),
+	)
+	if config == nil || len(config.Defaults) != len(coreteamquota.Keys()) {
+		return []string{requiredMessage}
+	}
+	seen := make(map[coreteamquota.Key]bool, len(config.Defaults))
+	for _, policy := range config.Defaults {
+		key := coreteamquota.Key(policy.Key)
+		if !coreteamquota.KnownKey(key) || seen[key] {
+			return []string{requiredMessage}
+		}
+		seen[key] = true
+		if err := validateTeamQuotaPolicy(policy); err != nil {
+			return []string{fmt.Sprintf("spec.teamQuota default policy %q is invalid: %v", policy.Key, err)}
+		}
+	}
+	for _, key := range coreteamquota.Keys() {
+		if !seen[key] {
+			return []string{requiredMessage}
+		}
+	}
+	return nil
+}
+
+func teamQuotaStateIdentityValidationErrors(
+	infra *infrav1alpha1.Sandbox0Infra,
+	policyOwner bool,
+) []string {
+	var validationErrors []string
+	config := infra.Spec.TeamQuota
+	if !policyOwner {
+		if config == nil || !validTeamQuotaStateID(config.StateID) {
+			validationErrors = append(
+				validationErrors,
+				"Team Quota consumers require spec.teamQuota.stateId to be a canonical UUID v4 copied from the region owner's status.teamQuota.stateId",
+			)
+		}
+		if config != nil && len(config.Defaults) != 0 {
+			validationErrors = append(
+				validationErrors,
+				"consumer-only Team Quota configuration must omit spec.teamQuota.defaults",
+			)
+		}
+		return validationErrors
+	}
+
+	statusStateID := ""
+	if infra.Status.TeamQuota != nil {
+		statusStateID = infra.Status.TeamQuota.StateID
+	}
+	if !validTeamQuotaStateID(statusStateID) {
+		validationErrors = append(
+			validationErrors,
+			"region Team Quota owner requires a canonical UUID v4 in status.teamQuota.stateId initialized by infra-operator",
+		)
+	}
+	if config != nil && config.StateID != "" {
+		if !validTeamQuotaStateID(config.StateID) {
+			validationErrors = append(
+				validationErrors,
+				"region Team Quota owner spec.teamQuota.stateId recovery input must be a canonical UUID v4",
+			)
+		} else if validTeamQuotaStateID(statusStateID) && config.StateID != statusStateID {
+			validationErrors = append(
+				validationErrors,
+				"region Team Quota owner spec.teamQuota.stateId recovery input must match the immutable status.teamQuota.stateId",
+			)
+		}
+	}
+	return validationErrors
+}
+
+func validTeamQuotaStateID(value string) bool {
+	parsed, err := uuid.Parse(value)
+	return err == nil &&
+		parsed.Version() == 4 &&
+		parsed.String() == value
+}
+
+func teamQuotaDistributedValidationErrors(config *infrav1alpha1.TeamQuotaConfig) []string {
+	if config == nil {
+		return nil
+	}
+	if config.DistributedEnforcement.PolicyCacheTTL.Duration < 0 {
+		return []string{"spec.teamQuota.distributedEnforcement.policyCacheTtl must be non-negative"}
+	}
+	leaseTTL := config.DistributedEnforcement.LeaseTTL.Duration
+	if leaseTTL == 0 {
+		leaseTTL = 15 * time.Second
+	}
+	renewInterval := config.DistributedEnforcement.RenewInterval.Duration
+	if renewInterval == 0 {
+		renewInterval = 5 * time.Second
+	}
+	if leaseTTL <= 0 {
+		return []string{"spec.teamQuota.distributedEnforcement.leaseTtl must be positive"}
+	}
+	if renewInterval <= 0 {
+		return []string{"spec.teamQuota.distributedEnforcement.renewInterval must be positive"}
+	}
+	if leaseTTL%time.Millisecond != 0 {
+		return []string{"spec.teamQuota.distributedEnforcement.leaseTtl must use whole milliseconds"}
+	}
+	if renewInterval%time.Millisecond != 0 {
+		return []string{"spec.teamQuota.distributedEnforcement.renewInterval must use whole milliseconds"}
+	}
+	if renewInterval > (leaseTTL-1)/2 {
+		return []string{"spec.teamQuota.distributedEnforcement.renewInterval doubled must be less than leaseTtl"}
+	}
+	return nil
+}
+
+func validateTeamQuotaPolicy(policy infrav1alpha1.TeamQuotaPolicyConfig) error {
+	corePolicy := coreteamquota.Policy{
+		Key:  coreteamquota.Key(policy.Key),
+		Kind: coreteamquota.Kind(policy.Kind),
+	}
+	switch corePolicy.Kind {
+	case coreteamquota.KindCapacity, coreteamquota.KindConcurrency:
+		if policy.Limit == nil {
+			return fmt.Errorf("%s policy requires limit", corePolicy.Kind)
+		}
+		corePolicy.Limit = *policy.Limit
+		if policy.Tokens != nil || policy.Interval != nil || policy.Burst != nil {
+			return fmt.Errorf("%s policy must not set rate fields", corePolicy.Kind)
+		}
+	case coreteamquota.KindRate:
+		if policy.Tokens == nil || policy.Interval == nil || policy.Burst == nil {
+			return fmt.Errorf("rate policy requires tokens, interval, and burst")
+		}
+		if policy.Limit != nil {
+			return fmt.Errorf("rate policy must not set limit")
+		}
+		intervalMillis, err := coreteamquota.RateIntervalMillis(policy.Interval.Duration)
+		if err != nil {
+			return err
+		}
+		corePolicy.Tokens = *policy.Tokens
+		corePolicy.IntervalMillis = intervalMillis
+		corePolicy.Burst = *policy.Burst
+	default:
+		return fmt.Errorf("unknown kind %q", policy.Kind)
+	}
+	return corePolicy.Validate()
 }
 
 func managerServicePortValidationErrors(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) []string {
@@ -981,6 +1263,17 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 			ErrorReason:    errorReason,
 		})
 	}
+	appendClusterGatewaySteps := func() {
+		if compiled.Components.EnableClusterGateway && compiled.Enterprise.ClusterGateway {
+			appendCheckStep("cluster-gateway-enterprise-license", infrav1alpha1.ConditionTypeClusterGatewayReady, "EnterpriseLicenseMissing")
+		}
+		if compiled.Components.EnableClusterGateway {
+			appendSuccessStep("cluster-gateway", infrav1alpha1.ConditionTypeClusterGatewayReady, "ClusterGatewayReady", "Internal gateway is ready", "ClusterGatewayFailed")
+		}
+	}
+	clusterGatewayOwnsTeamQuota := compiled.Components.EnableClusterGateway &&
+		!compiled.Components.EnableRegionalGateway &&
+		teamQuotaPolicyOwnerEnabled(compiled.infra, compiled)
 
 	if compiled.Validation.RequireControlPlanePublicKey {
 		appendCheckStep("control-plane-public-key", infrav1alpha1.ConditionTypeInternalAuthReady, "PublicKeySecretNotFound")
@@ -1030,6 +1323,11 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	if compiled.Components.EnableRegionalGateway {
 		appendSuccessStep("regional-gateway", infrav1alpha1.ConditionTypeRegionalGatewayReady, "RegionalGatewayReady", "Edge gateway is ready", "RegionalGatewayFailed")
 	}
+	if clusterGatewayOwnsTeamQuota {
+		// Fullmode cluster-gateway establishes the region state identity before
+		// validate-only data-plane and SSH consumers become ready.
+		appendClusterGatewaySteps()
+	}
 	if compiled.Components.EnableSSHGateway {
 		appendSuccessStep("ssh-gateway", infrav1alpha1.ConditionTypeSSHGatewayReady, "SSHGatewayReady", "SSH gateway is ready", "SSHGatewayFailed")
 	}
@@ -1044,11 +1342,8 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 		appendCheckStep("manager-rbac", infrav1alpha1.ConditionTypeManagerReady, "ManagerRBACFailed")
 		appendSuccessStep("manager", infrav1alpha1.ConditionTypeManagerReady, "ManagerReady", "Manager is ready", "ManagerFailed")
 	}
-	if compiled.Components.EnableClusterGateway && compiled.Enterprise.ClusterGateway {
-		appendCheckStep("cluster-gateway-enterprise-license", infrav1alpha1.ConditionTypeClusterGatewayReady, "EnterpriseLicenseMissing")
-	}
-	if compiled.Components.EnableClusterGateway {
-		appendSuccessStep("cluster-gateway", infrav1alpha1.ConditionTypeClusterGatewayReady, "ClusterGatewayReady", "Internal gateway is ready", "ClusterGatewayFailed")
+	if !clusterGatewayOwnsTeamQuota {
+		appendClusterGatewaySteps()
 	}
 	if compiled.Components.EnableStorageRuntime {
 		appendSuccessStep("storage-runtime-ready", infrav1alpha1.ConditionTypeStorageRuntimeReady, "StorageRuntimeReady", "Manager storage API is ready", "StorageRuntimeFailed")
@@ -1346,6 +1641,24 @@ func regionalGatewayAuthMode(infra *infrav1alpha1.Sandbox0Infra) string {
 		return defaultRegionalGatewayAuthMode
 	}
 	return mode
+}
+
+func publicIdentityOverloadGuardEnabled(
+	infra *infrav1alpha1.Sandbox0Infra,
+	compiled *InfraPlan,
+) bool {
+	if infra == nil || compiled == nil {
+		return false
+	}
+	if compiled.Components.EnableGlobalGateway {
+		return true
+	}
+	if compiled.Components.EnableRegionalGateway &&
+		regionalGatewayAuthMode(infra) != "federated_global" {
+		return true
+	}
+	return compiled.Components.EnableClusterGateway &&
+		clusterGatewayPublicAuthEnabled(clusterGatewayAuthMode(infra))
 }
 
 func initUserConsumerEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {

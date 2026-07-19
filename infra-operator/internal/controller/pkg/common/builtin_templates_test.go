@@ -134,7 +134,7 @@ func TestBuildBuiltinTemplateSpecAllowsFullSpecOverride(t *testing.T) {
 			DisplayName: "Custom",
 			MainContainer: templatev1alpha1.ContainerSpec{
 				Image: "example.com/custom:latest",
-				Resources: templatev1alpha1.ResourceQuota{
+				Resources: templatev1alpha1.SandboxResourceLimits{
 					CPU:    customCPU,
 					Memory: customMemory,
 				},

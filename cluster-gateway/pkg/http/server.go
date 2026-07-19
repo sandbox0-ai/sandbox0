@@ -25,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	gatewayteamquota "github.com/sandbox0-ai/sandbox0/pkg/gateway/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/teamresources"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
@@ -32,7 +33,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
+	coreteamquota "github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"go.uber.org/zap"
 )
 
@@ -41,6 +44,11 @@ type ServerOption func(*serverOptions)
 type serverOptions struct {
 	sandboxObservabilityRepo sandboxobservability.Repository
 	meteringReader           gatewayhandlers.MeteringReader
+	teamQuotaController      *gatewayteamquota.Controller
+	teamQuotaPolicyManager   coreteamquota.PolicyManager
+	publicOverloadGuard      *gatewaymiddleware.OverloadGuard
+	sandboxServiceAbuseGuard ratelimit.Limiter
+	apiKeyRepositoryFactory  func(*pgxpool.Pool) *gatewayapikey.Repository
 }
 
 func WithSandboxObservabilityRepository(repo sandboxobservability.Repository) ServerOption {
@@ -52,6 +60,44 @@ func WithSandboxObservabilityRepository(repo sandboxobservability.Repository) Se
 func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
 	return func(opts *serverOptions) {
 		opts.meteringReader = reader
+	}
+}
+
+// WithTeamQuotaController overrides Team Quota dependencies for tests.
+func WithTeamQuotaController(controller *gatewayteamquota.Controller) ServerOption {
+	return func(opts *serverOptions) {
+		opts.teamQuotaController = controller
+	}
+}
+
+// WithTeamQuotaPolicyManager supplies the serialized region policy owner used by
+// fullmode admin writes.
+func WithTeamQuotaPolicyManager(manager coreteamquota.PolicyManager) ServerOption {
+	return func(opts *serverOptions) {
+		opts.teamQuotaPolicyManager = manager
+	}
+}
+
+// WithPublicOverloadGuard overrides the public identity and exposure guard for tests.
+func WithPublicOverloadGuard(guard *gatewaymiddleware.OverloadGuard) ServerOption {
+	return func(opts *serverOptions) {
+		opts.publicOverloadGuard = guard
+	}
+}
+
+// WithSandboxServiceAbuseGuard overrides the distributed public-route guard
+// for tests.
+func WithSandboxServiceAbuseGuard(limiter ratelimit.Limiter) ServerOption {
+	return func(opts *serverOptions) {
+		opts.sandboxServiceAbuseGuard = limiter
+	}
+}
+
+func withAPIKeyRepositoryFactoryForTest(
+	factory func(*pgxpool.Pool) *gatewayapikey.Repository,
+) ServerOption {
+	return func(opts *serverOptions) {
+		opts.apiKeyRepositoryFactory = factory
 	}
 }
 
@@ -69,8 +115,12 @@ type Server struct {
 	compositeAuth                            *middleware.CompositeAuthMiddleware
 	publicIdentityRepo                       *gatewayidentity.Repository
 	publicAPIKeyRepo                         *gatewayapikey.Repository
-	rateLimiter                              *gatewaymiddleware.RateLimiter
-	externalLimiter                          *middleware.ExternalRateLimiter
+	ownsPublicAPIKeyRepo                     bool
+	teamQuotaController                      *gatewayteamquota.Controller
+	ownsTeamQuotaController                  bool
+	publicOverloadGuard                      *gatewaymiddleware.OverloadGuard
+	ownsPublicOverloadGuard                  bool
+	ownsSandboxServiceAbuseGuard             bool
 	publicBuiltin                            *gatewaybuiltin.Provider
 	publicOIDC                               *gatewayoidc.Manager
 	publicJWT                                *gatewayauthn.Issuer
@@ -85,7 +135,7 @@ type Server struct {
 	sandboxAuditEntitlements                 licensing.Entitlements
 	obsProvider                              *observability.Provider
 	httpClient                               *http.Client
-	sandboxServiceLimiter                    ratelimit.Limiter
+	sandboxServiceAbuseGuard                 ratelimit.Limiter
 	sandboxInternalCache                     sandboxInternalCache
 }
 
@@ -236,17 +286,34 @@ func NewServer(
 
 	var publicIdentityRepo *gatewayidentity.Repository
 	var publicAPIKeyRepo *gatewayapikey.Repository
+	publicAPIKeyRepositoryReady := false
 	var publicAuth *gatewaymiddleware.AuthMiddleware
 	var compositeAuth *middleware.CompositeAuthMiddleware
-	var rateLimiter *gatewaymiddleware.RateLimiter
-	var externalLimiter *middleware.ExternalRateLimiter
 	var publicBuiltin *gatewaybuiltin.Provider
 	var publicOIDC *gatewayoidc.Manager
 	var publicJWT *gatewayauthn.Issuer
 
 	if pool != nil {
-		publicIdentityRepo = gatewayidentity.NewRepository(pool)
-		publicAPIKeyRepo = gatewayapikey.NewRepository(pool)
+		identityOptions := []gatewayidentity.RepositoryOption(nil)
+		if publicAuthEnabled {
+			identityOptions = append(
+				identityOptions,
+				gatewayidentity.WithIdentityResourceGuard(public.IdentityResourceGuardLimits(cfg.IdentityResourceGuard)),
+			)
+		}
+		publicIdentityRepo = gatewayidentity.NewRepository(pool, identityOptions...)
+		apiKeyRepositoryFactory := options.apiKeyRepositoryFactory
+		if apiKeyRepositoryFactory == nil {
+			apiKeyRepositoryFactory = func(pool *pgxpool.Pool) *gatewayapikey.Repository {
+				return gatewayapikey.NewRepository(pool)
+			}
+		}
+		publicAPIKeyRepo = apiKeyRepositoryFactory(pool)
+		defer func() {
+			if !publicAPIKeyRepositoryReady && publicAPIKeyRepo != nil {
+				_ = publicAPIKeyRepo.Close()
+			}
+		}()
 	}
 
 	if publicAuthEnabled {
@@ -255,15 +322,15 @@ func NewServer(
 		}
 
 		edgeCfg := &config.GatewayConfig{
-			DefaultTeamName:          cfg.DefaultTeamName,
-			OIDCProviders:            cfg.OIDCProviders,
-			OIDCStateTTL:             cfg.OIDCStateTTL,
-			OIDCStateCleanupInterval: cfg.OIDCStateCleanupInterval,
-			BaseURL:                  cfg.BaseURL,
-			RegionID:                 cfg.RegionID,
-			PublicExposureEnabled:    cfg.PublicExposureEnabled,
-			PublicRootDomain:         cfg.PublicRootDomain,
-			PublicRegionID:           cfg.PublicRegionID,
+			DefaultTeamName:       cfg.DefaultTeamName,
+			IdentityResourceGuard: cfg.IdentityResourceGuard,
+			OIDCProviders:         cfg.OIDCProviders,
+			OIDCStateTTL:          cfg.OIDCStateTTL,
+			BaseURL:               cfg.BaseURL,
+			RegionID:              cfg.RegionID,
+			PublicExposureEnabled: cfg.PublicExposureEnabled,
+			PublicRootDomain:      cfg.PublicRootDomain,
+			PublicRegionID:        cfg.PublicRegionID,
 		}
 
 		builtinProvider := gatewaybuiltin.NewProvider(publicIdentityRepo, &cfg.BuiltInAuth, cfg.DefaultTeamName)
@@ -284,18 +351,18 @@ func NewServer(
 
 		publicAuth = gatewaymiddleware.NewAuthMiddleware(publicAPIKeyRepo, cfg.JWTSecret, jwtIssuer, logger)
 		compositeAuth = middleware.NewCompositeAuthMiddleware(authMiddleware, publicAuth, logger)
-		rateLimiter, err = gatewaymiddleware.NewRateLimiterWithConfig(context.Background(), cfg.RateLimitRPS, cfg.RateLimitBurst, gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig), logger)
-		if err != nil {
-			return nil, fmt.Errorf("create rate limiter: %w", err)
-		}
-		externalLimiter = middleware.NewExternalRateLimiter(rateLimiter)
 		publicBuiltin = builtinProvider
 		publicOIDC = oidcManager
 		publicJWT = jwtIssuer
 	}
 
 	meteringHandler := gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger)
-	observabilityOptions := []gatewayhandlers.SandboxObservabilityHandlerOption(nil)
+	observabilityOptions := []gatewayhandlers.SandboxObservabilityHandlerOption{
+		gatewayhandlers.WithSandboxObservabilityIngestPolicy(gatewayhandlers.SandboxObservabilityIngestPolicy{
+			RegionID:  cfg.RegionID,
+			ClusterID: cfg.ClusterID,
+		}),
+	}
 	if cfg.SandboxObservability.AuditEnabled {
 		observabilityOptions = append(observabilityOptions, gatewayhandlers.WithAuditIntegrityPolicy(gatewayhandlers.AuditIntegrityPolicy{
 			RegionID:        cfg.RegionID,
@@ -314,14 +381,82 @@ func NewServer(
 		if strings.TrimSpace(cfg.SandboxObservability.AuditSpoolDir) == "" {
 			return nil, fmt.Errorf("sandbox audit requires audit_spool_dir")
 		}
-		delivery, err = newAuditDelivery(cfg.SandboxObservability.AuditSpoolDir, auditWriter, logger, auditSigningPublicKey)
+		delivery, err = newAuditDeliveryWithLimits(
+			cfg.SandboxObservability.AuditSpoolDir,
+			auditWriter,
+			logger,
+			auditSigningPublicKey,
+			auditDeliveryLimitsFromConfig(cfg.SandboxObservability.AuditSpoolLimits),
+		)
 		if err != nil {
 			return nil, fmt.Errorf("initialize sandbox audit delivery: %w", err)
 		}
 	}
-	sandboxServiceLimiter, err := ratelimit.New(context.Background(), gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig))
-	if err != nil {
-		return nil, fmt.Errorf("create sandbox service rate limiter: %w", err)
+	teamQuotaController := options.teamQuotaController
+	ownsTeamQuotaController := false
+	if teamQuotaController == nil {
+		if pool == nil {
+			return nil, fmt.Errorf("distributed Team Quota requires region database connection")
+		}
+		policyManager := options.teamQuotaPolicyManager
+		var policyReader coreteamquota.PolicyReader = coreteamquota.NewRepository(pool)
+		if policyManager != nil {
+			policyReader = policyManager
+		}
+		distributedStore, ok := policyReader.(interface {
+			coreteamquota.PolicyReader
+			coreteamquota.TeamAdmissionStateResolver
+		})
+		if !ok {
+			return nil, fmt.Errorf("team quota policy reader does not support admission state")
+		}
+		teamQuotaController, err = gatewayteamquota.NewDistributedController(
+			context.Background(),
+			distributedStore,
+			publicIdentityRepo,
+			cfg.RegionID,
+			cfg.TeamQuota.DistributedEnforcement,
+			logger,
+			gatewayteamquota.WithPolicyManager(policyManager),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create distributed Team Quota controller: %w", err)
+		}
+		ownsTeamQuotaController = true
+	}
+	publicOverloadGuard := options.publicOverloadGuard
+	ownsPublicOverloadGuard := false
+	if publicOverloadGuard == nil {
+		publicOverloadGuard, err = gatewaymiddleware.NewSharedOverloadGuard(
+			context.Background(),
+			gatewaymiddleware.SharedOverloadGuardConfig(
+				cfg.GatewayConfig,
+				rediscache.JoinKeyPrefix("cluster-gateway", cfg.RegionID),
+			),
+			logger,
+		)
+		if err != nil {
+			if ownsTeamQuotaController && teamQuotaController != nil {
+				_ = teamQuotaController.Close()
+			}
+			return nil, fmt.Errorf("create public overload guard: %w", err)
+		}
+		ownsPublicOverloadGuard = true
+	}
+	sandboxServiceAbuseGuard := options.sandboxServiceAbuseGuard
+	ownsSandboxServiceAbuseGuard := false
+	if sandboxServiceAbuseGuard == nil {
+		sandboxServiceAbuseGuard, err = ratelimit.New(context.Background(), sandboxServiceAbuseGuardConfig(cfg.GatewayConfig))
+		if err != nil {
+			if ownsPublicOverloadGuard {
+				_ = publicOverloadGuard.Close()
+			}
+			if ownsTeamQuotaController && teamQuotaController != nil {
+				_ = teamQuotaController.Close()
+			}
+			return nil, fmt.Errorf("create sandbox service abuse guard: %w", err)
+		}
+		ownsSandboxServiceAbuseGuard = true
 	}
 	sandboxInternalCache, err := newSandboxInternalCache(context.Background(), cfg.GatewayConfig)
 	if err != nil {
@@ -341,8 +476,12 @@ func NewServer(
 		compositeAuth:                            compositeAuth,
 		publicIdentityRepo:                       publicIdentityRepo,
 		publicAPIKeyRepo:                         publicAPIKeyRepo,
-		rateLimiter:                              rateLimiter,
-		externalLimiter:                          externalLimiter,
+		ownsPublicAPIKeyRepo:                     publicAPIKeyRepo != nil,
+		teamQuotaController:                      teamQuotaController,
+		ownsTeamQuotaController:                  ownsTeamQuotaController,
+		publicOverloadGuard:                      publicOverloadGuard,
+		ownsPublicOverloadGuard:                  ownsPublicOverloadGuard,
+		ownsSandboxServiceAbuseGuard:             ownsSandboxServiceAbuseGuard,
 		publicBuiltin:                            publicBuiltin,
 		publicOIDC:                               publicOIDC,
 		publicJWT:                                publicJWT,
@@ -357,12 +496,13 @@ func NewServer(
 		sandboxAuditEntitlements:                 sandboxAuditEntitlements,
 		obsProvider:                              obsProvider,
 		httpClient:                               httpClient,
-		sandboxServiceLimiter:                    sandboxServiceLimiter,
+		sandboxServiceAbuseGuard:                 sandboxServiceAbuseGuard,
 		sandboxInternalCache:                     sandboxInternalCache,
 	}
 
 	server.setupRoutes()
 
+	publicAPIKeyRepositoryReady = true
 	return server, nil
 }
 
@@ -451,36 +591,43 @@ func (s *Server) setupRoutes() {
 	// Metrics endpoint
 	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	if authModeEnabled(s.cfg.AuthMode, authModePublic) {
-		var teamDeletePreflight gatewayhandlers.TeamDeletePreflight
-		if s.publicIdentityRepo != nil {
-			teamDeletePreflight = teamresources.NewRepository(s.publicIdentityRepo.Pool())
-		}
-		public.RegisterRoutes(s.router, public.Deps{
-			IdentityRepo:        s.publicIdentityRepo,
-			APIKeyRepo:          s.publicAPIKeyRepo,
-			AuthMiddleware:      s.publicAuth,
-			TeamDeletePreflight: teamDeletePreflight,
-			BuiltinProvider:     s.publicBuiltin,
-			OIDCManager:         s.publicOIDC,
-			Entitlements:        s.entitlements,
-			JWTIssuer:           s.publicJWT,
-			RegionID:            s.cfg.RegionID,
-			Logger:              s.logger,
-		})
-	}
+	s.setupPublicRoutes()
 
 	// API v1 routes
 	v1 := s.router.Group("/api/v1")
+	s.attachPublicAPIOverloadGuard(v1)
 	{
 		if authModeEnabled(s.cfg.AuthMode, authModePublic) {
 			v1.Use(s.compositeAuth.Authenticate())
-			if s.externalLimiter != nil {
-				v1.Use(s.externalLimiter.RateLimit())
+			v1.Use(s.teamQuotaController.ConsumeForwardedAdmissionProof())
+			// Actual system administrators bypass these controls only on the
+			// policy-repair routes. Rejected non-admin attempts remain charged.
+			v1.Use(s.teamQuotaController.AdmitLongLivedConnections(true))
+			v1.Use(s.teamQuotaController.LimitNetworkTraffic(true))
+			v1.Use(s.teamQuotaController.AdmitActiveRequests(true))
+			v1.Use(s.teamQuotaController.RateLimitAPIRequests(true))
+			if s.cfg.TeamQuota.PolicyOwner {
+				adminQuotas := v1.Group("/teams")
+				adminQuotas.Use(s.publicAuth.RequireSystemAdmin())
+				{
+					adminQuotas.GET("/:team_id/quotas", s.teamQuotaController.ListTeam)
+					adminQuotas.PUT("/:team_id/quotas/:key", s.teamQuotaController.PutTeamPolicy)
+					adminQuotas.DELETE("/:team_id/quotas/:key", s.teamQuotaController.DeleteTeamPolicy)
+				}
 			}
+			v1.GET(
+				"/quotas",
+				s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaRead),
+				s.teamQuotaController.ListCurrent,
+			)
 		} else {
 			// Apply internal auth to all v1 routes (requests come from regional-gateway)
 			v1.Use(s.authMiddleware.Authenticate())
+			v1.Use(s.teamQuotaController.ConsumeForwardedAdmissionProof())
+			v1.Use(s.teamQuotaController.AdmitLongLivedConnections(true))
+			v1.Use(s.teamQuotaController.LimitNetworkTraffic(true))
+			v1.Use(s.teamQuotaController.AdmitActiveRequests(true))
+			v1.Use(s.teamQuotaController.RateLimitAPIRequests(true))
 		}
 
 		// === Sandbox Management (→ Manager) ===
@@ -551,12 +698,6 @@ func (s *Server) setupRoutes() {
 			credentialSources.DELETE("/:name", s.authMiddleware.RequirePermission(gatewayauthn.PermCredentialSourceDelete), s.proxyToManager)
 		}
 
-		quotas := v1.Group("/quotas")
-		quotas.Use(s.managerUpstreamMiddleware())
-		{
-			quotas.GET("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaRead), s.proxyToManager)
-		}
-
 		rootFSSnapshots := v1.Group("/sandbox-rootfs-snapshots")
 		rootFSSnapshots.Use(s.managerUpstreamMiddleware())
 		{
@@ -609,7 +750,61 @@ func (s *Server) setupRoutes() {
 	s.setupMeteringRoutes()
 
 	// Host-based public exposure fallback (for non-/api paths)
+	s.setupPublicExposureNoRoute()
+}
+
+func (s *Server) attachPublicAPIOverloadGuard(api *gin.RouterGroup) {
+	if s.publicOverloadGuard != nil {
+		api.Use(s.publicOverloadGuard.Admit())
+	}
+}
+
+func (s *Server) setupPublicExposureNoRoute() {
+	if s.publicOverloadGuard != nil {
+		s.router.NoRoute(
+			s.publicOverloadGuard.Admit(),
+			s.handlePublicExposureNoRoute,
+		)
+		return
+	}
 	s.router.NoRoute(s.handlePublicExposureNoRoute)
+}
+
+func (s *Server) setupPublicRoutes() {
+	if s == nil || s.cfg == nil || !authModeEnabled(s.cfg.AuthMode, authModePublic) {
+		return
+	}
+
+	var teamDeletePreflight gatewayhandlers.TeamDeletePreflight
+	var teamDeletionLifecycle gatewayhandlers.TeamDeletionLifecycle
+	if s.publicIdentityRepo != nil {
+		pool := s.publicIdentityRepo.Pool()
+		teamDeletePreflight = teamresources.NewRepository(pool)
+		teamDeletionLifecycle = coreteamquota.NewRepository(pool)
+	}
+	deps := public.Deps{
+		IdentityRepo:          s.publicIdentityRepo,
+		APIKeyRepo:            s.publicAPIKeyRepo,
+		AuthMiddleware:        s.publicAuth,
+		TeamDeletePreflight:   teamDeletePreflight,
+		TeamDeletionLifecycle: teamDeletionLifecycle,
+		BuiltinProvider:       s.publicBuiltin,
+		OIDCManager:           s.publicOIDC,
+		Entitlements:          s.entitlements,
+		JWTIssuer:             s.publicJWT,
+		RegionID:              s.cfg.RegionID,
+		Logger:                s.logger,
+	}
+	if s.teamQuotaController != nil {
+		deps.TeamDistributedAdmissionDisabler = s.teamQuotaController
+		deps.TeamTrafficAdmission = s.teamQuotaController.AdmitEdgeTraffic(false)
+		deps.TeamActiveRequestAdmission = s.teamQuotaController.AdmitActiveRequests(false)
+		deps.TeamRequestAdmission = s.teamQuotaController.RateLimitAPIRequests(false)
+	}
+	if s.publicOverloadGuard != nil {
+		deps.IdentityRequestAdmission = s.publicOverloadGuard.Admit()
+	}
+	public.RegisterRoutes(s.router, deps)
 }
 
 func (s *Server) registerSandboxProcdRoutes(sandboxes *gin.RouterGroup) {
@@ -682,24 +877,42 @@ func (s *Server) setupInternalControlPlaneRoutes() {
 		// Template statistics (→ Manager)
 		internal.GET("/templates/stats", s.getTemplateStats)
 
-		// Team quota management (→ Manager)
-		internal.PUT("/teams/:team_id/quotas/:dimension", s.proxyInternalSystemQuotaRequest)
-		internal.DELETE("/teams/:team_id/quotas/:dimension", s.proxyInternalSystemQuotaRequest)
 	}
 }
 
 func (s *Server) setupSandboxObservabilityIngestRoutes() {
+	overloadAdmission := s.sandboxObservabilityIngestOverloadAdmission()
+	activeRequestAdmission := s.sandboxObservabilityIngestActiveRequestAdmission()
+	quotaAdmission := s.sandboxObservabilityIngestQuotaAdmission()
+
 	audit := s.router.Group("/internal/v1")
+	audit.Use(overloadAdmission)
 	audit.Use(s.sandboxAuditIngestAuthMiddleware.Authenticate())
+	audit.Use(activeRequestAdmission)
 	{
-		audit.POST("/sandbox-observability/events", s.sandboxAuditIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), s.sandboxObservabilityHandler().IngestEvents)
+		audit.POST("/sandbox-observability/events", s.sandboxAuditIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), licensinghttp.RequireFeature(s.sandboxAuditEntitlements, licensing.FeatureSandboxAudit, s.logger), quotaAdmission, s.sandboxObservabilityHandler().IngestEvents)
 	}
 
 	internal := s.router.Group("/internal/v1")
+	internal.Use(overloadAdmission)
 	internal.Use(s.sandboxObservabilityIngestAuthMiddleware.Authenticate())
+	internal.Use(activeRequestAdmission)
 	{
-		internal.POST("/sandbox-observability/logs", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestLogs)
-		internal.POST("/sandbox-observability/runtime-samples", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), s.sandboxObservabilityHandler().IngestRuntimeSamples)
+		internal.POST("/sandbox-observability/logs", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), quotaAdmission, s.sandboxObservabilityHandler().IngestLogs)
+		internal.POST("/sandbox-observability/runtime-samples", s.sandboxObservabilityIngestAuthMiddleware.RequirePermission(gatewayauthn.PermSandboxObservabilityWrite), quotaAdmission, s.sandboxObservabilityHandler().IngestRuntimeSamples)
+	}
+}
+
+func (s *Server) sandboxObservabilityIngestQuotaAdmission() gin.HandlerFunc {
+	if s.teamQuotaController != nil {
+		return s.teamQuotaController.RateLimitBodyBytes(
+			coreteamquota.KeyObservabilityIngestBytes,
+			gatewayhandlers.MaxSandboxObservabilityIngestBytes,
+		)
+	}
+	return func(c *gin.Context) {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "team quota is unavailable")
+		c.Abort()
 	}
 }
 
@@ -751,6 +964,52 @@ func requireMeteringAccess() gin.HandlerFunc {
 
 // Start starts the HTTP server
 func (s *Server) Start(ctx context.Context) error {
+	if s.ownsPublicAPIKeyRepo && s.publicAPIKeyRepo != nil {
+		defer func() {
+			if err := s.closeAPIKeyRepository(); err != nil {
+				s.logger.Warn("Failed to close API key repository", zap.Error(err))
+			}
+		}()
+	}
+	if s.shouldRunTeamQuotaTombstoneCleanup() {
+		if err := s.teamQuotaController.StartDeletedTeamTombstoneCleanup(
+			ctx,
+			gatewayteamquota.DeletedTeamTombstoneRetention(s.cfg.JWTAccessTokenTTL.Duration),
+		); err != nil {
+			return fmt.Errorf("start deleted Team Quota tombstone cleanup: %w", err)
+		}
+	}
+	if authModeEnabled(s.cfg.AuthMode, authModePublic) && s.publicIdentityRepo != nil {
+		go s.publicIdentityRepo.RunIdentitySessionCleanup(
+			ctx,
+			s.cfg.IdentityResourceGuard.SessionCleanupInterval.Duration,
+			s.cfg.IdentityResourceGuard.SessionCleanupBatchSize,
+			func(err error) {
+				s.logger.Warn("Failed to clean up identity sessions", zap.Error(err))
+			},
+		)
+	}
+	if s.ownsTeamQuotaController && s.teamQuotaController != nil {
+		defer func() {
+			if err := s.teamQuotaController.Close(); err != nil {
+				s.logger.Warn("Failed to close Team Quota controller", zap.Error(err))
+			}
+		}()
+	}
+	if s.ownsPublicOverloadGuard && s.publicOverloadGuard != nil {
+		defer func() {
+			if err := s.publicOverloadGuard.Close(); err != nil {
+				s.logger.Warn("Failed to close public overload guard", zap.Error(err))
+			}
+		}()
+	}
+	if s.ownsSandboxServiceAbuseGuard && s.sandboxServiceAbuseGuard != nil {
+		defer func() {
+			if err := s.sandboxServiceAbuseGuard.Close(); err != nil {
+				s.logger.Warn("Failed to close sandbox service abuse guard", zap.Error(err))
+			}
+		}()
+	}
 	if s.auditDelivery != nil {
 		s.auditDelivery.Start(ctx)
 	}
@@ -787,6 +1046,31 @@ func (s *Server) Start(ctx context.Context) error {
 		return server.Shutdown(shutdownCtx)
 	case err := <-errChan:
 		return err
+	}
+}
+
+func (s *Server) closeAPIKeyRepository() error {
+	if s == nil || !s.ownsPublicAPIKeyRepo || s.publicAPIKeyRepo == nil {
+		return nil
+	}
+	return s.publicAPIKeyRepo.Close()
+}
+
+func (s *Server) shouldRunTeamQuotaTombstoneCleanup() bool {
+	return s != nil &&
+		s.ownsTeamQuotaController &&
+		s.teamQuotaController != nil &&
+		s.cfg != nil &&
+		s.cfg.TeamQuota.PolicyOwner
+}
+
+func sandboxServiceAbuseGuardConfig(cfg config.GatewayConfig) ratelimit.Config {
+	return ratelimit.Config{
+		Backend:        ratelimit.BackendRedis,
+		RedisURL:       cfg.RedisURL,
+		RedisKeyPrefix: rediscache.JoinKeyPrefix(cfg.RedisKeyPrefix, "sandbox-service-abuse-guard"),
+		RedisTimeout:   cfg.RedisTimeout.Duration,
+		FailOpen:       false,
 	}
 }
 
@@ -889,7 +1173,6 @@ func newInternalAuthValidators(
 		AllowedCallers: []string{
 			internalauth.ServiceCtld,
 			internalauth.ServiceManager,
-			internalauth.ServiceProcd,
 		},
 		ClockSkewTolerance: 10 * time.Second,
 	})

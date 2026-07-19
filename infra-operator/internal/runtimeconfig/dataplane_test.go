@@ -60,24 +60,6 @@ func TestToManagerPreservesExplicitEmptyProcdWebhookOutboxDir(t *testing.T) {
 	}
 }
 
-func TestToManagerPreservesDefaultTeamQuotas(t *testing.T) {
-	cfg := ToManager(&infrav1alpha1.ManagerConfig{
-		DefaultTeamQuotas: []infrav1alpha1.TeamQuotaLimitConfig{
-			{Dimension: "active_sandboxes", LimitValue: 3},
-			{Dimension: "cpu_millicpu", LimitValue: 2000},
-		},
-	})
-	if len(cfg.DefaultTeamQuotas) != 2 {
-		t.Fatalf("default team quotas len = %d, want 2", len(cfg.DefaultTeamQuotas))
-	}
-	if cfg.DefaultTeamQuotas[0].Dimension != "active_sandboxes" || cfg.DefaultTeamQuotas[0].LimitValue != 3 {
-		t.Fatalf("first default quota = %+v, want active_sandboxes=3", cfg.DefaultTeamQuotas[0])
-	}
-	if cfg.DefaultTeamQuotas[1].Dimension != "cpu_millicpu" || cfg.DefaultTeamQuotas[1].LimitValue != 2000 {
-		t.Fatalf("second default quota = %+v, want cpu_millicpu=2000", cfg.DefaultTeamQuotas[1])
-	}
-}
-
 func TestToManagerPreservesSandboxMaxMemory(t *testing.T) {
 	cfg := ToManager(&infrav1alpha1.ManagerConfig{
 		SandboxMaxMemory: "16Gi",
@@ -156,19 +138,48 @@ func TestToStorageProxyPreservesS0FSLayoutConfig(t *testing.T) {
 
 func TestToNetdPreservesBandwidthLimits(t *testing.T) {
 	cfg := ToNetd(&infrav1alpha1.NetdConfig{
-		EgressBandwidthBytesPerSecond:      1024,
-		IngressBandwidthBytesPerSecond:     2048,
-		BandwidthBurstBytes:                4096,
-		TeamEgressBandwidthBytesPerSecond:  8192,
-		TeamIngressBandwidthBytesPerSecond: 16384,
-		TeamBandwidthBurstBytes:            32768,
+		EgressBandwidthBytesPerSecond:  1024,
+		IngressBandwidthBytesPerSecond: 2048,
+		BandwidthBurstBytes:            4096,
 	})
 	if cfg.EgressBandwidthBytesPerSecond != 1024 ||
 		cfg.IngressBandwidthBytesPerSecond != 2048 ||
-		cfg.BandwidthBurstBytes != 4096 ||
-		cfg.TeamEgressBandwidthBytesPerSecond != 8192 ||
-		cfg.TeamIngressBandwidthBytesPerSecond != 16384 ||
-		cfg.TeamBandwidthBurstBytes != 32768 {
+		cfg.BandwidthBurstBytes != 4096 {
 		t.Fatalf("bandwidth limits were not preserved: %#v", cfg)
+	}
+}
+
+func TestToNetdPreservesWorkAdmissionLimits(t *testing.T) {
+	cfg := ToNetd(&infrav1alpha1.NetdConfig{
+		ProxyMaxActiveTCPConnections: 1234,
+		ProxyUDPWorkers:              12,
+		ProxyUDPQueueSize:            345,
+	})
+	if cfg.ProxyMaxActiveTCPConnections != 1234 ||
+		cfg.ProxyUDPWorkers != 12 ||
+		cfg.ProxyUDPQueueSize != 345 {
+		t.Fatalf("network work admission limits were not preserved: %#v", cfg)
+	}
+}
+
+func TestToNetdPreservesAuditSpoolLimits(t *testing.T) {
+	cfg := ToNetd(&infrav1alpha1.NetdConfig{
+		AuditSpoolLimits: infrav1alpha1.AuditSpoolLimitsConfig{
+			MaxBytes:       1024,
+			MaxEntries:     20,
+			MaxTeamBytes:   512,
+			MaxTeamEntries: 10,
+			MinFreeBytes:   256,
+			MaxRecordBytes: 128,
+		},
+	})
+	limits := cfg.SandboxObservabilityAuditSpoolLimits
+	if limits.MaxBytes != 1024 ||
+		limits.MaxEntries != 20 ||
+		limits.MaxTeamBytes != 512 ||
+		limits.MaxTeamEntries != 10 ||
+		limits.MinFreeBytes != 256 ||
+		limits.MaxRecordBytes != 128 {
+		t.Fatalf("audit spool limits were not preserved: %#v", limits)
 	}
 }

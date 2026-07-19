@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
+	storagequotatest "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/storagequota/testutil"
 )
 
 type recordingStorageObserver struct {
@@ -109,6 +111,71 @@ func TestVolumeContextCompactObservesInitialMaterialization(t *testing.T) {
 	}
 }
 
+func TestVolumeContextSyncMaterializeReservesPlannedCompleteTarget(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore(t.Name())
+	engine, err := s0fs.Open(ctx, s0fs.Config{
+		VolumeID:          "vol-quota",
+		WALPath:           filepath.Join(t.TempDir(), "engine.wal"),
+		ObjectStore:       store,
+		SegmentTargetSize: 4,
+	})
+	if err != nil {
+		t.Fatalf("s0fs.Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(s0fs.RootInode, "payload.bin", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, make([]byte, 32)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	before, err := engine.StorageUsage()
+	if err != nil {
+		t.Fatalf("StorageUsage(before) error = %v", err)
+	}
+	planned, required, err := engine.PlannedMaterializationStorageUsage(ctx, false)
+	if err != nil {
+		t.Fatalf("PlannedMaterializationStorageUsage() error = %v", err)
+	}
+	if !required || planned.Objects <= before.Objects+6 {
+		t.Fatalf("planned usage = %+v before %+v, want materialization growth beyond six objects", planned, before)
+	}
+
+	volCtx := &VolumeContext{
+		VolumeID: "vol-quota",
+		TeamID:   "team-quota",
+		Backend:  BackendS0FS,
+		S0FS:     engine,
+	}
+	// The old write-only bound would fit, while the exact materialized target
+	// does not. Admission must reject before the first object-store write.
+	volCtx.SetStorageQuota(storagequotatest.NewLimitedService(
+		"test-region",
+		teamquota.KeyStorageObjectCount,
+		before.Objects+1+6,
+	))
+	if _, err := volCtx.SyncMaterialize(ctx); !teamquota.IsExceeded(err) {
+		t.Fatalf("SyncMaterialize() error = %v, want object quota exceeded", err)
+	}
+	objects, _, _, err := store.List("", "", "", "", 100)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(objects) != 0 {
+		t.Fatalf("object store writes = %v, want none before admission", objects)
+	}
+	after, err := engine.StorageUsage()
+	if err != nil {
+		t.Fatalf("StorageUsage(after) error = %v", err)
+	}
+	if after != before {
+		t.Fatalf("usage after rejected materialization = %+v, want %+v", after, before)
+	}
+}
+
 func newMaterializationTestVolume(t *testing.T) *VolumeContext {
 	t.Helper()
 	engine, err := s0fs.Open(context.Background(), s0fs.Config{
@@ -124,12 +191,14 @@ func newMaterializationTestVolume(t *testing.T) *VolumeContext {
 			t.Errorf("Close() error = %v", err)
 		}
 	})
-	return &VolumeContext{
+	volCtx := &VolumeContext{
 		VolumeID: "vol-1",
 		TeamID:   "team-1",
 		Backend:  BackendS0FS,
 		S0FS:     engine,
 	}
+	volCtx.SetStorageQuota(storagequotatest.NewService("test-region"))
+	return volCtx
 }
 
 func writeMaterializationTestFile(t *testing.T, engine *s0fs.Engine, name, contents string) {

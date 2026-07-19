@@ -194,7 +194,7 @@ func codingAgentTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 		Description: template.CodingAgentTemplateDescription,
 		MainContainer: templatev1alpha1.ContainerSpec{
 			Image: template.CodingAgentTemplateImage,
-			Resources: templatev1alpha1.ResourceQuota{
+			Resources: templatev1alpha1.SandboxResourceLimits{
 				CPU:              resource.MustParse(template.CodingAgentCPU),
 				Memory:           resource.MustParse(template.CodingAgentMemory),
 				EphemeralStorage: resource.MustParse(template.CodingAgentEphemeralStorage),
@@ -238,7 +238,7 @@ func defaultBuiltinTemplateSpec(templateID string) templatev1alpha1.SandboxTempl
 		Description: fmt.Sprintf("Builtin template %s installed by infra-operator.", templateID),
 		MainContainer: templatev1alpha1.ContainerSpec{
 			Image: template.DefaultTemplateImage,
-			Resources: templatev1alpha1.ResourceQuota{
+			Resources: templatev1alpha1.SandboxResourceLimits{
 				CPU:              resource.MustParse(template.DefaultTemplateCPU),
 				Memory:           resource.MustParse(template.DefaultTemplateMemory),
 				EphemeralStorage: resource.MustParse(template.DefaultTemplateEphemeralStorage),
@@ -280,7 +280,7 @@ func openClawTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 		Description: template.OpenClawTemplateDescription,
 		MainContainer: templatev1alpha1.ContainerSpec{
 			Image: template.OpenClawTemplateImage,
-			Resources: templatev1alpha1.ResourceQuota{
+			Resources: templatev1alpha1.SandboxResourceLimits{
 				CPU:              resource.MustParse(template.OpenClawCPU),
 				Memory:           resource.MustParse(template.OpenClawMemory),
 				EphemeralStorage: resource.MustParse(template.OpenClawEphemeralStorage),
@@ -325,7 +325,7 @@ func hermesTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 		Description: template.HermesTemplateDescription,
 		MainContainer: templatev1alpha1.ContainerSpec{
 			Image: template.HermesTemplateImage,
-			Resources: templatev1alpha1.ResourceQuota{
+			Resources: templatev1alpha1.SandboxResourceLimits{
 				CPU:              resource.MustParse(template.HermesCPU),
 				Memory:           resource.MustParse(template.HermesMemory),
 				EphemeralStorage: resource.MustParse(template.HermesEphemeralStorage),
@@ -370,7 +370,7 @@ func browserTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 		Description: template.BrowserTemplateDescription,
 		MainContainer: templatev1alpha1.ContainerSpec{
 			Image: template.BrowserTemplateImage,
-			Resources: templatev1alpha1.ResourceQuota{
+			Resources: templatev1alpha1.SandboxResourceLimits{
 				CPU:              resource.MustParse(template.BrowserCPU),
 				Memory:           resource.MustParse(template.BrowserMemory),
 				EphemeralStorage: resource.MustParse(template.BrowserEphemeralStorage),

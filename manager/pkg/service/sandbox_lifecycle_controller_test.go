@@ -15,7 +15,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -29,8 +31,14 @@ import (
 )
 
 type recordingSandboxCleaner struct {
-	calls []SandboxLifecycleInfo
-	err   error
+	calls         []SandboxLifecycleInfo
+	completed     []string
+	pending       []SandboxLifecycleInfo
+	listClusterID string
+	listAfterID   string
+	listErr       error
+	err           error
+	completionErr error
 }
 
 type deleteRecordingBindingStore struct {
@@ -52,6 +60,32 @@ type recordingDeletionWebhookEmitter struct {
 func (c *recordingSandboxCleaner) CleanupDeletedSandbox(_ context.Context, info SandboxLifecycleInfo) error {
 	c.calls = append(c.calls, info)
 	return c.err
+}
+
+func (c *recordingSandboxCleaner) MarkSandboxCleanupCompleted(
+	_ context.Context,
+	sandboxID string,
+	_ time.Time,
+) error {
+	c.completed = append(c.completed, sandboxID)
+	return c.completionErr
+}
+
+func (c *recordingSandboxCleaner) ListPendingSandboxDeletionCleanups(
+	_ context.Context,
+	clusterID string,
+	afterSandboxID string,
+	limit int,
+) ([]SandboxLifecycleInfo, error) {
+	c.listClusterID = clusterID
+	c.listAfterID = afterSandboxID
+	if c.listErr != nil {
+		return nil, c.listErr
+	}
+	if limit > 0 && len(c.pending) > limit {
+		return append([]SandboxLifecycleInfo(nil), c.pending[:limit]...), nil
+	}
+	return append([]SandboxLifecycleInfo(nil), c.pending...), nil
 }
 
 func (s *deleteRecordingBindingStore) GetBindings(context.Context, string, string) (*egressauth.BindingRecord, error) {
@@ -120,6 +154,9 @@ func TestSandboxLifecycleControllerCleansAndRemovesFinalizer(t *testing.T) {
 	}
 	if len(cleaner.calls) != 1 {
 		t.Fatalf("cleanup calls = %d, want 1", len(cleaner.calls))
+	}
+	if len(cleaner.completed) != 0 {
+		t.Fatalf("cleanup completion calls = %d, want 0 before Pod absence", len(cleaner.completed))
 	}
 	if got := cleaner.calls[0].SandboxID; got != pod.Name {
 		t.Fatalf("cleanup sandboxID = %q, want %q", got, pod.Name)
@@ -242,6 +279,103 @@ func TestSandboxLifecycleControllerCleansLegacyDeleteEvent(t *testing.T) {
 	if len(cleaner.calls) != 1 {
 		t.Fatalf("cleanup calls = %d, want 1", len(cleaner.calls))
 	}
+	if len(cleaner.completed) != 1 || cleaner.completed[0] != "sandbox-a" {
+		t.Fatalf("cleanup completion calls = %#v, want sandbox-a", cleaner.completed)
+	}
+}
+
+func TestSandboxLifecycleControllerRetriesCleanupCompletionFence(t *testing.T) {
+	cleaner := &recordingSandboxCleaner{completionErr: errors.New("completion failed")}
+	controller := NewSandboxLifecycleController(fake.NewSimpleClientset(), nil, cleaner, zap.NewNop())
+	item := sandboxLifecycleQueueItem{
+		Namespace: "ns-a",
+		PodName:   "sandbox-a",
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+		Deleted:   true,
+	}
+
+	if err := controller.reconcile(context.Background(), item); err == nil {
+		t.Fatal("reconcile() error = nil, want cleanup completion failure")
+	}
+	if len(cleaner.calls) != 1 || len(cleaner.completed) != 1 {
+		t.Fatalf("cleanup calls = %d, completion calls = %d, want 1 and 1", len(cleaner.calls), len(cleaner.completed))
+	}
+}
+
+func TestSandboxLifecycleControllerRecoversDurableDeletionWithoutPodEvent(t *testing.T) {
+	cleaner := &recordingSandboxCleaner{
+		pending: []SandboxLifecycleInfo{{
+			SandboxID: "sandbox-a",
+			TeamID:    "team-a",
+			ClusterID: "cluster-a",
+		}},
+	}
+	controller := NewSandboxLifecycleController(fake.NewSimpleClientset(), nil, cleaner, zap.NewNop())
+	controller.SetClusterID("cluster-a")
+	controller.enqueuePendingDeletionCleanups(context.Background())
+
+	if got := controller.queue.Len(); got != 1 {
+		t.Fatalf("queued recovery items = %d, want 1", got)
+	}
+	if cleaner.listClusterID != "cluster-a" || cleaner.listAfterID != "" {
+		t.Fatalf(
+			"list scope = cluster %q after %q, want cluster-a and empty cursor",
+			cleaner.listClusterID,
+			cleaner.listAfterID,
+		)
+	}
+	item, shutdown := controller.queue.Get()
+	if shutdown {
+		t.Fatal("recovery queue unexpectedly shut down")
+	}
+	defer controller.queue.Done(item)
+	if err := controller.reconcile(context.Background(), item); err != nil {
+		t.Fatalf("reconcile recovered deletion: %v", err)
+	}
+	if len(cleaner.calls) != 1 || len(cleaner.completed) != 1 {
+		t.Fatalf(
+			"cleanup calls = %d, completion calls = %d, want 1 and 1",
+			len(cleaner.calls),
+			len(cleaner.completed),
+		)
+	}
+}
+
+func TestSandboxLifecycleControllerConfirmsCacheMissAgainstAPIServer(t *testing.T) {
+	pod := newLifecycleTestPod()
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	lister := corelisters.NewPodLister(indexer)
+	cleaner := &recordingSandboxCleaner{}
+	controller := NewSandboxLifecycleController(client, lister, cleaner, zap.NewNop())
+
+	err := controller.reconcile(context.Background(), sandboxLifecycleItemFromInfo(
+		SandboxLifecycleInfo{
+			Namespace: pod.Namespace,
+			PodName:   pod.Name,
+			SandboxID: pod.Name,
+			TeamID:    "team-a",
+		},
+		false,
+	))
+	if err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+	if len(cleaner.calls) != 0 || len(cleaner.completed) != 0 {
+		t.Fatal("cache miss incorrectly proved physical Pod deletion")
+	}
+	updated, err := client.CoreV1().Pods(pod.Namespace).Get(
+		context.Background(),
+		pod.Name,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get live Pod: %v", err)
+	}
+	if !hasSandboxCleanupFinalizer(updated) {
+		t.Fatal("live Pod was not reconciled after cache miss")
+	}
 }
 
 func TestSandboxServiceCleanupDeletedSandboxRemovesExternalState(t *testing.T) {
@@ -252,6 +386,7 @@ func TestSandboxServiceCleanupDeletedSandboxRemovesExternalState(t *testing.T) {
 			removed = append(removed, namespace+"/"+sandboxID)
 		}},
 		credentialStore: store,
+		teamQuotaStore:  &permissiveTeamQuotaCapacityStore{},
 		logger:          zap.NewNop(),
 	}
 
@@ -278,6 +413,7 @@ func TestSandboxServiceCleanupDeletedSandboxRecordsPhaseMetrics(t *testing.T) {
 	svc := &SandboxService{
 		networkProvider: &assertingNetworkProvider{},
 		credentialStore: store,
+		teamQuotaStore:  &permissiveTeamQuotaCapacityStore{},
 		logger:          zap.NewNop(),
 		metrics:         obsmetrics.NewManager(registry),
 	}
@@ -322,6 +458,7 @@ func TestSandboxServiceCleanupDeletedSandboxEmitsWebhookAndMarksStateVolumeForCl
 	svc := &SandboxService{
 		webhookStateVolumes:    volumeClient,
 		deletionWebhookEmitter: emitter,
+		teamQuotaStore:         &permissiveTeamQuotaCapacityStore{},
 		logger:                 zap.NewNop(),
 	}
 
@@ -355,6 +492,7 @@ func TestSandboxServiceCleanupDeletedSandboxDoesNotBlockOnDeletionWebhookFailure
 	svc := &SandboxService{
 		webhookStateVolumes:    volumeClient,
 		deletionWebhookEmitter: emitter,
+		teamQuotaStore:         &permissiveTeamQuotaCapacityStore{},
 		logger:                 zap.NewNop(),
 	}
 
@@ -391,6 +529,7 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausingRunti
 		credentialStore:        store,
 		webhookStateVolumes:    volumeClient,
 		deletionWebhookEmitter: emitter,
+		teamQuotaStore:         &permissiveTeamQuotaCapacityStore{},
 		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
 			"sandbox-a": {
 				ID:     "sandbox-a",
@@ -439,6 +578,7 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime
 		credentialStore:        store,
 		webhookStateVolumes:    volumeClient,
 		deletionWebhookEmitter: emitter,
+		teamQuotaStore:         &permissiveTeamQuotaCapacityStore{},
 		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
 			"sandbox-a": {
 				ID:                  "sandbox-a",
@@ -503,7 +643,8 @@ func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 		t.Fatalf("parse ctld port: %v", err)
 	}
 	svc := &SandboxService{
-		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		ctldClient:     NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		teamQuotaStore: &permissiveTeamQuotaCapacityStore{},
 		config: SandboxServiceConfig{
 			CtldEnabled: true,
 			CtldPort:    ctldPort,
@@ -515,6 +656,7 @@ func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 		Namespace: "ns-a",
 		PodName:   "sandbox-a",
 		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
 		PodUID:    "pod-uid-a",
 		HostIP:    ctldURL.Hostname(),
 		VolumePortals: []SandboxLifecycleVolumePortal{{
@@ -536,6 +678,7 @@ func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 
 func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
 	pod := newLifecycleTestPod()
+	pod.Annotations[controller.AnnotationClusterID] = "cluster-a"
 	pod.Annotations[controller.AnnotationUserID] = "user-a"
 	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "volume-a"
 	pod.Annotations[controller.AnnotationRuntimeGeneration] = "7"
@@ -548,12 +691,127 @@ func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
 	if info.UserID != "user-a" || info.WebhookStateVolumeID != "volume-a" {
 		t.Fatalf("unexpected lifecycle metadata: %#v", info)
 	}
+	if info.ClusterID != "cluster-a" {
+		t.Fatalf("cluster ID = %q, want cluster-a", info.ClusterID)
+	}
 	if info.WebhookURL != "https://example.test/webhook" || info.WebhookSecret != "secret" {
 		t.Fatalf("unexpected webhook metadata: %#v", info)
 	}
 	if info.RuntimeGeneration != 7 {
 		t.Fatalf("runtime generation = %d, want 7", info.RuntimeGeneration)
 	}
+}
+
+func TestSandboxLifecycleInfoUsesDefaultClusterForLegacyPod(t *testing.T) {
+	info, ok := sandboxLifecycleInfoFromPod(newLifecycleTestPod())
+	if !ok {
+		t.Fatal("expected lifecycle info")
+	}
+	if info.ClusterID != naming.DefaultClusterID {
+		t.Fatalf("cluster ID = %q, want %q", info.ClusterID, naming.DefaultClusterID)
+	}
+}
+
+func TestSandboxLifecycleInfoFromRecordPreservesCluster(t *testing.T) {
+	info := sandboxLifecycleInfoFromRecord(&SandboxRecord{
+		ID:        "sandbox-a",
+		TeamID:    "team-a",
+		ClusterID: "cluster-a",
+	})
+	if info.ClusterID != "cluster-a" {
+		t.Fatalf("cluster ID = %q, want cluster-a", info.ClusterID)
+	}
+}
+
+func TestDeletedSandboxTeamQuotaReleasePreservesClusterOwnership(t *testing.T) {
+	store := &releaseCaptureCapacityStore{
+		recoveryQuotaTestStore: newRecoveryQuotaTestStore(),
+	}
+	svc := &SandboxService{teamQuotaStore: store}
+	err := svc.beginDeletedSandboxTeamQuotaRelease(context.Background(), SandboxLifecycleInfo{
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+		ClusterID: "cluster-a",
+	}, false)
+	if err != nil {
+		t.Fatalf("beginDeletedSandboxTeamQuotaRelease() error = %v", err)
+	}
+	if store.request.Owner.ClusterID != "cluster-a" {
+		t.Fatalf("release owner cluster = %q, want cluster-a", store.request.Owner.ClusterID)
+	}
+}
+
+func TestDeletedSandboxCleanupContinuesAfterTeamTombstoneWhenQuotaIsReleased(t *testing.T) {
+	store := &releaseCaptureCapacityStore{
+		recoveryQuotaTestStore: newRecoveryQuotaTestStore(),
+		beginErr: &teamquota.UnavailableError{
+			Operation: "begin team capacity release",
+			Err:       &teamquota.TeamAdmissionDisabledError{TeamID: "team-a"},
+		},
+	}
+	svc := &SandboxService{teamQuotaStore: store}
+	err := svc.beginDeletedSandboxTeamQuotaRelease(context.Background(), SandboxLifecycleInfo{
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+		ClusterID: "cluster-a",
+	}, false)
+	if err != nil {
+		t.Fatalf("released tombstone retry error = %v", err)
+	}
+}
+
+func TestDeletedSandboxCleanupFailsClosedAfterTeamTombstoneWithLiveQuota(t *testing.T) {
+	recovery := newRecoveryQuotaTestStore()
+	recovery.allocations = []teamquota.RecoveryAllocation{{
+		AllocationID: "allocation-a",
+		Owner: teamquota.Owner{
+			TeamID:    "team-a",
+			Kind:      "sandbox",
+			ID:        "sandbox-a",
+			ClusterID: "cluster-a",
+		},
+		State: "active",
+		Committed: teamquota.Values{
+			teamquota.KeySandboxIdentityCount: 1,
+		},
+	}}
+	store := &releaseCaptureCapacityStore{
+		recoveryQuotaTestStore: recovery,
+		beginErr: &teamquota.UnavailableError{
+			Operation: "begin team capacity release",
+			Err:       &teamquota.TeamAdmissionDisabledError{TeamID: "team-a"},
+		},
+	}
+	svc := &SandboxService{teamQuotaStore: store}
+	err := svc.beginDeletedSandboxTeamQuotaRelease(context.Background(), SandboxLifecycleInfo{
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+		ClusterID: "cluster-a",
+	}, false)
+	if err == nil {
+		t.Fatal("live quota under a team tombstone must fail closed")
+	}
+}
+
+type releaseCaptureCapacityStore struct {
+	*recoveryQuotaTestStore
+	request  teamquota.ReleaseRequest
+	beginErr error
+}
+
+func (s *releaseCaptureCapacityStore) BeginRelease(
+	_ context.Context,
+	request teamquota.ReleaseRequest,
+) (*teamquota.Reservation, error) {
+	s.request = request
+	if s.beginErr != nil {
+		return nil, s.beginErr
+	}
+	return &teamquota.Reservation{
+		Owner:     request.Owner,
+		Operation: request.Operation,
+		Target:    request.Target,
+	}, nil
 }
 
 func TestSandboxLifecycleInfoFromPodIncludesVolumePortals(t *testing.T) {
@@ -734,6 +992,7 @@ func TestTerminateSandboxRequestsPodDeleteWithoutExternalCleanup(t *testing.T) {
 			removed = append(removed, namespace+"/"+sandboxID)
 		}},
 		credentialStore: store,
+		teamQuotaStore:  &permissiveTeamQuotaCapacityStore{},
 		logger:          zap.NewNop(),
 	}
 

@@ -10,22 +10,138 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// CreateTeam creates a new team.
-func (r *Repository) CreateTeam(ctx context.Context, team *Team) error {
+// CreateTeamWithOwner creates the team and its admin owner membership in one
+// transaction so no externally visible team can be missing its owner grant.
+func (r *Repository) CreateTeamWithOwner(ctx context.Context, team *Team) (*TeamMember, error) {
+	if team == nil || team.OwnerID == nil || strings.TrimSpace(*team.OwnerID) == "" {
+		return nil, fmt.Errorf("team owner is required")
+	}
 	if team.Slug == "" {
 		team.Slug = generateSlug(team.Name)
 	}
+	if err := validateTeamForPersistence(team); err != nil {
+		return nil, err
+	}
 
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO teams (name, slug, owner_id, home_region_id)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, created_at, updated_at
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin create team with owner: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	ownerID := strings.TrimSpace(*team.OwnerID)
+	if err := lockIdentityScopesTx(ctx, tx, identityUserScope(ownerID)); err != nil {
+		return nil, err
+	}
+	if limits, guarded := r.identityResourceLimits(); guarded {
+		if err := ensureTeamsOwnedLimitTx(ctx, tx, ownerID, limits.MaxTeamsOwnedPerUser); err != nil {
+			return nil, err
+		}
+		if err := ensureUserMembershipLimitTx(
+			ctx,
+			tx,
+			ownerID,
+			limits.MaxTeamMembershipsPerUser,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := r.insertTeam(ctx, tx, team); err != nil {
+		return nil, err
+	}
+
+	member := &TeamMember{
+		TeamID: team.ID,
+		UserID: ownerID,
+		Role:   "admin",
+	}
+	if err := insertTeamMemberTx(ctx, tx, member); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit create team with owner: %w", err)
+	}
+	return member, nil
+}
+
+type teamInsertQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (r *Repository) insertTeam(ctx context.Context, q teamInsertQuerier, team *Team) error {
+	if err := validateTeamForPersistence(team); err != nil {
+		return err
+	}
+	err := q.QueryRow(ctx, `
+			INSERT INTO teams (name, slug, owner_id, home_region_id)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id, created_at, updated_at
 	`, team.Name, team.Slug, team.OwnerID, team.HomeRegionID).Scan(&team.ID, &team.CreatedAt, &team.UpdatedAt)
 	if err != nil {
 		if isDuplicateKeyError(err) {
 			return ErrTeamAlreadyExists
 		}
 		return fmt.Errorf("insert team: %w", err)
+	}
+	return nil
+}
+
+func ensureTeamsOwnedLimitTx(ctx context.Context, tx pgx.Tx, userID string, limit int64) error {
+	var count int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM teams
+		WHERE owner_id = $1
+	`, userID).Scan(&count); err != nil {
+		return fmt.Errorf("count teams owned by user: %w", err)
+	}
+	if count >= limit {
+		return &IdentityResourceLimitExceededError{
+			Scope:    "user",
+			ScopeID:  userID,
+			Resource: IdentityLimitResourceTeamsOwned,
+			Limit:    limit,
+		}
+	}
+	return nil
+}
+
+func ensureUserMembershipLimitTx(ctx context.Context, tx pgx.Tx, userID string, limit int64) error {
+	var count int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM team_members
+		WHERE user_id = $1
+	`, userID).Scan(&count); err != nil {
+		return fmt.Errorf("count user team memberships: %w", err)
+	}
+	if count >= limit {
+		return &IdentityResourceLimitExceededError{
+			Scope:    "user",
+			ScopeID:  userID,
+			Resource: IdentityLimitResourceTeamMemberships,
+			Limit:    limit,
+		}
+	}
+	return nil
+}
+
+func ensureTeamMemberLimitTx(ctx context.Context, tx pgx.Tx, teamID string, limit int64) error {
+	var count int64
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM team_members
+		WHERE team_id = $1
+	`, teamID).Scan(&count); err != nil {
+		return fmt.Errorf("count team members: %w", err)
+	}
+	if count >= limit {
+		return &IdentityResourceLimitExceededError{
+			Scope:    "team",
+			ScopeID:  teamID,
+			Resource: IdentityLimitResourceTeamMembers,
+			Limit:    limit,
+		}
 	}
 	return nil
 }
@@ -66,12 +182,23 @@ func (r *Repository) GetTeamBySlug(ctx context.Context, slug string) (*Team, err
 
 // UpdateTeam updates a team.
 func (r *Repository) UpdateTeam(ctx context.Context, team *Team) error {
-	err := r.pool.QueryRow(ctx, `
+	if err := validateTeamForPersistence(team); err != nil {
+		return err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin update team: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockIdentityScopesTx(ctx, tx, identityTeamScope(team.ID)); err != nil {
+		return err
+	}
+	err = tx.QueryRow(ctx, `
 		UPDATE teams
-		SET name = $2, slug = $3, owner_id = $4, home_region_id = $5
+		SET name = $2, slug = $3, home_region_id = $4
 		WHERE id = $1
 		RETURNING updated_at
-	`, team.ID, team.Name, team.Slug, team.OwnerID, team.HomeRegionID).Scan(&team.UpdatedAt)
+	`, team.ID, team.Name, team.Slug, team.HomeRegionID).Scan(&team.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTeamNotFound
@@ -81,41 +208,202 @@ func (r *Repository) UpdateTeam(ctx context.Context, team *Team) error {
 		}
 		return fmt.Errorf("update team: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit update team: %w", err)
+	}
 	return nil
 }
 
-// DeleteTeam deletes a team.
-func (r *Repository) DeleteTeam(ctx context.Context, id string) error {
-	result, err := r.pool.Exec(ctx, `DELETE FROM teams WHERE id = $1`, id)
+// DeleteTeamOwnedBy serializes deletion with every identity mutation for the
+// team and deletes only while expectedOwnerID is still the current owner.
+func (r *Repository) DeleteTeamOwnedBy(
+	ctx context.Context,
+	id string,
+	expectedOwnerID string,
+) error {
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("delete team: %w", err)
+		return fmt.Errorf("begin owned team deletion: %w", err)
 	}
-	if result.RowsAffected() == 0 {
-		return ErrTeamNotFound
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockIdentityScopesTx(ctx, tx, identityTeamScope(id)); err != nil {
+		return err
+	}
+
+	var (
+		currentOwnerID   *string
+		deletionFencedAt *time.Time
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT owner_id::text, deletion_fenced_at
+		FROM teams
+		WHERE id = $1
+		FOR UPDATE
+	`, id).Scan(&currentOwnerID, &deletionFencedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrTeamNotFound
+		}
+		return fmt.Errorf("lock team for deletion: %w", err)
+	}
+	if currentOwnerID == nil || *currentOwnerID != expectedOwnerID {
+		return ErrTeamOwnerChanged
+	}
+	if deletionFencedAt == nil {
+		return ErrTeamDeletionNotFenced
+	}
+
+	result, err := tx.Exec(ctx, `
+		DELETE FROM teams
+		WHERE id = $1 AND owner_id = $2 AND deletion_fenced_at IS NOT NULL
+	`, id, expectedOwnerID)
+	if err != nil {
+		return fmt.Errorf("delete owned team: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return ErrTeamOwnerChanged
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit owned team deletion: %w", err)
+	}
+	return nil
+}
+
+// FenceTeamDeletionOwnedBy linearizes the identity deletion decision before
+// the quota tombstone is created. Owner transfer takes the same team lock and
+// refuses a fenced team, so either transfer commits before this owner check or
+// deletion prevents all later transfers.
+func (r *Repository) FenceTeamDeletionOwnedBy(
+	ctx context.Context,
+	id string,
+	expectedOwnerID string,
+) error {
+	return r.setTeamDeletionFence(ctx, id, expectedOwnerID, true)
+}
+
+// UnfenceTeamDeletionOwnedBy clears a fence only for a failure known to have
+// happened before the durable quota tombstone transaction committed.
+func (r *Repository) UnfenceTeamDeletionOwnedBy(
+	ctx context.Context,
+	id string,
+	expectedOwnerID string,
+) error {
+	return r.setTeamDeletionFence(ctx, id, expectedOwnerID, false)
+}
+
+func (r *Repository) setTeamDeletionFence(
+	ctx context.Context,
+	id string,
+	expectedOwnerID string,
+	fenced bool,
+) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin team deletion fence update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockIdentityScopesTx(ctx, tx, identityTeamScope(id)); err != nil {
+		return err
+	}
+
+	var currentOwnerID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT owner_id::text
+		FROM teams
+		WHERE id = $1
+		FOR UPDATE
+	`, id).Scan(&currentOwnerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrTeamNotFound
+		}
+		return fmt.Errorf("lock team for deletion fence update: %w", err)
+	}
+	if currentOwnerID == nil || *currentOwnerID != expectedOwnerID {
+		return ErrTeamOwnerChanged
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE teams
+		SET deletion_fenced_at = CASE
+			WHEN $2::boolean THEN COALESCE(deletion_fenced_at, NOW())
+			ELSE NULL
+		END
+		WHERE id = $1
+	`, id, fenced); err != nil {
+		return fmt.Errorf("update team deletion fence: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit team deletion fence update: %w", err)
 	}
 	return nil
 }
 
 // TransferTeamOwner sets a team member as the team owner and ensures they have admin role.
-func (r *Repository) TransferTeamOwner(ctx context.Context, teamID, userID string) (*Team, error) {
+func (r *Repository) TransferTeamOwner(
+	ctx context.Context,
+	teamID string,
+	expectedOwnerID string,
+	userID string,
+) (*Team, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin transfer team owner: %w", err)
 	}
-	defer func() {
-		_ = tx.Rollback(ctx)
-	}()
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockIdentityScopesTx(
+		ctx,
+		tx,
+		identityTeamScope(teamID),
+		identityUserScope(userID),
+	); err != nil {
+		return nil, err
+	}
+
+	var (
+		currentOwnerID   *string
+		deletionFencedAt *time.Time
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT owner_id::text, deletion_fenced_at
+		FROM teams
+		WHERE id = $1
+		FOR UPDATE
+	`, teamID).Scan(&currentOwnerID, &deletionFencedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrTeamNotFound
+		}
+		return nil, fmt.Errorf("lock team owner: %w", err)
+	}
+	if currentOwnerID == nil || *currentOwnerID != expectedOwnerID {
+		return nil, ErrTeamOwnerChanged
+	}
+	if deletionFencedAt != nil {
+		return nil, ErrTeamDeletionInProgress
+	}
 
 	var memberID string
 	if err := tx.QueryRow(ctx, `
 		SELECT id
 		FROM team_members
 		WHERE team_id = $1 AND user_id = $2
+		FOR UPDATE
 	`, teamID, userID).Scan(&memberID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrMemberNotFound
 		}
 		return nil, fmt.Errorf("query owner member: %w", err)
+	}
+
+	if (currentOwnerID == nil || *currentOwnerID != userID) && r.identityResourceGuard != nil {
+		if err := ensureTeamsOwnedLimitTx(
+			ctx,
+			tx,
+			userID,
+			r.identityResourceGuard.MaxTeamsOwnedPerUser,
+		); err != nil {
+			return nil, err
+		}
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -214,10 +502,56 @@ func (r *Repository) ListTeamGrantsByUserID(ctx context.Context, userID string) 
 
 // AddTeamMember adds a user to a team.
 func (r *Repository) AddTeamMember(ctx context.Context, member *TeamMember) error {
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO team_members (team_id, user_id, role)
-		VALUES ($1, $2, $3)
-		RETURNING id, joined_at
+	if err := validateTeamMemberForPersistence(member); err != nil {
+		return err
+	}
+	limits, guarded := r.identityResourceLimits()
+	if !guarded {
+		return insertTeamMemberTx(ctx, r.pool, member)
+	}
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin add team member: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := lockIdentityScopesTx(
+		ctx,
+		tx,
+		identityTeamScope(member.TeamID),
+		identityUserScope(member.UserID),
+	); err != nil {
+		return err
+	}
+	if err := ensureTeamMemberLimitTx(ctx, tx, member.TeamID, limits.MaxMembersPerTeam); err != nil {
+		return err
+	}
+	if err := ensureUserMembershipLimitTx(
+		ctx,
+		tx,
+		member.UserID,
+		limits.MaxTeamMembershipsPerUser,
+	); err != nil {
+		return err
+	}
+	if err := insertTeamMemberTx(ctx, tx, member); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit add team member: %w", err)
+	}
+	return nil
+}
+
+func insertTeamMemberTx(ctx context.Context, q teamInsertQuerier, member *TeamMember) error {
+	if err := validateTeamMemberForPersistence(member); err != nil {
+		return err
+	}
+	err := q.QueryRow(ctx, `
+			INSERT INTO team_members (team_id, user_id, role)
+			VALUES ($1, $2, $3)
+			RETURNING id, joined_at
 	`, member.TeamID, member.UserID, member.Role).Scan(&member.ID, &member.JoinedAt)
 	if err != nil {
 		if isDuplicateKeyError(err) {
@@ -230,28 +564,150 @@ func (r *Repository) AddTeamMember(ctx context.Context, member *TeamMember) erro
 
 // UpdateTeamMemberRole updates a team member's role.
 func (r *Repository) UpdateTeamMemberRole(ctx context.Context, teamID, userID, role string) error {
-	result, err := r.pool.Exec(ctx, `
-		UPDATE team_members SET role = $3 WHERE team_id = $1 AND user_id = $2
-	`, teamID, userID, role)
+	if err := validateIdentityFieldSize(
+		"team_member_role",
+		role,
+		MaxIdentityTeamRoleBytes,
+	); err != nil {
+		return err
+	}
+	if r.identityResourceGuard == nil {
+		result, err := r.pool.Exec(ctx, `
+			UPDATE team_members SET role = $3 WHERE team_id = $1 AND user_id = $2
+		`, teamID, userID, role)
+		if err != nil {
+			return fmt.Errorf("update member role: %w", err)
+		}
+		if result.RowsAffected() == 0 {
+			return ErrMemberNotFound
+		}
+		return nil
+	}
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
+		return fmt.Errorf("begin update member role: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockIdentityScopesTx(
+		ctx,
+		tx,
+		identityTeamScope(teamID),
+		identityUserScope(userID),
+	); err != nil {
+		return err
+	}
+
+	var currentRole string
+	var ownerID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT tm.role, t.owner_id::text
+		FROM team_members tm
+		INNER JOIN teams t ON t.id = tm.team_id
+		WHERE tm.team_id = $1 AND tm.user_id = $2
+		FOR UPDATE OF tm, t
+	`, teamID, userID).Scan(&currentRole, &ownerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrMemberNotFound
+		}
+		return fmt.Errorf("lock member role: %w", err)
+	}
+	if role != "admin" && ownerID != nil && *ownerID == userID {
+		return ErrCannotDemoteTeamOwner
+	}
+	if role != "admin" && currentRole == "admin" {
+		var adminCount int64
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM team_members
+			WHERE team_id = $1 AND role = 'admin'
+		`, teamID).Scan(&adminCount); err != nil {
+			return fmt.Errorf("count team admins: %w", err)
+		}
+		if adminCount <= 1 {
+			return ErrCannotRemoveLastTeamAdmin
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE team_members
+		SET role = $3
+		WHERE team_id = $1 AND user_id = $2
+	`, teamID, userID, role); err != nil {
 		return fmt.Errorf("update member role: %w", err)
 	}
-	if result.RowsAffected() == 0 {
-		return ErrMemberNotFound
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit update member role: %w", err)
 	}
 	return nil
 }
 
 // RemoveTeamMember removes a user from a team.
 func (r *Repository) RemoveTeamMember(ctx context.Context, teamID, userID string) error {
-	result, err := r.pool.Exec(ctx, `
-		DELETE FROM team_members WHERE team_id = $1 AND user_id = $2
-	`, teamID, userID)
+	if r.identityResourceGuard == nil {
+		result, err := r.pool.Exec(ctx, `
+			DELETE FROM team_members WHERE team_id = $1 AND user_id = $2
+		`, teamID, userID)
+		if err != nil {
+			return fmt.Errorf("remove member: %w", err)
+		}
+		if result.RowsAffected() == 0 {
+			return ErrMemberNotFound
+		}
+		return nil
+	}
+
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
+		return fmt.Errorf("begin remove team member: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockIdentityScopesTx(
+		ctx,
+		tx,
+		identityTeamScope(teamID),
+		identityUserScope(userID),
+	); err != nil {
+		return err
+	}
+
+	var role string
+	var ownerID *string
+	if err := tx.QueryRow(ctx, `
+		SELECT tm.role, t.owner_id::text
+		FROM team_members tm
+		INNER JOIN teams t ON t.id = tm.team_id
+		WHERE tm.team_id = $1 AND tm.user_id = $2
+		FOR UPDATE OF tm, t
+	`, teamID, userID).Scan(&role, &ownerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrMemberNotFound
+		}
+		return fmt.Errorf("lock removed team member: %w", err)
+	}
+	if ownerID != nil && *ownerID == userID {
+		return ErrCannotRemoveTeamOwner
+	}
+	if role == "admin" {
+		var adminCount int64
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM team_members
+			WHERE team_id = $1 AND role = 'admin'
+		`, teamID).Scan(&adminCount); err != nil {
+			return fmt.Errorf("count team admins: %w", err)
+		}
+		if adminCount <= 1 {
+			return ErrCannotRemoveLastTeamAdmin
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM team_members
+		WHERE team_id = $1 AND user_id = $2
+	`, teamID, userID); err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}
-	if result.RowsAffected() == 0 {
-		return ErrMemberNotFound
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit remove team member: %w", err)
 	}
 	return nil
 }
@@ -277,6 +733,13 @@ func (r *Repository) SearchTeamMembers(ctx context.Context, teamID, query string
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return r.GetTeamMembers(ctx, teamID)
+	}
+	if err := validateIdentityFieldSize(
+		"team_member_search",
+		query,
+		MaxIdentityMemberSearchBytes,
+	); err != nil {
+		return nil, err
 	}
 
 	rows, err := r.pool.Query(ctx, `

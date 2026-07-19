@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/teamquota"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -59,6 +61,9 @@ type ClaimRequest struct {
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
 	WebhookStateVolumeID string `json:"-"`
+	// OperationID is the trusted cross-service idempotency key for quota
+	// reservation. It is generated locally when the caller did not supply one.
+	OperationID string `json:"-"`
 }
 
 type ClaimMount struct {
@@ -268,6 +273,9 @@ func setMountsAnnotation(annotations map[string]string, mounts []ClaimMount) err
 		delete(annotations, controller.AnnotationMounts)
 		return nil
 	}
+	if err := ValidateClaimRequestSize(&ClaimRequest{Mounts: mounts}); err != nil {
+		return err
+	}
 	data, err := json.Marshal(mounts)
 	if err != nil {
 		return fmt.Errorf("marshal mounts: %w", err)
@@ -341,6 +349,9 @@ type ClaimResponse struct {
 
 // ClaimSandbox claims a sandbox from the idle pool or creates a new one
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {
+	if err := ValidateClaimRequestSize(req); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	metrics := s.metrics
 	phaseStarted := time.Now()
@@ -363,12 +374,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 	}
 	s.observeClaimPhase(req.Template, "unknown", "validate_claim_mounts", phaseStarted, nil)
-	phaseStarted = time.Now()
-	if err := s.enforceActiveSandboxQuota(ctx, req.TeamID); err != nil {
-		s.observeClaimPhase(req.Template, "unknown", "enforce_active_sandbox_quota", phaseStarted, err)
-		return nil, err
-	}
-	s.observeClaimPhase(req.Template, "unknown", "enforce_active_sandbox_quota", phaseStarted, nil)
 	s.logger.Info("Claiming sandbox",
 		zap.String("template", req.Template),
 		zap.String("teamID", req.TeamID),
@@ -410,13 +415,15 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 	}
 
-	// Enforce tenant isolation (best-effort based on scheduler-projected metadata).
-	if template.Labels != nil && template.Labels["sandbox0.ai/template-scope"] == naming.ScopeTeam {
-		teamID := ""
-		if template.Annotations != nil {
-			teamID = template.Annotations["sandbox0.ai/template-team-id"]
-		}
-		if teamID != "" && teamID != req.TeamID {
+	// Enforce tenant isolation from the scheduler-projected template identity.
+	templateTeamID, ownershipErr := controller.ValidateTeamOwnedTemplate(template)
+	if ownershipErr != nil {
+		err := fmt.Errorf("forbidden: invalid team-scoped template ownership: %w", ownershipErr)
+		s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, err)
+		return nil, err
+	}
+	if templateTeamID != "" {
+		if templateTeamID != strings.TrimSpace(req.TeamID) {
 			err := fmt.Errorf("forbidden: template belongs to a different team")
 			s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, err)
 			return nil, err
@@ -435,13 +442,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	phaseStarted = time.Now()
-	if err := s.enforceSandboxResourceQuota(ctx, req.TeamID, template, req.Config); err != nil {
-		s.observeClaimPhase(req.Template, "unknown", "enforce_resource_quota", phaseStarted, err)
-		return nil, err
-	}
-	s.observeClaimPhase(req.Template, "unknown", "enforce_resource_quota", phaseStarted, nil)
-
-	phaseStarted = time.Now()
 	if err := validateClaimMountsForTemplate(req, template); err != nil {
 		s.observeClaimPhase(req.Template, "unknown", "validate_template_mounts", phaseStarted, err)
 		return nil, err
@@ -450,9 +450,38 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
 
+	phaseStarted = time.Now()
+	sandboxStartAdmitted, err := s.admitSandboxStartBeforePoolClaim(ctx, req.TeamID, template)
+	s.observeClaimPhase(req.Template, "unknown", "admit_sandbox_start_rate", phaseStarted, err)
+	if err != nil {
+		return nil, err
+	}
+
+	var quotaAdmission *sandboxTeamQuotaAdmission
+	if !isTeamOwnedWarmPoolTemplate(template, req.TeamID) {
+		phaseStarted = time.Now()
+		reservation, reserveErr := s.reserveSandboxTeamQuota(ctx, req, template, "claim")
+		s.observeClaimPhase(req.Template, "unknown", "reserve_team_quota", phaseStarted, reserveErr)
+		if reserveErr != nil {
+			return nil, reserveErr
+		}
+		quotaAdmission = &sandboxTeamQuotaAdmission{Reservation: reservation}
+	}
+	var pod *corev1.Pod
+	teamQuotaFinalized := false
+	defer func() {
+		if !teamQuotaFinalized {
+			s.releaseFailedSandboxTeamQuotaAdmission(quotaAdmission, pod, "sandbox claim failed")
+		}
+	}()
+
 	// Try to claim an idle pod first
 	phaseStarted = time.Now()
-	pod, err := s.claimIdlePod(ctx, template, req)
+	var hotQuotaAdmission *sandboxTeamQuotaAdmission
+	pod, hotQuotaAdmission, err = s.claimIdlePodWithTeamQuota(ctx, template, req)
+	if hotQuotaAdmission != nil {
+		quotaAdmission = hotQuotaAdmission
+	}
 	claimIdleType := "hot"
 	if pod == nil {
 		claimIdleType = "cold"
@@ -467,6 +496,17 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		return nil, fmt.Errorf("claim idle pod: %w", err)
 	}
+	if pod != nil {
+		phaseStarted = time.Now()
+		err = s.finalizeSandboxTeamQuotaAdmission(ctx, quotaAdmission, pod)
+		s.observeClaimPhase(req.Template, "hot", "commit_team_quota", phaseStarted, err)
+		if err != nil {
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, err
+		}
+	}
 	claimType := "hot"
 	var lifecycleTracker *podLifecycleStageTracker
 
@@ -476,6 +516,23 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		s.logger.Info("No idle pod available, creating new pod",
 			zap.String("template", req.Template),
 		)
+		if !sandboxStartAdmitted {
+			phaseStarted = time.Now()
+			err = s.admitSandboxStartTeamQuota(ctx, req.TeamID)
+			s.observeClaimPhase(req.Template, claimType, "admit_sandbox_start_rate", phaseStarted, err)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if quotaAdmission == nil {
+			phaseStarted = time.Now()
+			reservation, reserveErr := s.reserveSandboxTeamQuota(ctx, req, template, "claim")
+			s.observeClaimPhase(req.Template, claimType, "reserve_team_quota", phaseStarted, reserveErr)
+			if reserveErr != nil {
+				return nil, reserveErr
+			}
+			quotaAdmission = &sandboxTeamQuotaAdmission{Reservation: reservation}
+		}
 
 		var claimStartReservation *startlimiter.Reservation
 		if s.claimStartLimiter != nil && s.claimStartLimiter.SupportsReservations() {
@@ -498,6 +555,15 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			}
 			return nil, fmt.Errorf("create new pod: %w", err)
 		}
+		phaseStarted = time.Now()
+		err = s.finalizeSandboxTeamQuotaAdmission(ctx, quotaAdmission, pod)
+		s.observeClaimPhase(req.Template, claimType, "commit_team_quota", phaseStarted, err)
+		if err != nil {
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, err
+		}
 		lifecycleTracker = newPodLifecycleStageTracker(s, req.Template)
 		lifecycleTracker.observePod(pod)
 
@@ -506,7 +572,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		// already selected a Kubernetes-ready idle pod. Cold claims must wait until
 		// the pod has the network identity watched by the ctld network runtime before
 		// waiting for it to patch the applied policy hash.
-		if s.networkProvider != nil {
+		if s.SupportsNetworkPolicy() {
 			phaseStarted = time.Now()
 			networkPod, err := s.waitForPodNetworkIdentityTracked(ctx, req.Template, pod.Namespace, pod.Name, lifecycleTracker)
 			s.observeClaimPhase(req.Template, claimType, "wait_for_pod_network_identity", phaseStarted, err)
@@ -623,6 +689,15 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 	s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, nil)
 
+	phaseStarted = time.Now()
+	if err := s.finalizeSandboxTeamQuotaAdmission(ctx, quotaAdmission, pod); err != nil {
+		s.observeClaimPhase(req.Template, claimType, "commit_team_quota", phaseStarted, err)
+		cleanupClaimFailure(pod, "team quota commit failed")
+		return nil, err
+	}
+	teamQuotaFinalized = true
+	s.observeClaimPhase(req.Template, claimType, "commit_team_quota", phaseStarted, nil)
+
 	if metrics != nil {
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
 		metrics.SandboxClaimDuration.WithLabelValues(req.Template, claimType).Observe(time.Since(start).Seconds())
@@ -717,8 +792,7 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 	if state == nil {
 		return pod, true, fmt.Errorf("%w: snapshot %s", ErrRootFSFilesystemNotFound, snapshotID)
 	}
-	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, state, SandboxStatusStarting)
-	if err != nil {
+	if err = s.applySandboxRootFSCheckpoint(ctx, pod, state); err != nil {
 		return pod, true, err
 	}
 	return pod, true, nil
@@ -1034,11 +1108,42 @@ func isVolumePortalPendingPublicationError(resp *ctldapi.BindVolumePortalRespons
 	return strings.Contains(message, "is not published")
 }
 
-func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
+type sandboxTeamQuotaAdmission struct {
+	Reservation               *teamquota.Reservation
+	WarmPoolCommitment        *warmPoolReplicaCommitment
+	Committed                 bool
+	Transfer                  bool
+	WarmPoolCommitmentDrained bool
+}
+
+func (s *SandboxService) claimIdlePod(
+	ctx context.Context,
+	template *v1alpha1.SandboxTemplate,
+	req *ClaimRequest,
+) (*corev1.Pod, error) {
+	pod, _, err := s.claimIdlePodInternal(ctx, template, req, false)
+	return pod, err
+}
+
+func (s *SandboxService) claimIdlePodWithTeamQuota(
+	ctx context.Context,
+	template *v1alpha1.SandboxTemplate,
+	req *ClaimRequest,
+) (*corev1.Pod, *sandboxTeamQuotaAdmission, error) {
+	return s.claimIdlePodInternal(ctx, template, req, true)
+}
+
+func (s *SandboxService) claimIdlePodInternal(
+	ctx context.Context,
+	template *v1alpha1.SandboxTemplate,
+	req *ClaimRequest,
+	manageTeamQuota bool,
+) (*corev1.Pod, *sandboxTeamQuotaAdmission, error) {
 	var claimedPod *corev1.Pod
+	var quotaAdmission *sandboxTeamQuotaAdmission
 	desiredTemplateHash, err := controller.TemplateSpecHash(template)
 	if err != nil {
-		return nil, fmt.Errorf("compute template hash: %w", err)
+		return nil, nil, fmt.Errorf("compute template hash: %w", err)
 	}
 	templateID := controller.TemplateLogicalID(template)
 	err = retry.OnError(claimIdlePodBackoff, func(err error) bool {
@@ -1119,13 +1224,17 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Update pod labels and annotations
 		originalIdlePod := pod.DeepCopy()
 		pod = pod.DeepCopy()
-		resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
+		resourceLimits, err := s.effectiveSandboxResourceLimits(template, req.Config)
 		if err != nil {
 			return err
 		}
-		var resizeQuota *v1alpha1.ResourceQuota
-		if sandboxPodNeedsResourceResize(pod, resourceQuota) {
-			resizeQuota = &resourceQuota
+		destinationSpec := pod.Spec.DeepCopy()
+		if err := applySandboxResourceLimitsToPodSpec(destinationSpec, resourceLimits); err != nil {
+			return err
+		}
+		var resizeLimits *v1alpha1.SandboxResourceLimits
+		if sandboxPodNeedsResourceResize(pod, resourceLimits) {
+			resizeLimits = &resourceLimits
 		}
 
 		// Change pool type from idle to active
@@ -1166,6 +1275,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		// Serialize config
 		if persistedConfig != nil {
+			if err := ValidateSandboxConfigSize(persistedConfig); err != nil {
+				return err
+			}
 			configJSON, marshalErr := json.Marshal(persistedConfig)
 			if marshalErr != nil {
 				return fmt.Errorf("marshal config: %w", marshalErr)
@@ -1183,9 +1295,69 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}
 
+		var transferReservation *teamquota.Reservation
+		var replicaCommitment *warmPoolReplicaCommitment
+		if manageTeamQuota && isTeamOwnedWarmPoolTemplate(template, req.TeamID) {
+			if s.teamQuotaStore == nil {
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after missing quota store",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				return fmt.Errorf(
+					"%w: capacity store is not configured for team warm-pool transfer",
+					ErrTeamQuotaUnavailable,
+				)
+			}
+			transferReservation, err = s.prepareTeamWarmPoolTransfer(
+				ctx,
+				template,
+				req,
+				originalIdlePod,
+			)
+			if err != nil {
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after quota transfer rejection",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				return err
+			}
+			replicaCommitment, err = warmPoolReplicaCommitmentForIdlePod(
+				template,
+				originalIdlePod,
+				transferReservation.Operation.ID,
+			)
+			if err != nil {
+				s.abortTeamWarmPoolTransfer(ctx, transferReservation, "warm-pool ReplicaSet identity is invalid")
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after warm-pool identity failure",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				return err
+			}
+		}
+		rollbackTransfer := func(reason string) {
+			if transferReservation == nil {
+				return
+			}
+			abortCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			s.abortTeamWarmPoolTransfer(abortCtx, transferReservation, reason)
+		}
+
 		// Update the pod
 		var updatedPod *corev1.Pod
+		updateAttempted := false
 		updatePod := func(updateCtx context.Context) error {
+			updateAttempted = true
 			var updateErr error
 			updatedPod, updateErr = s.k8sClient.CoreV1().Pods(pod.Namespace).Update(updateCtx, pod, metav1.UpdateOptions{})
 			return updateErr
@@ -1197,6 +1369,55 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			updateErr = updatePod(ctx)
 		}
 		if updateErr != nil {
+			if updateAttempted {
+				observed, observeErr := s.k8sClient.CoreV1().
+					Pods(pod.Namespace).
+					Get(ctx, pod.Name, metav1.GetOptions{})
+				switch {
+				case observeErr == nil && hotClaimPodMatchesIntended(observed, pod):
+					// The API response was ambiguous, but the intended active
+					// ownership is durable. Continue and commit the transfer.
+					updatedPod = observed
+					updateErr = nil
+				case observeErr != nil && !k8serrors.IsNotFound(observeErr):
+					// Do not roll back a prepared transfer when ownership cannot
+					// be observed. Startup/periodic recovery resolves it.
+					claimedPod = pod
+					keepReservationUntilTTL()
+					s.observeIdleClaim(templateID, "update_observation_error")
+					return fmt.Errorf(
+						"observe ambiguous hot-claim update after %v: %w",
+						updateErr,
+						observeErr,
+					)
+				case observeErr == nil && !hotClaimPodMatchesOriginal(observed, originalIdlePod):
+					// A third state may be the partially applied intended
+					// mutation. Keep conservative quota holds for recovery.
+					claimedPod = observed
+					keepReservationUntilTTL()
+					s.observeIdleClaim(templateID, "update_observation_ambiguous")
+					return fmt.Errorf(
+						"hot-claim update returned %v and pod ownership is ambiguous",
+						updateErr,
+					)
+				case observeErr == nil &&
+					hotClaimPodMatchesOriginal(observed, originalIdlePod) &&
+					!isDefiniteHotClaimPodUpdateRejection(updateErr):
+					// A transport or server failure can race a late-applied
+					// update even when the first observation is still original.
+					// Keep the prepared transfer for a later stable recovery
+					// decision instead of aborting under a possibly active Pod.
+					keepReservationUntilTTL()
+					s.observeIdleClaim(templateID, "update_observation_pending")
+					return fmt.Errorf(
+						"hot-claim update outcome remains ambiguous after observing the original pod: %w",
+						updateErr,
+					)
+				}
+			}
+		}
+		if updateErr != nil {
+			rollbackTransfer("hot-claim pod update failed")
 			rollbackStateVolume()
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 				s.logger.Warn("Failed to roll back credential bindings after hot-claim update failure",
@@ -1219,9 +1440,73 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return updateErr
 		}
 		keepReservationUntilTTL()
+		claimedPod = updatedPod
 
-		if resizeQuota != nil {
-			resizedPod, resizeErr := s.resizeSandboxPodResources(ctx, updatedPod, *resizeQuota)
+		if transferReservation != nil {
+			quotaAdmission = &sandboxTeamQuotaAdmission{
+				Reservation:        transferReservation,
+				Transfer:           true,
+				WarmPoolCommitment: replicaCommitment,
+			}
+			if releaseErr := s.releaseWarmPoolReplicaCommitment(ctx, replicaCommitment); releaseErr != nil {
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after warm-pool scale-down failure",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				s.requestSandboxDeletionAfterClaimFailure(
+					updatedPod,
+					"warm-pool ReplicaSet scale-down failed",
+				)
+				return releaseErr
+			}
+			quotaAdmission.WarmPoolCommitmentDrained = true
+			if commitErr := s.commitTeamWarmPoolTransfer(
+				ctx,
+				transferReservation,
+				replicaCommitment.observedSource,
+			); commitErr != nil {
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after quota transfer commit failure",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				s.requestSandboxDeletionAfterClaimFailure(updatedPod, "warm-pool quota transfer commit failed")
+				return commitErr
+			}
+			quotaAdmission.Committed = true
+			if clearErr := s.clearWarmPoolReplicaCommitment(ctx, replicaCommitment); clearErr != nil {
+				s.logWarmPoolCommitmentMarkerCleanupFailure(originalIdlePod, clearErr)
+			}
+		}
+
+		if resizeLimits != nil {
+			var resizedPod *corev1.Pod
+			var resizeErr error
+			if transferReservation != nil {
+				// The committed warm-pool transfer accounts for the Pod's
+				// current physical resources. Admit the requested target as a
+				// separate resize before changing those resources.
+				resizedPod, resizeErr = s.resizeSandboxPodResourcesWithTeamQuota(
+					ctx,
+					updatedPod,
+					template,
+					*resizeLimits,
+				)
+			} else {
+				// Non-transfer claims are already covered by their claim
+				// reservation. The internal helper is also used by tests and
+				// recovery paths that intentionally do not manage team quota.
+				resizedPod, resizeErr = s.resizeSandboxPodResources(
+					ctx,
+					updatedPod,
+					*resizeLimits,
+				)
+			}
 			if resizeErr != nil {
 				rollbackStateVolume()
 				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1230,7 +1515,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 						zap.Error(rollbackErr),
 					)
 				}
-				if k8serrors.IsConflict(resizeErr) {
+				if k8serrors.IsConflict(resizeErr) && transferReservation == nil {
 					s.observeIdleClaim(templateID, "resize_conflict")
 					restoreCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					if restoreErr := s.restoreIdlePodAfterHotClaimResizeConflict(restoreCtx, updatedPod, originalIdlePod); restoreErr != nil {
@@ -1272,11 +1557,14 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		if errors.Is(err, errNoIdlePod) ||
 			errors.Is(err, errIdlePodReservationConflict) ||
 			errors.Is(err, errIdlePodClaimLost) {
-			return nil, nil // No idle pod available
+			return nil, nil, nil // No idle pod available
 		}
-		return nil, err
+		if !manageTeamQuota {
+			return nil, nil, err
+		}
+		return claimedPod, quotaAdmission, err
 	}
-	return claimedPod, nil
+	return claimedPod, quotaAdmission, nil
 }
 
 func (s *SandboxService) isHotClaimableIdlePod(pod *corev1.Pod, desiredTemplateHash string) bool {
@@ -1320,6 +1608,35 @@ func isIdlePodLostDuringClaim(err error) bool {
 		strings.Contains(msg, "no new finalizers can be added if the object is being deleted")
 }
 
+func isDefiniteHotClaimPodUpdateRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	if k8serrors.IsNotFound(err) ||
+		k8serrors.IsAlreadyExists(err) ||
+		k8serrors.IsConflict(err) ||
+		k8serrors.IsInvalid(err) ||
+		k8serrors.IsGone(err) ||
+		k8serrors.IsResourceExpired(err) ||
+		k8serrors.IsNotAcceptable(err) ||
+		k8serrors.IsUnsupportedMediaType(err) ||
+		k8serrors.IsMethodNotSupported(err) ||
+		k8serrors.IsBadRequest(err) ||
+		k8serrors.IsUnauthorized(err) ||
+		k8serrors.IsForbidden(err) ||
+		k8serrors.IsRequestEntityTooLargeError(err) {
+		return true
+	}
+	var status k8serrors.APIStatus
+	if !errors.As(err, &status) {
+		return false
+	}
+	code := status.Status().Code
+	return code >= http.StatusBadRequest &&
+		code < http.StatusInternalServerError &&
+		code != http.StatusRequestTimeout
+}
+
 func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
 	return s.createNewPodWithReservation(ctx, template, req, nil)
 }
@@ -1335,11 +1652,11 @@ func (s *SandboxService) createNewPodWithReservation(ctx context.Context, templa
 	// Build pod spec before side-effecting resources so claims fail fast when the
 	// sandbox data plane has no ready nodes to receive the pod.
 	spec := v1alpha1.BuildPodSpec(template)
-	resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
+	resourceLimits, err := s.effectiveSandboxResourceLimits(template, req.Config)
 	if err != nil {
 		return nil, err
 	}
-	if err := applySandboxResourceQuotaToPodSpec(&spec, resourceQuota); err != nil {
+	if err := applySandboxResourceLimitsToPodSpec(&spec, resourceLimits); err != nil {
 		return nil, err
 	}
 	if err := s.ensureDataPlaneReadyCapacity(spec); err != nil {
@@ -1420,6 +1737,9 @@ func (s *SandboxService) createNewPodWithReservation(ctx context.Context, templa
 
 	// Serialize config
 	if persistedConfig != nil {
+		if err := ValidateSandboxConfigSize(persistedConfig); err != nil {
+			return nil, err
+		}
 		configJSON, err := json.Marshal(persistedConfig)
 		if err != nil {
 			return nil, fmt.Errorf("marshal config: %w", err)
@@ -1439,7 +1759,9 @@ func (s *SandboxService) createNewPodWithReservation(ctx context.Context, templa
 
 	// Create the pod
 	var createdPod *corev1.Pod
+	createAttempted := false
 	createPod := func(createCtx context.Context) error {
+		createAttempted = true
 		var createErr error
 		createdPod, createErr = s.k8sClient.CoreV1().Pods(template.ObjectMeta.Namespace).Create(createCtx, pod, metav1.CreateOptions{})
 		return createErr
@@ -1452,6 +1774,23 @@ func (s *SandboxService) createNewPodWithReservation(ctx context.Context, templa
 		err = createPod(ctx)
 	}
 	if err != nil {
+		if createAttempted && !definitivePodCreateRejection(err) {
+			observed, observeErr := s.k8sClient.CoreV1().
+				Pods(pod.Namespace).
+				Get(ctx, pod.Name, metav1.GetOptions{})
+			switch {
+			case observeErr == nil && coldCreatePodMatchesIntended(observed, pod):
+				return observed, fmt.Errorf("create pod response was ambiguous: %w", err)
+			case observeErr != nil && !k8serrors.IsNotFound(observeErr):
+				// Return the deterministic intended identity so the caller
+				// keeps quota pending and requests cleanup conservatively.
+				return pod, fmt.Errorf(
+					"create pod response was ambiguous (%v) and observation failed: %w",
+					err,
+					observeErr,
+				)
+			}
+		}
 		rollbackStateVolume()
 		if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
 			s.logger.Warn("Failed to clean up staged credential bindings after create failure",
@@ -1469,6 +1808,51 @@ func (s *SandboxService) createNewPodWithReservation(ctx context.Context, templa
 	)
 
 	return createdPod, nil
+}
+
+func definitivePodCreateRejection(err error) bool {
+	return k8serrors.IsInvalid(err) ||
+		k8serrors.IsForbidden(err) ||
+		k8serrors.IsUnauthorized(err) ||
+		k8serrors.IsBadRequest(err) ||
+		k8serrors.IsMethodNotSupported(err)
+}
+
+func coldCreatePodMatchesIntended(observed, intended *corev1.Pod) bool {
+	if observed == nil || intended == nil ||
+		observed.Namespace != intended.Namespace ||
+		observed.Name != intended.Name {
+		return false
+	}
+	return observed.Labels[controller.LabelPoolType] == controller.PoolTypeActive &&
+		sandboxIDFromPod(observed) == sandboxIDFromPod(intended) &&
+		strings.TrimSpace(observed.Annotations[controller.AnnotationTeamID]) ==
+			strings.TrimSpace(intended.Annotations[controller.AnnotationTeamID]) &&
+		runtimeGenerationFromPod(observed) == runtimeGenerationFromPod(intended)
+}
+
+func hotClaimPodMatchesIntended(observed, intended *corev1.Pod) bool {
+	if !coldCreatePodMatchesIntended(observed, intended) ||
+		string(observed.UID) != string(intended.UID) {
+		return false
+	}
+	return metav1.GetControllerOf(observed) == nil
+}
+
+func hotClaimPodMatchesOriginal(observed, original *corev1.Pod) bool {
+	if observed == nil || original == nil ||
+		observed.Namespace != original.Namespace ||
+		observed.Name != original.Name ||
+		string(observed.UID) != string(original.UID) ||
+		observed.Labels[controller.LabelPoolType] != controller.PoolTypeIdle {
+		return false
+	}
+	observedController := metav1.GetControllerOf(observed)
+	originalController := metav1.GetControllerOf(original)
+	if observedController == nil || originalController == nil {
+		return observedController == nil && originalController == nil
+	}
+	return observedController.UID == originalController.UID
 }
 
 func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod, reason string) {

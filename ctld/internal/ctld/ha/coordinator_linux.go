@@ -344,13 +344,14 @@ func (l *PrimaryLease) Close() error {
 }
 
 type wireMessage struct {
-	Version  int                          `json:"version"`
-	Type     string                       `json:"type"`
-	Sequence uint64                       `json:"sequence"`
-	Epoch    uint64                       `json:"epoch"`
-	Manifest *ctldportal.RecoveryManifest `json:"manifest,omitempty"`
-	Key      string                       `json:"key,omitempty"`
-	Error    string                       `json:"error,omitempty"`
+	Version      int                          `json:"version"`
+	Type         string                       `json:"type"`
+	Sequence     uint64                       `json:"sequence"`
+	Epoch        uint64                       `json:"epoch"`
+	Manifest     *ctldportal.RecoveryManifest `json:"manifest,omitempty"`
+	Key          string                       `json:"key,omitempty"`
+	Error        string                       `json:"error,omitempty"`
+	Capabilities []string                     `json:"capabilities,omitempty"`
 }
 
 const (
@@ -391,7 +392,13 @@ func (s *standbyState) receive(ctx context.Context, conn *net.UnixConn, onState 
 			return fmt.Errorf("decode ctld HA message: %w", err)
 		}
 		ackErr := s.apply(message, oob[:oobn])
-		ack := wireMessage{Version: protocolVersion, Type: messageAck, Sequence: message.Sequence, Epoch: message.Epoch}
+		ack := wireMessage{
+			Version:      protocolVersion,
+			Type:         messageAck,
+			Sequence:     message.Sequence,
+			Epoch:        message.Epoch,
+			Capabilities: []string{ctldportal.RecoveryCapabilityS0FSHandleJournal},
+		}
 		if ackErr != nil {
 			ack.Error = ackErr.Error()
 		}

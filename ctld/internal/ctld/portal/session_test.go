@@ -790,6 +790,117 @@ func TestLocalSessionRestoresOpenUnlinkedS0FSHandle(t *testing.T) {
 	}
 }
 
+func TestLocalSessionPersistsFileHandlesIncrementallyAndSkipsDirectories(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "engine.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+	node, err := engine.CreateFile(s0fs.RootInode, "file.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS,
+		S0FS: engine, Access: volume.AccessModeRWO, RootInode: fsmeta.Ino(s0fs.RootInode), RootPath: "/",
+	})
+	session := newLocalSession("vol-1", mgr, nil)
+	session.statePath = filepath.Join(t.TempDir(), "handles.json")
+	defer session.Close()
+
+	opened, err := session.Open(context.Background(), &pb.OpenRequest{Inode: node.Inode})
+	if err != nil {
+		t.Fatalf("Open(file) error = %v", err)
+	}
+	if _, err := os.Stat(session.statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot Stat() error = %v, want not exist before compaction", err)
+	}
+	journalInfo, err := os.Stat(s0fsHandleJournalPath(session.statePath))
+	if err != nil {
+		t.Fatalf("journal Stat() error = %v", err)
+	}
+	state, err := loadS0FSHandleState(session.statePath, "vol-1")
+	if err != nil {
+		t.Fatalf("loadS0FSHandleState() error = %v", err)
+	}
+	if got := state.FileHandles[opened.HandleId]; got != node.Inode {
+		t.Fatalf("replayed handle inode = %d, want %d", got, node.Inode)
+	}
+
+	dir, err := session.OpenDir(context.Background(), &pb.OpenDirRequest{Inode: s0fs.RootInode})
+	if err != nil {
+		t.Fatalf("OpenDir() error = %v", err)
+	}
+	if _, err := session.ReleaseDir(context.Background(), &pb.ReleaseDirRequest{
+		Inode: s0fs.RootInode, HandleId: dir.HandleId,
+	}); err != nil {
+		t.Fatalf("ReleaseDir() error = %v", err)
+	}
+	afterDirInfo, err := os.Stat(s0fsHandleJournalPath(session.statePath))
+	if err != nil {
+		t.Fatalf("journal Stat(after directory operations) error = %v", err)
+	}
+	if afterDirInfo.Size() != journalInfo.Size() {
+		t.Fatalf("journal size after directory operations = %d, want %d", afterDirInfo.Size(), journalInfo.Size())
+	}
+
+	if _, err := session.Release(context.Background(), &pb.ReleaseRequest{
+		Inode: node.Inode, HandleId: opened.HandleId,
+	}); err != nil {
+		t.Fatalf("Release(file) error = %v", err)
+	}
+	state, err = loadS0FSHandleState(session.statePath, "vol-1")
+	if err != nil {
+		t.Fatalf("loadS0FSHandleState(after release) error = %v", err)
+	}
+	if len(state.FileHandles) != 0 {
+		t.Fatalf("replayed file handles after release = %#v, want empty", state.FileHandles)
+	}
+}
+
+func TestLocalSessionFallsBackToSnapshotForLegacyStandby(t *testing.T) {
+	engine, err := s0fs.Open(context.Background(), s0fs.Config{
+		VolumeID: "vol-1",
+		WALPath:  filepath.Join(t.TempDir(), "engine.wal"),
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+	node, err := engine.CreateFile(s0fs.RootInode, "file.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	mgr := newLocalVolumeManager()
+	mgr.add(&volume.VolumeContext{
+		VolumeID: "vol-1", TeamID: "team-a", Backend: volume.BackendS0FS,
+		S0FS: engine, Access: volume.AccessModeRWO, RootInode: fsmeta.Ino(s0fs.RootInode), RootPath: "/",
+	})
+	session := newLocalSession("vol-1", mgr, nil)
+	session.statePath = filepath.Join(t.TempDir(), "handles.json")
+	session.incrementalReady = func() bool { return false }
+	defer session.Close()
+
+	opened, err := session.Open(context.Background(), &pb.OpenRequest{Inode: node.Inode})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	state, err := loadS0FSHandleSnapshot(session.statePath, "vol-1")
+	if err != nil {
+		t.Fatalf("loadS0FSHandleSnapshot() error = %v", err)
+	}
+	if got := state.FileHandles[opened.HandleId]; got != node.Inode {
+		t.Fatalf("snapshot handle inode = %d, want %d", got, node.Inode)
+	}
+	if _, err := os.Stat(s0fsHandleJournalPath(session.statePath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy fallback journal Stat() error = %v, want not exist", err)
+	}
+}
+
 func TestLocalSessionRestoresOpenUnlinkedS0FSHandleAfterProcessKill(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestLocalSessionS0FSProcessKillHelper$")
@@ -809,8 +920,8 @@ func TestLocalSessionRestoresOpenUnlinkedS0FSHandleAfterProcessKill(t *testing.T
 	if err != nil {
 		t.Fatalf("loadS0FSHandleState() error = %v", err)
 	}
-	if len(handleState.FileHandles) != 2 || len(handleState.UnlinkedFiles) != 1 {
-		t.Fatalf("recovered handle state = %#v, want two handles for one open-unlinked file", handleState)
+	if len(handleState.FileHandles) != 1 || len(handleState.UnlinkedFiles) != 1 {
+		t.Fatalf("recovered handle state = %#v, want one journal-replayed handle for an open-unlinked file", handleState)
 	}
 	handleIDs := make([]uint64, 0, len(handleState.FileHandles))
 	var inode uint64
@@ -854,14 +965,6 @@ func TestLocalSessionRestoresOpenUnlinkedS0FSHandleAfterProcessKill(t *testing.T
 	}
 	if _, err := session.Release(context.Background(), &pb.ReleaseRequest{
 		Inode: inode, HandleId: handleIDs[0],
-	}); err != nil {
-		t.Fatalf("Release(first recovered handle) error = %v", err)
-	}
-	if _, err := engine.GetAttr(inode); err != nil {
-		t.Fatalf("GetAttr(after first release) error = %v, want retained inode", err)
-	}
-	if _, err := session.Release(context.Background(), &pb.ReleaseRequest{
-		Inode: inode, HandleId: handleIDs[1],
 	}); err != nil {
 		t.Fatalf("Release(final recovered handle) error = %v", err)
 	}
@@ -910,6 +1013,11 @@ func TestLocalSessionS0FSProcessKillHelper(t *testing.T) {
 		Parent: s0fs.RootInode, Name: "transient.txt",
 	}); err != nil {
 		t.Fatalf("Unlink(transient.txt) error = %v", err)
+	}
+	if _, err := session.Release(context.Background(), &pb.ReleaseRequest{
+		Inode: created.Inode, HandleId: created.HandleId,
+	}); err != nil {
+		t.Fatalf("Release(first handle) error = %v", err)
 	}
 	if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
 		t.Fatalf("Kill(self) error = %v", err)

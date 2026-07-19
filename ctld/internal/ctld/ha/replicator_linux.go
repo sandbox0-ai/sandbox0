@@ -43,8 +43,9 @@ type Replicator struct {
 }
 
 type standbyClient struct {
-	conn  *net.UnixConn
-	ready bool
+	conn         *net.UnixConn
+	ready        bool
+	capabilities map[string]struct{}
 }
 
 func newReplicator(socket string, epoch uint64, logger *zap.Logger, onReady func(int)) (*Replicator, error) {
@@ -103,6 +104,27 @@ func (r *Replicator) StandbyCount() int {
 		}
 	}
 	return count
+}
+
+// SupportsRecoveryCapability reports whether incremental recovery state is
+// safe for every connected standby. No clients is safe because a newly
+// accepted client is added before capability negotiation and immediately
+// disables the incremental path until its first acknowledgement.
+func (r *Replicator) SupportsRecoveryCapability(capability string) bool {
+	if r == nil || strings.TrimSpace(capability) == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.clients) == 0 {
+		return true
+	}
+	for client := range r.clients {
+		if _, ok := client.capabilities[capability]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Replicator) Publish(ctx context.Context, manifest ctldportal.RecoveryManifest, channel *os.File) error {
@@ -197,6 +219,11 @@ func (r *Replicator) initializeClient(client *standbyClient) {
 		r.removeClient(client, fmt.Errorf("ctld HA snapshot provider unavailable"))
 		return
 	}
+	if err := r.send(r.ctx, client, wireMessage{Type: messagePing}, nil); err != nil {
+		r.opMu.Unlock()
+		r.removeClient(client, fmt.Errorf("negotiate ctld HA standby capabilities: %w", err))
+		return
+	}
 	target := &singleClientReplicator{parent: r, client: client}
 	if err := provider(r.ctx, target); err != nil {
 		r.opMu.Unlock()
@@ -274,6 +301,17 @@ func (r *Replicator) send(ctx context.Context, client *standbyClient, message wi
 	if ack.Error != "" {
 		return errors.New(ack.Error)
 	}
+	capabilities := make(map[string]struct{}, len(ack.Capabilities))
+	for _, capability := range ack.Capabilities {
+		if capability = strings.TrimSpace(capability); capability != "" {
+			capabilities[capability] = struct{}{}
+		}
+	}
+	r.mu.Lock()
+	if _, ok := r.clients[client]; ok {
+		client.capabilities = capabilities
+	}
+	r.mu.Unlock()
 	return nil
 }
 
@@ -343,6 +381,16 @@ type singleClientReplicator struct {
 
 func (r *singleClientReplicator) Ready() bool { return r != nil && r.client != nil }
 
+func (r *singleClientReplicator) SupportsRecoveryCapability(capability string) bool {
+	if r == nil || r.parent == nil || r.client == nil || strings.TrimSpace(capability) == "" {
+		return false
+	}
+	r.parent.mu.RLock()
+	defer r.parent.mu.RUnlock()
+	_, ok := r.client.capabilities[capability]
+	return ok
+}
+
 func (r *singleClientReplicator) Publish(ctx context.Context, manifest ctldportal.RecoveryManifest, channel *os.File) error {
 	return r.parent.send(ctx, r.client, wireMessage{Type: messagePublish, Manifest: &manifest}, channel)
 }
@@ -357,3 +405,5 @@ func (r *singleClientReplicator) Remove(ctx context.Context, key string) error {
 
 var _ ctldportal.PortalReplicator = (*Replicator)(nil)
 var _ ctldportal.PortalReplicator = (*singleClientReplicator)(nil)
+var _ ctldportal.PortalRecoveryCapabilityProvider = (*Replicator)(nil)
+var _ ctldportal.PortalRecoveryCapabilityProvider = (*singleClientReplicator)(nil)

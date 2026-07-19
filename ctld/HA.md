@@ -70,10 +70,14 @@ input. Runtime state uses backend-specific recovery:
 
 - S0FS reopens its node-local WAL only after promotion. Kernel inode IDs remain
   stable because S0FS persists them, and a separate handle state preserves
-  open and open-unlinked inode references. Handle updates use atomic renames so
-  they are visible to the same-node standby before the FUSE operation returns;
-  graceful handoff additionally syncs the final snapshot file before replacing
-  the previous state.
+  open and open-unlinked inode references. File-handle opens and closes append
+  constant-size recovery events that are visible to the same-node standby
+  before the FUSE operation returns. Periodic compaction and graceful handoff
+  replace the legacy snapshot atomically; handoff also syncs the final
+  snapshot. Directory handles are stateless because directory requests carry
+  the inode they operate on. During a rolling upgrade, a primary falls back to
+  snapshot updates until every connected standby advertises journal replay
+  support.
 - Rootfs-backed portals persist their inode-to-path and handle journal.
   Open-unlinked files move into a hidden orphan directory until the restored
   final handle is released.

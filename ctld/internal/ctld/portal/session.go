@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -309,6 +310,8 @@ type localSession struct {
 	statePath        string
 	stateMu          sync.Mutex
 	stateErr         error
+	recoveryJournal  *s0fsHandleStateJournal
+	incrementalReady func() bool
 }
 
 func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Logger) *localSession {
@@ -329,10 +332,17 @@ func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Lo
 	}
 }
 
-func (s *localSession) Close() { _ = s.persistDurableRecoveryState() }
+func (s *localSession) Close() {
+	_ = s.persistDurableRecoveryState()
+	_ = s.closeRecoveryJournal()
+}
 
 func (s *localSession) Handoff() error {
-	return s.persistDurableRecoveryState()
+	if err := s.persistDurableRecoveryState(); err != nil {
+		_ = s.closeRecoveryJournal()
+		return err
+	}
+	return s.closeRecoveryJournal()
 }
 
 func (s *localSession) RecoveryError() error {
@@ -356,22 +366,95 @@ func (s *localSession) persistRecoveryStateWithDurability(durable bool) error {
 	if s == nil || strings.TrimSpace(s.statePath) == "" || s.mgr == nil {
 		return nil
 	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.persistRecoveryStateLocked(durable)
+}
+
+func (s *localSession) persistRecoveryStateLocked(durable bool) error {
 	volCtx, err := s.mgr.GetVolume(s.volumeID)
 	if err != nil {
-		s.stateMu.Lock()
 		s.stateErr = err
-		s.stateMu.Unlock()
 		return err
+	}
+	handles := volCtx.SnapshotHandleState()
+	err = compactS0FSHandleState(s.statePath, s.volumeID, handles, durable, s.recoveryJournal)
+	s.stateErr = err
+	return err
+}
+
+func (s *localSession) persistFileHandleOpen(handleID, inode uint64) error {
+	if handleID == 0 {
+		return nil
+	}
+	return s.persistFileHandleEvent(s0fsHandleJournalEvent{
+		Version:   s0fsHandleJournalVersion,
+		VolumeID:  s.volumeID,
+		Operation: s0fsHandleJournalOperationOpen,
+		HandleID:  handleID,
+		Inode:     inode,
+	})
+}
+
+func (s *localSession) persistFileHandleClose(handleID uint64) error {
+	if handleID == 0 {
+		return nil
+	}
+	return s.persistFileHandleEvent(s0fsHandleJournalEvent{
+		Version:   s0fsHandleJournalVersion,
+		VolumeID:  s.volumeID,
+		Operation: s0fsHandleJournalOperationClose,
+		HandleID:  handleID,
+	})
+}
+
+func (s *localSession) persistFileHandleEvent(event s0fsHandleJournalEvent) error {
+	if s == nil || strings.TrimSpace(s.statePath) == "" || s.mgr == nil {
+		return nil
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	handles := volCtx.SnapshotHandleState()
-	if durable {
-		err = persistS0FSHandleState(s.statePath, s.volumeID, handles)
-	} else {
-		err = persistProcessLocalS0FSHandleState(s.statePath, s.volumeID, handles)
+	if s.incrementalReady != nil && !s.incrementalReady() {
+		return s.persistRecoveryStateLocked(false)
 	}
-	s.stateErr = err
+	if s.recoveryJournal == nil {
+		journal, err := openS0FSHandleStateJournal(s.statePath)
+		if err != nil {
+			s.stateErr = err
+			return err
+		}
+		s.recoveryJournal = journal
+	}
+	if err := s.recoveryJournal.Append(event); err != nil {
+		appendErr := err
+		if snapshotErr := s.persistRecoveryStateLocked(false); snapshotErr != nil {
+			s.stateErr = errors.Join(appendErr, snapshotErr)
+			return s.stateErr
+		}
+		s.stateErr = nil
+		return nil
+	}
+	if s.recoveryJournal.ShouldCompact() {
+		return s.persistRecoveryStateLocked(false)
+	}
+	s.stateErr = nil
+	return nil
+}
+
+func (s *localSession) closeRecoveryJournal() error {
+	if s == nil {
+		return nil
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.recoveryJournal == nil {
+		return nil
+	}
+	err := s.recoveryJournal.Close()
+	s.recoveryJournal = nil
+	if err != nil {
+		s.stateErr = err
+	}
 	return err
 }
 
@@ -453,7 +536,7 @@ func (s *localSession) Create(ctx context.Context, req *pb.CreateRequest) (*pb.N
 	if err != nil {
 		return nil, err
 	}
-	if err := s.persistRecoveryState(); err != nil {
+	if err := s.persistFileHandleOpen(resp.HandleId, resp.Inode); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -541,7 +624,7 @@ func (s *localSession) Open(ctx context.Context, req *pb.OpenRequest) (*pb.OpenR
 			s.trackReadOnlyHandle(req.VolumeId, resp.HandleId)
 		}
 	}
-	if err := s.persistRecoveryState(); err != nil {
+	if err := s.persistFileHandleOpen(resp.HandleId, req.Inode); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -618,7 +701,7 @@ func (s *localSession) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb
 				s.evictReadCache(volCtx, inode)
 				_ = volCtx.S0FS.Forget(inode)
 			}
-			if err := s.persistRecoveryState(); err != nil {
+			if err := s.persistFileHandleClose(req.HandleId); err != nil {
 				return nil, err
 			}
 			return &pb.Empty{}, nil
@@ -628,7 +711,7 @@ func (s *localSession) Release(ctx context.Context, req *pb.ReleaseRequest) (*pb
 	if err != nil {
 		return nil, err
 	}
-	if err := s.persistRecoveryState(); err != nil {
+	if err := s.persistFileHandleClose(req.HandleId); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -687,9 +770,6 @@ func (s *localSession) OpenDir(ctx context.Context, req *pb.OpenDirRequest) (*pb
 	if err != nil {
 		return nil, err
 	}
-	if err := s.persistRecoveryState(); err != nil {
-		return nil, err
-	}
 	return resp, nil
 }
 func (s *localSession) ReadDir(ctx context.Context, req *pb.ReadDirRequest) (*pb.ReadDirResponse, error) {
@@ -700,9 +780,6 @@ func (s *localSession) ReleaseDir(ctx context.Context, req *pb.ReleaseDirRequest
 	s.fix(&req.VolumeId)
 	resp, err := s.fs.ReleaseDir(s.ctx(ctx), req)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.persistRecoveryState(); err != nil {
 		return nil, err
 	}
 	return resp, nil

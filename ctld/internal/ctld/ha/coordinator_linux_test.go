@@ -28,13 +28,24 @@ func TestCoordinatorTransfersPortalAndPromotesStandby(t *testing.T) {
 		t.Fatalf("WaitForPrimary(primary) error = %v", err)
 	}
 	t.Cleanup(func() { _ = primary.Close() })
-	primary.Replicator.SetSnapshotProvider(func(context.Context, ctldportal.PortalReplicator) error { return nil })
+	capabilityDuringSnapshot := make(chan bool, 1)
+	primary.Replicator.SetSnapshotProvider(func(_ context.Context, target ctldportal.PortalReplicator) error {
+		provider, ok := target.(ctldportal.PortalRecoveryCapabilityProvider)
+		capabilityDuringSnapshot <- ok && provider.SupportsRecoveryCapability(ctldportal.RecoveryCapabilityS0FSHandleJournal)
+		return nil
+	})
 
 	standbyCoordinator := newTestCoordinator(t, root, "b")
 	standbyCtx, standbyCancel := context.WithCancel(context.Background())
 	defer standbyCancel()
 	standbyResult := waitForPrimaryAsync(standbyCtx, standbyCoordinator)
 	waitForStandbys(t, primary.Replicator, 1)
+	if supported := <-capabilityDuringSnapshot; !supported {
+		t.Fatal("standby capability was not negotiated before snapshot synchronization")
+	}
+	if !primary.Replicator.SupportsRecoveryCapability(ctldportal.RecoveryCapabilityS0FSHandleJournal) {
+		t.Fatal("standby did not advertise S0FS handle journal recovery")
+	}
 
 	channel := writeTestChannel(t, "portal-channel")
 	manifest := testManifest("pod-1\x00workspace")
@@ -276,6 +287,27 @@ func waitForStandbys(t *testing.T, replicator *Replicator, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("standby count = %d, want %d", replicator.StandbyCount(), want)
+}
+
+func TestReplicatorRecoveryCapabilityRequiresEveryConnectedStandby(t *testing.T) {
+	replicator := &Replicator{clients: make(map[*standbyClient]struct{})}
+	if !replicator.SupportsRecoveryCapability(ctldportal.RecoveryCapabilityS0FSHandleJournal) {
+		t.Fatal("SupportsRecoveryCapability() = false without a standby, want true")
+	}
+
+	current := &standbyClient{capabilities: map[string]struct{}{
+		ctldportal.RecoveryCapabilityS0FSHandleJournal: {},
+	}}
+	replicator.clients[current] = struct{}{}
+	if !replicator.SupportsRecoveryCapability(ctldportal.RecoveryCapabilityS0FSHandleJournal) {
+		t.Fatal("SupportsRecoveryCapability() = false for current standby, want true")
+	}
+
+	legacy := &standbyClient{}
+	replicator.clients[legacy] = struct{}{}
+	if replicator.SupportsRecoveryCapability(ctldportal.RecoveryCapabilityS0FSHandleJournal) {
+		t.Fatal("SupportsRecoveryCapability() = true with legacy standby, want false")
+	}
 }
 
 func onlyReadyClient(t *testing.T, replicator *Replicator) *standbyClient {

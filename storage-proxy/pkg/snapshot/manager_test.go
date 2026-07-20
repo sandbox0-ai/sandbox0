@@ -111,6 +111,10 @@ func (r *fakeRepo) ListSnapshotsByVolume(ctx context.Context, volumeID string) (
 	return snaps, nil
 }
 
+func (r *fakeRepo) ListSnapshotsByVolumeForUpdate(ctx context.Context, tx pgx.Tx, volumeID string) ([]*db.Snapshot, error) {
+	return r.ListSnapshotsByVolume(ctx, volumeID)
+}
+
 func (r *fakeRepo) ListSandboxVolumesBySource(ctx context.Context, sourceVolumeID string) ([]*db.SandboxVolume, error) {
 	var volumes []*db.SandboxVolume
 	for _, volume := range r.volumes {
@@ -630,6 +634,70 @@ func TestDeleteSnapshotRecordsMetering(t *testing.T) {
 	}
 	if len(meteringRecorder.watermarks) != 2 {
 		t.Fatalf("expected two watermarks, got %d", len(meteringRecorder.watermarks))
+	}
+}
+
+func TestDeleteSnapshotsForVolumeTxRecordsMetering(t *testing.T) {
+	repo := newFakeRepo()
+	createdAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	repo.snapshots["snap1"] = &db.Snapshot{
+		ID:        "snap1",
+		VolumeID:  "vol1",
+		TeamID:    "team1",
+		UserID:    "user1",
+		SizeBytes: 128,
+		CreatedAt: createdAt,
+	}
+	repo.snapshots["snap2"] = &db.Snapshot{
+		ID:        "snap2",
+		VolumeID:  "vol1",
+		TeamID:    "team1",
+		UserID:    "user1",
+		SizeBytes: 256,
+		CreatedAt: createdAt.Add(time.Hour),
+	}
+	mgr := newTestManager(repo, nil)
+	mgr.config.RegionID = "aws-us-east-1"
+	meteringRecorder := &fakeMeteringRecorder{}
+	mgr.SetMeteringRepository(meteringRecorder)
+	deletedAt := time.Date(2026, 3, 14, 15, 30, 0, 0, time.UTC)
+
+	if err := mgr.DeleteSnapshotsForVolumeTx(context.Background(), nil, "vol1", "team1", deletedAt); err != nil {
+		t.Fatalf("DeleteSnapshotsForVolumeTx() error = %v", err)
+	}
+	if len(repo.snapshots) != 0 {
+		t.Fatalf("remaining snapshots = %v, want none", repo.snapshots)
+	}
+	if len(meteringRecorder.events) != 2 {
+		t.Fatalf("event count = %d, want 2", len(meteringRecorder.events))
+	}
+	if len(meteringRecorder.closedStorage) != 2 {
+		t.Fatalf("closed storage count = %d, want 2", len(meteringRecorder.closedStorage))
+	}
+	if len(meteringRecorder.watermarks) != 4 {
+		t.Fatalf("watermark count = %d, want 4", len(meteringRecorder.watermarks))
+	}
+
+	eventSubjects := make(map[string]bool, 2)
+	for _, event := range meteringRecorder.events {
+		if event.EventType != metering.EventTypeSnapshotDeleted {
+			t.Fatalf("event type = %q, want %q", event.EventType, metering.EventTypeSnapshotDeleted)
+		}
+		if !event.OccurredAt.Equal(deletedAt) {
+			t.Fatalf("event occurred_at = %v, want %v", event.OccurredAt, deletedAt)
+		}
+		eventSubjects[event.SubjectID] = true
+	}
+	if !eventSubjects["snap1"] || !eventSubjects["snap2"] {
+		t.Fatalf("event subjects = %v, want snap1 and snap2", eventSubjects)
+	}
+	for _, observation := range meteringRecorder.closedStorage {
+		if observation.SubjectType != metering.SubjectTypeSnapshot {
+			t.Fatalf("observation subject type = %q, want %q", observation.SubjectType, metering.SubjectTypeSnapshot)
+		}
+		if !observation.ObservedAt.Equal(deletedAt) {
+			t.Fatalf("observation observed_at = %v, want %v", observation.ObservedAt, deletedAt)
+		}
 	}
 }
 

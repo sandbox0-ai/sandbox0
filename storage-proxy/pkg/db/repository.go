@@ -657,7 +657,16 @@ func (r *Repository) getSnapshot(ctx context.Context, db DB, id string, forUpdat
 
 // ListSnapshotsByVolume retrieves all snapshots for a volume
 func (r *Repository) ListSnapshotsByVolume(ctx context.Context, volumeID string) ([]*Snapshot, error) {
-	rows, err := r.pool.Query(ctx, `
+	return r.listSnapshotsByVolume(ctx, r.pool, volumeID, false)
+}
+
+// ListSnapshotsByVolumeForUpdate retrieves and locks all snapshots for a volume.
+func (r *Repository) ListSnapshotsByVolumeForUpdate(ctx context.Context, tx pgx.Tx, volumeID string) ([]*Snapshot, error) {
+	return r.listSnapshotsByVolume(ctx, tx, volumeID, true)
+}
+
+func (r *Repository) listSnapshotsByVolume(ctx context.Context, db DB, volumeID string, forUpdate bool) ([]*Snapshot, error) {
+	query := `
 		SELECT
 			id, volume_id, team_id, user_id,
 			root_inode, source_inode,
@@ -666,7 +675,12 @@ func (r *Repository) ListSnapshotsByVolume(ctx context.Context, volumeID string)
 		FROM sandbox_volume_snapshots
 		WHERE volume_id = $1
 		ORDER BY created_at DESC
-	`, volumeID)
+	`
+	if forUpdate {
+		query += " FOR UPDATE NOWAIT"
+	}
+
+	rows, err := db.Query(ctx, query, volumeID)
 	if err != nil {
 		return nil, fmt.Errorf("query snapshots: %w", err)
 	}

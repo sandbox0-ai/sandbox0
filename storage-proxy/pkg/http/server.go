@@ -37,6 +37,7 @@ type volumeRepository interface {
 	ListSandboxVolumesByTeam(ctx context.Context, teamID string) ([]*db.SandboxVolume, error)
 	ListOwnedSandboxVolumes(ctx context.Context, clusterID string, cleanupRequested *bool) ([]*db.OwnedSandboxVolume, error)
 	GetSandboxVolume(ctx context.Context, id string) (*db.SandboxVolume, error)
+	GetSandboxVolumeForUpdate(ctx context.Context, tx pgx.Tx, id string) (*db.SandboxVolume, error)
 	GetSandboxVolumeOwner(ctx context.Context, volumeID string) (*db.SandboxVolumeOwner, error)
 	GetOwnedSandboxVolumeByOwner(ctx context.Context, clusterID, sandboxID, purpose string) (*db.OwnedSandboxVolume, error)
 	GetActiveMounts(ctx context.Context, volumeID string, heartbeatTimeout int) ([]*db.VolumeMount, error)
@@ -78,6 +79,7 @@ type snapshotManager interface {
 	ExportSnapshotArchive(ctx context.Context, req *snapshot.ExportSnapshotRequest, w io.Writer) error
 	RestoreSnapshot(ctx context.Context, req *snapshot.RestoreSnapshotRequest) error
 	DeleteSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) error
+	DeleteSnapshotsForVolumeTx(ctx context.Context, tx pgx.Tx, volumeID, teamID string, deletedAt time.Time) error
 	DeleteVolumeObjectsIfUnreferenced(ctx context.Context, volume *db.SandboxVolume) error
 	ForkVolume(ctx context.Context, req *snapshot.ForkVolumeRequest) (*db.SandboxVolume, error)
 	CreateVolumeFromSnapshot(ctx context.Context, req *snapshot.CreateVolumeFromSnapshotRequest) (*db.SandboxVolume, error)

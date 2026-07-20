@@ -36,6 +36,7 @@ type repository interface {
 	CreateSandboxVolume(context.Context, *db.SandboxVolume) error
 	CreateSandboxVolumeTx(context.Context, pgx.Tx, *db.SandboxVolume) error
 	ListSnapshotsByVolume(context.Context, string) ([]*db.Snapshot, error)
+	ListSnapshotsByVolumeForUpdate(context.Context, pgx.Tx, string) ([]*db.Snapshot, error)
 	GetSnapshot(context.Context, string) (*db.Snapshot, error)
 	CreateSnapshot(context.Context, *db.Snapshot) error
 	DeleteSnapshot(context.Context, string) error
@@ -634,6 +635,44 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 	return nil
 }
 
+// DeleteSnapshotsForVolumeTx deletes every snapshot attached to a volume and
+// closes their metering projections in the caller's volume deletion transaction.
+func (m *Manager) DeleteSnapshotsForVolumeTx(ctx context.Context, tx pgx.Tx, volumeID, teamID string, deletedAt time.Time) error {
+	if deletedAt.IsZero() {
+		deletedAt = time.Now().UTC()
+	} else {
+		deletedAt = deletedAt.UTC()
+	}
+
+	snapshots, err := m.repo.ListSnapshotsByVolumeForUpdate(ctx, tx, volumeID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+			return ErrVolumeBusy
+		}
+		return fmt.Errorf("list volume snapshots: %w", err)
+	}
+
+	for _, snapshot := range snapshots {
+		if snapshot.VolumeID != volumeID || snapshot.TeamID != teamID {
+			return ErrSnapshotNotBelongToVolume
+		}
+		if err := m.repo.DeleteSnapshotTx(ctx, tx, snapshot.ID); err != nil {
+			return fmt.Errorf("delete snapshot record %s: %w", snapshot.ID, err)
+		}
+
+		deletedEvent := snapshotDeletedEventAt(m.regionID(), m.clusterID, snapshot, deletedAt)
+		if err := m.closeStorageObservationTx(ctx, tx, m.snapshotStorageObservation(ctx, snapshot, deletedAt)); err != nil {
+			return fmt.Errorf("close snapshot storage observation %s: %w", snapshot.ID, err)
+		}
+		if err := m.appendMeteringEventTx(ctx, tx, deletedEvent); err != nil {
+			return fmt.Errorf("append snapshot deletion event %s: %w", snapshot.ID, err)
+		}
+	}
+
+	return nil
+}
+
 func snapshotCreatedEvent(regionID, clusterID string, snapshot *db.Snapshot) *meteringpkg.Event {
 	return &meteringpkg.Event{
 		EventID:     fmt.Sprintf("snapshot/%s/created/%d", snapshot.ID, snapshot.CreatedAt.UTC().UnixNano()),
@@ -652,9 +691,13 @@ func snapshotCreatedEvent(regionID, clusterID string, snapshot *db.Snapshot) *me
 }
 
 func snapshotDeletedEvent(regionID, clusterID string, snapshot *db.Snapshot) *meteringpkg.Event {
-	now := time.Now().UTC()
+	return snapshotDeletedEventAt(regionID, clusterID, snapshot, time.Now().UTC())
+}
+
+func snapshotDeletedEventAt(regionID, clusterID string, snapshot *db.Snapshot, deletedAt time.Time) *meteringpkg.Event {
+	deletedAt = deletedAt.UTC()
 	return &meteringpkg.Event{
-		EventID:     fmt.Sprintf("snapshot/%s/deleted/%d", snapshot.ID, now.UnixNano()),
+		EventID:     fmt.Sprintf("snapshot/%s/deleted/%d", snapshot.ID, deletedAt.UnixNano()),
 		Producer:    "storage-proxy.snapshot",
 		RegionID:    regionID,
 		EventType:   meteringpkg.EventTypeSnapshotDeleted,
@@ -665,7 +708,7 @@ func snapshotDeletedEvent(regionID, clusterID string, snapshot *db.Snapshot) *me
 		VolumeID:    snapshot.VolumeID,
 		SnapshotID:  snapshot.ID,
 		ClusterID:   clusterID,
-		OccurredAt:  now,
+		OccurredAt:  deletedAt,
 	}
 }
 

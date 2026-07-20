@@ -49,6 +49,7 @@ const (
 var redisReservationScript = redis.NewScript(`
 local reservation_key = KEYS[1]
 local units_key = KEYS[2]
+local metadata_key = KEYS[3]
 
 local now_ms = tonumber(ARGV[1])
 local expires_at_ms = tonumber(ARGV[2])
@@ -64,25 +65,51 @@ if #expired > 0 then
   redis.call("HDEL", units_key, unpack(expired))
 end
 
-local reserved_units = 0
-local active = redis.call("ZRANGE", reservation_key, 0, -1)
-for _, token in ipairs(active) do
-  local units = tonumber(redis.call("HGET", units_key, token))
-  if units == nil or units <= 0 then
-    units = 1
+local active_count = redis.call("ZCARD", reservation_key)
+local metadata = redis.call("HMGET", metadata_key, "count", "units")
+local metadata_count = tonumber(metadata[1])
+local reserved_units = tonumber(metadata[2])
+if #expired > 0 or metadata_count == nil or reserved_units == nil or metadata_count ~= active_count then
+  reserved_units = 0
+  local active = redis.call("ZRANGE", reservation_key, 0, -1)
+  if #active > 0 then
+    local active_units = redis.call("HMGET", units_key, unpack(active))
+    for _, value in ipairs(active_units) do
+      local units = tonumber(value)
+      if units == nil or units <= 0 then
+        units = 1
+      end
+      reserved_units = reserved_units + units
+    end
   end
-  reserved_units = reserved_units + units
+  if active_count > 0 then
+    redis.call("HSET", metadata_key, "count", active_count, "units", reserved_units)
+    redis.call("PEXPIRE", metadata_key, ttl_ms)
+  else
+    redis.call("DEL", metadata_key)
+  end
 end
 
 local overlap_units = 0
 local seen = {}
+local overlap_tokens = {}
 for index = 8, #ARGV do
   local token = ARGV[index]
   if token ~= "" and seen[token] == nil then
     seen[token] = true
-    local score = tonumber(redis.call("ZSCORE", reservation_key, token))
-    if score ~= nil and score > now_ms then
-      local units = tonumber(redis.call("HGET", units_key, token))
+    table.insert(overlap_tokens, token)
+  end
+end
+if #overlap_tokens > 0 then
+  local active_tokens = redis.call("ZRANGE", reservation_key, 0, -1)
+  local active = {}
+  for _, token in ipairs(active_tokens) do
+    active[token] = true
+  end
+  local units_by_token = redis.call("HMGET", units_key, unpack(overlap_tokens))
+  for index, token in ipairs(overlap_tokens) do
+    if active[token] then
+      local units = tonumber(units_by_token[index])
       if units == nil or units <= 0 then
         units = 1
       end
@@ -107,11 +134,53 @@ if requested > available then
   return {0, in_flight, available}
 end
 
+if redis.call("ZSCORE", reservation_key, reservation_token) ~= false then
+  return redis.error_reply("claim start reservation token already exists")
+end
 redis.call("ZADD", reservation_key, expires_at_ms, reservation_token)
 redis.call("HSET", units_key, reservation_token, requested)
+redis.call("HSET", metadata_key, "count", active_count + 1, "units", reserved_units + requested)
 redis.call("PEXPIRE", reservation_key, ttl_ms)
 redis.call("PEXPIRE", units_key, ttl_ms)
+redis.call("PEXPIRE", metadata_key, ttl_ms)
 return {1, in_flight, available}
+`)
+
+var redisReservationReleaseScript = redis.NewScript(`
+local reservation_key = KEYS[1]
+local units_key = KEYS[2]
+local metadata_key = KEYS[3]
+local token = ARGV[1]
+
+local units = tonumber(redis.call("HGET", units_key, token))
+if units == nil or units <= 0 then
+  units = 1
+end
+local removed = redis.call("ZREM", reservation_key, token)
+redis.call("HDEL", units_key, token)
+if removed == 0 then
+  return 0
+end
+
+local active_count = redis.call("ZCARD", reservation_key)
+local metadata = redis.call("HMGET", metadata_key, "count", "units")
+local metadata_count = tonumber(metadata[1])
+local reserved_units = tonumber(metadata[2])
+if metadata_count == nil or reserved_units == nil or metadata_count ~= active_count + 1 then
+  redis.call("DEL", metadata_key)
+  return 1
+end
+
+if active_count == 0 then
+  redis.call("DEL", metadata_key)
+else
+  reserved_units = reserved_units - units
+  if reserved_units < 0 then
+    reserved_units = 0
+  end
+  redis.call("HSET", metadata_key, "count", active_count, "units", reserved_units)
+end
+return 1
 `)
 
 // Reason describes the caller reserving cluster start budget.
@@ -194,6 +263,7 @@ type Limiter struct {
 	lockResource        string
 	reservationKey      string
 	reservationUnitsKey string
+	reservationMetaKey  string
 	reservationTTL      time.Duration
 	perSandboxNode      int32
 	maxLimit            int32
@@ -285,6 +355,7 @@ func New(ctx context.Context, cfg Config) (*Limiter, error) {
 		keyPrefix := rediscache.JoinKeyPrefix(normalized.KeyPrefix, "manager", "claim-start", cfg.ClusterID)
 		limiter.reservationKey = rediscache.JoinKeyPrefix(keyPrefix, "reservations")
 		limiter.reservationUnitsKey = rediscache.JoinKeyPrefix(keyPrefix, "reservation-units")
+		limiter.reservationMetaKey = rediscache.JoinKeyPrefix(keyPrefix, "reservation-metadata")
 		limiter.reservationTTL = defaultReservationTTL
 	}
 
@@ -509,7 +580,7 @@ func (l *Limiter) runRedisAdmission(
 	result, err := redisReservationScript.Run(
 		opCtx,
 		l.redisClient,
-		[]string{l.reservationKey, l.reservationUnitsKey},
+		[]string{l.reservationKey, l.reservationUnitsKey, l.reservationMetaKey},
 		args...,
 	).Result()
 	if err != nil {
@@ -612,33 +683,16 @@ func (l *Limiter) releaseReservation(token string) {
 	if l == nil || l.redisClient == nil || token == "" {
 		return
 	}
-	if err := l.removeReservations(context.Background(), token); err != nil {
+	opCtx, cancel := rediscache.WithTimeout(context.Background(), l.redisTimeout)
+	defer cancel()
+	if err := redisReservationReleaseScript.Run(
+		opCtx,
+		l.redisClient,
+		[]string{l.reservationKey, l.reservationUnitsKey, l.reservationMetaKey},
+		token,
+	).Err(); err != nil {
 		l.logger.Warn("Failed to release claim start reservation", zap.String("token", token), zap.Error(err))
 	}
-}
-
-func (l *Limiter) removeReservations(ctx context.Context, tokens ...string) error {
-	if l == nil || l.redisClient == nil || len(tokens) == 0 {
-		return nil
-	}
-	args := make([]interface{}, 0, len(tokens))
-	for _, token := range tokens {
-		if token != "" {
-			args = append(args, token)
-		}
-	}
-	if len(args) == 0 {
-		return nil
-	}
-	opCtx, cancel := rediscache.WithTimeout(ctx, l.redisTimeout)
-	defer cancel()
-	pipe := l.redisClient.TxPipeline()
-	pipe.ZRem(opCtx, l.reservationKey, args...)
-	pipe.HDel(opCtx, l.reservationUnitsKey, tokens...)
-	if _, err := pipe.Exec(opCtx); err != nil {
-		return fmt.Errorf("remove claim start reservation: %w", err)
-	}
-	return nil
 }
 
 func (l *Limiter) limitForNodes(nodes int) int32 {

@@ -3,6 +3,7 @@ package startlimiter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -332,7 +333,6 @@ func TestRedisReserveAtomicallyEnforcesLimitAcrossInstances(t *testing.T) {
 			Redis: rediscache.Config{
 				URL:       "redis://" + redisServer.Addr() + "/0",
 				KeyPrefix: "test",
-				Timeout:   2 * time.Second,
 			},
 		})
 		if err != nil {
@@ -341,6 +341,24 @@ func TestRedisReserveAtomicallyEnforcesLimitAcrossInstances(t *testing.T) {
 		return limiter
 	}
 	limiters := []*Limiter{newLimiter(), newLimiter()}
+	var reservations []*Reservation
+	var observedPods []*corev1.Pod
+	for index := 0; index < 10; index++ {
+		reservation, _, err := limiters[0].Reserve(ctx, ReasonColdCreate, 1)
+		if err != nil {
+			t.Fatalf("seed Reserve() error = %v", err)
+		}
+		reservations = append(reservations, reservation)
+		pod := startingActivePod("default", fmt.Sprintf("active-starting-%d", index), "tmpl-a")
+		pod.Annotations = map[string]string{
+			AnnotationClaimStartReservation: reservation.Token(),
+		}
+		created, err := client.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("create observed pod: %v", err)
+		}
+		observedPods = append(observedPods, created)
+	}
 
 	type result struct {
 		reservation *Reservation
@@ -364,11 +382,12 @@ func TestRedisReserveAtomicallyEnforcesLimitAcrossInstances(t *testing.T) {
 	wg.Wait()
 	close(results)
 
-	var reservations []*Reservation
 	throttled := 0
+	admitted := 0
 	for result := range results {
 		if result.err == nil {
 			reservations = append(reservations, result.reservation)
+			admitted++
 			continue
 		}
 		if !errors.Is(result.err, ErrThrottled) {
@@ -386,12 +405,17 @@ func TestRedisReserveAtomicallyEnforcesLimitAcrossInstances(t *testing.T) {
 		}
 		throttled++
 	}
-	if len(reservations) != 80 || throttled != 80 {
-		t.Fatalf("reservations/throttled = %d/%d, want 80/80", len(reservations), throttled)
+	if admitted != 70 || len(reservations) != 80 || throttled != 90 {
+		t.Fatalf("admitted/active/throttled = %d/%d/%d, want 70/80/90", admitted, len(reservations), throttled)
 	}
 
 	for _, reservation := range reservations {
 		reservation.Release()
+	}
+	for _, pod := range observedPods {
+		if err := client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+			t.Fatalf("delete observed pod: %v", err)
+		}
 	}
 	snapshot, err := limiters[0].Snapshot(ctx)
 	if err != nil {
@@ -399,6 +423,59 @@ func TestRedisReserveAtomicallyEnforcesLimitAcrossInstances(t *testing.T) {
 	}
 	if snapshot.InFlight != 0 || snapshot.Available != 80 {
 		t.Fatalf("Snapshot() after release in-flight/available = %d/%d, want 0/80", snapshot.InFlight, snapshot.Available)
+	}
+}
+
+func TestRedisSnapshotRebuildsReservationMetadata(t *testing.T) {
+	ctx := context.Background()
+	redisServer := miniredis.RunT(t)
+	client := fake.NewSimpleClientset(readyNode("sandbox-a", nil, nil))
+	limiter, err := New(ctx, Config{
+		ClusterID:      "cluster-a",
+		K8sClient:      client,
+		PerSandboxNode: 5,
+		MaxLimit:       5,
+		Redis: rediscache.Config{
+			URL:       "redis://" + redisServer.Addr() + "/0",
+			KeyPrefix: "test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	const token = "existing"
+	if err := limiter.redisClient.ZAdd(ctx, limiter.reservationKey, redis.Z{
+		Score:  float64(time.Now().Add(time.Minute).UnixMilli()),
+		Member: token,
+	}).Err(); err != nil {
+		t.Fatalf("seed reservation: %v", err)
+	}
+	if err := limiter.redisClient.HSet(ctx, limiter.reservationUnitsKey, token, 3).Err(); err != nil {
+		t.Fatalf("seed reservation units: %v", err)
+	}
+
+	snapshot, err := limiter.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.InFlight != 3 || snapshot.Available != 2 {
+		t.Fatalf("Snapshot() in-flight/available = %d/%d, want 3/2", snapshot.InFlight, snapshot.Available)
+	}
+	metadata, err := limiter.redisClient.HGetAll(ctx, limiter.reservationMetaKey).Result()
+	if err != nil {
+		t.Fatalf("read reservation metadata: %v", err)
+	}
+	if metadata["count"] != "1" || metadata["units"] != "3" {
+		t.Fatalf("reservation metadata = %#v, want count=1 units=3", metadata)
+	}
+
+	limiter.releaseReservation(token)
+	snapshot, err = limiter.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot() after release error = %v", err)
+	}
+	if snapshot.InFlight != 0 || snapshot.Available != 5 {
+		t.Fatalf("Snapshot() after release in-flight/available = %d/%d, want 0/5", snapshot.InFlight, snapshot.Available)
 	}
 }
 

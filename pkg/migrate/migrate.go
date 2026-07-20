@@ -23,11 +23,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 )
+
+var gooseMu sync.Mutex
 
 // Options configures the migrator behavior.
 type Options struct {
@@ -104,6 +107,9 @@ func Up(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ...O
 		return fmt.Errorf("resolve migrations directory: %w", err)
 	}
 
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+
 	// Convert pgx pool to sql.DB
 	db := stdlib.OpenDBFromPool(pool)
 	defer func() {
@@ -125,10 +131,7 @@ func Up(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ...O
 		goose.SetLogger(options.Logger)
 	}
 
-	// Set custom table name if provided
-	if options.TableName != "" {
-		goose.SetTableName(options.TableName)
-	}
+	setGooseTableName(options.TableName)
 
 	// Set schema search_path if specified
 	if options.Schema != "" {
@@ -162,6 +165,9 @@ func Status(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts 
 		return err
 	}
 
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+
 	db := stdlib.OpenDBFromPool(pool)
 	defer func() {
 		db.Close()
@@ -189,9 +195,7 @@ func Status(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts 
 		}
 	}
 
-	if options.TableName != "" {
-		goose.SetTableName(options.TableName)
-	}
+	setGooseTableName(options.TableName)
 
 	return goose.StatusContext(ctx, db, resolvedDir)
 }
@@ -210,6 +214,9 @@ func Down(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ..
 	if err != nil {
 		return fmt.Errorf("resolve migrations directory: %w", err)
 	}
+
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
 
 	db := stdlib.OpenDBFromPool(pool)
 	defer func() {
@@ -241,15 +248,20 @@ func Down(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ..
 		}
 	}
 
-	if options.TableName != "" {
-		goose.SetTableName(options.TableName)
-	}
+	setGooseTableName(options.TableName)
 
 	if err := goose.DownContext(ctx, db, resolvedDir); err != nil {
 		return fmt.Errorf("run down migration: %w", err)
 	}
 
 	return nil
+}
+
+func setGooseTableName(name string) {
+	if name == "" {
+		name = goose.DefaultTablename
+	}
+	goose.SetTableName(name)
 }
 
 // Create creates a new migration file in the specified directory.

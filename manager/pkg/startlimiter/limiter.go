@@ -32,7 +32,7 @@ const (
 	defaultMaxLimit       = int32(80)
 	defaultRetryAfter     = time.Second
 	defaultReservationTTL = 5 * time.Minute
-	redisScriptAttempts   = 2
+	redisScriptAttempts   = 3
 
 	labelTemplateID = "sandbox0.ai/template-id"
 	labelPoolType   = "sandbox0.ai/pool-type"

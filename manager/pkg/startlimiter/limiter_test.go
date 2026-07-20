@@ -444,7 +444,7 @@ func TestRedisReserveRetriesAnAmbiguousTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	hook := &timeoutAfterSuccessfulScriptHook{}
+	hook := &timeoutAfterSuccessfulScriptHook{remaining: redisScriptAttempts - 1}
 	limiter.redisClient.AddHook(hook)
 
 	reservation, _, err := limiter.Reserve(ctx, ReasonColdCreate, 1)
@@ -452,8 +452,8 @@ func TestRedisReserveRetriesAnAmbiguousTimeout(t *testing.T) {
 		t.Fatalf("Reserve() error = %v", err)
 	}
 	defer reservation.Release()
-	if !hook.Injected() {
-		t.Fatal("Reserve() did not exercise an ambiguous Redis timeout")
+	if got := hook.InjectedTimeouts(); got != redisScriptAttempts-1 {
+		t.Fatalf("ambiguous Redis timeouts = %d, want %d", got, redisScriptAttempts-1)
 	}
 	active, err := limiter.redisClient.ZCard(ctx, limiter.reservationKey).Result()
 	if err != nil {
@@ -623,8 +623,9 @@ func TestRedisReserveRemovesExpiredReservation(t *testing.T) {
 }
 
 type timeoutAfterSuccessfulScriptHook struct {
-	mu       sync.Mutex
-	injected bool
+	mu        sync.Mutex
+	remaining int
+	injected  int
 }
 
 func (h *timeoutAfterSuccessfulScriptHook) DialHook(next redis.DialHook) redis.DialHook {
@@ -643,10 +644,11 @@ func (h *timeoutAfterSuccessfulScriptHook) ProcessHook(next redis.ProcessHook) r
 		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		if h.injected {
+		if h.remaining <= 0 {
 			return nil
 		}
-		h.injected = true
+		h.remaining--
+		h.injected++
 		return context.DeadlineExceeded
 	}
 }
@@ -655,7 +657,7 @@ func (h *timeoutAfterSuccessfulScriptHook) ProcessPipelineHook(next redis.Proces
 	return next
 }
 
-func (h *timeoutAfterSuccessfulScriptHook) Injected() bool {
+func (h *timeoutAfterSuccessfulScriptHook) InjectedTimeouts() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.injected

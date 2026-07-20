@@ -243,6 +243,7 @@ func main() {
 		K8sClient:        k8sClient,
 		NodeLister:       nodeLister,
 		PodLister:        podLister,
+		PodIndexer:       podInformer.Informer().GetIndexer(),
 		ReplicaSetLister: replicaSetLister,
 		PGPool:           pool,
 		Redis: rediscache.Config{

@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 const (
@@ -31,9 +32,13 @@ const (
 	defaultMaxLimit       = int32(80)
 	defaultRetryAfter     = time.Second
 	defaultReservationTTL = 5 * time.Minute
+	redisScriptAttempts   = 2
 
 	labelTemplateID = "sandbox0.ai/template-id"
 	labelPoolType   = "sandbox0.ai/pool-type"
+
+	startPressurePodIndexName  = "claimStartPressure"
+	startPressurePodIndexValue = "candidate"
 
 	// AnnotationClaimStartReservation marks a pod whose start is covered by an
 	// active Redis reservation, so pressure snapshots do not double-count it.
@@ -130,12 +135,16 @@ end
 if requested <= 0 then
   return {1, in_flight, available}
 end
-if requested > available then
-  return {0, in_flight, available}
-end
 
 if redis.call("ZSCORE", reservation_key, reservation_token) ~= false then
-  return redis.error_reply("claim start reservation token already exists")
+  local existing_units = tonumber(redis.call("HGET", units_key, reservation_token))
+  if existing_units == nil or existing_units ~= requested then
+    return redis.error_reply("claim start reservation token units mismatch")
+  end
+  return {1, in_flight, available}
+end
+if requested > available then
+  return {0, in_flight, available}
 end
 redis.call("ZADD", reservation_key, expires_at_ms, reservation_token)
 redis.call("HSET", units_key, reservation_token, requested)
@@ -241,6 +250,7 @@ type Config struct {
 	K8sClient           kubernetes.Interface
 	NodeLister          corelisters.NodeLister
 	PodLister           corelisters.PodLister
+	PodIndexer          cache.Indexer
 	ReplicaSetLister    appslisters.ReplicaSetLister
 	PGPool              *pgxpool.Pool
 	Redis               rediscache.Config
@@ -255,6 +265,7 @@ type Limiter struct {
 	k8sClient           kubernetes.Interface
 	nodeLister          corelisters.NodeLister
 	podLister           corelisters.PodLister
+	podIndexer          cache.Indexer
 	replicaSetLister    appslisters.ReplicaSetLister
 	pgLocker            *pglock.Locker
 	redisClient         *redis.Client
@@ -324,11 +335,15 @@ func New(ctx context.Context, cfg Config) (*Limiter, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureStartPressurePodIndex(cfg.PodIndexer); err != nil {
+		return nil, fmt.Errorf("configure claim start pressure pod index: %w", err)
+	}
 
 	limiter := &Limiter{
 		k8sClient:          cfg.K8sClient,
 		nodeLister:         cfg.NodeLister,
 		podLister:          cfg.PodLister,
+		podIndexer:         cfg.PodIndexer,
 		replicaSetLister:   cfg.ReplicaSetLister,
 		pgLocker:           pglock.New(cfg.PGPool),
 		backend:            BackendPostgres,
@@ -575,14 +590,7 @@ func (l *Limiter) runRedisAdmission(
 		args = append(args, reservationToken)
 	}
 
-	opCtx, cancel := rediscache.WithTimeout(ctx, l.redisTimeout)
-	defer cancel()
-	result, err := redisReservationScript.Run(
-		opCtx,
-		l.redisClient,
-		[]string{l.reservationKey, l.reservationUnitsKey, l.reservationMetaKey},
-		args...,
-	).Result()
+	result, err := l.runRedisReservationScript(ctx, redisReservationScript, args...)
 	if err != nil {
 		return false, nil, fmt.Errorf("run redis claim start admission: %w", err)
 	}
@@ -626,6 +634,46 @@ func redisResultInt64(value interface{}) (int64, error) {
 	}
 }
 
+func (l *Limiter) runRedisReservationScript(
+	ctx context.Context,
+	script *redis.Script,
+	args ...interface{},
+) (interface{}, error) {
+	// A timeout can happen after Redis committed the script. Admission and
+	// release scripts are idempotent so the same operation can be retried safely.
+	var (
+		result interface{}
+		err    error
+	)
+	for attempt := 0; attempt < redisScriptAttempts; attempt++ {
+		opCtx, cancel := rediscache.WithTimeout(ctx, l.redisTimeout)
+		result, err = script.Run(
+			opCtx,
+			l.redisClient,
+			[]string{l.reservationKey, l.reservationUnitsKey, l.reservationMetaKey},
+			args...,
+		).Result()
+		cancel()
+		if err == nil {
+			return result, nil
+		}
+		if attempt+1 >= redisScriptAttempts || ctx.Err() != nil || !redisTimeoutError(err) {
+			return nil, err
+		}
+	}
+	return nil, err
+}
+
+func redisTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface {
+		Timeout() bool
+	}
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
 func (l *Limiter) listNodes(ctx context.Context) ([]*corev1.Node, error) {
 	if l.nodeLister != nil {
 		return l.nodeLister.List(labels.Everything())
@@ -642,6 +690,21 @@ func (l *Limiter) listNodes(ctx context.Context) ([]*corev1.Node, error) {
 }
 
 func (l *Limiter) listPods(ctx context.Context) ([]*corev1.Pod, error) {
+	if l.podIndexer != nil {
+		items, err := l.podIndexer.ByIndex(startPressurePodIndexName, startPressurePodIndexValue)
+		if err != nil {
+			return nil, err
+		}
+		pods := make([]*corev1.Pod, 0, len(items))
+		for _, item := range items {
+			pod, ok := item.(*corev1.Pod)
+			if !ok {
+				return nil, fmt.Errorf("claim start pressure index contains %T, want *corev1.Pod", item)
+			}
+			pods = append(pods, pod)
+		}
+		return pods, nil
+	}
 	selector, err := labels.Parse(l.podSelector)
 	if err != nil {
 		return nil, err
@@ -683,14 +746,11 @@ func (l *Limiter) releaseReservation(token string) {
 	if l == nil || l.redisClient == nil || token == "" {
 		return
 	}
-	opCtx, cancel := rediscache.WithTimeout(context.Background(), l.redisTimeout)
-	defer cancel()
-	if err := redisReservationReleaseScript.Run(
-		opCtx,
-		l.redisClient,
-		[]string{l.reservationKey, l.reservationUnitsKey, l.reservationMetaKey},
+	if _, err := l.runRedisReservationScript(
+		context.Background(),
+		redisReservationReleaseScript,
 		token,
-	).Err(); err != nil {
+	); err != nil {
 		l.logger.Warn("Failed to release claim start reservation", zap.String("token", token), zap.Error(err))
 	}
 }
@@ -800,6 +860,37 @@ func podReady(pod *corev1.Pod) bool {
 	}
 	live := findPodCondition(pod.Status.Conditions, v1alpha1.SandboxPodLivenessConditionType)
 	return live == nil || live.Status != corev1.ConditionFalse
+}
+
+func ensureStartPressurePodIndex(indexer cache.Indexer) error {
+	if indexer == nil {
+		return nil
+	}
+	if _, exists := indexer.GetIndexers()[startPressurePodIndexName]; exists {
+		return nil
+	}
+	// Ready active sandboxes do not contribute start pressure and can dominate
+	// the pod cache on high-density nodes, so keep them out of the hot-path scan.
+	return indexer.AddIndexers(cache.Indexers{
+		startPressurePodIndexName: func(obj interface{}) ([]string, error) {
+			pod, ok := obj.(*corev1.Pod)
+			if !ok {
+				return nil, fmt.Errorf("index claim start pressure for %T, want *corev1.Pod", obj)
+			}
+			if !countsForStartPressure(pod) {
+				return nil, nil
+			}
+			switch pod.Labels[labelPoolType] {
+			case poolTypeIdle:
+				return []string{startPressurePodIndexValue}, nil
+			case poolTypeActive:
+				if !podReady(pod) {
+					return []string{startPressurePodIndexValue}, nil
+				}
+			}
+			return nil, nil
+		},
+	})
 }
 
 func podConditionTrue(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) bool {

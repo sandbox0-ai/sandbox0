@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -426,6 +427,103 @@ func TestRedisReserveAtomicallyEnforcesLimitAcrossInstances(t *testing.T) {
 	}
 }
 
+func TestRedisReserveRetriesAnAmbiguousTimeout(t *testing.T) {
+	ctx := context.Background()
+	redisServer := miniredis.RunT(t)
+	client := fake.NewSimpleClientset(readyNode("sandbox-a", nil, nil))
+	limiter, err := New(ctx, Config{
+		ClusterID:      "cluster-a",
+		K8sClient:      client,
+		PerSandboxNode: 1,
+		MaxLimit:       1,
+		Redis: rediscache.Config{
+			URL:       "redis://" + redisServer.Addr() + "/0",
+			KeyPrefix: "test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	hook := &timeoutAfterSuccessfulScriptHook{}
+	limiter.redisClient.AddHook(hook)
+
+	reservation, _, err := limiter.Reserve(ctx, ReasonColdCreate, 1)
+	if err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	defer reservation.Release()
+	if !hook.Injected() {
+		t.Fatal("Reserve() did not exercise an ambiguous Redis timeout")
+	}
+	active, err := limiter.redisClient.ZCard(ctx, limiter.reservationKey).Result()
+	if err != nil {
+		t.Fatalf("count active reservations: %v", err)
+	}
+	if active != 1 {
+		t.Fatalf("active reservations = %d, want 1 after idempotent retry", active)
+	}
+}
+
+func TestSnapshotUsesStartPressurePodIndex(t *testing.T) {
+	ctx := context.Background()
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	client := fake.NewSimpleClientset(
+		readyNode("sandbox-a", nil, nil),
+		replicaSet("default", "tmpl-a-rs", "tmpl-a", 3),
+	)
+	limiter, err := New(ctx, Config{
+		K8sClient:      client,
+		PodIndexer:     indexer,
+		PerSandboxNode: 10,
+		MaxLimit:       10,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for index := 0; index < 100; index++ {
+		if err := indexer.Add(readyActivePod("default", fmt.Sprintf("active-ready-%d", index), "tmpl-a")); err != nil {
+			t.Fatalf("add ready active pod: %v", err)
+		}
+	}
+	readyIdle := readyIdlePod("default", "idle-ready", "tmpl-a")
+	startingIdle := startingIdlePod("default", "idle-starting", "tmpl-a")
+	startingActive := startingActivePod("default", "active-starting", "tmpl-a")
+	for _, pod := range []*corev1.Pod{readyIdle, startingIdle, startingActive} {
+		if err := indexer.Add(pod); err != nil {
+			t.Fatalf("add pressure pod: %v", err)
+		}
+	}
+
+	items, err := indexer.ByIndex(startPressurePodIndexName, startPressurePodIndexValue)
+	if err != nil {
+		t.Fatalf("read pressure pod index: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("pressure pod index size = %d, want 3 without 100 ready active pods", len(items))
+	}
+	snapshot, err := limiter.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if snapshot.InFlight != 3 {
+		t.Fatalf("InFlight = %d, want starting idle + starting active + ReplicaSet gap = 3", snapshot.InFlight)
+	}
+
+	readyActive := startingActive.DeepCopy()
+	readyActive.Status.Phase = corev1.PodRunning
+	readyActive.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	if err := indexer.Update(readyActive); err != nil {
+		t.Fatalf("mark active pod ready: %v", err)
+	}
+	items, err = indexer.ByIndex(startPressurePodIndexName, startPressurePodIndexValue)
+	if err != nil {
+		t.Fatalf("read pressure pod index after update: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("pressure pod index size after ready transition = %d, want 2", len(items))
+	}
+}
+
 func TestRedisSnapshotRebuildsReservationMetadata(t *testing.T) {
 	ctx := context.Background()
 	redisServer := miniredis.RunT(t)
@@ -522,6 +620,45 @@ func TestRedisReserveRemovesExpiredReservation(t *testing.T) {
 	if exists {
 		t.Fatal("expired reservation units were not removed")
 	}
+}
+
+type timeoutAfterSuccessfulScriptHook struct {
+	mu       sync.Mutex
+	injected bool
+}
+
+func (h *timeoutAfterSuccessfulScriptHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *timeoutAfterSuccessfulScriptHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		err := next(ctx, cmd)
+		if err != nil {
+			return err
+		}
+		name := strings.ToLower(cmd.Name())
+		if name != "eval" && name != "evalsha" {
+			return nil
+		}
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.injected {
+			return nil
+		}
+		h.injected = true
+		return context.DeadlineExceeded
+	}
+}
+
+func (h *timeoutAfterSuccessfulScriptHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *timeoutAfterSuccessfulScriptHook) Injected() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.injected
 }
 
 func readyNode(name string, labels map[string]string, taints []corev1.Taint) *corev1.Node {

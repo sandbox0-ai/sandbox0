@@ -57,7 +57,7 @@ type ManagerConfig struct {
 	// +kubebuilder:default=2
 	DatabaseMinConns int32 `yaml:"database_min_conns" json:"databaseMinConns"`
 
-	// RedisURL configures the Redis backend used for manager-wide admission locks.
+	// RedisURL configures the Redis backend used for manager-wide admission state.
 	// When empty, manager falls back to PostgreSQL advisory locks.
 	// +optional
 	RedisURL string `yaml:"redis_url" json:"-"`
@@ -312,9 +312,13 @@ type SandboxPodPlacementConfig struct {
 
 // ClaimStartLimiterConfig defines cluster-wide start admission limits.
 type ClaimStartLimiterConfig struct {
-	PerSandboxNode int32           `yaml:"per_sandbox_node" json:"-"`
-	MaxLimit       int32           `yaml:"max_limit" json:"-"`
-	LockTTL        metav1.Duration `yaml:"lock_ttl" json:"-"`
+	PerSandboxNode int32 `yaml:"per_sandbox_node" json:"-"`
+	MaxLimit       int32 `yaml:"max_limit" json:"-"`
+	// LockTTL is retained for backward-compatible config decoding and is ignored.
+	// Deprecated: Redis admission no longer uses a distributed lock.
+	LockTTL metav1.Duration `yaml:"lock_ttl" json:"-"`
+	// AcquireTimeout is retained for backward-compatible config decoding and is ignored.
+	// Deprecated: Redis admission no longer polls for a distributed lock.
 	AcquireTimeout metav1.Duration `yaml:"acquire_timeout" json:"-"`
 }
 
@@ -552,12 +556,6 @@ func applyClaimStartLimiterDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.ClaimStartLimiter.MaxLimit <= 0 {
 		cfg.ClaimStartLimiter.MaxLimit = 80
-	}
-	if cfg.ClaimStartLimiter.LockTTL.Duration == 0 {
-		cfg.ClaimStartLimiter.LockTTL = metav1.Duration{Duration: 5 * time.Second}
-	}
-	if cfg.ClaimStartLimiter.AcquireTimeout.Duration == 0 {
-		cfg.ClaimStartLimiter.AcquireTimeout = metav1.Duration{Duration: 250 * time.Millisecond}
 	}
 }
 

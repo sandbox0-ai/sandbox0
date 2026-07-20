@@ -29,8 +29,6 @@ import (
 const (
 	defaultPerSandboxNode = int32(30)
 	defaultMaxLimit       = int32(80)
-	defaultLockTTL        = 5 * time.Second
-	defaultAcquireTimeout = 250 * time.Millisecond
 	defaultRetryAfter     = time.Second
 	defaultReservationTTL = 5 * time.Minute
 
@@ -47,6 +45,74 @@ const (
 	BackendPostgres = "postgres_advisory_lock"
 	BackendRedis    = "redis"
 )
+
+var redisReservationScript = redis.NewScript(`
+local reservation_key = KEYS[1]
+local units_key = KEYS[2]
+
+local now_ms = tonumber(ARGV[1])
+local expires_at_ms = tonumber(ARGV[2])
+local ttl_ms = tonumber(ARGV[3])
+local limit = tonumber(ARGV[4])
+local observed_pressure = tonumber(ARGV[5])
+local requested = tonumber(ARGV[6])
+local reservation_token = ARGV[7]
+
+local expired = redis.call("ZRANGEBYSCORE", reservation_key, "-inf", now_ms)
+if #expired > 0 then
+  redis.call("ZREM", reservation_key, unpack(expired))
+  redis.call("HDEL", units_key, unpack(expired))
+end
+
+local reserved_units = 0
+local active = redis.call("ZRANGE", reservation_key, 0, -1)
+for _, token in ipairs(active) do
+  local units = tonumber(redis.call("HGET", units_key, token))
+  if units == nil or units <= 0 then
+    units = 1
+  end
+  reserved_units = reserved_units + units
+end
+
+local overlap_units = 0
+local seen = {}
+for index = 8, #ARGV do
+  local token = ARGV[index]
+  if token ~= "" and seen[token] == nil then
+    seen[token] = true
+    local score = tonumber(redis.call("ZSCORE", reservation_key, token))
+    if score ~= nil and score > now_ms then
+      local units = tonumber(redis.call("HGET", units_key, token))
+      if units == nil or units <= 0 then
+        units = 1
+      end
+      overlap_units = overlap_units + units
+    end
+  end
+end
+
+local in_flight = observed_pressure + reserved_units - overlap_units
+if in_flight < 0 then
+  in_flight = 0
+end
+local available = limit - in_flight
+if available < 0 then
+  available = 0
+end
+
+if requested <= 0 then
+  return {1, in_flight, available}
+end
+if requested > available then
+  return {0, in_flight, available}
+end
+
+redis.call("ZADD", reservation_key, expires_at_ms, reservation_token)
+redis.call("HSET", units_key, reservation_token, requested)
+redis.call("PEXPIRE", reservation_key, ttl_ms)
+redis.call("PEXPIRE", units_key, ttl_ms)
+return {1, in_flight, available}
+`)
 
 // Reason describes the caller reserving cluster start budget.
 type Reason string
@@ -67,15 +133,11 @@ type ThrottledError struct {
 	Units      int32
 	RetryAfter time.Duration
 	Snapshot   Snapshot
-	Message    string
 }
 
 func (e *ThrottledError) Error() string {
 	if e == nil {
 		return ErrThrottled.Error()
-	}
-	if e.Message != "" {
-		return e.Message
 	}
 	if e.Snapshot.Limit <= 0 {
 		return fmt.Sprintf("%s: no sandbox-ready nodes", ErrThrottled)
@@ -115,8 +177,6 @@ type Config struct {
 	Redis               rediscache.Config
 	PerSandboxNode      int32
 	MaxLimit            int32
-	LockTTL             time.Duration
-	AcquireTimeout      time.Duration
 	SandboxNodeSelector map[string]string
 	SandboxTolerations  []corev1.Toleration
 	Logger              *zap.Logger
@@ -132,12 +192,9 @@ type Limiter struct {
 	redisTimeout        time.Duration
 	backend             string
 	lockResource        string
-	lockKey             string
 	reservationKey      string
 	reservationUnitsKey string
-	lockTTL             time.Duration
 	reservationTTL      time.Duration
-	acquireTimeout      time.Duration
 	perSandboxNode      int32
 	maxLimit            int32
 	sandboxSelector     map[string]string
@@ -185,12 +242,6 @@ func New(ctx context.Context, cfg Config) (*Limiter, error) {
 	if cfg.MaxLimit <= 0 {
 		cfg.MaxLimit = defaultMaxLimit
 	}
-	if cfg.LockTTL <= 0 {
-		cfg.LockTTL = defaultLockTTL
-	}
-	if cfg.AcquireTimeout <= 0 {
-		cfg.AcquireTimeout = defaultAcquireTimeout
-	}
 	if cfg.Logger == nil {
 		cfg.Logger = zap.NewNop()
 	}
@@ -212,8 +263,6 @@ func New(ctx context.Context, cfg Config) (*Limiter, error) {
 		pgLocker:           pglock.New(cfg.PGPool),
 		backend:            BackendPostgres,
 		lockResource:       fmt.Sprintf("manager:claim-start:%s", cfg.ClusterID),
-		lockTTL:            cfg.LockTTL,
-		acquireTimeout:     cfg.AcquireTimeout,
 		perSandboxNode:     cfg.PerSandboxNode,
 		maxLimit:           cfg.MaxLimit,
 		sandboxSelector:    cloneStringMap(cfg.SandboxNodeSelector),
@@ -234,7 +283,6 @@ func New(ctx context.Context, cfg Config) (*Limiter, error) {
 		limiter.redisTimeout = normalized.Timeout
 		limiter.backend = BackendRedis
 		keyPrefix := rediscache.JoinKeyPrefix(normalized.KeyPrefix, "manager", "claim-start", cfg.ClusterID)
-		limiter.lockKey = rediscache.JoinKeyPrefix(keyPrefix, "lock")
 		limiter.reservationKey = rediscache.JoinKeyPrefix(keyPrefix, "reservations")
 		limiter.reservationUnitsKey = rediscache.JoinKeyPrefix(keyPrefix, "reservation-units")
 		limiter.reservationTTL = defaultReservationTTL
@@ -281,7 +329,7 @@ func (l *Limiter) Admit(ctx context.Context, reason Reason, units int32, mutate 
 	}
 
 	var snapshot *Snapshot
-	err := l.withLock(ctx, func(lockCtx context.Context) error {
+	err := l.withPostgresLock(ctx, func(lockCtx context.Context) error {
 		s, err := l.snapshotLocked(lockCtx)
 		if err != nil {
 			return err
@@ -315,7 +363,7 @@ func (l *Limiter) Reserve(ctx context.Context, reason Reason, units int32) (*Res
 	}
 	if l.redisClient == nil {
 		var snapshot *Snapshot
-		err := l.withLock(ctx, func(lockCtx context.Context) error {
+		err := l.withPostgresLock(ctx, func(lockCtx context.Context) error {
 			s, err := l.snapshotLocked(lockCtx)
 			if err != nil {
 				return err
@@ -334,34 +382,25 @@ func (l *Limiter) Reserve(ctx context.Context, reason Reason, units int32) (*Res
 		return nil, snapshot, err
 	}
 
-	var snapshot *Snapshot
-	var token string
-	err := l.withLock(ctx, func(lockCtx context.Context) error {
-		reservations, err := l.activeReservations(lockCtx)
-		if err != nil {
-			return err
-		}
-		s, err := l.snapshotLockedWithReservations(lockCtx, reservations)
-		if err != nil {
-			return err
-		}
-		snapshot = s
-		if s.Available < units {
-			return &ThrottledError{
-				Reason:     reason,
-				Units:      units,
-				RetryAfter: defaultRetryAfter,
-				Snapshot:   *s,
-			}
-		}
-		token, err = randomToken()
-		if err != nil {
-			return err
-		}
-		return l.addReservation(lockCtx, token, units)
-	})
+	observation, err := l.observeStartPressure(ctx)
 	if err != nil {
-		return nil, snapshot, err
+		return nil, nil, err
+	}
+	token, err := randomToken()
+	if err != nil {
+		return nil, nil, err
+	}
+	admitted, snapshot, err := l.runRedisAdmission(ctx, observation, token, units)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !admitted {
+		return nil, snapshot, &ThrottledError{
+			Reason:     reason,
+			Units:      units,
+			RetryAfter: defaultRetryAfter,
+			Snapshot:   *snapshot,
+		}
 	}
 	return &Reservation{limiter: l, token: token}, snapshot, nil
 }
@@ -371,83 +410,51 @@ func (l *Limiter) Snapshot(ctx context.Context) (*Snapshot, error) {
 	if l == nil {
 		return nil, nil
 	}
-	reservations, err := l.activeReservations(ctx)
+	if l.redisClient == nil {
+		return l.snapshotLocked(ctx)
+	}
+	observation, err := l.observeStartPressure(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return l.snapshotLockedWithReservations(ctx, reservations)
+	_, snapshot, err := l.runRedisAdmission(ctx, observation, "", 0)
+	return snapshot, err
 }
 
-func (l *Limiter) withLock(ctx context.Context, fn func(context.Context) error) error {
-	if l.redisClient != nil {
-		return l.withRedisLock(ctx, fn)
-	}
+func (l *Limiter) withPostgresLock(ctx context.Context, fn func(context.Context) error) error {
 	return l.pgLocker.WithExclusive(ctx, l.lockResource, fn)
 }
 
-func (l *Limiter) withRedisLock(ctx context.Context, fn func(context.Context) error) error {
-	token, err := randomToken()
-	if err != nil {
-		return err
-	}
-	deadline := time.Now().Add(l.acquireTimeout)
-	for {
-		opCtx, cancel := rediscache.WithTimeout(ctx, l.redisTimeout)
-		ok, setErr := l.redisClient.SetNX(opCtx, l.lockKey, token, l.lockTTL).Result()
-		cancel()
-		if setErr != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if errors.Is(setErr, context.DeadlineExceeded) {
-				return &ThrottledError{
-					RetryAfter: defaultRetryAfter,
-					Message:    "claim start admission lock is unavailable",
-				}
-			}
-			return fmt.Errorf("acquire redis claim start lock: %w", setErr)
-		}
-		if ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			return &ThrottledError{
-				RetryAfter: defaultRetryAfter,
-				Message:    "claim start admission lock is busy",
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	defer l.releaseRedisLock(token)
-	return fn(ctx)
-}
-
-func (l *Limiter) releaseRedisLock(token string) {
-	if l == nil || l.redisClient == nil {
-		return
-	}
-	opCtx, cancel := rediscache.WithTimeout(context.Background(), l.redisTimeout)
-	defer cancel()
-	const releaseScript = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
-	if err := l.redisClient.Eval(opCtx, releaseScript, []string{l.lockKey}, token).Err(); err != nil {
-		l.logger.Warn("Failed to release redis claim start lock", zap.Error(err))
-	}
-}
-
 func (l *Limiter) snapshotLocked(ctx context.Context) (*Snapshot, error) {
-	return l.snapshotLockedWithReservations(ctx, nil)
+	observation, err := l.observeStartPressure(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return observation.snapshot(l.backend, observation.inFlight), nil
 }
 
-type activeReservationSnapshot struct {
-	tokens map[string]struct{}
-	units  int32
+type startPressureObservation struct {
+	warmReadySandboxNodes int
+	limit                 int32
+	inFlight              int32
+	reservationTokens     []string
 }
 
-func (l *Limiter) snapshotLockedWithReservations(ctx context.Context, reservations *activeReservationSnapshot) (*Snapshot, error) {
+func (o *startPressureObservation) snapshot(backend string, inFlight int32) *Snapshot {
+	available := o.limit - inFlight
+	if available < 0 {
+		available = 0
+	}
+	return &Snapshot{
+		Backend:               backend,
+		WarmReadySandboxNodes: o.warmReadySandboxNodes,
+		Limit:                 o.limit,
+		InFlight:              inFlight,
+		Available:             available,
+	}
+}
+
+func (l *Limiter) observeStartPressure(ctx context.Context) (*startPressureObservation, error) {
 	nodes, err := l.listNodes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes for claim start limiter: %w", err)
@@ -464,68 +471,88 @@ func (l *Limiter) snapshotLockedWithReservations(ctx context.Context, reservatio
 		return nil, fmt.Errorf("list pool replicasets for claim start limiter: %w", err)
 	}
 
-	inFlight := startPressure(pods, replicaSets, reservationTokens(reservations))
-	if reservations != nil {
-		inFlight += reservations.units
-	}
-	available := limit - inFlight
-	if available < 0 {
-		available = 0
-	}
-	return &Snapshot{
-		Backend:               l.backend,
-		WarmReadySandboxNodes: warmReadyNodes,
-		Limit:                 limit,
-		InFlight:              inFlight,
-		Available:             available,
+	inFlight, reservationTokens := startPressure(pods, replicaSets)
+	return &startPressureObservation{
+		warmReadySandboxNodes: warmReadyNodes,
+		limit:                 limit,
+		inFlight:              inFlight,
+		reservationTokens:     reservationTokens,
 	}, nil
 }
 
-func reservationTokens(reservations *activeReservationSnapshot) map[string]struct{} {
-	if reservations == nil {
-		return nil
+func (l *Limiter) runRedisAdmission(
+	ctx context.Context,
+	observation *startPressureObservation,
+	token string,
+	units int32,
+) (bool, *Snapshot, error) {
+	if l == nil || l.redisClient == nil || observation == nil {
+		return false, nil, fmt.Errorf("redis claim start admission is not configured")
 	}
-	return reservations.tokens
+	now := time.Now()
+	args := make([]interface{}, 0, 7+len(observation.reservationTokens))
+	args = append(args,
+		now.UnixMilli(),
+		now.Add(l.reservationTTL).UnixMilli(),
+		l.reservationTTL.Milliseconds(),
+		observation.limit,
+		observation.inFlight,
+		units,
+		token,
+	)
+	for _, reservationToken := range observation.reservationTokens {
+		args = append(args, reservationToken)
+	}
+
+	opCtx, cancel := rediscache.WithTimeout(ctx, l.redisTimeout)
+	defer cancel()
+	result, err := redisReservationScript.Run(
+		opCtx,
+		l.redisClient,
+		[]string{l.reservationKey, l.reservationUnitsKey},
+		args...,
+	).Result()
+	if err != nil {
+		return false, nil, fmt.Errorf("run redis claim start admission: %w", err)
+	}
+	values, ok := result.([]interface{})
+	if !ok || len(values) != 3 {
+		return false, nil, fmt.Errorf("unexpected redis claim start admission response: %T", result)
+	}
+	admitted, err := redisResultInt64(values[0])
+	if err != nil {
+		return false, nil, fmt.Errorf("parse redis claim start admission decision: %w", err)
+	}
+	inFlight, err := redisResultInt64(values[1])
+	if err != nil {
+		return false, nil, fmt.Errorf("parse redis claim start in-flight count: %w", err)
+	}
+	available, err := redisResultInt64(values[2])
+	if err != nil {
+		return false, nil, fmt.Errorf("parse redis claim start available count: %w", err)
+	}
+	if inFlight < 0 || inFlight > int64(^uint32(0)>>1) {
+		return false, nil, fmt.Errorf("redis claim start in-flight count is out of range: %d", inFlight)
+	}
+	if available < 0 || available > int64(^uint32(0)>>1) {
+		return false, nil, fmt.Errorf("redis claim start available count is out of range: %d", available)
+	}
+	snapshot := observation.snapshot(l.backend, int32(inFlight))
+	snapshot.Available = int32(available)
+	return admitted == 1, snapshot, nil
 }
 
-func (l *Limiter) activeReservations(ctx context.Context) (*activeReservationSnapshot, error) {
-	if l == nil || l.redisClient == nil {
-		return nil, nil
+func redisResultInt64(value interface{}) (int64, error) {
+	switch typed := value.(type) {
+	case int64:
+		return typed, nil
+	case string:
+		return strconv.ParseInt(typed, 10, 64)
+	case []byte:
+		return strconv.ParseInt(string(typed), 10, 64)
+	default:
+		return 0, fmt.Errorf("unexpected integer type %T", value)
 	}
-	nowMs := time.Now().UnixMilli()
-	expired, err := l.redisZRangeByScore(ctx, l.reservationKey, "-inf", strconv.FormatInt(nowMs, 10))
-	if err != nil {
-		return nil, fmt.Errorf("list expired claim start reservations: %w", err)
-	}
-	if len(expired) > 0 {
-		if err := l.removeReservations(ctx, expired...); err != nil {
-			return nil, err
-		}
-	}
-	active, err := l.redisZRangeByScore(ctx, l.reservationKey, strconv.FormatInt(nowMs+1, 10), "+inf")
-	if err != nil {
-		return nil, fmt.Errorf("list active claim start reservations: %w", err)
-	}
-	if len(active) == 0 {
-		return &activeReservationSnapshot{}, nil
-	}
-	values, err := l.redisHMGet(ctx, active...)
-	if err != nil {
-		return nil, err
-	}
-	snapshot := &activeReservationSnapshot{tokens: make(map[string]struct{}, len(active))}
-	for idx, token := range active {
-		units := int32(1)
-		if idx < len(values) && values[idx] != nil {
-			parsed, parseErr := strconv.ParseInt(fmt.Sprint(values[idx]), 10, 32)
-			if parseErr == nil && parsed > 0 {
-				units = int32(parsed)
-			}
-		}
-		snapshot.tokens[token] = struct{}{}
-		snapshot.units += units
-	}
-	return snapshot, nil
 }
 
 func (l *Limiter) listNodes(ctx context.Context) ([]*corev1.Node, error) {
@@ -581,27 +608,6 @@ func (l *Limiter) listReplicaSets(ctx context.Context) ([]*appsv1.ReplicaSet, er
 	return out, nil
 }
 
-func (l *Limiter) addReservation(ctx context.Context, token string, units int32) error {
-	if l == nil || l.redisClient == nil || token == "" {
-		return nil
-	}
-	if units <= 0 {
-		units = 1
-	}
-	expireAtMs := time.Now().Add(l.reservationTTL).UnixMilli()
-	opCtx, cancel := rediscache.WithTimeout(ctx, l.redisTimeout)
-	defer cancel()
-	pipe := l.redisClient.TxPipeline()
-	pipe.ZAdd(opCtx, l.reservationKey, redis.Z{Score: float64(expireAtMs), Member: token})
-	pipe.HSet(opCtx, l.reservationUnitsKey, token, strconv.FormatInt(int64(units), 10))
-	pipe.PExpire(opCtx, l.reservationKey, l.reservationTTL)
-	pipe.PExpire(opCtx, l.reservationUnitsKey, l.reservationTTL)
-	if _, err := pipe.Exec(opCtx); err != nil {
-		return fmt.Errorf("add claim start reservation: %w", err)
-	}
-	return nil
-}
-
 func (l *Limiter) releaseReservation(token string) {
 	if l == nil || l.redisClient == nil || token == "" {
 		return
@@ -635,22 +641,6 @@ func (l *Limiter) removeReservations(ctx context.Context, tokens ...string) erro
 	return nil
 }
 
-func (l *Limiter) redisZRangeByScore(ctx context.Context, key, min, max string) ([]string, error) {
-	opCtx, cancel := rediscache.WithTimeout(ctx, l.redisTimeout)
-	defer cancel()
-	return l.redisClient.ZRangeByScore(opCtx, key, &redis.ZRangeBy{Min: min, Max: max}).Result()
-}
-
-func (l *Limiter) redisHMGet(ctx context.Context, tokens ...string) ([]interface{}, error) {
-	opCtx, cancel := rediscache.WithTimeout(ctx, l.redisTimeout)
-	defer cancel()
-	values, err := l.redisClient.HMGet(opCtx, l.reservationUnitsKey, tokens...).Result()
-	if err != nil {
-		return nil, fmt.Errorf("read claim start reservation units: %w", err)
-	}
-	return values, nil
-}
-
 func (l *Limiter) limitForNodes(nodes int) int32 {
 	if nodes <= 0 {
 		return 0
@@ -667,16 +657,14 @@ type poolKey struct {
 	templateID string
 }
 
-func startPressure(pods []*corev1.Pod, replicaSets []*appsv1.ReplicaSet, activeReservations map[string]struct{}) int32 {
+func startPressure(pods []*corev1.Pod, replicaSets []*appsv1.ReplicaSet) (int32, []string) {
 	readyIdleByPool := make(map[poolKey]int32)
 	startingIdleByPool := make(map[poolKey]int32)
+	reservationTokens := make([]string, 0)
 	var inFlight int32
 
 	for _, pod := range pods {
 		if !countsForStartPressure(pod) {
-			continue
-		}
-		if podCoveredByActiveReservation(pod, activeReservations) {
 			continue
 		}
 		key := poolKey{namespace: pod.Namespace, templateID: pod.Labels[labelTemplateID]}
@@ -687,10 +675,12 @@ func startPressure(pods []*corev1.Pod, replicaSets []*appsv1.ReplicaSet, activeR
 			} else {
 				startingIdleByPool[key]++
 				inFlight++
+				reservationTokens = appendReservationToken(reservationTokens, pod)
 			}
 		case poolTypeActive:
 			if !podReady(pod) {
 				inFlight++
+				reservationTokens = appendReservationToken(reservationTokens, pod)
 			}
 		}
 	}
@@ -715,19 +705,18 @@ func startPressure(pods []*corev1.Pod, replicaSets []*appsv1.ReplicaSet, activeR
 			inFlight += desired - ownedIdle
 		}
 	}
-	return inFlight
+	return inFlight, reservationTokens
 }
 
-func podCoveredByActiveReservation(pod *corev1.Pod, activeReservations map[string]struct{}) bool {
-	if pod == nil || len(activeReservations) == 0 {
-		return false
+func appendReservationToken(tokens []string, pod *corev1.Pod) []string {
+	if pod == nil {
+		return tokens
 	}
 	token := pod.Annotations[AnnotationClaimStartReservation]
 	if token == "" {
-		return false
+		return tokens
 	}
-	_, ok := activeReservations[token]
-	return ok
+	return append(tokens, token)
 }
 
 func countsForStartPressure(pod *corev1.Pod) bool {
@@ -876,7 +865,7 @@ func templateReplicaSetSelector() (string, error) {
 func randomToken() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("generate claim start lock token: %w", err)
+		return "", fmt.Errorf("generate claim start reservation token: %w", err)
 	}
 	return hex.EncodeToString(b[:]), nil
 }

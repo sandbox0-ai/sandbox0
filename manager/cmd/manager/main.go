@@ -253,8 +253,6 @@ func main() {
 		},
 		PerSandboxNode:      cfg.ClaimStartLimiter.PerSandboxNode,
 		MaxLimit:            cfg.ClaimStartLimiter.MaxLimit,
-		LockTTL:             cfg.ClaimStartLimiter.LockTTL.Duration,
-		AcquireTimeout:      cfg.ClaimStartLimiter.AcquireTimeout.Duration,
 		SandboxNodeSelector: cfg.SandboxPodPlacement.NodeSelector,
 		SandboxTolerations:  cfg.SandboxPodPlacement.Tolerations,
 		Logger:              logger,

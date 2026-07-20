@@ -585,7 +585,7 @@ func (s *Server) deleteSandboxVolumeTx(ctx context.Context, id string) (*db.Sand
 }
 
 func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force bool) (*db.SandboxVolume, error) {
-	vol, err := s.repo.GetSandboxVolume(ctx, id)
+	_, err := s.repo.GetSandboxVolume(ctx, id)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			return nil, db.ErrNotFound
@@ -621,7 +621,7 @@ func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force
 			}
 		}
 	}
-	vol, err = s.deleteSandboxVolumeTx(ctx, id)
+	vol, err := s.deleteSandboxVolumeTx(ctx, id)
 	if err != nil {
 		return nil, err
 	}

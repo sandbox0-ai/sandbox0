@@ -243,6 +243,7 @@ func main() {
 		K8sClient:        k8sClient,
 		NodeLister:       nodeLister,
 		PodLister:        podLister,
+		PodIndexer:       podInformer.Informer().GetIndexer(),
 		ReplicaSetLister: replicaSetLister,
 		PGPool:           pool,
 		Redis: rediscache.Config{
@@ -253,8 +254,6 @@ func main() {
 		},
 		PerSandboxNode:      cfg.ClaimStartLimiter.PerSandboxNode,
 		MaxLimit:            cfg.ClaimStartLimiter.MaxLimit,
-		LockTTL:             cfg.ClaimStartLimiter.LockTTL.Duration,
-		AcquireTimeout:      cfg.ClaimStartLimiter.AcquireTimeout.Duration,
 		SandboxNodeSelector: cfg.SandboxPodPlacement.NodeSelector,
 		SandboxTolerations:  cfg.SandboxPodPlacement.Tolerations,
 		Logger:              logger,

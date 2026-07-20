@@ -82,6 +82,8 @@ func cloneTeamQuotaLimitConfigs(in []infrav1alpha1.TeamQuotaLimitConfig) []apico
 		out = append(out, apiconfig.TeamQuotaLimitConfig{
 			Dimension:  limit.Dimension,
 			LimitValue: limit.LimitValue,
+			IntervalMS: limit.IntervalMS,
+			BurstValue: limit.BurstValue,
 		})
 	}
 	return out
@@ -132,8 +134,6 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 	cfg.HTTPReadTimeout = spec.HTTPReadTimeout
 	cfg.HTTPWriteTimeout = spec.HTTPWriteTimeout
 	cfg.HTTPIdleTimeout = spec.HTTPIdleTimeout
-	cfg.MaxOpsPerSecond = spec.MaxOpsPerSecond
-	cfg.MaxBytesPerSecond = spec.MaxBytesPerSecond
 	cfg.WatchEventsEnabled = spec.WatchEventsEnabled
 	cfg.WatchEventQueueSize = spec.WatchEventQueueSize
 	cfg.RestoreRemountTimeout = spec.RestoreRemountTimeout

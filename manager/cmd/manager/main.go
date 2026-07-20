@@ -487,7 +487,7 @@ func main() {
 	if meteringSink != nil {
 		quotaUsageStore = meteringSink
 	}
-	quotaRepo, err := buildQuotaRepository(pool, cfg, quotaUsageStore)
+	quotaRepo, err := buildQuotaRepository(ctx, pool, cfg, quotaUsageStore)
 	if err != nil {
 		logger.Fatal("Invalid quota configuration", zap.Error(err))
 	}
@@ -981,10 +981,13 @@ func initMetering(ctx context.Context, cfg *config.ManagerConfig, logger *zap.Lo
 	return db, repo, true, nil
 }
 
-func buildQuotaRepository(pool *pgxpool.Pool, cfg *config.ManagerConfig, usageStore quota.UsageStore) (*quota.Repository, error) {
-	repo, err := quota.NewRepositoryWithDefaults(pool, defaultTeamQuotaLimits(cfg))
-	if err != nil || repo == nil {
-		return repo, err
+func buildQuotaRepository(ctx context.Context, pool *pgxpool.Pool, cfg *config.ManagerConfig, usageStore quota.UsageStore) (*quota.Repository, error) {
+	repo := quota.NewRepository(pool)
+	if repo == nil {
+		return nil, nil
+	}
+	if err := repo.SyncDefaultPolicies(ctx, "manager_config", defaultTeamQuotaLimits(cfg)); err != nil {
+		return nil, err
 	}
 	if usageStore != nil {
 		repo.SetUsageStore(usageStore)
@@ -998,9 +1001,21 @@ func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
 	}
 	limits := make([]quota.DefaultLimit, 0, len(cfg.DefaultTeamQuotas))
 	for _, limit := range cfg.DefaultTeamQuotas {
+		intervalMS := limit.IntervalMS
+		burstValue := limit.BurstValue
+		if quota.KindForDimension(quota.Dimension(limit.Dimension)) == quota.KindRate {
+			if intervalMS == 0 {
+				intervalMS = int64(time.Second / time.Millisecond)
+			}
+			if burstValue == 0 {
+				burstValue = limit.LimitValue
+			}
+		}
 		limits = append(limits, quota.DefaultLimit{
 			Dimension:  quota.Dimension(limit.Dimension),
 			LimitValue: limit.LimitValue,
+			IntervalMS: intervalMS,
+			BurstValue: burstValue,
 		})
 	}
 	return limits

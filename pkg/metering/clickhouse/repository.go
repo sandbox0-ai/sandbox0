@@ -672,10 +672,6 @@ WHERE team_id = ? AND claimed_at IS NOT NULL AND terminated_at IS NULL
 	case quota.DimensionSnapshotGB:
 		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeSnapshot)
 		return quota.BytesToGBRoundUp(current), err
-	case quota.DimensionEgress:
-		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxEgressBytes)
-	case quota.DimensionIngress:
-		return r.currentNetworkUsage(ctx, teamID, metering.WindowTypeSandboxIngressBytes)
 	default:
 		return 0, fmt.Errorf("unsupported quota usage dimension %q", dimension)
 	}
@@ -725,24 +721,6 @@ SELECT COALESCE(SUM(size_bytes), 0)
 FROM %s FINAL
 WHERE deleted = 0 AND team_id = ? AND subject_type = ?
 `, qualified(r.cfg.Database, r.cfg.StorageStateTable)), teamID, subjectType)
-}
-
-func (r *Repository) currentNetworkUsage(ctx context.Context, teamID string, windowTypes ...string) (int64, error) {
-	if len(windowTypes) == 0 {
-		return 0, fmt.Errorf("window type is required")
-	}
-	args := make([]any, 0, len(windowTypes)+1)
-	args = append(args, teamID)
-	placeholders := make([]string, 0, len(windowTypes))
-	for _, windowType := range windowTypes {
-		args = append(args, windowType)
-		placeholders = append(placeholders, "?")
-	}
-	return r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(value), 0)
-FROM %s FINAL
-WHERE team_id = ? AND window_type IN (%s)
-`, qualified(r.cfg.Database, r.cfg.WindowsTable), joinComma(placeholders)), args...)
 }
 
 func (r *Repository) currentScalar(ctx context.Context, query string, args ...any) (int64, error) {
@@ -799,15 +777,4 @@ func versionFrom(value time.Time) uint64 {
 		return 0
 	}
 	return uint64(nanos)
-}
-
-func joinComma(values []string) string {
-	out := ""
-	for i, value := range values {
-		if i > 0 {
-			out += ", "
-		}
-		out += value
-	}
-	return out
 }

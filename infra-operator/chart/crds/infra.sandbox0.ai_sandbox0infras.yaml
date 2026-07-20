@@ -1922,22 +1922,20 @@ spec:
                         default: 2s
                         type: string
                       teamBandwidthBurstBytes:
-                        description: Token bucket burst in bytes for team bandwidth
-                          limiting. Zero uses one second of the configured rate.
+                        description: 'Deprecated: use each network quota policy''s
+                          burstValue.'
                         format: int64
                         minimum: 0
                         type: integer
                       teamEgressBandwidthBytesPerSecond:
-                        description: Cluster-scoped per-team egress bandwidth limit
-                          in bytes per second. Requires spec.redis. Zero disables
-                          throttling.
+                        description: 'Deprecated: use services.manager.config.defaultTeamQuotas
+                          with network_egress_bytes.'
                         format: int64
                         minimum: 0
                         type: integer
                       teamIngressBandwidthBytesPerSecond:
-                        description: Cluster-scoped per-team ingress bandwidth limit
-                          in bytes per second. Requires spec.redis. Zero disables
-                          throttling.
+                        description: 'Deprecated: use services.manager.config.defaultTeamQuotas
+                          with network_ingress_bytes.'
                         format: int64
                         minimum: 0
                         type: integer
@@ -3699,13 +3697,19 @@ spec:
                             type: string
                           defaultTeamQuotas:
                             description: |-
-                              DefaultTeamQuotas configures region-wide fallback team quota limits.
-                              Team-specific quota rows in the database override these defaults.
+                              DefaultTeamQuotas declaratively reconciles region-wide quota defaults.
+                              Team-specific database policies override these defaults.
                             items:
                               description: |-
-                                TeamQuotaLimitConfig configures a fallback quota limit for teams without a
-                                database override for the same dimension.
+                                TeamQuotaLimitConfig configures a region default for teams without an
+                                override for the same dimension.
                               properties:
+                                burstValue:
+                                  description: BurstValue is the maximum immediately
+                                    available tokens for a rate quota.
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
                                 dimension:
                                   enum:
                                   - active_sandboxes
@@ -3713,9 +3717,16 @@ spec:
                                   - memory_mib
                                   - volume_storage_gb
                                   - snapshot_storage_gb
-                                  - egress
-                                  - ingress
+                                  - api_requests
+                                  - network_egress_bytes
+                                  - network_ingress_bytes
                                   type: string
+                                intervalMs:
+                                  description: IntervalMS is the token refill interval
+                                    for rate quotas and is omitted for capacity quotas.
+                                  format: int64
+                                  minimum: 0
+                                  type: integer
                                 limitValue:
                                   format: int64
                                   minimum: 0
@@ -3724,7 +3735,7 @@ spec:
                               - dimension
                               - limitValue
                               type: object
-                            maxItems: 7
+                            maxItems: 8
                             type: array
                             x-kubernetes-list-map-keys:
                             - dimension
@@ -4808,13 +4819,6 @@ spec:
                       logSizeLimit:
                         default: 1Gi
                         type: string
-                      maxBytesPerSecond:
-                        default: 1073741824
-                        format: int64
-                        type: integer
-                      maxOpsPerSecond:
-                        default: 10000
-                        type: integer
                       metricsEnabled:
                         default: true
                         type: boolean

@@ -163,8 +163,8 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		}
 
 		repo = db.NewRepository(pool)
+		quotaRepo = quota.NewRepository(pool)
 		if r.cfg.Metering.Enabled {
-			quotaRepo = quota.NewRepository(pool)
 			meteringRepo = meteringoutbox.NewRepository(pool)
 		}
 	} else {

@@ -1325,6 +1325,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/quotas:
+    get:
+      tags: [quotas]
+      summary: List team quotas
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/quotas
+      responses:
+        "200":
+          description: All team quota statuses
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/TeamQuota"
   /api/v1/quotas/{dimension}:
     get:
       tags: [quotas]
@@ -3888,8 +3910,9 @@ components:
         - memory_mib
         - volume_storage_gb
         - snapshot_storage_gb
-        - egress
-        - ingress
+        - api_requests
+        - network_egress_bytes
+        - network_ingress_bytes
     TeamQuota:
       type: object
       properties:
@@ -3897,14 +3920,33 @@ components:
           type: string
         dimension:
           $ref: "#/components/schemas/QuotaDimension"
+        kind:
+          type: string
+          enum:
+            - capacity
+            - rate
+          x-enum-varnames:
+            - TeamQuotaKindCapacity
+            - TeamQuotaKindRate
         limit_value:
           type: integer
           format: int64
+          nullable: true
+        interval_ms:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+        burst_value:
+          type: integer
+          format: int64
+          minimum: 0
           nullable: true
         current:
           type: integer
           format: int64
           minimum: 0
+          nullable: true
         remaining:
           type: integer
           format: int64
@@ -3919,8 +3961,26 @@ components:
             - millicpu
             - MiB
             - GB
+            - requests
             - bytes
-      required: [team_id, dimension, limit_value, current, remaining, unlimited, unit]
+          x-enum-varnames:
+            - TeamQuotaUnitCount
+            - TeamQuotaUnitMillicpu
+            - TeamQuotaUnitMiB
+            - TeamQuotaUnitGB
+            - TeamQuotaUnitRequests
+            - TeamQuotaUnitBytes
+        source:
+          type: string
+          enum:
+            - team_override
+            - region_default
+            - unlimited
+          x-enum-varnames:
+            - TeamQuotaSourceTeamOverride
+            - TeamQuotaSourceRegionDefault
+            - TeamQuotaSourceUnlimited
+      required: [team_id, dimension, kind, limit_value, interval_ms, burst_value, current, remaining, unlimited, unit, source]
     SuccessRegistryCredentialsResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -5672,9 +5732,18 @@ components:
     SandboxRuntimeMetricUnit:
       type: string
       enum: [ratio, cores, seconds, bytes, count, bytes_per_second, count_per_second]
+      x-enum-varnames:
+        - SandboxRuntimeMetricUnitRatio
+        - SandboxRuntimeMetricUnitCores
+        - SandboxRuntimeMetricUnitSeconds
+        - SandboxRuntimeMetricUnitBytes
+        - SandboxRuntimeMetricUnitCount
+        - SandboxRuntimeMetricUnitBytesPerSecond
+        - SandboxRuntimeMetricUnitCountPerSecond
     SandboxRuntimeMetricStatistic:
       type: string
       enum: [auto, average, minimum, maximum, last, rate]
+      x-enum-varnames: [Auto, Average, Minimum, Maximum, Last, Rate]
     SandboxRuntimeMetricGapReason:
       type: string
       enum: [unavailable, unsupported, collection_error, no_data, series_reset]

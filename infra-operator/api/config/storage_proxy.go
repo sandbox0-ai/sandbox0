@@ -164,14 +164,6 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="60s"
 	HTTPIdleTimeout string `yaml:"http_idle_timeout" json:"httpIdleTimeout"`
 
-	// Rate limiting
-	// +optional
-	// +kubebuilder:default=10000
-	MaxOpsPerSecond int `yaml:"max_ops_per_second" json:"maxOpsPerSecond"`
-	// +optional
-	// +kubebuilder:default=1073741824
-	MaxBytesPerSecond int64 `yaml:"max_bytes_per_second" json:"maxBytesPerSecond"`
-
 	// Watch events
 	// +optional
 	// +kubebuilder:default=true

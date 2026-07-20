@@ -284,9 +284,9 @@ func NewServer(
 
 		publicAuth = gatewaymiddleware.NewAuthMiddleware(publicAPIKeyRepo, cfg.JWTSecret, jwtIssuer, logger)
 		compositeAuth = middleware.NewCompositeAuthMiddleware(authMiddleware, publicAuth, logger)
-		rateLimiter, err = gatewaymiddleware.NewRateLimiterWithConfig(context.Background(), cfg.RateLimitRPS, cfg.RateLimitBurst, gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig), logger)
+		rateLimiter, err = gatewaymiddleware.NewTeamQuotaRateLimiterWithConfig(context.Background(), pool, cfg.GatewayConfig, logger)
 		if err != nil {
-			return nil, fmt.Errorf("create rate limiter: %w", err)
+			return nil, fmt.Errorf("create team quota rate limiter: %w", err)
 		}
 		externalLimiter = middleware.NewExternalRateLimiter(rateLimiter)
 		publicBuiltin = builtinProvider
@@ -554,6 +554,7 @@ func (s *Server) setupRoutes() {
 		quotas := v1.Group("/quotas")
 		quotas.Use(s.managerUpstreamMiddleware())
 		{
+			quotas.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaRead), s.proxyToManager)
 			quotas.GET("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaRead), s.proxyToManager)
 		}
 

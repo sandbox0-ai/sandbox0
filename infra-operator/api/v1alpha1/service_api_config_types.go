@@ -901,10 +901,10 @@ type ManagerConfig struct {
 	// ProcdBinImageRef overrides the OCI image used for the procd binary image volume.
 	// +optional
 	ProcdBinImageRef string `json:"procdBinImageRef,omitempty"`
-	// DefaultTeamQuotas configures region-wide fallback team quota limits.
-	// Team-specific quota rows in the database override these defaults.
+	// DefaultTeamQuotas declaratively reconciles region-wide quota defaults.
+	// Team-specific database policies override these defaults.
 	// +optional
-	// +kubebuilder:validation:MaxItems=7
+	// +kubebuilder:validation:MaxItems=8
 	// +listType=map
 	// +listMapKey=dimension
 	DefaultTeamQuotas []TeamQuotaLimitConfig `json:"defaultTeamQuotas,omitempty"`
@@ -954,13 +954,21 @@ type ManagerConfig struct {
 	Autoscaler AutoscalerConfig `json:"autoscaler,omitempty"`
 }
 
-// TeamQuotaLimitConfig configures a fallback quota limit for teams without a
-// database override for the same dimension.
+// TeamQuotaLimitConfig configures a region default for teams without an
+// override for the same dimension.
 type TeamQuotaLimitConfig struct {
-	// +kubebuilder:validation:Enum=active_sandboxes;cpu_millicpu;memory_mib;volume_storage_gb;snapshot_storage_gb;egress;ingress
+	// +kubebuilder:validation:Enum=active_sandboxes;cpu_millicpu;memory_mib;volume_storage_gb;snapshot_storage_gb;api_requests;network_egress_bytes;network_ingress_bytes
 	Dimension string `json:"dimension"`
 	// +kubebuilder:validation:Minimum=0
 	LimitValue int64 `json:"limitValue"`
+	// IntervalMS is the token refill interval for rate quotas and is omitted for capacity quotas.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	IntervalMS int64 `json:"intervalMs,omitempty"`
+	// BurstValue is the maximum immediately available tokens for a rate quota.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	BurstValue int64 `json:"burstValue,omitempty"`
 }
 
 // StorageProxyConfig defines user-facing configuration for the manager storage runtime.
@@ -1082,12 +1090,6 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="60s"
 	HTTPIdleTimeout string `json:"httpIdleTimeout,omitempty"`
 	// +optional
-	// +kubebuilder:default=10000
-	MaxOpsPerSecond int `json:"maxOpsPerSecond,omitempty"`
-	// +optional
-	// +kubebuilder:default=1073741824
-	MaxBytesPerSecond int64 `json:"maxBytesPerSecond,omitempty"`
-	// +optional
 	// +kubebuilder:default=true
 	WatchEventsEnabled bool `json:"watchEventsEnabled,omitempty"`
 	// +optional
@@ -1167,15 +1169,15 @@ type NetdConfig struct {
 	BandwidthBurstBytes int64 `json:"bandwidthBurstBytes,omitempty"`
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	// Cluster-scoped per-team egress bandwidth limit in bytes per second. Requires spec.redis. Zero disables throttling.
+	// Deprecated: use services.manager.config.defaultTeamQuotas with network_egress_bytes.
 	TeamEgressBandwidthBytesPerSecond int64 `json:"teamEgressBandwidthBytesPerSecond,omitempty"`
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	// Cluster-scoped per-team ingress bandwidth limit in bytes per second. Requires spec.redis. Zero disables throttling.
+	// Deprecated: use services.manager.config.defaultTeamQuotas with network_ingress_bytes.
 	TeamIngressBandwidthBytesPerSecond int64 `json:"teamIngressBandwidthBytesPerSecond,omitempty"`
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	// Token bucket burst in bytes for team bandwidth limiting. Zero uses one second of the configured rate.
+	// Deprecated: use each network quota policy's burstValue.
 	TeamBandwidthBurstBytes int64 `json:"teamBandwidthBurstBytes,omitempty"`
 	// +optional
 	// +kubebuilder:default=53

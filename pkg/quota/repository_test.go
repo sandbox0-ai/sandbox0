@@ -61,45 +61,56 @@ func (r fakeRow) Scan(dest ...any) error {
 	return nil
 }
 
-func TestGetLimitFallsBackToDefaultLimitWhenDBHasNoRow(t *testing.T) {
-	repo, err := NewRepositoryWithDBDefaults(&fakeDB{
+func TestGetPolicyReturnsRegionDefault(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return fakeRow{err: pgx.ErrNoRows}
+			return fakeRow{values: []any{
+				"team-1",
+				DimensionActiveSandboxes,
+				int64(3),
+				int64(0),
+				int64(0),
+				string(SourceRegionDefault),
+			}}
 		},
-	}, []DefaultLimit{{Dimension: DimensionActiveSandboxes, LimitValue: 3}})
-	if err != nil {
-		t.Fatalf("NewRepositoryWithDBDefaults: %v", err)
-	}
+	})
 
-	limit, err := repo.GetLimit(context.Background(), "team-1", DimensionActiveSandboxes)
+	policy, err := repo.GetPolicy(context.Background(), "team-1", DimensionActiveSandboxes)
 	if err != nil {
-		t.Fatalf("GetLimit: %v", err)
+		t.Fatalf("GetPolicy: %v", err)
 	}
-	if limit == nil || limit.TeamID != "team-1" || limit.Dimension != DimensionActiveSandboxes || limit.LimitValue != 3 {
-		t.Fatalf("limit = %+v, want default active sandbox limit 3", limit)
+	if policy == nil || policy.TeamID != "team-1" || policy.Dimension != DimensionActiveSandboxes || policy.LimitValue != 3 {
+		t.Fatalf("policy = %+v, want default active sandbox limit 3", policy)
+	}
+	if policy.Kind != KindCapacity || policy.Source != SourceRegionDefault {
+		t.Fatalf("policy = %+v, want region capacity policy", policy)
 	}
 }
 
-func TestGetLimitPrefersDBLimitOverDefaultLimit(t *testing.T) {
-	repo, err := NewRepositoryWithDBDefaults(&fakeDB{
+func TestGetPolicyReturnsTeamOverride(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return fakeRow{values: []any{"team-1", DimensionActiveSandboxes, int64(5)}}
+			return fakeRow{values: []any{
+				"team-1",
+				DimensionAPIRequests,
+				int64(5),
+				int64(1000),
+				int64(10),
+				string(SourceTeamOverride),
+			}}
 		},
-	}, []DefaultLimit{{Dimension: DimensionActiveSandboxes, LimitValue: 3}})
-	if err != nil {
-		t.Fatalf("NewRepositoryWithDBDefaults: %v", err)
-	}
+	})
 
-	limit, err := repo.GetLimit(context.Background(), "team-1", DimensionActiveSandboxes)
+	policy, err := repo.GetPolicy(context.Background(), "team-1", DimensionAPIRequests)
 	if err != nil {
-		t.Fatalf("GetLimit: %v", err)
+		t.Fatalf("GetPolicy: %v", err)
 	}
-	if limit == nil || limit.LimitValue != 5 {
-		t.Fatalf("limit = %+v, want DB override limit 5", limit)
+	if policy == nil || policy.LimitValue != 5 || policy.IntervalMS != 1000 || policy.BurstValue != 10 {
+		t.Fatalf("policy = %+v, want team rate override", policy)
 	}
 }
 
-func TestNewRepositoryWithDBDefaultsRejectsInvalidLimits(t *testing.T) {
+func TestEnsureDefaultPoliciesRejectsInvalidLimits(t *testing.T) {
 	tests := []struct {
 		name     string
 		defaults []DefaultLimit
@@ -122,8 +133,9 @@ func TestNewRepositoryWithDBDefaultsRejectsInvalidLimits(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := NewRepositoryWithDBDefaults(&fakeDB{}, tt.defaults); err == nil {
-				t.Fatal("NewRepositoryWithDBDefaults error = nil, want error")
+			repo := NewRepositoryWithDB(&fakeDB{})
+			if err := repo.EnsureDefaultPolicies(context.Background(), "test", tt.defaults); err == nil {
+				t.Fatal("EnsureDefaultPolicies error = nil, want error")
 			}
 		})
 	}
@@ -163,14 +175,14 @@ func TestCurrentUsageDelegatesToUsageStore(t *testing.T) {
 			if teamID != "team-1" {
 				t.Fatalf("teamID = %q, want trimmed team-1", teamID)
 			}
-			if dimension != DimensionEgress {
-				t.Fatalf("dimension = %q, want egress", dimension)
+			if dimension != DimensionCPU {
+				t.Fatalf("dimension = %q, want cpu", dimension)
 			}
 			return 1024, nil
 		},
 	})
 
-	got, err := repo.CurrentUsage(context.Background(), " team-1 ", DimensionEgress)
+	got, err := repo.CurrentUsage(context.Background(), " team-1 ", DimensionCPU)
 	if err != nil {
 		t.Fatalf("CurrentUsage: %v", err)
 	}
@@ -241,5 +253,64 @@ func TestAdditionalStorageUsageGBDelegatesToUsageStore(t *testing.T) {
 	}
 	if got != 3 {
 		t.Fatalf("AdditionalStorageUsageGB = %d, want 3", got)
+	}
+}
+
+func TestCheckProjectedStorageUsageRejectsRequestBeforeUsageLookup(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{
+		queryRowFn: func(context.Context, string, ...any) pgx.Row {
+			return fakeRow{values: []any{
+				"team-1",
+				DimensionSnapshotGB,
+				int64(0),
+				int64(0),
+				int64(0),
+				string(SourceTeamOverride),
+			}}
+		},
+	})
+
+	decision, err := repo.CheckProjectedStorageUsageGB(
+		context.Background(),
+		"team-1",
+		DimensionSnapshotGB,
+		metering.SubjectTypeSnapshot,
+		"snapshot-1",
+		1,
+	)
+	if !IsExceeded(err) {
+		t.Fatalf("CheckProjectedStorageUsageGB error = %v, want quota exceeded", err)
+	}
+	if decision.Allowed || decision.Requested != 1 || decision.LimitValue != 0 {
+		t.Fatalf("decision = %+v, want one requested GB rejected by zero limit", decision)
+	}
+}
+
+func TestCheckAdditionalStorageUsageRejectsRequestBeforeUsageLookup(t *testing.T) {
+	repo := NewRepositoryWithDB(&fakeDB{
+		queryRowFn: func(context.Context, string, ...any) pgx.Row {
+			return fakeRow{values: []any{
+				"team-1",
+				DimensionVolumeStorageGB,
+				int64(0),
+				int64(0),
+				int64(0),
+				string(SourceTeamOverride),
+			}}
+		},
+	})
+
+	decision, err := repo.CheckAdditionalStorageUsageGB(
+		context.Background(),
+		"team-1",
+		DimensionVolumeStorageGB,
+		metering.SubjectTypeVolume,
+		1,
+	)
+	if !IsExceeded(err) {
+		t.Fatalf("CheckAdditionalStorageUsageGB error = %v, want quota exceeded", err)
+	}
+	if decision.Allowed || decision.Requested != 1 || decision.LimitValue != 0 {
+		t.Fatalf("decision = %+v, want one requested GB rejected by zero limit", decision)
 	}
 }

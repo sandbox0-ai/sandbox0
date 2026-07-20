@@ -15,9 +15,26 @@ const (
 	DimensionMemory          Dimension = "memory_mib"
 	DimensionVolumeStorageGB Dimension = "volume_storage_gb"
 	DimensionSnapshotGB      Dimension = "snapshot_storage_gb"
-	DimensionEgress          Dimension = "egress"
-	DimensionIngress         Dimension = "ingress"
+	DimensionAPIRequests     Dimension = "api_requests"
+	DimensionNetworkEgress   Dimension = "network_egress_bytes"
+	DimensionNetworkIngress  Dimension = "network_ingress_bytes"
 )
+
+var dimensions = []Dimension{
+	DimensionActiveSandboxes,
+	DimensionCPU,
+	DimensionMemory,
+	DimensionVolumeStorageGB,
+	DimensionSnapshotGB,
+	DimensionAPIRequests,
+	DimensionNetworkEgress,
+	DimensionNetworkIngress,
+}
+
+// Dimensions returns every supported quota dimension in API display order.
+func Dimensions() []Dimension {
+	return append([]Dimension(nil), dimensions...)
+}
 
 func KnownDimension(d Dimension) bool {
 	switch d {
@@ -26,12 +43,57 @@ func KnownDimension(d Dimension) bool {
 		DimensionMemory,
 		DimensionVolumeStorageGB,
 		DimensionSnapshotGB,
-		DimensionEgress,
-		DimensionIngress:
+		DimensionAPIRequests,
+		DimensionNetworkEgress,
+		DimensionNetworkIngress:
 		return true
 	default:
 		return false
 	}
+}
+
+type Kind string
+
+const (
+	KindCapacity Kind = "capacity"
+	KindRate     Kind = "rate"
+)
+
+// KindForDimension returns the admission model used by a quota dimension.
+func KindForDimension(d Dimension) Kind {
+	switch d {
+	case DimensionActiveSandboxes,
+		DimensionCPU,
+		DimensionMemory,
+		DimensionVolumeStorageGB,
+		DimensionSnapshotGB:
+		return KindCapacity
+	case DimensionAPIRequests,
+		DimensionNetworkEgress,
+		DimensionNetworkIngress:
+		return KindRate
+	default:
+		return ""
+	}
+}
+
+type Source string
+
+const (
+	SourceTeamOverride  Source = "team_override"
+	SourceRegionDefault Source = "region_default"
+	SourceUnlimited     Source = "unlimited"
+)
+
+// Policy is the resolved quota policy for a team and dimension.
+type Policy struct {
+	TeamID     string    `json:"team_id"`
+	Dimension  Dimension `json:"dimension"`
+	Kind       Kind      `json:"kind"`
+	LimitValue int64     `json:"limit_value"`
+	IntervalMS int64     `json:"interval_ms,omitempty"`
+	BurstValue int64     `json:"burst_value,omitempty"`
+	Source     Source    `json:"source"`
 }
 
 type Limit struct {
@@ -40,42 +102,58 @@ type Limit struct {
 	LimitValue int64     `json:"limit_value"`
 }
 
-// DefaultLimit configures a region-wide fallback quota limit for a dimension.
-// Team-specific database limits override these defaults.
+// DefaultLimit bootstraps a region-wide policy when the database has no policy
+// for the dimension. Team-specific database policies override these defaults.
 type DefaultLimit struct {
-	Dimension  Dimension `json:"dimension"`
-	LimitValue int64     `json:"limit_value"`
+	Dimension  Dimension
+	LimitValue int64
+	IntervalMS int64
+	BurstValue int64
 }
 
 // Status describes the current quota view for a team and dimension.
 type Status struct {
 	TeamID     string    `json:"team_id"`
 	Dimension  Dimension `json:"dimension"`
+	Kind       Kind      `json:"kind"`
 	LimitValue *int64    `json:"limit_value"`
-	Current    int64     `json:"current"`
+	IntervalMS *int64    `json:"interval_ms"`
+	BurstValue *int64    `json:"burst_value"`
+	Current    *int64    `json:"current"`
 	Remaining  *int64    `json:"remaining"`
 	Unlimited  bool      `json:"unlimited"`
 	Unit       string    `json:"unit"`
+	Source     Source    `json:"source"`
 }
 
-// NewStatus builds a user-facing quota status from the configured limit and usage.
-func NewStatus(teamID string, dimension Dimension, limit *Limit, current int64) Status {
+// NewStatus builds a user-facing quota status from a resolved policy and
+// capacity usage. Rate quotas intentionally omit current and remaining because
+// Redis token state is admission state, not cumulative usage.
+func NewStatus(teamID string, dimension Dimension, policy *Policy, current int64) Status {
+	kind := KindForDimension(dimension)
 	status := Status{
 		TeamID:    teamID,
 		Dimension: dimension,
-		Current:   current,
-		Unlimited: limit == nil,
+		Kind:      kind,
+		Unlimited: policy == nil,
 		Unit:      UnitForDimension(dimension),
+		Source:    SourceUnlimited,
 	}
-	if limit == nil {
+	if kind == KindCapacity {
+		status.Current = int64Pointer(current)
+	}
+	if policy == nil {
 		return status
 	}
-	status.LimitValue = &limit.LimitValue
-	remaining := limit.LimitValue - current
-	if remaining < 0 {
-		remaining = 0
+	status.LimitValue = int64Pointer(policy.LimitValue)
+	status.Source = policy.Source
+	if kind == KindRate {
+		status.IntervalMS = int64Pointer(policy.IntervalMS)
+		status.BurstValue = int64Pointer(policy.BurstValue)
+		return status
 	}
-	status.Remaining = &remaining
+	remaining := max(policy.LimitValue-current, 0)
+	status.Remaining = int64Pointer(remaining)
 	return status
 }
 
@@ -90,11 +168,50 @@ func UnitForDimension(d Dimension) string {
 		return "MiB"
 	case DimensionVolumeStorageGB, DimensionSnapshotGB:
 		return "GB"
-	case DimensionEgress, DimensionIngress:
+	case DimensionAPIRequests:
+		return "requests"
+	case DimensionNetworkEgress, DimensionNetworkIngress:
 		return "bytes"
 	default:
 		return ""
 	}
+}
+
+// ValidatePolicyValues checks the fields stored for a quota policy.
+func ValidatePolicyValues(dimension Dimension, limitValue, intervalMS, burstValue int64) error {
+	if !KnownDimension(dimension) {
+		return fmt.Errorf("unknown quota dimension %q", dimension)
+	}
+	if limitValue < 0 {
+		return fmt.Errorf("limit_value must be non-negative")
+	}
+	switch KindForDimension(dimension) {
+	case KindCapacity:
+		if intervalMS != 0 {
+			return fmt.Errorf("interval_ms is only valid for rate quotas")
+		}
+		if burstValue != 0 {
+			return fmt.Errorf("burst_value is only valid for rate quotas")
+		}
+	case KindRate:
+		if intervalMS <= 0 {
+			return fmt.Errorf("interval_ms must be positive for rate quotas")
+		}
+		if burstValue < 0 {
+			return fmt.Errorf("burst_value must be non-negative")
+		}
+		if limitValue == 0 && burstValue != 0 {
+			return fmt.Errorf("burst_value must be zero when limit_value is zero")
+		}
+		if limitValue > 0 && burstValue == 0 {
+			return fmt.Errorf("burst_value must be positive when limit_value is positive")
+		}
+	}
+	return nil
+}
+
+func int64Pointer(value int64) *int64 {
+	return &value
 }
 
 type Decision struct {

@@ -59,11 +59,6 @@ type UsageRecorder interface {
 	RecordIngress(compiled *policy.CompiledPolicy, bytes int64)
 }
 
-type UsageQuotaChecker interface {
-	AllowEgress(compiled *policy.CompiledPolicy) error
-	AllowIngress(compiled *policy.CompiledPolicy) error
-}
-
 func NewServer(cfg *config.NetdConfig, store *policy.Store, tracker *conntrack.Tracker, usageRecorder UsageRecorder, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("ctld network runtime config is nil")
@@ -504,18 +499,6 @@ func (s *Server) handleTCPDecision(req *adapterRequest, decision trafficDecision
 			zap.String("auth_rule", decision.MatchedAuthRule.Name),
 		)
 	}
-	if err := s.checkEgressQuota(req.Compiled, decision); err != nil {
-		closeProbedUpstream(req)
-		decision.Action = decisionActionDeny
-		decision.Reason = "egress_quota_exceeded"
-		baseFields = append(baseFields, zap.Error(err))
-	}
-	if err := s.checkIngressQuota(req.Compiled, decision); err != nil {
-		closeProbedUpstream(req)
-		decision.Action = decisionActionDeny
-		decision.Reason = "ingress_quota_exceeded"
-		baseFields = append(baseFields, zap.Error(err))
-	}
 	baseFields = append(baseFields, fields...)
 	switch decision.Action {
 	case decisionActionDeny:
@@ -916,16 +899,6 @@ func (s *Server) handleUDPDecision(req *adapterRequest, decision trafficDecision
 			zap.String("auth_rule", decision.MatchedAuthRule.Name),
 		)
 	}
-	if err := s.checkEgressQuota(req.Compiled, decision); err != nil {
-		decision.Action = decisionActionDeny
-		decision.Reason = "egress_quota_exceeded"
-		fields = append(fields, zap.Error(err))
-	}
-	if err := s.checkIngressQuota(req.Compiled, decision); err != nil {
-		decision.Action = decisionActionDeny
-		decision.Reason = "ingress_quota_exceeded"
-		fields = append(fields, zap.Error(err))
-	}
 	switch decision.Action {
 	case decisionActionDeny:
 		s.logger.Info("UDP decision denied", fields...)
@@ -1270,28 +1243,6 @@ func (s *Server) recordEgressBytes(compiled *policy.CompiledPolicy, bytes int64,
 	s.usageRecorder.RecordEgress(compiled, bytes)
 }
 
-func (s *Server) checkEgressQuota(compiled *policy.CompiledPolicy, decision trafficDecision) error {
-	if decision.Action == decisionActionDeny || s == nil || s.usageRecorder == nil {
-		return nil
-	}
-	checker, ok := s.usageRecorder.(UsageQuotaChecker)
-	if !ok {
-		return nil
-	}
-	return checker.AllowEgress(compiled)
-}
-
-func (s *Server) checkIngressQuota(compiled *policy.CompiledPolicy, decision trafficDecision) error {
-	if decision.Action == decisionActionDeny || s == nil || s.usageRecorder == nil {
-		return nil
-	}
-	checker, ok := s.usageRecorder.(UsageQuotaChecker)
-	if !ok {
-		return nil
-	}
-	return checker.AllowIngress(compiled)
-}
-
 func (s *Server) recordIngressBytes(compiled *policy.CompiledPolicy, bytes int64, audit *flowAudit) {
 	if bytes <= 0 {
 		return
@@ -1317,6 +1268,13 @@ func (s *Server) waitBandwidth(compiled *policy.CompiledPolicy, direction bandwi
 		return nil
 	}
 	return s.bandwidthLimiter.wait(compiled, direction, bytes)
+}
+
+func (s *Server) waitDatagramBandwidth(ctx context.Context, compiled *policy.CompiledPolicy, direction bandwidthDirection, bytes int) error {
+	if s == nil || s.bandwidthLimiter == nil {
+		return nil
+	}
+	return s.bandwidthLimiter.waitDatagram(ctx, compiled, direction, bytes)
 }
 
 func (s *Server) newFlowAudit(transport string) *flowAudit {
@@ -1376,7 +1334,7 @@ type countingConn struct {
 
 func (c *countingConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if n > 0 && c.limiter != nil {
+	if n > 0 && c.limiter != nil && c.readDirection != "" {
 		if waitErr := c.limiter.wait(c.compiled, c.readDirection, n); waitErr != nil && err == nil {
 			err = waitErr
 		}

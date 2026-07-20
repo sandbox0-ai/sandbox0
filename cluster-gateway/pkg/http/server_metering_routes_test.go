@@ -428,6 +428,9 @@ func TestSetupRoutesExposesQuotaReadOnlyPublicAPI(t *testing.T) {
 	server.obsProvider = newTestMeteringObservability(t)
 	server.setupRoutes()
 
+	if !hasRoute(server.router, "GET", "/api/v1/quotas") {
+		t.Fatal("expected public quota collection route")
+	}
 	if !hasRoute(server.router, "GET", "/api/v1/quotas/:dimension") {
 		t.Fatal("expected public quota read route")
 	}

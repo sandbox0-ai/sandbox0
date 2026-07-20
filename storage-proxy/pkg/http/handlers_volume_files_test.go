@@ -88,7 +88,14 @@ func (db *fakeQuotaDB) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row
 		if db.limit == nil {
 			return fakeQuotaRow{err: pgx.ErrNoRows}
 		}
-		return fakeQuotaRow{values: []any{db.limit.TeamID, db.limit.Dimension, db.limit.LimitValue}}
+		return fakeQuotaRow{values: []any{
+			db.limit.TeamID,
+			db.limit.Dimension,
+			db.limit.LimitValue,
+			int64(0),
+			int64(0),
+			string(quota.SourceTeamOverride),
+		}}
 	default:
 		return fakeQuotaRow{err: errors.New("unexpected quota query")}
 	}

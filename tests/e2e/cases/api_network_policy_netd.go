@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 	"gopkg.in/yaml.v3"
@@ -33,7 +34,7 @@ const (
 	netdHTTPFixturePort            = 8080
 	netdHTTPFixtureLargeBytes      = 256 * 1024
 	netdRedisBandwidthMinElapsed   = 3 * time.Second
-	defaultNetdBandwidthKeyPrefix  = "sandbox0:netd:bandwidth"
+	defaultNetdBandwidthKeyPrefix  = "sandbox0:quota:network"
 )
 
 type netdHTTPFixture struct {
@@ -136,6 +137,9 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 		defer session.SelectTeam(originalTeamID)
 		session.SelectTeam(team.Id)
 		var cleanupErrs []error
+		if _, err := session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionNetworkIngress); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
 		if err := clearNetdRedisTeamBandwidthKeys(env, team.Id); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
 		}
@@ -152,6 +156,16 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 
 	Expect(session.Login(env.TestCtx.Context, GinkgoT(), "admin@example.com", adminPassword)).To(Succeed())
 	session.SelectTeam(team.Id)
+	_, status, err = session.PutTeamRateQuota(
+		env.TestCtx.Context,
+		env,
+		quota.DimensionNetworkIngress,
+		65536,
+		1000,
+		65536,
+	)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
 
 	first := claimSandboxEventually(env, session, "default")
 	sandboxIDs = append(sandboxIDs, first.SandboxId)
@@ -191,14 +205,13 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 		Expect(<-errCh).NotTo(HaveOccurred())
 	}
 	elapsed := time.Since(started)
-	Expect(elapsed).To(BeNumerically(">=", netdRedisBandwidthMinElapsed), "expected two same-team downloads to share the cluster-scoped bandwidth bucket")
+	Expect(elapsed).To(BeNumerically(">=", netdRedisBandwidthMinElapsed), "expected two same-team downloads to share the region-scoped quota bucket")
 	Expect(clearNetdRedisTeamBandwidthKeys(env, team.Id)).To(Succeed())
 }
 
 func netdRedisTeamBandwidthConfigured(env *framework.ScenarioEnv) bool {
 	cfg, ok := netdRedisTeamBandwidthConfig(env)
-	return ok && strings.TrimSpace(cfg.RedisURL) != "" &&
-		(cfg.TeamEgressBandwidthBytesPerSecond > 0 || cfg.TeamIngressBandwidthBytesPerSecond > 0)
+	return ok && strings.TrimSpace(cfg.RedisURL) != ""
 }
 
 func netdRedisTeamBandwidthConfig(env *framework.ScenarioEnv) (*apiconfig.NetdConfig, bool) {
@@ -311,28 +324,27 @@ func clearNetdRedisTeamBandwidthKeys(env *framework.ScenarioEnv, teamID string) 
 
 func netdRedisTeamBandwidthKeys(cfg *apiconfig.NetdConfig, teamID string) []string {
 	return []string{
-		netdRedisTeamBandwidthKey(cfg, teamID, "egress"),
-		netdRedisTeamBandwidthKey(cfg, teamID, "ingress"),
+		netdRedisTeamBandwidthKey(cfg, teamID, quota.DimensionNetworkEgress),
+		netdRedisTeamBandwidthKey(cfg, teamID, quota.DimensionNetworkIngress),
 	}
 }
 
-func netdRedisTeamBandwidthKey(cfg *apiconfig.NetdConfig, teamID, direction string) string {
+func netdRedisTeamBandwidthKey(cfg *apiconfig.NetdConfig, teamID string, dimension quota.Dimension) string {
 	keyPrefix := defaultNetdBandwidthKeyPrefix
 	if cfg != nil {
 		basePrefix := strings.TrimSpace(cfg.RedisKeyPrefix)
 		if basePrefix == "" {
 			basePrefix = rediscache.DefaultKeyPrefix
 		}
-		keyPrefix = rediscache.JoinKeyPrefix(basePrefix, "netd", "bandwidth")
+		keyPrefix = rediscache.JoinKeyPrefix(basePrefix, "quota", "network")
 		if keyPrefix == "" {
 			keyPrefix = defaultNetdBandwidthKeyPrefix
 		}
 	}
 	raw := rediscache.JoinKeyPrefix(
 		"region", netdRedisValueOrUnknown(cfgRegionID(cfg)),
-		"cluster", netdRedisValueOrUnknown(cfgClusterID(cfg)),
 		"team", teamID,
-		"direction", direction,
+		"dimension", string(dimension),
 	)
 	return rediscache.HashedKey(keyPrefix, raw)
 }
@@ -342,13 +354,6 @@ func cfgRegionID(cfg *apiconfig.NetdConfig) string {
 		return ""
 	}
 	return cfg.RegionID
-}
-
-func cfgClusterID(cfg *apiconfig.NetdConfig) string {
-	if cfg == nil {
-		return ""
-	}
-	return cfg.ClusterID
 }
 
 func netdRedisValueOrUnknown(value string) string {

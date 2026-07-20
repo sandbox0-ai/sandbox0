@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
@@ -522,22 +523,15 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// No active mounts, proceed with deletion
-	if err := s.repo.WithTx(r.Context(), func(tx pgx.Tx) error {
-		if err := s.repo.DeleteSandboxVolumeTx(r.Context(), tx, id); err != nil {
-			return err
-		}
-		deletedEvent := volumeDeletedEvent(s.regionID, vol)
-		if err := s.closeStorageObservationTx(r.Context(), tx, s.volumeStorageObservation(vol, nil, 0, deletedEvent.OccurredAt)); err != nil {
-			return err
-		}
-		if err := s.appendMeteringEventTx(r.Context(), tx, deletedEvent); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
+	// No active mounts, proceed with deletion.
+	deletedVolume, err := s.deleteSandboxVolumeTx(r.Context(), id)
+	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
+			return
+		}
+		if errors.Is(err, snapshot.ErrVolumeBusy) {
+			_ = spec.WriteError(w, http.StatusConflict, spec.CodeConflict, snapshot.ErrVolumeBusy.Error())
 			return
 		}
 		s.logger.WithError(err).Error("Failed to delete sandbox volume")
@@ -545,9 +539,49 @@ func (s *Server) deleteSandboxVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.cleanupDeletedSandboxVolumeObjects(r.Context(), vol)
-	s.logger.WithField("volume_id", id).WithField("team_id", vol.TeamID).Info("Sandbox volume deleted")
+	s.cleanupDeletedSandboxVolumeObjects(r.Context(), deletedVolume)
+	s.logger.WithField("volume_id", id).WithField("team_id", deletedVolume.TeamID).Info("Sandbox volume deleted")
 	_ = spec.WriteSuccess(w, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+func (s *Server) deleteSandboxVolumeTx(ctx context.Context, id string) (*db.SandboxVolume, error) {
+	if s.snapshotMgr == nil {
+		return nil, errors.New("snapshot manager is required to delete a sandbox volume")
+	}
+
+	var deletedVolume *db.SandboxVolume
+	err := s.repo.WithTx(ctx, func(tx pgx.Tx) error {
+		volume, err := s.repo.GetSandboxVolumeForUpdate(ctx, tx, id)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+				return snapshot.ErrVolumeBusy
+			}
+			return err
+		}
+
+		deletedEvent := volumeDeletedEvent(s.regionID, volume)
+		if err := s.snapshotMgr.DeleteSnapshotsForVolumeTx(ctx, tx, volume.ID, volume.TeamID, deletedEvent.OccurredAt); err != nil {
+			return fmt.Errorf("delete volume snapshots: %w", err)
+		}
+		storageObservation := s.volumeStorageObservation(volume, nil, 0, deletedEvent.OccurredAt)
+		if err := s.repo.DeleteSandboxVolumeTx(ctx, tx, id); err != nil {
+			return err
+		}
+		if err := s.closeStorageObservationTx(ctx, tx, storageObservation); err != nil {
+			return err
+		}
+		if err := s.appendMeteringEventTx(ctx, tx, deletedEvent); err != nil {
+			return err
+		}
+
+		deletedVolume = volume
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return deletedVolume, nil
 }
 
 func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force bool) (*db.SandboxVolume, error) {
@@ -587,19 +621,8 @@ func (s *Server) deleteSandboxVolumeRecord(ctx context.Context, id string, force
 			}
 		}
 	}
-	if err := s.repo.WithTx(ctx, func(tx pgx.Tx) error {
-		if err := s.repo.DeleteSandboxVolumeTx(ctx, tx, id); err != nil {
-			return err
-		}
-		deletedEvent := volumeDeletedEvent(s.regionID, vol)
-		if err := s.closeStorageObservationTx(ctx, tx, s.volumeStorageObservation(vol, nil, 0, deletedEvent.OccurredAt)); err != nil {
-			return err
-		}
-		if err := s.appendMeteringEventTx(ctx, tx, deletedEvent); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
+	vol, err = s.deleteSandboxVolumeTx(ctx, id)
+	if err != nil {
 		return nil, err
 	}
 	s.cleanupDeletedSandboxVolumeObjects(ctx, vol)
@@ -866,7 +889,7 @@ func (s *Server) deleteOwnedSandboxVolume(w http.ResponseWriter, r *http.Request
 	if _, err := s.deleteSandboxVolumeRecord(r.Context(), id, false); err != nil {
 		_ = s.repo.MarkOwnedSandboxVolumeCleanupAttempt(r.Context(), id, err)
 		status, code := http.StatusInternalServerError, spec.CodeInternal
-		if errors.Is(err, errVolumeHasActiveMounts) {
+		if errors.Is(err, errVolumeHasActiveMounts) || errors.Is(err, snapshot.ErrVolumeBusy) {
 			status, code = http.StatusConflict, spec.CodeConflict
 		}
 		_ = spec.WriteError(w, status, code, err.Error())

@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,6 +87,10 @@ func (r *fakeHTTPRepo) GetSandboxVolume(ctx context.Context, id string) (*db.San
 		return nil, db.ErrNotFound
 	}
 	return volume, nil
+}
+
+func (r *fakeHTTPRepo) GetSandboxVolumeForUpdate(ctx context.Context, tx pgx.Tx, id string) (*db.SandboxVolume, error) {
+	return r.GetSandboxVolume(ctx, id)
 }
 
 func (r *fakeHTTPRepo) GetSandboxVolumeOwner(ctx context.Context, volumeID string) (*db.SandboxVolumeOwner, error) {
@@ -228,6 +233,9 @@ type fakeHTTPSnapshotManager struct {
 	casefoldEntries      []snapshot.SnapshotCasefoldCollision
 	compatibilityIssues  []pathnorm.CompatibilityIssue
 	deletedSnapshot      []string
+	deletedVolumeSnaps   []string
+	deletedVolumeSnapAt  []time.Time
+	deleteVolumeSnapsErr error
 	cleanedVolumeObjects []string
 }
 
@@ -286,6 +294,15 @@ func (f *fakeHTTPSnapshotManager) RestoreSnapshot(ctx context.Context, req *snap
 
 func (f *fakeHTTPSnapshotManager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) error {
 	f.deletedSnapshot = append(f.deletedSnapshot, snapshotID)
+	return nil
+}
+
+func (f *fakeHTTPSnapshotManager) DeleteSnapshotsForVolumeTx(ctx context.Context, tx pgx.Tx, volumeID, teamID string, deletedAt time.Time) error {
+	if f.deleteVolumeSnapsErr != nil {
+		return f.deleteVolumeSnapsErr
+	}
+	f.deletedVolumeSnaps = append(f.deletedVolumeSnaps, volumeID)
+	f.deletedVolumeSnapAt = append(f.deletedVolumeSnapAt, deletedAt)
 	return nil
 }
 
@@ -421,6 +438,9 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 	if len(repo.deletedVolume) != 1 || repo.deletedVolume[0] != "vol-1" {
 		t.Fatalf("deleted volume = %v, want [vol-1]", repo.deletedVolume)
 	}
+	if len(snapshotMgr.deletedVolumeSnaps) != 1 || snapshotMgr.deletedVolumeSnaps[0] != "vol-1" {
+		t.Fatalf("deleted volume snapshots = %v, want [vol-1]", snapshotMgr.deletedVolumeSnaps)
+	}
 	if len(snapshotMgr.cleanedVolumeObjects) != 1 || snapshotMgr.cleanedVolumeObjects[0] != "vol-1" {
 		t.Fatalf("cleaned volume objects = %v, want [vol-1]", snapshotMgr.cleanedVolumeObjects)
 	}
@@ -442,6 +462,54 @@ func TestDeleteSandboxVolumeForceRecordsMetering(t *testing.T) {
 	}
 	if len(meteringWriter.watermarks) != 2 {
 		t.Fatalf("watermark count = %d, want 2", len(meteringWriter.watermarks))
+	}
+	if len(snapshotMgr.deletedVolumeSnapAt) != 1 || !snapshotMgr.deletedVolumeSnapAt[0].Equal(event.OccurredAt) {
+		t.Fatalf("snapshot deletion time = %v, want %v", snapshotMgr.deletedVolumeSnapAt, event.OccurredAt)
+	}
+}
+
+func TestDeleteSandboxVolumeKeepsVolumeWhenSnapshotMeteringFails(t *testing.T) {
+	repo := newFakeHTTPRepo()
+	repo.volumes["vol-1"] = &db.SandboxVolume{
+		ID:        "vol-1",
+		TeamID:    "team-1",
+		UserID:    "user-1",
+		CreatedAt: time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC),
+	}
+	meteringWriter := &fakeHTTPMeteringRepository{}
+	snapshotMgr := &fakeHTTPSnapshotManager{deleteVolumeSnapsErr: errors.New("close snapshot metering")}
+	server := &Server{
+		logger:       logrus.New(),
+		repo:         repo,
+		meteringRepo: meteringWriter,
+		regionID:     "aws-us-east-1",
+		snapshotMgr:  snapshotMgr,
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/sandboxvolumes/vol-1?force=true", nil)
+	req.SetPathValue("id", "vol-1")
+	req = req.WithContext(internalauth.WithClaims(req.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	recorder := httptest.NewRecorder()
+
+	server.deleteSandboxVolume(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if _, ok := repo.volumes["vol-1"]; !ok {
+		t.Fatal("volume was deleted after snapshot metering failed")
+	}
+	if len(repo.deletedVolume) != 0 {
+		t.Fatalf("deleted volume = %v, want none", repo.deletedVolume)
+	}
+	if len(meteringWriter.events) != 0 || len(meteringWriter.closedStorage) != 0 {
+		t.Fatalf("volume metering changed after snapshot metering failed: events=%d closed=%d", len(meteringWriter.events), len(meteringWriter.closedStorage))
+	}
+	if len(snapshotMgr.cleanedVolumeObjects) != 0 {
+		t.Fatalf("cleaned volume objects = %v, want none", snapshotMgr.cleanedVolumeObjects)
 	}
 }
 

@@ -1,0 +1,125 @@
+# Team Quotas
+
+Team Quota protects shared regional capacity and bandwidth from one team. A
+region has one set of defaults, and a team-specific policy overrides the
+default for the same key.
+
+## Supported Keys
+
+| Key | Kind | Unit | Enforcement |
+|---|---|---|---|
+| `active_sandboxes` | capacity | count | Sandbox claim |
+| `cpu_millicpu` | capacity | millicpu | Sandbox claim |
+| `memory_mib` | capacity | MiB | Sandbox claim |
+| `volume_storage_gb` | capacity | GB | Volume mutation |
+| `snapshot_storage_gb` | capacity | GB | Snapshot mutation |
+| `api_requests` | rate | requests | External regional or full-mode gateway request |
+| `network_egress_bytes` | rate | bytes | Sandbox traffic sent through the ctld network runtime |
+| `network_ingress_bytes` | rate | bytes | Sandbox traffic received through the ctld network runtime |
+
+Capacity policies compare current projected usage with `limitValue`. Rate
+policies refill `limitValue` tokens every `intervalMs` and allow an immediate
+burst up to `burstValue`.
+
+`network_egress_bytes` and `network_ingress_bytes` are bandwidth controls, not
+lifetime transfer caps. TCP and other streams wait for reserved byte tokens.
+UDP is dropped when tokens are not immediately available, so a datagram does
+not block a ctld worker indefinitely.
+
+## Configure Region Defaults
+
+Configure defaults under `spec.services.manager.config.defaultTeamQuotas`.
+For clarity, specify `intervalMs` and `burstValue` on every rate policy. An
+omitted interval defaults to 1000 milliseconds, and an omitted burst defaults
+to `limitValue`.
+
+```yaml
+spec:
+    redis:
+        type: builtin
+        builtin:
+            enabled: true
+    services:
+        manager:
+            enabled: true
+            config:
+                defaultTeamQuotas:
+                    - dimension: active_sandboxes
+                      limitValue: 20
+                    - dimension: cpu_millicpu
+                      limitValue: 20000
+                    - dimension: memory_mib
+                      limitValue: 40960
+                    - dimension: volume_storage_gb
+                      limitValue: 500
+                    - dimension: snapshot_storage_gb
+                      limitValue: 1000
+                    - dimension: api_requests
+                      limitValue: 100
+                      intervalMs: 1000
+                      burstValue: 200
+                    - dimension: network_egress_bytes
+                      limitValue: 104857600
+                      intervalMs: 1000
+                      burstValue: 104857600
+                    - dimension: network_ingress_bytes
+                      limitValue: 104857600
+                      intervalMs: 1000
+                      burstValue: 104857600
+```
+
+PostgreSQL stores the resolved policy source of truth. Region-wide rate
+admission uses Redis, so configure one shared Redis deployment for all clusters
+in a region. Network Redis keys are scoped by region and team and deliberately
+do not include a cluster ID.
+
+`api_requests` is charged once. A regional gateway charges the external request
+before forwarding it, and the internally authenticated cluster-gateway hop
+does not charge it again. A full-mode cluster gateway charges the external
+request directly.
+
+## Limiter Boundaries
+
+Not every limiter represents a tenant entitlement. These controls remain
+outside Team Quota:
+
+- the manager claim-start limiter protects cluster pod-start capacity
+- sandbox service route rate limits are application route policy
+- per-sandbox bandwidth limits are workload QoS
+- function concurrency is local to one sandbox runtime
+- Kubernetes client, observability, and global-gateway guards protect internal
+  components or the global entry layer
+
+Gateway route limits and per-sandbox bandwidth reuse the shared token-bucket
+implementation, but their configuration and state are not Team Quota policy.
+
+## Inspect Quotas
+
+Use `GET /api/v1/quotas` to return all eight statuses, or
+`GET /api/v1/quotas/{'{dimension}'}` for one status.
+
+Capacity statuses include `current` and `remaining`. Rate statuses include
+`interval_ms` and `burst_value`; `current` and `remaining` are `null` because
+Redis token state is transient admission state, not cumulative usage.
+
+## Metering Boundary
+
+Raw `sandbox.egress_bytes` and `sandbox.ingress_bytes` metering remains
+available for usage export and showback. PostgreSQL metering state and its
+ClickHouse read model continue to record transferred bytes, but those lifetime
+totals are never used to admit or reject network traffic.
+
+## Migration
+
+The old `egress` and `ingress` cumulative quota keys are deleted during the
+quota database migration and cannot be converted into bandwidth values.
+
+Move legacy `network.config.teamEgressBandwidthBytesPerSecond`,
+`teamIngressBandwidthBytesPerSecond`, and `teamBandwidthBurstBytes` values into
+`defaultTeamQuotas` using `network_egress_bytes` and
+`network_ingress_bytes`. The legacy fields are accepted only as a first-start
+compatibility bootstrap and should not be used in new configuration.
+
+Per-sandbox `network.config.egressBandwidthBytesPerSecond`,
+`ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` remain workload QoS
+settings and are intentionally separate from Team Quota.

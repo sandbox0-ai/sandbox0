@@ -105,16 +105,16 @@ type NetdConfig struct {
 	// Token bucket burst in bytes for bandwidth limiting. Zero uses one second of the configured rate.
 	BandwidthBurstBytes int64 `yaml:"bandwidth_burst_bytes" json:"bandwidthBurstBytes"`
 	// +optional
-	// Cluster-scoped per-team egress bandwidth limit in bytes per second. Requires Redis. Zero disables throttling.
+	// Deprecated: bootstrap network_egress_bytes through manager default_team_quotas instead.
 	TeamEgressBandwidthBytesPerSecond int64 `yaml:"team_egress_bandwidth_bytes_per_second" json:"teamEgressBandwidthBytesPerSecond"`
 	// +optional
-	// Cluster-scoped per-team ingress bandwidth limit in bytes per second. Requires Redis. Zero disables throttling.
+	// Deprecated: bootstrap network_ingress_bytes through manager default_team_quotas instead.
 	TeamIngressBandwidthBytesPerSecond int64 `yaml:"team_ingress_bandwidth_bytes_per_second" json:"teamIngressBandwidthBytesPerSecond"`
 	// +optional
-	// Token bucket burst in bytes for team bandwidth limiting. Zero uses one second of the configured rate.
+	// Deprecated: use each network quota policy's burst_value.
 	TeamBandwidthBurstBytes int64 `yaml:"team_bandwidth_burst_bytes" json:"teamBandwidthBurstBytes"`
 	// +optional
-	// RedisURL configures the Redis backend used by cluster-scoped team bandwidth limiting.
+	// RedisURL configures the Redis backend used by region-scoped Team Quota bandwidth limiting.
 	RedisURL string `yaml:"redis_url" json:"-"`
 	// +optional
 	// RedisKeyPrefix prefixes Redis keys used by the network runtime.

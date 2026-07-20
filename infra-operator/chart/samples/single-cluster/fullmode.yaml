@@ -163,8 +163,6 @@ spec:
     config:
       egressAuthEnabled: true
       egressAuthFailurePolicy: fail-closed
-      teamIngressBandwidthBytesPerSecond: 65536
-      teamBandwidthBurstBytes: 65536
   services:
     clusterGateway:
       enabled: true

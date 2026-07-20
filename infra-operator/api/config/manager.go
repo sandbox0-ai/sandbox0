@@ -105,8 +105,8 @@ type ManagerConfig struct {
 	SandboxMaxMemory string `yaml:"sandbox_max_memory" json:"sandboxMaxMemory"`
 	// +optional
 	SandboxRuntimeClassName string `yaml:"sandbox_runtime_class_name" json:"sandboxRuntimeClassName"`
-	// DefaultTeamQuotas configures region-wide fallback team quota limits.
-	// Team-specific quota rows in the database override these defaults.
+	// DefaultTeamQuotas declaratively reconciles region-wide quota defaults.
+	// Team-specific database policies override these defaults.
 	// +optional
 	DefaultTeamQuotas []TeamQuotaLimitConfig `yaml:"default_team_quotas" json:"defaultTeamQuotas"`
 	// AllowColdStartWithoutReadyDataPlane lets cold claims create Pending pods
@@ -234,11 +234,13 @@ type ManagerConfig struct {
 	ClaimStartLimiter ClaimStartLimiterConfig `yaml:"claim_start_limiter" json:"-"`
 }
 
-// TeamQuotaLimitConfig configures a fallback quota limit for teams without a
-// database override for the same dimension.
+// TeamQuotaLimitConfig configures a region default for teams without an
+// override for the same dimension.
 type TeamQuotaLimitConfig struct {
 	Dimension  string `yaml:"dimension" json:"dimension"`
 	LimitValue int64  `yaml:"limit_value" json:"limitValue"`
+	IntervalMS int64  `yaml:"interval_ms,omitempty" json:"intervalMs,omitempty"`
+	BurstValue int64  `yaml:"burst_value,omitempty" json:"burstValue,omitempty"`
 }
 
 // StaticEgressAuthConfig defines a static auth directive for runtime egress auth injection.

@@ -20,6 +20,9 @@ import (
 
 type quotaHandlerFakeDB struct {
 	limit     *quota.Limit
+	source    quota.Source
+	interval  int64
+	burst     int64
 	putLimit  *quota.Limit
 	deletedID string
 }
@@ -46,7 +49,18 @@ func (db *quotaHandlerFakeDB) QueryRow(_ context.Context, sql string, _ ...any) 
 		if db.limit == nil {
 			return quotaHandlerFakeRow{err: pgx.ErrNoRows}
 		}
-		return quotaHandlerFakeRow{values: []any{db.limit.TeamID, db.limit.Dimension, db.limit.LimitValue}}
+		source := db.source
+		if source == "" {
+			source = quota.SourceTeamOverride
+		}
+		return quotaHandlerFakeRow{values: []any{
+			db.limit.TeamID,
+			db.limit.Dimension,
+			db.limit.LimitValue,
+			db.interval,
+			db.burst,
+			string(source),
+		}}
 	default:
 		return quotaHandlerFakeRow{err: errors.New("unexpected query")}
 	}
@@ -54,10 +68,11 @@ func (db *quotaHandlerFakeDB) QueryRow(_ context.Context, sql string, _ ...any) 
 
 type quotaHandlerUsageStore struct {
 	current int64
+	err     error
 }
 
 func (s quotaHandlerUsageStore) CurrentUsage(context.Context, string, quota.Dimension) (int64, error) {
-	return s.current, nil
+	return s.current, s.err
 }
 
 func (s quotaHandlerUsageStore) ProjectedStorageUsageGB(context.Context, string, quota.Dimension, string, string, int64) (int64, error) {
@@ -122,7 +137,7 @@ func TestGetTeamQuotaReturnsUsageStatus(t *testing.T) {
 	if apiErr != nil {
 		t.Fatalf("api error = %+v, want nil", apiErr)
 	}
-	if resp == nil || resp.LimitValue == nil || *resp.LimitValue != 5 || resp.Current != 2 || resp.Remaining == nil || *resp.Remaining != 3 {
+	if resp == nil || resp.LimitValue == nil || *resp.LimitValue != 5 || resp.Current == nil || *resp.Current != 2 || resp.Remaining == nil || *resp.Remaining != 3 {
 		t.Fatalf("quota status = %+v, want limit=5 current=2 remaining=3", resp)
 	}
 	if resp.Unlimited || resp.Unit != "count" {
@@ -158,21 +173,53 @@ func TestGetTeamQuotaReturnsUnlimitedWhenLimitIsUnset(t *testing.T) {
 	if apiErr != nil {
 		t.Fatalf("api error = %+v, want nil", apiErr)
 	}
-	if resp == nil || !resp.Unlimited || resp.LimitValue != nil || resp.Remaining != nil || resp.Current != 7 {
+	if resp == nil || !resp.Unlimited || resp.LimitValue != nil || resp.Remaining != nil || resp.Current == nil || *resp.Current != 7 {
 		t.Fatalf("quota status = %+v, want unlimited with current=7", resp)
+	}
+}
+
+func TestGetTeamRateQuotaDoesNotReadCumulativeUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := quota.NewRepositoryWithDB(&quotaHandlerFakeDB{
+		limit:    &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionAPIRequests, LimitValue: 100},
+		source:   quota.SourceTeamOverride,
+		interval: 1000,
+		burst:    200,
+	})
+	repo.SetUsageStore(quotaHandlerUsageStore{err: errors.New("rate status must not query usage")})
+	server := &Server{quotaRepo: repo, logger: zap.NewNop()}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/quotas/api_requests", nil)
+	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{TeamID: "team-1"}))
+	ctx.Request = request
+	ctx.Params = gin.Params{{Key: "dimension", Value: string(quota.DimensionAPIRequests)}}
+
+	server.getTeamQuota(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	resp, apiErr, err := spec.DecodeResponse[quota.Status](strings.NewReader(recorder.Body.String()))
+	if err != nil || apiErr != nil {
+		t.Fatalf("decode response = %+v, %v", apiErr, err)
+	}
+	if resp == nil || resp.Kind != quota.KindRate || resp.Current != nil || resp.Remaining != nil {
+		t.Fatalf("quota status = %+v, want rate status without cumulative usage", resp)
+	}
+	if resp.IntervalMS == nil || *resp.IntervalMS != 1000 || resp.BurstValue == nil || *resp.BurstValue != 200 {
+		t.Fatalf("quota status = %+v, want interval=1000 burst=200", resp)
 	}
 }
 
 func TestGetTeamQuotaReturnsDefaultLimitWhenDBLimitIsUnset(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	repo, err := quota.NewRepositoryWithDBDefaults(
-		&quotaHandlerFakeDB{},
-		[]quota.DefaultLimit{{Dimension: quota.DimensionActiveSandboxes, LimitValue: 3}},
-	)
-	if err != nil {
-		t.Fatalf("NewRepositoryWithDBDefaults: %v", err)
-	}
+	repo := quota.NewRepositoryWithDB(&quotaHandlerFakeDB{
+		limit:  &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 3},
+		source: quota.SourceRegionDefault,
+	})
 	repo.SetUsageStore(quotaHandlerUsageStore{current: 1})
 	server := &Server{
 		quotaRepo: repo,
@@ -197,7 +244,7 @@ func TestGetTeamQuotaReturnsDefaultLimitWhenDBLimitIsUnset(t *testing.T) {
 	if apiErr != nil {
 		t.Fatalf("api error = %+v, want nil", apiErr)
 	}
-	if resp == nil || resp.LimitValue == nil || *resp.LimitValue != 3 || resp.Current != 1 || resp.Remaining == nil || *resp.Remaining != 2 {
+	if resp == nil || resp.LimitValue == nil || *resp.LimitValue != 3 || resp.Current == nil || *resp.Current != 1 || resp.Remaining == nil || *resp.Remaining != 2 {
 		t.Fatalf("quota status = %+v, want default limit=3 current=1 remaining=2", resp)
 	}
 	if resp.Unlimited {

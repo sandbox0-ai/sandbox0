@@ -206,9 +206,9 @@ func NewServer(
 		}
 	}
 	authMiddleware := middleware.NewAuthMiddleware(apiKeyRepo, cfg.JWTSecret, jwtIssuer, logger, authMiddlewareOptions...)
-	rateLimiter, err := middleware.NewRateLimiterWithConfig(ctx, cfg.RateLimitRPS, cfg.RateLimitBurst, middleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig), logger)
+	rateLimiter, err := middleware.NewTeamQuotaRateLimiterWithConfig(ctx, pool, cfg.GatewayConfig, logger)
 	if err != nil {
-		return nil, fmt.Errorf("create rate limiter: %w", err)
+		return nil, fmt.Errorf("create team quota rate limiter: %w", err)
 	}
 	requestLogger := middleware.NewRequestLogger(logger)
 

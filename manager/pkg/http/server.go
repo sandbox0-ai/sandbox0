@@ -201,6 +201,7 @@ func (s *Server) setupRoutes() {
 
 		quotas := v1.Group("/quotas")
 		{
+			quotas.GET("", s.listTeamQuotas)
 			quotas.GET("/:dimension", s.getTeamQuota)
 		}
 	}

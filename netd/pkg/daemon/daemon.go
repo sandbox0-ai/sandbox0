@@ -165,6 +165,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	tracker := conntrack.NewTracker()
 	var usageAggregator *netdmetering.Aggregator
 	var databasePool *pgxpool.Pool
+	var quotaRepo *quota.Repository
 	var meteringDB runtimeResource
 	runtimeResourcesRegistered := false
 	defer func() {
@@ -195,12 +196,16 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		if err := quota.RunMigrations(ctx, databasePool, observability.NewMigrateLogger(d.logger)); err != nil {
 			return fmt.Errorf("run quota migrations: %w", err)
 		}
+		quotaRepo = quota.NewRepository(databasePool)
+		if err := quotaRepo.EnsureDefaultPolicies(ctx, "netd_legacy_bandwidth", netdTeamQuotaDefaults(d.cfg)); err != nil {
+			return fmt.Errorf("bootstrap network quota defaults: %w", err)
+		}
 	}
 	if d.cfg.Metering.Enabled {
 		if databasePool == nil {
 			return fmt.Errorf("DATABASE_URL is required when metering is enabled")
 		}
-		db, usageStore, err := d.openMetering(ctx)
+		db, _, err := d.openMetering(ctx)
 		if err != nil {
 			return err
 		}
@@ -212,11 +217,6 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 			d.cfg.NodeName,
 			d.logger,
 		)
-		if databasePool != nil {
-			quotaRepo := quota.NewRepository(databasePool)
-			quotaRepo.SetUsageStore(usageStore)
-			usageAggregator.SetQuotaStore(quotaRepo)
-		}
 	}
 	syncTrigger := make(chan struct{}, 1)
 	triggerSync := func() {
@@ -260,6 +260,23 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	}
 
 	proxyOpts := []proxy.ServerOption{}
+	if quotaRepo != nil {
+		if strings.TrimSpace(d.cfg.RedisURL) == "" {
+			d.logger.Warn("Network Team Quota is using node-local token state; configure region Redis for cross-node enforcement")
+		}
+		policies, policyErr := quota.NewCachedPolicyStore(ctx, databasePool, quotaRepo, quota.DefaultPolicyCacheTTL)
+		if policyErr != nil {
+			return fmt.Errorf("create network quota policy cache: %w", policyErr)
+		}
+		teamQuotaOption, optionErr := proxy.WithTeamQuotaBandwidth(ctx, d.cfg, policies)
+		if optionErr != nil {
+			_ = policies.Close()
+			return fmt.Errorf("create network quota limiter: %w", optionErr)
+		}
+		if teamQuotaOption != nil {
+			proxyOpts = append(proxyOpts, teamQuotaOption)
+		}
+	}
 	if d.cfg.EgressAuthResolverURL != "" {
 		privateKey, keyErr := internalauth.LoadEd25519PrivateKeyFromFile(internalauth.DefaultInternalJWTPrivateKeyPath)
 		if keyErr != nil {
@@ -359,6 +376,31 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func netdTeamQuotaDefaults(cfg *config.NetdConfig) []quota.DefaultLimit {
+	if cfg == nil {
+		return nil
+	}
+	defaults := make([]quota.DefaultLimit, 0, 2)
+	add := func(dimension quota.Dimension, rate int64) {
+		if rate <= 0 {
+			return
+		}
+		burst := cfg.TeamBandwidthBurstBytes
+		if burst <= 0 {
+			burst = rate
+		}
+		defaults = append(defaults, quota.DefaultLimit{
+			Dimension:  dimension,
+			LimitValue: rate,
+			IntervalMS: int64(time.Second / time.Millisecond),
+			BurstValue: burst,
+		})
+	}
+	add(quota.DimensionNetworkEgress, cfg.TeamEgressBandwidthBytesPerSecond)
+	add(quota.DimensionNetworkIngress, cfg.TeamIngressBandwidthBytesPerSecond)
+	return defaults
 }
 
 func (d *Daemon) dbConfigModifier() func(*pgxpool.Config) error {

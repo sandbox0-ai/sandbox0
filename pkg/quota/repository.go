@@ -19,12 +19,15 @@ type DB interface {
 }
 
 type Repository struct {
-	db            DB
-	defaultLimits map[Dimension]int64
-	usageStore    UsageStore
+	db         DB
+	usageStore UsageStore
 }
 
 var ErrUsageStoreNotConfigured = errors.New("quota usage store is not configured")
+
+type PolicyStore interface {
+	GetPolicy(ctx context.Context, teamID string, dimension Dimension) (*Policy, error)
+}
 
 type UsageStore interface {
 	CurrentUsage(ctx context.Context, teamID string, dimension Dimension) (int64, error)
@@ -44,24 +47,6 @@ func NewRepositoryWithDB(db DB) *Repository {
 		return nil
 	}
 	return &Repository{db: db}
-}
-
-func NewRepositoryWithDefaults(pool *pgxpool.Pool, defaults []DefaultLimit) (*Repository, error) {
-	if pool == nil {
-		return nil, nil
-	}
-	return NewRepositoryWithDBDefaults(pool, defaults)
-}
-
-func NewRepositoryWithDBDefaults(db DB, defaults []DefaultLimit) (*Repository, error) {
-	if db == nil {
-		return nil, nil
-	}
-	defaultLimits, err := buildDefaultLimitMap(defaults)
-	if err != nil {
-		return nil, err
-	}
-	return &Repository{db: db, defaultLimits: defaultLimits}, nil
 }
 
 func (r *Repository) SetUsageStore(store UsageStore) {
@@ -95,27 +80,20 @@ func (r *Repository) configuredUsageStore() (UsageStore, bool) {
 	return r.usageStore, true
 }
 
-func buildDefaultLimitMap(defaults []DefaultLimit) (map[Dimension]int64, error) {
-	if len(defaults) == 0 {
-		return nil, nil
+func (r *Repository) GetLimit(ctx context.Context, teamID string, dimension Dimension) (*Limit, error) {
+	policy, err := r.GetPolicy(ctx, teamID, dimension)
+	if err != nil || policy == nil {
+		return nil, err
 	}
-	limits := make(map[Dimension]int64, len(defaults))
-	for _, limit := range defaults {
-		if !KnownDimension(limit.Dimension) {
-			return nil, fmt.Errorf("unknown quota dimension %q", limit.Dimension)
-		}
-		if limit.LimitValue < 0 {
-			return nil, fmt.Errorf("default quota %s limit_value must be non-negative", limit.Dimension)
-		}
-		if _, exists := limits[limit.Dimension]; exists {
-			return nil, fmt.Errorf("duplicate default quota dimension %q", limit.Dimension)
-		}
-		limits[limit.Dimension] = limit.LimitValue
-	}
-	return limits, nil
+	return &Limit{
+		TeamID:     policy.TeamID,
+		Dimension:  policy.Dimension,
+		LimitValue: policy.LimitValue,
+	}, nil
 }
 
-func (r *Repository) GetLimit(ctx context.Context, teamID string, dimension Dimension) (*Limit, error) {
+// GetPolicy resolves a team override before the region default.
+func (r *Repository) GetPolicy(ctx context.Context, teamID string, dimension Dimension) (*Policy, error) {
 	if r == nil || r.db == nil {
 		return nil, nil
 	}
@@ -123,34 +101,50 @@ func (r *Repository) GetLimit(ctx context.Context, teamID string, dimension Dime
 	if teamID == "" {
 		return nil, fmt.Errorf("team_id is required")
 	}
-	if dimension == "" {
-		return nil, fmt.Errorf("dimension is required")
+	if !KnownDimension(dimension) {
+		return nil, fmt.Errorf("unknown quota dimension %q", dimension)
 	}
 
-	var limit Limit
+	var (
+		policy     Policy
+		source     string
+		intervalMS int64
+		burstValue int64
+	)
 	err := r.db.QueryRow(ctx, `
-		SELECT team_id, dimension, limit_value
-		FROM quota.team_quota_limits
-		WHERE team_id = $1 AND dimension = $2
-	`, teamID, string(dimension)).Scan(&limit.TeamID, &limit.Dimension, &limit.LimitValue)
+		SELECT team_id, dimension, limit_value, interval_ms, burst_value, source
+		FROM (
+			SELECT team_id, dimension, limit_value, interval_ms, burst_value,
+				'team_override'::TEXT AS source, 0 AS priority
+			FROM quota.team_quota_limits
+			WHERE team_id = $1 AND dimension = $2
+			UNION ALL
+			SELECT $1::TEXT AS team_id, dimension, limit_value, interval_ms, burst_value,
+				'region_default'::TEXT AS source, 1 AS priority
+			FROM quota.region_quota_limits
+			WHERE dimension = $2
+		) AS candidates
+		ORDER BY priority
+		LIMIT 1
+	`, teamID, string(dimension)).Scan(
+		&policy.TeamID,
+		&policy.Dimension,
+		&policy.LimitValue,
+		&intervalMS,
+		&burstValue,
+		&source,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return r.defaultLimit(teamID, dimension), nil
+			return nil, nil
 		}
-		return nil, fmt.Errorf("query team quota limit: %w", err)
+		return nil, fmt.Errorf("query team quota policy: %w", err)
 	}
-	return &limit, nil
-}
-
-func (r *Repository) defaultLimit(teamID string, dimension Dimension) *Limit {
-	if r == nil || len(r.defaultLimits) == 0 {
-		return nil
-	}
-	limitValue, ok := r.defaultLimits[dimension]
-	if !ok {
-		return nil
-	}
-	return &Limit{TeamID: teamID, Dimension: dimension, LimitValue: limitValue}
+	policy.Kind = KindForDimension(policy.Dimension)
+	policy.IntervalMS = intervalMS
+	policy.BurstValue = burstValue
+	policy.Source = Source(source)
+	return &policy, nil
 }
 
 func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension Dimension) (int64, error) {
@@ -179,6 +173,10 @@ func (r *Repository) CheckProjectedStorageUsageGB(ctx context.Context, teamID st
 	if limit == nil {
 		return Check(teamID, dimension, 0, 0, nil), nil
 	}
+	requested := BytesToGBRoundUp(sizeBytes)
+	if decision := Check(teamID, dimension, 0, requested, limit); !decision.Allowed {
+		return decision, decision.Err()
+	}
 	projected, err := r.ProjectedStorageUsageGB(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
 	if err != nil {
 		return Decision{}, err
@@ -201,6 +199,10 @@ func (r *Repository) CheckAdditionalStorageUsageGB(ctx context.Context, teamID s
 	}
 	if limit == nil {
 		return Check(teamID, dimension, 0, 0, nil), nil
+	}
+	requested := BytesToGBRoundUp(additionalBytes)
+	if decision := Check(teamID, dimension, 0, requested, limit); !decision.Allowed {
+		return decision, decision.Err()
 	}
 	projected, err := r.AdditionalStorageUsageGB(ctx, teamID, dimension, subjectType, additionalBytes)
 	if err != nil {
@@ -260,37 +262,58 @@ func storageDimensionMatchesSubjectType(dimension Dimension, subjectType string)
 }
 
 func (r *Repository) PutLimit(ctx context.Context, limit *Limit) error {
-	if r == nil || r.db == nil {
-		return fmt.Errorf("quota repository is not configured")
-	}
 	if limit == nil {
 		return fmt.Errorf("limit is nil")
 	}
-	limit.TeamID = strings.TrimSpace(limit.TeamID)
-	if limit.TeamID == "" {
+	return r.PutPolicy(ctx, &Policy{
+		TeamID:     limit.TeamID,
+		Dimension:  limit.Dimension,
+		Kind:       KindForDimension(limit.Dimension),
+		LimitValue: limit.LimitValue,
+		Source:     SourceTeamOverride,
+	})
+}
+
+// PutPolicy creates or replaces a team-specific quota policy.
+func (r *Repository) PutPolicy(ctx context.Context, policy *Policy) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("quota repository is not configured")
+	}
+	if policy == nil {
+		return fmt.Errorf("policy is nil")
+	}
+	policy.TeamID = strings.TrimSpace(policy.TeamID)
+	if policy.TeamID == "" {
 		return fmt.Errorf("team_id is required")
 	}
-	if limit.Dimension == "" {
-		return fmt.Errorf("dimension is required")
+	if err := ValidatePolicyValues(policy.Dimension, policy.LimitValue, policy.IntervalMS, policy.BurstValue); err != nil {
+		return err
 	}
-	if limit.LimitValue < 0 {
-		return fmt.Errorf("limit_value must be non-negative")
-	}
-
 	_, err := r.db.Exec(ctx, `
-		INSERT INTO quota.team_quota_limits (team_id, dimension, limit_value)
-		VALUES ($1, $2, $3)
+		INSERT INTO quota.team_quota_limits (
+			team_id, dimension, limit_value, interval_ms, burst_value
+		)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (team_id, dimension) DO UPDATE
 		SET limit_value = EXCLUDED.limit_value,
+			interval_ms = EXCLUDED.interval_ms,
+			burst_value = EXCLUDED.burst_value,
 			updated_at = NOW()
-	`, limit.TeamID, string(limit.Dimension), limit.LimitValue)
+	`, policy.TeamID, string(policy.Dimension), policy.LimitValue, policy.IntervalMS, policy.BurstValue)
 	if err != nil {
-		return fmt.Errorf("upsert team quota limit: %w", err)
+		return fmt.Errorf("upsert team quota policy: %w", err)
 	}
+	policy.Kind = KindForDimension(policy.Dimension)
+	policy.Source = SourceTeamOverride
 	return nil
 }
 
 func (r *Repository) DeleteLimit(ctx context.Context, teamID string, dimension Dimension) error {
+	return r.DeletePolicy(ctx, teamID, dimension)
+}
+
+// DeletePolicy removes a team override so the region default applies again.
+func (r *Repository) DeletePolicy(ctx context.Context, teamID string, dimension Dimension) error {
 	if r == nil || r.db == nil {
 		return fmt.Errorf("quota repository is not configured")
 	}
@@ -298,8 +321,8 @@ func (r *Repository) DeleteLimit(ctx context.Context, teamID string, dimension D
 	if teamID == "" {
 		return fmt.Errorf("team_id is required")
 	}
-	if dimension == "" {
-		return fmt.Errorf("dimension is required")
+	if !KnownDimension(dimension) {
+		return fmt.Errorf("unknown quota dimension %q", dimension)
 	}
 
 	_, err := r.db.Exec(ctx, `
@@ -308,6 +331,117 @@ func (r *Repository) DeleteLimit(ctx context.Context, teamID string, dimension D
 	`, teamID, string(dimension))
 	if err != nil {
 		return fmt.Errorf("delete team quota limit: %w", err)
+	}
+	return nil
+}
+
+// EnsureDefaultPolicies bootstraps region defaults once without overwriting
+// policies already reconciled by another owner.
+func (r *Repository) EnsureDefaultPolicies(ctx context.Context, owner string, defaults []DefaultLimit) error {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return fmt.Errorf("default quota owner is required")
+	}
+	seen := make(map[Dimension]struct{}, len(defaults))
+	for _, item := range defaults {
+		if _, ok := seen[item.Dimension]; ok {
+			return fmt.Errorf("duplicate default quota dimension %q", item.Dimension)
+		}
+		seen[item.Dimension] = struct{}{}
+		policy := &Policy{
+			Dimension:  item.Dimension,
+			Kind:       KindForDimension(item.Dimension),
+			LimitValue: item.LimitValue,
+			IntervalMS: item.IntervalMS,
+			BurstValue: item.BurstValue,
+			Source:     SourceRegionDefault,
+		}
+		if err := r.ensureDefaultPolicy(ctx, owner, policy); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) ensureDefaultPolicy(ctx context.Context, owner string, policy *Policy) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("quota repository is not configured")
+	}
+	if policy == nil {
+		return fmt.Errorf("policy is nil")
+	}
+	if err := ValidatePolicyValues(policy.Dimension, policy.LimitValue, policy.IntervalMS, policy.BurstValue); err != nil {
+		return err
+	}
+	_, err := r.db.Exec(ctx, `
+		WITH claimed AS (
+			INSERT INTO quota.region_quota_bootstrap (dimension)
+			VALUES ($1)
+			ON CONFLICT (dimension) DO NOTHING
+			RETURNING dimension
+		)
+		INSERT INTO quota.region_quota_limits (
+			dimension, limit_value, interval_ms, burst_value, managed_by
+		)
+		SELECT dimension, $2, $3, $4, $5
+		FROM claimed
+		ON CONFLICT (dimension) DO NOTHING
+	`, string(policy.Dimension), policy.LimitValue, policy.IntervalMS, policy.BurstValue, owner)
+	if err != nil {
+		return fmt.Errorf("ensure region quota policy: %w", err)
+	}
+	return nil
+}
+
+// SyncDefaultPolicies reconciles the complete set of region defaults owned by
+// one declarative configuration source.
+func (r *Repository) SyncDefaultPolicies(ctx context.Context, owner string, defaults []DefaultLimit) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("quota repository is not configured")
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return fmt.Errorf("default quota owner is required")
+	}
+	seen := make(map[Dimension]struct{}, len(defaults))
+	dimensions := make([]string, 0, len(defaults))
+	for _, item := range defaults {
+		if _, ok := seen[item.Dimension]; ok {
+			return fmt.Errorf("duplicate default quota dimension %q", item.Dimension)
+		}
+		seen[item.Dimension] = struct{}{}
+		if err := ValidatePolicyValues(item.Dimension, item.LimitValue, item.IntervalMS, item.BurstValue); err != nil {
+			return err
+		}
+		dimensions = append(dimensions, string(item.Dimension))
+		_, err := r.db.Exec(ctx, `
+			WITH marked AS (
+				INSERT INTO quota.region_quota_bootstrap (dimension)
+				VALUES ($1)
+				ON CONFLICT (dimension) DO NOTHING
+			)
+			INSERT INTO quota.region_quota_limits (
+				dimension, limit_value, interval_ms, burst_value, managed_by
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (dimension) DO UPDATE
+			SET limit_value = EXCLUDED.limit_value,
+				interval_ms = EXCLUDED.interval_ms,
+				burst_value = EXCLUDED.burst_value,
+				managed_by = EXCLUDED.managed_by,
+				updated_at = NOW()
+		`, string(item.Dimension), item.LimitValue, item.IntervalMS, item.BurstValue, owner)
+		if err != nil {
+			return fmt.Errorf("sync region quota policy %s: %w", item.Dimension, err)
+		}
+	}
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM quota.region_quota_limits
+		WHERE managed_by = $1
+			AND NOT (dimension = ANY($2::TEXT[]))
+	`, owner, dimensions)
+	if err != nil {
+		return fmt.Errorf("delete stale region quota policies: %w", err)
 	}
 	return nil
 }

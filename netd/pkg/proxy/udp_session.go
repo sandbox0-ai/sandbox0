@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -170,7 +171,7 @@ func (session *udpSession) Forward(payload []byte) error {
 	session.touch()
 	_ = upstream.SetWriteDeadline(time.Now().Add(session.server.udpSessionIdleTimeout()))
 	if session.server != nil {
-		if err := session.server.waitBandwidth(compiled, bandwidthEgress, len(payload)); err != nil {
+		if err := session.server.waitDatagramBandwidth(context.Background(), compiled, bandwidthEgress, len(payload)); err != nil {
 			session.closeWithError(err)
 			return err
 		}
@@ -257,7 +258,7 @@ func (session *udpSession) readLoop(conn *net.UDPConn) {
 		}
 		compiled, audit := session.auditSnapshot()
 		if session.server != nil {
-			if err := session.server.waitBandwidth(compiled, bandwidthIngress, len(payload)); err != nil {
+			if err := session.server.waitDatagramBandwidth(context.Background(), compiled, bandwidthIngress, len(payload)); err != nil {
 				session.closeWithError(err)
 				return
 			}

@@ -47,25 +47,9 @@ func TestMemoryLimiterUpdatesLimitForExistingKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("updated Allow() error = %v", err)
 	}
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-	if got, want := limiter.entries[key].limit, (Limit{RPS: 100, Burst: 10}); got != want {
-		t.Fatalf("stored limit = %+v, want %+v", got, want)
-	}
-}
-
-func TestMemoryLimiterCleanupRemovesIdleKeys(t *testing.T) {
-	limiter := NewMemoryLimiter(MemoryConfig{CleanupInterval: time.Hour})
-	defer limiter.Close()
-
-	if decision, err := limiter.Allow(context.Background(), "stale", Limit{RPS: 1, Burst: 1}); err != nil || !decision.Allowed {
-		t.Fatalf("Allow() = %+v, %v", decision, err)
-	}
-	limiter.cleanup(time.Now().Add(2 * time.Hour))
-
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-	if _, ok := limiter.entries["stale"]; ok {
-		t.Fatal("stale limiter was not removed")
+	for i := 0; i < 9; i++ {
+		if decision, err := limiter.Allow(context.Background(), key, Limit{RPS: 100, Burst: 10}); err != nil || !decision.Allowed {
+			t.Fatalf("updated Allow() %d = %+v, %v, want allowed", i, decision, err)
+		}
 	}
 }

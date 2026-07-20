@@ -428,7 +428,7 @@ Cache contents are safe to delete. If a cached object is missing, corrupt, too o
 
 ### Shared Redis Rate Limiting
 
-Gateway request rate limiting defaults to process-local memory. Configure `spec.redis` when gateway replicas need a shared Redis backend. The ctld network runtime uses the same Redis backend when cluster-scoped team bandwidth limits are configured.
+Gateway request rate limiting defaults to process-local memory. Configure `spec.redis` so `api_requests` and network bandwidth Team Quotas share admission state across gateway replicas, ctld nodes, and data-plane clusters in the region.
 
 ```yaml
 spec:
@@ -648,7 +648,7 @@ Examples:
 - `storage.runtime.cacheSizeLimit` and `logSizeLimit` cap storage cache and logs in the manager Pod; `volumePortalCacheSizeLimit` and `volumePortalRootMinFree` tune the volume portals used by ctld
 - `storage.runtime.objectEncryptionEnabled` controls application-layer encryption for S0FS object storage and node-local volume cache files; it is enabled by default
 - `network.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
-- `network.config.teamEgressBandwidthBytesPerSecond`, `teamIngressBandwidthBytesPerSecond`, and `teamBandwidthBurstBytes` apply cluster-scoped per-team aggregate throttling when set above zero and `spec.redis` is configured
+- `services.manager.config.defaultTeamQuotas` configures region-wide capacity, API request, and network bandwidth defaults; see [Team Quotas](/docs/sandbox/self-hosted/quotas)
 - `network.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
 
 ```yaml
@@ -672,9 +672,18 @@ spec:
             egressBandwidthBytesPerSecond: 10485760
             ingressBandwidthBytesPerSecond: 10485760
             bandwidthBurstBytes: 10485760
-            teamEgressBandwidthBytesPerSecond: 104857600
-            teamIngressBandwidthBytesPerSecond: 104857600
-            teamBandwidthBurstBytes: 104857600
+    services:
+        manager:
+            config:
+                defaultTeamQuotas:
+                    - dimension: network_egress_bytes
+                      limitValue: 104857600
+                      intervalMs: 1000
+                      burstValue: 104857600
+                    - dimension: network_ingress_bytes
+                      limitValue: 104857600
+                      intervalMs: 1000
+                      burstValue: 104857600
 ```
 
 Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods and the ctld HA pair. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready.

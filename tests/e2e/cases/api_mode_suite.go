@@ -197,6 +197,30 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				Expect(status).To(Equal(http.StatusTooManyRequests))
 			})
 
+			if opts.includeUsageQuotaAssertions {
+				It("enforces API request quota", func() {
+					_, status, err := session.PutTeamRateQuota(
+						env.TestCtx.Context,
+						env,
+						quota.DimensionAPIRequests,
+						0,
+						1000,
+						0,
+					)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(status).To(Equal(http.StatusOK))
+					defer func() {
+						_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionAPIRequests)
+					}()
+
+					Eventually(func() int {
+						_, observedStatus, _ := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+						return observedStatus
+					}).WithTimeout(15 * time.Second).WithPolling(500 * time.Millisecond).
+						Should(Equal(http.StatusTooManyRequests))
+				})
+			}
+
 			It("fetches status and refreshes sandboxes", func() {
 				Expect(sandboxID).NotTo(BeEmpty())
 
@@ -285,12 +309,12 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				})
 
 				if opts.includeUsageQuotaAssertions {
-					It("enforces egress quota", func() {
-						assertEgressQuota(env, session, sandboxID)
+					It("enforces network egress quota", func() {
+						assertNetworkEgressQuota(env, session, sandboxID)
 					})
 
-					It("enforces ingress quota", func() {
-						assertIngressQuota(env, session, sandboxID)
+					It("enforces network ingress quota", func() {
+						assertNetworkIngressQuota(env, session, sandboxID)
 					})
 				}
 
@@ -1980,7 +2004,7 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 }
 
-func assertEgressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+func assertNetworkEgressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
 	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
@@ -1989,18 +2013,20 @@ func assertEgressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sa
 	Expect(err).NotTo(HaveOccurred())
 	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 
-	_, status, err = session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionEgress, 0)
+	_, status, err = session.PutTeamRateQuota(env.TestCtx.Context, env, quota.DimensionNetworkEgress, 0, 1000, 0)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	DeferCleanup(func() {
-		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionEgress)
+		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionNetworkEgress)
 	})
 
-	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
-	Expect(err).To(HaveOccurred())
+	Eventually(func() bool {
+		_, execErr := execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
+		return execErr != nil
+	}).WithTimeout(15 * time.Second).WithPolling(500 * time.Millisecond).Should(BeTrue())
 }
 
-func assertIngressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+func assertNetworkIngressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
 	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
@@ -2009,15 +2035,17 @@ func assertIngressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, s
 	Expect(err).NotTo(HaveOccurred())
 	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 
-	_, status, err = session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionIngress, 0)
+	_, status, err = session.PutTeamRateQuota(env.TestCtx.Context, env, quota.DimensionNetworkIngress, 0, 1000, 0)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	DeferCleanup(func() {
-		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionIngress)
+		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionNetworkIngress)
 	})
 
-	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
-	Expect(err).To(HaveOccurred())
+	Eventually(func() bool {
+		_, execErr := execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
+		return execErr != nil
+	}).WithTimeout(15 * time.Second).WithPolling(500 * time.Millisecond).Should(BeTrue())
 }
 
 func assertCredentialSourceBindingLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {

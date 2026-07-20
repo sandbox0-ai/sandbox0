@@ -16,22 +16,36 @@ import (
 )
 
 type PutTeamQuotaRequest struct {
-	LimitValue int64 `json:"limit_value"`
+	LimitValue int64  `json:"limit_value"`
+	IntervalMS *int64 `json:"interval_ms,omitempty"`
+	BurstValue *int64 `json:"burst_value,omitempty"`
 }
 
-func (s *Session) PutTeamQuota(ctx context.Context, env *framework.ScenarioEnv, dimension quota.Dimension, limitValue int64) (*quota.Limit, int, error) {
+func (s *Session) PutTeamQuota(ctx context.Context, env *framework.ScenarioEnv, dimension quota.Dimension, limitValue int64) (*quota.Policy, int, error) {
+	return s.putTeamQuotaPolicy(ctx, env, dimension, PutTeamQuotaRequest{LimitValue: limitValue})
+}
+
+func (s *Session) PutTeamRateQuota(ctx context.Context, env *framework.ScenarioEnv, dimension quota.Dimension, limitValue, intervalMS, burstValue int64) (*quota.Policy, int, error) {
+	return s.putTeamQuotaPolicy(ctx, env, dimension, PutTeamQuotaRequest{
+		LimitValue: limitValue,
+		IntervalMS: &intervalMS,
+		BurstValue: &burstValue,
+	})
+}
+
+func (s *Session) putTeamQuotaPolicy(ctx context.Context, env *framework.ScenarioEnv, dimension quota.Dimension, request PutTeamQuotaRequest) (*quota.Policy, int, error) {
 	path, err := s.teamQuotaInternalPath(dimension)
 	if err != nil {
 		return nil, 0, err
 	}
-	status, body, err := s.doInternalSystemJSONRequest(ctx, env, http.MethodPut, path, PutTeamQuotaRequest{LimitValue: limitValue})
+	status, body, err := s.doInternalSystemJSONRequest(ctx, env, http.MethodPut, path, request)
 	if err != nil {
 		return nil, status, err
 	}
 	if status != http.StatusOK {
 		return nil, status, fmt.Errorf("put team quota failed with status %d: %s", status, formatAPIError(body))
 	}
-	resp, apiErr, err := gatewayspec.DecodeResponse[quota.Limit](bytes.NewReader(body))
+	resp, apiErr, err := gatewayspec.DecodeResponse[quota.Policy](bytes.NewReader(body))
 	if err != nil {
 		return nil, status, err
 	}

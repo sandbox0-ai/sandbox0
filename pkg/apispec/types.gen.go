@@ -211,13 +211,14 @@ const (
 
 // Defines values for QuotaDimension.
 const (
-	ActiveSandboxes   QuotaDimension = "active_sandboxes"
-	CpuMillicpu       QuotaDimension = "cpu_millicpu"
-	Egress            QuotaDimension = "egress"
-	Ingress           QuotaDimension = "ingress"
-	MemoryMib         QuotaDimension = "memory_mib"
-	SnapshotStorageGb QuotaDimension = "snapshot_storage_gb"
-	VolumeStorageGb   QuotaDimension = "volume_storage_gb"
+	ActiveSandboxes     QuotaDimension = "active_sandboxes"
+	ApiRequests         QuotaDimension = "api_requests"
+	CpuMillicpu         QuotaDimension = "cpu_millicpu"
+	MemoryMib           QuotaDimension = "memory_mib"
+	NetworkEgressBytes  QuotaDimension = "network_egress_bytes"
+	NetworkIngressBytes QuotaDimension = "network_ingress_bytes"
+	SnapshotStorageGb   QuotaDimension = "snapshot_storage_gb"
+	VolumeStorageGb     QuotaDimension = "volume_storage_gb"
 )
 
 // Defines values for REPLReadyMode.
@@ -742,6 +743,19 @@ const (
 	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
+// Defines values for TeamQuotaKind.
+const (
+	TeamQuotaKindCapacity TeamQuotaKind = "capacity"
+	TeamQuotaKindRate     TeamQuotaKind = "rate"
+)
+
+// Defines values for TeamQuotaSource.
+const (
+	TeamQuotaSourceRegionDefault TeamQuotaSource = "region_default"
+	TeamQuotaSourceTeamOverride  TeamQuotaSource = "team_override"
+	TeamQuotaSourceUnlimited     TeamQuotaSource = "unlimited"
+)
+
 // Defines values for TeamQuotaUnit.
 const (
 	TeamQuotaUnitBytes    TeamQuotaUnit = "bytes"
@@ -749,6 +763,7 @@ const (
 	TeamQuotaUnitGB       TeamQuotaUnit = "GB"
 	TeamQuotaUnitMiB      TeamQuotaUnit = "MiB"
 	TeamQuotaUnitMillicpu TeamQuotaUnit = "millicpu"
+	TeamQuotaUnitRequests TeamQuotaUnit = "requests"
 )
 
 // Defines values for TemplateCreationStatusStage.
@@ -3454,14 +3469,24 @@ type TeamMember struct {
 
 // TeamQuota defines model for TeamQuota.
 type TeamQuota struct {
-	Current    int64          `json:"current"`
-	Dimension  QuotaDimension `json:"dimension"`
-	LimitValue *int64         `json:"limit_value"`
-	Remaining  *int64         `json:"remaining"`
-	TeamId     string         `json:"team_id"`
-	Unit       TeamQuotaUnit  `json:"unit"`
-	Unlimited  bool           `json:"unlimited"`
+	BurstValue *int64          `json:"burst_value"`
+	Current    *int64          `json:"current"`
+	Dimension  QuotaDimension  `json:"dimension"`
+	IntervalMs *int64          `json:"interval_ms"`
+	Kind       TeamQuotaKind   `json:"kind"`
+	LimitValue *int64          `json:"limit_value"`
+	Remaining  *int64          `json:"remaining"`
+	Source     TeamQuotaSource `json:"source"`
+	TeamId     string          `json:"team_id"`
+	Unit       TeamQuotaUnit   `json:"unit"`
+	Unlimited  bool            `json:"unlimited"`
 }
+
+// TeamQuotaKind defines model for TeamQuota.Kind.
+type TeamQuotaKind string
+
+// TeamQuotaSource defines model for TeamQuota.Source.
+type TeamQuotaSource string
 
 // TeamQuotaUnit defines model for TeamQuota.Unit.
 type TeamQuotaUnit string

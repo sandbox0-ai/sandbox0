@@ -13,6 +13,7 @@ import (
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/regional-gateway/pkg/http"
 	"go.uber.org/zap"
 )
@@ -128,6 +129,9 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) 
 		migrate.WithSchema("shared_gateway"),
 	); err != nil {
 		return fmt.Errorf("migrate up: %w", err)
+	}
+	if err := quota.RunMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
+		return fmt.Errorf("quota migrations: %w", err)
 	}
 
 	logger.Info("Database migrations completed successfully")

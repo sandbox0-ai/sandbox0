@@ -244,6 +244,10 @@
           "title": "Configuration"
         },
         {
+          "slug": "quotas",
+          "title": "Team Quotas"
+        },
+        {
           "slug": "team-deletion",
           "title": "Team Deletion"
         }

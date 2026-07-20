@@ -2,25 +2,24 @@ package ratelimit
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"strings"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/tokenbucket"
 )
 
 const (
-	BackendMemory = "memory"
-	BackendRedis  = "redis"
+	BackendMemory = tokenbucket.BackendMemory
+	BackendRedis  = tokenbucket.BackendRedis
 
-	DefaultBackend         = BackendMemory
+	DefaultBackend         = tokenbucket.DefaultBackend
 	DefaultRedisKeyPrefix  = "sandbox0:ratelimit"
-	DefaultRedisTimeout    = 100 * time.Millisecond
-	DefaultCleanupInterval = 10 * time.Minute
+	DefaultRedisTimeout    = tokenbucket.DefaultRedisTimeout
+	DefaultCleanupInterval = tokenbucket.DefaultCleanupInterval
 )
 
 var (
-	ErrLimited = errors.New("rate limit exceeded")
-	ErrClosed  = errors.New("rate limiter is closed")
+	ErrLimited = tokenbucket.ErrLimited
+	ErrClosed  = tokenbucket.ErrClosed
 )
 
 // Limit defines a token bucket rate limit.
@@ -54,50 +53,48 @@ type Config struct {
 }
 
 func New(ctx context.Context, cfg Config) (Limiter, error) {
-	backend := strings.TrimSpace(strings.ToLower(cfg.Backend))
-	if backend == "" {
-		backend = DefaultBackend
+	bucket, err := tokenbucket.New(ctx, tokenbucket.Config{
+		Backend:         cfg.Backend,
+		RedisURL:        cfg.RedisURL,
+		RedisKeyPrefix:  cfg.RedisKeyPrefix,
+		RedisTimeout:    cfg.RedisTimeout,
+		CleanupInterval: cfg.CleanupInterval,
+		FailOpen:        cfg.FailOpen,
+	})
+	if err != nil {
+		return nil, err
 	}
-	switch backend {
-	case BackendMemory:
-		return NewMemoryLimiter(MemoryConfig{CleanupInterval: cfg.CleanupInterval}), nil
-	case BackendRedis:
-		return NewRedisLimiter(ctx, RedisConfig{
-			URL:       cfg.RedisURL,
-			KeyPrefix: cfg.RedisKeyPrefix,
-			Timeout:   cfg.RedisTimeout,
-			FailOpen:  cfg.FailOpen,
-		})
-	default:
-		return nil, fmt.Errorf("unsupported rate limit backend %q", cfg.Backend)
-	}
+	return &bucketLimiter{bucket: bucket}, nil
 }
 
-func normalizeLimit(limit Limit) (Limit, bool) {
+type bucketLimiter struct {
+	bucket tokenbucket.Bucket
+}
+
+func (l *bucketLimiter) Allow(ctx context.Context, key string, limit Limit) (Decision, error) {
 	if limit.RPS <= 0 || limit.Burst <= 0 {
-		return Limit{}, false
+		return Decision{Allowed: true}, nil
 	}
-	return limit, true
+	decision, err := l.bucket.TryTakeN(ctx, key, tokenbucket.Limit{
+		Tokens:   int64(limit.RPS),
+		Interval: time.Second,
+		Burst:    int64(limit.Burst),
+	}, 1)
+	return Decision{
+		Allowed:    decision.Allowed,
+		Limit:      limit.RPS,
+		Remaining:  int(decision.Remaining),
+		RetryAfter: decision.RetryAfter,
+	}, err
 }
 
-func retryAfterFromLimit(limit Limit) time.Duration {
-	if limit.RPS <= 0 {
-		return time.Second
+func (l *bucketLimiter) Close() error {
+	if l == nil || l.bucket == nil {
+		return nil
 	}
-	d := time.Second / time.Duration(limit.RPS)
-	if d <= 0 {
-		return time.Millisecond
-	}
-	return d
+	return l.bucket.Close()
 }
 
 func RetryAfterSeconds(d time.Duration) int {
-	if d <= 0 {
-		return 1
-	}
-	seconds := int(d.Round(time.Second) / time.Second)
-	if seconds < 1 {
-		return 1
-	}
-	return seconds
+	return tokenbucket.RetryAfterSeconds(d)
 }

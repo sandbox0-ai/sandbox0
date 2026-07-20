@@ -29,7 +29,7 @@ type countingTLSConn struct {
 
 func (c *countingTLSConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if n > 0 && c.limiter != nil {
+	if n > 0 && c.limiter != nil && c.readDirection != "" {
 		if waitErr := c.limiter.wait(c.compiled, c.readDirection, n); waitErr != nil && err == nil {
 			err = waitErr
 		}
@@ -96,10 +96,12 @@ func (s *Server) proxyHTTP2FromConn(downstream *tls.Conn, req *adapterRequest) e
 	}
 
 	downstreamCounter := &countingTLSConn{
-		Conn:           downstream,
-		limiter:        s.bandwidthLimiter,
-		compiled:       req.Compiled,
-		readDirection:  bandwidthEgress,
+		Conn:     downstream,
+		limiter:  s.bandwidthLimiter,
+		compiled: req.Compiled,
+		// Egress is charged when the upstream connection is written. Leaving
+		// reads unclassified avoids charging the same payload on both legs.
+		readDirection:  "",
 		writeDirection: bandwidthIngress,
 	}
 	var upstreamCounter *countingConn
@@ -222,10 +224,12 @@ func (s *Server) newHTTP2Transport(req *adapterRequest, upstreamCounter **counti
 				return nil, fmt.Errorf("handshake upstream http2 tls: %w", err)
 			}
 			wrapped := &countingConn{
-				Conn:           conn,
-				limiter:        s.bandwidthLimiter,
-				compiled:       req.Compiled,
-				readDirection:  bandwidthIngress,
+				Conn:     conn,
+				limiter:  s.bandwidthLimiter,
+				compiled: req.Compiled,
+				// Ingress is charged when the downstream connection is
+				// written. Reads remain counted for metering only.
+				readDirection:  "",
 				writeDirection: bandwidthEgress,
 			}
 			if upstreamCounter != nil && *upstreamCounter == nil {

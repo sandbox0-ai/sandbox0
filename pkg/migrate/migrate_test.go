@@ -28,6 +28,7 @@ func TestUpWithSchemaRestoresPoolSearchPath(t *testing.T) {
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: dbURL,
+		MaxConns:    4,
 		Schema:      appSchema,
 	})
 	if err != nil {
@@ -92,6 +93,7 @@ func TestUpWithDistinctTableNamesAvoidsVersionCollisions(t *testing.T) {
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: dbURL,
+		MaxConns:    4,
 		Schema:      appSchema,
 	})
 	if err != nil {
@@ -142,6 +144,78 @@ DROP TABLE IF EXISTS %s;
 			t.Fatalf("query table %s existence: %v", table, err)
 		}
 		if exists == "" {
+			t.Fatalf("expected table %s to exist", table)
+		}
+	}
+}
+
+func TestUpResetsDefaultTableNameAfterCustomTableName(t *testing.T) {
+	dbURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if dbURL == "" {
+		dbURL = os.Getenv("TEST_DATABASE_URL")
+	}
+	if dbURL == "" {
+		t.Skip("missing INTEGRATION_DATABASE_URL or TEST_DATABASE_URL")
+	}
+
+	ctx := context.Background()
+	appSchema := fmt.Sprintf("migrate_table_reset_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
+
+	pool, err := dbpool.New(ctx, dbpool.Options{
+		DatabaseURL: dbURL,
+		MaxConns:    4,
+		Schema:      appSchema,
+	})
+	if err != nil {
+		t.Fatalf("connect test database: %v", err)
+	}
+	defer pool.Close()
+
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", appSchema))
+	})
+
+	writeMigration := func(dir, filename, table string) {
+		t.Helper()
+		migration := fmt.Sprintf(`-- +goose Up
+CREATE TABLE %s (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid()
+);
+
+-- +goose Down
+DROP TABLE %s;
+`, table, table)
+		if err := os.WriteFile(filepath.Join(dir, filename), []byte(migration), 0o644); err != nil {
+			t.Fatalf("write migration %s: %v", filename, err)
+		}
+	}
+
+	customDir := t.TempDir()
+	defaultDir := t.TempDir()
+	writeMigration(customDir, "00001_create_custom.sql", "custom_records")
+	writeMigration(defaultDir, "00001_create_default.sql", "default_records")
+
+	if err := migrate.Up(ctx, pool, customDir,
+		migrate.WithSchema(appSchema),
+		migrate.WithTableName("goose_custom"),
+	); err != nil {
+		t.Fatalf("run custom-table migration: %v", err)
+	}
+	if err := migrate.Up(ctx, pool, defaultDir, migrate.WithSchema(appSchema)); err != nil {
+		t.Fatalf("run default-table migration: %v", err)
+	}
+
+	for _, table := range []string{
+		"custom_records",
+		"default_records",
+		"goose_custom",
+		"goose_db_version",
+	} {
+		var exists bool
+		if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", table).Scan(&exists); err != nil {
+			t.Fatalf("query table %s existence: %v", table, err)
+		}
+		if !exists {
 			t.Fatalf("expected table %s to exist", table)
 		}
 	}

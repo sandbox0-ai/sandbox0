@@ -107,7 +107,7 @@ func TestS0FSFileLifecycle(t *testing.T) {
 	}
 }
 
-func TestS0FSStatFsReportsLogicalUsageWithVirtualHeadroom(t *testing.T) {
+func TestS0FSStatFsReportsLogicalUsageAgainstVirtualCapacity(t *testing.T) {
 	t.Parallel()
 
 	volCtx := newMountedS0FSVolumeContext(t, "vol-statfs", "team-a")
@@ -122,11 +122,11 @@ func TestS0FSStatFsReportsLogicalUsageWithVirtualHeadroom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StatFs(initial) error = %v", err)
 	}
-	if initial.Blocks != s0fsStatFSVirtualAvailableBlocks || initial.Bfree != s0fsStatFSVirtualAvailableBlocks || initial.Bavail != s0fsStatFSVirtualAvailableBlocks {
-		t.Fatalf("StatFs(initial) blocks = (%d, %d, %d), want (%d, %d, %d)", initial.Blocks, initial.Bfree, initial.Bavail, s0fsStatFSVirtualAvailableBlocks, s0fsStatFSVirtualAvailableBlocks, s0fsStatFSVirtualAvailableBlocks)
+	if initial.Blocks != s0fsStatFSVirtualBlocks || initial.Bfree != s0fsStatFSVirtualBlocks || initial.Bavail != s0fsStatFSVirtualBlocks {
+		t.Fatalf("StatFs(initial) blocks = (%d, %d, %d), want (%d, %d, %d)", initial.Blocks, initial.Bfree, initial.Bavail, s0fsStatFSVirtualBlocks, s0fsStatFSVirtualBlocks, s0fsStatFSVirtualBlocks)
 	}
-	if initial.Files != s0fsStatFSVirtualAvailableFiles+1 || initial.Ffree != s0fsStatFSVirtualAvailableFiles {
-		t.Fatalf("StatFs(initial) files = (%d, %d), want (%d, %d)", initial.Files, initial.Ffree, s0fsStatFSVirtualAvailableFiles+1, s0fsStatFSVirtualAvailableFiles)
+	if initial.Files != s0fsStatFSVirtualFiles || initial.Ffree != s0fsStatFSVirtualFiles-1 {
+		t.Fatalf("StatFs(initial) files = (%d, %d), want (%d, %d)", initial.Files, initial.Ffree, s0fsStatFSVirtualFiles, s0fsStatFSVirtualFiles-1)
 	}
 
 	file, err := volCtx.S0FS.CreateFile(s0fs.RootInode, "data.bin", 0o644)
@@ -141,11 +141,11 @@ func TestS0FSStatFsReportsLogicalUsageWithVirtualHeadroom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StatFs(updated) error = %v", err)
 	}
-	if updated.Blocks != s0fsStatFSVirtualAvailableBlocks+2 || updated.Bfree != s0fsStatFSVirtualAvailableBlocks || updated.Bavail != s0fsStatFSVirtualAvailableBlocks {
-		t.Fatalf("StatFs(updated) blocks = (%d, %d, %d), want (%d, %d, %d)", updated.Blocks, updated.Bfree, updated.Bavail, s0fsStatFSVirtualAvailableBlocks+2, s0fsStatFSVirtualAvailableBlocks, s0fsStatFSVirtualAvailableBlocks)
+	if updated.Blocks != s0fsStatFSVirtualBlocks || updated.Bfree != s0fsStatFSVirtualBlocks-2 || updated.Bavail != s0fsStatFSVirtualBlocks-2 {
+		t.Fatalf("StatFs(updated) blocks = (%d, %d, %d), want (%d, %d, %d)", updated.Blocks, updated.Bfree, updated.Bavail, s0fsStatFSVirtualBlocks, s0fsStatFSVirtualBlocks-2, s0fsStatFSVirtualBlocks-2)
 	}
-	if updated.Files != s0fsStatFSVirtualAvailableFiles+2 || updated.Ffree != s0fsStatFSVirtualAvailableFiles {
-		t.Fatalf("StatFs(updated) files = (%d, %d), want (%d, %d)", updated.Files, updated.Ffree, s0fsStatFSVirtualAvailableFiles+2, s0fsStatFSVirtualAvailableFiles)
+	if updated.Files != s0fsStatFSVirtualFiles || updated.Ffree != s0fsStatFSVirtualFiles-2 {
+		t.Fatalf("StatFs(updated) files = (%d, %d), want (%d, %d)", updated.Files, updated.Ffree, s0fsStatFSVirtualFiles, s0fsStatFSVirtualFiles-2)
 	}
 	if updated.Bsize != uint32(s0fsStatFSBlockSize) || updated.Frsize != uint32(s0fsStatFSBlockSize) {
 		t.Fatalf("StatFs(updated) block sizes = (%d, %d), want (%d, %d)", updated.Bsize, updated.Frsize, s0fsStatFSBlockSize, s0fsStatFSBlockSize)

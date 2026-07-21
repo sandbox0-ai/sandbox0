@@ -60,7 +60,7 @@ Volume detail and list responses expose the latest storage observation for `s0fs
 
 Both fields are `null` for external `s3` volumes and when a current metering projection is unavailable. These fields describe the latest current size; they are separate from historical `sandbox.volume_byte_hours` usage windows.
 
-For an `s0fs` mount, filesystem tools such as `df` report the current logical file bytes as used space plus a 4 TiB virtual availability window. Object storage does not expose a meaningful per-Volume disk size, so this virtual value is not a storage allocation, hard quota, or node filesystem capacity. Use `metered_storage_bytes` for the authoritative current logical payload size; platform quotas and ctld node-local cache safeguards are separate controls.
+For an `s0fs` mount, filesystem tools such as `df` report the current logical file bytes against a stable 4 TiB virtual capacity. Object storage does not expose a meaningful per-Volume disk size, so this virtual value is not a storage allocation, hard quota, or node filesystem capacity. Use `metered_storage_bytes` for the authoritative current logical payload size; platform quotas and ctld node-local cache safeguards are separate controls.
 
 ## Correctness Model
 

@@ -933,6 +933,12 @@ func (s *FileSystemServer) Rmdir(ctx context.Context, req *pb.RmdirRequest) (*pb
 	})
 }
 
+const (
+	s0fsStatFSBlockSize              = uint64(4096)
+	s0fsStatFSVirtualAvailableBlocks = uint64(1 << 30)
+	s0fsStatFSVirtualAvailableFiles  = uint64(1 << 30)
+)
+
 // StatFs implements FUSE statfs (filesystem statistics)
 func (s *FileSystemServer) StatFs(ctx context.Context, req *pb.StatFsRequest) (*pb.StatFsResponse, error) {
 	volCtx, err := s.getAuthorizedMountedVolume(ctx, req.VolumeId)
@@ -940,15 +946,26 @@ func (s *FileSystemServer) StatFs(ctx context.Context, req *pb.StatFsRequest) (*
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
+		usage, err := volCtx.S0FS.FilesystemUsage()
+		if err != nil {
+			return nil, MapS0FSError(err)
+		}
+		usedBlocks := usage.DataBytes / s0fsStatFSBlockSize
+		if usage.DataBytes%s0fsStatFSBlockSize != 0 {
+			usedBlocks++
+		}
+		// S0FS has no per-volume disk capacity. Keep a stable virtual free
+		// window and add live usage to the total instead of advertising a
+		// cosmetic hard limit or leaking the node filesystem size.
 		return &pb.StatFsResponse{
-			Blocks:  262144,
-			Bfree:   131072,
-			Bavail:  131072,
-			Files:   1048576,
-			Ffree:   1048576,
-			Bsize:   4096,
+			Blocks:  s0fsStatFSVirtualAvailableBlocks + usedBlocks,
+			Bfree:   s0fsStatFSVirtualAvailableBlocks,
+			Bavail:  s0fsStatFSVirtualAvailableBlocks,
+			Files:   s0fsStatFSVirtualAvailableFiles + usage.Inodes,
+			Ffree:   s0fsStatFSVirtualAvailableFiles,
+			Bsize:   uint32(s0fsStatFSBlockSize),
 			Namelen: 255,
-			Frsize:  4096,
+			Frsize:  uint32(s0fsStatFSBlockSize),
 		}, nil
 	}
 

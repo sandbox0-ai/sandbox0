@@ -904,7 +904,7 @@ type ManagerConfig struct {
 	// DefaultTeamQuotas declaratively reconciles region-wide quota defaults.
 	// Team-specific database policies override these defaults.
 	// +optional
-	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:MaxItems=7
 	// +listType=map
 	// +listMapKey=dimension
 	DefaultTeamQuotas []TeamQuotaLimitConfig `json:"defaultTeamQuotas,omitempty"`
@@ -957,7 +957,7 @@ type ManagerConfig struct {
 // TeamQuotaLimitConfig configures a region default for teams without an
 // override for the same dimension.
 type TeamQuotaLimitConfig struct {
-	// +kubebuilder:validation:Enum=active_sandboxes;cpu_millicpu;memory_mib;volume_storage_gb;snapshot_storage_gb;api_requests;network_egress_bytes;network_ingress_bytes
+	// +kubebuilder:validation:Enum=active_sandboxes;sandbox_claims;volume_storage_gb;snapshot_storage_gb;api_requests;network_egress_bytes;network_ingress_bytes
 	Dimension string `json:"dimension"`
 	// +kubebuilder:validation:Minimum=0
 	LimitValue int64 `json:"limitValue"`

@@ -111,9 +111,6 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			if err := s.enforceActiveSandboxQuota(lockCtx, locked.TeamID); err != nil {
 				return err
 			}
-			if err := s.enforceSandboxResourceQuota(lockCtx, locked.TeamID, template, &locked.Config); err != nil {
-				return err
-			}
 			generation := locked.RuntimeGeneration + 1
 			record = cloneSandboxRecordForLifecycle(locked)
 			req = &ClaimRequest{

@@ -64,7 +64,7 @@ func TestToManagerPreservesDefaultTeamQuotas(t *testing.T) {
 	cfg := ToManager(&infrav1alpha1.ManagerConfig{
 		DefaultTeamQuotas: []infrav1alpha1.TeamQuotaLimitConfig{
 			{Dimension: "active_sandboxes", LimitValue: 3},
-			{Dimension: "cpu_millicpu", LimitValue: 2000},
+			{Dimension: "sandbox_claims", LimitValue: 5, IntervalMS: 1000, BurstValue: 5},
 			{Dimension: "api_requests", LimitValue: 100, IntervalMS: 1000, BurstValue: 200},
 		},
 	})
@@ -74,8 +74,11 @@ func TestToManagerPreservesDefaultTeamQuotas(t *testing.T) {
 	if cfg.DefaultTeamQuotas[0].Dimension != "active_sandboxes" || cfg.DefaultTeamQuotas[0].LimitValue != 3 {
 		t.Fatalf("first default quota = %+v, want active_sandboxes=3", cfg.DefaultTeamQuotas[0])
 	}
-	if cfg.DefaultTeamQuotas[1].Dimension != "cpu_millicpu" || cfg.DefaultTeamQuotas[1].LimitValue != 2000 {
-		t.Fatalf("second default quota = %+v, want cpu_millicpu=2000", cfg.DefaultTeamQuotas[1])
+	if cfg.DefaultTeamQuotas[1].Dimension != "sandbox_claims" ||
+		cfg.DefaultTeamQuotas[1].LimitValue != 5 ||
+		cfg.DefaultTeamQuotas[1].IntervalMS != 1000 ||
+		cfg.DefaultTeamQuotas[1].BurstValue != 5 {
+		t.Fatalf("second default quota = %+v, want sandbox_claims rate policy", cfg.DefaultTeamQuotas[1])
 	}
 	if cfg.DefaultTeamQuotas[2].Dimension != "api_requests" ||
 		cfg.DefaultTeamQuotas[2].IntervalMS != 1000 ||

@@ -652,19 +652,7 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 		return r.currentScalar(ctx, fmt.Sprintf(`
 SELECT toInt64(COUNT())
 FROM %s FINAL
-WHERE team_id = ? AND claimed_at IS NOT NULL AND terminated_at IS NULL
-`, qualified(r.cfg.Database, r.cfg.SandboxStateTable)), teamID)
-	case quota.DimensionCPU:
-		return r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(resource_millicpu), 0)
-FROM %s FINAL
-WHERE team_id = ? AND claimed_at IS NOT NULL AND terminated_at IS NULL
-`, qualified(r.cfg.Database, r.cfg.SandboxStateTable)), teamID)
-	case quota.DimensionMemory:
-		return r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(resource_memory_mib), 0)
-FROM %s FINAL
-WHERE team_id = ? AND claimed_at IS NOT NULL AND terminated_at IS NULL
+WHERE team_id = ? AND claimed_at IS NOT NULL AND terminated_at IS NULL AND paused = 0
 `, qualified(r.cfg.Database, r.cfg.SandboxStateTable)), teamID)
 	case quota.DimensionVolumeStorageGB:
 		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeVolume)

@@ -3906,8 +3906,7 @@ components:
       type: string
       enum:
         - active_sandboxes
-        - cpu_millicpu
-        - memory_mib
+        - sandbox_claims
         - volume_storage_gb
         - snapshot_storage_gb
         - api_requests
@@ -3958,15 +3957,13 @@ components:
           type: string
           enum:
             - count
-            - millicpu
-            - MiB
+            - claims
             - GB
             - requests
             - bytes
           x-enum-varnames:
             - TeamQuotaUnitCount
-            - TeamQuotaUnitMillicpu
-            - TeamQuotaUnitMiB
+            - TeamQuotaUnitClaims
             - TeamQuotaUnitGB
             - TeamQuotaUnitRequests
             - TeamQuotaUnitBytes

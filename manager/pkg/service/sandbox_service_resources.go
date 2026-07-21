@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -224,83 +223,4 @@ func sandboxMemoryQuantityOrDefault(value, fallback string) resource.Quantity {
 		return parsed
 	}
 	return resource.MustParse(fallback)
-}
-
-func (s *SandboxService) enforceSandboxResourceQuota(ctx context.Context, teamID string, template *v1alpha1.SandboxTemplate, cfg *SandboxConfig) error {
-	quota, err := s.effectiveSandboxResourceQuota(template, cfg)
-	if err != nil {
-		return err
-	}
-	if err := s.enforceSandboxCPUQuota(ctx, teamID, quota); err != nil {
-		return err
-	}
-	return s.enforceSandboxMemoryQuota(ctx, teamID, quota)
-}
-
-func (s *SandboxService) enforceSandboxResourceQuotaIncrease(ctx context.Context, teamID string, current *corev1.Pod, next v1alpha1.ResourceQuota) error {
-	currentCPU, currentMemoryBytes := podContainerResourceAllocation(current)
-	oldCPU, oldMemoryBytes, ok := podRuntimeContainerResourceAllocation(current)
-	if !ok {
-		return fmt.Errorf("%w: sandbox runtime container not found", ErrInvalidClaimRequest)
-	}
-	nextCPU := currentCPU - oldCPU + next.CPU.MilliValue()
-	nextMemoryMiB := bytesToMiBRoundUp(currentMemoryBytes - oldMemoryBytes + next.Memory.Value())
-	currentMemoryMiB := bytesToMiBRoundUp(currentMemoryBytes)
-	if delta := nextCPU - currentCPU; delta > 0 {
-		if err := s.enforceQuota(ctx, teamID, quota.DimensionCPU, delta); err != nil {
-			return err
-		}
-	}
-	if delta := nextMemoryMiB - currentMemoryMiB; delta > 0 {
-		if err := s.enforceQuota(ctx, teamID, quota.DimensionMemory, delta); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func podContainerResourceAllocation(pod *corev1.Pod) (int64, int64) {
-	if pod == nil {
-		return 0, 0
-	}
-	var cpuMillis int64
-	var memoryBytes int64
-	for _, container := range pod.Spec.Containers {
-		cpuMillis += resourceListCPU(container.Resources)
-		memoryBytes += resourceListMemory(container.Resources)
-	}
-	return cpuMillis, memoryBytes
-}
-
-func podRuntimeContainerResourceAllocation(pod *corev1.Pod) (int64, int64, bool) {
-	if pod == nil {
-		return 0, 0, false
-	}
-	for _, container := range pod.Spec.Containers {
-		if container.Name != "procd" {
-			continue
-		}
-		return resourceListCPU(container.Resources), resourceListMemory(container.Resources), true
-	}
-	return 0, 0, false
-}
-
-func resourceListCPU(requirements corev1.ResourceRequirements) int64 {
-	if quantity, ok := requirements.Limits[corev1.ResourceCPU]; ok && !quantity.IsZero() {
-		return quantity.MilliValue()
-	}
-	if quantity, ok := requirements.Requests[corev1.ResourceCPU]; ok && !quantity.IsZero() {
-		return quantity.MilliValue()
-	}
-	return 0
-}
-
-func resourceListMemory(requirements corev1.ResourceRequirements) int64 {
-	if quantity, ok := requirements.Limits[corev1.ResourceMemory]; ok && !quantity.IsZero() {
-		return quantity.Value()
-	}
-	if quantity, ok := requirements.Requests[corev1.ResourceMemory]; ok && !quantity.IsZero() {
-		return quantity.Value()
-	}
-	return 0
 }

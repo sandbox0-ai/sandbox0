@@ -171,30 +171,30 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				Expect(status).To(Equal(http.StatusTooManyRequests))
 			})
 
-			It("enforces CPU quota", func() {
-				_, status, err := session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionCPU, 0)
+			It("enforces sandbox claim rate quota", func() {
+				_, status, err := session.PutTeamRateQuota(
+					env.TestCtx.Context,
+					env,
+					quota.DimensionSandboxClaims,
+					0,
+					1000,
+					0,
+				)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(status).To(Equal(http.StatusOK))
 				defer func() {
-					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionCPU)
+					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionSandboxClaims)
 				}()
 
-				_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), apispec.ClaimRequest{Template: ptr("default")})
-				Expect(err).To(HaveOccurred())
-				Expect(status).To(Equal(http.StatusTooManyRequests))
-			})
-
-			It("enforces memory quota", func() {
-				_, status, err := session.PutTeamQuota(env.TestCtx.Context, env, quota.DimensionMemory, 0)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(status).To(Equal(http.StatusOK))
-				defer func() {
-					_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionMemory)
-				}()
-
-				_, status, err = session.ClaimSandboxDetailed(env.TestCtx.Context, GinkgoT(), apispec.ClaimRequest{Template: ptr("default")})
-				Expect(err).To(HaveOccurred())
-				Expect(status).To(Equal(http.StatusTooManyRequests))
+				Eventually(func() int {
+					_, observedStatus, _ := session.ClaimSandboxDetailed(
+						env.TestCtx.Context,
+						GinkgoT(),
+						apispec.ClaimRequest{Template: ptr("default")},
+					)
+					return observedStatus
+				}).WithTimeout(15 * time.Second).WithPolling(500 * time.Millisecond).
+					Should(Equal(http.StatusTooManyRequests))
 			})
 
 			if opts.includeUsageQuotaAssertions {

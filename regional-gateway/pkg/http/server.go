@@ -30,6 +30,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 )
 
@@ -333,7 +334,7 @@ func (s *Server) setupRoutes() {
 			sandboxes := api.Group("/v1/sandboxes")
 			sandboxes.Use(s.requireTeamContextForTeamScopedAPI())
 			sandboxes.GET("", s.injectInternalTokenForTarget("scheduler"), s.schedulerRouter.ProxyToTarget)
-			sandboxes.POST("", s.injectInternalTokenForTarget("scheduler"), s.schedulerRouter.ProxyToTarget)
+			sandboxes.POST("", s.rateLimiter.RateLimitDimension(quota.DimensionSandboxClaims), s.injectInternalTokenForTarget("scheduler"), s.schedulerRouter.ProxyToTarget)
 			sandboxes.GET("/:id", s.getSandboxDetail)
 			// GET /:id is handled by regional-gateway so it can enrich the response with
 			// region-scoped connection details. Mutating exact-ID operations proxy to the
@@ -485,6 +486,12 @@ func (s *Server) handleAPINoRoute(c *gin.Context) bool {
 	}
 	if rejectTeamScopedPlatformAPIKeyWithoutTeam(c, authCtx) {
 		return true
+	}
+	if c.Request.Method == http.MethodPost && strings.TrimSuffix(path, "/") == "/api/v1/sandboxes" {
+		s.rateLimiter.RateLimitDimension(quota.DimensionSandboxClaims)(c)
+		if c.IsAborted() {
+			return true
+		}
 	}
 	token, err := s.generateInternalToken(authCtx, "cluster-gateway")
 	if err != nil {

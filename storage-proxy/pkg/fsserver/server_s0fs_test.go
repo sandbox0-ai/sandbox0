@@ -107,6 +107,51 @@ func TestS0FSFileLifecycle(t *testing.T) {
 	}
 }
 
+func TestS0FSStatFsReportsLogicalUsageAgainstVirtualCapacity(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-statfs", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{
+			"vol-statfs": volCtx,
+		},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+
+	initial, err := server.StatFs(ctx, &pb.StatFsRequest{VolumeId: "vol-statfs"})
+	if err != nil {
+		t.Fatalf("StatFs(initial) error = %v", err)
+	}
+	if initial.Blocks != s0fsStatFSVirtualBlocks || initial.Bfree != s0fsStatFSVirtualBlocks || initial.Bavail != s0fsStatFSVirtualBlocks {
+		t.Fatalf("StatFs(initial) blocks = (%d, %d, %d), want (%d, %d, %d)", initial.Blocks, initial.Bfree, initial.Bavail, s0fsStatFSVirtualBlocks, s0fsStatFSVirtualBlocks, s0fsStatFSVirtualBlocks)
+	}
+	if initial.Files != s0fsStatFSVirtualFiles || initial.Ffree != s0fsStatFSVirtualFiles-1 {
+		t.Fatalf("StatFs(initial) files = (%d, %d), want (%d, %d)", initial.Files, initial.Ffree, s0fsStatFSVirtualFiles, s0fsStatFSVirtualFiles-1)
+	}
+
+	file, err := volCtx.S0FS.CreateFile(s0fs.RootInode, "data.bin", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := volCtx.S0FS.Write(file.Inode, 4096, []byte("data")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	updated, err := server.StatFs(ctx, &pb.StatFsRequest{VolumeId: "vol-statfs"})
+	if err != nil {
+		t.Fatalf("StatFs(updated) error = %v", err)
+	}
+	if updated.Blocks != s0fsStatFSVirtualBlocks || updated.Bfree != s0fsStatFSVirtualBlocks-2 || updated.Bavail != s0fsStatFSVirtualBlocks-2 {
+		t.Fatalf("StatFs(updated) blocks = (%d, %d, %d), want (%d, %d, %d)", updated.Blocks, updated.Bfree, updated.Bavail, s0fsStatFSVirtualBlocks, s0fsStatFSVirtualBlocks-2, s0fsStatFSVirtualBlocks-2)
+	}
+	if updated.Files != s0fsStatFSVirtualFiles || updated.Ffree != s0fsStatFSVirtualFiles-2 {
+		t.Fatalf("StatFs(updated) files = (%d, %d), want (%d, %d)", updated.Files, updated.Ffree, s0fsStatFSVirtualFiles, s0fsStatFSVirtualFiles-2)
+	}
+	if updated.Bsize != uint32(s0fsStatFSBlockSize) || updated.Frsize != uint32(s0fsStatFSBlockSize) {
+		t.Fatalf("StatFs(updated) block sizes = (%d, %d), want (%d, %d)", updated.Bsize, updated.Frsize, s0fsStatFSBlockSize, s0fsStatFSBlockSize)
+	}
+}
+
 func TestS0FSOperationsPreservePOSIXErrnos(t *testing.T) {
 	t.Parallel()
 

@@ -519,6 +519,8 @@ func main() {
 	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
 	sandboxLifecycleController.SetMetrics(managerMetrics)
 	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
+	sandboxCrashLogCollector := service.NewSandboxCrashLogCollector(k8sClient, logger, managerMetrics)
+	podInformer.Informer().AddEventHandler(sandboxCrashLogCollector.ResourceEventHandler())
 	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)
 	sandboxService.SetPauseEnqueuer(sandboxPauseController)
 	operator.SetSandboxProbeRunner(sandboxService)
@@ -702,6 +704,11 @@ func main() {
 	}
 
 	startSandboxObservabilityLogProducer(ctx, cfg, k8sClient, podLister, sandboxLogWorker, logger, clk)
+	go func() {
+		if err := sandboxCrashLogCollector.Run(ctx, 2); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("Sandbox crash log collector failed", zap.Error(err))
+		}
+	}()
 
 	if templateBuildWorker != nil {
 		go func() {

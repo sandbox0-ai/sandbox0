@@ -15,6 +15,8 @@ type ManagerMetrics struct {
 	SandboxClaimPhaseDuration       *prometheus.HistogramVec
 	SandboxDeleteCleanupPhase       *prometheus.HistogramVec
 	SandboxIdleClaimsTotal          *prometheus.CounterVec
+	ProcdCrashLogCapturesTotal      *prometheus.CounterVec
+	ProcdCrashLogBytes              prometheus.Histogram
 	PodNetworkIdentityChecksTotal   *prometheus.CounterVec
 	PodNetworkIdentityStageDuration *prometheus.HistogramVec
 	PodLifecycleStageDuration       *prometheus.HistogramVec
@@ -90,6 +92,15 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Name: "manager_sandbox_idle_claims_total",
 			Help: "Total number of idle-pool claim attempts by result",
 		}, []string{"template", "result"}),
+		ProcdCrashLogCapturesTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_sandbox_procd_crash_log_captures_total",
+			Help: "Total number of previous procd crash log capture outcomes by result",
+		}, []string{"result"}),
+		ProcdCrashLogBytes: factory.NewHistogram(prometheus.HistogramOpts{
+			Name:    "manager_sandbox_procd_crash_log_bytes",
+			Help:    "Number of retained bytes emitted for a captured previous procd crash log",
+			Buckets: []float64{1024, 4096, 16384, 65536, 262144, 524288},
+		}),
 		PodNetworkIdentityChecksTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_pod_network_identity_checks_total",
 			Help: "Total number of pod network identity readiness checks by source, result, and reason",

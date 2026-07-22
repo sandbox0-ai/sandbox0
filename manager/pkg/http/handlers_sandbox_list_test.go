@@ -458,16 +458,3 @@ func withHTTPTestManagerConfig(t *testing.T, content string) {
 		_ = os.Unsetenv("CONFIG_PATH")
 	})
 }
-
-func withHTTPTestPublicKey(t *testing.T) {
-	t.Helper()
-	keyPath := filepath.Join(t.TempDir(), "internal_jwt_public.key")
-	if err := os.WriteFile(keyPath, []byte("test-public-key"), 0o600); err != nil {
-		t.Fatalf("write public key: %v", err)
-	}
-	previousPath := internalauth.DefaultInternalJWTPublicKeyPath
-	internalauth.DefaultInternalJWTPublicKeyPath = keyPath
-	t.Cleanup(func() {
-		internalauth.DefaultInternalJWTPublicKeyPath = previousPath
-	})
-}

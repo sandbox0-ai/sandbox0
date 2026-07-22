@@ -38,7 +38,6 @@ const (
 	CodeNotFound            = "not_found"
 	CodeConflict            = "conflict"
 	CodeTemplateNotReady    = "template_not_ready"
-	CodeClaimStartThrottled = "claim_start_throttled"
 	CodeUnavailable         = "unavailable"
 	CodeInternal            = "internal_error"
 	CodeNotLicensed         = "feature_not_licensed"

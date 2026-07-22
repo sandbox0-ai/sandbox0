@@ -9,7 +9,6 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
@@ -60,7 +59,6 @@ var ErrDataPlaneNotReady = errors.New("data plane not ready")
 var ErrQuotaExceeded = errors.New("quota exceeded")
 var ErrInvalidNetworkPolicy = errors.New("invalid network policy")
 var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint requires ctld")
-var ErrClaimStartThrottled = startlimiter.ErrThrottled
 
 const defaultPodClaimReadyTimeout = 90 * time.Second
 const defaultSandboxRestoreTimeout = 5 * time.Minute
@@ -129,7 +127,6 @@ type SandboxService struct {
 	rootFSObjectDeleter                    RootFSObjectDeleter
 	templateImageBuildCapabilityConfigured bool
 	templateImageBuildAvailable            bool
-	claimStartLimiter                      *startlimiter.Limiter
 	resumeGroup                            singleflight.Group
 	idlePodReservations                    *idlePodReservations
 	podWaiterMu                            sync.Mutex
@@ -237,17 +234,6 @@ func (s *SandboxService) PodEventHandler() cache.ResourceEventHandlerFuncs {
 		return cache.ResourceEventHandlerFuncs{}
 	}
 	return s.ensurePodEventWaiter().ResourceEventHandler()
-}
-
-func (s *SandboxService) SetClaimStartLimiter(limiter *startlimiter.Limiter) {
-	if s == nil {
-		return
-	}
-	s.claimStartLimiter = limiter
-}
-
-func ClaimStartRetryAfter(err error) time.Duration {
-	return startlimiter.RetryAfter(err)
 }
 
 func (s *SandboxService) ensurePodEventWaiter() *podEventWaiter {

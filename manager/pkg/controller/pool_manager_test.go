@@ -3,18 +3,14 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -115,9 +111,8 @@ func TestDesiredPoolReplicasUsesMinIdle(t *testing.T) {
 	assert.Equal(t, int32(15), desiredPoolReplicas(template))
 }
 
-func TestReconcileReplicaSetReplicasBatchesScaleUpAndRequeues(t *testing.T) {
+func TestReconcileReplicaSetReplicasAppliesFullScaleUp(t *testing.T) {
 	ctx := context.Background()
-	redisServer := miniredis.RunT(t)
 	zero := int32(0)
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
@@ -132,70 +127,23 @@ func TestReconcileReplicaSetReplicasBatchesScaleUpAndRequeues(t *testing.T) {
 		},
 		Spec: appsv1.ReplicaSetSpec{Replicas: &zero},
 	}
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "sandbox-a"},
-		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
-			Type:   corev1.NodeReady,
-			Status: corev1.ConditionTrue,
-		}}},
-	}
-	client := fake.NewSimpleClientset(node, rs)
-	limiter, err := startlimiter.New(ctx, startlimiter.Config{
-		ClusterID:      "cluster-a",
-		K8sClient:      client,
-		PerSandboxNode: 30,
-		MaxLimit:       30,
-		Redis: rediscache.Config{
-			URL:       "redis://" + redisServer.Addr() + "/0",
-			KeyPrefix: "test",
-		},
-	})
-	require.NoError(t, err)
+	client := fake.NewSimpleClientset(rs)
 
 	pm := &PoolManager{
-		k8sClient:         client,
-		recorder:          record.NewFakeRecorder(10),
-		logger:            zap.NewNop(),
-		claimStartLimiter: limiter,
+		k8sClient: client,
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
 	}
 
 	requeueAfter, err := pm.reconcileReplicaSetReplicas(ctx, template, rs, 50)
 	require.NoError(t, err)
-	assert.Equal(t, time.Second, requeueAfter)
+	assert.Zero(t, requeueAfter)
 	stored, err := client.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rs.Name, metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, int32(30), getInt32Value(stored.Spec.Replicas))
+	assert.Equal(t, int32(50), getInt32Value(stored.Spec.Replicas))
 
 	// Reconcile with the original stale ReplicaSet object. The live read must keep
-	// the first batch at 30 instead of scaling it back down.
-	requeueAfter, err = pm.reconcileReplicaSetReplicas(ctx, template, rs, 50)
-	require.NoError(t, err)
-	assert.Equal(t, time.Second, requeueAfter)
-	stored, err = client.AppsV1().ReplicaSets(template.Namespace).Get(ctx, rs.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, int32(30), getInt32Value(stored.Spec.Replicas))
-
-	for i := 0; i < 30; i++ {
-		_, err := client.CoreV1().Pods(template.Namespace).Create(ctx, &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("idle-%02d", i),
-				Namespace: template.Namespace,
-				Labels: map[string]string{
-					LabelTemplateID: template.Name,
-					LabelPoolType:   PoolTypeIdle,
-				},
-			},
-			Status: corev1.PodStatus{
-				Phase: corev1.PodRunning,
-				Conditions: []corev1.PodCondition{{
-					Type:   corev1.PodReady,
-					Status: corev1.ConditionTrue,
-				}},
-			},
-		}, metav1.CreateOptions{})
-		require.NoError(t, err)
-	}
-
+	// the already-applied target instead of writing from stale state.
 	requeueAfter, err = pm.reconcileReplicaSetReplicas(ctx, template, rs, 50)
 	require.NoError(t, err)
 	assert.Zero(t, requeueAfter)

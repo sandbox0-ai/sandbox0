@@ -229,19 +229,13 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 
 	selected, selectedBy := s.selectClusterByIdleWithAllocations(allocations, clusterMap, tpl, clusterTemplateID, maxAge)
 	if selected == nil {
-		selected = s.selectClusterByClaimStartWithAllocations(allocations, clusterMap, maxAge)
-		if selected != nil {
-			selectedBy = "claim_start_capacity"
-		}
-	}
-	if selected == nil {
 		selected = s.selectClusterByHeadroomWithAllocations(allocations, clusterMap, maxAge)
 		if selected != nil {
 			selectedBy = "headroom"
 		}
 	}
 	if selected == nil {
-		selected, err = s.selectClusterByWeightWithAllocations(allocations, clusterMap, maxAge)
+		selected, err = s.selectClusterByWeightWithAllocations(allocations, clusterMap)
 		if err != nil {
 			return nil, tpl, "", err
 		}
@@ -250,7 +244,7 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 		}
 	}
 	if selected == nil {
-		selected = s.selectClusterByFallbackWithAllocations(allocations, clusterMap, maxAge)
+		selected = s.selectClusterByFallbackWithAllocations(allocations, clusterMap)
 		if selected != nil {
 			selectedBy = "fallback"
 		}
@@ -305,10 +299,6 @@ func (s *Server) selectClusterByIdleWithAllocations(allocations []*template.Temp
 		if !ok || idleCount <= 0 {
 			continue
 		}
-		if allowed, known := s.clusterAllowedByClaimStart(cluster.ClusterID, maxAge); known && !allowed {
-			continue
-		}
-
 		if selected == nil ||
 			idleCount > bestIdle ||
 			(idleCount == bestIdle && alloc.MaxIdle > selectedAlloc.MaxIdle) ||
@@ -379,43 +369,7 @@ func (s *Server) selectClusterByHeadroomWithAllocations(allocations []*template.
 	return selected
 }
 
-func (s *Server) selectClusterByClaimStartWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) *template.Cluster {
-	var selected *template.Cluster
-	var selectedAlloc *template.TemplateAllocation
-	var bestAvailable int32 = -1
-
-	for _, alloc := range allocations {
-		cluster := clusterMap[alloc.ClusterID]
-		if cluster == nil || !cluster.Enabled {
-			continue
-		}
-
-		age, ok := s.reconciler.GetClusterSummaryAge(cluster.ClusterID)
-		s.recordClusterSummaryAge(cluster.ClusterID)
-		if !ok || age > maxAge {
-			continue
-		}
-		summary, ok := s.reconciler.GetClusterSummary(cluster.ClusterID)
-		if !ok || summary == nil || !clusterSummaryHasClaimStart(summary) || summary.ClaimStartAvailable <= 0 {
-			continue
-		}
-
-		available := summary.ClaimStartAvailable
-		if selected == nil ||
-			available > bestAvailable ||
-			(available == bestAvailable && alloc.MaxIdle > selectedAlloc.MaxIdle) ||
-			(available == bestAvailable && alloc.MaxIdle == selectedAlloc.MaxIdle && cluster.Weight > selected.Weight) ||
-			(available == bestAvailable && alloc.MaxIdle == selectedAlloc.MaxIdle && cluster.Weight == selected.Weight && cluster.ClusterID < selected.ClusterID) {
-			selected = cluster
-			selectedAlloc = alloc
-			bestAvailable = available
-		}
-	}
-
-	return selected
-}
-
-func (s *Server) selectClusterByWeightWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) (*template.Cluster, error) {
+func (s *Server) selectClusterByWeightWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster) (*template.Cluster, error) {
 	totalWeight := 0
 	for _, alloc := range allocations {
 		cluster := clusterMap[alloc.ClusterID]
@@ -423,9 +377,6 @@ func (s *Server) selectClusterByWeightWithAllocations(allocations []*template.Te
 			continue
 		}
 		if cluster.Weight <= 0 {
-			continue
-		}
-		if allowed, known := s.clusterAllowedByClaimStart(cluster.ClusterID, maxAge); known && !allowed {
 			continue
 		}
 		totalWeight += cluster.Weight
@@ -446,9 +397,6 @@ func (s *Server) selectClusterByWeightWithAllocations(allocations []*template.Te
 		if cluster.Weight <= 0 {
 			continue
 		}
-		if allowed, known := s.clusterAllowedByClaimStart(cluster.ClusterID, maxAge); known && !allowed {
-			continue
-		}
 		running += cluster.Weight
 		if choice < running {
 			return cluster, nil
@@ -458,16 +406,13 @@ func (s *Server) selectClusterByWeightWithAllocations(allocations []*template.Te
 	return nil, nil
 }
 
-func (s *Server) selectClusterByFallbackWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) *template.Cluster {
+func (s *Server) selectClusterByFallbackWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster) *template.Cluster {
 	var selected *template.Cluster
 	var selectedAlloc *template.TemplateAllocation
 
 	for _, alloc := range allocations {
 		cluster := clusterMap[alloc.ClusterID]
 		if cluster == nil || !cluster.Enabled {
-			continue
-		}
-		if allowed, known := s.clusterAllowedByClaimStart(cluster.ClusterID, maxAge); known && !allowed {
 			continue
 		}
 		if selected == nil ||
@@ -495,32 +440,6 @@ func writeTemplateNotReady(c *gin.Context, tpl *template.Template) {
 		}
 	}
 	spec.JSONError(c, http.StatusConflict, spec.CodeTemplateNotReady, message)
-}
-
-func (s *Server) clusterAllowedByClaimStart(clusterID string, maxAge time.Duration) (bool, bool) {
-	age, ok := s.reconciler.GetClusterSummaryAge(clusterID)
-	if !ok {
-		return true, false
-	}
-	summary, ok := s.reconciler.GetClusterSummary(clusterID)
-	if !ok || summary == nil || !clusterSummaryHasClaimStart(summary) {
-		return true, false
-	}
-	if age > maxAge {
-		return false, true
-	}
-	return summary.ClaimStartAvailable > 0, true
-}
-
-func clusterSummaryHasClaimStart(summary *templreconciler.ClusterSummary) bool {
-	if summary == nil {
-		return false
-	}
-	return summary.ClaimStartLimiterBackend != "" ||
-		summary.ClaimStartLimit > 0 ||
-		summary.ClaimStartInFlight > 0 ||
-		summary.ClaimStartAvailable > 0 ||
-		summary.WarmReadySandboxNodeCount > 0
 }
 
 func clusterAvailableHeadroom(summary *templreconciler.ClusterSummary, podsPerNode int) int32 {

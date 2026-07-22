@@ -15,10 +15,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/startlimiter"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -215,64 +215,15 @@ func TestClaimSandboxReturnsUnavailableWhenDataPlaneNotReady(t *testing.T) {
 	}
 }
 
-func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T) {
+func TestClaimSandboxReturnsTooManyRequestsWhenActiveSandboxQuotaExceeded(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	withHTTPTestPublicKey(t)
-	withHTTPTestManagerConfig(t, `sandbox_pod_placement:
-  node_selector:
-    sandbox0.ai/data-plane-ready: "true"
-`)
-
-	templateNamespace, err := naming.TemplateNamespaceForBuiltin("default")
-	if err != nil {
-		t.Fatalf("template namespace: %v", err)
-	}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: templateNamespace},
-		Spec:       v1alpha1.SandboxTemplateSpec{MainContainer: v1alpha1.ContainerSpec{Image: "busybox"}},
-	}
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "sandbox-node",
-			Labels: map[string]string{
-				"sandbox0.ai/data-plane-ready": "true",
-			},
-		},
-		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
-			Type:   corev1.NodeReady,
-			Status: corev1.ConditionTrue,
-		}}},
-	}
-	startingPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "active-starting",
-			Namespace: templateNamespace,
-			Labels: map[string]string{
-				controller.LabelTemplateID: template.Name,
-				controller.LabelPoolType:   controller.PoolTypeActive,
-			},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodPending},
-	}
-	k8sClient := fake.NewSimpleClientset(node, startingPod)
-	claimStartLimiter, err := startlimiter.New(context.Background(), startlimiter.Config{
-		K8sClient:      k8sClient,
-		PerSandboxNode: 1,
-		MaxLimit:       1,
-		SandboxNodeSelector: map[string]string{
-			"sandbox0.ai/data-plane-ready": "true",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create claim start limiter: %v", err)
-	}
 	sandboxService := service.NewSandboxService(
-		k8sClient,
-		newHTTPTestPodLister(t, startingPod),
-		newHTTPTestNodeLister(t, node),
+		fake.NewSimpleClientset(),
+		nil,
+		nil,
 		nil,
 		newHTTPTestSecretLister(t),
-		staticHTTPTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -281,7 +232,14 @@ func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T)
 		zap.NewNop(),
 		nil,
 	)
-	sandboxService.SetClaimStartLimiter(claimStartLimiter)
+	sandboxService.SetQuotaStore(staticClaimQuotaStore{
+		limit: &quota.Limit{
+			TeamID:     "team-1",
+			Dimension:  quota.DimensionActiveSandboxes,
+			LimitValue: 1,
+		},
+		usage: 1,
+	})
 
 	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
 	recorder := httptest.NewRecorder()
@@ -296,16 +254,26 @@ func TestClaimSandboxReturnsTooManyRequestsWhenClaimStartThrottled(t *testing.T)
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusTooManyRequests, recorder.Body.String())
 	}
-	if got := recorder.Header().Get("Retry-After"); got != "1" {
-		t.Fatalf("Retry-After = %q, want 1", got)
-	}
 	var response spec.Response
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if response.Success || response.Error == nil || response.Error.Code != spec.CodeClaimStartThrottled {
-		t.Fatalf("response = %+v, want claim_start_throttled error", response)
+	if response.Success || response.Error == nil || response.Error.Code != "quota_exceeded" {
+		t.Fatalf("response = %+v, want quota_exceeded error", response)
 	}
+}
+
+type staticClaimQuotaStore struct {
+	limit *quota.Limit
+	usage int64
+}
+
+func (s staticClaimQuotaStore) GetLimit(context.Context, string, quota.Dimension) (*quota.Limit, error) {
+	return s.limit, nil
+}
+
+func (s staticClaimQuotaStore) CurrentUsage(context.Context, string, quota.Dimension) (int64, error) {
+	return s.usage, nil
 }
 
 func TestClaimSandboxReturnsNotFoundForMissingTemplate(t *testing.T) {

@@ -77,7 +77,7 @@ Claim a sandbox from a template. The sandbox is created from a pre-warmed pool f
 | `auto_resume` | boolean | Auto-resume when accessed (default: true) |
 | `services` | array | Sandbox Services for public HTTP routes, including Sandbox Functions |
 
-When the cluster claim/start admission budget is full, the claim API returns `429` with `error.code` set to `claim_start_throttled` and a `Retry-After` header in seconds. Retry after that delay. Team quota failures also return `429`, but use `error.code` set to `quota_exceeded`.
+Team quota failures return `429` with `error.code` set to `quota_exceeded`. The `sandbox_claims` policy controls sustained claim rate and immediate burst and includes a `Retry-After` header when exhausted; `active_sandboxes` controls the team's running sandbox capacity.
 
 See [Network](/docs/sandbox/network) and [Protocol Controls](/docs/sandbox/protocol-controls) for outbound control, [Sandbox Services](/docs/sandbox/services) for public HTTP controls, [Sandbox Functions](/docs/sandbox/functions) for inline public handlers, and [Credential](/docs/sandbox/credential) for outbound auth and secret handling.
 

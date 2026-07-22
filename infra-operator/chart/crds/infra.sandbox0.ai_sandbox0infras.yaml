@@ -3713,8 +3713,7 @@ spec:
                                 dimension:
                                   enum:
                                   - active_sandboxes
-                                  - cpu_millicpu
-                                  - memory_mib
+                                  - sandbox_claims
                                   - volume_storage_gb
                                   - snapshot_storage_gb
                                   - api_requests
@@ -3735,7 +3734,7 @@ spec:
                               - dimension
                               - limitValue
                               type: object
-                            maxItems: 8
+                            maxItems: 7
                             type: array
                             x-kubernetes-list-map-keys:
                             - dimension

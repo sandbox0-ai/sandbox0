@@ -1,16 +1,16 @@
 # Team Quotas
 
-Team Quota protects shared regional capacity and bandwidth from one team. A
-region has one set of defaults, and a team-specific policy overrides the
-default for the same key.
+Team Quota protects shared regional capacity and bandwidth from one team. It is
+an operational guardrail, not a subscription entitlement: usage metering and
+billing remain independent. A region has one set of defaults, and a
+team-specific policy overrides the default for the same key.
 
 ## Supported Keys
 
 | Key | Kind | Unit | Enforcement |
 |---|---|---|---|
 | `active_sandboxes` | capacity | count | Sandbox claim |
-| `cpu_millicpu` | capacity | millicpu | Sandbox claim |
-| `memory_mib` | capacity | MiB | Sandbox claim |
+| `sandbox_claims` | rate | claims | External regional or full-mode gateway claim |
 | `volume_storage_gb` | capacity | GB | Volume mutation |
 | `snapshot_storage_gb` | capacity | GB | Snapshot mutation |
 | `api_requests` | rate | requests | External regional or full-mode gateway request |
@@ -25,6 +25,11 @@ burst up to `burstValue`.
 lifetime transfer caps. TCP and other streams wait for reserved byte tokens.
 UDP is dropped when tokens are not immediately available, so a datagram does
 not block a ctld worker indefinitely.
+
+CPU and memory remain sandbox resource settings and metered usage, but are not
+Team Quota dimensions. Rootfs is persisted in object storage and metered for
+billing, but it is not a separate quota dimension. Omit volume and snapshot
+policies when those dimensions should remain unlimited.
 
 ## Configure Region Defaults
 
@@ -45,27 +50,19 @@ spec:
             config:
                 defaultTeamQuotas:
                     - dimension: active_sandboxes
-                      limitValue: 20
-                    - dimension: cpu_millicpu
-                      limitValue: 20000
-                    - dimension: memory_mib
-                      limitValue: 40960
-                    - dimension: volume_storage_gb
-                      limitValue: 500
-                    - dimension: snapshot_storage_gb
-                      limitValue: 1000
-                    - dimension: api_requests
                       limitValue: 100
+                    - dimension: sandbox_claims
+                      limitValue: 5
                       intervalMs: 1000
-                      burstValue: 200
+                      burstValue: 5
                     - dimension: network_egress_bytes
-                      limitValue: 104857600
+                      limitValue: 12500000
                       intervalMs: 1000
-                      burstValue: 104857600
+                      burstValue: 25000000
                     - dimension: network_ingress_bytes
-                      limitValue: 104857600
+                      limitValue: 12500000
                       intervalMs: 1000
-                      burstValue: 104857600
+                      burstValue: 25000000
 ```
 
 PostgreSQL stores the resolved policy source of truth. Region-wide rate
@@ -73,7 +70,11 @@ admission uses Redis, so configure one shared Redis deployment for all clusters
 in a region. Network Redis keys are scoped by region and team and deliberately
 do not include a cluster ID.
 
-`api_requests` is charged once. A regional gateway charges the external request
+`sandbox_claims` is charged only for `POST /api/v1/sandboxes`. Resume, fork,
+and the manager's cluster-wide claim-start admission budget are separate.
+
+`api_requests` defaults to 100 requests per second with a burst of 200 through
+gateway `rateLimitRps` and `rateLimitBurst` settings. It is charged once. A regional gateway charges the external request
 before forwarding it, and the internally authenticated cluster-gateway hop
 does not charge it again. A full-mode cluster gateway charges the external
 request directly.
@@ -95,7 +96,7 @@ implementation, but their configuration and state are not Team Quota policy.
 
 ## Inspect Quotas
 
-Use `GET /api/v1/quotas` to return all eight statuses, or
+Use `GET /api/v1/quotas` to return all seven statuses, or
 `GET /api/v1/quotas/{'{dimension}'}` for one status.
 
 Capacity statuses include `current` and `remaining`. Rate statuses include

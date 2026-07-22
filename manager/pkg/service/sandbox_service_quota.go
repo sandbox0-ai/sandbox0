@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
@@ -37,43 +35,6 @@ func (s *SandboxService) enforceActiveSandboxQuota(ctx context.Context, teamID s
 	return fmt.Errorf("%w: %s", ErrQuotaExceeded, decision.Err())
 }
 
-func (s *SandboxService) enforceSandboxCPUQuota(ctx context.Context, teamID string, resourceQuota v1alpha1.ResourceQuota) error {
-	requested := resourceQuota.CPU.MilliValue()
-	return s.enforceQuota(ctx, teamID, quota.DimensionCPU, requested)
-}
-
-func (s *SandboxService) enforceSandboxMemoryQuota(ctx context.Context, teamID string, resourceQuota v1alpha1.ResourceQuota) error {
-	requested := bytesToMiBRoundUp(resourceQuota.Memory.Value())
-	return s.enforceQuota(ctx, teamID, quota.DimensionMemory, requested)
-}
-
-func (s *SandboxService) enforceQuota(ctx context.Context, teamID string, dimension quota.Dimension, requested int64) error {
-	teamID = strings.TrimSpace(teamID)
-	if s == nil || s.quotaStore == nil || teamID == "" {
-		return nil
-	}
-	limit, err := s.quotaStore.GetLimit(ctx, teamID, dimension)
-	if err != nil {
-		return fmt.Errorf("load %s quota: %w", dimension, err)
-	}
-	if limit == nil {
-		return nil
-	}
-	if requested > 0 && requested > limit.LimitValue {
-		decision := quota.Check(teamID, dimension, 0, requested, limit)
-		return fmt.Errorf("%w: %s", ErrQuotaExceeded, decision.Err())
-	}
-	current, err := s.currentQuotaUsage(ctx, teamID, dimension)
-	if err != nil {
-		return fmt.Errorf("load %s usage: %w", dimension, err)
-	}
-	decision := quota.Check(teamID, dimension, current, requested, limit)
-	if decision.Allowed {
-		return nil
-	}
-	return fmt.Errorf("%w: %s", ErrQuotaExceeded, decision.Err())
-}
-
 func (s *SandboxService) currentQuotaUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error) {
 	current, err := s.quotaStore.CurrentUsage(ctx, teamID, dimension)
 	if err == nil {
@@ -93,16 +54,12 @@ func (s *SandboxService) currentQuotaUsage(ctx context.Context, teamID string, d
 }
 
 func (s *SandboxService) currentLiveQuotaUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, bool, error) {
-	switch dimension {
-	case quota.DimensionActiveSandboxes, quota.DimensionCPU, quota.DimensionMemory:
-	default:
+	if dimension != quota.DimensionActiveSandboxes {
 		return 0, false, nil
 	}
-	if dimension == quota.DimensionActiveSandboxes {
-		current, ok, err := s.currentSandboxStoreActiveQuotaUsage(ctx, teamID)
-		if err != nil || ok {
-			return current, ok, err
-		}
+	current, ok, err := s.currentSandboxStoreActiveQuotaUsage(ctx, teamID)
+	if err != nil || ok {
+		return current, ok, err
 	}
 	if s == nil || s.podLister == nil {
 		return 0, false, nil
@@ -118,12 +75,7 @@ func (s *SandboxService) currentLiveQuotaUsage(ctx context.Context, teamID strin
 		if !liveQuotaPodMatchesTeam(pod, teamID) {
 			continue
 		}
-		switch dimension {
-		case quota.DimensionActiveSandboxes:
-			total++
-		case quota.DimensionCPU, quota.DimensionMemory:
-			total += liveQuotaPodResourceUsage(pod, dimension)
-		}
+		total++
 	}
 	return total, true, nil
 }
@@ -171,48 +123,4 @@ func liveQuotaPodMatchesTeam(pod *corev1.Pod, teamID string) bool {
 		return false
 	}
 	return pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending
-}
-
-func liveQuotaPodResourceUsage(pod *corev1.Pod, dimension quota.Dimension) int64 {
-	if pod == nil {
-		return 0
-	}
-	var total int64
-	for _, container := range pod.Spec.Containers {
-		switch dimension {
-		case quota.DimensionCPU:
-			total += quotaCPUUsageMilli(container.Resources.Limits.Cpu(), container.Resources.Requests.Cpu())
-		case quota.DimensionMemory:
-			total += quotaMemoryUsageMiB(container.Resources.Limits.Memory(), container.Resources.Requests.Memory())
-		}
-	}
-	return total
-}
-
-func quotaCPUUsageMilli(limit, request *resource.Quantity) int64 {
-	if limit != nil && limit.Sign() > 0 {
-		return limit.MilliValue()
-	}
-	if request != nil && request.Sign() > 0 {
-		return request.MilliValue()
-	}
-	return 0
-}
-
-func quotaMemoryUsageMiB(limit, request *resource.Quantity) int64 {
-	if limit != nil && limit.Sign() > 0 {
-		return bytesToMiBRoundUp(limit.Value())
-	}
-	if request != nil && request.Sign() > 0 {
-		return bytesToMiBRoundUp(request.Value())
-	}
-	return 0
-}
-
-func bytesToMiBRoundUp(value int64) int64 {
-	if value <= 0 {
-		return 0
-	}
-	const mib = int64(1024 * 1024)
-	return (value + mib - 1) / mib
 }

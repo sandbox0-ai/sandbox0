@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/tokenbucket"
 	"go.uber.org/zap"
@@ -137,8 +138,13 @@ func TokenBucketConfigFromGatewayConfig(cfg apiconfig.GatewayConfig) tokenbucket
 	}
 }
 
-// RateLimit returns a gin middleware that rate limits requests per team
+// RateLimit returns the api_requests quota middleware for each team.
 func (rl *RateLimiter) RateLimit() gin.HandlerFunc {
+	return rl.RateLimitDimension(quota.DimensionAPIRequests)
+}
+
+// RateLimitDimension returns a team rate-quota middleware for dimension.
+func (rl *RateLimiter) RateLimitDimension(dimension quota.Dimension) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := GetAuthContext(c)
 		if authCtx == nil {
@@ -153,10 +159,11 @@ func (rl *RateLimiter) RateLimit() gin.HandlerFunc {
 			return
 		}
 
-		decision, limitValue, err := rl.allow(c.Request.Context(), teamID)
+		decision, limitValue, err := rl.allowDimension(c.Request.Context(), teamID, dimension)
 		if err != nil {
 			rl.logger.Warn("Rate limiter failed",
 				zap.String("team_id", teamID),
+				zap.String("dimension", string(dimension)),
 				zap.String("client_ip", c.ClientIP()),
 				zap.Error(err),
 			)
@@ -172,6 +179,7 @@ func (rl *RateLimiter) RateLimit() gin.HandlerFunc {
 		if !decision.Allowed {
 			rl.logger.Warn("Rate limit exceeded",
 				zap.String("team_id", teamID),
+				zap.String("dimension", string(dimension)),
 				zap.String("client_ip", c.ClientIP()),
 			)
 
@@ -179,10 +187,15 @@ func (rl *RateLimiter) RateLimit() gin.HandlerFunc {
 			c.Header("X-RateLimit-Remaining", strconv.FormatInt(decision.Remaining, 10))
 			c.Header("Retry-After", strconv.Itoa(retryAfterSeconds(decision.RetryAfter)))
 
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error":       "rate limit exceeded",
-				"retry_after": retryAfterSeconds(decision.RetryAfter),
-			})
+			if dimension == quota.DimensionAPIRequests {
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+					"error":       "rate limit exceeded",
+					"retry_after": retryAfterSeconds(decision.RetryAfter),
+				})
+				return
+			}
+			spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", fmt.Sprintf("%s quota exceeded", dimension))
+			c.Abort()
 			return
 		}
 
@@ -197,8 +210,12 @@ type rateDecision struct {
 }
 
 func (rl *RateLimiter) allow(ctx context.Context, teamID string) (rateDecision, int64, error) {
+	return rl.allowDimension(ctx, teamID, quota.DimensionAPIRequests)
+}
+
+func (rl *RateLimiter) allowDimension(ctx context.Context, teamID string, dimension quota.Dimension) (rateDecision, int64, error) {
 	if rl.policyStore != nil {
-		policy, err := rl.policyStore.GetPolicy(ctx, teamID, quota.DimensionAPIRequests)
+		policy, err := rl.policyStore.GetPolicy(ctx, teamID, dimension)
 		if err != nil {
 			return rateDecision{}, 0, err
 		}
@@ -206,10 +223,10 @@ func (rl *RateLimiter) allow(ctx context.Context, teamID string) (rateDecision, 
 			return rateDecision{Allowed: true}, 0, nil
 		}
 		if policy.Kind != quota.KindRate {
-			return rateDecision{}, 0, fmt.Errorf("api_requests quota has kind %q", policy.Kind)
+			return rateDecision{}, 0, fmt.Errorf("%s quota has kind %q", dimension, policy.Kind)
 		}
 		decision, err := rl.bucket.TryTakeN(ctx,
-			rl.keyPrefix+teamID+":dimension:"+string(quota.DimensionAPIRequests),
+			rl.keyPrefix+teamID+":dimension:"+string(dimension),
 			tokenbucket.Limit{
 				Tokens:   policy.LimitValue,
 				Interval: time.Duration(policy.IntervalMS) * time.Millisecond,
@@ -222,6 +239,9 @@ func (rl *RateLimiter) allow(ctx context.Context, teamID string) (rateDecision, 
 			Remaining:  decision.Remaining,
 			RetryAfter: decision.RetryAfter,
 		}, policy.LimitValue, err
+	}
+	if dimension != quota.DimensionAPIRequests {
+		return rateDecision{Allowed: true}, 0, nil
 	}
 	decision, err := rl.limiter.Allow(ctx, "gateway:team:"+teamID, rl.limit)
 	return rateDecision{

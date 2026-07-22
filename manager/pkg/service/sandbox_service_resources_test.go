@@ -11,7 +11,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -451,36 +450,6 @@ func TestUpdatePausedSandboxValidatesAndPersistsMemory(t *testing.T) {
 	stored := store.records["sandbox-1"]
 	if stored.Config.Resources == nil || stored.Config.Resources.Memory != "2Gi" {
 		t.Fatalf("stored resources = %#v, want memory 2Gi", stored.Config.Resources)
-	}
-}
-
-func TestUpdateSandboxMemoryQuotaUsesIncreaseOnly(t *testing.T) {
-	template := newSandboxResourceTestTemplate(t)
-	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
-	client := fake.NewSimpleClientset(pod.DeepCopy())
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	if err := indexer.Add(pod.DeepCopy()); err != nil {
-		t.Fatalf("add pod: %v", err)
-	}
-	svc := &SandboxService{
-		k8sClient:      client,
-		podLister:      corelisters.NewPodLister(indexer),
-		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		quotaStore: fakeQuotaLimitStore{
-			limit: &quota.Limit{TeamID: "team-a", Dimension: quota.DimensionMemory, LimitValue: 2048},
-			usage: 1024,
-		},
-		clock:  systemTime{},
-		config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
-		logger: zap.NewNop(),
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if _, err := svc.UpdateSandbox(ctx, "sandbox-1", &SandboxUpdateConfig{
-		Resources: &SandboxResourceConfig{Memory: "2Gi"},
-	}); err != nil {
-		t.Fatalf("UpdateSandbox() error = %v, want nil because only 1Gi increase is charged", err)
 	}
 }
 

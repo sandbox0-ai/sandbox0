@@ -175,14 +175,14 @@ func TestCurrentUsageDelegatesToUsageStore(t *testing.T) {
 			if teamID != "team-1" {
 				t.Fatalf("teamID = %q, want trimmed team-1", teamID)
 			}
-			if dimension != DimensionCPU {
-				t.Fatalf("dimension = %q, want cpu", dimension)
+			if dimension != DimensionActiveSandboxes {
+				t.Fatalf("dimension = %q, want active sandboxes", dimension)
 			}
 			return 1024, nil
 		},
 	})
 
-	got, err := repo.CurrentUsage(context.Background(), " team-1 ", DimensionCPU)
+	got, err := repo.CurrentUsage(context.Background(), " team-1 ", DimensionActiveSandboxes)
 	if err != nil {
 		t.Fatalf("CurrentUsage: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestCurrentUsageWithoutUsageStoreReturnsUnavailable(t *testing.T) {
 		},
 	})
 
-	_, err := repo.CurrentUsage(context.Background(), "team-1", DimensionCPU)
+	_, err := repo.CurrentUsage(context.Background(), "team-1", DimensionActiveSandboxes)
 	if err == nil || !strings.Contains(err.Error(), "quota usage store is not configured") {
 		t.Fatalf("CurrentUsage error = %v, want usage store unavailable", err)
 	}
@@ -210,7 +210,7 @@ func TestCurrentUsageWithTypedNilUsageStoreReturnsUnavailable(t *testing.T) {
 	var store *fakeUsageStore
 	repo.SetUsageStore(store)
 
-	_, err := repo.CurrentUsage(context.Background(), "team-1", DimensionCPU)
+	_, err := repo.CurrentUsage(context.Background(), "team-1", DimensionActiveSandboxes)
 	if !errors.Is(err, ErrUsageStoreNotConfigured) {
 		t.Fatalf("CurrentUsage error = %v, want ErrUsageStoreNotConfigured", err)
 	}

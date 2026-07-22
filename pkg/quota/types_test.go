@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-func TestDimensionsContainsEightManagedKeys(t *testing.T) {
+func TestDimensionsContainsSevenManagedKeys(t *testing.T) {
 	got := Dimensions()
-	if len(got) != 8 {
-		t.Fatalf("Dimensions() len = %d, want 8: %v", len(got), got)
+	if len(got) != 7 {
+		t.Fatalf("Dimensions() len = %d, want 7: %v", len(got), got)
 	}
 	for _, dimension := range got {
 		if !KnownDimension(dimension) {
@@ -17,6 +17,12 @@ func TestDimensionsContainsEightManagedKeys(t *testing.T) {
 	}
 	if KnownDimension(Dimension("egress")) || KnownDimension(Dimension("ingress")) {
 		t.Fatal("legacy cumulative network dimensions remain supported")
+	}
+	if KnownDimension(Dimension("cpu_millicpu")) || KnownDimension(Dimension("memory_mib")) {
+		t.Fatal("compute resource dimensions remain supported")
+	}
+	if KindForDimension(DimensionSandboxClaims) != KindRate || UnitForDimension(DimensionSandboxClaims) != "claims" {
+		t.Fatal("sandbox_claims is not a claims rate quota")
 	}
 }
 

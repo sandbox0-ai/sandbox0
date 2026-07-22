@@ -11,8 +11,7 @@ type Dimension string
 
 const (
 	DimensionActiveSandboxes Dimension = "active_sandboxes"
-	DimensionCPU             Dimension = "cpu_millicpu"
-	DimensionMemory          Dimension = "memory_mib"
+	DimensionSandboxClaims   Dimension = "sandbox_claims"
 	DimensionVolumeStorageGB Dimension = "volume_storage_gb"
 	DimensionSnapshotGB      Dimension = "snapshot_storage_gb"
 	DimensionAPIRequests     Dimension = "api_requests"
@@ -22,8 +21,7 @@ const (
 
 var dimensions = []Dimension{
 	DimensionActiveSandboxes,
-	DimensionCPU,
-	DimensionMemory,
+	DimensionSandboxClaims,
 	DimensionVolumeStorageGB,
 	DimensionSnapshotGB,
 	DimensionAPIRequests,
@@ -39,8 +37,7 @@ func Dimensions() []Dimension {
 func KnownDimension(d Dimension) bool {
 	switch d {
 	case DimensionActiveSandboxes,
-		DimensionCPU,
-		DimensionMemory,
+		DimensionSandboxClaims,
 		DimensionVolumeStorageGB,
 		DimensionSnapshotGB,
 		DimensionAPIRequests,
@@ -63,12 +60,11 @@ const (
 func KindForDimension(d Dimension) Kind {
 	switch d {
 	case DimensionActiveSandboxes,
-		DimensionCPU,
-		DimensionMemory,
 		DimensionVolumeStorageGB,
 		DimensionSnapshotGB:
 		return KindCapacity
-	case DimensionAPIRequests,
+	case DimensionSandboxClaims,
+		DimensionAPIRequests,
 		DimensionNetworkEgress,
 		DimensionNetworkIngress:
 		return KindRate
@@ -162,10 +158,8 @@ func UnitForDimension(d Dimension) string {
 	switch d {
 	case DimensionActiveSandboxes:
 		return "count"
-	case DimensionCPU:
-		return "millicpu"
-	case DimensionMemory:
-		return "MiB"
+	case DimensionSandboxClaims:
+		return "claims"
 	case DimensionVolumeStorageGB, DimensionSnapshotGB:
 		return "GB"
 	case DimensionAPIRequests:

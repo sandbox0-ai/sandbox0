@@ -772,9 +772,6 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			if err != nil {
 				return err
 			}
-			if err := s.enforceSandboxResourceQuotaIncrease(ctx, teamID, current, resourceQuota); err != nil {
-				return err
-			}
 			resizeQuota = &resourceQuota
 			merged.Resources = &SandboxResourceConfig{Memory: resourceQuota.Memory.String()}
 		}

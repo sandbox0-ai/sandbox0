@@ -13,8 +13,10 @@ func TestLoadManagerConfigPreservesDefaultTeamQuotas(t *testing.T) {
 default_team_quotas:
   - dimension: active_sandboxes
     limit_value: 3
-  - dimension: cpu_millicpu
-    limit_value: 2000
+  - dimension: sandbox_claims
+    limit_value: 5
+    interval_ms: 1000
+    burst_value: 5
   - dimension: api_requests
     limit_value: 100
     interval_ms: 1000
@@ -33,8 +35,11 @@ default_team_quotas:
 	if cfg.DefaultTeamQuotas[0].Dimension != "active_sandboxes" || cfg.DefaultTeamQuotas[0].LimitValue != 3 {
 		t.Fatalf("first default quota = %+v, want active_sandboxes=3", cfg.DefaultTeamQuotas[0])
 	}
-	if cfg.DefaultTeamQuotas[1].Dimension != "cpu_millicpu" || cfg.DefaultTeamQuotas[1].LimitValue != 2000 {
-		t.Fatalf("second default quota = %+v, want cpu_millicpu=2000", cfg.DefaultTeamQuotas[1])
+	if cfg.DefaultTeamQuotas[1].Dimension != "sandbox_claims" ||
+		cfg.DefaultTeamQuotas[1].LimitValue != 5 ||
+		cfg.DefaultTeamQuotas[1].IntervalMS != 1000 ||
+		cfg.DefaultTeamQuotas[1].BurstValue != 5 {
+		t.Fatalf("second default quota = %+v, want sandbox_claims rate policy", cfg.DefaultTeamQuotas[1])
 	}
 	if cfg.DefaultTeamQuotas[2].Dimension != "api_requests" ||
 		cfg.DefaultTeamQuotas[2].IntervalMS != 1000 ||

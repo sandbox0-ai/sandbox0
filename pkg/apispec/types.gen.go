@@ -213,10 +213,9 @@ const (
 const (
 	ActiveSandboxes     QuotaDimension = "active_sandboxes"
 	ApiRequests         QuotaDimension = "api_requests"
-	CpuMillicpu         QuotaDimension = "cpu_millicpu"
-	MemoryMib           QuotaDimension = "memory_mib"
 	NetworkEgressBytes  QuotaDimension = "network_egress_bytes"
 	NetworkIngressBytes QuotaDimension = "network_ingress_bytes"
+	SandboxClaims       QuotaDimension = "sandbox_claims"
 	SnapshotStorageGb   QuotaDimension = "snapshot_storage_gb"
 	VolumeStorageGb     QuotaDimension = "volume_storage_gb"
 )
@@ -759,10 +758,9 @@ const (
 // Defines values for TeamQuotaUnit.
 const (
 	TeamQuotaUnitBytes    TeamQuotaUnit = "bytes"
+	TeamQuotaUnitClaims   TeamQuotaUnit = "claims"
 	TeamQuotaUnitCount    TeamQuotaUnit = "count"
 	TeamQuotaUnitGB       TeamQuotaUnit = "GB"
-	TeamQuotaUnitMiB      TeamQuotaUnit = "MiB"
-	TeamQuotaUnitMillicpu TeamQuotaUnit = "millicpu"
 	TeamQuotaUnitRequests TeamQuotaUnit = "requests"
 )
 

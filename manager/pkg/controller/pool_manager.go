@@ -70,7 +70,7 @@ const (
 	OwnerKindTeamWarmPool = "team_warm_pool"
 
 	unhealthyIdlePodRepairGracePeriod      = 2 * time.Minute
-	pendingHotClaimFinalizationGracePeriod = 5 * time.Second
+	pendingHotClaimFinalizationGracePeriod = 10 * time.Second
 )
 
 func TemplateLogicalID(template *v1alpha1.SandboxTemplate) string {

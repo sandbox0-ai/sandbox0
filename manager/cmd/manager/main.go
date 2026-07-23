@@ -963,6 +963,11 @@ func buildQuotaRepository(ctx context.Context, pool *pgxpool.Pool, cfg *config.M
 	if usageStore != nil {
 		repo.SetUsageStore(usageStore)
 	}
+	policyStore, err := quota.NewCachedPolicyStore(ctx, pool, repo, quota.DefaultPolicyCacheTTL)
+	if err != nil {
+		return nil, err
+	}
+	repo.SetLimitPolicyStore(policyStore)
 	return repo, nil
 }
 

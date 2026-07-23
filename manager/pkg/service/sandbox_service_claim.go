@@ -32,7 +32,8 @@ import (
 const (
 	volumePortalBindRetryWindow   = 5 * time.Second
 	volumePortalBindRetryInterval = 100 * time.Millisecond
-	hotClaimPoolRefillDelay       = 1500 * time.Millisecond
+	hotClaimPoolRefillQuietPeriod = 1500 * time.Millisecond
+	hotClaimPoolRefillMaxDelay    = 5 * time.Second
 	hotClaimFinalizationTimeout   = 10 * time.Second
 )
 
@@ -45,9 +46,10 @@ var errIdlePodReservationConflict = errors.New("idle pod reservation conflict")
 var errIdlePodClaimLost = errors.New("idle pod claim lost")
 
 type pendingHotClaimFinalization struct {
-	namespace string
-	podName   string
-	sandboxID string
+	namespace   string
+	podName     string
+	sandboxID   string
+	scheduledAt time.Time
 }
 
 // ClaimRequest represents a sandbox claim request
@@ -1422,7 +1424,20 @@ func materializeFinalizedHotClaimPod(pod *corev1.Pod) *corev1.Pod {
 }
 
 func (s *SandboxService) schedulePendingHotClaimFinalization(pending pendingHotClaimFinalization) {
-	time.AfterFunc(hotClaimPoolRefillDelay, func() {
+	now := time.Now()
+	pending.scheduledAt = now
+	s.hotClaimFinalizationMu.Lock()
+	s.hotClaimFinalizationLastScheduled = now
+	s.hotClaimFinalizationMu.Unlock()
+	s.schedulePendingHotClaimFinalizationAfter(pending, hotClaimPoolRefillQuietPeriod)
+}
+
+func (s *SandboxService) schedulePendingHotClaimFinalizationAfter(pending pendingHotClaimFinalization, delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		if delay := s.nextHotClaimFinalizationDelay(pending, time.Now()); delay > 0 {
+			s.schedulePendingHotClaimFinalizationAfter(pending, delay)
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), hotClaimFinalizationTimeout)
 		defer cancel()
 		if err := s.finalizePendingHotClaim(ctx, pending); err != nil {
@@ -1438,6 +1453,27 @@ func (s *SandboxService) schedulePendingHotClaimFinalization(pending pendingHotC
 			)
 		}
 	})
+}
+
+func (s *SandboxService) nextHotClaimFinalizationDelay(pending pendingHotClaimFinalization, now time.Time) time.Duration {
+	if pending.scheduledAt.IsZero() || now.Sub(pending.scheduledAt) >= hotClaimPoolRefillMaxDelay {
+		return 0
+	}
+	s.hotClaimFinalizationMu.Lock()
+	lastScheduled := s.hotClaimFinalizationLastScheduled
+	s.hotClaimFinalizationMu.Unlock()
+	if lastScheduled.IsZero() {
+		return 0
+	}
+	quietRemaining := hotClaimPoolRefillQuietPeriod - now.Sub(lastScheduled)
+	if quietRemaining <= 0 {
+		return 0
+	}
+	maxDelayRemaining := hotClaimPoolRefillMaxDelay - now.Sub(pending.scheduledAt)
+	if quietRemaining > maxDelayRemaining {
+		return maxDelayRemaining
+	}
+	return quietRemaining
 }
 
 func (s *SandboxService) finalizePendingHotClaim(ctx context.Context, pending pendingHotClaimFinalization) error {

@@ -703,6 +703,24 @@ func TestFinalizePendingHotClaimIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestNextHotClaimFinalizationDelayWaitsForBurstToSettle(t *testing.T) {
+	base := time.Unix(100, 0)
+	svc := &SandboxService{
+		hotClaimFinalizationLastScheduled: base.Add(time.Second),
+	}
+	pending := pendingHotClaimFinalization{scheduledAt: base}
+
+	if got := svc.nextHotClaimFinalizationDelay(pending, base.Add(1500*time.Millisecond)); got != time.Second {
+		t.Fatalf("delay = %s, want 1s quiet-period remainder", got)
+	}
+	if got := svc.nextHotClaimFinalizationDelay(pending, base.Add(3*time.Second)); got != 0 {
+		t.Fatalf("delay after quiet period = %s, want 0", got)
+	}
+	if got := svc.nextHotClaimFinalizationDelay(pending, base.Add(hotClaimPoolRefillMaxDelay)); got != 0 {
+		t.Fatalf("delay at maximum age = %s, want 0", got)
+	}
+}
+
 func TestHotClaimableIdlePodRejectsClaimedIdentityAndPendingFinalization(t *testing.T) {
 	svc := &SandboxService{}
 	tests := map[string]func(*corev1.Pod){

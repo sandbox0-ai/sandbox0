@@ -131,6 +131,8 @@ type SandboxService struct {
 	idlePodReservations                    *idlePodReservations
 	podWaiterMu                            sync.Mutex
 	podWaiter                              *podEventWaiter
+	hotClaimFinalizationMu                 sync.Mutex
+	hotClaimFinalizationLastScheduled      time.Time
 }
 
 type TeamQuotaLimitStore interface {

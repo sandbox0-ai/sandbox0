@@ -154,7 +154,10 @@ func (s *SandboxService) setNetworkPolicyAnnotations(pod *corev1.Pod, spec *v1al
 		return "", fmt.Errorf("serialize network policy: %w", err)
 	}
 	pod.Annotations[controller.AnnotationNetworkPolicy] = annotation
-	newHash := policyAnnotationHash(annotation)
+	newHash := ""
+	if v1alpha1.NetworkPolicyRequiresApply(spec) {
+		newHash = policyAnnotationHash(annotation)
+	}
 	oldHash := pod.Annotations[controller.AnnotationNetworkPolicyHash]
 	if newHash != "" {
 		pod.Annotations[controller.AnnotationNetworkPolicyHash] = newHash

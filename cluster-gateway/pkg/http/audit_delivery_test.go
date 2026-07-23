@@ -214,6 +214,38 @@ func TestAuditDeliveryReplayBatchesPendingEvents(t *testing.T) {
 	}
 }
 
+func TestAuditDeliveryCanonicalBatchIncludesTargetBeyondLimit(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	targetID := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	for _, eventID := range []string{
+		"11111111-1111-4111-8111-111111111111",
+		"22222222-2222-4222-8222-222222222222",
+		targetID,
+	} {
+		if err := delivery.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, eventID)); err != nil {
+			t.Fatalf("EnqueueDurable() error = %v", err)
+		}
+	}
+
+	delivery.mu.Lock()
+	events, err := delivery.loadBatchContainingLocked(2, targetID)
+	delivery.mu.Unlock()
+	if err != nil {
+		t.Fatalf("loadBatchContainingLocked() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("canonical batch size = %d, want 2", len(events))
+	}
+	if events[0].EventID != targetID {
+		t.Fatalf("first canonical event = %s, want %s", events[0].EventID, targetID)
+	}
+}
+
 func TestAuditDeliveryCanonicalWaitsForInFlightReplayWithoutDuplicate(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{started: make(chan struct{}, 1), block: make(chan struct{})}
@@ -252,18 +284,26 @@ func TestAuditDeliveryCanonicalWaitsForInFlightReplayWithoutDuplicate(t *testing
 	}
 }
 
-func TestAuditDeliveryBoundsConcurrentCanonicalWrites(t *testing.T) {
+func TestAuditDeliveryBatchesConcurrentCanonicalWrites(t *testing.T) {
 	dir := t.TempDir()
-	block := make(chan struct{})
-	writer := &auditDeliveryWriter{block: block}
+	writer := &auditDeliveryWriter{started: make(chan struct{}, 1), block: make(chan struct{})}
 	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
 
-	const extraWrites = 4
-	errs := make(chan error, auditCanonicalConcurrency+extraWrites)
-	for range auditCanonicalConcurrency + extraWrites {
+	const writes = 32
+	errs := make(chan error, writes)
+	firstEvent := testAuditDeliveryEvent(t, uuid.NewString())
+	go func() {
+		errs <- delivery.PersistCanonical(context.Background(), firstEvent)
+	}()
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("first canonical write did not start")
+	}
+	for range writes - 1 {
 		event := testAuditDeliveryEvent(t, uuid.NewString())
 		go func() {
 			errs <- delivery.PersistCanonical(context.Background(), event)
@@ -271,25 +311,35 @@ func TestAuditDeliveryBoundsConcurrentCanonicalWrites(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
-	for len(delivery.canonicalSlots) != auditCanonicalConcurrency && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		entries, readErr := os.ReadDir(dir)
+		if readErr != nil {
+			t.Fatalf("ReadDir() error = %v", readErr)
+		}
+		if len(entries) == writes {
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := len(delivery.canonicalSlots); got != auditCanonicalConcurrency {
-		t.Fatalf("canonical slots in use = %d, want %d", got, auditCanonicalConcurrency)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
-	if got := len(delivery.canonicalSlots); got != auditCanonicalConcurrency {
-		t.Fatalf("canonical slots exceeded bound: %d", got)
+	if len(entries) != writes {
+		t.Fatalf("durably spooled events = %d, want %d", len(entries), writes)
 	}
 
-	close(block)
-	for range auditCanonicalConcurrency + extraWrites {
+	close(writer.block)
+	for range writes {
 		if err := <-errs; err != nil {
 			t.Fatalf("PersistCanonical() error = %v", err)
 		}
 	}
-	if got := len(writer.snapshotEvents()); got != auditCanonicalConcurrency+extraWrites {
-		t.Fatalf("canonical events = %d, want %d", got, auditCanonicalConcurrency+extraWrites)
+	if got := len(writer.snapshotEvents()); got != writes {
+		t.Fatalf("canonical events = %d, want %d", got, writes)
+	}
+	if got, want := writer.snapshotBatchSizes(), []int{1, writes - 1}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("canonical batch sizes = %v, want %v", got, want)
 	}
 }
 

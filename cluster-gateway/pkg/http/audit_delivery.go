@@ -19,9 +19,8 @@ import (
 )
 
 const (
-	auditReplayInterval       = time.Second
-	auditReplayBatchSize      = 500
-	auditCanonicalConcurrency = 32
+	auditReplayInterval  = time.Second
+	auditReplayBatchSize = 500
 )
 
 var (
@@ -45,7 +44,7 @@ type auditDelivery struct {
 	mu              sync.Mutex
 	once            sync.Once
 	wake            chan struct{}
-	canonicalSlots  chan struct{}
+	canonicalSlot   chan struct{}
 }
 
 func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger, verificationKey ed25519.PublicKey) (*auditDelivery, error) {
@@ -68,7 +67,7 @@ func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger,
 		logger:          logger,
 		verificationKey: verificationKey,
 		wake:            make(chan struct{}, 1),
-		canonicalSlots:  make(chan struct{}, auditCanonicalConcurrency),
+		canonicalSlot:   make(chan struct{}, 1),
 	}
 	if _, err := delivery.loadLocked(); err != nil {
 		return nil, err
@@ -107,11 +106,11 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 	if err != nil || !spooled {
 		return err
 	}
-	if err := d.acquireCanonicalSlots(ctx, 1); err != nil {
+	if err := d.acquireCanonicalSlot(ctx); err != nil {
 		d.signalReplay()
 		return fmt.Errorf("%w: event is durably buffered but canonical delivery did not start: %v", errAuditDeliveryPending, err)
 	}
-	defer d.releaseCanonicalSlots(1)
+	defer d.releaseCanonicalSlot()
 
 	// Replay may have acknowledged this exact signed event between the local
 	// fsync and acquisition of the canonical delivery slot.
@@ -125,20 +124,28 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 	if !pending {
 		return nil
 	}
-	if err := d.writer.InsertEvents(ctx, []sandboxobservability.Event{event}); err != nil {
+	d.mu.Lock()
+	events, batchErr := d.loadBatchContainingLocked(auditReplayBatchSize, event.EventID)
+	d.mu.Unlock()
+	if batchErr != nil {
+		d.signalReplay()
+		return fmt.Errorf("%w: load durably buffered canonical batch: %v", errAuditDeliveryPending, batchErr)
+	}
+	if err := d.writer.InsertEvents(ctx, events); err != nil {
 		d.logger.Warn("Sandbox audit event buffered for retry", zap.String("event_id", event.EventID), zap.Error(err))
 		d.signalReplay()
 		return fmt.Errorf("%w: event is durably buffered but not yet acknowledged: %v", errAuditDeliveryPending, err)
 	}
 	d.mu.Lock()
-	removeErr := d.removeLocked(event.EventID)
+	removeErr := d.removeBatchLocked(events)
 	d.mu.Unlock()
 	if removeErr != nil {
 		// The canonical insert already succeeded. Leaving the record in place can
 		// cause a duplicate retry, but the stable event ID makes that safe and is
 		// preferable to reporting a false delivery failure.
-		d.logger.Error("Canonical sandbox audit event was acknowledged but spool cleanup failed",
+		d.logger.Error("Canonical sandbox audit batch was acknowledged but spool cleanup failed",
 			zap.String("event_id", event.EventID),
+			zap.Int("batch_size", len(events)),
 			zap.Error(removeErr),
 		)
 	}
@@ -194,33 +201,23 @@ func (d *auditDelivery) signalReplay() {
 	}
 }
 
-func (d *auditDelivery) acquireCanonicalSlots(ctx context.Context, count int) error {
-	if d == nil || d.canonicalSlots == nil {
+func (d *auditDelivery) acquireCanonicalSlot(ctx context.Context) error {
+	if d == nil || d.canonicalSlot == nil {
 		return fmt.Errorf("audit canonical delivery is not configured")
 	}
-	if count <= 0 || count > cap(d.canonicalSlots) {
-		return fmt.Errorf("invalid audit canonical delivery slot count %d", count)
+	select {
+	case d.canonicalSlot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	acquired := 0
-	for acquired < count {
-		select {
-		case d.canonicalSlots <- struct{}{}:
-			acquired++
-		case <-ctx.Done():
-			d.releaseCanonicalSlots(acquired)
-			return ctx.Err()
-		}
-	}
-	return nil
 }
 
-func (d *auditDelivery) releaseCanonicalSlots(count int) {
-	if d == nil || d.canonicalSlots == nil {
+func (d *auditDelivery) releaseCanonicalSlot() {
+	if d == nil || d.canonicalSlot == nil {
 		return
 	}
-	for range count {
-		<-d.canonicalSlots
-	}
+	<-d.canonicalSlot
 }
 
 func (d *auditDelivery) run(ctx context.Context) {
@@ -243,15 +240,10 @@ func (d *auditDelivery) run(ctx context.Context) {
 }
 
 func (d *auditDelivery) replay(ctx context.Context) error {
-	// Replay takes every permit so it cannot race a strict write for the same
-	// spooled event. Strict writes use one permit each and may proceed in
-	// parallel because their operation-local attempt/result ordering is already
-	// enforced by the request path.
-	slotCount := cap(d.canonicalSlots)
-	if err := d.acquireCanonicalSlots(ctx, slotCount); err != nil {
+	if err := d.acquireCanonicalSlot(ctx); err != nil {
 		return err
 	}
-	defer d.releaseCanonicalSlots(slotCount)
+	defer d.releaseCanonicalSlot()
 
 	d.mu.Lock()
 	events, err := d.loadBatchLocked(auditReplayBatchSize)
@@ -359,6 +351,10 @@ func (d *auditDelivery) loadLocked() ([]sandboxobservability.Event, error) {
 }
 
 func (d *auditDelivery) loadBatchLocked(limit int) ([]sandboxobservability.Event, error) {
+	return d.loadBatchContainingLocked(limit, "")
+}
+
+func (d *auditDelivery) loadBatchContainingLocked(limit int, eventID string) ([]sandboxobservability.Event, error) {
 	entries, err := os.ReadDir(d.dir)
 	if err != nil {
 		return nil, fmt.Errorf("read audit spool: %w", err)
@@ -370,6 +366,15 @@ func (d *auditDelivery) loadBatchLocked(limit int) ([]sandboxobservability.Event
 		}
 	}
 	sort.Strings(names)
+	if eventID != "" {
+		targetName := eventID + ".json"
+		targetIndex := sort.SearchStrings(names, targetName)
+		if targetIndex >= len(names) || names[targetIndex] != targetName {
+			return nil, fmt.Errorf("canonical audit event %s is missing from the spool", eventID)
+		}
+		copy(names[1:targetIndex+1], names[:targetIndex])
+		names[0] = targetName
+	}
 	events := make([]sandboxobservability.Event, 0, len(names))
 	for _, name := range names {
 		if limit > 0 && len(events) >= limit {

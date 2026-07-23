@@ -569,14 +569,27 @@ func TestClaimIdlePodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 	}
 }
 
-func TestClaimIdlePodCanDeferNetworkApply(t *testing.T) {
+func TestClaimIdlePodCanDeferHotRuntimePreparation(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "template-a",
 			Namespace: "ns-a",
 		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{
+				Resources: v1alpha1.ResourceQuota{
+					CPU:    resource.MustParse("250m"),
+					Memory: resource.MustParse("1Gi"),
+				},
+			},
+		},
 	}
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	templateHash, err := controller.TemplateSpecHash(template)
+	if err != nil {
+		t.Fatalf("template hash: %v", err)
+	}
+	readyPod.Annotations[controller.AnnotationTemplateSpecHash] = templateHash
 	applyCalls := 0
 	client := fake.NewSimpleClientset(readyPod.DeepCopy())
 	svc := &SandboxService{
@@ -590,11 +603,12 @@ func TestClaimIdlePodCanDeferNetworkApply(t *testing.T) {
 		logger: zap.NewNop(),
 	}
 
-	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
-		TeamID:               "team-a",
-		UserID:               "user-a",
-		deferHotNetworkApply: true,
-	})
+	req := &ClaimRequest{
+		TeamID:                     "team-a",
+		UserID:                     "user-a",
+		deferHotRuntimePreparation: true,
+	}
+	pod, err := svc.claimIdlePod(context.Background(), template, req)
 	if err != nil {
 		t.Fatalf("claimIdlePod() error = %v", err)
 	}
@@ -603,6 +617,131 @@ func TestClaimIdlePodCanDeferNetworkApply(t *testing.T) {
 	}
 	if applyCalls != 0 {
 		t.Fatalf("network apply calls = %d, want 0", applyCalls)
+	}
+	resizeCalls := 0
+	for _, action := range client.Actions() {
+		if action.Matches("patch", "pods") && action.GetSubresource() == "resize" {
+			resizeCalls++
+		}
+	}
+	if resizeCalls != 0 {
+		t.Fatalf("resize calls = %d, want 0", resizeCalls)
+	}
+	if req.deferredHotResizeQuota == nil {
+		t.Fatal("deferred resize quota is nil")
+	}
+}
+
+func TestClaimSandboxRunsHotRuntimePreparationConcurrently(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(template.Name)
+	if err != nil {
+		t.Fatalf("template namespace: %v", err)
+	}
+	template.Namespace = templateNamespace
+
+	resizeStarted := make(chan struct{}, 1)
+	networkStarted := make(chan struct{}, 1)
+	procdStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	defer unblock()
+	signalAndWait := func(started chan<- struct{}) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		signalAndWait(procdStarted)
+		if err := spec.WriteSuccess(w, http.StatusOK, InitializeResponse{
+			SandboxID: "sandbox-a",
+			TeamID:    "team-a",
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
+	defer procd.Close()
+	procdHost, procdPort := splitTestServerAddress(t, procd)
+
+	node := newClaimTestNode("node-a", "10.0.0.1")
+	node.Labels = map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue}
+	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")
+	idlePod.Spec.NodeName = node.Name
+	idlePod.Status.PodIP = procdHost
+
+	client := fake.NewSimpleClientset(idlePod.DeepCopy(), node.DeepCopy())
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "resize" {
+			return false, nil, nil
+		}
+		signalAndWait(resizeStarted)
+		return false, nil, nil
+	})
+
+	svc := &SandboxService{
+		k8sClient:              client,
+		podLister:              newClaimTestPodLister(t, idlePod),
+		nodeLister:             newClaimTestNodeLister(t, node),
+		secretLister:           newClaimTestSecretLister(t),
+		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		NetworkPolicyService:   NewNetworkPolicyService(zap.NewNop()),
+		networkProvider:        &assertingNetworkProvider{applyFunc: func(network.SandboxPolicyInput) { signalAndWait(networkStarted) }},
+		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			ProcdPort:           procdPort,
+			ProcdInitTimeout:    2 * time.Second,
+			SandboxMemoryPerCPU: "4Gi",
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	type claimResult struct {
+		response *ClaimResponse
+		err      error
+	}
+	result := make(chan claimResult, 1)
+	go func() {
+		response, claimErr := svc.ClaimSandbox(context.Background(), &ClaimRequest{
+			Template: template.Name,
+			TeamID:   "team-a",
+			UserID:   "user-a",
+		})
+		result <- claimResult{response: response, err: claimErr}
+	}()
+
+	for name, started := range map[string]<-chan struct{}{
+		"resize":  resizeStarted,
+		"network": networkStarted,
+		"procd":   procdStarted,
+	} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("%s preparation did not start concurrently", name)
+		}
+	}
+	unblock()
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("ClaimSandbox() error = %v", got.err)
+		}
+		if got.response == nil || got.response.SandboxID == "" {
+			t.Fatalf("ClaimSandbox() response = %+v, want sandbox id", got.response)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ClaimSandbox() did not complete")
 	}
 }
 

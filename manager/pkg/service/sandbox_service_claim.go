@@ -59,10 +59,11 @@ type ClaimRequest struct {
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
 	WebhookStateVolumeID string `json:"-"`
-	// deferHotNetworkApply lets the full claim path overlap the network
-	// acknowledgement with procd initialization. Direct hot-pool operations
-	// retain their synchronous behavior.
-	deferHotNetworkApply bool
+	// deferHotRuntimePreparation lets the full claim path overlap resource
+	// resize and network acknowledgement with procd initialization. Direct
+	// hot-pool operations retain their synchronous behavior.
+	deferHotRuntimePreparation bool
+	deferredHotResizeQuota     *v1alpha1.ResourceQuota
 }
 
 type ClaimMount struct {
@@ -449,7 +450,8 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	// Try to claim an idle pod first
 	phaseStarted = time.Now()
-	req.deferHotNetworkApply = true
+	req.deferHotRuntimePreparation = true
+	req.deferredHotResizeQuota = nil
 	pod, err := s.claimIdlePod(ctx, template, req)
 	claimIdleType := "hot"
 	if pod == nil {
@@ -587,8 +589,25 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
+	type resizeResult struct {
+		pod *corev1.Pod
+		err error
+	}
+	var resizeResultCh <-chan resizeResult
+	if claimType == "hot" && req.deferredHotResizeQuota != nil {
+		result := make(chan resizeResult, 1)
+		resizeResultCh = result
+		resizeQuota := *req.deferredHotResizeQuota.DeepCopy()
+		resizeStarted := time.Now()
+		go func() {
+			resizedPod, resizeErr := s.resizeSandboxPodResources(ctx, pod, resizeQuota)
+			s.observeClaimPhase(req.Template, claimType, "resize_claimed_pod", resizeStarted, resizeErr)
+			result <- resizeResult{pod: resizedPod, err: resizeErr}
+		}()
+	}
+
 	var networkApplyResult <-chan error
-	if claimType == "hot" && req.deferHotNetworkApply && s.networkProvider != nil {
+	if claimType == "hot" && req.deferHotRuntimePreparation && s.networkProvider != nil {
 		result := make(chan error, 1)
 		networkApplyResult = result
 		networkStarted := time.Now()
@@ -605,6 +624,20 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	var networkApplyErr error
 	if networkApplyResult != nil {
 		networkApplyErr = <-networkApplyResult
+	}
+	var hotResizeResult resizeResult
+	if resizeResultCh != nil {
+		hotResizeResult = <-resizeResultCh
+	}
+	if hotResizeResult.err != nil {
+		cleanupClaimFailure(pod, "sandbox resource resize failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("resize sandbox resources: %w", hotResizeResult.err)
+	}
+	if hotResizeResult.pod != nil {
+		pod = mergeSandboxMetadataAfterResize(hotResizeResult.pod, pod)
 	}
 	if networkApplyErr != nil {
 		cleanupClaimFailure(pod, "network policy apply failed")
@@ -1233,7 +1266,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		}
 		keepReservationUntilTTL()
 
-		if resizeQuota != nil {
+		if resizeQuota != nil && req.deferHotRuntimePreparation {
+			req.deferredHotResizeQuota = resizeQuota.DeepCopy()
+		} else if resizeQuota != nil {
 			phaseStarted = time.Now()
 			resizedPod, resizeErr := s.resizeSandboxPodResources(ctx, updatedPod, *resizeQuota)
 			s.observeClaimPhase(templateID, "hot", "resize_claimed_pod", phaseStarted, resizeErr)
@@ -1267,7 +1302,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			updatedPod = mergeSandboxMetadataAfterResize(resizedPod, updatedPod)
 		}
 
-		if !req.deferHotNetworkApply {
+		if !req.deferHotRuntimePreparation {
 			phaseStarted = time.Now()
 			applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState))
 			s.observeClaimPhase(templateID, "hot", "apply_network_policy", phaseStarted, applyErr)

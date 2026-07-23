@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -340,6 +341,51 @@ func TestAuditDeliveryBatchesConcurrentCanonicalWrites(t *testing.T) {
 	}
 	if got, want := writer.snapshotBatchSizes(), []int{1, writes - 1}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("canonical batch sizes = %v, want %v", got, want)
+	}
+}
+
+func TestAuditDeliverySerializesConcurrentEventIDCollisions(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	eventID := "99999999-9999-4999-8999-999999999999"
+	first := testAuditDeliveryEvent(t, eventID)
+	second := first
+	second.Action = "audit.delivery.collision"
+	if err := sandboxobservability.SignEvent(&second, auditDeliveryTestSigningKey); err != nil {
+		t.Fatalf("SignEvent() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, event := range []sandboxobservability.Event{first, second} {
+		event := event
+		go func() {
+			<-start
+			errs <- delivery.EnqueueDurable(context.Background(), event)
+		}()
+	}
+	close(start)
+
+	successes := 0
+	collisions := 0
+	for range 2 {
+		err := <-errs
+		switch {
+		case err == nil:
+			successes++
+		case strings.Contains(err.Error(), "event_id collision"):
+			collisions++
+		default:
+			t.Fatalf("EnqueueDurable() unexpected error = %v", err)
+		}
+	}
+	if successes != 1 || collisions != 1 {
+		t.Fatalf("concurrent writes: successes=%d collisions=%d, want 1 each", successes, collisions)
 	}
 }
 

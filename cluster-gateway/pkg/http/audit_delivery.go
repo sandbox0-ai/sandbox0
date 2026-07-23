@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	auditReplayInterval  = time.Second
-	auditReplayBatchSize = 500
+	auditReplayInterval   = time.Second
+	auditReplayBatchSize  = 500
+	auditSpoolWriteShards = 64
 )
 
 var (
@@ -41,7 +42,8 @@ type auditDelivery struct {
 	writer          auditEventInserter
 	logger          *zap.Logger
 	verificationKey ed25519.PublicKey
-	mu              sync.Mutex
+	mu              sync.RWMutex
+	spoolWriteLocks [auditSpoolWriteShards]sync.Mutex
 	once            sync.Once
 	wake            chan struct{}
 	canonicalSlot   chan struct{}
@@ -158,9 +160,7 @@ func (d *auditDelivery) spoolOrCanonical(ctx context.Context, event sandboxobser
 	if d == nil {
 		return false, fmt.Errorf("%w: audit delivery is not configured", errAuditUnrecorded)
 	}
-	d.mu.Lock()
-	spoolErr := d.putLocked(event)
-	d.mu.Unlock()
+	spoolErr := d.put(event)
 	if spoolErr == nil {
 		return true, nil
 	}
@@ -189,6 +189,28 @@ func (d *auditDelivery) spoolOrCanonical(ctx context.Context, event sandboxobser
 		zap.Error(spoolErr),
 	)
 	return false, nil
+}
+
+func (d *auditDelivery) put(event sandboxobservability.Event) error {
+	lock := &d.spoolWriteLocks[auditSpoolWriteShard(event.EventID)]
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Replay and cleanup need a stable directory view, while unrelated event
+	// writes may fsync concurrently so burst traffic can share the filesystem's
+	// group commit.
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.putLocked(event)
+}
+
+func auditSpoolWriteShard(eventID string) int {
+	var hash uint32 = 2166136261
+	for i := range len(eventID) {
+		hash ^= uint32(eventID[i])
+		hash *= 16777619
+	}
+	return int(hash % auditSpoolWriteShards)
 }
 
 func (d *auditDelivery) signalReplay() {

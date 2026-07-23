@@ -329,13 +329,15 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		defer ticker.Stop()
 		triggerSync()
 		for {
+			forceRedirectSync := false
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				forceRedirectSync = true
 			case <-syncTrigger:
 			}
-			if err := d.syncRedirect(ctx, netdWatcher, policyStore, platformState, redirectManager, patcher, tracker, conntrackManager, proxyServer); err != nil {
+			if err := d.syncRedirect(ctx, netdWatcher, policyStore, platformState, redirectManager, patcher, tracker, conntrackManager, proxyServer, forceRedirectSync); err != nil {
 				d.logger.Error("Failed to sync redirect rules", zap.Error(err))
 				if d.cfg.FailClosed {
 					d.ready.Store(false)
@@ -562,6 +564,7 @@ func (d *Daemon) syncRedirect(
 	tracker *conntrack.Tracker,
 	conntrackManager *conntrack.Manager,
 	proxyServer *proxy.Server,
+	forceRedirectSync bool,
 ) (err error) {
 	started := time.Now()
 	defer func() {
@@ -649,9 +652,15 @@ func (d *Daemon) syncRedirect(
 		zap.Strings("bypass_cidrs", bypassCIDRs),
 	)
 	stageStarted = time.Now()
-	if err := redirectManager.Sync(ctx, sandboxIPs, bypassCIDRs); err != nil {
+	var redirectErr error
+	if forceRedirectSync {
+		redirectErr = redirectManager.ForceSync(ctx, sandboxIPs, bypassCIDRs)
+	} else {
+		redirectErr = redirectManager.Sync(ctx, sandboxIPs, bypassCIDRs)
+	}
+	if redirectErr != nil {
 		daemonMetrics.RecordRedirectSyncStage("redirect_sync", "error", time.Since(stageStarted))
-		return err
+		return redirectErr
 	}
 	daemonMetrics.RecordRedirectSyncStage("redirect_sync", "success", time.Since(stageStarted))
 

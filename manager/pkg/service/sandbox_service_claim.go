@@ -24,6 +24,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/util/retry"
 )
@@ -58,6 +59,10 @@ type ClaimRequest struct {
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
 	WebhookStateVolumeID string `json:"-"`
+	// deferHotNetworkApply lets the full claim path overlap the network
+	// acknowledgement with procd initialization. Direct hot-pool operations
+	// retain their synchronous behavior.
+	deferHotNetworkApply bool
 }
 
 type ClaimMount struct {
@@ -444,6 +449,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	// Try to claim an idle pod first
 	phaseStarted = time.Now()
+	req.deferHotNetworkApply = true
 	pod, err := s.claimIdlePod(ctx, template, req)
 	claimIdleType := "hot"
 	if pod == nil {
@@ -581,16 +587,39 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
+	var networkApplyResult <-chan error
+	if claimType == "hot" && req.deferHotNetworkApply && s.networkProvider != nil {
+		result := make(chan error, 1)
+		networkApplyResult = result
+		networkStarted := time.Now()
+		go func() {
+			networkErr := s.applyNetworkProviderFromPod(ctx, pod, req.TeamID)
+			s.observeClaimPhase(req.Template, claimType, "apply_network_policy", networkStarted, networkErr)
+			result <- networkErr
+		}()
+	}
+
 	phaseStarted = time.Now()
-	if _, err := s.initializeProcd(ctx, pod, template, req, procdAddress); err != nil {
-		s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, err)
+	_, initializeErr := s.initializeProcd(ctx, pod, template, req, procdAddress)
+	s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, initializeErr)
+	var networkApplyErr error
+	if networkApplyResult != nil {
+		networkApplyErr = <-networkApplyResult
+	}
+	if networkApplyErr != nil {
+		cleanupClaimFailure(pod, "network policy apply failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("apply network policy: %w", networkApplyErr)
+	}
+	if initializeErr != nil {
 		cleanupClaimFailure(pod, "procd initialization failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
-		return nil, fmt.Errorf("initialize procd: %w", err)
+		return nil, fmt.Errorf("initialize procd: %w", initializeErr)
 	}
-	s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, nil)
 
 	phaseStarted = time.Now()
 	if err := s.persistClaimedSandbox(ctx, pod, template, req); err != nil {
@@ -1178,7 +1207,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		// Update the pod
 		phaseStarted = time.Now()
-		updatedPod, updateErr := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		updatedPod, updateErr := s.patchClaimedPodMetadata(ctx, pod)
 		s.observeClaimPhase(templateID, "hot", "update_claimed_pod", phaseStarted, updateErr)
 		if updateErr != nil {
 			rollbackStateVolume()
@@ -1238,13 +1267,15 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			updatedPod = mergeSandboxMetadataAfterResize(resizedPod, updatedPod)
 		}
 
-		phaseStarted = time.Now()
-		applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState))
-		s.observeClaimPhase(templateID, "hot", "apply_network_policy", phaseStarted, applyErr)
-		if applyErr != nil {
-			s.requestSandboxDeletionAfterClaimFailure(updatedPod, "network policy apply failed")
-			s.observeIdleClaim(templateID, "network_policy_error")
-			return fmt.Errorf("apply network policy: %w", applyErr)
+		if !req.deferHotNetworkApply {
+			phaseStarted = time.Now()
+			applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState))
+			s.observeClaimPhase(templateID, "hot", "apply_network_policy", phaseStarted, applyErr)
+			if applyErr != nil {
+				s.requestSandboxDeletionAfterClaimFailure(updatedPod, "network policy apply failed")
+				s.observeIdleClaim(templateID, "network_policy_error")
+				return fmt.Errorf("apply network policy: %w", applyErr)
+			}
 		}
 
 		s.logger.Info("Successfully claimed idle pod",
@@ -1266,6 +1297,38 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		return nil, err
 	}
 	return claimedPod, nil
+}
+
+type podMetadataPatchOperation struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value any    `json:"value"`
+}
+
+func (s *SandboxService) patchClaimedPodMetadata(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	if s == nil || s.k8sClient == nil {
+		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)
+	}
+	if pod == nil || pod.Namespace == "" || pod.Name == "" {
+		return nil, fmt.Errorf("%w: pod is required", ErrInvalidClaimRequest)
+	}
+	patch, err := json.Marshal([]podMetadataPatchOperation{
+		{Op: "test", Path: "/metadata/resourceVersion", Value: pod.ResourceVersion},
+		{Op: "add", Path: "/metadata/labels", Value: pod.Labels},
+		{Op: "add", Path: "/metadata/annotations", Value: pod.Annotations},
+		{Op: "add", Path: "/metadata/finalizers", Value: pod.Finalizers},
+		{Op: "add", Path: "/metadata/ownerReferences", Value: []metav1.OwnerReference{}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build claimed pod metadata patch: %w", err)
+	}
+	return s.k8sClient.CoreV1().Pods(pod.Namespace).Patch(
+		ctx,
+		pod.Name,
+		types.JSONPatchType,
+		patch,
+		metav1.PatchOptions{},
+	)
 }
 
 func (s *SandboxService) isHotClaimableIdlePod(pod *corev1.Pod, desiredTemplateHash string) bool {

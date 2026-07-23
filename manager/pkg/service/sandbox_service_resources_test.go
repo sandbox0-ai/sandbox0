@@ -278,12 +278,12 @@ func TestClaimIdlePodAppliesMemoryOverride(t *testing.T) {
 	assertResizeSubresourceUpdate(t, client.Actions())
 }
 
-func TestResizeSandboxPodResourcesRetriesConflictWithFreshPod(t *testing.T) {
+func TestResizeSandboxPodResourcesRetriesConflictWithoutPreflightGet(t *testing.T) {
 	template := newSandboxResourceTestTemplate(t)
 	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	resizeUpdates := 0
-	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "resize" {
 			return false, nil, nil
 		}
@@ -318,8 +318,8 @@ func TestResizeSandboxPodResourcesRetriesConflictWithFreshPod(t *testing.T) {
 			gets++
 		}
 	}
-	if gets != 1 {
-		t.Fatalf("pod get calls = %d, want 1 conflict refresh", gets)
+	if gets != 0 {
+		t.Fatalf("pod get calls = %d, want 0", gets)
 	}
 	container := sandboxRuntimeContainer(t, resized)
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "2Gi")
@@ -351,7 +351,7 @@ func TestResizeSandboxPodResourcesUsesUpdatedPodWithoutPreflightGet(t *testing.T
 		if action.GetVerb() == "get" && action.GetResource().Resource == "pods" {
 			gets++
 		}
-		if action.GetVerb() == "update" && action.GetSubresource() == "resize" {
+		if action.GetVerb() == "patch" && action.GetSubresource() == "resize" {
 			resizeUpdates++
 		}
 	}
@@ -372,7 +372,7 @@ func TestClaimIdlePodRestoresIdlePodAfterResizeConflict(t *testing.T) {
 	client := fake.NewSimpleClientset(idlePod.DeepCopy(), node.DeepCopy())
 	resizeUpdates := 0
 	deletes := 0
-	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "resize" {
 			return false, nil, nil
 		}
@@ -586,11 +586,11 @@ func assertResizePolicy(t *testing.T, policies []corev1.ContainerResizePolicy, r
 func assertResizeSubresourceUpdate(t *testing.T, actions []k8stesting.Action) {
 	t.Helper()
 	for _, action := range actions {
-		if action.Matches("update", "pods") && action.GetSubresource() == "resize" {
+		if action.Matches("patch", "pods") && action.GetSubresource() == "resize" {
 			return
 		}
 	}
-	t.Fatalf("missing update pods/resize action; actions = %#v", actions)
+	t.Fatalf("missing patch pods/resize action; actions = %#v", actions)
 }
 
 func contains(s, substr string) bool {

@@ -108,6 +108,22 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
 	}
+	metadataPatches := 0
+	fullUpdates := 0
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource != "pods" || action.GetSubresource() != "" {
+			continue
+		}
+		switch action.GetVerb() {
+		case "patch":
+			metadataPatches++
+		case "update":
+			fullUpdates++
+		}
+	}
+	if metadataPatches != 1 || fullUpdates != 0 {
+		t.Fatalf("pod metadata patches = %d, full updates = %d; want 1 and 0", metadataPatches, fullUpdates)
+	}
 }
 
 func TestClaimIdlePodReservationPreventsStaleCacheReuse(t *testing.T) {
@@ -392,7 +408,7 @@ func TestClaimIdlePodFallsBackWhenPodStartsDeletingDuringClaim(t *testing.T) {
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
 
 	client := fake.NewSimpleClientset(readyPod.DeepCopy())
-	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonInvalid,
 			Message: `Pod "idle-ready" is invalid: metadata.finalizers: Forbidden: no new finalizers can be added if the object is being deleted, found new finalizers []string{"sandbox0.ai/sandbox-cleanup"}`,
@@ -433,7 +449,7 @@ func TestClaimIdlePodFallsBackAfterRepeatedUpdateConflicts(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset(clientObjects...)
 	updateConflicts := 0
-	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		updateConflicts++
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonConflict,
@@ -550,6 +566,43 @@ func TestClaimIdlePodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 	}
 	if len(removed) != 0 {
 		t.Fatalf("network policy removals = %d, want 0; lifecycle controller owns delete cleanup", len(removed))
+	}
+}
+
+func TestClaimIdlePodCanDeferNetworkApply(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	applyCalls := 0
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:            client,
+		podLister:            newClaimTestPodLister(t, readyPod),
+		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkProvider: &assertingNetworkProvider{applyFunc: func(network.SandboxPolicyInput) {
+			applyCalls++
+		}},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
+		TeamID:               "team-a",
+		UserID:               "user-a",
+		deferHotNetworkApply: true,
+	})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod == nil {
+		t.Fatal("claimIdlePod() = nil, want claimed pod")
+	}
+	if applyCalls != 0 {
+		t.Fatalf("network apply calls = %d, want 0", applyCalls)
 	}
 }
 

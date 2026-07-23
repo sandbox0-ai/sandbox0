@@ -144,6 +144,56 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 	return firstErr
 }
 
+// CleanupStalePortals removes recovered portal state only when Kubernetes
+// authoritatively reports that its owning pod no longer exists on this node.
+func (m *Manager) CleanupStalePortals(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	activePods, activeReliable := m.activePodUIDs(ctx)
+	if !activeReliable {
+		return nil
+	}
+
+	m.mu.Lock()
+	targets := make([]string, 0)
+	for _, pm := range m.portals {
+		if pm == nil {
+			continue
+		}
+		if _, active := activePods[pm.podUID]; !active {
+			targets = append(targets, pm.targetPath)
+		}
+	}
+	m.mu.Unlock()
+
+	var firstErr error
+	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
+		if err := m.unpublishPortalContext(ctx, target, false); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if m.logger != nil {
+				m.logger.Warn("ctld stale portal cleanup failed", zap.String("target_path", target), zap.Error(err))
+			}
+			continue
+		}
+		if m.logger != nil {
+			m.logger.Info("ctld cleaned stale portal", zap.String("target_path", target))
+		}
+	}
+	return firstErr
+}
+
 func (m *Manager) activePodUIDs(ctx context.Context) (map[string]struct{}, bool) {
 	if m == nil || m.activePodUIDLister == nil {
 		return nil, false

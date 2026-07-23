@@ -35,6 +35,7 @@ import (
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	storagevolume "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
+	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -123,7 +124,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("validate ctld network runtime config: %w", err)
 	}
-	coordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: portalRoot, Slot: haSlot})
+	haLogger, err := zap.NewProduction()
+	if err != nil {
+		return fmt.Errorf("create ctld HA logger: %w", err)
+	}
+	defer haLogger.Sync()
+	coordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: portalRoot, Slot: haSlot, Logger: haLogger})
 	if err != nil {
 		return err
 	}
@@ -251,16 +257,19 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 			}
 		}
 	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := portalManager.CleanupStalePortals(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
+		log.Printf("ctld stale portal cleanup completed with errors: %v", err)
+	}
+	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
+		log.Printf("ctld stale CSI mount cleanup completed with errors: %v", err)
+	}
+	cleanupCancel()
 	if options.replicator != nil {
 		options.replicator.SetSnapshotProvider(func(ctx context.Context, target ctldportal.PortalReplicator) error {
 			return portalManager.SyncTo(ctx, target)
 		})
 	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
-	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
-		log.Printf("ctld stale CSI mount cleanup completed with errors: %v", err)
-	}
-	cleanupCancel()
 	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
 	csiErrors, err := csiServer.Start(csiSocket)

@@ -1026,12 +1026,14 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			errors.Is(err, errIdlePodReservationConflict) ||
 			errors.Is(err, errIdlePodClaimLost)
 	}, func() error {
+		phaseStarted := time.Now()
 		// Get all idle pods for this template
 		pods, listErr := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 			controller.LabelTemplateID: template.Name,
 			controller.LabelPoolType:   controller.PoolTypeIdle,
 		}))
 		if listErr != nil {
+			s.observeClaimPhase(templateID, "hot", "select_idle_pod", phaseStarted, listErr)
 			return listErr
 		}
 
@@ -1046,6 +1048,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		if len(readyPods) == 0 {
 			// No idle pod available, not an error - use a special error to stop retry
 			s.observeIdleClaim(templateID, "no_candidate")
+			s.observeClaimPhase(templateID, "hot", "select_idle_pod", phaseStarted, errNoIdlePod)
 			return errNoIdlePod
 		}
 
@@ -1053,8 +1056,10 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod := readyPods[rand.Intn(len(readyPods))]
 		if !s.reserveIdlePod(pod) {
 			s.observeIdleClaim(templateID, "reservation_conflict")
+			s.observeClaimPhase(templateID, "hot", "select_idle_pod", phaseStarted, errIdlePodReservationConflict)
 			return errIdlePodReservationConflict
 		}
+		s.observeClaimPhase(templateID, "hot", "select_idle_pod", phaseStarted, nil)
 		reservationHeld := true
 		releaseReservation := func() {
 			if reservationHeld {
@@ -1077,7 +1082,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			zap.String("sandboxID", sandboxID),
 		)
 
+		phaseStarted = time.Now()
 		stateVolume, err := s.prepareWebhookStateVolume(ctx, req, sandboxID)
+		s.observeClaimPhase(templateID, "hot", "prepare_webhook_state_volume", phaseStarted, err)
 		if err != nil {
 			return fmt.Errorf("prepare webhook state volume: %w", err)
 		}
@@ -1099,7 +1106,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Update pod labels and annotations
 		originalIdlePod := pod.DeepCopy()
 		pod = pod.DeepCopy()
+		phaseStarted = time.Now()
 		resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
+		s.observeClaimPhase(templateID, "hot", "resolve_resource_quota", phaseStarted, err)
 		if err != nil {
 			return err
 		}
@@ -1154,17 +1163,23 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		}
 
 		// Build and add network policy annotation
+		phaseStarted = time.Now()
 		networkState, policyErr := s.applyPoliciesForPod(ctx, pod, template, req)
+		s.observeClaimPhase(templateID, "hot", "build_network_policy", phaseStarted, policyErr)
 		if policyErr != nil {
 			return policyErr
 		}
+		phaseStarted = time.Now()
 		rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+		s.observeClaimPhase(templateID, "hot", "sync_credential_bindings", phaseStarted, err)
 		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}
 
 		// Update the pod
+		phaseStarted = time.Now()
 		updatedPod, updateErr := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		s.observeClaimPhase(templateID, "hot", "update_claimed_pod", phaseStarted, updateErr)
 		if updateErr != nil {
 			rollbackStateVolume()
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1190,7 +1205,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		keepReservationUntilTTL()
 
 		if resizeQuota != nil {
+			phaseStarted = time.Now()
 			resizedPod, resizeErr := s.resizeSandboxPodResources(ctx, updatedPod, *resizeQuota)
+			s.observeClaimPhase(templateID, "hot", "resize_claimed_pod", phaseStarted, resizeErr)
 			if resizeErr != nil {
 				rollbackStateVolume()
 				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1221,7 +1238,10 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			updatedPod = mergeSandboxMetadataAfterResize(resizedPod, updatedPod)
 		}
 
-		if applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState)); applyErr != nil {
+		phaseStarted = time.Now()
+		applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState))
+		s.observeClaimPhase(templateID, "hot", "apply_network_policy", phaseStarted, applyErr)
+		if applyErr != nil {
 			s.requestSandboxDeletionAfterClaimFailure(updatedPod, "network policy apply failed")
 			s.observeIdleClaim(templateID, "network_policy_error")
 			return fmt.Errorf("apply network policy: %w", applyErr)

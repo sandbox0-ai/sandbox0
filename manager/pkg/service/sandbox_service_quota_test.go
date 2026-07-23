@@ -21,6 +21,18 @@ type fakeQuotaLimitStore struct {
 	usageErr error
 }
 
+type countingSandboxStore struct {
+	*memorySandboxStore
+	count int64
+	calls int
+	err   error
+}
+
+func (s *countingSandboxStore) CountActiveSandboxes(context.Context, string) (int64, error) {
+	s.calls++
+	return s.count, s.err
+}
+
 func (f fakeQuotaLimitStore) GetLimit(context.Context, string, quota.Dimension) (*quota.Limit, error) {
 	return f.limit, f.err
 }
@@ -112,6 +124,50 @@ func TestEnforceActiveSandboxQuotaUsesSandboxStoreWhenUsageStoreDisabled(t *test
 	err := svc.enforceActiveSandboxQuota(context.Background(), "team-1")
 	if !errors.Is(err, ErrQuotaExceeded) {
 		t.Fatalf("enforceActiveSandboxQuota() error = %v, want ErrQuotaExceeded", err)
+	}
+}
+
+func TestEnforceActiveSandboxQuotaPrefersOperationalStoreOverUsageProjection(t *testing.T) {
+	svc := &SandboxService{
+		quotaStore: fakeQuotaLimitStore{
+			limit: &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 1},
+			usage: 0,
+		},
+		sandboxStore: &memorySandboxStore{
+			records: map[string]*SandboxRecord{
+				"sandbox-1": {
+					ID:     "sandbox-1",
+					TeamID: "team-1",
+					Status: SandboxStatusRunning,
+				},
+			},
+		},
+	}
+
+	err := svc.enforceActiveSandboxQuota(context.Background(), "team-1")
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("enforceActiveSandboxQuota() error = %v, want ErrQuotaExceeded", err)
+	}
+}
+
+func TestEnforceActiveSandboxQuotaUsesOptimizedOperationalCount(t *testing.T) {
+	store := &countingSandboxStore{
+		memorySandboxStore: &memorySandboxStore{},
+		count:              1,
+	}
+	svc := &SandboxService{
+		quotaStore: fakeQuotaLimitStore{
+			limit:    &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 2},
+			usageErr: errors.New("usage projection must not be queried"),
+		},
+		sandboxStore: store,
+	}
+
+	if err := svc.enforceActiveSandboxQuota(context.Background(), "team-1"); err != nil {
+		t.Fatalf("enforceActiveSandboxQuota() error = %v, want nil", err)
+	}
+	if store.calls != 1 {
+		t.Fatalf("CountActiveSandboxes() calls = %d, want 1", store.calls)
 	}
 }
 

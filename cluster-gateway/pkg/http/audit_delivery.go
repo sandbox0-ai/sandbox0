@@ -404,16 +404,6 @@ func (d *auditDelivery) loadBatchContainingLocked(limit int, eventID string) ([]
 	return events, nil
 }
 
-func (d *auditDelivery) removeLocked(eventID string) error {
-	if _, err := uuid.Parse(eventID); err != nil {
-		return fmt.Errorf("audit event_id is invalid")
-	}
-	if err := os.Remove(d.path(eventID)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return syncAuditDirectory(d.dir)
-}
-
 func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) error {
 	for _, event := range events {
 		if _, err := uuid.Parse(event.EventID); err != nil {

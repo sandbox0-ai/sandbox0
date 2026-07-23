@@ -121,8 +121,8 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 			fullUpdates++
 		}
 	}
-	if metadataPatches != 1 || fullUpdates != 0 {
-		t.Fatalf("pod metadata patches = %d, full updates = %d; want 1 and 0", metadataPatches, fullUpdates)
+	if metadataPatches != 0 || fullUpdates != 1 {
+		t.Fatalf("pod metadata patches = %d, full updates = %d; want 0 and 1", metadataPatches, fullUpdates)
 	}
 }
 
@@ -408,7 +408,7 @@ func TestClaimIdlePodFallsBackWhenPodStartsDeletingDuringClaim(t *testing.T) {
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
 
 	client := fake.NewSimpleClientset(readyPod.DeepCopy())
-	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonInvalid,
 			Message: `Pod "idle-ready" is invalid: metadata.finalizers: Forbidden: no new finalizers can be added if the object is being deleted, found new finalizers []string{"sandbox0.ai/sandbox-cleanup"}`,
@@ -449,7 +449,7 @@ func TestClaimIdlePodFallsBackAfterRepeatedUpdateConflicts(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset(clientObjects...)
 	updateConflicts := 0
-	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		updateConflicts++
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonConflict,

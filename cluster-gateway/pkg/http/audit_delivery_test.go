@@ -347,6 +347,99 @@ func TestAuditDeliveryBatchesConcurrentCanonicalWrites(t *testing.T) {
 	}
 }
 
+func TestAuditDeliveryGroupsConcurrentDirectorySyncs(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	const writes = 32
+	var syncMu sync.Mutex
+	syncCalls := 0
+	delivery.dirSync = func(path string) error {
+		syncMu.Lock()
+		syncCalls++
+		syncMu.Unlock()
+		return syncAuditDirectory(path)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, writes)
+	for range writes {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		go func() {
+			<-start
+			errs <- delivery.EnqueueDurable(context.Background(), event)
+		}()
+	}
+	close(start)
+	for range writes {
+		if err := <-errs; err != nil {
+			t.Fatalf("EnqueueDurable() error = %v", err)
+		}
+	}
+
+	syncMu.Lock()
+	got := syncCalls
+	syncMu.Unlock()
+	if got >= writes {
+		t.Fatalf("directory sync calls = %d, want fewer than %d writes", got, writes)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != writes {
+		t.Fatalf("durably spooled events = %d, want %d", len(entries), writes)
+	}
+}
+
+func TestAuditDeliveryDirectorySyncFailureWakesConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	syncStarted := make(chan struct{})
+	releaseSync := make(chan struct{})
+	syncErr := errors.New("directory sync failed")
+	delivery.dirSync = func(string) error {
+		select {
+		case <-syncStarted:
+		default:
+			close(syncStarted)
+		}
+		<-releaseSync
+		return syncErr
+	}
+	const writes = 8
+	errs := make(chan error, writes)
+	for range writes {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		go func() {
+			errs <- delivery.EnqueueDurable(context.Background(), event)
+		}()
+	}
+	select {
+	case <-syncStarted:
+	case <-time.After(time.Second):
+		t.Fatal("directory sync did not start")
+	}
+	close(releaseSync)
+	for range writes {
+		err := <-errs
+		if err != nil {
+			t.Fatalf("EnqueueDurable() canonical fallback error = %v", err)
+		}
+	}
+	if got := len(writer.snapshotEvents()); got != writes {
+		t.Fatalf("canonical fallback events = %d, want %d", got, writes)
+	}
+}
+
 func TestAuditDeliveryWaitsForConcurrentSpoolWritesToDrain(t *testing.T) {
 	delivery := &auditDelivery{}
 	delivery.canonicalCalls.Store(2)

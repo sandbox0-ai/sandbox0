@@ -25,6 +25,8 @@ const (
 	auditSpoolWriteShards = 64
 	auditSpoolQuietPeriod = 2 * time.Millisecond
 	auditSpoolDrainLimit  = 40 * time.Millisecond
+	auditDirSyncQuietTime = time.Millisecond
+	auditDirSyncWaitLimit = 10 * time.Millisecond
 )
 
 var (
@@ -48,6 +50,14 @@ type auditDelivery struct {
 	mu              sync.RWMutex
 	spoolWriteLocks [auditSpoolWriteShards]sync.Mutex
 	spoolWrites     atomic.Int64
+	dirSync         func(string) error
+	dirSyncMu       sync.Mutex
+	dirSyncWake     chan struct{}
+	dirSyncRunning  bool
+	dirSyncSequence uint64
+	dirSyncDurable  uint64
+	dirSyncFailed   uint64
+	dirSyncErr      error
 	canonicalCalls  atomic.Int64
 	canonicalTurns  atomic.Int64
 	canonicalWakeMu sync.Mutex
@@ -76,6 +86,8 @@ func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger,
 		writer:          writer,
 		logger:          logger,
 		verificationKey: verificationKey,
+		dirSync:         syncAuditDirectory,
+		dirSyncWake:     make(chan struct{}),
 		wake:            make(chan struct{}, 1),
 		canonicalSlot:   make(chan struct{}, 1),
 		canonicalWake:   make(chan struct{}),
@@ -470,11 +482,98 @@ func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return auditSpoolWriteError("commit record", err)
 	}
-	if err := syncAuditDirectory(d.dir); err != nil {
+	if err := d.waitForDirectorySync(); err != nil {
 		return auditSpoolWriteError("fsync directory", err)
 	}
 	committed = true
 	return nil
+}
+
+// waitForDirectorySync groups concurrent record renames behind the same
+// directory durability barrier. Each caller still waits for a successful
+// fsync whose snapshot includes its own rename.
+func (d *auditDelivery) waitForDirectorySync() error {
+	d.dirSyncMu.Lock()
+	d.dirSyncSequence++
+	target := d.dirSyncSequence
+	leader := !d.dirSyncRunning
+	if leader {
+		d.dirSyncRunning = true
+	}
+	d.dirSyncMu.Unlock()
+
+	if leader {
+		d.runDirectorySync()
+	}
+	for {
+		d.dirSyncMu.Lock()
+		switch {
+		case d.dirSyncDurable >= target:
+			d.dirSyncMu.Unlock()
+			return nil
+		case d.dirSyncFailed >= target:
+			err := d.dirSyncErr
+			d.dirSyncMu.Unlock()
+			return err
+		}
+		wake := d.dirSyncWake
+		d.dirSyncMu.Unlock()
+		<-wake
+	}
+}
+
+func (d *auditDelivery) runDirectorySync() {
+	for {
+		target := d.waitForDirectorySyncBatch()
+		err := d.dirSync(d.dir)
+
+		d.dirSyncMu.Lock()
+		if err != nil {
+			// A failed barrier cannot prove durability for any rename that
+			// arrived while it was running. Wake every current waiter so the
+			// canonical fallback can take custody.
+			d.dirSyncFailed = d.dirSyncSequence
+			d.dirSyncErr = err
+			d.dirSyncRunning = false
+			d.notifyDirectorySyncWaitersLocked()
+			d.dirSyncMu.Unlock()
+			return
+		}
+		if target > d.dirSyncDurable {
+			d.dirSyncDurable = target
+		}
+		d.notifyDirectorySyncWaitersLocked()
+		if d.dirSyncSequence == target {
+			d.dirSyncRunning = false
+			d.dirSyncMu.Unlock()
+			return
+		}
+		d.dirSyncMu.Unlock()
+	}
+}
+
+func (d *auditDelivery) waitForDirectorySyncBatch() uint64 {
+	deadline := time.Now().Add(auditDirSyncWaitLimit)
+	for {
+		d.dirSyncMu.Lock()
+		target := d.dirSyncSequence
+		d.dirSyncMu.Unlock()
+
+		time.Sleep(auditDirSyncQuietTime)
+
+		d.dirSyncMu.Lock()
+		stable := d.dirSyncSequence == target
+		target = d.dirSyncSequence
+		d.dirSyncMu.Unlock()
+		if stable || !time.Now().Before(deadline) {
+			return target
+		}
+	}
+}
+
+func (d *auditDelivery) notifyDirectorySyncWaitersLocked() {
+	close(d.dirSyncWake)
+	d.dirSyncWake = make(chan struct{})
 }
 
 func auditSpoolWriteError(operation string, err error) error {

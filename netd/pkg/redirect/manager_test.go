@@ -138,6 +138,58 @@ func TestNormalizeInputsDeduplicateAndTrim(t *testing.T) {
 	}
 }
 
+func TestPlanRedirectSyncUsesIPSetOnlyForSandboxChanges(t *testing.T) {
+	previousIPs := []string{"10.0.0.2"}
+	previousBypass := []string{"10.0.0.0/8"}
+
+	if got := planRedirectSync(true, previousIPs, previousBypass, []string{"10.0.0.2", "10.0.0.3"}, previousBypass, false); got != redirectSyncIPSet {
+		t.Fatalf("plan = %v, want IPSet-only sync", got)
+	}
+	if got := planRedirectSync(true, previousIPs, previousBypass, previousIPs, previousBypass, false); got != redirectSyncNoop {
+		t.Fatalf("plan = %v, want no-op sync", got)
+	}
+}
+
+func TestPlanRedirectSyncKeepsPeriodicAndBypassReconciliationFull(t *testing.T) {
+	ips := []string{"10.0.0.2"}
+	bypass := []string{"10.0.0.0/8"}
+
+	tests := []struct {
+		name        string
+		initialized bool
+		nextBypass  []string
+		force       bool
+	}{
+		{name: "initial", initialized: false, nextBypass: bypass},
+		{name: "periodic", initialized: true, nextBypass: bypass, force: true},
+		{name: "bypass changed", initialized: true, nextBypass: []string{"192.168.0.0/16"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := planRedirectSync(tt.initialized, ips, bypass, ips, tt.nextBypass, tt.force); got != redirectSyncFull {
+				t.Fatalf("plan = %v, want full sync", got)
+			}
+		})
+	}
+}
+
+func TestPlanRedirectSyncIgnoresInputOrder(t *testing.T) {
+	previousIPs := []string{"10.0.0.2", "10.0.0.3"}
+	previousBypass := []string{"10.0.0.0/8", "192.168.0.0/16"}
+
+	got := planRedirectSync(
+		true,
+		previousIPs,
+		previousBypass,
+		[]string{"10.0.0.3", "10.0.0.2"},
+		[]string{"192.168.0.0/16", "10.0.0.0/8"},
+		false,
+	)
+	if got != redirectSyncNoop {
+		t.Fatalf("plan = %v, want no-op sync", got)
+	}
+}
+
 func TestRuleExistsRequiresPriorityBeforeCNISourceRules(t *testing.T) {
 	mask := uint32(1)
 	rules := []netlink.Rule{

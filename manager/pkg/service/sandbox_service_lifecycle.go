@@ -667,6 +667,9 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			if record != nil {
+				if pod := s.getSandboxRecordPodLive(ctx, sandboxID, record); pod != nil {
+					return s.podToSandbox(ctx, pod, sandboxID), nil
+				}
 				return s.recordToSandbox(record), nil
 			}
 			return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
@@ -675,6 +678,28 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 	}
 
 	return s.podToSandbox(ctx, pod, sandboxID), nil
+}
+
+// getSandboxRecordPodLive closes the read-after-write gap between a successful
+// hot claim and the pod informer observing its new sandbox identity.
+func (s *SandboxService) getSandboxRecordPodLive(ctx context.Context, sandboxID string, record *SandboxRecord) *corev1.Pod {
+	if s == nil || s.k8sClient == nil || record == nil {
+		return nil
+	}
+	namespace := strings.TrimSpace(record.CurrentPodNamespace)
+	name := strings.TrimSpace(record.CurrentPodName)
+	if namespace == "" || name == "" {
+		return nil
+	}
+	pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil || pod == nil {
+		return nil
+	}
+	if sandboxIDFromPod(pod) != sandboxID ||
+		pod.Annotations[controller.AnnotationTeamID] != record.TeamID {
+		return nil
+	}
+	return pod
 }
 
 // UpdateSandbox updates mutable sandbox configuration fields.

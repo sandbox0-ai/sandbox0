@@ -2,7 +2,7 @@ package v1alpha1
 
 import "testing"
 
-func TestNetworkPolicyRequiresApply(t *testing.T) {
+func TestNetworkPolicyRequiresSynchronousApply(t *testing.T) {
 	tests := []struct {
 		name string
 		spec *NetworkPolicySpec
@@ -30,8 +30,8 @@ func TestNetworkPolicyRequiresApply(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NetworkPolicyRequiresApply(tt.spec); got != tt.want {
-				t.Fatalf("NetworkPolicyRequiresApply() = %t, want %t", got, tt.want)
+			if got := NetworkPolicyRequiresSynchronousApply(tt.spec); got != tt.want {
+				t.Fatalf("NetworkPolicyRequiresSynchronousApply() = %t, want %t", got, tt.want)
 			}
 		})
 	}

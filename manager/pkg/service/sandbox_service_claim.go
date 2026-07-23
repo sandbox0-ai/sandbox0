@@ -58,6 +58,7 @@ type ClaimRequest struct {
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
 	WebhookStateVolumeID string `json:"-"`
+	mayHaveExistingCredentialBindings bool
 }
 
 type ClaimMount struct {
@@ -342,6 +343,7 @@ type ClaimResponse struct {
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {
 	start := time.Now()
 	metrics := s.metrics
+	req.mayHaveExistingCredentialBindings = strings.TrimSpace(req.SandboxID) != ""
 	phaseStarted := time.Now()
 	canonicalTemplateID, err := naming.CanonicalTemplateID(req.Template)
 	s.observeClaimPhase(req.Template, "unknown", "canonicalize_template", phaseStarted, err)
@@ -1158,7 +1160,13 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		if policyErr != nil {
 			return policyErr
 		}
-		rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+		rollbackBindings, err := s.syncCredentialBindings(
+			ctx,
+			pod,
+			req.TeamID,
+			networkState,
+			req.mayHaveExistingCredentialBindings,
+		)
 		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}
@@ -1394,7 +1402,13 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if err != nil {
 		return nil, err
 	}
-	rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+	rollbackBindings, err := s.syncCredentialBindings(
+		ctx,
+		pod,
+		req.TeamID,
+		networkState,
+		req.mayHaveExistingCredentialBindings,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("stage credential bindings: %w", err)
 	}

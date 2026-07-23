@@ -18,10 +18,10 @@ type NetworkPolicySpec struct {
 	Egress *NetworkEgressPolicy `json:"egress,omitempty"`
 }
 
-// NetworkPolicyRequiresApply reports whether the network runtime must
-// acknowledge this policy before the sandbox can be used. The default
-// unrestricted policy has no enforcement state to install.
-func NetworkPolicyRequiresApply(spec *NetworkPolicySpec) bool {
+// NetworkPolicyRequiresSynchronousApply reports whether a claim must wait for
+// the network runtime to acknowledge the policy. Unrestricted policies are
+// still applied asynchronously and retain their desired and applied hashes.
+func NetworkPolicyRequiresSynchronousApply(spec *NetworkPolicySpec) bool {
 	if spec == nil {
 		return false
 	}

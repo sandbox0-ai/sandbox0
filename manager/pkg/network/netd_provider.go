@@ -257,7 +257,7 @@ func (p *NetdProvider) tick(ticker *time.Ticker) <-chan time.Time {
 }
 
 func (p *NetdProvider) networkPolicyHash(spec *v1alpha1.NetworkPolicySpec) (string, error) {
-	if !v1alpha1.NetworkPolicyRequiresApply(spec) {
+	if !v1alpha1.NetworkPolicyRequiresSynchronousApply(spec) {
 		return "", nil
 	}
 	annotation, err := v1alpha1.NetworkPolicyToAnnotation(spec)

@@ -1064,8 +1064,8 @@ func TestCreateNewPodDefersNetworkApplyUntilPodHasNetworkIdentity(t *testing.T) 
 	if pod.Annotations[controller.AnnotationNetworkPolicy] == "" {
 		t.Fatal("network policy annotation is empty")
 	}
-	if pod.Annotations[controller.AnnotationNetworkPolicyHash] != "" {
-		t.Fatal("unrestricted network policy unexpectedly requires an applied hash")
+	if pod.Annotations[controller.AnnotationNetworkPolicyHash] == "" {
+		t.Fatal("unrestricted network policy hash is empty")
 	}
 
 	pods, err := client.CoreV1().Pods("ns-a").List(context.Background(), metav1.ListOptions{})

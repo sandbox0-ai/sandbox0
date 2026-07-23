@@ -17,6 +17,18 @@ type captureDB struct {
 	execArgs  []any
 }
 
+type captureEventBatchInserter struct {
+	query string
+	rows  [][]any
+	err   error
+}
+
+func (c *captureEventBatchInserter) InsertEventBatch(_ context.Context, query string, rows [][]any) error {
+	c.query = query
+	c.rows = rows
+	return c.err
+}
+
 func (c *captureDB) ExecContext(_ context.Context, query string, args ...any) (sql.Result, error) {
 	c.execQuery = query
 	c.execArgs = args
@@ -96,6 +108,99 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	}
 	if strings.Contains(auditEventSelectColumns, "cursor") || strings.Contains(auditEventSelectColumns, "watermark") {
 		t.Fatalf("audit event storage columns contain query transport fields: %s", auditEventSelectColumns)
+	}
+}
+
+func TestInsertEventsUsesConfiguredNativeBatch(t *testing.T) {
+	repo, db := mustRepository(t)
+	batchInserter := &captureEventBatchInserter{}
+	repo.eventBatchInserter = batchInserter
+	now := time.Date(2026, 7, 1, 1, 2, 4, 987654321, time.UTC)
+	repo.now = func() time.Time { return now }
+	occurredAt := time.Date(2026, 7, 1, 1, 2, 3, 123456789, time.FixedZone("offset", 8*60*60))
+	event := sandboxobservability.Event{
+		EventID:       "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		TeamID:        "team-1",
+		SandboxID:     "sb-1",
+		RegionID:      "ali-us-east-1",
+		ClusterID:     "cluster-a",
+		OccurredAt:    occurredAt,
+		Source:        sandboxobservability.SourceManager,
+		EventType:     sandboxobservability.EventTypeLifecycle,
+		Phase:         sandboxobservability.EventPhaseResult,
+		Outcome:       sandboxobservability.OutcomeSucceeded,
+		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindHuman},
+		Action:        "sandbox.create",
+		Resource:      sandboxobservability.AuditResource{Type: "sandbox", ID: "sb-1"},
+		OperationID:   "operation-1",
+		Producer:      sandboxobservability.AuditProducer{Service: "cluster-gateway"},
+		Request:       sandboxobservability.AuditRequest{StatusCode: 201},
+	}
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	if err := sandboxobservability.SignEvent(&event, key); err != nil {
+		t.Fatalf("SignEvent() error = %v", err)
+	}
+
+	if err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{event}); err != nil {
+		t.Fatalf("InsertEvents() error = %v", err)
+	}
+	if db.execQuery != "" {
+		t.Fatalf("fallback query = %q, want native batch", db.execQuery)
+	}
+	if batchInserter.query != "INSERT INTO `sandbox0_observability`.`sandbox_audit_events` ("+auditEventSelectColumns+")" {
+		t.Fatalf("batch query = %q", batchInserter.query)
+	}
+	if len(batchInserter.rows) != 1 || len(batchInserter.rows[0]) != 38 {
+		t.Fatalf("batch rows = %#v, want one 38-column row", batchInserter.rows)
+	}
+	row := batchInserter.rows[0]
+	if got, ok := row[1].(uint16); !ok || got != sandboxobservability.CurrentEventSchemaVersion {
+		t.Fatalf("schema_version = %#v, want UInt16", row[1])
+	}
+	if got, ok := row[6].(time.Time); !ok || got.UnixNano() != occurredAt.UnixNano() || got.Location() != time.UTC {
+		t.Fatalf("occurred_at = %#v, want UTC nanosecond timestamp", row[6])
+	}
+	if got, ok := row[7].(time.Time); !ok || got != now {
+		t.Fatalf("ingested_at = %#v, want %s", row[7], now)
+	}
+	if got, ok := row[32].(uint16); !ok || got != 201 {
+		t.Fatalf("status_code = %#v, want UInt16", row[32])
+	}
+}
+
+func TestInsertEventsDoesNotFallbackAfterNativeBatchFailure(t *testing.T) {
+	repo, db := mustRepository(t)
+	repo.eventBatchInserter = &captureEventBatchInserter{err: errors.New("commit outcome unknown")}
+	event := sandboxobservability.Event{
+		EventID:       "11111111-1111-4111-8111-111111111111",
+		SchemaVersion: sandboxobservability.CurrentEventSchemaVersion,
+		TeamID:        "team-1",
+		SandboxID:     "sb-1",
+		RegionID:      "ali-us-east-1",
+		ClusterID:     "cluster-a",
+		OccurredAt:    time.Now().UTC(),
+		Source:        sandboxobservability.SourceManager,
+		EventType:     sandboxobservability.EventTypeLifecycle,
+		Phase:         sandboxobservability.EventPhaseResult,
+		Outcome:       sandboxobservability.OutcomeSucceeded,
+		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindHuman},
+		Action:        "sandbox.create",
+		Resource:      sandboxobservability.AuditResource{Type: "sandbox", ID: "sb-1"},
+		OperationID:   "operation-1",
+		Producer:      sandboxobservability.AuditProducer{Service: "cluster-gateway"},
+	}
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	if err := sandboxobservability.SignEvent(&event, key); err != nil {
+		t.Fatalf("SignEvent() error = %v", err)
+	}
+
+	err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{event})
+	if !errors.Is(err, sandboxobservability.ErrBackendUnavailable) || !strings.Contains(err.Error(), "commit outcome unknown") {
+		t.Fatalf("InsertEvents() error = %v", err)
+	}
+	if db.execQuery != "" {
+		t.Fatalf("fallback query = %q, want no retry after ambiguous batch failure", db.execQuery)
 	}
 }
 

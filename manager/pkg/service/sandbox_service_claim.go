@@ -32,6 +32,8 @@ import (
 const (
 	volumePortalBindRetryWindow   = 5 * time.Second
 	volumePortalBindRetryInterval = 100 * time.Millisecond
+	hotClaimPoolRefillDelay       = 1500 * time.Millisecond
+	hotClaimFinalizationTimeout   = 10 * time.Second
 )
 
 const (
@@ -41,6 +43,12 @@ const (
 
 var errIdlePodReservationConflict = errors.New("idle pod reservation conflict")
 var errIdlePodClaimLost = errors.New("idle pod claim lost")
+
+type pendingHotClaimFinalization struct {
+	namespace string
+	podName   string
+	sandboxID string
+}
 
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
@@ -64,6 +72,7 @@ type ClaimRequest struct {
 	// hot-pool operations retain their synchronous behavior.
 	deferHotRuntimePreparation        bool
 	deferredHotResizeQuota            *v1alpha1.ResourceQuota
+	pendingHotClaimFinalization       *pendingHotClaimFinalization
 	mayHaveExistingCredentialBindings bool
 }
 
@@ -454,6 +463,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	phaseStarted = time.Now()
 	req.deferHotRuntimePreparation = true
 	req.deferredHotResizeQuota = nil
+	req.pendingHotClaimFinalization = nil
 	pod, err := s.claimIdlePod(ctx, template, req)
 	claimIdleType := "hot"
 	if pod == nil {
@@ -666,6 +676,9 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, fmt.Errorf("persist sandbox: %w", err)
 	}
 	s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, nil)
+	if req.pendingHotClaimFinalization != nil {
+		s.schedulePendingHotClaimFinalization(*req.pendingHotClaimFinalization)
+	}
 
 	if metrics != nil {
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
@@ -1246,9 +1259,20 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}
 
+		// Keep the pod attached to the warm-pool ReplicaSet until the claim has
+		// been persisted. This prevents the ReplicaSet from creating replacement
+		// pods on the latency-sensitive claim path.
+		podToPatch := pod
+		if req.deferHotRuntimePreparation {
+			podToPatch = pod.DeepCopy()
+			podToPatch.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+			podToPatch.OwnerReferences = append([]metav1.OwnerReference(nil), originalIdlePod.OwnerReferences...)
+			podToPatch.Annotations[controller.AnnotationHotClaimFinalizationPending] = sandboxID
+		}
+
 		// Update the pod
 		phaseStarted = time.Now()
-		updatedPod, updateErr := s.patchClaimedPodMetadata(ctx, pod)
+		updatedPod, updateErr := s.patchClaimedPodMetadata(ctx, podToPatch)
 		s.observeClaimPhase(templateID, "hot", "update_claimed_pod", phaseStarted, updateErr)
 		if updateErr != nil {
 			rollbackStateVolume()
@@ -1273,6 +1297,14 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return updateErr
 		}
 		keepReservationUntilTTL()
+		if req.deferHotRuntimePreparation {
+			req.pendingHotClaimFinalization = &pendingHotClaimFinalization{
+				namespace: updatedPod.Namespace,
+				podName:   updatedPod.Name,
+				sandboxID: sandboxID,
+			}
+			updatedPod = materializeFinalizedHotClaimPod(updatedPod)
+		}
 
 		if resizeQuota != nil && req.deferHotRuntimePreparation {
 			req.deferredHotResizeQuota = resizeQuota.DeepCopy()
@@ -1355,12 +1387,16 @@ func (s *SandboxService) patchClaimedPodMetadata(ctx context.Context, pod *corev
 	if pod == nil || pod.Namespace == "" || pod.Name == "" {
 		return nil, fmt.Errorf("%w: pod is required", ErrInvalidClaimRequest)
 	}
+	ownerReferences := pod.OwnerReferences
+	if ownerReferences == nil {
+		ownerReferences = []metav1.OwnerReference{}
+	}
 	patch, err := json.Marshal([]podMetadataPatchOperation{
 		{Op: "test", Path: "/metadata/resourceVersion", Value: pod.ResourceVersion},
 		{Op: "add", Path: "/metadata/labels", Value: pod.Labels},
 		{Op: "add", Path: "/metadata/annotations", Value: pod.Annotations},
 		{Op: "add", Path: "/metadata/finalizers", Value: pod.Finalizers},
-		{Op: "add", Path: "/metadata/ownerReferences", Value: []metav1.OwnerReference{}},
+		{Op: "add", Path: "/metadata/ownerReferences", Value: ownerReferences},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build claimed pod metadata patch: %w", err)
@@ -1374,8 +1410,70 @@ func (s *SandboxService) patchClaimedPodMetadata(ctx context.Context, pod *corev
 	)
 }
 
+func materializeFinalizedHotClaimPod(pod *corev1.Pod) *corev1.Pod {
+	if pod == nil {
+		return nil
+	}
+	finalized := pod.DeepCopy()
+	finalized.Labels[controller.LabelPoolType] = controller.PoolTypeActive
+	delete(finalized.Annotations, controller.AnnotationHotClaimFinalizationPending)
+	finalized.OwnerReferences = nil
+	return finalized
+}
+
+func (s *SandboxService) schedulePendingHotClaimFinalization(pending pendingHotClaimFinalization) {
+	time.AfterFunc(hotClaimPoolRefillDelay, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), hotClaimFinalizationTimeout)
+		defer cancel()
+		if err := s.finalizePendingHotClaim(ctx, pending); err != nil {
+			logger := s.logger
+			if logger == nil {
+				logger = zap.NewNop()
+			}
+			logger.Warn("Failed to finalize pending hot claim",
+				zap.String("namespace", pending.namespace),
+				zap.String("pod", pending.podName),
+				zap.String("sandboxID", pending.sandboxID),
+				zap.Error(err),
+			)
+		}
+	})
+}
+
+func (s *SandboxService) finalizePendingHotClaim(ctx context.Context, pending pendingHotClaimFinalization) error {
+	return retry.OnError(retry.DefaultBackoff, func(err error) bool {
+		return k8serrors.IsConflict(err) || k8serrors.IsInvalid(err)
+	}, func() error {
+		pod, err := s.k8sClient.CoreV1().Pods(pending.namespace).Get(ctx, pending.podName, metav1.GetOptions{})
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if pod.Annotations[controller.AnnotationHotClaimFinalizationPending] == "" {
+			if pod.Labels[controller.LabelPoolType] == controller.PoolTypeActive &&
+				sandboxIDFromPod(pod) == pending.sandboxID {
+				return nil
+			}
+			return fmt.Errorf("pod no longer has the expected pending hot claim")
+		}
+		if pod.Annotations[controller.AnnotationHotClaimFinalizationPending] != pending.sandboxID ||
+			sandboxIDFromPod(pod) != pending.sandboxID {
+			return fmt.Errorf("pending hot claim has inconsistent sandbox identity")
+		}
+		_, err = s.patchClaimedPodMetadata(ctx, materializeFinalizedHotClaimPod(pod))
+		return err
+	})
+}
+
 func (s *SandboxService) isHotClaimableIdlePod(pod *corev1.Pod, desiredTemplateHash string) bool {
 	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	if strings.TrimSpace(pod.Labels[controller.LabelSandboxID]) != "" ||
+		strings.TrimSpace(pod.Annotations[controller.AnnotationSandboxID]) != "" ||
+		pod.Annotations[controller.AnnotationHotClaimFinalizationPending] != "" {
 		return false
 	}
 	if pod.Annotations[controller.AnnotationTemplateSpecHash] != desiredTemplateHash {

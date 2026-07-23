@@ -590,6 +590,12 @@ func TestClaimIdlePodCanDeferHotRuntimePreparation(t *testing.T) {
 		t.Fatalf("template hash: %v", err)
 	}
 	readyPod.Annotations[controller.AnnotationTemplateSpecHash] = templateHash
+	readyPod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "pool-template-a",
+		UID:        types.UID("pool-uid"),
+	}}
 	applyCalls := 0
 	client := fake.NewSimpleClientset(readyPod.DeepCopy())
 	svc := &SandboxService{
@@ -629,6 +635,95 @@ func TestClaimIdlePodCanDeferHotRuntimePreparation(t *testing.T) {
 	}
 	if req.deferredHotResizeQuota == nil {
 		t.Fatal("deferred resize quota is nil")
+	}
+	if pod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+		t.Fatalf("returned pod pool type = %q, want active", pod.Labels[controller.LabelPoolType])
+	}
+	if len(pod.OwnerReferences) != 0 {
+		t.Fatalf("returned pod owner references = %v, want none", pod.OwnerReferences)
+	}
+	if pod.Annotations[controller.AnnotationHotClaimFinalizationPending] != "" {
+		t.Fatal("returned pod still has pending finalization annotation")
+	}
+	livePod, err := client.CoreV1().Pods(readyPod.Namespace).Get(context.Background(), readyPod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get live pod: %v", err)
+	}
+	if livePod.Labels[controller.LabelPoolType] != controller.PoolTypeIdle {
+		t.Fatalf("live pod pool type = %q, want idle until finalization", livePod.Labels[controller.LabelPoolType])
+	}
+	if len(livePod.OwnerReferences) != 1 || livePod.OwnerReferences[0].Name != "pool-template-a" {
+		t.Fatalf("live pod owner references = %v, want warm-pool ReplicaSet", livePod.OwnerReferences)
+	}
+	if got := livePod.Annotations[controller.AnnotationHotClaimFinalizationPending]; got != readyPod.Name {
+		t.Fatalf("pending finalization = %q, want %q", got, readyPod.Name)
+	}
+	if req.pendingHotClaimFinalization == nil {
+		t.Fatal("pending hot claim finalization is nil")
+	}
+}
+
+func TestFinalizePendingHotClaimIsIdempotent(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	pod.Labels[controller.LabelSandboxID] = "sandbox-a"
+	pod.Annotations[controller.AnnotationSandboxID] = "sandbox-a"
+	pod.Annotations[controller.AnnotationHotClaimFinalizationPending] = "sandbox-a"
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "pool-template-a",
+		UID:        types.UID("pool-uid"),
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{k8sClient: client, logger: zap.NewNop()}
+	pending := pendingHotClaimFinalization{
+		namespace: pod.Namespace,
+		podName:   pod.Name,
+		sandboxID: "sandbox-a",
+	}
+
+	if err := svc.finalizePendingHotClaim(context.Background(), pending); err != nil {
+		t.Fatalf("finalizePendingHotClaim() error = %v", err)
+	}
+	if err := svc.finalizePendingHotClaim(context.Background(), pending); err != nil {
+		t.Fatalf("second finalizePendingHotClaim() error = %v", err)
+	}
+	livePod, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get finalized pod: %v", err)
+	}
+	if livePod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+		t.Fatalf("pool type = %q, want active", livePod.Labels[controller.LabelPoolType])
+	}
+	if len(livePod.OwnerReferences) != 0 {
+		t.Fatalf("owner references = %v, want none", livePod.OwnerReferences)
+	}
+	if livePod.Annotations[controller.AnnotationHotClaimFinalizationPending] != "" {
+		t.Fatal("pending finalization annotation was not removed")
+	}
+}
+
+func TestHotClaimableIdlePodRejectsClaimedIdentityAndPendingFinalization(t *testing.T) {
+	svc := &SandboxService{}
+	tests := map[string]func(*corev1.Pod){
+		"sandbox id label": func(pod *corev1.Pod) {
+			pod.Labels[controller.LabelSandboxID] = "sandbox-a"
+		},
+		"sandbox id annotation": func(pod *corev1.Pod) {
+			pod.Annotations[controller.AnnotationSandboxID] = "sandbox-a"
+		},
+		"pending finalization": func(pod *corev1.Pod) {
+			pod.Annotations[controller.AnnotationHotClaimFinalizationPending] = "sandbox-a"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			pod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+			mutate(pod)
+			if svc.isHotClaimableIdlePod(pod, claimTestTemplateHash("template-a")) {
+				t.Fatal("isHotClaimableIdlePod() = true, want false")
+			}
+		})
 	}
 }
 

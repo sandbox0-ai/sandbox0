@@ -538,6 +538,91 @@ func TestRepairUnhealthyIdlePodsKeepsRecentlyCreatedPod(t *testing.T) {
 	assert.Equal(t, 0, deleteActions)
 }
 
+func TestFinalizePendingHotClaimsRecoversExpiredClaim(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
+	}
+	pendingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "pending-claim",
+			Namespace:       "default",
+			ResourceVersion: "51",
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+				LabelSandboxID:  "sandbox-a",
+			},
+			Annotations: map[string]string{
+				AnnotationSandboxID:                   "sandbox-a",
+				AnnotationClaimedAt:                   time.Now().Add(-pendingHotClaimFinalizationGracePeriod - time.Second).Format(time.RFC3339),
+				AnnotationHotClaimFinalizationPending: "sandbox-a",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       "pool-template-a",
+				UID:        types.UID("pool-uid"),
+			}},
+		},
+	}
+	client := fake.NewSimpleClientset(pendingPod.DeepCopy())
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(pendingPod))
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: corelisters.NewPodLister(podIndexer),
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+	}
+
+	requeueAfter, err := pm.finalizePendingHotClaims(context.Background(), template)
+	require.NoError(t, err)
+	assert.Zero(t, requeueAfter)
+	livePod, err := client.CoreV1().Pods(pendingPod.Namespace).Get(context.Background(), pendingPod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, PoolTypeActive, livePod.Labels[LabelPoolType])
+	assert.Empty(t, livePod.OwnerReferences)
+	assert.Empty(t, livePod.Annotations[AnnotationHotClaimFinalizationPending])
+}
+
+func TestFinalizePendingHotClaimsRequeuesRecentClaim(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
+	}
+	pendingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pending-claim",
+			Namespace: "default",
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+				LabelSandboxID:  "sandbox-a",
+			},
+			Annotations: map[string]string{
+				AnnotationSandboxID:                   "sandbox-a",
+				AnnotationClaimedAt:                   time.Now().Format(time.RFC3339),
+				AnnotationHotClaimFinalizationPending: "sandbox-a",
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(pendingPod.DeepCopy())
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(pendingPod))
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: corelisters.NewPodLister(podIndexer),
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+	}
+
+	requeueAfter, err := pm.finalizePendingHotClaims(context.Background(), template)
+	require.NoError(t, err)
+	assert.Positive(t, requeueAfter)
+	for _, action := range client.Actions() {
+		assert.NotEqual(t, "update", action.GetVerb())
+	}
+}
+
 func TestReconcileReplicaSetTemplateUpdatesHash(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

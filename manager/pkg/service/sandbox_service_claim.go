@@ -48,7 +48,10 @@ var errIdlePodClaimLost = errors.New("idle pod claim lost")
 type pendingHotClaimFinalization struct {
 	namespace   string
 	podName     string
+	podUID      types.UID
 	sandboxID   string
+	metadata    HotClaimPodMetadata
+	durable     bool
 	scheduledAt time.Time
 }
 
@@ -549,6 +552,24 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	claimRecordPersisted := false
 	cleanupClaimFailure := func(pod *corev1.Pod, reason string) {
+		if req.pendingHotClaimFinalization != nil && req.pendingHotClaimFinalization.durable {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), hotClaimFinalizationTimeout)
+			if err := s.activateUncommittedHotClaim(cleanupCtx, req.pendingHotClaimFinalization); err != nil && s.logger != nil {
+				s.logger.Warn("Failed to materialize reserved hot claim before cleanup",
+					zap.String("sandboxID", req.SandboxID),
+					zap.String("reason", reason),
+					zap.Error(err),
+				)
+			}
+			if err := s.releaseReservedHotClaim(cleanupCtx, req.pendingHotClaimFinalization); err != nil && s.logger != nil {
+				s.logger.Warn("Failed to release reserved hot claim after claim failure",
+					zap.String("sandboxID", req.SandboxID),
+					zap.String("reason", reason),
+					zap.Error(err),
+				)
+			}
+			cancel()
+		}
 		s.requestSandboxDeletionAfterClaimFailure(pod, reason)
 		if claimRecordPersisted {
 			s.markSandboxDeletedAfterClaimFailure(req.SandboxID, reason)
@@ -702,7 +723,14 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 	if s == nil || s.sandboxStore == nil || pod == nil || template == nil || req == nil {
 		return nil
 	}
-	return s.sandboxStore.UpsertSandbox(ctx, sandboxRecordForClaimedPod(s, pod, template, req))
+	record := sandboxRecordForClaimedPod(s, pod, template, req)
+	if req.pendingHotClaimFinalization != nil && req.pendingHotClaimFinalization.durable {
+		if s.hotClaimReservationStore == nil {
+			return fmt.Errorf("durable hot claim reservation store is not configured")
+		}
+		return s.hotClaimReservationStore.CommitHotClaim(ctx, record, req.pendingHotClaimFinalization.podUID, req.pendingHotClaimFinalization.metadata)
+	}
+	return s.sandboxStore.UpsertSandbox(ctx, record)
 }
 
 func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest) *SandboxRecord {
@@ -1261,51 +1289,98 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}
 
-		// Keep the pod attached to the warm-pool ReplicaSet until the claim has
-		// been persisted. This prevents the ReplicaSet from creating replacement
-		// pods on the latency-sensitive claim path.
-		podToPatch := pod
-		if req.deferHotRuntimePreparation {
-			podToPatch = pod.DeepCopy()
-			podToPatch.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
-			podToPatch.OwnerReferences = append([]metav1.OwnerReference(nil), originalIdlePod.OwnerReferences...)
-			podToPatch.Annotations[controller.AnnotationHotClaimFinalizationPending] = sandboxID
-		}
+		useDurableReservation := req.deferHotRuntimePreparation &&
+			s.hotClaimReservationStore != nil &&
+			pod.UID != "" &&
+			resizeQuota == nil &&
+			!v1alpha1.NetworkPolicyRequiresSynchronousApply(policySpecFromState(networkState))
 
-		// Update the pod
-		phaseStarted = time.Now()
-		updatedPod, updateErr := s.patchClaimedPodMetadata(ctx, podToPatch)
-		s.observeClaimPhase(templateID, "hot", "update_claimed_pod", phaseStarted, updateErr)
-		if updateErr != nil {
-			rollbackStateVolume()
-			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
-				s.logger.Warn("Failed to roll back credential bindings after hot-claim update failure",
-					zap.String("sandboxID", sandboxID),
-					zap.Error(rollbackErr),
-				)
+		var updatedPod *corev1.Pod
+		if useDurableReservation {
+			phaseStarted = time.Now()
+			reservation := &HotClaimReservation{
+				SandboxID: sandboxID,
+				TeamID:    req.TeamID,
+				ClusterID: naming.ClusterIDOrDefault(template.Spec.ClusterId),
+				Namespace: pod.Namespace,
+				PodName:   pod.Name,
+				PodUID:    pod.UID,
 			}
-			if isIdlePodLostDuringClaim(updateErr) {
-				s.observeIdleClaim(templateID, "update_conflict")
+			reserved, reserveErr := s.hotClaimReservationStore.TryReserveHotClaim(ctx, reservation)
+			s.observeClaimPhase(templateID, "hot", "reserve_claimed_pod", phaseStarted, reserveErr)
+			if reserveErr != nil || !reserved {
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after hot-claim reservation failure",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				if reserveErr != nil {
+					s.observeIdleClaim(templateID, "reservation_error")
+					return fmt.Errorf("reserve hot claim: %w", reserveErr)
+				}
+				s.observeIdleClaim(templateID, "reservation_conflict")
 				keepReservationUntilTTL()
-				return errNoIdlePod
+				return errIdlePodReservationConflict
 			}
-			if k8serrors.IsConflict(updateErr) {
-				s.observeIdleClaim(templateID, "update_conflict")
-				keepReservationUntilTTL()
-				return fmt.Errorf("%w: update pod %s/%s: %w", errIdlePodClaimLost, pod.Namespace, pod.Name, updateErr)
-			} else {
-				s.observeIdleClaim(templateID, "update_error")
-			}
-			return updateErr
-		}
-		keepReservationUntilTTL()
-		if req.deferHotRuntimePreparation {
+			keepReservationUntilTTL()
+			updatedPod = pod
 			req.pendingHotClaimFinalization = &pendingHotClaimFinalization{
 				namespace: updatedPod.Namespace,
 				podName:   updatedPod.Name,
+				podUID:    updatedPod.UID,
 				sandboxID: sandboxID,
+				metadata:  hotClaimPodMetadata(updatedPod),
+				durable:   true,
 			}
-			updatedPod = materializeFinalizedHotClaimPod(updatedPod)
+		} else {
+			// Keep the pod attached to the warm-pool ReplicaSet until the claim has
+			// been persisted. This prevents the ReplicaSet from creating replacement
+			// pods on the latency-sensitive claim path.
+			podToPatch := pod
+			if req.deferHotRuntimePreparation {
+				podToPatch = pod.DeepCopy()
+				podToPatch.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+				podToPatch.OwnerReferences = append([]metav1.OwnerReference(nil), originalIdlePod.OwnerReferences...)
+				podToPatch.Annotations[controller.AnnotationHotClaimFinalizationPending] = sandboxID
+			}
+
+			phaseStarted = time.Now()
+			var updateErr error
+			updatedPod, updateErr = s.patchClaimedPodMetadata(ctx, podToPatch)
+			s.observeClaimPhase(templateID, "hot", "update_claimed_pod", phaseStarted, updateErr)
+			if updateErr != nil {
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after hot-claim update failure",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				if isIdlePodLostDuringClaim(updateErr) {
+					s.observeIdleClaim(templateID, "update_conflict")
+					keepReservationUntilTTL()
+					return errNoIdlePod
+				}
+				if k8serrors.IsConflict(updateErr) {
+					s.observeIdleClaim(templateID, "update_conflict")
+					keepReservationUntilTTL()
+					return fmt.Errorf("%w: update pod %s/%s: %w", errIdlePodClaimLost, pod.Namespace, pod.Name, updateErr)
+				}
+				s.observeIdleClaim(templateID, "update_error")
+				return updateErr
+			}
+			keepReservationUntilTTL()
+			if req.deferHotRuntimePreparation {
+				req.pendingHotClaimFinalization = &pendingHotClaimFinalization{
+					namespace: updatedPod.Namespace,
+					podName:   updatedPod.Name,
+					podUID:    updatedPod.UID,
+					sandboxID: sandboxID,
+				}
+				updatedPod = materializeFinalizedHotClaimPod(updatedPod)
+			}
 		}
 
 		if resizeQuota != nil && req.deferHotRuntimePreparation {
@@ -1477,6 +1552,9 @@ func (s *SandboxService) nextHotClaimFinalizationDelay(pending pendingHotClaimFi
 }
 
 func (s *SandboxService) finalizePendingHotClaim(ctx context.Context, pending pendingHotClaimFinalization) error {
+	if pending.durable {
+		return s.finalizeReservedHotClaim(ctx, pending.sandboxID)
+	}
 	return retry.OnError(retry.DefaultBackoff, func(err error) bool {
 		return k8serrors.IsConflict(err) || k8serrors.IsInvalid(err)
 	}, func() error {

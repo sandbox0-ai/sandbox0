@@ -25,26 +25,41 @@ import (
 func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string) error {
 	s.logger.Info("Terminating sandbox", zap.String("sandboxID", sandboxID))
 
+	if err := s.finalizeReservedHotClaim(ctx, sandboxID); err != nil {
+		return fmt.Errorf("finalize reserved hot claim before termination: %w", err)
+	}
+
 	// Find the pod by sandbox ID
 	pod, err := s.getSandboxPod(ctx, sandboxID)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			s.logger.Info("Sandbox already terminated", zap.String("sandboxID", sandboxID))
 			if s.sandboxStore != nil {
 				record, getErr := s.sandboxStore.GetSandbox(ctx, sandboxID)
 				if getErr != nil {
 					return fmt.Errorf("get sandbox record: %w", getErr)
 				}
-				if record != nil && record.Status != SandboxStatusDeleted {
-					if err := s.cleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record), false); err != nil {
-						return fmt.Errorf("cleanup deleted sandbox record: %w", err)
-					}
+				if record != nil {
+					pod = s.getSandboxRecordPodLive(ctx, sandboxID, record)
 				}
-				return s.sandboxStore.MarkSandboxDeleted(ctx, sandboxID, s.clock.Now())
+				if pod != nil {
+					err = nil
+				} else {
+					s.logger.Info("Sandbox already terminated", zap.String("sandboxID", sandboxID))
+					if record != nil && record.Status != SandboxStatusDeleted {
+						if err := s.cleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record), false); err != nil {
+							return fmt.Errorf("cleanup deleted sandbox record: %w", err)
+						}
+					}
+					return s.sandboxStore.MarkSandboxDeleted(ctx, sandboxID, s.clock.Now())
+				}
+			} else {
+				s.logger.Info("Sandbox already terminated", zap.String("sandboxID", sandboxID))
+				return nil
 			}
-			return nil
 		}
-		return fmt.Errorf("get pod: %w", err)
+		if err != nil {
+			return fmt.Errorf("get pod: %w", err)
+		}
 	}
 
 	pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
@@ -667,9 +682,6 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			if record != nil {
-				if pod := s.getSandboxRecordPodLive(ctx, sandboxID, record); pod != nil {
-					return s.podToSandbox(ctx, pod, sandboxID), nil
-				}
 				return s.recordToSandbox(record), nil
 			}
 			return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
@@ -1116,7 +1128,27 @@ func (s *SandboxService) getSandboxPod(ctx context.Context, sandboxID string) (*
 	if err != nil {
 		return nil, err
 	}
-	return selectSandboxRuntimePod(sandboxID, pods)
+	pod, err := selectSandboxRuntimePod(sandboxID, pods)
+	if err == nil || !k8serrors.IsNotFound(err) {
+		return pod, err
+	}
+	reservedPod, reservationErr := s.reservedHotClaimPod(ctx, sandboxID)
+	if reservationErr == nil && reservedPod != nil {
+		return reservedPod, nil
+	}
+	if reservationErr != nil && !k8serrors.IsNotFound(reservationErr) {
+		return nil, reservationErr
+	}
+	if s.sandboxStore != nil {
+		record, recordErr := s.sandboxStore.GetSandbox(ctx, sandboxID)
+		if recordErr != nil && !errors.Is(recordErr, ErrSandboxRecordNotFound) {
+			return nil, recordErr
+		}
+		if livePod := s.getSandboxRecordPodLive(ctx, sandboxID, record); livePod != nil {
+			return livePod, nil
+		}
+	}
+	return nil, err
 }
 
 func selectSandboxRuntimePod(sandboxID string, pods []*corev1.Pod) (*corev1.Pod, error) {

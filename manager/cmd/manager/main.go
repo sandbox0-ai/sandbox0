@@ -411,6 +411,7 @@ func main() {
 
 	// Create services
 	cfgForSandbox := service.SandboxServiceConfig{
+		ClusterID:                           naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
 		DefaultTTL:                          cfg.DefaultSandboxTTL.Duration,
 		SandboxMemoryPerCPU:                 cfg.TeamTemplateMemoryPerCPU,
 		SandboxMaxMemory:                    cfg.SandboxMaxMemory,
@@ -668,6 +669,7 @@ func main() {
 	}
 
 	startSandboxObservabilityLogProducer(ctx, cfg, k8sClient, podLister, sandboxLogWorker, logger, clk)
+	go sandboxService.StartHotClaimReservationReconciler(ctx)
 	go func() {
 		if err := sandboxCrashLogCollector.Run(ctx, 2); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("Sandbox crash log collector failed", zap.Error(err))

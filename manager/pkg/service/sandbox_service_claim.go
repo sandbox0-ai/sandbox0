@@ -24,6 +24,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/util/retry"
 )
@@ -1247,7 +1248,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		// Update the pod
 		phaseStarted = time.Now()
-		updatedPod, updateErr := s.updateClaimedPodMetadata(ctx, pod)
+		updatedPod, updateErr := s.patchClaimedPodMetadata(ctx, pod)
 		s.observeClaimPhase(templateID, "hot", "update_claimed_pod", phaseStarted, updateErr)
 		if updateErr != nil {
 			rollbackStateVolume()
@@ -1341,14 +1342,36 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 	return claimedPod, nil
 }
 
-func (s *SandboxService) updateClaimedPodMetadata(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+type podMetadataPatchOperation struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value any    `json:"value"`
+}
+
+func (s *SandboxService) patchClaimedPodMetadata(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
 	if s == nil || s.k8sClient == nil {
 		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)
 	}
 	if pod == nil || pod.Namespace == "" || pod.Name == "" {
 		return nil, fmt.Errorf("%w: pod is required", ErrInvalidClaimRequest)
 	}
-	return s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+	patch, err := json.Marshal([]podMetadataPatchOperation{
+		{Op: "test", Path: "/metadata/resourceVersion", Value: pod.ResourceVersion},
+		{Op: "add", Path: "/metadata/labels", Value: pod.Labels},
+		{Op: "add", Path: "/metadata/annotations", Value: pod.Annotations},
+		{Op: "add", Path: "/metadata/finalizers", Value: pod.Finalizers},
+		{Op: "add", Path: "/metadata/ownerReferences", Value: []metav1.OwnerReference{}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build claimed pod metadata patch: %w", err)
+	}
+	return s.k8sClient.CoreV1().Pods(pod.Namespace).Patch(
+		ctx,
+		pod.Name,
+		types.JSONPatchType,
+		patch,
+		metav1.PatchOptions{},
+	)
 }
 
 func (s *SandboxService) isHotClaimableIdlePod(pod *corev1.Pod, desiredTemplateHash string) bool {

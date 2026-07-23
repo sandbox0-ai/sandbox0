@@ -185,7 +185,7 @@ func TestCreateNewPodAppliesTemplateResourcesByDefault(t *testing.T) {
 	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "25m")
 }
 
-func TestClaimIdlePodAppliesTemplateResourcesByDefault(t *testing.T) {
+func TestClaimIdlePodPreservesDenseRequestsWhenTemplateLimitsMatch(t *testing.T) {
 	template := newSandboxResourceTestTemplate(t)
 	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")
 	node := newClaimTestNode("node-a", "10.0.0.1")
@@ -211,9 +211,9 @@ func TestClaimIdlePodAppliesTemplateResourcesByDefault(t *testing.T) {
 	container := sandboxRuntimeContainer(t, pod)
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "1Gi")
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "250m")
-	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "256Mi")
-	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "25m")
-	assertResizeSubresourceUpdate(t, client.Actions())
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "64Mi")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "10m")
+	assertNoResizeSubresourceUpdate(t, client.Actions())
 }
 
 func TestClaimIdlePodAppliesMinimumCPUToTemplateResources(t *testing.T) {
@@ -591,6 +591,15 @@ func assertResizeSubresourceUpdate(t *testing.T, actions []k8stesting.Action) {
 		}
 	}
 	t.Fatalf("missing patch pods/resize action; actions = %#v", actions)
+}
+
+func assertNoResizeSubresourceUpdate(t *testing.T, actions []k8stesting.Action) {
+	t.Helper()
+	for _, action := range actions {
+		if action.Matches("patch", "pods") && action.GetSubresource() == "resize" {
+			t.Fatalf("unexpected patch pods/resize action; actions = %#v", actions)
+		}
+	}
 }
 
 func contains(s, substr string) bool {

@@ -150,17 +150,18 @@ func sandboxPodNeedsResourceResize(pod *corev1.Pod, quota v1alpha1.ResourceQuota
 		if container.Name != "procd" {
 			continue
 		}
-		return !resizeResourcesEqual(container.Resources, desired)
+		// Warm pods already carry the template limits while keeping scheduling
+		// requests low. Preserve those dense requests when the claim does not
+		// change either enforceable limit; only resource overrides and limit
+		// corrections require an in-place resize.
+		return !resourceLimitsEqual(container.Resources.Limits, desired.Limits)
 	}
 	return true
 }
 
-func resizeResourcesEqual(a, b corev1.ResourceRequirements) bool {
+func resourceLimitsEqual(a, b corev1.ResourceList) bool {
 	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
-		if !resourceListQuantityEqual(a.Requests, b.Requests, name) {
-			return false
-		}
-		if !resourceListQuantityEqual(a.Limits, b.Limits, name) {
+		if !resourceListQuantityEqual(a, b, name) {
 			return false
 		}
 	}

@@ -715,6 +715,9 @@ func TestClaimSandboxRunsHotRuntimePreparationConcurrently(t *testing.T) {
 			Template: template.Name,
 			TeamID:   "team-a",
 			UserID:   "user-a",
+			Config: &SandboxConfig{
+				Resources: &SandboxResourceConfig{Memory: "2Gi"},
+			},
 		})
 		result <- claimResult{response: response, err: claimErr}
 	}()

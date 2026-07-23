@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -79,6 +80,45 @@ func TestCleanupStaleCSIMountsSkipsActivePodMounts(t *testing.T) {
 	}
 	if _, err := os.Stat(active); err != nil {
 		t.Fatalf("expected active mount %q to remain, stat error = %v", active, err)
+	}
+}
+
+func TestPortalsForStandbySyncSkipsInactivePods(t *testing.T) {
+	mgr := NewManager(Config{
+		RootDir: t.TempDir(),
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"active-pod": {}}, nil
+		},
+	})
+	mgr.portals["stale"] = &portalMount{podUID: "stale-pod"}
+	active := &portalMount{podUID: "active-pod"}
+	mgr.portals["active"] = active
+
+	portals, stale := mgr.portalsForStandbySync(context.Background())
+	if stale != 1 {
+		t.Fatalf("stale portal count = %d, want 1", stale)
+	}
+	if len(portals) != 1 || portals[0] != active {
+		t.Fatalf("standby portals = %#v, want only active portal", portals)
+	}
+}
+
+func TestPortalsForStandbySyncKeepsPortalsWhenPodListingFails(t *testing.T) {
+	mgr := NewManager(Config{
+		RootDir: t.TempDir(),
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return nil, errors.New("kubernetes unavailable")
+		},
+	})
+	portal := &portalMount{podUID: "pod-a"}
+	mgr.portals["portal"] = portal
+
+	portals, stale := mgr.portalsForStandbySync(context.Background())
+	if stale != 0 {
+		t.Fatalf("stale portal count = %d, want 0", stale)
+	}
+	if len(portals) != 1 || portals[0] != portal {
+		t.Fatalf("standby portals = %#v, want the original portal", portals)
 	}
 }
 

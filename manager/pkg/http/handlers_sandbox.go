@@ -81,15 +81,6 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 			return
 		}
-		if errors.Is(err, service.ErrClaimStartThrottled) {
-			retryAfter := int(service.ClaimStartRetryAfter(err).Seconds())
-			if retryAfter < 1 {
-				retryAfter = 1
-			}
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-			spec.JSONError(c, http.StatusTooManyRequests, spec.CodeClaimStartThrottled, err.Error())
-			return
-		}
 		if errors.Is(err, service.ErrDataPlaneNotReady) {
 			c.Header("Retry-After", "1")
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())

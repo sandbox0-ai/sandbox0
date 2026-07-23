@@ -64,13 +64,11 @@ Sandbox0 Cloud handles the mutable-tag policy at the platform layer: managed-reg
 
 The single-cluster sample is always fullmode. `manager` hosts lifecycle control and the storage API runtime. Each sandbox node runs the `ctld-a` and `ctld-b` DaemonSets; the elected primary owns rootfs persistence, volume portals, and the network runtime, and the synchronized standby takes over after promotion. Configure storage behavior under `spec.storage.runtime`, network behavior under `spec.network`, and shared sandbox-node placement under `spec.sandboxNodePlacement`.
 
-## Cold Claim Admission
+## Sandbox Claim Admission
 
-Manager enforces one cluster-wide admission budget for every sandbox claim that can trigger pod startup pressure: hot claims from warm pool, cold pod creates, and asynchronous warm-pool ReplicaSet replenishment. The default budget is `min(30 * N, 80)`, where `N` is the number of ready, schedulable sandbox nodes. Sandbox node eligibility follows the manager `sandboxPodPlacement` selector and tolerations, so ordinary control-plane or unschedulable nodes do not increase the claim budget.
+Team Quota is the claim admission boundary. The `sandbox_claims` rate policy controls sustained claim rate and immediate burst at the external regional or full-mode gateway, while `active_sandboxes` limits the number of running sandboxes for a team. Manager does not maintain a separate cluster-wide claim-start budget.
 
-When `spec.redis` is enabled, manager uses Redis as the distributed lock backend for this admission check. Without Redis, manager falls back to PostgreSQL advisory locks. The lock is held only around the Kubernetes mutation that changes start pressure, while the pressure source of truth stays in Kubernetes pod, ReplicaSet, and node state.
-
-Schedulers consume the manager cluster summary fields `claim_start_limit`, `claim_start_in_flight`, and `claim_start_available`. In multi-cluster routing, a cluster with no fresh claim-start capacity is skipped before weighted fallback routing.
+After quota admission, manager claims a ready idle pod or creates a cold pod directly. Warm-pool ReplicaSets also scale directly to each template's configured `minIdle`. In multi-cluster mode, scheduler routing prefers ready idle capacity, then estimated cluster headroom, configured weight, and deterministic fallback order.
 
 ## Metering Boundary
 

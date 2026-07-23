@@ -70,8 +70,9 @@ admission uses Redis, so configure one shared Redis deployment for all clusters
 in a region. Network Redis keys are scoped by region and team and deliberately
 do not include a cluster ID.
 
-`sandbox_claims` is charged only for `POST /api/v1/sandboxes`. Resume, fork,
-and the manager's cluster-wide claim-start admission budget are separate.
+`sandbox_claims` is charged only for `POST /api/v1/sandboxes`. Resume and fork
+are separate. Manager has no additional cluster-wide claim-start admission
+budget, so Team Quota is the policy boundary for sandbox claim admission.
 
 `api_requests` defaults to 100 requests per second with a burst of 200 through
 gateway `rateLimitRps` and `rateLimitBurst` settings. It is charged once. A regional gateway charges the external request
@@ -79,12 +80,11 @@ before forwarding it, and the internally authenticated cluster-gateway hop
 does not charge it again. A full-mode cluster gateway charges the external
 request directly.
 
-## Limiter Boundaries
+## Other Control Boundaries
 
 Not every limiter represents a tenant entitlement. These controls remain
 outside Team Quota:
 
-- the manager claim-start limiter protects cluster pod-start capacity
 - sandbox service route rate limits are application route policy
 - per-sandbox bandwidth limits are workload QoS
 - function concurrency is local to one sandbox runtime

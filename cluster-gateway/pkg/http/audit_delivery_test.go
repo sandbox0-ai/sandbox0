@@ -344,6 +344,28 @@ func TestAuditDeliveryBatchesConcurrentCanonicalWrites(t *testing.T) {
 	}
 }
 
+func TestAuditDeliveryWaitsForConcurrentSpoolWritesToDrain(t *testing.T) {
+	delivery := &auditDelivery{}
+	delivery.canonicalCalls.Store(2)
+	delivery.spoolWrites.Store(1)
+
+	drained := make(chan struct{})
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		delivery.spoolWrites.Store(0)
+		close(drained)
+	}()
+
+	started := time.Now()
+	if err := delivery.waitForConcurrentSpoolWrites(context.Background()); err != nil {
+		t.Fatalf("waitForConcurrentSpoolWrites() error = %v", err)
+	}
+	<-drained
+	if elapsed := time.Since(started); elapsed < 5*time.Millisecond {
+		t.Fatalf("waitForConcurrentSpoolWrites() returned before the spool drained: %v", elapsed)
+	}
+}
+
 func TestAuditDeliverySerializesConcurrentEventIDCollisions(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}

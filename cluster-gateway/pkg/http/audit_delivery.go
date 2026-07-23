@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +23,8 @@ const (
 	auditReplayInterval   = time.Second
 	auditReplayBatchSize  = 500
 	auditSpoolWriteShards = 64
+	auditSpoolQuietPeriod = 2 * time.Millisecond
+	auditSpoolDrainLimit  = 40 * time.Millisecond
 )
 
 var (
@@ -44,6 +47,8 @@ type auditDelivery struct {
 	verificationKey ed25519.PublicKey
 	mu              sync.RWMutex
 	spoolWriteLocks [auditSpoolWriteShards]sync.Mutex
+	spoolWrites     atomic.Int64
+	canonicalCalls  atomic.Int64
 	once            sync.Once
 	wake            chan struct{}
 	canonicalSlot   chan struct{}
@@ -104,6 +109,12 @@ func (d *auditDelivery) EnqueueDurable(ctx context.Context, event sandboxobserva
 // acknowledge it. A canonical failure leaves the event in the spool for replay
 // and is returned to the caller as pending.
 func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobservability.Event) error {
+	if d == nil {
+		return fmt.Errorf("%w: audit delivery is not configured", errAuditUnrecorded)
+	}
+	d.canonicalCalls.Add(1)
+	defer d.canonicalCalls.Add(-1)
+
 	spooled, err := d.spoolOrCanonical(ctx, event)
 	if err != nil || !spooled {
 		return err
@@ -113,6 +124,11 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 		return fmt.Errorf("%w: event is durably buffered but canonical delivery did not start: %v", errAuditDeliveryPending, err)
 	}
 	defer d.releaseCanonicalSlot()
+
+	if err := d.waitForConcurrentSpoolWrites(ctx); err != nil {
+		d.signalReplay()
+		return fmt.Errorf("%w: event is durably buffered but canonical batching was interrupted: %v", errAuditDeliveryPending, err)
+	}
 
 	// Replay may have acknowledged this exact signed event between the local
 	// fsync and acquisition of the canonical delivery slot.
@@ -192,6 +208,9 @@ func (d *auditDelivery) spoolOrCanonical(ctx context.Context, event sandboxobser
 }
 
 func (d *auditDelivery) put(event sandboxobservability.Event) error {
+	d.spoolWrites.Add(1)
+	defer d.spoolWrites.Add(-1)
+
 	lock := &d.spoolWriteLocks[auditSpoolWriteShard(event.EventID)]
 	lock.Lock()
 	defer lock.Unlock()
@@ -211,6 +230,37 @@ func auditSpoolWriteShard(eventID string) int {
 		hash *= 16777619
 	}
 	return int(hash % auditSpoolWriteShards)
+}
+
+func (d *auditDelivery) waitForConcurrentSpoolWrites(ctx context.Context) error {
+	if d == nil || d.canonicalCalls.Load() <= 1 {
+		return nil
+	}
+	deadline := time.NewTimer(auditSpoolDrainLimit)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	var quietSince time.Time
+	for {
+		if d.spoolWrites.Load() == 0 {
+			if quietSince.IsZero() {
+				quietSince = time.Now()
+			} else if time.Since(quietSince) >= auditSpoolQuietPeriod {
+				return nil
+			}
+		} else {
+			quietSince = time.Time{}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return nil
+		case <-ticker.C:
+		}
+	}
 }
 
 func (d *auditDelivery) signalReplay() {

@@ -49,6 +49,9 @@ type auditDelivery struct {
 	spoolWriteLocks [auditSpoolWriteShards]sync.Mutex
 	spoolWrites     atomic.Int64
 	canonicalCalls  atomic.Int64
+	canonicalTurns  atomic.Int64
+	canonicalWakeMu sync.Mutex
+	canonicalWake   chan struct{}
 	once            sync.Once
 	wake            chan struct{}
 	canonicalSlot   chan struct{}
@@ -75,6 +78,7 @@ func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger,
 		verificationKey: verificationKey,
 		wake:            make(chan struct{}, 1),
 		canonicalSlot:   make(chan struct{}, 1),
+		canonicalWake:   make(chan struct{}),
 	}
 	if _, err := delivery.loadLocked(); err != nil {
 		return nil, err
@@ -119,9 +123,13 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 	if err != nil || !spooled {
 		return err
 	}
-	if err := d.acquireCanonicalSlot(ctx); err != nil {
+	acquired, err := d.acquireCanonicalSlotOrAck(ctx, event.EventID)
+	if err != nil {
 		d.signalReplay()
 		return fmt.Errorf("%w: event is durably buffered but canonical delivery did not start: %v", errAuditDeliveryPending, err)
+	}
+	if !acquired {
+		return nil
 	}
 	defer d.releaseCanonicalSlot()
 
@@ -279,9 +287,54 @@ func (d *auditDelivery) acquireCanonicalSlot(ctx context.Context) error {
 	}
 	select {
 	case d.canonicalSlot <- struct{}{}:
+		d.canonicalTurns.Add(1)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+func (d *auditDelivery) acquireCanonicalSlotOrAck(ctx context.Context, eventID string) (bool, error) {
+	if d == nil || d.canonicalSlot == nil {
+		return false, fmt.Errorf("audit canonical delivery is not configured")
+	}
+	for {
+		d.canonicalWakeMu.Lock()
+		wake := d.canonicalWake
+		d.canonicalWakeMu.Unlock()
+		if wake == nil {
+			return false, fmt.Errorf("audit canonical delivery is not configured")
+		}
+
+		d.mu.RLock()
+		pending, err := d.pendingLocked(eventID)
+		d.mu.RUnlock()
+		if err != nil {
+			return false, err
+		}
+		if !pending {
+			return false, nil
+		}
+
+		select {
+		case <-wake:
+			continue
+		default:
+		}
+		select {
+		case d.canonicalSlot <- struct{}{}:
+			select {
+			case <-wake:
+				<-d.canonicalSlot
+				continue
+			default:
+			}
+			d.canonicalTurns.Add(1)
+			return true, nil
+		case <-wake:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
 	}
 }
 
@@ -289,6 +342,16 @@ func (d *auditDelivery) releaseCanonicalSlot() {
 	if d == nil || d.canonicalSlot == nil {
 		return
 	}
+	d.canonicalWakeMu.Lock()
+	wake := d.canonicalWake
+	if wake == nil {
+		d.canonicalWakeMu.Unlock()
+		<-d.canonicalSlot
+		return
+	}
+	d.canonicalWake = make(chan struct{})
+	close(wake)
+	d.canonicalWakeMu.Unlock()
 	<-d.canonicalSlot
 }
 

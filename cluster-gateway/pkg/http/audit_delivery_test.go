@@ -342,6 +342,9 @@ func TestAuditDeliveryBatchesConcurrentCanonicalWrites(t *testing.T) {
 	if got, want := writer.snapshotBatchSizes(), []int{1, writes - 1}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("canonical batch sizes = %v, want %v", got, want)
 	}
+	if got := delivery.canonicalTurns.Load(); got != 2 {
+		t.Fatalf("canonical delivery turns = %d, want 2", got)
+	}
 }
 
 func TestAuditDeliveryWaitsForConcurrentSpoolWritesToDrain(t *testing.T) {

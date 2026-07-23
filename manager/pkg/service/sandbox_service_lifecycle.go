@@ -802,7 +802,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 				TemplateBindings: templateBindings,
 				RequestBindings:  requestBindings,
 			})
-			rollbackBindings, err = s.syncCredentialBindings(ctx, updatedPod, teamID, networkState)
+			rollbackBindings, err = s.syncCredentialBindings(ctx, updatedPod, teamID, networkState, true)
 			if err != nil {
 				return fmt.Errorf("stage credential bindings: %w", err)
 			}

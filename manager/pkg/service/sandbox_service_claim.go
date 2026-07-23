@@ -62,8 +62,9 @@ type ClaimRequest struct {
 	// deferHotRuntimePreparation lets the full claim path overlap resource
 	// resize and network acknowledgement with procd initialization. Direct
 	// hot-pool operations retain their synchronous behavior.
-	deferHotRuntimePreparation bool
-	deferredHotResizeQuota     *v1alpha1.ResourceQuota
+	deferHotRuntimePreparation        bool
+	deferredHotResizeQuota            *v1alpha1.ResourceQuota
+	mayHaveExistingCredentialBindings bool
 }
 
 type ClaimMount struct {
@@ -348,6 +349,7 @@ type ClaimResponse struct {
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {
 	start := time.Now()
 	metrics := s.metrics
+	req.mayHaveExistingCredentialBindings = strings.TrimSpace(req.SandboxID) != ""
 	phaseStarted := time.Now()
 	canonicalTemplateID, err := naming.CanonicalTemplateID(req.Template)
 	s.observeClaimPhase(req.Template, "unknown", "canonicalize_template", phaseStarted, err)
@@ -1232,7 +1234,13 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return policyErr
 		}
 		phaseStarted = time.Now()
-		rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+		rollbackBindings, err := s.syncCredentialBindings(
+			ctx,
+			pod,
+			req.TeamID,
+			networkState,
+			req.mayHaveExistingCredentialBindings,
+		)
 		s.observeClaimPhase(templateID, "hot", "sync_credential_bindings", phaseStarted, err)
 		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)
@@ -1512,7 +1520,13 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if err != nil {
 		return nil, err
 	}
-	rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+	rollbackBindings, err := s.syncCredentialBindings(
+		ctx,
+		pod,
+		req.TeamID,
+		networkState,
+		req.mayHaveExistingCredentialBindings,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("stage credential bindings: %w", err)
 	}

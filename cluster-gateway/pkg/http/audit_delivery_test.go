@@ -252,6 +252,47 @@ func TestAuditDeliveryCanonicalWaitsForInFlightReplayWithoutDuplicate(t *testing
 	}
 }
 
+func TestAuditDeliveryBoundsConcurrentCanonicalWrites(t *testing.T) {
+	dir := t.TempDir()
+	block := make(chan struct{})
+	writer := &auditDeliveryWriter{block: block}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	const extraWrites = 4
+	errs := make(chan error, auditCanonicalConcurrency+extraWrites)
+	for range auditCanonicalConcurrency + extraWrites {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		go func() {
+			errs <- delivery.PersistCanonical(context.Background(), event)
+		}()
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(delivery.canonicalSlots) != auditCanonicalConcurrency && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(delivery.canonicalSlots); got != auditCanonicalConcurrency {
+		t.Fatalf("canonical slots in use = %d, want %d", got, auditCanonicalConcurrency)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := len(delivery.canonicalSlots); got != auditCanonicalConcurrency {
+		t.Fatalf("canonical slots exceeded bound: %d", got)
+	}
+
+	close(block)
+	for range auditCanonicalConcurrency + extraWrites {
+		if err := <-errs; err != nil {
+			t.Fatalf("PersistCanonical() error = %v", err)
+		}
+	}
+	if got := len(writer.snapshotEvents()); got != auditCanonicalConcurrency+extraWrites {
+		t.Fatalf("canonical events = %d, want %d", got, auditCanonicalConcurrency+extraWrites)
+	}
+}
+
 func TestAuditDeliveryFallsBackToCanonicalInsertWhenSpoolWriteFails(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}

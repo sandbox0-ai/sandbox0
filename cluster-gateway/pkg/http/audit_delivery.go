@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	auditReplayInterval  = time.Second
-	auditReplayBatchSize = 500
+	auditReplayInterval       = time.Second
+	auditReplayBatchSize      = 500
+	auditCanonicalConcurrency = 32
 )
 
 var (
@@ -44,7 +45,7 @@ type auditDelivery struct {
 	mu              sync.Mutex
 	once            sync.Once
 	wake            chan struct{}
-	canonicalSlot   chan struct{}
+	canonicalSlots  chan struct{}
 }
 
 func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger, verificationKey ed25519.PublicKey) (*auditDelivery, error) {
@@ -67,7 +68,7 @@ func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger,
 		logger:          logger,
 		verificationKey: verificationKey,
 		wake:            make(chan struct{}, 1),
-		canonicalSlot:   make(chan struct{}, 1),
+		canonicalSlots:  make(chan struct{}, auditCanonicalConcurrency),
 	}
 	if _, err := delivery.loadLocked(); err != nil {
 		return nil, err
@@ -106,11 +107,11 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 	if err != nil || !spooled {
 		return err
 	}
-	if err := d.acquireCanonicalSlot(ctx); err != nil {
+	if err := d.acquireCanonicalSlots(ctx, 1); err != nil {
 		d.signalReplay()
 		return fmt.Errorf("%w: event is durably buffered but canonical delivery did not start: %v", errAuditDeliveryPending, err)
 	}
-	defer d.releaseCanonicalSlot()
+	defer d.releaseCanonicalSlots(1)
 
 	// Replay may have acknowledged this exact signed event between the local
 	// fsync and acquisition of the canonical delivery slot.
@@ -193,23 +194,33 @@ func (d *auditDelivery) signalReplay() {
 	}
 }
 
-func (d *auditDelivery) acquireCanonicalSlot(ctx context.Context) error {
-	if d == nil || d.canonicalSlot == nil {
+func (d *auditDelivery) acquireCanonicalSlots(ctx context.Context, count int) error {
+	if d == nil || d.canonicalSlots == nil {
 		return fmt.Errorf("audit canonical delivery is not configured")
 	}
-	select {
-	case d.canonicalSlot <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	if count <= 0 || count > cap(d.canonicalSlots) {
+		return fmt.Errorf("invalid audit canonical delivery slot count %d", count)
 	}
+	acquired := 0
+	for acquired < count {
+		select {
+		case d.canonicalSlots <- struct{}{}:
+			acquired++
+		case <-ctx.Done():
+			d.releaseCanonicalSlots(acquired)
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
-func (d *auditDelivery) releaseCanonicalSlot() {
-	if d == nil || d.canonicalSlot == nil {
+func (d *auditDelivery) releaseCanonicalSlots(count int) {
+	if d == nil || d.canonicalSlots == nil {
 		return
 	}
-	<-d.canonicalSlot
+	for range count {
+		<-d.canonicalSlots
+	}
 }
 
 func (d *auditDelivery) run(ctx context.Context) {
@@ -232,10 +243,15 @@ func (d *auditDelivery) run(ctx context.Context) {
 }
 
 func (d *auditDelivery) replay(ctx context.Context) error {
-	if err := d.acquireCanonicalSlot(ctx); err != nil {
+	// Replay takes every permit so it cannot race a strict write for the same
+	// spooled event. Strict writes use one permit each and may proceed in
+	// parallel because their operation-local attempt/result ordering is already
+	// enforced by the request path.
+	slotCount := cap(d.canonicalSlots)
+	if err := d.acquireCanonicalSlots(ctx, slotCount); err != nil {
 		return err
 	}
-	defer d.releaseCanonicalSlot()
+	defer d.releaseCanonicalSlots(slotCount)
 
 	d.mu.Lock()
 	events, err := d.loadBatchLocked(auditReplayBatchSize)

@@ -312,9 +312,55 @@ func TestResizeSandboxPodResourcesRetriesConflictWithFreshPod(t *testing.T) {
 	if resizeUpdates != 2 {
 		t.Fatalf("resize update calls = %d, want 2", resizeUpdates)
 	}
+	gets := 0
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "get" && action.GetResource().Resource == "pods" {
+			gets++
+		}
+	}
+	if gets != 1 {
+		t.Fatalf("pod get calls = %d, want 1 conflict refresh", gets)
+	}
 	container := sandboxRuntimeContainer(t, resized)
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "2Gi")
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "500m")
+}
+
+func TestResizeSandboxPodResourcesUsesUpdatedPodWithoutPreflightGet(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient: client,
+		config:    SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
+		logger:    zap.NewNop(),
+	}
+	quota, err := svc.effectiveSandboxResourceQuota(template, &SandboxConfig{
+		Resources: &SandboxResourceConfig{Memory: "2Gi"},
+	})
+	if err != nil {
+		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+	}
+
+	if _, err := svc.resizeSandboxPodResources(context.Background(), pod, quota); err != nil {
+		t.Fatalf("resizeSandboxPodResources() error = %v", err)
+	}
+	gets := 0
+	resizeUpdates := 0
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "get" && action.GetResource().Resource == "pods" {
+			gets++
+		}
+		if action.GetVerb() == "update" && action.GetSubresource() == "resize" {
+			resizeUpdates++
+		}
+	}
+	if gets != 0 {
+		t.Fatalf("pod get calls = %d, want 0", gets)
+	}
+	if resizeUpdates != 1 {
+		t.Fatalf("resize update calls = %d, want 1", resizeUpdates)
+	}
 }
 
 func TestClaimIdlePodRestoresIdlePodAfterResizeConflict(t *testing.T) {

@@ -55,10 +55,17 @@ func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *cor
 
 	namespace, name := pod.Namespace, pod.Name
 	var updated *corev1.Pod
+	current := pod.DeepCopy()
+	firstAttempt := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
+		if firstAttempt {
+			firstAttempt = false
+		} else {
+			fresh, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			current = fresh
 		}
 		resized := current.DeepCopy()
 		if err := s.applySandboxResourceQuota(resized, quota); err != nil {

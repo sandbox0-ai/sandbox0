@@ -251,16 +251,19 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 			}
 		}
 	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := portalManager.CleanupStalePortals(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
+		log.Printf("ctld stale portal cleanup completed with errors: %v", err)
+	}
+	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
+		log.Printf("ctld stale CSI mount cleanup completed with errors: %v", err)
+	}
+	cleanupCancel()
 	if options.replicator != nil {
 		options.replicator.SetSnapshotProvider(func(ctx context.Context, target ctldportal.PortalReplicator) error {
 			return portalManager.SyncTo(ctx, target)
 		})
 	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
-	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
-		log.Printf("ctld stale CSI mount cleanup completed with errors: %v", err)
-	}
-	cleanupCancel()
 	go portalManager.Run(ctx)
 	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
 	csiErrors, err := csiServer.Start(csiSocket)

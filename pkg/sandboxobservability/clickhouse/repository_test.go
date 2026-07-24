@@ -85,7 +85,7 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 	if !strings.HasPrefix(db.execQuery, "INSERT INTO `sandbox0_observability`.`sandbox_audit_events`") {
 		t.Fatalf("exec query = %s", db.execQuery)
 	}
-	if !strings.Contains(db.execQuery, ") SETTINGS async_insert = 0, wait_for_async_insert = 1 VALUES") {
+	if !strings.Contains(db.execQuery, ") SETTINGS async_insert = 1, wait_for_async_insert = 1, async_insert_use_adaptive_busy_timeout = 0, async_insert_busy_timeout_ms = 10, async_insert_max_query_number = 4 VALUES") {
 		t.Fatalf("exec query must require a durable ClickHouse acknowledgement: %s", db.execQuery)
 	}
 	if strings.Count(db.execQuery, dateTime64NanoPlaceholder) != 2 {

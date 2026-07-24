@@ -11,9 +11,18 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
-const maxInsertBatchSize = 500
-const dateTime64NanoPlaceholder = "fromUnixTimestamp64Nano(?, 'UTC')"
-const auditInsertReliabilitySettings = " SETTINGS async_insert = 0, wait_for_async_insert = 1"
+const (
+	maxInsertBatchSize                = 500
+	dateTime64NanoPlaceholder         = "fromUnixTimestamp64Nano(?, 'UTC')"
+	auditAsyncInsertBusyTimeoutMillis = 10
+	auditAsyncInsertMaxQueryNumber    = 4
+)
+
+var auditInsertReliabilitySettings = fmt.Sprintf(
+	" SETTINGS async_insert = 1, wait_for_async_insert = 1, async_insert_use_adaptive_busy_timeout = 0, async_insert_busy_timeout_ms = %d, async_insert_max_query_number = %d",
+	auditAsyncInsertBusyTimeoutMillis,
+	auditAsyncInsertMaxQueryNumber,
+)
 
 type sqlBackend interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -51,8 +60,8 @@ func NewRepository(db sqlBackend, cfg Config) (*Repository, error) {
 			return time.Now().UTC()
 		},
 	}
-	if batchDB, ok := db.(eventBatchDB); ok {
-		repository.eventBatchInserter = sqlEventBatchInserter{db: batchDB}
+	if sqlDB, ok := db.(*sql.DB); ok {
+		repository.eventBatchInserter = sqlEventBatchInserter{db: sqlDB}
 	}
 	repository.loadRuntimeMetric = repository.queryRuntimeMetric
 	return repository, nil

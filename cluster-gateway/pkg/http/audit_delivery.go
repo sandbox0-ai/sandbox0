@@ -22,7 +22,7 @@ import (
 const (
 	auditReplayInterval   = time.Second
 	auditReplayBatchSize  = 500
-	auditCanonicalSlots   = 5
+	auditCanonicalSlots   = 4
 	auditSpoolWriteShards = 64
 	auditSpoolQuietPeriod = 2 * time.Millisecond
 	auditSpoolDrainLimit  = 40 * time.Millisecond

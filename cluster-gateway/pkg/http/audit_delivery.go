@@ -267,10 +267,6 @@ func (d *auditDelivery) spoolOrCanonicalWithDurability(ctx context.Context, even
 	return false, nil
 }
 
-func (d *auditDelivery) put(event sandboxobservability.Event) error {
-	return d.putWithDurability(event, true)
-}
-
 func (d *auditDelivery) putWithDurability(event sandboxobservability.Event, durable bool) error {
 	d.spoolWrites.Add(1)
 	defer d.spoolWrites.Add(-1)

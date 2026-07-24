@@ -394,14 +394,24 @@ func applyIdleResourceQuotaToPodSpec(spec *corev1.PodSpec, template *SandboxTemp
 	if spec == nil || template == nil {
 		return
 	}
-	quota := idleResourceQuota(template.Spec.MainContainer.Resources)
+	resources := idleResourceRequirements(template.Spec.MainContainer.Resources)
 	for i := range spec.Containers {
 		if spec.Containers[i].Name != "procd" {
 			continue
 		}
-		spec.Containers[i].Resources = BuildResourceRequirements(quota)
+		spec.Containers[i].Resources = resources
 		return
 	}
+}
+
+// idleResourceRequirements keeps warm-pool scheduling requests dense while
+// preserving the template limits. A hot claim still raises requests through
+// in-place resize, but its first process is never throttled by the warm limit.
+func idleResourceRequirements(templateQuota ResourceQuota) corev1.ResourceRequirements {
+	idleResources := BuildResourceRequirements(idleResourceQuota(templateQuota))
+	templateResources := BuildResourceRequirements(templateQuota)
+	idleResources.Limits = templateResources.Limits
+	return idleResources
 }
 
 func idleResourceQuota(templateQuota ResourceQuota) ResourceQuota {

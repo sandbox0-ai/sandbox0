@@ -452,11 +452,11 @@ func (d *auditDelivery) releaseCanonicalSlot() {
 // finishCanonicalBatch releases each event reservation after the ClickHouse
 // outcome is known, then wakes callers waiting on the bounded writer pool.
 func (d *auditDelivery) finishCanonicalBatch(events []sandboxobservability.Event, acknowledged bool) error {
-	d.mu.Lock()
 	var removeErr error
 	if acknowledged {
-		removeErr = d.removeBatchLocked(events)
+		removeErr = d.removeBatch(events)
 	}
+	d.mu.Lock()
 	for _, event := range events {
 		delete(d.canonicalActive, event.EventID)
 	}
@@ -825,7 +825,10 @@ func (d *auditDelivery) loadAvailableBatchContainingLocked(limit int, eventID st
 	return events, nil
 }
 
-func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) error {
+// removeBatch makes acknowledged spool cleanup durable without serializing
+// unrelated canonical writers behind the delivery state lock. Concurrent
+// batches share the directory fsync barrier through waitForDirectorySync.
+func (d *auditDelivery) removeBatch(events []sandboxobservability.Event) error {
 	for _, event := range events {
 		if _, err := uuid.Parse(event.EventID); err != nil {
 			return fmt.Errorf("audit event_id is invalid")
@@ -834,7 +837,7 @@ func (d *auditDelivery) removeBatchLocked(events []sandboxobservability.Event) e
 			return err
 		}
 	}
-	return syncAuditDirectory(d.dir)
+	return d.waitForDirectorySync()
 }
 
 func (d *auditDelivery) path(eventID string) string {

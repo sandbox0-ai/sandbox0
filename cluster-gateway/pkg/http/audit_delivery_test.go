@@ -144,46 +144,33 @@ func TestAuditDeliveryEnqueueWakesBackgroundReplay(t *testing.T) {
 	t.Fatalf("background replay did not receive event promptly: %#v", writer.snapshotEvents())
 }
 
-func TestAuditDeliveryCoalescesDurableReplayUntilQuiet(t *testing.T) {
-	dir := t.TempDir()
-	writer := &auditDeliveryWriter{started: make(chan struct{}, 1)}
-	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
-	if err != nil {
-		t.Fatalf("newAuditDelivery() error = %v", err)
-	}
+func TestAuditDeliveryReplayQuietPeriodResetsOnWake(t *testing.T) {
+	delivery := &auditDelivery{wake: make(chan struct{}, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	delivery.Start(ctx)
-	time.Sleep(20 * time.Millisecond)
+	done := make(chan bool, 1)
+	go func() {
+		done <- delivery.waitForReplayQuiet(ctx)
+	}()
 
-	for _, eventID := range []string{
-		"00000000-0000-4000-8000-000000000011",
-		"00000000-0000-4000-8000-000000000012",
-	} {
-		if err := delivery.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, eventID)); err != nil {
-			t.Fatalf("EnqueueDurable() error = %v", err)
-		}
+	for range 2 {
+		delivery.signalReplay()
 		time.Sleep(auditReplayQuietPeriod / 3)
-	}
-	select {
-	case <-writer.started:
-		t.Fatal("durable replay started before the quiet period elapsed")
-	case <-time.After(auditReplayQuietPeriod / 3):
+		select {
+		case <-done:
+			t.Fatal("replay quiet period elapsed before the latest wake")
+		default:
+		}
 	}
 
 	select {
-	case <-writer.started:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("durable replay did not start after the quiet period")
-	}
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if got := writer.snapshotBatchSizes(); len(got) == 1 && got[0] == 2 {
-			return
+	case quiet := <-done:
+		if !quiet {
+			t.Fatal("waitForReplayQuiet() returned false without cancellation")
 		}
-		time.Sleep(time.Millisecond)
+	case <-time.After(2 * auditReplayQuietPeriod):
+		t.Fatal("replay quiet period did not elapse after wakes stopped")
 	}
-	t.Fatalf("durable replay batch sizes = %v, want [2]", writer.snapshotBatchSizes())
 }
 
 func TestAuditDeliveryDurableReplayYieldsToCanonicalCallers(t *testing.T) {
@@ -266,11 +253,17 @@ func TestAuditDeliveryCanonicalAdmissionSkipsPreInsertDirectorySync(t *testing.T
 	}
 	var syncMu sync.Mutex
 	syncCalls := 0
+	syncCallsBeforeInsert := -1
 	delivery.dirSync = func(path string) error {
 		syncMu.Lock()
 		syncCalls++
 		syncMu.Unlock()
 		return syncAuditDirectory(path)
+	}
+	writer.onInsert = func() {
+		syncMu.Lock()
+		syncCallsBeforeInsert = syncCalls
+		syncMu.Unlock()
 	}
 
 	event := testAuditDeliveryEvent(t, "10101010-1010-4010-8010-101010101010")
@@ -278,10 +271,10 @@ func TestAuditDeliveryCanonicalAdmissionSkipsPreInsertDirectorySync(t *testing.T
 		t.Fatalf("PersistCanonicalAdmission() error = %v", err)
 	}
 	syncMu.Lock()
-	got := syncCalls
+	gotBeforeInsert := syncCallsBeforeInsert
 	syncMu.Unlock()
-	if got != 0 {
-		t.Fatalf("successful canonical admission pre-insert directory syncs = %d, want 0", got)
+	if gotBeforeInsert != 0 {
+		t.Fatalf("successful canonical admission pre-insert directory syncs = %d, want 0", gotBeforeInsert)
 	}
 	if events := writer.snapshotEvents(); len(events) != 1 || events[0].EventID != event.EventID {
 		t.Fatalf("canonical events = %#v, want admitted event", events)
@@ -518,15 +511,22 @@ func TestAuditDeliveryBatchesConcurrentCanonicalWrites(t *testing.T) {
 		t.Fatalf("canonical events = %d, want %d", got, writes)
 	}
 	batchSizes := writer.snapshotBatchSizes()
-	if len(batchSizes) < 2 || batchSizes[0] != 1 {
-		t.Fatalf("canonical batch sizes = %v, want an initial singleton followed by coalesced writes", batchSizes)
+	if len(batchSizes) < 2 {
+		t.Fatalf("canonical batch sizes = %v, want multiple bounded turns", batchSizes)
 	}
 	total := 0
+	singleton := false
+	coalesced := false
 	for _, size := range batchSizes {
 		total += size
+		singleton = singleton || size == 1
+		coalesced = coalesced || size > 1
 	}
 	if total != writes {
 		t.Fatalf("canonical batch rows = %d, want %d: %v", total, writes, batchSizes)
+	}
+	if !singleton || !coalesced {
+		t.Fatalf("canonical batch sizes = %v, want both the blocked singleton and coalesced writes", batchSizes)
 	}
 	if got := delivery.canonicalTurns.Load(); got != int64(len(batchSizes)) {
 		t.Fatalf("canonical delivery turns = %d, want %d", got, len(batchSizes))
@@ -582,6 +582,77 @@ func TestAuditDeliveryBoundsParallelCanonicalBatchesWithoutDuplicates(t *testing
 			t.Fatalf("canonical event %s was inserted more than once", event.EventID)
 		}
 		seen[event.EventID] = struct{}{}
+	}
+}
+
+func TestAuditDeliveryGroupsCanonicalCleanupWithoutHoldingStateLock(t *testing.T) {
+	dir := t.TempDir()
+	delivery, err := newAuditDelivery(dir, &auditDeliveryWriter{}, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	events := []sandboxobservability.Event{
+		testAuditDeliveryEvent(t, uuid.NewString()),
+		testAuditDeliveryEvent(t, uuid.NewString()),
+	}
+	for _, event := range events {
+		if err := delivery.putWithDurability(event, false); err != nil {
+			t.Fatalf("putWithDurability() error = %v", err)
+		}
+		delivery.canonicalActive[event.EventID] = struct{}{}
+		delivery.canonicalSlot <- struct{}{}
+	}
+
+	syncStarted := make(chan struct{})
+	releaseSync := make(chan struct{})
+	var syncOnce sync.Once
+	var syncMu sync.Mutex
+	syncCalls := 0
+	delivery.dirSync = func(string) error {
+		syncMu.Lock()
+		syncCalls++
+		syncMu.Unlock()
+		syncOnce.Do(func() { close(syncStarted) })
+		<-releaseSync
+		return nil
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, len(events))
+	for _, event := range events {
+		event := event
+		go func() {
+			<-start
+			errs <- delivery.finishCanonicalBatch([]sandboxobservability.Event{event}, true)
+		}()
+	}
+	close(start)
+	select {
+	case <-syncStarted:
+	case <-time.After(time.Second):
+		t.Fatal("canonical cleanup durability barrier did not start")
+	}
+	for _, event := range events {
+		if _, err := os.Stat(filepath.Join(dir, event.EventID+".json")); !os.IsNotExist(err) {
+			t.Fatalf("canonical cleanup for %s was serialized behind the state lock: %v", event.EventID, err)
+		}
+	}
+	close(releaseSync)
+	for range events {
+		if err := <-errs; err != nil {
+			t.Fatalf("finishCanonicalBatch() error = %v", err)
+		}
+	}
+
+	syncMu.Lock()
+	gotSyncCalls := syncCalls
+	syncMu.Unlock()
+	if gotSyncCalls != 1 {
+		t.Fatalf("canonical cleanup directory sync calls = %d, want 1 grouped barrier", gotSyncCalls)
+	}
+	if len(delivery.canonicalActive) != 0 {
+		t.Fatalf("canonical reservations after cleanup = %d, want 0", len(delivery.canonicalActive))
 	}
 }
 

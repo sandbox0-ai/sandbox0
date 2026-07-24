@@ -25,7 +25,7 @@ const (
 	auditReplayQuietPeriod = 25 * time.Millisecond
 	auditCanonicalSlots    = 4
 	auditSpoolWriteShards  = 64
-	auditSpoolQuietPeriod  = 5 * time.Millisecond
+	auditSpoolQuietPeriod  = 2 * time.Millisecond
 	auditSpoolDrainLimit   = 40 * time.Millisecond
 	auditDirSyncQuietTime  = time.Millisecond
 	auditDirSyncWaitLimit  = 10 * time.Millisecond

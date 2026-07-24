@@ -110,6 +110,34 @@ func TestGetPolicyReturnsTeamOverride(t *testing.T) {
 	}
 }
 
+func TestGetLimitUsesConfiguredPolicyStore(t *testing.T) {
+	source := &countingPolicyStore{policy: &Policy{
+		TeamID:     "team-1",
+		Dimension:  DimensionActiveSandboxes,
+		Kind:       KindCapacity,
+		LimitValue: 120,
+		Source:     SourceTeamOverride,
+	}}
+	repo := NewRepositoryWithDB(&fakeDB{
+		queryRowFn: func(context.Context, string, ...any) pgx.Row {
+			t.Fatal("GetLimit must use the configured policy store")
+			return fakeRow{}
+		},
+	})
+	repo.SetLimitPolicyStore(source)
+
+	limit, err := repo.GetLimit(context.Background(), "team-1", DimensionActiveSandboxes)
+	if err != nil {
+		t.Fatalf("GetLimit: %v", err)
+	}
+	if limit == nil || limit.LimitValue != 120 {
+		t.Fatalf("limit = %+v, want active sandbox limit 120", limit)
+	}
+	if source.calls.Load() != 1 {
+		t.Fatalf("source calls = %d, want 1", source.calls.Load())
+	}
+}
+
 func TestEnsureDefaultPoliciesRejectsInvalidLimits(t *testing.T) {
 	tests := []struct {
 		name     string

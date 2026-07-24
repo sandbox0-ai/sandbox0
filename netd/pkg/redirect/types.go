@@ -4,6 +4,7 @@ import "context"
 
 type Manager interface {
 	Sync(ctx context.Context, sandboxIPs []string, bypassCIDRs []string) error
+	ForceSync(ctx context.Context, sandboxIPs []string, bypassCIDRs []string) error
 	Cleanup(ctx context.Context) error
 }
 

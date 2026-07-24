@@ -22,6 +22,7 @@ type sqlBackend interface {
 
 type Repository struct {
 	db                  sqlBackend
+	eventBatchInserter  eventBatchInserter
 	cfg                 Config
 	eventsTable         string
 	logsTable           string
@@ -49,6 +50,9 @@ func NewRepository(db sqlBackend, cfg Config) (*Repository, error) {
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
+	}
+	if batchDB, ok := db.(eventBatchDB); ok {
+		repository.eventBatchInserter = sqlEventBatchInserter{db: batchDB}
 	}
 	repository.loadRuntimeMetric = repository.queryRuntimeMetric
 	return repository, nil
@@ -106,12 +110,23 @@ func (r *Repository) InsertEvents(ctx context.Context, events []sandboxobservabi
 		if chunkSize > maxInsertBatchSize {
 			chunkSize = maxInsertBatchSize
 		}
-		query, args, err := r.buildInsertSQL(normalized[:chunkSize])
-		if err != nil {
-			return err
-		}
-		if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("%w: insert events: %v", sandboxobservability.ErrBackendUnavailable, err)
+		chunk := normalized[:chunkSize]
+		if r.eventBatchInserter != nil {
+			rows, err := r.buildBatchInsertRows(chunk)
+			if err != nil {
+				return err
+			}
+			if err := r.eventBatchInserter.InsertEventBatch(ctx, r.buildBatchInsertSQL(), rows); err != nil {
+				return fmt.Errorf("%w: insert events: %v", sandboxobservability.ErrBackendUnavailable, err)
+			}
+		} else {
+			query, args, err := r.buildInsertSQL(chunk)
+			if err != nil {
+				return err
+			}
+			if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
+				return fmt.Errorf("%w: insert events: %v", sandboxobservability.ErrBackendUnavailable, err)
+			}
 		}
 		normalized = normalized[chunkSize:]
 	}
@@ -150,6 +165,27 @@ func (r *Repository) listEvents(ctx context.Context, query sandboxobservability.
 		NextCursor: nextCursor,
 		Watermark:  lastWatermark(events),
 	}, nil
+}
+
+func (r *Repository) buildBatchInsertSQL() string {
+	return "INSERT INTO " + r.eventsTable + " (" + auditEventSelectColumns + ")"
+}
+
+func (r *Repository) buildBatchInsertRows(events []sandboxobservability.Event) ([][]any, error) {
+	columnCount := auditEventInsertColumnCount()
+	rows := make([][]any, 0, len(events))
+	for _, event := range events {
+		row, err := newAuditEventRow(event)
+		if err != nil {
+			return nil, err
+		}
+		values := row.batchInsertValues()
+		if len(values) != columnCount {
+			return nil, fmt.Errorf("audit event row has %d values for %d insert columns", len(values), columnCount)
+		}
+		rows = append(rows, values)
+	}
+	return rows, nil
 }
 
 func (r *Repository) buildInsertSQL(events []sandboxobservability.Event) (string, []any, error) {

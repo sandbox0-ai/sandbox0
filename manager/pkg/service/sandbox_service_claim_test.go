@@ -108,6 +108,22 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
 	}
+	metadataPatches := 0
+	fullUpdates := 0
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource != "pods" || action.GetSubresource() != "" {
+			continue
+		}
+		switch action.GetVerb() {
+		case "patch":
+			metadataPatches++
+		case "update":
+			fullUpdates++
+		}
+	}
+	if metadataPatches != 1 || fullUpdates != 0 {
+		t.Fatalf("pod metadata patches = %d, full updates = %d; want 1 and 0", metadataPatches, fullUpdates)
+	}
 }
 
 func TestClaimIdlePodReservationPreventsStaleCacheReuse(t *testing.T) {
@@ -392,7 +408,7 @@ func TestClaimIdlePodFallsBackWhenPodStartsDeletingDuringClaim(t *testing.T) {
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
 
 	client := fake.NewSimpleClientset(readyPod.DeepCopy())
-	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonInvalid,
 			Message: `Pod "idle-ready" is invalid: metadata.finalizers: Forbidden: no new finalizers can be added if the object is being deleted, found new finalizers []string{"sandbox0.ai/sandbox-cleanup"}`,
@@ -433,7 +449,7 @@ func TestClaimIdlePodFallsBackAfterRepeatedUpdateConflicts(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset(clientObjects...)
 	updateConflicts := 0
-	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		updateConflicts++
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonConflict,
@@ -551,6 +567,399 @@ func TestClaimIdlePodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 	if len(removed) != 0 {
 		t.Fatalf("network policy removals = %d, want 0; lifecycle controller owns delete cleanup", len(removed))
 	}
+}
+
+func TestClaimIdlePodCanDeferHotRuntimePreparation(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{
+				Resources: v1alpha1.ResourceQuota{
+					CPU:    resource.MustParse("250m"),
+					Memory: resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	templateHash, err := controller.TemplateSpecHash(template)
+	if err != nil {
+		t.Fatalf("template hash: %v", err)
+	}
+	readyPod.Annotations[controller.AnnotationTemplateSpecHash] = templateHash
+	readyPod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "pool-template-a",
+		UID:        types.UID("pool-uid"),
+	}}
+	applyCalls := 0
+	client := fake.NewSimpleClientset(readyPod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:            client,
+		podLister:            newClaimTestPodLister(t, readyPod),
+		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkProvider: &assertingNetworkProvider{applyFunc: func(network.SandboxPolicyInput) {
+			applyCalls++
+		}},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	req := &ClaimRequest{
+		TeamID:                     "team-a",
+		UserID:                     "user-a",
+		deferHotRuntimePreparation: true,
+	}
+	pod, err := svc.claimIdlePod(context.Background(), template, req)
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod == nil {
+		t.Fatal("claimIdlePod() = nil, want claimed pod")
+	}
+	if applyCalls != 0 {
+		t.Fatalf("network apply calls = %d, want 0", applyCalls)
+	}
+	resizeCalls := 0
+	for _, action := range client.Actions() {
+		if action.Matches("patch", "pods") && action.GetSubresource() == "resize" {
+			resizeCalls++
+		}
+	}
+	if resizeCalls != 0 {
+		t.Fatalf("resize calls = %d, want 0", resizeCalls)
+	}
+	if req.deferredHotResizeQuota == nil {
+		t.Fatal("deferred resize quota is nil")
+	}
+	if pod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+		t.Fatalf("returned pod pool type = %q, want active", pod.Labels[controller.LabelPoolType])
+	}
+	if len(pod.OwnerReferences) != 0 {
+		t.Fatalf("returned pod owner references = %v, want none", pod.OwnerReferences)
+	}
+	if pod.Annotations[controller.AnnotationHotClaimFinalizationPending] != "" {
+		t.Fatal("returned pod still has pending finalization annotation")
+	}
+	livePod, err := client.CoreV1().Pods(readyPod.Namespace).Get(context.Background(), readyPod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get live pod: %v", err)
+	}
+	if livePod.Labels[controller.LabelPoolType] != controller.PoolTypeIdle {
+		t.Fatalf("live pod pool type = %q, want idle until finalization", livePod.Labels[controller.LabelPoolType])
+	}
+	if len(livePod.OwnerReferences) != 1 || livePod.OwnerReferences[0].Name != "pool-template-a" {
+		t.Fatalf("live pod owner references = %v, want warm-pool ReplicaSet", livePod.OwnerReferences)
+	}
+	if got := livePod.Annotations[controller.AnnotationHotClaimFinalizationPending]; got != readyPod.Name {
+		t.Fatalf("pending finalization = %q, want %q", got, readyPod.Name)
+	}
+	if req.pendingHotClaimFinalization == nil {
+		t.Fatal("pending hot claim finalization is nil")
+	}
+}
+
+func TestFinalizePendingHotClaimIsIdempotent(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	pod.Labels[controller.LabelSandboxID] = "sandbox-a"
+	pod.Annotations[controller.AnnotationSandboxID] = "sandbox-a"
+	pod.Annotations[controller.AnnotationHotClaimFinalizationPending] = "sandbox-a"
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "pool-template-a",
+		UID:        types.UID("pool-uid"),
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{k8sClient: client, logger: zap.NewNop()}
+	pending := pendingHotClaimFinalization{
+		namespace: pod.Namespace,
+		podName:   pod.Name,
+		sandboxID: "sandbox-a",
+	}
+
+	if err := svc.finalizePendingHotClaim(context.Background(), pending); err != nil {
+		t.Fatalf("finalizePendingHotClaim() error = %v", err)
+	}
+	if err := svc.finalizePendingHotClaim(context.Background(), pending); err != nil {
+		t.Fatalf("second finalizePendingHotClaim() error = %v", err)
+	}
+	livePod, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get finalized pod: %v", err)
+	}
+	if livePod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+		t.Fatalf("pool type = %q, want active", livePod.Labels[controller.LabelPoolType])
+	}
+	if len(livePod.OwnerReferences) != 0 {
+		t.Fatalf("owner references = %v, want none", livePod.OwnerReferences)
+	}
+	if livePod.Annotations[controller.AnnotationHotClaimFinalizationPending] != "" {
+		t.Fatal("pending finalization annotation was not removed")
+	}
+}
+
+func TestNextHotClaimFinalizationDelayWaitsForBurstToSettle(t *testing.T) {
+	base := time.Unix(100, 0)
+	svc := &SandboxService{
+		hotClaimFinalizationLastScheduled: base.Add(time.Second),
+	}
+	pending := pendingHotClaimFinalization{scheduledAt: base}
+
+	if got := svc.nextHotClaimFinalizationDelay(pending, base.Add(1500*time.Millisecond)); got != time.Second {
+		t.Fatalf("delay = %s, want 1s quiet-period remainder", got)
+	}
+	if got := svc.nextHotClaimFinalizationDelay(pending, base.Add(3*time.Second)); got != 0 {
+		t.Fatalf("delay after quiet period = %s, want 0", got)
+	}
+	if got := svc.nextHotClaimFinalizationDelay(pending, base.Add(hotClaimPoolRefillMaxDelay)); got != 0 {
+		t.Fatalf("delay at maximum age = %s, want 0", got)
+	}
+}
+
+func TestHotClaimableIdlePodRejectsClaimedIdentityAndPendingFinalization(t *testing.T) {
+	svc := &SandboxService{}
+	tests := map[string]func(*corev1.Pod){
+		"sandbox id label": func(pod *corev1.Pod) {
+			pod.Labels[controller.LabelSandboxID] = "sandbox-a"
+		},
+		"sandbox id annotation": func(pod *corev1.Pod) {
+			pod.Annotations[controller.AnnotationSandboxID] = "sandbox-a"
+		},
+		"pending finalization": func(pod *corev1.Pod) {
+			pod.Annotations[controller.AnnotationHotClaimFinalizationPending] = "sandbox-a"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			pod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+			mutate(pod)
+			if svc.isHotClaimableIdlePod(pod, claimTestTemplateHash("template-a")) {
+				t.Fatal("isHotClaimableIdlePod() = true, want false")
+			}
+		})
+	}
+}
+
+func TestClaimSandboxRunsHotRuntimePreparationConcurrently(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(template.Name)
+	if err != nil {
+		t.Fatalf("template namespace: %v", err)
+	}
+	template.Namespace = templateNamespace
+
+	resizeStarted := make(chan struct{}, 1)
+	networkStarted := make(chan struct{}, 1)
+	procdStarted := make(chan struct{}, 1)
+	persistStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	defer unblock()
+	signalAndWait := func(started chan<- struct{}) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		signalAndWait(procdStarted)
+		if err := spec.WriteSuccess(w, http.StatusOK, InitializeResponse{
+			SandboxID: "sandbox-a",
+			TeamID:    "team-a",
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}))
+	defer procd.Close()
+	procdHost, procdPort := splitTestServerAddress(t, procd)
+
+	node := newClaimTestNode("node-a", "10.0.0.1")
+	node.Labels = map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue}
+	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")
+	idlePod.Spec.NodeName = node.Name
+	idlePod.Status.PodIP = procdHost
+
+	client := fake.NewSimpleClientset(idlePod.DeepCopy(), node.DeepCopy())
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "resize" {
+			return false, nil, nil
+		}
+		signalAndWait(resizeStarted)
+		return false, nil, nil
+	})
+	store := &blockingClaimSandboxStore{
+		memorySandboxStore: &memorySandboxStore{},
+		started:            persistStarted,
+		release:            release,
+	}
+
+	svc := &SandboxService{
+		k8sClient:              client,
+		podLister:              newClaimTestPodLister(t, idlePod),
+		nodeLister:             newClaimTestNodeLister(t, node),
+		secretLister:           newClaimTestSecretLister(t),
+		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		NetworkPolicyService:   NewNetworkPolicyService(zap.NewNop()),
+		networkProvider:        &assertingNetworkProvider{applyFunc: func(network.SandboxPolicyInput) { signalAndWait(networkStarted) }},
+		sandboxStore:           store,
+		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			ProcdPort:           procdPort,
+			ProcdInitTimeout:    2 * time.Second,
+			SandboxMemoryPerCPU: "4Gi",
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	type claimResult struct {
+		response *ClaimResponse
+		err      error
+	}
+	result := make(chan claimResult, 1)
+	go func() {
+		response, claimErr := svc.ClaimSandbox(context.Background(), &ClaimRequest{
+			Template: template.Name,
+			TeamID:   "team-a",
+			UserID:   "user-a",
+			Config: &SandboxConfig{
+				Resources: &SandboxResourceConfig{Memory: "2Gi"},
+			},
+		})
+		result <- claimResult{response: response, err: claimErr}
+	}()
+
+	for name, started := range map[string]<-chan struct{}{
+		"resize":  resizeStarted,
+		"network": networkStarted,
+		"procd":   procdStarted,
+		"persist": persistStarted,
+	} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("%s preparation did not start concurrently", name)
+		}
+	}
+	unblock()
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("ClaimSandbox() error = %v", got.err)
+		}
+		if got.response == nil || got.response.SandboxID == "" {
+			t.Fatalf("ClaimSandbox() response = %+v, want sandbox id", got.response)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ClaimSandbox() did not complete")
+	}
+}
+
+func TestClaimSandboxMarksConcurrentDurableCommitDeletedWhenProcdInitializationFails(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(template.Name)
+	if err != nil {
+		t.Fatalf("template namespace: %v", err)
+	}
+	template.Namespace = templateNamespace
+
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	defer procd.Close()
+	procdHost, procdPort := splitTestServerAddress(t, procd)
+
+	node := newClaimTestNode("node-a", "10.0.0.1")
+	node.Labels = map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue}
+	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")
+	idlePod.UID = types.UID("pod-uid")
+	idlePod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "pool-default",
+		UID:        types.UID("pool-uid"),
+	}}
+	idlePod.Spec.NodeName = node.Name
+	idlePod.Status.PodIP = procdHost
+
+	store := newFakeHotClaimReservationStore()
+	client := fake.NewSimpleClientset(idlePod.DeepCopy(), node.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:                client,
+		podLister:                newClaimTestPodLister(t, idlePod),
+		nodeLister:               newClaimTestNodeLister(t, node),
+		secretLister:             newClaimTestSecretLister(t),
+		templateLister:           staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		sandboxStore:             store,
+		hotClaimReservationStore: store,
+		NetworkPolicyService:     NewNetworkPolicyService(zap.NewNop()),
+		procdClient:              NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
+		internalTokenGenerator:   staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			ProcdPort:        procdPort,
+			ProcdInitTimeout: 20 * time.Millisecond,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{
+		Template: template.Name,
+		TeamID:   "team-a",
+		UserID:   "user-a",
+	})
+	if err == nil || !strings.Contains(err.Error(), "initialize procd") {
+		t.Fatalf("ClaimSandbox() error = %v, want procd initialization failure", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.records) != 1 {
+		t.Fatalf("sandbox records = %d, want 1", len(store.records))
+	}
+	for sandboxID, record := range store.records {
+		if record.Status != SandboxStatusDeleted {
+			t.Fatalf("sandbox %s status = %q, want deleted", sandboxID, record.Status)
+		}
+	}
+	store.reservationMu.Lock()
+	defer store.reservationMu.Unlock()
+	if len(store.reservations) != 0 {
+		t.Fatalf("hot claim reservations = %d, want 0", len(store.reservations))
+	}
+}
+
+type blockingClaimSandboxStore struct {
+	*memorySandboxStore
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s *blockingClaimSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecord) error {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.memorySandboxStore.UpsertSandbox(ctx, record)
 }
 
 func TestWaitForPodClaimReadyUsesSandboxReadinessWithoutPodReady(t *testing.T) {
@@ -870,7 +1279,7 @@ func TestCreateNewPodDefersNetworkApplyUntilPodHasNetworkIdentity(t *testing.T) 
 		t.Fatal("network policy annotation is empty")
 	}
 	if pod.Annotations[controller.AnnotationNetworkPolicyHash] == "" {
-		t.Fatal("network policy hash annotation is empty")
+		t.Fatal("unrestricted network policy hash is empty")
 	}
 
 	pods, err := client.CoreV1().Pods("ns-a").List(context.Background(), metav1.ListOptions{})

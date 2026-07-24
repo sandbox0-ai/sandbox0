@@ -185,7 +185,7 @@ func TestCreateNewPodAppliesTemplateResourcesByDefault(t *testing.T) {
 	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "25m")
 }
 
-func TestClaimIdlePodAppliesTemplateResourcesByDefault(t *testing.T) {
+func TestClaimIdlePodPreservesDenseRequestsWhenTemplateLimitsMatch(t *testing.T) {
 	template := newSandboxResourceTestTemplate(t)
 	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")
 	node := newClaimTestNode("node-a", "10.0.0.1")
@@ -211,9 +211,9 @@ func TestClaimIdlePodAppliesTemplateResourcesByDefault(t *testing.T) {
 	container := sandboxRuntimeContainer(t, pod)
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "1Gi")
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "250m")
-	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "256Mi")
-	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "25m")
-	assertResizeSubresourceUpdate(t, client.Actions())
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "64Mi")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "10m")
+	assertNoResizeSubresourceUpdate(t, client.Actions())
 }
 
 func TestClaimIdlePodAppliesMinimumCPUToTemplateResources(t *testing.T) {
@@ -278,12 +278,12 @@ func TestClaimIdlePodAppliesMemoryOverride(t *testing.T) {
 	assertResizeSubresourceUpdate(t, client.Actions())
 }
 
-func TestResizeSandboxPodResourcesRetriesConflictWithFreshPod(t *testing.T) {
+func TestResizeSandboxPodResourcesRetriesConflictWithoutPreflightGet(t *testing.T) {
 	template := newSandboxResourceTestTemplate(t)
 	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	resizeUpdates := 0
-	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "resize" {
 			return false, nil, nil
 		}
@@ -312,9 +312,55 @@ func TestResizeSandboxPodResourcesRetriesConflictWithFreshPod(t *testing.T) {
 	if resizeUpdates != 2 {
 		t.Fatalf("resize update calls = %d, want 2", resizeUpdates)
 	}
+	gets := 0
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "get" && action.GetResource().Resource == "pods" {
+			gets++
+		}
+	}
+	if gets != 0 {
+		t.Fatalf("pod get calls = %d, want 0", gets)
+	}
 	container := sandboxRuntimeContainer(t, resized)
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "2Gi")
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "500m")
+}
+
+func TestResizeSandboxPodResourcesUsesUpdatedPodWithoutPreflightGet(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient: client,
+		config:    SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
+		logger:    zap.NewNop(),
+	}
+	quota, err := svc.effectiveSandboxResourceQuota(template, &SandboxConfig{
+		Resources: &SandboxResourceConfig{Memory: "2Gi"},
+	})
+	if err != nil {
+		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+	}
+
+	if _, err := svc.resizeSandboxPodResources(context.Background(), pod, quota); err != nil {
+		t.Fatalf("resizeSandboxPodResources() error = %v", err)
+	}
+	gets := 0
+	resizeUpdates := 0
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "get" && action.GetResource().Resource == "pods" {
+			gets++
+		}
+		if action.GetVerb() == "patch" && action.GetSubresource() == "resize" {
+			resizeUpdates++
+		}
+	}
+	if gets != 0 {
+		t.Fatalf("pod get calls = %d, want 0", gets)
+	}
+	if resizeUpdates != 1 {
+		t.Fatalf("resize update calls = %d, want 1", resizeUpdates)
+	}
 }
 
 func TestClaimIdlePodRestoresIdlePodAfterResizeConflict(t *testing.T) {
@@ -326,7 +372,7 @@ func TestClaimIdlePodRestoresIdlePodAfterResizeConflict(t *testing.T) {
 	client := fake.NewSimpleClientset(idlePod.DeepCopy(), node.DeepCopy())
 	resizeUpdates := 0
 	deletes := 0
-	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "resize" {
 			return false, nil, nil
 		}
@@ -540,11 +586,20 @@ func assertResizePolicy(t *testing.T, policies []corev1.ContainerResizePolicy, r
 func assertResizeSubresourceUpdate(t *testing.T, actions []k8stesting.Action) {
 	t.Helper()
 	for _, action := range actions {
-		if action.Matches("update", "pods") && action.GetSubresource() == "resize" {
+		if action.Matches("patch", "pods") && action.GetSubresource() == "resize" {
 			return
 		}
 	}
-	t.Fatalf("missing update pods/resize action; actions = %#v", actions)
+	t.Fatalf("missing patch pods/resize action; actions = %#v", actions)
+}
+
+func assertNoResizeSubresourceUpdate(t *testing.T, actions []k8stesting.Action) {
+	t.Helper()
+	for _, action := range actions {
+		if action.Matches("patch", "pods") && action.GetSubresource() == "resize" {
+			t.Fatalf("unexpected patch pods/resize action; actions = %#v", actions)
+		}
+	}
 }
 
 func contains(s, substr string) bool {

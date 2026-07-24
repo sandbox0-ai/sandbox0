@@ -61,6 +61,7 @@ const (
 	AnnotationRuntimeGeneration            = "sandbox0.ai/runtime-generation"
 	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
+	AnnotationHotClaimFinalizationPending  = "sandbox0.ai/hot-claim-finalization-pending"
 	AnnotationTemplateTeamID               = "sandbox0.ai/template-team-id"
 	AnnotationTemplateUserID               = "sandbox0.ai/template-user-id"
 	AnnotationClusterAutoscalerSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
@@ -68,7 +69,8 @@ const (
 
 	OwnerKindTeamWarmPool = "team_warm_pool"
 
-	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
+	unhealthyIdlePodRepairGracePeriod      = 2 * time.Minute
+	pendingHotClaimFinalizationGracePeriod = 10 * time.Second
 )
 
 func TemplateLogicalID(template *v1alpha1.SandboxTemplate) string {
@@ -148,28 +150,46 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		return 0, fmt.Errorf("reconcile replicaset template: %w", err)
 	}
 
-	// 3. Drain stale idle pods atomically with delete preconditions.
+	// 3. Recover hot claims whose request worker stopped before detaching the
+	// claimed pod from the warm-pool ReplicaSet.
+	pendingClaimRequeueAfter, err := pm.finalizePendingHotClaims(ctx, template)
+	if err != nil {
+		return 0, fmt.Errorf("finalize pending hot claims: %w", err)
+	}
+
+	// 4. Drain stale idle pods atomically with delete preconditions.
 	if err := pm.drainStaleIdlePods(ctx, template, desiredTemplateHash); err != nil {
 		return 0, fmt.Errorf("drain stale idle pods: %w", err)
 	}
 
-	// 4. Repair current-hash idle pods that are stuck and will keep the
+	// 5. Repair current-hash idle pods that are stuck and will keep the
 	// ReplicaSet from creating replacements.
 	if err := pm.repairUnhealthyIdlePods(ctx, template, desiredTemplateHash); err != nil {
 		return 0, fmt.Errorf("repair unhealthy idle pods: %w", err)
 	}
 
-	// 5. Keep the warm pool fixed at minIdle. Template autoscaling is disabled
+	// 6. Keep the warm pool fixed at minIdle. Template autoscaling is disabled
 	// because burst cold claims can already stress the data plane; expanding the
 	// idle pool at the same time compounds that pressure and may create unused
 	// pods after the burst ends.
 	currentReplicas := getInt32Value(rs.Spec.Replicas)
 	desiredReplicas := desiredPoolReplicas(template)
 	if rs.Spec.Replicas == nil || currentReplicas != desiredReplicas {
-		return pm.reconcileReplicaSetReplicas(ctx, template, rs, desiredReplicas)
+		replicaRequeueAfter, reconcileErr := pm.reconcileReplicaSetReplicas(ctx, template, rs, desiredReplicas)
+		return earlierPositiveDuration(pendingClaimRequeueAfter, replicaRequeueAfter), reconcileErr
 	}
 
-	return 0, nil
+	return pendingClaimRequeueAfter, nil
+}
+
+func earlierPositiveDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
 }
 
 // reconcileReplicaSetReplicas updates the warm-pool size to the configured minimum.
@@ -543,6 +563,93 @@ func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1
 		)
 	}
 	return nil
+}
+
+func (pm *PoolManager) finalizePendingHotClaims(ctx context.Context, template *v1alpha1.SandboxTemplate) (time.Duration, error) {
+	pods, err := pm.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
+		LabelTemplateID: template.Name,
+		LabelPoolType:   PoolTypeIdle,
+	}))
+	if err != nil {
+		return 0, err
+	}
+
+	now := time.Now()
+	var requeueAfter time.Duration
+	finalized := 0
+	for _, pod := range pods {
+		sandboxID := pod.Annotations[AnnotationHotClaimFinalizationPending]
+		if sandboxID == "" {
+			continue
+		}
+		claimedAt, parseErr := time.Parse(time.RFC3339, pod.Annotations[AnnotationClaimedAt])
+		if parseErr != nil {
+			claimedAt = pod.CreationTimestamp.Time
+		}
+		remaining := pendingHotClaimFinalizationGracePeriod - now.Sub(claimedAt)
+		if remaining > 0 {
+			requeueAfter = earlierPositiveDuration(requeueAfter, remaining)
+			continue
+		}
+
+		updated, err := pm.finalizePendingHotClaimWithRetry(ctx, pod.Namespace, pod.Name, sandboxID)
+		if err != nil {
+			return 0, err
+		}
+		if updated {
+			finalized++
+		}
+	}
+
+	if finalized > 0 {
+		pm.recorder.Eventf(template, corev1.EventTypeNormal, "PendingHotClaimsFinalized",
+			"Finalized %d hot claim(s) left attached to the warm pool", finalized)
+		pm.logger.Info("Finalized pending hot claims",
+			zap.String("template", template.Name),
+			zap.Int("count", finalized),
+		)
+	}
+	return requeueAfter, nil
+}
+
+func (pm *PoolManager) finalizePendingHotClaimWithRetry(
+	ctx context.Context,
+	namespace string,
+	podName string,
+	sandboxID string,
+) (bool, error) {
+	finalized := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pod, err := pm.k8sClient.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if pod.Labels[LabelPoolType] != PoolTypeIdle ||
+			pod.Annotations[AnnotationHotClaimFinalizationPending] != sandboxID {
+			return nil
+		}
+		if pod.Annotations[AnnotationSandboxID] != sandboxID ||
+			pod.Labels[LabelSandboxID] != sandboxID {
+			return fmt.Errorf("pending hot claim %s/%s has inconsistent sandbox identity", namespace, podName)
+		}
+
+		updated := pod.DeepCopy()
+		updated.Labels[LabelPoolType] = PoolTypeActive
+		delete(updated.Annotations, AnnotationHotClaimFinalizationPending)
+		updated.OwnerReferences = nil
+		if _, err := pm.k8sClient.CoreV1().Pods(namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		finalized = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return finalized, nil
 }
 
 func shouldRepairUnhealthyIdlePod(pod *corev1.Pod, now time.Time) bool {

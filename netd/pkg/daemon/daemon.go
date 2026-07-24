@@ -24,6 +24,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -147,6 +148,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	if err != nil {
 		return err
 	}
+	s0k8s.ApplyDefaultRateLimit(k8sConfig)
 	if d.obsProvider != nil {
 		d.obsProvider.K8s.WrapConfig(k8sConfig)
 	}
@@ -329,13 +331,15 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 		defer ticker.Stop()
 		triggerSync()
 		for {
+			forceRedirectSync := false
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				forceRedirectSync = true
 			case <-syncTrigger:
 			}
-			if err := d.syncRedirect(ctx, netdWatcher, policyStore, platformState, redirectManager, patcher, tracker, conntrackManager, proxyServer); err != nil {
+			if err := d.syncRedirect(ctx, netdWatcher, policyStore, platformState, redirectManager, patcher, tracker, conntrackManager, proxyServer, forceRedirectSync); err != nil {
 				d.logger.Error("Failed to sync redirect rules", zap.Error(err))
 				if d.cfg.FailClosed {
 					d.ready.Store(false)
@@ -562,6 +566,7 @@ func (d *Daemon) syncRedirect(
 	tracker *conntrack.Tracker,
 	conntrackManager *conntrack.Manager,
 	proxyServer *proxy.Server,
+	forceRedirectSync bool,
 ) (err error) {
 	started := time.Now()
 	defer func() {
@@ -649,9 +654,15 @@ func (d *Daemon) syncRedirect(
 		zap.Strings("bypass_cidrs", bypassCIDRs),
 	)
 	stageStarted = time.Now()
-	if err := redirectManager.Sync(ctx, sandboxIPs, bypassCIDRs); err != nil {
+	var redirectErr error
+	if forceRedirectSync {
+		redirectErr = redirectManager.ForceSync(ctx, sandboxIPs, bypassCIDRs)
+	} else {
+		redirectErr = redirectManager.Sync(ctx, sandboxIPs, bypassCIDRs)
+	}
+	if redirectErr != nil {
 		daemonMetrics.RecordRedirectSyncStage("redirect_sync", "error", time.Since(stageStarted))
-		return err
+		return redirectErr
 	}
 	daemonMetrics.RecordRedirectSyncStage("redirect_sync", "success", time.Since(stageStarted))
 

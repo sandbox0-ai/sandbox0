@@ -197,7 +197,7 @@ func TestEverySandboxRouteHasExplicitAuditAction(t *testing.T) {
 			t.Errorf("sandbox route %s has no explicit audit policy", key)
 		}
 		if route.Method != http.MethodGet && ok && !policy.BufferResponse {
-			t.Errorf("sandbox mutation route %s does not buffer its response until canonical audit acknowledgement", key)
+			t.Errorf("sandbox mutation route %s does not buffer its response until durable audit result custody", key)
 		}
 	}
 	for key, policy := range sandboxAuditRoutePolicies {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -143,6 +144,67 @@ func TestAuditDeliveryEnqueueWakesBackgroundReplay(t *testing.T) {
 	t.Fatalf("background replay did not receive event promptly: %#v", writer.snapshotEvents())
 }
 
+func TestAuditDeliveryReplayQuietPeriodResetsOnWake(t *testing.T) {
+	delivery := &auditDelivery{wake: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() {
+		done <- delivery.waitForReplayQuiet(ctx)
+	}()
+
+	for range 2 {
+		delivery.signalReplay()
+		time.Sleep(auditReplayQuietPeriod / 3)
+		select {
+		case <-done:
+			t.Fatal("replay quiet period elapsed before the latest wake")
+		default:
+		}
+	}
+
+	select {
+	case quiet := <-done:
+		if !quiet {
+			t.Fatal("waitForReplayQuiet() returned false without cancellation")
+		}
+	case <-time.After(2 * auditReplayQuietPeriod):
+		t.Fatal("replay quiet period did not elapse after wakes stopped")
+	}
+}
+
+func TestAuditDeliveryDurableReplayYieldsToCanonicalCallers(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{started: make(chan struct{}, 1)}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	delivery.Start(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	delivery.canonicalCalls.Store(1)
+	event := testAuditDeliveryEvent(t, "00000000-0000-4000-8000-000000000013")
+	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
+		t.Fatalf("EnqueueDurable() error = %v", err)
+	}
+	select {
+	case <-writer.started:
+		t.Fatal("durable replay competed with an active canonical caller")
+	case <-time.After(2 * auditReplayQuietPeriod):
+	}
+
+	delivery.canonicalCalls.Store(0)
+	delivery.signalReplay()
+	select {
+	case <-writer.started:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("durable replay did not resume after canonical callers drained")
+	}
+}
+
 func TestAuditDeliveryPersistsCanonicalBeforeClickHouseAndReplaysAfterRestart(t *testing.T) {
 	dir := t.TempDir()
 	event := testAuditDeliveryEvent(t, "11111111-1111-4111-8111-111111111111")
@@ -182,6 +244,116 @@ func TestAuditDeliveryPersistsCanonicalBeforeClickHouseAndReplaysAfterRestart(t 
 	}
 }
 
+func TestAuditDeliveryCanonicalAdmissionSkipsPreInsertDirectorySync(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	var syncMu sync.Mutex
+	syncCalls := 0
+	syncCallsBeforeInsert := -1
+	delivery.dirSync = func(path string) error {
+		syncMu.Lock()
+		syncCalls++
+		syncMu.Unlock()
+		return syncAuditDirectory(path)
+	}
+	writer.onInsert = func() {
+		syncMu.Lock()
+		syncCallsBeforeInsert = syncCalls
+		syncMu.Unlock()
+	}
+
+	event := testAuditDeliveryEvent(t, "10101010-1010-4010-8010-101010101010")
+	if err := delivery.PersistCanonicalAdmission(context.Background(), event); err != nil {
+		t.Fatalf("PersistCanonicalAdmission() error = %v", err)
+	}
+	syncMu.Lock()
+	gotBeforeInsert := syncCallsBeforeInsert
+	syncMu.Unlock()
+	if gotBeforeInsert != 0 {
+		t.Fatalf("successful canonical admission pre-insert directory syncs = %d, want 0", gotBeforeInsert)
+	}
+	if events := writer.snapshotEvents(); len(events) != 1 || events[0].EventID != event.EventID {
+		t.Fatalf("canonical events = %#v, want admitted event", events)
+	}
+	if _, err := os.Stat(filepath.Join(dir, event.EventID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("acknowledged admission spool record still exists: %v", err)
+	}
+}
+
+func TestAuditDeliveryCanonicalAdmissionFsyncsFallbackBeforePending(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{err: errors.New("clickhouse unavailable")}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	var syncMu sync.Mutex
+	syncCalls := 0
+	delivery.dirSync = func(path string) error {
+		syncMu.Lock()
+		syncCalls++
+		syncMu.Unlock()
+		return syncAuditDirectory(path)
+	}
+
+	event := testAuditDeliveryEvent(t, "20202020-2020-4020-8020-202020202020")
+	if err := delivery.PersistCanonicalAdmission(context.Background(), event); !errors.Is(err, errAuditDeliveryPending) {
+		t.Fatalf("PersistCanonicalAdmission() error = %v, want pending", err)
+	}
+	syncMu.Lock()
+	got := syncCalls
+	syncMu.Unlock()
+	if got == 0 {
+		t.Fatal("failed canonical admission returned pending without a directory durability barrier")
+	}
+	if _, err := os.Stat(filepath.Join(dir, event.EventID+".json")); err != nil {
+		t.Fatalf("pending admission is not in the spool: %v", err)
+	}
+
+	recovered := &auditDeliveryWriter{}
+	restarted, err := newAuditDelivery(dir, recovered, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("restart delivery error = %v", err)
+	}
+	if err := restarted.replay(context.Background()); err != nil {
+		t.Fatalf("replay() error = %v", err)
+	}
+	if events := recovered.snapshotEvents(); len(events) != 1 || events[0].EventID != event.EventID {
+		t.Fatalf("replayed admission events = %#v", events)
+	}
+}
+
+func TestAuditDeliveryRetriesCanonicalEventAfterWriterFailure(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{err: errors.New("clickhouse unavailable")}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	event := testAuditDeliveryEvent(t, "12121212-1212-4121-8121-121212121212")
+	if err := delivery.PersistCanonical(context.Background(), event); !errors.Is(err, errAuditDeliveryPending) {
+		t.Fatalf("first PersistCanonical() error = %v, want pending", err)
+	}
+
+	writer.mu.Lock()
+	writer.err = nil
+	writer.mu.Unlock()
+	if err := delivery.PersistCanonical(context.Background(), event); err != nil {
+		t.Fatalf("second PersistCanonical() error = %v", err)
+	}
+	events := writer.snapshotEvents()
+	if len(events) != 1 || events[0].EventID != event.EventID {
+		t.Fatalf("canonical events = %#v, want one retried event", events)
+	}
+	if _, err := os.Stat(filepath.Join(dir, event.EventID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("acknowledged spool record still exists: %v", err)
+	}
+}
+
 func TestAuditDeliveryReplayBatchesPendingEvents(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}
@@ -211,6 +383,38 @@ func TestAuditDeliveryReplayBatchesPendingEvents(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("acknowledged spool entries = %d, want 0", len(entries))
+	}
+}
+
+func TestAuditDeliveryCanonicalBatchIncludesTargetBeyondLimit(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	targetID := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	for _, eventID := range []string{
+		"11111111-1111-4111-8111-111111111111",
+		"22222222-2222-4222-8222-222222222222",
+		targetID,
+	} {
+		if err := delivery.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, eventID)); err != nil {
+			t.Fatalf("EnqueueDurable() error = %v", err)
+		}
+	}
+
+	delivery.mu.Lock()
+	events, err := delivery.loadBatchContainingLocked(2, targetID)
+	delivery.mu.Unlock()
+	if err != nil {
+		t.Fatalf("loadBatchContainingLocked() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("canonical batch size = %d, want 2", len(events))
+	}
+	if events[0].EventID != targetID {
+		t.Fatalf("first canonical event = %s, want %s", events[0].EventID, targetID)
 	}
 }
 
@@ -249,6 +453,398 @@ func TestAuditDeliveryCanonicalWaitsForInFlightReplayWithoutDuplicate(t *testing
 	}
 	if got := writer.snapshotEvents(); len(got) != 1 || got[0].EventID != event.EventID {
 		t.Fatalf("canonical events = %#v, want one copy", got)
+	}
+}
+
+func TestAuditDeliveryBatchesConcurrentCanonicalWrites(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{started: make(chan struct{}, 1), block: make(chan struct{})}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	const writes = 32
+	errs := make(chan error, writes)
+	firstEvent := testAuditDeliveryEvent(t, uuid.NewString())
+	go func() {
+		errs <- delivery.PersistCanonical(context.Background(), firstEvent)
+	}()
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("first canonical write did not start")
+	}
+	for range writes - 1 {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		go func() {
+			errs <- delivery.PersistCanonical(context.Background(), event)
+		}()
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, readErr := os.ReadDir(dir)
+		if readErr != nil {
+			t.Fatalf("ReadDir() error = %v", readErr)
+		}
+		if len(entries) == writes {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != writes {
+		t.Fatalf("durably spooled events = %d, want %d", len(entries), writes)
+	}
+
+	close(writer.block)
+	for range writes {
+		if err := <-errs; err != nil {
+			t.Fatalf("PersistCanonical() error = %v", err)
+		}
+	}
+	if got := len(writer.snapshotEvents()); got != writes {
+		t.Fatalf("canonical events = %d, want %d", got, writes)
+	}
+	batchSizes := writer.snapshotBatchSizes()
+	if len(batchSizes) < 2 {
+		t.Fatalf("canonical batch sizes = %v, want multiple bounded turns", batchSizes)
+	}
+	total := 0
+	singleton := false
+	coalesced := false
+	for _, size := range batchSizes {
+		total += size
+		singleton = singleton || size == 1
+		coalesced = coalesced || size > 1
+	}
+	if total != writes {
+		t.Fatalf("canonical batch rows = %d, want %d: %v", total, writes, batchSizes)
+	}
+	if !singleton || !coalesced {
+		t.Fatalf("canonical batch sizes = %v, want both the blocked singleton and coalesced writes", batchSizes)
+	}
+	if got := delivery.canonicalTurns.Load(); got != int64(len(batchSizes)) {
+		t.Fatalf("canonical delivery turns = %d, want %d", got, len(batchSizes))
+	}
+}
+
+func TestAuditDeliveryBoundsParallelCanonicalBatchesWithoutDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{
+		started: make(chan struct{}, auditCanonicalSlots+1),
+		block:   make(chan struct{}),
+	}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	const writes = auditCanonicalSlots + 1
+	errs := make(chan error, writes)
+	for i := range writes {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		go func() {
+			errs <- delivery.PersistCanonical(context.Background(), event)
+		}()
+		if i < auditCanonicalSlots {
+			select {
+			case <-writer.started:
+			case <-time.After(time.Second):
+				t.Fatalf("canonical batch %d did not start", i+1)
+			}
+		}
+	}
+
+	select {
+	case <-writer.started:
+		t.Fatalf("canonical batch exceeded the %d-slot bound", auditCanonicalSlots)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(writer.block)
+	for range writes {
+		if err := <-errs; err != nil {
+			t.Fatalf("PersistCanonical() error = %v", err)
+		}
+	}
+	events := writer.snapshotEvents()
+	if len(events) != writes {
+		t.Fatalf("canonical events = %d, want %d", len(events), writes)
+	}
+	seen := make(map[string]struct{}, writes)
+	for _, event := range events {
+		if _, duplicate := seen[event.EventID]; duplicate {
+			t.Fatalf("canonical event %s was inserted more than once", event.EventID)
+		}
+		seen[event.EventID] = struct{}{}
+	}
+}
+
+func TestAuditDeliveryGroupsCanonicalCleanupWithoutHoldingStateLock(t *testing.T) {
+	dir := t.TempDir()
+	delivery, err := newAuditDelivery(dir, &auditDeliveryWriter{}, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	events := []sandboxobservability.Event{
+		testAuditDeliveryEvent(t, uuid.NewString()),
+		testAuditDeliveryEvent(t, uuid.NewString()),
+	}
+	for _, event := range events {
+		if err := delivery.putWithDurability(event, false); err != nil {
+			t.Fatalf("putWithDurability() error = %v", err)
+		}
+		delivery.canonicalActive[event.EventID] = struct{}{}
+		delivery.canonicalSlot <- struct{}{}
+	}
+
+	syncStarted := make(chan struct{})
+	releaseSync := make(chan struct{})
+	var syncOnce sync.Once
+	var syncMu sync.Mutex
+	syncCalls := 0
+	delivery.dirSync = func(string) error {
+		syncMu.Lock()
+		syncCalls++
+		syncMu.Unlock()
+		syncOnce.Do(func() { close(syncStarted) })
+		<-releaseSync
+		return nil
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, len(events))
+	for _, event := range events {
+		event := event
+		go func() {
+			<-start
+			errs <- delivery.finishCanonicalBatch([]sandboxobservability.Event{event}, true)
+		}()
+	}
+	close(start)
+	select {
+	case <-syncStarted:
+	case <-time.After(time.Second):
+		t.Fatal("canonical cleanup durability barrier did not start")
+	}
+	for _, event := range events {
+		if _, err := os.Stat(filepath.Join(dir, event.EventID+".json")); !os.IsNotExist(err) {
+			t.Fatalf("canonical cleanup for %s was serialized behind the state lock: %v", event.EventID, err)
+		}
+	}
+	close(releaseSync)
+	for range events {
+		if err := <-errs; err != nil {
+			t.Fatalf("finishCanonicalBatch() error = %v", err)
+		}
+	}
+
+	syncMu.Lock()
+	gotSyncCalls := syncCalls
+	syncMu.Unlock()
+	if gotSyncCalls != 1 {
+		t.Fatalf("canonical cleanup directory sync calls = %d, want 1 grouped barrier", gotSyncCalls)
+	}
+	if len(delivery.canonicalActive) != 0 {
+		t.Fatalf("canonical reservations after cleanup = %d, want 0", len(delivery.canonicalActive))
+	}
+}
+
+func TestAuditDeliveryGroupsConcurrentDirectorySyncs(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	const writes = 32
+	var syncMu sync.Mutex
+	syncCalls := 0
+	delivery.dirSync = func(path string) error {
+		syncMu.Lock()
+		syncCalls++
+		syncMu.Unlock()
+		return syncAuditDirectory(path)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, writes)
+	for range writes {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		go func() {
+			<-start
+			errs <- delivery.EnqueueDurable(context.Background(), event)
+		}()
+	}
+	close(start)
+	for range writes {
+		if err := <-errs; err != nil {
+			t.Fatalf("EnqueueDurable() error = %v", err)
+		}
+	}
+
+	syncMu.Lock()
+	got := syncCalls
+	syncMu.Unlock()
+	if got >= writes {
+		t.Fatalf("directory sync calls = %d, want fewer than %d writes", got, writes)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != writes {
+		t.Fatalf("durably spooled events = %d, want %d", len(entries), writes)
+	}
+}
+
+func TestAuditDeliveryDirectorySyncFailureWakesConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	syncStarted := make(chan struct{})
+	releaseSync := make(chan struct{})
+	syncErr := errors.New("directory sync failed")
+	delivery.dirSync = func(string) error {
+		select {
+		case <-syncStarted:
+		default:
+			close(syncStarted)
+		}
+		<-releaseSync
+		return syncErr
+	}
+	const writes = 8
+	errs := make(chan error, writes)
+	for range writes {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		go func() {
+			errs <- delivery.EnqueueDurable(context.Background(), event)
+		}()
+	}
+	select {
+	case <-syncStarted:
+	case <-time.After(time.Second):
+		t.Fatal("directory sync did not start")
+	}
+	close(releaseSync)
+	for range writes {
+		err := <-errs
+		if err != nil {
+			t.Fatalf("EnqueueDurable() canonical fallback error = %v", err)
+		}
+	}
+	if got := len(writer.snapshotEvents()); got != writes {
+		t.Fatalf("canonical fallback events = %d, want %d", got, writes)
+	}
+}
+
+func TestAuditDeliveryWaitsForConcurrentSpoolWritesToDrain(t *testing.T) {
+	delivery := &auditDelivery{}
+	delivery.canonicalCalls.Store(2)
+	delivery.spoolWrites.Store(1)
+
+	drained := make(chan struct{})
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		delivery.spoolWrites.Store(0)
+		close(drained)
+	}()
+
+	started := time.Now()
+	if err := delivery.waitForConcurrentSpoolWrites(context.Background()); err != nil {
+		t.Fatalf("waitForConcurrentSpoolWrites() error = %v", err)
+	}
+	<-drained
+	if elapsed := time.Since(started); elapsed < 5*time.Millisecond {
+		t.Fatalf("waitForConcurrentSpoolWrites() returned before the spool drained: %v", elapsed)
+	}
+}
+
+func TestAuditDeliveryResetsQuietPeriodForCompletedSpoolWrites(t *testing.T) {
+	delivery := &auditDelivery{}
+	delivery.canonicalCalls.Store(2)
+	delivery.spoolWrites.Store(1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- delivery.waitForConcurrentSpoolWrites(context.Background())
+	}()
+
+	time.Sleep(auditSpoolQuietPeriod)
+	delivery.spoolWriteSeq.Add(1)
+	delivery.spoolWrites.Store(0)
+	time.Sleep(auditSpoolQuietPeriod / 2)
+	delivery.spoolWriteSeq.Add(1)
+
+	select {
+	case err := <-done:
+		t.Fatalf("waitForConcurrentSpoolWrites() returned before the completed-write sequence stayed quiet: %v", err)
+	case <-time.After(auditSpoolQuietPeriod / 2):
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("waitForConcurrentSpoolWrites() error = %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("waitForConcurrentSpoolWrites() did not return after the completed-write sequence stayed quiet")
+	}
+}
+
+func TestAuditDeliverySerializesConcurrentEventIDCollisions(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	eventID := "99999999-9999-4999-8999-999999999999"
+	first := testAuditDeliveryEvent(t, eventID)
+	second := first
+	second.Action = "audit.delivery.collision"
+	if err := sandboxobservability.SignEvent(&second, auditDeliveryTestSigningKey); err != nil {
+		t.Fatalf("SignEvent() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, event := range []sandboxobservability.Event{first, second} {
+		event := event
+		go func() {
+			<-start
+			errs <- delivery.EnqueueDurable(context.Background(), event)
+		}()
+	}
+	close(start)
+
+	successes := 0
+	collisions := 0
+	for range 2 {
+		err := <-errs
+		switch {
+		case err == nil:
+			successes++
+		case strings.Contains(err.Error(), "event_id collision"):
+			collisions++
+		default:
+			t.Fatalf("EnqueueDurable() unexpected error = %v", err)
+		}
+	}
+	if successes != 1 || collisions != 1 {
+		t.Fatalf("concurrent writes: successes=%d collisions=%d, want 1 each", successes, collisions)
 	}
 }
 

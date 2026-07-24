@@ -219,6 +219,26 @@ func (row *auditEventRow) insertValues() []any {
 	return values
 }
 
+func (row *auditEventRow) batchInsertValues() []any {
+	bindings := row.columnBindings()
+	values := make([]any, len(bindings))
+	for i, binding := range bindings {
+		switch binding.name {
+		case "schema_version":
+			values[i] = uint16(row.event.SchemaVersion)
+		case "status_code":
+			values[i] = uint16(row.event.Request.StatusCode)
+		case "occurred_at":
+			values[i] = row.event.OccurredAt.UTC()
+		case "ingested_at":
+			values[i] = row.event.IngestedAt.UTC()
+		default:
+			values[i] = binding.insertValue
+		}
+	}
+	return values
+}
+
 func (row auditEventRow) toEvent() (sandboxobservability.Event, error) {
 	attributes, err := decodeAttributes(row.attributesJSON)
 	if err != nil {

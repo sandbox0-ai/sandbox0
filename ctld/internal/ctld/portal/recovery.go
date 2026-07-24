@@ -76,6 +76,25 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 	activePods, activeReliable := m.activePodUIDs(ctx)
 
 	var firstErr error
+	cleanupMount := func(path string, cause error) {
+		if err := cleaner(path); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if m.logger != nil {
+				m.logger.Warn("ctld stale CSI mount cleanup failed", zap.String("path", path), zap.Error(err))
+			}
+			return
+		}
+		if m.logger == nil {
+			return
+		}
+		fields := []zap.Field{zap.String("path", path)}
+		if cause != nil {
+			fields = append(fields, zap.Error(cause))
+		}
+		m.logger.Info("ctld cleaned stale CSI mount", fields...)
+	}
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -85,21 +104,13 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 				return nil
 			}
 			if info, ok := sandboxCSIMountPathInfo(root, path); ok {
+				if m.managesPortalTarget(path) {
+					return filepath.SkipDir
+				}
 				if !shouldCleanSandboxCSIMount(info, activePods, activeReliable, true) {
 					return filepath.SkipDir
 				}
-				if cleanupErr := cleaner(path); cleanupErr != nil {
-					if firstErr == nil {
-						firstErr = cleanupErr
-					}
-					if m.logger != nil {
-						m.logger.Warn("ctld stale CSI mount cleanup failed", zap.String("path", path), zap.Error(cleanupErr))
-					}
-					return filepath.SkipDir
-				}
-				if m.logger != nil {
-					m.logger.Info("ctld cleaned stale CSI mount", zap.String("path", path), zap.Error(err))
-				}
+				cleanupMount(path, err)
 				return filepath.SkipDir
 			}
 			if m.logger != nil {
@@ -114,6 +125,15 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 			return nil
 		}
 		info, _ := sandboxCSIMountPathInfo(root, path)
+		if m.managesPortalTarget(path) {
+			return filepath.SkipDir
+		}
+		if activeReliable {
+			if _, active := activePods[info.podUID]; !active {
+				cleanupMount(path, nil)
+				return filepath.SkipDir
+			}
+		}
 		broken, checkErr := checker(path)
 		if checkErr != nil {
 			if m.logger != nil {
@@ -124,22 +144,73 @@ func (m *Manager) CleanupStaleCSIMounts(ctx context.Context) error {
 		if !shouldCleanSandboxCSIMount(info, activePods, activeReliable, broken) {
 			return filepath.SkipDir
 		}
-		if err := cleaner(path); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			if m.logger != nil {
-				m.logger.Warn("ctld stale CSI mount cleanup failed", zap.String("path", path), zap.Error(err))
-			}
-			return filepath.SkipDir
-		}
-		if m.logger != nil {
-			m.logger.Info("ctld cleaned stale CSI mount", zap.String("path", path))
-		}
+		cleanupMount(path, nil)
 		return filepath.SkipDir
 	})
 	if walkErr != nil {
 		return walkErr
+	}
+	return firstErr
+}
+
+func (m *Manager) managesPortalTarget(targetPath string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.portalsByTarget[targetPath] != nil
+}
+
+// CleanupStalePortals removes recovered portal state only when Kubernetes
+// authoritatively reports that its owning pod no longer exists on this node.
+func (m *Manager) CleanupStalePortals(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	activePods, activeReliable := m.activePodUIDs(ctx)
+	if !activeReliable {
+		return nil
+	}
+
+	m.mu.Lock()
+	targets := make([]string, 0)
+	for _, pm := range m.portals {
+		if pm == nil {
+			continue
+		}
+		if _, active := activePods[pm.podUID]; !active {
+			targets = append(targets, pm.targetPath)
+		}
+	}
+	m.mu.Unlock()
+
+	var firstErr error
+	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			break
+		}
+		// Recovered stale FUSE connections may no longer answer a graceful
+		// unmount. Detach the userspace channel and lazily unmount the target so
+		// one dead portal cannot block ctld startup indefinitely.
+		if err := m.unpublishPortalContext(ctx, target, true); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if m.logger != nil {
+				m.logger.Warn("ctld stale portal cleanup failed", zap.String("target_path", target), zap.Error(err))
+			}
+			continue
+		}
+		if m.logger != nil {
+			m.logger.Info("ctld cleaned stale portal", zap.String("target_path", target))
+		}
 	}
 	return firstErr
 }

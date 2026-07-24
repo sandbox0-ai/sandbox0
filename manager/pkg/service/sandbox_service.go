@@ -10,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
@@ -77,6 +78,7 @@ var claimIdlePodBackoff = wait.Backoff{
 
 // SandboxServiceConfig handles configuration for SandboxService
 type SandboxServiceConfig struct {
+	ClusterID                           string
 	DefaultTTL                          time.Duration
 	SandboxMemoryPerCPU                 string
 	SandboxMaxMemory                    string
@@ -124,6 +126,7 @@ type SandboxService struct {
 	deletionWebhookEmitter                 SandboxDeletionWebhookEmitter
 	quotaStore                             TeamQuotaLimitStore
 	sandboxStore                           SandboxStore
+	hotClaimReservationStore               HotClaimReservationStore
 	rootFSObjectDeleter                    RootFSObjectDeleter
 	templateImageBuildCapabilityConfigured bool
 	templateImageBuildAvailable            bool
@@ -131,6 +134,8 @@ type SandboxService struct {
 	idlePodReservations                    *idlePodReservations
 	podWaiterMu                            sync.Mutex
 	podWaiter                              *podEventWaiter
+	hotClaimFinalizationMu                 sync.Mutex
+	hotClaimFinalizationLastScheduled      time.Time
 }
 
 type TeamQuotaLimitStore interface {
@@ -193,6 +198,9 @@ func NewSandboxService(
 	}
 	if config.RootFSSquashMaxChainBytes <= 0 {
 		config.RootFSSquashMaxChainBytes = 512 * 1024 * 1024
+	}
+	if config.ClusterID == "" {
+		config.ClusterID = naming.DefaultClusterID
 	}
 	if networkProvider == nil {
 		networkProvider = network.NewNoopProvider()
@@ -302,6 +310,11 @@ func (s *SandboxService) SetQuotaStore(store TeamQuotaLimitStore) {
 // SetSandboxStore injects durable sandbox identity storage.
 func (s *SandboxService) SetSandboxStore(store SandboxStore) {
 	s.sandboxStore = store
+	if reservationStore, ok := store.(HotClaimReservationStore); ok {
+		s.hotClaimReservationStore = reservationStore
+	} else {
+		s.hotClaimReservationStore = nil
+	}
 }
 
 // SetRootFSObjectDeleter injects the object-store deleter used to clean up

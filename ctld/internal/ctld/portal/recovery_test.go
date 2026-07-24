@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -79,6 +80,159 @@ func TestCleanupStaleCSIMountsSkipsActivePodMounts(t *testing.T) {
 	}
 	if _, err := os.Stat(active); err != nil {
 		t.Fatalf("expected active mount %q to remain, stat error = %v", active, err)
+	}
+}
+
+func TestCleanupStaleCSIMountsSkipsManagedPortalHealthCheck(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "pod-a", "volumes", kubeletCSIVolumeDir, "sandbox0-volume-1-workspace", "mount")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", target, err)
+	}
+
+	checked := false
+	cleaned := false
+	mgr := NewManager(Config{
+		RootDir:         t.TempDir(),
+		KubeletPodsRoot: root,
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"pod-a": {}}, nil
+		},
+		StaleMountChecker: func(string) (bool, error) {
+			checked = true
+			return true, nil
+		},
+		StaleMountCleaner: func(string) error {
+			cleaned = true
+			return nil
+		},
+	})
+	pm := &portalMount{podUID: "pod-a", name: "workspace", targetPath: target}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+	mgr.portalsByTarget[target] = pm
+
+	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if checked {
+		t.Fatal("managed portal mount was health checked")
+	}
+	if cleaned {
+		t.Fatal("managed portal mount was cleaned")
+	}
+}
+
+func TestCleanupStaleCSIMountsCleansInactiveMountWithoutHealthCheck(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "pod-a", "volumes", kubeletCSIVolumeDir, "sandbox0-volume-1-workspace", "mount")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", target, err)
+	}
+
+	checked := false
+	var cleaned []string
+	mgr := NewManager(Config{
+		RootDir:         t.TempDir(),
+		KubeletPodsRoot: root,
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{}, nil
+		},
+		StaleMountChecker: func(string) (bool, error) {
+			checked = true
+			return false, nil
+		},
+		StaleMountCleaner: func(path string) error {
+			cleaned = append(cleaned, path)
+			return os.RemoveAll(path)
+		},
+	})
+
+	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if checked {
+		t.Fatal("inactive mount was health checked before cleanup")
+	}
+	if !slices.Equal(cleaned, []string{target}) {
+		t.Fatalf("cleaned paths = %#v, want %#v", cleaned, []string{target})
+	}
+}
+
+func TestCleanupStalePortalsRemovesOnlyInactivePodState(t *testing.T) {
+	root := t.TempDir()
+	staleTarget := filepath.Join(root, "stale-target")
+	activeTarget := filepath.Join(root, "active-target")
+	mgr := NewManager(Config{
+		RootDir: root,
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"active-pod": {}}, nil
+		},
+		StaleMountCleaner: func(string) error { return nil },
+	})
+	stale := &portalMount{
+		podUID:            "stale-pod",
+		name:              "workspace",
+		targetPath:        staleTarget,
+		rootfsBackingPath: filepath.Join(root, "stale-rootfs"),
+	}
+	active := &portalMount{
+		podUID:            "active-pod",
+		name:              "workspace",
+		targetPath:        activeTarget,
+		rootfsBackingPath: filepath.Join(root, "active-rootfs"),
+	}
+	mgr.portals[portalKey(stale.podUID, stale.name)] = stale
+	mgr.portals[portalKey(active.podUID, active.name)] = active
+	mgr.portalsByTarget[staleTarget] = stale
+	mgr.portalsByTarget[activeTarget] = active
+
+	if err := mgr.CleanupStalePortals(context.Background()); err != nil {
+		t.Fatalf("CleanupStalePortals() error = %v", err)
+	}
+	if _, ok := mgr.portals[portalKey(stale.podUID, stale.name)]; ok {
+		t.Fatal("stale portal remains registered")
+	}
+	if _, ok := mgr.portals[portalKey(active.podUID, active.name)]; !ok {
+		t.Fatal("active portal was removed")
+	}
+}
+
+func TestCleanupStalePortalsFailsClosedWhenPodListingFails(t *testing.T) {
+	mgr := NewManager(Config{
+		RootDir: t.TempDir(),
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return nil, errors.New("kubernetes unavailable")
+		},
+	})
+	pm := &portalMount{podUID: "pod-a", name: "workspace", targetPath: "/target"}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+	mgr.portalsByTarget[pm.targetPath] = pm
+
+	if err := mgr.CleanupStalePortals(context.Background()); err != nil {
+		t.Fatalf("CleanupStalePortals() error = %v", err)
+	}
+	if _, ok := mgr.portals[portalKey(pm.podUID, pm.name)]; !ok {
+		t.Fatal("portal was removed without a reliable pod list")
+	}
+}
+
+func TestPortalsForStandbySyncSkipsInactivePods(t *testing.T) {
+	mgr := NewManager(Config{
+		RootDir: t.TempDir(),
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"active-pod": {}}, nil
+		},
+	})
+	mgr.portals["stale"] = &portalMount{podUID: "stale-pod"}
+	active := &portalMount{podUID: "active-pod"}
+	mgr.portals["active"] = active
+
+	portals, stale := mgr.portalsForStandbySync(context.Background())
+	if stale != 1 {
+		t.Fatalf("stale portal count = %d, want 1", stale)
+	}
+	if len(portals) != 1 || portals[0] != active {
+		t.Fatalf("standby portals = %#v, want only active portal", portals)
 	}
 }
 

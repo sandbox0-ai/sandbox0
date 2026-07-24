@@ -25,26 +25,41 @@ import (
 func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string) error {
 	s.logger.Info("Terminating sandbox", zap.String("sandboxID", sandboxID))
 
+	if err := s.finalizeReservedHotClaim(ctx, sandboxID); err != nil {
+		return fmt.Errorf("finalize reserved hot claim before termination: %w", err)
+	}
+
 	// Find the pod by sandbox ID
 	pod, err := s.getSandboxPod(ctx, sandboxID)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			s.logger.Info("Sandbox already terminated", zap.String("sandboxID", sandboxID))
 			if s.sandboxStore != nil {
 				record, getErr := s.sandboxStore.GetSandbox(ctx, sandboxID)
 				if getErr != nil {
 					return fmt.Errorf("get sandbox record: %w", getErr)
 				}
-				if record != nil && record.Status != SandboxStatusDeleted {
-					if err := s.cleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record), false); err != nil {
-						return fmt.Errorf("cleanup deleted sandbox record: %w", err)
-					}
+				if record != nil {
+					pod = s.getSandboxRecordPodLive(ctx, sandboxID, record)
 				}
-				return s.sandboxStore.MarkSandboxDeleted(ctx, sandboxID, s.clock.Now())
+				if pod != nil {
+					err = nil
+				} else {
+					s.logger.Info("Sandbox already terminated", zap.String("sandboxID", sandboxID))
+					if record != nil && record.Status != SandboxStatusDeleted {
+						if err := s.cleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record), false); err != nil {
+							return fmt.Errorf("cleanup deleted sandbox record: %w", err)
+						}
+					}
+					return s.sandboxStore.MarkSandboxDeleted(ctx, sandboxID, s.clock.Now())
+				}
+			} else {
+				s.logger.Info("Sandbox already terminated", zap.String("sandboxID", sandboxID))
+				return nil
 			}
-			return nil
 		}
-		return fmt.Errorf("get pod: %w", err)
+		if err != nil {
+			return fmt.Errorf("get pod: %w", err)
+		}
 	}
 
 	pod, err = s.ensureSandboxDeletionFinalizer(ctx, pod)
@@ -677,6 +692,28 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 	return s.podToSandbox(ctx, pod, sandboxID), nil
 }
 
+// getSandboxRecordPodLive closes the read-after-write gap between a successful
+// hot claim and the pod informer observing its new sandbox identity.
+func (s *SandboxService) getSandboxRecordPodLive(ctx context.Context, sandboxID string, record *SandboxRecord) *corev1.Pod {
+	if s == nil || s.k8sClient == nil || record == nil {
+		return nil
+	}
+	namespace := strings.TrimSpace(record.CurrentPodNamespace)
+	name := strings.TrimSpace(record.CurrentPodName)
+	if namespace == "" || name == "" {
+		return nil
+	}
+	pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil || pod == nil {
+		return nil
+	}
+	if sandboxIDFromPod(pod) != sandboxID ||
+		pod.Annotations[controller.AnnotationTeamID] != record.TeamID {
+		return nil
+	}
+	return pod
+}
+
 // UpdateSandbox updates mutable sandbox configuration fields.
 func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cfg *SandboxUpdateConfig) (*Sandbox, error) {
 	if cfg == nil {
@@ -802,7 +839,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 				TemplateBindings: templateBindings,
 				RequestBindings:  requestBindings,
 			})
-			rollbackBindings, err = s.syncCredentialBindings(ctx, updatedPod, teamID, networkState)
+			rollbackBindings, err = s.syncCredentialBindings(ctx, updatedPod, teamID, networkState, true)
 			if err != nil {
 				return fmt.Errorf("stage credential bindings: %w", err)
 			}
@@ -1091,7 +1128,27 @@ func (s *SandboxService) getSandboxPod(ctx context.Context, sandboxID string) (*
 	if err != nil {
 		return nil, err
 	}
-	return selectSandboxRuntimePod(sandboxID, pods)
+	pod, err := selectSandboxRuntimePod(sandboxID, pods)
+	if err == nil || !k8serrors.IsNotFound(err) {
+		return pod, err
+	}
+	reservedPod, reservationErr := s.reservedHotClaimPod(ctx, sandboxID)
+	if reservationErr == nil && reservedPod != nil {
+		return reservedPod, nil
+	}
+	if reservationErr != nil && !k8serrors.IsNotFound(reservationErr) {
+		return nil, reservationErr
+	}
+	if s.sandboxStore != nil {
+		record, recordErr := s.sandboxStore.GetSandbox(ctx, sandboxID)
+		if recordErr != nil && !errors.Is(recordErr, ErrSandboxRecordNotFound) {
+			return nil, recordErr
+		}
+		if livePod := s.getSandboxRecordPodLive(ctx, sandboxID, record); livePod != nil {
+			return livePod, nil
+		}
+	}
+	return nil, err
 }
 
 func selectSandboxRuntimePod(sandboxID string, pods []*corev1.Pod) (*corev1.Pod, error) {

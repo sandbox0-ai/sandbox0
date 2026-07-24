@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -55,21 +57,35 @@ func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *cor
 
 	namespace, name := pod.Namespace, pod.Name
 	var updated *corev1.Pod
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		resized := current.DeepCopy()
-		if err := s.applySandboxResourceQuota(resized, quota); err != nil {
-			return err
-		}
-		result, err := s.k8sClient.CoreV1().Pods(namespace).UpdateResize(ctx, name, resized, metav1.UpdateOptions{})
+	resources := v1alpha1.BuildResourceRequirements(quota)
+	patch, err := json.Marshal(map[string]any{
+		"spec": map[string]any{
+			"containers": []map[string]any{{
+				"name":      "procd",
+				"resources": resources,
+			}},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build sandbox resource resize patch: %w", err)
+	}
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		result, err := s.k8sClient.CoreV1().Pods(namespace).Patch(
+			ctx,
+			name,
+			types.StrategicMergePatchType,
+			patch,
+			metav1.PatchOptions{},
+			"resize",
+		)
 		if err != nil {
 			return err
 		}
 		if result == nil || result.Name == "" {
-			updated = resized
+			updated = pod.DeepCopy()
+			if applyErr := s.applySandboxResourceQuota(updated, quota); applyErr != nil {
+				return applyErr
+			}
 		} else {
 			updated = result
 		}
@@ -134,17 +150,18 @@ func sandboxPodNeedsResourceResize(pod *corev1.Pod, quota v1alpha1.ResourceQuota
 		if container.Name != "procd" {
 			continue
 		}
-		return !resizeResourcesEqual(container.Resources, desired)
+		// Warm pods already carry the template limits while keeping scheduling
+		// requests low. Preserve those dense requests when the claim does not
+		// change either enforceable limit; only resource overrides and limit
+		// corrections require an in-place resize.
+		return !resourceLimitsEqual(container.Resources.Limits, desired.Limits)
 	}
 	return true
 }
 
-func resizeResourcesEqual(a, b corev1.ResourceRequirements) bool {
+func resourceLimitsEqual(a, b corev1.ResourceList) bool {
 	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
-		if !resourceListQuantityEqual(a.Requests, b.Requests, name) {
-			return false
-		}
-		if !resourceListQuantityEqual(a.Limits, b.Limits, name) {
+		if !resourceListQuantityEqual(a, b, name) {
 			return false
 		}
 	}

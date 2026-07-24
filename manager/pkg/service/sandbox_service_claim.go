@@ -24,6 +24,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/util/retry"
 )
@@ -31,6 +32,9 @@ import (
 const (
 	volumePortalBindRetryWindow   = 5 * time.Second
 	volumePortalBindRetryInterval = 100 * time.Millisecond
+	hotClaimPoolRefillQuietPeriod = 1500 * time.Millisecond
+	hotClaimPoolRefillMaxDelay    = 5 * time.Second
+	hotClaimFinalizationTimeout   = 10 * time.Second
 )
 
 const (
@@ -40,6 +44,16 @@ const (
 
 var errIdlePodReservationConflict = errors.New("idle pod reservation conflict")
 var errIdlePodClaimLost = errors.New("idle pod claim lost")
+
+type pendingHotClaimFinalization struct {
+	namespace   string
+	podName     string
+	podUID      types.UID
+	sandboxID   string
+	metadata    HotClaimPodMetadata
+	durable     bool
+	scheduledAt time.Time
+}
 
 // ClaimRequest represents a sandbox claim request
 type ClaimRequest struct {
@@ -58,6 +72,13 @@ type ClaimRequest struct {
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
 	WebhookStateVolumeID string `json:"-"`
+	// deferHotRuntimePreparation lets the full claim path overlap resource
+	// resize and network acknowledgement with procd initialization. Direct
+	// hot-pool operations retain their synchronous behavior.
+	deferHotRuntimePreparation        bool
+	deferredHotResizeQuota            *v1alpha1.ResourceQuota
+	pendingHotClaimFinalization       *pendingHotClaimFinalization
+	mayHaveExistingCredentialBindings bool
 }
 
 type ClaimMount struct {
@@ -342,6 +363,7 @@ type ClaimResponse struct {
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {
 	start := time.Now()
 	metrics := s.metrics
+	req.mayHaveExistingCredentialBindings = strings.TrimSpace(req.SandboxID) != ""
 	phaseStarted := time.Now()
 	canonicalTemplateID, err := naming.CanonicalTemplateID(req.Template)
 	s.observeClaimPhase(req.Template, "unknown", "canonicalize_template", phaseStarted, err)
@@ -444,6 +466,9 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	// Try to claim an idle pod first
 	phaseStarted = time.Now()
+	req.deferHotRuntimePreparation = true
+	req.deferredHotResizeQuota = nil
+	req.pendingHotClaimFinalization = nil
 	pod, err := s.claimIdlePod(ctx, template, req)
 	claimIdleType := "hot"
 	if pod == nil {
@@ -527,6 +552,24 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	claimRecordPersisted := false
 	cleanupClaimFailure := func(pod *corev1.Pod, reason string) {
+		if req.pendingHotClaimFinalization != nil && req.pendingHotClaimFinalization.durable {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), hotClaimFinalizationTimeout)
+			if err := s.activateUncommittedHotClaim(cleanupCtx, req.pendingHotClaimFinalization); err != nil && s.logger != nil {
+				s.logger.Warn("Failed to materialize reserved hot claim before cleanup",
+					zap.String("sandboxID", req.SandboxID),
+					zap.String("reason", reason),
+					zap.Error(err),
+				)
+			}
+			if err := s.releaseReservedHotClaim(cleanupCtx, req.pendingHotClaimFinalization); err != nil && s.logger != nil {
+				s.logger.Warn("Failed to release reserved hot claim after claim failure",
+					zap.String("sandboxID", req.SandboxID),
+					zap.String("reason", reason),
+					zap.Error(err),
+				)
+			}
+			cancel()
+		}
 		s.requestSandboxDeletionAfterClaimFailure(pod, reason)
 		if claimRecordPersisted {
 			s.markSandboxDeletedAfterClaimFailure(req.SandboxID, reason)
@@ -581,27 +624,105 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
+	type resizeResult struct {
+		pod *corev1.Pod
+		err error
+	}
+	var persistResultCh <-chan error
+	if claimType == "hot" {
+		result := make(chan error, 1)
+		persistResultCh = result
+		persistPod := pod.DeepCopy()
+		persistStarted := time.Now()
+		go func() {
+			persistErr := s.persistClaimedSandbox(ctx, persistPod, template, req)
+			s.observeClaimPhase(req.Template, claimType, "persist_sandbox", persistStarted, persistErr)
+			result <- persistErr
+		}()
+	}
+	var resizeResultCh <-chan resizeResult
+	if claimType == "hot" && req.deferredHotResizeQuota != nil {
+		result := make(chan resizeResult, 1)
+		resizeResultCh = result
+		resizeQuota := *req.deferredHotResizeQuota.DeepCopy()
+		resizeStarted := time.Now()
+		go func() {
+			resizedPod, resizeErr := s.resizeSandboxPodResources(ctx, pod, resizeQuota)
+			s.observeClaimPhase(req.Template, claimType, "resize_claimed_pod", resizeStarted, resizeErr)
+			result <- resizeResult{pod: resizedPod, err: resizeErr}
+		}()
+	}
+
+	var networkApplyResult <-chan error
+	if claimType == "hot" && req.deferHotRuntimePreparation && s.networkProvider != nil {
+		result := make(chan error, 1)
+		networkApplyResult = result
+		networkStarted := time.Now()
+		go func() {
+			networkErr := s.applyNetworkProviderFromPod(ctx, pod, req.TeamID)
+			s.observeClaimPhase(req.Template, claimType, "apply_network_policy", networkStarted, networkErr)
+			result <- networkErr
+		}()
+	}
+
 	phaseStarted = time.Now()
-	if _, err := s.initializeProcd(ctx, pod, template, req, procdAddress); err != nil {
-		s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, err)
+	_, initializeErr := s.initializeProcd(ctx, pod, template, req, procdAddress)
+	s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, initializeErr)
+	var networkApplyErr error
+	if networkApplyResult != nil {
+		networkApplyErr = <-networkApplyResult
+	}
+	var hotResizeResult resizeResult
+	if resizeResultCh != nil {
+		hotResizeResult = <-resizeResultCh
+	}
+	var persistErr error
+	if persistResultCh != nil {
+		persistErr = <-persistResultCh
+		if persistErr == nil && s.sandboxStore != nil {
+			claimRecordPersisted = true
+		}
+	}
+	if hotResizeResult.err != nil {
+		cleanupClaimFailure(pod, "sandbox resource resize failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("resize sandbox resources: %w", hotResizeResult.err)
+	}
+	if hotResizeResult.pod != nil {
+		pod = mergeSandboxMetadataAfterResize(hotResizeResult.pod, pod)
+	}
+	if networkApplyErr != nil {
+		cleanupClaimFailure(pod, "network policy apply failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("apply network policy: %w", networkApplyErr)
+	}
+	if initializeErr != nil {
 		cleanupClaimFailure(pod, "procd initialization failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
-		return nil, fmt.Errorf("initialize procd: %w", err)
+		return nil, fmt.Errorf("initialize procd: %w", initializeErr)
 	}
-	s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, nil)
 
-	phaseStarted = time.Now()
-	if err := s.persistClaimedSandbox(ctx, pod, template, req); err != nil {
-		s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, err)
+	if persistResultCh == nil {
+		phaseStarted = time.Now()
+		persistErr = s.persistClaimedSandbox(ctx, pod, template, req)
+		s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, persistErr)
+	}
+	if persistErr != nil {
 		cleanupClaimFailure(pod, "sandbox persistence failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
-		return nil, fmt.Errorf("persist sandbox: %w", err)
+		return nil, fmt.Errorf("persist sandbox: %w", persistErr)
 	}
-	s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, nil)
+	if req.pendingHotClaimFinalization != nil {
+		s.schedulePendingHotClaimFinalization(*req.pendingHotClaimFinalization)
+	}
 
 	if metrics != nil {
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
@@ -623,7 +744,14 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 	if s == nil || s.sandboxStore == nil || pod == nil || template == nil || req == nil {
 		return nil
 	}
-	return s.sandboxStore.UpsertSandbox(ctx, sandboxRecordForClaimedPod(s, pod, template, req))
+	record := sandboxRecordForClaimedPod(s, pod, template, req)
+	if req.pendingHotClaimFinalization != nil && req.pendingHotClaimFinalization.durable {
+		if s.hotClaimReservationStore == nil {
+			return fmt.Errorf("durable hot claim reservation store is not configured")
+		}
+		return s.hotClaimReservationStore.CommitHotClaim(ctx, record, req.pendingHotClaimFinalization.podUID, req.pendingHotClaimFinalization.metadata)
+	}
+	return s.sandboxStore.UpsertSandbox(ctx, record)
 }
 
 func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest) *SandboxRecord {
@@ -1026,12 +1154,14 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			errors.Is(err, errIdlePodReservationConflict) ||
 			errors.Is(err, errIdlePodClaimLost)
 	}, func() error {
+		phaseStarted := time.Now()
 		// Get all idle pods for this template
 		pods, listErr := s.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 			controller.LabelTemplateID: template.Name,
 			controller.LabelPoolType:   controller.PoolTypeIdle,
 		}))
 		if listErr != nil {
+			s.observeClaimPhase(templateID, "hot", "select_idle_pod", phaseStarted, listErr)
 			return listErr
 		}
 
@@ -1046,6 +1176,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		if len(readyPods) == 0 {
 			// No idle pod available, not an error - use a special error to stop retry
 			s.observeIdleClaim(templateID, "no_candidate")
+			s.observeClaimPhase(templateID, "hot", "select_idle_pod", phaseStarted, errNoIdlePod)
 			return errNoIdlePod
 		}
 
@@ -1053,8 +1184,10 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod := readyPods[rand.Intn(len(readyPods))]
 		if !s.reserveIdlePod(pod) {
 			s.observeIdleClaim(templateID, "reservation_conflict")
+			s.observeClaimPhase(templateID, "hot", "select_idle_pod", phaseStarted, errIdlePodReservationConflict)
 			return errIdlePodReservationConflict
 		}
+		s.observeClaimPhase(templateID, "hot", "select_idle_pod", phaseStarted, nil)
 		reservationHeld := true
 		releaseReservation := func() {
 			if reservationHeld {
@@ -1077,7 +1210,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			zap.String("sandboxID", sandboxID),
 		)
 
+		phaseStarted = time.Now()
 		stateVolume, err := s.prepareWebhookStateVolume(ctx, req, sandboxID)
+		s.observeClaimPhase(templateID, "hot", "prepare_webhook_state_volume", phaseStarted, err)
 		if err != nil {
 			return fmt.Errorf("prepare webhook state volume: %w", err)
 		}
@@ -1099,7 +1234,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Update pod labels and annotations
 		originalIdlePod := pod.DeepCopy()
 		pod = pod.DeepCopy()
+		phaseStarted = time.Now()
 		resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
+		s.observeClaimPhase(templateID, "hot", "resolve_resource_quota", phaseStarted, err)
 		if err != nil {
 			return err
 		}
@@ -1154,43 +1291,125 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		}
 
 		// Build and add network policy annotation
+		phaseStarted = time.Now()
 		networkState, policyErr := s.applyPoliciesForPod(ctx, pod, template, req)
+		s.observeClaimPhase(templateID, "hot", "build_network_policy", phaseStarted, policyErr)
 		if policyErr != nil {
 			return policyErr
 		}
-		rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+		phaseStarted = time.Now()
+		rollbackBindings, err := s.syncCredentialBindings(
+			ctx,
+			pod,
+			req.TeamID,
+			networkState,
+			req.mayHaveExistingCredentialBindings,
+		)
+		s.observeClaimPhase(templateID, "hot", "sync_credential_bindings", phaseStarted, err)
 		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}
 
-		// Update the pod
-		updatedPod, updateErr := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
-		if updateErr != nil {
-			rollbackStateVolume()
-			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
-				s.logger.Warn("Failed to roll back credential bindings after hot-claim update failure",
-					zap.String("sandboxID", sandboxID),
-					zap.Error(rollbackErr),
-				)
-			}
-			if isIdlePodLostDuringClaim(updateErr) {
-				s.observeIdleClaim(templateID, "update_conflict")
-				keepReservationUntilTTL()
-				return errNoIdlePod
-			}
-			if k8serrors.IsConflict(updateErr) {
-				s.observeIdleClaim(templateID, "update_conflict")
-				keepReservationUntilTTL()
-				return fmt.Errorf("%w: update pod %s/%s: %w", errIdlePodClaimLost, pod.Namespace, pod.Name, updateErr)
-			} else {
-				s.observeIdleClaim(templateID, "update_error")
-			}
-			return updateErr
-		}
-		keepReservationUntilTTL()
+		useDurableReservation := req.deferHotRuntimePreparation &&
+			s.hotClaimReservationStore != nil &&
+			pod.UID != "" &&
+			resizeQuota == nil &&
+			!v1alpha1.NetworkPolicyRequiresSynchronousApply(policySpecFromState(networkState))
 
-		if resizeQuota != nil {
+		var updatedPod *corev1.Pod
+		if useDurableReservation {
+			phaseStarted = time.Now()
+			reservation := &HotClaimReservation{
+				SandboxID: sandboxID,
+				TeamID:    req.TeamID,
+				ClusterID: naming.ClusterIDOrDefault(template.Spec.ClusterId),
+				Namespace: pod.Namespace,
+				PodName:   pod.Name,
+				PodUID:    pod.UID,
+			}
+			reserved, reserveErr := s.hotClaimReservationStore.TryReserveHotClaim(ctx, reservation)
+			s.observeClaimPhase(templateID, "hot", "reserve_claimed_pod", phaseStarted, reserveErr)
+			if reserveErr != nil || !reserved {
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after hot-claim reservation failure",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				if reserveErr != nil {
+					s.observeIdleClaim(templateID, "reservation_error")
+					return fmt.Errorf("reserve hot claim: %w", reserveErr)
+				}
+				s.observeIdleClaim(templateID, "reservation_conflict")
+				keepReservationUntilTTL()
+				return errIdlePodReservationConflict
+			}
+			keepReservationUntilTTL()
+			updatedPod = pod
+			req.pendingHotClaimFinalization = &pendingHotClaimFinalization{
+				namespace: updatedPod.Namespace,
+				podName:   updatedPod.Name,
+				podUID:    updatedPod.UID,
+				sandboxID: sandboxID,
+				metadata:  hotClaimPodMetadata(updatedPod),
+				durable:   true,
+			}
+		} else {
+			// Keep the pod attached to the warm-pool ReplicaSet until the claim has
+			// been persisted. This prevents the ReplicaSet from creating replacement
+			// pods on the latency-sensitive claim path.
+			podToPatch := pod
+			if req.deferHotRuntimePreparation {
+				podToPatch = pod.DeepCopy()
+				podToPatch.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+				podToPatch.OwnerReferences = append([]metav1.OwnerReference(nil), originalIdlePod.OwnerReferences...)
+				podToPatch.Annotations[controller.AnnotationHotClaimFinalizationPending] = sandboxID
+			}
+
+			phaseStarted = time.Now()
+			var updateErr error
+			updatedPod, updateErr = s.patchClaimedPodMetadata(ctx, podToPatch)
+			s.observeClaimPhase(templateID, "hot", "update_claimed_pod", phaseStarted, updateErr)
+			if updateErr != nil {
+				rollbackStateVolume()
+				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
+					s.logger.Warn("Failed to roll back credential bindings after hot-claim update failure",
+						zap.String("sandboxID", sandboxID),
+						zap.Error(rollbackErr),
+					)
+				}
+				if isIdlePodLostDuringClaim(updateErr) {
+					s.observeIdleClaim(templateID, "update_conflict")
+					keepReservationUntilTTL()
+					return errNoIdlePod
+				}
+				if k8serrors.IsConflict(updateErr) {
+					s.observeIdleClaim(templateID, "update_conflict")
+					keepReservationUntilTTL()
+					return fmt.Errorf("%w: update pod %s/%s: %w", errIdlePodClaimLost, pod.Namespace, pod.Name, updateErr)
+				}
+				s.observeIdleClaim(templateID, "update_error")
+				return updateErr
+			}
+			keepReservationUntilTTL()
+			if req.deferHotRuntimePreparation {
+				req.pendingHotClaimFinalization = &pendingHotClaimFinalization{
+					namespace: updatedPod.Namespace,
+					podName:   updatedPod.Name,
+					podUID:    updatedPod.UID,
+					sandboxID: sandboxID,
+				}
+				updatedPod = materializeFinalizedHotClaimPod(updatedPod)
+			}
+		}
+
+		if resizeQuota != nil && req.deferHotRuntimePreparation {
+			req.deferredHotResizeQuota = resizeQuota.DeepCopy()
+		} else if resizeQuota != nil {
+			phaseStarted = time.Now()
 			resizedPod, resizeErr := s.resizeSandboxPodResources(ctx, updatedPod, *resizeQuota)
+			s.observeClaimPhase(templateID, "hot", "resize_claimed_pod", phaseStarted, resizeErr)
 			if resizeErr != nil {
 				rollbackStateVolume()
 				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1221,10 +1440,15 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			updatedPod = mergeSandboxMetadataAfterResize(resizedPod, updatedPod)
 		}
 
-		if applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState)); applyErr != nil {
-			s.requestSandboxDeletionAfterClaimFailure(updatedPod, "network policy apply failed")
-			s.observeIdleClaim(templateID, "network_policy_error")
-			return fmt.Errorf("apply network policy: %w", applyErr)
+		if !req.deferHotRuntimePreparation {
+			phaseStarted = time.Now()
+			applyErr := s.applyNetworkProvider(ctx, updatedPod, req.TeamID, policySpecFromState(networkState))
+			s.observeClaimPhase(templateID, "hot", "apply_network_policy", phaseStarted, applyErr)
+			if applyErr != nil {
+				s.requestSandboxDeletionAfterClaimFailure(updatedPod, "network policy apply failed")
+				s.observeIdleClaim(templateID, "network_policy_error")
+				return fmt.Errorf("apply network policy: %w", applyErr)
+			}
 		}
 
 		s.logger.Info("Successfully claimed idle pod",
@@ -1248,8 +1472,143 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 	return claimedPod, nil
 }
 
+type podMetadataPatchOperation struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value any    `json:"value"`
+}
+
+func (s *SandboxService) patchClaimedPodMetadata(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	if s == nil || s.k8sClient == nil {
+		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)
+	}
+	if pod == nil || pod.Namespace == "" || pod.Name == "" {
+		return nil, fmt.Errorf("%w: pod is required", ErrInvalidClaimRequest)
+	}
+	ownerReferences := pod.OwnerReferences
+	if ownerReferences == nil {
+		ownerReferences = []metav1.OwnerReference{}
+	}
+	patch, err := json.Marshal([]podMetadataPatchOperation{
+		{Op: "test", Path: "/metadata/resourceVersion", Value: pod.ResourceVersion},
+		{Op: "add", Path: "/metadata/labels", Value: pod.Labels},
+		{Op: "add", Path: "/metadata/annotations", Value: pod.Annotations},
+		{Op: "add", Path: "/metadata/finalizers", Value: pod.Finalizers},
+		{Op: "add", Path: "/metadata/ownerReferences", Value: ownerReferences},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build claimed pod metadata patch: %w", err)
+	}
+	return s.k8sClient.CoreV1().Pods(pod.Namespace).Patch(
+		ctx,
+		pod.Name,
+		types.JSONPatchType,
+		patch,
+		metav1.PatchOptions{},
+	)
+}
+
+func materializeFinalizedHotClaimPod(pod *corev1.Pod) *corev1.Pod {
+	if pod == nil {
+		return nil
+	}
+	finalized := pod.DeepCopy()
+	finalized.Labels[controller.LabelPoolType] = controller.PoolTypeActive
+	delete(finalized.Annotations, controller.AnnotationHotClaimFinalizationPending)
+	finalized.OwnerReferences = nil
+	return finalized
+}
+
+func (s *SandboxService) schedulePendingHotClaimFinalization(pending pendingHotClaimFinalization) {
+	now := time.Now()
+	pending.scheduledAt = now
+	s.hotClaimFinalizationMu.Lock()
+	s.hotClaimFinalizationLastScheduled = now
+	s.hotClaimFinalizationMu.Unlock()
+	s.schedulePendingHotClaimFinalizationAfter(pending, hotClaimPoolRefillQuietPeriod)
+}
+
+func (s *SandboxService) schedulePendingHotClaimFinalizationAfter(pending pendingHotClaimFinalization, delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		if delay := s.nextHotClaimFinalizationDelay(pending, time.Now()); delay > 0 {
+			s.schedulePendingHotClaimFinalizationAfter(pending, delay)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), hotClaimFinalizationTimeout)
+		defer cancel()
+		if err := s.finalizePendingHotClaim(ctx, pending); err != nil {
+			logger := s.logger
+			if logger == nil {
+				logger = zap.NewNop()
+			}
+			logger.Warn("Failed to finalize pending hot claim",
+				zap.String("namespace", pending.namespace),
+				zap.String("pod", pending.podName),
+				zap.String("sandboxID", pending.sandboxID),
+				zap.Error(err),
+			)
+		}
+	})
+}
+
+func (s *SandboxService) nextHotClaimFinalizationDelay(pending pendingHotClaimFinalization, now time.Time) time.Duration {
+	if pending.scheduledAt.IsZero() || now.Sub(pending.scheduledAt) >= hotClaimPoolRefillMaxDelay {
+		return 0
+	}
+	s.hotClaimFinalizationMu.Lock()
+	lastScheduled := s.hotClaimFinalizationLastScheduled
+	s.hotClaimFinalizationMu.Unlock()
+	if lastScheduled.IsZero() {
+		return 0
+	}
+	quietRemaining := hotClaimPoolRefillQuietPeriod - now.Sub(lastScheduled)
+	if quietRemaining <= 0 {
+		return 0
+	}
+	maxDelayRemaining := hotClaimPoolRefillMaxDelay - now.Sub(pending.scheduledAt)
+	if quietRemaining > maxDelayRemaining {
+		return maxDelayRemaining
+	}
+	return quietRemaining
+}
+
+func (s *SandboxService) finalizePendingHotClaim(ctx context.Context, pending pendingHotClaimFinalization) error {
+	if pending.durable {
+		return s.finalizeReservedHotClaim(ctx, pending.sandboxID)
+	}
+	return retry.OnError(retry.DefaultBackoff, func(err error) bool {
+		return k8serrors.IsConflict(err) || k8serrors.IsInvalid(err)
+	}, func() error {
+		pod, err := s.k8sClient.CoreV1().Pods(pending.namespace).Get(ctx, pending.podName, metav1.GetOptions{})
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if pod.Annotations[controller.AnnotationHotClaimFinalizationPending] == "" {
+			if pod.Labels[controller.LabelPoolType] == controller.PoolTypeActive &&
+				sandboxIDFromPod(pod) == pending.sandboxID {
+				return nil
+			}
+			return fmt.Errorf("pod no longer has the expected pending hot claim")
+		}
+		if pod.Annotations[controller.AnnotationHotClaimFinalizationPending] != pending.sandboxID ||
+			sandboxIDFromPod(pod) != pending.sandboxID {
+			return fmt.Errorf("pending hot claim has inconsistent sandbox identity")
+		}
+		_, err = s.patchClaimedPodMetadata(ctx, materializeFinalizedHotClaimPod(pod))
+		return err
+	})
+}
+
 func (s *SandboxService) isHotClaimableIdlePod(pod *corev1.Pod, desiredTemplateHash string) bool {
 	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	if strings.TrimSpace(pod.Labels[controller.LabelSandboxID]) != "" ||
+		strings.TrimSpace(pod.Annotations[controller.AnnotationSandboxID]) != "" ||
+		pod.Annotations[controller.AnnotationHotClaimFinalizationPending] != "" {
 		return false
 	}
 	if pod.Annotations[controller.AnnotationTemplateSpecHash] != desiredTemplateHash {
@@ -1394,7 +1753,13 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if err != nil {
 		return nil, err
 	}
-	rollbackBindings, err := s.syncCredentialBindings(ctx, pod, req.TeamID, networkState)
+	rollbackBindings, err := s.syncCredentialBindings(
+		ctx,
+		pod,
+		req.TeamID,
+		networkState,
+		req.mayHaveExistingCredentialBindings,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("stage credential bindings: %w", err)
 	}

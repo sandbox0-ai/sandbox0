@@ -32,6 +32,7 @@ type memoryBindingStore struct {
 	records        map[string]*egressauth.BindingRecord
 	sourcesByRef   map[string]*egressauth.CredentialSource
 	sourceVersions map[string]*egressauth.CredentialSourceVersion
+	getCalls       int
 	upsertCalls    int
 	deleteCalls    int
 }
@@ -45,6 +46,7 @@ func newMemoryBindingStore() *memoryBindingStore {
 }
 
 func (s *memoryBindingStore) GetBindings(_ context.Context, teamID, sandboxID string) (*egressauth.BindingRecord, error) {
+	s.getCalls++
 	return cloneBindingRecord(s.records[s.bindingKey(teamID, sandboxID)]), nil
 }
 
@@ -541,6 +543,46 @@ func TestTemplateCredentialBindingsUsesNestedNetworkBindings(t *testing.T) {
 
 	require.Len(t, bindings, 1)
 	assert.Equal(t, "nested-ref", bindings[0].Ref)
+}
+
+func TestSyncCredentialBindingsSkipsLookupForFreshSandbox(t *testing.T) {
+	store := newMemoryBindingStore()
+	svc := &SandboxService{credentialStore: store}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-a",
+			Namespace: "ns-a",
+			Annotations: map[string]string{
+				controller.AnnotationSandboxID: "sandbox-a",
+			},
+		},
+	}
+
+	if _, err := svc.syncCredentialBindings(
+		context.Background(),
+		pod,
+		"team-a",
+		&BuildNetworkPolicyResult{},
+		false,
+	); err != nil {
+		t.Fatalf("syncCredentialBindings() error = %v", err)
+	}
+	if store.getCalls != 0 {
+		t.Fatalf("binding lookups = %d, want 0", store.getCalls)
+	}
+
+	if _, err := svc.syncCredentialBindings(
+		context.Background(),
+		pod,
+		"team-a",
+		&BuildNetworkPolicyResult{},
+		true,
+	); err != nil {
+		t.Fatalf("syncCredentialBindings(existing) error = %v", err)
+	}
+	if store.getCalls != 1 {
+		t.Fatalf("binding lookups = %d, want 1", store.getCalls)
+	}
 }
 
 func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {

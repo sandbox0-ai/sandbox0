@@ -183,6 +183,33 @@ func TestAuditDeliveryPersistsCanonicalBeforeClickHouseAndReplaysAfterRestart(t 
 	}
 }
 
+func TestAuditDeliveryRetriesCanonicalEventAfterWriterFailure(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{err: errors.New("clickhouse unavailable")}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	event := testAuditDeliveryEvent(t, "12121212-1212-4121-8121-121212121212")
+	if err := delivery.PersistCanonical(context.Background(), event); !errors.Is(err, errAuditDeliveryPending) {
+		t.Fatalf("first PersistCanonical() error = %v, want pending", err)
+	}
+
+	writer.mu.Lock()
+	writer.err = nil
+	writer.mu.Unlock()
+	if err := delivery.PersistCanonical(context.Background(), event); err != nil {
+		t.Fatalf("second PersistCanonical() error = %v", err)
+	}
+	events := writer.snapshotEvents()
+	if len(events) != 1 || events[0].EventID != event.EventID {
+		t.Fatalf("canonical events = %#v, want one retried event", events)
+	}
+	if _, err := os.Stat(filepath.Join(dir, event.EventID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("acknowledged spool record still exists: %v", err)
+	}
+}
+
 func TestAuditDeliveryReplayBatchesPendingEvents(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}
@@ -339,11 +366,71 @@ func TestAuditDeliveryBatchesConcurrentCanonicalWrites(t *testing.T) {
 	if got := len(writer.snapshotEvents()); got != writes {
 		t.Fatalf("canonical events = %d, want %d", got, writes)
 	}
-	if got, want := writer.snapshotBatchSizes(), []int{1, writes - 1}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("canonical batch sizes = %v, want %v", got, want)
+	batchSizes := writer.snapshotBatchSizes()
+	if len(batchSizes) < 2 || batchSizes[0] != 1 {
+		t.Fatalf("canonical batch sizes = %v, want an initial singleton followed by coalesced writes", batchSizes)
 	}
-	if got := delivery.canonicalTurns.Load(); got != 2 {
-		t.Fatalf("canonical delivery turns = %d, want 2", got)
+	total := 0
+	for _, size := range batchSizes {
+		total += size
+	}
+	if total != writes {
+		t.Fatalf("canonical batch rows = %d, want %d: %v", total, writes, batchSizes)
+	}
+	if got := delivery.canonicalTurns.Load(); got != int64(len(batchSizes)) {
+		t.Fatalf("canonical delivery turns = %d, want %d", got, len(batchSizes))
+	}
+}
+
+func TestAuditDeliveryBoundsParallelCanonicalBatchesWithoutDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{
+		started: make(chan struct{}, auditCanonicalSlots+1),
+		block:   make(chan struct{}),
+	}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	const writes = auditCanonicalSlots + 1
+	errs := make(chan error, writes)
+	for i := range writes {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		go func() {
+			errs <- delivery.PersistCanonical(context.Background(), event)
+		}()
+		if i < auditCanonicalSlots {
+			select {
+			case <-writer.started:
+			case <-time.After(time.Second):
+				t.Fatalf("canonical batch %d did not start", i+1)
+			}
+		}
+	}
+
+	select {
+	case <-writer.started:
+		t.Fatalf("canonical batch exceeded the %d-slot bound", auditCanonicalSlots)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(writer.block)
+	for range writes {
+		if err := <-errs; err != nil {
+			t.Fatalf("PersistCanonical() error = %v", err)
+		}
+	}
+	events := writer.snapshotEvents()
+	if len(events) != writes {
+		t.Fatalf("canonical events = %d, want %d", len(events), writes)
+	}
+	seen := make(map[string]struct{}, writes)
+	for _, event := range events {
+		if _, duplicate := seen[event.EventID]; duplicate {
+			t.Fatalf("canonical event %s was inserted more than once", event.EventID)
+		}
+		seen[event.EventID] = struct{}{}
 	}
 }
 

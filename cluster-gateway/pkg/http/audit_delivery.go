@@ -22,6 +22,7 @@ import (
 const (
 	auditReplayInterval   = time.Second
 	auditReplayBatchSize  = 500
+	auditCanonicalSlots   = 4
 	auditSpoolWriteShards = 64
 	auditSpoolQuietPeriod = 2 * time.Millisecond
 	auditSpoolDrainLimit  = 40 * time.Millisecond
@@ -33,6 +34,7 @@ var (
 	errAuditDeliveryPending = errors.New("canonical audit event is pending")
 	errAuditUnrecorded      = errors.New("audit event is unrecorded")
 	errAuditSpoolWrite      = errors.New("audit spool write failed")
+	errAuditBatchReserved   = errors.New("audit event is in an active canonical batch")
 )
 
 type auditEventInserter interface {
@@ -62,6 +64,7 @@ type auditDelivery struct {
 	canonicalTurns  atomic.Int64
 	canonicalWakeMu sync.Mutex
 	canonicalWake   chan struct{}
+	canonicalActive map[string]struct{}
 	once            sync.Once
 	wake            chan struct{}
 	canonicalSlot   chan struct{}
@@ -89,8 +92,9 @@ func newAuditDelivery(dir string, writer auditEventInserter, logger *zap.Logger,
 		dirSync:         syncAuditDirectory,
 		dirSyncWake:     make(chan struct{}),
 		wake:            make(chan struct{}, 1),
-		canonicalSlot:   make(chan struct{}, 1),
+		canonicalSlot:   make(chan struct{}, auditCanonicalSlots),
 		canonicalWake:   make(chan struct{}),
+		canonicalActive: make(map[string]struct{}),
 	}
 	if _, err := delivery.loadLocked(); err != nil {
 		return nil, err
@@ -135,59 +139,60 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 	if err != nil || !spooled {
 		return err
 	}
-	acquired, err := d.acquireCanonicalSlotOrAck(ctx, event.EventID)
-	if err != nil {
-		d.signalReplay()
-		return fmt.Errorf("%w: event is durably buffered but canonical delivery did not start: %v", errAuditDeliveryPending, err)
-	}
-	if !acquired {
+	for {
+		acquired, err := d.acquireCanonicalSlotOrAck(ctx, event.EventID)
+		if err != nil {
+			d.signalReplay()
+			return fmt.Errorf("%w: event is durably buffered but canonical delivery did not start: %v", errAuditDeliveryPending, err)
+		}
+		if !acquired {
+			return nil
+		}
+
+		if err := d.waitForConcurrentSpoolWrites(ctx); err != nil {
+			d.releaseCanonicalSlot()
+			d.signalReplay()
+			return fmt.Errorf("%w: event is durably buffered but canonical batching was interrupted: %v", errAuditDeliveryPending, err)
+		}
+
+		// Replay or another bounded writer may have acknowledged or reserved the
+		// target while this caller waited for a canonical slot.
+		d.mu.Lock()
+		events, acknowledged, batchErr := d.reserveCanonicalBatchLocked(auditReplayBatchSize, event.EventID)
+		d.mu.Unlock()
+		switch {
+		case errors.Is(batchErr, errAuditBatchReserved):
+			d.releaseCanonicalSlot()
+			continue
+		case batchErr != nil:
+			d.releaseCanonicalSlot()
+			d.signalReplay()
+			return fmt.Errorf("%w: load durably buffered canonical batch: %v", errAuditDeliveryPending, batchErr)
+		case acknowledged:
+			d.releaseCanonicalSlot()
+			return nil
+		}
+
+		d.canonicalTurns.Add(1)
+		if err := d.writer.InsertEvents(ctx, events); err != nil {
+			d.finishCanonicalBatch(events, false)
+			d.logger.Warn("Sandbox audit event buffered for retry", zap.String("event_id", event.EventID), zap.Error(err))
+			d.signalReplay()
+			return fmt.Errorf("%w: event is durably buffered but not yet acknowledged: %v", errAuditDeliveryPending, err)
+		}
+		removeErr := d.finishCanonicalBatch(events, true)
+		if removeErr != nil {
+			// The canonical insert already succeeded. Leaving the record in place
+			// can cause a duplicate retry, but the stable event ID makes that safe
+			// and is preferable to reporting a false delivery failure.
+			d.logger.Error("Canonical sandbox audit batch was acknowledged but spool cleanup failed",
+				zap.String("event_id", event.EventID),
+				zap.Int("batch_size", len(events)),
+				zap.Error(removeErr),
+			)
+		}
 		return nil
 	}
-	defer d.releaseCanonicalSlot()
-
-	if err := d.waitForConcurrentSpoolWrites(ctx); err != nil {
-		d.signalReplay()
-		return fmt.Errorf("%w: event is durably buffered but canonical batching was interrupted: %v", errAuditDeliveryPending, err)
-	}
-
-	// Replay may have acknowledged this exact signed event between the local
-	// fsync and acquisition of the canonical delivery slot.
-	d.mu.Lock()
-	pending, pendingErr := d.pendingLocked(event.EventID)
-	d.mu.Unlock()
-	if pendingErr != nil {
-		d.signalReplay()
-		return fmt.Errorf("%w: inspect durably buffered event: %v", errAuditDeliveryPending, pendingErr)
-	}
-	if !pending {
-		return nil
-	}
-	d.mu.Lock()
-	events, batchErr := d.loadBatchContainingLocked(auditReplayBatchSize, event.EventID)
-	d.mu.Unlock()
-	if batchErr != nil {
-		d.signalReplay()
-		return fmt.Errorf("%w: load durably buffered canonical batch: %v", errAuditDeliveryPending, batchErr)
-	}
-	if err := d.writer.InsertEvents(ctx, events); err != nil {
-		d.logger.Warn("Sandbox audit event buffered for retry", zap.String("event_id", event.EventID), zap.Error(err))
-		d.signalReplay()
-		return fmt.Errorf("%w: event is durably buffered but not yet acknowledged: %v", errAuditDeliveryPending, err)
-	}
-	d.mu.Lock()
-	removeErr := d.removeBatchLocked(events)
-	d.mu.Unlock()
-	if removeErr != nil {
-		// The canonical insert already succeeded. Leaving the record in place can
-		// cause a duplicate retry, but the stable event ID makes that safe and is
-		// preferable to reporting a false delivery failure.
-		d.logger.Error("Canonical sandbox audit batch was acknowledged but spool cleanup failed",
-			zap.String("event_id", event.EventID),
-			zap.Int("batch_size", len(events)),
-			zap.Error(removeErr),
-		)
-	}
-	return nil
 }
 
 // spoolOrCanonical returns true when the event is in the local spool. A false,
@@ -299,7 +304,6 @@ func (d *auditDelivery) acquireCanonicalSlot(ctx context.Context) error {
 	}
 	select {
 	case d.canonicalSlot <- struct{}{}:
-		d.canonicalTurns.Add(1)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -320,12 +324,21 @@ func (d *auditDelivery) acquireCanonicalSlotOrAck(ctx context.Context, eventID s
 
 		d.mu.RLock()
 		pending, err := d.pendingLocked(eventID)
+		_, active := d.canonicalActive[eventID]
 		d.mu.RUnlock()
 		if err != nil {
 			return false, err
 		}
 		if !pending {
 			return false, nil
+		}
+		if active {
+			select {
+			case <-wake:
+				continue
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
 		}
 
 		select {
@@ -341,7 +354,6 @@ func (d *auditDelivery) acquireCanonicalSlotOrAck(ctx context.Context, eventID s
 				continue
 			default:
 			}
-			d.canonicalTurns.Add(1)
 			return true, nil
 		case <-wake:
 		case <-ctx.Done():
@@ -367,6 +379,22 @@ func (d *auditDelivery) releaseCanonicalSlot() {
 	<-d.canonicalSlot
 }
 
+// finishCanonicalBatch releases each event reservation after the ClickHouse
+// outcome is known, then wakes callers waiting on the bounded writer pool.
+func (d *auditDelivery) finishCanonicalBatch(events []sandboxobservability.Event, acknowledged bool) error {
+	d.mu.Lock()
+	var removeErr error
+	if acknowledged {
+		removeErr = d.removeBatchLocked(events)
+	}
+	for _, event := range events {
+		delete(d.canonicalActive, event.EventID)
+	}
+	d.mu.Unlock()
+	d.releaseCanonicalSlot()
+	return removeErr
+}
+
 func (d *auditDelivery) run(ctx context.Context) {
 	ticker := time.NewTicker(auditReplayInterval)
 	defer ticker.Stop()
@@ -390,26 +418,26 @@ func (d *auditDelivery) replay(ctx context.Context) error {
 	if err := d.acquireCanonicalSlot(ctx); err != nil {
 		return err
 	}
-	defer d.releaseCanonicalSlot()
 
 	d.mu.Lock()
-	events, err := d.loadBatchLocked(auditReplayBatchSize)
+	events, _, err := d.reserveCanonicalBatchLocked(auditReplayBatchSize, "")
 	d.mu.Unlock()
 	if err != nil {
+		d.releaseCanonicalSlot()
 		return err
 	}
 	if len(events) == 0 {
+		d.releaseCanonicalSlot()
 		return nil
 	}
+	d.canonicalTurns.Add(1)
 	if err := d.writer.InsertEvents(ctx, events); err != nil {
+		d.finishCanonicalBatch(events, false)
 		return err
 	}
-	d.mu.Lock()
-	if err := d.removeBatchLocked(events); err != nil {
-		d.mu.Unlock()
+	if err := d.finishCanonicalBatch(events, true); err != nil {
 		return err
 	}
-	d.mu.Unlock()
 	if len(events) == auditReplayBatchSize {
 		// Yield the canonical slot after each batch so a strict mutation cannot
 		// be starved behind an arbitrarily large recovery backlog.
@@ -589,6 +617,38 @@ func (d *auditDelivery) loadBatchLocked(limit int) ([]sandboxobservability.Event
 }
 
 func (d *auditDelivery) loadBatchContainingLocked(limit int, eventID string) ([]sandboxobservability.Event, error) {
+	return d.loadAvailableBatchContainingLocked(limit, eventID, nil)
+}
+
+// reserveCanonicalBatchLocked assigns unclaimed spool records to one writer.
+// The caller must hold d.mu until every returned event is marked active.
+func (d *auditDelivery) reserveCanonicalBatchLocked(limit int, eventID string) ([]sandboxobservability.Event, bool, error) {
+	if d.canonicalActive == nil {
+		d.canonicalActive = make(map[string]struct{})
+	}
+	if eventID != "" {
+		pending, err := d.pendingLocked(eventID)
+		if err != nil {
+			return nil, false, err
+		}
+		if !pending {
+			return nil, true, nil
+		}
+		if _, active := d.canonicalActive[eventID]; active {
+			return nil, false, errAuditBatchReserved
+		}
+	}
+	events, err := d.loadAvailableBatchContainingLocked(limit, eventID, d.canonicalActive)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, event := range events {
+		d.canonicalActive[event.EventID] = struct{}{}
+	}
+	return events, false, nil
+}
+
+func (d *auditDelivery) loadAvailableBatchContainingLocked(limit int, eventID string, active map[string]struct{}) ([]sandboxobservability.Event, error) {
 	entries, err := os.ReadDir(d.dir)
 	if err != nil {
 		return nil, fmt.Errorf("read audit spool: %w", err)
@@ -596,6 +656,10 @@ func (d *auditDelivery) loadBatchContainingLocked(limit int, eventID string) ([]
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			entryEventID := strings.TrimSuffix(entry.Name(), ".json")
+			if _, reserved := active[entryEventID]; reserved {
+				continue
+			}
 			names = append(names, entry.Name())
 		}
 	}

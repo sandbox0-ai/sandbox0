@@ -83,6 +83,81 @@ func TestCleanupStaleCSIMountsSkipsActivePodMounts(t *testing.T) {
 	}
 }
 
+func TestCleanupStaleCSIMountsSkipsManagedPortalHealthCheck(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "pod-a", "volumes", kubeletCSIVolumeDir, "sandbox0-volume-1-workspace", "mount")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", target, err)
+	}
+
+	checked := false
+	cleaned := false
+	mgr := NewManager(Config{
+		RootDir:         t.TempDir(),
+		KubeletPodsRoot: root,
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"pod-a": {}}, nil
+		},
+		StaleMountChecker: func(string) (bool, error) {
+			checked = true
+			return true, nil
+		},
+		StaleMountCleaner: func(string) error {
+			cleaned = true
+			return nil
+		},
+	})
+	pm := &portalMount{podUID: "pod-a", name: "workspace", targetPath: target}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+	mgr.portalsByTarget[target] = pm
+
+	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if checked {
+		t.Fatal("managed portal mount was health checked")
+	}
+	if cleaned {
+		t.Fatal("managed portal mount was cleaned")
+	}
+}
+
+func TestCleanupStaleCSIMountsCleansInactiveMountWithoutHealthCheck(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "pod-a", "volumes", kubeletCSIVolumeDir, "sandbox0-volume-1-workspace", "mount")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", target, err)
+	}
+
+	checked := false
+	var cleaned []string
+	mgr := NewManager(Config{
+		RootDir:         t.TempDir(),
+		KubeletPodsRoot: root,
+		ActivePodUIDLister: func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{}, nil
+		},
+		StaleMountChecker: func(string) (bool, error) {
+			checked = true
+			return false, nil
+		},
+		StaleMountCleaner: func(path string) error {
+			cleaned = append(cleaned, path)
+			return os.RemoveAll(path)
+		},
+	})
+
+	if err := mgr.CleanupStaleCSIMounts(context.Background()); err != nil {
+		t.Fatalf("CleanupStaleCSIMounts() error = %v", err)
+	}
+	if checked {
+		t.Fatal("inactive mount was health checked before cleanup")
+	}
+	if !slices.Equal(cleaned, []string{target}) {
+		t.Fatalf("cleaned paths = %#v, want %#v", cleaned, []string{target})
+	}
+}
+
 func TestCleanupStalePortalsRemovesOnlyInactivePodState(t *testing.T) {
 	root := t.TempDir()
 	staleTarget := filepath.Join(root, "stale-target")

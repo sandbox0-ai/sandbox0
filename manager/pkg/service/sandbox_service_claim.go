@@ -57,7 +57,7 @@ type ClaimRequest struct {
 	// HardExpiresAt preserves the absolute hard deadline when recreating a paused sandbox.
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
-	WebhookStateVolumeID string `json:"-"`
+	WebhookStateVolumeID              string `json:"-"`
 	mayHaveExistingCredentialBindings bool
 }
 

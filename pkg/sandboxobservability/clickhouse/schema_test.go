@@ -10,13 +10,12 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 		RetentionDays:               7,
 		LogsRetentionDays:           3,
 		RuntimeSamplesRetentionDays: 14,
-		EventsStoragePolicy:         "audit_hot_s3",
 	})
 	if err != nil {
 		t.Fatalf("SchemaStatements() error = %v", err)
 	}
-	if len(statements) != 8 {
-		t.Fatalf("statement count = %d, want 8", len(statements))
+	if len(statements) != 7 {
+		t.Fatalf("statement count = %d, want 7", len(statements))
 	}
 	createEventsTable := statements[1]
 	for _, want := range []string{
@@ -25,9 +24,6 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 		"PARTITION BY toYYYYMM(occurred_at)",
 		"ORDER BY (team_id, sandbox_id, occurred_at, event_id, payload_hash)",
 		"TTL toDateTime(ingested_at) + INTERVAL 7 DAY DELETE",
-		"min_rows_for_wide_part = 1000000",
-		"min_bytes_for_wide_part = 1073741824",
-		"storage_policy = 'audit_hot_s3'",
 	} {
 		if !strings.Contains(createEventsTable, want) {
 			t.Fatalf("create events table statement missing %q:\n%s", want, createEventsTable)
@@ -72,9 +68,6 @@ func TestSchemaStatementsUseReplacingMergeTreeAndRetentionTTL(t *testing.T) {
 	if !strings.Contains(statements[6], "ALTER TABLE `sandbox0_observability`.`sandbox_runtime_samples` MODIFY TTL toDateTime(observed_at) + INTERVAL 14 DAY DELETE") {
 		t.Fatalf("runtime samples alter ttl statement = %q", statements[6])
 	}
-	if !strings.Contains(statements[7], "ALTER TABLE `sandbox0_observability`.`sandbox_audit_events` MODIFY SETTING min_rows_for_wide_part = 1000000, min_bytes_for_wide_part = 1073741824, storage_policy = 'audit_hot_s3'") {
-		t.Fatalf("events alter part format statement = %q", statements[7])
-	}
 }
 
 func TestAuditPartitionKeyIsStableAcrossDeliveryRetries(t *testing.T) {
@@ -88,9 +81,6 @@ func TestAuditPartitionKeyIsStableAcrossDeliveryRetries(t *testing.T) {
 	}
 	if strings.Contains(createEventsTable, "PARTITION BY toYYYYMM(ingested_at)") {
 		t.Fatalf("audit partition must not change when a retry receives a new ingested_at:\n%s", createEventsTable)
-	}
-	if strings.Contains(createEventsTable, "storage_policy") || strings.Contains(statements[7], "storage_policy") {
-		t.Fatalf("default schema must not require a deployment-specific storage policy:\n%s\n%s", createEventsTable, statements[7])
 	}
 }
 
@@ -106,9 +96,6 @@ func TestSchemaStatementsRejectUnsafeIdentifiers(t *testing.T) {
 	}
 	if _, err := SchemaStatements(Config{RuntimeSamplesTable: "runtime.v2"}); err == nil {
 		t.Fatal("SchemaStatements() error = nil, want unsafe runtime samples table identifier rejection")
-	}
-	if _, err := SchemaStatements(Config{EventsStoragePolicy: "hot;DROP"}); err == nil {
-		t.Fatal("SchemaStatements() error = nil, want unsafe events storage policy identifier rejection")
 	}
 }
 

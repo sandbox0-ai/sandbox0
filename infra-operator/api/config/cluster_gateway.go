@@ -127,10 +127,6 @@ type SandboxObservabilityClickHouseConfig struct {
 	// +optional
 	// +kubebuilder:default="sandbox_audit_events"
 	EventsTable string `yaml:"events_table" json:"eventsTable"`
-	// EventsStoragePolicy optionally places the audit events table on a
-	// ClickHouse storage policy provisioned by the deployment.
-	// +optional
-	EventsStoragePolicy string `yaml:"events_storage_policy" json:"eventsStoragePolicy"`
 	// +optional
 	// +kubebuilder:default="sandbox_logs"
 	LogsTable string `yaml:"logs_table" json:"logsTable"`

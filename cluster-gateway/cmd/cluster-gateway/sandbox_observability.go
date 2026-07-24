@@ -36,7 +36,6 @@ func initSandboxObservability(ctx context.Context, cfg *config.ClusterGatewayCon
 			Schema: obsclickhouse.Config{
 				Database:                    clickHouseCfg.Database,
 				EventsTable:                 clickHouseCfg.EventsTable,
-				EventsStoragePolicy:         clickHouseCfg.EventsStoragePolicy,
 				LogsTable:                   clickHouseCfg.LogsTable,
 				RuntimeSamplesTable:         clickHouseCfg.RuntimeSamplesTable,
 				RetentionDays:               clickHouseCfg.RetentionDays,
@@ -52,7 +51,6 @@ func initSandboxObservability(ctx context.Context, cfg *config.ClusterGatewayCon
 		logger.Info("Sandbox observability ClickHouse backend initialized",
 			zap.String("database", repo.Database()),
 			zap.String("events_table", repo.EventsTable()),
-			zap.String("events_storage_policy", strings.TrimSpace(clickHouseCfg.EventsStoragePolicy)),
 			zap.String("logs_table", repo.LogsTable()),
 			zap.String("runtime_samples_table", repo.RuntimeSamplesTable()),
 			zap.Int("retention_days", repo.RetentionDays()),

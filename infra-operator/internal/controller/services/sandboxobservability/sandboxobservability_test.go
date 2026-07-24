@@ -210,10 +210,6 @@ func TestGetRuntimeConfigUsesRegionClickHouse(t *testing.T) {
 			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
 				Enabled: &enabled,
 				Backend: infrav1alpha1.SandboxObservabilityBackendClickHouse,
-				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
-					Enabled:       true,
-					StoragePolicy: "audit_hot_s3",
-				},
 			},
 		},
 	}
@@ -232,7 +228,6 @@ func TestGetRuntimeConfigUsesRegionClickHouse(t *testing.T) {
 	assert.Equal(t, "clickhouse://sandbox0:password@clickhouse:9000/sandbox0_obs", cfg.DSN)
 	assert.Equal(t, "sandbox0_obs", cfg.Database)
 	assert.Equal(t, "sandbox_audit_events", cfg.EventsTable)
-	assert.Equal(t, "audit_hot_s3", cfg.EventsStoragePolicy)
 	assert.Equal(t, sandboxobstypes.AuditDeliveryModeDurableAsync, cfg.AuditDeliveryMode)
 }
 

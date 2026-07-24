@@ -34,7 +34,6 @@ sandbox_observability:
         dsn: ${TEST_CLICKHOUSE_DSN}
         database: sandbox0_obs_test
         events_table: sandbox_events_test
-        events_storage_policy: audit_hot_s3
         retention_days: 14
         connect_timeout:
             duration: 3s
@@ -60,7 +59,6 @@ sandbox_observability:
 	if ch.DSN != "clickhouse://default:pass@clickhouse:9000/default" ||
 		ch.Database != "sandbox0_obs_test" ||
 		ch.EventsTable != "sandbox_events_test" ||
-		ch.EventsStoragePolicy != "audit_hot_s3" ||
 		ch.RetentionDays != 14 ||
 		ch.ConnectTimeout != (metav1.Duration{Duration: 3 * time.Second}) {
 		t.Fatalf("clickhouse config = %+v", ch)

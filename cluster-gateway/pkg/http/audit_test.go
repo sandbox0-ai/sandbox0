@@ -524,7 +524,7 @@ func TestSandboxAuditMiddlewareInitialAttemptUnrecordedDoesNotFabricateResult(t 
 	}
 }
 
-func TestSandboxAuditMiddlewareAdmissionResultSpoolAndFallbackFailure(t *testing.T) {
+func TestSandboxAuditMiddlewareAdmissionDurabilityFallbackFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	dir := t.TempDir()
@@ -567,15 +567,15 @@ func TestSandboxAuditMiddlewareAdmissionResultSpoolAndFallbackFailure(t *testing
 		t.Fatalf("spool failure hook error = %v", hookErr)
 	}
 	if called {
-		t.Fatal("operation handler ran after the admission result became unrecorded")
+		t.Fatal("operation handler ran after the admission attempt became unrecorded")
 	}
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", recorder.Code)
 	}
-	if writer.calls != 2 {
-		t.Fatalf("canonical writer calls = %d, want attempt and result fallback", writer.calls)
+	if writer.calls != 1 {
+		t.Fatalf("canonical writer calls = %d, want only the unrecorded attempt", writer.calls)
 	}
-	for _, fragment := range []string{`"audit_attempt":"pending"`, `"audit_result":"unrecorded"`} {
+	for _, fragment := range []string{`"audit_attempt":"unrecorded"`, `"audit_result":"unrecorded"`} {
 		if !strings.Contains(recorder.Body.String(), fragment) {
 			t.Fatalf("response body %s missing %q", recorder.Body.String(), fragment)
 		}
@@ -585,21 +585,21 @@ func TestSandboxAuditMiddlewareAdmissionResultSpoolAndFallbackFailure(t *testing
 		t.Fatalf("ReadDir(%q) error = %v", backupDir, err)
 	}
 	if len(entries) != 1 {
-		t.Fatalf("preserved attempt entries = %d, want 1", len(entries))
+		t.Fatalf("buffered attempt entries = %d, want 1", len(entries))
 	}
 	raw, err := os.ReadFile(backupDir + "/" + entries[0].Name())
 	if err != nil {
-		t.Fatalf("ReadFile(preserved attempt) error = %v", err)
+		t.Fatalf("ReadFile(buffered attempt) error = %v", err)
 	}
 	var attempt sandboxobservability.Event
 	if err := json.Unmarshal(raw, &attempt); err != nil {
-		t.Fatalf("decode preserved attempt: %v", err)
+		t.Fatalf("decode buffered attempt: %v", err)
 	}
 	if attempt.Phase != sandboxobservability.EventPhaseAttempt {
-		t.Fatalf("preserved event phase = %q, want attempt", attempt.Phase)
+		t.Fatalf("buffered event phase = %q, want attempt", attempt.Phase)
 	}
 	if err := sandboxobservability.VerifyEventIntegrity(attempt, key.Public().(ed25519.PublicKey)); err != nil {
-		t.Fatalf("VerifyEventIntegrity(preserved attempt) error = %v", err)
+		t.Fatalf("VerifyEventIntegrity(buffered attempt) error = %v", err)
 	}
 }
 

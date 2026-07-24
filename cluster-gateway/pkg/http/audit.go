@@ -125,8 +125,8 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 		attemptDeliveryMode := s.auditAttemptDeliveryModeForRoute(policy)
 		attempt, err := s.newSandboxAPIEvent(c, authCtx, action, operationID, "", sandboxobservability.EventPhaseAttempt, sandboxobservability.OutcomeAccepted, 0)
 		if err == nil {
-			// The spool fsync itself is not context-cancelable, but any canonical
-			// insert (strict mode or durable fallback) is bounded.
+			// Canonical admission is bounded. Its local batch record is fsynced
+			// only if ClickHouse does not acknowledge the pre-execution attempt.
 			attemptCtx, cancel := context.WithTimeout(c.Request.Context(), auditCanonicalDeliveryTimeout)
 			err = s.deliverAuditEvent(attemptCtx, attempt, attemptDeliveryMode)
 			cancel()
@@ -274,6 +274,9 @@ func (s *Server) deliverAuditEvent(ctx context.Context, event sandboxobservabili
 		return fmt.Errorf("%w: sandbox audit delivery is unavailable", errAuditUnrecorded)
 	}
 	if sandboxobservability.NormalizeAuditDeliveryMode(mode) == sandboxobservability.AuditDeliveryModeCanonicalSync {
+		if event.Phase == sandboxobservability.EventPhaseAttempt {
+			return s.auditDelivery.PersistCanonicalAdmission(ctx, event)
+		}
 		return s.auditDelivery.PersistCanonical(ctx, event)
 	}
 	return s.auditDelivery.EnqueueDurable(ctx, event)
@@ -616,8 +619,8 @@ func (s *Server) beginExposureAudit(c *gin.Context, sandbox *mgr.Sandbox, servic
 	}
 	attempt, err := newEvent(sandboxobservability.EventPhaseAttempt, sandboxobservability.OutcomeAccepted, "")
 	if err == nil {
-		// The spool fsync itself is not context-cancelable, but any canonical
-		// insert (strict mode or durable fallback) is bounded.
+		// Canonical admission is bounded. Its local batch record is fsynced
+		// only if ClickHouse does not acknowledge the pre-execution attempt.
 		attemptCtx, cancel := context.WithTimeout(c.Request.Context(), auditCanonicalDeliveryTimeout)
 		err = s.deliverAuditEvent(attemptCtx, attempt, s.configuredAuditDeliveryMode())
 		cancel()

@@ -257,6 +257,83 @@ func TestAuditDeliveryPersistsCanonicalBeforeClickHouseAndReplaysAfterRestart(t 
 	}
 }
 
+func TestAuditDeliveryCanonicalAdmissionSkipsPreInsertDirectorySync(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	var syncMu sync.Mutex
+	syncCalls := 0
+	delivery.dirSync = func(path string) error {
+		syncMu.Lock()
+		syncCalls++
+		syncMu.Unlock()
+		return syncAuditDirectory(path)
+	}
+
+	event := testAuditDeliveryEvent(t, "10101010-1010-4010-8010-101010101010")
+	if err := delivery.PersistCanonicalAdmission(context.Background(), event); err != nil {
+		t.Fatalf("PersistCanonicalAdmission() error = %v", err)
+	}
+	syncMu.Lock()
+	got := syncCalls
+	syncMu.Unlock()
+	if got != 0 {
+		t.Fatalf("successful canonical admission pre-insert directory syncs = %d, want 0", got)
+	}
+	if events := writer.snapshotEvents(); len(events) != 1 || events[0].EventID != event.EventID {
+		t.Fatalf("canonical events = %#v, want admitted event", events)
+	}
+	if _, err := os.Stat(filepath.Join(dir, event.EventID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("acknowledged admission spool record still exists: %v", err)
+	}
+}
+
+func TestAuditDeliveryCanonicalAdmissionFsyncsFallbackBeforePending(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{err: errors.New("clickhouse unavailable")}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	var syncMu sync.Mutex
+	syncCalls := 0
+	delivery.dirSync = func(path string) error {
+		syncMu.Lock()
+		syncCalls++
+		syncMu.Unlock()
+		return syncAuditDirectory(path)
+	}
+
+	event := testAuditDeliveryEvent(t, "20202020-2020-4020-8020-202020202020")
+	if err := delivery.PersistCanonicalAdmission(context.Background(), event); !errors.Is(err, errAuditDeliveryPending) {
+		t.Fatalf("PersistCanonicalAdmission() error = %v, want pending", err)
+	}
+	syncMu.Lock()
+	got := syncCalls
+	syncMu.Unlock()
+	if got == 0 {
+		t.Fatal("failed canonical admission returned pending without a directory durability barrier")
+	}
+	if _, err := os.Stat(filepath.Join(dir, event.EventID+".json")); err != nil {
+		t.Fatalf("pending admission is not in the spool: %v", err)
+	}
+
+	recovered := &auditDeliveryWriter{}
+	restarted, err := newAuditDelivery(dir, recovered, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("restart delivery error = %v", err)
+	}
+	if err := restarted.replay(context.Background()); err != nil {
+		t.Fatalf("replay() error = %v", err)
+	}
+	if events := recovered.snapshotEvents(); len(events) != 1 || events[0].EventID != event.EventID {
+		t.Fatalf("replayed admission events = %#v", events)
+	}
+}
+
 func TestAuditDeliveryRetriesCanonicalEventAfterWriterFailure(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{err: errors.New("clickhouse unavailable")}

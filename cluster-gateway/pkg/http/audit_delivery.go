@@ -130,21 +130,33 @@ func (d *auditDelivery) EnqueueDurable(ctx context.Context, event sandboxobserva
 // acknowledge it. A canonical failure leaves the event in the spool for replay
 // and is returned to the caller as pending.
 func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobservability.Event) error {
+	return d.persistCanonical(ctx, event, true)
+}
+
+// PersistCanonicalAdmission coalesces a pre-execution attempt in the local
+// spool without forcing redundant disk durability on the successful path. The
+// protected operation remains blocked until ClickHouse acknowledges the event.
+// If canonical delivery fails, the local record is fsynced before the caller is
+// told that replay is pending.
+func (d *auditDelivery) PersistCanonicalAdmission(ctx context.Context, event sandboxobservability.Event) error {
+	return d.persistCanonical(ctx, event, false)
+}
+
+func (d *auditDelivery) persistCanonical(ctx context.Context, event sandboxobservability.Event, durableBeforeInsert bool) error {
 	if d == nil {
 		return fmt.Errorf("%w: audit delivery is not configured", errAuditUnrecorded)
 	}
 	d.canonicalCalls.Add(1)
 	defer d.canonicalCalls.Add(-1)
 
-	spooled, err := d.spoolOrCanonical(ctx, event)
+	spooled, err := d.spoolOrCanonicalWithDurability(ctx, event, durableBeforeInsert)
 	if err != nil || !spooled {
 		return err
 	}
 	for {
 		acquired, err := d.acquireCanonicalSlotOrAck(ctx, event.EventID)
 		if err != nil {
-			d.signalReplay()
-			return fmt.Errorf("%w: event is durably buffered but canonical delivery did not start: %v", errAuditDeliveryPending, err)
+			return d.pendingCanonicalError(event.EventID, durableBeforeInsert, "canonical delivery did not start", err)
 		}
 		if !acquired {
 			return nil
@@ -152,8 +164,7 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 
 		if err := d.waitForConcurrentSpoolWrites(ctx); err != nil {
 			d.releaseCanonicalSlot()
-			d.signalReplay()
-			return fmt.Errorf("%w: event is durably buffered but canonical batching was interrupted: %v", errAuditDeliveryPending, err)
+			return d.pendingCanonicalError(event.EventID, durableBeforeInsert, "canonical batching was interrupted", err)
 		}
 
 		// Replay or another bounded writer may have acknowledged or reserved the
@@ -167,8 +178,7 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 			continue
 		case batchErr != nil:
 			d.releaseCanonicalSlot()
-			d.signalReplay()
-			return fmt.Errorf("%w: load durably buffered canonical batch: %v", errAuditDeliveryPending, batchErr)
+			return d.pendingCanonicalError(event.EventID, durableBeforeInsert, "load canonical batch", batchErr)
 		case acknowledged:
 			d.releaseCanonicalSlot()
 			return nil
@@ -178,8 +188,7 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 		if err := d.writer.InsertEvents(ctx, events); err != nil {
 			d.finishCanonicalBatch(events, false)
 			d.logger.Warn("Sandbox audit event buffered for retry", zap.String("event_id", event.EventID), zap.Error(err))
-			d.signalReplay()
-			return fmt.Errorf("%w: event is durably buffered but not yet acknowledged: %v", errAuditDeliveryPending, err)
+			return d.pendingCanonicalError(event.EventID, durableBeforeInsert, "canonical storage did not acknowledge the event", err)
 		}
 		removeErr := d.finishCanonicalBatch(events, true)
 		if removeErr != nil {
@@ -196,13 +205,37 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 	}
 }
 
+func (d *auditDelivery) pendingCanonicalError(eventID string, durableBeforeInsert bool, stage string, canonicalErr error) error {
+	if !durableBeforeInsert {
+		acknowledged, err := d.ensureSpoolRecordDurable(eventID)
+		if err != nil {
+			d.logger.Error("Canonical audit admission failed without durable fallback",
+				zap.String("event_id", eventID),
+				zap.String("stage", stage),
+				zap.Error(canonicalErr),
+				zap.NamedError("spool_error", err),
+			)
+			return fmt.Errorf("%w: %s: %v; durable fallback failed: %v", errAuditUnrecorded, stage, canonicalErr, err)
+		}
+		if acknowledged {
+			return nil
+		}
+	}
+	d.signalReplay()
+	return fmt.Errorf("%w: event is durably buffered but %s: %v", errAuditDeliveryPending, stage, canonicalErr)
+}
+
 // spoolOrCanonical returns true when the event is in the local spool. A false,
 // nil result means the spool write failed but the canonical fallback succeeded.
 func (d *auditDelivery) spoolOrCanonical(ctx context.Context, event sandboxobservability.Event) (bool, error) {
+	return d.spoolOrCanonicalWithDurability(ctx, event, true)
+}
+
+func (d *auditDelivery) spoolOrCanonicalWithDurability(ctx context.Context, event sandboxobservability.Event, durable bool) (bool, error) {
 	if d == nil {
 		return false, fmt.Errorf("%w: audit delivery is not configured", errAuditUnrecorded)
 	}
-	spoolErr := d.put(event)
+	spoolErr := d.putWithDurability(event, durable)
 	if spoolErr == nil {
 		return true, nil
 	}
@@ -234,6 +267,10 @@ func (d *auditDelivery) spoolOrCanonical(ctx context.Context, event sandboxobser
 }
 
 func (d *auditDelivery) put(event sandboxobservability.Event) error {
+	return d.putWithDurability(event, true)
+}
+
+func (d *auditDelivery) putWithDurability(event sandboxobservability.Event, durable bool) error {
 	d.spoolWrites.Add(1)
 	defer d.spoolWrites.Add(-1)
 
@@ -246,7 +283,39 @@ func (d *auditDelivery) put(event sandboxobservability.Event) error {
 	// group commit.
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.putLocked(event)
+	return d.putLocked(event, durable)
+}
+
+func (d *auditDelivery) ensureSpoolRecordDurable(eventID string) (bool, error) {
+	if _, err := uuid.Parse(eventID); err != nil {
+		return false, fmt.Errorf("audit event_id is invalid")
+	}
+	lock := &d.spoolWriteLocks[auditSpoolWriteShard(eventID)]
+	lock.Lock()
+	defer lock.Unlock()
+
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	file, err := os.Open(d.path(eventID))
+	if os.IsNotExist(err) {
+		// Another canonical writer acknowledged and removed this record while
+		// the caller was waiting.
+		return true, nil
+	}
+	if err != nil {
+		return false, auditSpoolWriteError("open record for fsync", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return false, auditSpoolWriteError("fsync record", err)
+	}
+	if err := file.Close(); err != nil {
+		return false, auditSpoolWriteError("close fsynced record", err)
+	}
+	if err := d.waitForDirectorySync(); err != nil {
+		return false, auditSpoolWriteError("fsync directory", err)
+	}
+	return false, nil
 }
 
 func auditSpoolWriteShard(eventID string) int {
@@ -495,7 +564,7 @@ func (d *auditDelivery) pendingLocked(eventID string) (bool, error) {
 	}
 }
 
-func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
+func (d *auditDelivery) putLocked(event sandboxobservability.Event, durable bool) error {
 	if err := sandboxobservability.ValidateSignedEvent(event); err != nil {
 		return fmt.Errorf("audit event is invalid: %w", err)
 	}
@@ -512,6 +581,22 @@ func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
 	if existing, readErr := os.ReadFile(path); readErr == nil {
 		if string(existing) != string(payload) {
 			return fmt.Errorf("audit event_id collision")
+		}
+		if durable {
+			file, err := os.Open(path)
+			if err != nil {
+				return auditSpoolWriteError("open existing record for fsync", err)
+			}
+			if err := file.Sync(); err != nil {
+				_ = file.Close()
+				return auditSpoolWriteError("fsync existing record", err)
+			}
+			if err := file.Close(); err != nil {
+				return auditSpoolWriteError("close existing record", err)
+			}
+			if err := d.waitForDirectorySync(); err != nil {
+				return auditSpoolWriteError("fsync directory", err)
+			}
 		}
 		return nil
 	} else if !os.IsNotExist(readErr) {
@@ -535,8 +620,10 @@ func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
 	if _, err := tmp.Write(payload); err != nil {
 		return auditSpoolWriteError("write temp file", err)
 	}
-	if err := tmp.Sync(); err != nil {
-		return auditSpoolWriteError("fsync temp file", err)
+	if durable {
+		if err := tmp.Sync(); err != nil {
+			return auditSpoolWriteError("fsync temp file", err)
+		}
 	}
 	if err := tmp.Close(); err != nil {
 		return auditSpoolWriteError("close temp file", err)
@@ -544,8 +631,10 @@ func (d *auditDelivery) putLocked(event sandboxobservability.Event) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return auditSpoolWriteError("commit record", err)
 	}
-	if err := d.waitForDirectorySync(); err != nil {
-		return auditSpoolWriteError("fsync directory", err)
+	if durable {
+		if err := d.waitForDirectorySync(); err != nil {
+			return auditSpoolWriteError("fsync directory", err)
+		}
 	}
 	committed = true
 	return nil

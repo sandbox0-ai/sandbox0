@@ -8,9 +8,10 @@ import (
 
 const CurrentEventSchemaVersion = 2
 
-// AuditDeliveryMode controls when an audited operation may proceed. ClickHouse
-// remains canonical in every mode; durable_async only acknowledges the local
-// delivery buffer before continuing.
+// AuditDeliveryMode controls when an audit event has sufficient durable
+// custody for its operation to proceed or complete. ClickHouse remains
+// canonical in every mode; durable_async acknowledges the local delivery
+// buffer before canonical replay completes.
 type AuditDeliveryMode string
 
 const (

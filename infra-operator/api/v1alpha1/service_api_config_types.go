@@ -397,9 +397,12 @@ type SandboxObservabilityAuditConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
 
 	// DeliveryMode controls admission for non-mutating API requests, public
-	// exposure requests, and flows observed by the ctld network runtime.
+	// exposure requests, and flows observed by the ctld network runtime. It also
+	// controls result acknowledgement for mutating Sandbox API requests.
 	// ClickHouse remains the only canonical audit store in both modes. Mutating
-	// APIs always use canonical_sync.
+	// APIs always require canonical attempt acknowledgement before execution;
+	// durable_async accepts an fsynced result for replay, while canonical_sync
+	// also waits for ClickHouse to acknowledge the result.
 	// +optional
 	// +kubebuilder:validation:Enum=durable_async;canonical_sync
 	// +kubebuilder:default=durable_async

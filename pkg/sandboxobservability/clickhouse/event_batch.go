@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	clickhousedriver "github.com/ClickHouse/clickhouse-go/v2"
 )
@@ -13,59 +12,43 @@ type eventBatchInserter interface {
 	InsertEventBatch(context.Context, string, [][]any) error
 }
 
-type eventBatchExecer interface {
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
+type eventBatchDB interface {
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
 }
 
 type sqlEventBatchInserter struct {
-	db eventBatchExecer
+	db eventBatchDB
 }
 
 func (i sqlEventBatchInserter) InsertEventBatch(ctx context.Context, query string, rows [][]any) error {
-	if len(rows) == 0 {
-		return nil
+	batchContext := clickhousedriver.Context(ctx, clickhousedriver.WithSettings(clickhousedriver.Settings{
+		"async_insert":          0,
+		"wait_for_async_insert": 1,
+	}))
+	tx, err := i.db.BeginTx(batchContext, nil)
+	if err != nil {
+		return fmt.Errorf("begin event batch: %w", err)
 	}
-	columnCount := len(rows[0])
-	if columnCount == 0 {
-		return fmt.Errorf("event batch has no columns")
-	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 
-	var builder strings.Builder
-	builder.WriteString(query)
-	builder.WriteString(" VALUES ")
-	args := make([]any, 0, len(rows)*columnCount)
-	for rowIndex, row := range rows {
-		if len(row) != columnCount {
-			return fmt.Errorf("event batch row %d has %d columns, want %d", rowIndex, len(row), columnCount)
-		}
-		if rowIndex > 0 {
-			builder.WriteString(", ")
-		}
-		builder.WriteByte('(')
-		for columnIndex := range row {
-			if columnIndex > 0 {
-				builder.WriteString(", ")
-			}
-			builder.WriteByte('?')
-		}
-		builder.WriteByte(')')
-		args = append(args, row...)
+	statement, err := tx.PrepareContext(batchContext, query)
+	if err != nil {
+		return fmt.Errorf("prepare event batch: %w", err)
 	}
-
-	// ClickHouse still acknowledges only after the shared async buffer has
-	// flushed to storage. The short fixed window combines concurrent audit
-	// writers into fewer remote parts without weakening canonical durability.
-	batchContext := clickhousedriver.Context(
-		ctx,
-		clickhousedriver.WithStdAsync(true),
-		clickhousedriver.WithSettings(clickhousedriver.Settings{
-			"async_insert_use_adaptive_busy_timeout": 0,
-			"async_insert_busy_timeout_ms":           auditAsyncInsertBusyTimeoutMillis,
-			"async_insert_max_query_number":          auditAsyncInsertMaxQueryNumber,
-		}),
-	)
-	if _, err := i.db.ExecContext(batchContext, builder.String(), args...); err != nil {
-		return fmt.Errorf("execute async event batch: %w", err)
+	defer statement.Close()
+	for index, row := range rows {
+		if _, err := statement.ExecContext(batchContext, row...); err != nil {
+			return fmt.Errorf("append event batch row %d: %w", index, err)
+		}
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit event batch: %w", err)
+	}
+	committed = true
 	return nil
 }

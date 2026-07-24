@@ -162,10 +162,17 @@ func TestSandboxAuditMiddlewarePersistsTrustedAttemptAndResult(t *testing.T) {
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("status = %d", recorder.Code)
 	}
-	if len(writer.events) != 2 {
-		t.Fatalf("events = %d, want 2", len(writer.events))
+	if len(writer.events) != 1 {
+		t.Fatalf("canonical events = %d, want admitted attempt", len(writer.events))
 	}
-	attempt, result := writer.events[0], writer.events[1]
+	durableEvents, err := delivery.loadLocked()
+	if err != nil {
+		t.Fatalf("loadLocked() error = %v", err)
+	}
+	if len(durableEvents) != 1 {
+		t.Fatalf("durable events = %#v, want result pending replay", durableEvents)
+	}
+	attempt, result := writer.events[0], durableEvents[0]
 	if attempt.Phase != sandboxobservability.EventPhaseAttempt || result.Phase != sandboxobservability.EventPhaseResult || result.ParentEventID != attempt.EventID {
 		t.Fatalf("events = %+v %+v", attempt, result)
 	}
@@ -178,10 +185,16 @@ func TestSandboxAuditMiddlewarePersistsTrustedAttemptAndResult(t *testing.T) {
 	if attempt.OperationID == "" || result.OperationID != attempt.OperationID || result.Outcome != sandboxobservability.OutcomeSucceeded {
 		t.Fatalf("operation correlation = %+v %+v", attempt, result)
 	}
-	for _, event := range writer.events {
+	for _, event := range []sandboxobservability.Event{attempt, result} {
 		if err := sandboxobservability.VerifyEventIntegrity(event, key.Public().(ed25519.PublicKey)); err != nil {
 			t.Fatalf("VerifyEventIntegrity() error = %v", err)
 		}
+	}
+	if err := delivery.replay(context.Background()); err != nil {
+		t.Fatalf("replay() error = %v", err)
+	}
+	if len(writer.events) != 2 || writer.events[1].EventID != result.EventID {
+		t.Fatalf("canonical events after replay = %#v, want durable result", writer.events)
 	}
 }
 
@@ -214,11 +227,15 @@ func TestSandboxAuditMiddlewareRecordsUnknownResultOnPanic(t *testing.T) {
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", recorder.Code)
 	}
-	if len(writer.events) != 2 || writer.events[1].Outcome != sandboxobservability.OutcomeUnknown {
-		t.Fatalf("events = %#v, want unknown result after panic", writer.events)
+	durableEvents, err := delivery.loadLocked()
+	if err != nil {
+		t.Fatalf("loadLocked() error = %v", err)
 	}
-	if writer.events[1].Request.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("panic result status = %d, want 500", writer.events[1].Request.StatusCode)
+	if len(writer.events) != 1 || len(durableEvents) != 1 || durableEvents[0].Outcome != sandboxobservability.OutcomeUnknown {
+		t.Fatalf("canonical events = %#v, durable events = %#v, want unknown result after panic", writer.events, durableEvents)
+	}
+	if durableEvents[0].Request.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("panic result status = %d, want 500", durableEvents[0].Request.StatusCode)
 	}
 	if got := recorder.Header().Values("Set-Cookie"); len(got) != 0 {
 		t.Fatalf("panic response leaked handler Set-Cookie headers: %v", got)
@@ -337,11 +354,15 @@ func TestSandboxAuditMiddlewareRejectsOversizedResponseWithoutLeakingHeaders(t *
 	if strings.Contains(recorder.Body.String(), "xxx") {
 		t.Fatalf("overflow response leaked buffered handler body: %s", recorder.Body.String())
 	}
-	if len(writer.events) != 2 || writer.events[1].Outcome != sandboxobservability.OutcomeUnknown {
-		t.Fatalf("events = %#v, want recorded unknown result after overflow", writer.events)
+	durableEvents, err := server.auditDelivery.loadLocked()
+	if err != nil {
+		t.Fatalf("loadLocked() error = %v", err)
 	}
-	if writer.events[1].Request.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("overflow result status = %d, want 503", writer.events[1].Request.StatusCode)
+	if len(writer.events) != 1 || len(durableEvents) != 1 || durableEvents[0].Outcome != sandboxobservability.OutcomeUnknown {
+		t.Fatalf("canonical events = %#v, durable events = %#v, want recorded unknown result after overflow", writer.events, durableEvents)
+	}
+	if durableEvents[0].Request.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("overflow result status = %d, want 503", durableEvents[0].Request.StatusCode)
 	}
 }
 
@@ -838,7 +859,7 @@ func TestPublicExposureAuditCanonicalSyncFailureRecordsFailedResult(t *testing.T
 	}
 }
 
-func TestSandboxAuditMiddlewareWithholdsSuccessUntilResultCanonicalACK(t *testing.T) {
+func TestSandboxAuditMiddlewareCommitsSuccessAfterDurableResultCustody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	writer := &failAfterAuditWriter{succeedFor: 1}
@@ -848,6 +869,59 @@ func TestSandboxAuditMiddlewareWithholdsSuccessUntilResultCanonicalACK(t *testin
 	}
 	server := &Server{
 		cfg:             testAuditConfig(),
+		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
+	}
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), &authn.AuthContext{
+			AuthMethod: authn.AuthMethodJWT, TeamID: "team-1", UserID: "user-1",
+		}))
+		c.Next()
+	})
+	router.POST("/api/v1/sandboxes/:id/pause", server.auditSandboxRequests(), func(c *gin.Context) {
+		c.SetCookie("sandbox_session", "created", 60, "/", "", false, true)
+		c.Header("Location", "/api/v1/sandboxes/sb-1")
+		c.JSON(http.StatusOK, gin.H{"status": "paused"})
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sb-1/pause", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want handler success after durable result custody: %s", recorder.Code, recorder.Body.String())
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, `"status":"paused"`) {
+		t.Fatalf("success response body = %s", body)
+	}
+	if got := recorder.Header().Values("Set-Cookie"); len(got) != 1 {
+		t.Fatalf("handler Set-Cookie headers = %v, want one", got)
+	}
+	if got := recorder.Header().Get("Location"); got != "/api/v1/sandboxes/sb-1" {
+		t.Fatalf("handler Location header = %q", got)
+	}
+	entries, err := os.ReadDir(delivery.dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("result spool entries = %d, want 1", len(entries))
+	}
+	if len(writer.storedEvents) != 1 || writer.storedEvents[0].Phase != sandboxobservability.EventPhaseAttempt {
+		t.Fatalf("canonical events = %#v, want only the admitted attempt before replay", writer.storedEvents)
+	}
+}
+
+func TestSandboxAuditMiddlewareCanonicalOverrideWithholdsSuccessUntilResultACK(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	writer := &failAfterAuditWriter{succeedFor: 1}
+	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	cfg := testAuditConfig()
+	cfg.SandboxObservability.AuditDeliveryMode = sandboxobservability.AuditDeliveryModeCanonicalSync
+	server := &Server{
+		cfg:             cfg,
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()
@@ -928,7 +1002,7 @@ func TestSandboxAuditMiddlewareReportsUnrecordedWhenSpoolAndCanonicalFallbackFai
 	}
 }
 
-func TestSandboxAuditMiddlewareKeepsSuccessAfterCanonicalACKWhenSpoolCleanupFails(t *testing.T) {
+func TestSandboxAuditMiddlewareCanonicalOverrideKeepsSuccessAfterACKWhenSpoolCleanupFails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	dir := t.TempDir()
@@ -942,8 +1016,10 @@ func TestSandboxAuditMiddlewareKeepsSuccessAfterCanonicalACKWhenSpoolCleanupFail
 	if err != nil {
 		t.Fatalf("newAuditDelivery() error = %v", err)
 	}
+	cfg := testAuditConfig()
+	cfg.SandboxObservability.AuditDeliveryMode = sandboxobservability.AuditDeliveryModeCanonicalSync
 	server := &Server{
-		cfg:             testAuditConfig(),
+		cfg:             cfg,
 		auditSigningKey: key, auditDelivery: delivery, logger: zap.NewNop(),
 	}
 	router := gin.New()

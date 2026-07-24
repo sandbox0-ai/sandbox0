@@ -122,13 +122,13 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 			operationID = uuid.NewString()
 			authCtx.OperationID = operationID
 		}
-		deliveryMode := s.auditDeliveryModeForRoute(policy)
+		attemptDeliveryMode := s.auditAttemptDeliveryModeForRoute(policy)
 		attempt, err := s.newSandboxAPIEvent(c, authCtx, action, operationID, "", sandboxobservability.EventPhaseAttempt, sandboxobservability.OutcomeAccepted, 0)
 		if err == nil {
 			// The spool fsync itself is not context-cancelable, but any canonical
 			// insert (strict mode or durable fallback) is bounded.
 			attemptCtx, cancel := context.WithTimeout(c.Request.Context(), auditCanonicalDeliveryTimeout)
-			err = s.deliverAuditEvent(attemptCtx, attempt, deliveryMode)
+			err = s.deliverAuditEvent(attemptCtx, attempt, attemptDeliveryMode)
 			cancel()
 		}
 		if err != nil {
@@ -178,7 +178,11 @@ func (s *Server) auditSandboxRequests() gin.HandlerFunc {
 			result, resultErr := s.newSandboxAPIEvent(c, authCtx, action, operationID, attempt.EventID, sandboxobservability.EventPhaseResult, outcome, resultStatusCode)
 			if resultErr == nil {
 				resultCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), auditCanonicalDeliveryTimeout)
-				resultErr = s.deliverAuditEvent(resultCtx, result, deliveryMode)
+				// Mutation responses remain buffered until their result has
+				// durable custody. Canonical admission still happens before the
+				// handler, while the configured delivery mode controls whether
+				// the result also waits for ClickHouse.
+				resultErr = s.deliverAuditEvent(resultCtx, result, s.configuredAuditDeliveryMode())
 				cancel()
 			}
 			if resultErr != nil {
@@ -243,7 +247,7 @@ func (s *Server) configuredAuditDeliveryMode() sandboxobservability.AuditDeliver
 	return sandboxobservability.NormalizeAuditDeliveryMode(s.cfg.SandboxObservability.AuditDeliveryMode)
 }
 
-func (s *Server) auditDeliveryModeForRoute(policy sandboxAuditRoutePolicy) sandboxobservability.AuditDeliveryMode {
+func (s *Server) auditAttemptDeliveryModeForRoute(policy sandboxAuditRoutePolicy) sandboxobservability.AuditDeliveryMode {
 	if policy.BufferResponse {
 		return sandboxobservability.AuditDeliveryModeCanonicalSync
 	}

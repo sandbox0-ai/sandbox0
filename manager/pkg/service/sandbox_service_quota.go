@@ -12,6 +12,10 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
+type activeSandboxCounter interface {
+	CountActiveSandboxes(context.Context, string) (int64, error)
+}
+
 func (s *SandboxService) enforceActiveSandboxQuota(ctx context.Context, teamID string) error {
 	teamID = strings.TrimSpace(teamID)
 	if s == nil || s.quotaStore == nil || teamID == "" {
@@ -36,6 +40,15 @@ func (s *SandboxService) enforceActiveSandboxQuota(ctx context.Context, teamID s
 }
 
 func (s *SandboxService) currentQuotaUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error) {
+	if dimension == quota.DimensionActiveSandboxes {
+		current, ok, err := s.currentLiveQuotaUsage(ctx, teamID, dimension)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			return current, nil
+		}
+	}
 	current, err := s.quotaStore.CurrentUsage(ctx, teamID, dimension)
 	if err == nil {
 		return current, nil
@@ -83,6 +96,13 @@ func (s *SandboxService) currentLiveQuotaUsage(ctx context.Context, teamID strin
 func (s *SandboxService) currentSandboxStoreActiveQuotaUsage(ctx context.Context, teamID string) (int64, bool, error) {
 	if s == nil || s.sandboxStore == nil {
 		return 0, false, nil
+	}
+	if counter, ok := s.sandboxStore.(activeSandboxCounter); ok {
+		current, err := counter.CountActiveSandboxes(ctx, teamID)
+		if err != nil {
+			return 0, true, fmt.Errorf("count active sandbox records: %w", err)
+		}
+		return current, true, nil
 	}
 	records, err := s.sandboxStore.ListSandboxes(ctx, &ListSandboxesRequest{TeamID: teamID})
 	if err != nil {

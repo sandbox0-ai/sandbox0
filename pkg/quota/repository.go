@@ -19,8 +19,9 @@ type DB interface {
 }
 
 type Repository struct {
-	db         DB
-	usageStore UsageStore
+	db               DB
+	usageStore       UsageStore
+	limitPolicyStore PolicyStore
 }
 
 var ErrUsageStoreNotConfigured = errors.New("quota usage store is not configured")
@@ -60,6 +61,14 @@ func (r *Repository) SetUsageStore(store UsageStore) {
 	r.usageStore = store
 }
 
+// SetLimitPolicyStore configures the resolved policy source used by GetLimit.
+func (r *Repository) SetLimitPolicyStore(store PolicyStore) {
+	if r == nil {
+		return
+	}
+	r.limitPolicyStore = store
+}
+
 func usageStoreConfigured(store UsageStore) bool {
 	if store == nil {
 		return false
@@ -81,7 +90,15 @@ func (r *Repository) configuredUsageStore() (UsageStore, bool) {
 }
 
 func (r *Repository) GetLimit(ctx context.Context, teamID string, dimension Dimension) (*Limit, error) {
-	policy, err := r.GetPolicy(ctx, teamID, dimension)
+	var (
+		policy *Policy
+		err    error
+	)
+	if r != nil && r.limitPolicyStore != nil {
+		policy, err = r.limitPolicyStore.GetPolicy(ctx, teamID, dimension)
+	} else {
+		policy, err = r.GetPolicy(ctx, teamID, dimension)
+	}
 	if err != nil || policy == nil {
 		return nil, err
 	}

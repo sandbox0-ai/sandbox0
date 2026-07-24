@@ -60,7 +60,6 @@ type auditDelivery struct {
 	dirSyncDurable  uint64
 	dirSyncFailed   uint64
 	dirSyncErr      error
-	canonicalCalls  atomic.Int64
 	canonicalTurns  atomic.Int64
 	canonicalWakeMu sync.Mutex
 	canonicalWake   chan struct{}
@@ -132,8 +131,6 @@ func (d *auditDelivery) PersistCanonical(ctx context.Context, event sandboxobser
 	if d == nil {
 		return fmt.Errorf("%w: audit delivery is not configured", errAuditUnrecorded)
 	}
-	d.canonicalCalls.Add(1)
-	defer d.canonicalCalls.Add(-1)
 
 	spooled, err := d.spoolOrCanonical(ctx, event)
 	if err != nil || !spooled {
@@ -257,8 +254,11 @@ func auditSpoolWriteShard(eventID string) int {
 	return int(hash % auditSpoolWriteShards)
 }
 
+// waitForConcurrentSpoolWrites gives even the first canonical caller a short,
+// bounded quiet window. This lets the leading edge of a burst join the same
+// remote insert instead of creating avoidable singleton parts.
 func (d *auditDelivery) waitForConcurrentSpoolWrites(ctx context.Context) error {
-	if d == nil || d.canonicalCalls.Load() <= 1 {
+	if d == nil {
 		return nil
 	}
 	deadline := time.NewTimer(auditSpoolDrainLimit)

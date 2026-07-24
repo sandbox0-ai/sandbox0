@@ -529,7 +529,6 @@ func TestAuditDeliveryDirectorySyncFailureWakesConcurrentWriters(t *testing.T) {
 
 func TestAuditDeliveryWaitsForConcurrentSpoolWritesToDrain(t *testing.T) {
 	delivery := &auditDelivery{}
-	delivery.canonicalCalls.Store(2)
 	delivery.spoolWrites.Store(1)
 
 	drained := make(chan struct{})

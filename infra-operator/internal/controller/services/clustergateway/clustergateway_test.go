@@ -348,8 +348,9 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
 				Type: infrav1alpha1.SandboxObservabilityTypeExternal,
 				Audit: &infrav1alpha1.SandboxObservabilityAuditConfig{
-					Enabled:      true,
-					DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
+					Enabled:       true,
+					DeliveryMode:  sandboxobservability.AuditDeliveryModeCanonicalSync,
+					StoragePolicy: "audit_hot_s3",
 				},
 				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
 					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
@@ -403,6 +404,7 @@ func TestApplySandboxObservabilityConfigUsesTopLevelExternalSecret(t *testing.T)
 		cfg.SandboxObservability.AuditSpoolDir != "/var/lib/sandbox0/cluster-gateway/audit-spool" ||
 		cfg.SandboxObservability.ClickHouse.Database != "sandbox0_obs" ||
 		cfg.SandboxObservability.ClickHouse.EventsTable != "events_v1" ||
+		cfg.SandboxObservability.ClickHouse.EventsStoragePolicy != "audit_hot_s3" ||
 		cfg.SandboxObservability.ClickHouse.LogsTable != "logs_v1" ||
 		cfg.SandboxObservability.ClickHouse.RuntimeSamplesTable != "runtime_samples_v1" ||
 		cfg.SandboxObservability.ClickHouse.RetentionDays != 14 ||

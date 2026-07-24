@@ -405,6 +405,12 @@ type SandboxObservabilityAuditConfig struct {
 	// +kubebuilder:default=durable_async
 	DeliveryMode sandboxobservability.AuditDeliveryMode `json:"deliveryMode,omitempty"`
 
+	// StoragePolicy optionally selects a ClickHouse storage policy for the
+	// canonical audit events table.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+	StoragePolicy string `json:"storagePolicy,omitempty"`
+
 	// DeliveryPersistence configures the durable, non-canonical audit event
 	// delivery buffer used while ClickHouse is unavailable. The current
 	// implementation requires one cluster-gateway replica and a storage class

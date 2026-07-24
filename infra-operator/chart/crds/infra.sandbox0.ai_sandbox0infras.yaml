@@ -2810,6 +2810,12 @@ spec:
                         description: Enabled enables the enterprise sandbox_audit
                           feature.
                         type: boolean
+                      storagePolicy:
+                        description: |-
+                          StoragePolicy optionally selects a ClickHouse storage policy for the
+                          canonical audit events table.
+                        pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                        type: string
                     type: object
                     x-kubernetes-validations:
                     - message: deliveryPersistence presence is immutable after creation

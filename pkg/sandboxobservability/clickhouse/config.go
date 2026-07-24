@@ -27,6 +27,7 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 type Config struct {
 	Database                    string
 	EventsTable                 string
+	EventsStoragePolicy         string
 	LogsTable                   string
 	RuntimeSamplesTable         string
 	RetentionDays               int
@@ -87,6 +88,11 @@ func normalizeConfig(cfg Config) (Config, error) {
 	}
 	if err := validateIdentifier("events_table", cfg.EventsTable); err != nil {
 		return Config{}, err
+	}
+	if cfg.EventsStoragePolicy != "" {
+		if err := validateIdentifier("events_storage_policy", cfg.EventsStoragePolicy); err != nil {
+			return Config{}, err
+		}
 	}
 	if err := validateIdentifier("logs_table", cfg.LogsTable); err != nil {
 		return Config{}, err

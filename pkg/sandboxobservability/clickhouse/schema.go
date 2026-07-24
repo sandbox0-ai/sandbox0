@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 type schemaExecer interface {
@@ -23,6 +24,16 @@ func SchemaStatements(cfg Config) ([]string, error) {
 	eventsTTL := fmt.Sprintf("toDateTime(ingested_at) + INTERVAL %d DAY DELETE", cfg.RetentionDays)
 	logsTTL := fmt.Sprintf("toDateTime(occurred_at) + INTERVAL %d DAY DELETE", cfg.LogsRetentionDays)
 	runtimeSamplesTTL := fmt.Sprintf("toDateTime(observed_at) + INTERVAL %d DAY DELETE", cfg.RuntimeSamplesRetentionDays)
+	eventsSettings := []string{
+		"index_granularity = 8192",
+		"min_rows_for_wide_part = 1000000",
+		"min_bytes_for_wide_part = 1073741824",
+	}
+	if cfg.EventsStoragePolicy != "" {
+		eventsSettings = append(eventsSettings, fmt.Sprintf("storage_policy = '%s'", cfg.EventsStoragePolicy))
+	}
+	eventsSettingsSQL := strings.Join(eventsSettings, ",\n\t\t")
+	eventsAlterSettingsSQL := strings.Join(eventsSettings[1:], ", ")
 
 	return []string{
 		fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", database),
@@ -33,7 +44,7 @@ func SchemaStatements(cfg Config) ([]string, error) {
 	PARTITION BY toYYYYMM(occurred_at)
 	ORDER BY (team_id, sandbox_id, occurred_at, event_id, payload_hash)
 	TTL %s
-	SETTINGS index_granularity = 8192`, eventsTable, auditEventColumnDefinitions(), eventsTTL),
+	SETTINGS %s`, eventsTable, auditEventColumnDefinitions(), eventsTTL, eventsSettingsSQL),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 	team_id String,
 	sandbox_id String,
@@ -90,6 +101,7 @@ SETTINGS index_granularity = 8192`, runtimeSamplesTable, runtimeSamplesTTL),
 		fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s", eventsTable, eventsTTL),
 		fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s", logsTable, logsTTL),
 		fmt.Sprintf("ALTER TABLE %s MODIFY TTL %s", runtimeSamplesTable, runtimeSamplesTTL),
+		fmt.Sprintf("ALTER TABLE %s MODIFY SETTING %s", eventsTable, eventsAlterSettingsSQL),
 	}, nil
 }
 

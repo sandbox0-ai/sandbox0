@@ -26,6 +26,7 @@ type RuntimeConfig struct {
 	AuditDeliveryMode           sandboxobstypes.AuditDeliveryMode
 	Database                    string
 	EventsTable                 string
+	EventsStoragePolicy         string
 	LogsTable                   string
 	RuntimeSamplesTable         string
 	RetentionDays               int
@@ -78,6 +79,7 @@ func ApplyClusterGatewayConfig(ctx context.Context, c client.Client, infra *infr
 			DSN:                         runtimeCfg.DSN,
 			Database:                    runtimeCfg.Database,
 			EventsTable:                 runtimeCfg.EventsTable,
+			EventsStoragePolicy:         runtimeCfg.EventsStoragePolicy,
 			LogsTable:                   runtimeCfg.LogsTable,
 			RuntimeSamplesTable:         runtimeCfg.RuntimeSamplesTable,
 			RetentionDays:               runtimeCfg.RetentionDays,
@@ -176,6 +178,7 @@ func GetRuntimeConfig(ctx context.Context, c client.Client, infra *infrav1alpha1
 	}
 	if infra.Spec.SandboxObservability.Audit != nil {
 		cfg.AuditDeliveryMode = sandboxobstypes.NormalizeAuditDeliveryMode(infra.Spec.SandboxObservability.Audit.DeliveryMode)
+		cfg.EventsStoragePolicy = strings.TrimSpace(infra.Spec.SandboxObservability.Audit.StoragePolicy)
 	}
 	applyRetentionConfig(infra, &cfg)
 	applyTableOverrides(infra, &cfg)

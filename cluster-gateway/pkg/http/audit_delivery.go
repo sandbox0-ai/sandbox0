@@ -25,7 +25,7 @@ const (
 	auditReplayQuietPeriod = 25 * time.Millisecond
 	auditCanonicalSlots    = 4
 	auditSpoolWriteShards  = 64
-	auditSpoolQuietPeriod  = 2 * time.Millisecond
+	auditSpoolQuietPeriod  = 5 * time.Millisecond
 	auditSpoolDrainLimit   = 40 * time.Millisecond
 	auditDirSyncQuietTime  = time.Millisecond
 	auditDirSyncWaitLimit  = 10 * time.Millisecond
@@ -53,6 +53,7 @@ type auditDelivery struct {
 	mu              sync.RWMutex
 	spoolWriteLocks [auditSpoolWriteShards]sync.Mutex
 	spoolWrites     atomic.Int64
+	spoolWriteSeq   atomic.Uint64
 	dirSync         func(string) error
 	dirSyncMu       sync.Mutex
 	dirSyncWake     chan struct{}
@@ -283,7 +284,9 @@ func (d *auditDelivery) putWithDurability(event sandboxobservability.Event, dura
 	// group commit.
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.putLocked(event, durable)
+	err := d.putLocked(event, durable)
+	d.spoolWriteSeq.Add(1)
+	return err
 }
 
 func (d *auditDelivery) ensureSpoolRecordDurable(eventID string) (bool, error) {
@@ -327,6 +330,9 @@ func auditSpoolWriteShard(eventID string) int {
 	return int(hash % auditSpoolWriteShards)
 }
 
+// waitForConcurrentSpoolWrites waits for both active writes and the completed
+// write sequence to stay quiet so sub-millisecond writes between polls still
+// join the same canonical batch.
 func (d *auditDelivery) waitForConcurrentSpoolWrites(ctx context.Context) error {
 	if d == nil || d.canonicalCalls.Load() <= 1 {
 		return nil
@@ -337,14 +343,21 @@ func (d *auditDelivery) waitForConcurrentSpoolWrites(ctx context.Context) error 
 	defer ticker.Stop()
 
 	var quietSince time.Time
+	sequence := d.spoolWriteSeq.Load()
 	for {
+		currentSequence := d.spoolWriteSeq.Load()
 		if d.spoolWrites.Load() == 0 {
+			if currentSequence != sequence {
+				sequence = currentSequence
+				quietSince = time.Now()
+			}
 			if quietSince.IsZero() {
 				quietSince = time.Now()
 			} else if time.Since(quietSince) >= auditSpoolQuietPeriod {
 				return nil
 			}
 		} else {
+			sequence = currentSequence
 			quietSince = time.Time{}
 		}
 

@@ -771,6 +771,38 @@ func TestAuditDeliveryWaitsForConcurrentSpoolWritesToDrain(t *testing.T) {
 	}
 }
 
+func TestAuditDeliveryResetsQuietPeriodForCompletedSpoolWrites(t *testing.T) {
+	delivery := &auditDelivery{}
+	delivery.canonicalCalls.Store(2)
+	delivery.spoolWrites.Store(1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- delivery.waitForConcurrentSpoolWrites(context.Background())
+	}()
+
+	time.Sleep(auditSpoolQuietPeriod)
+	delivery.spoolWriteSeq.Add(1)
+	delivery.spoolWrites.Store(0)
+	time.Sleep(auditSpoolQuietPeriod / 2)
+	delivery.spoolWriteSeq.Add(1)
+
+	select {
+	case err := <-done:
+		t.Fatalf("waitForConcurrentSpoolWrites() returned before the completed-write sequence stayed quiet: %v", err)
+	case <-time.After(auditSpoolQuietPeriod / 2):
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("waitForConcurrentSpoolWrites() error = %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("waitForConcurrentSpoolWrites() did not return after the completed-write sequence stayed quiet")
+	}
+}
+
 func TestAuditDeliverySerializesConcurrentEventIDCollisions(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{}

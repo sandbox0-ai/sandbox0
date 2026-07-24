@@ -24,6 +24,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	meteringclickhouse "github.com/sandbox0-ai/sandbox0/pkg/metering/clickhouse"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -147,6 +148,7 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	if err != nil {
 		return err
 	}
+	s0k8s.ApplyDefaultRateLimit(k8sConfig)
 	if d.obsProvider != nil {
 		d.obsProvider.K8s.WrapConfig(k8sConfig)
 	}

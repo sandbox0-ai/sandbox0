@@ -20,14 +20,15 @@ import (
 )
 
 const (
-	auditReplayInterval   = time.Second
-	auditReplayBatchSize  = 500
-	auditCanonicalSlots   = 4
-	auditSpoolWriteShards = 64
-	auditSpoolQuietPeriod = 2 * time.Millisecond
-	auditSpoolDrainLimit  = 40 * time.Millisecond
-	auditDirSyncQuietTime = time.Millisecond
-	auditDirSyncWaitLimit = 10 * time.Millisecond
+	auditReplayInterval    = time.Second
+	auditReplayBatchSize   = 500
+	auditReplayQuietPeriod = 25 * time.Millisecond
+	auditCanonicalSlots    = 4
+	auditSpoolWriteShards  = 64
+	auditSpoolQuietPeriod  = 2 * time.Millisecond
+	auditSpoolDrainLimit   = 40 * time.Millisecond
+	auditDirSyncQuietTime  = time.Millisecond
+	auditDirSyncWaitLimit  = 10 * time.Millisecond
 )
 
 var (
@@ -411,12 +412,45 @@ func (d *auditDelivery) run(ctx context.Context) {
 		case <-ticker.C:
 		case <-d.wake:
 		}
+		if !d.waitForReplayQuiet(ctx) {
+			return
+		}
+	}
+}
+
+// waitForReplayQuiet batches fsync-backed events without delaying their
+// responses. Synchronous canonical callers bypass this background worker.
+func (d *auditDelivery) waitForReplayQuiet(ctx context.Context) bool {
+	timer := time.NewTimer(auditReplayQuietPeriod)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-d.wake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(auditReplayQuietPeriod)
+		case <-timer.C:
+			return true
+		}
 	}
 }
 
 func (d *auditDelivery) replay(ctx context.Context) error {
+	if d.canonicalCalls.Load() > 0 {
+		return nil
+	}
 	if err := d.acquireCanonicalSlot(ctx); err != nil {
 		return err
+	}
+	if d.canonicalCalls.Load() > 0 {
+		d.releaseCanonicalSlot()
+		return nil
 	}
 
 	d.mu.Lock()

@@ -144,6 +144,80 @@ func TestAuditDeliveryEnqueueWakesBackgroundReplay(t *testing.T) {
 	t.Fatalf("background replay did not receive event promptly: %#v", writer.snapshotEvents())
 }
 
+func TestAuditDeliveryCoalescesDurableReplayUntilQuiet(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{started: make(chan struct{}, 1)}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	delivery.Start(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	for _, eventID := range []string{
+		"00000000-0000-4000-8000-000000000011",
+		"00000000-0000-4000-8000-000000000012",
+	} {
+		if err := delivery.EnqueueDurable(context.Background(), testAuditDeliveryEvent(t, eventID)); err != nil {
+			t.Fatalf("EnqueueDurable() error = %v", err)
+		}
+		time.Sleep(auditReplayQuietPeriod / 3)
+	}
+	select {
+	case <-writer.started:
+		t.Fatal("durable replay started before the quiet period elapsed")
+	case <-time.After(auditReplayQuietPeriod / 3):
+	}
+
+	select {
+	case <-writer.started:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("durable replay did not start after the quiet period")
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := writer.snapshotBatchSizes(); len(got) == 1 && got[0] == 2 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("durable replay batch sizes = %v, want [2]", writer.snapshotBatchSizes())
+}
+
+func TestAuditDeliveryDurableReplayYieldsToCanonicalCallers(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{started: make(chan struct{}, 1)}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	delivery.Start(ctx)
+	time.Sleep(20 * time.Millisecond)
+
+	delivery.canonicalCalls.Store(1)
+	event := testAuditDeliveryEvent(t, "00000000-0000-4000-8000-000000000013")
+	if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
+		t.Fatalf("EnqueueDurable() error = %v", err)
+	}
+	select {
+	case <-writer.started:
+		t.Fatal("durable replay competed with an active canonical caller")
+	case <-time.After(2 * auditReplayQuietPeriod):
+	}
+
+	delivery.canonicalCalls.Store(0)
+	delivery.signalReplay()
+	select {
+	case <-writer.started:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("durable replay did not resume after canonical callers drained")
+	}
+}
+
 func TestAuditDeliveryPersistsCanonicalBeforeClickHouseAndReplaysAfterRestart(t *testing.T) {
 	dir := t.TempDir()
 	event := testAuditDeliveryEvent(t, "11111111-1111-4111-8111-111111111111")

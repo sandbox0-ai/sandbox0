@@ -81,7 +81,11 @@ func buildClaimMetadataPatch(originalPod, claimedPod *corev1.Pod) ([]byte, error
 	operations = appendMetadataMapPatch(operations, "labels", originalPod.Labels, claimedPod.Labels)
 	operations = appendMetadataMapPatch(operations, "annotations", originalPod.Annotations, claimedPod.Annotations)
 	operations = appendFinalizerPatch(operations, originalPod.Finalizers, claimedPod.Finalizers)
-	operations = appendReplicaSetOwnerRemovalPatch(operations, originalPod.OwnerReferences)
+	operations = appendReplicaSetOwnerRemovalPatch(
+		operations,
+		originalPod.OwnerReferences,
+		claimedPod.OwnerReferences,
+	)
 
 	patch, err := json.Marshal(operations)
 	if err != nil {
@@ -174,10 +178,14 @@ func appendFinalizerPatch(
 func appendReplicaSetOwnerRemovalPatch(
 	operations []claimMetadataPatchOperation,
 	ownerReferences []metav1.OwnerReference,
+	desiredOwnerReferences []metav1.OwnerReference,
 ) []claimMetadataPatchOperation {
 	for index := len(ownerReferences) - 1; index >= 0; index-- {
 		owner := ownerReferences[index]
 		if owner.Kind != "ReplicaSet" || owner.Controller == nil || !*owner.Controller {
+			continue
+		}
+		if ownerReferencePresent(desiredOwnerReferences, owner) {
 			continue
 		}
 		path := "/metadata/ownerReferences/" + strconv.Itoa(index)
@@ -194,6 +202,23 @@ func appendReplicaSetOwnerRemovalPatch(
 		})
 	}
 	return operations
+}
+
+func ownerReferencePresent(ownerReferences []metav1.OwnerReference, expected metav1.OwnerReference) bool {
+	for _, owner := range ownerReferences {
+		if owner.UID != "" && expected.UID != "" {
+			if owner.UID == expected.UID {
+				return true
+			}
+			continue
+		}
+		if owner.APIVersion == expected.APIVersion &&
+			owner.Kind == expected.Kind &&
+			owner.Name == expected.Name {
+			return true
+		}
+	}
+	return false
 }
 
 func removeReplicaSetControllerOwnerReferences(ownerReferences []metav1.OwnerReference) []metav1.OwnerReference {

@@ -32,10 +32,13 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
 		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
 	})
+	reserved := newOperatorTestPod("default", "idle-reserved", "template-a", PoolTypeIdle, corev1.PodRunning, corev1.ConditionTrue)
+	reserved.Annotations = map[string]string{AnnotationHotClaimReservation: "reservation-token"}
 	for _, pod := range []*corev1.Pod{
 		newOperatorTestPod("default", "idle-ready", "template-a", PoolTypeIdle, corev1.PodRunning, corev1.ConditionTrue),
 		newOperatorTestPod("default", "idle-not-ready", "template-a", PoolTypeIdle, corev1.PodRunning, corev1.ConditionFalse),
 		newOperatorTestPod("default", "idle-pending", "template-a", PoolTypeIdle, corev1.PodPending, corev1.ConditionTrue),
+		reserved,
 		newOperatorTestPod("default", "active-running", "template-a", PoolTypeActive, corev1.PodRunning, corev1.ConditionFalse),
 		newOperatorTestPod("default", "active-pending", "template-a", PoolTypeActive, corev1.PodPending, corev1.ConditionTrue),
 	} {
@@ -55,7 +58,7 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 	assert.False(t, needsProbeRequeue)
 
 	assert.Equal(t, int32(1), template.Status.IdleCount)
-	assert.Equal(t, int32(1), template.Status.ActiveCount)
+	assert.Equal(t, int32(2), template.Status.ActiveCount)
 	require.Len(t, template.Status.Conditions, 2)
 	assert.Equal(t, v1alpha1.ConditionFalse, template.Status.Conditions[0].Status)
 	assert.Equal(t, "InsufficientIdlePods", template.Status.Conditions[0].Reason)
@@ -64,9 +67,9 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 
 	assert.Equal(t, 1, publisher.calls)
 	assert.Equal(t, int32(1), publisher.idleCount)
-	assert.Equal(t, int32(1), publisher.activeCount)
+	assert.Equal(t, int32(2), publisher.activeCount)
 	assert.Equal(t, "default/template-a", publisher.statsKey)
-	assert.Equal(t, TemplateCounts{IdleCount: 1, ActiveCount: 1}, op.lastStats["default/template-a"])
+	assert.Equal(t, TemplateCounts{IdleCount: 1, ActiveCount: 2}, op.lastStats["default/template-a"])
 }
 
 func TestShouldRequeueSandboxProbe(t *testing.T) {

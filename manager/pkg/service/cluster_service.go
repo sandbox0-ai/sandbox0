@@ -98,14 +98,23 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 
 	// Count only ready idle pods as available pooled capacity.
 	idleCount := int32(0)
+	activeCount := int32(0)
+	pendingActiveCount := int32(0)
 	for _, pod := range idlePods {
+		if controller.IsHotClaimReservedPod(pod) {
+			if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
+				activeCount++
+				if pod.Status.Phase == corev1.PodPending {
+					pendingActiveCount++
+				}
+			}
+			continue
+		}
 		if controller.IsPodReady(pod) {
 			idleCount++
 		}
 	}
 
-	activeCount := int32(0)
-	pendingActiveCount := int32(0)
 	for _, pod := range activePods {
 		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
 			activeCount++
@@ -170,14 +179,23 @@ func (s *ClusterService) GetTemplateStats(ctx context.Context) (*TemplateStats, 
 
 		// Count only ready idle pods as available pooled capacity.
 		idleCount := int32(0)
+		activeCount := int32(0)
+		pendingActiveCount := int32(0)
 		for _, pod := range idlePods {
+			if controller.IsHotClaimReservedPod(pod) {
+				if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
+					activeCount++
+					if pod.Status.Phase == corev1.PodPending {
+						pendingActiveCount++
+					}
+				}
+				continue
+			}
 			if controller.IsPodReady(pod) {
 				idleCount++
 			}
 		}
 
-		activeCount := int32(0)
-		pendingActiveCount := int32(0)
 		for _, pod := range activePods {
 			if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
 				activeCount++

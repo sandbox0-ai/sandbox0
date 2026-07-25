@@ -80,6 +80,14 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 		},
 	}
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	controllerOwner := true
+	readyPod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "warm-pool",
+		UID:        types.UID("replicaset-uid"),
+		Controller: &controllerOwner,
+	}}
 
 	client := fake.NewSimpleClientset(readyPod.DeepCopy())
 	svc := &SandboxService{
@@ -102,15 +110,24 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	if pod.Name != "idle-ready" {
 		t.Fatalf("claimIdlePod() selected %q, want %q", pod.Name, "idle-ready")
 	}
-	if got := pod.Labels[controller.LabelPoolType]; got != controller.PoolTypeActive {
-		t.Fatalf("pool-type = %q, want %q", got, controller.PoolTypeActive)
+	if got := pod.Labels[controller.LabelPoolType]; got != controller.PoolTypeIdle {
+		t.Fatalf("pool-type = %q, want %q until detachment", got, controller.PoolTypeIdle)
+	}
+	if got := pod.Annotations[controller.AnnotationHotClaimReservation]; got == "" {
+		t.Fatal("hot claim reservation token is empty")
+	}
+	if got := pod.Annotations[controller.AnnotationHotClaimReservationState]; got != controller.HotClaimReservationStateInitializing {
+		t.Fatalf("reservation state = %q, want %q", got, controller.HotClaimReservationStateInitializing)
 	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
 	}
+	if len(pod.OwnerReferences) != 1 || pod.OwnerReferences[0].UID != types.UID("replicaset-uid") {
+		t.Fatalf("owner references = %#v, want warm-pool ReplicaSet", pod.OwnerReferences)
+	}
 }
 
-func TestClaimIdlePodReservationPreventsStaleCacheReuse(t *testing.T) {
+func TestClaimIdlePodSkipsReservationFromAnotherManager(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "template-a",
@@ -118,37 +135,25 @@ func TestClaimIdlePodReservationPreventsStaleCacheReuse(t *testing.T) {
 		},
 	}
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
-	reservations := newIdlePodReservations()
+	readyPod.Annotations[controller.AnnotationHotClaimReservation] = "other-manager-reservation"
+	readyPod.Annotations[controller.AnnotationHotClaimReservationState] = controller.HotClaimReservationStateInitializing
+	readyPod.Annotations[controller.AnnotationHotClaimReservedAt] = time.Now().UTC().Format(time.RFC3339Nano)
 
-	client := fake.NewSimpleClientset(readyPod.DeepCopy())
 	svc := &SandboxService{
-		k8sClient:           client,
-		podLister:           newClaimTestPodLister(t, readyPod),
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
-		idlePodReservations: reservations,
+		k8sClient: fake.NewSimpleClientset(readyPod.DeepCopy()),
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
 	}
-
 	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
 		TeamID: "team-a",
 		UserID: "user-a",
 	})
 	if err != nil {
-		t.Fatalf("first claimIdlePod() error = %v", err)
-	}
-	if pod == nil {
-		t.Fatal("first claimIdlePod() = nil, want ready pod")
-	}
-
-	pod, err = svc.claimIdlePod(context.Background(), template, &ClaimRequest{
-		TeamID: "team-a",
-		UserID: "user-a",
-	})
-	if err != nil {
-		t.Fatalf("second claimIdlePod() error = %v", err)
+		t.Fatalf("claimIdlePod() error = %v", err)
 	}
 	if pod != nil {
-		t.Fatalf("second claimIdlePod() = %s, want nil while stale idle pod is reserved", pod.Name)
+		t.Fatalf("claimIdlePod() = %s, want nil for globally reserved idle pod", pod.Name)
 	}
 }
 
@@ -161,18 +166,16 @@ func TestClaimIdlePodSkipsReservedPod(t *testing.T) {
 	}
 	podA := newClaimTestPod("ns-a", "idle-a", "template-a", true)
 	podB := newClaimTestPod("ns-a", "idle-b", "template-a", true)
-	reservations := newIdlePodReservations()
+	podA.Annotations[controller.AnnotationHotClaimReservation] = "reservation-token"
+	podA.Annotations[controller.AnnotationHotClaimReservationState] = controller.HotClaimReservationStateInitializing
+	podA.Annotations[controller.AnnotationHotClaimReservedAt] = time.Now().UTC().Format(time.RFC3339Nano)
 
 	client := fake.NewSimpleClientset(podA.DeepCopy(), podB.DeepCopy())
 	svc := &SandboxService{
-		k8sClient:           client,
-		podLister:           newClaimTestPodLister(t, podA, podB),
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
-		idlePodReservations: reservations,
-	}
-	if !svc.reserveIdlePod(podA) {
-		t.Fatal("reserveIdlePod(podA) = false, want true")
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, podA, podB),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
 	}
 
 	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{

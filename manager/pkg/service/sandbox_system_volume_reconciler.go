@@ -119,7 +119,7 @@ func (s *SandboxService) systemVolumeOwnerPodActive(sandboxID string) bool {
 		if pod == nil || pod.DeletionTimestamp != nil || pod.Labels == nil {
 			continue
 		}
-		if pod.Labels[controller.LabelPoolType] == controller.PoolTypeActive {
+		if controller.IsClaimedSandboxPod(pod) {
 			return true
 		}
 	}

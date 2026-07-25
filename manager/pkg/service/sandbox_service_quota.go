@@ -77,9 +77,7 @@ func (s *SandboxService) currentLiveQuotaUsage(ctx context.Context, teamID strin
 	if s == nil || s.podLister == nil {
 		return 0, false, nil
 	}
-	pods, err := s.podLister.List(labels.SelectorFromSet(map[string]string{
-		controller.LabelPoolType: controller.PoolTypeActive,
-	}))
+	pods, err := s.podLister.List(labels.Everything())
 	if err != nil {
 		return 0, true, fmt.Errorf("list active sandbox pods: %w", err)
 	}
@@ -133,7 +131,7 @@ func liveQuotaPodMatchesTeam(pod *corev1.Pod, teamID string) bool {
 	if pod == nil || pod.DeletionTimestamp != nil {
 		return false
 	}
-	if pod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+	if !controller.IsClaimedSandboxPod(pod) {
 		return false
 	}
 	if pod.Labels[controller.LabelSandboxID] == "" && pod.Annotations[controller.AnnotationSandboxID] == "" {

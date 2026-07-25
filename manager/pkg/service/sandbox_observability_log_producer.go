@@ -177,7 +177,7 @@ func sandboxObservabilityPodEligible(pod *corev1.Pod) bool {
 	if pod == nil || pod.Status.Phase != corev1.PodRunning {
 		return false
 	}
-	if pod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+	if !controller.IsClaimedSandboxPod(pod) {
 		return false
 	}
 	if sandboxIDFromPod(pod) == "" {

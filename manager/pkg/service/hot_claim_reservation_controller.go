@@ -10,6 +10,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,10 @@ import (
 const (
 	hotClaimReservationRecoveryGracePeriod = 5 * time.Minute
 	hotClaimReservationResyncPeriod        = 30 * time.Second
+	hotClaimDetachmentSettleWindow         = 3 * time.Second
+	hotClaimDetachmentMaxDelay             = 2 * time.Minute
+	hotClaimDetachmentLowWatermark         = 16
+	hotClaimDetachmentRatePerSecond        = 5
 )
 
 // HotClaimReservationController safely detaches completed hot claims from
@@ -39,6 +44,14 @@ type HotClaimReservationController struct {
 	queue          workqueue.TypedRateLimitingInterface[string]
 	resyncInterval time.Duration
 	recoveryGrace  time.Duration
+	detachPacer    hotClaimDetachmentPacer
+	settleWindow   time.Duration
+	maxDetachDelay time.Duration
+	lowWatermark   int
+}
+
+type hotClaimDetachmentPacer interface {
+	Wait(context.Context) error
 }
 
 func NewHotClaimReservationController(
@@ -59,6 +72,10 @@ func NewHotClaimReservationController(
 		queue:          workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 		resyncInterval: hotClaimReservationResyncPeriod,
 		recoveryGrace:  hotClaimReservationRecoveryGracePeriod,
+		detachPacer:    rate.NewLimiter(rate.Limit(hotClaimDetachmentRatePerSecond), 1),
+		settleWindow:   hotClaimDetachmentSettleWindow,
+		maxDetachDelay: hotClaimDetachmentMaxDelay,
+		lowWatermark:   hotClaimDetachmentLowWatermark,
 	}
 }
 
@@ -87,9 +104,7 @@ func (c *HotClaimReservationController) Run(ctx context.Context, workers int) er
 	if c == nil {
 		return nil
 	}
-	if workers <= 0 {
-		workers = 1
-	}
+	workers = 1
 	if c.queue == nil {
 		c.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]())
 	}
@@ -190,6 +205,14 @@ func (c *HotClaimReservationController) reconcile(ctx context.Context, key strin
 	}
 	if pod.Annotations[controller.AnnotationHotClaimReservationState] == controller.HotClaimReservationStateReady &&
 		hotClaimReservationMatchesRecord(pod, record) {
+		if requeueAfter := c.detachmentTimeRemaining(pod); requeueAfter > 0 {
+			return requeueAfter, nil
+		}
+		if !c.detachmentMaxDelayElapsed(pod) && c.detachPacer != nil {
+			if err := c.detachPacer.Wait(ctx); err != nil {
+				return 0, fmt.Errorf("wait for hot claim detachment pace: %w", err)
+			}
+		}
 		return 0, c.finalizeReservation(ctx, pod)
 	}
 
@@ -233,6 +256,92 @@ func (c *HotClaimReservationController) recoveryTimeRemaining(pod *corev1.Pod) t
 	return remaining
 }
 
+func (c *HotClaimReservationController) detachmentTimeRemaining(pod *corev1.Pod) time.Duration {
+	readyAt, ok := hotClaimReservationReadyTime(pod)
+	if !ok || c.settleWindow <= 0 || c.detachmentMaxDelayElapsedAt(readyAt) {
+		return 0
+	}
+	if c.claimableIdleBelowLowWatermark(pod) {
+		return 0
+	}
+	now := c.clock.Now()
+	if readyAt.After(now) {
+		return c.settleWindow
+	}
+	remaining := c.settleWindow - now.Sub(readyAt)
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
+}
+
+func (c *HotClaimReservationController) detachmentMaxDelayElapsed(pod *corev1.Pod) bool {
+	readyAt, ok := hotClaimReservationReadyTime(pod)
+	return !ok || c.detachmentMaxDelayElapsedAt(readyAt)
+}
+
+func (c *HotClaimReservationController) detachmentMaxDelayElapsedAt(readyAt time.Time) bool {
+	if c.maxDetachDelay <= 0 {
+		return true
+	}
+	now := c.clock.Now()
+	return !readyAt.After(now) && now.Sub(readyAt) >= c.maxDetachDelay
+}
+
+func (c *HotClaimReservationController) claimableIdleBelowLowWatermark(pod *corev1.Pod) bool {
+	if c.lowWatermark <= 0 || c.podLister == nil || pod == nil {
+		return false
+	}
+	templateID := strings.TrimSpace(pod.Labels[controller.LabelTemplateID])
+	if templateID == "" {
+		return false
+	}
+	pods, err := c.podLister.Pods(pod.Namespace).List(labels.SelectorFromSet(map[string]string{
+		controller.LabelTemplateID: templateID,
+		controller.LabelPoolType:   controller.PoolTypeIdle,
+	}))
+	if err != nil {
+		c.logger.Warn("Failed to count claimable idle pods before hot claim detachment",
+			zap.String("template", templateID),
+			zap.Error(err),
+		)
+		return false
+	}
+	claimable := 0
+	for _, candidate := range pods {
+		if candidate.DeletionTimestamp != nil ||
+			controller.IsHotClaimReservedPod(candidate) ||
+			!controller.IsPodReady(candidate) {
+			continue
+		}
+		claimable++
+		if claimable >= c.lowWatermark {
+			return false
+		}
+	}
+	return true
+}
+
+func hotClaimReservationReadyTime(pod *corev1.Pod) (time.Time, bool) {
+	if pod == nil {
+		return time.Time{}, false
+	}
+	for _, key := range []string{
+		controller.AnnotationHotClaimReadyAt,
+		controller.AnnotationHotClaimReservedAt,
+	} {
+		value := strings.TrimSpace(pod.Annotations[key])
+		if value == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
 func (c *HotClaimReservationController) finalizeReservation(ctx context.Context, pod *corev1.Pod) error {
 	operations := hotClaimReservationPreconditions(pod)
 	operations = appendReplicaSetOwnerRemovalPatch(
@@ -254,11 +363,17 @@ func (c *HotClaimReservationController) finalizeReservation(ctx context.Context,
 			Operation: "remove",
 			Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReservedAt),
 		},
-		claimMetadataPatchOperation{
-			Operation: "remove",
-			Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReservation),
-		},
 	)
+	if pod.Annotations[controller.AnnotationHotClaimReadyAt] != "" {
+		operations = append(operations, claimMetadataPatchOperation{
+			Operation: "remove",
+			Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReadyAt),
+		})
+	}
+	operations = append(operations, claimMetadataPatchOperation{
+		Operation: "remove",
+		Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReservation),
+	})
 	patch, err := json.Marshal(operations)
 	if err != nil {
 		return fmt.Errorf("marshal hot claim detachment patch: %w", err)

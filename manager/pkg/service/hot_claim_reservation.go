@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	corev1 "k8s.io/api/core/v1"
@@ -75,6 +76,7 @@ func (s *SandboxService) markHotClaimReservationReady(
 		}
 		// Pod status updates advance resourceVersion during initialization. UID
 		// and the unique reservation token are the stable CAS inputs here.
+		readyAt := s.now().UTC().Format(time.RFC3339Nano)
 		operations = append(operations,
 			claimMetadataPatchOperation{
 				Operation: "test",
@@ -85,6 +87,11 @@ func (s *SandboxService) markHotClaimReservationReady(
 				Operation: "replace",
 				Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReservationState),
 				Value:     controller.HotClaimReservationStateReady,
+			},
+			claimMetadataPatchOperation{
+				Operation: "add",
+				Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReadyAt),
+				Value:     readyAt,
 			},
 		)
 		patch, err := json.Marshal(operations)

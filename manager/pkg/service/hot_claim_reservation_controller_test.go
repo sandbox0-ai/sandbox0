@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -26,6 +28,9 @@ func TestMarkHotClaimReservationReadyKeepsWarmPoolAttachment(t *testing.T) {
 	}
 	if got := ready.Annotations[controller.AnnotationHotClaimReservationState]; got != controller.HotClaimReservationStateReady {
 		t.Fatalf("reservation state = %q, want %q", got, controller.HotClaimReservationStateReady)
+	}
+	if got := ready.Annotations[controller.AnnotationHotClaimReadyAt]; got == "" {
+		t.Fatal("hot claim ready timestamp is empty")
 	}
 	if got := ready.Labels[controller.LabelPoolType]; got != controller.PoolTypeIdle {
 		t.Fatalf("pool type = %q, want idle before controller detachment", got)
@@ -67,6 +72,8 @@ func TestHotClaimReservationControllerFinalizesDurableReadyClaim(t *testing.T) {
 		nil,
 	)
 	reconciler.clock = fixedClock{now: now}
+	pacer := &recordingHotClaimDetachmentPacer{}
+	reconciler.detachPacer = pacer
 
 	requeueAfter, err := reconciler.reconcile(context.Background(), pod.Namespace+"/"+pod.Name)
 	if err != nil {
@@ -74,6 +81,9 @@ func TestHotClaimReservationControllerFinalizesDurableReadyClaim(t *testing.T) {
 	}
 	if requeueAfter != 0 {
 		t.Fatalf("reconcile() requeueAfter = %s, want 0", requeueAfter)
+	}
+	if pacer.calls != 1 {
+		t.Fatalf("detachment pacer calls = %d, want 1", pacer.calls)
 	}
 
 	got, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
@@ -91,6 +101,77 @@ func TestHotClaimReservationControllerFinalizesDurableReadyClaim(t *testing.T) {
 	}
 	if !hasSandboxCleanupFinalizer(got) {
 		t.Fatal("sandbox cleanup finalizer was removed")
+	}
+}
+
+func TestHotClaimReservationControllerWaitsForSettleWindowWithHealthyCapacity(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateReady)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": hotClaimReservationTestRecord(pod),
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	pacer := &recordingHotClaimDetachmentPacer{}
+	reconciler := NewHotClaimReservationController(
+		client,
+		newClaimTestPodLister(t, hotClaimReservationCapacityPods(pod, hotClaimDetachmentLowWatermark)...),
+		store,
+		nil,
+	)
+	reconciler.clock = fixedClock{now: now}
+	reconciler.detachPacer = pacer
+
+	requeueAfter, err := reconciler.reconcile(context.Background(), pod.Namespace+"/"+pod.Name)
+	if err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+	if requeueAfter != hotClaimDetachmentSettleWindow {
+		t.Fatalf("reconcile() requeueAfter = %s, want %s", requeueAfter, hotClaimDetachmentSettleWindow)
+	}
+	if pacer.calls != 0 {
+		t.Fatalf("detachment pacer calls = %d, want 0 before settle window", pacer.calls)
+	}
+	got, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get reserved pod: %v", err)
+	}
+	if got.Labels[controller.LabelPoolType] != controller.PoolTypeIdle {
+		t.Fatalf("pool type = %q, want idle during settle window", got.Labels[controller.LabelPoolType])
+	}
+}
+
+func TestHotClaimReservationControllerMaxDelayBypassesPacer(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	pod := newHotClaimReservationTestPod(
+		now.Add(-hotClaimDetachmentMaxDelay-time.Second),
+		controller.HotClaimReservationStateReady,
+	)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": hotClaimReservationTestRecord(pod),
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	pacer := &recordingHotClaimDetachmentPacer{err: errors.New("pacer must be bypassed")}
+	reconciler := NewHotClaimReservationController(
+		client,
+		newClaimTestPodLister(t, hotClaimReservationCapacityPods(pod, hotClaimDetachmentLowWatermark)...),
+		store,
+		nil,
+	)
+	reconciler.clock = fixedClock{now: now}
+	reconciler.detachPacer = pacer
+
+	if _, err := reconciler.reconcile(context.Background(), pod.Namespace+"/"+pod.Name); err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+	if pacer.calls != 0 {
+		t.Fatalf("detachment pacer calls = %d, want 0 after max delay", pacer.calls)
+	}
+	got, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get finalized pod: %v", err)
+	}
+	if got.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+		t.Fatalf("pool type = %q, want active after max delay", got.Labels[controller.LabelPoolType])
 	}
 }
 
@@ -211,6 +292,9 @@ func newHotClaimReservationTestPod(reservedAt time.Time, state string) *corev1.P
 	pod.Annotations[controller.AnnotationHotClaimReservation] = "reservation-token"
 	pod.Annotations[controller.AnnotationHotClaimReservationState] = state
 	pod.Annotations[controller.AnnotationHotClaimReservedAt] = reservedAt.Format(time.RFC3339Nano)
+	if state == controller.HotClaimReservationStateReady {
+		pod.Annotations[controller.AnnotationHotClaimReadyAt] = reservedAt.Format(time.RFC3339Nano)
+	}
 	pod.Finalizers = []string{"example.com/unrelated", sandboxCleanupFinalizer}
 	pod.OwnerReferences = []metav1.OwnerReference{
 		{
@@ -228,6 +312,30 @@ func newHotClaimReservationTestPod(reservedAt time.Time, state string) *corev1.P
 		},
 	}
 	return pod
+}
+
+func hotClaimReservationCapacityPods(reserved *corev1.Pod, claimable int) []*corev1.Pod {
+	pods := make([]*corev1.Pod, 0, claimable+1)
+	pods = append(pods, reserved)
+	for index := range claimable {
+		pods = append(pods, newClaimTestPod(
+			reserved.Namespace,
+			fmt.Sprintf("idle-ready-%d", index),
+			reserved.Labels[controller.LabelTemplateID],
+			true,
+		))
+	}
+	return pods
+}
+
+type recordingHotClaimDetachmentPacer struct {
+	calls int
+	err   error
+}
+
+func (p *recordingHotClaimDetachmentPacer) Wait(context.Context) error {
+	p.calls++
+	return p.err
 }
 
 func hotClaimReservationTestRecord(pod *corev1.Pod) *SandboxRecord {

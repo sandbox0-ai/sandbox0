@@ -306,14 +306,19 @@ func (w *Watcher) handlePodUpsert(obj any) {
 
 	key := pod.Namespace + "/" + pod.Name
 	w.mu.Lock()
+	notify := true
 	if existing := w.sandboxes[key]; existing != nil {
 		if !isResourceVersionNewer(existing.ResourceVersion, info.ResourceVersion) {
 			w.mu.Unlock()
 			return
 		}
+		notify = sandboxRuntimeInputChanged(existing, info)
 	}
 	w.sandboxes[key] = info
 	w.mu.Unlock()
+	if !notify {
+		return
+	}
 
 	w.logger.Info("Sandbox pod detected",
 		zap.String("sandbox", key),
@@ -326,6 +331,20 @@ func (w *Watcher) handlePodUpsert(obj any) {
 	if w.onSandboxUpsert != nil {
 		w.onSandboxUpsert(cloneSandboxInfo(info))
 	}
+}
+
+func sandboxRuntimeInputChanged(current, incoming *SandboxInfo) bool {
+	if current == nil || incoming == nil {
+		return true
+	}
+	return current.UID != incoming.UID ||
+		current.PodIP != incoming.PodIP ||
+		current.NodeName != incoming.NodeName ||
+		current.SandboxID != incoming.SandboxID ||
+		current.TeamID != incoming.TeamID ||
+		current.OwnerKind != incoming.OwnerKind ||
+		current.NetworkPolicy != incoming.NetworkPolicy ||
+		current.NetworkPolicyHash != incoming.NetworkPolicyHash
 }
 
 func (w *Watcher) handlePodDelete(obj any) {

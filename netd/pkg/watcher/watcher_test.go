@@ -39,6 +39,57 @@ func TestHandlePodUpsertRemovesDeletingSandboxFromFallbackCache(t *testing.T) {
 	}
 }
 
+func TestHandlePodUpsertDoesNotNotifyForAppliedHashOnlyUpdate(t *testing.T) {
+	w := NewWatcher(nil, 0, zap.NewNop())
+	notifications := 0
+	w.SetSandboxHandlers(func(*SandboxInfo) {
+		notifications++
+	}, nil)
+	pod := testSandboxPod("sandbox-a", "uid-a", "10", "10.0.0.2", "node-a")
+	pod.Annotations = map[string]string{
+		controller.AnnotationNetworkPolicy:     `{"mode":"allow-all"}`,
+		controller.AnnotationNetworkPolicyHash: "hash-a",
+	}
+	w.handlePodUpsert(pod)
+
+	applied := pod.DeepCopy()
+	applied.ResourceVersion = "11"
+	applied.Annotations[controller.AnnotationNetworkPolicyAppliedHash] = "hash-a"
+	w.handlePodUpsert(applied)
+
+	if notifications != 1 {
+		t.Fatalf("sandbox notifications = %d, want 1", notifications)
+	}
+	got := w.ListSandboxesByNode("node-a")
+	if len(got) != 1 || got[0].NetworkAppliedHash != "hash-a" {
+		t.Fatalf("cached sandbox = %#v, want updated applied hash", got)
+	}
+}
+
+func TestHandlePodUpsertNotifiesWhenPolicyHashChanges(t *testing.T) {
+	w := NewWatcher(nil, 0, zap.NewNop())
+	notifications := 0
+	w.SetSandboxHandlers(func(*SandboxInfo) {
+		notifications++
+	}, nil)
+	pod := testSandboxPod("sandbox-a", "uid-a", "10", "10.0.0.2", "node-a")
+	pod.Annotations = map[string]string{
+		controller.AnnotationNetworkPolicy:     `{"mode":"allow-all"}`,
+		controller.AnnotationNetworkPolicyHash: "hash-a",
+	}
+	w.handlePodUpsert(pod)
+
+	changed := pod.DeepCopy()
+	changed.ResourceVersion = "11"
+	changed.Annotations[controller.AnnotationNetworkPolicy] = `{"mode":"block-all"}`
+	changed.Annotations[controller.AnnotationNetworkPolicyHash] = "hash-b"
+	w.handlePodUpsert(changed)
+
+	if notifications != 2 {
+		t.Fatalf("sandbox notifications = %d, want 2", notifications)
+	}
+}
+
 func TestListSandboxesByNodeUsesInformerCacheAsAuthoritativeSource(t *testing.T) {
 	w := NewWatcher(nil, 0, zap.NewNop())
 	informer := cache.NewSharedIndexInformer(nil, &corev1.Pod{}, 0, cache.Indexers{podNodeIndex: indexPodByNode})

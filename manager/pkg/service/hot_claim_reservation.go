@@ -73,13 +73,8 @@ func (s *SandboxService) markHotClaimReservationReady(
 				Value:     current.UID,
 			})
 		}
-		if current.ResourceVersion != "" {
-			operations = append(operations, claimMetadataPatchOperation{
-				Operation: "test",
-				Path:      "/metadata/resourceVersion",
-				Value:     current.ResourceVersion,
-			})
-		}
+		// Pod status updates advance resourceVersion during initialization. UID
+		// and the unique reservation token are the stable CAS inputs here.
 		operations = append(operations,
 			claimMetadataPatchOperation{
 				Operation: "test",

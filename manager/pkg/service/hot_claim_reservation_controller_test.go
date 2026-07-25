@@ -35,6 +35,24 @@ func TestMarkHotClaimReservationReadyKeepsWarmPoolAttachment(t *testing.T) {
 	}
 }
 
+func TestMarkHotClaimReservationReadyAllowsResourceVersionAdvance(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	stalePod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateInitializing)
+	stalePod.ResourceVersion = "10"
+	livePod := stalePod.DeepCopy()
+	livePod.ResourceVersion = "11"
+	client := fake.NewSimpleClientset(livePod)
+	service := &SandboxService{k8sClient: client}
+
+	ready, err := service.markHotClaimReservationReady(context.Background(), stalePod)
+	if err != nil {
+		t.Fatalf("markHotClaimReservationReady() error = %v", err)
+	}
+	if got := ready.Annotations[controller.AnnotationHotClaimReservationState]; got != controller.HotClaimReservationStateReady {
+		t.Fatalf("reservation state = %q, want %q", got, controller.HotClaimReservationStateReady)
+	}
+}
+
 func TestHotClaimReservationControllerFinalizesDurableReadyClaim(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
 	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateReady)

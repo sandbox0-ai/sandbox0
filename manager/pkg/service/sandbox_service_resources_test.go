@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -211,9 +212,10 @@ func TestClaimIdlePodAppliesTemplateResourcesByDefault(t *testing.T) {
 	container := sandboxRuntimeContainer(t, pod)
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "1Gi")
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "250m")
-	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "256Mi")
-	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "25m")
-	assertResizeSubresourceUpdate(t, client.Actions())
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "64Mi")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "10m")
+	assertHotClaimActiveResources(t, pod, "1Gi", "250m", "256Mi", "25m")
+	assertNoResizeSubresourceUpdate(t, client.Actions())
 }
 
 func TestClaimIdlePodAppliesMinimumCPUToTemplateResources(t *testing.T) {
@@ -244,8 +246,10 @@ func TestClaimIdlePodAppliesMinimumCPUToTemplateResources(t *testing.T) {
 	container := sandboxRuntimeContainer(t, pod)
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceMemory], "512Mi")
 	assertQuantity(t, container.Resources.Limits[corev1.ResourceCPU], "150m")
+	assertQuantity(t, container.Resources.Requests[corev1.ResourceMemory], "64Mi")
 	assertQuantity(t, container.Resources.Requests[corev1.ResourceCPU], "10m")
-	assertResizeSubresourceUpdate(t, client.Actions())
+	assertHotClaimActiveResources(t, pod, "512Mi", "150m", "128Mi", "10m")
+	assertNoResizeSubresourceUpdate(t, client.Actions())
 }
 
 func TestClaimIdlePodAppliesMemoryOverride(t *testing.T) {
@@ -591,6 +595,38 @@ func assertResizeSubresourceUpdate(t *testing.T, actions []k8stesting.Action) {
 		}
 	}
 	t.Fatalf("missing patch pods/resize action; actions = %#v", actions)
+}
+
+func assertNoResizeSubresourceUpdate(t *testing.T, actions []k8stesting.Action) {
+	t.Helper()
+	for _, action := range actions {
+		if action.Matches("patch", "pods") && action.GetSubresource() == "resize" {
+			t.Fatalf("unexpected patch pods/resize action; actions = %#v", actions)
+		}
+	}
+}
+
+func assertHotClaimActiveResources(
+	t *testing.T,
+	pod *corev1.Pod,
+	memoryLimit string,
+	cpuLimit string,
+	memoryRequest string,
+	cpuRequest string,
+) {
+	t.Helper()
+	raw := pod.Annotations[controller.AnnotationHotClaimActiveResources]
+	if raw == "" {
+		t.Fatal("hot claim active resources annotation is empty")
+	}
+	var resources corev1.ResourceRequirements
+	if err := json.Unmarshal([]byte(raw), &resources); err != nil {
+		t.Fatalf("decode hot claim active resources: %v", err)
+	}
+	assertQuantity(t, resources.Limits[corev1.ResourceMemory], memoryLimit)
+	assertQuantity(t, resources.Limits[corev1.ResourceCPU], cpuLimit)
+	assertQuantity(t, resources.Requests[corev1.ResourceMemory], memoryRequest)
+	assertQuantity(t, resources.Requests[corev1.ResourceCPU], cpuRequest)
 }
 
 func contains(s, substr string) bool {

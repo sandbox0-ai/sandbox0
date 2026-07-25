@@ -1108,7 +1108,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return err
 		}
 		var resizeQuota *v1alpha1.ResourceQuota
-		if sandboxPodNeedsResourceResize(pod, resourceQuota) {
+		if sandboxPodNeedsSynchronousResourceResize(pod, resourceQuota) {
 			resizeQuota = &resourceQuota
 		}
 
@@ -1131,6 +1131,11 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod.Annotations[controller.AnnotationHotClaimReservation] = reservationToken
 		pod.Annotations[controller.AnnotationHotClaimReservationState] = controller.HotClaimReservationStateInitializing
 		pod.Annotations[controller.AnnotationHotClaimReservedAt] = s.clock.Now().UTC().Format(time.RFC3339Nano)
+		activeResourcesJSON, marshalErr := json.Marshal(v1alpha1.BuildResourceRequirements(resourceQuota))
+		if marshalErr != nil {
+			return fmt.Errorf("marshal hot claim active resources: %w", marshalErr)
+		}
+		pod.Annotations[controller.AnnotationHotClaimActiveResources] = string(activeResourcesJSON)
 		if stateVolume != nil {
 			pod.Annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 		} else {

@@ -213,6 +213,10 @@ func (c *HotClaimReservationController) reconcile(ctx context.Context, key strin
 				return 0, fmt.Errorf("wait for hot claim detachment pace: %w", err)
 			}
 		}
+		pod, err = c.ensureActiveResourceRequests(ctx, pod)
+		if err != nil {
+			return 0, err
+		}
 		return 0, c.finalizeReservation(ctx, pod)
 	}
 
@@ -342,6 +346,34 @@ func hotClaimReservationReadyTime(pod *corev1.Pod) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+func (c *HotClaimReservationController) ensureActiveResourceRequests(
+	ctx context.Context,
+	pod *corev1.Pod,
+) (*corev1.Pod, error) {
+	if pod == nil {
+		return nil, nil
+	}
+	rawResources := strings.TrimSpace(pod.Annotations[controller.AnnotationHotClaimActiveResources])
+	if rawResources == "" {
+		return pod, nil
+	}
+	var desired corev1.ResourceRequirements
+	if err := json.Unmarshal([]byte(rawResources), &desired); err != nil {
+		return pod, fmt.Errorf("decode hot claim active resources: %w", err)
+	}
+	for _, container := range pod.Spec.Containers {
+		if container.Name == "procd" && resizeResourcesEqual(container.Resources, desired) {
+			return pod, nil
+		}
+	}
+
+	resized, err := resizeSandboxPodToResources(ctx, c.k8sClient, pod, desired)
+	if err != nil {
+		return pod, fmt.Errorf("expand active sandbox resource requests: %w", err)
+	}
+	return mergeSandboxMetadataAfterResize(resized, pod), nil
+}
+
 func (c *HotClaimReservationController) finalizeReservation(ctx context.Context, pod *corev1.Pod) error {
 	operations := hotClaimReservationPreconditions(pod)
 	operations = appendReplicaSetOwnerRemovalPatch(
@@ -368,6 +400,12 @@ func (c *HotClaimReservationController) finalizeReservation(ctx context.Context,
 		operations = append(operations, claimMetadataPatchOperation{
 			Operation: "remove",
 			Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReadyAt),
+		})
+	}
+	if pod.Annotations[controller.AnnotationHotClaimActiveResources] != "" {
+		operations = append(operations, claimMetadataPatchOperation{
+			Operation: "remove",
+			Path:      metadataMapPath("annotations", controller.AnnotationHotClaimActiveResources),
 		})
 	}
 	operations = append(operations, claimMetadataPatchOperation{

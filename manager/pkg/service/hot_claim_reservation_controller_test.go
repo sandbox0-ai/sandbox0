@@ -2,18 +2,23 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestMarkHotClaimReservationReadyKeepsWarmPoolAttachment(t *testing.T) {
@@ -101,6 +106,113 @@ func TestHotClaimReservationControllerFinalizesDurableReadyClaim(t *testing.T) {
 	}
 	if !hasSandboxCleanupFinalizer(got) {
 		t.Fatal("sandbox cleanup finalizer was removed")
+	}
+}
+
+func TestHotClaimReservationControllerExpandsRequestsBeforeDetachment(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateReady)
+	quota := v1alpha1.ResourceQuota{
+		CPU:    resource.MustParse("250m"),
+		Memory: resource.MustParse("1Gi"),
+	}
+	setHotClaimReservationResources(t, pod, quota)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": hotClaimReservationTestRecord(pod),
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	reconciler := NewHotClaimReservationController(
+		client,
+		newClaimTestPodLister(t, pod),
+		store,
+		nil,
+	)
+	reconciler.clock = fixedClock{now: now}
+	reconciler.detachPacer = &recordingHotClaimDetachmentPacer{}
+
+	if _, err := reconciler.reconcile(context.Background(), pod.Namespace+"/"+pod.Name); err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+
+	resizeIndex := -1
+	detachIndex := -1
+	for index, action := range client.Actions() {
+		if !action.Matches("patch", "pods") {
+			continue
+		}
+		if action.GetSubresource() == "resize" {
+			resizeIndex = index
+		} else {
+			detachIndex = index
+		}
+	}
+	if resizeIndex < 0 || detachIndex < 0 || resizeIndex >= detachIndex {
+		t.Fatalf("actions = %#v, want pods/resize before metadata detachment", client.Actions())
+	}
+
+	got, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get finalized pod: %v", err)
+	}
+	resources := sandboxRuntimeContainer(t, got).Resources
+	assertQuantity(t, resources.Limits[corev1.ResourceMemory], "1Gi")
+	assertQuantity(t, resources.Limits[corev1.ResourceCPU], "250m")
+	assertQuantity(t, resources.Requests[corev1.ResourceMemory], "256Mi")
+	assertQuantity(t, resources.Requests[corev1.ResourceCPU], "25m")
+	if got.Annotations[controller.AnnotationHotClaimActiveResources] != "" {
+		t.Fatalf("active resources annotation was not removed: %#v", got.Annotations)
+	}
+	if got.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+		t.Fatalf("pool type = %q, want active", got.Labels[controller.LabelPoolType])
+	}
+}
+
+func TestHotClaimReservationControllerKeepsWarmPoolAttachmentWhenRequestExpansionFails(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateReady)
+	setHotClaimReservationResources(t, pod, v1alpha1.ResourceQuota{
+		CPU:    resource.MustParse("250m"),
+		Memory: resource.MustParse("1Gi"),
+	})
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": hotClaimReservationTestRecord(pod),
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "resize" {
+			return false, nil, nil
+		}
+		return true, nil, errors.New("resize rejected")
+	})
+	reconciler := NewHotClaimReservationController(
+		client,
+		newClaimTestPodLister(t, pod),
+		store,
+		nil,
+	)
+	reconciler.clock = fixedClock{now: now}
+	reconciler.detachPacer = &recordingHotClaimDetachmentPacer{}
+
+	if _, err := reconciler.reconcile(context.Background(), pod.Namespace+"/"+pod.Name); err == nil {
+		t.Fatal("reconcile() error = nil, want request expansion failure")
+	}
+	got, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get reserved pod: %v", err)
+	}
+	if got.Labels[controller.LabelPoolType] != controller.PoolTypeIdle {
+		t.Fatalf("pool type = %q, want idle after failed request expansion", got.Labels[controller.LabelPoolType])
+	}
+	if !controller.IsHotClaimReservedPod(got) {
+		t.Fatal("reservation was removed after failed request expansion")
+	}
+	if len(got.OwnerReferences) != 2 {
+		t.Fatalf("owner references = %#v, want warm-pool attachment preserved", got.OwnerReferences)
+	}
+	for _, action := range client.Actions() {
+		if action.Matches("patch", "pods") && action.GetSubresource() == "" {
+			t.Fatalf("unexpected metadata detachment after failed request expansion: %#v", client.Actions())
+		}
 	}
 }
 
@@ -312,6 +424,21 @@ func newHotClaimReservationTestPod(reservedAt time.Time, state string) *corev1.P
 		},
 	}
 	return pod
+}
+
+func setHotClaimReservationResources(t *testing.T, pod *corev1.Pod, quota v1alpha1.ResourceQuota) {
+	t.Helper()
+	for index := range pod.Spec.Containers {
+		if pod.Spec.Containers[index].Name == "procd" {
+			pod.Spec.Containers[index].Resources = v1alpha1.BuildIdleResourceRequirements(quota)
+			break
+		}
+	}
+	activeResources, err := json.Marshal(v1alpha1.BuildResourceRequirements(quota))
+	if err != nil {
+		t.Fatalf("marshal active resources: %v", err)
+	}
+	pod.Annotations[controller.AnnotationHotClaimActiveResources] = string(activeResources)
 }
 
 func hotClaimReservationCapacityPods(reserved *corev1.Pod, claimable int) []*corev1.Pod {

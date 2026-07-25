@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -47,13 +48,29 @@ func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *cor
 	if s == nil || s.k8sClient == nil {
 		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)
 	}
+	return resizeSandboxPodToResources(
+		ctx,
+		s.k8sClient,
+		pod,
+		v1alpha1.BuildResourceRequirements(quota),
+	)
+}
+
+func resizeSandboxPodToResources(
+	ctx context.Context,
+	k8sClient kubernetes.Interface,
+	pod *corev1.Pod,
+	resources corev1.ResourceRequirements,
+) (*corev1.Pod, error) {
+	if k8sClient == nil {
+		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)
+	}
 	if pod == nil || pod.Namespace == "" || pod.Name == "" {
 		return nil, fmt.Errorf("%w: pod is required", ErrInvalidClaimRequest)
 	}
 
 	namespace, name := pod.Namespace, pod.Name
 	var updated *corev1.Pod
-	resources := v1alpha1.BuildResourceRequirements(quota)
 	patch, err := json.Marshal(map[string]any{
 		"spec": map[string]any{
 			"containers": []map[string]any{{
@@ -66,7 +83,7 @@ func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *cor
 		return nil, fmt.Errorf("build sandbox resource resize patch: %w", err)
 	}
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		result, err := s.k8sClient.CoreV1().Pods(namespace).Patch(
+		result, err := k8sClient.CoreV1().Pods(namespace).Patch(
 			ctx,
 			name,
 			types.StrategicMergePatchType,
@@ -79,9 +96,14 @@ func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *cor
 		}
 		if result == nil || result.Name == "" {
 			updated = pod.DeepCopy()
-			if applyErr := s.applySandboxResourceQuota(updated, quota); applyErr != nil {
-				return applyErr
+			for index := range updated.Spec.Containers {
+				if updated.Spec.Containers[index].Name != "procd" {
+					continue
+				}
+				updated.Spec.Containers[index].Resources = resources
+				return nil
 			}
+			return fmt.Errorf("%w: sandbox runtime container not found", ErrInvalidClaimRequest)
 		} else {
 			updated = result
 		}
@@ -134,7 +156,10 @@ func applySandboxResourceQuotaToPodSpec(spec *corev1.PodSpec, quota v1alpha1.Res
 	return fmt.Errorf("%w: sandbox runtime container not found", ErrInvalidClaimRequest)
 }
 
-func sandboxPodNeedsResourceResize(pod *corev1.Pod, quota v1alpha1.ResourceQuota) bool {
+// sandboxPodNeedsSynchronousResourceResize reports whether claim-time resize is
+// required to enforce the requested limits. Request-only expansion is deferred
+// until warm-pool detachment.
+func sandboxPodNeedsSynchronousResourceResize(pod *corev1.Pod, quota v1alpha1.ResourceQuota) bool {
 	if quota.CPU.Sign() <= 0 && quota.Memory.Sign() <= 0 {
 		return false
 	}
@@ -146,7 +171,16 @@ func sandboxPodNeedsResourceResize(pod *corev1.Pod, quota v1alpha1.ResourceQuota
 		if container.Name != "procd" {
 			continue
 		}
-		return !resizeResourcesEqual(container.Resources, desired)
+		return !resizeResourceLimitsEqual(container.Resources, desired)
+	}
+	return true
+}
+
+func resizeResourceLimitsEqual(a, b corev1.ResourceRequirements) bool {
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		if !resourceListQuantityEqual(a.Limits, b.Limits, name) {
+			return false
+		}
 	}
 	return true
 }

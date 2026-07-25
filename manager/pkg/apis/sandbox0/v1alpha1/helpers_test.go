@@ -455,7 +455,7 @@ func TestBuildResourceRequirementsAppliesMinimumCPULimit(t *testing.T) {
 	}
 }
 
-func TestBuildIdlePodSpecUsesMinimumCPUAndLowMemoryLimits(t *testing.T) {
+func TestBuildIdlePodSpecUsesFullLimitsAndLowRequests(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
@@ -471,9 +471,9 @@ manager_image: sandbox0/manager:test
 	resources := spec.Containers[0].Resources
 
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "10m")
-	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "150m")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "500m")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "64Mi")
-	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "128Mi")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "2Gi")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceEphemeralStorage], "1Gi")
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "8Gi")
 }

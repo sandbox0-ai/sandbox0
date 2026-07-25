@@ -394,12 +394,11 @@ func applyIdleResourceQuotaToPodSpec(spec *corev1.PodSpec, template *SandboxTemp
 	if spec == nil || template == nil {
 		return
 	}
-	quota := idleResourceQuota(template.Spec.MainContainer.Resources)
 	for i := range spec.Containers {
 		if spec.Containers[i].Name != "procd" {
 			continue
 		}
-		spec.Containers[i].Resources = BuildResourceRequirements(quota)
+		spec.Containers[i].Resources = BuildIdleResourceRequirements(template.Spec.MainContainer.Resources)
 		return
 	}
 }
@@ -418,6 +417,16 @@ func idleResourceQuota(templateQuota ResourceQuota) ResourceQuota {
 		quota.Memory = idleMemory
 	}
 	return *quota
+}
+
+// BuildIdleResourceRequirements keeps the template's full limits while using
+// low warm-pool requests. Claims can therefore defer request expansion without
+// changing the resources available to the sandbox runtime.
+func BuildIdleResourceRequirements(templateQuota ResourceQuota) corev1.ResourceRequirements {
+	active := BuildResourceRequirements(templateQuota)
+	idle := BuildResourceRequirements(idleResourceQuota(templateQuota))
+	active.Requests = idle.Requests.DeepCopy()
+	return active
 }
 
 // BuildResourceRequirements converts a sandbox resource quota into Kubernetes

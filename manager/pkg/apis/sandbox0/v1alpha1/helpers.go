@@ -35,8 +35,8 @@ const (
 	minSandboxEphemeralStorageRequestBytes           = int64(64 * 1024 * 1024)
 	defaultIdleSandboxMemoryLimitBytes               = int64(128 * 1024 * 1024)
 
-	// MinimumClaimedSandboxCPULimitMilli is the CPU limit floor for claimed sandboxes.
-	MinimumClaimedSandboxCPULimitMilli = int64(150)
+	// MinimumSandboxCPULimitMilli is the CPU limit floor for every sandbox pod.
+	MinimumSandboxCPULimitMilli = int64(150)
 )
 
 // BuildPodSpec builds a pod spec with every template-declared user volume portal.
@@ -423,6 +423,7 @@ func idleResourceQuota(templateQuota ResourceQuota) ResourceQuota {
 // BuildResourceRequirements converts a sandbox resource quota into Kubernetes
 // container requests and limits.
 func BuildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements {
+	quota = NormalizeSandboxResourceQuota(quota)
 	requests := corev1.ResourceList{}
 	limits := corev1.ResourceList{}
 	if quota.CPU.Sign() > 0 {
@@ -450,11 +451,21 @@ func BuildResourceRequirements(quota ResourceQuota) corev1.ResourceRequirements 
 	return corev1.ResourceRequirements{Requests: requests, Limits: limits}
 }
 
+// NormalizeSandboxResourceQuota applies platform resource floors without
+// mutating the caller's quota.
+func NormalizeSandboxResourceQuota(quota ResourceQuota) ResourceQuota {
+	normalized := *quota.DeepCopy()
+	minCPU := *resource.NewMilliQuantity(MinimumSandboxCPULimitMilli, resource.DecimalSI)
+	if normalized.CPU.Cmp(minCPU) < 0 {
+		normalized.CPU = minCPU
+	}
+	return normalized
+}
+
 func scaledCPURequest(limit resource.Quantity) resource.Quantity {
 	limitMilli := limit.MilliValue()
-	// Keep the scheduler reservation at its existing floor when manager raises
-	// a small claimed sandbox to the CPU limit floor.
-	if limitMilli == MinimumClaimedSandboxCPULimitMilli {
+	// Keep the scheduler reservation dense at the platform CPU limit floor.
+	if limitMilli == MinimumSandboxCPULimitMilli {
 		return *resource.NewMilliQuantity(minSandboxCPURequestMilli, resource.DecimalSI)
 	}
 	requestMilli := scaleResource(limitMilli, defaultSandboxCPURequestRatioMillis, minSandboxCPURequestMilli)

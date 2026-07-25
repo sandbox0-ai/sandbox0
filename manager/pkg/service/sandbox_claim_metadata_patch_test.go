@@ -136,13 +136,13 @@ func TestPatchClaimedPodMetadataRejectsAlreadyClaimedPod(t *testing.T) {
 	}
 }
 
-func TestIdlePodLostDuringClaimRecognizesMetadataPatchPreconditionFailure(t *testing.T) {
+func TestClaimMetadataPatchPreconditionFailureRecognizesJSONPatchTest(t *testing.T) {
 	err := &apierrors.StatusError{ErrStatus: metav1.Status{
 		Reason:  metav1.StatusReasonInvalid,
 		Message: "testing value /metadata/resourceVersion failed: test failed",
 	}}
-	if !isIdlePodLostDuringClaim(err) {
-		t.Fatalf("isIdlePodLostDuringClaim(%v) = false, want true", err)
+	if !isClaimMetadataPatchPreconditionFailure(err) {
+		t.Fatalf("isClaimMetadataPatchPreconditionFailure(%v) = false, want true", err)
 	}
 }
 

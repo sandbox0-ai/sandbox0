@@ -459,6 +459,50 @@ func TestClaimIdlePodFallsBackAfterRepeatedUpdateConflicts(t *testing.T) {
 	}
 }
 
+func TestClaimIdlePodRetriesMetadataPatchPreconditionFailure(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	idlePods := []*corev1.Pod{
+		newClaimTestPod("ns-a", "idle-a", "template-a", true),
+		newClaimTestPod("ns-a", "idle-b", "template-a", true),
+		newClaimTestPod("ns-a", "idle-c", "template-a", true),
+	}
+	clientObjects := make([]runtime.Object, 0, len(idlePods))
+	for _, pod := range idlePods {
+		clientObjects = append(clientObjects, pod.DeepCopy())
+	}
+	client := fake.NewSimpleClientset(clientObjects...)
+	patchFailures := 0
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		patchFailures++
+		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+			Reason:  metav1.StatusReasonInvalid,
+			Message: "testing value /metadata/resourceVersion failed: test failed",
+		}}
+	})
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, idlePods...),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v, want nil fallback", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil after repeated patch precondition failures", pod.Name)
+	}
+	if patchFailures != claimIdlePodBackoff.Steps {
+		t.Fatalf("patch failures = %d, want %d", patchFailures, claimIdlePodBackoff.Steps)
+	}
+}
+
 func TestClaimIdlePodRequiresDataPlaneReadyNode(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

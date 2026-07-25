@@ -146,6 +146,20 @@ func TestClaimMetadataPatchPreconditionFailureRecognizesJSONPatchTest(t *testing
 	}
 }
 
+func TestClaimMetadataPatchPreconditionFailureDoesNotHideUnchangedValidationError(t *testing.T) {
+	original := newClaimTestPod("sandbox-a", "idle-a", "default", true)
+	client := fake.NewSimpleClientset(original.DeepCopy())
+	service := &SandboxService{k8sClient: client}
+	err := &apierrors.StatusError{ErrStatus: metav1.Status{
+		Reason:  metav1.StatusReasonInvalid,
+		Message: "the server rejected our request due to an error in our request",
+	}}
+
+	if service.claimMetadataPatchPreconditionFailed(context.Background(), original, err) {
+		t.Fatal("unchanged pod was treated as a lost claim candidate")
+	}
+}
+
 func assertClaimPatchOperation(
 	t *testing.T,
 	operations []claimMetadataPatchOperation,

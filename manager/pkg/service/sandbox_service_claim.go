@@ -1018,6 +1018,7 @@ func isVolumePortalPendingPublicationError(resp *ctldapi.BindVolumePortalRespons
 
 func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {
 	var claimedPod *corev1.Pod
+	lostCandidates := make(map[string]struct{})
 	desiredTemplateHash, err := controller.TemplateSpecHash(template)
 	if err != nil {
 		return nil, fmt.Errorf("compute template hash: %w", err)
@@ -1040,6 +1041,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		// Filter hot-claimable pods to Kubernetes-ready instances only.
 		var readyPods []*corev1.Pod
 		for _, pod := range pods {
+			if _, lost := lostCandidates[pod.Namespace+"/"+pod.Name]; lost {
+				continue
+			}
 			if s.isHotClaimableIdlePod(pod, desiredTemplateHash) && !s.isIdlePodReserved(pod) {
 				readyPods = append(readyPods, pod)
 			}
@@ -1182,7 +1186,8 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 					zap.Error(rollbackErr),
 				)
 			}
-			if isClaimMetadataPatchPreconditionFailure(updateErr) {
+			if s.claimMetadataPatchPreconditionFailed(ctx, originalIdlePod, updateErr) {
+				lostCandidates[pod.Namespace+"/"+pod.Name] = struct{}{}
 				s.observeIdleClaim(templateID, "update_conflict")
 				keepReservationUntilTTL()
 				return fmt.Errorf("%w: patch pod %s/%s: %w", errIdlePodClaimLost, pod.Namespace, pod.Name, updateErr)
@@ -1317,6 +1322,39 @@ func isClaimMetadataPatchPreconditionFailure(err error) bool {
 		return true
 	}
 	return false
+}
+
+// claimMetadataPatchPreconditionFailed resolves sanitized Kubernetes 422
+// responses by checking the exact compare-and-swap inputs against live state.
+func (s *SandboxService) claimMetadataPatchPreconditionFailed(
+	ctx context.Context,
+	originalPod *corev1.Pod,
+	err error,
+) bool {
+	if isClaimMetadataPatchPreconditionFailure(err) {
+		return true
+	}
+	if !k8serrors.IsInvalid(err) || s == nil || s.k8sClient == nil || originalPod == nil {
+		return false
+	}
+	current, getErr := s.k8sClient.CoreV1().Pods(originalPod.Namespace).Get(
+		ctx,
+		originalPod.Name,
+		metav1.GetOptions{},
+	)
+	if k8serrors.IsNotFound(getErr) {
+		return true
+	}
+	if getErr != nil || current == nil {
+		return false
+	}
+	if originalPod.UID != "" && current.UID != originalPod.UID {
+		return true
+	}
+	if originalPod.ResourceVersion != "" && current.ResourceVersion != originalPod.ResourceVersion {
+		return true
+	}
+	return current.Labels[controller.LabelPoolType] != controller.PoolTypeIdle
 }
 
 func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {

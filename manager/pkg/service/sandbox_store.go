@@ -308,6 +308,25 @@ func (s *PGSandboxStore) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 	return records, nil
 }
 
+// CountActiveSandboxes returns the region-wide operational count used by the
+// active_sandboxes quota. All clusters in a region share this store.
+func (s *PGSandboxStore) CountActiveSandboxes(ctx context.Context, teamID string) (int64, error) {
+	if s == nil || s.pool == nil {
+		return 0, nil
+	}
+	var total int64
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM manager.sandboxes
+		WHERE team_id = $1
+			AND deleted_at IS NULL
+			AND status IN ($2, $3)
+	`, strings.TrimSpace(teamID), SandboxStatusStarting, SandboxStatusRunning).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count active sandboxes: %w", err)
+	}
+	return total, nil
+}
+
 func (s *PGSandboxStore) ListActiveLifecycleTxns(ctx context.Context, kind string, limit int) ([]*SandboxLifecycleTxn, error) {
 	if s == nil || s.pool == nil {
 		return nil, nil

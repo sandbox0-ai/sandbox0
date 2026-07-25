@@ -24,13 +24,16 @@ func TestBuildIdentityIndexFiltersAndResolvesActiveLocalSandbox(t *testing.T) {
 	wrongNode := runtimeMetricPod("ns-a", "pod-b", "pod-uid-b", "node-b", "team-a", "sandbox-b", "1")
 	idle := runtimeMetricPod("ns-a", "pod-c", "pod-uid-c", "node-a", "team-a", "sandbox-c", "1")
 	idle.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+	reserved := runtimeMetricPod("ns-a", "pod-f", "pod-uid-f", "node-a", "team-a", "sandbox-f", "2")
+	reserved.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+	reserved.Annotations[controller.AnnotationHotClaimReservation] = "reservation-token"
 	invalidGeneration := runtimeMetricPod("ns-a", "pod-d", "pod-uid-d", "node-a", "team-a", "sandbox-d", "invalid")
 	terminal := runtimeMetricPod("ns-a", "pod-e", "pod-uid-e", "node-a", "team-a", "sandbox-e", "1")
 	terminal.Status.Phase = corev1.PodFailed
 
-	index, err := buildIdentityIndex(podLister(t, eligible, wrongNode, idle, invalidGeneration, terminal), "node-a")
+	index, err := buildIdentityIndex(podLister(t, eligible, wrongNode, idle, reserved, invalidGeneration, terminal), "node-a")
 	require.NoError(t, err)
-	require.Len(t, index.byUID, 1)
+	require.Len(t, index.byUID, 2)
 
 	identity, ok := index.resolve(&runtimeapi.PodSandboxAttributes{Metadata: &runtimeapi.PodSandboxMetadata{
 		Uid:       "pod-uid-a",
@@ -45,6 +48,14 @@ func TestBuildIdentityIndexFiltersAndResolvesActiveLocalSandbox(t *testing.T) {
 	assert.InDelta(t, 1.5, *identity.CPULimitCores, 0.0001)
 	require.NotNil(t, identity.MemoryLimitBytes)
 	assert.Equal(t, uint64(2*1024*1024*1024), *identity.MemoryLimitBytes)
+
+	reservedIdentity, ok := index.resolve(&runtimeapi.PodSandboxAttributes{Metadata: &runtimeapi.PodSandboxMetadata{
+		Uid:       "pod-uid-f",
+		Namespace: "ns-a",
+		Name:      "pod-f",
+	}})
+	require.True(t, ok)
+	assert.Equal(t, "sandbox-f", reservedIdentity.SandboxID)
 }
 
 func TestIdentityIndexFallsBackToNamespaceAndName(t *testing.T) {

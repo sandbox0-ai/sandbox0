@@ -100,11 +100,11 @@ func (c *HotClaimReservationController) EnqueueHotClaimReservation(namespace, po
 }
 
 // Run reconciles reservations from informer events and periodic recovery scans.
-func (c *HotClaimReservationController) Run(ctx context.Context, workers int) error {
+func (c *HotClaimReservationController) Run(ctx context.Context, _ int) error {
 	if c == nil {
 		return nil
 	}
-	workers = 1
+	const workers = 1
 	if c.queue == nil {
 		c.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]())
 	}

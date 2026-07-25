@@ -197,6 +197,7 @@ func (s *SandboxService) syncCredentialBindings(
 	pod *corev1.Pod,
 	teamID string,
 	state *BuildNetworkPolicyResult,
+	previousMayExist bool,
 ) (func(context.Context) error, error) {
 	if s.credentialStore == nil || pod == nil || state == nil {
 		return noopCredentialBindingRollback, nil
@@ -206,11 +207,15 @@ func (s *SandboxService) syncCredentialBindings(
 	if sandboxID == "" {
 		sandboxID = pod.Name
 	}
-	previous, err := s.credentialStore.GetBindings(ctx, teamID, sandboxID)
-	if err != nil {
-		return nil, err
+	var previous *egressauth.BindingRecord
+	if previousMayExist {
+		var err error
+		previous, err = s.credentialStore.GetBindings(ctx, teamID, sandboxID)
+		if err != nil {
+			return nil, err
+		}
+		previous = cloneBindingRecord(previous)
 	}
-	previous = cloneBindingRecord(previous)
 
 	rollback := func(rollbackCtx context.Context) error {
 		if previous == nil || len(previous.Bindings) == 0 {
@@ -678,7 +683,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 			return fmt.Errorf("%w: %v", ErrInvalidNetworkPolicy, err)
 		}
 		networkState = s.NetworkPolicyService.BuildNetworkPolicyState(buildReq)
-		rollbackBindings, err = s.syncCredentialBindings(ctx, current, teamID, networkState)
+		rollbackBindings, err = s.syncCredentialBindings(ctx, current, teamID, networkState, true)
 		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}

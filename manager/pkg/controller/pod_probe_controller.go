@@ -135,7 +135,7 @@ func (op *Operator) ensureSandboxProbeConditions(ctx context.Context, pod *corev
 func (op *Operator) runSandboxProbe(ctx context.Context, pod *corev1.Pod, kind sandboxprobe.Kind) *sandboxprobe.Response {
 	started := time.Now()
 	result, err := op.probeRunner.ProbeSandboxPod(ctx, pod, kind)
-	resultLabel := "success"
+	var resultLabel string
 	if err != nil {
 		resultLabel = "error"
 		result = probeFailure(kind, "SandboxProbeFailed", err.Error())

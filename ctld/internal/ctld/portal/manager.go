@@ -588,12 +588,10 @@ func (m *Manager) SyncTo(ctx context.Context, target PortalReplicator) error {
 			return fmt.Errorf("compact S0FS recovery state for legacy standby: %w", err)
 		}
 	}
-	m.mu.Lock()
-	portals := make([]*portalMount, 0, len(m.portals))
-	for _, pm := range m.portals {
-		portals = append(portals, pm)
+	portals, stale := m.portalsForStandbySync(ctx)
+	if stale > 0 {
+		m.logger.Info("ctld skipped stale portals during standby synchronization", zap.Int("stale_portals", stale))
 	}
-	m.mu.Unlock()
 	for _, pm := range portals {
 		if pm == nil || pm.server == nil {
 			continue
@@ -610,6 +608,30 @@ func (m *Manager) SyncTo(ctx context.Context, target PortalReplicator) error {
 		}
 	}
 	return nil
+}
+
+func (m *Manager) portalsForStandbySync(ctx context.Context) ([]*portalMount, int) {
+	if m == nil {
+		return nil, 0
+	}
+	activePods, activeReliable := m.activePodUIDs(ctx)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	portals := make([]*portalMount, 0, len(m.portals))
+	stale := 0
+	for _, pm := range m.portals {
+		if pm == nil {
+			continue
+		}
+		if activeReliable {
+			if _, active := activePods[pm.podUID]; !active {
+				stale++
+				continue
+			}
+		}
+		portals = append(portals, pm)
+	}
+	return portals, stale
 }
 
 func (m *Manager) UnpublishPortal(targetPath string) error {

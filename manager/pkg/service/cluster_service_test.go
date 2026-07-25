@@ -30,6 +30,8 @@ sandbox_pod_placement:
 			newClusterServicePod("ns-a", "idle-ready", "template-a", controller.PoolTypeIdle, corev1.PodRunning, true),
 			newClusterServicePod("ns-a", "idle-not-ready", "template-a", controller.PoolTypeIdle, corev1.PodRunning, false),
 			newClusterServicePod("ns-a", "idle-pending", "template-a", controller.PoolTypeIdle, corev1.PodPending, false),
+			newReservedClusterServicePod("ns-a", "idle-reserved-running", "template-a", corev1.PodRunning),
+			newReservedClusterServicePod("ns-a", "idle-reserved-pending", "template-a", corev1.PodPending),
 			newClusterServicePod("ns-a", "active-running", "template-a", controller.PoolTypeActive, corev1.PodRunning, true),
 			newClusterServicePod("ns-a", "active-pending-1", "template-a", controller.PoolTypeActive, corev1.PodPending, false),
 			newClusterServicePod("ns-a", "active-pending-2", "template-a", controller.PoolTypeActive, corev1.PodPending, false),
@@ -63,14 +65,14 @@ sandbox_pod_placement:
 	if summary.IdlePodCount != 1 {
 		t.Fatalf("IdlePodCount = %d, want 1", summary.IdlePodCount)
 	}
-	if summary.ActivePodCount != 3 {
-		t.Fatalf("ActivePodCount = %d, want 3", summary.ActivePodCount)
+	if summary.ActivePodCount != 5 {
+		t.Fatalf("ActivePodCount = %d, want 5", summary.ActivePodCount)
 	}
-	if summary.PendingActivePodCount != 2 {
-		t.Fatalf("PendingActivePodCount = %d, want 2", summary.PendingActivePodCount)
+	if summary.PendingActivePodCount != 3 {
+		t.Fatalf("PendingActivePodCount = %d, want 3", summary.PendingActivePodCount)
 	}
-	if summary.TotalPodCount != 4 {
-		t.Fatalf("TotalPodCount = %d, want 4", summary.TotalPodCount)
+	if summary.TotalPodCount != 6 {
+		t.Fatalf("TotalPodCount = %d, want 6", summary.TotalPodCount)
 	}
 }
 
@@ -148,6 +150,7 @@ func TestGetTemplateStatsCountsPendingActivePods(t *testing.T) {
 			newClusterServicePod("ns-a", "idle-ready", "template-a", controller.PoolTypeIdle, corev1.PodRunning, true),
 			newClusterServicePod("ns-a", "idle-not-ready", "template-a", controller.PoolTypeIdle, corev1.PodRunning, false),
 			newClusterServicePod("ns-a", "idle-pending", "template-a", controller.PoolTypeIdle, corev1.PodPending, false),
+			newReservedClusterServicePod("ns-a", "idle-reserved", "template-a", corev1.PodRunning),
 			newClusterServicePod("ns-a", "active-running", "template-a", controller.PoolTypeActive, corev1.PodRunning, true),
 			newClusterServicePod("ns-a", "active-pending", "template-a", controller.PoolTypeActive, corev1.PodPending, false),
 			newClusterServicePod("ns-a", "active-other-template", "template-b", controller.PoolTypeActive, corev1.PodPending, false),
@@ -187,8 +190,8 @@ func TestGetTemplateStatsCountsPendingActivePods(t *testing.T) {
 	if stat.IdleCount != 1 {
 		t.Fatalf("IdleCount = %d, want 1", stat.IdleCount)
 	}
-	if stat.ActiveCount != 2 {
-		t.Fatalf("ActiveCount = %d, want 2", stat.ActiveCount)
+	if stat.ActiveCount != 3 {
+		t.Fatalf("ActiveCount = %d, want 3", stat.ActiveCount)
 	}
 	if stat.PendingActiveCount != 1 {
 		t.Fatalf("PendingActiveCount = %d, want 1", stat.PendingActiveCount)
@@ -278,6 +281,15 @@ func newClusterServicePod(namespace, name, templateID, poolType string, phase co
 				Status: status,
 			},
 		}
+	}
+	return pod
+}
+
+func newReservedClusterServicePod(namespace, name, templateID string, phase corev1.PodPhase) *corev1.Pod {
+	pod := newClusterServicePod(namespace, name, templateID, controller.PoolTypeIdle, phase, true)
+	pod.Annotations = map[string]string{
+		controller.AnnotationHotClaimReservation:      "reservation-token",
+		controller.AnnotationHotClaimReservationState: controller.HotClaimReservationStateInitializing,
 	}
 	return pod
 }

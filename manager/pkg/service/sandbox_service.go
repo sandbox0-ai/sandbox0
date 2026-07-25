@@ -118,6 +118,7 @@ type SandboxService struct {
 	logger                                 *zap.Logger
 	metrics                                *obsmetrics.ManagerMetrics
 	pauseEnqueuer                          SandboxPauseEnqueuer
+	hotClaimReservationEnqueuer            HotClaimReservationEnqueuer
 	credentialStore                        egressauth.BindingStore
 	webhookStateVolumes                    SandboxSystemVolumeClient
 	volumeMetadata                         SandboxVolumeMetadataClient
@@ -128,7 +129,6 @@ type SandboxService struct {
 	templateImageBuildCapabilityConfigured bool
 	templateImageBuildAvailable            bool
 	resumeGroup                            singleflight.Group
-	idlePodReservations                    *idlePodReservations
 	podWaiterMu                            sync.Mutex
 	podWaiter                              *podEventWaiter
 }
@@ -141,6 +141,11 @@ type TeamQuotaLimitStore interface {
 // SandboxPauseEnqueuer schedules durable pause transactions for background completion.
 type SandboxPauseEnqueuer interface {
 	EnqueueSandboxPause(sandboxID string)
+}
+
+// HotClaimReservationEnqueuer schedules a completed hot claim for warm-pool detachment.
+type HotClaimReservationEnqueuer interface {
+	EnqueueHotClaimReservation(namespace, podName string)
 }
 
 // TimeProvider provides time functions, allowing for synchronized time across clusters
@@ -222,7 +227,6 @@ func NewSandboxService(
 		config:                 config,
 		logger:                 logger,
 		metrics:                metrics,
-		idlePodReservations:    newIdlePodReservations(),
 		podWaiter:              newPodEventWaiter(),
 	}
 	return service
@@ -269,6 +273,15 @@ func (s *SandboxService) SetCtldClient(client *CtldClient) {
 // SetPauseEnqueuer injects the background worker used to complete accepted pause operations.
 func (s *SandboxService) SetPauseEnqueuer(enqueuer SandboxPauseEnqueuer) {
 	s.pauseEnqueuer = enqueuer
+}
+
+// SetHotClaimReservationEnqueuer injects the controller that detaches completed
+// hot claims from their warm-pool ReplicaSet.
+func (s *SandboxService) SetHotClaimReservationEnqueuer(enqueuer HotClaimReservationEnqueuer) {
+	if s == nil {
+		return
+	}
+	s.hotClaimReservationEnqueuer = enqueuer
 }
 
 // SetCredentialStore injects the sandbox credential binding store.

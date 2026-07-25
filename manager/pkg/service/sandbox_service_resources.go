@@ -33,11 +33,7 @@ func (s *SandboxService) effectiveSandboxResourceQuota(template *v1alpha1.Sandbo
 		quota.Memory = memory
 		quota.CPU = s0template.CPUForMemory(memory, s.sandboxMemoryPerCPU())
 	}
-	minCPU := *resource.NewMilliQuantity(v1alpha1.MinimumClaimedSandboxCPULimitMilli, resource.DecimalSI)
-	if quota.CPU.Cmp(minCPU) < 0 {
-		quota.CPU = minCPU
-	}
-	return quota, nil
+	return v1alpha1.NormalizeSandboxResourceQuota(quota), nil
 }
 
 func (s *SandboxService) applySandboxResourceQuota(pod *corev1.Pod, quota v1alpha1.ResourceQuota) error {

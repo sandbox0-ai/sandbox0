@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -31,11 +33,7 @@ func (s *SandboxService) effectiveSandboxResourceQuota(template *v1alpha1.Sandbo
 		quota.Memory = memory
 		quota.CPU = s0template.CPUForMemory(memory, s.sandboxMemoryPerCPU())
 	}
-	minCPU := *resource.NewMilliQuantity(v1alpha1.MinimumClaimedSandboxCPULimitMilli, resource.DecimalSI)
-	if quota.CPU.Cmp(minCPU) < 0 {
-		quota.CPU = minCPU
-	}
-	return quota, nil
+	return v1alpha1.NormalizeSandboxResourceQuota(quota), nil
 }
 
 func (s *SandboxService) applySandboxResourceQuota(pod *corev1.Pod, quota v1alpha1.ResourceQuota) error {
@@ -55,21 +53,35 @@ func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *cor
 
 	namespace, name := pod.Namespace, pod.Name
 	var updated *corev1.Pod
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		resized := current.DeepCopy()
-		if err := s.applySandboxResourceQuota(resized, quota); err != nil {
-			return err
-		}
-		result, err := s.k8sClient.CoreV1().Pods(namespace).UpdateResize(ctx, name, resized, metav1.UpdateOptions{})
+	resources := v1alpha1.BuildResourceRequirements(quota)
+	patch, err := json.Marshal(map[string]any{
+		"spec": map[string]any{
+			"containers": []map[string]any{{
+				"name":      "procd",
+				"resources": resources,
+			}},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build sandbox resource resize patch: %w", err)
+	}
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		result, err := s.k8sClient.CoreV1().Pods(namespace).Patch(
+			ctx,
+			name,
+			types.StrategicMergePatchType,
+			patch,
+			metav1.PatchOptions{},
+			"resize",
+		)
 		if err != nil {
 			return err
 		}
 		if result == nil || result.Name == "" {
-			updated = resized
+			updated = pod.DeepCopy()
+			if applyErr := s.applySandboxResourceQuota(updated, quota); applyErr != nil {
+				return applyErr
+			}
 		} else {
 			updated = result
 		}

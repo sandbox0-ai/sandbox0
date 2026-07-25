@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -33,6 +34,7 @@ type CachedPolicyStore struct {
 
 	mu      sync.RWMutex
 	entries map[policyCacheKey]policyCacheEntry
+	fetches singleflight.Group
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -74,16 +76,34 @@ func (s *CachedPolicyStore) GetPolicy(ctx context.Context, teamID string, dimens
 		return clonePolicy(entry.policy), nil
 	}
 
-	policy, err := s.source.GetPolicy(ctx, teamID, dimension)
+	value, err, _ := s.fetches.Do(teamID+"\x00"+string(dimension), func() (any, error) {
+		now := time.Now()
+		s.mu.RLock()
+		entry, ok := s.entries[key]
+		s.mu.RUnlock()
+		if ok && now.Before(entry.expiresAt) {
+			return clonePolicy(entry.policy), nil
+		}
+
+		policy, err := s.source.GetPolicy(ctx, teamID, dimension)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		s.entries[key] = policyCacheEntry{
+			policy:    clonePolicy(policy),
+			expiresAt: time.Now().Add(s.ttl),
+		}
+		s.mu.Unlock()
+		return clonePolicy(policy), nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	s.entries[key] = policyCacheEntry{
-		policy:    clonePolicy(policy),
-		expiresAt: now.Add(s.ttl),
+	policy, ok := value.(*Policy)
+	if !ok {
+		return nil, fmt.Errorf("quota policy source returned %T", value)
 	}
-	s.mu.Unlock()
 	return clonePolicy(policy), nil
 }
 

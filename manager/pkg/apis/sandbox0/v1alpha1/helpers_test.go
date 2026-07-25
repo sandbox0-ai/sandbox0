@@ -432,19 +432,30 @@ manager_image: sandbox0/manager:test
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceEphemeralStorage], "8Gi")
 }
 
-func TestBuildResourceRequirementsKeepsMinimumCPURequestDense(t *testing.T) {
-	resources := BuildResourceRequirements(ResourceQuota{
-		CPU:    resource.MustParse("150m"),
-		Memory: resource.MustParse("128Mi"),
-	})
+func TestBuildResourceRequirementsAppliesMinimumCPULimit(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cpu  resource.Quantity
+	}{
+		{name: "missing"},
+		{name: "below floor", cpu: resource.MustParse("32m")},
+		{name: "at floor", cpu: resource.MustParse("150m")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resources := BuildResourceRequirements(ResourceQuota{
+				CPU:    tt.cpu,
+				Memory: resource.MustParse("128Mi"),
+			})
 
-	assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "10m")
-	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "150m")
-	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "64Mi")
-	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "128Mi")
+			assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "10m")
+			assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "150m")
+			assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "64Mi")
+			assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "128Mi")
+		})
+	}
 }
 
-func TestBuildIdlePodSpecUsesLowCPUAndMemoryLimits(t *testing.T) {
+func TestBuildIdlePodSpecUsesMinimumCPUAndLowMemoryLimits(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
@@ -460,7 +471,7 @@ manager_image: sandbox0/manager:test
 	resources := spec.Containers[0].Resources
 
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "10m")
-	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "32m")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "150m")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "64Mi")
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "128Mi")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceEphemeralStorage], "1Gi")
@@ -480,7 +491,7 @@ manager_image: sandbox0/manager:test
 	assertResizePolicy(t, policies, corev1.ResourceMemory, corev1.NotRequired)
 }
 
-func TestBuildPodSpecClampsReducedRequestsToSmallQuota(t *testing.T) {
+func TestBuildPodSpecAppliesCPUFloorAndClampsOtherRequestsToSmallQuota(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
@@ -496,8 +507,8 @@ manager_image: sandbox0/manager:test
 	spec := BuildPodSpec(template)
 	resources := spec.Containers[0].Resources
 
-	assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "5m")
-	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "5m")
+	assertResourceQuantity(t, resources.Requests[corev1.ResourceCPU], "10m")
+	assertResourceQuantity(t, resources.Limits[corev1.ResourceCPU], "150m")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceMemory], "32Mi")
 	assertResourceQuantity(t, resources.Limits[corev1.ResourceMemory], "32Mi")
 	assertResourceQuantity(t, resources.Requests[corev1.ResourceEphemeralStorage], "32Mi")

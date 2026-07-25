@@ -503,6 +503,76 @@ func TestClaimIdlePodRetriesMetadataPatchPreconditionFailure(t *testing.T) {
 	}
 }
 
+func TestClaimIdlePodRetriesSanitizedMetadataPatchPreconditionFailure(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	idlePods := []*corev1.Pod{
+		newClaimTestPod("ns-a", "idle-a", "template-a", true),
+		newClaimTestPod("ns-a", "idle-b", "template-a", true),
+	}
+	clientObjects := make([]runtime.Object, 0, len(idlePods))
+	for _, pod := range idlePods {
+		clientObjects = append(clientObjects, pod.DeepCopy())
+	}
+	client := fake.NewSimpleClientset(clientObjects...)
+	patchAttempts := 0
+	failedPodName := ""
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		patchAttempts++
+		if patchAttempts != 1 {
+			return false, nil, nil
+		}
+		patchAction := action.(k8stesting.PatchAction)
+		failedPodName = patchAction.GetName()
+		current, err := client.Tracker().Get(
+			corev1.SchemeGroupVersion.WithResource("pods"),
+			action.GetNamespace(),
+			failedPodName,
+		)
+		if err != nil {
+			return true, nil, err
+		}
+		claimedByOther := current.(*corev1.Pod).DeepCopy()
+		claimedByOther.ResourceVersion = "2"
+		claimedByOther.Annotations[controller.AnnotationSandboxID] = "claimed-by-other"
+		if err := client.Tracker().Update(
+			corev1.SchemeGroupVersion.WithResource("pods"),
+			claimedByOther,
+			action.GetNamespace(),
+		); err != nil {
+			return true, nil, err
+		}
+		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+			Reason:  metav1.StatusReasonInvalid,
+			Message: "the server rejected our request due to an error in our request",
+		}}
+	})
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, idlePods...),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod == nil {
+		t.Fatal("claimIdlePod() = nil, want retry on another idle pod")
+	}
+	if pod.Name == failedPodName {
+		t.Fatalf("claimIdlePod() retried lost pod %q", failedPodName)
+	}
+	if patchAttempts != 2 {
+		t.Fatalf("patch attempts = %d, want 2", patchAttempts)
+	}
+}
+
 func TestClaimIdlePodRequiresDataPlaneReadyNode(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

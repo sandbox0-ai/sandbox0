@@ -8,6 +8,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
@@ -23,9 +24,13 @@ const (
 )
 
 type iptablesManager struct {
-	cfg    Config
-	logger *zap.Logger
-	ipt    iptablesClient
+	cfg         Config
+	logger      *zap.Logger
+	ipt         iptablesClient
+	syncMu      sync.Mutex
+	initialized bool
+	sandboxIPs  []string
+	bypassCIDRs []string
 }
 
 type iptablesClient interface {
@@ -59,12 +64,43 @@ func NewManager(cfg Config, logger *zap.Logger) Manager {
 }
 
 func (m *iptablesManager) Sync(ctx context.Context, sandboxIPs []string, bypassCIDRs []string) error {
+	return m.sync(ctx, sandboxIPs, bypassCIDRs, false)
+}
+
+func (m *iptablesManager) ForceSync(ctx context.Context, sandboxIPs []string, bypassCIDRs []string) error {
+	return m.sync(ctx, sandboxIPs, bypassCIDRs, true)
+}
+
+func (m *iptablesManager) sync(
+	ctx context.Context,
+	sandboxIPs []string,
+	bypassCIDRs []string,
+	force bool,
+) error {
 	if m.cfg.ProxyHTTPPort == 0 || m.cfg.ProxyHTTPSPort == 0 {
 		return fmt.Errorf("proxy ports are not configured")
 	}
 	if m.ipt == nil {
 		return fmt.Errorf("iptables is not initialized")
 	}
+	sandboxIPs = normalizeIPs(sandboxIPs)
+	bypassCIDRs = normalizeCIDRs(bypassCIDRs)
+
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
+
+	switch planRedirectSync(m.initialized, m.sandboxIPs, m.bypassCIDRs, sandboxIPs, bypassCIDRs, force) {
+	case redirectSyncNoop:
+		return nil
+	case redirectSyncIPSet:
+		if err := m.syncIPSet(ctx, sandboxIPs); err != nil {
+			return err
+		}
+		m.sandboxIPs = append(m.sandboxIPs[:0], sandboxIPs...)
+		m.logger.Info("IPSet-only redirect sync complete", zap.Int("sandbox_ips", len(sandboxIPs)))
+		return nil
+	}
+
 	m.logger.Info(
 		"Iptables sync start",
 		zap.Int("sandbox_ips", len(sandboxIPs)),
@@ -105,9 +141,55 @@ func (m *iptablesManager) Sync(ctx context.Context, sandboxIPs []string, bypassC
 	if err := m.ensureNATJump(ctx); err != nil {
 		return err
 	}
+	m.initialized = true
+	m.sandboxIPs = append(m.sandboxIPs[:0], sandboxIPs...)
+	m.bypassCIDRs = append(m.bypassCIDRs[:0], bypassCIDRs...)
 
 	m.logger.Info("Iptables sync complete")
 	return nil
+}
+
+type redirectSyncPlan int
+
+const (
+	redirectSyncFull redirectSyncPlan = iota
+	redirectSyncIPSet
+	redirectSyncNoop
+)
+
+func planRedirectSync(
+	initialized bool,
+	previousSandboxIPs []string,
+	previousBypassCIDRs []string,
+	sandboxIPs []string,
+	bypassCIDRs []string,
+	force bool,
+) redirectSyncPlan {
+	if force || !initialized || !sameStringSet(previousBypassCIDRs, bypassCIDRs) {
+		return redirectSyncFull
+	}
+	if sameStringSet(previousSandboxIPs, sandboxIPs) {
+		return redirectSyncNoop
+	}
+	return redirectSyncIPSet
+}
+
+func sameStringSet(left, right []string) bool {
+	left = normalizeUnique(left)
+	right = normalizeUnique(right)
+	if len(left) != len(right) {
+		return false
+	}
+	values := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		values[value] = struct{}{}
+	}
+	for _, value := range right {
+		if _, ok := values[value]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *iptablesManager) syncIPSet(ctx context.Context, ips []string) error {

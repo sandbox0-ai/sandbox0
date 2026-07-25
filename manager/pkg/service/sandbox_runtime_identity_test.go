@@ -855,7 +855,7 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 	}}
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
 	observedTxn := make(chan *SandboxLifecycleTxn, 1)
-	client.PrependReactor("update", "pods", func(_ ktesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		txn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
 		if err != nil {
 			t.Errorf("GetActiveLifecycleTxn() error = %v", err)
@@ -880,7 +880,7 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 	select {
 	case txn = <-observedTxn:
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for pod update")
+		t.Fatal("timed out waiting for pod patch")
 	}
 	if txn == nil {
 		t.Fatal("active resume txn was not visible before pod claim")

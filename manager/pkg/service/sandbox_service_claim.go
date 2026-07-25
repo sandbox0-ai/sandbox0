@@ -1115,8 +1115,8 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod.Labels[controller.LabelSandboxID] = sandboxID
 		ensureSandboxCleanupFinalizer(pod)
 
-		// Remove owner reference (so it's no longer managed by ReplicaSet)
-		pod.OwnerReferences = nil
+		// Detach the pod from its warm-pool ReplicaSet while preserving unrelated owners.
+		pod.OwnerReferences = removeReplicaSetControllerOwnerReferences(pod.OwnerReferences)
 
 		// Add annotations
 		if pod.Annotations == nil {
@@ -1171,8 +1171,9 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return fmt.Errorf("stage credential bindings: %w", err)
 		}
 
-		// Update the pod
-		updatedPod, updateErr := s.k8sClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		// Claim through a metadata-only compare-and-swap patch. This avoids
+		// replacing status/spec fields owned by kubelet or other controllers.
+		updatedPod, updateErr := s.patchClaimedPodMetadata(ctx, originalIdlePod, pod)
 		if updateErr != nil {
 			rollbackStateVolume()
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1293,6 +1294,14 @@ func isIdlePodLostDuringClaim(err error) bool {
 		return false
 	}
 	msg := err.Error()
+	if strings.Contains(msg, "testing value /metadata/") &&
+		strings.Contains(msg, "failed: test failed") {
+		return true
+	}
+	if strings.Contains(msg, "test operation does not apply") &&
+		strings.Contains(msg, "/metadata/") {
+		return true
+	}
 	return strings.Contains(msg, "metadata.finalizers") &&
 		strings.Contains(msg, "no new finalizers can be added if the object is being deleted")
 }

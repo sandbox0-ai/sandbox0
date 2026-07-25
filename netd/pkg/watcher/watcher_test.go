@@ -103,31 +103,42 @@ func TestListSandboxesByNodeUsesInformerCacheAsAuthoritativeSource(t *testing.T)
 	terminal.Status.Phase = corev1.PodSucceeded
 	noIP := testSandboxPod("sandbox-d", "uid-d", "13", "", "node-a")
 	otherNode := testSandboxPod("sandbox-e", "uid-e", "14", "10.0.0.5", "node-b")
+	reserved := testSandboxPod("sandbox-f", "uid-f", "15", "10.0.0.6", "node-a")
+	reserved.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+	reserved.Annotations = map[string]string{
+		controller.AnnotationHotClaimReservation: "reservation-token",
+	}
+	idle := testSandboxPod("sandbox-g", "uid-g", "16", "10.0.0.7", "node-a")
+	idle.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
 
-	for _, pod := range []*corev1.Pod{active, deleting, terminal, noIP, otherNode} {
+	for _, pod := range []*corev1.Pod{active, deleting, terminal, noIP, otherNode, reserved, idle} {
 		if err := informer.GetStore().Add(pod); err != nil {
 			t.Fatalf("add pod: %v", err)
 		}
 	}
 
 	got := w.ListSandboxesByNode("node-a")
-	if len(got) != 1 {
-		t.Fatalf("node-a sandboxes = %#v, want exactly active sandbox", got)
+	if len(got) != 2 {
+		t.Fatalf("node-a sandboxes = %#v, want active and reserved sandboxes", got)
 	}
-	if got[0].Name != active.Name || got[0].PodIP != active.Status.PodIP {
-		t.Fatalf("unexpected sandbox: %#v", got[0])
+	byName := map[string]*SandboxInfo{}
+	for _, info := range got {
+		byName[info.Name] = info
+	}
+	if byName[active.Name] == nil || byName[reserved.Name] == nil {
+		t.Fatalf("node-a sandboxes = %#v, want %s and %s", got, active.Name, reserved.Name)
 	}
 
 	all := w.ListSandboxesByNode("")
-	if len(all) != 2 {
-		t.Fatalf("all-node sandboxes = %#v, want active sandboxes from both nodes", all)
+	if len(all) != 3 {
+		t.Fatalf("all-node sandboxes = %#v, want active and reserved sandboxes", all)
 	}
-	byName := map[string]*SandboxInfo{}
+	byName = map[string]*SandboxInfo{}
 	for _, info := range all {
 		byName[info.Name] = info
 	}
-	if byName[active.Name] == nil || byName[otherNode.Name] == nil {
-		t.Fatalf("all-node sandboxes = %#v, want %s and %s", all, active.Name, otherNode.Name)
+	if byName[active.Name] == nil || byName[otherNode.Name] == nil || byName[reserved.Name] == nil {
+		t.Fatalf("all-node sandboxes = %#v, want %s, %s, and %s", all, active.Name, otherNode.Name, reserved.Name)
 	}
 }
 

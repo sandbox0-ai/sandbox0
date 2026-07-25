@@ -392,7 +392,7 @@ func TestClaimIdlePodFallsBackWhenPodStartsDeletingDuringClaim(t *testing.T) {
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
 
 	client := fake.NewSimpleClientset(readyPod.DeepCopy())
-	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonInvalid,
 			Message: `Pod "idle-ready" is invalid: metadata.finalizers: Forbidden: no new finalizers can be added if the object is being deleted, found new finalizers []string{"sandbox0.ai/sandbox-cleanup"}`,
@@ -432,9 +432,9 @@ func TestClaimIdlePodFallsBackAfterRepeatedUpdateConflicts(t *testing.T) {
 		clientObjects = append(clientObjects, pod.DeepCopy())
 	}
 	client := fake.NewSimpleClientset(clientObjects...)
-	updateConflicts := 0
-	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
-		updateConflicts++
+	patchConflicts := 0
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		patchConflicts++
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonConflict,
 			Message: "pod was claimed by another manager",
@@ -454,8 +454,8 @@ func TestClaimIdlePodFallsBackAfterRepeatedUpdateConflicts(t *testing.T) {
 	if pod != nil {
 		t.Fatalf("claimIdlePod() = %s, want nil after repeated update conflicts", pod.Name)
 	}
-	if updateConflicts != claimIdlePodBackoff.Steps {
-		t.Fatalf("update conflicts = %d, want %d", updateConflicts, claimIdlePodBackoff.Steps)
+	if patchConflicts != claimIdlePodBackoff.Steps {
+		t.Fatalf("patch conflicts = %d, want %d", patchConflicts, claimIdlePodBackoff.Steps)
 	}
 }
 

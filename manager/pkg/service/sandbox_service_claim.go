@@ -1182,6 +1182,11 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 					zap.Error(rollbackErr),
 				)
 			}
+			if isClaimMetadataPatchPreconditionFailure(updateErr) {
+				s.observeIdleClaim(templateID, "update_conflict")
+				keepReservationUntilTTL()
+				return fmt.Errorf("%w: patch pod %s/%s: %w", errIdlePodClaimLost, pod.Namespace, pod.Name, updateErr)
+			}
 			if isIdlePodLostDuringClaim(updateErr) {
 				s.observeIdleClaim(templateID, "update_conflict")
 				keepReservationUntilTTL()
@@ -1294,6 +1299,15 @@ func isIdlePodLostDuringClaim(err error) bool {
 		return false
 	}
 	msg := err.Error()
+	return strings.Contains(msg, "metadata.finalizers") &&
+		strings.Contains(msg, "no new finalizers can be added if the object is being deleted")
+}
+
+func isClaimMetadataPatchPreconditionFailure(err error) bool {
+	if !k8serrors.IsInvalid(err) {
+		return false
+	}
+	msg := err.Error()
 	if strings.Contains(msg, "testing value /metadata/") &&
 		strings.Contains(msg, "failed: test failed") {
 		return true
@@ -1302,8 +1316,7 @@ func isIdlePodLostDuringClaim(err error) bool {
 		strings.Contains(msg, "/metadata/") {
 		return true
 	}
-	return strings.Contains(msg, "metadata.finalizers") &&
-		strings.Contains(msg, "no new finalizers can be added if the object is being deleted")
+	return false
 }
 
 func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, error) {

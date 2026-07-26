@@ -103,6 +103,7 @@ type SandboxServiceConfig struct {
 // SandboxService handles sandbox operations
 type SandboxService struct {
 	k8sClient                              kubernetes.Interface
+	hotClaimK8sClient                      kubernetes.Interface
 	podLister                              corelisters.PodLister
 	nodeLister                             corelisters.NodeLister
 	sandboxIndex                           *SandboxIndex
@@ -129,6 +130,8 @@ type SandboxService struct {
 	templateImageBuildCapabilityConfigured bool
 	templateImageBuildAvailable            bool
 	resumeGroup                            singleflight.Group
+	idleClaimMu                            sync.Mutex
+	idleClaimReservations                  map[string]string
 	podWaiterMu                            sync.Mutex
 	podWaiter                              *podEventWaiter
 }
@@ -227,6 +230,7 @@ func NewSandboxService(
 		config:                 config,
 		logger:                 logger,
 		metrics:                metrics,
+		idleClaimReservations:  make(map[string]string),
 		podWaiter:              newPodEventWaiter(),
 	}
 	return service
@@ -237,7 +241,27 @@ func (s *SandboxService) PodEventHandler() cache.ResourceEventHandlerFuncs {
 	if s == nil {
 		return cache.ResourceEventHandlerFuncs{}
 	}
-	return s.ensurePodEventWaiter().ResourceEventHandler()
+	waiterHandler := s.ensurePodEventWaiter().ResourceEventHandler()
+	return cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			if waiterHandler.AddFunc != nil {
+				waiterHandler.AddFunc(obj)
+			}
+			s.observeIdleClaimPodEvent(obj, false)
+		},
+		UpdateFunc: func(oldObj, newObj any) {
+			if waiterHandler.UpdateFunc != nil {
+				waiterHandler.UpdateFunc(oldObj, newObj)
+			}
+			s.observeIdleClaimPodEvent(newObj, false)
+		},
+		DeleteFunc: func(obj any) {
+			if waiterHandler.DeleteFunc != nil {
+				waiterHandler.DeleteFunc(obj)
+			}
+			s.observeIdleClaimPodEvent(obj, true)
+		},
+	}
 }
 
 func (s *SandboxService) ensurePodEventWaiter() *podEventWaiter {
@@ -282,6 +306,15 @@ func (s *SandboxService) SetHotClaimReservationEnqueuer(enqueuer HotClaimReserva
 		return
 	}
 	s.hotClaimReservationEnqueuer = enqueuer
+}
+
+// SetHotClaimK8sClient injects the Kubernetes client whose rate budget is
+// reserved for latency-sensitive hot-claim operations.
+func (s *SandboxService) SetHotClaimK8sClient(client kubernetes.Interface) {
+	if s == nil || client == nil {
+		return
+	}
+	s.hotClaimK8sClient = client
 }
 
 // SetCredentialStore injects the sandbox credential binding store.

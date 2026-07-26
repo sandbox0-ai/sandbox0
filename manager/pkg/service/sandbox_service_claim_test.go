@@ -119,6 +119,9 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	if got := pod.Annotations[controller.AnnotationHotClaimReservationState]; got != controller.HotClaimReservationStateInitializing {
 		t.Fatalf("reservation state = %q, want %q", got, controller.HotClaimReservationStateInitializing)
 	}
+	if got := pod.Annotations[controller.AnnotationHotClaimCompletionProtocol]; got != controller.HotClaimCompletionProtocolRecordV1 {
+		t.Fatalf("completion protocol = %q, want %q", got, controller.HotClaimCompletionProtocolRecordV1)
+	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
 	}
@@ -1438,6 +1441,15 @@ func TestClaimSandboxOverlapsHotPersistenceWithProcdInitialization(t *testing.T)
 		if record.Status != SandboxStatusRunning {
 			t.Fatalf("sandbox record status = %q, want running", record.Status)
 		}
+	}
+	podPatches := 0
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "patch" && action.GetResource().Resource == "pods" {
+			podPatches++
+		}
+	}
+	if podPatches != 1 {
+		t.Fatalf("claim-path Pod patches = %d, want one reservation patch", podPatches)
 	}
 }
 

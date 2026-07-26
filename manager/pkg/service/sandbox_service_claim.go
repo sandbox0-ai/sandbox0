@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -622,19 +621,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, fmt.Errorf("persist sandbox: %w", persistErr)
 	}
 
-	if controller.IsHotClaimReservedPod(pod) {
-		phaseStarted = time.Now()
-		pod, err = s.markHotClaimReservationReady(ctx, pod)
-		s.observeClaimPhase(req.Template, claimType, "complete_hot_claim_reservation", phaseStarted, err)
-		if err != nil {
-			cleanupClaimFailure(pod, "hot claim reservation completion failed")
-			if metrics != nil {
-				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-			}
-			return nil, fmt.Errorf("complete hot claim reservation: %w", err)
-		}
-	}
-
 	if persistResultCh == nil {
 		phaseStarted = time.Now()
 		persistErr = s.persistClaimedSandbox(ctx, pod, template, req)
@@ -647,6 +633,18 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			return nil, fmt.Errorf("persist sandbox: %w", persistErr)
 		}
 		claimRecordPersisted = true
+	}
+	if controller.IsHotClaimReservedPod(pod) {
+		phaseStarted = time.Now()
+		err = s.completeHotClaimReservation(ctx, pod, template, req)
+		s.observeClaimPhase(req.Template, claimType, "complete_hot_claim_reservation", phaseStarted, err)
+		if err != nil {
+			cleanupClaimFailure(pod, "hot claim reservation completion failed")
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("complete hot claim reservation: %w", err)
+		}
 	}
 	s.enqueueHotClaimReservation(pod)
 
@@ -683,7 +681,7 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 	}
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
 	mounts := parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
-	return &SandboxRecord{
+	record := &SandboxRecord{
 		ID:                   sandboxID,
 		TeamID:               req.TeamID,
 		UserID:               req.UserID,
@@ -705,6 +703,12 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 		OwnerKind:            ownerKindFromPod(pod),
 		CreatedAt:            s.clock.Now(),
 	}
+	if hotClaimUsesRecordCompletion(pod) &&
+		pod.Annotations[controller.AnnotationHotClaimReservationState] ==
+			controller.HotClaimReservationStateInitializing {
+		record.Status = SandboxStatusStarting
+	}
+	return record
 }
 
 func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, pod *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, bool, error) {
@@ -1099,8 +1103,20 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return errNoIdlePod
 		}
 
-		// Claim an available pod
-		pod := readyPods[rand.Intn(len(readyPods))]
+		// Reserve one informer-cached candidate inside this manager before any
+		// claim side effects. The Kubernetes metadata patch remains the
+		// cross-process compare-and-swap boundary.
+		pod := s.reserveIdleClaimCandidate(readyPods)
+		if pod == nil {
+			s.observeIdleClaim(templateID, "local_contention")
+			return errNoIdlePod
+		}
+		reservationPersisted := false
+		defer func() {
+			if !reservationPersisted {
+				s.releaseIdleClaimCandidate(pod)
+			}
+		}()
 
 		sandboxID := strings.TrimSpace(req.SandboxID)
 		if sandboxID == "" {
@@ -1162,6 +1178,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod.Annotations[controller.AnnotationHotClaimReservation] = reservationToken
 		pod.Annotations[controller.AnnotationHotClaimReservationState] = controller.HotClaimReservationStateInitializing
 		pod.Annotations[controller.AnnotationHotClaimReservedAt] = s.clock.Now().UTC().Format(time.RFC3339Nano)
+		pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV1
 		if stateVolume != nil {
 			pod.Annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 		} else {
@@ -1233,9 +1250,18 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			return updateErr
 		}
 		s.observeIdleClaim(templateID, "reserved")
+		// Keep the local reservation until the shared informer observes this
+		// durable reservation. Releasing it at PATCH return would reopen the
+		// stale-cache window that caused duplicate candidate selection.
+		reservationPersisted = true
 
 		if resizeQuota != nil {
-			resizedPod, resizeErr := s.resizeSandboxPodResources(ctx, updatedPod, *resizeQuota)
+			resizedPod, resizeErr := s.resizeSandboxPodResourcesWithClient(
+				ctx,
+				s.hotClaimClient(),
+				updatedPod,
+				*resizeQuota,
+			)
 			if resizeErr != nil {
 				rollbackStateVolume()
 				if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1342,10 +1368,14 @@ func (s *SandboxService) claimMetadataPatchPreconditionFailed(
 	if isClaimMetadataPatchPreconditionFailure(err) {
 		return true
 	}
-	if !k8serrors.IsInvalid(err) || s == nil || s.k8sClient == nil || originalPod == nil {
+	if !k8serrors.IsInvalid(err) || s == nil || originalPod == nil {
 		return false
 	}
-	current, getErr := s.k8sClient.CoreV1().Pods(originalPod.Namespace).Get(
+	client := s.hotClaimClient()
+	if client == nil {
+		return false
+	}
+	current, getErr := client.CoreV1().Pods(originalPod.Namespace).Get(
 		ctx,
 		originalPod.Name,
 		metav1.GetOptions{},

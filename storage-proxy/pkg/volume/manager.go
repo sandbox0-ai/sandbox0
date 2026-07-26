@@ -11,6 +11,7 @@ import (
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sirupsen/logrus"
 )
@@ -74,18 +75,19 @@ type directMountLease struct {
 
 // Manager manages mounted volumes and mount sessions.
 type Manager struct {
-	mu             sync.RWMutex
-	volumes        map[string]*VolumeContext
-	mountSessions  map[string]map[string]*MountSession
-	directMounts   map[string]*directMountLease
-	invalidates    map[string]map[string]*invalidateTracker
-	logger         *logrus.Logger
-	config         *config.StorageProxyConfig
-	metrics        *obsmetrics.StorageProxyMetrics
-	backends       map[string]Backend
-	defaultBackend string
-	registrar      MountRegistrar // Optional: for distributed coordination
-	observer       StorageObserver
+	mu              sync.RWMutex
+	volumes         map[string]*VolumeContext
+	mountSessions   map[string]map[string]*MountSession
+	directMounts    map[string]*directMountLease
+	invalidates     map[string]map[string]*invalidateTracker
+	logger          *logrus.Logger
+	config          *config.StorageProxyConfig
+	metrics         *obsmetrics.StorageProxyMetrics
+	backends        map[string]Backend
+	defaultBackend  string
+	registrar       MountRegistrar // Optional: for distributed coordination
+	observer        StorageObserver
+	requestObserver objectstore.RequestObserver
 }
 
 // NewManager creates a new volume manager
@@ -131,6 +133,21 @@ func (m *Manager) SetStorageObserver(observer StorageObserver) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.observer = observer
+}
+
+// SetObjectStoreRequestObserver configures request metering for platform-owned
+// S0FS volume objects.
+func (m *Manager) SetObjectStoreRequestObserver(observer objectstore.RequestObserver) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requestObserver = observer
+	for _, backend := range m.backends {
+		if configurable, ok := backend.(interface {
+			SetObjectStoreRequestObserver(objectstore.RequestObserver)
+		}); ok {
+			configurable.SetObjectStoreRequestObserver(observer)
+		}
+	}
 }
 
 func (m *Manager) SetMetrics(metrics *obsmetrics.StorageProxyMetrics) {
@@ -200,6 +217,7 @@ func (m *Manager) MountVolume(ctx context.Context, s3Prefix, volumeID, teamID st
 		MountedAt:       sessionTime,
 		Metrics:         m.metrics,
 		StorageObserver: m.observer,
+		RequestObserver: m.requestObserver,
 	})
 	if err != nil {
 		if registeredMount {

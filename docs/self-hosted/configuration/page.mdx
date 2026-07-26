@@ -87,8 +87,20 @@ Sandbox compute uses a serverless-style contract:
 | `sandbox.ingress_bytes` | `bytes` | Ingress traffic observed by the ctld network runtime |
 | `sandbox.volume_byte_hours` | `byte_hours` | Persisted volume and volume snapshot storage over time. Snapshot rows keep `subject_type=snapshot` |
 | `sandbox.rootfs_byte_hours` | `byte_hours` | Persisted sandbox rootfs COW object storage over time |
+| `sandbox.object_store_get_requests` | `count` | Successful GetRequest-class OSS HTTP attempts for platform-owned volume and rootfs storage |
+| `sandbox.object_store_put_requests` | `count` | Successful PutRequest-class OSS HTTP attempts for platform-owned volume and rootfs storage, including ListObjectsV2 |
 
 Public template idle pools are platform cost. Team-owned template warm pools are attributed to the owning team with `subject_type=template`.
+
+OSS request windows are usage facts only; Sandbox0 does not attach prices. The
+manager and ctld aggregate provider HTTP attempts for one minute before writing
+them to the PostgreSQL metering outbox. Successful volume requests are
+attributed from `sandboxvolumes/<team_id>/<volume_id>`, and rootfs requests from
+`sandbox-rootfs/<team_id>/<sandbox_id>`. Window `data` records `provider`,
+`bucket`, `billing_item`, `operation`, `cost_scope`, and `prefix_class`.
+Requests to customer-configured external S3 volumes are excluded because the
+customer owns that object-store account. Reconcile these windows with provider
+access and metering logs before using them for cost reporting.
 
 ## Platform Observability
 

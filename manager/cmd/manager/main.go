@@ -288,6 +288,14 @@ func main() {
 		}()
 		logger.Info("Metering PostgreSQL outbox projector started")
 	}
+	objectStoreRequestMeter := startManagerObjectStoreRequestMetering(
+		ctx,
+		meteringRepo,
+		cfg.RegionID,
+		cfg.DefaultClusterId,
+		logger,
+	)
+	defer flushObjectStoreRequestMetering(objectStoreRequestMeter, logger)
 	if meteringRepo != nil {
 		lifecycleProjector := managermetering.NewLifecycleProjector(managermetering.NewStore(meteringRepo), cfg.RegionID, cfg.DefaultClusterId)
 		lifecycleProjector.SetLogger(logger)
@@ -384,11 +392,12 @@ func main() {
 		storageLogrusLogger.SetLevel(storageLogLevel)
 
 		managerStorageRuntime, err = storageproxyruntime.New(ctx, storageproxyruntime.Options{
-			Config:        storageCfg,
-			Logger:        logger,
-			LogrusLogger:  storageLogrusLogger,
-			Observability: obsProvider,
-			K8sClient:     k8sClient,
+			Config:                     storageCfg,
+			Logger:                     logger,
+			LogrusLogger:               storageLogrusLogger,
+			Observability:              obsProvider,
+			K8sClient:                  k8sClient,
+			ObjectStoreRequestObserver: objectStoreRequestMeter,
 		})
 		if err != nil {
 			logger.Fatal("Failed to initialize manager storage runtime", zap.Error(err))
@@ -479,7 +488,7 @@ func main() {
 		logger,
 	)
 	sandboxService.SetHotClaimReservationEnqueuer(hotClaimReservationController)
-	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg, managerStorageConfig)
+	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg, managerStorageConfig, objectStoreRequestMeter)
 	if rootFSObjectStoreErr != nil {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
 	} else if rootFSObjectStore != nil {
@@ -1043,7 +1052,11 @@ func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
 	return limits
 }
 
-func buildRootFSObjectStore(cfg *config.ManagerConfig, storageRuntimeCfg *config.StorageProxyConfig) (objectstore.Store, error) {
+func buildRootFSObjectStore(
+	cfg *config.ManagerConfig,
+	storageRuntimeCfg *config.StorageProxyConfig,
+	requestObserver objectstore.RequestObserver,
+) (objectstore.Store, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -1052,13 +1065,14 @@ func buildRootFSObjectStore(cfg *config.ManagerConfig, storageRuntimeCfg *config
 		return nil, nil
 	}
 	store, err := objectstore.Create(objectstore.Config{
-		Type:         objectStorageCfg.Type,
-		Bucket:       objectStorageCfg.Bucket,
-		Region:       objectStorageCfg.Region,
-		Endpoint:     objectStorageCfg.Endpoint,
-		AccessKey:    objectStorageCfg.AccessKey,
-		SecretKey:    objectStorageCfg.SecretKey,
-		SessionToken: objectStorageCfg.SessionToken,
+		Type:            objectStorageCfg.Type,
+		Bucket:          objectStorageCfg.Bucket,
+		Region:          objectStorageCfg.Region,
+		Endpoint:        objectStorageCfg.Endpoint,
+		AccessKey:       objectStorageCfg.AccessKey,
+		SecretKey:       objectStorageCfg.SecretKey,
+		SessionToken:    objectStorageCfg.SessionToken,
+		RequestObserver: requestObserver,
 	})
 	if err != nil {
 		return nil, err

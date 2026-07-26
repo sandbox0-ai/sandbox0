@@ -215,14 +215,15 @@ func (m *Manager) s0fsObjectStore(teamID, volumeID string) (objectstore.Store, e
 		return nil, err
 	}
 	store, err := objectstore.Create(objectstore.Config{
-		Type:         m.config.ObjectStorageType,
-		Bucket:       m.config.S3Bucket,
-		Region:       m.config.S3Region,
-		Endpoint:     m.config.S3Endpoint,
-		AccessKey:    m.config.S3AccessKey,
-		SecretKey:    m.config.S3SecretKey,
-		SessionToken: m.config.S3SessionToken,
-		Metrics:      m.metrics,
+		Type:            m.config.ObjectStorageType,
+		Bucket:          m.config.S3Bucket,
+		Region:          m.config.S3Region,
+		Endpoint:        m.config.S3Endpoint,
+		AccessKey:       m.config.S3AccessKey,
+		SecretKey:       m.config.S3SecretKey,
+		SessionToken:    m.config.S3SessionToken,
+		Metrics:         m.metrics,
+		RequestObserver: m.requestObserver,
 	})
 	if err != nil {
 		return nil, err

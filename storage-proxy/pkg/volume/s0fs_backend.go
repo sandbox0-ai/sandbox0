@@ -20,10 +20,20 @@ import (
 
 // S0FSBackend mounts the in-process active volume engine.
 type S0FSBackend struct {
-	logger    *logrus.Logger
-	config    *config.StorageProxyConfig
-	repo      *db.Repository
-	headStore s0fs.HeadStore
+	logger          *logrus.Logger
+	config          *config.StorageProxyConfig
+	repo            *db.Repository
+	headStore       s0fs.HeadStore
+	requestObserver objectstore.RequestObserver
+}
+
+// SetObjectStoreRequestObserver configures request metering for stores created
+// outside the mount path.
+func (b *S0FSBackend) SetObjectStoreRequestObserver(observer objectstore.RequestObserver) {
+	if b == nil {
+		return
+	}
+	b.requestObserver = observer
 }
 
 func NewS0FSBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig, repo *db.Repository) *S0FSBackend {
@@ -194,14 +204,15 @@ func (b *S0FSBackend) createObjectStorageForVolume(req BackendMountRequest, volu
 		return nil, nil
 	}
 	store, err := objectstore.Create(objectstore.Config{
-		Type:         b.config.ObjectStorageType,
-		Bucket:       b.config.S3Bucket,
-		Region:       b.config.S3Region,
-		Endpoint:     b.config.S3Endpoint,
-		AccessKey:    b.config.S3AccessKey,
-		SecretKey:    b.config.S3SecretKey,
-		SessionToken: b.config.S3SessionToken,
-		Metrics:      req.Metrics,
+		Type:            b.config.ObjectStorageType,
+		Bucket:          b.config.S3Bucket,
+		Region:          b.config.S3Region,
+		Endpoint:        b.config.S3Endpoint,
+		AccessKey:       b.config.S3AccessKey,
+		SecretKey:       b.config.S3SecretKey,
+		SessionToken:    b.config.S3SessionToken,
+		Metrics:         req.Metrics,
+		RequestObserver: req.RequestObserver,
 	})
 	if err != nil {
 		return nil, err
@@ -407,13 +418,14 @@ func (b *S0FSBackend) objectStoreForTeamVolume(teamID, volumeID string) (objects
 		return nil, err
 	}
 	store, err := objectstore.Create(objectstore.Config{
-		Type:         b.config.ObjectStorageType,
-		Bucket:       b.config.S3Bucket,
-		Region:       b.config.S3Region,
-		Endpoint:     b.config.S3Endpoint,
-		AccessKey:    b.config.S3AccessKey,
-		SecretKey:    b.config.S3SecretKey,
-		SessionToken: b.config.S3SessionToken,
+		Type:            b.config.ObjectStorageType,
+		Bucket:          b.config.S3Bucket,
+		Region:          b.config.S3Region,
+		Endpoint:        b.config.S3Endpoint,
+		AccessKey:       b.config.S3AccessKey,
+		SecretKey:       b.config.S3SecretKey,
+		SessionToken:    b.config.S3SessionToken,
+		RequestObserver: b.requestObserver,
 	})
 	if err != nil {
 		return nil, err

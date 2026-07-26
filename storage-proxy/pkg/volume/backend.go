@@ -6,6 +6,7 @@ import (
 	"time"
 
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
 
@@ -48,6 +49,7 @@ type BackendMountRequest struct {
 	MountedAt       time.Time
 	Metrics         *obsmetrics.StorageProxyMetrics
 	StorageObserver StorageObserver
+	RequestObserver objectstore.RequestObserver
 }
 
 // FlushAll flushes dirty data for the mounted volume.

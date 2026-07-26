@@ -216,6 +216,14 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 			defer dbPool.Close()
 		}
 	}
+	objectStoreRequestMeter := startCtldObjectStoreRequestMetering(
+		ctx,
+		storageCfg,
+		dbPool,
+		nodeName,
+		zapLogger,
+	)
+	defer flushCtldObjectStoreRequestMetering(objectStoreRequestMeter, zapLogger)
 
 	podUIDLister := activePodUIDLister(k8sClient, nodeName)
 	portalManager := ctldportal.NewManager(ctldportal.Config{
@@ -225,6 +233,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		Logger:             zapLogger,
 		StorageConfig:      storageCfg,
 		StorageObserver:    newPortalStorageObserver(storageCfg, repo, dbPool),
+		RequestObserver:    objectStoreRequestMeter,
 		Repository:         repo,
 		PodName:            podName,
 		PodNamespace:       podNamespace,
@@ -311,7 +320,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller: probeController,
 		Portal:     portalManager,
-		RootFS:     buildRootFSController(ctx, storageCfg, portalManager, containerdRuntime),
+		RootFS:     buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, portalManager, containerdRuntime),
 		ReadyCheck: serviceReady,
 	})
 	if obsProvider != nil {
@@ -500,8 +509,14 @@ func podTerminalForMountCleanup(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
 }
 
-func buildRootFSController(ctx context.Context, storageCfg *apiconfig.StorageProxyConfig, portalResolver ctldrootfs.PortalResolver, runtime *ctldrootfs.ContainerdRuntime) rootFSHandler {
-	store, err := buildRootFSObjectStore(storageCfg)
+func buildRootFSController(
+	ctx context.Context,
+	storageCfg *apiconfig.StorageProxyConfig,
+	requestObserver objectstore.RequestObserver,
+	portalResolver ctldrootfs.PortalResolver,
+	runtime *ctldrootfs.ContainerdRuntime,
+) rootFSHandler {
+	store, err := buildRootFSObjectStore(storageCfg, requestObserver)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
@@ -570,18 +585,19 @@ func parseByteQuantity(raw string) (int64, error) {
 	return bytes, nil
 }
 
-func buildRootFSObjectStore(cfg *apiconfig.StorageProxyConfig) (objectstore.Store, error) {
+func buildRootFSObjectStore(cfg *apiconfig.StorageProxyConfig, requestObserver objectstore.RequestObserver) (objectstore.Store, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("storage config is not configured")
 	}
 	store, err := objectstore.Create(objectstore.Config{
-		Type:         cfg.ObjectStorageType,
-		Bucket:       cfg.S3Bucket,
-		Region:       cfg.S3Region,
-		Endpoint:     cfg.S3Endpoint,
-		AccessKey:    cfg.S3AccessKey,
-		SecretKey:    cfg.S3SecretKey,
-		SessionToken: cfg.S3SessionToken,
+		Type:            cfg.ObjectStorageType,
+		Bucket:          cfg.S3Bucket,
+		Region:          cfg.S3Region,
+		Endpoint:        cfg.S3Endpoint,
+		AccessKey:       cfg.S3AccessKey,
+		SecretKey:       cfg.S3SecretKey,
+		SessionToken:    cfg.S3SessionToken,
+		RequestObserver: requestObserver,
 	})
 	if err != nil {
 		return nil, err

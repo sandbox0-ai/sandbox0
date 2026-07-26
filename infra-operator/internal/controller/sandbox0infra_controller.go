@@ -37,11 +37,14 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
@@ -66,7 +69,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sshgateway"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storage"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
 const (
@@ -75,7 +77,6 @@ const (
 	retryBaseDelay         = 2 * time.Second
 	retryMaxDelay          = 2 * time.Minute
 	initUserPasswordLength = 24
-	templateIDPodLabelKey  = "sandbox0.ai/template-id"
 )
 
 // Sandbox0InfraReconciler reconciles a Sandbox0Infra object
@@ -88,7 +89,9 @@ type Sandbox0InfraReconciler struct {
 //+kubebuilder:rbac:groups=infra.sandbox0.ai,resources=sandbox0infras/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=infra.sandbox0.ai,resources=sandbox0infras/finalizers,verbs=update
 //+kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets;replicasets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=core,resources=services;secrets;configmaps;persistentvolumeclaims;serviceaccounts;pods;pods/exec;pods/resize;pods/status;nodes;events;namespaces;endpoints,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=services;secrets;configmaps;persistentvolumeclaims;serviceaccounts;pods;pods/exec;pods/resize;pods/status;nodes;namespaces;endpoints,verbs=get;list;watch;create;update;patch;delete
+// The operator needs Event permissions to create the manager ClusterRole; it does not watch Events itself.
+//+kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
 //+kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -474,8 +477,6 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error {
 			return managerReconciler.Reconcile(ctx, imageRepo, imageTag, compiledPlan)
 		}, nil
-	case "builtin-template-pods":
-		return func(ctx context.Context) error { return r.waitBuiltinTemplatePodsReady(ctx, infra, compiledPlan) }, nil
 	case "network-ready":
 		return func(ctx context.Context) error {
 			ready, err := ctldReconciler.NetworkReady(ctx, infra)
@@ -1026,188 +1027,12 @@ func (r *Sandbox0InfraReconciler) registerCluster(ctx context.Context, infra *in
 	return fmt.Errorf("cluster registration is not implemented yet; refusing to report success without a real control-plane side effect")
 }
 
-func (r *Sandbox0InfraReconciler) waitBuiltinTemplatePodsReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) error {
-	if infra == nil {
-		return nil
-	}
-	if compiledPlan == nil {
-		compiledPlan = infraplan.Compile(infra)
-	}
-	if !compiledPlan.Components.EnableManager || !compiledPlan.Manager.TemplateStoreEnabled {
-		return nil
-	}
-
-	for _, builtin := range compiledPlan.BuiltinTemplates() {
-		templateID, err := naming.CanonicalTemplateID(builtin.TemplateID)
-		if err != nil {
-			return fmt.Errorf("invalid builtin template_id %q: %w", builtin.TemplateID, err)
-		}
-
-		spec := common.BuildBuiltinTemplateSpec(templateID, builtin)
-		minIdle := spec.Pool.MinIdle
-		if minIdle == 0 {
-			continue
-		}
-
-		namespace, err := naming.TemplateNamespaceForBuiltin(templateID)
-		if err != nil {
-			return fmt.Errorf("resolve namespace for builtin template %q: %w", templateID, err)
-		}
-
-		podList := &corev1.PodList{}
-		if err := r.List(ctx, podList,
-			client.InNamespace(namespace),
-			client.MatchingLabels{templateIDPodLabelKey: templateID},
-		); err != nil {
-			return fmt.Errorf("list pods for builtin template %q: %w", templateID, err)
-		}
-
-		readyPods := int32(0)
-		for i := range podList.Items {
-			if isReadyPod(&podList.Items[i]) {
-				readyPods++
-			}
-		}
-		if readyPods < minIdle {
-			return fmt.Errorf("builtin template %q pods not ready: %d/%d ready; %s", templateID, readyPods, minIdle, r.notReadyTemplatePodSummary(ctx, namespace, podList.Items))
-		}
-	}
-	return nil
-}
-
-func (r *Sandbox0InfraReconciler) notReadyTemplatePodSummary(ctx context.Context, namespace string, pods []corev1.Pod) string {
-	if len(pods) == 0 {
-		return "no pods found"
-	}
-
-	const maxPods = 3
-	summaries := make([]string, 0, len(pods))
-	for i := range pods {
-		pod := &pods[i]
-		if isReadyPod(pod) {
-			continue
-		}
-
-		summary := podReadinessSummary(pod)
-		if eventSummary := r.latestPodEventSummary(ctx, namespace, pod.Name); eventSummary != "" {
-			summary += ", latestEvent=" + eventSummary
-		}
-		summaries = append(summaries, summary)
-		if len(summaries) == maxPods {
-			break
-		}
-	}
-	if len(summaries) == 0 {
-		return "not enough ready pods"
-	}
-	if len(pods) > maxPods {
-		summaries = append(summaries, fmt.Sprintf("%d more pod(s)", len(pods)-maxPods))
-	}
-	return "pods: " + strings.Join(summaries, "; ")
-}
-
-func (r *Sandbox0InfraReconciler) latestPodEventSummary(ctx context.Context, namespace, podName string) string {
-	events := &corev1.EventList{}
-	if err := r.List(ctx, events, client.InNamespace(namespace)); err != nil {
-		return ""
-	}
-
-	var latest *corev1.Event
-	for i := range events.Items {
-		event := &events.Items[i]
-		if event.InvolvedObject.Kind != "Pod" || event.InvolvedObject.Name != podName {
-			continue
-		}
-		if latest == nil || eventTimestamp(event).After(eventTimestamp(latest)) {
-			latest = event
-		}
-	}
-	if latest == nil {
-		return ""
-	}
-	if latest.Message == "" {
-		return latest.Reason
-	}
-	return fmt.Sprintf("%s(%s)", latest.Reason, compactStatusMessage(latest.Message, 160))
-}
-
-func eventTimestamp(event *corev1.Event) time.Time {
-	if event.EventTime.Time != (time.Time{}) {
-		return event.EventTime.Time
-	}
-	if !event.LastTimestamp.IsZero() {
-		return event.LastTimestamp.Time
-	}
-	return event.CreationTimestamp.Time
-}
-
-func podReadinessSummary(pod *corev1.Pod) string {
-	if pod == nil {
-		return "pod=<nil>"
-	}
-
-	parts := []string{fmt.Sprintf("%s phase=%s", pod.Name, pod.Status.Phase)}
-	for _, status := range pod.Status.InitContainerStatuses {
-		if status.State.Waiting != nil {
-			parts = append(parts, fmt.Sprintf("init/%s=waiting(%s)", status.Name, status.State.Waiting.Reason))
-		}
-		if status.State.Terminated != nil && status.State.Terminated.ExitCode != 0 {
-			parts = append(parts, fmt.Sprintf("init/%s=terminated(%s:%d)", status.Name, status.State.Terminated.Reason, status.State.Terminated.ExitCode))
-		}
-	}
-	for _, status := range pod.Status.ContainerStatuses {
-		if status.Ready {
-			continue
-		}
-		switch {
-		case status.State.Waiting != nil:
-			parts = append(parts, fmt.Sprintf("%s=waiting(%s)", status.Name, status.State.Waiting.Reason))
-		case status.State.Terminated != nil:
-			parts = append(parts, fmt.Sprintf("%s=terminated(%s:%d)", status.Name, status.State.Terminated.Reason, status.State.Terminated.ExitCode))
-		default:
-			parts = append(parts, fmt.Sprintf("%s=notReady", status.Name))
-		}
-	}
-	for _, condition := range pod.Status.Conditions {
-		if condition.Status == corev1.ConditionTrue {
-			continue
-		}
-		if condition.Reason != "" {
-			parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Reason))
-		} else {
-			parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
-		}
-	}
-	return strings.Join(parts, ", ")
-}
-
-func compactStatusMessage(message string, limit int) string {
-	message = strings.Join(strings.Fields(message), " ")
-	if len(message) <= limit {
-		return message
-	}
-	if limit <= 3 {
-		return message[:limit]
-	}
-	return message[:limit-3] + "..."
-}
-
-func isReadyPod(pod *corev1.Pod) bool {
-	if pod == nil || pod.Status.Phase != corev1.PodRunning {
-		return false
-	}
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-	return false
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *Sandbox0InfraReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&infrav1alpha1.Sandbox0Infra{}).
+		For(&infrav1alpha1.Sandbox0Infra{}, builder.WithPredicates(predicate.Funcs{
+			UpdateFunc: sandbox0InfraUpdateRequiresReconcile,
+		})).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.requestsForManagedDataPlanePod)).
 		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
@@ -1222,6 +1047,24 @@ func (r *Sandbox0InfraReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](retryBaseDelay, retryMaxDelay),
 		}).
 		Complete(r)
+}
+
+// sandbox0InfraUpdateRequiresReconcile ignores status-only writes while still
+// admitting desired-state changes and finalizer-driven deletion.
+func sandbox0InfraUpdateRequiresReconcile(update event.UpdateEvent) bool {
+	if update.ObjectOld == nil || update.ObjectNew == nil {
+		return false
+	}
+	if update.ObjectOld.GetGeneration() != update.ObjectNew.GetGeneration() {
+		return true
+	}
+
+	oldDeletion := update.ObjectOld.GetDeletionTimestamp()
+	newDeletion := update.ObjectNew.GetDeletionTimestamp()
+	if oldDeletion == nil || newDeletion == nil {
+		return oldDeletion != newDeletion
+	}
+	return !oldDeletion.Equal(newDeletion)
 }
 
 func (r *Sandbox0InfraReconciler) requestsForManagedDataPlanePod(_ context.Context, obj client.Object) []reconcile.Request {

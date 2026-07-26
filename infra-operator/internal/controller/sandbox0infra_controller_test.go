@@ -1,10 +1,13 @@
 package controller
 
 import (
-	"strings"
+	"context"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
@@ -43,26 +46,64 @@ func TestExpectedConditionTypesIncludesGlobalGateway(t *testing.T) {
 	}
 }
 
-func TestPodReadinessSummaryIncludesWaitingReason(t *testing.T) {
-	pod := &corev1.Pod{}
-	pod.Name = "default-idle"
-	pod.Status.Phase = corev1.PodPending
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name: "procd",
-		State: corev1.ContainerState{
-			Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"},
+func TestSandbox0InfraUpdateRequiresReconcile(t *testing.T) {
+	base := &infrav1alpha1.Sandbox0Infra{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "sandbox0",
+			Namespace:  "sandbox0-system",
+			Generation: 3,
 		},
-	}}
-	pod.Status.Conditions = []corev1.PodCondition{{
-		Type:   corev1.PodReady,
-		Status: corev1.ConditionFalse,
-		Reason: "ContainersNotReady",
-	}}
+	}
 
-	summary := podReadinessSummary(pod)
-	for _, want := range []string{"default-idle phase=Pending", "procd=waiting(ImagePullBackOff)", "Ready=ContainersNotReady"} {
-		if !strings.Contains(summary, want) {
-			t.Fatalf("summary %q does not contain %q", summary, want)
-		}
+	statusOnly := base.DeepCopy()
+	statusOnly.Status.Phase = infrav1alpha1.PhaseReady
+	if sandbox0InfraUpdateRequiresReconcile(event.UpdateEvent{ObjectOld: base, ObjectNew: statusOnly}) {
+		t.Fatal("status-only update should not trigger reconciliation")
+	}
+
+	specUpdate := base.DeepCopy()
+	specUpdate.Generation++
+	if !sandbox0InfraUpdateRequiresReconcile(event.UpdateEvent{ObjectOld: base, ObjectNew: specUpdate}) {
+		t.Fatal("generation change should trigger reconciliation")
+	}
+
+	deleting := base.DeepCopy()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	if !sandbox0InfraUpdateRequiresReconcile(event.UpdateEvent{ObjectOld: base, ObjectNew: deleting}) {
+		t.Fatal("deletion timestamp change should trigger reconciliation")
+	}
+}
+
+func TestRequestsForManagedDataPlanePodIgnoresRuntimeSandboxes(t *testing.T) {
+	reconciler := &Sandbox0InfraReconciler{}
+	sandboxPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "tpl-default",
+			Name:      "default-idle",
+			Labels: map[string]string{
+				"sandbox0.ai/template-id": "default",
+				"sandbox0.ai/pool-type":   "idle",
+			},
+		},
+	}
+	if requests := reconciler.requestsForManagedDataPlanePod(context.Background(), sandboxPod); len(requests) != 0 {
+		t.Fatalf("runtime sandbox Pod mapped to reconcile requests: %#v", requests)
+	}
+
+	ctldPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "sandbox0-system",
+			Name:      "fullmode-ctld-a-node",
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "sandbox0infra-operator",
+				"app.kubernetes.io/component":  "ctld",
+				"app.kubernetes.io/instance":   "fullmode",
+			},
+		},
+	}
+	requests := reconciler.requestsForManagedDataPlanePod(context.Background(), ctldPod)
+	if len(requests) != 1 || requests[0].NamespacedName != (types.NamespacedName{Namespace: "sandbox0-system", Name: "fullmode"}) {
+		t.Fatalf("ctld Pod mapped to unexpected reconcile requests: %#v", requests)
 	}
 }

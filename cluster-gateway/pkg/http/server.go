@@ -559,6 +559,11 @@ func (s *Server) setupRoutes() {
 			quotas.GET("/:dimension", s.authMiddleware.RequirePermission(gatewayauthn.PermQuotaRead), s.proxyToManager)
 		}
 
+		usage := v1.Group("/usage")
+		{
+			usage.GET("/windows", s.authMiddleware.RequirePermission(gatewayauthn.PermUsageRead), s.meteringHandler.ListUsageWindows)
+		}
+
 		rootFSSnapshots := v1.Group("/sandbox-rootfs-snapshots")
 		rootFSSnapshots.Use(s.managerUpstreamMiddleware())
 		{

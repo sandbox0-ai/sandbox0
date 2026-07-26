@@ -23,6 +23,8 @@ tags:
   - name: sandbox-volumes
   - name: snapshots
   - name: sandbox-rootfs
+  - name: quotas
+  - name: usage
 paths:
   /healthz:
     get:
@@ -1366,6 +1368,67 @@ paths:
                 $ref: "#/components/schemas/SuccessTeamQuotaResponse"
         "400":
           description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/usage/windows:
+    get:
+      tags: [usage]
+      summary: List usage windows for the current team
+      description: |
+        Returns immutable, closed usage windows belonging to the authenticated
+        team. The opaque cursor can be retained and reused to incrementally
+        import newly recorded windows.
+      security:
+        - bearerAuth: []
+      x-required-permission: usage:read
+      parameters:
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor returned by a previous response.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of windows to return. Values above 1000 are capped.
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+        - name: window_type
+          in: query
+          description: Return only windows with this exact usage type.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Team usage windows
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessUsageWindowsResponse"
+        "400":
+          description: Invalid cursor, limit, or team context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Missing or invalid authentication
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Missing usage read permission
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Usage query backend is unavailable
           content:
             application/json:
               schema:
@@ -3902,6 +3965,67 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/TeamQuota"
+    UsageWindow:
+      type: object
+      properties:
+        window_id:
+          type: string
+        region_id:
+          type: string
+        cluster_id:
+          type: string
+        window_type:
+          type: string
+        subject_type:
+          type: string
+        subject_id:
+          type: string
+        sandbox_id:
+          type: string
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        value:
+          type: integer
+          format: int64
+          minimum: 0
+        unit:
+          type: string
+        recorded_at:
+          type: string
+          format: date-time
+      required:
+        - window_id
+        - window_type
+        - subject_type
+        - subject_id
+        - window_start
+        - window_end
+        - value
+        - unit
+        - recorded_at
+    UsageWindowPage:
+      type: object
+      properties:
+        windows:
+          type: array
+          items:
+            $ref: "#/components/schemas/UsageWindow"
+        next_cursor:
+          type: string
+      required:
+        - windows
+        - next_cursor
+    SuccessUsageWindowsResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/UsageWindowPage"
     QuotaDimension:
       type: string
       enum:

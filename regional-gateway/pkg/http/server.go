@@ -316,6 +316,10 @@ func (s *Server) setupRoutes() {
 		api.Use(attachAuditCorrelation())
 		api.Use(s.rateLimiter.RateLimit())
 
+		usage := api.Group("/v1/usage")
+		usage.Use(s.requireTeamContextForTeamScopedAPI())
+		usage.GET("/windows", s.authMiddleware.RequirePermission(authn.PermUsageRead), s.meteringHandler.ListUsageWindows)
+
 		// If scheduler is enabled, route /api/v1/templates* to scheduler
 		if s.schedulerRouter != nil {
 			// Template routes go to scheduler

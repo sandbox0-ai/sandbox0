@@ -582,16 +582,45 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		return nil, fmt.Errorf("get procd address: %w", err)
 	}
+
+	var persistResultCh <-chan error
+	if claimType == "hot" && !claimRecordPersisted {
+		result := make(chan error, 1)
+		persistResultCh = result
+		persistPod := pod.DeepCopy()
+		persistStarted := time.Now()
+		go func() {
+			persistErr := s.persistClaimedSandbox(ctx, persistPod, template, req)
+			s.observeClaimPhase(req.Template, claimType, "persist_sandbox", persistStarted, persistErr)
+			result <- persistErr
+		}()
+	}
+
 	phaseStarted = time.Now()
-	if _, err := s.initializeProcd(ctx, pod, template, req, procdAddress); err != nil {
-		s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, err)
+	_, initializeErr := s.initializeProcd(ctx, pod, template, req, procdAddress)
+	s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, initializeErr)
+
+	var persistErr error
+	if persistResultCh != nil {
+		persistErr = <-persistResultCh
+		if persistErr == nil {
+			claimRecordPersisted = true
+		}
+	}
+	if initializeErr != nil {
 		cleanupClaimFailure(pod, "procd initialization failed")
 		if metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}
-		return nil, fmt.Errorf("initialize procd: %w", err)
+		return nil, fmt.Errorf("initialize procd: %w", initializeErr)
 	}
-	s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, nil)
+	if persistErr != nil {
+		cleanupClaimFailure(pod, "sandbox persistence failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("persist sandbox: %w", persistErr)
+	}
 
 	if controller.IsHotClaimReservedPod(pod) {
 		phaseStarted = time.Now()
@@ -606,18 +635,20 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 	}
 
-	phaseStarted = time.Now()
-	if err := s.persistClaimedSandbox(ctx, pod, template, req); err != nil {
-		s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, err)
-		cleanupClaimFailure(pod, "sandbox persistence failed")
-		if metrics != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+	if persistResultCh == nil {
+		phaseStarted = time.Now()
+		persistErr = s.persistClaimedSandbox(ctx, pod, template, req)
+		s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, persistErr)
+		if persistErr != nil {
+			cleanupClaimFailure(pod, "sandbox persistence failed")
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("persist sandbox: %w", persistErr)
 		}
-		return nil, fmt.Errorf("persist sandbox: %w", err)
+		claimRecordPersisted = true
 	}
-	claimRecordPersisted = true
 	s.enqueueHotClaimReservation(pod)
-	s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, nil)
 
 	if metrics != nil {
 		metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()

@@ -384,6 +384,16 @@ func TestAuditDeliveryRecordsStageAndBatchMetrics(t *testing.T) {
 	if got := testutil.ToFloat64(metrics.AuditCanonicalInFlight); got != 0 {
 		t.Fatalf("canonical in-flight = %v, want 0", got)
 	}
+	if got := delivery.pendingCalls.Load(); got != 0 {
+		t.Fatalf("pending canonical calls = %d, want 0", got)
+	}
+	if got := len(delivery.canonicalSlot); got != 0 {
+		t.Fatalf("occupied canonical writer slots = %d, want 0", got)
+	}
+	if !delivery.canonicalGate.TryLock() {
+		t.Fatal("canonical gate is still held after PersistCanonical returned")
+	}
+	delivery.canonicalGate.Unlock()
 	families, err := registry.Gather()
 	if err != nil {
 		t.Fatalf("Gather() error = %v", err)

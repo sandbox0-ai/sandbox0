@@ -714,7 +714,7 @@ func main() {
 	}()
 
 	go func() {
-		if err := hotClaimReservationController.Run(ctx, 2); err != nil && err != context.Canceled {
+		if err := hotClaimReservationController.Run(ctx, 1); err != nil && err != context.Canceled {
 			logger.Error("Hot claim reservation controller failed", zap.Error(err))
 		}
 	}()

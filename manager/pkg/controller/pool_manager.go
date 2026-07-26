@@ -64,6 +64,7 @@ const (
 	AnnotationHotClaimReservation          = "sandbox0.ai/hot-claim-reservation"
 	AnnotationHotClaimReservationState     = "sandbox0.ai/hot-claim-reservation-state"
 	AnnotationHotClaimReservedAt           = "sandbox0.ai/hot-claim-reserved-at"
+	AnnotationHotClaimReadyAt              = "sandbox0.ai/hot-claim-ready-at"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
 	AnnotationTemplateTeamID               = "sandbox0.ai/template-team-id"
 	AnnotationTemplateUserID               = "sandbox0.ai/template-user-id"

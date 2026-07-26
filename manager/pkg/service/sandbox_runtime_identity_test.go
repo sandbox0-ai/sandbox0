@@ -595,6 +595,108 @@ func TestResumePausedSandboxRuntimeWaitsWhileRuntimeDeleting(t *testing.T) {
 	}
 }
 
+func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
+	failedPod := runtimeIdentityPod("tpl-default", "failed-pod", "sandbox-a")
+	failedPod.Annotations[controller.AnnotationRuntimeGeneration] = "3"
+	failedPod.Status.Phase = corev1.PodFailed
+	idlePod := newClaimTestPod("tpl-default", "idle-pod", "default", true)
+	indexer := newClaimTestPodIndexer(t, failedPod, idlePod)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                  "sandbox-a",
+			TeamID:              "team-a",
+			UserID:              "user-a",
+			TemplateID:          "default",
+			TemplateName:        "default",
+			TemplateNamespace:   "tpl-default",
+			Status:              SandboxStatusRunning,
+			CurrentPodName:      failedPod.Name,
+			CurrentPodNamespace: failedPod.Namespace,
+			RuntimeGeneration:   3,
+			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	client := fake.NewSimpleClientset(failedPod.DeepCopy(), idlePod.DeepCopy())
+	deletedFailedPod := false
+	client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		deleteAction, ok := action.(ktesting.DeleteAction)
+		if !ok || deleteAction.GetName() != failedPod.Name {
+			return false, nil, nil
+		}
+		record, err := store.GetSandbox(context.Background(), "sandbox-a")
+		if err != nil {
+			t.Errorf("GetSandbox() before failed pod delete error = %v", err)
+		} else if record.Status != SandboxStatusPaused {
+			t.Errorf("status before failed pod delete = %q, want paused", record.Status)
+		}
+		deletedFailedPod = true
+		if err := indexer.Delete(failedPod); err != nil {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
+	observedTxn := make(chan *SandboxLifecycleTxn, 1)
+	client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		updateAction, ok := action.(ktesting.UpdateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		pod, ok := updateAction.GetObject().(*corev1.Pod)
+		if !ok || pod.Name != idlePod.Name {
+			return false, nil, nil
+		}
+		txn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
+		if err != nil {
+			t.Errorf("GetActiveLifecycleTxn() error = %v", err)
+		}
+		observedTxn <- txn
+		return true, nil, errors.New("stop replacement claim")
+	})
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    corelisters.NewPodLister(indexer),
+		sandboxStore: store,
+		config:       SandboxServiceConfig{ProcdPort: 49983},
+		clock:        fixedClock{now: time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)},
+		logger:       zap.NewNop(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := svc.ResumePausedSandboxRuntime(ctx, "sandbox-a")
+	if err == nil || !strings.Contains(err.Error(), "stop replacement claim") {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want replacement claim failure", err)
+	}
+	if !deletedFailedPod {
+		t.Fatal("failed runtime pod was not deleted")
+	}
+	record, err := store.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if record.Status != SandboxStatusPaused {
+		t.Fatalf("status = %q, want paused before replacement claim", record.Status)
+	}
+	if record.CurrentPodName != "" || record.CurrentPodNamespace != "" {
+		t.Fatalf("current runtime = %s/%s, want empty", record.CurrentPodNamespace, record.CurrentPodName)
+	}
+	if record.RuntimeGeneration != 3 {
+		t.Fatalf("runtime generation = %d, want 3", record.RuntimeGeneration)
+	}
+	var txn *SandboxLifecycleTxn
+	select {
+	case txn = <-observedTxn:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for replacement claim")
+	}
+	if txn == nil || txn.Kind != SandboxLifecycleKindResume {
+		t.Fatalf("replacement lifecycle txn = %+v, want resume txn", txn)
+	}
+	if txn.FromGeneration != 3 || txn.ToGeneration != 4 {
+		t.Fatalf("replacement generations = %d -> %d, want 3 -> 4", txn.FromGeneration, txn.ToGeneration)
+	}
+}
+
 func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
 	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"

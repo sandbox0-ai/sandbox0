@@ -167,7 +167,7 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 		}
 		if record.CurrentPodName != "" && record.Status != SandboxStatusPaused && !sandboxLifecycleTxnHidesCommittedRuntime(activeTxn) {
 			if pod, err := s.getSandboxPod(ctx, record.ID); err == nil {
-				sandbox = s.podToSandbox(ctx, pod, record.ID)
+				sandbox = s.podToSandbox(pod, record.ID)
 			}
 		}
 		if req.Paused != nil && sandbox.Paused != *req.Paused {

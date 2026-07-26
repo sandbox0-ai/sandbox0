@@ -276,7 +276,7 @@ func sandboxRuntimeMissing(sandbox *mgr.Sandbox) bool {
 		return false
 	}
 	switch sandbox.Status {
-	case mgr.SandboxStatusPaused:
+	case mgr.SandboxStatusPaused, mgr.SandboxStatusFailed:
 		return true
 	}
 	return strings.TrimSpace(sandbox.InternalAddr) == ""

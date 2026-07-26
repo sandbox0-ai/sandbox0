@@ -2111,8 +2111,9 @@ type SandboxAppServiceRoute struct {
 	PathPrefix *string                          `json:"path_prefix,omitempty"`
 	RateLimit  *SandboxAppServiceRouteRateLimit `json:"rate_limit,omitempty"`
 
-	// Resume Allows this public route to wake a paused sandbox when sandbox auto_resume is true.
-	// Resume-enabled public routes require a restartable service runtime: cmd or function.
+	// Resume Allows this public route to wake a paused sandbox or replace a failed runtime when
+	// sandbox auto_resume is true. Resume-enabled public routes require a restartable service
+	// runtime: cmd or function.
 	Resume         bool    `json:"resume"`
 	RewritePrefix  *string `json:"rewrite_prefix"`
 	TimeoutSeconds *int32  `json:"timeout_seconds,omitempty"`
@@ -2246,8 +2247,8 @@ type SandboxAuditResource struct {
 
 // SandboxConfig defines model for SandboxConfig.
 type SandboxConfig struct {
-	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
-	// (API or public exposure) must not auto resume the sandbox.
+	// AutoResume Sandbox-level runtime recovery gate. When false, inbound API or public exposure
+	// requests must not automatically resume a paused sandbox or replace a failed runtime.
 	AutoResume *bool              `json:"auto_resume,omitempty"`
 	EnvVars    *map[string]string `json:"env_vars,omitempty"`
 
@@ -2625,8 +2626,8 @@ type SandboxTemplateStatus struct {
 // SandboxUpdateConfig Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
 // Note: env_vars only affect new processes. webhook is not included as it requires restart.
 type SandboxUpdateConfig struct {
-	// AutoResume Sandbox-level resume gate for paused sandboxes. When false, any inbound request
-	// (API or public exposure) must not auto resume the sandbox.
+	// AutoResume Sandbox-level runtime recovery gate. When false, inbound API or public exposure
+	// requests must not automatically resume a paused sandbox or replace a failed runtime.
 	AutoResume *bool `json:"auto_resume,omitempty"`
 
 	// EnvVars Sandbox-level environment variables used as defaults for new procd-managed

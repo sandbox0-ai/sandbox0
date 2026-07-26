@@ -11,6 +11,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )
@@ -214,6 +218,192 @@ func TestAuditDeliveryReplayBatchesPendingEvents(t *testing.T) {
 	}
 }
 
+func TestAuditDeliveryCoalescesForegroundCanonicalBurst(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	delivery.started.Store(true)
+	go delivery.runCanonicalBatches(ctx)
+
+	const eventCount = 32
+	events := make([]sandboxobservability.Event, 0, eventCount)
+	for range eventCount {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
+			t.Fatalf("EnqueueDurable() error = %v", err)
+		}
+		events = append(events, event)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, eventCount)
+	for _, event := range events {
+		event := event
+		go func() {
+			<-start
+			errs <- delivery.PersistCanonical(context.Background(), event)
+		}()
+	}
+	close(start)
+	for range eventCount {
+		if err := <-errs; err != nil {
+			t.Fatalf("PersistCanonical() error = %v", err)
+		}
+	}
+
+	if got := len(writer.snapshotEvents()); got != eventCount {
+		t.Fatalf("canonical events = %d, want %d", got, eventCount)
+	}
+	batched := false
+	for _, size := range writer.snapshotBatchSizes() {
+		if size > 1 {
+			batched = true
+			break
+		}
+	}
+	if !batched {
+		t.Fatalf("canonical batch sizes = %v, want at least one coalesced batch", writer.snapshotBatchSizes())
+	}
+}
+
+func TestAuditDeliveryBoundsCanonicalWriters(t *testing.T) {
+	dir := t.TempDir()
+	writer := &concurrentAuditDeliveryWriter{
+		started: make(chan struct{}, auditCanonicalWriterSlots+2),
+		release: make(chan struct{}),
+	}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+
+	const batchCount = auditCanonicalWriterSlots + 2
+	for range batchCount {
+		event := testAuditDeliveryEvent(t, uuid.NewString())
+		if err := delivery.EnqueueDurable(context.Background(), event); err != nil {
+			t.Fatalf("EnqueueDurable() error = %v", err)
+		}
+		call, leader := delivery.joinCanonicalCall(event)
+		if !leader {
+			t.Fatalf("event %s unexpectedly joined an in-flight call", event.EventID)
+		}
+		go delivery.dispatchCanonicalBatch(context.Background(), []*auditCanonicalCall{call}, "foreground")
+	}
+
+	for range auditCanonicalWriterSlots {
+		select {
+		case <-writer.started:
+		case <-time.After(time.Second):
+			t.Fatal("bounded canonical writer did not start")
+		}
+	}
+	select {
+	case <-writer.started:
+		t.Fatalf("more than %d canonical writers started concurrently", auditCanonicalWriterSlots)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(writer.release)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if writer.maxConcurrency() == auditCanonicalWriterSlots &&
+			delivery.pendingCalls.Load() == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("max canonical writer concurrency = %d, pending calls = %d", writer.maxConcurrency(), delivery.pendingCalls.Load())
+}
+
+func TestAuditDeliveryPrioritizesForegroundOverReplay(t *testing.T) {
+	dir := t.TempDir()
+	writer := &auditDeliveryWriter{started: make(chan struct{}, 1), block: make(chan struct{})}
+	delivery, err := newAuditDelivery(dir, writer, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	background := testAuditDeliveryEvent(t, uuid.NewString())
+	foreground := testAuditDeliveryEvent(t, uuid.NewString())
+	if err := delivery.EnqueueDurable(context.Background(), background); err != nil {
+		t.Fatalf("enqueue background event: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	delivery.started.Store(true)
+	go delivery.runCanonicalBatches(ctx)
+	foregroundDone := make(chan error, 1)
+	go func() {
+		foregroundDone <- delivery.PersistCanonical(context.Background(), foreground)
+	}()
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("foreground canonical insert did not start")
+	}
+
+	if err := delivery.replay(context.Background()); err != nil {
+		t.Fatalf("replay() while foreground active error = %v", err)
+	}
+	if got := len(writer.snapshotBatchSizes()); got != 0 {
+		t.Fatalf("completed batches before foreground release = %d, want 0", got)
+	}
+	close(writer.block)
+	if err := <-foregroundDone; err != nil {
+		t.Fatalf("foreground PersistCanonical() error = %v", err)
+	}
+	if err := delivery.replay(context.Background()); err != nil {
+		t.Fatalf("replay() after foreground error = %v", err)
+	}
+	batches := writer.snapshotBatchSizes()
+	if len(batches) != 2 || batches[0] != 1 || batches[1] != 1 {
+		t.Fatalf("canonical batch sizes = %v, want foreground then replay singletons", batches)
+	}
+}
+
+func TestAuditDeliveryRecordsStageAndBatchMetrics(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := obsmetrics.NewClusterGateway(registry)
+	writer := &auditDeliveryWriter{}
+	delivery, err := newAuditDelivery(t.TempDir(), writer, zap.NewNop(), nil, metrics)
+	if err != nil {
+		t.Fatalf("newAuditDelivery() error = %v", err)
+	}
+	event := testAuditDeliveryEvent(t, uuid.NewString())
+	if err := delivery.PersistCanonical(context.Background(), event); err != nil {
+		t.Fatalf("PersistCanonical() error = %v", err)
+	}
+
+	if got := testutil.ToFloat64(metrics.AuditCanonicalQueueDepth); got != 0 {
+		t.Fatalf("canonical queue depth = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(metrics.AuditCanonicalInFlight); got != 0 {
+		t.Fatalf("canonical in-flight = %v, want 0", got)
+	}
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+	if got := histogramSampleCount(
+		families,
+		"cluster_gateway_audit_canonical_batch_size",
+		map[string]string{"source": "foreground", "result": "success"},
+	); got != 1 {
+		t.Fatalf("canonical batch metric samples = %d, want 1", got)
+	}
+	if got := histogramSampleCount(
+		families,
+		"cluster_gateway_audit_delivery_stage_duration_seconds",
+		map[string]string{"mode": "canonical", "stage": "spool_write", "result": "success"},
+	); got != 1 {
+		t.Fatalf("spool stage metric samples = %d, want 1", got)
+	}
+}
+
 func TestAuditDeliveryCanonicalWaitsForInFlightReplayWithoutDuplicate(t *testing.T) {
 	dir := t.TempDir()
 	writer := &auditDeliveryWriter{started: make(chan struct{}, 1), block: make(chan struct{})}
@@ -250,6 +440,63 @@ func TestAuditDeliveryCanonicalWaitsForInFlightReplayWithoutDuplicate(t *testing
 	if got := writer.snapshotEvents(); len(got) != 1 || got[0].EventID != event.EventID {
 		t.Fatalf("canonical events = %#v, want one copy", got)
 	}
+}
+
+type concurrentAuditDeliveryWriter struct {
+	mu      sync.Mutex
+	active  int
+	max     int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (w *concurrentAuditDeliveryWriter) InsertEvents(_ context.Context, _ []sandboxobservability.Event) error {
+	w.mu.Lock()
+	w.active++
+	if w.active > w.max {
+		w.max = w.active
+	}
+	w.mu.Unlock()
+	w.started <- struct{}{}
+	<-w.release
+	w.mu.Lock()
+	w.active--
+	w.mu.Unlock()
+	return nil
+}
+
+func (w *concurrentAuditDeliveryWriter) maxConcurrency() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.max
+}
+
+func histogramSampleCount(families []*dto.MetricFamily, name string, labels map[string]string) uint64 {
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.Metric {
+			matched := true
+			for key, value := range labels {
+				found := false
+				for _, pair := range metric.Label {
+					if pair.GetName() == key && pair.GetValue() == value {
+						found = true
+						break
+					}
+				}
+				if !found {
+					matched = false
+					break
+				}
+			}
+			if matched && metric.Histogram != nil {
+				return metric.Histogram.GetSampleCount()
+			}
+		}
+	}
+	return 0
 }
 
 func TestAuditDeliveryFallsBackToCanonicalInsertWhenSpoolWriteFails(t *testing.T) {

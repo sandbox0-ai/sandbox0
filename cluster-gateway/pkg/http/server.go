@@ -31,6 +31,7 @@ import (
 	licensinghttp "github.com/sandbox0-ai/sandbox0/pkg/licensing/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
@@ -315,7 +316,14 @@ func NewServer(
 		if strings.TrimSpace(cfg.SandboxObservability.AuditSpoolDir) == "" {
 			return nil, fmt.Errorf("sandbox audit requires audit_spool_dir")
 		}
-		delivery, err = newAuditDelivery(cfg.SandboxObservability.AuditSpoolDir, auditWriter, logger, auditSigningPublicKey)
+		clusterGatewayMetrics := obsmetrics.NewClusterGateway(obsProvider.MetricsRegistryOrNil())
+		delivery, err = newAuditDelivery(
+			cfg.SandboxObservability.AuditSpoolDir,
+			auditWriter,
+			logger,
+			auditSigningPublicKey,
+			clusterGatewayMetrics,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("initialize sandbox audit delivery: %w", err)
 		}

@@ -1355,6 +1355,166 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 	}
 }
 
+func TestClaimSandboxOverlapsHotPersistenceWithProcdInitialization(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	templateID := "template-a"
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(templateID)
+	if err != nil {
+		t.Fatalf("template namespace: %v", err)
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateID, Namespace: templateNamespace},
+	}
+
+	procdStarted := make(chan struct{}, 1)
+	persistStarted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/initialize" {
+			http.NotFound(w, r)
+			return
+		}
+		procdStarted <- struct{}{}
+		<-release
+		if err := spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-a", TeamID: "team-a"}); err != nil {
+			t.Fatalf("write procd response: %v", err)
+		}
+	}))
+	defer procd.Close()
+	procdURL, procdPort := parsedTestServer(t, procd.URL)
+
+	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
+	idlePod.Status.PodIP = procdURL.Hostname()
+	store := &blockingClaimSandboxStore{
+		memorySandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{}},
+		started:            persistStarted,
+		release:            release,
+	}
+	client := fake.NewSimpleClientset(idlePod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:              client,
+		podLister:              newClaimTestPodLister(t, idlePod),
+		secretLister:           newClaimTestSecretLister(t),
+		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		sandboxStore:           store,
+		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			ProcdPort:        procdPort,
+			ProcdInitTimeout: time.Second,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := svc.ClaimSandbox(context.Background(), &ClaimRequest{
+			Template: templateID,
+			TeamID:   "team-a",
+			UserID:   "user-a",
+		})
+		result <- err
+	}()
+	for name, started := range map[string]<-chan struct{}{
+		"procd initialization": procdStarted,
+		"sandbox persistence":  persistStarted,
+	} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not start before the other operation completed", name)
+		}
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatalf("ClaimSandbox() error = %v", err)
+	}
+	if len(store.records) != 1 {
+		t.Fatalf("sandbox records = %d, want 1", len(store.records))
+	}
+	for _, record := range store.records {
+		if record.Status != SandboxStatusRunning {
+			t.Fatalf("sandbox record status = %q, want running", record.Status)
+		}
+	}
+}
+
+func TestClaimSandboxDeletesConcurrentRecordWhenProcdInitializationFails(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	templateID := "template-a"
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin(templateID)
+	if err != nil {
+		t.Fatalf("template namespace: %v", err)
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateID, Namespace: templateNamespace},
+	}
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	defer procd.Close()
+	procdURL, procdPort := parsedTestServer(t, procd.URL)
+
+	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
+	idlePod.Status.PodIP = procdURL.Hostname()
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	client := fake.NewSimpleClientset(idlePod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:              client,
+		podLister:              newClaimTestPodLister(t, idlePod),
+		secretLister:           newClaimTestSecretLister(t),
+		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		sandboxStore:           store,
+		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			ProcdPort:        procdPort,
+			ProcdInitTimeout: 20 * time.Millisecond,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{
+		Template: templateID,
+		TeamID:   "team-a",
+		UserID:   "user-a",
+	})
+	if err == nil || !strings.Contains(err.Error(), "initialize procd") {
+		t.Fatalf("ClaimSandbox() error = %v, want procd initialization failure", err)
+	}
+	if len(store.records) != 1 {
+		t.Fatalf("sandbox records = %d, want 1", len(store.records))
+	}
+	for _, record := range store.records {
+		if record.Status != SandboxStatusDeleted || record.DeletedAt.IsZero() {
+			t.Fatalf("sandbox record = %#v, want deleted", record)
+		}
+	}
+}
+
+type blockingClaimSandboxStore struct {
+	*memorySandboxStore
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s *blockingClaimSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecord) error {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.memorySandboxStore.UpsertSandbox(ctx, record)
+}
+
 func TestInitializeClaimRootFSFromSnapshotRejectsInternalTemplateBuildSnapshot(t *testing.T) {
 	internalSnapshotID := "template-build-123456"
 	store := &memorySandboxStore{

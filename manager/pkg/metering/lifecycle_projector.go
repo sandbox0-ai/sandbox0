@@ -146,7 +146,13 @@ func (p *LifecycleProjector) handleUpdate(oldObj, newObj any) {
 	oldPod := extractPod(oldObj)
 	newPod := extractPod(newObj)
 	if isTeamOwnedIdlePoolPod(oldPod) && !isTeamOwnedIdlePoolPod(newPod) {
-		p.handleWarmPoolDelete(oldPod)
+		transitionAt := time.Time{}
+		if isClaimedActiveSandbox(newPod) {
+			// ClaimedAt is also the active runtime start, so use it as the
+			// shared boundary instead of charging the warm pool until observation.
+			transitionAt, _ = parseRFC3339(newPod.Annotations[controller.AnnotationClaimedAt])
+		}
+		p.handleWarmPoolDeleteAt(oldPod, transitionAt)
 	}
 	// Warm-pool updates advance runtime windows, so they intentionally keep the
 	// resync behavior. Claimed sandboxes only need a projection write when an
@@ -257,6 +263,15 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 			LastResourceVer:   pod.ResourceVersion,
 		}
 		pendingEvents = append(pendingEvents, p.buildSandboxEvent(sandboxID, teamID, userID, templateID, claimedAt, meteringpkg.EventTypeSandboxClaimed, claimedEventID(sandboxID, claimedAt), claimEventData(pod)))
+	}
+
+	// Close the prior allocation before replacing it so elapsed runtime keeps
+	// the memory size that was actually active during that interval.
+	if !paused && !state.Paused && state.ActiveSince != nil &&
+		state.ResourceMemoryMiB != podUsage.ResourceMemoryMiB &&
+		observedAt.After(*state.ActiveSince) {
+		pendingWindows = append(pendingWindows, p.buildSandboxRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, observedAt))
+		state.ActiveSince = ptrTime(observedAt)
 	}
 
 	if paused {
@@ -502,6 +517,10 @@ func (p *LifecycleProjector) handleWarmPoolUpsert(pod *corev1.Pod) {
 }
 
 func (p *LifecycleProjector) handleWarmPoolDelete(pod *corev1.Pod) {
+	p.handleWarmPoolDeleteAt(pod, time.Time{})
+}
+
+func (p *LifecycleProjector) handleWarmPoolDeleteAt(pod *corev1.Pod, endedAt time.Time) {
 	stateID := warmPoolMeteringIDFromPod(pod)
 	if stateID == "" {
 		return
@@ -518,6 +537,9 @@ func (p *LifecycleProjector) handleWarmPoolDelete(pod *corev1.Pod) {
 	}
 
 	observedAt := p.now()
+	if endedAt.IsZero() {
+		endedAt = observedAt
+	}
 	teamID := pod.Annotations[controller.AnnotationTeamID]
 	userID := pod.Annotations[controller.AnnotationUserID]
 	templateID := pod.Labels[controller.LabelTemplateID]
@@ -541,7 +563,7 @@ func (p *LifecycleProjector) handleWarmPoolDelete(pod *corev1.Pod) {
 	}
 
 	pendingWindows := []*meteringpkg.Window{
-		p.buildWarmPoolRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, observedAt, pod),
+		p.buildWarmPoolRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, endedAt, pod),
 	}
 	state.Namespace = pod.Namespace
 	state.TeamID = teamID
@@ -553,7 +575,7 @@ func (p *LifecycleProjector) handleWarmPoolDelete(pod *corev1.Pod) {
 	state.ResourceMemoryMiB = podUsage.ResourceMemoryMiB
 	state.ActiveSince = nil
 	state.Paused = false
-	state.TerminatedAt = &observedAt
+	state.TerminatedAt = &endedAt
 	state.LastObservedAt = observedAt
 	state.LastResourceVer = pod.ResourceVersion
 

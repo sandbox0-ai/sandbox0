@@ -241,16 +241,6 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		}
 		return nil, err
 	}
-	if controller.IsHotClaimReservedPod(restoredPod) {
-		restoredPod, err = s.markHotClaimReservationReady(ctx, restoredPod)
-		if err != nil {
-			s.requestSandboxDeletionAfterClaimFailure(restoredPod, "restored hot claim reservation completion failed")
-			if txn != nil {
-				_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
-			}
-			return nil, fmt.Errorf("complete restored hot claim reservation: %w", err)
-		}
-	}
 	if txn != nil {
 		if err := s.commitResumedSandboxRuntime(ctx, restoredPod, record, txn); err != nil {
 			s.requestSandboxDeletionAfterClaimFailure(restoredPod, "restored runtime commit failed")

@@ -136,6 +136,31 @@ func TestPatchClaimedPodMetadataRejectsAlreadyClaimedPod(t *testing.T) {
 	}
 }
 
+func TestPatchClaimedPodMetadataUsesHotClaimClient(t *testing.T) {
+	original := newClaimTestPod("sandbox-a", "idle-a", "default", true)
+	original.UID = types.UID("pod-uid")
+	claimed := original.DeepCopy()
+	claimed.Labels[controller.LabelSandboxID] = "sandbox-id"
+	claimed.Annotations[controller.AnnotationSandboxID] = "sandbox-id"
+	ensureSandboxCleanupFinalizer(claimed)
+
+	sharedClient := fake.NewSimpleClientset(original.DeepCopy())
+	hotClaimClient := fake.NewSimpleClientset(original.DeepCopy())
+	service := &SandboxService{
+		k8sClient:         sharedClient,
+		hotClaimK8sClient: hotClaimClient,
+	}
+	if _, err := service.patchClaimedPodMetadata(context.Background(), original, claimed); err != nil {
+		t.Fatalf("patchClaimedPodMetadata() error = %v", err)
+	}
+	if actions := sharedClient.Actions(); len(actions) != 0 {
+		t.Fatalf("shared client actions = %v, want none", actions)
+	}
+	if actions := hotClaimClient.Actions(); len(actions) != 1 || actions[0].GetVerb() != "patch" {
+		t.Fatalf("hot claim client actions = %v, want one patch", actions)
+	}
+}
+
 func TestClaimMetadataPatchPreconditionFailureRecognizesJSONPatchTest(t *testing.T) {
 	err := &apierrors.StatusError{ErrStatus: metav1.Status{
 		Reason:  metav1.StatusReasonInvalid,

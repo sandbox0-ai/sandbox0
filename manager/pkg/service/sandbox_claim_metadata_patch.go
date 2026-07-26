@@ -31,7 +31,11 @@ func (s *SandboxService) patchClaimedPodMetadata(
 	if err != nil {
 		return nil, err
 	}
-	return s.k8sClient.CoreV1().Pods(originalPod.Namespace).Patch(
+	client := s.hotClaimClient()
+	if client == nil {
+		return nil, fmt.Errorf("patch claimed pod metadata: kubernetes client is not configured")
+	}
+	return client.CoreV1().Pods(originalPod.Namespace).Patch(
 		ctx,
 		originalPod.Name,
 		types.JSONPatchType,

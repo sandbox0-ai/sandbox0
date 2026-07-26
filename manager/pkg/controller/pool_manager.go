@@ -65,6 +65,7 @@ const (
 	AnnotationHotClaimReservationState     = "sandbox0.ai/hot-claim-reservation-state"
 	AnnotationHotClaimReservedAt           = "sandbox0.ai/hot-claim-reserved-at"
 	AnnotationHotClaimReadyAt              = "sandbox0.ai/hot-claim-ready-at"
+	AnnotationHotClaimCompletionProtocol   = "sandbox0.ai/hot-claim-completion-protocol"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
 	AnnotationTemplateTeamID               = "sandbox0.ai/template-team-id"
 	AnnotationTemplateUserID               = "sandbox0.ai/template-user-id"
@@ -75,6 +76,7 @@ const (
 
 	HotClaimReservationStateInitializing = "initializing"
 	HotClaimReservationStateReady        = "ready"
+	HotClaimCompletionProtocolRecordV1   = "record-status-v1"
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
 )

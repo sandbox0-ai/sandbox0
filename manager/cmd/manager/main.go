@@ -124,6 +124,16 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to create Kubernetes client", zap.Error(err))
 	}
+	hotClaimK8sConfig := isolatedK8sClientConfig(k8sConfig)
+	observeHotClaimK8sClientRateLimit(managerMetrics, hotClaimK8sConfig)
+	logger.Info("Hot claim Kubernetes client rate limit configured",
+		zap.Float32("qps", effectiveK8sClientQPS(hotClaimK8sConfig)),
+		zap.Int("burst", effectiveK8sClientBurst(hotClaimK8sConfig)),
+	)
+	hotClaimK8sClient, err := kubernetes.NewForConfig(hotClaimK8sConfig)
+	if err != nil {
+		logger.Fatal("Failed to create hot claim Kubernetes client", zap.Error(err))
+	}
 
 	// Add SandboxTemplate to scheme
 	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
@@ -461,6 +471,7 @@ func main() {
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quotaRepo)
 	sandboxService.SetSandboxStore(sandboxStore)
+	sandboxService.SetHotClaimK8sClient(hotClaimK8sClient)
 	hotClaimReservationController := service.NewHotClaimReservationController(
 		k8sClient,
 		podLister,
@@ -854,12 +865,33 @@ func configureK8sClientRateLimiter(restConfig *rest.Config, qps int, burst int) 
 	restConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(rate, burst)
 }
 
+func isolatedK8sClientConfig(base *rest.Config) *rest.Config {
+	if base == nil {
+		return nil
+	}
+	isolated := rest.CopyConfig(base)
+	rate := effectiveK8sClientQPS(base)
+	burst := effectiveK8sClientBurst(base)
+	isolated.QPS = rate
+	isolated.Burst = burst
+	isolated.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(rate, burst)
+	return isolated
+}
+
 func observeK8sClientRateLimit(metrics *obsmetrics.ManagerMetrics, restConfig *rest.Config) {
 	if metrics == nil || metrics.K8sClientRateLimit == nil || restConfig == nil {
 		return
 	}
 	metrics.K8sClientRateLimit.WithLabelValues("qps").Set(float64(effectiveK8sClientQPS(restConfig)))
 	metrics.K8sClientRateLimit.WithLabelValues("burst").Set(float64(effectiveK8sClientBurst(restConfig)))
+}
+
+func observeHotClaimK8sClientRateLimit(metrics *obsmetrics.ManagerMetrics, restConfig *rest.Config) {
+	if metrics == nil || metrics.K8sClientRateLimit == nil || restConfig == nil {
+		return
+	}
+	metrics.K8sClientRateLimit.WithLabelValues("hot_claim_qps").Set(float64(effectiveK8sClientQPS(restConfig)))
+	metrics.K8sClientRateLimit.WithLabelValues("hot_claim_burst").Set(float64(effectiveK8sClientBurst(restConfig)))
 }
 
 func effectiveK8sClientQPS(restConfig *rest.Config) float32 {

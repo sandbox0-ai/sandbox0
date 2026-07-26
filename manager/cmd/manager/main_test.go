@@ -194,3 +194,28 @@ func TestConfigureK8sClientRateLimiterDefaultsWhenUnset(t *testing.T) {
 		t.Fatal("expected shared rate limiter")
 	}
 }
+
+func TestIsolatedK8sClientConfigUsesIndependentRateBudget(t *testing.T) {
+	shared := &rest.Config{}
+	configureK8sClientRateLimiter(shared, 25, 50)
+
+	isolated := isolatedK8sClientConfig(shared)
+	if isolated == nil {
+		t.Fatal("isolatedK8sClientConfig() = nil")
+	}
+	if isolated.QPS != shared.QPS || isolated.Burst != shared.Burst {
+		t.Fatalf(
+			"isolated rate = %v/%d, want %v/%d",
+			isolated.QPS,
+			isolated.Burst,
+			shared.QPS,
+			shared.Burst,
+		)
+	}
+	if isolated.RateLimiter == nil {
+		t.Fatal("isolated rate limiter is nil")
+	}
+	if isolated.RateLimiter == shared.RateLimiter {
+		t.Fatal("isolated client reused the shared rate limiter")
+	}
+}

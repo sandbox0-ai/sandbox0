@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -16,45 +17,143 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestMarkHotClaimReservationReadyKeepsWarmPoolAttachment(t *testing.T) {
+func TestCompleteHotClaimReservationPersistsRunningRecordWithoutPodPatch(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
 	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateInitializing)
+	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV1
 	client := fake.NewSimpleClientset(pod.DeepCopy())
-	service := &SandboxService{k8sClient: client}
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	service := &SandboxService{
+		k8sClient:    client,
+		sandboxStore: store,
+		clock:        fixedClock{now: now},
+	}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: pod.Namespace},
+	}
+	req := &ClaimRequest{
+		SandboxID:         "sandbox-a",
+		Template:          "default",
+		TeamID:            "team-a",
+		UserID:            "user-a",
+		RuntimeGeneration: 1,
+	}
 
-	ready, err := service.markHotClaimReservationReady(context.Background(), pod)
+	if err := service.completeHotClaimReservation(context.Background(), pod, template, req); err != nil {
+		t.Fatalf("completeHotClaimReservation() error = %v", err)
+	}
+	record, err := store.GetSandbox(context.Background(), "sandbox-a")
 	if err != nil {
-		t.Fatalf("markHotClaimReservationReady() error = %v", err)
+		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if got := ready.Annotations[controller.AnnotationHotClaimReservationState]; got != controller.HotClaimReservationStateReady {
-		t.Fatalf("reservation state = %q, want %q", got, controller.HotClaimReservationStateReady)
+	if record == nil || record.Status != SandboxStatusRunning {
+		t.Fatalf("sandbox record = %#v, want running", record)
 	}
-	if got := ready.Annotations[controller.AnnotationHotClaimReadyAt]; got == "" {
-		t.Fatal("hot claim ready timestamp is empty")
+	if actions := client.Actions(); len(actions) != 0 {
+		t.Fatalf("Kubernetes actions = %v, want none on completion path", actions)
 	}
-	if got := ready.Labels[controller.LabelPoolType]; got != controller.PoolTypeIdle {
-		t.Fatalf("pool type = %q, want idle before controller detachment", got)
-	}
-	if len(ready.OwnerReferences) != 2 {
-		t.Fatalf("owner references = %#v, want both warm-pool and external owners", ready.OwnerReferences)
+	if got := pod.Annotations[controller.AnnotationHotClaimReservationState]; got != controller.HotClaimReservationStateInitializing {
+		t.Fatalf("reservation state = %q, want unchanged initializing", got)
 	}
 }
 
-func TestMarkHotClaimReservationReadyAllowsResourceVersionAdvance(t *testing.T) {
+func TestSandboxRecordForRecordCompletedHotClaimStartsInitializing(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
-	stalePod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateInitializing)
-	stalePod.ResourceVersion = "10"
-	livePod := stalePod.DeepCopy()
-	livePod.ResourceVersion = "11"
-	client := fake.NewSimpleClientset(livePod)
-	service := &SandboxService{k8sClient: client}
-
-	ready, err := service.markHotClaimReservationReady(context.Background(), stalePod)
-	if err != nil {
-		t.Fatalf("markHotClaimReservationReady() error = %v", err)
+	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateInitializing)
+	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV1
+	service := &SandboxService{clock: fixedClock{now: now}}
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: pod.Namespace},
 	}
-	if got := ready.Annotations[controller.AnnotationHotClaimReservationState]; got != controller.HotClaimReservationStateReady {
-		t.Fatalf("reservation state = %q, want %q", got, controller.HotClaimReservationStateReady)
+
+	record := sandboxRecordForClaimedPod(service, pod, template, &ClaimRequest{
+		SandboxID:         "sandbox-a",
+		Template:          "default",
+		TeamID:            "team-a",
+		UserID:            "user-a",
+		RuntimeGeneration: 1,
+	})
+	if record.Status != SandboxStatusStarting {
+		t.Fatalf("sandbox record status = %q, want starting", record.Status)
+	}
+}
+
+func TestHotClaimReservationControllerFinalizesRecordCompletedClaim(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateInitializing)
+	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV1
+	record := hotClaimReservationTestRecord(pod)
+	record.UpdatedAt = now
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{"sandbox-a": record}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	reconciler := NewHotClaimReservationController(client, newClaimTestPodLister(t, pod), store, nil)
+	reconciler.clock = fixedClock{now: now}
+	reconciler.settleWindow = 0
+	reconciler.detachPacer = &recordingHotClaimDetachmentPacer{}
+
+	if _, err := reconciler.reconcile(context.Background(), pod.Namespace+"/"+pod.Name); err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+	got, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get finalized pod: %v", err)
+	}
+	if got.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+		t.Fatalf("pool type = %q, want active", got.Labels[controller.LabelPoolType])
+	}
+	if controller.IsHotClaimReservedPod(got) {
+		t.Fatalf("finalized pod still has reservation: %#v", got.Annotations)
+	}
+	if _, exists := got.Annotations[controller.AnnotationHotClaimCompletionProtocol]; exists {
+		t.Fatalf("completion protocol remains after finalization: %#v", got.Annotations)
+	}
+}
+
+func TestHotClaimReservationControllerDoesNotCompleteUnsafeInitializingClaim(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		protocol string
+		status   string
+	}{
+		{
+			name:   "legacy running record lacks completion protocol",
+			status: SandboxStatusRunning,
+		},
+		{
+			name:     "record protocol is still starting",
+			protocol: controller.HotClaimCompletionProtocolRecordV1,
+			status:   SandboxStatusStarting,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateInitializing)
+			if test.protocol != "" {
+				pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = test.protocol
+			}
+			record := hotClaimReservationTestRecord(pod)
+			record.Status = test.status
+			store := &memorySandboxStore{records: map[string]*SandboxRecord{"sandbox-a": record}}
+			client := fake.NewSimpleClientset(pod.DeepCopy())
+			reconciler := NewHotClaimReservationController(client, newClaimTestPodLister(t, pod), store, nil)
+			reconciler.clock = fixedClock{now: now}
+
+			requeueAfter, err := reconciler.reconcile(context.Background(), pod.Namespace+"/"+pod.Name)
+			if err != nil {
+				t.Fatalf("reconcile() error = %v", err)
+			}
+			if requeueAfter != hotClaimReservationRecoveryGracePeriod {
+				t.Fatalf("requeueAfter = %s, want %s", requeueAfter, hotClaimReservationRecoveryGracePeriod)
+			}
+			got, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("get reserved pod: %v", err)
+			}
+			if got.Labels[controller.LabelPoolType] != controller.PoolTypeIdle {
+				t.Fatalf("pool type = %q, want idle", got.Labels[controller.LabelPoolType])
+			}
+		})
 	}
 }
 

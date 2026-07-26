@@ -203,12 +203,11 @@ func (c *HotClaimReservationController) reconcile(ctx context.Context, key strin
 	if err != nil {
 		return 0, err
 	}
-	if pod.Annotations[controller.AnnotationHotClaimReservationState] == controller.HotClaimReservationStateReady &&
-		hotClaimReservationMatchesRecord(pod, record) {
-		if requeueAfter := c.detachmentTimeRemaining(pod); requeueAfter > 0 {
+	if hotClaimReservationCompleted(pod, record) {
+		if requeueAfter := c.detachmentTimeRemaining(pod, record); requeueAfter > 0 {
 			return requeueAfter, nil
 		}
-		if !c.detachmentMaxDelayElapsed(pod) && c.detachPacer != nil {
+		if !c.detachmentMaxDelayElapsed(pod, record) && c.detachPacer != nil {
 			if err := c.detachPacer.Wait(ctx); err != nil {
 				return 0, fmt.Errorf("wait for hot claim detachment pace: %w", err)
 			}
@@ -256,8 +255,8 @@ func (c *HotClaimReservationController) recoveryTimeRemaining(pod *corev1.Pod) t
 	return remaining
 }
 
-func (c *HotClaimReservationController) detachmentTimeRemaining(pod *corev1.Pod) time.Duration {
-	readyAt, ok := hotClaimReservationReadyTime(pod)
+func (c *HotClaimReservationController) detachmentTimeRemaining(pod *corev1.Pod, record *SandboxRecord) time.Duration {
+	readyAt, ok := hotClaimReservationReadyTime(pod, record)
 	if !ok || c.settleWindow <= 0 || c.detachmentMaxDelayElapsedAt(readyAt) {
 		return 0
 	}
@@ -275,8 +274,8 @@ func (c *HotClaimReservationController) detachmentTimeRemaining(pod *corev1.Pod)
 	return remaining
 }
 
-func (c *HotClaimReservationController) detachmentMaxDelayElapsed(pod *corev1.Pod) bool {
-	readyAt, ok := hotClaimReservationReadyTime(pod)
+func (c *HotClaimReservationController) detachmentMaxDelayElapsed(pod *corev1.Pod, record *SandboxRecord) bool {
+	readyAt, ok := hotClaimReservationReadyTime(pod, record)
 	return !ok || c.detachmentMaxDelayElapsedAt(readyAt)
 }
 
@@ -322,9 +321,12 @@ func (c *HotClaimReservationController) claimableIdleBelowLowWatermark(pod *core
 	return true
 }
 
-func hotClaimReservationReadyTime(pod *corev1.Pod) (time.Time, bool) {
+func hotClaimReservationReadyTime(pod *corev1.Pod, record *SandboxRecord) (time.Time, bool) {
 	if pod == nil {
 		return time.Time{}, false
+	}
+	if hotClaimUsesRecordCompletion(pod) && record != nil && !record.UpdatedAt.IsZero() {
+		return record.UpdatedAt, true
 	}
 	for _, key := range []string{
 		controller.AnnotationHotClaimReadyAt,
@@ -370,6 +372,12 @@ func (c *HotClaimReservationController) finalizeReservation(ctx context.Context,
 			Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReadyAt),
 		})
 	}
+	if pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] != "" {
+		operations = append(operations, claimMetadataPatchOperation{
+			Operation: "remove",
+			Path:      metadataMapPath("annotations", controller.AnnotationHotClaimCompletionProtocol),
+		})
+	}
 	operations = append(operations, claimMetadataPatchOperation{
 		Operation: "remove",
 		Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReservation),
@@ -403,13 +411,6 @@ func hotClaimReservationPreconditions(pod *corev1.Pod) []claimMetadataPatchOpera
 			Value:     pod.UID,
 		})
 	}
-	if pod.ResourceVersion != "" {
-		operations = append(operations, claimMetadataPatchOperation{
-			Operation: "test",
-			Path:      "/metadata/resourceVersion",
-			Value:     pod.ResourceVersion,
-		})
-	}
 	return append(operations,
 		claimMetadataPatchOperation{
 			Operation: "test",
@@ -424,7 +425,7 @@ func hotClaimReservationPreconditions(pod *corev1.Pod) []claimMetadataPatchOpera
 		claimMetadataPatchOperation{
 			Operation: "test",
 			Path:      metadataMapPath("annotations", controller.AnnotationHotClaimReservationState),
-			Value:     controller.HotClaimReservationStateReady,
+			Value:     pod.Annotations[controller.AnnotationHotClaimReservationState],
 		},
 	)
 }
@@ -471,4 +472,17 @@ func hotClaimReservationMatchesRecord(pod *corev1.Pod, record *SandboxRecord) bo
 	}
 	podGeneration := runtimeGenerationFromPod(pod)
 	return podGeneration <= 0 || record.RuntimeGeneration <= 0 || record.RuntimeGeneration == podGeneration
+}
+
+func hotClaimReservationCompleted(pod *corev1.Pod, record *SandboxRecord) bool {
+	if !hotClaimReservationMatchesRecord(pod, record) {
+		return false
+	}
+	state := pod.Annotations[controller.AnnotationHotClaimReservationState]
+	if state == controller.HotClaimReservationStateReady {
+		return true
+	}
+	return state == controller.HotClaimReservationStateInitializing &&
+		hotClaimUsesRecordCompletion(pod) &&
+		record.Status == SandboxStatusRunning
 }

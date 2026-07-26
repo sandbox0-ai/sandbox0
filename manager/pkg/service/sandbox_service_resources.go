@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -44,7 +45,19 @@ func (s *SandboxService) applySandboxResourceQuota(pod *corev1.Pod, quota v1alph
 }
 
 func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *corev1.Pod, quota v1alpha1.ResourceQuota) (*corev1.Pod, error) {
-	if s == nil || s.k8sClient == nil {
+	if s == nil {
+		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)
+	}
+	return s.resizeSandboxPodResourcesWithClient(ctx, s.k8sClient, pod, quota)
+}
+
+func (s *SandboxService) resizeSandboxPodResourcesWithClient(
+	ctx context.Context,
+	client kubernetes.Interface,
+	pod *corev1.Pod,
+	quota v1alpha1.ResourceQuota,
+) (*corev1.Pod, error) {
+	if client == nil {
 		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)
 	}
 	if pod == nil || pod.Namespace == "" || pod.Name == "" {
@@ -66,7 +79,7 @@ func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *cor
 		return nil, fmt.Errorf("build sandbox resource resize patch: %w", err)
 	}
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		result, err := s.k8sClient.CoreV1().Pods(namespace).Patch(
+		result, err := client.CoreV1().Pods(namespace).Patch(
 			ctx,
 			name,
 			types.StrategicMergePatchType,

@@ -433,6 +433,22 @@ func TestTLSAdapterDefersHTTPSHeaderResolutionUntilAfterDownstreamHandshake(t *t
 }
 
 func TestTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		upstreamALPN         string
+		wantUpstreamProtocol string
+	}{
+		{name: "upstream_http2", upstreamALPN: "h2", wantUpstreamProtocol: "HTTP/2.0"},
+		{name: "upstream_http1", upstreamALPN: "http/1.1", wantUpstreamProtocol: "HTTP/1.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t, tc.upstreamALPN, tc.wantUpstreamProtocol)
+		})
+	}
+}
+
+func testTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T, upstreamALPN, wantUpstreamProtocol string) {
+	t.Helper()
 	mitmCertPEM, mitmKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-mitm", time.Hour)
 	if err != nil {
 		t.Fatalf("new mitm ca: %v", err)
@@ -464,7 +480,7 @@ func TestTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T) {
 	requestProtocol := make(chan string, 1)
 	upstreamListener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
 		Certificates: []tls.Certificate{*upstreamLeaf},
-		NextProtos:   []string{"h2"},
+		NextProtos:   []string{upstreamALPN},
 		MinVersion:   tls.VersionTLS12,
 	})
 	if err != nil {
@@ -482,11 +498,13 @@ func TestTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T) {
 			requestHeaders <- r.Header.Clone()
 			requestBody <- string(body)
 			requestProtocol <- r.Proto
-			_, _ = w.Write([]byte("h2-secure-ok"))
+			_, _ = w.Write([]byte("secure-ok"))
 		}),
 	}
-	if err := http2.ConfigureServer(upstreamServer, &http2.Server{}); err != nil {
-		t.Fatalf("configure upstream http2 server: %v", err)
+	if upstreamALPN == "h2" {
+		if err := http2.ConfigureServer(upstreamServer, &http2.Server{}); err != nil {
+			t.Fatalf("configure upstream http2 server: %v", err)
+		}
 	}
 	defer upstreamServer.Close()
 	go func() {
@@ -590,14 +608,14 @@ func TestTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T) {
 		t.Fatalf("read http2 response body: %v", err)
 	}
 	_ = resp.Body.Close()
-	if got := string(body); got != "h2-secure-ok" {
+	if got := string(body); got != "secure-ok" {
 		t.Fatalf("response body = %q", got)
 	}
 	if got := <-negotiatedProtocol; got != "h2" {
 		t.Fatalf("negotiated protocol = %q, want h2", got)
 	}
-	if got := <-requestProtocol; got != "HTTP/2.0" {
-		t.Fatalf("upstream protocol = %q, want HTTP/2.0", got)
+	if got := <-requestProtocol; got != wantUpstreamProtocol {
+		t.Fatalf("upstream protocol = %q, want %s", got, wantUpstreamProtocol)
 	}
 	headers := <-requestHeaders
 	if got := headers.Get("Authorization"); got != "Bearer h2-token" {
@@ -614,6 +632,78 @@ func TestTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for tls adapter")
+	}
+}
+
+func TestHTTP2DownstreamProxyRequiresHTTP2UpstreamForGRPC(t *testing.T) {
+	upstreamCAPEM, upstreamCAKeyPEM, err := newSelfSignedCertificateAuthority("sandbox0-upstream", time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream ca: %v", err)
+	}
+	upstreamAuthority, err := newCertificateAuthority(upstreamCAPEM, upstreamCAKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("new upstream authority: %v", err)
+	}
+	upstreamLeaf, err := upstreamAuthority.CertificateForHost("api.example.com")
+	if err != nil {
+		t.Fatalf("upstream leaf: %v", err)
+	}
+	upstreamRootPool := x509.NewCertPool()
+	if !upstreamRootPool.AppendCertsFromPEM(upstreamCAPEM) {
+		t.Fatal("append upstream ca")
+	}
+
+	upstreamListener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{*upstreamLeaf},
+		NextProtos:   []string{"http/1.1"},
+		MinVersion:   tls.VersionTLS12,
+	})
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer upstreamListener.Close()
+	upstreamServer := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("unexpected-http1"))
+		}),
+	}
+	defer upstreamServer.Close()
+	go func() {
+		_ = upstreamServer.Serve(upstreamListener)
+	}()
+
+	server := &Server{
+		cfg: &config.NetdConfig{
+			ProxyUpstreamTimeout: metav1.Duration{Duration: 2 * time.Second},
+		},
+		logger:            zap.NewNop(),
+		upstreamTLSConfig: &tls.Config{RootCAs: upstreamRootPool},
+	}
+	req := &adapterRequest{
+		Compiled: &policy.CompiledPolicy{SandboxID: "sbx_123", TeamID: "team_123"},
+		DestIP:   upstreamListener.Addr().(*net.TCPAddr).IP,
+		DestPort: upstreamListener.Addr().(*net.TCPAddr).Port,
+		Host:     "api.example.com",
+		EgressAuth: &egressAuthContext{
+			Rule: &policy.CompiledEgressAuthRule{
+				Protocol: v1alpha1.EgressAuthProtocolGRPC,
+			},
+		},
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, "https://api.example.com/grpc.health.v1.Health/Check", strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("new grpc request: %v", err)
+	}
+
+	resp, closeUpstream, err := server.roundTripHTTP2DownstreamRequest(httpReq, req, nil)
+	if closeUpstream != nil {
+		defer closeUpstream()
+	}
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "handshake upstream tls") {
+		t.Fatalf("expected upstream h2 negotiation error, got %v", err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/policy"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -110,12 +112,13 @@ func (s *Server) proxyHTTP2FromConn(downstream *tls.Conn, req *adapterRequest) e
 			if errors.Is(err, errProtocolPolicyDenied) {
 				return
 			}
-			s.logger.Warn("HTTP/2 proxy request failed",
+			s.logger.Warn("HTTP/2 downstream proxy request failed",
 				zap.Error(err),
 				zap.String("host", req.Host),
 				zap.Int("port", req.DestPort),
+				zap.String("sandbox_id", compiledSandboxID(req.Compiled)),
 			)
-			http.Error(w, "upstream http2 request failed", http.StatusBadGateway)
+			http.Error(w, "upstream http request failed", http.StatusBadGateway)
 		}
 	})
 
@@ -139,8 +142,6 @@ func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *h
 	if w == nil || downstreamReq == nil || req == nil {
 		return fmt.Errorf("http2 proxy request is incomplete")
 	}
-	transport := s.newHTTP2Transport(req, upstreamCounter)
-	defer transport.CloseIdleConnections()
 
 	requestScoped := *req
 	if req.EgressAuth != nil {
@@ -185,10 +186,11 @@ func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *h
 		return err
 	}
 
-	resp, err := transport.RoundTrip(upstreamReq)
+	resp, closeUpstream, err := s.roundTripHTTP2DownstreamRequest(upstreamReq, &requestScoped, upstreamCounter)
 	if err != nil {
-		return fmt.Errorf("round trip upstream http2 request: %w", err)
+		return fmt.Errorf("round trip upstream http request: %w", err)
 	}
+	defer closeUpstream()
 	defer resp.Body.Close()
 
 	declareResponseTrailers(w, resp.Trailer)
@@ -202,41 +204,85 @@ func (s *Server) handleHTTP2ProxyRequest(w http.ResponseWriter, downstreamReq *h
 	return nil
 }
 
-func (s *Server) newHTTP2Transport(req *adapterRequest, upstreamCounter **countingConn) *http2.Transport {
+// roundTripHTTP2DownstreamRequest negotiates the upstream HTTP version
+// independently from the downstream HTTP/2 connection. Ordinary HTTPS can
+// bridge to an HTTP/1.1-only origin, while gRPC remains HTTP/2-only.
+func (s *Server) roundTripHTTP2DownstreamRequest(
+	httpReq *http.Request,
+	req *adapterRequest,
+	upstreamCounter **countingConn,
+) (*http.Response, func(), error) {
+	if s == nil || httpReq == nil || req == nil {
+		return nil, nil, fmt.Errorf("upstream http request is incomplete")
+	}
 	cfg := cloneTLSConfig(s.upstreamTLSConfig)
 	if cfg.ServerName == "" {
 		cfg.ServerName = req.Host
 	}
-	cfg.NextProtos = []string{"h2"}
-	return &http2.Transport{
-		TLSClientConfig: cfg,
-		DialTLSContext: func(ctx context.Context, network, addr string, tlsCfg *tls.Config) (net.Conn, error) {
-			_ = network
-			_ = addr
-			_ = tlsCfg
-			rawConn, err := s.dialTCPUpstreamForRequest(req)
-			if err != nil {
-				return nil, fmt.Errorf("dial upstream http2 tls: %w", err)
-			}
-			conn := tls.Client(rawConn, cfg)
-			if err := conn.HandshakeContext(ctx); err != nil {
-				_ = rawConn.Close()
-				return nil, fmt.Errorf("handshake upstream http2 tls: %w", err)
-			}
-			wrapped := &countingConn{
-				Conn:     conn,
-				limiter:  s.bandwidthLimiter,
-				compiled: req.Compiled,
-				// Ingress is charged when the downstream connection is
-				// written. Reads remain counted for metering only.
-				readDirection:  "",
-				writeDirection: bandwidthEgress,
-			}
-			if upstreamCounter != nil && *upstreamCounter == nil {
-				*upstreamCounter = wrapped
-			}
-			return wrapped, nil
-		},
+	requiresHTTP2 := req.EgressAuth != nil &&
+		req.EgressAuth.Rule != nil &&
+		req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
+	if requiresHTTP2 {
+		cfg.NextProtos = []string{"h2"}
+	} else {
+		cfg.NextProtos = []string{"h2", "http/1.1"}
+	}
+
+	rawConn, err := s.dialTCPUpstreamForRequest(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial upstream tls: %w", err)
+	}
+	tlsConn := tls.Client(rawConn, cfg)
+	if err := tlsConn.HandshakeContext(httpReq.Context()); err != nil {
+		_ = rawConn.Close()
+		return nil, nil, fmt.Errorf("handshake upstream tls: %w", err)
+	}
+	wrapped := &countingConn{
+		Conn:     tlsConn,
+		limiter:  s.bandwidthLimiter,
+		compiled: req.Compiled,
+		// Ingress is charged when the downstream connection is written.
+		// Reads remain counted for metering only.
+		readDirection:  "",
+		writeDirection: bandwidthEgress,
+	}
+	if upstreamCounter != nil && *upstreamCounter == nil {
+		*upstreamCounter = wrapped
+	}
+
+	switch negotiated := tlsConn.ConnectionState().NegotiatedProtocol; negotiated {
+	case "h2":
+		transport := &http2.Transport{}
+		clientConn, err := transport.NewClientConn(wrapped)
+		if err != nil {
+			_ = wrapped.Close()
+			return nil, nil, fmt.Errorf("initialize upstream http2 connection: %w", err)
+		}
+		resp, err := clientConn.RoundTrip(httpReq)
+		if err != nil {
+			_ = clientConn.Close()
+			return nil, nil, fmt.Errorf("round trip upstream http2 request: %w", err)
+		}
+		return resp, func() { _ = clientConn.Close() }, nil
+	case "", "http/1.1":
+		if requiresHTTP2 {
+			_ = wrapped.Close()
+			return nil, nil, fmt.Errorf("grpc upstream did not negotiate h2")
+		}
+		httpReq.Close = true
+		if err := httpReq.Write(wrapped); err != nil {
+			_ = wrapped.Close()
+			return nil, nil, fmt.Errorf("write upstream http1 request: %w", err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(wrapped), httpReq)
+		if err != nil {
+			_ = wrapped.Close()
+			return nil, nil, fmt.Errorf("read upstream http1 response: %w", err)
+		}
+		return resp, func() { _ = wrapped.Close() }, nil
+	default:
+		_ = wrapped.Close()
+		return nil, nil, fmt.Errorf("upstream negotiated unsupported ALPN protocol %q", negotiated)
 	}
 }
 

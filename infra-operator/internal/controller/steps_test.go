@@ -21,7 +21,6 @@ import (
 	"errors"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -104,37 +103,5 @@ func TestRunStepsErrorStopsAndSetsCondition(t *testing.T) {
 		if status != metav1.ConditionFalse {
 			t.Fatalf("expected condition status false, got %v", status)
 		}
-	}
-}
-
-func TestIsReadyPod(t *testing.T) {
-	readyPod := &corev1.Pod{
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			Conditions: []corev1.PodCondition{
-				{
-					Type:   corev1.PodReady,
-					Status: corev1.ConditionTrue,
-				},
-			},
-		},
-	}
-	if !isReadyPod(readyPod) {
-		t.Fatalf("expected running ready pod to be reported as ready")
-	}
-
-	notReadyPod := &corev1.Pod{
-		Status: corev1.PodStatus{
-			Phase: corev1.PodPending,
-			Conditions: []corev1.PodCondition{
-				{
-					Type:   corev1.PodReady,
-					Status: corev1.ConditionFalse,
-				},
-			},
-		},
-	}
-	if isReadyPod(notReadyPod) {
-		t.Fatalf("expected pending pod to be reported as not ready")
 	}
 }

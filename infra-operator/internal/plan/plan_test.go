@@ -1218,7 +1218,6 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"ctld-ready",
 		"network-ready",
 		"data-plane-node-readiness",
-		"builtin-template-pods",
 		"register-cluster",
 	}
 	if len(got) != len(want) {

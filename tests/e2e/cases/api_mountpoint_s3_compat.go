@@ -569,13 +569,13 @@ fi
 func assertMountpointS3Overwrite(env *framework.ScenarioEnv, namespace, podName string, store objectstore.Store) {
 	By("overwriting existing S3 objects through truncate semantics")
 	putMountpointS3Object(store, "write-lifecycle/truncate.txt", "before-truncate")
-	runMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
+	waitMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
 set -eu
 M=%s
 file="$M/write-lifecycle/truncate.txt"
 : > "$file"
 sync
-	`, shellQuote(mountpointS3MountPath)))
+	`, shellQuote(mountpointS3MountPath)), 30*time.Second)
 	expectMountpointS3ObjectEventually(store, "write-lifecycle/truncate.txt", []byte(""))
 	waitMountpointS3Script(env, namespace, podName, fmt.Sprintf(`
 set -eu

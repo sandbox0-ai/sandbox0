@@ -9,7 +9,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -26,8 +25,7 @@ import (
 )
 
 const (
-	maxRetries               = 5
-	sandboxProbeRequeueAfter = 5 * time.Second
+	maxRetries = 5
 )
 
 // Operator is the main controller for SandboxTemplate CRD
@@ -42,7 +40,8 @@ type Operator struct {
 	statsPublisher TemplateStatsPublisher
 	probeRunner    SandboxProbeRunner
 
-	workqueue workqueue.TypedRateLimitingInterface[string]
+	workqueue     workqueue.TypedRateLimitingInterface[string]
+	podProbeQueue workqueue.TypedRateLimitingInterface[string]
 
 	metrics *obsmetrics.ManagerMetrics
 
@@ -54,10 +53,6 @@ type Operator struct {
 
 	statsMu   sync.Mutex
 	lastStats map[string]TemplateCounts
-}
-
-type SandboxProbeRunner interface {
-	ProbeSandboxPod(ctx context.Context, pod *corev1.Pod, kind sandboxprobe.Kind) (*sandboxprobe.Response, error)
 }
 
 // SetNamespacePolicyReconciler installs the manager-owned template namespace baseline reconciler.
@@ -128,6 +123,7 @@ func NewOperator(
 		clock:            clock,
 		logger:           logger,
 		workqueue:        workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
+		podProbeQueue:    workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 		metrics:          metrics,
 		templateInformer: templateInformer,
 		templateLister: TemplateListerImpl{
@@ -157,6 +153,7 @@ func NewOperator(
 func (op *Operator) Run(ctx context.Context, workers int) error {
 	defer runtime.HandleCrash()
 	defer op.workqueue.ShutDown()
+	defer op.podProbeQueue.ShutDown()
 
 	op.logger.Info("Starting operator")
 
@@ -169,6 +166,9 @@ func (op *Operator) Run(ctx context.Context, workers int) error {
 	op.logger.Info("Starting workers", zap.Int("count", workers))
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, op.runWorker, time.Second)
+	}
+	for i := 0; i < sandboxProbeWorkers; i++ {
+		go wait.UntilWithContext(ctx, op.runPodProbeWorker, time.Second)
 	}
 
 	op.logger.Info("Operator started")
@@ -257,14 +257,10 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 	}
 
 	// Update status
-	needsProbeRequeue, err := op.updateTemplateStatus(ctx, template)
-	if err != nil {
+	if err := op.updateTemplateStatus(ctx, template); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
 	requeueAfter := poolRequeueAfter
-	if needsProbeRequeue && (requeueAfter <= 0 || sandboxProbeRequeueAfter < requeueAfter) {
-		requeueAfter = sandboxProbeRequeueAfter
-	}
 	if requeueAfter > 0 {
 		op.workqueue.AddAfter(key, requeueAfter)
 	}
@@ -273,14 +269,14 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 }
 
 // updateTemplateStatus updates the status of a SandboxTemplate
-func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1.SandboxTemplate) (bool, error) {
+func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1.SandboxTemplate) error {
 	// Get idle pods
 	idlePods, err := op.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
 		LabelPoolType:   PoolTypeIdle,
 	}))
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	// Get active pods
@@ -289,28 +285,12 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		LabelPoolType:   PoolTypeActive,
 	}))
 	if err != nil {
-		return false, err
-	}
-
-	reconciledPods := make(map[string]*corev1.Pod, len(idlePods)+len(activePods))
-	needsProbeRequeue := false
-	for _, pod := range append(append([]*corev1.Pod(nil), idlePods...), activePods...) {
-		updatedPod, err := op.ensureSandboxProbeConditions(ctx, pod)
-		if err != nil {
-			return false, fmt.Errorf("ensure sandbox pod probe conditions for %s/%s: %w", pod.Namespace, pod.Name, err)
-		}
-		reconciledPods[pod.Namespace+"/"+pod.Name] = updatedPod
-		if op.probeRunner != nil && shouldRequeueSandboxProbe(updatedPod) {
-			needsProbeRequeue = true
-		}
+		return err
 	}
 
 	// Count only ready idle pods as available pooled capacity.
 	idleCount := int32(0)
 	for _, pod := range idlePods {
-		if updatedPod := reconciledPods[pod.Namespace+"/"+pod.Name]; updatedPod != nil {
-			pod = updatedPod
-		}
 		if IsPodReady(pod) {
 			idleCount++
 		}
@@ -369,60 +349,7 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		)
 	}
 
-	return needsProbeRequeue, nil
-}
-
-func shouldRequeueSandboxProbe(pod *corev1.Pod) bool {
-	if pod == nil || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || !HasSandboxPodReadinessGate(pod) {
-		return false
-	}
-	if !podConditionTrue(pod.Status.Conditions, v1alpha1.SandboxPodReadinessConditionType) {
-		return true
-	}
-	live := findPodCondition(pod.Status.Conditions, v1alpha1.SandboxPodLivenessConditionType)
-	return live != nil && live.Status == corev1.ConditionFalse
-}
-
-func (op *Operator) ensureSandboxProbeConditions(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
-	if pod == nil {
-		return nil, nil
-	}
-	if op.probeRunner == nil {
-		return EnsureSandboxPodProbeConditions(ctx, op.k8sClient, pod,
-			probeFailure(sandboxprobe.KindStartup, "SandboxProbeUnavailable", "sandbox probe runner is unavailable"),
-			probeFailure(sandboxprobe.KindReadiness, "SandboxProbeUnavailable", "sandbox probe runner is unavailable"),
-			probeFailure(sandboxprobe.KindLiveness, "SandboxProbeUnavailable", "sandbox probe runner is unavailable"),
-		)
-	}
-	if pod.Status.Phase != corev1.PodRunning {
-		message := fmt.Sprintf("pod phase is %s", pod.Status.Phase)
-		return EnsureSandboxPodProbeConditions(ctx, op.k8sClient, pod,
-			probeFailure(sandboxprobe.KindStartup, "PodNotRunning", message),
-			probeFailure(sandboxprobe.KindReadiness, "PodNotRunning", message),
-			probeFailure(sandboxprobe.KindLiveness, "PodNotRunning", message),
-		)
-	}
-
-	startup := op.runSandboxProbe(ctx, pod, sandboxprobe.KindStartup)
-	readiness := op.runSandboxProbe(ctx, pod, sandboxprobe.KindReadiness)
-	liveness := op.runSandboxProbe(ctx, pod, sandboxprobe.KindLiveness)
-	return EnsureSandboxPodProbeConditions(ctx, op.k8sClient, pod, startup, readiness, liveness)
-}
-
-func (op *Operator) runSandboxProbe(ctx context.Context, pod *corev1.Pod, kind sandboxprobe.Kind) *sandboxprobe.Response {
-	result, err := op.probeRunner.ProbeSandboxPod(ctx, pod, kind)
-	if err != nil {
-		return probeFailure(kind, "SandboxProbeFailed", err.Error())
-	}
-	if result == nil {
-		return probeFailure(kind, "SandboxProbeMissing", "sandbox probe returned no result")
-	}
-	return result
-}
-
-func probeFailure(kind sandboxprobe.Kind, reason, message string) *sandboxprobe.Response {
-	result := sandboxprobe.Failed(kind, reason, message, nil)
-	return &result
+	return nil
 }
 
 // computeConditions computes the conditions for a template
@@ -524,6 +451,7 @@ func (op *Operator) enqueueTemplateKey(namespace, name string) {
 func (op *Operator) handlePodAdd(obj any) {
 	pod := obj.(*corev1.Pod)
 	op.enqueueTemplateForPod(pod)
+	op.enqueuePodProbe(pod)
 }
 
 func (op *Operator) handlePodUpdate(oldObj, newObj any) {
@@ -533,6 +461,9 @@ func (op *Operator) handlePodUpdate(oldObj, newObj any) {
 		return
 	}
 	op.enqueueTemplateForPod(newPod)
+	if podProbeInputsChanged(oldPod, newPod) {
+		op.enqueuePodProbe(newPod)
+	}
 }
 
 func (op *Operator) handlePodDelete(obj any) {

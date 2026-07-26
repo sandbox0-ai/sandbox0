@@ -105,6 +105,7 @@ const (
 	PermSandboxVolumeFileWrite = "sandboxvolumefile:write"
 
 	PermQuotaRead = "quota:read"
+	PermUsageRead = "usage:read"
 
 	PermSandboxObservabilityWrite = "sandboxobservability:write"
 	PermSandboxAuditRead          = "sandboxaudit:read"
@@ -133,6 +134,7 @@ var RolePermissions = map[string][]string{
 		PermSandboxVolumeFileRead,
 		PermSandboxVolumeFileWrite,
 		PermQuotaRead,
+		PermUsageRead,
 		PermSandboxAuditRead,
 	},
 	"developer": {
@@ -152,6 +154,7 @@ var RolePermissions = map[string][]string{
 		PermSandboxVolumeFileRead,
 		PermSandboxVolumeFileWrite,
 		PermQuotaRead,
+		PermUsageRead,
 	},
 	"builder": {
 		PermTemplateRead,
@@ -164,6 +167,7 @@ var RolePermissions = map[string][]string{
 		PermSandboxVolumeRead,
 		PermSandboxVolumeFileRead,
 		PermQuotaRead,
+		PermUsageRead,
 	},
 }
 

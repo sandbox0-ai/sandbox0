@@ -442,6 +442,33 @@ func TestSetupRoutesExposesQuotaReadOnlyPublicAPI(t *testing.T) {
 	}
 }
 
+func TestSetupRoutesExposesTenantScopedUsageAPI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server, _, issuer := testMeteringRouteServer(t, "public")
+	server.requestLogger = middleware.NewRequestLogger(zap.NewNop())
+	server.obsProvider = newTestMeteringObservability(t)
+	server.setupRoutes()
+
+	if !hasRoute(server.router, "GET", "/api/v1/usage/windows") {
+		t.Fatal("expected public usage windows route")
+	}
+
+	tokens, err := issuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "viewer"}})
+	if err != nil {
+		t.Fatalf("issue token pair: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/windows", nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set(internalauth.TeamIDHeader, "team-1")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
 func TestSetupMeteringRoutesDoesNotRequireManagerUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

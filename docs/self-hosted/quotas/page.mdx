@@ -103,6 +103,32 @@ Capacity statuses include `current` and `remaining`. Rate statuses include
 `interval_ms` and `burst_value`; `current` and `remaining` are `null` because
 Redis token state is transient admission state, not cumulative usage.
 
+## Read Cumulative Usage
+
+Use the official SDK usage resource when a separate product needs cumulative
+usage. `client.usage.listWindows()` calls
+`GET /api/v1/usage/windows`, which derives the team from the authenticated
+token and requires `usage:read`.
+
+```ts
+const page = await client.usage.listWindows({
+    cursor,
+    limit: 1000,
+    windowType: "sandbox.runtime_mib_milliseconds",
+});
+```
+
+The response contains immutable, closed windows and an opaque `nextCursor`.
+Persist the cursor only after the page is durably consumed. The public response
+omits producer-only team, user, and raw event data. It is served by the
+configured ClickHouse metering projection and returns `503` when that query
+backend is disabled or unavailable.
+
+This SDK endpoint is the supported boundary for separate products. Do not give
+them ClickHouse credentials, a Sandbox0 PostgreSQL connection, or access to
+`/internal/v1/metering/*`; those internal endpoints remain region-operator
+export and diagnosis surfaces.
+
 ## Metering Boundary
 
 Raw `sandbox.egress_bytes` and `sandbox.ingress_bytes` metering remains

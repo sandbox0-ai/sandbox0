@@ -727,6 +727,11 @@ const (
 	SuccessTemplateResponseSuccessTrue SuccessTemplateResponseSuccess = true
 )
 
+// Defines values for SuccessUsageWindowsResponseSuccess.
+const (
+	SuccessUsageWindowsResponseSuccessTrue SuccessUsageWindowsResponseSuccess = true
+)
+
 // Defines values for SuccessUserResponseSuccess.
 const (
 	SuccessUserResponseSuccessTrue SuccessUserResponseSuccess = true
@@ -739,7 +744,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TeamQuotaKind.
@@ -3374,6 +3379,15 @@ type SuccessTemplateResponse struct {
 // SuccessTemplateResponseSuccess defines model for SuccessTemplateResponse.Success.
 type SuccessTemplateResponseSuccess bool
 
+// SuccessUsageWindowsResponse defines model for SuccessUsageWindowsResponse.
+type SuccessUsageWindowsResponse struct {
+	Data    *UsageWindowPage                   `json:"data,omitempty"`
+	Success SuccessUsageWindowsResponseSuccess `json:"success"`
+}
+
+// SuccessUsageWindowsResponseSuccess defines model for SuccessUsageWindowsResponse.Success.
+type SuccessUsageWindowsResponseSuccess bool
+
 // SuccessUserResponse defines model for SuccessUserResponse.
 type SuccessUserResponse struct {
 	Data    *User                      `json:"data,omitempty"`
@@ -3624,6 +3638,28 @@ type UpdateTeamRequest struct {
 type UpdateUserRequest struct {
 	AvatarUrl *string `json:"avatar_url,omitempty"`
 	Name      *string `json:"name,omitempty"`
+}
+
+// UsageWindow defines model for UsageWindow.
+type UsageWindow struct {
+	ClusterId   *string   `json:"cluster_id,omitempty"`
+	RecordedAt  time.Time `json:"recorded_at"`
+	RegionId    *string   `json:"region_id,omitempty"`
+	SandboxId   *string   `json:"sandbox_id,omitempty"`
+	SubjectId   string    `json:"subject_id"`
+	SubjectType string    `json:"subject_type"`
+	Unit        string    `json:"unit"`
+	Value       int64     `json:"value"`
+	WindowEnd   time.Time `json:"window_end"`
+	WindowId    string    `json:"window_id"`
+	WindowStart time.Time `json:"window_start"`
+	WindowType  string    `json:"window_type"`
+}
+
+// UsageWindowPage defines model for UsageWindowPage.
+type UsageWindowPage struct {
+	NextCursor string        `json:"next_cursor"`
+	Windows    []UsageWindow `json:"windows"`
 }
 
 // User defines model for User.
@@ -3919,6 +3955,18 @@ type GetApiV1SandboxvolumesIdFilesStatParams struct {
 type PostApiV1TemplatesFromSandboxParams struct {
 	// IdempotencyKey Optional key for retrying creation without starting a duplicate image build.
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
+// GetApiV1UsageWindowsParams defines parameters for GetApiV1UsageWindows.
+type GetApiV1UsageWindowsParams struct {
+	// Cursor Opaque pagination cursor returned by a previous response.
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit Maximum number of windows to return. Values above 1000 are capped.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// WindowType Return only windows with this exact usage type.
+	WindowType *string `form:"window_type,omitempty" json:"window_type,omitempty"`
 }
 
 // GetAuthOidcProviderCallbackParams defines parameters for GetAuthOidcProviderCallback.

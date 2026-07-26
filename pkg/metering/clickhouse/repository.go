@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	metering "github.com/sandbox0-ai/sandbox0/pkg/metering"
@@ -336,6 +337,19 @@ LIMIT ?
 }
 
 func (r *Repository) ListWindows(ctx context.Context, cursor string, limit int) ([]*metering.Window, string, error) {
+	return r.listWindows(ctx, "", "", cursor, limit)
+}
+
+// ListTeamWindows returns usage windows scoped to exactly one team.
+func (r *Repository) ListTeamWindows(ctx context.Context, teamID string, windowType string, cursor string, limit int) ([]*metering.Window, string, error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return nil, "", fmt.Errorf("team_id is required")
+	}
+	return r.listWindows(ctx, teamID, strings.TrimSpace(windowType), cursor, limit)
+}
+
+func (r *Repository) listWindows(ctx context.Context, teamID string, windowType string, cursor string, limit int) ([]*metering.Window, string, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -343,7 +357,7 @@ func (r *Repository) ListWindows(ctx context.Context, cursor string, limit int) 
 	if err != nil {
 		return nil, "", err
 	}
-	where, args := cursorWhere(decoded, "window_id")
+	where, args := windowWhere(teamID, windowType, decoded)
 	args = append(args, limit)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 SELECT
@@ -390,6 +404,27 @@ LIMIT ?
 		return nil, "", err
 	}
 	return windows, next, nil
+}
+
+func windowWhere(teamID string, windowType string, cursor *pageCursor) (string, []any) {
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 5)
+	if teamID != "" {
+		clauses = append(clauses, "team_id = ?")
+		args = append(args, teamID)
+	}
+	if windowType != "" {
+		clauses = append(clauses, "window_type = ?")
+		args = append(args, windowType)
+	}
+	if cursor != nil {
+		clauses = append(clauses, fmt.Sprintf("(recorded_at, producer, window_id) > (%s, ?, ?)", dateTime64NanoPlaceholder))
+		args = append(args, dateTime64NanoArg(cursor.RecordedAt), cursor.Producer, cursor.ID)
+	}
+	if len(clauses) == 0 {
+		return "", args
+	}
+	return "WHERE " + strings.Join(clauses, " AND "), args
 }
 
 func nextEventCursor(events []*metering.Event) (string, error) {

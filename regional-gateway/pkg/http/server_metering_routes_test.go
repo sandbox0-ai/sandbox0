@@ -13,6 +13,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
 )
 
@@ -30,6 +32,44 @@ func TestSetupMeteringRoutesMountsRegionScopedEndpoints(t *testing.T) {
 	}
 	if !hasRoute(server.router, "GET", "/internal/v1/metering/windows") {
 		t.Fatal("expected metering windows route to be mounted")
+	}
+}
+
+func TestSetupRoutesExposesTeamScopedUsageAPI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := zap.NewNop()
+	obsProvider, err := observability.New(observability.Config{
+		ServiceName:    "regional-gateway-usage-test",
+		Logger:         logger,
+		DisableTracing: true,
+		DisableMetrics: true,
+		DisableLogging: true,
+		TraceExporter: observability.TraceExporterConfig{
+			Type: "noop",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create observability provider: %v", err)
+	}
+
+	server := testMeteringRouteServer()
+	server.obsProvider = obsProvider
+	server.requestLogger = gatewaymiddleware.NewRequestLogger(logger)
+	server.rateLimiter = gatewaymiddleware.NewRateLimiter(100, 200, time.Minute, logger)
+	server.setupRoutes()
+
+	tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "viewer"}})
+	if err != nil {
+		t.Fatalf("issue token pair: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/usage/windows", nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set(internalauth.TeamIDHeader, "team-1")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 }
 

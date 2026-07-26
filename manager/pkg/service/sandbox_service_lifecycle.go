@@ -674,7 +674,7 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*San
 		return nil, fmt.Errorf("get pod: %w", err)
 	}
 
-	return s.podToSandbox(ctx, pod, sandboxID), nil
+	return s.podToSandbox(pod, sandboxID), nil
 }
 
 // UpdateSandbox updates mutable sandbox configuration fields.
@@ -867,7 +867,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		return nil, err
 	}
 
-	return s.podToSandbox(ctx, updatedPod, sandboxID), nil
+	return s.podToSandbox(updatedPod, sandboxID), nil
 }
 
 func (s *SandboxService) updatePausedSandboxRecord(ctx context.Context, record *SandboxRecord, cfg *SandboxUpdateConfig) (*Sandbox, error) {
@@ -1122,8 +1122,8 @@ func selectSandboxRuntimePod(sandboxID string, pods []*corev1.Pod) (*corev1.Pod,
 	return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "pod"}, sandboxID)
 }
 
-// podToSandbox converts a pod to a sandbox object
-func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sandboxID string) *Sandbox {
+// podToSandbox projects cached pod state without waiting for runtime readiness.
+func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *Sandbox {
 	if sandboxID == "" {
 		sandboxID = sandboxIDFromPod(pod)
 	}
@@ -1135,11 +1135,6 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 	hardExpiresAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt)
 	createdAt := pod.CreationTimestamp.Time
 
-	internalAddr, err := s.prodAddress(ctx, pod)
-	if err != nil {
-		s.logger.Error("Failed to get procd address", zap.String("sandboxID", sandboxID), zap.Error(err))
-	}
-
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
 	autoResume := true
 	if cfg.AutoResume != nil {
@@ -1150,7 +1145,7 @@ func (s *SandboxService) podToSandbox(ctx context.Context, pod *corev1.Pod, sand
 		TemplateID:        sandboxTemplateIDFromLabels(pod.Labels),
 		TeamID:            pod.Annotations[controller.AnnotationTeamID],
 		UserID:            pod.Annotations[controller.AnnotationUserID],
-		InternalAddr:      internalAddr,
+		InternalAddr:      s.procdAddressFromPod(pod),
 		Status:            status,
 		Paused:            status == SandboxStatusPaused,
 		AutoResume:        autoResume,

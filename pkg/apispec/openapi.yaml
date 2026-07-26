@@ -4781,8 +4781,8 @@ components:
           type: boolean
           default: true
           description: |
-            Sandbox-level resume gate for paused sandboxes. When false, any inbound request
-            (API or public exposure) must not auto resume the sandbox.
+            Sandbox-level runtime recovery gate. When false, inbound API or public exposure
+            requests must not automatically resume a paused sandbox or replace a failed runtime.
         services:
           type: array
           items:
@@ -4954,8 +4954,9 @@ components:
         resume:
           type: boolean
           description: |
-            Allows this public route to wake a paused sandbox when sandbox auto_resume is true.
-            Resume-enabled public routes require a restartable service runtime: cmd or function.
+            Allows this public route to wake a paused sandbox or replace a failed runtime when
+            sandbox auto_resume is true. Resume-enabled public routes require a restartable service
+            runtime: cmd or function.
       required: [id, resume]
     SandboxAppServiceHealth:
       type: object
@@ -5161,8 +5162,8 @@ components:
           type: boolean
           default: true
           description: |
-            Sandbox-level resume gate for paused sandboxes. When false, any inbound request
-            (API or public exposure) must not auto resume the sandbox.
+            Sandbox-level runtime recovery gate. When false, inbound API or public exposure
+            requests must not automatically resume a paused sandbox or replace a failed runtime.
         services:
           type: array
           items:

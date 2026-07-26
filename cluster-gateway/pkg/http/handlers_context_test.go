@@ -241,6 +241,43 @@ func TestGetProcdURLPausedSandboxReturnsWakingUp(t *testing.T) {
 	}
 }
 
+func TestSandboxRuntimeMissing(t *testing.T) {
+	tests := []struct {
+		name    string
+		sandbox *mgr.Sandbox
+		want    bool
+	}{
+		{
+			name:    "running with address",
+			sandbox: &mgr.Sandbox{Status: mgr.SandboxStatusRunning, InternalAddr: "http://127.0.0.1:7777"},
+			want:    false,
+		},
+		{
+			name:    "running without address",
+			sandbox: &mgr.Sandbox{Status: mgr.SandboxStatusRunning},
+			want:    true,
+		},
+		{
+			name:    "paused with stale address",
+			sandbox: &mgr.Sandbox{Status: mgr.SandboxStatusPaused, InternalAddr: "http://127.0.0.1:7777"},
+			want:    true,
+		},
+		{
+			name:    "failed with stale address",
+			sandbox: &mgr.Sandbox{Status: mgr.SandboxStatusFailed, InternalAddr: "http://127.0.0.1:7777"},
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sandboxRuntimeMissing(tt.sandbox); got != tt.want {
+				t.Fatalf("sandboxRuntimeMissing() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func mustGetProcdURL(t *testing.T, server *Server, teamID, userID, sandboxID string) (*url.URL, *httptest.ResponseRecorder) {
 	t.Helper()
 

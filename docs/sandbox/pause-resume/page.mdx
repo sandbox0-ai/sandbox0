@@ -81,6 +81,8 @@ Resume a sandbox that was paused manually or by TTL expiry.
 
 Resume first restores the writable rootfs checkpoint onto a runtime pod created from the current template image. If that restore fails, Sandbox0 retries once with a runtime pod pinned to the checkpoint's recorded base image digest. Kubernetes pulls and garbage-collects that image through the normal kubelet image lifecycle.
 
+If the current runtime pod has reached the `Failed` phase, sandbox details return that state immediately instead of waiting for a Pod IP. Explicit resume, or a supported access path with `auto_resume: true`, removes the failed pod and creates a new runtime generation. The replacement restores the latest committed rootfs checkpoint; writes made after that checkpoint are not guaranteed to survive an unexpected runtime failure. Mounted Sandbox Volumes are remounted from their durable state.
+
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/resume
 </Endpoint>

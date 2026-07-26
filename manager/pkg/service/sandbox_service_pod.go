@@ -21,8 +21,8 @@ func (s *SandboxService) prodAddress(ctx context.Context, pod *corev1.Pod) (stri
 	if pod == nil {
 		return "", fmt.Errorf("pod is nil")
 	}
-	if podIP := strings.TrimSpace(pod.Status.PodIP); podIP != "" {
-		return fmt.Sprintf("http://%s:%d", podIP, s.config.ProcdPort), nil
+	if address := s.procdAddressFromPod(pod); address != "" {
+		return address, nil
 	}
 
 	podIP, err := s.waitForPodIP(ctx, pod.Namespace, pod.Name)
@@ -31,6 +31,17 @@ func (s *SandboxService) prodAddress(ctx context.Context, pod *corev1.Pod) (stri
 	}
 
 	return fmt.Sprintf("http://%s:%d", podIP, s.config.ProcdPort), nil
+}
+
+func (s *SandboxService) procdAddressFromPod(pod *corev1.Pod) string {
+	if s == nil || pod == nil {
+		return ""
+	}
+	podIP := strings.TrimSpace(pod.Status.PodIP)
+	if podIP == "" {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d", podIP, s.config.ProcdPort)
 }
 
 func (s *SandboxService) waitForPodIP(ctx context.Context, namespace, name string) (string, error) {

@@ -38,11 +38,46 @@ func TestPodToSandboxDoesNotExposeLegacyPausedAnnotation(t *testing.T) {
 		},
 	}
 
-	sandbox := svc.podToSandbox(context.Background(), pod, pod.Name)
+	sandbox := svc.podToSandbox(pod, pod.Name)
 
 	assert.False(t, sandbox.Paused)
 	assert.Equal(t, "template-1", sandbox.TemplateID)
 	assert.Equal(t, int64(9), sandbox.RuntimeGeneration)
+}
+
+func TestGetSandboxDoesNotWaitForFailedPodIP(t *testing.T) {
+	pod := runtimeIdentityPod("tpl-default", "sandbox-pod", "sandbox-1")
+	pod.Status.Phase = corev1.PodFailed
+	svc := &SandboxService{
+		config:    SandboxServiceConfig{ProcdPort: 49983},
+		logger:    zap.NewNop(),
+		podLister: runtimeIdentityPodLister(t, pod),
+	}
+
+	type result struct {
+		sandbox *Sandbox
+		err     error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		sandbox, err := svc.GetSandbox(context.Background(), "sandbox-1")
+		resultCh <- result{sandbox: sandbox, err: err}
+	}()
+
+	var got result
+	select {
+	case got = <-resultCh:
+	case <-time.After(time.Second):
+		t.Fatal("GetSandbox() waited for a failed pod IP")
+	}
+	if got.err != nil {
+		t.Fatalf("GetSandbox() error = %v", got.err)
+	}
+	if got.sandbox == nil {
+		t.Fatal("GetSandbox() returned nil sandbox")
+	}
+	assert.Equal(t, SandboxStatusFailed, got.sandbox.Status)
+	assert.Empty(t, got.sandbox.InternalAddr)
 }
 
 type staticTokenGenerator struct{}

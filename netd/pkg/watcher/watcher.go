@@ -586,7 +586,7 @@ func sandboxInfoFromPod(pod *corev1.Pod) *SandboxInfo {
 	if sandboxID == "" {
 		return nil
 	}
-	if pod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+	if !controller.IsClaimedSandboxPod(pod) {
 		return nil
 	}
 	teamID := pod.Annotations[controller.AnnotationTeamID]

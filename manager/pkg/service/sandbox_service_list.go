@@ -61,10 +61,9 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 		return s.listSandboxesFromStore(ctx, req)
 	}
 
-	// List all active pods (exclude idle pool)
-	pods, err := s.podLister.List(labels.SelectorFromSet(map[string]string{
-		controller.LabelPoolType: controller.PoolTypeActive,
-	}))
+	// List claimed pods, including hot claims that have not detached from their
+	// warm-pool ReplicaSet yet.
+	pods, err := s.podLister.List(labels.Everything())
 	if err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
@@ -72,6 +71,9 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 	// Filter and convert pods to sandbox summaries
 	var summaries []*SandboxSummary
 	for _, pod := range pods {
+		if !controller.IsClaimedSandboxPod(pod) {
+			continue
+		}
 		// Filter by team_id from annotations
 		teamID := pod.Annotations[controller.AnnotationTeamID]
 		if teamID != req.TeamID {

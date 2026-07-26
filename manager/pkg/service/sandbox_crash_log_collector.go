@@ -197,7 +197,7 @@ func (c *SandboxCrashLogCollector) enqueueRestart(oldPod, newPod *corev1.Pod) {
 }
 
 func sandboxCrashLogPodEligible(pod *corev1.Pod) bool {
-	if pod == nil || pod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+	if pod == nil || !controller.IsClaimedSandboxPod(pod) {
 		return false
 	}
 	if strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID]) == "" {

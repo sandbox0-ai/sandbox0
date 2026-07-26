@@ -57,7 +57,7 @@ func buildIdentityIndex(podLister corelisters.PodLister, nodeName string) (ident
 }
 
 func identityFromPod(pod *corev1.Pod, nodeName string) (sandboxIdentity, bool) {
-	if pod == nil || pod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+	if !controller.IsClaimedSandboxPod(pod) {
 		return sandboxIdentity{}, false
 	}
 	if strings.TrimSpace(nodeName) != "" && strings.TrimSpace(pod.Spec.NodeName) != strings.TrimSpace(nodeName) {

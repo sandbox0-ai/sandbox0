@@ -80,6 +80,14 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 		},
 	}
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
+	controllerOwner := true
+	readyPod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "warm-pool",
+		UID:        types.UID("replicaset-uid"),
+		Controller: &controllerOwner,
+	}}
 
 	client := fake.NewSimpleClientset(readyPod.DeepCopy())
 	svc := &SandboxService{
@@ -102,15 +110,24 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	if pod.Name != "idle-ready" {
 		t.Fatalf("claimIdlePod() selected %q, want %q", pod.Name, "idle-ready")
 	}
-	if got := pod.Labels[controller.LabelPoolType]; got != controller.PoolTypeActive {
-		t.Fatalf("pool-type = %q, want %q", got, controller.PoolTypeActive)
+	if got := pod.Labels[controller.LabelPoolType]; got != controller.PoolTypeIdle {
+		t.Fatalf("pool-type = %q, want %q until detachment", got, controller.PoolTypeIdle)
+	}
+	if got := pod.Annotations[controller.AnnotationHotClaimReservation]; got == "" {
+		t.Fatal("hot claim reservation token is empty")
+	}
+	if got := pod.Annotations[controller.AnnotationHotClaimReservationState]; got != controller.HotClaimReservationStateInitializing {
+		t.Fatalf("reservation state = %q, want %q", got, controller.HotClaimReservationStateInitializing)
 	}
 	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
 	}
+	if len(pod.OwnerReferences) != 1 || pod.OwnerReferences[0].UID != types.UID("replicaset-uid") {
+		t.Fatalf("owner references = %#v, want warm-pool ReplicaSet", pod.OwnerReferences)
+	}
 }
 
-func TestClaimIdlePodReservationPreventsStaleCacheReuse(t *testing.T) {
+func TestClaimIdlePodSkipsReservationFromAnotherManager(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "template-a",
@@ -118,37 +135,25 @@ func TestClaimIdlePodReservationPreventsStaleCacheReuse(t *testing.T) {
 		},
 	}
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
-	reservations := newIdlePodReservations()
+	readyPod.Annotations[controller.AnnotationHotClaimReservation] = "other-manager-reservation"
+	readyPod.Annotations[controller.AnnotationHotClaimReservationState] = controller.HotClaimReservationStateInitializing
+	readyPod.Annotations[controller.AnnotationHotClaimReservedAt] = time.Now().UTC().Format(time.RFC3339Nano)
 
-	client := fake.NewSimpleClientset(readyPod.DeepCopy())
 	svc := &SandboxService{
-		k8sClient:           client,
-		podLister:           newClaimTestPodLister(t, readyPod),
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
-		idlePodReservations: reservations,
+		k8sClient: fake.NewSimpleClientset(readyPod.DeepCopy()),
+		podLister: newClaimTestPodLister(t, readyPod),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
 	}
-
 	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
 		TeamID: "team-a",
 		UserID: "user-a",
 	})
 	if err != nil {
-		t.Fatalf("first claimIdlePod() error = %v", err)
-	}
-	if pod == nil {
-		t.Fatal("first claimIdlePod() = nil, want ready pod")
-	}
-
-	pod, err = svc.claimIdlePod(context.Background(), template, &ClaimRequest{
-		TeamID: "team-a",
-		UserID: "user-a",
-	})
-	if err != nil {
-		t.Fatalf("second claimIdlePod() error = %v", err)
+		t.Fatalf("claimIdlePod() error = %v", err)
 	}
 	if pod != nil {
-		t.Fatalf("second claimIdlePod() = %s, want nil while stale idle pod is reserved", pod.Name)
+		t.Fatalf("claimIdlePod() = %s, want nil for globally reserved idle pod", pod.Name)
 	}
 }
 
@@ -161,18 +166,16 @@ func TestClaimIdlePodSkipsReservedPod(t *testing.T) {
 	}
 	podA := newClaimTestPod("ns-a", "idle-a", "template-a", true)
 	podB := newClaimTestPod("ns-a", "idle-b", "template-a", true)
-	reservations := newIdlePodReservations()
+	podA.Annotations[controller.AnnotationHotClaimReservation] = "reservation-token"
+	podA.Annotations[controller.AnnotationHotClaimReservationState] = controller.HotClaimReservationStateInitializing
+	podA.Annotations[controller.AnnotationHotClaimReservedAt] = time.Now().UTC().Format(time.RFC3339Nano)
 
 	client := fake.NewSimpleClientset(podA.DeepCopy(), podB.DeepCopy())
 	svc := &SandboxService{
-		k8sClient:           client,
-		podLister:           newClaimTestPodLister(t, podA, podB),
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
-		idlePodReservations: reservations,
-	}
-	if !svc.reserveIdlePod(podA) {
-		t.Fatal("reserveIdlePod(podA) = false, want true")
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, podA, podB),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
 	}
 
 	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
@@ -392,7 +395,7 @@ func TestClaimIdlePodFallsBackWhenPodStartsDeletingDuringClaim(t *testing.T) {
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
 
 	client := fake.NewSimpleClientset(readyPod.DeepCopy())
-	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonInvalid,
 			Message: `Pod "idle-ready" is invalid: metadata.finalizers: Forbidden: no new finalizers can be added if the object is being deleted, found new finalizers []string{"sandbox0.ai/sandbox-cleanup"}`,
@@ -432,9 +435,9 @@ func TestClaimIdlePodFallsBackAfterRepeatedUpdateConflicts(t *testing.T) {
 		clientObjects = append(clientObjects, pod.DeepCopy())
 	}
 	client := fake.NewSimpleClientset(clientObjects...)
-	updateConflicts := 0
-	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
-		updateConflicts++
+	patchConflicts := 0
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		patchConflicts++
 		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
 			Reason:  metav1.StatusReasonConflict,
 			Message: "pod was claimed by another manager",
@@ -454,8 +457,122 @@ func TestClaimIdlePodFallsBackAfterRepeatedUpdateConflicts(t *testing.T) {
 	if pod != nil {
 		t.Fatalf("claimIdlePod() = %s, want nil after repeated update conflicts", pod.Name)
 	}
-	if updateConflicts != claimIdlePodBackoff.Steps {
-		t.Fatalf("update conflicts = %d, want %d", updateConflicts, claimIdlePodBackoff.Steps)
+	if patchConflicts != claimIdlePodBackoff.Steps {
+		t.Fatalf("patch conflicts = %d, want %d", patchConflicts, claimIdlePodBackoff.Steps)
+	}
+}
+
+func TestClaimIdlePodRetriesMetadataPatchPreconditionFailure(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	idlePods := []*corev1.Pod{
+		newClaimTestPod("ns-a", "idle-a", "template-a", true),
+		newClaimTestPod("ns-a", "idle-b", "template-a", true),
+		newClaimTestPod("ns-a", "idle-c", "template-a", true),
+	}
+	clientObjects := make([]runtime.Object, 0, len(idlePods))
+	for _, pod := range idlePods {
+		clientObjects = append(clientObjects, pod.DeepCopy())
+	}
+	client := fake.NewSimpleClientset(clientObjects...)
+	patchFailures := 0
+	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		patchFailures++
+		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+			Reason:  metav1.StatusReasonInvalid,
+			Message: "testing value /metadata/resourceVersion failed: test failed",
+		}}
+	})
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, idlePods...),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v, want nil fallback", err)
+	}
+	if pod != nil {
+		t.Fatalf("claimIdlePod() = %s, want nil after repeated patch precondition failures", pod.Name)
+	}
+	if patchFailures != claimIdlePodBackoff.Steps {
+		t.Fatalf("patch failures = %d, want %d", patchFailures, claimIdlePodBackoff.Steps)
+	}
+}
+
+func TestClaimIdlePodRetriesSanitizedMetadataPatchPreconditionFailure(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "ns-a",
+		},
+	}
+	idlePods := []*corev1.Pod{
+		newClaimTestPod("ns-a", "idle-a", "template-a", true),
+		newClaimTestPod("ns-a", "idle-b", "template-a", true),
+	}
+	clientObjects := make([]runtime.Object, 0, len(idlePods))
+	for _, pod := range idlePods {
+		clientObjects = append(clientObjects, pod.DeepCopy())
+	}
+	client := fake.NewSimpleClientset(clientObjects...)
+	patchAttempts := 0
+	failedPodName := ""
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		patchAttempts++
+		if patchAttempts != 1 {
+			return false, nil, nil
+		}
+		patchAction := action.(k8stesting.PatchAction)
+		failedPodName = patchAction.GetName()
+		current, err := client.Tracker().Get(
+			corev1.SchemeGroupVersion.WithResource("pods"),
+			action.GetNamespace(),
+			failedPodName,
+		)
+		if err != nil {
+			return true, nil, err
+		}
+		claimedByOther := current.(*corev1.Pod).DeepCopy()
+		claimedByOther.ResourceVersion = "2"
+		claimedByOther.Annotations[controller.AnnotationSandboxID] = "claimed-by-other"
+		if err := client.Tracker().Update(
+			corev1.SchemeGroupVersion.WithResource("pods"),
+			claimedByOther,
+			action.GetNamespace(),
+		); err != nil {
+			return true, nil, err
+		}
+		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+			Reason:  metav1.StatusReasonInvalid,
+			Message: "the server rejected our request due to an error in our request",
+		}}
+	})
+	svc := &SandboxService{
+		k8sClient: client,
+		podLister: newClaimTestPodLister(t, idlePods...),
+		clock:     systemTime{},
+		logger:    zap.NewNop(),
+	}
+
+	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("claimIdlePod() error = %v", err)
+	}
+	if pod == nil {
+		t.Fatal("claimIdlePod() = nil, want retry on another idle pod")
+	}
+	if pod.Name == failedPodName {
+		t.Fatalf("claimIdlePod() retried lost pod %q", failedPodName)
+	}
+	if patchAttempts != 2 {
+		t.Fatalf("patch attempts = %d, want 2", patchAttempts)
 	}
 }
 

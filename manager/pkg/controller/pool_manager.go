@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -60,6 +61,9 @@ const (
 	AnnotationSandboxID                    = "sandbox0.ai/sandbox-id"
 	AnnotationRuntimeGeneration            = "sandbox0.ai/runtime-generation"
 	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
+	AnnotationHotClaimReservation          = "sandbox0.ai/hot-claim-reservation"
+	AnnotationHotClaimReservationState     = "sandbox0.ai/hot-claim-reservation-state"
+	AnnotationHotClaimReservedAt           = "sandbox0.ai/hot-claim-reserved-at"
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
 	AnnotationTemplateTeamID               = "sandbox0.ai/template-team-id"
 	AnnotationTemplateUserID               = "sandbox0.ai/template-user-id"
@@ -67,6 +71,9 @@ const (
 	AnnotationOwnerKind                    = "sandbox0.ai/owner-kind"
 
 	OwnerKindTeamWarmPool = "team_warm_pool"
+
+	HotClaimReservationStateInitializing = "initializing"
+	HotClaimReservationStateReady        = "ready"
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
 )
@@ -92,6 +99,22 @@ func ClaimedSandboxPodAnnotations(extra map[string]string) map[string]string {
 	}
 	annotations[AnnotationClusterAutoscalerSafeToEvict] = "false"
 	return annotations
+}
+
+// IsHotClaimReservedPod reports whether an idle warm-pool pod is reserved by a
+// sandbox claim and must no longer be exposed as idle capacity.
+func IsHotClaimReservedPod(pod *corev1.Pod) bool {
+	return pod != nil &&
+		strings.TrimSpace(pod.Annotations[AnnotationHotClaimReservation]) != ""
+}
+
+// IsClaimedSandboxPod reports whether a pod is an active sandbox, including
+// the short interval in which a hot claim still belongs to its warm pool.
+func IsClaimedSandboxPod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	return pod.Labels[LabelPoolType] == PoolTypeActive || IsHotClaimReservedPod(pod)
 }
 
 // PoolManager manages the idle pool (ReplicaSet)
@@ -482,6 +505,9 @@ func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha
 		if pod.DeletionTimestamp != nil {
 			continue
 		}
+		if IsHotClaimReservedPod(pod) {
+			continue
+		}
 		if pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
 			continue
 		}
@@ -518,6 +544,9 @@ func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1
 	now := time.Now()
 	repaired := 0
 	for _, pod := range pods {
+		if IsHotClaimReservedPod(pod) {
+			continue
+		}
 		if pod.Annotations[AnnotationTemplateSpecHash] != desiredTemplateHash {
 			continue
 		}
@@ -546,7 +575,7 @@ func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1
 }
 
 func shouldRepairUnhealthyIdlePod(pod *corev1.Pod, now time.Time) bool {
-	if pod == nil || pod.DeletionTimestamp != nil || IsPodReady(pod) {
+	if pod == nil || pod.DeletionTimestamp != nil || IsHotClaimReservedPod(pod) || IsPodReady(pod) {
 		return false
 	}
 	switch pod.Status.Phase {
@@ -573,6 +602,7 @@ func (pm *PoolManager) deleteUnhealthyIdlePodWithRetry(ctx context.Context, name
 		}
 
 		if pod.Labels[LabelPoolType] != PoolTypeIdle ||
+			IsHotClaimReservedPod(pod) ||
 			pod.Annotations[AnnotationTemplateSpecHash] != desiredTemplateHash ||
 			!shouldRepairUnhealthyIdlePod(pod, time.Now()) {
 			return nil
@@ -615,6 +645,7 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 		// If pod is already deleting, claimed, or already updated to latest hash, skip delete.
 		if pod.DeletionTimestamp != nil ||
 			pod.Labels[LabelPoolType] != PoolTypeIdle ||
+			IsHotClaimReservedPod(pod) ||
 			pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
 			return nil
 		}

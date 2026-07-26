@@ -461,6 +461,13 @@ func main() {
 	sandboxService.SetCredentialStore(credentialStore)
 	sandboxService.SetQuotaStore(quotaRepo)
 	sandboxService.SetSandboxStore(sandboxStore)
+	hotClaimReservationController := service.NewHotClaimReservationController(
+		k8sClient,
+		podLister,
+		sandboxStore,
+		logger,
+	)
+	sandboxService.SetHotClaimReservationEnqueuer(hotClaimReservationController)
 	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg, managerStorageConfig)
 	if rootFSObjectStoreErr != nil {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
@@ -482,6 +489,7 @@ func main() {
 	}
 	sandboxService.SetDeletionWebhookEmitter(service.NewHTTPSandboxDeletionWebhookEmitter(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})))
 	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
+	podInformer.Informer().AddEventHandler(hotClaimReservationController.ResourceEventHandler())
 	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
 	sandboxLifecycleController.SetMetrics(managerMetrics)
 	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
@@ -702,6 +710,12 @@ func main() {
 	go func() {
 		if err := sandboxLifecycleController.Run(ctx, 2); err != nil && err != context.Canceled {
 			logger.Error("Sandbox lifecycle controller failed", zap.Error(err))
+		}
+	}()
+
+	go func() {
+		if err := hotClaimReservationController.Run(ctx, 2); err != nil && err != context.Canceled {
+			logger.Error("Hot claim reservation controller failed", zap.Error(err))
 		}
 	}()
 

@@ -652,7 +652,7 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 	if pod == nil || pod.Labels == nil {
 		return SandboxLifecycleInfo{}, false
 	}
-	if pod.Labels[controller.LabelPoolType] != controller.PoolTypeActive {
+	if !controller.IsClaimedSandboxPod(pod) {
 		return SandboxLifecycleInfo{}, false
 	}
 	sandboxID := strings.TrimSpace(pod.Labels[controller.LabelSandboxID])

@@ -556,6 +556,21 @@ func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
 	}
 }
 
+func TestSandboxLifecycleInfoFromPodIncludesHotClaimReservation(t *testing.T) {
+	pod := newLifecycleTestPod()
+	pod.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+	pod.Annotations[controller.AnnotationHotClaimReservation] = "reservation-token"
+	pod.Annotations[controller.AnnotationHotClaimReservationState] = controller.HotClaimReservationStateInitializing
+
+	info, ok := sandboxLifecycleInfoFromPod(pod)
+	if !ok {
+		t.Fatal("expected lifecycle info for reserved hot claim")
+	}
+	if info.SandboxID != "sandbox-a" {
+		t.Fatalf("sandbox ID = %q, want sandbox-a", info.SandboxID)
+	}
+}
+
 func TestSandboxLifecycleInfoFromPodIncludesVolumePortals(t *testing.T) {
 	pod := newLifecycleTestPod()
 	pod.UID = types.UID("pod-uid-a")

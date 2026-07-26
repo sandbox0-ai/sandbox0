@@ -218,9 +218,12 @@ func TestLifecycleProjectorPersistsMeteringRelevantSandboxUpdates(t *testing.T) 
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
 	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
 	claimedAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	projector.now = func() time.Time { return claimedAt }
 	oldPod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "1", "1Gi")
 	projector.handleUpsert(oldPod)
 
+	resizedAt := claimedAt.Add(10 * time.Minute)
+	projector.now = func() time.Time { return resizedAt }
 	newPod := withSandboxResources(oldPod.DeepCopy(), "2", "2Gi")
 	newPod.ResourceVersion = "2"
 	projector.handleUpdate(oldPod, newPod)
@@ -231,6 +234,30 @@ func TestLifecycleProjectorPersistsMeteringRelevantSandboxUpdates(t *testing.T) 
 	state := recorder.states["sb-1"]
 	if state == nil || state.ResourceMillicpu != 2000 || state.ResourceMemoryMiB != 2048 || state.LastResourceVer != "2" {
 		t.Fatalf("state after resource update = %#v", state)
+	}
+	if state.ActiveSince == nil || !state.ActiveSince.Equal(resizedAt) {
+		t.Fatalf("active_since after resource update = %v, want %v", state.ActiveSince, resizedAt)
+	}
+	if len(recorder.windows) != 1 {
+		t.Fatalf("window count after resource update = %d, want 1", len(recorder.windows))
+	}
+	if window := recorder.windows[0]; !window.WindowStart.Equal(claimedAt) || !window.WindowEnd.Equal(resizedAt) || window.Value != 614_400_000 {
+		t.Fatalf("pre-resize runtime window = %#v", window)
+	}
+
+	pausedAt := resizedAt.Add(10 * time.Minute)
+	projector.now = func() time.Time { return pausedAt }
+	pausedPod := withSandboxResources(newPod.DeepCopy(), "2", "2Gi")
+	pausedPod.ResourceVersion = "3"
+	pausedPod.Annotations[controller.AnnotationPaused] = "true"
+	pausedPod.Annotations[controller.AnnotationPausedAt] = pausedAt.Format(time.RFC3339)
+	projector.handleUpdate(newPod, pausedPod)
+
+	if len(recorder.windows) != 2 {
+		t.Fatalf("window count after pause = %d, want 2", len(recorder.windows))
+	}
+	if window := recorder.windows[1]; !window.WindowStart.Equal(resizedAt) || !window.WindowEnd.Equal(pausedAt) || window.Value != 1_228_800_000 {
+		t.Fatalf("post-resize runtime window = %#v", window)
 	}
 }
 
@@ -518,7 +545,8 @@ func TestLifecycleProjectorClosesTeamWarmPoolWhenClaimed(t *testing.T) {
 	projector.handleUpsert(idlePod)
 
 	claimedAt := createdAt.Add(5 * time.Minute)
-	projector.now = func() time.Time { return claimedAt }
+	claimObservedAt := claimedAt.Add(3 * time.Second)
+	projector.now = func() time.Time { return claimObservedAt }
 	activePod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "2"), "2", "1Gi")
 	activePod.Name = idlePod.Name
 	activePod.Namespace = idlePod.Namespace
@@ -536,13 +564,20 @@ func TestLifecycleProjectorClosesTeamWarmPoolWhenClaimed(t *testing.T) {
 	if finalWarmPoolWindow.Value != 184_320_000 {
 		t.Fatalf("final warm pool value = %d, want 184320000", finalWarmPoolWindow.Value)
 	}
+	if !finalWarmPoolWindow.WindowEnd.Equal(claimedAt) {
+		t.Fatalf("final warm pool end = %v, want claim time %v", finalWarmPoolWindow.WindowEnd, claimedAt)
+	}
 
 	warmPoolState := recorder.states["warm-pool/pod-uid-1"]
 	if warmPoolState == nil || warmPoolState.ActiveSince != nil || warmPoolState.TerminatedAt == nil || !warmPoolState.TerminatedAt.Equal(claimedAt) {
 		t.Fatalf("warm pool state after claim = %#v, want closed at %v", warmPoolState, claimedAt)
 	}
-	if recorder.states["sb-1"] == nil {
-		t.Fatalf("active sandbox projection state was not created")
+	if !warmPoolState.LastObservedAt.Equal(claimObservedAt) {
+		t.Fatalf("warm pool last_observed_at = %v, want %v", warmPoolState.LastObservedAt, claimObservedAt)
+	}
+	activeState := recorder.states["sb-1"]
+	if activeState == nil || activeState.ActiveSince == nil || !activeState.ActiveSince.Equal(claimedAt) {
+		t.Fatalf("active sandbox state = %#v, want active_since %v", activeState, claimedAt)
 	}
 }
 

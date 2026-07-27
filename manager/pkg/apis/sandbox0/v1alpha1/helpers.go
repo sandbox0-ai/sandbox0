@@ -333,11 +333,13 @@ func buildContainers(template *SandboxTemplate) []corev1.Container {
 // buildContainer builds a single container
 func buildContainer(spec *ContainerSpec, template *SandboxTemplate) corev1.Container {
 	name := "procd"
+	restartPolicy := corev1.ContainerRestartPolicyNever
 
 	container := corev1.Container{
 		Name:            name,
 		Image:           spec.Image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
+		RestartPolicy:   &restartPolicy,
 		Resources:       BuildResourceRequirements(spec.Resources),
 		ResizePolicy: []corev1.ContainerResizePolicy{
 			{ResourceName: corev1.ResourceCPU, RestartPolicy: corev1.NotRequired},

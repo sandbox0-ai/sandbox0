@@ -20,8 +20,8 @@ import (
 const sandboxLifecycleWaitInterval = 100 * time.Millisecond
 
 // ResumePausedSandboxRuntime creates a new runtime for a paused durable sandbox
-// and restores the latest writable rootfs checkpoint. A failed runtime is first
-// committed as paused and then replaced through the same generation transition.
+// and restores the latest writable rootfs checkpoint. A terminal runtime first
+// completes crash recovery through the durable pause transaction.
 func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandboxID string) (*Sandbox, error) {
 	if s == nil || s.sandboxStore == nil {
 		return nil, k8serrors.NewNotFound(corev1.Resource("pod"), sandboxID)
@@ -33,7 +33,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 	var txn *SandboxLifecycleTxn
 	var req *ClaimRequest
 	var deletingPodRef *sandboxRuntimePodRef
-	var failedPodRef *sandboxRuntimePodRef
+	crashRecoveryRequested := false
 	claimType := "hot"
 	restoreNeeded := false
 	for {
@@ -43,7 +43,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		txn = nil
 		req = nil
 		deletingPodRef = nil
-		failedPodRef = nil
+		crashRecoveryRequested = false
 		restoreNeeded = false
 		var waitErr error
 		err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
@@ -88,11 +88,12 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 					return errSandboxRuntimeDeleting
 				}
 				if sandboxRuntimePodNeedsReplacement(existing) {
-					failedPodRef = &sandboxRuntimePodRef{
-						namespace: existing.Namespace,
-						name:      existing.Name,
+					if err := beginCrashRecoveryTxn(lockCtx, tx, locked, existing); err != nil {
+						return err
 					}
-					return tx.MarkRuntimePaused(lockCtx, sandboxID, runtimeGenerationFromPod(existing), s.now())
+					crashRecoveryRequested = true
+					waitErr = errSandboxLifecyclePausing
+					return nil
 				}
 				if locked.Status == SandboxStatusPaused {
 					deletingPodRef = &sandboxRuntimePodRef{
@@ -148,25 +149,9 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			}
 			return tx.BeginLifecycleTxn(lockCtx, txn)
 		})
-		if err == nil && failedPodRef != nil {
-			if s.logger != nil {
-				s.logger.Warn("Replacing failed sandbox runtime",
-					zap.String("sandboxID", sandboxID),
-					zap.String("namespace", failedPodRef.namespace),
-					zap.String("pod", failedPodRef.name),
-				)
-			}
-			if s.k8sClient == nil {
-				return nil, fmt.Errorf("delete failed runtime pod: kubernetes client is not configured")
-			}
-			deleteErr := s.k8sClient.CoreV1().Pods(failedPodRef.namespace).Delete(ctx, failedPodRef.name, metav1.DeleteOptions{})
-			if deleteErr != nil && !k8serrors.IsNotFound(deleteErr) {
-				return nil, fmt.Errorf("delete failed runtime pod: %w", deleteErr)
-			}
-			if err := s.waitForSandboxRuntimePodDeletion(ctx, failedPodRef.namespace, failedPodRef.name); err != nil {
-				return nil, err
-			}
-			continue
+		if err == nil && crashRecoveryRequested {
+			s.enqueueSandboxPause(sandboxID)
+			err = waitErr
 		}
 		if err == nil && waitErr != nil {
 			err = waitErr
@@ -314,7 +299,11 @@ type sandboxRuntimePodRef struct {
 }
 
 func sandboxRuntimePodNeedsReplacement(pod *corev1.Pod) bool {
-	return pod != nil && pod.Status.Phase == corev1.PodFailed
+	if pod == nil {
+		return false
+	}
+	_, terminated := terminatedProcdContainer(pod)
+	return terminated != nil || sandboxRuntimePodTerminal(pod)
 }
 
 func (s *SandboxService) waitForSandboxLifecycleTxnExit(ctx context.Context, sandboxID string) error {

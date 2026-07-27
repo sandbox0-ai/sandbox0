@@ -99,11 +99,11 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 		}, []string{"template", "result"}),
 		ProcdCrashLogCapturesTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_sandbox_procd_crash_log_captures_total",
-			Help: "Total number of previous procd crash log capture outcomes by result",
+			Help: "Total number of terminated procd crash log capture outcomes by result",
 		}, []string{"result"}),
 		ProcdCrashLogBytes: factory.NewHistogram(prometheus.HistogramOpts{
 			Name:    "manager_sandbox_procd_crash_log_bytes",
-			Help:    "Number of retained bytes emitted for a captured previous procd crash log",
+			Help:    "Number of retained bytes emitted for a captured terminated procd crash log",
 			Buckets: []float64{1024, 4096, 16384, 65536, 262144, 524288},
 		}),
 		PodNetworkIdentityChecksTotal: factory.NewCounterVec(prometheus.CounterOpts{

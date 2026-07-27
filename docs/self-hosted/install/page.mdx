@@ -13,6 +13,10 @@ This is the shortest production-like path from zero to a running self-hosted San
 Kubernetes `1.35+` is required for the supported Sandbox0 runtime stack. Checkpointed pause/resume depends on `ctld` on sandbox nodes so Sandbox0 can save and restore writable rootfs checkpoints when releasing and recreating runtime pods.
 </Callout>
 
+<Callout variant="warning">
+Keep the Kubernetes `ContainerRestartRules` feature gate enabled. Sandbox0 uses its container-level restart policy to leave a terminated `procd` attempt available for crash rootfs recovery while keeping the ReplicaSet-compatible pod restart policy.
+</Callout>
+
 ## 0) Create a Local Kind Cluster
 
 Create the cluster:

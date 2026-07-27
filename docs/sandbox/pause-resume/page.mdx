@@ -40,6 +40,12 @@ Runtime access paths do not expose `pausing` or `resuming` states. File, context
 
 Automatic pause from `ttl` is opportunistic. If supported runtime access arrives before an automatic pause reaches its commit point, Sandbox0 cancels that automatic pause, releases the runtime barrier, and continues on the existing runtime generation. Explicit pause requests are not canceled by runtime access; those requests wait for the committed pause and then resume if auto-resume is allowed.
 
+## Unexpected Runtime Termination
+
+If the `procd` container in a claimed sandbox exits unexpectedly, including an OOM termination, Sandbox0 leaves that container attempt stopped while `manager` starts a non-cancelable crash-recovery pause. `ctld` checkpoints the exact terminated containerd snapshot, then `manager` atomically commits the new rootfs head and paused state before deleting the old runtime pod. A supported runtime request waits for this transaction and can resume from the recovered checkpoint when auto-resume is allowed.
+
+Explicit sandbox deletion and `hard_ttl` still take precedence over crash recovery. Recovery also depends on the terminated snapshot remaining available on the same node. If the old runtime pod or containerd snapshot disappears before `ctld` can read it, Sandbox0 records the degraded recovery and falls back to the last committed rootfs checkpoint. Files written after that checkpoint may be lost. Mounted Sandbox Volumes keep their independently durable state.
+
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/pause
 </Endpoint>
@@ -81,7 +87,7 @@ Resume a sandbox that was paused manually or by TTL expiry.
 
 Resume first restores the writable rootfs checkpoint onto a runtime pod created from the current template image. If that restore fails, Sandbox0 retries once with a runtime pod pinned to the checkpoint's recorded base image digest. Kubernetes pulls and garbage-collects that image through the normal kubelet image lifecycle.
 
-If the current runtime pod has reached the `Failed` phase, sandbox details return that state immediately instead of waiting for a Pod IP. Explicit resume, or a supported access path with `auto_resume: true`, removes the failed pod and creates a new runtime generation. The replacement restores the latest committed rootfs checkpoint; writes made after that checkpoint are not guaranteed to survive an unexpected runtime failure. Mounted Sandbox Volumes are remounted from their durable state.
+If the current runtime pod reaches a terminal phase, explicit resume or a supported access path first waits for any crash-recovery checkpoint to commit. The replacement runtime then restores that recovered rootfs head. When the terminated snapshot is no longer available, the replacement restores the last committed checkpoint instead. Mounted Sandbox Volumes are remounted from their durable state.
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/resume

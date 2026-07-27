@@ -114,6 +114,7 @@ const (
 
 	SandboxLifecycleSourceManual = "manual"
 	SandboxLifecycleSourceAuto   = "auto"
+	SandboxLifecycleSourceCrash  = "crash"
 
 	SandboxLifecyclePhasePreparing  = "preparing"
 	SandboxLifecyclePhaseBarriered  = "barriered"

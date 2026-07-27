@@ -365,15 +365,23 @@ func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctlda
 	if err != nil {
 		return "", "", err
 	}
+	requestedID := normalizeContainerID(target.ContainerID)
+	filter := &runtimeapi.ContainerFilter{}
+	if requestedID != "" {
+		filter.Id = requestedID
+	} else {
+		filter.State = &runtimeapi.ContainerStateValue{State: runtimeapi.ContainerState_CONTAINER_RUNNING}
+	}
 	resp, err := client.ListContainers(ctx, &runtimeapi.ListContainersRequest{
-		Filter: &runtimeapi.ContainerFilter{
-			State: &runtimeapi.ContainerStateValue{State: runtimeapi.ContainerState_CONTAINER_RUNNING},
-		},
+		Filter: filter,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("list cri containers: %w", err)
 	}
 	for _, item := range resp.GetContainers() {
+		if requestedID != "" && strings.TrimSpace(item.GetId()) != requestedID {
+			continue
+		}
 		metadata := item.GetMetadata()
 		if metadata == nil || metadata.GetName() != target.ContainerName {
 			continue
@@ -386,12 +394,23 @@ func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctlda
 		if target.PodUID != "" && podUID != target.PodUID {
 			continue
 		}
-		if item.GetState() != runtimeapi.ContainerState_CONTAINER_RUNNING {
+		if requestedID == "" && item.GetState() != runtimeapi.ContainerState_CONTAINER_RUNNING {
 			continue
 		}
 		return item.GetId(), podUID, nil
 	}
+	if requestedID != "" {
+		return "", "", fmt.Errorf("%w: container %s for %s in pod %s/%s", ErrNotFound, requestedID, target.ContainerName, target.Namespace, target.PodName)
+	}
 	return "", "", fmt.Errorf("%w: running container %s in pod %s/%s", ErrNotFound, target.ContainerName, target.Namespace, target.PodName)
+}
+
+func normalizeContainerID(containerID string) string {
+	containerID = strings.TrimSpace(containerID)
+	if _, raw, ok := strings.Cut(containerID, "://"); ok {
+		return strings.TrimSpace(raw)
+	}
+	return containerID
 }
 
 // ListPodSandboxStats returns one bulk node-local CRI stats snapshot.

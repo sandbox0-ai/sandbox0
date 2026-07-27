@@ -72,6 +72,40 @@ func TestValidateAPIKeyRequiresExistingTeam(t *testing.T) {
 	}
 }
 
+func TestValidateAPIKeyAllowsMissingLocalTeamWhenValidationDisabled(t *testing.T) {
+	pool := newGatewayAPIKeyTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	apiKeyRepo := NewRepository(pool, WithLocalTeamValidation(false))
+	teamID := uuid.NewString()
+	userID := uuid.NewString()
+
+	_, keyValue, err := apiKeyRepo.CreateAPIKey(
+		ctx,
+		teamID,
+		"aws-us-east-1",
+		userID,
+		"federated build key",
+		ScopeTeam,
+		[]string{"viewer"},
+		time.Now().Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("create api key without local team: %v", err)
+	}
+
+	key, err := apiKeyRepo.ValidateAPIKey(ctx, keyValue)
+	if err != nil {
+		t.Fatalf("validate api key without local team: %v", err)
+	}
+	if key.TeamID != teamID {
+		t.Fatalf("validated team id = %q, want %q", key.TeamID, teamID)
+	}
+}
+
 func newGatewayAPIKeyTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
@@ -98,6 +132,7 @@ func newGatewayAPIKeyTestPool(t *testing.T) *pgxpool.Pool {
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: dbURL,
+		MaxConns:    4,
 		Schema:      schema,
 	})
 	if err != nil {

@@ -11,7 +11,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DISABLE_AUTOUPDATER=1 \
     OPENCODE_DISABLE_AUTOUPDATE=1 \
     PI_SKIP_VERSION_CHECK=1 \
-    PI_TELEMETRY=0
+    PI_TELEMETRY=0 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    PLAYWRIGHT_MCP_BROWSER=chromium \
+    PLAYWRIGHT_MCP_ISOLATED=false \
+    PLAYWRIGHT_MCP_SANDBOX=false
 
 # Claude Code and Pi require Node.js 22. Pi currently requires Node.js 22.19+
 # specifically, so fail the build if the repository ever resolves an older 22.x.
@@ -28,11 +32,14 @@ COPY manager/procd/coding-agents/package.json manager/procd/coding-agents/packag
 COPY manager/procd/coding-agents/THIRD_PARTY.md ./
 
 RUN npm ci --omit=dev \
-  && for agent in codex claude opencode pi; do ln -sf "/opt/coding-agents/node_modules/.bin/$agent" "/usr/local/bin/$agent"; done \
+  && for agent in codex claude opencode pi playwright-cli; do ln -sf "/opt/coding-agents/node_modules/.bin/$agent" "/usr/local/bin/$agent"; done \
+  && playwright-cli install-browser chromium --with-deps \
+  && test -f /opt/coding-agents/node_modules/playwright-core/lib/tools/cli-client/skill/SKILL.md \
   && codex --version \
   && claude --version \
   && opencode --version \
   && pi --version \
+  && playwright-cli --version \
   && npm cache clean --force
 
 RUN mkdir -p /workspace

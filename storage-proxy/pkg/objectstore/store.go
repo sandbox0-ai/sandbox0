@@ -41,6 +41,10 @@ type Config struct {
 	SecretKey    string
 	SessionToken string
 	Metrics      *obsmetrics.StorageProxyMetrics
+	// RequestObserver receives provider HTTP attempts. It is intentionally
+	// separate from Metrics because attributed request counts belong in the
+	// durable metering ledger, not in high-cardinality Prometheus labels.
+	RequestObserver RequestObserver
 }
 
 type Info struct {
@@ -212,6 +216,14 @@ func newS3Store(cfg Config) (Store, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), loadOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("load object storage config: %w", err)
+	}
+	if cfg.RequestObserver != nil {
+		awsCfg.HTTPClient = newRequestObservingHTTPClient(
+			awsCfg.HTTPClient,
+			storageType,
+			strings.TrimSpace(cfg.Bucket),
+			cfg.RequestObserver,
+		)
 	}
 
 	options := func(o *s3.Options) {

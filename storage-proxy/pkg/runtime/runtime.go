@@ -36,6 +36,7 @@ import (
 	fsserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsserver"
 	httpserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volumelock"
@@ -56,6 +57,9 @@ type Options struct {
 	Observability *observability.Provider
 	K8sClient     kubernetes.Interface
 	Listen        func(network, address string) (net.Listener, error)
+	// ObjectStoreRequestObserver is process-owned and may be shared with the
+	// manager rootfs runtime so all platform OSS calls use one aggregate stream.
+	ObjectStoreRequestObserver objectstore.RequestObserver
 }
 
 // Runtime owns one manager storage HTTP endpoint and all of its background
@@ -207,6 +211,7 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 
 	r.volMgr = volume.NewManager(r.logrusLogger, r.cfg, repo)
 	r.volMgr.SetMetrics(storageProxyMetrics)
+	r.volMgr.SetObjectStoreRequestObserver(opts.ObjectStoreRequestObserver)
 	var volumeBarrier *volumelock.Locker
 	if r.pool != nil {
 		volumeBarrier = volumelock.New(r.pool)
@@ -254,6 +259,7 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		return nil, fmt.Errorf("initialize snapshot manager: %w", err)
 	}
 	snapshotMgr.SetMeteringRepository(meteringRepo)
+	snapshotMgr.SetObjectStoreRequestObserver(opts.ObjectStoreRequestObserver)
 	snapshotMgr.SetQuotaRepository(quotaRepo)
 	r.volMgr.SetStorageObserver(snapshotMgr)
 	if eventBroadcaster != nil {

@@ -46,6 +46,7 @@ type Manager struct {
 	logrus                 *logrus.Logger
 	storage                *apiconfig.StorageProxyConfig
 	storageObserver        volume.StorageObserver
+	requestObserver        objectstore.RequestObserver
 	s3CredentialCodec      *volume.S3BackendCredentialCodec
 	s3CredentialCodecErr   error
 	repo                   *db.Repository
@@ -126,6 +127,7 @@ type Config struct {
 	Logger                  *zap.Logger
 	StorageConfig           *apiconfig.StorageProxyConfig
 	StorageObserver         volume.StorageObserver
+	RequestObserver         objectstore.RequestObserver
 	Repository              *db.Repository
 	PodName                 string
 	PodNamespace            string
@@ -185,6 +187,7 @@ func NewManager(cfg Config) *Manager {
 		logrus:                 l,
 		storage:                storageConfig,
 		storageObserver:        cfg.StorageObserver,
+		requestObserver:        cfg.RequestObserver,
 		s3CredentialCodec:      s3CredentialCodec,
 		s3CredentialCodecErr:   s3CredentialCodecErr,
 		repo:                   cfg.Repository,
@@ -1570,13 +1573,14 @@ func (m *Manager) createObjectStore(teamID, volumeID string) (objectstore.Store,
 		return nil, nil
 	}
 	store, err := objectstore.Create(objectstore.Config{
-		Type:         m.storage.ObjectStorageType,
-		Bucket:       m.storage.S3Bucket,
-		Region:       m.storage.S3Region,
-		Endpoint:     m.storage.S3Endpoint,
-		AccessKey:    m.storage.S3AccessKey,
-		SecretKey:    m.storage.S3SecretKey,
-		SessionToken: m.storage.S3SessionToken,
+		Type:            m.storage.ObjectStorageType,
+		Bucket:          m.storage.S3Bucket,
+		Region:          m.storage.S3Region,
+		Endpoint:        m.storage.S3Endpoint,
+		AccessKey:       m.storage.S3AccessKey,
+		SecretKey:       m.storage.S3SecretKey,
+		SessionToken:    m.storage.S3SessionToken,
+		RequestObserver: m.requestObserver,
 	})
 	if err != nil {
 		return nil, err

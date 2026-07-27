@@ -30,6 +30,8 @@ const (
 	WindowTypeSandboxRuntimeMiBMilliseconds = "sandbox.runtime_mib_milliseconds"
 	WindowTypeSandboxVolumeByteHours        = "sandbox.volume_byte_hours"
 	WindowTypeSandboxRootFSByteHours        = "sandbox.rootfs_byte_hours"
+	WindowTypeSandboxObjectStoreGetRequests = "sandbox.object_store_get_requests"
+	WindowTypeSandboxObjectStorePutRequests = "sandbox.object_store_put_requests"
 
 	WindowTypeManagedAgentSessionRunningMilliseconds = "managed_agent.session_running_milliseconds"
 
@@ -43,6 +45,7 @@ const (
 	SubjectTypeVolume              = "volume"
 	SubjectTypeSnapshot            = "snapshot"
 	SubjectTypeRootFS              = "rootfs"
+	SubjectTypeObjectStoreBucket   = "object_store_bucket"
 	SubjectTypeTemplate            = "template"
 	SubjectTypeManagedAgentSession = "managed_agent_session"
 )

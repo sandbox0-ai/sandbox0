@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -115,6 +116,7 @@ type Manager struct {
 	quotaRepo         *quota.Repository
 	metrics           *obsmetrics.StorageProxyMetrics
 	volumeObserver    *volume.VolumeStorageObserver
+	requestObserver   objectstore.RequestObserver
 }
 
 // NewManager creates a new snapshot manager
@@ -155,6 +157,14 @@ func (m *Manager) SetMeteringRepository(repo meteringRecorder) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.meteringRepo = repo
+}
+
+// SetObjectStoreRequestObserver configures request metering for platform-owned
+// S0FS snapshot objects.
+func (m *Manager) SetObjectStoreRequestObserver(observer objectstore.RequestObserver) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requestObserver = observer
 }
 
 func (m *Manager) SetQuotaRepository(repo *quota.Repository) {

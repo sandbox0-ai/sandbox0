@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,7 +44,27 @@ func TestSandboxCrashLogCollectorEnqueuesUnexpectedProcdRestart(t *testing.T) {
 	assert.Equal(t, int64(7), item.RuntimeGeneration)
 	assert.Equal(t, int32(1), item.RestartCount)
 	assert.Equal(t, int32(2), item.ExitCode)
+	assert.True(t, item.Previous)
 	assert.Equal(t, "pod-uid:1", item.crashID())
+}
+
+func TestSandboxCrashLogCollectorEnqueuesCurrentTerminatedProcdAttempt(t *testing.T) {
+	collector := NewSandboxCrashLogCollector(nil, zap.NewNop(), nil)
+	t.Cleanup(collector.queue.ShutDown)
+
+	oldPod := testProcdCrashPod(0, 0)
+	newPod := testTerminatedProcdCrashPod(0)
+	collector.ResourceEventHandler().UpdateFunc(oldPod, newPod)
+
+	require.Equal(t, 1, collector.queue.Len())
+	item, shutdown := collector.queue.Get()
+	require.False(t, shutdown)
+	collector.queue.Done(item)
+	collector.queue.Forget(item)
+	assert.False(t, item.Previous)
+	assert.Equal(t, "containerd://terminated-procd", item.ContainerID)
+	assert.Equal(t, int32(0), item.ExitCode)
+	assert.Equal(t, "pod-uid:containerd://terminated-procd", item.crashID())
 }
 
 func TestSandboxCrashLogCollectorIgnoresExpectedOrIrrelevantPodUpdates(t *testing.T) {
@@ -80,6 +101,16 @@ func TestSandboxCrashLogCollectorIgnoresExpectedOrIrrelevantPodUpdates(t *testin
 				return pod
 			}(),
 		},
+		{
+			name:   "pod being deleted",
+			oldPod: testProcdCrashPod(0, 0),
+			newPod: func() *corev1.Pod {
+				pod := testTerminatedProcdCrashPod(137)
+				now := metav1.Now()
+				pod.DeletionTimestamp = &now
+				return pod
+			}(),
+		},
 	}
 
 	for _, tt := range tests {
@@ -110,7 +141,7 @@ func TestSandboxCrashLogCollectorCapturesInternalLogsAndDropsProcessOutput(t *te
 	core, observed := observer.New(zap.DebugLevel)
 	registry := prometheus.NewRegistry()
 	metrics := obsmetrics.NewManager(registry)
-	reader := &recordingPreviousLogReader{logs: []byte(strings.Join([]string{
+	reader := &recordingContainerLogReader{logs: []byte(strings.Join([]string{
 		`2026-07-23T03:26:46.900000000Z {"level":"info","msg":"request started","service":"procd"}`,
 		`2026-07-23T03:26:46.950000000Z {"message":"sandbox process output","process_id":"ctx-1","process_type":"cmd","source":"stderr","data":"TOP_SECRET"}`,
 		`2026-07-23T03:26:46.978000000Z panic: test crash`,
@@ -121,10 +152,10 @@ func TestSandboxCrashLogCollectorCapturesInternalLogsAndDropsProcessOutput(t *te
 	t.Cleanup(collector.queue.ShutDown)
 
 	item := crashLogItemFromPod(testProcdCrashPod(1, 2))
-	require.NoError(t, collector.capturePreviousLogs(context.Background(), item))
+	require.NoError(t, collector.captureLogs(context.Background(), item))
 
-	assert.Equal(t, []string{"sandbox-ns/sandbox-pod"}, reader.Calls())
-	entries := observed.FilterMessage("Captured previous procd container logs").All()
+	assert.Equal(t, []string{"sandbox-ns/sandbox-pod:true"}, reader.Calls())
+	entries := observed.FilterMessage("Captured terminated procd container logs").All()
 	require.Len(t, entries, 1)
 	fields := entries[0].ContextMap()
 	assert.Equal(t, "sandbox_procd_crash", fields["event"])
@@ -142,26 +173,27 @@ func TestSandboxCrashLogCollectorDoesNotEmitFilteredProcessOutput(t *testing.T) 
 	core, observed := observer.New(zap.DebugLevel)
 	registry := prometheus.NewRegistry()
 	metrics := obsmetrics.NewManager(registry)
-	reader := &recordingPreviousLogReader{logs: []byte(`2026-07-23T03:26:46.950000000Z {"message":"sandbox process output","process_id":"ctx-1","process_type":"cmd","source":"stdout","data":"TOP_SECRET"}`)}
+	reader := &recordingContainerLogReader{logs: []byte(`2026-07-23T03:26:46.950000000Z {"message":"sandbox process output","process_id":"ctx-1","process_type":"cmd","source":"stdout","data":"TOP_SECRET"}`)}
 	collector := NewSandboxCrashLogCollector(nil, zap.New(core), metrics)
 	collector.reader = reader
 	t.Cleanup(collector.queue.ShutDown)
 
-	require.NoError(t, collector.capturePreviousLogs(context.Background(), crashLogItemFromPod(testProcdCrashPod(1, 2))))
+	require.NoError(t, collector.captureLogs(context.Background(), crashLogItemFromPod(testProcdCrashPod(1, 2))))
 
-	assert.Equal(t, 0, observed.FilterMessage("Captured previous procd container logs").Len())
-	emptyEntries := observed.FilterMessage("Previous procd container logs contained no internal log lines").All()
+	assert.Equal(t, 0, observed.FilterMessage("Captured terminated procd container logs").Len())
+	emptyEntries := observed.FilterMessage("Terminated procd container logs contained no internal log lines").All()
 	require.Len(t, emptyEntries, 1)
 	assert.NotContains(t, emptyEntries[0].ContextMap(), "log_chunk")
 	assert.Equal(t, float64(1), testutil.ToFloat64(metrics.ProcdCrashLogCapturesTotal.WithLabelValues("empty")))
 }
 
-func TestKubernetesPreviousContainerLogReaderUsesPreviousProcdLogOptions(t *testing.T) {
+func TestKubernetesContainerLogReaderUsesRequestedProcdLogAttempt(t *testing.T) {
+	var previousValues []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/v1/namespaces/sandbox-ns/pods/sandbox-pod/log", r.URL.Path)
 		query := r.URL.Query()
 		assert.Equal(t, DefaultSandboxLogContainer, query.Get("container"))
-		assert.Equal(t, "true", query.Get("previous"))
+		previousValues = append(previousValues, query.Get("previous"))
 		assert.Equal(t, "true", query.Get("timestamps"))
 		assert.Equal(t, "2048", query.Get("tailLines"))
 		assert.Equal(t, "16777216", query.Get("limitBytes"))
@@ -171,16 +203,20 @@ func TestKubernetesPreviousContainerLogReaderUsesPreviousProcdLogOptions(t *test
 
 	client, err := kubernetes.NewForConfig(&rest.Config{Host: server.URL})
 	require.NoError(t, err)
-	reader := &kubernetesPreviousContainerLogReader{client: client}
+	reader := &kubernetesContainerLogReader{client: client}
 
-	logs, err := reader.ReadPreviousLogs(context.Background(), "sandbox-ns", "sandbox-pod")
+	logs, err := reader.ReadLogs(context.Background(), "sandbox-ns", "sandbox-pod", true)
 	require.NoError(t, err)
 	assert.Equal(t, "panic: captured\n", string(logs))
+	logs, err = reader.ReadLogs(context.Background(), "sandbox-ns", "sandbox-pod", false)
+	require.NoError(t, err)
+	assert.Equal(t, "panic: captured\n", string(logs))
+	assert.Equal(t, []string{"true", ""}, previousValues)
 }
 
 func TestSandboxCrashLogCollectorRetriesTransientReadFailure(t *testing.T) {
 	core, observed := observer.New(zap.DebugLevel)
-	reader := &recordingPreviousLogReader{
+	reader := &recordingContainerLogReader{
 		logs:         []byte("panic: captured after retry\n"),
 		failuresLeft: 2,
 	}
@@ -193,7 +229,7 @@ func TestSandboxCrashLogCollectorRetriesTransientReadFailure(t *testing.T) {
 	go func() { done <- collector.Run(ctx, 1) }()
 	collector.queue.Add(crashLogItemFromPod(testProcdCrashPod(1, 2)))
 	require.Eventually(t, func() bool {
-		return observed.FilterMessage("Captured previous procd container logs").Len() == 1
+		return observed.FilterMessage("Captured terminated procd container logs").Len() == 1
 	}, 3*time.Second, 20*time.Millisecond)
 	assert.Equal(t, 3, len(reader.Calls()))
 
@@ -201,17 +237,17 @@ func TestSandboxCrashLogCollectorRetriesTransientReadFailure(t *testing.T) {
 	require.ErrorIs(t, <-done, context.Canceled)
 }
 
-type recordingPreviousLogReader struct {
+type recordingContainerLogReader struct {
 	mu           sync.Mutex
 	logs         []byte
 	failuresLeft int
 	calls        []string
 }
 
-func (r *recordingPreviousLogReader) ReadPreviousLogs(_ context.Context, namespace, podName string) ([]byte, error) {
+func (r *recordingContainerLogReader) ReadLogs(_ context.Context, namespace, podName string, previous bool) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, namespace+"/"+podName)
+	r.calls = append(r.calls, fmt.Sprintf("%s/%s:%t", namespace, podName, previous))
 	if r.failuresLeft > 0 {
 		r.failuresLeft--
 		return nil, errors.New("transient log read failure")
@@ -219,7 +255,7 @@ func (r *recordingPreviousLogReader) ReadPreviousLogs(_ context.Context, namespa
 	return append([]byte(nil), r.logs...), nil
 }
 
-func (r *recordingPreviousLogReader) Calls() []string {
+func (r *recordingContainerLogReader) Calls() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.calls...)
@@ -261,6 +297,26 @@ func testProcdCrashPod(restartCount, exitCode int32) *corev1.Pod {
 	}
 }
 
+func testTerminatedProcdCrashPod(exitCode int32) *corev1.Pod {
+	pod := testProcdCrashPod(0, 0)
+	now := time.Now().UTC()
+	pod.Status.Phase = corev1.PodFailed
+	if exitCode == 0 {
+		pod.Status.Phase = corev1.PodSucceeded
+	}
+	status := &pod.Status.ContainerStatuses[0]
+	status.ContainerID = "containerd://terminated-procd"
+	status.LastTerminationState = corev1.ContainerState{}
+	status.State.Terminated = &corev1.ContainerStateTerminated{
+		ContainerID: "containerd://terminated-procd",
+		ExitCode:    exitCode,
+		Reason:      "Error",
+		StartedAt:   metav1.NewTime(now.Add(-time.Minute)),
+		FinishedAt:  metav1.NewTime(now),
+	}
+	return pod
+}
+
 func crashLogItemFromPod(pod *corev1.Pod) procdCrashLogItem {
 	status := procdContainerStatus(pod)
 	terminated := status.LastTerminationState.Terminated
@@ -272,6 +328,7 @@ func crashLogItemFromPod(pod *corev1.Pod) procdCrashLogItem {
 		TeamID:            pod.Annotations[controller.AnnotationTeamID],
 		RuntimeGeneration: runtimeGenerationFromPod(pod),
 		RestartCount:      status.RestartCount,
+		Previous:          true,
 		ExitCode:          terminated.ExitCode,
 		Signal:            terminated.Signal,
 		Reason:            terminated.Reason,

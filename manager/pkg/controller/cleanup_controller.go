@@ -197,13 +197,6 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 			cc.forceDeleteStaleDeletingPod(ctx, template, pod, now)
 			continue
 		}
-		if pod.Status.Phase == corev1.PodSucceeded {
-			if cc.deleteCompletedPod(ctx, template, pod) {
-				expiredCount++
-			}
-			continue
-		}
-
 		// Hard expiry deletes the durable sandbox identity and state.
 		if hardExpiresAtStr := pod.Annotations[AnnotationHardExpiresAt]; hardExpiresAtStr != "" {
 			hardExpiresAt, err := time.Parse(time.RFC3339, hardExpiresAtStr)
@@ -245,6 +238,14 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 				expiredCount++
 				continue
 			}
+		}
+
+		// Claimed stopped runtimes are retained until manager checkpoints their
+		// terminated container snapshot. The Pod phase can remain Running when
+		// its container-level restart policy prevents procd from restarting.
+		// Hard expiry above still wins.
+		if claimedSandboxRuntimeStopped(pod) {
+			continue
 		}
 
 		// Check if pod has expiration annotation
@@ -300,6 +301,21 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 	return nil
 }
 
+func claimedSandboxRuntimeStopped(pod *corev1.Pod) bool {
+	if !IsClaimedSandboxPod(pod) {
+		return false
+	}
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return true
+	}
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].State.Terminated != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (cc *CleanupController) cleanupStaleDeletingIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, now time.Time) error {
 	pods, err := cc.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
@@ -315,45 +331,6 @@ func (cc *CleanupController) cleanupStaleDeletingIdlePods(ctx context.Context, t
 		}
 	}
 	return nil
-}
-
-func (cc *CleanupController) deleteCompletedPod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-
-	cc.logger.Info("Deleting completed sandbox pod",
-		zap.String("pod", pod.Name),
-		zap.String("phase", string(pod.Status.Phase)),
-	)
-
-	if cc.sandboxTerminator != nil {
-		if err := cc.sandboxTerminator.TerminateSandboxByID(ctx, cleanupSandboxIDFromPod(pod)); err != nil {
-			cc.logger.Error("Failed to delete completed sandbox pod",
-				zap.String("pod", pod.Name),
-				zap.Error(err),
-			)
-			return false
-		}
-	} else {
-		if cc.k8sClient == nil {
-			cc.logger.Warn("Kubernetes client not configured, skipping completed sandbox pod delete",
-				zap.String("pod", pod.Name),
-			)
-			return false
-		}
-		if err := cc.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
-			cc.logger.Error("Failed to delete completed sandbox pod",
-				zap.String("pod", pod.Name),
-				zap.Error(err),
-			)
-			return false
-		}
-	}
-
-	cc.recorder.Eventf(template, corev1.EventTypeNormal, "CompletedPodDeleted",
-		"Deleted completed sandbox pod %s", pod.Name)
-	return true
 }
 
 func cleanupSandboxIDFromPod(pod *corev1.Pod) string {

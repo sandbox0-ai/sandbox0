@@ -484,11 +484,16 @@ func rootFSTargetForPod(pod *corev1.Pod) ctldapi.RootFSContainerRef {
 	if pod == nil {
 		return ctldapi.RootFSContainerRef{ContainerName: sandboxRootFSContainerName}
 	}
+	containerID := ""
+	if status := procdContainerStatus(pod); status != nil {
+		containerID = status.ContainerID
+	}
 	return ctldapi.RootFSContainerRef{
 		Namespace:     pod.Namespace,
 		PodName:       pod.Name,
 		PodUID:        string(pod.UID),
 		ContainerName: sandboxRootFSContainerName,
+		ContainerID:   containerID,
 	}
 }
 
@@ -647,6 +652,11 @@ func rootFSBaselineMissing(err error, resp *ctldapi.SaveRootFSResponse) bool {
 	}
 	message := strings.ToLower(saveRootFSError(resp))
 	return strings.Contains(message, "baseline") && strings.Contains(message, "not captured")
+}
+
+func rootFSTerminatedSnapshotMissing(err error) bool {
+	var reqErr *ctldapi.RequestError
+	return errors.As(err, &reqErr) && reqErr != nil && reqErr.StatusCode == http.StatusNotFound
 }
 
 func rootFSResponseError(err error, message string) error {

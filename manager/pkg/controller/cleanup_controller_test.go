@@ -185,6 +185,7 @@ func TestCleanupExpiredDeletesHardExpiredSandbox(t *testing.T) {
 				AnnotationHardExpiresAt: now.Add(-time.Minute).Format(time.RFC3339),
 			},
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed},
 	}
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
 		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
@@ -343,7 +344,7 @@ func TestCleanupExpiredForceDeletesStaleDeletingIdlePod(t *testing.T) {
 	}
 }
 
-func TestCleanupExpiredDeletesCompletedSandboxPodViaTerminator(t *testing.T) {
+func TestCleanupExpiredRetainsCompletedSandboxPodForCrashRecovery(t *testing.T) {
 	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -385,16 +386,67 @@ func TestCleanupExpiredDeletesCompletedSandboxPodViaTerminator(t *testing.T) {
 
 	require.NoError(t, controller.cleanupExpired(context.Background(), template))
 
-	assert.Equal(t, []string{"sandbox-1"}, terminator.calls)
+	assert.Empty(t, terminator.calls)
 	select {
 	case event := <-recorder.Events:
-		assert.Contains(t, event, "CompletedPodDeleted")
+		t.Fatalf("unexpected cleanup event: %s", event)
 	default:
-		t.Fatal("expected completed-pod-deleted event")
 	}
 }
 
-func TestCleanupExpiredDeletesCompletedSandboxPodDirectlyWhenTerminatorMissing(t *testing.T) {
+func TestCleanupExpiredDoesNotPauseRunningPodWithTerminatedRuntime(t *testing.T) {
+	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default",
+			Namespace: "tpl-default",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sandbox-1",
+			Namespace: "tpl-default",
+			Labels: map[string]string{
+				LabelTemplateID: "default",
+				LabelPoolType:   PoolTypeActive,
+			},
+			Annotations: map[string]string{
+				AnnotationExpiresAt: now.Add(-time.Minute).Format(time.RFC3339),
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "procd",
+				State: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{ExitCode: 137},
+				},
+			}},
+		},
+	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+	})
+	require.NoError(t, indexer.Add(pod))
+
+	runtimePauser := &recordingRuntimePauser{}
+	controller := NewCleanupController(
+		nil,
+		corelisters.NewPodLister(indexer),
+		nil,
+		record.NewFakeRecorder(1),
+		staticCleanupClock{now: now},
+		runtimePauser,
+		nil,
+		zap.NewNop(),
+		time.Minute,
+	)
+
+	require.NoError(t, controller.cleanupExpired(context.Background(), template))
+	assert.Empty(t, runtimePauser.calls)
+}
+
+func TestCleanupExpiredDoesNotDeleteCompletedSandboxPodDirectly(t *testing.T) {
 	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -438,11 +490,10 @@ func TestCleanupExpiredDeletesCompletedSandboxPodDirectlyWhenTerminatorMissing(t
 	require.NoError(t, controller.cleanupExpired(context.Background(), template))
 
 	_, err := client.CoreV1().Pods("tpl-default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
-	require.True(t, apierrors.IsNotFound(err), "expected completed pod to be deleted, got %v", err)
+	require.NoError(t, err)
 	select {
 	case event := <-recorder.Events:
-		assert.Contains(t, event, "CompletedPodDeleted")
+		t.Fatalf("unexpected cleanup event: %s", event)
 	default:
-		t.Fatal("expected completed-pod-deleted event")
 	}
 }

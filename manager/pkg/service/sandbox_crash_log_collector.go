@@ -21,46 +21,46 @@ import (
 )
 
 const (
-	defaultProcdPreviousLogTailLines      int64 = 2048
-	defaultProcdPreviousLogReadLimitBytes int64 = 16 << 20
-	defaultProcdCrashLogRetainBytes             = 512 << 10
-	defaultProcdCrashLogChunkBytes              = 32 << 10
-	defaultProcdCrashLogRequestTimeout          = 3 * time.Second
-	maxProcdPreviousLogCaptureRetries           = 4
+	defaultProcdCrashLogTailLines      int64 = 2048
+	defaultProcdCrashLogReadLimitBytes int64 = 16 << 20
+	defaultProcdCrashLogRetainBytes          = 512 << 10
+	defaultProcdCrashLogChunkBytes           = 32 << 10
+	defaultProcdCrashLogRequestTimeout       = 3 * time.Second
+	maxProcdCrashLogCaptureRetries           = 4
 )
 
-type previousContainerLogReader interface {
-	ReadPreviousLogs(ctx context.Context, namespace, podName string) ([]byte, error)
+type containerLogReader interface {
+	ReadLogs(ctx context.Context, namespace, podName string, previous bool) ([]byte, error)
 }
 
-type kubernetesPreviousContainerLogReader struct {
+type kubernetesContainerLogReader struct {
 	client kubernetes.Interface
 }
 
-func (r *kubernetesPreviousContainerLogReader) ReadPreviousLogs(ctx context.Context, namespace, podName string) ([]byte, error) {
+func (r *kubernetesContainerLogReader) ReadLogs(ctx context.Context, namespace, podName string, previous bool) ([]byte, error) {
 	if r == nil || r.client == nil {
 		return nil, fmt.Errorf("kubernetes client is not configured")
 	}
-	tailLines := defaultProcdPreviousLogTailLines
-	limitBytes := defaultProcdPreviousLogReadLimitBytes
+	tailLines := defaultProcdCrashLogTailLines
+	limitBytes := defaultProcdCrashLogReadLimitBytes
 	stream, err := r.client.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
 		Container:  DefaultSandboxLogContainer,
-		Previous:   true,
+		Previous:   previous,
 		Timestamps: true,
 		TailLines:  &tailLines,
 		LimitBytes: &limitBytes,
 	}).Stream(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("stream previous procd container logs: %w", err)
+		return nil, fmt.Errorf("stream procd container logs: %w", err)
 	}
 	defer stream.Close()
 
 	logs, err := io.ReadAll(io.LimitReader(stream, limitBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read previous procd container logs: %w", err)
+		return nil, fmt.Errorf("read procd container logs: %w", err)
 	}
 	if int64(len(logs)) > limitBytes {
-		return nil, fmt.Errorf("previous procd container logs exceeded %d bytes", limitBytes)
+		return nil, fmt.Errorf("procd container logs exceeded %d bytes", limitBytes)
 	}
 	return logs, nil
 }
@@ -73,6 +73,8 @@ type procdCrashLogItem struct {
 	TeamID            string
 	RuntimeGeneration int64
 	RestartCount      int32
+	ContainerID       string
+	Previous          bool
 	ExitCode          int32
 	Signal            int32
 	Reason            string
@@ -86,13 +88,16 @@ func (i procdCrashLogItem) crashID() string {
 	if podIdentity == "" {
 		podIdentity = i.Namespace + "/" + i.PodName
 	}
+	if !i.Previous && strings.TrimSpace(i.ContainerID) != "" {
+		return podIdentity + ":" + strings.TrimSpace(i.ContainerID)
+	}
 	return fmt.Sprintf("%s:%d", podIdentity, i.RestartCount)
 }
 
-// SandboxCrashLogCollector captures the previous procd container logs after an
-// unexpected restart and emits them through the manager's platform logger.
+// SandboxCrashLogCollector captures procd logs after an unexpected termination
+// and emits them through the manager's platform logger.
 type SandboxCrashLogCollector struct {
-	reader  previousContainerLogReader
+	reader  containerLogReader
 	logger  *zap.Logger
 	metrics *obsmetrics.ManagerMetrics
 	queue   workqueue.TypedRateLimitingInterface[procdCrashLogItem]
@@ -105,7 +110,7 @@ func NewSandboxCrashLogCollector(k8sClient kubernetes.Interface, logger *zap.Log
 		logger = zap.NewNop()
 	}
 	return &SandboxCrashLogCollector{
-		reader:  &kubernetesPreviousContainerLogReader{client: k8sClient},
+		reader:  &kubernetesContainerLogReader{client: k8sClient},
 		logger:  logger,
 		metrics: metrics,
 		queue: workqueue.NewTypedRateLimitingQueue(
@@ -114,17 +119,17 @@ func NewSandboxCrashLogCollector(k8sClient kubernetes.Interface, logger *zap.Log
 	}
 }
 
-// ResourceEventHandler detects failed procd restarts from shared Pod informer events.
+// ResourceEventHandler detects terminated procd attempts from shared Pod informer events.
 func (c *SandboxCrashLogCollector) ResourceEventHandler() cache.ResourceEventHandlerFuncs {
 	if c == nil {
 		return cache.ResourceEventHandlerFuncs{}
 	}
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
-			c.enqueueRestart(nil, extractPod(obj))
+			c.enqueueTermination(nil, extractPod(obj))
 		},
 		UpdateFunc: func(oldObj, newObj any) {
-			c.enqueueRestart(extractPod(oldObj), extractPod(newObj))
+			c.enqueueTermination(extractPod(oldObj), extractPod(newObj))
 		},
 	}
 }
@@ -156,15 +161,26 @@ func (c *SandboxCrashLogCollector) Run(ctx context.Context, workers int) error {
 	return ctx.Err()
 }
 
-func (c *SandboxCrashLogCollector) enqueueRestart(oldPod, newPod *corev1.Pod) {
+func (c *SandboxCrashLogCollector) enqueueTermination(oldPod, newPod *corev1.Pod) {
 	if c == nil || c.queue == nil || !sandboxCrashLogPodEligible(newPod) {
 		return
 	}
 	newStatus := procdContainerStatus(newPod)
-	if newStatus == nil || newStatus.RestartCount == 0 || newStatus.LastTerminationState.Terminated == nil {
+	if newStatus == nil {
 		return
 	}
 
+	if terminated := newStatus.State.Terminated; terminated != nil {
+		if sameCurrentProcdTermination(oldPod, newPod, newStatus, terminated) {
+			return
+		}
+		c.queue.Add(crashLogItem(newPod, newStatus, terminated, false))
+		return
+	}
+
+	if newStatus.RestartCount == 0 || newStatus.LastTerminationState.Terminated == nil {
+		return
+	}
 	oldRestartCount := int32(0)
 	if oldPod != nil && oldPod.UID == newPod.UID {
 		if oldStatus := procdContainerStatus(oldPod); oldStatus != nil {
@@ -179,25 +195,52 @@ func (c *SandboxCrashLogCollector) enqueueRestart(oldPod, newPod *corev1.Pod) {
 	if terminated.ExitCode == 0 && terminated.Signal == 0 {
 		return
 	}
-	c.queue.Add(procdCrashLogItem{
-		Namespace:         newPod.Namespace,
-		PodName:           newPod.Name,
-		PodUID:            string(newPod.UID),
-		SandboxID:         sandboxIDFromPod(newPod),
-		TeamID:            strings.TrimSpace(newPod.Annotations[controller.AnnotationTeamID]),
-		RuntimeGeneration: runtimeGenerationFromPod(newPod),
-		RestartCount:      newStatus.RestartCount,
+	c.queue.Add(crashLogItem(newPod, newStatus, terminated, true))
+}
+
+func sameCurrentProcdTermination(
+	oldPod, newPod *corev1.Pod,
+	newStatus *corev1.ContainerStatus,
+	newTerminated *corev1.ContainerStateTerminated,
+) bool {
+	if oldPod == nil || newPod == nil || oldPod.UID != newPod.UID {
+		return false
+	}
+	oldStatus := procdContainerStatus(oldPod)
+	if oldStatus == nil || oldStatus.State.Terminated == nil {
+		return false
+	}
+	return oldStatus.ContainerID == newStatus.ContainerID &&
+		oldStatus.State.Terminated.FinishedAt.Equal(&newTerminated.FinishedAt)
+}
+
+func crashLogItem(
+	pod *corev1.Pod,
+	status *corev1.ContainerStatus,
+	terminated *corev1.ContainerStateTerminated,
+	previous bool,
+) procdCrashLogItem {
+	return procdCrashLogItem{
+		Namespace:         pod.Namespace,
+		PodName:           pod.Name,
+		PodUID:            string(pod.UID),
+		SandboxID:         sandboxIDFromPod(pod),
+		TeamID:            strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID]),
+		RuntimeGeneration: runtimeGenerationFromPod(pod),
+		RestartCount:      status.RestartCount,
+		ContainerID:       status.ContainerID,
+		Previous:          previous,
 		ExitCode:          terminated.ExitCode,
 		Signal:            terminated.Signal,
 		Reason:            terminated.Reason,
 		Message:           terminated.Message,
 		StartedAt:         terminated.StartedAt.Time,
 		FinishedAt:        terminated.FinishedAt.Time,
-	})
+	}
 }
 
 func sandboxCrashLogPodEligible(pod *corev1.Pod) bool {
-	if pod == nil || !controller.IsClaimedSandboxPod(pod) {
+	if pod == nil || pod.DeletionTimestamp != nil || !controller.IsClaimedSandboxPod(pod) {
 		return false
 	}
 	if strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID]) == "" {
@@ -230,7 +273,7 @@ func (c *SandboxCrashLogCollector) processNextWorkItem(ctx context.Context) bool
 	}
 	defer c.queue.Done(item)
 
-	err := c.capturePreviousLogs(ctx, item)
+	err := c.captureLogs(ctx, item)
 	if err == nil {
 		c.queue.Forget(item)
 		return true
@@ -239,8 +282,8 @@ func (c *SandboxCrashLogCollector) processNextWorkItem(ctx context.Context) bool
 		c.queue.Forget(item)
 		return true
 	}
-	if c.queue.NumRequeues(item) < maxProcdPreviousLogCaptureRetries {
-		c.logger.Debug("Previous procd log capture failed, retrying",
+	if c.queue.NumRequeues(item) < maxProcdCrashLogCaptureRetries {
+		c.logger.Debug("Procd crash log capture failed, retrying",
 			append(procdCrashLogFields(item), zap.Error(err))...,
 		)
 		c.queue.AddRateLimited(item)
@@ -249,41 +292,41 @@ func (c *SandboxCrashLogCollector) processNextWorkItem(ctx context.Context) bool
 
 	c.queue.Forget(item)
 	c.observeCapture("error", 0)
-	c.logger.Warn("Failed to capture previous procd container logs",
+	c.logger.Warn("Failed to capture terminated procd container logs",
 		append(procdCrashLogFields(item), zap.Error(err))...,
 	)
 	return true
 }
 
-func (c *SandboxCrashLogCollector) capturePreviousLogs(ctx context.Context, item procdCrashLogItem) error {
+func (c *SandboxCrashLogCollector) captureLogs(ctx context.Context, item procdCrashLogItem) error {
 	if c == nil || c.reader == nil {
 		return fmt.Errorf("previous container log reader is not configured")
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, defaultProcdCrashLogRequestTimeout)
 	defer cancel()
 
-	raw, err := c.reader.ReadPreviousLogs(requestCtx, item.Namespace, item.PodName)
+	raw, err := c.reader.ReadLogs(requestCtx, item.Namespace, item.PodName, item.Previous)
 	if err != nil {
 		return err
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return fmt.Errorf("previous procd container logs were empty")
+		return fmt.Errorf("terminated procd container logs were empty")
 	}
 
-	filtered, droppedProcessLines, err := filterPreviousProcdLogs(raw)
+	filtered, droppedProcessLines, err := filterProcdCrashLogs(raw)
 	if err != nil {
 		return err
 	}
 	if len(bytes.TrimSpace(filtered)) == 0 {
 		c.observeCapture("empty", 0)
-		c.logger.Warn("Previous procd container logs contained no internal log lines",
+		c.logger.Warn("Terminated procd container logs contained no internal log lines",
 			append(procdCrashLogFields(item), zap.Int("dropped_process_log_lines", droppedProcessLines))...,
 		)
 		return nil
 	}
 
-	retained, truncated := retainPreviousLogTail(filtered, defaultProcdCrashLogRetainBytes)
-	chunks := splitPreviousLogChunks(retained, defaultProcdCrashLogChunkBytes)
+	retained, truncated := retainProcdCrashLogTail(filtered, defaultProcdCrashLogRetainBytes)
+	chunks := splitProcdCrashLogChunks(retained, defaultProcdCrashLogChunkBytes)
 	fields := procdCrashLogFields(item)
 	fields = append(fields,
 		zap.Int("captured_log_bytes", len(retained)),
@@ -298,15 +341,15 @@ func (c *SandboxCrashLogCollector) capturePreviousLogs(ctx context.Context, item
 			zap.Int("chunk_index", index),
 			zap.String("log_chunk", chunk),
 		)
-		c.logger.Warn("Captured previous procd container logs", chunkFields...)
+		c.logger.Warn("Captured terminated procd container logs", chunkFields...)
 	}
 	c.observeCapture("success", len(retained))
 	return nil
 }
 
-func filterPreviousProcdLogs(raw []byte) ([]byte, int, error) {
+func filterProcdCrashLogs(raw []byte) ([]byte, int, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
-	scanner.Buffer(make([]byte, 64<<10), int(defaultProcdPreviousLogReadLimitBytes))
+	scanner.Buffer(make([]byte, 64<<10), int(defaultProcdCrashLogReadLimitBytes))
 	var filtered bytes.Buffer
 	droppedProcessLines := 0
 	for scanner.Scan() {
@@ -319,12 +362,12 @@ func filterPreviousProcdLogs(raw []byte) ([]byte, int, error) {
 		filtered.WriteByte('\n')
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, 0, fmt.Errorf("filter previous procd container logs: %w", err)
+		return nil, 0, fmt.Errorf("filter terminated procd container logs: %w", err)
 	}
 	return filtered.Bytes(), droppedProcessLines, nil
 }
 
-func retainPreviousLogTail(logs []byte, limit int) ([]byte, bool) {
+func retainProcdCrashLogTail(logs []byte, limit int) ([]byte, bool) {
 	if limit <= 0 || len(logs) <= limit {
 		return logs, false
 	}
@@ -335,7 +378,7 @@ func retainPreviousLogTail(logs []byte, limit int) ([]byte, bool) {
 	return logs, true
 }
 
-func splitPreviousLogChunks(logs []byte, limit int) []string {
+func splitProcdCrashLogChunks(logs []byte, limit int) []string {
 	if len(logs) == 0 {
 		return nil
 	}
@@ -367,6 +410,8 @@ func procdCrashLogFields(item procdCrashLogItem) []zap.Field {
 		zap.String("pod_uid", item.PodUID),
 		zap.Int64("runtime_generation", item.RuntimeGeneration),
 		zap.Int32("restart_count", item.RestartCount),
+		zap.String("container_id", item.ContainerID),
+		zap.Bool("previous_logs", item.Previous),
 		zap.Int32("exit_code", item.ExitCode),
 		zap.Int32("signal", item.Signal),
 		zap.String("reason", item.Reason),

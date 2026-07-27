@@ -517,6 +517,8 @@ func main() {
 	podInformer.Informer().AddEventHandler(sandboxCrashLogCollector.ResourceEventHandler())
 	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)
 	sandboxService.SetPauseEnqueuer(sandboxPauseController)
+	sandboxCrashRecoveryController := service.NewSandboxCrashRecoveryController(k8sClient, podLister, sandboxService, logger)
+	podInformer.Informer().AddEventHandler(sandboxCrashRecoveryController.ResourceEventHandler())
 	operator.SetSandboxProbeRunner(sandboxService)
 	sandboxLogWorker := buildSandboxObservabilityLogWorker(cfg, internalAuthGen, obsProvider, logger)
 	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
@@ -699,6 +701,11 @@ func main() {
 	go func() {
 		if err := sandboxCrashLogCollector.Run(ctx, 2); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("Sandbox crash log collector failed", zap.Error(err))
+		}
+	}()
+	go func() {
+		if err := sandboxCrashRecoveryController.Run(ctx, 2); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("Sandbox crash recovery controller failed", zap.Error(err))
 		}
 	}()
 

@@ -403,7 +403,7 @@ procd_config:
 	}
 }
 
-func TestBuildPodSpecUsesRestartPolicyAlways(t *testing.T) {
+func TestBuildPodSpecUsesContainerRestartPolicyNever(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
@@ -412,6 +412,12 @@ manager_image: sandbox0/manager:test
 	spec := BuildPodSpec(newTestTemplate())
 	if spec.RestartPolicy != corev1.RestartPolicyAlways {
 		t.Fatalf("restartPolicy = %q, want %q", spec.RestartPolicy, corev1.RestartPolicyAlways)
+	}
+	if len(spec.Containers) != 1 || spec.Containers[0].RestartPolicy == nil {
+		t.Fatalf("container restartPolicy = nil, want %q", corev1.ContainerRestartPolicyNever)
+	}
+	if got := *spec.Containers[0].RestartPolicy; got != corev1.ContainerRestartPolicyNever {
+		t.Fatalf("container restartPolicy = %q, want %q", got, corev1.ContainerRestartPolicyNever)
 	}
 }
 

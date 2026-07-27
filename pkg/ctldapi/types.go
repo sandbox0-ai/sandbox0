@@ -40,6 +40,7 @@ type RootFSContainerRef struct {
 	PodName       string `json:"pod_name"`
 	PodUID        string `json:"pod_uid,omitempty"`
 	ContainerName string `json:"container_name"`
+	ContainerID   string `json:"container_id,omitempty"`
 }
 
 // RootFSInfo is the containerd metadata needed to validate and restore a

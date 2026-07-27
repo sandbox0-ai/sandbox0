@@ -115,6 +115,71 @@ func TestResolveContainerIDPrefersRunningAttempt(t *testing.T) {
 	assert.Equal(t, "uid-1", podUID)
 }
 
+func TestResolveContainerIDSelectsExactExitedAttempt(t *testing.T) {
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{
+		CRIClient: fakeCRIClient{containers: []*runtimeapi.Container{
+			{
+				Id:       "exited-container",
+				State:    runtimeapi.ContainerState_CONTAINER_EXITED,
+				Metadata: &runtimeapi.ContainerMetadata{Name: "sandbox"},
+				Labels: map[string]string{
+					"io.kubernetes.pod.namespace": "default",
+					"io.kubernetes.pod.name":      "pod-1",
+					"io.kubernetes.pod.uid":       "uid-1",
+				},
+			},
+			{
+				Id:       "running-container",
+				State:    runtimeapi.ContainerState_CONTAINER_RUNNING,
+				Metadata: &runtimeapi.ContainerMetadata{Name: "sandbox"},
+				Labels: map[string]string{
+					"io.kubernetes.pod.namespace": "default",
+					"io.kubernetes.pod.name":      "pod-1",
+					"io.kubernetes.pod.uid":       "uid-1",
+				},
+			},
+		}},
+	})
+
+	containerID, podUID, err := runtime.resolveContainerID(context.Background(), ctldapi.RootFSContainerRef{
+		Namespace:     "default",
+		PodName:       "pod-1",
+		PodUID:        "uid-1",
+		ContainerName: "sandbox",
+		ContainerID:   "containerd://exited-container",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "exited-container", containerID)
+	assert.Equal(t, "uid-1", podUID)
+}
+
+func TestResolveContainerIDRejectsExactAttemptWithMismatchedPodIdentity(t *testing.T) {
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{
+		CRIClient: fakeCRIClient{containers: []*runtimeapi.Container{{
+			Id:       "exited-container",
+			State:    runtimeapi.ContainerState_CONTAINER_EXITED,
+			Metadata: &runtimeapi.ContainerMetadata{Name: "sandbox"},
+			Labels: map[string]string{
+				"io.kubernetes.pod.namespace": "default",
+				"io.kubernetes.pod.name":      "other-pod",
+				"io.kubernetes.pod.uid":       "other-uid",
+			},
+		}}},
+	})
+
+	_, _, err := runtime.resolveContainerID(context.Background(), ctldapi.RootFSContainerRef{
+		Namespace:     "default",
+		PodName:       "pod-1",
+		PodUID:        "uid-1",
+		ContainerName: "sandbox",
+		ContainerID:   "exited-container",
+	})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
 func TestResolveContainerIDReturnsNotFound(t *testing.T) {
 	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{CRIClient: fakeCRIClient{}})
 
@@ -253,6 +318,11 @@ func TestNormalizeCRIEndpoint(t *testing.T) {
 	assert.Equal(t, "unix:///run/containerd/containerd.sock", normalizeCRIEndpoint("/run/containerd/containerd.sock"))
 	assert.Equal(t, "unix:///run/containerd/containerd.sock", normalizeCRIEndpoint("unix:///run/containerd/containerd.sock"))
 	assert.Equal(t, "127.0.0.1:1234", normalizeCRIEndpoint("127.0.0.1:1234"))
+}
+
+func TestNormalizeContainerID(t *testing.T) {
+	assert.Equal(t, "container-1", normalizeContainerID("containerd://container-1"))
+	assert.Equal(t, "container-2", normalizeContainerID(" container-2 "))
 }
 
 type fakeCRIClient struct {

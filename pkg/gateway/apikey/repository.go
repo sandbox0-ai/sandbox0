@@ -60,12 +60,34 @@ func NormalizeScope(scope string) (string, bool) {
 
 // Repository provides database access for team-scoped API keys.
 type Repository struct {
-	pool *pgxpool.Pool
+	pool                       *pgxpool.Pool
+	requireLocalTeamOnValidate bool
+}
+
+// RepositoryOption configures an API key repository.
+type RepositoryOption func(*Repository)
+
+// WithLocalTeamValidation controls whether API key validation requires a
+// matching row in the local teams table. Federated regional gateways disable
+// this because team identity is owned by the global gateway.
+func WithLocalTeamValidation(enabled bool) RepositoryOption {
+	return func(r *Repository) {
+		r.requireLocalTeamOnValidate = enabled
+	}
 }
 
 // NewRepository creates a new API key repository.
-func NewRepository(pool *pgxpool.Pool) *Repository {
-	return &Repository{pool: pool}
+func NewRepository(pool *pgxpool.Pool, opts ...RepositoryOption) *Repository {
+	repository := &Repository{
+		pool:                       pool,
+		requireLocalTeamOnValidate: true,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(repository)
+		}
+	}
+	return repository
 }
 
 // Pool returns the underlying connection pool.
@@ -245,13 +267,16 @@ func (r *Repository) ValidateAPIKey(ctx context.Context, keyValue string) (*APIK
 
 	var key APIKey
 	var rolesJSON []byte
-	err := r.pool.QueryRow(ctx, `
+	query := `
 		SELECT k.id, k.key_value, k.team_id, k.created_by, k.name, k.roles, k.scope,
 		       k.is_active, k.expires_at, k.last_used_at, k.usage_count, k.created_at, k.updated_at, k.user_id
 		FROM api_keys k
-		INNER JOIN teams t ON t.id = k.team_id
-		WHERE k.key_value = $1
-	`, keyValue).Scan(
+	`
+	if r.requireLocalTeamOnValidate {
+		query += `INNER JOIN teams t ON t.id = k.team_id`
+	}
+	query += ` WHERE k.key_value = $1`
+	err := r.pool.QueryRow(ctx, query, keyValue).Scan(
 		&key.ID, &key.KeyValue, &key.TeamID, &key.CreatedBy,
 		&key.Name, &rolesJSON, &key.Scope, &key.IsActive,
 		&key.ExpiresAt, &key.LastUsed, &key.UsageCount,

@@ -108,15 +108,15 @@ func NewServer(
 	router := gin.New()
 
 	// Create repository
+	selfHostedAuthEnabled := edgeAuthModeUsesSelfHostedIdentity(cfg.AuthMode)
 	identityRepo := identity.NewRepository(pool)
-	apiKeyRepo := apikey.NewRepository(pool)
+	apiKeyRepo := apikey.NewRepository(pool, apikey.WithLocalTeamValidation(selfHostedAuthEnabled))
 	registryProvider, err := registryprovider.NewProvider(cfg.Registry, nil, logger)
 	if err != nil {
 		logger.Warn("Registry provider disabled", zap.Error(err))
 	}
 	oidcConfigured := config.HasEnabledOIDCProviders(cfg.OIDCProviders)
 	schedulerConfigured := cfg.SchedulerEnabled && cfg.SchedulerURL != ""
-	selfHostedAuthEnabled := edgeAuthModeUsesSelfHostedIdentity(cfg.AuthMode)
 	enterpriseFeaturesEnabled := schedulerConfigured || (selfHostedAuthEnabled && oidcConfigured)
 
 	licenseEntitlements := licensing.NewStaticEntitlements()

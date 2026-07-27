@@ -264,9 +264,9 @@ func (d *auditDelivery) completeCanonicalCall(call *auditCanonicalCall, err erro
 		if d.canonicalCalls[call.event.EventID] == call {
 			delete(d.canonicalCalls, call.event.EventID)
 		}
+		d.pendingCalls.Add(-1)
 		close(call.done)
 		d.canonicalMu.Unlock()
-		d.pendingCalls.Add(-1)
 	})
 }
 
@@ -369,14 +369,22 @@ func (d *auditDelivery) dispatchCanonicalBatch(
 	d.observeStage(source, "slot_wait", slotStarted, nil)
 
 	go func() {
-		defer d.canonicalGate.RUnlock()
-		defer d.releaseCanonicalSlot()
-		d.observeInFlightDelta(1)
-		defer d.observeInFlightDelta(-1)
+		results := func() []error {
+			defer d.canonicalGate.RUnlock()
+			defer d.releaseCanonicalSlot()
+			d.observeInFlightDelta(1)
+			defer d.observeInFlightDelta(-1)
 
-		deliveryCtx, cancel := context.WithTimeout(ctx, auditCanonicalDeliveryTimeout)
-		defer cancel()
-		d.deliverCanonicalBatch(deliveryCtx, batch, source)
+			deliveryCtx, cancel := context.WithTimeout(ctx, auditCanonicalDeliveryTimeout)
+			defer cancel()
+			return d.deliverCanonicalBatch(deliveryCtx, batch, source)
+		}()
+
+		// Publish completion only after the batch has released every shared
+		// resource so callers observe a quiescent canonical delivery state.
+		for index, call := range batch {
+			d.completeCanonicalCall(call, results[index])
+		}
 	}()
 }
 
@@ -384,30 +392,30 @@ func (d *auditDelivery) deliverCanonicalBatch(
 	ctx context.Context,
 	batch []*auditCanonicalCall,
 	source string,
-) {
-	pending := make([]*auditCanonicalCall, 0, len(batch))
+) []error {
+	results := make([]error, len(batch))
+	pendingIndexes := make([]int, 0, len(batch))
 	events := make([]sandboxobservability.Event, 0, len(batch))
 	d.mu.Lock()
-	for _, call := range batch {
+	for index, call := range batch {
 		isPending, err := d.pendingLocked(call.event.EventID)
 		if err != nil {
 			d.mu.Unlock()
 			pendingErr := d.pendingCanonicalError("durable spool inspection failed", err)
-			for _, candidate := range batch {
-				d.completeCanonicalCall(candidate, pendingErr)
+			for index := range results {
+				results[index] = pendingErr
 			}
-			return
+			return results
 		}
 		if !isPending {
-			d.completeCanonicalCall(call, nil)
 			continue
 		}
-		pending = append(pending, call)
+		pendingIndexes = append(pendingIndexes, index)
 		events = append(events, call.event)
 	}
 	d.mu.Unlock()
 	if len(events) == 0 {
-		return
+		return results
 	}
 
 	insertStarted := time.Now()
@@ -416,15 +424,15 @@ func (d *auditDelivery) deliverCanonicalBatch(
 	d.observeBatchSize(source, len(events), insertErr)
 	if insertErr != nil {
 		pendingErr := d.pendingCanonicalError("canonical storage did not acknowledge the batch", insertErr)
-		for _, call := range pending {
-			d.completeCanonicalCall(call, pendingErr)
+		for _, index := range pendingIndexes {
+			results[index] = pendingErr
 		}
 		d.logger.Warn("Sandbox audit batch buffered for retry",
 			zap.Int("batch_size", len(events)),
 			zap.Error(insertErr),
 		)
 		d.signalReplay()
-		return
+		return results
 	}
 
 	cleanupStarted := time.Now()
@@ -438,9 +446,7 @@ func (d *auditDelivery) deliverCanonicalBatch(
 			zap.Error(cleanupErr),
 		)
 	}
-	for _, call := range pending {
-		d.completeCanonicalCall(call, nil)
-	}
+	return results
 }
 
 func (d *auditDelivery) signalReplay() {

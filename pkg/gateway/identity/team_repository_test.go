@@ -2,11 +2,13 @@ package identity
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 )
 
-func TestTeamRepositoryScopesSlugUniquenessToOwner(t *testing.T) {
+func TestTeamRepositoryAllowsDuplicateNamesAndSlugs(t *testing.T) {
 	pool, _ := newGatewayIdentityTestPool(t)
 	if pool == nil {
 		return
@@ -35,9 +37,61 @@ func TestTeamRepositoryScopesSlugUniquenessToOwner(t *testing.T) {
 		t.Fatalf("create team B with same slug for another owner: %v", err)
 	}
 
-	duplicate := &Team{Name: "Duplicate", Slug: "gcp-us-east-4", OwnerID: &ownerAID}
-	if err := repo.CreateTeam(ctx, duplicate); !errors.Is(err, ErrTeamAlreadyExists) {
-		t.Fatalf("duplicate owner slug error = %v, want %v", err, ErrTeamAlreadyExists)
+	teamC := &Team{Name: "GCP US East 4", Slug: "gcp-us-east-4", OwnerID: &ownerAID}
+	if err := repo.CreateTeam(ctx, teamC); err != nil {
+		t.Fatalf("create team C with same name and slug for same owner: %v", err)
+	}
+
+	teamIDs := map[string]struct{}{
+		teamA.ID: {},
+		teamB.ID: {},
+		teamC.ID: {},
+	}
+	if len(teamIDs) != 3 {
+		t.Fatalf("team IDs are not unique: A=%s B=%s C=%s", teamA.ID, teamB.ID, teamC.ID)
+	}
+}
+
+func TestGatewayMigration14RepairsProductionSlugConstraint(t *testing.T) {
+	pool, schema := newGatewayIdentityTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM goose_db_version WHERE version_id = 14;
+		INSERT INTO goose_db_version (version_id, is_applied)
+		SELECT version_id, true
+		FROM generate_series(9, 13) AS versions(version_id);
+		ALTER TABLE teams ADD CONSTRAINT teams_slug_key UNIQUE (slug);
+	`); err != nil {
+		t.Fatalf("prepare production migration state: %v", err)
+	}
+
+	if err := migrate.Up(
+		ctx,
+		pool,
+		".",
+		migrate.WithBaseFS(gatewaymigrations.FS),
+		migrate.WithSchema(schema),
+	); err != nil {
+		t.Fatalf("apply migration 14 from production version: %v", err)
+	}
+
+	var hasGlobalConstraint bool
+	if err := pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_constraint
+			WHERE conrelid = 'teams'::regclass
+			  AND conname = 'teams_slug_key'
+		)
+	`).Scan(&hasGlobalConstraint); err != nil {
+		t.Fatalf("query global slug constraint: %v", err)
+	}
+	if hasGlobalConstraint {
+		t.Fatal("global team slug constraint still exists after migration 14")
 	}
 }
 
@@ -108,6 +162,11 @@ func TestTeamRepositoryTransferTeamOwnerPromotesMember(t *testing.T) {
 	team := &Team{Name: "Transfer Team", Slug: "transfer-team", OwnerID: &ownerID}
 	if err := repo.CreateTeam(ctx, team); err != nil {
 		t.Fatalf("create team: %v", err)
+	}
+	nextOwnerID := nextOwner.ID
+	existingTeam := &Team{Name: "Existing Team", Slug: "transfer-team", OwnerID: &nextOwnerID}
+	if err := repo.CreateTeam(ctx, existingTeam); err != nil {
+		t.Fatalf("create next owner's team with same slug: %v", err)
 	}
 	for _, member := range []*TeamMember{
 		{TeamID: team.ID, UserID: owner.ID, Role: "admin"},

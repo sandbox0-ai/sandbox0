@@ -154,10 +154,6 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 	}
 
 	if err := h.repo.CreateTeam(c.Request.Context(), team); err != nil {
-		if errors.Is(err, identity.ErrTeamAlreadyExists) {
-			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team with this slug already exists")
-			return
-		}
 		h.logger.Error("Failed to create team", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create team")
 		return
@@ -300,10 +296,6 @@ func (h *TeamHandler) UpdateTeam(c *gin.Context) {
 	}
 
 	if err := h.repo.UpdateTeam(c.Request.Context(), team); err != nil {
-		if errors.Is(err, identity.ErrTeamAlreadyExists) {
-			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "team with this slug already exists")
-			return
-		}
 		h.logger.Error("Failed to update team", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to update team")
 		return

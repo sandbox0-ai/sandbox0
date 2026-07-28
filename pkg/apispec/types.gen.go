@@ -1135,8 +1135,12 @@ type CreateSnapshotRequest struct {
 // CreateTeamRequest defines model for CreateTeamRequest.
 type CreateTeamRequest struct {
 	HomeRegionId *string `json:"home_region_id"`
-	Name         string  `json:"name"`
-	Slug         *string `json:"slug,omitempty"`
+
+	// Name Display name. Team names are not unique.
+	Name string `json:"name"`
+
+	// Slug Human-readable alias. Team slugs are not unique.
+	Slug *string `json:"slug,omitempty"`
 }
 
 // CredentialBinding defines model for CredentialBinding.
@@ -3427,10 +3431,14 @@ type Team struct {
 	CreatedAt    time.Time `json:"created_at"`
 	HomeRegionId *string   `json:"home_region_id"`
 	Id           string    `json:"id"`
-	Name         string    `json:"name"`
-	OwnerId      *string   `json:"owner_id"`
-	Slug         string    `json:"slug"`
-	UpdatedAt    time.Time `json:"updated_at"`
+
+	// Name Display name. Team names are not unique; use the team ID as the canonical identifier.
+	Name    string  `json:"name"`
+	OwnerId *string `json:"owner_id"`
+
+	// Slug Human-readable alias. Team slugs are not unique; use the team ID as the canonical identifier.
+	Slug      string    `json:"slug"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // TeamDeleteConflictDetails defines model for TeamDeleteConflictDetails.
@@ -3632,7 +3640,10 @@ type UpdateTeamMemberRequestRole string
 
 // UpdateTeamRequest defines model for UpdateTeamRequest.
 type UpdateTeamRequest struct {
+	// Name Display name. Team names are not unique.
 	Name *string `json:"name,omitempty"`
+
+	// Slug Human-readable alias. Team slugs are not unique.
 	Slug *string `json:"slug,omitempty"`
 }
 

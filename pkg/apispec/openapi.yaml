@@ -803,12 +803,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-        "409":
-          description: Team already exists
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
   /teams/{id}:
     get:
       tags: [teams]
@@ -876,7 +870,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "409":
-          description: Team update conflicts with an immutable field or existing slug
+          description: Team update conflicts with an immutable field
           content:
             application/json:
               schema:
@@ -4484,8 +4478,10 @@ components:
           type: string
         name:
           type: string
+          description: Display name. Team names are not unique; use the team ID as the canonical identifier.
         slug:
           type: string
+          description: Human-readable alias. Team slugs are not unique; use the team ID as the canonical identifier.
         owner_id:
           type: string
           nullable: true
@@ -4636,8 +4632,10 @@ components:
       properties:
         name:
           type: string
+          description: Display name. Team names are not unique.
         slug:
           type: string
+          description: Human-readable alias. Team slugs are not unique.
         home_region_id:
           type: string
           nullable: true
@@ -4647,8 +4645,10 @@ components:
       properties:
         name:
           type: string
+          description: Display name. Team names are not unique.
         slug:
           type: string
+          description: Human-readable alias. Team slugs are not unique.
     TransferTeamOwnerRequest:
       type: object
       properties:

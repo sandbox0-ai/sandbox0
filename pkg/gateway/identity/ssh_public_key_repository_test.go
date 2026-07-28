@@ -223,6 +223,7 @@ func newGatewayIdentityTestPool(t *testing.T) (*pgxpool.Pool, string) {
 
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: dbURL,
+		MaxConns:    4,
 		Schema:      schema,
 	})
 	if err != nil {

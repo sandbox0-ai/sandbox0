@@ -22,9 +22,6 @@ func (r *Repository) CreateTeam(ctx context.Context, team *Team) error {
 		RETURNING id, created_at, updated_at
 	`, team.Name, team.Slug, team.OwnerID, team.HomeRegionID).Scan(&team.ID, &team.CreatedAt, &team.UpdatedAt)
 	if err != nil {
-		if isDuplicateKeyError(err) {
-			return ErrTeamAlreadyExists
-		}
 		return fmt.Errorf("insert team: %w", err)
 	}
 	return nil
@@ -47,23 +44,6 @@ func (r *Repository) GetTeamByID(ctx context.Context, id string) (*Team, error) 
 	return &team, nil
 }
 
-// GetTeamBySlug retrieves a team by slug.
-func (r *Repository) GetTeamBySlug(ctx context.Context, slug string) (*Team, error) {
-	var team Team
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, name, slug, owner_id, home_region_id, created_at, updated_at
-		FROM teams
-		WHERE slug = $1
-	`, slug).Scan(&team.ID, &team.Name, &team.Slug, &team.OwnerID, &team.HomeRegionID, &team.CreatedAt, &team.UpdatedAt)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrTeamNotFound
-		}
-		return nil, fmt.Errorf("query team: %w", err)
-	}
-	return &team, nil
-}
-
 // UpdateTeam updates a team.
 func (r *Repository) UpdateTeam(ctx context.Context, team *Team) error {
 	err := r.pool.QueryRow(ctx, `
@@ -75,9 +55,6 @@ func (r *Repository) UpdateTeam(ctx context.Context, team *Team) error {
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTeamNotFound
-		}
-		if isDuplicateKeyError(err) {
-			return ErrTeamAlreadyExists
 		}
 		return fmt.Errorf("update team: %w", err)
 	}

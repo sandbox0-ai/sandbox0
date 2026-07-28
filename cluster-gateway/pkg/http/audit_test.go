@@ -10,6 +10,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -268,7 +270,46 @@ func TestAuditBufferedResponseWriterCommitsHeadersAtomically(t *testing.T) {
 	}
 }
 
-func TestAuditBufferedResponseWriterRejectsBypassInterfaces(t *testing.T) {
+func TestAuditBufferedResponseWriterBuffersChunkedReverseProxyResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		_, _ = w.Write([]byte(`{"status":"updated"}`))
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("url.Parse() error = %v", err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	buffered := newAuditBufferedResponseWriter(c.Writer, 1024)
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/sandboxes/sb-1", nil)
+	requestContext, cancel := context.WithCancel(request.Context())
+	defer cancel()
+	request = request.WithContext(context.WithValue(requestContext, http.ServerContextKey, &http.Server{}))
+
+	proxy.ServeHTTP(buffered, request)
+
+	if buffered.err != nil {
+		t.Fatalf("buffered response error = %v", buffered.err)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("response reached client before commit: %q", recorder.Body.String())
+	}
+	if err := buffered.commit(); err != nil {
+		t.Fatalf("commit() error = %v", err)
+	}
+	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"status":"updated"}` {
+		t.Fatalf("committed response = %d %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAuditBufferedResponseWriterControlsOptionalInterfaces(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("flush", func(t *testing.T) {
@@ -276,8 +317,14 @@ func TestAuditBufferedResponseWriterRejectsBypassInterfaces(t *testing.T) {
 		c, _ := gin.CreateTestContext(recorder)
 		buffered := newAuditBufferedResponseWriter(c.Writer, 1024)
 		buffered.Flush()
-		if buffered.err == nil || !strings.Contains(buffered.err.Error(), "streaming flush") {
+		if buffered.err != nil {
 			t.Fatalf("Flush() error = %v", buffered.err)
+		}
+		if _, err := buffered.WriteString("buffered"); err != nil {
+			t.Fatalf("WriteString() after Flush() error = %v", err)
+		}
+		if buffered.body.String() != "buffered" {
+			t.Fatalf("buffered body = %q", buffered.body.String())
 		}
 		if c.Writer.Written() {
 			t.Fatal("Flush() reached the underlying response writer")

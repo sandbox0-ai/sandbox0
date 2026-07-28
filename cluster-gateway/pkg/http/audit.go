@@ -464,14 +464,15 @@ func (w *auditBufferedResponseWriter) WriteString(value string) (int, error) {
 	return w.Write([]byte(value))
 }
 
-// Streaming and connection takeover would expose a response before its audit
-// result reaches canonical storage. Record those attempts as delivery errors
-// instead of forwarding them to the underlying writer.
+// Flush records the response status but keeps all bytes buffered. ReverseProxy
+// uses Flush as a transport hint for chunked responses, so rejecting it would
+// turn a successful upstream mutation into a response-copy failure.
 func (w *auditBufferedResponseWriter) Flush() {
 	w.WriteHeaderNow()
-	w.setUnsupportedError("streaming flush")
 }
 
+// Connection takeover would expose a response before its audit result reaches
+// canonical storage, so it remains unsupported.
 func (w *auditBufferedResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	err := w.setUnsupportedError("connection hijacking")
 	return nil, nil, err

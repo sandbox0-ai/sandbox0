@@ -18,7 +18,13 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-const sandboxLifecycleProducer = "manager.sandbox_lifecycle"
+const (
+	sandboxLifecycleProducer = "manager.sandbox_lifecycle"
+
+	// SandboxRuntimeWindowInterval bounds how long active runtime remains only
+	// in projection state before it is persisted as an exportable usage window.
+	SandboxRuntimeWindowInterval = time.Minute
+)
 
 type txStore interface {
 	AppendEvent(ctx context.Context, event *meteringpkg.Event) error
@@ -104,7 +110,7 @@ type LifecycleProjector struct {
 	metrics            *obsmetrics.ManagerMetrics
 	now                func() time.Time
 	projectionMu       sync.RWMutex
-	activeProjections  map[string]activeSandboxProjectionInputs
+	activeProjections  map[string]activeSandboxProjection
 }
 
 func NewLifecycleProjector(store Store, regionID string, clusterID string) *LifecycleProjector {
@@ -113,7 +119,7 @@ func NewLifecycleProjector(store Store, regionID string, clusterID string) *Life
 		regionID:          regionID,
 		clusterID:         clusterID,
 		logger:            zap.NewNop(),
-		activeProjections: make(map[string]activeSandboxProjectionInputs),
+		activeProjections: make(map[string]activeSandboxProjection),
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -155,17 +161,21 @@ func (p *LifecycleProjector) handleUpdate(oldObj, newObj any) {
 		p.handleWarmPoolDeleteAt(oldPod, transitionAt)
 	}
 	// Warm-pool updates advance runtime windows, so they intentionally keep the
-	// resync behavior. Claimed sandboxes only need a projection write when an
-	// input used by metering changes; kubelet status updates are otherwise pure
-	// ClickHouse write amplification.
+	// resync behavior. Claimed sandboxes skip unchanged updates until the next
+	// runtime window is due.
 	if isTeamOwnedIdlePoolPod(newPod) {
 		p.handleUpsert(newObj)
 		return
 	}
-	if isClaimedActiveSandbox(newPod) && p.activeProjectionSucceeded(newPod) {
+	if isClaimedActiveSandbox(newPod) && p.activeProjectionFresh(newPod, p.now()) {
 		return
 	}
 	p.handleUpsert(newObj)
+}
+
+type activeSandboxProjection struct {
+	inputs      activeSandboxProjectionInputs
+	projectedAt time.Time
 }
 
 type activeSandboxProjectionInputs struct {
@@ -245,8 +255,9 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 	pausedAt, pausedAtSet := parseRFC3339(pod.Annotations[controller.AnnotationPausedAt])
 	pendingEvents := make([]*meteringpkg.Event, 0, 2)
 	pendingWindows := make([]*meteringpkg.Window, 0, 2)
+	newState := state == nil
 
-	if state == nil {
+	if newState {
 		state = &meteringpkg.SandboxProjectionState{
 			SandboxID:         sandboxID,
 			Namespace:         pod.Namespace,
@@ -294,6 +305,16 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 		applySandboxUsage(state, podUsage)
 	}
 
+	// Periodically close an unchanged active allocation so long-running
+	// sandboxes produce bounded, exportable windows before pause or deletion.
+	// A resource change already closes the prior allocation above.
+	if !newState && !paused && !state.Paused && state.ActiveSince != nil &&
+		state.ResourceMemoryMiB == podUsage.ResourceMemoryMiB &&
+		observedAt.After(*state.ActiveSince) {
+		pendingWindows = append(pendingWindows, p.buildSandboxRuntimeWindow(state, teamID, userID, templateID, state.ActiveSince, observedAt))
+		state.ActiveSince = ptrTime(observedAt)
+	}
+
 	state.Namespace = pod.Namespace
 	state.TeamID = teamID
 	state.UserID = userID
@@ -309,7 +330,7 @@ func (p *LifecycleProjector) handleUpsert(obj any) {
 	if err := p.commitProjection(ctx, sandboxID, state, pendingEvents, pendingWindows, observedAt); err != nil {
 		return
 	}
-	p.rememberActiveProjection(pod)
+	p.rememberActiveProjection(pod, observedAt)
 }
 
 func (p *LifecycleProjector) handleDelete(obj any) {
@@ -416,7 +437,7 @@ func (p *LifecycleProjector) handleDelete(obj any) {
 	p.forgetActiveProjection(sandboxID)
 }
 
-func (p *LifecycleProjector) activeProjectionSucceeded(pod *corev1.Pod) bool {
+func (p *LifecycleProjector) activeProjectionFresh(pod *corev1.Pod, observedAt time.Time) bool {
 	input := activeSandboxProjectionInput(pod)
 	if input.sandboxID == "" {
 		return false
@@ -424,16 +445,21 @@ func (p *LifecycleProjector) activeProjectionSucceeded(pod *corev1.Pod) bool {
 	p.projectionMu.RLock()
 	projected, ok := p.activeProjections[input.sandboxID]
 	p.projectionMu.RUnlock()
-	return ok && projected == input
+	return ok &&
+		projected.inputs == input &&
+		observedAt.Before(projected.projectedAt.Add(SandboxRuntimeWindowInterval))
 }
 
-func (p *LifecycleProjector) rememberActiveProjection(pod *corev1.Pod) {
+func (p *LifecycleProjector) rememberActiveProjection(pod *corev1.Pod, projectedAt time.Time) {
 	input := activeSandboxProjectionInput(pod)
 	if input.sandboxID == "" {
 		return
 	}
 	p.projectionMu.Lock()
-	p.activeProjections[input.sandboxID] = input
+	p.activeProjections[input.sandboxID] = activeSandboxProjection{
+		inputs:      input,
+		projectedAt: projectedAt,
+	}
 	p.projectionMu.Unlock()
 }
 

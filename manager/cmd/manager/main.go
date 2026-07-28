@@ -196,7 +196,13 @@ func main() {
 	)
 
 	// Create informers
-	informerFactory := informers.NewSharedInformerFactory(k8sClient, cfg.ResyncPeriod.Duration)
+	informerResyncPeriod := cfg.ResyncPeriod.Duration
+	if cfg.Metering.Enabled && informerResyncPeriod == 0 {
+		// A non-zero shared check period is required before an individual
+		// handler can request periodic resyncs.
+		informerResyncPeriod = managermetering.SandboxRuntimeWindowInterval
+	}
+	informerFactory := informers.NewSharedInformerFactory(k8sClient, informerResyncPeriod)
 	podInformer := informerFactory.Core().V1().Pods()
 	nodeInformer := informerFactory.Core().V1().Nodes().Informer()
 	secretInformer := informerFactory.Core().V1().Secrets().Informer()
@@ -307,7 +313,10 @@ func main() {
 			}
 			return service.SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration), nil
 		})
-		podInformer.Informer().AddEventHandler(lifecycleProjector.ResourceEventHandler())
+		podInformer.Informer().AddEventHandlerWithResyncPeriod(
+			lifecycleProjector.ResourceEventHandler(),
+			managermetering.SandboxRuntimeWindowInterval,
+		)
 	}
 
 	// Create network policy service for building policy annotations

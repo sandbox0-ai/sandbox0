@@ -167,6 +167,7 @@ func TestLifecycleProjectorIgnoresStatusOnlySandboxUpdates(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
 	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
 	claimedAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	projector.now = func() time.Time { return claimedAt }
 	oldPod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "1", "1Gi")
 	projector.handleUpsert(oldPod)
 
@@ -174,6 +175,7 @@ func TestLifecycleProjectorIgnoresStatusOnlySandboxUpdates(t *testing.T) {
 	newPod.ResourceVersion = "2"
 	newPod.Status.Phase = corev1.PodRunning
 	newPod.Status.PodIP = "10.0.0.10"
+	projector.now = func() time.Time { return claimedAt.Add(SandboxRuntimeWindowInterval / 2) }
 	projector.handleUpdate(oldPod, newPod)
 
 	if recorder.transactionCalls != 1 {
@@ -184,6 +186,60 @@ func TestLifecycleProjectorIgnoresStatusOnlySandboxUpdates(t *testing.T) {
 	}
 	if state := recorder.states["sb-1"]; state == nil || state.LastResourceVer != "1" {
 		t.Fatalf("state after status-only update = %#v, want original resource version", state)
+	}
+}
+
+func TestLifecycleProjectorFlushesRuntimeWindowOnPeriodicResync(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+	claimedAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	projector.now = func() time.Time { return claimedAt }
+	oldPod := withSandboxResources(buildSandboxPod(claimedAt, false, "", "1"), "1", "1Gi")
+	projector.handleUpsert(oldPod)
+
+	windowEnd := claimedAt.Add(SandboxRuntimeWindowInterval)
+	projector.now = func() time.Time { return windowEnd }
+	resyncedPod := oldPod.DeepCopy()
+	projector.handleUpdate(oldPod, resyncedPod)
+
+	if recorder.transactionCalls != 2 {
+		t.Fatalf("transaction calls = %d, want 2 after periodic resync", recorder.transactionCalls)
+	}
+	if len(recorder.windows) != 1 {
+		t.Fatalf("window count = %d, want 1 after periodic resync", len(recorder.windows))
+	}
+	window := recorder.windows[0]
+	if !window.WindowStart.Equal(claimedAt) || !window.WindowEnd.Equal(windowEnd) {
+		t.Fatalf("runtime window = [%v, %v), want [%v, %v)", window.WindowStart, window.WindowEnd, claimedAt, windowEnd)
+	}
+	if window.Value != 61_440_000 {
+		t.Fatalf("runtime value = %d, want 61440000", window.Value)
+	}
+	state := recorder.states["sb-1"]
+	if state == nil || state.ActiveSince == nil || !state.ActiveSince.Equal(windowEnd) {
+		t.Fatalf("active_since after periodic resync = %#v, want %v", state, windowEnd)
+	}
+	if state.LastResourceVer != "1" {
+		t.Fatalf("last resource version = %q, want 1", state.LastResourceVer)
+	}
+
+	nextWindowEnd := windowEnd.Add(SandboxRuntimeWindowInterval)
+	projector.now = func() time.Time { return nextWindowEnd }
+	projector.handleUpdate(resyncedPod, resyncedPod.DeepCopy())
+
+	if len(recorder.windows) != 2 {
+		t.Fatalf("window count = %d, want 2 after second periodic resync", len(recorder.windows))
+	}
+	nextWindow := recorder.windows[1]
+	if !nextWindow.WindowStart.Equal(windowEnd) || !nextWindow.WindowEnd.Equal(nextWindowEnd) {
+		t.Fatalf("second runtime window = [%v, %v), want [%v, %v)", nextWindow.WindowStart, nextWindow.WindowEnd, windowEnd, nextWindowEnd)
+	}
+	state = recorder.states["sb-1"]
+	if state.ActiveSince == nil || !state.ActiveSince.Equal(nextWindowEnd) {
+		t.Fatalf("active_since after second resync = %#v, want %v", state, nextWindowEnd)
+	}
+	if recorder.watermarkHits != 3 {
+		t.Fatalf("watermark writes = %d, want 3", recorder.watermarkHits)
 	}
 }
 

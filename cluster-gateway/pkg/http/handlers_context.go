@@ -60,7 +60,7 @@ func (s *Server) createContext(c *gin.Context) {
 	upReq.Header = c.Request.Header.Clone()
 	requestModifier(upReq)
 
-	resp, err := s.outboundHTTPClient().Do(upReq)
+	resp, err := proxy.ClientForRequest(s.outboundHTTPClient(), upReq).Do(upReq)
 	if err != nil {
 		if proxy.IsTimeoutError(err) {
 			spec.JSONError(c, http.StatusGatewayTimeout, spec.CodeUnavailable, "sandbox process request timed out")

@@ -11,10 +11,9 @@ var (
 	ErrUserAlreadyExists  = errors.New("user already exists")
 	ErrInvalidCredentials = errors.New("invalid credentials")
 
-	ErrTeamNotFound      = errors.New("team not found")
-	ErrTeamAlreadyExists = errors.New("team already exists")
-	ErrMemberNotFound    = errors.New("team member not found")
-	ErrAlreadyMember     = errors.New("user is already a team member")
+	ErrTeamNotFound   = errors.New("team not found")
+	ErrMemberNotFound = errors.New("team member not found")
+	ErrAlreadyMember  = errors.New("user is already a team member")
 
 	ErrIdentityNotFound      = errors.New("identity not found")
 	ErrIdentityAlreadyExists = errors.New("identity already exists")

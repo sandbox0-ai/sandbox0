@@ -146,6 +146,32 @@ type StorageProjectionState struct {
 	UnbilledByteNanoseconds int64     `json:"unbilled_byte_nanoseconds,omitempty"`
 }
 
+// StorageProjectionStateTombstone records a versioned deletion in the
+// ClickHouse storage projection.
+type StorageProjectionStateTombstone struct {
+	State     *StorageProjectionState `json:"state"`
+	DeletedAt time.Time               `json:"deleted_at"`
+}
+
+// StorageProjectionMutation preserves the outbox order of upserts and
+// tombstones that target the same ClickHouse projection table.
+type StorageProjectionMutation struct {
+	State     *StorageProjectionState
+	Deleted   bool
+	DeletedAt time.Time
+}
+
+// ProjectionBatch is one or more ordered PostgreSQL outbox transactions
+// decoded for an idempotent ClickHouse delivery attempt. Watermarks are
+// applied only after every data and state row in the batch.
+type ProjectionBatch struct {
+	Events           []*Event
+	Windows          []*Window
+	Watermarks       []*ProducerWatermark
+	SandboxStates    []*SandboxProjectionState
+	StorageMutations []*StorageProjectionMutation
+}
+
 type StorageObservation struct {
 	SubjectType       string    `json:"subject_type"`
 	SubjectID         string    `json:"subject_id"`

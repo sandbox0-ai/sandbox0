@@ -15,6 +15,8 @@ import (
 const (
 	dateTime64NanoPlaceholder         = "fromUnixTimestamp64Nano(?, 'UTC')"
 	nullableDateTime64NanoPlaceholder = "if(toUInt8(?), fromUnixTimestamp64Nano(?, 'UTC'), NULL)"
+	maxMeteringInsertBatchSize        = 500
+	meteringInsertReliabilitySettings = " SETTINGS async_insert = 0, wait_for_async_insert = 1"
 )
 
 type Repository struct {
@@ -34,34 +36,154 @@ func NewRepository(db *sql.DB, cfg Config) *Repository {
 	}
 }
 
-func (r *Repository) AppendEvent(ctx context.Context, event *metering.Event) error {
-	return r.appendEvent(ctx, event)
-}
-
-func (r *Repository) appendEvent(ctx context.Context, event *metering.Event) error {
+// ApplyProjectionBatch writes data and state rows before advancing producer
+// watermarks. PostgreSQL remains the durable producer boundary, so any partial
+// ClickHouse acceptance is retried safely through versioned rows.
+func (r *Repository) ApplyProjectionBatch(ctx context.Context, batch *metering.ProjectionBatch) error {
 	if r == nil || r.db == nil {
 		return fmt.Errorf("metering clickhouse repository is not configured")
 	}
+	if batch == nil {
+		return fmt.Errorf("metering projection batch is nil")
+	}
+
+	// Validate the complete batch before the first INSERT. Once validation has
+	// succeeded, transient failures may still leave a partial idempotent write.
+	for _, event := range batch.Events {
+		if _, err := r.eventInsertValues(event); err != nil {
+			return err
+		}
+	}
+	for _, window := range batch.Windows {
+		if _, err := r.windowInsertValues(window); err != nil {
+			return err
+		}
+	}
+	for _, state := range batch.SandboxStates {
+		if _, err := r.sandboxStateInsertValues(state); err != nil {
+			return err
+		}
+	}
+	for _, mutation := range batch.StorageMutations {
+		if mutation == nil {
+			return fmt.Errorf("storage projection mutation is nil")
+		}
+		if _, err := r.storageStateInsertValues(mutation.State, mutation.Deleted, mutation.DeletedAt); err != nil {
+			return err
+		}
+	}
+	for _, watermark := range batch.Watermarks {
+		if _, err := r.watermarkInsertValues(watermark); err != nil {
+			return err
+		}
+	}
+
+	if err := r.appendEvents(ctx, batch.Events); err != nil {
+		return err
+	}
+	if err := r.appendWindows(ctx, batch.Windows); err != nil {
+		return err
+	}
+	if err := r.upsertSandboxProjectionStates(ctx, batch.SandboxStates); err != nil {
+		return err
+	}
+	if err := r.writeStorageProjectionStates(ctx, batch.StorageMutations); err != nil {
+		return err
+	}
+	return r.upsertProducerWatermarks(ctx, batch.Watermarks)
+}
+
+type insertRowsConfig struct {
+	table        string
+	columns      string
+	placeholders string
+	description  string
+}
+
+func (r *Repository) execInsertRows(ctx context.Context, cfg insertRowsConfig, rows [][]any) error {
+	for len(rows) > 0 {
+		chunkSize := min(len(rows), maxMeteringInsertBatchSize)
+		chunk := rows[:chunkSize]
+		var query strings.Builder
+		query.WriteString("INSERT INTO ")
+		query.WriteString(cfg.table)
+		query.WriteString(" (")
+		query.WriteString(cfg.columns)
+		query.WriteString(")")
+		query.WriteString(meteringInsertReliabilitySettings)
+		query.WriteString(" VALUES ")
+
+		args := make([]any, 0)
+		for index, row := range chunk {
+			if index > 0 {
+				query.WriteString(", ")
+			}
+			query.WriteString(cfg.placeholders)
+			args = append(args, row...)
+		}
+		if _, err := r.db.ExecContext(ctx, query.String(), args...); err != nil {
+			return fmt.Errorf("%s: %w", cfg.description, err)
+		}
+		rows = rows[chunkSize:]
+	}
+	return nil
+}
+
+func (r *Repository) AppendEvent(ctx context.Context, event *metering.Event) error {
+	return r.appendEvents(ctx, []*metering.Event{event})
+}
+
+func (r *Repository) appendEvents(ctx context.Context, events []*metering.Event) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("metering clickhouse repository is not configured")
+	}
+	rows := make([][]any, 0, len(events))
+	for _, event := range events {
+		row, err := r.eventInsertValues(event)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, row)
+	}
+	return r.execInsertRows(ctx, insertRowsConfig{
+		table: qualified(r.cfg.Database, r.cfg.EventsTable),
+		columns: `
+    sequence, event_id, producer, region_id, event_type,
+    subject_type, subject_id,
+    team_id, user_id,
+    sandbox_id, volume_id, snapshot_id,
+    template_id, cluster_id,
+    occurred_at, recorded_at, version, data`,
+		placeholders: fmt.Sprintf(
+			"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, ?)",
+			dateTime64NanoPlaceholder,
+			dateTime64NanoPlaceholder,
+		),
+		description: "insert usage events",
+	}, rows)
+}
+
+func (r *Repository) eventInsertValues(event *metering.Event) ([]any, error) {
 	if event == nil {
-		return fmt.Errorf("event is nil")
+		return nil, fmt.Errorf("event is nil")
 	}
 	if event.EventID == "" {
-		return fmt.Errorf("event_id is required")
+		return nil, fmt.Errorf("event_id is required")
 	}
 	if event.Sequence <= 0 {
-		return fmt.Errorf("sequence is required")
+		return nil, fmt.Errorf("sequence is required")
 	}
 	if event.Producer == "" {
-		return fmt.Errorf("producer is required")
+		return nil, fmt.Errorf("producer is required")
 	}
 	if event.EventType == "" {
-		return fmt.Errorf("event_type is required")
+		return nil, fmt.Errorf("event_type is required")
 	}
 	if event.SubjectType == "" || event.SubjectID == "" {
-		return fmt.Errorf("subject_type and subject_id are required")
+		return nil, fmt.Errorf("subject_type and subject_id are required")
 	}
 	if event.OccurredAt.IsZero() {
-		return fmt.Errorf("occurred_at is required")
+		return nil, fmt.Errorf("occurred_at is required")
 	}
 	recordedAt := event.RecordedAt
 	if recordedAt.IsZero() {
@@ -71,66 +193,82 @@ func (r *Repository) appendEvent(ctx context.Context, event *metering.Event) err
 	if len(data) == 0 {
 		data = json.RawMessage(`{}`)
 	}
-	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
-INSERT INTO %s (
-    sequence, event_id, producer, region_id, event_type,
-    subject_type, subject_id,
-    team_id, user_id,
-    sandbox_id, volume_id, snapshot_id,
-    template_id, cluster_id,
-    occurred_at, recorded_at, version, data
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, ?)
-`, qualified(r.cfg.Database, r.cfg.EventsTable), dateTime64NanoPlaceholder, dateTime64NanoPlaceholder),
+	return []any{
 		event.Sequence, event.EventID, event.Producer, event.RegionID, event.EventType,
 		event.SubjectType, event.SubjectID,
 		event.TeamID, event.UserID,
 		event.SandboxID, event.VolumeID, event.SnapshotID,
 		event.TemplateID, event.ClusterID,
 		dateTime64NanoArg(event.OccurredAt), dateTime64NanoArg(recordedAt), versionFrom(recordedAt), string(data),
-	)
-	if err != nil {
-		return fmt.Errorf("insert usage event: %w", err)
-	}
-	return nil
+	}, nil
 }
 
 func (r *Repository) AppendWindow(ctx context.Context, window *metering.Window) error {
-	return r.appendWindow(ctx, window)
+	return r.appendWindows(ctx, []*metering.Window{window})
 }
 
-func (r *Repository) appendWindow(ctx context.Context, window *metering.Window) error {
+func (r *Repository) appendWindows(ctx context.Context, windows []*metering.Window) error {
 	if r == nil || r.db == nil {
 		return fmt.Errorf("metering clickhouse repository is not configured")
 	}
+	rows := make([][]any, 0, len(windows))
+	for _, window := range windows {
+		row, err := r.windowInsertValues(window)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, row)
+	}
+	return r.execInsertRows(ctx, insertRowsConfig{
+		table: qualified(r.cfg.Database, r.cfg.WindowsTable),
+		columns: `
+    sequence, window_id, producer, region_id, window_type,
+    subject_type, subject_id,
+    team_id, user_id,
+    sandbox_id, volume_id, snapshot_id,
+    template_id, cluster_id,
+    window_start, window_end,
+    value, unit, recorded_at, version, data`,
+		placeholders: fmt.Sprintf(
+			"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, ?, %s, ?, ?)",
+			dateTime64NanoPlaceholder,
+			dateTime64NanoPlaceholder,
+			dateTime64NanoPlaceholder,
+		),
+		description: "insert usage windows",
+	}, rows)
+}
+
+func (r *Repository) windowInsertValues(window *metering.Window) ([]any, error) {
 	if window == nil {
-		return fmt.Errorf("window is nil")
+		return nil, fmt.Errorf("window is nil")
 	}
 	if window.WindowID == "" {
-		return fmt.Errorf("window_id is required")
+		return nil, fmt.Errorf("window_id is required")
 	}
 	if window.Sequence <= 0 {
-		return fmt.Errorf("sequence is required")
+		return nil, fmt.Errorf("sequence is required")
 	}
 	if window.Producer == "" {
-		return fmt.Errorf("producer is required")
+		return nil, fmt.Errorf("producer is required")
 	}
 	if window.WindowType == "" {
-		return fmt.Errorf("window_type is required")
+		return nil, fmt.Errorf("window_type is required")
 	}
 	if window.SubjectType == "" || window.SubjectID == "" {
-		return fmt.Errorf("subject_type and subject_id are required")
+		return nil, fmt.Errorf("subject_type and subject_id are required")
 	}
 	if window.WindowStart.IsZero() || window.WindowEnd.IsZero() {
-		return fmt.Errorf("window_start and window_end are required")
+		return nil, fmt.Errorf("window_start and window_end are required")
 	}
 	if window.WindowEnd.Before(window.WindowStart) {
-		return fmt.Errorf("window_end must be greater than or equal to window_start")
+		return nil, fmt.Errorf("window_end must be greater than or equal to window_start")
 	}
 	if window.Unit == "" {
-		return fmt.Errorf("unit is required")
+		return nil, fmt.Errorf("unit is required")
 	}
 	if window.Value < 0 {
-		return fmt.Errorf("value must be non-negative")
+		return nil, fmt.Errorf("value must be non-negative")
 	}
 	recordedAt := window.RecordedAt
 	if recordedAt.IsZero() {
@@ -140,17 +278,7 @@ func (r *Repository) appendWindow(ctx context.Context, window *metering.Window) 
 	if len(data) == 0 {
 		data = json.RawMessage(`{}`)
 	}
-	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
-INSERT INTO %s (
-    sequence, window_id, producer, region_id, window_type,
-    subject_type, subject_id,
-    team_id, user_id,
-    sandbox_id, volume_id, snapshot_id,
-    template_id, cluster_id,
-    window_start, window_end,
-    value, unit, recorded_at, version, data
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, ?, %s, ?, ?)
-`, qualified(r.cfg.Database, r.cfg.WindowsTable), dateTime64NanoPlaceholder, dateTime64NanoPlaceholder, dateTime64NanoPlaceholder),
+	return []any{
 		window.Sequence, window.WindowID, window.Producer, window.RegionID, window.WindowType,
 		window.SubjectType, window.SubjectID,
 		window.TeamID, window.UserID,
@@ -158,38 +286,58 @@ INSERT INTO %s (
 		window.TemplateID, window.ClusterID,
 		dateTime64NanoArg(window.WindowStart), dateTime64NanoArg(window.WindowEnd),
 		window.Value, window.Unit, dateTime64NanoArg(recordedAt), versionFrom(recordedAt), string(data),
-	)
-	if err != nil {
-		return fmt.Errorf("insert usage window: %w", err)
-	}
-	return nil
+	}, nil
 }
 
 func (r *Repository) UpsertProducerWatermark(ctx context.Context, producer string, regionID string, completeBefore time.Time) error {
-	return r.upsertProducerWatermark(ctx, producer, regionID, completeBefore)
+	return r.upsertProducerWatermarks(ctx, []*metering.ProducerWatermark{{
+		Producer:       producer,
+		RegionID:       regionID,
+		CompleteBefore: completeBefore,
+	}})
 }
 
-func (r *Repository) upsertProducerWatermark(ctx context.Context, producer string, regionID string, completeBefore time.Time) error {
+func (r *Repository) upsertProducerWatermarks(ctx context.Context, watermarks []*metering.ProducerWatermark) error {
 	if r == nil || r.db == nil {
 		return fmt.Errorf("metering clickhouse repository is not configured")
 	}
-	if producer == "" {
-		return fmt.Errorf("producer is required")
+	rows := make([][]any, 0, len(watermarks))
+	for _, watermark := range watermarks {
+		row, err := r.watermarkInsertValues(watermark)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, row)
 	}
-	if completeBefore.IsZero() {
-		return fmt.Errorf("complete_before is required")
+	return r.execInsertRows(ctx, insertRowsConfig{
+		table:        qualified(r.cfg.Database, r.cfg.WatermarksTable),
+		columns:      "producer, region_id, complete_before, updated_at, version",
+		placeholders: fmt.Sprintf("(?, ?, %s, %s, ?)", dateTime64NanoPlaceholder, dateTime64NanoPlaceholder),
+		description:  "upsert producer watermarks",
+	}, rows)
+}
+
+func (r *Repository) watermarkInsertValues(watermark *metering.ProducerWatermark) ([]any, error) {
+	if watermark == nil {
+		return nil, fmt.Errorf("producer watermark is nil")
 	}
-	updatedAt := r.now()
-	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
-INSERT INTO %s (producer, region_id, complete_before, updated_at, version)
-VALUES (?, ?, %s, %s, ?)
-`, qualified(r.cfg.Database, r.cfg.WatermarksTable), dateTime64NanoPlaceholder, dateTime64NanoPlaceholder),
-		producer, regionID, dateTime64NanoArg(completeBefore), dateTime64NanoArg(updatedAt), versionFrom(completeBefore),
-	)
-	if err != nil {
-		return fmt.Errorf("upsert producer watermark: %w", err)
+	if watermark.Producer == "" {
+		return nil, fmt.Errorf("producer is required")
 	}
-	return nil
+	if watermark.CompleteBefore.IsZero() {
+		return nil, fmt.Errorf("complete_before is required")
+	}
+	updatedAt := watermark.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = r.now()
+	}
+	return []any{
+		watermark.Producer,
+		watermark.RegionID,
+		dateTime64NanoArg(watermark.CompleteBefore),
+		dateTime64NanoArg(updatedAt),
+		versionFrom(watermark.CompleteBefore),
+	}, nil
 }
 
 func (r *Repository) GetStatus(ctx context.Context, fallbackRegionID string) (*metering.Status, error) {
@@ -535,18 +683,49 @@ WHERE terminated_at IS NULL
 }
 
 func (r *Repository) UpsertSandboxProjectionState(ctx context.Context, state *metering.SandboxProjectionState) error {
-	return r.upsertSandboxProjectionState(ctx, state)
+	return r.upsertSandboxProjectionStates(ctx, []*metering.SandboxProjectionState{state})
 }
 
-func (r *Repository) upsertSandboxProjectionState(ctx context.Context, state *metering.SandboxProjectionState) error {
+func (r *Repository) upsertSandboxProjectionStates(ctx context.Context, states []*metering.SandboxProjectionState) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("metering clickhouse repository is not configured")
+	}
+	rows := make([][]any, 0, len(states))
+	for _, state := range states {
+		row, err := r.sandboxStateInsertValues(state)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, row)
+	}
+	return r.execInsertRows(ctx, insertRowsConfig{
+		table: qualified(r.cfg.Database, r.cfg.SandboxStateTable),
+		columns: `
+    sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
+    owner_kind, resource_millicpu, resource_memory_mib,
+    claimed_at, active_since, paused, paused_at, terminated_at,
+    last_observed_at, last_resource_version, version`,
+		placeholders: fmt.Sprintf(
+			"(?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, %s, %s, %s, ?, ?)",
+			nullableDateTime64NanoPlaceholder,
+			nullableDateTime64NanoPlaceholder,
+			nullableDateTime64NanoPlaceholder,
+			nullableDateTime64NanoPlaceholder,
+			dateTime64NanoPlaceholder,
+		),
+		description: "upsert sandbox projection states",
+	}, rows)
+}
+
+func (r *Repository) sandboxStateInsertValues(state *metering.SandboxProjectionState) ([]any, error) {
 	if state == nil {
-		return fmt.Errorf("state is nil")
+		return nil, fmt.Errorf("state is nil")
 	}
 	if state.SandboxID == "" {
-		return fmt.Errorf("sandbox_id is required")
+		return nil, fmt.Errorf("sandbox_id is required")
 	}
 	if state.Namespace == "" {
-		return fmt.Errorf("namespace is required")
+		return nil, fmt.Errorf("namespace is required")
 	}
 	if state.LastObservedAt.IsZero() {
 		state.LastObservedAt = r.now()
@@ -555,21 +734,7 @@ func (r *Repository) upsertSandboxProjectionState(ctx context.Context, state *me
 	activeSincePresent, activeSinceNanos := nullableDateTime64NanoArgs(state.ActiveSince)
 	pausedAtPresent, pausedAtNanos := nullableDateTime64NanoArgs(state.PausedAt)
 	terminatedAtPresent, terminatedAtNanos := nullableDateTime64NanoArgs(state.TerminatedAt)
-	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
-INSERT INTO %s (
-    sandbox_id, namespace, team_id, user_id, template_id, cluster_id,
-    owner_kind, resource_millicpu, resource_memory_mib,
-    claimed_at, active_since, paused, paused_at, terminated_at,
-    last_observed_at, last_resource_version, version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, ?, %s, %s, %s, ?, ?)
-`,
-		qualified(r.cfg.Database, r.cfg.SandboxStateTable),
-		nullableDateTime64NanoPlaceholder,
-		nullableDateTime64NanoPlaceholder,
-		nullableDateTime64NanoPlaceholder,
-		nullableDateTime64NanoPlaceholder,
-		dateTime64NanoPlaceholder,
-	),
+	return []any{
 		state.SandboxID, state.Namespace, state.TeamID, state.UserID, state.TemplateID, state.ClusterID,
 		state.OwnerKind, state.ResourceMillicpu, state.ResourceMemoryMiB,
 		claimedAtPresent, claimedAtNanos,
@@ -578,40 +743,15 @@ INSERT INTO %s (
 		pausedAtPresent, pausedAtNanos,
 		terminatedAtPresent, terminatedAtNanos,
 		dateTime64NanoArg(state.LastObservedAt), state.LastResourceVer, versionFrom(state.LastObservedAt),
-	)
-	if err != nil {
-		return fmt.Errorf("upsert sandbox projection state: %w", err)
-	}
-	return nil
-}
-
-func (r *Repository) upsertStorageProjectionState(ctx context.Context, state *metering.StorageProjectionState) error {
-	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
-INSERT INTO %s (
-    subject_type, subject_id, product, owner_kind,
-    team_id, user_id, sandbox_id, volume_id, snapshot_id,
-    cluster_id, region_id, size_bytes, observed_at, unbilled_byte_nanoseconds,
-    deleted, version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, 0, ?)
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable), dateTime64NanoPlaceholder),
-		state.SubjectType, state.SubjectID, state.Product, state.OwnerKind,
-		state.TeamID, state.UserID, state.SandboxID, state.VolumeID, state.SnapshotID,
-		state.ClusterID, state.RegionID, state.SizeBytes, dateTime64NanoArg(state.ObservedAt), state.UnbilledByteNanoseconds,
-		versionFrom(state.ObservedAt),
-	)
-	if err != nil {
-		return fmt.Errorf("upsert storage projection state: %w", err)
-	}
-	return nil
+	}, nil
 }
 
 // UpsertStorageProjectionState applies an idempotent storage-state mutation
 // captured by the PostgreSQL metering outbox.
 func (r *Repository) UpsertStorageProjectionState(ctx context.Context, state *metering.StorageProjectionState) error {
-	if state == nil {
-		return fmt.Errorf("storage projection state is nil")
-	}
-	return r.upsertStorageProjectionState(ctx, state)
+	return r.writeStorageProjectionStates(ctx, []*metering.StorageProjectionMutation{{
+		State: state,
+	}})
 }
 
 // ListActiveStorageProjectionStates returns current producer state needed to
@@ -649,36 +789,70 @@ WHERE deleted = 0
 	return states, nil
 }
 
-func (r *Repository) deleteStorageProjectionState(ctx context.Context, state *metering.StorageProjectionState, deletedAt time.Time) error {
-	if deletedAt.IsZero() {
-		deletedAt = r.now()
-	}
-	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`
-INSERT INTO %s (
-    subject_type, subject_id, product, owner_kind,
-    team_id, user_id, sandbox_id, volume_id, snapshot_id,
-    cluster_id, region_id, size_bytes, observed_at, unbilled_byte_nanoseconds,
-    deleted, version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, 1, ?)
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable), dateTime64NanoPlaceholder),
-		state.SubjectType, state.SubjectID, state.Product, state.OwnerKind,
-		state.TeamID, state.UserID, state.SandboxID, state.VolumeID, state.SnapshotID,
-		state.ClusterID, state.RegionID, state.SizeBytes, dateTime64NanoArg(deletedAt), state.UnbilledByteNanoseconds,
-		versionFrom(deletedAt),
-	)
-	if err != nil {
-		return fmt.Errorf("delete storage projection state: %w", err)
-	}
-	return nil
-}
-
 // DeleteStorageProjectionState applies an idempotent storage-state tombstone
 // captured by the PostgreSQL metering outbox.
 func (r *Repository) DeleteStorageProjectionState(ctx context.Context, state *metering.StorageProjectionState, deletedAt time.Time) error {
-	if state == nil {
-		return fmt.Errorf("storage projection state is nil")
+	return r.writeStorageProjectionStates(ctx, []*metering.StorageProjectionMutation{{
+		State:     state,
+		Deleted:   true,
+		DeletedAt: deletedAt,
+	}})
+}
+
+func (r *Repository) writeStorageProjectionStates(
+	ctx context.Context,
+	mutations []*metering.StorageProjectionMutation,
+) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("metering clickhouse repository is not configured")
 	}
-	return r.deleteStorageProjectionState(ctx, state, deletedAt)
+	rows := make([][]any, 0, len(mutations))
+	for _, mutation := range mutations {
+		if mutation == nil {
+			return fmt.Errorf("storage projection mutation is nil")
+		}
+		row, err := r.storageStateInsertValues(mutation.State, mutation.Deleted, mutation.DeletedAt)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, row)
+	}
+	return r.execInsertRows(ctx, insertRowsConfig{
+		table: qualified(r.cfg.Database, r.cfg.StorageStateTable),
+		columns: `
+    subject_type, subject_id, product, owner_kind,
+    team_id, user_id, sandbox_id, volume_id, snapshot_id,
+    cluster_id, region_id, size_bytes, observed_at, unbilled_byte_nanoseconds,
+    deleted, version`,
+		placeholders: fmt.Sprintf(
+			"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, ?, ?, ?)",
+			dateTime64NanoPlaceholder,
+		),
+		description: "write storage projection states",
+	}, rows)
+}
+
+func (r *Repository) storageStateInsertValues(
+	state *metering.StorageProjectionState,
+	deleted bool,
+	deletedAt time.Time,
+) ([]any, error) {
+	if state == nil {
+		return nil, fmt.Errorf("storage projection state is nil")
+	}
+	observedAt := state.ObservedAt
+	if deleted {
+		observedAt = deletedAt
+		if observedAt.IsZero() {
+			observedAt = r.now()
+		}
+	}
+	return []any{
+		state.SubjectType, state.SubjectID, state.Product, state.OwnerKind,
+		state.TeamID, state.UserID, state.SandboxID, state.VolumeID, state.SnapshotID,
+		state.ClusterID, state.RegionID, state.SizeBytes, dateTime64NanoArg(observedAt), state.UnbilledByteNanoseconds,
+		boolUInt8(deleted), versionFrom(observedAt),
+	}, nil
 }
 
 func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error) {

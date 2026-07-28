@@ -396,6 +396,23 @@ func (r *Repository) FlushStorageProjectionWindows(ctx context.Context, before t
 }
 
 func (r *Repository) ClaimNextBatch(ctx context.Context, workerID string, lease time.Duration) (*Batch, error) {
+	batches, err := r.ClaimNextBatches(ctx, workerID, lease, 1, 1)
+	if err != nil || len(batches) == 0 {
+		return nil, err
+	}
+	return batches[0], nil
+}
+
+// ClaimNextBatches leases consecutive ready transaction batches without
+// skipping the global outbox head. The first transaction is always claimed in
+// full, even when it contains more than maxOperations operations.
+func (r *Repository) ClaimNextBatches(
+	ctx context.Context,
+	workerID string,
+	lease time.Duration,
+	maxBatches int,
+	maxOperations int,
+) ([]*Batch, error) {
 	if r == nil || r.pool == nil {
 		return nil, fmt.Errorf("metering outbox pool is not configured")
 	}
@@ -405,111 +422,266 @@ func (r *Repository) ClaimNextBatch(ctx context.Context, workerID string, lease 
 	if lease <= 0 {
 		lease = 30 * time.Second
 	}
-	var batch *Batch
+	if maxBatches <= 0 {
+		maxBatches = 1
+	}
+	if maxOperations <= 0 {
+		maxOperations = 1
+	}
+	var batches []*Batch
 	err := r.InTx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, claimLockID); err != nil {
 			return fmt.Errorf("lock metering outbox claim: %w", err)
 		}
-		var batchID int64
-		var availableAt time.Time
-		var claimExpiresAt *time.Time
-		err := tx.QueryRow(ctx, `
-			SELECT batch_id, available_at, claim_expires_at
+
+		candidateRows, err := tx.Query(ctx, `
+			SELECT batch_id
 			FROM metering.projection_outbox
 			WHERE delivered_at IS NULL
 			ORDER BY sequence ASC
-			LIMIT 1
-			FOR UPDATE
-		`).Scan(&batchID, &availableAt, &claimExpiresAt)
-		if err == pgx.ErrNoRows {
-			return nil
-		}
+			LIMIT $1
+		`, max(maxBatches, maxOperations))
 		if err != nil {
-			return fmt.Errorf("select oldest metering outbox batch: %w", err)
+			return fmt.Errorf("select oldest metering outbox batches: %w", err)
 		}
-		now := r.timestamp()
-		if availableAt.After(now) || (claimExpiresAt != nil && claimExpiresAt.After(now)) {
+		defer candidateRows.Close()
+
+		candidateIDs := make([]int64, 0, maxBatches)
+		seenCandidates := make(map[int64]struct{}, maxBatches)
+		for candidateRows.Next() {
+			var batchID int64
+			if err := candidateRows.Scan(&batchID); err != nil {
+				return fmt.Errorf("scan oldest metering outbox batch ID: %w", err)
+			}
+			if _, seen := seenCandidates[batchID]; seen {
+				continue
+			}
+			seenCandidates[batchID] = struct{}{}
+			candidateIDs = append(candidateIDs, batchID)
+			if len(candidateIDs) >= maxBatches {
+				break
+			}
+		}
+		if err := candidateRows.Err(); err != nil {
+			return fmt.Errorf("iterate oldest metering outbox batch IDs: %w", err)
+		}
+		candidateRows.Close()
+		if len(candidateIDs) == 0 {
 			return nil
 		}
-		rows, err := tx.Query(ctx, `
+
+		now := r.timestamp()
+		type candidateState struct {
+			count          int
+			availableAt    time.Time
+			claimExpiresAt *time.Time
+		}
+		states := make(map[int64]candidateState, len(candidateIDs))
+		stateRows, err := tx.Query(ctx, `
+			SELECT
+				batch_id,
+				COUNT(*),
+				MAX(available_at),
+				MAX(claim_expires_at)
+			FROM metering.projection_outbox
+			WHERE batch_id = ANY($1::bigint[]) AND delivered_at IS NULL
+			GROUP BY batch_id
+		`, candidateIDs)
+		if err != nil {
+			return fmt.Errorf("inspect oldest metering outbox batches: %w", err)
+		}
+		defer stateRows.Close()
+		for stateRows.Next() {
+			var (
+				batchID int64
+				state   candidateState
+			)
+			if err := stateRows.Scan(&batchID, &state.count, &state.availableAt, &state.claimExpiresAt); err != nil {
+				return fmt.Errorf("scan oldest metering outbox batch: %w", err)
+			}
+			states[batchID] = state
+		}
+		if err := stateRows.Err(); err != nil {
+			return fmt.Errorf("iterate oldest metering outbox batches: %w", err)
+		}
+		stateRows.Close()
+
+		batchIDs := make([]int64, 0, maxBatches)
+		operationCount := 0
+		for _, batchID := range candidateIDs {
+			state, ok := states[batchID]
+			if !ok {
+				continue
+			}
+			if state.availableAt.After(now) || (state.claimExpiresAt != nil && state.claimExpiresAt.After(now)) {
+				break
+			}
+			if len(batchIDs) > 0 && operationCount+state.count > maxOperations {
+				break
+			}
+			batchIDs = append(batchIDs, batchID)
+			operationCount += state.count
+			if operationCount >= maxOperations {
+				break
+			}
+		}
+		if len(batchIDs) == 0 {
+			return nil
+		}
+
+		claimedRows, err := tx.Query(ctx, `
 			UPDATE metering.projection_outbox
 			SET claimed_by = $2,
 				claim_expires_at = $3,
 				attempts = attempts + 1
-			WHERE batch_id = $1 AND delivered_at IS NULL
+			WHERE batch_id = ANY($1::bigint[]) AND delivered_at IS NULL
 			RETURNING sequence, batch_id, operation_type, dedupe_key, payload,
 				attempts, created_at, claim_expires_at
-		`, batchID, workerID, now.Add(lease))
+		`, batchIDs, workerID, now.Add(lease))
 		if err != nil {
-			return fmt.Errorf("claim metering outbox batch: %w", err)
+			return fmt.Errorf("claim metering outbox batches: %w", err)
 		}
-		defer rows.Close()
-		operations := make([]*Operation, 0, 4)
-		for rows.Next() {
+		defer claimedRows.Close()
+		byID := make(map[int64][]*Operation, len(batchIDs))
+		for claimedRows.Next() {
 			operation := &Operation{}
-			if err := rows.Scan(
+			if err := claimedRows.Scan(
 				&operation.Sequence, &operation.BatchID, &operation.Type,
 				&operation.DedupeKey, &operation.Payload, &operation.Attempts,
 				&operation.CreatedAt, &operation.ClaimExpiresAt,
 			); err != nil {
 				return fmt.Errorf("scan claimed metering operation: %w", err)
 			}
-			operations = append(operations, operation)
+			byID[operation.BatchID] = append(byID[operation.BatchID], operation)
 		}
-		if err := rows.Err(); err != nil {
+		if err := claimedRows.Err(); err != nil {
 			return fmt.Errorf("iterate claimed metering operations: %w", err)
 		}
-		if len(operations) > 0 {
+		for _, batchID := range batchIDs {
+			operations := byID[batchID]
+			if len(operations) == 0 {
+				return fmt.Errorf("claimed metering outbox batch %d has no operations", batchID)
+			}
 			sort.Slice(operations, func(i, j int) bool {
 				return operations[i].Sequence < operations[j].Sequence
 			})
-			batch = &Batch{ID: batchID, Operations: operations}
+			batches = append(batches, &Batch{ID: batchID, Operations: operations})
 		}
 		return nil
 	})
-	return batch, err
+	return batches, err
 }
 
 func (r *Repository) MarkDelivered(ctx context.Context, batchID int64, workerID string) error {
+	return r.MarkDeliveredBatches(ctx, []int64{batchID}, workerID)
+}
+
+// MarkDeliveredBatches atomically acknowledges every claimed transaction.
+func (r *Repository) MarkDeliveredBatches(ctx context.Context, batchIDs []int64, workerID string) error {
 	if r == nil || r.pool == nil {
 		return fmt.Errorf("metering outbox pool is not configured")
 	}
-	tag, err := r.pool.Exec(ctx, `
-		UPDATE metering.projection_outbox
-		SET delivered_at = NOW(),
-			claimed_by = '',
-			claim_expires_at = NULL,
-			last_error = ''
-		WHERE batch_id = $1 AND delivered_at IS NULL AND claimed_by = $2
-	`, batchID, workerID)
-	if err != nil {
-		return fmt.Errorf("mark metering outbox batch delivered: %w", err)
+	if len(batchIDs) == 0 {
+		return nil
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("metering outbox batch %d is not claimed by %q", batchID, workerID)
-	}
-	return nil
+	return r.InTx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			UPDATE metering.projection_outbox
+			SET delivered_at = NOW(),
+				claimed_by = '',
+				claim_expires_at = NULL,
+				last_error = ''
+			WHERE batch_id = ANY($1::bigint[])
+				AND delivered_at IS NULL
+				AND claimed_by = $2
+			RETURNING batch_id
+		`, batchIDs, workerID)
+		if err != nil {
+			return fmt.Errorf("mark metering outbox batches delivered: %w", err)
+		}
+		delivered, err := returnedBatchIDs(rows)
+		if err != nil {
+			return fmt.Errorf("read delivered metering outbox batches: %w", err)
+		}
+		if missing := missingBatchIDs(batchIDs, delivered); len(missing) > 0 {
+			return fmt.Errorf("metering outbox batches %v are not claimed by %q", missing, workerID)
+		}
+		return nil
+	})
 }
 
 func (r *Repository) MarkFailed(ctx context.Context, batchID int64, workerID, message string, retryAt time.Time) error {
+	return r.MarkFailedBatches(ctx, []int64{batchID}, workerID, message, retryAt)
+}
+
+// MarkFailedBatches atomically releases every transaction in a failed
+// ClickHouse delivery attempt.
+func (r *Repository) MarkFailedBatches(
+	ctx context.Context,
+	batchIDs []int64,
+	workerID string,
+	message string,
+	retryAt time.Time,
+) error {
 	if r == nil || r.pool == nil {
 		return fmt.Errorf("metering outbox pool is not configured")
+	}
+	if len(batchIDs) == 0 {
+		return nil
 	}
 	if retryAt.IsZero() {
 		retryAt = r.timestamp()
 	}
-	_, err := r.pool.Exec(ctx, `
-		UPDATE metering.projection_outbox
-		SET available_at = $3,
-			claimed_by = '',
-			claim_expires_at = NULL,
-			last_error = $4
-		WHERE batch_id = $1 AND delivered_at IS NULL AND claimed_by = $2
-	`, batchID, workerID, retryAt.UTC(), truncateError(message))
-	if err != nil {
-		return fmt.Errorf("release failed metering outbox batch: %w", err)
+	return r.InTx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			UPDATE metering.projection_outbox
+			SET available_at = $3,
+				claimed_by = '',
+				claim_expires_at = NULL,
+				last_error = $4
+			WHERE batch_id = ANY($1::bigint[])
+				AND delivered_at IS NULL
+				AND claimed_by = $2
+			RETURNING batch_id
+		`, batchIDs, workerID, retryAt.UTC(), truncateError(message))
+		if err != nil {
+			return fmt.Errorf("release failed metering outbox batches: %w", err)
+		}
+		released, err := returnedBatchIDs(rows)
+		if err != nil {
+			return fmt.Errorf("read released metering outbox batches: %w", err)
+		}
+		if missing := missingBatchIDs(batchIDs, released); len(missing) > 0 {
+			return fmt.Errorf("metering outbox batches %v are not claimed by %q", missing, workerID)
+		}
+		return nil
+	})
+}
+
+func returnedBatchIDs(rows pgx.Rows) (map[int64]struct{}, error) {
+	defer rows.Close()
+	result := make(map[int64]struct{})
+	for rows.Next() {
+		var batchID int64
+		if err := rows.Scan(&batchID); err != nil {
+			return nil, err
+		}
+		result[batchID] = struct{}{}
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func missingBatchIDs(expected []int64, actual map[int64]struct{}) []int64 {
+	missing := make([]int64, 0)
+	for _, batchID := range expected {
+		if _, ok := actual[batchID]; !ok {
+			missing = append(missing, batchID)
+		}
+	}
+	return missing
 }
 
 func (r *Repository) Stats(ctx context.Context) (*Stats, error) {

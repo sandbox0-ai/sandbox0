@@ -24,10 +24,7 @@ type WatermarkOperation struct {
 	CompleteBefore time.Time `json:"complete_before"`
 }
 
-type StorageStateDeleteOperation struct {
-	State     *metering.StorageProjectionState `json:"state"`
-	DeletedAt time.Time                        `json:"deleted_at"`
-}
+type StorageStateDeleteOperation = metering.StorageProjectionStateTombstone
 
 // Operation is one idempotent ClickHouse mutation captured in PostgreSQL.
 type Operation struct {
@@ -55,6 +52,13 @@ type Sink interface {
 	UpsertSandboxProjectionState(context.Context, *metering.SandboxProjectionState) error
 	UpsertStorageProjectionState(context.Context, *metering.StorageProjectionState) error
 	DeleteStorageProjectionState(context.Context, *metering.StorageProjectionState, time.Time) error
+}
+
+// BatchSink applies several ordered outbox transactions with a bounded number
+// of ClickHouse INSERT statements. Implementations must be idempotent because
+// a partially accepted batch is retried in full.
+type BatchSink interface {
+	ApplyProjectionBatch(context.Context, *metering.ProjectionBatch) error
 }
 
 // Stats summarizes outstanding delivery work.

@@ -65,6 +65,20 @@ type fakeSink struct {
 	failWindowOnce      bool
 }
 
+type fakeBatchSink struct {
+	*fakeSink
+	batches []*metering.ProjectionBatch
+	err     error
+}
+
+func (f *fakeBatchSink) ApplyProjectionBatch(_ context.Context, batch *metering.ProjectionBatch) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.batches = append(f.batches, batch)
+	return nil
+}
+
 func (f *fakeSink) AppendEvent(_ context.Context, value *metering.Event) error {
 	f.events = append(f.events, value)
 	return nil
@@ -183,6 +197,208 @@ func TestProjectorAppliesProjectionStateOperations(t *testing.T) {
 	if len(sink.sandboxStates) != 1 || len(sink.storageStates) != 1 || len(sink.storageStateDeletes) != 1 || len(sink.watermarks) != 1 {
 		t.Fatalf("applied operations = sandbox:%d storage:%d delete:%d watermark:%d",
 			len(sink.sandboxStates), len(sink.storageStates), len(sink.storageStateDeletes), len(sink.watermarks))
+	}
+}
+
+type fakeCoalescingProjectionStore struct {
+	batches       []*Batch
+	claimed       bool
+	deliveredIDs  []int64
+	failedIDs     []int64
+	maxBatches    int
+	maxOperations int
+}
+
+func (f *fakeCoalescingProjectionStore) ClaimNextBatch(context.Context, string, time.Duration) (*Batch, error) {
+	if len(f.batches) == 0 {
+		return nil, nil
+	}
+	return f.batches[0], nil
+}
+
+func (f *fakeCoalescingProjectionStore) ClaimNextBatches(
+	_ context.Context,
+	_ string,
+	_ time.Duration,
+	maxBatches int,
+	maxOperations int,
+) ([]*Batch, error) {
+	if f.claimed {
+		return nil, nil
+	}
+	f.claimed = true
+	f.maxBatches = maxBatches
+	f.maxOperations = maxOperations
+	return f.batches, nil
+}
+
+func (f *fakeCoalescingProjectionStore) MarkDelivered(context.Context, int64, string) error {
+	return errors.New("single-batch delivery should not be used")
+}
+
+func (f *fakeCoalescingProjectionStore) MarkDeliveredBatches(_ context.Context, ids []int64, _ string) error {
+	f.deliveredIDs = append([]int64(nil), ids...)
+	return nil
+}
+
+func (f *fakeCoalescingProjectionStore) MarkFailed(context.Context, int64, string, string, time.Time) error {
+	return errors.New("single-batch failure should not be used")
+}
+
+func (f *fakeCoalescingProjectionStore) MarkFailedBatches(
+	_ context.Context,
+	ids []int64,
+	_ string,
+	_ string,
+	_ time.Time,
+) error {
+	f.failedIDs = append([]int64(nil), ids...)
+	return nil
+}
+
+func (f *fakeCoalescingProjectionStore) DeleteDeliveredBefore(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
+}
+
+func (f *fakeCoalescingProjectionStore) Stats(context.Context) (*Stats, error) {
+	return &Stats{}, nil
+}
+
+func TestProjectorCoalescesConsecutiveTransactionsForBatchSink(t *testing.T) {
+	now := time.Date(2026, 7, 28, 10, 0, 0, 0, time.UTC)
+	event := &metering.Event{
+		EventID:     "event-1",
+		Producer:    "producer-1",
+		EventType:   metering.EventTypeSandboxClaimed,
+		SubjectType: metering.SubjectTypeSandbox,
+		SubjectID:   "sandbox-1",
+		OccurredAt:  now,
+		RecordedAt:  now,
+	}
+	window := &metering.Window{
+		WindowID:    "window-1",
+		Producer:    "producer-1",
+		WindowType:  metering.WindowTypeSandboxEgressBytes,
+		SubjectType: metering.SubjectTypeSandbox,
+		SubjectID:   "sandbox-1",
+		WindowStart: now,
+		WindowEnd:   now.Add(time.Minute),
+		Value:       1,
+		Unit:        metering.WindowUnitBytes,
+		RecordedAt:  now,
+	}
+	watermark := &WatermarkOperation{
+		Producer:       "producer-1",
+		RegionID:       "region-1",
+		CompleteBefore: now.Add(time.Minute),
+	}
+	storageState := &metering.StorageProjectionState{
+		SubjectType: metering.SubjectTypeVolume,
+		SubjectID:   "volume-1",
+		ObservedAt:  now,
+	}
+	store := &fakeCoalescingProjectionStore{batches: []*Batch{
+		{
+			ID: 10,
+			Operations: []*Operation{
+				{Sequence: 2, BatchID: 10, Type: OperationWindow, Payload: mustMarshal(t, window), Attempts: 1},
+				{Sequence: 1, BatchID: 10, Type: OperationEvent, Payload: mustMarshal(t, event), Attempts: 1},
+			},
+		},
+		{
+			ID: 11,
+			Operations: []*Operation{
+				{
+					Sequence: 3,
+					BatchID:  11,
+					Type:     OperationStorageStateDelete,
+					Payload: mustMarshal(t, &StorageStateDeleteOperation{
+						State:     storageState,
+						DeletedAt: now,
+					}),
+					Attempts: 1,
+				},
+				{Sequence: 4, BatchID: 11, Type: OperationStorageState, Payload: mustMarshal(t, storageState), Attempts: 1},
+				{Sequence: 5, BatchID: 11, Type: OperationWatermark, Payload: mustMarshal(t, watermark), Attempts: 1},
+			},
+		},
+	}}
+	sink := &fakeBatchSink{fakeSink: &fakeSink{}}
+	projector := NewProjector(store, sink, ProjectorConfig{WorkerID: "worker-1"}, nil)
+
+	if processed, err := projector.ProjectOnce(context.Background()); !processed || err != nil {
+		t.Fatalf("ProjectOnce() = (%v, %v)", processed, err)
+	}
+	if store.maxBatches != defaultDeliveryBatches || store.maxOperations != defaultDeliveryOperations {
+		t.Fatalf("claim limits = (%d, %d)", store.maxBatches, store.maxOperations)
+	}
+	if len(store.deliveredIDs) != 2 || store.deliveredIDs[0] != 10 || store.deliveredIDs[1] != 11 {
+		t.Fatalf("delivered batch IDs = %v", store.deliveredIDs)
+	}
+	if len(sink.batches) != 1 {
+		t.Fatalf("projection batch calls = %d, want 1", len(sink.batches))
+	}
+	batch := sink.batches[0]
+	if len(batch.Events) != 1 || batch.Events[0].Sequence != 1 ||
+		len(batch.Windows) != 1 || batch.Windows[0].Sequence != 2 ||
+		len(batch.StorageMutations) != 2 || !batch.StorageMutations[0].Deleted || batch.StorageMutations[1].Deleted ||
+		len(batch.Watermarks) != 1 || batch.Watermarks[0].Producer != watermark.Producer {
+		t.Fatalf("decoded projection batch = %#v", batch)
+	}
+}
+
+func TestProjectorReleasesEveryCoalescedTransactionOnBatchFailure(t *testing.T) {
+	now := time.Date(2026, 7, 28, 10, 0, 0, 0, time.UTC)
+	event := &metering.Event{
+		EventID:     "event-1",
+		Producer:    "producer-1",
+		EventType:   metering.EventTypeSandboxClaimed,
+		SubjectType: metering.SubjectTypeSandbox,
+		SubjectID:   "sandbox-1",
+		OccurredAt:  now,
+		RecordedAt:  now,
+	}
+	store := &fakeCoalescingProjectionStore{batches: []*Batch{
+		{
+			ID: 10,
+			Operations: []*Operation{{
+				Sequence: 1,
+				BatchID:  10,
+				Type:     OperationEvent,
+				Payload:  mustMarshal(t, event),
+				Attempts: 1,
+			}},
+		},
+		{
+			ID: 11,
+			Operations: []*Operation{{
+				Sequence: 2,
+				BatchID:  11,
+				Type:     OperationWatermark,
+				Payload: mustMarshal(t, &WatermarkOperation{
+					Producer:       "producer-1",
+					CompleteBefore: now,
+				}),
+				Attempts: 1,
+			}},
+		},
+	}}
+	sink := &fakeBatchSink{
+		fakeSink: &fakeSink{},
+		err:      errors.New("clickhouse unavailable"),
+	}
+	projector := NewProjector(store, sink, ProjectorConfig{WorkerID: "worker-1"}, nil)
+	projector.now = func() time.Time { return now }
+
+	processed, err := projector.ProjectOnce(context.Background())
+	if !processed || err == nil {
+		t.Fatalf("ProjectOnce() = (%v, %v), want processed failure", processed, err)
+	}
+	if len(store.failedIDs) != 2 || store.failedIDs[0] != 10 || store.failedIDs[1] != 11 {
+		t.Fatalf("failed batch IDs = %v", store.failedIDs)
+	}
+	if len(store.deliveredIDs) != 0 {
+		t.Fatalf("delivered batch IDs = %v, want none", store.deliveredIDs)
 	}
 }
 

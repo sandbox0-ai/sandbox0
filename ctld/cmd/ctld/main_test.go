@@ -60,6 +60,47 @@ func TestCtldHealthEndpoints(t *testing.T) {
 	assert.Equal(t, "ok", rec.Body.String())
 }
 
+func TestCombinedControllerExposesPrimaryHealth(t *testing.T) {
+	healthy := false
+	server := newHTTPServer(":0", combinedController{
+		Controller:  ctldserver.NotImplementedController{},
+		ReadyCheck:  func() bool { return healthy },
+		HealthCheck: func() bool { return healthy },
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	server.Handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+
+	healthy = true
+	rec = httptest.NewRecorder()
+	server.Handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestMonitorPrimaryServiceHealthReportsFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	failures := make(chan error, 1)
+	checks := 0
+	go monitorPrimaryServiceHealth(ctx, time.Millisecond, func() error {
+		checks++
+		if checks < 2 {
+			return nil
+		}
+		return fmt.Errorf("multiplexer stalled")
+	}, failures)
+
+	select {
+	case err := <-failures:
+		require.ErrorContains(t, err, "ctld primary health")
+		require.ErrorContains(t, err, "multiplexer stalled")
+	case <-time.After(time.Second):
+		t.Fatal("primary service health failure was not reported")
+	}
+}
+
 func TestCtldPauseResumeStubsReturnNotImplemented(t *testing.T) {
 	server := newHTTPServer(":0", nil)
 

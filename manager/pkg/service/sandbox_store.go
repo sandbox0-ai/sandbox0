@@ -115,6 +115,7 @@ const (
 	SandboxLifecycleSourceManual = "manual"
 	SandboxLifecycleSourceAuto   = "auto"
 	SandboxLifecycleSourceCrash  = "crash"
+	SandboxLifecycleSourceHealth = "health"
 
 	SandboxLifecyclePhasePreparing  = "preparing"
 	SandboxLifecyclePhaseBarriered  = "barriered"
@@ -357,6 +358,51 @@ func (s *PGSandboxStore) ListActiveLifecycleTxns(ctx context.Context, kind strin
 		return nil, fmt.Errorf("iterate active lifecycle txns: %w", err)
 	}
 	return txns, nil
+}
+
+// ListPendingHealthRecoverySandboxIDs returns paused sandboxes whose latest
+// committed lifecycle transition was an automatic health-recovery pause.
+func (s *PGSandboxStore) ListPendingHealthRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT s.sandbox_id
+		FROM manager.sandboxes s
+		JOIN LATERAL (
+			SELECT kind, source
+			FROM manager.sandbox_lifecycle_txns
+			WHERE sandbox_id = s.sandbox_id
+				AND phase = $1
+			ORDER BY epoch DESC
+			LIMIT 1
+		) latest ON TRUE
+		WHERE s.deleted_at IS NULL
+			AND s.status = $2
+			AND latest.kind = $3
+			AND latest.source = $4
+		ORDER BY s.updated_at ASC
+		LIMIT $5
+	`, SandboxLifecyclePhaseCommitted, SandboxStatusPaused, SandboxLifecycleKindPause, SandboxLifecycleSourceHealth, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending health recovery sandboxes: %w", err)
+	}
+	defer rows.Close()
+	var sandboxIDs []string
+	for rows.Next() {
+		var sandboxID string
+		if err := rows.Scan(&sandboxID); err != nil {
+			return nil, fmt.Errorf("scan pending health recovery sandbox: %w", err)
+		}
+		sandboxIDs = append(sandboxIDs, sandboxID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending health recovery sandboxes: %w", err)
+	}
+	return sandboxIDs, nil
 }
 
 func (s *PGSandboxStore) GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {

@@ -2252,8 +2252,9 @@ type SandboxAuditResource struct {
 
 // SandboxConfig defines model for SandboxConfig.
 type SandboxConfig struct {
-	// AutoResume Sandbox-level runtime recovery gate. When false, inbound API or public exposure
-	// requests must not automatically resume a paused sandbox or replace a failed runtime.
+	// AutoResume Controls whether supported inbound API or public exposure requests may automatically
+	// make an inactive sandbox available. This setting does not control platform-initiated
+	// runtime fault recovery.
 	AutoResume *bool              `json:"auto_resume,omitempty"`
 	EnvVars    *map[string]string `json:"env_vars,omitempty"`
 
@@ -2631,8 +2632,9 @@ type SandboxTemplateStatus struct {
 // SandboxUpdateConfig Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
 // Note: env_vars only affect new processes. webhook is not included as it requires restart.
 type SandboxUpdateConfig struct {
-	// AutoResume Sandbox-level runtime recovery gate. When false, inbound API or public exposure
-	// requests must not automatically resume a paused sandbox or replace a failed runtime.
+	// AutoResume Controls whether supported inbound API or public exposure requests may automatically
+	// make an inactive sandbox available. This setting does not control platform-initiated
+	// runtime fault recovery.
 	AutoResume *bool `json:"auto_resume,omitempty"`
 
 	// EnvVars Sandbox-level environment variables used as defaults for new procd-managed

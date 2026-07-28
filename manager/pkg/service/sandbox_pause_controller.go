@@ -16,26 +16,45 @@ const (
 	defaultSandboxPauseScanLimit    = 500
 )
 
+type sandboxPauseItem struct {
+	SandboxID string
+	Resume    bool
+}
+
+type pendingHealthRecoveryStore interface {
+	ListPendingHealthRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error)
+}
+
 // SandboxPauseController completes durable pause transactions outside the API request path.
 type SandboxPauseController struct {
 	service        *SandboxService
 	logger         *zap.Logger
-	queue          workqueue.TypedRateLimitingInterface[string]
+	queue          workqueue.TypedRateLimitingInterface[sandboxPauseItem]
 	resyncInterval time.Duration
 	scanLimit      int
+	complete       func(context.Context, string) error
+	resume         func(context.Context, string) error
 }
 
 func NewSandboxPauseController(service *SandboxService, logger *zap.Logger) *SandboxPauseController {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &SandboxPauseController{
+	controller := &SandboxPauseController{
 		service:        service,
 		logger:         logger,
-		queue:          workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
+		queue:          workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[sandboxPauseItem]()),
 		resyncInterval: defaultSandboxPauseResyncPeriod,
 		scanLimit:      defaultSandboxPauseScanLimit,
 	}
+	if service != nil {
+		controller.complete = service.CompletePausingSandboxRuntime
+		controller.resume = func(ctx context.Context, sandboxID string) error {
+			_, err := service.ResumePausedSandboxRuntime(ctx, sandboxID)
+			return err
+		}
+	}
+	return controller
 }
 
 func (c *SandboxPauseController) EnqueueSandboxPause(sandboxID string) {
@@ -46,7 +65,19 @@ func (c *SandboxPauseController) EnqueueSandboxPause(sandboxID string) {
 	if sandboxID == "" {
 		return
 	}
-	c.queue.Add(sandboxID)
+	c.queue.Add(sandboxPauseItem{SandboxID: sandboxID})
+}
+
+// EnqueueSandboxRecovery completes the pause transaction and reconstructs the runtime.
+func (c *SandboxPauseController) EnqueueSandboxRecovery(sandboxID string) {
+	if c == nil || c.queue == nil {
+		return
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return
+	}
+	c.queue.Add(sandboxPauseItem{SandboxID: sandboxID, Resume: true})
 }
 
 func (c *SandboxPauseController) Run(ctx context.Context, workers int) error {
@@ -57,7 +88,7 @@ func (c *SandboxPauseController) Run(ctx context.Context, workers int) error {
 		workers = 1
 	}
 	if c.queue == nil {
-		c.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]())
+		c.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[sandboxPauseItem]())
 	}
 	if c.scanLimit <= 0 {
 		c.scanLimit = defaultSandboxPauseScanLimit
@@ -99,8 +130,24 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 	}
 	for _, txn := range txns {
 		if txn != nil {
-			c.EnqueueSandboxPause(txn.SandboxID)
+			if txn.Source == SandboxLifecycleSourceHealth {
+				c.EnqueueSandboxRecovery(txn.SandboxID)
+			} else {
+				c.EnqueueSandboxPause(txn.SandboxID)
+			}
 		}
+	}
+	recoveryStore, ok := c.service.sandboxStore.(pendingHealthRecoveryStore)
+	if !ok {
+		return
+	}
+	sandboxIDs, err := recoveryStore.ListPendingHealthRecoverySandboxIDs(ctx, c.scanLimit)
+	if err != nil {
+		c.logger.Warn("Failed to list pending sandbox health recoveries", zap.Error(err))
+		return
+	}
+	for _, sandboxID := range sandboxIDs {
+		c.EnqueueSandboxRecovery(sandboxID)
 	}
 }
 
@@ -110,24 +157,38 @@ func (c *SandboxPauseController) runWorker(ctx context.Context) {
 }
 
 func (c *SandboxPauseController) processNextWorkItem(ctx context.Context) bool {
-	sandboxID, shutdown := c.queue.Get()
+	item, shutdown := c.queue.Get()
 	if shutdown {
 		return false
 	}
-	defer c.queue.Done(sandboxID)
+	defer c.queue.Done(item)
 
-	if c.service == nil {
-		c.queue.Forget(sandboxID)
+	if c.complete == nil {
+		c.queue.Forget(item)
 		return true
 	}
-	if err := c.service.CompletePausingSandboxRuntime(ctx, sandboxID); err != nil {
+	if err := c.complete(ctx, item.SandboxID); err != nil {
 		c.logger.Warn("Sandbox pause completion failed, requeueing",
-			zap.String("sandboxID", sandboxID),
+			zap.String("sandboxID", item.SandboxID),
 			zap.Error(err),
 		)
-		c.queue.AddRateLimited(sandboxID)
+		c.queue.AddRateLimited(item)
 		return true
 	}
-	c.queue.Forget(sandboxID)
+	if item.Resume {
+		if c.resume == nil {
+			c.queue.Forget(item)
+			return true
+		}
+		if err := c.resume(ctx, item.SandboxID); err != nil {
+			c.logger.Warn("Sandbox runtime reconstruction failed, requeueing",
+				zap.String("sandboxID", item.SandboxID),
+				zap.Error(err),
+			)
+			c.queue.AddRateLimited(item)
+			return true
+		}
+	}
+	c.queue.Forget(item)
 	return true
 }

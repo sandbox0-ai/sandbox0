@@ -331,6 +331,9 @@ func (s *Server) handleReady(events uint32) (bool, error) {
 		return true, nil
 	}
 	request, err := readRequest(channelFD, s.opts.MaxWrite)
+	if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+		return false, nil
+	}
 	if errors.Is(err, unix.ENODEV) || errors.Is(err, unix.EBADF) {
 		return true, nil
 	}

@@ -50,6 +50,13 @@ type ReadinessController interface {
 	Ready() bool
 }
 
+// HealthController contributes fatal primary service state to the ctld health
+// endpoint. A failed health check causes the HA liveness probe to restart the
+// primary so its peer can take over.
+type HealthController interface {
+	Healthy() bool
+}
+
 type NotImplementedController struct{}
 
 func (NotImplementedController) Pause(_ *http.Request, _ string) (ctldapi.PauseResponse, int) {
@@ -98,6 +105,11 @@ func NewMux(controller Controller) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if healthController, ok := controller.(HealthController); ok && !healthController.Healthy() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("unhealthy"))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})

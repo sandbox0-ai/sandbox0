@@ -40,11 +40,15 @@ Runtime access paths do not expose `pausing` or `resuming` states. File, context
 
 Automatic pause from `ttl` is opportunistic. If supported runtime access arrives before an automatic pause reaches its commit point, Sandbox0 cancels that automatic pause, releases the runtime barrier, and continues on the existing runtime generation. Explicit pause requests are not canceled by runtime access; those requests wait for the committed pause and then resume if auto-resume is allowed.
 
-## Unexpected Runtime Termination
+## Runtime Failure Recovery
 
 If the `procd` container in a claimed sandbox exits unexpectedly, including an OOM termination, Sandbox0 leaves that container attempt stopped while `manager` starts a non-cancelable crash-recovery pause. `ctld` checkpoints the exact terminated containerd snapshot, then `manager` atomically commits the new rootfs head and paused state before deleting the old runtime pod. A supported runtime request waits for this transaction and can resume from the recovered checkpoint when auto-resume is allowed.
 
 Explicit sandbox deletion and `hard_ttl` still take precedence over crash recovery. Recovery also depends on the terminated snapshot remaining available on the same node. If the old runtime pod or containerd snapshot disappears before `ctld` can read it, Sandbox0 records the degraded recovery and falls back to the last committed rootfs checkpoint. Files written after that checkpoint may be lost. Mounted Sandbox Volumes keep their independently durable state.
+
+Sandbox0 treats a sustained runtime liveness failure as an internal platform fault. A transient failure does not replace the runtime, but after the failure continues for 90 seconds, manager starts the same durable pause flow and reconstructs the runtime as a new `runtime_generation`. This recovery is independent of the sandbox `auto_resume` access policy.
+
+For an unresponsive runtime, `ctld` gets a bounded checkpoint attempt. If the runtime cannot produce a new checkpoint, recovery preserves the last committed rootfs head and continues so a stuck runtime cannot block replacement indefinitely. Mounted Sandbox Volumes remain independently durable.
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/pause

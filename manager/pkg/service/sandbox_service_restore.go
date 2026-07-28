@@ -33,7 +33,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 	var txn *SandboxLifecycleTxn
 	var req *ClaimRequest
 	var deletingPodRef *sandboxRuntimePodRef
-	crashRecoveryRequested := false
+	runtimeRecoveryRequested := false
 	claimType := "hot"
 	restoreNeeded := false
 	for {
@@ -43,7 +43,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		txn = nil
 		req = nil
 		deletingPodRef = nil
-		crashRecoveryRequested = false
+		runtimeRecoveryRequested = false
 		restoreNeeded = false
 		var waitErr error
 		err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
@@ -87,21 +87,35 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 					}
 					return errSandboxRuntimeDeleting
 				}
-				if sandboxRuntimePodNeedsReplacement(existing) {
-					if err := beginCrashRecoveryTxn(lockCtx, tx, locked, existing); err != nil {
-						return err
-					}
-					crashRecoveryRequested = true
-					waitErr = errSandboxLifecyclePausing
-					return nil
-				}
 				if locked.Status == SandboxStatusPaused {
 					deletingPodRef = &sandboxRuntimePodRef{
 						namespace: existing.Namespace,
 						name:      existing.Name,
 					}
-					_ = s.k8sClient.CoreV1().Pods(existing.Namespace).Delete(lockCtx, existing.Name, metav1.DeleteOptions{})
+					if err := s.k8sClient.CoreV1().Pods(existing.Namespace).Delete(lockCtx, existing.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+						return fmt.Errorf("delete stale sandbox runtime pod: %w", err)
+					}
 					return errSandboxRuntimeDeleting
+				}
+				if sandboxRuntimePodNeedsReplacement(existing) {
+					if err := beginCrashRecoveryTxn(lockCtx, tx, locked, existing); err != nil {
+						return err
+					}
+					runtimeRecoveryRequested = true
+					waitErr = errSandboxLifecyclePausing
+					return nil
+				}
+				if sandboxRuntimeLivenessFailureSustained(
+					sandboxRuntimeLivenessCondition(existing),
+					s.now(),
+					defaultSandboxRuntimeUnhealthyAfter,
+				) {
+					if err := beginHealthRecoveryTxn(lockCtx, tx, locked, existing); err != nil {
+						return err
+					}
+					runtimeRecoveryRequested = true
+					waitErr = errSandboxLifecyclePausing
+					return nil
 				}
 				pod = existing
 				record = nil
@@ -149,7 +163,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			}
 			return tx.BeginLifecycleTxn(lockCtx, txn)
 		})
-		if err == nil && crashRecoveryRequested {
+		if err == nil && runtimeRecoveryRequested {
 			s.enqueueSandboxPause(sandboxID)
 			err = waitErr
 		}
@@ -352,25 +366,20 @@ func (s *SandboxService) waitForSandboxRuntimePodDeletion(ctx context.Context, n
 	defer ticker.Stop()
 	for {
 		if s != nil && s.podLister != nil {
-			pod, err := s.podLister.Pods(namespace).Get(name)
+			_, err := s.podLister.Pods(namespace).Get(name)
 			if k8serrors.IsNotFound(err) {
 				return nil
 			}
 			if err != nil {
 				return err
 			}
-			if pod != nil && pod.DeletionTimestamp == nil {
-				return nil
-			}
 		} else if s != nil && s.k8sClient != nil {
-			pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+			_, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 			switch {
 			case k8serrors.IsNotFound(err):
 				return nil
 			case err != nil:
 				return err
-			case pod != nil && pod.DeletionTimestamp == nil:
-				return nil
 			}
 		} else {
 			return nil

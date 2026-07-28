@@ -42,6 +42,8 @@ const (
 
 type criRuntimeService interface {
 	ListContainers(ctx context.Context, in *runtimeapi.ListContainersRequest, opts ...grpc.CallOption) (*runtimeapi.ListContainersResponse, error)
+	ListPodSandbox(ctx context.Context, in *runtimeapi.ListPodSandboxRequest, opts ...grpc.CallOption) (*runtimeapi.ListPodSandboxResponse, error)
+	PodSandboxStats(ctx context.Context, in *runtimeapi.PodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.PodSandboxStatsResponse, error)
 	ListPodSandboxStats(ctx context.Context, in *runtimeapi.ListPodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.ListPodSandboxStatsResponse, error)
 }
 
@@ -422,6 +424,40 @@ func (r *ContainerdRuntime) ListPodSandboxStats(ctx context.Context) ([]*runtime
 	resp, err := client.ListPodSandboxStats(ctx, &runtimeapi.ListPodSandboxStatsRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("list CRI pod sandbox stats: %w", err)
+	}
+	return resp.GetStats(), nil
+}
+
+// ListPodSandboxes returns ready node-local CRI sandboxes for isolated stats
+// fallback after a bulk stats failure.
+func (r *ContainerdRuntime) ListPodSandboxes(ctx context.Context) ([]*runtimeapi.PodSandbox, error) {
+	client, err := r.runtimeClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{
+		Filter: &runtimeapi.PodSandboxFilter{
+			State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list CRI pod sandboxes: %w", err)
+	}
+	return resp.GetItems(), nil
+}
+
+// PodSandboxStats returns one isolated CRI sandbox stats sample.
+func (r *ContainerdRuntime) PodSandboxStats(ctx context.Context, sandboxID string) (*runtimeapi.PodSandboxStats, error) {
+	client, err := r.runtimeClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.PodSandboxStats(ctx, &runtimeapi.PodSandboxStatsRequest{PodSandboxId: sandboxID})
+	if err != nil {
+		return nil, fmt.Errorf("get CRI pod sandbox %s stats: %w", sandboxID, err)
+	}
+	if resp.GetStats() == nil {
+		return nil, fmt.Errorf("get CRI pod sandbox %s stats: empty response", sandboxID)
 	}
 	return resp.GetStats(), nil
 }

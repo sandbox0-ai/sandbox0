@@ -268,6 +268,188 @@ func TestHandleAndReplyReturnsProtocolErrorToKernel(t *testing.T) {
 	}
 }
 
+func TestHandleReadyIgnoresStaleReadiness(t *testing.T) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, 0)
+	if err != nil {
+		t.Fatalf("Socketpair() error = %v", err)
+	}
+	defer unix.Close(fds[1])
+	server, err := newServer(fuse.NewDefaultRawFileSystem(), fds[0], "", &fuse.MountOptions{})
+	if err != nil {
+		_ = unix.Close(fds[0])
+		t.Fatalf("newServer() error = %v", err)
+	}
+	defer server.closeDescriptors()
+
+	done := make(chan struct{})
+	var stop bool
+	var readyErr error
+	go func() {
+		stop, readyErr = server.handleReady(uint32(unix.EPOLLIN))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleReady blocked on stale epoll readiness")
+	}
+	if stop {
+		t.Fatal("handleReady() stop = true for stale epoll readiness")
+	}
+	if readyErr != nil {
+		t.Fatalf("handleReady() error = %v", readyErr)
+	}
+}
+
+func TestSharedEpollStaleReadinessDoesNotBlockAnotherPortal(t *testing.T) {
+	mux, err := newEpollMultiplexer(multiplexerConfig{
+		watchdogInterval: 10 * time.Millisecond,
+		watchdogTimeout:  200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("newEpollMultiplexer() error = %v", err)
+	}
+	defer mux.close()
+
+	first, firstPeer, firstDone := newMultiplexerTestServer(t, mux)
+	second, secondPeer, secondDone := newMultiplexerTestServer(t, mux)
+	defer unix.Close(firstPeer)
+	defer unix.Close(secondPeer)
+	defer func() {
+		_ = first.Detach()
+		_ = second.Detach()
+		<-firstDone
+		<-secondDone
+	}()
+	waitForMultiplexerRegistrations(t, mux, 2)
+
+	first.fdMu.Lock()
+	firstFD := first.fd
+	first.fdMu.Unlock()
+	flags, err := unix.FcntlInt(uintptr(firstFD), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatalf("FcntlInt(F_GETFL) error = %v", err)
+	}
+	if flags&unix.O_NONBLOCK == 0 {
+		t.Fatalf("FUSE channel flags = %#x, want O_NONBLOCK", flags)
+	}
+
+	stop, err := first.handleReady(uint32(unix.EPOLLIN))
+	if err != nil {
+		t.Fatalf("first handleReady() error = %v", err)
+	}
+	if stop {
+		t.Fatal("first handleReady() stop = true for stale readiness")
+	}
+
+	request := testGetattrRequest(99)
+	if _, err := unix.Write(secondPeer, request); err != nil {
+		t.Fatalf("Write(second request) error = %v", err)
+	}
+	response, err := readTestResponse(secondPeer)
+	if err != nil {
+		t.Fatalf("Read(second response) error = %v", err)
+	}
+	if got := binary.LittleEndian.Uint64(response[8:16]); got != 99 {
+		t.Fatalf("second response unique = %d, want 99", got)
+	}
+}
+
+func TestMultiplexerWatchdogDetectsBlockedDispatch(t *testing.T) {
+	mux, err := newEpollMultiplexer(multiplexerConfig{
+		watchdogInterval: 5 * time.Millisecond,
+		watchdogTimeout:  40 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("newEpollMultiplexer() error = %v", err)
+	}
+	defer mux.close()
+
+	server, peerFD, serveDone := newMultiplexerTestServer(t, mux)
+	defer unix.Close(peerFD)
+	waitForMultiplexerRegistrations(t, mux, 1)
+
+	server.fdMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			server.fdMu.Unlock()
+		}
+		_ = server.Detach()
+		<-serveDone
+	}()
+	if _, err := unix.Write(peerFD, testGetattrRequest(7)); err != nil {
+		t.Fatalf("Write(request) error = %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for mux.health() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("multiplexer watchdog did not report blocked dispatch")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := mux.health(); err == nil || !strings.Contains(err.Error(), "made no progress") {
+		t.Fatalf("multiplexer health error = %v, want progress timeout", err)
+	}
+
+	server.fdMu.Unlock()
+	locked = false
+}
+
+func TestMultiplexerDetachWaitsForInFlightDispatch(t *testing.T) {
+	mux, err := newEpollMultiplexer(multiplexerConfig{
+		watchdogInterval: 5 * time.Millisecond,
+		watchdogTimeout:  40 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("newEpollMultiplexer() error = %v", err)
+	}
+	defer mux.close()
+
+	server, peerFD, serveDone := newMultiplexerTestServer(t, mux)
+	defer unix.Close(peerFD)
+	waitForMultiplexerRegistrations(t, mux, 1)
+
+	server.fdMu.Lock()
+	if _, err := unix.Write(peerFD, testGetattrRequest(11)); err != nil {
+		server.fdMu.Unlock()
+		t.Fatalf("Write(request) error = %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for mux.health() == nil {
+		if time.Now().After(deadline) {
+			server.fdMu.Unlock()
+			t.Fatal("dispatch did not enter the blocked critical section")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	detachDone := make(chan error, 1)
+	go func() {
+		detachDone <- server.Detach()
+	}()
+	select {
+	case err := <-detachDone:
+		server.fdMu.Unlock()
+		t.Fatalf("Detach() returned before in-flight dispatch completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	server.fdMu.Unlock()
+	select {
+	case err := <-detachDone:
+		if err != nil {
+			t.Fatalf("Detach() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Detach() did not complete after dispatch was released")
+	}
+	if err := <-serveDone; err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+}
+
 func TestSharedEpollMultiplexesPortalChannels(t *testing.T) {
 	mux, err := sharedEpollMultiplexer()
 	if err != nil {
@@ -365,6 +547,44 @@ func TestSharedEpollMultiplexesPortalChannels(t *testing.T) {
 	if got := mux.activeCount(); got != baseline {
 		t.Fatalf("active epoll registrations after detach = %d, want %d", got, baseline)
 	}
+}
+
+func newMultiplexerTestServer(t *testing.T, mux *epollMultiplexer) (*Server, int, <-chan error) {
+	t.Helper()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("Socketpair() error = %v", err)
+	}
+	server, err := newServer(fuse.NewDefaultRawFileSystem(), fds[0], "", &fuse.MountOptions{})
+	if err != nil {
+		_ = unix.Close(fds[0])
+		_ = unix.Close(fds[1])
+		t.Fatalf("newServer() error = %v", err)
+	}
+	server.mux = mux
+	done := make(chan error, 1)
+	go func() { done <- server.Serve() }()
+	return server, fds[1], done
+}
+
+func waitForMultiplexerRegistrations(t *testing.T, mux *epollMultiplexer, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for mux.activeCount() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("active epoll registrations = %d, want %d", mux.activeCount(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func testGetattrRequest(unique uint64) []byte {
+	request := make([]byte, int(unsafe.Sizeof(fuse.GetAttrIn{})))
+	binary.LittleEndian.PutUint32(request[0:4], uint32(len(request)))
+	binary.LittleEndian.PutUint32(request[4:8], opGetattr)
+	binary.LittleEndian.PutUint64(request[8:16], unique)
+	binary.LittleEndian.PutUint64(request[16:24], fuseRootID)
+	return request
 }
 
 func readTestResponse(fd int) ([]byte, error) {

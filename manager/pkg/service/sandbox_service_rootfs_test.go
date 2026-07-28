@@ -1097,11 +1097,16 @@ func addRootFSTestPauseTxn(store *memorySandboxStore, pod *corev1.Pod, phase str
 }
 
 type recordingPauseEnqueuer struct {
-	calls []string
+	calls         []string
+	recoveryCalls []string
 }
 
 func (r *recordingPauseEnqueuer) EnqueueSandboxPause(sandboxID string) {
 	r.calls = append(r.calls, sandboxID)
+}
+
+func (r *recordingPauseEnqueuer) EnqueueSandboxRecovery(sandboxID string) {
+	r.recoveryCalls = append(r.recoveryCalls, sandboxID)
 }
 
 func metav1ObjectMeta(name, sandboxID, teamID string) metav1.ObjectMeta {

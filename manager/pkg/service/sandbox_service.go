@@ -146,6 +146,11 @@ type SandboxPauseEnqueuer interface {
 	EnqueueSandboxPause(sandboxID string)
 }
 
+// SandboxRecoveryEnqueuer schedules a durable pause followed by runtime reconstruction.
+type SandboxRecoveryEnqueuer interface {
+	EnqueueSandboxRecovery(sandboxID string)
+}
+
 // HotClaimReservationEnqueuer schedules a completed hot claim for warm-pool detachment.
 type HotClaimReservationEnqueuer interface {
 	EnqueueHotClaimReservation(namespace, podName string)

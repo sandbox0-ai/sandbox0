@@ -100,6 +100,75 @@ func (s *SandboxService) RecoverTerminatedSandboxRuntime(ctx context.Context, po
 	return nil
 }
 
+// RecoverUnhealthySandboxRuntime starts a durable pause-and-resume transition
+// after the runtime liveness probe has failed continuously beyond the recovery
+// threshold. Runtime failure recovery is a platform responsibility and does
+// not depend on the sandbox auto-resume access policy.
+func (s *SandboxService) RecoverUnhealthySandboxRuntime(ctx context.Context, pod *corev1.Pod) error {
+	if s == nil || s.sandboxStore == nil || pod == nil || pod.DeletionTimestamp != nil ||
+		!sandboxCrashRecoveryPodEligible(pod) || pod.Status.Phase != corev1.PodRunning {
+		return nil
+	}
+	if _, terminated := terminatedProcdContainer(pod); terminated != nil {
+		return s.RecoverTerminatedSandboxRuntime(ctx, pod)
+	}
+	liveness := sandboxRuntimeLivenessCondition(pod)
+	if !sandboxRuntimeLivenessFailureSustained(liveness, s.now(), defaultSandboxRuntimeUnhealthyAfter) {
+		return nil
+	}
+
+	sandboxID := sandboxIDFromPod(pod)
+	enqueue := false
+	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+		if record == nil || record.Status == SandboxStatusDeleted || !record.DeletedAt.IsZero() ||
+			sandboxHardExpired(record.HardExpiresAt, s.now()) || !sandboxRecordReferencesPod(record, pod) {
+			return nil
+		}
+		activeTxn, err := tx.GetActiveLifecycleTxn(lockCtx, sandboxID)
+		if err != nil {
+			return err
+		}
+		if activeTxn != nil {
+			if healthRecoveryTxnReferencesPod(activeTxn, pod) {
+				enqueue = true
+				return nil
+			}
+			return fmt.Errorf("%w: active %s transaction %s", errSandboxCrashRecoveryBlocked, activeTxn.Kind, activeTxn.ID)
+		}
+		if record.Status == SandboxStatusPaused {
+			return nil
+		}
+		if err := beginHealthRecoveryTxn(lockCtx, tx, record, pod); err != nil {
+			return err
+		}
+		enqueue = true
+		return nil
+	})
+	if errors.Is(err, ErrSandboxRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !enqueue {
+		return nil
+	}
+	if s.logger != nil {
+		s.logger.Error("Queued unhealthy sandbox runtime reconstruction",
+			zap.String("sandboxID", sandboxID),
+			zap.String("namespace", pod.Namespace),
+			zap.String("pod", pod.Name),
+			zap.String("podUID", string(pod.UID)),
+			zap.Int64("runtimeGeneration", runtimeGenerationFromPod(pod)),
+			zap.String("reason", liveness.Reason),
+			zap.String("message", liveness.Message),
+			zap.Time("unhealthySince", liveness.LastTransitionTime.Time),
+		)
+	}
+	s.enqueueSandboxRecovery(sandboxID)
+	return nil
+}
+
 func beginCrashRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord, pod *corev1.Pod) error {
 	if tx == nil || record == nil || pod == nil {
 		return nil
@@ -124,6 +193,30 @@ func beginCrashRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *Sandb
 	})
 }
 
+func beginHealthRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord, pod *corev1.Pod) error {
+	if tx == nil || record == nil || pod == nil {
+		return nil
+	}
+	condition := sandboxRuntimeLivenessCondition(pod)
+	if condition == nil || condition.Status != corev1.ConditionFalse {
+		return fmt.Errorf("pod %s/%s has no failed liveness condition to recover", pod.Namespace, pod.Name)
+	}
+	if !sandboxRecordReferencesPod(record, pod) {
+		return fmt.Errorf("sandbox runtime identity changed before health recovery")
+	}
+	return tx.BeginLifecycleTxn(ctx, &SandboxLifecycleTxn{
+		ID:               uuid.NewString(),
+		SandboxID:        record.ID,
+		Kind:             SandboxLifecycleKindPause,
+		Phase:            SandboxLifecyclePhasePreparing,
+		Source:           SandboxLifecycleSourceHealth,
+		Cancelable:       false,
+		FromGeneration:   runtimeGenerationFromPod(pod),
+		FromPodNamespace: pod.Namespace,
+		FromPodName:      pod.Name,
+	})
+}
+
 func sandboxRecordReferencesPod(record *SandboxRecord, pod *corev1.Pod) bool {
 	if record == nil || pod == nil {
 		return false
@@ -136,7 +229,15 @@ func sandboxRecordReferencesPod(record *SandboxRecord, pod *corev1.Pod) bool {
 }
 
 func crashRecoveryTxnReferencesPod(txn *SandboxLifecycleTxn, pod *corev1.Pod) bool {
-	if txn == nil || pod == nil || txn.Kind != SandboxLifecycleKindPause || txn.Source != SandboxLifecycleSourceCrash {
+	return runtimeRecoveryTxnReferencesPod(txn, pod, SandboxLifecycleSourceCrash)
+}
+
+func healthRecoveryTxnReferencesPod(txn *SandboxLifecycleTxn, pod *corev1.Pod) bool {
+	return runtimeRecoveryTxnReferencesPod(txn, pod, SandboxLifecycleSourceHealth)
+}
+
+func runtimeRecoveryTxnReferencesPod(txn *SandboxLifecycleTxn, pod *corev1.Pod, source string) bool {
+	if txn == nil || pod == nil || txn.Kind != SandboxLifecycleKindPause || txn.Source != source {
 		return false
 	}
 	return txn.FromGeneration == runtimeGenerationFromPod(pod) &&

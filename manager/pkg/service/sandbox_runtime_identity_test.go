@@ -122,6 +122,40 @@ func (s *memorySandboxStore) ListActiveLifecycleTxns(_ context.Context, kind str
 	return txns, nil
 }
 
+func (s *memorySandboxStore) ListPendingHealthRecoverySandboxIDs(_ context.Context, limit int) ([]string, error) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = len(s.records)
+	}
+	var sandboxIDs []string
+	for sandboxID, record := range s.records {
+		if record == nil || record.Status != SandboxStatusPaused || !record.DeletedAt.IsZero() {
+			continue
+		}
+		var latest *SandboxLifecycleTxn
+		for _, txn := range s.lifecycleTxns {
+			if txn == nil || txn.SandboxID != sandboxID || txn.Phase != SandboxLifecyclePhaseCommitted {
+				continue
+			}
+			if latest == nil || txn.Epoch > latest.Epoch {
+				latest = txn
+			}
+		}
+		if latest == nil || latest.Kind != SandboxLifecycleKindPause || latest.Source != SandboxLifecycleSourceHealth {
+			continue
+		}
+		sandboxIDs = append(sandboxIDs, sandboxID)
+		if len(sandboxIDs) >= limit {
+			break
+		}
+	}
+	return sandboxIDs, nil
+}
+
 func (s *memorySandboxStore) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {
 	if s == nil {
 		return nil, nil
@@ -592,6 +626,66 @@ func TestResumePausedSandboxRuntimeWaitsWhileRuntimeDeleting(t *testing.T) {
 	}
 	if store.saves != 0 {
 		t.Fatalf("store saves = %d, want 0", store.saves)
+	}
+}
+
+func TestResumePausedSandboxRuntimeDeletesStaleUnhealthyRuntimeBeforeIdentityCheck(t *testing.T) {
+	now := time.Date(2026, time.July, 28, 4, 0, 0, 0, time.UTC)
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	pod.UID = "stale-runtime"
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type:               v1alpha1.SandboxPodLivenessConditionType,
+		Status:             corev1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(now.Add(-2 * time.Minute)),
+	}}
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                "sandbox-a",
+			TeamID:            "team-a",
+			UserID:            "user-a",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			Status:            SandboxStatusPaused,
+			RuntimeGeneration: 1,
+			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	client.PrependReactor("delete", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		deletionTime := metav1.NewTime(now)
+		pod.DeletionTimestamp = &deletionTime
+		return true, nil, nil
+	})
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    runtimeIdentityPodLister(t, pod),
+		sandboxStore: store,
+		clock:        fixedClock{now: now},
+		logger:       zap.NewNop(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*sandboxLifecycleWaitInterval)
+	defer cancel()
+	_, err := svc.ResumePausedSandboxRuntime(ctx, "sandbox-a")
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want context deadline while stale pod deletion is observed", err)
+	}
+	if strings.Contains(err.Error(), "runtime identity changed") {
+		t.Fatalf("ResumePausedSandboxRuntime() checked stale runtime identity before deletion: %v", err)
+	}
+	var deleted bool
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "pods" {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Fatal("stale unhealthy runtime pod was not deleted")
+	}
+	if len(store.lifecycleTxns) != 0 {
+		t.Fatalf("lifecycle transactions = %#v, want none", store.lifecycleTxns)
 	}
 }
 

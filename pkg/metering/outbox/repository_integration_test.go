@@ -196,6 +196,86 @@ func TestRepositoryStorageProjectionIsAtomicWithCallerTransaction(t *testing.T) 
 	}
 }
 
+func TestRepositoryClaimsAndAcknowledgesConsecutiveBatchesAtomically(t *testing.T) {
+	pool := newMeteringTestDatabase(t)
+	ctx := context.Background()
+	if err := RunMigrations(ctx, pool, nil); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	repo := NewRepository(pool)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for index := 0; index < 3; index++ {
+		window := &metering.Window{
+			WindowID:    "window-" + string(rune('1'+index)),
+			Producer:    "producer-1",
+			WindowType:  metering.WindowTypeSandboxEgressBytes,
+			SubjectType: metering.SubjectTypeSandbox,
+			SubjectID:   "sandbox-1",
+			WindowStart: now,
+			WindowEnd:   now.Add(time.Minute),
+			Value:       1,
+			Unit:        metering.WindowUnitBytes,
+		}
+		if err := repo.AppendWindow(ctx, window); err != nil {
+			t.Fatalf("AppendWindow(%d): %v", index, err)
+		}
+	}
+
+	batches, err := repo.ClaimNextBatches(ctx, "worker-1", 30*time.Second, 10, 2)
+	if err != nil {
+		t.Fatalf("ClaimNextBatches: %v", err)
+	}
+	if len(batches) != 2 || len(batches[0].Operations) != 1 || len(batches[1].Operations) != 1 {
+		t.Fatalf("claimed batches = %#v", batches)
+	}
+	ids := []int64{batches[0].ID, batches[1].ID}
+	if err := repo.MarkDeliveredBatches(ctx, []int64{ids[0], -1}, "worker-1"); err == nil {
+		t.Fatal("MarkDeliveredBatches accepted a missing batch")
+	}
+	assertCount(t, pool, `
+		SELECT COUNT(*)
+		FROM metering.projection_outbox
+		WHERE batch_id = ANY($1::bigint[]) AND delivered_at IS NULL
+	`, 2, ids)
+	if err := repo.MarkDeliveredBatches(ctx, ids, "worker-1"); err != nil {
+		t.Fatalf("MarkDeliveredBatches: %v", err)
+	}
+
+	remaining, err := repo.ClaimNextBatches(ctx, "worker-1", 30*time.Second, 10, 10)
+	if err != nil || len(remaining) != 1 {
+		t.Fatalf("remaining ClaimNextBatches = (%#v, %v)", remaining, err)
+	}
+	if err := repo.MarkFailedBatches(
+		ctx,
+		[]int64{remaining[0].ID},
+		"worker-1",
+		"retry later",
+		time.Now().UTC().Add(time.Hour),
+	); err != nil {
+		t.Fatalf("MarkFailedBatches: %v", err)
+	}
+	if err := repo.AppendWindow(ctx, &metering.Window{
+		WindowID:    "window-4",
+		Producer:    "producer-1",
+		WindowType:  metering.WindowTypeSandboxEgressBytes,
+		SubjectType: metering.SubjectTypeSandbox,
+		SubjectID:   "sandbox-1",
+		WindowStart: now,
+		WindowEnd:   now.Add(time.Minute),
+		Value:       1,
+		Unit:        metering.WindowUnitBytes,
+	}); err != nil {
+		t.Fatalf("AppendWindow(4): %v", err)
+	}
+	blocked, err := repo.ClaimNextBatches(ctx, "worker-2", 30*time.Second, 10, 10)
+	if err != nil {
+		t.Fatalf("blocked ClaimNextBatches: %v", err)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("ClaimNextBatches skipped the retrying global head: %#v", blocked)
+	}
+}
+
 func TestMigrationsUpgradeLegacyVersionFiveSchema(t *testing.T) {
 	pool := newMeteringTestDatabase(t)
 	ctx := context.Background()
@@ -236,9 +316,14 @@ func TestMigrationsUpgradeLegacyVersionFiveSchema(t *testing.T) {
 		t.Fatalf("upgrade legacy schema: %v", err)
 	}
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 6 AND is_applied`, 1)
+	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 7 AND is_applied`, 1)
 	var tableName string
 	if err := pool.QueryRow(ctx, `SELECT to_regclass('metering.projection_outbox')::text`).Scan(&tableName); err != nil || tableName == "" {
 		t.Fatalf("projection_outbox after migration = %q, %v", tableName, err)
+	}
+	var indexName string
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('metering.idx_projection_outbox_pending_batch')::text`).Scan(&indexName); err != nil || indexName == "" {
+		t.Fatalf("pending batch index after migration = %q, %v", indexName, err)
 	}
 }
 
@@ -350,10 +435,10 @@ func newMeteringTestDatabase(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func assertCount(t *testing.T, pool *pgxpool.Pool, query string, want int64) {
+func assertCount(t *testing.T, pool *pgxpool.Pool, query string, want int64, args ...any) {
 	t.Helper()
 	var got int64
-	if err := pool.QueryRow(context.Background(), query).Scan(&got); err != nil {
+	if err := pool.QueryRow(context.Background(), query, args...).Scan(&got); err != nil {
 		t.Fatalf("query count %q: %v", query, err)
 	}
 	if got != want {

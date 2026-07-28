@@ -31,8 +31,11 @@ func (captureDriver) Open(string) (driver.Conn, error) {
 }
 
 type captureConn struct {
-	query string
-	args  []driver.NamedValue
+	query       string
+	args        []driver.NamedValue
+	queries     []string
+	argsHistory [][]driver.NamedValue
+	failExec    int
 }
 
 func (c *captureConn) Prepare(string) (driver.Stmt, error) {
@@ -50,6 +53,11 @@ func (c *captureConn) Begin() (driver.Tx, error) {
 func (c *captureConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	c.query = query
 	c.args = append([]driver.NamedValue(nil), args...)
+	c.queries = append(c.queries, query)
+	c.argsHistory = append(c.argsHistory, append([]driver.NamedValue(nil), args...))
+	if c.failExec > 0 && len(c.queries) == c.failExec {
+		return nil, errors.New("injected ClickHouse failure")
+	}
 	return driver.RowsAffected(1), nil
 }
 
@@ -152,6 +160,237 @@ func TestAppendRequiresOutboxSequence(t *testing.T) {
 		Unit:        metering.WindowUnitBytes,
 	}); err == nil || !strings.Contains(err.Error(), "sequence is required") {
 		t.Fatalf("AppendWindow() error = %v, want missing sequence", err)
+	}
+}
+
+func TestApplyProjectionBatchUsesBoundedMultiRowInsertsAndAdvancesWatermarksLast(t *testing.T) {
+	repo, conn := newCaptureRepository(t)
+	now := time.Date(2026, 7, 28, 10, 0, 0, 123, time.UTC)
+	repo.now = func() time.Time { return now }
+
+	events := make([]*metering.Event, 0, 2)
+	windows := make([]*metering.Window, 0, 2)
+	sandboxStates := make([]*metering.SandboxProjectionState, 0, 2)
+	storageMutations := make([]*metering.StorageProjectionMutation, 0, 2)
+	watermarks := make([]*metering.ProducerWatermark, 0, 2)
+	for index := 1; index <= 2; index++ {
+		events = append(events, &metering.Event{
+			Sequence:    int64(index),
+			EventID:     "event-" + string(rune('0'+index)),
+			Producer:    "producer-1",
+			EventType:   metering.EventTypeSandboxClaimed,
+			SubjectType: metering.SubjectTypeSandbox,
+			SubjectID:   "sandbox-1",
+			OccurredAt:  now,
+			RecordedAt:  now,
+		})
+		windows = append(windows, &metering.Window{
+			Sequence:    int64(index + 2),
+			WindowID:    "window-" + string(rune('0'+index)),
+			Producer:    "producer-1",
+			WindowType:  metering.WindowTypeSandboxEgressBytes,
+			SubjectType: metering.SubjectTypeSandbox,
+			SubjectID:   "sandbox-1",
+			WindowStart: now,
+			WindowEnd:   now.Add(time.Minute),
+			Value:       int64(index),
+			Unit:        metering.WindowUnitBytes,
+			RecordedAt:  now,
+		})
+		sandboxStates = append(sandboxStates, &metering.SandboxProjectionState{
+			SandboxID:      "sandbox-" + string(rune('0'+index)),
+			Namespace:      "default",
+			LastObservedAt: now,
+		})
+		storageMutations = append(storageMutations, &metering.StorageProjectionMutation{
+			State: &metering.StorageProjectionState{
+				SubjectType: metering.SubjectTypeVolume,
+				SubjectID:   "volume-" + string(rune('0'+index)),
+				ObservedAt:  now,
+			},
+		})
+		watermarks = append(watermarks, &metering.ProducerWatermark{
+			Producer:       "producer-" + string(rune('0'+index)),
+			RegionID:       "region-1",
+			CompleteBefore: now,
+		})
+	}
+	tombstone := &metering.StorageProjectionMutation{
+		State: &metering.StorageProjectionState{
+			SubjectType: metering.SubjectTypeVolume,
+			SubjectID:   "volume-deleted",
+			ObservedAt:  now.Add(-time.Minute),
+		},
+		Deleted:   true,
+		DeletedAt: now,
+	}
+
+	err := repo.ApplyProjectionBatch(context.Background(), &metering.ProjectionBatch{
+		Events:           events,
+		Windows:          windows,
+		SandboxStates:    sandboxStates,
+		StorageMutations: append(storageMutations, tombstone),
+		Watermarks:       watermarks,
+	})
+	if err != nil {
+		t.Fatalf("ApplyProjectionBatch() error = %v", err)
+	}
+	if len(conn.queries) != 5 {
+		t.Fatalf("ClickHouse INSERT count = %d, want 5", len(conn.queries))
+	}
+	for index, query := range conn.queries {
+		if !strings.Contains(query, meteringInsertReliabilitySettings) {
+			t.Fatalf("query %d is missing durability settings: %s", index, query)
+		}
+	}
+	if !strings.Contains(conn.queries[len(conn.queries)-1], "producer_watermarks") {
+		t.Fatalf("last INSERT does not advance watermarks: %s", conn.queries[len(conn.queries)-1])
+	}
+	wantArgCounts := []int{36, 42, 42, 48, 10}
+	for index, want := range wantArgCounts {
+		if got := len(conn.argsHistory[index]); got != want {
+			t.Fatalf("query %d argument count = %d, want %d", index, got, want)
+		}
+	}
+}
+
+func TestApplyProjectionBatchValidatesAllRowsBeforeWriting(t *testing.T) {
+	repo, conn := newCaptureRepository(t)
+	now := time.Now().UTC()
+	err := repo.ApplyProjectionBatch(context.Background(), &metering.ProjectionBatch{
+		Events: []*metering.Event{{
+			Sequence:    1,
+			EventID:     "event-1",
+			Producer:    "producer-1",
+			EventType:   metering.EventTypeSandboxClaimed,
+			SubjectType: metering.SubjectTypeSandbox,
+			SubjectID:   "sandbox-1",
+			OccurredAt:  now,
+		}},
+		Windows: []*metering.Window{{
+			Sequence: 2,
+			WindowID: "invalid-window",
+		}},
+	})
+	if err == nil {
+		t.Fatal("ApplyProjectionBatch() succeeded with an invalid later row")
+	}
+	if len(conn.queries) != 0 {
+		t.Fatalf("ClickHouse INSERT count = %d, want 0", len(conn.queries))
+	}
+}
+
+func TestApplyProjectionBatchDoesNotAdvanceWatermarkAfterPartialFailure(t *testing.T) {
+	repo, conn := newCaptureRepository(t)
+	now := time.Now().UTC()
+	conn.failExec = 2
+
+	err := repo.ApplyProjectionBatch(context.Background(), &metering.ProjectionBatch{
+		Events: []*metering.Event{{
+			Sequence:    1,
+			EventID:     "event-1",
+			Producer:    "producer-1",
+			EventType:   metering.EventTypeSandboxClaimed,
+			SubjectType: metering.SubjectTypeSandbox,
+			SubjectID:   "sandbox-1",
+			OccurredAt:  now,
+			RecordedAt:  now,
+		}},
+		Windows: []*metering.Window{{
+			Sequence:    2,
+			WindowID:    "window-1",
+			Producer:    "producer-1",
+			WindowType:  metering.WindowTypeSandboxEgressBytes,
+			SubjectType: metering.SubjectTypeSandbox,
+			SubjectID:   "sandbox-1",
+			WindowStart: now,
+			WindowEnd:   now.Add(time.Minute),
+			Value:       1,
+			Unit:        metering.WindowUnitBytes,
+			RecordedAt:  now,
+		}},
+		Watermarks: []*metering.ProducerWatermark{{
+			Producer:       "producer-1",
+			CompleteBefore: now,
+		}},
+	})
+	if err == nil {
+		t.Fatal("ApplyProjectionBatch() succeeded after an injected partial failure")
+	}
+	if len(conn.queries) != 2 {
+		t.Fatalf("ClickHouse INSERT count = %d, want 2", len(conn.queries))
+	}
+	for _, query := range conn.queries {
+		if strings.Contains(query, "producer_watermarks") {
+			t.Fatalf("watermark advanced after a partial failure: %s", query)
+		}
+	}
+}
+
+func TestApplyProjectionBatchPreservesStorageMutationOrder(t *testing.T) {
+	repo, conn := newCaptureRepository(t)
+	now := time.Now().UTC()
+	state := &metering.StorageProjectionState{
+		SubjectType: metering.SubjectTypeVolume,
+		SubjectID:   "volume-1",
+		ObservedAt:  now,
+	}
+
+	err := repo.ApplyProjectionBatch(context.Background(), &metering.ProjectionBatch{
+		StorageMutations: []*metering.StorageProjectionMutation{
+			{
+				State:     state,
+				Deleted:   true,
+				DeletedAt: now,
+			},
+			{State: state},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyProjectionBatch() error = %v", err)
+	}
+	if len(conn.queries) != 1 {
+		t.Fatalf("ClickHouse INSERT count = %d, want 1", len(conn.queries))
+	}
+	const storageRowArgumentCount = 16
+	if got := conn.argsHistory[0][14].Value; got != int64(1) {
+		t.Fatalf("first storage mutation deleted arg = %#v, want 1", got)
+	}
+	if got := conn.argsHistory[0][storageRowArgumentCount+14].Value; got != int64(0) {
+		t.Fatalf("second storage mutation deleted arg = %#v, want 0", got)
+	}
+}
+
+func TestApplyProjectionBatchChunksLargeTables(t *testing.T) {
+	repo, conn := newCaptureRepository(t)
+	now := time.Now().UTC()
+	windows := make([]*metering.Window, 0, maxMeteringInsertBatchSize+1)
+	for index := 0; index <= maxMeteringInsertBatchSize; index++ {
+		windows = append(windows, &metering.Window{
+			Sequence:    int64(index + 1),
+			WindowID:    "window-" + time.Duration(index).String(),
+			Producer:    "producer-1",
+			WindowType:  metering.WindowTypeSandboxEgressBytes,
+			SubjectType: metering.SubjectTypeSandbox,
+			SubjectID:   "sandbox-1",
+			WindowStart: now,
+			WindowEnd:   now.Add(time.Minute),
+			Value:       1,
+			Unit:        metering.WindowUnitBytes,
+			RecordedAt:  now,
+		})
+	}
+	if err := repo.ApplyProjectionBatch(context.Background(), &metering.ProjectionBatch{Windows: windows}); err != nil {
+		t.Fatalf("ApplyProjectionBatch() error = %v", err)
+	}
+	if len(conn.queries) != 2 {
+		t.Fatalf("ClickHouse INSERT count = %d, want 2", len(conn.queries))
+	}
+	if got := len(conn.argsHistory[0]); got != maxMeteringInsertBatchSize*21 {
+		t.Fatalf("first chunk argument count = %d", got)
+	}
+	if got := len(conn.argsHistory[1]); got != 21 {
+		t.Fatalf("second chunk argument count = %d", got)
 	}
 }
 

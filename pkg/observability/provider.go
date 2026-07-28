@@ -1,250 +1,63 @@
 package observability
 
 import (
-	"context"
-	"errors"
-	"fmt"
-	"sort"
-	"strings"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
-	"go.opentelemetry.io/otel/trace"
-	"go.opentelemetry.io/otel/trace/noop"
-	"go.uber.org/zap"
-
+	coreobs "github.com/sandbox0-ai/sandbox0/pkg/observability/core"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	k8sobs "github.com/sandbox0-ai/sandbox0/pkg/observability/k8s"
 	pgxobs "github.com/sandbox0-ai/sandbox0/pkg/observability/pgx"
 )
 
-var (
-	ErrMissingServiceName = errors.New("service name is required")
-	ErrMissingLogger      = errors.New("logger is required")
-)
-
-// Provider is the main entry point for observability features
+// Provider combines the observability core with the optional client adapters
+// used by control-plane and data-plane services.
 type Provider struct {
-	config Config
-	logger *zap.Logger
-	tracer trace.Tracer
+	*coreobs.Provider
 
-	// TracerProvider is the OpenTelemetry tracer provider
-	// Exposed for advanced use cases
-	TracerProvider *sdktrace.TracerProvider
-
-	// MetricsRegistry is the Prometheus metrics registry
-	MetricsRegistry prometheus.Registerer
-
-	// Client-specific adapters
 	HTTP httpobs.Adapter
 	K8s  k8sobs.Adapter
 	Pgx  pgxobs.Adapter
-	// GRPC grpcobs.Adapter // TODO: implement gRPC adapter
 }
 
-// New creates a new observability provider
+// New creates a new observability provider.
 func New(cfg Config) (*Provider, error) {
-	if err := cfg.Validate(); err != nil {
+	coreProvider, err := coreobs.New(coreobs.Config(cfg))
+	if err != nil {
 		return nil, err
 	}
-	cfg.setDefaults()
+	normalized := coreProvider.Config()
+	disabled := normalized.DisableTracing && normalized.DisableMetrics && normalized.DisableLogging
 
-	p := &Provider{
-		config:          cfg,
-		logger:          cfg.Logger,
-		MetricsRegistry: cfg.MetricsRegistry,
-	}
-
-	// Initialize tracing if not disabled
-	if !cfg.DisableTracing && cfg.TraceExporter.Type != "" {
-		tp, err := initTracing(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("init tracing: %w", err)
-		}
-		p.TracerProvider = tp
-		p.tracer = tp.Tracer(cfg.ServiceName)
-
-		// Set global tracer provider
-		otel.SetTracerProvider(tp)
-
-		// Set global propagator
-		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-			propagation.TraceContext{},
-			propagation.Baggage{},
-		))
-	} else {
-		p.tracer = noop.NewTracerProvider().Tracer(cfg.ServiceName)
-	}
-
-	// Initialize client adapters
-	p.HTTP = httpobs.NewAdapter(httpobs.AdapterConfig{
-		ServiceName:    cfg.ServiceName,
-		Tracer:         p.tracer,
-		Logger:         cfg.Logger,
-		Registry:       cfg.MetricsRegistry,
-		DisableMetrics: cfg.DisableMetrics,
-		DisableLogging: cfg.DisableLogging,
-		Disabled:       cfg.DisableTracing && cfg.DisableMetrics && cfg.DisableLogging,
+	httpAdapter := httpobs.NewAdapter(httpobs.AdapterConfig{
+		ServiceName:    normalized.ServiceName,
+		Tracer:         coreProvider.Tracer(),
+		Logger:         normalized.Logger,
+		Registry:       normalized.MetricsRegistry,
+		DisableMetrics: normalized.DisableMetrics,
+		DisableLogging: normalized.DisableLogging,
+		Disabled:       disabled,
+	})
+	k8sAdapter := k8sobs.NewAdapter(k8sobs.AdapterConfig{
+		ServiceName:    normalized.ServiceName,
+		Tracer:         coreProvider.Tracer(),
+		Logger:         normalized.Logger,
+		Registry:       normalized.MetricsRegistry,
+		DisableMetrics: normalized.DisableMetrics,
+		DisableLogging: normalized.DisableLogging,
+		Disabled:       disabled,
+	})
+	pgxAdapter := pgxobs.NewAdapter(pgxobs.AdapterConfig{
+		ServiceName:    normalized.ServiceName,
+		Tracer:         coreProvider.Tracer(),
+		Logger:         normalized.Logger,
+		Registry:       normalized.MetricsRegistry,
+		DisableMetrics: normalized.DisableMetrics,
+		DisableLogging: normalized.DisableLogging,
+		Disabled:       disabled,
 	})
 
-	p.K8s = k8sobs.NewAdapter(k8sobs.AdapterConfig{
-		ServiceName:    cfg.ServiceName,
-		Tracer:         p.tracer,
-		Logger:         cfg.Logger,
-		Registry:       cfg.MetricsRegistry,
-		DisableMetrics: cfg.DisableMetrics,
-		DisableLogging: cfg.DisableLogging,
-		Disabled:       cfg.DisableTracing && cfg.DisableMetrics && cfg.DisableLogging,
-	})
-
-	p.Pgx = pgxobs.NewAdapter(pgxobs.AdapterConfig{
-		ServiceName:    cfg.ServiceName,
-		Tracer:         p.tracer,
-		Logger:         cfg.Logger,
-		Registry:       cfg.MetricsRegistry,
-		DisableMetrics: cfg.DisableMetrics,
-		DisableLogging: cfg.DisableLogging,
-		Disabled:       cfg.DisableTracing && cfg.DisableMetrics && cfg.DisableLogging,
-	})
-
-	cfg.Logger.Info("Observability provider initialized",
-		zap.String("service", cfg.ServiceName),
-		zap.Bool("tracing", !cfg.DisableTracing),
-		zap.Bool("metrics", !cfg.DisableMetrics),
-		zap.String("trace_exporter", cfg.TraceExporter.Type),
-	)
-
-	return p, nil
-}
-
-// Shutdown gracefully shuts down the provider and flushes any pending data
-func (p *Provider) Shutdown(ctx context.Context) error {
-	if p.TracerProvider != nil {
-		if err := p.TracerProvider.Shutdown(ctx); err != nil {
-			p.logger.Error("Failed to shutdown tracer provider", zap.Error(err))
-			return err
-		}
-	}
-	return nil
-}
-
-// Tracer returns the OpenTelemetry tracer for manual instrumentation
-func (p *Provider) Tracer() trace.Tracer {
-	return p.tracer
-}
-
-// MetricsRegistryOrNil returns the metrics registry when metrics are enabled.
-// When metrics are disabled, it returns nil so callers can skip registration.
-func (p *Provider) MetricsRegistryOrNil() prometheus.Registerer {
-	if p == nil || p.config.DisableMetrics {
-		return nil
-	}
-	return p.MetricsRegistry
-}
-
-// HTTPServerConfig returns server middleware config using this provider.
-func (p *Provider) HTTPServerConfig(logger *zap.Logger) httpobs.ServerConfig {
-	if p == nil {
-		return httpobs.ServerConfig{Disabled: true}
-	}
-	return httpobs.ServerConfig{
-		ServiceName:    p.config.ServiceName,
-		Tracer:         p.tracer,
-		Logger:         logger,
-		Registry:       p.MetricsRegistryOrNil(),
-		DisableMetrics: p.config.DisableMetrics,
-		DisableLogging: p.config.DisableLogging || logger == nil,
-		Disabled:       p.config.DisableTracing && p.config.DisableMetrics && p.config.DisableLogging,
-	}
-}
-
-// initTracing initializes OpenTelemetry tracing with the configured exporter
-func initTracing(cfg Config) (*sdktrace.TracerProvider, error) {
-	var exporter sdktrace.SpanExporter
-	var err error
-
-	switch cfg.TraceExporter.Type {
-	case "otlp":
-		exporter, err = otlptracegrpc.New(context.Background(), otlpTraceGRPCOptions(cfg.TraceExporter)...)
-	case "stdout":
-		// Use custom zap-based exporter for consistent JSON logging
-		exporter = newZapSpanExporter(cfg.Logger)
-	case "noop", "":
-		return sdktrace.NewTracerProvider(), nil
-	default:
-		return nil, fmt.Errorf("unknown trace exporter type: %s (supported: otlp, stdout, noop)", cfg.TraceExporter.Type)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("create trace exporter: %w", err)
-	}
-
-	res, err := resource.New(
-		context.Background(),
-		resource.WithAttributes(resourceAttributes(cfg)...),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create resource: %w", err)
-	}
-
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(cfg.TraceSampleRate)),
-	)
-
-	return tp, nil
-}
-
-func otlpTraceGRPCOptions(cfg TraceExporterConfig) []otlptracegrpc.Option {
-	opts := make([]otlptracegrpc.Option, 0, 4)
-	endpoint := strings.TrimSpace(cfg.Endpoint)
-	if endpoint != "" {
-		if strings.Contains(endpoint, "://") {
-			opts = append(opts, otlptracegrpc.WithEndpointURL(endpoint))
-		} else {
-			opts = append(opts, otlptracegrpc.WithEndpoint(endpoint))
-		}
-	}
-	if len(cfg.Headers) > 0 {
-		opts = append(opts, otlptracegrpc.WithHeaders(cfg.Headers))
-	}
-	if cfg.Timeout > 0 {
-		opts = append(opts, otlptracegrpc.WithTimeout(cfg.Timeout))
-	}
-	if cfg.Insecure != nil && *cfg.Insecure {
-		opts = append(opts, otlptracegrpc.WithInsecure())
-	}
-	return opts
-}
-
-func resourceAttributes(cfg Config) []attribute.KeyValue {
-	attrs := []attribute.KeyValue{semconv.ServiceNameKey.String(cfg.ServiceName)}
-	if len(cfg.ResourceAttributes) == 0 {
-		return attrs
-	}
-
-	normalized := map[string]string{}
-	for key, value := range cfg.ResourceAttributes {
-		key = strings.TrimSpace(key)
-		if key != "" && key != string(semconv.ServiceNameKey) {
-			normalized[key] = value
-		}
-	}
-	keys := make([]string, 0, len(normalized))
-	for key := range normalized {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		attrs = append(attrs, attribute.String(key, normalized[key]))
-	}
-	return attrs
+	return &Provider{
+		Provider: coreProvider,
+		HTTP:     httpAdapter,
+		K8s:      k8sAdapter,
+		Pgx:      pgxAdapter,
+	}, nil
 }

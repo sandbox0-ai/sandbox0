@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http/handlers"
@@ -20,8 +19,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	"github.com/sandbox0-ai/sandbox0/pkg/observability"
-	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	coreobs "github.com/sandbox0-ai/sandbox0/pkg/observability/core"
+	"github.com/sandbox0-ai/sandbox0/pkg/observability/httpserver"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -32,8 +32,8 @@ type Server struct {
 	router      *mux.Router
 	httpServer  *http.Server
 	logger      *zap.Logger
-	cfg         *config.ProcdConfig
-	obsProvider *observability.Provider
+	cfg         *procdconfig.Config
+	obsProvider *coreobs.Provider
 
 	// Managers
 	contextManager    *ctxpkg.Manager
@@ -52,14 +52,14 @@ type Server struct {
 
 // NewServer creates a new HTTP server.
 func NewServer(
-	cfg *config.ProcdConfig,
+	cfg *procdconfig.Config,
 	contextManager *ctxpkg.Manager,
 	sessionSupervisor *session.Supervisor,
 	fileManager *file.Manager,
 	authValidator *internalauth.Validator,
 	webhookDispatcher *webhook.Dispatcher,
 	logger *zap.Logger,
-	obsProvider *observability.Provider,
+	obsProvider *coreobs.Provider,
 	probeRunner func(sandboxprobe.Kind) sandboxprobe.Response,
 ) *Server {
 	s := &Server{
@@ -82,7 +82,7 @@ func NewServer(
 
 func (s *Server) setupRoutes() {
 	// Global middleware (applied to all routes)
-	s.router.Use(httpobs.ServerMiddleware(s.obsProvider.HTTPServerConfig(nil)))
+	s.router.Use(httpserver.Middleware(s.obsProvider.HTTPServerConfig(nil)))
 	s.router.Use(s.loggingMiddleware)
 	s.router.Use(s.recoveryMiddleware)
 

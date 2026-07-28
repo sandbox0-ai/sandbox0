@@ -15,7 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
-	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/streaming"
 	"go.uber.org/zap"
 )
 
@@ -201,7 +201,8 @@ func (h *SessionHandler) EventStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
-	if err := proxy.DisableResponseDeadlines(w); err != nil {
+	defer backlog.Close()
+	if err := streaming.DisableResponseDeadlines(w); err != nil {
 		h.logger.Debug("Failed to disable session event stream deadlines", zap.Error(err))
 	}
 	flusher, ok := w.(http.Flusher)
@@ -213,7 +214,15 @@ func (h *SessionHandler) EventStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	for _, event := range backlog {
+	for {
+		event, ok, err := backlog.Next()
+		if err != nil {
+			h.logger.Warn("Failed to read session event backlog", zap.Error(err))
+			return
+		}
+		if !ok {
+			break
+		}
 		if err := writeSessionSSE(w, event); err != nil {
 			return
 		}
@@ -273,7 +282,8 @@ func (h *SessionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
-	if err := proxy.DisableResponseDeadlines(w); err != nil {
+	defer backlog.Close()
+	if err := streaming.DisableResponseDeadlines(w); err != nil {
 		h.logger.Debug("Failed to disable session websocket response deadlines", zap.Error(err))
 	}
 	conn, err := h.upgrader.Upgrade(w, r, nil)
@@ -281,7 +291,7 @@ func (h *SessionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	if err := proxy.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
+	if err := streaming.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
 		h.logger.Debug("Failed to disable session websocket deadlines", zap.Error(err))
 	}
 	var writeMu sync.Mutex
@@ -290,7 +300,15 @@ func (h *SessionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		defer writeMu.Unlock()
 		return conn.WriteJSON(value)
 	}
-	for _, event := range backlog {
+	for {
+		event, ok, err := backlog.Next()
+		if err != nil {
+			h.logger.Warn("Failed to read session websocket backlog", zap.Error(err))
+			return
+		}
+		if !ok {
+			break
+		}
 		copy := event
 		if err := write(sessionWSResponse{Type: "event", Event: &copy}); err != nil {
 			return

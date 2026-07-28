@@ -671,7 +671,7 @@ func (s *Supervisor) Events(id string, after int64, limit int) (EventPage, error
 	return managed.journal.Read(after, limit)
 }
 
-func (s *Supervisor) Subscribe(id string, after int64) ([]Event, <-chan Event, func(), EventCursor, error) {
+func (s *Supervisor) Subscribe(id string, after int64) (*EventBacklog, <-chan Event, func(), EventCursor, error) {
 	managed, err := s.getManaged(id)
 	if err != nil {
 		return nil, nil, nil, EventCursor{}, err

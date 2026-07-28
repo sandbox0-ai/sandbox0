@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,8 +32,9 @@ func TestJournalCursorRetentionAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(backlog) != 0 {
-		t.Fatalf("backlog length = %d, want 0", len(backlog))
+	defer backlog.Close()
+	if _, ok, err := backlog.Next(); err != nil || ok {
+		t.Fatalf("backlog.Next() = (_, %t, %v), want empty backlog", ok, err)
 	}
 	appended, err := journal.Append(Event{SessionID: "ses-test", Type: "session.ready"})
 	if err != nil {
@@ -177,5 +180,164 @@ func TestJournalReopenTruncatesIncompleteTail(t *testing.T) {
 	}
 	if len(page.Events) != 2 || page.Events[1].Seq != 2 {
 		t.Fatalf("events = %#v, want two complete records", page.Events)
+	}
+}
+
+func TestJournalRetainedPayloadDoesNotStayInHeap(t *testing.T) {
+	journal, err := OpenJournal(
+		filepath.Join(t.TempDir(), "events.jsonl"),
+		EventRetentionSpec{MaxBytes: 32 << 20, MaxAgeSeconds: 3600},
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+
+	if _, err := journal.Append(Event{SessionID: "ses-test", Type: "session.created"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	const (
+		eventCount = 64
+		eventBytes = 256 << 10
+	)
+	for i := 0; i < eventCount; i++ {
+		payload := strings.Repeat(string(rune('a'+i%26)), eventBytes)
+		if _, err := journal.Append(Event{
+			SessionID:  "ses-test",
+			Type:       "output",
+			DataBase64: payload,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	if retained := int64(after.HeapAlloc) - int64(before.HeapAlloc); retained > 4<<20 {
+		t.Fatalf("journal retained %d heap bytes after storing %d bytes of event payload", retained, eventCount*eventBytes)
+	}
+	if len(journal.entries) != eventCount+1 {
+		t.Fatalf("entry count = %d, want %d", len(journal.entries), eventCount+1)
+	}
+}
+
+func TestJournalSubscribeStreamsBacklogWithBoundedLiveBuffer(t *testing.T) {
+	journal, err := OpenJournal(
+		filepath.Join(t.TempDir(), "events.jsonl"),
+		EventRetentionSpec{MaxBytes: 1 << 20, MaxAgeSeconds: 3600},
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+
+	const count = defaultSubscriptionBacklog + 100
+	for i := 0; i < count; i++ {
+		if _, err := journal.Append(Event{SessionID: "ses-test", Type: "output", DataBase64: "dGVzdA=="}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backlog, live, cancel, _, err := journal.Subscribe(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backlog.Close()
+	defer cancel()
+	if cap(live) != defaultSubscriptionBacklog {
+		t.Fatalf("live buffer capacity = %d, want %d", cap(live), defaultSubscriptionBacklog)
+	}
+	for i := 1; i <= count; i++ {
+		event, ok, err := backlog.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatalf("backlog ended at event %d, want %d events", i-1, count)
+		}
+		if event.Seq != int64(i) {
+			t.Fatalf("event seq = %d, want %d", event.Seq, i)
+		}
+	}
+	if _, ok, err := backlog.Next(); err != nil || ok {
+		t.Fatalf("backlog.Next() = (_, %t, %v), want end of backlog", ok, err)
+	}
+}
+
+func TestJournalBacklogSnapshotSurvivesCompaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	journal, err := OpenJournal(
+		path,
+		EventRetentionSpec{MaxBytes: 1 << 20, MaxAgeSeconds: 3600},
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+
+	for i := 0; i < 10; i++ {
+		if _, err := journal.Append(Event{SessionID: "ses-test", Type: "output", DataBase64: strings.Repeat("eA==", 128)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backlog, _, cancel, _, err := journal.Subscribe(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backlog.Close()
+	defer cancel()
+
+	if err := journal.SetRetention(EventRetentionSpec{MaxBytes: 1, MaxAgeSeconds: 3600}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 10; i++ {
+		event, ok, err := backlog.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok || event.Seq != int64(i) {
+			t.Fatalf("backlog event %d = (%#v, %t), want seq %d", i, event, ok, i)
+		}
+	}
+}
+
+func TestJournalCompactionKeepsFileBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	const maxBytes = int64(32 << 10)
+	journal, err := OpenJournal(
+		path,
+		EventRetentionSpec{MaxBytes: maxBytes, MaxAgeSeconds: 3600},
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+
+	for i := 0; i < 300; i++ {
+		if _, err := journal.Append(Event{
+			SessionID:  "ses-test",
+			Type:       "output",
+			DataBase64: strings.Repeat("eA==", 256),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > maxBytes*2 {
+		t.Fatalf("journal file size = %d, want at most %d", info.Size(), maxBytes*2)
+	}
+	if journal.totalBytes > maxBytes {
+		t.Fatalf("retained bytes = %d, want at most %d", journal.totalBytes, maxBytes)
 	}
 }

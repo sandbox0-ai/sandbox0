@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	procdhttp "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http"
@@ -21,13 +20,14 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/trust"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	"github.com/sandbox0-ai/sandbox0/pkg/observability"
+	coreobs "github.com/sandbox0-ai/sandbox0/pkg/observability/core"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
 	"go.uber.org/zap"
 )
 
 func main() {
 	// Load configuration
-	cfg := config.LoadProcdConfig()
+	cfg := procdconfig.Load()
 
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
@@ -35,7 +35,7 @@ func main() {
 	}
 
 	// Initialize logger
-	logger, err := observability.NewLogger(observability.LoggerConfig{
+	logger, err := coreobs.NewLogger(coreobs.LoggerConfig{
 		ServiceName: "procd",
 		Level:       cfg.LogLevel,
 	})
@@ -63,7 +63,9 @@ func main() {
 	}
 
 	// Initialize observability provider
-	obsProvider, err := observability.New(observability.ConfigFromEnv("procd", logger))
+	obsConfig := coreobs.ConfigFromEnv("procd", logger)
+	obsConfig.DisableMetrics = true
+	obsProvider, err := coreobs.New(obsConfig)
 	if err != nil {
 		logger.Fatal("Failed to initialize observability", zap.Error(err))
 	}

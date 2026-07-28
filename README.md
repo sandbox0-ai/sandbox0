@@ -144,6 +144,8 @@ More examples:
 | SandboxVolume | Durable storage independent of one sandbox identity | Yes | Repos, caches, agent memory, artifacts, shared data, snapshots, forks |
 | Metering, quota, and policy state | Control-plane storage | Yes | Usage truth, policy audit, quota, showback, and export |
 
+By default, Sandbox0 encrypts persisted rootfs checkpoint objects and S0FS Volume objects at the application layer before writing them to S3-compatible storage. This is service-side rather than end-to-end encryption: manager and the active ctld hold the installation key and can decrypt these objects. Self-hosted deployments control this behavior with `spec.storage.runtime.objectEncryptionEnabled`.
+
 `ttl` pauses idle runtime compute after checkpointing the writable root filesystem. `hard_ttl` deletes the sandbox identity and state tied to it. Long-running agents should treat the runtime as replaceable and put durable state in volumes, rootfs checkpoints, event logs, or external storage.
 
 ## Network And Credentials

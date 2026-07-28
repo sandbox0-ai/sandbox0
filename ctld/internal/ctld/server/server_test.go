@@ -115,7 +115,7 @@ func TestNewMuxDefaultsToNotImplementedController(t *testing.T) {
 }
 
 func TestNewMuxReadinessIncludesControllerState(t *testing.T) {
-	controller := &readinessTestController{}
+	controller := &readinessTestController{healthy: true}
 	handler := NewMux(controller)
 
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
@@ -133,12 +133,35 @@ func TestNewMuxReadinessIncludesControllerState(t *testing.T) {
 	}
 }
 
+func TestNewMuxHealthIncludesControllerState(t *testing.T) {
+	controller := &readinessTestController{ready: true}
+	handler := NewMux(controller)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unhealthy status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	controller.healthy = true
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthy status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
 type readinessTestController struct {
 	NotImplementedController
-	ready bool
+	ready   bool
+	healthy bool
 }
 
 func (c *readinessTestController) Ready() bool { return c.ready }
+func (c *readinessTestController) Healthy() bool {
+	return c.healthy
+}
 
 func TestNewMuxRoutesRootFS(t *testing.T) {
 	controller := &recordingController{}

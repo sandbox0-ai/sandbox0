@@ -4905,8 +4905,9 @@ components:
           type: boolean
           default: true
           description: |
-            Sandbox-level runtime recovery gate. When false, inbound API or public exposure
-            requests must not automatically resume a paused sandbox or replace a failed runtime.
+            Controls whether supported inbound API or public exposure requests may automatically
+            make an inactive sandbox available. This setting does not control platform-initiated
+            runtime fault recovery.
         services:
           type: array
           items:
@@ -5286,8 +5287,9 @@ components:
           type: boolean
           default: true
           description: |
-            Sandbox-level runtime recovery gate. When false, inbound API or public exposure
-            requests must not automatically resume a paused sandbox or replace a failed runtime.
+            Controls whether supported inbound API or public exposure requests may automatically
+            make an inactive sandbox available. This setting does not control platform-initiated
+            runtime fault recovery.
         services:
           type: array
           items:

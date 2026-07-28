@@ -25,6 +25,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/fuseportal"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -306,8 +307,15 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	serviceErrors := make(chan error, 1)
 	networkRequired := options.networkFactory != nil
 	var networkHandle *primaryServiceHandle
+	multiplexerHealth := fuseportal.SharedMultiplexerHealth
+	if err := multiplexerHealth(); err != nil {
+		return fmt.Errorf("initialize shared FUSE multiplexer health: %w", err)
+	}
+	serviceHealthy := func() bool {
+		return ctx.Err() == nil && multiplexerHealth() == nil
+	}
 	serviceReady := func() bool {
-		return ctx.Err() == nil && portalManager.RecoveryError() == nil &&
+		return serviceHealthy() && portalManager.RecoveryError() == nil &&
 			(registrationServer == nil || registrationServer.Registered()) &&
 			(!networkRequired || (networkHandle != nil && networkHandle.Ready()))
 	}
@@ -318,10 +326,11 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	defer containerdRuntime.Close()
 	runtimeMetricsHandle := startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)
 	httpServer := newHTTPServer(httpAddr, combinedController{
-		Controller: probeController,
-		Portal:     portalManager,
-		RootFS:     buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, portalManager, containerdRuntime),
-		ReadyCheck: serviceReady,
+		Controller:  probeController,
+		Portal:      portalManager,
+		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, portalManager, containerdRuntime),
+		ReadyCheck:  serviceReady,
+		HealthCheck: serviceHealthy,
 	})
 	if obsProvider != nil {
 		httpServer.Handler = httpobs.ServerMiddleware(obsProvider.HTTPServerConfig(zapLogger))(httpServer.Handler)
@@ -349,6 +358,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 			serviceErrors <- fmt.Errorf("ctld HTTP server: %w", err)
 		}
 	}()
+	go monitorPrimaryServiceHealth(ctx, time.Second, multiplexerHealth, serviceErrors)
 
 	if options.setReady != nil {
 		options.setReady(serviceReady())
@@ -661,13 +671,43 @@ func newPortalStorageObserver(
 
 type combinedController struct {
 	ctldserver.Controller
-	Portal     volumePortalHandler
-	RootFS     rootFSHandler
-	ReadyCheck func() bool
+	Portal      volumePortalHandler
+	RootFS      rootFSHandler
+	ReadyCheck  func() bool
+	HealthCheck func() bool
 }
 
 func (c combinedController) Ready() bool {
 	return c.ReadyCheck == nil || c.ReadyCheck()
+}
+
+func (c combinedController) Healthy() bool {
+	return c.HealthCheck == nil || c.HealthCheck()
+}
+
+func monitorPrimaryServiceHealth(ctx context.Context, interval time.Duration, check func() error, failures chan<- error) {
+	if check == nil || failures == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if err := check(); err != nil {
+			select {
+			case failures <- fmt.Errorf("ctld primary health: %w", err):
+			case <-ctx.Done():
+			}
+			return
+		}
+	}
 }
 
 func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {

@@ -41,6 +41,12 @@ Use [Volumes](/docs/sandbox/volume) when data must be mounted by multiple sandbo
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
 </Callout>
 
+## Storage Encryption
+
+Application-layer object encryption is enabled by default. Before manager or ctld writes persisted rootfs layer and checkpoint objects to S3-compatible storage, Sandbox0 encrypts them with AES-256-GCM. Each object receives a random data key, its contents are stored in independently authenticated chunks, and the data key is wrapped with the installation's RSA key.
+
+This is service-side encryption, not end-to-end encryption: manager and the active ctld hold the installation key and can decrypt rootfs objects while serving sandbox operations. Existing plaintext objects remain readable after encryption is enabled, while new object writes use the encrypted format; enabling encryption does not rewrite historical objects automatically. Self-hosted deployments can configure this behavior with `spec.storage.runtime.objectEncryptionEnabled`; see [Service and Runtime Config](/docs/sandbox/self-hosted/configuration#service-and-runtime-config).
+
 ## Initialize Once, Claim Many
 
 Rootfs snapshots plus claim-time `snapshot_id` can act like a lightweight custom rootfs when your changes are ordinary filesystem state. Instead of building a custom image and maintaining a team-owned warm pool, start from a builtin template, initialize the sandbox, publish a rootfs snapshot, then claim new sandboxes from that snapshot.

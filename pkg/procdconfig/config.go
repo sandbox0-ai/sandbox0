@@ -41,7 +41,7 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON encodes the duration as a string.
 func (d Duration) MarshalJSON() ([]byte, error) {
-	return json.Marshal(d.Duration.String())
+	return json.Marshal(d.String())
 }
 
 // UnmarshalYAML decodes a duration string.
@@ -60,12 +60,12 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 
 // MarshalYAML encodes the duration as a string.
 func (d Duration) MarshalYAML() (any, error) {
-	return d.Duration.String(), nil
+	return d.String(), nil
 }
 
 // ToUnstructured returns the representation used by Kubernetes converters.
 func (d Duration) ToUnstructured() any {
-	return d.Duration.String()
+	return d.String()
 }
 
 // OpenAPISchemaType describes Duration as a string.
@@ -123,6 +123,12 @@ type Config struct {
 	SessionStateDir string `yaml:"session_state_dir" json:"sessionStateDir"`
 
 	setKeys map[string]bool
+}
+
+// MarshalYAML preserves the fields when Config is embedded inline by manager.
+func (c Config) MarshalYAML() (any, error) {
+	type plain Config
+	return plain(c), nil
 }
 
 // UnmarshalYAML captures configured keys without hardcoding them.
@@ -293,7 +299,7 @@ func setFieldValue(field reflect.Value, value string, key string) error {
 
 func formatEnvValue(value reflect.Value) string {
 	if value.Type() == reflect.TypeOf(Duration{}) {
-		return value.Interface().(Duration).Duration.String()
+		return value.Interface().(Duration).String()
 	}
 	switch value.Kind() {
 	case reflect.String:

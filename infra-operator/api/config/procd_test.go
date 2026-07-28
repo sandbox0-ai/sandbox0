@@ -44,3 +44,32 @@ func TestProcdConfigPreservesInlineYAMLAndConfiguredKeys(t *testing.T) {
 		t.Fatal("unexpected unset root_path")
 	}
 }
+
+func TestManagerConfigProcdYAMLRoundTripPreservesConfiguredKeys(t *testing.T) {
+	original := ManagerConfig{
+		ProcdConfig: ProcdConfig{},
+	}
+	original.ProcdConfig.HTTPPort = 49984
+	original.ProcdConfig.RootPath = "/workspace"
+	original.ProcdConfig.ContextCleanupInterval.Duration = 45 * time.Second
+
+	data, err := yaml.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal manager config: %v", err)
+	}
+
+	var decoded ManagerConfig
+	if err := yaml.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal manager config: %v", err)
+	}
+	env := decoded.ProcdConfig.EnvMap()
+	if env["http_port"] != "49984" {
+		t.Fatalf("http_port = %q, want 49984; YAML:\n%s", env["http_port"], data)
+	}
+	if env["root_path"] != "/workspace" {
+		t.Fatalf("root_path = %q, want /workspace; YAML:\n%s", env["root_path"], data)
+	}
+	if env["context_cleanup_interval"] != "45s" {
+		t.Fatalf("context_cleanup_interval = %q, want 45s; YAML:\n%s", env["context_cleanup_interval"], data)
+	}
+}

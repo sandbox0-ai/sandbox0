@@ -1059,6 +1059,12 @@ func (s *Supervisor) handleStartFailure(managed *managedSession, runtime *attemp
 }
 
 func (s *Supervisor) handleExit(managed *managedSession, runtime *attemptRuntime, event process.ExitEvent) {
+	// EOF can make the child exit before WriteInput persists its receipt.
+	// Serialize exit handling behind in-flight input so acceptance stays durable
+	// and the journal preserves input.accepted before attempt.exited.
+	managed.inputMu.Lock()
+	defer managed.inputMu.Unlock()
+
 	managed.mu.Lock()
 	if managed.runtime != runtime {
 		managed.mu.Unlock()

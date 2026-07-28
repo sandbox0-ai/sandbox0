@@ -12,8 +12,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"go.uber.org/zap"
 )
+
+type blockingCloseInputProcess struct {
+	process.Process
+	closeStarted chan struct{}
+	closeRelease chan struct{}
+}
+
+func (p *blockingCloseInputProcess) CloseInput() error {
+	close(p.closeStarted)
+	<-p.closeRelease
+	return nil
+}
 
 func TestSupervisorConcurrentCreateDeduplicatesByKey(t *testing.T) {
 	supervisor := newTestSupervisor(t)
@@ -295,6 +308,110 @@ func TestSupervisorSerializesConcurrentDuplicateInput(t *testing.T) {
 	}
 	if stdout != "once\n" {
 		t.Fatalf("stdout = %q, want one input", stdout)
+	}
+}
+
+func TestSupervisorPersistsEOFReceiptBeforeAttemptExit(t *testing.T) {
+	supervisor := newTestSupervisor(t)
+	value, _, err := supervisor.Create(SessionSpec{
+		Command: []string{"/bin/cat"},
+		IO:      IOSpec{Mode: IOModePipes},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSessionPhase(t, supervisor, value.ID, PhaseRunning)
+
+	managed, err := supervisor.getManaged(value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStarted := make(chan struct{})
+	closeRelease := make(chan struct{})
+	managed.mu.Lock()
+	runtime := managed.runtime
+	if runtime == nil {
+		managed.mu.Unlock()
+		t.Fatal("session runtime is missing")
+	}
+	originalProcess := runtime.proc
+	runtime.proc = &blockingCloseInputProcess{
+		Process:      originalProcess,
+		closeStarted: closeStarted,
+		closeRelease: closeRelease,
+	}
+	attemptID := runtime.attemptID
+	managed.mu.Unlock()
+	t.Cleanup(func() { _ = originalProcess.Stop() })
+
+	type inputResult struct {
+		response *InputResponse
+		err      error
+	}
+	inputDone := make(chan inputResult, 1)
+	go func() {
+		response, err := supervisor.WriteInput(value.ID, InputRequest{
+			InputID:           "eof",
+			ExpectedAttemptID: attemptID,
+			EOF:               true,
+		})
+		inputDone <- inputResult{response: response, err: err}
+	}()
+	<-closeStarted
+
+	exitDone := make(chan struct{})
+	go func() {
+		supervisor.handleExit(managed, runtime, process.ExitEvent{
+			ProcessID: runtime.attemptID,
+			ExitCode:  0,
+			State:     process.ProcessStateStopped,
+		})
+		close(exitDone)
+	}()
+	exitCompletedBeforeReceipt := false
+	select {
+	case <-exitDone:
+		exitCompletedBeforeReceipt = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(closeRelease)
+
+	var result inputResult
+	select {
+	case result = <-inputDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for EOF input")
+	}
+	select {
+	case <-exitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for attempt exit")
+	}
+	if exitCompletedBeforeReceipt {
+		t.Fatal("attempt exit completed before the EOF receipt")
+	}
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if result.response == nil || !result.response.Accepted {
+		t.Fatalf("input response = %#v, want accepted", result.response)
+	}
+
+	page, err := supervisor.Events(value.ID, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputIndex, exitIndex := -1, -1
+	for index, event := range page.Events {
+		switch event.Type {
+		case "input.accepted":
+			inputIndex = index
+		case "attempt.exited":
+			exitIndex = index
+		}
+	}
+	if inputIndex < 0 || exitIndex <= inputIndex {
+		t.Fatalf("event order = input %d, exit %d; want input before exit", inputIndex, exitIndex)
 	}
 }
 

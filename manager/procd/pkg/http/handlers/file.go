@@ -9,7 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
-	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/streaming"
 	"go.uber.org/zap"
 )
 
@@ -188,7 +188,7 @@ func (h *FileHandler) Move(w http.ResponseWriter, r *http.Request) {
 
 // Watch handles WebSocket file watching.
 func (h *FileHandler) Watch(w http.ResponseWriter, r *http.Request) {
-	if err := proxy.DisableResponseDeadlines(w); err != nil {
+	if err := streaming.DisableResponseDeadlines(w); err != nil {
 		h.logger.Debug("Failed to disable file watch response deadlines", zap.Error(err))
 	}
 	conn, err := h.upgrader.Upgrade(w, r, nil)
@@ -197,7 +197,7 @@ func (h *FileHandler) Watch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	if err := proxy.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
+	if err := streaming.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
 		h.logger.Debug("Failed to clear file watch websocket connection deadlines", zap.Error(err))
 	}
 

@@ -1,4 +1,4 @@
-package observability
+package core
 
 import (
 	"context"
@@ -8,32 +8,25 @@ import (
 	"go.uber.org/zap"
 )
 
-// zapSpanExporter exports spans using zap logger in JSON format
 type zapSpanExporter struct {
 	logger *zap.Logger
 }
 
-// newZapSpanExporter creates a new zap-based span exporter
 func newZapSpanExporter(logger *zap.Logger) sdktrace.SpanExporter {
-	return &zapSpanExporter{
-		logger: logger,
-	}
+	return &zapSpanExporter{logger: logger}
 }
 
-// ExportSpans exports spans to zap logger
-func (e *zapSpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+func (e *zapSpanExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
 	for _, span := range spans {
 		e.logSpan(span)
 	}
 	return nil
 }
 
-// Shutdown shuts down the exporter
-func (e *zapSpanExporter) Shutdown(ctx context.Context) error {
+func (e *zapSpanExporter) Shutdown(context.Context) error {
 	return nil
 }
 
-// logSpan logs a single span using zap logger
 func (e *zapSpanExporter) logSpan(span sdktrace.ReadOnlySpan) {
 	fields := []zap.Field{
 		zap.String("trace_id", span.SpanContext().TraceID().String()),
@@ -46,25 +39,17 @@ func (e *zapSpanExporter) logSpan(span sdktrace.ReadOnlySpan) {
 		zap.Duration("duration", span.EndTime().Sub(span.StartTime())),
 		zap.String("status_code", span.Status().Code.String()),
 	}
-
-	// Add status description if present
 	if span.Status().Description != "" {
 		fields = append(fields, zap.String("status_description", span.Status().Description))
 	}
-
-	// Add resource attributes
 	if resource := span.Resource(); resource != nil {
 		for _, attr := range resource.Attributes() {
 			fields = append(fields, attributeToZapField("resource", attr))
 		}
 	}
-
-	// Add span attributes
 	for _, attr := range span.Attributes() {
 		fields = append(fields, attributeToZapField("attr", attr))
 	}
-
-	// Add events
 	for _, event := range span.Events() {
 		eventFields := []zap.Field{
 			zap.String("event_name", event.Name),
@@ -75,14 +60,11 @@ func (e *zapSpanExporter) logSpan(span sdktrace.ReadOnlySpan) {
 		}
 		fields = append(fields, zap.Any("event", eventFields))
 	}
-
 	e.logger.Info("trace_span", fields...)
 }
 
-// attributeToZapField converts an OTEL attribute to a zap field
 func attributeToZapField(prefix string, attr attribute.KeyValue) zap.Field {
 	key := prefix + "." + string(attr.Key)
-
 	switch attr.Value.Type() {
 	case attribute.BOOL:
 		return zap.Bool(key, attr.Value.AsBool())

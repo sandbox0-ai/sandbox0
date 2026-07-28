@@ -23,8 +23,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/reaper"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
-	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
+	"github.com/sandbox0-ai/sandbox0/pkg/streaming"
 	"go.uber.org/zap"
 )
 
@@ -248,7 +248,7 @@ func (h *FunctionHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, spec.CodeInternal, "failed to encode function request")
 		return
 	}
-	if err := proxy.DisableResponseWriteDeadline(w); err != nil {
+	if err := streaming.DisableResponseWriteDeadline(w); err != nil {
 		h.logger.Debug("Failed to disable function stream response deadline", zap.Error(err))
 	}
 	tracker := &trackingResponseWriter{ResponseWriter: w}
@@ -272,7 +272,7 @@ func (h *FunctionHandler) Stream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *FunctionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
-	if err := proxy.DisableResponseDeadlines(w); err != nil {
+	if err := streaming.DisableResponseDeadlines(w); err != nil {
 		h.logger.Debug("Failed to disable function websocket response deadlines", zap.Error(err))
 	}
 	conn, err := h.upgrader.Upgrade(w, r, nil)
@@ -281,7 +281,7 @@ func (h *FunctionHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	if err := proxy.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
+	if err := streaming.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
 		h.logger.Debug("Failed to clear function websocket connection deadlines", zap.Error(err))
 	}
 

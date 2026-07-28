@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/observability/internal/httpattrs"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
@@ -51,7 +52,7 @@ func (t *observableTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			semconv.URLPathKey.String(req.URL.EscapedPath()),
 		),
 	)
-	if address, port := splitHostPort(req.URL.Host); address != "" {
+	if address, port := httpattrs.SplitHostPort(req.URL.Host); address != "" {
 		span.SetAttributes(semconv.ServerAddressKey.String(address))
 		if port > 0 {
 			span.SetAttributes(semconv.ServerPort(port))

@@ -3,6 +3,7 @@ package runtimeconfig
 import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
 )
 
 func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
@@ -47,19 +48,21 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.ProcdInitTimeout = spec.ProcdInitTimeout
 	cfg.ShutdownTimeout = spec.ShutdownTimeout
 	cfg.ProcdConfig = apiconfig.ProcdConfig{
-		HTTPPort:               spec.ProcdConfig.HTTPPort,
-		LogLevel:               spec.ProcdConfig.LogLevel,
-		RootPath:               spec.ProcdConfig.RootPath,
-		ContextCleanupInterval: spec.ProcdConfig.ContextCleanupInterval,
-		ContextIdleTimeout:     spec.ProcdConfig.ContextIdleTimeout,
-		ContextMaxLifetime:     spec.ProcdConfig.ContextMaxLifetime,
-		ContextFinishedTTL:     spec.ProcdConfig.ContextFinishedTTL,
-		WebhookQueueSize:       spec.ProcdConfig.WebhookQueueSize,
-		WebhookRequestTimeout:  spec.ProcdConfig.WebhookRequestTimeout,
-		WebhookMaxRetries:      spec.ProcdConfig.WebhookMaxRetries,
-		WebhookBaseBackoff:     spec.ProcdConfig.WebhookBaseBackoff,
-		WebhookOutboxDir:       webhookOutboxDir,
-		SessionStateDir:        apiconfig.DefaultSessionStateDir,
+		Config: procdconfig.Config{
+			HTTPPort:               spec.ProcdConfig.HTTPPort,
+			LogLevel:               spec.ProcdConfig.LogLevel,
+			RootPath:               spec.ProcdConfig.RootPath,
+			ContextCleanupInterval: procdconfig.Duration{Duration: spec.ProcdConfig.ContextCleanupInterval.Duration},
+			ContextIdleTimeout:     procdconfig.Duration{Duration: spec.ProcdConfig.ContextIdleTimeout.Duration},
+			ContextMaxLifetime:     procdconfig.Duration{Duration: spec.ProcdConfig.ContextMaxLifetime.Duration},
+			ContextFinishedTTL:     procdconfig.Duration{Duration: spec.ProcdConfig.ContextFinishedTTL.Duration},
+			WebhookQueueSize:       spec.ProcdConfig.WebhookQueueSize,
+			WebhookRequestTimeout:  procdconfig.Duration{Duration: spec.ProcdConfig.WebhookRequestTimeout.Duration},
+			WebhookMaxRetries:      spec.ProcdConfig.WebhookMaxRetries,
+			WebhookBaseBackoff:     procdconfig.Duration{Duration: spec.ProcdConfig.WebhookBaseBackoff.Duration},
+			WebhookOutboxDir:       webhookOutboxDir,
+			SessionStateDir:        apiconfig.DefaultSessionStateDir,
+		},
 	}
 	cfg.Autoscaler = apiconfig.AutoscalerConfig{
 		MinScaleInterval:        spec.Autoscaler.MinScaleInterval,

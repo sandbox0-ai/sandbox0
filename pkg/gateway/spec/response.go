@@ -6,8 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-
-	"github.com/gin-gonic/gin"
 )
 
 // Error represents a standardized error payload.
@@ -83,18 +81,23 @@ func WriteError(w http.ResponseWriter, status int, code, message string, details
 	return write(w, status, errorresp(code, message, details...))
 }
 
-// jsonfunc writes a response envelope using gin.
-func jsonfunc(c *gin.Context, status int, resp Response) {
+// JSONWriter is implemented by HTTP frameworks that can serialize a response.
+type JSONWriter interface {
+	JSON(status int, value any)
+}
+
+// jsonfunc writes a response envelope through a framework JSON response.
+func jsonfunc(c JSONWriter, status int, resp Response) {
 	c.JSON(status, resp)
 }
 
-// JSONSuccess writes a success envelope using gin.
-func JSONSuccess(c *gin.Context, status int, data any) {
+// JSONSuccess writes a success envelope through a framework JSON response.
+func JSONSuccess(c JSONWriter, status int, data any) {
 	jsonfunc(c, status, successresp(data))
 }
 
-// JSONError writes an error envelope using gin.
-func JSONError(c *gin.Context, status int, code, message string, details ...any) {
+// JSONError writes an error envelope through a framework JSON response.
+func JSONError(c JSONWriter, status int, code, message string, details ...any) {
 	jsonfunc(c, status, errorresp(code, message, details...))
 }
 

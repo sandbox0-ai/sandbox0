@@ -18,7 +18,7 @@ import (
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process/repl"
-	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/pkg/streaming"
 	"go.uber.org/zap"
 )
 
@@ -837,7 +837,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
 
-	if err := proxy.DisableResponseDeadlines(w); err != nil {
+	if err := streaming.DisableResponseDeadlines(w); err != nil {
 		h.logger.Debug("Failed to disable context websocket response deadlines", zap.String("context_id", id), zap.Error(err))
 	}
 	conn, err := h.upgrader.Upgrade(w, r, nil)
@@ -846,7 +846,7 @@ func (h *ContextHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	if err := proxy.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
+	if err := streaming.DisableConnectionDeadlines(conn.UnderlyingConn()); err != nil {
 		h.logger.Debug("Failed to clear context websocket connection deadlines", zap.String("context_id", id), zap.Error(err))
 	}
 

@@ -238,7 +238,11 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 				zap.String("sandbox_id", sandboxID),
 				zap.Error(err),
 			)
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+			if errors.Is(err, client.ErrSandboxResumeFailed) {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeSandboxResumeFailed, "sandbox resume failed")
+			} else {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+			}
 			return nil, err
 		}
 		if needsRuntimeRefetch {

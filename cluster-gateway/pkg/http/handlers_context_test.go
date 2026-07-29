@@ -236,8 +236,88 @@ func TestGetProcdURLPausedSandboxReturnsWakingUp(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
+	assertGatewayError(t, rec, spec.CodeUnavailable, "sandbox is waking up")
 	if resumeCalls != 1 {
 		t.Fatalf("resumeCalls = %d, want 1", resumeCalls)
+	}
+}
+
+func TestGetProcdURLReportsDefinitiveResumeFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target:             "manager",
+		PublicKey:          publicKey,
+		AllowedCallers:     []string{"cluster-gateway"},
+		ClockSkewTolerance: 5 * time.Second,
+	})
+	tokenGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "cluster-gateway",
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+
+	var resumeCalls int
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := validator.Validate(r.Header.Get(internalauth.DefaultTokenHeader)); err != nil {
+			t.Fatalf("validate token: %v", err)
+		}
+		switch {
+		case r.Method == http.MethodGet:
+			_ = spec.WriteSuccess(w, http.StatusOK, mgr.Sandbox{
+				ID:         "sb-1",
+				TeamID:     "team-a",
+				UserID:     "user-a",
+				Status:     mgr.SandboxStatusPaused,
+				Paused:     true,
+				AutoResume: true,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sandboxes/sb-1/resume":
+			resumeCalls++
+			_ = spec.WriteError(w, http.StatusGatewayTimeout, spec.CodeUnavailable, "runtime initialization timed out")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer manager.Close()
+
+	server := &Server{
+		managerClient: client.NewManagerClient(manager.URL, tokenGen, zap.NewNop(), time.Second),
+		logger:        zap.NewNop(),
+	}
+
+	addr, rec := mustGetProcdURL(t, server, "team-a", "user-a", "sb-1")
+	if addr != nil {
+		t.Fatalf("addr = %v, want nil", addr)
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	assertGatewayError(t, rec, spec.CodeSandboxResumeFailed, "sandbox resume failed")
+	if resumeCalls != 1 {
+		t.Fatalf("resumeCalls = %d, want 1", resumeCalls)
+	}
+}
+
+func assertGatewayError(t *testing.T, rec *httptest.ResponseRecorder, code string, message string) {
+	t.Helper()
+
+	var response spec.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode gateway response: %v", err)
+	}
+	if response.Error == nil {
+		t.Fatal("gateway response error is nil")
+	}
+	if response.Error.Code != code {
+		t.Fatalf("error code = %q, want %q", response.Error.Code, code)
+	}
+	if response.Error.Message != message {
+		t.Fatalf("error message = %q, want %q", response.Error.Message, message)
 	}
 }
 

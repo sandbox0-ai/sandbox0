@@ -30,15 +30,16 @@ type rawResponse struct {
 }
 
 const (
-	CodeBadRequest       = "bad_request"
-	CodeUnauthorized     = "unauthorized"
-	CodeForbidden        = "forbidden"
-	CodeNotFound         = "not_found"
-	CodeConflict         = "conflict"
-	CodeTemplateNotReady = "template_not_ready"
-	CodeUnavailable      = "unavailable"
-	CodeInternal         = "internal_error"
-	CodeNotLicensed      = "feature_not_licensed"
+	CodeBadRequest          = "bad_request"
+	CodeUnauthorized        = "unauthorized"
+	CodeForbidden           = "forbidden"
+	CodeNotFound            = "not_found"
+	CodeConflict            = "conflict"
+	CodeTemplateNotReady    = "template_not_ready"
+	CodeSandboxResumeFailed = "sandbox_resume_failed"
+	CodeUnavailable         = "unavailable"
+	CodeInternal            = "internal_error"
+	CodeNotLicensed         = "feature_not_licensed"
 )
 
 // successresp builds a success envelope.

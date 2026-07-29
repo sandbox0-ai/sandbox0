@@ -61,3 +61,56 @@ func TestResumeSandboxUsesRequestContextInsteadOfClientTimeout(t *testing.T) {
 		t.Fatalf("ResumeSandbox() error = %v, want nil", err)
 	}
 }
+
+func TestResumeSandboxMarksManagerErrorResponseAsDefinitiveFailure(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	tokenGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "cluster-gateway",
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusGatewayTimeout)
+		_, _ = w.Write([]byte(`{"success":false,"error":{"code":"unavailable","message":"runtime initialization timed out"}}`))
+	}))
+	defer manager.Close()
+
+	client := NewManagerClient(manager.URL, tokenGen, zap.NewNop(), time.Second)
+	err = client.ResumeSandbox(context.Background(), "sandbox-1", "user-1", "team-1")
+	if !errors.Is(err, ErrSandboxResumeFailed) {
+		t.Fatalf("ResumeSandbox() error = %v, want ErrSandboxResumeFailed", err)
+	}
+	if strings.Contains(err.Error(), "unexpected status code") {
+		t.Fatalf("ResumeSandbox() error = %q, want decoded manager message", err.Error())
+	}
+	if !strings.Contains(err.Error(), "runtime initialization timed out") {
+		t.Fatalf("ResumeSandbox() error = %q, want manager message", err.Error())
+	}
+}
+
+func TestResumeSandboxDoesNotMarkTransportUncertaintyAsDefinitiveFailure(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	tokenGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "cluster-gateway",
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+	client := NewManagerClient("http://127.0.0.1:1", tokenGen, zap.NewNop(), time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = client.ResumeSandbox(ctx, "sandbox-1", "user-1", "team-1")
+	if err == nil {
+		t.Fatal("ResumeSandbox() error = nil, want canceled request error")
+	}
+	if errors.Is(err, ErrSandboxResumeFailed) {
+		t.Fatalf("ResumeSandbox() error = %v, do not want ErrSandboxResumeFailed", err)
+	}
+}

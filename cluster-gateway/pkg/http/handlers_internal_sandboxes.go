@@ -97,7 +97,11 @@ func (s *Server) resumeInternalSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
 			return
 		}
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox resume failed")
+		if errors.Is(err, client.ErrSandboxResumeFailed) {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeSandboxResumeFailed, "sandbox resume failed")
+			return
+		}
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
 		return
 	}
 	s.invalidateSandboxInternalCache(c.Request.Context(), sandboxID)

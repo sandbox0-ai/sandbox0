@@ -10,51 +10,23 @@
 
 # Sandbox0
 
-Sandbox0 is an open-source AI agent sandbox runtime for platforms that need to run untrusted code in persistent, policy-controlled Linux workspaces.
+**Persistent, encrypted, Kubernetes-native sandboxes for long-running AI agents.**
 
-Each sandbox can provide an agent with a real execution environment: processes, files, optional volumes, service ports, network policy, and credential projection. Use Sandbox0 Cloud or self-host the control-plane and data-plane components for your own region.
+Sandbox0 is an open-source runtime for platforms that need to run untrusted code without treating every workspace as a disposable container. The runtime pod is replaceable; the sandbox identity, writable rootfs checkpoints, and SandboxVolume data are durable.
 
 Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, volumes, credentials, and team-scoped API keys.
 
 > Sandbox0 is under active development. Prefer the SDKs and `s0` CLI over hardcoded HTTP paths, and check the docs before depending on beta surfaces.
 
-## Built For
+## Why Sandbox0
 
-| You are building | The runtime problem | Sandbox0 gives you |
-| --- | --- | --- |
-| Coding agents and app builders | Every task needs a repo, shell, package manager, test runner, dev server, and preview URL. | Template-based sandboxes with commands, REPL contexts, files, services, and fast warm claims. |
-| Code interpreters, evals, and security harnesses | Generated or user-submitted code must run with evidence, artifacts, and a constrained network. | Isolated execution, volume-backed artifacts, egress policy, credential boundaries, and usage records. |
-| Agent products with long-lived sessions | Workspaces must survive idle time, resume later, branch for parallel work, and avoid idle compute as the source of truth. | Rootfs checkpoints, SandboxVolume, snapshots, forks, pause/resume, and `hard_ttl` cleanup. |
-| Internal developer platforms | Agent work cannot all run on laptops, broad CI runners, or a public-only hosted sandbox. | Self-hosted Kubernetes data planes, regional storage boundaries, operator install, and usage truth. |
-
-The important distinction is that Sandbox0 treats state, network, credentials, and usage as runtime primitives, not incidental files and side effects inside a disposable container.
-
-## Runtime Model
-
-```mermaid
-flowchart LR
-    platform["Agent platform"] --> api["Sandbox0 API"]
-    api --> sandbox["Sandbox identity"]
-    sandbox --> runtime["Runtime pod"]
-    runtime --> procd["procd"]
-    procd --> work["cmd, REPL, files, services"]
-    sandbox --> rootfs["Rootfs checkpoint"]
-    runtime --> volume["SandboxVolume"]
-    runtime --> network["ctld network policy runtime"]
-    network --> external["Allowed external systems"]
-    rootfs --> object["S3-compatible storage"]
-    volume --> object["S3-compatible storage"]
-```
-
-The sandbox is the execution boundary, not the durable source of truth. Sandbox identity, rootfs checkpoints, volumes, policy, events, and usage records live outside the running process so a runtime pod can be paused, resumed, replaced, or deleted.
-
-## Choose Your Path
-
-| Path | Use it when | Start here |
-| --- | --- | --- |
-| **Raw Sandboxes** | You want direct control over processes, files, volumes, ports, templates, and network policy. | [Get started](https://sandbox0.ai/docs/get-started) |
-| **Use Cases** | You want an agent framework gateway, browser automation API, or similar tool to run inside a sandbox, with state on a volume and its API exposed through Sandbox0 routes. | [Use Cases](https://sandbox0.ai/docs/use-cases) |
-| **Self-hosted** | You need private deployment, data-plane ownership, regional storage boundaries, or custom runtime isolation. | [Self-hosted](https://sandbox0.ai/docs/self-hosted) |
+| Differentiator | What it means |
+| --- | --- |
+| **Storage and compute are separated** | Persisted rootfs checkpoints and SandboxVolume objects are application-encrypted and stored in horizontally scalable S3-compatible object storage. Sandbox worker nodes keep disposable caches, not the durable source of truth. |
+| **The sandbox lifetime is your policy** | `ttl` and `hard_ttl` both default to `0` (disabled), so the API imposes no fixed execution window. Keep a runtime running, or pause idle compute and resume the same sandbox identity later. |
+| **Choose `runc` or `gVisor`** | Sandbox Pods use Kubernetes `RuntimeClass`. Run trusted or compatibility-sensitive workloads with `runc`, or untrusted multi-tenant workloads with `gVisor`/`runsc`; Sandbox0 supports rootfs checkpoint and restore on both runtime families. |
+| **Fast starts, warm or cold** | Ready template pools make common claims a metadata handoff instead of a Pod boot. When a pool is empty, the cold path avoids a per-Pod init copy by mounting `procd` from a small OCI artifact and can work with cloud node autoscaling. |
+| **Small-file performance is measured** | The checked-in SandboxVolume suite covers 30,000-file writes, content-verified reads, metadata operations, destruction, reattachment, and byte-for-byte durability instead of relying on a storage bandwidth claim. |
 
 ## Quickstart
 
@@ -134,7 +106,19 @@ More examples:
 - [OpenAI Agents SDK integration](https://sandbox0.ai/docs/integrations/openai-agents)
 - [Vercel Eve integration](https://sandbox0.ai/docs/integrations/vercel-eve)
 
-## State And Persistence
+## Storage, Encryption, And Long-Running Sandboxes
+
+```mermaid
+flowchart LR
+    api["Sandbox0 API"] --> pod["Replaceable sandbox Pod<br/>runc or gVisor"]
+    pod --> procd["procd<br/>cmd, REPL, files, services"]
+    pod <--> ctld["ctld<br/>rootfs + volume runtime"]
+    ctld --> rootfs["Writable rootfs checkpoint"]
+    ctld --> volume["SandboxVolume"]
+    rootfs --> encryption["Application-layer<br/>object encryption"]
+    volume --> encryption
+    encryption --> object[("S3-compatible<br/>object storage")]
+```
 
 | State | Where it lives | Survives pause/resume? | Use it for |
 | --- | --- | --- | --- |
@@ -144,19 +128,45 @@ More examples:
 | SandboxVolume | Durable storage independent of one sandbox identity | Yes | Repos, caches, agent memory, artifacts, shared data, snapshots, forks |
 | Metering, quota, and policy state | Control-plane storage | Yes | Usage truth, policy audit, quota, showback, and export |
 
-By default, Sandbox0 encrypts persisted rootfs checkpoint objects and S0FS Volume objects at the application layer before writing them to S3-compatible storage. This is service-side rather than end-to-end encryption: manager and the active ctld hold the installation key and can decrypt these objects. Self-hosted deployments control this behavior with `spec.storage.runtime.objectEncryptionEnabled`.
+By default, Sandbox0 applies envelope encryption to persisted rootfs checkpoint objects and S0FS Volume objects before writing them to S3-compatible storage. This is service-side rather than end-to-end encryption: `manager` and the active `ctld` hold the installation key and can decrypt objects while serving sandbox operations. Self-hosted deployments control this behavior with `spec.storage.runtime.objectEncryptionEnabled`.
 
-`ttl` pauses idle runtime compute after checkpointing the writable root filesystem. `hard_ttl` deletes the sandbox identity and state tied to it. Long-running agents should treat the runtime as replaceable and put durable state in volumes, rootfs checkpoints, event logs, or external storage.
+On pause, `ctld` captures the writable containerd rootfs, uploads the encrypted checkpoint, and releases the runtime Pod. Resume creates a new Pod for the same sandbox identity and restores that rootfs. Running processes, memory, and sockets are intentionally not checkpointed.
 
-## Network And Credentials
+This model lets storage capacity scale independently of compute nodes and lets long-running agents survive idle periods, node replacement, and runtime restarts. Set `ttl` to pause idle compute, set `hard_ttl` when you need a cleanup deadline, or leave either value at `0` to disable that expiration path.
 
-Sandbox0 is designed for workloads that execute code the host should not trust.
+## Why Kubernetes + gVisor Instead Of A Firecracker-First Stack
 
-- Network policy can default to block-all and allow only explicit destinations.
-- The active `ctld` process enforces data-plane egress rules and protocol controls.
-- Egress auth can project credentials at the network boundary instead of placing raw production keys in sandbox files or environment variables.
-- SSH egress auth can proxy Git-over-SSH without writing the upstream private key into the sandbox.
-- Sandbox Services enforce route auth, CORS, rate limits, timeouts, and path policy before public traffic reaches the sandbox.
+[Firecracker](https://github.com/firecracker-microvm/firecracker) is excellent microVM technology. Its KVM boundary is a strong choice when hardware virtualization is the primary requirement. Sandbox0 deliberately optimizes for a different systems boundary: multi-tenant isolation that fits directly into managed Kubernetes and preserves containerd-native rootfs lifecycle operations.
+
+| Goal | Sandbox0's Kubernetes + gVisor approach |
+| --- | --- |
+| **Use the cloud's managed control plane** | Major clouds already operate Kubernetes as a managed service: [Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html), [Google GKE](https://cloud.google.com/kubernetes-engine/docs/concepts/kubernetes-engine-overview), [Azure AKS](https://learn.microsoft.com/en-us/azure/aks/core-aks-concepts), and [Alibaba Cloud ACK](https://www.alibabacloud.com/help/en/ack/product-overview/product-introduction). Sandbox0 can use their cluster lifecycle, version upgrades, node pools, networking integrations, and horizontal node autoscaling instead of building a separate microVM control plane. |
+| **Add a multi-tenant isolation layer** | [gVisor](https://gvisor.dev/docs/architecture_guide/intro/) handles guest system calls in a per-sandbox application kernel, reducing direct exposure to the host Linux kernel while retaining the Pod resource model. |
+| **Keep deployment portable** | GKE exposes gVisor as [GKE Sandbox](https://cloud.google.com/kubernetes-engine/docs/concepts/sandbox-pods). On other Kubernetes clusters, `runsc` integrates with [Kubernetes and containerd](https://gvisor.dev/docs/user_guide/quick_start/kubernetes/) through a `RuntimeClass`. Sandbox0 can also use the cluster's standard `runc` runtime. |
+| **Scale with ordinary Kubernetes primitives** | Sandbox workloads remain Pods, so the scheduler, quotas, node pools, rolling upgrades, observability, and cluster autoscaler stay on the normal operational path. |
+| **Persist and restore the writable rootfs** | Sandbox0's `gvisor-rootfs` containerd handler uses shared rootfs access so `ctld` can checkpoint writable layers to encrypted S3-compatible storage. Pause releases compute; resume restores the rootfs into a replacement Pod. |
+
+This is a tradeoff, not a claim that gVisor has a stronger isolation boundary than a Firecracker microVM. Sandbox0 chooses gVisor when teams want a substantial isolation layer without giving up managed Kubernetes operations, elastic Pod scheduling, or containerd-backed rootfs pause/resume.
+
+## Reproducible SandboxVolume Performance
+
+S0FS is Sandbox0's S3-backed filesystem for durable SandboxVolumes. It batches small writes into object-storage-friendly segments while presenting a normal mounted filesystem to the sandbox.
+
+The checked-in online benchmark was run in a production `gVisor` sandbox in `ali-ue1`:
+
+| Workload | S0FS result |
+| --- | ---: |
+| Destroy producer, reattach to a fresh sandbox, verify 30,000 x 4 KiB files | 30,000 files and 122,880,000 bytes verified; 0 missing, corrupt, or unexpected files |
+| Eight-worker 30,000 x 4 KiB write | 903 files/s |
+| Eight-worker immediate full-content read and verify | 1,566 files/s |
+| Recursive list plus stat | 7,681 operations/s |
+| Historical `mdtest` geometry, file operations only | 1.26-2.57x the historical JuiceFS-published rates and 8.33-18.21x the historical EFS-published rates |
+
+These results are transparent baselines, not an SLA or a current cross-provider leaderboard. The JuiceFS and EFS values are historical, cross-environment references. See the [benchmark standard](./scripts/SANDBOX_VOLUME_BENCHMARK_STANDARD.md), [verified 4 KiB results](./scripts/VOLUME_SMALL_FILE_BENCHMARK.md), [historical mdtest comparison](./scripts/VOLUME_MDTEST_BENCHMARK.md), and runnable scripts in [`scripts/`](./scripts/).
+
+## Isolation, Network, And Credentials
+
+Sandbox0 also provides the expected policy surfaces for untrusted code: selectable runtime isolation, default-deny egress rules, protocol controls, credential projection at the network boundary, Git-over-SSH credential proxying, and authenticated public services with CORS, rate limits, timeouts, and path policy.
 
 Sandboxing reduces blast radius and gives policy a real enforcement point. It does not make prompt injection disappear. Isolation strength depends on your deployment choices, runtime class, CNI, storage, credential policy, and network defaults.
 
@@ -184,7 +194,7 @@ Sandbox0 separates region-scoped control-plane services from cluster-scoped data
 | Control plane | Optional `regional-gateway`, optional `scheduler` | Tenant/API key management, cluster selection, internal routing, template distribution |
 | Data plane | `cluster-gateway`, `manager`, `ctld-a` / `ctld-b` | Sandbox lifecycle, rootfs checkpoints, process/file APIs, volume storage, network enforcement |
 | In-pod runtime | `procd` | PID 1 inside each sandbox pod, process abstraction, file I/O, volume mount operations |
-| Storage | PostgreSQL, ClickHouse, and S3-compatible object storage | Transactional metadata and metering delivery, long-term usage truth, rootfs/volume data |
+| Storage | PostgreSQL, ClickHouse, and S3-compatible object storage | Transactional state and metering producer state/outbox in PostgreSQL, asynchronous metering query projection in ClickHouse, encrypted rootfs/volume objects in S3 |
 
 Self-hosting is operator-first:
 
@@ -213,6 +223,9 @@ For API changes, `pkg/apispec/openapi.yaml` is the source of truth. Generated SD
 
 - Sandbox0 is a runtime boundary, not a complete agent framework. Bring your own harness or use the documented use-case templates when you want a framework gateway to live inside the sandbox boundary.
 - Pause/resume does not preserve live processes, sockets, or memory. Runtime requests are routed to a committed generation; during lifecycle transitions they may wait for the transaction to commit and continue after resume.
+- Cold-claim latency includes Kubernetes scheduling, CNI setup, image locality, and, when necessary, node provisioning.
+- Sandbox0 selects an existing Kubernetes `RuntimeClass`; self-hosted operators must install and maintain `runsc` and the matching containerd handler when using gVisor outside a managed integration such as GKE Sandbox.
+- SandboxVolume numbers above are measured baselines, not an availability or performance SLA. Historical JuiceFS/EFS comparisons are not current same-environment provider tests.
 - Self-hosted production installs require deliberate choices for Kubernetes runtime isolation, CNI, PostgreSQL, S3-compatible storage, registry, ingress, and credential policy.
 - Browser and computer-use workloads require templates and integrations that include the browser/runtime tools you need.
 - Do not hand-edit generated OpenAPI or SDK output. Update `sandbox0/pkg/apispec/openapi.yaml`, regenerate, and synchronize.

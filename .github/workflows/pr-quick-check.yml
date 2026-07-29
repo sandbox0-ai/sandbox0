@@ -85,6 +85,15 @@ jobs:
           packages="$(go list -buildvcs=false ./... | grep -Ev '/tests/(e2e|integration)(/|$)')"
           GOTOOLCHAIN=go1.25.0+auto go test -buildvcs=false -race -count=1 $packages
 
+      - name: Enforce 100% billing admission statement coverage
+        shell: bash
+        run: |
+          profile="$(mktemp)"
+          trap 'rm -f -- "$profile"' EXIT
+          GOTOOLCHAIN=go1.25.0+auto go test -buildvcs=false -count=1 -coverprofile="$profile" ./pkg/gateway/admission
+          coverage="$(go tool cover -func="$profile" | awk '/^total:/ { print $3 }')"
+          test "$coverage" = "100.0%"
+
       - name: Show git diff on failure
         if: failure()
         shell: bash

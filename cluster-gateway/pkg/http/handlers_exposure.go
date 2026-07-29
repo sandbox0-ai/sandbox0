@@ -101,6 +101,9 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is not running and resume is disabled")
 			return
 		}
+		if !s.enforceRuntimeStartAdmission(c, sandbox.TeamID) {
+			return
+		}
 		if err := s.managerClient.ResumeSandbox(c.Request.Context(), sandboxID, "", sandbox.TeamID); err != nil {
 			s.logger.Warn("Auto resume failed", zap.String("sandbox_id", sandboxID), zap.Error(err))
 			if errors.Is(err, client.ErrSandboxResumeFailed) {

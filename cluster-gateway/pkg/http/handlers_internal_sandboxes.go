@@ -85,6 +85,9 @@ func (s *Server) resumeInternalSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
 		return
 	}
+	if !s.enforceRuntimeStartAdmission(c, authCtx.TeamID) {
+		return
+	}
 
 	if err := s.managerClient.ResumeSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
 		s.logger.Warn("Internal sandbox resume failed",

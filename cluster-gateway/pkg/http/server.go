@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -43,6 +44,7 @@ type ServerOption func(*serverOptions)
 type serverOptions struct {
 	sandboxObservabilityRepo sandboxobservability.Repository
 	meteringReader           gatewayhandlers.MeteringReader
+	admissionStore           admission.Store
 }
 
 func WithSandboxObservabilityRepository(repo sandboxobservability.Repository) ServerOption {
@@ -54,6 +56,12 @@ func WithSandboxObservabilityRepository(repo sandboxobservability.Repository) Se
 func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
 	return func(opts *serverOptions) {
 		opts.meteringReader = reader
+	}
+}
+
+func WithAdmissionStore(store admission.Store) ServerOption {
+	return func(opts *serverOptions) {
+		opts.admissionStore = store
 	}
 }
 
@@ -79,6 +87,7 @@ type Server struct {
 	requestLogger                            *middleware.RequestLogger
 	logger                                   *zap.Logger
 	meteringHandler                          *gatewayhandlers.MeteringHandler
+	admissionStore                           admission.Store
 	observabilityHandler                     *gatewayhandlers.SandboxObservabilityHandler
 	auditSigningKey                          ed25519.PrivateKey
 	auditDelivery                            *auditDelivery
@@ -297,6 +306,10 @@ func NewServer(
 	}
 
 	meteringHandler := gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger)
+	admissionStore := options.admissionStore
+	if admissionStore == nil && pool != nil {
+		admissionStore = admission.NewRepository(pool)
+	}
 	observabilityOptions := []gatewayhandlers.SandboxObservabilityHandlerOption(nil)
 	if cfg.SandboxObservability.AuditEnabled {
 		observabilityOptions = append(observabilityOptions, gatewayhandlers.WithAuditIntegrityPolicy(gatewayhandlers.AuditIntegrityPolicy{
@@ -358,6 +371,7 @@ func NewServer(
 		requestLogger:                            requestLogger,
 		logger:                                   logger,
 		meteringHandler:                          meteringHandler,
+		admissionStore:                           admissionStore,
 		observabilityHandler:                     observabilityHandler,
 		auditSigningKey:                          auditSigningPrivateKey,
 		auditDelivery:                            delivery,
@@ -491,6 +505,7 @@ func (s *Server) setupRoutes() {
 			// Apply internal auth to all v1 routes (requests come from regional-gateway)
 			v1.Use(s.authMiddleware.Authenticate())
 		}
+		v1.Use(admission.NewUsageMiddleware(s.admissionStore, s.logger, s.cfg.AdmissionRequireState))
 
 		// === Sandbox Management (→ Manager) ===
 		sandboxes := v1.Group("/sandboxes")
@@ -622,6 +637,7 @@ func (s *Server) setupRoutes() {
 	// Metering export is region-scoped and must remain available when
 	// cluster-gateway serves as the single-cluster public API entrypoint.
 	s.setupMeteringRoutes()
+	s.setupAdmissionRoutes()
 
 	// Host-based public exposure fallback (for non-/api paths)
 	s.router.NoRoute(s.handlePublicExposureNoRoute)
@@ -734,7 +750,7 @@ func (s *Server) setupMeteringRoutes() {
 		internal.Use(s.publicAuth.RequireSystemAdmin())
 	case authModeBoth:
 		internal.Use(s.compositeAuth.Authenticate())
-		internal.Use(requireMeteringAccess())
+		internal.Use(requireInternalOrSystemAdmin())
 	default:
 		internal.Use(s.authMiddleware.Authenticate())
 	}
@@ -745,7 +761,7 @@ func (s *Server) setupMeteringRoutes() {
 	}
 }
 
-func requireMeteringAccess() gin.HandlerFunc {
+func requireInternalOrSystemAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := gatewaymiddleware.GetAuthContext(c)
 		if authCtx == nil {
@@ -762,6 +778,22 @@ func requireMeteringAccess() gin.HandlerFunc {
 			"error": "system admin access required",
 		})
 	}
+}
+
+func (s *Server) setupAdmissionRoutes() {
+	handler := admission.NewHandler(s.admissionStore, s.logger)
+	internal := s.router.Group("/internal/v1")
+	switch normalizeAuthMode(s.cfg.AuthMode) {
+	case authModePublic:
+		internal.Use(s.publicAuth.Authenticate())
+		internal.Use(s.publicAuth.RequireSystemAdmin())
+	case authModeBoth:
+		internal.Use(s.compositeAuth.Authenticate())
+		internal.Use(requireInternalOrSystemAdmin())
+	default:
+		internal.Use(s.authMiddleware.Authenticate())
+	}
+	internal.PUT("/teams/:team_id/admission-state", handler.Put)
 }
 
 // Start starts the HTTP server

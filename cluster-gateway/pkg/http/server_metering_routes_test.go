@@ -56,6 +56,9 @@ func TestSetupRoutesMountsMeteringEndpointsInPublicMode(t *testing.T) {
 	if !hasRoute(server.router, "GET", "/internal/v1/metering/windows") {
 		t.Fatal("expected metering windows route to be mounted")
 	}
+	if !hasRoute(server.router, http.MethodPut, "/internal/v1/teams/:team_id/admission-state") {
+		t.Fatal("expected team admission state route to be mounted")
+	}
 }
 
 func TestSetupRoutesSkipsControlPlaneEndpointsInPublicMode(t *testing.T) {
@@ -121,6 +124,9 @@ func TestSetupRoutesMountsControlPlaneEndpointsInInternalMode(t *testing.T) {
 	}
 	if !hasRoute(server.router, "DELETE", "/internal/v1/teams/:team_id/quotas/:dimension") {
 		t.Fatal("expected internal mode to mount internal quota delete route")
+	}
+	if !hasRoute(server.router, http.MethodPut, "/internal/v1/teams/:team_id/admission-state") {
+		t.Fatal("expected internal mode to mount team admission state route")
 	}
 }
 

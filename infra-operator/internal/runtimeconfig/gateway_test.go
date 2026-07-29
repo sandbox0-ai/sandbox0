@@ -12,12 +12,13 @@ import (
 func TestApplyGatewayConfigCopiesJWTKeyFields(t *testing.T) {
 	src := infrav1alpha1.GlobalGatewayConfig{
 		GatewayConfig: infrav1alpha1.GatewayConfig{
-			JWTIssuer:         "https://api.sandbox0.ai",
-			JWTPrivateKeyPEM:  "private-pem",
-			JWTPublicKeyPEM:   "public-pem",
-			JWTPrivateKeyFile: "/runtime/secrets/jwt_private_key.pem",
-			JWTPublicKeyFile:  "/runtime/secrets/jwt_public_key.pem",
-			JWTAccessTokenTTL: metav1.Duration{Duration: 15 * time.Minute},
+			JWTIssuer:             "https://api.sandbox0.ai",
+			JWTPrivateKeyPEM:      "private-pem",
+			JWTPublicKeyPEM:       "public-pem",
+			JWTPrivateKeyFile:     "/runtime/secrets/jwt_private_key.pem",
+			JWTPublicKeyFile:      "/runtime/secrets/jwt_public_key.pem",
+			JWTAccessTokenTTL:     metav1.Duration{Duration: 15 * time.Minute},
+			AdmissionRequireState: true,
 		},
 	}
 
@@ -36,6 +37,9 @@ func TestApplyGatewayConfigCopiesJWTKeyFields(t *testing.T) {
 	}
 	if cfg.JWTPublicKeyFile != src.JWTPublicKeyFile {
 		t.Fatalf("expected public key file to be copied")
+	}
+	if !cfg.AdmissionRequireState {
+		t.Fatal("expected admission require state to be copied")
 	}
 }
 

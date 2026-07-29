@@ -7,8 +7,7 @@ import (
 )
 
 const (
-	ProductSandbox      = "sandbox"
-	ProductManagedAgent = "managed_agent"
+	ProductSandbox = "sandbox"
 
 	ProducerStorage = "storage-proxy.storage"
 
@@ -33,21 +32,18 @@ const (
 	WindowTypeSandboxObjectStoreGetRequests = "sandbox.object_store_get_requests"
 	WindowTypeSandboxObjectStorePutRequests = "sandbox.object_store_put_requests"
 
-	WindowTypeManagedAgentSessionRunningMilliseconds = "managed_agent.session_running_milliseconds"
-
 	WindowUnitMilliseconds    = "milliseconds"
 	WindowUnitBytes           = "bytes"
 	WindowUnitByteHours       = "byte_hours"
 	WindowUnitCount           = "count"
 	WindowUnitMiBMilliseconds = "mib_milliseconds"
 
-	SubjectTypeSandbox             = "sandbox"
-	SubjectTypeVolume              = "volume"
-	SubjectTypeSnapshot            = "snapshot"
-	SubjectTypeRootFS              = "rootfs"
-	SubjectTypeObjectStoreBucket   = "object_store_bucket"
-	SubjectTypeTemplate            = "template"
-	SubjectTypeManagedAgentSession = "managed_agent_session"
+	SubjectTypeSandbox           = "sandbox"
+	SubjectTypeVolume            = "volume"
+	SubjectTypeSnapshot          = "snapshot"
+	SubjectTypeRootFS            = "rootfs"
+	SubjectTypeObjectStoreBucket = "object_store_bucket"
+	SubjectTypeTemplate          = "template"
 )
 
 type Event struct {

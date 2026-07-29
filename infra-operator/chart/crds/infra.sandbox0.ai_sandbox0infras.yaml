@@ -3038,6 +3038,14 @@ spec:
                         default: {}
                         description: Config contains cluster-gateway specific configuration
                         properties:
+                          admissionRequireState:
+                            default: false
+                            description: |-
+                              AdmissionRequireState rejects usage-starting requests until a team
+                              admission record has been projected into the region database. Hosted
+                              prepaid deployments should enable it; self-hosted deployments default to
+                              allowing teams without an external billing projection.
+                            type: boolean
                           allowedCallers:
                             default:
                             - regional-gateway
@@ -3343,6 +3351,14 @@ spec:
                         default: {}
                         description: Config contains global-gateway specific configuration
                         properties:
+                          admissionRequireState:
+                            default: false
+                            description: |-
+                              AdmissionRequireState rejects usage-starting requests until a team
+                              admission record has been projected into the region database. Hosted
+                              prepaid deployments should enable it; self-hosted deployments default to
+                              allowing teams without an external billing projection.
+                            type: boolean
                           baseUrl:
                             default: http://localhost:8080
                             description: BaseURL sets the external base URL used by
@@ -3964,6 +3980,14 @@ spec:
                         default: {}
                         description: Config contains regional-gateway specific configuration
                         properties:
+                          admissionRequireState:
+                            default: false
+                            description: |-
+                              AdmissionRequireState rejects usage-starting requests until a team
+                              admission record has been projected into the region database. Hosted
+                              prepaid deployments should enable it; self-hosted deployments default to
+                              allowing teams without an external billing projection.
+                            type: boolean
                           authMode:
                             default: self_hosted
                             enum:

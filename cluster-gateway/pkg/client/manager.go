@@ -3,7 +3,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +23,9 @@ var (
 
 	// ErrManagerUnavailable indicates the manager service is unreachable or returned an unexpected error.
 	ErrManagerUnavailable = errors.New("manager service unavailable")
+
+	// ErrSandboxResumeFailed indicates manager returned a completed, unsuccessful resume response.
+	ErrSandboxResumeFailed = errors.New("sandbox resume failed")
 )
 
 // ManagerClient provides methods to call manager APIs
@@ -209,12 +211,7 @@ func (c *ManagerClient) ResumeSandbox(ctx context.Context, sandboxID, userID, te
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		var payload map[string]any
-		_ = json.Unmarshal(body, &payload)
-		if msg, ok := payload["message"].(string); ok && msg != "" {
-			return fmt.Errorf("%w: %s", ErrManagerUnavailable, msg)
-		}
-		return fmt.Errorf("%w: unexpected status code %d", ErrManagerUnavailable, resp.StatusCode)
+		return sandboxResumeStatusError(resp.StatusCode, body)
 	}
 	return nil
 }
@@ -236,4 +233,11 @@ func managerUnavailableStatusError(statusCode int, body []byte) error {
 		return fmt.Errorf("%w: %s", ErrManagerUnavailable, message)
 	}
 	return fmt.Errorf("%w: unexpected status code %d: %s", ErrManagerUnavailable, statusCode, string(body))
+}
+
+func sandboxResumeStatusError(statusCode int, body []byte) error {
+	if message, ok := spec.DecodeErrorMessage(body); ok {
+		return fmt.Errorf("%w: %s", ErrSandboxResumeFailed, message)
+	}
+	return fmt.Errorf("%w: unexpected status code %d: %s", ErrSandboxResumeFailed, statusCode, string(body))
 }

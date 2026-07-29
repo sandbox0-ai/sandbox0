@@ -233,6 +233,7 @@ func main() {
 	// Create operator
 	operator := controller.NewOperator(
 		k8sClient,
+		crdClient,
 		podInformer.Informer(),
 		replicaSetInformer,
 		secretInformer,

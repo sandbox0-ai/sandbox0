@@ -103,7 +103,11 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		}
 		if err := s.managerClient.ResumeSandbox(c.Request.Context(), sandboxID, "", sandbox.TeamID); err != nil {
 			s.logger.Warn("Auto resume failed", zap.String("sandbox_id", sandboxID), zap.Error(err))
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+			if errors.Is(err, client.ErrSandboxResumeFailed) {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeSandboxResumeFailed, "sandbox resume failed")
+			} else {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+			}
 			return
 		}
 		s.invalidateSandboxInternalCache(c.Request.Context(), sandboxID)

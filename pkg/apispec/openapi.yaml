@@ -4907,7 +4907,9 @@ components:
           description: |
             Controls whether supported inbound API or public exposure requests may automatically
             make an inactive sandbox available. This setting does not control platform-initiated
-            runtime fault recovery.
+            runtime fault recovery. A supported access request returns `503 unavailable` with
+            `sandbox is waking up` when an accepted resume has not committed yet. It returns
+            `503 sandbox_resume_failed` when that resume attempt has ended unsuccessfully.
         services:
           type: array
           items:
@@ -5289,7 +5291,9 @@ components:
           description: |
             Controls whether supported inbound API or public exposure requests may automatically
             make an inactive sandbox available. This setting does not control platform-initiated
-            runtime fault recovery.
+            runtime fault recovery. A supported access request returns `503 unavailable` with
+            `sandbox is waking up` when an accepted resume has not committed yet. It returns
+            `503 sandbox_resume_failed` when that resume attempt has ended unsuccessfully.
         services:
           type: array
           items:

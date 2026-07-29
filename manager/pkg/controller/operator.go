@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	clientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
@@ -21,6 +22,7 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 )
 
@@ -31,6 +33,7 @@ const (
 // Operator is the main controller for SandboxTemplate CRD
 type Operator struct {
 	k8sClient      kubernetes.Interface
+	crdClient      clientset.Interface
 	podLister      corelisters.PodLister
 	podsSynced     cache.InformerSynced
 	poolManager    *PoolManager
@@ -95,6 +98,7 @@ func (t *TemplateListerImpl) Get(namespace, name string) (*v1alpha1.SandboxTempl
 // NewOperator creates a new Operator
 func NewOperator(
 	k8sClient kubernetes.Interface,
+	crdClient clientset.Interface,
 	podInformer cache.SharedIndexInformer,
 	replicaSetInformer cache.SharedIndexInformer,
 	secretInformer cache.SharedIndexInformer,
@@ -116,6 +120,7 @@ func NewOperator(
 
 	op := &Operator{
 		k8sClient:        k8sClient,
+		crdClient:        crdClient,
 		podLister:        podLister,
 		podsSynced:       podInformer.HasSynced,
 		poolManager:      poolManager,
@@ -338,25 +343,95 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		}
 	}
 
-	// Update status if changed
-	if template.Status.IdleCount != idleCount || template.Status.ActiveCount != activeCount {
-		template.Status.IdleCount = idleCount
-		template.Status.ActiveCount = activeCount
-		template.Status.LastUpdateTime = metav1.Now()
+	if err := op.persistTemplateStatus(ctx, template.Namespace, template.Name, idleCount, activeCount); err != nil {
+		return err
+	}
 
-		// Update conditions
-		template.Status.Conditions = op.computeConditions(template, idleCount, activeCount)
+	return nil
+}
 
-		// Note: In a real implementation, we should use a status subresource update
-		// For now, we'll just log the status
+// persistTemplateStatus writes pool observations without mutating informer
+// objects or overwriting status owned by another controller.
+func (op *Operator) persistTemplateStatus(
+	ctx context.Context,
+	namespace string,
+	name string,
+	idleCount int32,
+	activeCount int32,
+) error {
+	if op.crdClient == nil {
+		return fmt.Errorf("sandbox template client is not configured")
+	}
+
+	templates := op.crdClient.Sandbox0V1alpha1().SandboxTemplates(namespace)
+	updated := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := templates.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		conditions := op.computeConditions(current, idleCount, activeCount)
+		preserveConditionTransitionTimes(current.Status.Conditions, conditions)
+		if current.Status.IdleCount == idleCount &&
+			current.Status.ActiveCount == activeCount &&
+			templateConditionsEqual(current.Status.Conditions, conditions) {
+			return nil
+		}
+
+		next := current.DeepCopy()
+		next.Status.IdleCount = idleCount
+		next.Status.ActiveCount = activeCount
+		next.Status.Conditions = conditions
+		next.Status.LastUpdateTime = metav1.Now()
+		if _, err := templates.Update(ctx, next, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+		updated = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if updated {
 		op.logger.Info("Template status updated",
-			zap.String("template", template.Name),
+			zap.String("template", name),
 			zap.Int32("idle", idleCount),
 			zap.Int32("active", activeCount),
 		)
 	}
-
 	return nil
+}
+
+func preserveConditionTransitionTimes(
+	current []v1alpha1.SandboxTemplateCondition,
+	next []v1alpha1.SandboxTemplateCondition,
+) {
+	for i := range next {
+		for _, condition := range current {
+			if condition.Type == next[i].Type &&
+				condition.Status == next[i].Status &&
+				!condition.LastTransitionTime.IsZero() {
+				next[i].LastTransitionTime = condition.LastTransitionTime
+				break
+			}
+		}
+	}
+}
+
+func templateConditionsEqual(
+	left []v1alpha1.SandboxTemplateCondition,
+	right []v1alpha1.SandboxTemplateCondition,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // computeConditions computes the conditions for a template

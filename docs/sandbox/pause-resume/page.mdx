@@ -195,6 +195,11 @@ Common auto-resume entrypoints:
 
 For a paused sandbox, auto-resume creates a new runtime pod for the same sandbox identity and restores the saved rootfs checkpoint before the sandbox is used. Public service URLs remain stable until the sandbox is explicitly deleted or `hard_ttl` expires.
 
+Supported runtime access distinguishes an accepted resume from a failed attempt:
+
+- `503 unavailable` with `sandbox is waking up` means the accepted lifecycle transition has not committed yet; poll sandbox details before retrying the runtime request
+- `503 sandbox_resume_failed` with `sandbox resume failed` means that resume attempt ended unsuccessfully; clients may perform a bounded retry, but should not treat the failed attempt as still in progress
+
 Running PIDs, memory, sockets, and client attachments do not survive pause. A [supervised session](/docs/sandbox/session-supervisor) keeps its logical identity and retained journal, then follows its `runtime_recovery` policy in the new runtime generation.
 
 See [Sandbox Services](/docs/sandbox/services), [Sandbox Functions](/docs/sandbox/functions), and [SSH](/docs/sandbox/ssh) for the user-facing flows.

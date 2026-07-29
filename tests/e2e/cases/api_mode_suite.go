@@ -98,6 +98,12 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			var err error
 			session, cleanup, err = e2eutils.NewAPISession(env, false)
 			Expect(err).NotTo(HaveOccurred())
+			// Keep the API tunnel alive for spec-level deferred cleanups.
+			DeferCleanup(func() {
+				if cleanup != nil {
+					cleanup()
+				}
+			})
 
 			password, err := framework.GetSecretValue(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "admin-password", "password")
 			Expect(err).NotTo(HaveOccurred())
@@ -123,9 +129,6 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			}
 			if sshFixtureCleanup != nil {
 				sshFixtureCleanup()
-			}
-			if cleanup != nil {
-				cleanup()
 			}
 		})
 

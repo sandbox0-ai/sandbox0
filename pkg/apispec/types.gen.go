@@ -2260,7 +2260,9 @@ type SandboxAuditResource struct {
 type SandboxConfig struct {
 	// AutoResume Controls whether supported inbound API or public exposure requests may automatically
 	// make an inactive sandbox available. This setting does not control platform-initiated
-	// runtime fault recovery.
+	// runtime fault recovery. A supported access request returns `503 unavailable` with
+	// `sandbox is waking up` when an accepted resume has not committed yet. It returns
+	// `503 sandbox_resume_failed` when that resume attempt has ended unsuccessfully.
 	AutoResume *bool              `json:"auto_resume,omitempty"`
 	EnvVars    *map[string]string `json:"env_vars,omitempty"`
 
@@ -2640,7 +2642,9 @@ type SandboxTemplateStatus struct {
 type SandboxUpdateConfig struct {
 	// AutoResume Controls whether supported inbound API or public exposure requests may automatically
 	// make an inactive sandbox available. This setting does not control platform-initiated
-	// runtime fault recovery.
+	// runtime fault recovery. A supported access request returns `503 unavailable` with
+	// `sandbox is waking up` when an accepted resume has not committed yet. It returns
+	// `503 sandbox_resume_failed` when that resume attempt has ended unsuccessfully.
 	AutoResume *bool `json:"auto_resume,omitempty"`
 
 	// EnvVars Sandbox-level environment variables used as defaults for new procd-managed

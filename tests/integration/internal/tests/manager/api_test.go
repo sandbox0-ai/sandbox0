@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -1218,6 +1219,22 @@ func (t memorySandboxStoreTxForManagerIntegration) GetActiveLifecycleTxn(_ conte
 		}
 	}
 	return nil, nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) ListRecentLifecycleTxns(_ context.Context, sandboxID, kind string, limit int) ([]*service.SandboxLifecycleTxn, error) {
+	txns := make([]*service.SandboxLifecycleTxn, 0, len(t.store.lifecycleTxns))
+	for _, txn := range t.store.lifecycleTxns {
+		if txn != nil && txn.SandboxID == sandboxID && txn.Kind == kind {
+			txns = append(txns, cloneSandboxLifecycleTxnForManagerIntegration(txn))
+		}
+	}
+	sort.Slice(txns, func(i, j int) bool {
+		return txns[i].Epoch > txns[j].Epoch
+	})
+	if limit > 0 && len(txns) > limit {
+		txns = txns[:limit]
+	}
+	return txns, nil
 }
 
 func (t memorySandboxStoreTxForManagerIntegration) BeginLifecycleTxn(_ context.Context, txn *service.SandboxLifecycleTxn) error {

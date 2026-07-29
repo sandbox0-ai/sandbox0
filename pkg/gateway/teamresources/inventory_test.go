@@ -90,6 +90,9 @@ func TestDiscoveryHelpers(t *testing.T) {
 	if !isIgnoredDiscoveredTable("shared_gateway", "team_members") {
 		t.Fatal("team_members should be ignored because team deletion cascades membership")
 	}
+	if !isIgnoredDiscoveredTable("shared_gateway", "team_admission_states") {
+		t.Fatal("team_admission_states should be ignored because team deletion cascades admission state")
+	}
 	if isIgnoredDiscoveredTable("manager", "sandboxes") {
 		t.Fatal("sandboxes should not be ignored")
 	}

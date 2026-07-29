@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -542,6 +543,14 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 		spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 	case errors.Is(err, service.ErrSandboxCheckpointRequiresCtld):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox checkpoint pause requires ctld")
+	case errors.Is(err, service.ErrSandboxResumeBackoff):
+		retryAfter := service.SandboxResumeRetryAfter(err)
+		retryAfterSeconds := int((retryAfter + time.Second - 1) / time.Second)
+		if retryAfterSeconds < 1 {
+			retryAfterSeconds = 1
+		}
+		c.Header("Retry-After", strconv.Itoa(retryAfterSeconds))
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox resume is temporarily backing off")
 	case errors.Is(err, context.DeadlineExceeded):
 		spec.JSONError(c, http.StatusGatewayTimeout, spec.CodeUnavailable, fmt.Sprintf("timed out waiting for sandbox to %s", action))
 	case errors.Is(err, context.Canceled):

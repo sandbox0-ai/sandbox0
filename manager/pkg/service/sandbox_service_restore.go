@@ -19,6 +19,39 @@ import (
 
 const sandboxLifecycleWaitInterval = 100 * time.Millisecond
 
+const (
+	sandboxResumeFailureHistoryLimit   = 8
+	sandboxResumeFailureInitialBackoff = 15 * time.Second
+	sandboxResumeFailureMaxBackoff     = 2 * time.Minute
+)
+
+// ErrSandboxResumeBackoff indicates that a recent failed resume is temporarily
+// suppressing another runtime claim for the same sandbox.
+var ErrSandboxResumeBackoff = errors.New("sandbox resume is backing off")
+
+type sandboxResumeBackoffError struct {
+	retryAfter time.Duration
+	failures   int
+}
+
+func (e *sandboxResumeBackoffError) Error() string {
+	return fmt.Sprintf("%s after %d consecutive failures; retry after %s",
+		ErrSandboxResumeBackoff.Error(), e.failures, e.retryAfter.Round(time.Second))
+}
+
+func (e *sandboxResumeBackoffError) Unwrap() error {
+	return ErrSandboxResumeBackoff
+}
+
+// SandboxResumeRetryAfter returns the remaining claim backoff carried by err.
+func SandboxResumeRetryAfter(err error) time.Duration {
+	var backoffErr *sandboxResumeBackoffError
+	if !errors.As(err, &backoffErr) {
+		return 0
+	}
+	return backoffErr.retryAfter
+}
+
 // ResumePausedSandboxRuntime creates a new runtime for a paused durable sandbox
 // and restores the latest writable rootfs checkpoint. A terminal runtime first
 // completes crash recovery through the durable pause transaction.
@@ -126,6 +159,21 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			}
 			if locked.Status != SandboxStatusPaused {
 				return k8serrors.NewConflict(corev1.Resource("sandbox"), sandboxID, fmt.Errorf("sandbox runtime for status %q is not available", locked.Status))
+			}
+			recentResumes, err := tx.ListRecentLifecycleTxns(
+				lockCtx,
+				sandboxID,
+				SandboxLifecycleKindResume,
+				sandboxResumeFailureHistoryLimit,
+			)
+			if err != nil {
+				return err
+			}
+			if retryAfter, failures := sandboxResumeFailureRetryAfter(recentResumes, locked.RuntimeGeneration, s.now()); retryAfter > 0 {
+				return &sandboxResumeBackoffError{
+					retryAfter: retryAfter,
+					failures:   failures,
+				}
 			}
 
 			resumeTemplate, err := s.templateForSandboxRecord(locked)
@@ -249,6 +297,46 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 	}
 	s.enqueueHotClaimReservation(restoredPod)
 	return s.GetSandbox(ctx, sandboxID)
+}
+
+func sandboxResumeFailureRetryAfter(txns []*SandboxLifecycleTxn, runtimeGeneration int64, now time.Time) (time.Duration, int) {
+	failures := 0
+	var latestFailureAt time.Time
+	for _, txn := range txns {
+		if txn == nil ||
+			txn.Kind != SandboxLifecycleKindResume ||
+			txn.Phase != SandboxLifecyclePhaseAborted ||
+			txn.FromGeneration != runtimeGeneration {
+			break
+		}
+		failureAt := txn.AbortedAt
+		if failureAt.IsZero() {
+			failureAt = txn.UpdatedAt
+		}
+		if failureAt.IsZero() {
+			break
+		}
+		if failures == 0 {
+			latestFailureAt = failureAt
+		}
+		failures++
+	}
+	if failures == 0 {
+		return 0, 0
+	}
+
+	backoff := sandboxResumeFailureInitialBackoff
+	for i := 1; i < failures && backoff < sandboxResumeFailureMaxBackoff; i++ {
+		backoff *= 2
+		if backoff > sandboxResumeFailureMaxBackoff {
+			backoff = sandboxResumeFailureMaxBackoff
+		}
+	}
+	retryAfter := latestFailureAt.Add(backoff).Sub(now)
+	if retryAfter <= 0 {
+		return 0, failures
+	}
+	return retryAfter, failures
 }
 
 func (s *SandboxService) recordResumeLifecycleRuntime(ctx context.Context, sandboxID string, txn *SandboxLifecycleTxn, pod *corev1.Pod) error {

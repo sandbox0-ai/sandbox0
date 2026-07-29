@@ -854,10 +854,18 @@ func declaredVolumeMountsByPath(template *v1alpha1.SandboxTemplate) map[string]v
 	return out
 }
 
-func declaredVolumeMountDirs(template *v1alpha1.SandboxTemplate) []string {
+func unboundVolumeMountDirs(template *v1alpha1.SandboxTemplate, mounts []ClaimMount) []string {
 	declared := declaredVolumeMountsByPath(template)
 	if len(declared) == 0 {
 		return nil
+	}
+	for i := range mounts {
+		boundPath := filepath.Clean(strings.TrimSpace(mounts[i].MountPoint))
+		for mountPath := range declared {
+			if mountPath == boundPath || strings.HasPrefix(mountPath, boundPath+string(filepath.Separator)) {
+				delete(declared, mountPath)
+			}
+		}
 	}
 	dirs := make([]string, 0, len(declared))
 	for mountPath := range declared {
@@ -1694,8 +1702,11 @@ func (s *SandboxService) initializeProcd(
 				s.config.PublicRootDomain,
 			),
 		}),
-		Webhook:   webhookConfig,
-		MountDirs: declaredVolumeMountDirs(template),
+		Webhook: webhookConfig,
+		// Bound portals are already mounted by ctld. Touching one here can block
+		// initialization on its FUSE backend; procd only needs to materialize
+		// optional mount paths that were not bound for this claim.
+		MountDirs: unboundVolumeMountDirs(template, req.Mounts),
 	}
 
 	var initErr error

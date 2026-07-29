@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -348,6 +349,24 @@ func (t memorySandboxStoreTx) GetActiveLifecycleTxn(_ context.Context, sandboxID
 	return nil, nil
 }
 
+func (t memorySandboxStoreTx) ListRecentLifecycleTxns(_ context.Context, sandboxID, kind string, limit int) ([]*SandboxLifecycleTxn, error) {
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
+	txns := make([]*SandboxLifecycleTxn, 0, len(t.store.lifecycleTxns))
+	for _, txn := range t.store.lifecycleTxns {
+		if txn != nil && txn.SandboxID == sandboxID && txn.Kind == kind {
+			txns = append(txns, cloneSandboxLifecycleTxn(txn))
+		}
+	}
+	sort.Slice(txns, func(i, j int) bool {
+		return txns[i].Epoch > txns[j].Epoch
+	})
+	if limit > 0 && len(txns) > limit {
+		txns = txns[:limit]
+	}
+	return txns, nil
+}
+
 func (t memorySandboxStoreTx) BeginLifecycleTxn(_ context.Context, txn *SandboxLifecycleTxn) error {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
@@ -436,6 +455,8 @@ func (t memorySandboxStoreTx) AbortLifecycleTxn(_ context.Context, txnID, reason
 	if txn := t.store.lifecycleTxns[txnID]; txn != nil && sandboxLifecyclePhaseActive(txn.Phase) {
 		txn.Phase = SandboxLifecyclePhaseAborted
 		txn.Error = reason
+		txn.AbortedAt = time.Now().UTC()
+		txn.UpdatedAt = txn.AbortedAt
 	}
 	return nil
 }
@@ -925,6 +946,98 @@ func TestResumeSandboxSingleflightPreventsConcurrentSandboxLocks(t *testing.T) {
 	store.mu.Unlock()
 	if lockCalls != 1 {
 		t.Fatalf("sandbox lock calls after joined resumes = %d, want 1", lockCalls)
+	}
+}
+
+func TestResumePausedSandboxRuntimeBacksOffBeforeClaimingAnotherPod(t *testing.T) {
+	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-a": {
+				ID:                "sandbox-a",
+				TeamID:            "team-a",
+				UserID:            "user-a",
+				TemplateID:        "default",
+				TemplateName:      "default",
+				TemplateNamespace: "tpl-default",
+				Status:            SandboxStatusPaused,
+				RuntimeGeneration: 3,
+				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+			},
+		},
+		lifecycleTxns: map[string]*SandboxLifecycleTxn{
+			"resume-failed": {
+				ID:             "resume-failed",
+				SandboxID:      "sandbox-a",
+				Kind:           SandboxLifecycleKindResume,
+				Phase:          SandboxLifecyclePhaseAborted,
+				Epoch:          4,
+				FromGeneration: 3,
+				ToGeneration:   4,
+				AbortedAt:      now.Add(-5 * time.Second),
+			},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    runtimeIdentityPodLister(t),
+		sandboxStore: store,
+		config:       SandboxServiceConfig{ProcdPort: 49983},
+		clock:        fixedClock{now: now},
+		logger:       zap.NewNop(),
+	}
+
+	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
+	if !errors.Is(err, ErrSandboxResumeBackoff) {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want ErrSandboxResumeBackoff", err)
+	}
+	if retryAfter := SandboxResumeRetryAfter(err); retryAfter != 10*time.Second {
+		t.Fatalf("SandboxResumeRetryAfter() = %s, want 10s", retryAfter)
+	}
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource == "pods" &&
+			(action.GetVerb() == "patch" || action.GetVerb() == "create" || action.GetVerb() == "delete") {
+			t.Fatalf("unexpected pod mutation during resume backoff: %#v", action)
+		}
+	}
+}
+
+func TestSandboxResumeFailureRetryAfterUsesConsecutiveExponentialBackoff(t *testing.T) {
+	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	txns := []*SandboxLifecycleTxn{
+		{
+			Kind:           SandboxLifecycleKindResume,
+			Phase:          SandboxLifecyclePhaseAborted,
+			FromGeneration: 3,
+			AbortedAt:      now.Add(-10 * time.Second),
+		},
+		{
+			Kind:           SandboxLifecycleKindResume,
+			Phase:          SandboxLifecyclePhaseAborted,
+			FromGeneration: 3,
+			AbortedAt:      now.Add(-time.Minute),
+		},
+		{
+			Kind:           SandboxLifecycleKindResume,
+			Phase:          SandboxLifecyclePhaseAborted,
+			FromGeneration: 3,
+			AbortedAt:      now.Add(-2 * time.Minute),
+		},
+	}
+
+	retryAfter, failures := sandboxResumeFailureRetryAfter(txns, 3, now)
+	if failures != 3 {
+		t.Fatalf("failure count = %d, want 3", failures)
+	}
+	if retryAfter != 50*time.Second {
+		t.Fatalf("retry after = %s, want 50s", retryAfter)
+	}
+
+	txns[1].Phase = SandboxLifecyclePhaseCommitted
+	retryAfter, failures = sandboxResumeFailureRetryAfter(txns, 3, now)
+	if failures != 1 || retryAfter != 5*time.Second {
+		t.Fatalf("retry after committed boundary = %s with %d failures, want 5s with 1", retryAfter, failures)
 	}
 }
 

@@ -178,6 +178,7 @@ type SandboxStoreTx interface {
 	MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
 	GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error)
+	ListRecentLifecycleTxns(ctx context.Context, sandboxID, kind string, limit int) ([]*SandboxLifecycleTxn, error)
 	BeginLifecycleTxn(ctx context.Context, txn *SandboxLifecycleTxn) error
 	SetLifecycleTxnRuntime(ctx context.Context, txnID, namespace, podName string) error
 	UpdateLifecycleTxnPhase(ctx context.Context, txnID, phase string) error
@@ -674,6 +675,35 @@ func (t sandboxStoreTx) SaveRootFSState(ctx context.Context, state *SandboxRootF
 
 func (t sandboxStoreTx) GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {
 	return getActiveLifecycleTxn(ctx, t.tx, sandboxID)
+}
+
+func (t sandboxStoreTx) ListRecentLifecycleTxns(ctx context.Context, sandboxID, kind string, limit int) ([]*SandboxLifecycleTxn, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := t.tx.Query(ctx, lifecycleTxnSelectSQL()+`
+		WHERE sandbox_id = $1
+			AND kind = $2
+		ORDER BY epoch DESC
+		LIMIT $3
+	`, strings.TrimSpace(sandboxID), strings.TrimSpace(kind), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recent lifecycle txns: %w", err)
+	}
+	defer rows.Close()
+
+	txns := make([]*SandboxLifecycleTxn, 0, limit)
+	for rows.Next() {
+		txn, err := scanLifecycleTxnRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		txns = append(txns, txn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent lifecycle txns: %w", err)
+	}
+	return txns, nil
 }
 
 func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifecycleTxn) error {

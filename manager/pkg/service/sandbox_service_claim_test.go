@@ -2126,6 +2126,43 @@ func TestValidateClaimMountsForTemplateAllowsPartialDeclaredMountPoints(t *testi
 	}
 }
 
+func TestUnboundVolumeMountDirsExcludesBoundPortals(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{
+				{Name: "workspace", MountPath: "/workspace"},
+				{Name: "cache", MountPath: "/workspace/cache"},
+				{Name: "scratch", MountPath: "/scratch"},
+				{Name: "data", MountPath: "/data"},
+			},
+		},
+	}
+
+	got := unboundVolumeMountDirs(template, []ClaimMount{
+		{SandboxVolumeID: "vol-workspace", MountPoint: "/workspace/project/.."},
+		{SandboxVolumeID: "vol-data", MountPoint: "/data"},
+	})
+	if joined := strings.Join(got, ","); joined != "/scratch" {
+		t.Fatalf("unboundVolumeMountDirs() = %q, want /scratch", joined)
+	}
+}
+
+func TestUnboundVolumeMountDirsKeepsOmittedOptionalMounts(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			VolumeMounts: []v1alpha1.VolumeMountSpec{
+				{Name: "workspace", MountPath: "/workspace"},
+				{Name: "data", MountPath: "/data"},
+			},
+		},
+	}
+
+	got := unboundVolumeMountDirs(template, nil)
+	if joined := strings.Join(got, ","); joined != "/data,/workspace" {
+		t.Fatalf("unboundVolumeMountDirs() = %q, want /data,/workspace", joined)
+	}
+}
+
 func TestValidateClaimMountsForTemplateAllowsDeclaredMountPoint(t *testing.T) {
 	req := &ClaimRequest{
 		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}},

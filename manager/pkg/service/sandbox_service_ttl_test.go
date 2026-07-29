@@ -215,8 +215,8 @@ func TestPersistUpdatedSandboxPodStoresRuntimeMetadata(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Labels[controller.LabelTemplateID] = "default"
 	pod.Labels[controller.LabelTemplateLogicalID] = "default"
-	pod.Labels[controller.LabelOwnerKind] = "managed-agent"
-	pod.Annotations[controller.AnnotationOwnerKind] = "managed-agent"
+	pod.Labels[controller.LabelOwnerKind] = "automation"
+	pod.Annotations[controller.AnnotationOwnerKind] = "automation"
 	pod.Annotations[controller.AnnotationConfig] = `{"ttl":300}`
 	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-volume-1"
 
@@ -234,7 +234,7 @@ func TestPersistUpdatedSandboxPodStoresRuntimeMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, record)
 	assert.Equal(t, "webhook-volume-1", record.WebhookStateVolumeID)
-	assert.Equal(t, "managed-agent", record.OwnerKind)
+	assert.Equal(t, "automation", record.OwnerKind)
 }
 
 func TestRefreshSandboxPersistsExpirationRecord(t *testing.T) {

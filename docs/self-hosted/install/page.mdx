@@ -339,6 +339,17 @@ spec:
             containerdHostDataRoot: /var/lib/containerd/sandbox0
 ```
 
+`ctld` keeps volume portal WAL, HA state, and its rootfs cache under `/var/lib/sandbox0/ctld` by default. On nodes with a dedicated data disk, place that directory on the data disk too:
+
+```yaml
+spec:
+    services:
+        ctld:
+            hostDataRoot: /var/lib/containerd/sandbox0/ctld
+```
+
+If ctld has already run on the node, stop both HA slots and migrate the complete existing directory before changing `hostDataRoot`. Only the rootfs cache is disposable; the volume portal WAL and HA state are not.
+
 For large writable rootfs checkpoints, ctld uses a disposable node-local object cache capped at `20Gi` per node by default. Tune the cap and free-space floor for your node disk:
 
 ```yaml

@@ -37,8 +37,10 @@ type Reconciler struct {
 
 const (
 	containerdDataMountPath        = "/host-var-lib/containerd"
+	ctldDataMountPath              = "/var/lib/sandbox0/ctld"
 	defaultContainerdHostDataRoot  = "/var/lib/containerd"
 	defaultContainerdHostStateRoot = "/run/containerd"
+	defaultCtldHostDataRoot        = ctldDataMountPath
 	ctldProbeTimeoutSeconds        = 15
 	ctldProbeFailureThreshold      = 12
 	ctldTerminationGraceSeconds    = int64(45)
@@ -109,6 +111,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	containerdHostDataRoot := ctldContainerdHostDataRoot(infra)
+	ctldDataHostRoot := ctldHostDataRoot(infra)
 	args := ctldArgs(infra, containerdHostDataRoot)
 	terminationGraceSeconds := ctldTerminationGraceSeconds
 	bidirectional := corev1.MountPropagationBidirectional
@@ -117,7 +120,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "config", MountPath: "/config/config.yaml", SubPath: "config.yaml", ReadOnly: true},
 		{Name: "csi-plugin", MountPath: "/csi"},
 		{Name: "kubelet", MountPath: "/var/lib/kubelet", MountPropagation: &bidirectional},
-		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
+		{Name: "ctld-data", MountPath: ctldDataMountPath},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
 		{Name: "containerd-data", MountPath: containerdDataMountPath, ReadOnly: true},
 		{Name: netdsvc.RunVolumeName, MountPath: netdsvc.RunMountDirectory},
@@ -150,7 +153,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Name: "ctld-data",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
-					Path: "/var/lib/sandbox0/ctld",
+					Path: ctldDataHostRoot,
 					Type: &hostPathDirectoryOrCreate,
 				},
 			},
@@ -702,7 +705,7 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string)
 		"-containerd-host-root=" + defaultContainerdHostStateRoot,
 		"-containerd-data-root=" + containerdDataMountPath,
 		"-containerd-host-data-root=" + containerdHostDataRoot,
-		"-volume-portal-root=/var/lib/sandbox0/ctld",
+		"-volume-portal-root=" + ctldDataMountPath,
 		"-kubelet-pods-root=/var/lib/kubelet/pods",
 		"-csi-socket=/csi/csi.sock",
 	}
@@ -732,6 +735,16 @@ func ctldContainerdHostDataRoot(infra *infrav1alpha1.Sandbox0Infra) string {
 		return root
 	}
 	return defaultContainerdHostDataRoot
+}
+
+func ctldHostDataRoot(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Ctld == nil {
+		return defaultCtldHostDataRoot
+	}
+	if root := strings.TrimSpace(infra.Spec.Services.Ctld.HostDataRoot); root != "" {
+		return root
+	}
+	return defaultCtldHostDataRoot
 }
 
 func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]string) error {

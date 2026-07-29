@@ -422,7 +422,18 @@ spec:
             containerdHostDataRoot: /var/lib/containerd/sandbox0
 ```
 
-`ctld` also keeps a disposable node-local rootfs object cache under its host data directory. This cache accelerates pause/resume when the restoring ctld already has the needed rootfs layer objects. The default cap is `20Gi` per ctld node. Set `rootfsObjectCacheMaxBytes: "0"` to disable it, or tune the GC fields to fit your node disk:
+Separately, `ctld` stores volume portal WAL, HA state, and its node-local rootfs cache under `/var/lib/sandbox0/ctld` by default. Put this directory on durable node storage, not a capacity-constrained system disk. On nodes with a dedicated data disk, set `hostDataRoot` to a directory on that disk:
+
+```yaml
+spec:
+    services:
+        ctld:
+            hostDataRoot: /var/lib/containerd/sandbox0/ctld
+```
+
+Changing `hostDataRoot` does not migrate existing data. Cordon the node, stop both ctld HA slots, copy the complete old directory, and then update the setting. The volume portal WAL and HA state are not disposable.
+
+The rootfs object cache inside that directory is disposable and accelerates pause/resume when the restoring ctld already has the needed rootfs layer objects. The default cap is `20Gi` per ctld node. Set `rootfsObjectCacheMaxBytes: "0"` to disable it, or tune the GC fields to fit your node disk:
 
 ```yaml
 spec:

@@ -3312,6 +3312,14 @@ spec:
                           sandbox worker data disk.
                         pattern: ^/.*
                         type: string
+                      hostDataRoot:
+                        default: /var/lib/sandbox0/ctld
+                        description: |-
+                          HostDataRoot is the node path mounted at /var/lib/sandbox0/ctld.
+                          It stores volume portal WAL, HA state, and the node-local rootfs cache.
+                          Migrate the existing directory while ctld is stopped before changing it.
+                        pattern: ^/.*
+                        type: string
                       rootfsObjectCacheMaxAge:
                         description: |-
                           RootFSObjectCacheMaxAge evicts cache entries older than this age. Zero

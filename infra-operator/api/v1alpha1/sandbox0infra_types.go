@@ -1371,6 +1371,14 @@ type ManagerServiceConfig struct {
 
 // CtldServiceConfig defines configuration for the ctld daemonset.
 type CtldServiceConfig struct {
+	// HostDataRoot is the node path mounted at /var/lib/sandbox0/ctld.
+	// It stores volume portal WAL, HA state, and the node-local rootfs cache.
+	// Migrate the existing directory while ctld is stopped before changing it.
+	// +optional
+	// +kubebuilder:default=/var/lib/sandbox0/ctld
+	// +kubebuilder:validation:Pattern=`^/.*`
+	HostDataRoot string `json:"hostDataRoot,omitempty"`
+
 	// ContainerdHostDataRoot is the containerd data root path on the host.
 	// Set this when nodes use a non-default containerd root such as a dedicated
 	// sandbox worker data disk.

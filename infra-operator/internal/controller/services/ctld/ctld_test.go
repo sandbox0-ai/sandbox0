@@ -618,19 +618,24 @@ func TestReconcileUsesDefaultContainerdHostDataRoot(t *testing.T) {
 	args := ds.Spec.Template.Spec.Containers[0].Args
 	assertContainsArg(t, args, "-containerd-host-data-root=/var/lib/containerd")
 	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/containerd")
+	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "ctld-data", "/var/lib/sandbox0/ctld")
 }
 
 func TestReconcileUsesConfiguredContainerdHostDataRoot(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.Services.Ctld = &infrav1alpha1.CtldServiceConfig{
 		ContainerdHostDataRoot: "/var/lib/sandbox0-worker/containerd",
+		HostDataRoot:           "/var/lib/sandbox0-worker/ctld",
 	}
 
 	ds := reconcileCtldDaemonSet(t, infra)
 	args := ds.Spec.Template.Spec.Containers[0].Args
 	assertContainsArg(t, args, "-containerd-data-root=/host-var-lib/containerd")
 	assertContainsArg(t, args, "-containerd-host-data-root=/var/lib/sandbox0-worker/containerd")
+	assertContainsArg(t, args, "-volume-portal-root=/var/lib/sandbox0/ctld")
 	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/sandbox0-worker/containerd")
+	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "ctld-data", "/var/lib/sandbox0-worker/ctld")
+	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "ctld-data", "/var/lib/sandbox0/ctld")
 }
 
 func TestReconcilePassesRootFSObjectCacheConfig(t *testing.T) {

@@ -415,12 +415,43 @@ Create a new context in a sandbox.
 | `pty_size` | object | Terminal size `{rows, cols}` |
 | `ttl_sec` | integer | Context time-to-live in seconds |
 | `idle_timeout_sec` | integer | Idle timeout in seconds |
-| `wait_until_done` | boolean | Wait for completion (default: false) |
+| `wait_until_done` | boolean | Wait for completion on the create request (default: false) |
 
 For Cmd contexts created with `wait_until_done: true`, the response includes
 `output_raw`, `stdout`, `stderr`, `exit_code`, and `state` after the process
 exits. `stdout` and `stderr` are populated for non-PTY Cmd contexts when
 available; PTY and REPL contexts may only expose `output_raw`.
+
+### Long-running commands
+
+Do not keep the create request open for a command that may run for a long time.
+Create the Cmd context with `wait_until_done: false` and a bounded `ttl_sec`,
+attach to its [WebSocket stream](#websocket-streaming), and then fetch the
+context after the terminal `done` event to read the final `stdout`, `stderr`,
+`exit_code`, and `state`.
+
+```bash
+# 1. Start the command and save data.id from the response.
+curl -X POST "$SANDBOX0_BASE_URL/api/v1/sandboxes/$SANDBOX_ID/contexts" \
+    -H "Authorization: Bearer $SANDBOX0_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "type": "cmd",
+        "cmd": {"command": ["sh", "-lc", "run-my-long-job"]},
+        "wait_until_done": false,
+        "ttl_sec": 3600
+    }'
+
+# 2. Follow /contexts/{context_id}/ws until its terminal done event.
+# 3. Read the final result.
+curl "$SANDBOX0_BASE_URL/api/v1/sandboxes/$SANDBOX_ID/contexts/$CONTEXT_ID" \
+    -H "Authorization: Bearer $SANDBOX0_TOKEN"
+```
+
+The Context WebSocket is live rather than replayable. If the caller must
+disconnect and later resume output from a cursor, retain process identity across
+retries, or recover execution after sandbox runtime replacement, use a
+[Supervised Session](/docs/sandbox/session-supervisor) instead.
 
 ### REPL Configuration
 

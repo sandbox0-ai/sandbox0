@@ -60,7 +60,7 @@ func (s *Server) createContext(c *gin.Context) {
 	upReq.Header = c.Request.Header.Clone()
 	requestModifier(upReq)
 
-	resp, err := s.outboundHTTPClient().Do(upReq)
+	resp, err := proxy.ClientForRequest(s.outboundHTTPClient(), upReq).Do(upReq)
 	if err != nil {
 		if proxy.IsTimeoutError(err) {
 			spec.JSONError(c, http.StatusGatewayTimeout, spec.CodeUnavailable, "sandbox process request timed out")
@@ -238,7 +238,11 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 				zap.String("sandbox_id", sandboxID),
 				zap.Error(err),
 			)
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+			if errors.Is(err, client.ErrSandboxResumeFailed) {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeSandboxResumeFailed, "sandbox resume failed")
+			} else {
+				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
+			}
 			return nil, err
 		}
 		if needsRuntimeRefetch {

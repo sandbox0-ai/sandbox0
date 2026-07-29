@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	crdfake "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/fake"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,6 +20,7 @@ import (
 )
 
 func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
+	transitionTime := metav1.NewTime(time.Unix(1_700_000_000, 0))
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "template-a",
@@ -30,7 +32,31 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 				MaxIdle: 5,
 			},
 		},
+		Status: v1alpha1.SandboxTemplateStatus{
+			Creation: &v1alpha1.TemplateCreationStatus{
+				State: v1alpha1.TemplateCreationStateReady,
+				Stage: v1alpha1.TemplateCreationStageReconciling,
+			},
+			Conditions: []v1alpha1.SandboxTemplateCondition{
+				{
+					Type:               v1alpha1.SandboxTemplateReady,
+					Status:             v1alpha1.ConditionFalse,
+					LastTransitionTime: transitionTime,
+					Reason:             "InsufficientIdlePods",
+					Message:            "Idle pod count (0) is less than minIdle (2)",
+				},
+				{
+					Type:               v1alpha1.SandboxTemplatePoolHealthy,
+					Status:             v1alpha1.ConditionTrue,
+					LastTransitionTime: transitionTime,
+					Reason:             "PoolHealthy",
+					Message:            "Pool is healthy",
+				},
+			},
+		},
 	}
+	informerTemplate := template.DeepCopy()
+	crdClient := crdfake.NewSimpleClientset(template.DeepCopy())
 
 	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
 		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
@@ -52,6 +78,7 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 	probeRunner := &recordingSandboxProbeRunner{}
 	op := &Operator{
 		podLister:      corelisters.NewPodLister(podIndexer),
+		crdClient:      crdClient,
 		logger:         zap.NewNop(),
 		statsPublisher: publisher,
 		probeRunner:    probeRunner,
@@ -61,13 +88,43 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 	err := op.updateTemplateStatus(context.Background(), template)
 	require.NoError(t, err)
 
-	assert.Equal(t, int32(1), template.Status.IdleCount)
-	assert.Equal(t, int32(2), template.Status.ActiveCount)
-	require.Len(t, template.Status.Conditions, 2)
-	assert.Equal(t, v1alpha1.ConditionFalse, template.Status.Conditions[0].Status)
-	assert.Equal(t, "InsufficientIdlePods", template.Status.Conditions[0].Reason)
-	assert.Equal(t, v1alpha1.ConditionTrue, template.Status.Conditions[1].Status)
-	assert.Equal(t, "PoolHealthy", template.Status.Conditions[1].Reason)
+	assert.Equal(t, informerTemplate, template, "the informer object must not be mutated")
+
+	persisted, err := crdClient.Sandbox0V1alpha1().SandboxTemplates("default").Get(
+		context.Background(),
+		"template-a",
+		metav1.GetOptions{},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), persisted.Status.IdleCount)
+	assert.Equal(t, int32(2), persisted.Status.ActiveCount)
+	assert.Equal(t, template.Status.Creation, persisted.Status.Creation)
+	require.Len(t, persisted.Status.Conditions, 2)
+	assert.Equal(t, v1alpha1.ConditionFalse, persisted.Status.Conditions[0].Status)
+	assert.Equal(t, "InsufficientIdlePods", persisted.Status.Conditions[0].Reason)
+	assert.Equal(t, transitionTime, persisted.Status.Conditions[0].LastTransitionTime)
+	assert.Equal(t, v1alpha1.ConditionTrue, persisted.Status.Conditions[1].Status)
+	assert.Equal(t, "PoolHealthy", persisted.Status.Conditions[1].Reason)
+	assert.Equal(t, transitionTime, persisted.Status.Conditions[1].LastTransitionTime)
+	assert.False(t, persisted.Status.LastUpdateTime.IsZero())
+
+	updateActions := 0
+	for _, action := range crdClient.Actions() {
+		if action.GetVerb() == "update" {
+			updateActions++
+		}
+	}
+	require.Equal(t, 1, updateActions)
+
+	err = op.updateTemplateStatus(context.Background(), template)
+	require.NoError(t, err)
+	updateActions = 0
+	for _, action := range crdClient.Actions() {
+		if action.GetVerb() == "update" {
+			updateActions++
+		}
+	}
+	assert.Equal(t, 1, updateActions, "unchanged status must not be written again")
 
 	assert.Equal(t, 1, publisher.calls)
 	assert.Equal(t, int32(1), publisher.idleCount)

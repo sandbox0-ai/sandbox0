@@ -287,6 +287,37 @@ func TestCreateContextWaitUntilDoneIncludesCMDSplitOutput(t *testing.T) {
 	}
 }
 
+func TestCreateContextWaitUntilDoneCanExceedExecTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell command fixture requires POSIX")
+	}
+	handler := NewContextHandler(ctxpkg.NewManager(), zap.NewNop())
+	handler.execTimeout = 10 * time.Millisecond
+	req := httptest.NewRequest(http.MethodPost, "/contexts", strings.NewReader(`{
+		"type": "cmd",
+		"cmd": {"command": ["/bin/sh", "-c", "sleep 0.05; printf done"]},
+		"wait_until_done": true,
+		"ttl_sec": 1
+	}`))
+	rec := httptest.NewRecorder()
+
+	handler.Create(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var resp struct {
+		Success bool            `json:"success"`
+		Data    ContextResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if !resp.Success || resp.Data.Stdout == nil || *resp.Data.Stdout != "done" {
+		t.Fatalf("response = %+v, want successful output after exec timeout", resp)
+	}
+}
+
 func TestExecReturnsCMDTerminalStatus(t *testing.T) {
 	outputCh := make(chan process.ProcessOutput, 1)
 	var proc *fakeProcess
@@ -426,6 +457,21 @@ func TestExecInputSync_OutputBeforePromptReturnsOutput(t *testing.T) {
 	}
 	if output != "_S0_> hello world" {
 		t.Errorf("output = %q, want %q", output, "_S0_> hello world")
+	}
+}
+
+func TestExecInputSyncRetainsInteractionTimeout(t *testing.T) {
+	proc := &fakeProcess{outputCh: make(chan process.ProcessOutput)}
+	handler, ctx := newHandlerWithContext(proc, process.ProcessTypeREPL)
+	handler.execTimeout = 10 * time.Millisecond
+
+	_, execErr, aborted := handler.execInputSync(ctx, "print('hello world')\n", context.Background())
+
+	if aborted {
+		t.Fatal("execInputSync() aborted, want timeout error")
+	}
+	if execErr == nil || execErr.code != "exec_timeout" {
+		t.Fatalf("execInputSync() error = %#v, want exec_timeout", execErr)
 	}
 }
 

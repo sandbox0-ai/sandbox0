@@ -113,6 +113,21 @@ func ApplyRequestTimeout(req *http.Request, defaultTimeout time.Duration) (*http
 	return req.WithContext(ctx), cancel
 }
 
+// ClientForRequest returns an HTTP client that honors the request's upstream
+// timeout policy. http.Client.Timeout is a separate deadline from the request
+// context, so it must also be disabled for whitelisted requests.
+func ClientForRequest(client *http.Client, req *http.Request) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	if req == nil || client.Timeout <= 0 || !UpstreamTimeoutDisabled(req.Context()) {
+		return client
+	}
+	withoutTimeout := *client
+	withoutTimeout.Timeout = 0
+	return &withoutTimeout
+}
+
 // IsTimeoutError reports whether err was caused by an upstream timeout.
 func IsTimeoutError(err error) bool {
 	if err == nil {

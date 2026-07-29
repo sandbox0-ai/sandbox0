@@ -7,18 +7,83 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
+	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
+
+func TestCreateContextHonorsDisabledUpstreamTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/contexts" {
+			t.Fatalf("unexpected procd request %s %s", r.Method, r.URL.Path)
+		}
+		time.Sleep(50 * time.Millisecond)
+		_ = spec.WriteSuccess(w, http.StatusCreated, map[string]any{"id": "ctx-1"})
+	}))
+	defer procd.Close()
+
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate keypair: %v", err)
+	}
+	tokenGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "cluster-gateway",
+		PrivateKey: privateKey,
+		TTL:        time.Minute,
+	})
+	manager := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = spec.WriteSuccess(w, http.StatusOK, mgr.Sandbox{
+			ID:           "sb-1",
+			TeamID:       "team-a",
+			UserID:       "user-a",
+			InternalAddr: procd.URL,
+			Status:       mgr.SandboxStatusRunning,
+		})
+	}))
+	defer manager.Close()
+
+	cfg := &config.ClusterGatewayConfig{}
+	cfg.ProxyTimeout.Duration = 10 * time.Millisecond
+	server := &Server{
+		cfg:             cfg,
+		managerClient:   client.NewManagerClient(manager.URL, tokenGen, zap.NewNop(), time.Second),
+		internalAuthGen: tokenGen,
+		logger:          zap.NewNop(),
+		httpClient:      &http.Client{Timeout: cfg.ProxyTimeout.Duration},
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Params = gin.Params{{Key: "id", Value: "sb-1"}}
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/sandboxes/sb-1/contexts",
+		strings.NewReader(`{"type":"cmd","cmd":{"command":["sh","-lc","true"]},"wait_until_done":true}`),
+	)
+	req = proxy.WithUpstreamTimeoutDisabledRequest(req)
+	authCtx := &gatewayauthn.AuthContext{TeamID: "team-a", UserID: "user-a"}
+	ctx.Set("auth_context", authCtx)
+	ctx.Request = req.WithContext(gatewayauthn.WithAuthContext(req.Context(), authCtx))
+
+	server.createContext(ctx)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+}
 
 func TestGetProcdURLFetchesManagerForEachRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)

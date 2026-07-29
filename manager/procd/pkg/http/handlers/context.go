@@ -24,16 +24,18 @@ import (
 
 // ContextHandler handles context-related HTTP requests.
 type ContextHandler struct {
-	manager  *ctxpkg.Manager
-	logger   *zap.Logger
-	upgrader websocket.Upgrader
+	manager     *ctxpkg.Manager
+	logger      *zap.Logger
+	execTimeout time.Duration
+	upgrader    websocket.Upgrader
 }
 
 // NewContextHandler creates a new context handler.
 func NewContextHandler(manager *ctxpkg.Manager, logger *zap.Logger) *ContextHandler {
 	return &ContextHandler{
-		manager: manager,
-		logger:  logger,
+		manager:     manager,
+		logger:      logger,
+		execTimeout: execTimeout,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -372,7 +374,7 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.WaitUntilDone {
-		output, execErr, aborted := h.execInputSync(ctx, input, r.Context())
+		output, execErr, aborted := h.execInputSyncWithTimeout(ctx, input, r.Context(), 0)
 		if aborted {
 			return
 		}
@@ -607,6 +609,18 @@ func applySplitOutputToExecResponse(response *ContextExecResponse, ctx *ctxpkg.C
 }
 
 func (h *ContextHandler) execInputSync(ctx *ctxpkg.Context, input string, requestCtx context.Context) (string, *execError, bool) {
+	return h.execInputSyncWithTimeout(ctx, input, requestCtx, h.execTimeout)
+}
+
+// execInputSyncWithTimeout waits for a prompt or process completion. A
+// non-positive timeout lets the request context and context cleanup policy own
+// the lifetime, which is required by wait_until_done context creation.
+func (h *ContextHandler) execInputSyncWithTimeout(
+	ctx *ctxpkg.Context,
+	input string,
+	requestCtx context.Context,
+	executionTimeout time.Duration,
+) (string, *execError, bool) {
 	if ctx == nil || ctx.MainProcess == nil {
 		return "", &execError{
 			status:  http.StatusConflict,
@@ -662,8 +676,13 @@ func (h *ContextHandler) execInputSync(ctx *ctxpkg.Context, input string, reques
 		}, false
 	}
 
-	timeout := time.NewTimer(execTimeout)
-	defer timeout.Stop()
+	var timeout *time.Timer
+	var timeoutCh <-chan time.Time
+	if executionTimeout > 0 {
+		timeout = time.NewTimer(executionTimeout)
+		timeoutCh = timeout.C
+		defer timeout.Stop()
+	}
 
 	var output bytes.Buffer
 	var promptTimer *time.Timer
@@ -672,7 +691,7 @@ func (h *ContextHandler) execInputSync(ctx *ctxpkg.Context, input string, reques
 		select {
 		case <-requestCtx.Done():
 			return "", nil, true
-		case <-timeout.C:
+		case <-timeoutCh:
 			return "", &execError{
 				status:  http.StatusRequestTimeout,
 				code:    "exec_timeout",

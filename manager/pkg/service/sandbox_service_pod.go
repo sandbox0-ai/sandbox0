@@ -12,7 +12,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
-	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -45,22 +44,34 @@ func (s *SandboxService) procdAddressFromPod(pod *corev1.Pod) string {
 }
 
 func (s *SandboxService) waitForPodIP(ctx context.Context, namespace, name string) (string, error) {
-	ticker := time.NewTicker(time.Millisecond * 50)
-	defer ticker.Stop()
-
-	for {
+	evaluate := func() (string, error) {
 		pod, err := s.podLister.Pods(namespace).Get(name)
 		if err != nil {
 			return "", fmt.Errorf("get pod for ip: %w", err)
 		}
-		if podIP := strings.TrimSpace(pod.Status.PodIP); podIP != "" {
-			return podIP, nil
-		}
+		return strings.TrimSpace(pod.Status.PodIP), nil
+	}
+	if podIP, err := evaluate(); err != nil || podIP != "" {
+		return podIP, err
+	}
 
+	events, unregister := s.ensurePodEventWaiter().register(namespace, name)
+	defer unregister()
+	if podIP, err := evaluate(); err != nil || podIP != "" {
+		return podIP, err
+	}
+
+	for {
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("pod ip not assigned")
-		case <-ticker.C:
+			return "", fmt.Errorf("pod ip not assigned: %w", ctx.Err())
+		case event := <-events:
+			if event.deleted {
+				return "", fmt.Errorf("pod ip not assigned: pod is deleting")
+			}
+			if podIP, err := evaluate(); err != nil || podIP != "" {
+				return podIP, err
+			}
 		}
 	}
 }
@@ -70,7 +81,7 @@ func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, na
 }
 
 func (s *SandboxService) waitForPodClaimReadyTracked(ctx context.Context, namespace, name string, lifecycle *podLifecycleStageTracker) (*corev1.Pod, error) {
-	timeout := s.config.ProcdInitTimeout
+	timeout := s.config.RuntimeReadyTimeout
 	if timeout < defaultPodClaimReadyTimeout {
 		timeout = defaultPodClaimReadyTimeout
 	}
@@ -142,7 +153,7 @@ func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, template
 }
 
 func (s *SandboxService) waitForPodNetworkIdentityTracked(ctx context.Context, template, namespace, name string, lifecycle *podLifecycleStageTracker) (*corev1.Pod, error) {
-	timeout := s.config.ProcdInitTimeout
+	timeout := s.config.RuntimeReadyTimeout
 	if timeout < defaultPodClaimReadyTimeout {
 		timeout = defaultPodClaimReadyTimeout
 	}
@@ -485,7 +496,7 @@ func isPodNetworkIdentityReady(pod *corev1.Pod) (bool, string) {
 	return true, ""
 }
 
-func (s *SandboxService) isPodClaimReady(ctx context.Context, pod *corev1.Pod) (bool, string) {
+func (s *SandboxService) isPodClaimReady(_ context.Context, pod *corev1.Pod) (bool, string) {
 	if pod == nil {
 		return false, "pod is nil"
 	}
@@ -501,23 +512,12 @@ func (s *SandboxService) isPodClaimReady(ctx context.Context, pod *corev1.Pod) (
 	if !controller.HasSandboxPodReadinessGate(pod) {
 		return true, ""
 	}
-
-	result, err := s.ProbeSandboxPod(ctx, pod, sandboxprobe.KindReadiness)
-	if err != nil {
-		return false, err.Error()
-	}
-	if result == nil {
-		return false, "sandbox readiness probe returned no result"
-	}
-	if result.Status != sandboxprobe.StatusPassed {
-		message := strings.TrimSpace(result.Message)
-		if message != "" {
-			return false, message
+	if !controller.IsPodReady(pod) {
+		message := runtimeProbeConditionMessage(pod)
+		if message == "runtime activation failed" {
+			message = "sandbox readiness condition is not true"
 		}
-		if result.Reason != "" {
-			return false, result.Reason
-		}
-		return false, fmt.Sprintf("sandbox readiness probe is %s", result.Status)
+		return false, message
 	}
 	return true, ""
 }
@@ -532,33 +532,6 @@ func podContainerRunning(pod *corev1.Pod, name string) bool {
 		}
 	}
 	return false
-}
-
-func (s *SandboxService) refreshSandboxProbeConditionsAsync(pod *corev1.Pod) {
-	if s == nil || pod == nil || !controller.HasSandboxPodReadinessGate(pod) {
-		return
-	}
-	go func(snapshot *corev1.Pod) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := s.refreshSandboxProbeConditions(ctx, snapshot); err != nil && s.logger != nil {
-			s.logger.Warn("Failed to refresh sandbox probe conditions asynchronously",
-				zap.String("pod", snapshot.Name),
-				zap.String("namespace", snapshot.Namespace),
-				zap.Error(err),
-			)
-		}
-	}(pod.DeepCopy())
-}
-
-func (s *SandboxService) refreshSandboxProbeConditions(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
-	if !controller.HasSandboxPodReadinessGate(pod) {
-		return pod, nil
-	}
-	startup := s.probeSandboxPodOrFailure(ctx, pod, sandboxprobe.KindStartup)
-	readiness := s.probeSandboxPodOrFailure(ctx, pod, sandboxprobe.KindReadiness)
-	liveness := s.probeSandboxPodOrFailure(ctx, pod, sandboxprobe.KindLiveness)
-	return controller.EnsureSandboxPodProbeConditions(ctx, s.k8sClient, pod, startup, readiness, liveness)
 }
 
 func (s *SandboxService) ProbeSandboxPod(ctx context.Context, pod *corev1.Pod, kind sandboxprobe.Kind) (*sandboxprobe.Response, error) {
@@ -645,19 +618,6 @@ func expectedVolumePortalsForPod(pod *corev1.Pod) []ctldapi.VolumePortalRef {
 	return portals
 }
 
-func (s *SandboxService) probeSandboxPodOrFailure(ctx context.Context, pod *corev1.Pod, kind sandboxprobe.Kind) *sandboxprobe.Response {
-	result, err := s.ProbeSandboxPod(ctx, pod, kind)
-	if err != nil {
-		failure := sandboxprobe.Failed(kind, "SandboxProbeFailed", err.Error(), nil)
-		return &failure
-	}
-	if result == nil {
-		failure := sandboxprobe.Failed(kind, "SandboxProbeMissing", "sandbox probe returned no result", nil)
-		return &failure
-	}
-	return result
-}
-
 // podToSandboxStatus converts pod state to sandbox status.
 func (s *SandboxService) podToSandboxStatus(pod *corev1.Pod) string {
 	if pod == nil {
@@ -665,6 +625,17 @@ func (s *SandboxService) podToSandboxStatus(pod *corev1.Pod) string {
 	}
 	if pod.DeletionTimestamp != nil {
 		return SandboxStatusTerminating
+	}
+	if pod.Status.Phase == corev1.PodRunning {
+		ready, failed, _ := runtimeAssignmentObservation(pod, "")
+		switch {
+		case ready:
+			return SandboxStatusRunning
+		case failed:
+			return SandboxStatusFailed
+		default:
+			return SandboxStatusStarting
+		}
 	}
 	return s.podPhaseToSandboxStatus(pod.Status.Phase)
 }

@@ -21,6 +21,7 @@ import (
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
+	ctldruntimewatch "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/runtimewatch"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -31,6 +32,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
@@ -41,10 +43,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 )
 
 var (
 	httpAddr                       = ":8095"
+	runtimeWatchAddr               = fmt.Sprintf(":%d", runtimecontrol.DefaultCtldWatchPort)
 	kubeconfig                     = ""
 	criEndpoint                    = "/host-run/containerd/containerd.sock"
 	containerdEndpoint             = "/host-run/containerd/containerd.sock"
@@ -81,6 +85,12 @@ const (
 
 func main() {
 	flag.StringVar(&httpAddr, "http-addr", ":8095", "HTTP listen address for ctld health and control endpoints")
+	flag.StringVar(
+		&runtimeWatchAddr,
+		"runtime-watch-addr",
+		fmt.Sprintf(":%d", runtimecontrol.DefaultCtldWatchPort),
+		"dedicated HTTP listen address for the procd runtime event stream",
+	)
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "optional kubeconfig path used by ctld")
 	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
 	flag.StringVar(&containerdEndpoint, "containerd-endpoint", "/host-run/containerd/containerd.sock", "host containerd socket used for rootfs diff/apply")
@@ -120,7 +130,7 @@ func run() error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	defer cancel()
-	networkFactory, err := configuredNetworkRuntimeFactory(networkRuntimeConfigPath, httpAddr)
+	networkFactory, err := configuredNetworkRuntimeFactory(networkRuntimeConfigPath, httpAddr, runtimeWatchAddr)
 	if err != nil {
 		return fmt.Errorf("validate ctld network runtime config: %w", err)
 	}
@@ -304,7 +314,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		defer registrationServer.Stop()
 		registrationErrors = registrationServer.Errors()
 	}
-	serviceErrors := make(chan error, 1)
+	serviceErrors := make(chan error, 2)
 	networkRequired := options.networkFactory != nil
 	var networkHandle *primaryServiceHandle
 	multiplexerHealth := fuseportal.SharedMultiplexerHealth
@@ -320,7 +330,21 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 			(!networkRequired || (networkHandle != nil && networkHandle.Ready()))
 	}
 
-	podCache := buildNodePodCache(ctx, k8sClient)
+	var runtimeWatchServer *ctldruntimewatch.Server
+	var runtimeWatchHTTPServer *http.Server
+	var runtimeWatchHandler cache.ResourceEventHandler
+	if k8sClient != nil {
+		runtimeHub := ctldruntimewatch.NewHub(ctldruntimewatch.NewPodStatusSink(k8sClient))
+		runtimeWatchServer = ctldruntimewatch.NewServer(runtimeHub)
+		runtimeWatchHTTPServer = &http.Server{
+			Addr:              runtimeWatchAddr,
+			Handler:           runtimeWatchServer,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		runtimeWatchHandler = runtimeHub.PodEventHandler()
+		go runtimeHub.Run(ctx, 4)
+	}
+	podCache := buildNodePodCache(ctx, k8sClient, runtimeWatchHandler)
 	probeController := buildProbeController(k8sClient, obsProvider, podCache)
 	containerdRuntime := buildContainerdRuntime()
 	defer containerdRuntime.Close()
@@ -340,14 +364,28 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	if err != nil {
 		return fmt.Errorf("listen for ctld HTTP server: %w", err)
 	}
+	var runtimeWatchListener net.Listener
+	if runtimeWatchHTTPServer != nil {
+		runtimeWatchListener, err = net.Listen("tcp", runtimeWatchAddr)
+		if err != nil {
+			_ = httpListener.Close()
+			return fmt.Errorf("listen for ctld runtime watch server: %w", err)
+		}
+	}
 	if options.networkFactory != nil {
 		networkService, err := options.networkFactory()
 		if err != nil {
 			_ = httpListener.Close()
+			if runtimeWatchListener != nil {
+				_ = runtimeWatchListener.Close()
+			}
 			return fmt.Errorf("initialize ctld network runtime: %w", err)
 		}
 		if networkService == nil {
 			_ = httpListener.Close()
+			if runtimeWatchListener != nil {
+				_ = runtimeWatchListener.Close()
+			}
 			return fmt.Errorf("initialize ctld network runtime: factory returned a nil service")
 		}
 		networkHandle = startPrimaryService(ctx, networkService)
@@ -358,6 +396,14 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 			serviceErrors <- fmt.Errorf("ctld HTTP server: %w", err)
 		}
 	}()
+	if runtimeWatchHTTPServer != nil {
+		go func() {
+			if err := runtimeWatchHTTPServer.Serve(runtimeWatchListener); err != nil &&
+				!errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
+				serviceErrors <- fmt.Errorf("ctld runtime watch server: %w", err)
+			}
+		}()
+	}
 	go monitorPrimaryServiceHealth(ctx, time.Second, multiplexerHealth, serviceErrors)
 
 	if options.setReady != nil {
@@ -414,6 +460,9 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	}
 	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 	_ = httpServer.Shutdown(httpShutdownCtx)
+	if runtimeWatchHTTPServer != nil {
+		_ = runtimeWatchHTTPServer.Shutdown(httpShutdownCtx)
+	}
 	httpShutdownCancel()
 	runtimeMetricsShutdownCtx, runtimeMetricsShutdownCancel := context.WithTimeout(context.Background(), runtimeMetricsShutdownTimeout)
 	if err := runtimeMetricsHandle.Shutdown(runtimeMetricsShutdownCtx); err != nil {
@@ -468,7 +517,7 @@ func buildProbeController(k8sClient kubernetes.Interface, obsProvider *observabi
 	return controller
 }
 
-func buildNodePodCache(ctx context.Context, k8sClient kubernetes.Interface) *ctldpower.PodCache {
+func buildNodePodCache(ctx context.Context, k8sClient kubernetes.Interface, handlers ...cache.ResourceEventHandler) *ctldpower.PodCache {
 	if k8sClient == nil {
 		return nil
 	}
@@ -476,6 +525,15 @@ func buildNodePodCache(ctx context.Context, k8sClient kubernetes.Interface) *ctl
 	if err != nil {
 		log.Printf("ctld pod cache disabled: %v", err)
 		return nil
+	}
+	for _, handler := range handlers {
+		if handler == nil {
+			continue
+		}
+		if err := podCache.AddEventHandler(handler); err != nil {
+			log.Printf("ctld pod cache handler disabled: %v", err)
+			return nil
+		}
 	}
 	podCache.Start(ctx)
 	go func() {

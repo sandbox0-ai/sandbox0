@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -528,8 +529,32 @@ func appendProcdConfigEnvVars(envVars []corev1.EnvVar) []corev1.EnvVar {
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
 		},
 	})
+	for _, item := range []struct {
+		name      string
+		fieldPath string
+	}{
+		{name: runtimecontrol.EnvPodName, fieldPath: "metadata.name"},
+		{name: runtimecontrol.EnvPodNamespace, fieldPath: "metadata.namespace"},
+		{name: runtimecontrol.EnvPodUID, fieldPath: "metadata.uid"},
+		{name: runtimecontrol.EnvNodeHostIP, fieldPath: "status.hostIP"},
+	} {
+		upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+			Name: item.name,
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: item.fieldPath},
+			},
+		})
+	}
 
 	cfg := config.LoadManagerConfig()
+	ctldRuntimeWatchPort := runtimecontrol.DefaultCtldWatchPort
+	if cfg != nil && cfg.CtldRuntimeWatchPort > 0 {
+		ctldRuntimeWatchPort = cfg.CtldRuntimeWatchPort
+	}
+	upsertProcdEnvVar(envIndex, &envVars, corev1.EnvVar{
+		Name:  runtimecontrol.EnvCtldRuntimeWatchPort,
+		Value: fmt.Sprintf("%d", ctldRuntimeWatchPort),
+	})
 	if cfg == nil {
 		return envVars
 	}

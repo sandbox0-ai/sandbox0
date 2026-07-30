@@ -949,8 +949,8 @@ type ManagerConfig struct {
 	// +kubebuilder:default="30s"
 	ProcdClientTimeout metav1.Duration `json:"procdClientTimeout,omitempty"`
 	// +optional
-	// +kubebuilder:default="6s"
-	ProcdInitTimeout metav1.Duration `json:"procdInitTimeout,omitempty"`
+	// +kubebuilder:default="90s"
+	RuntimeReadyTimeout metav1.Duration `json:"runtimeReadyTimeout,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"
 	ShutdownTimeout metav1.Duration `json:"shutdownTimeout,omitempty"`

@@ -91,7 +91,7 @@ type SandboxServiceConfig struct {
 	ProcdPort                           int
 	ProcdClientTimeout                  time.Duration
 	ProcdHTTPClient                     *http.Client
-	ProcdInitTimeout                    time.Duration
+	RuntimeReadyTimeout                 time.Duration
 	AllowColdStartWithoutReadyDataPlane bool
 	RootFSSquashDisabled                bool
 	RootFSSquashMaxChainDepth           int

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -751,6 +752,35 @@ procd_config:
 	nodeName := envByName["node_name"]
 	if nodeName.ValueFrom == nil || nodeName.ValueFrom.FieldRef == nil || nodeName.ValueFrom.FieldRef.FieldPath != "spec.nodeName" {
 		t.Fatalf("expected node_name to come from pod fieldRef spec.nodeName")
+	}
+}
+
+func TestBuildPodSpecInjectsRuntimeControlIdentityFromDownwardAPI(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+ctld_port: 8123
+ctld_runtime_watch_port: 8124
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	spec := BuildPodSpec(newTestTemplate())
+	envByName := map[string]corev1.EnvVar{}
+	for _, env := range spec.Containers[0].Env {
+		envByName[env.Name] = env
+	}
+	for name, fieldPath := range map[string]string{
+		runtimecontrol.EnvPodName:      "metadata.name",
+		runtimecontrol.EnvPodNamespace: "metadata.namespace",
+		runtimecontrol.EnvPodUID:       "metadata.uid",
+		runtimecontrol.EnvNodeHostIP:   "status.hostIP",
+	} {
+		env := envByName[name]
+		if env.ValueFrom == nil || env.ValueFrom.FieldRef == nil || env.ValueFrom.FieldRef.FieldPath != fieldPath {
+			t.Fatalf("%s fieldRef = %#v, want %q", name, env.ValueFrom, fieldPath)
+		}
+	}
+	if got := envByName[runtimecontrol.EnvCtldRuntimeWatchPort].Value; got != "8124" {
+		t.Fatalf("%s = %q, want 8124", runtimecontrol.EnvCtldRuntimeWatchPort, got)
 	}
 }
 

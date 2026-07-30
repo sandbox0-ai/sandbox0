@@ -23,6 +23,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
 func TestCompilePlanSelectsNetworkPolicyProvider(t *testing.T) {
@@ -306,6 +307,9 @@ func TestBuildConfigEnablesCtldWhenManagerIsEnabled(t *testing.T) {
 	}
 	if cfg.CtldPort != 8095 {
 		t.Fatalf("ctld port = %d, want 8095", cfg.CtldPort)
+	}
+	if cfg.CtldRuntimeWatchPort != runtimecontrol.DefaultCtldWatchPort {
+		t.Fatalf("ctld runtime watch port = %d, want %d", cfg.CtldRuntimeWatchPort, runtimecontrol.DefaultCtldWatchPort)
 	}
 }
 

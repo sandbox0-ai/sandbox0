@@ -409,7 +409,6 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 			return pod, fmt.Errorf("wait for pod claim readiness: %w", err)
 		}
 		pod = readyPod
-		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 	req := &ClaimRequest{
 		TeamID:               record.TeamID,
@@ -425,6 +424,11 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if strings.TrimSpace(record.OwnerKind) != "" {
 		req.Metadata = &ClaimMetadata{OwnerKind: record.OwnerKind}
 	}
+	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, false)
+	if err != nil {
+		return pod, err
+	}
+	assignedPodUID := pod.UID
 	rootFSState, err := s.latestRootFSState(ctx, record.ID)
 	if err != nil {
 		return pod, fmt.Errorf("load rootfs checkpoint: %w", err)
@@ -433,18 +437,21 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return pod, err
 	}
+	if pod.UID != assignedPodUID {
+		pod, runtimeRevision, err = s.publishRuntimeAssignment(ctx, pod, false)
+		if err != nil {
+			return pod, err
+		}
+	}
 	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {
 		return pod, fmt.Errorf("bind volume portals: %w", err)
 	}
 	if err := s.bindWebhookStatePortal(ctx, pod, req); err != nil {
 		return pod, fmt.Errorf("bind webhook state portal: %w", err)
 	}
-	procdAddress, err := s.prodAddress(ctx, pod)
+	pod, err = s.activateRuntimeAssignment(ctx, pod, runtimeRevision)
 	if err != nil {
-		return pod, fmt.Errorf("get procd address: %w", err)
-	}
-	if _, err := s.initializeProcd(ctx, pod, template, req, procdAddress); err != nil {
-		return pod, fmt.Errorf("initialize procd: %w", err)
+		return pod, fmt.Errorf("activate runtime: %w", err)
 	}
 	if s.logger != nil {
 		s.logger.Info("Resumed paused sandbox runtime",

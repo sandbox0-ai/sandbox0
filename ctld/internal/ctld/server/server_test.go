@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -112,6 +113,16 @@ func TestNewMuxDefaultsToNotImplementedController(t *testing.T) {
 	var resp ctldapi.PauseResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.False(t, resp.Paused)
+}
+
+func TestNewMuxDoesNotExposeRuntimeWatchOnControlPort(t *testing.T) {
+	handler := NewMux(&recordingController{})
+	req := httptest.NewRequest(http.MethodGet, runtimecontrol.WatchPath, nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestNewMuxReadinessIncludesControllerState(t *testing.T) {

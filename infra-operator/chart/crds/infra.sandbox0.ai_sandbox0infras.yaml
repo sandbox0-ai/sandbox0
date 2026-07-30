@@ -3848,11 +3848,11 @@ spec:
                                 default: 5s
                                 type: string
                             type: object
-                          procdInitTimeout:
-                            default: 6s
-                            type: string
                           resyncPeriod:
                             default: 30s
+                            type: string
+                          runtimeReadyTimeout:
+                            default: 90s
                             type: string
                           sandboxMaxMemory:
                             default: 32Gi

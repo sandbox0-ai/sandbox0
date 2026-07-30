@@ -9,7 +9,8 @@ type Manager interface {
 }
 
 type Config struct {
-	PreferNFT      bool
-	ProxyHTTPPort  int
-	ProxyHTTPSPort int
+	PreferNFT            bool
+	ProxyHTTPPort        int
+	ProxyHTTPSPort       int
+	RuntimeWatchTCPPorts []int
 }

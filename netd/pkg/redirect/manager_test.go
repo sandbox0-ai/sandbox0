@@ -13,12 +13,15 @@ import (
 
 func TestBuildIPTablesRestoreInputRoutesSpecificAndGenericTraffic(t *testing.T) {
 	cfg := Config{
-		ProxyHTTPPort:  18080,
-		ProxyHTTPSPort: 18443,
+		ProxyHTTPPort:        18080,
+		ProxyHTTPSPort:       18443,
+		RuntimeWatchTCPPorts: []int{8096, 0, 8096, 65536},
 	}
 
 	restore := buildIPTablesRestoreInput(cfg, []string{"10.0.0.0/8", "10.0.0.0/8", " 192.168.0.0/16 "})
 
+	runtimeWatchBypass := "-m set --match-set " + ipsetName + " src -p tcp --dport 8096 -m addrtype --dst-type LOCAL -j RETURN"
+	mustContain(t, restore, "-A "+chainName+" "+runtimeWatchBypass)
 	mustContain(t, restore, "-A "+chainName+" -d "+defaultLoopback+" -j RETURN")
 	mustContain(t, restore, "-A "+chainName+" -d 10.0.0.0/8 -j RETURN")
 	mustContain(t, restore, "-A "+chainName+" -d 192.168.0.0/16 -j RETURN")
@@ -44,17 +47,23 @@ func TestBuildIPTablesRestoreInputRoutesSpecificAndGenericTraffic(t *testing.T) 
 	mustContain(t, restore, "-p udp -m socket --transparent -j TPROXY --on-port 18080")
 
 	mustContain(t, restore, "-A "+natChainName+" -m mark --mark 0x1/0x1 -j ACCEPT")
+	mustContain(t, restore, "-A "+natChainName+" "+runtimeWatchBypass)
 	mustContain(t, restore, "-A "+natChainName+" -d "+defaultLoopback+" -j RETURN")
 	mustContain(t, restore, "-A "+natChainName+" -d 10.0.0.0/8 -j RETURN")
 	mustContain(t, restore, "-p tcp --dport 443 -j REDIRECT --to-ports 18443")
 	mustContain(t, restore, "-p tcp --dport 853 -j REDIRECT --to-ports 18443")
 	mustContain(t, restore, "-p tcp -j REDIRECT --to-ports 18080")
 
-	mustNotContain(t, restore, "-A "+chainName+" -m set --match-set "+ipsetName+" src -p tcp")
+	mustNotContain(t, restore, "-A "+chainName+" -m set --match-set "+ipsetName+" src -p tcp -m")
 
 	if strings.Count(restore, "-d 10.0.0.0/8 -j RETURN") != 2 {
 		t.Fatalf("expected duplicate bypass CIDRs to be normalized once per chain, got:\n%s", restore)
 	}
+	if strings.Count(restore, runtimeWatchBypass) != 2 {
+		t.Fatalf("expected one runtime watch bypass per redirect chain, got:\n%s", restore)
+	}
+	mustNotContain(t, restore, "--dport 8095 -m addrtype --dst-type LOCAL -j RETURN")
+	mustNotContain(t, restore, "--dport 65536")
 }
 
 func TestBuildIPSetRestoreInput(t *testing.T) {

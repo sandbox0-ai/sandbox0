@@ -16,6 +16,7 @@ import (
 	procdhttp "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/reaper"
+	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/runtimecontroller"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/session"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/trust"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/webhook"
@@ -170,6 +171,25 @@ func main() {
 	// Note: Network isolation is handled by the ctld network runtime through pod annotations.
 	// Procd no longer manages network policies.
 
+	runtimeController := runtimecontroller.New(
+		contextManager,
+		sessionSupervisor,
+		fileManager,
+		webhookDispatcher,
+		cfg.HTTPPort,
+		logger,
+	)
+	runtimeIdentity, err := runtimecontroller.IdentityFromEnv()
+	if err != nil {
+		logger.Fatal("Failed to load runtime control identity", zap.Error(err))
+	}
+	runtimeClient, err := runtimecontroller.NewClient(runtimeIdentity, runtimeController, logger)
+	if err != nil {
+		logger.Fatal("Failed to create runtime control client", zap.Error(err))
+	}
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+	go runtimeClient.Run(runtimeCtx)
+
 	// Create and start HTTP server
 	server := procdhttp.NewServer(
 		cfg,
@@ -180,7 +200,8 @@ func main() {
 		webhookDispatcher,
 		logger,
 		obsProvider,
-		nil,
+		runtimeController.Probe,
+		runtimeController.CanServe,
 	)
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
@@ -197,6 +218,7 @@ func main() {
 
 		cleanupCancel()
 		reaperCancel()
+		runtimeCancel()
 
 		if _, err := webhookDispatcher.Enqueue(webhook.Event{
 			EventType: webhook.EventTypeSandboxKilled,
@@ -222,6 +244,7 @@ func main() {
 		if err := sessionSupervisor.Close(); err != nil {
 			logger.Warn("Session supervisor shutdown error", zap.Error(err))
 		}
+		runtimeController.Close()
 		fileManager.Close()
 
 		if err := webhookDispatcher.Shutdown(context.Background()); err != nil {
@@ -231,7 +254,7 @@ func main() {
 	}()
 
 	// Start HTTP server
-	logger.Info("Procd is ready")
+	logger.Info("Procd HTTP server started")
 	if err := server.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatal("HTTP server error", zap.Error(err))
 	}

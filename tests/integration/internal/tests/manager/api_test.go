@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -29,16 +30,19 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/tests/integration/internal/utils"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	networkinglisters "k8s.io/client-go/listers/networking/v1"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -50,11 +54,12 @@ type managerTestEnv struct {
 }
 
 type managerTestEnvOptions struct {
-	sandboxConfig          service.SandboxServiceConfig
-	internalTokenGenerator service.TokenGenerator
-	procdClient            *service.ProcdClient
-	volumeMetadata         service.SandboxVolumeMetadataClient
-	sandboxStore           service.SandboxStore
+	sandboxConfig             service.SandboxServiceConfig
+	internalTokenGenerator    service.TokenGenerator
+	procdClient               *service.ProcdClient
+	volumeMetadata            service.SandboxVolumeMetadataClient
+	sandboxStore              service.SandboxStore
+	runtimeActivationObserver func(*corev1.Pod)
 }
 
 func newManagerTestEnv(t *testing.T) *managerTestEnv {
@@ -83,7 +88,7 @@ func newManagerTestEnvWithProcd(t *testing.T) *managerTestEnv {
 			PauseMinCPU:            "10m",
 			ProcdPort:              49983,
 			ProcdClientTimeout:     5 * time.Second,
-			ProcdInitTimeout:       5 * time.Second,
+			RuntimeReadyTimeout:    5 * time.Second,
 		},
 		internalTokenGenerator: service.NewInternalTokenGenerator(procdGen),
 		procdClient:            procdClient,
@@ -169,6 +174,69 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	if opts.sandboxStore != nil {
 		sandboxService.SetSandboxStore(opts.sandboxStore)
 	}
+	podEventHandler := sandboxService.PodEventHandler()
+	k8sClient.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		update, ok := action.(k8stesting.UpdateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		pod, ok := update.GetObject().(*corev1.Pod)
+		if !ok || pod == nil {
+			return false, nil, nil
+		}
+		pod = pod.DeepCopy()
+
+		assignment, revision, err := runtimecontrol.AssignmentFromPod(pod)
+		if err != nil {
+			return true, nil, err
+		}
+		if assignment != nil {
+			if pod.Annotations == nil {
+				pod.Annotations = make(map[string]string)
+			}
+			publishedRevision := pod.Annotations[runtimecontrol.AnnotationAssignmentRevision]
+			if publishedRevision != "" {
+				readyRevision := pod.Annotations[runtimecontrol.AnnotationAssignmentReady]
+				if publishedRevision == revision && readyRevision == revision {
+					alreadyReady := pod.Annotations[runtimecontrol.AnnotationObservedState] == string(runtimecontrol.ObservedReady) &&
+						pod.Annotations[runtimecontrol.AnnotationObservedRevision] == revision
+					pod.Annotations[runtimecontrol.AnnotationObservedState] = string(runtimecontrol.ObservedReady)
+					pod.Annotations[runtimecontrol.AnnotationObservedRevision] = revision
+					pod.Annotations[runtimecontrol.AnnotationObservedGeneration] = formatIntegrationGeneration(assignment.RuntimeGeneration)
+					setManagerIntegrationCondition(pod, corev1.PodReady, corev1.ConditionTrue)
+					setManagerIntegrationCondition(pod, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionTrue)
+					if !alreadyReady && opts.runtimeActivationObserver != nil {
+						opts.runtimeActivationObserver(pod.DeepCopy())
+					}
+				} else {
+					pod.Annotations[runtimecontrol.AnnotationObservedState] = string(runtimecontrol.ObservedDisconnected)
+					delete(pod.Annotations, runtimecontrol.AnnotationObservedRevision)
+					delete(pod.Annotations, runtimecontrol.AnnotationObservedGeneration)
+					setManagerIntegrationCondition(pod, corev1.PodReady, corev1.ConditionFalse)
+					setManagerIntegrationCondition(pod, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionFalse)
+				}
+			}
+		}
+		*update.GetObject().(*corev1.Pod) = *pod
+
+		key, err := cache.MetaNamespaceKeyFunc(pod)
+		if err != nil {
+			return true, nil, err
+		}
+		oldObject, exists, err := podIndexer.GetByKey(key)
+		if err != nil {
+			return true, nil, err
+		}
+		if err := podIndexer.Update(pod.DeepCopy()); err != nil {
+			return true, nil, err
+		}
+		if exists {
+			podEventHandler.UpdateFunc(oldObject, pod.DeepCopy())
+		} else {
+			podEventHandler.AddFunc(pod.DeepCopy())
+		}
+		return false, nil, nil
+	})
 
 	templateService := service.NewTemplateService(
 		k8sClient,
@@ -275,11 +343,6 @@ func TestCreateTemplateLegacyEnsuresNamespaceIngressBaseline(t *testing.T) {
 }
 
 func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
-	recorder := &initializeRequestRecorder{}
-	procdServer := newInitializeRecordingProcdServer(t, recorder, service.InitializeResponse{
-		SandboxID: "initialized",
-	})
-	t.Cleanup(procdServer.Close)
 	ctldRecorder := &volumePortalBindRecorder{}
 	ctldServer := newVolumePortalBindRecordingCtldServer(t, ctldRecorder, ctldapi.BindVolumePortalResponse{
 		SandboxVolumeID: "vol-1",
@@ -288,11 +351,7 @@ func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
 	})
 	t.Cleanup(ctldServer.Close)
 
-	procdClient := newProcdClientForURL(t, procdServer.URL)
 	ctldHTTPClient := newRewriteHTTPClientForURL(t, ctldServer.URL)
-	privateKey, _, err := createInternalKeys()
-	utils.RequireNoError(t, err, "create procd keys")
-	procdGen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("manager", privateKey))
 
 	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{
 		sandboxConfig: service.SandboxServiceConfig{
@@ -303,13 +362,11 @@ func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
 			PauseMinCPU:            "10m",
 			ProcdPort:              49983,
 			ProcdClientTimeout:     5 * time.Second,
-			ProcdInitTimeout:       5 * time.Second,
+			RuntimeReadyTimeout:    5 * time.Second,
 			CtldPort:               8095,
 			CtldHTTPClient:         ctldHTTPClient,
 		},
-		internalTokenGenerator: service.NewInternalTokenGenerator(procdGen),
-		procdClient:            procdClient,
-		volumeMetadata:         staticVolumeMetadataClient{accessMode: "RWO"},
+		volumeMetadata: staticVolumeMetadataClient{accessMode: "RWO"},
 	})
 
 	templateName := "claim-bootstrap"
@@ -365,24 +422,26 @@ func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
 		t.Fatalf("unexpected ctld bind request: %+v", bindReq)
 	}
 
-	initReq := recorder.Get()
-	if initReq.SandboxID != claimResp.SandboxID || initReq.TeamID != "team-1" {
-		t.Fatalf("unexpected initialize request: %+v", initReq)
+	claimedPod, err := env.k8sClient.CoreV1().Pods(namespace).Get(context.Background(), claimResp.PodName, metav1.GetOptions{})
+	utils.RequireNoError(t, err, "get claimed pod")
+	assignment, revision, err := runtimecontrol.AssignmentFromPod(claimedPod)
+	utils.RequireNoError(t, err, "derive runtime assignment")
+	if assignment == nil || assignment.SandboxID != claimResp.SandboxID || assignment.TeamID != "team-1" {
+		t.Fatalf("unexpected runtime assignment: %+v", assignment)
+	}
+	if claimedPod.Annotations[runtimecontrol.AnnotationAssignmentReady] != revision ||
+		claimedPod.Annotations[runtimecontrol.AnnotationObservedRevision] != revision ||
+		claimedPod.Annotations[runtimecontrol.AnnotationObservedState] != string(runtimecontrol.ObservedReady) {
+		t.Fatalf("runtime assignment was not observed as ready")
 	}
 }
 
-func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeInitialize(t *testing.T) {
+func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivation(t *testing.T) {
 	events := &orderedEvents{}
 	namespace, err := naming.TemplateNamespaceForBuiltin("default")
 	utils.RequireNoError(t, err, "resolve template namespace")
 	ctldServer := newRootFSApplyRecordingCtldServer(t, events, namespace)
 	t.Cleanup(ctldServer.Close)
-	procdServer := newInitializeEventServer(t, events)
-	t.Cleanup(procdServer.Close)
-
-	privateKey, _, err := createInternalKeys()
-	utils.RequireNoError(t, err, "create procd keys")
-	procdGen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("manager", privateKey))
 
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: namespace},
@@ -429,14 +488,15 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeInitialize(t *te
 			PauseMinCPU:            "10m",
 			ProcdPort:              49983,
 			ProcdClientTimeout:     5 * time.Second,
-			ProcdInitTimeout:       5 * time.Second,
+			RuntimeReadyTimeout:    5 * time.Second,
 			CtldEnabled:            true,
 			CtldPort:               8095,
 			CtldHTTPClient:         newRewriteHTTPClientForURL(t, ctldServer.URL),
 		},
-		internalTokenGenerator: service.NewInternalTokenGenerator(procdGen),
-		procdClient:            newProcdClientForURL(t, procdServer.URL),
-		sandboxStore:           store,
+		sandboxStore: store,
+		runtimeActivationObserver: func(*corev1.Pod) {
+			events.Add("runtime-ready")
+		},
 	})
 
 	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/internal/v1/templates", env.token, map[string]any{
@@ -464,8 +524,8 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeInitialize(t *te
 		t.Fatalf("paused runtime resume response = %+v, want resumed", resumeResp)
 	}
 
-	if got := events.List(); len(got) != 2 || got[0] != "apply-rootfs" || got[1] != "initialize-procd" {
-		t.Fatalf("event order = %#v, want apply-rootfs before initialize-procd", got)
+	if got := events.List(); len(got) != 2 || got[0] != "apply-rootfs" || got[1] != "runtime-ready" {
+		t.Fatalf("event order = %#v, want apply-rootfs before runtime activation", got)
 	}
 	record, err := store.GetSandbox(context.Background(), "sandbox-1")
 	if err != nil {
@@ -736,19 +796,46 @@ func addIdleReadyPodForTemplate(t *testing.T, env *managerTestEnv, template *v1a
 			},
 			ResourceVersion: "1",
 		},
-		Spec: corev1.PodSpec{NodeName: nodeName},
+		Spec: corev1.PodSpec{
+			NodeName: nodeName,
+			ReadinessGates: []corev1.PodReadinessGate{{
+				ConditionType: v1alpha1.SandboxPodReadinessConditionType,
+			}},
+		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			PodIP: podIP,
-			Conditions: []corev1.PodCondition{{
-				Type:   corev1.PodReady,
-				Status: corev1.ConditionTrue,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{Type: v1alpha1.SandboxPodReadinessConditionType, Status: corev1.ConditionTrue},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  runtimecontrol.ProcdContainerName,
+				Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 			}},
 		},
 	}
 	_, err = env.k8sClient.CoreV1().Pods(template.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
 	utils.RequireNoError(t, err, "create ready idle pod in fake client")
 	utils.RequireNoError(t, env.podIndexer.Add(pod), "add ready idle pod to indexer")
+}
+
+func setManagerIntegrationCondition(pod *corev1.Pod, conditionType corev1.PodConditionType, status corev1.ConditionStatus) {
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == conditionType {
+			pod.Status.Conditions[i].Status = status
+			return
+		}
+	}
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:   conditionType,
+		Status: status,
+	})
+}
+
+func formatIntegrationGeneration(generation int64) string {
+	return strconv.FormatInt(generation, 10)
 }
 
 func addNode(t *testing.T, env *managerTestEnv, name, internalIP string) {
@@ -764,14 +851,6 @@ func addNode(t *testing.T, env *managerTestEnv, name, internalIP string) {
 	}
 	_, err := env.k8sClient.CoreV1().Nodes().Create(context.Background(), node, metav1.CreateOptions{})
 	utils.RequireNoError(t, err, "create node in fake client")
-}
-
-type initializeRequestRecorder struct {
-	request service.InitializeRequest
-}
-
-func (r *initializeRequestRecorder) Set(req service.InitializeRequest) {
-	r.request = req
 }
 
 type volumePortalBindRecorder struct {
@@ -854,23 +933,6 @@ func newRootFSApplyRecordingCtldServer(t *testing.T, events *orderedEvents, name
 		}
 		events.Add("apply-rootfs")
 		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
-	})
-	return httptest.NewServer(mux)
-}
-
-func newInitializeEventServer(t *testing.T, events *orderedEvents) *httptest.Server {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/initialize", func(w http.ResponseWriter, r *http.Request) {
-		var req service.InitializeRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode initialize request: %v", err)
-		}
-		if req.SandboxID != "sandbox-1" || req.TeamID != "team-1" {
-			t.Fatalf("unexpected initialize request: %+v", req)
-		}
-		events.Add("initialize-procd")
-		_ = spec.WriteSuccess(w, http.StatusOK, service.InitializeResponse{SandboxID: req.SandboxID})
 	})
 	return httptest.NewServer(mux)
 }
@@ -1389,26 +1451,6 @@ func cloneRootFSFilesystemForManagerIntegration(filesystem *service.RootFSFilesy
 	return &clone
 }
 
-func (r *initializeRequestRecorder) Get() service.InitializeRequest {
-	return r.request
-}
-
-func newInitializeRecordingProcdServer(t *testing.T, recorder *initializeRequestRecorder, response service.InitializeResponse) *httptest.Server {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/initialize", func(w http.ResponseWriter, r *http.Request) {
-		var req service.InitializeRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode initialize request: %v", err)
-		}
-		if recorder != nil {
-			recorder.Set(req)
-		}
-		_ = spec.WriteSuccess(w, http.StatusOK, response)
-	})
-	return httptest.NewServer(mux)
-}
-
 type rewriteTransport struct {
 	base      *url.URL
 	transport http.RoundTripper
@@ -1466,10 +1508,5 @@ func newProcdStubServer(t *testing.T) *httptest.Server {
 		}
 		_ = json.NewEncoder(w).Encode(response)
 	})
-	mux.HandleFunc("/api/v1/initialize", func(w http.ResponseWriter, r *http.Request) {
-		response := service.InitializeResponse{SandboxID: "initialized"}
-		_ = json.NewEncoder(w).Encode(response)
-	})
-
 	return httptest.NewServer(mux)
 }

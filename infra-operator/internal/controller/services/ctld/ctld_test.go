@@ -616,6 +616,7 @@ func TestReconcileUsesDefaultContainerdHostDataRoot(t *testing.T) {
 
 	ds := reconcileCtldDaemonSet(t, infra)
 	args := ds.Spec.Template.Spec.Containers[0].Args
+	assertContainsArg(t, args, "-runtime-watch-addr=:8096")
 	assertContainsArg(t, args, "-containerd-host-data-root=/var/lib/containerd")
 	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/containerd")
 }

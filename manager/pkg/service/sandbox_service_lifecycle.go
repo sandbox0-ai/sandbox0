@@ -834,6 +834,7 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 	var networkState *BuildNetworkPolicyResult
 	var updatedPod *corev1.Pod
 	var rollbackBindings func(context.Context) error
+	var runtimeRevision string
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Get the latest version of the pod
@@ -941,6 +942,12 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 			return fmt.Errorf("marshal sandbox config: %w", err)
 		}
 		updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
+		if cfg.EnvVars != nil {
+			runtimeRevision, err = deactivateRuntimeAssignment(updatedPod)
+			if err != nil {
+				return err
+			}
+		}
 
 		if resizeQuota != nil {
 			resizedPod, err := s.resizeSandboxPodResources(ctx, current, *resizeQuota)
@@ -973,11 +980,6 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 		return nil, fmt.Errorf("update pod: %w", err)
 	}
 
-	if cfg.EnvVars != nil {
-		if err := s.updateActiveSandboxEnvVars(ctx, updatedPod, sandboxID, sandboxEnvVarsFromPod(updatedPod)); err != nil {
-			return nil, fmt.Errorf("update sandbox env vars: %w", err)
-		}
-	}
 	if networkState != nil {
 		teamID := updatedPod.Annotations[controller.AnnotationTeamID]
 		if err := s.applyNetworkProvider(ctx, updatedPod, teamID, policySpecFromState(networkState)); err != nil {
@@ -986,6 +988,12 @@ func (s *SandboxService) UpdateSandbox(ctx context.Context, sandboxID string, cf
 	}
 	if err := s.persistUpdatedSandboxPod(ctx, updatedPod); err != nil {
 		return nil, err
+	}
+	if runtimeRevision != "" {
+		updatedPod, err = s.activateRuntimeAssignment(ctx, updatedPod, runtimeRevision)
+		if err != nil {
+			return nil, fmt.Errorf("activate updated runtime assignment: %w", err)
+		}
 	}
 
 	return s.podToSandbox(updatedPod, sandboxID), nil
@@ -1044,44 +1052,6 @@ func (s *SandboxService) updatePausedSandboxRecord(ctx context.Context, record *
 		return nil, err
 	}
 	return s.recordToSandbox(record), nil
-}
-
-func (s *SandboxService) updateActiveSandboxEnvVars(ctx context.Context, pod *corev1.Pod, sandboxID string, envVars map[string]string) error {
-	if s.procdClient == nil {
-		return fmt.Errorf("procd client is not configured")
-	}
-	if s.internalTokenGenerator == nil {
-		return fmt.Errorf("token generators not configured, cannot authenticate with procd")
-	}
-	procdAddress, err := s.prodAddress(ctx, pod)
-	if err != nil {
-		return fmt.Errorf("procd address: %w", err)
-	}
-	currentSandboxID := sandboxIDFromPod(pod)
-	if currentSandboxID == "" {
-		currentSandboxID = sandboxID
-	}
-	teamID, userID := "", ""
-	if pod != nil && pod.Annotations != nil {
-		teamID = pod.Annotations[controller.AnnotationTeamID]
-		userID = pod.Annotations[controller.AnnotationUserID]
-	}
-	internalToken, err := s.internalTokenGenerator.GenerateToken(teamID, userID, currentSandboxID)
-	if err != nil {
-		return fmt.Errorf("generate internal token: %w", err)
-	}
-	_, err = s.procdClient.UpdateSandboxEnvVars(ctx, procdAddress, UpdateSandboxEnvVarsRequest{
-		EnvVars: cloneEnvVars(envVars),
-	}, internalToken)
-	return err
-}
-
-func sandboxEnvVarsFromPod(pod *corev1.Pod) map[string]string {
-	if pod == nil || pod.Annotations == nil {
-		return nil
-	}
-	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
-	return cloneEnvVars(cfg.EnvVars)
 }
 
 func expirationFromTTL(now time.Time, ttl *int32) time.Time {
@@ -1261,12 +1231,16 @@ func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *Sandbo
 	if cfg.AutoResume != nil {
 		autoResume = *cfg.AutoResume
 	}
+	internalAddr := ""
+	if status == SandboxStatusRunning {
+		internalAddr = s.procdAddressFromPod(pod)
+	}
 	return &Sandbox{
 		ID:                sandboxID,
 		TemplateID:        sandboxTemplateIDFromLabels(pod.Labels),
 		TeamID:            pod.Annotations[controller.AnnotationTeamID],
 		UserID:            pod.Annotations[controller.AnnotationUserID],
-		InternalAddr:      s.procdAddressFromPod(pod),
+		InternalAddr:      internalAddr,
 		Status:            status,
 		Paused:            status == SandboxStatusPaused,
 		AutoResume:        autoResume,

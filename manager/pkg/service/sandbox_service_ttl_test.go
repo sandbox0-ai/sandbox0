@@ -4,17 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strconv"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -45,6 +41,7 @@ func newSandboxServiceForTTLTests(t *testing.T, pod *corev1.Pod, defaultTTL time
 		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
 	})
 	require.NoError(t, indexer.Add(pod.DeepCopy()))
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, nil)
 
 	return &SandboxService{
 		k8sClient: client,
@@ -68,11 +65,19 @@ func testSandboxPod() *corev1.Pod {
 				controller.LabelSandboxID: "sandbox-1",
 			},
 			Annotations: map[string]string{
-				controller.AnnotationTeamID: "team-1",
-				controller.AnnotationUserID: "user-1",
+				controller.AnnotationSandboxID:         "sandbox-1",
+				controller.AnnotationTeamID:            "team-1",
+				controller.AnnotationUserID:            "user-1",
+				controller.AnnotationRuntimeGeneration: "1",
 			},
 		},
+		Spec: corev1.PodSpec{
+			ReadinessGates: []corev1.PodReadinessGate{{
+				ConditionType: v1alpha1.SandboxPodReadinessConditionType,
+			}},
+		},
 		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
 			PodIP: "10.0.0.10",
 		},
 	}
@@ -266,35 +271,11 @@ func TestRefreshSandboxPersistsExpirationRecord(t *testing.T) {
 	assert.Equal(t, time.Date(2026, time.March, 7, 12, 2, 0, 0, time.UTC), record.HardExpiresAt)
 }
 
-func TestUpdateSandboxEnvVarsUpdatesProcdAndConfig(t *testing.T) {
+func TestUpdateSandboxEnvVarsPublishesRuntimeAssignmentAndConfig(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Annotations[controller.AnnotationConfig] = `{"env_vars":{"OLD":"old"},"ttl":300}`
 
-	var procdReq UpdateSandboxEnvVarsRequest
-	procdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/sandbox/env_vars" {
-			t.Fatalf("unexpected procd request %s %s", r.Method, r.URL.Path)
-		}
-		if got := r.Header.Get("X-Internal-Token"); got != "token" {
-			t.Fatalf("X-Internal-Token = %q, want token", got)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&procdReq); err != nil {
-			t.Fatalf("decode procd request: %v", err)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"success": true,
-			"data": map[string]any{
-				"env_vars": procdReq.EnvVars,
-			},
-		})
-	}))
-	t.Cleanup(procdServer.Close)
-	procdPort := configurePodForProcdServer(t, pod, procdServer.URL)
-
 	svc, client := newSandboxServiceForTTLTests(t, pod, 0)
-	svc.config.ProcdPort = procdPort
-	svc.procdClient = NewProcdClientWithHTTPClient(procdServer.Client())
-	svc.internalTokenGenerator = staticTokenGenerator{}
 
 	_, err := svc.UpdateSandbox(context.Background(), pod.Name, &SandboxUpdateConfig{
 		EnvVars: map[string]string{
@@ -302,7 +283,6 @@ func TestUpdateSandboxEnvVarsUpdatesProcdAndConfig(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"APP_ENV": "test"}, procdReq.EnvVars)
 
 	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -311,41 +291,37 @@ func TestUpdateSandboxEnvVarsUpdatesProcdAndConfig(t *testing.T) {
 	assert.Equal(t, map[string]string{"APP_ENV": "test"}, cfg.EnvVars)
 	require.NotNil(t, cfg.TTL)
 	assert.Equal(t, int32(300), *cfg.TTL)
+	assignment, revision, err := runtimecontrol.AssignmentFromPod(stored)
+	require.NoError(t, err)
+	require.NotNil(t, assignment)
+	assert.Equal(t, map[string]string{
+		"APP_ENV":                   "test",
+		runtimecontrol.EnvSandboxID: "sandbox-1",
+	}, assignment.EnvVars)
+	assert.Equal(t, revision, stored.Annotations[runtimecontrol.AnnotationAssignmentReady])
+	assert.Equal(t, revision, stored.Annotations[runtimecontrol.AnnotationObservedRevision])
+	assert.Equal(t, string(runtimecontrol.ObservedReady), stored.Annotations[runtimecontrol.AnnotationObservedState])
 }
 
-func TestUpdateSandboxEnvVarsClearsConfig(t *testing.T) {
+func TestUpdateSandboxEnvVarsClearsConfigThroughRuntimeAssignment(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Annotations[controller.AnnotationConfig] = `{"env_vars":{"OLD":"old"}}`
 
-	var procdReq UpdateSandboxEnvVarsRequest
-	procdServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&procdReq); err != nil {
-			t.Fatalf("decode procd request: %v", err)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"success": true,
-			"data":    map[string]any{"env_vars": map[string]string{}},
-		})
-	}))
-	t.Cleanup(procdServer.Close)
-	procdPort := configurePodForProcdServer(t, pod, procdServer.URL)
-
 	svc, client := newSandboxServiceForTTLTests(t, pod, 0)
-	svc.config.ProcdPort = procdPort
-	svc.procdClient = NewProcdClientWithHTTPClient(procdServer.Client())
-	svc.internalTokenGenerator = staticTokenGenerator{}
 
 	_, err := svc.UpdateSandbox(context.Background(), pod.Name, &SandboxUpdateConfig{
 		EnvVars: map[string]string{},
 	})
 	require.NoError(t, err)
-	assert.Empty(t, procdReq.EnvVars)
 
 	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	var cfg SandboxConfig
 	require.NoError(t, json.Unmarshal([]byte(stored.Annotations[controller.AnnotationConfig]), &cfg))
 	assert.Empty(t, cfg.EnvVars)
+	assignment, _, err := runtimecontrol.AssignmentFromPod(stored)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"}, assignment.EnvVars)
 }
 
 func TestUpdateSandboxRejectsInvalidTTLState(t *testing.T) {
@@ -458,23 +434,4 @@ func TestRefreshSandboxRetriesPodUpdateConflict(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "2026-03-07T12:02:00Z", stored.Annotations[controller.AnnotationExpiresAt])
 	assert.Equal(t, "2026-03-07T12:10:00Z", stored.Annotations[controller.AnnotationHardExpiresAt])
-}
-
-func configurePodForProcdServer(t *testing.T, pod *corev1.Pod, rawURL string) int {
-	t.Helper()
-	parsed, err := url.Parse(rawURL)
-	require.NoError(t, err)
-	host, portText, err := net.SplitHostPort(parsed.Host)
-	require.NoError(t, err)
-	port, err := strconv.Atoi(portText)
-	require.NoError(t, err)
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	if pod.Labels == nil {
-		pod.Labels = map[string]string{}
-	}
-	pod.Annotations[controller.AnnotationSandboxID] = pod.Name
-	pod.Status.PodIP = host
-	return port
 }

@@ -481,7 +481,7 @@ func TestSupervisorRecoversPersistedRunningSessionAsNewAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cleanupSupervisor(t, supervisor) })
-	if err := supervisor.Initialize("sandbox-1", 5, nil); err != nil {
+	if err := supervisor.Activate(Activation{SandboxID: "sandbox-1", RuntimeGeneration: 5}); err != nil {
 		t.Fatal(err)
 	}
 	waitForSessionPhase(t, supervisor, record.ID, PhaseExited)
@@ -523,7 +523,7 @@ func TestSupervisorDropsSessionsCopiedFromAnotherSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := source.Initialize("sandbox-source", 1, nil); err != nil {
+	if err := source.Activate(Activation{SandboxID: "sandbox-source", RuntimeGeneration: 1}); err != nil {
 		t.Fatal(err)
 	}
 	created, _, err := source.Create(SessionSpec{
@@ -549,7 +549,17 @@ func TestSupervisorDropsSessionsCopiedFromAnotherSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cleanupSupervisor(t, target) })
-	if err := target.Initialize("sandbox-target", 1, nil); err != nil {
+	if err := target.Activate(Activation{
+		SandboxID:         "sandbox-target",
+		RuntimeGeneration: 1,
+	}); err == nil {
+		t.Fatal("Activate() accepted session state copied from another sandbox without an explicit reset")
+	}
+	if err := target.Activate(Activation{
+		SandboxID:               "sandbox-target",
+		RuntimeGeneration:       1,
+		ResetCopiedSessionState: true,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if got := target.List(); len(got) != 0 {
@@ -569,8 +579,8 @@ func TestSupervisorDropsSessionsCopiedFromAnotherSandbox(t *testing.T) {
 
 func TestSupervisorRejectsRebindingRunningProcessToAnotherSandbox(t *testing.T) {
 	supervisor := newTestSupervisor(t)
-	if err := supervisor.Initialize("sandbox-other", 2, nil); err == nil {
-		t.Fatal("Initialize() rebound one procd process to another sandbox")
+	if err := supervisor.Activate(Activation{SandboxID: "sandbox-other", RuntimeGeneration: 2}); err == nil {
+		t.Fatal("Activate() rebound one procd process to another sandbox")
 	}
 }
 
@@ -640,7 +650,11 @@ func newTestSupervisor(t *testing.T) *Supervisor {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := supervisor.Initialize("sandbox-1", 1, map[string]string{"SANDBOX_DEFAULT": "true"}); err != nil {
+	if err := supervisor.Activate(Activation{
+		SandboxID:         "sandbox-1",
+		RuntimeGeneration: 1,
+		SandboxEnv:        map[string]string{"SANDBOX_DEFAULT": "true"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cleanupSupervisor(t, supervisor) })

@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/stretchr/testify/assert"
@@ -591,59 +592,59 @@ func TestGetSandboxHidesRuntimeAfterPauseBarrier(t *testing.T) {
 	assert.Equal(t, "pod-1", sandbox.PodName)
 }
 
-func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *testing.T) {
+func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeRuntimeActivation(t *testing.T) {
 	var calls []string
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
-		var req ctldapi.ApplyRootFSRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		assert.Equal(t, "runc", req.ExpectedRuntime)
-		assert.Equal(t, "io.containerd.runc.v2", req.ExpectedRuntimeHandler)
-		assert.Equal(t, "overlayfs", req.ExpectedSnapshotter)
-		assert.Equal(t, "sha256:base", req.ExpectedBaseImageDigest)
-		assert.Equal(t, "parent-1", req.ExpectedSnapshotParent)
-		assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)
-		assert.Equal(t, "sha256:diff", req.Descriptor.Digest)
-		assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", req.Descriptor.ObjectKey)
-		assert.ElementsMatch(t, []string{"/workspace/data"}, req.ExcludedPaths)
-		calls = append(calls, "apply")
-		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+		switch r.URL.Path {
+		case "/api/v1/rootfs/apply":
+			var req ctldapi.ApplyRootFSRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			assert.Equal(t, "runc", req.ExpectedRuntime)
+			assert.Equal(t, "io.containerd.runc.v2", req.ExpectedRuntimeHandler)
+			assert.Equal(t, "overlayfs", req.ExpectedSnapshotter)
+			assert.Equal(t, "sha256:base", req.ExpectedBaseImageDigest)
+			assert.Equal(t, "parent-1", req.ExpectedSnapshotParent)
+			assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)
+			assert.Equal(t, "sha256:diff", req.Descriptor.Digest)
+			assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", req.Descriptor.ObjectKey)
+			assert.ElementsMatch(t, []string{"/workspace/data"}, req.ExcludedPaths)
+			calls = append(calls, "apply")
+			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+		case "/api/v1/volume-portals/check":
+			_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true})
+		default:
+			t.Fatalf("unexpected CTLD path %s", r.URL.Path)
+		}
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
-
-	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/initialize", r.URL.Path)
-		require.Equal(t, []string{"apply"}, calls)
-		calls = append(calls, "procd")
-		require.NoError(t, spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-1", TeamID: "team-1"}))
-	}))
-	defer procd.Close()
-	procdURL, procdPort := parsedTestServer(t, procd.URL)
 
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
 	setRootFSTestClaimMounts(t, pod, []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}})
 	pod.Status.HostIP = ctldURL.Hostname()
-	pod.Status.PodIP = procdURL.Hostname()
+	pod.Status.PodIP = "10.0.0.10"
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{},
 		rootFSStates: map[string]*SandboxRootFSState{
 			"sandbox-1": rootFSTestState(),
 		},
 	}
+	indexer := newClaimTestPodIndexer(t, pod)
+	client := fake.NewSimpleClientset(pod)
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(*corev1.Pod) {
+		require.Equal(t, []string{"apply"}, calls)
+		calls = append(calls, "runtime")
+	})
 	svc := &SandboxService{
-		k8sClient:              fake.NewSimpleClientset(pod),
-		podLister:              newTestPodLister(t, pod),
-		sandboxStore:           store,
-		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
-		internalTokenGenerator: staticTokenGenerator{},
+		k8sClient:    client,
+		podLister:    corelisters.NewPodLister(indexer),
+		sandboxStore: store,
+		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
 		config: SandboxServiceConfig{
-			CtldEnabled:      true,
-			CtldPort:         ctldPort,
-			ProcdPort:        procdPort,
-			ProcdInitTimeout: time.Second,
+			CtldEnabled:         true,
+			CtldPort:            ctldPort,
+			RuntimeReadyTimeout: time.Second,
 		},
 		clock:  systemTime{},
 		logger: zap.NewNop(),
@@ -662,7 +663,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeProcdInitialization(t *t
 
 	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"apply", "procd"}, calls)
+	assert.Equal(t, []string{"apply", "runtime"}, calls)
 }
 
 func TestFinishRestoredSandboxRuntimeAppliesRootFSLayerChain(t *testing.T) {
@@ -675,34 +676,27 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSLayerChain(t *testing.T) {
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
-	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/initialize", r.URL.Path)
-		require.NoError(t, spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-1", TeamID: "team-1"}))
-	}))
-	defer procd.Close()
-	procdURL, procdPort := parsedTestServer(t, procd.URL)
-
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	pod.Status.HostIP = ctldURL.Hostname()
-	pod.Status.PodIP = procdURL.Hostname()
+	pod.Status.PodIP = "10.0.0.10"
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{},
 		rootFSStates: map[string]*SandboxRootFSState{
 			"sandbox-1": rootFSTestLayerState(),
 		},
 	}
+	indexer := newClaimTestPodIndexer(t, pod)
+	client := fake.NewSimpleClientset(pod)
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, nil)
 	svc := &SandboxService{
-		k8sClient:              fake.NewSimpleClientset(pod),
-		podLister:              newTestPodLister(t, pod),
-		sandboxStore:           store,
-		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
-		internalTokenGenerator: staticTokenGenerator{},
+		k8sClient:    client,
+		podLister:    corelisters.NewPodLister(indexer),
+		sandboxStore: store,
+		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
 		config: SandboxServiceConfig{
-			CtldEnabled:      true,
-			CtldPort:         ctldPort,
-			ProcdPort:        procdPort,
-			ProcdInitTimeout: time.Second,
+			CtldEnabled:         true,
+			CtldPort:            ctldPort,
+			RuntimeReadyTimeout: time.Second,
 		},
 		clock:  systemTime{},
 		logger: zap.NewNop(),
@@ -765,37 +759,35 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
-	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/initialize", r.URL.Path)
-		require.Len(t, applyTargets, 2)
-		require.NoError(t, spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-1", TeamID: "team-1"}))
-	}))
-	defer procd.Close()
-	procdURL, procdPort := parsedTestServer(t, procd.URL)
-
 	currentPod := rootFSTestPod("pod-current", "sandbox-1", "team-1")
 	currentPod.Namespace = templateNamespace
 	currentPod.Status.HostIP = ctldURL.Hostname()
-	currentPod.Status.PodIP = procdURL.Hostname()
+	currentPod.Status.PodIP = "10.0.0.10"
 	indexer := newClaimTestPodIndexer(t, currentPod)
 	k8sClient := fake.NewSimpleClientset(currentPod)
 	var fallbackImage string
 	k8sClient.PrependReactor("create", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
-		pod := action.(ktesting.CreateAction).GetObject().(*corev1.Pod).DeepCopy()
+		pod := action.(ktesting.CreateAction).GetObject().(*corev1.Pod)
 		require.Len(t, pod.Spec.Containers, 1)
 		fallbackImage = pod.Spec.Containers[0].Image
 
-		readyPod := pod.DeepCopy()
-		readyPod.UID = types.UID("fallback-uid")
-		readyPod.Status.Phase = corev1.PodRunning
-		readyPod.Status.HostIP = ctldURL.Hostname()
-		readyPod.Status.PodIP = procdURL.Hostname()
-		readyPod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		pod.UID = types.UID("fallback-uid")
+		pod.Status.Phase = corev1.PodRunning
+		pod.Status.HostIP = ctldURL.Hostname()
+		pod.Status.PodIP = "10.0.0.11"
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 			Name:  "procd",
 			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 		}}
-		require.NoError(t, indexer.Add(readyPod))
+		pod.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: v1alpha1.SandboxPodReadinessConditionType, Status: corev1.ConditionTrue},
+		}
+		require.NoError(t, indexer.Add(pod.DeepCopy()))
 		return false, nil, nil
+	})
+	installRuntimeObservationReactor(t, k8sClient, indexer, runtimecontrol.ObservedReady, func(*corev1.Pod) {
+		require.Len(t, applyTargets, 2)
 	})
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -840,19 +832,16 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 		},
 	}
 	svc := &SandboxService{
-		k8sClient:              k8sClient,
-		podLister:              corelisters.NewPodLister(indexer),
-		secretLister:           newClaimTestSecretLister(t),
-		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		sandboxStore:           store,
-		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
-		internalTokenGenerator: staticTokenGenerator{},
+		k8sClient:      k8sClient,
+		podLister:      corelisters.NewPodLister(indexer),
+		secretLister:   newClaimTestSecretLister(t),
+		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		sandboxStore:   store,
+		ctldClient:     NewCtldClient(CtldClientConfig{Timeout: time.Second}),
 		config: SandboxServiceConfig{
-			CtldEnabled:      true,
-			CtldPort:         ctldPort,
-			ProcdPort:        procdPort,
-			ProcdInitTimeout: time.Second,
+			CtldEnabled:         true,
+			CtldPort:            ctldPort,
+			RuntimeReadyTimeout: time.Second,
 		},
 		clock:  systemTime{},
 		logger: zap.NewNop(),

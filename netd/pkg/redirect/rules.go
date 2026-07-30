@@ -23,10 +23,12 @@ const (
 func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 	var buf bytes.Buffer
 	bypass := normalizeCIDRs(append([]string{defaultLoopback}, bypassCIDRs...))
+	runtimeWatchTCPPorts := normalizePorts(cfg.RuntimeWatchTCPPorts)
 
 	buf.WriteString("*mangle\n")
 	buf.WriteString(fmt.Sprintf("-F %s\n", chainName))
 
+	appendRuntimeWatchBypassRules(&buf, chainName, runtimeWatchTCPPorts)
 	for _, cidr := range bypass {
 		buf.WriteString(fmt.Sprintf("-A %s -d %s -j RETURN\n", chainName, cidr))
 	}
@@ -47,6 +49,7 @@ func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 	buf.WriteString("*nat\n")
 	buf.WriteString(fmt.Sprintf("-F %s\n", natChainName))
 	buf.WriteString(fmt.Sprintf("-A %s -m mark --mark %s -j ACCEPT\n", natChainName, natBypassJumpMark))
+	appendRuntimeWatchBypassRules(&buf, natChainName, runtimeWatchTCPPorts)
 	for _, cidr := range bypass {
 		buf.WriteString(fmt.Sprintf("-A %s -d %s -j RETURN\n", natChainName, cidr))
 	}
@@ -56,6 +59,24 @@ func buildIPTablesRestoreInput(cfg Config, bypassCIDRs []string) string {
 	buf.WriteString("COMMIT\n")
 
 	return buf.String()
+}
+
+// appendRuntimeWatchBypassRules preserves the Pod source address only for the
+// dedicated CTLD event listener. The listener exposes no CTLD control APIs and
+// validates the source against the subscribed Pod.
+func appendRuntimeWatchBypassRules(buf *bytes.Buffer, chain string, ports []int) {
+	if buf == nil || chain == "" {
+		return
+	}
+	for _, port := range ports {
+		_, _ = fmt.Fprintf(
+			buf,
+			"-A %s -m set --match-set %s src -p tcp --dport %d -m addrtype --dst-type LOCAL -j RETURN\n",
+			chain,
+			ipsetName,
+			port,
+		)
+	}
 }
 
 func appendTPROXYRules(buf *bytes.Buffer, inputInterface, protocol string, destPort int, proxyPort int) {
@@ -110,6 +131,22 @@ func normalizeIPs(values []string) []string {
 
 func normalizeCIDRs(values []string) []string {
 	return normalizeUnique(values)
+}
+
+func normalizePorts(values []int) []int {
+	out := make([]int, 0, len(values))
+	seen := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		if value <= 0 || value > 65535 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func normalizeUnique(values []string) []string {

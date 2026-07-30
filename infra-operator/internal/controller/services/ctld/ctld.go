@@ -27,6 +27,7 @@ import (
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
@@ -696,6 +697,7 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string)
 	}
 	args := []string{
 		"-http-addr=:8095",
+		fmt.Sprintf("-runtime-watch-addr=:%d", runtimecontrol.DefaultCtldWatchPort),
 		"-cri-endpoint=/host-run/containerd/containerd.sock",
 		"-containerd-endpoint=/host-run/containerd/containerd.sock",
 		"-containerd-root=/host-run/containerd",

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -40,13 +41,13 @@ const (
 	PoolTypeActive = "active"
 
 	// Annotations
-	AnnotationTeamID                       = "sandbox0.ai/team-id"
+	AnnotationTeamID                       = runtimecontrol.AnnotationTeamID
 	AnnotationUserID                       = "sandbox0.ai/user-id"
 	AnnotationClaimedAt                    = "sandbox0.ai/claimed-at"
 	AnnotationClaimType                    = "sandbox0.ai/claim-type" // "hot" or "cold"
 	AnnotationExpiresAt                    = "sandbox0.ai/expires-at"
 	AnnotationHardExpiresAt                = "sandbox0.ai/hard-expires-at"
-	AnnotationConfig                       = "sandbox0.ai/config"
+	AnnotationConfig                       = runtimecontrol.AnnotationConfig
 	AnnotationMounts                       = "sandbox0.ai/mounts"
 	AnnotationPaused                       = "sandbox0.ai/paused"
 	AnnotationPausedAt                     = "sandbox0.ai/paused-at"
@@ -59,8 +60,8 @@ const (
 	AnnotationNetworkPolicy                = "sandbox0.ai/network-policy" // JSON serialized network policy spec
 	AnnotationNetworkPolicyHash            = "sandbox0.ai/network-policy-hash"
 	AnnotationNetworkPolicyAppliedHash     = "sandbox0.ai/network-policy-applied-hash"
-	AnnotationSandboxID                    = "sandbox0.ai/sandbox-id"
-	AnnotationRuntimeGeneration            = "sandbox0.ai/runtime-generation"
+	AnnotationSandboxID                    = runtimecontrol.AnnotationSandboxID
+	AnnotationRuntimeGeneration            = runtimecontrol.AnnotationRuntimeGeneration
 	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
 	AnnotationHotClaimReservation          = "sandbox0.ai/hot-claim-reservation"
 	AnnotationHotClaimReservationState     = "sandbox0.ai/hot-claim-reservation-state"

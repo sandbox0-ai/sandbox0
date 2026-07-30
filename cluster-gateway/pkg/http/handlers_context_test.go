@@ -403,6 +403,11 @@ func TestSandboxRuntimeMissing(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "starting with stale address",
+			sandbox: &mgr.Sandbox{Status: mgr.SandboxStatusStarting, InternalAddr: "http://127.0.0.1:7777"},
+			want:    true,
+		},
+		{
 			name:    "paused with stale address",
 			sandbox: &mgr.Sandbox{Status: mgr.SandboxStatusPaused, InternalAddr: "http://127.0.0.1:7777"},
 			want:    true,

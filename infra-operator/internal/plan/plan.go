@@ -13,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/runtimeconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 )
 
@@ -457,6 +458,9 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 	cfg.CtldEnabled = infrav1alpha1.IsManagerEnabled(infra)
 	if cfg.CtldEnabled && cfg.CtldPort == 0 {
 		cfg.CtldPort = 8095
+	}
+	if cfg.CtldEnabled && cfg.CtldRuntimeWatchPort == 0 {
+		cfg.CtldRuntimeWatchPort = runtimecontrol.DefaultCtldWatchPort
 	}
 
 	if resolvedRegistry := registry.ResolveRegistryConfig(infra); resolvedRegistry != nil {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -229,6 +230,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 	envVars := []corev1.EnvVar{
 		{Name: "SERVICE", Value: "manager"},
 		{Name: "CONFIG_PATH", Value: "/config/config.yaml"},
+		{Name: apiconfig.ManagerLeaderElectionNameEnv, Value: deploymentName},
 	}
 	if storageConfig != nil {
 		storageHTTPPort := int32(storageConfig.HTTPPort)
@@ -237,6 +239,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		)
 		envVars = append(envVars, corev1.EnvVar{Name: "STORAGE_RUNTIME_CONFIG_PATH", Value: storageRuntimeConfigPath})
 	}
+	maxSurge := intstr.FromInt32(0)
+	maxUnavailable := intstr.FromInt32(1)
 
 	// Create deployment
 	if err := r.Resources.ReconcileDeploymentWithScope(ctx, scope, deploymentName, labels, replicas, common.ServiceDefinition{
@@ -254,6 +258,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		VolumeMounts:   volumeMounts,
 		Volumes:        volumes,
 		PodAnnotations: podAnnotations,
+		// A no-surge rollout also protects the first upgrade from a manager
+		// version that does not participate in leader election. Once all
+		// replicas are leader-aware, the Lease remains the single-writer guard.
+		DeploymentStrategy: &appsv1.DeploymentStrategy{
+			Type: appsv1.RollingUpdateDeploymentStrategyType,
+			RollingUpdate: &appsv1.RollingUpdateDeployment{
+				MaxSurge:       &maxSurge,
+				MaxUnavailable: &maxUnavailable,
+			},
+		},
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{

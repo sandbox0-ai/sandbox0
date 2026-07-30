@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,6 +131,40 @@ func TestSandboxLifecycleControllerCleansAndRemovesFinalizer(t *testing.T) {
 	}
 	if hasSandboxCleanupFinalizer(updated) {
 		t.Fatal("sandbox cleanup finalizer was not removed")
+	}
+}
+
+func TestSandboxLifecycleControllerRemovesFinalizerForUnscheduledPod(t *testing.T) {
+	deletionTime := metav1.NewTime(time.Now().UTC())
+	pod := newLifecycleTestPod()
+	pod.UID = types.UID("pod-uid-a")
+	pod.Finalizers = []string{sandboxCleanupFinalizer}
+	pod.DeletionTimestamp = &deletionTime
+	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "volume-a"
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	cleaner := &SandboxService{
+		config: SandboxServiceConfig{CtldEnabled: true},
+		logger: zap.NewNop(),
+	}
+	lifecycleController := NewSandboxLifecycleController(client, nil, cleaner, zap.NewNop())
+
+	err := lifecycleController.reconcile(
+		context.Background(),
+		sandboxLifecycleItemFromInfo(SandboxLifecycleInfo{
+			Namespace: pod.Namespace,
+			PodName:   pod.Name,
+			SandboxID: pod.Name,
+		}, false),
+	)
+	if err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+	updated, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get updated pod: %v", err)
+	}
+	if hasSandboxCleanupFinalizer(updated) {
+		t.Fatal("sandbox cleanup finalizer was not removed for unscheduled pod")
 	}
 }
 
@@ -531,6 +566,29 @@ func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 	}
 	if got.SandboxVolumeID != "vol-1" || got.MountPath != "/workspace/data" || got.PortalName != "data" {
 		t.Fatalf("unexpected volume portal unbind request: %+v", got)
+	}
+}
+
+func TestSandboxServiceCleanupDeletedSandboxStillRequiresCtldForScheduledPod(t *testing.T) {
+	svc := &SandboxService{
+		config: SandboxServiceConfig{CtldEnabled: true},
+		logger: zap.NewNop(),
+	}
+
+	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace: "ns-a",
+		PodName:   "sandbox-a",
+		SandboxID: "sandbox-a",
+		PodUID:    "pod-uid-a",
+		NodeName:  "sandbox-node-a",
+		VolumePortals: []SandboxLifecycleVolumePortal{{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+			PortalName:      "data",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "ctld client is not configured") {
+		t.Fatalf("CleanupDeletedSandbox() error = %v, want missing ctld client", err)
 	}
 }
 

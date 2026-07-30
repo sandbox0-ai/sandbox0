@@ -572,7 +572,6 @@ func main() {
 			clk,
 			logger,
 		)
-		go templateReconciler.Start(ctx)
 	} else {
 		logger.Info("Template reconciliation disabled; durable template build queue remains enabled")
 	}
@@ -698,97 +697,115 @@ func main() {
 		}
 	}
 
-	startSandboxObservabilityLogProducer(ctx, cfg, k8sClient, podLister, sandboxLogWorker, logger, clk)
-	go func() {
-		if err := sandboxCrashLogCollector.Run(ctx, 2); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("Sandbox crash log collector failed", zap.Error(err))
+	startControllers := func(controllerCtx context.Context) {
+		if templateReconciler != nil {
+			go templateReconciler.Start(controllerCtx)
 		}
-	}()
-	go func() {
-		if err := sandboxCrashRecoveryController.Run(ctx, 2); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Error("Sandbox crash recovery controller failed", zap.Error(err))
-		}
-	}()
-
-	if templateBuildWorker != nil {
+		startSandboxObservabilityLogProducer(controllerCtx, cfg, k8sClient, podLister, sandboxLogWorker, logger, clk)
 		go func() {
-			if err := templateBuildWorker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				logger.Error("Template image build worker stopped", zap.Error(err))
+			if err := sandboxCrashLogCollector.Run(controllerCtx, 2); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("Sandbox crash log collector failed", zap.Error(err))
 			}
 		}()
-		logger.Info("Template image build worker started",
-			zap.String("clusterID", naming.ClusterIDOrDefault(&cfg.DefaultClusterId)),
-		)
-	}
-
-	// Start operator
-	go func() {
-		if err := operator.Run(ctx, 2); err != nil {
-			logger.Fatal("Operator failed", zap.Error(err))
-		}
-	}()
-
-	// Start cleanup controller
-	go func() {
-		if err := cleanupController.Start(ctx); err != nil && err != context.Canceled {
-			logger.Error("Cleanup controller failed", zap.Error(err))
-		}
-	}()
-
-	go func() {
-		if err := sandboxLifecycleController.Run(ctx, 2); err != nil && err != context.Canceled {
-			logger.Error("Sandbox lifecycle controller failed", zap.Error(err))
-		}
-	}()
-
-	go func() {
-		if err := hotClaimReservationController.Run(ctx, 1); err != nil && err != context.Canceled {
-			logger.Error("Hot claim reservation controller failed", zap.Error(err))
-		}
-	}()
-
-	go func() {
-		if err := sandboxPauseController.Run(ctx, 2); err != nil && err != context.Canceled {
-			logger.Error("Sandbox pause controller failed", zap.Error(err))
-		}
-	}()
-	if !cfg.RootFSMaintenance.Disabled {
-		if rootFSObjectStoreErr != nil {
-			logger.Warn("Rootfs maintenance disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
-		} else if rootFSObjectStore == nil {
-			logger.Warn("Rootfs maintenance disabled; object store is not configured")
-		} else {
-			rootFSMaintenanceController := service.NewRootFSMaintenanceController(
-				sandboxStore,
-				rootFSObjectStore,
-				rootFSMaintenanceControllerConfig(cfg),
-				logger,
-				managerMetrics,
-			)
-			rootFSMaintenanceController.SetObjectInspector(rootFSObjectStoreInspector{store: rootFSObjectStore})
-			if meteringRepo != nil {
-				rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
+		go func() {
+			if err := sandboxCrashRecoveryController.Run(controllerCtx, 2); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("Sandbox crash recovery controller failed", zap.Error(err))
 			}
+		}()
+
+		if templateBuildWorker != nil {
 			go func() {
-				if err := rootFSMaintenanceController.Run(ctx); err != nil && err != context.Canceled {
-					logger.Error("Rootfs maintenance controller failed", zap.Error(err))
+				if err := templateBuildWorker.Run(controllerCtx); err != nil && !errors.Is(err, context.Canceled) {
+					logger.Error("Template image build worker stopped", zap.Error(err))
 				}
 			}()
+			logger.Info("Template image build worker started",
+				zap.String("clusterID", naming.ClusterIDOrDefault(&cfg.DefaultClusterId)),
+			)
 		}
-	} else {
-		logger.Info("Rootfs maintenance controller disabled by config")
+
+		go func() {
+			if err := operator.Run(controllerCtx, 2); err != nil {
+				logger.Fatal("Operator failed", zap.Error(err))
+			}
+		}()
+
+		go func() {
+			if err := cleanupController.Start(controllerCtx); err != nil && err != context.Canceled {
+				logger.Error("Cleanup controller failed", zap.Error(err))
+			}
+		}()
+
+		go func() {
+			if err := sandboxLifecycleController.Run(controllerCtx, 2); err != nil && err != context.Canceled {
+				logger.Error("Sandbox lifecycle controller failed", zap.Error(err))
+			}
+		}()
+
+		go func() {
+			if err := hotClaimReservationController.Run(controllerCtx, 1); err != nil && err != context.Canceled {
+				logger.Error("Hot claim reservation controller failed", zap.Error(err))
+			}
+		}()
+
+		go func() {
+			if err := sandboxPauseController.Run(controllerCtx, 2); err != nil && err != context.Canceled {
+				logger.Error("Sandbox pause controller failed", zap.Error(err))
+			}
+		}()
+		if !cfg.RootFSMaintenance.Disabled {
+			if rootFSObjectStoreErr != nil {
+				logger.Warn("Rootfs maintenance disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
+			} else if rootFSObjectStore == nil {
+				logger.Warn("Rootfs maintenance disabled; object store is not configured")
+			} else {
+				rootFSMaintenanceController := service.NewRootFSMaintenanceController(
+					sandboxStore,
+					rootFSObjectStore,
+					rootFSMaintenanceControllerConfig(cfg),
+					logger,
+					managerMetrics,
+				)
+				rootFSMaintenanceController.SetObjectInspector(rootFSObjectStoreInspector{store: rootFSObjectStore})
+				if meteringRepo != nil {
+					rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
+				}
+				go func() {
+					if err := rootFSMaintenanceController.Run(controllerCtx); err != nil && err != context.Canceled {
+						logger.Error("Rootfs maintenance controller failed", zap.Error(err))
+					}
+				}()
+			}
+		} else {
+			logger.Info("Rootfs maintenance controller disabled by config")
+		}
+
+		go sandboxService.StartSystemVolumeReconciler(controllerCtx, cfg.ResyncPeriod.Duration)
 	}
 
-	go sandboxService.StartSystemVolumeReconciler(ctx, cfg.ResyncPeriod.Duration)
-
-	// Start HTTP server
+	// HTTP and metrics remain available on every replica. Only background
+	// reconcilers that mutate pool and sandbox state are leader-scoped.
 	go func() {
 		if err := httpServer.Start(ctx); err != nil && err != http.ErrServerClosed {
 			logger.Fatal("HTTP server failed", zap.Error(err))
 		}
 	}()
 
-	logger.Info("Manager is running")
+	if cfg.LeaderElection {
+		go func() {
+			if err := runManagerLeaderElection(ctx, k8sClient, logger, startControllers, cancel); err != nil {
+				logger.Error("Manager controller leader election stopped", zap.Error(err))
+				cancel()
+			}
+		}()
+	} else {
+		logger.Warn("Manager controller leader election is disabled")
+		startControllers(ctx)
+	}
+
+	logger.Info("Manager is running",
+		zap.Bool("leaderElection", cfg.LeaderElection),
+	)
 
 	// Wait for termination signal
 	<-ctx.Done()

@@ -12,6 +12,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ManagerLeaderElectionNameEnv identifies the Lease name shared by manager replicas.
+const ManagerLeaderElectionNameEnv = "MANAGER_LEADER_ELECTION_NAME"
+
 // ManagerConfig holds the configuration for the manager.
 type ManagerConfig struct {
 	// HTTP Server
@@ -510,8 +513,8 @@ func LoadManagerConfig() *ManagerConfig {
 
 	cfg, err := loadManagerConfig(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using empty config\n", path, err)
-		cfg = &ManagerConfig{}
+		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v, using default config\n", path, err)
+		cfg = defaultManagerConfig()
 	}
 	if cfg.EgressAuthDefaultResolveTTL.Duration == 0 {
 		cfg.EgressAuthDefaultResolveTTL = metav1.Duration{Duration: 5 * time.Minute}
@@ -593,7 +596,7 @@ func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {
 }
 
 func loadManagerConfig(path string) (*ManagerConfig, error) {
-	cfg := &ManagerConfig{}
+	cfg := defaultManagerConfig()
 	if path == "" {
 		return cfg, nil
 	}
@@ -611,4 +614,8 @@ func loadManagerConfig(path string) (*ManagerConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func defaultManagerConfig() *ManagerConfig {
+	return &ManagerConfig{LeaderElection: true}
 }

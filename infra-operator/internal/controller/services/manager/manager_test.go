@@ -439,6 +439,28 @@ func TestReconcileStorageRuntimeUsesManagerBudgetAndService(t *testing.T) {
 	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
 		t.Fatalf("manager replicas = %v, want 1", deployment.Spec.Replicas)
 	}
+	leaderElectionName := ""
+	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
+		if env.Name == "MANAGER_LEADER_ELECTION_NAME" {
+			leaderElectionName = env.Value
+			break
+		}
+	}
+	if leaderElectionName != "demo-manager" {
+		t.Fatalf("manager leader election name = %q, want demo-manager", leaderElectionName)
+	}
+	if deployment.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType ||
+		deployment.Spec.Strategy.RollingUpdate == nil ||
+		deployment.Spec.Strategy.RollingUpdate.MaxSurge == nil ||
+		deployment.Spec.Strategy.RollingUpdate.MaxUnavailable == nil {
+		t.Fatalf("manager deployment strategy = %#v, want no-surge rolling update", deployment.Spec.Strategy)
+	}
+	if got := deployment.Spec.Strategy.RollingUpdate.MaxSurge.IntValue(); got != 0 {
+		t.Fatalf("manager maxSurge = %d, want 0", got)
+	}
+	if got := deployment.Spec.Strategy.RollingUpdate.MaxUnavailable.IntValue(); got != 1 {
+		t.Fatalf("manager maxUnavailable = %d, want 1", got)
+	}
 	resources := deployment.Spec.Template.Spec.Containers[0].Resources
 	if got := resources.Requests.Cpu().String(); got != "75m" {
 		t.Fatalf("manager CPU request = %q, want 75m", got)

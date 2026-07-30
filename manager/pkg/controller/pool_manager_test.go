@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -256,8 +257,9 @@ func TestDrainStaleIdlePodsUsesDeletePreconditions(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	rolloutPending, err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
 	require.NoError(t, err)
+	assert.True(t, rolloutPending)
 	assert.Equal(t, 1, deleteActions)
 }
 
@@ -304,8 +306,9 @@ func TestDrainStaleIdlePodsSkipsAlreadyDeletingPod(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	rolloutPending, err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
 	require.NoError(t, err)
+	assert.True(t, rolloutPending)
 	assert.Equal(t, 0, deleteActions)
 }
 
@@ -353,8 +356,9 @@ func TestDrainStaleIdlePodsSkipsPodDeletingAfterList(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	rolloutPending, err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
 	require.NoError(t, err)
+	assert.True(t, rolloutPending)
 	assert.Equal(t, 0, deleteActions)
 }
 
@@ -400,9 +404,144 @@ func TestDrainStaleIdlePodsSkipsClaimedActivePods(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	rolloutPending, err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
 	require.NoError(t, err)
+	assert.False(t, rolloutPending)
 	assert.Equal(t, 0, deleteActions)
+}
+
+func TestWarmPoolRolloutMaxUnavailable(t *testing.T) {
+	tests := []struct {
+		name     string
+		desired  int32
+		expected int32
+	}{
+		{name: "empty pool", desired: 0, expected: 1},
+		{name: "small pool", desired: 3, expected: 1},
+		{name: "twenty pod pool", desired: 20, expected: 2},
+		{name: "large pool", desired: 180, expected: 10},
+		{name: "capped pool", desired: 1000, expected: 10},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.expected, warmPoolRolloutMaxUnavailable(test.desired))
+		})
+	}
+}
+
+func TestDrainStaleIdlePodsLimitsRolloutBatch(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Pool: v1alpha1.PoolStrategy{MinIdle: 20},
+		},
+	}
+	objects := make([]runtime.Object, 0, 20)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for i := 0; i < 20; i++ {
+		pod := readyIdlePoolPod(
+			fmt.Sprintf("idle-stale-%02d", i),
+			types.UID(fmt.Sprintf("uid-%02d", i)),
+			"old-hash",
+		)
+		objects = append(objects, pod)
+		require.NoError(t, podIndexer.Add(pod))
+	}
+	client := fake.NewSimpleClientset(objects...)
+	deleteActions := 0
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deleteActions++
+		return false, nil, nil
+	})
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: corelisters.NewPodLister(podIndexer),
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+	}
+
+	rolloutPending, err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	require.NoError(t, err)
+	assert.True(t, rolloutPending)
+	assert.Equal(t, 2, deleteActions)
+}
+
+func TestDrainStaleIdlePodsWaitsForReplacementReadiness(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Pool: v1alpha1.PoolStrategy{MinIdle: 20},
+		},
+	}
+	objects := make([]runtime.Object, 0, 20)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	for i := 0; i < 18; i++ {
+		pod := readyIdlePoolPod(
+			fmt.Sprintf("idle-stale-%02d", i),
+			types.UID(fmt.Sprintf("uid-stale-%02d", i)),
+			"old-hash",
+		)
+		objects = append(objects, pod)
+		require.NoError(t, podIndexer.Add(pod))
+	}
+	for i := 0; i < 2; i++ {
+		pod := idlePoolPod(
+			fmt.Sprintf("idle-replacement-%02d", i),
+			types.UID(fmt.Sprintf("uid-replacement-%02d", i)),
+			"new-hash",
+		)
+		objects = append(objects, pod)
+		require.NoError(t, podIndexer.Add(pod))
+	}
+	client := fake.NewSimpleClientset(objects...)
+	deleteActions := 0
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deleteActions++
+		return false, nil, nil
+	})
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: corelisters.NewPodLister(podIndexer),
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+	}
+
+	rolloutPending, err := pm.drainStaleIdlePods(context.Background(), template, "new-hash")
+	require.NoError(t, err)
+	assert.True(t, rolloutPending)
+	assert.Equal(t, 0, deleteActions)
+}
+
+func idlePoolPod(name string, uid types.UID, templateHash string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       "default",
+			UID:             uid,
+			ResourceVersion: string(uid),
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{
+				AnnotationTemplateSpecHash: templateHash,
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+}
+
+func readyIdlePoolPod(name string, uid types.UID, templateHash string) *corev1.Pod {
+	pod := idlePoolPod(name, uid, templateHash)
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodRunning,
+		Conditions: []corev1.PodCondition{{
+			Type:   corev1.PodReady,
+			Status: corev1.ConditionTrue,
+		}},
+	}
+	return pod
 }
 
 func TestRepairUnhealthyIdlePodsDeletesStuckCurrentHashIdlePod(t *testing.T) {

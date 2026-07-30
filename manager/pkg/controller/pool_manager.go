@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -79,6 +80,10 @@ const (
 	HotClaimCompletionProtocolRecordV1   = "record-status-v1"
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
+	warmPoolRolloutRequeueAfter       = 2 * time.Second
+
+	warmPoolRolloutMaxUnavailablePercent int32 = 10
+	warmPoolRolloutMaxUnavailableLimit   int32 = 10
 )
 
 func TemplateLogicalID(template *v1alpha1.SandboxTemplate) string {
@@ -174,8 +179,12 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		return 0, fmt.Errorf("reconcile replicaset template: %w", err)
 	}
 
-	// 3. Drain stale idle pods atomically with delete preconditions.
-	if err := pm.drainStaleIdlePods(ctx, template, desiredTemplateHash); err != nil {
+	// 3. Drain stale idle pods in availability-bounded batches. A following
+	// batch is not released until replacements from the previous batch are
+	// ready, which prevents a manager rollout from recreating the whole pool at
+	// once.
+	rolloutPending, err := pm.drainStaleIdlePods(ctx, template, desiredTemplateHash)
+	if err != nil {
 		return 0, fmt.Errorf("drain stale idle pods: %w", err)
 	}
 
@@ -191,11 +200,18 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 	// pods after the burst ends.
 	currentReplicas := getInt32Value(rs.Spec.Replicas)
 	desiredReplicas := desiredPoolReplicas(template)
+	requeueAfter := time.Duration(0)
 	if rs.Spec.Replicas == nil || currentReplicas != desiredReplicas {
-		return pm.reconcileReplicaSetReplicas(ctx, template, rs, desiredReplicas)
+		requeueAfter, err = pm.reconcileReplicaSetReplicas(ctx, template, rs, desiredReplicas)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if rolloutPending && (requeueAfter <= 0 || warmPoolRolloutRequeueAfter < requeueAfter) {
+		requeueAfter = warmPoolRolloutRequeueAfter
 	}
 
-	return 0, nil
+	return requeueAfter, nil
 }
 
 // reconcileReplicaSetReplicas updates the warm-pool size to the configured minimum.
@@ -494,29 +510,87 @@ func (pm *PoolManager) reconcileReplicaSetTemplate(
 	return updatedRS, nil
 }
 
-func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, desiredTemplateHash string) error {
-	pods, err := pm.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
+func (pm *PoolManager) drainStaleIdlePods(
+	ctx context.Context,
+	template *v1alpha1.SandboxTemplate,
+	desiredTemplateHash string,
+) (bool, error) {
+	selector := labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
 		LabelPoolType:   PoolTypeIdle,
-	}))
+	})
+	podList, err := pm.k8sClient.CoreV1().Pods(template.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
 	if err != nil {
-		return err
+		return false, err
+	}
+	pods := make([]*corev1.Pod, 0, len(podList.Items))
+	for idx := range podList.Items {
+		pods = append(pods, &podList.Items[idx])
 	}
 
-	drained := 0
+	desiredReplicas := desiredPoolReplicas(template)
+	maxUnavailable := warmPoolRolloutMaxUnavailable(desiredReplicas)
+	availabilityFloor := desiredReplicas - maxUnavailable
+	if availabilityFloor < 0 {
+		availabilityFloor = 0
+	}
+
+	readyIdlePods := int32(0)
+	stalePods := make([]*corev1.Pod, 0)
+	rolloutPending := false
 	for _, pod := range pods {
-		if pod.DeletionTimestamp != nil {
-			continue
-		}
 		if IsHotClaimReservedPod(pod) {
 			continue
+		}
+		if pod.DeletionTimestamp == nil && IsPodReady(pod) {
+			readyIdlePods++
 		}
 		if pod.Annotations[AnnotationTemplateSpecHash] == desiredTemplateHash {
 			continue
 		}
+		rolloutPending = true
+		if pod.DeletionTimestamp == nil {
+			stalePods = append(stalePods, pod)
+		}
+	}
+
+	// Unready stale pods do not contribute to pool availability, so replace
+	// them before spending the availability budget on ready pods.
+	sort.SliceStable(stalePods, func(i, j int) bool {
+		iReady := IsPodReady(stalePods[i])
+		jReady := IsPodReady(stalePods[j])
+		if iReady != jReady {
+			return !iReady
+		}
+		return stalePods[i].Name < stalePods[j].Name
+	})
+
+	remainingBatch := maxUnavailable
+	readyDeletionBudget := readyIdlePods - availabilityFloor
+	if readyDeletionBudget < 0 {
+		readyDeletionBudget = 0
+	}
+	drained := 0
+	for _, pod := range stalePods {
+		if remainingBatch <= 0 {
+			break
+		}
+		podReady := IsPodReady(pod)
+		if podReady && readyDeletionBudget <= 0 {
+			continue
+		}
+		// Consume the snapshot budget even when the guarded live delete finds
+		// that a concurrent actor already changed the pod. A stale observation
+		// must never allow this reconcile to move on and delete extra pods.
+		remainingBatch--
+		if podReady {
+			readyDeletionBudget--
+		}
 		deleted, err := pm.deleteStaleIdlePodWithRetry(ctx, template.Namespace, pod.Name, desiredTemplateHash)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if deleted {
 			drained++
@@ -525,14 +599,31 @@ func (pm *PoolManager) drainStaleIdlePods(ctx context.Context, template *v1alpha
 
 	if drained > 0 {
 		pm.recorder.Eventf(template, corev1.EventTypeNormal, "StaleIdlePodsDrained",
-			"Drained %d stale idle pod(s) with outdated template hash", drained)
-		pm.logger.Info("Drained stale idle pods",
+			"Drained %d stale idle pod(s) with outdated template hash in rollout batch", drained)
+		pm.logger.Info("Drained stale idle pod rollout batch",
 			zap.String("template", template.Name),
 			zap.Int("count", drained),
+			zap.Int32("readyIdle", readyIdlePods),
+			zap.Int32("availabilityFloor", availabilityFloor),
+			zap.Int32("maxUnavailable", maxUnavailable),
 			zap.String("desiredHash", desiredTemplateHash),
 		)
 	}
-	return nil
+	return rolloutPending, nil
+}
+
+func warmPoolRolloutMaxUnavailable(desiredReplicas int32) int32 {
+	if desiredReplicas <= 0 {
+		return 1
+	}
+	maxUnavailable := (desiredReplicas*warmPoolRolloutMaxUnavailablePercent + 99) / 100
+	if maxUnavailable < 1 {
+		maxUnavailable = 1
+	}
+	if maxUnavailable > warmPoolRolloutMaxUnavailableLimit {
+		maxUnavailable = warmPoolRolloutMaxUnavailableLimit
+	}
+	return maxUnavailable
 }
 
 func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, desiredTemplateHash string) error {

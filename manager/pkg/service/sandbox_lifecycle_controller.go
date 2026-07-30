@@ -519,6 +519,19 @@ func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, 
 	if s == nil || !s.config.CtldEnabled || len(info.VolumePortals) == 0 {
 		return nil
 	}
+	if strings.TrimSpace(info.HostIP) == "" && strings.TrimSpace(info.NodeName) == "" {
+		// A pod that was never assigned to a node could not have bound a ctld
+		// volume portal. Treat the absent node identity as proof that there is
+		// no node-local state to clean up so deletion can finish.
+		if s.logger != nil {
+			s.logger.Info("Skipping sandbox volume portal cleanup for unscheduled pod",
+				zap.String("sandboxID", info.SandboxID),
+				zap.String("namespace", info.Namespace),
+				zap.String("pod", info.PodName),
+			)
+		}
+		return nil
+	}
 	if s.ctldClient == nil {
 		return fmt.Errorf("ctld client is not configured")
 	}

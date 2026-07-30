@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +39,7 @@ type captureConn struct {
 	queries     []string
 	argsHistory [][]driver.NamedValue
 	failExec    int
+	queryRows   []*captureRows
 }
 
 func (c *captureConn) Prepare(string) (driver.Stmt, error) {
@@ -59,6 +63,52 @@ func (c *captureConn) ExecContext(_ context.Context, query string, args []driver
 		return nil, errors.New("injected ClickHouse failure")
 	}
 	return driver.RowsAffected(1), nil
+}
+
+func (c *captureConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.query = query
+	c.args = append([]driver.NamedValue(nil), args...)
+	c.queries = append(c.queries, query)
+	c.argsHistory = append(c.argsHistory, append([]driver.NamedValue(nil), args...))
+	if len(c.queryRows) == 0 {
+		return nil, errors.New("no captured query rows configured")
+	}
+	rows := c.queryRows[0]
+	c.queryRows = c.queryRows[1:]
+	return rows, nil
+}
+
+type captureRows struct {
+	columns []string
+	values  [][]driver.Value
+	index   int
+	err     error
+}
+
+func (r *captureRows) Columns() []string {
+	return r.columns
+}
+
+func (r *captureRows) Close() error {
+	return nil
+}
+
+func (r *captureRows) Next(dest []driver.Value) error {
+	if r.index >= len(r.values) {
+		return r.errOrEOF()
+	}
+	copy(dest, r.values[r.index])
+	r.index++
+	return nil
+}
+
+func (r *captureRows) errOrEOF() error {
+	if r.err != nil {
+		err := r.err
+		r.err = nil
+		return err
+	}
+	return io.EOF
 }
 
 func newCaptureRepository(t *testing.T) (*Repository, *captureConn) {
@@ -441,6 +491,232 @@ func TestWatermarkAndProjectionStatePreserveNanosecondTimestamps(t *testing.T) {
 	}
 }
 
+func TestListTeamWindowsUsesNarrowFinalKeysAndRawSelectedVersions(t *testing.T) {
+	repo, conn := newCaptureRepository(t)
+	firstRecordedAt := time.Date(2026, 7, 30, 21, 17, 23, 123, time.UTC)
+	secondRecordedAt := firstRecordedAt.Add(time.Nanosecond)
+	first := testUsageWindow(
+		"window-1",
+		"producer-1",
+		"region-1",
+		"team-1",
+		firstRecordedAt,
+	)
+	second := testUsageWindow(
+		"window-2",
+		"producer-2",
+		"region-1",
+		"team-1",
+		secondRecordedAt,
+	)
+	concurrentReplacement := testUsageWindow(
+		first.WindowID,
+		first.Producer,
+		first.RegionID,
+		"another-team",
+		firstRecordedAt.Add(time.Minute),
+	)
+	conn.queryRows = []*captureRows{
+		{
+			columns: []string{"recorded_at", "region_id", "producer", "window_id", "version"},
+			values: [][]driver.Value{
+				{firstRecordedAt, first.RegionID, first.Producer, first.WindowID, int64(11)},
+				{secondRecordedAt, second.RegionID, second.Producer, second.WindowID, int64(22)},
+			},
+		},
+		{
+			columns: windowDetailColumns(),
+			values: [][]driver.Value{
+				windowDetailValues(concurrentReplacement, 12),
+				windowDetailValues(first, 11),
+				windowDetailValues(first, 10),
+				windowDetailValues(second, 22),
+			},
+		},
+	}
+
+	windows, next, err := repo.ListTeamWindows(
+		context.Background(),
+		" team-1 ",
+		metering.WindowTypeSandboxEgressBytes,
+		"",
+		2,
+	)
+	if err != nil {
+		t.Fatalf("ListTeamWindows() error = %v", err)
+	}
+	if len(windows) != 2 ||
+		windows[0].WindowID != first.WindowID ||
+		windows[1].WindowID != second.WindowID {
+		t.Fatalf("ListTeamWindows() windows = %#v", windows)
+	}
+	decoded, err := decodeCursor(next)
+	if err != nil {
+		t.Fatalf("decode next cursor: %v", err)
+	}
+	if decoded == nil ||
+		!decoded.RecordedAt.Equal(secondRecordedAt) ||
+		decoded.Producer != second.Producer ||
+		decoded.ID != second.WindowID {
+		t.Fatalf("next cursor = %#v", decoded)
+	}
+	if len(conn.queries) != 2 {
+		t.Fatalf("window query count = %d, want 2", len(conn.queries))
+	}
+	if !strings.Contains(conn.queries[0], "FROM `sandbox0_metering`.`usage_windows` FINAL") ||
+		strings.Contains(conn.queries[0], "sequence, window_id") ||
+		!strings.Contains(conn.queries[0], "recorded_at, region_id, producer, window_id, version") {
+		t.Fatalf("key query is not a narrow FINAL lookup: %s", conn.queries[0])
+	}
+	if strings.Contains(conn.queries[1], " FINAL") ||
+		!strings.Contains(conn.queries[1], "data, version") ||
+		strings.Count(conn.queries[1], "(?, ?, ?)") != 2 {
+		t.Fatalf("detail query is not a bounded raw-version lookup: %s", conn.queries[1])
+	}
+	if got := len(conn.argsHistory[0]); got != 3 {
+		t.Fatalf("key query argument count = %d, want 3", got)
+	}
+	if got := len(conn.argsHistory[1]); got != 6 {
+		t.Fatalf("detail query argument count = %d, want 6", got)
+	}
+}
+
+func TestLoadWindowDetailsUsesBoundedBatches(t *testing.T) {
+	repo, conn := newCaptureRepository(t)
+	keys := make([]windowLookupKey, 0, maxWindowDetailBatchSize+1)
+	firstBatch := make([][]driver.Value, 0, maxWindowDetailBatchSize)
+	for index := 0; index <= maxWindowDetailBatchSize; index++ {
+		recordedAt := time.Date(2026, 7, 30, 22, 0, 0, index, time.UTC)
+		window := testUsageWindow(
+			fmt.Sprintf("window-%03d", index),
+			"producer",
+			"region",
+			"team",
+			recordedAt,
+		)
+		version := uint64(index + 1)
+		keys = append(keys, windowLookupKey{
+			RecordedAt: recordedAt,
+			RegionID:   window.RegionID,
+			Producer:   window.Producer,
+			WindowID:   window.WindowID,
+			Version:    version,
+		})
+		values := windowDetailValues(window, version)
+		if index < maxWindowDetailBatchSize {
+			firstBatch = append(firstBatch, values)
+			continue
+		}
+		conn.queryRows = []*captureRows{
+			{
+				columns: windowDetailColumns(),
+				values:  firstBatch,
+			},
+			{
+				columns: windowDetailColumns(),
+				values:  [][]driver.Value{values},
+			},
+		}
+	}
+
+	details, err := repo.loadWindowDetails(context.Background(), keys)
+	if err != nil {
+		t.Fatalf("loadWindowDetails() error = %v", err)
+	}
+	if len(details) != len(keys) {
+		t.Fatalf("loaded detail count = %d, want %d", len(details), len(keys))
+	}
+	if len(conn.queries) != 2 {
+		t.Fatalf("detail query count = %d, want 2", len(conn.queries))
+	}
+	if got := strings.Count(conn.queries[0], "(?, ?, ?)"); got != maxWindowDetailBatchSize {
+		t.Fatalf("first detail batch size = %d, want %d", got, maxWindowDetailBatchSize)
+	}
+	if got := strings.Count(conn.queries[1], "(?, ?, ?)"); got != 1 {
+		t.Fatalf("second detail batch size = %d, want 1", got)
+	}
+}
+
+func TestListWindowsRejectsMissingSelectedVersion(t *testing.T) {
+	repo, conn := newCaptureRepository(t)
+	recordedAt := time.Date(2026, 7, 30, 22, 0, 0, 0, time.UTC)
+	window := testUsageWindow("window", "producer", "region", "team", recordedAt)
+	conn.queryRows = []*captureRows{
+		{
+			columns: []string{"recorded_at", "region_id", "producer", "window_id", "version"},
+			values: [][]driver.Value{{
+				recordedAt,
+				window.RegionID,
+				window.Producer,
+				window.WindowID,
+				int64(7),
+			}},
+		},
+		{
+			columns: windowDetailColumns(),
+			values:  [][]driver.Value{windowDetailValues(window, 8)},
+		},
+	}
+
+	if _, _, err := repo.ListWindows(context.Background(), "", 1); err == nil ||
+		!strings.Contains(err.Error(), "disappeared while loading its selected version") {
+		t.Fatalf("ListWindows() error = %v, want missing selected version", err)
+	}
+}
+
+func testUsageWindow(
+	windowID string,
+	producer string,
+	regionID string,
+	teamID string,
+	recordedAt time.Time,
+) *metering.Window {
+	return &metering.Window{
+		Sequence:    10,
+		WindowID:    windowID,
+		Producer:    producer,
+		RegionID:    regionID,
+		WindowType:  metering.WindowTypeSandboxEgressBytes,
+		SubjectType: metering.SubjectTypeSandbox,
+		SubjectID:   "sandbox-1",
+		TeamID:      teamID,
+		UserID:      "user-1",
+		SandboxID:   "sandbox-1",
+		TemplateID:  "template-1",
+		ClusterID:   "cluster-1",
+		WindowStart: recordedAt.Add(-time.Minute),
+		WindowEnd:   recordedAt,
+		Value:       42,
+		Unit:        metering.WindowUnitBytes,
+		RecordedAt:  recordedAt,
+		Data:        json.RawMessage(`{"source":"test"}`),
+	}
+}
+
+func windowDetailColumns() []string {
+	return []string{
+		"sequence", "window_id", "producer", "region_id", "window_type",
+		"subject_type", "subject_id",
+		"team_id", "user_id",
+		"sandbox_id", "volume_id", "snapshot_id",
+		"template_id", "cluster_id",
+		"window_start", "window_end",
+		"value", "unit", "recorded_at", "data", "version",
+	}
+}
+
+func windowDetailValues(window *metering.Window, version uint64) []driver.Value {
+	return []driver.Value{
+		window.Sequence, window.WindowID, window.Producer, window.RegionID, window.WindowType,
+		window.SubjectType, window.SubjectID,
+		window.TeamID, window.UserID,
+		window.SandboxID, window.VolumeID, window.SnapshotID,
+		window.TemplateID, window.ClusterID,
+		window.WindowStart, window.WindowEnd,
+		window.Value, window.Unit, window.RecordedAt, string(window.Data), int64(version),
+	}
+}
+
 func TestCursorAndSchemaKeepNanosecondAndSequenceContracts(t *testing.T) {
 	recordedAt := time.Date(2026, 7, 17, 1, 2, 3, 123456789, time.UTC)
 	where, args := cursorWhere(&pageCursor{RecordedAt: recordedAt, Producer: "producer-1", ID: "event-1"}, "event_id")
@@ -458,6 +734,12 @@ func TestCursorAndSchemaKeepNanosecondAndSequenceContracts(t *testing.T) {
 	statements := strings.Join(schemaStatements(cfg), "\n")
 	if strings.Count(statements, "ADD COLUMN IF NOT EXISTS sequence Int64") != 2 {
 		t.Fatalf("schema does not upgrade both export tables with sequence columns: %s", statements)
+	}
+	if !strings.Contains(
+		statements,
+		"ADD INDEX IF NOT EXISTS usage_windows_recorded_at_minmax recorded_at TYPE minmax",
+	) {
+		t.Fatalf("schema does not add the recorded_at window skip index: %s", statements)
 	}
 	if query := watermarkStatusQuery("metering.watermarks"); !strings.Contains(query, "MAX(complete_before)") || strings.Contains(query, "MIN(complete_before)") {
 		t.Fatalf("watermark status query does not use the global delivered frontier: %s", query)

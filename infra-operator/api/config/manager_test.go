@@ -65,3 +65,28 @@ sandbox_max_memory: 16Gi
 		t.Fatalf("sandbox max memory = %q, want 16Gi", cfg.SandboxMaxMemory)
 	}
 }
+
+func TestLoadManagerConfigDefaultsLeaderElectionOn(t *testing.T) {
+	cfg, err := loadManagerConfig("")
+	if err != nil {
+		t.Fatalf("loadManagerConfig: %v", err)
+	}
+	if !cfg.LeaderElection {
+		t.Fatal("leader election default = false, want true")
+	}
+}
+
+func TestLoadManagerConfigAllowsLeaderElectionOff(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manager.yaml")
+	if err := os.WriteFile(path, []byte("leader_election: false\n"), 0o600); err != nil {
+		t.Fatalf("write manager config: %v", err)
+	}
+
+	cfg, err := loadManagerConfig(path)
+	if err != nil {
+		t.Fatalf("loadManagerConfig: %v", err)
+	}
+	if cfg.LeaderElection {
+		t.Fatal("leader election = true, want explicit false")
+	}
+}

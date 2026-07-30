@@ -52,6 +52,69 @@ func TestTeamRepositoryAllowsDuplicateNamesAndSlugs(t *testing.T) {
 	}
 }
 
+func TestTeamRepositoryCreateTeamWithMemberIsAtomic(t *testing.T) {
+	pool, _ := newGatewayIdentityTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	repo := NewRepository(pool)
+	owner := &User{Email: "atomic-team-owner@example.com", Name: "Atomic Owner"}
+	if err := repo.CreateUser(ctx, owner); err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+
+	ownerID := owner.ID
+	team := &Team{Name: "Atomic Team", OwnerID: &ownerID}
+	member := &TeamMember{UserID: owner.ID, Role: "admin"}
+	if err := repo.CreateTeamWithMember(ctx, team, member); err != nil {
+		t.Fatalf("create team with member: %v", err)
+	}
+	if team.ID == "" || member.ID == "" || member.TeamID != team.ID {
+		t.Fatalf("created team=%#v member=%#v", team, member)
+	}
+	storedMember, err := repo.GetTeamMember(ctx, team.ID, owner.ID)
+	if err != nil {
+		t.Fatalf("get owner membership: %v", err)
+	}
+	if storedMember.Role != "admin" {
+		t.Fatalf("owner membership role = %q, want admin", storedMember.Role)
+	}
+
+	teams, err := repo.GetTeamsByUserID(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("list owner teams: %v", err)
+	}
+	if len(teams) != 1 || teams[0].ID != team.ID {
+		t.Fatalf("owner teams = %#v, want team %s", teams, team.ID)
+	}
+
+	rolledBackTeam := &Team{Name: "Rolled Back Team", OwnerID: &ownerID}
+	rolledBackMember := &TeamMember{
+		UserID: "00000000-0000-0000-0000-000000000000",
+		Role:   "admin",
+	}
+	if err := repo.CreateTeamWithMember(ctx, rolledBackTeam, rolledBackMember); err == nil {
+		t.Fatal("create team with missing member user error = nil")
+	}
+	if rolledBackTeam.ID != "" || rolledBackMember.TeamID != "" {
+		t.Fatalf("failed creation mutated inputs: team=%#v member=%#v", rolledBackTeam, rolledBackMember)
+	}
+
+	var rolledBackCount int
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*) FROM teams WHERE name = $1`,
+		rolledBackTeam.Name,
+	).Scan(&rolledBackCount); err != nil {
+		t.Fatalf("count rolled back teams: %v", err)
+	}
+	if rolledBackCount != 0 {
+		t.Fatalf("rolled back team count = %d, want 0", rolledBackCount)
+	}
+}
+
 func TestGatewayMigration14RepairsProductionSlugConstraint(t *testing.T) {
 	pool, schema := newGatewayIdentityTestPool(t)
 	if pool == nil {

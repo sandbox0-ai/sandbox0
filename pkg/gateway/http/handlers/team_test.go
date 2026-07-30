@@ -28,27 +28,38 @@ const (
 )
 
 type stubTeamRepository struct {
-	createdTeam     *identity.Team
-	updatedTeam     *identity.Team
-	addedTeamMember *identity.TeamMember
-	teams           map[string]*identity.Team
-	members         map[string]*identity.TeamMember
-	memberLists     map[string][]*identity.TeamMemberWithUser
-	searchMembers   []*identity.TeamMemberWithUser
-	searchTeamID    string
-	searchQuery     string
-	deletedTeamID   string
+	createdTeam             *identity.Team
+	updatedTeam             *identity.Team
+	addedTeamMember         *identity.TeamMember
+	createTeamWithMemberErr error
+	teams                   map[string]*identity.Team
+	members                 map[string]*identity.TeamMember
+	memberLists             map[string][]*identity.TeamMemberWithUser
+	searchMembers           []*identity.TeamMemberWithUser
+	searchTeamID            string
+	searchQuery             string
+	deletedTeamID           string
 }
 
 func (s *stubTeamRepository) GetTeamsByUserID(context.Context, string) ([]*identity.Team, error) {
 	return nil, nil
 }
 
-func (s *stubTeamRepository) CreateTeam(_ context.Context, team *identity.Team) error {
+func (s *stubTeamRepository) CreateTeamWithMember(
+	_ context.Context,
+	team *identity.Team,
+	member *identity.TeamMember,
+) error {
+	if s.createTeamWithMemberErr != nil {
+		return s.createTeamWithMemberErr
+	}
 	copyTeam := *team
 	copyTeam.ID = testTeamID
 	s.createdTeam = &copyTeam
 	team.ID = copyTeam.ID
+	member.TeamID = copyTeam.ID
+	copyMember := *member
+	s.addedTeamMember = &copyMember
 	return nil
 }
 
@@ -342,8 +353,32 @@ func TestTeamHandlerCreateTeamAllowsMissingHomeRegionWithoutGlobalRequirement(t 
 	if repo.createdTeam.HomeRegionID != nil {
 		t.Fatalf("expected nil home region, got %#v", repo.createdTeam.HomeRegionID)
 	}
-	if repo.addedTeamMember == nil || repo.addedTeamMember.TeamID != testTeamID {
+	if repo.addedTeamMember == nil ||
+		repo.addedTeamMember.TeamID != testTeamID ||
+		repo.addedTeamMember.UserID != testCreatorUserID ||
+		repo.addedTeamMember.Role != "admin" {
 		t.Fatalf("expected creator to be added as team member, got %#v", repo.addedTeamMember)
+	}
+}
+
+func TestTeamHandlerCreateTeamFailsWhenOwnerMembershipCannotBeCreated(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	gin.SetMode(gin.ReleaseMode)
+
+	repo := &stubTeamRepository{
+		createTeamWithMemberErr: errors.New("insert team member"),
+	}
+	handler := NewTeamHandler(repo, zap.NewNop())
+
+	rec := performCreateTeamRequest(t, handler, map[string]any{
+		"name": "Example Team",
+	})
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if repo.createdTeam != nil || repo.addedTeamMember != nil {
+		t.Fatalf("team creation should fail atomically: team=%#v member=%#v", repo.createdTeam, repo.addedTeamMember)
 	}
 }
 

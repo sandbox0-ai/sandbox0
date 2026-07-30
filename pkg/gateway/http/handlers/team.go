@@ -17,7 +17,7 @@ import (
 
 type teamRepository interface {
 	GetTeamsByUserID(ctx context.Context, userID string) ([]*identity.Team, error)
-	CreateTeam(ctx context.Context, team *identity.Team) error
+	CreateTeamWithMember(ctx context.Context, team *identity.Team, member *identity.TeamMember) error
 	GetTeamMember(ctx context.Context, teamID, userID string) (*identity.TeamMember, error)
 	GetTeamByID(ctx context.Context, id string) (*identity.Team, error)
 	UpdateTeam(ctx context.Context, team *identity.Team) error
@@ -152,21 +152,15 @@ func (h *TeamHandler) CreateTeam(c *gin.Context) {
 		OwnerID:      &authCtx.UserID,
 		HomeRegionID: homeRegionID,
 	}
-
-	if err := h.repo.CreateTeam(c.Request.Context(), team); err != nil {
-		h.logger.Error("Failed to create team", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create team")
-		return
-	}
-
-	// Add creator as admin member
 	member := &identity.TeamMember{
-		TeamID: team.ID,
 		UserID: authCtx.UserID,
 		Role:   "admin",
 	}
-	if err := h.repo.AddTeamMember(c.Request.Context(), member); err != nil {
-		h.logger.Warn("Failed to add creator as member", zap.Error(err))
+
+	if err := h.repo.CreateTeamWithMember(c.Request.Context(), team, member); err != nil {
+		h.logger.Error("Failed to create team with owner membership", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to create team")
+		return
 	}
 
 	spec.JSONSuccess(c, http.StatusCreated, team)

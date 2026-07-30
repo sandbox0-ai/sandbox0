@@ -12,14 +12,51 @@ import (
 
 // CreateTeam creates a new team.
 func (r *Repository) CreateTeam(ctx context.Context, team *Team) error {
+	return insertTeam(ctx, r.pool, team)
+}
+
+// CreateTeamWithMember creates a team and its initial member in one transaction.
+func (r *Repository) CreateTeamWithMember(ctx context.Context, team *Team, member *TeamMember) error {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin create team with member: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	createdTeam := *team
+	if err := insertTeam(ctx, tx, &createdTeam); err != nil {
+		return err
+	}
+
+	createdMember := *member
+	createdMember.TeamID = createdTeam.ID
+	if err := insertTeamMember(ctx, tx, &createdMember); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit create team with member: %w", err)
+	}
+	*team = createdTeam
+	*member = createdMember
+	return nil
+}
+
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func insertTeam(ctx context.Context, querier rowQuerier, team *Team) error {
 	if team.Slug == "" {
 		team.Slug = generateSlug(team.Name)
 	}
 
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO teams (name, slug, owner_id, home_region_id)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, created_at, updated_at
+	err := querier.QueryRow(ctx, `
+			INSERT INTO teams (name, slug, owner_id, home_region_id)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id, created_at, updated_at
 	`, team.Name, team.Slug, team.OwnerID, team.HomeRegionID).Scan(&team.ID, &team.CreatedAt, &team.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert team: %w", err)
@@ -191,10 +228,14 @@ func (r *Repository) ListTeamGrantsByUserID(ctx context.Context, userID string) 
 
 // AddTeamMember adds a user to a team.
 func (r *Repository) AddTeamMember(ctx context.Context, member *TeamMember) error {
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO team_members (team_id, user_id, role)
-		VALUES ($1, $2, $3)
-		RETURNING id, joined_at
+	return insertTeamMember(ctx, r.pool, member)
+}
+
+func insertTeamMember(ctx context.Context, querier rowQuerier, member *TeamMember) error {
+	err := querier.QueryRow(ctx, `
+			INSERT INTO team_members (team_id, user_id, role)
+			VALUES ($1, $2, $3)
+			RETURNING id, joined_at
 	`, member.TeamID, member.UserID, member.Role).Scan(&member.ID, &member.JoinedAt)
 	if err != nil {
 		if isDuplicateKeyError(err) {

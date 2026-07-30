@@ -48,6 +48,7 @@ type Server struct {
 	webhookDispatcher *webhook.Dispatcher
 
 	probeRunner func(sandboxprobe.Kind) sandboxprobe.Response
+	runtimeGate func() (bool, string)
 }
 
 // NewServer creates a new HTTP server.
@@ -61,6 +62,7 @@ func NewServer(
 	logger *zap.Logger,
 	obsProvider *coreobs.Provider,
 	probeRunner func(sandboxprobe.Kind) sandboxprobe.Response,
+	runtimeGate func() (bool, string),
 ) *Server {
 	s := &Server{
 		router:            mux.NewRouter(),
@@ -74,6 +76,7 @@ func NewServer(
 		logger:            logger,
 		obsProvider:       obsProvider,
 		probeRunner:       probeRunner,
+		runtimeGate:       runtimeGate,
 	}
 
 	s.setupRoutes()
@@ -104,6 +107,7 @@ func (s *Server) setupRoutes() {
 	// Apply auth middleware to all API routes
 	api.Use(s.authMiddleware)
 	api.Use(s.internalTokenMiddleware)
+	api.Use(s.runtimeReadyMiddleware)
 	api.Use(s.barrier.middleware)
 
 	// Sandbox-level handlers (pause/resume all processes)
@@ -152,12 +156,6 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/functions/stream", functionHandler.Stream).Methods("POST")
 	api.HandleFunc("/functions/ws", functionHandler.WebSocket).Methods("GET")
 
-	// Initialize handler
-	initializeHandler := handlers.NewInitializeHandler(s.webhookDispatcher, s.fileManager, s.contextManager, s.cfg.HTTPPort, s.logger)
-	initializeHandler.SetSessionSupervisor(s.sessionSupervisor)
-	api.HandleFunc("/initialize", initializeHandler.Initialize).Methods("POST")
-	api.HandleFunc("/sandbox/env_vars", initializeHandler.UpdateSandboxEnvVars).Methods("PUT")
-
 	// File handlers
 	fileHandler := handlers.NewFileHandler(s.fileManager, s.logger)
 	api.HandleFunc("/files/watch", fileHandler.Watch).Methods("GET")
@@ -165,6 +163,24 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/files", fileHandler.Handle).Methods("GET", "POST", "DELETE")
 	api.HandleFunc("/files/stat", fileHandler.Stat).Methods("GET")
 	api.HandleFunc("/files/list", fileHandler.List).Methods("GET")
+}
+
+func (s *Server) runtimeReadyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.runtimeGate == nil || procdLifecycleControlRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ready, reason := s.runtimeGate()
+		if ready {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.TrimSpace(reason) == "" {
+			reason = "sandbox runtime is not ready"
+		}
+		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, reason)
+	})
 }
 
 // Start starts the HTTP server.

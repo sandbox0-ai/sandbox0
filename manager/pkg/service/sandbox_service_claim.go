@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,11 +29,6 @@ import (
 const (
 	volumePortalBindRetryWindow   = 5 * time.Second
 	volumePortalBindRetryInterval = 100 * time.Millisecond
-)
-
-const (
-	SandboxEnvSandboxID = "SANDBOX0_SANDBOX_ID"
-	SandboxEnvAppDomain = "SANDBOX0_APP_DOMAIN"
 )
 
 var errIdlePodClaimLost = errors.New("idle pod claim lost")
@@ -522,8 +516,19 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			return nil, fmt.Errorf("wait for pod claim readiness: %w", err)
 		}
 		pod = readyPod
-		s.refreshSandboxProbeConditionsAsync(pod)
 	}
+
+	phaseStarted = time.Now()
+	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, req.SnapshotID != "")
+	s.observeClaimPhase(req.Template, claimType, "publish_runtime_assignment", phaseStarted, err)
+	if err != nil {
+		s.requestSandboxDeletionAfterClaimFailure(pod, "runtime assignment publication failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, err
+	}
+	assignedPodUID := pod.UID
 
 	claimRecordPersisted := false
 	cleanupClaimFailure := func(pod *corev1.Pod, reason string) {
@@ -547,6 +552,16 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 			}
 			return nil, fmt.Errorf("initialize rootfs from snapshot: %w", err)
+		}
+		if pod.UID != assignedPodUID {
+			pod, runtimeRevision, err = s.publishRuntimeAssignment(ctx, pod, true)
+			if err != nil {
+				cleanupClaimFailure(pod, "fallback runtime assignment publication failed")
+				if metrics != nil {
+					metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+				}
+				return nil, err
+			}
 		}
 	}
 
@@ -595,23 +610,12 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}()
 	}
 
-	phaseStarted = time.Now()
-	_, initializeErr := s.initializeProcd(ctx, pod, template, req, procdAddress)
-	s.observeClaimPhase(req.Template, claimType, "initialize_procd", phaseStarted, initializeErr)
-
 	var persistErr error
 	if persistResultCh != nil {
 		persistErr = <-persistResultCh
 		if persistErr == nil {
 			claimRecordPersisted = true
 		}
-	}
-	if initializeErr != nil {
-		cleanupClaimFailure(pod, "procd initialization failed")
-		if metrics != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-		}
-		return nil, fmt.Errorf("initialize procd: %w", initializeErr)
 	}
 	if persistErr != nil {
 		cleanupClaimFailure(pod, "sandbox persistence failed")
@@ -634,6 +638,24 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		claimRecordPersisted = true
 	}
+
+	phaseStarted = time.Now()
+	pod, err = s.activateRuntimeAssignment(ctx, pod, runtimeRevision)
+	s.observeClaimPhase(req.Template, claimType, "wait_for_runtime_ready", phaseStarted, err)
+	if err != nil {
+		cleanupClaimFailure(pod, "runtime activation failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("activate runtime: %w", err)
+	}
+	if err := s.persistUpdatedSandboxPod(ctx, pod); err != nil {
+		cleanupClaimFailure(pod, "runtime readiness persistence failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("persist runtime readiness: %w", err)
+	}
 	if controller.IsHotClaimReservedPod(pod) {
 		phaseStarted = time.Now()
 		err = s.completeHotClaimReservation(ctx, pod, template, req)
@@ -655,7 +677,7 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 
 	return &ClaimResponse{
 		SandboxID:       req.SandboxID,
-		Status:          "starting",
+		Status:          s.podToSandboxStatus(pod),
 		ProcdAddress:    procdAddress,
 		PodName:         pod.Name,
 		Template:        req.Template,
@@ -852,19 +874,6 @@ func declaredVolumeMountsByPath(template *v1alpha1.SandboxTemplate) map[string]v
 		out[mountPath] = item
 	}
 	return out
-}
-
-func declaredVolumeMountDirs(template *v1alpha1.SandboxTemplate) []string {
-	declared := declaredVolumeMountsByPath(template)
-	if len(declared) == 0 {
-		return nil
-	}
-	dirs := make([]string, 0, len(declared))
-	for mountPath := range declared {
-		dirs = append(dirs, mountPath)
-	}
-	sort.Strings(dirs)
-	return dirs
 }
 
 func (s *SandboxService) bindVolumePortals(ctx context.Context, pod *corev1.Pod, req *ClaimRequest, template *v1alpha1.SandboxTemplate) ([]BootstrapMountStatus, error) {
@@ -1642,111 +1651,4 @@ func (s *SandboxService) ensureDataPlaneReadyCapacity(spec corev1.PodSpec) error
 		return fmt.Errorf("%w: no nodes match selector %q", ErrDataPlaneNotReady, labels.Set(spec.NodeSelector).String())
 	}
 	return nil
-}
-
-func (s *SandboxService) initializeProcd(
-	ctx context.Context,
-	pod *corev1.Pod,
-	template *v1alpha1.SandboxTemplate,
-	req *ClaimRequest,
-	procdAddress string,
-) (*InitializeResponse, error) {
-	if s.internalTokenGenerator == nil {
-		return nil, fmt.Errorf("token generators not configured, cannot authenticate with procd")
-	}
-	if pod == nil || req == nil {
-		return nil, fmt.Errorf("missing sandbox context")
-	}
-
-	teamID := req.TeamID
-	userID := req.UserID
-	sandboxID := sandboxIDFromPod(pod)
-	if sandboxID == "" {
-		sandboxID = req.SandboxID
-	}
-	if sandboxID == "" {
-		sandboxID = pod.Name
-	}
-
-	internalToken, err := s.internalTokenGenerator.GenerateToken(teamID, userID, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("generate internal token: %w", err)
-	}
-
-	webhookInfo := s.getWebhookInfo(req)
-	var webhookConfig *InitializeWebhook
-	if webhookInfo != nil {
-		webhookConfig = &InitializeWebhook{
-			URL:      webhookInfo.URL,
-			Secret:   webhookInfo.Secret,
-			WatchDir: webhookInfo.WatchDir,
-		}
-	}
-
-	initReq := InitializeRequest{
-		SandboxID:         sandboxID,
-		TeamID:            teamID,
-		RuntimeGeneration: req.RuntimeGeneration,
-		EnvVars: sandboxEnvVarsForInitialize(req.Config, sandboxPlatformEnv{
-			SandboxID: sandboxID,
-			AppDomain: SandboxAppDomain(
-				s.config.PublicRegionID,
-				s.config.PublicRootDomain,
-			),
-		}),
-		Webhook:   webhookConfig,
-		MountDirs: declaredVolumeMountDirs(template),
-	}
-
-	var initErr error
-	var initResp *InitializeResponse
-	timeout := s.config.ProcdInitTimeout
-	if timeout == 0 {
-		timeout = 6 * time.Second
-	}
-
-	initCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		initResp, initErr = s.procdClient.Initialize(initCtx, procdAddress, initReq, internalToken)
-		if initErr == nil {
-			return initResp, nil
-		}
-
-		select {
-		case <-initCtx.Done():
-			return nil, fmt.Errorf("initialize procd timed out after %s: %w", timeout, initErr)
-		case <-ticker.C:
-			continue
-		}
-	}
-}
-
-type sandboxPlatformEnv struct {
-	SandboxID string
-	AppDomain string
-}
-
-func sandboxEnvVarsForInitialize(cfg *SandboxConfig, platform sandboxPlatformEnv) map[string]string {
-	var envVars map[string]string
-	if cfg != nil {
-		envVars = cloneEnvVars(cfg.EnvVars)
-	}
-	if envVars == nil {
-		envVars = map[string]string{}
-	}
-	if sandboxID := strings.TrimSpace(platform.SandboxID); sandboxID != "" {
-		envVars[SandboxEnvSandboxID] = sandboxID
-	}
-	if appDomain := strings.Trim(strings.TrimSpace(platform.AppDomain), "."); appDomain != "" {
-		envVars[SandboxEnvAppDomain] = appDomain
-	}
-	if len(envVars) == 0 {
-		return nil
-	}
-	return envVars
 }

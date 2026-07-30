@@ -75,6 +75,18 @@ func TestReadyReflectsSynchronizedRuntimeState(t *testing.T) {
 	}
 }
 
+func TestNewCopiesRuntimeWatchTCPPorts(t *testing.T) {
+	ports := []int{8096}
+	d := New(&apiconfig.NetdConfig{}, zap.NewNop(), nil, Options{
+		RuntimeWatchTCPPorts: ports,
+	})
+	ports[0] = 1
+
+	if len(d.runtimeWatchTCPPorts) != 1 || d.runtimeWatchTCPPorts[0] != 8096 {
+		t.Fatalf("runtime watch ports = %#v, want [8096]", d.runtimeWatchTCPPorts)
+	}
+}
+
 func TestRedirectBypassCIDRsIncludesClusterDNSCIDRs(t *testing.T) {
 	got := redirectBypassCIDRs(
 		[]string{"10.96.0.10", "10.244.0.53"},

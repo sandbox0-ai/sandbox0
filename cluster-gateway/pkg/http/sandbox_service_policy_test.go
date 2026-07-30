@@ -49,6 +49,7 @@ func TestSandboxServiceProxiesAuthorizedRouteWithRewrite(t *testing.T) {
 		ID:           "sb-demo",
 		TeamID:       "team-1",
 		InternalAddr: "http://127.0.0.1:1",
+		Status:       mgr.SandboxStatusRunning,
 		AutoResume:   true,
 		Services: []mgr.SandboxAppService{{
 			ID:   "api",
@@ -98,6 +99,7 @@ func TestSandboxServiceRejectsDisallowedMethod(t *testing.T) {
 		ID:           "sb-demo",
 		TeamID:       "team-1",
 		InternalAddr: "http://127.0.0.1:1",
+		Status:       mgr.SandboxStatusRunning,
 		AutoResume:   true,
 		Services: []mgr.SandboxAppService{{
 			ID:   "api",
@@ -138,6 +140,7 @@ func TestSandboxServiceHandlesCORSPreflight(t *testing.T) {
 		ID:           "sb-demo",
 		TeamID:       "team-1",
 		InternalAddr: "http://127.0.0.1:1",
+		Status:       mgr.SandboxStatusRunning,
 		AutoResume:   true,
 		Services: []mgr.SandboxAppService{{
 			ID:   "api",
@@ -292,6 +295,7 @@ func TestSandboxFunctionServiceExecutesThroughProcdPort(t *testing.T) {
 		TeamID:       "team-1",
 		UserID:       "user-1",
 		InternalAddr: procd.URL,
+		Status:       mgr.SandboxStatusRunning,
 		AutoResume:   true,
 		Services: []mgr.SandboxAppService{{
 			ID:   "webhook",
@@ -675,6 +679,7 @@ func TestSandboxCMDServiceStartsSessionBeforeProxy(t *testing.T) {
 		TeamID:       "team-1",
 		UserID:       "user-1",
 		InternalAddr: procd.URL,
+		Status:       mgr.SandboxStatusRunning,
 		AutoResume:   true,
 		Services: []mgr.SandboxAppService{{
 			ID:   "api",
@@ -817,7 +822,13 @@ func TestEnsureSandboxCMDServiceReconcilesExistingSession(t *testing.T) {
 					Caller: "cluster-gateway", PrivateKey: privateKey, TTL: time.Minute,
 				}),
 			}
-			sandbox := &mgr.Sandbox{ID: "sb-demo", TeamID: "team-1", UserID: "user-1", InternalAddr: procd.URL}
+			sandbox := &mgr.Sandbox{
+				ID:           "sb-demo",
+				TeamID:       "team-1",
+				UserID:       "user-1",
+				InternalAddr: procd.URL,
+				Status:       mgr.SandboxStatusRunning,
+			}
 			if err := server.ensureSandboxServiceCMDSession(t.Context(), sandbox, service); err != nil {
 				t.Fatal(err)
 			}
@@ -919,6 +930,7 @@ func newFunctionServiceSandbox(internalAddr string, port int) *mgr.Sandbox {
 		TeamID:       "team-1",
 		UserID:       "user-1",
 		InternalAddr: internalAddr,
+		Status:       mgr.SandboxStatusRunning,
 		AutoResume:   true,
 		Services: []mgr.SandboxAppService{{
 			ID:   "webhook",

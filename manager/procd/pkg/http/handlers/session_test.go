@@ -149,7 +149,7 @@ func TestSessionHandlerRejectsExpiredCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := supervisor.Initialize("sandbox-1", 1, nil); err != nil {
+	if err := supervisor.Activate(session.Activation{SandboxID: "sandbox-1", RuntimeGeneration: 1}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = supervisor.Close() })
@@ -181,7 +181,7 @@ func newHandlerTestSupervisor(t *testing.T) *session.Supervisor {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := supervisor.Initialize("sandbox-1", 1, nil); err != nil {
+	if err := supervisor.Activate(session.Activation{SandboxID: "sandbox-1", RuntimeGeneration: 1}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {

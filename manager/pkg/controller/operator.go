@@ -41,10 +41,8 @@ type Operator struct {
 	clock          TimeProvider
 	logger         *zap.Logger
 	statsPublisher TemplateStatsPublisher
-	probeRunner    SandboxProbeRunner
 
-	workqueue     workqueue.TypedRateLimitingInterface[string]
-	podProbeQueue workqueue.TypedRateLimitingInterface[string]
+	workqueue workqueue.TypedRateLimitingInterface[string]
 
 	metrics *obsmetrics.ManagerMetrics
 
@@ -61,10 +59,6 @@ type Operator struct {
 // SetNamespacePolicyReconciler installs the manager-owned template namespace baseline reconciler.
 func (op *Operator) SetNamespacePolicyReconciler(reconciler namespacepolicy.TemplateNamespaceReconciler) {
 	op.namespacePolicy = reconciler
-}
-
-func (op *Operator) SetSandboxProbeRunner(runner SandboxProbeRunner) {
-	op.probeRunner = runner
 }
 
 // TemplateListerImpl implements TemplateLister
@@ -128,7 +122,6 @@ func NewOperator(
 		clock:            clock,
 		logger:           logger,
 		workqueue:        workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
-		podProbeQueue:    workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 		metrics:          metrics,
 		templateInformer: templateInformer,
 		templateLister: TemplateListerImpl{
@@ -158,7 +151,6 @@ func NewOperator(
 func (op *Operator) Run(ctx context.Context, workers int) error {
 	defer runtime.HandleCrash()
 	defer op.workqueue.ShutDown()
-	defer op.podProbeQueue.ShutDown()
 
 	op.logger.Info("Starting operator")
 
@@ -172,10 +164,6 @@ func (op *Operator) Run(ctx context.Context, workers int) error {
 	for i := 0; i < workers; i++ {
 		go wait.UntilWithContext(ctx, op.runWorker, time.Second)
 	}
-	for i := 0; i < sandboxProbeWorkers; i++ {
-		go wait.UntilWithContext(ctx, op.runPodProbeWorker, time.Second)
-	}
-
 	op.logger.Info("Operator started")
 	<-ctx.Done()
 	op.logger.Info("Shutting down operator")
@@ -533,7 +521,6 @@ func (op *Operator) enqueueTemplateKey(namespace, name string) {
 func (op *Operator) handlePodAdd(obj any) {
 	pod := obj.(*corev1.Pod)
 	op.enqueueTemplateForPod(pod)
-	op.enqueuePodProbe(pod)
 }
 
 func (op *Operator) handlePodUpdate(oldObj, newObj any) {
@@ -543,9 +530,6 @@ func (op *Operator) handlePodUpdate(oldObj, newObj any) {
 		return
 	}
 	op.enqueueTemplateForPod(newPod)
-	if podProbeInputsChanged(oldPod, newPod) {
-		op.enqueuePodProbe(newPod)
-	}
 }
 
 func (op *Operator) handlePodDelete(obj any) {

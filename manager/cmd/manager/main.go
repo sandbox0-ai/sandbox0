@@ -445,7 +445,7 @@ func main() {
 		ProcdPort:                           cfg.ProcdConfig.HTTPPort,
 		ProcdClientTimeout:                  cfg.ProcdClientTimeout.Duration,
 		ProcdHTTPClient:                     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
-		ProcdInitTimeout:                    cfg.ProcdInitTimeout.Duration,
+		RuntimeReadyTimeout:                 cfg.RuntimeReadyTimeout.Duration,
 		AllowColdStartWithoutReadyDataPlane: cfg.AllowColdStartWithoutReadyDataPlane,
 		RootFSSquashDisabled:                cfg.RootFSMaintenance.SquashDisabled,
 		RootFSSquashMaxChainDepth:           cfg.RootFSMaintenance.SquashMaxChainDepth,
@@ -520,7 +520,6 @@ func main() {
 	sandboxService.SetPauseEnqueuer(sandboxPauseController)
 	sandboxCrashRecoveryController := service.NewSandboxCrashRecoveryController(k8sClient, podLister, sandboxService, logger)
 	podInformer.Informer().AddEventHandler(sandboxCrashRecoveryController.ResourceEventHandler())
-	operator.SetSandboxProbeRunner(sandboxService)
 	sandboxLogWorker := buildSandboxObservabilityLogWorker(cfg, internalAuthGen, obsProvider, logger)
 	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
 	for _, entry := range cfg.EgressAuthStaticAuth {

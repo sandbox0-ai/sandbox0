@@ -1270,7 +1270,7 @@ func (in *ManagerConfig) DeepCopyInto(out *ManagerConfig) {
 	out.NetdPolicyApplyPollInterval = in.NetdPolicyApplyPollInterval
 	out.EgressAuthDefaultResolveTTL = in.EgressAuthDefaultResolveTTL
 	out.ProcdClientTimeout = in.ProcdClientTimeout
-	out.ProcdInitTimeout = in.ProcdInitTimeout
+	out.RuntimeReadyTimeout = in.RuntimeReadyTimeout
 	out.ShutdownTimeout = in.ShutdownTimeout
 	in.ProcdConfig.DeepCopyInto(&out.ProcdConfig)
 	out.Autoscaler = in.Autoscaler

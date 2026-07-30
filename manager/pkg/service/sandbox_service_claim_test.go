@@ -23,10 +23,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -673,31 +673,28 @@ func TestClaimIdlePodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 	}
 }
 
-func TestWaitForPodClaimReadyUsesSandboxReadinessWithoutPodReady(t *testing.T) {
+func TestWaitForPodClaimReadyWaitsForRuntimeControlConditions(t *testing.T) {
 	pod := newClaimReadyTestPod("ns-a", "cold-pod", "template-a")
 	indexer := newClaimTestPodIndexer(t, pod)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s, want POST", r.Method)
-		}
-		if r.URL.Path != "/api/v1/pods/ns-a/cold-pod/probes/readiness" {
-			t.Fatalf("path = %s", r.URL.Path)
-		}
-		_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
-	}))
-	defer server.Close()
-	host, port := splitTestServerAddress(t, server)
-
 	svc := &SandboxService{
-		k8sClient:  fake.NewSimpleClientset(pod.DeepCopy(), newClaimTestNode("node-a", host)),
-		podLister:  corelisters.NewPodLister(indexer),
-		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config: SandboxServiceConfig{
-			CtldPort: port,
-		},
-		logger: zap.NewNop(),
+		k8sClient: fake.NewSimpleClientset(pod.DeepCopy()),
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
 	}
+
+	handler := svc.PodEventHandler()
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		updated := pod.DeepCopy()
+		setRuntimeTestCondition(updated, corev1.PodReady, corev1.ConditionTrue, "RuntimeStandby", "runtime is ready for assignment")
+		setRuntimeTestCondition(updated, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionTrue, "RuntimeStandby", "runtime is ready for assignment")
+		if err := indexer.Update(updated); err != nil {
+			t.Errorf("update pod: %v", err)
+			return
+		}
+		handler.UpdateFunc(pod, updated)
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -705,8 +702,8 @@ func TestWaitForPodClaimReadyUsesSandboxReadinessWithoutPodReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForPodClaimReady() error = %v", err)
 	}
-	if controller.IsPodReady(readyPod) {
-		t.Fatal("waitForPodClaimReady() waited for Kubernetes PodReady; want sandbox claim readiness only")
+	if !controller.IsPodReady(readyPod) {
+		t.Fatal("waitForPodClaimReady() returned before runtime control conditions became ready")
 	}
 }
 
@@ -1240,7 +1237,7 @@ func TestCreateNewPodFailsBeforeCreateWhenDataPlaneNotReady(t *testing.T) {
 	}
 }
 
-func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
+func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing.T) {
 	withClaimTestPublicKey(t)
 
 	templateID := "template-a"
@@ -1271,26 +1268,10 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
-	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/initialize" {
-			http.NotFound(w, r)
-			return
-		}
-		if len(calls) != 1 || calls[0] != "apply" {
-			t.Fatalf("calls before procd = %v, want [apply]", calls)
-		}
-		calls = append(calls, "procd")
-		if err := spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-a", TeamID: "team-a"}); err != nil {
-			t.Fatalf("write procd response: %v", err)
-		}
-	}))
-	defer procd.Close()
-	procdURL, procdPort := parsedTestServer(t, procd.URL)
-
 	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
 	idlePod.Spec.NodeName = "node-a"
 	idlePod.Status.HostIP = ctldURL.Hostname()
-	idlePod.Status.PodIP = procdURL.Hostname()
+	idlePod.Status.PodIP = "10.0.0.10"
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{},
 		rootFSSnapshots: map[string]*RootFSSnapshot{
@@ -1304,21 +1285,26 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 			},
 		},
 	}
+	indexer := newClaimTestPodIndexer(t, idlePod)
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(*corev1.Pod) {
+		if len(calls) != 1 || calls[0] != "apply" {
+			t.Fatalf("calls before runtime activation = %v, want [apply]", calls)
+		}
+		calls = append(calls, "runtime")
+	})
 	svc := &SandboxService{
 		k8sClient:              client,
-		podLister:              newClaimTestPodLister(t, idlePod),
+		podLister:              corelisters.NewPodLister(indexer),
 		secretLister:           newClaimTestSecretLister(t),
 		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
 		sandboxStore:           store,
 		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
 		internalTokenGenerator: staticTokenGenerator{},
 		config: SandboxServiceConfig{
-			CtldEnabled:      true,
-			CtldPort:         ctldPort,
-			ProcdPort:        procdPort,
-			ProcdInitTimeout: time.Second,
+			CtldEnabled:         true,
+			CtldPort:            ctldPort,
+			RuntimeReadyTimeout: time.Second,
 		},
 		clock:  systemTime{},
 		logger: zap.NewNop(),
@@ -1336,8 +1322,8 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 	if resp == nil || resp.SandboxID == "" {
 		t.Fatalf("ClaimSandbox() response = %+v, want sandbox id", resp)
 	}
-	if len(calls) != 2 || calls[0] != "apply" || calls[1] != "procd" {
-		t.Fatalf("calls = %v, want [apply procd]", calls)
+	if len(calls) != 2 || calls[0] != "apply" || calls[1] != "runtime" {
+		t.Fatalf("calls = %v, want [apply runtime]", calls)
 	}
 	if applyReq.Target.PodName != "idle-ready" {
 		t.Fatalf("apply target pod = %q, want idle-ready", applyReq.Target.PodName)
@@ -1358,7 +1344,7 @@ func TestClaimSandboxInitializesRootFSFromSnapshotBeforeProcd(t *testing.T) {
 	}
 }
 
-func TestClaimSandboxOverlapsHotPersistenceWithProcdInitialization(t *testing.T) {
+func TestClaimSandboxDoesNotActivateRuntimeBeforePersistence(t *testing.T) {
 	withClaimTestPublicKey(t)
 
 	templateID := "template-a"
@@ -1370,42 +1356,31 @@ func TestClaimSandboxOverlapsHotPersistenceWithProcdInitialization(t *testing.T)
 		ObjectMeta: metav1.ObjectMeta{Name: templateID, Namespace: templateNamespace},
 	}
 
-	procdStarted := make(chan struct{}, 1)
 	persistStarted := make(chan struct{}, 1)
 	release := make(chan struct{})
-	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/initialize" {
-			http.NotFound(w, r)
-			return
-		}
-		procdStarted <- struct{}{}
-		<-release
-		if err := spec.WriteSuccess(w, http.StatusOK, InitializeResponse{SandboxID: "sandbox-a", TeamID: "team-a"}); err != nil {
-			t.Fatalf("write procd response: %v", err)
-		}
-	}))
-	defer procd.Close()
-	procdURL, procdPort := parsedTestServer(t, procd.URL)
+	runtimeActivated := make(chan struct{}, 1)
 
 	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
-	idlePod.Status.PodIP = procdURL.Hostname()
+	idlePod.Status.PodIP = "10.0.0.10"
 	store := &blockingClaimSandboxStore{
 		memorySandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{}},
 		started:            persistStarted,
 		release:            release,
 	}
+	indexer := newClaimTestPodIndexer(t, idlePod)
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(*corev1.Pod) {
+		runtimeActivated <- struct{}{}
+	})
 	svc := &SandboxService{
 		k8sClient:              client,
-		podLister:              newClaimTestPodLister(t, idlePod),
+		podLister:              corelisters.NewPodLister(indexer),
 		secretLister:           newClaimTestSecretLister(t),
 		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
 		sandboxStore:           store,
-		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
 		internalTokenGenerator: staticTokenGenerator{},
 		config: SandboxServiceConfig{
-			ProcdPort:        procdPort,
-			ProcdInitTimeout: time.Second,
+			RuntimeReadyTimeout: time.Second,
 		},
 		clock:  systemTime{},
 		logger: zap.NewNop(),
@@ -1420,19 +1395,31 @@ func TestClaimSandboxOverlapsHotPersistenceWithProcdInitialization(t *testing.T)
 		})
 		result <- err
 	}()
-	for name, started := range map[string]<-chan struct{}{
-		"procd initialization": procdStarted,
-		"sandbox persistence":  persistStarted,
-	} {
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatalf("%s did not start before the other operation completed", name)
-		}
+	select {
+	case <-persistStarted:
+	case <-time.After(time.Second):
+		t.Fatal("sandbox persistence did not start")
+	}
+	storedPod, err := client.CoreV1().Pods(idlePod.Namespace).Get(context.Background(), idlePod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedPod.Annotations[runtimecontrol.AnnotationAssignmentReady] != "" {
+		t.Fatal("runtime assignment activated before persistence completed")
+	}
+	select {
+	case <-runtimeActivated:
+		t.Fatal("runtime activated before persistence completed")
+	default:
 	}
 	close(release)
 	if err := <-result; err != nil {
 		t.Fatalf("ClaimSandbox() error = %v", err)
+	}
+	select {
+	case <-runtimeActivated:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not activate after persistence completed")
 	}
 	if len(store.records) != 1 {
 		t.Fatalf("sandbox records = %d, want 1", len(store.records))
@@ -1442,18 +1429,9 @@ func TestClaimSandboxOverlapsHotPersistenceWithProcdInitialization(t *testing.T)
 			t.Fatalf("sandbox record status = %q, want running", record.Status)
 		}
 	}
-	podPatches := 0
-	for _, action := range client.Actions() {
-		if action.GetVerb() == "patch" && action.GetResource().Resource == "pods" {
-			podPatches++
-		}
-	}
-	if podPatches != 1 {
-		t.Fatalf("claim-path Pod patches = %d, want one reservation patch", podPatches)
-	}
 }
 
-func TestClaimSandboxDeletesConcurrentRecordWhenProcdInitializationFails(t *testing.T) {
+func TestClaimSandboxDeletesConcurrentRecordWhenRuntimeActivationFails(t *testing.T) {
 	withClaimTestPublicKey(t)
 
 	templateID := "template-a"
@@ -1464,27 +1442,21 @@ func TestClaimSandboxDeletesConcurrentRecordWhenProcdInitializationFails(t *test
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: templateID, Namespace: templateNamespace},
 	}
-	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
-	}))
-	defer procd.Close()
-	procdURL, procdPort := parsedTestServer(t, procd.URL)
-
 	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
-	idlePod.Status.PodIP = procdURL.Hostname()
+	idlePod.Status.PodIP = "10.0.0.10"
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	indexer := newClaimTestPodIndexer(t, idlePod)
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedFailed, nil)
 	svc := &SandboxService{
 		k8sClient:              client,
-		podLister:              newClaimTestPodLister(t, idlePod),
+		podLister:              corelisters.NewPodLister(indexer),
 		secretLister:           newClaimTestSecretLister(t),
 		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
 		sandboxStore:           store,
-		procdClient:            NewProcdClient(ProcdClientConfig{Timeout: time.Second}),
 		internalTokenGenerator: staticTokenGenerator{},
 		config: SandboxServiceConfig{
-			ProcdPort:        procdPort,
-			ProcdInitTimeout: 20 * time.Millisecond,
+			RuntimeReadyTimeout: 20 * time.Millisecond,
 		},
 		clock:  systemTime{},
 		logger: zap.NewNop(),
@@ -1495,8 +1467,8 @@ func TestClaimSandboxDeletesConcurrentRecordWhenProcdInitializationFails(t *test
 		TeamID:   "team-a",
 		UserID:   "user-a",
 	})
-	if err == nil || !strings.Contains(err.Error(), "initialize procd") {
-		t.Fatalf("ClaimSandbox() error = %v, want procd initialization failure", err)
+	if err == nil || !strings.Contains(err.Error(), "activate runtime") {
+		t.Fatalf("ClaimSandbox() error = %v, want runtime activation failure", err)
 	}
 	if len(store.records) != 1 {
 		t.Fatalf("sandbox records = %d, want 1", len(store.records))
@@ -1781,22 +1753,14 @@ func TestObserveIdleClaimRecordsMetric(t *testing.T) {
 func TestWaitForPodClaimReadyWaitsForProcdContainerRunning(t *testing.T) {
 	pod := newClaimReadyTestPod("ns-a", "cold-pod", "template-a")
 	pod.Status.ContainerStatuses = nil
+	setRuntimeTestCondition(pod, corev1.PodReady, corev1.ConditionTrue, "RuntimeStandby", "runtime is ready for assignment")
+	setRuntimeTestCondition(pod, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionTrue, "RuntimeStandby", "runtime is ready for assignment")
 	indexer := newClaimTestPodIndexer(t, pod)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
-	}))
-	defer server.Close()
-	host, port := splitTestServerAddress(t, server)
-
 	svc := &SandboxService{
-		k8sClient:  fake.NewSimpleClientset(pod.DeepCopy(), newClaimTestNode("node-a", host)),
-		podLister:  corelisters.NewPodLister(indexer),
-		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config: SandboxServiceConfig{
-			CtldPort: port,
-		},
-		logger: zap.NewNop(),
+		k8sClient: fake.NewSimpleClientset(pod.DeepCopy()),
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
 	}
 
 	handler := svc.PodEventHandler()
@@ -1826,36 +1790,14 @@ func TestWaitForPodClaimReadyWaitsForProcdContainerRunning(t *testing.T) {
 	}
 }
 
-func TestWaitForPodClaimReadyReprobesOnlyAfterInformerEvent(t *testing.T) {
+func TestWaitForPodClaimReadyReevaluatesOnlyAfterInformerEvent(t *testing.T) {
 	pod := newClaimReadyTestPod("ns-a", "cold-pod", "template-a")
 	indexer := newClaimTestPodIndexer(t, pod)
 
-	probeCalls := make(chan struct{}, 8)
-	var probeMu sync.Mutex
-	probeReady := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		probeMu.Lock()
-		ready := probeReady
-		probeMu.Unlock()
-
-		probeCalls <- struct{}{}
-		if ready {
-			_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
-			return
-		}
-		_ = json.NewEncoder(w).Encode(sandboxprobe.Failed(sandboxprobe.KindReadiness, "SandboxProbePending", "sandbox probe pending", nil))
-	}))
-	defer server.Close()
-	host, port := splitTestServerAddress(t, server)
-
 	svc := &SandboxService{
-		k8sClient:  fake.NewSimpleClientset(pod.DeepCopy(), newClaimTestNode("node-a", host)),
-		podLister:  corelisters.NewPodLister(indexer),
-		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config: SandboxServiceConfig{
-			CtldPort: port,
-		},
-		logger: zap.NewNop(),
+		k8sClient: fake.NewSimpleClientset(pod.DeepCopy()),
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1866,28 +1808,16 @@ func TestWaitForPodClaimReadyReprobesOnlyAfterInformerEvent(t *testing.T) {
 		resultCh <- err
 	}()
 
-	for i := 0; i < 2; i++ {
-		select {
-		case <-probeCalls:
-		case <-time.After(time.Second):
-			t.Fatalf("probe call %d did not happen", i+1)
-		}
-	}
-
 	select {
-	case <-probeCalls:
-		t.Fatal("unexpected readiness probe before informer event")
 	case err := <-resultCh:
 		t.Fatalf("waitForPodClaimReady returned before informer event: %v", err)
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	probeMu.Lock()
-	probeReady = true
-	probeMu.Unlock()
-
 	updated := pod.DeepCopy()
 	updated.ResourceVersion = "2"
+	setRuntimeTestCondition(updated, corev1.PodReady, corev1.ConditionTrue, "RuntimeStandby", "runtime is ready for assignment")
+	setRuntimeTestCondition(updated, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionTrue, "RuntimeStandby", "runtime is ready for assignment")
 	if err := indexer.Update(updated); err != nil {
 		t.Fatalf("update pod: %v", err)
 	}

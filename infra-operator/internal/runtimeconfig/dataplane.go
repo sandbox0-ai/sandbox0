@@ -45,7 +45,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.PauseMemoryBufferRatio = spec.PauseMemoryBufferRatio
 	cfg.PauseMinCPU = spec.PauseMinCPU
 	cfg.ProcdClientTimeout = spec.ProcdClientTimeout
-	cfg.ProcdInitTimeout = spec.ProcdInitTimeout
+	cfg.RuntimeReadyTimeout = spec.RuntimeReadyTimeout
 	cfg.ShutdownTimeout = spec.ShutdownTimeout
 	cfg.ProcdConfig = apiconfig.ProcdConfig{
 		Config: procdconfig.Config{

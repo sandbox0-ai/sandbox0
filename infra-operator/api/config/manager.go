@@ -155,6 +155,10 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default=8095
 	CtldPort int `yaml:"ctld_port" json:"-"`
+	// CtldRuntimeWatchPort is the dedicated node-local event stream consumed by procd.
+	// +optional
+	// +kubebuilder:default=8096
+	CtldRuntimeWatchPort int `yaml:"ctld_runtime_watch_port" json:"-"`
 
 	// Timeouts
 	// +optional
@@ -164,8 +168,8 @@ type ManagerConfig struct {
 	// +kubebuilder:default="15s"
 	CtldClientTimeout metav1.Duration `yaml:"ctld_client_timeout" json:"-"`
 	// +optional
-	// +kubebuilder:default="6s"
-	ProcdInitTimeout metav1.Duration `yaml:"procd_init_timeout" json:"procdInitTimeout"`
+	// +kubebuilder:default="90s"
+	RuntimeReadyTimeout metav1.Duration `yaml:"runtime_ready_timeout" json:"runtimeReadyTimeout"`
 	// +optional
 	// +kubebuilder:default="30s"
 	ShutdownTimeout metav1.Duration `yaml:"shutdown_timeout" json:"shutdownTimeout"`

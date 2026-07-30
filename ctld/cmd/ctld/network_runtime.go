@@ -95,7 +95,18 @@ func (h *primaryServiceHandle) Wait(ctx context.Context) error {
 	}
 }
 
-func configuredNetworkRuntimeFactory(path, ctldHTTPAddr string) (primaryServiceFactory, error) {
+func configuredNetworkRuntimeFactory(path, ctldHTTPAddr, runtimeWatchHTTPAddr string) (primaryServiceFactory, error) {
+	ctldPort, err := listenerPort(ctldHTTPAddr, "ctld HTTP")
+	if err != nil {
+		return nil, err
+	}
+	runtimeWatchPort, err := listenerPort(runtimeWatchHTTPAddr, "ctld runtime watch")
+	if err != nil {
+		return nil, err
+	}
+	if ctldPort == runtimeWatchPort {
+		return nil, fmt.Errorf("ctld HTTP port and runtime watch port must differ")
+	}
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, nil
@@ -104,20 +115,27 @@ func configuredNetworkRuntimeFactory(path, ctldHTTPAddr string) (primaryServiceF
 	if err != nil {
 		return nil, err
 	}
-	_, rawPort, err := net.SplitHostPort(ctldHTTPAddr)
-	if err != nil {
-		return nil, fmt.Errorf("parse ctld HTTP address %q: %w", ctldHTTPAddr, err)
-	}
-	ctldPort, err := strconv.Atoi(rawPort)
-	if err != nil {
-		return nil, fmt.Errorf("parse ctld HTTP port %q: %w", rawPort, err)
-	}
-	if err := cfg.ValidateListenerPorts(map[int]string{ctldPort: "ctld HTTP port"}); err != nil {
+	if err := cfg.ValidateListenerPorts(map[int]string{
+		ctldPort:         "ctld HTTP port",
+		runtimeWatchPort: "ctld runtime watch port",
+	}); err != nil {
 		return nil, err
 	}
 	return func() (primaryService, error) {
-		return newNetworkRuntimeService(cfg.DeepCopy())
+		return newNetworkRuntimeService(cfg.DeepCopy(), runtimeWatchPort)
 	}, nil
+}
+
+func listenerPort(address, label string) (int, error) {
+	_, rawPort, err := net.SplitHostPort(address)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s address %q: %w", label, address, err)
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("parse %s port %q", label, rawPort)
+	}
+	return port, nil
 }
 
 type networkRuntimeService struct {
@@ -141,7 +159,7 @@ func loadNetworkRuntimeConfig(configPath string) (*apiconfig.NetdConfig, error) 
 	return cfg, nil
 }
 
-func newNetworkRuntimeService(cfg *apiconfig.NetdConfig) (*networkRuntimeService, error) {
+func newNetworkRuntimeService(cfg *apiconfig.NetdConfig, runtimeWatchPort int) (*networkRuntimeService, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("network runtime config is nil")
 	}
@@ -165,7 +183,9 @@ func newNetworkRuntimeService(cfg *apiconfig.NetdConfig) (*networkRuntimeService
 		zap.Int("proxy_https_port", cfg.ProxyHTTPSPort),
 	)
 	return &networkRuntimeService{
-		daemon:        netddaemon.New(cfg, logger, provider),
+		daemon: netddaemon.New(cfg, logger, provider, netddaemon.Options{
+			RuntimeWatchTCPPorts: []int{runtimeWatchPort},
+		}),
 		logger:        logger,
 		observability: provider,
 	}, nil

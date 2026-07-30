@@ -409,7 +409,6 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 			return pod, fmt.Errorf("wait for pod claim readiness: %w", err)
 		}
 		pod = readyPod
-		s.refreshSandboxProbeConditionsAsync(pod)
 	}
 	req := &ClaimRequest{
 		TeamID:               record.TeamID,
@@ -429,9 +428,21 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return pod, fmt.Errorf("load rootfs checkpoint: %w", err)
 	}
+	resetCopiedSessionState := copiedSessionStateRequiresReset(record.ID, rootFSState)
+	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
+	if err != nil {
+		return pod, err
+	}
+	assignedPodUID := pod.UID
 	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState, "")
 	if err != nil {
 		return pod, err
+	}
+	if pod.UID != assignedPodUID {
+		pod, runtimeRevision, err = s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
+		if err != nil {
+			return pod, err
+		}
 	}
 	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {
 		return pod, fmt.Errorf("bind volume portals: %w", err)
@@ -439,12 +450,9 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err := s.bindWebhookStatePortal(ctx, pod, req); err != nil {
 		return pod, fmt.Errorf("bind webhook state portal: %w", err)
 	}
-	procdAddress, err := s.prodAddress(ctx, pod)
+	pod, err = s.activateRuntimeAssignment(ctx, pod, runtimeRevision)
 	if err != nil {
-		return pod, fmt.Errorf("get procd address: %w", err)
-	}
-	if _, err := s.initializeProcd(ctx, pod, template, req, procdAddress); err != nil {
-		return pod, fmt.Errorf("initialize procd: %w", err)
+		return pod, fmt.Errorf("activate runtime: %w", err)
 	}
 	if s.logger != nil {
 		s.logger.Info("Resumed paused sandbox runtime",
@@ -454,6 +462,22 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		)
 	}
 	return pod, nil
+}
+
+// copiedSessionStateRequiresReset derives the one-time reset intent from the
+// authoritative rootfs head provenance. Once the target sandbox saves its own
+// layer, later resumes preserve that sandbox's session state.
+func copiedSessionStateRequiresReset(sandboxID string, state *SandboxRootFSState) bool {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || state == nil || len(state.LayerChain) == 0 {
+		return false
+	}
+	head := state.LayerChain[len(state.LayerChain)-1]
+	if head == nil {
+		return false
+	}
+	sourceSandboxID := strings.TrimSpace(head.SourceSandboxID)
+	return sourceSandboxID != "" && sourceSandboxID != sandboxID
 }
 
 func (s *SandboxService) templateForSandboxRecord(record *SandboxRecord) (*v1alpha1.SandboxTemplate, error) {

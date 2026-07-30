@@ -17,8 +17,8 @@ import (
 var errSandboxCrashRecoveryBlocked = errors.New("sandbox crash recovery is blocked by another lifecycle transaction")
 
 // RecoverTerminatedSandboxRuntime durably starts checkpoint recovery for an
-// unexpectedly terminated claimed runtime. The existing pause controller owns
-// checkpoint completion so manager restarts reuse the same durable transaction.
+// unexpectedly terminated claimed runtime. The pause controller checkpoints
+// and reconstructs the runtime so manager restarts reuse the same transaction.
 func (s *SandboxService) RecoverTerminatedSandboxRuntime(ctx context.Context, pod *corev1.Pod) error {
 	if s == nil || s.sandboxStore == nil || pod == nil || pod.DeletionTimestamp != nil {
 		return nil
@@ -96,7 +96,7 @@ func (s *SandboxService) RecoverTerminatedSandboxRuntime(ctx context.Context, po
 			zap.String("reason", reason),
 		)
 	}
-	s.enqueueSandboxPause(sandboxID)
+	s.enqueueSandboxRecovery(sandboxID)
 	return nil
 }
 

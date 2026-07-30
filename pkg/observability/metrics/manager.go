@@ -22,11 +22,6 @@ type ManagerMetrics struct {
 	PodLifecycleStageDuration       *prometheus.HistogramVec
 	NetworkPolicyApplyTotal         *prometheus.CounterVec
 	NetworkPolicyApplyDuration      *prometheus.HistogramVec
-	SandboxProbeQueueDepth          prometheus.Gauge
-	SandboxProbeReconcileTotal      *prometheus.CounterVec
-	SandboxProbeReconcileDuration   *prometheus.HistogramVec
-	SandboxProbeRequestsTotal       *prometheus.CounterVec
-	SandboxProbeRequestDuration     *prometheus.HistogramVec
 	K8sClientRateLimit              *prometheus.GaugeVec
 	AutoscalerDecisionsTotal        *prometheus.CounterVec
 	AutoscalerPoolReplicas          *prometheus.GaugeVec
@@ -129,28 +124,6 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Help:    "Duration of network policy apply attempts by provider and result",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
 		}, []string{"provider", "result"}),
-		SandboxProbeQueueDepth: factory.NewGauge(prometheus.GaugeOpts{
-			Name: "manager_sandbox_probe_queue_depth",
-			Help: "Current number of sandbox pods awaiting probe reconciliation",
-		}),
-		SandboxProbeReconcileTotal: factory.NewCounterVec(prometheus.CounterOpts{
-			Name: "manager_sandbox_probe_reconcile_total",
-			Help: "Total number of sandbox pod probe reconciliations by result",
-		}, []string{"result"}),
-		SandboxProbeReconcileDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "manager_sandbox_probe_reconcile_duration_seconds",
-			Help:    "Duration of sandbox pod probe reconciliations by result",
-			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
-		}, []string{"result"}),
-		SandboxProbeRequestsTotal: factory.NewCounterVec(prometheus.CounterOpts{
-			Name: "manager_sandbox_probe_requests_total",
-			Help: "Total number of sandbox probe requests by kind and result",
-		}, []string{"kind", "result"}),
-		SandboxProbeRequestDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "manager_sandbox_probe_request_duration_seconds",
-			Help:    "Duration of sandbox probe requests by kind and result",
-			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
-		}, []string{"kind", "result"}),
 		K8sClientRateLimit: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "manager_k8s_client_rate_limit",
 			Help: "Effective Kubernetes client rate limit configuration values",

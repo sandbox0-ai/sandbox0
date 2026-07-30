@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"go.uber.org/zap"
 )
 
 func TestProbeHandlersUseProbeCheckers(t *testing.T) {
@@ -87,5 +89,79 @@ func TestSandboxProbeHandlerWritesProbeResponse(t *testing.T) {
 	}
 	if result.Kind != sandboxprobe.KindReadiness || result.Status != sandboxprobe.StatusFailed {
 		t.Fatalf("result = %#v, want failed readiness", result)
+	}
+}
+
+func TestRuntimeReadyMiddlewareFailsClosed(t *testing.T) {
+	server := &Server{
+		runtimeGate: func() (bool, string) {
+			return false, "runtime assignment is recovering"
+		},
+	}
+	nextCalled := false
+	handler := server.runtimeReadyMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		nextCalled = true
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/contexts", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if nextCalled {
+		t.Fatal("runtime-gated handler was called before the assignment was ready")
+	}
+}
+
+func TestRuntimeReadyMiddlewareAllowsLifecycleRecoveryControls(t *testing.T) {
+	server := &Server{
+		runtimeGate: func() (bool, string) {
+			return false, "runtime assignment is recovering"
+		},
+	}
+	for _, path := range []string{
+		"/api/v1/lifecycle/barrier",
+		"/api/v1/sandbox/pause",
+		"/api/v1/sandbox/resume",
+	} {
+		t.Run(path, func(t *testing.T) {
+			nextCalled := false
+			handler := server.runtimeReadyMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				nextCalled = true
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
+
+			if recorder.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+			}
+			if !nextCalled {
+				t.Fatal("lifecycle recovery control was blocked by runtime readiness")
+			}
+		})
+	}
+}
+
+func TestServerDoesNotExposeInitializeCompatibilityEndpoint(t *testing.T) {
+	server := NewServer(
+		&procdconfig.Config{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		zap.NewNop(),
+		nil,
+		nil,
+		nil,
+	)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/initialize", nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	server.router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }

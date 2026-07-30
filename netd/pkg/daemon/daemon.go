@@ -36,17 +36,22 @@ import (
 )
 
 type Daemon struct {
-	cfg             *config.NetdConfig
-	logger          *zap.Logger
-	healthServer    *http.Server
-	metricsServer   *http.Server
-	proxyServer     *proxy.Server
-	obsProvider     *observability.Provider
-	runtimeMu       sync.Mutex
-	conntrackCloser runtimeResource
-	meteringCloser  runtimeResource
-	meteringDone    <-chan struct{}
-	ready           atomic.Bool
+	cfg                  *config.NetdConfig
+	logger               *zap.Logger
+	healthServer         *http.Server
+	metricsServer        *http.Server
+	proxyServer          *proxy.Server
+	obsProvider          *observability.Provider
+	runtimeWatchTCPPorts []int
+	runtimeMu            sync.Mutex
+	conntrackCloser      runtimeResource
+	meteringCloser       runtimeResource
+	meteringDone         <-chan struct{}
+	ready                atomic.Bool
+}
+
+type Options struct {
+	RuntimeWatchTCPPorts []int
 }
 
 type runtimeResource interface {
@@ -71,14 +76,15 @@ func (m multiRuntimeResource) Close() {
 	}
 }
 
-func New(cfg *config.NetdConfig, logger *zap.Logger, obsProvider *observability.Provider) *Daemon {
+func New(cfg *config.NetdConfig, logger *zap.Logger, obsProvider *observability.Provider, options Options) *Daemon {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	return &Daemon{
-		cfg:         cfg,
-		logger:      logger,
-		obsProvider: obsProvider,
+		cfg:                  cfg,
+		logger:               logger,
+		obsProvider:          obsProvider,
+		runtimeWatchTCPPorts: append([]int(nil), options.RuntimeWatchTCPPorts...),
 	}
 }
 
@@ -319,9 +325,10 @@ func (d *Daemon) runNetd(ctx context.Context, cancel context.CancelFunc, proxyEx
 	}
 
 	redirectManager := redirect.NewManager(redirect.Config{
-		PreferNFT:      d.cfg.PreferNFT != nil && *d.cfg.PreferNFT,
-		ProxyHTTPPort:  d.cfg.ProxyHTTPPort,
-		ProxyHTTPSPort: d.cfg.ProxyHTTPSPort,
+		PreferNFT:            d.cfg.PreferNFT != nil && *d.cfg.PreferNFT,
+		ProxyHTTPPort:        d.cfg.ProxyHTTPPort,
+		ProxyHTTPSPort:       d.cfg.ProxyHTTPSPort,
+		RuntimeWatchTCPPorts: d.runtimeWatchTCPPorts,
 	}, d.logger)
 	patcher := apply.NewPatcher(client, d.logger)
 

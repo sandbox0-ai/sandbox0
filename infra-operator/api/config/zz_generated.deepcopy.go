@@ -316,7 +316,7 @@ func (in *ManagerConfig) DeepCopyInto(out *ManagerConfig) {
 	out.NetdPolicyApplyPollInterval = in.NetdPolicyApplyPollInterval
 	out.ProcdClientTimeout = in.ProcdClientTimeout
 	out.CtldClientTimeout = in.CtldClientTimeout
-	out.ProcdInitTimeout = in.ProcdInitTimeout
+	out.RuntimeReadyTimeout = in.RuntimeReadyTimeout
 	out.ShutdownTimeout = in.ShutdownTimeout
 	in.ProcdConfig.DeepCopyInto(&out.ProcdConfig)
 	out.RootFSMaintenance = in.RootFSMaintenance

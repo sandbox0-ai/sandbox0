@@ -40,6 +40,7 @@ type apiModeSuiteOptions struct {
 	includeObjectEncryption     bool
 	includeWebhookLifecycle     bool
 	includeRootFSPauseResume    bool
+	includeRuntimeControl       bool
 	includeTemplateFromSandbox  bool
 	includeMeteringAssertions   bool
 	includeUsageQuotaAssertions bool
@@ -57,22 +58,31 @@ type e2ePodList struct {
 
 type e2ePod struct {
 	Metadata e2ePodMetadata `json:"metadata"`
+	Spec     e2ePodSpec     `json:"spec"`
 	Status   e2ePodStatus   `json:"status"`
 }
 
 type e2ePodMetadata struct {
 	Name              string            `json:"name"`
+	UID               string            `json:"uid"`
 	Annotations       map[string]string `json:"annotations"`
 	DeletionTimestamp *metav1.Time      `json:"deletionTimestamp,omitempty"`
 }
 
+type e2ePodSpec struct {
+	NodeName string `json:"nodeName"`
+}
+
 type e2ePodStatus struct {
+	Phase      string            `json:"phase"`
 	Conditions []e2ePodCondition `json:"conditions"`
 }
 
 type e2ePodCondition struct {
-	Type   string `json:"type"`
-	Status string `json:"status"`
+	Type               string      `json:"type"`
+	Status             string      `json:"status"`
+	Reason             string      `json:"reason"`
+	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
 }
 
 type idlePoolPodInfo struct {
@@ -264,6 +274,20 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 
 				It("snapshots restores and forks sandbox rootfs", func() {
 					assertSandboxRootFSSnapshotRestoreFork(env, session)
+				})
+			}
+
+			if opts.includeRuntimeControl {
+				It("keeps activation failures unroutable without reconstructing the live runtime", Label("runtime-control"), func() {
+					assertRuntimeActivationFailureRecovery(env, session)
+				})
+
+				It("reconnects the same runtime after ctld primary failover", Label("runtime-control"), func() {
+					assertRuntimeControlCtldFailover(env, session)
+				})
+
+				It("reconstructs a terminated procd from durable manifest state", Label("runtime-control"), func() {
+					assertTerminatedProcdAutonomousRecovery(env, session)
 				})
 			}
 		})

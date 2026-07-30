@@ -21,8 +21,8 @@ type sandboxPauseItem struct {
 	Resume    bool
 }
 
-type pendingHealthRecoveryStore interface {
-	ListPendingHealthRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error)
+type pendingRuntimeRecoveryStore interface {
+	ListPendingRuntimeRecoverySandboxIDs(ctx context.Context, limit int) ([]string, error)
 }
 
 // SandboxPauseController completes durable pause transactions outside the API request path.
@@ -130,25 +130,29 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 	}
 	for _, txn := range txns {
 		if txn != nil {
-			if txn.Source == SandboxLifecycleSourceHealth {
+			if sandboxLifecycleSourceReconstructsRuntime(txn.Source) {
 				c.EnqueueSandboxRecovery(txn.SandboxID)
 			} else {
 				c.EnqueueSandboxPause(txn.SandboxID)
 			}
 		}
 	}
-	recoveryStore, ok := c.service.sandboxStore.(pendingHealthRecoveryStore)
+	recoveryStore, ok := c.service.sandboxStore.(pendingRuntimeRecoveryStore)
 	if !ok {
 		return
 	}
-	sandboxIDs, err := recoveryStore.ListPendingHealthRecoverySandboxIDs(ctx, c.scanLimit)
+	sandboxIDs, err := recoveryStore.ListPendingRuntimeRecoverySandboxIDs(ctx, c.scanLimit)
 	if err != nil {
-		c.logger.Warn("Failed to list pending sandbox health recoveries", zap.Error(err))
+		c.logger.Warn("Failed to list pending sandbox runtime recoveries", zap.Error(err))
 		return
 	}
 	for _, sandboxID := range sandboxIDs {
 		c.EnqueueSandboxRecovery(sandboxID)
 	}
+}
+
+func sandboxLifecycleSourceReconstructsRuntime(source string) bool {
+	return source == SandboxLifecycleSourceCrash || source == SandboxLifecycleSourceHealth
 }
 
 func (c *SandboxPauseController) runWorker(ctx context.Context) {

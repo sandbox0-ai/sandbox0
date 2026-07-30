@@ -17,6 +17,7 @@ func registerApiFullModeSuite(envProvider func() *framework.ScenarioEnv) {
 		includeObjectEncryption:     true,
 		includeWebhookLifecycle:     true,
 		includeRootFSPauseResume:    true,
+		includeRuntimeControl:       true,
 		includeTemplateFromSandbox:  true,
 		includeUsageQuotaAssertions: true,
 	})

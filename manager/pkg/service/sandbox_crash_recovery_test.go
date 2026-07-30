@@ -50,7 +50,28 @@ func TestRecoverTerminatedSandboxRuntimeStartsDurableCrashPause(t *testing.T) {
 	assert.Equal(t, int64(3), txn.FromGeneration)
 	assert.Equal(t, pod.Namespace, txn.FromPodNamespace)
 	assert.Equal(t, pod.Name, txn.FromPodName)
-	assert.Equal(t, []string{"sandbox-1", "sandbox-1"}, enqueuer.calls)
+	assert.Equal(t, []string{"sandbox-1", "sandbox-1"}, enqueuer.recoveryCalls)
+	assert.Empty(t, enqueuer.calls)
+}
+
+func TestRecoverTerminatedSandboxRuntimeIgnoresAutoResumeAccessPolicy(t *testing.T) {
+	pod := crashRecoveryTestPod(corev1.PodRunning, 137, "OOMKilled")
+	store := crashRecoveryTestStore(pod)
+	autoResume := false
+	store.records["sandbox-1"].Config.AutoResume = &autoResume
+	enqueuer := &recordingPauseEnqueuer{}
+	svc := &SandboxService{
+		sandboxStore:  store,
+		pauseEnqueuer: enqueuer,
+		clock:         systemTime{},
+		logger:        zap.NewNop(),
+	}
+
+	require.NoError(t, svc.RecoverTerminatedSandboxRuntime(context.Background(), pod))
+
+	require.Len(t, store.lifecycleTxns, 1)
+	assert.Equal(t, []string{"sandbox-1"}, enqueuer.recoveryCalls)
+	assert.Empty(t, enqueuer.calls)
 }
 
 func TestSandboxRuntimePodNeedsReplacementWhenProcdTerminatedWhilePodRunning(t *testing.T) {
@@ -124,6 +145,7 @@ func TestRecoverTerminatedSandboxRuntimeIgnoresStalePod(t *testing.T) {
 
 	assert.Empty(t, store.lifecycleTxns)
 	assert.Empty(t, enqueuer.calls)
+	assert.Empty(t, enqueuer.recoveryCalls)
 }
 
 func TestRecoverTerminatedSandboxRuntimeWaitsForConflictingLifecycle(t *testing.T) {
@@ -503,6 +525,42 @@ func TestCrashRecoveryControllerRecoversSustainedLivenessFailure(t *testing.T) {
 	assert.Empty(t, recoverer.pods)
 }
 
+func TestCrashRecoveryControllerDoesNotReconstructLiveRuntimeForReadinessFailures(t *testing.T) {
+	now := time.Date(2026, time.July, 28, 4, 0, 0, 0, time.UTC)
+	for _, status := range []corev1.ConditionStatus{
+		corev1.ConditionUnknown,
+		corev1.ConditionTrue,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			pod := unhealthyRecoveryTestPod(now.Add(-2 * time.Minute))
+			for i := range pod.Status.Conditions {
+				if pod.Status.Conditions[i].Type == v1alpha1.SandboxPodLivenessConditionType {
+					pod.Status.Conditions[i].Status = status
+					pod.Status.Conditions[i].Reason = "RuntimeControlDisconnected"
+				}
+			}
+			pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+				Type:               v1alpha1.SandboxPodReadinessConditionType,
+				Status:             corev1.ConditionFalse,
+				Reason:             "RuntimeActivationFailed",
+				LastTransitionTime: metav1.NewTime(now.Add(-2 * time.Minute)),
+			})
+
+			controller := NewSandboxCrashRecoveryController(
+				nil,
+				newTestPodLister(t, pod),
+				&recordingCrashRecoverer{},
+				zap.NewNop(),
+			)
+			t.Cleanup(controller.queue.ShutDown)
+
+			controller.ResourceEventHandler().AddFunc(pod)
+
+			assert.Zero(t, controller.queue.Len(), "readiness failure must not enqueue runtime reconstruction")
+		})
+	}
+}
+
 func TestCrashRecoveryControllerResyncsExistingUnhealthyPod(t *testing.T) {
 	now := time.Date(2026, time.July, 28, 4, 0, 0, 0, time.UTC)
 	pod := unhealthyRecoveryTestPod(now.Add(-2 * time.Minute))
@@ -567,7 +625,7 @@ func TestSandboxPauseControllerFindsCrashRecoveryAfterManagerRestart(t *testing.
 	controller.queue.Done(item)
 	controller.queue.Forget(item)
 	assert.Equal(t, "sandbox-1", item.SandboxID)
-	assert.False(t, item.Resume)
+	assert.True(t, item.Resume)
 }
 
 func TestSandboxPauseControllerFindsHealthRecoveryAfterManagerRestart(t *testing.T) {
@@ -607,6 +665,41 @@ func TestSandboxPauseControllerResumesCommittedHealthRecoveryAfterManagerRestart
 			Kind:      SandboxLifecycleKindPause,
 			Phase:     SandboxLifecyclePhaseCommitted,
 			Source:    SandboxLifecycleSourceHealth,
+			Epoch:     4,
+		},
+		"failed-resume": {
+			ID:        "failed-resume",
+			SandboxID: "sandbox-1",
+			Kind:      SandboxLifecycleKindResume,
+			Phase:     SandboxLifecyclePhaseAborted,
+			Epoch:     5,
+		},
+	}
+	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
+	t.Cleanup(controller.queue.ShutDown)
+
+	controller.enqueuePausingSandboxes(context.Background())
+
+	require.Equal(t, 1, controller.queue.Len())
+	item, shutdown := controller.queue.Get()
+	require.False(t, shutdown)
+	controller.queue.Done(item)
+	controller.queue.Forget(item)
+	assert.Equal(t, "sandbox-1", item.SandboxID)
+	assert.True(t, item.Resume)
+}
+
+func TestSandboxPauseControllerResumesCommittedCrashRecoveryAfterManagerRestart(t *testing.T) {
+	pod := crashRecoveryTestPod(corev1.PodFailed, 137, "OOMKilled")
+	store := crashRecoveryTestStore(pod)
+	store.records["sandbox-1"].Status = SandboxStatusPaused
+	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+		"crash-pause": {
+			ID:        "crash-pause",
+			SandboxID: "sandbox-1",
+			Kind:      SandboxLifecycleKindPause,
+			Phase:     SandboxLifecyclePhaseCommitted,
+			Source:    SandboxLifecycleSourceCrash,
 			Epoch:     4,
 		},
 		"failed-resume": {

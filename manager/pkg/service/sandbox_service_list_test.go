@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -389,7 +391,7 @@ func createTestPodWithPhase(name, teamID, templateID, poolType string, createdAt
 	if paused {
 		pausedStr = "true"
 	}
-	return &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
 			Namespace:         "default",
@@ -400,15 +402,36 @@ func createTestPodWithPhase(name, teamID, templateID, poolType string, createdAt
 				controller.LabelSandboxID:  name,
 			},
 			Annotations: map[string]string{
-				controller.AnnotationTeamID:    teamID,
-				controller.AnnotationExpiresAt: expiresAt.Format(time.RFC3339),
-				controller.AnnotationPaused:    pausedStr,
+				controller.AnnotationTeamID:                teamID,
+				controller.AnnotationExpiresAt:             expiresAt.Format(time.RFC3339),
+				controller.AnnotationPaused:                pausedStr,
+				runtimecontrol.AnnotationSandboxID:         name,
+				runtimecontrol.AnnotationRuntimeGeneration: "1",
 			},
 		},
 		Status: corev1.PodStatus{
 			Phase: phase,
 		},
 	}
+	if phase == corev1.PodRunning {
+		assignment, revision, err := runtimecontrol.AssignmentFromPod(pod)
+		if err != nil {
+			panic(err)
+		}
+		pod.Annotations[runtimecontrol.AnnotationAssignmentRevision] = revision
+		pod.Annotations[runtimecontrol.AnnotationAssignmentReady] = revision
+		pod.Annotations[runtimecontrol.AnnotationObservedRevision] = revision
+		pod.Annotations[runtimecontrol.AnnotationObservedGeneration] = "1"
+		pod.Annotations[runtimecontrol.AnnotationObservedState] = string(runtimecontrol.ObservedReady)
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type:   v1alpha1.SandboxPodReadinessConditionType,
+			Status: corev1.ConditionTrue,
+		})
+		if assignment == nil {
+			panic("runtime assignment is nil")
+		}
+	}
+	return pod
 }
 
 func boolPtr(b bool) *bool {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -122,7 +123,7 @@ func (s *memorySandboxStore) ListActiveLifecycleTxns(_ context.Context, kind str
 	return txns, nil
 }
 
-func (s *memorySandboxStore) ListPendingHealthRecoverySandboxIDs(_ context.Context, limit int) ([]string, error) {
+func (s *memorySandboxStore) ListPendingRuntimeRecoverySandboxIDs(_ context.Context, limit int) ([]string, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -145,7 +146,8 @@ func (s *memorySandboxStore) ListPendingHealthRecoverySandboxIDs(_ context.Conte
 				latest = txn
 			}
 		}
-		if latest == nil || latest.Kind != SandboxLifecycleKindPause || latest.Source != SandboxLifecycleSourceHealth {
+		if latest == nil || latest.Kind != SandboxLifecycleKindPause ||
+			!sandboxLifecycleSourceReconstructsRuntime(latest.Source) {
 			continue
 		}
 		sandboxIDs = append(sandboxIDs, sandboxID)
@@ -792,6 +794,7 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.PodIP = "10.0.0.4"
+	markRuntimeIdentityPodReady(t, pod)
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
 			"sandbox-a": {
@@ -863,6 +866,7 @@ func TestResumeSandboxSingleflightPreventsConcurrentSandboxLocks(t *testing.T) {
 	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.PodIP = "10.0.0.4"
+	markRuntimeIdentityPodReady(t, pod)
 	lockStarted := make(chan struct{}, 1)
 	blockLock := make(chan struct{})
 	store := &memorySandboxStore{
@@ -1060,6 +1064,7 @@ func TestResumePausedSandboxRuntimeCancelsAutoPauseTransaction(t *testing.T) {
 	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.PodIP = "10.0.0.4"
+	markRuntimeIdentityPodReady(t, pod)
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
 			"sandbox-a": {
@@ -1396,6 +1401,26 @@ func runtimeIdentityPod(namespace, name, sandboxID string) *corev1.Pod {
 			},
 		},
 	}
+}
+
+func markRuntimeIdentityPodReady(t *testing.T, pod *corev1.Pod) {
+	t.Helper()
+	assignment, revision, err := runtimecontrol.AssignmentFromPod(pod)
+	if err != nil {
+		t.Fatalf("derive runtime assignment: %v", err)
+	}
+	if assignment == nil {
+		t.Fatal("runtime assignment is nil")
+	}
+	pod.Annotations[runtimecontrol.AnnotationAssignmentRevision] = revision
+	pod.Annotations[runtimecontrol.AnnotationAssignmentReady] = revision
+	pod.Annotations[runtimecontrol.AnnotationObservedRevision] = revision
+	pod.Annotations[runtimecontrol.AnnotationObservedGeneration] = fmt.Sprintf("%d", assignment.RuntimeGeneration)
+	pod.Annotations[runtimecontrol.AnnotationObservedState] = string(runtimecontrol.ObservedReady)
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:   v1alpha1.SandboxPodReadinessConditionType,
+		Status: corev1.ConditionTrue,
+	})
 }
 
 func runtimeIdentityPodLister(t *testing.T, pods ...*corev1.Pod) corelisters.PodLister {

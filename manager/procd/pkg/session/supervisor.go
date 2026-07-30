@@ -56,7 +56,7 @@ type Supervisor struct {
 	sandboxID         string
 	sandboxEnv        map[string]string
 	runtimeGeneration int64
-	initialized       bool
+	active            bool
 	ctx               context.Context
 	cancel            context.CancelFunc
 	logger            *zap.Logger
@@ -177,18 +177,32 @@ func (s *Supervisor) RestartTransient(id string) error {
 	return proc.Restart()
 }
 
-// Initialize binds persisted state to the sandbox, provides sandbox-scoped
-// defaults, and reconciles sessions after a runtime replacement.
-func (s *Supervisor) Initialize(sandboxID string, runtimeGeneration int64, sandboxEnv map[string]string) error {
-	sandboxID = strings.TrimSpace(sandboxID)
+// Activation binds a procd process to one manager-owned runtime generation.
+type Activation struct {
+	SandboxID               string
+	RuntimeGeneration       int64
+	SandboxEnv              map[string]string
+	ResetCopiedSessionState bool
+}
+
+// Activate binds persisted state to the sandbox and reconciles sessions after
+// a runtime replacement.
+func (s *Supervisor) Activate(activation Activation) error {
+	sandboxID := strings.TrimSpace(activation.SandboxID)
+	if sandboxID == "" {
+		return errors.New("sandbox id is required")
+	}
+	if activation.RuntimeGeneration <= 0 {
+		return errors.New("runtime generation must be positive")
+	}
 	s.mu.Lock()
-	if s.initialized {
+	if s.active {
 		if s.sandboxID != sandboxID {
 			s.mu.Unlock()
 			return fmt.Errorf("session supervisor is already bound to sandbox %q", s.sandboxID)
 		}
-		s.runtimeGeneration = runtimeGeneration
-		s.sandboxEnv = process.CloneEnvVars(sandboxEnv)
+		s.runtimeGeneration = activation.RuntimeGeneration
+		s.sandboxEnv = process.CloneEnvVars(activation.SandboxEnv)
 		s.mu.Unlock()
 		return nil
 	}
@@ -198,6 +212,10 @@ func (s *Supervisor) Initialize(sandboxID string, runtimeGeneration int64, sandb
 		return err
 	}
 	if !bound {
+		if !activation.ResetCopiedSessionState {
+			s.mu.Unlock()
+			return fmt.Errorf("session state belongs to another sandbox")
+		}
 		if err := s.store.ResetForSandbox(sandboxID); err != nil {
 			s.mu.Unlock()
 			return err
@@ -211,10 +229,10 @@ func (s *Supervisor) Initialize(sandboxID string, runtimeGeneration int64, sandb
 		s.mu.Unlock()
 		return err
 	}
-	s.initialized = true
+	s.active = true
 	s.sandboxID = sandboxID
-	s.runtimeGeneration = runtimeGeneration
-	s.sandboxEnv = process.CloneEnvVars(sandboxEnv)
+	s.runtimeGeneration = activation.RuntimeGeneration
+	s.sandboxEnv = process.CloneEnvVars(activation.SandboxEnv)
 	sessions := make([]*managedSession, 0, len(s.sessions))
 	for _, managed := range s.sessions {
 		sessions = append(sessions, managed)
@@ -222,7 +240,7 @@ func (s *Supervisor) Initialize(sandboxID string, runtimeGeneration int64, sandb
 	s.mu.Unlock()
 
 	for _, managed := range sessions {
-		shouldStart, err := s.recoverPersistedSession(managed, runtimeGeneration)
+		shouldStart, err := s.recoverPersistedSession(managed, activation.RuntimeGeneration)
 		if err != nil {
 			return err
 		}
@@ -324,10 +342,10 @@ func (s *Supervisor) Create(spec SessionSpec, creationKey string) (*Session, boo
 	if creationKey != "" {
 		s.creationKeys[creationKey] = record.ID
 	}
-	initialized := s.initialized
+	active := s.active
 	s.mu.Unlock()
 
-	if initialized && spec.Lifecycle.DesiredState == DesiredStateRunning {
+	if active && spec.Lifecycle.DesiredState == DesiredStateRunning {
 		if err := s.startAttempt(managed, "created"); err != nil {
 			s.logger.Warn("Failed to start created session",
 				zap.String("session_id", record.ID),
@@ -818,11 +836,11 @@ func (s *Supervisor) Close() error {
 
 func (s *Supervisor) startAttempt(managed *managedSession, reason string) error {
 	s.mu.RLock()
-	initialized := s.initialized
+	active := s.active
 	runtimeGeneration := s.runtimeGeneration
 	sandboxEnv := process.CloneEnvVars(s.sandboxEnv)
 	s.mu.RUnlock()
-	if !initialized {
+	if !active {
 		return nil
 	}
 

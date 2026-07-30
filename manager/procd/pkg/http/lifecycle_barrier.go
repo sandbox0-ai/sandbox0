@@ -216,11 +216,10 @@ func procdRequestMutatesRuntime(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
 	}
-	path := strings.TrimRight(r.URL.Path, "/")
-	switch path {
-	case "/api/v1/lifecycle/barrier", "/api/v1/sandbox/pause", "/api/v1/sandbox/resume":
+	if procdLifecycleControlRequest(r) {
 		return false
 	}
+	path := strings.TrimRight(r.URL.Path, "/")
 	if !strings.HasPrefix(path, "/api/v1/") {
 		return false
 	}
@@ -231,5 +230,17 @@ func procdRequestMutatesRuntime(r *http.Request) bool {
 		return strings.HasSuffix(path, "/ws") || path == "/api/v1/functions/ws"
 	default:
 		return true
+	}
+}
+
+func procdLifecycleControlRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	switch strings.TrimRight(r.URL.Path, "/") {
+	case "/api/v1/lifecycle/barrier", "/api/v1/sandbox/pause", "/api/v1/sandbox/resume":
+		return true
+	default:
+		return false
 	}
 }

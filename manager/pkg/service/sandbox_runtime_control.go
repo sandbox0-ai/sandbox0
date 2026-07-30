@@ -238,7 +238,8 @@ func runtimeAssignmentObservation(pod *corev1.Pod, expectedRevision string) (rea
 		return false, false, "runtime observation does not match the assignment"
 	}
 	if observedState == runtimecontrol.ObservedFailed {
-		return false, true, runtimeProbeConditionMessage(pod)
+		failed, reason := runtimeProbeFailure(pod)
+		return false, failed, reason
 	}
 	if observedState != runtimecontrol.ObservedReady {
 		return false, false, fmt.Sprintf("runtime observation is %s", observedState)
@@ -247,6 +248,24 @@ func runtimeAssignmentObservation(pod *corev1.Pod, expectedRevision string) (rea
 		return false, false, "runtime readiness condition is not true"
 	}
 	return true, false, ""
+}
+
+func runtimeProbeFailure(pod *corev1.Pod) (bool, string) {
+	if pod != nil {
+		for i := range pod.Status.Conditions {
+			condition := &pod.Status.Conditions[i]
+			if condition.Type != v1alpha1.SandboxPodReadinessConditionType ||
+				condition.Status != corev1.ConditionFalse ||
+				condition.Reason != "RuntimeFailed" {
+				continue
+			}
+			if message := strings.TrimSpace(condition.Message); message != "" {
+				return true, message
+			}
+			return true, "runtime activation failed"
+		}
+	}
+	return false, "runtime failure condition is pending"
 }
 
 func runtimeProbeConditionMessage(pod *corev1.Pod) string {

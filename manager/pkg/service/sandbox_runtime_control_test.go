@@ -57,6 +57,13 @@ func TestRuntimeAssignmentObservationRequiresExactPublishedReadyState(t *testing
 			},
 			failed: true,
 		},
+		{
+			name: "runtime failure condition pending",
+			mutate: func(pod *corev1.Pod) {
+				pod.Annotations[runtimecontrol.AnnotationObservedState] = string(runtimecontrol.ObservedFailed)
+				setRuntimeTestCondition(pod, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionFalse, "RuntimeControlDisconnected", "runtime control stream is disconnected")
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

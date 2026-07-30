@@ -727,6 +727,101 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSLayerChain(t *testing.T) {
 	assert.Equal(t, "rootfs/child.tar", applyReq.Layers[1].Descriptor.ObjectKey)
 }
 
+func TestFinishRestoredSandboxRuntimeResetsSessionStateCopiedByFork(t *testing.T) {
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
+		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	const sandboxID = "forked-sandbox"
+	pod := rootFSTestPod("pod-1", sandboxID, "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	pod.Status.PodIP = "10.0.0.10"
+	state := rootFSTestLayerState()
+	state.SandboxID = sandboxID
+	for _, layer := range state.LayerChain {
+		layer.SourceSandboxID = "source-sandbox"
+	}
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{},
+		rootFSStates: map[string]*SandboxRootFSState{
+			sandboxID: state,
+		},
+	}
+	indexer := newClaimTestPodIndexer(t, pod)
+	client := fake.NewSimpleClientset(pod)
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(activePod *corev1.Pod) {
+		assert.Equal(t, "true", activePod.Annotations[runtimecontrol.AnnotationResetCopiedState])
+	})
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    corelisters.NewPodLister(indexer),
+		sandboxStore: store,
+		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled:         true,
+			CtldPort:            ctldPort,
+			RuntimeReadyTimeout: time.Second,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+	record := &SandboxRecord{
+		ID:                sandboxID,
+		TeamID:            "team-1",
+		UserID:            "user-1",
+		TemplateID:        "template-1",
+		TemplateName:      "template-1",
+		TemplateNamespace: "template-default",
+		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		Status:            SandboxStatusPaused,
+	}
+
+	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
+	require.NoError(t, err)
+}
+
+func TestCopiedSessionStateRequiresResetUsesRootFSHeadProvenance(t *testing.T) {
+	tests := []struct {
+		name      string
+		sandboxID string
+		state     *SandboxRootFSState
+		want      bool
+	}{
+		{name: "missing state", sandboxID: "sandbox-1"},
+		{
+			name:      "own head",
+			sandboxID: "sandbox-1",
+			state: &SandboxRootFSState{LayerChain: []*SandboxRootFSLayer{
+				{SourceSandboxID: "source-sandbox"},
+				{SourceSandboxID: "sandbox-1"},
+			}},
+		},
+		{
+			name:      "copied head",
+			sandboxID: "sandbox-1",
+			state: &SandboxRootFSState{LayerChain: []*SandboxRootFSLayer{
+				{SourceSandboxID: "source-sandbox"},
+			}},
+			want: true,
+		},
+		{
+			name:      "legacy head without provenance fails closed",
+			sandboxID: "sandbox-1",
+			state:     &SandboxRootFSState{LayerChain: []*SandboxRootFSLayer{{}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := copiedSessionStateRequiresReset(tt.sandboxID, tt.state); got != tt.want {
+				t.Fatalf("copiedSessionStateRequiresReset() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T) {
 	withClaimTestPublicKey(t)
 

@@ -424,21 +424,22 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if strings.TrimSpace(record.OwnerKind) != "" {
 		req.Metadata = &ClaimMetadata{OwnerKind: record.OwnerKind}
 	}
-	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, false)
-	if err != nil {
-		return pod, err
-	}
-	assignedPodUID := pod.UID
 	rootFSState, err := s.latestRootFSState(ctx, record.ID)
 	if err != nil {
 		return pod, fmt.Errorf("load rootfs checkpoint: %w", err)
 	}
+	resetCopiedSessionState := copiedSessionStateRequiresReset(record.ID, rootFSState)
+	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
+	if err != nil {
+		return pod, err
+	}
+	assignedPodUID := pod.UID
 	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState, "")
 	if err != nil {
 		return pod, err
 	}
 	if pod.UID != assignedPodUID {
-		pod, runtimeRevision, err = s.publishRuntimeAssignment(ctx, pod, false)
+		pod, runtimeRevision, err = s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
 		if err != nil {
 			return pod, err
 		}
@@ -461,6 +462,22 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		)
 	}
 	return pod, nil
+}
+
+// copiedSessionStateRequiresReset derives the one-time reset intent from the
+// authoritative rootfs head provenance. Once the target sandbox saves its own
+// layer, later resumes preserve that sandbox's session state.
+func copiedSessionStateRequiresReset(sandboxID string, state *SandboxRootFSState) bool {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || state == nil || len(state.LayerChain) == 0 {
+		return false
+	}
+	head := state.LayerChain[len(state.LayerChain)-1]
+	if head == nil {
+		return false
+	}
+	sourceSandboxID := strings.TrimSpace(head.SourceSandboxID)
+	return sourceSandboxID != "" && sourceSandboxID != sandboxID
 }
 
 func (s *SandboxService) templateForSandboxRecord(record *SandboxRecord) (*v1alpha1.SandboxTemplate, error) {

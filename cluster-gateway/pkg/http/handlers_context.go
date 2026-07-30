@@ -233,6 +233,9 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 		return nil, errors.New("sandbox auto_resume is disabled")
 	}
 	if sandboxNeedsRuntime(sandbox) {
+		if !s.enforceRuntimeStartAdmission(c, authCtx.TeamID) {
+			return nil, errors.New("sandbox resume is restricted by admission policy")
+		}
 		if err := s.managerClient.ResumeSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
 			s.logger.Warn("Resume sandbox failed",
 				zap.String("sandbox_id", sandboxID),

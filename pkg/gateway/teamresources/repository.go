@@ -511,7 +511,7 @@ func compactSchemas(schemas []string) []string {
 
 func isIgnoredDiscoveredTable(_ string, table string) bool {
 	switch table {
-	case "team_members":
+	case "team_members", "team_admission_states":
 		return true
 	default:
 		return false

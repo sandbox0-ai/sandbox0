@@ -37,6 +37,7 @@ const (
 	CodeConflict            = "conflict"
 	CodeTemplateNotReady    = "template_not_ready"
 	CodeSandboxResumeFailed = "sandbox_resume_failed"
+	CodeAdmissionRestricted = "admission_restricted"
 	CodeUnavailable         = "unavailable"
 	CodeInternal            = "internal_error"
 	CodeNotLicensed         = "feature_not_licensed"

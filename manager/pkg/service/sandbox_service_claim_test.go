@@ -236,7 +236,7 @@ func TestClaimRequestDoesNotAcceptRuntimeMetadataFromJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{
 		"template":"template-a",
 		"metadata":{
-			"owner_kind":"managed-agent"
+			"owner_kind":"automation"
 		}
 	}`), &req); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
@@ -280,7 +280,7 @@ func TestClaimIdlePodAppliesRuntimeOwnerMetadata(t *testing.T) {
 		TeamID: "team-a",
 		UserID: "user-a",
 		Metadata: &ClaimMetadata{
-			OwnerKind: "managed-agent",
+			OwnerKind: "automation",
 		},
 	})
 	if err != nil {
@@ -1005,13 +1005,13 @@ func TestCreateNewPodDefersNetworkApplyUntilPodHasNetworkIdentity(t *testing.T) 
 func TestClaimSandboxDeletesColdPodAfterNetworkApplyFailure(t *testing.T) {
 	withClaimTestPublicKey(t)
 
-	templateNamespace, err := naming.TemplateNamespaceForBuiltin("managed-agent-claude")
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("automation-claude")
 	if err != nil {
 		t.Fatalf("template namespace: %v", err)
 	}
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "managed-agent-claude",
+			Name:      "automation-claude",
 			Namespace: templateNamespace,
 		},
 		Spec: v1alpha1.SandboxTemplateSpec{
@@ -1033,7 +1033,7 @@ func TestClaimSandboxDeletesColdPodAfterNetworkApplyFailure(t *testing.T) {
 		logger:               zap.NewNop(),
 	}
 
-	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{Template: "managed-agent-claude", TeamID: "team-a", UserID: "user-a"})
+	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{Template: "automation-claude", TeamID: "team-a", UserID: "user-a"})
 	if err == nil {
 		t.Fatal("ClaimSandbox() error = nil, want network apply failure")
 	}
@@ -1149,7 +1149,7 @@ func TestCreateNewPodAppliesRuntimeOwnerMetadata(t *testing.T) {
 		TeamID: "team-a",
 		UserID: "user-a",
 		Metadata: &ClaimMetadata{
-			OwnerKind: "managed-agent",
+			OwnerKind: "automation",
 		},
 	})
 	if err != nil {
@@ -1574,13 +1574,13 @@ func TestInitializeClaimRootFSFromSnapshotRejectsInternalTemplateBuildSnapshot(t
 
 func TestClaimSandboxCleansColdPodWhenClaimReadinessFails(t *testing.T) {
 	withClaimTestPublicKey(t)
-	templateNamespace, err := naming.TemplateNamespaceForBuiltin("managed-agent-claude")
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("automation-claude")
 	if err != nil {
 		t.Fatalf("template namespace: %v", err)
 	}
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "managed-agent-claude",
+			Name:      "automation-claude",
 			Namespace: templateNamespace,
 		},
 		Spec: v1alpha1.SandboxTemplateSpec{
@@ -1606,7 +1606,7 @@ func TestClaimSandboxCleansColdPodWhenClaimReadinessFails(t *testing.T) {
 		logger: zap.NewNop(),
 	}
 
-	_, err = svc.ClaimSandbox(ctx, &ClaimRequest{Template: "managed-agent-claude", TeamID: "team-a", UserID: "user-a"})
+	_, err = svc.ClaimSandbox(ctx, &ClaimRequest{Template: "automation-claude", TeamID: "team-a", UserID: "user-a"})
 	if err == nil {
 		t.Fatal("ClaimSandbox() error = nil, want claim readiness failure")
 	}
@@ -1624,14 +1624,14 @@ func TestObserveClaimPhaseRecordsMetric(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}
 
-	svc.observeClaimPhase("managed-agents", "cold", "wait_for_pod_claim_ready", time.Now().Add(-20*time.Millisecond), nil)
+	svc.observeClaimPhase("automation", "cold", "wait_for_pod_claim_ready", time.Now().Add(-20*time.Millisecond), nil)
 
 	families, err := registry.Gather()
 	if err != nil {
 		t.Fatalf("gather metrics: %v", err)
 	}
 	metric := findMetric(families, "manager_sandbox_claim_phase_duration_seconds", map[string]string{
-		"template": "managed-agents",
+		"template": "automation",
 		"type":     "cold",
 		"phase":    "wait_for_pod_claim_ready",
 		"status":   "success",
@@ -1651,14 +1651,14 @@ func TestObservePodNetworkIdentityStageRecordsMetric(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}
 
-	svc.observePodNetworkIdentityStage("managed-agents", "pod_ip_assigned", "timeout", "pod IP is not assigned", time.Now().Add(-20*time.Millisecond))
+	svc.observePodNetworkIdentityStage("automation", "pod_ip_assigned", "timeout", "pod IP is not assigned", time.Now().Add(-20*time.Millisecond))
 
 	families, err := registry.Gather()
 	if err != nil {
 		t.Fatalf("gather metrics: %v", err)
 	}
 	metric := findMetric(families, "manager_pod_network_identity_stage_duration_seconds", map[string]string{
-		"template": "managed-agents",
+		"template": "automation",
 		"stage":    "pod_ip_assigned",
 		"status":   "timeout",
 		"reason":   "ip_unassigned",
@@ -1677,12 +1677,12 @@ func TestObservePodNetworkIdentityStageRecordsMetric(t *testing.T) {
 func TestPodLifecycleStageTrackerRecordsCompletedStagesOnce(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}
-	tracker := newPodLifecycleStageTracker(svc, "managed-agents")
+	tracker := newPodLifecycleStageTracker(svc, "automation")
 	createdAt := time.Now().UTC().Add(-time.Minute)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "cold-pod",
-			Namespace:         "tpl-managed-agents",
+			Namespace:         "tpl-automation",
 			CreationTimestamp: metav1.NewTime(createdAt),
 		},
 		Status: corev1.PodStatus{
@@ -1741,7 +1741,7 @@ func TestPodLifecycleStageTrackerRecordsCompletedStagesOnce(t *testing.T) {
 	}
 	for stage, wantSeconds := range want {
 		metric := findMetric(families, "manager_pod_lifecycle_stage_duration_seconds", map[string]string{
-			"template": "managed-agents",
+			"template": "automation",
 			"stage":    stage,
 		})
 		if metric == nil || metric.GetHistogram() == nil {
@@ -1760,14 +1760,14 @@ func TestObserveIdleClaimRecordsMetric(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}
 
-	svc.observeIdleClaim("managed-agents", "success")
+	svc.observeIdleClaim("automation", "success")
 
 	families, err := registry.Gather()
 	if err != nil {
 		t.Fatalf("gather metrics: %v", err)
 	}
 	metric := findMetric(families, "manager_sandbox_idle_claims_total", map[string]string{
-		"template": "managed-agents",
+		"template": "automation",
 		"result":   "success",
 	})
 	if metric == nil || metric.GetCounter() == nil {
@@ -2529,11 +2529,11 @@ func assertClaimOwnerMetadata(t *testing.T, pod *corev1.Pod) {
 	if pod == nil {
 		t.Fatal("pod is nil")
 	}
-	if got := pod.Labels[controller.LabelOwnerKind]; got != "managed-agent" {
-		t.Fatalf("owner kind label = %q, want managed-agent", got)
+	if got := pod.Labels[controller.LabelOwnerKind]; got != "automation" {
+		t.Fatalf("owner kind label = %q, want automation", got)
 	}
-	if got := pod.Annotations[controller.AnnotationOwnerKind]; got != "managed-agent" {
-		t.Fatalf("owner kind annotation = %q, want managed-agent", got)
+	if got := pod.Annotations[controller.AnnotationOwnerKind]; got != "automation" {
+		t.Fatalf("owner kind annotation = %q, want automation", got)
 	}
 }
 

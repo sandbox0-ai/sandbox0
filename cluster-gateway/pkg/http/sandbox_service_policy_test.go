@@ -22,6 +22,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -529,6 +530,51 @@ func TestSandboxFunctionServiceExecutesAfterPausedAutoResume(t *testing.T) {
 	}
 }
 
+func TestSandboxFunctionServiceAutoResumeHonorsAdmission(t *testing.T) {
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("restricted exposure reached procd")
+	}))
+	defer procd.Close()
+
+	port := serverPort(t, procd.URL)
+	activeSandbox := newFunctionServiceSandbox(procd.URL, port)
+	activeSandbox.Status = mgr.SandboxStatusRunning
+	activeSandbox.Services[0].Ingress.Routes[0].Resume = true
+	managerURL, resumed := newPausedFunctionManager(t, activeSandbox)
+	gateway := newSandboxServiceExposureTestServerWithAdmission(
+		t,
+		managerURL,
+		&runtimeAdmissionStore{
+			found:  true,
+			record: admission.Record{State: admission.StateRestricted, Version: 4},
+		},
+	)
+	gatewayServer := httptest.NewServer(gateway)
+	defer gatewayServer.Close()
+
+	request := newGatewayRequest(
+		t,
+		http.MethodPost,
+		gatewayServer.URL,
+		fmt.Sprintf("sb-demo--p%d.aws-us-east-1.sandbox0.app", port),
+		"/events/resume",
+	)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || resumed.Load() {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf(
+			"exposure admission status=%d resumed=%v body=%s",
+			response.StatusCode,
+			resumed.Load(),
+			string(body),
+		)
+	}
+}
+
 func TestSandboxFunctionServiceProxiesWebSocketAfterPausedAutoResume(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -963,6 +1009,14 @@ func newSandboxServiceExposureTestServer(t *testing.T, sandbox *mgr.Sandbox) htt
 }
 
 func newSandboxServiceExposureTestServerWithManagerURL(t *testing.T, managerURL string) http.Handler {
+	return newSandboxServiceExposureTestServerWithAdmission(t, managerURL, nil)
+}
+
+func newSandboxServiceExposureTestServerWithAdmission(
+	t *testing.T,
+	managerURL string,
+	store admission.Store,
+) http.Handler {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -989,6 +1043,7 @@ func newSandboxServiceExposureTestServerWithManagerURL(t *testing.T, managerURL 
 		managerClient:         client.NewManagerClient(managerURL, gen, zap.NewNop(), time.Second),
 		internalAuthGen:       gen,
 		sandboxServiceLimiter: ratelimit.NewMemoryLimiter(ratelimit.MemoryConfig{}),
+		admissionStore:        store,
 	}
 	router := gin.New()
 	router.NoRoute(s.handlePublicExposureNoRoute)

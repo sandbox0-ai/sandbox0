@@ -68,6 +68,12 @@ type GatewayConfig struct {
 	// +kubebuilder:default=true
 	RateLimitFailOpen bool `yaml:"rate_limit_fail_open" json:"-"`
 
+	// AdmissionRequireState rejects usage-starting requests until a team
+	// admission record has been projected into the region database.
+	// +optional
+	// +kubebuilder:default=false
+	AdmissionRequireState bool `yaml:"admission_require_state" json:"admissionRequireState"`
+
 	// Identity and Teams
 	// +optional
 	// +kubebuilder:default="Personal Team"

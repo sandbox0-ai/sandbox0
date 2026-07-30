@@ -55,6 +55,14 @@ type GatewayConfig struct {
 	RateLimitRedisTimeout    metav1.Duration `json:"-"`
 	RateLimitFailOpen        bool            `json:"-"`
 
+	// AdmissionRequireState rejects usage-starting requests until a team
+	// admission record has been projected into the region database. Hosted
+	// prepaid deployments should enable it; self-hosted deployments default to
+	// allowing teams without an external billing projection.
+	// +optional
+	// +kubebuilder:default=false
+	AdmissionRequireState bool `json:"admissionRequireState,omitempty"`
+
 	// Identity and Teams
 	// +optional
 	// +kubebuilder:default="Personal Team"

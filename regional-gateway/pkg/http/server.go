@@ -14,6 +14,7 @@ import (
 	internalmiddleware "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -38,11 +39,18 @@ type ServerOption func(*serverOptions)
 
 type serverOptions struct {
 	meteringReader gatewayhandlers.MeteringReader
+	admissionStore admission.Store
 }
 
 func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
 	return func(opts *serverOptions) {
 		opts.meteringReader = reader
+	}
+}
+
+func WithAdmissionStore(store admission.Store) ServerOption {
+	return func(opts *serverOptions) {
+		opts.admissionStore = store
 	}
 }
 
@@ -62,6 +70,7 @@ type Server struct {
 	logger               *zap.Logger
 	internalAuthGen      *internalauth.Generator
 	meteringHandler      *gatewayhandlers.MeteringHandler
+	admissionStore       admission.Store
 	obsProvider          *observability.Provider
 	httpClient           *http.Client
 
@@ -212,6 +221,10 @@ func NewServer(
 		return nil, fmt.Errorf("create team quota rate limiter: %w", err)
 	}
 	requestLogger := middleware.NewRequestLogger(logger)
+	admissionStore := options.admissionStore
+	if admissionStore == nil && pool != nil {
+		admissionStore = admission.NewRepository(pool)
+	}
 
 	// Initialize built-in auth provider
 	var builtinProvider *builtin.Provider
@@ -257,6 +270,7 @@ func NewServer(
 		logger:                logger,
 		internalAuthGen:       internalAuthGen,
 		meteringHandler:       gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger),
+		admissionStore:        admissionStore,
 		obsProvider:           obsProvider,
 		httpClient:            httpClient,
 		clusterGatewayProxies: make(map[string]*proxy.Router),
@@ -305,6 +319,7 @@ func (s *Server) setupRoutes() {
 
 	s.setupPublicRoutes()
 	s.setupMeteringRoutes()
+	s.setupAdmissionRoutes()
 	s.setupInternalSSHRoutes()
 
 	// ===== API Proxy Routes =====
@@ -315,6 +330,7 @@ func (s *Server) setupRoutes() {
 		api.Use(s.authMiddleware.Authenticate())
 		api.Use(attachAuditCorrelation())
 		api.Use(s.rateLimiter.RateLimit())
+		api.Use(admission.NewUsageMiddleware(s.admissionStore, s.logger, s.cfg.AdmissionRequireState))
 
 		usage := api.Group("/v1/usage")
 		usage.Use(s.requireTeamContextForTeamScopedAPI())
@@ -371,6 +387,14 @@ func (s *Server) setupRoutes() {
 	// Unmatched API routes fall back to the default cluster-gateway. Everything
 	// else goes through the public exposure fallback.
 	s.router.NoRoute(s.handleNoRoute)
+}
+
+func (s *Server) setupAdmissionRoutes() {
+	handler := admission.NewHandler(s.admissionStore, s.logger)
+	internal := s.router.Group("/internal/v1")
+	internal.Use(s.authMiddleware.Authenticate())
+	internal.Use(s.authMiddleware.RequireSystemAdmin())
+	internal.PUT("/teams/:team_id/admission-state", handler.Put)
 }
 
 func (s *Server) setupInternalSSHRoutes() {

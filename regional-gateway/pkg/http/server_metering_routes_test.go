@@ -35,6 +35,17 @@ func TestSetupMeteringRoutesMountsRegionScopedEndpoints(t *testing.T) {
 	}
 }
 
+func TestSetupAdmissionRoutesMountsRegionScopedEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := testMeteringRouteServer()
+	server.setupAdmissionRoutes()
+
+	if !hasRoute(server.router, http.MethodPut, "/internal/v1/teams/:team_id/admission-state") {
+		t.Fatal("expected team admission state route to be mounted")
+	}
+}
+
 func TestSetupRoutesExposesTeamScopedUsageAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger := zap.NewNop()

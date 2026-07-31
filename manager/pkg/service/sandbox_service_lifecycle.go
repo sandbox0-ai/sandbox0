@@ -128,8 +128,6 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 		case SandboxStatusPaused:
 			status = SandboxStatusPaused
 			return nil
-		case SandboxStatusStarting:
-			return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("sandbox lifecycle operation %q is in progress", record.Status))
 		}
 
 		pod, err := s.getSandboxPod(lockCtx, sandboxID)
@@ -145,6 +143,18 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 		}
 		generation := runtimeGenerationFromPod(pod)
 		status = record.Status
+		if record.Status == SandboxStatusStarting {
+			// Without an active resume transaction, the Pod is authoritative for
+			// recovering a record left in starting by a timed-out resume request.
+			observedStatus := s.podToSandboxStatus(pod)
+			if observedStatus != SandboxStatusRunning {
+				return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("sandbox runtime is still %q", observedStatus))
+			}
+			if err := tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, observedStatus, generation, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt), sandboxRuntimeMetadataFromPod(pod)); err != nil {
+				return err
+			}
+			status = observedStatus
+		}
 		source := strings.TrimSpace(opts.source)
 		if source == "" {
 			source = SandboxLifecycleSourceManual

@@ -56,6 +56,84 @@ func TestReserveIdleClaimCandidateAssignsDistinctPodsConcurrently(t *testing.T) 
 	}
 }
 
+func TestReserveIdleClaimCandidatePrefersMatchingNodeThenFallsBack(t *testing.T) {
+	fixedNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-fixed",
+		Labels: map[string]string{
+			"sandbox0.ai/capacity-type": "fixed",
+		},
+	}}
+	burstNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-burst",
+		Labels: map[string]string{
+			"sandbox0.ai/capacity-type": "burst",
+		},
+	}}
+	fixedPod := newClaimTestPod("ns-a", "idle-fixed", "template-a", true)
+	fixedPod.Spec.NodeName = fixedNode.Name
+	fixedPod.UID = types.UID("uid-fixed")
+	burstPod := newClaimTestPod("ns-a", "idle-burst", "template-a", true)
+	burstPod.Spec.NodeName = burstNode.Name
+	burstPod.UID = types.UID("uid-burst")
+
+	service := &SandboxService{
+		nodeLister: newClaimTestNodeLister(t, fixedNode, burstNode),
+		config: SandboxServiceConfig{PreferredNodeSelector: map[string]string{
+			"sandbox0.ai/capacity-type": "fixed",
+		}},
+	}
+
+	first := service.reserveIdleClaimCandidate([]*corev1.Pod{burstPod, fixedPod})
+	if first == nil || first.Name != fixedPod.Name {
+		t.Fatalf("first candidate = %#v, want fixed pod", first)
+	}
+	second := service.reserveIdleClaimCandidate([]*corev1.Pod{burstPod, fixedPod})
+	if second == nil || second.Name != burstPod.Name {
+		t.Fatalf("second candidate = %#v, want burst fallback", second)
+	}
+}
+
+func TestReserveIdleClaimCandidateFallsBackWhenPreferredNodeIsUnknown(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "idle-a", "template-a", true)
+	pod.Spec.NodeName = "node-missing"
+	service := &SandboxService{
+		nodeLister: newClaimTestNodeLister(t),
+		config: SandboxServiceConfig{PreferredNodeSelector: map[string]string{
+			"sandbox0.ai/capacity-type": "fixed",
+		}},
+	}
+
+	if selected := service.reserveIdleClaimCandidate([]*corev1.Pod{pod}); selected != pod {
+		t.Fatalf("candidate = %#v, want fallback pod", selected)
+	}
+}
+
+func TestIdleClaimCandidateRequiresPreferredLabelPresence(t *testing.T) {
+	labeledNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name:   "node-labeled",
+		Labels: map[string]string{"sandbox0.ai/fixed": ""},
+	}}
+	unlabeledNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-unlabeled"}}
+	labeledPod := newClaimTestPod("ns-a", "idle-labeled", "template-a", true)
+	labeledPod.Spec.NodeName = labeledNode.Name
+	unlabeledPod := newClaimTestPod("ns-a", "idle-unlabeled", "template-a", true)
+	unlabeledPod.Spec.NodeName = unlabeledNode.Name
+
+	service := &SandboxService{
+		nodeLister: newClaimTestNodeLister(t, labeledNode, unlabeledNode),
+		config: SandboxServiceConfig{PreferredNodeSelector: map[string]string{
+			"sandbox0.ai/fixed": "",
+		}},
+	}
+
+	if !service.idleClaimCandidateMatchesPreferredNode(labeledPod) {
+		t.Fatal("node with an empty-valued preferred label should match")
+	}
+	if service.idleClaimCandidateMatchesPreferredNode(unlabeledPod) {
+		t.Fatal("node without the preferred label should not match")
+	}
+}
+
 func TestClaimIdlePodAvoidsDuplicateCandidatesWithStaleInformer(t *testing.T) {
 	const count = 32
 	template := &v1alpha1.SandboxTemplate{

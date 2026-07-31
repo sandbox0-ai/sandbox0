@@ -236,6 +236,13 @@ type SandboxNodePlacementConfig struct {
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
+	// PreferredNodeSelector gives manager-created sandbox Pods a soft scheduling
+	// preference for nodes matching all labels. Hot claims use the same selector
+	// when choosing among already scheduled idle Pods. Node-local services do not
+	// consume this preference.
+	// +optional
+	PreferredNodeSelector map[string]string `json:"preferredNodeSelector,omitempty"`
+
 	// Tolerations allow sandbox workloads and node-local sandbox services to run
 	// on tainted sandbox nodes.
 	// +optional

@@ -544,7 +544,25 @@ spec:
                       burstValue: 104857600
 ```
 
-Use `spec.sandboxNodePlacement` for the shared node placement consumed by sandbox template Pods and the ctld HA pair. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready.
+Use `spec.sandboxNodePlacement.nodeSelector` and `tolerations` for the hard placement shared by sandbox template Pods and the ctld HA pair. `infra-operator` owns `sandbox0.ai/data-plane-ready` and adds it to sandbox Pod placement after the required node-local components are Ready.
+
+`preferredNodeSelector` is different: it is a soft preference used only for manager-created sandbox Pods. The manager also uses the same selector when a hot claim chooses among already scheduled idle Pods. This lets a fixed-capacity pool absorb claims first while preserving an autoscaled pool as fallback:
+
+```yaml
+spec:
+    sandboxNodePlacement:
+        nodeSelector:
+            sandbox0.ai/node-role: sandbox
+        preferredNodeSelector:
+            sandbox0.ai/capacity-type: fixed
+        tolerations:
+            - key: sandbox0.ai/sandbox
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+```
+
+Do not put a fallback capacity label such as `sandbox0.ai/capacity-type: fixed` in `nodeSelector`; that would turn the preference into a hard requirement and prevent scheduling onto burst nodes.
 
 <Callout variant="info">
 Use the generated reference below for exact field names, defaults, enums, and required flags. Use the sample manifests for operator-friendly starting points.
@@ -566,7 +584,7 @@ The reference below is generated from the `Sandbox0Infra` CRD schema produced by
 - Prefer external PostgreSQL and external object storage for serious deployments.
 - Configure `spec.storage` and `spec.storage.runtime` for volume and snapshot features.
 - Configure `spec.network` for sandbox network policy; enforcement runs in the active ctld process on Linux nodes.
-- Use `sandboxNodePlacement` to keep sandbox workloads and the node-local ctld pair on the same node set.
+- Use `sandboxNodePlacement.nodeSelector` and `tolerations` to keep sandbox workloads and the node-local ctld pair on the same node set. Use `preferredNodeSelector` only for soft sandbox-Pod placement and hot-claim ordering.
 - Treat `sandbox0.ai/data-plane-ready` as operator-owned; use your own labels under `sandboxNodePlacement` and let `infra-operator` manage readiness.
 - If sandbox workloads use `gvisor` or `kata`, keep ctld on a host-compatible runtime such as the cluster default runtime.
 - `services.manager.config.sandboxRuntimeClassName` references an existing Kubernetes `RuntimeClass`; it does not install the node-level containerd handler.

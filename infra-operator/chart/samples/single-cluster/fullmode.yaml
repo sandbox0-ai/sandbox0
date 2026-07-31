@@ -148,6 +148,10 @@ spec:
   #sandboxNodePlacement:
   #  nodeSelector:
   #    sandbox0.ai/node-role: sandbox
+  #  # Soft preference for new sandbox Pods and existing idle-Pod hot claims.
+  #  # Omit this when every matching sandbox node has equal placement cost.
+  #  preferredNodeSelector:
+  #    sandbox0.ai/capacity-type: fixed
   #  tolerations:
   #    - key: sandbox0.ai/sandbox
   #      operator: Equal

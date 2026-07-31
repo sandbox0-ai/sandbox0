@@ -66,6 +66,25 @@ sandbox_max_memory: 16Gi
 	}
 }
 
+func TestLoadManagerConfigPreservesPreferredNodeSelector(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manager.yaml")
+	if err := os.WriteFile(path, []byte(`
+sandbox_pod_placement:
+  preferred_node_selector:
+    sandbox0.ai/capacity-type: fixed
+`), 0o600); err != nil {
+		t.Fatalf("write manager config: %v", err)
+	}
+
+	cfg, err := loadManagerConfig(path)
+	if err != nil {
+		t.Fatalf("loadManagerConfig: %v", err)
+	}
+	if got := cfg.SandboxPodPlacement.PreferredNodeSelector["sandbox0.ai/capacity-type"]; got != "fixed" {
+		t.Fatalf("preferred capacity type = %q, want fixed", got)
+	}
+}
+
 func TestLoadManagerConfigDefaultsLeaderElectionOn(t *testing.T) {
 	cfg, err := loadManagerConfig("")
 	if err != nil {

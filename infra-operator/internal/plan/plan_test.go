@@ -29,6 +29,9 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 				NodeSelector: map[string]string{
 					"sandbox0.ai/node-role": "shared",
 				},
+				PreferredNodeSelector: map[string]string{
+					"sandbox0.ai/capacity-type": "fixed",
+				},
 				Tolerations: []corev1.Toleration{
 					{
 						Key:      "sandbox0.ai/sandbox",
@@ -123,6 +126,9 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	}
 	if len(compiled.Manager.SandboxPodPlacement.Tolerations) != 1 || compiled.Manager.SandboxPodPlacement.Tolerations[0].Key != "sandbox0.ai/sandbox" {
 		t.Fatalf("expected shared manager sandbox tolerations, got %#v", compiled.Manager.SandboxPodPlacement.Tolerations)
+	}
+	if got := compiled.Manager.SandboxPodPlacement.PreferredNodeSelector["sandbox0.ai/capacity-type"]; got != "fixed" {
+		t.Fatalf("expected fixed manager sandbox preference, got %q", got)
 	}
 	if !compiled.Scheduler.Enabled {
 		t.Fatal("expected scheduler plan to be enabled")

@@ -113,6 +113,7 @@ func Registry() []Entry {
 		exact("spec.network.config.egressAuthResolverUrl", "plan", []string{"ctld"}, []string{"InfraPlan.Network.EgressAuthResolverURL"}, UpdateSemanticsDeclarative, "Explicit resolver URL overrides the manager-derived default."),
 
 		prefix("spec.sandboxNodePlacement", "plan", []string{"manager", "ctld"}, []string{"InfraPlan.Manager.SandboxPodPlacement", "ctld workload placement"}, UpdateSemanticsDeclarative, "Shared node placement for sandbox workloads and node-local services."),
+		exact("spec.sandboxNodePlacement.preferredNodeSelector", "plan", []string{"manager"}, []string{"InfraPlan.Manager.SandboxPodPlacement"}, UpdateSemanticsDeclarative, "Soft node preference for new sandbox Pods and existing idle-Pod hot claims."),
 		exact("spec.region", "plan", []string{"global-gateway", "regional-gateway", "manager", "ctld"}, []string{"InfraPlan.Manager.RegionID", "InfraPlan.Network.RegionID"}, UpdateSemanticsDeclarative, "Region identifier propagated into control-plane and data-plane services."),
 
 		prefix("spec.publicExposure", "plan", []string{"global-gateway", "cluster-gateway", "manager"}, nil, UpdateSemanticsDeclarative, "Shared public-exposure settings consumed by gateway and manager runtime config."),

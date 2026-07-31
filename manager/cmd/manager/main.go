@@ -447,6 +447,7 @@ func main() {
 		ProcdHTTPClient:                     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
 		RuntimeReadyTimeout:                 cfg.RuntimeReadyTimeout.Duration,
 		AllowColdStartWithoutReadyDataPlane: cfg.AllowColdStartWithoutReadyDataPlane,
+		PreferredNodeSelector:               cfg.SandboxPodPlacement.PreferredNodeSelector,
 		RootFSSquashDisabled:                cfg.RootFSMaintenance.SquashDisabled,
 		RootFSSquashMaxChainDepth:           cfg.RootFSMaintenance.SquashMaxChainDepth,
 		RootFSSquashMaxChainBytes:           cfg.RootFSMaintenance.SquashMaxChainBytes,

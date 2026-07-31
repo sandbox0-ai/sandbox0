@@ -93,6 +93,7 @@ type SandboxServiceConfig struct {
 	ProcdHTTPClient                     *http.Client
 	RuntimeReadyTimeout                 time.Duration
 	AllowColdStartWithoutReadyDataPlane bool
+	PreferredNodeSelector               map[string]string
 	RootFSSquashDisabled                bool
 	RootFSSquashMaxChainDepth           int
 	RootFSSquashMaxChainBytes           int64

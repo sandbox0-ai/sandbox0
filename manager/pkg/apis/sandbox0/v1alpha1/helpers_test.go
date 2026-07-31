@@ -39,6 +39,43 @@ sandbox_pod_placement:
 	}
 }
 
+func TestBuildPodSpecsApplyPreferredNodeSelector(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+sandbox_pod_placement:
+  preferred_node_selector:
+    sandbox0.ai/capacity-type: fixed
+    topology.kubernetes.io/zone: us-east1-b
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	for name, spec := range map[string]corev1.PodSpec{
+		"cold": BuildPodSpec(newTestTemplate()),
+		"idle": BuildIdlePodSpec(newTestTemplate()),
+	} {
+		if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil {
+			t.Fatalf("%s spec missing node affinity", name)
+		}
+		terms := spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+		if len(terms) != 1 {
+			t.Fatalf("%s preferred terms = %d, want 1", name, len(terms))
+		}
+		if terms[0].Weight != defaultPreferredNodeAffinityWeight {
+			t.Fatalf("%s preferred weight = %d, want %d", name, terms[0].Weight, defaultPreferredNodeAffinityWeight)
+		}
+		expressions := terms[0].Preference.MatchExpressions
+		if len(expressions) != 2 {
+			t.Fatalf("%s match expressions = %#v, want 2", name, expressions)
+		}
+		if expressions[0].Key != "sandbox0.ai/capacity-type" || len(expressions[0].Values) != 1 || expressions[0].Values[0] != "fixed" {
+			t.Fatalf("%s first match expression = %#v", name, expressions[0])
+		}
+		if expressions[1].Key != "topology.kubernetes.io/zone" || len(expressions[1].Values) != 1 || expressions[1].Values[0] != "us-east1-b" {
+			t.Fatalf("%s second match expression = %#v", name, expressions[1])
+		}
+	}
+}
+
 func TestBuildPodSpecKeepsInjectedPlacementAuthoritative(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

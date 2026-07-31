@@ -1200,6 +1200,15 @@ func ResolveSandboxNodePlacement(infra *infrav1alpha1.Sandbox0Infra) (map[string
 	return nil, nil
 }
 
+// ResolveSandboxPodPreferredNodeSelector returns the soft node preference used
+// only by manager-created sandbox Pods and hot-claim candidate selection.
+func ResolveSandboxPodPreferredNodeSelector(infra *infrav1alpha1.Sandbox0Infra) map[string]string {
+	if infra == nil || infra.Spec.SandboxNodePlacement == nil {
+		return nil
+	}
+	return cloneNodeSelector(infra.Spec.SandboxNodePlacement.PreferredNodeSelector)
+}
+
 func cloneNodeSelector(src map[string]string) map[string]string {
 	if len(src) == 0 {
 		return nil

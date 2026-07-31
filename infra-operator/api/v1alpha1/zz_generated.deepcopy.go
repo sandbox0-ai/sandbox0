@@ -2263,6 +2263,13 @@ func (in *SandboxNodePlacementConfig) DeepCopyInto(out *SandboxNodePlacementConf
 			(*out)[key] = val
 		}
 	}
+	if in.PreferredNodeSelector != nil {
+		in, out := &in.PreferredNodeSelector, &out.PreferredNodeSelector
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.Tolerations != nil {
 		in, out := &in.Tolerations, &out.Tolerations
 		*out = make([]v1.Toleration, len(*in))

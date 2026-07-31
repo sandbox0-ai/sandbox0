@@ -112,6 +112,46 @@ func TestClaimConfigForPersistence(t *testing.T) {
 	})
 }
 
+func TestDisabledExpirationResponsesMarshalNull(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "sandbox", value: &Sandbox{}},
+		{name: "sandbox summary", value: &SandboxSummary{}},
+		{name: "refresh", value: &RefreshResponse{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := json.Marshal(tt.value)
+			require.NoError(t, err)
+
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(payload, &fields))
+			assert.Equal(t, "null", string(fields["expires_at"]))
+			assert.Equal(t, "null", string(fields["hard_expires_at"]))
+		})
+	}
+}
+
+func TestGetSandboxStatusDisabledExpirationFieldsAreNull(t *testing.T) {
+	pod := testSandboxPod()
+	svc, _ := newSandboxServiceForTTLTests(t, pod, 0)
+
+	status, err := svc.GetSandboxStatus(context.Background(), pod.Name)
+	require.NoError(t, err)
+	assert.Nil(t, status["expires_at"])
+	assert.Nil(t, status["hard_expires_at"])
+
+	payload, err := json.Marshal(status)
+	require.NoError(t, err)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(payload, &fields))
+	assert.Equal(t, "null", string(fields["expires_at"]))
+	assert.Equal(t, "null", string(fields["hard_expires_at"]))
+}
+
 func TestUpdateSandboxZeroTTLDisablesExpirations(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Annotations[controller.AnnotationExpiresAt] = "2026-03-07T12:05:00Z"
@@ -125,8 +165,8 @@ func TestUpdateSandboxZeroTTLDisablesExpirations(t *testing.T) {
 		HardTTL: int32Ptr(0),
 	})
 	require.NoError(t, err)
-	assert.True(t, updated.ExpiresAt.IsZero())
-	assert.True(t, updated.HardExpiresAt.IsZero())
+	assert.Nil(t, updated.ExpiresAt)
+	assert.Nil(t, updated.HardExpiresAt)
 
 	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -169,7 +209,7 @@ func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, SandboxStatusPaused, updated.Status)
-	assert.True(t, updated.ExpiresAt.IsZero())
+	assert.Nil(t, updated.ExpiresAt)
 
 	record, err := svc.sandboxStore.GetSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)
@@ -265,8 +305,10 @@ func TestRefreshSandboxPersistsExpirationRecord(t *testing.T) {
 	record, err := store.GetSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)
 	require.NotNil(t, record)
-	assert.Equal(t, resp.ExpiresAt, record.ExpiresAt)
-	assert.Equal(t, resp.HardExpiresAt, record.HardExpiresAt)
+	require.NotNil(t, resp.ExpiresAt)
+	require.NotNil(t, resp.HardExpiresAt)
+	assert.Equal(t, *resp.ExpiresAt, record.ExpiresAt)
+	assert.Equal(t, *resp.HardExpiresAt, record.HardExpiresAt)
 	assert.Equal(t, time.Date(2026, time.March, 7, 12, 1, 30, 0, time.UTC), record.ExpiresAt)
 	assert.Equal(t, time.Date(2026, time.March, 7, 12, 2, 0, 0, time.UTC), record.HardExpiresAt)
 }
@@ -365,8 +407,8 @@ func TestRefreshSandboxDisabledTTLRemainsDisabled(t *testing.T) {
 
 	resp, err := svc.RefreshSandbox(context.Background(), pod.Name, &RefreshRequest{})
 	require.NoError(t, err)
-	assert.True(t, resp.ExpiresAt.IsZero())
-	assert.True(t, resp.HardExpiresAt.IsZero())
+	assert.Nil(t, resp.ExpiresAt)
+	assert.Nil(t, resp.HardExpiresAt)
 
 	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -427,8 +469,10 @@ func TestRefreshSandboxRetriesPodUpdateConflict(t *testing.T) {
 	if updates != 2 {
 		t.Fatalf("pod update calls = %d, want 2", updates)
 	}
-	assert.Equal(t, time.Date(2026, time.March, 7, 12, 2, 0, 0, time.UTC), resp.ExpiresAt)
-	assert.Equal(t, time.Date(2026, time.March, 7, 12, 10, 0, 0, time.UTC), resp.HardExpiresAt)
+	require.NotNil(t, resp.ExpiresAt)
+	require.NotNil(t, resp.HardExpiresAt)
+	assert.Equal(t, time.Date(2026, time.March, 7, 12, 2, 0, 0, time.UTC), *resp.ExpiresAt)
+	assert.Equal(t, time.Date(2026, time.March, 7, 12, 10, 0, 0, time.UTC), *resp.HardExpiresAt)
 
 	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)

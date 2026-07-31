@@ -35,11 +35,18 @@ type Sandbox struct {
 	Mounts            []ClaimMount           `json:"mounts,omitempty"`
 	PodName           string                 `json:"pod_name"`
 	RuntimeGeneration int64                  `json:"runtime_generation"`
-	ExpiresAt         time.Time              `json:"expires_at"`
-	HardExpiresAt     time.Time              `json:"hard_expires_at"`
+	ExpiresAt         *time.Time             `json:"expires_at"`
+	HardExpiresAt     *time.Time             `json:"hard_expires_at"`
 	ClaimedAt         time.Time              `json:"claimed_at"`
 	CreatedAt         time.Time              `json:"created_at"`
 	UpdatedAt         time.Time              `json:"updated_at"`
+}
+
+func optionalTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
 }
 
 // SandboxStatus represents possible sandbox statuses

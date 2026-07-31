@@ -72,12 +72,6 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 					return nil
 				}
 			}
-			switch locked.Status {
-			case SandboxStatusStarting:
-				waitErr = errSandboxLifecycleResuming
-				return nil
-			}
-
 			existing, getErr := s.getSandboxPod(lockCtx, sandboxID)
 			if getErr == nil {
 				if existing.DeletionTimestamp != nil {
@@ -123,6 +117,16 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			}
 			if getErr != nil && !k8serrors.IsNotFound(getErr) {
 				return fmt.Errorf("get current runtime pod: %w", getErr)
+			}
+			if locked.Status == SandboxStatusStarting {
+				// No active resume transaction owns this state. Reconcile it before
+				// creating a replacement runtime so a timed-out caller cannot leave
+				// the durable record permanently stuck in starting.
+				if err := tx.MarkRuntimePaused(lockCtx, sandboxID, locked.RuntimeGeneration, s.now()); err != nil {
+					return err
+				}
+				waitErr = errSandboxRuntimeStateReconciled
+				return nil
 			}
 			if locked.Status != SandboxStatusPaused {
 				return k8serrors.NewConflict(corev1.Resource("sandbox"), sandboxID, fmt.Errorf("sandbox runtime for status %q is not available", locked.Status))
@@ -194,6 +198,8 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			if err := s.waitForSandboxRuntimePodDeletion(ctx, deletingPodRef.namespace, deletingPodRef.name); err != nil {
 				return nil, err
 			}
+			continue
+		case errors.Is(err, errSandboxRuntimeStateReconciled):
 			continue
 		default:
 			return nil, err
@@ -335,6 +341,7 @@ var (
 	errSandboxLifecycleResuming            = errors.New("sandbox lifecycle resume is in progress")
 	errSandboxLifecycleRootFSCheckpointing = errors.New("sandbox lifecycle rootfs checkpoint is in progress")
 	errSandboxRuntimeDeleting              = errors.New("sandbox runtime pod deletion is in progress")
+	errSandboxRuntimeStateReconciled       = errors.New("sandbox runtime state was reconciled")
 )
 
 type sandboxRuntimePodRef struct {

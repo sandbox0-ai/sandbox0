@@ -861,6 +861,157 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 	}
 }
 
+func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.PodIP = "10.0.0.4"
+	markRuntimeIdentityPodReady(t, pod)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                  "sandbox-a",
+			TeamID:              "team-a",
+			UserID:              "user-a",
+			TemplateID:          "default",
+			TemplateName:        "default",
+			TemplateNamespace:   "tpl-default",
+			Status:              SandboxStatusStarting,
+			CurrentPodName:      "pod-a",
+			CurrentPodNamespace: "ns-a",
+			RuntimeGeneration:   4,
+			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	svc := &SandboxService{
+		k8sClient:    fake.NewSimpleClientset(pod.DeepCopy()),
+		podLister:    runtimeIdentityPodLister(t, pod),
+		sandboxStore: store,
+		config:       SandboxServiceConfig{ProcdPort: 49983},
+		logger:       zap.NewNop(),
+	}
+
+	sandbox, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want nil", err)
+	}
+	if sandbox.Status != SandboxStatusRunning {
+		t.Fatalf("status = %q, want running", sandbox.Status)
+	}
+	if got := store.records["sandbox-a"].Status; got != SandboxStatusRunning {
+		t.Fatalf("stored status = %q, want running", got)
+	}
+	if store.saves != 1 {
+		t.Fatalf("store saves = %d, want 1", store.saves)
+	}
+}
+
+func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecordWithoutPod(t *testing.T) {
+	idlePod := newClaimTestPod("tpl-default", "idle-a", "default", true)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                "sandbox-a",
+			TeamID:            "team-a",
+			UserID:            "user-a",
+			TemplateID:        "default",
+			TemplateName:      "default",
+			TemplateNamespace: "tpl-default",
+			Status:            SandboxStatusStarting,
+			RuntimeGeneration: 3,
+			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	client := fake.NewSimpleClientset(idlePod.DeepCopy())
+	client.PrependReactor("patch", "pods", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		if store.pauses != 1 {
+			t.Errorf("runtime pause reconciliations = %d, want 1", store.pauses)
+		}
+		txn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
+		if err != nil {
+			t.Errorf("GetActiveLifecycleTxn() error = %v", err)
+		} else if txn == nil || txn.Kind != SandboxLifecycleKindResume {
+			t.Errorf("active lifecycle transaction = %+v, want resume", txn)
+		}
+		return true, nil, errors.New("stop reconciled hot claim")
+	})
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    runtimeIdentityPodLister(t, idlePod),
+		sandboxStore: store,
+		config:       SandboxServiceConfig{ProcdPort: 49983},
+		clock:        fixedClock{now: time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)},
+		logger:       zap.NewNop(),
+	}
+
+	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
+	if err == nil || !strings.Contains(err.Error(), "stop reconciled hot claim") {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want hot claim failure", err)
+	}
+	if store.pauses != 1 {
+		t.Fatalf("runtime pause reconciliations = %d, want 1", store.pauses)
+	}
+	if got := store.records["sandbox-a"].Status; got != SandboxStatusPaused {
+		t.Fatalf("stored status after failed claim = %q, want paused", got)
+	}
+}
+
+func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
+	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.PodIP = "10.0.0.4"
+	markRuntimeIdentityPodReady(t, pod)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-a": {
+			ID:                  "sandbox-a",
+			TeamID:              "team-a",
+			UserID:              "user-a",
+			TemplateID:          "default",
+			TemplateName:        "default",
+			TemplateNamespace:   "tpl-default",
+			Status:              SandboxStatusStarting,
+			CurrentPodName:      "pod-a",
+			CurrentPodNamespace: "ns-a",
+			RuntimeGeneration:   4,
+			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+		},
+	}}
+	enqueuer := &recordingPauseEnqueuer{}
+	svc := &SandboxService{
+		k8sClient:     fake.NewSimpleClientset(pod.DeepCopy()),
+		podLister:     runtimeIdentityPodLister(t, pod),
+		sandboxStore:  store,
+		ctldClient:    NewCtldClient(CtldClientConfig{}),
+		pauseEnqueuer: enqueuer,
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			ProcdPort:   49983,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	status, err := svc.RequestPauseSandboxRuntime(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("RequestPauseSandboxRuntime() error = %v, want nil", err)
+	}
+	if status != SandboxStatusRunning {
+		t.Fatalf("status = %q, want running", status)
+	}
+	if got := store.records["sandbox-a"].Status; got != SandboxStatusRunning {
+		t.Fatalf("stored status = %q, want running", got)
+	}
+	active, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetActiveLifecycleTxn() error = %v", err)
+	}
+	if active == nil || active.Kind != SandboxLifecycleKindPause {
+		t.Fatalf("active txn = %+v, want pause", active)
+	}
+	if len(enqueuer.calls) != 1 || enqueuer.calls[0] != "sandbox-a" {
+		t.Fatalf("pause queue calls = %#v, want sandbox-a", enqueuer.calls)
+	}
+}
+
 func TestResumeSandboxSingleflightPreventsConcurrentSandboxLocks(t *testing.T) {
 	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
 	pod.Annotations[controller.AnnotationRuntimeGeneration] = "4"

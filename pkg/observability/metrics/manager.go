@@ -31,6 +31,8 @@ type ManagerMetrics struct {
 	PodsCleanedTotal                *prometheus.CounterVec
 	ReconcileTotal                  *prometheus.CounterVec
 	ReconcileDuration               *prometheus.HistogramVec
+	PodTeardownDecisionsTotal       *prometheus.CounterVec
+	PodTeardownInFlight             *prometheus.GaugeVec
 	MeteringEventsTotal             *prometheus.CounterVec
 	MeteringWindowsTotal            *prometheus.CounterVec
 	MeteringErrorsTotal             *prometheus.CounterVec
@@ -162,6 +164,14 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Help:    "Duration of reconciliation operations",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"template"}),
+		PodTeardownDecisionsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_pod_teardown_decisions_total",
+			Help: "Total number of node-aware pod teardown planning decisions by reason and result",
+		}, []string{"reason", "result"}),
+		PodTeardownInFlight: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "manager_pod_teardown_in_flight",
+			Help: "Current pod teardown pressure and reservations by state",
+		}, []string{"state"}),
 		MeteringEventsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_metering_events_total",
 			Help: "Total number of manager metering lifecycle events attempted",

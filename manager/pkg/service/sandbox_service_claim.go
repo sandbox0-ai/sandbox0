@@ -1177,7 +1177,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		if pod.Annotations == nil {
 			pod.Annotations = make(map[string]string)
 		}
-		pod.Annotations = controller.ClaimedSandboxPodAnnotations(pod.Annotations)
+		pod.Annotations = controller.ClaimedSandboxPodAnnotations(pod.Annotations, s.config.AutoscalerSafeToEvictAnnotationKeys)
 		pod.Annotations[controller.AnnotationSandboxID] = sandboxID
 		pod.Annotations[controller.AnnotationRuntimeGeneration] = strconv.FormatInt(req.RuntimeGeneration, 10)
 		pod.Annotations[controller.AnnotationTeamID] = req.TeamID
@@ -1462,7 +1462,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		controller.AnnotationUserID:            req.UserID,
 		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType:         "cold",
-	})
+	}, s.config.AutoscalerSafeToEvictAnnotationKeys)
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}

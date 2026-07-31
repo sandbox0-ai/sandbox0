@@ -25,6 +25,12 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
 	cfg.DatabaseMinConns = spec.DatabaseMinConns
 	cfg.CleanupInterval = spec.CleanupInterval
+	cfg.AutoscalerSafeToEvictAnnotationKeys = cloneStrings(spec.AutoscalerSafeToEvictAnnotationKeys)
+	cfg.PodTeardown = apiconfig.PodTeardownConfig{
+		MaxConcurrentPerNode:         spec.PodTeardown.MaxConcurrentPerNode,
+		MaxConcurrentPerDegradedNode: spec.PodTeardown.MaxConcurrentPerDegradedNode,
+		MaxConcurrentReplacements:    spec.PodTeardown.MaxConcurrentReplacements,
+	}
 	cfg.LogLevel = spec.LogLevel
 	cfg.MetricsPort = spec.MetricsPort
 	cfg.WebhookPort = spec.WebhookPort

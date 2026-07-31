@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -44,6 +46,7 @@ type CleanupController struct {
 	hardExpiredLister HardExpiredSandboxLister
 	logger            *zap.Logger
 	interval          time.Duration
+	teardown          *PodTeardownCoordinator
 }
 
 // TimeProvider provides time functions, allowing for synchronized time across clusters
@@ -98,6 +101,15 @@ func NewCleanupController(
 		hardExpiredLister: hardExpiredLister,
 		logger:            logger,
 		interval:          interval,
+		teardown:          NewPodTeardownCoordinator(podLister, nil, config.PodTeardownConfig{}, nil, logger),
+	}
+}
+
+// SetPodTeardownCoordinator installs the manager-wide coordinator shared with
+// pool rollout and repair paths.
+func (cc *CleanupController) SetPodTeardownCoordinator(teardown *PodTeardownCoordinator) {
+	if teardown != nil {
+		cc.teardown = teardown
 	}
 }
 
@@ -189,12 +201,20 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 	if err != nil {
 		return err
 	}
+	staleDeletingPods := make([]*corev1.Pod, 0)
+	for _, pod := range pods {
+		if shouldForceDeleteStalePod(pod, now) {
+			staleDeletingPods = append(staleDeletingPods, pod)
+		}
+	}
+	if err := cc.forceDeleteStaleDeletingPods(ctx, template, staleDeletingPods); err != nil {
+		return err
+	}
 
 	expiredCount := 0
 
 	for _, pod := range pods {
 		if pod.DeletionTimestamp != nil {
-			cc.forceDeleteStaleDeletingPod(ctx, template, pod, now)
 			continue
 		}
 		// Hard expiry deletes the durable sandbox identity and state.
@@ -325,12 +345,13 @@ func (cc *CleanupController) cleanupStaleDeletingIdlePods(ctx context.Context, t
 		return err
 	}
 
+	candidates := make([]*corev1.Pod, 0)
 	for _, pod := range pods {
-		if pod.DeletionTimestamp != nil {
-			cc.forceDeleteStaleDeletingPod(ctx, template, pod, now)
+		if shouldForceDeleteStalePod(pod, now) {
+			candidates = append(candidates, pod)
 		}
 	}
-	return nil
+	return cc.forceDeleteStaleDeletingPods(ctx, template, candidates)
 }
 
 func cleanupSandboxIDFromPod(pod *corev1.Pod) string {
@@ -350,13 +371,28 @@ func cleanupSandboxIDFromPod(pod *corev1.Pod) string {
 	return pod.Name
 }
 
-func (cc *CleanupController) forceDeleteStaleDeletingPod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod, now time.Time) {
-	if pod == nil || pod.DeletionTimestamp == nil {
-		return
+func shouldForceDeleteStalePod(pod *corev1.Pod, now time.Time) bool {
+	return pod != nil && pod.DeletionTimestamp != nil && now.Sub(pod.DeletionTimestamp.Time) >= staleDeletingPodForceDeleteAfter
+}
+
+func (cc *CleanupController) forceDeleteStaleDeletingPods(ctx context.Context, template *v1alpha1.SandboxTemplate, candidates []*corev1.Pod) error {
+	if len(candidates) == 0 {
+		return nil
 	}
-	if now.Sub(pod.DeletionTimestamp.Time) < staleDeletingPodForceDeleteAfter {
-		return
+	if cc.teardown == nil {
+		return fmt.Errorf("pod teardown coordinator is not configured")
 	}
+	selected, err := cc.teardown.SelectForceDeletes(candidates)
+	if err != nil {
+		return err
+	}
+	for _, pod := range selected {
+		cc.forceDeleteStaleDeletingPod(ctx, template, pod)
+	}
+	return nil
+}
+
+func (cc *CleanupController) forceDeleteStaleDeletingPod(ctx context.Context, template *v1alpha1.SandboxTemplate, pod *corev1.Pod) {
 	if cc.k8sClient == nil {
 		cc.logger.Warn("Kubernetes client not configured, skipping stale deleting pod force delete",
 			zap.String("pod", pod.Name),

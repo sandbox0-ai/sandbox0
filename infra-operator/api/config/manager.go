@@ -74,6 +74,17 @@ type ManagerConfig struct {
 	// +kubebuilder:default="60s"
 	CleanupInterval metav1.Duration `yaml:"cleanup_interval" json:"cleanupInterval"`
 
+	// AutoscalerSafeToEvictAnnotationKeys contains platform-specific annotation
+	// keys whose values are managed as "true" for idle pods and "false" for
+	// claimed pods. The platform deployment config owns the keys so manager does
+	// not need vendor-specific autoscaler knowledge.
+	// +optional
+	AutoscalerSafeToEvictAnnotationKeys []string `yaml:"autoscaler_safe_to_evict_annotation_keys" json:"autoscalerSafeToEvictAnnotationKeys"`
+
+	// PodTeardown bounds manager-initiated pod teardown and replacement work.
+	// +optional
+	PodTeardown PodTeardownConfig `yaml:"pod_teardown" json:"podTeardown"`
+
 	// Logging
 	// +optional
 	// +kubebuilder:default="info"
@@ -359,6 +370,28 @@ type AutoscalerConfig struct {
 	ScaleDownPercent string `yaml:"scale_down_percent" json:"scaleDownPercent"`
 }
 
+// PodTeardownConfig bounds concurrent pod teardown work at the node and
+// cluster levels. Node limits protect kubelet, the container runtime, and CNI;
+// the replacement limit prevents repair waves from flooding the scheduler.
+type PodTeardownConfig struct {
+	// MaxConcurrentPerNode is the teardown limit for a healthy node.
+	// +optional
+	// +kubebuilder:default=4
+	MaxConcurrentPerNode int32 `yaml:"max_concurrent_per_node" json:"maxConcurrentPerNode"`
+
+	// MaxConcurrentPerDegradedNode is the teardown limit for a Ready node with
+	// memory, disk, PID, or network pressure. NotReady and Unknown nodes do not
+	// accept new teardowns.
+	// +optional
+	// +kubebuilder:default=1
+	MaxConcurrentPerDegradedNode int32 `yaml:"max_concurrent_per_degraded_node" json:"maxConcurrentPerDegradedNode"`
+
+	// MaxConcurrentReplacements caps manager-initiated replacements cluster-wide.
+	// +optional
+	// +kubebuilder:default=40
+	MaxConcurrentReplacements int32 `yaml:"max_concurrent_replacements" json:"maxConcurrentReplacements"`
+}
+
 func (c AutoscalerConfig) ParsedScaleUpFactor(defaultValue float64) float64 {
 	return parseFloatOrDefault(c.ScaleUpFactor, defaultValue)
 }
@@ -537,7 +570,26 @@ func LoadManagerConfig() *ManagerConfig {
 	}
 	applyRootFSMaintenanceDefaults(cfg)
 	applySandboxObservabilityProducerDefaults(cfg)
+	applyPodTeardownDefaults(cfg)
 	return cfg
+}
+
+func applyPodTeardownDefaults(cfg *ManagerConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.PodTeardown.MaxConcurrentPerNode <= 0 {
+		cfg.PodTeardown.MaxConcurrentPerNode = 4
+	}
+	if cfg.PodTeardown.MaxConcurrentPerDegradedNode <= 0 {
+		cfg.PodTeardown.MaxConcurrentPerDegradedNode = 1
+	}
+	if cfg.PodTeardown.MaxConcurrentPerDegradedNode > cfg.PodTeardown.MaxConcurrentPerNode {
+		cfg.PodTeardown.MaxConcurrentPerDegradedNode = cfg.PodTeardown.MaxConcurrentPerNode
+	}
+	if cfg.PodTeardown.MaxConcurrentReplacements <= 0 {
+		cfg.PodTeardown.MaxConcurrentReplacements = 40
+	}
 }
 
 func applySandboxObservabilityProducerDefaults(cfg *ManagerConfig) {

@@ -229,6 +229,17 @@ func main() {
 	namespaceLister := informerFactory.Core().V1().Namespaces().Lister()
 	serviceAccountLister := informerFactory.Core().V1().ServiceAccounts().Lister()
 	networkPolicyLister := informerFactory.Networking().V1().NetworkPolicies().Lister()
+	autoscalerAnnotationKeys, err := controller.NormalizeAutoscalerSafeToEvictAnnotationKeys(cfg.AutoscalerSafeToEvictAnnotationKeys)
+	if err != nil {
+		logger.Fatal("Invalid autoscaler safe-to-evict annotation configuration", zap.Error(err))
+	}
+	teardownCoordinator := controller.NewPodTeardownCoordinator(
+		podLister,
+		nodeLister,
+		cfg.PodTeardown,
+		managerMetrics,
+		logger,
+	)
 
 	// Create operator
 	operator := controller.NewOperator(
@@ -242,6 +253,8 @@ func main() {
 		clk,
 		logger,
 		managerMetrics,
+		teardownCoordinator,
+		autoscalerAnnotationKeys,
 	)
 	if pool != nil {
 		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
@@ -453,6 +466,7 @@ func main() {
 		RootFSSquashMaxChainBytes:           cfg.RootFSMaintenance.SquashMaxChainBytes,
 		PublicRootDomain:                    cfg.PublicRootDomain,
 		PublicRegionID:                      cfg.PublicRegionID,
+		AutoscalerSafeToEvictAnnotationKeys: autoscalerAnnotationKeys,
 	}
 
 	sandboxService := service.NewSandboxService(
@@ -634,6 +648,7 @@ func main() {
 		logger,
 		cfg.CleanupInterval.Duration,
 	)
+	cleanupController.SetPodTeardownCoordinator(teardownCoordinator)
 
 	// Initialize internal auth validator
 	publicKey, err := internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultInternalJWTPublicKeyPath)

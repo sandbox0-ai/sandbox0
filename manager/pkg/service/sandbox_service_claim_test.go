@@ -43,6 +43,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
+const testAutoscalerSafeToEvictAnnotation = "example.com/safe-to-evict"
+
 func TestClaimIdlePodRequiresPodReady(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -95,6 +97,9 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 		podLister: newClaimTestPodLister(t, readyPod),
 		clock:     systemTime{},
 		logger:    zap.NewNop(),
+		config: SandboxServiceConfig{
+			AutoscalerSafeToEvictAnnotationKeys: []string{testAutoscalerSafeToEvictAnnotation},
+		},
 	}
 
 	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
@@ -122,7 +127,7 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	if got := pod.Annotations[controller.AnnotationHotClaimCompletionProtocol]; got != controller.HotClaimCompletionProtocolRecordV1 {
 		t.Fatalf("completion protocol = %q, want %q", got, controller.HotClaimCompletionProtocolRecordV1)
 	}
-	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
+	if got := pod.Annotations[testAutoscalerSafeToEvictAnnotation]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
 	}
 	if len(pod.OwnerReferences) != 1 || pod.OwnerReferences[0].UID != types.UID("replicaset-uid") {
@@ -1065,13 +1070,16 @@ func TestCreateNewPodMarksColdPodNonEvictable(t *testing.T) {
 		secretLister: newClaimTestSecretLister(t),
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
+		config: SandboxServiceConfig{
+			AutoscalerSafeToEvictAnnotationKeys: []string{testAutoscalerSafeToEvictAnnotation},
+		},
 	}
 
 	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
 	if err != nil {
 		t.Fatalf("createNewPod() error = %v", err)
 	}
-	if got := pod.Annotations[controller.AnnotationClusterAutoscalerSafeToEvict]; got != "false" {
+	if got := pod.Annotations[testAutoscalerSafeToEvictAnnotation]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
 	}
 }

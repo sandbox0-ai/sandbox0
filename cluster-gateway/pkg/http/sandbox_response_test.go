@@ -28,8 +28,8 @@ func TestSandboxToAPIPreservesPublicDetailFields(t *testing.T) {
 		},
 		ClaimedAt:     now,
 		CreatedAt:     now,
-		ExpiresAt:     now,
-		HardExpiresAt: now,
+		ExpiresAt:     &now,
+		HardExpiresAt: &now,
 	}
 
 	payload := sandboxToAPI(sandbox, sharedssh.BuildConnectionInfo("aws-us-east-1.ssh.sandbox0.app", 30222, sandbox.ID))

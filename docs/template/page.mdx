@@ -42,7 +42,14 @@ You do not need a new template ID for every initialized environment. If the base
 
 For platform-owned builtin templates, the operator manages the warm pool. That lets teams reuse warm builtin capacity and store only the initialized rootfs state for their own dependency set instead of maintaining a separate custom template pool for each variation.
 
-Rootfs snapshots do not create template IDs and do not appear in `s0 template list`. Claiming with `snapshot_id` creates a new running sandbox from the selected rootfs snapshot while the requested template still controls image, default resources, mounts, services, and network defaults. A claim or runtime update can override only the sandbox memory limit; CPU is derived from the platform memory-per-CPU ratio with a `150m` minimum limit. Snapshot and fork accept a running or paused source sandbox. Restore remains useful for rolling back an existing paused sandbox. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for the lifecycle requirements and API workflow, or read [Initialize Once, Claim Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes) for the custom-rootfs pattern.
+Rootfs snapshot behavior:
+
+- snapshots do not create template IDs and do not appear in `s0 template list`
+- claiming with `snapshot_id` creates a new running sandbox; the requested template still supplies the image, default resources, mounts, services, and network defaults
+- resource overrides at claim or runtime update can change memory only; CPU follows the platform memory-per-CPU ratio with a `150m` minimum limit
+- snapshot and fork accept a running or paused source; restore rolls an existing paused sandbox back
+
+See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for lifecycle requirements and APIs, or [Initialize Once, Claim Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes) for the custom-rootfs pattern.
 
 ---
 

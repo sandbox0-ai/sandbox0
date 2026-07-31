@@ -42,6 +42,10 @@
           "title": "Overview"
         },
         {
+          "slug": "observability",
+          "title": "Observability"
+        },
+        {
           "slug": "pause-resume",
           "title": "Pause And Resume"
         },
@@ -242,6 +246,10 @@
         {
           "slug": "configuration",
           "title": "Configuration"
+        },
+        {
+          "slug": "observability",
+          "title": "Observability"
         },
         {
           "slug": "quotas",

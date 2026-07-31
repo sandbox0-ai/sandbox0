@@ -34,21 +34,35 @@ On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the
 
 Pause a sandbox to release compute while keeping its identity, configuration, services, mounted durable storage, and latest writable rootfs checkpoint available for a later resume.
 
-The pause endpoint accepts the lifecycle transition and returns the current committed state. Rootfs checkpoint upload and runtime pod deletion continue in the background. Until the pause transaction commits, sandbox details continue to report the previous committed runtime state, usually `running`. Poll sandbox details until `status` is `paused` and `paused` is `true` before treating the checkpoint as resume-ready.
+The pause request is asynchronous. Poll sandbox details until `status` is `paused` and `paused` is `true` before treating the checkpoint as resume-ready.
 
-Runtime access paths do not expose `pausing` or `resuming` states. File, context, public service, and SSH requests are linearized to a committed runtime generation: they either use the currently committed runtime or wait for the lifecycle transaction to commit before continuing after resume. Lifecycle work in progress should not be handled as a caller-visible `409 Conflict`; conflicts are reserved for real policy or state conflicts such as disabled auto-resume, non-restartable service routes, quota limits, deletion, or paused-only operations.
+| Situation | Behavior |
+|-----------|----------|
+| Pause request accepted | The API returns the current committed state while checkpoint upload and runtime pod deletion continue |
+| Pause not yet committed | Sandbox details still show the previous committed state, usually `running` |
+| File, context, service, or SSH access during a transition | The request uses the committed runtime generation or waits for the transaction, then continues after resume |
+| Runtime access reaches an automatic TTL pause before commit | Sandbox0 cancels the automatic pause and continues on the existing runtime generation |
+| Runtime access reaches an explicit pause | The explicit pause commits; access can then resume the sandbox when auto-resume is allowed |
 
-Automatic pause from `ttl` is opportunistic. If supported runtime access arrives before an automatic pause reaches its commit point, Sandbox0 cancels that automatic pause, releases the runtime barrier, and continues on the existing runtime generation. Explicit pause requests are not canceled by runtime access; those requests wait for the committed pause and then resume if auto-resume is allowed.
+`pausing` and `resuming` are not caller-visible states. A lifecycle transaction in progress is not a `409 Conflict`; that status is reserved for actual policy or state conflicts such as disabled auto-resume, non-restartable routes, quota limits, deletion, or paused-only operations.
 
 ## Runtime Failure Recovery
 
-If the `procd` container in a claimed sandbox exits unexpectedly, including an OOM termination, Sandbox0 leaves that container attempt stopped while `manager` starts a non-cancelable crash-recovery pause. `ctld` checkpoints the exact terminated containerd snapshot, then `manager` atomically commits the new rootfs head and paused state before deleting the old runtime pod. A supported runtime request waits for this transaction and can resume from the recovered checkpoint when auto-resume is allowed.
+Sandbox0 uses the durable pause flow to replace a failed runtime.
 
-Explicit sandbox deletion and `hard_ttl` still take precedence over crash recovery. Recovery also depends on the terminated snapshot remaining available on the same node. If the old runtime pod or containerd snapshot disappears before `ctld` can read it, Sandbox0 records the degraded recovery and falls back to the last committed rootfs checkpoint. Files written after that checkpoint may be lost. Mounted Sandbox Volumes keep their independently durable state.
+| Failure or condition | Recovery behavior |
+|----------------------|-------------------|
+| `procd` exits unexpectedly, including OOM | Manager starts a non-cancelable recovery pause; ctld checkpoints the terminated containerd snapshot, then manager atomically commits the new rootfs head and paused state before deleting the old pod |
+| Runtime liveness failure is transient | The existing runtime is not replaced |
+| Runtime liveness fails continuously for 90 seconds | Manager starts the same durable pause flow and reconstructs the sandbox with a new `runtime_generation` |
+| Runtime cannot produce a checkpoint within the bounded attempt | Recovery keeps the last committed rootfs head and replaces the stuck runtime |
+| Explicit delete or `hard_ttl` occurs | Deletion takes precedence over crash recovery |
 
-Sandbox0 treats a sustained runtime liveness failure as an internal platform fault. A transient failure does not replace the runtime, but after the failure continues for 90 seconds, manager starts the same durable pause flow and reconstructs the runtime as a new `runtime_generation`. This recovery is independent of the sandbox `auto_resume` access policy.
+Recovery is independent of the sandbox `auto_resume` access policy. A supported runtime request waits for recovery to commit, then resumes when auto-resume is allowed.
 
-For an unresponsive runtime, `ctld` gets a bounded checkpoint attempt. If the runtime cannot produce a new checkpoint, recovery preserves the last committed rootfs head and continues so a stuck runtime cannot block replacement indefinitely. Mounted Sandbox Volumes remain independently durable.
+<Callout variant="warning">
+Recovering the latest writes requires the terminated containerd snapshot to remain available on the same node. If the old pod or snapshot disappears first, Sandbox0 falls back to the last committed rootfs checkpoint and records degraded recovery. Files written after that checkpoint may be lost; mounted Sandbox Volumes retain their independently durable state.
+</Callout>
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/pause
@@ -89,9 +103,14 @@ console.log("Pause requested");`
 
 Resume a sandbox that was paused manually or by TTL expiry.
 
-Resume first restores the writable rootfs checkpoint onto a runtime pod created from the current template image. If that restore fails, Sandbox0 retries once with a runtime pod pinned to the checkpoint's recorded base image digest. Kubernetes pulls and garbage-collects that image through the normal kubelet image lifecycle.
+| Situation | Restore behavior |
+|-----------|------------------|
+| Normal resume | Creates a runtime pod from the current template image and restores the latest committed rootfs checkpoint |
+| Restore fails against the current template image | Retries once with the checkpoint's recorded base image digest; kubelet manages that image normally |
+| Existing runtime pod is terminal | Waits for crash recovery to commit, then restores the recovered rootfs head |
+| Terminated snapshot is unavailable | Restores the last committed checkpoint |
 
-If the current runtime pod reaches a terminal phase, explicit resume or a supported access path first waits for any crash-recovery checkpoint to commit. The replacement runtime then restores that recovered rootfs head. When the terminated snapshot is no longer available, the replacement restores the last committed checkpoint instead. Mounted Sandbox Volumes are remounted from their durable state.
+Mounted Sandbox Volumes are remounted from their durable state.
 
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/resume

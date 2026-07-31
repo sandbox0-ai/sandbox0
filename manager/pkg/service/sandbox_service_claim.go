@@ -1197,10 +1197,13 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		// Set expiration annotations. Explicit 0 disables TTLs; omitted TTL uses the configured default.
 		persistedConfig := s.claimConfigForPersistence(req.Config)
+		var ttl, hardTTL *int32
 		if persistedConfig != nil {
-			setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
-			setClaimHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL, req.HardExpiresAt)
+			ttl = persistedConfig.TTL
+			hardTTL = persistedConfig.HardTTL
 		}
+		setExpirationAnnotation(pod.Annotations, s.clock.Now(), ttl)
+		setClaimHardExpirationAnnotation(pod.Annotations, s.clock.Now(), hardTTL, req.HardExpiresAt)
 		if err := setMountsAnnotation(pod.Annotations, req.Mounts); err != nil {
 			return err
 		}
@@ -1487,10 +1490,13 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 
 	// Set expiration annotations. Explicit 0 disables TTLs; omitted TTL uses the configured default.
 	persistedConfig := s.claimConfigForPersistence(req.Config)
+	var ttl, hardTTL *int32
 	if persistedConfig != nil {
-		setExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.TTL)
-		setClaimHardExpirationAnnotation(pod.Annotations, s.clock.Now(), persistedConfig.HardTTL, req.HardExpiresAt)
+		ttl = persistedConfig.TTL
+		hardTTL = persistedConfig.HardTTL
 	}
+	setExpirationAnnotation(pod.Annotations, s.clock.Now(), ttl)
+	setClaimHardExpirationAnnotation(pod.Annotations, s.clock.Now(), hardTTL, req.HardExpiresAt)
 	if err := setMountsAnnotation(pod.Annotations, req.Mounts); err != nil {
 		return nil, err
 	}

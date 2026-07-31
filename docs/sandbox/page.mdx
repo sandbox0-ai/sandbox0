@@ -105,6 +105,10 @@ The relationship: <code>ttl {'<='} hard_ttl</code>. When <code>ttl</code> expire
 When <code>hard_ttl</code> expires, the sandbox is deleted and later access returns not found. Resume starts a new runtime generation from the latest rootfs checkpoint only while the sandbox is paused and still within its hard TTL.
 </Callout>
 
+When an expiration path is disabled or unset, Sandbox responses return `null`
+for the corresponding `expires_at` or `hard_expires_at` field. A disabled
+expiration is never represented as a sentinel date.
+
 **Example timeline (sandbox created with `ttl=300` and `hard_ttl=3600`):**
 - `t=0`: Sandbox created
 - `t=300`: TTL expires → sandbox auto-pauses

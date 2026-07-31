@@ -1941,11 +1941,12 @@ type RefreshRequest struct {
 
 // RefreshResponse defines model for RefreshResponse.
 type RefreshResponse struct {
-	ExpiresAt time.Time `json:"expires_at"`
+	// ExpiresAt Soft expiration timestamp. Null means disabled or not set.
+	ExpiresAt *time.Time `json:"expires_at"`
 
-	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
-	HardExpiresAt time.Time `json:"hard_expires_at"`
-	SandboxId     string    `json:"sandbox_id"`
+	// HardExpiresAt Hard expiration timestamp. Null means disabled or not set.
+	HardExpiresAt *time.Time `json:"hard_expires_at"`
+	SandboxId     string     `json:"sandbox_id"`
 }
 
 // Region defines model for Region.
@@ -2062,11 +2063,11 @@ type Sandbox struct {
 	ClaimedAt  time.Time `json:"claimed_at"`
 	CreatedAt  time.Time `json:"created_at"`
 
-	// ExpiresAt Soft expiration timestamp. Zero value means not set.
-	ExpiresAt time.Time `json:"expires_at"`
+	// ExpiresAt Soft expiration timestamp. Null means disabled or not set.
+	ExpiresAt *time.Time `json:"expires_at"`
 
-	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
-	HardExpiresAt time.Time            `json:"hard_expires_at"`
+	// HardExpiresAt Hard expiration timestamp. Null means disabled or not set.
+	HardExpiresAt *time.Time           `json:"hard_expires_at"`
 	Id            string               `json:"id"`
 	Mounts        *[]ClaimMountRequest `json:"mounts,omitempty"`
 
@@ -2567,8 +2568,8 @@ type SandboxServicesUpdateRequest struct {
 type SandboxStatus struct {
 	ClaimedAt     *string                 `json:"claimed_at,omitempty"`
 	CreatedAt     *string                 `json:"created_at,omitempty"`
-	ExpiresAt     *string                 `json:"expires_at,omitempty"`
-	HardExpiresAt *string                 `json:"hard_expires_at,omitempty"`
+	ExpiresAt     *time.Time              `json:"expires_at"`
+	HardExpiresAt *time.Time              `json:"hard_expires_at"`
 	PodName       *string                 `json:"pod_name,omitempty"`
 	SandboxId     *string                 `json:"sandbox_id,omitempty"`
 	Status        *SandboxLifecycleStatus `json:"status,omitempty"`
@@ -2582,11 +2583,13 @@ type SandboxSummary struct {
 	// ClusterId Cluster where sandbox runs (multi-cluster only)
 	ClusterId *string   `json:"cluster_id"`
 	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
 
-	// HardExpiresAt Hard expiration timestamp. Zero value means not set.
-	HardExpiresAt time.Time `json:"hard_expires_at"`
-	Id            string    `json:"id"`
+	// ExpiresAt Soft expiration timestamp. Null means disabled or not set.
+	ExpiresAt *time.Time `json:"expires_at"`
+
+	// HardExpiresAt Hard expiration timestamp. Null means disabled or not set.
+	HardExpiresAt *time.Time `json:"hard_expires_at"`
+	Id            string     `json:"id"`
 
 	// Paused True when status is paused.
 	Paused bool `json:"paused"`

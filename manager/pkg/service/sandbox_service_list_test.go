@@ -258,10 +258,11 @@ func TestListSandboxes_HardExpiresAt(t *testing.T) {
 	}
 
 	require.NotNil(t, gotWithHard)
+	require.NotNil(t, gotWithHard.HardExpiresAt)
 	assert.Equal(t, hardExpiresAt.Format(time.RFC3339), gotWithHard.HardExpiresAt.Format(time.RFC3339))
 
 	require.NotNil(t, gotWithoutHard)
-	assert.True(t, gotWithoutHard.HardExpiresAt.IsZero())
+	assert.Nil(t, gotWithoutHard.HardExpiresAt)
 }
 
 func TestListSandboxes_IncludesRuntimeGeneration(t *testing.T) {

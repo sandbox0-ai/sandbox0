@@ -203,6 +203,10 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		if record == nil || !restoreNeeded {
 			return s.GetSandbox(ctx, sandboxID)
 		}
+		if err := s.restoreResumeCredentialBindings(ctx, req); err != nil {
+			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
+			return nil, fmt.Errorf("restore credential bindings: %w", err)
+		}
 		var err error
 		pod, err = s.claimIdlePod(ctx, template, req)
 		if err != nil {
@@ -249,6 +253,32 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 	}
 	s.enqueueHotClaimReservation(restoredPod)
 	return s.GetSandbox(ctx, sandboxID)
+}
+
+// restoreResumeCredentialBindings rejoins bindings stored outside the sanitized
+// sandbox config before a paused sandbox claims its replacement runtime pod.
+func (s *SandboxService) restoreResumeCredentialBindings(ctx context.Context, req *ClaimRequest) error {
+	if req == nil {
+		return nil
+	}
+	req.mayHaveExistingCredentialBindings = true
+	bindings, err := s.loadCredentialBindingsForSandbox(ctx, req.TeamID, req.SandboxID)
+	if err != nil {
+		return err
+	}
+	if len(bindings) == 0 {
+		return nil
+	}
+	config := cloneSandboxConfig(req.Config)
+	if config == nil {
+		config = &SandboxConfig{}
+	}
+	if config.Network == nil {
+		config.Network = &v1alpha1.SandboxNetworkPolicy{}
+	}
+	config.Network.CredentialBindings = bindings
+	req.Config = config
+	return nil
 }
 
 func (s *SandboxService) recordResumeLifecycleRuntime(ctx context.Context, sandboxID string, txn *SandboxLifecycleTxn, pod *corev1.Pod) error {

@@ -266,7 +266,14 @@ func (s *SandboxService) loadCredentialBindings(ctx context.Context, pod *corev1
 	if sandboxID == "" {
 		sandboxID = pod.Name
 	}
-	record, err := s.credentialStore.GetBindings(ctx, sandboxTeamID(pod), sandboxID)
+	return s.loadCredentialBindingsForSandbox(ctx, sandboxTeamID(pod), sandboxID)
+}
+
+func (s *SandboxService) loadCredentialBindingsForSandbox(ctx context.Context, teamID, sandboxID string) ([]v1alpha1.CredentialBinding, error) {
+	if s.credentialStore == nil {
+		return nil, nil
+	}
+	record, err := s.credentialStore.GetBindings(ctx, teamID, sandboxID)
 	if err != nil {
 		return nil, err
 	}

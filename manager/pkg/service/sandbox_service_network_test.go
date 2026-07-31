@@ -545,6 +545,49 @@ func TestTemplateCredentialBindingsUsesNestedNetworkBindings(t *testing.T) {
 	assert.Equal(t, "nested-ref", bindings[0].Ref)
 }
 
+func TestRestoreResumeCredentialBindingsAddsPersistedBindingsToClaim(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryBindingStore()
+	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+		Bindings: []egressauth.CredentialBinding{{
+			Ref:           "data-api",
+			SourceRef:     "data-api",
+			SourceID:      1,
+			SourceVersion: 1,
+			Projection: egressauth.ProjectionSpec{
+				Type: egressauth.CredentialProjectionTypeHTTPHeaders,
+				HTTPHeaders: &egressauth.HTTPHeadersProjection{
+					Headers: []egressauth.ProjectedHeader{{
+						Name:          "Authorization",
+						ValueTemplate: "Basic {{ .value }}",
+					}},
+				},
+			},
+		}},
+	}))
+	persistedPolicy := sanitizedNetworkPolicyForPersistence(
+		testNetworkPolicy("data-api", "Basic {{ .value }}"),
+	)
+	req := &ClaimRequest{
+		TeamID:    "team-a",
+		SandboxID: "sandbox-a",
+		Config:    &SandboxConfig{Network: persistedPolicy},
+	}
+	svc := &SandboxService{credentialStore: store}
+
+	require.NoError(t, svc.restoreResumeCredentialBindings(ctx, req))
+	require.True(t, req.mayHaveExistingCredentialBindings)
+	require.NotNil(t, req.Config)
+	require.NotNil(t, req.Config.Network)
+	require.Len(t, req.Config.Network.CredentialBindings, 1)
+	assert.Equal(t, "data-api", req.Config.Network.CredentialBindings[0].Ref)
+	require.Len(t, req.Config.Network.Egress.CredentialRules, 1)
+	assert.Equal(t, "data-api", req.Config.Network.Egress.CredentialRules[0].CredentialRef)
+	assert.Empty(t, persistedPolicy.CredentialBindings)
+}
+
 func TestSyncCredentialBindingsSkipsLookupForFreshSandbox(t *testing.T) {
 	store := newMemoryBindingStore()
 	svc := &SandboxService{credentialStore: store}

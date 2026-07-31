@@ -57,7 +57,22 @@ func TestRepositoryPostgresIntegration(t *testing.T) {
 		t.Fatalf("migrate up: %v", err)
 	}
 	if err := migrate.Down(ctx, pool, ".", migrationOptions...); err != nil {
-		t.Fatalf("migrate down: %v", err)
+		t.Fatalf("migrate admission decoupling down: %v", err)
+	}
+	var admissionForeignKey *string
+	if err := adminPool.QueryRow(ctx, `
+		SELECT conname
+		FROM pg_constraint
+		WHERE conrelid = to_regclass($1)
+		  AND conname = 'team_admission_states_team_id_fkey'
+	`, schema+".team_admission_states").Scan(&admissionForeignKey); err != nil {
+		t.Fatalf("look up restored admission foreign key: %v", err)
+	}
+	if admissionForeignKey == nil || *admissionForeignKey != "team_admission_states_team_id_fkey" {
+		t.Fatalf("restored admission foreign key = %v", admissionForeignKey)
+	}
+	if err := migrate.Down(ctx, pool, ".", migrationOptions...); err != nil {
+		t.Fatalf("migrate admission table down: %v", err)
 	}
 	var admissionTable *string
 	if err := adminPool.QueryRow(ctx, "SELECT to_regclass($1)::text", schema+".team_admission_states").Scan(&admissionTable); err != nil {
@@ -71,7 +86,7 @@ func TestRepositoryPostgresIntegration(t *testing.T) {
 	}
 
 	repository := NewRepository(pool)
-	teamID := createAdmissionTestTeam(t, ctx, pool, "monotonic")
+	teamID := uuid.NewString()
 	if _, found, err := repository.Get(ctx, teamID); err != nil || found {
 		t.Fatalf("default Get() found = %v, error = %v", found, err)
 	}
@@ -107,7 +122,7 @@ func TestRepositoryPostgresIntegration(t *testing.T) {
 		t.Fatalf("final admission = %#v", record)
 	}
 
-	conflictTeamID := createAdmissionTestTeam(t, ctx, pool, "conflict")
+	conflictTeamID := uuid.NewString()
 	conflictUpdates := []Update{
 		{Version: 1, State: StateAllowed, Source: "integration", Reason: "a"},
 		{Version: 1, State: StateRestricted, Source: "integration", Reason: "b"},
@@ -139,7 +154,7 @@ func TestRepositoryPostgresIntegration(t *testing.T) {
 		t.Fatalf("conflicting results: successes = %d, conflicts = %d", successes, conflicts)
 	}
 
-	replayTeamID := createAdmissionTestTeam(t, ctx, pool, "replay")
+	replayTeamID := uuid.NewString()
 	replay := Update{Version: 1, State: StateRestricted, Source: "integration", Reason: "same"}
 	replayApplied := make(chan bool, 2)
 	replayErrors := make(chan error, 2)
@@ -170,10 +185,18 @@ func TestRepositoryPostgresIntegration(t *testing.T) {
 		t.Fatalf("replayed Put() applied count = %d, want 1", appliedCount)
 	}
 
-	if _, err := pool.Exec(ctx, "DELETE FROM teams WHERE id = $1", replayTeamID); err != nil {
+	localTeamID := createAdmissionTestTeam(t, ctx, pool, "cleanup")
+	if _, err := repository.Put(ctx, localTeamID, Update{
+		Version: 1,
+		State:   StateAllowed,
+		Source:  "integration",
+	}); err != nil {
+		t.Fatalf("Put() local team admission state: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM teams WHERE id = $1", localTeamID); err != nil {
 		t.Fatalf("delete team: %v", err)
 	}
-	if _, found, err := repository.Get(ctx, replayTeamID); err != nil || found {
+	if _, found, err := repository.Get(ctx, localTeamID); err != nil || found {
 		t.Fatalf("Get() after team delete found = %v, error = %v", found, err)
 	}
 }

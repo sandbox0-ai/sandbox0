@@ -1,0 +1,233 @@
+# Observability
+
+Sandbox0 provides runtime metrics, historical logs, and a signed audit ledger for each sandbox. These APIs read historical data without waking a paused sandbox.
+
+| Data | Endpoint | Use it for |
+|------|----------|------------|
+| Runtime metrics | <code>GET /api/v1/sandboxes/{'{id}'}/metrics</code> | Chart-ready CPU, memory, network, process, and writable-rootfs series |
+| Metric catalog | <code>GET /api/v1/sandboxes/{'{id}'}/metrics/catalog</code> | Discover supported metric names, kinds, units, and dimensions |
+| Historical logs | <code>GET /api/v1/sandboxes/{'{id}'}/observability/logs</code> | Query or watch retained stdout, stderr, and PTY output |
+| Audit events | <code>GET /api/v1/sandboxes/{'{id}'}/observability/events</code> | Query or watch canonical signed audit facts |
+
+<Callout variant="info">
+Audit ingestion and the audit event API require the enterprise `sandbox_audit` feature and the `sandboxaudit:read` permission. Historical logs, runtime metrics, and the metric catalog do not require that enterprise feature.
+</Callout>
+
+Per-sandbox historical data is separate from [platform telemetry](/docs/sandbox/self-hosted/observability#platform-telemetry) and the metering usage ledger.
+
+## Runtime Metrics
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/metrics
+</Endpoint>
+
+The metrics endpoint returns bounded, server-downsampled series ready for charts. The default query covers the last hour and requests CPU utilization, memory utilization, and network I/O. A query cannot span more than 30 days.
+
+### Query Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `start_time` | RFC3339 timestamp | Start of the window; defaults to one hour before `end_time` |
+| `end_time` | RFC3339 timestamp | End of the window; defaults to the current time |
+| `metrics` | comma-separated string | Canonical metric names from the catalog |
+| `step_seconds` | integer | Requested bucket width; the server uses at least 15 seconds and may increase it to honor `max_points` |
+| `statistic` | string | `auto`, `average`, `minimum`, `maximum`, `last`, or `rate`; `auto` averages gauges and rates counters |
+| `max_points` | integer | Maximum points per series (default: 240, max: 1000) |
+
+### Metric Catalog
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/metrics/catalog
+</Endpoint>
+
+| Metric | Kind | Unit | Meaning |
+|--------|------|------|---------|
+| `sandbox.cpu.utilization` | gauge | ratio | CPU usage divided by the configured CPU limit |
+| `sandbox.cpu.usage` | gauge | cores | CPU cores currently used |
+| `sandbox.cpu.time` | counter | seconds | Cumulative CPU time; `auto` returns its rate in cores |
+| `sandbox.cpu.limit` | gauge | cores | Configured CPU limit |
+| `sandbox.memory.usage` | gauge | bytes | Cgroup memory usage |
+| `sandbox.memory.working_set` | gauge | bytes | Memory working set |
+| `sandbox.memory.available` | gauge | bytes | Memory available within the sandbox limit |
+| `sandbox.memory.limit` | gauge | bytes | Configured memory limit |
+| `sandbox.memory.utilization` | gauge | ratio | Working set divided by the configured memory limit |
+| `sandbox.network.io` | counter | bytes | Receive or transmit bytes, selected by the `direction` dimension; `auto` returns bytes per second |
+| `sandbox.network.errors` | counter | count | Receive or transmit errors, selected by the `direction` dimension; `auto` returns errors per second |
+| `sandbox.process.count` | gauge | count | Current sandbox process count |
+| `sandbox.rootfs.writable.usage` | gauge | bytes | Main runtime container writable-layer usage when the CRI reports it |
+| `sandbox.rootfs.writable.inodes` | gauge | count | Main runtime container writable-layer inodes when the CRI reports them |
+
+Each series contains zero or more continuous `segments`:
+
+- runtime resets and collection gaps start a new segment; clients must not connect lines across segments
+- typed `gaps` explain missing intervals
+- the response reports freshness, the effective `step_seconds`, and whether the result is `partial`
+- missing or unsupported observations are omitted and never synthesized as zero
+
+```typescript
+import { Client, SandboxRuntimeMetricName } from "sandbox0";
+
+const client = new Client({ token: process.env.SANDBOX0_TOKEN! });
+const metrics = await client.sandbox("sb_abc123").getMetrics({
+    startTime: new Date(Date.now() - 60 * 60 * 1000),
+    metrics: [
+        SandboxRuntimeMetricName.SandboxCpuUtilization,
+        SandboxRuntimeMetricName.SandboxMemoryWorkingSet,
+        SandboxRuntimeMetricName.SandboxNetworkIo,
+    ],
+    maxPoints: 120,
+});
+```
+
+## Historical Logs
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/observability/logs
+</Endpoint>
+
+Use this endpoint for retained logs. It is separate from the live output streams exposed by process and session APIs.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `start_time` | RFC3339 timestamp | Include entries that occurred at or after this time |
+| `end_time` | RFC3339 timestamp | Include entries that occurred at or before this time |
+| `limit` | integer | Maximum entries to return (default: 100, max: 1000) |
+| `cursor` | string | Opaque cursor from a previous response; in watch mode, use a `watermark` cursor |
+| `watch` | boolean | Stream matching records as NDJSON until the client disconnects |
+| `context_id` | string | Restrict results to one process context |
+| `stream` | string | `stdout`, `stderr`, or `pty` |
+
+## Audit Events
+
+<Endpoint method="GET">
+/api/v1/sandboxes/{'{id}'}/observability/events
+</Endpoint>
+
+The audit endpoint reads canonical signed facts from ClickHouse. It returns `403 feature_not_licensed` when audit is not enabled or the cluster-gateway license does not contain `sandbox_audit`.
+
+### Query Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `start_time` | RFC3339 timestamp | Include events that occurred at or after this time |
+| `end_time` | RFC3339 timestamp | Include events that occurred at or before this time |
+| `limit` | integer | Maximum events to return (default: 100, max: 1000); exact `event_id` lookup ignores it and returns at most two payload variants |
+| `cursor` | string | Opaque cursor from a previous response; in watch mode, use a `watermark` cursor |
+| `watch` | boolean | Stream matching records as NDJSON until the client disconnects |
+| `source` | string | Trusted producer, such as `cluster_gateway` or `netd`; `netd` identifies ctld network-runtime events |
+| `event_type` | string | Category such as `api_access` or `network_audit` |
+| `outcome` | string | `completed`, `denied`, `error`, `succeeded`, `failed`, `accepted`, or `unknown` |
+| `actor_kind` | string | Trusted actor kind, such as `human`, `api_key`, `service`, or `sandbox_workload` |
+| `actor_id` | string | Trusted user, API key, service, or workload identifier |
+| `action` | string | Stable action such as `sandbox.pause`, `process.exec`, `file.write`, or `network.connect` |
+| `resource_type` | string | Resource category such as `sandbox` or `sandbox_network` |
+| `operation_id` | string | Correlates the attempt and result of one operation |
+| `event_id` | UUID | Exact lookup for one stable audit ID; cannot be combined with time, cursor, watch, or other event filters |
+
+### Event Model And Integrity
+
+| Field | Meaning |
+|-------|---------|
+| `event_id` | Stable UUID for the audit fact |
+| `phase` | `attempt`, `result`, or `effect` |
+| `actor`, `action`, `resource` | Who acted, what they did, and the affected resource |
+| `producer` | Trusted service and producer sequence |
+| `operation_id` | Correlation ID shared by facts from the same operation |
+| `request` | Bounded request metadata |
+| `integrity.payload_hash` | Canonical SHA-256 payload digest |
+| `integrity.signature` | Ed25519 signature |
+| `integrity.signing_key_id` | Signing key identifier |
+| `integrity.signature_status` | Query-time result: `verified`, `invalid`, or `unavailable` |
+
+List and watch responses recompute each returned row's digest and verify its signature. An exact `event_id` lookup also detects reused IDs:
+
+- one canonical payload returns one row
+- conflicting payload hashes return at most two variants and set `event_id_conflict=true`
+- `event_id_conflict` does not replace `signature_status`, so callers can distinguish an ID collision from a signature failure
+
+Pagination cursors and watch watermarks are response metadata. They are not repeated inside each signed event.
+
+### Audit Delivery
+
+Gateway operations produce an `attempt` before authorization or execution and a `result` after the downstream response or a failed admission decision.
+
+| Operation | `durable_async` | `canonical_sync` |
+|-----------|-----------------|------------------|
+| Non-mutating Sandbox API and public exposure | May proceed after local durable enqueue; ClickHouse visibility follows asynchronously | Waits for ClickHouse to acknowledge the attempt before proceeding |
+| New allowed network flow | Opens after the ctld node-local spool fsyncs the attempt | Waits for ClickHouse acknowledgement before opening, including server-first SSH probes |
+| State-changing Sandbox API | Always waits for ClickHouse acknowledgement before execution and before returning the signed result | Same strict behavior |
+
+The default `durable_async` path normally becomes query-visible after immediate delivery wakeups and the one-second flush/replay cycle. It is not a read-after-write guarantee.
+
+Failure behavior is fail-closed at the applicable admission boundary:
+
+| Failure | Caller-visible behavior |
+|---------|-------------------------|
+| Local buffer cannot accept an event | Sandbox0 tries synchronous canonical delivery; the operation is denied if that also fails |
+| Canonical admission fails for a mutation | The downstream operation is not executed; the caller receives `503` |
+| A mutation executes but its result is only buffered for retry | The caller receives `503`, not a success response |
+| A downstream `5xx` or panic has an uncertain execution result | The audit result uses `outcome=unknown` |
+| ClickHouse is unavailable in `durable_async` | Eligible traffic can continue while the durable buffer remains writable, but audit queries lag until replay succeeds |
+| ClickHouse is unavailable in `canonical_sync` | New audited operations and flows fail closed |
+
+A failed canonical mutation admission records a correlated result when result custody succeeds:
+
+| Field | Value |
+|-------|-------|
+| `outcome` | `failed` |
+| HTTP status | `503` |
+| `execution_started` | `false` |
+| `operation_executed` | `false` |
+| `failure_stage` | `canonical_audit_admission` |
+| `failure_code` | `canonical_ack_unavailable` |
+
+If terminal-result custody also fails, the response reports `audit_result=unrecorded`. Investigate the surviving attempt as an audit-completeness incident, not evidence that the operation ran.
+
+### Network Flow Events
+
+Network audit records the connection lifecycle:
+
+- an allowed flow has one attempt and one result when the flow closes
+- a long-lived keep-alive connection therefore has one allow attempt and one eventual flow result
+- parsed HTTP or MCP operations may appear in bounded protocol details rather than as separate connections
+- raw proxy and credential-resolution errors stay in local diagnostics because they may contain upstream or credential details
+
+## Watch Logs Or Events
+
+Set `watch=true` on the logs or events endpoint to receive `application/x-ndjson` in ingestion order.
+
+| Line type | Meaning |
+|-----------|---------|
+| `event` or `log` | One matching record |
+| `watermark` | Resume cursor for a later watch request |
+| `heartbeat` | Keeps an idle stream active |
+| `error` | Backend failure after streaming started; the stream then ends |
+
+Watch behavior:
+
+- without `cursor` or `start_time`, the stream starts at request time and does not replay history
+- `end_time` is not supported with `watch=true`
+- runtime metrics use bounded time-series queries and do not expose a watch mode
+
+## Storage And Coverage
+
+ClickHouse is the only audit read source. Fsync-backed buffers retain pending events for retry, but buffered events are invisible to list and watch queries until ClickHouse acknowledges them. Logs and runtime samples use separate historical projections with independent retention periods.
+
+Current producers are:
+
+- cluster-gateway for authenticated Sandbox API access, including regional detail requests
+- the ctld network runtime for network attempts and results
+- manager for historical logs
+- node-local ctld collectors for sandbox-wide CRI runtime samples, collected every 15 seconds with jitter
+
+Historical queries return `503` when their backend is disabled or unavailable. The static metric catalog remains available so clients can build selectors without probing storage.
+
+### Coverage Limits
+
+- Metering windows remain separate usage-ledger records for quota, showback, and billing export.
+- `process.*` and `file.*` facts prove authenticated gateway requests and their HTTP results. They do not observe every process effect, SSH/SFTP command, POSIX write, direct SandboxVolume operation, or manager-initiated reconciliation.
+- Public exposure streams and WebSockets record a durable open attempt, but abrupt node or process loss can prevent the eventual close result.
+- Cluster-gateway pending events require reattachable durable storage. Node-local network-flow buffers survive same-node Pod restarts, not permanent node loss.
+- Per-row signatures detect modified returned facts. They do not prove that a privileged ClickHouse administrator never deleted a row.
+
+Deployments that require completeness across node loss should preserve audit signing public keys and export signed facts or checkpoints to independently controlled immutable storage. See [Self-hosted Observability](/docs/sandbox/self-hosted/observability) for ClickHouse, retention, delivery persistence, and signing-key configuration.

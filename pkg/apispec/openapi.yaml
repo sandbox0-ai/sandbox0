@@ -5218,11 +5218,13 @@ components:
         expires_at:
           type: string
           format: date-time
-          description: Soft expiration timestamp. Zero value means not set.
+          nullable: true
+          description: Soft expiration timestamp. Null means disabled or not set.
         hard_expires_at:
           type: string
           format: date-time
-          description: Hard expiration timestamp. Zero value means not set.
+          nullable: true
+          description: Hard expiration timestamp. Null means disabled or not set.
         claimed_at:
           type: string
           format: date-time
@@ -5322,8 +5324,12 @@ components:
           type: string
         expires_at:
           type: string
+          format: date-time
+          nullable: true
         hard_expires_at:
           type: string
+          format: date-time
+          nullable: true
         created_at:
           type: string
     SuccessSandboxResponse:
@@ -5483,10 +5489,13 @@ components:
         expires_at:
           type: string
           format: date-time
+          nullable: true
+          description: Soft expiration timestamp. Null means disabled or not set.
         hard_expires_at:
           type: string
           format: date-time
-          description: Hard expiration timestamp. Zero value means not set.
+          nullable: true
+          description: Hard expiration timestamp. Null means disabled or not set.
         updated_at:
           type: string
           format: date-time
@@ -6108,10 +6117,13 @@ components:
         expires_at:
           type: string
           format: date-time
+          nullable: true
+          description: Soft expiration timestamp. Null means disabled or not set.
         hard_expires_at:
           type: string
           format: date-time
-          description: Hard expiration timestamp. Zero value means not set.
+          nullable: true
+          description: Hard expiration timestamp. Null means disabled or not set.
       required: [sandbox_id, expires_at, hard_expires_at]
     SuccessRefreshResponse:
       allOf:

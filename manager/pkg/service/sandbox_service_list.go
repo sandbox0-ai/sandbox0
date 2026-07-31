@@ -30,15 +30,15 @@ type ListSandboxesResponse struct {
 
 // SandboxSummary represents a summary of a sandbox for listing
 type SandboxSummary struct {
-	ID                string    `json:"id"`
-	TemplateID        string    `json:"template_id"`
-	Status            string    `json:"status"`
-	Paused            bool      `json:"paused"`
-	RuntimeGeneration int64     `json:"runtime_generation"`
-	CreatedAt         time.Time `json:"created_at"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	HardExpiresAt     time.Time `json:"hard_expires_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                string     `json:"id"`
+	TemplateID        string     `json:"template_id"`
+	Status            string     `json:"status"`
+	Paused            bool       `json:"paused"`
+	RuntimeGeneration int64      `json:"runtime_generation"`
+	CreatedAt         time.Time  `json:"created_at"`
+	ExpiresAt         *time.Time `json:"expires_at"`
+	HardExpiresAt     *time.Time `json:"hard_expires_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 // ListSandboxes lists all sandboxes for a team with optional filters
@@ -110,8 +110,8 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 			Paused:            paused,
 			RuntimeGeneration: runtimeGenerationFromPod(pod),
 			CreatedAt:         pod.CreationTimestamp.Time,
-			ExpiresAt:         expiresAt,
-			HardExpiresAt:     hardExpiresAt,
+			ExpiresAt:         optionalTime(expiresAt),
+			HardExpiresAt:     optionalTime(hardExpiresAt),
 			UpdatedAt:         pod.CreationTimestamp.Time,
 		})
 	}

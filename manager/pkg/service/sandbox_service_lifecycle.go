@@ -1259,8 +1259,8 @@ func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *Sandbo
 		Mounts:            parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
 		PodName:           pod.Name,
 		RuntimeGeneration: runtimeGenerationFromPod(pod),
-		ExpiresAt:         expiresAt,
-		HardExpiresAt:     hardExpiresAt,
+		ExpiresAt:         optionalTime(expiresAt),
+		HardExpiresAt:     optionalTime(hardExpiresAt),
 		ClaimedAt:         claimedAt,
 		CreatedAt:         createdAt,
 		UpdatedAt:         createdAt,
@@ -1288,8 +1288,8 @@ func (s *SandboxService) recordToSandbox(record *SandboxRecord) *Sandbox {
 		Mounts:            record.Mounts,
 		PodName:           record.CurrentPodName,
 		RuntimeGeneration: record.RuntimeGeneration,
-		ExpiresAt:         record.ExpiresAt,
-		HardExpiresAt:     record.HardExpiresAt,
+		ExpiresAt:         optionalTime(record.ExpiresAt),
+		HardExpiresAt:     optionalTime(record.HardExpiresAt),
 		ClaimedAt:         record.ClaimedAt,
 		CreatedAt:         record.CreatedAt,
 		UpdatedAt:         record.UpdatedAt,
@@ -1430,8 +1430,8 @@ func (s *SandboxService) GetSandboxStatus(ctx context.Context, sandboxID string)
 		"pod_name":        sandbox.PodName,
 		"status":          sandbox.Status,
 		"claimed_at":      sandbox.ClaimedAt.Format(time.RFC3339),
-		"expires_at":      sandbox.ExpiresAt.Format(time.RFC3339),
-		"hard_expires_at": sandbox.HardExpiresAt.Format(time.RFC3339),
+		"expires_at":      sandbox.ExpiresAt,
+		"hard_expires_at": sandbox.HardExpiresAt,
 		"created_at":      sandbox.CreatedAt.Format(time.RFC3339),
 	}
 
@@ -1445,9 +1445,9 @@ type RefreshRequest struct {
 
 // RefreshResponse represents a sandbox refresh response
 type RefreshResponse struct {
-	SandboxID     string    `json:"sandbox_id"`
-	ExpiresAt     time.Time `json:"expires_at"`
-	HardExpiresAt time.Time `json:"hard_expires_at"`
+	SandboxID     string     `json:"sandbox_id"`
+	ExpiresAt     *time.Time `json:"expires_at"`
+	HardExpiresAt *time.Time `json:"hard_expires_at"`
 }
 
 // RefreshSandbox refreshes the TTL and HardTTL of a sandbox
@@ -1547,7 +1547,7 @@ func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, r
 
 	return &RefreshResponse{
 		SandboxID:     sandboxID,
-		ExpiresAt:     newExpiresAt,
-		HardExpiresAt: newHardExpiresAt,
+		ExpiresAt:     optionalTime(newExpiresAt),
+		HardExpiresAt: optionalTime(newHardExpiresAt),
 	}, nil
 }

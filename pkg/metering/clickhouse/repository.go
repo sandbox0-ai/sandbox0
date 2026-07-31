@@ -16,6 +16,7 @@ const (
 	dateTime64NanoPlaceholder         = "fromUnixTimestamp64Nano(?, 'UTC')"
 	nullableDateTime64NanoPlaceholder = "if(toUInt8(?), fromUnixTimestamp64Nano(?, 'UTC'), NULL)"
 	maxMeteringInsertBatchSize        = 500
+	maxWindowDetailBatchSize          = 200
 	meteringInsertReliabilitySettings = " SETTINGS async_insert = 0, wait_for_async_insert = 1"
 )
 
@@ -505,9 +506,161 @@ func (r *Repository) listWindows(ctx context.Context, teamID string, windowType 
 	if err != nil {
 		return nil, "", err
 	}
-	where, args := windowWhere(teamID, windowType, decoded)
+	keys, err := r.listWindowKeys(ctx, teamID, windowType, decoded, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(keys) == 0 {
+		return []*metering.Window{}, "", nil
+	}
+	details, err := r.loadWindowDetails(ctx, keys)
+	if err != nil {
+		return nil, "", err
+	}
+
+	windows := make([]*metering.Window, 0, len(keys))
+	for _, key := range keys {
+		window, ok := details[key.identity()]
+		if !ok {
+			return nil, "", fmt.Errorf(
+				"usage window %q from producer %q disappeared while loading its selected version",
+				key.WindowID,
+				key.Producer,
+			)
+		}
+		if !window.RecordedAt.Equal(key.RecordedAt) {
+			return nil, "", fmt.Errorf(
+				"usage window %q from producer %q changed while loading its selected version",
+				key.WindowID,
+				key.Producer,
+			)
+		}
+		if teamID != "" && window.TeamID != teamID {
+			return nil, "", fmt.Errorf(
+				"usage window %q from producer %q changed team while loading its selected version",
+				key.WindowID,
+				key.Producer,
+			)
+		}
+		if windowType != "" && window.WindowType != windowType {
+			return nil, "", fmt.Errorf(
+				"usage window %q from producer %q changed type while loading its selected version",
+				key.WindowID,
+				key.Producer,
+			)
+		}
+		windows = append(windows, window)
+	}
+	next, err := nextWindowCursor(windows)
+	if err != nil {
+		return nil, "", err
+	}
+	return windows, next, nil
+}
+
+type windowLookupIdentity struct {
+	RegionID string
+	Producer string
+	WindowID string
+}
+
+type windowLookupKey struct {
+	RecordedAt time.Time
+	RegionID   string
+	Producer   string
+	WindowID   string
+	Version    uint64
+}
+
+func (k windowLookupKey) identity() windowLookupIdentity {
+	return windowLookupIdentity{
+		RegionID: k.RegionID,
+		Producer: k.Producer,
+		WindowID: k.WindowID,
+	}
+}
+
+// listWindowKeys keeps FINAL limited to the narrow cursor and primary-key
+// columns. Selecting the full row under FINAL makes ClickHouse retain hundreds
+// of MiB while resolving ReplacingMergeTree versions.
+func (r *Repository) listWindowKeys(
+	ctx context.Context,
+	teamID string,
+	windowType string,
+	cursor *pageCursor,
+	limit int,
+) ([]windowLookupKey, error) {
+	where, args := windowWhere(teamID, windowType, cursor)
 	args = append(args, limit)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+SELECT
+    recorded_at, region_id, producer, window_id, version
+FROM %s FINAL
+%s
+ORDER BY recorded_at ASC, producer ASC, window_id ASC
+LIMIT ?
+`, qualified(r.cfg.Database, r.cfg.WindowsTable), where), args...)
+	if err != nil {
+		return nil, fmt.Errorf("query usage window keys: %w", err)
+	}
+	defer rows.Close()
+
+	keys := make([]windowLookupKey, 0, limit)
+	seen := make(map[windowLookupIdentity]struct{}, limit)
+	for rows.Next() {
+		key := windowLookupKey{}
+		if err := rows.Scan(
+			&key.RecordedAt,
+			&key.RegionID,
+			&key.Producer,
+			&key.WindowID,
+			&key.Version,
+		); err != nil {
+			return nil, fmt.Errorf("scan usage window key: %w", err)
+		}
+		identity := key.identity()
+		if _, ok := seen[identity]; ok {
+			return nil, fmt.Errorf(
+				"usage window key %q from producer %q is duplicated after FINAL",
+				key.WindowID,
+				key.Producer,
+			)
+		}
+		seen[identity] = struct{}{}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate usage window keys: %w", err)
+	}
+	return keys, nil
+}
+
+// loadWindowDetails reads raw primary-key ranges in bounded batches and
+// selects exactly the version chosen by the FINAL key query. Avoiding FINAL on
+// the wide row set bounds memory without allowing a concurrent replacement to
+// advance the export cursor past an unseen version.
+func (r *Repository) loadWindowDetails(
+	ctx context.Context,
+	keys []windowLookupKey,
+) (map[windowLookupIdentity]*metering.Window, error) {
+	details := make(map[windowLookupIdentity]*metering.Window, len(keys))
+	for offset := 0; offset < len(keys); offset += maxWindowDetailBatchSize {
+		end := min(offset+maxWindowDetailBatchSize, len(keys))
+		batch := keys[offset:end]
+		expectedVersions := make(map[windowLookupIdentity]uint64, len(batch))
+		var predicates strings.Builder
+		args := make([]any, 0, len(batch)*3)
+		for index, key := range batch {
+			identity := key.identity()
+			expectedVersions[identity] = key.Version
+			if index > 0 {
+				predicates.WriteString(", ")
+			}
+			predicates.WriteString("(?, ?, ?)")
+			args = append(args, key.RegionID, key.Producer, key.WindowID)
+		}
+
+		rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 SELECT
     sequence, window_id, producer, region_id, window_type,
     subject_type, subject_id,
@@ -515,43 +668,55 @@ SELECT
     sandbox_id, volume_id, snapshot_id,
     template_id, cluster_id,
     window_start, window_end,
-    value, unit, recorded_at, data
-FROM %s FINAL
-%s
-ORDER BY recorded_at ASC, producer ASC, window_id ASC
-LIMIT ?
-`, qualified(r.cfg.Database, r.cfg.WindowsTable), where), args...)
-	if err != nil {
-		return nil, "", fmt.Errorf("query usage windows: %w", err)
-	}
-	defer rows.Close()
-
-	windows := make([]*metering.Window, 0, limit)
-	for rows.Next() {
-		window := &metering.Window{}
-		var data string
-		if err := rows.Scan(
-			&window.Sequence, &window.WindowID, &window.Producer, &window.RegionID, &window.WindowType,
-			&window.SubjectType, &window.SubjectID,
-			&window.TeamID, &window.UserID,
-			&window.SandboxID, &window.VolumeID, &window.SnapshotID,
-			&window.TemplateID, &window.ClusterID,
-			&window.WindowStart, &window.WindowEnd,
-			&window.Value, &window.Unit, &window.RecordedAt, &data,
-		); err != nil {
-			return nil, "", fmt.Errorf("scan usage window: %w", err)
+    value, unit, recorded_at, data, version
+FROM %s
+WHERE (region_id, producer, window_id) IN (%s)
+ORDER BY region_id ASC, producer ASC, window_id ASC, version DESC
+`, qualified(r.cfg.Database, r.cfg.WindowsTable), predicates.String()), args...)
+		if err != nil {
+			return nil, fmt.Errorf("query usage window details: %w", err)
 		}
-		window.Data = json.RawMessage(data)
-		windows = append(windows, window)
+
+		for rows.Next() {
+			window := &metering.Window{}
+			var data string
+			var version uint64
+			if err := rows.Scan(
+				&window.Sequence, &window.WindowID, &window.Producer, &window.RegionID, &window.WindowType,
+				&window.SubjectType, &window.SubjectID,
+				&window.TeamID, &window.UserID,
+				&window.SandboxID, &window.VolumeID, &window.SnapshotID,
+				&window.TemplateID, &window.ClusterID,
+				&window.WindowStart, &window.WindowEnd,
+				&window.Value, &window.Unit, &window.RecordedAt, &data, &version,
+			); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan usage window detail: %w", err)
+			}
+			identity := windowLookupIdentity{
+				RegionID: window.RegionID,
+				Producer: window.Producer,
+				WindowID: window.WindowID,
+			}
+			expectedVersion, ok := expectedVersions[identity]
+			if !ok || version != expectedVersion {
+				continue
+			}
+			if _, ok := details[identity]; ok {
+				continue
+			}
+			window.Data = json.RawMessage(data)
+			details[identity] = window
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("iterate usage window details: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close usage window details: %w", err)
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("iterate usage windows: %w", err)
-	}
-	next, err := nextWindowCursor(windows)
-	if err != nil {
-		return nil, "", err
-	}
-	return windows, next, nil
+	return details, nil
 }
 
 func windowWhere(teamID string, windowType string, cursor *pageCursor) (string, []any) {

@@ -81,6 +81,10 @@ ORDER BY (region_id, producer, window_id)
 `, windows),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS sequence Int64 DEFAULT 0", events),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS sequence Int64 DEFAULT 0", windows),
+		fmt.Sprintf(
+			"ALTER TABLE %s ADD INDEX IF NOT EXISTS usage_windows_recorded_at_minmax recorded_at TYPE minmax GRANULARITY 1",
+			windows,
+		),
 		fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     producer String,

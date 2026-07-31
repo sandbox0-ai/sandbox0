@@ -2715,6 +2715,15 @@ spec:
                       NodeSelector constrains sandbox workloads and node-local sandbox services
                       onto a specific node set.
                     type: object
+                  preferredNodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      PreferredNodeSelector gives manager-created sandbox Pods a soft scheduling
+                      preference for nodes matching all labels. Hot claims use the same selector
+                      when choosing among already scheduled idle Pods. Node-local services do not
+                      consume this preference.
+                    type: object
                   tolerations:
                     description: |-
                       Tolerations allow sandbox workloads and node-local sandbox services to run

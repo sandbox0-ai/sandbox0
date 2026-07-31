@@ -15,6 +15,7 @@ func (s *SandboxService) reserveIdleClaimCandidate(candidates []*corev1.Pod) *co
 	if s == nil || len(candidates) == 0 {
 		return nil
 	}
+	candidateGroups := s.idleClaimCandidateGroups(candidates)
 
 	s.idleClaimMu.Lock()
 	defer s.idleClaimMu.Unlock()
@@ -22,24 +23,63 @@ func (s *SandboxService) reserveIdleClaimCandidate(candidates []*corev1.Pod) *co
 		s.idleClaimReservations = make(map[string]string)
 	}
 
-	start := rand.Intn(len(candidates))
-	for offset := range len(candidates) {
-		candidate := candidates[(start+offset)%len(candidates)]
-		if candidate == nil {
+	for _, group := range candidateGroups {
+		if len(group) == 0 {
 			continue
 		}
-		key := podEventKey(candidate.Namespace, candidate.Name)
-		uid := string(candidate.UID)
-		if reservedUID, reserved := s.idleClaimReservations[key]; reserved {
-			if reservedUID == "" || uid == "" || reservedUID == uid {
+		start := rand.Intn(len(group))
+		for offset := range len(group) {
+			candidate := group[(start+offset)%len(group)]
+			if candidate == nil {
 				continue
 			}
-			delete(s.idleClaimReservations, key)
+			key := podEventKey(candidate.Namespace, candidate.Name)
+			uid := string(candidate.UID)
+			if reservedUID, reserved := s.idleClaimReservations[key]; reserved {
+				if reservedUID == "" || uid == "" || reservedUID == uid {
+					continue
+				}
+				delete(s.idleClaimReservations, key)
+			}
+			s.idleClaimReservations[key] = uid
+			return candidate
 		}
-		s.idleClaimReservations[key] = uid
-		return candidate
 	}
 	return nil
+}
+
+func (s *SandboxService) idleClaimCandidateGroups(candidates []*corev1.Pod) [][]*corev1.Pod {
+	if len(s.config.PreferredNodeSelector) == 0 || s.nodeLister == nil {
+		return [][]*corev1.Pod{candidates}
+	}
+
+	preferred := make([]*corev1.Pod, 0, len(candidates))
+	fallback := make([]*corev1.Pod, 0, len(candidates))
+	for _, candidate := range candidates {
+		if s.idleClaimCandidateMatchesPreferredNode(candidate) {
+			preferred = append(preferred, candidate)
+			continue
+		}
+		fallback = append(fallback, candidate)
+	}
+	return [][]*corev1.Pod{preferred, fallback}
+}
+
+func (s *SandboxService) idleClaimCandidateMatchesPreferredNode(candidate *corev1.Pod) bool {
+	if candidate == nil || candidate.Spec.NodeName == "" || s.nodeLister == nil {
+		return false
+	}
+	node, err := s.nodeLister.Get(candidate.Spec.NodeName)
+	if err != nil || node == nil {
+		return false
+	}
+	for key, value := range s.config.PreferredNodeSelector {
+		nodeValue, exists := node.Labels[key]
+		if !exists || nodeValue != value {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *SandboxService) releaseIdleClaimCandidate(pod *corev1.Pod) {

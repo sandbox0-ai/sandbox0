@@ -35,6 +35,7 @@ const (
 	minSandboxMemoryRequestBytes                     = int64(64 * 1024 * 1024)
 	minSandboxEphemeralStorageRequestBytes           = int64(64 * 1024 * 1024)
 	defaultIdleSandboxMemoryLimitBytes               = int64(128 * 1024 * 1024)
+	defaultPreferredNodeAffinityWeight               = int32(100)
 
 	// MinimumSandboxCPULimitMilli is the CPU limit floor for every sandbox pod.
 	MinimumSandboxCPULimitMilli = int64(150)
@@ -101,6 +102,42 @@ func applyDefaultSandboxPlacement(spec *corev1.PodSpec) {
 
 	spec.NodeSelector = mergeNodeSelectors(spec.NodeSelector, cfg.SandboxPodPlacement.NodeSelector)
 	spec.Tolerations = mergeTolerations(spec.Tolerations, cfg.SandboxPodPlacement.Tolerations)
+	applyPreferredNodeSelector(spec, cfg.SandboxPodPlacement.PreferredNodeSelector)
+}
+
+func applyPreferredNodeSelector(spec *corev1.PodSpec, selector map[string]string) {
+	if spec == nil || len(selector) == 0 {
+		return
+	}
+	if spec.Affinity == nil {
+		spec.Affinity = &corev1.Affinity{}
+	}
+	if spec.Affinity.NodeAffinity == nil {
+		spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+	}
+
+	keys := make([]string, 0, len(selector))
+	for key := range selector {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	requirements := make([]corev1.NodeSelectorRequirement, 0, len(keys))
+	for _, key := range keys {
+		requirements = append(requirements, corev1.NodeSelectorRequirement{
+			Key:      key,
+			Operator: corev1.NodeSelectorOpIn,
+			Values:   []string{selector[key]},
+		})
+	}
+	spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution = append(
+		spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution,
+		corev1.PreferredSchedulingTerm{
+			Weight: defaultPreferredNodeAffinityWeight,
+			Preference: corev1.NodeSelectorTerm{
+				MatchExpressions: requirements,
+			},
+		},
+	)
 }
 
 func configuredSandboxRuntimeClassName() *string {

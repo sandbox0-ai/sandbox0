@@ -267,6 +267,9 @@ func TestResolveSandboxNodePlacementUsesSharedPlacement(t *testing.T) {
 				NodeSelector: map[string]string{
 					"sandbox0.ai/node-role": "shared",
 				},
+				PreferredNodeSelector: map[string]string{
+					"sandbox0.ai/capacity-type": "fixed",
+				},
 				Tolerations: []corev1.Toleration{
 					{
 						Key:      "sandbox0.ai/sandbox",
@@ -285,6 +288,10 @@ func TestResolveSandboxNodePlacementUsesSharedPlacement(t *testing.T) {
 	}
 	if len(tolerations) != 1 || tolerations[0].Key != "sandbox0.ai/sandbox" {
 		t.Fatalf("expected shared tolerations, got %#v", tolerations)
+	}
+	preferred := ResolveSandboxPodPreferredNodeSelector(infra)
+	if got := preferred["sandbox0.ai/capacity-type"]; got != "fixed" {
+		t.Fatalf("expected fixed preferred node selector, got %q", got)
 	}
 }
 

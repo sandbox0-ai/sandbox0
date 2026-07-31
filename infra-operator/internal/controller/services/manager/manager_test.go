@@ -53,6 +53,9 @@ func TestCompilePlanSandboxPodPlacementPrefersSharedPlacement(t *testing.T) {
 				NodeSelector: map[string]string{
 					"sandbox0.ai/node-role": "shared",
 				},
+				PreferredNodeSelector: map[string]string{
+					"sandbox0.ai/capacity-type": "fixed",
+				},
 				Tolerations: []corev1.Toleration{
 					{
 						Key:      "sandbox0.ai/sandbox",
@@ -71,6 +74,9 @@ func TestCompilePlanSandboxPodPlacementPrefersSharedPlacement(t *testing.T) {
 	}
 	if len(placement.Tolerations) != 1 || placement.Tolerations[0].Key != "sandbox0.ai/sandbox" {
 		t.Fatalf("expected shared tolerations, got %#v", placement.Tolerations)
+	}
+	if got := placement.PreferredNodeSelector["sandbox0.ai/capacity-type"]; got != "fixed" {
+		t.Fatalf("expected fixed preferred placement, got %q", got)
 	}
 }
 

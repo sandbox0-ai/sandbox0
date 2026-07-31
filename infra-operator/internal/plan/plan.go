@@ -369,6 +369,7 @@ func compileSchedulerHomeCluster(infra *infrav1alpha1.Sandbox0Infra, compiled *I
 func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) ManagerPlan {
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	nodeSelector = withDataPlaneReadyNodeSelector(nodeSelector, compiled)
+	preferredNodeSelector := common.ResolveSandboxPodPreferredNodeSelector(infra)
 	templateStoreEnabled := clusterGatewayAuthMode(infra) != defaultClusterGatewayAuthMode
 	if infrav1alpha1.IsRegionalGatewayEnabled(infra) && !infrav1alpha1.IsSchedulerEnabled(infra) {
 		templateStoreEnabled = true
@@ -380,8 +381,9 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 		TemplateStoreEnabled:  templateStoreEnabled,
 		NetworkPolicyProvider: "noop",
 		SandboxPodPlacement: apiconfig.SandboxPodPlacementConfig{
-			NodeSelector: nodeSelector,
-			Tolerations:  tolerations,
+			NodeSelector:          nodeSelector,
+			PreferredNodeSelector: preferredNodeSelector,
+			Tolerations:           tolerations,
 		},
 	}
 

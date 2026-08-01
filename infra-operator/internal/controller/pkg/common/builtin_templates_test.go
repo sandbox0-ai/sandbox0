@@ -38,22 +38,7 @@ func TestBuildBuiltinTemplateSpecUsesDefaultPreset(t *testing.T) {
 	if mount.Name != template.DefaultTemplateWorkspaceName || mount.MountPath != template.DefaultTemplateWorkspaceMount || mount.ReadOnly {
 		t.Fatalf("volumeMounts[0] = %#v, want writable %s at %s", mount, template.DefaultTemplateWorkspaceName, template.DefaultTemplateWorkspaceMount)
 	}
-	if spec.MainContainer.SecurityContext == nil || spec.MainContainer.SecurityContext.Privileged == nil || !*spec.MainContainer.SecurityContext.Privileged {
-		t.Fatalf("expected privileged security context, got %#v", spec.MainContainer.SecurityContext)
-	}
-	if spec.MainContainer.SecurityContext.AllowPrivilegeEscalation == nil || !*spec.MainContainer.SecurityContext.AllowPrivilegeEscalation {
-		t.Fatalf("expected allowPrivilegeEscalation=true, got %#v", spec.MainContainer.SecurityContext)
-	}
-	if spec.Pod == nil || len(spec.Pod.EmptyDirMounts) != 1 {
-		t.Fatalf("expected one emptyDir mount, got %#v", spec.Pod)
-	}
-	dockerRoot := spec.Pod.EmptyDirMounts[0]
-	if dockerRoot.MountPath != template.DefaultTemplateDockerRoot {
-		t.Fatalf("emptyDir mount path = %q, want %q", dockerRoot.MountPath, template.DefaultTemplateDockerRoot)
-	}
-	if dockerRoot.SizeLimit == nil || dockerRoot.SizeLimit.Cmp(resource.MustParse(template.DefaultTemplateDockerRootSize)) != 0 {
-		t.Fatalf("emptyDir sizeLimit = %#v, want %s", dockerRoot.SizeLimit, template.DefaultTemplateDockerRootSize)
-	}
+	assertDockerRuntimeShape(t, spec, template.DefaultTemplateEphemeralStorage)
 }
 
 func TestBuildBuiltinTemplateSpecDoesNotAddDefaultRuntimeShapeToGenericPreset(t *testing.T) {
@@ -100,11 +85,9 @@ func TestBuildBuiltinTemplateSpecUsesCodingAgentPreset(t *testing.T) {
 	}
 	security := spec.MainContainer.SecurityContext
 	if security == nil || security.RunAsUser == nil || *security.RunAsUser != 0 || security.RunAsNonRoot == nil || *security.RunAsNonRoot {
-		t.Fatalf("securityContext = %#v, want root without privileged mode", security)
+		t.Fatalf("securityContext = %#v, want root", security)
 	}
-	if security.Privileged != nil || security.AllowPrivilegeEscalation != nil {
-		t.Fatalf("securityContext = %#v, want no privileged settings", security)
-	}
+	assertDockerRuntimeShape(t, spec, template.CodingAgentEphemeralStorage)
 	for key, want := range map[string]string{
 		"DISABLE_AUTOUPDATER":         "1",
 		"HOME":                        template.DefaultTemplateWorkspaceMount,
@@ -121,6 +104,27 @@ func TestBuildBuiltinTemplateSpecUsesCodingAgentPreset(t *testing.T) {
 	}
 	if spec.Network == nil || spec.Network.Mode != templatev1alpha1.NetworkModeAllowAll {
 		t.Fatalf("network = %#v, want allow-all", spec.Network)
+	}
+}
+
+func assertDockerRuntimeShape(t *testing.T, spec templatev1alpha1.SandboxTemplateSpec, wantSize string) {
+	t.Helper()
+	security := spec.MainContainer.SecurityContext
+	if security == nil || security.Privileged == nil || !*security.Privileged {
+		t.Fatalf("expected privileged security context, got %#v", security)
+	}
+	if security.AllowPrivilegeEscalation == nil || !*security.AllowPrivilegeEscalation {
+		t.Fatalf("expected allowPrivilegeEscalation=true, got %#v", security)
+	}
+	if spec.Pod == nil || len(spec.Pod.EmptyDirMounts) != 1 {
+		t.Fatalf("expected one Docker emptyDir mount, got %#v", spec.Pod)
+	}
+	dockerRoot := spec.Pod.EmptyDirMounts[0]
+	if dockerRoot.MountPath != template.DockerDataRootMount {
+		t.Fatalf("emptyDir mount path = %q, want %q", dockerRoot.MountPath, template.DockerDataRootMount)
+	}
+	if dockerRoot.SizeLimit == nil || dockerRoot.SizeLimit.Cmp(resource.MustParse(wantSize)) != 0 {
+		t.Fatalf("emptyDir sizeLimit = %#v, want %s", dockerRoot.SizeLimit, wantSize)
 	}
 }
 

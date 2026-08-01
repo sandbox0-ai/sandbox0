@@ -2,11 +2,30 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 )
+
+type testTeamCreationHook struct {
+	before func(context.Context, pgx.Tx, *Team) error
+	after  func(context.Context, *Team)
+}
+
+func (h testTeamCreationHook) BeforeTeamCreateCommit(
+	ctx context.Context,
+	tx pgx.Tx,
+	team *Team,
+) error {
+	return h.before(ctx, tx, team)
+}
+
+func (h testTeamCreationHook) AfterTeamCreateCommit(ctx context.Context, team *Team) {
+	h.after(ctx, team)
+}
 
 func TestTeamRepositoryAllowsDuplicateNamesAndSlugs(t *testing.T) {
 	pool, _ := newGatewayIdentityTestPool(t)
@@ -112,6 +131,82 @@ func TestTeamRepositoryCreateTeamWithMemberIsAtomic(t *testing.T) {
 	}
 	if rolledBackCount != 0 {
 		t.Fatalf("rolled back team count = %d, want 0", rolledBackCount)
+	}
+}
+
+func TestTeamCreationHookCoversRepositoryCreationPaths(t *testing.T) {
+	pool, _ := newGatewayIdentityTestPool(t)
+	if pool == nil {
+		return
+	}
+
+	ctx := context.Background()
+	var beforeIDs []string
+	var afterIDs []string
+	wantFailure := errors.New("provisioning failed")
+	hook := testTeamCreationHook{
+		before: func(ctx context.Context, tx pgx.Tx, team *Team) error {
+			if team.Name == "Rejected Team" {
+				return wantFailure
+			}
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM teams WHERE id = $1)`, team.ID).
+				Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return errors.New("team is not visible inside its creation transaction")
+			}
+			beforeIDs = append(beforeIDs, team.ID)
+			return nil
+		},
+		after: func(ctx context.Context, team *Team) {
+			var exists bool
+			if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM teams WHERE id = $1)`, team.ID).
+				Scan(&exists); err != nil || !exists {
+				t.Errorf("team is not committed before post-commit hook: exists=%t err=%v", exists, err)
+			}
+			afterIDs = append(afterIDs, team.ID)
+		},
+	}
+	repo := NewRepository(pool, WithTeamCreationHook(hook))
+
+	owner := &User{Email: "team-hook-owner@example.com", Name: "Hook Owner"}
+	if err := repo.CreateUser(ctx, owner); err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	ownerID := owner.ID
+	direct := &Team{Name: "Direct Team", OwnerID: &ownerID}
+	if err := repo.CreateTeam(ctx, direct); err != nil {
+		t.Fatalf("create direct team: %v", err)
+	}
+
+	withMember := &Team{Name: "Member Team", OwnerID: &ownerID}
+	member := &TeamMember{UserID: owner.ID, Role: "admin"}
+	if err := repo.CreateTeamWithMember(ctx, withMember, member); err != nil {
+		t.Fatalf("create team with member: %v", err)
+	}
+
+	registered := &User{Email: "team-hook-register@example.com", Name: "Registered"}
+	if _, _, err := repo.CreateUserWithInitialTeam(ctx, registered, "Initial Team", nil); err != nil {
+		t.Fatalf("create user with initial team: %v", err)
+	}
+
+	if len(beforeIDs) != 3 || len(afterIDs) != 3 {
+		t.Fatalf("team hook calls = before %d, after %d, want 3 each", len(beforeIDs), len(afterIDs))
+	}
+
+	rejected := &Team{Name: "Rejected Team", OwnerID: &ownerID}
+	if err := repo.CreateTeam(ctx, rejected); !errors.Is(err, wantFailure) {
+		t.Fatalf("create rejected team error = %v, want %v", err, wantFailure)
+	}
+	var rejectedCount int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM teams WHERE name = 'Rejected Team'`).
+		Scan(&rejectedCount); err != nil {
+		t.Fatalf("count rejected teams: %v", err)
+	}
+	if rejectedCount != 0 || len(afterIDs) != 3 {
+		t.Fatalf("rejected team state = rows %d, after calls %d", rejectedCount, len(afterIDs))
 	}
 }
 

@@ -58,6 +58,21 @@ type regionDirectory interface {
 	GetRegion(ctx context.Context, regionID string) (*tenantdir.Region, error)
 }
 
+type serverOptions struct {
+	teamCreationHook identity.TeamCreationHook
+}
+
+// ServerOption configures optional global-gateway integrations.
+type ServerOption func(*serverOptions)
+
+// WithTeamCreationHook extends all team creation transactions in the global
+// identity repository.
+func WithTeamCreationHook(hook identity.TeamCreationHook) ServerOption {
+	return func(options *serverOptions) {
+		options.teamCreationHook = hook
+	}
+}
+
 const regionRouteCacheTTL = 8 * time.Hour
 const regionRouteCacheMaxEntries = 256
 
@@ -67,6 +82,7 @@ func NewServer(
 	pool *pgxpool.Pool,
 	logger *zap.Logger,
 	obsProvider *observability.Provider,
+	opts ...ServerOption,
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is required")
@@ -78,7 +94,15 @@ func NewServer(
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 
-	identityRepo := identity.NewRepository(pool)
+	var options serverOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	identityOptions := make([]identity.RepositoryOption, 0, 1)
+	if options.teamCreationHook != nil {
+		identityOptions = append(identityOptions, identity.WithTeamCreationHook(options.teamCreationHook))
+	}
+	identityRepo := identity.NewRepository(pool, identityOptions...)
 	regionRepo := tenantdir.NewRepository(pool)
 	jwtIssuer, err := authn.NewIssuerFromConfig(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTPrivateKeyPEM, cfg.JWTPublicKeyPEM, cfg.JWTPrivateKeyFile, cfg.JWTPublicKeyFile, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
 	if err != nil {

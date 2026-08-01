@@ -10,9 +10,41 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// TeamCreationHook extends every repository-owned team creation transaction.
+// BeforeTeamCreateCommit must only perform transactional database work. The
+// post-commit callback is synchronous but best effort so external delivery
+// failures cannot make an already-committed team appear to have failed.
+type TeamCreationHook interface {
+	BeforeTeamCreateCommit(ctx context.Context, tx pgx.Tx, team *Team) error
+	AfterTeamCreateCommit(ctx context.Context, team *Team)
+}
+
 // CreateTeam creates a new team.
 func (r *Repository) CreateTeam(ctx context.Context, team *Team) error {
-	return insertTeam(ctx, r.pool, team)
+	if r.teamCreationHook == nil {
+		return insertTeam(ctx, r.pool, team)
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin create team: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	createdTeam := *team
+	if err := insertTeam(ctx, tx, &createdTeam); err != nil {
+		return err
+	}
+	if err := r.teamCreationHook.BeforeTeamCreateCommit(ctx, tx, &createdTeam); err != nil {
+		return fmt.Errorf("provision new team: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit create team: %w", err)
+	}
+	*team = createdTeam
+	r.teamCreationHook.AfterTeamCreateCommit(ctx, &createdTeam)
+	return nil
 }
 
 // CreateTeamWithMember creates a team and its initial member in one transaction.
@@ -35,12 +67,20 @@ func (r *Repository) CreateTeamWithMember(ctx context.Context, team *Team, membe
 	if err := insertTeamMember(ctx, tx, &createdMember); err != nil {
 		return err
 	}
+	if r.teamCreationHook != nil {
+		if err := r.teamCreationHook.BeforeTeamCreateCommit(ctx, tx, &createdTeam); err != nil {
+			return fmt.Errorf("provision new team: %w", err)
+		}
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit create team with member: %w", err)
 	}
 	*team = createdTeam
 	*member = createdMember
+	if r.teamCreationHook != nil {
+		r.teamCreationHook.AfterTeamCreateCommit(ctx, &createdTeam)
+	}
 	return nil
 }
 

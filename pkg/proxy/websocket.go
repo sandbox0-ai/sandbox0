@@ -140,9 +140,10 @@ func isWebSocketUpgrade(r *http.Request) bool {
 
 func dialWebSocketUpstream(ctx context.Context, targetURL *url.URL) (net.Conn, error) {
 	dialer := &net.Dialer{}
+	address := websocketUpstreamAddress(targetURL)
 	switch strings.ToLower(targetURL.Scheme) {
 	case "https", "wss":
-		rawConn, err := dialer.DialContext(ctx, "tcp", targetURL.Host)
+		rawConn, err := dialer.DialContext(ctx, "tcp", address)
 		if err != nil {
 			return nil, err
 		}
@@ -155,8 +156,21 @@ func dialWebSocketUpstream(ctx context.Context, targetURL *url.URL) (net.Conn, e
 		}
 		return tlsConn, nil
 	default:
-		return dialer.DialContext(ctx, "tcp", targetURL.Host)
+		return dialer.DialContext(ctx, "tcp", address)
 	}
+}
+
+func websocketUpstreamAddress(targetURL *url.URL) string {
+	port := targetURL.Port()
+	if port == "" {
+		switch strings.ToLower(targetURL.Scheme) {
+		case "https", "wss":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(targetURL.Hostname(), port)
 }
 
 func writeUpstreamHandshake(conn net.Conn, req *http.Request) error {

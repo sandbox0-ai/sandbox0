@@ -73,3 +73,28 @@ func TestWebSocketProxyRewritesUntrustedForwardedHeaders(t *testing.T) {
 		t.Fatal("timed out waiting for upstream headers")
 	}
 }
+
+func TestWebSocketUpstreamAddressAddsDefaultPort(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "http", target: "http://region.example", want: "region.example:80"},
+		{name: "https", target: "https://region.example", want: "region.example:443"},
+		{name: "ws", target: "ws://region.example", want: "region.example:80"},
+		{name: "wss", target: "wss://region.example", want: "region.example:443"},
+		{name: "explicit port", target: "https://region.example:8443", want: "region.example:8443"},
+		{name: "IPv6", target: "https://[2001:db8::1]", want: "[2001:db8::1]:443"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			targetURL, err := url.Parse(test.target)
+			if err != nil {
+				t.Fatalf("parse target URL: %v", err)
+			}
+			if got := websocketUpstreamAddress(targetURL); got != test.want {
+				t.Fatalf("websocketUpstreamAddress() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

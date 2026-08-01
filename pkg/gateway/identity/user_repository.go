@@ -78,9 +78,17 @@ func (r *Repository) CreateUserWithInitialTeam(ctx context.Context, user *User, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("insert team member: %w", err)
 	}
+	if r.teamCreationHook != nil {
+		if err = r.teamCreationHook.BeforeTeamCreateCommit(ctx, tx, team); err != nil {
+			return nil, nil, fmt.Errorf("provision initial team: %w", err)
+		}
+	}
 
 	if err = tx.Commit(ctx); err != nil {
 		return nil, nil, fmt.Errorf("commit tx: %w", err)
+	}
+	if r.teamCreationHook != nil {
+		r.teamCreationHook.AfterTeamCreateCommit(ctx, team)
 	}
 	return team, member, nil
 }

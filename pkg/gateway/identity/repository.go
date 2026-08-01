@@ -34,12 +34,28 @@ var (
 
 // Repository provides database access for identity and tenancy data.
 type Repository struct {
-	pool *pgxpool.Pool
+	pool             *pgxpool.Pool
+	teamCreationHook TeamCreationHook
+}
+
+// RepositoryOption configures optional identity repository behavior.
+type RepositoryOption func(*Repository)
+
+// WithTeamCreationHook adds transactional and post-commit work to every team
+// creation path.
+func WithTeamCreationHook(hook TeamCreationHook) RepositoryOption {
+	return func(repository *Repository) {
+		repository.teamCreationHook = hook
+	}
 }
 
 // NewRepository creates a new database repository.
-func NewRepository(pool *pgxpool.Pool) *Repository {
-	return &Repository{pool: pool}
+func NewRepository(pool *pgxpool.Pool, opts ...RepositoryOption) *Repository {
+	repository := &Repository{pool: pool}
+	for _, opt := range opts {
+		opt(repository)
+	}
+	return repository
 }
 
 // Pool returns the underlying connection pool.

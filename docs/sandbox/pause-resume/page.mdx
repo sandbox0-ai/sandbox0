@@ -112,6 +112,21 @@ Resume a sandbox that was paused manually or by TTL expiry.
 
 Mounted Sandbox Volumes are remounted from their durable state.
 
+## Persistent And Ephemeral Paths
+
+The writable rootfs persists across pause and resume except for runtime-owned ephemeral paths:
+
+- `/tmp` is recreated from the clean carrier or template state. Files written there do not survive pause and resume.
+- `/var/tmp` remains part of the persistent rootfs.
+- Other writable rootfs paths, such as `/root` and workspace directories, remain persistent.
+- Mounted Sandbox Volumes keep their independent durable state, including a Volume mounted beneath `/tmp`.
+
+This policy is applied while saving checkpoints, restoring checkpoint layers, and capturing incremental baselines. Sandbox0 also filters `/tmp` from older checkpoint layers during restore. The first restore of a large older checkpoint can still take time because the layer must be read once; the next pause writes a checkpoint without those `/tmp` contents.
+
+<Callout variant="warning">
+Do not use `/tmp` for dependency caches, downloaded tools, or other state that must survive runtime replacement. Store that data under a persistent rootfs path or mount a Sandbox Volume.
+</Callout>
+
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/resume
 </Endpoint>

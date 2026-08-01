@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
 	ctldha "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/ha"
 	ctldregistration "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/kubeletregistration"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
@@ -346,13 +347,18 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	}
 	podCache := buildNodePodCache(ctx, k8sClient, runtimeWatchHandler)
 	probeController := buildProbeController(k8sClient, obsProvider, podCache)
-	containerdRuntime := buildContainerdRuntime()
+	var rootFSMetricsRegistry prometheus.Registerer
+	if obsProvider != nil {
+		rootFSMetricsRegistry = obsProvider.MetricsRegistryOrNil()
+	}
+	rootFSObserver := ctldrootfs.NewObserver(rootFSMetricsRegistry, zapLogger)
+	containerdRuntime := buildContainerdRuntime(rootFSObserver)
 	defer containerdRuntime.Close()
 	runtimeMetricsHandle := startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller:  probeController,
 		Portal:      portalManager,
-		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, portalManager, containerdRuntime),
+		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, portalManager, containerdRuntime, rootFSObserver),
 		ReadyCheck:  serviceReady,
 		HealthCheck: serviceHealthy,
 	})
@@ -583,22 +589,24 @@ func buildRootFSController(
 	requestObserver objectstore.RequestObserver,
 	portalResolver ctldrootfs.PortalResolver,
 	runtime *ctldrootfs.ContainerdRuntime,
+	observer *ctldrootfs.Observer,
 ) rootFSHandler {
 	store, err := buildRootFSObjectStore(storageCfg, requestObserver)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
-	objectCache := buildRootFSObjectCache(ctx)
+	objectCache := buildRootFSObjectCache(ctx, observer)
 	return ctldrootfs.NewController(ctldrootfs.Config{
 		Runtime:        runtime,
 		Store:          store,
 		PortalResolver: portalResolver,
 		SnapshotDir:    filepath.Join(portalRoot, "rootfs", "prepared"),
 		ObjectCache:    objectCache,
+		Observer:       observer,
 	})
 }
 
-func buildContainerdRuntime() *ctldrootfs.ContainerdRuntime {
+func buildContainerdRuntime(observer *ctldrootfs.Observer) *ctldrootfs.ContainerdRuntime {
 	return ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
 		CRIEndpoint:            criEndpoint,
 		ContainerdEndpoint:     containerdEndpoint,
@@ -608,10 +616,11 @@ func buildContainerdRuntime() *ctldrootfs.ContainerdRuntime {
 		ContainerdHostDataRoot: containerdHostDataRoot,
 		RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
 		Namespace:              containerdNamespace,
+		Observer:               observer,
 	})
 }
 
-func buildRootFSObjectCache(ctx context.Context) *ctldrootfs.ObjectCache {
+func buildRootFSObjectCache(ctx context.Context, observer *ctldrootfs.Observer) *ctldrootfs.ObjectCache {
 	maxBytes, err := parseByteQuantity(rootFSObjectCacheMaxBytes)
 	if err != nil {
 		log.Printf("ctld rootfs object cache disabled: %v", err)
@@ -628,6 +637,7 @@ func buildRootFSObjectCache(ctx context.Context) *ctldrootfs.ObjectCache {
 		MinFreeBytes:  minFreeBytes,
 		MaxAge:        rootFSObjectCacheMaxAge,
 		SweepInterval: rootFSObjectCacheSweepInterval,
+		Observer:      observer,
 	})
 	if cache != nil {
 		cache.Start(ctx)

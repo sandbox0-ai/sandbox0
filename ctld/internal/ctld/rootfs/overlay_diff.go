@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
@@ -23,8 +24,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var defaultRootFSSnapshotExcludedPaths = []string{
-	"/procd",
+type rootFSDefaultExcludedPath struct {
+	path           string
+	preserveOpaque bool
+}
+
+// defaultRootFSSnapshotExcludedPaths is the single source of truth for paths
+// that belong to a fresh sandbox runtime instead of its persistent rootfs.
+// preserveOpaque prevents a legacy ancestor whiteout from clearing the clean
+// carrier state for that path during restore.
+var defaultRootFSSnapshotExcludedPaths = []rootFSDefaultExcludedPath{
+	{path: "/procd"},
+	{path: "/tmp", preserveOpaque: true},
 }
 
 func (r *ContainerdRuntime) createOverlayUpperDiff(ctx context.Context, client containerdClient, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
@@ -323,7 +334,7 @@ func newRootFSPathFilter(extraPaths []string) rootFSPathFilter {
 		}
 	}
 	for _, value := range defaultRootFSSnapshotExcludedPaths {
-		add(value, false)
+		add(value.path, value.preserveOpaque)
 	}
 	for _, value := range extraPaths {
 		add(value, true)
@@ -376,6 +387,9 @@ func (f rootFSPathFilter) ChangeFunc(next fs.ChangeFunc) fs.ChangeFunc {
 
 func (f rootFSPathFilter) AffectsOpaquePreservedPath(dir string) bool {
 	clean := cleanRootFSPath(dir)
+	if clean == "/" {
+		return len(f.opaquePreserve) > 0
+	}
 	for _, preserved := range f.opaquePreserve {
 		if clean == preserved || strings.HasPrefix(preserved, clean+"/") {
 			return true
@@ -465,30 +479,27 @@ func filterRootFSDiffTarForSave(desc ctldapi.RootFSDiffDescriptor, reader io.Rea
 	return appendPortalRootFSToDiff(filteredDesc, filteredReader, portalPaths)
 }
 
-func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+type rootFSDiffFilterStats struct {
+	InputBytes     int64
+	OutputBytes    int64
+	ExcludedBytes  int64
+	PortalBytes    int64
+	FilterDuration time.Duration
+	IngestDuration time.Duration
+}
+
+func writeRootFSDiffTarForApply(dst io.Writer, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, rootFSDiffFilterStats, error) {
 	portalPaths = filterRootFSPortalPaths(portalPaths, excludedPaths)
-	if !shouldFilterRootFSDiffTar(desc) {
-		return desc, noopReadSeekCloser{Reader: reader}, nil
-	}
 	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
-
-	tmp, err := os.CreateTemp("", "sandbox0-rootfs-apply-filtered-diff-*.tar")
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-	removeOnError := true
-	defer func() {
-		if removeOnError {
-			_ = tmp.Close()
-			_ = os.Remove(tmp.Name())
-		}
-	}()
-
+	input := &countingReader{Reader: reader}
+	ingest := &durationWriter{Writer: dst}
+	output := &countingWriter{Writer: ingest}
 	digester := digest.Canonical.Digester()
-	writer := io.MultiWriter(tmp, digester.Hash())
-	tarWriter := tar.NewWriter(writer)
-	tarReader := tar.NewReader(reader)
+	tarWriter := tar.NewWriter(io.MultiWriter(output, digester.Hash()))
+	tarReader := tar.NewReader(input)
 	restored := make(map[string]struct{}, len(portalPaths))
+	stats := rootFSDiffFilterStats{}
+	started := time.Now()
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
@@ -496,50 +507,82 @@ func filterRootFSDiffTarForApply(desc ctldapi.RootFSDiffDescriptor, reader io.Re
 		}
 		if err != nil {
 			_ = tarWriter.Close()
-			return ctldapi.RootFSDiffDescriptor{}, nil, err
+			return ctldapi.RootFSDiffDescriptor{}, stats, err
 		}
 		if portal, rel, ok := matchRootFSPortalHeader(header.Name, portalPaths); ok {
+			stats.PortalBytes += header.Size
 			if err := restoreRootFSPortalHeader(tarReader, header, portal, rel, restored); err != nil {
 				_ = tarWriter.Close()
-				return ctldapi.RootFSDiffDescriptor{}, nil, err
+				return ctldapi.RootFSDiffDescriptor{}, stats, err
 			}
 			continue
 		}
 		if filter.ExcludesTarHeader(header.Name) {
+			stats.ExcludedBytes += header.Size
 			continue
 		}
 
 		headerCopy := *header
 		if err := tarWriter.WriteHeader(&headerCopy); err != nil {
 			_ = tarWriter.Close()
-			return ctldapi.RootFSDiffDescriptor{}, nil, err
+			return ctldapi.RootFSDiffDescriptor{}, stats, err
 		}
 		if header.Size > 0 {
 			if _, err := io.Copy(tarWriter, tarReader); err != nil {
 				_ = tarWriter.Close()
-				return ctldapi.RootFSDiffDescriptor{}, nil, err
+				return ctldapi.RootFSDiffDescriptor{}, stats, err
 			}
 		}
 	}
 	if err := tarWriter.Close(); err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-	stat, err := tmp.Stat()
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
+		return ctldapi.RootFSDiffDescriptor{}, stats, err
 	}
 
 	desc.Digest = digester.Digest().String()
 	desc.DiffID = desc.Digest
-	desc.Size = stat.Size()
+	desc.Size = output.Written
 	if strings.TrimSpace(desc.MediaType) == "" {
 		desc.MediaType = ocispec.MediaTypeImageLayer
 	}
-	removeOnError = false
-	return desc, removeOnCloseFile{File: tmp}, nil
+	stats.InputBytes = input.BytesRead
+	stats.OutputBytes = output.Written
+	stats.IngestDuration = ingest.Duration
+	stats.FilterDuration = time.Since(started) - ingest.Duration
+	return desc, stats, nil
+}
+
+type countingReader struct {
+	io.Reader
+	BytesRead int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.BytesRead += int64(n)
+	return n, err
+}
+
+type countingWriter struct {
+	io.Writer
+	Written int64
+}
+
+type durationWriter struct {
+	io.Writer
+	Duration time.Duration
+}
+
+func (w *durationWriter) Write(p []byte) (int, error) {
+	started := time.Now()
+	n, err := w.Writer.Write(p)
+	w.Duration += time.Since(started)
+	return n, err
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	w.Written += int64(n)
+	return n, err
 }
 
 func appendPortalRootFSToDiff(desc ctldapi.RootFSDiffDescriptor, reader io.ReadSeekCloser, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {

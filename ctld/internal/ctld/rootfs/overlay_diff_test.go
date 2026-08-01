@@ -51,6 +51,10 @@ func TestWriteOverlayUpperDiffExcludesRuntimePaths(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "procd", "bin"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "procd", "bin", "procd"), []byte("runtime"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "procd", "bin", "python-runner"), []byte("runtime"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "tmp", "cache"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "tmp", "cache", "download"), []byte("ephemeral"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "var", "tmp"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(upperdir, "var", "tmp", "state"), []byte("persistent"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, strings.TrimPrefix(volumeportal.WebhookStateMountPath, "/"), "webhook-outbox"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(upperdir, strings.TrimPrefix(volumeportal.WebhookStateMountPath, "/"), "webhook-outbox", "evt.json"), []byte("runtime"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(upperdir, "workspace"), 0o755))
@@ -65,6 +69,11 @@ func TestWriteOverlayUpperDiffExcludesRuntimePaths(t *testing.T) {
 	assert.NotContains(t, entries, "procd/bin/")
 	assert.NotContains(t, entries, "procd/bin/procd")
 	assert.NotContains(t, entries, "procd/bin/python-runner")
+	assert.NotContains(t, entries, "tmp/")
+	assert.NotContains(t, entries, "tmp/cache/")
+	assert.NotContains(t, entries, "tmp/cache/download")
+	assert.Contains(t, entries, "var/tmp/")
+	assert.Contains(t, entries, "var/tmp/state")
 	assert.Contains(t, entries, "var/lib/sandbox0/procd/")
 	assert.Contains(t, entries, "var/lib/sandbox0/procd/webhook-outbox/")
 	assert.Contains(t, entries, "var/lib/sandbox0/procd/webhook-outbox/evt.json")
@@ -268,16 +277,16 @@ func TestFilterRootFSDiffTarForApplyRestoresPortalBacking(t *testing.T) {
 	backing := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(backing, "stale.txt"), []byte("stale"), 0o644))
 
-	desc, reader, err := filterRootFSDiffTarForApply(rootFSDiffDescriptorForTest(), bytes.NewReader(buf.Bytes()), nil, []ctldapi.RootFSPortalPath{{
+	var filtered bytes.Buffer
+	desc, _, err := writeRootFSDiffTarForApply(&filtered, rootFSDiffDescriptorForTest(), bytes.NewReader(buf.Bytes()), nil, []ctldapi.RootFSPortalPath{{
 		PortalName:  "cache",
 		MountPath:   "/workspace/cache",
 		BackingPath: backing,
 	}})
 	require.NoError(t, err)
-	defer reader.Close()
 	require.NotEmpty(t, desc.Digest)
 
-	entries := readTarEntries(t, reader)
+	entries := readTarEntries(t, bytes.NewReader(filtered.Bytes()))
 	assert.Contains(t, entries, "workspace/root.txt")
 	assert.NotContains(t, entries, "workspace/cache/")
 	assert.NotContains(t, entries, "workspace/cache/old.txt")
@@ -291,6 +300,10 @@ func TestFilterRootFSDiffTarExcludesRuntimePaths(t *testing.T) {
 	tarWriter := tar.NewWriter(&buf)
 	writeTarEntry(t, tarWriter, "procd/bin/python-runner", []byte("runtime"), 0o755)
 	writeTarEntry(t, tarWriter, "procd/.wh..wh..opq", nil, 0o000)
+	writeTarEntry(t, tarWriter, "tmp/legacy-download", []byte("ephemeral"), 0o644)
+	writeTarEntry(t, tarWriter, ".wh.tmp", nil, 0o000)
+	writeTarEntry(t, tarWriter, ".wh..wh..opq", nil, 0o000)
+	writeTarEntry(t, tarWriter, "var/tmp/state", []byte("persistent"), 0o644)
 	writeTarEntry(t, tarWriter, "var/lib/sandbox0/procd/webhook-outbox/evt.json", []byte("runtime"), 0o644)
 	writeTarEntry(t, tarWriter, "var/lib/sandbox0/procd/.wh..wh..opq", nil, 0o000)
 	writeTarEntry(t, tarWriter, "workspace/state", []byte("value"), 0o644)
@@ -306,6 +319,10 @@ func TestFilterRootFSDiffTarExcludesRuntimePaths(t *testing.T) {
 	entries := readTarEntries(t, reader)
 	assert.NotContains(t, entries, "procd/bin/python-runner")
 	assert.NotContains(t, entries, "procd/.wh..wh..opq")
+	assert.NotContains(t, entries, "tmp/legacy-download")
+	assert.NotContains(t, entries, ".wh.tmp")
+	assert.NotContains(t, entries, ".wh..wh..opq")
+	assert.Contains(t, entries, "var/tmp/state")
 	assert.Contains(t, entries, "var/lib/sandbox0/procd/webhook-outbox/evt.json")
 	assert.Contains(t, entries, "var/lib/sandbox0/procd/.wh..wh..opq")
 	assert.Contains(t, entries, "workspace/state")
@@ -365,6 +382,11 @@ func TestRootFSPathFilterDoesNotExcludeSimilarPrefixes(t *testing.T) {
 	assert.True(t, filter.Excludes("/workspace/data/file"))
 	assert.False(t, filter.Excludes("/workspace/database/file"))
 	assert.False(t, filter.Excludes("/workspace/data-old/file"))
+	assert.True(t, filter.Excludes("/tmp"))
+	assert.True(t, filter.Excludes("/tmp/cache/file"))
+	assert.False(t, filter.Excludes("/var/tmp/file"))
+	assert.True(t, filter.ExcludesTarHeader(".wh.tmp"))
+	assert.True(t, filter.ExcludesTarHeader(".wh..wh..opq"))
 	assert.True(t, filter.ExcludesTarHeader("workspace/.wh.data"))
 	assert.False(t, filter.ExcludesTarHeader("workspace/.wh.database"))
 	assert.True(t, filter.ExcludesTarHeader("workspace/.wh..wh..opq"))
@@ -374,6 +396,22 @@ func TestRootFSPathFilterDoesNotExcludeSimilarPrefixes(t *testing.T) {
 	assert.True(t, opaque)
 	assert.Equal(t, "/workspace", target)
 	assert.True(t, filter.AffectsOpaquePreservedPath(target))
+}
+
+func TestRootFSPathFilterRemovesEphemeralPathsFromBaseline(t *testing.T) {
+	baseline := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(baseline, "tmp", "cache"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseline, "tmp", "cache", "download"), []byte("ephemeral"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(baseline, "var", "tmp"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseline, "var", "tmp", "state"), []byte("persistent"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(baseline, "root"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseline, "root", "sentinel"), []byte("persistent"), 0o644))
+
+	require.NoError(t, newRootFSPathFilter(nil).RemoveAll(baseline))
+	_, err := os.Stat(filepath.Join(baseline, "tmp"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	assertFileContent(t, filepath.Join(baseline, "var", "tmp", "state"), "persistent")
+	assertFileContent(t, filepath.Join(baseline, "root", "sentinel"), "persistent")
 }
 
 func rootFSDiffDescriptorForTest() ctldapi.RootFSDiffDescriptor {

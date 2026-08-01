@@ -22,7 +22,7 @@ const sandboxLifecycleWaitInterval = 100 * time.Millisecond
 // ResumePausedSandboxRuntime creates a new runtime for a paused durable sandbox
 // and restores the latest writable rootfs checkpoint. A terminal runtime first
 // completes crash recovery through the durable pause transaction.
-func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandboxID string) (*Sandbox, error) {
+func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandboxID string) (result *Sandbox, resultErr error) {
 	if s == nil || s.sandboxStore == nil {
 		return nil, k8serrors.NewNotFound(corev1.Resource("pod"), sandboxID)
 	}
@@ -36,6 +36,12 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 	runtimeRecoveryRequested := false
 	claimType := "hot"
 	restoreNeeded := false
+	started := time.Now()
+	defer func() {
+		if restoreNeeded && record != nil {
+			s.observeClaimPhase(record.TemplateID, claimType, "resume_total", started, resultErr)
+		}
+	}()
 	for {
 		pod = nil
 		record = nil
@@ -471,7 +477,9 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		return pod, err
 	}
 	assignedPodUID := pod.UID
+	phaseStarted := time.Now()
 	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState, "")
+	s.observeClaimPhase(record.TemplateID, claimType, "apply_rootfs_checkpoint", phaseStarted, err)
 	if err != nil {
 		return pod, err
 	}
@@ -481,13 +489,21 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 			return pod, err
 		}
 	}
-	if _, err := s.bindVolumePortals(ctx, pod, req, template); err != nil {
+	phaseStarted = time.Now()
+	_, err = s.bindVolumePortals(ctx, pod, req, template)
+	s.observeClaimPhase(record.TemplateID, claimType, "bind_volume_portals", phaseStarted, err)
+	if err != nil {
 		return pod, fmt.Errorf("bind volume portals: %w", err)
 	}
-	if err := s.bindWebhookStatePortal(ctx, pod, req); err != nil {
+	phaseStarted = time.Now()
+	err = s.bindWebhookStatePortal(ctx, pod, req)
+	s.observeClaimPhase(record.TemplateID, claimType, "bind_webhook_state_portal", phaseStarted, err)
+	if err != nil {
 		return pod, fmt.Errorf("bind webhook state portal: %w", err)
 	}
+	phaseStarted = time.Now()
 	pod, err = s.activateRuntimeAssignment(ctx, pod, runtimeRevision)
+	s.observeClaimPhase(record.TemplateID, claimType, "activate_runtime", phaseStarted, err)
 	if err != nil {
 		return pod, fmt.Errorf("activate runtime: %w", err)
 	}

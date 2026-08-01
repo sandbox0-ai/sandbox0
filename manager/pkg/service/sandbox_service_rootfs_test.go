@@ -1025,10 +1025,12 @@ func TestRootFSExcludedPathsForPodUsesBoundClaimMountPaths(t *testing.T) {
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data/")
 	addRootFSTestVolumePortal(pod, "data-duplicate", "/workspace/data")
 	addRootFSTestVolumePortal(pod, "database", "/workspace/database")
+	addRootFSTestVolumePortal(pod, "tmp-volume", "/tmp/sandbox0-volume")
 	addRootFSTestVolumePortal(pod, "ignored-root", "/")
 	setRootFSTestClaimMounts(t, pod, []ClaimMount{
 		{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data/"},
 		{SandboxVolumeID: "vol-2", MountPoint: "/workspace/database"},
+		{SandboxVolumeID: "vol-3", MountPoint: "/tmp/sandbox0-volume"},
 	})
 	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-state-vol-1"
 	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
@@ -1046,7 +1048,7 @@ func TestRootFSExcludedPathsForPodUsesBoundClaimMountPaths(t *testing.T) {
 
 	got := rootFSExcludedPathsForPod(pod)
 
-	assert.ElementsMatch(t, []string{"/workspace/data", "/workspace/database", volumeportal.WebhookStateMountPath}, got)
+	assert.ElementsMatch(t, []string{"/workspace/data", "/workspace/database", "/tmp/sandbox0-volume", volumeportal.WebhookStateMountPath}, got)
 }
 
 func TestRootFSExcludedPathsForPodIgnoresUnboundVolumePortals(t *testing.T) {

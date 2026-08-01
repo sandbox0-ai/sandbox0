@@ -2,7 +2,7 @@
 
 Run Codex, Claude Code, OpenCode, or Pi inside a Sandbox0 sandbox when you want an isolated, persistent workspace with supervised process recovery, replayable I/O, and an agent-controllable browser.
 
-The builtin `coding-agent` template installs all four native CLIs, the official Playwright CLI, and Chromium. It declares `/workspace` as its writable mount point.
+The builtin `coding-agent` template installs all four native CLIs, the official Playwright CLI, Chromium, and Docker. It declares `/workspace` as its writable mount point.
 
 ## Why Supervised Sessions?
 
@@ -30,6 +30,12 @@ The template sets both the container's operating-system `HOME` and every supervi
 | OpenCode | `opencode acp --cwd /workspace` | Agent Client Protocol over nd-JSON |
 | Pi | `pi --mode rpc` | Pi RPC over JSONL |
 
+## Use Docker
+
+The template supports a sandbox-local Docker daemon for builds, test databases, and other service containers. Docker does not start automatically; follow [Docker in Sandbox](/docs/sandbox/docker-in-sandbox) to start it in the Sandbox0 Cloud-compatible mode. In Cloud sandboxes, run service containers with `--network=host` and connect to them from the coding agent at `127.0.0.1:<port>`.
+
+Docker images, containers, layers, and volumes under `/var/lib/docker` are ephemeral. Keep repositories and durable outputs in the `/workspace` Sandbox Volume.
+
 ## Use The Shared Browser
 
 The template installs the official `playwright-cli` command and its bundled Agent Skill. Chromium is stored in the image instead of downloaded into each claimed sandbox. Browser sessions use Playwright's official daemon and Dashboard; Sandbox0 does not add another browser-control protocol.
@@ -47,7 +53,7 @@ playwright-cli open http://127.0.0.1:3000 --browser chromium --persistent
 playwright-cli show --host=127.0.0.1 --port=9324
 ```
 
-The coding-agent container runs as root, so the template disables Chromium's process sandbox and relies on the enclosing Sandbox0 runtime isolation. The Dashboard has no Sandbox0 user authentication of its own. Keep it on sandbox loopback unless an authenticated application proxies both its HTTP and WebSocket traffic.
+The coding-agent container runs privileged inside the enclosing Sandbox0 runtime so it can host a sandbox-local Docker daemon. The template also disables Chromium's process sandbox and relies on the Sandbox0 runtime boundary for isolation. The Dashboard has no Sandbox0 user authentication of its own. Keep it on sandbox loopback unless an authenticated application proxies both its HTTP and WebSocket traffic.
 
 <Callout variant="warning">
 The examples grant the selected coding agent broad control inside its sandbox. Keep model credentials narrow, restrict network policy for production workloads, and do not mount a developer home directory or host Docker socket into the sandbox.

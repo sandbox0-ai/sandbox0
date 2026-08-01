@@ -189,7 +189,7 @@ func BuildBuiltinTemplateSpec(templateID string, builtin infrav1alpha1.BuiltinTe
 func codingAgentTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 	runAsRoot := int64(0)
 	runAsNonRoot := false
-	return templatev1alpha1.SandboxTemplateSpec{
+	spec := templatev1alpha1.SandboxTemplateSpec{
 		DisplayName: template.CodingAgentTemplateDisplayName,
 		Description: template.CodingAgentTemplateDescription,
 		MainContainer: templatev1alpha1.ContainerSpec{
@@ -226,6 +226,8 @@ func codingAgentTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 			Mode: templatev1alpha1.NetworkModeAllowAll,
 		},
 	}
+	applyDockerRuntime(&spec)
+	return spec
 }
 
 func defaultBuiltinTemplateSpec(templateID string) templatev1alpha1.SandboxTemplateSpec {
@@ -254,21 +256,27 @@ func defaultBuiltinTemplateSpec(templateID string) templatev1alpha1.SandboxTempl
 			Name:      template.DefaultTemplateWorkspaceName,
 			MountPath: template.DefaultTemplateWorkspaceMount,
 		}}
-		spec.MainContainer.SecurityContext = &templatev1alpha1.SecurityContext{
-			Privileged:               BoolPtr(true),
-			AllowPrivilegeEscalation: BoolPtr(true),
-		}
-		sizeLimit := resource.MustParse(template.DefaultTemplateDockerRootSize)
-		spec.Pod = &templatev1alpha1.PodSpecOverride{
-			EmptyDirMounts: []templatev1alpha1.EmptyDirMountSpec{
-				{
-					MountPath: template.DefaultTemplateDockerRoot,
-					SizeLimit: &sizeLimit,
-				},
-			},
-		}
+		applyDockerRuntime(&spec)
 	}
 	return spec
+}
+
+// applyDockerRuntime enables a sandbox-local Docker daemon and keeps its state outside the root filesystem.
+func applyDockerRuntime(spec *templatev1alpha1.SandboxTemplateSpec) {
+	if spec.MainContainer.SecurityContext == nil {
+		spec.MainContainer.SecurityContext = &templatev1alpha1.SecurityContext{}
+	}
+	spec.MainContainer.SecurityContext.Privileged = BoolPtr(true)
+	spec.MainContainer.SecurityContext.AllowPrivilegeEscalation = BoolPtr(true)
+
+	if spec.Pod == nil {
+		spec.Pod = &templatev1alpha1.PodSpecOverride{}
+	}
+	dockerRootSize := spec.MainContainer.Resources.EphemeralStorage.DeepCopy()
+	spec.Pod.EmptyDirMounts = append(spec.Pod.EmptyDirMounts, templatev1alpha1.EmptyDirMountSpec{
+		MountPath: template.DockerDataRootMount,
+		SizeLimit: &dockerRootSize,
+	})
 }
 
 func openClawTemplateSpec() templatev1alpha1.SandboxTemplateSpec {

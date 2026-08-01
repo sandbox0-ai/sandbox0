@@ -1,6 +1,7 @@
 package s0fs
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -50,6 +51,8 @@ type Materializer struct {
 	encryption           *EncryptionConfig
 	cache                *segmentCache
 	segmentTargetSize    uint64
+	openObserver         OpenObserver
+	stateFormatVersion   int
 }
 
 func NewMaterializer(volumeID string, store objectstore.Store, headStore HeadStore, resolvers ...ObjectStoreResolver) *Materializer {
@@ -67,6 +70,7 @@ func NewMaterializer(volumeID string, store objectstore.Store, headStore HeadSto
 		headStore:            headStore,
 		cache:                newSegmentCache(segmentCacheMaxBytes),
 		segmentTargetSize:    DefaultSegmentTargetSizeBytes,
+		stateFormatVersion:   StateFormatV1,
 	}
 }
 
@@ -86,8 +90,40 @@ func (m *Materializer) SetSegmentTargetSize(size uint64) {
 	m.segmentTargetSize = size
 }
 
+func (m *Materializer) SetOpenObserver(observer OpenObserver) {
+	if m != nil {
+		m.openObserver = observer
+	}
+}
+
+func (m *Materializer) SetStateFormatVersion(version int) {
+	if m != nil {
+		m.stateFormatVersion = normalizedStateFormatVersion(version)
+	}
+}
+
 func (m *Materializer) Enabled() bool {
 	return m != nil && m.store != nil
+}
+
+func (m *Materializer) estimatedCacheMemoryBytes() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.cache.estimatedMemoryBytes()
+}
+
+func (m *Materializer) loadCommittedHead(ctx context.Context) (*CommittedHead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if m == nil || m.headStore == nil {
+		return nil, ErrCommittedHeadNotFound
+	}
+	started := time.Now()
+	head, err := m.headStore.LoadCommittedHead(ctx, m.volumeID)
+	m.observeOpenPhase("committed_head", "remote", 0, started, -1, nil, err)
+	return head, err
 }
 
 func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64) (*Manifest, error) {
@@ -124,7 +160,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		return nil, err
 	}
 	manifest := &Manifest{
-		Version:       1,
+		Version:       m.stateFormatVersion,
 		VolumeID:      m.volumeID,
 		ManifestSeq:   nextSeq,
 		CheckpointSeq: checkpointSequence(inline),
@@ -146,7 +182,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		}
 		m.cache.put(segmentCacheKey(segment.VolumeID, segment.Key), segment.Payload)
 	}
-	if err := m.putJSON(ctx, manifestKey(nextSeq), manifest); err != nil {
+	if err := m.putManifest(ctx, manifestKey(nextSeq), manifest); err != nil {
 		return nil, err
 	}
 	if m.headStore != nil {
@@ -160,7 +196,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, expectedManifestSeq, head); err != nil {
 			return nil, err
 		}
-	} else if err := m.putJSON(ctx, manifestLatestKey, manifest); err != nil {
+	} else if err := m.putManifest(ctx, manifestLatestKey, manifest); err != nil {
 		return nil, err
 	}
 
@@ -240,7 +276,7 @@ func (m *Materializer) LoadLatestManifest(ctx context.Context) (*Manifest, error
 		return nil, ErrMaterializedManifestNotFound
 	}
 	if m.headStore != nil {
-		head, err := m.headStore.LoadCommittedHead(ctx, m.volumeID)
+		head, err := m.loadCommittedHead(ctx)
 		switch {
 		case err == nil:
 			return m.loadManifestByKey(ctx, head.ManifestKey)
@@ -271,12 +307,26 @@ func (m *Materializer) LoadLatestManifest(ctx context.Context) (*Manifest, error
 }
 
 func (m *Materializer) LoadLatestState(ctx context.Context) (*SnapshotState, *Manifest, error) {
+	state, manifest, err := m.loadLatestStateOwned(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	started := time.Now()
+	state = cloneState(state)
+	format := StateFormatV1
+	if manifest.Version == StateFormatV2 {
+		format = StateFormatV2
+	}
+	m.observeOpenPhase("state_clone", "remote", format, started, -1, state, nil)
+	return state, manifest, nil
+}
+
+func (m *Materializer) loadLatestStateOwned(ctx context.Context) (*SnapshotState, *Manifest, error) {
 	manifest, err := m.LoadLatestManifest(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	state := cloneState(manifest.State)
-	return state, manifest, nil
+	return manifest.State, manifest, nil
 }
 
 func (m *Materializer) persistSnapshot(ctx context.Context, snapshotID string, state *SnapshotState) error {
@@ -292,7 +342,7 @@ func (m *Materializer) persistSnapshot(ctx context.Context, snapshotID string, s
 	if state == nil {
 		return fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
 	}
-	return m.putJSON(ctx, snapshotObjectKey(snapshotID), state)
+	return m.putSnapshotState(ctx, snapshotObjectKey(snapshotID), state)
 }
 
 func (m *Materializer) loadSnapshot(ctx context.Context, snapshotID string) (*SnapshotState, error) {
@@ -305,16 +355,16 @@ func (m *Materializer) loadSnapshot(ctx context.Context, snapshotID string) (*Sn
 	if err := validateSnapshotID(snapshotID); err != nil {
 		return nil, err
 	}
-	var state SnapshotState
-	if err := m.getJSON(ctx, snapshotObjectKey(snapshotID), &state); err != nil {
+	state, err := m.getSnapshotState(ctx, snapshotObjectKey(snapshotID))
+	if err != nil {
 		if objectstore.IsNotFound(err) {
 			return nil, ErrSnapshotNotFound
 		}
 		return nil, fmt.Errorf("load snapshot object %s: %w", snapshotID, err)
 	}
-	normalizeState(&state)
-	defaultSegmentVolumeIDs(&state, m.volumeID)
-	return &state, nil
+	normalizeState(state)
+	defaultSegmentVolumeIDs(state, m.volumeID)
+	return state, nil
 }
 
 func (m *Materializer) deleteSnapshot(ctx context.Context, snapshotID string) error {
@@ -429,7 +479,7 @@ func (m *Materializer) validateRecoveryManifest(key string, keySequence uint64, 
 	if manifest == nil || manifest.State == nil {
 		return fmt.Errorf("%w: manifest %s has no state", ErrInvalidInput, key)
 	}
-	if manifest.Version != 1 {
+	if manifest.Version != StateFormatV1 && manifest.Version != StateFormatV2 {
 		return fmt.Errorf("%w: manifest %s has unsupported version %d", ErrInvalidInput, key, manifest.Version)
 	}
 	if manifest.VolumeID != m.volumeID {
@@ -715,6 +765,128 @@ func checkpointSequence(state *SnapshotState) uint64 {
 	return state.NextSeq - 1
 }
 
+func (m *Materializer) putManifest(ctx context.Context, key string, manifest *Manifest) error {
+	if manifest == nil || manifest.State == nil {
+		return fmt.Errorf("%w: manifest state is required", ErrInvalidInput)
+	}
+	if normalizedStateFormatVersion(manifest.Version) != StateFormatV2 {
+		return m.putJSON(ctx, key, manifest)
+	}
+	payload, err := encodeStateV2(m.volumeID, stateBlobAAD(m.volumeID, "object:"+key), manifest.State, stateV2Metadata{
+		Role:          StateV2Role_STATE_V2_ROLE_MANIFEST,
+		ManifestSeq:   manifest.ManifestSeq,
+		CheckpointSeq: manifest.CheckpointSeq,
+		CreatedAt:     manifest.CreatedAt,
+	}, m.encryption)
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", key, err)
+	}
+	return m.putBytes(ctx, key, payload)
+}
+
+func (m *Materializer) getManifest(ctx context.Context, key string) (*Manifest, error) {
+	result, legacy, err := m.readStateObject(ctx, key, StateV2Role_STATE_V2_ROLE_MANIFEST)
+	if err != nil {
+		return nil, err
+	}
+	if result != nil {
+		return &Manifest{
+			Version:       StateFormatV2,
+			VolumeID:      m.volumeID,
+			ManifestSeq:   result.Metadata.ManifestSeq,
+			CheckpointSeq: result.Metadata.CheckpointSeq,
+			CreatedAt:     result.Metadata.CreatedAt,
+			State:         result.State,
+		}, nil
+	}
+	started := time.Now()
+	var manifest Manifest
+	if err := json.Unmarshal(legacy, &manifest); err != nil {
+		m.observeOpenPhase("decode", "remote", StateFormatV1, started, int64(len(legacy)), nil, err)
+		return nil, fmt.Errorf("decode %s: %w", key, err)
+	}
+	m.observeOpenPhase("decode", "remote", StateFormatV1, started, int64(len(legacy)), manifest.State, nil)
+	return &manifest, nil
+}
+
+func (m *Materializer) putSnapshotState(ctx context.Context, key string, state *SnapshotState) error {
+	if m.stateFormatVersion != StateFormatV2 {
+		return m.putJSON(ctx, key, state)
+	}
+	payload, err := encodeStateV2(m.volumeID, stateBlobAAD(m.volumeID, "object:"+key), state, stateV2Metadata{Role: StateV2Role_STATE_V2_ROLE_SNAPSHOT}, m.encryption)
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", key, err)
+	}
+	return m.putBytes(ctx, key, payload)
+}
+
+func (m *Materializer) getSnapshotState(ctx context.Context, key string) (*SnapshotState, error) {
+	result, legacy, err := m.readStateObject(ctx, key, StateV2Role_STATE_V2_ROLE_SNAPSHOT)
+	if err != nil {
+		return nil, err
+	}
+	if result != nil {
+		return result.State, nil
+	}
+	started := time.Now()
+	var state SnapshotState
+	if err := json.Unmarshal(legacy, &state); err != nil {
+		m.observeOpenPhase("decode", "remote", StateFormatV1, started, int64(len(legacy)), nil, err)
+		return nil, fmt.Errorf("decode %s: %w", key, err)
+	}
+	m.observeOpenPhase("decode", "remote", StateFormatV1, started, int64(len(legacy)), &state, nil)
+	return &state, nil
+}
+
+// readStateObject returns either a decoded v2 result or decrypted legacy JSON.
+func (m *Materializer) readStateObject(ctx context.Context, key string, role StateV2Role) (*stateV2DecodeResult, []byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	started := time.Now()
+	reader, err := m.store.Get(key, 0, -1)
+	if err != nil {
+		m.observeOpenPhase("object_read", "remote", 0, started, -1, nil, err)
+		return nil, nil, fmt.Errorf("get %s: %w", key, err)
+	}
+	defer reader.Close()
+	buffered := bufio.NewReader(reader)
+	v2, err := hasStateV2Magic(buffered)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inspect %s: %w", key, err)
+	}
+	if v2 {
+		result, err := decodeStateV2(buffered, m.volumeID, stateBlobAAD(m.volumeID, "object:"+key), role, m.encryption)
+		bytesRead := int64(-1)
+		var state *SnapshotState
+		if result != nil {
+			bytesRead = result.Bytes
+			state = result.State
+		}
+		m.observeOpenPhase("object_read_decode", "remote", StateFormatV2, started, bytesRead, state, err)
+		if err != nil {
+			return nil, nil, err
+		}
+		return result, nil, nil
+	}
+	payload, err := io.ReadAll(buffered)
+	if err != nil {
+		m.observeOpenPhase("object_read", "remote", StateFormatV1, started, int64(len(payload)), nil, err)
+		return nil, nil, fmt.Errorf("read %s: %w", key, err)
+	}
+	m.observeOpenPhase("object_read", "remote", StateFormatV1, started, int64(len(payload)), nil, nil)
+	started = time.Now()
+	if plaintext, encrypted, err := m.encryption.decryptBlobIfEncrypted(payload, stateBlobAAD(m.volumeID, "object:"+key)); encrypted || err != nil {
+		if err != nil {
+			m.observeOpenPhase("decrypt", "remote", StateFormatV1, started, int64(len(payload)), nil, err)
+			return nil, nil, err
+		}
+		payload = plaintext
+	}
+	m.observeOpenPhase("decrypt", "remote", StateFormatV1, started, int64(len(payload)), nil, nil)
+	return nil, payload, nil
+}
+
 func (m *Materializer) putJSON(ctx context.Context, key string, value any) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -730,38 +902,33 @@ func (m *Materializer) putJSON(ctx context.Context, key string, value any) error
 	return m.putBytes(ctx, key, payload)
 }
 
-func (m *Materializer) getJSON(ctx context.Context, key string, value any) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func (m *Materializer) observeOpenPhase(phase, source string, format int, started time.Time, bytes int64, state *SnapshotState, err error) {
+	if m == nil || m.openObserver == nil {
+		return
 	}
-	reader, err := m.store.Get(key, 0, -1)
-	if err != nil {
-		return fmt.Errorf("get %s: %w", key, err)
+	observation := OpenObservation{
+		VolumeID: m.volumeID,
+		Phase:    phase,
+		Source:   source,
+		Format:   format,
+		Duration: time.Since(started),
+		Bytes:    bytes,
+		Err:      err,
 	}
-	defer reader.Close()
-
-	payload, err := io.ReadAll(reader)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", key, err)
+	if phase == "complete" && state != nil {
+		observation.Nodes = len(state.Nodes)
+		observation.DirectoryEntries = directoryEntryCount(state.Children)
+		observation.Segments = len(state.Segments)
 	}
-	if plaintext, encrypted, err := m.encryption.decryptBlobIfEncrypted(payload, stateBlobAAD(m.volumeID, "object:"+key)); encrypted || err != nil {
-		if err != nil {
-			return err
-		}
-		payload = plaintext
-	}
-	if err := json.Unmarshal(payload, value); err != nil {
-		return fmt.Errorf("decode %s: %w", key, err)
-	}
-	return nil
+	emitOpenObservation(m.openObserver, observation)
 }
 
 func (m *Materializer) loadManifestByKey(ctx context.Context, key string) (*Manifest, error) {
 	if strings.TrimSpace(key) == "" {
 		return nil, ErrMaterializedManifestNotFound
 	}
-	var manifest Manifest
-	if err := m.getJSON(ctx, key, &manifest); err != nil {
+	manifest, err := m.getManifest(ctx, key)
+	if err != nil {
 		return nil, err
 	}
 	if manifest.State == nil {
@@ -773,7 +940,7 @@ func (m *Materializer) loadManifestByKey(ctx context.Context, key string) (*Mani
 		sourceVolumeID = m.volumeID
 	}
 	defaultSegmentVolumeIDs(manifest.State, sourceVolumeID)
-	return &manifest, nil
+	return manifest, nil
 }
 
 func (m *Materializer) loadLegacyLatestManifest(ctx context.Context) (*Manifest, error) {
@@ -896,6 +1063,19 @@ func (c *segmentCache) put(key string, payload []byte) {
 			c.size -= int64(len(evicted))
 		}
 	}
+}
+
+func (c *segmentCache) estimatedMemoryBytes() int64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	total := c.size + int64(len(c.order))*16
+	for key := range c.entries {
+		total += int64(64 + len(key))
+	}
+	return total
 }
 
 func cloneNodeMap(nodes map[uint64]*Node) map[uint64]*Node {

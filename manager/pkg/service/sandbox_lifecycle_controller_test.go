@@ -514,6 +514,30 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime
 	}
 }
 
+func TestRuntimeDeletionDispositionDoesNotCacheStaleRuntime(t *testing.T) {
+	svc := &SandboxService{
+		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
+			"sandbox-a": {
+				ID:                "sandbox-a",
+				Status:            SandboxStatusRunning,
+				CurrentPodName:    "pod-new",
+				RuntimeGeneration: 2,
+			},
+		}},
+	}
+	runtimeOnly, retainHot, err := svc.runtimeDeletionDisposition(context.Background(), SandboxLifecycleInfo{
+		SandboxID:         "sandbox-a",
+		PodName:           "pod-old",
+		RuntimeGeneration: 1,
+	})
+	if err != nil {
+		t.Fatalf("runtimeDeletionDisposition() error = %v", err)
+	}
+	if !runtimeOnly || retainHot {
+		t.Fatalf("runtimeOnly = %v, retainHot = %v, want true/false", runtimeOnly, retainHot)
+	}
+}
+
 func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 	var got ctldapi.UnbindVolumePortalRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -566,6 +590,60 @@ func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 	}
 	if got.SandboxVolumeID != "vol-1" || got.MountPath != "/workspace/data" || got.PortalName != "data" {
 		t.Fatalf("unexpected volume portal unbind request: %+v", got)
+	}
+	if got.RetainHot {
+		t.Fatal("deleted sandbox requested hot engine retention")
+	}
+}
+
+func TestSandboxServicePausedSandboxRequestsHotVolumeRetention(t *testing.T) {
+	var got ctldapi.UnbindVolumePortalRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode unbind request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ctldapi.UnbindVolumePortalResponse{Unbound: true})
+	}))
+	defer ctld.Close()
+
+	ctldURL, err := url.Parse(ctld.URL)
+	if err != nil {
+		t.Fatalf("parse ctld url: %v", err)
+	}
+	ctldPort, err := strconv.Atoi(ctldURL.Port())
+	if err != nil {
+		t.Fatalf("parse ctld port: %v", err)
+	}
+	svc := &SandboxService{
+		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
+			"sandbox-a": {ID: "sandbox-a", Status: SandboxStatusPaused},
+		}},
+		logger: zap.NewNop(),
+	}
+
+	err = svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
+		Namespace: "ns-a",
+		PodName:   "sandbox-a",
+		SandboxID: "sandbox-a",
+		PodUID:    "pod-uid-a",
+		HostIP:    ctldURL.Hostname(),
+		VolumePortals: []SandboxLifecycleVolumePortal{{
+			SandboxVolumeID: "vol-1",
+			MountPoint:      "/workspace/data",
+			PortalName:      "data",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
+	}
+	if !got.RetainHot {
+		t.Fatal("intentional pause did not request hot engine retention")
 	}
 }
 

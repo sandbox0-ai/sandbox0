@@ -319,10 +319,11 @@ app-configs:
 
 proto: protoc
 	@printf "$(CYAN)Generating storage runtime protobufs...$(RESET)\n"
-	@rm -f storage-proxy/proto/*.pb.go storage-proxy/proto/fs/*.pb.go
+	@rm -f storage-proxy/proto/*.pb.go storage-proxy/proto/fs/*.pb.go storage-proxy/pkg/s0fs/state_v2.pb.go
 	@mkdir -p storage-proxy/proto/fs
 	@PATH="$(LOCALBIN):$(PATH)" $(PROTOC) --go_out=. --go_opt=paths=source_relative \
-		storage-proxy/proto/filesystem.proto
+		storage-proxy/proto/filesystem.proto \
+		storage-proxy/pkg/s0fs/state_v2.proto
 	@mv storage-proxy/proto/*.pb.go storage-proxy/proto/fs/
 
 .PHONY: apispec oapi-codegen

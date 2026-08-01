@@ -1,10 +1,12 @@
 package s0fs
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -34,10 +36,10 @@ func PersistSnapshot(ctx context.Context, cfg Config, snapshotID string, state *
 		}
 		// The object is canonical. Failure to refresh the disposable local
 		// cache must not turn a durable snapshot into a failed operation.
-		_ = saveSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, state, cfg.Encryption)
+		_ = saveSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, state, cfg.Encryption, cfg.StateFormatVersion)
 		return nil
 	}
-	return saveSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, state, cfg.Encryption)
+	return saveSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, state, cfg.Encryption, cfg.StateFormatVersion)
 }
 
 // LoadSnapshot loads canonical snapshot state from object storage. When only a
@@ -54,7 +56,7 @@ func LoadSnapshot(ctx context.Context, cfg Config, snapshotID string) (*Snapshot
 		state, err := materializer.loadSnapshot(ctx, snapshotID)
 		if err == nil {
 			// A local cache write must not make a durable snapshot unavailable.
-			_ = saveSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, state, cfg.Encryption)
+			_ = saveSnapshotState(snapshotFilePath(cfg.WALPath, snapshotID), cfg.VolumeID, "snapshot:"+snapshotID, state, cfg.Encryption, cfg.StateFormatVersion)
 			return state, nil
 		}
 		if !errors.Is(err, ErrSnapshotNotFound) {
@@ -130,6 +132,9 @@ func validateSnapshotConfig(cfg Config, snapshotID string) error {
 	if cfg.ObjectStore != nil && strings.TrimSpace(cfg.VolumeID) == "" {
 		return fmt.Errorf("%w: volume id is required", ErrInvalidInput)
 	}
+	if err := validateStateFormatVersion(cfg.StateFormatVersion); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -147,6 +152,7 @@ func snapshotMaterializer(cfg Config) *Materializer {
 	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
 	if materializer != nil {
 		materializer.SetEncryption(cfg.Encryption)
+		materializer.SetStateFormatVersion(cfg.StateFormatVersion)
 	}
 	return materializer
 }
@@ -209,29 +215,52 @@ func headStatePath(walPath string) string {
 }
 
 func loadSnapshotState(path, volumeID, role string, encryption *EncryptionConfig) (*SnapshotState, error) {
-	data, err := os.ReadFile(path)
+	state, _, _, err := loadSnapshotStateWithFormat(path, volumeID, role, encryption)
+	return state, err
+}
+
+func loadSnapshotStateWithFormat(path, volumeID, role string, encryption *EncryptionConfig) (*SnapshotState, int, int64, error) {
+	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, ErrSnapshotNotFound
+			return nil, 0, -1, ErrSnapshotNotFound
 		}
-		return nil, fmt.Errorf("read snapshot state: %w", err)
+		return nil, 0, -1, fmt.Errorf("read snapshot state: %w", err)
 	}
+	defer file.Close()
+	reader := bufio.NewReader(file)
+	v2, err := hasStateV2Magic(reader)
+	if err != nil {
+		return nil, 0, -1, fmt.Errorf("inspect snapshot state: %w", err)
+	}
+	if v2 {
+		result, err := decodeStateV2(reader, volumeID, stateBlobAAD(volumeID, role), stateV2RoleForStateRole(role), encryption)
+		if err != nil {
+			return nil, StateFormatV2, -1, fmt.Errorf("decode snapshot state v2: %w", err)
+		}
+		return result.State, StateFormatV2, result.Bytes, nil
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, StateFormatV1, int64(len(data)), fmt.Errorf("read snapshot state: %w", err)
+	}
+	readBytes := int64(len(data))
 	if plaintext, encrypted, err := encryption.decryptBlobIfEncrypted(data, stateBlobAAD(volumeID, role)); encrypted || err != nil {
 		if err != nil {
-			return nil, err
+			return nil, StateFormatV1, readBytes, err
 		}
 		data = plaintext
 	}
 
 	var state SnapshotState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("decode snapshot state: %w", err)
+		return nil, StateFormatV1, readBytes, fmt.Errorf("decode snapshot state: %w", err)
 	}
 	normalizeState(&state)
-	return &state, nil
+	return &state, StateFormatV1, readBytes, nil
 }
 
-func saveSnapshotState(path, volumeID, role string, state *SnapshotState, encryption *EncryptionConfig) error {
+func saveSnapshotState(path, volumeID, role string, state *SnapshotState, encryption *EncryptionConfig, versions ...int) error {
 	if state == nil {
 		return fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
 	}
@@ -239,13 +268,23 @@ func saveSnapshotState(path, volumeID, role string, state *SnapshotState, encryp
 		return fmt.Errorf("create snapshot directory: %w", err)
 	}
 
-	data, err := json.Marshal(state)
-	if err != nil {
-		return fmt.Errorf("encode snapshot state: %w", err)
-	}
-	data, err = encryption.encryptBlob(data, stateBlobAAD(volumeID, role))
-	if err != nil {
-		return fmt.Errorf("encrypt snapshot state: %w", err)
+	format := normalizedStateFormatVersion(versions...)
+	var data []byte
+	var err error
+	if format == StateFormatV2 {
+		data, err = encodeStateV2(volumeID, stateBlobAAD(volumeID, role), state, stateV2Metadata{Role: stateV2RoleForStateRole(role)}, encryption)
+		if err != nil {
+			return fmt.Errorf("encode snapshot state v2: %w", err)
+		}
+	} else {
+		data, err = json.Marshal(state)
+		if err != nil {
+			return fmt.Errorf("encode snapshot state: %w", err)
+		}
+		data, err = encryption.encryptBlob(data, stateBlobAAD(volumeID, role))
+		if err != nil {
+			return fmt.Errorf("encrypt snapshot state: %w", err)
+		}
 	}
 
 	tempPath := path + ".tmp"
@@ -256,6 +295,20 @@ func saveSnapshotState(path, volumeID, role string, state *SnapshotState, encryp
 		return fmt.Errorf("replace snapshot state: %w", err)
 	}
 	return nil
+}
+
+func normalizedStateFormatVersion(versions ...int) int {
+	if len(versions) > 0 && versions[0] == StateFormatV2 {
+		return StateFormatV2
+	}
+	return StateFormatV1
+}
+
+func validateStateFormatVersion(version int) error {
+	if version == 0 || version == StateFormatV1 || version == StateFormatV2 {
+		return nil
+	}
+	return fmt.Errorf("%w: unsupported state format version %d", ErrInvalidInput, version)
 }
 
 func normalizeState(state *SnapshotState) {

@@ -62,14 +62,23 @@ func supportsRecoveryCapability(replicator PortalReplicator, capability string) 
 }
 
 type portalRecoveryStore struct {
-	dir string
+	dir      string
+	observer *Observer
 }
 
-func newPortalRecoveryStore(rootDir string) *portalRecoveryStore {
-	return &portalRecoveryStore{dir: filepath.Join(rootDir, "ha", "portals")}
+func newPortalRecoveryStore(rootDir string, observers ...*Observer) *portalRecoveryStore {
+	store := &portalRecoveryStore{dir: filepath.Join(rootDir, "ha", "portals")}
+	if len(observers) > 0 {
+		store.observer = observers[0]
+	}
+	return store
 }
 
 func (s *portalRecoveryStore) Put(manifest RecoveryManifest) error {
+	return s.put(manifest)
+}
+
+func (s *portalRecoveryStore) put(manifest RecoveryManifest) error {
 	if s == nil {
 		return nil
 	}
@@ -77,42 +86,92 @@ func (s *portalRecoveryStore) Put(manifest RecoveryManifest) error {
 	if err := validateRecoveryManifest(manifest); err != nil {
 		return err
 	}
+	started := time.Now()
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+		s.observePhase("local_prepare", manifest.VolumeID, started, err)
 		return fmt.Errorf("create portal recovery directory: %w", err)
 	}
+	s.observePhase("local_prepare", manifest.VolumeID, started, nil)
+	started = time.Now()
 	payload, err := json.Marshal(manifest)
+	s.observePhase("local_encode", manifest.VolumeID, started, err)
 	if err != nil {
 		return fmt.Errorf("marshal portal recovery manifest: %w", err)
 	}
+	started = time.Now()
 	path := s.path(manifest.Key)
 	tmp, err := os.CreateTemp(s.dir, ".portal-*.tmp")
 	if err != nil {
+		s.observePhase("local_write", manifest.VolumeID, started, err)
 		return fmt.Errorf("create portal recovery manifest: %w", err)
 	}
 	tmpPath := tmp.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
+		s.observePhase("local_write", manifest.VolumeID, started, err)
 		return fmt.Errorf("chmod portal recovery manifest: %w", err)
 	}
 	if _, err := tmp.Write(payload); err != nil {
 		_ = tmp.Close()
+		s.observePhase("local_write", manifest.VolumeID, started, err)
 		return fmt.Errorf("write portal recovery manifest: %w", err)
 	}
+	s.observePhase("local_write", manifest.VolumeID, started, nil)
+	started = time.Now()
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
+		s.observePhase("local_fsync", manifest.VolumeID, started, err)
 		return fmt.Errorf("sync portal recovery manifest: %w", err)
 	}
+	s.observePhase("local_fsync", manifest.VolumeID, started, nil)
+	started = time.Now()
 	if err := tmp.Close(); err != nil {
+		s.observePhase("local_close", manifest.VolumeID, started, err)
 		return fmt.Errorf("close portal recovery manifest: %w", err)
 	}
+	s.observePhase("local_close", manifest.VolumeID, started, nil)
+	started = time.Now()
 	if err := os.Rename(tmpPath, path); err != nil {
+		s.observePhase("local_rename", manifest.VolumeID, started, err)
 		return fmt.Errorf("replace portal recovery manifest: %w", err)
 	}
+	s.observePhase("local_rename", manifest.VolumeID, started, nil)
+	return nil
+}
+
+func (s *portalRecoveryStore) observePhase(phase, volumeID string, started time.Time, err error) {
+	if s != nil && s.observer != nil {
+		s.observer.ObservePhase("recovery", phase, "local", 0, volumeID, started, err)
+	}
+}
+
+func (s *portalRecoveryStore) syncDirectory() error {
+	if s == nil {
+		return nil
+	}
+	dir, err := os.Open(s.dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open portal recovery directory: %w", err)
+	}
+	defer dir.Close()
+	started := time.Now()
+	if err := dir.Sync(); err != nil {
+		s.observePhase("local_dir_fsync", "", started, err)
+		return fmt.Errorf("sync portal recovery directory: %w", err)
+	}
+	s.observePhase("local_dir_fsync", "", started, nil)
 	return nil
 }
 
 func (s *portalRecoveryStore) Delete(key string) error {
+	return s.delete(key)
+}
+
+func (s *portalRecoveryStore) delete(key string) error {
 	if s == nil || strings.TrimSpace(key) == "" {
 		return nil
 	}

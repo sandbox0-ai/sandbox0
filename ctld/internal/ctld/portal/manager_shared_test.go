@@ -106,7 +106,7 @@ func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 		fs:        volumefuse.New("portal-b", time.Second, unboundSession{}),
 	}
 
-	cleanup := mgr.unbindLockedSnapshot(pmA)
+	cleanup := mgr.unbindLockedSnapshot(pmA, false)
 	if cleanup != nil {
 		t.Fatalf("unbindLockedSnapshot(first) cleanup = %+v, want nil", cleanup)
 	}
@@ -124,7 +124,7 @@ func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 		t.Fatalf("GetVolume() after first unbind error = %v, want mounted volume to remain", err)
 	}
 
-	cleanup = mgr.unbindLockedSnapshot(pmB)
+	cleanup = mgr.unbindLockedSnapshot(pmB, false)
 	if err := mgr.finishBoundVolumeCleanup(context.Background(), cleanup); err != nil {
 		t.Fatalf("finishBoundVolumeCleanup(last) error = %v", err)
 	}

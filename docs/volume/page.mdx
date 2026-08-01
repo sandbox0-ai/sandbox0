@@ -76,7 +76,9 @@ This keeps the mounted filesystem view and the direct volume API view consistent
 
 Sandbox0 encrypts persisted S0FS volume data at the application layer before it is written to object storage.
 
-Manifest objects are encrypted as full blobs. Segment objects are encrypted in independently authenticated chunks, so cold file reads can still fetch only the ciphertext chunks needed for the requested byte range. Node-local cache files, including the S0FS WAL, head state, and snapshot state, are also encrypted before they are written to disk.
+State format version `1` encrypts each manifest or snapshot as one blob. Version `2` keeps each state in one atomic object but replaces JSON and base64-heavy maps with sorted protobuf records, zstd-compressed typed chunks, and independently authenticated chunk encryption. The single-object layout preserves the existing committed-head, snapshot, fork, and garbage-collection semantics while allowing readers to decode bounded chunks directly into the final filesystem maps. Readers accept both state formats.
+
+Segment objects are also encrypted in independently authenticated chunks, so cold file reads can fetch only the ciphertext chunks needed for the requested byte range. Node-local cache files, including the S0FS WAL, head state, and snapshot state, are encrypted before they are written to disk.
 
 <Callout variant="info">
 This is service-side application-layer encryption. The storage runtime in manager and the active ctld process hold the volume encryption key so they can serve normal POSIX filesystem reads and writes. It is not end-to-end encryption where Sandbox0 services cannot decrypt volume data.

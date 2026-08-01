@@ -116,6 +116,8 @@ func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StoragePr
 	cfg.FilesystemMetaRetries = spec.FilesystemMetaRetries
 	cfg.FilesystemMaxUpload = spec.FilesystemMaxUpload
 	cfg.S0FSSegmentTargetSize = spec.S0FSSegmentTargetSize
+	cfg.S0FSStateFormatVersion = spec.S0FSStateFormatVersion
+	cfg.S0FSHotCacheMaxSize = spec.S0FSHotCacheMaxSize
 	cfg.S0FSCompactionInterval = spec.S0FSCompactionInterval
 	cfg.S0FSCompactionMinDeadRatio = spec.S0FSCompactionMinDeadRatio
 	cfg.S0FSCompactionMinReclaimSize = spec.S0FSCompactionMinReclaimSize

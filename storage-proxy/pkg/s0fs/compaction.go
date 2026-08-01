@@ -97,7 +97,7 @@ func (m *Materializer) Compact(ctx context.Context, state *SnapshotState, expect
 		return nil, nil, err
 	}
 	manifest := &Manifest{
-		Version:       1,
+		Version:       m.stateFormatVersion,
 		VolumeID:      m.volumeID,
 		ManifestSeq:   nextSeq,
 		CheckpointSeq: checkpointSequence(inline),
@@ -118,7 +118,7 @@ func (m *Materializer) Compact(ctx context.Context, state *SnapshotState, expect
 		}
 		m.cache.put(segmentCacheKey(segment.VolumeID, segment.Key), segment.Payload)
 	}
-	if err := m.putJSON(ctx, manifestKey(nextSeq), manifest); err != nil {
+	if err := m.putManifest(ctx, manifestKey(nextSeq), manifest); err != nil {
 		return nil, nil, err
 	}
 	if m.headStore != nil {
@@ -132,7 +132,7 @@ func (m *Materializer) Compact(ctx context.Context, state *SnapshotState, expect
 		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, expectedManifestSeq, head); err != nil {
 			return nil, nil, err
 		}
-	} else if err := m.putJSON(ctx, manifestLatestKey, manifest); err != nil {
+	} else if err := m.putManifest(ctx, manifestLatestKey, manifest); err != nil {
 		return nil, nil, err
 	}
 	return manifest, result, nil

@@ -62,6 +62,17 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="4Mi"
 	S0FSSegmentTargetSize string `yaml:"s0fs_segment_target_size" json:"s0fsSegmentTargetSize"`
 	// +optional
+	// S0FSStateFormatVersion selects the format for new S0FS state objects and local state files.
+	// Readers accept both versions. Keep version 1 until every manager and ctld runs a dual-reader build.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Enum=1;2
+	S0FSStateFormatVersion int `yaml:"s0fs_state_format_version" json:"s0fsStateFormatVersion"`
+	// +optional
+	// S0FSHotCacheMaxSize bounds conservatively estimated memory retained by clean engines.
+	// Engines are retained only after an intentional sandbox pause. Set 0 to disable retention.
+	// +kubebuilder:default="1Gi"
+	S0FSHotCacheMaxSize string `yaml:"s0fs_hot_cache_max_size" json:"s0fsHotCacheMaxSize"`
+	// +optional
 	// +kubebuilder:default="1m"
 	S0FSCompactionInterval string `yaml:"s0fs_compaction_interval" json:"s0fsCompactionInterval"`
 	// +optional
@@ -213,6 +224,9 @@ func loadStorageProxyConfig(path string) (*StorageProxyConfig, error) {
 func (c *StorageProxyConfig) Validate() error {
 	if c.ObjectEncryptionEnabled && c.ObjectEncryptionKeyPath == "" {
 		return &ConfigError{Message: "object encryption enabled but object_encryption_key_path is empty"}
+	}
+	if c.S0FSStateFormatVersion != 0 && c.S0FSStateFormatVersion != 1 && c.S0FSStateFormatVersion != 2 {
+		return &ConfigError{Message: fmt.Sprintf("unsupported s0fs state format version %d", c.S0FSStateFormatVersion)}
 	}
 	return nil
 }

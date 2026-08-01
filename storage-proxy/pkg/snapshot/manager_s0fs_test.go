@@ -24,7 +24,7 @@ import (
 func TestS0FSSnapshotCreateRestoreAndDelete(t *testing.T) {
 	t.Parallel()
 
-	mgr, repo, volMgr, engine := newS0FSSnapshotTestManager(t, "vol-1")
+	mgr, repo, volMgr, engine := newS0FSSnapshotTestManagerWithFormat(t, "vol-1", s0fs.StateFormatV2)
 	writeS0FSFile(t, engine, "state.txt", "alpha")
 
 	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
@@ -263,7 +263,7 @@ func TestS0FSLegacySnapshotRejectsManifestSizeMismatch(t *testing.T) {
 func TestS0FSForkVolumeUsesCopyOnWriteState(t *testing.T) {
 	t.Parallel()
 
-	mgr, repo, _, engine := newS0FSSnapshotTestManager(t, "vol-1")
+	mgr, repo, _, engine := newS0FSSnapshotTestManagerWithFormat(t, "vol-1", s0fs.StateFormatV2)
 	coordinator := &failingFlushCoordinator{}
 	mgr.SetFlushCoordinator(coordinator)
 	writeS0FSFile(t, engine, "fork.txt", "seed")
@@ -469,7 +469,7 @@ func TestS0FSCreateVolumeFromSnapshotUsesCopyOnWriteState(t *testing.T) {
 func TestS0FSGarbageCollectsObjectsAfterSnapshotDelete(t *testing.T) {
 	t.Parallel()
 
-	mgr, _, _, engine := newS0FSSnapshotTestManager(t, "vol-gc-delete")
+	mgr, _, _, engine := newS0FSSnapshotTestManagerWithFormat(t, "vol-gc-delete", s0fs.StateFormatV2)
 	writeS0FSFile(t, engine, "state.txt", "old")
 	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
 		t.Fatalf("SyncMaterialize(old) error = %v", err)
@@ -662,6 +662,10 @@ func TestExportSnapshotArchiveS0FSMissingLegacyStateRemainsNotFound(t *testing.T
 }
 
 func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeRepo, *fakeVolumeProvider, *s0fs.Engine) {
+	return newS0FSSnapshotTestManagerWithFormat(t, volumeID, s0fs.StateFormatV1)
+}
+
+func newS0FSSnapshotTestManagerWithFormat(t *testing.T, volumeID string, stateFormatVersion int) (*Manager, *fakeRepo, *fakeVolumeProvider, *s0fs.Engine) {
 	t.Helper()
 
 	cacheDir := t.TempDir()
@@ -687,11 +691,12 @@ func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeR
 		repo:   repo,
 		volMgr: volMgr,
 		config: &config.StorageProxyConfig{
-			CacheDir:              cacheDir,
-			DefaultClusterId:      "test-cluster",
-			RestoreRemountTimeout: "100ms",
-			ObjectStorageType:     "mem",
-			S3Bucket:              "snapshot-tests-" + sanitizeTestObjectStoreName(t.Name()),
+			CacheDir:               cacheDir,
+			DefaultClusterId:       "test-cluster",
+			RestoreRemountTimeout:  "100ms",
+			ObjectStorageType:      "mem",
+			S3Bucket:               "snapshot-tests-" + sanitizeTestObjectStoreName(t.Name()),
+			S0FSStateFormatVersion: stateFormatVersion,
 		},
 		logger:    logrus.New(),
 		clusterID: "test-cluster",

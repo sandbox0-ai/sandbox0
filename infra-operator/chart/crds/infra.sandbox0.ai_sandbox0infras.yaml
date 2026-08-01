@@ -4907,9 +4907,24 @@ spec:
                       s0fsCompactionMinReclaimSize:
                         default: 1Mi
                         type: string
+                      s0fsHotCacheMaxSize:
+                        default: 1Gi
+                        description: |-
+                          S0FSHotCacheMaxSize bounds conservatively estimated memory retained by clean engines.
+                          Engines are retained only after an intentional sandbox pause. Set 0 to disable retention.
+                        type: string
                       s0fsSegmentTargetSize:
                         default: 4Mi
                         type: string
+                      s0fsStateFormatVersion:
+                        default: 1
+                        description: |-
+                          S0FSStateFormatVersion selects the format for new S0FS state objects and local state files.
+                          Readers accept both versions. Keep version 1 until every manager and ctld runs a dual-reader build.
+                        enum:
+                        - 1
+                        - 2
+                        type: integer
                       volumePortalCacheSizeLimit:
                         default: 20Gi
                         type: string

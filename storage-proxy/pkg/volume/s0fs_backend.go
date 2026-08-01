@@ -68,11 +68,16 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 	if err != nil {
 		return nil, err
 	}
+	stateFormatVersion, err := S0FSStateFormatVersion(b.config)
+	if err != nil {
+		return nil, err
+	}
 	engine, err := s0fs.Open(ctx, s0fs.Config{
-		VolumeID:          req.VolumeID,
-		WALPath:           filepath.Join(cacheDir, "engine.wal"),
-		ObjectStore:       remoteStore,
-		SegmentTargetSize: segmentTargetSize,
+		VolumeID:           req.VolumeID,
+		WALPath:            filepath.Join(cacheDir, "engine.wal"),
+		ObjectStore:        remoteStore,
+		SegmentTargetSize:  segmentTargetSize,
+		StateFormatVersion: stateFormatVersion,
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return b.createObjectStorageForVolume(req, volumeID)
 		},
@@ -116,6 +121,17 @@ func S0FSSegmentTargetSize(cfg *config.StorageProxyConfig) (uint64, error) {
 		return 0, fmt.Errorf("s0fs segment target size must be > 0")
 	}
 	return uint64(bytes), nil
+}
+
+func S0FSStateFormatVersion(cfg *config.StorageProxyConfig) (int, error) {
+	version := s0fs.StateFormatV1
+	if cfg != nil && cfg.S0FSStateFormatVersion != 0 {
+		version = cfg.S0FSStateFormatVersion
+	}
+	if version != s0fs.StateFormatV1 && version != s0fs.StateFormatV2 {
+		return 0, fmt.Errorf("unsupported s0fs state format version %d", version)
+	}
+	return version, nil
 }
 
 func S0FSCompactionInterval(cfg *config.StorageProxyConfig) (time.Duration, error) {
@@ -351,6 +367,11 @@ func (b *S0FSBackend) garbageCollectVolumeObjects(ctx context.Context, volCtx *V
 		return nil, err
 	}
 	materializer.SetEncryption(encryption)
+	stateFormatVersion, err := S0FSStateFormatVersion(b.config)
+	if err != nil {
+		return nil, err
+	}
+	materializer.SetStateFormatVersion(stateFormatVersion)
 
 	headBefore, err := b.headStore.LoadCommittedHead(ctx, volCtx.VolumeID)
 	if err != nil && !errors.Is(err, s0fs.ErrCommittedHeadNotFound) {
@@ -358,11 +379,12 @@ func (b *S0FSBackend) garbageCollectVolumeObjects(ctx context.Context, volCtx *V
 	}
 	retainedStates := []*s0fs.SnapshotState{manifest.State}
 	cfg := s0fs.Config{
-		VolumeID:    volCtx.VolumeID,
-		WALPath:     filepath.Join(volCtx.CacheDir, "engine.wal"),
-		ObjectStore: store,
-		HeadStore:   b.headStore,
-		Encryption:  encryption,
+		VolumeID:           volCtx.VolumeID,
+		WALPath:            filepath.Join(volCtx.CacheDir, "engine.wal"),
+		ObjectStore:        store,
+		HeadStore:          b.headStore,
+		Encryption:         encryption,
+		StateFormatVersion: stateFormatVersion,
 	}
 	localSnapshots, err := s0fs.LoadLocalSnapshots(ctx, cfg)
 	if err != nil {

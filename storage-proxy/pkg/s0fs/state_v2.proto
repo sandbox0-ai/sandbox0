@@ -1,0 +1,130 @@
+syntax = "proto3";
+
+package sandbox0.s0fs.internal;
+
+option go_package = "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs";
+
+enum StateV2Role {
+  STATE_V2_ROLE_UNSPECIFIED = 0;
+  STATE_V2_ROLE_HEAD = 1;
+  STATE_V2_ROLE_MANIFEST = 2;
+  STATE_V2_ROLE_SNAPSHOT = 3;
+}
+
+enum StateV2ChunkKind {
+  STATE_V2_CHUNK_KIND_UNSPECIFIED = 0;
+  STATE_V2_CHUNK_KIND_NODES = 1;
+  STATE_V2_CHUNK_KIND_DIRECTORIES = 2;
+  STATE_V2_CHUNK_KIND_DATA = 3;
+  STATE_V2_CHUNK_KIND_COLD_FILES = 4;
+  STATE_V2_CHUNK_KIND_SEGMENTS = 5;
+}
+
+enum StateV2FileType {
+  STATE_V2_FILE_TYPE_UNSPECIFIED = 0;
+  STATE_V2_FILE_TYPE_DIRECTORY = 1;
+  STATE_V2_FILE_TYPE_FILE = 2;
+  STATE_V2_FILE_TYPE_SYMLINK = 3;
+}
+
+message StateV2Header {
+  uint32 format_version = 1;
+  StateV2Role role = 2;
+  string volume_id = 3;
+  bytes binding_sha256 = 4;
+  uint64 next_seq = 5;
+  uint64 next_inode = 6;
+  uint64 manifest_seq = 7;
+  uint64 checkpoint_seq = 8;
+  int64 created_at_seconds = 9;
+  int32 created_at_nanos = 10;
+  string compression = 11;
+  string encryption_algorithm = 12;
+  bytes wrapped_key = 13;
+  bytes nonce_prefix = 14;
+  repeated StateV2ChunkDescriptor chunks = 15;
+}
+
+message StateV2ChunkDescriptor {
+  StateV2ChunkKind kind = 1;
+  uint32 index = 2;
+  uint64 offset = 3;
+  uint64 encoded_size = 4;
+  uint64 stored_size = 5;
+  uint64 record_count = 6;
+  uint64 first_inode = 7;
+  uint64 last_inode = 8;
+  bytes encoded_sha256 = 9;
+}
+
+message StateV2Chunk {
+  repeated StateV2Node nodes = 1;
+  repeated StateV2Directory directories = 2;
+  repeated StateV2Data data = 3;
+  repeated StateV2ColdFile cold_files = 4;
+  repeated StateV2Segment segments = 5;
+}
+
+message StateV2Node {
+  uint64 inode = 1;
+  StateV2FileType type = 2;
+  uint32 mode = 3;
+  uint32 uid = 4;
+  uint32 gid = 5;
+  uint32 nlink = 6;
+  uint64 size = 7;
+  string target = 8;
+  int64 atime_seconds = 9;
+  int32 atime_nanos = 10;
+  int64 mtime_seconds = 11;
+  int32 mtime_nanos = 12;
+  int64 ctime_seconds = 13;
+  int32 ctime_nanos = 14;
+}
+
+message StateV2Directory {
+  uint64 parent_inode = 1;
+  repeated StateV2Child children = 2;
+}
+
+message StateV2Child {
+  string name = 1;
+  uint64 inode = 2;
+}
+
+message StateV2Data {
+  uint64 inode = 1;
+  uint64 offset = 2;
+  bytes payload = 3;
+}
+
+message StateV2ColdFile {
+  uint64 inode = 1;
+  repeated StateV2Extent extents = 2;
+}
+
+message StateV2Extent {
+  string segment_id = 1;
+  uint64 offset = 2;
+  uint64 length = 3;
+}
+
+message StateV2Segment {
+  string id = 1;
+  string volume_id = 2;
+  string key = 3;
+  uint64 length = 4;
+  string sha256 = 5;
+  StateV2SegmentEncryption encryption = 6;
+  bytes inline_data = 7;
+}
+
+message StateV2SegmentEncryption {
+  uint32 version = 1;
+  string algorithm = 2;
+  uint64 chunk_size = 3;
+  uint64 plaintext_size = 4;
+  uint64 ciphertext_size = 5;
+  bytes wrapped_key = 6;
+  bytes nonce_prefix = 7;
+}

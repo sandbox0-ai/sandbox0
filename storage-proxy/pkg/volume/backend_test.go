@@ -126,6 +126,32 @@ func TestS0FSSegmentTargetSizeParsesConfig(t *testing.T) {
 	}
 }
 
+func TestS0FSStateFormatVersionDefaultsToV1(t *testing.T) {
+	got, err := S0FSStateFormatVersion(&config.StorageProxyConfig{})
+	if err != nil {
+		t.Fatalf("S0FSStateFormatVersion() error = %v", err)
+	}
+	if got != s0fs.StateFormatV1 {
+		t.Fatalf("S0FSStateFormatVersion() = %d, want %d", got, s0fs.StateFormatV1)
+	}
+}
+
+func TestS0FSStateFormatVersionAcceptsV2(t *testing.T) {
+	got, err := S0FSStateFormatVersion(&config.StorageProxyConfig{S0FSStateFormatVersion: s0fs.StateFormatV2})
+	if err != nil {
+		t.Fatalf("S0FSStateFormatVersion() error = %v", err)
+	}
+	if got != s0fs.StateFormatV2 {
+		t.Fatalf("S0FSStateFormatVersion() = %d, want %d", got, s0fs.StateFormatV2)
+	}
+}
+
+func TestS0FSStateFormatVersionRejectsUnsupportedValue(t *testing.T) {
+	if _, err := S0FSStateFormatVersion(&config.StorageProxyConfig{S0FSStateFormatVersion: 3}); err == nil {
+		t.Fatal("S0FSStateFormatVersion() accepted unsupported value")
+	}
+}
+
 func TestS0FSCompactionOptionsParseConfig(t *testing.T) {
 	opts, err := S0FSCompactionOptions(&config.StorageProxyConfig{
 		S0FSSegmentTargetSize:        "8Mi",

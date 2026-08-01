@@ -29,6 +29,7 @@ type Engine struct {
 
 	materializer            *Materializer
 	encryption              *EncryptionConfig
+	stateFormatVersion      int
 	localDiskGuard          *LocalDiskGuard
 	retainUnlinked          bool
 	mutationVersion         uint64
@@ -38,38 +39,109 @@ type Engine struct {
 	dirtyAt                 time.Time
 }
 
-func Open(ctx context.Context, cfg Config) (*Engine, error) {
+func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
+	openedAt := time.Now()
+	selectedSource := "new"
+	selectedFormat := 0
+	walRecordsApplied := 0
+	defer func() {
+		if cfg.OpenObserver == nil {
+			return
+		}
+		observation := OpenObservation{
+			VolumeID: cfg.VolumeID,
+			Phase:    "complete",
+			Source:   selectedSource,
+			Format:   selectedFormat,
+			Duration: time.Since(openedAt),
+			Bytes:    -1,
+			Err:      retErr,
+		}
+		if engine != nil {
+			engine.mu.RLock()
+			observation.WALRecords = walRecordsApplied
+			observation.Nodes = len(engine.nodes)
+			observation.DirectoryEntries = directoryEntryCount(engine.children)
+			observation.Segments = len(engine.segments)
+			engine.mu.RUnlock()
+		}
+		emitOpenObservation(cfg.OpenObserver, observation)
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if cfg.VolumeID == "" {
 		return nil, fmt.Errorf("%w: volume id is required", ErrInvalidInput)
 	}
+	if err := validateStateFormatVersion(cfg.StateFormatVersion); err != nil {
+		return nil, err
+	}
 
+	phaseStarted := time.Now()
 	walFile, records, err := openWAL(cfg.WALPath, cfg.VolumeID, cfg.Encryption, cfg.WALSyncHook)
+	emitOpenPhase(cfg, "wal_open", "local", 0, phaseStarted, walFileSize(cfg.WALPath), len(records), nil, err)
 	if err != nil {
 		return nil, err
 	}
 
-	state, err := loadCurrentState(cfg)
+	phaseStarted = time.Now()
+	state, localFormat, localBytes, err := loadCurrentState(cfg)
+	localStateErr := err
+	emitOpenPhase(cfg, "state_load", "local", localFormat, phaseStarted, localBytes, len(records), state, err)
 	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
 	if materializer != nil {
 		materializer.SetEncryption(cfg.Encryption)
 		materializer.SetSegmentTargetSize(cfg.SegmentTargetSize)
+		materializer.SetStateFormatVersion(cfg.StateFormatVersion)
+		materializer.SetOpenObserver(cfg.OpenObserver)
 	}
 	var latestManifest *Manifest
 	if materializer != nil {
-		latestState, manifest, latestErr := materializer.LoadLatestState(ctx)
-		switch {
-		case latestErr == nil && shouldUseMaterializedState(state, err, latestState, len(records)):
-			state = latestState
-			err = nil
-			latestManifest = manifest
-		case latestErr == nil:
-			latestManifest = manifest
-		case errors.Is(err, ErrSnapshotNotFound) && latestErr != nil && !errors.Is(latestErr, ErrMaterializedManifestNotFound):
-			err = latestErr
+		localCommitted := false
+		if state != nil && localStateErr == nil && materializer.headStore != nil {
+			head, headErr := materializer.loadCommittedHead(ctx)
+			reuseStarted := time.Now()
+			if headErr == nil && committedHeadMatchesCheckpoint(head, cfg.VolumeID, checkpointSequence(state)) {
+				latestManifest = &Manifest{
+					VolumeID:      head.VolumeID,
+					ManifestSeq:   head.ManifestSeq,
+					CheckpointSeq: head.CheckpointSeq,
+					CreatedAt:     head.UpdatedAt,
+				}
+				localCommitted = true
+				selectedSource = "local"
+				selectedFormat = localFormat
+				emitOpenPhase(cfg, "state_reuse", "local", localFormat, reuseStarted, localBytes, len(records), state, nil)
+			} else if headErr != nil && !errors.Is(headErr, ErrCommittedHeadNotFound) {
+				err = headErr
+			}
 		}
+		if !localCommitted && (err == nil || errors.Is(err, ErrSnapshotNotFound)) {
+			phaseStarted = time.Now()
+			latestState, manifest, latestErr := materializer.loadLatestStateOwned(ctx)
+			remoteFormat := 0
+			if manifest != nil && (manifest.Version == StateFormatV1 || manifest.Version == StateFormatV2) {
+				remoteFormat = manifest.Version
+			}
+			emitOpenPhase(cfg, "state_load", "remote", remoteFormat, phaseStarted, -1, len(records), latestState, latestErr)
+			switch {
+			case latestErr == nil && shouldUseMaterializedState(state, err, latestState, len(records)):
+				state = latestState
+				err = nil
+				latestManifest = manifest
+				selectedSource = "remote"
+				selectedFormat = remoteFormat
+			case latestErr == nil:
+				latestManifest = manifest
+				if localStateErr == nil {
+					selectedSource = "local"
+					selectedFormat = localFormat
+				}
+			case errors.Is(err, ErrSnapshotNotFound) && latestErr != nil && !errors.Is(latestErr, ErrMaterializedManifestNotFound):
+				err = latestErr
+			}
+		}
+		materializer.SetOpenObserver(nil)
 	}
 	if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrMaterializedManifestNotFound) {
 		_ = walFile.close()
@@ -98,27 +170,34 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 			ColdFiles: make(map[uint64][]FileExtent),
 			Segments:  make(map[string]*Segment),
 		}
+		selectedSource = "new"
+		selectedFormat = 0
+	} else if selectedSource == "new" && localStateErr == nil {
+		selectedSource = "local"
+		selectedFormat = localFormat
 	}
 
 	e := &Engine{
-		volumeID:       cfg.VolumeID,
-		wal:            walFile,
-		nextSeq:        state.NextSeq,
-		nextInode:      state.NextInode,
-		nodes:          state.Nodes,
-		children:       state.Children,
-		data:           state.Data,
-		coldFiles:      state.ColdFiles,
-		segments:       state.Segments,
-		materializer:   materializer,
-		encryption:     cfg.Encryption,
-		localDiskGuard: cfg.LocalDiskGuard,
-		retainUnlinked: cfg.RetainUnlinked,
+		volumeID:           cfg.VolumeID,
+		wal:                walFile,
+		nextSeq:            state.NextSeq,
+		nextInode:          state.NextInode,
+		nodes:              state.Nodes,
+		children:           state.Children,
+		data:               state.Data,
+		coldFiles:          state.ColdFiles,
+		segments:           state.Segments,
+		materializer:       materializer,
+		encryption:         cfg.Encryption,
+		stateFormatVersion: normalizedStateFormatVersion(cfg.StateFormatVersion),
+		localDiskGuard:     cfg.LocalDiskGuard,
+		retainUnlinked:     cfg.RetainUnlinked,
 	}
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
 	}
 
+	phaseStarted = time.Now()
 	appliedRecords := 0
 	for _, record := range records {
 		if record.Seq < e.nextSeq {
@@ -148,8 +227,56 @@ func Open(ctx context.Context, cfg Config) (*Engine, error) {
 		e.dirtyAt = time.Now().UTC()
 		e.mutationVersion = 1
 	}
+	walRecordsApplied = appliedRecords
+	emitOpenPhase(cfg, "wal_replay", "local", selectedFormat, phaseStarted, walFileSize(cfg.WALPath), appliedRecords, e.currentStateLocked(), nil)
 
-	return e, nil
+	engine = e
+	return engine, nil
+}
+
+func emitOpenPhase(cfg Config, phase, source string, format int, started time.Time, bytes int64, walRecords int, state *SnapshotState, err error) {
+	observation := OpenObservation{
+		VolumeID:   cfg.VolumeID,
+		Phase:      phase,
+		Source:     source,
+		Format:     format,
+		Duration:   time.Since(started),
+		Bytes:      bytes,
+		WALRecords: walRecords,
+		Err:        err,
+	}
+	if phase == "complete" && state != nil {
+		observation.Nodes = len(state.Nodes)
+		observation.DirectoryEntries = directoryEntryCount(state.Children)
+		observation.Segments = len(state.Segments)
+	}
+	emitOpenObservation(cfg.OpenObserver, observation)
+}
+
+func emitOpenObservation(observer OpenObserver, observation OpenObservation) {
+	if observer != nil {
+		observer(observation)
+	}
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1
+	}
+	return info.Size()
+}
+
+func walFileSize(path string) int64 {
+	return fileSize(path)
+}
+
+func directoryEntryCount(children map[uint64]map[string]uint64) int {
+	total := 0
+	for _, entries := range children {
+		total += len(entries)
+	}
+	return total
 }
 
 func (e *Engine) Close() error {
@@ -608,6 +735,61 @@ func (e *Engine) SnapshotReferenceState() *SnapshotState {
 	return cloneStateForMaterialization(e.currentStateLocked())
 }
 
+// CommittedHeadCurrent reports whether this clean in-memory engine still
+// matches the authoritative committed manifest pointer. It is used before a
+// node-local hot engine is made visible again after relinquishing ownership.
+func (e *Engine) CommittedHeadCurrent(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	e.mu.RLock()
+	if err := e.checkOpen(); err != nil {
+		e.mu.RUnlock()
+		return false, err
+	}
+	dirty := e.dirty
+	manifestSeq := e.lastCommittedManifest
+	checkpointSeq := checkpointSequence(e.currentStateLocked())
+	materializer := e.materializer
+	e.mu.RUnlock()
+	if dirty || materializer == nil || materializer.headStore == nil {
+		return false, nil
+	}
+	head, err := materializer.headStore.LoadCommittedHead(ctx, e.volumeID)
+	if errors.Is(err, ErrCommittedHeadNotFound) {
+		return manifestSeq == 0, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committedHeadMatchesCheckpoint(head, e.volumeID, checkpointSeq) && head.ManifestSeq == manifestSeq, nil
+}
+
+func committedHeadMatchesCheckpoint(head *CommittedHead, volumeID string, checkpointSeq uint64) bool {
+	return head != nil &&
+		head.VolumeID == volumeID &&
+		head.ManifestSeq != 0 &&
+		head.ManifestSeq == checkpointSeq &&
+		head.CheckpointSeq == checkpointSeq &&
+		head.ManifestKey == manifestKey(head.ManifestSeq)
+}
+
+// EstimatedMemoryBytes returns a conservative size estimate for bounding the
+// node-local hot engine cache. It does not mutate or clone engine state.
+func (e *Engine) EstimatedMemoryBytes() int64 {
+	if e == nil {
+		return 0
+	}
+	e.mu.RLock()
+	total := estimatedStateMemoryBytes(e.currentStateLocked())
+	materializer := e.materializer
+	e.mu.RUnlock()
+	if materializer != nil {
+		total += materializer.estimatedCacheMemoryBytes()
+	}
+	return total
+}
+
 func (e *Engine) ExportState() (*SnapshotState, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -692,7 +874,7 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	currentNextSeq := e.nextSeq
 	e.mu.RUnlock()
 
-	state, manifest, err := e.materializer.LoadLatestState(ctx)
+	state, manifest, err := e.materializer.loadLatestStateOwned(ctx)
 	if errors.Is(err, ErrMaterializedManifestNotFound) {
 		return false, nil
 	}
@@ -714,7 +896,7 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	if e.dirty || state.NextSeq <= e.nextSeq {
 		return false, nil
 	}
-	e.replaceStateLocked(cloneState(state))
+	e.replaceStateLocked(state)
 	if err := e.persistCurrentStateLocked(); err != nil {
 		return false, err
 	}
@@ -741,7 +923,7 @@ func (e *Engine) CreateSnapshot(snapshotID string) (*SnapshotState, error) {
 	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
 		return nil, err
 	}
-	if err := saveSnapshotState(snapshotFilePath(e.wal.path, snapshotID), e.volumeID, "snapshot:"+snapshotID, state, e.encryption); err != nil {
+	if err := saveSnapshotState(snapshotFilePath(e.wal.path, snapshotID), e.volumeID, "snapshot:"+snapshotID, state, e.encryption, e.stateFormatVersion); err != nil {
 		return nil, err
 	}
 	e.refreshLocalDiskGuardLocked()
@@ -983,6 +1165,35 @@ func estimatedStateBytes(state *SnapshotState) int64 {
 	return total
 }
 
+func estimatedStateMemoryBytes(state *SnapshotState) int64 {
+	if state == nil {
+		return 0
+	}
+	total := estimatedStateBytes(state)
+	for _, children := range state.Children {
+		for name := range children {
+			total += int64(len(name))
+		}
+	}
+	for _, extents := range state.ColdFiles {
+		total += int64(64 + len(extents)*64)
+		for _, extent := range extents {
+			total += int64(len(extent.SegmentID))
+		}
+	}
+	for id, segment := range state.Segments {
+		total += int64(256 + len(id))
+		if segment == nil {
+			continue
+		}
+		total += int64(len(segment.ID) + len(segment.VolumeID) + len(segment.Key) + len(segment.SHA256) + len(segment.InlineData))
+		if segment.Encryption != nil {
+			total += int64(len(segment.Encryption.Algorithm) + len(segment.Encryption.WrappedKey) + len(segment.Encryption.NoncePrefix) + 128)
+		}
+	}
+	return total
+}
+
 func (e *Engine) currentStateLocked() *SnapshotState {
 	return &SnapshotState{
 		NextSeq:   e.nextSeq,
@@ -1027,14 +1238,14 @@ func (e *Engine) persistCurrentStateLockedWithReserve(reserve bool) error {
 			return err
 		}
 	}
-	return saveSnapshotState(headStatePath(e.wal.path), e.volumeID, "head", state, e.encryption)
+	return saveSnapshotState(headStatePath(e.wal.path), e.volumeID, "head", state, e.encryption, e.stateFormatVersion)
 }
 
-func loadCurrentState(cfg Config) (*SnapshotState, error) {
+func loadCurrentState(cfg Config) (*SnapshotState, int, int64, error) {
 	if cfg.WALPath == "" {
-		return nil, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
+		return nil, 0, -1, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
-	return loadSnapshotState(headStatePath(cfg.WALPath), cfg.VolumeID, "head", cfg.Encryption)
+	return loadSnapshotStateWithFormat(headStatePath(cfg.WALPath), cfg.VolumeID, "head", cfg.Encryption)
 }
 
 func shouldUseMaterializedState(current *SnapshotState, currentErr error, latest *SnapshotState, walRecords int) bool {

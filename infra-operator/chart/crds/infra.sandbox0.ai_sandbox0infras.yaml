@@ -4907,9 +4907,34 @@ spec:
                       s0fsCompactionMinReclaimSize:
                         default: 1Mi
                         type: string
+                      s0fsHotCacheMaxEntries:
+                        default: 8
+                        description: S0FSHotCacheMaxEntries bounds retained engines
+                          per active ctld process.
+                        minimum: 1
+                        type: integer
+                      s0fsHotCacheMaxSize:
+                        default: 1Gi
+                        description: S0FSHotCacheMaxSize bounds estimated memory retained
+                          by clean engines.
+                        type: string
+                      s0fsHotCacheTTL:
+                        default: 30s
+                        description: S0FSHotCacheTTL retains clean unbound engines
+                          for same-node remounts. Zero disables retention.
+                        type: string
                       s0fsSegmentTargetSize:
                         default: 4Mi
                         type: string
+                      s0fsStateFormatVersion:
+                        default: 1
+                        description: |-
+                          S0FSStateFormatVersion selects the format for new S0FS state objects and local state files.
+                          Readers accept both versions. Keep version 1 until every manager and ctld runs a dual-reader build.
+                        enum:
+                        - 1
+                        - 2
+                        type: integer
                       volumePortalCacheSizeLimit:
                         default: 20Gi
                         type: string

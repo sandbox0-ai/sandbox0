@@ -236,8 +236,13 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		zapLogger,
 	)
 	defer flushCtldObjectStoreRequestMetering(objectStoreRequestMeter, zapLogger)
+	var ctldMetricsRegistry prometheus.Registerer
+	if obsProvider != nil {
+		ctldMetricsRegistry = obsProvider.MetricsRegistryOrNil()
+	}
 
 	podUIDLister := activePodUIDLister(k8sClient, nodeName)
+	portalObserver := ctldportal.NewObserver(ctldMetricsRegistry, zapLogger)
 	portalManager := ctldportal.NewManager(ctldportal.Config{
 		NodeName:           nodeName,
 		RootDir:            portalRoot,
@@ -246,6 +251,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		StorageConfig:      storageCfg,
 		StorageObserver:    newPortalStorageObserver(storageCfg, repo, dbPool),
 		RequestObserver:    objectStoreRequestMeter,
+		Observer:           portalObserver,
 		Repository:         repo,
 		PodName:            podName,
 		PodNamespace:       podNamespace,
@@ -347,11 +353,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	}
 	podCache := buildNodePodCache(ctx, k8sClient, runtimeWatchHandler)
 	probeController := buildProbeController(k8sClient, obsProvider, podCache)
-	var rootFSMetricsRegistry prometheus.Registerer
-	if obsProvider != nil {
-		rootFSMetricsRegistry = obsProvider.MetricsRegistryOrNil()
-	}
-	rootFSObserver := ctldrootfs.NewObserver(rootFSMetricsRegistry, zapLogger)
+	rootFSObserver := ctldrootfs.NewObserver(ctldMetricsRegistry, zapLogger)
 	containerdRuntime := buildContainerdRuntime(rootFSObserver)
 	defer containerdRuntime.Close()
 	runtimeMetricsHandle := startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)

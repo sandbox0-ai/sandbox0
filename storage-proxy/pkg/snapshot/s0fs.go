@@ -92,6 +92,11 @@ func (m *Manager) s0fsConfig(teamID, volumeID string) (s0fs.Config, error) {
 		return s0fs.Config{}, err
 	}
 	cfg.SegmentTargetSize = segmentTargetSize
+	stateFormatVersion, err := volume.S0FSStateFormatVersion(m.config)
+	if err != nil {
+		return s0fs.Config{}, err
+	}
+	cfg.StateFormatVersion = stateFormatVersion
 	store, err := m.s0fsObjectStore(teamID, volumeID)
 	if err != nil {
 		return s0fs.Config{}, err

@@ -120,6 +120,7 @@ func (m *Manager) registerOwner(ctx context.Context, bound *boundVolume) error {
 	if err := m.acquireOwner(ctx, bound, ownerPodID); err != nil {
 		return err
 	}
+	bound.ownerRegistered = true
 
 	interval := m.heartbeatInterval
 	if interval <= 0 {
@@ -188,6 +189,7 @@ func (m *Manager) unregisterOwner(bound *boundVolume) {
 		return
 	}
 	m.stopOwnerHeartbeat(bound)
+	bound.ownerRegistered = false
 	if m.repo == nil || bound.volumeID == "" {
 		return
 	}

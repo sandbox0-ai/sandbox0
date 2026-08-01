@@ -236,6 +236,30 @@ func (m *localVolumeManager) UnmountVolume(ctx context.Context, volumeID, _ stri
 	return nil
 }
 
+// DetachHotVolume materializes and removes a volume from request routing while
+// leaving its clean engine open for bounded node-local reuse.
+func (m *localVolumeManager) DetachHotVolume(ctx context.Context, volumeID string) (*volume.VolumeContext, error) {
+	m.mu.RLock()
+	volCtx, ok := m.volumes[volumeID]
+	m.mu.RUnlock()
+	if !ok || volCtx == nil {
+		return nil, nil
+	}
+	if volCtx.S0FS == nil {
+		m.remove(volumeID)
+		return nil, nil
+	}
+	if err := m.prepareSnapshotCheckpoint(ctx, volumeID); err != nil {
+		return nil, err
+	}
+	if _, err := volCtx.SyncMaterialize(ctx); err != nil {
+		m.completeSnapshotCheckpoint(volumeID)
+		return nil, err
+	}
+	m.remove(volumeID)
+	return volCtx, nil
+}
+
 // HandoffVolume closes the local engine while preserving its recovery state
 // for the promoted ctld process on the same node.
 func (m *localVolumeManager) HandoffVolume(volumeID string) error {

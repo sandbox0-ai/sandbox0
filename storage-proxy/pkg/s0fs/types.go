@@ -23,14 +23,39 @@ type Config struct {
 	ObjectStoreForVolume ObjectStoreResolver
 	HeadStore            HeadStore
 	Encryption           *EncryptionConfig
+	StateFormatVersion   int
 	MaterializeInterval  time.Duration
 	SegmentTargetSize    uint64
 	WALSyncHook          func()
+	OpenObserver         OpenObserver
 	LocalDiskGuard       *LocalDiskGuard
 	RetainUnlinked       bool
 }
 
 type ObjectStoreResolver func(volumeID string) (objectstore.Store, error)
+
+const (
+	StateFormatV1 = 1
+	StateFormatV2 = 2
+)
+
+// OpenObservation describes one bounded S0FS engine-open phase. Callers must
+// keep metric labels low-cardinality; VolumeID is intended for logs only.
+type OpenObservation struct {
+	VolumeID         string
+	Phase            string
+	Source           string
+	Format           int
+	Duration         time.Duration
+	Bytes            int64
+	WALRecords       int
+	Nodes            int
+	DirectoryEntries int
+	Segments         int
+	Err              error
+}
+
+type OpenObserver func(OpenObservation)
 
 type SnapshotState struct {
 	NextSeq   uint64                       `json:"next_seq"`

@@ -1043,6 +1043,25 @@ type StorageProxyConfig struct {
 	// +kubebuilder:default="4Mi"
 	S0FSSegmentTargetSize string `json:"s0fsSegmentTargetSize,omitempty"`
 	// +optional
+	// S0FSStateFormatVersion selects the format for new S0FS state objects and local state files.
+	// Readers accept both versions. Keep version 1 until every manager and ctld runs a dual-reader build.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Enum=1;2
+	S0FSStateFormatVersion int `json:"s0fsStateFormatVersion,omitempty"`
+	// +optional
+	// S0FSHotCacheTTL retains clean unbound engines for same-node remounts. Zero disables retention.
+	// +kubebuilder:default="30s"
+	S0FSHotCacheTTL string `json:"s0fsHotCacheTTL,omitempty"`
+	// +optional
+	// S0FSHotCacheMaxEntries bounds retained engines per active ctld process.
+	// +kubebuilder:default=8
+	// +kubebuilder:validation:Minimum=1
+	S0FSHotCacheMaxEntries int `json:"s0fsHotCacheMaxEntries,omitempty"`
+	// +optional
+	// S0FSHotCacheMaxSize bounds estimated memory retained by clean engines.
+	// +kubebuilder:default="1Gi"
+	S0FSHotCacheMaxSize string `json:"s0fsHotCacheMaxSize,omitempty"`
+	// +optional
 	// +kubebuilder:default="1m"
 	S0FSCompactionInterval string `json:"s0fsCompactionInterval,omitempty"`
 	// +optional

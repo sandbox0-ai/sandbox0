@@ -272,6 +272,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 					assertSandboxRootFSPersistsAcrossPauseResume(env, session)
 				})
 
+				It("keeps a SandboxVolume mounted beneath ephemeral tmp", func() {
+					assertSandboxVolumeUnderTmpPersistsAcrossPauseResume(env, session)
+				})
+
 				It("snapshots restores and forks sandbox rootfs", func() {
 					assertSandboxRootFSSnapshotRestoreFork(env, session)
 				})
@@ -1392,6 +1396,8 @@ func assertSandboxRootFSPersistsAcrossPauseResume(env *framework.ScenarioEnv, se
 	filePath := rootDir + "/marker.txt"
 	nestedPath := rootDir + "/nested/value.txt"
 	linkPath := rootDir + "/marker.link"
+	tmpPath := "/tmp/" + marker + ".txt"
+	varTmpPath := "/var/tmp/" + marker + ".txt"
 	content := "rootfs checkpoint " + marker
 
 	writeScript := fmt.Sprintf(`set -eu
@@ -1399,6 +1405,8 @@ rm -rf %s
 mkdir -p %s
 printf %%s %s > %s
 printf %%s nested > %s
+printf %%s ephemeral > %s
+printf %%s persistent-var-tmp > %s
 ln -sf %s %s
 chmod 751 %s
 test "$(cat %s)" = %s
@@ -1411,6 +1419,8 @@ test "$(stat -c %%a %s)" = 751
 		shellQuote(content),
 		shellQuote(filePath),
 		shellQuote(nestedPath),
+		shellQuote(tmpPath),
+		shellQuote(varTmpPath),
 		shellQuote(filePath),
 		shellQuote(linkPath),
 		shellQuote(rootDir),
@@ -1452,6 +1462,8 @@ test "$(cat %s)" = %s
 test "$(cat %s)" = nested
 test "$(cat %s)" = %s
 test "$(stat -c %%a %s)" = 751
+test ! -e %s
+test "$(cat %s)" = persistent-var-tmp
 `,
 		shellQuote(filePath),
 		shellQuote(content),
@@ -1459,8 +1471,66 @@ test "$(stat -c %%a %s)" = 751
 		shellQuote(linkPath),
 		shellQuote(content),
 		shellQuote(rootDir),
+		shellQuote(tmpPath),
+		shellQuote(varTmpPath),
 	)
 	_, err = execInSandboxPod(env, templateNamespace, restored.PodName, verifyScript)
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func assertSandboxVolumeUnderTmpPersistsAcrossPauseResume(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	volume, status, err := session.CreateSandboxVolume(env.TestCtx.Context, GinkgoT(), apispec.CreateSandboxVolumeRequest{})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusCreated))
+	Expect(volume).NotTo(BeNil())
+	volumeID := expectStringPtr(volume.Id, "volume id")
+	DeferCleanup(func() {
+		deleteSandboxVolumeForCleanup(env, session, volumeID)
+	})
+
+	mountPoint := "/tmp/sandbox0-volume"
+	templateID := createVolumePortalTemplate(env, session, mountPoint)
+	template, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
+	Expect(err).NotTo(HaveOccurred())
+	templateNamespace, err := naming.TemplateNamespaceForTeam(expectStringPtr(template.TeamId, "team id"))
+	Expect(err).NotTo(HaveOccurred())
+	claimResp, err := session.ClaimSandboxWithRequest(env.TestCtx.Context, GinkgoT(), apispec.ClaimRequest{
+		Template: &templateID,
+		Mounts: &[]apispec.ClaimMountRequest{{
+			SandboxvolumeId: volumeID,
+			MountPoint:      mountPoint,
+		}},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(claimResp).NotTo(BeNil())
+	sandboxID := claimResp.SandboxId
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+	sandbox := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	marker := fmt.Sprintf("tmp-volume-%d", time.Now().UnixNano())
+	volumePath := mountPoint + "/marker.txt"
+	_, err = execInSandboxPod(env, templateNamespace, sandbox.PodName, fmt.Sprintf(
+		"set -eu; printf %%s %s > %s; test \"$(cat %s)\" = %s",
+		shellQuote(marker), shellQuote(volumePath), shellQuote(volumePath), shellQuote(marker),
+	))
+	Expect(err).NotTo(HaveOccurred())
+
+	pauseResp, status, err := session.PauseSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(pauseResp).NotTo(BeNil())
+	waitForSandboxLifecycleStatusEventually(env, session, sandboxID, apispec.SandboxLifecycleStatusPaused)
+	resumeResp, status, err := session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(resumeResp).NotTo(BeNil())
+	Expect(resumeResp.Resumed).To(BeTrue())
+	restored := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	_, err = execInSandboxPod(env, templateNamespace, restored.PodName, fmt.Sprintf(
+		"set -eu; test \"$(cat %s)\" = %s",
+		shellQuote(volumePath), shellQuote(marker),
+	))
 	Expect(err).NotTo(HaveOccurred())
 }
 
@@ -1631,6 +1701,7 @@ func assertSandboxRootFSSnapshotRestoreFork(env *framework.ScenarioEnv, session 
 	rootDir := "/root/" + marker
 	filePath := rootDir + "/marker.txt"
 	nestedPath := rootDir + "/nested/value.txt"
+	tmpPath := "/tmp/" + marker + ".txt"
 	v1Content := "snapshot v1 " + marker
 	v2Content := "snapshot v2 " + marker
 
@@ -1639,6 +1710,7 @@ rm -rf %s
 mkdir -p %s
 printf %%s %s > %s
 printf %%s nested-v1 > %s
+printf %%s ephemeral-v1 > %s
 test "$(cat %s)" = %s
 test "$(cat %s)" = nested-v1
 `,
@@ -1647,6 +1719,7 @@ test "$(cat %s)" = nested-v1
 		shellQuote(v1Content),
 		shellQuote(filePath),
 		shellQuote(nestedPath),
+		shellQuote(tmpPath),
 		shellQuote(filePath),
 		shellQuote(v1Content),
 		shellQuote(nestedPath),
@@ -1682,12 +1755,14 @@ test "$(cat %s)" = nested-v1
 	writeV2Script := fmt.Sprintf(`set -eu
 printf %%s %s > %s
 printf %%s nested-v2 > %s
+printf %%s ephemeral-v2 > %s
 test "$(cat %s)" = %s
 test "$(cat %s)" = nested-v2
 `,
 		shellQuote(v2Content),
 		shellQuote(filePath),
 		shellQuote(nestedPath),
+		shellQuote(tmpPath),
 		shellQuote(filePath),
 		shellQuote(v2Content),
 		shellQuote(nestedPath),
@@ -1717,10 +1792,12 @@ test "$(cat %s)" = nested-v2
 	verifyV2Script := fmt.Sprintf(`set -eu
 test "$(cat %s)" = %s
 test "$(cat %s)" = nested-v2
+test ! -e %s
 `,
 		shellQuote(filePath),
 		shellQuote(v2Content),
 		shellQuote(nestedPath),
+		shellQuote(tmpPath),
 	)
 	_, err = execInSandboxPod(env, templateNamespace, runningForked.PodName, verifyV2Script)
 	Expect(err).NotTo(HaveOccurred())
@@ -1759,10 +1836,12 @@ test "$(cat %s)" = nested-v2
 	verifyV1Script := fmt.Sprintf(`set -eu
 test "$(cat %s)" = %s
 test "$(cat %s)" = nested-v1
+test ! -e %s
 `,
 		shellQuote(filePath),
 		shellQuote(v1Content),
 		shellQuote(nestedPath),
+		shellQuote(tmpPath),
 	)
 	_, err = execInSandboxPod(env, templateNamespace, source.PodName, verifyV1Script)
 	Expect(err).NotTo(HaveOccurred())

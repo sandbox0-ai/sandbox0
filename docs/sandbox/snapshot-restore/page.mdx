@@ -37,6 +37,12 @@ Use [Volumes](/docs/sandbox/volume) when data must be mounted by multiple sandbo
 - `Resume` is required before reading or writing files through sandbox process and file APIs after restore or fork. A sandbox claimed with `snapshot_id` starts running.
 - Deleting a snapshot does not modify any sandbox already claimed or restored from it, and it does not affect forks created from the same rootfs state.
 
+### Rootfs Path Semantics
+
+Snapshots, snapshot claims, restore, and fork use the same persistence boundary as pause and resume. `/tmp` is ephemeral and is not captured or restored, while `/var/tmp` and ordinary writable rootfs paths remain persistent. A Sandbox Volume mounted beneath `/tmp` remains durable because Volume state is managed independently from rootfs checkpoints.
+
+Older snapshot layers are filtered when restored, so legacy `/tmp` entries do not reappear. Reading and filtering a large legacy layer can make its first restore slower; later checkpoints omit that data. See [Pause And Resume](/docs/sandbox/pause-resume#persistent-and-ephemeral-paths) for the complete path policy.
+
 <Callout variant="info">
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
 </Callout>

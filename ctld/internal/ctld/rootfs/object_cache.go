@@ -25,6 +25,7 @@ type ObjectCacheConfig struct {
 	MinFreeBytes  int64
 	MaxAge        time.Duration
 	SweepInterval time.Duration
+	Observer      *Observer
 }
 
 type ObjectCache struct {
@@ -34,6 +35,15 @@ type ObjectCache struct {
 	maxAge        time.Duration
 	sweepInterval time.Duration
 	mu            sync.Mutex
+	validated     map[string]objectCacheFileIdentity
+	observer      *Observer
+}
+
+type objectCacheFileIdentity struct {
+	device      uint64
+	inode       uint64
+	size        int64
+	modTimeNano int64
 }
 
 type objectCacheEntry struct {
@@ -60,6 +70,8 @@ func NewObjectCache(cfg ObjectCacheConfig) *ObjectCache {
 		minFreeBytes:  cfg.MinFreeBytes,
 		maxAge:        cfg.MaxAge,
 		sweepInterval: interval,
+		validated:     make(map[string]objectCacheFileIdentity),
+		observer:      cfg.Observer,
 	}
 }
 
@@ -79,19 +91,30 @@ func (c *ObjectCache) GetOrFetch(ctx context.Context, store objectstore.Store, d
 		reader, err := store.Get(desc.ObjectKey, 0, -1)
 		return reader, false, err
 	}
+	started := time.Now()
 	if reader, ok, err := c.Open(desc); err != nil {
+		c.observer.ObservePhase("apply", "cache_lookup", started, err)
+		c.observer.ObserveCache("error")
 		return nil, false, err
 	} else if ok {
+		c.observer.ObservePhase("apply", "cache_lookup", started, nil)
+		c.observer.ObserveCache("hit")
 		return reader, true, nil
 	}
+	c.observer.ObservePhase("apply", "cache_lookup", started, nil)
+	c.observer.ObserveCache("miss")
+	started = time.Now()
 	reader, err := store.Get(desc.ObjectKey, 0, -1)
 	if err != nil {
+		c.observer.ObservePhase("apply", "object_fetch_cache_fill", started, err)
 		return nil, false, err
 	}
 	defer reader.Close()
 	if err := c.Put(ctx, desc, reader); err != nil {
+		c.observer.ObservePhase("apply", "object_fetch_cache_fill", started, err)
 		return c.fetchUncached(desc, store, err)
 	}
+	c.observer.ObservePhase("apply", "object_fetch_cache_fill", started, nil)
 	cached, ok, err := c.Open(desc)
 	if err != nil {
 		return c.fetchUncached(desc, store, err)
@@ -120,21 +143,30 @@ func (c *ObjectCache) Open(desc ctldapi.RootFSDiffDescriptor) (io.ReadCloser, bo
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if ok, err := c.validateFile(desc, path); err != nil {
-		_ = os.Remove(path)
-		return nil, false, err
-	} else if !ok {
-		return nil, false, nil
-	}
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			delete(c.validated, path)
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
+	if ok, err := c.validateOpenFile(desc, path, file); err != nil {
+		_ = file.Close()
+		delete(c.validated, path)
+		_ = os.Remove(path)
+		return nil, false, err
+	} else if !ok {
+		_ = file.Close()
+		delete(c.validated, path)
+		_ = os.Remove(path)
+		return nil, false, nil
+	}
 	now := time.Now()
 	_ = os.Chtimes(path, now, now)
+	if info, statErr := file.Stat(); statErr == nil {
+		c.validated[path] = objectCacheIdentity(info)
+	}
 	return file, true, nil
 }
 
@@ -169,6 +201,9 @@ func (c *ObjectCache) PutFile(ctx context.Context, desc ctldapi.RootFSDiffDescri
 				_ = os.Remove(tmpPath)
 			}
 		}()
+		if err := verifyRootFSObjectFile(desc, tmpPath); err != nil {
+			return err
+		}
 		return c.publishTemp(path, tmpPath, &removeTmp)
 	}
 	source, err := os.Open(sourcePath)
@@ -237,6 +272,9 @@ func (c *ObjectCache) publishTemp(path, tmpPath string, removeTmp *bool) error {
 	}
 	now := time.Now()
 	_ = os.Chtimes(path, now, now)
+	if info, err := os.Stat(path); err == nil {
+		c.validated[path] = objectCacheIdentity(info)
+	}
 	return c.sweepLocked()
 }
 
@@ -261,6 +299,7 @@ func (c *ObjectCache) sweepLocked() error {
 		for _, entry := range entries {
 			if now.Sub(entry.modTime) > c.maxAge {
 				_ = os.Remove(entry.path)
+				delete(c.validated, entry.path)
 				continue
 			}
 			kept = append(kept, entry)
@@ -276,6 +315,7 @@ func (c *ObjectCache) sweepLocked() error {
 			break
 		}
 		if err := os.Remove(entry.path); err == nil {
+			delete(c.validated, entry.path)
 			total -= entry.size
 		}
 	}
@@ -297,6 +337,7 @@ func (c *ObjectCache) entriesLocked() ([]objectCacheEntry, int64, error) {
 		}
 		if strings.HasPrefix(entry.Name(), ".") {
 			_ = os.Remove(path)
+			delete(c.validated, path)
 			return nil
 		}
 		info, err := entry.Info()
@@ -329,40 +370,103 @@ func (c *ObjectCache) hasMinFreeLocked() bool {
 	return free >= c.minFreeBytes
 }
 
-func (c *ObjectCache) validateFile(desc ctldapi.RootFSDiffDescriptor, path string) (bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+func (c *ObjectCache) validateOpenFile(desc ctldapi.RootFSDiffDescriptor, path string, file *os.File) (valid bool, resultErr error) {
+	var validationStarted time.Time
+	defer func() {
+		if !validationStarted.IsZero() {
+			c.observer.ObservePhase("apply", "cache_validation", validationStarted, resultErr)
 		}
+	}()
+	info, err := file.Stat()
+	if err != nil {
 		return false, err
 	}
 	if !info.Mode().IsRegular() {
-		_ = os.Remove(path)
 		return false, nil
 	}
 	if desc.Size > 0 && info.Size() != desc.Size {
-		_ = os.Remove(path)
 		return false, nil
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return false, err
+	identity := objectCacheIdentity(info)
+	if validated, ok := c.validated[path]; ok && validated == identity {
+		return true, nil
 	}
-	defer file.Close()
+	validationStarted = time.Now()
 	d, err := godigest.Parse(strings.TrimSpace(desc.Digest))
 	if err != nil {
 		return false, fmt.Errorf("parse rootfs object digest: %w", err)
 	}
 	verifier := d.Verifier()
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
 	if _, err := io.Copy(verifier, file); err != nil {
 		return false, err
 	}
+	after, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if objectCacheIdentity(after) != identity {
+		return false, fmt.Errorf("rootfs object changed while validating %s", desc.Digest)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
 	if !verifier.Verified() {
-		_ = os.Remove(path)
 		return false, nil
 	}
+	c.validated[path] = identity
 	return true, nil
+}
+
+func verifyRootFSObjectFile(desc ctldapi.RootFSDiffDescriptor, path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("rootfs object is not a regular file")
+	}
+	if desc.Size > 0 && info.Size() != desc.Size {
+		return fmt.Errorf("rootfs object size mismatch: expected %d, got %d", desc.Size, info.Size())
+	}
+	d, err := godigest.Parse(strings.TrimSpace(desc.Digest))
+	if err != nil {
+		return fmt.Errorf("parse rootfs object digest: %w", err)
+	}
+	verifier := d.Verifier()
+	if _, err := io.Copy(verifier, file); err != nil {
+		return err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if objectCacheIdentity(after) != objectCacheIdentity(info) {
+		return fmt.Errorf("rootfs object changed while validating %s", desc.Digest)
+	}
+	if !verifier.Verified() {
+		return fmt.Errorf("rootfs object digest mismatch: expected %s", d.String())
+	}
+	return nil
+}
+
+func objectCacheIdentity(info os.FileInfo) objectCacheFileIdentity {
+	identity := objectCacheFileIdentity{
+		size:        info.Size(),
+		modTimeNano: info.ModTime().UnixNano(),
+	}
+	if stat, ok := info.Sys().(*unix.Stat_t); ok {
+		identity.device = uint64(stat.Dev)
+		identity.inode = stat.Ino
+	}
+	return identity
 }
 
 func (c *ObjectCache) pathForDescriptor(desc ctldapi.RootFSDiffDescriptor) (string, error) {

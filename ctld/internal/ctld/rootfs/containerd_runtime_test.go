@@ -1,6 +1,8 @@
 package rootfs
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +13,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/content"
+	contentlocal "github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,6 +26,46 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
+
+func TestIngestRootFSDiffForApplyStreamsFilteredLayerIntoContentStore(t *testing.T) {
+	var input bytes.Buffer
+	tarWriter := tar.NewWriter(&input)
+	writeTarEntry(t, tarWriter, "tmp/legacy-download", []byte("ephemeral"), 0o644)
+	writeTarEntry(t, tarWriter, "root/sentinel", []byte("persistent"), 0o644)
+	writeTarEntry(t, tarWriter, "var/tmp/state", []byte("persistent-var-tmp"), 0o644)
+	require.NoError(t, tarWriter.Close())
+
+	inputDigest := digest.FromBytes(input.Bytes())
+	desc := ctldapi.RootFSDiffDescriptor{
+		MediaType: ocispec.MediaTypeImageLayer,
+		Digest:    inputDigest.String(),
+		DiffID:    inputDigest.String(),
+		Size:      int64(input.Len()),
+		ObjectKey: "rootfs/legacy.tar",
+	}
+	store, err := contentlocal.NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	filtered, stats, err := ingestRootFSDiffForApply(context.Background(), store, desc, bytes.NewReader(input.Bytes()), nil, nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, desc.Digest, filtered.Digest)
+	assert.Equal(t, int64(input.Len()), stats.InputBytes)
+	assert.Equal(t, filtered.Size, stats.OutputBytes)
+	assert.Equal(t, int64(len("ephemeral")), stats.ExcludedBytes)
+
+	ociDesc, err := descriptorToOCI(filtered)
+	require.NoError(t, err)
+	blob, err := content.ReadBlob(context.Background(), store, ociDesc)
+	require.NoError(t, err)
+	entries := readTarEntries(t, bytes.NewReader(blob))
+	assert.NotContains(t, entries, "tmp/legacy-download")
+	assert.Contains(t, entries, "root/sentinel")
+	assert.Contains(t, entries, "var/tmp/state")
+
+	filteredAgain, _, err := ingestRootFSDiffForApply(context.Background(), store, desc, bytes.NewReader(input.Bytes()), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, filtered.Digest, filteredAgain.Digest)
+}
 
 func TestRuntimeFamily(t *testing.T) {
 	tests := []struct {

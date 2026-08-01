@@ -43,6 +43,7 @@ type Config struct {
 	PortalResolver   PortalResolver
 	SnapshotDir      string
 	ObjectCache      *ObjectCache
+	Observer         *Observer
 }
 
 type Controller struct {
@@ -52,6 +53,7 @@ type Controller struct {
 	portalResolver   PortalResolver
 	snapshotDir      string
 	objectCache      *ObjectCache
+	observer         *Observer
 }
 
 func NewController(cfg Config) *Controller {
@@ -66,6 +68,7 @@ func NewController(cfg Config) *Controller {
 		portalResolver:   cfg.PortalResolver,
 		snapshotDir:      cfg.SnapshotDir,
 		objectCache:      cfg.ObjectCache,
+		observer:         cfg.Observer,
 	}
 }
 
@@ -108,7 +111,11 @@ func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) 
 	return ctldapi.SaveRootFSResponse{Info: published.Info, Descriptor: published.Descriptor}, http.StatusOK
 }
 
-func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
+func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (response ctldapi.PrepareRootFSSnapshotResponse, status int) {
+	started := time.Now()
+	defer func() {
+		c.observer.ObserveOperation("save", req.Target, -1, -1, response.Descriptor.Size, -1, started, status, response.Error)
+	}()
 	if err := validateTarget(req.Target); err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()}, http.StatusBadRequest
 	}
@@ -175,7 +182,12 @@ func (c *Controller) AbortRootFSSnapshot(_ *http.Request, req ctldapi.AbortRootF
 	return ctldapi.AbortRootFSSnapshotResponse{Aborted: true}, http.StatusOK
 }
 
-func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
+func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (response ctldapi.ApplyRootFSResponse, status int) {
+	started := time.Now()
+	chainDepth, inputBytes := rootFSApplyInputStats(req)
+	defer func() {
+		c.observer.ObserveOperation("apply", req.Target, chainDepth, inputBytes, rootFSApplyOutputBytes(response), -1, started, status, response.Error)
+	}()
 	if err := validateTarget(req.Target); err != nil {
 		return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
 	}
@@ -276,6 +288,32 @@ func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInf
 	}
 	applied.ObjectKey = desc.ObjectKey
 	return applied, nil
+}
+
+func rootFSApplyInputStats(req ctldapi.ApplyRootFSRequest) (int, int64) {
+	if len(req.Layers) == 0 {
+		return 1, req.Descriptor.Size
+	}
+	var bytes int64
+	for _, layer := range req.Layers {
+		if layer.Descriptor.Size > 0 {
+			bytes += layer.Descriptor.Size
+		}
+	}
+	return len(req.Layers), bytes
+}
+
+func rootFSApplyOutputBytes(response ctldapi.ApplyRootFSResponse) int64 {
+	if len(response.Layers) == 0 {
+		return response.Descriptor.Size
+	}
+	var bytes int64
+	for _, layer := range response.Layers {
+		if layer.Descriptor.Size > 0 {
+			bytes += layer.Descriptor.Size
+		}
+	}
+	return bytes
 }
 
 type preparedRootFSSnapshot struct {

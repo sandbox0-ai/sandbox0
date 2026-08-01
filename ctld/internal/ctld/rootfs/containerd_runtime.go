@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	crootfs "github.com/containerd/containerd/v2/pkg/rootfs"
 	"github.com/containerd/continuity/fs"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -60,6 +62,7 @@ type ContainerdRuntimeConfig struct {
 	CRIClient              criRuntimeService
 	CRIDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
 	ContainerdClient       containerdClient
+	Observer               *Observer
 }
 
 type ContainerdRuntime struct {
@@ -78,6 +81,7 @@ type ContainerdRuntime struct {
 	criConn                *grpc.ClientConn
 	connectedCRIClient     criRuntimeService
 	containerdClient       containerdClient
+	observer               *Observer
 }
 
 type containerdClient interface {
@@ -139,6 +143,7 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		criClient:              cfg.CRIClient,
 		criDialContext:         cfg.CRIDialContext,
 		containerdClient:       cfg.ContainerdClient,
+		observer:               cfg.Observer,
 	}
 }
 
@@ -160,7 +165,11 @@ func (r *ContainerdRuntime) Inspect(ctx context.Context, target ctldapi.RootFSCo
 	return info, nil
 }
 
-func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (result ctldapi.RootFSDiffDescriptor, resultReader io.ReadSeekCloser, resultErr error) {
+	started := time.Now()
+	defer func() {
+		r.observer.ObservePhase("save", "diff_create", started, resultErr)
+	}()
 	if strings.TrimSpace(info.SnapshotKey) == "" || strings.TrimSpace(info.Snapshotter) == "" {
 		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: snapshot key and snapshotter are required", ErrBadRequest)
 	}
@@ -207,7 +216,11 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 	return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
 }
 
-func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (result ctldapi.RootFSDiffDescriptor, resultReader io.ReadSeekCloser, resultErr error) {
+	started := time.Now()
+	defer func() {
+		r.observer.ObservePhase("save", "incremental_diff_create", started, resultErr)
+	}()
 	if strings.TrimSpace(baselineLayerID) == "" {
 		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
 	}
@@ -233,7 +246,11 @@ func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctl
 	return writeOverlayUpperDiffFromBaseline(ctx, baselineDir, upperdir, excludedPaths, portalPaths)
 }
 
-func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error) {
+func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (result ctldapi.RootFSDiffDescriptor, resultErr error) {
+	started := time.Now()
+	defer func() {
+		r.observer.ObservePhase("apply", "total", started, resultErr)
+	}()
 	if strings.TrimSpace(info.ContainerID) == "" {
 		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("%w: container id is required", ErrBadRequest)
 	}
@@ -243,38 +260,97 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 	}
 	defer closeClient()
 
+	phaseStarted := time.Now()
 	liveRootFS, err := liveRootFSPath(r.containerdRoot, r.containerdHostRoot, r.namespace, info)
+	r.observer.ObservePhase("apply", "live_rootfs_lookup", phaseStarted, err)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, err
 	}
-	filteredDesc, filteredReader, err := filterRootFSDiffTarForApply(desc, reader, excludedPaths, portalPaths)
+	phaseStarted = time.Now()
+	ingestedDesc, stats, err := ingestRootFSDiffForApply(ctx, client.ContentStore(), desc, reader, excludedPaths, portalPaths)
+	r.observer.ObservePhase("apply", "filter_containerd_ingest", phaseStarted, err)
 	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("filter rootfs diff: %w", err)
+		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("ingest rootfs diff: %w", err)
 	}
-	defer filteredReader.Close()
-	desc = filteredDesc
-	reader = filteredReader
+	r.observer.ObservePhaseDuration("apply", "tar_filter", stats.FilterDuration, nil)
+	r.observer.ObservePhaseDuration("apply", "containerd_ingest", stats.IngestDuration, nil)
+	r.observer.ObserveBytes("apply", "portal", stats.PortalBytes)
+	desc = ingestedDesc
 
 	ociDesc, err := descriptorToOCI(desc)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, err
 	}
-	ref := "sandbox0-rootfs-apply-" + strings.ReplaceAll(ociDesc.Digest.String(), ":", "-")
-	if err := content.WriteBlob(ctx, client.ContentStore(), ref, reader, ociDesc); err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("write rootfs diff into containerd content store: %w", err)
-	}
+	phaseStarted = time.Now()
 	applied, err := client.DiffService().Apply(ctx, ociDesc, []mount.Mount{{
 		Type:    "bind",
 		Source:  liveRootFS,
 		Options: []string{"rbind", "rw"},
 	}})
+	r.observer.ObservePhase("apply", "diff_apply", phaseStarted, err)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, err
 	}
 	return descriptorFromOCI(applied), nil
 }
 
-func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error {
+func ingestRootFSDiffForApply(ctx context.Context, store content.Store, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, rootFSDiffFilterStats, error) {
+	if !shouldFilterRootFSDiffTar(desc) {
+		ociDesc, err := descriptorToOCI(desc)
+		if err != nil {
+			return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, err
+		}
+		ref := rootFSApplyIngestRef(desc, excludedPaths, portalPaths)
+		started := time.Now()
+		if err := content.WriteBlob(ctx, store, ref, reader, ociDesc); err != nil {
+			return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, fmt.Errorf("write rootfs diff into containerd content store: %w", err)
+		}
+		return desc, rootFSDiffFilterStats{InputBytes: desc.Size, OutputBytes: desc.Size, IngestDuration: time.Since(started)}, nil
+	}
+
+	setupStarted := time.Now()
+	writer, err := content.OpenWriter(ctx, store, content.WithRef(rootFSApplyIngestRef(desc, excludedPaths, portalPaths)))
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, fmt.Errorf("open containerd rootfs content writer: %w", err)
+	}
+	defer writer.Close()
+	if err := writer.Truncate(0); err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, fmt.Errorf("reset containerd rootfs content writer: %w", err)
+	}
+	setupDuration := time.Since(setupStarted)
+
+	filteredDesc, stats, err := writeRootFSDiffTarForApply(writer, desc, reader, excludedPaths, portalPaths)
+	stats.IngestDuration += setupDuration
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, stats, fmt.Errorf("filter rootfs diff into containerd content store: %w", err)
+	}
+	filteredDigest, err := digest.Parse(filteredDesc.Digest)
+	if err != nil {
+		return ctldapi.RootFSDiffDescriptor{}, stats, fmt.Errorf("parse filtered rootfs digest: %w", err)
+	}
+	commitStarted := time.Now()
+	commitErr := writer.Commit(ctx, filteredDesc.Size, filteredDigest)
+	stats.IngestDuration += time.Since(commitStarted)
+	if commitErr != nil && !errdefs.IsAlreadyExists(commitErr) {
+		return ctldapi.RootFSDiffDescriptor{}, stats, fmt.Errorf("commit rootfs diff to containerd content store: %w", commitErr)
+	}
+	return filteredDesc, stats, nil
+}
+
+func rootFSApplyIngestRef(desc ctldapi.RootFSDiffDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) string {
+	portalPaths = filterRootFSPortalPaths(portalPaths, excludedPaths)
+	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
+	paths := append([]string(nil), filter.excluded...)
+	sort.Strings(paths)
+	sum := sha256.Sum256([]byte(strings.TrimSpace(desc.Digest) + "\x00" + strings.Join(paths, "\x00")))
+	return "sandbox0-rootfs-apply-" + hex.EncodeToString(sum[:])
+}
+
+func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (resultErr error) {
+	started := time.Now()
+	defer func() {
+		r.observer.ObservePhase("apply", "baseline_capture", started, resultErr)
+	}()
 	if strings.TrimSpace(baselineLayerID) == "" {
 		return fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
 	}
@@ -303,12 +379,18 @@ func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.Ro
 			_ = os.RemoveAll(tmp)
 		}
 	}()
+	phaseStarted := time.Now()
 	if err := fs.CopyDir(tmp, upperdir); err != nil {
+		r.observer.ObservePhase("apply", "baseline_copy", phaseStarted, err)
 		return fmt.Errorf("copy rootfs baseline: %w", err)
 	}
+	r.observer.ObservePhase("apply", "baseline_copy", phaseStarted, nil)
+	phaseStarted = time.Now()
 	if err := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths)).RemoveAll(tmp); err != nil {
+		r.observer.ObservePhase("apply", "baseline_filter", phaseStarted, err)
 		return fmt.Errorf("filter rootfs baseline: %w", err)
 	}
+	r.observer.ObservePhase("apply", "baseline_filter", phaseStarted, nil)
 	if err := os.RemoveAll(target); err != nil {
 		return fmt.Errorf("replace rootfs baseline: %w", err)
 	}

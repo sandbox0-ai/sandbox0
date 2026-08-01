@@ -851,6 +851,22 @@ type AutoscalerConfig struct {
 	ScaleDownPercent string `json:"scaleDownPercent,omitempty"`
 }
 
+// PodTeardownConfig defines manager pod teardown concurrency limits.
+type PodTeardownConfig struct {
+	// +optional
+	// +kubebuilder:default=4
+	// +kubebuilder:validation:Minimum=1
+	MaxConcurrentPerNode int32 `json:"maxConcurrentPerNode,omitempty"`
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	MaxConcurrentPerDegradedNode int32 `json:"maxConcurrentPerDegradedNode,omitempty"`
+	// +optional
+	// +kubebuilder:default=40
+	// +kubebuilder:validation:Minimum=1
+	MaxConcurrentReplacements int32 `json:"maxConcurrentReplacements,omitempty"`
+}
+
 // ManagerConfig defines user-facing configuration for manager.
 type ManagerConfig struct {
 	// +optional
@@ -879,6 +895,15 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="60s"
 	CleanupInterval metav1.Duration `json:"cleanupInterval,omitempty"`
+	// AutoscalerSafeToEvictAnnotationKeys configures the platform-specific pod
+	// annotation keys toggled by manager for idle and claimed sandbox pods.
+	// +optional
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=set
+	AutoscalerSafeToEvictAnnotationKeys []string `json:"autoscalerSafeToEvictAnnotationKeys,omitempty"`
+	// +optional
+	// +kubebuilder:default={}
+	PodTeardown PodTeardownConfig `json:"podTeardown,omitempty"`
 	// +optional
 	// +kubebuilder:default="info"
 	LogLevel string `json:"logLevel,omitempty"`

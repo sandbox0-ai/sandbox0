@@ -11,15 +11,19 @@ import (
 	"strings"
 	"time"
 
+	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -71,7 +75,6 @@ const (
 	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
 	AnnotationTemplateTeamID               = "sandbox0.ai/template-team-id"
 	AnnotationTemplateUserID               = "sandbox0.ai/template-user-id"
-	AnnotationClusterAutoscalerSafeToEvict = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 	AnnotationOwnerKind                    = "sandbox0.ai/owner-kind"
 
 	OwnerKindTeamWarmPool = "team_warm_pool"
@@ -81,10 +84,12 @@ const (
 	HotClaimCompletionProtocolRecordV1   = "record-status-v1"
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
-	warmPoolRolloutRequeueAfter       = 2 * time.Second
+	warmPoolRolloutRequeueAfter       = 10 * time.Second
+	claimedPodAnnotationRequeueAfter  = 2 * time.Second
 
-	warmPoolRolloutMaxUnavailablePercent int32 = 10
-	warmPoolRolloutMaxUnavailableLimit   int32 = 10
+	warmPoolRolloutMaxUnavailablePercent   int32 = 10
+	warmPoolRolloutMaxUnavailableLimit     int32 = 10
+	claimedPodAnnotationReconcileBatchSize       = 50
 )
 
 func TemplateLogicalID(template *v1alpha1.SandboxTemplate) string {
@@ -99,15 +104,48 @@ func TemplateLogicalID(template *v1alpha1.SandboxTemplate) string {
 	return template.Name
 }
 
-// ClaimedSandboxPodAnnotations returns manager-owned metadata for active sandbox
-// pods. Active sandboxes are marked unsafe for Cluster Autoscaler eviction.
-func ClaimedSandboxPodAnnotations(extra map[string]string) map[string]string {
-	annotations := make(map[string]string, len(extra)+1)
+// ClaimedSandboxPodAnnotations returns manager-owned metadata for active
+// sandbox pods. Platform-configured autoscaler annotations are set to false.
+func ClaimedSandboxPodAnnotations(extra map[string]string, autoscalerAnnotationKeys []string) map[string]string {
+	annotations := make(map[string]string, len(extra)+len(autoscalerAnnotationKeys))
 	for key, value := range extra {
 		annotations[key] = value
 	}
-	annotations[AnnotationClusterAutoscalerSafeToEvict] = "false"
+	applyAutoscalerSafeToEvictAnnotations(annotations, autoscalerAnnotationKeys, false)
 	return annotations
+}
+
+// NormalizeAutoscalerSafeToEvictAnnotationKeys validates, trims, and
+// de-duplicates platform-provided annotation keys.
+func NormalizeAutoscalerSafeToEvictAnnotationKeys(keys []string) ([]string, error) {
+	normalized := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, raw := range keys {
+		key := strings.TrimSpace(raw)
+		if key == "" {
+			continue
+		}
+		if errs := validation.IsQualifiedName(key); len(errs) > 0 {
+			return nil, fmt.Errorf("invalid autoscaler safe-to-evict annotation key %q: %s", key, strings.Join(errs, "; "))
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, key)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func applyAutoscalerSafeToEvictAnnotations(annotations map[string]string, keys []string, safe bool) {
+	value := "false"
+	if safe {
+		value = "true"
+	}
+	for _, key := range keys {
+		annotations[key] = value
+	}
 }
 
 // IsHotClaimReservedPod reports whether an idle warm-pool pod is reserved by a
@@ -128,12 +166,14 @@ func IsClaimedSandboxPod(pod *corev1.Pod) bool {
 
 // PoolManager manages the idle pool (ReplicaSet)
 type PoolManager struct {
-	k8sClient        kubernetes.Interface
-	podLister        corelisters.PodLister
-	replicaSetLister appslisters.ReplicaSetLister
-	secretLister     corelisters.SecretLister
-	recorder         record.EventRecorder
-	logger           *zap.Logger
+	k8sClient                kubernetes.Interface
+	podLister                corelisters.PodLister
+	replicaSetLister         appslisters.ReplicaSetLister
+	secretLister             corelisters.SecretLister
+	recorder                 record.EventRecorder
+	logger                   *zap.Logger
+	teardown                 *PodTeardownCoordinator
+	autoscalerAnnotationKeys []string
 }
 
 // NewPoolManager creates a new PoolManager
@@ -144,20 +184,24 @@ func NewPoolManager(
 	secretLister corelisters.SecretLister,
 	recorder record.EventRecorder,
 	logger *zap.Logger,
+	teardown *PodTeardownCoordinator,
+	autoscalerAnnotationKeys []string,
 ) *PoolManager {
 	return &PoolManager{
-		k8sClient:        k8sClient,
-		podLister:        podLister,
-		replicaSetLister: replicaSetLister,
-		secretLister:     secretLister,
-		recorder:         recorder,
-		logger:           logger,
+		k8sClient:                k8sClient,
+		podLister:                podLister,
+		replicaSetLister:         replicaSetLister,
+		secretLister:             secretLister,
+		recorder:                 recorder,
+		logger:                   logger,
+		teardown:                 teardown,
+		autoscalerAnnotationKeys: append([]string(nil), autoscalerAnnotationKeys...),
 	}
 }
 
 // ReconcilePool reconciles the idle pool for a template.
 func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.SandboxTemplate) (time.Duration, error) {
-	pm.logger.Info("Reconciling pool",
+	pm.logger.Debug("Reconciling pool",
 		zap.String("template", template.Name),
 		zap.String("namespace", template.Namespace),
 		zap.Int32("minIdle", template.Spec.Pool.MinIdle),
@@ -180,7 +224,18 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		return 0, fmt.Errorf("reconcile replicaset template: %w", err)
 	}
 
-	// 3. Drain stale idle pods in availability-bounded batches. A following
+	// 3. Keep a workload-availability guard for autoscalers that use the
+	// Eviction API. Manager's own direct deletes are governed by the node-aware
+	// teardown coordinator below.
+	if err := pm.reconcileIdlePoolDisruptionBudget(ctx, template, rs); err != nil {
+		return 0, fmt.Errorf("reconcile idle pool disruption budget: %w", err)
+	}
+	annotationReconcilePending, err := pm.reconcileClaimedPodAutoscalerAnnotations(ctx, template)
+	if err != nil {
+		return 0, fmt.Errorf("reconcile claimed pod autoscaler annotations: %w", err)
+	}
+
+	// 4. Drain stale idle pods in availability-bounded batches. A following
 	// batch is not released until replacements from the previous batch are
 	// ready, which prevents a manager rollout from recreating the whole pool at
 	// once.
@@ -189,13 +244,14 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 		return 0, fmt.Errorf("drain stale idle pods: %w", err)
 	}
 
-	// 4. Repair current-hash idle pods that are stuck and will keep the
+	// 5. Repair current-hash idle pods that are stuck and will keep the
 	// ReplicaSet from creating replacements.
-	if err := pm.repairUnhealthyIdlePods(ctx, template, desiredTemplateHash); err != nil {
+	repairRequeueAfter, err := pm.repairUnhealthyIdlePods(ctx, template, desiredTemplateHash)
+	if err != nil {
 		return 0, fmt.Errorf("repair unhealthy idle pods: %w", err)
 	}
 
-	// 5. Keep the warm pool fixed at minIdle. Template autoscaling is disabled
+	// 6. Keep the warm pool fixed at minIdle. Template autoscaling is disabled
 	// because burst cold claims can already stress the data plane; expanding the
 	// idle pool at the same time compounds that pressure and may create unused
 	// pods after the burst ends.
@@ -210,6 +266,12 @@ func (pm *PoolManager) ReconcilePool(ctx context.Context, template *v1alpha1.San
 	}
 	if rolloutPending && (requeueAfter <= 0 || warmPoolRolloutRequeueAfter < requeueAfter) {
 		requeueAfter = warmPoolRolloutRequeueAfter
+	}
+	if annotationReconcilePending && (requeueAfter <= 0 || claimedPodAnnotationRequeueAfter < requeueAfter) {
+		requeueAfter = claimedPodAnnotationRequeueAfter
+	}
+	if repairRequeueAfter > 0 && (requeueAfter <= 0 || repairRequeueAfter < requeueAfter) {
+		requeueAfter = repairRequeueAfter
 	}
 
 	return requeueAfter, nil
@@ -410,9 +472,9 @@ func (pm *PoolManager) reconcileReplicaSetMetadata(
 func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, specHash string) (corev1.PodTemplateSpec, error) {
 	spec := v1alpha1.BuildIdlePodSpec(template)
 	annotations := map[string]string{
-		AnnotationTemplateSpecHash:             specHash,
-		AnnotationClusterAutoscalerSafeToEvict: "true",
+		AnnotationTemplateSpecHash: specHash,
 	}
+	applyAutoscalerSafeToEvictAnnotations(annotations, pm.autoscalerAnnotationKeys, true)
 	labels := map[string]string{
 		LabelTemplateID:        template.Name,
 		LabelTemplateLogicalID: TemplateLogicalID(template),
@@ -568,33 +630,38 @@ func (pm *PoolManager) drainStaleIdlePods(
 		return stalePods[i].Name < stalePods[j].Name
 	})
 
-	remainingBatch := maxUnavailable
 	readyDeletionBudget := readyIdlePods - availabilityFloor
 	if readyDeletionBudget < 0 {
 		readyDeletionBudget = 0
 	}
-	drained := 0
+	eligibleCandidates := make([]*corev1.Pod, 0, len(stalePods))
 	for _, pod := range stalePods {
-		if remainingBatch <= 0 {
-			break
-		}
-		podReady := IsPodReady(pod)
-		if podReady && readyDeletionBudget <= 0 {
-			continue
-		}
-		// Consume the snapshot budget even when the guarded live delete finds
-		// that a concurrent actor already changed the pod. A stale observation
-		// must never allow this reconcile to move on and delete extra pods.
-		remainingBatch--
-		if podReady {
+		if IsPodReady(pod) {
+			if readyDeletionBudget <= 0 {
+				continue
+			}
 			readyDeletionBudget--
 		}
+		eligibleCandidates = append(eligibleCandidates, pod)
+	}
+	leases, err := pm.teardownCoordinator().Acquire(eligibleCandidates, TeardownReasonStaleRollout)
+	if err != nil {
+		return rolloutPending, err
+	}
+
+	drained := 0
+	for _, lease := range leases {
+		pod := lease.Pod()
 		deleted, err := pm.deleteStaleIdlePodWithRetry(ctx, template.Namespace, pod.Name, desiredTemplateHash)
 		if err != nil {
+			lease.Release()
 			return false, err
 		}
 		if deleted {
+			lease.Commit()
 			drained++
+		} else {
+			lease.Release()
 		}
 	}
 
@@ -627,17 +694,174 @@ func warmPoolRolloutMaxUnavailable(desiredReplicas int32) int32 {
 	return maxUnavailable
 }
 
-func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, desiredTemplateHash string) error {
+func (pm *PoolManager) reconcileIdlePoolDisruptionBudget(
+	ctx context.Context,
+	template *v1alpha1.SandboxTemplate,
+	rs *appsv1.ReplicaSet,
+) error {
+	if rs == nil {
+		return fmt.Errorf("replicaset is required")
+	}
+	maxUnavailable := intstr.FromInt32(warmPoolRolloutMaxUnavailable(desiredPoolReplicas(template)))
+	unhealthyPolicy := policyv1.AlwaysAllow
+	desired := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      rs.Name + "-idle-pdb",
+			Namespace: template.Namespace,
+			Labels: map[string]string{
+				LabelTemplateID: template.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(template, v1alpha1.SchemeGroupVersion.WithKind("SandboxTemplate")),
+			},
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MaxUnavailable: &maxUnavailable,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+				LabelTemplateID: template.Name,
+				LabelPoolType:   PoolTypeIdle,
+			}},
+			UnhealthyPodEvictionPolicy: &unhealthyPolicy,
+		},
+	}
+
+	pdbs := pm.k8sClient.PolicyV1().PodDisruptionBudgets(template.Namespace)
+	current, err := pdbs.Get(ctx, desired.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if _, err := pdbs.Create(ctx, desired, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+		pm.recorder.Eventf(template, corev1.EventTypeNormal, "IdlePoolDisruptionBudgetCreated",
+			"Created idle pool disruption budget with maxUnavailable %s", maxUnavailable.String())
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.DeletionTimestamp != nil {
+		return nil
+	}
+	if reflect.DeepEqual(current.Labels, desired.Labels) &&
+		reflect.DeepEqual(current.OwnerReferences, desired.OwnerReferences) &&
+		reflect.DeepEqual(current.Spec, desired.Spec) {
+		return nil
+	}
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest, err := pdbs.Get(ctx, desired.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if latest.DeletionTimestamp != nil {
+			return nil
+		}
+		updated := latest.DeepCopy()
+		updated.Labels = desired.Labels
+		updated.OwnerReferences = desired.OwnerReferences
+		updated.Spec = desired.Spec
+		_, err = pdbs.Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+func (pm *PoolManager) reconcileClaimedPodAutoscalerAnnotations(
+	ctx context.Context,
+	template *v1alpha1.SandboxTemplate,
+) (bool, error) {
+	if len(pm.autoscalerAnnotationKeys) == 0 {
+		return false, nil
+	}
+	pods, err := pm.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
+		LabelTemplateID: template.Name,
+	}))
+	if err != nil {
+		return false, err
+	}
+	candidates := make([]*corev1.Pod, 0)
+	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil || !IsClaimedSandboxPod(pod) || autoscalerAnnotationsMatch(pod.Annotations, pm.autoscalerAnnotationKeys, false) {
+			continue
+		}
+		candidates = append(candidates, pod)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Name < candidates[j].Name })
+	limit := len(candidates)
+	if limit > claimedPodAnnotationReconcileBatchSize {
+		limit = claimedPodAnnotationReconcileBatchSize
+	}
+	updated := 0
+	for _, pod := range candidates[:limit] {
+		changed, err := pm.updateClaimedPodAutoscalerAnnotations(ctx, pod.Namespace, pod.Name, template.Name)
+		if err != nil {
+			return len(candidates) > updated, err
+		}
+		if changed {
+			updated++
+		}
+	}
+	if updated > 0 {
+		pm.recorder.Eventf(template, corev1.EventTypeNormal, "ClaimedPodAutoscalerAnnotationsReconciled",
+			"Marked %d claimed sandbox pod(s) unsafe for platform autoscaler eviction", updated)
+		pm.logger.Info("Reconciled claimed pod autoscaler annotations",
+			zap.String("template", template.Name),
+			zap.Int("count", updated),
+		)
+	}
+	return len(candidates) > limit, nil
+}
+
+func (pm *PoolManager) updateClaimedPodAutoscalerAnnotations(ctx context.Context, namespace, name, templateID string) (bool, error) {
+	changed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pod, err := pm.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if pod.DeletionTimestamp != nil || pod.Labels[LabelTemplateID] != templateID || !IsClaimedSandboxPod(pod) || autoscalerAnnotationsMatch(pod.Annotations, pm.autoscalerAnnotationKeys, false) {
+			return nil
+		}
+		updated := pod.DeepCopy()
+		if updated.Annotations == nil {
+			updated.Annotations = make(map[string]string)
+		}
+		applyAutoscalerSafeToEvictAnnotations(updated.Annotations, pm.autoscalerAnnotationKeys, false)
+		_, err = pm.k8sClient.CoreV1().Pods(namespace).Update(ctx, updated, metav1.UpdateOptions{})
+		if err == nil {
+			changed = true
+		}
+		return err
+	})
+	return changed, err
+}
+
+func autoscalerAnnotationsMatch(annotations map[string]string, keys []string, safe bool) bool {
+	want := "false"
+	if safe {
+		want = "true"
+	}
+	for _, key := range keys {
+		if annotations[key] != want {
+			return false
+		}
+	}
+	return true
+}
+
+func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1alpha1.SandboxTemplate, desiredTemplateHash string) (time.Duration, error) {
 	pods, err := pm.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
 		LabelPoolType:   PoolTypeIdle,
 	}))
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	now := time.Now()
-	repaired := 0
+	candidates := make([]*corev1.Pod, 0)
+	nextGraceCheck := time.Duration(0)
 	for _, pod := range pods {
 		if IsHotClaimReservedPod(pod) {
 			continue
@@ -645,15 +869,36 @@ func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1
 		if pod.Annotations[AnnotationTemplateSpecHash] != desiredTemplateHash {
 			continue
 		}
-		if !shouldRepairUnhealthyIdlePod(pod, now) {
+		if shouldRepairUnhealthyIdlePod(pod, now) {
+			candidates = append(candidates, pod)
 			continue
 		}
+		if pod.DeletionTimestamp != nil || IsPodReady(pod) || pod.CreationTimestamp.IsZero() {
+			continue
+		}
+		remaining := unhealthyIdlePodRepairGracePeriod - now.Sub(pod.CreationTimestamp.Time)
+		if remaining > 0 && (nextGraceCheck <= 0 || remaining < nextGraceCheck) {
+			nextGraceCheck = remaining
+		}
+	}
+
+	leases, err := pm.teardownCoordinator().Acquire(candidates, TeardownReasonUnhealthyRepair)
+	if err != nil {
+		return warmPoolRolloutRequeueAfter, err
+	}
+	repaired := 0
+	for _, lease := range leases {
+		pod := lease.Pod()
 		deleted, err := pm.deleteUnhealthyIdlePodWithRetry(ctx, template.Namespace, pod.Name, desiredTemplateHash)
 		if err != nil {
-			return err
+			lease.Release()
+			return warmPoolRolloutRequeueAfter, err
 		}
 		if deleted {
+			lease.Commit()
 			repaired++
+		} else {
+			lease.Release()
 		}
 	}
 
@@ -666,7 +911,20 @@ func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1
 			zap.String("desiredHash", desiredTemplateHash),
 		)
 	}
-	return nil
+	if len(candidates) > repaired && (nextGraceCheck <= 0 || warmPoolRolloutRequeueAfter < nextGraceCheck) {
+		nextGraceCheck = warmPoolRolloutRequeueAfter
+	}
+	return nextGraceCheck, nil
+}
+
+func (pm *PoolManager) teardownCoordinator() *PodTeardownCoordinator {
+	if pm.teardown == nil {
+		// A missing node lister fails closed for scheduled Pods. This fallback is
+		// primarily useful to keep narrow controller tests safe; manager wiring
+		// always injects the shared, node-aware coordinator.
+		pm.teardown = NewPodTeardownCoordinator(pm.podLister, nil, config.PodTeardownConfig{}, nil, pm.logger)
+	}
+	return pm.teardown
 }
 
 func shouldRepairUnhealthyIdlePod(pod *corev1.Pod, now time.Time) bool {
@@ -768,12 +1026,19 @@ func (pm *PoolManager) deleteStaleIdlePodWithRetry(ctx context.Context, namespac
 // TemplateSpecHash returns the idle pod spec hash used to identify current idle pods.
 func TemplateSpecHash(template *v1alpha1.SandboxTemplate) (string, error) {
 	podSpec := v1alpha1.BuildIdlePodSpec(template)
+	cfg := config.LoadManagerConfig()
+	autoscalerAnnotationKeys, err := NormalizeAutoscalerSafeToEvictAnnotationKeys(cfg.AutoscalerSafeToEvictAnnotationKeys)
+	if err != nil {
+		return "", err
+	}
 	payload := struct {
-		PodSpec  corev1.PodSpec            `json:"podSpec"`
-		WarmPool *warmPoolTemplateMetadata `json:"warmPool,omitempty"`
+		PodSpec                  corev1.PodSpec            `json:"podSpec"`
+		WarmPool                 *warmPoolTemplateMetadata `json:"warmPool,omitempty"`
+		AutoscalerAnnotationKeys []string                  `json:"autoscalerAnnotationKeys,omitempty"`
 	}{
-		PodSpec:  podSpec,
-		WarmPool: teamWarmPoolTemplateMetadata(template),
+		PodSpec:                  podSpec,
+		WarmPool:                 teamWarmPoolTemplateMetadata(template),
+		AutoscalerAnnotationKeys: autoscalerAnnotationKeys,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

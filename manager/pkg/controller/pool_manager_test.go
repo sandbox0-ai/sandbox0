@@ -18,11 +18,13 @@ import (
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -31,8 +33,10 @@ import (
 	"k8s.io/client-go/tools/record"
 )
 
+const testAutoscalerSafeToEvictAnnotation = "example.com/safe-to-evict"
+
 func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
-	pm := &PoolManager{}
+	pm := &PoolManager{autoscalerAnnotationKeys: []string{testAutoscalerSafeToEvictAnnotation}}
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "template-a",
@@ -47,10 +51,30 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got.Annotations)
 	assert.Equal(t, "hash-v1", got.Annotations[AnnotationTemplateSpecHash])
-	assert.Equal(t, "true", got.Annotations[AnnotationClusterAutoscalerSafeToEvict])
+	assert.Equal(t, "true", got.Annotations[testAutoscalerSafeToEvictAnnotation])
 	assert.Equal(t, PoolTypeIdle, got.Labels[LabelPoolType])
 	assert.Equal(t, "template-a", got.Labels[LabelTemplateID])
 	assert.Equal(t, "logical-a", got.Labels[LabelTemplateLogicalID])
+}
+
+func TestAutoscalerSafeToEvictAnnotationKeysArePlatformConfigured(t *testing.T) {
+	keys, err := NormalizeAutoscalerSafeToEvictAnnotationKeys([]string{
+		" goatscaler.io/safe-to-evict ",
+		"example.com/safe-to-evict",
+		"goatscaler.io/safe-to-evict",
+		"",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"example.com/safe-to-evict", "goatscaler.io/safe-to-evict"}, keys)
+
+	annotations := ClaimedSandboxPodAnnotations(map[string]string{
+		"goatscaler.io/safe-to-evict": "true",
+	}, keys)
+	assert.Equal(t, "false", annotations["goatscaler.io/safe-to-evict"])
+	assert.Equal(t, "false", annotations["example.com/safe-to-evict"])
+
+	_, err = NormalizeAutoscalerSafeToEvictAnnotationKeys([]string{"not a key"})
+	require.Error(t, err)
 }
 
 func TestBuildPodTemplateAnnotatesTeamOwnedWarmPool(t *testing.T) {
@@ -430,6 +454,103 @@ func TestWarmPoolRolloutMaxUnavailable(t *testing.T) {
 	}
 }
 
+func TestReconcileIdlePoolDisruptionBudgetProtectsReadyPodsAndAllowsUnhealthyEviction(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-a",
+			Namespace: "default",
+			UID:       types.UID("template-uid"),
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{Pool: v1alpha1.PoolStrategy{MinIdle: 20}},
+	}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "rs-default-template-a", Namespace: "default"}}
+	client := fake.NewSimpleClientset()
+	pm := &PoolManager{k8sClient: client, recorder: record.NewFakeRecorder(10), logger: zap.NewNop()}
+
+	require.NoError(t, pm.reconcileIdlePoolDisruptionBudget(context.Background(), template, rs))
+	pdb, err := client.PolicyV1().PodDisruptionBudgets("default").Get(context.Background(), rs.Name+"-idle-pdb", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, pdb.Spec.MaxUnavailable)
+	assert.Equal(t, intstr.FromInt32(2), *pdb.Spec.MaxUnavailable)
+	require.NotNil(t, pdb.Spec.UnhealthyPodEvictionPolicy)
+	assert.Equal(t, policyv1.AlwaysAllow, *pdb.Spec.UnhealthyPodEvictionPolicy)
+	assert.Equal(t, map[string]string{
+		LabelTemplateID: "template-a",
+		LabelPoolType:   PoolTypeIdle,
+	}, pdb.Spec.Selector.MatchLabels)
+	require.Len(t, pdb.OwnerReferences, 1)
+	assert.Equal(t, template.UID, pdb.OwnerReferences[0].UID)
+
+	template.Spec.Pool.MinIdle = 180
+	require.NoError(t, pm.reconcileIdlePoolDisruptionBudget(context.Background(), template, rs))
+	pdb, err = client.PolicyV1().PodDisruptionBudgets("default").Get(context.Background(), rs.Name+"-idle-pdb", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, intstr.FromInt32(10), *pdb.Spec.MaxUnavailable)
+}
+
+func TestReconcileClaimedPodAutoscalerAnnotationsMigratesExistingPods(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"}}
+	active := idlePoolPod("active", types.UID("uid-active"), "hash")
+	active.Labels[LabelPoolType] = PoolTypeActive
+	reserved := idlePoolPod("reserved", types.UID("uid-reserved"), "hash")
+	reserved.Annotations[AnnotationHotClaimReservation] = "reservation"
+	idle := idlePoolPod("idle", types.UID("uid-idle"), "hash")
+	client := fake.NewSimpleClientset(active, reserved, idle)
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	for _, pod := range []*corev1.Pod{active, reserved, idle} {
+		require.NoError(t, indexer.Add(pod))
+	}
+	pm := &PoolManager{
+		k8sClient:                client,
+		podLister:                corelisters.NewPodLister(indexer),
+		recorder:                 record.NewFakeRecorder(10),
+		logger:                   zap.NewNop(),
+		autoscalerAnnotationKeys: []string{testAutoscalerSafeToEvictAnnotation},
+	}
+
+	pending, err := pm.reconcileClaimedPodAutoscalerAnnotations(context.Background(), template)
+	require.NoError(t, err)
+	assert.False(t, pending)
+	for _, name := range []string{"active", "reserved"} {
+		pod, err := client.CoreV1().Pods("default").Get(context.Background(), name, metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, "false", pod.Annotations[testAutoscalerSafeToEvictAnnotation])
+	}
+	pod, err := client.CoreV1().Pods("default").Get(context.Background(), "idle", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, pod.Annotations[testAutoscalerSafeToEvictAnnotation])
+}
+
+func TestReconcileClaimedPodAutoscalerAnnotationsUsesBoundedBatches(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"}}
+	objects := make([]runtime.Object, 0, claimedPodAnnotationReconcileBatchSize+1)
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	for i := 0; i < claimedPodAnnotationReconcileBatchSize+1; i++ {
+		pod := idlePoolPod(fmt.Sprintf("active-%02d", i), types.UID(fmt.Sprintf("uid-active-%02d", i)), "hash")
+		pod.Labels[LabelPoolType] = PoolTypeActive
+		objects = append(objects, pod)
+		require.NoError(t, indexer.Add(pod))
+	}
+	client := fake.NewSimpleClientset(objects...)
+	updates := 0
+	client.PrependReactor("update", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		updates++
+		return false, nil, nil
+	})
+	pm := &PoolManager{
+		k8sClient:                client,
+		podLister:                corelisters.NewPodLister(indexer),
+		recorder:                 record.NewFakeRecorder(100),
+		logger:                   zap.NewNop(),
+		autoscalerAnnotationKeys: []string{testAutoscalerSafeToEvictAnnotation},
+	}
+
+	pending, err := pm.reconcileClaimedPodAutoscalerAnnotations(context.Background(), template)
+	require.NoError(t, err)
+	assert.True(t, pending)
+	assert.Equal(t, claimedPodAnnotationReconcileBatchSize, updates)
+}
+
 func TestDrainStaleIdlePodsLimitsRolloutBatch(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
@@ -621,7 +742,7 @@ func TestRepairUnhealthyIdlePodsDeletesStuckCurrentHashIdlePod(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	err := pm.repairUnhealthyIdlePods(context.Background(), template, "new-hash")
+	_, err := pm.repairUnhealthyIdlePods(context.Background(), template, "new-hash")
 	require.NoError(t, err)
 	assert.Equal(t, 1, deleteActions)
 }
@@ -672,9 +793,11 @@ func TestRepairUnhealthyIdlePodsKeepsRecentlyCreatedPod(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	err := pm.repairUnhealthyIdlePods(context.Background(), template, "new-hash")
+	requeueAfter, err := pm.repairUnhealthyIdlePods(context.Background(), template, "new-hash")
 	require.NoError(t, err)
 	assert.Equal(t, 0, deleteActions)
+	assert.Greater(t, requeueAfter, time.Duration(0))
+	assert.LessOrEqual(t, requeueAfter, unhealthyIdlePodRepairGracePeriod)
 }
 
 func TestReconcileReplicaSetTemplateUpdatesHash(t *testing.T) {
@@ -816,6 +939,30 @@ sandbox_pod_placement:
 	hashB, err := TemplateSpecHash(template)
 	require.NoError(t, err)
 
+	assert.NotEqual(t, hashA, hashB)
+}
+
+func TestTemplateSpecHashIncludesPlatformAutoscalerAnnotationKeys(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{MainContainer: v1alpha1.ContainerSpec{Image: "busybox:latest"}},
+	}
+
+	configA := writeManagerConfig(t, `
+autoscaler_safe_to_evict_annotation_keys:
+  - cluster-autoscaler.kubernetes.io/safe-to-evict
+`)
+	t.Setenv("CONFIG_PATH", configA)
+	hashA, err := TemplateSpecHash(template)
+	require.NoError(t, err)
+
+	configB := writeManagerConfig(t, `
+autoscaler_safe_to_evict_annotation_keys:
+  - goatscaler.io/safe-to-evict
+`)
+	t.Setenv("CONFIG_PATH", configB)
+	hashB, err := TemplateSpecHash(template)
+	require.NoError(t, err)
 	assert.NotEqual(t, hashA, hashB)
 }
 

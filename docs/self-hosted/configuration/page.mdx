@@ -500,6 +500,8 @@ Examples:
 - `services.manager.config.sandboxMaxMemory` caps per-sandbox memory overrides; the default is `32Gi`
 - `services.manager.config.procdBinImageRef` overrides the derived procd artifact image used by sandbox Pods
 - `services.manager.config.allowColdStartWithoutReadyDataPlane` lets cold claims create Pending pods for external node autoscaler scale-from-zero deployments; keep it disabled unless the cluster autoscaler can provision matching sandbox nodes
+- `services.manager.config.autoscalerSafeToEvictAnnotationKeys` lists the platform autoscaler's pod annotation keys; manager writes `true` on idle pods and `false` on claimed pods without embedding a vendor-specific key
+- `services.manager.config.podTeardown.*` bounds warm-pool rollout and repair work per node and across the cluster
 - `storage.runtime.filesystem*` tunes the manager storage runtime; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
 - `storage.runtime.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`
 - `storage.runtime.s0fsCompaction*` tunes background S0FS compaction for RWO volume owners; `s0fsCompactionInterval` accepts `0`, `off`, or `disabled` to turn it off
@@ -508,6 +510,25 @@ Examples:
 - `network.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
 - `services.manager.config.defaultTeamQuotas` configures region-wide capacity, API request, and network bandwidth defaults; see [Team Quotas](/docs/sandbox/self-hosted/quotas)
 - `network.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
+
+For autoscaled sandbox node pools, configure the annotation contract and teardown budgets together:
+
+```yaml
+spec:
+    services:
+        manager:
+            config:
+                autoscalerSafeToEvictAnnotationKeys:
+                    - cluster-autoscaler.kubernetes.io/safe-to-evict
+                podTeardown:
+                    maxConcurrentPerNode: 4
+                    maxConcurrentPerDegradedNode: 1
+                    maxConcurrentReplacements: 40
+```
+
+`maxConcurrentPerNode` is applied independently to each healthy node, so cleanup can progress in parallel across nodes. A Ready node reporting memory, disk, PID, or network pressure uses `maxConcurrentPerDegradedNode`. Manager starts no new teardown on a `NotReady` or `Unknown` node, but stale force-deletes still make bounded progress with the degraded-node limit. All templates and cleanup paths share the same cluster-wide replacement budget.
+
+Manager also creates a PodDisruptionBudget for each idle pool. It protects ready capacity from autoscalers that use the Eviction API, while the node-aware manager budget controls direct rollout and repair deletes.
 
 ```yaml
 spec:

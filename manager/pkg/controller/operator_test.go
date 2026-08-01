@@ -129,6 +129,91 @@ func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 	assert.Equal(t, TemplateCounts{IdleCount: 1, ActiveCount: 2}, op.lastStats["default/template-a"])
 }
 
+func TestPodUpdateRequiresPoolReconcileFiltersStatusNoise(t *testing.T) {
+	base := newOperatorTestPod("default", "idle-a", "template-a", PoolTypeIdle, corev1.PodRunning, corev1.ConditionTrue)
+	base.Spec.NodeName = "node-a"
+	base.Annotations = map[string]string{AnnotationTemplateSpecHash: "hash-a"}
+
+	tests := []struct {
+		name   string
+		mutate func(*corev1.Pod)
+		want   bool
+	}{
+		{
+			name: "pod IP update is ignored",
+			mutate: func(pod *corev1.Pod) {
+				pod.Status.PodIP = "10.0.0.2"
+			},
+			want: false,
+		},
+		{
+			name: "ready condition message update is ignored",
+			mutate: func(pod *corev1.Pod) {
+				pod.Status.Conditions[0].Message = "periodic probe detail"
+			},
+			want: false,
+		},
+		{
+			name: "readiness transition is relevant",
+			mutate: func(pod *corev1.Pod) {
+				pod.Status.Conditions[0].Status = corev1.ConditionFalse
+			},
+			want: true,
+		},
+		{
+			name: "phase transition is relevant",
+			mutate: func(pod *corev1.Pod) {
+				pod.Status.Phase = corev1.PodFailed
+			},
+			want: true,
+		},
+		{
+			name: "node assignment is relevant",
+			mutate: func(pod *corev1.Pod) {
+				pod.Spec.NodeName = "node-b"
+			},
+			want: true,
+		},
+		{
+			name: "deletion start is relevant",
+			mutate: func(pod *corev1.Pod) {
+				deletedAt := metav1.Now()
+				pod.DeletionTimestamp = &deletedAt
+			},
+			want: true,
+		},
+		{
+			name: "template hash change is relevant",
+			mutate: func(pod *corev1.Pod) {
+				pod.Annotations[AnnotationTemplateSpecHash] = "hash-b"
+			},
+			want: true,
+		},
+		{
+			name: "hot claim reservation is relevant",
+			mutate: func(pod *corev1.Pod) {
+				pod.Annotations[AnnotationHotClaimReservation] = "reservation"
+			},
+			want: true,
+		},
+		{
+			name: "template ownership change is relevant",
+			mutate: func(pod *corev1.Pod) {
+				pod.Labels[LabelTemplateID] = "template-b"
+			},
+			want: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			updated := base.DeepCopy()
+			test.mutate(updated)
+			assert.Equal(t, test.want, podUpdateRequiresPoolReconcile(base, updated))
+		})
+	}
+}
+
 type recordingNamespacePolicyReconciler struct {
 	calls []string
 	err   error

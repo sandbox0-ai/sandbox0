@@ -106,6 +106,7 @@ type SandboxServiceConfig struct {
 	RootFSSquashMaxChainBytes           int64
 	PublicRootDomain                    string
 	PublicRegionID                      string
+	AutoscalerSafeToEvictAnnotationKeys []string
 }
 
 // SandboxService handles sandbox operations

@@ -122,6 +122,25 @@ func TestToManagerPreservesK8sClientRateLimit(t *testing.T) {
 	}
 }
 
+func TestToManagerPreservesPodTeardownAndAutoscalerAnnotations(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		AutoscalerSafeToEvictAnnotationKeys: []string{"goatscaler.io/safe-to-evict"},
+		PodTeardown: infrav1alpha1.PodTeardownConfig{
+			MaxConcurrentPerNode:         6,
+			MaxConcurrentPerDegradedNode: 2,
+			MaxConcurrentReplacements:    24,
+		},
+	})
+	if len(cfg.AutoscalerSafeToEvictAnnotationKeys) != 1 || cfg.AutoscalerSafeToEvictAnnotationKeys[0] != "goatscaler.io/safe-to-evict" {
+		t.Fatalf("autoscaler annotation keys = %#v", cfg.AutoscalerSafeToEvictAnnotationKeys)
+	}
+	if cfg.PodTeardown.MaxConcurrentPerNode != 6 ||
+		cfg.PodTeardown.MaxConcurrentPerDegradedNode != 2 ||
+		cfg.PodTeardown.MaxConcurrentReplacements != 24 {
+		t.Fatalf("pod teardown config = %#v", cfg.PodTeardown)
+	}
+}
+
 func TestToStorageProxyDefaultsObjectEncryptionEnabled(t *testing.T) {
 	cfg := ToStorageProxy(nil)
 	if !cfg.ObjectEncryptionEnabled {

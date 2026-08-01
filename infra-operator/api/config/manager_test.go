@@ -85,6 +85,43 @@ sandbox_pod_placement:
 	}
 }
 
+func TestLoadManagerConfigDefaultsPodTeardownLimits(t *testing.T) {
+	cfg, err := loadManagerConfig("")
+	if err != nil {
+		t.Fatalf("loadManagerConfig: %v", err)
+	}
+	applyPodTeardownDefaults(cfg)
+	if cfg.PodTeardown.MaxConcurrentPerNode != 4 ||
+		cfg.PodTeardown.MaxConcurrentPerDegradedNode != 1 ||
+		cfg.PodTeardown.MaxConcurrentReplacements != 40 {
+		t.Fatalf("pod teardown defaults = %#v", cfg.PodTeardown)
+	}
+}
+
+func TestLoadManagerConfigPreservesPodLifecyclePlatformConfig(t *testing.T) {
+	path := writeManagerConfigFile(t, `
+autoscaler_safe_to_evict_annotation_keys:
+  - goatscaler.io/safe-to-evict
+pod_teardown:
+  max_concurrent_per_node: 6
+  max_concurrent_per_degraded_node: 2
+  max_concurrent_replacements: 24
+`)
+	cfg, err := loadManagerConfig(path)
+	if err != nil {
+		t.Fatalf("loadManagerConfig: %v", err)
+	}
+	applyPodTeardownDefaults(cfg)
+	if len(cfg.AutoscalerSafeToEvictAnnotationKeys) != 1 || cfg.AutoscalerSafeToEvictAnnotationKeys[0] != "goatscaler.io/safe-to-evict" {
+		t.Fatalf("autoscaler annotation keys = %#v", cfg.AutoscalerSafeToEvictAnnotationKeys)
+	}
+	if cfg.PodTeardown.MaxConcurrentPerNode != 6 ||
+		cfg.PodTeardown.MaxConcurrentPerDegradedNode != 2 ||
+		cfg.PodTeardown.MaxConcurrentReplacements != 24 {
+		t.Fatalf("pod teardown config = %#v", cfg.PodTeardown)
+	}
+}
+
 func TestLoadManagerConfigDefaultsLeaderElectionOn(t *testing.T) {
 	cfg, err := loadManagerConfig("")
 	if err != nil {
@@ -108,4 +145,13 @@ func TestLoadManagerConfigAllowsLeaderElectionOff(t *testing.T) {
 	if cfg.LeaderElection {
 		t.Fatal("leader election = true, want explicit false")
 	}
+}
+
+func writeManagerConfigFile(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "manager.yaml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write manager config: %v", err)
+	}
+	return path
 }

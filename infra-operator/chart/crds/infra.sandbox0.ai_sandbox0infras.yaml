@@ -3706,6 +3706,15 @@ spec:
                                 default: "0.2"
                                 type: string
                             type: object
+                          autoscalerSafeToEvictAnnotationKeys:
+                            description: |-
+                              AutoscalerSafeToEvictAnnotationKeys configures the platform-specific pod
+                              annotation keys toggled by manager for idle and claimed sandbox pods.
+                            items:
+                              type: string
+                            maxItems: 8
+                            type: array
+                            x-kubernetes-list-type: set
                           cleanupInterval:
                             default: 60s
                             type: string
@@ -3809,6 +3818,27 @@ spec:
                           pauseMinMemoryRequest:
                             default: 10Mi
                             type: string
+                          podTeardown:
+                            default: {}
+                            description: PodTeardownConfig defines manager pod teardown
+                              concurrency limits.
+                            properties:
+                              maxConcurrentPerDegradedNode:
+                                default: 1
+                                format: int32
+                                minimum: 1
+                                type: integer
+                              maxConcurrentPerNode:
+                                default: 4
+                                format: int32
+                                minimum: 1
+                                type: integer
+                              maxConcurrentReplacements:
+                                default: 40
+                                format: int32
+                                minimum: 1
+                                type: integer
+                            type: object
                           procdBinImageRef:
                             description: ProcdBinImageRef overrides the OCI image
                               used for the procd binary image volume.

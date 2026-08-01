@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -12,9 +14,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 )
@@ -342,6 +346,58 @@ func TestCleanupExpiredForceDeletesStaleDeletingIdlePod(t *testing.T) {
 	default:
 		t.Fatal("expected stale force-delete event")
 	}
+}
+
+func TestCleanupExpiredSharesForceDeleteBudgetAcrossIdleAndActivePods(t *testing.T) {
+	now := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
+	template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "tpl-default"}}
+	node := teardownTestNode("node-a", corev1.ConditionTrue)
+	pods := make([]*corev1.Pod, 0, 12)
+	objects := make([]runtime.Object, 0, 12)
+	for i := 0; i < 12; i++ {
+		poolType := PoolTypeIdle
+		if i >= 6 {
+			poolType = PoolTypeActive
+		}
+		deletedAt := metav1.NewTime(now.Add(-staleDeletingPodForceDeleteAfter - time.Minute))
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              fmt.Sprintf("pod-%02d", i),
+				Namespace:         template.Namespace,
+				UID:               types.UID(fmt.Sprintf("uid-%02d", i)),
+				DeletionTimestamp: &deletedAt,
+				Labels: map[string]string{
+					LabelTemplateID: template.Name,
+					LabelPoolType:   poolType,
+				},
+			},
+			Spec: corev1.PodSpec{NodeName: node.Name},
+		}
+		pods = append(pods, pod)
+		objects = append(objects, pod)
+	}
+	coordinator, podIndexer, _ := newTeardownTestCoordinator(t, pods, []*corev1.Node{node}, config.PodTeardownConfig{})
+	client := fake.NewSimpleClientset(objects...)
+	deleteActions := 0
+	client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		deleteActions++
+		return false, nil, nil
+	})
+	controller := NewCleanupController(
+		client,
+		corelisters.NewPodLister(podIndexer),
+		nil,
+		record.NewFakeRecorder(20),
+		staticCleanupClock{now: now},
+		nil,
+		nil,
+		zap.NewNop(),
+		time.Minute,
+	)
+	controller.SetPodTeardownCoordinator(coordinator)
+
+	require.NoError(t, controller.cleanupExpired(context.Background(), template))
+	assert.Equal(t, 4, deleteActions, "idle and active cleanup must share one per-node force-delete budget")
 }
 
 func TestCleanupExpiredRetainsCompletedSandboxPodForCrashRecovery(t *testing.T) {

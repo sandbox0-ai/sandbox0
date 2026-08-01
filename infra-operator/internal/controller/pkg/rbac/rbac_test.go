@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestReconcileManagerRBACIncludesNetworkPolicies(t *testing.T) {
+func TestReconcileManagerRBACIncludesManagedPoolResources(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, rbacv1.AddToScheme(scheme))
@@ -51,6 +51,16 @@ func TestReconcileManagerRBACIncludesNetworkPolicies(t *testing.T) {
 		found = true
 	}
 	assert.True(t, found, "expected manager cluster role to include networkpolicies permissions")
+
+	found = false
+	for _, rule := range role.Rules {
+		if !contains(rule.APIGroups, "policy") || !contains(rule.Resources, "poddisruptionbudgets") {
+			continue
+		}
+		assert.ElementsMatch(t, []string{"get", "list", "watch", "create", "update", "patch", "delete"}, rule.Verbs)
+		found = true
+	}
+	assert.True(t, found, "expected manager cluster role to include poddisruptionbudgets permissions")
 }
 
 func TestReconcileManagerRBACIncludesPodResize(t *testing.T) {

@@ -110,9 +110,11 @@ pool:
 
 When you update a template spec, the warm pool is recycled:
 
-1. Existing idle pods (running the old spec) are drained
+1. Existing idle pods (running the old spec) are drained with per-node teardown and cluster replacement limits
 2. New idle pods are created with the updated spec
 3. Running sandboxes are **not** affected
+
+Ready pods are additionally protected by an idle-pool PodDisruptionBudget and an availability floor. Unready pods do not consume that availability allowance, but they still consume their node's teardown budget. This allows independent nodes to clean up in parallel without sending an unbounded delete wave to one kubelet, container runtime, or CNI instance.
 
 During the transition, the pool may temporarily drop below `minIdle`. Plan updates during low-traffic windows if uninterrupted pool availability is critical.
 

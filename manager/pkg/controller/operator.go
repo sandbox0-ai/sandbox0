@@ -101,6 +101,8 @@ func NewOperator(
 	clock TimeProvider,
 	logger *zap.Logger,
 	metrics *obsmetrics.ManagerMetrics,
+	teardown *PodTeardownCoordinator,
+	autoscalerAnnotationKeys []string,
 ) *Operator {
 	// Use system time as fallback if clock is nil
 	if clock == nil {
@@ -110,7 +112,7 @@ func NewOperator(
 	podLister := corelisters.NewPodLister(podInformer.GetIndexer())
 	replicaSetLister := appslisters.NewReplicaSetLister(replicaSetInformer.GetIndexer())
 	secretLister := corelisters.NewSecretLister(secretInformer.GetIndexer())
-	poolManager := NewPoolManager(k8sClient, podLister, replicaSetLister, secretLister, recorder, logger)
+	poolManager := NewPoolManager(k8sClient, podLister, replicaSetLister, secretLister, recorder, logger, teardown, autoscalerAnnotationKeys)
 
 	op := &Operator{
 		k8sClient:        k8sClient,
@@ -529,7 +531,32 @@ func (op *Operator) handlePodUpdate(oldObj, newObj any) {
 	if oldPod.ResourceVersion == newPod.ResourceVersion {
 		return
 	}
+	if !podUpdateRequiresPoolReconcile(oldPod, newPod) {
+		return
+	}
+	if oldPod.Namespace != newPod.Namespace || oldPod.Labels[LabelTemplateID] != newPod.Labels[LabelTemplateID] {
+		op.enqueueTemplateForPod(oldPod)
+	}
 	op.enqueueTemplateForPod(newPod)
+}
+
+func podUpdateRequiresPoolReconcile(oldPod, newPod *corev1.Pod) bool {
+	if oldPod == nil || newPod == nil {
+		return true
+	}
+	if oldPod.Namespace != newPod.Namespace ||
+		oldPod.Labels[LabelTemplateID] != newPod.Labels[LabelTemplateID] ||
+		oldPod.Labels[LabelPoolType] != newPod.Labels[LabelPoolType] ||
+		oldPod.Spec.NodeName != newPod.Spec.NodeName ||
+		oldPod.Status.Phase != newPod.Status.Phase ||
+		IsPodReady(oldPod) != IsPodReady(newPod) ||
+		IsHotClaimReservedPod(oldPod) != IsHotClaimReservedPod(newPod) ||
+		oldPod.Annotations[AnnotationTemplateSpecHash] != newPod.Annotations[AnnotationTemplateSpecHash] {
+		return true
+	}
+	oldDeleting := oldPod.DeletionTimestamp != nil
+	newDeleting := newPod.DeletionTimestamp != nil
+	return oldDeleting != newDeleting
 }
 
 func (op *Operator) handlePodDelete(obj any) {

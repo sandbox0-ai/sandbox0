@@ -9,6 +9,7 @@
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@openai/codex": "0.144.1",
     "@playwright/cli": "0.1.17",
-    "opencode-ai": "1.17.18"
+    "opencode-ai": "1.17.18",
+    "ws": "8.21.0"
   }
 }

@@ -19,9 +19,17 @@ type Observer struct {
 	stateBytes             *prometheus.HistogramVec
 	stateItems             *prometheus.HistogramVec
 	hotCacheRequests       *prometheus.CounterVec
+	hotCacheAdmissions     *prometheus.CounterVec
 	hotCacheEvictions      *prometheus.CounterVec
 	hotCacheEntries        prometheus.Gauge
 	hotCacheEstimatedBytes prometheus.Gauge
+	hotCacheSegmentEntries *prometheus.GaugeVec
+	hotCacheSegmentBytes   *prometheus.GaugeVec
+	hotCacheBudgetBytes    prometheus.Gauge
+	hotCacheEntryBytes     *prometheus.HistogramVec
+	hotCacheActiveDuration *prometheus.HistogramVec
+	hotCacheOpenDuration   *prometheus.HistogramVec
+	hotCacheResidence      *prometheus.HistogramVec
 }
 
 func NewObserver(registry prometheus.Registerer, logger *zap.Logger) *Observer {
@@ -56,19 +64,55 @@ func NewObserver(registry prometheus.Registerer, logger *zap.Logger) *Observer {
 	observer.hotCacheRequests = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "ctld_s0fs_hot_cache_requests_total",
 		Help: "S0FS hot engine cache requests by result",
-	}, []string{"result"})
+	}, []string{"result", "segment"})
+	observer.hotCacheAdmissions = factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "ctld_s0fs_hot_cache_admissions_total",
+		Help: "S0FS hot engine cache admission decisions",
+	}, []string{"decision", "reason"})
 	observer.hotCacheEvictions = factory.NewCounterVec(prometheus.CounterOpts{
 		Name: "ctld_s0fs_hot_cache_evictions_total",
 		Help: "S0FS hot engine cache evictions by reason",
-	}, []string{"reason"})
+	}, []string{"reason", "segment"})
 	observer.hotCacheEntries = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ctld_s0fs_hot_cache_entries",
 		Help: "Current S0FS hot engine cache entry count",
 	})
 	observer.hotCacheEstimatedBytes = factory.NewGauge(prometheus.GaugeOpts{
 		Name: "ctld_s0fs_hot_cache_estimated_bytes",
-		Help: "Estimated memory retained by the S0FS hot engine cache",
+		Help: "Conservatively estimated memory retained by the S0FS hot engine cache",
 	})
+	observer.hotCacheSegmentEntries = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ctld_s0fs_hot_cache_segment_entries",
+		Help: "Current S0FS hot engine cache entry count by segment",
+	}, []string{"segment"})
+	observer.hotCacheSegmentBytes = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ctld_s0fs_hot_cache_segment_estimated_bytes",
+		Help: "Conservatively estimated S0FS hot engine cache memory by segment",
+	}, []string{"segment"})
+	observer.hotCacheBudgetBytes = factory.NewGauge(prometheus.GaugeOpts{
+		Name: "ctld_s0fs_hot_cache_budget_bytes",
+		Help: "Configured S0FS hot engine cache memory budget",
+	})
+	observer.hotCacheEntryBytes = factory.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "ctld_s0fs_hot_cache_entry_estimated_bytes",
+		Help:    "Conservatively estimated memory charged for S0FS hot cache candidates",
+		Buckets: byteBuckets,
+	}, []string{"segment"})
+	observer.hotCacheActiveDuration = factory.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "ctld_s0fs_hot_cache_candidate_active_duration_seconds",
+		Help:    "Mounted duration of S0FS hot cache candidates",
+		Buckets: []float64{1, 5, 10, 30, 60, 300, 900, 3600, 21600, 86400},
+	}, []string{"segment"})
+	observer.hotCacheOpenDuration = factory.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "ctld_s0fs_hot_cache_candidate_cold_open_duration_seconds",
+		Help:    "Last cold engine-open duration of S0FS hot cache candidates",
+		Buckets: durationBuckets,
+	}, []string{"segment"})
+	observer.hotCacheResidence = factory.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "ctld_s0fs_hot_cache_residence_duration_seconds",
+		Help:    "Time S0FS engines remain in the hot cache before a hit or eviction",
+		Buckets: []float64{1, 5, 10, 30, 60, 300, 900, 3600, 21600, 86400},
+	}, []string{"segment", "outcome"})
 	return observer
 }
 
@@ -121,19 +165,52 @@ func (o *Observer) ObserveS0FSOpen(observation s0fs.OpenObservation) {
 	}
 }
 
-func (o *Observer) ObserveHotCacheRequest(result string) {
+func (o *Observer) ObserveHotCacheRequest(result, segment string) {
 	if o != nil && o.hotCacheRequests != nil {
-		o.hotCacheRequests.WithLabelValues(result).Inc()
+		o.hotCacheRequests.WithLabelValues(result, segment).Inc()
 	}
 }
 
-func (o *Observer) ObserveHotCacheEviction(reason string) {
+func (o *Observer) ObserveHotCacheAdmission(decision, reason string) {
+	if o != nil && o.hotCacheAdmissions != nil {
+		o.hotCacheAdmissions.WithLabelValues(decision, reason).Inc()
+	}
+}
+
+func (o *Observer) ObserveHotCacheEviction(reason, segment string) {
 	if o != nil && o.hotCacheEvictions != nil {
-		o.hotCacheEvictions.WithLabelValues(reason).Inc()
+		o.hotCacheEvictions.WithLabelValues(reason, segment).Inc()
 	}
 }
 
-func (o *Observer) SetHotCacheSize(entries int, estimatedBytes int64) {
+func (o *Observer) ObserveHotCacheCandidate(segment string, estimatedBytes int64, activeDuration, coldOpenDuration time.Duration) {
+	if o == nil {
+		return
+	}
+	if o.hotCacheEntryBytes != nil {
+		o.hotCacheEntryBytes.WithLabelValues(segment).Observe(float64(estimatedBytes))
+	}
+	if o.hotCacheActiveDuration != nil {
+		o.hotCacheActiveDuration.WithLabelValues(segment).Observe(activeDuration.Seconds())
+	}
+	if o.hotCacheOpenDuration != nil {
+		o.hotCacheOpenDuration.WithLabelValues(segment).Observe(coldOpenDuration.Seconds())
+	}
+}
+
+func (o *Observer) ObserveHotCacheResidence(segment, outcome string, duration time.Duration) {
+	if o != nil && o.hotCacheResidence != nil {
+		o.hotCacheResidence.WithLabelValues(segment, outcome).Observe(duration.Seconds())
+	}
+}
+
+func (o *Observer) SetHotCacheBudget(bytes int64) {
+	if o != nil && o.hotCacheBudgetBytes != nil {
+		o.hotCacheBudgetBytes.Set(float64(bytes))
+	}
+}
+
+func (o *Observer) SetHotCacheSize(entries int, estimatedBytes int64, probationEntries int, probationBytes int64, protectedEntries int, protectedBytes int64) {
 	if o == nil {
 		return
 	}
@@ -142,6 +219,14 @@ func (o *Observer) SetHotCacheSize(entries int, estimatedBytes int64) {
 	}
 	if o.hotCacheEstimatedBytes != nil {
 		o.hotCacheEstimatedBytes.Set(float64(estimatedBytes))
+	}
+	if o.hotCacheSegmentEntries != nil {
+		o.hotCacheSegmentEntries.WithLabelValues(string(hotCacheSegmentProbation)).Set(float64(probationEntries))
+		o.hotCacheSegmentEntries.WithLabelValues(string(hotCacheSegmentProtected)).Set(float64(protectedEntries))
+	}
+	if o.hotCacheSegmentBytes != nil {
+		o.hotCacheSegmentBytes.WithLabelValues(string(hotCacheSegmentProbation)).Set(float64(probationBytes))
+		o.hotCacheSegmentBytes.WithLabelValues(string(hotCacheSegmentProtected)).Set(float64(protectedBytes))
 	}
 }
 

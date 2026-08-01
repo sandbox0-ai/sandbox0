@@ -201,6 +201,9 @@ type UnbindVolumePortalRequest struct {
 	PortalName      string `json:"portal_name,omitempty"`
 	MountPath       string `json:"mount_path"`
 	SandboxVolumeID string `json:"sandboxvolume_id"`
+	// RetainHot is set only for an intentional pause. Delete and stale-runtime
+	// cleanup must close the engine instead of polluting the resume cache.
+	RetainHot bool `json:"retain_hot,omitempty"`
 }
 
 type UnbindVolumePortalResponse struct {

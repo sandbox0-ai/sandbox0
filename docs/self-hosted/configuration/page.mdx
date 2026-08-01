@@ -505,7 +505,7 @@ Examples:
 - `storage.runtime.filesystem*` tunes the manager storage runtime; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
 - `storage.runtime.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`
 - `storage.runtime.s0fsStateFormatVersion` selects the format used for new S0FS state writes; readers accept versions `1` and `2`, and the default remains `1`
-- `storage.runtime.s0fsHotCacheTTL`, `s0fsHotCacheMaxEntries`, and `s0fsHotCacheMaxSize` bound the clean node-local S0FS engines retained after unbind for fast same-node remounts; defaults are `30s`, `8`, and `1Gi`, and a TTL of `0s` disables retention
+- `storage.runtime.s0fsHotCacheMaxSize` bounds the conservatively estimated memory used by clean node-local S0FS engines retained after an intentional pause; the cache has no age-based expiry, uses probation/protected admission to resist short-lived churn, defaults to `1Gi`, and is disabled by setting the value to `0`
 - `storage.runtime.s0fsCompaction*` tunes background S0FS compaction for RWO volume owners; `s0fsCompactionInterval` accepts `0`, `off`, or `disabled` to turn it off
 - `storage.runtime.cacheSizeLimit` and `logSizeLimit` cap storage cache and logs in the manager Pod; `volumePortalCacheSizeLimit` and `volumePortalRootMinFree` tune the volume portals used by ctld
 - `storage.runtime.objectEncryptionEnabled` controls application-layer encryption for persisted rootfs checkpoint objects, S0FS Volume objects, and node-local S0FS volume cache files; it is enabled by default
@@ -532,6 +532,8 @@ spec:
 
 Manager also creates a PodDisruptionBudget for each idle pool. It protects ready capacity from autoscalers that use the Eviction API, while the node-aware manager budget controls direct rollout and repair deletes.
 
+Monitor the S0FS resume cache with `ctld_s0fs_hot_cache_requests_total`, `ctld_s0fs_hot_cache_admissions_total`, `ctld_s0fs_hot_cache_evictions_total`, and the entry, estimated-byte, segment, and budget gauges under the `ctld_s0fs_hot_cache_` prefix. Admission and segment labels are intentionally low-cardinality; sandbox and volume IDs appear only in structured logs.
+
 ### S0FS State Format Rollout
 
 Treat S0FS state format `2` as a two-phase rollout. First deploy the dual-reader build to every manager and both ctld DaemonSets while leaving `s0fsStateFormatVersion: 1`. After every old reader is gone, set the field to `2`. Once any committed head or snapshot has been written as version `2`, roll back only to a build that can read both versions; changing the field back to `1` changes future writes but does not rewrite existing version `2` objects.
@@ -548,8 +550,6 @@ spec:
             logSizeLimit: 1Gi
             s0fsSegmentTargetSize: 4Mi
             s0fsStateFormatVersion: 1
-            s0fsHotCacheTTL: 30s
-            s0fsHotCacheMaxEntries: 8
             s0fsHotCacheMaxSize: 1Gi
             s0fsCompactionInterval: 1m
             s0fsCompactionMinDeadRatio: "0.5"

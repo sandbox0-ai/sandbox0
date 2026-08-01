@@ -902,49 +902,6 @@ func (m *Materializer) putJSON(ctx context.Context, key string, value any) error
 	return m.putBytes(ctx, key, payload)
 }
 
-func (m *Materializer) getJSON(ctx context.Context, key string, value any) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	started := time.Now()
-	reader, err := m.store.Get(key, 0, -1)
-	if err != nil {
-		m.observeOpenPhase("object_read", "remote", StateFormatV1, started, -1, nil, err)
-		return fmt.Errorf("get %s: %w", key, err)
-	}
-	defer reader.Close()
-
-	payload, err := io.ReadAll(reader)
-	if err != nil {
-		m.observeOpenPhase("object_read", "remote", StateFormatV1, started, int64(len(payload)), nil, err)
-		return fmt.Errorf("read %s: %w", key, err)
-	}
-	m.observeOpenPhase("object_read", "remote", StateFormatV1, started, int64(len(payload)), nil, nil)
-	started = time.Now()
-	if plaintext, encrypted, err := m.encryption.decryptBlobIfEncrypted(payload, stateBlobAAD(m.volumeID, "object:"+key)); encrypted || err != nil {
-		if err != nil {
-			m.observeOpenPhase("decrypt", "remote", StateFormatV1, started, int64(len(payload)), nil, err)
-			return err
-		}
-		payload = plaintext
-	}
-	m.observeOpenPhase("decrypt", "remote", StateFormatV1, started, int64(len(payload)), nil, nil)
-	started = time.Now()
-	if err := json.Unmarshal(payload, value); err != nil {
-		m.observeOpenPhase("decode", "remote", StateFormatV1, started, int64(len(payload)), nil, err)
-		return fmt.Errorf("decode %s: %w", key, err)
-	}
-	var state *SnapshotState
-	switch typed := value.(type) {
-	case *Manifest:
-		state = typed.State
-	case *SnapshotState:
-		state = typed
-	}
-	m.observeOpenPhase("decode", "remote", StateFormatV1, started, int64(len(payload)), state, nil)
-	return nil
-}
-
 func (m *Materializer) observeOpenPhase(phase, source string, format int, started time.Time, bytes int64, state *SnapshotState, err error) {
 	if m == nil || m.openObserver == nil {
 		return

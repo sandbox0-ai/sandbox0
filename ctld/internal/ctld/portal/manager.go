@@ -37,9 +37,6 @@ const defaultVolumePortalCacheSizeLimit = "20Gi"
 const defaultVolumePortalRootMinFree = "5Gi"
 const defaultS0FSMaterializerConcurrency = 16
 const defaultVolumeMaterializeInterval = 2 * time.Second
-const defaultS0FSHotCacheTTL = 30 * time.Second
-const defaultS0FSHotCacheMaxEntries = 8
-const defaultS0FSHotCacheMaxSize = "1Gi"
 const defaultS0FSHotCacheMaxBytes int64 = 1 << 30
 
 type Manager struct {
@@ -72,10 +69,10 @@ type Manager struct {
 	recoveryWriter         *portalRecoveryWriter
 	replicator             PortalReplicator
 	requireStandby         bool
-	hotCacheTTL            time.Duration
-	hotCacheMaxEntries     int
 	hotCacheMaxBytes       int64
 	hotCacheBytes          int64
+	hotCacheProbationBytes int64
+	hotCacheProtectedBytes int64
 	activationMu           sync.Mutex
 	activations            map[string]*volumeActivation
 
@@ -126,6 +123,7 @@ type boundVolume struct {
 	closing           bool
 	ownerRegistered   bool
 	hotReuse          bool
+	coldOpenDuration  time.Duration
 }
 
 type boundVolumeCleanup struct {
@@ -137,9 +135,12 @@ type boundVolumeCleanup struct {
 }
 
 type hotVolume struct {
-	bound          *boundVolume
-	cachedAt       time.Time
-	estimatedBytes int64
+	bound            *boundVolume
+	cachedAt         time.Time
+	estimatedBytes   int64
+	segment          hotCacheSegment
+	mountedDuration  time.Duration
+	coldOpenDuration time.Duration
 }
 
 type Config struct {
@@ -161,8 +162,6 @@ type Config struct {
 	MaterializerConcurrency int
 	Replicator              PortalReplicator
 	RequireStandby          bool
-	S0FSHotCacheTTL         time.Duration
-	S0FSHotCacheMaxEntries  int
 	S0FSHotCacheMaxBytes    int64
 }
 
@@ -205,28 +204,13 @@ func NewManager(cfg Config) *Manager {
 	if materializerConcurrency <= 0 {
 		materializerConcurrency = defaultS0FSMaterializerConcurrency
 	}
-	hotCacheTTL := cfg.S0FSHotCacheTTL
-	if hotCacheTTL == 0 {
-		configuredTTL := strings.TrimSpace(storageConfig.S0FSHotCacheTTL)
-		parsedTTL, parseErr := time.ParseDuration(configuredTTL)
-		if configuredTTL == "" || parseErr != nil || parsedTTL < 0 {
-			hotCacheTTL = defaultS0FSHotCacheTTL
-		} else {
-			hotCacheTTL = parsedTTL
-		}
-	}
-	hotCacheMaxEntries := cfg.S0FSHotCacheMaxEntries
-	if hotCacheMaxEntries == 0 {
-		hotCacheMaxEntries = storageConfig.S0FSHotCacheMaxEntries
-		if hotCacheMaxEntries <= 0 {
-			hotCacheMaxEntries = defaultS0FSHotCacheMaxEntries
-		}
-	}
 	hotCacheMaxBytes := cfg.S0FSHotCacheMaxBytes
 	if hotCacheMaxBytes == 0 {
-		hotCacheMaxBytes = parseQuantityBytesOrDefault(storageConfig.S0FSHotCacheMaxSize, defaultS0FSHotCacheMaxSize)
-		if hotCacheMaxBytes <= 0 {
+		configuredMaxSize := strings.TrimSpace(storageConfig.S0FSHotCacheMaxSize)
+		if configuredMaxSize == "" {
 			hotCacheMaxBytes = defaultS0FSHotCacheMaxBytes
+		} else {
+			hotCacheMaxBytes = parseHotCacheMaxBytes(configuredMaxSize)
 		}
 	}
 	observer := cfg.Observer
@@ -262,8 +246,6 @@ func NewManager(cfg Config) *Manager {
 		recoveryStore:          recoveryStore,
 		replicator:             cfg.Replicator,
 		requireStandby:         cfg.RequireStandby,
-		hotCacheTTL:            hotCacheTTL,
-		hotCacheMaxEntries:     hotCacheMaxEntries,
 		hotCacheMaxBytes:       hotCacheMaxBytes,
 		portals:                make(map[string]*portalMount),
 		portalsByTarget:        make(map[string]*portalMount),
@@ -274,6 +256,8 @@ func NewManager(cfg Config) *Manager {
 	}
 	manager.recoveryWriter = newPortalRecoveryWriter(recoveryStore, logger, observer)
 	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
+	manager.observer.SetHotCacheBudget(hotCacheMaxBytes)
+	manager.observer.SetHotCacheSize(0, 0, 0, 0, 0, 0)
 	return manager
 }
 
@@ -334,13 +318,10 @@ func (m *Manager) localDiskGuard(cacheDir string) *s0fs.LocalDiskGuard {
 }
 
 func (m *Manager) Run(ctx context.Context) {
-	if m == nil || (m.ownerOnlyIdleTTL <= 0 && m.hotCacheTTL <= 0) {
+	if m == nil || m.ownerOnlyIdleTTL <= 0 {
 		return
 	}
 	interval := m.ownerOnlyIdleTTL / 2
-	if interval <= 0 || (m.hotCacheTTL > 0 && m.hotCacheTTL/2 < interval) {
-		interval = m.hotCacheTTL / 2
-	}
 	if interval <= 0 || interval > 5*time.Second {
 		interval = 5 * time.Second
 	}
@@ -352,7 +333,6 @@ func (m *Manager) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.cleanupIdleOwnerOnlyVolumes(ctx)
-			m.cleanupExpiredHotVolumes()
 		}
 	}
 }
@@ -646,7 +626,7 @@ func (m *Manager) RestorePortal(ctx context.Context, manifest RecoveryManifest, 
 	if err != nil {
 		if boundAttached {
 			m.mu.Lock()
-			cleanup := m.unbindLockedSnapshot(pm)
+			cleanup := m.unbindLockedSnapshot(pm, false)
 			m.mu.Unlock()
 			if cleanupErr := m.finishBoundVolumeHandoff(ctx, cleanup); cleanupErr != nil {
 				m.logger.Warn("Failed to preserve bound volume after FUSE attach failure", zap.Error(cleanupErr), zap.String("volume_id", manifest.VolumeID))
@@ -750,7 +730,7 @@ func (m *Manager) unpublishPortalContext(ctx context.Context, targetPath string,
 	if pm != nil {
 		delete(m.portalsByTarget, targetPath)
 		delete(m.portals, portalKey(pm.podUID, pm.name))
-		cleanup = m.unbindLockedSnapshot(pm)
+		cleanup = m.unbindLockedSnapshot(pm, false)
 	}
 	m.mu.Unlock()
 	if pm == nil {
@@ -1067,6 +1047,8 @@ func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest)
 	}
 	if newBound != nil && newBound.hotReuse {
 		path = "hot"
+	} else if newBound != nil {
+		newBound.coldOpenDuration = time.Since(activateStarted)
 	}
 	m.observer.ObservePhase("bind", "engine_activate", path, 0, req.SandboxVolumeID, activateStarted, nil)
 	openedCleanup := cleanupNewBound
@@ -1342,9 +1324,14 @@ func (m *Manager) Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequ
 	pm := m.portals[portalKey(req.PodUID, portalName)]
 	if pm == nil {
 		m.mu.Unlock()
+		if !req.RetainHot && strings.TrimSpace(req.SandboxVolumeID) != "" {
+			if err := m.evictHotVolumeWithActivation(ctx, req.SandboxVolumeID, "lifecycle"); err != nil {
+				return ctldapi.UnbindVolumePortalResponse{}, err
+			}
+		}
 		return ctldapi.UnbindVolumePortalResponse{Unbound: true}, nil
 	}
-	cleanup := m.unbindLockedSnapshot(pm)
+	cleanup := m.unbindLockedSnapshot(pm, req.RetainHot)
 	m.mu.Unlock()
 	if err := m.updateRecoveryState(ctx, pm); err != nil {
 		return ctldapi.UnbindVolumePortalResponse{}, err
@@ -1655,7 +1642,7 @@ func (m *Manager) releaseOwnerOnlyVolumeLocked(volumeID string, bound *boundVolu
 	return cleanup
 }
 
-func (m *Manager) unbindLockedSnapshot(pm *portalMount) *boundVolumeCleanup {
+func (m *Manager) unbindLockedSnapshot(pm *portalMount, retainHot bool) *boundVolumeCleanup {
 	volumeID := pm.volumeID
 	m.clearPortalLocked(pm)
 	if volumeID == "" {
@@ -1671,8 +1658,16 @@ func (m *Manager) unbindLockedSnapshot(pm *portalMount) *boundVolumeCleanup {
 	}
 	bound.refCount = 0
 	cleanup := m.releaseOwnerOnlyVolumeLocked(volumeID, bound)
-	if cleanup != nil && bound.volCtx != nil && bound.volCtx.S0FS != nil && m.hotCacheEnabled() {
-		cleanup.retainHot = true
+	if cleanup != nil && bound.volCtx != nil && bound.volCtx.S0FS != nil {
+		if retainHot && m.hotCacheEnabled() {
+			cleanup.retainHot = true
+		} else if m.observer != nil {
+			reason := "lifecycle"
+			if retainHot {
+				reason = "disabled"
+			}
+			m.observer.ObserveHotCacheAdmission("skipped", reason)
+		}
 	}
 	return cleanup
 }
@@ -1715,7 +1710,6 @@ func (m *Manager) finishBoundVolumeCleanup(ctx context.Context, cleanup *boundVo
 		}
 		m.mu.Unlock()
 		m.unregisterOwner(cleanup.bound)
-		cleanup.bound.hotReuse = false
 		var stateErr error
 		if cleanup.bound.statePath != "" {
 			stateErr = removeS0FSHandleRecoveryState(cleanup.bound.statePath)
@@ -2250,6 +2244,14 @@ func parseQuantityBytesOrDefault(value, fallback string) int64 {
 		if err != nil || quantity.Sign() <= 0 {
 			return 0
 		}
+	}
+	return quantity.Value()
+}
+
+func parseHotCacheMaxBytes(value string) int64 {
+	quantity, err := resource.ParseQuantity(strings.TrimSpace(value))
+	if err != nil || quantity.Sign() < 0 {
+		return defaultS0FSHotCacheMaxBytes
 	}
 	return quantity.Value()
 }

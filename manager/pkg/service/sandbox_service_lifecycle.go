@@ -36,7 +36,7 @@ func (s *SandboxService) TerminateSandbox(ctx context.Context, sandboxID string)
 					return fmt.Errorf("get sandbox record: %w", getErr)
 				}
 				if record != nil && record.Status != SandboxStatusDeleted {
-					if err := s.cleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record), false); err != nil {
+					if err := s.cleanupDeletedSandbox(ctx, sandboxLifecycleInfoFromRecord(record), false, false); err != nil {
 						return fmt.Errorf("cleanup deleted sandbox record: %w", err)
 					}
 				}

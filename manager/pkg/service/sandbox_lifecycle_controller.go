@@ -347,8 +347,8 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	}
 
 	classifyStarted := time.Now()
-	runtimePaused, err := s.runtimeDeletionIsPause(ctx, info)
-	scope := sandboxDeleteCleanupScope(runtimePaused)
+	runtimeOnly, retainHot, err := s.runtimeDeletionDisposition(ctx, info)
+	scope := sandboxDeleteCleanupScope(runtimeOnly)
 	if err != nil {
 		scope = sandboxDeleteCleanupScopeUnknown
 	}
@@ -356,10 +356,10 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	if err != nil {
 		return err
 	}
-	return s.cleanupDeletedSandbox(ctx, info, runtimePaused)
+	return s.cleanupDeletedSandbox(ctx, info, runtimeOnly, retainHot)
 }
 
-func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info SandboxLifecycleInfo, runtimePaused bool) (cleanupErr error) {
+func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info SandboxLifecycleInfo, runtimeOnly, retainHot bool) (cleanupErr error) {
 	logger := s.logger
 	if logger == nil {
 		logger = zap.NewNop()
@@ -371,7 +371,7 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 	if sandboxID == "" {
 		return nil
 	}
-	scope := sandboxDeleteCleanupScope(runtimePaused)
+	scope := sandboxDeleteCleanupScope(runtimeOnly)
 	cleanupStarted := time.Now()
 	logger.Info("Cleaning sandbox deletion state",
 		zap.String("sandboxID", sandboxID),
@@ -396,7 +396,7 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 	}()
 
 	var errs []error
-	if !runtimePaused && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
+	if !runtimeOnly && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
 		_ = s.runSandboxDeleteCleanupPhase(ctx, info, scope, "emit_deletion_webhook", func() error {
 			return s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info)
 		})
@@ -408,7 +408,7 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 			errs = append(errs, fmt.Errorf("remove network policy: %w", err))
 		}
 	}
-	if !runtimePaused && s.credentialStore != nil {
+	if !runtimeOnly && s.credentialStore != nil {
 		teamID := strings.TrimSpace(info.TeamID)
 		if teamID == "" {
 			logger.Warn("Skipping credential binding cleanup for sandbox without team ID",
@@ -421,7 +421,7 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 			errs = append(errs, fmt.Errorf("delete credential bindings: %w", err))
 		}
 	}
-	if !runtimePaused && shouldDeleteWebhookStateVolume(info) {
+	if !runtimeOnly && shouldDeleteWebhookStateVolume(info) {
 		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "mark_webhook_state_volume_cleanup", func() error {
 			return s.deleteWebhookStateVolume(ctx, info)
 		}); err != nil {
@@ -430,7 +430,7 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 	}
 	if s.shouldUnbindDeletedSandboxVolumePortals(info) {
 		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "unbind_volume_portals", func() error {
-			return s.unbindDeletedSandboxVolumePortals(ctx, info)
+			return s.unbindDeletedSandboxVolumePortals(ctx, info, retainHot)
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("unbind sandbox volume portals: %w", err))
 		}
@@ -471,22 +471,23 @@ func (s *SandboxService) shouldUnbindDeletedSandboxVolumePortals(info SandboxLif
 	return s != nil && s.config.CtldEnabled && len(info.VolumePortals) > 0
 }
 
-func (s *SandboxService) runtimeDeletionIsPause(ctx context.Context, info SandboxLifecycleInfo) (bool, error) {
+func (s *SandboxService) runtimeDeletionDisposition(ctx context.Context, info SandboxLifecycleInfo) (bool, bool, error) {
 	if s == nil || s.sandboxStore == nil {
-		return false, nil
+		return false, false, nil
 	}
 	sandboxID := strings.TrimSpace(info.SandboxID)
 	if sandboxID == "" {
 		sandboxID = strings.TrimSpace(info.PodName)
 	}
 	if sandboxID == "" {
-		return false, nil
+		return false, false, nil
 	}
 	record, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
 	if err != nil {
-		return false, fmt.Errorf("get sandbox record for runtime deletion cleanup: %w", err)
+		return false, false, fmt.Errorf("get sandbox record for runtime deletion cleanup: %w", err)
 	}
-	return SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration), nil
+	runtimeOnly := SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration)
+	return runtimeOnly, runtimeOnly && record != nil && record.Status == SandboxStatusPaused, nil
 }
 
 // SandboxRecordDeletionIsRuntimeOnly reports whether a runtime pod deletion should
@@ -515,7 +516,7 @@ func SandboxRecordDeletionIsRuntimeOnly(record *SandboxRecord, namespace, podNam
 	return false
 }
 
-func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, info SandboxLifecycleInfo) error {
+func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, info SandboxLifecycleInfo, retainHot bool) error {
 	if s == nil || !s.config.CtldEnabled || len(info.VolumePortals) == 0 {
 		return nil
 	}
@@ -564,6 +565,7 @@ func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, 
 			PortalName:      portalName,
 			MountPath:       mountPoint,
 			SandboxVolumeID: volumeID,
+			RetainHot:       retainHot,
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("%s at %s: %w", volumeID, mountPoint, err))
 		}
@@ -804,8 +806,8 @@ func observeSandboxDeleteCleanupPhase(metrics *obsmetrics.ManagerMetrics, phase,
 	metrics.SandboxDeleteCleanupPhase.WithLabelValues(phase, status, scope).Observe(time.Since(started).Seconds())
 }
 
-func sandboxDeleteCleanupScope(runtimePaused bool) string {
-	if runtimePaused {
+func sandboxDeleteCleanupScope(runtimeOnly bool) string {
+	if runtimeOnly {
 		return sandboxDeleteCleanupScopeRuntimeOnly
 	}
 	return sandboxDeleteCleanupScopeSandboxDelete

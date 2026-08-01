@@ -8,44 +8,35 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
 
-func TestNewManagerReadsHotCacheLimits(t *testing.T) {
+func TestNewManagerReadsHotCacheByteBudget(t *testing.T) {
 	mgr := NewManager(Config{
-		RootDir: t.TempDir(),
-		StorageConfig: &config.StorageProxyConfig{
-			S0FSHotCacheTTL:        "45s",
-			S0FSHotCacheMaxEntries: 12,
-			S0FSHotCacheMaxSize:    "2Gi",
-		},
+		RootDir:       t.TempDir(),
+		StorageConfig: &config.StorageProxyConfig{S0FSHotCacheMaxSize: "2Gi"},
 	})
 	t.Cleanup(func() { _ = mgr.recoveryWriter.Close(context.Background()) })
-	if mgr.hotCacheTTL != 45*time.Second || mgr.hotCacheMaxEntries != 12 || mgr.hotCacheMaxBytes != 2<<30 {
-		t.Fatalf("hot cache limits = %s/%d/%d", mgr.hotCacheTTL, mgr.hotCacheMaxEntries, mgr.hotCacheMaxBytes)
+	if mgr.hotCacheMaxBytes != 2<<30 {
+		t.Fatalf("hot cache byte budget = %d, want %d", mgr.hotCacheMaxBytes, int64(2<<30))
 	}
 }
 
 func TestNewManagerAllowsHotCacheDisable(t *testing.T) {
 	mgr := NewManager(Config{
 		RootDir:       t.TempDir(),
-		StorageConfig: &config.StorageProxyConfig{S0FSHotCacheTTL: "0s"},
+		StorageConfig: &config.StorageProxyConfig{S0FSHotCacheMaxSize: "0"},
 	})
 	t.Cleanup(func() { _ = mgr.recoveryWriter.Close(context.Background()) })
-	if mgr.hotCacheTTL != 0 || mgr.hotCacheEnabled() {
-		t.Fatalf("hot cache TTL = %s, enabled = %v", mgr.hotCacheTTL, mgr.hotCacheEnabled())
+	if mgr.hotCacheMaxBytes != 0 || mgr.hotCacheEnabled() {
+		t.Fatalf("hot cache byte budget = %d, enabled = %v", mgr.hotCacheMaxBytes, mgr.hotCacheEnabled())
 	}
 }
 
 func TestFinishBoundVolumeCleanupRetainsCleanS0FSEngine(t *testing.T) {
-	mgr := NewManager(Config{
-		RootDir:                t.TempDir(),
-		S0FSHotCacheTTL:        time.Minute,
-		S0FSHotCacheMaxEntries: 2,
-		S0FSHotCacheMaxBytes:   64 << 20,
-	})
-	t.Cleanup(func() { _ = mgr.recoveryWriter.Close(context.Background()) })
+	mgr := newHotCacheTestManager(t, 64<<20)
 	bound := newHotCacheTestBound(t, mgr, "vol-hot")
 	mgr.boundVolumes[bound.volumeID] = bound
 	mgr.volumes.add(bound.volCtx)
@@ -61,8 +52,8 @@ func TestFinishBoundVolumeCleanupRetainsCleanS0FSEngine(t *testing.T) {
 		t.Fatal("hot engine remained visible to file requests")
 	}
 	entry := mgr.hotVolumes[bound.volumeID]
-	if entry == nil || entry.bound != bound {
-		t.Fatal("clean S0FS engine was not retained")
+	if entry == nil || entry.bound != bound || entry.segment != hotCacheSegmentProbation {
+		t.Fatalf("clean S0FS engine was not retained in probation: %#v", entry)
 	}
 	claimed, ok := mgr.takeHotVolume(bound.volumeID)
 	if !ok || claimed != entry {
@@ -71,49 +62,244 @@ func TestFinishBoundVolumeCleanupRetainsCleanS0FSEngine(t *testing.T) {
 	mgr.closeHotVolume(claimed)
 }
 
-func TestHotCacheEvictsOldestEntryAtCapacity(t *testing.T) {
-	mgr := NewManager(Config{
-		RootDir:                t.TempDir(),
-		S0FSHotCacheTTL:        time.Minute,
-		S0FSHotCacheMaxEntries: 1,
-		S0FSHotCacheMaxBytes:   64 << 20,
-	})
-	t.Cleanup(func() { _ = mgr.recoveryWriter.Close(context.Background()) })
-	first := newHotCacheTestBound(t, mgr, "vol-first")
-	second := newHotCacheTestBound(t, mgr, "vol-second")
-	mgr.retainHotVolume(first)
-	time.Sleep(time.Millisecond)
-	mgr.retainHotVolume(second)
+func TestHotCacheDoesNotExpireByAge(t *testing.T) {
+	mgr := newHotCacheTestManager(t, 64<<20)
+	bound := newHotCacheTestBound(t, mgr, "vol-old")
+	mgr.retainHotVolume(bound)
+	mgr.mu.Lock()
+	mgr.hotVolumes[bound.volumeID].cachedAt = time.Now().Add(-24 * time.Hour)
+	mgr.mu.Unlock()
 
-	if mgr.hotVolumes[first.volumeID] != nil {
-		t.Fatal("oldest hot engine was not evicted")
+	entry, ok := mgr.takeHotVolume(bound.volumeID)
+	if !ok {
+		t.Fatal("old entry expired without memory pressure")
 	}
-	if mgr.hotVolumes[second.volumeID] == nil {
-		t.Fatal("newest hot engine was not retained")
-	}
-	if _, err := os.Stat(first.volCtx.CacheDir); !os.IsNotExist(err) {
-		t.Fatalf("evicted cache directory still exists: %v", err)
-	}
-	mgr.evictHotVolume(second.volumeID, "test")
+	mgr.closeHotVolume(entry)
 }
 
-func TestHotCacheExpiresEntry(t *testing.T) {
-	mgr := NewManager(Config{
-		RootDir:                t.TempDir(),
-		S0FSHotCacheTTL:        10 * time.Millisecond,
-		S0FSHotCacheMaxEntries: 2,
-		S0FSHotCacheMaxBytes:   64 << 20,
-	})
-	t.Cleanup(func() { _ = mgr.recoveryWriter.Close(context.Background()) })
-	bound := newHotCacheTestBound(t, mgr, "vol-expired")
+func TestHotCacheRejectsShortLivedProbationChurn(t *testing.T) {
+	mgr := newHotCacheTestManager(t, hotCacheMinimumEntryBytes)
+	valuable := newHotCacheTestBound(t, mgr, "vol-valuable")
+	valuable.mountedAt = time.Now().Add(-time.Hour)
+	churn := newHotCacheTestBound(t, mgr, "vol-churn")
+	churn.mountedAt = time.Now().Add(-time.Second)
+
+	mgr.retainHotVolume(valuable)
+	mgr.retainHotVolume(churn)
+
+	if mgr.hotVolumes[valuable.volumeID] == nil {
+		t.Fatal("long-running probation entry was displaced by short-lived churn")
+	}
+	if mgr.hotVolumes[churn.volumeID] != nil {
+		t.Fatal("short-lived churn candidate was admitted over a more valuable entry")
+	}
+	if _, err := os.Stat(churn.volCtx.CacheDir); !os.IsNotExist(err) {
+		t.Fatalf("rejected churn cache directory still exists: %v", err)
+	}
+}
+
+func TestHotCacheAdmitsLongRunningCandidateOverShortLivedEntry(t *testing.T) {
+	mgr := newHotCacheTestManager(t, hotCacheMinimumEntryBytes)
+	shortLived := newHotCacheTestBound(t, mgr, "vol-short")
+	shortLived.mountedAt = time.Now().Add(-time.Second)
+	longRunning := newHotCacheTestBound(t, mgr, "vol-long")
+	longRunning.mountedAt = time.Now().Add(-time.Hour)
+
+	mgr.retainHotVolume(shortLived)
+	mgr.retainHotVolume(longRunning)
+
+	if mgr.hotVolumes[shortLived.volumeID] != nil {
+		t.Fatal("short-lived probation entry survived a higher-value candidate")
+	}
+	if mgr.hotVolumes[longRunning.volumeID] == nil {
+		t.Fatal("long-running probation candidate was not admitted")
+	}
+}
+
+func TestHotCacheProbationValueUsesColdOpenCostAndAgeAsTieBreakers(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	cheap := &hotVolume{
+		mountedDuration:  4 * time.Minute,
+		coldOpenDuration: 10 * time.Millisecond,
+		cachedAt:         base.Add(time.Minute),
+	}
+	expensive := &hotVolume{
+		mountedDuration:  31 * time.Second,
+		coldOpenDuration: time.Second,
+		cachedAt:         base,
+	}
+	if !lessValuableHotVolume(cheap, expensive) {
+		t.Fatal("cheap cold-open entry was not ranked below expensive entry")
+	}
+	if lessValuableHotVolume(expensive, cheap) {
+		t.Fatal("expensive cold-open entry was ranked below cheap entry")
+	}
+
+	shorter := &hotVolume{mountedDuration: time.Minute, coldOpenDuration: time.Second, cachedAt: base.Add(time.Minute)}
+	longer := &hotVolume{mountedDuration: 4 * time.Minute, coldOpenDuration: time.Second, cachedAt: base}
+	if !lessValuableHotVolume(shorter, longer) {
+		t.Fatal("shorter equal-cost entry was not ranked below longer entry")
+	}
+
+	newer := &hotVolume{mountedDuration: time.Minute, coldOpenDuration: time.Second, cachedAt: base.Add(time.Minute)}
+	older := &hotVolume{mountedDuration: time.Minute, coldOpenDuration: time.Second, cachedAt: base}
+	if !lessValuableHotVolume(older, newer) {
+		t.Fatal("oldest equal-value entry was not selected first")
+	}
+}
+
+func TestHotCacheProtectedEntriesResistProbationScan(t *testing.T) {
+	mgr := newHotCacheTestManager(t, 4*hotCacheMinimumEntryBytes)
+	protectedIDs := []string{"vol-protected-1", "vol-protected-2", "vol-protected-3"}
+	for _, volumeID := range protectedIDs {
+		bound := newHotCacheTestBound(t, mgr, volumeID)
+		bound.hotReuse = true
+		mgr.retainHotVolume(bound)
+	}
+	valuable := newHotCacheTestBound(t, mgr, "vol-probation-valuable")
+	valuable.mountedAt = time.Now().Add(-time.Hour)
+	mgr.retainHotVolume(valuable)
+	churn := newHotCacheTestBound(t, mgr, "vol-probation-churn")
+	churn.mountedAt = time.Now().Add(-time.Second)
+	mgr.retainHotVolume(churn)
+
+	for _, volumeID := range protectedIDs {
+		entry := mgr.hotVolumes[volumeID]
+		if entry == nil || entry.segment != hotCacheSegmentProtected {
+			t.Fatalf("protected entry %s was displaced by probation scan: %#v", volumeID, entry)
+		}
+	}
+	if mgr.hotVolumes[valuable.volumeID] == nil || mgr.hotVolumes[churn.volumeID] != nil {
+		t.Fatal("probation scan did not retain the higher-value candidate")
+	}
+}
+
+func TestHotCacheHitPromotesEntryAfterNextPause(t *testing.T) {
+	mgr := newHotCacheTestManager(t, 4*hotCacheMinimumEntryBytes)
+	bound := newHotCacheTestBound(t, mgr, "vol-promote")
 	mgr.retainHotVolume(bound)
-	time.Sleep(20 * time.Millisecond)
-	mgr.cleanupExpiredHotVolumes()
+	entry, ok := mgr.takeHotVolume(bound.volumeID)
+	if !ok {
+		t.Fatal("probation entry was not reusable")
+	}
+	entry.bound.hotReuse = true
+	entry.bound.mountedAt = time.Now().Add(-time.Minute)
+	mgr.retainHotVolume(entry.bound)
+
+	promoted := mgr.hotVolumes[bound.volumeID]
+	if promoted == nil || promoted.segment != hotCacheSegmentProtected {
+		t.Fatalf("cache hit was not promoted after the next pause: %#v", promoted)
+	}
+}
+
+func TestHotCacheDemotesOldestProtectedEntryToPreserveAdmissionWindow(t *testing.T) {
+	mgr := newHotCacheTestManager(t, 4*hotCacheMinimumEntryBytes)
+	ids := []string{"vol-1", "vol-2", "vol-3", "vol-4"}
+	base := time.Now().Add(-time.Hour)
+	for index, volumeID := range ids {
+		bound := newHotCacheTestBound(t, mgr, volumeID)
+		bound.hotReuse = true
+		mgr.retainHotVolume(bound)
+		if entry := mgr.hotVolumes[volumeID]; entry != nil {
+			entry.cachedAt = base.Add(time.Duration(index) * time.Minute)
+		}
+	}
+
+	if entry := mgr.hotVolumes[ids[0]]; entry == nil || entry.segment != hotCacheSegmentProbation {
+		t.Fatalf("oldest protected entry was not demoted: %#v", entry)
+	}
+	for _, volumeID := range ids[1:] {
+		if entry := mgr.hotVolumes[volumeID]; entry == nil || entry.segment != hotCacheSegmentProtected {
+			t.Fatalf("newer protected entry %s was not retained: %#v", volumeID, entry)
+		}
+	}
+}
+
+func TestHotCacheRejectsEntryLargerThanBudget(t *testing.T) {
+	mgr := newHotCacheTestManager(t, hotCacheMinimumEntryBytes/2)
+	bound := newHotCacheTestBound(t, mgr, "vol-oversize")
+	mgr.retainHotVolume(bound)
 	if mgr.hotVolumes[bound.volumeID] != nil {
-		t.Fatal("expired hot engine was not evicted")
+		t.Fatal("entry larger than the byte budget was admitted")
 	}
 	if _, err := os.Stat(bound.volCtx.CacheDir); !os.IsNotExist(err) {
-		t.Fatalf("expired cache directory still exists: %v", err)
+		t.Fatalf("oversize cache directory still exists: %v", err)
+	}
+}
+
+func TestHotCacheAdmissionDoesNotWaitForBusyVictim(t *testing.T) {
+	mgr := newHotCacheTestManager(t, hotCacheMinimumEntryBytes)
+	victim := newHotCacheTestBound(t, mgr, "vol-busy-victim")
+	candidate := newHotCacheTestBound(t, mgr, "vol-candidate")
+	victim.mountedAt = time.Now().Add(-time.Second)
+	candidate.mountedAt = time.Now().Add(-time.Hour)
+	mgr.retainHotVolume(victim)
+
+	victimRelease, err := mgr.acquireVolumeActivation(context.Background(), victim.volumeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer victimRelease()
+	candidateRelease, err := mgr.acquireVolumeActivation(context.Background(), candidate.volumeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer candidateRelease()
+		mgr.retainHotVolume(candidate)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cache admission waited for a busy victim")
+	}
+
+	if mgr.hotVolumes[victim.volumeID] == nil || mgr.hotVolumes[candidate.volumeID] != nil {
+		t.Fatalf("busy victim was displaced: victim=%#v candidate=%#v", mgr.hotVolumes[victim.volumeID], mgr.hotVolumes[candidate.volumeID])
+	}
+}
+
+func TestDeleteUnbindWithoutPortalEvictsPausedHotEntry(t *testing.T) {
+	mgr := newHotCacheTestManager(t, 4*hotCacheMinimumEntryBytes)
+	bound := newHotCacheTestBound(t, mgr, "vol-paused-delete")
+	mgr.retainHotVolume(bound)
+
+	resp, err := mgr.Unbind(context.Background(), ctldapi.UnbindVolumePortalRequest{
+		PodUID:          "deleted-pod",
+		PortalName:      "workspace",
+		SandboxVolumeID: bound.volumeID,
+		RetainHot:       false,
+	})
+	if err != nil {
+		t.Fatalf("Unbind() error = %v", err)
+	}
+	if !resp.Unbound || mgr.hotVolumes[bound.volumeID] != nil {
+		t.Fatalf("delete unbind did not invalidate paused cache: response=%+v", resp)
+	}
+	if _, err := os.Stat(bound.volCtx.CacheDir); !os.IsNotExist(err) {
+		t.Fatalf("invalidated cache directory still exists: %v", err)
+	}
+}
+
+func TestRetriedPauseUnbindWithoutPortalKeepsHotEntry(t *testing.T) {
+	mgr := newHotCacheTestManager(t, 4*hotCacheMinimumEntryBytes)
+	bound := newHotCacheTestBound(t, mgr, "vol-paused-retry")
+	mgr.retainHotVolume(bound)
+
+	resp, err := mgr.Unbind(context.Background(), ctldapi.UnbindVolumePortalRequest{
+		PodUID:          "paused-pod",
+		PortalName:      "workspace",
+		SandboxVolumeID: bound.volumeID,
+		RetainHot:       true,
+	})
+	if err != nil {
+		t.Fatalf("Unbind() error = %v", err)
+	}
+	if !resp.Unbound || mgr.hotVolumes[bound.volumeID] == nil {
+		t.Fatalf("idempotent pause unbind discarded hot entry: response=%+v", resp)
 	}
 }
 
@@ -152,6 +338,18 @@ func TestDetachHotVolumeWaitsForInflightRequests(t *testing.T) {
 	mgr.closeHotVolume(&hotVolume{bound: bound})
 }
 
+func newHotCacheTestManager(t *testing.T, maxBytes int64) *Manager {
+	t.Helper()
+	mgr := NewManager(Config{RootDir: t.TempDir(), S0FSHotCacheMaxBytes: maxBytes})
+	t.Cleanup(func() {
+		for _, entry := range mgr.drainHotVolumes("test_cleanup") {
+			mgr.closeHotVolume(entry)
+		}
+		_ = mgr.recoveryWriter.Close(context.Background())
+	})
+	return mgr
+}
+
 func newHotCacheTestBound(t *testing.T, mgr *Manager, volumeID string) *boundVolume {
 	t.Helper()
 	cacheDir := filepath.Join(mgr.rootDir, "volumes", volumeID)
@@ -163,10 +361,12 @@ func newHotCacheTestBound(t *testing.T, mgr *Manager, volumeID string) *boundVol
 		t.Fatalf("s0fs.Open() error = %v", err)
 	}
 	return &boundVolume{
-		volumeID: volumeID,
-		teamID:   "team-1",
-		access:   volume.AccessModeRWO,
-		refCount: 0,
+		volumeID:         volumeID,
+		teamID:           "team-1",
+		access:           volume.AccessModeRWO,
+		mountedAt:        time.Now().Add(-time.Minute),
+		refCount:         0,
+		coldOpenDuration: 100 * time.Millisecond,
 		volCtx: &volume.VolumeContext{
 			VolumeID: volumeID,
 			TeamID:   "team-1",

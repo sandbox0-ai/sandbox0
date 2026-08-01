@@ -68,16 +68,8 @@ type StorageProxyConfig struct {
 	// +kubebuilder:validation:Enum=1;2
 	S0FSStateFormatVersion int `yaml:"s0fs_state_format_version" json:"s0fsStateFormatVersion"`
 	// +optional
-	// S0FSHotCacheTTL retains clean unbound engines for same-node remounts. Zero disables retention.
-	// +kubebuilder:default="30s"
-	S0FSHotCacheTTL string `yaml:"s0fs_hot_cache_ttl" json:"s0fsHotCacheTTL"`
-	// +optional
-	// S0FSHotCacheMaxEntries bounds retained engines per active ctld process.
-	// +kubebuilder:default=8
-	// +kubebuilder:validation:Minimum=1
-	S0FSHotCacheMaxEntries int `yaml:"s0fs_hot_cache_max_entries" json:"s0fsHotCacheMaxEntries"`
-	// +optional
-	// S0FSHotCacheMaxSize bounds estimated memory retained by clean engines.
+	// S0FSHotCacheMaxSize bounds conservatively estimated memory retained by clean engines.
+	// Engines are retained only after an intentional sandbox pause. Set 0 to disable retention.
 	// +kubebuilder:default="1Gi"
 	S0FSHotCacheMaxSize string `yaml:"s0fs_hot_cache_max_size" json:"s0fsHotCacheMaxSize"`
 	// +optional

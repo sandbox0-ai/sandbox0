@@ -13,8 +13,32 @@ import (
 	"go.uber.org/zap"
 )
 
+type hotCacheSegment string
+
+const (
+	hotCacheSegmentProbation hotCacheSegment = "probation"
+	hotCacheSegmentProtected hotCacheSegment = "protected"
+
+	// A retained engine keeps a WAL descriptor, object-store client, and other
+	// fixed state that is not represented by the decoded filesystem state.
+	hotCacheMinimumEntryBytes int64 = 1 << 20
+
+	// Proven-reused entries may occupy three quarters of the byte budget. The
+	// remaining window lets first-time pause candidates prove reuse without a
+	// scan evicting the protected working set.
+	hotCacheProtectedTargetNumerator   int64 = 3
+	hotCacheProtectedTargetDenominator int64 = 4
+
+	// Runtime bands prevent a few milliseconds of active-time difference from
+	// hiding the cold-open cost signal. Any stable workload outranks rapid
+	// churn; within a band, expensive large-state opens get priority.
+	hotCacheStableRuntime   = 30 * time.Second
+	hotCacheLongRuntime     = 5 * time.Minute
+	hotCacheVeryLongRuntime = time.Hour
+)
+
 func (m *Manager) hotCacheEnabled() bool {
-	return m != nil && m.hotCacheTTL > 0 && m.hotCacheMaxEntries > 0 && m.hotCacheMaxBytes > 0
+	return m != nil && m.hotCacheMaxBytes > 0
 }
 
 func (m *Manager) activateHotBoundVolume(
@@ -96,29 +120,19 @@ func (m *Manager) takeHotVolume(volumeID string) (*hotVolume, bool) {
 	if m == nil || strings.TrimSpace(volumeID) == "" {
 		return nil, false
 	}
-	now := time.Now().UTC()
-	var expired *hotVolume
 	m.mu.Lock()
 	entry := m.hotVolumes[volumeID]
-	if entry != nil && (m.hotCacheTTL <= 0 || now.Sub(entry.cachedAt) >= m.hotCacheTTL) {
-		expired = entry
-		m.removeHotVolumeLocked(volumeID, entry)
-		entry = nil
-	}
 	if entry != nil {
 		m.removeHotVolumeLocked(volumeID, entry)
 	}
 	m.observeHotCacheSizeLocked()
 	m.mu.Unlock()
-	if expired != nil {
-		m.observer.ObserveHotCacheEviction("expired")
-		m.closeHotVolume(expired)
-	}
 	if entry == nil {
-		m.observer.ObserveHotCacheRequest("miss")
+		m.observer.ObserveHotCacheRequest("miss", "none")
 		return nil, false
 	}
-	m.observer.ObserveHotCacheRequest("hit")
+	m.observer.ObserveHotCacheRequest("hit", string(entry.segment))
+	m.observer.ObserveHotCacheResidence(string(entry.segment), "hit", time.Since(entry.cachedAt))
 	return entry, true
 }
 
@@ -128,17 +142,35 @@ func (m *Manager) retainHotVolume(bound *boundVolume) {
 	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
 		return
 	}
-	entry := &hotVolume{
-		bound:          bound,
-		cachedAt:       time.Now().UTC(),
-		estimatedBytes: bound.volCtx.S0FS.EstimatedMemoryBytes(),
+	now := time.Now().UTC()
+	mountedDuration := time.Duration(0)
+	if !bound.mountedAt.IsZero() && now.After(bound.mountedAt) {
+		mountedDuration = now.Sub(bound.mountedAt)
 	}
-	if !m.hotCacheEnabled() || entry.estimatedBytes > m.hotCacheMaxBytes {
-		reason := "disabled"
-		if entry.estimatedBytes > m.hotCacheMaxBytes && m.hotCacheMaxBytes > 0 {
-			reason = "oversize"
-		}
-		m.observer.ObserveHotCacheEviction(reason)
+	segment := hotCacheSegmentProbation
+	if bound.hotReuse {
+		segment = hotCacheSegmentProtected
+	}
+	estimatedBytes := bound.volCtx.S0FS.EstimatedMemoryBytes()
+	if estimatedBytes < hotCacheMinimumEntryBytes {
+		estimatedBytes = hotCacheMinimumEntryBytes
+	}
+	entry := &hotVolume{
+		bound:            bound,
+		cachedAt:         now,
+		estimatedBytes:   estimatedBytes,
+		segment:          segment,
+		mountedDuration:  mountedDuration,
+		coldOpenDuration: bound.coldOpenDuration,
+	}
+	m.observer.ObserveHotCacheCandidate(string(segment), estimatedBytes, mountedDuration, bound.coldOpenDuration)
+	if !m.hotCacheEnabled() {
+		m.observer.ObserveHotCacheAdmission("rejected", "disabled")
+		m.closeHotVolume(entry)
+		return
+	}
+	if entry.estimatedBytes > m.hotCacheMaxBytes {
+		m.observer.ObserveHotCacheAdmission("rejected", "oversize")
 		m.closeHotVolume(entry)
 		return
 	}
@@ -149,61 +181,93 @@ func (m *Manager) retainHotVolume(bound *boundVolume) {
 		m.removeHotVolumeLocked(bound.volumeID, previous)
 		replaced = previous
 	}
-	m.hotVolumes[bound.volumeID] = entry
-	m.hotCacheBytes += entry.estimatedBytes
+	m.addHotVolumeLocked(bound.volumeID, entry)
 	m.observeHotCacheSizeLocked()
 	m.mu.Unlock()
 
 	if replaced != nil {
-		m.observer.ObserveHotCacheEviction("replaced")
+		m.observer.ObserveHotCacheEviction("replaced", string(replaced.segment))
+		m.observer.ObserveHotCacheResidence(string(replaced.segment), "replaced", time.Since(replaced.cachedAt))
 		m.closeHotVolume(replaced)
+	}
+
+	if segment == hotCacheSegmentProtected {
+		m.rebalanceProtectedSegment(entry)
 	}
 	for {
 		m.mu.Lock()
-		if len(m.hotVolumes) <= m.hotCacheMaxEntries && m.hotCacheBytes <= m.hotCacheMaxBytes {
+		if m.hotCacheBytes <= m.hotCacheMaxBytes {
+			admittedSegment := entry.segment
 			m.observeHotCacheSizeLocked()
+			m.mu.Unlock()
+			m.observer.ObserveHotCacheAdmission("admitted", string(admittedSegment))
+			return
+		}
+		victimID, victim := m.capacityVictimLocked(entry)
+		if victim == entry {
+			m.removeHotVolumeLocked(victimID, victim)
+			m.observeHotCacheSizeLocked()
+			m.mu.Unlock()
+			m.observer.ObserveHotCacheAdmission("rejected", "capacity")
+			m.closeHotVolume(entry)
+			return
+		}
+		m.mu.Unlock()
+		if victim == nil {
+			m.observer.ObserveHotCacheAdmission("rejected", "capacity")
+			m.evictHotVolume(bound.volumeID, "capacity")
+			return
+		}
+		if !m.tryEvictHotVolumeEntry(victimID, victim, "capacity") {
+			// retainHotVolume runs while the candidate activation is held. A
+			// blocking wait for another volume could deadlock with a concurrent
+			// admission choosing this candidate as its victim, so reject the
+			// candidate when the selected victim is busy.
+			m.observer.ObserveHotCacheAdmission("rejected", "victim_busy")
+			m.evictHotVolume(bound.volumeID, "victim_busy")
+			return
+		}
+	}
+}
+
+func (m *Manager) rebalanceProtectedSegment(candidate *hotVolume) {
+	if m == nil || candidate == nil {
+		return
+	}
+	target := m.hotCacheMaxBytes * hotCacheProtectedTargetNumerator / hotCacheProtectedTargetDenominator
+	for {
+		m.mu.Lock()
+		if m.hotCacheProtectedBytes <= target {
 			m.mu.Unlock()
 			return
 		}
-		volumeID, oldest := m.oldestHotVolumeExceptLocked(bound.volumeID)
-		m.mu.Unlock()
-		if oldest == nil {
+		volumeID, entry := m.oldestProtectedExceptLocked(candidate.bound.volumeID)
+		if entry == nil {
+			m.mu.Unlock()
 			return
 		}
-		m.evictHotVolumeEntry(volumeID, oldest, "capacity")
+		if m.hotVolumes[volumeID] == entry && entry.segment == hotCacheSegmentProtected {
+			m.setHotVolumeSegmentLocked(entry, hotCacheSegmentProbation)
+			m.observeHotCacheSizeLocked()
+		}
+		m.mu.Unlock()
 	}
 }
 
-func (m *Manager) cleanupExpiredHotVolumes() {
-	if m == nil || m.hotCacheTTL <= 0 {
-		return
+func (m *Manager) capacityVictimLocked(candidate *hotVolume) (string, *hotVolume) {
+	if candidate == nil {
+		return "", nil
 	}
-	cutoff := time.Now().UTC().Add(-m.hotCacheTTL)
-	for {
-		var (
-			volumeID string
-			expired  *hotVolume
-		)
-		m.mu.Lock()
-		for candidateID, entry := range m.hotVolumes {
-			if entry != nil && !entry.cachedAt.After(cutoff) {
-				volumeID = candidateID
-				expired = entry
-				break
-			}
-		}
-		m.mu.Unlock()
-		if expired == nil {
-			return
-		}
-		m.evictHotVolumeEntry(volumeID, expired, "expired")
+	if volumeID, entry := m.leastValuableProbationLocked(); entry != nil {
+		return volumeID, entry
 	}
+	return m.oldestProtectedExceptLocked(candidate.bound.volumeID)
 }
 
-func (m *Manager) evictHotVolumeEntry(volumeID string, expected *hotVolume, reason string) {
-	release, err := m.acquireVolumeActivation(context.Background(), volumeID)
-	if err != nil {
-		return
+func (m *Manager) tryEvictHotVolumeEntry(volumeID string, expected *hotVolume, reason string) bool {
+	release, ok := m.tryAcquireVolumeActivation(volumeID)
+	if !ok {
+		return false
 	}
 	defer release()
 	m.mu.Lock()
@@ -216,11 +280,28 @@ func (m *Manager) evictHotVolumeEntry(volumeID string, expected *hotVolume, reas
 	m.observeHotCacheSizeLocked()
 	m.mu.Unlock()
 	if entry != nil {
-		m.observer.ObserveHotCacheEviction(reason)
+		m.observer.ObserveHotCacheEviction(reason, string(entry.segment))
+		m.observer.ObserveHotCacheResidence(string(entry.segment), reason, time.Since(entry.cachedAt))
 		m.closeHotVolume(entry)
 	}
+	return true
 }
 
+func (m *Manager) evictHotVolumeWithActivation(ctx context.Context, volumeID, reason string) error {
+	if m == nil || strings.TrimSpace(volumeID) == "" {
+		return nil
+	}
+	release, err := m.acquireVolumeActivation(ctx, volumeID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	m.evictHotVolume(volumeID, reason)
+	return nil
+}
+
+// evictHotVolume requires the caller to hold the per-volume activation when a
+// bind or cleanup for the same volume may still be running.
 func (m *Manager) evictHotVolume(volumeID, reason string) {
 	if m == nil {
 		return
@@ -233,7 +314,8 @@ func (m *Manager) evictHotVolume(volumeID, reason string) {
 	m.observeHotCacheSizeLocked()
 	m.mu.Unlock()
 	if entry != nil {
-		m.observer.ObserveHotCacheEviction(reason)
+		m.observer.ObserveHotCacheEviction(reason, string(entry.segment))
+		m.observer.ObserveHotCacheResidence(string(entry.segment), reason, time.Since(entry.cachedAt))
 		m.closeHotVolume(entry)
 	}
 }
@@ -249,12 +331,26 @@ func (m *Manager) drainHotVolumes(reason string) []*hotVolume {
 		delete(m.hotVolumes, volumeID)
 	}
 	m.hotCacheBytes = 0
+	m.hotCacheProbationBytes = 0
+	m.hotCacheProtectedBytes = 0
 	m.observeHotCacheSizeLocked()
 	m.mu.Unlock()
-	for range entries {
-		m.observer.ObserveHotCacheEviction(reason)
+	for _, entry := range entries {
+		m.observer.ObserveHotCacheEviction(reason, string(entry.segment))
+		m.observer.ObserveHotCacheResidence(string(entry.segment), reason, time.Since(entry.cachedAt))
 	}
 	return entries
+}
+
+func (m *Manager) addHotVolumeLocked(volumeID string, entry *hotVolume) {
+	m.hotVolumes[volumeID] = entry
+	m.hotCacheBytes += entry.estimatedBytes
+	switch entry.segment {
+	case hotCacheSegmentProtected:
+		m.hotCacheProtectedBytes += entry.estimatedBytes
+	default:
+		m.hotCacheProbationBytes += entry.estimatedBytes
+	}
 }
 
 func (m *Manager) removeHotVolumeLocked(volumeID string, entry *hotVolume) {
@@ -263,33 +359,131 @@ func (m *Manager) removeHotVolumeLocked(volumeID string, entry *hotVolume) {
 	}
 	delete(m.hotVolumes, volumeID)
 	m.hotCacheBytes -= entry.estimatedBytes
+	switch entry.segment {
+	case hotCacheSegmentProtected:
+		m.hotCacheProtectedBytes -= entry.estimatedBytes
+	default:
+		m.hotCacheProbationBytes -= entry.estimatedBytes
+	}
 	if m.hotCacheBytes < 0 {
 		m.hotCacheBytes = 0
 	}
+	if m.hotCacheProbationBytes < 0 {
+		m.hotCacheProbationBytes = 0
+	}
+	if m.hotCacheProtectedBytes < 0 {
+		m.hotCacheProtectedBytes = 0
+	}
 }
 
-func (m *Manager) oldestHotVolumeExceptLocked(exceptVolumeID string) (string, *hotVolume) {
+func (m *Manager) setHotVolumeSegmentLocked(entry *hotVolume, segment hotCacheSegment) {
+	if entry == nil || entry.segment == segment {
+		return
+	}
+	switch entry.segment {
+	case hotCacheSegmentProtected:
+		m.hotCacheProtectedBytes -= entry.estimatedBytes
+	default:
+		m.hotCacheProbationBytes -= entry.estimatedBytes
+	}
+	entry.segment = segment
+	switch segment {
+	case hotCacheSegmentProtected:
+		m.hotCacheProtectedBytes += entry.estimatedBytes
+	default:
+		m.hotCacheProbationBytes += entry.estimatedBytes
+	}
+}
+
+func (m *Manager) leastValuableProbationLocked() (string, *hotVolume) {
+	var (
+		victimID string
+		victim   *hotVolume
+	)
+	for volumeID, entry := range m.hotVolumes {
+		if entry == nil || entry.segment != hotCacheSegmentProbation {
+			continue
+		}
+		if victim == nil || lessValuableHotVolume(entry, victim) {
+			victimID = volumeID
+			victim = entry
+		}
+	}
+	return victimID, victim
+}
+
+func lessValuableHotVolume(left, right *hotVolume) bool {
+	if left == nil {
+		return true
+	}
+	if right == nil {
+		return false
+	}
+	leftRuntimeBand := hotCacheRuntimeBand(left.mountedDuration)
+	rightRuntimeBand := hotCacheRuntimeBand(right.mountedDuration)
+	if leftRuntimeBand != rightRuntimeBand {
+		return leftRuntimeBand < rightRuntimeBand
+	}
+	if left.coldOpenDuration != right.coldOpenDuration {
+		return left.coldOpenDuration < right.coldOpenDuration
+	}
+	if left.mountedDuration != right.mountedDuration {
+		return left.mountedDuration < right.mountedDuration
+	}
+	return left.cachedAt.Before(right.cachedAt)
+}
+
+func hotCacheRuntimeBand(duration time.Duration) int {
+	switch {
+	case duration >= hotCacheVeryLongRuntime:
+		return 3
+	case duration >= hotCacheLongRuntime:
+		return 2
+	case duration >= hotCacheStableRuntime:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (m *Manager) oldestProtectedExceptLocked(exceptVolumeID string) (string, *hotVolume) {
 	var (
 		oldestID string
 		oldest   *hotVolume
 	)
 	for volumeID, entry := range m.hotVolumes {
-		if volumeID == exceptVolumeID {
+		if volumeID == exceptVolumeID || entry == nil || entry.segment != hotCacheSegmentProtected {
 			continue
 		}
-		if entry == nil || (oldest != nil && !entry.cachedAt.Before(oldest.cachedAt)) {
-			continue
+		if oldest == nil || entry.cachedAt.Before(oldest.cachedAt) {
+			oldestID = volumeID
+			oldest = entry
 		}
-		oldestID = volumeID
-		oldest = entry
 	}
 	return oldestID, oldest
 }
 
 func (m *Manager) observeHotCacheSizeLocked() {
-	if m != nil && m.observer != nil {
-		m.observer.SetHotCacheSize(len(m.hotVolumes), m.hotCacheBytes)
+	if m == nil || m.observer == nil {
+		return
 	}
+	probationEntries := 0
+	protectedEntries := 0
+	for _, entry := range m.hotVolumes {
+		if entry != nil && entry.segment == hotCacheSegmentProtected {
+			protectedEntries++
+		} else if entry != nil {
+			probationEntries++
+		}
+	}
+	m.observer.SetHotCacheSize(
+		len(m.hotVolumes),
+		m.hotCacheBytes,
+		probationEntries,
+		m.hotCacheProbationBytes,
+		protectedEntries,
+		m.hotCacheProtectedBytes,
+	)
 }
 
 func (m *Manager) closeHotVolume(entry *hotVolume) {

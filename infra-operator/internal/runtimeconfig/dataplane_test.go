@@ -171,8 +171,6 @@ func TestToStorageProxyPreservesS0FSLayoutConfig(t *testing.T) {
 	cfg := ToStorageProxy(&infrav1alpha1.StorageProxyConfig{
 		S0FSSegmentTargetSize:        "8Mi",
 		S0FSStateFormatVersion:       2,
-		S0FSHotCacheTTL:              "45s",
-		S0FSHotCacheMaxEntries:       12,
 		S0FSHotCacheMaxSize:          "2Gi",
 		S0FSCompactionInterval:       "30s",
 		S0FSCompactionMinDeadRatio:   "0.25",
@@ -180,8 +178,6 @@ func TestToStorageProxyPreservesS0FSLayoutConfig(t *testing.T) {
 	})
 	if cfg.S0FSSegmentTargetSize != "8Mi" ||
 		cfg.S0FSStateFormatVersion != 2 ||
-		cfg.S0FSHotCacheTTL != "45s" ||
-		cfg.S0FSHotCacheMaxEntries != 12 ||
 		cfg.S0FSHotCacheMaxSize != "2Gi" ||
 		cfg.S0FSCompactionInterval != "30s" ||
 		cfg.S0FSCompactionMinDeadRatio != "0.25" ||

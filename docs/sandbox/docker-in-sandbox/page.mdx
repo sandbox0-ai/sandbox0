@@ -11,7 +11,7 @@ Typical uses:
 `/var/lib/docker` is ephemeral. Images, containers, layers, and Docker volumes are discarded when the sandbox is deleted. Store source code and durable outputs in Sandbox volumes instead.
 
 <Callout variant="info">
-The built-in `default` and `coding-agent` templates provide Docker binaries and writable Docker state, but they do not start `dockerd` before the sandbox is claimed. The examples below use `default`; claim `coding-agent` instead when the same sandbox also needs the bundled coding agents and browser tooling.
+The built-in `default` and `coding-agent` templates provide Docker binaries and writable Docker state, but they do not start `dockerd` before the sandbox is claimed. The examples below use `default`; claim `coding-agent` instead when the same sandbox also needs the bundled coding agents and Playwright CLI.
 </Callout>
 
 <Callout variant="warning">

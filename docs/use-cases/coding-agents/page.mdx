@@ -1,8 +1,8 @@
 # Running Coding Agents
 
-Run Codex, Claude Code, OpenCode, or Pi inside a Sandbox0 sandbox when you want an isolated, persistent workspace with supervised process recovery, replayable I/O, and an agent-controllable browser.
+Run Codex, Claude Code, OpenCode, or Pi inside a Sandbox0 sandbox when you want an isolated, persistent workspace with supervised process recovery and replayable I/O.
 
-The builtin `coding-agent` template installs all four native CLIs, the official Playwright CLI, Chromium, a lightweight headed-browser runtime (TigerVNC and Openbox, with Xvfb and x11vnc retained for compatibility), and Docker. It declares `/workspace` as its writable mount point.
+The builtin `coding-agent` template installs all four native CLIs, the official Playwright CLI, and Docker. It does not bundle Chromium, another browser executable, or a headed display/VNC runtime. It declares `/workspace` as its writable mount point.
 
 ## Why Supervised Sessions?
 
@@ -36,28 +36,19 @@ The template supports a sandbox-local Docker daemon for builds, test databases, 
 
 Docker images, containers, layers, and volumes under `/var/lib/docker` are ephemeral. Keep repositories and durable outputs in the `/workspace` Sandbox Volume.
 
-## Use The Shared Browser
+## Use Playwright CLI
 
-The template installs the official `playwright-cli` command and its bundled Agent Skill. Chromium is stored in the image instead of downloaded into each claimed sandbox. The redundant Chromium headless-shell payload is omitted; Playwright uses the full bundled browser for both headless and headed sessions. Browser sessions use Playwright's official daemon and Dashboard; Sandbox0 does not add another browser-control protocol.
+The template retains the official `playwright-cli` command and its bundled Agent Skill so applications can materialize guidance that matches the installed CLI version. The base image sets `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`; installing dependencies or the Skill does not add a browser executable to the sandbox.
 
-Install the bundled official Skill into a claimed workspace before asking an Agent Skills-compatible coding agent to use the browser:
+Install the bundled official Skill into a claimed workspace before asking an Agent Skills-compatible coding agent to use Playwright:
 
 ```bash
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 playwright-cli install --skills=agents
 ```
 
-The template configures Playwright CLI to use the bundled Chromium build with persistent profiles. Named sessions therefore keep separate profiles under the workspace-backed home directory, and the default session can be shared by the coding agent and a human:
+The Skill provides commands, not a browser runtime. A Playwright command that needs a browser will fail until the application supplies a compatible executable. Keep that capability separate by either extending a reviewed private image or running a dedicated browser service or sandbox. The [Steel Browser guide](/docs/sandbox/use-cases/steel-browser) shows the builtin browser-template boundary for browser automation APIs, profiles, and live view.
 
-```bash
-playwright-cli open http://127.0.0.1:3000 --browser chromium --persistent
-playwright-cli show --host=127.0.0.1 --port=9324
-```
-
-The coding-agent container runs privileged inside the enclosing Sandbox0 runtime so it can host a sandbox-local Docker daemon. The managed Playwright CLI flow disables Chromium's process sandbox and relies on the Sandbox0 runtime boundary for isolation; the unprivileged headed-browser flow uses Chromium's configured setuid sandbox helper. The Dashboard has no Sandbox0 user authentication of its own. Keep it on sandbox loopback unless an authenticated application proxies both its HTTP and WebSocket traffic.
-
-Applications that need exclusive human takeover can use the same template without exposing a CDP endpoint. Stop the Playwright daemon, launch the bundled browser as the unprivileged `sandbox-browser` user on the TigerVNC X server, bind VNC to loopback, and proxy its stream through an authenticated AppService. TigerVNC accepts client-requested desktop sizes, so the remote framebuffer can follow the human-control viewport instead of being scaled from a fixed desktop. Xvfb and x11vnc remain available as a compatibility fallback for older application integrations. Return control by stopping the headed browser before Playwright reopens the same workspace-backed profile. Keep the owner in one application-level record; any file used to block the supported agent command should be treated only as a derived guard.
-
-The public template contains Chrome for Testing, not the proprietary Google Chrome stable binary. An operator may extend a private image with another browser after reviewing its license and deployment requirements. Browser ownership inside one privileged coding-agent sandbox is a cooperative application boundary: a root process can bypass wrappers or launch another browser, so use a separate Sandbox or more strongly isolated component when the browser owner is adversarial.
+The coding-agent container runs privileged inside the enclosing Sandbox0 runtime so it can host a sandbox-local Docker daemon. That privilege is not a browser ownership or authentication boundary. An application that shares a browser between a human and an agent must separately own profile persistence, control transfer, ingress authentication, and process isolation.
 
 <Callout variant="warning">
 The examples grant the selected coding agent broad control inside its sandbox. Keep model credentials narrow, restrict network policy for production workloads, and do not mount a developer home directory or host Docker socket into the sandbox.

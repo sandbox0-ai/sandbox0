@@ -484,6 +484,53 @@ func TestLifecycleProjectorIgnoresPublicIdlePoolPods(t *testing.T) {
 	}
 }
 
+func TestLifecycleProjectorIgnoresPublicIdlePoolDuringClaimInitialization(t *testing.T) {
+	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
+	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")
+
+	createdAt := time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)
+	claimedAt := createdAt.Add(3 * time.Hour)
+	projector.now = func() time.Time { return claimedAt.Add(time.Second) }
+
+	idlePod := withSandboxResources(buildTeamWarmPoolPod(createdAt, "1"), "100m", "128Mi")
+	delete(idlePod.Labels, controller.LabelOwnerKind)
+	delete(idlePod.Annotations, controller.AnnotationTeamID)
+	delete(idlePod.Annotations, controller.AnnotationUserID)
+	delete(idlePod.Annotations, controller.AnnotationOwnerKind)
+
+	initializingPod := idlePod.DeepCopy()
+	initializingPod.ResourceVersion = "2"
+	initializingPod.Labels[controller.LabelSandboxID] = "sb-1"
+	initializingPod.Annotations[controller.AnnotationTeamID] = "team-1"
+	initializingPod.Annotations[controller.AnnotationUserID] = "user-1"
+	initializingPod.Annotations[controller.AnnotationClaimedAt] = claimedAt.Format(time.RFC3339)
+	projector.handleUpdate(idlePod, initializingPod)
+
+	if len(recorder.events) != 0 || len(recorder.windows) != 0 {
+		t.Fatalf("public idle claim initialization should not be metered, events=%#v windows=%#v", recorder.events, recorder.windows)
+	}
+	if state := recorder.states["warm-pool/pod-uid-1"]; state != nil {
+		t.Fatalf("public idle claim initialization created warm-pool state: %#v", state)
+	}
+
+	activePod := initializingPod.DeepCopy()
+	activePod.ResourceVersion = "3"
+	activePod.Labels[controller.LabelPoolType] = controller.PoolTypeActive
+	activePod = withSandboxResources(activePod, "2", "4Gi")
+	projector.handleUpdate(initializingPod, activePod)
+
+	if len(recorder.events) != 1 || recorder.events[0].EventType != meteringpkg.EventTypeSandboxClaimed {
+		t.Fatalf("active claim events = %#v, want one sandbox claimed event", recorder.events)
+	}
+	if len(recorder.windows) != 0 {
+		t.Fatalf("active claim emitted retroactive runtime windows: %#v", recorder.windows)
+	}
+	state := recorder.states["sb-1"]
+	if state == nil || state.ActiveSince == nil || !state.ActiveSince.Equal(claimedAt) {
+		t.Fatalf("active claim state = %#v, want active_since %v", state, claimedAt)
+	}
+}
+
 func TestLifecycleProjectorMetersTeamOwnedWarmPoolMemory(t *testing.T) {
 	recorder := &fakeRecorder{states: map[string]*meteringpkg.SandboxProjectionState{}}
 	projector := NewLifecycleProjector(recorder, "aws-us-east-1", "cluster-a")

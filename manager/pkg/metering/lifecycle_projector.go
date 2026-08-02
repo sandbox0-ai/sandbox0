@@ -777,7 +777,13 @@ func isTeamOwnedIdlePoolPod(pod *corev1.Pod) bool {
 	if pod.Labels[controller.LabelTemplateID] == "" {
 		return false
 	}
-	return pod.Annotations[controller.AnnotationTeamID] != ""
+	if strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID]) == "" {
+		return false
+	}
+	// A public idle pod temporarily receives claim ownership annotations before
+	// its pool type changes to active. Only templates that explicitly created a
+	// team-owned warm pool may accrue idle runtime for that team.
+	return strings.TrimSpace(pod.Annotations[controller.AnnotationOwnerKind]) == controller.OwnerKindTeamWarmPool
 }
 
 func warmPoolMeteringIDFromPod(pod *corev1.Pod) string {

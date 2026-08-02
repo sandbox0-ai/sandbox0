@@ -4,6 +4,7 @@
 
 FROM sandbox0ai/otemplates:default-v0.2.0
 
+# Keep Playwright CLI and its Agent Skill without bundling a browser runtime.
 ENV DEBIAN_FRONTEND=noninteractive \
     NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FUND=false \
@@ -12,21 +13,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     OPENCODE_DISABLE_AUTOUPDATE=1 \
     PI_SKIP_VERSION_CHECK=1 \
     PI_TELEMETRY=0 \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
     PLAYWRIGHT_MCP_BROWSER=chromium \
     PLAYWRIGHT_MCP_ISOLATED=false \
-    PLAYWRIGHT_MCP_SANDBOX=false \
-    SANDPI_BROWSER_USER=sandbox-browser
+    PLAYWRIGHT_MCP_SANDBOX=false
 
 # Claude Code and Pi require Node.js 22. Pi currently requires Node.js 22.19+
 # specifically, so fail the build if the repository ever resolves an older 22.x.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg openbox tigervnc-standalone-server x11vnc xvfb \
-  && command -v Xtigervnc >/dev/null \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
   && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' \
-  && useradd --create-home --home-dir /home/sandbox-browser --shell /bin/bash "$SANDPI_BROWSER_USER" \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/coding-agents
@@ -36,7 +35,6 @@ COPY manager/procd/coding-agents/THIRD_PARTY.md ./
 
 RUN npm ci --omit=dev \
   && for agent in codex claude opencode pi playwright-cli; do ln -sf "/opt/coding-agents/node_modules/.bin/$agent" "/usr/local/bin/$agent"; done \
-  && ./node_modules/.bin/playwright install chromium --with-deps --no-shell \
   && test -f /opt/coding-agents/node_modules/playwright-core/lib/tools/cli-client/skill/SKILL.md \
   && codex --version \
   && claude --version \
@@ -44,14 +42,6 @@ RUN npm ci --omit=dev \
   && pi --version \
   && playwright-cli --version \
   && npm cache clean --force
-
-# Chrome for Testing ships its process-sandbox helper without the setuid bit.
-# Human-owned headed sessions run as sandbox-browser, so configure the helper
-# explicitly instead of weakening those sessions with --no-sandbox.
-RUN chrome_sandbox="$(find /opt/ms-playwright -type f -path '*/chrome-linux*/chrome_sandbox' | head -n 1)" \
-  && test -n "$chrome_sandbox" \
-  && chown root:root "$chrome_sandbox" \
-  && chmod 4755 "$chrome_sandbox"
 
 RUN mkdir -p /workspace
 

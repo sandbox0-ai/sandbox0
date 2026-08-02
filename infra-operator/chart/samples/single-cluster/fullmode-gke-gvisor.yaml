@@ -67,9 +67,9 @@ spec:
         minIdle: 0
         maxIdle: 2
     - templateId: coding-agent
-      image: sandbox0ai/otemplates:coding-agent-v0.4.0
+      image: sandbox0ai/otemplates:coding-agent-v0.5.0
       displayName: Coding Agents
-      description: Builtin coding-agent template with Docker, Codex, Claude Code, OpenCode, Pi, Playwright CLI, and headed browser runtime installed by infra-operator.
+      description: Builtin coding-agent template with Docker, Codex, Claude Code, OpenCode, Pi, and Playwright CLI installed by infra-operator.
       pool:
         minIdle: 0
         maxIdle: 2

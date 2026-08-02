@@ -16,9 +16,9 @@ const (
 	DockerDataRootMount             = "/var/lib/docker"
 
 	CodingAgentTemplateID          = "coding-agent"
-	CodingAgentTemplateImage       = "sandbox0ai/otemplates:coding-agent-v0.4.0"
+	CodingAgentTemplateImage       = "sandbox0ai/otemplates:coding-agent-v0.5.0"
 	CodingAgentTemplateDisplayName = "Coding Agents"
-	CodingAgentTemplateDescription = "Builtin coding-agent template with Docker, Codex, Claude Code, OpenCode, Pi, Playwright CLI, and headed browser runtime installed by infra-operator."
+	CodingAgentTemplateDescription = "Builtin coding-agent template with Docker, Codex, Claude Code, OpenCode, Pi, and Playwright CLI installed by infra-operator."
 	CodingAgentCPU                 = "1"
 	CodingAgentMemory              = "4Gi"
 	CodingAgentEphemeralStorage    = "16Gi"

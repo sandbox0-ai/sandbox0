@@ -34,7 +34,6 @@ type CollectorConfig struct {
 	Interval         time.Duration
 	Jitter           time.Duration
 	MaxConcurrency   int
-	MaxSandboxes     int
 	RequestTimeout   time.Duration
 	CollectionBudget time.Duration
 	Now              func() time.Time
@@ -55,7 +54,6 @@ type Collector struct {
 	interval         time.Duration
 	jitter           time.Duration
 	maxConcurrency   int
-	maxSandboxes     int
 	requestTimeout   time.Duration
 	collectionBudget time.Duration
 	targetCursor     int
@@ -80,7 +78,6 @@ type CollectResult struct {
 
 const (
 	defaultMaxConcurrency   = 4
-	defaultMaxSandboxes     = 16
 	defaultRequestTimeout   = 2 * time.Second
 	defaultCollectionBudget = 10 * time.Second
 )
@@ -115,9 +112,6 @@ func NewCollector(cfg CollectorConfig) (*Collector, error) {
 	if cfg.MaxConcurrency <= 0 {
 		cfg.MaxConcurrency = defaultMaxConcurrency
 	}
-	if cfg.MaxSandboxes <= 0 {
-		cfg.MaxSandboxes = defaultMaxSandboxes
-	}
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = defaultRequestTimeout
 	}
@@ -140,7 +134,6 @@ func NewCollector(cfg CollectorConfig) (*Collector, error) {
 		interval:         cfg.Interval,
 		jitter:           cfg.Jitter,
 		maxConcurrency:   cfg.MaxConcurrency,
-		maxSandboxes:     cfg.MaxSandboxes,
 		requestTimeout:   cfg.RequestTimeout,
 		collectionBudget: cfg.CollectionBudget,
 		now:              cfg.Now,
@@ -260,7 +253,7 @@ func (c *Collector) collectTargets(ctx context.Context, identities identityIndex
 		return result, fmt.Errorf("list CRI pod sandboxes: %w", err)
 	}
 	allTargets := collectionTargets(identities, sandboxes)
-	targets := c.nextCollectionTargets(allTargets)
+	targets, start := c.orderedCollectionTargets(allTargets)
 	result.Matched = len(targets)
 	if len(targets) == 0 {
 		c.cpuUsage.prune(nil)
@@ -274,16 +267,22 @@ func (c *Collector) collectTargets(ctx context.Context, identities identityIndex
 	results := make([]targetResult, len(targets))
 	semaphore := make(chan struct{}, c.maxConcurrency)
 	var wg sync.WaitGroup
+	dispatched := 0
 dispatch:
 	for i := range targets {
+		if budgetCtx.Err() != nil {
+			break
+		}
 		select {
 		case semaphore <- struct{}{}:
-		case <-budgetCtx.Done():
-			for j := i; j < len(results); j++ {
-				results[j].err = budgetCtx.Err()
+			if budgetCtx.Err() != nil {
+				<-semaphore
+				break dispatch
 			}
+		case <-budgetCtx.Done():
 			break dispatch
 		}
+		dispatched++
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
@@ -297,10 +296,11 @@ dispatch:
 		}(i)
 	}
 	wg.Wait()
+	c.advanceTargetCursor(len(targets), start, dispatched)
 
-	stats := make([]*runtimeapi.PodSandboxStats, 0, len(results))
+	stats := make([]*runtimeapi.PodSandboxStats, 0, dispatched)
 	var collectionErr error
-	for i := range results {
+	for i := 0; i < dispatched; i++ {
 		if results[i].err != nil {
 			result.Failed++
 			collectionErr = errors.Join(collectionErr, fmt.Errorf("collect CRI pod sandbox %s stats: %w", targets[i].id, results[i].err))
@@ -308,7 +308,15 @@ dispatch:
 		}
 		stats = append(stats, results[i].stats)
 	}
-	pruneCPUUsage := len(targets) == len(allTargets) && collectionErr == nil
+	if deferred := len(targets) - dispatched; deferred > 0 {
+		collectionErr = errors.Join(collectionErr, fmt.Errorf(
+			"runtime metric collection stopped with %d of %d targets deferred: %w",
+			deferred,
+			len(targets),
+			budgetCtx.Err(),
+		))
+	}
+	pruneCPUUsage := dispatched == len(targets) && collectionErr == nil
 	projected, projectErr := c.projectStats(identities, stats, pruneCPUUsage)
 	result.StatsReceived = projected.StatsReceived
 	result.Enqueued = projected.Enqueued
@@ -340,22 +348,26 @@ func collectionTargets(identities identityIndex, sandboxes []*runtimeapi.PodSand
 	return targets
 }
 
-func (c *Collector) nextCollectionTargets(targets []collectionTarget) []collectionTarget {
+func (c *Collector) orderedCollectionTargets(targets []collectionTarget) ([]collectionTarget, int) {
 	if len(targets) == 0 {
-		return nil
-	}
-	limit := c.maxSandboxes
-	if limit <= 0 || limit >= len(targets) {
-		c.targetCursor = 0
-		return targets
+		return nil, 0
 	}
 	start := c.targetCursor % len(targets)
-	selected := make([]collectionTarget, 0, limit)
-	for i := 0; i < limit; i++ {
-		selected = append(selected, targets[(start+i)%len(targets)])
+	if start == 0 {
+		return targets, start
 	}
-	c.targetCursor = (start + limit) % len(targets)
-	return selected
+	ordered := make([]collectionTarget, 0, len(targets))
+	ordered = append(ordered, targets[start:]...)
+	ordered = append(ordered, targets[:start]...)
+	return ordered, start
+}
+
+func (c *Collector) advanceTargetCursor(targetCount, start, dispatched int) {
+	if targetCount == 0 || dispatched >= targetCount {
+		c.targetCursor = 0
+		return
+	}
+	c.targetCursor = (start + dispatched) % targetCount
 }
 
 func (c *Collector) nextDelay() time.Duration {

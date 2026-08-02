@@ -250,33 +250,75 @@ func TestCollectorBoundsStatsConcurrency(t *testing.T) {
 	assert.LessOrEqual(t, client.maxActive, 2)
 }
 
-func TestCollectorRotatesBoundedTargets(t *testing.T) {
-	pods := make([]*corev1.Pod, 0, 3)
+func TestCollectorCollectsAllClaimedTargetsWithinBudget(t *testing.T) {
+	const sandboxCount = 64
+	pods := make([]*corev1.Pod, 0, sandboxCount)
 	client := &fakeStatsClient{
-		statsByID: make(map[string]*runtimeapi.PodSandboxStats, 3),
+		statsByID: make(map[string]*runtimeapi.PodSandboxStats, sandboxCount),
 	}
-	for _, suffix := range []string{"a", "b", "c"} {
-		name := "pod-" + suffix
-		uid := "uid-" + suffix
-		id := "cri-" + suffix
-		pods = append(pods, runtimeMetricPod("ns-a", name, uid, "node-a", "team-a", "sandbox-"+suffix, "1"))
+	for i := 0; i < sandboxCount; i++ {
+		name := fmt.Sprintf("pod-%03d", i)
+		uid := fmt.Sprintf("uid-%03d", i)
+		id := fmt.Sprintf("cri-%03d", i)
+		pods = append(pods, runtimeMetricPod("ns-a", name, uid, "node-a", "team-a", fmt.Sprintf("sandbox-%03d", i), "1"))
+		client.sandboxes = append(client.sandboxes, podSandbox(id, "ns-a", name, uid))
+		client.statsByID[id] = minimalPodStats(id, "ns-a", name, uid)
+	}
+	sink := &recordingSampleSink{}
+	collector, err := NewCollector(CollectorConfig{
+		StatsClient:    client,
+		PodLister:      podLister(t, pods...),
+		Sink:           sink,
+		NodeName:       "node-a",
+		MaxConcurrency: 4,
+	})
+	require.NoError(t, err)
+
+	result, err := collector.Collect(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, sandboxCount, result.Matched)
+	assert.Equal(t, sandboxCount, result.Enqueued)
+	assert.Len(t, client.perSandboxCalls, sandboxCount)
+	assert.Len(t, sink.samples, sandboxCount)
+}
+
+func TestCollectorRotatesAfterCollectionBudgetExhaustion(t *testing.T) {
+	const sandboxCount = 6
+	pods := make([]*corev1.Pod, 0, sandboxCount)
+	client := &fakeStatsClient{
+		statsByID: make(map[string]*runtimeapi.PodSandboxStats, sandboxCount),
+		block:     make(chan struct{}),
+	}
+	for i := 0; i < sandboxCount; i++ {
+		name := fmt.Sprintf("pod-%c", 'a'+i)
+		uid := fmt.Sprintf("uid-%c", 'a'+i)
+		id := fmt.Sprintf("cri-%c", 'a'+i)
+		pods = append(pods, runtimeMetricPod("ns-a", name, uid, "node-a", "team-a", fmt.Sprintf("sandbox-%c", 'a'+i), "1"))
 		client.sandboxes = append(client.sandboxes, podSandbox(id, "ns-a", name, uid))
 		client.statsByID[id] = minimalPodStats(id, "ns-a", name, uid)
 	}
 	collector, err := NewCollector(CollectorConfig{
-		StatsClient:    client,
-		PodLister:      podLister(t, pods...),
-		Sink:           &recordingSampleSink{},
-		NodeName:       "node-a",
-		MaxSandboxes:   2,
-		MaxConcurrency: 1,
+		StatsClient:      client,
+		PodLister:        podLister(t, pods...),
+		Sink:             &recordingSampleSink{},
+		NodeName:         "node-a",
+		MaxConcurrency:   2,
+		RequestTimeout:   time.Second,
+		CollectionBudget: 20 * time.Millisecond,
 	})
 	require.NoError(t, err)
 
-	_, _ = collector.Collect(context.Background())
-	_, _ = collector.Collect(context.Background())
+	first, firstErr := collector.Collect(context.Background())
+	second, secondErr := collector.Collect(context.Background())
 
-	assert.Equal(t, []string{"cri-a", "cri-b", "cri-c", "cri-a"}, client.perSandboxCalls)
+	require.ErrorIs(t, firstErr, context.DeadlineExceeded)
+	require.ErrorIs(t, secondErr, context.DeadlineExceeded)
+	assert.Equal(t, sandboxCount, first.Matched)
+	assert.Equal(t, sandboxCount, second.Matched)
+	require.Len(t, client.perSandboxCalls, 4)
+	assert.ElementsMatch(t, []string{"cri-a", "cri-b"}, client.perSandboxCalls[:2])
+	assert.ElementsMatch(t, []string{"cri-c", "cri-d"}, client.perSandboxCalls[2:])
 }
 
 func TestCollectorCountsFullQueueDrops(t *testing.T) {
@@ -357,7 +399,6 @@ func TestCollectorUsesSharedRuntimeSampleCadenceDefaults(t *testing.T) {
 	assert.Equal(t, sandboxobservability.DefaultRuntimeSampleInterval, collector.interval)
 	assert.Equal(t, sandboxobservability.DefaultRuntimeSampleJitter, collector.jitter)
 	assert.Equal(t, defaultMaxConcurrency, collector.maxConcurrency)
-	assert.Equal(t, defaultMaxSandboxes, collector.maxSandboxes)
 	assert.Equal(t, defaultRequestTimeout, collector.requestTimeout)
 	assert.Equal(t, defaultCollectionBudget, collector.collectionBudget)
 }

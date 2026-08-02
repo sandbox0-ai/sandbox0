@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -13,14 +14,19 @@ func TestObserverDoesNotUseVolumeIDAsMetricLabel(t *testing.T) {
 	observer := NewObserver(registry, nil)
 	observer.ObserveBind("s0fs", "hot", "vol-sensitive", time.Now(), nil)
 	observer.ObserveS0FSOpen(s0fs.OpenObservation{
-		VolumeID:         "vol-sensitive",
-		Phase:            "complete",
-		Source:           "local",
-		Format:           s0fs.StateFormatV2,
-		Duration:         time.Millisecond,
-		Bytes:            1024,
-		Nodes:            10,
-		DirectoryEntries: 9,
+		VolumeID:           "vol-sensitive",
+		Phase:              "complete",
+		Source:             "local",
+		Format:             s0fs.StateFormatV2,
+		Duration:           time.Millisecond,
+		Bytes:              1024,
+		WALRecords:         7,
+		WALRecordsScanned:  10,
+		WALRecordsSkipped:  3,
+		WALMaxRecordBytes:  4096,
+		WALMaxDecodedBytes: 2048,
+		Nodes:              10,
+		DirectoryEntries:   9,
 	})
 	observer.ObserveHotCacheRequest("hit", "protected")
 	observer.ObserveHotCacheAdmission("admitted", "protected")
@@ -69,5 +75,14 @@ func TestObserverDoesNotUseVolumeIDAsMetricLabel(t *testing.T) {
 		if !seen {
 			t.Errorf("metric %s was not gathered", name)
 		}
+	}
+}
+
+func TestObservationStatusDistinguishesCancellation(t *testing.T) {
+	if got := observationStatus(context.Canceled); got != "canceled" {
+		t.Fatalf("observationStatus(context.Canceled) = %q, want canceled", got)
+	}
+	if got := observationStatus(context.DeadlineExceeded); got != "deadline_exceeded" {
+		t.Fatalf("observationStatus(context.DeadlineExceeded) = %q, want deadline_exceeded", got)
 	}
 }

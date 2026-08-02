@@ -35,31 +35,46 @@ type Engine struct {
 	mutationVersion         uint64
 	lastCommittedManifest   uint64
 	lastMaterializedVersion uint64
+	pendingMaterialization  *pendingMaterialization
 	dirty                   bool
 	dirtyAt                 time.Time
 }
 
+type pendingMaterialization struct {
+	manifestSeq     uint64
+	mutationVersion uint64
+	state           *SnapshotState
+	walCheckpoint   *walCheckpoint
+}
+
 func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
+	ctx = nonNilContext(ctx)
 	openedAt := time.Now()
 	selectedSource := "new"
 	selectedFormat := 0
 	walRecordsApplied := 0
+	walRecordsSkipped := 0
+	var replayStats walReplayStats
 	defer func() {
 		if cfg.OpenObserver == nil {
 			return
 		}
 		observation := OpenObservation{
-			VolumeID: cfg.VolumeID,
-			Phase:    "complete",
-			Source:   selectedSource,
-			Format:   selectedFormat,
-			Duration: time.Since(openedAt),
-			Bytes:    -1,
-			Err:      retErr,
+			VolumeID:           cfg.VolumeID,
+			Phase:              "complete",
+			Source:             selectedSource,
+			Format:             selectedFormat,
+			Duration:           time.Since(openedAt),
+			Bytes:              -1,
+			WALRecords:         walRecordsApplied,
+			WALRecordsScanned:  replayStats.RecordsScanned,
+			WALRecordsSkipped:  walRecordsSkipped,
+			WALMaxRecordBytes:  replayStats.MaxRecordBytes,
+			WALMaxDecodedBytes: replayStats.MaxDecodedBytes,
+			Err:                retErr,
 		}
 		if engine != nil {
 			engine.mu.RLock()
-			observation.WALRecords = walRecordsApplied
 			observation.Nodes = len(engine.nodes)
 			observation.DirectoryEntries = directoryEntryCount(engine.children)
 			observation.Segments = len(engine.segments)
@@ -78,8 +93,15 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 	}
 
 	phaseStarted := time.Now()
-	walFile, records, err := openWAL(cfg.WALPath, cfg.VolumeID, cfg.Encryption, cfg.WALSyncHook)
-	emitOpenPhase(cfg, "wal_open", "local", 0, phaseStarted, walFileSize(cfg.WALPath), len(records), nil, err)
+	replay, err := openWALReplay(cfg.WALPath, cfg.VolumeID, cfg.Encryption)
+	if err != nil {
+		emitWALOpenPhase(cfg, "wal_open", 0, phaseStarted, replayStats, 0, 0, nil, err)
+		return nil, err
+	}
+	defer replay.Close()
+	firstWALRecord, hasWALRecords, err := replay.Peek(ctx)
+	replayStats = replay.Stats()
+	emitWALOpenPhase(cfg, "wal_open", 0, phaseStarted, replayStats, 0, 0, nil, err)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +109,7 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 	phaseStarted = time.Now()
 	state, localFormat, localBytes, err := loadCurrentState(cfg)
 	localStateErr := err
-	emitOpenPhase(cfg, "state_load", "local", localFormat, phaseStarted, localBytes, len(records), state, err)
+	emitOpenPhase(cfg, "state_load", "local", localFormat, phaseStarted, localBytes, replayStats.RecordsScanned, state, err)
 	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
 	if materializer != nil {
 		materializer.SetEncryption(cfg.Encryption)
@@ -111,7 +133,7 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 				localCommitted = true
 				selectedSource = "local"
 				selectedFormat = localFormat
-				emitOpenPhase(cfg, "state_reuse", "local", localFormat, reuseStarted, localBytes, len(records), state, nil)
+				emitOpenPhase(cfg, "state_reuse", "local", localFormat, reuseStarted, localBytes, replayStats.RecordsScanned, state, nil)
 			} else if headErr != nil && !errors.Is(headErr, ErrCommittedHeadNotFound) {
 				err = headErr
 			}
@@ -123,9 +145,14 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 			if manifest != nil && (manifest.Version == StateFormatV1 || manifest.Version == StateFormatV2) {
 				remoteFormat = manifest.Version
 			}
-			emitOpenPhase(cfg, "state_load", "remote", remoteFormat, phaseStarted, -1, len(records), latestState, latestErr)
+			emitOpenPhase(cfg, "state_load", "remote", remoteFormat, phaseStarted, -1, replayStats.RecordsScanned, latestState, latestErr)
+			if latestErr == nil {
+				if baseErr := validateCommittedWALBase(localStateErr, latestState, firstWALRecord, hasWALRecords); baseErr != nil {
+					return nil, baseErr
+				}
+			}
 			switch {
-			case latestErr == nil && shouldUseMaterializedState(state, err, latestState, len(records)):
+			case latestErr == nil && shouldUseMaterializedState(state, err, latestState, hasWALRecords):
 				state = latestState
 				err = nil
 				latestManifest = manifest
@@ -144,7 +171,6 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		materializer.SetOpenObserver(nil)
 	}
 	if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrMaterializedManifestNotFound) {
-		_ = walFile.close()
 		return nil, err
 	}
 	if state == nil {
@@ -179,7 +205,6 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 
 	e := &Engine{
 		volumeID:           cfg.VolumeID,
-		wal:                walFile,
 		nextSeq:            state.NextSeq,
 		nextInode:          state.NextInode,
 		nodes:              state.Nodes,
@@ -199,19 +224,32 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 
 	phaseStarted = time.Now()
 	appliedRecords := 0
-	for _, record := range records {
+	for {
+		record, ok, replayErr := replay.Next(ctx)
+		replayStats = replay.Stats()
+		if replayErr != nil {
+			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), replayErr)
+			return nil, replayErr
+		}
+		if !ok {
+			break
+		}
 		if record.Seq < e.nextSeq {
+			walRecordsSkipped++
 			continue
 		}
 		if record.Seq > e.nextSeq {
-			_ = walFile.close()
-			return nil, fmt.Errorf("replay wal seq %d: %w: missing wal seq %d", record.Seq, ErrInvalidInput, e.nextSeq)
+			replayErr := fmt.Errorf("replay wal seq %d: %w: missing wal seq %d", record.Seq, ErrInvalidInput, e.nextSeq)
+			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), replayErr)
+			return nil, replayErr
 		}
 		if err := e.apply(record); err != nil {
-			_ = walFile.close()
-			return nil, fmt.Errorf("replay wal seq %d: %w", record.Seq, err)
+			replayErr := fmt.Errorf("replay wal seq %d: %w", record.Seq, err)
+			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), replayErr)
+			return nil, replayErr
 		}
 		appliedRecords++
+		walRecordsApplied = appliedRecords
 		if record.Seq >= e.nextSeq {
 			e.nextSeq = record.Seq + 1
 		}
@@ -219,6 +257,16 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 			e.nextInode = record.Inode + 1
 		}
 	}
+	if err := replay.Close(); err != nil {
+		emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), err)
+		return nil, err
+	}
+	walFile, err := openWAL(cfg.WALPath, cfg.VolumeID, cfg.Encryption, cfg.WALSyncHook, replayStats)
+	if err != nil {
+		emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), err)
+		return nil, err
+	}
+	e.wal = walFile
 	if !e.retainUnlinked {
 		e.collectUnlinkedLocked()
 	}
@@ -228,10 +276,37 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		e.mutationVersion = 1
 	}
 	walRecordsApplied = appliedRecords
-	emitOpenPhase(cfg, "wal_replay", "local", selectedFormat, phaseStarted, walFileSize(cfg.WALPath), appliedRecords, e.currentStateLocked(), nil)
+	emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), nil)
 
 	engine = e
 	return engine, nil
+}
+
+func emitWALOpenPhase(cfg Config, phase string, format int, started time.Time, stats walReplayStats, skipped, applied int, state *SnapshotState, err error) {
+	bytes := stats.BytesScanned
+	if phase == "wal_open" {
+		bytes = walFileSize(cfg.WALPath)
+	}
+	observation := OpenObservation{
+		VolumeID:           cfg.VolumeID,
+		Phase:              phase,
+		Source:             "local",
+		Format:             format,
+		Duration:           time.Since(started),
+		Bytes:              bytes,
+		WALRecords:         applied,
+		WALRecordsScanned:  stats.RecordsScanned,
+		WALRecordsSkipped:  skipped,
+		WALMaxRecordBytes:  stats.MaxRecordBytes,
+		WALMaxDecodedBytes: stats.MaxDecodedBytes,
+		Err:                err,
+	}
+	if state != nil {
+		observation.Nodes = len(state.Nodes)
+		observation.DirectoryEntries = directoryEntryCount(state.Children)
+		observation.Segments = len(state.Segments)
+	}
+	emitOpenObservation(cfg.OpenObserver, observation)
 }
 
 func emitOpenPhase(cfg Config, phase, source string, format int, started time.Time, bytes int64, walRecords int, state *SnapshotState, err error) {
@@ -280,6 +355,9 @@ func directoryEntryCount(children map[uint64]map[string]uint64) int {
 }
 
 func (e *Engine) Close() error {
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
+
 	e.mutationMu.Lock()
 	defer e.mutationMu.Unlock()
 
@@ -810,26 +888,45 @@ func (e *Engine) EnsureMaterialized(ctx context.Context) (*Manifest, error) {
 }
 
 func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, error) {
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	e.materializeMu.Lock()
 	defer e.materializeMu.Unlock()
 
-	e.mu.RLock()
+	e.mutationMu.Lock()
+	e.mu.Lock()
 	if err := e.checkOpen(); err != nil {
-		e.mu.RUnlock()
+		e.mu.Unlock()
+		e.mutationMu.Unlock()
+		return nil, err
+	}
+	if err := e.finalizePendingMaterializationLocked(); err != nil {
+		e.mu.Unlock()
+		e.mutationMu.Unlock()
 		return nil, err
 	}
 	if e.materializer == nil || !e.materializer.Enabled() || (!e.dirty && (!force || !e.needsMaterializationLocked())) {
-		e.mu.RUnlock()
+		e.mu.Unlock()
+		e.mutationMu.Unlock()
 		return nil, nil
 	}
 	version := e.mutationVersion
 	state, err := e.materializeStateLocked()
 	if err != nil {
-		e.mu.RUnlock()
+		e.mu.Unlock()
+		e.mutationMu.Unlock()
 		return nil, err
 	}
 	expectedManifestSeq := e.lastCommittedManifest
-	e.mu.RUnlock()
+	e.mu.Unlock()
+	checkpoint, err := e.wal.checkpoint(checkpointSequence(state))
+	if err != nil {
+		e.mutationMu.Unlock()
+		return nil, err
+	}
+	e.mutationMu.Unlock()
 
 	manifest, err := e.materializer.Materialize(ctx, state, expectedManifestSeq)
 	if err != nil || manifest == nil {
@@ -841,24 +938,53 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.mutationVersion == version && e.lastCommittedManifest == expectedManifestSeq {
-		if manifest.State != nil {
-			e.replaceStateLocked(cloneState(manifest.State))
-		}
-		if err := e.persistCurrentStateLocked(); err != nil {
-			return nil, err
-		}
-		if err := e.wal.reset(); err != nil {
-			return nil, err
-		}
-		e.refreshLocalDiskGuardLocked()
-		e.lastCommittedManifest = manifest.ManifestSeq
-		e.lastMaterializedVersion = version
-		e.dirty = false
-	} else if manifest.ManifestSeq > e.lastCommittedManifest {
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	if manifest.ManifestSeq > e.lastCommittedManifest {
 		e.lastCommittedManifest = manifest.ManifestSeq
 	}
+	e.pendingMaterialization = &pendingMaterialization{
+		manifestSeq:     manifest.ManifestSeq,
+		mutationVersion: version,
+		state:           manifest.State,
+		walCheckpoint:   checkpoint,
+	}
+	if err := e.finalizePendingMaterializationLocked(); err != nil {
+		return nil, err
+	}
 	return manifest, nil
+}
+
+// finalizePendingMaterializationLocked makes a committed remote checkpoint
+// durable locally before reclaiming its WAL prefix. The caller holds
+// mutationMu and e.mu so Close, restore, and new mutations cannot cross the
+// local checkpoint boundary.
+func (e *Engine) finalizePendingMaterializationLocked() error {
+	pending := e.pendingMaterialization
+	if pending == nil {
+		return nil
+	}
+	if pending.state == nil || checkpointSequence(pending.state) != pending.manifestSeq {
+		return fmt.Errorf("%w: pending materialization checkpoint is invalid", ErrInvalidInput)
+	}
+	if err := e.persistStateLocked(pending.state, true); err != nil {
+		return err
+	}
+	if pending.walCheckpoint == nil || pending.walCheckpoint.throughSeq != pending.manifestSeq {
+		return fmt.Errorf("%w: pending materialization wal checkpoint is invalid", ErrInvalidInput)
+	}
+	if err := e.wal.discardThrough(pending.walCheckpoint); err != nil {
+		return err
+	}
+	if e.mutationVersion == pending.mutationVersion {
+		e.replaceStateLocked(cloneState(pending.state))
+		e.lastMaterializedVersion = pending.mutationVersion
+		e.dirty = false
+	}
+	e.pendingMaterialization = nil
+	e.refreshLocalDiskGuardLocked()
+	return nil
 }
 
 func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
@@ -1108,7 +1234,7 @@ func (e *Engine) appendAndApplyLocked(record walRecord, projectedBytes int64) er
 }
 
 func (e *Engine) appendPreparedAndApplyLocked(record walRecord, walPayload []byte) error {
-	if err := e.wal.appendPrepared(walPayload); err != nil {
+	if err := e.wal.appendPrepared(record, walPayload); err != nil {
 		return err
 	}
 	if err := e.apply(record); err != nil {
@@ -1231,7 +1357,11 @@ func (e *Engine) persistCurrentStateLocked() error {
 }
 
 func (e *Engine) persistCurrentStateLockedWithReserve(reserve bool) error {
-	state := cloneState(e.currentStateLocked())
+	return e.persistStateLocked(e.currentStateLocked(), reserve)
+}
+
+func (e *Engine) persistStateLocked(source *SnapshotState, reserve bool) error {
+	state := cloneState(source)
 	pruneUnreferencedSegments(state)
 	if reserve {
 		if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
@@ -1248,7 +1378,7 @@ func loadCurrentState(cfg Config) (*SnapshotState, int, int64, error) {
 	return loadSnapshotStateWithFormat(headStatePath(cfg.WALPath), cfg.VolumeID, "head", cfg.Encryption)
 }
 
-func shouldUseMaterializedState(current *SnapshotState, currentErr error, latest *SnapshotState, walRecords int) bool {
+func shouldUseMaterializedState(current *SnapshotState, currentErr error, latest *SnapshotState, hasWALRecords bool) bool {
 	if latest == nil {
 		return false
 	}
@@ -1261,10 +1391,25 @@ func shouldUseMaterializedState(current *SnapshotState, currentErr error, latest
 	if current == nil {
 		return true
 	}
-	if walRecords > 0 {
+	if hasWALRecords {
 		return false
 	}
 	return latest.NextSeq > current.NextSeq
+}
+
+func validateCommittedWALBase(localStateErr error, committed *SnapshotState, firstWALRecord walRecord, hasWALRecords bool) error {
+	if !hasWALRecords || !errors.Is(localStateErr, ErrSnapshotNotFound) || committed == nil {
+		return nil
+	}
+	if firstWALRecord.Seq == committed.NextSeq {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: local head is missing, committed state expects wal seq %d, and local wal starts at seq %d",
+		ErrCommittedHeadConflict,
+		committed.NextSeq,
+		firstWALRecord.Seq,
+	)
 }
 
 func (e *Engine) apply(record walRecord) error {

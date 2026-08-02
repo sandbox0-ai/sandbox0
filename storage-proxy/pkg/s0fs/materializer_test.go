@@ -872,6 +872,13 @@ func TestEngineSyncMaterializeDetectsCommittedHeadConflicts(t *testing.T) {
 	if _, err := second.SyncMaterialize(ctx); !errors.Is(err, ErrCommittedHeadConflict) {
 		t.Fatalf("SyncMaterialize(second) err = %v, want %v", err, ErrCommittedHeadConflict)
 	}
+	info, err := os.Stat(second.wal.path)
+	if err != nil {
+		t.Fatalf("Stat(second WAL) error = %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("failed commit discarded the local WAL")
+	}
 }
 
 func TestEngineSyncMaterializeSerializesSameEngineCommits(t *testing.T) {
@@ -995,9 +1002,23 @@ func TestEngineSyncMaterializeAdvancesCommittedHeadWhenDirtyDuringCommit(t *test
 	case <-time.After(time.Second):
 		t.Fatal("SyncMaterialize(first) did not complete")
 	}
+	engine.wal.mu.Lock()
+	activeFirstSeq := engine.wal.firstSeq
+	activeLastSeq := engine.wal.lastSeq
+	engine.wal.mu.Unlock()
+	if activeFirstSeq != 3 || activeLastSeq != 4 {
+		t.Fatalf("active WAL sequence range after concurrent writes = %d-%d, want 3-4", activeFirstSeq, activeLastSeq)
+	}
 
 	if _, err := engine.SyncMaterialize(ctx); err != nil {
 		t.Fatalf("SyncMaterialize(second) error = %v", err)
+	}
+	engine.wal.mu.Lock()
+	activeFirstSeq = engine.wal.firstSeq
+	activeLastSeq = engine.wal.lastSeq
+	engine.wal.mu.Unlock()
+	if activeFirstSeq != 0 || activeLastSeq != 0 {
+		t.Fatalf("active WAL sequence range after second checkpoint = %d-%d, want empty", activeFirstSeq, activeLastSeq)
 	}
 	head, err := heads.LoadCommittedHead(ctx, "vol-dirty-during-materialize")
 	if err != nil {
@@ -1005,6 +1026,66 @@ func TestEngineSyncMaterializeAdvancesCommittedHeadWhenDirtyDuringCommit(t *test
 	}
 	if head.ManifestSeq < 2 {
 		t.Fatalf("committed manifest seq = %d, want at least 2", head.ManifestSeq)
+	}
+}
+
+func TestEngineSyncMaterializeRetriesLocalCheckpointAfterRemoteCommit(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	guard := &LocalDiskGuard{Path: dir, MaxBytes: 1 << 30}
+	store := newPrefixedRecordingStore(t, "vol-local-checkpoint-retry")
+	heads := newMemoryHeadStore()
+	engine, err := Open(ctx, Config{
+		VolumeID:       "vol-local-checkpoint-retry",
+		WALPath:        filepath.Join(dir, "engine.wal"),
+		ObjectStore:    store,
+		HeadStore:      heads,
+		LocalDiskGuard: guard,
+	})
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+
+	node, err := engine.CreateFile(RootInode, "data.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("payload")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	guard.MaxBytes = 1
+	if _, err := engine.SyncMaterialize(ctx); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("SyncMaterialize(first) error = %v, want ErrNoSpace", err)
+	}
+	if engine.pendingMaterialization == nil {
+		t.Fatal("committed materialization was not retained for local retry")
+	}
+	info, err := os.Stat(engine.wal.path)
+	if err != nil {
+		t.Fatalf("Stat(WAL before local retry) error = %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("remote commit discarded WAL before the local checkpoint was durable")
+	}
+
+	guard.MaxBytes = 1 << 30
+	manifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize(retry) error = %v", err)
+	}
+	if manifest != nil {
+		t.Fatalf("SyncMaterialize(retry) manifest = %+v, want local-only finalization", manifest)
+	}
+	if engine.pendingMaterialization != nil {
+		t.Fatal("pending materialization was not cleared after local retry")
+	}
+	info, err = os.Stat(engine.wal.path)
+	if err != nil {
+		t.Fatalf("Stat(WAL after local retry) error = %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("WAL bytes after local retry = %d, want 0", info.Size())
 	}
 }
 

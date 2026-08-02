@@ -3,6 +3,7 @@ package runtimemetrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -15,14 +16,26 @@ import (
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-func TestCollectorUsesOneBulkCallAndEnqueuesMatchedSandboxes(t *testing.T) {
+func TestCollectorRequestsStatsOnlyForClaimedSandboxes(t *testing.T) {
 	podA := runtimeMetricPod("ns-a", "pod-a", "pod-uid-a", "node-a", "team-a", "sandbox-a", "2")
 	podB := runtimeMetricPod("ns-a", "pod-b", "pod-uid-b", "node-a", "team-a", "sandbox-b", "3")
-	client := &fakeStatsClient{stats: []*runtimeapi.PodSandboxStats{
-		minimalPodStats("cri-a", "ns-a", "pod-a", "pod-uid-a"),
-		minimalPodStats("cri-b", "ns-a", "pod-b", "pod-uid-b"),
-		minimalPodStats("cri-other", "ns-a", "other", "pod-uid-other"),
-	}}
+	client := &fakeStatsClient{
+		sandboxes: []*runtimeapi.PodSandbox{
+			podSandbox("cri-a", "ns-a", "pod-a", "pod-uid-a"),
+			podSandbox("cri-b", "ns-a", "pod-b", "pod-uid-b"),
+		},
+		statsByID: map[string]*runtimeapi.PodSandboxStats{
+			"cri-a": minimalPodStats("cri-a", "ns-a", "pod-a", "pod-uid-a"),
+			"cri-b": minimalPodStats("cri-b", "ns-a", "pod-b", "pod-uid-b"),
+		},
+	}
+	for i := 0; i < 500; i++ {
+		id := fmt.Sprintf("cri-unclaimed-%03d", i)
+		name := fmt.Sprintf("unclaimed-%03d", i)
+		uid := fmt.Sprintf("unclaimed-uid-%03d", i)
+		client.sandboxes = append(client.sandboxes, podSandbox(id, "ns-a", name, uid))
+		client.statsByID[id] = minimalPodStats(id, "ns-a", name, uid)
+	}
 	sink := &recordingSampleSink{}
 	collector, err := NewCollector(CollectorConfig{
 		RegionID: "region-a", ClusterID: "cluster-a", NodeName: "node-a",
@@ -33,11 +46,34 @@ func TestCollectorUsesOneBulkCallAndEnqueuesMatchedSandboxes(t *testing.T) {
 
 	result, err := collector.Collect(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 1, client.calls)
-	assert.Equal(t, CollectResult{StatsReceived: 3, Matched: 2, Enqueued: 2}, result)
+	assert.Equal(t, 1, client.listCalls)
+	assert.ElementsMatch(t, []string{"cri-a", "cri-b"}, client.perSandboxCalls)
+	assert.Equal(t, CollectResult{StatsReceived: 2, Matched: 2, Enqueued: 2}, result)
 	require.Len(t, sink.samples, 2)
 	assert.Equal(t, "sandbox-a", sink.samples[0].SandboxID)
 	assert.Equal(t, "sandbox-b", sink.samples[1].SandboxID)
+}
+
+func TestCollectorSkipsCRIWhenNoClaimedSandboxes(t *testing.T) {
+	client := &fakeStatsClient{
+		sandboxes: []*runtimeapi.PodSandbox{
+			podSandbox("cri-unclaimed", "ns-a", "pod-unclaimed", "uid-unclaimed"),
+		},
+	}
+	collector, err := NewCollector(CollectorConfig{
+		StatsClient: client,
+		PodLister:   podLister(t),
+		Sink:        &recordingSampleSink{},
+		NodeName:    "node-a",
+	})
+	require.NoError(t, err)
+
+	result, err := collector.Collect(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, CollectResult{}, result)
+	assert.Zero(t, client.listCalls)
+	assert.Empty(t, client.perSandboxCalls)
 }
 
 func TestCollectorDerivesCPUUsageFromLinuxCumulativeStats(t *testing.T) {
@@ -45,9 +81,12 @@ func TestCollectorDerivesCPUUsageFromLinuxCumulativeStats(t *testing.T) {
 	pod.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
 		corev1.ResourceCPU: resource.MustParse("2"),
 	}
-	client := &fakeStatsClient{stats: []*runtimeapi.PodSandboxStats{
-		cpuOnlyPodStats("cri-a", "ns-a", "pod-a", "pod-uid-a", 10_000_000_000, 10_000_000_000),
-	}}
+	client := &fakeStatsClient{
+		sandboxes: []*runtimeapi.PodSandbox{podSandbox("cri-a", "ns-a", "pod-a", "pod-uid-a")},
+		statsByID: map[string]*runtimeapi.PodSandboxStats{
+			"cri-a": cpuOnlyPodStats("cri-a", "ns-a", "pod-a", "pod-uid-a", 10_000_000_000, 10_000_000_000),
+		},
+	}
 	sink := &recordingSampleSink{}
 	collector, err := NewCollector(CollectorConfig{
 		RegionID: "region-a", ClusterID: "cluster-a", NodeName: "node-a",
@@ -61,9 +100,7 @@ func TestCollectorDerivesCPUUsageFromLinuxCumulativeStats(t *testing.T) {
 	assert.Nil(t, sink.samples[0].CPU.Usage)
 	assertMissing(t, sink.samples[0].Missing, sandboxobservability.RuntimeMetricCPUUsage, nil)
 
-	client.setStats([]*runtimeapi.PodSandboxStats{
-		cpuOnlyPodStats("cri-a", "ns-a", "pod-a", "pod-uid-a", 20_000_000_000, 15_000_000_000),
-	})
+	client.setStatsByID("cri-a", cpuOnlyPodStats("cri-a", "ns-a", "pod-a", "pod-uid-a", 20_000_000_000, 15_000_000_000))
 	_, err = collector.Collect(context.Background())
 	require.NoError(t, err)
 	require.Len(t, sink.samples, 2)
@@ -77,7 +114,7 @@ func TestCollectorDerivesCPUUsageFromLinuxCumulativeStats(t *testing.T) {
 }
 
 func TestCollectorReportsCRIErrorWithoutEnqueuing(t *testing.T) {
-	client := &fakeStatsClient{err: errors.New("containerd unavailable")}
+	client := &fakeStatsClient{listErr: errors.New("containerd unavailable")}
 	sink := &recordingSampleSink{}
 	collector, err := NewCollector(CollectorConfig{
 		StatsClient: client,
@@ -88,15 +125,14 @@ func TestCollectorReportsCRIErrorWithoutEnqueuing(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = collector.Collect(context.Background())
-	require.ErrorContains(t, err, "list CRI pod sandbox stats")
+	require.ErrorContains(t, err, "list CRI pod sandboxes")
 	assert.Empty(t, sink.samples)
 }
 
-func TestCollectorFallsBackToIsolatedStatsAfterBulkFailure(t *testing.T) {
+func TestCollectorIsolatesPerSandboxStatsFailures(t *testing.T) {
 	podA := runtimeMetricPod("ns-a", "pod-a", "uid-a", "node-a", "team-a", "sandbox-a", "1")
 	podB := runtimeMetricPod("ns-a", "pod-b", "uid-b", "node-a", "team-a", "sandbox-b", "1")
 	client := &fakeStatsClient{
-		err: errors.New("one runtime poisoned bulk stats"),
 		sandboxes: []*runtimeapi.PodSandbox{
 			podSandbox("cri-a", "ns-a", "pod-a", "uid-a"),
 			podSandbox("cri-b", "ns-a", "pod-b", "uid-b"),
@@ -116,24 +152,22 @@ func TestCollectorFallsBackToIsolatedStatsAfterBulkFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	result, err := collector.Collect(context.Background())
-	require.ErrorContains(t, err, "one runtime poisoned bulk stats")
 	require.ErrorContains(t, err, "runtime unavailable")
 	assert.Equal(t, CollectResult{
 		StatsReceived: 1,
 		Matched:       2,
 		Enqueued:      1,
 		Failed:        1,
-		Fallback:      true,
 	}, result)
 	require.Len(t, sink.samples, 1)
 	assert.Equal(t, "sandbox-b", sink.samples[0].SandboxID)
 	assert.ElementsMatch(t, []string{"cri-a", "cri-b"}, client.perSandboxCalls)
 }
 
-func TestCollectorFallsBackWhenBulkStatsTimesOut(t *testing.T) {
+func TestCollectorBoundsPerSandboxStatsTimeout(t *testing.T) {
 	pod := runtimeMetricPod("ns-a", "pod-a", "uid-a", "node-a", "team-a", "sandbox-a", "1")
 	client := &fakeStatsClient{
-		bulkBlock: make(chan struct{}),
+		block: make(chan struct{}),
 		sandboxes: []*runtimeapi.PodSandbox{
 			podSandbox("cri-a", "ns-a", "pod-a", "uid-a"),
 		},
@@ -143,28 +177,26 @@ func TestCollectorFallsBackWhenBulkStatsTimesOut(t *testing.T) {
 	}
 	sink := &recordingSampleSink{}
 	collector, err := NewCollector(CollectorConfig{
-		StatsClient:        client,
-		PodLister:          podLister(t, pod),
-		Sink:               sink,
-		NodeName:           "node-a",
-		BulkRequestTimeout: 10 * time.Millisecond,
+		StatsClient:    client,
+		PodLister:      podLister(t, pod),
+		Sink:           sink,
+		NodeName:       "node-a",
+		RequestTimeout: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
 
 	result, err := collector.Collect(context.Background())
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.True(t, result.Fallback)
-	assert.Equal(t, 1, result.Enqueued)
-	require.Len(t, sink.samples, 1)
-	assert.Equal(t, "sandbox-a", sink.samples[0].SandboxID)
+	assert.Equal(t, 1, result.Failed)
+	assert.Zero(t, result.Enqueued)
+	assert.Empty(t, sink.samples)
 }
 
-func TestCollectorBoundsFallbackConcurrency(t *testing.T) {
+func TestCollectorBoundsStatsConcurrency(t *testing.T) {
 	const sandboxCount = 6
 	pods := make([]*corev1.Pod, 0, sandboxCount)
 	client := &fakeStatsClient{
-		err:       errors.New("bulk unavailable"),
 		statsByID: make(map[string]*runtimeapi.PodSandboxStats, sandboxCount),
 		block:     make(chan struct{}),
 	}
@@ -178,12 +210,12 @@ func TestCollectorBoundsFallbackConcurrency(t *testing.T) {
 		client.statsByID[id] = minimalPodStats(id, "ns-a", name, uid)
 	}
 	collector, err := NewCollector(CollectorConfig{
-		StatsClient:            client,
-		PodLister:              podLister(t, pods...),
-		Sink:                   &recordingSampleSink{},
-		NodeName:               "node-a",
-		FallbackMaxConcurrency: 2,
-		FallbackRequestTimeout: time.Second,
+		StatsClient:    client,
+		PodLister:      podLister(t, pods...),
+		Sink:           &recordingSampleSink{},
+		NodeName:       "node-a",
+		MaxConcurrency: 2,
+		RequestTimeout: time.Second,
 	})
 	require.NoError(t, err)
 
@@ -203,7 +235,7 @@ func TestCollectorBoundsFallbackConcurrency(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("fallback collector did not reach configured concurrency")
+			t.Fatal("collector did not reach configured concurrency")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -211,17 +243,16 @@ func TestCollectorBoundsFallbackConcurrency(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("fallback collection did not complete")
+		t.Fatal("collection did not complete")
 	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	assert.LessOrEqual(t, client.maxActive, 2)
 }
 
-func TestCollectorRotatesBoundedFallbackTargets(t *testing.T) {
+func TestCollectorRotatesBoundedTargets(t *testing.T) {
 	pods := make([]*corev1.Pod, 0, 3)
 	client := &fakeStatsClient{
-		err:       errors.New("bulk unavailable"),
 		statsByID: make(map[string]*runtimeapi.PodSandboxStats, 3),
 	}
 	for _, suffix := range []string{"a", "b", "c"} {
@@ -233,12 +264,12 @@ func TestCollectorRotatesBoundedFallbackTargets(t *testing.T) {
 		client.statsByID[id] = minimalPodStats(id, "ns-a", name, uid)
 	}
 	collector, err := NewCollector(CollectorConfig{
-		StatsClient:            client,
-		PodLister:              podLister(t, pods...),
-		Sink:                   &recordingSampleSink{},
-		NodeName:               "node-a",
-		FallbackMaxSandboxes:   2,
-		FallbackMaxConcurrency: 1,
+		StatsClient:    client,
+		PodLister:      podLister(t, pods...),
+		Sink:           &recordingSampleSink{},
+		NodeName:       "node-a",
+		MaxSandboxes:   2,
+		MaxConcurrency: 1,
 	})
 	require.NoError(t, err)
 
@@ -251,10 +282,13 @@ func TestCollectorRotatesBoundedFallbackTargets(t *testing.T) {
 func TestCollectorCountsFullQueueDrops(t *testing.T) {
 	sink := &recordingSampleSink{accept: func(sandboxobservability.RuntimeSample) bool { return false }}
 	collector, err := NewCollector(CollectorConfig{
-		StatsClient: &fakeStatsClient{stats: []*runtimeapi.PodSandboxStats{minimalPodStats("cri-a", "ns-a", "pod-a", "uid-a")}},
-		PodLister:   podLister(t, runtimeMetricPod("ns-a", "pod-a", "uid-a", "node-a", "team-a", "sandbox-a", "1")),
-		Sink:        sink,
-		NodeName:    "node-a",
+		StatsClient: &fakeStatsClient{
+			sandboxes: []*runtimeapi.PodSandbox{podSandbox("cri-a", "ns-a", "pod-a", "uid-a")},
+			statsByID: map[string]*runtimeapi.PodSandboxStats{"cri-a": minimalPodStats("cri-a", "ns-a", "pod-a", "uid-a")},
+		},
+		PodLister: podLister(t, runtimeMetricPod("ns-a", "pod-a", "uid-a", "node-a", "team-a", "sandbox-a", "1")),
+		Sink:      sink,
+		NodeName:  "node-a",
 	})
 	require.NoError(t, err)
 
@@ -266,10 +300,17 @@ func TestCollectorCountsFullQueueDrops(t *testing.T) {
 
 func TestCollectorRunCollectsImmediately(t *testing.T) {
 	called := make(chan struct{}, 1)
-	client := &fakeStatsClient{onCall: func() { called <- struct{}{} }}
+	pod := runtimeMetricPod("ns-a", "pod-a", "uid-a", "node-a", "team-a", "sandbox-a", "1")
+	client := &fakeStatsClient{
+		onList:    func() { called <- struct{}{} },
+		sandboxes: []*runtimeapi.PodSandbox{podSandbox("cri-a", "ns-a", "pod-a", "uid-a")},
+		statsByID: map[string]*runtimeapi.PodSandboxStats{
+			"cri-a": minimalPodStats("cri-a", "ns-a", "pod-a", "uid-a"),
+		},
+	}
 	collector, err := NewCollector(CollectorConfig{
 		StatsClient: client,
-		PodLister:   podLister(t),
+		PodLister:   podLister(t, pod),
 		Sink:        &recordingSampleSink{},
 		Interval:    time.Hour,
 		Random:      func() float64 { return 0.5 },
@@ -315,7 +356,10 @@ func TestCollectorUsesSharedRuntimeSampleCadenceDefaults(t *testing.T) {
 
 	assert.Equal(t, sandboxobservability.DefaultRuntimeSampleInterval, collector.interval)
 	assert.Equal(t, sandboxobservability.DefaultRuntimeSampleJitter, collector.jitter)
-	assert.Equal(t, defaultBulkRequestTimeout, collector.bulkRequestTimeout)
+	assert.Equal(t, defaultMaxConcurrency, collector.maxConcurrency)
+	assert.Equal(t, defaultMaxSandboxes, collector.maxSandboxes)
+	assert.Equal(t, defaultRequestTimeout, collector.requestTimeout)
+	assert.Equal(t, defaultCollectionBudget, collector.collectionBudget)
 }
 
 func minimalPodStats(epoch, namespace, name, uid string) *runtimeapi.PodSandboxStats {
@@ -347,46 +391,29 @@ func cpuOnlyPodStats(epoch, namespace, name, uid string, timestamp int64, cumula
 
 type fakeStatsClient struct {
 	mu              sync.Mutex
-	stats           []*runtimeapi.PodSandboxStats
-	err             error
-	calls           int
-	onCall          func()
+	listCalls       int
+	onList          func()
 	sandboxes       []*runtimeapi.PodSandbox
 	listErr         error
 	statsByID       map[string]*runtimeapi.PodSandboxStats
 	statsErrByID    map[string]error
 	perSandboxCalls []string
-	bulkBlock       chan struct{}
 	block           chan struct{}
 	active          int
 	maxActive       int
 }
 
-func (c *fakeStatsClient) ListPodSandboxStats(ctx context.Context) ([]*runtimeapi.PodSandboxStats, error) {
-	c.mu.Lock()
-	c.calls++
-	onCall := c.onCall
-	stats := c.stats
-	err := c.err
-	bulkBlock := c.bulkBlock
-	c.mu.Unlock()
-	if onCall != nil {
-		onCall()
-	}
-	if bulkBlock != nil {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-bulkBlock:
-		}
-	}
-	return stats, err
-}
-
 func (c *fakeStatsClient) ListPodSandboxes(context.Context) ([]*runtimeapi.PodSandbox, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]*runtimeapi.PodSandbox(nil), c.sandboxes...), c.listErr
+	c.listCalls++
+	onList := c.onList
+	sandboxes := append([]*runtimeapi.PodSandbox(nil), c.sandboxes...)
+	err := c.listErr
+	c.mu.Unlock()
+	if onList != nil {
+		onList()
+	}
+	return sandboxes, err
 }
 
 func (c *fakeStatsClient) PodSandboxStats(ctx context.Context, id string) (*runtimeapi.PodSandboxStats, error) {
@@ -415,10 +442,10 @@ func (c *fakeStatsClient) PodSandboxStats(ctx context.Context, id string) (*runt
 	return stats, err
 }
 
-func (c *fakeStatsClient) setStats(stats []*runtimeapi.PodSandboxStats) {
+func (c *fakeStatsClient) setStatsByID(id string, stats *runtimeapi.PodSandboxStats) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.stats = stats
+	c.statsByID[id] = stats
 }
 
 type recordingSampleSink struct {

@@ -15,14 +15,8 @@ import (
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// StatsClient exposes the CRI node-wide pod sandbox stats snapshot.
+// StatsClient exposes the bounded CRI calls used to collect claimed sandbox stats.
 type StatsClient interface {
-	ListPodSandboxStats(context.Context) ([]*runtimeapi.PodSandboxStats, error)
-}
-
-// PerSandboxStatsClient provides the bounded fallback used when a node-wide
-// CRI stats request is poisoned by one unresponsive runtime.
-type PerSandboxStatsClient interface {
 	ListPodSandboxes(context.Context) ([]*runtimeapi.PodSandbox, error)
 	PodSandboxStats(context.Context, string) (*runtimeapi.PodSandboxStats, error)
 }
@@ -34,70 +28,68 @@ type SampleSink interface {
 
 // CollectorConfig configures node identity, cadence, and producer dependencies.
 type CollectorConfig struct {
-	RegionID                 string
-	ClusterID                string
-	NodeName                 string
-	Interval                 time.Duration
-	Jitter                   time.Duration
-	BulkRequestTimeout       time.Duration
-	FallbackMaxConcurrency   int
-	FallbackMaxSandboxes     int
-	FallbackRequestTimeout   time.Duration
-	FallbackCollectionBudget time.Duration
-	Now                      func() time.Time
-	Random                   func() float64
-	Logger                   *zap.Logger
-	StatsClient              StatsClient
-	PodLister                corelisters.PodLister
-	Sink                     SampleSink
+	RegionID         string
+	ClusterID        string
+	NodeName         string
+	Interval         time.Duration
+	Jitter           time.Duration
+	MaxConcurrency   int
+	MaxSandboxes     int
+	RequestTimeout   time.Duration
+	CollectionBudget time.Duration
+	Now              func() time.Time
+	Random           func() float64
+	Logger           *zap.Logger
+	StatsClient      StatsClient
+	PodLister        corelisters.PodLister
+	Sink             SampleSink
+	Observer         *Observer
 }
 
 // Collector maps CRI pod sandbox stats to sandbox runtime samples.
 type Collector struct {
-	collectMu                sync.Mutex
-	regionID                 string
-	clusterID                string
-	nodeName                 string
-	interval                 time.Duration
-	jitter                   time.Duration
-	bulkRequestTimeout       time.Duration
-	fallbackMaxConcurrency   int
-	fallbackMaxSandboxes     int
-	fallbackRequestTimeout   time.Duration
-	fallbackCollectionBudget time.Duration
-	fallbackCursor           int
-	now                      func() time.Time
-	random                   func() float64
-	logger                   *zap.Logger
-	statsClient              StatsClient
-	podLister                corelisters.PodLister
-	sink                     SampleSink
-	cpuUsage                 *cpuUsageTracker
+	collectMu        sync.Mutex
+	regionID         string
+	clusterID        string
+	nodeName         string
+	interval         time.Duration
+	jitter           time.Duration
+	maxConcurrency   int
+	maxSandboxes     int
+	requestTimeout   time.Duration
+	collectionBudget time.Duration
+	targetCursor     int
+	now              func() time.Time
+	random           func() float64
+	logger           *zap.Logger
+	statsClient      StatsClient
+	podLister        corelisters.PodLister
+	sink             SampleSink
+	observer         *Observer
+	cpuUsage         *cpuUsageTracker
 }
 
-// CollectResult summarizes one bulk collection attempt.
+// CollectResult summarizes one bounded collection attempt.
 type CollectResult struct {
 	StatsReceived int
 	Matched       int
 	Enqueued      int
 	Dropped       int
 	Failed        int
-	Fallback      bool
 }
 
 const (
-	defaultBulkRequestTimeout       = 3 * time.Second
-	defaultFallbackMaxConcurrency   = 4
-	defaultFallbackMaxSandboxes     = 16
-	defaultFallbackRequestTimeout   = 2 * time.Second
-	defaultFallbackCollectionBudget = 10 * time.Second
+	defaultMaxConcurrency   = 4
+	defaultMaxSandboxes     = 16
+	defaultRequestTimeout   = 2 * time.Second
+	defaultCollectionBudget = 10 * time.Second
 )
 
-type fallbackTarget struct {
+type collectionTarget struct {
 	id string
 }
 
-// NewCollector creates a node-local bulk CRI runtime metric collector.
+// NewCollector creates a node-local, bounded CRI runtime metric collector.
 func NewCollector(cfg CollectorConfig) (*Collector, error) {
 	if cfg.StatsClient == nil {
 		return nil, fmt.Errorf("stats client is nil")
@@ -120,20 +112,17 @@ func NewCollector(cfg CollectorConfig) (*Collector, error) {
 	if cfg.Jitter >= cfg.Interval {
 		cfg.Jitter = cfg.Interval / 2
 	}
-	if cfg.BulkRequestTimeout <= 0 {
-		cfg.BulkRequestTimeout = defaultBulkRequestTimeout
+	if cfg.MaxConcurrency <= 0 {
+		cfg.MaxConcurrency = defaultMaxConcurrency
 	}
-	if cfg.FallbackMaxConcurrency <= 0 {
-		cfg.FallbackMaxConcurrency = defaultFallbackMaxConcurrency
+	if cfg.MaxSandboxes <= 0 {
+		cfg.MaxSandboxes = defaultMaxSandboxes
 	}
-	if cfg.FallbackMaxSandboxes <= 0 {
-		cfg.FallbackMaxSandboxes = defaultFallbackMaxSandboxes
+	if cfg.RequestTimeout <= 0 {
+		cfg.RequestTimeout = defaultRequestTimeout
 	}
-	if cfg.FallbackRequestTimeout <= 0 {
-		cfg.FallbackRequestTimeout = defaultFallbackRequestTimeout
-	}
-	if cfg.FallbackCollectionBudget <= 0 {
-		cfg.FallbackCollectionBudget = defaultFallbackCollectionBudget
+	if cfg.CollectionBudget <= 0 {
+		cfg.CollectionBudget = defaultCollectionBudget
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -145,23 +134,23 @@ func NewCollector(cfg CollectorConfig) (*Collector, error) {
 		cfg.Logger = zap.NewNop()
 	}
 	return &Collector{
-		regionID:                 cfg.RegionID,
-		clusterID:                cfg.ClusterID,
-		nodeName:                 cfg.NodeName,
-		interval:                 cfg.Interval,
-		jitter:                   cfg.Jitter,
-		bulkRequestTimeout:       cfg.BulkRequestTimeout,
-		fallbackMaxConcurrency:   cfg.FallbackMaxConcurrency,
-		fallbackMaxSandboxes:     cfg.FallbackMaxSandboxes,
-		fallbackRequestTimeout:   cfg.FallbackRequestTimeout,
-		fallbackCollectionBudget: cfg.FallbackCollectionBudget,
-		now:                      cfg.Now,
-		random:                   cfg.Random,
-		logger:                   cfg.Logger,
-		statsClient:              cfg.StatsClient,
-		podLister:                cfg.PodLister,
-		sink:                     cfg.Sink,
-		cpuUsage:                 &cpuUsageTracker{},
+		regionID:         cfg.RegionID,
+		clusterID:        cfg.ClusterID,
+		nodeName:         cfg.NodeName,
+		interval:         cfg.Interval,
+		jitter:           cfg.Jitter,
+		maxConcurrency:   cfg.MaxConcurrency,
+		maxSandboxes:     cfg.MaxSandboxes,
+		requestTimeout:   cfg.RequestTimeout,
+		collectionBudget: cfg.CollectionBudget,
+		now:              cfg.Now,
+		random:           cfg.Random,
+		logger:           cfg.Logger,
+		statsClient:      cfg.StatsClient,
+		podLister:        cfg.PodLister,
+		sink:             cfg.Sink,
+		observer:         cfg.Observer,
+		cpuUsage:         &cpuUsageTracker{},
 	}, nil
 }
 
@@ -175,7 +164,6 @@ func (c *Collector) Run(ctx context.Context) {
 		if err != nil && ctx.Err() == nil {
 			c.logger.Warn("Failed to collect some sandbox runtime metrics",
 				zap.Error(err),
-				zap.Bool("fallback", result.Fallback),
 				zap.Int("matched", result.Matched),
 				zap.Int("enqueued", result.Enqueued),
 				zap.Int("failed", result.Failed),
@@ -196,29 +184,36 @@ func (c *Collector) Run(ctx context.Context) {
 	}
 }
 
-// Collect projects one bulk CRI snapshot against the current node pod cache.
-func (c *Collector) Collect(ctx context.Context) (CollectResult, error) {
+// Collect resolves current claimed pods to CRI sandboxes and requests stats only
+// for those targets. It intentionally avoids ListPodSandboxStats because
+// containerd fans that request out to every ready sandbox on the node.
+func (c *Collector) Collect(ctx context.Context) (result CollectResult, err error) {
 	if c == nil {
 		return CollectResult{}, fmt.Errorf("collector is nil")
 	}
+	started := time.Now()
+	defer func() {
+		if c.observer != nil {
+			c.observer.ObserveCollection(time.Since(started), result, err)
+		}
+	}()
 	c.collectMu.Lock()
 	defer c.collectMu.Unlock()
 	identities, err := buildIdentityIndex(c.podLister, c.nodeName)
 	if err != nil {
 		return CollectResult{}, err
 	}
-	bulkCtx, cancel := context.WithTimeout(ctx, c.bulkRequestTimeout)
-	stats, err := c.statsClient.ListPodSandboxStats(bulkCtx)
-	cancel()
-	if err != nil {
-		return c.collectFallback(ctx, identities, fmt.Errorf("list CRI pod sandbox stats: %w", err))
+	if identities.empty() {
+		if c.cpuUsage != nil {
+			c.cpuUsage.prune(nil)
+		}
+		return CollectResult{}, nil
 	}
-	return c.projectStats(identities, stats, false)
+	return c.collectTargets(ctx, identities)
 }
 
-func (c *Collector) projectStats(identities identityIndex, stats []*runtimeapi.PodSandboxStats, fallback bool) (CollectResult, error) {
+func (c *Collector) projectStats(identities identityIndex, stats []*runtimeapi.PodSandboxStats, pruneCPUUsage bool) (CollectResult, error) {
 	result := CollectResult{StatsReceived: len(stats)}
-	result.Fallback = fallback
 	collectedAt := c.now().UTC()
 	activeCPUSeries := make(map[cpuSeriesKey]struct{})
 	if c.cpuUsage == nil {
@@ -250,37 +245,34 @@ func (c *Collector) projectStats(identities identityIndex, stats []*runtimeapi.P
 			result.Dropped++
 		}
 	}
-	if !fallback {
+	if pruneCPUUsage {
 		c.cpuUsage.prune(activeCPUSeries)
 	}
 	return result, nil
 }
 
-func (c *Collector) collectFallback(ctx context.Context, identities identityIndex, bulkErr error) (CollectResult, error) {
-	result := CollectResult{Fallback: true}
-	client, ok := c.statsClient.(PerSandboxStatsClient)
-	if !ok {
-		return result, bulkErr
-	}
-	budgetCtx, cancel := context.WithTimeout(ctx, c.fallbackCollectionBudget)
+func (c *Collector) collectTargets(ctx context.Context, identities identityIndex) (CollectResult, error) {
+	result := CollectResult{}
+	budgetCtx, cancel := context.WithTimeout(ctx, c.collectionBudget)
 	defer cancel()
-	sandboxes, err := client.ListPodSandboxes(budgetCtx)
+	sandboxes, err := c.statsClient.ListPodSandboxes(budgetCtx)
 	if err != nil {
-		return result, errors.Join(bulkErr, fmt.Errorf("list CRI pod sandboxes for fallback: %w", err))
+		return result, fmt.Errorf("list CRI pod sandboxes: %w", err)
 	}
-	allTargets := fallbackTargets(identities, sandboxes)
-	targets := c.nextFallbackTargets(allTargets)
+	allTargets := collectionTargets(identities, sandboxes)
+	targets := c.nextCollectionTargets(allTargets)
 	result.Matched = len(targets)
 	if len(targets) == 0 {
-		return result, bulkErr
+		c.cpuUsage.prune(nil)
+		return result, nil
 	}
 
-	type fallbackResult struct {
+	type targetResult struct {
 		stats *runtimeapi.PodSandboxStats
 		err   error
 	}
-	results := make([]fallbackResult, len(targets))
-	semaphore := make(chan struct{}, c.fallbackMaxConcurrency)
+	results := make([]targetResult, len(targets))
+	semaphore := make(chan struct{}, c.maxConcurrency)
 	var wg sync.WaitGroup
 dispatch:
 	for i := range targets {
@@ -296,8 +288,8 @@ dispatch:
 		go func(index int) {
 			defer wg.Done()
 			defer func() { <-semaphore }()
-			requestCtx, requestCancel := context.WithTimeout(budgetCtx, c.fallbackRequestTimeout)
-			results[index].stats, results[index].err = client.PodSandboxStats(requestCtx, targets[index].id)
+			requestCtx, requestCancel := context.WithTimeout(budgetCtx, c.requestTimeout)
+			results[index].stats, results[index].err = c.statsClient.PodSandboxStats(requestCtx, targets[index].id)
 			requestCancel()
 			if results[index].stats == nil && results[index].err == nil {
 				results[index].err = fmt.Errorf("empty CRI pod sandbox stats")
@@ -307,24 +299,25 @@ dispatch:
 	wg.Wait()
 
 	stats := make([]*runtimeapi.PodSandboxStats, 0, len(results))
-	var fallbackErr error
+	var collectionErr error
 	for i := range results {
 		if results[i].err != nil {
 			result.Failed++
-			fallbackErr = errors.Join(fallbackErr, fmt.Errorf("collect CRI pod sandbox %s stats: %w", targets[i].id, results[i].err))
+			collectionErr = errors.Join(collectionErr, fmt.Errorf("collect CRI pod sandbox %s stats: %w", targets[i].id, results[i].err))
 			continue
 		}
 		stats = append(stats, results[i].stats)
 	}
-	projected, projectErr := c.projectStats(identities, stats, true)
+	pruneCPUUsage := len(targets) == len(allTargets) && collectionErr == nil
+	projected, projectErr := c.projectStats(identities, stats, pruneCPUUsage)
 	result.StatsReceived = projected.StatsReceived
 	result.Enqueued = projected.Enqueued
 	result.Dropped = projected.Dropped
-	return result, errors.Join(bulkErr, fallbackErr, projectErr)
+	return result, errors.Join(collectionErr, projectErr)
 }
 
-func fallbackTargets(identities identityIndex, sandboxes []*runtimeapi.PodSandbox) []fallbackTarget {
-	targets := make([]fallbackTarget, 0, len(sandboxes))
+func collectionTargets(identities identityIndex, sandboxes []*runtimeapi.PodSandbox) []collectionTarget {
+	targets := make([]collectionTarget, 0, len(sandboxes))
 	seen := make(map[string]struct{}, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		if sandbox == nil || sandbox.Id == "" || sandbox.Metadata == nil ||
@@ -339,7 +332,7 @@ func fallbackTargets(identities identityIndex, sandboxes []*runtimeapi.PodSandbo
 			continue
 		}
 		seen[sandbox.Id] = struct{}{}
-		targets = append(targets, fallbackTarget{id: sandbox.Id})
+		targets = append(targets, collectionTarget{id: sandbox.Id})
 	}
 	sort.Slice(targets, func(i, j int) bool {
 		return targets[i].id < targets[j].id
@@ -347,21 +340,21 @@ func fallbackTargets(identities identityIndex, sandboxes []*runtimeapi.PodSandbo
 	return targets
 }
 
-func (c *Collector) nextFallbackTargets(targets []fallbackTarget) []fallbackTarget {
+func (c *Collector) nextCollectionTargets(targets []collectionTarget) []collectionTarget {
 	if len(targets) == 0 {
 		return nil
 	}
-	limit := c.fallbackMaxSandboxes
+	limit := c.maxSandboxes
 	if limit <= 0 || limit >= len(targets) {
-		c.fallbackCursor = 0
+		c.targetCursor = 0
 		return targets
 	}
-	start := c.fallbackCursor % len(targets)
-	selected := make([]fallbackTarget, 0, limit)
+	start := c.targetCursor % len(targets)
+	selected := make([]collectionTarget, 0, limit)
 	for i := 0; i < limit; i++ {
 		selected = append(selected, targets[(start+i)%len(targets)])
 	}
-	c.fallbackCursor = (start + limit) % len(targets)
+	c.targetCursor = (start + limit) % len(targets)
 	return selected
 }
 

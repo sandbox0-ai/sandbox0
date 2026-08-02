@@ -168,6 +168,10 @@ func newCtldRuntimeMetricsProducer(cfg *config.CtldConfig, statsClient ctldrunti
 	if err != nil {
 		return nil, fmt.Errorf("create runtime sample worker: %w", err)
 	}
+	var runtimeMetricsObserver *ctldruntimemetrics.Observer
+	if obsProvider != nil {
+		runtimeMetricsObserver = ctldruntimemetrics.NewObserver(obsProvider.MetricsRegistryOrNil())
+	}
 	collector, err := ctldruntimemetrics.NewCollector(ctldruntimemetrics.CollectorConfig{
 		RegionID:    cfg.RegionID,
 		ClusterID:   cfg.DefaultClusterId,
@@ -178,6 +182,7 @@ func newCtldRuntimeMetricsProducer(cfg *config.CtldConfig, statsClient ctldrunti
 		StatsClient: statsClient,
 		PodLister:   podLister,
 		Sink:        worker,
+		Observer:    runtimeMetricsObserver,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create runtime metric collector: %w", err)

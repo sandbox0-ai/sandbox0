@@ -46,7 +46,6 @@ type criRuntimeService interface {
 	ListContainers(ctx context.Context, in *runtimeapi.ListContainersRequest, opts ...grpc.CallOption) (*runtimeapi.ListContainersResponse, error)
 	ListPodSandbox(ctx context.Context, in *runtimeapi.ListPodSandboxRequest, opts ...grpc.CallOption) (*runtimeapi.ListPodSandboxResponse, error)
 	PodSandboxStats(ctx context.Context, in *runtimeapi.PodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.PodSandboxStatsResponse, error)
-	ListPodSandboxStats(ctx context.Context, in *runtimeapi.ListPodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.ListPodSandboxStatsResponse, error)
 }
 
 type ContainerdRuntimeConfig struct {
@@ -497,21 +496,9 @@ func normalizeContainerID(containerID string) string {
 	return containerID
 }
 
-// ListPodSandboxStats returns one bulk node-local CRI stats snapshot.
-func (r *ContainerdRuntime) ListPodSandboxStats(ctx context.Context) ([]*runtimeapi.PodSandboxStats, error) {
-	client, err := r.runtimeClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.ListPodSandboxStats(ctx, &runtimeapi.ListPodSandboxStatsRequest{})
-	if err != nil {
-		return nil, fmt.Errorf("list CRI pod sandbox stats: %w", err)
-	}
-	return resp.GetStats(), nil
-}
-
 // ListPodSandboxes returns ready node-local CRI sandboxes for isolated stats
-// fallback after a bulk stats failure.
+// collection. Callers match this cheap metadata snapshot against claimed pods
+// before requesting individual sandbox stats.
 func (r *ContainerdRuntime) ListPodSandboxes(ctx context.Context) ([]*runtimeapi.PodSandbox, error) {
 	client, err := r.runtimeClient(ctx)
 	if err != nil {

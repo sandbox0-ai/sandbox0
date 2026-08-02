@@ -239,26 +239,6 @@ func TestResolveContainerIDReturnsNotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrNotFound))
 }
 
-func TestListPodSandboxStatsUsesBulkCRIRequest(t *testing.T) {
-	want := []*runtimeapi.PodSandboxStats{{
-		Attributes: &runtimeapi.PodSandboxAttributes{Id: "sandbox-1"},
-	}}
-	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{CRIClient: fakeCRIClient{stats: want}})
-
-	got, err := runtime.ListPodSandboxStats(context.Background())
-
-	require.NoError(t, err)
-	assert.Equal(t, want, got)
-}
-
-func TestListPodSandboxStatsWrapsCRIError(t *testing.T) {
-	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{CRIClient: fakeCRIClient{err: errors.New("unavailable")}})
-
-	_, err := runtime.ListPodSandboxStats(context.Background())
-
-	require.ErrorContains(t, err, "list CRI pod sandbox stats")
-}
-
 func TestListPodSandboxesReturnsReadyCRIItems(t *testing.T) {
 	want := []*runtimeapi.PodSandbox{{
 		Id:       "sandbox-1",
@@ -326,9 +306,9 @@ func TestContainerdRuntimeReusesAndClosesCRIConnection(t *testing.T) {
 		},
 	})
 
-	_, err := runtime.ListPodSandboxStats(context.Background())
+	_, err := runtime.ListPodSandboxes(context.Background())
 	require.NoError(t, err)
-	_, err = runtime.ListPodSandboxStats(context.Background())
+	_, err = runtime.ListPodSandboxes(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), dialCount.Load())
 
@@ -408,7 +388,6 @@ func TestNormalizeContainerID(t *testing.T) {
 type fakeCRIClient struct {
 	containers []*runtimeapi.Container
 	sandboxes  []*runtimeapi.PodSandbox
-	stats      []*runtimeapi.PodSandboxStats
 	statsByID  map[string]*runtimeapi.PodSandboxStats
 	err        error
 }
@@ -417,9 +396,9 @@ type fakeRuntimeServiceServer struct {
 	runtimeapi.UnimplementedRuntimeServiceServer
 }
 
-func (*fakeRuntimeServiceServer) ListPodSandboxStats(context.Context, *runtimeapi.ListPodSandboxStatsRequest) (*runtimeapi.ListPodSandboxStatsResponse, error) {
-	return &runtimeapi.ListPodSandboxStatsResponse{Stats: []*runtimeapi.PodSandboxStats{{
-		Attributes: &runtimeapi.PodSandboxAttributes{Id: "sandbox-1"},
+func (*fakeRuntimeServiceServer) ListPodSandbox(context.Context, *runtimeapi.ListPodSandboxRequest) (*runtimeapi.ListPodSandboxResponse, error) {
+	return &runtimeapi.ListPodSandboxResponse{Items: []*runtimeapi.PodSandbox{{
+		Id: "sandbox-1",
 	}}}, nil
 }
 
@@ -442,13 +421,6 @@ func (c fakeCRIClient) PodSandboxStats(_ context.Context, req *runtimeapi.PodSan
 		return nil, c.err
 	}
 	return &runtimeapi.PodSandboxStatsResponse{Stats: c.statsByID[req.PodSandboxId]}, nil
-}
-
-func (c fakeCRIClient) ListPodSandboxStats(_ context.Context, _ *runtimeapi.ListPodSandboxStatsRequest, _ ...grpc.CallOption) (*runtimeapi.ListPodSandboxStatsResponse, error) {
-	if c.err != nil {
-		return nil, c.err
-	}
-	return &runtimeapi.ListPodSandboxStatsResponse{Stats: c.stats}, nil
 }
 
 func minimalRuntimePodStats(id string) *runtimeapi.PodSandboxStats {

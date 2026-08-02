@@ -1941,10 +1941,10 @@ type RefreshRequest struct {
 
 // RefreshResponse defines model for RefreshResponse.
 type RefreshResponse struct {
-	// ExpiresAt Soft expiration timestamp. Null means disabled or not set.
+	// ExpiresAt Soft expiration timestamp. Omitted or null means disabled or not set.
 	ExpiresAt *time.Time `json:"expires_at"`
 
-	// HardExpiresAt Hard expiration timestamp. Null means disabled or not set.
+	// HardExpiresAt Hard expiration timestamp. Omitted or null means disabled or not set.
 	HardExpiresAt *time.Time `json:"hard_expires_at"`
 	SandboxId     string     `json:"sandbox_id"`
 }
@@ -2063,10 +2063,10 @@ type Sandbox struct {
 	ClaimedAt  time.Time `json:"claimed_at"`
 	CreatedAt  time.Time `json:"created_at"`
 
-	// ExpiresAt Soft expiration timestamp. Null means disabled or not set.
+	// ExpiresAt Soft expiration timestamp. Omitted or null means disabled or not set.
 	ExpiresAt *time.Time `json:"expires_at"`
 
-	// HardExpiresAt Hard expiration timestamp. Null means disabled or not set.
+	// HardExpiresAt Hard expiration timestamp. Omitted or null means disabled or not set.
 	HardExpiresAt *time.Time           `json:"hard_expires_at"`
 	Id            string               `json:"id"`
 	Mounts        *[]ClaimMountRequest `json:"mounts,omitempty"`
@@ -2584,10 +2584,10 @@ type SandboxSummary struct {
 	ClusterId *string   `json:"cluster_id"`
 	CreatedAt time.Time `json:"created_at"`
 
-	// ExpiresAt Soft expiration timestamp. Null means disabled or not set.
+	// ExpiresAt Soft expiration timestamp. Omitted or null means disabled or not set.
 	ExpiresAt *time.Time `json:"expires_at"`
 
-	// HardExpiresAt Hard expiration timestamp. Null means disabled or not set.
+	// HardExpiresAt Hard expiration timestamp. Omitted or null means disabled or not set.
 	HardExpiresAt *time.Time `json:"hard_expires_at"`
 	Id            string     `json:"id"`
 

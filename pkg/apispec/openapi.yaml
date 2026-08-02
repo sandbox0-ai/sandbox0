@@ -5219,12 +5219,12 @@ components:
           type: string
           format: date-time
           nullable: true
-          description: Soft expiration timestamp. Null means disabled or not set.
+          description: Soft expiration timestamp. Omitted or null means disabled or not set.
         hard_expires_at:
           type: string
           format: date-time
           nullable: true
-          description: Hard expiration timestamp. Null means disabled or not set.
+          description: Hard expiration timestamp. Omitted or null means disabled or not set.
         claimed_at:
           type: string
           format: date-time
@@ -5243,8 +5243,6 @@ components:
         - auto_resume
         - pod_name
         - runtime_generation
-        - expires_at
-        - hard_expires_at
         - claimed_at
         - created_at
         - updated_at
@@ -5490,12 +5488,12 @@ components:
           type: string
           format: date-time
           nullable: true
-          description: Soft expiration timestamp. Null means disabled or not set.
+          description: Soft expiration timestamp. Omitted or null means disabled or not set.
         hard_expires_at:
           type: string
           format: date-time
           nullable: true
-          description: Hard expiration timestamp. Null means disabled or not set.
+          description: Hard expiration timestamp. Omitted or null means disabled or not set.
         updated_at:
           type: string
           format: date-time
@@ -5506,8 +5504,6 @@ components:
         - paused
         - runtime_generation
         - created_at
-        - expires_at
-        - hard_expires_at
         - updated_at
     SuccessSandboxListResponse:
       allOf:
@@ -6118,13 +6114,13 @@ components:
           type: string
           format: date-time
           nullable: true
-          description: Soft expiration timestamp. Null means disabled or not set.
+          description: Soft expiration timestamp. Omitted or null means disabled or not set.
         hard_expires_at:
           type: string
           format: date-time
           nullable: true
-          description: Hard expiration timestamp. Null means disabled or not set.
-      required: [sandbox_id, expires_at, hard_expires_at]
+          description: Hard expiration timestamp. Omitted or null means disabled or not set.
+      required: [sandbox_id]
     SuccessRefreshResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

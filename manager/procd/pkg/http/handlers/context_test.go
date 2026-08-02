@@ -35,6 +35,8 @@ type fakeProcess struct {
 	exitHandlers []process.ExitHandler
 	handlerAdded chan struct{}
 	writeErr     error
+	completionCh <-chan struct{}
+	outputRaw    string
 }
 
 func (f *fakeProcess) ID() string { return "proc-test" }
@@ -94,6 +96,8 @@ func (f *fakeProcess) GetOutput() (stdout, stderr string) {
 	defer f.mu.RUnlock()
 	return f.stdout, f.stderr
 }
+func (f *fakeProcess) OutputDone() <-chan struct{}     { return f.completionCh }
+func (f *fakeProcess) GetOutputRaw() string            { return f.outputRaw }
 func (f *fakeProcess) ResizePTY(process.PTYSize) error { return nil }
 func (f *fakeProcess) SendSignal(syscall.Signal) error { return nil }
 func (f *fakeProcess) ExitCode() (int, error) {
@@ -315,6 +319,31 @@ func TestCreateContextWaitUntilDoneCanExceedExecTimeout(t *testing.T) {
 	}
 	if !resp.Success || resp.Data.Stdout == nil || *resp.Data.Stdout != "done" {
 		t.Fatalf("response = %+v, want successful output after exec timeout", resp)
+	}
+}
+
+func TestWaitForCMDCompletionIncludesOutputCapturedBeforeWait(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	proc := &fakeProcess{
+		completionCh: done,
+		outputRaw:    "outerr",
+		finished:     true,
+		state:        process.ProcessStateCrashed,
+		processType:  process.ProcessTypeCMD,
+	}
+	_, ctx := newHandlerWithContext(proc, process.ProcessTypeCMD)
+
+	output, execErr, aborted := waitForCMDCompletion(ctx, context.Background())
+
+	if aborted {
+		t.Fatal("waitForCMDCompletion() aborted")
+	}
+	if execErr != nil {
+		t.Fatalf("waitForCMDCompletion() error = %#v", execErr)
+	}
+	if output != "outerr" {
+		t.Fatalf("waitForCMDCompletion() output = %q, want outerr", output)
 	}
 }
 

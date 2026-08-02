@@ -12,7 +12,10 @@ import (
 	"github.com/creack/pty"
 )
 
-const defaultInputCloseTimeout = 5 * time.Second
+const (
+	defaultInputCloseTimeout = 5 * time.Second
+	maxCapturedOutputBytes   = 1 << 20
+)
 
 // ProcessType defines the type of process.
 type ProcessType string
@@ -165,6 +168,14 @@ type OutputProvider interface {
 	GetOutput() (stdout, stderr string)
 }
 
+// CompletionOutputProvider exposes the merged process output after all output
+// readers have reached EOF. It is used by one-shot callers that need a stable
+// result even when the process exits before they begin waiting.
+type CompletionOutputProvider interface {
+	OutputDone() <-chan struct{}
+	GetOutputRaw() string
+}
+
 // Process interface defines the contract for all process types.
 type Process interface {
 	// Identity
@@ -212,6 +223,8 @@ type BaseProcess struct {
 	reliableOutput  chan ProcessOutput
 	outputMultiplex *MultiplexedChannel[ProcessOutput]
 	outputForwarder OutputForwarder
+	rawOutput       *limitedBuffer
+	outputDone      chan struct{}
 	startTime       time.Time
 
 	// cpuTracker tracks CPU time between samples for percentage calculation
@@ -228,6 +241,7 @@ type BaseProcess struct {
 	inputReadyOnce  sync.Once
 	inputWriterOnce sync.Once
 	inputStopOnce   sync.Once
+	outputDoneOnce  sync.Once
 }
 
 type inputOperation struct {
@@ -248,10 +262,14 @@ func NewBaseProcess(id string, processType ProcessType, config ProcessConfig) *B
 		state:           ProcessStateCreated,
 		outputMultiplex: NewMultiplexedChannel[ProcessOutput](config.BufferSize),
 		outputForwarder: defaultOutputForwarderSnapshot(),
+		outputDone:      make(chan struct{}),
 		cpuTracker:      newCPUTracker(),
 		inputQueue:      make(chan inputOperation, config.BufferSize),
 		inputReady:      make(chan struct{}),
 		inputStop:       make(chan struct{}),
+	}
+	if processType == ProcessTypeCMD {
+		bp.rawOutput = newLimitedBuffer(maxCapturedOutputBytes)
 	}
 	if processType != ProcessTypeREPL {
 		close(bp.inputReady)
@@ -447,6 +465,19 @@ func (bp *BaseProcess) ReadOutput() <-chan ProcessOutput {
 // SubscribeOutput returns a cancellable subscription to process output.
 func (bp *BaseProcess) SubscribeOutput() (<-chan ProcessOutput, func()) {
 	return bp.outputMultiplex.Fork()
+}
+
+// OutputDone closes after the process output readers have reached EOF.
+func (bp *BaseProcess) OutputDone() <-chan struct{} {
+	return bp.outputDone
+}
+
+// GetOutputRaw returns the bounded merged output captured for the process.
+func (bp *BaseProcess) GetOutputRaw() string {
+	if bp.rawOutput == nil {
+		return ""
+	}
+	return bp.rawOutput.String()
 }
 
 // SetReliableOutput installs a lossless output sink for a process owner. The
@@ -720,6 +751,9 @@ func (bp *BaseProcess) NotifyStart(event StartEvent) {
 
 // PublishOutput publishes output to all subscribers.
 func (bp *BaseProcess) PublishOutput(output ProcessOutput) {
+	if len(output.Data) > 0 && bp.rawOutput != nil {
+		bp.rawOutput.Write(output.Data)
+	}
 	bp.mu.RLock()
 	if bp.reliableOutput != nil {
 		bp.reliableOutput <- output
@@ -733,16 +767,19 @@ func (bp *BaseProcess) PublishOutput(output ProcessOutput) {
 
 // CloseOutput closes the output channel.
 func (bp *BaseProcess) CloseOutput() {
-	if forwarder, ok := bp.outputForwarderSnapshot().(FlushableOutputForwarder); ok && forwarder != nil {
-		forwarder.FlushProcessOutput(bp.descriptor())
-	}
-	bp.mu.Lock()
-	if bp.reliableOutput != nil {
-		close(bp.reliableOutput)
-		bp.reliableOutput = nil
-	}
-	bp.mu.Unlock()
-	bp.outputMultiplex.Close()
+	bp.outputDoneOnce.Do(func() {
+		if forwarder, ok := bp.outputForwarderSnapshot().(FlushableOutputForwarder); ok && forwarder != nil {
+			forwarder.FlushProcessOutput(bp.descriptor())
+		}
+		bp.mu.Lock()
+		if bp.reliableOutput != nil {
+			close(bp.reliableOutput)
+			bp.reliableOutput = nil
+		}
+		bp.mu.Unlock()
+		bp.outputMultiplex.Close()
+		close(bp.outputDone)
+	})
 }
 
 func (bp *BaseProcess) outputForwarderSnapshot() OutputForwarder {

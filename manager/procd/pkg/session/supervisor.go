@@ -88,10 +88,15 @@ func (s *Supervisor) loadPersistedSessionsLocked() error {
 	if len(s.sessions) > 0 {
 		return nil
 	}
+	loadStartedAt := time.Now()
 	stored, err := s.store.Load()
 	if err != nil {
 		return err
 	}
+	s.logger.Info("Loaded persisted session directory",
+		zap.Duration("duration", time.Since(loadStartedAt)),
+		zap.Int("sessions", len(stored)),
+	)
 	loadedSessions := make(map[string]*managedSession, len(stored))
 	loadedKeys := make(map[string]string)
 	closeLoaded := func() {
@@ -112,11 +117,24 @@ func (s *Supervisor) loadPersistedSessionsLocked() error {
 			closeLoaded()
 			return err
 		}
-		journal, err := OpenJournal(path, record.Spec.EventRetention, record.Cursor.Latest)
+		openStartedAt := time.Now()
+		journal, err := OpenJournal(path, record.Spec.EventRetention, record.Cursor)
 		if err != nil {
 			closeLoaded()
 			return fmt.Errorf("open journal for %s: %w", record.ID, err)
 		}
+		stats := journal.Stats()
+		s.logger.Info("Opened session event journal",
+			zap.String("session_id", record.ID),
+			zap.Duration("duration", time.Since(openStartedAt)),
+			zap.Int("format_version", stats.FormatVersion),
+			zap.Int("sealed_segments", stats.SealedSegments),
+			zap.Int64("active_bytes", stats.ActiveBytes),
+			zap.Int("active_events", stats.ActiveEvents),
+			zap.Int64("retained_bytes", stats.RetainedBytes),
+			zap.Bool("retained_bytes_known", stats.RetainedBytesKnown),
+			zap.Bool("legacy_deferred", stats.LegacyDeferred),
+		)
 		record.Cursor = journal.Cursor()
 		loadedSessions[record.ID] = &managedSession{record: record, journal: journal}
 	}
@@ -315,7 +333,7 @@ func (s *Supervisor) Create(spec SessionSpec, creationKey string) (*Session, boo
 		s.mu.Unlock()
 		return nil, false, err
 	}
-	journal, err := OpenJournal(path, spec.EventRetention, 0)
+	journal, err := OpenJournal(path, spec.EventRetention, EventCursor{})
 	if err != nil {
 		s.mu.Unlock()
 		return nil, false, err

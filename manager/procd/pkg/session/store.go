@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	sessionStateFile  = "state.json"
-	sessionEventsFile = "events.jsonl"
-	sandboxIDFile     = "sandbox-id"
+	sessionStateFile        = "state.json"
+	sessionLegacyEventsFile = "events.jsonl"
+	sandboxIDFile           = "sandbox-id"
 )
 
 type persistedSession struct {
@@ -163,7 +163,9 @@ func (s *FileStore) JournalPath(id string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create session directory: %w", err)
 	}
-	return filepath.Join(dir, sessionEventsFile), nil
+	// V2 derives its segmented directory from this path. Keeping the legacy
+	// filename here makes upgrades read-only and does not create new JSONL data.
+	return filepath.Join(dir, sessionLegacyEventsFile), nil
 }
 
 func (s *FileStore) sessionDir(id string) (string, error) {

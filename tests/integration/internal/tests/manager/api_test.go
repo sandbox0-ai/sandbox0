@@ -30,6 +30,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/tests/integration/internal/utils"
 	"go.uber.org/zap"
@@ -59,6 +60,7 @@ type managerTestEnvOptions struct {
 	procdClient               *service.ProcdClient
 	volumeMetadata            service.SandboxVolumeMetadataClient
 	sandboxStore              service.SandboxStore
+	rootFSHeadObserver        func(*corev1.Pod)
 	runtimeActivationObserver func(*corev1.Pod)
 }
 
@@ -185,6 +187,25 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 			return false, nil, nil
 		}
 		pod = pod.DeepCopy()
+		desiredHeadImage := pod.Annotations[controller.AnnotationRootFSHeadImage]
+		if desiredHeadImage != "" {
+			headReady := false
+			for index := range pod.Status.ContainerStatuses {
+				status := &pod.Status.ContainerStatuses[index]
+				if status.Name != runtimecontrol.ProcdContainerName {
+					continue
+				}
+				headReady = status.State.Running != nil && status.Image == desiredHeadImage
+				status.Image = desiredHeadImage
+				status.ImageID = desiredHeadImage
+				status.Ready = true
+				status.State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+				break
+			}
+			if !headReady && opts.rootFSHeadObserver != nil {
+				opts.rootFSHeadObserver(pod.DeepCopy())
+			}
+		}
 
 		assignment, revision, err := runtimecontrol.AssignmentFromPod(pod)
 		if err != nil {
@@ -436,17 +457,32 @@ func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
 	}
 }
 
-func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivation(t *testing.T) {
+func TestPausedSandboxRuntimeResumeActivatesMetadataHeadBeforeRuntime(t *testing.T) {
 	events := &orderedEvents{}
 	namespace, err := naming.TemplateNamespaceForBuiltin("default")
 	utils.RequireNoError(t, err, "resolve template namespace")
-	ctldServer := newRootFSApplyRecordingCtldServer(t, events, namespace)
-	t.Cleanup(ctldServer.Close)
 
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: namespace},
 	}
 	now := time.Now().UTC()
+	headDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	headImage := "registry.example/sandbox0/rootfs-head@" + headDigest
+	layer := &service.SandboxRootFSLayer{
+		ID:                  "layer-3",
+		SourceSandboxID:     "sandbox-1",
+		TeamID:              "team-1",
+		RuntimeGeneration:   3,
+		Snapshotter:         rootfshead.SnapshotterName,
+		SnapshotParent:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		HeadObjectDigest:    "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+		HeadObjectMediaType: rootfshead.HeadMediaType,
+		HeadObjectSize:      96,
+		HeadObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/head.json.gz",
+		HeadImageRef:        headImage,
+		HeadImageDigest:     headDigest,
+		CreatedAt:           now,
+	}
 	store := newMemorySandboxStoreForManagerIntegration(&service.SandboxRecord{
 		ID:                "sandbox-1",
 		TeamID:            "team-1",
@@ -461,22 +497,24 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 		ClaimedAt:         now,
 		CreatedAt:         now,
 	}, &service.SandboxRootFSState{
+		LayerID:             layer.ID,
 		SandboxID:           "sandbox-1",
 		TeamID:              "team-1",
 		RuntimeGeneration:   3,
 		Runtime:             "runc",
-		RuntimeHandler:      "runc",
+		RuntimeHandler:      "sandbox0-rootfs",
 		BaseImageRef:        "docker.io/sandbox0ai/otemplates:default-v0.2.0",
-		BaseImageDigest:     "sha256:base",
-		Snapshotter:         "overlayfs",
-		SnapshotParent:      "sha256:parent",
-		SnapshotParentChain: []string{"sha256:parent"},
-		DiffDigest:          "sha256:diff",
-		DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
-		DiffSize:            128,
-		DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
+		BaseImageDigest:     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Snapshotter:         rootfshead.SnapshotterName,
+		HeadObjectDigest:    layer.HeadObjectDigest,
+		HeadObjectMediaType: layer.HeadObjectMediaType,
+		HeadObjectSize:      layer.HeadObjectSize,
+		HeadObjectKey:       layer.HeadObjectKey,
+		HeadImageRef:        headImage,
+		HeadImageDigest:     headDigest,
 		CreatedAt:           now,
 		UpdatedAt:           now,
+		LayerChain:          []*service.SandboxRootFSLayer{layer},
 	})
 
 	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{
@@ -489,11 +527,11 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 			ProcdPort:              49983,
 			ProcdClientTimeout:     5 * time.Second,
 			RuntimeReadyTimeout:    5 * time.Second,
-			CtldEnabled:            true,
-			CtldPort:               8095,
-			CtldHTTPClient:         newRewriteHTTPClientForURL(t, ctldServer.URL),
 		},
 		sandboxStore: store,
+		rootFSHeadObserver: func(*corev1.Pod) {
+			events.Add("head-ready")
+		},
 		runtimeActivationObserver: func(*corev1.Pod) {
 			events.Add("runtime-ready")
 		},
@@ -524,8 +562,15 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 		t.Fatalf("paused runtime resume response = %+v, want resumed", resumeResp)
 	}
 
-	if got := events.List(); len(got) != 2 || got[0] != "apply-rootfs" || got[1] != "runtime-ready" {
-		t.Fatalf("event order = %#v, want apply-rootfs before runtime activation", got)
+	if got := events.List(); len(got) != 2 || got[0] != "head-ready" || got[1] != "runtime-ready" {
+		t.Fatalf("event order = %#v, want metadata head before runtime activation", got)
+	}
+	claimedPod, err := env.k8sClient.CoreV1().Pods(namespace).Get(context.Background(), "idle-rootfs", metav1.GetOptions{})
+	utils.RequireNoError(t, err, "get metadata-head pod")
+	if claimedPod.Spec.Containers[0].Image != headImage ||
+		claimedPod.Annotations[controller.AnnotationRootFSHeadImage] != headImage ||
+		claimedPod.Annotations[controller.AnnotationRootFSHeadLayerID] != layer.ID {
+		t.Fatalf("metadata head was not activated on warm pod: %+v", claimedPod)
 	}
 	record, err := store.GetSandbox(context.Background(), "sandbox-1")
 	if err != nil {
@@ -798,6 +843,10 @@ func addIdleReadyPodForTemplate(t *testing.T, env *managerTestEnv, template *v1a
 		},
 		Spec: corev1.PodSpec{
 			NodeName: nodeName,
+			Containers: []corev1.Container{{
+				Name:  runtimecontrol.ProcdContainerName,
+				Image: "docker.io/sandbox0ai/otemplates:default-v0.2.0",
+			}},
 			ReadinessGates: []corev1.PodReadinessGate{{
 				ConditionType: v1alpha1.SandboxPodReadinessConditionType,
 			}},
@@ -909,32 +958,6 @@ func (e *orderedEvents) List() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]string(nil), e.events...)
-}
-
-func newRootFSApplyRecordingCtldServer(t *testing.T, events *orderedEvents, namespace string) *httptest.Server {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/rootfs/apply", func(w http.ResponseWriter, r *http.Request) {
-		var req ctldapi.ApplyRootFSRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode ctld rootfs apply request: %v", err)
-		}
-		if req.Target.Namespace != namespace || req.Target.PodName != "idle-rootfs" || req.Target.ContainerName != "procd" {
-			t.Fatalf("unexpected rootfs target: %+v", req.Target)
-		}
-		if req.ExpectedRuntime != "runc" || req.ExpectedRuntimeHandler != "runc" || req.ExpectedSnapshotter != "overlayfs" {
-			t.Fatalf("unexpected rootfs runtime validation: %+v", req)
-		}
-		if req.ExpectedBaseImageDigest != "sha256:base" || len(req.ExpectedSnapshotParentChain) != 1 || req.ExpectedSnapshotParentChain[0] != "sha256:parent" {
-			t.Fatalf("unexpected rootfs base validation: %+v", req)
-		}
-		if req.Descriptor.Digest != "sha256:diff" || req.Descriptor.ObjectKey != "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar" {
-			t.Fatalf("unexpected rootfs descriptor: %+v", req.Descriptor)
-		}
-		events.Add("apply-rootfs")
-		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
-	})
-	return httptest.NewServer(mux)
 }
 
 type memorySandboxStoreForManagerIntegration struct {

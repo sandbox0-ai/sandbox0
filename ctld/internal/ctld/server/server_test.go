@@ -55,13 +55,8 @@ func (c *recordingController) InspectRootFS(_ *http.Request, req ctldapi.Inspect
 func (c *recordingController) SaveRootFS(_ *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
 	c.rootFSTarget = req.Target
 	return ctldapi.SaveRootFSResponse{
-		Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
+		Checkpoint: ctldapi.RootFSCheckpointDescriptor{},
 	}, http.StatusOK
-}
-
-func (c *recordingController) ApplyRootFS(_ *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
-	c.rootFSTarget = req.Target
-	return ctldapi.ApplyRootFSResponse{Applied: true}, http.StatusOK
 }
 
 func TestNewMuxRoutesPauseResume(t *testing.T) {
@@ -204,21 +199,7 @@ func TestNewMuxRoutesRootFS(t *testing.T) {
 				t.Helper()
 				var resp ctldapi.SaveRootFSResponse
 				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "rootfs/diff.tar", resp.Descriptor.ObjectKey)
-			},
-		},
-		{
-			name: "apply",
-			path: "/api/v1/rootfs/apply",
-			body: ctldapi.ApplyRootFSRequest{
-				Target:     target,
-				Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
-			},
-			want: func(t *testing.T, body []byte) {
-				t.Helper()
-				var resp ctldapi.ApplyRootFSResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.True(t, resp.Applied)
+				assert.Empty(t, resp.Checkpoint.Reference.HeadID)
 			},
 		},
 	}

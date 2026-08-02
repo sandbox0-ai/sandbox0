@@ -151,6 +151,8 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "forbidden")
 	case apierrors.IsConflict(err):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+	case errors.Is(err, service.ErrRootFSHeadMigrationRequired):
+		spec.JSONError(c, http.StatusConflict, codeRootFSHeadMigrationRequired, err.Error())
 	case errors.Is(err, service.ErrSandboxRootFSRequiresPausedSandbox):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox rootfs operation requires a paused sandbox")
 	case errors.Is(err, service.ErrSandboxRootFSSourceRequiresRunningOrPaused):

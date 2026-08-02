@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
@@ -66,7 +67,7 @@ func TestPatchClaimedPodMetadataChangesOnlyManagerOwnedMetadata(t *testing.T) {
 
 	client := fake.NewSimpleClientset(original.DeepCopy())
 	service := &SandboxService{k8sClient: client}
-	patched, err := service.patchClaimedPodMetadata(context.Background(), original, claimed)
+	patched, err := service.patchClaimedPod(context.Background(), original, claimed)
 	if err != nil {
 		t.Fatalf("patchClaimedPodMetadata() error = %v", err)
 	}
@@ -118,6 +119,56 @@ func TestPatchClaimedPodMetadataChangesOnlyManagerOwnedMetadata(t *testing.T) {
 	assertClaimPatchOperation(t, operations, "remove", "/metadata/ownerReferences/0")
 }
 
+func TestPatchClaimedPodReplacesOnlyProcdImageForMetadataHead(t *testing.T) {
+	original := newClaimTestPod("sandbox-a", "idle-a", "default", true)
+	original.UID = types.UID("pod-uid")
+	original.Spec.Containers[0].Image = "example.com/procd:base"
+	original.Spec.Containers = append(original.Spec.Containers, corev1.Container{
+		Name:  "sidecar",
+		Image: "example.com/sidecar:v1",
+	})
+	claimed := original.DeepCopy()
+	claimed.Labels[controller.LabelPoolType] = controller.PoolTypeActive
+	claimed.Spec.Containers[procdContainerIndex(claimed.Spec.Containers)].Image =
+		"example.com/rootfs/head@sha256:" + strings.Repeat("a", 64)
+	claimed.Spec.Containers[1].Image = "example.com/sidecar:v2"
+
+	client := fake.NewSimpleClientset(original.DeepCopy())
+	service := &SandboxService{k8sClient: client}
+	patched, err := service.patchClaimedPod(context.Background(), original, claimed)
+	if err != nil {
+		t.Fatalf("patchClaimedPod() error = %v", err)
+	}
+	if got := patched.Spec.Containers[0].Image; got != claimed.Spec.Containers[0].Image {
+		t.Fatalf("procd image = %q, want %q", got, claimed.Spec.Containers[0].Image)
+	}
+	if got := patched.Spec.Containers[1].Image; got != original.Spec.Containers[1].Image {
+		t.Fatalf("sidecar image = %q, want unchanged %q", got, original.Spec.Containers[1].Image)
+	}
+
+	var patchAction k8stesting.PatchAction
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "patch" {
+			patchAction = action.(k8stesting.PatchAction)
+		}
+	}
+	if patchAction == nil {
+		t.Fatal("claim did not issue a pod patch")
+	}
+	var operations []claimMetadataPatchOperation
+	if err := json.Unmarshal(patchAction.GetPatch(), &operations); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+	for _, operation := range operations {
+		if strings.HasPrefix(operation.Path, "/spec/") &&
+			operation.Path != "/spec/containers/0/image" {
+			t.Fatalf("unexpected spec patch operation: %#v", operation)
+		}
+	}
+	assertClaimPatchOperation(t, operations, "test", "/spec/containers/0/image")
+	assertClaimPatchOperation(t, operations, "replace", "/spec/containers/0/image")
+}
+
 func TestPatchClaimedPodMetadataRejectsAlreadyClaimedPod(t *testing.T) {
 	original := newClaimTestPod("sandbox-a", "idle-a", "default", true)
 	original.UID = types.UID("pod-uid")
@@ -128,10 +179,10 @@ func TestPatchClaimedPodMetadataRejectsAlreadyClaimedPod(t *testing.T) {
 
 	client := fake.NewSimpleClientset(original.DeepCopy())
 	service := &SandboxService{k8sClient: client}
-	if _, err := service.patchClaimedPodMetadata(context.Background(), original, claimed); err != nil {
+	if _, err := service.patchClaimedPod(context.Background(), original, claimed); err != nil {
 		t.Fatalf("first patchClaimedPodMetadata() error = %v", err)
 	}
-	if _, err := service.patchClaimedPodMetadata(context.Background(), original, claimed); err == nil {
+	if _, err := service.patchClaimedPod(context.Background(), original, claimed); err == nil {
 		t.Fatal("second patchClaimedPodMetadata() error = nil, want stale idle-label precondition failure")
 	}
 }
@@ -150,7 +201,7 @@ func TestPatchClaimedPodMetadataUsesHotClaimClient(t *testing.T) {
 		k8sClient:         sharedClient,
 		hotClaimK8sClient: hotClaimClient,
 	}
-	if _, err := service.patchClaimedPodMetadata(context.Background(), original, claimed); err != nil {
+	if _, err := service.patchClaimedPod(context.Background(), original, claimed); err != nil {
 		t.Fatalf("patchClaimedPodMetadata() error = %v", err)
 	}
 	if actions := sharedClient.Actions(); len(actions) != 0 {

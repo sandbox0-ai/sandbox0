@@ -72,6 +72,10 @@ func (c *CtldClient) SaveRootFSWithTimeout(ctx context.Context, ctldAddress stri
 	return c.apiWithTimeout(timeout).SaveRootFS(ctx, ctldAddress, req)
 }
 
+func (c *CtldClient) BindRootFSSyncWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.BindRootFSSyncRequest, timeout time.Duration) (*ctldapi.BindRootFSSyncResponse, error) {
+	return c.apiWithTimeout(timeout).BindRootFSSync(ctx, ctldAddress, req)
+}
+
 func (c *CtldClient) PrepareRootFSSnapshotWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.PrepareRootFSSnapshotRequest, timeout time.Duration) (*ctldapi.PrepareRootFSSnapshotResponse, error) {
 	return c.apiWithTimeout(timeout).PrepareRootFSSnapshot(ctx, ctldAddress, req)
 }
@@ -82,14 +86,6 @@ func (c *CtldClient) PublishRootFSSnapshotWithTimeout(ctx context.Context, ctldA
 
 func (c *CtldClient) AbortRootFSSnapshotWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.AbortRootFSSnapshotRequest, timeout time.Duration) (*ctldapi.AbortRootFSSnapshotResponse, error) {
 	return c.apiWithTimeout(timeout).AbortRootFSSnapshot(ctx, ctldAddress, req)
-}
-
-func (c *CtldClient) ApplyRootFS(ctx context.Context, ctldAddress string, req ctldapi.ApplyRootFSRequest) (*ctldapi.ApplyRootFSResponse, error) {
-	return c.apiOrDefault().ApplyRootFS(ctx, ctldAddress, req)
-}
-
-func (c *CtldClient) ApplyRootFSWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.ApplyRootFSRequest, timeout time.Duration) (*ctldapi.ApplyRootFSResponse, error) {
-	return c.apiWithTimeout(timeout).ApplyRootFS(ctx, ctldAddress, req)
 }
 
 func (c *CtldClient) apiOrDefault() *ctldapi.Client {

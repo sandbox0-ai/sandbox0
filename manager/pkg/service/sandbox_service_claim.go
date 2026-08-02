@@ -49,7 +49,12 @@ type ClaimRequest struct {
 	// HardExpiresAt preserves the absolute hard deadline when recreating a paused sandbox.
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
-	WebhookStateVolumeID              string `json:"-"`
+	WebhookStateVolumeID string `json:"-"`
+	// RootFSHeadImageRef replaces only procd's image when activating a persisted
+	// rootfs on either a warm or cold pod.
+	RootFSHeadImageRef                string `json:"-"`
+	RootFSHeadLayerID                 string `json:"-"`
+	RootFSBaseImageRef                string `json:"-"`
 	mayHaveExistingCredentialBindings bool
 }
 
@@ -426,6 +431,12 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	if req.RuntimeGeneration <= 0 {
 		req.RuntimeGeneration = 1
 	}
+	phaseStarted = time.Now()
+	if err := s.prepareClaimRootFSHead(ctx, req); err != nil {
+		s.observeClaimPhase(req.Template, "unknown", "prepare_rootfs_head", phaseStarted, err)
+		return nil, fmt.Errorf("prepare rootfs head: %w", err)
+	}
+	s.observeClaimPhase(req.Template, "unknown", "prepare_rootfs_head", phaseStarted, nil)
 
 	phaseStarted = time.Now()
 	if err := validateClaimMountsForTemplate(req, template); err != nil {
@@ -529,6 +540,18 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	assignedPodUID := pod.UID
+	if req.RootFSHeadImageRef != "" {
+		phaseStarted = time.Now()
+		pod, err = s.waitForPodRootFSHeadReady(ctx, pod.Namespace, pod.Name, req.RootFSHeadImageRef, req.RootFSHeadLayerID)
+		s.observeClaimPhase(req.Template, claimType, "wait_for_rootfs_head", phaseStarted, err)
+		if err != nil {
+			s.requestSandboxDeletionAfterClaimFailure(pod, "rootfs head activation failed")
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("wait for rootfs head: %w", err)
+		}
+	}
 
 	claimRecordPersisted := false
 	cleanupClaimFailure := func(pod *corev1.Pod, reason string) {
@@ -637,6 +660,17 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			return nil, fmt.Errorf("persist sandbox: %w", persistErr)
 		}
 		claimRecordPersisted = true
+	}
+
+	phaseStarted = time.Now()
+	err = s.bindSandboxRootFSSync(ctx, pod, req)
+	s.observeClaimPhase(req.Template, claimType, "bind_rootfs_sync", phaseStarted, err)
+	if err != nil {
+		cleanupClaimFailure(pod, "rootfs sync bind failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("bind rootfs sync: %w", err)
 	}
 
 	phaseStarted = time.Now()
@@ -770,9 +804,15 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 	if state == nil {
 		return pod, true, fmt.Errorf("%w: snapshot %s", ErrRootFSFilesystemNotFound, snapshotID)
 	}
-	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, state, SandboxStatusStarting)
-	if err != nil {
+	if err := configureClaimRootFSHead(req, state); err != nil {
 		return pod, true, err
+	}
+	if pod.Annotations[controller.AnnotationRootFSHeadLayerID] != req.RootFSHeadLayerID {
+		return pod, true, fmt.Errorf(
+			"claimed pod rootfs head %q does not match restored snapshot head %q",
+			pod.Annotations[controller.AnnotationRootFSHeadLayerID],
+			req.RootFSHeadLayerID,
+		)
 	}
 	return pod, true, nil
 }
@@ -1193,6 +1233,10 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		} else {
 			delete(pod.Annotations, controller.AnnotationWebhookStateVolumeID)
 		}
+		if err := applyClaimRootFSHeadToPod(pod, req); err != nil {
+			rollbackStateVolume()
+			return err
+		}
 		applyClaimMetadata(pod, req.Metadata)
 
 		// Set expiration annotations. Explicit 0 disables TTLs; omitted TTL uses the configured default.
@@ -1235,7 +1279,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		// Claim through a metadata-only compare-and-swap patch. This avoids
 		// replacing status/spec fields owned by kubelet or other controllers.
-		updatedPod, updateErr := s.patchClaimedPodMetadata(ctx, originalIdlePod, pod)
+		updatedPod, updateErr := s.patchClaimedPod(ctx, originalIdlePod, pod)
 		if updateErr != nil {
 			rollbackStateVolume()
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1359,12 +1403,12 @@ func isClaimMetadataPatchPreconditionFailure(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "testing value /metadata/") &&
+	if (strings.Contains(msg, "testing value /metadata/") || strings.Contains(msg, "testing value /spec/containers/")) &&
 		strings.Contains(msg, "failed: test failed") {
 		return true
 	}
 	if strings.Contains(msg, "test operation does not apply") &&
-		strings.Contains(msg, "/metadata/") {
+		(strings.Contains(msg, "/metadata/") || strings.Contains(msg, "/spec/containers/")) {
 		return true
 	}
 	return false
@@ -1485,6 +1529,14 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 			Annotations: annotations,
 		},
 		Spec: spec,
+	}
+	if err := applyClaimRootFSHeadToPod(pod, req); err != nil {
+		rollbackStateVolume()
+		return nil, err
+	}
+	if err := applyColdRootFSBaseImageVolume(pod, req); err != nil {
+		rollbackStateVolume()
+		return nil, err
 	}
 	applyClaimMetadata(pod, req.Metadata)
 

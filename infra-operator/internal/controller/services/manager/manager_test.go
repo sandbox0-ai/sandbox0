@@ -164,7 +164,7 @@ func TestBuildConfigPropagatesNetworkMITMCASecretName(t *testing.T) {
 	})
 }
 
-func TestBuildConfigPreservesSandboxRuntimeClassName(t *testing.T) {
+func TestBuildConfigUsesRootFSSnapshotterRuntimeClassName(t *testing.T) {
 	reconciler := newManagerTestReconciler(t)
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
@@ -183,9 +183,11 @@ func TestBuildConfigPreservesSandboxRuntimeClassName(t *testing.T) {
 				},
 			},
 			Services: &infrav1alpha1.ServicesConfig{
-				Manager: &infrav1alpha1.ManagerServiceConfig{
-					Config: &infrav1alpha1.ManagerConfig{
-						SandboxRuntimeClassName: "kata-shared",
+				Manager: &infrav1alpha1.ManagerServiceConfig{},
+				Ctld: &infrav1alpha1.CtldServiceConfig{
+					RootFSSnapshotter: infrav1alpha1.RootFSSnapshotterConfig{
+						RuntimeClassName: "kata-rootfs",
+						Handler:          "sandbox0-kata",
 					},
 				},
 			},
@@ -196,8 +198,8 @@ func TestBuildConfigPreservesSandboxRuntimeClassName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
-	if cfg.SandboxRuntimeClassName != "kata-shared" {
-		t.Fatalf("sandbox runtime class = %q, want kata-shared", cfg.SandboxRuntimeClassName)
+	if cfg.SandboxRuntimeClassName != "kata-rootfs" {
+		t.Fatalf("sandbox runtime class = %q, want kata-rootfs", cfg.SandboxRuntimeClassName)
 	}
 }
 

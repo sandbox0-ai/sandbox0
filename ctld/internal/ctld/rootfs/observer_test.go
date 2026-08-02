@@ -11,16 +11,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRootFSObserverRegistersOperationPhaseSizeAndCacheMetrics(t *testing.T) {
+func TestRootFSObserverRegistersSaveOperationPhaseAndSizeMetrics(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	observer := NewObserver(registry, nil)
-	observer.ObservePhaseDuration("apply", "tar_filter", 25*time.Millisecond, nil)
-	observer.ObserveCache("hit")
-	observer.ObserveOperation("apply", ctldapi.RootFSContainerRef{
+	observer.ObservePhaseDuration("save", "diff_create", 25*time.Millisecond, nil)
+	observer.ObserveOperation("save", ctldapi.RootFSContainerRef{
 		Namespace:     "tpl-default",
 		PodName:       "sandbox-pod",
 		ContainerName: "procd",
-	}, 2, 2048, 1024, -1, time.Now().Add(-time.Second), http.StatusOK, "")
+	}, 2048, 1024, -1, time.Now().Add(-time.Second), http.StatusOK, "")
 
 	families, err := registry.Gather()
 	require.NoError(t, err)
@@ -32,8 +31,6 @@ func TestRootFSObserverRegistersOperationPhaseSizeAndCacheMetrics(t *testing.T) 
 		"ctld_rootfs_operation_duration_seconds",
 		"ctld_rootfs_phase_duration_seconds",
 		"ctld_rootfs_checkpoint_bytes",
-		"ctld_rootfs_checkpoint_chain_depth",
-		"ctld_rootfs_object_cache_requests_total",
 	} {
 		_, ok := names[name]
 		assert.True(t, ok, "metric family %s is registered", name)
@@ -47,7 +44,7 @@ func TestRootFSObserverRegistersOperationPhaseSizeAndCacheMetrics(t *testing.T) 
 			for _, label := range metric.GetLabel() {
 				labels[label.GetName()] = label.GetValue()
 			}
-			if labels["operation"] == "apply" && labels["kind"] == "excluded" {
+			if labels["operation"] == "save" && labels["kind"] == "excluded" {
 				assert.Equal(t, uint64(1), metric.GetHistogram().GetSampleCount())
 				assert.Equal(t, float64(1024), metric.GetHistogram().GetSampleSum())
 				return

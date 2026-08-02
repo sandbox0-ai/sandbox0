@@ -221,6 +221,28 @@ func (s *memorySandboxStore) GetLatestRootFSState(_ context.Context, sandboxID s
 	return cloneSandboxRootFSState(s.rootFSStates[sandboxID]), nil
 }
 
+func (s *memorySandboxStore) GetRootFSLayerChainByHead(_ context.Context, teamID, headLayerID string) ([]*SandboxRootFSLayer, error) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, state := range s.rootFSStates {
+		if state == nil || strings.TrimSpace(state.TeamID) != strings.TrimSpace(teamID) {
+			continue
+		}
+		chain := state.LayerChain
+		if len(chain) == 0 && strings.TrimSpace(state.LayerID) == strings.TrimSpace(headLayerID) {
+			chain = []*SandboxRootFSLayer{rootFSLayerFromState(state)}
+		}
+		if len(chain) == 0 || chain[len(chain)-1] == nil || strings.TrimSpace(chain[len(chain)-1].ID) != strings.TrimSpace(headLayerID) {
+			continue
+		}
+		return cloneSandboxRootFSLayers(chain), nil
+	}
+	return nil, nil
+}
+
 func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error {
 	if s == nil {
 		return ErrSandboxRecordNotFound
@@ -697,21 +719,24 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 	failedPod.Status.Phase = corev1.PodFailed
 	idlePod := newClaimTestPod("tpl-default", "idle-pod", "default", true)
 	indexer := newClaimTestPodIndexer(t, failedPod, idlePod)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
-		"sandbox-a": {
-			ID:                  "sandbox-a",
-			TeamID:              "team-a",
-			UserID:              "user-a",
-			TemplateID:          "default",
-			TemplateName:        "default",
-			TemplateNamespace:   "tpl-default",
-			Status:              SandboxStatusRunning,
-			CurrentPodName:      failedPod.Name,
-			CurrentPodNamespace: failedPod.Namespace,
-			RuntimeGeneration:   3,
-			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-a": {
+				ID:                  "sandbox-a",
+				TeamID:              "team-a",
+				UserID:              "user-a",
+				TemplateID:          "default",
+				TemplateName:        "default",
+				TemplateNamespace:   "tpl-default",
+				Status:              SandboxStatusRunning,
+				CurrentPodName:      failedPod.Name,
+				CurrentPodNamespace: failedPod.Namespace,
+				RuntimeGeneration:   3,
+				TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+			},
 		},
-	}}
+		rootFSStates: map[string]*SandboxRootFSState{"sandbox-a": rootFSTestMetadataHeadState("sandbox-a", "team-a")},
+	}
 	client := fake.NewSimpleClientset(failedPod.DeepCopy(), idlePod.DeepCopy())
 	deletedFailedPod := false
 	client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -867,21 +892,24 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.PodIP = "10.0.0.4"
 	markRuntimeIdentityPodReady(t, pod)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
-		"sandbox-a": {
-			ID:                  "sandbox-a",
-			TeamID:              "team-a",
-			UserID:              "user-a",
-			TemplateID:          "default",
-			TemplateName:        "default",
-			TemplateNamespace:   "tpl-default",
-			Status:              SandboxStatusStarting,
-			CurrentPodName:      "pod-a",
-			CurrentPodNamespace: "ns-a",
-			RuntimeGeneration:   4,
-			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-a": {
+				ID:                  "sandbox-a",
+				TeamID:              "team-a",
+				UserID:              "user-a",
+				TemplateID:          "default",
+				TemplateName:        "default",
+				TemplateNamespace:   "tpl-default",
+				Status:              SandboxStatusStarting,
+				CurrentPodName:      "pod-a",
+				CurrentPodNamespace: "ns-a",
+				RuntimeGeneration:   4,
+				TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+			},
 		},
-	}}
+		rootFSStates: map[string]*SandboxRootFSState{"sandbox-a": rootFSTestMetadataHeadState("sandbox-a", "team-a")},
+	}
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(pod.DeepCopy()),
 		podLister:    runtimeIdentityPodLister(t, pod),
@@ -907,19 +935,22 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 
 func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecordWithoutPod(t *testing.T) {
 	idlePod := newClaimTestPod("tpl-default", "idle-a", "default", true)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
-		"sandbox-a": {
-			ID:                "sandbox-a",
-			TeamID:            "team-a",
-			UserID:            "user-a",
-			TemplateID:        "default",
-			TemplateName:      "default",
-			TemplateNamespace: "tpl-default",
-			Status:            SandboxStatusStarting,
-			RuntimeGeneration: 3,
-			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-a": {
+				ID:                "sandbox-a",
+				TeamID:            "team-a",
+				UserID:            "user-a",
+				TemplateID:        "default",
+				TemplateName:      "default",
+				TemplateNamespace: "tpl-default",
+				Status:            SandboxStatusStarting,
+				RuntimeGeneration: 3,
+				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+			},
 		},
-	}}
+		rootFSStates: map[string]*SandboxRootFSState{"sandbox-a": rootFSTestMetadataHeadState("sandbox-a", "team-a")},
+	}
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
 	client.PrependReactor("patch", "pods", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		if store.pauses != 1 {
@@ -1085,19 +1116,22 @@ func TestResumeSandboxSingleflightPreventsConcurrentSandboxLocks(t *testing.T) {
 
 func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing.T) {
 	idlePod := newClaimTestPod("tpl-default", "idle-a", "default", true)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
-		"sandbox-a": {
-			ID:                "sandbox-a",
-			TeamID:            "team-a",
-			UserID:            "user-a",
-			TemplateID:        "default",
-			TemplateName:      "default",
-			TemplateNamespace: "tpl-default",
-			Status:            SandboxStatusPaused,
-			RuntimeGeneration: 3,
-			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+	store := &memorySandboxStore{
+		records: map[string]*SandboxRecord{
+			"sandbox-a": {
+				ID:                "sandbox-a",
+				TeamID:            "team-a",
+				UserID:            "user-a",
+				TemplateID:        "default",
+				TemplateName:      "default",
+				TemplateNamespace: "tpl-default",
+				Status:            SandboxStatusPaused,
+				RuntimeGeneration: 3,
+				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+			},
 		},
-	}}
+		rootFSStates: map[string]*SandboxRootFSState{"sandbox-a": rootFSTestMetadataHeadState("sandbox-a", "team-a")},
+	}
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
 	observedTxn := make(chan *SandboxLifecycleTxn, 1)
 	client.PrependReactor("patch", "pods", func(_ ktesting.Action) (bool, runtime.Object, error) {

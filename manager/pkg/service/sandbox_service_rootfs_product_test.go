@@ -10,6 +10,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -174,53 +175,7 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 
 func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSource(t *testing.T) {
 	now := time.Now().UTC()
-	var prepareReq ctldapi.PrepareRootFSSnapshotRequest
-	var publishReq ctldapi.PublishRootFSSnapshotRequest
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/rootfs/snapshots/prepare":
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&prepareReq))
-			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
-				Handle: "handle-1",
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff-v2",
-					Size:      456,
-				},
-			}))
-		case "/api/v1/rootfs/snapshots/publish":
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&publishReq))
-			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
-				Published: true,
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff-v2",
-					Size:      456,
-					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff-v2.tar",
-				},
-			}))
-		default:
-			t.Fatalf("unexpected ctld path %s", r.URL.Path)
-		}
-	}))
+	ctld, recorder := newRootFSProductCheckpointServer(t)
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
@@ -247,6 +202,7 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
 	}
+	configureRootFSHeadTestDependencies(t, svc)
 	var procdCalls []string
 	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
 
@@ -258,9 +214,8 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 	require.NotNil(t, snapshot)
 	assert.Equal(t, "sandbox-1", snapshot.SandboxID)
 	assert.Equal(t, "running-state", snapshot.Name)
-	assert.Equal(t, "layer-v1", prepareReq.ParentLayerID)
-	assert.Equal(t, "sandbox-1", publishReq.SandboxID)
-	assert.Equal(t, int64(3), publishReq.ExpectedRuntimeGeneration)
+	assert.Equal(t, "sandbox-1", recorder.Prepare.SandboxID)
+	assert.Equal(t, "handle-1", recorder.Publish.Handle)
 	assert.Equal(t, []string{"barrier:true", "pause", "resume", "barrier:false"}, procdCalls)
 
 	sourceRecord := store.records["sandbox-1"]
@@ -274,7 +229,7 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 	require.NotNil(t, sourceState)
 	assert.NotEqual(t, "layer-v1", sourceState.LayerID)
 	assert.Equal(t, int64(3), sourceState.RuntimeGeneration)
-	assert.Equal(t, "sha256:diff-v2", sourceState.DiffDigest)
+	assert.Equal(t, recorder.Checkpoint.Reference.Manifest.Digest, sourceState.HeadObjectDigest)
 	storedSnapshot := store.rootFSSnapshots[snapshot.ID]
 	require.NotNil(t, storedSnapshot)
 	assert.Equal(t, sourceState.LayerID, storedSnapshot.HeadLayerID)
@@ -286,53 +241,7 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 
 func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t *testing.T) {
 	now := time.Now().UTC()
-	var prepareReq ctldapi.PrepareRootFSSnapshotRequest
-	var publishReq ctldapi.PublishRootFSSnapshotRequest
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/rootfs/snapshots/prepare":
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&prepareReq))
-			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
-				Handle: "handle-1",
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff-v2",
-					Size:      456,
-				},
-			}))
-		case "/api/v1/rootfs/snapshots/publish":
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&publishReq))
-			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
-				Published: true,
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff-v2",
-					Size:      456,
-					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff-v2.tar",
-				},
-			}))
-		default:
-			t.Fatalf("unexpected ctld path %s", r.URL.Path)
-		}
-	}))
+	ctld, recorder := newRootFSProductCheckpointServer(t)
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
@@ -359,6 +268,7 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
 	}
+	configureRootFSHeadTestDependencies(t, svc)
 	var procdCalls []string
 	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
 
@@ -370,9 +280,8 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 	assert.Equal(t, "sandbox-1", forkResp.SourceSandboxID)
 	assert.Equal(t, SandboxStatusPaused, forkResp.Sandbox.Status)
 	assert.Equal(t, "user-2", forkResp.Sandbox.UserID)
-	assert.Equal(t, "layer-v1", prepareReq.ParentLayerID)
-	assert.Equal(t, "sandbox-1", publishReq.SandboxID)
-	assert.Equal(t, int64(3), publishReq.ExpectedRuntimeGeneration)
+	assert.Equal(t, "sandbox-1", recorder.Prepare.SandboxID)
+	assert.Equal(t, "handle-1", recorder.Publish.Handle)
 	assert.Equal(t, []string{"barrier:true", "pause", "resume", "barrier:false"}, procdCalls)
 
 	sourceRecord := store.records["sandbox-1"]
@@ -386,7 +295,7 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 	require.NotNil(t, sourceState)
 	assert.NotEqual(t, "layer-v1", sourceState.LayerID)
 	assert.Equal(t, int64(3), sourceState.RuntimeGeneration)
-	assert.Equal(t, "sha256:diff-v2", sourceState.DiffDigest)
+	assert.Equal(t, recorder.Checkpoint.Reference.Manifest.Digest, sourceState.HeadObjectDigest)
 	forkState := store.rootFSStates[forkResp.Sandbox.ID]
 	require.NotNil(t, forkState)
 	assert.Equal(t, sourceState.LayerID, forkState.LayerID)
@@ -804,6 +713,48 @@ func rootFSProductTestService(store *memorySandboxStore) *SandboxService {
 	}
 }
 
+type rootFSProductCheckpointRecorder struct {
+	Prepare    ctldapi.PrepareRootFSSnapshotRequest
+	Publish    ctldapi.PublishRootFSSnapshotRequest
+	Checkpoint ctldapi.RootFSCheckpointDescriptor
+}
+
+func newRootFSProductCheckpointServer(t *testing.T) (*httptest.Server, *rootFSProductCheckpointRecorder) {
+	t.Helper()
+	recorder := &rootFSProductCheckpointRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		info := ctldapi.RootFSInfo{
+			Runtime:             "runc",
+			RuntimeHandler:      "io.containerd.runc.v2",
+			BaseImageRef:        "docker.io/library/busybox:1.36",
+			BaseImageDigest:     rootFSTestBaseDigest,
+			Snapshotter:         rootfshead.SnapshotterName,
+			SnapshotParent:      "parent-1",
+			SnapshotParentChain: []string{"parent-1", "parent-0"},
+		}
+		switch r.URL.Path {
+		case "/api/v1/rootfs/snapshots/prepare":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&recorder.Prepare))
+			recorder.Checkpoint, _ = rootFSTestCheckpoint(t, recorder.Prepare.HeadID)
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+				Handle:     "handle-1",
+				Info:       info,
+				Checkpoint: recorder.Checkpoint,
+			}))
+		case "/api/v1/rootfs/snapshots/publish":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&recorder.Publish))
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+				Published:  true,
+				Info:       info,
+				Checkpoint: recorder.Checkpoint,
+			}))
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
+	}))
+	return server, recorder
+}
+
 func rootFSProductTestRecord(id, teamID, status string, now time.Time) *SandboxRecord {
 	return &SandboxRecord{
 		ID:                id,
@@ -821,19 +772,23 @@ func rootFSProductTestRecord(id, teamID, status string, now time.Time) *SandboxR
 }
 
 func rootFSProductTestState(sandboxID, teamID, layerID string) *SandboxRootFSState {
+	objectKey := "sandbox-rootfs/cow-v2/teams/" + teamID + "/filesystems/" + sandboxID + "/heads/sha256/head"
 	return &SandboxRootFSState{
-		LayerID:           layerID,
-		SandboxID:         sandboxID,
-		TeamID:            teamID,
-		RuntimeGeneration: 1,
-		Runtime:           "runc",
-		BaseImageRef:      "docker.io/library/busybox:1.36",
-		BaseImageDigest:   "sha256:base",
-		Snapshotter:       "overlayfs",
-		DiffDigest:        "sha256:" + layerID,
-		DiffObjectKey:     "rootfs/" + layerID + ".tar",
-		CreatedAt:         time.Now().UTC(),
-		UpdatedAt:         time.Now().UTC(),
+		LayerID:             layerID,
+		SandboxID:           sandboxID,
+		TeamID:              teamID,
+		RuntimeGeneration:   1,
+		Runtime:             "runc",
+		BaseImageRef:        "docker.io/library/busybox:1.36",
+		BaseImageDigest:     rootFSTestBaseDigest,
+		Snapshotter:         rootfshead.SnapshotterName,
+		SnapshotParent:      "parent-1",
+		HeadObjectDigest:    rootFSTestDiffDigest,
+		HeadObjectMediaType: rootfshead.HeadMediaType,
+		HeadObjectSize:      123,
+		HeadObjectKey:       objectKey,
+		CreatedAt:           time.Now().UTC(),
+		UpdatedAt:           time.Now().UTC(),
 	}
 }
 

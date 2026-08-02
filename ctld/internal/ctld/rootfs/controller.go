@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfscow"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
@@ -26,10 +27,7 @@ var (
 
 type Runtime interface {
 	Inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error)
-	CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
-	CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
-	ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error)
-	CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error
+	RootFSUpperdir(ctx context.Context, info ctldapi.RootFSInfo) (string, error)
 }
 
 type PortalResolver interface {
@@ -37,23 +35,36 @@ type PortalResolver interface {
 }
 
 type Config struct {
-	Runtime          Runtime
-	Store            objectstore.Store
-	OperationTimeout time.Duration
-	PortalResolver   PortalResolver
-	SnapshotDir      string
-	ObjectCache      *ObjectCache
-	Observer         *Observer
+	Runtime           Runtime
+	Store             objectstore.Store
+	OperationTimeout  time.Duration
+	PortalResolver    PortalResolver
+	SnapshotDir       string
+	Observer          *Observer
+	ActivePodUIDs     func(context.Context) (map[string]struct{}, error)
+	SessionSweepEvery time.Duration
+}
+
+type trackedSession struct {
+	session *rootfscow.Session
+	podUID  string
 }
 
 type Controller struct {
-	runtime          Runtime
-	store            objectstore.Store
-	operationTimeout time.Duration
-	portalResolver   PortalResolver
-	snapshotDir      string
-	objectCache      *ObjectCache
-	observer         *Observer
+	runtime           Runtime
+	store             objectstore.Store
+	operationTimeout  time.Duration
+	portalResolver    PortalResolver
+	snapshotDir       string
+	observer          *Observer
+	activePodUIDs     func(context.Context) (map[string]struct{}, error)
+	sessionSweepEvery time.Duration
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+
+	mu       sync.Mutex
+	sessions map[string]trackedSession
 }
 
 func NewController(cfg Config) *Controller {
@@ -61,14 +72,83 @@ func NewController(cfg Config) *Controller {
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
 	}
-	return &Controller{
-		runtime:          cfg.Runtime,
-		store:            cfg.Store,
-		operationTimeout: timeout,
-		portalResolver:   cfg.PortalResolver,
-		snapshotDir:      cfg.SnapshotDir,
-		objectCache:      cfg.ObjectCache,
-		observer:         cfg.Observer,
+	controllerCtx, cancel := context.WithCancel(context.Background())
+	controller := &Controller{
+		runtime:           cfg.Runtime,
+		store:             cfg.Store,
+		operationTimeout:  timeout,
+		portalResolver:    cfg.PortalResolver,
+		snapshotDir:       cfg.SnapshotDir,
+		observer:          cfg.Observer,
+		activePodUIDs:     cfg.ActivePodUIDs,
+		sessionSweepEvery: cfg.SessionSweepEvery,
+		ctx:               controllerCtx,
+		cancel:            cancel,
+		sessions:          make(map[string]trackedSession),
+	}
+	if controller.activePodUIDs != nil {
+		if controller.sessionSweepEvery <= 0 {
+			controller.sessionSweepEvery = time.Minute
+		}
+		controller.wg.Add(1)
+		go controller.sweepSessions()
+	}
+	return controller
+}
+
+func (c *Controller) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.cancel()
+	c.wg.Wait()
+	c.mu.Lock()
+	sessions := c.sessions
+	c.sessions = make(map[string]trackedSession)
+	c.mu.Unlock()
+	var closeErr error
+	for _, tracked := range sessions {
+		closeErr = errors.Join(closeErr, tracked.session.Close())
+	}
+	return closeErr
+}
+
+func (c *Controller) sweepSessions() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(c.sessionSweepEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			c.removeInactiveSessions()
+		}
+	}
+}
+
+func (c *Controller) removeInactiveSessions() {
+	ctx, cancel := context.WithTimeout(c.ctx, min(c.sessionSweepEvery, 30*time.Second))
+	defer cancel()
+	active, err := c.activePodUIDs(ctx)
+	if err != nil {
+		return
+	}
+	var stale []*rootfscow.Session
+	c.mu.Lock()
+	for key, tracked := range c.sessions {
+		if tracked.podUID == "" {
+			continue
+		}
+		if _, ok := active[tracked.podUID]; ok {
+			continue
+		}
+		delete(c.sessions, key)
+		stale = append(stale, tracked.session)
+	}
+	c.mu.Unlock()
+	for _, session := range stale {
+		_ = session.Close()
 	}
 }
 
@@ -83,45 +163,105 @@ func (c *Controller) InspectRootFS(r *http.Request, req ctldapi.InspectRootFSReq
 	return ctldapi.InspectRootFSResponse{Info: info}, http.StatusOK
 }
 
-func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
+// BindRootFSSync starts continuous persistence for one active writable overlay.
+// It is intentionally called after claim and before procd is released to user
+// workloads, so large files are uploaded while the sandbox is running instead
+// of extending the pause critical path.
+func (c *Controller) BindRootFSSync(r *http.Request, req ctldapi.BindRootFSSyncRequest) (ctldapi.BindRootFSSyncResponse, int) {
 	if c.store == nil {
-		return ctldapi.SaveRootFSResponse{Error: "rootfs object store is not configured"}, http.StatusNotImplemented
+		return ctldapi.BindRootFSSyncResponse{Error: "rootfs object store is not configured"}, http.StatusNotImplemented
 	}
+	if err := validateSyncIdentity(req.Target, req.SandboxID, req.TeamID, req.FilesystemID); err != nil {
+		return ctldapi.BindRootFSSyncResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	ctx, cancel := c.operationContext(requestContext(r))
+	defer cancel()
+	inspected, err := c.inspect(ctx, req.Target)
+	if err != nil {
+		return ctldapi.BindRootFSSyncResponse{Error: err.Error()}, statusForError(err)
+	}
+	if err := validateSupportedRuntime(inspected); err != nil {
+		return ctldapi.BindRootFSSyncResponse{Error: err.Error()}, statusForError(err)
+	}
+	key := rootFSSessionKey(inspected)
+	c.mu.Lock()
+	existing := c.sessions[key].session
+	c.mu.Unlock()
+	if existing != nil {
+		return ctldapi.BindRootFSSyncResponse{Bound: true}, http.StatusOK
+	}
+	info, session, err := c.newSession(ctx, sessionRequest{
+		Target:        req.Target,
+		SandboxID:     req.SandboxID,
+		TeamID:        req.TeamID,
+		FilesystemID:  req.FilesystemID,
+		Parent:        req.Parent,
+		ExcludedPaths: req.ExcludedPaths,
+		PortalPaths:   req.PortalPaths,
+	})
+	if err != nil {
+		return ctldapi.BindRootFSSyncResponse{Error: err.Error()}, statusForError(err)
+	}
+	key = rootFSSessionKey(info)
+	c.mu.Lock()
+	existing = c.sessions[key].session
+	if existing == nil {
+		c.sessions[key] = trackedSession{session: session, podUID: strings.TrimSpace(req.Target.PodUID)}
+	}
+	c.mu.Unlock()
+	if existing != nil {
+		_ = session.Close()
+	}
+	return ctldapi.BindRootFSSyncResponse{Bound: true}, http.StatusOK
+}
 
+// SaveRootFS is kept as a compatibility wrapper around the transactional API.
+func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
+	headID := strings.TrimSpace(req.HeadID)
+	if headID == "" {
+		headID = uuid.NewString()
+	}
+	filesystemID := strings.TrimSpace(req.FilesystemID)
+	if filesystemID == "" {
+		filesystemID = strings.TrimSpace(req.SandboxID)
+	}
 	prepared, status := c.PrepareRootFSSnapshot(r, ctldapi.PrepareRootFSSnapshotRequest{
 		Target:        req.Target,
-		ParentLayerID: req.ParentLayerID,
+		HeadID:        headID,
+		SandboxID:     req.SandboxID,
+		TeamID:        req.TeamID,
+		FilesystemID:  filesystemID,
+		Parent:        req.Parent,
 		ExcludedPaths: req.ExcludedPaths,
 		PortalPaths:   req.PortalPaths,
 	})
 	if status != http.StatusOK {
-		return ctldapi.SaveRootFSResponse{Info: prepared.Info, Error: prepared.Error}, status
+		return ctldapi.SaveRootFSResponse{Info: prepared.Info, Checkpoint: prepared.Checkpoint, Error: prepared.Error}, status
 	}
-	published, status := c.PublishRootFSSnapshot(r, ctldapi.PublishRootFSSnapshotRequest{
-		Handle:                    prepared.Handle,
-		SandboxID:                 req.SandboxID,
-		TeamID:                    req.TeamID,
-		ExpectedRuntimeGeneration: req.ExpectedRuntimeGeneration,
-		ObjectKey:                 req.ObjectKey,
-	})
+	published, status := c.PublishRootFSSnapshot(r, ctldapi.PublishRootFSSnapshotRequest{Handle: prepared.Handle})
 	if status != http.StatusOK {
 		_, _ = c.AbortRootFSSnapshot(r, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle})
-		return ctldapi.SaveRootFSResponse{Info: published.Info, Error: published.Error}, status
+		return ctldapi.SaveRootFSResponse{Info: published.Info, Checkpoint: published.Checkpoint, Error: published.Error}, status
 	}
-	return ctldapi.SaveRootFSResponse{Info: published.Info, Descriptor: published.Descriptor}, http.StatusOK
+	return ctldapi.SaveRootFSResponse{Info: published.Info, Checkpoint: published.Checkpoint}, http.StatusOK
 }
 
 func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (response ctldapi.PrepareRootFSSnapshotResponse, status int) {
 	started := time.Now()
 	defer func() {
-		c.observer.ObserveOperation("save", req.Target, -1, -1, response.Descriptor.Size, -1, started, status, response.Error)
+		c.observer.ObserveOperation("seal", req.Target, -1, response.Checkpoint.CreatedBytes, -1, started, status, response.Error)
 	}()
-	if err := validateTarget(req.Target); err != nil {
+	if c.store == nil {
+		return ctldapi.PrepareRootFSSnapshotResponse{Error: "rootfs object store is not configured"}, http.StatusNotImplemented
+	}
+	if strings.TrimSpace(req.HeadID) == "" {
+		return ctldapi.PrepareRootFSSnapshotResponse{Error: fmt.Sprintf("%v: head_id is required", ErrBadRequest)}, http.StatusBadRequest
+	}
+	if err := validateSyncIdentity(req.Target, req.SandboxID, req.TeamID, req.FilesystemID); err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()}, http.StatusBadRequest
 	}
 	ctx, cancel := c.operationContext(requestContext(r))
 	defer cancel()
-
 	info, err := c.inspect(ctx, req.Target)
 	if err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()}, statusForError(err)
@@ -129,50 +269,61 @@ func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareR
 	if err := validateSupportedRuntime(info); err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 	}
-	portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-	desc, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID), req.ExcludedPaths, portalPaths)
+	key := rootFSSessionKey(info)
+	c.mu.Lock()
+	session := c.sessions[key].session
+	c.mu.Unlock()
+	if session == nil {
+		// A failover or ctld restart loses only the in-memory watcher. Rebuild the
+		// session from the active upper and synchronously drain it before sealing.
+		var createErr error
+		info, session, createErr = c.newSession(ctx, sessionRequest{
+			Target:        req.Target,
+			SandboxID:     req.SandboxID,
+			TeamID:        req.TeamID,
+			FilesystemID:  req.FilesystemID,
+			Parent:        req.Parent,
+			ExcludedPaths: req.ExcludedPaths,
+			PortalPaths:   req.PortalPaths,
+		})
+		if createErr != nil {
+			return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: createErr.Error()}, statusForError(createErr)
+		}
+		c.mu.Lock()
+		if existing := c.sessions[key].session; existing == nil {
+			c.sessions[key] = trackedSession{session: session, podUID: strings.TrimSpace(req.Target.PodUID)}
+		} else {
+			_ = session.Close()
+			session = existing
+		}
+		c.mu.Unlock()
+	}
+	result, err := session.Seal(ctx, req.HeadID)
 	if err != nil {
-		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: fmt.Sprintf("create rootfs diff: %v", err)}, statusForError(err)
+		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: fmt.Sprintf("seal rootfs head: %v", err)}, statusForError(err)
 	}
-	defer reader.Close()
-
+	checkpoint := checkpointDescriptor(result)
 	handle := uuid.NewString()
-	if err := c.writePreparedSnapshot(handle, info, desc, reader); err != nil {
-		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: fmt.Sprintf("prepare rootfs snapshot: %v", err)}, http.StatusInternalServerError
+	if err := c.writePreparedSnapshot(handle, preparedRootFSSnapshot{
+		Handle:     handle,
+		Info:       info,
+		Checkpoint: checkpoint,
+		CreatedAt:  time.Now().UTC(),
+	}); err != nil {
+		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Checkpoint: checkpoint, Error: fmt.Sprintf("persist prepared rootfs head: %v", err)}, http.StatusInternalServerError
 	}
-	return ctldapi.PrepareRootFSSnapshotResponse{Handle: handle, Info: info, Descriptor: desc}, http.StatusOK
+	return ctldapi.PrepareRootFSSnapshotResponse{Handle: handle, Info: info, Checkpoint: checkpoint}, http.StatusOK
 }
 
-func (c *Controller) PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
-	if c.store == nil {
-		return ctldapi.PublishRootFSSnapshotResponse{Error: "rootfs object store is not configured"}, http.StatusNotImplemented
-	}
+func (c *Controller) PublishRootFSSnapshot(_ *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
 	prepared, err := c.readPreparedSnapshot(req.Handle)
 	if err != nil {
 		return ctldapi.PublishRootFSSnapshotResponse{Error: err.Error()}, statusForError(err)
 	}
-	objectKey := strings.Trim(strings.TrimSpace(req.ObjectKey), "/")
-	if objectKey == "" {
-		objectKey, err = defaultObjectKey(req.TeamID, req.SandboxID, req.ExpectedRuntimeGeneration, prepared.Descriptor.Digest)
-		if err != nil {
-			return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Error: err.Error()}, http.StatusBadRequest
-		}
+	if err := c.removePreparedSnapshot(req.Handle); err != nil {
+		return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Checkpoint: prepared.Checkpoint, Error: err.Error()}, statusForError(err)
 	}
-	content, err := os.Open(c.preparedSnapshotContentPath(req.Handle))
-	if err != nil {
-		return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Error: fmt.Sprintf("open prepared rootfs snapshot: %v", err)}, statusForError(err)
-	}
-	defer content.Close()
-	if err := c.store.Put(objectKey, content); err != nil {
-		return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Error: fmt.Sprintf("upload rootfs diff: %v", err)}, http.StatusInternalServerError
-	}
-	desc := prepared.Descriptor
-	desc.ObjectKey = objectKey
-	if c.objectCache != nil {
-		_ = c.objectCache.PutFile(requestContext(r), desc, c.preparedSnapshotContentPath(req.Handle))
-	}
-	_ = c.removePreparedSnapshot(req.Handle)
-	return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Descriptor: desc, Published: true}, http.StatusOK
+	return ctldapi.PublishRootFSSnapshotResponse{Info: prepared.Info, Checkpoint: prepared.Checkpoint, Published: true}, http.StatusOK
 }
 
 func (c *Controller) AbortRootFSSnapshot(_ *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
@@ -182,203 +333,111 @@ func (c *Controller) AbortRootFSSnapshot(_ *http.Request, req ctldapi.AbortRootF
 	return ctldapi.AbortRootFSSnapshotResponse{Aborted: true}, http.StatusOK
 }
 
-func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (response ctldapi.ApplyRootFSResponse, status int) {
-	started := time.Now()
-	chainDepth, inputBytes := rootFSApplyInputStats(req)
-	defer func() {
-		c.observer.ObserveOperation("apply", req.Target, chainDepth, inputBytes, rootFSApplyOutputBytes(response), -1, started, status, response.Error)
-	}()
-	if err := validateTarget(req.Target); err != nil {
-		return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
-	}
-	layered := len(req.Layers) > 0
-	if layered {
-		if err := validateLayerDescriptors(req.Layers); err != nil {
-			return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
-		}
-	} else if err := validateDescriptor(req.Descriptor); err != nil {
-		return ctldapi.ApplyRootFSResponse{Error: err.Error()}, http.StatusBadRequest
-	}
-	if c.store == nil {
-		return ctldapi.ApplyRootFSResponse{Error: "rootfs object store is not configured"}, http.StatusNotImplemented
-	}
+type sessionRequest struct {
+	Target        ctldapi.RootFSContainerRef
+	SandboxID     string
+	TeamID        string
+	FilesystemID  string
+	Parent        *rootfshead.HeadReference
+	ExcludedPaths []string
+	PortalPaths   []ctldapi.RootFSPortalPath
+}
 
-	ctx, cancel := c.operationContext(requestContext(r))
-	defer cancel()
-
+func (c *Controller) newSession(ctx context.Context, req sessionRequest) (ctldapi.RootFSInfo, *rootfscow.Session, error) {
 	info, err := c.inspect(ctx, req.Target)
 	if err != nil {
-		return ctldapi.ApplyRootFSResponse{Error: err.Error()}, statusForError(err)
+		return ctldapi.RootFSInfo{}, nil, err
 	}
 	if err := validateSupportedRuntime(info); err != nil {
-		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
+		return info, nil, err
 	}
-	if err := validateExpectedBase(info, req); err != nil {
-		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusConflict
+	upperdir, err := c.runtime.RootFSUpperdir(ctx, info)
+	if err != nil {
+		return info, nil, fmt.Errorf("resolve rootfs upperdir: %w", err)
 	}
-	if layered {
-		if err := validateBaselineLayerID(req); err != nil {
-			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
-		}
-		// The layer chain represents the sandbox's writable rootfs state. Replaying
-		// it across template image upgrades is valid; actual path-level conflicts
-		// are surfaced by the runtime apply step below.
-		portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-		applied, err := c.applyLayers(ctx, info, req.Layers, req.ExcludedPaths, portalPaths)
+	var parent *rootfshead.Head
+	if req.Parent != nil {
+		loaded, err := rootfscow.LoadHead(ctx, c.store, *req.Parent)
 		if err != nil {
-			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
+			return info, nil, fmt.Errorf("load parent rootfs head: %w", err)
 		}
-		if req.BaselineLayerID != "" {
-			if err := c.runtime.CaptureBaseline(ctx, info, req.BaselineLayerID, req.ExcludedPaths, portalPaths); err != nil {
-				return ctldapi.ApplyRootFSResponse{Info: info, Error: fmt.Sprintf("capture rootfs baseline: %v", err)}, statusForError(err)
-			}
-		}
-		return ctldapi.ApplyRootFSResponse{Info: info, Layers: applied, Applied: true}, http.StatusOK
+		parent = &loaded
 	}
-
 	portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-	applied, err := c.applyDescriptor(ctx, info, req.Descriptor, req.ExcludedPaths, portalPaths)
+	session, err := rootfscow.NewSession(c.ctx, rootfscow.SessionConfig{
+		Root:            upperdir,
+		GenerationID:    rootFSSessionKey(info),
+		TeamID:          req.TeamID,
+		FilesystemID:    req.FilesystemID,
+		BaseImageDigest: info.BaseImageDigest,
+		BaseSnapshotKey: info.SnapshotParent,
+		Parent:          parent,
+		ExcludedPaths:   rootFSExcludedPathsWithPortals(req.ExcludedPaths, portalPaths),
+		PortalPaths:     portalPaths,
+		Store:           c.store,
+	})
 	if err != nil {
-		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
+		return info, nil, fmt.Errorf("start rootfs sync: %w", err)
 	}
-	return ctldapi.ApplyRootFSResponse{Info: info, Descriptor: applied, Applied: true}, http.StatusOK
+	return info, session, nil
 }
 
-func (c *Controller) createDiff(ctx context.Context, info ctldapi.RootFSInfo, parentLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
-	if parentLayerID != "" {
-		return c.runtime.CreateDiffFromBaseline(ctx, info, parentLayerID, excludedPaths, portalPaths)
+func checkpointDescriptor(result *rootfscow.SealResult) ctldapi.RootFSCheckpointDescriptor {
+	if result == nil {
+		return ctldapi.RootFSCheckpointDescriptor{}
 	}
-	return c.runtime.CreateDiff(ctx, info, excludedPaths, portalPaths)
-}
-
-func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, layers []ctldapi.RootFSLayerDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) ([]ctldapi.RootFSLayerDescriptor, error) {
-	applied := make([]ctldapi.RootFSLayerDescriptor, 0, len(layers))
-	for _, layer := range layers {
-		desc, err := c.applyDescriptor(ctx, info, layer.Descriptor, excludedPaths, portalPaths)
-		if err != nil {
-			return nil, err
-		}
-		applied = append(applied, ctldapi.RootFSLayerDescriptor{
-			LayerID:       layer.LayerID,
-			ParentLayerID: layer.ParentLayerID,
-			Descriptor:    desc,
-		})
+	return ctldapi.RootFSCheckpointDescriptor{
+		Reference:          result.Reference,
+		Objects:            append([]rootfshead.Object(nil), result.Objects...),
+		CreatedBytes:       result.CreatedBytes,
+		CreatedObjectCount: result.CreatedObjectCount,
+		DirtyPaths:         result.DirtyPaths,
+		SealDurationMS:     result.Duration.Milliseconds(),
 	}
-	return applied, nil
-}
-
-func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error) {
-	var (
-		reader io.ReadCloser
-		err    error
-	)
-	if c.objectCache != nil {
-		reader, _, err = c.objectCache.GetOrFetch(ctx, c.store, desc)
-	} else {
-		reader, err = c.store.Get(desc.ObjectKey, 0, -1)
-	}
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("download rootfs diff: %w", err)
-	}
-	defer reader.Close()
-
-	applied, err := c.runtime.ApplyDiff(ctx, info, desc, reader, excludedPaths, portalPaths)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("apply rootfs diff: %w", err)
-	}
-	applied.ObjectKey = desc.ObjectKey
-	return applied, nil
-}
-
-func rootFSApplyInputStats(req ctldapi.ApplyRootFSRequest) (int, int64) {
-	if len(req.Layers) == 0 {
-		return 1, req.Descriptor.Size
-	}
-	var bytes int64
-	for _, layer := range req.Layers {
-		if layer.Descriptor.Size > 0 {
-			bytes += layer.Descriptor.Size
-		}
-	}
-	return len(req.Layers), bytes
-}
-
-func rootFSApplyOutputBytes(response ctldapi.ApplyRootFSResponse) int64 {
-	if len(response.Layers) == 0 {
-		return response.Descriptor.Size
-	}
-	var bytes int64
-	for _, layer := range response.Layers {
-		if layer.Descriptor.Size > 0 {
-			bytes += layer.Descriptor.Size
-		}
-	}
-	return bytes
 }
 
 type preparedRootFSSnapshot struct {
-	Handle     string                       `json:"handle"`
-	Info       ctldapi.RootFSInfo           `json:"info"`
-	Descriptor ctldapi.RootFSDiffDescriptor `json:"descriptor"`
-	CreatedAt  time.Time                    `json:"created_at"`
+	Handle     string                             `json:"handle"`
+	Info       ctldapi.RootFSInfo                 `json:"info"`
+	Checkpoint ctldapi.RootFSCheckpointDescriptor `json:"checkpoint"`
+	CreatedAt  time.Time                          `json:"created_at"`
 }
 
-func (c *Controller) writePreparedSnapshot(handle string, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader) error {
-	if strings.TrimSpace(handle) == "" {
-		return fmt.Errorf("%w: snapshot handle is required", ErrBadRequest)
+func (c *Controller) writePreparedSnapshot(handle string, prepared preparedRootFSSnapshot) error {
+	handle = strings.TrimSpace(handle)
+	if handle == "" || filepath.Base(handle) != handle {
+		return fmt.Errorf("%w: snapshot handle is invalid", ErrBadRequest)
 	}
-	if err := os.MkdirAll(c.preparedSnapshotDir(), 0o755); err != nil {
+	if err := os.MkdirAll(c.preparedSnapshotDir(), 0o700); err != nil {
 		return err
 	}
-	contentTmp := c.preparedSnapshotContentPath(handle) + ".tmp"
-	content, err := os.Create(contentTmp)
+	temporary, err := os.CreateTemp(c.preparedSnapshotDir(), ".rootfs-head-*.tmp")
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(content, reader); err != nil {
-		_ = content.Close()
-		_ = os.Remove(contentTmp)
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
 		return err
 	}
-	if err := content.Close(); err != nil {
-		_ = os.Remove(contentTmp)
+	if err := json.NewEncoder(temporary).Encode(prepared); err != nil {
+		_ = temporary.Close()
 		return err
 	}
-	if err := os.Rename(contentTmp, c.preparedSnapshotContentPath(handle)); err != nil {
-		_ = os.Remove(contentTmp)
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
 		return err
 	}
-
-	meta := preparedRootFSSnapshot{
-		Handle:     handle,
-		Info:       info,
-		Descriptor: desc,
-		CreatedAt:  time.Now().UTC(),
-	}
-	metaTmp := c.preparedSnapshotMetaPath(handle) + ".tmp"
-	metaFile, err := os.Create(metaTmp)
-	if err != nil {
+	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := json.NewEncoder(metaFile).Encode(meta); err != nil {
-		_ = metaFile.Close()
-		_ = os.Remove(metaTmp)
-		return err
-	}
-	if err := metaFile.Close(); err != nil {
-		_ = os.Remove(metaTmp)
-		return err
-	}
-	if err := os.Rename(metaTmp, c.preparedSnapshotMetaPath(handle)); err != nil {
-		_ = os.Remove(metaTmp)
-		return err
-	}
-	return nil
+	return os.Rename(temporaryName, c.preparedSnapshotMetaPath(handle))
 }
 
 func (c *Controller) readPreparedSnapshot(handle string) (preparedRootFSSnapshot, error) {
 	handle = strings.TrimSpace(handle)
-	if handle == "" {
+	if handle == "" || filepath.Base(handle) != handle {
 		return preparedRootFSSnapshot{}, fmt.Errorf("%w: snapshot handle is required", ErrBadRequest)
 	}
 	metaFile, err := os.Open(c.preparedSnapshotMetaPath(handle))
@@ -393,30 +452,18 @@ func (c *Controller) readPreparedSnapshot(handle string) (preparedRootFSSnapshot
 	if err := json.NewDecoder(metaFile).Decode(&prepared); err != nil {
 		return preparedRootFSSnapshot{}, err
 	}
+	if err := prepared.Checkpoint.Reference.Validate(); err != nil {
+		return preparedRootFSSnapshot{}, fmt.Errorf("invalid prepared rootfs head: %w", err)
+	}
 	return prepared, nil
 }
 
 func (c *Controller) removePreparedSnapshot(handle string) error {
 	handle = strings.TrimSpace(handle)
-	if handle == "" {
+	if handle == "" || filepath.Base(handle) != handle {
 		return nil
 	}
-	contentErr := os.Remove(c.preparedSnapshotContentPath(handle))
-	metaErr := os.Remove(c.preparedSnapshotMetaPath(handle))
-	if contentErr != nil && !errors.Is(contentErr, os.ErrNotExist) {
-		return contentErr
-	}
-	if metaErr != nil && !errors.Is(metaErr, os.ErrNotExist) {
-		return metaErr
-	}
-	if errors.Is(contentErr, os.ErrNotExist) && errors.Is(metaErr, os.ErrNotExist) {
-		return os.ErrNotExist
-	}
-	return nil
-}
-
-func (c *Controller) preparedSnapshotContentPath(handle string) string {
-	return filepath.Join(c.preparedSnapshotDir(), filepath.Base(handle)+".tar")
+	return os.Remove(c.preparedSnapshotMetaPath(handle))
 }
 
 func (c *Controller) preparedSnapshotMetaPath(handle string) string {
@@ -467,6 +514,22 @@ func requestContext(r *http.Request) context.Context {
 	return context.Background()
 }
 
+func validateSyncIdentity(target ctldapi.RootFSContainerRef, sandboxID, teamID, filesystemID string) error {
+	if err := validateTarget(target); err != nil {
+		return err
+	}
+	if strings.TrimSpace(sandboxID) == "" {
+		return fmt.Errorf("%w: sandbox_id is required", ErrBadRequest)
+	}
+	if strings.TrimSpace(teamID) == "" {
+		return fmt.Errorf("%w: team_id is required", ErrBadRequest)
+	}
+	if strings.TrimSpace(filesystemID) == "" {
+		return fmt.Errorf("%w: filesystem_id is required", ErrBadRequest)
+	}
+	return nil
+}
+
 func validateTarget(target ctldapi.RootFSContainerRef) error {
 	if strings.TrimSpace(target.Namespace) == "" {
 		return fmt.Errorf("%w: namespace is required", ErrBadRequest)
@@ -476,46 +539,6 @@ func validateTarget(target ctldapi.RootFSContainerRef) error {
 	}
 	if strings.TrimSpace(target.ContainerName) == "" {
 		return fmt.Errorf("%w: container_name is required", ErrBadRequest)
-	}
-	return nil
-}
-
-func validateDescriptor(desc ctldapi.RootFSDiffDescriptor) error {
-	if strings.TrimSpace(desc.Digest) == "" {
-		return fmt.Errorf("%w: descriptor digest is required", ErrBadRequest)
-	}
-	if desc.Size < 0 {
-		return fmt.Errorf("%w: descriptor size must be non-negative", ErrBadRequest)
-	}
-	if strings.TrimSpace(desc.ObjectKey) == "" {
-		return fmt.Errorf("%w: descriptor object_key is required", ErrBadRequest)
-	}
-	return nil
-}
-
-func validateLayerDescriptors(layers []ctldapi.RootFSLayerDescriptor) error {
-	if len(layers) == 0 {
-		return fmt.Errorf("%w: layers are required", ErrBadRequest)
-	}
-	seen := make(map[string]struct{}, len(layers))
-	for i, layer := range layers {
-		layerID := strings.TrimSpace(layer.LayerID)
-		if layerID == "" {
-			return fmt.Errorf("%w: layers[%d].layer_id is required", ErrBadRequest, i)
-		}
-		if _, ok := seen[layerID]; ok {
-			return fmt.Errorf("%w: duplicate rootfs layer %q", ErrBadRequest, layerID)
-		}
-		seen[layerID] = struct{}{}
-		if strings.TrimSpace(layer.ParentLayerID) == layerID {
-			return fmt.Errorf("%w: layers[%d].parent_layer_id cannot reference itself", ErrBadRequest, i)
-		}
-		if i > 0 && strings.TrimSpace(layer.ParentLayerID) != strings.TrimSpace(layers[i-1].LayerID) {
-			return fmt.Errorf("%w: layers[%d].parent_layer_id must reference previous layer", ErrBadRequest, i)
-		}
-		if err := validateDescriptor(layer.Descriptor); err != nil {
-			return fmt.Errorf("%w: layers[%d]: %v", ErrBadRequest, i, err)
-		}
 	}
 	return nil
 }
@@ -532,55 +555,8 @@ func validateSupportedRuntime(info ctldapi.RootFSInfo) error {
 	}
 }
 
-func validateExpectedBase(info ctldapi.RootFSInfo, req ctldapi.ApplyRootFSRequest) error {
-	if expected := strings.TrimSpace(req.ExpectedRuntime); expected != "" && strings.TrimSpace(info.Runtime) != expected {
-		return fmt.Errorf("%w: runtime mismatch: expected %s, got %s", ErrConflict, expected, info.Runtime)
-	}
-	if expected := strings.TrimSpace(req.ExpectedRuntimeHandler); expected != "" && strings.TrimSpace(info.RuntimeHandler) != expected {
-		return fmt.Errorf("%w: runtime handler mismatch: expected %s, got %s", ErrConflict, expected, info.RuntimeHandler)
-	}
-	if expected := strings.TrimSpace(req.ExpectedSnapshotter); expected != "" && strings.TrimSpace(info.Snapshotter) != expected {
-		return fmt.Errorf("%w: snapshotter mismatch: expected %s, got %s", ErrConflict, expected, info.Snapshotter)
-	}
-	return nil
-}
-
-func validateBaselineLayerID(req ctldapi.ApplyRootFSRequest) error {
-	if strings.TrimSpace(req.BaselineLayerID) == "" {
-		return nil
-	}
-	if len(req.Layers) == 0 {
-		return fmt.Errorf("%w: baseline_layer_id requires layers", ErrBadRequest)
-	}
-	head := strings.TrimSpace(req.Layers[len(req.Layers)-1].LayerID)
-	if strings.TrimSpace(req.BaselineLayerID) != head {
-		return fmt.Errorf("%w: baseline_layer_id must match the head layer", ErrBadRequest)
-	}
-	return nil
-}
-
-func defaultObjectKey(teamID, sandboxID string, generation int64, digest string) (string, error) {
-	teamID = strings.TrimSpace(teamID)
-	sandboxID = strings.TrimSpace(sandboxID)
-	if teamID == "" {
-		return "", fmt.Errorf("%w: team_id is required when object_key is omitted", ErrBadRequest)
-	}
-	if sandboxID == "" {
-		return "", fmt.Errorf("%w: sandbox_id is required when object_key is omitted", ErrBadRequest)
-	}
-	if containsPathSeparator(teamID) || containsPathSeparator(sandboxID) {
-		return "", fmt.Errorf("%w: team_id and sandbox_id cannot contain '/'", ErrBadRequest)
-	}
-	digest = strings.TrimSpace(digest)
-	parts := strings.SplitN(digest, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", fmt.Errorf("%w: invalid diff digest %q", ErrBadRequest, digest)
-	}
-	return filepath.ToSlash(filepath.Join("sandbox-rootfs", teamID, sandboxID, strconv.FormatInt(generation, 10), parts[0], parts[1]+".tar")), nil
-}
-
-func containsPathSeparator(value string) bool {
-	return strings.Contains(value, "/")
+func rootFSSessionKey(info ctldapi.RootFSInfo) string {
+	return strings.TrimSpace(info.Snapshotter) + "\x00" + strings.TrimSpace(info.SnapshotKey)
 }
 
 func statusForError(err error) int {

@@ -14,18 +14,20 @@ func TestSandboxRuntimeClassPatch(t *testing.T) {
 	var patch struct {
 		Spec struct {
 			Services struct {
-				Manager struct {
-					Config struct {
-						SandboxRuntimeClassName string `json:"sandboxRuntimeClassName"`
-					} `json:"config"`
-				} `json:"manager"`
+				Ctld struct {
+					RootFSSnapshotter struct {
+						RuntimeClassName string `json:"runtimeClassName"`
+						Handler          string `json:"handler"`
+					} `json:"rootfsSnapshotter"`
+				} `json:"ctld"`
 			} `json:"services"`
 		} `json:"spec"`
 	}
 	if err := json.Unmarshal([]byte(got), &patch); err != nil {
 		t.Fatalf("patch is not valid JSON: %v", err)
 	}
-	if patch.Spec.Services.Manager.Config.SandboxRuntimeClassName != "gvisor-rootfs" {
-		t.Fatalf("sandbox runtime class = %q, want gvisor-rootfs", patch.Spec.Services.Manager.Config.SandboxRuntimeClassName)
+	if patch.Spec.Services.Ctld.RootFSSnapshotter.RuntimeClassName != "gvisor-rootfs" ||
+		patch.Spec.Services.Ctld.RootFSSnapshotter.Handler != "gvisor-rootfs" {
+		t.Fatalf("rootfs snapshotter runtime = %+v, want gvisor-rootfs", patch.Spec.Services.Ctld.RootFSSnapshotter)
 	}
 }

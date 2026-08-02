@@ -217,6 +217,9 @@ runs:
         archive="${RUNNER_TEMP}/infra-image-cache/infra-image-template-default-v0.2.0.tar"
         kind load image-archive "${archive}" --name ${{ inputs.kind-cluster-name }}
         rm -f "${archive}"
+        ./scripts/refresh-containerd-image-metadata.sh \
+          "${{ inputs.kind-cluster-name }}" \
+          "docker.io/sandbox0ai/otemplates:default-v0.2.0"
 
     - name: Restore SSH fixture image cache
       id: infra-ssh-fixture-cache

@@ -458,6 +458,9 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 	cfg.DefaultClusterId = managerPlan.DefaultClusterID
 	cfg.RegionID = managerPlan.RegionID
 	cfg.CtldEnabled = infrav1alpha1.IsManagerEnabled(infra)
+	// Persistent metadata heads require every idle and active sandbox pod to use
+	// the delegating external snapshotter from its first image pull.
+	cfg.SandboxRuntimeClassName = infrav1alpha1.ResolveRootFSSnapshotterConfig(infra).RuntimeClassName
 	if cfg.CtldEnabled && cfg.CtldPort == 0 {
 		cfg.CtldPort = 8095
 	}

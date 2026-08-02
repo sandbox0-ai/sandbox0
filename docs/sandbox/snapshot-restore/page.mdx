@@ -31,7 +31,7 @@ Use [Volumes](/docs/sandbox/volume) when data must be mounted by multiple sandbo
 ## State Model
 
 - `Create snapshot` creates a snapshot record from the source sandbox's current rootfs head. If the source is running, Sandbox0 briefly barriers the sandbox, checkpoints its writable rootfs, and then releases the source back to running.
-- `Claim with snapshot_id` creates a running sandbox and initializes its writable rootfs from the selected snapshot before process APIs are initialized.
+- `Claim with snapshot_id` adopts a normal template warm Pod when available, swaps only `procd` to the snapshot's digest-pinned metadata head, and verifies that head before process APIs are initialized.
 - `Restore` changes a paused target sandbox rootfs head to the selected snapshot and leaves the sandbox paused.
 - `Fork` creates a new paused sandbox with the source sandbox configuration and an isolated rootfs fork. If the source is running, Sandbox0 briefly barriers the sandbox, checkpoints its writable rootfs, and then releases the source back to running. The fork request can override lifecycle `ttl` and `hard_ttl`.
 - `Resume` is required before reading or writing files through sandbox process and file APIs after restore or fork. A sandbox claimed with `snapshot_id` starts running.
@@ -41,7 +41,7 @@ Use [Volumes](/docs/sandbox/volume) when data must be mounted by multiple sandbo
 
 Snapshots, snapshot claims, restore, and fork use the same persistence boundary as pause and resume. `/tmp` is ephemeral and is not captured or restored, while `/var/tmp` and ordinary writable rootfs paths remain persistent. A Sandbox Volume mounted beneath `/tmp` remains durable because Volume state is managed independently from rootfs checkpoints.
 
-Older snapshot layers are filtered when restored, so legacy `/tmp` entries do not reappear. Reading and filtering a large legacy layer can make its first restore slower; later checkpoints omit that data. See [Pause And Resume](/docs/sandbox/pause-resume#persistent-and-ephemeral-paths) for the complete path policy.
+Each new checkpoint excludes `/tmp` before its immutable diff and index are published. Snapshot heads from the previous replay architecture require an explicit migration and are not restored through a permanent compatibility path. See [Pause And Resume](/docs/sandbox/pause-resume#persistent-and-ephemeral-paths) for the complete path policy.
 
 <Callout variant="info">
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
@@ -51,7 +51,7 @@ The rootfs snapshot API stores snapshot metadata including `name`, `description`
 
 Application-layer object encryption is enabled by default. Before manager or ctld writes persisted rootfs layer and checkpoint objects to S3-compatible storage, Sandbox0 encrypts them with AES-256-GCM. Each object receives a random data key, its contents are stored in independently authenticated chunks, and the data key is wrapped with the installation's RSA key.
 
-This is service-side encryption, not end-to-end encryption: manager and the active ctld hold the installation key and can decrypt rootfs objects while serving sandbox operations. Existing plaintext objects remain readable after encryption is enabled, while new object writes use the encrypted format; enabling encryption does not rewrite historical objects automatically. Self-hosted deployments can configure this behavior with `spec.storage.runtime.objectEncryptionEnabled`; see [Service and Runtime Config](/docs/sandbox/self-hosted/configuration#service-and-runtime-config).
+This is service-side encryption, not end-to-end encryption: manager, the active ctld, and the node-local rootfs snapshotter hold the installation key while serving sandbox operations. Encrypted range reads fetch only the header metadata and authenticated chunks covering the requested plaintext range; they do not download the entire rootfs object. Existing plaintext objects remain readable after encryption is enabled, while new object writes use the encrypted format; enabling encryption does not rewrite historical objects automatically. Self-hosted deployments can configure this behavior with `spec.storage.runtime.objectEncryptionEnabled`; see [Service and Runtime Config](/docs/sandbox/self-hosted/configuration#service-and-runtime-config).
 
 ## Initialize Once, Claim Many
 

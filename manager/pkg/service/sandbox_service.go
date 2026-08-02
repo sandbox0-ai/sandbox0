@@ -3,12 +3,14 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
@@ -101,9 +103,6 @@ type SandboxServiceConfig struct {
 	RuntimeReadyTimeout                 time.Duration
 	AllowColdStartWithoutReadyDataPlane bool
 	PreferredNodeSelector               map[string]string
-	RootFSSquashDisabled                bool
-	RootFSSquashMaxChainDepth           int
-	RootFSSquashMaxChainBytes           int64
 	PublicRootDomain                    string
 	PublicRegionID                      string
 	AutoscalerSafeToEvictAnnotationKeys []string
@@ -136,6 +135,8 @@ type SandboxService struct {
 	quotaStore                             TeamQuotaLimitStore
 	sandboxStore                           SandboxStore
 	rootFSObjectDeleter                    RootFSObjectDeleter
+	rootFSHeadStore                        RootFSHeadStore
+	rootFSHeadPublisher                    RootFSHeadPublisher
 	templateImageBuildCapabilityConfigured bool
 	templateImageBuildAvailable            bool
 	resumeGroup                            singleflight.Group
@@ -148,6 +149,18 @@ type SandboxService struct {
 type TeamQuotaLimitStore interface {
 	GetLimit(ctx context.Context, teamID string, dimension quota.Dimension) (*quota.Limit, error)
 	CurrentUsage(ctx context.Context, teamID string, dimension quota.Dimension) (int64, error)
+}
+
+// RootFSHeadPublisher publishes the metadata-only OCI image used to activate
+// one immutable persistent rootfs head through the external snapshotter.
+type RootFSHeadPublisher interface {
+	PublishHead(context.Context, templateimage.HeadRequest) (*templateimage.Result, error)
+}
+
+// RootFSHeadStore persists the immutable, compact head manifest referenced by
+// a metadata-only OCI marker.
+type RootFSHeadStore interface {
+	Put(string, io.Reader) error
 }
 
 // SandboxPauseEnqueuer schedules durable pause transactions for background completion.
@@ -209,12 +222,6 @@ func NewSandboxService(
 	}
 	if config.CtldClientTimeout == 0 {
 		config.CtldClientTimeout = defaultCtldClientTimeout
-	}
-	if config.RootFSSquashMaxChainDepth <= 0 {
-		config.RootFSSquashMaxChainDepth = 8
-	}
-	if config.RootFSSquashMaxChainBytes <= 0 {
-		config.RootFSSquashMaxChainBytes = 512 * 1024 * 1024
 	}
 	if networkProvider == nil {
 		networkProvider = network.NewNoopProvider()
@@ -368,6 +375,16 @@ func (s *SandboxService) SetSandboxStore(store SandboxStore) {
 // rootfs diffs that were uploaded but never committed into the DB rootfs head.
 func (s *SandboxService) SetRootFSObjectDeleter(deleter RootFSObjectDeleter) {
 	s.rootFSObjectDeleter = deleter
+}
+
+// SetRootFSHeadPublisher injects the required metadata-only head publisher.
+func (s *SandboxService) SetRootFSHeadPublisher(publisher RootFSHeadPublisher) {
+	s.rootFSHeadPublisher = publisher
+}
+
+// SetRootFSHeadStore injects the durable object store used for head manifests.
+func (s *SandboxService) SetRootFSHeadStore(store RootFSHeadStore) {
+	s.rootFSHeadStore = store
 }
 
 // SetTemplateImageBuildAvailable controls source capability preflight. It is

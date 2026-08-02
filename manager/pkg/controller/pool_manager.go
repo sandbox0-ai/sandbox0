@@ -76,6 +76,8 @@ const (
 	AnnotationTemplateTeamID               = "sandbox0.ai/template-team-id"
 	AnnotationTemplateUserID               = "sandbox0.ai/template-user-id"
 	AnnotationOwnerKind                    = "sandbox0.ai/owner-kind"
+	AnnotationRootFSHeadImage              = "sandbox0.ai/rootfs-head-image"
+	AnnotationRootFSHeadLayerID            = "sandbox0.ai/rootfs-head-layer-id"
 
 	OwnerKindTeamWarmPool = "team_warm_pool"
 

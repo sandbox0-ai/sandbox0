@@ -178,21 +178,44 @@ spec:
             objectEncryptionEnabled: true
 ```
 
-### Sandbox RuntimeClass
+### Rootfs Snapshotter RuntimeClass
 
-Use `services.manager.config.sandboxRuntimeClassName` when sandbox Pods should run with a non-default runtime such as `runc`, `gvisor`, or a custom `gvisor-rootfs` handler.
+Every idle and active sandbox Pod must use the external `sandbox0` containerd snapshotter from its first image pull. Warm resume reuses the already unpacked template snapshot, while cold resume materializes that same digest-pinned base through an internal image volume before the marker-only head is unpacked. Configure the RuntimeClass name and its containerd handler in one place:
 
 ```yaml
-spec:
-    services:
-        manager:
-            config:
-                sandboxRuntimeClassName: gvisor-rootfs
+    spec:
+        services:
+            ctld:
+                rootfsSnapshotter:
+                    runtimeClassName: sandbox0-rootfs
+                    handler: sandbox0-rootfs
 ```
 
-This field only controls the `runtimeClassName` written onto sandbox Pods. The named Kubernetes `RuntimeClass` must already exist, and its `handler` must already be configured in the node CRI runtime on every eligible sandbox node.
+`infra-operator` creates that Kubernetes `RuntimeClass` and the node-local snapshotter DaemonSet. It does not edit or restart host containerd. Before rolling out manager, configure every eligible sandbox node so the handler selects `snapshotter = "sandbox0"` and the proxy socket is registered. The self-describing marker does not depend on CRI snapshot-annotation propagation. Containerd 1.x with config version 2 uses:
 
-`infra-operator` does not install node runtime handlers. It does not install `runsc`, write `/etc/containerd/config.toml`, restart containerd, or create a `gvisor-rootfs` handler. Do that through your node image, node bootstrap automation, or a dedicated privileged node setup process before scheduling sandbox workloads there.
+```toml
+    [proxy_plugins.sandbox0]
+      type = "snapshot"
+      address = "/run/sandbox0-rootfs-snapshotter/snapshotter.sock"
+
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes."sandbox0-rootfs"]
+      runtime_type = "io.containerd.runc.v2"
+      snapshotter = "sandbox0"
+```
+
+Containerd 2.x with config version 3 uses:
+
+```toml
+    [proxy_plugins.sandbox0]
+      type = "snapshot"
+      address = "/run/sandbox0-rootfs-snapshotter/snapshotter.sock"
+
+    [plugins."io.containerd.cri.v1.runtime".containerd.runtimes."sandbox0-rootfs"]
+      runtime_type = "io.containerd.runc.v2"
+      snapshotter = "sandbox0"
+```
+
+Use `scripts/render-containerd-rootfs-snapshotter-config.sh` to render either fragment. Merge it through the node image or bootstrap system, validate the resulting config, and restart containerd before sandbox workloads are admitted. Snapshotter readiness remains false until the main containerd can call the registered `sandbox0` plugin.
 
 ### Procd Binary Image Volume
 
@@ -230,38 +253,38 @@ spec:
 
 Sandbox0 derives CPU from memory using `services.manager.config.teamTemplateMemoryPerCpu`, so callers do not set CPU directly on a sandbox claim or update.
 
-For `gVisor` rootfs checkpoint and restore support on self-managed clusters, use a dedicated containerd handler that points to `runsc` with shared file access and overlay disabled, then create a matching `RuntimeClass`:
+For `gVisor` on self-managed clusters, use a dedicated handler that points to `runsc`, selects the `sandbox0` snapshotter, and exposes shared rootfs access. Set the same handler and RuntimeClass name under `services.ctld.rootfsSnapshotter`:
 
 ```toml
-# /etc/containerd/config.toml
-version = 2
+    # /etc/containerd/config.toml, config version 2
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes."sandbox0-gvisor-rootfs"]
+      runtime_type = "io.containerd.runsc.v1"
+      snapshotter = "sandbox0"
 
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs]
-    runtime_type = "io.containerd.runsc.v1"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs.options]
-    TypeUrl = "io.containerd.runsc.v1.options"
-    ConfigPath = "/etc/containerd/runsc-rootfs.toml"
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes."sandbox0-gvisor-rootfs".options]
+      TypeUrl = "io.containerd.runsc.v1.options"
+      ConfigPath = "/etc/containerd/runsc-rootfs.toml"
 ```
 
 ```toml
-# /etc/containerd/runsc-rootfs.toml
-[runsc_config]
-    overlay2 = "none"
-    file-access = "shared"
+    # /etc/containerd/runsc-rootfs.toml
+    [runsc_config]
+      overlay2 = "none"
+      file-access = "shared"
 ```
 
 ```yaml
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-    name: gvisor-rootfs
-handler: gvisor-rootfs
+    spec:
+        services:
+            ctld:
+                rootfsSnapshotter:
+                    runtimeClassName: sandbox0-gvisor-rootfs
+                    handler: sandbox0-gvisor-rootfs
 ```
 
-`sandboxRuntimeClassName` applies only to sandbox Pods. Ctld is a node-local host component and must use a runtime that supports its required `hostNetwork`, `hostPath`, FUSE, and network-programming access; do not run ctld under `gvisor`, `gvisor-rootfs`, or `kata`.
+The generated RuntimeClass applies only to sandbox Pods. Ctld and the rootfs snapshotter are node-local host components and must use a runtime that supports their required `hostPath`, FUSE, and network-programming access; do not run those DaemonSets under `gvisor` or `kata`. Provider-managed RuntimeClasses that cannot select a custom snapshotter are not compatible with persistent metadata heads.
 
-`ctld` assumes the node's containerd data root is `/var/lib/containerd` by default. If your nodes move containerd data to another host path, configure the same path so rootfs pause/resume can use the overlayfs fast path:
+The snapshotter assumes the node's containerd data root is `/var/lib/containerd` by default. If your nodes move containerd data to another host path, configure the same absolute path so its private overlay metadata and propagated FUSE mounts are visible to host containerd:
 
 ```yaml
 spec:
@@ -270,19 +293,11 @@ spec:
             containerdHostDataRoot: /var/lib/containerd/sandbox0
 ```
 
-`ctld` also keeps a disposable node-local rootfs object cache under its host data directory. This cache accelerates pause/resume when the restoring ctld already has the needed rootfs layer objects. The default cap is `20Gi` per ctld node. Set `rootfsObjectCacheMaxBytes: "0"` to disable it, or tune the GC fields to fit your node disk:
+The snapshotter does not maintain a second full-object replay cache. It keeps only containerd overlay metadata on the node, and immutable file extents are read from object storage by range. A cached head is mounted only while it has a live container snapshot: the first `Prepare` or `View` acquires the FUSE mount, removing the last child releases it, and process recovery remounts only heads with live children. Its DaemonSet uses `OnDelete` updates because replacing a process that owns live FUSE connections can disrupt running sandboxes. Drain the node before deleting or upgrading that Pod.
 
-```yaml
-spec:
-    services:
-        ctld:
-            rootfsObjectCacheMaxBytes: 20Gi
-            rootfsObjectCacheMinFreeBytes: 5Gi
-            rootfsObjectCacheMaxAge: 24h
-            rootfsObjectCacheSweepInterval: 1m
-```
-
-Cache contents are safe to delete. If a cached object is missing, corrupt, too old, or evicted to preserve free space, `ctld` downloads the rootfs object from configured object storage.
+<Callout variant="warning">
+This release intentionally has no permanent reader for checkpoints produced by the previous apply/replay architecture. Before upgrading manager, resume legacy paused sandboxes while the old stack is still available. After the new node runtime and manager are active, manager binds those running sandboxes to continuous sync. Wait until their initial upperdir drain completes before pausing them to publish metadata heads. A legacy head that reaches the new manager returns an explicit migration-required error.
+</Callout>
 
 ### Shared Redis Rate Limiting
 
@@ -617,8 +632,8 @@ The reference below is generated from the `Sandbox0Infra` CRD schema produced by
 - Configure `spec.network` for sandbox network policy; enforcement runs in the active ctld process on Linux nodes.
 - Use `sandboxNodePlacement.nodeSelector` and `tolerations` to keep sandbox workloads and the node-local ctld pair on the same node set. Use `preferredNodeSelector` only for soft sandbox-Pod placement and hot-claim ordering.
 - Treat `sandbox0.ai/data-plane-ready` as operator-owned; use your own labels under `sandboxNodePlacement` and let `infra-operator` manage readiness.
-- If sandbox workloads use `gvisor` or `kata`, keep ctld on a host-compatible runtime such as the cluster default runtime.
-- `services.manager.config.sandboxRuntimeClassName` references an existing Kubernetes `RuntimeClass`; it does not install the node-level containerd handler.
+- If sandbox workloads use `gvisor` or `kata`, configure a dedicated handler with `snapshotter = "sandbox0"` and keep ctld plus the snapshotter DaemonSet on a host-compatible runtime.
+- Treat `services.ctld.rootfsSnapshotter` as the only Sandbox0Infra source for sandbox RuntimeClass selection. Configure its handler in host containerd before manager rollout.
 - Keep control-plane and data-plane components in the same storage and latency domain for a given region.
 
 ## Next Steps

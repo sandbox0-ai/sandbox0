@@ -31,10 +31,10 @@ type VolumePortalController interface {
 type RootFSController interface {
 	InspectRootFS(r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int)
 	SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int)
-	ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int)
 }
 
 type RootFSSnapshotController interface {
+	BindRootFSSync(r *http.Request, req ctldapi.BindRootFSSyncRequest) (ctldapi.BindRootFSSyncResponse, int)
 	PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int)
 	PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int)
 	AbortRootFSSnapshot(r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int)
@@ -83,6 +83,10 @@ func (NotImplementedController) SaveRootFS(_ *http.Request, _ ctldapi.SaveRootFS
 	return ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"}, http.StatusNotImplemented
 }
 
+func (NotImplementedController) BindRootFSSync(_ *http.Request, _ ctldapi.BindRootFSSyncRequest) (ctldapi.BindRootFSSyncResponse, int) {
+	return ctldapi.BindRootFSSyncResponse{Error: "ctld rootfs sync bind not implemented"}, http.StatusNotImplemented
+}
+
 func (NotImplementedController) PrepareRootFSSnapshot(_ *http.Request, _ ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
 	return ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"}, http.StatusNotImplemented
 }
@@ -93,10 +97,6 @@ func (NotImplementedController) PublishRootFSSnapshot(_ *http.Request, _ ctldapi
 
 func (NotImplementedController) AbortRootFSSnapshot(_ *http.Request, _ ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
 	return ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"}, http.StatusNotImplemented
-}
-
-func (NotImplementedController) ApplyRootFS(_ *http.Request, _ ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
-	return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
 }
 
 func NewMux(controller Controller) http.Handler {
@@ -348,6 +348,28 @@ func NewMux(controller Controller) http.Handler {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
 	})
+	mux.HandleFunc("/api/v1/rootfs/sync/bind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootFSController, ok := controller.(RootFSSnapshotController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{Error: "ctld rootfs sync bind not implemented"})
+			return
+		}
+		var req ctldapi.BindRootFSSyncRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootFSController.BindRootFSSync(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
 	mux.HandleFunc("/api/v1/rootfs/snapshots/prepare", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -411,28 +433,6 @@ func NewMux(controller Controller) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := rootFSController.AbortRootFSSnapshot(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/apply", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		rootFSController, ok := controller.(RootFSController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"})
-			return
-		}
-		var req ctldapi.ApplyRootFSRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := rootFSController.ApplyRootFS(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
 	})

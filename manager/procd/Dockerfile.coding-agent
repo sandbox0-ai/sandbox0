@@ -21,7 +21,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Claude Code and Pi require Node.js 22. Pi currently requires Node.js 22.19+
 # specifically, so fail the build if the repository ever resolves an older 22.x.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg openbox x11vnc xvfb \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg openbox tigervnc-standalone-server x11vnc xvfb \
+  && command -v Xtigervnc >/dev/null \
   && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) process.exit(1)' \

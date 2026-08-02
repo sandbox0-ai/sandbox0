@@ -37,8 +37,8 @@ func NewDirectRunner(base *BaseProcess, ctx context.Context, onStop func()) *Dir
 		base:   base,
 		ctx:    ctx,
 		onStop: onStop,
-		stdout: newLimitedBuffer(maxDirectRunnerOutputBytes),
-		stderr: newLimitedBuffer(maxDirectRunnerOutputBytes),
+		stdout: newLimitedBuffer(maxCapturedOutputBytes),
+		stderr: newLimitedBuffer(maxCapturedOutputBytes),
 	}
 }
 
@@ -215,8 +215,6 @@ func (w *directRunnerOutputWriter) Write(p []byte) (int, error) {
 
 	return len(p), nil
 }
-
-const maxDirectRunnerOutputBytes = 1 << 20
 
 type limitedBuffer struct {
 	mu   sync.Mutex

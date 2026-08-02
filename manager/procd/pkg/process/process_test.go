@@ -236,6 +236,28 @@ func TestBaseProcess_PublishAndReadOutput(t *testing.T) {
 	}
 }
 
+func TestBaseProcessCompletionOutputCapturesBeforeWait(t *testing.T) {
+	bp := NewBaseProcess("test-id", ProcessTypeCMD, ProcessConfig{Type: ProcessTypeCMD})
+	bp.PublishOutput(ProcessOutput{Source: OutputSourceStdout, Data: []byte("out")})
+	bp.PublishOutput(ProcessOutput{Source: OutputSourceStderr, Data: []byte("err")})
+	bp.CloseOutput()
+
+	select {
+	case <-bp.OutputDone():
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for output completion")
+	}
+	if got := bp.GetOutputRaw(); got != "outerr" {
+		t.Fatalf("GetOutputRaw() = %q, want outerr", got)
+	}
+
+	// Closing twice must leave the completed result stable.
+	bp.CloseOutput()
+	if got := bp.GetOutputRaw(); got != "outerr" {
+		t.Fatalf("GetOutputRaw() after second close = %q, want outerr", got)
+	}
+}
+
 // TestBaseProcess_ConcurrentStateAccess tests concurrent state access.
 func TestBaseProcess_ConcurrentStateAccess(t *testing.T) {
 	config := ProcessConfig{

@@ -374,7 +374,16 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.WaitUntilDone {
-		output, execErr, aborted := h.execInputSyncWithTimeout(ctx, input, r.Context(), 0)
+		var (
+			output  string
+			execErr *execError
+			aborted bool
+		)
+		if ctx.Type == process.ProcessTypeCMD {
+			output, execErr, aborted = waitForCMDCompletion(ctx, r.Context())
+		} else {
+			output, execErr, aborted = h.execInputSyncWithTimeout(ctx, input, r.Context(), 0)
+		}
 		if aborted {
 			return
 		}
@@ -610,6 +619,30 @@ func applySplitOutputToExecResponse(response *ContextExecResponse, ctx *ctxpkg.C
 
 func (h *ContextHandler) execInputSync(ctx *ctxpkg.Context, input string, requestCtx context.Context) (string, *execError, bool) {
 	return h.execInputSyncWithTimeout(ctx, input, requestCtx, h.execTimeout)
+}
+
+func waitForCMDCompletion(ctx *ctxpkg.Context, requestCtx context.Context) (string, *execError, bool) {
+	if ctx == nil || ctx.MainProcess == nil {
+		return "", &execError{
+			status:  http.StatusConflict,
+			code:    "process_not_running",
+			message: process.ErrProcessNotRunning.Error(),
+		}, false
+	}
+	provider, ok := ctx.MainProcess.(process.CompletionOutputProvider)
+	if !ok {
+		return "", &execError{
+			status:  http.StatusInternalServerError,
+			code:    "wait_failed",
+			message: "process completion output is unavailable",
+		}, false
+	}
+	select {
+	case <-requestCtx.Done():
+		return "", nil, true
+	case <-provider.OutputDone():
+		return provider.GetOutputRaw(), nil, false
+	}
 }
 
 // execInputSyncWithTimeout waits for a prompt or process completion. A

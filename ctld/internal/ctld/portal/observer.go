@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -162,6 +163,33 @@ func (o *Observer) ObserveS0FSOpen(observation s0fs.OpenObservation) {
 		o.stateItems.WithLabelValues("directory_entries", observation.Source, format).Observe(float64(observation.DirectoryEntries))
 		o.stateItems.WithLabelValues("segments", observation.Source, format).Observe(float64(observation.Segments))
 		o.stateItems.WithLabelValues("wal_records", observation.Source, format).Observe(float64(observation.WALRecords))
+		o.stateItems.WithLabelValues("wal_records_scanned", observation.Source, format).Observe(float64(observation.WALRecordsScanned))
+		o.stateItems.WithLabelValues("wal_records_skipped", observation.Source, format).Observe(float64(observation.WALRecordsSkipped))
+	}
+	if observation.Phase == "complete" && observation.WALMaxRecordBytes > 0 && o.stateBytes != nil {
+		o.stateBytes.WithLabelValues("wal_max_record", observation.Source, format).Observe(float64(observation.WALMaxRecordBytes))
+	}
+	if observation.Phase == "complete" && observation.WALMaxDecodedBytes > 0 && o.stateBytes != nil {
+		o.stateBytes.WithLabelValues("wal_max_decoded_record", observation.Source, format).Observe(float64(observation.WALMaxDecodedBytes))
+	}
+	if observation.Phase == "wal_replay" && o.logger != nil {
+		fields := []zap.Field{
+			zap.String("volume_id", observation.VolumeID),
+			zap.String("source", observation.Source),
+			zap.String("format", format),
+			zap.Int64("wal_bytes_scanned", observation.Bytes),
+			zap.Int("wal_records_scanned", observation.WALRecordsScanned),
+			zap.Int("wal_records_skipped", observation.WALRecordsSkipped),
+			zap.Int("wal_records_replayed", observation.WALRecords),
+			zap.Int64("wal_max_record_bytes", observation.WALMaxRecordBytes),
+			zap.Int64("wal_max_decoded_record_bytes", observation.WALMaxDecodedBytes),
+			zap.Duration("duration", observation.Duration),
+			zap.String("status", observationStatus(observation.Err)),
+		}
+		if observation.Err != nil {
+			fields = append(fields, zap.Error(observation.Err))
+		}
+		o.logger.Debug("S0FS WAL recovery completed", fields...)
 	}
 }
 
@@ -257,6 +285,12 @@ func (o *Observer) observePhaseDuration(operation, phase, source string, format 
 func observationStatus(err error) string {
 	if err == nil {
 		return "success"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
 	}
 	if errors.Is(err, s0fs.ErrCommittedHeadNotFound) || errors.Is(err, s0fs.ErrMaterializedManifestNotFound) || errors.Is(err, s0fs.ErrSnapshotNotFound) {
 		return "not_found"

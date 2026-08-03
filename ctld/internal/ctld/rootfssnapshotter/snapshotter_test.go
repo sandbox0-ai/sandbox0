@@ -104,6 +104,34 @@ func TestSnapshotterCommitsStoredHeadOnCanonicalBase(t *testing.T) {
 	assert.True(t, errdefs.IsNotFound(err))
 }
 
+func TestSnapshotterRebasesHeadWithInheritedDescriptorAnnotation(t *testing.T) {
+	ctx := namespaces.WithNamespace(context.Background(), "test")
+	delegate, err := overlay.NewSnapshotter(t.TempDir(), overlay.WithUpperdirLabel)
+	require.NoError(t, err)
+	baseReference := digest.FromString("base-chain").String()
+	physicalBase := commitOpaqueBackendSnapshot(t, ctx, delegate, 2, baseReference)
+	store := objectstore.NewMemoryStore("")
+	markerObject, annotation := putStoredHead(t, store, baseReference)
+
+	snapshotter, err := NewSnapshotter(delegate, store)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = snapshotter.Close() })
+
+	active := "k8s.io/3/extract-head"
+	_, err = snapshotter.Prepare(ctx, active, "", snapshots.WithLabels(map[string]string{
+		rootfshead.AnnotationHead: annotation,
+	}))
+	require.NoError(t, err)
+	physicalHead := "k8s.io/4/" + markerObject.Digest
+	require.NoError(t, snapshotter.Commit(ctx, physicalHead, active))
+
+	info, err := delegate.Stat(ctx, physicalHead)
+	require.NoError(t, err)
+	assert.Equal(t, physicalBase, info.Parent)
+	assert.Equal(t, baseReference, info.Labels[labelHeadBaseReference])
+	assert.Equal(t, annotation, info.Labels[rootfshead.AnnotationHead])
+}
+
 func TestSnapshotterAttachesDistinctHeadsConcurrently(t *testing.T) {
 	ctx := namespaces.WithNamespace(context.Background(), "test")
 	delegate, err := overlay.NewSnapshotter(t.TempDir(), overlay.WithUpperdirLabel)

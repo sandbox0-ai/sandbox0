@@ -331,10 +331,18 @@ func (s *Snapshotter) commitHead(
 	activeLabels[labelHeadBaseReference] = head.BaseSnapshotKey
 	activeLabels[rootfshead.AnnotationHead] = annotation
 
-	if existing := strings.TrimSpace(activeInfo.Labels[rootfshead.AnnotationHead]); existing == "" {
-		if activeInfo.Parent != "" {
-			return fmt.Errorf("rootfs head active snapshot has unexpected parent %q", activeInfo.Parent)
-		}
+	existing := strings.TrimSpace(activeInfo.Labels[rootfshead.AnnotationHead])
+	if existing != "" && existing != annotation {
+		return fmt.Errorf("rootfs head active snapshot has conflicting metadata")
+	}
+	declaredBase := strings.TrimSpace(activeInfo.Labels[labelHeadBaseReference])
+	if declaredBase != "" && declaredBase != head.BaseSnapshotKey {
+		return fmt.Errorf("rootfs head active snapshot has conflicting base %q", declaredBase)
+	}
+	if activeInfo.Parent == "" {
+		// containerd inherits descriptor annotations onto the unpack snapshot.
+		// The head annotation alone does not mean the empty marker layer has
+		// already been physically rebased onto its canonical OCI base.
 		if err := s.delegate.Remove(ctx, key); err != nil {
 			return fmt.Errorf("remove filesystem-empty rootfs marker snapshot: %w", err)
 		}
@@ -346,13 +354,9 @@ func (s *Snapshotter) commitHead(
 		if err != nil {
 			return fmt.Errorf("inspect rebased rootfs head snapshot: %w", err)
 		}
-	} else {
-		if existing != annotation {
-			return fmt.Errorf("rootfs head active snapshot has conflicting metadata")
-		}
-		if activeInfo.Parent != baseInfo.Name {
-			return fmt.Errorf("rootfs head active snapshot has physical parent %q, expected %q", activeInfo.Parent, baseInfo.Name)
-		}
+	}
+	if activeInfo.Parent != baseInfo.Name {
+		return fmt.Errorf("rootfs head active snapshot has physical parent %q, expected %q", activeInfo.Parent, baseInfo.Name)
 	}
 
 	upperdir := strings.TrimSpace(activeInfo.Labels[labelOverlayUpperdir])

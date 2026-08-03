@@ -3,9 +3,6 @@ package service
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,10 +18,8 @@ import (
 )
 
 const (
-	webhookStateMountPoint           = volumeportal.WebhookStateMountPath
-	webhookStateVolumeKind           = "webhook-state"
-	deletionWebhookMaxAttempts       = 3
-	deletionWebhookRetryInitialDelay = 100 * time.Millisecond
+	webhookStateMountPoint = volumeportal.WebhookStateMountPath
+	webhookStateVolumeKind = "webhook-state"
 )
 
 var ErrVolumePortalBindConflict = errors.New("volume portal bind conflict")
@@ -422,118 +417,4 @@ func (s *SandboxService) deleteWebhookStateVolume(ctx context.Context, info Sand
 		return nil
 	}
 	return s.webhookStateVolumes.MarkSandboxForCleanup(ctx, info.TeamID, info.UserID, info.SandboxID, "sandbox_deleted")
-}
-
-// SandboxDeletionWebhookEmitter emits manager-owned sandbox deletion lifecycle events.
-type SandboxDeletionWebhookEmitter interface {
-	EmitSandboxDeleted(ctx context.Context, info SandboxLifecycleInfo) error
-}
-
-type HTTPSandboxDeletionWebhookEmitter struct {
-	httpClient *http.Client
-}
-
-type retryableSandboxDeletionWebhookError struct {
-	err error
-}
-
-func (e *retryableSandboxDeletionWebhookError) Error() string {
-	if e == nil || e.err == nil {
-		return "sandbox deletion webhook delivery failed"
-	}
-	return e.err.Error()
-}
-
-func (e *retryableSandboxDeletionWebhookError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.err
-}
-
-func isRetryableSandboxDeletionWebhookError(err error) bool {
-	var retryableErr *retryableSandboxDeletionWebhookError
-	return errors.As(err, &retryableErr)
-}
-
-func NewHTTPSandboxDeletionWebhookEmitter(httpClient *http.Client) *HTTPSandboxDeletionWebhookEmitter {
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 10 * time.Second}
-	}
-	return &HTTPSandboxDeletionWebhookEmitter{httpClient: httpClient}
-}
-
-func (e *HTTPSandboxDeletionWebhookEmitter) EmitSandboxDeleted(ctx context.Context, info SandboxLifecycleInfo) error {
-	url := strings.TrimSpace(info.WebhookURL)
-	if e == nil || url == "" {
-		return nil
-	}
-	event := map[string]any{
-		"event_id":   "evt_sandbox_deleted_" + info.SandboxID,
-		"event_type": "sandbox.deleted",
-		"timestamp":  time.Now().UTC(),
-		"sandbox_id": info.SandboxID,
-		"team_id":    info.TeamID,
-		"payload": map[string]any{
-			"reason": "pod_deleted",
-		},
-	}
-	body, err := json.Marshal(event)
-	if err != nil {
-		return err
-	}
-	var lastErr error
-	for attempt := 0; attempt < deletionWebhookMaxAttempts; attempt++ {
-		retryable, err := e.postSandboxDeleted(ctx, url, info.WebhookSecret, body)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !retryable || attempt == deletionWebhookMaxAttempts-1 {
-			if retryable {
-				return &retryableSandboxDeletionWebhookError{err: err}
-			}
-			return err
-		}
-		delay := deletionWebhookRetryInitialDelay << attempt
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-		}
-	}
-	return lastErr
-}
-
-func (e *HTTPSandboxDeletionWebhookEmitter) postSandboxDeleted(ctx context.Context, url, secret string, body []byte) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if secret != "" {
-		req.Header.Set("X-Sandbox0-Signature", signWebhookPayload(secret, body))
-	}
-	resp, err := e.httpClient.Do(req)
-	if err != nil {
-		// A client-level timeout is transient as long as the lifecycle
-		// controller context itself is still active.
-		retryable := ctx.Err() == nil
-		return retryable, fmt.Errorf("emit sandbox.deleted webhook: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		retryable := resp.StatusCode == http.StatusRequestTimeout ||
-			resp.StatusCode == http.StatusTooEarly ||
-			resp.StatusCode == http.StatusTooManyRequests ||
-			resp.StatusCode >= http.StatusInternalServerError
-		return retryable, fmt.Errorf("emit sandbox.deleted webhook failed with status %d", resp.StatusCode)
-	}
-	return false, nil
-}
-
-func signWebhookPayload(secret string, payload []byte) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	return hex.EncodeToString(mac.Sum(nil))
 }

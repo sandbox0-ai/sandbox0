@@ -538,6 +538,24 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 		return fmt.Errorf("begin mark sandbox deleted tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var currentStatus, teamID, webhookURL, webhookSecret string
+	err = tx.QueryRow(ctx, `
+		SELECT status,
+			team_id,
+			COALESCE(config->'webhook'->>'url', ''),
+			COALESCE(config->'webhook'->>'secret', '')
+		FROM manager.sandboxes
+		WHERE sandbox_id = $1
+		FOR UPDATE
+	`, sandboxID).Scan(&currentStatus, &teamID, &webhookURL, &webhookSecret)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("lock sandbox before marking deleted: %w", err)
+	}
+	if err == nil && currentStatus == SandboxStatusTerminating && strings.TrimSpace(webhookURL) != "" {
+		if err := enqueueSandboxDeletionWebhook(ctx, tx, sandboxID, teamID, webhookURL, webhookSecret, deletedAt); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET status = $2,

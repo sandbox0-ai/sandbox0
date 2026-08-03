@@ -83,7 +83,7 @@ func (r *Repository) GetTeamResourceInventory(ctx context.Context, teamID string
 	if err != nil {
 		return nil, err
 	}
-	discoveredBlocking, err := r.discoverTeamIDQueries(ctx, blockingQueries, blockingDiscoverySchemas)
+	discoveredBlocking, err := r.discoverTeamIDQueries(ctx, append(blockingQueries, retainedQueries...), blockingDiscoverySchemas)
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +380,14 @@ func (r *Repository) blockingQueries() []countQuery {
 }
 
 func (r *Repository) retainedQueries() []countQuery {
-	return nil
+	webhookOutbox := tableRef(r.schemas.Manager, "sandbox_deletion_webhook_outbox")
+	return []countQuery{
+		{
+			category: "sandbox_deletion_webhook_deliveries",
+			table:    webhookOutbox,
+			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, webhookOutbox),
+		},
+	}
 }
 
 func (r *Repository) countOptional(ctx context.Context, table, query, teamID string) (int64, error) {

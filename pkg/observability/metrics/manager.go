@@ -7,46 +7,51 @@ import (
 
 // ManagerMetrics holds Prometheus metrics for the manager service.
 type ManagerMetrics struct {
-	TemplatesTotal                  prometheus.Gauge
-	IdlePodsTotal                   *prometheus.GaugeVec
-	ActivePodsTotal                 *prometheus.GaugeVec
-	SandboxClaimsTotal              *prometheus.CounterVec
-	SandboxClaimDuration            *prometheus.HistogramVec
-	SandboxClaimPhaseDuration       *prometheus.HistogramVec
-	SandboxDeleteCleanupPhase       *prometheus.HistogramVec
-	SandboxIdleClaimsTotal          *prometheus.CounterVec
-	ProcdCrashLogCapturesTotal      *prometheus.CounterVec
-	ProcdCrashLogBytes              prometheus.Histogram
-	PodNetworkIdentityChecksTotal   *prometheus.CounterVec
-	PodNetworkIdentityStageDuration *prometheus.HistogramVec
-	PodLifecycleStageDuration       *prometheus.HistogramVec
-	NetworkPolicyApplyTotal         *prometheus.CounterVec
-	NetworkPolicyApplyDuration      *prometheus.HistogramVec
-	K8sClientRateLimit              *prometheus.GaugeVec
-	AutoscalerDecisionsTotal        *prometheus.CounterVec
-	AutoscalerPoolReplicas          *prometheus.GaugeVec
-	AutoscalerPoolPods              *prometheus.GaugeVec
-	AutoscalerColdClaimsInFlight    *prometheus.GaugeVec
-	AutoscalerScaleDelta            *prometheus.HistogramVec
-	PodsCleanedTotal                *prometheus.CounterVec
-	ReconcileTotal                  *prometheus.CounterVec
-	ReconcileDuration               *prometheus.HistogramVec
-	PodTeardownDecisionsTotal       *prometheus.CounterVec
-	PodTeardownInFlight             *prometheus.GaugeVec
-	MeteringEventsTotal             *prometheus.CounterVec
-	MeteringWindowsTotal            *prometheus.CounterVec
-	MeteringErrorsTotal             *prometheus.CounterVec
-	MeteringOutboxBatchesTotal      *prometheus.CounterVec
-	MeteringOutboxOperationsTotal   *prometheus.CounterVec
-	MeteringOutboxPendingOperations prometheus.Gauge
-	MeteringOutboxOldestPendingAge  prometheus.Gauge
-	RootFSMaintenanceRunsTotal      *prometheus.CounterVec
-	RootFSMaintenanceDuration       *prometheus.HistogramVec
-	RootFSGCLayersTotal             prometheus.Counter
-	RootFSObjectDeletesTotal        *prometheus.CounterVec
-	RootFSObjectDeletionQueueDepth  *prometheus.GaugeVec
-	RootFSStorageBytes              prometheus.Gauge
-	RootFSStorageObjects            prometheus.Gauge
+	TemplatesTotal                         prometheus.Gauge
+	IdlePodsTotal                          *prometheus.GaugeVec
+	ActivePodsTotal                        *prometheus.GaugeVec
+	SandboxClaimsTotal                     *prometheus.CounterVec
+	SandboxClaimDuration                   *prometheus.HistogramVec
+	SandboxClaimPhaseDuration              *prometheus.HistogramVec
+	SandboxDeleteCleanupPhase              *prometheus.HistogramVec
+	SandboxDeletionWebhookAttemptsTotal    *prometheus.CounterVec
+	SandboxDeletionWebhookDeliveryDuration *prometheus.HistogramVec
+	SandboxDeletionWebhookQueueDepth       *prometheus.GaugeVec
+	SandboxDeletionWebhookOldestPendingAge prometheus.Gauge
+	SandboxDeletionWebhookExpiredTotal     prometheus.Counter
+	SandboxIdleClaimsTotal                 *prometheus.CounterVec
+	ProcdCrashLogCapturesTotal             *prometheus.CounterVec
+	ProcdCrashLogBytes                     prometheus.Histogram
+	PodNetworkIdentityChecksTotal          *prometheus.CounterVec
+	PodNetworkIdentityStageDuration        *prometheus.HistogramVec
+	PodLifecycleStageDuration              *prometheus.HistogramVec
+	NetworkPolicyApplyTotal                *prometheus.CounterVec
+	NetworkPolicyApplyDuration             *prometheus.HistogramVec
+	K8sClientRateLimit                     *prometheus.GaugeVec
+	AutoscalerDecisionsTotal               *prometheus.CounterVec
+	AutoscalerPoolReplicas                 *prometheus.GaugeVec
+	AutoscalerPoolPods                     *prometheus.GaugeVec
+	AutoscalerColdClaimsInFlight           *prometheus.GaugeVec
+	AutoscalerScaleDelta                   *prometheus.HistogramVec
+	PodsCleanedTotal                       *prometheus.CounterVec
+	ReconcileTotal                         *prometheus.CounterVec
+	ReconcileDuration                      *prometheus.HistogramVec
+	PodTeardownDecisionsTotal              *prometheus.CounterVec
+	PodTeardownInFlight                    *prometheus.GaugeVec
+	MeteringEventsTotal                    *prometheus.CounterVec
+	MeteringWindowsTotal                   *prometheus.CounterVec
+	MeteringErrorsTotal                    *prometheus.CounterVec
+	MeteringOutboxBatchesTotal             *prometheus.CounterVec
+	MeteringOutboxOperationsTotal          *prometheus.CounterVec
+	MeteringOutboxPendingOperations        prometheus.Gauge
+	MeteringOutboxOldestPendingAge         prometheus.Gauge
+	RootFSMaintenanceRunsTotal             *prometheus.CounterVec
+	RootFSMaintenanceDuration              *prometheus.HistogramVec
+	RootFSGCLayersTotal                    prometheus.Counter
+	RootFSObjectDeletesTotal               *prometheus.CounterVec
+	RootFSObjectDeletionQueueDepth         *prometheus.GaugeVec
+	RootFSStorageBytes                     prometheus.Gauge
+	RootFSStorageObjects                   prometheus.Gauge
 }
 
 // NewManager registers and returns manager metrics.
@@ -90,6 +95,27 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Help:    "Duration of sandbox deletion cleanup phases",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300},
 		}, []string{"phase", "status", "scope"}), // scope: "sandbox_delete", "runtime_only", or "unknown"
+		SandboxDeletionWebhookAttemptsTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "manager_sandbox_deletion_webhook_attempts_total",
+			Help: "Total number of sandbox.deleted webhook delivery attempts by result and HTTP status class",
+		}, []string{"result", "status_class"}),
+		SandboxDeletionWebhookDeliveryDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "manager_sandbox_deletion_webhook_delivery_duration_seconds",
+			Help:    "Duration of sandbox.deleted webhook delivery attempts by result",
+			Buckets: []float64{.01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+		}, []string{"result"}),
+		SandboxDeletionWebhookQueueDepth: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "manager_sandbox_deletion_webhook_queue_depth",
+			Help: "Sandbox deletion webhook outbox records by state",
+		}, []string{"state"}),
+		SandboxDeletionWebhookOldestPendingAge: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "manager_sandbox_deletion_webhook_oldest_pending_age_seconds",
+			Help: "Age in seconds of the oldest pending sandbox deletion webhook",
+		}),
+		SandboxDeletionWebhookExpiredTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "manager_sandbox_deletion_webhook_expired_total",
+			Help: "Total number of sandbox deletion webhooks whose bounded delivery window expired",
+		}),
 		SandboxIdleClaimsTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_sandbox_idle_claims_total",
 			Help: "Total number of idle-pool claim attempts by result",

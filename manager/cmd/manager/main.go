@@ -269,6 +269,18 @@ func main() {
 		defer meteringDB.Close()
 	}
 	sandboxStore := service.NewPGSandboxStore(pool)
+	sandboxDeletionWebhookDispatcher := service.NewSandboxDeletionWebhookDispatcher(
+		service.NewSandboxDeletionWebhookOutbox(pool),
+		obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 5 * time.Second}),
+		service.SandboxDeletionWebhookDispatcherConfig{},
+		logger,
+	)
+	sandboxDeletionWebhookDispatcher.SetMetrics(managerMetrics)
+	go func() {
+		if err := sandboxDeletionWebhookDispatcher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Error("Sandbox deletion webhook dispatcher stopped", zap.Error(err))
+		}
+	}()
 	var meteringRepo *meteringoutbox.Repository
 	if cfg.Metering.Enabled {
 		meteringRepo = meteringoutbox.NewRepository(pool)
@@ -524,7 +536,6 @@ func main() {
 	} else {
 		logger.Warn("Webhook state volumes disabled; sandbox claims with webhooks require storage.runtime")
 	}
-	sandboxService.SetDeletionWebhookEmitter(service.NewHTTPSandboxDeletionWebhookEmitter(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})))
 	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
 	podInformer.Informer().AddEventHandler(hotClaimReservationController.ResourceEventHandler())
 	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)

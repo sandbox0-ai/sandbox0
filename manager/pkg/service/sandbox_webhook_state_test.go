@@ -4,22 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"slices"
-	"sync"
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
-
-type webhookRoundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f webhookRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
 
 func TestManagerStorageVolumeClientDefaultsClusterID(t *testing.T) {
 	var gotClusterID string
@@ -79,122 +70,6 @@ func TestPrepareWebhookStateVolumeReusesDurableVolume(t *testing.T) {
 	}
 	if len(volumeClient.created) != 0 {
 		t.Fatalf("created volumes = %#v, want none", volumeClient.created)
-	}
-}
-
-func TestHTTPSandboxDeletionWebhookEmitterRetriesTransientFailure(t *testing.T) {
-	var mu sync.Mutex
-	var bodies [][]byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read request body: %v", err)
-			http.Error(w, "read request", http.StatusInternalServerError)
-			return
-		}
-		mu.Lock()
-		bodies = append(bodies, body)
-		attempt := len(bodies)
-		mu.Unlock()
-		if attempt < deletionWebhookMaxAttempts {
-			http.Error(w, "try again", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	emitter := NewHTTPSandboxDeletionWebhookEmitter(server.Client())
-	err := emitter.EmitSandboxDeleted(t.Context(), SandboxLifecycleInfo{
-		SandboxID:     "sandbox-1",
-		TeamID:        "team-1",
-		WebhookURL:    server.URL,
-		WebhookSecret: "secret",
-	})
-	if err != nil {
-		t.Fatalf("EmitSandboxDeleted() error = %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(bodies) != deletionWebhookMaxAttempts {
-		t.Fatalf("request count = %d, want %d", len(bodies), deletionWebhookMaxAttempts)
-	}
-	for i := 1; i < len(bodies); i++ {
-		if !slices.Equal(bodies[0], bodies[i]) {
-			t.Fatalf("retry body %d differs from the first attempt", i+1)
-		}
-	}
-}
-
-func TestHTTPSandboxDeletionWebhookEmitterDoesNotRetryPermanentFailure(t *testing.T) {
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls++
-		http.Error(w, "invalid", http.StatusBadRequest)
-	}))
-	defer server.Close()
-
-	emitter := NewHTTPSandboxDeletionWebhookEmitter(server.Client())
-	err := emitter.EmitSandboxDeleted(t.Context(), SandboxLifecycleInfo{
-		SandboxID:  "sandbox-1",
-		TeamID:     "team-1",
-		WebhookURL: server.URL,
-	})
-	if err == nil {
-		t.Fatal("EmitSandboxDeleted() error = nil, want permanent failure")
-	}
-	if calls != 1 {
-		t.Fatalf("request count = %d, want 1", calls)
-	}
-	if isRetryableSandboxDeletionWebhookError(err) {
-		t.Fatalf("EmitSandboxDeleted() error = %v, want permanent failure", err)
-	}
-}
-
-func TestHTTPSandboxDeletionWebhookEmitterClassifiesExhaustedTransientFailure(t *testing.T) {
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls++
-		http.Error(w, "try again", http.StatusServiceUnavailable)
-	}))
-	defer server.Close()
-
-	emitter := NewHTTPSandboxDeletionWebhookEmitter(server.Client())
-	err := emitter.EmitSandboxDeleted(t.Context(), SandboxLifecycleInfo{
-		SandboxID:  "sandbox-1",
-		TeamID:     "team-1",
-		WebhookURL: server.URL,
-	})
-	if err == nil {
-		t.Fatal("EmitSandboxDeleted() error = nil, want transient failure")
-	}
-	if !isRetryableSandboxDeletionWebhookError(err) {
-		t.Fatalf("EmitSandboxDeleted() error = %v, want retryable failure", err)
-	}
-	if calls != deletionWebhookMaxAttempts {
-		t.Fatalf("request count = %d, want %d", calls, deletionWebhookMaxAttempts)
-	}
-}
-
-func TestHTTPSandboxDeletionWebhookEmitterClassifiesClientTimeoutAsRetryable(t *testing.T) {
-	calls := 0
-	emitter := NewHTTPSandboxDeletionWebhookEmitter(&http.Client{Transport: webhookRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		calls++
-		return nil, context.DeadlineExceeded
-	})})
-	err := emitter.EmitSandboxDeleted(t.Context(), SandboxLifecycleInfo{
-		SandboxID:  "sandbox-1",
-		TeamID:     "team-1",
-		WebhookURL: "https://example.test/webhook",
-	})
-	if err == nil {
-		t.Fatal("EmitSandboxDeleted() error = nil, want timeout")
-	}
-	if !isRetryableSandboxDeletionWebhookError(err) {
-		t.Fatalf("EmitSandboxDeleted() error = %v, want retryable failure", err)
-	}
-	if calls != deletionWebhookMaxAttempts {
-		t.Fatalf("request count = %d, want %d", calls, deletionWebhookMaxAttempts)
 	}
 }
 

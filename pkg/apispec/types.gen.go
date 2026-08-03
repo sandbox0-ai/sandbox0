@@ -2295,7 +2295,7 @@ type SandboxConfig struct {
 	// Ttl Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
 	Ttl *int32 `json:"ttl,omitempty"`
 
-	// Webhook Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
+	// Webhook Per-sandbox webhook configuration. Retries can deliver the same event more than once, so consumers should deduplicate by event_id and must not assume every unavailable endpoint eventually receives every event. Procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace. Manager transactionally queues sandbox.deleted in PostgreSQL, retries transient failures for up to 24 hours, and never waits for the external endpoint before completing sandbox cleanup.
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
 }
 
@@ -3795,7 +3795,7 @@ type WebLoginExchangeRequest struct {
 	ReturnUrl string `json:"return_url"`
 }
 
-// WebhookConfig Per-sandbox webhook configuration. Sandbox0 delivers webhook events at least once and consumers should deduplicate by event_id. For sandbox lifecycle events, procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace before dispatch; manager also emits sandbox.deleted during pod deletion cleanup.
+// WebhookConfig Per-sandbox webhook configuration. Retries can deliver the same event more than once, so consumers should deduplicate by event_id and must not assume every unavailable endpoint eventually receives every event. Procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace. Manager transactionally queues sandbox.deleted in PostgreSQL, retries transient failures for up to 24 hours, and never waits for the external endpoint before completing sandbox cleanup.
 type WebhookConfig struct {
 	// Secret Optional. Shared secret used to sign webhook payloads.
 	Secret *string `json:"secret,omitempty"`

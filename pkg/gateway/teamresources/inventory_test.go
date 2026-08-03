@@ -71,10 +71,11 @@ func TestRepositoryBlockingQueriesCoverTeamScopedStores(t *testing.T) {
 	}
 }
 
-func TestRepositoryDoesNotQueryPostgresMeteringForRetainedUsage(t *testing.T) {
+func TestRepositoryRetainsBoundedWebhookDeliveriesWithoutQueryingPostgresMetering(t *testing.T) {
 	repo := NewRepository(nil)
-	if got := repo.retainedQueries(); len(got) != 0 {
-		t.Fatalf("retained queries = %#v, want none because metering truth is ClickHouse-backed", got)
+	got := repo.retainedQueries()
+	if len(got) != 1 || got[0].category != "sandbox_deletion_webhook_deliveries" {
+		t.Fatalf("retained queries = %#v, want sandbox deletion webhook deliveries only", got)
 	}
 	if MeteringRetentionPolicy == "" {
 		t.Fatal("metering retention policy must be explicit")

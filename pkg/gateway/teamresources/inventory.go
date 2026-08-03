@@ -14,7 +14,7 @@ type Inventory struct {
 	RetentionPolicy   string          `json:"retention_policy,omitempty"`
 }
 
-const MeteringRetentionPolicy = "historical metering records are retained for usage truth and audit and do not block team deletion"
+const MeteringRetentionPolicy = "historical metering records and bounded operational delivery records are retained and do not block team deletion"
 
 // HasBlockingResources returns true when team deletion should be rejected.
 func (i *Inventory) HasBlockingResources() bool {

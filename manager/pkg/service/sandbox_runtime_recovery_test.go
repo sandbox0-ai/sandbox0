@@ -464,9 +464,13 @@ func TestCompleteLostRecoveryPreservesLastCommittedHeadWhenPodIsGone(t *testing.
 	assert.Equal(t, SandboxLifecyclePhaseCommitted, store.lifecycleTxns["txn-lost"].Phase)
 }
 
-func TestTerminateSandboxPersistsIntentBeforePodDeletion(t *testing.T) {
+func TestTerminateActiveSandboxCompletesWithoutSynchronousWebhookDelivery(t *testing.T) {
 	pod := runtimeRecoveryPod("pod-1", "sandbox-1", 3)
 	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, SandboxStatusRunning)
+	store.records["sandbox-1"].Config.Webhook = &WebhookConfig{
+		URL:    "https://example.test/webhook",
+		Secret: "secret",
+	}
 	client := fake.NewSimpleClientset(pod)
 	statusAtDelete := ""
 	client.PrependReactor("delete", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
@@ -507,14 +511,12 @@ func TestSandboxRecordDeletionScopeRequiresDurableDeleteIntent(t *testing.T) {
 func TestUnexpectedCurrentPodDeletionPreservesSandboxExternalState(t *testing.T) {
 	bindings := &deleteRecordingBindingStore{}
 	volumes := &recordingSystemVolumeClient{}
-	emitter := &recordingDeletionWebhookEmitter{}
 	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, SandboxStatusRunning)
 	svc := &SandboxService{
-		sandboxStore:           store,
-		credentialStore:        bindings,
-		webhookStateVolumes:    volumes,
-		deletionWebhookEmitter: emitter,
-		logger:                 zap.NewNop(),
+		sandboxStore:        store,
+		credentialStore:     bindings,
+		webhookStateVolumes: volumes,
+		logger:              zap.NewNop(),
 	}
 
 	require.NoError(t, svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
@@ -528,7 +530,6 @@ func TestUnexpectedCurrentPodDeletionPreservesSandboxExternalState(t *testing.T)
 	}))
 	assert.Zero(t, bindings.deleteCalls)
 	assert.Empty(t, volumes.marked)
-	assert.Empty(t, emitter.calls)
 	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
 }
 

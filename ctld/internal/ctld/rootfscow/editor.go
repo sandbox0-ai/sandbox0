@@ -39,8 +39,9 @@ type mutableShard struct {
 }
 
 type mutableEntry struct {
-	value rootfshead.Entry
-	child *mutableDirectory
+	value   rootfshead.Entry
+	child   *mutableDirectory
+	current bool
 }
 
 func NewEditor(store objectstore.Store, writer *ObjectWriter, parent *rootfshead.Head) (*Editor, error) {
@@ -100,7 +101,7 @@ func (e *Editor) Set(ctx context.Context, relativePath string, entry rootfshead.
 	current := shard.entries[name]
 	if entry.Kind == rootfshead.EntryDirectory {
 		var child *mutableDirectory
-		if !opaque && current != nil && current.value.Kind == rootfshead.EntryDirectory {
+		if current != nil && current.value.Kind == rootfshead.EntryDirectory {
 			child = current.child
 			if child == nil && current.value.Directory != nil {
 				ref := *current.value.Directory
@@ -110,11 +111,14 @@ func (e *Editor) Set(ctx context.Context, relativePath string, entry rootfshead.
 		if child == nil {
 			child = newMutableDirectory()
 		}
+		if opaque {
+			e.makeOpaqueLocked(child)
+		}
 		entry.Directory = cloneObject(child.ref)
 		entry.File = nil
-		shard.entries[name] = &mutableEntry{value: cloneEntry(entry), child: child}
+		shard.entries[name] = &mutableEntry{value: cloneEntry(entry), child: child, current: true}
 	} else {
-		shard.entries[name] = &mutableEntry{value: cloneEntry(entry)}
+		shard.entries[name] = &mutableEntry{value: cloneEntry(entry), current: true}
 	}
 	shard.dirty = true
 	parent.dirty = true
@@ -199,10 +203,16 @@ func (e *Editor) directoryLocked(ctx context.Context, parts []string, create boo
 			value := rootDirectoryEntry()
 			value.Name = name
 			value.Inode = "synthetic:" + strings.Join(parts, "/")
-			entry = &mutableEntry{value: value, child: child}
+			entry = &mutableEntry{value: value, child: child, current: true}
 			shard.entries[name] = entry
 			shard.dirty = true
 			directory.dirty = true
+		}
+		if create {
+			// A current-generation child can only exist through directories
+			// present in the upper. Remember the path so a later opaque parent
+			// update can retain it while pruning inherited siblings.
+			entry.current = true
 		}
 		if entry.child == nil {
 			if entry.value.Directory == nil {
@@ -215,6 +225,52 @@ func (e *Editor) directoryLocked(ctx context.Context, parts []string, create boo
 		directory = entry.child
 	}
 	return directory, nil
+}
+
+// makeOpaqueLocked removes the immutable parent view while preserving entries
+// already observed in the active upper. Capture workers intentionally run in
+// parallel, so children can arrive before their directory's opaque xattr.
+func (e *Editor) makeOpaqueLocked(directory *mutableDirectory) {
+	if !directory.indexLoaded {
+		directory.indexLoaded = true
+		directory.shardRefs = make(map[uint8]rootfshead.Object)
+		directory.shards = make(map[uint8]*mutableShard)
+		directory.ref = nil
+		directory.dirty = true
+		return
+	}
+	for bucket, shard := range directory.shards {
+		if !shard.loaded {
+			delete(directory.shards, bucket)
+			continue
+		}
+		for name, entry := range shard.entries {
+			if entry == nil || !entry.current {
+				delete(shard.entries, name)
+				continue
+			}
+			if entry.value.Kind != rootfshead.EntryDirectory {
+				continue
+			}
+			if entry.child == nil {
+				if entry.value.Directory == nil {
+					entry.child = newMutableDirectory()
+				} else {
+					ref := *entry.value.Directory
+					entry.child = &mutableDirectory{ref: &ref}
+				}
+			}
+			// An opaque ancestor also makes lower descendants unreachable. Keep
+			// only descendants independently observed in this generation.
+			e.makeOpaqueLocked(entry.child)
+		}
+		shard.ref = nil
+		shard.base = make(map[string]rootfshead.Entry)
+		shard.dirty = true
+	}
+	directory.shardRefs = make(map[uint8]rootfshead.Object)
+	directory.ref = nil
+	directory.dirty = true
 }
 
 func (e *Editor) shardLocked(ctx context.Context, directory *mutableDirectory, bucket uint8) (*mutableShard, error) {

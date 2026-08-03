@@ -84,6 +84,9 @@ func (r *ContainerdRuntime) MaterializeRootFSHead(
 			return fmt.Errorf("write rootfs head %s blob: %w", blob.name, err)
 		}
 	}
+	if err := protectRootFSHeadImageContent(leaseContext, client.ContentStore(), envelope.Manifest); err != nil {
+		return err
+	}
 
 	record := images.Image{
 		Name:   image.Name,
@@ -116,6 +119,18 @@ func (r *ContainerdRuntime) MaterializeRootFSHead(
 	}
 	if err := r.waitForCRIImage(leaseContext, image.Name); err != nil {
 		return err
+	}
+	return nil
+}
+
+// protectRootFSHeadImageContent records the manifest's config and layer edges
+// in containerd's content metadata. An image record roots the manifest, while
+// these labels keep its children reachable after the materialization lease is
+// released and containerd GC runs.
+func protectRootFSHeadImageContent(ctx context.Context, store content.Store, target ocispec.Descriptor) error {
+	handler := images.SetChildrenLabels(store, images.ChildrenHandler(store))
+	if err := images.WalkNotEmpty(ctx, handler, target); err != nil {
+		return fmt.Errorf("protect rootfs head image content: %w", err)
 	}
 	return nil
 }

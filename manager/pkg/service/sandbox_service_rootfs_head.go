@@ -155,7 +155,7 @@ func applyColdRootFSBaseImageVolume(pod *corev1.Pod, req *ClaimRequest) error {
 		if pod.Spec.Volumes[index].Name != rootFSBaseImageVolumeName {
 			continue
 		}
-		image := pod.Spec.Volumes[index].VolumeSource.Image
+		image := pod.Spec.Volumes[index].Image
 		if image == nil || image.Reference != baseImageRef {
 			return fmt.Errorf("pod %s/%s has conflicting rootfs base image volume", pod.Namespace, pod.Name)
 		}

@@ -3,7 +3,6 @@ package rootfs
 import (
 	"bytes"
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -186,12 +185,4 @@ func testRootFSInfo() ctldapi.RootFSInfo {
 		SnapshotParent:  "sha256:base-snapshot",
 		BaseImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}
-}
-
-func readAllAndClose(t *testing.T, reader io.ReadCloser) []byte {
-	t.Helper()
-	payload, err := io.ReadAll(reader)
-	require.NoError(t, err)
-	require.NoError(t, reader.Close())
-	return payload
 }

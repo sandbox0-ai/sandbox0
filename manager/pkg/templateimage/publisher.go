@@ -236,7 +236,7 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 		openAt := func(offset int64) (io.ReadCloser, error) {
 			return p.objects.Get(layer.ObjectKey, offset, layer.Size-offset)
 		}
-		if materialized != nil && layer.ID == materialized.Layer.ID {
+		if materialized != nil && layer.ID == materialized.ID {
 			openAt = materialized.OpenAt
 		}
 		err = pushBlob(ctx, target.pusher, desc, openAt)

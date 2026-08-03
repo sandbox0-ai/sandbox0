@@ -434,8 +434,8 @@ func encodeGZIPJSON(value any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	writer.Header.ModTime = time.Unix(0, 0).UTC()
-	writer.Header.OS = 255
+	writer.ModTime = time.Unix(0, 0).UTC()
+	writer.OS = 255
 	encoder := json.NewEncoder(writer)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {

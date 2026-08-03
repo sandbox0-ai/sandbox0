@@ -533,6 +533,24 @@ func TestBaseProcess_CloseInputBeforeReadyIsBounded(t *testing.T) {
 	}
 }
 
+func TestBaseProcess_CloseInputAfterProcessCleanupIsIdempotent(t *testing.T) {
+	bp := NewBaseProcess("finished", ProcessTypeCMD, ProcessConfig{Type: ProcessTypeCMD})
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	bp.SetInput(w)
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bp.stopInputWriter()
+	if err := bp.CloseInput(); err != nil {
+		t.Fatalf("CloseInput() after process cleanup error = %v, want nil", err)
+	}
+}
+
 // BenchmarkBaseProcess_StateRead benchmarks concurrent state reading.
 func BenchmarkBaseProcess_StateRead(b *testing.B) {
 	config := ProcessConfig{

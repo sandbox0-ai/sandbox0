@@ -1119,6 +1119,9 @@ func (e *Engine) restoreStateLocked(state *SnapshotState) error {
 }
 
 func (e *Engine) ReplaceState(state *SnapshotState) error {
+	state = cloneState(state)
+	ensureMaterializableSequence(state)
+
 	e.mutationMu.Lock()
 	defer e.mutationMu.Unlock()
 
@@ -1130,7 +1133,7 @@ func (e *Engine) ReplaceState(state *SnapshotState) error {
 	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
 		return err
 	}
-	e.replaceStateLocked(cloneState(state))
+	e.replaceStateLocked(state)
 	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
 		return err
 	}

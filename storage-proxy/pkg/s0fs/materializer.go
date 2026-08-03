@@ -143,9 +143,7 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 	inline := cloneStateForMaterialization(state)
 	normalizeState(inline)
 	defaultSegmentVolumeIDs(inline, m.volumeID)
-	if inline.NextSeq <= 1 {
-		inline.NextSeq = 2
-	}
+	ensureMaterializableSequence(inline)
 
 	nextSeq := checkpointSequence(inline)
 	if nextSeq == 0 {
@@ -763,6 +761,12 @@ func checkpointSequence(state *SnapshotState) uint64 {
 		return 0
 	}
 	return state.NextSeq - 1
+}
+
+func ensureMaterializableSequence(state *SnapshotState) {
+	if state != nil && state.NextSeq <= 1 {
+		state.NextSeq = 2
+	}
 }
 
 func (m *Materializer) putManifest(ctx context.Context, key string, manifest *Manifest) error {

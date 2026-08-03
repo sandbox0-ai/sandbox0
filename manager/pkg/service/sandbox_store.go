@@ -1300,6 +1300,7 @@ func rootFSLayerChainSQL() string {
 				p.created_at, c.depth + 1 AS depth
 			FROM manager.rootfs_layers p
 			JOIN chain c ON p.layer_id = c.parent_layer_id
+			WHERE c.head_object_key = ''
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 				runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
@@ -1340,6 +1341,7 @@ func rootFSLayerChainByHeadSQL() string {
 			FROM manager.rootfs_layers p
 			JOIN chain c ON p.layer_id = c.parent_layer_id
 				AND p.team_id = c.team_id
+			WHERE c.head_object_key = ''
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 				runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,

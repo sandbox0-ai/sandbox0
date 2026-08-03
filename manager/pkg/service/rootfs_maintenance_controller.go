@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
@@ -30,6 +31,7 @@ type RootFSMaintenanceControllerConfig struct {
 type RootFSMaintenanceController struct {
 	store            *PGSandboxStore
 	deleter          RootFSObjectDeleter
+	objectReader     RootFSObjectReader
 	cfg              RootFSMaintenanceControllerConfig
 	logger           *zap.Logger
 	metrics          *obsmetrics.ManagerMetrics
@@ -67,6 +69,13 @@ func (c *RootFSMaintenanceController) SetObjectInspector(inspector RootFSObjectI
 		return
 	}
 	c.objectInspector = inspector
+}
+
+func (c *RootFSMaintenanceController) SetObjectReader(reader RootFSObjectReader) {
+	if c == nil {
+		return
+	}
+	c.objectReader = reader
 }
 
 func (c *RootFSMaintenanceController) Run(ctx context.Context) error {
@@ -110,11 +119,22 @@ func (c *RootFSMaintenanceController) RunOnce(ctx context.Context) error {
 	status := "success"
 	var totalLayers int
 	var totalObjects int
+	var completedInventories int
 	var runErr error
 	defer func() {
 		c.observeRun(status, time.Since(started), totalLayers, totalObjects)
 		c.observeQueueStats(ctx)
 	}()
+
+	completedInventories, runErr = c.compactRootFSInventories(ctx)
+	if runErr != nil {
+		status = "error"
+	}
+	if completedInventories > 0 {
+		c.logger.Info("Compacted rootfs object inventories",
+			zap.Int("inventories", completedInventories),
+		)
+	}
 
 	for batch := 0; batch < c.cfg.MaxBatchesPerRun; batch++ {
 		if err := ctx.Err(); err != nil {
@@ -131,7 +151,9 @@ func (c *RootFSMaintenanceController) RunOnce(ctx context.Context) error {
 		}
 		if err != nil {
 			status = "error"
-			runErr = err
+			if runErr == nil {
+				runErr = err
+			}
 			break
 		}
 		if result == nil || (len(result.Layers) == 0 && len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0) {
@@ -151,6 +173,36 @@ func (c *RootFSMaintenanceController) RunOnce(ctx context.Context) error {
 		}
 	}
 	return runErr
+}
+
+// compactRootFSInventories walks live metadata heads without downloading file
+// chunks, replaces conservative generation inventories, and lets the normal
+// GC path reclaim overwritten or deleted content. It never runs on a sandbox
+// lifecycle request.
+func (c *RootFSMaintenanceController) compactRootFSInventories(ctx context.Context) (int, error) {
+	if c == nil || c.store == nil || c.objectReader == nil {
+		return 0, nil
+	}
+	limit := min(c.cfg.BatchSize, defaultRootFSInventoryCompactLimit)
+	candidates, err := c.store.ListRootFSInventoryCandidates(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+	completed := 0
+	for _, candidate := range candidates {
+		objects, err := CollectRootFSObjectInventory(ctx, c.objectReader, candidate)
+		if err != nil {
+			return completed, fmt.Errorf("collect rootfs object inventory for %s: %w", candidate.LayerID, err)
+		}
+		changed, err := c.store.CompleteRootFSObjectInventory(ctx, candidate, objects)
+		if err != nil {
+			return completed, fmt.Errorf("complete rootfs object inventory for %s: %w", candidate.LayerID, err)
+		}
+		if changed {
+			completed++
+		}
+	}
+	return completed, nil
 }
 
 func (c *RootFSMaintenanceController) observeRun(status string, duration time.Duration, layers, objects int) {

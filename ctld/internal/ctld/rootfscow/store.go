@@ -36,9 +36,10 @@ func LoadHead(ctx context.Context, store objectstore.Store, reference rootfshead
 	return head, ctx.Err()
 }
 
-// ObjectWriter stores immutable plaintext objects and inventories every object
-// produced or reused by this runtime generation. Upload metrics count only CAS
-// misses, while the complete reference set protects shared objects during GC.
+// ObjectWriter stores immutable plaintext objects and conservatively
+// inventories every object produced or reused by this runtime generation.
+// Upload metrics count only CAS misses; manager later compacts the committed
+// head to its exact reachable set outside lifecycle latency.
 type ObjectWriter struct {
 	store  objectstore.Store
 	prefix string
@@ -117,9 +118,8 @@ func (w *ObjectWriter) Put(ctx context.Context, mediaType string, payload []byte
 }
 
 // Referenced returns every object produced or reused by this runtime session.
-// Parent-only objects stay reachable through layer ancestry; recording reused
-// objects prevents a restored branch from losing CAS data owned by an
-// otherwise unrelated, garbage-collected branch of the same filesystem.
+// Parent-only objects stay reachable through layer ancestry until manager has
+// built an exact inventory for the complete new head.
 func (w *ObjectWriter) Referenced() []rootfshead.Object {
 	if w == nil {
 		return nil

@@ -798,6 +798,7 @@ func main() {
 					managerMetrics,
 				)
 				rootFSMaintenanceController.SetObjectInspector(rootFSObjectStoreInspector{store: rootFSObjectStore})
+				rootFSMaintenanceController.SetObjectReader(rootFSObjectStore)
 				if meteringRepo != nil {
 					rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
 				}

@@ -663,13 +663,14 @@ func (s *PGSandboxStore) ListRootFSStorageUsage(ctx context.Context, teamID stri
 				AND (expires_at IS NULL OR expires_at > NOW())
 		),
 		reachable AS (
-			SELECT l.layer_id, l.parent_layer_id
+			SELECT l.layer_id, l.parent_layer_id, l.object_inventory_complete
 			FROM manager.rootfs_layers l
 			JOIN roots r ON r.layer_id = l.layer_id
 			UNION
-			SELECT parent.layer_id, parent.parent_layer_id
+			SELECT parent.layer_id, parent.parent_layer_id, parent.object_inventory_complete
 			FROM manager.rootfs_layers parent
 			JOIN reachable child ON child.parent_layer_id = parent.layer_id
+			WHERE child.object_inventory_complete = FALSE
 		),
 		reachable_objects AS (
 			SELECT o.team_id, o.object_key, MAX(o.diff_size) AS object_size
@@ -884,13 +885,14 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 				AND (expires_at IS NULL OR expires_at > NOW())
 		),
 		reachable AS (
-			SELECT l.layer_id, l.parent_layer_id
+			SELECT l.layer_id, l.parent_layer_id, l.object_inventory_complete
 			FROM manager.rootfs_layers l
 			JOIN roots r ON r.layer_id = l.layer_id
 			UNION
-			SELECT parent.layer_id, parent.parent_layer_id
+			SELECT parent.layer_id, parent.parent_layer_id, parent.object_inventory_complete
 			FROM manager.rootfs_layers parent
 			JOIN reachable child ON child.parent_layer_id = parent.layer_id
+			WHERE child.object_inventory_complete = FALSE
 		),
 		candidates AS (
 			SELECT l.layer_id
@@ -905,6 +907,7 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 					SELECT 1
 					FROM manager.rootfs_layers child
 					WHERE child.parent_layer_id = l.layer_id
+						AND child.object_inventory_complete = FALSE
 				)
 				AND NOT EXISTS (
 					SELECT 1
@@ -1191,11 +1194,24 @@ func (s *PGSandboxStore) rootFSObjectReferences(ctx context.Context, objectKey s
 			EXISTS (
 				SELECT 1
 				FROM manager.rootfs_objects o
-				JOIN manager.sandbox_lifecycle_txns t
-					ON t.prepared_head_layer_id = o.first_layer_id
 				WHERE o.object_key = $1
-					AND t.kind = 'pause'
-					AND t.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+					AND (
+						EXISTS (
+							SELECT 1
+							FROM manager.sandbox_lifecycle_txns t
+							WHERE t.prepared_head_layer_id = o.first_layer_id
+								AND t.kind = 'pause'
+								AND t.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+						)
+						OR EXISTS (
+							SELECT 1
+							FROM manager.sandbox_lifecycle_txns t
+							JOIN manager.sandboxes sandbox ON sandbox.sandbox_id = t.sandbox_id
+							WHERE sandbox.team_id = o.team_id
+								AND t.kind = 'pause'
+								AND t.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+						)
+					)
 			) AS has_active_lifecycle_references
 	`, objectKey).Scan(&refs.HasLayerReferences, &refs.HasActiveLifecycleReferences); err != nil {
 		return refs, fmt.Errorf("check rootfs object references for %q: %w", objectKey, err)

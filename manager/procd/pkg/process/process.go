@@ -535,7 +535,7 @@ func (bp *BaseProcess) closeInput(timeout time.Duration) error {
 			bp.input = nil
 		}
 		bp.mu.Unlock()
-		return input.Close()
+		return closeInputStream(input)
 	default:
 	}
 	timer := time.NewTimer(timeout)
@@ -570,7 +570,7 @@ func (bp *BaseProcess) forceCloseInput() error {
 	if input == nil {
 		return nil
 	}
-	return input.Close()
+	return closeInputStream(input)
 }
 
 // ResizePTY resizes the attached PTY, if present.
@@ -684,12 +684,20 @@ func (bp *BaseProcess) startInputWriter(input io.WriteCloser) {
 }
 
 func (bp *BaseProcess) closeInputWriter(input io.WriteCloser) error {
-	err := input.Close()
+	err := closeInputStream(input)
 	bp.mu.Lock()
 	if bp.input == input {
 		bp.input = nil
 	}
 	bp.mu.Unlock()
+	return err
+}
+
+func closeInputStream(input io.WriteCloser) error {
+	err := input.Close()
+	if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return nil
+	}
 	return err
 }
 

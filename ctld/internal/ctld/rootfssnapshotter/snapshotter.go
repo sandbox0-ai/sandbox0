@@ -707,6 +707,11 @@ func mountLayerTree(target string, tree *LayerTree) (mountedHead, error) {
 		mounted.mu.Unlock()
 		close(mounted.done)
 	}()
+	readyCtx, cancelReady := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelReady()
+	if err := server.WaitReady(readyCtx); err != nil {
+		return nil, errors.Join(fmt.Errorf("start rootfs FUSE server: %w", err), mounted.Unmount())
+	}
 	return mounted, nil
 }
 

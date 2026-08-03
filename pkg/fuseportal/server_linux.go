@@ -3,6 +3,7 @@
 package fuseportal
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -75,6 +76,9 @@ type Server struct {
 	mux         *epollMultiplexer
 	muxToken    uint64
 	serveResult chan error
+	ready       chan struct{}
+	readyErr    error
+	readyOnce   sync.Once
 	stopOnce    sync.Once
 	requests    sync.WaitGroup
 	done        chan struct{}
@@ -178,6 +182,7 @@ func newServer(fs fuse.RawFileSystem, fd int, mountPoint string, opts *fuse.Moun
 		fd:          fd,
 		mux:         mux,
 		serveResult: make(chan error, 1),
+		ready:       make(chan struct{}),
 		done:        make(chan struct{}),
 	}, nil
 }
@@ -195,15 +200,39 @@ func (s *Server) Serve() error {
 	}
 	s.serving = true
 	if err := s.mux.add(s); err != nil {
+		s.signalReady(err)
 		s.serveMu.Unlock()
 		s.finish()
 		return err
 	}
+	s.signalReady(nil)
 	s.serveMu.Unlock()
 
 	err := <-s.serveResult
 	s.finish()
 	return err
+}
+
+// WaitReady waits until Serve has registered the FUSE channel for regular
+// request processing. Mount only completes the protocol INIT exchange, so
+// callers must not expose a newly mounted filesystem before this succeeds.
+func (s *Server) WaitReady(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("FUSE server is nil")
+	}
+	select {
+	case <-s.ready:
+		return s.readyErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) signalReady(err error) {
+	s.readyOnce.Do(func() {
+		s.readyErr = err
+		close(s.ready)
+	})
 }
 
 // CloneChannel creates a second device channel attached to the same kernel
@@ -280,6 +309,7 @@ func (s *Server) stopIdle() bool {
 		return false
 	}
 	s.serving = true
+	s.signalReady(fmt.Errorf("FUSE server stopped before serving"))
 	s.requestStop(nil)
 	s.finish()
 	return true

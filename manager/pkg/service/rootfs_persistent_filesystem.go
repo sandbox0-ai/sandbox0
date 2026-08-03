@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -68,12 +69,6 @@ type RestoreRootFSFromSnapshotRequest struct {
 	SandboxID  string
 	SnapshotID string
 	TeamID     string
-}
-
-type SquashRootFSFilesystemRequest struct {
-	SandboxID           string
-	ExpectedHeadLayerID string
-	SquashedRootFSState *SandboxRootFSState
 }
 
 type RootFSGarbageCollectionResult struct {
@@ -504,49 +499,6 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 	return filesystem, nil
 }
 
-// SquashRootFSFilesystem replaces a filesystem layer chain with a single
-// precomputed layer. The caller is responsible for creating the squashed diff
-// object before advancing the filesystem head.
-func (s *PGSandboxStore) SquashRootFSFilesystem(ctx context.Context, req *SquashRootFSFilesystemRequest) error {
-	if s == nil || s.pool == nil || req == nil || req.SquashedRootFSState == nil {
-		return nil
-	}
-	sandboxID := strings.TrimSpace(req.SandboxID)
-	if sandboxID == "" {
-		sandboxID = strings.TrimSpace(req.SquashedRootFSState.SandboxID)
-	}
-	if sandboxID == "" {
-		return fmt.Errorf("sandbox_id is required")
-	}
-	if strings.TrimSpace(req.ExpectedHeadLayerID) == "" {
-		return fmt.Errorf("expected_head_layer_id is required")
-	}
-	state := *req.SquashedRootFSState
-	state.SandboxID = sandboxID
-	if strings.TrimSpace(state.ParentLayerID) != "" {
-		return fmt.Errorf("squashed rootfs layer cannot have a parent layer")
-	}
-	if err := validateRootFSState(&state); err != nil {
-		return err
-	}
-
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("begin rootfs squash tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := saveRootFSLayer(ctx, tx, &state); err != nil {
-		return err
-	}
-	if err := advanceRootFSFilesystemHead(ctx, tx, &state, nullableText(req.ExpectedHeadLayerID)); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit rootfs squash tx: %w", err)
-	}
-	return nil
-}
-
 // GarbageCollectRootFSFilesystem removes unreferenced leaf layer metadata and
 // deletes the corresponding diff objects from durable object storage. Object
 // keys are durably queued before layer metadata is removed, so failed object
@@ -711,21 +663,23 @@ func (s *PGSandboxStore) ListRootFSStorageUsage(ctx context.Context, teamID stri
 				AND (expires_at IS NULL OR expires_at > NOW())
 		),
 		reachable AS (
-			SELECT l.layer_id, l.parent_layer_id
+			SELECT l.layer_id, l.parent_layer_id, l.object_inventory_complete
 			FROM manager.rootfs_layers l
 			JOIN roots r ON r.layer_id = l.layer_id
 			UNION
-			SELECT parent.layer_id, parent.parent_layer_id
+			SELECT parent.layer_id, parent.parent_layer_id, parent.object_inventory_complete
 			FROM manager.rootfs_layers parent
 			JOIN reachable child ON child.parent_layer_id = parent.layer_id
+			WHERE child.object_inventory_complete = FALSE
 		),
 		reachable_objects AS (
-			SELECT l.team_id, l.diff_object_key, MAX(l.diff_size) AS diff_size
-			FROM manager.rootfs_layers l
-			JOIN reachable r ON r.layer_id = l.layer_id
-			WHERE l.diff_object_key <> ''
-				AND ($1 = '' OR l.team_id = $1)
-			GROUP BY l.team_id, l.diff_object_key
+			SELECT o.team_id, o.object_key, MAX(o.diff_size) AS object_size
+			FROM manager.rootfs_layer_objects relation
+			JOIN reachable r ON r.layer_id = relation.layer_id
+			JOIN manager.rootfs_objects o ON o.object_key = relation.object_key
+			WHERE o.object_key <> ''
+				AND ($1 = '' OR o.team_id = $1)
+			GROUP BY o.team_id, o.object_key
 		),
 		known_teams AS (
 			SELECT DISTINCT team_id
@@ -742,8 +696,8 @@ func (s *PGSandboxStore) ListRootFSStorageUsage(ctx context.Context, teamID stri
 		)
 		SELECT
 			known_teams.team_id,
-			COUNT(reachable_objects.diff_object_key) AS object_count,
-			COALESCE(SUM(reachable_objects.diff_size), 0) AS storage_bytes
+			COUNT(reachable_objects.object_key) AS object_count,
+			COALESCE(SUM(reachable_objects.object_size), 0) AS storage_bytes
 		FROM known_teams
 		LEFT JOIN reachable_objects ON reachable_objects.team_id = known_teams.team_id
 		GROUP BY known_teams.team_id
@@ -931,13 +885,14 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 				AND (expires_at IS NULL OR expires_at > NOW())
 		),
 		reachable AS (
-			SELECT l.layer_id, l.parent_layer_id
+			SELECT l.layer_id, l.parent_layer_id, l.object_inventory_complete
 			FROM manager.rootfs_layers l
 			JOIN roots r ON r.layer_id = l.layer_id
 			UNION
-			SELECT parent.layer_id, parent.parent_layer_id
+			SELECT parent.layer_id, parent.parent_layer_id, parent.object_inventory_complete
 			FROM manager.rootfs_layers parent
 			JOIN reachable child ON child.parent_layer_id = parent.layer_id
+			WHERE child.object_inventory_complete = FALSE
 		),
 		candidates AS (
 			SELECT l.layer_id
@@ -952,6 +907,7 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 					SELECT 1
 					FROM manager.rootfs_layers child
 					WHERE child.parent_layer_id = l.layer_id
+						AND child.object_inventory_complete = FALSE
 				)
 				AND NOT EXISTS (
 					SELECT 1
@@ -962,24 +918,28 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		),
+		candidate_objects AS (
+			SELECT DISTINCT o.object_key, o.team_id
+			FROM manager.rootfs_layer_objects relation
+			JOIN candidates c ON c.layer_id = relation.layer_id
+			JOIN manager.rootfs_objects o ON o.object_key = relation.object_key
+			WHERE o.object_key <> ''
+		),
 		queued_objects AS (
 			INSERT INTO manager.rootfs_object_deletions (
 				object_key, team_id, created_at, updated_at
 			)
-			SELECT DISTINCT l.diff_object_key, l.team_id, NOW(), NOW()
-			FROM manager.rootfs_layers l
-			JOIN candidates c ON c.layer_id = l.layer_id
-			WHERE l.diff_object_key <> ''
+			SELECT object_key, team_id, NOW(), NOW()
+			FROM candidate_objects o
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM manager.rootfs_layer_objects ref
+				WHERE ref.object_key = o.object_key
 				AND NOT EXISTS (
-					SELECT 1
-					FROM manager.rootfs_layers ref
-					WHERE ref.diff_object_key = l.diff_object_key
-						AND NOT EXISTS (
-							SELECT 1
-							FROM candidates candidate_ref
-							WHERE candidate_ref.layer_id = ref.layer_id
-						)
+					SELECT 1 FROM candidates candidate_ref
+					WHERE candidate_ref.layer_id = ref.layer_id
 				)
+			)
 			ON CONFLICT (object_key) DO UPDATE SET
 				team_id = EXCLUDED.team_id,
 				next_attempt_at = NOW(),
@@ -997,14 +957,17 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
 				l.base_image_digest, l.snapshotter, l.snapshot_parent,
 				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
-				l.diff_size, l.diff_object_key, l.platform_os, l.platform_architecture,
-				l.platform_variant, l.created_at
+				l.diff_size, l.diff_object_key, l.head_object_digest,
+				l.head_object_media_type, l.head_object_size, l.head_object_key,
+				l.head_image_ref, l.head_image_digest,
+				l.platform_os, l.platform_architecture, l.platform_variant, l.created_at
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
 			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, platform_os, platform_architecture,
-			platform_variant, created_at
+			diff_size, diff_object_key, head_object_digest, head_object_media_type,
+			head_object_size, head_object_key, head_image_ref, head_image_digest, platform_os,
+			platform_architecture, platform_variant, created_at
 		FROM deleted
 		ORDER BY created_at ASC
 	`, strings.TrimSpace(teamID), limit)
@@ -1032,7 +995,7 @@ func (s *PGSandboxStore) DeletePendingRootFSObjects(ctx context.Context, deleter
 }
 
 func (s *PGSandboxStore) QueueUncommittedRootFSObjectDeletion(ctx context.Context, state *SandboxRootFSState, notBefore time.Time) error {
-	if s == nil || s.pool == nil || state == nil || strings.TrimSpace(state.DiffObjectKey) == "" {
+	if s == nil || s.pool == nil || state == nil {
 		return nil
 	}
 	if notBefore.IsZero() {
@@ -1044,38 +1007,58 @@ func (s *PGSandboxStore) QueueUncommittedRootFSObjectDeletion(ctx context.Contex
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	tag, err := tx.Exec(ctx, `
+	objects, err := rootFSStateObjects(state, true)
+	if err != nil {
+		return err
+	}
+	if len(objects) == 0 {
+		return nil
+	}
+	objectsJSON, err := json.Marshal(objects)
+	if err != nil {
+		return fmt.Errorf("marshal uncommitted rootfs object inventory: %w", err)
+	}
+	var inputCount int64
+	var upsertedCount int64
+	if err := tx.QueryRow(ctx, `
+		WITH input AS MATERIALIZED (
+			SELECT object.key AS object_key,
+				object.digest AS object_digest,
+				object.media_type,
+				object.size AS object_size
+			FROM jsonb_to_recordset($1::jsonb) AS object(
+				key TEXT,
+				digest TEXT,
+				size BIGINT,
+				media_type TEXT
+			)
+		),
+		upserted AS (
 		INSERT INTO manager.rootfs_objects (
 			object_key, team_id, diff_digest, diff_media_type, diff_size,
 			first_layer_id, last_referenced_at, missing_at, deleted_at,
 			last_error, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NULL, NULL, '', NOW(), NOW())
+		SELECT object_key, $2, object_digest, media_type, object_size,
+			$3, NOW(), NULL, NULL, '', NOW(), NOW()
+		FROM input
 		ON CONFLICT (object_key) DO UPDATE SET
-			team_id = EXCLUDED.team_id,
-			diff_digest = EXCLUDED.diff_digest,
-			diff_media_type = EXCLUDED.diff_media_type,
-			diff_size = EXCLUDED.diff_size,
 			last_error = '',
 			updated_at = NOW()
 		WHERE manager.rootfs_objects.team_id = EXCLUDED.team_id
 			AND manager.rootfs_objects.diff_digest = EXCLUDED.diff_digest
+			AND manager.rootfs_objects.diff_media_type = EXCLUDED.diff_media_type
 			AND manager.rootfs_objects.diff_size = EXCLUDED.diff_size
-	`, state.DiffObjectKey, state.TeamID, state.DiffDigest, state.DiffMediaType,
-		state.DiffSize, state.LayerID)
-	if err != nil {
-		return fmt.Errorf("track uncommitted rootfs object: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: %s", ErrRootFSObjectConflict, state.DiffObjectKey)
-	}
-	if _, err := tx.Exec(ctx, `
+		RETURNING object_key
+		),
+		queued AS (
 		INSERT INTO manager.rootfs_object_deletions (
 			object_key, team_id, attempts, last_error,
 			next_attempt_at, claimed_by, claimed_until, dead_lettered_at,
 			created_at, updated_at
 		)
-		VALUES ($1, $2, 0, '', $3, '', NULL, NULL, NOW(), NOW())
+		SELECT object_key, $2, 0, '', $4, '', NULL, NULL, NOW(), NOW()
+		FROM upserted
 		ON CONFLICT (object_key) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			next_attempt_at = EXCLUDED.next_attempt_at,
@@ -1084,8 +1067,15 @@ func (s *PGSandboxStore) QueueUncommittedRootFSObjectDeletion(ctx context.Contex
 			dead_lettered_at = NULL,
 			last_error = '',
 			updated_at = NOW()
-	`, state.DiffObjectKey, state.TeamID, notBefore.UTC()); err != nil {
-		return fmt.Errorf("queue uncommitted rootfs object deletion: %w", err)
+		)
+		SELECT
+			(SELECT COUNT(*) FROM input),
+			(SELECT COUNT(*) FROM upserted)
+	`, objectsJSON, state.TeamID, state.LayerID, notBefore.UTC()).Scan(&inputCount, &upsertedCount); err != nil {
+		return fmt.Errorf("queue uncommitted rootfs object inventory: %w", err)
+	}
+	if inputCount != int64(len(objects)) || upsertedCount != inputCount {
+		return fmt.Errorf("%w: accepted %d of %d uncommitted objects", ErrRootFSObjectConflict, upsertedCount, inputCount)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit uncommitted rootfs object deletion tx: %w", err)
@@ -1111,8 +1101,8 @@ func (s *PGSandboxStore) CompleteRootFSObjectDeletion(ctx context.Context, objec
 		WHERE object_key = $1
 			AND NOT EXISTS (
 				SELECT 1
-				FROM manager.rootfs_layers
-				WHERE diff_object_key = $1
+				FROM manager.rootfs_layer_objects
+				WHERE object_key = $1
 			)
 	`, strings.TrimSpace(objectKey)); err != nil {
 		return fmt.Errorf("mark rootfs object deleted %q: %w", objectKey, err)
@@ -1122,8 +1112,8 @@ func (s *PGSandboxStore) CompleteRootFSObjectDeletion(ctx context.Context, objec
 		WHERE object_key = $1
 			AND NOT EXISTS (
 				SELECT 1
-				FROM manager.rootfs_layers
-				WHERE diff_object_key = $1
+				FROM manager.rootfs_layer_objects
+				WHERE object_key = $1
 			)
 	`, strings.TrimSpace(objectKey)); err != nil {
 		return fmt.Errorf("clear rootfs object deletion %q: %w", objectKey, err)
@@ -1198,17 +1188,30 @@ func (s *PGSandboxStore) rootFSObjectReferences(ctx context.Context, objectKey s
 		SELECT
 			EXISTS (
 				SELECT 1
-				FROM manager.rootfs_layers
-				WHERE diff_object_key = $1
+				FROM manager.rootfs_layer_objects
+				WHERE object_key = $1
 			) AS has_layer_references,
 			EXISTS (
 				SELECT 1
 				FROM manager.rootfs_objects o
-				JOIN manager.sandbox_lifecycle_txns t
-					ON t.prepared_head_layer_id = o.first_layer_id
 				WHERE o.object_key = $1
-					AND t.kind = 'pause'
-					AND t.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+					AND (
+						EXISTS (
+							SELECT 1
+							FROM manager.sandbox_lifecycle_txns t
+							WHERE t.prepared_head_layer_id = o.first_layer_id
+								AND t.kind = 'pause'
+								AND t.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+						)
+						OR EXISTS (
+							SELECT 1
+							FROM manager.sandbox_lifecycle_txns t
+							JOIN manager.sandboxes sandbox ON sandbox.sandbox_id = t.sandbox_id
+							WHERE sandbox.team_id = o.team_id
+								AND t.kind = 'pause'
+								AND t.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+						)
+					)
 			) AS has_active_lifecycle_references
 	`, objectKey).Scan(&refs.HasLayerReferences, &refs.HasActiveLifecycleReferences); err != nil {
 		return refs, fmt.Errorf("check rootfs object references for %q: %w", objectKey, err)
@@ -1226,8 +1229,8 @@ func (s *PGSandboxStore) markRootFSObjectDeleted(ctx context.Context, objectKey 
 		WHERE object_key = $1
 			AND NOT EXISTS (
 				SELECT 1
-				FROM manager.rootfs_layers
-				WHERE diff_object_key = $1
+				FROM manager.rootfs_layer_objects
+				WHERE object_key = $1
 			)
 	`, objectKey); err != nil {
 		return fmt.Errorf("mark rootfs object deleted %q: %w", objectKey, err)
@@ -1440,35 +1443,6 @@ func truncateRootFSError(message string) string {
 		return message
 	}
 	return message[:2048]
-}
-
-func DeleteRootFSObjects(ctx context.Context, deleter RootFSObjectDeleter, layers []*SandboxRootFSLayer) ([]string, error) {
-	if deleter == nil || len(layers) == 0 {
-		return nil, nil
-	}
-	seen := make(map[string]struct{}, len(layers))
-	deleted := make([]string, 0, len(layers))
-	for _, layer := range layers {
-		if layer == nil {
-			continue
-		}
-		key := strings.TrimSpace(layer.DiffObjectKey)
-		if key == "" {
-			continue
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		if err := ctx.Err(); err != nil {
-			return deleted, err
-		}
-		if err := deleter.Delete(key); err != nil {
-			return deleted, fmt.Errorf("delete rootfs object %q: %w", key, err)
-		}
-		deleted = append(deleted, key)
-	}
-	return deleted, nil
 }
 
 func (s *PGSandboxStore) rootFSForkNoRowsError(ctx context.Context, req *ForkRootFSFilesystemRequest) error {

@@ -114,17 +114,6 @@ func TestCtldClientRootFSMethods(t *testing.T) {
 				return err
 			},
 		},
-		{
-			name: "apply",
-			path: "/api/v1/rootfs/apply",
-			call: func(client *CtldClient, address string) error {
-				_, err := client.ApplyRootFS(context.Background(), address, ctldapi.ApplyRootFSRequest{
-					Target:     ctldapi.RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
-					Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
-				})
-				return err
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -137,9 +126,7 @@ func TestCtldClientRootFSMethods(t *testing.T) {
 				case "inspect":
 					_ = json.NewEncoder(w).Encode(ctldapi.InspectRootFSResponse{Info: ctldapi.RootFSInfo{Runtime: "runc"}})
 				case "save":
-					_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Descriptor: ctldapi.RootFSDiffDescriptor{ObjectKey: "rootfs/diff.tar"}})
-				case "apply":
-					_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+					_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Checkpoint: ctldapi.RootFSCheckpointDescriptor{}})
 				}
 			}))
 			defer server.Close()
@@ -155,7 +142,7 @@ func TestCtldClientRootFSMethodsCanUseExtendedTimeout(t *testing.T) {
 		assert.Equal(t, "/api/v1/rootfs/save", r.URL.Path)
 		time.Sleep(80 * time.Millisecond)
 		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{
-			Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:diff"},
+			Checkpoint: ctldapi.RootFSCheckpointDescriptor{},
 		})
 	}))
 	defer server.Close()
@@ -173,5 +160,5 @@ func TestCtldClientRootFSMethodsCanUseExtendedTimeout(t *testing.T) {
 	resp, err := client.SaveRootFSWithTimeout(context.Background(), server.URL, req, time.Second)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
-	assert.Equal(t, "sha256:diff", resp.Descriptor.Digest)
+	assert.Empty(t, resp.Checkpoint.Reference.HeadID)
 }

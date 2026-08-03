@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/stretchr/testify/assert"
@@ -22,6 +23,7 @@ type recordingController struct {
 	probedPodName  string
 	probedKind     sandboxprobe.Kind
 	rootFSTarget   ctldapi.RootFSContainerRef
+	rootFSHead     rootfshead.HeadReference
 }
 
 func (c *recordingController) Pause(_ *http.Request, sandboxID string) (ctldapi.PauseResponse, int) {
@@ -55,13 +57,13 @@ func (c *recordingController) InspectRootFS(_ *http.Request, req ctldapi.Inspect
 func (c *recordingController) SaveRootFS(_ *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
 	c.rootFSTarget = req.Target
 	return ctldapi.SaveRootFSResponse{
-		Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
+		Checkpoint: ctldapi.RootFSCheckpointDescriptor{},
 	}, http.StatusOK
 }
 
-func (c *recordingController) ApplyRootFS(_ *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
-	c.rootFSTarget = req.Target
-	return ctldapi.ApplyRootFSResponse{Applied: true}, http.StatusOK
+func (c *recordingController) MaterializeRootFSHead(_ *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
+	c.rootFSHead = req.Head
+	return ctldapi.MaterializeRootFSHeadResponse{Materialized: true, Image: req.Image.Name}, http.StatusOK
 }
 
 func TestNewMuxRoutesPauseResume(t *testing.T) {
@@ -204,21 +206,7 @@ func TestNewMuxRoutesRootFS(t *testing.T) {
 				t.Helper()
 				var resp ctldapi.SaveRootFSResponse
 				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.Equal(t, "rootfs/diff.tar", resp.Descriptor.ObjectKey)
-			},
-		},
-		{
-			name: "apply",
-			path: "/api/v1/rootfs/apply",
-			body: ctldapi.ApplyRootFSRequest{
-				Target:     target,
-				Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
-			},
-			want: func(t *testing.T, body []byte) {
-				t.Helper()
-				var resp ctldapi.ApplyRootFSResponse
-				require.NoError(t, json.Unmarshal(body, &resp))
-				assert.True(t, resp.Applied)
+				assert.Empty(t, resp.Checkpoint.Reference.HeadID)
 			},
 		},
 	}
@@ -237,4 +225,26 @@ func TestNewMuxRoutesRootFS(t *testing.T) {
 			tt.want(t, rec.Body.Bytes())
 		})
 	}
+}
+
+func TestNewMuxRoutesRootFSHeadMaterialization(t *testing.T) {
+	controller := &recordingController{}
+	handler := NewMux(controller)
+	reqBody := ctldapi.MaterializeRootFSHeadRequest{
+		Head:  rootfshead.HeadReference{HeadID: "head-1"},
+		Image: rootfshead.ImageReference{Name: "sandbox0.local/rootfs-heads@sha256:test"},
+	}
+	payload, err := json.Marshal(reqBody)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/heads/materialize", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "head-1", controller.rootFSHead.HeadID)
+	var response ctldapi.MaterializeRootFSHeadResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	assert.True(t, response.Materialized)
+	assert.Equal(t, reqBody.Image.Name, response.Image)
 }

@@ -94,6 +94,89 @@ type resolvedBase struct {
 	fetcher    remotes.Fetcher
 }
 
+type publicationTarget struct {
+	credential        *managerregistry.Credential
+	pushRegistry      string
+	pullRepositoryRef string
+	plainHTTP         bool
+	pusher            remotes.Pusher
+}
+
+func (p *Publisher) preparePublication(
+	ctx context.Context,
+	teamID string,
+	targetImage string,
+	repository string,
+) (*publicationTarget, error) {
+	credential, err := p.credentials.GetPushCredentials(ctx, managerregistry.PushCredentialsRequest{
+		TeamID:      teamID,
+		TargetImage: targetImage,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get registry credentials: %w", err)
+	}
+	if credential == nil {
+		return nil, fmt.Errorf("registry credential provider returned no credentials")
+	}
+	pushRegistry, pullRegistry, plainHTTP, err := publicationEndpoints(credential, p.registry.InternalRegistry, teamID)
+	if err != nil {
+		return nil, err
+	}
+	resolver := p.newResolver(resolverOptions{
+		purpose:     resolverPurposeTarget,
+		plainHTTP:   plainHTTP,
+		credentials: staticCredentials(pushRegistry, credential.Username, credential.Password),
+	})
+	pusher, err := resolver.Pusher(ctx, joinImageReference(pushRegistry, targetImage))
+	if err != nil {
+		return nil, fmt.Errorf("create target registry pusher: %w", err)
+	}
+	return &publicationTarget{
+		credential:        credential,
+		pushRegistry:      pushRegistry,
+		pullRepositoryRef: joinImageReference(pullRegistry, repository),
+		plainHTTP:         plainHTTP,
+		pusher:            pusher,
+	}, nil
+}
+
+func (p *Publisher) resolvePublicationBase(
+	ctx context.Context,
+	target *publicationTarget,
+	baseImageRef string,
+	baseImageDigest string,
+	platform ocispec.Platform,
+) (*resolvedBase, error) {
+	if target == nil || target.credential == nil {
+		return nil, fmt.Errorf("publication target is required")
+	}
+	baseRef, baseHost, baseRepository, err := normalizeBaseReference(baseImageRef, baseImageDigest)
+	if err != nil {
+		return nil, err
+	}
+	baseRef, baseHost, baseRepository, sourcePlainHTTP, err := publicationSourceReference(
+		baseRef,
+		baseHost,
+		baseRepository,
+		target.credential,
+		target.pushRegistry,
+		target.plainHTTP,
+	)
+	if err != nil {
+		return nil, err
+	}
+	sourceAuth, err := p.sourceCredentials(baseHost, target.credential, target.pushRegistry)
+	if err != nil {
+		return nil, err
+	}
+	sourceResolver := p.newResolver(resolverOptions{
+		purpose:     resolverPurposeSource,
+		plainHTTP:   sourcePlainHTTP,
+		credentials: sourceAuth,
+	})
+	return resolveBase(ctx, sourceResolver, baseRef, baseHost, baseRepository, platform)
+}
+
 // Publish streams the base image and captured rootfs layers to the configured
 // registry. The output is digest-pinned even though an idempotent build tag is
 // also written for operational inspection.
@@ -104,11 +187,23 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 	if err := req.validate(true); err != nil {
 		return nil, err
 	}
-	resolvedLayers, err := ResolveLayerDiffIDs(ctx, p.objects, req.Layers)
-	if err != nil {
-		return nil, err
+	var materialized *materializedHeadLayer
+	if req.RootFSHead != nil {
+		var err error
+		materialized, err = materializeHeadLayer(ctx, p.objects, *req.RootFSHead)
+		if err != nil {
+			return nil, fmt.Errorf("materialize rootfs head: %w", err)
+		}
+		defer materialized.Close()
+		req.RootFSHead = nil
+		req.Layers = []Layer{materialized.Layer}
+	} else {
+		resolvedLayers, err := ResolveLayerDiffIDs(ctx, p.objects, req.Layers)
+		if err != nil {
+			return nil, err
+		}
+		req.Layers = resolvedLayers
 	}
-	req.Layers = resolvedLayers
 	if err := req.validate(false); err != nil {
 		return nil, err
 	}
@@ -116,67 +211,11 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 	repository := outputRepository(req.TemplateID)
 	tag := "build-" + strings.ToLower(strings.TrimSpace(req.BuildID))
 	targetImage := repository + ":" + tag
-	credential, err := p.credentials.GetPushCredentials(ctx, managerregistry.PushCredentialsRequest{
-		TeamID:      req.TeamID,
-		TargetImage: targetImage,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("get registry credentials: %w", err)
-	}
-	if credential == nil {
-		return nil, fmt.Errorf("registry credential provider returned no credentials")
-	}
-
-	pushRegistry, pullRegistry, plainHTTP, err := publicationEndpoints(
-		credential,
-		p.registry.InternalRegistry,
-		req.TeamID,
-	)
+	target, err := p.preparePublication(ctx, req.TeamID, targetImage, repository)
 	if err != nil {
 		return nil, err
 	}
-	pushTagRef := joinImageReference(pushRegistry, targetImage)
-	pullRepositoryRef := joinImageReference(pullRegistry, repository)
-
-	targetResolver := p.newResolver(resolverOptions{
-		purpose:   resolverPurposeTarget,
-		plainHTTP: plainHTTP,
-		credentials: staticCredentials(
-			pushRegistry,
-			credential.Username,
-			credential.Password,
-		),
-	})
-	pusher, err := targetResolver.Pusher(ctx, pushTagRef)
-	if err != nil {
-		return nil, fmt.Errorf("create target registry pusher: %w", err)
-	}
-
-	baseRef, baseHost, baseRepository, err := normalizeBaseReference(req.BaseImageRef, req.BaseImageDigest)
-	if err != nil {
-		return nil, err
-	}
-	baseRef, baseHost, baseRepository, sourcePlainHTTP, err := publicationSourceReference(
-		baseRef,
-		baseHost,
-		baseRepository,
-		credential,
-		pushRegistry,
-		plainHTTP,
-	)
-	if err != nil {
-		return nil, err
-	}
-	sourceAuth, err := p.sourceCredentials(baseHost, credential, pushRegistry)
-	if err != nil {
-		return nil, err
-	}
-	sourceResolver := p.newResolver(resolverOptions{
-		purpose:     resolverPurposeSource,
-		plainHTTP:   sourcePlainHTTP,
-		credentials: sourceAuth,
-	})
-	base, err := resolveBase(ctx, sourceResolver, baseRef, baseHost, baseRepository, req.Platform)
+	base, err := p.resolvePublicationBase(ctx, target, req.BaseImageRef, req.BaseImageDigest, req.Platform)
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +225,43 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 		return nil, err
 	}
 
+	if err := pushBaseLayers(ctx, target.pusher, base, target.pushRegistry); err != nil {
+		return nil, err
+	}
+	for i, layer := range req.Layers {
+		desc, err := rootFSLayerDescriptor(layer)
+		if err != nil {
+			return nil, err
+		}
+		openAt := func(offset int64) (io.ReadCloser, error) {
+			return p.objects.Get(layer.ObjectKey, offset, layer.Size-offset)
+		}
+		if materialized != nil && layer.ID == materialized.ID {
+			openAt = materialized.OpenAt
+		}
+		err = pushBlob(ctx, target.pusher, desc, openAt)
+		if err != nil {
+			return nil, fmt.Errorf("push rootfs layer %d (%s): %w", i, desc.Digest, err)
+		}
+	}
+	if err := pushBytes(ctx, target.pusher, configDesc, configBytes); err != nil {
+		return nil, fmt.Errorf("push image config: %w", err)
+	}
+	// The manifest is intentionally last. A failed build can leave only
+	// unreferenced blobs and never expose a partially composed image.
+	if err := pushBytes(ctx, target.pusher, manifestDesc, manifestBytes); err != nil {
+		return nil, fmt.Errorf("push image manifest: %w", err)
+	}
+
+	return &Result{
+		PushReference:  joinImageReference(target.pushRegistry, repository) + "@" + manifestDesc.Digest.String(),
+		PullReference:  target.pullRepositoryRef + "@" + manifestDesc.Digest.String(),
+		ManifestDigest: manifestDesc.Digest,
+		Platform:       platforms.Normalize(req.Platform),
+	}, nil
+}
+
+func pushBaseLayers(ctx context.Context, pusher remotes.Pusher, base *resolvedBase, pushRegistry string) error {
 	targetHost := registryHostname(pushRegistry)
 	for _, layer := range base.manifest.Layers {
 		pushDesc := layer
@@ -196,38 +272,11 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 			}
 			pushDesc.Annotations[distributionSourceLabel+"."+targetHost] = base.repository
 		}
-		err := pushBlob(ctx, pusher, pushDesc, remoteBlobOpener(ctx, base.fetcher, layer))
-		if err != nil {
-			return nil, fmt.Errorf("push base layer %s: %w", layer.Digest, err)
+		if err := pushBlob(ctx, pusher, pushDesc, remoteBlobOpener(ctx, base.fetcher, layer)); err != nil {
+			return fmt.Errorf("push base layer %s: %w", layer.Digest, err)
 		}
 	}
-	for i, layer := range req.Layers {
-		desc, err := rootFSLayerDescriptor(layer)
-		if err != nil {
-			return nil, err
-		}
-		err = pushBlob(ctx, pusher, desc, func(offset int64) (io.ReadCloser, error) {
-			return p.objects.Get(layer.ObjectKey, offset, layer.Size-offset)
-		})
-		if err != nil {
-			return nil, fmt.Errorf("push rootfs layer %d (%s): %w", i, desc.Digest, err)
-		}
-	}
-	if err := pushBytes(ctx, pusher, configDesc, configBytes); err != nil {
-		return nil, fmt.Errorf("push image config: %w", err)
-	}
-	// The manifest is intentionally last. A failed build can leave only
-	// unreferenced blobs and never expose a partially composed image.
-	if err := pushBytes(ctx, pusher, manifestDesc, manifestBytes); err != nil {
-		return nil, fmt.Errorf("push image manifest: %w", err)
-	}
-
-	return &Result{
-		PushReference:  joinImageReference(pushRegistry, repository) + "@" + manifestDesc.Digest.String(),
-		PullReference:  pullRepositoryRef + "@" + manifestDesc.Digest.String(),
-		ManifestDigest: manifestDesc.Digest,
-		Platform:       platforms.Normalize(req.Platform),
-	}, nil
+	return nil
 }
 
 func publicationEndpoints(

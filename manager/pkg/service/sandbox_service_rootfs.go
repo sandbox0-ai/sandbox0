@@ -10,11 +10,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	godigest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -70,6 +69,7 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 		return nil, err
 	}
 	generation := runtimeGenerationFromPod(pod)
+	layerID := uuid.NewString()
 	parentLayerID := ""
 	expectedHeadLayerID := ""
 	var parentState *SandboxRootFSState
@@ -77,30 +77,32 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 		return nil, fmt.Errorf("load current rootfs head: %w", err)
 	} else if parentState != nil {
 		expectedHeadLayerID = strings.TrimSpace(parentState.LayerID)
-		if squash, reason := s.shouldSquashSandboxRootFSCheckpoint(parentState); squash {
-			if s.logger != nil {
-				s.logger.Info("Squashing sandbox rootfs checkpoint",
-					zap.String("sandboxID", sandboxID),
-					zap.String("headLayerID", expectedHeadLayerID),
-					zap.String("reason", reason),
-				)
-			}
-		} else {
+	}
+	filesystemID, err := s.rootFSFilesystemID(ctx, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("load rootfs filesystem: %w", err)
+	}
+	var parent *rootfshead.HeadReference
+	if parentState != nil {
+		reference, err := optionalRootFSHeadReference(parentState)
+		if err != nil {
+			return nil, fmt.Errorf("load parent rootfs head: %w", err)
+		}
+		parent = reference
+		if parent != nil {
 			parentLayerID = expectedHeadLayerID
 		}
 	}
 	prepareReq := ctldapi.PrepareRootFSSnapshotRequest{
 		Target:        rootFSTargetForPod(pod),
-		ParentLayerID: parentLayerID,
+		HeadID:        layerID,
+		SandboxID:     sandboxID,
+		TeamID:        teamID,
+		FilesystemID:  filesystemID,
+		Parent:        parent,
 		ExcludedPaths: rootFSExcludedPathsForPod(pod),
 	}
-	layerID := uuid.NewString()
 	resp, err := s.prepareAndPublishSandboxRootFSSnapshot(ctx, ctldAddress, prepareReq, sandboxID, teamID, generation, layerID)
-	if err != nil && parentLayerID != "" && rootFSBaselineMissing(err, resp) {
-		parentLayerID = ""
-		prepareReq.ParentLayerID = ""
-		resp, err = s.prepareAndPublishSandboxRootFSSnapshot(ctx, ctldAddress, prepareReq, sandboxID, teamID, generation, layerID)
-	}
 	if err != nil {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: %w", rootFSResponseError(err, saveRootFSError(resp)))
 	}
@@ -108,10 +110,20 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	if err != nil {
 		return nil, err
 	}
+	inheritCanonicalRootFSBase(state, parentState)
 	state.LayerID = layerID
 	state.ParentLayerID = parentLayerID
 	state.ExpectedHeadLayerID = expectedHeadLayerID
 	platform := s.rootFSPlatformForPod(pod)
+	if platform.OS == "" {
+		platform.OS = state.PlatformOS
+	}
+	if platform.Architecture == "" {
+		platform.Architecture = state.PlatformArchitecture
+	}
+	if platform.Variant == "" {
+		platform.Variant = state.PlatformVariant
+	}
 	if platform.OS == "" && parentState != nil {
 		platform.OS = parentState.PlatformOS
 	}
@@ -124,7 +136,147 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	state.PlatformOS = platform.OS
 	state.PlatformArchitecture = platform.Architecture
 	state.PlatformVariant = platform.Variant
+	state.LayerChain = appendRootFSCheckpointLayer(parentState, state)
+	if err := validatePersistedRootFSHeadImage(state); err != nil {
+		s.deleteUncommittedRootFSObject(state, "rootfs head image validation failed")
+		return nil, err
+	}
 	return state, nil
+}
+
+// inheritCanonicalRootFSBase prevents metadata heads from recursively using a
+// previous metadata head as their OCI base. Every generation remains the
+// original digest-pinned template image plus one metadata marker layer.
+func inheritCanonicalRootFSBase(state, parent *SandboxRootFSState) {
+	if state == nil || parent == nil {
+		return
+	}
+	if value := strings.TrimSpace(parent.BaseImageRef); value != "" {
+		state.BaseImageRef = value
+	}
+	if value := strings.TrimSpace(parent.BaseImageDigest); value != "" {
+		state.BaseImageDigest = value
+	}
+}
+
+func appendRootFSCheckpointLayer(parent, state *SandboxRootFSState) []*SandboxRootFSLayer {
+	chain := make([]*SandboxRootFSLayer, 0, 1)
+	if parent != nil && state != nil && strings.TrimSpace(state.ParentLayerID) != "" {
+		chain = cloneSandboxRootFSLayers(parent.LayerChain)
+		if len(chain) == 0 && strings.TrimSpace(parent.LayerID) != "" {
+			chain = append(chain, rootFSLayerFromState(parent))
+		}
+	}
+	chain = append(chain, rootFSLayerFromState(state))
+	return chain
+}
+
+func rootFSLayerFromState(state *SandboxRootFSState) *SandboxRootFSLayer {
+	if state == nil {
+		return nil
+	}
+	return &SandboxRootFSLayer{
+		ID:                   state.LayerID,
+		ParentLayerID:        state.ParentLayerID,
+		SourceSandboxID:      state.SandboxID,
+		TeamID:               state.TeamID,
+		RuntimeGeneration:    state.RuntimeGeneration,
+		Runtime:              state.Runtime,
+		RuntimeHandler:       state.RuntimeHandler,
+		BaseImageRef:         state.BaseImageRef,
+		BaseImageDigest:      state.BaseImageDigest,
+		PlatformOS:           state.PlatformOS,
+		PlatformArchitecture: state.PlatformArchitecture,
+		PlatformVariant:      state.PlatformVariant,
+		Snapshotter:          state.Snapshotter,
+		SnapshotParent:       state.SnapshotParent,
+		SnapshotParentChain:  append([]string(nil), state.SnapshotParentChain...),
+		DiffDigest:           state.DiffDigest,
+		DiffID:               state.DiffID,
+		DiffMediaType:        state.DiffMediaType,
+		DiffSize:             state.DiffSize,
+		DiffObjectKey:        state.DiffObjectKey,
+		HeadObjectDigest:     state.HeadObjectDigest,
+		HeadObjectMediaType:  state.HeadObjectMediaType,
+		HeadObjectSize:       state.HeadObjectSize,
+		HeadObjectKey:        state.HeadObjectKey,
+		HeadImageRef:         state.HeadImageRef,
+		HeadImageDigest:      state.HeadImageDigest,
+		CreatedAt:            state.CreatedAt,
+	}
+}
+
+func validatePersistedRootFSHeadImage(state *SandboxRootFSState) error {
+	if state == nil {
+		return nil
+	}
+	if _, err := rootFSHeadReferenceFromState(state); err != nil {
+		return err
+	}
+	image := rootfshead.ImageReference{
+		Name:           strings.TrimSpace(state.HeadImageRef),
+		ManifestDigest: strings.TrimSpace(state.HeadImageDigest),
+		Platform:       rootFSPlatformFromState(state),
+	}
+	if err := image.Validate(); err != nil {
+		return fmt.Errorf("validate node-local rootfs head image: %w", err)
+	}
+	return nil
+}
+
+func rootFSPlatformFromState(state *SandboxRootFSState) ocispec.Platform {
+	if state == nil {
+		return ocispec.Platform{}
+	}
+	return ocispec.Platform{OS: state.PlatformOS, Architecture: state.PlatformArchitecture, Variant: state.PlatformVariant}
+}
+
+func rootFSHeadReferenceFromState(state *SandboxRootFSState) (rootfshead.HeadReference, error) {
+	if state == nil {
+		return rootfshead.HeadReference{}, fmt.Errorf("rootfs state is required")
+	}
+	reference := rootfshead.HeadReference{
+		Version: rootfshead.Version,
+		HeadID:  state.LayerID,
+		Manifest: rootfshead.Object{
+			Key:       state.HeadObjectKey,
+			Digest:    state.HeadObjectDigest,
+			Size:      state.HeadObjectSize,
+			MediaType: state.HeadObjectMediaType,
+		},
+	}
+	if err := reference.Validate(); err != nil {
+		return rootfshead.HeadReference{}, err
+	}
+	return reference, nil
+}
+
+func optionalRootFSHeadReference(state *SandboxRootFSState) (*rootfshead.HeadReference, error) {
+	if state == nil {
+		return nil, nil
+	}
+	fields := []string{
+		strings.TrimSpace(state.HeadObjectKey),
+		strings.TrimSpace(state.HeadObjectDigest),
+		strings.TrimSpace(state.HeadObjectMediaType),
+	}
+	if fields[0] == "" && fields[1] == "" && fields[2] == "" && state.HeadObjectSize == 0 {
+		return nil, nil
+	}
+	reference, err := rootFSHeadReferenceFromState(state)
+	if err != nil {
+		return nil, err
+	}
+	return &reference, nil
+}
+
+func rootFSHeadMarkerObjectFromState(state *SandboxRootFSState) (rootfshead.Object, error) {
+	reference, err := rootFSHeadReferenceFromState(state)
+	if err != nil {
+		return rootfshead.Object{}, err
+	}
+	object, _, err := rootfshead.MarkerObject(reference)
+	return object, err
 }
 
 const rootFSPlatformVariantLabel = "sandbox0.ai/platform-variant"
@@ -169,118 +321,43 @@ func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Cont
 		resp := &ctldapi.SaveRootFSResponse{}
 		if prepared != nil {
 			resp.Info = prepared.Info
-			resp.Descriptor = prepared.Descriptor
+			resp.Checkpoint = prepared.Checkpoint
 			resp.Error = prepared.Error
 		}
 		return resp, err
 	}
-	objectKey, err := defaultSandboxRootFSObjectKey(teamID, sandboxID, generation, prepared.Descriptor.Digest)
-	if err != nil {
-		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
-		return &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}, err
+	if prepared == nil || prepared.Checkpoint.Reference.HeadID != layerID {
+		actualHeadID := ""
+		if prepared != nil {
+			actualHeadID = prepared.Checkpoint.Reference.HeadID
+			_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
+		}
+		return &ctldapi.SaveRootFSResponse{}, fmt.Errorf("ctld sealed unexpected rootfs head %q", actualHeadID)
 	}
-	pendingState := rootFSStateFromPreparedSnapshot(sandboxID, teamID, generation, layerID, objectKey, prepared)
+	pendingState := rootFSStateFromPreparedSnapshot(sandboxID, teamID, generation, layerID, prepared)
 	if err := s.queueUncommittedRootFSObjectDeletion(ctx, pendingState, s.now().Add(sandboxRootFSUncommittedObjectDeleteDelay)); err != nil {
 		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
-		return &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}, err
+		return &ctldapi.SaveRootFSResponse{Info: prepared.Info, Checkpoint: prepared.Checkpoint}, err
 	}
 	published, err := s.ctldClient.PublishRootFSSnapshotWithTimeout(ctx, ctldAddress, ctldapi.PublishRootFSSnapshotRequest{
-		Handle:                    prepared.Handle,
-		SandboxID:                 sandboxID,
-		TeamID:                    teamID,
-		ExpectedRuntimeGeneration: generation,
-		ObjectKey:                 objectKey,
+		Handle: prepared.Handle,
 	}, sandboxRootFSOperationTimeout)
 	if err != nil {
 		_, _ = s.ctldClient.AbortRootFSSnapshotWithTimeout(context.Background(), ctldAddress, ctldapi.AbortRootFSSnapshotRequest{Handle: prepared.Handle}, sandboxRootFSOperationTimeout)
 		s.deleteUncommittedRootFSObject(pendingState, "rootfs snapshot publish failed")
-		resp := &ctldapi.SaveRootFSResponse{Info: prepared.Info, Descriptor: prepared.Descriptor}
+		resp := &ctldapi.SaveRootFSResponse{Info: prepared.Info, Checkpoint: prepared.Checkpoint}
 		if published != nil {
 			resp.Info = published.Info
-			resp.Descriptor = published.Descriptor
+			resp.Checkpoint = published.Checkpoint
 			resp.Error = published.Error
 		}
 		return resp, err
 	}
 	return &ctldapi.SaveRootFSResponse{
 		Info:       published.Info,
-		Descriptor: published.Descriptor,
+		Checkpoint: published.Checkpoint,
 		Error:      published.Error,
 	}, nil
-}
-
-func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootFSState) (bool, string) {
-	if s == nil || s.config.RootFSSquashDisabled || state == nil {
-		return false, ""
-	}
-	depth := len(state.LayerChain)
-	if depth == 0 && strings.TrimSpace(state.LayerID) != "" {
-		depth = 1
-	}
-	if maxDepth := s.config.RootFSSquashMaxChainDepth; maxDepth > 0 && depth >= maxDepth {
-		return true, fmt.Sprintf("chain_depth:%d", depth)
-	}
-	if maxBytes := s.config.RootFSSquashMaxChainBytes; maxBytes > 0 {
-		var totalBytes int64
-		for _, layer := range state.LayerChain {
-			if layer != nil && layer.DiffSize > 0 {
-				totalBytes += layer.DiffSize
-			}
-		}
-		if totalBytes == 0 && state.DiffSize > 0 {
-			totalBytes = state.DiffSize
-		}
-		if totalBytes >= maxBytes {
-			return true, fmt.Sprintf("chain_bytes:%d", totalBytes)
-		}
-	}
-	return false, ""
-}
-
-func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, state *SandboxRootFSState) error {
-	if state == nil {
-		return nil
-	}
-	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil {
-		return fmt.Errorf("ctld is required to restore sandbox rootfs checkpoint")
-	}
-	if pod == nil {
-		return fmt.Errorf("pod is nil")
-	}
-	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
-	if err != nil {
-		return err
-	}
-	req := ctldapi.ApplyRootFSRequest{
-		Target:                      rootFSTargetForPod(pod),
-		ExpectedRuntime:             state.Runtime,
-		ExpectedRuntimeHandler:      state.RuntimeHandler,
-		ExpectedSnapshotter:         state.Snapshotter,
-		ExpectedBaseImageDigest:     state.BaseImageDigest,
-		ExpectedSnapshotParent:      state.SnapshotParent,
-		ExpectedSnapshotParentChain: append([]string(nil), state.SnapshotParentChain...),
-		Descriptor: ctldapi.RootFSDiffDescriptor{
-			MediaType: state.DiffMediaType,
-			Digest:    state.DiffDigest,
-			DiffID:    state.DiffID,
-			Size:      state.DiffSize,
-			ObjectKey: state.DiffObjectKey,
-		},
-		ExcludedPaths: rootFSExcludedPathsForPod(pod),
-	}
-	if layers := rootFSLayerDescriptors(state); len(layers) > 0 {
-		req.Layers = layers
-		req.BaselineLayerID = state.LayerID
-		req.Descriptor = ctldapi.RootFSDiffDescriptor{}
-	}
-	resp, err := s.ctldClient.ApplyRootFSWithTimeout(ctx, ctldAddress, req, sandboxRootFSOperationTimeout)
-	if err != nil {
-		return fmt.Errorf("apply sandbox rootfs checkpoint: %w", rootFSResponseError(err, applyRootFSError(resp)))
-	}
-	if resp == nil || !resp.Applied {
-		return fmt.Errorf("apply sandbox rootfs checkpoint: ctld did not report applied")
-	}
-	return nil
 }
 
 func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
@@ -316,168 +393,81 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	return out
 }
 
-func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState, fallbackStatus string) (*corev1.Pod, error) {
-	if state == nil {
-		return pod, nil
-	}
-	err := s.applySandboxRootFSCheckpoint(ctx, pod, state)
-	if err == nil {
-		return pod, nil
-	}
-	fallbackTemplate, fallbackErr := templateWithCheckpointBaseImage(template, state)
-	if fallbackErr != nil {
-		return pod, fmt.Errorf("%w; checkpoint base image fallback unavailable: %v", err, fallbackErr)
-	}
-	if s != nil && s.logger != nil {
-		s.logger.Warn("Rootfs force-apply failed; retrying with checkpoint base image",
-			zap.String("sandboxID", state.SandboxID),
-			zap.String("baseImageRef", state.BaseImageRef),
-			zap.String("baseImageDigest", state.BaseImageDigest),
-			zap.Error(err),
-		)
-	}
-	s.requestSandboxDeletionAfterClaimFailure(pod, "rootfs force-apply failed")
-
-	fallbackPod, fallbackErr := s.createNewPod(ctx, fallbackTemplate, req)
-	if fallbackErr != nil {
-		return pod, fmt.Errorf("%w; create checkpoint base image runtime: %v", err, fallbackErr)
-	}
-	networkPod, fallbackErr := s.waitForColdPodNetworkPolicy(ctx, fallbackPod, req.TeamID)
-	if fallbackErr != nil {
-		s.requestSandboxDeletionAfterClaimFailure(fallbackPod, "checkpoint base image network policy failed")
-		return fallbackPod, fmt.Errorf("%w; prepare checkpoint base image network policy: %v", err, fallbackErr)
-	}
-	fallbackPod = networkPod
-	readyPod, fallbackErr := s.waitForPodClaimReady(ctx, fallbackPod.Namespace, fallbackPod.Name)
-	if fallbackErr != nil {
-		s.requestSandboxDeletionAfterClaimFailure(fallbackPod, "checkpoint base image runtime readiness failed")
-		return fallbackPod, fmt.Errorf("%w; wait for checkpoint base image runtime: %v", err, fallbackErr)
-	}
-	if fallbackErr := s.applySandboxRootFSCheckpoint(ctx, readyPod, state); fallbackErr != nil {
-		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image rootfs apply failed")
-		return readyPod, fmt.Errorf("%w; checkpoint base image retry failed: %v", err, fallbackErr)
-	}
-	if strings.TrimSpace(fallbackStatus) != "" {
-		if fallbackErr := s.saveRestoredRuntimePod(ctx, readyPod, record, fallbackStatus); fallbackErr != nil {
-			s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image runtime persistence failed")
-			return readyPod, fallbackErr
-		}
-	}
-	return readyPod, nil
-}
-
-func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, status string) error {
-	if s == nil || s.sandboxStore == nil || pod == nil || record == nil {
-		return nil
-	}
-	sandboxID := strings.TrimSpace(record.ID)
-	if sandboxID == "" {
-		sandboxID = sandboxIDFromPod(pod)
-	}
-	if sandboxID == "" {
-		return fmt.Errorf("sandbox_id is required")
-	}
-	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
-		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, status, runtimeGenerationFromPod(pod), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt), sandboxRuntimeMetadataFromPod(pod))
-	})
-}
-
-func templateWithCheckpointBaseImage(template *v1alpha1.SandboxTemplate, state *SandboxRootFSState) (*v1alpha1.SandboxTemplate, error) {
-	if template == nil {
-		return nil, fmt.Errorf("template is required")
-	}
-	image, err := checkpointBaseImageRef(state)
-	if err != nil {
-		return nil, err
-	}
-	clone := template.DeepCopy()
-	clone.Spec.MainContainer.Image = image
-	clone.Spec.MainContainer.ImagePullPolicy = string(corev1.PullIfNotPresent)
-	return clone, nil
-}
-
-func checkpointBaseImageRef(state *SandboxRootFSState) (string, error) {
-	if state == nil {
-		return "", fmt.Errorf("rootfs state is required")
-	}
-	repo := imageRepositoryFromRef(state.BaseImageRef)
-	if repo == "" {
-		return "", fmt.Errorf("base image ref is required")
-	}
-	digestValue := strings.TrimSpace(state.BaseImageDigest)
-	if digestValue == "" {
-		return "", fmt.Errorf("base image digest is required")
-	}
-	parsed, err := godigest.Parse(digestValue)
-	if err != nil {
-		return "", fmt.Errorf("base image digest %q is invalid: %w", digestValue, err)
-	}
-	return repo + "@" + parsed.String(), nil
-}
-
-func imageRepositoryFromRef(ref string) string {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return ""
-	}
-	if idx := strings.LastIndex(ref, "@"); idx >= 0 {
-		ref = ref[:idx]
-	}
-	lastSlash := strings.LastIndex(ref, "/")
-	lastColon := strings.LastIndex(ref, ":")
-	if lastColon > lastSlash {
-		ref = ref[:lastColon]
-	}
-	return strings.TrimSpace(ref)
-}
-
-func rootFSLayerDescriptors(state *SandboxRootFSState) []ctldapi.RootFSLayerDescriptor {
-	if state == nil {
-		return nil
-	}
-	if len(state.LayerChain) > 0 {
-		out := make([]ctldapi.RootFSLayerDescriptor, 0, len(state.LayerChain))
-		for _, layer := range state.LayerChain {
-			if layer == nil || strings.TrimSpace(layer.ID) == "" {
-				continue
-			}
-			out = append(out, ctldapi.RootFSLayerDescriptor{
-				LayerID:       layer.ID,
-				ParentLayerID: layer.ParentLayerID,
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: layer.DiffMediaType,
-					Digest:    layer.DiffDigest,
-					DiffID:    layer.DiffID,
-					Size:      layer.DiffSize,
-					ObjectKey: layer.DiffObjectKey,
-				},
-			})
-		}
-		if len(out) > 0 {
-			return out
-		}
-	}
-	if strings.TrimSpace(state.LayerID) == "" {
-		return nil
-	}
-	return []ctldapi.RootFSLayerDescriptor{{
-		LayerID:       state.LayerID,
-		ParentLayerID: state.ParentLayerID,
-		Descriptor: ctldapi.RootFSDiffDescriptor{
-			MediaType: state.DiffMediaType,
-			Digest:    state.DiffDigest,
-			DiffID:    state.DiffID,
-			Size:      state.DiffSize,
-			ObjectKey: state.DiffObjectKey,
-		},
-	}}
-}
-
 func (s *SandboxService) latestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error) {
 	if s == nil || s.sandboxStore == nil {
 		return nil, nil
 	}
 	return s.sandboxStore.GetLatestRootFSState(ctx, sandboxID)
+}
+
+func (s *SandboxService) rootFSFilesystemID(ctx context.Context, sandboxID string) (string, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	reader, ok := s.sandboxStore.(interface {
+		GetRootFSFilesystem(context.Context, string) (*RootFSFilesystem, error)
+	})
+	if !ok || reader == nil {
+		return sandboxID, nil
+	}
+	filesystem, err := reader.GetRootFSFilesystem(ctx, sandboxID)
+	if err != nil {
+		return "", err
+	}
+	if filesystem == nil || strings.TrimSpace(filesystem.ID) == "" {
+		return sandboxID, nil
+	}
+	return strings.TrimSpace(filesystem.ID), nil
+}
+
+func (s *SandboxService) bindSandboxRootFSSync(ctx context.Context, pod *corev1.Pod, req *ClaimRequest) error {
+	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil || pod == nil || req == nil {
+		return nil
+	}
+	sandboxID := strings.TrimSpace(req.SandboxID)
+	if sandboxID == "" {
+		sandboxID = sandboxIDFromPod(pod)
+	}
+	filesystemID, err := s.rootFSFilesystemID(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	state, err := s.latestRootFSState(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	var parent *rootfshead.HeadReference
+	if state != nil {
+		reference, err := optionalRootFSHeadReference(state)
+		if err != nil {
+			return err
+		}
+		parent = reference
+	}
+	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
+	if err != nil {
+		return err
+	}
+	response, err := s.ctldClient.BindRootFSSyncWithTimeout(ctx, ctldAddress, ctldapi.BindRootFSSyncRequest{
+		Target:        rootFSTargetForPod(pod),
+		SandboxID:     sandboxID,
+		TeamID:        req.TeamID,
+		FilesystemID:  filesystemID,
+		Parent:        parent,
+		ExcludedPaths: rootFSExcludedPathsForPod(pod),
+	}, 30*time.Second)
+	if err != nil {
+		return rootFSResponseError(err, bindRootFSSyncError(response))
+	}
+	if response == nil || !response.Bound {
+		return fmt.Errorf("ctld did not bind rootfs sync")
+	}
+	return nil
+}
+
+func bindRootFSSyncError(response *ctldapi.BindRootFSSyncResponse) string {
+	if response == nil {
+		return ""
+	}
+	return strings.TrimSpace(response.Error)
 }
 
 func rootFSTargetForPod(pod *corev1.Pod) ctldapi.RootFSContainerRef {
@@ -501,76 +491,66 @@ func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, res
 	if resp == nil {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: empty ctld response")
 	}
-	if strings.TrimSpace(resp.Descriptor.Digest) == "" {
-		return nil, fmt.Errorf("save sandbox rootfs checkpoint: diff digest is empty")
+	if err := resp.Checkpoint.Reference.Validate(); err != nil {
+		return nil, fmt.Errorf("save sandbox rootfs checkpoint: %w", err)
 	}
-	if strings.TrimSpace(resp.Descriptor.ObjectKey) == "" {
-		return nil, fmt.Errorf("save sandbox rootfs checkpoint: diff object key is empty")
-	}
+	manifest := resp.Checkpoint.Reference.Manifest
 	return &SandboxRootFSState{
-		SandboxID:           sandboxID,
-		TeamID:              teamID,
-		RuntimeGeneration:   generation,
-		Runtime:             resp.Info.Runtime,
-		RuntimeHandler:      resp.Info.RuntimeHandler,
-		BaseImageRef:        resp.Info.BaseImageRef,
-		BaseImageDigest:     resp.Info.BaseImageDigest,
-		Snapshotter:         resp.Info.Snapshotter,
-		SnapshotParent:      resp.Info.SnapshotParent,
-		SnapshotParentChain: append([]string(nil), resp.Info.SnapshotParentChain...),
-		DiffDigest:          resp.Descriptor.Digest,
-		DiffID:              resp.Descriptor.DiffID,
-		DiffMediaType:       resp.Descriptor.MediaType,
-		DiffSize:            resp.Descriptor.Size,
-		DiffObjectKey:       resp.Descriptor.ObjectKey,
+		SandboxID:            sandboxID,
+		TeamID:               teamID,
+		RuntimeGeneration:    generation,
+		Runtime:              resp.Info.Runtime,
+		RuntimeHandler:       resp.Info.RuntimeHandler,
+		BaseImageRef:         resp.Info.BaseImageRef,
+		BaseImageDigest:      resp.Info.BaseImageDigest,
+		PlatformOS:           resp.Checkpoint.Image.Platform.OS,
+		PlatformArchitecture: resp.Checkpoint.Image.Platform.Architecture,
+		PlatformVariant:      resp.Checkpoint.Image.Platform.Variant,
+		Snapshotter:          resp.Info.Snapshotter,
+		SnapshotParent:       resp.Info.SnapshotParent,
+		SnapshotParentChain:  append([]string(nil), resp.Info.SnapshotParentChain...),
+		HeadObjectDigest:     manifest.Digest,
+		HeadObjectMediaType:  manifest.MediaType,
+		HeadObjectSize:       manifest.Size,
+		HeadObjectKey:        manifest.Key,
+		HeadImageRef:         resp.Checkpoint.Image.Name,
+		HeadImageDigest:      resp.Checkpoint.Image.ManifestDigest,
+		Objects:              append([]rootfshead.Object(nil), resp.Checkpoint.Objects...),
 	}, nil
 }
 
-func rootFSStateFromPreparedSnapshot(sandboxID, teamID string, generation int64, layerID, objectKey string, prepared *ctldapi.PrepareRootFSSnapshotResponse) *SandboxRootFSState {
+func rootFSStateFromPreparedSnapshot(sandboxID, teamID string, generation int64, layerID string, prepared *ctldapi.PrepareRootFSSnapshotResponse) *SandboxRootFSState {
 	if prepared == nil {
 		return nil
 	}
+	manifest := prepared.Checkpoint.Reference.Manifest
 	return &SandboxRootFSState{
-		LayerID:             layerID,
-		SandboxID:           sandboxID,
-		TeamID:              teamID,
-		RuntimeGeneration:   generation,
-		Runtime:             prepared.Info.Runtime,
-		RuntimeHandler:      prepared.Info.RuntimeHandler,
-		BaseImageRef:        prepared.Info.BaseImageRef,
-		BaseImageDigest:     prepared.Info.BaseImageDigest,
-		Snapshotter:         prepared.Info.Snapshotter,
-		SnapshotParent:      prepared.Info.SnapshotParent,
-		SnapshotParentChain: append([]string(nil), prepared.Info.SnapshotParentChain...),
-		DiffDigest:          prepared.Descriptor.Digest,
-		DiffID:              prepared.Descriptor.DiffID,
-		DiffMediaType:       prepared.Descriptor.MediaType,
-		DiffSize:            prepared.Descriptor.Size,
-		DiffObjectKey:       objectKey,
+		LayerID:              layerID,
+		SandboxID:            sandboxID,
+		TeamID:               teamID,
+		RuntimeGeneration:    generation,
+		Runtime:              prepared.Info.Runtime,
+		RuntimeHandler:       prepared.Info.RuntimeHandler,
+		BaseImageRef:         prepared.Info.BaseImageRef,
+		BaseImageDigest:      prepared.Info.BaseImageDigest,
+		PlatformOS:           prepared.Checkpoint.Image.Platform.OS,
+		PlatformArchitecture: prepared.Checkpoint.Image.Platform.Architecture,
+		PlatformVariant:      prepared.Checkpoint.Image.Platform.Variant,
+		Snapshotter:          prepared.Info.Snapshotter,
+		SnapshotParent:       prepared.Info.SnapshotParent,
+		SnapshotParentChain:  append([]string(nil), prepared.Info.SnapshotParentChain...),
+		HeadObjectDigest:     manifest.Digest,
+		HeadObjectMediaType:  manifest.MediaType,
+		HeadObjectSize:       manifest.Size,
+		HeadObjectKey:        manifest.Key,
+		HeadImageRef:         prepared.Checkpoint.Image.Name,
+		HeadImageDigest:      prepared.Checkpoint.Image.ManifestDigest,
+		Objects:              append([]rootfshead.Object(nil), prepared.Checkpoint.Objects...),
 	}
-}
-
-func defaultSandboxRootFSObjectKey(teamID, sandboxID string, generation int64, digest string) (string, error) {
-	teamID = strings.TrimSpace(teamID)
-	sandboxID = strings.TrimSpace(sandboxID)
-	if teamID == "" {
-		return "", fmt.Errorf("team_id is required when rootfs object key is omitted")
-	}
-	if sandboxID == "" {
-		return "", fmt.Errorf("sandbox_id is required when rootfs object key is omitted")
-	}
-	if strings.Contains(teamID, "/") || strings.Contains(sandboxID, "/") {
-		return "", fmt.Errorf("team_id and sandbox_id cannot contain '/'")
-	}
-	parts := strings.SplitN(strings.TrimSpace(digest), ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", fmt.Errorf("invalid rootfs diff digest %q", digest)
-	}
-	return path.Join("sandbox-rootfs", teamID, sandboxID, fmt.Sprintf("%d", generation), parts[0], parts[1]+".tar"), nil
 }
 
 func (s *SandboxService) queueUncommittedRootFSObjectDeletion(ctx context.Context, state *SandboxRootFSState, notBefore time.Time) error {
-	if state == nil || strings.TrimSpace(state.DiffObjectKey) == "" {
+	if state == nil || (strings.TrimSpace(state.HeadObjectKey) == "" && len(state.Objects) == 0) {
 		return nil
 	}
 	store, ok := s.sandboxStore.(interface {
@@ -583,51 +563,21 @@ func (s *SandboxService) queueUncommittedRootFSObjectDeletion(ctx context.Contex
 }
 
 func (s *SandboxService) deleteUncommittedRootFSObject(state *SandboxRootFSState, reason string) {
-	if state == nil || strings.TrimSpace(state.DiffObjectKey) == "" {
+	if state == nil || (strings.TrimSpace(state.HeadObjectKey) == "" && len(state.Objects) == 0) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxRootFSUncommittedObjectDeleteTimeout)
 	defer cancel()
-	if err := s.queueUncommittedRootFSObjectDeletion(ctx, state, time.Now()); err != nil && s.logger != nil {
+	// A running sync session may reuse these immutable objects in its next seal.
+	// Delayed deletion gives a later committed layer time to cancel the queue;
+	// deleting immediately could corrupt that still-running generation.
+	if err := s.queueUncommittedRootFSObjectDeletion(ctx, state, time.Now().Add(sandboxRootFSUncommittedObjectDeleteDelay)); err != nil && s.logger != nil {
 		s.logger.Warn("Failed to queue uncommitted rootfs object deletion",
 			zap.String("sandboxID", state.SandboxID),
 			zap.String("objectKey", state.DiffObjectKey),
 			zap.String("reason", reason),
 			zap.Error(err),
 		)
-	}
-	if s.rootFSObjectDeleter == nil {
-		if s.logger != nil {
-			s.logger.Warn("Uncommitted rootfs object deletion deferred; object deleter is not configured",
-				zap.String("sandboxID", state.SandboxID),
-				zap.String("objectKey", state.DiffObjectKey),
-				zap.String("reason", reason),
-			)
-		}
-		return
-	}
-	if err := s.rootFSObjectDeleter.Delete(state.DiffObjectKey); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("Failed to delete uncommitted rootfs object",
-				zap.String("sandboxID", state.SandboxID),
-				zap.String("objectKey", state.DiffObjectKey),
-				zap.String("reason", reason),
-				zap.Error(err),
-			)
-		}
-		return
-	}
-	store, ok := s.sandboxStore.(interface {
-		CompleteRootFSObjectDeletion(context.Context, string) error
-	})
-	if ok && store != nil {
-		if err := store.CompleteRootFSObjectDeletion(ctx, state.DiffObjectKey); err != nil && s.logger != nil {
-			s.logger.Warn("Failed to mark uncommitted rootfs object deleted",
-				zap.String("sandboxID", state.SandboxID),
-				zap.String("objectKey", state.DiffObjectKey),
-				zap.Error(err),
-			)
-		}
 	}
 }
 
@@ -636,22 +586,6 @@ func saveRootFSError(resp *ctldapi.SaveRootFSResponse) string {
 		return ""
 	}
 	return strings.TrimSpace(resp.Error)
-}
-
-func applyRootFSError(resp *ctldapi.ApplyRootFSResponse) string {
-	if resp == nil {
-		return ""
-	}
-	return strings.TrimSpace(resp.Error)
-}
-
-func rootFSBaselineMissing(err error, resp *ctldapi.SaveRootFSResponse) bool {
-	var reqErr *ctldapi.RequestError
-	if !errors.As(err, &reqErr) || reqErr == nil || reqErr.StatusCode != http.StatusNotFound {
-		return false
-	}
-	message := strings.ToLower(saveRootFSError(resp))
-	return strings.Contains(message, "baseline") && strings.Contains(message, "not captured")
 }
 
 func rootFSTerminatedSnapshotMissing(err error) bool {

@@ -14,8 +14,8 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 PROTOC ?= protoc
 GO ?= env GOWORK=off go
 
-BINARIES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld procd infra-operator
-TEST_SUITES := $(BINARIES) storage-proxy netd
+BINARIES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld rootfs-snapshotter procd infra-operator
+TEST_SUITES := $(filter-out rootfs-snapshotter,$(BINARIES)) storage-proxy netd
 E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
 E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
 E2E_DEPENDENCY_IMAGES := postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3 sandbox0ai/otemplates:default-v0.2.0 $(E2E_SSH_FIXTURE_IMAGE)
@@ -67,6 +67,8 @@ build: manifests proto apispec
 			dir="infra-operator"; bin="infra-operator"; src="./infra-operator/cmd/infra-operator"; \
 		elif [ "$$s" = "ctld" ]; then \
 			dir="ctld"; bin="ctld"; src="./ctld/cmd/ctld"; \
+		elif [ "$$s" = "rootfs-snapshotter" ]; then \
+			dir="ctld"; bin="rootfs-snapshotter"; src="./ctld/cmd/rootfs-snapshotter"; \
 		else \
 			dir="$$s"; bin="$$s"; src="./$$s/cmd/$$s"; \
 		fi; \
@@ -205,7 +207,7 @@ test-e2e-load-images:
 	fi
 	@load_image() { \
 		image="$$1"; \
-		for node in $$(kind get nodes --name sandbox0-e2e); do \
+		for node in $$(kind get nodes --name "$(E2E_CLUSTER_NAME)"); do \
 			printf "$(YELLOW)Loading $$image into $$node...$(RESET)\n"; \
 			docker save "$$image" | docker exec --privileged -i "$$node" ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs - || return 1; \
 		done; \
@@ -218,13 +220,17 @@ test-e2e-load-images:
 			docker pull --platform "$(E2E_IMAGE_PLATFORM)" "$$image" || exit 1; \
 		fi; \
 		load_image "$$image" || exit 1; \
-	done
+	done; \
+	./scripts/refresh-containerd-image-metadata.sh \
+		"$(E2E_CLUSTER_NAME)" \
+		"docker.io/sandbox0ai/otemplates:default-v0.2.0" \
+		"$(E2E_IMAGE_PLATFORM)"
 
 test-e2e-prepare-kind: docker-build-local test-e2e-kind test-e2e-load-images
 
 test-e2e-destroy:
 	@printf "$(YELLOW)Destroying Kind cluster...$(RESET)\n"
-	kind delete cluster --name sandbox0-e2e
+	kind delete cluster --name "$(E2E_CLUSTER_NAME)"
 
 test-e2e-specific:
 	@if [ -z "$(SPEC)" ]; then \
@@ -288,7 +294,7 @@ test-e2e-network-cni:
 	unset http_proxy && unset https_proxy && unset all_proxy && E2E_SINGLE_CLUSTER_SCENARIOS=fullmode $(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster -run TestSingleCluster -ginkgo.focus="API fullmode.*(enforces transparent TCP egress through the ctld network runtime|resolves cluster DNS over UDP with the ctld network runtime active|blocks private sandbox traffic while preserving public exposure and cluster service access)" -timeout=30m
 
 # Prevent make from treating service names as targets
-regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
+regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld rootfs-snapshotter procd netd infra-operator:
 	@:
 
 lint:

@@ -117,7 +117,7 @@ spec:
         maxIdle: 2
   # Shared placement for sandbox template Pods and the node-local ctld runtime.
   # In production, point this at your dedicated sandbox
-  # node pool and pair it with services.manager.config.sandboxRuntimeClassName.
+  # node pool and pair it with services.ctld.rootfsSnapshotter.
   # infra-operator manages sandbox0.ai/data-plane-ready; do not include it here.
   # The example below targets a Kata node pool; adjust labels and tolerations
   # for your cluster.
@@ -145,5 +145,8 @@ spec:
     manager:
       enabled: true
       replicas: 1
-      # config:
-      #   sandboxRuntimeClassName: kata
+    # Every sandbox runtime handler must select the sandbox0 snapshotter.
+    # ctld:
+    #   rootfsSnapshotter:
+    #     runtimeClassName: sandbox0-kata
+    #     handler: sandbox0-kata

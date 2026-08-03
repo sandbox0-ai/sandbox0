@@ -101,9 +101,6 @@ type SandboxServiceConfig struct {
 	RuntimeReadyTimeout                 time.Duration
 	AllowColdStartWithoutReadyDataPlane bool
 	PreferredNodeSelector               map[string]string
-	RootFSSquashDisabled                bool
-	RootFSSquashMaxChainDepth           int
-	RootFSSquashMaxChainBytes           int64
 	PublicRootDomain                    string
 	PublicRegionID                      string
 	AutoscalerSafeToEvictAnnotationKeys []string
@@ -209,12 +206,6 @@ func NewSandboxService(
 	}
 	if config.CtldClientTimeout == 0 {
 		config.CtldClientTimeout = defaultCtldClientTimeout
-	}
-	if config.RootFSSquashMaxChainDepth <= 0 {
-		config.RootFSSquashMaxChainDepth = 8
-	}
-	if config.RootFSSquashMaxChainBytes <= 0 {
-		config.RootFSSquashMaxChainBytes = 512 * 1024 * 1024
 	}
 	if networkProvider == nil {
 		networkProvider = network.NewNoopProvider()

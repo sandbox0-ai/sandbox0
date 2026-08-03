@@ -13,6 +13,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 )
@@ -25,14 +26,15 @@ var errTemplateBuildCaptureInvalid = errors.New("invalid template build capture"
 // and publishing. It pins both the immutable rootfs head and the source
 // platform selected when the sandbox actually ran.
 type TemplateBuildCaptureMetadata struct {
-	Version         int                   `json:"version"`
-	SnapshotID      string                `json:"snapshot_id"`
-	HeadLayerID     string                `json:"head_layer_id"`
-	BaseImageRef    string                `json:"base_image_ref"`
-	BaseImageDigest string                `json:"base_image_digest"`
-	Platform        ocispec.Platform      `json:"platform"`
-	Layers          []templateimage.Layer `json:"layers"`
-	CapturedAt      time.Time             `json:"captured_at"`
+	Version         int                       `json:"version"`
+	SnapshotID      string                    `json:"snapshot_id"`
+	HeadLayerID     string                    `json:"head_layer_id"`
+	BaseImageRef    string                    `json:"base_image_ref"`
+	BaseImageDigest string                    `json:"base_image_digest"`
+	Platform        ocispec.Platform          `json:"platform"`
+	Layers          []templateimage.Layer     `json:"layers"`
+	RootFSHead      *rootfshead.HeadReference `json:"rootfs_head,omitempty"`
+	CapturedAt      time.Time                 `json:"captured_at"`
 }
 
 type templateBuildRootFSStore interface {
@@ -112,19 +114,29 @@ func (s *SandboxService) EnsureTemplateBuildCapture(
 		return nil, err
 	}
 
-	layers := make([]templateimage.Layer, 0, len(chain))
-	for _, layer := range chain {
-		if layer == nil {
-			return nil, fmt.Errorf("captured rootfs chain contains an empty layer")
+	var layers []templateimage.Layer
+	var headReference *rootfshead.HeadReference
+	if strings.TrimSpace(head.HeadObjectKey) != "" {
+		reference, err := rootFSHeadReferenceFromLayer(head)
+		if err != nil {
+			return nil, fmt.Errorf("%w: captured rootfs metadata head is invalid: %v", errTemplateBuildCaptureInvalid, err)
 		}
-		layers = append(layers, templateimage.Layer{
-			ID:        layer.ID,
-			ObjectKey: layer.DiffObjectKey,
-			MediaType: layer.DiffMediaType,
-			Digest:    layer.DiffDigest,
-			DiffID:    layer.DiffID,
-			Size:      layer.DiffSize,
-		})
+		headReference = &reference
+	} else {
+		layers = make([]templateimage.Layer, 0, len(chain))
+		for _, layer := range chain {
+			if layer == nil {
+				return nil, fmt.Errorf("captured rootfs chain contains an empty layer")
+			}
+			layers = append(layers, templateimage.Layer{
+				ID:        layer.ID,
+				ObjectKey: layer.DiffObjectKey,
+				MediaType: layer.DiffMediaType,
+				Digest:    layer.DiffDigest,
+				DiffID:    layer.DiffID,
+				Size:      layer.DiffSize,
+			})
+		}
 	}
 	return &TemplateBuildCaptureMetadata{
 		Version:         templateBuildCaptureMetadataVersion,
@@ -134,8 +146,29 @@ func (s *SandboxService) EnsureTemplateBuildCapture(
 		BaseImageDigest: head.BaseImageDigest,
 		Platform:        platform,
 		Layers:          layers,
+		RootFSHead:      headReference,
 		CapturedAt:      snapshot.CreatedAt.UTC(),
 	}, nil
+}
+
+func rootFSHeadReferenceFromLayer(layer *SandboxRootFSLayer) (rootfshead.HeadReference, error) {
+	if layer == nil {
+		return rootfshead.HeadReference{}, fmt.Errorf("rootfs layer is required")
+	}
+	reference := rootfshead.HeadReference{
+		Version: rootfshead.Version,
+		HeadID:  strings.TrimSpace(layer.ID),
+		Manifest: rootfshead.Object{
+			Key:       strings.TrimSpace(layer.HeadObjectKey),
+			Digest:    strings.TrimSpace(layer.HeadObjectDigest),
+			Size:      layer.HeadObjectSize,
+			MediaType: strings.TrimSpace(layer.HeadObjectMediaType),
+		},
+	}
+	if err := reference.Validate(); err != nil {
+		return rootfshead.HeadReference{}, err
+	}
+	return reference, nil
 }
 
 func validateTemplateBuildRootFSChain(

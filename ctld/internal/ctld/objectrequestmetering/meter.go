@@ -1,4 +1,4 @@
-package main
+package objectrequestmetering
 
 import (
 	"context"
@@ -13,38 +13,38 @@ import (
 	"go.uber.org/zap"
 )
 
-const ctldObjectStoreRequestFinalFlushTimeout = 10 * time.Second
+const finalFlushTimeout = 10 * time.Second
 
-func startCtldObjectStoreRequestMetering(
+// Start creates the shared object-request metering producer used by ctld and
+// the rootfs snapshotter. PostgreSQL remains the durable usage-truth boundary.
+func Start(
 	ctx context.Context,
 	cfg *apiconfig.StorageProxyConfig,
 	pool *pgxpool.Pool,
-	nodeName string,
+	instance string,
 	logger *zap.Logger,
 ) *requestmetering.Aggregator {
 	if cfg == nil || !cfg.Metering.Enabled || pool == nil {
 		return nil
 	}
-	instance := strings.TrimSpace(nodeName)
-	if instance == "" {
-		instance = strings.TrimSpace(podName)
-	}
 	aggregator := requestmetering.NewAggregator(
 		requestmetering.NewRecorder(meteringoutbox.NewRepository(pool)),
 		cfg.RegionID,
 		naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-		requestmetering.ProducerName(requestmetering.ProducerCtld, instance),
+		requestmetering.ProducerName(requestmetering.ProducerCtld, strings.TrimSpace(instance)),
 		logger,
 	)
 	go aggregator.Run(ctx, requestmetering.DefaultFlushInterval)
 	return aggregator
 }
 
-func flushCtldObjectStoreRequestMetering(aggregator *requestmetering.Aggregator, logger *zap.Logger) {
+// Flush persists the producer's final in-memory request counts during a clean
+// shutdown.
+func Flush(aggregator *requestmetering.Aggregator, logger *zap.Logger) {
 	if aggregator == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), ctldObjectStoreRequestFinalFlushTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), finalFlushTimeout)
 	defer cancel()
 	if err := aggregator.Flush(ctx); err != nil && logger != nil {
 		logger.Warn("Final object store request metering flush failed", zap.Error(err))

@@ -145,6 +145,19 @@ sandbox_runtime_class_name: kata-shared
 	}
 }
 
+func TestSandboxRuntimeHandlerAnnotationsPinContainerdImagePull(t *testing.T) {
+	configPath := writeManagerConfig(t, `
+manager_image: sandbox0/manager:test
+sandbox_runtime_handler: sandbox0-kata
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	annotations := SandboxRuntimeHandlerAnnotations()
+	if got := annotations[ContainerdRuntimeHandlerAnnotation]; got != "sandbox0-kata" {
+		t.Fatalf("containerd runtime handler annotation = %q, want sandbox0-kata", got)
+	}
+}
+
 func TestBuildPodSpecDisablesServiceAccountTokenAutomount(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test

@@ -215,11 +215,24 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 		if record == nil || !restoreNeeded {
 			return s.GetSandbox(ctx, sandboxID)
 		}
+		rootFSState, err := s.latestRootFSState(ctx, record.ID)
+		if err != nil {
+			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
+			return nil, fmt.Errorf("load rootfs head: %w", err)
+		}
+		if rootFSState == nil {
+			err = fmt.Errorf("%w: sandbox %s has no rootfs head", ErrRootFSHeadMigrationRequired, record.ID)
+			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
+			return nil, err
+		}
+		if err := configureClaimRootFSHead(req, rootFSState); err != nil {
+			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
+			return nil, err
+		}
 		if err := s.restoreResumeCredentialBindings(ctx, req); err != nil {
 			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
 			return nil, fmt.Errorf("restore credential bindings: %w", err)
 		}
-		var err error
 		pod, err = s.claimIdlePod(ctx, template, req)
 		if err != nil {
 			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
@@ -471,23 +484,22 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return pod, fmt.Errorf("load rootfs checkpoint: %w", err)
 	}
+	if rootFSState == nil {
+		return pod, fmt.Errorf("%w: sandbox %s has no rootfs head", ErrRootFSHeadMigrationRequired, record.ID)
+	}
+	if err := configureClaimRootFSHead(req, rootFSState); err != nil {
+		return pod, err
+	}
 	resetCopiedSessionState := copiedSessionStateRequiresReset(record.ID, rootFSState)
+	phaseStarted := time.Now()
+	pod, err = s.activateClaimRootFSHead(ctx, pod, req)
+	s.observeClaimPhase(record.TemplateID, claimType, "materialize_rootfs_head", phaseStarted, err)
+	if err != nil {
+		return pod, fmt.Errorf("activate rootfs head: %w", err)
+	}
 	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
 	if err != nil {
 		return pod, err
-	}
-	assignedPodUID := pod.UID
-	phaseStarted := time.Now()
-	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, rootFSState, "")
-	s.observeClaimPhase(record.TemplateID, claimType, "apply_rootfs_checkpoint", phaseStarted, err)
-	if err != nil {
-		return pod, err
-	}
-	if pod.UID != assignedPodUID {
-		pod, runtimeRevision, err = s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
-		if err != nil {
-			return pod, err
-		}
 	}
 	phaseStarted = time.Now()
 	_, err = s.bindVolumePortals(ctx, pod, req, template)
@@ -500,6 +512,12 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	s.observeClaimPhase(record.TemplateID, claimType, "bind_webhook_state_portal", phaseStarted, err)
 	if err != nil {
 		return pod, fmt.Errorf("bind webhook state portal: %w", err)
+	}
+	phaseStarted = time.Now()
+	err = s.bindSandboxRootFSSync(ctx, pod, req)
+	s.observeClaimPhase(record.TemplateID, claimType, "bind_rootfs_sync", phaseStarted, err)
+	if err != nil {
+		return pod, fmt.Errorf("bind rootfs sync: %w", err)
 	}
 	phaseStarted = time.Now()
 	pod, err = s.activateRuntimeAssignment(ctx, pod, runtimeRevision)

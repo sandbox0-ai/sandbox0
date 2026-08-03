@@ -40,41 +40,16 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	err = store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-source", "team-1", "layer-stale", "layer-root", 3, "stale"))
 	require.ErrorIs(t, err, ErrRootFSHeadConflict)
 
-	require.NoError(t, store.SquashRootFSFilesystem(ctx, &SquashRootFSFilesystemRequest{
-		SandboxID:           "sandbox-source",
-		ExpectedHeadLayerID: "layer-child",
-		SquashedRootFSState: rootFSTestStoreState("sandbox-source", "team-1", "layer-squash", "", 3, "squash"),
-	}))
-	latest, err = store.GetLatestRootFSState(ctx, "sandbox-source")
-	require.NoError(t, err)
-	require.NotNil(t, latest)
-	assert.Equal(t, "layer-squash", latest.LayerID)
-	require.Len(t, latest.LayerChain, 1)
-
 	deleter := &recordingRootFSObjectDeleter{}
-	gcResult, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
-	require.NoError(t, err)
-	require.Len(t, gcResult.Layers, 1)
-	assert.Equal(t, "layer-child", gcResult.Layers[0].ID)
-	assert.Equal(t, "linux", gcResult.Layers[0].PlatformOS)
-	assert.Equal(t, "arm64", gcResult.Layers[0].PlatformArchitecture)
-	assert.Equal(t, "v8", gcResult.Layers[0].PlatformVariant)
-	assert.Equal(t, []string{"rootfs/child.tar"}, gcResult.DeletedObjectKeys)
-	gcResult, err = store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
-	require.NoError(t, err)
-	require.Len(t, gcResult.Layers, 1)
-	assert.Equal(t, "layer-root", gcResult.Layers[0].ID)
-	assert.Equal(t, []string{"rootfs/root.tar"}, gcResult.DeletedObjectKeys)
-
 	snapshot, err := store.CreateRootFSSnapshot(ctx, &CreateRootFSSnapshotRequest{
 		SandboxID:   "sandbox-source",
-		SnapshotID:  "snapshot-squash",
-		Name:        "squash",
-		Description: "squashed head",
+		SnapshotID:  "snapshot-child",
+		Name:        "child",
+		Description: "immutable child head",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "sandbox-source", snapshot.FilesystemID)
-	assert.Equal(t, "layer-squash", snapshot.HeadLayerID)
+	assert.Equal(t, "layer-child", snapshot.HeadLayerID)
 
 	snapshots, err := store.ListRootFSSnapshots(ctx, &ListRootFSSnapshotsRequest{
 		SandboxID: "sandbox-source",
@@ -84,10 +59,10 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	require.Len(t, snapshots, 1)
 	assert.Equal(t, snapshot.ID, snapshots[0].ID)
 
-	loadedSnapshot, err := store.GetRootFSSnapshot(ctx, "snapshot-squash", "team-1")
+	loadedSnapshot, err := store.GetRootFSSnapshot(ctx, "snapshot-child", "team-1")
 	require.NoError(t, err)
 	assert.Equal(t, snapshot.HeadLayerID, loadedSnapshot.HeadLayerID)
-	_, err = store.GetRootFSSnapshot(ctx, "snapshot-squash", "team-2")
+	_, err = store.GetRootFSSnapshot(ctx, "snapshot-child", "team-2")
 	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
 
 	_, err = store.CreateRootFSSnapshot(ctx, &CreateRootFSSnapshotRequest{
@@ -106,16 +81,20 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "sandbox-source", forked.SourceFilesystemID)
-	assert.Equal(t, "layer-squash", forked.HeadLayerID)
+	assert.Equal(t, "layer-child", forked.HeadLayerID)
 
 	forkLatest, err := store.GetLatestRootFSState(ctx, "sandbox-fork")
 	require.NoError(t, err)
 	require.NotNil(t, forkLatest)
 	assert.Equal(t, "sandbox-fork", forkLatest.SandboxID)
-	assert.Equal(t, "layer-squash", forkLatest.LayerID)
-	require.Len(t, forkLatest.LayerChain, 1)
+	assert.Equal(t, "layer-child", forkLatest.LayerID)
+	require.Len(t, forkLatest.LayerChain, 2)
 
-	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-fork", "team-1", "layer-fork", "layer-squash", 4, "fork")))
+	forkState := rootFSTestStoreState("sandbox-fork", "team-1", "layer-fork", "layer-child", 4, "fork")
+	forkState.PlatformOS = "linux"
+	forkState.PlatformArchitecture = "arm64"
+	forkState.PlatformVariant = "v8"
+	require.NoError(t, store.SaveRootFSState(ctx, forkState))
 	forkLatest, err = store.GetLatestRootFSState(ctx, "sandbox-fork")
 	require.NoError(t, err)
 	require.NotNil(t, forkLatest)
@@ -123,18 +102,21 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 
 	restored, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
 		SandboxID:  "sandbox-fork",
-		SnapshotID: "snapshot-squash",
+		SnapshotID: "snapshot-child",
 		TeamID:     "team-1",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "sandbox-fork", restored.ID)
-	assert.Equal(t, "layer-squash", restored.HeadLayerID)
+	assert.Equal(t, "layer-child", restored.HeadLayerID)
 
 	failDeleter := &recordingRootFSObjectDeleter{failKey: "rootfs/fork.tar", err: assert.AnError}
-	gcResult, err = store.GarbageCollectRootFSFilesystem(ctx, failDeleter, "team-1", 10)
+	gcResult, err := store.GarbageCollectRootFSFilesystem(ctx, failDeleter, "team-1", 10)
 	require.ErrorIs(t, err, assert.AnError)
 	require.Len(t, gcResult.Layers, 1)
 	assert.Equal(t, "layer-fork", gcResult.Layers[0].ID)
+	assert.Equal(t, "linux", gcResult.Layers[0].PlatformOS)
+	assert.Equal(t, "arm64", gcResult.Layers[0].PlatformArchitecture)
+	assert.Equal(t, "v8", gcResult.Layers[0].PlatformVariant)
 	assert.Equal(t, int64(1), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
 
 	_, err = pool.Exec(ctx, `
@@ -525,6 +507,38 @@ func TestRootFSStorageUsageDedupesReachableObjectsAndRecordsMetering(t *testing.
 	assert.Equal(t, meteringpkg.SubjectTypeRootFS, recorder.observations[0].SubjectType)
 	assert.Equal(t, "team-1", recorder.observations[0].SubjectID)
 	assert.Equal(t, int64(len("shared")), recorder.observations[0].SizeBytes)
+}
+
+func TestRootFSGCKeepsCASObjectReferencedByAnotherLayer(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+
+	first := rootFSTestStoreState("sandbox-a", "team-1", "layer-a", "", 1, "shared")
+	first.DiffObjectKey = "rootfs/shared.tar"
+	second := rootFSTestStoreState("sandbox-b", "team-1", "layer-b", "", 1, "shared")
+	second.DiffObjectKey = first.DiffObjectKey
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-a", "team-1")))
+	require.NoError(t, store.SaveRootFSState(ctx, first))
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-b", "team-1")))
+	require.NoError(t, store.SaveRootFSState(ctx, second))
+
+	require.NoError(t, store.MarkSandboxDeleted(ctx, "sandbox-a", time.Now().UTC()))
+	deleter := &recordingRootFSObjectDeleter{}
+	result, err := store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
+	require.NoError(t, err)
+	require.Len(t, result.Layers, 1)
+	assert.Equal(t, "layer-a", result.Layers[0].ID)
+	assert.Empty(t, result.DeletedObjectKeys)
+	assert.Empty(t, deleter.keys)
+
+	var references int64
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM manager.rootfs_layer_objects
+		WHERE object_key = $1
+	`, first.DiffObjectKey).Scan(&references))
+	assert.Equal(t, int64(1), references)
 }
 
 func TestRootFSObjectAuditRecordsAndClearsMissingState(t *testing.T) {

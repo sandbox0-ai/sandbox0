@@ -26,15 +26,15 @@ For cold-start diagnosis, collect `manager_pod_lifecycle_stage_duration_seconds`
 
 The sandbox boundary is a Kubernetes lifecycle timestamp, not an individual CRI call duration. Collect `kubelet_runtime_operations_duration_seconds{operation_type=~"run_podsandbox|create_container|start_container"}` when you need node-level CRI timing.
 
-For rootfs checkpoint and resume diagnosis, collect these ctld metrics:
+For rootfs checkpoint and resume diagnosis, collect:
 
-- `ctld_rootfs_operation_duration_seconds` for total save and apply latency
-- `ctld_rootfs_phase_duration_seconds` for cache lookup, cache validation, tar filtering, containerd ingest, diff apply, and baseline capture
+- `ctld_rootfs_operation_duration_seconds{operation="seal"}` for the pause-critical dirty-tail drain and metadata-head seal
+- `ctld_rootfs_phase_duration_seconds` for checkpoint sub-phases reported by ctld
 - `ctld_rootfs_checkpoint_bytes` for input, output, excluded, and Volume portal byte distributions
-- `ctld_rootfs_checkpoint_chain_depth` for the number of layers replayed by each operation
-- `ctld_rootfs_object_cache_requests_total` for cache hit, miss, and error counts
+- `rootfs_snapshotter_operation_duration_seconds{operation=~"commit_head|attach_head"}` for marker commit and lazy head attachment, independent of Pod readiness
+- `manager_sandbox_claim_phase_duration_seconds` with `prepare_rootfs_head`, `claim_idle_pod`, `create_new_pod`, `materialize_rootfs_head`, `activate_runtime`, and `resume_total` phases
 
-Manager also records `apply_rootfs_checkpoint`, `bind_volume_portals`, `bind_webhook_state_portal`, `activate_runtime`, and `resume_total` in `manager_sandbox_claim_phase_duration_seconds`. ctld emits a structured warning when a rootfs operation takes at least 10 seconds or handles a checkpoint of at least 512 MiB.
+Resume no longer has a ctld apply/replay phase, a node-local full-object cache, or a remote registry operation for the marker head. When `materialize_rootfs_head` is slow or fails, check the selected node's active `ctld`, read/write access to the containerd API socket, CRI image visibility, rootfs snapshotter readiness, containerd's `sandbox0` plugin registration, and structured object-range read errors. Rootfs object requests use the same PostgreSQL metering outbox as ctld requests. Ctld emits a structured warning when a checkpoint save takes at least 10 seconds or handles at least 512 MiB.
 
 Each sandbox node runs two ctld peers, but exactly one peer on that node should own the primary lock. More than one `ctld_ha_primary` across the whole cluster is normal when the cluster has multiple sandbox nodes. Scrape the `ha-metrics` port on both ctld Pods and group HA checks by the `node` label:
 
@@ -116,7 +116,6 @@ When traces are not enabled through `collection.traces` or the legacy `traces` b
 Official sample manifests:
 
 - <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode.yaml">single-cluster/fullmode.yaml</GitHubRawLink>
-- <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/single-cluster/fullmode-gke-gvisor.yaml">single-cluster/fullmode-gke-gvisor.yaml</GitHubRawLink>
 - <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/control-plane.yaml">multi-cluster/control-plane.yaml</GitHubRawLink>
 - <GitHubRawLink repo="sandbox0" path="infra-operator/chart/samples/multi-cluster/data-plane.yaml">multi-cluster/data-plane.yaml</GitHubRawLink>
 

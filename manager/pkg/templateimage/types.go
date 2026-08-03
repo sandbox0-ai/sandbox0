@@ -10,6 +10,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	managerregistry "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 )
 
 // ObjectReader opens immutable rootfs layer objects.
@@ -45,6 +46,7 @@ type BuildRequest struct {
 	BaseImageDigest string
 	Platform        ocispec.Platform
 	Layers          []Layer
+	RootFSHead      *rootfshead.HeadReference
 	CreatedAt       time.Time
 }
 
@@ -72,11 +74,21 @@ func (r BuildRequest) validate(allowLegacyDiffID bool) error {
 		return fmt.Errorf("source platform os is required")
 	case strings.TrimSpace(r.Platform.Architecture) == "":
 		return fmt.Errorf("source platform architecture is required")
-	case len(r.Layers) == 0:
-		return fmt.Errorf("rootfs layer chain is empty")
 	}
 	if _, err := digest.Parse(strings.TrimSpace(r.BaseImageDigest)); err != nil {
 		return fmt.Errorf("parse base image digest: %w", err)
+	}
+	if r.RootFSHead != nil {
+		if len(r.Layers) != 0 {
+			return fmt.Errorf("rootfs head and layer chain are mutually exclusive")
+		}
+		if err := r.RootFSHead.Validate(); err != nil {
+			return fmt.Errorf("validate rootfs head: %w", err)
+		}
+		return nil
+	}
+	if len(r.Layers) == 0 {
+		return fmt.Errorf("rootfs layer chain is empty")
 	}
 	for i, layer := range r.Layers {
 		if strings.TrimSpace(layer.ObjectKey) == "" {

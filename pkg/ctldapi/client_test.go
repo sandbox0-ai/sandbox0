@@ -128,13 +128,10 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 			},
 		},
 		{
-			name: "apply",
-			path: "/api/v1/rootfs/apply",
+			name: "materialize head",
+			path: "/api/v1/rootfs/heads/materialize",
 			call: func(client *Client, address string) error {
-				_, err := client.ApplyRootFS(context.Background(), address, ApplyRootFSRequest{
-					Target:     RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "sandbox"},
-					Descriptor: RootFSDiffDescriptor{MediaType: "application/vnd.oci.image.layer.v1.tar", Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
-				})
+				_, err := client.MaterializeRootFSHead(context.Background(), address, MaterializeRootFSHeadRequest{})
 				return err
 			},
 		},
@@ -156,9 +153,9 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 				case "inspect":
 					_ = json.NewEncoder(w).Encode(InspectRootFSResponse{Info: RootFSInfo{Runtime: "runc"}})
 				case "save":
-					_ = json.NewEncoder(w).Encode(SaveRootFSResponse{Descriptor: RootFSDiffDescriptor{ObjectKey: "rootfs/diff.tar"}})
-				case "apply":
-					_ = json.NewEncoder(w).Encode(ApplyRootFSResponse{Applied: true})
+					_ = json.NewEncoder(w).Encode(SaveRootFSResponse{Checkpoint: RootFSCheckpointDescriptor{}})
+				case "materialize head":
+					_ = json.NewEncoder(w).Encode(MaterializeRootFSHeadResponse{Materialized: true})
 				}
 			}))
 			defer server.Close()

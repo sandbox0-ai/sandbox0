@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	nodev1 "k8s.io/api/node/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -131,6 +132,9 @@ func TestReconcileRemovesDisabledNetworkRuntimeAssets(t *testing.T) {
 		Namespace: infra.Namespace,
 	}}
 	_, client := reconcileCtldResources(t, infra, staleConfig, staleMetrics)
+	markRootFSSnapshotterReady(t, context.Background(), client, infra)
+	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
+	require.NoError(t, reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "http://demo-cluster-gateway:8443"))
 
 	for _, object := range []ctrlclient.Object{
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: staleConfig.Name, Namespace: staleConfig.Namespace}},
@@ -195,6 +199,7 @@ func TestReadyRejectsHealthyPreviousRevisionDuringNetworkDisableRollout(t *testi
 	standby := getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	markCtldDaemonSetReady(t, ctx, client, primary)
 	markCtldDaemonSetReady(t, ctx, client, standby)
+	markRootFSSnapshotterReady(t, ctx, client, infra)
 	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(primary, "ctld-a-network", "node-a")))
 	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(standby, "ctld-b-network", "node-a")))
 
@@ -325,6 +330,7 @@ func TestReadyRejectsLiveSurgePredecessor(t *testing.T) {
 			t.Fatalf("create current %s pod: %v", ds.Name, err)
 		}
 	}
+	markRootFSSnapshotterReady(t, ctx, client, infra)
 	reconciler := NewReconciler(common.NewResourceManager(client, nil, nil, common.LocalDevConfig{}))
 	if ready, err := reconciler.Ready(ctx, infra); err != nil || !ready {
 		t.Fatalf("Ready() before predecessor = %v, %v; want true, nil", ready, err)
@@ -350,6 +356,27 @@ func TestReadyRejectsLiveSurgePredecessor(t *testing.T) {
 	if ready, err := reconciler.Ready(ctx, infra); err != nil || ready {
 		t.Fatalf("Ready() with live predecessor = %v, %v; want false, nil", ready, err)
 	}
+}
+
+func TestReadyRequiresRootFSSnapshotterReadiness(t *testing.T) {
+	ctx := context.Background()
+	infra := newCtldTestInfra()
+	primary, client := reconcileCtldResources(t, infra)
+	standby := getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
+	for _, ds := range []*appsv1.DaemonSet{primary, standby} {
+		markCtldDaemonSetReady(t, ctx, client, ds)
+		require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(ds, ds.Name+"-ready", "node-a")))
+	}
+	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
+
+	ready, err := reconciler.Ready(ctx, infra)
+	require.NoError(t, err)
+	assert.False(t, ready, "ctld must remain unavailable until containerd can use the rootfs snapshotter")
+
+	markRootFSSnapshotterReady(t, ctx, client, infra)
+	ready, err = reconciler.Ready(ctx, infra)
+	require.NoError(t, err)
+	assert.True(t, ready)
 }
 
 func TestCurrentTemplatePodsReadyRequiresUniqueNonTerminatingNodes(t *testing.T) {
@@ -484,6 +511,7 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
+	assertContainerVolumeMountWritable(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-sock", "/host-run/containerd")
 	assertNoPodVolume(t, ds.Spec.Template.Spec.Volumes, "plugin-registration")
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
@@ -507,6 +535,9 @@ func newCtldTestScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := storagev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storagev1 scheme: %v", err)
+	}
+	if err := nodev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add nodev1 scheme: %v", err)
 	}
 	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add infra scheme: %v", err)
@@ -543,6 +574,35 @@ func markCtldDaemonSetNotReady(t *testing.T, ctx context.Context, client ctrlcli
 	ds.Status.NumberAvailable = 0
 	ds.Status.NumberUnavailable = 1
 	require.NoError(t, client.Status().Update(ctx, ds))
+}
+
+func markRootFSSnapshotterReady(t *testing.T, ctx context.Context, client ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra) {
+	t.Helper()
+	ds := &appsv1.DaemonSet{}
+	require.NoError(t, client.Get(ctx, types.NamespacedName{
+		Name:      rootFSSnapshotterDaemonSetName(infra),
+		Namespace: infra.Namespace,
+	}, ds))
+	markCtldDaemonSetReady(t, ctx, client, ds)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        ds.Name + "-node-a",
+			Namespace:   ds.Namespace,
+			Labels:      common.CloneStringMap(ds.Spec.Template.Labels),
+			Annotations: common.CloneStringMap(ds.Spec.Template.Annotations),
+		},
+		Spec: *ds.Spec.Template.Spec.DeepCopy(),
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  rootFSSnapshotterServiceName,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+	pod.Spec.NodeName = "node-a"
+	require.NoError(t, client.Create(ctx, pod))
 }
 
 func readyCtldPodForDaemonSet(ds *appsv1.DaemonSet, name, node string) *corev1.Pod {
@@ -629,21 +689,46 @@ func TestReconcileUsesConfiguredContainerdHostDataRoot(t *testing.T) {
 	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/sandbox0-worker/containerd")
 }
 
-func TestReconcilePassesRootFSObjectCacheConfig(t *testing.T) {
+func TestReconcileDeploysRootFSSnapshotterAndRuntimeClass(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.Services.Ctld = &infrav1alpha1.CtldServiceConfig{
-		RootFSObjectCacheMaxBytes:      "10Gi",
-		RootFSObjectCacheMinFreeBytes:  "2Gi",
-		RootFSObjectCacheMaxAge:        metav1.Duration{Duration: 6 * time.Hour},
-		RootFSObjectCacheSweepInterval: metav1.Duration{Duration: 30 * time.Second},
+		ContainerdHostDataRoot: "/var/lib/sandbox0-worker/containerd",
+		RootFSSnapshotter: infrav1alpha1.RootFSSnapshotterConfig{
+			RuntimeClassName: "sandbox0-rootfs-test",
+			Handler:          "sandbox0-rootfs-handler",
+		},
 	}
+	_, client := reconcileCtldResources(t, infra)
 
-	ds := reconcileCtldDaemonSet(t, infra)
-	args := ds.Spec.Template.Spec.Containers[0].Args
-	assertContainsArg(t, args, "-rootfs-object-cache-max-bytes=10Gi")
-	assertContainsArg(t, args, "-rootfs-object-cache-min-free-bytes=2Gi")
-	assertContainsArg(t, args, "-rootfs-object-cache-max-age=6h0m0s")
-	assertContainsArg(t, args, "-rootfs-object-cache-sweep-interval=30s")
+	ds := &appsv1.DaemonSet{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{
+		Name:      rootFSSnapshotterDaemonSetName(infra),
+		Namespace: infra.Namespace,
+	}, ds))
+	require.Equal(t, appsv1.OnDeleteDaemonSetStrategyType, ds.Spec.UpdateStrategy.Type)
+	require.Len(t, ds.Spec.Template.Spec.Containers, 1)
+	container := ds.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, rootFSSnapshotterServiceName, container.Name)
+	assertContainerFieldEnv(t, container.Env, "NODE_NAME", "spec.nodeName")
+	assertContainerFieldEnv(t, container.Env, "POD_NAME", "metadata.name")
+	assertContainsArg(t, container.Args, "-root=/var/lib/sandbox0-worker/containerd/"+rootFSSnapshotterRootDirName)
+	assertContainsArg(t, container.Args, "-address="+rootFSSnapshotterSocketPath)
+	assertContainsArg(t, container.Args, "-containerd-address="+rootFSSnapshotterContainerdAPI)
+	assertContainerVolumeMount(t, container.VolumeMounts, "containerd-data", "/var/lib/sandbox0-worker/containerd")
+	assertContainerVolumeMount(t, container.VolumeMounts, "containerd-run", rootFSSnapshotterContainerdDir)
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "containerd-data" {
+			require.NotNil(t, mount.MountPropagation)
+			assert.Equal(t, corev1.MountPropagationBidirectional, *mount.MountPropagation)
+		}
+	}
+	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "snapshotter-run", rootFSSnapshotterSocketDir)
+	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-run", defaultContainerdHostStateRoot)
+	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "fuse", "/dev/fuse")
+
+	runtimeClass := &nodev1.RuntimeClass{}
+	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: "sandbox0-rootfs-test"}, runtimeClass))
+	assert.Equal(t, "sandbox0-rootfs-handler", runtimeClass.Handler)
 }
 
 func TestReconcileDoesNotPassPauseConfigToCtld(t *testing.T) {
@@ -832,6 +917,23 @@ func assertContainerVolumeMount(t *testing.T, mounts []corev1.VolumeMount, name,
 	t.Fatalf("expected volume mount %q, got %#v", name, mounts)
 }
 
+func assertContainerVolumeMountWritable(t *testing.T, mounts []corev1.VolumeMount, name, mountPath string) {
+	t.Helper()
+	for _, mount := range mounts {
+		if mount.Name != name {
+			continue
+		}
+		if mount.MountPath != mountPath {
+			t.Fatalf("volume mount %q path = %q, want %q", name, mount.MountPath, mountPath)
+		}
+		if mount.ReadOnly {
+			t.Fatalf("volume mount %q must be writable", name)
+		}
+		return
+	}
+	t.Fatalf("expected writable volume mount %q, got %#v", name, mounts)
+}
+
 func assertContainerEnv(t *testing.T, env []corev1.EnvVar, name, value string) {
 	t.Helper()
 	for i := range env {
@@ -840,6 +942,20 @@ func assertContainerEnv(t *testing.T, env []corev1.EnvVar, name, value string) {
 		}
 		if env[i].Value != value {
 			t.Fatalf("environment %q = %q, want %q", name, env[i].Value, value)
+		}
+		return
+	}
+	t.Fatalf("expected environment %q, got %#v", name, env)
+}
+
+func assertContainerFieldEnv(t *testing.T, env []corev1.EnvVar, name, fieldPath string) {
+	t.Helper()
+	for i := range env {
+		if env[i].Name != name {
+			continue
+		}
+		if env[i].ValueFrom == nil || env[i].ValueFrom.FieldRef == nil || env[i].ValueFrom.FieldRef.FieldPath != fieldPath {
+			t.Fatalf("environment %q fieldRef = %#v, want %q", name, env[i].ValueFrom, fieldPath)
 		}
 		return
 	}

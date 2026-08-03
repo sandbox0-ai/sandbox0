@@ -112,6 +112,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	containerdHostDataRoot := ctldContainerdHostDataRoot(infra)
+	if err := r.reconcileRootFSSnapshotter(
+		ctx,
+		infra,
+		image,
+		pullPolicy,
+		nodeSelector,
+		tolerations,
+		configRef,
+		storageConfig,
+		containerdHostDataRoot,
+	); err != nil {
+		return fmt.Errorf("reconcile rootfs snapshotter: %w", err)
+	}
 	args := ctldArgs(infra, containerdHostDataRoot)
 	terminationGraceSeconds := ctldTerminationGraceSeconds
 	bidirectional := corev1.MountPropagationBidirectional
@@ -535,12 +548,28 @@ func appendUniqueVolumeMounts(existing []corev1.VolumeMount, additions ...corev1
 	return existing
 }
 
-// Ready reports whether both ctld HA slots completed their rollout and all
-// desired Pods pass the role-aware readiness probe.
+// Ready reports whether the rootfs snapshotter and both ctld HA slots completed
+// their rollout and all desired Pods pass their readiness probes.
 func (r *Reconciler) Ready(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (bool, error) {
 	if infra == nil {
 		return false, fmt.Errorf("sandbox0infra is required")
 	}
+	snapshotter := &appsv1.DaemonSet{}
+	snapshotterKey := types.NamespacedName{Name: rootFSSnapshotterDaemonSetName(infra), Namespace: infra.Namespace}
+	if err := r.Resources.Client.Get(ctx, snapshotterKey, snapshotter); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if snapshotter.Status.DesiredNumberScheduled == 0 || !daemonSetReady(snapshotter) {
+		return false, nil
+	}
+	ready, err := r.currentRootFSSnapshotterPodsReady(ctx, snapshotter)
+	if err != nil || !ready {
+		return false, err
+	}
+
 	name := fmt.Sprintf("%s-ctld", infra.Name)
 	for _, slot := range []string{dataplane.CtldHASlotA, dataplane.CtldHASlotB} {
 		ds := &appsv1.DaemonSet{}
@@ -567,6 +596,51 @@ func (r *Reconciler) Ready(ctx context.Context, infra *infrav1alpha1.Sandbox0Inf
 		}
 	}
 	return true, nil
+}
+
+func (r *Reconciler) currentRootFSSnapshotterPodsReady(ctx context.Context, ds *appsv1.DaemonSet) (bool, error) {
+	if ds == nil || ds.Status.DesiredNumberScheduled == 0 {
+		return true, nil
+	}
+	pods := &corev1.PodList{}
+	if err := r.Resources.Client.List(ctx, pods,
+		ctrlclient.InNamespace(ds.Namespace),
+		ctrlclient.MatchingLabels(ds.Spec.Selector.MatchLabels),
+	); err != nil {
+		return false, err
+	}
+	readyNodes := make(map[string]struct{}, ds.Status.DesiredNumberScheduled)
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		running := containerStatusByName(pod.Status.ContainerStatuses, rootFSSnapshotterServiceName)
+		if running != nil && running.State.Running != nil && !rootFSSnapshotterPodMatchesCurrentTemplate(pod, ds) {
+			return false, nil
+		}
+		if pod.DeletionTimestamp.IsZero() && pod.Spec.NodeName != "" &&
+			rootFSSnapshotterPodMatchesCurrentTemplate(pod, ds) && podReady(pod) {
+			readyNodes[pod.Spec.NodeName] = struct{}{}
+		}
+	}
+	return int32(len(readyNodes)) >= ds.Status.DesiredNumberScheduled, nil
+}
+
+func rootFSSnapshotterPodMatchesCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
+	if pod == nil || ds == nil || !mapContains(pod.Labels, ds.Spec.Template.Labels) || !mapContains(pod.Annotations, ds.Spec.Template.Annotations) {
+		return false
+	}
+	desired := containerByName(ds.Spec.Template.Spec.Containers, rootFSSnapshotterServiceName)
+	actual := containerByName(pod.Spec.Containers, rootFSSnapshotterServiceName)
+	return desired != nil && actual != nil && desired.Image == actual.Image
+}
+
+func podReady(pod *corev1.Pod) bool {
+	for i := range pod.Status.Conditions {
+		condition := pod.Status.Conditions[i]
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // NetworkReady reports network readiness through the ctld HA pair.
@@ -653,13 +727,7 @@ func PodReadyForCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
 	if !PodMatchesCurrentTemplate(pod, ds) {
 		return false
 	}
-	for i := range pod.Status.Conditions {
-		condition := pod.Status.Conditions[i]
-		if condition.Type == corev1.PodReady {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-	return false
+	return podReady(pod)
 }
 
 func mapContains(actual, expected map[string]string) bool {
@@ -716,28 +784,11 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string)
 		fmt.Sprintf("-runtime-watch-addr=:%d", runtimecontrol.DefaultCtldWatchPort),
 		"-cri-endpoint=/host-run/containerd/containerd.sock",
 		"-containerd-endpoint=/host-run/containerd/containerd.sock",
-		"-containerd-root=/host-run/containerd",
-		"-containerd-host-root=" + defaultContainerdHostStateRoot,
 		"-containerd-data-root=" + containerdDataMountPath,
 		"-containerd-host-data-root=" + containerdHostDataRoot,
 		"-volume-portal-root=/var/lib/sandbox0/ctld",
 		"-kubelet-pods-root=/var/lib/kubelet/pods",
 		"-csi-socket=/csi/csi.sock",
-	}
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Ctld != nil {
-		cfg := infra.Spec.Services.Ctld
-		if value := strings.TrimSpace(cfg.RootFSObjectCacheMaxBytes); value != "" {
-			args = append(args, "-rootfs-object-cache-max-bytes="+value)
-		}
-		if value := strings.TrimSpace(cfg.RootFSObjectCacheMinFreeBytes); value != "" {
-			args = append(args, "-rootfs-object-cache-min-free-bytes="+value)
-		}
-		if cfg.RootFSObjectCacheMaxAge.Duration > 0 {
-			args = append(args, "-rootfs-object-cache-max-age="+cfg.RootFSObjectCacheMaxAge.Duration.String())
-		}
-		if cfg.RootFSObjectCacheSweepInterval.Duration > 0 {
-			args = append(args, "-rootfs-object-cache-sweep-interval="+cfg.RootFSObjectCacheSweepInterval.Duration.String())
-		}
 	}
 	return args
 }

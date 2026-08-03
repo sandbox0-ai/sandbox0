@@ -163,15 +163,11 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 			continue
 		}
 		sandbox := s.recordToSandbox(record)
-		var activeTxn *SandboxLifecycleTxn
 		if record.DesiredState == SandboxDesiredStateActive {
-			activeTxn, err = s.sandboxStore.GetActiveLifecycleTxn(ctx, record.ID)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if record.DesiredState == SandboxDesiredStateActive {
-			sandbox, err = s.projectSandboxRecordFromCache(ctx, record, activeTxn)
+			// SandboxSummary does not expose runtime connectivity, so lifecycle
+			// transactions are irrelevant to list projection. Avoid one database
+			// lookup per active sandbox.
+			sandbox, err = s.projectSandboxRecordFromCache(ctx, record, nil)
 			if err != nil {
 				return nil, err
 			}

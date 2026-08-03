@@ -34,6 +34,7 @@ type memorySandboxStore struct {
 	saves             int
 	pauses            int
 	lockCalls         int
+	activeTxnGets     int
 	lockStarted       chan struct{}
 	blockLock         chan struct{}
 }
@@ -173,6 +174,7 @@ func (s *memorySandboxStore) GetActiveLifecycleTxn(_ context.Context, sandboxID 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.activeTxnGets++
 	for _, txn := range s.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && sandboxLifecyclePhaseActive(txn.Phase) {
 			return cloneSandboxLifecycleTxn(txn), nil

@@ -391,6 +391,7 @@ func TestListSandboxesFromStoreProjectsAndFiltersCachedPodStatus(t *testing.T) {
 	require.Len(t, starting.Sandboxes, 1)
 	assert.Equal(t, "sandbox-missing", starting.Sandboxes[0].ID)
 	assert.Empty(t, client.Actions(), "status projection must not call the Kubernetes API")
+	assert.Zero(t, store.activeTxnGets, "list projection must not query lifecycle transactions per sandbox")
 }
 
 func TestListSandboxes_TerminatingPodStatus(t *testing.T) {

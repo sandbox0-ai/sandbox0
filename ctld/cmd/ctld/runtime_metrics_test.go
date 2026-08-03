@@ -101,13 +101,23 @@ func TestCtldRuntimeMetricsProducerPostsAuthorizedRuntimeSample(t *testing.T) {
 		SandboxObservabilityIngestRetryBackoff:      metav1.Duration{Duration: time.Millisecond},
 		SandboxObservabilityRuntimeSampleInterval:   metav1.Duration{Duration: time.Minute},
 		SandboxObservabilityRuntimeSampleJitter:     metav1.Duration{Duration: time.Second},
-	}, staticStatsClient{onCall: statsCalled, stats: []*runtimeapi.PodSandboxStats{{
-		Attributes: &runtimeapi.PodSandboxAttributes{
+	}, staticStatsClient{
+		onCall: statsCalled,
+		sandboxes: []*runtimeapi.PodSandbox{{
 			Id:       "cri-sandbox-a",
 			Metadata: &runtimeapi.PodSandboxMetadata{Namespace: "ns-a", Name: "pod-a", Uid: "pod-uid-a"},
+			State:    runtimeapi.PodSandboxState_SANDBOX_READY,
+		}},
+		statsByID: map[string]*runtimeapi.PodSandboxStats{
+			"cri-sandbox-a": {
+				Attributes: &runtimeapi.PodSandboxAttributes{
+					Id:       "cri-sandbox-a",
+					Metadata: &runtimeapi.PodSandboxMetadata{Namespace: "ns-a", Name: "pod-a", Uid: "pod-uid-a"},
+				},
+				Linux: &runtimeapi.LinuxPodSandboxStats{},
+			},
 		},
-		Linux: &runtimeapi.LinuxPodSandboxStats{},
-	}}}, testPodLister(t, pod), generator, nil, nil)
+	}, testPodLister(t, pod), generator, nil, nil)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -182,15 +192,20 @@ func TestCtldRuntimeMetricsShutdownStopsCollectorBeforeWorkerDrain(t *testing.T)
 }
 
 type staticStatsClient struct {
-	stats  []*runtimeapi.PodSandboxStats
-	onCall chan<- struct{}
+	sandboxes []*runtimeapi.PodSandbox
+	statsByID map[string]*runtimeapi.PodSandboxStats
+	onCall    chan<- struct{}
 }
 
-func (c staticStatsClient) ListPodSandboxStats(context.Context) ([]*runtimeapi.PodSandboxStats, error) {
+func (c staticStatsClient) ListPodSandboxes(context.Context) ([]*runtimeapi.PodSandbox, error) {
+	return c.sandboxes, nil
+}
+
+func (c staticStatsClient) PodSandboxStats(_ context.Context, id string) (*runtimeapi.PodSandboxStats, error) {
 	if c.onCall != nil {
 		c.onCall <- struct{}{}
 	}
-	return c.stats, nil
+	return c.statsByID[id], nil
 }
 
 var _ ctldruntimemetrics.StatsClient = staticStatsClient{}

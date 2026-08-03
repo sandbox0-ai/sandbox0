@@ -52,6 +52,8 @@ const (
 	ctldKubeletCSIEndpoint         = "/var/lib/kubelet/plugins/" + volumeportal.DriverName + "/csi.sock"
 	ctldRolloutRevisionAnnotation  = "infra.sandbox0.ai/ctld-rollout-revision"
 	networkMetricsServiceSuffix    = "-ctld-network-metrics"
+	ctldHAMetricsPortA             = int32(9192)
+	ctldHAMetricsPortB             = int32(9193)
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -390,10 +392,12 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 		labels[key] = value
 	}
 	labels[dataplane.CtldHASlotLabel] = cfg.Slot
+	haMetricsPort := ctldHAMetricsPort(cfg.Slot)
 	args := append([]string(nil), cfg.Args...)
 	args = append(args,
 		"-ha-slot="+cfg.Slot,
 		"-ha-probe-socket="+ctldHAProbeSocket,
+		fmt.Sprintf("-ha-metrics-addr=:%d", haMetricsPort),
 		"-kubelet-registration-socket="+ctldKubeletRegistrationSocket,
 		"-kubelet-registration-endpoint="+ctldKubeletCSIEndpoint,
 	)
@@ -451,6 +455,11 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 		SecurityContext: &corev1.SecurityContext{Privileged: common.BoolPtr(true)},
 		Resources:       corev1.ResourceRequirements{Requests: requests},
 		VolumeMounts:    cfg.VolumeMounts,
+		Ports: []corev1.ContainerPort{{
+			Name:          "ha-metrics",
+			ContainerPort: haMetricsPort,
+			Protocol:      corev1.ProtocolTCP,
+		}},
 	}
 	if cfg.NetdEnabled {
 		ctldContainer.Env = append(ctldContainer.Env,
@@ -487,6 +496,13 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 			},
 		},
 	}
+}
+
+func ctldHAMetricsPort(slot string) int32 {
+	if slot == dataplane.CtldHASlotB {
+		return ctldHAMetricsPortB
+	}
+	return ctldHAMetricsPortA
 }
 
 func appendUniqueVolumes(existing []corev1.Volume, additions ...corev1.Volume) []corev1.Volume {

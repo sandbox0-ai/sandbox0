@@ -30,6 +30,10 @@ type identityIndex struct {
 	byName map[string]sandboxIdentity
 }
 
+func (i identityIndex) empty() bool {
+	return len(i.byUID) == 0 && len(i.byName) == 0
+}
+
 func buildIdentityIndex(podLister corelisters.PodLister, nodeName string) (identityIndex, error) {
 	if podLister == nil {
 		return identityIndex{}, fmt.Errorf("pod lister is nil")

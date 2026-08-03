@@ -138,18 +138,6 @@ rules:
   - update
   - watch
 - apiGroups:
-  - node.k8s.io
-  resources:
-  - runtimeclasses
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
   - policy
   resources:
   - poddisruptionbudgets

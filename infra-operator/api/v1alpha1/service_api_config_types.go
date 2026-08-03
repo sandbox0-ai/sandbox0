@@ -929,6 +929,8 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="32Gi"
 	SandboxMaxMemory string `json:"sandboxMaxMemory,omitempty"`
+	// +optional
+	SandboxRuntimeClassName string `json:"sandboxRuntimeClassName,omitempty"`
 	// ProcdBinImageRef overrides the OCI image used for the procd binary image volume.
 	// +optional
 	ProcdBinImageRef string `json:"procdBinImageRef,omitempty"`

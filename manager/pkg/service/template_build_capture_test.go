@@ -10,7 +10,6 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -90,48 +89,6 @@ func TestEnsureTemplateBuildCaptureReadsPinnedHeadAfterSourceAdvances(t *testing
 	}
 	if !capture.CapturedAt.Equal(now) {
 		t.Fatalf("capture time = %v, want %v", capture.CapturedAt, now)
-	}
-}
-
-func TestEnsureTemplateBuildCaptureUsesMetadataHeadWithoutLegacyLayers(t *testing.T) {
-	t.Parallel()
-
-	headDigest := digest.FromString("head-object").String()
-	head := &SandboxRootFSLayer{
-		ID:                   "layer-head-v2",
-		TeamID:               "team-1",
-		BaseImageRef:         "docker.io/library/busybox:1.36",
-		BaseImageDigest:      digest.FromString("base-index").String(),
-		PlatformOS:           "linux",
-		PlatformArchitecture: "amd64",
-		HeadObjectKey:        "sandbox-rootfs/cow-v2/heads/head.json.gz",
-		HeadObjectDigest:     headDigest,
-		HeadObjectMediaType:  rootfshead.HeadMediaType,
-		HeadObjectSize:       128,
-	}
-	store := &templateCaptureMemoryStore{
-		memorySandboxStore: &memorySandboxStore{
-			records: map[string]*SandboxRecord{"sandbox-1": {ID: "sandbox-1", TeamID: "team-1", Status: SandboxStatusPaused}},
-			rootFSSnapshots: map[string]*RootFSSnapshot{"template-build-v2": {
-				ID: "template-build-v2", TeamID: "team-1", SourceSandboxID: "sandbox-1", HeadLayerID: head.ID, CreatedAt: time.Unix(200, 0).UTC(),
-			}},
-		},
-		chains: map[string][]*SandboxRootFSLayer{head.ID: {head}},
-	}
-	service := &SandboxService{sandboxStore: store, clock: systemTime{}}
-
-	capture, err := service.EnsureTemplateBuildCapture(
-		context.Background(), "sandbox-1", "team-1", "template-build-v2", v1alpha1.SandboxTemplateSpec{},
-	)
-
-	if err != nil {
-		t.Fatalf("EnsureTemplateBuildCapture() error = %v", err)
-	}
-	if capture.RootFSHead == nil || capture.RootFSHead.HeadID != head.ID {
-		t.Fatalf("capture rootfs head = %#v, want %s", capture.RootFSHead, head.ID)
-	}
-	if len(capture.Layers) != 0 {
-		t.Fatalf("metadata-head capture unexpectedly contains legacy layers: %#v", capture.Layers)
 	}
 }
 

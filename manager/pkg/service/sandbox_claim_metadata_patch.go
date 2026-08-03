@@ -14,25 +14,20 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-type claimPatchOperation struct {
+type claimMetadataPatchOperation struct {
 	Operation string `json:"op"`
 	Path      string `json:"path"`
 	Value     any    `json:"value,omitempty"`
 }
 
-// claimMetadataPatchOperation is also used by the reservation controller's
-// metadata-only patch builder.
-type claimMetadataPatchOperation = claimPatchOperation
-
-// patchClaimedPod atomically moves one idle pod to claimed ownership and, for
-// resume, replaces only procd's image. PodSandbox and every other spec/status
-// field remain untouched.
-func (s *SandboxService) patchClaimedPod(
+// patchClaimedPodMetadata atomically moves one idle pod to claimed metadata
+// without replacing spec or status fields owned by other Kubernetes actors.
+func (s *SandboxService) patchClaimedPodMetadata(
 	ctx context.Context,
 	originalPod *corev1.Pod,
 	claimedPod *corev1.Pod,
 ) (*corev1.Pod, error) {
-	patch, err := buildClaimPatch(originalPod, claimedPod)
+	patch, err := buildClaimMetadataPatch(originalPod, claimedPod)
 	if err != nil {
 		return nil, err
 	}
@@ -49,10 +44,10 @@ func (s *SandboxService) patchClaimedPod(
 	)
 }
 
-// buildClaimPatch creates the compare-and-swap JSON patch used by hot
+// buildClaimMetadataPatch creates the compare-and-swap JSON patch used by hot
 // claims. UID, resource version, and pool state prevent stale managers from
 // claiming the same pod.
-func buildClaimPatch(originalPod, claimedPod *corev1.Pod) ([]byte, error) {
+func buildClaimMetadataPatch(originalPod, claimedPod *corev1.Pod) ([]byte, error) {
 	if originalPod == nil || claimedPod == nil {
 		return nil, fmt.Errorf("build claim metadata patch: pod is nil")
 	}
@@ -66,22 +61,22 @@ func buildClaimPatch(originalPod, claimedPod *corev1.Pod) ([]byte, error) {
 		)
 	}
 
-	operations := make([]claimPatchOperation, 0, 18)
+	operations := make([]claimMetadataPatchOperation, 0, 16)
 	if originalPod.UID != "" {
-		operations = append(operations, claimPatchOperation{
+		operations = append(operations, claimMetadataPatchOperation{
 			Operation: "test",
 			Path:      "/metadata/uid",
 			Value:     originalPod.UID,
 		})
 	}
 	if originalPod.ResourceVersion != "" {
-		operations = append(operations, claimPatchOperation{
+		operations = append(operations, claimMetadataPatchOperation{
 			Operation: "test",
 			Path:      "/metadata/resourceVersion",
 			Value:     originalPod.ResourceVersion,
 		})
 	}
-	operations = append(operations, claimPatchOperation{
+	operations = append(operations, claimMetadataPatchOperation{
 		Operation: "test",
 		Path:      metadataMapPath("labels", controller.LabelPoolType),
 		Value:     controller.PoolTypeIdle,
@@ -95,10 +90,6 @@ func buildClaimPatch(originalPod, claimedPod *corev1.Pod) ([]byte, error) {
 		originalPod.OwnerReferences,
 		claimedPod.OwnerReferences,
 	)
-	operations, err := appendRootFSHeadImagePatch(operations, originalPod, claimedPod)
-	if err != nil {
-		return nil, err
-	}
 
 	patch, err := json.Marshal(operations)
 	if err != nil {
@@ -108,13 +99,13 @@ func buildClaimPatch(originalPod, claimedPod *corev1.Pod) ([]byte, error) {
 }
 
 func appendMetadataMapPatch(
-	operations []claimPatchOperation,
+	operations []claimMetadataPatchOperation,
 	field string,
 	original map[string]string,
 	desired map[string]string,
-) []claimPatchOperation {
+) []claimMetadataPatchOperation {
 	if original == nil && len(desired) > 0 {
-		return append(operations, claimPatchOperation{
+		return append(operations, claimMetadataPatchOperation{
 			Operation: "add",
 			Path:      "/metadata/" + field,
 			Value:     desired,
@@ -129,7 +120,7 @@ func appendMetadataMapPatch(
 	}
 	sort.Strings(removedKeys)
 	for _, key := range removedKeys {
-		operations = append(operations, claimPatchOperation{
+		operations = append(operations, claimMetadataPatchOperation{
 			Operation: "remove",
 			Path:      metadataMapPath(field, key),
 		})
@@ -147,7 +138,7 @@ func appendMetadataMapPatch(
 		if _, exists := original[key]; exists {
 			operation = "replace"
 		}
-		operations = append(operations, claimPatchOperation{
+		operations = append(operations, claimMetadataPatchOperation{
 			Operation: operation,
 			Path:      metadataMapPath(field, key),
 			Value:     desired[key],
@@ -157,10 +148,10 @@ func appendMetadataMapPatch(
 }
 
 func appendFinalizerPatch(
-	operations []claimPatchOperation,
+	operations []claimMetadataPatchOperation,
 	original []string,
 	desired []string,
-) []claimPatchOperation {
+) []claimMetadataPatchOperation {
 	existing := make(map[string]struct{}, len(original))
 	for _, finalizer := range original {
 		existing[finalizer] = struct{}{}
@@ -170,14 +161,14 @@ func appendFinalizerPatch(
 			continue
 		}
 		if len(original) == 0 {
-			operations = append(operations, claimPatchOperation{
+			operations = append(operations, claimMetadataPatchOperation{
 				Operation: "add",
 				Path:      "/metadata/finalizers",
 				Value:     []string{finalizer},
 			})
 			original = append(original, finalizer)
 		} else {
-			operations = append(operations, claimPatchOperation{
+			operations = append(operations, claimMetadataPatchOperation{
 				Operation: "add",
 				Path:      "/metadata/finalizers/-",
 				Value:     finalizer,
@@ -189,10 +180,10 @@ func appendFinalizerPatch(
 }
 
 func appendReplicaSetOwnerRemovalPatch(
-	operations []claimPatchOperation,
+	operations []claimMetadataPatchOperation,
 	ownerReferences []metav1.OwnerReference,
 	desiredOwnerReferences []metav1.OwnerReference,
-) []claimPatchOperation {
+) []claimMetadataPatchOperation {
 	for index := len(ownerReferences) - 1; index >= 0; index-- {
 		owner := ownerReferences[index]
 		if owner.Kind != "ReplicaSet" || owner.Controller == nil || !*owner.Controller {
@@ -203,36 +194,18 @@ func appendReplicaSetOwnerRemovalPatch(
 		}
 		path := "/metadata/ownerReferences/" + strconv.Itoa(index)
 		if owner.UID != "" {
-			operations = append(operations, claimPatchOperation{
+			operations = append(operations, claimMetadataPatchOperation{
 				Operation: "test",
 				Path:      path + "/uid",
 				Value:     owner.UID,
 			})
 		}
-		operations = append(operations, claimPatchOperation{
+		operations = append(operations, claimMetadataPatchOperation{
 			Operation: "remove",
 			Path:      path,
 		})
 	}
 	return operations
-}
-
-func appendRootFSHeadImagePatch(operations []claimPatchOperation, originalPod, claimedPod *corev1.Pod) ([]claimPatchOperation, error) {
-	originalIndex := procdContainerIndex(originalPod.Spec.Containers)
-	desiredIndex := procdContainerIndex(claimedPod.Spec.Containers)
-	if originalIndex < 0 || desiredIndex < 0 || originalIndex != desiredIndex {
-		return nil, fmt.Errorf("build claim patch: procd container identity changed")
-	}
-	originalImage := originalPod.Spec.Containers[originalIndex].Image
-	desiredImage := claimedPod.Spec.Containers[desiredIndex].Image
-	if originalImage != desiredImage {
-		imagePath := "/spec/containers/" + strconv.Itoa(originalIndex) + "/image"
-		operations = append(operations,
-			claimPatchOperation{Operation: "test", Path: imagePath, Value: originalImage},
-			claimPatchOperation{Operation: "replace", Path: imagePath, Value: desiredImage},
-		)
-	}
-	return operations, nil
 }
 
 func ownerReferencePresent(ownerReferences []metav1.OwnerReference, expected metav1.OwnerReference) bool {

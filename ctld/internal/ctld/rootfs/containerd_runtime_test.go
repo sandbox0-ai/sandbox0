@@ -1,13 +1,22 @@
 package rootfs
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/content"
+	contentlocal "github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,6 +26,46 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
+
+func TestIngestRootFSDiffForApplyStreamsFilteredLayerIntoContentStore(t *testing.T) {
+	var input bytes.Buffer
+	tarWriter := tar.NewWriter(&input)
+	writeTarEntry(t, tarWriter, "tmp/legacy-download", []byte("ephemeral"), 0o644)
+	writeTarEntry(t, tarWriter, "root/sentinel", []byte("persistent"), 0o644)
+	writeTarEntry(t, tarWriter, "var/tmp/state", []byte("persistent-var-tmp"), 0o644)
+	require.NoError(t, tarWriter.Close())
+
+	inputDigest := digest.FromBytes(input.Bytes())
+	desc := ctldapi.RootFSDiffDescriptor{
+		MediaType: ocispec.MediaTypeImageLayer,
+		Digest:    inputDigest.String(),
+		DiffID:    inputDigest.String(),
+		Size:      int64(input.Len()),
+		ObjectKey: "rootfs/legacy.tar",
+	}
+	store, err := contentlocal.NewStore(t.TempDir())
+	require.NoError(t, err)
+
+	filtered, stats, err := ingestRootFSDiffForApply(context.Background(), store, desc, bytes.NewReader(input.Bytes()), nil, nil)
+	require.NoError(t, err)
+	assert.NotEqual(t, desc.Digest, filtered.Digest)
+	assert.Equal(t, int64(input.Len()), stats.InputBytes)
+	assert.Equal(t, filtered.Size, stats.OutputBytes)
+	assert.Equal(t, int64(len("ephemeral")), stats.ExcludedBytes)
+
+	ociDesc, err := descriptorToOCI(filtered)
+	require.NoError(t, err)
+	blob, err := content.ReadBlob(context.Background(), store, ociDesc)
+	require.NoError(t, err)
+	entries := readTarEntries(t, bytes.NewReader(blob))
+	assert.NotContains(t, entries, "tmp/legacy-download")
+	assert.Contains(t, entries, "root/sentinel")
+	assert.Contains(t, entries, "var/tmp/state")
+
+	filteredAgain, _, err := ingestRootFSDiffForApply(context.Background(), store, desc, bytes.NewReader(input.Bytes()), nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, filtered.Digest, filteredAgain.Digest)
+}
 
 func TestRuntimeFamily(t *testing.T) {
 	tests := []struct {
@@ -272,6 +321,54 @@ func TestContainerdRuntimeReusesAndClosesCRIConnection(t *testing.T) {
 	require.NoError(t, runtime.Close())
 }
 
+func TestFindLiveRootFSByTaskAnnotations(t *testing.T) {
+	taskRoot := t.TempDir()
+	hostTaskRoot := filepath.Join(string(filepath.Separator), "run", "containerd", "io.containerd.runtime.v2.task", "k8s.io")
+	writeTaskConfig(t, filepath.Join(taskRoot, "wrong"), map[string]string{
+		"io.kubernetes.cri.container-type":    "container",
+		"io.kubernetes.cri.container-name":    "procd",
+		"io.kubernetes.cri.sandbox-namespace": "tpl-default",
+		"io.kubernetes.cri.sandbox-name":      "other-pod",
+		"io.kubernetes.cri.sandbox-uid":       "other-uid",
+	})
+	wantTask := filepath.Join(taskRoot, "task-1")
+	writeTaskConfig(t, wantTask, map[string]string{
+		"io.kubernetes.cri.container-type":    "container",
+		"io.kubernetes.cri.container-name":    "procd",
+		"io.kubernetes.cri.sandbox-namespace": "tpl-default",
+		"io.kubernetes.cri.sandbox-name":      "pod-1",
+		"io.kubernetes.cri.sandbox-uid":       "uid-1",
+	})
+	require.NoError(t, os.Mkdir(filepath.Join(wantTask, "rootfs"), 0o755))
+
+	got, err := findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot, ctldapi.RootFSInfo{
+		ContainerName: "procd",
+		PodNamespace:  "tpl-default",
+		PodName:       "pod-1",
+		PodUID:        "uid-1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(hostTaskRoot, "task-1", "rootfs"), got)
+}
+
+func TestLiveRootFSPathMapsMountedRootToHostRoot(t *testing.T) {
+	containerdRoot := t.TempDir()
+	containerdHostRoot := filepath.Join(string(filepath.Separator), "run", "containerd")
+	containerID := "container-1"
+	require.NoError(t, os.MkdirAll(filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs"), 0o755))
+
+	got, err := liveRootFSPath(containerdRoot, containerdHostRoot, "k8s.io", ctldapi.RootFSInfo{
+		ContainerID:   containerID,
+		ContainerName: "procd",
+		PodNamespace:  "tpl-default",
+		PodName:       "pod-1",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(containerdHostRoot, "io.containerd.runtime.v2.task", "k8s.io", containerID, "rootfs"), got)
+}
+
 func TestDigestFromReference(t *testing.T) {
 	assert.Equal(t, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", digestFromReference("busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
 	assert.Empty(t, digestFromReference("busybox:1.36"))
@@ -326,13 +423,19 @@ func (c fakeCRIClient) PodSandboxStats(_ context.Context, req *runtimeapi.PodSan
 	return &runtimeapi.PodSandboxStatsResponse{Stats: c.statsByID[req.PodSandboxId]}, nil
 }
 
-func (c fakeCRIClient) ImageStatus(_ context.Context, _ *runtimeapi.ImageStatusRequest, _ ...grpc.CallOption) (*runtimeapi.ImageStatusResponse, error) {
-	return &runtimeapi.ImageStatusResponse{}, c.err
-}
-
 func minimalRuntimePodStats(id string) *runtimeapi.PodSandboxStats {
 	return &runtimeapi.PodSandboxStats{
 		Attributes: &runtimeapi.PodSandboxAttributes{Id: id},
 		Linux:      &runtimeapi.LinuxPodSandboxStats{},
 	}
+}
+
+func writeTaskConfig(t *testing.T, taskDir string, annotations map[string]string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(taskDir, 0o755))
+	raw, err := json.Marshal(struct {
+		Annotations map[string]string `json:"annotations"`
+	}{Annotations: annotations})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(taskDir, "config.json"), raw, 0o644))
 }

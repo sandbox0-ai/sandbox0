@@ -14,7 +14,6 @@ import (
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -219,7 +218,7 @@ func TestCombinedControllerRoutesRootFSSnapshotAPI(t *testing.T) {
 	})
 
 	t.Run("publish", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/publish", strings.NewReader(`{"handle":"snapshot-handle"}`))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/publish", strings.NewReader(`{"handle":"snapshot-handle","sandbox_id":"sandbox-1","team_id":"team-1"}`))
 		rec := httptest.NewRecorder()
 		server.Handler.ServeHTTP(rec, req)
 
@@ -227,7 +226,7 @@ func TestCombinedControllerRoutesRootFSSnapshotAPI(t *testing.T) {
 		var resp ctldapi.PublishRootFSSnapshotResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		assert.True(t, resp.Published)
-		assert.Equal(t, "head-test", resp.Checkpoint.Reference.HeadID)
+		assert.Equal(t, "sha256:test", resp.Descriptor.Digest)
 	})
 
 	t.Run("abort", func(t *testing.T) {
@@ -252,10 +251,6 @@ func (fakeRootFSHandler) SaveRootFS(_ *http.Request, _ ctldapi.SaveRootFSRequest
 	return ctldapi.SaveRootFSResponse{}, http.StatusOK
 }
 
-func (fakeRootFSHandler) BindRootFSSync(_ *http.Request, _ ctldapi.BindRootFSSyncRequest) (ctldapi.BindRootFSSyncResponse, int) {
-	return ctldapi.BindRootFSSyncResponse{Bound: true}, http.StatusOK
-}
-
 func (fakeRootFSHandler) PrepareRootFSSnapshot(_ *http.Request, _ ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
 	return ctldapi.PrepareRootFSSnapshotResponse{Handle: "snapshot-handle"}, http.StatusOK
 }
@@ -263,7 +258,7 @@ func (fakeRootFSHandler) PrepareRootFSSnapshot(_ *http.Request, _ ctldapi.Prepar
 func (fakeRootFSHandler) PublishRootFSSnapshot(_ *http.Request, _ ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
 	return ctldapi.PublishRootFSSnapshotResponse{
 		Published:  true,
-		Checkpoint: ctldapi.RootFSCheckpointDescriptor{Reference: rootfshead.HeadReference{HeadID: "head-test"}},
+		Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:test"},
 	}, http.StatusOK
 }
 
@@ -271,8 +266,8 @@ func (fakeRootFSHandler) AbortRootFSSnapshot(_ *http.Request, _ ctldapi.AbortRoo
 	return ctldapi.AbortRootFSSnapshotResponse{Aborted: true}, http.StatusOK
 }
 
-func (fakeRootFSHandler) MaterializeRootFSHead(_ *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
-	return ctldapi.MaterializeRootFSHeadResponse{Materialized: true, Image: req.Image.Name}, http.StatusOK
+func (fakeRootFSHandler) ApplyRootFS(_ *http.Request, _ ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
+	return ctldapi.ApplyRootFSResponse{}, http.StatusOK
 }
 
 type fakeVolumePortalHandler struct {

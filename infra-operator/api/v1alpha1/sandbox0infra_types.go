@@ -17,8 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"strings"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1388,48 +1386,26 @@ type CtldServiceConfig struct {
 	// +kubebuilder:validation:Pattern=`^/.*`
 	ContainerdHostDataRoot string `json:"containerdHostDataRoot,omitempty"`
 
-	// RootFSSnapshotter configures the node-local external containerd
-	// snapshotter used by all warm sandbox pods.
+	// RootFSObjectCacheMaxBytes caps the ctld node-local rootfs object cache.
+	// Set 0 to disable the cache.
+	// +kubebuilder:default="20Gi"
 	// +optional
-	// +kubebuilder:default={runtimeClassName:sandbox0-rootfs,handler:sandbox0-rootfs}
-	RootFSSnapshotter RootFSSnapshotterConfig `json:"rootfsSnapshotter,omitempty"`
-}
+	RootFSObjectCacheMaxBytes string `json:"rootfsObjectCacheMaxBytes,omitempty"`
 
-// RootFSSnapshotterConfig binds the Kubernetes RuntimeClass used by warm-pool
-// pods to a containerd runtime handler configured with snapshotter=sandbox0.
-type RootFSSnapshotterConfig struct {
-	// RuntimeClassName is the RuntimeClass assigned to every sandbox pod.
+	// RootFSObjectCacheMinFreeBytes asks ctld GC to keep at least this much free
+	// space on the cache filesystem.
 	// +optional
-	// +kubebuilder:default=sandbox0-rootfs
-	// +kubebuilder:validation:MinLength=1
-	RuntimeClassName string `json:"runtimeClassName,omitempty"`
+	RootFSObjectCacheMinFreeBytes string `json:"rootfsObjectCacheMinFreeBytes,omitempty"`
 
-	// Handler is the containerd CRI runtime handler installed on sandbox nodes.
+	// RootFSObjectCacheMaxAge evicts cache entries older than this age. Zero
+	// disables age-based eviction.
 	// +optional
-	// +kubebuilder:default=sandbox0-rootfs
-	// +kubebuilder:validation:MinLength=1
-	Handler string `json:"handler,omitempty"`
-}
+	RootFSObjectCacheMaxAge metav1.Duration `json:"rootfsObjectCacheMaxAge,omitempty"`
 
-const (
-	DefaultRootFSSnapshotterRuntimeClassName = "sandbox0-rootfs"
-	DefaultRootFSSnapshotterHandler          = "sandbox0-rootfs"
-)
-
-// ResolveRootFSSnapshotterConfig applies defaults for direct Go callers that
-// do not pass through API-server CRD defaulting.
-func ResolveRootFSSnapshotterConfig(infra *Sandbox0Infra) RootFSSnapshotterConfig {
-	cfg := RootFSSnapshotterConfig{}
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Ctld != nil {
-		cfg = infra.Spec.Services.Ctld.RootFSSnapshotter
-	}
-	if strings.TrimSpace(cfg.RuntimeClassName) == "" {
-		cfg.RuntimeClassName = DefaultRootFSSnapshotterRuntimeClassName
-	}
-	if strings.TrimSpace(cfg.Handler) == "" {
-		cfg.Handler = DefaultRootFSSnapshotterHandler
-	}
-	return cfg
+	// RootFSObjectCacheSweepInterval controls how often ctld sweeps the
+	// node-local rootfs object cache.
+	// +optional
+	RootFSObjectCacheSweepInterval metav1.Duration `json:"rootfsObjectCacheSweepInterval,omitempty"`
 }
 
 // IsGlobalGatewayEnabled returns true when global-gateway is enabled.

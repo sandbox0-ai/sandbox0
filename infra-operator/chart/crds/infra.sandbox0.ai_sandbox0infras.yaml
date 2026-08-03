@@ -3329,27 +3329,27 @@ spec:
                           sandbox worker data disk.
                         pattern: ^/.*
                         type: string
-                      rootfsSnapshotter:
-                        default:
-                          handler: sandbox0-rootfs
-                          runtimeClassName: sandbox0-rootfs
+                      rootfsObjectCacheMaxAge:
                         description: |-
-                          RootFSSnapshotter configures the node-local external containerd
-                          snapshotter used by all warm sandbox pods.
-                        properties:
-                          handler:
-                            default: sandbox0-rootfs
-                            description: Handler is the containerd CRI runtime handler
-                              installed on sandbox nodes.
-                            minLength: 1
-                            type: string
-                          runtimeClassName:
-                            default: sandbox0-rootfs
-                            description: RuntimeClassName is the RuntimeClass assigned
-                              to every sandbox pod.
-                            minLength: 1
-                            type: string
-                        type: object
+                          RootFSObjectCacheMaxAge evicts cache entries older than this age. Zero
+                          disables age-based eviction.
+                        type: string
+                      rootfsObjectCacheMaxBytes:
+                        default: 20Gi
+                        description: |-
+                          RootFSObjectCacheMaxBytes caps the ctld node-local rootfs object cache.
+                          Set 0 to disable the cache.
+                        type: string
+                      rootfsObjectCacheMinFreeBytes:
+                        description: |-
+                          RootFSObjectCacheMinFreeBytes asks ctld GC to keep at least this much free
+                          space on the cache filesystem.
+                        type: string
+                      rootfsObjectCacheSweepInterval:
+                        description: |-
+                          RootFSObjectCacheSweepInterval controls how often ctld sweeps the
+                          node-local rootfs object cache.
+                        type: string
                     type: object
                   globalGateway:
                     default: {}
@@ -3897,6 +3897,8 @@ spec:
                             default: 32Gi
                             description: SandboxMaxMemory is the maximum memory limit
                               accepted for a single sandbox.
+                            type: string
+                          sandboxRuntimeClassName:
                             type: string
                           shutdownTimeout:
                             default: 30s

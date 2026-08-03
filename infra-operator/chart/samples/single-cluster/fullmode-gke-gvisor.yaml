@@ -1,0 +1,110 @@
+# Example: Single-cluster fullmode deployment on GKE with gVisor sandbox nodes
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox0-system
+---
+apiVersion: infra.sandbox0.ai/v1alpha1
+kind: Sandbox0Infra
+metadata:
+  name: fullmode
+  namespace: sandbox0-system
+spec:
+  database:
+    type: builtin
+    builtin:
+      enabled: true
+      persistence:
+        size: "20Gi"
+  publicExposure:
+    enabled: true
+    rootDomain: sandbox0.app
+    regionId: gcp-us-east1
+  storage:
+    type: builtin
+    builtin:
+      enabled: true
+      persistence:
+        size: "20Gi"
+    runtime:
+      objectEncryptionEnabled: false
+  registry:
+    provider: builtin
+    builtin:
+      enabled: true
+      service:
+        type: NodePort
+        port: 30500
+      # Replace this with a TLS/LB address reachable by every sandbox node.
+      pushEndpoint: 127.0.0.1:30500
+  builtinTemplates:
+    - templateId: default
+      image: sandbox0ai/otemplates:default-v0.2.0
+      displayName: Default
+      description: Builtin template installed by infra-operator.
+      pool:
+        minIdle: 1
+        maxIdle: 5
+    - templateId: openclaw
+      image: ghcr.io/openclaw/openclaw:latest
+      displayName: OpenClaw
+      description: Builtin OpenClaw agent-in-sandbox template installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 2
+    - templateId: hermes
+      image: nousresearch/hermes-agent:latest
+      displayName: Hermes
+      description: Builtin Hermes agent-in-sandbox template installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 2
+    - templateId: browser
+      image: ghcr.io/steel-dev/steel-browser:latest
+      displayName: Browser
+      description: Builtin browser automation template installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 2
+    - templateId: coding-agent
+      image: sandbox0ai/otemplates:coding-agent-v0.5.0
+      displayName: Coding Agents
+      description: Builtin coding-agent template with Docker, Codex, Claude Code, OpenCode, Pi, and Playwright CLI installed by infra-operator.
+      pool:
+        minIdle: 0
+        maxIdle: 2
+  # Shared placement for sandbox template Pods and the node-local ctld runtime.
+  sandboxNodePlacement:
+    # Reuse the native GKE Sandbox node label so sandbox placement does not
+    # depend on an extra custom node label.
+    nodeSelector:
+      sandbox.gke.io/runtime: gvisor
+    tolerations:
+      - key: sandbox0.ai/sandbox
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: sandbox.gke.io/runtime
+        operator: Equal
+        value: gvisor
+        effect: NoSchedule
+  network:
+    config:
+      egressAuthEnabled: true
+      egressAuthFailurePolicy: fail-closed
+  services:
+    clusterGateway:
+      enabled: true
+      replicas: 1
+      service:
+        type: NodePort
+        port: 30080
+      config:
+        authMode: public
+    manager:
+      enabled: true
+      replicas: 1
+      config:
+        sandboxRuntimeClassName: gvisor
+  initUser:
+    email: "admin@example.com"

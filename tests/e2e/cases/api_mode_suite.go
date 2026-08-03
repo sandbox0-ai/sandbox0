@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -270,6 +271,10 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 			if opts.includeRootFSPauseResume {
 				It("persists rootfs changes across pause and resume", func() {
 					assertSandboxRootFSPersistsAcrossPauseResume(env, session)
+				})
+
+				It("reconstructs a missing runtime without duplicating generations", Label("runtime-reconciliation"), func() {
+					assertSandboxRuntimeReconcilesUnexpectedPodDeletion(env, session)
 				})
 
 				It("keeps a SandboxVolume mounted beneath ephemeral tmp", func() {
@@ -1479,6 +1484,150 @@ test "$(cat %s)" = persistent-var-tmp
 	)
 	_, err = execInSandboxPod(env, templateNamespace, restored.PodName, verifyScript)
 	Expect(err).NotTo(HaveOccurred())
+}
+
+func assertSandboxRuntimeReconcilesUnexpectedPodDeletion(env *framework.ScenarioEnv, session *e2eutils.Session) {
+	claimResp := claimSandboxEventually(env, session, "default")
+	sandboxID := claimResp.SandboxId
+	Expect(sandboxID).NotTo(BeEmpty())
+	DeferCleanup(func() {
+		_ = session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	})
+
+	templateNamespace, err := naming.TemplateNamespaceForBuiltin("default")
+	Expect(err).NotTo(HaveOccurred())
+	current := waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	uncommittedPath := fmt.Sprintf("/root/s0-runtime-uncommitted-%d", time.Now().UnixNano())
+	_, err = execInSandboxPod(env, templateNamespace, current.PodName, fmt.Sprintf(
+		"printf uncommitted > %s",
+		shellQuote(uncommittedPath),
+	))
+	Expect(err).NotTo(HaveOccurred())
+
+	current = forceDeleteSandboxRuntimeAndWaitForReplacement(env, session, sandboxID, templateNamespace, current)
+	_, err = execInSandboxPod(env, templateNamespace, current.PodName, fmt.Sprintf(
+		"test ! -e %s",
+		shellQuote(uncommittedPath),
+	))
+	Expect(err).NotTo(HaveOccurred(), "a runtime lost before its first checkpoint must restart from the template baseline")
+
+	marker := fmt.Sprintf("s0-runtime-reconcile-%d", time.Now().UnixNano())
+	markerPath := "/root/" + marker
+	markerContent := "last committed rootfs " + marker
+	_, err = execInSandboxPod(env, templateNamespace, current.PodName, fmt.Sprintf(
+		"printf %%s %s > %s",
+		shellQuote(markerContent),
+		shellQuote(markerPath),
+	))
+	Expect(err).NotTo(HaveOccurred())
+
+	_, status, err := session.PauseSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	waitForSandboxLifecycleStatusEventually(env, session, sandboxID, apispec.SandboxLifecycleStatusPaused)
+
+	resumeResp, status, err := session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(resumeResp).NotTo(BeNil())
+	Expect(resumeResp.Resumed).To(BeTrue())
+	current = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+
+	for iteration := 0; iteration < 3; iteration++ {
+		current = forceDeleteSandboxRuntimeAndWaitForReplacement(env, session, sandboxID, templateNamespace, current)
+		_, err = execInSandboxPod(env, templateNamespace, current.PodName, fmt.Sprintf(
+			"test \"$(cat %s)\" = %s",
+			shellQuote(markerPath),
+			shellQuote(markerContent),
+		))
+		Expect(err).NotTo(HaveOccurred())
+	}
+}
+
+func forceDeleteSandboxRuntimeAndWaitForReplacement(
+	env *framework.ScenarioEnv,
+	session *e2eutils.Session,
+	sandboxID string,
+	templateNamespace string,
+	current *apispec.Sandbox,
+) *apispec.Sandbox {
+	oldPodName := current.PodName
+	oldGeneration := current.RuntimeGeneration
+	Expect(framework.Kubectl(
+		env.TestCtx.Context,
+		env.Config.Kubeconfig,
+		"-n", templateNamespace,
+		"delete", "pod", oldPodName,
+		"--force", "--grace-period=0", "--wait=false",
+	)).To(Succeed())
+
+	Eventually(func() error {
+		observed, observedStatus, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+		if err != nil {
+			return err
+		}
+		if observedStatus != http.StatusOK {
+			return fmt.Errorf("get sandbox returned status %d", observedStatus)
+		}
+		if observed == nil {
+			return fmt.Errorf("sandbox response missing")
+		}
+		if observed.Status != apispec.SandboxLifecycleStatusRunning {
+			return fmt.Errorf("sandbox status is %s", observed.Status)
+		}
+		if observed.PodName == "" || observed.PodName == oldPodName {
+			return fmt.Errorf("replacement pod is not published")
+		}
+		if observed.RuntimeGeneration <= oldGeneration {
+			return fmt.Errorf("runtime generation did not advance: old=%d current=%d", oldGeneration, observed.RuntimeGeneration)
+		}
+		current = observed
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+
+	current = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+	Eventually(func() error {
+		podListJSON, err := framework.KubectlOutput(
+			env.TestCtx.Context,
+			env.Config.Kubeconfig,
+			"-n", templateNamespace,
+			"get", "pods",
+			"-l", "sandbox0.ai/sandbox-id="+sandboxID,
+			"-o", "json",
+		)
+		if err != nil {
+			return err
+		}
+		var podList e2ePodList
+		if err := json.Unmarshal([]byte(podListJSON), &podList); err != nil {
+			return err
+		}
+		var activePod *e2ePod
+		for _, pod := range podList.Items {
+			if pod.Metadata.DeletionTimestamp == nil {
+				if activePod != nil {
+					return fmt.Errorf("multiple active runtime pods remain")
+				}
+				pod := pod
+				activePod = &pod
+			}
+		}
+		if len(podList.Items) != 1 || activePod == nil {
+			return fmt.Errorf("runtime pod set has not converged: total=%d", len(podList.Items))
+		}
+		if activePod.Metadata.Name != current.PodName {
+			return fmt.Errorf("API pod %s does not match Kubernetes pod %s", current.PodName, activePod.Metadata.Name)
+		}
+		generation, err := strconv.ParseInt(strings.TrimSpace(activePod.Metadata.Annotations[runtimecontrol.AnnotationRuntimeGeneration]), 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse runtime generation annotation: %w", err)
+		}
+		if generation != current.RuntimeGeneration {
+			return fmt.Errorf("API generation %d does not match Kubernetes generation %d", current.RuntimeGeneration, generation)
+		}
+		return nil
+	}).WithTimeout(3 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+	return current
 }
 
 func assertSandboxVolumeUnderTmpPersistsAcrossPauseResume(env *framework.ScenarioEnv, session *e2eutils.Session) {

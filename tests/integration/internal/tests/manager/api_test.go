@@ -969,6 +969,10 @@ func (s *memorySandboxStoreForManagerIntegration) UpsertSandbox(_ context.Contex
 	if record == nil || record.ID == "" {
 		return nil
 	}
+	if existing := s.records[record.ID]; existing != nil &&
+		(existing.Status == service.SandboxStatusTerminating || existing.Status == service.SandboxStatusDeleted || !existing.DeletedAt.IsZero()) {
+		return nil
+	}
 	s.records[record.ID] = cloneSandboxRecordForManagerIntegration(record)
 	return nil
 }
@@ -1230,9 +1234,15 @@ type memorySandboxStoreTxForManagerIntegration struct {
 	store *memorySandboxStoreForManagerIntegration
 }
 
+var _ service.SandboxStoreTx = memorySandboxStoreTxForManagerIntegration{}
+
+func (t memorySandboxStoreTxForManagerIntegration) SaveSandbox(ctx context.Context, record *service.SandboxRecord) error {
+	return t.store.UpsertSandbox(ctx, record)
+}
+
 func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata service.SandboxRuntimeMetadata) error {
 	record := t.store.records[sandboxID]
-	if record == nil || !record.DeletedAt.IsZero() {
+	if record == nil || record.Status == service.SandboxStatusTerminating || record.Status == service.SandboxStatusDeleted || !record.DeletedAt.IsZero() {
 		return service.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = namespace
@@ -1252,7 +1262,7 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context
 
 func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimePaused(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
 	record := t.store.records[sandboxID]
-	if record == nil || !record.DeletedAt.IsZero() {
+	if record == nil || record.Status == service.SandboxStatusTerminating || record.Status == service.SandboxStatusDeleted || !record.DeletedAt.IsZero() {
 		return service.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = ""
@@ -1262,6 +1272,15 @@ func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimePaused(_ context.C
 		record.RuntimeGeneration = generation
 	}
 	record.ExpiresAt = time.Time{}
+	return nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimeTerminating(_ context.Context, sandboxID string) error {
+	record := t.store.records[sandboxID]
+	if record == nil || !record.DeletedAt.IsZero() {
+		return service.ErrSandboxRecordNotFound
+	}
+	record.Status = service.SandboxStatusTerminating
 	return nil
 }
 
@@ -1365,6 +1384,34 @@ func (t memorySandboxStoreTxForManagerIntegration) AbortLifecycleTxn(_ context.C
 		txn.Error = reason
 	}
 	return nil
+}
+
+func TestMemorySandboxStoreTxForManagerIntegrationFencesTerminatingRuntime(t *testing.T) {
+	const sandboxID = "sandbox-terminating"
+	store := newMemorySandboxStoreForManagerIntegration(&service.SandboxRecord{
+		ID:     sandboxID,
+		Status: service.SandboxStatusRunning,
+	}, nil)
+	tx := memorySandboxStoreTxForManagerIntegration{store: store}
+
+	if err := tx.MarkRuntimeTerminating(t.Context(), sandboxID); err != nil {
+		t.Fatalf("mark runtime terminating: %v", err)
+	}
+	if got := store.records[sandboxID].Status; got != service.SandboxStatusTerminating {
+		t.Fatalf("expected terminating status, got %q", got)
+	}
+	if err := tx.MarkRuntimePaused(t.Context(), sandboxID, 2, time.Now()); !stderrors.Is(err, service.ErrSandboxRecordNotFound) {
+		t.Fatalf("expected paused write to be fenced, got %v", err)
+	}
+	if err := tx.SaveRuntime(t.Context(), sandboxID, "default", "replacement", service.SandboxStatusRunning, 2, time.Time{}, time.Time{}, service.SandboxRuntimeMetadata{}); !stderrors.Is(err, service.ErrSandboxRecordNotFound) {
+		t.Fatalf("expected runtime write to be fenced, got %v", err)
+	}
+	if err := tx.SaveSandbox(t.Context(), &service.SandboxRecord{ID: sandboxID, Status: service.SandboxStatusRunning}); err != nil {
+		t.Fatalf("save stale sandbox projection: %v", err)
+	}
+	if got := store.records[sandboxID].Status; got != service.SandboxStatusTerminating {
+		t.Fatalf("expected stale sandbox projection to remain fenced, got %q", got)
+	}
 }
 
 func cloneSandboxRecordForManagerIntegration(record *service.SandboxRecord) *service.SandboxRecord {

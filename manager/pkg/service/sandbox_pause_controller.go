@@ -152,7 +152,7 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 }
 
 func sandboxLifecycleSourceReconstructsRuntime(source string) bool {
-	return source == SandboxLifecycleSourceCrash || source == SandboxLifecycleSourceHealth
+	return source == SandboxLifecycleSourceCrash || source == SandboxLifecycleSourceHealth || source == SandboxLifecycleSourceLost
 }
 
 func (c *SandboxPauseController) runWorker(ctx context.Context) {

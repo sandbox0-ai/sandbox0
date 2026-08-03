@@ -232,7 +232,18 @@ runs:
         archive="${RUNNER_TEMP}/infra-image-cache/infra-image-e2e-openssh-server-68b605929e83.tar"
         source="lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7"
         image="sandbox0ai/e2e-openssh-server:68b605929e83"
-        docker pull "${source}"
+        for attempt in 1 2 3; do
+          if docker pull "${source}"; then
+            break
+          fi
+          if (( attempt == 3 )); then
+            echo "Failed to pull SSH fixture image after ${attempt} attempts." >&2
+            exit 1
+          fi
+          delay=$((attempt * 5))
+          echo "Retrying SSH fixture image pull in ${delay}s (attempt ${attempt}/3 failed)."
+          sleep "${delay}"
+        done
         docker tag "${source}" "${image}"
         docker save -o "${archive}" "${image}"
         docker image rm "${image}" "${source}" 2>/dev/null || true

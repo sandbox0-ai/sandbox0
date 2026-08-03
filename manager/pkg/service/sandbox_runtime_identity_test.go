@@ -42,11 +42,19 @@ type memorySandboxStoreTx struct {
 	store *memorySandboxStore
 }
 
+func (t memorySandboxStoreTx) SaveSandbox(_ context.Context, record *SandboxRecord) error {
+	return t.store.UpsertSandbox(context.Background(), record)
+}
+
 func (s *memorySandboxStore) UpsertSandbox(_ context.Context, record *SandboxRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.records == nil {
 		s.records = make(map[string]*SandboxRecord)
+	}
+	if existing := s.records[record.ID]; existing != nil &&
+		(existing.Status == SandboxStatusTerminating || existing.Status == SandboxStatusDeleted || !existing.DeletedAt.IsZero()) {
+		return nil
 	}
 	s.records[record.ID] = cloneSandboxRecord(record)
 	return nil
@@ -293,7 +301,7 @@ func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespac
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
-	if record == nil || !record.DeletedAt.IsZero() {
+	if record == nil || record.Status == SandboxStatusTerminating || !record.DeletedAt.IsZero() {
 		return ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = namespace
@@ -316,7 +324,7 @@ func (t memorySandboxStoreTx) MarkRuntimePaused(_ context.Context, sandboxID str
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
-	if record == nil || !record.DeletedAt.IsZero() {
+	if record == nil || record.Status == SandboxStatusTerminating || !record.DeletedAt.IsZero() {
 		return ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = ""
@@ -326,6 +334,17 @@ func (t memorySandboxStoreTx) MarkRuntimePaused(_ context.Context, sandboxID str
 		record.RuntimeGeneration = generation
 	}
 	t.store.pauses++
+	return nil
+}
+
+func (t memorySandboxStoreTx) MarkRuntimeTerminating(_ context.Context, sandboxID string) error {
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
+	record := t.store.records[sandboxID]
+	if record == nil || !record.DeletedAt.IsZero() {
+		return ErrSandboxRecordNotFound
+	}
+	record.Status = SandboxStatusTerminating
 	return nil
 }
 
@@ -1372,7 +1391,7 @@ func TestCompletePausingSandboxRuntimeAbortsCanceledAutoPause(t *testing.T) {
 	}
 }
 
-func TestResumePausedSandboxRuntimeDoesNotCreateRuntimeForRunningRecordWithoutPod(t *testing.T) {
+func TestResumePausedSandboxRuntimeStartsRecoveryForRunningRecordWithoutPod(t *testing.T) {
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{
 		"sandbox-a": {
 			ID:                "sandbox-a",
@@ -1387,16 +1406,30 @@ func TestResumePausedSandboxRuntimeDoesNotCreateRuntimeForRunningRecordWithoutPo
 		},
 	}}
 	client := fake.NewSimpleClientset()
+	enqueuer := &recordingPauseEnqueuer{}
 	svc := &SandboxService{
-		k8sClient:    client,
-		podLister:    runtimeIdentityPodLister(t),
-		sandboxStore: store,
-		logger:       zap.NewNop(),
+		k8sClient:     client,
+		podLister:     runtimeIdentityPodLister(t),
+		sandboxStore:  store,
+		pauseEnqueuer: enqueuer,
+		logger:        zap.NewNop(),
 	}
 
-	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
-	if !k8serrors.IsConflict(err) {
-		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want conflict", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := svc.ResumePausedSandboxRuntime(ctx, "sandbox-a")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want deadline while recovery remains queued", err)
+	}
+	txn, getErr := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
+	if getErr != nil {
+		t.Fatalf("GetActiveLifecycleTxn() error = %v", getErr)
+	}
+	if txn == nil || txn.Kind != SandboxLifecycleKindPause || txn.Source != SandboxLifecycleSourceLost {
+		t.Fatalf("lifecycle txn = %+v, want lost-runtime pause", txn)
+	}
+	if len(enqueuer.recoveryCalls) != 1 || enqueuer.recoveryCalls[0] != "sandbox-a" {
+		t.Fatalf("recovery calls = %#v, want sandbox-a", enqueuer.recoveryCalls)
 	}
 	for _, action := range client.Actions() {
 		if action.GetVerb() == "create" && action.GetResource().Resource == "pods" {
@@ -1457,6 +1490,7 @@ func TestTerminatePausedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 	volumes := &recordingSystemVolumeClient{}
 	emitter := &recordingDeletionWebhookEmitter{}
 	svc := &SandboxService{
+		k8sClient:              fake.NewSimpleClientset(),
 		podLister:              runtimeIdentityPodLister(t),
 		credentialStore:        bindings,
 		webhookStateVolumes:    volumes,

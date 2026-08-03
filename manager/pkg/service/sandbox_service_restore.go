@@ -56,6 +56,9 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			if locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
 				return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
 			}
+			if locked.Status == SandboxStatusTerminating {
+				return k8serrors.NewConflict(corev1.Resource("sandbox"), sandboxID, fmt.Errorf("sandbox termination is in progress"))
+			}
 			if sandboxHardExpired(locked.HardExpiresAt, s.now()) {
 				return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
 			}
@@ -124,18 +127,9 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			if getErr != nil && !k8serrors.IsNotFound(getErr) {
 				return fmt.Errorf("get current runtime pod: %w", getErr)
 			}
-			if locked.Status == SandboxStatusStarting {
-				// No active resume transaction owns this state. Reconcile it before
-				// creating a replacement runtime so a timed-out caller cannot leave
-				// the durable record permanently stuck in starting.
-				if err := tx.MarkRuntimePaused(lockCtx, sandboxID, locked.RuntimeGeneration, s.now()); err != nil {
-					return err
-				}
-				waitErr = errSandboxRuntimeStateReconciled
-				return nil
-			}
 			if locked.Status != SandboxStatusPaused {
-				return k8serrors.NewConflict(corev1.Resource("sandbox"), sandboxID, fmt.Errorf("sandbox runtime for status %q is not available", locked.Status))
+				waitErr = errSandboxRuntimeReconcileRequested
+				return nil
 			}
 
 			resumeTemplate, err := s.templateForSandboxRecord(locked)
@@ -205,7 +199,18 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 				return nil, err
 			}
 			continue
-		case errors.Is(err, errSandboxRuntimeStateReconciled):
+		case errors.Is(err, errSandboxRuntimeReconcileRequested):
+			if err := s.ReconcileSandboxRuntime(ctx, sandboxID); err != nil {
+				return nil, err
+			}
+			if err := s.waitForSandboxLifecycleTxnExit(ctx, sandboxID); err != nil {
+				return nil, err
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(sandboxLifecycleWaitInterval):
+			}
 			continue
 		default:
 			return nil, err
@@ -347,7 +352,7 @@ var (
 	errSandboxLifecycleResuming            = errors.New("sandbox lifecycle resume is in progress")
 	errSandboxLifecycleRootFSCheckpointing = errors.New("sandbox lifecycle rootfs checkpoint is in progress")
 	errSandboxRuntimeDeleting              = errors.New("sandbox runtime pod deletion is in progress")
-	errSandboxRuntimeStateReconciled       = errors.New("sandbox runtime state was reconciled")
+	errSandboxRuntimeReconcileRequested    = errors.New("sandbox runtime state requires reconciliation")
 )
 
 type sandboxRuntimePodRef struct {

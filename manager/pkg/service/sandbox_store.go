@@ -116,6 +116,7 @@ const (
 	SandboxLifecycleSourceAuto   = "auto"
 	SandboxLifecycleSourceCrash  = "crash"
 	SandboxLifecycleSourceHealth = "health"
+	SandboxLifecycleSourceLost   = "lost"
 
 	SandboxLifecyclePhasePreparing  = "preparing"
 	SandboxLifecyclePhaseBarriered  = "barriered"
@@ -158,6 +159,17 @@ type SandboxRuntimeMetadata struct {
 	OwnerKind            string
 }
 
+// SandboxRuntimeReconcileCandidate is the durable runtime projection used by
+// the anti-entropy controller. Pod fields are hints only; Kubernetes remains
+// authoritative for whether the referenced runtime currently exists.
+type SandboxRuntimeReconcileCandidate struct {
+	SandboxID         string
+	Status            string
+	PodNamespace      string
+	PodName           string
+	RuntimeGeneration int64
+}
+
 // SandboxStore persists sandbox identities independently of runtime pods.
 type SandboxStore interface {
 	UpsertSandbox(ctx context.Context, record *SandboxRecord) error
@@ -174,8 +186,10 @@ type SandboxStore interface {
 
 // SandboxStoreTx is a locked sandbox store transaction.
 type SandboxStoreTx interface {
+	SaveSandbox(ctx context.Context, record *SandboxRecord) error
 	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error
 	MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error
+	MarkRuntimeTerminating(ctx context.Context, sandboxID string) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
 	GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error)
 	BeginLifecycleTxn(ctx context.Context, txn *SandboxLifecycleTxn) error
@@ -263,11 +277,14 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			hard_expires_at = EXCLUDED.hard_expires_at,
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
+		WHERE manager.sandboxes.deleted_at IS NULL
+			AND manager.sandboxes.status NOT IN ($23, $24)
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
 		record.ClusterID, record.Status, configJSON, mountsJSON, specJSON,
 		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
 		strings.TrimSpace(record.WebhookStateVolumeID), strings.TrimSpace(record.OwnerKind),
-		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt))
+		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt),
+		SandboxStatusTerminating, SandboxStatusDeleted)
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
 	}
@@ -383,15 +400,16 @@ func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Contex
 			WHERE s.deleted_at IS NULL
 				AND s.status = $2
 				AND latest.kind = $3
-				AND latest.source IN ($4, $5)
+				AND latest.source IN ($4, $5, $6)
 			ORDER BY s.updated_at ASC
-			LIMIT $6
+			LIMIT $7
 		`,
 		SandboxLifecyclePhaseCommitted,
 		SandboxStatusPaused,
 		SandboxLifecycleKindPause,
 		SandboxLifecycleSourceCrash,
 		SandboxLifecycleSourceHealth,
+		SandboxLifecycleSourceLost,
 		limit,
 	)
 	if err != nil {
@@ -410,6 +428,60 @@ func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Contex
 		return nil, fmt.Errorf("iterate pending runtime recovery sandboxes: %w", err)
 	}
 	return sandboxIDs, nil
+}
+
+// ListRuntimeReconcileCandidates returns a stable page of sandboxes whose
+// durable state expects either an active runtime or completion of deletion.
+// The controller compares these projections with its synced Pod cache before
+// performing a strong Kubernetes API read for suspected mismatches.
+func (s *PGSandboxStore) ListRuntimeReconcileCandidates(ctx context.Context, clusterID, afterSandboxID string, limit int) ([]SandboxRuntimeReconcileCandidate, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT sandbox_id, status, current_pod_namespace, current_pod_name, runtime_generation
+		FROM manager.sandboxes
+		WHERE deleted_at IS NULL
+			AND (
+				status IN ($1, $2, $3, $4)
+				OR EXISTS (
+					SELECT 1
+					FROM manager.sandbox_lifecycle_txns txn
+					WHERE txn.sandbox_id = manager.sandboxes.sandbox_id
+						AND txn.kind = $5
+						AND txn.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+				)
+			)
+			AND cluster_id = $6
+			AND sandbox_id > $7
+		ORDER BY sandbox_id ASC
+		LIMIT $8
+	`, SandboxStatusStarting, SandboxStatusRunning, SandboxStatusFailed, SandboxStatusTerminating, SandboxLifecycleKindResume, strings.TrimSpace(clusterID), strings.TrimSpace(afterSandboxID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list sandbox runtime reconcile candidates: %w", err)
+	}
+	defer rows.Close()
+	candidates := make([]SandboxRuntimeReconcileCandidate, 0, limit)
+	for rows.Next() {
+		var candidate SandboxRuntimeReconcileCandidate
+		if err := rows.Scan(
+			&candidate.SandboxID,
+			&candidate.Status,
+			&candidate.PodNamespace,
+			&candidate.PodName,
+			&candidate.RuntimeGeneration,
+		); err != nil {
+			return nil, fmt.Errorf("scan sandbox runtime reconcile candidate: %w", err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sandbox runtime reconcile candidates: %w", err)
+	}
+	return candidates, nil
 }
 
 func (s *PGSandboxStore) GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {
@@ -629,6 +701,10 @@ type sandboxStoreTx struct {
 	tx pgx.Tx
 }
 
+func (t sandboxStoreTx) SaveSandbox(ctx context.Context, record *SandboxRecord) error {
+	return upsertSandboxRecord(ctx, t.tx, record)
+}
+
 func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error {
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
@@ -644,7 +720,8 @@ func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, p
 			updated_at = NOW()
 		WHERE sandbox_id = $1
 			AND deleted_at IS NULL
-	`, sandboxID, status, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt), strings.TrimSpace(metadata.WebhookStateVolumeID), strings.TrimSpace(metadata.OwnerKind))
+			AND status NOT IN ($10, $11)
+	`, sandboxID, status, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt), strings.TrimSpace(metadata.WebhookStateVolumeID), strings.TrimSpace(metadata.OwnerKind), SandboxStatusTerminating, SandboxStatusDeleted)
 	if err != nil {
 		return fmt.Errorf("save sandbox runtime: %w", err)
 	}
@@ -665,9 +742,27 @@ func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
 			AND deleted_at IS NULL
-	`, sandboxID, SandboxStatusPaused, generation)
+			AND status NOT IN ($4, $5)
+	`, sandboxID, SandboxStatusPaused, generation, SandboxStatusTerminating, SandboxStatusDeleted)
 	if err != nil {
 		return fmt.Errorf("mark sandbox runtime paused: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, sandboxID)
+	}
+	return nil
+}
+
+func (t sandboxStoreTx) MarkRuntimeTerminating(ctx context.Context, sandboxID string) error {
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET status = $2,
+			updated_at = NOW()
+		WHERE sandbox_id = $1
+			AND deleted_at IS NULL
+	`, sandboxID, SandboxStatusTerminating)
+	if err != nil {
+		return fmt.Errorf("mark sandbox runtime terminating: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, sandboxID)

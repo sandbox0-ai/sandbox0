@@ -377,7 +377,13 @@ func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1
 	if sandboxID == "" {
 		return fmt.Errorf("sandbox_id is required")
 	}
-	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
+		if locked == nil || locked.Status == SandboxStatusTerminating || locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
+			return nil
+		}
+		if runtimeGenerationFromPod(pod) < locked.RuntimeGeneration {
+			return nil
+		}
 		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, status, runtimeGenerationFromPod(pod), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt), sandboxRuntimeMetadataFromPod(pod))
 	})
 }

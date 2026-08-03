@@ -444,6 +444,7 @@ func main() {
 
 	// Create services
 	cfgForSandbox := service.SandboxServiceConfig{
+		ClusterID:                           naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
 		DefaultTTL:                          cfg.DefaultSandboxTTL.Duration,
 		SandboxMemoryPerCPU:                 cfg.TeamTemplateMemoryPerCPU,
 		SandboxMaxMemory:                    cfg.SandboxMaxMemory,
@@ -535,6 +536,14 @@ func main() {
 	sandboxService.SetPauseEnqueuer(sandboxPauseController)
 	sandboxCrashRecoveryController := service.NewSandboxCrashRecoveryController(k8sClient, podLister, sandboxService, logger)
 	podInformer.Informer().AddEventHandler(sandboxCrashRecoveryController.ResourceEventHandler())
+	sandboxRuntimeReconciler := service.NewSandboxRuntimeReconciler(
+		naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+		sandboxStore,
+		podLister,
+		sandboxService,
+		logger,
+	)
+	podInformer.Informer().AddEventHandler(sandboxRuntimeReconciler.ResourceEventHandler())
 	sandboxLogWorker := buildSandboxObservabilityLogWorker(cfg, internalAuthGen, obsProvider, logger)
 	staticAuth := make([]egressauthruntime.StaticAuthConfig, 0, len(cfg.EgressAuthStaticAuth))
 	for _, entry := range cfg.EgressAuthStaticAuth {
@@ -725,6 +734,11 @@ func main() {
 		go func() {
 			if err := sandboxCrashRecoveryController.Run(controllerCtx, 2); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("Sandbox crash recovery controller failed", zap.Error(err))
+			}
+		}()
+		go func() {
+			if err := sandboxRuntimeReconciler.Run(controllerCtx, 2); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("Sandbox runtime reconciler failed", zap.Error(err))
 			}
 		}()
 

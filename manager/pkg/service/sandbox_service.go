@@ -84,6 +84,7 @@ var claimIdlePodBackoff = wait.Backoff{
 
 // SandboxServiceConfig handles configuration for SandboxService
 type SandboxServiceConfig struct {
+	ClusterID                           string
 	DefaultTTL                          time.Duration
 	SandboxMemoryPerCPU                 string
 	SandboxMaxMemory                    string

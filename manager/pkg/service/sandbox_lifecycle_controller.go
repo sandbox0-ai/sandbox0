@@ -492,30 +492,20 @@ func (s *SandboxService) runtimeDeletionDisposition(ctx context.Context, info Sa
 	return runtimeOnly, runtimeOnly && record != nil && record.Status == SandboxStatusPaused, nil
 }
 
-// SandboxRecordDeletionIsRuntimeOnly reports whether a runtime pod deletion should
-// be treated as pause/stale runtime cleanup instead of sandbox deletion.
-func SandboxRecordDeletionIsRuntimeOnly(record *SandboxRecord, namespace, podName string, runtimeGeneration int64) bool {
+// SandboxRecordDeletionIsRuntimeOnly reports whether Pod deletion is limited to
+// runtime-scoped cleanup. For a tracked sandbox, only durable
+// terminating/deleted intent authorizes sandbox-wide cleanup; untracked legacy
+// Pods retain the existing sandbox-wide cleanup behavior.
+func SandboxRecordDeletionIsRuntimeOnly(record *SandboxRecord, _ string, _ string, _ int64) bool {
 	if record == nil {
 		return false
 	}
 	switch record.Status {
-	case SandboxStatusPaused:
-		return true
-	case SandboxStatusDeleted:
+	case SandboxStatusTerminating, SandboxStatusDeleted:
 		return false
-	}
-	if runtimeGeneration > 0 && record.RuntimeGeneration > runtimeGeneration {
+	default:
 		return true
 	}
-	podName = strings.TrimSpace(podName)
-	namespace = strings.TrimSpace(namespace)
-	if podName != "" && strings.TrimSpace(record.CurrentPodName) != "" && record.CurrentPodName != podName {
-		return true
-	}
-	if namespace != "" && strings.TrimSpace(record.CurrentPodNamespace) != "" && record.CurrentPodNamespace != namespace {
-		return true
-	}
-	return false
 }
 
 func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, info SandboxLifecycleInfo, retainHot bool) error {

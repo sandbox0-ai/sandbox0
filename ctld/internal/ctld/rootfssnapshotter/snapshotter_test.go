@@ -480,6 +480,18 @@ func TestBackendSnapshotReference(t *testing.T) {
 	assert.Empty(t, backendSnapshotReference(""))
 }
 
+func TestProbeMountedTreeAcceptsPopulatedAndEmptyDirectories(t *testing.T) {
+	populated := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(populated, "entry"), []byte("value"), 0o600))
+	require.NoError(t, probeMountedTree(context.Background(), populated))
+	require.NoError(t, probeMountedTree(context.Background(), t.TempDir()))
+}
+
+func TestProbeMountedTreeReportsOpenFailure(t *testing.T) {
+	err := probeMountedTree(context.Background(), filepath.Join(t.TempDir(), "missing"))
+	require.Error(t, err)
+}
+
 func TestSnapshotterCloseIsIdempotent(t *testing.T) {
 	delegate, err := overlay.NewSnapshotter(t.TempDir(), overlay.WithUpperdirLabel)
 	require.NoError(t, err)

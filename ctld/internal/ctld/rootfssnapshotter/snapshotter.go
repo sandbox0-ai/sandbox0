@@ -712,7 +712,32 @@ func mountLayerTree(target string, tree *LayerTree) (mountedHead, error) {
 	if err := server.WaitReady(readyCtx); err != nil {
 		return nil, errors.Join(fmt.Errorf("start rootfs FUSE server: %w", err), mounted.Unmount())
 	}
+	if err := probeMountedTree(readyCtx, target); err != nil {
+		return nil, errors.Join(fmt.Errorf("probe rootfs FUSE mount: %w", err), mounted.Unmount())
+	}
 	return mounted, nil
+}
+
+func probeMountedTree(ctx context.Context, target string) error {
+	result := make(chan error, 1)
+	go func() {
+		directory, err := os.Open(target)
+		if err != nil {
+			result <- err
+			return
+		}
+		_, readErr := directory.Readdirnames(1)
+		if errors.Is(readErr, io.EOF) {
+			readErr = nil
+		}
+		result <- errors.Join(readErr, directory.Close())
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *fuseHeadMount) Unmount() error {

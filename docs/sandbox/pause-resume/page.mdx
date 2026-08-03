@@ -55,6 +55,8 @@ Sandbox0 uses the durable pause flow to replace a failed runtime.
 | `procd` exits unexpectedly, including OOM | Manager starts a non-cancelable recovery pause; ctld checkpoints the terminated containerd snapshot, then manager atomically commits the new rootfs head and paused state before deleting the old pod |
 | Runtime liveness failure is transient | The existing runtime is not replaced |
 | Runtime liveness fails continuously for 90 seconds | Manager starts the same durable pause flow and reconstructs the sandbox with a new `runtime_generation` |
+| Runtime Pod disappears, including while manager is restarting | Manager confirms the absence through the Kubernetes API and reconstructs the same sandbox identity from its last committed rootfs head. A periodic anti-entropy scan covers missed Pod events |
+| Kubernetes API is unavailable | Manager waits and retries; API unavailability is never treated as proof that a runtime is missing |
 | Runtime cannot produce a checkpoint within the bounded attempt | Recovery keeps the last committed rootfs head and replaces the stuck runtime |
 | Explicit delete or `hard_ttl` occurs | Deletion takes precedence over crash recovery |
 

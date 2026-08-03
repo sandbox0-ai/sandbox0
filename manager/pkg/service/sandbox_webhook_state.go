@@ -433,6 +433,29 @@ type HTTPSandboxDeletionWebhookEmitter struct {
 	httpClient *http.Client
 }
 
+type retryableSandboxDeletionWebhookError struct {
+	err error
+}
+
+func (e *retryableSandboxDeletionWebhookError) Error() string {
+	if e == nil || e.err == nil {
+		return "sandbox deletion webhook delivery failed"
+	}
+	return e.err.Error()
+}
+
+func (e *retryableSandboxDeletionWebhookError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func isRetryableSandboxDeletionWebhookError(err error) bool {
+	var retryableErr *retryableSandboxDeletionWebhookError
+	return errors.As(err, &retryableErr)
+}
+
 func NewHTTPSandboxDeletionWebhookEmitter(httpClient *http.Client) *HTTPSandboxDeletionWebhookEmitter {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
@@ -467,6 +490,9 @@ func (e *HTTPSandboxDeletionWebhookEmitter) EmitSandboxDeleted(ctx context.Conte
 		}
 		lastErr = err
 		if !retryable || attempt == deletionWebhookMaxAttempts-1 {
+			if retryable {
+				return &retryableSandboxDeletionWebhookError{err: err}
+			}
 			return err
 		}
 		delay := deletionWebhookRetryInitialDelay << attempt
@@ -490,7 +516,9 @@ func (e *HTTPSandboxDeletionWebhookEmitter) postSandboxDeleted(ctx context.Conte
 	}
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		retryable := ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded)
+		// A client-level timeout is transient as long as the lifecycle
+		// controller context itself is still active.
+		retryable := ctx.Err() == nil
 		return retryable, fmt.Errorf("emit sandbox.deleted webhook: %w", err)
 	}
 	defer resp.Body.Close()

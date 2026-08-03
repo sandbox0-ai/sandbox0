@@ -397,9 +397,11 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 
 	var errs []error
 	if !runtimeOnly && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
-		_ = s.runSandboxDeleteCleanupPhase(ctx, info, scope, "emit_deletion_webhook", func() error {
+		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "emit_deletion_webhook", func() error {
 			return s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info)
-		})
+		}); isRetryableSandboxDeletionWebhookError(err) {
+			errs = append(errs, fmt.Errorf("emit deletion webhook: %w", err))
+		}
 	}
 	if s.networkProvider != nil && info.Namespace != "" {
 		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "remove_network_policy", func() error {

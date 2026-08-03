@@ -592,7 +592,8 @@ func runTemplateLifecycleAssertions(env *framework.ScenarioEnv, session *e2eutil
 
 func assertSandboxWebhookDurabilityLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session) {
 	receiverName := "sandbox0-e2e-webhook"
-	cleanup := setupWebhookReceiver(env, receiverName)
+	const rejectedDeletionAttempts = 3
+	cleanup := setupWebhookReceiver(env, receiverName, rejectedDeletionAttempts)
 	defer cleanup()
 
 	webhookURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:8080/events", receiverName, env.Infra.Namespace)
@@ -638,16 +639,7 @@ func assertSandboxWebhookDurabilityLifecycle(env *framework.ScenarioEnv, session
 		return nil
 	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 
-	Expect(framework.Kubectl(
-		env.TestCtx.Context,
-		env.Config.Kubeconfig,
-		"delete",
-		"pod",
-		claimResp.PodName,
-		"--namespace",
-		sandboxNamespace,
-		"--wait=true",
-	)).To(Succeed())
+	Expect(session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)).To(Succeed())
 	sandboxID = ""
 
 	Eventually(func() error {
@@ -657,9 +649,12 @@ func assertSandboxWebhookDurabilityLifecycle(env *framework.ScenarioEnv, session
 		}
 		return nil
 	}).WithTimeout(90 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+
+	attempts := readWebhookReceiverFile(env, receiverName, "delete-attempts.jsonl")
+	Expect(strings.Count(attempts, `"event_type":"sandbox.deleted"`)).To(BeNumerically(">=", rejectedDeletionAttempts+1))
 }
 
-func setupWebhookReceiver(env *framework.ScenarioEnv, name string) func() {
+func setupWebhookReceiver(env *framework.ScenarioEnv, name string, rejectedDeletionAttempts int) func() {
 	manifest := fmt.Sprintf(`
 apiVersion: v1
 kind: ConfigMap
@@ -668,31 +663,42 @@ metadata:
   namespace: %[2]s
 data:
   server.py: |
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from pathlib import Path
 
     events = Path("/data/events.jsonl")
+    delete_attempts = Path("/data/delete-attempts.jsonl")
     events.parent.mkdir(parents=True, exist_ok=True)
 
     class Handler(BaseHTTPRequestHandler):
+        deleted_requests = 0
+
+        def respond(self, status):
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+            self.close_connection = True
+
         def do_POST(self):
             length = int(self.headers.get("content-length", "0"))
             body = self.rfile.read(length)
-            reject_delete_once = Path("/data/reject-delete-once")
-            if b'"event_type":"sandbox.deleted"' in body and not reject_delete_once.exists():
-                reject_delete_once.touch()
-                self.send_response(503)
-                self.end_headers()
-                return
+            if b'"event_type":"sandbox.deleted"' in body:
+                Handler.deleted_requests += 1
+                with delete_attempts.open("ab") as f:
+                    f.write(body + b"\n")
+                if Handler.deleted_requests <= %[3]d:
+                    self.respond(503)
+                    return
             with events.open("ab") as f:
                 f.write(body + b"\n")
-            self.send_response(204)
-            self.end_headers()
+            self.respond(204)
 
         def log_message(self, fmt, *args):
             return
 
-    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -741,7 +747,7 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
-`, name, env.Infra.Namespace)
+`, name, env.Infra.Namespace, rejectedDeletionAttempts)
 	Expect(framework.ApplyManifestContent(env.TestCtx.Context, env.Config.Kubeconfig, "sandbox0-e2e-webhook-", manifest)).To(Succeed())
 	Expect(framework.WaitForDeployment(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, name, "3m")).To(Succeed())
 	return func() {
@@ -752,6 +758,10 @@ spec:
 }
 
 func readWebhookReceiverEvents(env *framework.ScenarioEnv, name string) string {
+	return readWebhookReceiverFile(env, name, "events.jsonl")
+}
+
+func readWebhookReceiverFile(env *framework.ScenarioEnv, name, filename string) string {
 	podName, err := framework.KubectlGetJSONPath(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
@@ -768,7 +778,7 @@ func readWebhookReceiverEvents(env *framework.ScenarioEnv, name string) string {
 		strings.TrimSpace(podName),
 		"sh",
 		"-c",
-		"cat /data/events.jsonl 2>/dev/null || true",
+		"cat /data/"+filename+" 2>/dev/null || true",
 	)
 	Expect(err).NotTo(HaveOccurred())
 	return output

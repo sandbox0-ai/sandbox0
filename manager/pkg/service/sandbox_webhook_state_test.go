@@ -15,6 +15,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
 
+type webhookRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f webhookRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestManagerStorageVolumeClientDefaultsClusterID(t *testing.T) {
 	var gotClusterID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +145,56 @@ func TestHTTPSandboxDeletionWebhookEmitterDoesNotRetryPermanentFailure(t *testin
 	}
 	if calls != 1 {
 		t.Fatalf("request count = %d, want 1", calls)
+	}
+	if isRetryableSandboxDeletionWebhookError(err) {
+		t.Fatalf("EmitSandboxDeleted() error = %v, want permanent failure", err)
+	}
+}
+
+func TestHTTPSandboxDeletionWebhookEmitterClassifiesExhaustedTransientFailure(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		http.Error(w, "try again", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	emitter := NewHTTPSandboxDeletionWebhookEmitter(server.Client())
+	err := emitter.EmitSandboxDeleted(t.Context(), SandboxLifecycleInfo{
+		SandboxID:  "sandbox-1",
+		TeamID:     "team-1",
+		WebhookURL: server.URL,
+	})
+	if err == nil {
+		t.Fatal("EmitSandboxDeleted() error = nil, want transient failure")
+	}
+	if !isRetryableSandboxDeletionWebhookError(err) {
+		t.Fatalf("EmitSandboxDeleted() error = %v, want retryable failure", err)
+	}
+	if calls != deletionWebhookMaxAttempts {
+		t.Fatalf("request count = %d, want %d", calls, deletionWebhookMaxAttempts)
+	}
+}
+
+func TestHTTPSandboxDeletionWebhookEmitterClassifiesClientTimeoutAsRetryable(t *testing.T) {
+	calls := 0
+	emitter := NewHTTPSandboxDeletionWebhookEmitter(&http.Client{Transport: webhookRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, context.DeadlineExceeded
+	})})
+	err := emitter.EmitSandboxDeleted(t.Context(), SandboxLifecycleInfo{
+		SandboxID:  "sandbox-1",
+		TeamID:     "team-1",
+		WebhookURL: "https://example.test/webhook",
+	})
+	if err == nil {
+		t.Fatal("EmitSandboxDeleted() error = nil, want timeout")
+	}
+	if !isRetryableSandboxDeletionWebhookError(err) {
+		t.Fatalf("EmitSandboxDeleted() error = %v, want retryable failure", err)
+	}
+	if calls != deletionWebhookMaxAttempts {
+		t.Fatalf("request count = %d, want %d", calls, deletionWebhookMaxAttempts)
 	}
 }
 

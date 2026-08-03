@@ -15,6 +15,9 @@ containerdConfigPatches:
     runtime_type = "io.containerd.runc.v2"
     snapshotter = "sandbox0"
 
+  [plugins."io.containerd.cri.v1.images".runtime_platforms.sandbox0-rootfs]
+    snapshotter = "sandbox0"
+
   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs]
     runtime_type = "io.containerd.runsc.v1"
     snapshotter = "sandbox0"
@@ -32,6 +35,9 @@ containerdConfigPatches:
   [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.gvisor-rootfs.options]
     TypeUrl = "io.containerd.runsc.v1.options"
     ConfigPath = "/etc/containerd/runsc-rootfs.toml"
+
+  [plugins."io.containerd.cri.v1.images".runtime_platforms.gvisor-rootfs]
+    snapshotter = "sandbox0"
 networking:
   disableDefaultCNI: true
   podSubnet: 10.244.0.0/16

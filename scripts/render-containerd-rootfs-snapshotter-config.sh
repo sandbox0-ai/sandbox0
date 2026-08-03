@@ -27,6 +27,9 @@ EOF
 [plugins."io.containerd.cri.v1.runtime".containerd.runtimes."${runtime_handler}"]
   runtime_type = "${runtime_type}"
   snapshotter = "sandbox0"
+
+[plugins."io.containerd.cri.v1.images".runtime_platforms."${runtime_handler}"]
+  snapshotter = "sandbox0"
 EOF
     ;;
   *)

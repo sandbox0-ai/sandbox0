@@ -191,7 +191,7 @@ Every idle and active sandbox Pod must use the external `sandbox0` containerd sn
                     handler: sandbox0-rootfs
 ```
 
-`infra-operator` creates that Kubernetes `RuntimeClass` and the node-local snapshotter DaemonSet. It also configures manager to add `io.containerd.cri.runtime-handler: <handler>` to every idle and cold-start sandbox Pod. Containerd uses that Pod sandbox annotation during `PullImage`, so the image is unpacked directly into the same snapshotter later used by `CreateContainer`; this avoids a second base-image unpack and prevents container creation from depending on layer blobs released after a default-snapshotter unpack. Do not override or remove this manager-owned annotation.
+`infra-operator` creates that Kubernetes `RuntimeClass` and the node-local snapshotter DaemonSet. It also configures manager to add `io.containerd.cri.runtime-handler: <handler>` to every idle and cold-start sandbox Pod. Containerd uses that Pod sandbox annotation during `PullImage`, so the image is unpacked directly into the same snapshotter later used by `CreateContainer`; this avoids a second base-image unpack and prevents container creation from depending on layer blobs released after a default-snapshotter unpack. Do not override or remove this manager-owned annotation. Containerd 2.x also requires the same handler in the image service's `runtime_platforms` map; configuring only the runtime service still pulls through the default snapshotter.
 
 `infra-operator` does not edit or restart host containerd. Before rolling out manager, configure every eligible sandbox node so the handler selects `snapshotter = "sandbox0"` and the proxy socket is registered. The self-describing marker does not depend on CRI snapshot-annotation propagation. Containerd 1.x with config version 2 uses:
 
@@ -214,6 +214,9 @@ Containerd 2.x with config version 3 uses:
 
     [plugins."io.containerd.cri.v1.runtime".containerd.runtimes."sandbox0-rootfs"]
       runtime_type = "io.containerd.runc.v2"
+      snapshotter = "sandbox0"
+
+    [plugins."io.containerd.cri.v1.images".runtime_platforms."sandbox0-rootfs"]
       snapshotter = "sandbox0"
 ```
 

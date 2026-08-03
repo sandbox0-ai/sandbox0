@@ -44,6 +44,9 @@ containerdConfigPatches:
   [plugins."io.containerd.cri.v1.runtime".containerd.runtimes.sandbox0-rootfs]
     runtime_type = "io.containerd.runc.v2"
     snapshotter = "sandbox0"
+
+  [plugins."io.containerd.cri.v1.images".runtime_platforms.sandbox0-rootfs]
+    snapshotter = "sandbox0"
 nodes:
 - role: control-plane
   image: kindest/node:v1.35.0

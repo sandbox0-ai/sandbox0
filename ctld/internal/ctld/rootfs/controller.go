@@ -302,6 +302,14 @@ func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareR
 	if err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: fmt.Sprintf("seal rootfs head: %v", err)}, statusForError(err)
 	}
+	// Seal terminally drains the generation before returning. Forget it now so
+	// an aborted prepare or lifecycle retry creates a fresh watcher instead of
+	// reusing a closed session.
+	c.mu.Lock()
+	if tracked, ok := c.sessions[key]; ok && tracked.session == session {
+		delete(c.sessions, key)
+	}
+	c.mu.Unlock()
 	checkpoint := checkpointDescriptor(result)
 	handle := uuid.NewString()
 	if err := c.writePreparedSnapshot(handle, preparedRootFSSnapshot{

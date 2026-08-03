@@ -44,6 +44,10 @@ func TestControllerBindsContinuousSyncAndSealsMetadataHead(t *testing.T) {
 	assert.Equal(t, "head-1", prepared.Checkpoint.Reference.HeadID)
 	assert.NotEmpty(t, prepared.Checkpoint.Objects)
 	assert.Positive(t, prepared.Checkpoint.CreatedObjectCount)
+	controller.mu.Lock()
+	_, sessionStillBound := controller.sessions[rootFSSessionKey(runtime.info)]
+	controller.mu.Unlock()
+	assert.False(t, sessionStillBound, "a sealed generation must not retain a closed watcher session")
 
 	headReader, err := store.Get(prepared.Checkpoint.Reference.Manifest.Key, 0, prepared.Checkpoint.Reference.Manifest.Size)
 	require.NoError(t, err)

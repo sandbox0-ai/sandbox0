@@ -111,6 +111,25 @@ func TestSessionDebouncesGrowingFileBeforeUploadingStableChunks(t *testing.T) {
 	assert.Equal(t, uint64(8<<20), manifest.Size)
 }
 
+func TestSessionSealStopsPostCommitObjectWrites(t *testing.T) {
+	store := &countingObjectStore{Store: objectstore.NewMemoryStore(t.Name())}
+	upper := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upper, "persisted"), []byte("before seal"), 0o644))
+	session := newTestSession(t, store, upper, nil, nil)
+
+	result, err := session.Seal(context.Background(), "terminal-head")
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Objects)
+	putsAtSeal := store.putCount()
+
+	// Container teardown can still touch an upper after manager has obtained the
+	// checkpoint. Those writes belong to no committed generation and must not be
+	// uploaded after Seal returns.
+	require.NoError(t, os.WriteFile(filepath.Join(upper, "post-seal"), []byte("must stay local"), 0o644))
+	time.Sleep(backgroundFlushEvery + 2*pathSyncDebounce)
+	assert.Equal(t, putsAtSeal, store.putCount())
+}
+
 func TestSessionCapturesUnboundPortalAsOpaqueCurrentState(t *testing.T) {
 	store := objectstore.NewMemoryStore(t.Name())
 	firstUpper := t.TempDir()
@@ -253,6 +272,29 @@ type delayedChunkStore struct {
 	active        int
 	maximum       int
 	completedPuts int
+}
+
+type countingObjectStore struct {
+	objectstore.Store
+
+	mu   sync.Mutex
+	puts int
+}
+
+func (s *countingObjectStore) Put(key string, reader io.Reader) error {
+	if err := s.Store.Put(key, reader); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.puts++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *countingObjectStore) putCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.puts
 }
 
 func (s *delayedChunkStore) Put(key string, reader io.Reader) error {

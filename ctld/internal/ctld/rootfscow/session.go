@@ -190,6 +190,8 @@ func NewSession(parentContext context.Context, cfg SessionConfig) (*Session, err
 	return session, nil
 }
 
+// Seal drains the dirty tail, commits one immutable head, and terminally stops
+// the generation before returning its conservative object inventory.
 func (s *Session) Seal(ctx context.Context, headID string) (*SealResult, error) {
 	started := time.Now()
 	headID = strings.TrimSpace(headID)
@@ -227,6 +229,13 @@ func (s *Session) Seal(ctx context.Context, headID string) (*SealResult, error) 
 	reference := rootfshead.HeadReference{Version: rootfshead.Version, HeadID: headID, Manifest: manifest}
 	if err := reference.Validate(); err != nil {
 		return nil, err
+	}
+	// A sealed generation must stop writing before its conservative inventory is
+	// observed. Pod teardown can mutate the containerd upper after the head is
+	// committed; leaving the watcher alive would upload objects after they can no
+	// longer be attached to a layer, making them invisible to manager GC.
+	if err := s.Close(); err != nil {
+		return nil, fmt.Errorf("close sealed rootfs generation: %w", err)
 	}
 	bytes, count := s.writer.CreatedMetrics()
 	return &SealResult{

@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
@@ -396,6 +397,9 @@ type rootFSSourceCheckpoint struct {
 	rootFSState   *SandboxRootFSState
 	procdAddress  string
 	internalToken string
+	pod           *corev1.Pod
+	sandboxID     string
+	teamID        string
 }
 
 func (c *rootFSSourceCheckpoint) close(s *SandboxService, committed bool) {
@@ -407,6 +411,24 @@ func (c *rootFSSourceCheckpoint) close(s *SandboxService, committed bool) {
 		s.deleteUncommittedRootFSObject(c.rootFSState, reason)
 		if c.txn != nil {
 			_ = s.abortLifecycleTxn(context.Background(), c.txn.SandboxID, c.txn.ID, reason)
+		}
+	}
+	// Seal terminally closes the old watcher generation. Roll continuous sync
+	// forward to the committed head (or back to the previous head on abort)
+	// while the runtime barrier still prevents user mutations.
+	if c.pod != nil {
+		rebindCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		err := s.bindSandboxRootFSSync(rebindCtx, c.pod, &ClaimRequest{
+			SandboxID: c.sandboxID,
+			TeamID:    c.teamID,
+		})
+		cancel()
+		if err != nil && s.logger != nil {
+			s.logger.Warn("Failed to roll rootfs sync after checkpoint",
+				zap.String("sandboxID", c.sandboxID),
+				zap.Bool("committed", committed),
+				zap.Error(err),
+			)
 		}
 	}
 	s.releasePauseRuntimeBarrier(context.Background(), c.procdAddress, c.internalToken)
@@ -539,6 +561,9 @@ func (s *SandboxService) prepareRunningRootFSSourceCheckpoint(ctx context.Contex
 		txn:           txn,
 		procdAddress:  procdAddress,
 		internalToken: internalToken,
+		pod:           pod.DeepCopy(),
+		sandboxID:     source.ID,
+		teamID:        source.TeamID,
 	}
 	if err := s.markLifecycleTxnPhase(ctx, source.ID, txn.ID, SandboxLifecyclePhasePublishing); err != nil {
 		return checkpoint, err

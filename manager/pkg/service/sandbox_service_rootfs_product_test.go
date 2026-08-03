@@ -230,6 +230,9 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 	assert.NotEqual(t, "layer-v1", sourceState.LayerID)
 	assert.Equal(t, int64(3), sourceState.RuntimeGeneration)
 	assert.Equal(t, recorder.Checkpoint.Reference.Manifest.Digest, sourceState.HeadObjectDigest)
+	assert.Equal(t, "sandbox-1", recorder.Bind.SandboxID)
+	require.NotNil(t, recorder.Bind.Parent)
+	assert.Equal(t, sourceState.LayerID, recorder.Bind.Parent.HeadID)
 	storedSnapshot := store.rootFSSnapshots[snapshot.ID]
 	require.NotNil(t, storedSnapshot)
 	assert.Equal(t, sourceState.LayerID, storedSnapshot.HeadLayerID)
@@ -296,6 +299,9 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 	assert.NotEqual(t, "layer-v1", sourceState.LayerID)
 	assert.Equal(t, int64(3), sourceState.RuntimeGeneration)
 	assert.Equal(t, recorder.Checkpoint.Reference.Manifest.Digest, sourceState.HeadObjectDigest)
+	assert.Equal(t, "sandbox-1", recorder.Bind.SandboxID)
+	require.NotNil(t, recorder.Bind.Parent)
+	assert.Equal(t, sourceState.LayerID, recorder.Bind.Parent.HeadID)
 	forkState := store.rootFSStates[forkResp.Sandbox.ID]
 	require.NotNil(t, forkState)
 	assert.Equal(t, sourceState.LayerID, forkState.LayerID)
@@ -716,6 +722,7 @@ func rootFSProductTestService(store *memorySandboxStore) *SandboxService {
 type rootFSProductCheckpointRecorder struct {
 	Prepare    ctldapi.PrepareRootFSSnapshotRequest
 	Publish    ctldapi.PublishRootFSSnapshotRequest
+	Bind       ctldapi.BindRootFSSyncRequest
 	Checkpoint ctldapi.RootFSCheckpointDescriptor
 }
 
@@ -748,6 +755,9 @@ func newRootFSProductCheckpointServer(t *testing.T) (*httptest.Server, *rootFSPr
 				Info:       info,
 				Checkpoint: recorder.Checkpoint,
 			}))
+		case "/api/v1/rootfs/sync/bind":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&recorder.Bind))
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{Bound: true}))
 		default:
 			t.Fatalf("unexpected ctld path %s", r.URL.Path)
 		}

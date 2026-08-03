@@ -663,7 +663,7 @@ metadata:
   namespace: %[2]s
 data:
   server.py: |
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from pathlib import Path
 
     events = Path("/data/events.jsonl")
@@ -673,6 +673,14 @@ data:
     class Handler(BaseHTTPRequestHandler):
         deleted_requests = 0
 
+        def respond(self, status):
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+            self.close_connection = True
+
         def do_POST(self):
             length = int(self.headers.get("content-length", "0"))
             body = self.rfile.read(length)
@@ -681,18 +689,16 @@ data:
                 with delete_attempts.open("ab") as f:
                     f.write(body + b"\n")
                 if Handler.deleted_requests <= %[3]d:
-                    self.send_response(503)
-                    self.end_headers()
+                    self.respond(503)
                     return
             with events.open("ab") as f:
                 f.write(body + b"\n")
-            self.send_response(204)
-            self.end_headers()
+            self.respond(204)
 
         def log_message(self, fmt, *args):
             return
 
-    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 ---
 apiVersion: apps/v1
 kind: Deployment

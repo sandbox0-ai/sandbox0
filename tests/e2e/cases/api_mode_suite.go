@@ -551,12 +551,16 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 	})
 }
 
-func runTemplateLifecycleAssertions(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
-	templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
+func getDefaultTemplate(env *framework.ScenarioEnv, session *e2eutils.Session) apispec.Template {
+	GinkgoHelper()
+	template, err := session.GetTemplate(env.TestCtx.Context, GinkgoT(), "default")
 	Expect(err).NotTo(HaveOccurred())
-	Expect(templates).NotTo(BeEmpty())
+	Expect(template).NotTo(BeNil())
+	return *template
+}
 
-	base := templates[0]
+func runTemplateLifecycleAssertions(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
+	base := getDefaultTemplate(env, session)
 	name := fmt.Sprintf("%s-%d", templateNamePrefix, time.Now().UnixNano())
 	newTemplate := e2eutils.CloneTemplateForCreate(base, name)
 
@@ -771,12 +775,7 @@ func readWebhookReceiverEvents(env *framework.ScenarioEnv, name string) string {
 }
 
 func assertTemplateStatusCountersEventually(env *framework.ScenarioEnv, session *e2eutils.Session) {
-	templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
-	Expect(err).NotTo(HaveOccurred())
-	Expect(templates).NotTo(BeEmpty())
-
-	templateID := templates[0].TemplateId
-	Expect(templateID).NotTo(BeEmpty())
+	templateID := getDefaultTemplate(env, session).TemplateId
 
 	Eventually(func() error {
 		tpl, getErr := session.GetTemplate(env.TestCtx.Context, GinkgoT(), templateID)
@@ -803,12 +802,8 @@ func assertTemplateStatusCountersEventually(env *framework.ScenarioEnv, session 
 }
 
 func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
-	templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
-	Expect(err).NotTo(HaveOccurred())
-	Expect(templates).NotTo(BeEmpty())
-
 	name := fmt.Sprintf("%s-ready-gate-%d", templateNamePrefix, time.Now().UnixNano())
-	templateReq := e2eutils.CloneTemplateForCreate(templates[0], name)
+	templateReq := e2eutils.CloneTemplateForCreate(getDefaultTemplate(env, session), name)
 	Expect(templateReq.Spec.Pool).NotTo(BeNil())
 	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
 	templateReq.Spec.MainContainer.Resources = apispec.ResourceQuota{
@@ -880,12 +875,8 @@ func assertTemplatePoolReadinessGate(env *framework.ScenarioEnv, session *e2euti
 }
 
 func assertTemplateRolloutClaimFallsBackToColdStart(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
-	templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
-	Expect(err).NotTo(HaveOccurred())
-	Expect(templates).NotTo(BeEmpty())
-
 	name := fmt.Sprintf("%s-rc-%d", templateNamePrefix, time.Now().UnixNano()%1_000_000_000)
-	templateReq := e2eutils.CloneTemplateForCreate(templates[0], name)
+	templateReq := e2eutils.CloneTemplateForCreate(getDefaultTemplate(env, session), name)
 	Expect(templateReq.Spec.Pool).NotTo(BeNil())
 	Expect(templateReq.Spec.MainContainer).NotTo(BeNil())
 	templateReq.Spec.MainContainer.Resources = apispec.ResourceQuota{
@@ -1033,12 +1024,8 @@ func podHasCondition(pod e2ePod, conditionType, status string) bool {
 }
 
 func assertTemplateNamespaceIngressBaselineLifecycle(env *framework.ScenarioEnv, session *e2eutils.Session, templateNamePrefix string) {
-	templates, err := session.ListTemplates(env.TestCtx.Context, GinkgoT())
-	Expect(err).NotTo(HaveOccurred())
-	Expect(templates).NotTo(BeEmpty())
-
 	name := fmt.Sprintf("%s-baseline-%d", templateNamePrefix, time.Now().UnixNano())
-	templateReq := e2eutils.CloneTemplateForCreate(templates[0], name)
+	templateReq := e2eutils.CloneTemplateForCreate(getDefaultTemplate(env, session), name)
 
 	created, err := session.CreateTemplate(env.TestCtx.Context, GinkgoT(), templateReq)
 	Expect(err).NotTo(HaveOccurred())

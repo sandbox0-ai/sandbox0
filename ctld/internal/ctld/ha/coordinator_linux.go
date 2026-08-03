@@ -44,6 +44,27 @@ type State struct {
 	Standbys     int
 }
 
+// RoleTransition identifies one observed HA role change.
+type RoleTransition struct {
+	From Role
+	To   Role
+}
+
+// LockIdentity identifies the shared filesystem object used for primary fencing.
+type LockIdentity struct {
+	Device uint64
+	Inode  uint64
+	Known  bool
+}
+
+// MetricsSnapshot is a consistent view of the node-local HA election state.
+type MetricsSnapshot struct {
+	State        State
+	StateSince   time.Time
+	Transitions  map[RoleTransition]uint64
+	LockIdentity LockIdentity
+}
+
 type Config struct {
 	RootDir string
 	Slot    string
@@ -55,8 +76,11 @@ type Coordinator struct {
 	slot    string
 	logger  *zap.Logger
 
-	mu    sync.RWMutex
-	state State
+	mu           sync.RWMutex
+	state        State
+	stateSince   time.Time
+	transitions  map[RoleTransition]uint64
+	lockIdentity LockIdentity
 }
 
 type RecoveredPortal struct {
@@ -92,10 +116,12 @@ func NewCoordinator(cfg Config) (*Coordinator, error) {
 		logger = zap.NewNop()
 	}
 	coordinator := &Coordinator{
-		rootDir: rootDir,
-		slot:    slot,
-		logger:  logger,
-		state:   State{Role: RoleStarting},
+		rootDir:     rootDir,
+		slot:        slot,
+		logger:      logger,
+		state:       State{Role: RoleStarting},
+		stateSince:  time.Now(),
+		transitions: make(map[RoleTransition]uint64),
 	}
 	return coordinator, nil
 }
@@ -114,8 +140,49 @@ func (c *Coordinator) setState(update func(*State)) {
 		return
 	}
 	c.mu.Lock()
+	previousRole := c.state.Role
 	update(&c.state)
+	if c.state.Role != previousRole {
+		if c.transitions == nil {
+			c.transitions = make(map[RoleTransition]uint64)
+		}
+		c.transitions[RoleTransition{From: previousRole, To: c.state.Role}]++
+		c.stateSince = time.Now()
+	}
 	c.mu.Unlock()
+}
+
+// MetricsSnapshot returns HA state and transition counters from one lock hold.
+func (c *Coordinator) MetricsSnapshot() MetricsSnapshot {
+	if c == nil {
+		return MetricsSnapshot{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	transitions := make(map[RoleTransition]uint64, len(c.transitions))
+	for transition, count := range c.transitions {
+		transitions[transition] = count
+	}
+	return MetricsSnapshot{
+		State:        c.state,
+		StateSince:   c.stateSince,
+		Transitions:  transitions,
+		LockIdentity: c.lockIdentity,
+	}
+}
+
+func (c *Coordinator) recordLockIdentity(file *os.File) error {
+	if c == nil || file == nil {
+		return fmt.Errorf("ctld HA lock file is required")
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return fmt.Errorf("stat ctld primary lock: %w", err)
+	}
+	c.mu.Lock()
+	c.lockIdentity = LockIdentity{Device: uint64(stat.Dev), Inode: stat.Ino, Known: true}
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *Coordinator) WaitForPrimary(ctx context.Context) (*PrimaryLease, error) {
@@ -126,6 +193,10 @@ func (c *Coordinator) WaitForPrimary(ctx context.Context) (*PrimaryLease, error)
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open ctld primary lock: %w", err)
+	}
+	if err := c.recordLockIdentity(lockFile); err != nil {
+		_ = lockFile.Close()
+		return nil, err
 	}
 	var standby *standbyState
 	for {

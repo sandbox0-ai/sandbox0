@@ -2,6 +2,7 @@ package ctld
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -83,11 +84,8 @@ func TestReconcileConfiguresNetworkRuntimeInBothHASlots(t *testing.T) {
 			t.Fatalf("%s embedded memory request = %s, want 384Mi", ds.Name, got.String())
 		}
 	}
-	for _, ds := range []*appsv1.DaemonSet{primary, standby} {
-		if len(ds.Spec.Template.Spec.Containers[0].Ports) != 0 {
-			t.Fatalf("%s reserves host-network runtime ports: %#v", ds.Name, ds.Spec.Template.Spec.Containers[0].Ports)
-		}
-	}
+	assertHAMetricsEndpoint(t, primary.Spec.Template.Spec.Containers[0], dataplane.CtldHASlotA, ctldHAMetricsPortA)
+	assertHAMetricsEndpoint(t, standby.Spec.Template.Spec.Containers[0], dataplane.CtldHASlotB, ctldHAMetricsPortB)
 	metricsService := &corev1.Service{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: infra.Name + networkMetricsServiceSuffix, Namespace: infra.Namespace}, metricsService); err != nil {
 		t.Fatalf("get ctld network metrics service: %v", err)
@@ -478,11 +476,8 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	if ds.Spec.Template.Labels[dataplane.CtldHASlotLabel] != dataplane.CtldHASlotA || standby.Spec.Template.Labels[dataplane.CtldHASlotLabel] != dataplane.CtldHASlotB {
 		t.Fatalf("unexpected ctld HA slot labels: slot A=%q slot B=%q", ds.Spec.Template.Labels[dataplane.CtldHASlotLabel], standby.Spec.Template.Labels[dataplane.CtldHASlotLabel])
 	}
-	for _, workload := range []*appsv1.DaemonSet{ds, standby} {
-		if !infrav1alpha1.IsNetworkEnabled(infra) && len(workload.Spec.Template.Spec.Containers[0].Ports) != 0 {
-			t.Fatalf("ctld hostNetwork pod %s reserves node ports: %#v", workload.Name, workload.Spec.Template.Spec.Containers[0].Ports)
-		}
-	}
+	assertHAMetricsEndpoint(t, ds.Spec.Template.Spec.Containers[0], dataplane.CtldHASlotA, ctldHAMetricsPortA)
+	assertHAMetricsEndpoint(t, standby.Spec.Template.Spec.Containers[0], dataplane.CtldHASlotB, ctldHAMetricsPortB)
 	assertCtldRollingUpdate(t, ds, 1, 0)
 	assertCtldRollingUpdate(t, standby, 1, 0)
 	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 7 {
@@ -801,6 +796,18 @@ func assertContainsArg(t *testing.T, args []string, want string) {
 		}
 	}
 	t.Fatalf("expected args to contain %q, got %#v", want, args)
+}
+
+func assertHAMetricsEndpoint(t *testing.T, container corev1.Container, slot string, port int32) {
+	t.Helper()
+	assertContainsArg(t, container.Args, "-ha-metrics-addr=:"+fmt.Sprint(port))
+	if len(container.Ports) != 1 {
+		t.Fatalf("ctld slot %s ports = %#v, want one HA metrics port", slot, container.Ports)
+	}
+	got := container.Ports[0]
+	if got.Name != "ha-metrics" || got.ContainerPort != port || got.Protocol != corev1.ProtocolTCP || got.HostPort != 0 {
+		t.Fatalf("ctld slot %s HA metrics port = %#v, want named container port %d without hostPort", slot, got, port)
+	}
 }
 
 func assertNotContainsArgPrefix(t *testing.T, args []string, prefix string) {

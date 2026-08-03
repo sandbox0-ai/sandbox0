@@ -89,6 +89,10 @@
           ]
         },
         {
+          "slug": "previews",
+          "title": "Private Previews"
+        },
+        {
           "slug": "docker-in-sandbox",
           "title": "Docker in Sandbox"
         },

@@ -38,6 +38,24 @@ func (s *Server) handlePublicExposureNoRoute(c *gin.Context) {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")
 		return
 	}
+	if c.Request.URL.Path == previewBootstrapPath {
+		if s.previewGrants == nil {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "preview authorization store is unavailable")
+			return
+		}
+		s.handlePreviewBootstrap(c, sandboxID, port)
+		return
+	}
+	if s.previewGrants != nil {
+		if grant, ok := s.previewGrantForRequest(c, sandboxID, port); ok {
+			sandbox, previewErr := s.getSandboxForPreview(c, sandboxID)
+			if previewErr != nil {
+				return
+			}
+			s.proxySandboxPreview(c, sandbox, grant)
+			return
+		}
+	}
 
 	sandbox, err := s.getSandboxForPublicExposure(c, sandboxID)
 	if err != nil {

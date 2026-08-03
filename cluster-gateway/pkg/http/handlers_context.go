@@ -207,6 +207,11 @@ func (s *Server) proxyToSandboxProcdPath(c *gin.Context, sandboxID, path string)
 
 // getProcdURL resolves the procd URL for a sandbox
 func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error) {
+	_, addr, err := s.getSandboxAndProcdURL(c, sandboxID)
+	return addr, err
+}
+
+func (s *Server) getSandboxAndProcdURL(c *gin.Context, sandboxID string) (*mgr.Sandbox, *url.URL, error) {
 	authCtx := middleware.GetAuthContext(c)
 
 	sandbox, err := s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID)
@@ -220,21 +225,21 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 		} else {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager service unavailable")
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	if sandbox.TeamID != authCtx.TeamID {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
-		return nil, errors.New("sandbox belongs to a different team")
+		return nil, nil, errors.New("sandbox belongs to a different team")
 	}
 	needsRuntimeRefetch := sandboxRuntimeMissing(sandbox)
 	if sandboxNeedsRuntime(sandbox) && !sandbox.AutoResume {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is not running and auto_resume is disabled")
-		return nil, errors.New("sandbox auto_resume is disabled")
+		return nil, nil, errors.New("sandbox auto_resume is disabled")
 	}
 	if sandboxNeedsRuntime(sandbox) {
 		if !s.enforceRuntimeStartAdmission(c, authCtx.TeamID) {
-			return nil, errors.New("sandbox resume is restricted by admission policy")
+			return nil, nil, errors.New("sandbox resume is restricted by admission policy")
 		}
 		if err := s.managerClient.ResumeSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID); err != nil {
 			s.logger.Warn("Resume sandbox failed",
@@ -246,17 +251,17 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 			} else {
 				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		if needsRuntimeRefetch {
 			sandbox, err = s.managerClient.GetSandbox(c.Request.Context(), sandboxID, authCtx.UserID, authCtx.TeamID)
 			if err != nil {
 				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
-				return nil, err
+				return nil, nil, err
 			}
 			if sandboxNeedsRuntime(sandbox) {
 				spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox is waking up")
-				return nil, errors.New("sandbox runtime is still unavailable after resume")
+				return nil, nil, errors.New("sandbox runtime is still unavailable after resume")
 			}
 		}
 	}
@@ -269,9 +274,9 @@ func (s *Server) getProcdURL(c *gin.Context, sandboxID string) (*url.URL, error)
 			zap.Error(err),
 		)
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "invalid procd address")
-		return nil, err
+		return nil, nil, err
 	}
-	return addr, nil
+	return sandbox, addr, nil
 }
 
 func sandboxNeedsRuntime(sandbox *mgr.Sandbox) bool {

@@ -337,6 +337,18 @@ const (
 	SandboxObservabilityWatchLineTypeWatermark SandboxObservabilityWatchLineType = "watermark"
 )
 
+// Defines values for SandboxPreviewCreateRequestProtocol.
+const (
+	SandboxPreviewCreateRequestProtocolHttp  SandboxPreviewCreateRequestProtocol = "http"
+	SandboxPreviewCreateRequestProtocolHttps SandboxPreviewCreateRequestProtocol = "https"
+)
+
+// Defines values for SandboxPreviewGrantProtocol.
+const (
+	SandboxPreviewGrantProtocolHttp  SandboxPreviewGrantProtocol = "http"
+	SandboxPreviewGrantProtocolHttps SandboxPreviewGrantProtocol = "https"
+)
+
 // Defines values for SandboxRuntimeMetricFreshnessStatus.
 const (
 	Fresh   SandboxRuntimeMetricFreshnessStatus = "fresh"
@@ -632,6 +644,11 @@ const (
 	SuccessSandboxObservabilityLogsResponseSuccessTrue SuccessSandboxObservabilityLogsResponseSuccess = true
 )
 
+// Defines values for SuccessSandboxPreviewResponseSuccess.
+const (
+	SuccessSandboxPreviewResponseSuccessTrue SuccessSandboxPreviewResponseSuccess = true
+)
+
 // Defines values for SuccessSandboxResponseSuccess.
 const (
 	SuccessSandboxResponseSuccessTrue SuccessSandboxResponseSuccess = true
@@ -744,7 +761,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	True SuccessWrittenResponseSuccess = true
+	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TeamQuotaKind.
@@ -2423,6 +2440,46 @@ type SandboxObservabilityWatchLine_Data struct {
 // SandboxObservabilityWatchLineType defines model for SandboxObservabilityWatchLine.Type.
 type SandboxObservabilityWatchLineType string
 
+// SandboxPreviewCreateRequest defines model for SandboxPreviewCreateRequest.
+type SandboxPreviewCreateRequest struct {
+	// Path Same-origin absolute path, including an optional query or fragment, opened after browser bootstrap.
+	Path *string `json:"path,omitempty"`
+
+	// Port Loopback TCP port inside the sandbox runtime.
+	Port int32 `json:"port"`
+
+	// Protocol Protocol spoken by the loopback server. HTTPS permits a self-signed loopback certificate.
+	Protocol   *SandboxPreviewCreateRequestProtocol `json:"protocol,omitempty"`
+	TtlSeconds *int32                               `json:"ttl_seconds,omitempty"`
+}
+
+// SandboxPreviewCreateRequestProtocol Protocol spoken by the loopback server. HTTPS permits a self-signed loopback certificate.
+type SandboxPreviewCreateRequestProtocol string
+
+// SandboxPreviewGrant defines model for SandboxPreviewGrant.
+type SandboxPreviewGrant struct {
+	ExpiresAt         time.Time                   `json:"expires_at"`
+	Id                string                      `json:"id"`
+	Port              int32                       `json:"port"`
+	Protocol          SandboxPreviewGrantProtocol `json:"protocol"`
+	RuntimeGeneration int64                       `json:"runtime_generation"`
+	SandboxId         string                      `json:"sandbox_id"`
+
+	// TargetUrl Clean preview origin and path without credentials.
+	TargetUrl string `json:"target_url"`
+
+	// Url One-time browser bootstrap URL for a newly created grant; a clean target URL for a renewal response. The resulting browser cookie is session-scoped while this server-side grant remains authoritative for expiration.
+	Url string `json:"url"`
+}
+
+// SandboxPreviewGrantProtocol defines model for SandboxPreviewGrant.Protocol.
+type SandboxPreviewGrantProtocol string
+
+// SandboxPreviewRenewRequest defines model for SandboxPreviewRenewRequest.
+type SandboxPreviewRenewRequest struct {
+	TtlSeconds *int32 `json:"ttl_seconds,omitempty"`
+}
+
 // SandboxRefreshRequest defines model for SandboxRefreshRequest.
 type SandboxRefreshRequest struct {
 	// Duration Duration to extend TTL in seconds (optional, defaults to original TTL)
@@ -3210,6 +3267,15 @@ type SuccessSandboxObservabilityLogsResponse struct {
 // SuccessSandboxObservabilityLogsResponseSuccess defines model for SuccessSandboxObservabilityLogsResponse.Success.
 type SuccessSandboxObservabilityLogsResponseSuccess bool
 
+// SuccessSandboxPreviewResponse defines model for SuccessSandboxPreviewResponse.
+type SuccessSandboxPreviewResponse struct {
+	Data    *SandboxPreviewGrant                 `json:"data,omitempty"`
+	Success SuccessSandboxPreviewResponseSuccess `json:"success"`
+}
+
+// SuccessSandboxPreviewResponseSuccess defines model for SuccessSandboxPreviewResponse.Success.
+type SuccessSandboxPreviewResponseSuccess bool
+
 // SuccessSandboxResponse defines model for SuccessSandboxResponse.
 type SuccessSandboxResponse struct {
 	Data    *Sandbox                      `json:"data,omitempty"`
@@ -3762,6 +3828,9 @@ type IdentityID = string
 // OIDCProvider defines model for OIDCProvider.
 type OIDCProvider = string
 
+// PreviewID defines model for PreviewID.
+type PreviewID = string
+
 // QueryMkdir defines model for QueryMkdir.
 type QueryMkdir = bool
 
@@ -4052,6 +4121,12 @@ type PostApiV1SandboxesIdForkJSONRequestBody = ForkSandboxRequest
 
 // PutApiV1SandboxesIdNetworkJSONRequestBody defines body for PutApiV1SandboxesIdNetwork for application/json ContentType.
 type PutApiV1SandboxesIdNetworkJSONRequestBody = SandboxNetworkPolicy
+
+// PostApiV1SandboxesIdPreviewsJSONRequestBody defines body for PostApiV1SandboxesIdPreviews for application/json ContentType.
+type PostApiV1SandboxesIdPreviewsJSONRequestBody = SandboxPreviewCreateRequest
+
+// PutApiV1SandboxesIdPreviewsPreviewIdJSONRequestBody defines body for PutApiV1SandboxesIdPreviewsPreviewId for application/json ContentType.
+type PutApiV1SandboxesIdPreviewsPreviewIdJSONRequestBody = SandboxPreviewRenewRequest
 
 // PostApiV1SandboxesIdRefreshJSONRequestBody defines body for PostApiV1SandboxesIdRefresh for application/json ContentType.
 type PostApiV1SandboxesIdRefreshJSONRequestBody = SandboxRefreshRequest

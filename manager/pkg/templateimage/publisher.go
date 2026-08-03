@@ -261,6 +261,24 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 	}, nil
 }
 
+func pushBaseLayers(ctx context.Context, pusher remotes.Pusher, base *resolvedBase, pushRegistry string) error {
+	targetHost := registryHostname(pushRegistry)
+	for _, layer := range base.manifest.Layers {
+		pushDesc := layer
+		if sameRegistryHost(base.host, pushRegistry) {
+			pushDesc.Annotations = cloneStringMap(layer.Annotations)
+			if pushDesc.Annotations == nil {
+				pushDesc.Annotations = make(map[string]string)
+			}
+			pushDesc.Annotations[distributionSourceLabel+"."+targetHost] = base.repository
+		}
+		if err := pushBlob(ctx, pusher, pushDesc, remoteBlobOpener(ctx, base.fetcher, layer)); err != nil {
+			return fmt.Errorf("push base layer %s: %w", layer.Digest, err)
+		}
+	}
+	return nil
+}
+
 func publicationEndpoints(
 	credential *managerregistry.Credential,
 	internalRegistry string,

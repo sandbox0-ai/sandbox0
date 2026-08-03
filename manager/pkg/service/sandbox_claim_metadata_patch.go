@@ -225,13 +225,25 @@ func appendRootFSHeadImagePatch(operations []claimPatchOperation, originalPod, c
 	}
 	originalImage := originalPod.Spec.Containers[originalIndex].Image
 	desiredImage := claimedPod.Spec.Containers[desiredIndex].Image
-	if originalImage == desiredImage {
+	if originalImage != desiredImage {
+		imagePath := "/spec/containers/" + strconv.Itoa(originalIndex) + "/image"
+		operations = append(operations,
+			claimPatchOperation{Operation: "test", Path: imagePath, Value: originalImage},
+			claimPatchOperation{Operation: "replace", Path: imagePath, Value: desiredImage},
+		)
+	}
+	originalPullPolicy := originalPod.Spec.Containers[originalIndex].ImagePullPolicy
+	desiredPullPolicy := claimedPod.Spec.Containers[desiredIndex].ImagePullPolicy
+	if originalPullPolicy == desiredPullPolicy {
 		return operations, nil
 	}
-	imagePath := "/spec/containers/" + strconv.Itoa(originalIndex) + "/image"
+	pullPolicyPath := "/spec/containers/" + strconv.Itoa(originalIndex) + "/imagePullPolicy"
+	if originalPullPolicy == "" {
+		return append(operations, claimPatchOperation{Operation: "add", Path: pullPolicyPath, Value: desiredPullPolicy}), nil
+	}
 	operations = append(operations,
-		claimPatchOperation{Operation: "test", Path: imagePath, Value: originalImage},
-		claimPatchOperation{Operation: "replace", Path: imagePath, Value: desiredImage},
+		claimPatchOperation{Operation: "test", Path: pullPolicyPath, Value: originalPullPolicy},
+		claimPatchOperation{Operation: "replace", Path: pullPolicyPath, Value: desiredPullPolicy},
 	)
 	return operations, nil
 }

@@ -58,43 +58,6 @@ type Result struct {
 	Platform       ocispec.Platform
 }
 
-// HeadRequest identifies one metadata-only OCI image that seals a persistent
-// rootfs chain. Unlike BuildRequest, the rootfs diff payload is not copied to
-// the registry.
-type HeadRequest struct {
-	TeamID          string
-	SandboxID       string
-	BaseImageRef    string
-	BaseImageDigest string
-	Platform        ocispec.Platform
-	Reference       rootfshead.HeadReference
-	CreatedAt       time.Time
-}
-
-func (r HeadRequest) validate() error {
-	switch {
-	case strings.TrimSpace(r.TeamID) == "":
-		return fmt.Errorf("team_id is required")
-	case strings.TrimSpace(r.SandboxID) == "":
-		return fmt.Errorf("sandbox_id is required")
-	case strings.TrimSpace(r.BaseImageRef) == "":
-		return fmt.Errorf("base image reference is required")
-	case strings.TrimSpace(r.BaseImageDigest) == "":
-		return fmt.Errorf("base image digest is required")
-	case strings.TrimSpace(r.Platform.OS) == "":
-		return fmt.Errorf("source platform os is required")
-	case strings.TrimSpace(r.Platform.Architecture) == "":
-		return fmt.Errorf("source platform architecture is required")
-	}
-	if _, err := digest.Parse(strings.TrimSpace(r.BaseImageDigest)); err != nil {
-		return fmt.Errorf("parse base image digest: %w", err)
-	}
-	if err := r.Reference.Validate(); err != nil {
-		return err
-	}
-	return nil
-}
-
 func (r BuildRequest) validate(allowLegacyDiffID bool) error {
 	switch {
 	case strings.TrimSpace(r.BuildID) == "":

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,8 +15,8 @@ import (
 	"time"
 
 	godigest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
@@ -59,6 +60,9 @@ func TestPauseSandboxRuntimePublishesMetadataHeadBeforeDeletingPod(t *testing.T)
 			var headPayload []byte
 			checkpoint, headPayload = rootFSTestCheckpoint(t, req.HeadID)
 			require.NoError(t, headStore.Put(checkpoint.Reference.Manifest.Key, bytes.NewReader(headPayload)))
+			_, _, marker, markerPayload, envelopeObject, envelopePayload := rootFSTestHeadImage(t, checkpoint.Reference)
+			require.NoError(t, headStore.Put(marker.Key, bytes.NewReader(markerPayload)))
+			require.NoError(t, headStore.Put(envelopeObject.Key, bytes.NewReader(envelopePayload)))
 			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
 				Handle: "handle-1",
 				Info: ctldapi.RootFSInfo{
@@ -102,11 +106,9 @@ func TestPauseSandboxRuntimePublishesMetadataHeadBeforeDeletingPod(t *testing.T)
 	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-state-vol-1"
 	pod.Status.HostIP = ctldURL.Hostname()
 	k8sClient := fake.NewSimpleClientset(pod)
-	publisher := &recordingRootFSHeadPublisher{}
 	deleteCalled := false
 	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
 		require.True(t, checkpointPublished, "pod delete must happen after checkpoint publication")
-		require.Len(t, publisher.requests, 1, "pod delete must happen after metadata head publication")
 		deleteCalled = true
 		return true, nil, nil
 	})
@@ -120,16 +122,14 @@ func TestPauseSandboxRuntimePublishesMetadataHeadBeforeDeletingPod(t *testing.T)
 	}}
 	enqueuer := &recordingPauseEnqueuer{}
 	svc := &SandboxService{
-		k8sClient:           k8sClient,
-		podLister:           newTestPodLister(t, pod),
-		sandboxStore:        store,
-		ctldClient:          NewCtldClient(CtldClientConfig{Timeout: time.Second}),
-		config:              SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
-		pauseEnqueuer:       enqueuer,
-		rootFSHeadPublisher: publisher,
-		rootFSHeadStore:     headStore,
+		k8sClient:     k8sClient,
+		podLister:     newTestPodLister(t, pod),
+		sandboxStore:  store,
+		ctldClient:    NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		config:        SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:         systemTime{},
+		logger:        zap.NewNop(),
+		pauseEnqueuer: enqueuer,
 	}
 	defer attachRootFSTestProcd(t, pod, svc, nil)()
 
@@ -147,8 +147,8 @@ func TestPauseSandboxRuntimePublishesMetadataHeadBeforeDeletingPod(t *testing.T)
 	assert.Equal(t, checkpoint.Reference.Manifest.Digest, state.HeadObjectDigest)
 	assert.NotEmpty(t, state.HeadObjectKey)
 	assert.Equal(t, rootfshead.HeadMediaType, state.HeadObjectMediaType)
-	assert.Equal(t, "registry.example/rootfs-heads@"+rootFSTestManifestDigest, state.HeadImageRef)
-	assert.Equal(t, rootFSTestManifestDigest, state.HeadImageDigest)
+	assert.Equal(t, checkpoint.Image.Name, state.HeadImageRef)
+	assert.Equal(t, checkpoint.Image.ManifestDigest, state.HeadImageDigest)
 	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
 
 	reader, err := headStore.Get(state.HeadObjectKey, 0, -1)
@@ -158,16 +158,24 @@ func TestPauseSandboxRuntimePublishesMetadataHeadBeforeDeletingPod(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, state.LayerID, head.HeadID)
 	assert.Equal(t, rootFSTestBaseSnapshot, head.BaseSnapshotKey)
-	require.Len(t, publisher.requests, 1)
-	assert.Equal(t, state.LayerID, publisher.requests[0].Reference.HeadID)
-	markerObject, _, err := rootfshead.MarkerObject(publisher.requests[0].Reference)
+	markerObject, _, err := rootfshead.MarkerObject(checkpoint.Reference)
 	require.NoError(t, err)
 	markerReader, err := headStore.Get(markerObject.Key, 0, -1)
 	require.NoError(t, err)
 	defer markerReader.Close()
 	markerReference, err := rootfshead.DecodeMarker(markerReader)
 	require.NoError(t, err)
-	assert.Equal(t, publisher.requests[0].Reference, markerReference)
+	assert.Equal(t, checkpoint.Reference, markerReference)
+	envelopeObject, err := rootfshead.ImageEnvelopeObjectKey(checkpoint.Image.ManifestDigest)
+	require.NoError(t, err)
+	envelopeReader, err := headStore.Get(envelopeObject, 0, -1)
+	require.NoError(t, err)
+	defer envelopeReader.Close()
+	envelopePayload, err := io.ReadAll(envelopeReader)
+	require.NoError(t, err)
+	envelope, err := rootfshead.DecodeImageEnvelope(envelopePayload)
+	require.NoError(t, err)
+	require.NoError(t, rootfshead.ValidateImage(checkpoint.Reference, checkpoint.Image, envelope))
 }
 
 func TestAppendRootFSCheckpointLayerPreservesImmutableChain(t *testing.T) {
@@ -340,33 +348,6 @@ func TestRootFSExcludedPathsForPodIgnoresUnboundVolumePortals(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
 	assert.Empty(t, rootFSExcludedPathsForPod(pod))
-}
-
-type recordingRootFSHeadPublisher struct {
-	requests []templateimage.HeadRequest
-	err      error
-}
-
-func configureRootFSHeadTestDependencies(t *testing.T, svc *SandboxService) *recordingRootFSHeadPublisher {
-	t.Helper()
-	publisher := &recordingRootFSHeadPublisher{}
-	svc.rootFSHeadPublisher = publisher
-	svc.rootFSHeadStore = objectstore.NewMemoryStore(t.Name())
-	return publisher
-}
-
-func (p *recordingRootFSHeadPublisher) PublishHead(_ context.Context, req templateimage.HeadRequest) (*templateimage.Result, error) {
-	p.requests = append(p.requests, req)
-	if p.err != nil {
-		return nil, p.err
-	}
-	digest := godigest.Digest(rootFSTestManifestDigest)
-	return &templateimage.Result{
-		PullReference:  "registry.example/rootfs-heads@" + digest.String(),
-		PushReference:  "registry.internal/rootfs-heads@" + digest.String(),
-		ManifestDigest: digest,
-		Platform:       req.Platform,
-	}, nil
 }
 
 func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {
@@ -544,7 +525,9 @@ func rootFSTestMetadataHeadState(sandboxID, teamID string) *SandboxRootFSState {
 	state.HeadObjectSize = 64
 	state.HeadObjectKey = "sandbox-rootfs/" + teamID + "/" + sandboxID + "/heads/layer-v1/sha256/head.json.gz"
 	state.HeadImageDigest = rootFSTestManifestDigest
-	state.HeadImageRef = "registry.example/rootfs-heads@" + rootFSTestManifestDigest
+	state.HeadImageRef = rootfshead.LocalImageReference(rootFSTestManifestDigest)
+	state.PlatformOS = "linux"
+	state.PlatformArchitecture = "amd64"
 	state.LayerChain = []*SandboxRootFSLayer{rootFSLayerFromState(state)}
 	return state
 }
@@ -577,16 +560,35 @@ func rootFSTestCheckpoint(t *testing.T, headID string) (ctldapi.RootFSCheckpoint
 		Size:      int64(len(payload)),
 		MediaType: rootfshead.HeadMediaType,
 	}
+	reference := rootfshead.HeadReference{
+		Version:  rootfshead.Version,
+		HeadID:   headID,
+		Manifest: manifest,
+	}
+	image, _, marker, markerPayload, envelopeObject, envelopePayload := rootFSTestHeadImage(t, reference)
 	return ctldapi.RootFSCheckpointDescriptor{
-		Reference: rootfshead.HeadReference{
-			Version:  rootfshead.Version,
-			HeadID:   headID,
-			Manifest: manifest,
-		},
-		Objects:            []rootfshead.Object{manifest},
-		CreatedBytes:       manifest.Size,
-		CreatedObjectCount: 1,
+		Reference:          reference,
+		Image:              image,
+		Objects:            []rootfshead.Object{manifest, marker, envelopeObject},
+		CreatedBytes:       manifest.Size + int64(len(markerPayload)) + int64(len(envelopePayload)),
+		CreatedObjectCount: 3,
 	}, payload
+}
+
+func rootFSTestHeadImage(t *testing.T, reference rootfshead.HeadReference) (rootfshead.ImageReference, rootfshead.ImageEnvelope, rootfshead.Object, []byte, rootfshead.Object, []byte) {
+	t.Helper()
+	baseConfig, err := json.Marshal(ocispec.Image{
+		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		RootFS:   ocispec.RootFS{Type: "layers"},
+	})
+	require.NoError(t, err)
+	image, envelope, err := rootfshead.ComposeImage(reference, baseConfig)
+	require.NoError(t, err)
+	marker, markerPayload, err := rootfshead.MarkerObject(reference)
+	require.NoError(t, err)
+	envelopeObject, envelopePayload, err := rootfshead.ImageEnvelopeObject(envelope)
+	require.NoError(t, err)
+	return image, envelope, marker, markerPayload, envelopeObject, envelopePayload
 }
 
 func parsedTestServer(t *testing.T, rawURL string) (*url.URL, int) {
@@ -596,4 +598,58 @@ func parsedTestServer(t *testing.T, rawURL string) (*url.URL, int) {
 	port, err := strconv.Atoi(parsed.Port())
 	require.NoError(t, err)
 	return parsed, port
+}
+
+func configureRootFSHeadMaterializationTest(t *testing.T, svc *SandboxService, pods ...*corev1.Pod) {
+	t.Helper()
+	var checkpoint ctldapi.RootFSCheckpointDescriptor
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/rootfs/heads/materialize":
+			var req ctldapi.MaterializeRootFSHeadRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{
+				Materialized: true,
+				Image:        req.Image.Name,
+			}))
+		case "/api/v1/rootfs/snapshots/prepare":
+			var req ctldapi.PrepareRootFSSnapshotRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			checkpoint, _ = rootFSTestCheckpoint(t, req.HeadID)
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
+				Handle:     "test-rootfs-handle",
+				Info:       rootFSTestCheckpointInfo(),
+				Checkpoint: checkpoint,
+			}))
+		case "/api/v1/rootfs/snapshots/publish":
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
+				Published:  true,
+				Info:       rootFSTestCheckpointInfo(),
+				Checkpoint: checkpoint,
+			}))
+		default:
+			t.Fatalf("unexpected ctld test request %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+	parsed, port := parsedTestServer(t, server.URL)
+	for _, pod := range pods {
+		if pod != nil {
+			pod.Status.HostIP = parsed.Hostname()
+		}
+	}
+	svc.ctldClient = NewCtldClientWithHTTPClient(server.Client())
+	svc.config.CtldEnabled = true
+	svc.config.CtldPort = port
+}
+
+func rootFSTestCheckpointInfo() ctldapi.RootFSInfo {
+	return ctldapi.RootFSInfo{
+		Runtime:         "runc",
+		RuntimeHandler:  "io.containerd.runc.v2",
+		BaseImageRef:    "docker.io/library/busybox:1.36",
+		BaseImageDigest: rootFSTestBaseDigest,
+		Snapshotter:     rootfshead.SnapshotterName,
+		SnapshotParent:  rootFSTestBaseSnapshot,
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/stretchr/testify/assert"
@@ -22,6 +23,7 @@ type recordingController struct {
 	probedPodName  string
 	probedKind     sandboxprobe.Kind
 	rootFSTarget   ctldapi.RootFSContainerRef
+	rootFSHead     rootfshead.HeadReference
 }
 
 func (c *recordingController) Pause(_ *http.Request, sandboxID string) (ctldapi.PauseResponse, int) {
@@ -57,6 +59,11 @@ func (c *recordingController) SaveRootFS(_ *http.Request, req ctldapi.SaveRootFS
 	return ctldapi.SaveRootFSResponse{
 		Checkpoint: ctldapi.RootFSCheckpointDescriptor{},
 	}, http.StatusOK
+}
+
+func (c *recordingController) MaterializeRootFSHead(_ *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
+	c.rootFSHead = req.Head
+	return ctldapi.MaterializeRootFSHeadResponse{Materialized: true, Image: req.Image.Name}, http.StatusOK
 }
 
 func TestNewMuxRoutesPauseResume(t *testing.T) {
@@ -218,4 +225,26 @@ func TestNewMuxRoutesRootFS(t *testing.T) {
 			tt.want(t, rec.Body.Bytes())
 		})
 	}
+}
+
+func TestNewMuxRoutesRootFSHeadMaterialization(t *testing.T) {
+	controller := &recordingController{}
+	handler := NewMux(controller)
+	reqBody := ctldapi.MaterializeRootFSHeadRequest{
+		Head:  rootfshead.HeadReference{HeadID: "head-1"},
+		Image: rootfshead.ImageReference{Name: "sandbox0.local/rootfs-heads@sha256:test"},
+	}
+	payload, err := json.Marshal(reqBody)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/heads/materialize", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "head-1", controller.rootFSHead.HeadID)
+	var response ctldapi.MaterializeRootFSHeadResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	assert.True(t, response.Materialized)
+	assert.Equal(t, reqBody.Image.Name, response.Image)
 }

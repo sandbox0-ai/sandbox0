@@ -71,7 +71,7 @@ func TestOptionalRootFSHeadReferenceRejectsPartialMetadataHead(t *testing.T) {
 func TestApplyClaimRootFSHeadChangesOnlyProcdImageAndAnnotations(t *testing.T) {
 	imageDigest := "sha256:" + strings.Repeat("b", 64)
 	req := &ClaimRequest{
-		RootFSHeadImageRef: "registry.example.com/rootfs/head@" + imageDigest,
+		RootFSHeadImageRef: rootfshead.LocalImageReference(imageDigest),
 		RootFSHeadLayerID:  "layer-2",
 	}
 	pod := &corev1.Pod{
@@ -95,6 +95,9 @@ func TestApplyClaimRootFSHeadChangesOnlyProcdImageAndAnnotations(t *testing.T) {
 	if got := pod.Spec.Containers[0].Image; got != req.RootFSHeadImageRef {
 		t.Fatalf("procd image = %q, want %q", got, req.RootFSHeadImageRef)
 	}
+	if got := pod.Spec.Containers[0].ImagePullPolicy; got != corev1.PullNever {
+		t.Fatalf("procd image pull policy = %q, want %q", got, corev1.PullNever)
+	}
 	if got := pod.Spec.Containers[1].Image; got != "registry.example.com/sidecar:v1" {
 		t.Fatalf("sidecar image = %q, want unchanged", got)
 	}
@@ -112,9 +115,9 @@ func TestApplyClaimRootFSHeadChangesOnlyProcdImageAndAnnotations(t *testing.T) {
 	}
 }
 
-func TestApplyColdRootFSBaseImageVolumePinsBaseWithoutChangingSidecars(t *testing.T) {
+func TestApplyColdRootFSBaseImageStartsCarrierWithoutChangingSidecars(t *testing.T) {
 	req := &ClaimRequest{
-		RootFSHeadImageRef: "registry.example.com/rootfs/head@sha256:" + strings.Repeat("b", 64),
+		RootFSHeadImageRef: rootfshead.LocalImageReference("sha256:" + strings.Repeat("b", 64)),
 		RootFSBaseImageRef: "docker.io/library/debian@sha256:" + strings.Repeat("a", 64),
 	}
 	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{
@@ -122,17 +125,17 @@ func TestApplyColdRootFSBaseImageVolumePinsBaseWithoutChangingSidecars(t *testin
 		{Name: "sidecar", VolumeMounts: []corev1.VolumeMount{{Name: "keep", MountPath: "/keep"}}},
 	}}}
 
-	if err := applyColdRootFSBaseImageVolume(pod, req); err != nil {
-		t.Fatalf("applyColdRootFSBaseImageVolume() error = %v", err)
+	if err := applyColdRootFSBaseImageToPod(pod, req); err != nil {
+		t.Fatalf("applyColdRootFSBaseImageToPod() error = %v", err)
 	}
-	if len(pod.Spec.Volumes) != 1 || pod.Spec.Volumes[0].Image == nil {
-		t.Fatalf("rootfs base image volume = %#v", pod.Spec.Volumes)
+	if got := pod.Spec.Containers[0].Image; got != req.RootFSBaseImageRef {
+		t.Fatalf("procd carrier image = %q, want %q", got, req.RootFSBaseImageRef)
 	}
-	if got := pod.Spec.Volumes[0].Image.Reference; got != req.RootFSBaseImageRef {
-		t.Fatalf("base image reference = %q, want %q", got, req.RootFSBaseImageRef)
+	if got := pod.Spec.Containers[0].ImagePullPolicy; got != corev1.PullIfNotPresent {
+		t.Fatalf("procd image pull policy = %q, want %q", got, corev1.PullIfNotPresent)
 	}
-	if len(pod.Spec.Containers[0].VolumeMounts) != 1 || pod.Spec.Containers[0].VolumeMounts[0].MountPath != rootFSBaseImageMountPath {
-		t.Fatalf("procd base mount = %#v", pod.Spec.Containers[0].VolumeMounts)
+	if len(pod.Spec.Volumes) != 0 || len(pod.Spec.Containers[0].VolumeMounts) != 0 {
+		t.Fatalf("cold carrier unexpectedly added image volumes: volumes=%#v mounts=%#v", pod.Spec.Volumes, pod.Spec.Containers[0].VolumeMounts)
 	}
 	if got := pod.Spec.Containers[1].VolumeMounts; len(got) != 1 || got[0].Name != "keep" {
 		t.Fatalf("sidecar mounts changed: %#v", got)
@@ -141,7 +144,7 @@ func TestApplyColdRootFSBaseImageVolumePinsBaseWithoutChangingSidecars(t *testin
 
 func TestPodRootFSHeadReadyRequiresRunningDesiredDigest(t *testing.T) {
 	imageDigest := "sha256:" + strings.Repeat("c", 64)
-	desiredImage := "registry.example.com/rootfs/head@" + imageDigest
+	desiredImage := rootfshead.LocalImageReference(imageDigest)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 			controller.AnnotationRootFSHeadImage:   desiredImage,
@@ -154,7 +157,7 @@ func TestPodRootFSHeadReadyRequiresRunningDesiredDigest(t *testing.T) {
 		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
 			Name:    sandboxRootFSContainerName,
 			Image:   desiredImage,
-			ImageID: "registry.example.com/rootfs/head@" + imageDigest,
+			ImageID: desiredImage,
 			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{
 				StartedAt: metav1.NewTime(time.Now()),
 			}},
@@ -164,8 +167,8 @@ func TestPodRootFSHeadReadyRequiresRunningDesiredDigest(t *testing.T) {
 	if ready, reason := podRootFSHeadReady(pod, desiredImage, "layer-3"); !ready {
 		t.Fatalf("podRootFSHeadReady() = false, reason %q", reason)
 	}
-	pod.Status.ContainerStatuses[0].ImageID = "registry.example.com/rootfs/head@sha256:" + strings.Repeat("d", 64)
-	pod.Status.ContainerStatuses[0].Image = "registry.example.com/rootfs/head:old"
+	pod.Status.ContainerStatuses[0].ImageID = rootfshead.LocalImageReference("sha256:" + strings.Repeat("d", 64))
+	pod.Status.ContainerStatuses[0].Image = "sandbox0.local/rootfs-heads:old"
 	if ready, _ := podRootFSHeadReady(pod, desiredImage, "layer-3"); ready {
 		t.Fatal("podRootFSHeadReady() = true for previous image")
 	}
@@ -173,16 +176,18 @@ func TestPodRootFSHeadReadyRequiresRunningDesiredDigest(t *testing.T) {
 
 func completeRootFSHeadTestState(imageDigest string) *SandboxRootFSState {
 	return &SandboxRootFSState{
-		SandboxID:           "sandbox-1",
-		LayerID:             "layer-1",
-		BaseImageRef:        "debian:bookworm-slim",
-		BaseImageDigest:     imageDigest,
-		HeadObjectKey:       "rootfs/heads/head.json.gz",
-		HeadObjectDigest:    "sha256:" + strings.Repeat("e", 64),
-		HeadObjectSize:      128,
-		HeadObjectMediaType: rootfshead.HeadMediaType,
-		HeadImageRef:        "registry.example.com/rootfs/head@" + imageDigest,
-		HeadImageDigest:     imageDigest,
+		SandboxID:            "sandbox-1",
+		LayerID:              "layer-1",
+		BaseImageRef:         "debian:bookworm-slim",
+		BaseImageDigest:      imageDigest,
+		HeadObjectKey:        "rootfs/heads/head.json.gz",
+		HeadObjectDigest:     "sha256:" + strings.Repeat("e", 64),
+		HeadObjectSize:       128,
+		HeadObjectMediaType:  rootfshead.HeadMediaType,
+		HeadImageRef:         rootfshead.LocalImageReference(imageDigest),
+		HeadImageDigest:      imageDigest,
+		PlatformOS:           "linux",
+		PlatformArchitecture: "amd64",
 		LayerChain: []*SandboxRootFSLayer{{
 			ID:             "layer-1",
 			SnapshotParent: "sha256:base-snapshot",

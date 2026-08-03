@@ -9,17 +9,15 @@ import (
 	distref "github.com/distribution/reference"
 	godigest "github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 var ErrRootFSHeadMigrationRequired = errors.New("rootfs checkpoint requires metadata-head migration")
-
-const (
-	rootFSBaseImageVolumeName = "rootfs-base-image"
-	rootFSBaseImageMountPath  = "/run/sandbox0/rootfs-base-image"
-)
 
 type rootFSLayerChainByHeadReader interface {
 	GetRootFSLayerChainByHead(context.Context, string, string) ([]*SandboxRootFSLayer, error)
@@ -80,6 +78,15 @@ func configureClaimRootFSHead(req *ClaimRequest, state *SandboxRootFSState) erro
 	req.RootFSHeadImageRef = image
 	req.RootFSHeadLayerID = strings.TrimSpace(state.LayerID)
 	req.RootFSBaseImageRef = baseImageRef
+	req.RootFSHeadReference, _ = rootFSHeadReferenceFromState(state)
+	req.RootFSHeadImage = rootfshead.ImageReference{
+		Name:           image,
+		ManifestDigest: state.HeadImageDigest,
+		Platform:       rootFSPlatformFromState(state),
+	}
+	if err := req.RootFSHeadImage.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrRootFSHeadMigrationRequired, err)
+	}
 	return nil
 }
 
@@ -127,6 +134,9 @@ func applyClaimRootFSHeadToPod(pod *corev1.Pod, req *ClaimRequest) error {
 		return fmt.Errorf("pod %s/%s has no %s container", pod.Namespace, pod.Name, sandboxRootFSContainerName)
 	}
 	pod.Spec.Containers[containerIndex].Image = strings.TrimSpace(req.RootFSHeadImageRef)
+	// The image has already been materialized and confirmed through CRI on this
+	// node. Never lets kubelet resolve it locally without a registry fallback.
+	pod.Spec.Containers[containerIndex].ImagePullPolicy = corev1.PullNever
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
@@ -135,11 +145,10 @@ func applyClaimRootFSHeadToPod(pod *corev1.Pod, req *ClaimRequest) error {
 	return nil
 }
 
-// applyColdRootFSBaseImageVolume makes kubelet unpack the canonical template
-// base before a marker-only head is pulled on a newly created Pod. Hot resume
-// does not call this function because the warm Pod already owns that snapshot
-// and Pod volumes are immutable.
-func applyColdRootFSBaseImageVolume(pod *corev1.Pod, req *ClaimRequest) error {
+// applyColdRootFSBaseImageToPod starts a cold carrier with the canonical base
+// image. Once Kubernetes has selected a node and unpacked that base, manager
+// materializes and activates the node-local metadata head on the same Pod.
+func applyColdRootFSBaseImageToPod(pod *corev1.Pod, req *ClaimRequest) error {
 	if pod == nil || req == nil || strings.TrimSpace(req.RootFSHeadImageRef) == "" {
 		return nil
 	}
@@ -151,46 +160,86 @@ func applyColdRootFSBaseImageVolume(pod *corev1.Pod, req *ClaimRequest) error {
 	if containerIndex < 0 {
 		return fmt.Errorf("pod %s/%s has no %s container", pod.Namespace, pod.Name, sandboxRootFSContainerName)
 	}
-	for index := range pod.Spec.Volumes {
-		if pod.Spec.Volumes[index].Name != rootFSBaseImageVolumeName {
-			continue
-		}
-		image := pod.Spec.Volumes[index].Image
-		if image == nil || image.Reference != baseImageRef {
-			return fmt.Errorf("pod %s/%s has conflicting rootfs base image volume", pod.Namespace, pod.Name)
-		}
-		return ensureRootFSBaseImageMount(&pod.Spec.Containers[containerIndex])
-	}
-	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-		Name: rootFSBaseImageVolumeName,
-		VolumeSource: corev1.VolumeSource{Image: &corev1.ImageVolumeSource{
-			Reference:  baseImageRef,
-			PullPolicy: corev1.PullIfNotPresent,
-		}},
-	})
-	return ensureRootFSBaseImageMount(&pod.Spec.Containers[containerIndex])
+	pod.Spec.Containers[containerIndex].Image = baseImageRef
+	pod.Spec.Containers[containerIndex].ImagePullPolicy = corev1.PullIfNotPresent
+	return nil
 }
 
-func ensureRootFSBaseImageMount(container *corev1.Container) error {
-	if container == nil {
-		return fmt.Errorf("procd container is required")
-	}
-	for index := range container.VolumeMounts {
-		mount := &container.VolumeMounts[index]
-		if mount.Name != rootFSBaseImageVolumeName && mount.MountPath != rootFSBaseImageMountPath {
-			continue
-		}
-		if mount.Name != rootFSBaseImageVolumeName || mount.MountPath != rootFSBaseImageMountPath {
-			return fmt.Errorf("procd container has conflicting rootfs base image mount")
-		}
+func (s *SandboxService) materializeClaimRootFSHead(ctx context.Context, pod *corev1.Pod, req *ClaimRequest) error {
+	if pod == nil || req == nil || strings.TrimSpace(req.RootFSHeadImageRef) == "" {
 		return nil
 	}
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      rootFSBaseImageVolumeName,
-		MountPath: rootFSBaseImageMountPath,
-		ReadOnly:  true,
-	})
+	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil {
+		return fmt.Errorf("ctld rootfs head materialization is not configured")
+	}
+	if err := req.RootFSHeadReference.Validate(); err != nil {
+		return err
+	}
+	if err := req.RootFSHeadImage.Validate(); err != nil {
+		return err
+	}
+	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
+	if err != nil {
+		return err
+	}
+	response, err := s.ctldClient.MaterializeRootFSHeadWithTimeout(ctx, ctldAddress, ctldapi.MaterializeRootFSHeadRequest{
+		Head: req.RootFSHeadReference, Image: req.RootFSHeadImage,
+	}, sandboxRootFSOperationTimeout)
+	if err != nil {
+		return rootFSResponseError(err, materializeRootFSHeadError(response))
+	}
+	if response == nil || !response.Materialized || strings.TrimSpace(response.Image) != strings.TrimSpace(req.RootFSHeadImageRef) {
+		return fmt.Errorf("ctld did not materialize rootfs head image %s", req.RootFSHeadImageRef)
+	}
 	return nil
+}
+
+func materializeRootFSHeadError(response *ctldapi.MaterializeRootFSHeadResponse) string {
+	if response == nil {
+		return ""
+	}
+	return strings.TrimSpace(response.Error)
+}
+
+func (s *SandboxService) activateClaimRootFSHead(ctx context.Context, pod *corev1.Pod, req *ClaimRequest) (*corev1.Pod, error) {
+	if pod == nil || req == nil || strings.TrimSpace(req.RootFSHeadImageRef) == "" {
+		return pod, nil
+	}
+	containerIndex := procdContainerIndex(pod.Spec.Containers)
+	if containerIndex < 0 {
+		return pod, fmt.Errorf("pod %s/%s has no %s container", pod.Namespace, pod.Name, sandboxRootFSContainerName)
+	}
+	if pod.Spec.Containers[containerIndex].Image != req.RootFSHeadImageRef {
+		if err := s.materializeClaimRootFSHead(ctx, pod, req); err != nil {
+			return pod, err
+		}
+		updated, err := s.patchPodRootFSHead(ctx, pod.Namespace, pod.Name, req)
+		if err != nil {
+			return pod, err
+		}
+		pod = updated
+	}
+	return s.waitForPodRootFSHeadReady(ctx, pod.Namespace, pod.Name, req.RootFSHeadImageRef, req.RootFSHeadLayerID)
+}
+
+func (s *SandboxService) patchPodRootFSHead(ctx context.Context, namespace, name string, req *ClaimRequest) (*corev1.Pod, error) {
+	var updated *corev1.Pod
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		desired := current.DeepCopy()
+		if err := applyClaimRootFSHeadToPod(desired, req); err != nil {
+			return err
+		}
+		updated, err = s.k8sClient.CoreV1().Pods(namespace).Update(ctx, desired, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("activate node-local rootfs head on pod %s/%s: %w", namespace, name, err)
+	}
+	return updated, nil
 }
 
 func procdContainerIndex(containers []corev1.Container) int {

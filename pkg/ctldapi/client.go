@@ -33,6 +33,7 @@ const (
 	pathRootFSSnapshotPrepare    = "/api/v1/rootfs/snapshots/prepare"
 	pathRootFSSnapshotPublish    = "/api/v1/rootfs/snapshots/publish"
 	pathRootFSSnapshotAbort      = "/api/v1/rootfs/snapshots/abort"
+	pathRootFSHeadMaterialize    = "/api/v1/rootfs/heads/materialize"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -144,6 +145,10 @@ func (c *Client) PublishRootFSSnapshot(ctx context.Context, ctldAddress string, 
 
 func (c *Client) AbortRootFSSnapshot(ctx context.Context, ctldAddress string, req AbortRootFSSnapshotRequest) (*AbortRootFSSnapshotResponse, error) {
 	return PostJSON[AbortRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotAbort, req)
+}
+
+func (c *Client) MaterializeRootFSHead(ctx context.Context, ctldAddress string, req MaterializeRootFSHeadRequest) (*MaterializeRootFSHeadResponse, error) {
+	return PostJSON[MaterializeRootFSHeadResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSHeadMaterialize, req)
 }
 
 func (c *Client) httpClientOrDefault() *http.Client {

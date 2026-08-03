@@ -127,6 +127,14 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 				return err
 			},
 		},
+		{
+			name: "materialize head",
+			path: "/api/v1/rootfs/heads/materialize",
+			call: func(client *Client, address string) error {
+				_, err := client.MaterializeRootFSHead(context.Background(), address, MaterializeRootFSHeadRequest{})
+				return err
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -146,6 +154,8 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(InspectRootFSResponse{Info: RootFSInfo{Runtime: "runc"}})
 				case "save":
 					_ = json.NewEncoder(w).Encode(SaveRootFSResponse{Checkpoint: RootFSCheckpointDescriptor{}})
+				case "materialize head":
+					_ = json.NewEncoder(w).Encode(MaterializeRootFSHeadResponse{Materialized: true})
 				}
 			}))
 			defer server.Close()

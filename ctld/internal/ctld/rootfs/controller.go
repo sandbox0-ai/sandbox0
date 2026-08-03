@@ -1,10 +1,12 @@
 package rootfs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,6 +30,10 @@ var (
 type Runtime interface {
 	Inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error)
 	RootFSUpperdir(ctx context.Context, info ctldapi.RootFSInfo) (string, error)
+}
+
+type HeadImageRuntime interface {
+	MaterializeRootFSHead(context.Context, rootfshead.HeadReference, rootfshead.ImageReference, rootfshead.ImageEnvelope, string) error
 }
 
 type PortalResolver interface {
@@ -160,6 +166,7 @@ func (c *Controller) InspectRootFS(r *http.Request, req ctldapi.InspectRootFSReq
 	if err != nil {
 		return ctldapi.InspectRootFSResponse{Error: err.Error()}, statusForError(err)
 	}
+	info.BaseImageConfig = nil
 	return ctldapi.InspectRootFSResponse{Info: info}, http.StatusOK
 }
 
@@ -249,6 +256,7 @@ func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) 
 func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (response ctldapi.PrepareRootFSSnapshotResponse, status int) {
 	started := time.Now()
 	defer func() {
+		response.Info.BaseImageConfig = nil
 		c.observer.ObserveOperation("seal", req.Target, -1, response.Checkpoint.CreatedBytes, -1, started, status, response.Error)
 	}()
 	if c.store == nil {
@@ -311,6 +319,14 @@ func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareR
 	}
 	c.mu.Unlock()
 	checkpoint := checkpointDescriptor(result)
+	checkpoint, err = c.persistHeadImage(ctx, info, checkpoint)
+	if err != nil {
+		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Checkpoint: checkpoint, Error: fmt.Sprintf("persist rootfs head image: %v", err)}, statusForError(err)
+	}
+	// The base config may contain image-level environment defaults. It is only
+	// needed in-process while composing the envelope and is never persisted in
+	// the prepared checkpoint or returned to manager.
+	info.BaseImageConfig = nil
 	handle := uuid.NewString()
 	if err := c.writePreparedSnapshot(handle, preparedRootFSSnapshot{
 		Handle:     handle,
@@ -404,6 +420,124 @@ func checkpointDescriptor(result *rootfscow.SealResult) ctldapi.RootFSCheckpoint
 	}
 }
 
+func (c *Controller) persistHeadImage(ctx context.Context, info ctldapi.RootFSInfo, checkpoint ctldapi.RootFSCheckpointDescriptor) (ctldapi.RootFSCheckpointDescriptor, error) {
+	image, envelope, err := rootfshead.ComposeImage(checkpoint.Reference, info.BaseImageConfig)
+	if err != nil {
+		return checkpoint, err
+	}
+	marker, markerPayload, err := rootfshead.MarkerObject(checkpoint.Reference)
+	if err != nil {
+		return checkpoint, err
+	}
+	envelopeObject, envelopePayload, err := rootfshead.ImageEnvelopeObject(envelope)
+	if err != nil {
+		return checkpoint, err
+	}
+	for _, candidate := range []struct {
+		object  rootfshead.Object
+		payload []byte
+	}{{marker, markerPayload}, {envelopeObject, envelopePayload}} {
+		created, err := putImmutableRootFSObject(ctx, c.store, candidate.object, candidate.payload)
+		if err != nil {
+			return checkpoint, err
+		}
+		checkpoint.Objects = appendRootFSObject(checkpoint.Objects, candidate.object)
+		if created {
+			checkpoint.CreatedBytes += candidate.object.Size
+			checkpoint.CreatedObjectCount++
+		}
+	}
+	checkpoint.Image = image
+	return checkpoint, nil
+}
+
+func putImmutableRootFSObject(ctx context.Context, store objectstore.Store, object rootfshead.Object, payload []byte) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if store == nil {
+		return false, fmt.Errorf("rootfs object store is required")
+	}
+	if err := object.Validate(object.MediaType); err != nil {
+		return false, err
+	}
+	if int64(len(payload)) != object.Size {
+		return false, fmt.Errorf("rootfs object %s payload size is %d, expected %d", object.Key, len(payload), object.Size)
+	}
+	info, err := store.Head(object.Key)
+	if err == nil {
+		if info.Size != object.Size {
+			return false, fmt.Errorf("rootfs object %s exists with size %d, expected %d", object.Key, info.Size, object.Size)
+		}
+		return false, nil
+	}
+	if !objectstore.IsNotFound(err) {
+		return false, fmt.Errorf("inspect rootfs object %s: %w", object.Key, err)
+	}
+	if err := store.Put(object.Key, bytes.NewReader(payload)); err != nil {
+		return false, fmt.Errorf("store rootfs object %s: %w", object.Key, err)
+	}
+	return true, nil
+}
+
+func appendRootFSObject(objects []rootfshead.Object, candidate rootfshead.Object) []rootfshead.Object {
+	for _, object := range objects {
+		if object.Key == candidate.Key {
+			return objects
+		}
+	}
+	return append(objects, candidate)
+}
+
+// MaterializeRootFSHead installs a persisted OCI envelope only after manager
+// has selected this node for a warm or cold claim.
+func (c *Controller) MaterializeRootFSHead(r *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
+	if c.store == nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: "rootfs object store is not configured"}, http.StatusNotImplemented
+	}
+	if err := req.Head.Validate(); err != nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	if err := req.Image.Validate(); err != nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	runtime, ok := c.runtime.(HeadImageRuntime)
+	if !ok || runtime == nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: "rootfs head materialization is not configured"}, http.StatusNotImplemented
+	}
+	ctx, cancel := c.operationContext(requestContext(r))
+	defer cancel()
+	head, err := rootfscow.LoadHead(ctx, c.store, req.Head)
+	if err != nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: fmt.Sprintf("load rootfs head: %v", err)}, statusForError(err)
+	}
+	envelopeKey, err := rootfshead.ImageEnvelopeObjectKey(req.Image.ManifestDigest)
+	if err != nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	const maxEnvelopeBytes = 32 << 20
+	reader, err := c.store.Get(envelopeKey, 0, maxEnvelopeBytes+1)
+	if err != nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: fmt.Sprintf("read rootfs head image envelope: %v", err)}, statusForError(err)
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(reader, maxEnvelopeBytes+1))
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: fmt.Sprintf("read rootfs head image envelope: %v", errors.Join(readErr, closeErr))}, http.StatusInternalServerError
+	}
+	if len(payload) == 0 || len(payload) > maxEnvelopeBytes {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: "rootfs head image envelope has invalid size"}, http.StatusBadRequest
+	}
+	envelope, err := rootfshead.DecodeImageEnvelope(payload)
+	if err != nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, http.StatusBadRequest
+	}
+	if err := runtime.MaterializeRootFSHead(ctx, req.Head, req.Image, envelope, head.BaseSnapshotKey); err != nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, statusForError(err)
+	}
+	return ctldapi.MaterializeRootFSHeadResponse{Materialized: true, Image: req.Image.Name}, http.StatusOK
+}
+
 type preparedRootFSSnapshot struct {
 	Handle     string                             `json:"handle"`
 	Info       ctldapi.RootFSInfo                 `json:"info"`
@@ -462,6 +596,9 @@ func (c *Controller) readPreparedSnapshot(handle string) (preparedRootFSSnapshot
 	}
 	if err := prepared.Checkpoint.Reference.Validate(); err != nil {
 		return preparedRootFSSnapshot{}, fmt.Errorf("invalid prepared rootfs head: %w", err)
+	}
+	if err := prepared.Checkpoint.Image.Validate(); err != nil {
+		return preparedRootFSSnapshot{}, fmt.Errorf("invalid prepared rootfs head image: %w", err)
 	}
 	return prepared, nil
 }

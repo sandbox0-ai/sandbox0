@@ -8,8 +8,11 @@ import (
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/platforms"
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"google.golang.org/grpc"
@@ -32,6 +35,10 @@ type criRuntimeService interface {
 	PodSandboxStats(ctx context.Context, in *runtimeapi.PodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.PodSandboxStatsResponse, error)
 }
 
+type criImageService interface {
+	ImageStatus(ctx context.Context, in *runtimeapi.ImageStatusRequest, opts ...grpc.CallOption) (*runtimeapi.ImageStatusResponse, error)
+}
+
 type ContainerdRuntimeConfig struct {
 	CRIEndpoint            string
 	ContainerdEndpoint     string
@@ -40,31 +47,37 @@ type ContainerdRuntimeConfig struct {
 	Namespace              string
 	DialTimeout            time.Duration
 	CRIClient              criRuntimeService
+	CRIImageClient         criImageService
 	CRIDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
 	ContainerdClient       containerdClient
 	Observer               *Observer
 }
 
 type ContainerdRuntime struct {
-	criEndpoint            string
-	containerdEndpoint     string
-	containerdDataRoot     string
-	containerdHostDataRoot string
-	namespace              string
-	dialTimeout            time.Duration
-	criClient              criRuntimeService
-	criDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
-	criMu                  sync.Mutex
-	criConn                *grpc.ClientConn
-	connectedCRIClient     criRuntimeService
-	containerdClient       containerdClient
-	observer               *Observer
+	criEndpoint             string
+	containerdEndpoint      string
+	containerdDataRoot      string
+	containerdHostDataRoot  string
+	namespace               string
+	dialTimeout             time.Duration
+	criClient               criRuntimeService
+	criImageClient          criImageService
+	criDialContext          func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
+	criMu                   sync.Mutex
+	criConn                 *grpc.ClientConn
+	connectedCRIClient      criRuntimeService
+	connectedCRIImageClient criImageService
+	containerdClient        containerdClient
+	observer                *Observer
 }
 
 type containerdClient interface {
 	LoadContainer(ctx context.Context, id string) (containerd.Container, error)
 	SnapshotService(snapshotterName string) snapshots.Snapshotter
+	ContentStore() content.Store
 	ImageService() images.Store
+	LeasesService() leases.Manager
+	GetImage(ctx context.Context, ref string) (containerd.Image, error)
 	Close() error
 }
 
@@ -93,6 +106,10 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 	if timeout <= 0 {
 		timeout = defaultDialTimeout
 	}
+	imageClient := cfg.CRIImageClient
+	if imageClient == nil {
+		imageClient, _ = cfg.CRIClient.(criImageService)
+	}
 	return &ContainerdRuntime{
 		criEndpoint:            criEndpoint,
 		containerdEndpoint:     containerdEndpoint,
@@ -101,6 +118,7 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		namespace:              namespace,
 		dialTimeout:            timeout,
 		criClient:              cfg.CRIClient,
+		criImageClient:         imageClient,
 		criDialContext:         cfg.CRIDialContext,
 		containerdClient:       cfg.ContainerdClient,
 		observer:               cfg.Observer,
@@ -234,6 +252,7 @@ func (r *ContainerdRuntime) Close() error {
 	conn := r.criConn
 	r.criConn = nil
 	r.connectedCRIClient = nil
+	r.connectedCRIImageClient = nil
 	r.criMu.Unlock()
 	if conn == nil {
 		return nil
@@ -273,7 +292,29 @@ func (r *ContainerdRuntime) runtimeClient(ctx context.Context) (criRuntimeServic
 	}
 	r.criConn = conn
 	r.connectedCRIClient = runtimeapi.NewRuntimeServiceClient(conn)
+	r.connectedCRIImageClient = runtimeapi.NewImageServiceClient(conn)
 	return r.connectedCRIClient, nil
+}
+
+func (r *ContainerdRuntime) imageClient(ctx context.Context) (criImageService, error) {
+	if r != nil && r.criImageClient != nil {
+		return r.criImageClient, nil
+	}
+	if r == nil {
+		return nil, fmt.Errorf("containerd runtime is nil")
+	}
+	if r.criClient != nil {
+		return nil, fmt.Errorf("cri image service client is not configured")
+	}
+	if _, err := r.runtimeClient(ctx); err != nil {
+		return nil, err
+	}
+	r.criMu.Lock()
+	defer r.criMu.Unlock()
+	if r.connectedCRIImageClient == nil {
+		return nil, fmt.Errorf("cri image service client is not connected")
+	}
+	return r.connectedCRIImageClient, nil
 }
 
 func (r *ContainerdRuntime) client(ctx context.Context) (containerdClient, func(), error) {
@@ -335,12 +376,12 @@ func inspectContainer(ctx context.Context, client containerdClient, target ctlda
 	}
 	info.Runtime = runtimeFamily(containerInfo.Runtime.Name)
 
-	if imageDigest, err := imageDigest(ctx, client, containerInfo.Image); err == nil {
-		info.BaseImageDigest = imageDigest
+	imageDigest, imageConfig, err := imageMetadata(ctx, client, containerInfo.Image)
+	if err != nil {
+		return ctldapi.RootFSInfo{}, fmt.Errorf("inspect base image metadata: %w", err)
 	}
-	if info.BaseImageDigest == "" {
-		info.BaseImageDigest = digestFromReference(containerInfo.Image)
-	}
+	info.BaseImageDigest = imageDigest
+	info.BaseImageConfig = imageConfig
 	parent, chain, err := snapshotParentChain(ctx, client.SnapshotService(containerInfo.Snapshotter), containerInfo.SnapshotKey)
 	if err != nil {
 		return ctldapi.RootFSInfo{}, fmt.Errorf("inspect snapshot parent chain: %w", err)
@@ -371,20 +412,31 @@ func snapshotParentChain(ctx context.Context, snapshotter snapshots.Snapshotter,
 	return parent, chain, nil
 }
 
-func imageDigest(ctx context.Context, client containerdClient, imageRef string) (string, error) {
+func imageMetadata(ctx context.Context, client containerdClient, imageRef string) (string, []byte, error) {
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
-		return "", nil
+		return "", nil, fmt.Errorf("base image reference is required")
 	}
 	image, err := client.ImageService().Get(ctx, imageRef)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	d := image.Target.Digest
-	if d == "" {
-		return "", nil
+	if image.Target.Digest == "" {
+		return "", nil, fmt.Errorf("base image %s has no target digest", imageRef)
 	}
-	return d.String(), nil
+	configDescriptor, err := images.Config(ctx, client.ContentStore(), image.Target, platforms.DefaultStrict())
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve base image config: %w", err)
+	}
+	const maxBaseImageConfigBytes = 16 << 20
+	if configDescriptor.Size <= 0 || configDescriptor.Size > maxBaseImageConfigBytes {
+		return "", nil, fmt.Errorf("base image config has invalid size %d", configDescriptor.Size)
+	}
+	config, err := content.ReadBlob(ctx, client.ContentStore(), configDescriptor)
+	if err != nil {
+		return "", nil, fmt.Errorf("read base image config: %w", err)
+	}
+	return image.Target.Digest.String(), config, nil
 }
 
 func runtimeFamily(handler string) string {

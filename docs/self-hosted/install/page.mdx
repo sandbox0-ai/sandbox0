@@ -10,7 +10,7 @@ This is the shortest production-like path from zero to a running self-hosted San
 - A default `StorageClass`
 
 <Callout variant="info">
-Kubernetes `1.35+` is required for the supported Sandbox0 runtime stack. Checkpointed pause/resume depends on `ctld` continuously sealing writable changes and the node-local Sandbox0 containerd snapshotter lazily attaching metadata heads when runtime containers are recreated.
+Kubernetes `1.35+` is required for the supported Sandbox0 runtime stack. Checkpointed pause/resume depends on `ctld` continuously sealing writable changes, installing selected marker images through the node's containerd API socket, and the node-local Sandbox0 containerd snapshotter lazily attaching metadata heads when runtime containers are recreated.
 </Callout>
 
 <Callout variant="warning">
@@ -60,7 +60,7 @@ nodes:
   # cluster-gateway HTTP port
   - containerPort: 30080
     hostPort: 30080
-  # registry port for template image push
+  # optional registry port for template image push; rootfs marker images do not use it
   - containerPort: 30500
     hostPort: 30500
 ```

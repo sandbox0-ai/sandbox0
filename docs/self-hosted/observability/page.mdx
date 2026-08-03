@@ -32,9 +32,9 @@ For rootfs checkpoint and resume diagnosis, collect:
 - `ctld_rootfs_phase_duration_seconds` for checkpoint sub-phases reported by ctld
 - `ctld_rootfs_checkpoint_bytes` for input, output, excluded, and Volume portal byte distributions
 - `rootfs_snapshotter_operation_duration_seconds{operation=~"commit_head|attach_head"}` for marker commit and lazy head attachment, independent of Pod readiness
-- `manager_sandbox_claim_phase_duration_seconds` with `prepare_rootfs_head`, `claim_idle_pod`, `create_new_pod`, `wait_for_rootfs_head`, `activate_runtime`, and `resume_total` phases
+- `manager_sandbox_claim_phase_duration_seconds` with `prepare_rootfs_head`, `claim_idle_pod`, `create_new_pod`, `materialize_rootfs_head`, `activate_runtime`, and `resume_total` phases
 
-Resume no longer has a ctld apply/replay phase or a node-local full-object cache. Check the rootfs snapshotter DaemonSet readiness, containerd's `sandbox0` plugin registration, and structured object-range read errors when `wait_for_rootfs_head` is slow or fails. Rootfs object requests use the same PostgreSQL metering outbox as ctld requests. Ctld emits a structured warning when a checkpoint save takes at least 10 seconds or handles at least 512 MiB.
+Resume no longer has a ctld apply/replay phase, a node-local full-object cache, or a remote registry operation for the marker head. When `materialize_rootfs_head` is slow or fails, check the selected node's active `ctld`, read/write access to the containerd API socket, CRI image visibility, rootfs snapshotter readiness, containerd's `sandbox0` plugin registration, and structured object-range read errors. Rootfs object requests use the same PostgreSQL metering outbox as ctld requests. Ctld emits a structured warning when a checkpoint save takes at least 10 seconds or handles at least 512 MiB.
 
 Each sandbox node runs two ctld peers, but exactly one peer on that node should own the primary lock. More than one `ctld_ha_primary` across the whole cluster is normal when the cluster has multiple sandbox nodes. Scrape the `ha-metrics` port on both ctld Pods and group HA checks by the `node` label:
 

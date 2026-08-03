@@ -506,7 +506,6 @@ func main() {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
 	} else if rootFSObjectStore != nil {
 		sandboxService.SetRootFSObjectDeleter(rootFSObjectStore)
-		sandboxService.SetRootFSHeadStore(rootFSObjectStore)
 	}
 	if managerStorageRuntime != nil && managerStorageTokenGenerator != nil {
 		internalHTTPClient := managerStorageRuntime.InternalHTTPClient()
@@ -596,9 +595,7 @@ func main() {
 	if registryProvider != nil && rootFSObjectStoreErr == nil && rootFSObjectStore != nil {
 		imagePublisher, err = templateimage.NewPublisher(rootFSObjectStore, registryProvider, cfg.Registry)
 		if err != nil {
-			logger.Warn("Rootfs head publisher disabled", zap.Error(err))
-		} else {
-			sandboxService.SetRootFSHeadPublisher(imagePublisher)
+			logger.Warn("Template image publisher disabled", zap.Error(err))
 		}
 	}
 	var templateBuildWorker *service.TemplateBuildWorker

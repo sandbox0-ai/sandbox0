@@ -777,6 +777,7 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 		clock:        fixedClock{now: time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)},
 		logger:       zap.NewNop(),
 	}
+	configureRootFSHeadMaterializationTest(t, svc, failedPod, idlePod)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -972,6 +973,7 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecordWithoutPod(t *te
 		clock:        fixedClock{now: time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)},
 		logger:       zap.NewNop(),
 	}
+	configureRootFSHeadMaterializationTest(t, svc, idlePod)
 
 	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
 	if err == nil || !strings.Contains(err.Error(), "stop reconciled hot claim") {
@@ -1150,6 +1152,7 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 		clock:        fixedClock{now: time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)},
 		logger:       zap.NewNop(),
 	}
+	configureRootFSHeadMaterializationTest(t, svc, idlePod)
 
 	_, err := svc.ResumePausedSandboxRuntime(context.Background(), "sandbox-a")
 	if err == nil || !strings.Contains(err.Error(), "stop hot claim") {

@@ -202,7 +202,6 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
 	}
-	configureRootFSHeadTestDependencies(t, svc)
 	var procdCalls []string
 	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
 
@@ -271,7 +270,6 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
 	}
-	configureRootFSHeadTestDependencies(t, svc)
 	var procdCalls []string
 	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
 

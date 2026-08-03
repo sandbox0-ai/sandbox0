@@ -40,6 +40,10 @@ type RootFSSnapshotController interface {
 	AbortRootFSSnapshot(r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int)
 }
 
+type RootFSHeadController interface {
+	MaterializeRootFSHead(r *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int)
+}
+
 type MountedVolumeController interface {
 	MountedVolumeHandler() http.Handler
 }
@@ -97,6 +101,10 @@ func (NotImplementedController) PublishRootFSSnapshot(_ *http.Request, _ ctldapi
 
 func (NotImplementedController) AbortRootFSSnapshot(_ *http.Request, _ ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
 	return ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"}, http.StatusNotImplemented
+}
+
+func (NotImplementedController) MaterializeRootFSHead(_ *http.Request, _ ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
+	return ctldapi.MaterializeRootFSHeadResponse{Error: "ctld rootfs head materialization not implemented"}, http.StatusNotImplemented
 }
 
 func NewMux(controller Controller) http.Handler {
@@ -433,6 +441,28 @@ func NewMux(controller Controller) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		resp, status := rootFSController.AbortRootFSSnapshot(r, req)
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/v1/rootfs/heads/materialize", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rootFSController, ok := controller.(RootFSHeadController)
+		if !ok {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{Error: "ctld rootfs head materialization not implemented"})
+			return
+		}
+		var req ctldapi.MaterializeRootFSHeadRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := rootFSController.MaterializeRootFSHead(r, req)
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(resp)
 	})

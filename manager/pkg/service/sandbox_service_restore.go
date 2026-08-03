@@ -491,15 +491,15 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		return pod, err
 	}
 	resetCopiedSessionState := copiedSessionStateRequiresReset(record.ID, rootFSState)
+	phaseStarted := time.Now()
+	pod, err = s.activateClaimRootFSHead(ctx, pod, req)
+	s.observeClaimPhase(record.TemplateID, claimType, "materialize_rootfs_head", phaseStarted, err)
+	if err != nil {
+		return pod, fmt.Errorf("activate rootfs head: %w", err)
+	}
 	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
 	if err != nil {
 		return pod, err
-	}
-	phaseStarted := time.Now()
-	pod, err = s.waitForPodRootFSHeadReady(ctx, pod.Namespace, pod.Name, req.RootFSHeadImageRef, req.RootFSHeadLayerID)
-	s.observeClaimPhase(record.TemplateID, claimType, "wait_for_rootfs_head", phaseStarted, err)
-	if err != nil {
-		return pod, fmt.Errorf("wait for rootfs head: %w", err)
 	}
 	phaseStarted = time.Now()
 	_, err = s.bindVolumePortals(ctx, pod, req, template)

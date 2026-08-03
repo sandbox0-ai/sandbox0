@@ -131,6 +131,7 @@ func TestPatchClaimedPodReplacesOnlyProcdImageForMetadataHead(t *testing.T) {
 	claimed.Labels[controller.LabelPoolType] = controller.PoolTypeActive
 	claimed.Spec.Containers[procdContainerIndex(claimed.Spec.Containers)].Image =
 		"example.com/rootfs/head@sha256:" + strings.Repeat("a", 64)
+	claimed.Spec.Containers[procdContainerIndex(claimed.Spec.Containers)].ImagePullPolicy = corev1.PullNever
 	claimed.Spec.Containers[1].Image = "example.com/sidecar:v2"
 
 	client := fake.NewSimpleClientset(original.DeepCopy())
@@ -141,6 +142,9 @@ func TestPatchClaimedPodReplacesOnlyProcdImageForMetadataHead(t *testing.T) {
 	}
 	if got := patched.Spec.Containers[0].Image; got != claimed.Spec.Containers[0].Image {
 		t.Fatalf("procd image = %q, want %q", got, claimed.Spec.Containers[0].Image)
+	}
+	if got := patched.Spec.Containers[0].ImagePullPolicy; got != corev1.PullNever {
+		t.Fatalf("procd image pull policy = %q, want %q", got, corev1.PullNever)
 	}
 	if got := patched.Spec.Containers[1].Image; got != original.Spec.Containers[1].Image {
 		t.Fatalf("sidecar image = %q, want unchanged %q", got, original.Spec.Containers[1].Image)
@@ -161,12 +165,14 @@ func TestPatchClaimedPodReplacesOnlyProcdImageForMetadataHead(t *testing.T) {
 	}
 	for _, operation := range operations {
 		if strings.HasPrefix(operation.Path, "/spec/") &&
-			operation.Path != "/spec/containers/0/image" {
+			operation.Path != "/spec/containers/0/image" &&
+			operation.Path != "/spec/containers/0/imagePullPolicy" {
 			t.Fatalf("unexpected spec patch operation: %#v", operation)
 		}
 	}
 	assertClaimPatchOperation(t, operations, "test", "/spec/containers/0/image")
 	assertClaimPatchOperation(t, operations, "replace", "/spec/containers/0/image")
+	assertClaimPatchOperation(t, operations, "add", "/spec/containers/0/imagePullPolicy")
 }
 
 func TestPatchClaimedPodMetadataRejectsAlreadyClaimedPod(t *testing.T) {

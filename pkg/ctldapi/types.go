@@ -1,6 +1,8 @@
 package ctldapi
 
 import (
+	"encoding/json"
+
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 )
@@ -62,18 +64,35 @@ type RootFSInfo struct {
 	SnapshotParentChain []string `json:"snapshot_parent_chain,omitempty"`
 	BaseImageRef        string   `json:"base_image_ref,omitempty"`
 	BaseImageDigest     string   `json:"base_image_digest,omitempty"`
+	// BaseImageConfig is populated only inside ctld's node-local runtime so the
+	// controller can preserve OCI runtime defaults. HTTP handlers redact it.
+	BaseImageConfig json.RawMessage `json:"base_image_config,omitempty"`
 }
 
 // RootFSCheckpointDescriptor is the immutable COW head sealed by ctld. Objects
 // contains every CAS object produced or reused by this runtime session; parent-
 // only objects remain reachable through layer ancestry.
 type RootFSCheckpointDescriptor struct {
-	Reference          rootfshead.HeadReference `json:"reference"`
-	Objects            []rootfshead.Object      `json:"objects,omitempty"`
-	CreatedBytes       int64                    `json:"created_bytes,omitempty"`
-	CreatedObjectCount int64                    `json:"created_object_count,omitempty"`
-	DirtyPaths         int                      `json:"dirty_paths,omitempty"`
-	SealDurationMS     int64                    `json:"seal_duration_ms,omitempty"`
+	Reference          rootfshead.HeadReference  `json:"reference"`
+	Image              rootfshead.ImageReference `json:"image"`
+	Objects            []rootfshead.Object       `json:"objects,omitempty"`
+	CreatedBytes       int64                     `json:"created_bytes,omitempty"`
+	CreatedObjectCount int64                     `json:"created_object_count,omitempty"`
+	DirtyPaths         int                       `json:"dirty_paths,omitempty"`
+	SealDurationMS     int64                     `json:"seal_duration_ms,omitempty"`
+}
+
+// MaterializeRootFSHeadRequest asks the selected node to reconstruct one
+// digest-pinned metadata-only image directly in its containerd content store.
+type MaterializeRootFSHeadRequest struct {
+	Head  rootfshead.HeadReference  `json:"head"`
+	Image rootfshead.ImageReference `json:"image"`
+}
+
+type MaterializeRootFSHeadResponse struct {
+	Materialized bool   `json:"materialized"`
+	Image        string `json:"image,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 // RootFSPortalPath maps an unbound volume portal's visible mount path to the

@@ -884,9 +884,17 @@ func (c combinedController) AbortRootFSSnapshot(r *http.Request, req ctldapi.Abo
 	return c.RootFS.AbortRootFSSnapshot(r, req)
 }
 
+func (c combinedController) MaterializeRootFSHead(r *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
+	if c.RootFS == nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: "ctld rootfs head materialization not implemented"}, http.StatusNotImplemented
+	}
+	return c.RootFS.MaterializeRootFSHead(r, req)
+}
+
 type rootFSHandler interface {
 	ctldserver.RootFSController
 	ctldserver.RootFSSnapshotController
+	ctldserver.RootFSHeadController
 }
 
 type volumePortalHandler interface {

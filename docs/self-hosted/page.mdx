@@ -58,7 +58,7 @@ flowchart TD
     end
 ```
 
-In single-cluster fullmode, the storage API runtime runs in the `manager` Deployment. Each sandbox node has `ctld-a` and `ctld-b` DaemonSet Pods; the elected primary continuously persists writable-rootfs changes and seals metadata heads while owning volume portals and network policy, and the synchronized standby assumes those responsibilities after promotion. A separate external containerd snapshotter lazily serves immutable metadata heads from S3/OSS object ranges. PostgreSQL, S3/OSS, and the optional image registry are middleware dependencies.
+In single-cluster fullmode, the storage API runtime runs in the `manager` Deployment. Each sandbox node has `ctld-a` and `ctld-b` DaemonSet Pods; the elected primary continuously persists writable-rootfs changes, seals metadata heads, and materializes a selected head directly into node-local containerd while owning volume portals and network policy. The synchronized standby assumes those responsibilities after promotion. A separate external containerd snapshotter lazily serves immutable metadata heads from S3/OSS object ranges. PostgreSQL and S3/OSS are rootfs lifecycle dependencies. The optional image registry is used for template image publication and cold base pulls, not warm marker-head pause/resume.
 
 ### Request Flow
 
@@ -76,7 +76,7 @@ One region should keep control plane and its managed data-plane clusters aligned
 
 - `spec.database` (builtin for quick start, external for production)
 - `spec.storage` (builtin for quick start, S3/OSS for production)
-- `spec.registry`
+- `spec.registry` when template image publication or an internal base-image registry is required; rootfs marker heads do not use it
 - `spec.services.clusterGateway` and `spec.services.manager`
 - `spec.storage.runtime` and `spec.network`
 - `spec.publicExposure`

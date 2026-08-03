@@ -271,6 +271,10 @@ func (fakeRootFSHandler) AbortRootFSSnapshot(_ *http.Request, _ ctldapi.AbortRoo
 	return ctldapi.AbortRootFSSnapshotResponse{Aborted: true}, http.StatusOK
 }
 
+func (fakeRootFSHandler) MaterializeRootFSHead(_ *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
+	return ctldapi.MaterializeRootFSHeadResponse{Materialized: true, Image: req.Image.Name}, http.StatusOK
+}
+
 type fakeVolumePortalHandler struct {
 	mountedHandler http.Handler
 	bindErr        error

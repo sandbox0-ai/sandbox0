@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -52,9 +53,11 @@ type ClaimRequest struct {
 	WebhookStateVolumeID string `json:"-"`
 	// RootFSHeadImageRef replaces only procd's image when activating a persisted
 	// rootfs on either a warm or cold pod.
-	RootFSHeadImageRef                string `json:"-"`
-	RootFSHeadLayerID                 string `json:"-"`
-	RootFSBaseImageRef                string `json:"-"`
+	RootFSHeadImageRef                string                    `json:"-"`
+	RootFSHeadLayerID                 string                    `json:"-"`
+	RootFSBaseImageRef                string                    `json:"-"`
+	RootFSHeadReference               rootfshead.HeadReference  `json:"-"`
+	RootFSHeadImage                   rootfshead.ImageReference `json:"-"`
 	mayHaveExistingCredentialBindings bool
 }
 
@@ -528,6 +531,18 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 		pod = readyPod
 	}
+	if req.RootFSHeadImageRef != "" {
+		phaseStarted = time.Now()
+		pod, err = s.activateClaimRootFSHead(ctx, pod, req)
+		s.observeClaimPhase(req.Template, claimType, "materialize_rootfs_head", phaseStarted, err)
+		if err != nil {
+			s.requestSandboxDeletionAfterClaimFailure(pod, "rootfs head activation failed")
+			if metrics != nil {
+				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+			}
+			return nil, fmt.Errorf("activate rootfs head: %w", err)
+		}
+	}
 
 	phaseStarted = time.Now()
 	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, req.SnapshotID != "")
@@ -540,18 +555,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	assignedPodUID := pod.UID
-	if req.RootFSHeadImageRef != "" {
-		phaseStarted = time.Now()
-		pod, err = s.waitForPodRootFSHeadReady(ctx, pod.Namespace, pod.Name, req.RootFSHeadImageRef, req.RootFSHeadLayerID)
-		s.observeClaimPhase(req.Template, claimType, "wait_for_rootfs_head", phaseStarted, err)
-		if err != nil {
-			s.requestSandboxDeletionAfterClaimFailure(pod, "rootfs head activation failed")
-			if metrics != nil {
-				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-			}
-			return nil, fmt.Errorf("wait for rootfs head: %w", err)
-		}
-	}
 
 	claimRecordPersisted := false
 	cleanupClaimFailure := func(pod *corev1.Pod, reason string) {
@@ -1176,6 +1179,14 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			zap.String("pod", pod.Name),
 			zap.String("sandboxID", sandboxID),
 		)
+		if err := s.materializeClaimRootFSHead(ctx, pod, req); err != nil {
+			if ctldapi.IsConflictError(err) {
+				lostCandidates[pod.Namespace+"/"+pod.Name] = struct{}{}
+				s.observeIdleClaim(templateID, "rootfs_base_unavailable")
+				return fmt.Errorf("%w: materialize rootfs head on pod %s/%s: %v", errIdlePodClaimLost, pod.Namespace, pod.Name, err)
+			}
+			return fmt.Errorf("materialize rootfs head on pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
 
 		stateVolume, err := s.prepareWebhookStateVolume(ctx, req, sandboxID)
 		if err != nil {
@@ -1533,11 +1544,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		},
 		Spec: spec,
 	}
-	if err := applyClaimRootFSHeadToPod(pod, req); err != nil {
-		rollbackStateVolume()
-		return nil, err
-	}
-	if err := applyColdRootFSBaseImageVolume(pod, req); err != nil {
+	if err := applyColdRootFSBaseImageToPod(pod, req); err != nil {
 		rollbackStateVolume()
 		return nil, err
 	}

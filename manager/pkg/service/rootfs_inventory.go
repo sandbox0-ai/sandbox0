@@ -29,9 +29,10 @@ type RootFSObjectReader interface {
 // RootFSInventoryCandidate is a live metadata head whose initially recorded
 // object set still includes generation-local or ancestor references.
 type RootFSInventoryCandidate struct {
-	LayerID string
-	TeamID  string
-	Head    rootfshead.HeadReference
+	LayerID       string
+	TeamID        string
+	Head          rootfshead.HeadReference
+	ImageEnvelope rootfshead.Object
 }
 
 // ListRootFSInventoryCandidates returns live metadata heads that need an
@@ -60,14 +61,25 @@ func (s *PGSandboxStore) ListRootFSInventoryCandidates(ctx context.Context, limi
 				AND (expires_at IS NULL OR expires_at > NOW())
 		)
 		SELECT l.layer_id, l.team_id, l.head_object_digest,
-			l.head_object_media_type, l.head_object_size, l.head_object_key
+			l.head_object_media_type, l.head_object_size, l.head_object_key,
+			COALESCE(envelope.object_key, ''), COALESCE(envelope.diff_digest, ''),
+			COALESCE(envelope.diff_size, 0), COALESCE(envelope.diff_media_type, '')
 		FROM roots r
 		JOIN manager.rootfs_layers l ON l.layer_id = r.layer_id
+		LEFT JOIN LATERAL (
+			SELECT object.object_key, object.diff_digest, object.diff_size, object.diff_media_type
+			FROM manager.rootfs_layer_objects relation
+			JOIN manager.rootfs_objects object ON object.object_key = relation.object_key
+			WHERE relation.layer_id = l.layer_id
+				AND object.diff_media_type = $2
+			ORDER BY object.object_key ASC
+			LIMIT 1
+		) envelope ON TRUE
 		WHERE l.object_inventory_complete = FALSE
 			AND l.head_object_key <> ''
 		ORDER BY l.created_at ASC
 		LIMIT $1
-	`, limit)
+	`, limit, rootfshead.ImageEnvelopeMediaType)
 	if err != nil {
 		return nil, fmt.Errorf("list rootfs inventory candidates: %w", err)
 	}
@@ -85,6 +97,10 @@ func (s *PGSandboxStore) ListRootFSInventoryCandidates(ctx context.Context, limi
 			&candidate.Head.Manifest.MediaType,
 			&candidate.Head.Manifest.Size,
 			&candidate.Head.Manifest.Key,
+			&candidate.ImageEnvelope.Key,
+			&candidate.ImageEnvelope.Digest,
+			&candidate.ImageEnvelope.Size,
+			&candidate.ImageEnvelope.MediaType,
 		); err != nil {
 			return nil, err
 		}
@@ -127,6 +143,9 @@ func (s *PGSandboxStore) CompleteRootFSObjectInventory(ctx context.Context, cand
 	}
 	if !rootFSInventoryContains(objects, marker.Key) {
 		return false, fmt.Errorf("rootfs inventory for layer %s omits marker object", candidate.LayerID)
+	}
+	if strings.TrimSpace(candidate.ImageEnvelope.Key) != "" && !rootFSInventoryContains(objects, candidate.ImageEnvelope.Key) {
+		return false, fmt.Errorf("rootfs inventory for layer %s omits image envelope", candidate.LayerID)
 	}
 	payload, err := json.Marshal(objects)
 	if err != nil {
@@ -392,6 +411,12 @@ func CollectRootFSObjectInventory(ctx context.Context, reader RootFSObjectReader
 		return nil, err
 	}
 	objects[marker.Key] = marker
+	if strings.TrimSpace(candidate.ImageEnvelope.Key) != "" {
+		if err := candidate.ImageEnvelope.Validate(rootfshead.ImageEnvelopeMediaType); err != nil {
+			return nil, fmt.Errorf("invalid rootfs head image envelope: %w", err)
+		}
+		objects[candidate.ImageEnvelope.Key] = candidate.ImageEnvelope
+	}
 	result := make([]rootfshead.Object, 0, len(objects))
 	for _, object := range objects {
 		result = append(result, object)

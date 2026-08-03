@@ -326,6 +326,10 @@ func (c fakeCRIClient) PodSandboxStats(_ context.Context, req *runtimeapi.PodSan
 	return &runtimeapi.PodSandboxStatsResponse{Stats: c.statsByID[req.PodSandboxId]}, nil
 }
 
+func (c fakeCRIClient) ImageStatus(_ context.Context, _ *runtimeapi.ImageStatusRequest, _ ...grpc.CallOption) (*runtimeapi.ImageStatusResponse, error) {
+	return &runtimeapi.ImageStatusResponse{}, c.err
+}
+
 func minimalRuntimePodStats(id string) *runtimeapi.PodSandboxStats {
 	return &runtimeapi.PodSandboxStats{
 		Attributes: &runtimeapi.PodSandboxAttributes{Id: id},

@@ -3,12 +3,14 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"path"
 	"sort"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/stretchr/testify/assert"
@@ -97,10 +99,14 @@ func TestRootFSInventoryCompactionReclaimsDeletedAndTransientS3Objects(t *testin
 
 	_, err := objects.Head(parentFiles["deleted.bin"].Key)
 	assert.True(t, objectstore.IsNotFound(err), "deleted file chunk must be physically removed")
+	_, err = objects.Head(parentCandidate.ImageEnvelope.Key)
+	assert.True(t, objectstore.IsNotFound(err), "unreferenced parent OCI envelope must be physically removed")
 	_, err = objects.Head(transient.Key)
 	assert.True(t, objectstore.IsNotFound(err), "transient write-amplification object must be physically removed")
 	_, err = objects.Head(childFiles["keep.bin"].Key)
 	require.NoError(t, err, "an inherited live chunk must remain")
+	_, err = objects.Head(childCandidate.ImageEnvelope.Key)
+	require.NoError(t, err, "the live head OCI envelope must remain")
 	assert.Equal(t, int64(0), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
 
 	afterBytes := rootFSInventoryKnownPhysicalBytes(t, childObjects, objects)
@@ -202,6 +208,18 @@ func rootFSInventoryFixture(t *testing.T, store objectstore.Store, prefix, headI
 	require.NoError(t, err)
 	require.NoError(t, store.Put(marker.Key, bytes.NewReader(markerPayload)))
 	objects[marker.Key] = marker
+	baseConfig, err := json.Marshal(ocispec.Image{
+		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		RootFS:   ocispec.RootFS{Type: "layers"},
+	})
+	require.NoError(t, err)
+	_, envelope, err := rootfshead.ComposeImage(candidate.Head, baseConfig)
+	require.NoError(t, err)
+	envelopeObject, envelopePayload, err := rootfshead.ImageEnvelopeObject(envelope)
+	require.NoError(t, err)
+	require.NoError(t, store.Put(envelopeObject.Key, bytes.NewReader(envelopePayload)))
+	objects[envelopeObject.Key] = envelopeObject
+	candidate.ImageEnvelope = envelopeObject
 
 	result := make([]rootfshead.Object, 0, len(objects))
 	for _, object := range objects {

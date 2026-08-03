@@ -209,8 +209,6 @@ func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
 		clock:         systemTime{},
 		logger:        zap.NewNop(),
 	}
-	configureRootFSHeadTestDependencies(t, svc)
-
 	require.NoError(t, svc.RecoverTerminatedSandboxRuntime(context.Background(), pod))
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 

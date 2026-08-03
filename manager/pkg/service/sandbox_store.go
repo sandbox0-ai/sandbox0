@@ -1167,6 +1167,7 @@ func supportedRootFSObjectMediaType(mediaType string) bool {
 		rootfshead.FileMediaType,
 		rootfshead.ChunkMediaType,
 		rootfshead.MarkerMediaType,
+		rootfshead.ImageEnvelopeMediaType,
 		ocispec.MediaTypeImageLayer,
 		ocispec.MediaTypeImageLayerGzip,
 		ocispec.MediaTypeImageLayerZstd,

@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"github.com/google/uuid"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"go.uber.org/zap"
@@ -117,6 +115,15 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	state.ParentLayerID = parentLayerID
 	state.ExpectedHeadLayerID = expectedHeadLayerID
 	platform := s.rootFSPlatformForPod(pod)
+	if platform.OS == "" {
+		platform.OS = state.PlatformOS
+	}
+	if platform.Architecture == "" {
+		platform.Architecture = state.PlatformArchitecture
+	}
+	if platform.Variant == "" {
+		platform.Variant = state.PlatformVariant
+	}
 	if platform.OS == "" && parentState != nil {
 		platform.OS = parentState.PlatformOS
 	}
@@ -130,8 +137,8 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	state.PlatformArchitecture = platform.Architecture
 	state.PlatformVariant = platform.Variant
 	state.LayerChain = appendRootFSCheckpointLayer(parentState, state)
-	if err := s.publishSandboxRootFSHead(ctx, state); err != nil {
-		s.deleteUncommittedRootFSObject(state, "rootfs head publication failed")
+	if err := validatePersistedRootFSHeadImage(state); err != nil {
+		s.deleteUncommittedRootFSObject(state, "rootfs head image validation failed")
 		return nil, err
 	}
 	return state, nil
@@ -199,57 +206,29 @@ func rootFSLayerFromState(state *SandboxRootFSState) *SandboxRootFSLayer {
 	}
 }
 
-func (s *SandboxService) publishSandboxRootFSHead(ctx context.Context, state *SandboxRootFSState) error {
+func validatePersistedRootFSHeadImage(state *SandboxRootFSState) error {
 	if state == nil {
 		return nil
 	}
-	if s == nil || s.rootFSHeadPublisher == nil {
-		return fmt.Errorf("metadata-only rootfs head publisher is not configured")
-	}
-	if s.rootFSHeadStore == nil {
-		return fmt.Errorf("rootfs head object store is not configured")
-	}
-	reference, err := rootFSHeadReferenceFromState(state)
-	if err != nil {
+	if _, err := rootFSHeadReferenceFromState(state); err != nil {
 		return err
 	}
-	markerObject, markerPayload, err := rootfshead.MarkerObject(reference)
-	if err != nil {
-		return err
+	image := rootfshead.ImageReference{
+		Name:           strings.TrimSpace(state.HeadImageRef),
+		ManifestDigest: strings.TrimSpace(state.HeadImageDigest),
+		Platform:       rootFSPlatformFromState(state),
 	}
-	if err := s.rootFSHeadStore.Put(markerObject.Key, bytes.NewReader(markerPayload)); err != nil {
-		return fmt.Errorf("store rootfs head marker: %w", err)
-	}
-	if err := s.queueUncommittedRootFSObjectDeletion(ctx, state, s.now().Add(sandboxRootFSUncommittedObjectDeleteDelay)); err != nil {
-		return fmt.Errorf("queue rootfs head manifest cleanup: %w", err)
-	}
-	result, err := s.rootFSHeadPublisher.PublishHead(ctx, templateimage.HeadRequest{
-		TeamID:          state.TeamID,
-		SandboxID:       state.SandboxID,
-		BaseImageRef:    state.BaseImageRef,
-		BaseImageDigest: state.BaseImageDigest,
-		Platform: ocispec.Platform{
-			OS:           state.PlatformOS,
-			Architecture: state.PlatformArchitecture,
-			Variant:      state.PlatformVariant,
-		},
-		Reference: reference,
-		CreatedAt: s.now().UTC(),
-	})
-	if err != nil {
-		return fmt.Errorf("publish metadata-only rootfs head: %w", err)
-	}
-	if result == nil || strings.TrimSpace(result.PullReference) == "" || result.ManifestDigest == "" {
-		return fmt.Errorf("publish metadata-only rootfs head returned no digest-pinned image")
-	}
-	state.HeadImageRef = result.PullReference
-	state.HeadImageDigest = result.ManifestDigest.String()
-	if len(state.LayerChain) > 0 {
-		headLayer := state.LayerChain[len(state.LayerChain)-1]
-		headLayer.HeadImageRef = state.HeadImageRef
-		headLayer.HeadImageDigest = state.HeadImageDigest
+	if err := image.Validate(); err != nil {
+		return fmt.Errorf("validate node-local rootfs head image: %w", err)
 	}
 	return nil
+}
+
+func rootFSPlatformFromState(state *SandboxRootFSState) ocispec.Platform {
+	if state == nil {
+		return ocispec.Platform{}
+	}
+	return ocispec.Platform{OS: state.PlatformOS, Architecture: state.PlatformArchitecture, Variant: state.PlatformVariant}
 }
 
 func rootFSHeadReferenceFromState(state *SandboxRootFSState) (rootfshead.HeadReference, error) {
@@ -517,21 +496,26 @@ func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, res
 	}
 	manifest := resp.Checkpoint.Reference.Manifest
 	return &SandboxRootFSState{
-		SandboxID:           sandboxID,
-		TeamID:              teamID,
-		RuntimeGeneration:   generation,
-		Runtime:             resp.Info.Runtime,
-		RuntimeHandler:      resp.Info.RuntimeHandler,
-		BaseImageRef:        resp.Info.BaseImageRef,
-		BaseImageDigest:     resp.Info.BaseImageDigest,
-		Snapshotter:         resp.Info.Snapshotter,
-		SnapshotParent:      resp.Info.SnapshotParent,
-		SnapshotParentChain: append([]string(nil), resp.Info.SnapshotParentChain...),
-		HeadObjectDigest:    manifest.Digest,
-		HeadObjectMediaType: manifest.MediaType,
-		HeadObjectSize:      manifest.Size,
-		HeadObjectKey:       manifest.Key,
-		Objects:             append([]rootfshead.Object(nil), resp.Checkpoint.Objects...),
+		SandboxID:            sandboxID,
+		TeamID:               teamID,
+		RuntimeGeneration:    generation,
+		Runtime:              resp.Info.Runtime,
+		RuntimeHandler:       resp.Info.RuntimeHandler,
+		BaseImageRef:         resp.Info.BaseImageRef,
+		BaseImageDigest:      resp.Info.BaseImageDigest,
+		PlatformOS:           resp.Checkpoint.Image.Platform.OS,
+		PlatformArchitecture: resp.Checkpoint.Image.Platform.Architecture,
+		PlatformVariant:      resp.Checkpoint.Image.Platform.Variant,
+		Snapshotter:          resp.Info.Snapshotter,
+		SnapshotParent:       resp.Info.SnapshotParent,
+		SnapshotParentChain:  append([]string(nil), resp.Info.SnapshotParentChain...),
+		HeadObjectDigest:     manifest.Digest,
+		HeadObjectMediaType:  manifest.MediaType,
+		HeadObjectSize:       manifest.Size,
+		HeadObjectKey:        manifest.Key,
+		HeadImageRef:         resp.Checkpoint.Image.Name,
+		HeadImageDigest:      resp.Checkpoint.Image.ManifestDigest,
+		Objects:              append([]rootfshead.Object(nil), resp.Checkpoint.Objects...),
 	}, nil
 }
 
@@ -541,22 +525,27 @@ func rootFSStateFromPreparedSnapshot(sandboxID, teamID string, generation int64,
 	}
 	manifest := prepared.Checkpoint.Reference.Manifest
 	return &SandboxRootFSState{
-		LayerID:             layerID,
-		SandboxID:           sandboxID,
-		TeamID:              teamID,
-		RuntimeGeneration:   generation,
-		Runtime:             prepared.Info.Runtime,
-		RuntimeHandler:      prepared.Info.RuntimeHandler,
-		BaseImageRef:        prepared.Info.BaseImageRef,
-		BaseImageDigest:     prepared.Info.BaseImageDigest,
-		Snapshotter:         prepared.Info.Snapshotter,
-		SnapshotParent:      prepared.Info.SnapshotParent,
-		SnapshotParentChain: append([]string(nil), prepared.Info.SnapshotParentChain...),
-		HeadObjectDigest:    manifest.Digest,
-		HeadObjectMediaType: manifest.MediaType,
-		HeadObjectSize:      manifest.Size,
-		HeadObjectKey:       manifest.Key,
-		Objects:             append([]rootfshead.Object(nil), prepared.Checkpoint.Objects...),
+		LayerID:              layerID,
+		SandboxID:            sandboxID,
+		TeamID:               teamID,
+		RuntimeGeneration:    generation,
+		Runtime:              prepared.Info.Runtime,
+		RuntimeHandler:       prepared.Info.RuntimeHandler,
+		BaseImageRef:         prepared.Info.BaseImageRef,
+		BaseImageDigest:      prepared.Info.BaseImageDigest,
+		PlatformOS:           prepared.Checkpoint.Image.Platform.OS,
+		PlatformArchitecture: prepared.Checkpoint.Image.Platform.Architecture,
+		PlatformVariant:      prepared.Checkpoint.Image.Platform.Variant,
+		Snapshotter:          prepared.Info.Snapshotter,
+		SnapshotParent:       prepared.Info.SnapshotParent,
+		SnapshotParentChain:  append([]string(nil), prepared.Info.SnapshotParentChain...),
+		HeadObjectDigest:     manifest.Digest,
+		HeadObjectMediaType:  manifest.MediaType,
+		HeadObjectSize:       manifest.Size,
+		HeadObjectKey:        manifest.Key,
+		HeadImageRef:         prepared.Checkpoint.Image.Name,
+		HeadImageDigest:      prepared.Checkpoint.Image.ManifestDigest,
+		Objects:              append([]rootfshead.Object(nil), prepared.Checkpoint.Objects...),
 	}
 }
 

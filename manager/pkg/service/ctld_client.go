@@ -88,6 +88,10 @@ func (c *CtldClient) AbortRootFSSnapshotWithTimeout(ctx context.Context, ctldAdd
 	return c.apiWithTimeout(timeout).AbortRootFSSnapshot(ctx, ctldAddress, req)
 }
 
+func (c *CtldClient) MaterializeRootFSHeadWithTimeout(ctx context.Context, ctldAddress string, req ctldapi.MaterializeRootFSHeadRequest, timeout time.Duration) (*ctldapi.MaterializeRootFSHeadResponse, error) {
+	return c.apiWithTimeout(timeout).MaterializeRootFSHead(ctx, ctldAddress, req)
+}
+
 func (c *CtldClient) apiOrDefault() *ctldapi.Client {
 	if c != nil && c.api != nil {
 		return c.api

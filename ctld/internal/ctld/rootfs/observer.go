@@ -22,6 +22,8 @@ type Observer struct {
 	operationDuration *prometheus.HistogramVec
 	phaseDuration     *prometheus.HistogramVec
 	checkpointBytes   *prometheus.HistogramVec
+	chainDepth        *prometheus.HistogramVec
+	cacheRequests     *prometheus.CounterVec
 }
 
 func NewObserver(registry prometheus.Registerer, logger *zap.Logger) *Observer {
@@ -47,6 +49,15 @@ func NewObserver(registry prometheus.Registerer, logger *zap.Logger) *Observer {
 		Help:    "Rootfs checkpoint bytes by operation and byte class",
 		Buckets: byteBuckets,
 	}, []string{"operation", "kind"})
+	observer.chainDepth = factory.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "ctld_rootfs_checkpoint_chain_depth",
+		Help:    "Rootfs checkpoint layer chain depth by operation",
+		Buckets: []float64{1, 2, 4, 8, 16, 32, 64},
+	}, []string{"operation"})
+	observer.cacheRequests = factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "ctld_rootfs_object_cache_requests_total",
+		Help: "Rootfs object cache requests by result",
+	}, []string{"result"})
 	return observer
 }
 
@@ -89,7 +100,13 @@ func (o *Observer) ObserveBytes(operation, kind string, bytes int64) {
 	o.checkpointBytes.WithLabelValues(operation, kind).Observe(float64(bytes))
 }
 
-func (o *Observer) ObserveOperation(operation string, target ctldapi.RootFSContainerRef, inputBytes, outputBytes, excludedBytes int64, started time.Time, statusCode int, message string) {
+func (o *Observer) ObserveCache(result string) {
+	if o != nil && o.cacheRequests != nil {
+		o.cacheRequests.WithLabelValues(result).Inc()
+	}
+}
+
+func (o *Observer) ObserveOperation(operation string, target ctldapi.RootFSContainerRef, chainDepth int, inputBytes, outputBytes, excludedBytes int64, started time.Time, statusCode int, message string) {
 	if o == nil {
 		return
 	}
@@ -104,6 +121,9 @@ func (o *Observer) ObserveOperation(operation string, target ctldapi.RootFSConta
 	if o.operationDuration != nil {
 		o.operationDuration.WithLabelValues(operation, status).Observe(duration.Seconds())
 	}
+	if o.chainDepth != nil && chainDepth > 0 {
+		o.chainDepth.WithLabelValues(operation).Observe(float64(chainDepth))
+	}
 	o.ObserveBytes(operation, "input", inputBytes)
 	o.ObserveBytes(operation, "output", outputBytes)
 	o.ObserveBytes(operation, "excluded", excludedBytes)
@@ -117,6 +137,9 @@ func (o *Observer) ObserveOperation(operation string, target ctldapi.RootFSConta
 		zap.String("namespace", target.Namespace),
 		zap.String("pod", target.PodName),
 		zap.String("container", target.ContainerName),
+	}
+	if chainDepth >= 0 {
+		fields = append(fields, zap.Int("chain_depth", chainDepth))
 	}
 	if inputBytes >= 0 {
 		fields = append(fields, zap.Int64("input_bytes", inputBytes))

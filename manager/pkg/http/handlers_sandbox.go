@@ -21,8 +21,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
-const codeRootFSHeadMigrationRequired = "rootfs_head_migration_required"
-
 type updateSandboxRequest struct {
 	Config *service.SandboxUpdateConfig `json:"config"`
 }
@@ -81,10 +79,6 @@ func (s *Server) claimSandbox(c *gin.Context) {
 		}
 		if errors.Is(err, service.ErrClaimConflict) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
-			return
-		}
-		if errors.Is(err, service.ErrRootFSHeadMigrationRequired) {
-			spec.JSONError(c, http.StatusConflict, codeRootFSHeadMigrationRequired, err.Error())
 			return
 		}
 		if errors.Is(err, service.ErrDataPlaneNotReady) {
@@ -544,8 +538,6 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s conflicts with another lifecycle operation", action))
 	case apierrors.IsNotFound(err):
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
-	case errors.Is(err, service.ErrRootFSHeadMigrationRequired):
-		spec.JSONError(c, http.StatusConflict, codeRootFSHeadMigrationRequired, err.Error())
 	case errors.Is(err, service.ErrQuotaExceeded):
 		spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 	case errors.Is(err, service.ErrSandboxCheckpointRequiresCtld):

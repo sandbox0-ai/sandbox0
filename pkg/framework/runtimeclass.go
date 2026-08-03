@@ -7,8 +7,7 @@ import (
 	"strings"
 )
 
-// PatchScenarioSandboxRuntimeClass points scenario sandbox Pods at a dedicated
-// containerd handler backed by the Sandbox0 rootfs snapshotter.
+// PatchScenarioSandboxRuntimeClass points scenario sandbox Pods at the requested RuntimeClass.
 func PatchScenarioSandboxRuntimeClass(ctx context.Context, kubeconfig string, infra InfraConfig, runtimeClassName string) error {
 	runtimeClassName = strings.TrimSpace(runtimeClassName)
 	if runtimeClassName == "" {
@@ -29,10 +28,9 @@ func sandboxRuntimeClassPatch(runtimeClassName string) (string, error) {
 	patch := map[string]any{
 		"spec": map[string]any{
 			"services": map[string]any{
-				"ctld": map[string]any{
-					"rootfsSnapshotter": map[string]any{
-						"runtimeClassName": runtimeClassName,
-						"handler":          runtimeClassName,
+				"manager": map[string]any{
+					"config": map[string]any{
+						"sandboxRuntimeClassName": runtimeClassName,
 					},
 				},
 			},

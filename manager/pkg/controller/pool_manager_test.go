@@ -57,25 +57,6 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 	assert.Equal(t, "logical-a", got.Labels[LabelTemplateLogicalID])
 }
 
-func TestBuildPodTemplatePinsImagePullToRootFSSnapshotter(t *testing.T) {
-	configPath := writeManagerConfig(t, `
-sandbox_runtime_class_name: gvisor-rootfs
-sandbox_runtime_handler: gvisor-rootfs
-`)
-	t.Setenv("CONFIG_PATH", configPath)
-	pm := &PoolManager{}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			MainContainer: v1alpha1.ContainerSpec{Image: "busybox:latest"},
-		},
-	}
-
-	got, err := pm.buildPodTemplate(template, "hash-v1")
-	require.NoError(t, err)
-	assert.Equal(t, "gvisor-rootfs", got.Annotations[v1alpha1.ContainerdRuntimeHandlerAnnotation])
-}
-
 func TestAutoscalerSafeToEvictAnnotationKeysArePlatformConfigured(t *testing.T) {
 	keys, err := NormalizeAutoscalerSafeToEvictAnnotationKeys([]string{
 		" goatscaler.io/safe-to-evict ",
@@ -979,24 +960,6 @@ autoscaler_safe_to_evict_annotation_keys:
 autoscaler_safe_to_evict_annotation_keys:
   - goatscaler.io/safe-to-evict
 `)
-	t.Setenv("CONFIG_PATH", configB)
-	hashB, err := TemplateSpecHash(template)
-	require.NoError(t, err)
-	assert.NotEqual(t, hashA, hashB)
-}
-
-func TestTemplateSpecHashIncludesSandboxRuntimeHandler(t *testing.T) {
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
-		Spec:       v1alpha1.SandboxTemplateSpec{MainContainer: v1alpha1.ContainerSpec{Image: "busybox:latest"}},
-	}
-
-	configA := writeManagerConfig(t, "sandbox_runtime_handler: sandbox0-runc\n")
-	t.Setenv("CONFIG_PATH", configA)
-	hashA, err := TemplateSpecHash(template)
-	require.NoError(t, err)
-
-	configB := writeManagerConfig(t, "sandbox_runtime_handler: sandbox0-gvisor\n")
 	t.Setenv("CONFIG_PATH", configB)
 	hashB, err := TemplateSpecHash(template)
 	require.NoError(t, err)

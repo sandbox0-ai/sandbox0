@@ -34,6 +34,7 @@ func TestRecoverTerminatedSandboxRuntimeStartsDurableCrashPause(t *testing.T) {
 		clock:         systemTime{},
 		logger:        zap.NewNop(),
 	}
+
 	require.NoError(t, svc.RecoverTerminatedSandboxRuntime(context.Background(), pod))
 	require.NoError(t, svc.RecoverTerminatedSandboxRuntime(context.Background(), pod))
 
@@ -65,6 +66,7 @@ func TestRecoverTerminatedSandboxRuntimeIgnoresAutoResumeAccessPolicy(t *testing
 		clock:         systemTime{},
 		logger:        zap.NewNop(),
 	}
+
 	require.NoError(t, svc.RecoverTerminatedSandboxRuntime(context.Background(), pod))
 
 	require.Len(t, store.lifecycleTxns, 1)
@@ -168,17 +170,15 @@ func TestRecoverTerminatedSandboxRuntimeWaitsForConflictingLifecycle(t *testing.
 
 func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
 	var preparedTarget ctldapi.RootFSContainerRef
-	var checkpoint ctldapi.RootFSCheckpointDescriptor
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/rootfs/snapshots/prepare":
 			var req ctldapi.PrepareRootFSSnapshotRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 			preparedTarget = req.Target
-			checkpoint, _ = rootFSTestCheckpoint(t, req.HeadID)
-			require.NoError(t, json.NewEncoder(w).Encode(crashRecoveryPrepareResponse(checkpoint)))
+			require.NoError(t, json.NewEncoder(w).Encode(crashRecoveryPrepareResponse()))
 		case "/api/v1/rootfs/snapshots/publish":
-			require.NoError(t, json.NewEncoder(w).Encode(crashRecoveryPublishResponse(checkpoint)))
+			require.NoError(t, json.NewEncoder(w).Encode(crashRecoveryPublishResponse()))
 		default:
 			t.Fatalf("unexpected ctld path %s", r.URL.Path)
 		}
@@ -209,6 +209,7 @@ func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
 		clock:         systemTime{},
 		logger:        zap.NewNop(),
 	}
+
 	require.NoError(t, svc.RecoverTerminatedSandboxRuntime(context.Background(), pod))
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
@@ -219,7 +220,7 @@ func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 	state := store.rootFSStates["sandbox-1"]
 	require.NotNil(t, state)
-	assert.Equal(t, checkpoint.Reference.Manifest.Digest, state.HeadObjectDigest)
+	assert.Equal(t, "sha256:recovered", state.DiffDigest)
 	assert.NotEmpty(t, state.LayerID)
 }
 
@@ -269,11 +270,13 @@ func TestCompleteHealthRecoveryFallsBackAndFencesBeforeDeletingPod(t *testing.T)
 	pod := unhealthyRecoveryTestPod(now.Add(-2 * time.Minute))
 	pod.Status.HostIP = ctldURL.Hostname()
 	store := crashRecoveryTestStore(pod)
-	previous := rootFSTestMetadataHeadState("sandbox-1", "team-1")
-	previous.LayerID = "previous-head"
-	previous.RuntimeGeneration = 2
 	store.rootFSStates = map[string]*SandboxRootFSState{
-		"sandbox-1": previous,
+		"sandbox-1": {
+			SandboxID:         "sandbox-1",
+			TeamID:            "team-1",
+			LayerID:           "previous-head",
+			RuntimeGeneration: 2,
+		},
 	}
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	deleted := false
@@ -316,11 +319,13 @@ func TestCompleteCrashRecoveryFallsBackToLastCommittedHeadWhenSnapshotWasRemoved
 	pod.Status.ContainerStatuses = nil
 	pod.Status.HostIP = ctldURL.Hostname()
 	store := crashRecoveryTestStore(pod)
-	previous := rootFSTestMetadataHeadState("sandbox-1", "team-1")
-	previous.LayerID = "previous-head"
-	previous.RuntimeGeneration = 2
 	store.rootFSStates = map[string]*SandboxRootFSState{
-		"sandbox-1": previous,
+		"sandbox-1": {
+			SandboxID:         "sandbox-1",
+			TeamID:            "team-1",
+			LayerID:           "previous-head",
+			RuntimeGeneration: 2,
+		},
 	}
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	deleted := false
@@ -769,27 +774,30 @@ func crashRecoveryTestStore(pod *corev1.Pod) *memorySandboxStore {
 	}}
 }
 
-func crashRecoveryPrepareResponse(checkpoint ctldapi.RootFSCheckpointDescriptor) ctldapi.PrepareRootFSSnapshotResponse {
+func crashRecoveryPrepareResponse() ctldapi.PrepareRootFSSnapshotResponse {
 	return ctldapi.PrepareRootFSSnapshotResponse{
 		Handle: "crash-handle",
 		Info: ctldapi.RootFSInfo{
 			Runtime:         "runc",
 			RuntimeHandler:  "io.containerd.runc.v2",
 			Snapshotter:     "overlayfs",
-			SnapshotParent:  rootFSTestBaseSnapshot,
-			BaseImageRef:    "docker.io/library/busybox:1.36",
-			BaseImageDigest: rootFSTestBaseDigest,
+			BaseImageDigest: "sha256:base",
 		},
-		Checkpoint: checkpoint,
+		Descriptor: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:recovered",
+			Size:      42,
+		},
 	}
 }
 
-func crashRecoveryPublishResponse(checkpoint ctldapi.RootFSCheckpointDescriptor) ctldapi.PublishRootFSSnapshotResponse {
-	prepared := crashRecoveryPrepareResponse(checkpoint)
+func crashRecoveryPublishResponse() ctldapi.PublishRootFSSnapshotResponse {
+	prepared := crashRecoveryPrepareResponse()
+	prepared.Descriptor.ObjectKey = "sandbox-rootfs/team-1/sandbox-1/3/sha256/recovered.tar"
 	return ctldapi.PublishRootFSSnapshotResponse{
 		Published:  true,
 		Info:       prepared.Info,
-		Checkpoint: prepared.Checkpoint,
+		Descriptor: prepared.Descriptor,
 	}
 }
 

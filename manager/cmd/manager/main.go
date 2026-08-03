@@ -461,6 +461,9 @@ func main() {
 		RuntimeReadyTimeout:                 cfg.RuntimeReadyTimeout.Duration,
 		AllowColdStartWithoutReadyDataPlane: cfg.AllowColdStartWithoutReadyDataPlane,
 		PreferredNodeSelector:               cfg.SandboxPodPlacement.PreferredNodeSelector,
+		RootFSSquashDisabled:                cfg.RootFSMaintenance.SquashDisabled,
+		RootFSSquashMaxChainDepth:           cfg.RootFSMaintenance.SquashMaxChainDepth,
+		RootFSSquashMaxChainBytes:           cfg.RootFSMaintenance.SquashMaxChainBytes,
 		PublicRootDomain:                    cfg.PublicRootDomain,
 		PublicRegionID:                      cfg.PublicRegionID,
 		AutoscalerSafeToEvictAnnotationKeys: autoscalerAnnotationKeys,
@@ -522,11 +525,6 @@ func main() {
 	}
 	sandboxService.SetDeletionWebhookEmitter(service.NewHTTPSandboxDeletionWebhookEmitter(obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})))
 	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
-	var rootFSSyncController *service.RootFSSyncController
-	if cfg.CtldEnabled {
-		rootFSSyncController = service.NewRootFSSyncController(podLister, sandboxService, logger)
-		podInformer.Informer().AddEventHandler(rootFSSyncController.ResourceEventHandler())
-	}
 	podInformer.Informer().AddEventHandler(hotClaimReservationController.ResourceEventHandler())
 	sandboxLifecycleController := service.NewSandboxLifecycleController(k8sClient, podLister, sandboxService, logger)
 	sandboxLifecycleController.SetMetrics(managerMetrics)
@@ -591,13 +589,6 @@ func main() {
 	} else {
 		logger.Info("Template reconciliation disabled; durable template build queue remains enabled")
 	}
-	var imagePublisher *templateimage.Publisher
-	if registryProvider != nil && rootFSObjectStoreErr == nil && rootFSObjectStore != nil {
-		imagePublisher, err = templateimage.NewPublisher(rootFSObjectStore, registryProvider, cfg.Registry)
-		if err != nil {
-			logger.Warn("Template image publisher disabled", zap.Error(err))
-		}
-	}
 	var templateBuildWorker *service.TemplateBuildWorker
 	switch {
 	case registryProvider == nil:
@@ -606,9 +597,12 @@ func main() {
 		logger.Warn("Template image build worker disabled; rootfs object store is unavailable", zap.Error(rootFSObjectStoreErr))
 	case rootFSObjectStore == nil:
 		logger.Warn("Template image build worker disabled; rootfs object store is not configured")
-	case imagePublisher == nil:
-		logger.Warn("Template image build worker disabled; image publisher is unavailable")
 	default:
+		imagePublisher, publisherErr := templateimage.NewPublisher(rootFSObjectStore, registryProvider, cfg.Registry)
+		if publisherErr != nil {
+			logger.Warn("Template image build worker disabled", zap.Error(publisherErr))
+			break
+		}
 		templateBuildWorker, err = service.NewTemplateBuildWorker(
 			templateStore,
 			sandboxService,
@@ -733,13 +727,6 @@ func main() {
 				logger.Error("Sandbox crash recovery controller failed", zap.Error(err))
 			}
 		}()
-		if rootFSSyncController != nil {
-			go func() {
-				if err := rootFSSyncController.Run(controllerCtx, 2); err != nil && !errors.Is(err, context.Canceled) {
-					logger.Error("Rootfs sync controller failed", zap.Error(err))
-				}
-			}()
-		}
 
 		if templateBuildWorker != nil {
 			go func() {
@@ -795,7 +782,6 @@ func main() {
 					managerMetrics,
 				)
 				rootFSMaintenanceController.SetObjectInspector(rootFSObjectStoreInspector{store: rootFSObjectStore})
-				rootFSMaintenanceController.SetObjectReader(rootFSObjectStore)
 				if meteringRepo != nil {
 					rootFSMaintenanceController.SetStorageMeteringRecorder(meteringRepo)
 				}

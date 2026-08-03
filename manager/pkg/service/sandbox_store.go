@@ -11,11 +11,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	servicemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/service/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 )
 
 const sandboxStoreSchemaName = "manager"
@@ -78,13 +76,6 @@ type SandboxRootFSState struct {
 	DiffMediaType        string
 	DiffSize             int64
 	DiffObjectKey        string
-	HeadObjectDigest     string
-	HeadObjectMediaType  string
-	HeadObjectSize       int64
-	HeadObjectKey        string
-	HeadImageRef         string
-	HeadImageDigest      string
-	Objects              []rootfshead.Object
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
 	LayerChain           []*SandboxRootFSLayer
@@ -112,12 +103,6 @@ type SandboxRootFSLayer struct {
 	DiffMediaType        string
 	DiffSize             int64
 	DiffObjectKey        string
-	HeadObjectDigest     string
-	HeadObjectMediaType  string
-	HeadObjectSize       int64
-	HeadObjectKey        string
-	HeadImageRef         string
-	HeadImageDigest      string
 	CreatedAt            time.Time
 }
 
@@ -938,7 +923,6 @@ func getActiveLifecycleTxn(ctx context.Context, exec interface {
 
 type rootFSStateExecutor interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 func saveRootFSState(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
@@ -964,39 +948,14 @@ func validateRootFSState(state *SandboxRootFSState) error {
 	if strings.TrimSpace(state.TeamID) == "" {
 		return fmt.Errorf("team_id is required")
 	}
-	if strings.TrimSpace(state.LayerID) == "" {
-		return fmt.Errorf("layer_id is required")
-	}
-	headObjectFields := 0
-	if strings.TrimSpace(state.HeadObjectDigest) != "" {
-		headObjectFields++
-	}
-	if strings.TrimSpace(state.HeadObjectMediaType) != "" {
-		headObjectFields++
-	}
-	if state.HeadObjectSize > 0 {
-		headObjectFields++
-	}
-	if strings.TrimSpace(state.HeadObjectKey) != "" {
-		headObjectFields++
-	}
-	if headObjectFields != 0 && headObjectFields != 4 {
-		return fmt.Errorf("rootfs head object metadata must be complete")
-	}
-	if headObjectFields == 4 {
-		if _, err := rootFSHeadReferenceFromState(state); err != nil {
-			return err
-		}
-		if _, err := rootFSStateObjects(state, true); err != nil {
-			return err
-		}
-		return nil
-	}
 	if strings.TrimSpace(state.DiffDigest) == "" {
-		return fmt.Errorf("legacy rootfs diff_digest is required")
+		return fmt.Errorf("diff_digest is required")
 	}
 	if strings.TrimSpace(state.DiffObjectKey) == "" {
-		return fmt.Errorf("legacy rootfs diff_object_key is required")
+		return fmt.Errorf("diff_object_key is required")
+	}
+	if strings.TrimSpace(state.LayerID) == "" {
+		return fmt.Errorf("layer_id is required")
 	}
 	return nil
 }
@@ -1011,6 +970,9 @@ func saveRootFSLayer(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 	if strings.TrimSpace(state.ParentLayerID) == strings.TrimSpace(state.LayerID) {
 		return fmt.Errorf("parent_layer_id cannot reference layer_id")
 	}
+	if err := saveRootFSObject(ctx, exec, state); err != nil {
+		return err
+	}
 	parentLayerID := nullableText(state.ParentLayerID)
 	parentChainJSON, err := json.Marshal(state.SnapshotParentChain)
 	if err != nil {
@@ -1019,165 +981,63 @@ func saveRootFSLayer(ctx context.Context, exec rootFSStateExecutor, state *Sandb
 	_, err = exec.Exec(ctx, `
 		INSERT INTO manager.rootfs_layers (
 			layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
-				runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-				snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-				diff_size, diff_object_key, head_object_digest, head_object_media_type,
-				head_object_size, head_object_key, head_image_ref, head_image_digest, platform_os,
-				platform_architecture, platform_variant, created_at
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, COALESCE($27, NOW()))
+			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
+			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
+			diff_size, diff_object_key, platform_os, platform_architecture,
+			platform_variant, created_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21, NOW()))
 		ON CONFLICT (layer_id) DO NOTHING
 	`, state.LayerID, parentLayerID, state.SandboxID, state.TeamID, state.RuntimeGeneration,
 		state.Runtime, state.RuntimeHandler, state.BaseImageRef, state.BaseImageDigest, state.Snapshotter,
 		state.SnapshotParent, parentChainJSON, state.DiffDigest, state.DiffID, state.DiffMediaType,
-		state.DiffSize, state.DiffObjectKey, state.HeadObjectDigest, state.HeadObjectMediaType,
-		state.HeadObjectSize, state.HeadObjectKey, state.HeadImageRef, state.HeadImageDigest, state.PlatformOS,
-		state.PlatformArchitecture, state.PlatformVariant, nullableTime(state.CreatedAt))
+		state.DiffSize, state.DiffObjectKey, state.PlatformOS, state.PlatformArchitecture,
+		state.PlatformVariant, nullableTime(state.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("save rootfs layer: %w", err)
 	}
-	return saveRootFSObject(ctx, exec, state)
+	return nil
 }
 
 func saveRootFSObject(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
 	if exec == nil || state == nil {
 		return nil
 	}
-	objects, err := rootFSStateObjects(state, true)
-	if err != nil {
-		return err
-	}
-	if len(objects) == 0 {
-		return nil
-	}
-	objectsJSON, err := json.Marshal(objects)
-	if err != nil {
-		return fmt.Errorf("marshal rootfs object inventory: %w", err)
-	}
-	var inputCount int64
-	var upsertedCount int64
-	err = exec.QueryRow(ctx, `
-		WITH input AS MATERIALIZED (
-			SELECT object.key AS object_key,
-				object.digest AS object_digest,
-				object.media_type,
-				object.size AS object_size
-			FROM jsonb_to_recordset($1::jsonb) AS object(
-				key TEXT,
-				digest TEXT,
-				size BIGINT,
-				media_type TEXT
-			)
-		),
-		upserted AS (
-			INSERT INTO manager.rootfs_objects (
-				object_key, team_id, diff_digest, diff_media_type, diff_size,
-				first_layer_id, last_referenced_at, missing_at, deleted_at,
-				last_error, created_at, updated_at
-			)
-			SELECT object_key, $2, object_digest, media_type, object_size,
-				$3, COALESCE($4, NOW()), NULL, NULL,
-				'', COALESCE($4, NOW()), NOW()
-			FROM input
-			ON CONFLICT (object_key) DO UPDATE SET
-				first_layer_id = CASE
-					WHEN EXISTS (
-						SELECT 1 FROM manager.rootfs_layers owner
-						WHERE owner.layer_id = manager.rootfs_objects.first_layer_id
-					) THEN manager.rootfs_objects.first_layer_id
-					ELSE EXCLUDED.first_layer_id
-				END,
-				last_referenced_at = NOW(),
-				missing_at = NULL,
-				deleted_at = NULL,
-				last_error = '',
-				updated_at = NOW()
-			WHERE manager.rootfs_objects.team_id = EXCLUDED.team_id
-				AND manager.rootfs_objects.diff_digest = EXCLUDED.diff_digest
-				AND manager.rootfs_objects.diff_media_type = EXCLUDED.diff_media_type
-				AND manager.rootfs_objects.diff_size = EXCLUDED.diff_size
-			RETURNING object_key
-		),
-		linked AS (
-			INSERT INTO manager.rootfs_layer_objects (layer_id, object_key, created_at)
-			SELECT $3, object_key, COALESCE($4, NOW())
-			FROM upserted
-			ON CONFLICT (layer_id, object_key) DO NOTHING
-		),
-		cleared AS (
-			DELETE FROM manager.rootfs_object_deletions deletion
-			USING upserted
-			WHERE deletion.object_key = upserted.object_key
+	tag, err := exec.Exec(ctx, `
+		INSERT INTO manager.rootfs_objects (
+			object_key, team_id, diff_digest, diff_media_type, diff_size,
+			first_layer_id, last_referenced_at, missing_at, deleted_at,
+			last_error, created_at, updated_at
 		)
-		SELECT
-			(SELECT COUNT(*) FROM input),
-			(SELECT COUNT(*) FROM upserted)
-	`, objectsJSON, state.TeamID, state.LayerID, nullableTime(state.CreatedAt)).Scan(&inputCount, &upsertedCount)
+		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW()), NULL, NULL, '', COALESCE($7, NOW()), NOW())
+		ON CONFLICT (object_key) DO UPDATE SET
+			team_id = EXCLUDED.team_id,
+			diff_digest = EXCLUDED.diff_digest,
+			diff_media_type = EXCLUDED.diff_media_type,
+			diff_size = EXCLUDED.diff_size,
+			last_referenced_at = NOW(),
+			missing_at = NULL,
+			deleted_at = NULL,
+			last_error = '',
+			updated_at = NOW()
+		WHERE manager.rootfs_objects.team_id = EXCLUDED.team_id
+			AND manager.rootfs_objects.diff_digest = EXCLUDED.diff_digest
+			AND manager.rootfs_objects.diff_size = EXCLUDED.diff_size
+	`, state.DiffObjectKey, state.TeamID, state.DiffDigest, state.DiffMediaType,
+		state.DiffSize, state.LayerID, nullableTime(state.CreatedAt))
 	if err != nil {
-		return fmt.Errorf("save rootfs object inventory: %w", err)
+		return fmt.Errorf("save rootfs object: %w", err)
 	}
-	if inputCount != int64(len(objects)) || upsertedCount != inputCount {
-		return fmt.Errorf("%w: accepted %d of %d objects", ErrRootFSObjectConflict, upsertedCount, inputCount)
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrRootFSObjectConflict, state.DiffObjectKey)
+	}
+	if _, err := exec.Exec(ctx, `
+		DELETE FROM manager.rootfs_object_deletions
+		WHERE object_key = $1
+	`, state.DiffObjectKey); err != nil {
+		return fmt.Errorf("clear pending rootfs object deletion: %w", err)
 	}
 	return nil
-}
-
-func rootFSStateObjects(state *SandboxRootFSState, includeMarker bool) ([]rootfshead.Object, error) {
-	if state == nil {
-		return nil, nil
-	}
-	objects := append([]rootfshead.Object(nil), state.Objects...)
-	objects = append(objects,
-		rootfshead.Object{Key: state.DiffObjectKey, Digest: state.DiffDigest, MediaType: state.DiffMediaType, Size: state.DiffSize},
-		rootfshead.Object{Key: state.HeadObjectKey, Digest: state.HeadObjectDigest, MediaType: state.HeadObjectMediaType, Size: state.HeadObjectSize},
-	)
-	if includeMarker && strings.TrimSpace(state.HeadObjectKey) != "" {
-		marker, err := rootFSHeadMarkerObjectFromState(state)
-		if err != nil {
-			return nil, fmt.Errorf("resolve rootfs head marker object: %w", err)
-		}
-		objects = append(objects, marker)
-	}
-	seen := make(map[string]struct{}, len(objects))
-	result := make([]rootfshead.Object, 0, len(objects))
-	for _, object := range objects {
-		if strings.TrimSpace(object.Key) == "" {
-			continue
-		}
-		if !supportedRootFSObjectMediaType(object.MediaType) {
-			return nil, fmt.Errorf("invalid rootfs object %s: unsupported media type %q", object.Key, object.MediaType)
-		}
-		if err := object.Validate(object.MediaType); err != nil {
-			return nil, fmt.Errorf("invalid rootfs object %s: %w", object.Key, err)
-		}
-		if _, ok := seen[object.Key]; ok {
-			continue
-		}
-		seen[object.Key] = struct{}{}
-		result = append(result, object)
-	}
-	return result, nil
-}
-
-func supportedRootFSObjectMediaType(mediaType string) bool {
-	switch strings.TrimSpace(mediaType) {
-	case rootfshead.HeadMediaType,
-		rootfshead.DirectoryIndexMediaType,
-		rootfshead.DirectoryShardMediaType,
-		rootfshead.FileMediaType,
-		rootfshead.ChunkMediaType,
-		rootfshead.MarkerMediaType,
-		rootfshead.ImageEnvelopeMediaType,
-		ocispec.MediaTypeImageLayer,
-		ocispec.MediaTypeImageLayerGzip,
-		ocispec.MediaTypeImageLayerZstd,
-		ocispec.MediaTypeImageLayerNonDistributable,
-		ocispec.MediaTypeImageLayerNonDistributableGzip,
-		ocispec.MediaTypeImageLayerNonDistributableZstd:
-		return true
-	default:
-		return false
-	}
 }
 
 func advanceSandboxRootFSFilesystemHead(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
@@ -1279,36 +1139,28 @@ func rootFSLayerChainSQL() string {
 			SELECT
 				l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
 				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
-					l.base_image_digest, l.snapshotter, l.snapshot_parent,
-					l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
-					l.diff_size, l.diff_object_key, l.head_object_digest,
-				l.head_object_media_type, l.head_object_size, l.head_object_key,
-				l.head_image_ref, l.head_image_digest,
-				l.platform_os, l.platform_architecture, l.platform_variant,
-				l.created_at, 0 AS depth
+				l.base_image_digest, l.snapshotter, l.snapshot_parent,
+				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
+				l.diff_size, l.diff_object_key, l.platform_os, l.platform_architecture,
+				l.platform_variant, l.created_at, 0 AS depth
 			FROM head h
 			JOIN manager.rootfs_layers l ON l.layer_id = h.head_layer_id
 			UNION ALL
 			SELECT
 				p.layer_id, p.parent_layer_id, p.source_sandbox_id, p.team_id,
 				p.runtime_generation, p.runtime, p.runtime_handler, p.base_image_ref,
-					p.base_image_digest, p.snapshotter, p.snapshot_parent,
-					p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
-					p.diff_size, p.diff_object_key, p.head_object_digest,
-				p.head_object_media_type, p.head_object_size, p.head_object_key,
-				p.head_image_ref, p.head_image_digest,
-				p.platform_os, p.platform_architecture, p.platform_variant,
-				p.created_at, c.depth + 1 AS depth
+				p.base_image_digest, p.snapshotter, p.snapshot_parent,
+				p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
+				p.diff_size, p.diff_object_key, p.platform_os, p.platform_architecture,
+				p.platform_variant, p.created_at, c.depth + 1 AS depth
 			FROM manager.rootfs_layers p
 			JOIN chain c ON p.layer_id = c.parent_layer_id
-			WHERE c.head_object_key = ''
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
-				runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-				snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-				diff_size, diff_object_key, head_object_digest, head_object_media_type,
-			head_object_size, head_object_key, head_image_ref, head_image_digest, platform_os,
-			platform_architecture, platform_variant, created_at
+			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
+			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
+			diff_size, diff_object_key, platform_os, platform_architecture,
+			platform_variant, created_at
 		FROM chain
 		ORDER BY depth DESC`
 }
@@ -1318,13 +1170,10 @@ func rootFSLayerChainByHeadSQL() string {
 			SELECT
 				l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
 				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
-					l.base_image_digest, l.snapshotter, l.snapshot_parent,
-					l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
-					l.diff_size, l.diff_object_key, l.head_object_digest,
-				l.head_object_media_type, l.head_object_size, l.head_object_key,
-				l.head_image_ref, l.head_image_digest,
-				l.platform_os, l.platform_architecture, l.platform_variant,
-				l.created_at, 0 AS depth
+				l.base_image_digest, l.snapshotter, l.snapshot_parent,
+				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
+				l.diff_size, l.diff_object_key, l.platform_os, l.platform_architecture,
+				l.platform_variant, l.created_at, 0 AS depth
 			FROM manager.rootfs_layers l
 			WHERE l.layer_id = $1
 				AND ($2 = '' OR l.team_id = $2)
@@ -1332,24 +1181,19 @@ func rootFSLayerChainByHeadSQL() string {
 			SELECT
 				p.layer_id, p.parent_layer_id, p.source_sandbox_id, p.team_id,
 				p.runtime_generation, p.runtime, p.runtime_handler, p.base_image_ref,
-					p.base_image_digest, p.snapshotter, p.snapshot_parent,
-					p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
-					p.diff_size, p.diff_object_key, p.head_object_digest,
-				p.head_object_media_type, p.head_object_size, p.head_object_key,
-				p.head_image_ref, p.head_image_digest,
-				p.platform_os, p.platform_architecture, p.platform_variant,
-				p.created_at, c.depth + 1 AS depth
+				p.base_image_digest, p.snapshotter, p.snapshot_parent,
+				p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
+				p.diff_size, p.diff_object_key, p.platform_os, p.platform_architecture,
+				p.platform_variant, p.created_at, c.depth + 1 AS depth
 			FROM manager.rootfs_layers p
 			JOIN chain c ON p.layer_id = c.parent_layer_id
 				AND p.team_id = c.team_id
-			WHERE c.head_object_key = ''
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
-				runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-				snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-				diff_size, diff_object_key, head_object_digest, head_object_media_type,
-			head_object_size, head_object_key, head_image_ref, head_image_digest, platform_os,
-			platform_architecture, platform_variant, created_at
+			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
+			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
+			diff_size, diff_object_key, platform_os, platform_architecture,
+			platform_variant, created_at
 		FROM chain
 		ORDER BY depth DESC`
 }
@@ -1362,10 +1206,8 @@ func scanRootFSLayerRows(rows pgx.Rows) (*SandboxRootFSLayer, error) {
 		&layer.ID, &parentLayerID, &layer.SourceSandboxID, &layer.TeamID, &layer.RuntimeGeneration,
 		&layer.Runtime, &layer.RuntimeHandler, &layer.BaseImageRef, &layer.BaseImageDigest, &layer.Snapshotter,
 		&layer.SnapshotParent, &parentChainJSON, &layer.DiffDigest, &layer.DiffID, &layer.DiffMediaType,
-		&layer.DiffSize, &layer.DiffObjectKey, &layer.HeadObjectDigest,
-		&layer.HeadObjectMediaType, &layer.HeadObjectSize, &layer.HeadObjectKey,
-		&layer.HeadImageRef, &layer.HeadImageDigest,
-		&layer.PlatformOS, &layer.PlatformArchitecture, &layer.PlatformVariant, &layer.CreatedAt,
+		&layer.DiffSize, &layer.DiffObjectKey, &layer.PlatformOS, &layer.PlatformArchitecture,
+		&layer.PlatformVariant, &layer.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -1406,12 +1248,6 @@ func rootFSStateFromLayerChain(sandboxID string, chain []*SandboxRootFSLayer) *S
 		DiffMediaType:        head.DiffMediaType,
 		DiffSize:             head.DiffSize,
 		DiffObjectKey:        head.DiffObjectKey,
-		HeadObjectDigest:     head.HeadObjectDigest,
-		HeadObjectMediaType:  head.HeadObjectMediaType,
-		HeadObjectSize:       head.HeadObjectSize,
-		HeadObjectKey:        head.HeadObjectKey,
-		HeadImageRef:         head.HeadImageRef,
-		HeadImageDigest:      head.HeadImageDigest,
 		CreatedAt:            head.CreatedAt,
 		LayerChain:           cloneSandboxRootFSLayers(chain),
 	}

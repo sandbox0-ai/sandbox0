@@ -15,7 +15,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
@@ -50,14 +49,7 @@ type ClaimRequest struct {
 	// HardExpiresAt preserves the absolute hard deadline when recreating a paused sandbox.
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
-	WebhookStateVolumeID string `json:"-"`
-	// RootFSHeadImageRef replaces only procd's image when activating a persisted
-	// rootfs on either a warm or cold pod.
-	RootFSHeadImageRef                string                    `json:"-"`
-	RootFSHeadLayerID                 string                    `json:"-"`
-	RootFSBaseImageRef                string                    `json:"-"`
-	RootFSHeadReference               rootfshead.HeadReference  `json:"-"`
-	RootFSHeadImage                   rootfshead.ImageReference `json:"-"`
+	WebhookStateVolumeID              string `json:"-"`
 	mayHaveExistingCredentialBindings bool
 }
 
@@ -434,12 +426,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	if req.RuntimeGeneration <= 0 {
 		req.RuntimeGeneration = 1
 	}
-	phaseStarted = time.Now()
-	if err := s.prepareClaimRootFSHead(ctx, req); err != nil {
-		s.observeClaimPhase(req.Template, "unknown", "prepare_rootfs_head", phaseStarted, err)
-		return nil, fmt.Errorf("prepare rootfs head: %w", err)
-	}
-	s.observeClaimPhase(req.Template, "unknown", "prepare_rootfs_head", phaseStarted, nil)
 
 	phaseStarted = time.Now()
 	if err := validateClaimMountsForTemplate(req, template); err != nil {
@@ -530,18 +516,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			return nil, fmt.Errorf("wait for pod claim readiness: %w", err)
 		}
 		pod = readyPod
-	}
-	if req.RootFSHeadImageRef != "" {
-		phaseStarted = time.Now()
-		pod, err = s.activateClaimRootFSHead(ctx, pod, req)
-		s.observeClaimPhase(req.Template, claimType, "materialize_rootfs_head", phaseStarted, err)
-		if err != nil {
-			s.requestSandboxDeletionAfterClaimFailure(pod, "rootfs head activation failed")
-			if metrics != nil {
-				metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-			}
-			return nil, fmt.Errorf("activate rootfs head: %w", err)
-		}
 	}
 
 	phaseStarted = time.Now()
@@ -663,17 +637,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			return nil, fmt.Errorf("persist sandbox: %w", persistErr)
 		}
 		claimRecordPersisted = true
-	}
-
-	phaseStarted = time.Now()
-	err = s.bindSandboxRootFSSync(ctx, pod, req)
-	s.observeClaimPhase(req.Template, claimType, "bind_rootfs_sync", phaseStarted, err)
-	if err != nil {
-		cleanupClaimFailure(pod, "rootfs sync bind failed")
-		if metrics != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-		}
-		return nil, fmt.Errorf("bind rootfs sync: %w", err)
 	}
 
 	phaseStarted = time.Now()
@@ -807,15 +770,9 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 	if state == nil {
 		return pod, true, fmt.Errorf("%w: snapshot %s", ErrRootFSFilesystemNotFound, snapshotID)
 	}
-	if err := configureClaimRootFSHead(req, state); err != nil {
+	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, state, SandboxStatusStarting)
+	if err != nil {
 		return pod, true, err
-	}
-	if pod.Annotations[controller.AnnotationRootFSHeadLayerID] != req.RootFSHeadLayerID {
-		return pod, true, fmt.Errorf(
-			"claimed pod rootfs head %q does not match restored snapshot head %q",
-			pod.Annotations[controller.AnnotationRootFSHeadLayerID],
-			req.RootFSHeadLayerID,
-		)
 	}
 	return pod, true, nil
 }
@@ -1179,14 +1136,6 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 			zap.String("pod", pod.Name),
 			zap.String("sandboxID", sandboxID),
 		)
-		if err := s.materializeClaimRootFSHead(ctx, pod, req); err != nil {
-			if ctldapi.IsConflictError(err) {
-				lostCandidates[pod.Namespace+"/"+pod.Name] = struct{}{}
-				s.observeIdleClaim(templateID, "rootfs_base_unavailable")
-				return fmt.Errorf("%w: materialize rootfs head on pod %s/%s: %v", errIdlePodClaimLost, pod.Namespace, pod.Name, err)
-			}
-			return fmt.Errorf("materialize rootfs head on pod %s/%s: %w", pod.Namespace, pod.Name, err)
-		}
 
 		stateVolume, err := s.prepareWebhookStateVolume(ctx, req, sandboxID)
 		if err != nil {
@@ -1244,10 +1193,6 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		} else {
 			delete(pod.Annotations, controller.AnnotationWebhookStateVolumeID)
 		}
-		if err := applyClaimRootFSHeadToPod(pod, req); err != nil {
-			rollbackStateVolume()
-			return err
-		}
 		applyClaimMetadata(pod, req.Metadata)
 
 		// Set expiration annotations. Explicit 0 disables TTLs; omitted TTL uses the configured default.
@@ -1290,7 +1235,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 
 		// Claim through a metadata-only compare-and-swap patch. This avoids
 		// replacing status/spec fields owned by kubelet or other controllers.
-		updatedPod, updateErr := s.patchClaimedPod(ctx, originalIdlePod, pod)
+		updatedPod, updateErr := s.patchClaimedPodMetadata(ctx, originalIdlePod, pod)
 		if updateErr != nil {
 			rollbackStateVolume()
 			if rollbackErr := rollbackBindings(ctx); rollbackErr != nil {
@@ -1414,12 +1359,12 @@ func isClaimMetadataPatchPreconditionFailure(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	if (strings.Contains(msg, "testing value /metadata/") || strings.Contains(msg, "testing value /spec/containers/")) &&
+	if strings.Contains(msg, "testing value /metadata/") &&
 		strings.Contains(msg, "failed: test failed") {
 		return true
 	}
 	if strings.Contains(msg, "test operation does not apply") &&
-		(strings.Contains(msg, "/metadata/") || strings.Contains(msg, "/spec/containers/")) {
+		strings.Contains(msg, "/metadata/") {
 		return true
 	}
 	return false
@@ -1513,17 +1458,14 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		return nil, fmt.Errorf("ensure network-runtime MITM CA secret: %w", err)
 	}
 
-	runtimeAnnotations := v1alpha1.SandboxRuntimeHandlerAnnotations()
-	if runtimeAnnotations == nil {
-		runtimeAnnotations = make(map[string]string)
-	}
-	runtimeAnnotations[controller.AnnotationSandboxID] = sandboxID
-	runtimeAnnotations[controller.AnnotationRuntimeGeneration] = strconv.FormatInt(req.RuntimeGeneration, 10)
-	runtimeAnnotations[controller.AnnotationTeamID] = req.TeamID
-	runtimeAnnotations[controller.AnnotationUserID] = req.UserID
-	runtimeAnnotations[controller.AnnotationClaimedAt] = s.clock.Now().Format(time.RFC3339)
-	runtimeAnnotations[controller.AnnotationClaimType] = "cold"
-	annotations := controller.ClaimedSandboxPodAnnotations(runtimeAnnotations, s.config.AutoscalerSafeToEvictAnnotationKeys)
+	annotations := controller.ClaimedSandboxPodAnnotations(map[string]string{
+		controller.AnnotationSandboxID:         sandboxID,
+		controller.AnnotationRuntimeGeneration: strconv.FormatInt(req.RuntimeGeneration, 10),
+		controller.AnnotationTeamID:            req.TeamID,
+		controller.AnnotationUserID:            req.UserID,
+		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
+		controller.AnnotationClaimType:         "cold",
+	}, s.config.AutoscalerSafeToEvictAnnotationKeys)
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}
@@ -1543,10 +1485,6 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 			Annotations: annotations,
 		},
 		Spec: spec,
-	}
-	if err := applyColdRootFSBaseImageToPod(pod, req); err != nil {
-		rollbackStateVolume()
-		return nil, err
 	}
 	applyClaimMetadata(pod, req.Metadata)
 

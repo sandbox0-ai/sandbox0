@@ -3,7 +3,6 @@
 package fuseportal
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -299,58 +298,6 @@ func TestHandleReadyIgnoresStaleReadiness(t *testing.T) {
 	}
 	if readyErr != nil {
 		t.Fatalf("handleReady() error = %v", readyErr)
-	}
-}
-
-func TestWaitReadyReturnsAfterServeRegistersChannel(t *testing.T) {
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		t.Fatalf("Socketpair() error = %v", err)
-	}
-	defer unix.Close(fds[1])
-	server, err := newServer(fuse.NewDefaultRawFileSystem(), fds[0], "", &fuse.MountOptions{})
-	if err != nil {
-		_ = unix.Close(fds[0])
-		t.Fatalf("newServer() error = %v", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- server.Serve() }()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := server.WaitReady(ctx); err != nil {
-		t.Fatalf("WaitReady() error = %v", err)
-	}
-	if server.muxToken == 0 {
-		t.Fatal("WaitReady() returned before epoll registration")
-	}
-	if err := server.Detach(); err != nil {
-		t.Fatalf("Detach() error = %v", err)
-	}
-	if err := <-done; err != nil {
-		t.Fatalf("Serve() error = %v", err)
-	}
-}
-
-func TestWaitReadyReportsStopBeforeServe(t *testing.T) {
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
-	if err != nil {
-		t.Fatalf("Socketpair() error = %v", err)
-	}
-	defer unix.Close(fds[1])
-	server, err := newServer(fuse.NewDefaultRawFileSystem(), fds[0], "", &fuse.MountOptions{})
-	if err != nil {
-		_ = unix.Close(fds[0])
-		t.Fatalf("newServer() error = %v", err)
-	}
-	if err := server.Detach(); err != nil {
-		t.Fatalf("Detach() error = %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := server.WaitReady(ctx); err == nil || !strings.Contains(err.Error(), "stopped before serving") {
-		t.Fatalf("WaitReady() error = %v, want stopped-before-serving error", err)
 	}
 }
 

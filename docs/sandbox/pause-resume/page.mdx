@@ -1,6 +1,6 @@
 # Pause And Resume
 
-Sandbox0 can pause an idle sandbox without deleting it. Pause checkpoints the writable root filesystem, publishes an immutable metadata head, releases the runtime pod, and keeps the sandbox identity and durable state. Resume creates a new runtime generation from that head.
+Sandbox0 can pause an idle sandbox without deleting it. Pause checkpoints the writable root filesystem, releases the runtime pod, and keeps the sandbox identity and durable state. Resume creates a new runtime generation and restores the latest rootfs checkpoint.
 
 Use this page when you need to:
 
@@ -14,7 +14,7 @@ Pause is a runtime lifecycle operation. It checkpoints the writable rootfs and d
 </Callout>
 
 <Callout variant="warning">
-Self-hosted deployments must run `ctld` and the Sandbox0 containerd snapshotter on sandbox nodes for checkpointed pause/resume. Pause saves the writable rootfs checkpoint and releases the runtime pod; it does not preserve process state.
+Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/resume. Pause saves the writable rootfs checkpoint and releases the runtime pod; it does not preserve process state.
 </Callout>
 
 ## What Persists
@@ -28,13 +28,7 @@ Self-hosted deployments must run `ctld` and the Sandbox0 containerd snapshotter 
 
 The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. It is different from a Sandbox Volume: it is tied to sandbox rootfs lifecycle and does not provide volume sharing or direct Volume file APIs. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
 
-Every warm sandbox Pod uses the delegating `sandbox0` containerd snapshotter from its first image pull. Normal template layers still use overlayfs. While the sandbox runs, `ctld` asynchronously drains stable writable-upperdir changes into immutable file chunks, file manifests, and hash-sharded directory metadata. A pause briefly barriers `procd`, drains the remaining dirty tail, and seals one complete immutable Merkle head. Unchanged objects are shared with the previous head. On that same node, `ctld` deterministically composes a digest-pinned OCI marker image and stores its marker plus its small config/manifest envelope in the rootfs object-store inventory. The marker is only a serialized head reference; the envelope preserves the base image's runtime defaults. Neither template layers nor rootfs data chunks are copied into these objects, and pause does not push an image to a registry.
-
-After commit, manager asynchronously walks only the head's metadata objects to replace the conservative generation inventory with its exact live object set. Once that inventory is complete, the new head no longer keeps its historical parent alive for runtime correctness. The normal maintenance loop can then delete superseded captures and chunks for files that were persisted and later removed. Active snapshots and forks retain their directly referenced heads, so their objects remain protected. Inventory compaction and S3 garbage collection stay outside pause, resume, and claim latency. Containerd also detaches the old writable overlay snapshot immediately and reclaims its node-local directory through asynchronous snapshotter cleanup, so Pod release does not recursively delete the upperdir on the pause path.
-
-At warm resume, manager first selects a Pod whose digest-pinned template base is already unpacked. It asks that node's `ctld` to load the marker and OCI envelope from object storage, write those tiny blobs directly into containerd's `k8s.io` content and image stores, and unpack the head through the `sandbox0` snapshotter. Only after CRI can resolve the local digest-pinned image does manager replace the Pod's `procd` image. The existing `IfNotPresent` policy remains unchanged because Kubernetes does not allow an in-place pull-policy update; the CRI visibility check guarantees that kubelet resolves the already materialized local image without a registry request. Containerd keeps the Pod sandbox, recreates `procd`, and the external snapshotter mounts the immutable head lazily above that deterministic base snapshot with a fresh writable overlay. Warm resume has no registry resolve, pull, or push for the marker image.
-
-A path lookup reads only the head and the matching directory shard; regular-file chunks are fetched and cached only when read. Rootfs seal and head-attach work therefore depend on the unsynchronized dirty tail and bounded metadata, not total saved rootfs capacity. End-to-end time until the Pod is Ready also includes Kubernetes scheduling, kubelet, image, and runtime work and is measured separately.
+On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
 
 ## Pause A Sandbox
 
@@ -111,10 +105,10 @@ Resume a sandbox that was paused manually or by TTL expiry.
 
 | Situation | Restore behavior |
 |-----------|------------------|
-| Warm resume | Adopts a warm Pod, materializes the OCI marker directly into that node's containerd, swaps only the `procd` image to the local digest-pinned head, and waits for that exact image before runtime activation |
-| Cold resume | Starts a carrier Pod from the canonical digest-pinned base, waits for scheduling and base unpack, then materializes and activates the local marker image on the selected node |
+| Normal resume | Creates a runtime pod from the current template image and restores the latest committed rootfs checkpoint |
+| Restore fails against the current template image | Retries once with the checkpoint's recorded base image digest; kubelet manages that image normally |
 | Existing runtime pod is terminal | Waits for crash recovery to commit, then restores the recovered rootfs head |
-| Terminated snapshot is unavailable | Activates the last committed metadata head |
+| Terminated snapshot is unavailable | Restores the last committed checkpoint |
 
 Mounted Sandbox Volumes are remounted from their durable state.
 
@@ -127,7 +121,7 @@ The writable rootfs persists across pause and resume except for runtime-owned ep
 - Other writable rootfs paths, such as `/root` and workspace directories, remain persistent.
 - Mounted Sandbox Volumes keep their independent durable state, including a Volume mounted beneath `/tmp`.
 
-This policy is applied while sealing each metadata head. Checkpoints created by the previous replay architecture are not dual-read. Before upgrading, resume every legacy paused sandbox while the old stack is still active. After upgrading, manager binds those running sandboxes to continuous sync and converts their materialized writable state into a first metadata head in the background. Do not pause them until that initial drain has completed. Their next pause publishes the v2 head used by later resume, snapshot claim, restore, and fork operations.
+This policy is applied while saving checkpoints, restoring checkpoint layers, and capturing incremental baselines. Sandbox0 also filters `/tmp` from older checkpoint layers during restore. The first restore of a large older checkpoint can still take time because the layer must be read once; the next pause writes a checkpoint without those `/tmp` contents.
 
 <Callout variant="warning">
 Do not use `/tmp` for dependency caches, downloaded tools, or other state that must survive runtime replacement. Store that data under a persistent rootfs path or mount a Sandbox Volume.

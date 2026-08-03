@@ -239,7 +239,6 @@ func (w *TemplateBuildWorker) captureAndPublish(ctx context.Context, build *temp
 		BaseImageDigest: capture.BaseImageDigest,
 		Platform:        capture.Platform,
 		Layers:          capture.Layers,
-		RootFSHead:      capture.RootFSHead,
 		CreatedAt:       capture.CapturedAt,
 	})
 	if err != nil {
@@ -285,11 +284,9 @@ func (w *TemplateBuildWorker) captureMetadata(ctx context.Context, build *templa
 	if err != nil {
 		return nil, err
 	}
-	if capture.RootFSHead == nil {
-		capture.Layers, err = templateimage.ResolveLayerDiffIDs(ctx, w.objects, capture.Layers)
-		if err != nil {
-			return nil, err
-		}
+	capture.Layers, err = templateimage.ResolveLayerDiffIDs(ctx, w.objects, capture.Layers)
+	if err != nil {
+		return nil, err
 	}
 	if err := validateTemplateBuildCapture(build, capture); err != nil {
 		return nil, fmt.Errorf("%w: %v", errTemplateBuildCaptureInvalid, err)
@@ -317,19 +314,8 @@ func validateTemplateBuildCapture(build *template.TemplateBuild, capture *Templa
 	if strings.TrimSpace(capture.SnapshotID) == "" || capture.SnapshotID != build.SnapshotID {
 		return fmt.Errorf("template build capture snapshot does not match build")
 	}
-	if strings.TrimSpace(capture.HeadLayerID) == "" || (len(capture.Layers) == 0 && capture.RootFSHead == nil) {
+	if strings.TrimSpace(capture.HeadLayerID) == "" || len(capture.Layers) == 0 {
 		return fmt.Errorf("template build capture has no rootfs layer chain")
-	}
-	if len(capture.Layers) > 0 && capture.RootFSHead != nil {
-		return fmt.Errorf("template build capture has both a rootfs head and layer chain")
-	}
-	if capture.RootFSHead != nil {
-		if err := capture.RootFSHead.Validate(); err != nil {
-			return fmt.Errorf("template build capture rootfs head is invalid: %w", err)
-		}
-		if capture.RootFSHead.HeadID != capture.HeadLayerID {
-			return fmt.Errorf("template build capture rootfs head does not match captured layer")
-		}
 	}
 	if capture.Platform.OS == "" || capture.Platform.Architecture == "" {
 		return fmt.Errorf("template build capture has no source platform")

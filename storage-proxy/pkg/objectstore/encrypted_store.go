@@ -3,7 +3,6 @@ package objectstore
 import (
 	"bufio"
 	"bytes"
-	"container/list"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -13,14 +12,12 @@ import (
 	"io"
 	"os"
 	"strings"
-	"sync"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
 const (
 	defaultEncryptedObjectChunkSize = 1 << 20
-	encryptedObjectHeaderCacheSize  = 4096
 	encryptedObjectMagic            = "s0.object.encrypted.v1\n"
 	encryptedObjectVersion          = 1
 	maxUint32                       = int64(^uint32(0))
@@ -39,22 +36,6 @@ type EncryptionConfig struct {
 type encryptedStore struct {
 	store Store
 	cfg   EncryptionConfig
-
-	headerCacheMu sync.Mutex
-	headerCache   map[string]*list.Element
-	headerOrder   *list.List
-}
-
-type encryptedObjectMetadata struct {
-	encrypted  bool
-	header     encryptedObjectHeader
-	headerSize int64
-	aead       cipher.AEAD
-}
-
-type encryptedObjectMetadataCacheEntry struct {
-	key      string
-	metadata encryptedObjectMetadata
 }
 
 type encryptedObjectHeader struct {
@@ -120,37 +101,13 @@ func (s *encryptedStore) Put(key string, in io.Reader) error {
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek encrypted object temp file: %w", err)
 	}
-	if err := s.store.Put(key, tmp); err != nil {
-		return err
-	}
-	s.invalidateHeader(key)
-	return nil
+	return s.store.Put(key, tmp)
 }
 
 func (s *encryptedStore) Get(key string, off, limit int64) (io.ReadCloser, error) {
 	if limit == 0 {
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
-	if off < 0 {
-		return nil, fmt.Errorf("negative object read offset: %d", off)
-	}
-	// Full reads retain the original single-request streaming path. Range reads
-	// use independently authenticated chunks so a lazy filesystem never has to
-	// download an entire encrypted tar object to serve one file extent.
-	if off == 0 && limit < 0 {
-		return s.getFull(key, off, limit)
-	}
-	metadata, err := s.loadObjectMetadata(key)
-	if err != nil {
-		return nil, err
-	}
-	if !metadata.encrypted {
-		return s.store.Get(key, off, limit)
-	}
-	return s.getEncryptedRange(key, off, limit, metadata)
-}
-
-func (s *encryptedStore) getFull(key string, off, limit int64) (io.ReadCloser, error) {
 	reader, err := s.store.Get(key, 0, -1)
 	if err != nil {
 		return nil, err
@@ -164,180 +121,8 @@ func (s *encryptedStore) getFull(key string, off, limit int64) (io.ReadCloser, e
 	return pr, nil
 }
 
-func (s *encryptedStore) getEncryptedRange(key string, off, limit int64, metadata encryptedObjectMetadata) (io.ReadCloser, error) {
-	aead := metadata.aead
-	if aead == nil {
-		return nil, fmt.Errorf("encrypted object cipher is unavailable")
-	}
-
-	firstChunk := off / metadata.header.ChunkSize
-	recordSize := int64(4) + metadata.header.ChunkSize + int64(aead.Overhead())
-	if firstChunk > (maxInt64-metadata.headerSize)/recordSize {
-		return io.NopCloser(bytes.NewReader(nil)), nil
-	}
-	cipherOffset := metadata.headerSize + firstChunk*recordSize
-	cipherLimit := int64(-1)
-	if limit >= 0 {
-		rangeEnd := off + limit
-		if rangeEnd < off {
-			rangeEnd = maxInt64
-		}
-		lastChunk := (rangeEnd - 1) / metadata.header.ChunkSize
-		chunkCount := lastChunk - firstChunk + 1
-		if chunkCount > maxInt64/recordSize {
-			cipherLimit = maxInt64
-		} else {
-			cipherLimit = chunkCount * recordSize
-		}
-	}
-	reader, err := s.store.Get(key, cipherOffset, cipherLimit)
-	if err != nil {
-		return nil, err
-	}
-	pr, pw := io.Pipe()
-	go func() {
-		defer reader.Close()
-		err := decryptEncryptedObjectRange(pw, key, reader, metadata.header, aead, uint64(firstChunk), off, limit)
-		_ = pw.CloseWithError(err)
-	}()
-	return pr, nil
-}
-
-func (s *encryptedStore) loadObjectMetadata(key string) (encryptedObjectMetadata, error) {
-	if metadata, ok := s.cachedHeader(key); ok {
-		return metadata, nil
-	}
-	prefixSize := int64(len(encryptedObjectMagic) + 4)
-	reader, err := s.store.Get(key, 0, prefixSize)
-	if err != nil {
-		return encryptedObjectMetadata{}, err
-	}
-	prefix, readErr := io.ReadAll(reader)
-	closeErr := reader.Close()
-	if readErr != nil {
-		return encryptedObjectMetadata{}, readErr
-	}
-	if closeErr != nil {
-		return encryptedObjectMetadata{}, closeErr
-	}
-	if len(prefix) < len(encryptedObjectMagic) || string(prefix[:len(encryptedObjectMagic)]) != encryptedObjectMagic {
-		metadata := encryptedObjectMetadata{}
-		s.cacheHeader(key, metadata)
-		return metadata, nil
-	}
-	if len(prefix) != int(prefixSize) {
-		return encryptedObjectMetadata{}, fmt.Errorf("read encrypted object header prefix: got %d bytes, want %d", len(prefix), prefixSize)
-	}
-	headerLen := binary.BigEndian.Uint32(prefix[len(encryptedObjectMagic):])
-	if headerLen == 0 || headerLen > 1<<20 {
-		return encryptedObjectMetadata{}, fmt.Errorf("invalid encrypted object header size %d", headerLen)
-	}
-	headerReader, err := s.store.Get(key, prefixSize, int64(headerLen))
-	if err != nil {
-		return encryptedObjectMetadata{}, err
-	}
-	headerBytes, readErr := io.ReadAll(headerReader)
-	closeErr = headerReader.Close()
-	if readErr != nil {
-		return encryptedObjectMetadata{}, readErr
-	}
-	if closeErr != nil {
-		return encryptedObjectMetadata{}, closeErr
-	}
-	if len(headerBytes) != int(headerLen) {
-		return encryptedObjectMetadata{}, fmt.Errorf("read encrypted object header: got %d bytes, want %d", len(headerBytes), headerLen)
-	}
-	var header encryptedObjectHeader
-	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return encryptedObjectMetadata{}, fmt.Errorf("unmarshal encrypted object header: %w", err)
-	}
-	if header.Version != encryptedObjectVersion {
-		return encryptedObjectMetadata{}, fmt.Errorf("unsupported encrypted object version %d", header.Version)
-	}
-	if header.ChunkSize <= 0 {
-		return encryptedObjectMetadata{}, fmt.Errorf("encrypted object chunk size is required")
-	}
-	if header.ChunkSize > maxInt64-4-32 {
-		return encryptedObjectMetadata{}, fmt.Errorf("encrypted object chunk size is too large: %d", header.ChunkSize)
-	}
-	dataKey, err := s.cfg.KeyEncryptor.Decrypt(header.WrappedKey)
-	if err != nil {
-		return encryptedObjectMetadata{}, fmt.Errorf("unwrap object data key: %w", err)
-	}
-	aead, err := newObjectAEAD(header.Algorithm, dataKey)
-	if err != nil {
-		return encryptedObjectMetadata{}, err
-	}
-	if len(header.NoncePrefix) != aead.NonceSize()-8 {
-		return encryptedObjectMetadata{}, fmt.Errorf("invalid encrypted object nonce prefix size %d", len(header.NoncePrefix))
-	}
-	metadata := encryptedObjectMetadata{
-		encrypted:  true,
-		header:     header,
-		headerSize: prefixSize + int64(headerLen),
-		aead:       aead,
-	}
-	s.cacheHeader(key, metadata)
-	return metadata, nil
-}
-
-func (s *encryptedStore) cachedHeader(key string) (encryptedObjectMetadata, bool) {
-	s.headerCacheMu.Lock()
-	defer s.headerCacheMu.Unlock()
-	if s.headerCache == nil {
-		return encryptedObjectMetadata{}, false
-	}
-	element, ok := s.headerCache[key]
-	if !ok {
-		return encryptedObjectMetadata{}, false
-	}
-	s.headerOrder.MoveToFront(element)
-	return element.Value.(encryptedObjectMetadataCacheEntry).metadata, true
-}
-
-func (s *encryptedStore) cacheHeader(key string, metadata encryptedObjectMetadata) {
-	s.headerCacheMu.Lock()
-	defer s.headerCacheMu.Unlock()
-	if s.headerCache == nil {
-		s.headerCache = make(map[string]*list.Element)
-		s.headerOrder = list.New()
-	}
-	if element, ok := s.headerCache[key]; ok {
-		element.Value = encryptedObjectMetadataCacheEntry{key: key, metadata: metadata}
-		s.headerOrder.MoveToFront(element)
-		return
-	}
-	element := s.headerOrder.PushFront(encryptedObjectMetadataCacheEntry{key: key, metadata: metadata})
-	s.headerCache[key] = element
-	if s.headerOrder.Len() <= encryptedObjectHeaderCacheSize {
-		return
-	}
-	oldest := s.headerOrder.Back()
-	entry := oldest.Value.(encryptedObjectMetadataCacheEntry)
-	delete(s.headerCache, entry.key)
-	s.headerOrder.Remove(oldest)
-}
-
-func (s *encryptedStore) invalidateHeader(key string) {
-	s.headerCacheMu.Lock()
-	defer s.headerCacheMu.Unlock()
-	if s.headerCache == nil {
-		return
-	}
-	element, ok := s.headerCache[key]
-	if !ok {
-		return
-	}
-	delete(s.headerCache, key)
-	s.headerOrder.Remove(element)
-}
-
 func (s *encryptedStore) Delete(key string) error {
-	if err := s.store.Delete(key); err != nil {
-		return err
-	}
-	s.invalidateHeader(key)
-	return nil
+	return s.store.Delete(key)
 }
 
 func (s *encryptedStore) Head(key string) (Info, error) {
@@ -476,63 +261,6 @@ func (s *encryptedStore) decryptTo(out io.Writer, key string, in io.Reader, off,
 		}
 		plainOffset += int64(len(plaintext))
 		if rangeEnd >= 0 && plainOffset >= rangeEnd {
-			return nil
-		}
-	}
-}
-
-func decryptEncryptedObjectRange(
-	out io.Writer,
-	key string,
-	in io.Reader,
-	header encryptedObjectHeader,
-	aead cipher.AEAD,
-	firstChunk uint64,
-	off int64,
-	limit int64,
-) error {
-	rangeEnd := int64(-1)
-	if limit >= 0 {
-		rangeEnd = off + limit
-		if rangeEnd < off {
-			rangeEnd = maxInt64
-		}
-	}
-	for chunkIndex := firstChunk; ; chunkIndex++ {
-		var lenBuf [4]byte
-		if _, err := io.ReadFull(in, lenBuf[:]); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-		cipherLen := binary.BigEndian.Uint32(lenBuf[:])
-		if cipherLen == 0 || int64(cipherLen) > header.ChunkSize+int64(aead.Overhead()) {
-			return fmt.Errorf("invalid encrypted object chunk size %d", cipherLen)
-		}
-		ciphertext := make([]byte, cipherLen)
-		if _, err := io.ReadFull(in, ciphertext); err != nil {
-			return err
-		}
-		nonce := encryptedObjectNonce(aead.NonceSize(), header.NoncePrefix, chunkIndex)
-		plaintext, err := aead.Open(nil, nonce, ciphertext, encryptedObjectChunkAAD(key, chunkIndex, header.Algorithm))
-		if err != nil {
-			return fmt.Errorf("decrypt object chunk %d: %w", chunkIndex, err)
-		}
-		if chunkIndex > uint64(maxInt64/header.ChunkSize) {
-			return nil
-		}
-		chunkStart := int64(chunkIndex) * header.ChunkSize
-		if err := writeRangeChunk(out, plaintext, chunkStart, off, rangeEnd); err != nil {
-			return err
-		}
-		if rangeEnd >= 0 && chunkStart+int64(len(plaintext)) >= rangeEnd {
-			return nil
-		}
-		if len(plaintext) < int(header.ChunkSize) {
-			return nil
-		}
-		if chunkIndex == ^uint64(0) {
 			return nil
 		}
 	}

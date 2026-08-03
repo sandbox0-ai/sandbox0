@@ -73,6 +73,7 @@ var (
 	haSlot                         = os.Getenv("CTLD_HA_SLOT")
 	haProbe                        string
 	haProbeSocket                  = "/run/sandbox0/ctld-ha.sock"
+	haMetricsAddr                  string
 	networkRuntimeConfigPath       = strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH"))
 )
 
@@ -113,6 +114,7 @@ func main() {
 	flag.StringVar(&haSlot, "ha-slot", os.Getenv("CTLD_HA_SLOT"), "stable ctld HA deployment slot")
 	flag.StringVar(&haProbe, "ha-probe", "", "run one ctld HA probe (live or ready) and exit")
 	flag.StringVar(&haProbeSocket, "ha-probe-socket", "/run/sandbox0/ctld-ha.sock", "container-local ctld HA probe socket")
+	flag.StringVar(&haMetricsAddr, "ha-metrics-addr", "", "dedicated pre-election HTTP listen address for ctld HA metrics; empty disables it")
 	flag.StringVar(&networkRuntimeConfigPath, "netd-config-path", strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH")), "explicit ctld network runtime config path; empty disables network policy enforcement")
 	flag.Parse()
 
@@ -139,12 +141,33 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	haMetricsServer, err := ctldha.StartMetricsServer(ctx, haMetricsAddr, coordinator, nodeName, haSlot)
+	if err != nil {
+		return err
+	}
+	if haMetricsServer != nil {
+		defer haMetricsServer.Close()
+		log.Printf("ctld HA metrics server listening on %q", haMetricsServer.Addr())
+	}
 	probeServer, err := ctldha.StartProbeServer(ctx, haProbeSocket, coordinator)
 	if err != nil {
 		return err
 	}
 	defer probeServer.Close()
-	return runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, runPrimary)
+	if haMetricsServer == nil {
+		return runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, runPrimary)
+	}
+	primaryErrors := make(chan error, 1)
+	go func() {
+		primaryErrors <- runHAPrimary(ctx, coordinator, probeServer.SetServiceReady, networkFactory, runPrimary)
+	}()
+	select {
+	case err := <-primaryErrors:
+		return err
+	case err := <-haMetricsServer.Errors():
+		cancel()
+		return errors.Join(fmt.Errorf("ctld HA metrics server: %w", err), <-primaryErrors)
+	}
 }
 
 type primaryRunner func(context.Context, primaryRunOptions) error

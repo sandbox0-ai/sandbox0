@@ -36,6 +36,16 @@ For rootfs checkpoint and resume diagnosis, collect these ctld metrics:
 
 Manager also records `apply_rootfs_checkpoint`, `bind_volume_portals`, `bind_webhook_state_portal`, `activate_runtime`, and `resume_total` in `manager_sandbox_claim_phase_duration_seconds`. ctld emits a structured warning when a rootfs operation takes at least 10 seconds or handles a checkpoint of at least 512 MiB.
 
+Each sandbox node runs two ctld peers, but exactly one peer on that node should own the primary lock. More than one `ctld_ha_primary` across the whole cluster is normal when the cluster has multiple sandbox nodes. Scrape the `ha-metrics` port on both ctld Pods and group HA checks by the `node` label:
+
+- `ctld_ha_primary` identifies the elected peer; alert when `sum by (node) (ctld_ha_primary) != 1` remains true
+- `ctld_ha_role`, `ctld_ha_epoch`, and `ctld_ha_role_transitions_total` show election and failover history
+- `ctld_ha_synchronized` and `ctld_ha_standbys` show whether failover state has reached the peer
+- `ctld_ha_state_duration_seconds` shows how long the peer has held its current role
+- `ctld_ha_lock_info` exposes the shared lock device and inode; the two peers on one node should report the same identity
+
+Slot A exposes this pre-election endpoint on port `9192`; slot B uses `9193`. These endpoints stay available on both primary and standby peers, unlike the primary-only ctld service endpoint.
+
 ### Managed Collector
 
 Use `managedCollector` when Sandbox0 should install OpenTelemetry Collectors and export to your OTLP endpoint.

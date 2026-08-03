@@ -20,7 +20,11 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 
 	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-source", "team-1")))
 	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-source", "team-1", "layer-root", "", 1, "root")))
-	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-source", "team-1", "layer-child", "layer-root", 2, "child")))
+	childState := rootFSTestStoreState("sandbox-source", "team-1", "layer-child", "layer-root", 2, "child")
+	childState.PlatformOS = "linux"
+	childState.PlatformArchitecture = "arm64"
+	childState.PlatformVariant = "v8"
+	require.NoError(t, store.SaveRootFSState(ctx, childState))
 
 	latest, err := store.GetLatestRootFSState(ctx, "sandbox-source")
 	require.NoError(t, err)
@@ -52,6 +56,9 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, gcResult.Layers, 1)
 	assert.Equal(t, "layer-child", gcResult.Layers[0].ID)
+	assert.Equal(t, "linux", gcResult.Layers[0].PlatformOS)
+	assert.Equal(t, "arm64", gcResult.Layers[0].PlatformArchitecture)
+	assert.Equal(t, "v8", gcResult.Layers[0].PlatformVariant)
 	assert.Equal(t, []string{"rootfs/child.tar"}, gcResult.DeletedObjectKeys)
 	gcResult, err = store.GarbageCollectRootFSFilesystem(ctx, deleter, "team-1", 10)
 	require.NoError(t, err)

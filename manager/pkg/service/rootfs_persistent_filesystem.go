@@ -997,12 +997,14 @@ func (s *PGSandboxStore) collectUnreferencedRootFSLayers(ctx context.Context, te
 				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
 				l.base_image_digest, l.snapshotter, l.snapshot_parent,
 				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
-				l.diff_size, l.diff_object_key, l.created_at
+				l.diff_size, l.diff_object_key, l.platform_os, l.platform_architecture,
+				l.platform_variant, l.created_at
 		)
 		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
 			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
 			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, created_at
+			diff_size, diff_object_key, platform_os, platform_architecture,
+			platform_variant, created_at
 		FROM deleted
 		ORDER BY created_at ASC
 	`, strings.TrimSpace(teamID), limit)

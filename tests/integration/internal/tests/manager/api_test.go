@@ -620,7 +620,7 @@ func TestPausedSandboxRuntimeResumeActivatesMetadataHeadBeforeRuntime(t *testing
 	claimedPod, err := env.k8sClient.CoreV1().Pods(namespace).Get(context.Background(), "idle-rootfs", metav1.GetOptions{})
 	utils.RequireNoError(t, err, "get metadata-head pod")
 	if claimedPod.Spec.Containers[0].Image != headImage ||
-		claimedPod.Spec.Containers[0].ImagePullPolicy != corev1.PullNever ||
+		claimedPod.Spec.Containers[0].ImagePullPolicy != corev1.PullIfNotPresent ||
 		claimedPod.Annotations[controller.AnnotationRootFSHeadImage] != headImage ||
 		claimedPod.Annotations[controller.AnnotationRootFSHeadLayerID] != layer.ID {
 		t.Fatalf("metadata head was not activated on warm pod: %+v", claimedPod)
@@ -897,8 +897,9 @@ func addIdleReadyPodForTemplate(t *testing.T, env *managerTestEnv, template *v1a
 		Spec: corev1.PodSpec{
 			NodeName: nodeName,
 			Containers: []corev1.Container{{
-				Name:  runtimecontrol.ProcdContainerName,
-				Image: "docker.io/sandbox0ai/otemplates:default-v0.2.0",
+				Name:            runtimecontrol.ProcdContainerName,
+				Image:           "docker.io/sandbox0ai/otemplates:default-v0.2.0",
+				ImagePullPolicy: corev1.PullIfNotPresent,
 			}},
 			ReadinessGates: []corev1.PodReadinessGate{{
 				ConditionType: v1alpha1.SandboxPodReadinessConditionType,

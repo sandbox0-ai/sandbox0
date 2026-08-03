@@ -83,7 +83,7 @@ func TestApplyClaimRootFSHeadChangesOnlyProcdImageAndAnnotations(t *testing.T) {
 		Spec: corev1.PodSpec{
 			NodeName: "node-1",
 			Containers: []corev1.Container{
-				{Name: sandboxRootFSContainerName, Image: "registry.example.com/template:base"},
+				{Name: sandboxRootFSContainerName, Image: "registry.example.com/template:base", ImagePullPolicy: corev1.PullIfNotPresent},
 				{Name: "sidecar", Image: "registry.example.com/sidecar:v1"},
 			},
 		},
@@ -95,8 +95,8 @@ func TestApplyClaimRootFSHeadChangesOnlyProcdImageAndAnnotations(t *testing.T) {
 	if got := pod.Spec.Containers[0].Image; got != req.RootFSHeadImageRef {
 		t.Fatalf("procd image = %q, want %q", got, req.RootFSHeadImageRef)
 	}
-	if got := pod.Spec.Containers[0].ImagePullPolicy; got != corev1.PullNever {
-		t.Fatalf("procd image pull policy = %q, want %q", got, corev1.PullNever)
+	if got := pod.Spec.Containers[0].ImagePullPolicy; got != corev1.PullIfNotPresent {
+		t.Fatalf("procd image pull policy = %q, want preserved %q", got, corev1.PullIfNotPresent)
 	}
 	if got := pod.Spec.Containers[1].Image; got != "registry.example.com/sidecar:v1" {
 		t.Fatalf("sidecar image = %q, want unchanged", got)

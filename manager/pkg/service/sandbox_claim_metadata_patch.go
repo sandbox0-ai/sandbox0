@@ -232,19 +232,6 @@ func appendRootFSHeadImagePatch(operations []claimPatchOperation, originalPod, c
 			claimPatchOperation{Operation: "replace", Path: imagePath, Value: desiredImage},
 		)
 	}
-	originalPullPolicy := originalPod.Spec.Containers[originalIndex].ImagePullPolicy
-	desiredPullPolicy := claimedPod.Spec.Containers[desiredIndex].ImagePullPolicy
-	if originalPullPolicy == desiredPullPolicy {
-		return operations, nil
-	}
-	pullPolicyPath := "/spec/containers/" + strconv.Itoa(originalIndex) + "/imagePullPolicy"
-	if originalPullPolicy == "" {
-		return append(operations, claimPatchOperation{Operation: "add", Path: pullPolicyPath, Value: desiredPullPolicy}), nil
-	}
-	operations = append(operations,
-		claimPatchOperation{Operation: "test", Path: pullPolicyPath, Value: originalPullPolicy},
-		claimPatchOperation{Operation: "replace", Path: pullPolicyPath, Value: desiredPullPolicy},
-	)
 	return operations, nil
 }
 

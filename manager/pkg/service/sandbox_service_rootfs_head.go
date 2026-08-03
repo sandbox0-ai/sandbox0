@@ -134,9 +134,10 @@ func applyClaimRootFSHeadToPod(pod *corev1.Pod, req *ClaimRequest) error {
 		return fmt.Errorf("pod %s/%s has no %s container", pod.Namespace, pod.Name, sandboxRootFSContainerName)
 	}
 	pod.Spec.Containers[containerIndex].Image = strings.TrimSpace(req.RootFSHeadImageRef)
-	// The image has already been materialized and confirmed through CRI on this
-	// node. Never lets kubelet resolve it locally without a registry fallback.
-	pod.Spec.Containers[containerIndex].ImagePullPolicy = corev1.PullNever
+	// Preserve the Pod's existing pull policy: Kubernetes permits an in-place
+	// image change but rejects an imagePullPolicy change. The node-local image
+	// has already been materialized and confirmed through CRI, so
+	// IfNotPresent resolves it without a registry request.
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}

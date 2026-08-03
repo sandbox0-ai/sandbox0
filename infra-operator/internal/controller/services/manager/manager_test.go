@@ -201,6 +201,9 @@ func TestBuildConfigUsesRootFSSnapshotterRuntimeClassName(t *testing.T) {
 	if cfg.SandboxRuntimeClassName != "kata-rootfs" {
 		t.Fatalf("sandbox runtime class = %q, want kata-rootfs", cfg.SandboxRuntimeClassName)
 	}
+	if cfg.SandboxRuntimeHandler != "sandbox0-kata" {
+		t.Fatalf("sandbox runtime handler = %q, want sandbox0-kata", cfg.SandboxRuntimeHandler)
+	}
 }
 
 func TestBuildConfigDerivesProcdBinImageRef(t *testing.T) {

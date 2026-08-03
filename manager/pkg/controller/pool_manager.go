@@ -473,9 +473,11 @@ func (pm *PoolManager) reconcileReplicaSetMetadata(
 // buildPodTemplate builds the pod template for a template
 func (pm *PoolManager) buildPodTemplate(template *v1alpha1.SandboxTemplate, specHash string) (corev1.PodTemplateSpec, error) {
 	spec := v1alpha1.BuildIdlePodSpec(template)
-	annotations := map[string]string{
-		AnnotationTemplateSpecHash: specHash,
+	annotations := v1alpha1.SandboxRuntimeHandlerAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
 	}
+	annotations[AnnotationTemplateSpecHash] = specHash
 	applyAutoscalerSafeToEvictAnnotations(annotations, pm.autoscalerAnnotationKeys, true)
 	labels := map[string]string{
 		LabelTemplateID:        template.Name,
@@ -1037,10 +1039,12 @@ func TemplateSpecHash(template *v1alpha1.SandboxTemplate) (string, error) {
 		PodSpec                  corev1.PodSpec            `json:"podSpec"`
 		WarmPool                 *warmPoolTemplateMetadata `json:"warmPool,omitempty"`
 		AutoscalerAnnotationKeys []string                  `json:"autoscalerAnnotationKeys,omitempty"`
+		RuntimeAnnotations       map[string]string         `json:"runtimeAnnotations,omitempty"`
 	}{
 		PodSpec:                  podSpec,
 		WarmPool:                 teamWarmPoolTemplateMetadata(template),
 		AutoscalerAnnotationKeys: autoscalerAnnotationKeys,
+		RuntimeAnnotations:       v1alpha1.SandboxRuntimeHandlerAnnotations(),
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

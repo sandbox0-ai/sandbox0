@@ -191,7 +191,9 @@ Every idle and active sandbox Pod must use the external `sandbox0` containerd sn
                     handler: sandbox0-rootfs
 ```
 
-`infra-operator` creates that Kubernetes `RuntimeClass` and the node-local snapshotter DaemonSet. It does not edit or restart host containerd. Before rolling out manager, configure every eligible sandbox node so the handler selects `snapshotter = "sandbox0"` and the proxy socket is registered. The self-describing marker does not depend on CRI snapshot-annotation propagation. Containerd 1.x with config version 2 uses:
+`infra-operator` creates that Kubernetes `RuntimeClass` and the node-local snapshotter DaemonSet. It also configures manager to add `io.containerd.cri.runtime-handler: <handler>` to every idle and cold-start sandbox Pod. Containerd uses that Pod sandbox annotation during `PullImage`, so the image is unpacked directly into the same snapshotter later used by `CreateContainer`; this avoids a second base-image unpack and prevents container creation from depending on layer blobs released after a default-snapshotter unpack. Do not override or remove this manager-owned annotation.
+
+`infra-operator` does not edit or restart host containerd. Before rolling out manager, configure every eligible sandbox node so the handler selects `snapshotter = "sandbox0"` and the proxy socket is registered. The self-describing marker does not depend on CRI snapshot-annotation propagation. Containerd 1.x with config version 2 uses:
 
 ```toml
     [proxy_plugins.sandbox0]

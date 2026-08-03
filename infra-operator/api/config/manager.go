@@ -119,6 +119,10 @@ type ManagerConfig struct {
 	SandboxMaxMemory string `yaml:"sandbox_max_memory" json:"sandboxMaxMemory"`
 	// +optional
 	SandboxRuntimeClassName string `yaml:"sandbox_runtime_class_name" json:"sandboxRuntimeClassName"`
+	// SandboxRuntimeHandler pins containerd image pulls to the snapshotter used
+	// by the configured sandbox RuntimeClass.
+	// +optional
+	SandboxRuntimeHandler string `yaml:"sandbox_runtime_handler" json:"sandboxRuntimeHandler"`
 	// DefaultTeamQuotas declaratively reconciles region-wide quota defaults.
 	// Team-specific database policies override these defaults.
 	// +optional

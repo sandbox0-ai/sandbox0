@@ -459,8 +459,11 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 	cfg.RegionID = managerPlan.RegionID
 	cfg.CtldEnabled = infrav1alpha1.IsManagerEnabled(infra)
 	// Persistent metadata heads require every idle and active sandbox pod to use
-	// the delegating external snapshotter from its first image pull.
-	cfg.SandboxRuntimeClassName = infrav1alpha1.ResolveRootFSSnapshotterConfig(infra).RuntimeClassName
+	// the external snapshotter from its first image pull. Containerd currently
+	// needs both the Kubernetes RuntimeClass and its CRI pull annotation.
+	rootFSSnapshotter := infrav1alpha1.ResolveRootFSSnapshotterConfig(infra)
+	cfg.SandboxRuntimeClassName = rootFSSnapshotter.RuntimeClassName
+	cfg.SandboxRuntimeHandler = rootFSSnapshotter.Handler
 	if cfg.CtldEnabled && cfg.CtldPort == 0 {
 		cfg.CtldPort = 8095
 	}

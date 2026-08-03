@@ -1041,6 +1041,34 @@ func TestCreateNewPodDefersNetworkApplyUntilPodHasNetworkIdentity(t *testing.T) 
 	}
 }
 
+func TestCreateNewPodPinsImagePullToRootFSSnapshotter(t *testing.T) {
+	withClaimTestPublicKey(t)
+	withClaimTestManagerConfig(t, "sandbox_runtime_handler: gvisor-rootfs\n")
+
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "ns-a"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:            client,
+		secretLister:         newClaimTestSecretLister(t),
+		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		clock:                systemTime{},
+		logger:               zap.NewNop(),
+	}
+
+	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatalf("createNewPod() error = %v", err)
+	}
+	if got := pod.Annotations[v1alpha1.ContainerdRuntimeHandlerAnnotation]; got != "gvisor-rootfs" {
+		t.Fatalf("containerd runtime handler annotation = %q, want gvisor-rootfs", got)
+	}
+}
+
 func TestClaimSandboxDeletesColdPodAfterNetworkApplyFailure(t *testing.T) {
 	withClaimTestPublicKey(t)
 

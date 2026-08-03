@@ -16,6 +16,11 @@ import (
 )
 
 const (
+	// ContainerdRuntimeHandlerAnnotation lets containerd select the runtime's
+	// snapshotter while pulling an image. Without it, CRI may unpack through the
+	// default snapshotter and later attempt a second unpack during CreateContainer.
+	ContainerdRuntimeHandlerAnnotation = "io.containerd.cri.runtime-handler"
+
 	procdBinVolumeName = "procd-bin"
 	procdBinMountPath  = "/procd-image"
 	procdPath          = procdBinMountPath + "/usr/local/bin/procd"
@@ -150,6 +155,20 @@ func configuredSandboxRuntimeClassName() *string {
 		return nil
 	}
 	return &runtimeClassName
+}
+
+// SandboxRuntimeHandlerAnnotations returns manager-owned Pod annotations that
+// keep image pull and container creation on the same containerd snapshotter.
+func SandboxRuntimeHandlerAnnotations() map[string]string {
+	cfg := config.LoadManagerConfig()
+	if cfg == nil {
+		return nil
+	}
+	handler := strings.TrimSpace(cfg.SandboxRuntimeHandler)
+	if handler == "" {
+		return nil
+	}
+	return map[string]string{ContainerdRuntimeHandlerAnnotation: handler}
 }
 
 func mergeNodeSelectors(base, override map[string]string) map[string]string {

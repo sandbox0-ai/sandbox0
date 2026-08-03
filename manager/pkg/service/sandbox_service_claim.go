@@ -1502,14 +1502,17 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		return nil, fmt.Errorf("ensure network-runtime MITM CA secret: %w", err)
 	}
 
-	annotations := controller.ClaimedSandboxPodAnnotations(map[string]string{
-		controller.AnnotationSandboxID:         sandboxID,
-		controller.AnnotationRuntimeGeneration: strconv.FormatInt(req.RuntimeGeneration, 10),
-		controller.AnnotationTeamID:            req.TeamID,
-		controller.AnnotationUserID:            req.UserID,
-		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
-		controller.AnnotationClaimType:         "cold",
-	}, s.config.AutoscalerSafeToEvictAnnotationKeys)
+	runtimeAnnotations := v1alpha1.SandboxRuntimeHandlerAnnotations()
+	if runtimeAnnotations == nil {
+		runtimeAnnotations = make(map[string]string)
+	}
+	runtimeAnnotations[controller.AnnotationSandboxID] = sandboxID
+	runtimeAnnotations[controller.AnnotationRuntimeGeneration] = strconv.FormatInt(req.RuntimeGeneration, 10)
+	runtimeAnnotations[controller.AnnotationTeamID] = req.TeamID
+	runtimeAnnotations[controller.AnnotationUserID] = req.UserID
+	runtimeAnnotations[controller.AnnotationClaimedAt] = s.clock.Now().Format(time.RFC3339)
+	runtimeAnnotations[controller.AnnotationClaimType] = "cold"
+	annotations := controller.ClaimedSandboxPodAnnotations(runtimeAnnotations, s.config.AutoscalerSafeToEvictAnnotationKeys)
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}

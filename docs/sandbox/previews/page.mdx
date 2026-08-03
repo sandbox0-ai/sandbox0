@@ -1,0 +1,83 @@
+# Private Previews
+
+Private previews let an authenticated client open an HTTP server that listens only on `localhost`, `127.0.0.1`, or `::1` inside a sandbox. They are intended for IDE and agent-product preview panes, not for publishing an application.
+
+Unlike [Sandbox Services](/docs/sandbox/services), a preview:
+
+- does not add or update sandbox `services`
+- is bound to one sandbox runtime generation and one port
+- expires after 30 to 3600 seconds
+- uses a one-time browser bootstrap URL and an `HttpOnly`, session-scoped browser cookie
+- can be renewed or revoked only by the authenticated user who created it
+
+The gateway validates the preview grant and sends the request to procd. Procd fixes the upstream address to sandbox loopback, strips internal authorization headers, and supports ordinary HTTP, streaming responses, and WebSockets.
+
+## Create A Preview
+
+Start an application inside the sandbox. It can stay bound to loopback:
+
+```bash
+python -m http.server 3000 --bind 127.0.0.1
+```
+
+Create the grant through the region API:
+
+```bash
+curl -X POST "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/previews" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "port": 3000,
+        "protocol": "http",
+        "path": "/",
+        "ttl_seconds": 900
+    }'
+```
+
+Open the returned `data.url` in a browser. The URL contains a one-time credential, sets an exact-host preview cookie, and redirects to `data.target_url` so credentials do not remain in the address bar. Do not fetch the bootstrap URL from a backend or link scanner before the browser opens it, because it can be consumed only once.
+
+The preview uses the normal region exposure domain:
+
+```text
+https://<sandbox_id>--p<port>.<region_id>.<root_domain>
+```
+
+The hostname is routing information, not authorization. Requests without a valid preview cookie still follow normal public Sandbox Service policy; a private preview does not make the port public.
+
+## Renew Or Revoke
+
+Renew an active grant with `PUT`:
+
+```bash
+curl -X PUT "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/previews/$PREVIEW_ID" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"ttl_seconds": 900}'
+```
+
+Revoke it when the preview closes:
+
+```bash
+curl -X DELETE "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/previews/$PREVIEW_ID" \
+    -H "Authorization: Bearer $SANDBOX0_API_KEY"
+```
+
+Pause, failure recovery, refresh, or any other runtime replacement changes `runtime_generation`. A grant from the previous runtime is rejected and must be recreated.
+
+## Security Boundary
+
+- Grant creation, renewal, and revocation require `sandbox:write` and team ownership. Renewal and revocation are additionally bound to the user who created the grant.
+- The bootstrap credential is stored only as a hash and is replaced with a separate cookie secret after first use.
+- The cookie is session-scoped, `Secure`, `HttpOnly`, exact-host, `SameSite=None`, and partitioned for an authenticated preview iframe. The server-side grant remains authoritative for expiration, so renewing the grant extends the existing browser session without exposing another credential.
+- Preview traffic cannot select an arbitrary host or the procd control port. It can reach only `127.0.0.1:<granted-port>`.
+- Configure shared Redis for cluster-gateway replicas. A single-cluster deployment without Redis uses an in-process ephemeral grant store.
+
+<CardGroup>
+  <Card title="Sandbox Services" href="/docs/sandbox/services" cta="Continue">
+    Publish a stable application route with explicit ingress policy.
+  </Card>
+
+  <Card title="Sandbox Lifecycle" href="/docs/sandbox/pause-resume" cta="Continue">
+    Understand runtime replacement and auto-resume behavior.
+  </Card>
+</CardGroup>

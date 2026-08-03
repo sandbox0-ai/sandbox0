@@ -116,6 +116,8 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/sandbox/pause", sandboxHandler.Pause).Methods("POST")
 	api.HandleFunc("/sandbox/resume", sandboxHandler.Resume).Methods("POST")
 	api.HandleFunc("/sandbox/stats", sandboxHandler.Stats).Methods("GET")
+	api.HandleFunc("/preview/{scheme:http|https}/{port:[0-9]+}", s.previewProxyHandler)
+	api.HandleFunc("/preview/{scheme:http|https}/{port:[0-9]+}/{path:.*}", s.previewProxyHandler)
 
 	// Context/Process handlers
 	contextHandler := handlers.NewContextHandler(s.contextManager, s.logger)

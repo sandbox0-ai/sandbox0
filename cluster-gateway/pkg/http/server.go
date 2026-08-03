@@ -98,6 +98,7 @@ type Server struct {
 	httpClient                               *http.Client
 	sandboxServiceLimiter                    ratelimit.Limiter
 	sandboxInternalCache                     sandboxInternalCache
+	previewGrants                            previewGrantStore
 }
 
 // NewServer creates a new HTTP server
@@ -349,6 +350,10 @@ func NewServer(
 	if err != nil {
 		logger.Warn("Failed to initialize sandbox internal cache", zap.Error(err))
 	}
+	previewGrants, err := newPreviewGrantStore(context.Background(), cfg.GatewayConfig)
+	if err != nil {
+		logger.Warn("Failed to initialize preview grant store", zap.Error(err))
+	}
 
 	server := &Server{
 		router:                                   router,
@@ -382,6 +387,7 @@ func NewServer(
 		httpClient:                               httpClient,
 		sandboxServiceLimiter:                    sandboxServiceLimiter,
 		sandboxInternalCache:                     sandboxInternalCache,
+		previewGrants:                            previewGrants,
 	}
 
 	server.setupRoutes()
@@ -537,6 +543,9 @@ func (s *Server) setupRoutes() {
 
 			sandboxes.GET("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxRead), s.proxySandboxManagerSubresource("services"))
 			sandboxes.PUT("/:id/services", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.proxySandboxManagerSubresource("services"))
+			sandboxes.POST("/:id/previews", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.createSandboxPreview)
+			sandboxes.PUT("/:id/previews/:preview_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.renewSandboxPreview)
+			sandboxes.DELETE("/:id/previews/:preview_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxWrite), s.deleteSandboxPreview)
 
 			s.registerSandboxProcdRoutes(sandboxes)
 		}

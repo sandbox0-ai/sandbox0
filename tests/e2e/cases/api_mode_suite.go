@@ -674,6 +674,12 @@ data:
         def do_POST(self):
             length = int(self.headers.get("content-length", "0"))
             body = self.rfile.read(length)
+            reject_delete_once = Path("/data/reject-delete-once")
+            if b'"event_type":"sandbox.deleted"' in body and not reject_delete_once.exists():
+                reject_delete_once.touch()
+                self.send_response(503)
+                self.end_headers()
+                return
             with events.open("ab") as f:
                 f.write(body + b"\n")
             self.send_response(204)

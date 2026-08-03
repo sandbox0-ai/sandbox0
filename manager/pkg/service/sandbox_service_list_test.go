@@ -294,17 +294,17 @@ func TestListSandboxesFromStoreFiltersPausedState(t *testing.T) {
 	now := time.Now()
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{
 		"sandbox-running": {
-			ID:         "sandbox-running",
-			TeamID:     "team-a",
-			TemplateID: "template-1",
-			Status:     SandboxStatusRunning,
-			CreatedAt:  now.Add(-time.Minute),
+			ID:           "sandbox-running",
+			TeamID:       "team-a",
+			TemplateID:   "template-1",
+			DesiredState: SandboxDesiredStateActive,
+			CreatedAt:    now.Add(-time.Minute),
 		},
 		"sandbox-paused": {
 			ID:                "sandbox-paused",
 			TeamID:            "team-a",
 			TemplateID:        "template-1",
-			Status:            SandboxStatusPaused,
+			DesiredState:      SandboxDesiredStatePaused,
 			RuntimeGeneration: 3,
 			CreatedAt:         now,
 		},
@@ -326,6 +326,71 @@ func TestListSandboxesFromStoreFiltersPausedState(t *testing.T) {
 	assert.Equal(t, "sandbox-paused", resp.Sandboxes[0].ID)
 	assert.True(t, resp.Sandboxes[0].Paused)
 	assert.Equal(t, int64(3), resp.Sandboxes[0].RuntimeGeneration)
+}
+
+func TestListSandboxesFromStoreProjectsAndFiltersCachedPodStatus(t *testing.T) {
+	now := time.Now()
+	runningPod := createTestPod("sandbox-running", "team-a", "template-1", controller.PoolTypeActive, now, now.Add(time.Hour), false)
+	failedPod := createTestPodWithPhase("sandbox-failed", "team-a", "template-1", controller.PoolTypeActive, now, now.Add(time.Hour), false, corev1.PodFailed)
+	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+		"sandbox-running": {
+			ID:           "sandbox-running",
+			TeamID:       "team-a",
+			TemplateID:   "template-1",
+			DesiredState: SandboxDesiredStateActive,
+			CreatedAt:    now,
+		},
+		"sandbox-failed": {
+			ID:           "sandbox-failed",
+			TeamID:       "team-a",
+			TemplateID:   "template-1",
+			DesiredState: SandboxDesiredStateActive,
+			CreatedAt:    now.Add(-time.Minute),
+		},
+		"sandbox-missing": {
+			ID:           "sandbox-missing",
+			TeamID:       "team-a",
+			TemplateID:   "template-1",
+			DesiredState: SandboxDesiredStateActive,
+			CreatedAt:    now.Add(-2 * time.Minute),
+		},
+	}}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{
+		k8sClient:    client,
+		sandboxStore: store,
+		podLister:    newTestPodLister(t, runningPod, failedPod),
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+
+	running, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+		TeamID: "team-a",
+		Status: SandboxStatusRunning,
+		Limit:  50,
+	})
+	require.NoError(t, err)
+	require.Len(t, running.Sandboxes, 1)
+	assert.Equal(t, "sandbox-running", running.Sandboxes[0].ID)
+
+	failed, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+		TeamID: "team-a",
+		Status: SandboxStatusFailed,
+		Limit:  50,
+	})
+	require.NoError(t, err)
+	require.Len(t, failed.Sandboxes, 1)
+	assert.Equal(t, "sandbox-failed", failed.Sandboxes[0].ID)
+
+	starting, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+		TeamID: "team-a",
+		Status: SandboxStatusStarting,
+		Limit:  50,
+	})
+	require.NoError(t, err)
+	require.Len(t, starting.Sandboxes, 1)
+	assert.Equal(t, "sandbox-missing", starting.Sandboxes[0].ID)
+	assert.Empty(t, client.Actions(), "status projection must not call the Kubernetes API")
 }
 
 func TestListSandboxes_TerminatingPodStatus(t *testing.T) {

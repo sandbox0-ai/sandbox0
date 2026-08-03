@@ -119,8 +119,8 @@ func sandboxRecordCountsForActiveQuota(record *SandboxRecord) bool {
 	if record == nil || !record.DeletedAt.IsZero() {
 		return false
 	}
-	switch record.Status {
-	case SandboxStatusStarting, SandboxStatusRunning:
+	switch record.DesiredState {
+	case SandboxDesiredStateActive:
 		return true
 	default:
 		return false

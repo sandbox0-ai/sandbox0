@@ -457,9 +457,9 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausingRunti
 		deletionWebhookEmitter: emitter,
 		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
 			"sandbox-a": {
-				ID:     "sandbox-a",
-				TeamID: "team-a",
-				Status: SandboxStatusPaused,
+				ID:           "sandbox-a",
+				TeamID:       "team-a",
+				DesiredState: SandboxDesiredStatePaused,
 			},
 		}},
 		logger: zap.NewNop(),
@@ -507,7 +507,7 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime
 			"sandbox-a": {
 				ID:                  "sandbox-a",
 				TeamID:              "team-a",
-				Status:              SandboxStatusRunning,
+				DesiredState:        SandboxDesiredStateActive,
 				CurrentPodNamespace: "ns-a",
 				CurrentPodName:      "pod-new",
 				RuntimeGeneration:   2,
@@ -548,7 +548,7 @@ func TestRuntimeDeletionDispositionDoesNotCacheStaleRuntime(t *testing.T) {
 		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
 			"sandbox-a": {
 				ID:                "sandbox-a",
-				Status:            SandboxStatusRunning,
+				DesiredState:      SandboxDesiredStateActive,
 				CurrentPodName:    "pod-new",
 				RuntimeGeneration: 2,
 			},
@@ -651,7 +651,7 @@ func TestSandboxServicePausedSandboxRequestsHotVolumeRetention(t *testing.T) {
 			CtldPort:    ctldPort,
 		},
 		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
-			"sandbox-a": {ID: "sandbox-a", Status: SandboxStatusPaused},
+			"sandbox-a": {ID: "sandbox-a", DesiredState: SandboxDesiredStatePaused},
 		}},
 		logger: zap.NewNop(),
 	}
@@ -855,7 +855,7 @@ func TestSystemVolumeReconcilerKeepsPausedOwnedVolume(t *testing.T) {
 				ID:                   "sandbox-a",
 				TeamID:               "team-a",
 				UserID:               "user-a",
-				Status:               SandboxStatusPaused,
+				DesiredState:         SandboxDesiredStatePaused,
 				WebhookStateVolumeID: "volume-a",
 			},
 		}},

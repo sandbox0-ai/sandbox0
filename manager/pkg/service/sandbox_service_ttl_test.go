@@ -195,7 +195,7 @@ func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
 			TemplateID:          "default",
 			TemplateName:        "default",
 			TemplateNamespace:   "tpl-default",
-			Status:              SandboxStatusPaused,
+			DesiredState:        SandboxDesiredStatePaused,
 			Config:              SandboxConfig{TTL: int32Ptr(300)},
 			CurrentPodName:      pod.Name,
 			CurrentPodNamespace: pod.Namespace,
@@ -214,7 +214,7 @@ func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
 	record, err := svc.sandboxStore.GetSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)
 	require.NotNil(t, record.Config.TTL)
-	assert.Equal(t, SandboxStatusPaused, record.Status)
+	assert.Equal(t, SandboxDesiredStatePaused, record.DesiredState)
 	assert.Equal(t, int32(0), *record.Config.TTL)
 	assert.True(t, record.ExpiresAt.IsZero())
 
@@ -229,8 +229,8 @@ func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
 }
 
 func TestPersistUpdatedSandboxPodDoesNotOverwriteDurableLifecycleState(t *testing.T) {
-	for _, status := range []string{SandboxStatusPaused, SandboxStatusTerminating, SandboxStatusDeleted} {
-		t.Run(status, func(t *testing.T) {
+	for _, desiredState := range []string{SandboxDesiredStatePaused, SandboxDesiredStateTerminating, SandboxDesiredStateDeleted} {
+		t.Run(desiredState, func(t *testing.T) {
 			pod := testSandboxPod()
 			pod.Annotations[controller.AnnotationConfig] = `{"ttl":0}`
 
@@ -243,7 +243,7 @@ func TestPersistUpdatedSandboxPodDoesNotOverwriteDurableLifecycleState(t *testin
 					TemplateID:          "default",
 					TemplateName:        "default",
 					TemplateNamespace:   "tpl-default",
-					Status:              status,
+					DesiredState:        desiredState,
 					Config:              SandboxConfig{TTL: int32Ptr(300)},
 					CurrentPodName:      pod.Name,
 					CurrentPodNamespace: pod.Namespace,
@@ -256,7 +256,7 @@ func TestPersistUpdatedSandboxPodDoesNotOverwriteDurableLifecycleState(t *testin
 			record, err := store.GetSandbox(context.Background(), "sandbox-1")
 			require.NoError(t, err)
 			require.NotNil(t, record.Config.TTL)
-			assert.Equal(t, status, record.Status)
+			assert.Equal(t, desiredState, record.DesiredState)
 			assert.Equal(t, int32(300), *record.Config.TTL)
 		})
 	}

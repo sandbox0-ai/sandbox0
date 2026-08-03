@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
@@ -365,7 +366,7 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		TemplateName:      source.TemplateName,
 		TemplateNamespace: source.TemplateNamespace,
 		ClusterID:         source.ClusterID,
-		Status:            SandboxStatusPaused,
+		DesiredState:      SandboxDesiredStatePaused,
 		Config:            targetConfig,
 		TemplateSpec:      *source.TemplateSpec.DeepCopy(),
 		ClaimedAt:         now,
@@ -459,21 +460,15 @@ func (s *SandboxService) prepareRootFSSourceCheckpoint(ctx context.Context, sour
 			return nil
 		}
 		source = cloneSandboxRecordForRootFSProduct(record)
-		if record.Status == SandboxStatusPaused {
+		if record.DesiredState == SandboxDesiredStatePaused {
 			return nil
 		}
 		if !s.config.CtldEnabled || s.ctldClient == nil {
 			return ErrSandboxCheckpointRequiresCtld
 		}
-		pod, err := s.getSandboxPod(lockCtx, sourceSandboxID)
+		pod, err := s.resolveRootFSSourceRuntimePod(lockCtx, record)
 		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sourceSandboxID, fmt.Errorf("running sandbox has no runtime pod"))
-			}
-			return fmt.Errorf("get runtime pod: %w", err)
-		}
-		if pod.DeletionTimestamp != nil {
-			return apierrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sourceSandboxID, fmt.Errorf("runtime pod deletion is in progress"))
+			return err
 		}
 		txn = &SandboxLifecycleTxn{
 			ID:               uuid.NewString(),
@@ -583,7 +578,7 @@ func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store Sandbox
 			if activeTxn != nil {
 				return errSandboxLifecycleRootFSCheckpointing
 			}
-			if record.Status != SandboxStatusPaused {
+			if record.DesiredState != SandboxDesiredStatePaused {
 				return errSandboxLifecycleRootFSCheckpointing
 			}
 		}
@@ -648,7 +643,7 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 			if activeTxn != nil {
 				return errSandboxLifecycleRootFSCheckpointing
 			}
-			if record.Status != SandboxStatusPaused {
+			if record.DesiredState != SandboxDesiredStatePaused {
 				return errSandboxLifecycleRootFSCheckpointing
 			}
 		}
@@ -746,14 +741,14 @@ func (s *SandboxService) requireRootFSSandboxOwnership(ctx context.Context, sand
 }
 
 func validateRootFSSandboxRecord(record *SandboxRecord, sandboxID, teamID string, requirePaused bool) error {
-	if record == nil || record.Status == SandboxStatusDeleted {
+	if record == nil || record.DesiredState == SandboxDesiredStateDeleted {
 		return apierrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
 	}
 	if record.TeamID != teamID {
 		return apierrors.NewForbidden(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("sandbox belongs to a different team"))
 	}
-	if requirePaused && record.Status != SandboxStatusPaused {
-		return fmt.Errorf("%w: current status is %s", ErrSandboxRootFSRequiresPausedSandbox, record.Status)
+	if requirePaused && record.DesiredState != SandboxDesiredStatePaused {
+		return fmt.Errorf("%w: current desired state is %s", ErrSandboxRootFSRequiresPausedSandbox, record.DesiredState)
 	}
 	return nil
 }
@@ -762,13 +757,42 @@ func validateRootFSSourceSandboxRecord(record *SandboxRecord, sandboxID, teamID 
 	if err := validateRootFSSandboxRecord(record, sandboxID, teamID, false); err != nil {
 		return err
 	}
-	if record.Status != SandboxStatusPaused && record.Status != SandboxStatusRunning {
-		return fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, record.Status)
+	if record.DesiredState != SandboxDesiredStatePaused && record.DesiredState != SandboxDesiredStateActive {
+		return fmt.Errorf("%w: current desired state is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, record.DesiredState)
 	}
 	if sandboxHardExpired(record.HardExpiresAt, now) {
 		return apierrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
 	}
 	return nil
+}
+
+// resolveRootFSSourceRuntimePod projects active source readiness exclusively
+// from the shared informer cache. Paused sources have no runtime pod by design.
+func (s *SandboxService) resolveRootFSSourceRuntimePod(ctx context.Context, record *SandboxRecord) (*corev1.Pod, error) {
+	if record == nil {
+		return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, SandboxStatusStarting)
+	}
+	if record.DesiredState == SandboxDesiredStatePaused {
+		return nil, nil
+	}
+	if record.DesiredState != SandboxDesiredStateActive {
+		return nil, fmt.Errorf("%w: current desired state is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, record.DesiredState)
+	}
+	if s == nil || s.podLister == nil {
+		return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, SandboxStatusStarting)
+	}
+	pod, err := s.getSandboxPod(ctx, record.ID)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, SandboxStatusStarting)
+		}
+		return nil, fmt.Errorf("get cached runtime pod: %w", err)
+	}
+	status := s.podToSandboxStatus(pod)
+	if status != SandboxStatusRunning {
+		return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, status)
+	}
+	return pod, nil
 }
 
 func sandboxRootFSSnapshotFromStore(snapshot *RootFSSnapshot) *SandboxRootFSSnapshot {

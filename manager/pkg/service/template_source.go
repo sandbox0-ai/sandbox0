@@ -41,6 +41,9 @@ func (s *SandboxService) ResolveSandboxTemplateSource(ctx context.Context, sandb
 			return nil, fmt.Errorf("%w: %v", template.ErrTemplateSourceNotReady, err)
 		}
 	}
+	if _, err := s.resolveRootFSSourceRuntimePod(ctx, record); err != nil {
+		return nil, fmt.Errorf("%w: %v", template.ErrTemplateSourceNotReady, err)
+	}
 	return &template.SandboxTemplateSource{
 		SandboxID:  record.ID,
 		TeamID:     record.TeamID,

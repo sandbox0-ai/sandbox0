@@ -36,9 +36,9 @@ func TestCheckpointPauseRequiresCtldEnabled(t *testing.T) {
 	}
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{
 		"sandbox-1": {
-			ID:     "sandbox-1",
-			TeamID: "team-1",
-			Status: SandboxStatusRunning,
+			ID:           "sandbox-1",
+			TeamID:       "team-1",
+			DesiredState: SandboxDesiredStateActive,
 		},
 	}}
 	svc := &SandboxService{

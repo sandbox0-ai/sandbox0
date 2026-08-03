@@ -192,8 +192,8 @@ func TestClaimIdlePodAvoidsDuplicateCandidatesWithStaleInformer(t *testing.T) {
 			t.Fatalf("Pod %q was claimed more than once", pod.Name)
 		}
 		selected[pod.Name] = struct{}{}
-		if got := pod.Annotations[controller.AnnotationHotClaimCompletionProtocol]; got != controller.HotClaimCompletionProtocolRecordV1 {
-			t.Fatalf("completion protocol = %q, want %q", got, controller.HotClaimCompletionProtocolRecordV1)
+		if got := pod.Annotations[controller.AnnotationHotClaimCompletionProtocol]; got != controller.HotClaimCompletionProtocolRecordV2 {
+			t.Fatalf("completion protocol = %q, want %q", got, controller.HotClaimCompletionProtocolRecordV2)
 		}
 	}
 	if len(selected) != count {

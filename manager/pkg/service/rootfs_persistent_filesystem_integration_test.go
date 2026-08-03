@@ -8,10 +8,85 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	servicemigrations "github.com/sandbox0-ai/sandbox0/manager/pkg/service/migrations"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSandboxDesiredStateMigrationRepairsLegacyObservedStatuses(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	require.NoError(t, migrate.Down(ctx, pool, ".",
+		migrate.WithBaseFS(servicemigrations.FS),
+		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
+		migrate.WithSchema(sandboxStoreSchemaName),
+	))
+
+	updatedAt := time.Date(2026, time.August, 4, 10, 0, 0, 0, time.UTC)
+	legacyRows := []struct {
+		id        string
+		status    string
+		deletedAt *time.Time
+	}{
+		{id: "starting", status: SandboxStatusStarting},
+		{id: "running", status: SandboxStatusRunning},
+		{id: "failed", status: SandboxStatusFailed},
+		{id: "paused", status: SandboxStatusPaused},
+		{id: "terminating", status: SandboxStatusTerminating},
+		{id: "deleted", status: SandboxStatusRunning, deletedAt: &updatedAt},
+		{id: "deleted-status", status: "deleted"},
+	}
+	for _, row := range legacyRows {
+		_, err := pool.Exec(ctx, `
+			INSERT INTO manager.sandboxes (
+				sandbox_id, team_id, template_id, template_name, template_namespace,
+				status, deleted_at, updated_at
+			) VALUES ($1, 'team-1', 'template-1', 'template-1', 'template-default', $2, $3, $4)
+		`, row.id, row.status, row.deletedAt, updatedAt)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+
+	type migratedState struct {
+		desiredState string
+		completedAt  *time.Time
+		deletedAt    *time.Time
+	}
+	migrated := make(map[string]migratedState, len(legacyRows))
+	rows, err := pool.Query(ctx, `
+		SELECT sandbox_id, desired_state, hot_claim_completed_at, deleted_at
+		FROM manager.sandboxes
+	`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var state migratedState
+		require.NoError(t, rows.Scan(&id, &state.desiredState, &state.completedAt, &state.deletedAt))
+		migrated[id] = state
+	}
+	require.NoError(t, rows.Err())
+
+	for _, id := range []string{"starting", "running", "failed"} {
+		assert.Equal(t, SandboxDesiredStateActive, migrated[id].desiredState)
+		assert.Nil(t, migrated[id].completedAt)
+	}
+	assert.Equal(t, SandboxDesiredStatePaused, migrated["paused"].desiredState)
+	assert.Equal(t, SandboxDesiredStateTerminating, migrated["terminating"].desiredState)
+	assert.Equal(t, SandboxDesiredStateDeleted, migrated["deleted"].desiredState)
+	assert.Equal(t, SandboxDesiredStateDeleted, migrated["deleted-status"].desiredState)
+	assert.NotNil(t, migrated["deleted-status"].deletedAt)
+
+	_, err = pool.Exec(ctx, `UPDATE manager.sandboxes SET desired_state = 'running' WHERE sandbox_id = 'running'`)
+	require.Error(t, err, "legacy observed status must be rejected after migration")
+
+	active, err := NewPGSandboxStore(pool).CountActiveSandboxes(ctx, "team-1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), active)
+}
 
 func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	ctx := context.Background()
@@ -690,7 +765,7 @@ func rootFSTestSandboxRecord(sandboxID, teamID string) *SandboxRecord {
 		TemplateID:        "template-1",
 		TemplateName:      "template-1",
 		TemplateNamespace: "template-default",
-		Status:            SandboxStatusRunning,
+		DesiredState:      SandboxDesiredStateActive,
 		CreatedAt:         time.Now().UTC(),
 	}
 }

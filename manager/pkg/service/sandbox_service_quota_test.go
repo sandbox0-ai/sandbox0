@@ -103,19 +103,19 @@ func TestEnforceActiveSandboxQuotaUsesSandboxStoreWhenUsageStoreDisabled(t *test
 		sandboxStore: &memorySandboxStore{
 			records: map[string]*SandboxRecord{
 				"sandbox-1": {
-					ID:     "sandbox-1",
-					TeamID: "team-1",
-					Status: SandboxStatusRunning,
+					ID:           "sandbox-1",
+					TeamID:       "team-1",
+					DesiredState: SandboxDesiredStateActive,
 				},
 				"paused": {
-					ID:     "paused",
-					TeamID: "team-1",
-					Status: SandboxStatusPaused,
+					ID:           "paused",
+					TeamID:       "team-1",
+					DesiredState: SandboxDesiredStatePaused,
 				},
 				"other-team": {
-					ID:     "other-team",
-					TeamID: "team-2",
-					Status: SandboxStatusRunning,
+					ID:           "other-team",
+					TeamID:       "team-2",
+					DesiredState: SandboxDesiredStateActive,
 				},
 			},
 		},
@@ -136,9 +136,9 @@ func TestEnforceActiveSandboxQuotaPrefersOperationalStoreOverUsageProjection(t *
 		sandboxStore: &memorySandboxStore{
 			records: map[string]*SandboxRecord{
 				"sandbox-1": {
-					ID:     "sandbox-1",
-					TeamID: "team-1",
-					Status: SandboxStatusRunning,
+					ID:           "sandbox-1",
+					TeamID:       "team-1",
+					DesiredState: SandboxDesiredStateActive,
 				},
 			},
 		},

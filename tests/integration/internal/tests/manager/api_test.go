@@ -455,7 +455,7 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 		TemplateName:      template.Name,
 		TemplateNamespace: template.Namespace,
 		ClusterID:         "default",
-		Status:            service.SandboxStatusPaused,
+		DesiredState:      service.SandboxDesiredStatePaused,
 		TemplateSpec:      template.Spec,
 		RuntimeGeneration: 3,
 		ClaimedAt:         now,
@@ -531,7 +531,7 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 	if err != nil {
 		t.Fatalf("get restored sandbox record: %v", err)
 	}
-	if record.Status != service.SandboxStatusRunning || record.CurrentPodName != "idle-rootfs" || record.RuntimeGeneration != 4 {
+	if record.DesiredState != service.SandboxDesiredStateActive || record.CurrentPodName != "idle-rootfs" || record.RuntimeGeneration != 4 {
 		t.Fatalf("restored record = %+v", record)
 	}
 }
@@ -546,7 +546,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 		TemplateName:      "template-1",
 		TemplateNamespace: "template-default",
 		ClusterID:         "default",
-		Status:            service.SandboxStatusPaused,
+		DesiredState:      service.SandboxDesiredStatePaused,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}, &service.SandboxRootFSState{
@@ -685,7 +685,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	}
 
 	store.mu.Lock()
-	store.records["sandbox-1"].Status = service.SandboxStatusRunning
+	store.records["sandbox-1"].DesiredState = service.SandboxDesiredStateActive
 	store.mu.Unlock()
 	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/snapshots", env.token, nil)
 	if resp.StatusCode != http.StatusServiceUnavailable {
@@ -970,10 +970,14 @@ func (s *memorySandboxStoreForManagerIntegration) UpsertSandbox(_ context.Contex
 		return nil
 	}
 	if existing := s.records[record.ID]; existing != nil &&
-		(existing.Status == service.SandboxStatusTerminating || existing.Status == service.SandboxStatusDeleted || !existing.DeletedAt.IsZero()) {
+		(existing.DesiredState == service.SandboxDesiredStateTerminating || existing.DesiredState == service.SandboxDesiredStateDeleted || !existing.DeletedAt.IsZero()) {
 		return nil
 	}
-	s.records[record.ID] = cloneSandboxRecordForManagerIntegration(record)
+	clone := cloneSandboxRecordForManagerIntegration(record)
+	if existing := s.records[record.ID]; existing != nil && clone.HotClaimCompletedAt.IsZero() {
+		clone.HotClaimCompletedAt = existing.HotClaimCompletedAt
+	}
+	s.records[record.ID] = clone
 	return nil
 }
 
@@ -1053,7 +1057,7 @@ func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.C
 	if record == nil {
 		return service.ErrSandboxRecordNotFound
 	}
-	record.Status = service.SandboxStatusDeleted
+	record.DesiredState = service.SandboxDesiredStateDeleted
 	record.DeletedAt = deletedAt
 	for _, txn := range s.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && managerIntegrationLifecyclePhaseActive(txn.Phase) {
@@ -1240,14 +1244,14 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveSandbox(ctx context.Conte
 	return t.store.UpsertSandbox(ctx, record)
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata service.SandboxRuntimeMetadata) error {
+func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName string, generation int64, expiresAt, hardExpiresAt time.Time, metadata service.SandboxRuntimeMetadata) error {
 	record := t.store.records[sandboxID]
-	if record == nil || record.Status == service.SandboxStatusTerminating || record.Status == service.SandboxStatusDeleted || !record.DeletedAt.IsZero() {
+	if record == nil || record.DesiredState == service.SandboxDesiredStateTerminating || record.DesiredState == service.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
 		return service.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = namespace
 	record.CurrentPodName = podName
-	record.Status = status
+	record.DesiredState = service.SandboxDesiredStateActive
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
 	record.HardExpiresAt = hardExpiresAt
@@ -1262,12 +1266,12 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context
 
 func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimePaused(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
 	record := t.store.records[sandboxID]
-	if record == nil || record.Status == service.SandboxStatusTerminating || record.Status == service.SandboxStatusDeleted || !record.DeletedAt.IsZero() {
+	if record == nil || record.DesiredState == service.SandboxDesiredStateTerminating || record.DesiredState == service.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
 		return service.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = ""
 	record.CurrentPodName = ""
-	record.Status = service.SandboxStatusPaused
+	record.DesiredState = service.SandboxDesiredStatePaused
 	if record.RuntimeGeneration < generation {
 		record.RuntimeGeneration = generation
 	}
@@ -1280,7 +1284,7 @@ func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimeTerminating(_ cont
 	if record == nil || !record.DeletedAt.IsZero() {
 		return service.ErrSandboxRecordNotFound
 	}
-	record.Status = service.SandboxStatusTerminating
+	record.DesiredState = service.SandboxDesiredStateTerminating
 	return nil
 }
 
@@ -1389,27 +1393,27 @@ func (t memorySandboxStoreTxForManagerIntegration) AbortLifecycleTxn(_ context.C
 func TestMemorySandboxStoreTxForManagerIntegrationFencesTerminatingRuntime(t *testing.T) {
 	const sandboxID = "sandbox-terminating"
 	store := newMemorySandboxStoreForManagerIntegration(&service.SandboxRecord{
-		ID:     sandboxID,
-		Status: service.SandboxStatusRunning,
+		ID:           sandboxID,
+		DesiredState: service.SandboxDesiredStateActive,
 	}, nil)
 	tx := memorySandboxStoreTxForManagerIntegration{store: store}
 
 	if err := tx.MarkRuntimeTerminating(t.Context(), sandboxID); err != nil {
 		t.Fatalf("mark runtime terminating: %v", err)
 	}
-	if got := store.records[sandboxID].Status; got != service.SandboxStatusTerminating {
-		t.Fatalf("expected terminating status, got %q", got)
+	if got := store.records[sandboxID].DesiredState; got != service.SandboxDesiredStateTerminating {
+		t.Fatalf("expected terminating desired state, got %q", got)
 	}
 	if err := tx.MarkRuntimePaused(t.Context(), sandboxID, 2, time.Now()); !stderrors.Is(err, service.ErrSandboxRecordNotFound) {
 		t.Fatalf("expected paused write to be fenced, got %v", err)
 	}
-	if err := tx.SaveRuntime(t.Context(), sandboxID, "default", "replacement", service.SandboxStatusRunning, 2, time.Time{}, time.Time{}, service.SandboxRuntimeMetadata{}); !stderrors.Is(err, service.ErrSandboxRecordNotFound) {
+	if err := tx.SaveRuntime(t.Context(), sandboxID, "default", "replacement", 2, time.Time{}, time.Time{}, service.SandboxRuntimeMetadata{}); !stderrors.Is(err, service.ErrSandboxRecordNotFound) {
 		t.Fatalf("expected runtime write to be fenced, got %v", err)
 	}
-	if err := tx.SaveSandbox(t.Context(), &service.SandboxRecord{ID: sandboxID, Status: service.SandboxStatusRunning}); err != nil {
+	if err := tx.SaveSandbox(t.Context(), &service.SandboxRecord{ID: sandboxID, DesiredState: service.SandboxDesiredStateActive}); err != nil {
 		t.Fatalf("save stale sandbox projection: %v", err)
 	}
-	if got := store.records[sandboxID].Status; got != service.SandboxStatusTerminating {
+	if got := store.records[sandboxID].DesiredState; got != service.SandboxDesiredStateTerminating {
 		t.Fatalf("expected stale sandbox projection to remain fenced, got %q", got)
 	}
 }

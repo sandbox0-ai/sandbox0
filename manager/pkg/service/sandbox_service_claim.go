@@ -711,7 +711,7 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 		TemplateName:         template.Name,
 		TemplateNamespace:    template.Namespace,
 		ClusterID:            naming.ClusterIDOrDefault(template.Spec.ClusterId),
-		Status:               s.podToSandboxStatus(pod),
+		DesiredState:         SandboxDesiredStateActive,
 		Config:               cfg,
 		Mounts:               mounts,
 		TemplateSpec:         template.Spec,
@@ -724,11 +724,6 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 		WebhookStateVolumeID: webhookStateVolumeIDFromPod(pod),
 		OwnerKind:            ownerKindFromPod(pod),
 		CreatedAt:            s.clock.Now(),
-	}
-	if hotClaimUsesRecordCompletion(pod) &&
-		pod.Annotations[controller.AnnotationHotClaimReservationState] ==
-			controller.HotClaimReservationStateInitializing {
-		record.Status = SandboxStatusStarting
 	}
 	return record
 }
@@ -770,7 +765,7 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 	if state == nil {
 		return pod, true, fmt.Errorf("%w: snapshot %s", ErrRootFSFilesystemNotFound, snapshotID)
 	}
-	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, state, SandboxStatusStarting)
+	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, state, true)
 	if err != nil {
 		return pod, true, err
 	}
@@ -1187,7 +1182,7 @@ func (s *SandboxService) claimIdlePod(ctx context.Context, template *v1alpha1.Sa
 		pod.Annotations[controller.AnnotationHotClaimReservation] = reservationToken
 		pod.Annotations[controller.AnnotationHotClaimReservationState] = controller.HotClaimReservationStateInitializing
 		pod.Annotations[controller.AnnotationHotClaimReservedAt] = s.clock.Now().UTC().Format(time.RFC3339Nano)
-		pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV1
+		pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV2
 		if stateVolume != nil {
 			pod.Annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 		} else {

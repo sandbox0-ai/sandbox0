@@ -124,8 +124,8 @@ func TestClaimIdlePodClaimsReadyPod(t *testing.T) {
 	if got := pod.Annotations[controller.AnnotationHotClaimReservationState]; got != controller.HotClaimReservationStateInitializing {
 		t.Fatalf("reservation state = %q, want %q", got, controller.HotClaimReservationStateInitializing)
 	}
-	if got := pod.Annotations[controller.AnnotationHotClaimCompletionProtocol]; got != controller.HotClaimCompletionProtocolRecordV1 {
-		t.Fatalf("completion protocol = %q, want %q", got, controller.HotClaimCompletionProtocolRecordV1)
+	if got := pod.Annotations[controller.AnnotationHotClaimCompletionProtocol]; got != controller.HotClaimCompletionProtocolRecordV2 {
+		t.Fatalf("completion protocol = %q, want %q", got, controller.HotClaimCompletionProtocolRecordV2)
 	}
 	if got := pod.Annotations[testAutoscalerSafeToEvictAnnotation]; got != "false" {
 		t.Fatalf("safe-to-evict annotation = %q, want false", got)
@@ -1422,8 +1422,8 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 		t.Fatalf("rootfs state = %+v, want layer-v1 for claimed sandbox", state)
 	}
 	record := store.records[resp.SandboxID]
-	if record == nil || record.Status != SandboxStatusRunning {
-		t.Fatalf("record = %+v, want running claimed sandbox", record)
+	if record == nil || record.DesiredState != SandboxDesiredStateActive {
+		t.Fatalf("record = %+v, want active claimed sandbox", record)
 	}
 }
 
@@ -1508,8 +1508,8 @@ func TestClaimSandboxDoesNotActivateRuntimeBeforePersistence(t *testing.T) {
 		t.Fatalf("sandbox records = %d, want 1", len(store.records))
 	}
 	for _, record := range store.records {
-		if record.Status != SandboxStatusRunning {
-			t.Fatalf("sandbox record status = %q, want running", record.Status)
+		if record.DesiredState != SandboxDesiredStateActive {
+			t.Fatalf("sandbox record desired state = %q, want active", record.DesiredState)
 		}
 	}
 }
@@ -1557,7 +1557,7 @@ func TestClaimSandboxDeletesConcurrentRecordWhenRuntimeActivationFails(t *testin
 		t.Fatalf("sandbox records = %d, want 1", len(store.records))
 	}
 	for _, record := range store.records {
-		if record.Status != SandboxStatusDeleted || record.DeletedAt.IsZero() {
+		if record.DesiredState != SandboxDesiredStateDeleted || record.DeletedAt.IsZero() {
 			t.Fatalf("sandbox record = %#v, want deleted", record)
 		}
 	}

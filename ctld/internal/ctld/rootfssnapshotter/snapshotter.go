@@ -50,6 +50,7 @@ type Snapshotter struct {
 	observer *Observer
 
 	mu        sync.Mutex
+	cleanupMu sync.Mutex
 	ops       sync.WaitGroup
 	mounted   map[string]mountedHead
 	children  map[string]string
@@ -419,6 +420,26 @@ func (s *Snapshotter) Remove(ctx context.Context, key string) error {
 	return nil
 }
 
+// Cleanup reclaims filesystem data detached by asynchronous snapshot removal.
+// Containerd invokes this outside the key-removal path so releasing a large
+// writable upper does not block Pod teardown or a later warm claim.
+func (s *Snapshotter) Cleanup(ctx context.Context) error {
+	if !s.beginOperation() {
+		return fmt.Errorf("rootfs snapshotter is closed")
+	}
+	defer s.ops.Done()
+	cleaner, ok := s.delegate.(snapshots.Cleaner)
+	if !ok {
+		return fmt.Errorf("rootfs snapshotter delegate cleanup: %w", errdefs.ErrNotImplemented)
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	if err := cleaner.Cleanup(ctx); err != nil {
+		return fmt.Errorf("clean rootfs overlay snapshots: %w", err)
+	}
+	return nil
+}
+
 func (s *Snapshotter) headInUseLocked(head string) bool {
 	if strings.TrimSpace(head) == "" {
 		return false
@@ -765,3 +786,4 @@ func (m *fuseHeadMount) HealthError() error {
 }
 
 var _ snapshots.Snapshotter = (*Snapshotter)(nil)
+var _ snapshots.Cleaner = (*Snapshotter)(nil)

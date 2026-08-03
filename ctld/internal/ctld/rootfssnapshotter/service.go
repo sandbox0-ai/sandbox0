@@ -46,7 +46,11 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	if socketPath == "" || socketPath == "." {
 		return nil, fmt.Errorf("rootfs snapshotter socket path is required")
 	}
-	delegate, err := overlay.NewSnapshotter(filepath.Join(root, "overlay"), overlay.WithUpperdirLabel)
+	delegate, err := overlay.NewSnapshotter(
+		filepath.Join(root, "overlay"),
+		overlay.WithUpperdirLabel,
+		overlay.AsynchronousRemove,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create private overlay snapshotter: %w", err)
 	}

@@ -48,6 +48,47 @@ func TestSnapshotterCommitsOrdinaryLayerWithoutMarker(t *testing.T) {
 	assert.Empty(t, mounter.paths)
 }
 
+func TestServiceDefersOverlayRemovalUntilCleanup(t *testing.T) {
+	ctx := namespaces.WithNamespace(context.Background(), "test")
+	service, err := NewService(ServiceConfig{
+		Root:       t.TempDir(),
+		SocketPath: filepath.Join(t.TempDir(), "snapshotter.sock"),
+		Store:      objectstore.NewMemoryStore(""),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = service.Close() })
+
+	const key = "container-active"
+	_, err = service.snapshotter.Prepare(ctx, key, "")
+	require.NoError(t, err)
+	first, err := service.snapshotter.Stat(ctx, key)
+	require.NoError(t, err)
+	firstUpper := first.Labels[labelOverlayUpperdir]
+	require.NotEmpty(t, firstUpper)
+	require.NoError(t, os.WriteFile(filepath.Join(firstUpper, "payload"), bytes.Repeat([]byte("x"), 1<<20), 0o600))
+	firstSnapshotDir := filepath.Dir(firstUpper)
+
+	require.NoError(t, service.snapshotter.Remove(ctx, key))
+	_, err = service.snapshotter.Stat(ctx, key)
+	assert.True(t, errdefs.IsNotFound(err))
+	require.DirExists(t, firstSnapshotDir, "Remove must detach metadata without walking a large upper")
+
+	// The public key is reusable before physical cleanup. Cleanup must remove
+	// only the detached directory and leave the replacement snapshot intact.
+	_, err = service.snapshotter.Prepare(ctx, key, "")
+	require.NoError(t, err)
+	second, err := service.snapshotter.Stat(ctx, key)
+	require.NoError(t, err)
+	secondUpper := second.Labels[labelOverlayUpperdir]
+	require.NotEqual(t, firstUpper, secondUpper)
+
+	require.NoError(t, service.snapshotter.Cleanup(ctx))
+	assert.NoDirExists(t, firstSnapshotDir)
+	require.DirExists(t, filepath.Dir(secondUpper))
+	require.NoError(t, service.snapshotter.Remove(ctx, key))
+	require.NoError(t, service.snapshotter.Cleanup(ctx))
+}
+
 func TestSnapshotterCommitsStoredHeadOnCanonicalBase(t *testing.T) {
 	ctx := namespaces.WithNamespace(context.Background(), "test")
 	delegate, err := overlay.NewSnapshotter(t.TempDir(), overlay.WithUpperdirLabel)

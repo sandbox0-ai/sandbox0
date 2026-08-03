@@ -2245,6 +2245,132 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxes/{id}/previews:
+    post:
+      tags: [sandboxes]
+      summary: Create a private sandbox preview grant
+      description: |
+        Creates a short-lived, sandbox-runtime-bound authorization for previewing a loopback HTTP
+        server through the region public exposure domain. The returned URL performs a one-time
+        browser bootstrap and then redirects to a clean same-origin URL. This does not publish or
+        modify sandbox services.
+      security:
+        - bearerAuth: []
+      x-upstream-service: cluster-gateway
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxPreviewCreateRequest"
+      responses:
+        "201":
+          description: Preview grant created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxPreviewResponse"
+        "400":
+          description: Invalid preview request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "403":
+          description: Forbidden or reserved port
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Sandbox runtime, public exposure, or authorization store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxes/{id}/previews/{preview_id}:
+    put:
+      tags: [sandboxes]
+      summary: Renew a private sandbox preview grant
+      security:
+        - bearerAuth: []
+      x-upstream-service: cluster-gateway
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/PreviewID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxPreviewRenewRequest"
+      responses:
+        "200":
+          description: Preview grant renewed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessSandboxPreviewResponse"
+        "400":
+          description: Invalid preview renewal request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Preview grant or sandbox not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Preview grant belongs to a previous sandbox runtime
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Sandbox runtime or authorization store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    delete:
+      tags: [sandboxes]
+      summary: Revoke a private sandbox preview grant
+      security:
+        - bearerAuth: []
+      x-upstream-service: cluster-gateway
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+        - $ref: "#/components/parameters/PreviewID"
+      responses:
+        "200":
+          description: Preview grant revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessMessageResponse"
+        "404":
+          description: Preview grant not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Preview authorization store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/contexts:
     post:
       tags: [contexts]
@@ -3778,6 +3904,12 @@ components:
       required: true
       schema:
         type: string
+    PreviewID:
+      name: preview_id
+      in: path
+      required: true
+      schema:
+        type: string
     RootFSSnapshotID:
       name: snapshot_id
       in: path
@@ -5113,6 +5245,75 @@ components:
           items:
             $ref: "#/components/schemas/SandboxAppService"
       required: [services]
+    SandboxPreviewCreateRequest:
+      type: object
+      properties:
+        port:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 65535
+          description: Loopback TCP port inside the sandbox runtime.
+        protocol:
+          type: string
+          enum: [http, https]
+          default: http
+          description: Protocol spoken by the loopback server. HTTPS permits a self-signed loopback certificate.
+        path:
+          type: string
+          default: /
+          description: Same-origin absolute path, including an optional query or fragment, opened after browser bootstrap.
+        ttl_seconds:
+          type: integer
+          format: int32
+          minimum: 30
+          maximum: 3600
+          default: 900
+      required: [port]
+    SandboxPreviewRenewRequest:
+      type: object
+      properties:
+        ttl_seconds:
+          type: integer
+          format: int32
+          minimum: 30
+          maximum: 3600
+          default: 900
+    SandboxPreviewGrant:
+      type: object
+      properties:
+        id:
+          type: string
+        sandbox_id:
+          type: string
+        port:
+          type: integer
+          format: int32
+        protocol:
+          type: string
+          enum: [http, https]
+        url:
+          type: string
+          format: uri
+          description: One-time browser bootstrap URL for a newly created grant; a clean target URL for a renewal response. The resulting browser cookie is session-scoped while this server-side grant remains authoritative for expiration.
+        target_url:
+          type: string
+          format: uri
+          description: Clean preview origin and path without credentials.
+        expires_at:
+          type: string
+          format: date-time
+        runtime_generation:
+          type: integer
+          format: int64
+      required: [id, sandbox_id, port, protocol, url, target_url, expires_at, runtime_generation]
+    SuccessSandboxPreviewResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/SandboxPreviewGrant"
     SuccessSandboxServicesResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

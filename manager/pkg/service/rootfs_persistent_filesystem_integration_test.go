@@ -20,7 +20,11 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 
 	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-source", "team-1")))
 	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-source", "team-1", "layer-root", "", 1, "root")))
-	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-source", "team-1", "layer-child", "layer-root", 2, "child")))
+	childState := rootFSTestStoreState("sandbox-source", "team-1", "layer-child", "layer-root", 2, "child")
+	childState.PlatformOS = "linux"
+	childState.PlatformArchitecture = "arm64"
+	childState.PlatformVariant = "v8"
+	require.NoError(t, store.SaveRootFSState(ctx, childState))
 
 	latest, err := store.GetLatestRootFSState(ctx, "sandbox-source")
 	require.NoError(t, err)
@@ -86,7 +90,11 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	assert.Equal(t, "layer-child", forkLatest.LayerID)
 	require.Len(t, forkLatest.LayerChain, 2)
 
-	require.NoError(t, store.SaveRootFSState(ctx, rootFSTestStoreState("sandbox-fork", "team-1", "layer-fork", "layer-child", 4, "fork")))
+	forkState := rootFSTestStoreState("sandbox-fork", "team-1", "layer-fork", "layer-child", 4, "fork")
+	forkState.PlatformOS = "linux"
+	forkState.PlatformArchitecture = "arm64"
+	forkState.PlatformVariant = "v8"
+	require.NoError(t, store.SaveRootFSState(ctx, forkState))
 	forkLatest, err = store.GetLatestRootFSState(ctx, "sandbox-fork")
 	require.NoError(t, err)
 	require.NotNil(t, forkLatest)
@@ -106,6 +114,9 @@ func TestRootFSFilesystemPersistenceIntegration(t *testing.T) {
 	require.ErrorIs(t, err, assert.AnError)
 	require.Len(t, gcResult.Layers, 1)
 	assert.Equal(t, "layer-fork", gcResult.Layers[0].ID)
+	assert.Equal(t, "linux", gcResult.Layers[0].PlatformOS)
+	assert.Equal(t, "arm64", gcResult.Layers[0].PlatformArchitecture)
+	assert.Equal(t, "v8", gcResult.Layers[0].PlatformVariant)
 	assert.Equal(t, int64(1), rootFSTestCountRows(t, pool, "rootfs_object_deletions"))
 
 	_, err = pool.Exec(ctx, `

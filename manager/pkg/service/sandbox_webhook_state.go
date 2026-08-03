@@ -21,8 +21,10 @@ import (
 )
 
 const (
-	webhookStateMountPoint = volumeportal.WebhookStateMountPath
-	webhookStateVolumeKind = "webhook-state"
+	webhookStateMountPoint           = volumeportal.WebhookStateMountPath
+	webhookStateVolumeKind           = "webhook-state"
+	deletionWebhookMaxAttempts       = 3
+	deletionWebhookRetryInitialDelay = 100 * time.Millisecond
 )
 
 var ErrVolumePortalBindConflict = errors.New("volume portal bind conflict")
@@ -457,23 +459,49 @@ func (e *HTTPSandboxDeletionWebhookEmitter) EmitSandboxDeleted(ctx context.Conte
 	if err != nil {
 		return err
 	}
+	var lastErr error
+	for attempt := 0; attempt < deletionWebhookMaxAttempts; attempt++ {
+		retryable, err := e.postSandboxDeleted(ctx, url, info.WebhookSecret, body)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !retryable || attempt == deletionWebhookMaxAttempts-1 {
+			return err
+		}
+		delay := deletionWebhookRetryInitialDelay << attempt
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return lastErr
+}
+
+func (e *HTTPSandboxDeletionWebhookEmitter) postSandboxDeleted(ctx context.Context, url, secret string, body []byte) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if info.WebhookSecret != "" {
-		req.Header.Set("X-Sandbox0-Signature", signWebhookPayload(info.WebhookSecret, body))
+	if secret != "" {
+		req.Header.Set("X-Sandbox0-Signature", signWebhookPayload(secret, body))
 	}
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("emit sandbox.deleted webhook: %w", err)
+		retryable := ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded)
+		return retryable, fmt.Errorf("emit sandbox.deleted webhook: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("emit sandbox.deleted webhook failed with status %d", resp.StatusCode)
+		retryable := resp.StatusCode == http.StatusRequestTimeout ||
+			resp.StatusCode == http.StatusTooEarly ||
+			resp.StatusCode == http.StatusTooManyRequests ||
+			resp.StatusCode >= http.StatusInternalServerError
+		return retryable, fmt.Errorf("emit sandbox.deleted webhook failed with status %d", resp.StatusCode)
 	}
-	return nil
+	return false, nil
 }
 
 func signWebhookPayload(secret string, payload []byte) string {

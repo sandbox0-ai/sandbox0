@@ -16,8 +16,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.33.14
 	github.com/aws/smithy-go v1.24.0
 	github.com/container-storage-interface/spec v1.12.0
+	github.com/containerd/containerd/api v1.10.0
 	github.com/containerd/containerd/v2 v2.2.0
-	github.com/containerd/continuity v0.4.5
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/platforms v1.0.0-rc.2
 	github.com/coreos/go-iptables v0.8.0
@@ -52,6 +52,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/ti-mo/conntrack v0.6.0
 	github.com/vishvananda/netlink v1.3.1
+	go.etcd.io/bbolt v1.4.3
 	go.opentelemetry.io/otel v1.39.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.39.0
 	go.opentelemetry.io/otel/sdk v1.39.0
@@ -107,7 +108,7 @@ require (
 	github.com/chenzhuoyu/base64x v0.0.0-20230717121745-296ad89f973d // indirect
 	github.com/chenzhuoyu/iasm v0.9.0 // indirect
 	github.com/containerd/cgroups/v3 v3.1.0 // indirect
-	github.com/containerd/containerd/api v1.10.0 // indirect
+	github.com/containerd/continuity v0.4.5 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
@@ -191,7 +192,6 @@ require (
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
-	go.etcd.io/bbolt v1.4.3 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.61.0 // indirect

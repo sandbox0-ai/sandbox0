@@ -63,12 +63,6 @@ func CanonicalTemplateID(templateID string) (string, error) {
 	return strings.ToLower(trimmed), nil
 }
 
-// ValidateTemplateID ensures template_id is non-empty and safe for storage.
-func ValidateTemplateID(templateID string) error {
-	_, err := CanonicalTemplateID(templateID)
-	return err
-}
-
 // TemplateNamespaceForBuiltin generates a namespace for a builtin template ID.
 func TemplateNamespaceForBuiltin(templateID string) (string, error) {
 	canonical, err := CanonicalTemplateID(templateID)

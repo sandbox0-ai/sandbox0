@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -23,28 +25,28 @@ var ErrSandboxRootFSSourceRequiresRunningOrPaused = errors.New("sandbox rootfs s
 var ErrRootFSSnapshotExpired = errors.New("rootfs snapshot expires_at must be in the future")
 
 type SandboxRootFSProductStore interface {
-	CreateRootFSSnapshot(ctx context.Context, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error)
-	ListRootFSSnapshots(ctx context.Context, req *ListRootFSSnapshotsRequest) ([]*RootFSSnapshot, error)
-	GetRootFSSnapshot(ctx context.Context, snapshotID, teamID string) (*RootFSSnapshot, error)
+	CreateRootFSSnapshot(ctx context.Context, req *sandboxstore.CreateRootFSSnapshotRequest) (*sandboxstore.RootFSSnapshot, error)
+	ListRootFSSnapshots(ctx context.Context, req *sandboxstore.ListRootFSSnapshotsRequest) ([]*sandboxstore.RootFSSnapshot, error)
+	GetRootFSSnapshot(ctx context.Context, snapshotID, teamID string) (*sandboxstore.RootFSSnapshot, error)
 	DeleteRootFSSnapshot(ctx context.Context, snapshotID, teamID string) error
-	ForkRootFSFilesystem(ctx context.Context, req *ForkRootFSFilesystemRequest) (*RootFSFilesystem, error)
-	RestoreRootFSFromSnapshot(ctx context.Context, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error)
+	ForkRootFSFilesystem(ctx context.Context, req *sandboxstore.ForkRootFSFilesystemRequest) (*sandboxstore.RootFSFilesystem, error)
+	RestoreRootFSFromSnapshot(ctx context.Context, req *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error)
 }
 
 type sandboxRootFSSnapshotCreator interface {
-	CreateRootFSSnapshot(ctx context.Context, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error)
+	CreateRootFSSnapshot(ctx context.Context, req *sandboxstore.CreateRootFSSnapshotRequest) (*sandboxstore.RootFSSnapshot, error)
 }
 
 type sandboxRootFSRestorer interface {
-	RestoreRootFSFromSnapshot(ctx context.Context, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error)
+	RestoreRootFSFromSnapshot(ctx context.Context, req *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error)
 }
 
 type sandboxRootFSForker interface {
-	ForkRootFSFilesystem(ctx context.Context, req *ForkRootFSFilesystemRequest) (*RootFSFilesystem, error)
+	ForkRootFSFilesystem(ctx context.Context, req *sandboxstore.ForkRootFSFilesystemRequest) (*sandboxstore.RootFSFilesystem, error)
 }
 
 type sandboxRecordUpserter interface {
-	UpsertSandbox(ctx context.Context, record *SandboxRecord) error
+	UpsertSandbox(ctx context.Context, record *sandboxstore.SandboxRecord) error
 }
 
 type CreateSandboxRootFSSnapshotRequest struct {
@@ -87,8 +89,8 @@ type ForkSandboxConfig struct {
 }
 
 type ForkSandboxResponse struct {
-	SourceSandboxID string   `json:"source_sandbox_id"`
-	Sandbox         *Sandbox `json:"sandbox"`
+	SourceSandboxID string              `json:"source_sandbox_id"`
+	Sandbox         *managerapi.Sandbox `json:"sandbox"`
 }
 
 func (s *SandboxService) CreateSandboxRootFSSnapshot(ctx context.Context, sandboxID, teamID string, req *CreateSandboxRootFSSnapshotRequest) (*SandboxRootFSSnapshot, error) {
@@ -138,7 +140,7 @@ func (s *SandboxService) createSandboxRootFSSnapshotWithID(ctx context.Context, 
 	description = strings.TrimSpace(description)
 	var checkpoint *rootFSSourceCheckpoint
 	for {
-		_, checkpoint, err = s.prepareRootFSSourceCheckpoint(ctx, sandboxID, teamID, SandboxLifecycleKindSnapshot)
+		_, checkpoint, err = s.prepareRootFSSourceCheckpoint(ctx, sandboxID, teamID, sandboxstore.SandboxLifecycleKindSnapshot)
 		if err == nil {
 			break
 		}
@@ -184,7 +186,7 @@ func (s *SandboxService) ListSandboxRootFSSnapshots(ctx context.Context, sandbox
 	if err := s.requireRootFSSandboxOwnership(ctx, sandboxID, teamID); err != nil {
 		return nil, err
 	}
-	snapshots, err := store.ListRootFSSnapshots(ctx, &ListRootFSSnapshotsRequest{
+	snapshots, err := store.ListRootFSSnapshots(ctx, &sandboxstore.ListRootFSSnapshotsRequest{
 		SandboxID: sandboxID,
 		TeamID:    teamID,
 	})
@@ -207,7 +209,7 @@ func (s *SandboxService) ListSandboxRootFSSnapshots(ctx context.Context, sandbox
 func (s *SandboxService) GetSandboxRootFSSnapshot(ctx context.Context, snapshotID, teamID string) (*SandboxRootFSSnapshot, error) {
 	snapshotID = strings.TrimSpace(snapshotID)
 	if template.IsBuildSnapshotID(snapshotID) {
-		return nil, ErrRootFSSnapshotNotFound
+		return nil, sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	store, err := s.rootFSProductStore()
 	if err != nil {
@@ -223,7 +225,7 @@ func (s *SandboxService) GetSandboxRootFSSnapshot(ctx context.Context, snapshotI
 func (s *SandboxService) DeleteSandboxRootFSSnapshot(ctx context.Context, snapshotID, teamID string) error {
 	snapshotID = strings.TrimSpace(snapshotID)
 	if template.IsBuildSnapshotID(snapshotID) {
-		return ErrRootFSSnapshotNotFound
+		return sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	store, err := s.rootFSProductStore()
 	if err != nil {
@@ -253,12 +255,12 @@ func (s *SandboxService) RestoreSandboxRootFS(ctx context.Context, sandboxID, te
 		return nil, fmt.Errorf("snapshot_id is required")
 	}
 	if template.IsBuildSnapshotID(snapshotID) {
-		return nil, ErrRootFSSnapshotNotFound
+		return nil, sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	if _, err := store.GetRootFSSnapshot(ctx, snapshotID, teamID); err != nil {
 		return nil, err
 	}
-	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		if err := validateRootFSSandboxRecord(record, sandboxID, teamID, true); err != nil {
 			return err
 		}
@@ -266,7 +268,7 @@ func (s *SandboxService) RestoreSandboxRootFS(ctx context.Context, sandboxID, te
 		if txRestorer, ok := tx.(sandboxRootFSRestorer); ok {
 			restorer = txRestorer
 		}
-		_, restoreErr := restorer.RestoreRootFSFromSnapshot(lockCtx, &RestoreRootFSFromSnapshotRequest{
+		_, restoreErr := restorer.RestoreRootFSFromSnapshot(lockCtx, &sandboxstore.RestoreRootFSFromSnapshotRequest{
 			SandboxID:  sandboxID,
 			SnapshotID: snapshotID,
 			TeamID:     teamID,
@@ -279,7 +281,7 @@ func (s *SandboxService) RestoreSandboxRootFS(ctx context.Context, sandboxID, te
 	return &RestoreSandboxRootFSResponse{
 		SandboxID:  sandboxID,
 		SnapshotID: snapshotID,
-		Status:     SandboxStatusPaused,
+		Status:     managerapi.SandboxStatusPaused,
 	}, nil
 }
 
@@ -301,10 +303,10 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		return nil, fmt.Errorf("team_id is required")
 	}
 
-	var source *SandboxRecord
+	var source *sandboxstore.SandboxRecord
 	var checkpoint *rootFSSourceCheckpoint
 	for {
-		source, checkpoint, err = s.prepareRootFSSourceCheckpoint(ctx, sourceSandboxID, teamID, SandboxLifecycleKindFork)
+		source, checkpoint, err = s.prepareRootFSSourceCheckpoint(ctx, sourceSandboxID, teamID, sandboxstore.SandboxLifecycleKindFork)
 		if err == nil {
 			break
 		}
@@ -358,7 +360,7 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 	if hardExpiresAt.IsZero() && targetConfig.HardTTL == nil {
 		hardExpiresAt = source.HardExpiresAt
 	}
-	target := &SandboxRecord{
+	target := &sandboxstore.SandboxRecord{
 		ID:                targetID,
 		TeamID:            teamID,
 		UserID:            userID,
@@ -366,7 +368,7 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		TemplateName:      source.TemplateName,
 		TemplateNamespace: source.TemplateNamespace,
 		ClusterID:         source.ClusterID,
-		DesiredState:      SandboxDesiredStatePaused,
+		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 		Config:            targetConfig,
 		TemplateSpec:      *source.TemplateSpec.DeepCopy(),
 		ClaimedAt:         now,
@@ -393,8 +395,8 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 }
 
 type rootFSSourceCheckpoint struct {
-	txn           *SandboxLifecycleTxn
-	rootFSState   *SandboxRootFSState
+	txn           *sandboxstore.SandboxLifecycleTxn
+	rootFSState   *sandboxstore.SandboxRootFSState
 	procdAddress  string
 	internalToken string
 }
@@ -413,29 +415,29 @@ func (c *rootFSSourceCheckpoint) close(s *SandboxService, committed bool) {
 	s.releasePauseRuntimeBarrier(context.Background(), c.procdAddress, c.internalToken)
 }
 
-func rootFSSourceCheckpointTxnReason(txn *SandboxLifecycleTxn, suffix string) string {
+func rootFSSourceCheckpointTxnReason(txn *sandboxstore.SandboxLifecycleTxn, suffix string) string {
 	kind := "rootfs checkpoint"
 	if txn != nil {
 		switch txn.Kind {
-		case SandboxLifecycleKindFork:
+		case sandboxstore.SandboxLifecycleKindFork:
 			kind = "fork"
-		case SandboxLifecycleKindSnapshot:
+		case sandboxstore.SandboxLifecycleKindSnapshot:
 			kind = "snapshot"
 		}
 	}
 	return kind + " " + suffix
 }
 
-func (s *SandboxService) prepareRootFSSourceCheckpoint(ctx context.Context, sourceSandboxID, teamID, kind string) (*SandboxRecord, *rootFSSourceCheckpoint, error) {
+func (s *SandboxService) prepareRootFSSourceCheckpoint(ctx context.Context, sourceSandboxID, teamID, kind string) (*sandboxstore.SandboxRecord, *rootFSSourceCheckpoint, error) {
 	switch kind {
-	case SandboxLifecycleKindFork, SandboxLifecycleKindSnapshot:
+	case sandboxstore.SandboxLifecycleKindFork, sandboxstore.SandboxLifecycleKindSnapshot:
 	default:
 		return nil, nil, fmt.Errorf("unsupported rootfs source checkpoint kind %q", kind)
 	}
-	var source *SandboxRecord
-	var txn *SandboxLifecycleTxn
+	var source *sandboxstore.SandboxRecord
+	var txn *sandboxstore.SandboxLifecycleTxn
 	var waitErr error
-	err := s.sandboxStore.WithSandboxLock(ctx, sourceSandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+	err := s.sandboxStore.WithSandboxLock(ctx, sourceSandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		if err := validateRootFSSourceSandboxRecord(record, sourceSandboxID, teamID, s.now()); err != nil {
 			return err
 		}
@@ -445,14 +447,14 @@ func (s *SandboxService) prepareRootFSSourceCheckpoint(ctx context.Context, sour
 		}
 		if activeTxn != nil {
 			switch activeTxn.Kind {
-			case SandboxLifecycleKindPause:
+			case sandboxstore.SandboxLifecycleKindPause:
 				if sandboxLifecycleTxnCancelableAutoPause(activeTxn) {
 					if _, err := tx.RequestLifecycleTxnCancel(lockCtx, activeTxn.ID, kind+" arrived during auto pause"); err != nil {
 						return err
 					}
 				}
 				waitErr = errSandboxLifecyclePausing
-			case SandboxLifecycleKindResume:
+			case sandboxstore.SandboxLifecycleKindResume:
 				waitErr = errSandboxLifecycleResuming
 			default:
 				waitErr = errSandboxLifecycleRootFSCheckpointing
@@ -460,7 +462,7 @@ func (s *SandboxService) prepareRootFSSourceCheckpoint(ctx context.Context, sour
 			return nil
 		}
 		source = cloneSandboxRecordForRootFSProduct(record)
-		if record.DesiredState == SandboxDesiredStatePaused {
+		if record.DesiredState == sandboxstore.SandboxDesiredStatePaused {
 			return nil
 		}
 		if !s.config.CtldEnabled || s.ctldClient == nil {
@@ -470,12 +472,12 @@ func (s *SandboxService) prepareRootFSSourceCheckpoint(ctx context.Context, sour
 		if err != nil {
 			return err
 		}
-		txn = &SandboxLifecycleTxn{
+		txn = &sandboxstore.SandboxLifecycleTxn{
 			ID:               uuid.NewString(),
 			SandboxID:        sourceSandboxID,
 			Kind:             kind,
-			Phase:            SandboxLifecyclePhasePreparing,
-			Source:           SandboxLifecycleSourceManual,
+			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:           sandboxstore.SandboxLifecycleSourceManual,
 			FromGeneration:   runtimeGenerationFromPod(pod),
 			FromPodNamespace: pod.Namespace,
 			FromPodName:      pod.Name,
@@ -505,7 +507,7 @@ func (s *SandboxService) prepareRootFSSourceCheckpoint(ctx context.Context, sour
 	return source, checkpoint, nil
 }
 
-func (s *SandboxService) prepareRunningRootFSSourceCheckpoint(ctx context.Context, source *SandboxRecord, txn *SandboxLifecycleTxn) (*rootFSSourceCheckpoint, error) {
+func (s *SandboxService) prepareRunningRootFSSourceCheckpoint(ctx context.Context, source *sandboxstore.SandboxRecord, txn *sandboxstore.SandboxLifecycleTxn) (*rootFSSourceCheckpoint, error) {
 	if source == nil || txn == nil {
 		return nil, fmt.Errorf("rootfs checkpoint source is required")
 	}
@@ -523,7 +525,7 @@ func (s *SandboxService) prepareRunningRootFSSourceCheckpoint(ctx context.Contex
 	if txn.FromPodNamespace != "" && pod.Namespace != txn.FromPodNamespace {
 		return nil, apierrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("rootfs checkpoint transaction points at runtime namespace %s", txn.FromPodNamespace))
 	}
-	if err := s.markLifecycleTxnPhase(ctx, source.ID, txn.ID, SandboxLifecyclePhaseBarriered); err != nil {
+	if err := s.markLifecycleTxnPhase(ctx, source.ID, txn.ID, sandboxstore.SandboxLifecyclePhaseBarriered); err != nil {
 		return nil, err
 	}
 	procdAddress, internalToken, err := s.activatePauseRuntimeBarrier(ctx, pod, source, txn)
@@ -535,7 +537,7 @@ func (s *SandboxService) prepareRunningRootFSSourceCheckpoint(ctx context.Contex
 		procdAddress:  procdAddress,
 		internalToken: internalToken,
 	}
-	if err := s.markLifecycleTxnPhase(ctx, source.ID, txn.ID, SandboxLifecyclePhasePublishing); err != nil {
+	if err := s.markLifecycleTxnPhase(ctx, source.ID, txn.ID, sandboxstore.SandboxLifecyclePhasePublishing); err != nil {
 		return checkpoint, err
 	}
 	rootFSState, err := s.prepareSandboxRootFSCheckpoint(ctx, pod, source)
@@ -552,9 +554,9 @@ func (s *SandboxService) prepareRunningRootFSSourceCheckpoint(ctx context.Contex
 	return checkpoint, nil
 }
 
-func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store SandboxRootFSProductStore, sandboxID, teamID, snapshotID, name, description string, expiresAt time.Time, checkpoint *rootFSSourceCheckpoint) (*RootFSSnapshot, error) {
-	var snapshot *RootFSSnapshot
-	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store SandboxRootFSProductStore, sandboxID, teamID, snapshotID, name, description string, expiresAt time.Time, checkpoint *rootFSSourceCheckpoint) (*sandboxstore.RootFSSnapshot, error) {
+	var snapshot *sandboxstore.RootFSSnapshot
+	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		if err := validateRootFSSourceSandboxRecord(record, sandboxID, teamID, s.now()); err != nil {
 			return err
 		}
@@ -563,10 +565,10 @@ func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store Sandbox
 			return err
 		}
 		if checkpoint != nil {
-			if activeTxn == nil || checkpoint.txn == nil || activeTxn.ID != checkpoint.txn.ID || activeTxn.Kind != SandboxLifecycleKindSnapshot {
+			if activeTxn == nil || checkpoint.txn == nil || activeTxn.ID != checkpoint.txn.ID || activeTxn.Kind != sandboxstore.SandboxLifecycleKindSnapshot {
 				return fmt.Errorf("snapshot lifecycle transaction is no longer active")
 			}
-			if err := tx.UpdateLifecycleTxnPhase(lockCtx, checkpoint.txn.ID, SandboxLifecyclePhaseCommitting); err != nil {
+			if err := tx.UpdateLifecycleTxnPhase(lockCtx, checkpoint.txn.ID, sandboxstore.SandboxLifecyclePhaseCommitting); err != nil {
 				return err
 			}
 			if checkpoint.rootFSState != nil {
@@ -578,7 +580,7 @@ func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store Sandbox
 			if activeTxn != nil {
 				return errSandboxLifecycleRootFSCheckpointing
 			}
-			if record.DesiredState != SandboxDesiredStatePaused {
+			if record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
 				return errSandboxLifecycleRootFSCheckpointing
 			}
 		}
@@ -588,7 +590,7 @@ func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store Sandbox
 			creator = txCreator
 		}
 		var createErr error
-		snapshot, createErr = creator.CreateRootFSSnapshot(lockCtx, &CreateRootFSSnapshotRequest{
+		snapshot, createErr = creator.CreateRootFSSnapshot(lockCtx, &sandboxstore.CreateRootFSSnapshotRequest{
 			SandboxID:   sandboxID,
 			SnapshotID:  snapshotID,
 			Name:        name,
@@ -615,11 +617,11 @@ func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store Sandbox
 	return snapshot, nil
 }
 
-func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRootFSProductStore, sourceSandboxID, teamID string, target *SandboxRecord, checkpoint *rootFSSourceCheckpoint) error {
+func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRootFSProductStore, sourceSandboxID, teamID string, target *sandboxstore.SandboxRecord, checkpoint *rootFSSourceCheckpoint) error {
 	if target == nil {
 		return fmt.Errorf("target sandbox record is required")
 	}
-	err := s.sandboxStore.WithSandboxLock(ctx, sourceSandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+	err := s.sandboxStore.WithSandboxLock(ctx, sourceSandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		if err := validateRootFSSourceSandboxRecord(record, sourceSandboxID, teamID, s.now()); err != nil {
 			return err
 		}
@@ -628,10 +630,10 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 			return err
 		}
 		if checkpoint != nil {
-			if activeTxn == nil || checkpoint.txn == nil || activeTxn.ID != checkpoint.txn.ID || activeTxn.Kind != SandboxLifecycleKindFork {
+			if activeTxn == nil || checkpoint.txn == nil || activeTxn.ID != checkpoint.txn.ID || activeTxn.Kind != sandboxstore.SandboxLifecycleKindFork {
 				return fmt.Errorf("fork lifecycle transaction is no longer active")
 			}
-			if err := tx.UpdateLifecycleTxnPhase(lockCtx, checkpoint.txn.ID, SandboxLifecyclePhaseCommitting); err != nil {
+			if err := tx.UpdateLifecycleTxnPhase(lockCtx, checkpoint.txn.ID, sandboxstore.SandboxLifecyclePhaseCommitting); err != nil {
 				return err
 			}
 			if checkpoint.rootFSState != nil {
@@ -643,7 +645,7 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 			if activeTxn != nil {
 				return errSandboxLifecycleRootFSCheckpointing
 			}
-			if record.DesiredState != SandboxDesiredStatePaused {
+			if record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
 				return errSandboxLifecycleRootFSCheckpointing
 			}
 		}
@@ -662,7 +664,7 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 			forker = txForker
 			txBacked = true
 		}
-		if _, err := forker.ForkRootFSFilesystem(lockCtx, &ForkRootFSFilesystemRequest{
+		if _, err := forker.ForkRootFSFilesystem(lockCtx, &sandboxstore.ForkRootFSFilesystemRequest{
 			SourceSandboxID: sourceSandboxID,
 			TargetSandboxID: target.ID,
 			TargetTeamID:    teamID,
@@ -717,7 +719,7 @@ func (s *SandboxService) generateAvailableForkSandboxID(ctx context.Context, tem
 		}
 		existing, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
 		if err != nil {
-			if errors.Is(err, ErrSandboxRecordNotFound) {
+			if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 				return sandboxID, nil
 			}
 			return "", err
@@ -740,24 +742,24 @@ func (s *SandboxService) requireRootFSSandboxOwnership(ctx context.Context, sand
 	return validateRootFSSandboxRecord(record, sandboxID, teamID, false)
 }
 
-func validateRootFSSandboxRecord(record *SandboxRecord, sandboxID, teamID string, requirePaused bool) error {
-	if record == nil || record.DesiredState == SandboxDesiredStateDeleted {
+func validateRootFSSandboxRecord(record *sandboxstore.SandboxRecord, sandboxID, teamID string, requirePaused bool) error {
+	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted {
 		return apierrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
 	}
 	if record.TeamID != teamID {
 		return apierrors.NewForbidden(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("sandbox belongs to a different team"))
 	}
-	if requirePaused && record.DesiredState != SandboxDesiredStatePaused {
+	if requirePaused && record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
 		return fmt.Errorf("%w: current desired state is %s", ErrSandboxRootFSRequiresPausedSandbox, record.DesiredState)
 	}
 	return nil
 }
 
-func validateRootFSSourceSandboxRecord(record *SandboxRecord, sandboxID, teamID string, now time.Time) error {
+func validateRootFSSourceSandboxRecord(record *sandboxstore.SandboxRecord, sandboxID, teamID string, now time.Time) error {
 	if err := validateRootFSSandboxRecord(record, sandboxID, teamID, false); err != nil {
 		return err
 	}
-	if record.DesiredState != SandboxDesiredStatePaused && record.DesiredState != SandboxDesiredStateActive {
+	if record.DesiredState != sandboxstore.SandboxDesiredStatePaused && record.DesiredState != sandboxstore.SandboxDesiredStateActive {
 		return fmt.Errorf("%w: current desired state is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, record.DesiredState)
 	}
 	if sandboxHardExpired(record.HardExpiresAt, now) {
@@ -768,34 +770,34 @@ func validateRootFSSourceSandboxRecord(record *SandboxRecord, sandboxID, teamID 
 
 // resolveRootFSSourceRuntimePod projects active source readiness exclusively
 // from the shared informer cache. Paused sources have no runtime pod by design.
-func (s *SandboxService) resolveRootFSSourceRuntimePod(ctx context.Context, record *SandboxRecord) (*corev1.Pod, error) {
+func (s *SandboxService) resolveRootFSSourceRuntimePod(ctx context.Context, record *sandboxstore.SandboxRecord) (*corev1.Pod, error) {
 	if record == nil {
-		return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, SandboxStatusStarting)
+		return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, managerapi.SandboxStatusStarting)
 	}
-	if record.DesiredState == SandboxDesiredStatePaused {
+	if record.DesiredState == sandboxstore.SandboxDesiredStatePaused {
 		return nil, nil
 	}
-	if record.DesiredState != SandboxDesiredStateActive {
+	if record.DesiredState != sandboxstore.SandboxDesiredStateActive {
 		return nil, fmt.Errorf("%w: current desired state is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, record.DesiredState)
 	}
 	if s == nil || s.podLister == nil {
-		return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, SandboxStatusStarting)
+		return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, managerapi.SandboxStatusStarting)
 	}
 	pod, err := s.getSandboxPod(ctx, record.ID)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, SandboxStatusStarting)
+			return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, managerapi.SandboxStatusStarting)
 		}
 		return nil, fmt.Errorf("get cached runtime pod: %w", err)
 	}
 	status := s.podToSandboxStatus(pod)
-	if status != SandboxStatusRunning {
+	if status != managerapi.SandboxStatusRunning {
 		return nil, fmt.Errorf("%w: current status is %s", ErrSandboxRootFSSourceRequiresRunningOrPaused, status)
 	}
 	return pod, nil
 }
 
-func sandboxRootFSSnapshotFromStore(snapshot *RootFSSnapshot) *SandboxRootFSSnapshot {
+func sandboxRootFSSnapshotFromStore(snapshot *sandboxstore.RootFSSnapshot) *SandboxRootFSSnapshot {
 	if snapshot == nil {
 		return nil
 	}
@@ -813,21 +815,21 @@ func generateRootFSSnapshotID() string {
 	return "rootfs-snapshot-" + utilrand.String(10)
 }
 
-func cloneSandboxRecordForRootFSProduct(record *SandboxRecord) *SandboxRecord {
+func cloneSandboxRecordForRootFSProduct(record *sandboxstore.SandboxRecord) *sandboxstore.SandboxRecord {
 	if record == nil {
 		return nil
 	}
 	clone := *record
 	clone.Config = cloneSandboxConfigValue(record.Config)
-	clone.Mounts = append([]ClaimMount(nil), record.Mounts...)
+	clone.Mounts = append([]managerapi.ClaimMount(nil), record.Mounts...)
 	clone.TemplateSpec = *record.TemplateSpec.DeepCopy()
 	return &clone
 }
 
-func cloneSandboxConfigValue(cfg SandboxConfig) SandboxConfig {
+func cloneSandboxConfigValue(cfg sandboxstore.SandboxConfig) sandboxstore.SandboxConfig {
 	cloned := cloneSandboxConfig(&cfg)
 	if cloned == nil {
-		return SandboxConfig{}
+		return sandboxstore.SandboxConfig{}
 	}
 	return *cloned
 }

@@ -10,7 +10,6 @@ import (
 
 type upstreamTimeoutDisabledKey struct{}
 type longLivedRequestKey struct{}
-type streamingResponseDeadlinesDisabledKey struct{}
 
 // WithUpstreamTimeoutDisabled marks a request context so gateway upstream calls
 // should not apply the default proxy timeout.
@@ -28,15 +27,6 @@ func WithLongLivedRequest(ctx context.Context) context.Context {
 	return context.WithValue(ctx, longLivedRequestKey{}, true)
 }
 
-// WithStreamingResponseDeadlinesDisabled marks a request context so gateway
-// server write deadlines are cleared while still allowing an upstream timeout.
-func WithStreamingResponseDeadlinesDisabled(ctx context.Context) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, streamingResponseDeadlinesDisabledKey{}, true)
-}
-
 // WithUpstreamTimeoutDisabledRequest applies the no-timeout marker to a request.
 func WithUpstreamTimeoutDisabledRequest(req *http.Request) *http.Request {
 	if req == nil {
@@ -51,15 +41,6 @@ func WithLongLivedRequestRequest(req *http.Request) *http.Request {
 		return nil
 	}
 	return req.WithContext(WithLongLivedRequest(req.Context()))
-}
-
-// WithStreamingResponseDeadlinesDisabledRequest applies the streaming response
-// deadline marker to a request.
-func WithStreamingResponseDeadlinesDisabledRequest(req *http.Request) *http.Request {
-	if req == nil {
-		return nil
-	}
-	return req.WithContext(WithStreamingResponseDeadlinesDisabled(req.Context()))
 }
 
 // UpstreamTimeoutDisabled reports whether upstream timeout enforcement is disabled.
@@ -79,16 +60,6 @@ func LongLivedRequest(ctx context.Context) bool {
 	}
 	longLived, _ := ctx.Value(longLivedRequestKey{}).(bool)
 	return longLived
-}
-
-// StreamingResponseDeadlinesDisabled reports whether gateway server write
-// deadlines should be cleared without changing upstream timeout enforcement.
-func StreamingResponseDeadlinesDisabled(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	disabled, _ := ctx.Value(streamingResponseDeadlinesDisabledKey{}).(bool)
-	return disabled
 }
 
 // EffectiveUpstreamTimeout returns the timeout to apply for an upstream request.

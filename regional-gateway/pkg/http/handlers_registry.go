@@ -6,9 +6,9 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	registryprovider "github.com/sandbox0-ai/sandbox0/pkg/registry"
 	"go.uber.org/zap"
 )
 

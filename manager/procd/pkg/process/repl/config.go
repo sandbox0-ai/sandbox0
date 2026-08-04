@@ -341,24 +341,6 @@ var BuiltinConfigs = map[string]*REPLConfig{
 	},
 }
 
-// GetBuiltinConfig returns a clone of a built-in config.
-func GetBuiltinConfig(name string) (*REPLConfig, bool) {
-	config, ok := BuiltinConfigs[name]
-	if !ok {
-		return nil, false
-	}
-	return config.Clone(), true
-}
-
-// ListBuiltinConfigs returns the names of all built-in configs.
-func ListBuiltinConfigs() []string {
-	names := make([]string, 0, len(BuiltinConfigs))
-	for name := range BuiltinConfigs {
-		names = append(names, name)
-	}
-	return names
-}
-
 // REPLRegistry holds custom REPL configurations.
 type REPLRegistry struct {
 	configs map[string]*REPLConfig
@@ -374,15 +356,6 @@ func NewREPLRegistry() *REPLRegistry {
 		r.configs[name] = config.Clone()
 	}
 	return r
-}
-
-// Register adds or updates a REPL configuration.
-func (r *REPLRegistry) Register(config *REPLConfig) error {
-	if err := config.Validate(); err != nil {
-		return err
-	}
-	r.configs[config.Name] = config.Clone()
-	return nil
 }
 
 // Get returns a REPL configuration.

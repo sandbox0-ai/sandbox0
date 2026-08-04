@@ -18,7 +18,6 @@ package migrate
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io/fs"
 	"os"
@@ -153,53 +152,6 @@ func Up(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ...O
 	return nil
 }
 
-// Status prints the current migration status to stdout.
-func Status(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ...Option) error {
-	options := &Options{}
-	for _, opt := range opts {
-		opt(options)
-	}
-
-	resolvedDir, err := resolveDirWithBaseFS(migrationsDir, options.BaseFS)
-	if err != nil {
-		return err
-	}
-
-	gooseMu.Lock()
-	defer gooseMu.Unlock()
-
-	db := stdlib.OpenDBFromPool(pool)
-	defer func() {
-		db.Close()
-		if options.Schema != "" {
-			pool.Reset()
-		}
-	}()
-
-	// Set goose base filesystem for embedded migrations
-	if options.BaseFS != nil {
-		goose.SetBaseFS(options.BaseFS)
-	} else {
-		goose.SetBaseFS(nil)
-	}
-
-	// Set schema search_path if specified
-	if options.Schema != "" {
-		// Create schema if not exists
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", options.Schema)); err != nil {
-			return fmt.Errorf("create schema: %w", err)
-		}
-		// Set search_path to the schema
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("SET search_path TO %s", options.Schema)); err != nil {
-			return fmt.Errorf("set search_path: %w", err)
-		}
-	}
-
-	setGooseTableName(options.TableName)
-
-	return goose.StatusContext(ctx, db, resolvedDir)
-}
-
 // Down rolls back the most recently applied migration.
 func Down(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ...Option) error {
 	options := &Options{}
@@ -236,24 +188,19 @@ func Down(ctx context.Context, pool *pgxpool.Pool, migrationsDir string, opts ..
 		goose.SetLogger(options.Logger)
 	}
 
-	// Set schema search_path if specified
 	if options.Schema != "" {
-		// Create schema if not exists
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", options.Schema)); err != nil {
 			return fmt.Errorf("create schema: %w", err)
 		}
-		// Set search_path to the schema
 		if _, err := db.ExecContext(ctx, fmt.Sprintf("SET search_path TO %s", options.Schema)); err != nil {
 			return fmt.Errorf("set search_path: %w", err)
 		}
 	}
 
 	setGooseTableName(options.TableName)
-
 	if err := goose.DownContext(ctx, db, resolvedDir); err != nil {
 		return fmt.Errorf("run down migration: %w", err)
 	}
-
 	return nil
 }
 
@@ -262,25 +209,6 @@ func setGooseTableName(name string) {
 		name = goose.DefaultTablename
 	}
 	goose.SetTableName(name)
-}
-
-// Create creates a new migration file in the specified directory.
-//
-// name: The name of the migration (e.g., "add_users_table")
-// migrationType: The type of migration ("sql" or "go")
-func Create(migrationsDir, name, migrationType string) error {
-	resolvedDir, err := resolveDir(migrationsDir)
-	if err != nil {
-		return fmt.Errorf("resolve migrations directory: %w", err)
-	}
-
-	db, err := sql.Open("pgx", "postgres:///")
-	if err != nil {
-		return fmt.Errorf("open db: %w", err)
-	}
-	defer db.Close()
-
-	return goose.Create(db, resolvedDir, name, migrationType)
 }
 
 // resolveDirWithBaseFS resolves the migrations directory path with an optional base FS.

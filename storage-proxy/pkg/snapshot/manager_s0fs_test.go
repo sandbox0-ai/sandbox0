@@ -1,12 +1,8 @@
 package snapshot
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
-	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -580,87 +576,6 @@ func (f *failingFlushCoordinator) CoordinateFlush(context.Context, string) error
 	return errors.New("distributed flush should not be called for fork")
 }
 
-func TestExportSnapshotArchiveS0FS(t *testing.T) {
-	t.Parallel()
-
-	mgr, _, _, engine := newS0FSSnapshotTestManager(t, "vol-1")
-	dir, err := engine.Mkdir(s0fs.RootInode, "dir", 0o755)
-	if err != nil {
-		t.Fatalf("Mkdir() error = %v", err)
-	}
-	file, err := engine.CreateFile(dir.Inode, "hello.txt", 0o644)
-	if err != nil {
-		t.Fatalf("CreateFile() error = %v", err)
-	}
-	if _, err := engine.Write(file.Inode, 0, []byte("archive-body")); err != nil {
-		t.Fatalf("Write() error = %v", err)
-	}
-
-	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
-		VolumeID: "vol-1",
-		Name:     "snap-a",
-		TeamID:   "team-1",
-		UserID:   "user-1",
-	})
-	if err != nil {
-		t.Fatalf("CreateSnapshot() error = %v", err)
-	}
-	mgr.config.CacheDir = t.TempDir()
-
-	var archive bytes.Buffer
-	if err := mgr.ExportSnapshotArchive(context.Background(), &ExportSnapshotRequest{
-		VolumeID:   "vol-1",
-		SnapshotID: snap.ID,
-		TeamID:     "team-1",
-	}, &archive); err != nil {
-		t.Fatalf("ExportSnapshotArchive() error = %v", err)
-	}
-
-	files := untarSnapshotArchive(t, archive.Bytes())
-	if got := string(files["dir/hello.txt"]); got != "archive-body" {
-		t.Fatalf("archive file = %q, want archive-body", got)
-	}
-}
-
-func TestExportSnapshotArchiveS0FSMissingLegacyStateRemainsNotFound(t *testing.T) {
-	t.Parallel()
-
-	mgr, _, _, engine := newS0FSSnapshotTestManager(t, "vol-missing-legacy")
-	writeS0FSFile(t, engine, "state.txt", "payload")
-	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
-		VolumeID: "vol-missing-legacy",
-		Name:     "snap-missing-legacy",
-		TeamID:   "team-1",
-		UserID:   "user-1",
-	})
-	if err != nil {
-		t.Fatalf("CreateSnapshot() error = %v", err)
-	}
-	cfg, err := mgr.s0fsConfig("team-1", "vol-missing-legacy")
-	if err != nil {
-		t.Fatalf("s0fsConfig() error = %v", err)
-	}
-	if err := s0fs.DeleteSnapshot(context.Background(), cfg, snap.ID); err != nil {
-		t.Fatalf("DeleteSnapshotState() error = %v", err)
-	}
-	for _, key := range listS0FSKeys(t, cfg.ObjectStore, "manifests/") {
-		if err := cfg.ObjectStore.Delete(key); err != nil {
-			t.Fatalf("Delete(%q) error = %v", key, err)
-		}
-	}
-	mgr.config.CacheDir = t.TempDir()
-
-	var archive bytes.Buffer
-	err = mgr.ExportSnapshotArchive(context.Background(), &ExportSnapshotRequest{
-		VolumeID:   "vol-missing-legacy",
-		SnapshotID: snap.ID,
-		TeamID:     "team-1",
-	}, &archive)
-	if !errors.Is(err, ErrSnapshotNotFound) {
-		t.Fatalf("ExportSnapshotArchive() error = %v, want ErrSnapshotNotFound", err)
-	}
-}
-
 func newS0FSSnapshotTestManager(t *testing.T, volumeID string) (*Manager, *fakeRepo, *fakeVolumeProvider, *s0fs.Engine) {
 	return newS0FSSnapshotTestManagerWithFormat(t, volumeID, s0fs.StateFormatV1)
 }
@@ -753,37 +668,6 @@ func readS0FSFile(t *testing.T, engine *s0fs.Engine, name string) string {
 		t.Fatalf("Read(%q) error = %v", name, err)
 	}
 	return string(payload)
-}
-
-func untarSnapshotArchive(t *testing.T, payload []byte) map[string][]byte {
-	t.Helper()
-
-	gzipReader, err := gzip.NewReader(bytes.NewReader(payload))
-	if err != nil {
-		t.Fatalf("gzip.NewReader() error = %v", err)
-	}
-	defer gzipReader.Close()
-
-	tarReader := tar.NewReader(gzipReader)
-	files := make(map[string][]byte)
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("tar.Next() error = %v", err)
-		}
-		if header.Typeflag != tar.TypeReg {
-			continue
-		}
-		body, err := io.ReadAll(tarReader)
-		if err != nil {
-			t.Fatalf("ReadAll(%q) error = %v", header.Name, err)
-		}
-		files[header.Name] = body
-	}
-	return files
 }
 
 func openFreshS0FSEngine(t *testing.T, mgr *Manager, teamID, volumeID string) *s0fs.Engine {

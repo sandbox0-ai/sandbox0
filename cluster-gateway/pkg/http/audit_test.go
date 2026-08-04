@@ -19,8 +19,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )

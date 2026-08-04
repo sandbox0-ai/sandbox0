@@ -10,24 +10,24 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthservice"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
-	egressauthruntime "github.com/sandbox0-ai/sandbox0/pkg/egressauth/runtime"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
 type egressAuthBindingStore struct {
-	record        *egressauth.BindingRecord
-	sourceVersion *egressauth.CredentialSourceVersion
+	record        *egressauthstore.BindingRecord
+	sourceVersion *egressauthstore.CredentialSourceVersion
 }
 
-func (s *egressAuthBindingStore) GetBindings(context.Context, string, string) (*egressauth.BindingRecord, error) {
+func (s *egressAuthBindingStore) GetBindings(context.Context, string, string) (*egressauthstore.BindingRecord, error) {
 	return s.record, nil
 }
 
-func (s *egressAuthBindingStore) UpsertBindings(context.Context, *egressauth.BindingRecord) error {
+func (s *egressAuthBindingStore) UpsertBindings(context.Context, *egressauthstore.BindingRecord) error {
 	return nil
 }
 
@@ -35,11 +35,11 @@ func (s *egressAuthBindingStore) DeleteBindings(context.Context, string, string)
 	return nil
 }
 
-func (s *egressAuthBindingStore) GetSourceByRef(context.Context, string, string) (*egressauth.CredentialSource, error) {
+func (s *egressAuthBindingStore) GetSourceByRef(context.Context, string, string) (*egressauthstore.CredentialSource, error) {
 	return nil, nil
 }
 
-func (s *egressAuthBindingStore) GetSourceVersion(context.Context, int64, int64) (*egressauth.CredentialSourceVersion, error) {
+func (s *egressAuthBindingStore) GetSourceVersion(context.Context, int64, int64) (*egressauthstore.CredentialSourceVersion, error) {
 	return s.sourceVersion, nil
 }
 
@@ -47,9 +47,9 @@ func TestResolveEgressAuthAllowsNetdCaller(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	srv := &Server{
 		logger: zap.NewNop(),
-		egressAuthService: service.NewEgressAuthService(service.EgressAuthServiceConfig{
+		egressAuthService: egressauthservice.NewEgressAuthService(egressauthservice.EgressAuthServiceConfig{
 			DefaultResolveTTL: time.Minute,
-			StaticAuth: []egressauthruntime.StaticAuthConfig{{
+			StaticAuth: []egressauthservice.StaticAuthConfig{{
 				AuthRef: "example-api",
 				Headers: map[string]string{"Authorization": "Bearer static"},
 				TTL:     time.Minute,
@@ -101,7 +101,7 @@ func TestResolveEgressAuthRejectsNonNetdCaller(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	srv := &Server{
 		logger:            zap.NewNop(),
-		egressAuthService: service.NewEgressAuthService(service.EgressAuthServiceConfig{}, nil, zap.NewNop()),
+		egressAuthService: egressauthservice.NewEgressAuthService(egressauthservice.EgressAuthServiceConfig{}, nil, zap.NewNop()),
 	}
 
 	recorder := httptest.NewRecorder()

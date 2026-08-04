@@ -43,7 +43,7 @@ func (s *stubEgressAuthResolver) Resolve(_ context.Context, req *egressauth.Reso
 }
 
 func resolvedHeaderResponse(authRef, token, teamID, sourceRef string, sourceID, sourceVersion int64, expiresAt time.Time) *egressauth.ResolveResponse {
-	resp := egressauth.NewHTTPHeadersResolveResponse(authRef, map[string]string{"Authorization": "Bearer " + token}, &expiresAt)
+	resp := testHTTPHeadersResolveResponse(authRef, map[string]string{"Authorization": "Bearer " + token}, &expiresAt)
 	resp.Source = &egressauth.ResolveSource{
 		TeamID:        teamID,
 		SourceRef:     sourceRef,
@@ -83,7 +83,7 @@ func TestMemoryEgressAuthCacheInvalidatesRotatedSource(t *testing.T) {
 
 	cache.Put(rotatedKey, resolvedHeaderResponse("example-api", "old", "team-1", "example-source", 1, 1, expiresAt))
 	cache.Put(otherKey, resolvedHeaderResponse("other-api", "old", "team-1", "other-source", 2, 1, expiresAt))
-	cache.Put(staticKey, egressauth.NewHTTPHeadersResolveResponse("static-api", map[string]string{"Authorization": "Bearer static"}, &expiresAt))
+	cache.Put(staticKey, testHTTPHeadersResolveResponse("static-api", map[string]string{"Authorization": "Bearer static"}, &expiresAt))
 
 	removed := cache.InvalidateSource("team-1", 1, "example-source", 2)
 	if removed != 1 {
@@ -436,7 +436,7 @@ func TestPrepareUsernamePasswordDirectives(t *testing.T) {
 		Rule: &policy.CompiledEgressAuthRule{
 			AuthRef: "corp-proxy",
 		},
-		Resolved: egressauth.NewUsernamePasswordResolveResponse("corp-proxy", &egressauth.UsernamePasswordDirective{
+		Resolved: testUsernamePasswordResolveResponse("corp-proxy", &egressauth.UsernamePasswordDirective{
 			Username: "alice",
 			Password: "secret",
 		}, nil),
@@ -459,7 +459,7 @@ func TestPrepareSSHProxyDirectives(t *testing.T) {
 		Rule: &policy.CompiledEgressAuthRule{
 			AuthRef: "git-ssh",
 		},
-		Resolved: egressauth.NewSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{
+		Resolved: testSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{
 			SandboxPublicKeys: []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID////////////////////////////////////////// fake"},
 			UpstreamUsername:  "git",
 			PrivateKeyPEM:     "-----BEGIN RSA PRIVATE KEY-----\nplaceholder\n-----END RSA PRIVATE KEY-----",
@@ -487,7 +487,7 @@ func TestPrepareSSHProxyDirectivesRejectsInvalidMaterial(t *testing.T) {
 		Rule: &policy.CompiledEgressAuthRule{
 			AuthRef: "git-ssh",
 		},
-		Resolved: egressauth.NewSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{
+		Resolved: testSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{
 			UpstreamUsername: "git",
 			PrivateKeyPEM:    "-----BEGIN RSA PRIVATE KEY-----\nplaceholder\n-----END RSA PRIVATE KEY-----",
 		}, nil),
@@ -631,7 +631,7 @@ func TestPrepareTLSClientCertificateDirectivesLoadsMaterial(t *testing.T) {
 	}
 	ctx := &egressAuthContext{
 		Rule: &policy.CompiledEgressAuthRule{Name: "example-mtls", AuthRef: "example-cert"},
-		Resolved: egressauth.NewTLSClientCertificateResolveResponse("example-cert", &egressauth.TLSClientCertificateDirective{
+		Resolved: testTLSClientCertificateResolveResponse("example-cert", &egressauth.TLSClientCertificateDirective{
 			CertificatePEM: string(certPEM),
 			PrivateKeyPEM:  string(keyPEM),
 		}, nil),
@@ -654,7 +654,7 @@ func TestPrepareTLSClientCertificateDirectivesRejectsWhenTerminationUnavailable(
 	}
 	ctx := &egressAuthContext{
 		Rule: &policy.CompiledEgressAuthRule{Name: "example-mtls", AuthRef: "example-cert"},
-		Resolved: egressauth.NewTLSClientCertificateResolveResponse("example-cert", &egressauth.TLSClientCertificateDirective{
+		Resolved: testTLSClientCertificateResolveResponse("example-cert", &egressauth.TLSClientCertificateDirective{
 			CertificatePEM: string(certPEM),
 			PrivateKeyPEM:  string(keyPEM),
 		}, nil),

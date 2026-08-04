@@ -10,11 +10,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	memcachepkg "github.com/sandbox0-ai/sandbox0/global-gateway/pkg/memcache"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
-	memcachepkg "github.com/sandbox0-ai/sandbox0/pkg/memcache"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
@@ -82,7 +82,6 @@ func TestGlobalGatewaySetupRoutesOmitsRegionLocalSSHKeys(t *testing.T) {
 func TestGlobalGatewayResolveRoutableRegionCachesLookups(t *testing.T) {
 	dir := &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: "https://regional.example"}}
 	cache := memcachepkg.New[string, tenantdir.Region](memcachepkg.Config{MaxSize: 16, TTL: time.Hour})
-	defer cache.Close()
 	server := &Server{
 		logger:       zap.NewNop(),
 		regionLookup: dir,
@@ -115,8 +114,7 @@ func globalHasRoute(router *gin.Engine, method, path string) bool {
 
 func TestGlobalGatewayResolveRoutableRegionExpiresCache(t *testing.T) {
 	dir := &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: "https://regional.example"}}
-	cache := memcachepkg.New[string, tenantdir.Region](memcachepkg.Config{MaxSize: 16, TTL: 10 * time.Millisecond, CleanupInterval: 5 * time.Millisecond})
-	defer cache.Close()
+	cache := memcachepkg.New[string, tenantdir.Region](memcachepkg.Config{MaxSize: 16, TTL: 10 * time.Millisecond})
 	server := &Server{
 		logger:       zap.NewNop(),
 		regionLookup: dir,
@@ -139,7 +137,6 @@ func TestGlobalGatewayResolveRoutableRegionExpiresCache(t *testing.T) {
 func TestGlobalGatewayResolveRoutableRegionInvalidationClearsCache(t *testing.T) {
 	dir := &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: "https://regional.example"}}
 	cache := memcachepkg.New[string, tenantdir.Region](memcachepkg.Config{MaxSize: 16, TTL: time.Hour})
-	defer cache.Close()
 	server := &Server{
 		logger:       zap.NewNop(),
 		regionLookup: dir,
@@ -160,148 +157,98 @@ func TestGlobalGatewayResolveRoutableRegionInvalidationClearsCache(t *testing.T)
 }
 
 func TestGlobalGatewayNoRouteProxiesAPIKeyRequestsToRegion(t *testing.T) {
-	gin.SetMode(gin.ReleaseMode)
-	var gotAuth string
-	var gotPath string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotPath = r.URL.Path
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer upstream.Close()
+	for _, tt := range []struct {
+		name         string
+		path         string
+		upstreamBody string
+	}{
+		{name: "templates", path: "/api/v1/templates", upstreamBody: `{"ok":true}`},
+		{name: "current key", path: "/api-keys/current", upstreamBody: `{"id":"key_123"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.ReleaseMode)
+			var gotAuth string
+			var gotPath string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				gotPath = r.URL.Path
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tt.upstreamBody))
+			}))
+			defer upstream.Close()
 
-	server := &Server{
-		router:        gin.New(),
-		logger:        zap.NewNop(),
-		regionLookup:  &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: upstream.URL}},
-		proxyTimeout:  time.Second,
-		regionProxies: make(map[string]*proxy.Router),
-	}
-	server.router.NoRoute(server.handleNoRoute)
-	gw := httptest.NewServer(server.router)
-	defer gw.Close()
+			server := &Server{
+				router:        gin.New(),
+				logger:        zap.NewNop(),
+				regionLookup:  &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: upstream.URL}},
+				proxyTimeout:  time.Second,
+				regionProxies: make(map[string]*proxy.Router),
+			}
+			server.router.NoRoute(server.handleNoRoute)
+			gw := httptest.NewServer(server.router)
+			defer gw.Close()
 
-	req, err := http.NewRequest(http.MethodGet, gw.URL+"/api/v1/templates", nil)
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef")
-	resp, err := gw.Client().Do(req)
-	if err != nil {
-		t.Fatalf("do request: %v", err)
-	}
-	defer resp.Body.Close()
+			req, err := http.NewRequest(http.MethodGet, gw.URL+tt.path, nil)
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef")
+			resp, err := gw.Client().Do(req)
+			if err != nil {
+				t.Fatalf("do request: %v", err)
+			}
+			defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	if gotAuth != "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef" {
-		t.Fatalf("Authorization = %q", gotAuth)
-	}
-	if gotPath != "/api/v1/templates" {
-		t.Fatalf("path = %q, want /api/v1/templates", gotPath)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+			}
+			if gotAuth != "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef" {
+				t.Fatalf("Authorization = %q", gotAuth)
+			}
+			if gotPath != tt.path {
+				t.Fatalf("path = %q, want %q", gotPath, tt.path)
+			}
+		})
 	}
 }
 
-func TestGlobalGatewayNoRouteProxiesCurrentAPIKeyRequestToRegion(t *testing.T) {
-	gin.SetMode(gin.ReleaseMode)
-	var gotAuth string
-	var gotPath string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotPath = r.URL.Path
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"key_123"}`))
-	}))
-	defer upstream.Close()
+func TestGlobalGatewayNoRouteLeavesRequestsAsNotFoundWhenTheyAreNotRoutable(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		method        string
+		path          string
+		authorization string
+	}{
+		{name: "API key management", method: http.MethodPost, path: "/api-keys", authorization: "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef"},
+		{name: "non API key request", method: http.MethodGet, path: "/api/v1/templates", authorization: "Bearer user-token"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.ReleaseMode)
+			server := &Server{
+				router:        gin.New(),
+				logger:        zap.NewNop(),
+				proxyTimeout:  time.Second,
+				regionProxies: make(map[string]*proxy.Router),
+			}
+			server.router.NoRoute(server.handleNoRoute)
+			gw := httptest.NewServer(server.router)
+			defer gw.Close()
 
-	server := &Server{
-		router:        gin.New(),
-		logger:        zap.NewNop(),
-		regionLookup:  &stubRegionDirectory{region: &tenantdir.Region{ID: "aws-us-east-1", Enabled: true, RegionalGatewayURL: upstream.URL}},
-		proxyTimeout:  time.Second,
-		regionProxies: make(map[string]*proxy.Router),
-	}
-	server.router.NoRoute(server.handleNoRoute)
-	gw := httptest.NewServer(server.router)
-	defer gw.Close()
+			req, err := http.NewRequest(tt.method, gw.URL+tt.path, nil)
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+			req.Header.Set("Authorization", tt.authorization)
+			resp, err := gw.Client().Do(req)
+			if err != nil {
+				t.Fatalf("do request: %v", err)
+			}
+			defer resp.Body.Close()
 
-	req, err := http.NewRequest(http.MethodGet, gw.URL+"/api-keys/current", nil)
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef")
-	resp, err := gw.Client().Do(req)
-	if err != nil {
-		t.Fatalf("do request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	if gotAuth != "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef" {
-		t.Fatalf("Authorization = %q", gotAuth)
-	}
-	if gotPath != "/api-keys/current" {
-		t.Fatalf("path = %q, want /api-keys/current", gotPath)
-	}
-}
-
-func TestGlobalGatewayNoRouteDoesNotProxyAPIKeyManagementRequests(t *testing.T) {
-	gin.SetMode(gin.ReleaseMode)
-	server := &Server{
-		router:        gin.New(),
-		logger:        zap.NewNop(),
-		proxyTimeout:  time.Second,
-		regionProxies: make(map[string]*proxy.Router),
-	}
-	server.router.NoRoute(server.handleNoRoute)
-	gw := httptest.NewServer(server.router)
-	defer gw.Close()
-
-	req, err := http.NewRequest(http.MethodPost, gw.URL+"/api-keys", nil)
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer s0_aws-us-east-1_deadbeefdeadbeefdeadbeefdeadbeef")
-	resp, err := gw.Client().Do(req)
-	if err != nil {
-		t.Fatalf("do request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
-	}
-}
-
-func TestGlobalGatewayNoRouteLeavesNonAPIKeyRequestsAsNotFound(t *testing.T) {
-	gin.SetMode(gin.ReleaseMode)
-	server := &Server{
-		router:        gin.New(),
-		logger:        zap.NewNop(),
-		proxyTimeout:  time.Second,
-		regionProxies: make(map[string]*proxy.Router),
-	}
-	server.router.NoRoute(server.handleNoRoute)
-	gw := httptest.NewServer(server.router)
-	defer gw.Close()
-
-	req, err := http.NewRequest(http.MethodGet, gw.URL+"/api/v1/templates", nil)
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer user-token")
-	resp, err := gw.Client().Do(req)
-	if err != nil {
-		t.Fatalf("do request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			}
+		})
 	}
 }
 

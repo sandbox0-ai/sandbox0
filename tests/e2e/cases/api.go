@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 
 	. "github.com/onsi/ginkgo/v2"

@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	registryprovider "github.com/sandbox0-ai/sandbox0/pkg/registry"
 	"go.uber.org/zap"
 )
 

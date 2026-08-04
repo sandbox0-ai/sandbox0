@@ -30,6 +30,17 @@ func (f *fakeDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row 
 	return fakeRow{}
 }
 
+func TestNewRepositoryReturnsNilForNilDB(t *testing.T) {
+	if repo := NewRepository(nil); repo != nil {
+		t.Fatalf("NewRepository(nil) = %#v, want nil", repo)
+	}
+
+	var db *fakeDB
+	if repo := NewRepository(db); repo != nil {
+		t.Fatalf("NewRepository(typed nil) = %#v, want nil", repo)
+	}
+}
+
 type fakeRow struct {
 	values []any
 	err    error
@@ -62,7 +73,7 @@ func (r fakeRow) Scan(dest ...any) error {
 }
 
 func TestGetPolicyReturnsRegionDefault(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{
+	repo := NewRepository(&fakeDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
 			return fakeRow{values: []any{
 				"team-1",
@@ -88,7 +99,7 @@ func TestGetPolicyReturnsRegionDefault(t *testing.T) {
 }
 
 func TestGetPolicyReturnsTeamOverride(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{
+	repo := NewRepository(&fakeDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
 			return fakeRow{values: []any{
 				"team-1",
@@ -118,7 +129,7 @@ func TestGetLimitUsesConfiguredPolicyStore(t *testing.T) {
 		LimitValue: 120,
 		Source:     SourceTeamOverride,
 	}}
-	repo := NewRepositoryWithDB(&fakeDB{
+	repo := NewRepository(&fakeDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
 			t.Fatal("GetLimit must use the configured policy store")
 			return fakeRow{}
@@ -161,7 +172,7 @@ func TestEnsureDefaultPoliciesRejectsInvalidLimits(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repo := NewRepositoryWithDB(&fakeDB{})
+			repo := NewRepository(&fakeDB{})
 			if err := repo.EnsureDefaultPolicies(context.Background(), "test", tt.defaults); err == nil {
 				t.Fatal("EnsureDefaultPolicies error = nil, want error")
 			}
@@ -197,7 +208,7 @@ func (f *fakeUsageStore) AdditionalStorageUsageGB(ctx context.Context, teamID st
 }
 
 func TestCurrentUsageDelegatesToUsageStore(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{})
+	repo := NewRepository(&fakeDB{})
 	repo.SetUsageStore(&fakeUsageStore{
 		currentFn: func(_ context.Context, teamID string, dimension Dimension) (int64, error) {
 			if teamID != "team-1" {
@@ -220,7 +231,7 @@ func TestCurrentUsageDelegatesToUsageStore(t *testing.T) {
 }
 
 func TestCurrentUsageWithoutUsageStoreReturnsUnavailable(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{
+	repo := NewRepository(&fakeDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
 			t.Fatal("CurrentUsage must not query PostgreSQL usage tables")
 			return fakeRow{}
@@ -234,7 +245,7 @@ func TestCurrentUsageWithoutUsageStoreReturnsUnavailable(t *testing.T) {
 }
 
 func TestCurrentUsageWithTypedNilUsageStoreReturnsUnavailable(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{})
+	repo := NewRepository(&fakeDB{})
 	var store *fakeUsageStore
 	repo.SetUsageStore(store)
 
@@ -245,7 +256,7 @@ func TestCurrentUsageWithTypedNilUsageStoreReturnsUnavailable(t *testing.T) {
 }
 
 func TestProjectedStorageUsageGBDelegatesToUsageStore(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{})
+	repo := NewRepository(&fakeDB{})
 	repo.SetUsageStore(&fakeUsageStore{
 		projectedFn: func(_ context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
 			if teamID != "team-1" || dimension != DimensionVolumeStorageGB || subjectType != metering.SubjectTypeVolume || subjectID != "vol-1" || sizeBytes != 1 {
@@ -265,7 +276,7 @@ func TestProjectedStorageUsageGBDelegatesToUsageStore(t *testing.T) {
 }
 
 func TestAdditionalStorageUsageGBDelegatesToUsageStore(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{})
+	repo := NewRepository(&fakeDB{})
 	repo.SetUsageStore(&fakeUsageStore{
 		additionalFn: func(_ context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error) {
 			if teamID != "team-1" || dimension != DimensionSnapshotGB || subjectType != metering.SubjectTypeSnapshot || additionalBytes != 1 {
@@ -285,7 +296,7 @@ func TestAdditionalStorageUsageGBDelegatesToUsageStore(t *testing.T) {
 }
 
 func TestCheckProjectedStorageUsageRejectsRequestBeforeUsageLookup(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{
+	repo := NewRepository(&fakeDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
 			return fakeRow{values: []any{
 				"team-1",
@@ -315,7 +326,7 @@ func TestCheckProjectedStorageUsageRejectsRequestBeforeUsageLookup(t *testing.T)
 }
 
 func TestCheckAdditionalStorageUsageRejectsRequestBeforeUsageLookup(t *testing.T) {
-	repo := NewRepositoryWithDB(&fakeDB{
+	repo := NewRepository(&fakeDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row {
 			return fakeRow{values: []any{
 				"team-1",

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -22,7 +23,7 @@ const (
 )
 
 type sandboxRuntimeReconcileStore interface {
-	ListRuntimeReconcileCandidates(ctx context.Context, clusterID, afterSandboxID string, limit int) ([]SandboxRuntimeReconcileCandidate, error)
+	ListRuntimeReconcileCandidates(ctx context.Context, clusterID, afterSandboxID string, limit int) ([]sandboxstore.SandboxRuntimeReconcileCandidate, error)
 }
 
 type sandboxRuntimeStateReconciler interface {
@@ -71,8 +72,8 @@ func (c *SandboxRuntimeReconciler) ResourceEventHandler() cache.ResourceEventHan
 	}
 	return cache.ResourceEventHandlerFuncs{
 		UpdateFunc: func(oldObj, newObj any) {
-			oldPod := extractPod(oldObj)
-			newPod := extractPod(newObj)
+			oldPod := sandboxPodFromInformerEvent(oldObj)
+			newPod := sandboxPodFromInformerEvent(newObj)
 			if newPod != nil && newPod.DeletionTimestamp != nil && (oldPod == nil || oldPod.DeletionTimestamp == nil) {
 				c.enqueuePod(newPod)
 			}
@@ -120,11 +121,11 @@ func (c *SandboxRuntimeReconciler) enqueuePod(obj any) {
 	if c == nil || c.queue == nil {
 		return
 	}
-	pod := extractPod(obj)
+	pod := sandboxPodFromInformerEvent(obj)
 	if pod == nil || !sandboxRuntimePodOwnedBySandbox(pod) {
 		return
 	}
-	c.enqueueSandbox(sandboxIDFromPod(pod))
+	c.enqueueSandbox(sandboxPodID(pod))
 }
 
 func (c *SandboxRuntimeReconciler) enqueueSandbox(sandboxID string) {
@@ -165,8 +166,8 @@ func (c *SandboxRuntimeReconciler) enqueueDriftCandidates(ctx context.Context) {
 	}
 }
 
-func (c *SandboxRuntimeReconciler) candidateNeedsReconcile(candidate SandboxRuntimeReconcileCandidate) bool {
-	if candidate.DesiredState == SandboxDesiredStateTerminating {
+func (c *SandboxRuntimeReconciler) candidateNeedsReconcile(candidate sandboxstore.SandboxRuntimeReconcileCandidate) bool {
+	if candidate.DesiredState == sandboxstore.SandboxDesiredStateTerminating {
 		return true
 	}
 	if strings.TrimSpace(candidate.PodNamespace) == "" || strings.TrimSpace(candidate.PodName) == "" || c.podLister == nil {
@@ -181,7 +182,7 @@ func (c *SandboxRuntimeReconciler) candidateNeedsReconcile(candidate SandboxRunt
 	}
 	return pod.DeletionTimestamp != nil ||
 		!sandboxRuntimePodOwnedBySandbox(pod) ||
-		sandboxIDFromPod(pod) != candidate.SandboxID ||
+		sandboxPodID(pod) != candidate.SandboxID ||
 		runtimeGenerationFromPod(pod) != candidate.RuntimeGeneration
 }
 
@@ -210,7 +211,7 @@ func (c *SandboxRuntimeReconciler) processNextWorkItem(ctx context.Context) bool
 }
 
 func sandboxRuntimePodOwnedBySandbox(pod *corev1.Pod) bool {
-	return pod != nil && controller.IsClaimedSandboxPod(pod) && strings.TrimSpace(sandboxIDFromPod(pod)) != ""
+	return pod != nil && controller.IsClaimedSandboxPod(pod) && strings.TrimSpace(sandboxPodID(pod)) != ""
 }
 
 var _ sandboxRuntimeStateReconciler = (*SandboxService)(nil)

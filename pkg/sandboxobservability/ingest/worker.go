@@ -1,12 +1,8 @@
 package ingest
 
 import (
-	"context"
 	"fmt"
-	"sync/atomic"
 	"time"
-
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
 const (
@@ -23,129 +19,6 @@ type Config struct {
 	FlushInterval time.Duration
 	MaxRetries    int
 	RetryBackoff  time.Duration
-}
-
-type Stats struct {
-	InsertedEvents uint64
-	DroppedEvents  uint64
-	FailedBatches  uint64
-}
-
-// Worker batches sandbox observability events into a bounded asynchronous writer.
-type Worker struct {
-	writer        sandboxobservability.Writer
-	cfg           Config
-	queue         chan sandboxobservability.Event
-	insertedCount atomic.Uint64
-	droppedCount  atomic.Uint64
-	failedBatches atomic.Uint64
-}
-
-func NewWorker(writer sandboxobservability.Writer, cfg Config) (*Worker, error) {
-	if writer == nil {
-		return nil, fmt.Errorf("writer is nil")
-	}
-	normalized, err := normalizeConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return &Worker{
-		writer: writer,
-		cfg:    normalized,
-		queue:  make(chan sandboxobservability.Event, normalized.QueueSize),
-	}, nil
-}
-
-func (w *Worker) Enqueue(ctx context.Context, event sandboxobservability.Event) error {
-	select {
-	case w.queue <- event:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (w *Worker) TryEnqueue(event sandboxobservability.Event) bool {
-	select {
-	case w.queue <- event:
-		return true
-	default:
-		w.droppedCount.Add(1)
-		return false
-	}
-}
-
-func (w *Worker) Run(ctx context.Context) {
-	ticker := time.NewTicker(w.cfg.FlushInterval)
-	defer ticker.Stop()
-
-	batch := make([]sandboxobservability.Event, 0, w.cfg.BatchSize)
-	flush := func(flushCtx context.Context) {
-		if len(batch) == 0 {
-			return
-		}
-		w.flushBatch(flushCtx, batch)
-		batch = make([]sandboxobservability.Event, 0, w.cfg.BatchSize)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownFlushTimeout)
-			for {
-				select {
-				case event := <-w.queue:
-					batch = append(batch, event)
-					if len(batch) >= w.cfg.BatchSize {
-						flush(shutdownCtx)
-					}
-				default:
-					flush(shutdownCtx)
-					cancel()
-					return
-				}
-			}
-		case event := <-w.queue:
-			batch = append(batch, event)
-			if len(batch) >= w.cfg.BatchSize {
-				flush(ctx)
-			}
-		case <-ticker.C:
-			flush(ctx)
-		}
-	}
-}
-
-func (w *Worker) Stats() Stats {
-	return Stats{
-		InsertedEvents: w.insertedCount.Load(),
-		DroppedEvents:  w.droppedCount.Load(),
-		FailedBatches:  w.failedBatches.Load(),
-	}
-}
-
-func (w *Worker) flushBatch(ctx context.Context, batch []sandboxobservability.Event) {
-	for attempt := 0; attempt <= w.cfg.MaxRetries; attempt++ {
-		err := w.writer.InsertEvents(ctx, batch)
-		if err == nil {
-			w.insertedCount.Add(uint64(len(batch)))
-			return
-		}
-		if attempt == w.cfg.MaxRetries {
-			w.failedBatches.Add(1)
-			w.droppedCount.Add(uint64(len(batch)))
-			return
-		}
-		timer := time.NewTimer(w.cfg.RetryBackoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			w.failedBatches.Add(1)
-			w.droppedCount.Add(uint64(len(batch)))
-			return
-		case <-timer.C:
-		}
-	}
 }
 
 func normalizeConfig(cfg Config) (Config, error) {

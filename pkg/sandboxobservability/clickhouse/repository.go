@@ -87,18 +87,32 @@ func (r *Repository) ListEvents(ctx context.Context, query sandboxobservability.
 }
 
 func (r *Repository) InsertEvents(ctx context.Context, events []sandboxobservability.Event) error {
-	if len(events) == 0 {
+	return insertNormalizedRows(r, ctx, events, normalizeEventForInsert, "event", "events", r.buildInsertSQL)
+}
+
+// insertNormalizedRows validates, normalizes, chunks, and persists one
+// observability record type using its caller-provided SQL builder.
+func insertNormalizedRows[T any](
+	r *Repository,
+	ctx context.Context,
+	records []T,
+	normalize func(T, time.Time) (T, error),
+	recordName string,
+	insertName string,
+	buildInsert func([]T) (string, []any, error),
+) error {
+	if len(records) == 0 {
 		return nil
 	}
 
-	normalized := make([]sandboxobservability.Event, 0, len(events))
+	normalized := make([]T, 0, len(records))
 	now := r.now()
-	for i, event := range events {
-		normalizedEvent, err := normalizeEventForInsert(event, now)
+	for i, record := range records {
+		normalizedRecord, err := normalize(record, now)
 		if err != nil {
-			return fmt.Errorf("event %d: %w", i, err)
+			return fmt.Errorf("%s %d: %w", recordName, i, err)
 		}
-		normalized = append(normalized, normalizedEvent)
+		normalized = append(normalized, normalizedRecord)
 	}
 
 	for len(normalized) > 0 {
@@ -106,12 +120,12 @@ func (r *Repository) InsertEvents(ctx context.Context, events []sandboxobservabi
 		if chunkSize > maxInsertBatchSize {
 			chunkSize = maxInsertBatchSize
 		}
-		query, args, err := r.buildInsertSQL(normalized[:chunkSize])
+		query, args, err := buildInsert(normalized[:chunkSize])
 		if err != nil {
 			return err
 		}
 		if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("%w: insert events: %v", sandboxobservability.ErrBackendUnavailable, err)
+			return fmt.Errorf("%w: insert %s: %v", sandboxobservability.ErrBackendUnavailable, insertName, err)
 		}
 		normalized = normalized[chunkSize:]
 	}

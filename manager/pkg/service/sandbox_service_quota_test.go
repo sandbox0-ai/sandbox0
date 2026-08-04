@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -101,21 +102,21 @@ func TestEnforceActiveSandboxQuotaUsesSandboxStoreWhenUsageStoreDisabled(t *test
 			usageErr: quota.ErrUsageStoreNotConfigured,
 		},
 		sandboxStore: &memorySandboxStore{
-			records: map[string]*SandboxRecord{
+			records: map[string]*sandboxstore.SandboxRecord{
 				"sandbox-1": {
 					ID:           "sandbox-1",
 					TeamID:       "team-1",
-					DesiredState: SandboxDesiredStateActive,
+					DesiredState: sandboxstore.SandboxDesiredStateActive,
 				},
 				"paused": {
 					ID:           "paused",
 					TeamID:       "team-1",
-					DesiredState: SandboxDesiredStatePaused,
+					DesiredState: sandboxstore.SandboxDesiredStatePaused,
 				},
 				"other-team": {
 					ID:           "other-team",
 					TeamID:       "team-2",
-					DesiredState: SandboxDesiredStateActive,
+					DesiredState: sandboxstore.SandboxDesiredStateActive,
 				},
 			},
 		},
@@ -134,11 +135,11 @@ func TestEnforceActiveSandboxQuotaPrefersOperationalStoreOverUsageProjection(t *
 			usage: 0,
 		},
 		sandboxStore: &memorySandboxStore{
-			records: map[string]*SandboxRecord{
+			records: map[string]*sandboxstore.SandboxRecord{
 				"sandbox-1": {
 					ID:           "sandbox-1",
 					TeamID:       "team-1",
-					DesiredState: SandboxDesiredStateActive,
+					DesiredState: sandboxstore.SandboxDesiredStateActive,
 				},
 			},
 		},

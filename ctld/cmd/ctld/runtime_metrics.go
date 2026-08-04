@@ -24,7 +24,7 @@ import (
 )
 
 type ctldRuntimeMetricsProducer struct {
-	worker    *sandboxobsingest.RuntimeSampleWorker
+	worker    *ctldruntimemetrics.RuntimeSampleWorker
 	collector *ctldruntimemetrics.Collector
 }
 
@@ -158,7 +158,7 @@ func newCtldRuntimeMetricsProducer(cfg *config.CtldConfig, statsClient ctldrunti
 			})
 		},
 	})
-	worker, err := sandboxobsingest.NewRuntimeSampleWorker(writer, sandboxobsingest.Config{
+	worker, err := ctldruntimemetrics.NewRuntimeSampleWorker(writer, sandboxobsingest.Config{
 		QueueSize:     cfg.SandboxObservabilityIngestQueueSize,
 		BatchSize:     cfg.SandboxObservabilityIngestBatchSize,
 		FlushInterval: cfg.SandboxObservabilityIngestFlushInterval.Duration,

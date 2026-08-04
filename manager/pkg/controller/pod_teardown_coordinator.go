@@ -8,7 +8,7 @@ import (
 	"time"
 
 	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"

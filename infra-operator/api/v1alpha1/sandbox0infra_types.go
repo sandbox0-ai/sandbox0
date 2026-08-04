@@ -1669,11 +1669,6 @@ func HasDataPlaneServices(infra *Sandbox0Infra) bool {
 	return IsClusterGatewayEnabled(infra) || IsManagerEnabled(infra) || IsStorageRuntimeEnabled(infra) || IsNetworkEnabled(infra)
 }
 
-// HasAnyServiceEnabled returns true when at least one service is enabled.
-func HasAnyServiceEnabled(infra *Sandbox0Infra) bool {
-	return IsGlobalGatewayEnabled(infra) || HasControlPlaneServices(infra) || HasDataPlaneServices(infra)
-}
-
 // ServiceNetworkConfig defines service network configuration
 // +kubebuilder:validation:XValidation:rule="self.type != 'NodePort' || self.port == 0 || (self.port >= 30000 && self.port <= 32767)",message="port must be within 30000-32767 when type is NodePort"
 type ServiceNetworkConfig struct {

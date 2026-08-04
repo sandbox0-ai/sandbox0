@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 )
 
 const singleClusterScenariosEnvVar = "E2E_SINGLE_CLUSTER_SCENARIOS"

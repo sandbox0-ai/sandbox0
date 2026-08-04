@@ -21,10 +21,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/scheduler/pkg/metrics"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )

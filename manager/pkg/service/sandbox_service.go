@@ -8,9 +8,14 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	egressauth "github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
-	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxindex"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
@@ -20,43 +25,12 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// Sandbox represents a sandbox instance
-type Sandbox struct {
-	ID                string                 `json:"id"`
-	TemplateID        string                 `json:"template_id"`
-	TeamID            string                 `json:"team_id"`
-	UserID            string                 `json:"user_id"`
-	InternalAddr      string                 `json:"internal_addr"`
-	Status            string                 `json:"status"`
-	Paused            bool                   `json:"paused"`
-	AutoResume        bool                   `json:"auto_resume"`
-	Resources         *SandboxResourceConfig `json:"resources,omitempty"`
-	Services          []SandboxAppService    `json:"services,omitempty"`
-	Mounts            []ClaimMount           `json:"mounts,omitempty"`
-	PodName           string                 `json:"pod_name"`
-	RuntimeGeneration int64                  `json:"runtime_generation"`
-	ExpiresAt         *time.Time             `json:"expires_at"`
-	HardExpiresAt     *time.Time             `json:"hard_expires_at"`
-	ClaimedAt         time.Time              `json:"claimed_at"`
-	CreatedAt         time.Time              `json:"created_at"`
-	UpdatedAt         time.Time              `json:"updated_at"`
-}
-
 func optionalTime(value time.Time) *time.Time {
 	if value.IsZero() {
 		return nil
 	}
 	return &value
 }
-
-// SandboxStatus represents possible sandbox statuses
-const (
-	SandboxStatusStarting    = "starting"
-	SandboxStatusRunning     = "running"
-	SandboxStatusPaused      = "paused"
-	SandboxStatusFailed      = "failed"
-	SandboxStatusTerminating = "terminating"
-)
 
 // errNoIdlePod is returned when no idle pod is available for claiming.
 var errNoIdlePod = errors.New("no idle pod available")
@@ -116,13 +90,13 @@ type SandboxService struct {
 	hotClaimK8sClient                      kubernetes.Interface
 	podLister                              corelisters.PodLister
 	nodeLister                             corelisters.NodeLister
-	sandboxIndex                           *SandboxIndex
+	sandboxIndex                           *sandboxindex.SandboxIndex
 	secretLister                           corelisters.SecretLister
 	templateLister                         controller.TemplateLister
-	NetworkPolicyService                   *NetworkPolicyService
+	networkPolicyService                   *networkpolicy.NetworkPolicyService
 	networkProvider                        network.Provider
-	procdClient                            *ProcdClient
-	ctldClient                             *CtldClient
+	procdClient                            *procdapi.ProcdClient
+	ctldClient                             *ctldapi.Client
 	internalTokenGenerator                 TokenGenerator
 	clock                                  TimeProvider
 	config                                 SandboxServiceConfig
@@ -134,8 +108,8 @@ type SandboxService struct {
 	webhookStateVolumes                    SandboxSystemVolumeClient
 	volumeMetadata                         SandboxVolumeMetadataClient
 	quotaStore                             TeamQuotaLimitStore
-	sandboxStore                           SandboxStore
-	rootFSObjectDeleter                    RootFSObjectDeleter
+	sandboxStore                           sandboxstore.SandboxStore
+	rootFSObjectDeleter                    sandboxstore.RootFSObjectDeleter
 	templateImageBuildCapabilityConfigured bool
 	templateImageBuildAvailable            bool
 	resumeGroup                            singleflight.Group
@@ -184,31 +158,50 @@ type TokenGenerator interface {
 	GenerateToken(teamID, userID, sandboxID string) (string, error)
 }
 
-// NewSandboxService creates a new SandboxService
-func NewSandboxService(
-	k8sClient kubernetes.Interface,
-	podLister corelisters.PodLister,
-	nodeLister corelisters.NodeLister,
-	sandboxIndex *SandboxIndex,
-	secretLister corelisters.SecretLister,
-	templateLister controller.TemplateLister,
-	networkPolicyService *NetworkPolicyService,
-	networkProvider network.Provider,
-	internalTokenGenerator TokenGenerator,
-	clock TimeProvider,
-	config SandboxServiceConfig,
-	logger *zap.Logger,
-	metrics *obsmetrics.ManagerMetrics,
-) *SandboxService {
+// SandboxServiceDependencies names the collaborators required by
+// SandboxService. Optional stores and workers may be nil to disable their
+// corresponding capability.
+type SandboxServiceDependencies struct {
+	K8sClient                   kubernetes.Interface
+	HotClaimK8sClient           kubernetes.Interface
+	PodLister                   corelisters.PodLister
+	NodeLister                  corelisters.NodeLister
+	SandboxIndex                *sandboxindex.SandboxIndex
+	SecretLister                corelisters.SecretLister
+	TemplateLister              controller.TemplateLister
+	NetworkPolicyService        *networkpolicy.NetworkPolicyService
+	NetworkProvider             network.Provider
+	InternalTokenGenerator      TokenGenerator
+	Clock                       TimeProvider
+	Config                      SandboxServiceConfig
+	Logger                      *zap.Logger
+	Metrics                     *obsmetrics.ManagerMetrics
+	ProcdClient                 *procdapi.ProcdClient
+	CtldClient                  *ctldapi.Client
+	PauseEnqueuer               SandboxPauseEnqueuer
+	HotClaimReservationEnqueuer HotClaimReservationEnqueuer
+	CredentialStore             egressauth.BindingStore
+	WebhookStateVolumeClient    SandboxSystemVolumeClient
+	VolumeMetadataClient        SandboxVolumeMetadataClient
+	QuotaStore                  TeamQuotaLimitStore
+	SandboxStore                sandboxstore.SandboxStore
+	RootFSObjectDeleter         sandboxstore.RootFSObjectDeleter
+}
+
+// NewSandboxServiceWithDependencies creates a SandboxService from named
+// collaborators so production composition does not depend on argument order or
+// follow-up setter calls.
+func NewSandboxServiceWithDependencies(deps SandboxServiceDependencies) *SandboxService {
+	config := deps.Config
 	// Use system time as fallback if clock is nil
-	if clock == nil {
-		clock = systemTime{}
+	if deps.Clock == nil {
+		deps.Clock = systemTime{}
 	}
 	if config.CtldPort == 0 {
 		config.CtldPort = 8095
 	}
 	if config.CtldClientTimeout == 0 {
-		config.CtldClientTimeout = defaultCtldClientTimeout
+		config.CtldClientTimeout = ctldapi.DefaultRequestTimeout
 	}
 	if config.RootFSSquashMaxChainDepth <= 0 {
 		config.RootFSSquashMaxChainDepth = 8
@@ -216,36 +209,54 @@ func NewSandboxService(
 	if config.RootFSSquashMaxChainBytes <= 0 {
 		config.RootFSSquashMaxChainBytes = 512 * 1024 * 1024
 	}
-	if networkProvider == nil {
-		networkProvider = network.NewNoopProvider()
+	if deps.NetworkProvider == nil {
+		deps.NetworkProvider = network.NewNoopProvider()
 	}
-	ctldClient := NewCtldClient(CtldClientConfig{Timeout: config.CtldClientTimeout})
-	if config.CtldHTTPClient != nil {
-		ctldClient = NewCtldClientWithHTTPClient(config.CtldHTTPClient)
+	if deps.CtldClient == nil {
+		deps.CtldClient = ctldapi.NewClientWithTimeout(config.CtldClientTimeout)
+		if config.CtldHTTPClient != nil {
+			deps.CtldClient = ctldapi.NewClient(config.CtldHTTPClient)
+		}
 	}
-	procdClient := NewProcdClient(ProcdClientConfig{Timeout: config.ProcdClientTimeout})
-	if config.ProcdHTTPClient != nil {
-		procdClient = NewProcdClientWithHTTPClient(config.ProcdHTTPClient)
+	if deps.ProcdClient == nil {
+		deps.ProcdClient = procdapi.NewProcdClient(procdapi.ProcdClientConfig{Timeout: config.ProcdClientTimeout})
+		if config.ProcdHTTPClient != nil {
+			deps.ProcdClient = procdapi.NewProcdClientWithHTTPClient(config.ProcdHTTPClient)
+		}
+	}
+	if deps.VolumeMetadataClient == nil {
+		if metadataClient, ok := deps.WebhookStateVolumeClient.(SandboxVolumeMetadataClient); ok {
+			deps.VolumeMetadataClient = metadataClient
+		}
 	}
 
 	service := &SandboxService{
-		k8sClient:              k8sClient,
-		podLister:              podLister,
-		nodeLister:             nodeLister,
-		sandboxIndex:           sandboxIndex,
-		secretLister:           secretLister,
-		templateLister:         templateLister,
-		NetworkPolicyService:   networkPolicyService,
-		networkProvider:        networkProvider,
-		ctldClient:             ctldClient,
-		procdClient:            procdClient,
-		internalTokenGenerator: internalTokenGenerator,
-		clock:                  clock,
-		config:                 config,
-		logger:                 logger,
-		metrics:                metrics,
-		idleClaimReservations:  make(map[string]string),
-		podWaiter:              newPodEventWaiter(),
+		k8sClient:                   deps.K8sClient,
+		hotClaimK8sClient:           deps.HotClaimK8sClient,
+		podLister:                   deps.PodLister,
+		nodeLister:                  deps.NodeLister,
+		sandboxIndex:                deps.SandboxIndex,
+		secretLister:                deps.SecretLister,
+		templateLister:              deps.TemplateLister,
+		networkPolicyService:        deps.NetworkPolicyService,
+		networkProvider:             deps.NetworkProvider,
+		ctldClient:                  deps.CtldClient,
+		procdClient:                 deps.ProcdClient,
+		internalTokenGenerator:      deps.InternalTokenGenerator,
+		clock:                       deps.Clock,
+		config:                      config,
+		logger:                      deps.Logger,
+		metrics:                     deps.Metrics,
+		pauseEnqueuer:               deps.PauseEnqueuer,
+		hotClaimReservationEnqueuer: deps.HotClaimReservationEnqueuer,
+		credentialStore:             deps.CredentialStore,
+		webhookStateVolumes:         deps.WebhookStateVolumeClient,
+		volumeMetadata:              deps.VolumeMetadataClient,
+		quotaStore:                  deps.QuotaStore,
+		sandboxStore:                deps.SandboxStore,
+		rootFSObjectDeleter:         deps.RootFSObjectDeleter,
+		idleClaimReservations:       make(map[string]string),
+		podWaiter:                   newPodEventWaiter(),
 	}
 	return service
 }
@@ -292,77 +303,9 @@ func (s *SandboxService) SupportsNetworkPolicy() bool {
 	return s != nil && s.networkProvider != nil && s.networkProvider.Name() != "noop"
 }
 
-// SetProcdClient overrides the procd client (used by tests).
-func (s *SandboxService) SetProcdClient(client *ProcdClient) {
-	if client == nil {
-		return
-	}
-	s.procdClient = client
-}
-
-// SetCtldClient overrides the ctld client (used by tests and future node runtimes).
-func (s *SandboxService) SetCtldClient(client *CtldClient) {
-	if client == nil {
-		return
-	}
-	s.ctldClient = client
-}
-
 // SetPauseEnqueuer injects the background worker used to complete accepted pause operations.
 func (s *SandboxService) SetPauseEnqueuer(enqueuer SandboxPauseEnqueuer) {
 	s.pauseEnqueuer = enqueuer
-}
-
-// SetHotClaimReservationEnqueuer injects the controller that detaches completed
-// hot claims from their warm-pool ReplicaSet.
-func (s *SandboxService) SetHotClaimReservationEnqueuer(enqueuer HotClaimReservationEnqueuer) {
-	if s == nil {
-		return
-	}
-	s.hotClaimReservationEnqueuer = enqueuer
-}
-
-// SetHotClaimK8sClient injects the Kubernetes client whose rate budget is
-// reserved for latency-sensitive hot-claim operations.
-func (s *SandboxService) SetHotClaimK8sClient(client kubernetes.Interface) {
-	if s == nil || client == nil {
-		return
-	}
-	s.hotClaimK8sClient = client
-}
-
-// SetCredentialStore injects the sandbox credential binding store.
-func (s *SandboxService) SetCredentialStore(store egressauth.BindingStore) {
-	s.credentialStore = store
-}
-
-// SetWebhookStateVolumeClient injects the system volume client used for durable webhook state.
-func (s *SandboxService) SetWebhookStateVolumeClient(client SandboxSystemVolumeClient) {
-	s.webhookStateVolumes = client
-	if metadataClient, ok := client.(SandboxVolumeMetadataClient); ok {
-		s.volumeMetadata = metadataClient
-	}
-}
-
-// SetVolumeMetadataClient injects the metadata client used to validate user volume mounts.
-func (s *SandboxService) SetVolumeMetadataClient(client SandboxVolumeMetadataClient) {
-	s.volumeMetadata = client
-}
-
-// SetQuotaStore injects the team quota limit store. Nil disables quota checks.
-func (s *SandboxService) SetQuotaStore(store TeamQuotaLimitStore) {
-	s.quotaStore = store
-}
-
-// SetSandboxStore injects durable sandbox identity storage.
-func (s *SandboxService) SetSandboxStore(store SandboxStore) {
-	s.sandboxStore = store
-}
-
-// SetRootFSObjectDeleter injects the object-store deleter used to clean up
-// rootfs diffs that were uploaded but never committed into the DB rootfs head.
-func (s *SandboxService) SetRootFSObjectDeleter(deleter RootFSObjectDeleter) {
-	s.rootFSObjectDeleter = deleter
 }
 
 // SetTemplateImageBuildAvailable controls source capability preflight. It is

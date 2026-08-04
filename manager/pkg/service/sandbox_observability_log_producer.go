@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	managerobs "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxobservability"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability/ingest"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -20,7 +20,10 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
-const defaultSandboxObservabilityLogTailLines int64 = 500
+const (
+	defaultSandboxObservabilityLogTailLines = int64(500)
+	maxSandboxProcessLogScanBytes           = int(MaxSandboxLogLimitBytes) + process.DefaultContainerLogMaxLineBytes
+)
 
 type SandboxLogProducerConfig struct {
 	RegionID     string
@@ -31,7 +34,7 @@ type SandboxLogProducerConfig struct {
 type SandboxLogProducer struct {
 	k8sClient kubernetes.Interface
 	podLister corelisters.PodLister
-	worker    *ingest.LogWorker
+	worker    *managerobs.LogWorker
 	cfg       SandboxLogProducerConfig
 	logger    *zap.Logger
 	clock     TimeProvider
@@ -40,7 +43,7 @@ type SandboxLogProducer struct {
 	seen map[string]time.Time
 }
 
-func NewSandboxLogProducer(k8sClient kubernetes.Interface, podLister corelisters.PodLister, worker *ingest.LogWorker, cfg SandboxLogProducerConfig, logger *zap.Logger, clock TimeProvider) *SandboxLogProducer {
+func NewSandboxLogProducer(k8sClient kubernetes.Interface, podLister corelisters.PodLister, worker *managerobs.LogWorker, cfg SandboxLogProducerConfig, logger *zap.Logger, clock TimeProvider) *SandboxLogProducer {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 10 * time.Second
 	}
@@ -103,7 +106,7 @@ func (p *SandboxLogProducer) collectPod(ctx context.Context, pod *corev1.Pod) er
 	if pod == nil {
 		return nil
 	}
-	sandboxID := strings.TrimSpace(sandboxIDFromPod(pod))
+	sandboxID := strings.TrimSpace(sandboxPodID(pod))
 	teamID := strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
 	if sandboxID == "" || teamID == "" {
 		return nil
@@ -180,7 +183,7 @@ func sandboxObservabilityPodEligible(pod *corev1.Pod) bool {
 	if !controller.IsClaimedSandboxPod(pod) {
 		return false
 	}
-	if sandboxIDFromPod(pod) == "" {
+	if sandboxPodID(pod) == "" {
 		return false
 	}
 	return strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID]) != ""

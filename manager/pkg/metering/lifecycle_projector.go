@@ -11,8 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"

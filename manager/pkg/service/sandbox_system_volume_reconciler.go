@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -134,5 +135,5 @@ func (s *SandboxService) systemVolumeOwnerSandboxExists(ctx context.Context, san
 	if err != nil {
 		return false, err
 	}
-	return record != nil && record.DesiredState != SandboxDesiredStateDeleted && record.DeletedAt.IsZero(), nil
+	return record != nil && record.DesiredState != sandboxstore.SandboxDesiredStateDeleted && record.DeletedAt.IsZero(), nil
 }

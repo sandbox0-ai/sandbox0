@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -26,7 +27,7 @@ func (s *SandboxService) ResolveSandboxTemplateSource(ctx context.Context, sandb
 	}
 	record, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
 	if err != nil {
-		if errors.Is(err, ErrSandboxRecordNotFound) || apierrors.IsNotFound(err) {
+		if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) || apierrors.IsNotFound(err) {
 			return nil, template.ErrTemplateSourceNotFound
 		}
 		return nil, fmt.Errorf("%w: %v", template.ErrTemplateSourceUnavailable, err)

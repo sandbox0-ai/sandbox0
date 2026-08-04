@@ -244,107 +244,68 @@ func TestCleanupHardExpiredDurableSandboxesDeletesListedRecords(t *testing.T) {
 	assert.Equal(t, []string{"sandbox-paused"}, service.recordingSandboxTerminator.calls)
 }
 
-func TestCleanupExpiredForceDeletesStaleDeletingPod(t *testing.T) {
-	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "default",
-			Namespace: "tpl-default",
-		},
+func TestCleanupExpiredForceDeletesStaleDeletingPods(t *testing.T) {
+	tests := []struct {
+		name     string
+		podName  string
+		poolType string
+	}{
+		{name: "active", podName: "sandbox-1", poolType: PoolTypeActive},
+		{name: "idle", podName: "idle-1", poolType: PoolTypeIdle},
 	}
-	deletedAt := metav1.NewTime(now.Add(-30 * time.Minute))
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "sandbox-1",
-			Namespace:         "tpl-default",
-			UID:               types.UID("pod-uid-1"),
-			DeletionTimestamp: &deletedAt,
-			Labels: map[string]string{
-				LabelTemplateID: "default",
-				LabelPoolType:   PoolTypeActive,
-			},
-		},
-	}
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
-		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
-	})
-	require.NoError(t, indexer.Add(pod))
 
-	client := fake.NewSimpleClientset(pod)
-	recorder := record.NewFakeRecorder(1)
-	controller := NewCleanupController(
-		client,
-		corelisters.NewPodLister(indexer),
-		nil,
-		recorder,
-		staticCleanupClock{now: now},
-		nil,
-		nil,
-		zap.NewNop(),
-		time.Minute,
-	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
+			template := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "default",
+					Namespace: "tpl-default",
+				},
+			}
+			deletedAt := metav1.NewTime(now.Add(-30 * time.Minute))
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              tt.podName,
+					Namespace:         "tpl-default",
+					UID:               types.UID("pod-uid-1"),
+					DeletionTimestamp: &deletedAt,
+					Labels: map[string]string{
+						LabelTemplateID: "default",
+						LabelPoolType:   tt.poolType,
+					},
+				},
+			}
+			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+				cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+			})
+			require.NoError(t, indexer.Add(pod))
 
-	require.NoError(t, controller.cleanupExpired(context.Background(), template))
+			client := fake.NewSimpleClientset(pod)
+			recorder := record.NewFakeRecorder(1)
+			controller := NewCleanupController(
+				client,
+				corelisters.NewPodLister(indexer),
+				nil,
+				recorder,
+				staticCleanupClock{now: now},
+				nil,
+				nil,
+				zap.NewNop(),
+				time.Minute,
+			)
 
-	_, err := client.CoreV1().Pods("tpl-default").Get(context.Background(), "sandbox-1", metav1.GetOptions{})
-	require.True(t, apierrors.IsNotFound(err), "expected stale deleting pod to be force deleted, got %v", err)
-	select {
-	case event := <-recorder.Events:
-		assert.Contains(t, event, "StaleDeletingPodForceDeleted")
-	default:
-		t.Fatal("expected stale force-delete event")
-	}
-}
+			require.NoError(t, controller.cleanupExpired(context.Background(), template))
 
-func TestCleanupExpiredForceDeletesStaleDeletingIdlePod(t *testing.T) {
-	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "default",
-			Namespace: "tpl-default",
-		},
-	}
-	deletedAt := metav1.NewTime(now.Add(-30 * time.Minute))
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "idle-1",
-			Namespace:         "tpl-default",
-			UID:               types.UID("pod-uid-1"),
-			DeletionTimestamp: &deletedAt,
-			Labels: map[string]string{
-				LabelTemplateID: "default",
-				LabelPoolType:   PoolTypeIdle,
-			},
-		},
-	}
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
-		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
-	})
-	require.NoError(t, indexer.Add(pod))
-
-	client := fake.NewSimpleClientset(pod)
-	recorder := record.NewFakeRecorder(1)
-	controller := NewCleanupController(
-		client,
-		corelisters.NewPodLister(indexer),
-		nil,
-		recorder,
-		staticCleanupClock{now: now},
-		nil,
-		nil,
-		zap.NewNop(),
-		time.Minute,
-	)
-
-	require.NoError(t, controller.cleanupExpired(context.Background(), template))
-
-	_, err := client.CoreV1().Pods("tpl-default").Get(context.Background(), "idle-1", metav1.GetOptions{})
-	require.True(t, apierrors.IsNotFound(err), "expected stale deleting idle pod to be force deleted, got %v", err)
-	select {
-	case event := <-recorder.Events:
-		assert.Contains(t, event, "StaleDeletingPodForceDeleted")
-	default:
-		t.Fatal("expected stale force-delete event")
+			_, err := client.CoreV1().Pods("tpl-default").Get(context.Background(), tt.podName, metav1.GetOptions{})
+			require.True(t, apierrors.IsNotFound(err), "expected stale deleting pod to be force deleted, got %v", err)
+			select {
+			case event := <-recorder.Events:
+				assert.Contains(t, event, "StaleDeletingPodForceDeleted")
+			default:
+				t.Fatal("expected stale force-delete event")
+			}
+		})
 	}
 }
 

@@ -15,13 +15,13 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/pubsub"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 	httpserver "github.com/sandbox0-ai/sandbox0/scheduler/pkg/http"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/scheduler/pkg/metrics"
 	schedpubsub "github.com/sandbox0-ai/sandbox0/scheduler/pkg/pubsub"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/reconciler"
 	"go.uber.org/zap"
@@ -73,9 +73,9 @@ func main() {
 	}
 
 	// Initialize clock for cross-cluster time synchronization
-	clk, err := clock.New(ctx, &pgxPoolAdapter{pool: pool},
+	clk, err := clock.NewPGX(ctx, pool,
 		clock.WithSyncInterval(30*time.Second),
-		clock.WithLogger(&zapClockLogger{logger: logger}),
+		clock.WithZapLogger(logger),
 	)
 	if err != nil {
 		logger.Fatal("Failed to initialize clock", zap.Error(err))
@@ -133,7 +133,19 @@ func main() {
 	rec := reconciler.NewReconciler(templateStore, templateStore, repo, clusterGatewayClient, cfg.ReconcileInterval.Duration, clk, cfg.PodsPerNode, logger, schedulerMetrics)
 
 	// Create HTTP server
-	httpServer, err := httpserver.NewServer(cfg, repo, templateStore, templateStore, templateSourceResolver, authValidator, internalAuthGen, rec, logger, obsProvider, schedulerMetrics)
+	httpServer, err := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
+		Config:         cfg,
+		Clusters:       repo,
+		Templates:      templateStore,
+		Allocations:    templateStore,
+		SourceResolver: templateSourceResolver,
+		AuthValidator:  authValidator,
+		InternalAuth:   internalAuthGen,
+		Reconciler:     rec,
+		Logger:         logger,
+		Observability:  obsProvider,
+		Metrics:        schedulerMetrics,
+	})
 	if err != nil {
 		logger.Fatal("Failed to create scheduler HTTP server", zap.Error(err))
 	}
@@ -209,58 +221,4 @@ func initDatabase(ctx context.Context, cfg *config.SchedulerConfig, logger *zap.
 	)
 
 	return pool, nil
-}
-
-// pgxPoolAdapter adapts pgxpool.Pool to clock.DB interface
-type pgxPoolAdapter struct {
-	pool *pgxpool.Pool
-}
-
-type pgxRowAdapter struct {
-	row interface {
-		Scan(dest ...any) error
-	}
-}
-
-func (r *pgxRowAdapter) Scan(dest ...any) error {
-	return r.row.Scan(dest...)
-}
-
-func (a *pgxPoolAdapter) QueryRow(ctx context.Context, sql string, args ...any) clock.Row {
-	return &pgxRowAdapter{row: a.pool.QueryRow(ctx, sql, args...)}
-}
-
-// zapClockLogger adapts zap.Logger to clock.Logger interface
-type zapClockLogger struct {
-	logger *zap.Logger
-}
-
-func (z *zapClockLogger) Info(msg string, keysAndValues ...any) {
-	z.logger.Info(msg, toZapFields(keysAndValues)...)
-}
-
-func (z *zapClockLogger) Warn(msg string, keysAndValues ...any) {
-	z.logger.Warn(msg, toZapFields(keysAndValues)...)
-}
-
-func (z *zapClockLogger) Error(msg string, keysAndValues ...any) {
-	z.logger.Error(msg, toZapFields(keysAndValues)...)
-}
-
-// toZapFields converts key-value pairs to zap fields
-func toZapFields(keysAndValues []any) []zap.Field {
-	if len(keysAndValues)%2 != 0 {
-		return []zap.Field{zap.Any("args", keysAndValues)}
-	}
-
-	fields := make([]zap.Field, 0, len(keysAndValues)/2)
-	for i := 0; i < len(keysAndValues); i += 2 {
-		key, ok := keysAndValues[i].(string)
-		if !ok {
-			continue
-		}
-		fields = append(fields, zap.Any(key, keysAndValues[i+1]))
-	}
-
-	return fields
 }

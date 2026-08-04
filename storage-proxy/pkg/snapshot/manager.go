@@ -13,10 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -101,22 +101,21 @@ var (
 
 // Manager handles snapshot operations for SandboxVolumes
 type Manager struct {
-	mu                sync.RWMutex
-	locks             map[string]time.Time // volumeID -> lock acquired time
-	repo              repository
-	volMgr            volumeProvider
-	newArchiveSession archiveSessionFactory
-	coordinator       FlushCoordinator // Optional: for distributed coordination
-	config            *config.StorageProxyConfig
-	logger            *logrus.Logger
-	clusterID         string
-	podID             string
-	eventPublisher    eventPublisher
-	meteringRepo      meteringRecorder
-	quotaRepo         *quota.Repository
-	metrics           *obsmetrics.StorageProxyMetrics
-	volumeObserver    *volume.VolumeStorageObserver
-	requestObserver   objectstore.RequestObserver
+	mu              sync.RWMutex
+	locks           map[string]time.Time // volumeID -> lock acquired time
+	repo            repository
+	volMgr          volumeProvider
+	coordinator     FlushCoordinator // Optional: for distributed coordination
+	config          *config.StorageProxyConfig
+	logger          *logrus.Logger
+	clusterID       string
+	podID           string
+	eventPublisher  eventPublisher
+	meteringRepo    meteringRecorder
+	quotaRepo       *quota.Repository
+	metrics         *obsmetrics.StorageProxyMetrics
+	volumeObserver  *volume.VolumeStorageObserver
+	requestObserver objectstore.RequestObserver
 }
 
 // NewManager creates a new snapshot manager
@@ -402,50 +401,46 @@ func (m *Manager) CreateSnapshotSimple(ctx context.Context, req *CreateSnapshotR
 
 // ForkVolume creates a new volume using the s0fs snapshot engine state.
 func (m *Manager) ForkVolume(ctx context.Context, req *ForkVolumeRequest) (*db.SandboxVolume, error) {
-	startTime := time.Now()
-	metrics := m.metrics
-	m.logger.WithFields(logrus.Fields{
+	return m.createDerivedVolume(ctx, "fork", "Forking volume", logrus.Fields{
 		"source_volume_id": req.SourceVolumeID,
 		"team_id":          req.TeamID,
-	}).Info("Forking volume")
-
-	vol, err := m.forkS0FSVolume(ctx, req)
-	if err != nil {
-		if metrics != nil {
-			metrics.SnapshotOperationsTotal.WithLabelValues("fork", "failure").Inc()
-			metrics.SnapshotOperationDuration.WithLabelValues("fork").Observe(time.Since(startTime).Seconds())
-		}
-		return nil, err
-	}
-	if metrics != nil {
-		metrics.SnapshotOperationsTotal.WithLabelValues("fork", "success").Inc()
-		metrics.SnapshotOperationDuration.WithLabelValues("fork").Observe(time.Since(startTime).Seconds())
-	}
-
-	return vol, nil
+	}, func(ctx context.Context) (*db.SandboxVolume, error) {
+		return m.forkS0FSVolume(ctx, req)
+	})
 }
 
 // CreateVolumeFromSnapshot creates a new SandboxVolume initialized from a
 // snapshot's immutable state.
 func (m *Manager) CreateVolumeFromSnapshot(ctx context.Context, req *CreateVolumeFromSnapshotRequest) (*db.SandboxVolume, error) {
-	startTime := time.Now()
-	metrics := m.metrics
-	m.logger.WithFields(logrus.Fields{
+	return m.createDerivedVolume(ctx, "create_volume_from_snapshot", "Creating volume from snapshot", logrus.Fields{
 		"snapshot_id": req.SnapshotID,
 		"team_id":     req.TeamID,
-	}).Info("Creating volume from snapshot")
+	}, func(ctx context.Context) (*db.SandboxVolume, error) {
+		return m.createS0FSVolumeFromSnapshot(ctx, req)
+	})
+}
 
-	vol, err := m.createS0FSVolumeFromSnapshot(ctx, req)
+func (m *Manager) createDerivedVolume(
+	ctx context.Context,
+	operation, message string,
+	fields logrus.Fields,
+	create func(context.Context) (*db.SandboxVolume, error),
+) (*db.SandboxVolume, error) {
+	startTime := time.Now()
+	metrics := m.metrics
+	m.logger.WithFields(fields).Info(message)
+
+	vol, err := create(ctx)
 	if err != nil {
 		if metrics != nil {
-			metrics.SnapshotOperationsTotal.WithLabelValues("create_volume_from_snapshot", "failure").Inc()
-			metrics.SnapshotOperationDuration.WithLabelValues("create_volume_from_snapshot").Observe(time.Since(startTime).Seconds())
+			metrics.SnapshotOperationsTotal.WithLabelValues(operation, "failure").Inc()
+			metrics.SnapshotOperationDuration.WithLabelValues(operation).Observe(time.Since(startTime).Seconds())
 		}
 		return nil, err
 	}
 	if metrics != nil {
-		metrics.SnapshotOperationsTotal.WithLabelValues("create_volume_from_snapshot", "success").Inc()
-		metrics.SnapshotOperationDuration.WithLabelValues("create_volume_from_snapshot").Observe(time.Since(startTime).Seconds())
+		metrics.SnapshotOperationsTotal.WithLabelValues(operation, "success").Inc()
+		metrics.SnapshotOperationDuration.WithLabelValues(operation).Observe(time.Since(startTime).Seconds())
 	}
 	return vol, nil
 }

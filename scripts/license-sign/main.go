@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	"github.com/sandbox0-ai/sandbox0/pkg/license"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 )
 
@@ -34,7 +33,7 @@ func main() {
 
 	flag.StringVar(&privateKeyFile, "private-key-file", "", "Path to Ed25519 private key PEM file (required)")
 	flag.StringVar(&outFile, "out", "license.lic", "Output license file path")
-	flag.StringVar(&keyID, "kid", license.CurrentKeyID, "Signing key id embedded in license envelope")
+	flag.StringVar(&keyID, "kid", licensing.CurrentKeyID, "Signing key id embedded in license envelope")
 	flag.StringVar(&subject, "subject", defaultLicenseSubject, "License subject/customer identifier")
 	flag.StringVar(&version, "version", "v1", "License payload version")
 	flag.StringVar(&featuresCSV, "features", string(licensing.FeatureMultiCluster), "Comma-separated feature list (e.g. sso,multi_cluster,sandbox_audit)")
@@ -81,7 +80,7 @@ func main() {
 		fatalf("load private key: %v", err)
 	}
 
-	claims := license.Claims{
+	claims := licensing.Claims{
 		Version:   strings.TrimSpace(version),
 		Subject:   strings.TrimSpace(subject),
 		IssuedAt:  now.Unix(),
@@ -97,7 +96,7 @@ func main() {
 
 	signature := ed25519.Sign(privateKey, payload)
 
-	env := license.Envelope{
+	env := licensing.Envelope{
 		KeyID:     keyID,
 		Payload:   base64.RawURLEncoding.EncodeToString(payload),
 		Signature: base64.RawURLEncoding.EncodeToString(signature),

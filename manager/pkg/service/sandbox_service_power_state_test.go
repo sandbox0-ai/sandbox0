@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -55,7 +56,7 @@ func TestGetSandboxDoesNotWaitForFailedPodIP(t *testing.T) {
 	}
 
 	type result struct {
-		sandbox *Sandbox
+		sandbox *managerapi.Sandbox
 		err     error
 	}
 	resultCh := make(chan result, 1)
@@ -76,7 +77,7 @@ func TestGetSandboxDoesNotWaitForFailedPodIP(t *testing.T) {
 	if got.sandbox == nil {
 		t.Fatal("GetSandbox() returned nil sandbox")
 	}
-	assert.Equal(t, SandboxStatusFailed, got.sandbox.Status)
+	assert.Equal(t, managerapi.SandboxStatusFailed, got.sandbox.Status)
 	assert.Empty(t, got.sandbox.InternalAddr)
 }
 

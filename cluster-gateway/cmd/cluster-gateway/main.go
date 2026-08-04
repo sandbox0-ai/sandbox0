@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/meteringbackend"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -67,7 +68,7 @@ func main() {
 	if sandboxObservabilityDB != nil {
 		defer sandboxObservabilityDB.Close()
 	}
-	meteringDB, meteringRepo, err := initMetering(ctx, cfg, logger)
+	meteringDB, meteringRepo, err := meteringbackend.Open(ctx, &cfg.Metering, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize metering backend", zap.Error(err))
 	}

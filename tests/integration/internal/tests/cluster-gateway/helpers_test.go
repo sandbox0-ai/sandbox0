@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -30,10 +30,19 @@ import (
 )
 
 type gatewayTestEnv struct {
-	server       *httptest.Server
+	server       *gatewayTestServer
 	edgeGen      *internalauth.Generator
 	schedulerGen *internalauth.Generator
 	publicKey    internalauth.PublicKeyType
+}
+
+type gatewayTestServer struct {
+	URL    string
+	client *http.Client
+}
+
+func (s *gatewayTestServer) Client() *http.Client {
+	return s.client
 }
 
 type gatewayKeyPair struct {
@@ -69,8 +78,7 @@ func newGatewayTestEnv(t *testing.T, managerURL, managerStorageURL string, sched
 		t.Fatalf("create cluster-gateway server: %v", err)
 	}
 
-	httpServer := httptest.NewServer(server.Handler())
-	t.Cleanup(httpServer.Close)
+	httpServer := startGatewayTestServer(t, server, cfg)
 
 	return &gatewayTestEnv{
 		server:       httpServer,
@@ -113,8 +121,7 @@ func newGatewayPublicTestEnv(t *testing.T, managerURL, managerStorageURL string,
 		t.Fatalf("create cluster-gateway server: %v", err)
 	}
 
-	httpServer := httptest.NewServer(server.Handler())
-	t.Cleanup(httpServer.Close)
+	httpServer := startGatewayTestServer(t, server, cfg)
 
 	return &gatewayTestEnv{
 		server:       httpServer,
@@ -122,6 +129,65 @@ func newGatewayPublicTestEnv(t *testing.T, managerURL, managerStorageURL string,
 		schedulerGen: schedulerGen,
 		publicKey:    keys.publicKey,
 	}
+}
+
+func startGatewayTestServer(t *testing.T, server *gatewayhttp.Server, cfg *config.ClusterGatewayConfig) *gatewayTestServer {
+	t.Helper()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate cluster-gateway test port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release cluster-gateway test port: %v", err)
+	}
+	cfg.HTTPPort = port
+	if cfg.ShutdownTimeout.Duration <= 0 {
+		cfg.ShutdownTimeout = metav1.Duration{Duration: time.Second}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Start(ctx)
+	}()
+
+	httpServer := &gatewayTestServer{
+		URL:    fmt.Sprintf("http://127.0.0.1:%d", port),
+		client: &http.Client{Timeout: time.Second},
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := httpServer.client.Get(httpServer.URL + "/healthz")
+		if err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		select {
+		case startErr := <-errCh:
+			cancel()
+			t.Fatalf("start cluster-gateway test server: %v", startErr)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("cluster-gateway test server did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("stop cluster-gateway test server: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Error("cluster-gateway test server did not stop")
+		}
+	})
+	return httpServer
 }
 
 func requireTestDatabaseURL(t *testing.T) string {

@@ -24,9 +24,13 @@ type nopWriteCloser struct {
 
 func (n nopWriteCloser) Close() error { return nil }
 
+func newTestAuditLogger(writer io.WriteCloser) *auditLogger {
+	return newAuditLoggerWithSink(newJSONLAuditSink(writer), "netd-local")
+}
+
 func TestAuditLoggerRecord(t *testing.T) {
 	var buf bytes.Buffer
-	logger := newAuditLoggerFromWriter(nopWriteCloser{Writer: &buf})
+	logger := newTestAuditLogger(nopWriteCloser{Writer: &buf})
 	logger.now = func() time.Time {
 		return time.Date(2026, 3, 16, 0, 0, 0, 0, time.UTC)
 	}
@@ -82,7 +86,7 @@ func TestAuditLoggerRecord(t *testing.T) {
 
 func TestAuditLoggerRecordIncludesEgressAuthFields(t *testing.T) {
 	var buf bytes.Buffer
-	logger := newAuditLoggerFromWriter(nopWriteCloser{Writer: &buf})
+	logger := newTestAuditLogger(nopWriteCloser{Writer: &buf})
 	req := &adapterRequest{
 		Compiled: &policy.CompiledPolicy{SandboxID: "sb-1", TeamID: "team-1"},
 		Audit:    newFlowAudit("tcp-2", time.Now().UTC()),

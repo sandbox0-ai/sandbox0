@@ -51,7 +51,7 @@ func TestProxySSHSessionReoriginatesWithPlatformCredential(t *testing.T) {
 			DestPort: upstreamPort,
 			EgressAuth: &egressAuthContext{
 				Rule: &policy.CompiledEgressAuthRule{AuthRef: "git-ssh"},
-				Resolved: egressauth.NewSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{
+				Resolved: testSSHProxyResolveResponse("git-ssh", &egressauth.SSHProxyDirective{
 					SandboxPublicKeys: []string{fakeAuthorizedKey},
 					UpstreamUsername:  "git",
 					PrivateKeyPEM:     upstreamPrivateKeyPEM,

@@ -69,9 +69,9 @@ func TestMarshalEncryptedS3BackendConfigEncryptsCredentials(t *testing.T) {
 	if bytes.Contains(raw, []byte("user-ak")) || bytes.Contains(raw, []byte("user-sk")) || bytes.Contains(raw, []byte("session-token")) {
 		t.Fatalf("encrypted backend config leaked credentials: %s", raw)
 	}
-	stored, err := DecodeS3BackendConfig(raw)
+	stored, err := decodeS3BackendConfig(raw, true)
 	if err != nil {
-		t.Fatalf("DecodeS3BackendConfig() error = %v", err)
+		t.Fatalf("decodeS3BackendConfig() error = %v", err)
 	}
 	if stored.AccessKey != "" || stored.SecretKey != "" || stored.SessionToken != "" {
 		t.Fatalf("stored config contains plaintext credentials: %+v", stored)

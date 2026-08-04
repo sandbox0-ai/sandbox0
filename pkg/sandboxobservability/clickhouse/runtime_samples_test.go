@@ -13,6 +13,95 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
+func buildRuntimeSeriesResult(query sandboxobservability.RuntimeSeriesQuery, selected []sandboxobservability.RuntimeMetricDescriptor, samples []sandboxobservability.RuntimeSample, truncated bool) *sandboxobservability.RuntimeSeriesResult {
+	inputs := initializeRuntimeSeriesInputs(selected)
+	selectedNames := make(map[sandboxobservability.RuntimeMetricName]struct{}, len(selected))
+	for _, descriptor := range selected {
+		selectedNames[descriptor.Name] = struct{}{}
+	}
+	gaps := []sandboxobservability.RuntimeSeriesGap{}
+	missingGapRanges := map[string][]sandboxobservability.RuntimeSeriesGap{}
+	var newest *time.Time
+	var oldest *time.Time
+	for _, sample := range samples {
+		appendRuntimeSampleValues(inputs, selectedNames, sample)
+		observed := sample.ObservedAt.UTC()
+		if oldest == nil || observed.Before(*oldest) {
+			oldest = &observed
+		}
+		if !sample.ObservedAt.Before(query.StartTime) && !sample.ObservedAt.After(query.EndTime) {
+			if newest == nil || observed.After(*newest) {
+				newest = &observed
+			}
+			appendRuntimeMissingGaps(missingGapRanges, selectedNames, sample, query.StartTime, query.EndTime, query.Step)
+		}
+	}
+	for _, ranges := range missingGapRanges {
+		gaps = append(gaps, ranges...)
+	}
+	state := newRuntimeResultState(query)
+	state.gaps = gaps
+	state.newest = newest
+	state.rawTruncated = truncated
+	for _, descriptor := range selected {
+		state.addLoad(descriptor, runtimeMetricLoad{
+			Inputs:    inputs,
+			Oldest:    oldest,
+			Truncated: truncated,
+		})
+	}
+	return state.result()
+}
+
+func appendRuntimeSampleValues(inputs map[runtimeSeriesKey]*runtimeSeriesInput, selected map[sandboxobservability.RuntimeMetricName]struct{}, sample sandboxobservability.RuntimeSample) {
+	appendValue := func(metric sandboxobservability.RuntimeMetricName, direction sandboxobservability.RuntimeMetricDirection, value *float64) {
+		if value == nil {
+			return
+		}
+		if _, ok := selected[metric]; !ok {
+			return
+		}
+		key := runtimeSeriesKey{Metric: metric, Direction: direction}
+		if input := inputs[key]; input != nil {
+			input.Points = append(input.Points, rawRuntimePoint{Time: sample.ObservedAt, Value: *value, RuntimeGeneration: sample.RuntimeGeneration, SeriesEpoch: sample.SeriesEpoch})
+		}
+	}
+	appendUint := func(metric sandboxobservability.RuntimeMetricName, direction sandboxobservability.RuntimeMetricDirection, value *uint64) {
+		if value == nil {
+			return
+		}
+		converted := float64(*value)
+		appendValue(metric, direction, &converted)
+	}
+
+	if sample.CPU != nil {
+		appendValue(sandboxobservability.RuntimeMetricCPUUtilization, "", sample.CPU.Utilization)
+		appendValue(sandboxobservability.RuntimeMetricCPUUsage, "", sample.CPU.Usage)
+		appendValue(sandboxobservability.RuntimeMetricCPUTime, "", sample.CPU.TimeSeconds)
+		appendValue(sandboxobservability.RuntimeMetricCPULimit, "", sample.CPU.LimitCores)
+	}
+	if sample.Memory != nil {
+		appendUint(sandboxobservability.RuntimeMetricMemoryUsage, "", sample.Memory.UsageBytes)
+		appendUint(sandboxobservability.RuntimeMetricMemoryWorkingSet, "", sample.Memory.WorkingSetBytes)
+		appendUint(sandboxobservability.RuntimeMetricMemoryAvailable, "", sample.Memory.AvailableBytes)
+		appendUint(sandboxobservability.RuntimeMetricMemoryLimit, "", sample.Memory.LimitBytes)
+		appendValue(sandboxobservability.RuntimeMetricMemoryUtilization, "", sample.Memory.Utilization)
+	}
+	if sample.Network != nil {
+		appendUint(sandboxobservability.RuntimeMetricNetworkIO, sandboxobservability.RuntimeMetricDirectionReceive, sample.Network.ReceiveBytes)
+		appendUint(sandboxobservability.RuntimeMetricNetworkIO, sandboxobservability.RuntimeMetricDirectionTransmit, sample.Network.TransmitBytes)
+		appendUint(sandboxobservability.RuntimeMetricNetworkErrors, sandboxobservability.RuntimeMetricDirectionReceive, sample.Network.ReceiveErrors)
+		appendUint(sandboxobservability.RuntimeMetricNetworkErrors, sandboxobservability.RuntimeMetricDirectionTransmit, sample.Network.TransmitErrors)
+	}
+	if sample.Process != nil {
+		appendUint(sandboxobservability.RuntimeMetricProcessCount, "", sample.Process.Count)
+	}
+	if sample.RootFSWritable != nil {
+		appendUint(sandboxobservability.RuntimeMetricRootFSWritableUsage, "", sample.RootFSWritable.UsageBytes)
+		appendUint(sandboxobservability.RuntimeMetricRootFSWritableInodes, "", sample.RootFSWritable.Inodes)
+	}
+}
+
 func TestNormalizeRuntimeSeriesQueryDefaultsAndUpsizesStep(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.FixedZone("offset", 8*60*60))
 	query, selected, err := normalizeRuntimeSeriesQuery(sandboxobservability.RuntimeSeriesQuery{

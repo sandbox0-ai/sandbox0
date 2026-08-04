@@ -295,13 +295,6 @@ func (s *multiAuditSink) Close() error {
 	return firstErr
 }
 
-func newAuditLoggerFromWriter(writer io.WriteCloser) *auditLogger {
-	if writer == nil {
-		return nil
-	}
-	return newAuditLoggerWithSink(newJSONLAuditSink(writer), "netd-local")
-}
-
 func newAuditLoggerWithSink(sink auditSink, producerBase string) *auditLogger {
 	if sink == nil {
 		return nil

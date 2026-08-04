@@ -13,22 +13,23 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 )
 
 const (
-	AnnotationSandboxID          = "sandbox0.ai/sandbox-id"
-	AnnotationTeamID             = "sandbox0.ai/team-id"
-	AnnotationRuntimeGeneration  = "sandbox0.ai/runtime-generation"
-	AnnotationConfig             = "sandbox0.ai/config"
-	AnnotationAppDomain          = "sandbox0.ai/app-domain"
-	AnnotationResetCopiedState   = "sandbox0.ai/runtime-reset-copied-state"
-	AnnotationAssignmentRevision = "sandbox0.ai/runtime-assignment-revision"
-	AnnotationAssignmentReady    = "sandbox0.ai/runtime-assignment-ready"
-	AnnotationObservedRevision   = "sandbox0.ai/runtime-observed-revision"
-	AnnotationObservedGeneration = "sandbox0.ai/runtime-observed-generation"
-	AnnotationObservedState      = "sandbox0.ai/runtime-observed-state"
+	AnnotationSandboxID          = sandboxpod.AnnotationSandboxID
+	AnnotationTeamID             = sandboxpod.AnnotationTeamID
+	AnnotationRuntimeGeneration  = sandboxpod.AnnotationRuntimeGeneration
+	AnnotationConfig             = sandboxpod.AnnotationConfig
+	AnnotationAppDomain          = sandboxpod.AnnotationAppDomain
+	AnnotationResetCopiedState   = sandboxpod.AnnotationResetCopiedState
+	AnnotationAssignmentRevision = sandboxpod.AnnotationAssignmentRevision
+	AnnotationAssignmentReady    = sandboxpod.AnnotationAssignmentReady
+	AnnotationObservedRevision   = sandboxpod.AnnotationObservedRevision
+	AnnotationObservedGeneration = sandboxpod.AnnotationObservedGeneration
+	AnnotationObservedState      = sandboxpod.AnnotationObservedState
 )
 
 const (

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
@@ -88,11 +88,6 @@ type s3Session struct {
 	stateMu      sync.Mutex
 	stateDirty   bool
 	stateErr     error
-}
-
-func newS3Session(volumeID string, store objectstore.Store, access volume.AccessMode, logger *logrus.Logger) *s3Session {
-	session, _ := newS3SessionWithState(volumeID, store, access, logger, "")
-	return session
 }
 
 func newS3SessionWithState(volumeID string, store objectstore.Store, access volume.AccessMode, logger *logrus.Logger, statePath string) (*s3Session, error) {

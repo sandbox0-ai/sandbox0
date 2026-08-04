@@ -18,6 +18,15 @@ import (
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
 
+func newTestS3Session(t *testing.T, volumeID string, store objectstore.Store, access volume.AccessMode) *s3Session {
+	t.Helper()
+	session, err := newS3SessionWithState(volumeID, store, access, nil, "")
+	if err != nil {
+		t.Fatalf("newS3SessionWithState() error = %v", err)
+	}
+	return session
+}
+
 func TestS3SessionRestoresInodesAndWritableHandle(t *testing.T) {
 	ctx := context.Background()
 	store := objectstore.NewMemoryStore(t.Name())
@@ -117,7 +126,7 @@ func TestS3SessionProjectsObjectsAsDirectoriesAndFiles(t *testing.T) {
 	putS3TestObject(t, store, "docs/readme.txt", "hello from s3")
 	putS3TestObject(t, store, "blue", "file-shadowed-by-directory")
 	putS3TestObject(t, store, "blue/nested.txt", "nested")
-	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
+	session := newTestS3Session(t, "vol-s3", store, volume.AccessModeRWO)
 
 	docs, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "docs"})
 	if err != nil {
@@ -163,7 +172,7 @@ func TestS3SessionReadDirShadowsFileWhenBackendOmitsCommonPrefix(t *testing.T) {
 	putS3TestObject(t, base, "blue", "file-shadowed-by-directory")
 	putS3TestObject(t, base, "blue/image.jpg", "nested")
 	store := commonPrefixBlindStore{Store: base}
-	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
+	session := newTestS3Session(t, "vol-s3", store, volume.AccessModeRWO)
 
 	entriesResp, err := session.ReadDir(ctx, &pb.ReadDirRequest{Inode: s3RootInode, Plus: true})
 	if err != nil {
@@ -187,7 +196,7 @@ func TestS3SessionReadDirShadowsFileWhenBackendOmitsCommonPrefix(t *testing.T) {
 func TestS3SessionSeesExternalObjectsAndWritesBackNewFiles(t *testing.T) {
 	ctx := context.Background()
 	store := objectstore.NewMemoryStore(t.Name())
-	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
+	session := newTestS3Session(t, "vol-s3", store, volume.AccessModeRWO)
 
 	putS3TestObject(t, store, "external/created-before-lookup.txt", "external")
 	externalDir, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "external"})
@@ -641,7 +650,7 @@ func TestS3SessionMkdirUsesMountpointLocalDirectorySemantics(t *testing.T) {
 	store := objectstore.NewMemoryStore(t.Name())
 	putS3TestObject(t, store, "marker/", "")
 	putS3TestObject(t, store, "implicit/file.txt", "payload")
-	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
+	session := newTestS3Session(t, "vol-s3", store, volume.AccessModeRWO)
 
 	local, err := session.Mkdir(ctx, &pb.MkdirRequest{Parent: s3RootInode, Name: "local"})
 	if err != nil {
@@ -766,7 +775,7 @@ func TestS3SessionHidesObjectKeysWithEmptyPathSegments(t *testing.T) {
 	putS3TestObject(t, store, "invalid//hidden.txt", "hidden")
 	putS3TestObject(t, store, "dots/./hidden.txt", "hidden")
 	putS3TestObject(t, store, "parents/../hidden.txt", "hidden")
-	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
+	session := newTestS3Session(t, "vol-s3", store, volume.AccessModeRWO)
 
 	for _, name := range []string{"invalid", "dots", "parents"} {
 		dir, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: name})
@@ -791,7 +800,7 @@ func TestS3SessionDirectoryLookupFallsBackToListWhenMarkerHeadFails(t *testing.T
 	base := objectstore.NewMemoryStore(t.Name())
 	putS3TestObject(t, base, "external/file.txt", "payload")
 	store := headErrorForDirectoryMarkersStore{Store: base}
-	session := newS3Session("vol-s3", store, volume.AccessModeRWO, nil)
+	session := newTestS3Session(t, "vol-s3", store, volume.AccessModeRWO)
 
 	externalDir, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s3RootInode, Name: "external"})
 	if err != nil {
@@ -805,7 +814,7 @@ func TestS3SessionDirectoryLookupFallsBackToListWhenMarkerHeadFails(t *testing.T
 func TestS3SessionReadOnlyAccessRejectsWrites(t *testing.T) {
 	ctx := context.Background()
 	store := objectstore.NewMemoryStore(t.Name())
-	session := newS3Session("vol-s3", store, volume.AccessModeROX, nil)
+	session := newTestS3Session(t, "vol-s3", store, volume.AccessModeROX)
 
 	_, err := session.Create(ctx, &pb.CreateRequest{Parent: s3RootInode, Name: "blocked.txt"})
 	if !errors.Is(err, syscall.EROFS) {

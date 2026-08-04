@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -20,7 +21,7 @@ import (
 )
 
 func TestReconcileSandboxRuntimeCreatesDurableLostRecoveryAfterStrongAbsence(t *testing.T) {
-	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
 	enqueuer := &recordingPauseEnqueuer{}
 	svc := &SandboxService{
 		k8sClient:     fake.NewSimpleClientset(),
@@ -33,20 +34,20 @@ func TestReconcileSandboxRuntimeCreatesDurableLostRecoveryAfterStrongAbsence(t *
 	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
 	txn := activeLifecycleTxnForTest(store, "sandbox-1")
 	require.NotNil(t, txn)
-	assert.Equal(t, SandboxLifecycleKindPause, txn.Kind)
-	assert.Equal(t, SandboxLifecycleSourceLost, txn.Source)
+	assert.Equal(t, sandboxstore.SandboxLifecycleKindPause, txn.Kind)
+	assert.Equal(t, sandboxstore.SandboxLifecycleSourceLost, txn.Source)
 	assert.Equal(t, int64(3), txn.FromGeneration)
 	assert.Equal(t, "default", txn.FromPodNamespace)
 	assert.Equal(t, "pod-1", txn.FromPodName)
 	assert.Equal(t, []string{"sandbox-1"}, enqueuer.recoveryCalls)
-	assert.Equal(t, SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 
 	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
 	assert.Len(t, store.lifecycleTxns, 1, "duplicate reconcile must reuse the active recovery transaction")
 }
 
 func TestReconcileSandboxRuntimeDoesNotTreatKubernetesFailureAsAbsence(t *testing.T) {
-	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
 	client := fake.NewSimpleClientset()
 	client.PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("apiserver unavailable")
@@ -61,12 +62,12 @@ func TestReconcileSandboxRuntimeDoesNotTreatKubernetesFailureAsAbsence(t *testin
 	err := svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1")
 	require.ErrorContains(t, err, "apiserver unavailable")
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
-	assert.Equal(t, SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 }
 
 func TestReconcileSandboxRuntimeRepairsSameGenerationProjectionFromKubernetes(t *testing.T) {
 	pod := runtimeRecoveryPod("pod-new", "sandbox-1", 3)
-	store := runtimeRecoveryStore("sandbox-1", "pod-old", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-old", 3, sandboxstore.SandboxDesiredStateActive)
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(pod),
 		sandboxStore: store,
@@ -84,7 +85,7 @@ func TestReconcileSandboxRuntimeRepairsSameGenerationProjectionFromKubernetes(t 
 
 func TestReconcileSandboxRuntimeRejectsUnownedNewerGeneration(t *testing.T) {
 	pod := runtimeRecoveryPod("pod-new", "sandbox-1", 4)
-	store := runtimeRecoveryStore("sandbox-1", "pod-old", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-old", 3, sandboxstore.SandboxDesiredStateActive)
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(pod),
 		sandboxStore: store,
@@ -101,7 +102,7 @@ func TestReconcileSandboxRuntimeRejectsUnownedNewerGeneration(t *testing.T) {
 func TestReconcileSandboxRuntimeRejectsAmbiguousSameGenerationPods(t *testing.T) {
 	first := runtimeRecoveryPod("pod-a", "sandbox-1", 3)
 	second := runtimeRecoveryPod("pod-b", "sandbox-1", 3)
-	store := runtimeRecoveryStore("sandbox-1", "pod-old", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-old", 3, sandboxstore.SandboxDesiredStateActive)
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(first, second),
 		sandboxStore: store,
@@ -117,7 +118,7 @@ func TestReconcileSandboxRuntimeRejectsAmbiguousSameGenerationPods(t *testing.T)
 
 func TestReconcileSandboxRuntimeDeletesOlderRuntimeBeforeRecovery(t *testing.T) {
 	stale := runtimeRecoveryPod("pod-stale", "sandbox-1", 2)
-	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
 	enqueuer := &recordingPauseEnqueuer{}
 	client := fake.NewSimpleClientset(stale)
 	svc := &SandboxService{
@@ -132,20 +133,20 @@ func TestReconcileSandboxRuntimeDeletesOlderRuntimeBeforeRecovery(t *testing.T) 
 	assert.True(t, hasPodAction(client.Actions(), "delete", "pod-stale"))
 	txn := activeLifecycleTxnForTest(store, "sandbox-1")
 	require.NotNil(t, txn)
-	assert.Equal(t, SandboxLifecycleSourceLost, txn.Source)
+	assert.Equal(t, sandboxstore.SandboxLifecycleSourceLost, txn.Source)
 	assert.Equal(t, []string{"sandbox-1"}, enqueuer.recoveryCalls)
 }
 
 func TestReconcileLostRuntimeRecoveryRetriesOlderRuntimeDeletion(t *testing.T) {
 	stale := runtimeRecoveryPod("pod-stale", "sandbox-1", 2)
-	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, SandboxDesiredStateActive)
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-lost": {
 			ID:               "txn-lost",
 			SandboxID:        "sandbox-1",
-			Kind:             SandboxLifecycleKindPause,
-			Phase:            SandboxLifecyclePhasePreparing,
-			Source:           SandboxLifecycleSourceLost,
+			Kind:             sandboxstore.SandboxLifecycleKindPause,
+			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:           sandboxstore.SandboxLifecycleSourceLost,
 			FromGeneration:   3,
 			FromPodNamespace: "default",
 			FromPodName:      "pod-missing",
@@ -181,14 +182,14 @@ func TestReconcileLostRuntimeRecoveryRetriesOlderRuntimeDeletion(t *testing.T) {
 
 func TestReconcileLostRuntimeRecoveryRejectsUnexpectedSameGenerationPod(t *testing.T) {
 	unexpected := runtimeRecoveryPod("pod-unexpected", "sandbox-1", 3)
-	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, SandboxDesiredStateActive)
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-lost": {
 			ID:               "txn-lost",
 			SandboxID:        "sandbox-1",
-			Kind:             SandboxLifecycleKindPause,
-			Phase:            SandboxLifecyclePhasePreparing,
-			Source:           SandboxLifecycleSourceLost,
+			Kind:             sandboxstore.SandboxLifecycleKindPause,
+			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:           sandboxstore.SandboxLifecycleSourceLost,
 			FromGeneration:   3,
 			FromPodNamespace: "default",
 			FromPodName:      "pod-missing",
@@ -212,7 +213,7 @@ func TestReconcileLostRuntimeRecoveryRejectsUnexpectedSameGenerationPod(t *testi
 func TestReconcileSandboxRuntimeDoesNotAdoptUnclaimedPod(t *testing.T) {
 	unclaimed := runtimeRecoveryPod("pod-idle", "sandbox-1", 3)
 	unclaimed.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
-	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
 	enqueuer := &recordingPauseEnqueuer{}
 	svc := &SandboxService{
 		k8sClient:     fake.NewSimpleClientset(unclaimed),
@@ -226,12 +227,12 @@ func TestReconcileSandboxRuntimeDoesNotAdoptUnclaimedPod(t *testing.T) {
 	assert.Equal(t, "pod-missing", store.records["sandbox-1"].CurrentPodName)
 	txn := activeLifecycleTxnForTest(store, "sandbox-1")
 	require.NotNil(t, txn)
-	assert.Equal(t, SandboxLifecycleSourceLost, txn.Source)
+	assert.Equal(t, sandboxstore.SandboxLifecycleSourceLost, txn.Source)
 	assert.Equal(t, []string{"sandbox-1"}, enqueuer.recoveryCalls)
 }
 
 func TestReconcileSandboxRuntimeIgnoresAnotherCluster(t *testing.T) {
-	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
 	store.records["sandbox-1"].ClusterID = "cluster-b"
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(),
@@ -246,7 +247,7 @@ func TestReconcileSandboxRuntimeIgnoresAnotherCluster(t *testing.T) {
 
 func TestReconcileSandboxRuntimeHardExpiryDeletesInsteadOfRecovering(t *testing.T) {
 	now := time.Date(2026, time.August, 3, 8, 0, 0, 0, time.UTC)
-	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
 	store.records["sandbox-1"].HardExpiresAt = now.Add(-time.Second)
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(),
@@ -257,13 +258,13 @@ func TestReconcileSandboxRuntimeHardExpiryDeletesInsteadOfRecovering(t *testing.
 	}
 
 	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
-	assert.Equal(t, SandboxDesiredStateDeleted, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateDeleted, store.records["sandbox-1"].DesiredState)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 }
 
 func TestReconcilePausedSandboxDeletesStalePodWithoutRecovery(t *testing.T) {
 	pod := runtimeRecoveryPod("pod-1", "sandbox-1", 3)
-	store := runtimeRecoveryStore("sandbox-1", "", 3, SandboxDesiredStatePaused)
+	store := runtimeRecoveryStore("sandbox-1", "", 3, sandboxstore.SandboxDesiredStatePaused)
 	client := fake.NewSimpleClientset(pod)
 	svc := &SandboxService{
 		k8sClient:    client,
@@ -273,20 +274,20 @@ func TestReconcilePausedSandboxDeletesStalePodWithoutRecovery(t *testing.T) {
 	}
 
 	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
-	assert.Equal(t, SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 	assert.True(t, hasPodAction(client.Actions(), "delete", "pod-1"))
 }
 
 func TestReconcileSandboxRuntimeDoesNotRaceFreshResumeTransaction(t *testing.T) {
 	now := time.Date(2026, time.August, 3, 8, 0, 0, 0, time.UTC)
-	store := runtimeRecoveryStore("sandbox-1", "", 3, SandboxDesiredStatePaused)
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store := runtimeRecoveryStore("sandbox-1", "", 3, sandboxstore.SandboxDesiredStatePaused)
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-resume": {
 			ID:             "txn-resume",
 			SandboxID:      "sandbox-1",
-			Kind:           SandboxLifecycleKindResume,
-			Phase:          SandboxLifecyclePhasePreparing,
+			Kind:           sandboxstore.SandboxLifecycleKindResume,
+			Phase:          sandboxstore.SandboxLifecyclePhasePreparing,
 			FromGeneration: 3,
 			ToGeneration:   4,
 			UpdatedAt:      now,
@@ -304,21 +305,21 @@ func TestReconcileSandboxRuntimeDoesNotRaceFreshResumeTransaction(t *testing.T) 
 	txn := activeLifecycleTxnForTest(store, "sandbox-1")
 	require.NotNil(t, txn)
 	assert.Equal(t, "txn-resume", txn.ID)
-	assert.Equal(t, SandboxLifecyclePhasePreparing, txn.Phase)
+	assert.Equal(t, sandboxstore.SandboxLifecyclePhasePreparing, txn.Phase)
 }
 
 func TestReconcileSandboxRuntimeAbortsStaleResumeWithMissingTarget(t *testing.T) {
 	now := time.Date(2026, time.August, 3, 8, 0, 0, 0, time.UTC)
-	store := runtimeRecoveryStore("sandbox-1", "", 3, SandboxDesiredStatePaused)
+	store := runtimeRecoveryStore("sandbox-1", "", 3, sandboxstore.SandboxDesiredStatePaused)
 	store.records["sandbox-1"].TemplateID = "default"
 	store.records["sandbox-1"].TemplateName = "default"
 	store.records["sandbox-1"].TemplateNamespace = "tpl-default"
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-resume": {
 			ID:             "txn-resume",
 			SandboxID:      "sandbox-1",
-			Kind:           SandboxLifecycleKindResume,
-			Phase:          SandboxLifecyclePhasePreparing,
+			Kind:           sandboxstore.SandboxLifecycleKindResume,
+			Phase:          sandboxstore.SandboxLifecyclePhasePreparing,
 			FromGeneration: 3,
 			ToGeneration:   4,
 			UpdatedAt:      now.Add(-3 * time.Minute),
@@ -335,19 +336,19 @@ func TestReconcileSandboxRuntimeAbortsStaleResumeWithMissingTarget(t *testing.T)
 
 	err := svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1")
 	require.Error(t, err, "replacement creation is expected to fail in the unit fixture")
-	assert.Equal(t, SandboxLifecyclePhaseAborted, store.lifecycleTxns["txn-resume"].Phase)
+	assert.Equal(t, sandboxstore.SandboxLifecyclePhaseAborted, store.lifecycleTxns["txn-resume"].Phase)
 	assert.NotEqual(t, "txn-resume", activeLifecycleTxnID(store, "sandbox-1"))
 }
 
 func TestReconcileSandboxRuntimeWaitsForFreshSourceCheckpointTransaction(t *testing.T) {
 	now := time.Date(2026, time.August, 3, 8, 0, 0, 0, time.UTC)
-	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, SandboxDesiredStateActive)
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-snapshot": {
 			ID:               "txn-snapshot",
 			SandboxID:        "sandbox-1",
-			Kind:             SandboxLifecycleKindSnapshot,
-			Phase:            SandboxLifecyclePhasePublishing,
+			Kind:             sandboxstore.SandboxLifecycleKindSnapshot,
+			Phase:            sandboxstore.SandboxLifecyclePhasePublishing,
 			FromGeneration:   3,
 			FromPodNamespace: "default",
 			FromPodName:      "pod-missing",
@@ -373,13 +374,13 @@ func TestReconcileSandboxRuntimeWaitsForFreshSourceCheckpointTransaction(t *test
 
 func TestReconcileSandboxRuntimeRecoversAfterStaleSourceCheckpointTransaction(t *testing.T) {
 	now := time.Date(2026, time.August, 3, 8, 0, 0, 0, time.UTC)
-	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, SandboxDesiredStateActive)
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateActive)
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-fork": {
 			ID:               "txn-fork",
 			SandboxID:        "sandbox-1",
-			Kind:             SandboxLifecycleKindFork,
-			Phase:            SandboxLifecyclePhasePublishing,
+			Kind:             sandboxstore.SandboxLifecycleKindFork,
+			Phase:            sandboxstore.SandboxLifecyclePhasePublishing,
 			FromGeneration:   3,
 			FromPodNamespace: "default",
 			FromPodName:      "pod-missing",
@@ -397,22 +398,22 @@ func TestReconcileSandboxRuntimeRecoversAfterStaleSourceCheckpointTransaction(t 
 	}
 
 	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
-	assert.Equal(t, SandboxLifecyclePhaseAborted, store.lifecycleTxns["txn-fork"].Phase)
+	assert.Equal(t, sandboxstore.SandboxLifecyclePhaseAborted, store.lifecycleTxns["txn-fork"].Phase)
 	txn := activeLifecycleTxnForTest(store, "sandbox-1")
 	require.NotNil(t, txn)
-	assert.Equal(t, SandboxLifecycleKindPause, txn.Kind)
-	assert.Equal(t, SandboxLifecycleSourceLost, txn.Source)
+	assert.Equal(t, sandboxstore.SandboxLifecycleKindPause, txn.Kind)
+	assert.Equal(t, sandboxstore.SandboxLifecycleSourceLost, txn.Source)
 	assert.Equal(t, []string{"sandbox-1"}, enqueuer.recoveryCalls)
 }
 
 func TestReconcileTerminatingSandboxAbortsResumeAndNeverRecovers(t *testing.T) {
-	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, SandboxDesiredStateTerminating)
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store := runtimeRecoveryStore("sandbox-1", "pod-missing", 3, sandboxstore.SandboxDesiredStateTerminating)
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-resume": {
 			ID:             "txn-resume",
 			SandboxID:      "sandbox-1",
-			Kind:           SandboxLifecycleKindResume,
-			Phase:          SandboxLifecyclePhasePreparing,
+			Kind:           sandboxstore.SandboxLifecycleKindResume,
+			Phase:          sandboxstore.SandboxLifecyclePhasePreparing,
 			FromGeneration: 3,
 			ToGeneration:   4,
 		},
@@ -428,23 +429,23 @@ func TestReconcileTerminatingSandboxAbortsResumeAndNeverRecovers(t *testing.T) {
 	}
 
 	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
-	assert.Equal(t, SandboxDesiredStateDeleted, store.records["sandbox-1"].DesiredState)
-	assert.Equal(t, SandboxLifecyclePhaseAborted, store.lifecycleTxns["txn-resume"].Phase)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateDeleted, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxLifecyclePhaseAborted, store.lifecycleTxns["txn-resume"].Phase)
 	assert.Empty(t, enqueuer.recoveryCalls)
 }
 
 func TestCompleteLostRecoveryPreservesLastCommittedHeadWhenPodIsGone(t *testing.T) {
-	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, SandboxDesiredStateActive)
-	store.rootFSStates = map[string]*SandboxRootFSState{
+	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
+	store.rootFSStates = map[string]*sandboxstore.SandboxRootFSState{
 		"sandbox-1": {SandboxID: "sandbox-1", LayerID: "committed-head", RuntimeGeneration: 2},
 	}
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-lost": {
 			ID:               "txn-lost",
 			SandboxID:        "sandbox-1",
-			Kind:             SandboxLifecycleKindPause,
-			Phase:            SandboxLifecyclePhasePreparing,
-			Source:           SandboxLifecycleSourceLost,
+			Kind:             sandboxstore.SandboxLifecycleKindPause,
+			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:           sandboxstore.SandboxLifecycleSourceLost,
 			FromGeneration:   3,
 			FromPodNamespace: "default",
 			FromPodName:      "pod-1",
@@ -459,15 +460,15 @@ func TestCompleteLostRecoveryPreservesLastCommittedHeadWhenPodIsGone(t *testing.
 	}
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
-	assert.Equal(t, SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 	assert.Equal(t, "committed-head", store.rootFSStates["sandbox-1"].LayerID)
-	assert.Equal(t, SandboxLifecyclePhaseCommitted, store.lifecycleTxns["txn-lost"].Phase)
+	assert.Equal(t, sandboxstore.SandboxLifecyclePhaseCommitted, store.lifecycleTxns["txn-lost"].Phase)
 }
 
 func TestTerminateActiveSandboxCompletesWithoutSynchronousWebhookDelivery(t *testing.T) {
 	pod := runtimeRecoveryPod("pod-1", "sandbox-1", 3)
-	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, SandboxDesiredStateActive)
-	store.records["sandbox-1"].Config.Webhook = &WebhookConfig{
+	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
+	store.records["sandbox-1"].Config.Webhook = &sandboxstore.WebhookConfig{
 		URL:    "https://example.test/webhook",
 		Secret: "secret",
 	}
@@ -489,29 +490,29 @@ func TestTerminateActiveSandboxCompletesWithoutSynchronousWebhookDelivery(t *tes
 	}
 
 	require.NoError(t, svc.TerminateSandbox(context.Background(), "sandbox-1"))
-	assert.Equal(t, SandboxDesiredStateTerminating, desiredStateAtDelete)
-	assert.Equal(t, SandboxDesiredStateDeleted, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateTerminating, desiredStateAtDelete)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateDeleted, store.records["sandbox-1"].DesiredState)
 }
 
 func TestSandboxRecordDeletionScopeRequiresDurableDeleteIntent(t *testing.T) {
-	record := &SandboxRecord{
+	record := &sandboxstore.SandboxRecord{
 		ID:                  "sandbox-1",
-		DesiredState:        SandboxDesiredStateActive,
+		DesiredState:        sandboxstore.SandboxDesiredStateActive,
 		CurrentPodNamespace: "default",
 		CurrentPodName:      "pod-1",
 		RuntimeGeneration:   3,
 	}
 	assert.True(t, SandboxRecordDeletionIsRuntimeOnly(record, "default", "pod-1", 3))
-	record.DesiredState = SandboxDesiredStateTerminating
+	record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
 	assert.False(t, SandboxRecordDeletionIsRuntimeOnly(record, "default", "pod-1", 3))
-	record.DesiredState = SandboxDesiredStateDeleted
+	record.DesiredState = sandboxstore.SandboxDesiredStateDeleted
 	assert.False(t, SandboxRecordDeletionIsRuntimeOnly(record, "default", "pod-1", 3))
 }
 
 func TestUnexpectedCurrentPodDeletionPreservesSandboxExternalState(t *testing.T) {
 	bindings := &deleteRecordingBindingStore{}
 	volumes := &recordingSystemVolumeClient{}
-	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, SandboxDesiredStateActive)
+	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
 	svc := &SandboxService{
 		sandboxStore:        store,
 		credentialStore:     bindings,
@@ -530,7 +531,7 @@ func TestUnexpectedCurrentPodDeletionPreservesSandboxExternalState(t *testing.T)
 	}))
 	assert.Zero(t, bindings.deleteCalls)
 	assert.Empty(t, volumes.marked)
-	assert.Equal(t, SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 }
 
 func TestSandboxRuntimeReconcilerDeleteEventQueuesSandbox(t *testing.T) {
@@ -547,10 +548,10 @@ func TestSandboxRuntimeReconcilerDeleteEventQueuesSandbox(t *testing.T) {
 
 func TestSandboxRuntimeReconcilerScansPagesAndQueuesOnlyDrift(t *testing.T) {
 	healthy := runtimeRecoveryPod("pod-a", "sandbox-a", 1)
-	store := &runtimeReconcileMemoryStore{candidates: []SandboxRuntimeReconcileCandidate{
-		{SandboxID: "sandbox-a", DesiredState: SandboxDesiredStateActive, PodNamespace: "default", PodName: "pod-a", RuntimeGeneration: 1},
-		{SandboxID: "sandbox-b", DesiredState: SandboxDesiredStateActive, PodNamespace: "default", PodName: "pod-b", RuntimeGeneration: 1},
-		{SandboxID: "sandbox-c", DesiredState: SandboxDesiredStateTerminating},
+	store := &runtimeReconcileMemoryStore{candidates: []sandboxstore.SandboxRuntimeReconcileCandidate{
+		{SandboxID: "sandbox-a", DesiredState: sandboxstore.SandboxDesiredStateActive, PodNamespace: "default", PodName: "pod-a", RuntimeGeneration: 1},
+		{SandboxID: "sandbox-b", DesiredState: sandboxstore.SandboxDesiredStateActive, PodNamespace: "default", PodName: "pod-b", RuntimeGeneration: 1},
+		{SandboxID: "sandbox-c", DesiredState: sandboxstore.SandboxDesiredStateTerminating},
 	}}
 	reconciler := NewSandboxRuntimeReconciler("cluster-a", store, runtimeIdentityPodLister(t, healthy), nil, zap.NewNop())
 	reconciler.pageSize = 2
@@ -570,13 +571,13 @@ func TestSandboxRuntimeReconcilerScansPagesAndQueuesOnlyDrift(t *testing.T) {
 }
 
 type runtimeReconcileMemoryStore struct {
-	candidates []SandboxRuntimeReconcileCandidate
+	candidates []sandboxstore.SandboxRuntimeReconcileCandidate
 	afterCalls []string
 }
 
-func (s *runtimeReconcileMemoryStore) ListRuntimeReconcileCandidates(_ context.Context, _ string, after string, limit int) ([]SandboxRuntimeReconcileCandidate, error) {
+func (s *runtimeReconcileMemoryStore) ListRuntimeReconcileCandidates(_ context.Context, _ string, after string, limit int) ([]sandboxstore.SandboxRuntimeReconcileCandidate, error) {
 	s.afterCalls = append(s.afterCalls, after)
-	page := make([]SandboxRuntimeReconcileCandidate, 0, limit)
+	page := make([]sandboxstore.SandboxRuntimeReconcileCandidate, 0, limit)
 	for _, candidate := range s.candidates {
 		if candidate.SandboxID <= after {
 			continue
@@ -594,7 +595,7 @@ func runtimeRecoveryStore(sandboxID, podName string, generation int64, desiredSt
 	if podName == "" {
 		namespace = ""
 	}
-	return &memorySandboxStore{records: map[string]*SandboxRecord{
+	return &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		sandboxID: {
 			ID:                  sandboxID,
 			TeamID:              "team-1",

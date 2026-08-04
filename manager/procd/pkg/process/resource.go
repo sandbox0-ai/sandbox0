@@ -172,20 +172,6 @@ type ContainerMemoryStats struct {
 	WorkingSet int64 `json:"working_set"`
 }
 
-// ContainerCPUStats contains container-level CPU statistics from cgroup.
-type ContainerCPUStats struct {
-	// UsageTotal is the total CPU time consumed (in nanoseconds).
-	UsageTotal uint64 `json:"usage_total"`
-	// UsageUser is the CPU time consumed in user mode (in nanoseconds).
-	UsageUser uint64 `json:"usage_user"`
-	// UsageSystem is the CPU time consumed in kernel mode (in nanoseconds).
-	UsageSystem uint64 `json:"usage_system"`
-	// ThrottledTime is the total time throttled (in nanoseconds).
-	ThrottledTime uint64 `json:"throttled_time"`
-	// ThrottledPeriods is the number of throttled periods.
-	ThrottledPeriods uint64 `json:"throttled_periods"`
-}
-
 // readFileInt64 reads a file and parses it as int64.
 // Returns 0 and error if file doesn't exist or can't be parsed.
 func readFileInt64(path string) (int64, error) {
@@ -194,15 +180,6 @@ func readFileInt64(path string) (int64, error) {
 		return 0, err
 	}
 	return strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-}
-
-// readFileUint64 reads a file and parses it as uint64.
-func readFileUint64(path string) (uint64, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
 }
 
 // readKeyValueFile reads a file with "key value" format per line.
@@ -524,114 +501,6 @@ func (c *cgroupReader) readMemoryStatsV1() (*ContainerMemoryStats, error) {
 		stats.WorkingSet = stats.Usage - inactiveFile
 		if stats.WorkingSet < 0 {
 			stats.WorkingSet = 0
-		}
-	}
-
-	return stats, nil
-}
-
-// ReadContainerCPUStats reads container CPU stats from cgroup.
-func (c *cgroupReader) ReadContainerCPUStats() (*ContainerCPUStats, error) {
-	version := c.detectVersion()
-
-	switch version {
-	case CgroupV2:
-		return c.readCPUStatsV2()
-	case CgroupV1:
-		return c.readCPUStatsV1()
-	default:
-		return nil, fmt.Errorf("cgroup not available")
-	}
-}
-
-func (c *cgroupReader) readCPUStatsV2() (*ContainerCPUStats, error) {
-	stats := &ContainerCPUStats{}
-	basePath := "/sys/fs/cgroup"
-	if resolved, err := c.cgroupV2BasePath(); err == nil {
-		basePath = resolved
-	}
-
-	// Read cpu.stat
-	if cpuStat, err := readKeyValueFile(filepath.Join(basePath, "cpu.stat")); err == nil {
-		if v, ok := cpuStat["usage_usec"]; ok {
-			stats.UsageTotal = uint64(v) * 1000 // convert to nanoseconds
-		}
-		if v, ok := cpuStat["user_usec"]; ok {
-			stats.UsageUser = uint64(v) * 1000
-		}
-		if v, ok := cpuStat["system_usec"]; ok {
-			stats.UsageSystem = uint64(v) * 1000
-		}
-		if v, ok := cpuStat["nr_throttled"]; ok {
-			stats.ThrottledPeriods = uint64(v)
-		}
-		if v, ok := cpuStat["throttled_usec"]; ok {
-			stats.ThrottledTime = uint64(v) * 1000
-		}
-	}
-
-	return stats, nil
-}
-
-func (c *cgroupReader) readCPUStatsV1() (*ContainerCPUStats, error) {
-	stats := &ContainerCPUStats{}
-	basePath := "/sys/fs/cgroup/cpu,cpuacct"
-	if resolved, err := c.cgroupV1BasePath("cpuacct"); err == nil {
-		basePath = resolved
-	} else if resolved, err := c.cgroupV1BasePath("cpu"); err == nil {
-		basePath = resolved
-	}
-
-	// Try combined path first, then separate paths
-	if _, err := os.Stat(basePath); os.IsNotExist(err) {
-		basePath = "/sys/fs/cgroup/cpuacct"
-	}
-
-	// Read total usage (in nanoseconds)
-	if usage, err := readFileUint64(filepath.Join(basePath, "cpuacct.usage")); err == nil {
-		stats.UsageTotal = usage
-	}
-
-	// Read user/system split
-	if data, err := os.ReadFile(filepath.Join(basePath, "cpuacct.stat")); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				continue
-			}
-			val, _ := strconv.ParseUint(fields[1], 10, 64)
-			// Values are in USER_HZ (typically 100), convert to nanoseconds
-			valNs := val * 10000000 // (1e9 / 100)
-			switch fields[0] {
-			case "user":
-				stats.UsageUser = valNs
-			case "system":
-				stats.UsageSystem = valNs
-			}
-		}
-	}
-
-	// Read throttling stats
-	cpuBasePath := "/sys/fs/cgroup/cpu"
-	if resolved, err := c.cgroupV1BasePath("cpu"); err == nil {
-		cpuBasePath = resolved
-	} else if _, err := os.Stat(filepath.Join(basePath, "cpu.stat")); err == nil {
-		cpuBasePath = basePath
-	}
-
-	if data, err := os.ReadFile(filepath.Join(cpuBasePath, "cpu.stat")); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				continue
-			}
-			val, _ := strconv.ParseUint(fields[1], 10, 64)
-			switch fields[0] {
-			case "nr_throttled":
-				stats.ThrottledPeriods = val
-			case "throttled_time":
-				stats.ThrottledTime = val
-			}
 		}
 	}
 

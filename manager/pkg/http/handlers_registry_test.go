@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/registry"
 	"go.uber.org/zap"
 )
 
@@ -18,7 +18,7 @@ func TestGetRegistryCredentialsReturnsBadRequestForInvalidTarget(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	server := &Server{
-		registryService: service.NewRegistryService(registryProviderFunc(func(context.Context, registry.PushCredentialsRequest) (*registry.Credential, error) {
+		registryService: registryservice.NewRegistryService(registryProviderFunc(func(context.Context, registry.PushCredentialsRequest) (*registry.Credential, error) {
 			return nil, registry.ErrInvalidTargetImage
 		}), zap.NewNop()),
 		logger: zap.NewNop(),

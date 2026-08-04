@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"

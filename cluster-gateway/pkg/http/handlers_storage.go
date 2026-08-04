@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"

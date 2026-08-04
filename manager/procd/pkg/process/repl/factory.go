@@ -26,21 +26,3 @@ func NewREPL(id string, config process.ProcessConfig) (*REPL, error) {
 func NewCustomREPL(id string, replConfig *REPLConfig, processConfig process.ProcessConfig) (*REPL, error) {
 	return New(id, replConfig, processConfig)
 }
-
-// CreateREPLConfig creates a minimal REPL config for a custom CLI.
-//
-// Example:
-//
-//	config := CreateREPLConfig("myrepl", []ExecCandidate{
-//	    {Name: "myrepl", Args: []string{"--interactive"}},
-//	})
-func CreateREPLConfig(name string, candidates []ExecCandidate) *REPLConfig {
-	return &REPLConfig{
-		Name:        name,
-		DisplayName: name,
-		Candidates:  candidates,
-		Ready: ReadyConfig{
-			Mode: ReadyModeStartupDelay,
-		},
-	}
-}

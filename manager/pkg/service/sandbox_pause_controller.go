@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -123,7 +124,7 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 	if c == nil || c.service == nil || c.service.sandboxStore == nil {
 		return
 	}
-	txns, err := c.service.sandboxStore.ListActiveLifecycleTxns(ctx, SandboxLifecycleKindPause, c.scanLimit)
+	txns, err := c.service.sandboxStore.ListActiveLifecycleTxns(ctx, sandboxstore.SandboxLifecycleKindPause, c.scanLimit)
 	if err != nil {
 		c.logger.Warn("Failed to list active pause lifecycle transactions", zap.Error(err))
 		return
@@ -152,7 +153,7 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 }
 
 func sandboxLifecycleSourceReconstructsRuntime(source string) bool {
-	return source == SandboxLifecycleSourceCrash || source == SandboxLifecycleSourceHealth || source == SandboxLifecycleSourceLost
+	return source == sandboxstore.SandboxLifecycleSourceCrash || source == sandboxstore.SandboxLifecycleSourceHealth || source == sandboxstore.SandboxLifecycleSourceLost
 }
 
 func (c *SandboxPauseController) runWorker(ctx context.Context) {

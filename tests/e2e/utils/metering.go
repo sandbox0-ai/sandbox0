@@ -30,7 +30,22 @@ func (s *Session) GetMeteringStatus(ctx context.Context) (*metering.Status, int,
 }
 
 func (s *Session) ListMeteringEvents(ctx context.Context, cursor string, limit int) ([]*metering.Event, string, int, error) {
-	path := "/internal/v1/metering/events"
+	return listMeteringPage(s, ctx, cursor, limit, "/internal/v1/metering/events", "list metering events", decodeMeteringEvents)
+}
+
+func (s *Session) ListMeteringWindows(ctx context.Context, cursor string, limit int) ([]*metering.Window, string, int, error) {
+	return listMeteringPage(s, ctx, cursor, limit, "/internal/v1/metering/windows", "list metering windows", decodeMeteringWindows)
+}
+
+func listMeteringPage[T any](
+	s *Session,
+	ctx context.Context,
+	cursor string,
+	limit int,
+	path string,
+	operation string,
+	decode func([]byte) ([]*T, string, *gatewayspec.Error, error),
+) ([]*T, string, int, error) {
 	query := url.Values{}
 	if cursor != "" {
 		query.Set("cursor", cursor)
@@ -47,52 +62,38 @@ func (s *Session) ListMeteringEvents(ctx context.Context, cursor string, limit i
 		return nil, "", status, err
 	}
 	if status != http.StatusOK {
-		return nil, "", status, fmt.Errorf("list metering events failed with status %d: %s", status, formatAPIError(body))
+		return nil, "", status, fmt.Errorf("%s failed with status %d: %s", operation, status, formatAPIError(body))
 	}
+	entries, nextCursor, apiErr, err := decode(body)
+	if err != nil {
+		return nil, "", status, err
+	}
+	if apiErr != nil {
+		return nil, "", status, fmt.Errorf("%s failed: %s", operation, apiErr.Message)
+	}
+	return entries, nextCursor, status, nil
+}
+
+func decodeMeteringEvents(body []byte) ([]*metering.Event, string, *gatewayspec.Error, error) {
 	resp, apiErr, err := gatewayspec.DecodeResponse[struct {
 		Events     []*metering.Event `json:"events"`
 		NextCursor string            `json:"next_cursor"`
 	}](bytes.NewReader(body))
-	if err != nil {
-		return nil, "", status, err
+	if err != nil || apiErr != nil {
+		return nil, "", apiErr, err
 	}
-	if apiErr != nil {
-		return nil, "", status, fmt.Errorf("list metering events failed: %s", apiErr.Message)
-	}
-	return resp.Events, resp.NextCursor, status, nil
+	return resp.Events, resp.NextCursor, nil, nil
 }
 
-func (s *Session) ListMeteringWindows(ctx context.Context, cursor string, limit int) ([]*metering.Window, string, int, error) {
-	path := "/internal/v1/metering/windows"
-	query := url.Values{}
-	if cursor != "" {
-		query.Set("cursor", cursor)
-	}
-	if limit > 0 {
-		query.Set("limit", fmt.Sprintf("%d", limit))
-	}
-	if encoded := query.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-
-	status, body, err := s.doJSONRequest(ctx, http.MethodGet, path, nil, true)
-	if err != nil {
-		return nil, "", status, err
-	}
-	if status != http.StatusOK {
-		return nil, "", status, fmt.Errorf("list metering windows failed with status %d: %s", status, formatAPIError(body))
-	}
+func decodeMeteringWindows(body []byte) ([]*metering.Window, string, *gatewayspec.Error, error) {
 	resp, apiErr, err := gatewayspec.DecodeResponse[struct {
 		Windows    []*metering.Window `json:"windows"`
 		NextCursor string             `json:"next_cursor"`
 	}](bytes.NewReader(body))
-	if err != nil {
-		return nil, "", status, err
+	if err != nil || apiErr != nil {
+		return nil, "", apiErr, err
 	}
-	if apiErr != nil {
-		return nil, "", status, fmt.Errorf("list metering windows failed: %s", apiErr.Message)
-	}
-	return resp.Windows, resp.NextCursor, status, nil
+	return resp.Windows, resp.NextCursor, nil, nil
 }
 
 func (s *Session) ListAllMeteringEvents(ctx context.Context, batchSize int) ([]*metering.Event, error) {

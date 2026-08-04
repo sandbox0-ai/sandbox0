@@ -1,10 +1,5 @@
 package sandboxfunction
 
-import (
-	"crypto/sha256"
-	"encoding/hex"
-)
-
 const (
 	RuntimePython = "python"
 
@@ -92,16 +87,4 @@ type WebSocketFrame struct {
 	Data        string `json:"data,omitempty"`
 	DataBase64  string `json:"data_base64,omitempty"`
 	Reason      string `json:"reason,omitempty"`
-}
-
-func InlineDigest(code string) string {
-	sum := sha256.Sum256([]byte(code))
-	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-// LegacyInlineDigest returns the digest used by function services before the
-// public filename field was removed. It is kept for rolling-upgrade compatibility.
-func LegacyInlineDigest(filename, code string) string {
-	sum := sha256.Sum256([]byte(filename + "\x00" + code))
-	return "sha256:" + hex.EncodeToString(sum[:])
 }

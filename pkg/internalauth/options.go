@@ -24,15 +24,6 @@ type GeneratorConfig struct {
 	NowFunc func() time.Time
 }
 
-// DefaultGeneratorConfig returns a GeneratorConfig with sensible defaults.
-func DefaultGeneratorConfig(caller string, privateKey ed25519.PrivateKey) GeneratorConfig {
-	return GeneratorConfig{
-		Caller:     caller,
-		PrivateKey: privateKey,
-		TTL:        30 * time.Second,
-	}
-}
-
 // ValidatorConfig holds the configuration for a Validator.
 type ValidatorConfig struct {
 	// Target is the service name that will validate tokens.

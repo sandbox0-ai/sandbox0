@@ -7,35 +7,6 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestConfigDefaultsTraceExporterToNoop(t *testing.T) {
-	cfg := Config{
-		ServiceName: "test-service",
-		Logger:      zap.NewNop(),
-	}
-
-	cfg.setDefaults()
-
-	if cfg.TraceExporter.Type != "noop" {
-		t.Fatalf("TraceExporter.Type = %q, want noop", cfg.TraceExporter.Type)
-	}
-}
-
-func TestConfigKeepsExplicitTraceExporter(t *testing.T) {
-	cfg := Config{
-		ServiceName: "test-service",
-		Logger:      zap.NewNop(),
-		TraceExporter: TraceExporterConfig{
-			Type: "stdout",
-		},
-	}
-
-	cfg.setDefaults()
-
-	if cfg.TraceExporter.Type != "stdout" {
-		t.Fatalf("TraceExporter.Type = %q, want stdout", cfg.TraceExporter.Type)
-	}
-}
-
 func TestConfigFromEnvParsesStandardOTELTraceConfig(t *testing.T) {
 	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://collector.sandbox0:4317")

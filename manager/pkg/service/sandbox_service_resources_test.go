@@ -9,7 +9,9 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -28,8 +30,8 @@ func TestEffectiveSandboxResourceQuotaAppliesMinimumCPUToMemoryOverride(t *testi
 	svc := &SandboxService{config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"}}
 	template := newSandboxResourceTestTemplate(t)
 
-	quota, err := svc.effectiveSandboxResourceQuota(template, &SandboxConfig{
-		Resources: &SandboxResourceConfig{Memory: "128Mi"},
+	quota, err := svc.effectiveSandboxResourceQuota(template, &sandboxstore.SandboxConfig{
+		Resources: &managerapi.SandboxResourceConfig{Memory: "128Mi"},
 	})
 	if err != nil {
 		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
@@ -116,8 +118,8 @@ func TestCreateNewPodAppliesClaimMemoryResources(t *testing.T) {
 	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
 		TeamID: "team-a",
 		UserID: "user-a",
-		Config: &SandboxConfig{
-			Resources: &SandboxResourceConfig{Memory: "2Gi"},
+		Config: &sandboxstore.SandboxConfig{
+			Resources: &managerapi.SandboxResourceConfig{Memory: "2Gi"},
 		},
 	})
 	if err != nil {
@@ -145,8 +147,8 @@ func TestCreateNewPodAppliesMinimumCPUResources(t *testing.T) {
 	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
 		TeamID: "team-a",
 		UserID: "user-a",
-		Config: &SandboxConfig{
-			Resources: &SandboxResourceConfig{Memory: "128Mi"},
+		Config: &sandboxstore.SandboxConfig{
+			Resources: &managerapi.SandboxResourceConfig{Memory: "128Mi"},
 		},
 	})
 	if err != nil {
@@ -267,7 +269,7 @@ func TestClaimIdlePodAppliesMemoryOverride(t *testing.T) {
 	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
 		TeamID: "team-a",
 		UserID: "user-a",
-		Config: &SandboxConfig{Resources: &SandboxResourceConfig{Memory: "2Gi"}},
+		Config: &sandboxstore.SandboxConfig{Resources: &managerapi.SandboxResourceConfig{Memory: "2Gi"}},
 	})
 	if err != nil {
 		t.Fatalf("claimIdlePod() error = %v", err)
@@ -298,8 +300,8 @@ func TestResizeSandboxPodResourcesRetriesConflictWithoutPreflightGet(t *testing.
 		config:    SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
 		logger:    zap.NewNop(),
 	}
-	quota, err := svc.effectiveSandboxResourceQuota(template, &SandboxConfig{
-		Resources: &SandboxResourceConfig{Memory: "2Gi"},
+	quota, err := svc.effectiveSandboxResourceQuota(template, &sandboxstore.SandboxConfig{
+		Resources: &managerapi.SandboxResourceConfig{Memory: "2Gi"},
 	})
 	if err != nil {
 		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
@@ -335,8 +337,8 @@ func TestResizeSandboxPodResourcesUsesUpdatedPodWithoutPreflightGet(t *testing.T
 		config:    SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"},
 		logger:    zap.NewNop(),
 	}
-	quota, err := svc.effectiveSandboxResourceQuota(template, &SandboxConfig{
-		Resources: &SandboxResourceConfig{Memory: "2Gi"},
+	quota, err := svc.effectiveSandboxResourceQuota(template, &sandboxstore.SandboxConfig{
+		Resources: &managerapi.SandboxResourceConfig{Memory: "2Gi"},
 	})
 	if err != nil {
 		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
@@ -395,7 +397,7 @@ func TestClaimIdlePodRestoresIdlePodAfterResizeConflict(t *testing.T) {
 	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
 		TeamID: "team-a",
 		UserID: "user-a",
-		Config: &SandboxConfig{Resources: &SandboxResourceConfig{Memory: "2Gi"}},
+		Config: &sandboxstore.SandboxConfig{Resources: &managerapi.SandboxResourceConfig{Memory: "2Gi"}},
 	})
 	if err != nil {
 		t.Fatalf("claimIdlePod() error = %v", err)
@@ -444,7 +446,7 @@ func TestUpdateSandboxAppliesMinimumCPUResourcesAndPersistsConfig(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	updated, err := svc.UpdateSandbox(ctx, "sandbox-1", &SandboxUpdateConfig{
-		Resources: &SandboxResourceConfig{Memory: "128Mi"},
+		Resources: &managerapi.SandboxResourceConfig{Memory: "128Mi"},
 	})
 	if err != nil {
 		t.Fatalf("UpdateSandbox() error = %v", err)
@@ -468,24 +470,24 @@ func TestUpdateSandboxAppliesMinimumCPUResourcesAndPersistsConfig(t *testing.T) 
 
 func TestUpdatePausedSandboxValidatesAndPersistsMemory(t *testing.T) {
 	now := timeNow()
-	record := &SandboxRecord{
+	record := &sandboxstore.SandboxRecord{
 		ID:           "sandbox-1",
 		TeamID:       "team-a",
 		TemplateID:   "default",
-		DesiredState: SandboxDesiredStatePaused,
-		Config:       SandboxConfig{},
+		DesiredState: sandboxstore.SandboxDesiredStatePaused,
+		Config:       sandboxstore.SandboxConfig{},
 		ClaimedAt:    now,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 		TemplateSpec: newSandboxResourceTestTemplate(t).Spec,
 	}
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{"sandbox-1": record}}
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{"sandbox-1": record}}
 	svc := &SandboxService{sandboxStore: store, clock: fixedClock{now: now}, logger: zap.NewNop()}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	updated, err := svc.UpdateSandbox(ctx, "sandbox-1", &SandboxUpdateConfig{
-		Resources: &SandboxResourceConfig{Memory: "2Gi"},
+		Resources: &managerapi.SandboxResourceConfig{Memory: "2Gi"},
 	})
 	if err != nil {
 		t.Fatalf("UpdateSandbox() error = %v", err)

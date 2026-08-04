@@ -130,11 +130,6 @@ func (m *Manager) StartCleanup(ctx context.Context, interval time.Duration) {
 	})
 }
 
-// CreateContext creates a new context.
-func (m *Manager) CreateContext(config process.ProcessConfig) (*Context, error) {
-	return m.CreateContextWithPolicyAndREPLConfig(config, nil, CleanupPolicy{})
-}
-
 // CreateContextWithPolicyAndREPLConfig creates a new context with a cleanup policy and optional REPL config.
 func (m *Manager) CreateContextWithPolicyAndREPLConfig(config process.ProcessConfig, replConfig *repl.REPLConfig, policy CleanupPolicy) (*Context, error) {
 	m.mu.RLock()
@@ -312,20 +307,6 @@ func (m *Manager) WriteInput(contextID string, data []byte) error {
 	}
 	ctx.Touch()
 	return nil
-}
-
-// ReadOutput returns the output channel for a context.
-func (m *Manager) ReadOutput(contextID string) (<-chan process.ProcessOutput, error) {
-	ctx, err := m.GetContext(contextID)
-	if err != nil {
-		return nil, err
-	}
-
-	if ctx.MainProcess == nil {
-		return nil, process.ErrProcessNotRunning
-	}
-
-	return ctx.MainProcess.ReadOutput(), nil
 }
 
 // SubscribeOutput returns a cancellable output subscription for a context.

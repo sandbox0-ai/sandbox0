@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,7 +40,7 @@ func (p *Patcher) SyncAppliedHashes(ctx context.Context, sandboxes []*watcher.Sa
 		}
 		annotations := map[string]string{}
 		if sandbox.NetworkPolicyHash != "" && sandbox.NetworkPolicyHash != sandbox.NetworkAppliedHash {
-			annotations[controller.AnnotationNetworkPolicyAppliedHash] = sandbox.NetworkPolicyHash
+			annotations[sandboxpod.AnnotationNetworkPolicyAppliedHash] = sandbox.NetworkPolicyHash
 		}
 		if len(annotations) == 0 {
 			continue
@@ -71,7 +71,7 @@ func (p *Patcher) SyncAppliedHashes(ctx context.Context, sandboxes []*watcher.Sa
 				zap.String("namespace", sandbox.Namespace),
 				zap.String("pod", sandbox.Name),
 				zap.String("pod_ip", sandbox.PodIP),
-				zap.String("network_policy_applied_hash", annotations[controller.AnnotationNetworkPolicyAppliedHash]),
+				zap.String("network_policy_applied_hash", annotations[sandboxpod.AnnotationNetworkPolicyAppliedHash]),
 			)
 			return nil
 		})

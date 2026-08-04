@@ -2,14 +2,13 @@ package service
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -20,13 +19,13 @@ import (
 func TestSandboxRootFSProductRequiresPausedSandboxForRestore(t *testing.T) {
 	now := time.Now().UTC()
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now),
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStateActive, now),
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
 		},
-		rootFSSnapshots: map[string]*RootFSSnapshot{
+		rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
 			"snapshot-1": {
 				ID:              "snapshot-1",
 				FilesystemID:    "sandbox-1",
@@ -53,13 +52,13 @@ func TestSandboxRootFSProductHidesInternalTemplateBuildSnapshots(t *testing.T) {
 	now := time.Now().UTC()
 	internalSnapshotID := "template-build-123456"
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now),
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, now),
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
 		},
-		rootFSSnapshots: map[string]*RootFSSnapshot{
+		rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
 			"snapshot-public": {
 				ID:              "snapshot-public",
 				FilesystemID:    "sandbox-1",
@@ -87,16 +86,16 @@ func TestSandboxRootFSProductHidesInternalTemplateBuildSnapshots(t *testing.T) {
 	assert.Equal(t, 1, list.Count)
 
 	_, err = svc.GetSandboxRootFSSnapshot(context.Background(), internalSnapshotID, "team-1")
-	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+	require.ErrorIs(t, err, sandboxstore.ErrRootFSSnapshotNotFound)
 	err = svc.DeleteSandboxRootFSSnapshot(context.Background(), internalSnapshotID, "team-1")
-	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+	require.ErrorIs(t, err, sandboxstore.ErrRootFSSnapshotNotFound)
 	_, err = svc.RestoreSandboxRootFS(
 		context.Background(),
 		"sandbox-1",
 		"team-1",
 		&RestoreSandboxRootFSRequest{SnapshotID: internalSnapshotID},
 	)
-	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+	require.ErrorIs(t, err, sandboxstore.ErrRootFSSnapshotNotFound)
 	assert.Contains(t, store.rootFSSnapshots, internalSnapshotID, "public delete must retain internal build snapshot")
 
 	internal, err := store.GetRootFSSnapshot(context.Background(), internalSnapshotID, "team-1")
@@ -108,22 +107,22 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 	now := time.Now().UTC()
 	autoResume := true
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now),
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, now),
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
 		},
 	}
-	store.records["sandbox-1"].Config = SandboxConfig{
+	store.records["sandbox-1"].Config = sandboxstore.SandboxConfig{
 		AutoResume: &autoResume,
-		Services: []SandboxAppService{{
+		Services: []managerapi.SandboxAppService{{
 			ID:      "web",
 			Port:    8080,
-			Ingress: SandboxAppServiceIngress{Public: true},
+			Ingress: managerapi.SandboxAppServiceIngress{Public: true},
 		}},
 	}
-	store.records["sandbox-1"].Mounts = []ClaimMount{{
+	store.records["sandbox-1"].Mounts = []managerapi.ClaimMount{{
 		SandboxVolumeID: "volume-1",
 		MountPoint:      "/workspace/data",
 	}}
@@ -151,7 +150,7 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 	store.rootFSStates["sandbox-1"] = rootFSProductTestState("sandbox-1", "team-1", "layer-v2")
 	restoreResp, err := svc.RestoreSandboxRootFS(context.Background(), "sandbox-1", "team-1", &RestoreSandboxRootFSRequest{SnapshotID: snapshot.ID})
 	require.NoError(t, err)
-	assert.Equal(t, SandboxStatusPaused, restoreResp.Status)
+	assert.Equal(t, managerapi.SandboxStatusPaused, restoreResp.Status)
 	assert.Equal(t, "layer-v1", store.rootFSStates["sandbox-1"].LayerID)
 
 	forkResp, err := svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-2", nil)
@@ -162,80 +161,58 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 	assert.NotEqual(t, "sandbox-1", forkResp.Sandbox.ID)
 	assert.Equal(t, "team-1", forkResp.Sandbox.TeamID)
 	assert.Equal(t, "user-2", forkResp.Sandbox.UserID)
-	assert.Equal(t, SandboxStatusPaused, forkResp.Sandbox.Status)
+	assert.Equal(t, managerapi.SandboxStatusPaused, forkResp.Sandbox.Status)
 	assert.Empty(t, forkResp.Sandbox.Mounts)
 	assert.Len(t, forkResp.Sandbox.Services, 1)
 	assert.Equal(t, "layer-v1", store.rootFSStates[forkResp.Sandbox.ID].LayerID)
 
 	require.NoError(t, svc.DeleteSandboxRootFSSnapshot(context.Background(), snapshot.ID, "team-1"))
 	_, err = svc.GetSandboxRootFSSnapshot(context.Background(), snapshot.ID, "team-1")
-	require.ErrorIs(t, err, ErrRootFSSnapshotNotFound)
+	require.ErrorIs(t, err, sandboxstore.ErrRootFSSnapshotNotFound)
 }
 
 func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSource(t *testing.T) {
 	now := time.Now().UTC()
 	var prepareReq ctldapi.PrepareRootFSSnapshotRequest
 	var publishReq ctldapi.PublishRootFSSnapshotRequest
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/rootfs/snapshots/prepare":
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&prepareReq))
-			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
-				Handle: "handle-1",
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff-v2",
-					Size:      456,
-				},
-			}))
-		case "/api/v1/rootfs/snapshots/publish":
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&publishReq))
-			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
-				Published: true,
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff-v2",
-					Size:      456,
-					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff-v2.tar",
-				},
-			}))
-		default:
-			t.Fatalf("unexpected ctld path %s", r.URL.Path)
-		}
-	}))
+	ctld := newRootFSSnapshotCTLDServer(t,
+		ctldapi.PrepareRootFSSnapshotResponse{
+			Handle: "handle-1",
+			Info:   rootFSSnapshotTestInfo(),
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:diff-v2",
+				Size:      456,
+			},
+		},
+		ctldapi.PublishRootFSSnapshotResponse{
+			Published: true,
+			Info:      rootFSSnapshotTestInfo(),
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:diff-v2",
+				Size:      456,
+				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff-v2.tar",
+			},
+		},
+		func(req ctldapi.PrepareRootFSSnapshotRequest) { prepareReq = req },
+		func(req ctldapi.PublishRootFSSnapshotRequest) { publishReq = req },
+	)
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	pod.Status.HostIP = ctldURL.Hostname()
 	markRuntimeIdentityPodReady(t, pod)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStateActive, now)
 	source.CurrentPodNamespace = pod.Namespace
 	source.CurrentPodName = pod.Name
 	source.RuntimeGeneration = runtimeGenerationFromPod(pod)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": source,
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
 		},
 	}
@@ -243,7 +220,7 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 		k8sClient:    fake.NewSimpleClientset(pod),
 		podLister:    newTestPodLister(t, pod),
 		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
 		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
@@ -266,7 +243,7 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 
 	sourceRecord := store.records["sandbox-1"]
 	require.NotNil(t, sourceRecord)
-	assert.Equal(t, SandboxDesiredStateActive, sourceRecord.DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, sourceRecord.DesiredState)
 	assert.Equal(t, pod.Name, sourceRecord.CurrentPodName)
 	assert.Equal(t, pod.Namespace, sourceRecord.CurrentPodNamespace)
 	assert.Equal(t, 0, store.pauses)
@@ -289,66 +266,44 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 	now := time.Now().UTC()
 	var prepareReq ctldapi.PrepareRootFSSnapshotRequest
 	var publishReq ctldapi.PublishRootFSSnapshotRequest
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/rootfs/snapshots/prepare":
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&prepareReq))
-			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
-				Handle: "handle-1",
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff-v2",
-					Size:      456,
-				},
-			}))
-		case "/api/v1/rootfs/snapshots/publish":
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&publishReq))
-			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
-				Published: true,
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff-v2",
-					Size:      456,
-					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff-v2.tar",
-				},
-			}))
-		default:
-			t.Fatalf("unexpected ctld path %s", r.URL.Path)
-		}
-	}))
+	ctld := newRootFSSnapshotCTLDServer(t,
+		ctldapi.PrepareRootFSSnapshotResponse{
+			Handle: "handle-1",
+			Info:   rootFSSnapshotTestInfo(),
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:diff-v2",
+				Size:      456,
+			},
+		},
+		ctldapi.PublishRootFSSnapshotResponse{
+			Published: true,
+			Info:      rootFSSnapshotTestInfo(),
+			Descriptor: ctldapi.RootFSDiffDescriptor{
+				MediaType: "application/vnd.oci.image.layer.v1.tar",
+				Digest:    "sha256:diff-v2",
+				Size:      456,
+				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff-v2.tar",
+			},
+		},
+		func(req ctldapi.PrepareRootFSSnapshotRequest) { prepareReq = req },
+		func(req ctldapi.PublishRootFSSnapshotRequest) { publishReq = req },
+	)
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	pod.Status.HostIP = ctldURL.Hostname()
 	markRuntimeIdentityPodReady(t, pod)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStateActive, now)
 	source.CurrentPodNamespace = pod.Namespace
 	source.CurrentPodName = pod.Name
 	source.RuntimeGeneration = runtimeGenerationFromPod(pod)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": source,
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
 		},
 	}
@@ -356,7 +311,7 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 		k8sClient:    fake.NewSimpleClientset(pod),
 		podLister:    newTestPodLister(t, pod),
 		sandboxStore: store,
-		ctldClient:   NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
 		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
@@ -370,7 +325,7 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 	require.NotNil(t, forkResp)
 	require.NotNil(t, forkResp.Sandbox)
 	assert.Equal(t, "sandbox-1", forkResp.SourceSandboxID)
-	assert.Equal(t, SandboxStatusPaused, forkResp.Sandbox.Status)
+	assert.Equal(t, managerapi.SandboxStatusPaused, forkResp.Sandbox.Status)
 	assert.Equal(t, "user-2", forkResp.Sandbox.UserID)
 	assert.Equal(t, "layer-v1", prepareReq.ParentLayerID)
 	assert.Equal(t, "sandbox-1", publishReq.SandboxID)
@@ -379,7 +334,7 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 
 	sourceRecord := store.records["sandbox-1"]
 	require.NotNil(t, sourceRecord)
-	assert.Equal(t, SandboxDesiredStateActive, sourceRecord.DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, sourceRecord.DesiredState)
 	assert.Equal(t, pod.Name, sourceRecord.CurrentPodName)
 	assert.Equal(t, pod.Namespace, sourceRecord.CurrentPodNamespace)
 	assert.Equal(t, 0, store.pauses)
@@ -399,75 +354,58 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 	assert.Nil(t, activeTxn)
 }
 
-func TestSandboxRootFSProductWaitAbortsStaleForkTxn(t *testing.T) {
+func TestSandboxRootFSProductWaitAbortsStaleTxn(t *testing.T) {
 	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
-	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now),
-		},
-		lifecycleTxns: map[string]*SandboxLifecycleTxn{
-			"txn-1": {
-				ID:        "txn-1",
-				SandboxID: "sandbox-1",
-				Kind:      SandboxLifecycleKindFork,
-				Phase:     SandboxLifecyclePhasePublishing,
-				UpdatedAt: now.Add(-sandboxRootFSSourceCheckpointLifecycleStaleAfter - time.Second),
-			},
-		},
+	for _, tt := range []struct {
+		name     string
+		kind     string
+		expected string
+	}{
+		{name: "fork", kind: sandboxstore.SandboxLifecycleKindFork, expected: "stale fork transaction"},
+		{name: "snapshot", kind: sandboxstore.SandboxLifecycleKindSnapshot, expected: "stale snapshot transaction"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &memorySandboxStore{
+				records: map[string]*sandboxstore.SandboxRecord{
+					"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStateActive, now),
+				},
+				lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
+					"txn-1": {
+						ID:        "txn-1",
+						SandboxID: "sandbox-1",
+						Kind:      tt.kind,
+						Phase:     sandboxstore.SandboxLifecyclePhasePublishing,
+						UpdatedAt: now.Add(-sandboxRootFSSourceCheckpointLifecycleStaleAfter - time.Second),
+					},
+				},
+			}
+			svc := rootFSProductTestService(store)
+			svc.clock = fixedClock{now: now}
+
+			err := svc.waitForSandboxLifecycleTxnExit(context.Background(), "sandbox-1")
+
+			require.NoError(t, err)
+			txn := store.lifecycleTxns["txn-1"]
+			require.NotNil(t, txn)
+			assert.Equal(t, sandboxstore.SandboxLifecyclePhaseAborted, txn.Phase)
+			assert.Equal(t, tt.expected, txn.Error)
+		})
 	}
-	svc := rootFSProductTestService(store)
-	svc.clock = fixedClock{now: now}
-
-	err := svc.waitForSandboxLifecycleTxnExit(context.Background(), "sandbox-1")
-
-	require.NoError(t, err)
-	txn := store.lifecycleTxns["txn-1"]
-	require.NotNil(t, txn)
-	assert.Equal(t, SandboxLifecyclePhaseAborted, txn.Phase)
-	assert.Equal(t, "stale fork transaction", txn.Error)
-}
-
-func TestSandboxRootFSProductWaitAbortsStaleSnapshotTxn(t *testing.T) {
-	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
-	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now),
-		},
-		lifecycleTxns: map[string]*SandboxLifecycleTxn{
-			"txn-1": {
-				ID:        "txn-1",
-				SandboxID: "sandbox-1",
-				Kind:      SandboxLifecycleKindSnapshot,
-				Phase:     SandboxLifecyclePhasePublishing,
-				UpdatedAt: now.Add(-sandboxRootFSSourceCheckpointLifecycleStaleAfter - time.Second),
-			},
-		},
-	}
-	svc := rootFSProductTestService(store)
-	svc.clock = fixedClock{now: now}
-
-	err := svc.waitForSandboxLifecycleTxnExit(context.Background(), "sandbox-1")
-
-	require.NoError(t, err)
-	txn := store.lifecycleTxns["txn-1"]
-	require.NotNil(t, txn)
-	assert.Equal(t, SandboxLifecyclePhaseAborted, txn.Phase)
-	assert.Equal(t, "stale snapshot transaction", txn.Error)
 }
 
 func TestSandboxRootFSProductForkSetsLifecycleExpirations(t *testing.T) {
 	claimedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	forkedAt := claimedAt.Add(5 * time.Minute)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, claimedAt)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, claimedAt)
 	source.Config.TTL = int32Ptr(900)
 	source.Config.HardTTL = int32Ptr(1800)
 	source.ExpiresAt = claimedAt.Add(15 * time.Minute)
 	source.HardExpiresAt = claimedAt.Add(30 * time.Minute)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": source,
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
 		},
 	}
@@ -494,16 +432,16 @@ func TestSandboxRootFSProductForkSetsLifecycleExpirations(t *testing.T) {
 func TestSandboxRootFSProductForkOverridesLifecycleConfig(t *testing.T) {
 	claimedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	forkedAt := claimedAt.Add(5 * time.Minute)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, claimedAt)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, claimedAt)
 	source.Config.TTL = int32Ptr(900)
 	source.Config.HardTTL = int32Ptr(1800)
 	source.ExpiresAt = claimedAt.Add(15 * time.Minute)
 	source.HardExpiresAt = claimedAt.Add(30 * time.Minute)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": source,
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
 		},
 	}
@@ -543,16 +481,16 @@ func TestSandboxRootFSProductForkOverridesLifecycleConfig(t *testing.T) {
 func TestSandboxRootFSProductForkCanDisableInheritedLifecycleConfig(t *testing.T) {
 	claimedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	forkedAt := claimedAt.Add(5 * time.Minute)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, claimedAt)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, claimedAt)
 	source.Config.TTL = int32Ptr(900)
 	source.Config.HardTTL = int32Ptr(1800)
 	source.ExpiresAt = claimedAt.Add(15 * time.Minute)
 	source.HardExpiresAt = claimedAt.Add(30 * time.Minute)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": source,
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
 		},
 	}
@@ -584,12 +522,12 @@ func TestSandboxRootFSProductForkCanDisableInheritedLifecycleConfig(t *testing.T
 
 func TestSandboxRootFSProductForkRejectsInvalidLifecycleConfig(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, now)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": source,
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
 		},
 	}
@@ -610,13 +548,13 @@ func TestSandboxRootFSProductForkRejectsInvalidLifecycleConfig(t *testing.T) {
 
 func TestSandboxRootFSProductForkRejectsHardExpiredSource(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now.Add(-time.Hour))
+	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, now.Add(-time.Hour))
 	source.HardExpiresAt = now.Add(-time.Second)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": source,
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
 		},
 	}
@@ -634,10 +572,10 @@ func TestSandboxRootFSProductForkRejectsHardExpiredSource(t *testing.T) {
 func TestSandboxRootFSProductRejectsExpiredSnapshotExpiration(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now),
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, now),
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
 		},
 	}
@@ -656,10 +594,10 @@ func TestSandboxRootFSProductRejectsExpiredSnapshotExpiration(t *testing.T) {
 func TestSandboxRootFSProductEnforcesTeamOwnership(t *testing.T) {
 	now := time.Now().UTC()
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now),
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, now),
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
 		},
 	}
@@ -669,21 +607,21 @@ func TestSandboxRootFSProductEnforcesTeamOwnership(t *testing.T) {
 	require.True(t, apierrors.IsForbidden(err), "error = %v", err)
 }
 
-func (s *memorySandboxStore) CreateRootFSSnapshot(_ context.Context, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error) {
+func (s *memorySandboxStore) CreateRootFSSnapshot(_ context.Context, req *sandboxstore.CreateRootFSSnapshotRequest) (*sandboxstore.RootFSSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.rootFSSnapshots == nil {
-		s.rootFSSnapshots = make(map[string]*RootFSSnapshot)
+		s.rootFSSnapshots = make(map[string]*sandboxstore.RootFSSnapshot)
 	}
 	state := s.rootFSStates[req.SandboxID]
 	if state == nil || state.LayerID == "" {
-		return nil, ErrRootFSFilesystemNotFound
+		return nil, sandboxstore.ErrRootFSFilesystemNotFound
 	}
 	record := s.records[req.SandboxID]
 	if record == nil {
-		return nil, ErrSandboxRecordNotFound
+		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
-	snapshot := &RootFSSnapshot{
+	snapshot := &sandboxstore.RootFSSnapshot{
 		ID:              req.SnapshotID,
 		FilesystemID:    req.SandboxID,
 		TeamID:          record.TeamID,
@@ -698,10 +636,10 @@ func (s *memorySandboxStore) CreateRootFSSnapshot(_ context.Context, req *Create
 	return cloneRootFSSnapshotForTest(snapshot), nil
 }
 
-func (s *memorySandboxStore) ListRootFSSnapshots(_ context.Context, req *ListRootFSSnapshotsRequest) ([]*RootFSSnapshot, error) {
+func (s *memorySandboxStore) ListRootFSSnapshots(_ context.Context, req *sandboxstore.ListRootFSSnapshotsRequest) ([]*sandboxstore.RootFSSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var snapshots []*RootFSSnapshot
+	var snapshots []*sandboxstore.RootFSSnapshot
 	for _, snapshot := range s.rootFSSnapshots {
 		if snapshot == nil || snapshot.SourceSandboxID != req.SandboxID {
 			continue
@@ -714,12 +652,12 @@ func (s *memorySandboxStore) ListRootFSSnapshots(_ context.Context, req *ListRoo
 	return snapshots, nil
 }
 
-func (s *memorySandboxStore) GetRootFSSnapshot(_ context.Context, snapshotID, teamID string) (*RootFSSnapshot, error) {
+func (s *memorySandboxStore) GetRootFSSnapshot(_ context.Context, snapshotID, teamID string) (*sandboxstore.RootFSSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snapshot := s.rootFSSnapshots[snapshotID]
 	if snapshot == nil || (teamID != "" && snapshot.TeamID != teamID) {
-		return nil, ErrRootFSSnapshotNotFound
+		return nil, sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	return cloneRootFSSnapshotForTest(snapshot), nil
 }
@@ -729,22 +667,22 @@ func (s *memorySandboxStore) DeleteRootFSSnapshot(_ context.Context, snapshotID,
 	defer s.mu.Unlock()
 	snapshot := s.rootFSSnapshots[snapshotID]
 	if snapshot == nil || (teamID != "" && snapshot.TeamID != teamID) {
-		return ErrRootFSSnapshotNotFound
+		return sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	delete(s.rootFSSnapshots, snapshotID)
 	return nil
 }
 
-func (s *memorySandboxStore) ForkRootFSFilesystem(_ context.Context, req *ForkRootFSFilesystemRequest) (*RootFSFilesystem, error) {
+func (s *memorySandboxStore) ForkRootFSFilesystem(_ context.Context, req *sandboxstore.ForkRootFSFilesystemRequest) (*sandboxstore.RootFSFilesystem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sourceState := s.rootFSStates[req.SourceSandboxID]
 	if sourceState == nil || sourceState.LayerID == "" {
-		return nil, ErrRootFSFilesystemNotFound
+		return nil, sandboxstore.ErrRootFSFilesystemNotFound
 	}
 	target := s.records[req.TargetSandboxID]
 	if target == nil {
-		return nil, ErrSandboxRecordNotFound
+		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
 	targetTeamID := req.TargetTeamID
 	if targetTeamID == "" {
@@ -754,13 +692,13 @@ func (s *memorySandboxStore) ForkRootFSFilesystem(_ context.Context, req *ForkRo
 	state.SandboxID = req.TargetSandboxID
 	state.TeamID = targetTeamID
 	if s.rootFSStates == nil {
-		s.rootFSStates = make(map[string]*SandboxRootFSState)
+		s.rootFSStates = make(map[string]*sandboxstore.SandboxRootFSState)
 	}
 	s.rootFSStates[req.TargetSandboxID] = state
 	if s.rootFSFilesystems == nil {
-		s.rootFSFilesystems = make(map[string]*RootFSFilesystem)
+		s.rootFSFilesystems = make(map[string]*sandboxstore.RootFSFilesystem)
 	}
-	filesystem := &RootFSFilesystem{
+	filesystem := &sandboxstore.RootFSFilesystem{
 		ID:                 req.TargetSandboxID,
 		TeamID:             targetTeamID,
 		SourceFilesystemID: req.SourceSandboxID,
@@ -772,22 +710,22 @@ func (s *memorySandboxStore) ForkRootFSFilesystem(_ context.Context, req *ForkRo
 	return cloneRootFSFilesystemForTest(filesystem), nil
 }
 
-func (s *memorySandboxStore) RestoreRootFSFromSnapshot(_ context.Context, req *RestoreRootFSFromSnapshotRequest) (*RootFSFilesystem, error) {
+func (s *memorySandboxStore) RestoreRootFSFromSnapshot(_ context.Context, req *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snapshot := s.rootFSSnapshots[req.SnapshotID]
 	if snapshot == nil || (req.TeamID != "" && snapshot.TeamID != req.TeamID) {
-		return nil, ErrRootFSSnapshotNotFound
+		return nil, sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	target := s.records[req.SandboxID]
 	if target == nil {
-		return nil, ErrSandboxRecordNotFound
+		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
 	if s.rootFSStates == nil {
-		s.rootFSStates = make(map[string]*SandboxRootFSState)
+		s.rootFSStates = make(map[string]*sandboxstore.SandboxRootFSState)
 	}
 	s.rootFSStates[req.SandboxID] = rootFSProductTestState(req.SandboxID, target.TeamID, snapshot.HeadLayerID)
-	filesystem := &RootFSFilesystem{
+	filesystem := &sandboxstore.RootFSFilesystem{
 		ID:                 req.SandboxID,
 		TeamID:             target.TeamID,
 		SourceFilesystemID: snapshot.FilesystemID,
@@ -806,8 +744,8 @@ func rootFSProductTestService(store *memorySandboxStore) *SandboxService {
 	}
 }
 
-func rootFSProductTestRecord(id, teamID, desiredState string, now time.Time) *SandboxRecord {
-	return &SandboxRecord{
+func rootFSProductTestRecord(id, teamID, desiredState string, now time.Time) *sandboxstore.SandboxRecord {
+	return &sandboxstore.SandboxRecord{
 		ID:                id,
 		TeamID:            teamID,
 		UserID:            "user-1",
@@ -822,8 +760,8 @@ func rootFSProductTestRecord(id, teamID, desiredState string, now time.Time) *Sa
 	}
 }
 
-func rootFSProductTestState(sandboxID, teamID, layerID string) *SandboxRootFSState {
-	return &SandboxRootFSState{
+func rootFSProductTestState(sandboxID, teamID, layerID string) *sandboxstore.SandboxRootFSState {
+	return &sandboxstore.SandboxRootFSState{
 		LayerID:           layerID,
 		SandboxID:         sandboxID,
 		TeamID:            teamID,
@@ -839,7 +777,7 @@ func rootFSProductTestState(sandboxID, teamID, layerID string) *SandboxRootFSSta
 	}
 }
 
-func cloneRootFSSnapshotForTest(snapshot *RootFSSnapshot) *RootFSSnapshot {
+func cloneRootFSSnapshotForTest(snapshot *sandboxstore.RootFSSnapshot) *sandboxstore.RootFSSnapshot {
 	if snapshot == nil {
 		return nil
 	}
@@ -847,7 +785,7 @@ func cloneRootFSSnapshotForTest(snapshot *RootFSSnapshot) *RootFSSnapshot {
 	return &clone
 }
 
-func cloneRootFSFilesystemForTest(filesystem *RootFSFilesystem) *RootFSFilesystem {
+func cloneRootFSFilesystemForTest(filesystem *sandboxstore.RootFSFilesystem) *sandboxstore.RootFSFilesystem {
 	if filesystem == nil {
 		return nil
 	}

@@ -154,20 +154,6 @@ func (p *Provider) ChangePassword(ctx context.Context, userID, oldPassword, newP
 	return p.repo.UpdateUserPassword(ctx, userID, string(passwordHash))
 }
 
-// SetPassword sets a password for a user (admin function, no old password required)
-func (p *Provider) SetPassword(ctx context.Context, userID, newPassword string) error {
-	if len(newPassword) < 8 {
-		return ErrPasswordTooWeak
-	}
-
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
-	if err != nil {
-		return fmt.Errorf("hash password: %w", err)
-	}
-
-	return p.repo.UpdateUserPassword(ctx, userID, string(passwordHash))
-}
-
 // EnsureInitUser ensures the initial user exists (for self-hosted deployments)
 func (p *Provider) EnsureInitUser(ctx context.Context) error {
 	if p.config.InitUser == nil {

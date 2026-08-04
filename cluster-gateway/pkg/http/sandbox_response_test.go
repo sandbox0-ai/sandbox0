@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	sharedssh "github.com/sandbox0-ai/sandbox0/pkg/sshgateway"
 )
 

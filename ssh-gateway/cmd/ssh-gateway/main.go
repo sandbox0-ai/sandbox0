@@ -20,7 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/ssh-gateway/pkg/metrics"
 	sshserver "github.com/sandbox0-ai/sandbox0/ssh-gateway/pkg/server"
 	"go.uber.org/zap"
 )

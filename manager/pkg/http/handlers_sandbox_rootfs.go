@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -145,7 +146,7 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 		zap.Error(err),
 	)
 	switch {
-	case apierrors.IsNotFound(err), errors.Is(err, service.ErrSandboxRecordNotFound), errors.Is(err, service.ErrRootFSSnapshotNotFound):
+	case apierrors.IsNotFound(err), errors.Is(err, sandboxstore.ErrSandboxRecordNotFound), errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound):
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "not found")
 	case apierrors.IsForbidden(err):
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "forbidden")
@@ -157,7 +158,7 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox rootfs source operation requires a running or paused sandbox")
 	case errors.Is(err, service.ErrRootFSSnapshotExpired):
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
-	case errors.Is(err, service.ErrRootFSFilesystemConflict), errors.Is(err, service.ErrRootFSHeadConflict), errors.Is(err, service.ErrRootFSFilesystemNotFound):
+	case errors.Is(err, sandboxstore.ErrRootFSFilesystemConflict), errors.Is(err, sandboxstore.ErrRootFSHeadConflict), errors.Is(err, sandboxstore.ErrRootFSFilesystemNotFound):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 	case errors.Is(err, service.ErrSandboxCheckpointRequiresCtld):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox checkpoint requires ctld")

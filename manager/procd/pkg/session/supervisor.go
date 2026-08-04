@@ -274,13 +274,6 @@ func (s *Supervisor) Activate(activation Activation) error {
 	return nil
 }
 
-// SetSandboxEnvVars replaces sandbox-scoped defaults used by future attempts.
-func (s *Supervisor) SetSandboxEnvVars(sandboxEnv map[string]string) {
-	s.mu.Lock()
-	s.sandboxEnv = process.CloneEnvVars(sandboxEnv)
-	s.mu.Unlock()
-}
-
 func (s *Supervisor) Create(spec SessionSpec, creationKey string) (*Session, bool, error) {
 	spec = normalizeSpec(spec)
 	if err := validateSpec(spec); err != nil {
@@ -797,28 +790,6 @@ func (s *Supervisor) ResumeAll() error {
 		managed.record.UpdatedAt = time.Now().UTC()
 		_, _ = s.appendEventLocked(managed, Event{Type: "session.resumed", AttemptID: attemptID})
 		if err := s.saveLocked(managed); err != nil {
-			errs = append(errs, err)
-		}
-		managed.mu.Unlock()
-	}
-	return errors.Join(errs...)
-}
-
-func (s *Supervisor) Flush() error {
-	s.mu.RLock()
-	sessions := make([]*managedSession, 0, len(s.sessions))
-	for _, managed := range s.sessions {
-		sessions = append(sessions, managed)
-	}
-	s.mu.RUnlock()
-	var errs []error
-	for _, managed := range sessions {
-		managed.mu.Lock()
-		managed.record.Cursor = managed.journal.Cursor()
-		if err := s.saveLocked(managed); err != nil {
-			errs = append(errs, err)
-		}
-		if err := managed.journal.Flush(); err != nil {
 			errs = append(errs, err)
 		}
 		managed.mu.Unlock()

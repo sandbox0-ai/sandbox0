@@ -2,7 +2,6 @@ package allocator
 
 import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 )
@@ -15,15 +14,23 @@ type ClusterSummary struct {
 	TotalPodCount    int32
 }
 
+// Metrics records scheduler-owned observations emitted while computing shared
+// template allocations. The concrete Prometheus implementation belongs to the
+// scheduler service.
+type Metrics interface {
+	ObserveCapacityClamp(clusterID, templateID string)
+	ObserveTemplateAllocation(clusterID, templateID, tenant, allocationType string, replicas int32)
+}
+
 // Allocator distributes pool sizes across clusters.
 type Allocator struct {
 	podsPerNode int
 	logger      *zap.Logger
-	metrics     *obsmetrics.SchedulerMetrics
+	metrics     Metrics
 }
 
 // NewAllocator creates a new Allocator.
-func NewAllocator(podsPerNode int, logger *zap.Logger, metrics *obsmetrics.SchedulerMetrics) *Allocator {
+func NewAllocator(podsPerNode int, logger *zap.Logger, metrics Metrics) *Allocator {
 	if podsPerNode <= 0 {
 		podsPerNode = 10
 	}
@@ -117,7 +124,7 @@ func (a *Allocator) ComputeAllocations(tpl *template.Template, clusters []*templ
 
 			if clampReason != "" {
 				if metrics != nil {
-					metrics.CapacityClamps.WithLabelValues(cluster.ClusterID, tpl.TemplateID).Inc()
+					metrics.ObserveCapacityClamp(cluster.ClusterID, tpl.TemplateID)
 				}
 				a.logger.Warn("Allocation clamped by cluster capacity",
 					zap.String("cluster_id", cluster.ClusterID),
@@ -156,8 +163,8 @@ func (a *Allocator) ComputeAllocations(tpl *template.Template, clusters []*templ
 		allocatedMaxIdle += maxIdle
 
 		if metrics != nil {
-			metrics.TemplateAllocations.WithLabelValues(cluster.ClusterID, tpl.TemplateID, tenantLabel, "min_idle").Set(float64(minIdle))
-			metrics.TemplateAllocations.WithLabelValues(cluster.ClusterID, tpl.TemplateID, tenantLabel, "max_idle").Set(float64(maxIdle))
+			metrics.ObserveTemplateAllocation(cluster.ClusterID, tpl.TemplateID, tenantLabel, "min_idle", minIdle)
+			metrics.ObserveTemplateAllocation(cluster.ClusterID, tpl.TemplateID, tenantLabel, "max_idle", maxIdle)
 		}
 
 		allocations = append(allocations, &template.TemplateAllocation{

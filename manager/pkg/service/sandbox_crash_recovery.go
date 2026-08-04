@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,11 +29,11 @@ func (s *SandboxService) RecoverTerminatedSandboxRuntime(ctx context.Context, po
 		return nil
 	}
 
-	sandboxID := sandboxIDFromPod(pod)
+	sandboxID := sandboxPodID(pod)
 	enqueue := false
 	deleteStaleRuntime := false
-	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
-		if record == nil || record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() || sandboxHardExpired(record.HardExpiresAt, s.now()) {
+	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
+		if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() || sandboxHardExpired(record.HardExpiresAt, s.now()) {
 			return nil
 		}
 		if !sandboxRecordReferencesPod(record, pod) {
@@ -49,7 +50,7 @@ func (s *SandboxService) RecoverTerminatedSandboxRuntime(ctx context.Context, po
 			}
 			return fmt.Errorf("%w: active %s transaction %s", errSandboxCrashRecoveryBlocked, activeTxn.Kind, activeTxn.ID)
 		}
-		if record.DesiredState == SandboxDesiredStatePaused {
+		if record.DesiredState == sandboxstore.SandboxDesiredStatePaused {
 			deleteStaleRuntime = true
 			return nil
 		}
@@ -59,7 +60,7 @@ func (s *SandboxService) RecoverTerminatedSandboxRuntime(ctx context.Context, po
 		enqueue = true
 		return nil
 	})
-	if errors.Is(err, ErrSandboxRecordNotFound) {
+	if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 		return nil
 	}
 	if err != nil {
@@ -117,10 +118,10 @@ func (s *SandboxService) RecoverUnhealthySandboxRuntime(ctx context.Context, pod
 		return nil
 	}
 
-	sandboxID := sandboxIDFromPod(pod)
+	sandboxID := sandboxPodID(pod)
 	enqueue := false
-	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
-		if record == nil || record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() ||
+	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
+		if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() ||
 			sandboxHardExpired(record.HardExpiresAt, s.now()) || !sandboxRecordReferencesPod(record, pod) {
 			return nil
 		}
@@ -135,7 +136,7 @@ func (s *SandboxService) RecoverUnhealthySandboxRuntime(ctx context.Context, pod
 			}
 			return fmt.Errorf("%w: active %s transaction %s", errSandboxCrashRecoveryBlocked, activeTxn.Kind, activeTxn.ID)
 		}
-		if record.DesiredState == SandboxDesiredStatePaused {
+		if record.DesiredState == sandboxstore.SandboxDesiredStatePaused {
 			return nil
 		}
 		if err := beginHealthRecoveryTxn(lockCtx, tx, record, pod); err != nil {
@@ -144,7 +145,7 @@ func (s *SandboxService) RecoverUnhealthySandboxRuntime(ctx context.Context, pod
 		enqueue = true
 		return nil
 	})
-	if errors.Is(err, ErrSandboxRecordNotFound) {
+	if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 		return nil
 	}
 	if err != nil {
@@ -169,7 +170,7 @@ func (s *SandboxService) RecoverUnhealthySandboxRuntime(ctx context.Context, pod
 	return nil
 }
 
-func beginCrashRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord, pod *corev1.Pod) error {
+func beginCrashRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord, pod *corev1.Pod) error {
 	if tx == nil || record == nil || pod == nil {
 		return nil
 	}
@@ -180,12 +181,12 @@ func beginCrashRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *Sandb
 	if !sandboxRecordReferencesPod(record, pod) {
 		return fmt.Errorf("sandbox runtime identity changed before crash recovery")
 	}
-	return tx.BeginLifecycleTxn(ctx, &SandboxLifecycleTxn{
+	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
 		ID:               uuid.NewString(),
 		SandboxID:        record.ID,
-		Kind:             SandboxLifecycleKindPause,
-		Phase:            SandboxLifecyclePhasePreparing,
-		Source:           SandboxLifecycleSourceCrash,
+		Kind:             sandboxstore.SandboxLifecycleKindPause,
+		Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
+		Source:           sandboxstore.SandboxLifecycleSourceCrash,
 		Cancelable:       false,
 		FromGeneration:   runtimeGenerationFromPod(pod),
 		FromPodNamespace: pod.Namespace,
@@ -193,7 +194,7 @@ func beginCrashRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *Sandb
 	})
 }
 
-func beginHealthRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord, pod *corev1.Pod) error {
+func beginHealthRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord, pod *corev1.Pod) error {
 	if tx == nil || record == nil || pod == nil {
 		return nil
 	}
@@ -204,12 +205,12 @@ func beginHealthRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *Sand
 	if !sandboxRecordReferencesPod(record, pod) {
 		return fmt.Errorf("sandbox runtime identity changed before health recovery")
 	}
-	return tx.BeginLifecycleTxn(ctx, &SandboxLifecycleTxn{
+	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
 		ID:               uuid.NewString(),
 		SandboxID:        record.ID,
-		Kind:             SandboxLifecycleKindPause,
-		Phase:            SandboxLifecyclePhasePreparing,
-		Source:           SandboxLifecycleSourceHealth,
+		Kind:             sandboxstore.SandboxLifecycleKindPause,
+		Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
+		Source:           sandboxstore.SandboxLifecycleSourceHealth,
 		Cancelable:       false,
 		FromGeneration:   runtimeGenerationFromPod(pod),
 		FromPodNamespace: pod.Namespace,
@@ -217,7 +218,7 @@ func beginHealthRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *Sand
 	})
 }
 
-func sandboxRecordReferencesPod(record *SandboxRecord, pod *corev1.Pod) bool {
+func sandboxRecordReferencesPod(record *sandboxstore.SandboxRecord, pod *corev1.Pod) bool {
 	if record == nil || pod == nil {
 		return false
 	}
@@ -228,16 +229,16 @@ func sandboxRecordReferencesPod(record *SandboxRecord, pod *corev1.Pod) bool {
 	return record.RuntimeGeneration == runtimeGenerationFromPod(pod)
 }
 
-func crashRecoveryTxnReferencesPod(txn *SandboxLifecycleTxn, pod *corev1.Pod) bool {
-	return runtimeRecoveryTxnReferencesPod(txn, pod, SandboxLifecycleSourceCrash)
+func crashRecoveryTxnReferencesPod(txn *sandboxstore.SandboxLifecycleTxn, pod *corev1.Pod) bool {
+	return runtimeRecoveryTxnReferencesPod(txn, pod, sandboxstore.SandboxLifecycleSourceCrash)
 }
 
-func healthRecoveryTxnReferencesPod(txn *SandboxLifecycleTxn, pod *corev1.Pod) bool {
-	return runtimeRecoveryTxnReferencesPod(txn, pod, SandboxLifecycleSourceHealth)
+func healthRecoveryTxnReferencesPod(txn *sandboxstore.SandboxLifecycleTxn, pod *corev1.Pod) bool {
+	return runtimeRecoveryTxnReferencesPod(txn, pod, sandboxstore.SandboxLifecycleSourceHealth)
 }
 
-func runtimeRecoveryTxnReferencesPod(txn *SandboxLifecycleTxn, pod *corev1.Pod, source string) bool {
-	if txn == nil || pod == nil || txn.Kind != SandboxLifecycleKindPause || txn.Source != source {
+func runtimeRecoveryTxnReferencesPod(txn *sandboxstore.SandboxLifecycleTxn, pod *corev1.Pod, source string) bool {
+	if txn == nil || pod == nil || txn.Kind != sandboxstore.SandboxLifecycleKindPause || txn.Source != source {
 		return false
 	}
 	return txn.FromGeneration == runtimeGenerationFromPod(pod) &&
@@ -249,7 +250,7 @@ func sandboxCrashRecoveryPodEligible(pod *corev1.Pod) bool {
 	if pod == nil || pod.DeletionTimestamp != nil || !controller.IsClaimedSandboxPod(pod) {
 		return false
 	}
-	return strings.TrimSpace(sandboxIDFromPod(pod)) != ""
+	return strings.TrimSpace(sandboxPodID(pod)) != ""
 }
 
 func terminatedProcdContainer(pod *corev1.Pod) (*corev1.ContainerStatus, *corev1.ContainerStateTerminated) {

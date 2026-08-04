@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/volumefuse"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
@@ -96,14 +96,14 @@ func TestUnbindLockedSnapshotKeepsSharedVolumeUntilLastPortal(t *testing.T) {
 		volumeID:  "vol-1",
 		teamID:    "team-a",
 		mountedAt: time.Now().UTC(),
-		fs:        volumefuse.New("portal-a", time.Second, unboundSession{}),
+		fs:        volumefuse.New("portal-a", time.Second, &localSession{}),
 	}
 	pmB := &portalMount{
 		mountPath: "/workspace/b",
 		volumeID:  "vol-1",
 		teamID:    "team-a",
 		mountedAt: time.Now().UTC(),
-		fs:        volumefuse.New("portal-b", time.Second, unboundSession{}),
+		fs:        volumefuse.New("portal-b", time.Second, &localSession{}),
 	}
 
 	cleanup := mgr.unbindLockedSnapshot(pmA, false)

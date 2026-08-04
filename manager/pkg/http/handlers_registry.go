@@ -6,10 +6,10 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/registry"
 	"go.uber.org/zap"
 )
 
@@ -37,7 +37,7 @@ func (s *Server) getRegistryCredentials(c *gin.Context) {
 	})
 	if err != nil {
 		s.logger.Error("Failed to get registry credentials", zap.Error(err))
-		if errors.Is(err, service.ErrRegistryProviderNotConfigured) {
+		if errors.Is(err, registryservice.ErrRegistryProviderNotConfigured) {
 			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "registry provider is not configured")
 			return
 		}

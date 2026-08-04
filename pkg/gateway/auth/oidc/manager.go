@@ -113,15 +113,6 @@ func (m *Manager) GetProvider(id string) (*Provider, error) {
 	return provider, nil
 }
 
-// ListProviders returns all enabled providers
-func (m *Manager) ListProviders() []*Provider {
-	providers := make([]*Provider, 0, len(m.providers))
-	for _, p := range m.providers {
-		providers = append(providers, p)
-	}
-	return providers
-}
-
 type authURLConfig struct {
 	webLoginHandoff bool
 }
@@ -470,9 +461,4 @@ func (m *Manager) ListProviderInfo() []ProviderInfo {
 		})
 	}
 	return info
-}
-
-// HasProvider checks if any OIDC providers are configured
-func (m *Manager) HasProvider() bool {
-	return len(m.providers) > 0
 }

@@ -14,9 +14,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	egressauth "github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -375,11 +377,11 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausingRunti
 		}},
 		credentialStore:     store,
 		webhookStateVolumes: volumeClient,
-		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
+		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:           "sandbox-a",
 				TeamID:       "team-a",
-				DesiredState: SandboxDesiredStatePaused,
+				DesiredState: sandboxstore.SandboxDesiredStatePaused,
 			},
 		}},
 		logger: zap.NewNop(),
@@ -418,11 +420,11 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime
 		}},
 		credentialStore:     store,
 		webhookStateVolumes: volumeClient,
-		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
+		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                  "sandbox-a",
 				TeamID:              "team-a",
-				DesiredState:        SandboxDesiredStateActive,
+				DesiredState:        sandboxstore.SandboxDesiredStateActive,
 				CurrentPodNamespace: "ns-a",
 				CurrentPodName:      "pod-new",
 				RuntimeGeneration:   2,
@@ -457,10 +459,10 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime
 
 func TestRuntimeDeletionDispositionDoesNotCacheStaleRuntime(t *testing.T) {
 	svc := &SandboxService{
-		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
+		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                "sandbox-a",
-				DesiredState:      SandboxDesiredStateActive,
+				DesiredState:      sandboxstore.SandboxDesiredStateActive,
 				CurrentPodName:    "pod-new",
 				RuntimeGeneration: 2,
 			},
@@ -503,7 +505,7 @@ func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
 		t.Fatalf("parse ctld port: %v", err)
 	}
 	svc := &SandboxService{
-		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
 		config: SandboxServiceConfig{
 			CtldEnabled: true,
 			CtldPort:    ctldPort,
@@ -557,13 +559,13 @@ func TestSandboxServicePausedSandboxRequestsHotVolumeRetention(t *testing.T) {
 		t.Fatalf("parse ctld port: %v", err)
 	}
 	svc := &SandboxService{
-		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
 		config: SandboxServiceConfig{
 			CtldEnabled: true,
 			CtldPort:    ctldPort,
 		},
-		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
-			"sandbox-a": {ID: "sandbox-a", DesiredState: SandboxDesiredStatePaused},
+		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-a": {ID: "sandbox-a", DesiredState: sandboxstore.SandboxDesiredStatePaused},
 		}},
 		logger: zap.NewNop(),
 	}
@@ -653,7 +655,7 @@ func TestSandboxLifecycleInfoFromPodIncludesVolumePortals(t *testing.T) {
 	pod.UID = types.UID("pod-uid-a")
 	pod.Spec.NodeName = "node-a"
 	pod.Status.HostIP = "10.0.0.8"
-	mountsJSON, err := json.Marshal([]ClaimMount{{
+	mountsJSON, err := json.Marshal([]managerapi.ClaimMount{{
 		SandboxVolumeID: "vol-1",
 		MountPoint:      "/workspace/data",
 	}})
@@ -762,12 +764,12 @@ func TestSystemVolumeReconcilerKeepsPausedOwnedVolume(t *testing.T) {
 	svc := &SandboxService{
 		podLister:           corelisters.NewPodLister(indexer),
 		webhookStateVolumes: volumeClient,
-		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{
+		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                   "sandbox-a",
 				TeamID:               "team-a",
 				UserID:               "user-a",
-				DesiredState:         SandboxDesiredStatePaused,
+				DesiredState:         sandboxstore.SandboxDesiredStatePaused,
 				WebhookStateVolumeID: "volume-a",
 			},
 		}},

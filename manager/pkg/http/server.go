@@ -11,7 +11,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialsource"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthservice"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -27,15 +32,15 @@ import (
 type Server struct {
 	router                  *gin.Engine
 	sandboxService          *service.SandboxService
-	egressAuthService       *service.EgressAuthService
-	credentialSourceService *service.CredentialSourceService
-	templateService         *service.TemplateService
-	registryService         *service.RegistryService
+	egressAuthService       *egressauthservice.EgressAuthService
+	credentialSourceService *credentialsource.CredentialSourceService
+	templateService         *templateservice.TemplateService
+	registryService         *registryservice.RegistryService
 	templateStore           store.TemplateStore
 	templateReconciler      TemplateReconciler
 	templateStoreEnabled    bool
 	templateHandler         *templatehttp.Handler
-	clusterService          *service.ClusterService
+	clusterService          *clusterservice.ClusterService
 	quotaRepo               *quota.Repository
 	authValidator           *internalauth.Validator
 	logger                  *zap.Logger
@@ -65,75 +70,78 @@ type TemplateReconciler interface {
 	TriggerReconcile(ctx context.Context)
 }
 
-// NewServer creates a new HTTP server
-func NewServer(
-	sandboxService *service.SandboxService,
-	egressAuthService *service.EgressAuthService,
-	credentialSourceService *service.CredentialSourceService,
-	templateService *service.TemplateService,
-	registryService *service.RegistryService,
-	templateStore store.TemplateStore,
-	templateReconciler TemplateReconciler,
-	templateStoreEnabled bool,
-	clusterService *service.ClusterService,
-	authValidator *internalauth.Validator,
-	logger *zap.Logger,
-	port int,
-	obsProvider *observability.Provider,
-	publicRootDomain string,
-	publicRegionID string,
-) *Server {
+// ServerDependencies names the manager capabilities exposed over HTTP. Using
+// this struct keeps composition changes local and avoids order-dependent
+// constructor calls as features are added or removed.
+type ServerDependencies struct {
+	SandboxService          *service.SandboxService
+	EgressAuthService       *egressauthservice.EgressAuthService
+	CredentialSourceService *credentialsource.CredentialSourceService
+	TemplateService         *templateservice.TemplateService
+	RegistryService         *registryservice.RegistryService
+	TemplateStore           store.TemplateStore
+	TemplateReconciler      TemplateReconciler
+	TemplateStoreEnabled    bool
+	ClusterService          *clusterservice.ClusterService
+	QuotaRepository         *quota.Repository
+	AuthValidator           *internalauth.Validator
+	Logger                  *zap.Logger
+	Port                    int
+	ObservabilityProvider   *observability.Provider
+	PublicRootDomain        string
+	PublicRegionID          string
+}
+
+// NewServerWithDependencies creates a manager HTTP server from named
+// dependencies.
+func NewServerWithDependencies(deps ServerDependencies) *Server {
 	// Set gin mode based on log level
 	gin.SetMode(gin.ReleaseMode)
 
 	router := gin.New()
-	router.Use(httpobs.GinMiddleware(obsProvider.HTTPServerConfig(nil)))
+	router.Use(httpobs.GinMiddleware(deps.ObservabilityProvider.HTTPServerConfig(nil)))
 	router.Use(gin.Recovery())
-	router.Use(requestLogger(logger))
+	router.Use(requestLogger(deps.Logger))
 
 	server := &Server{
 		router:                  router,
-		sandboxService:          sandboxService,
-		egressAuthService:       egressAuthService,
-		credentialSourceService: credentialSourceService,
-		templateService:         templateService,
-		registryService:         registryService,
-		templateStore:           templateStore,
-		templateReconciler:      templateReconciler,
-		templateStoreEnabled:    templateStoreEnabled,
-		clusterService:          clusterService,
-		authValidator:           authValidator,
-		logger:                  logger,
-		port:                    port,
-		obsProvider:             obsProvider,
-		publicRootDomain:        publicRootDomain,
-		publicRegionID:          publicRegionID,
+		sandboxService:          deps.SandboxService,
+		egressAuthService:       deps.EgressAuthService,
+		credentialSourceService: deps.CredentialSourceService,
+		templateService:         deps.TemplateService,
+		registryService:         deps.RegistryService,
+		templateStore:           deps.TemplateStore,
+		templateReconciler:      deps.TemplateReconciler,
+		templateStoreEnabled:    deps.TemplateStoreEnabled,
+		clusterService:          deps.ClusterService,
+		quotaRepo:               deps.QuotaRepository,
+		authValidator:           deps.AuthValidator,
+		logger:                  deps.Logger,
+		port:                    deps.Port,
+		obsProvider:             deps.ObservabilityProvider,
+		publicRootDomain:        deps.PublicRootDomain,
+		publicRegionID:          deps.PublicRegionID,
 	}
-	if templateStoreEnabled {
+	if deps.TemplateStoreEnabled {
 		registryHosts := []string(nil)
-		if templateService != nil {
-			registryHosts = templateService.RegistryHosts()
+		if deps.TemplateService != nil {
+			registryHosts = deps.TemplateService.RegistryHosts()
 		}
-		buildStore, _ := templateStore.(store.TemplateBuildStore)
+		buildStore, _ := deps.TemplateStore.(store.TemplateBuildStore)
 		server.templateHandler = &templatehttp.Handler{
-			Store:                templateStore,
+			Store:                deps.TemplateStore,
 			BuildStore:           buildStore,
-			SourceResolver:       sandboxService,
-			Reconciler:           templateReconciler,
-			StatsProvider:        &clusterTemplateStatsProvider{clusterService: clusterService},
+			SourceResolver:       deps.SandboxService,
+			Reconciler:           deps.TemplateReconciler,
+			StatsProvider:        &clusterTemplateStatsProvider{clusterService: deps.ClusterService},
 			PrivateRegistryHosts: registryHosts,
-			Logger:               logger,
+			Logger:               deps.Logger,
 		}
 	}
 
 	server.setupRoutes()
 
 	return server
-}
-
-// Handler exposes the HTTP handler for tests.
-func (s *Server) Handler() http.Handler {
-	return s.router
 }
 
 // setupRoutes sets up the HTTP routes
@@ -244,10 +252,6 @@ func (s *Server) setupRoutes() {
 			internalTeamQuotas.DELETE("/:dimension", s.deleteTeamQuotaInternal)
 		}
 	}
-}
-
-func (s *Server) SetQuotaRepository(repo *quota.Repository) {
-	s.quotaRepo = repo
 }
 
 // Start starts the HTTP server

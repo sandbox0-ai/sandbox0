@@ -21,15 +21,3 @@ type TraceExporterConfig = coreobs.TraceExporterConfig
 func ConfigFromEnv(serviceName string, logger *zap.Logger) Config {
 	return Config(coreobs.ConfigFromEnv(serviceName, logger))
 }
-
-// Validate checks if the config is valid.
-func (c *Config) Validate() error {
-	coreConfig := coreobs.Config(*c)
-	return coreConfig.Validate()
-}
-
-func (c *Config) setDefaults() {
-	coreConfig := coreobs.Config(*c)
-	coreConfig.ApplyDefaults()
-	*c = Config(coreConfig)
-}

@@ -13,11 +13,18 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+func updateHubPod(t *testing.T, hub *Hub, pod *corev1.Pod) {
+	t.Helper()
+	if err := hub.updatePod(context.Background(), pod); err != nil {
+		t.Fatalf("update pod: %v", err)
+	}
+}
+
 func TestHubSendsCurrentSnapshotAndActualChanges(t *testing.T) {
 	sink := &recordingSink{}
 	hub := NewHub(sink)
 	pod := testPod()
-	hub.UpdatePod(pod)
+	updateHubPod(t, hub, pod)
 
 	subscriberID, updates, unsubscribe, err := hub.Subscribe(pod.Namespace, pod.Name, string(pod.UID))
 	if err != nil {
@@ -36,14 +43,14 @@ func TestHubSendsCurrentSnapshotAndActualChanges(t *testing.T) {
 		runtimecontrol.AnnotationRuntimeGeneration: "2",
 		runtimecontrol.AnnotationConfig:            `{"env_vars":{"MODE":"test"}}`,
 	}
-	hub.UpdatePod(claimed)
+	updateHubPod(t, hub, claimed)
 	select {
 	case snapshot := <-updates:
 		t.Fatalf("unpublished assignment produced snapshot %#v", snapshot)
 	default:
 	}
 	publishTestAssignment(t, claimed)
-	hub.UpdatePod(claimed)
+	updateHubPod(t, hub, claimed)
 	waiting := receiveSnapshot(t, updates)
 	if waiting.State != runtimecontrol.DesiredWaitingStorage || waiting.Assignment == nil {
 		t.Fatalf("waiting snapshot = %#v", waiting)
@@ -51,7 +58,7 @@ func TestHubSendsCurrentSnapshotAndActualChanges(t *testing.T) {
 
 	ready := claimed.DeepCopy()
 	ready.Annotations[runtimecontrol.AnnotationAssignmentReady] = waiting.Revision
-	hub.UpdatePod(ready)
+	updateHubPod(t, hub, ready)
 	active := receiveSnapshot(t, updates)
 	if active.State != runtimecontrol.DesiredActive || active.Revision != waiting.Revision {
 		t.Fatalf("active snapshot = %#v", active)
@@ -71,7 +78,7 @@ func TestHubSendsCurrentSnapshotAndActualChanges(t *testing.T) {
 
 	unchanged := ready.DeepCopy()
 	unchanged.Annotations["unrelated"] = "value"
-	hub.UpdatePod(unchanged)
+	updateHubPod(t, hub, unchanged)
 	select {
 	case snapshot := <-updates:
 		t.Fatalf("unrelated update produced snapshot %#v", snapshot)
@@ -82,7 +89,7 @@ func TestHubSendsCurrentSnapshotAndActualChanges(t *testing.T) {
 func TestHubCoalescesToLatestCompleteSnapshot(t *testing.T) {
 	hub := NewHub(nil)
 	pod := testPod()
-	hub.UpdatePod(pod)
+	updateHubPod(t, hub, pod)
 	_, updates, unsubscribe, err := hub.Subscribe(pod.Namespace, pod.Name, string(pod.UID))
 	if err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
@@ -97,11 +104,11 @@ func TestHubCoalescesToLatestCompleteSnapshot(t *testing.T) {
 		runtimecontrol.AnnotationConfig:            `{"env_vars":{"STEP":"one"}}`,
 	}
 	publishTestAssignment(t, first)
-	hub.UpdatePod(first)
+	updateHubPod(t, hub, first)
 	second := first.DeepCopy()
 	second.Annotations[runtimecontrol.AnnotationConfig] = `{"env_vars":{"STEP":"two"}}`
 	publishTestAssignment(t, second)
-	hub.UpdatePod(second)
+	updateHubPod(t, hub, second)
 
 	snapshot := receiveSnapshot(t, updates)
 	if snapshot.Assignment == nil || snapshot.Assignment.EnvVars["STEP"] != "two" {
@@ -113,7 +120,7 @@ func TestHubOnlyAcceptsNewestSubscription(t *testing.T) {
 	sink := &recordingSink{}
 	hub := NewHub(sink)
 	pod := testPod()
-	hub.UpdatePod(pod)
+	updateHubPod(t, hub, pod)
 
 	firstID, firstUpdates, firstUnsubscribe, err := hub.Subscribe(pod.Namespace, pod.Name, string(pod.UID))
 	if err != nil {
@@ -152,7 +159,7 @@ func TestHubRejectsReadyObservationBeforeStorageActivation(t *testing.T) {
 		runtimecontrol.AnnotationRuntimeGeneration: "1",
 	}
 	publishTestAssignment(t, pod)
-	hub.UpdatePod(pod)
+	updateHubPod(t, hub, pod)
 
 	subscriberID, updates, unsubscribe, err := hub.Subscribe(pod.Namespace, pod.Name, string(pod.UID))
 	if err != nil {
@@ -182,7 +189,7 @@ func TestHubPublishesDesiredStateBeforeSnapshotCanBeObserved(t *testing.T) {
 	}
 	hub := NewHub(sink)
 	pod := testPod()
-	hub.UpdatePod(pod)
+	updateHubPod(t, hub, pod)
 
 	subscriberID, updates, unsubscribe, err := hub.Subscribe(pod.Namespace, pod.Name, string(pod.UID))
 	if err != nil {
@@ -197,7 +204,10 @@ func TestHubPublishesDesiredStateBeforeSnapshotCanBeObserved(t *testing.T) {
 		runtimecontrol.AnnotationRuntimeGeneration: "1",
 	}
 	publishTestAssignment(t, claimed)
-	go hub.UpdatePod(claimed)
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- hub.updatePod(context.Background(), claimed)
+	}()
 
 	select {
 	case <-sink.started:
@@ -212,6 +222,9 @@ func TestHubPublishesDesiredStateBeforeSnapshotCanBeObserved(t *testing.T) {
 
 	close(sink.release)
 	snapshot := receiveSnapshot(t, updates)
+	if err := <-updateDone; err != nil {
+		t.Fatalf("update claimed pod: %v", err)
+	}
 	if snapshot.State != runtimecontrol.DesiredWaitingStorage {
 		t.Fatalf("snapshot state = %q, want waiting_storage", snapshot.State)
 	}

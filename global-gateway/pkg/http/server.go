@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	memcachepkg "github.com/sandbox0-ai/sandbox0/global-gateway/pkg/memcache"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	gatewaybuiltin "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
 	gatewayoidc "github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/oidc"
@@ -20,7 +21,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/tenantdir"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
-	memcachepkg "github.com/sandbox0-ai/sandbox0/pkg/memcache"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
@@ -138,7 +138,7 @@ func NewServer(
 	if cfg.BuiltInAuth.InitUser != nil && (cfg.BuiltInAuth.Enabled || oidcConfigured) {
 		if userCount, err := identityRepo.CountUsers(context.Background()); err == nil && userCount == 0 {
 			homeRegionID := strings.TrimSpace(cfg.BuiltInAuth.InitUser.HomeRegionID)
-			if err := handlers.ValidateInitUserHomeRegion(context.Background(), regionRepo, homeRegionID); err != nil {
+			if err := ValidateInitUserHomeRegion(context.Background(), regionRepo, homeRegionID); err != nil {
 				return nil, err
 			}
 		}
@@ -175,7 +175,7 @@ func NewServer(
 	return server, nil
 }
 
-// Handler returns the HTTP handler for tests.
+// Handler returns the global gateway HTTP handler for embedders.
 func (s *Server) Handler() stdhttp.Handler {
 	return s.router
 }
@@ -204,7 +204,7 @@ func (s *Server) setupRoutes() {
 		Logger:                  s.logger,
 	})
 
-	regionHandler := handlers.NewRegionHandler(s.regionRepo, s.logger)
+	regionHandler := NewRegionHandler(s.regionRepo, s.logger)
 	regions := s.router.Group("/regions")
 	regions.Use(s.authMiddleware.Authenticate())
 	if s.rateLimiter != nil {

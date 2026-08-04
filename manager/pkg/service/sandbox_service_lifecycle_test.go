@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -15,7 +16,7 @@ func TestGetSandboxReturnsNotFoundWhenRecordAndPodAreMissing(t *testing.T) {
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(),
 		podLister:    newTestPodLister(t),
-		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{}},
+		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}},
 		clock:        systemTime{},
 		logger:       zap.NewNop(),
 	}
@@ -33,7 +34,7 @@ func TestGetSandboxFallsBackToPodWhenRecordIsMissing(t *testing.T) {
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(pod),
 		podLister:    newTestPodLister(t, pod),
-		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{}},
+		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}},
 		config:       SandboxServiceConfig{ProcdPort: 49983},
 		clock:        systemTime{},
 		logger:       zap.NewNop(),

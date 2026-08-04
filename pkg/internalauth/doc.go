@@ -17,8 +17,6 @@
 //
 //   - Generator: Creates signed JWT tokens for a caller service (uses private key)
 //   - Validator: Validates tokens for a target service (uses public key only)
-//   - Middleware: HTTP middleware for automatic token validation
-//   - Transport: HTTP RoundTripper for automatic token injection
 //
 // # Ed25519 Asymmetric Signing
 //
@@ -59,51 +57,20 @@
 //	    PublicKey: publicKey,
 //	})
 //
-//	middleware := internalauth.AuthMiddleware(validator, internalauth.DefaultExtractor())
-//	http.Handle("/api/", middleware(handler))
+//	claims, err := validator.Validate(token)
+//	if err != nil {
+//	    // Reject the request.
+//	}
 //
-// # HTTP Client with Automatic Token Injection
+// # Propagating Claims
 //
-//	// Create an auto-authenticating HTTP client
-//	client := internalauth.NewAuthenticatedClient(generator, "manager-storage")
+// Applications that pass authenticated claims through a context can use
+// WithClaims and ClaimsFromContext:
 //
-//	// Add team context to request
-//	req, _ := http.NewRequest("GET", "http://manager:8081/api/v1/volumes", nil)
-//	req = req.WithContext(internalauth.ContextWithTeam(req.Context(), "team-123"))
-//
-//	// Token is automatically added
-//	resp, err := client.Do(req)
-//
-// # Middleware Usage
-//
-//	// Simple auth middleware
-//	mux := http.NewServeMux()
-//	authMiddleware := internalauth.AuthMiddleware(validator, internalauth.DefaultExtractor())
-//
-//	// Apply to all routes
-//	mux.Handle("/api/", authMiddleware(handler))
-//
-//	// Require specific permissions
-//	mux.Handle("/api/admin/", authMiddleware(
-//	    internalauth.RequirePermissions("admin:*")(handler),
-//	))
-//
-//	// Require specific team
-//	mux.Handle("/api/teams/", authMiddleware(
-//	    internalauth.RequireTeam("team-123")(handler),
-//	))
-//
-// # Accessing Claims in Handlers
-//
-//	func handler(w http.ResponseWriter, r *http.Request) {
-//	    claims := internalauth.ClaimsFromContext(r.Context())
-//	    teamID := claims.TeamID
-//	    userID := claims.UserID
-//	    caller := claims.Caller
-//
-//	    // Or use convenience functions
-//	    teamID := internalauth.GetTeamID(r.Context())
-//	    hasPermission := internalauth.HasPermission(r.Context(), "sandboxvolume:write")
+//	ctx = internalauth.WithClaims(ctx, claims)
+//	claims = internalauth.ClaimsFromContext(ctx)
+//	if claims != nil && internalauth.HasPermission(ctx, "sandboxvolume:write") {
+//	    // Allow the operation.
 //	}
 //
 // # Token Structure

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 )
 
 func main() {

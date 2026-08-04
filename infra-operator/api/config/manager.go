@@ -235,7 +235,8 @@ type ManagerConfig struct {
 	// +optional
 	CredentialStore CredentialStoreConfig `yaml:"credential_store" json:"-"`
 
-	// Autoscaler config for pool scaling behavior
+	// Autoscaler preserves the legacy configuration surface. Manager currently
+	// keeps every warm pool fixed at minIdle and ignores these settings.
 	// +optional
 	// +kubebuilder:default={}
 	Autoscaler AutoscalerConfig `yaml:"autoscaler" json:"autoscaler"`
@@ -327,7 +328,8 @@ type SandboxPodPlacementConfig struct {
 	Tolerations           []corev1.Toleration `yaml:"tolerations" json:"-"`
 }
 
-// AutoscalerConfig holds autoscaler settings for pool scaling behavior.
+// AutoscalerConfig preserves legacy manager autoscaler settings. They remain
+// accepted for configuration compatibility but are currently ignored.
 type AutoscalerConfig struct {
 	// MinScaleInterval is the minimum time between scale operations for a template.
 	// This prevents thundering herd when multiple cold claims arrive simultaneously.

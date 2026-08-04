@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	managernaming "github.com/sandbox0-ai/sandbox0/manager/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
@@ -740,7 +741,7 @@ func ensureContainerVolumeMount(container *corev1.Container, mount corev1.Volume
 // Returns true if the spec was mutated.
 func applyProcdSecretVolume(spec *corev1.PodSpec, template *SandboxTemplate) bool {
 	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	name, err := naming.ProcdConfigSecretName(clusterID, template.Name)
+	name, err := managernaming.ProcdConfigSecretName(clusterID, template.Name)
 	if err != nil {
 		return false
 	}

@@ -3,7 +3,7 @@ package watcher
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,14 +47,14 @@ func TestHandlePodUpsertDoesNotNotifyForAppliedHashOnlyUpdate(t *testing.T) {
 	}, nil)
 	pod := testSandboxPod("sandbox-a", "uid-a", "10", "10.0.0.2", "node-a")
 	pod.Annotations = map[string]string{
-		controller.AnnotationNetworkPolicy:     `{"mode":"allow-all"}`,
-		controller.AnnotationNetworkPolicyHash: "hash-a",
+		sandboxpod.AnnotationNetworkPolicy:     `{"mode":"allow-all"}`,
+		sandboxpod.AnnotationNetworkPolicyHash: "hash-a",
 	}
 	w.handlePodUpsert(pod)
 
 	applied := pod.DeepCopy()
 	applied.ResourceVersion = "11"
-	applied.Annotations[controller.AnnotationNetworkPolicyAppliedHash] = "hash-a"
+	applied.Annotations[sandboxpod.AnnotationNetworkPolicyAppliedHash] = "hash-a"
 	w.handlePodUpsert(applied)
 
 	if notifications != 1 {
@@ -74,15 +74,15 @@ func TestHandlePodUpsertNotifiesWhenPolicyHashChanges(t *testing.T) {
 	}, nil)
 	pod := testSandboxPod("sandbox-a", "uid-a", "10", "10.0.0.2", "node-a")
 	pod.Annotations = map[string]string{
-		controller.AnnotationNetworkPolicy:     `{"mode":"allow-all"}`,
-		controller.AnnotationNetworkPolicyHash: "hash-a",
+		sandboxpod.AnnotationNetworkPolicy:     `{"mode":"allow-all"}`,
+		sandboxpod.AnnotationNetworkPolicyHash: "hash-a",
 	}
 	w.handlePodUpsert(pod)
 
 	changed := pod.DeepCopy()
 	changed.ResourceVersion = "11"
-	changed.Annotations[controller.AnnotationNetworkPolicy] = `{"mode":"block-all"}`
-	changed.Annotations[controller.AnnotationNetworkPolicyHash] = "hash-b"
+	changed.Annotations[sandboxpod.AnnotationNetworkPolicy] = `{"mode":"block-all"}`
+	changed.Annotations[sandboxpod.AnnotationNetworkPolicyHash] = "hash-b"
 	w.handlePodUpsert(changed)
 
 	if notifications != 2 {
@@ -104,12 +104,12 @@ func TestListSandboxesByNodeUsesInformerCacheAsAuthoritativeSource(t *testing.T)
 	noIP := testSandboxPod("sandbox-d", "uid-d", "13", "", "node-a")
 	otherNode := testSandboxPod("sandbox-e", "uid-e", "14", "10.0.0.5", "node-b")
 	reserved := testSandboxPod("sandbox-f", "uid-f", "15", "10.0.0.6", "node-a")
-	reserved.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+	reserved.Labels[sandboxpod.LabelPoolType] = sandboxpod.PoolTypeIdle
 	reserved.Annotations = map[string]string{
-		controller.AnnotationHotClaimReservation: "reservation-token",
+		sandboxpod.AnnotationHotClaimReservation: "reservation-token",
 	}
 	idle := testSandboxPod("sandbox-g", "uid-g", "16", "10.0.0.7", "node-a")
-	idle.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+	idle.Labels[sandboxpod.LabelPoolType] = sandboxpod.PoolTypeIdle
 
 	for _, pod := range []*corev1.Pod{active, deleting, terminal, noIP, otherNode, reserved, idle} {
 		if err := informer.GetStore().Add(pod); err != nil {
@@ -150,8 +150,8 @@ func testSandboxPod(name, uid, resourceVersion, podIP, nodeName string) *corev1.
 			UID:             types.UID(uid),
 			ResourceVersion: resourceVersion,
 			Labels: map[string]string{
-				controller.LabelSandboxID: "sandbox-id-" + name,
-				controller.LabelPoolType:  controller.PoolTypeActive,
+				sandboxpod.LabelSandboxID: "sandbox-id-" + name,
+				sandboxpod.LabelPoolType:  sandboxpod.PoolTypeActive,
 			},
 		},
 		Spec: corev1.PodSpec{

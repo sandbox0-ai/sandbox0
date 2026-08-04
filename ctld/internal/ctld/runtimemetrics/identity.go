@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -61,7 +61,7 @@ func buildIdentityIndex(podLister corelisters.PodLister, nodeName string) (ident
 }
 
 func identityFromPod(pod *corev1.Pod, nodeName string) (sandboxIdentity, bool) {
-	if !controller.IsClaimedSandboxPod(pod) {
+	if !sandboxpod.IsClaimed(pod) {
 		return sandboxIdentity{}, false
 	}
 	if strings.TrimSpace(nodeName) != "" && strings.TrimSpace(pod.Spec.NodeName) != strings.TrimSpace(nodeName) {
@@ -71,9 +71,9 @@ func identityFromPod(pod *corev1.Pod, nodeName string) (sandboxIdentity, bool) {
 		return sandboxIdentity{}, false
 	}
 
-	sandboxID := strings.TrimSpace(pod.Labels[controller.LabelSandboxID])
-	teamID := strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
-	rawGeneration := strings.TrimSpace(pod.Annotations[controller.AnnotationRuntimeGeneration])
+	sandboxID := strings.TrimSpace(pod.Labels[sandboxpod.LabelSandboxID])
+	teamID := strings.TrimSpace(pod.Annotations[sandboxpod.AnnotationTeamID])
+	rawGeneration := strings.TrimSpace(pod.Annotations[sandboxpod.AnnotationRuntimeGeneration])
 	if sandboxID == "" || teamID == "" || rawGeneration == "" {
 		return sandboxIdentity{}, false
 	}

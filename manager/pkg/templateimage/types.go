@@ -9,7 +9,7 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	managerregistry "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
+	managerregistry "github.com/sandbox0-ai/sandbox0/pkg/registry"
 )
 
 // ObjectReader opens immutable rootfs layer objects.

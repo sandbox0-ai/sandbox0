@@ -40,11 +40,6 @@ type Summary struct {
 	ReadyNodes   int
 }
 
-// Reconcile preserves the original gating behavior for existing callers.
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) error {
-	return r.Check(ctx, infra, compiledPlan)
-}
-
 // Check refreshes node labels and gates workflow progress on at least one
 // ready data-plane node.
 func (r *Reconciler) Check(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) error {

@@ -74,17 +74,9 @@ func TestEncryptedS0FSObjectsAndLocalStateHidePlaintext(t *testing.T) {
 	assertFileDoesNotContain(t, filepath.Join(dir, "engine.wal"), []byte(secretName))
 	assertFileDoesNotContain(t, filepath.Join(dir, "engine.wal"), secretPayload)
 
-	snapshotState, err := engine.CreateSnapshot("snap-1")
+	_, err = engine.CreateSnapshot("snap-1")
 	if err != nil {
 		t.Fatalf("CreateSnapshot() error = %v", err)
-	}
-	snapshotReader := NewSnapshotReader(snapshotState, engine.materializer)
-	snapshotPayload, err := snapshotReader.Read(node.Inode, 0, uint64(len(secretPayload)))
-	if err != nil {
-		t.Fatalf("snapshot Read() error = %v", err)
-	}
-	if got := string(snapshotPayload); got != string(secretPayload) {
-		t.Fatalf("snapshot data = %q, want %q", got, string(secretPayload))
 	}
 	assertFileDoesNotContain(t, filepath.Join(dir, "snapshots", "snap-1.json"), []byte(secretName))
 	assertFileDoesNotContain(t, filepath.Join(dir, "snapshots", "snap-1.json"), secretPayload)

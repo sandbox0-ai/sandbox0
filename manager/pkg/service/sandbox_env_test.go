@@ -1,9 +1,13 @@
 package service
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+)
 
 func TestCloneSandboxConfigClonesEnvVars(t *testing.T) {
-	cfg := &SandboxConfig{
+	cfg := &sandboxstore.SandboxConfig{
 		EnvVars: map[string]string{
 			"APP_ENV": "test",
 		},

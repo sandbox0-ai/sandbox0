@@ -5,17 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 )
 
 func TestFetchClusterSummariesPublishesCapacityMetrics(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	metrics := obsmetrics.NewScheduler(registry)
+	metrics := &metricRecorder{capacity: make(map[string]float64), summaryAge: make(map[string]float64)}
 
 	rec := NewMultiClusterReconciler(
 		nil,
@@ -50,16 +46,43 @@ func TestFetchClusterSummariesPublishesCapacityMetrics(t *testing.T) {
 		},
 	})
 
-	if got := testutil.ToFloat64(metrics.ClusterCapacity.WithLabelValues("cluster-a", "available_headroom")); got != 23 {
+	if got := metrics.capacity["cluster-a/available_headroom"]; got != 23 {
 		t.Fatalf("available_headroom = %v, want 23", got)
 	}
-	if got := testutil.ToFloat64(metrics.ClusterCapacity.WithLabelValues("cluster-a", "pending_active_pods")); got != 2 {
+	if got := metrics.capacity["cluster-a/pending_active_pods"]; got != 2 {
 		t.Fatalf("pending_active_pods = %v, want 2", got)
 	}
-	if got := testutil.ToFloat64(metrics.ClusterSummaryAge.WithLabelValues("cluster-a")); got != 0 {
+	if got := metrics.summaryAge["cluster-a"]; got != 0 {
 		t.Fatalf("cluster_summary_age = %v, want 0", got)
 	}
 }
+
+type metricRecorder struct {
+	capacity   map[string]float64
+	summaryAge map[string]float64
+}
+
+func (*metricRecorder) ObserveCapacityClamp(string, string) {}
+
+func (*metricRecorder) ObserveTemplateAllocation(string, string, string, string, int32) {}
+
+func (*metricRecorder) ObserveReconcileDuration(time.Duration) {}
+
+func (*metricRecorder) ObserveReconcileResult(string) {}
+
+func (*metricRecorder) ObserveLastReconcileTimestamp() {}
+
+func (m *metricRecorder) ObserveClusterCapacity(clusterID, metric string, value float64) {
+	m.capacity[clusterID+"/"+metric] = value
+}
+
+func (m *metricRecorder) ObserveClusterSummaryAge(clusterID string, ageSeconds float64) {
+	m.summaryAge[clusterID] = ageSeconds
+}
+
+func (*metricRecorder) ObserveTemplateSyncStatus(string, string, string, float64) {}
+
+func (*metricRecorder) ObserveOrphanRemoved(string) {}
 
 type fakeMetricClusterStore struct{}
 

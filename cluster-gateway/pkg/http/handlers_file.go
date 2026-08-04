@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 )
 
@@ -23,7 +24,7 @@ func (s *Server) handleFileOperation(c *gin.Context) {
 		return
 	}
 
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/files")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.FilesPath)
 }
 
 // handleFileWatch handles WebSocket connection for file watching
@@ -46,7 +47,7 @@ func (s *Server) handleFileWatch(c *gin.Context) {
 
 	// Handle WebSocket upgrade for file watching
 	wsProxy := proxy.NewWebSocketProxy(s.logger, proxy.WithRequestModifier(requestModifier))
-	c.Request.URL.Path = "/api/v1/files/watch"
+	c.Request.URL.Path = procdapi.FileWatchPath
 	wsProxy.Proxy(procdURL)(c)
 }
 
@@ -58,7 +59,7 @@ func (s *Server) handleFileMove(c *gin.Context) {
 		return
 	}
 
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/files/move")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.FileMovePath)
 }
 
 // handleFileStat handles file stat operations.
@@ -73,7 +74,7 @@ func (s *Server) handleFileStat(c *gin.Context) {
 		return
 	}
 
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/files/stat")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.FileStatPath)
 }
 
 // handleFileList handles directory listing operations.
@@ -88,5 +89,5 @@ func (s *Server) handleFileList(c *gin.Context) {
 		return
 	}
 
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/files/list")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.FileListPath)
 }

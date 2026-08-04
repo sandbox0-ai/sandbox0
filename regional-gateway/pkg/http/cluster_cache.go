@@ -12,10 +12,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/schedulerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
+	"github.com/sandbox0-ai/sandbox0/regional-gateway/pkg/schedulerapi"
 )
 
 func (s *Server) getClusterGatewayProxy(targetURL string) (*proxy.Router, error) {

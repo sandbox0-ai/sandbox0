@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
-	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	gatewayapikey "github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
@@ -22,7 +22,7 @@ import (
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/httpclient"
 	gatewayidentity "github.com/sandbox0-ai/sandbox0/pkg/gateway/identity"
-	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/public"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -32,7 +32,6 @@ import (
 	licensinghttp "github.com/sandbox0-ai/sandbox0/pkg/licensing/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
@@ -44,7 +43,6 @@ type ServerOption func(*serverOptions)
 type serverOptions struct {
 	sandboxObservabilityRepo sandboxobservability.Repository
 	meteringReader           gatewayhandlers.MeteringReader
-	admissionStore           admission.Store
 }
 
 func WithSandboxObservabilityRepository(repo sandboxobservability.Repository) ServerOption {
@@ -59,12 +57,6 @@ func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
 	}
 }
 
-func WithAdmissionStore(store admission.Store) ServerOption {
-	return func(opts *serverOptions) {
-		opts.admissionStore = store
-	}
-}
-
 // Server represents the HTTP server for cluster-gateway
 type Server struct {
 	router                                   *gin.Engine
@@ -75,11 +67,11 @@ type Server struct {
 	authMiddleware                           *middleware.InternalAuthMiddleware
 	sandboxAuditIngestAuthMiddleware         *middleware.InternalAuthMiddleware
 	sandboxObservabilityIngestAuthMiddleware *middleware.InternalAuthMiddleware
-	publicAuth                               *gatewaymiddleware.AuthMiddleware
+	publicAuth                               *middleware.AuthMiddleware
 	compositeAuth                            *middleware.CompositeAuthMiddleware
 	publicIdentityRepo                       *gatewayidentity.Repository
 	publicAPIKeyRepo                         *gatewayapikey.Repository
-	rateLimiter                              *gatewaymiddleware.RateLimiter
+	rateLimiter                              *middleware.RateLimiter
 	externalLimiter                          *middleware.ExternalRateLimiter
 	publicBuiltin                            *gatewaybuiltin.Provider
 	publicOIDC                               *gatewayoidc.Manager
@@ -88,7 +80,7 @@ type Server struct {
 	logger                                   *zap.Logger
 	meteringHandler                          *gatewayhandlers.MeteringHandler
 	admissionStore                           admission.Store
-	observabilityHandler                     *gatewayhandlers.SandboxObservabilityHandler
+	observabilityHandler                     *SandboxObservabilityHandler
 	auditSigningKey                          ed25519.PrivateKey
 	auditDelivery                            *auditDelivery
 	internalAuthGen                          *internalauth.Generator
@@ -248,9 +240,9 @@ func NewServer(
 
 	var publicIdentityRepo *gatewayidentity.Repository
 	var publicAPIKeyRepo *gatewayapikey.Repository
-	var publicAuth *gatewaymiddleware.AuthMiddleware
+	var publicAuth *middleware.AuthMiddleware
 	var compositeAuth *middleware.CompositeAuthMiddleware
-	var rateLimiter *gatewaymiddleware.RateLimiter
+	var rateLimiter *middleware.RateLimiter
 	var externalLimiter *middleware.ExternalRateLimiter
 	var publicBuiltin *gatewaybuiltin.Provider
 	var publicOIDC *gatewayoidc.Manager
@@ -294,9 +286,9 @@ func NewServer(
 
 		jwtIssuer := gatewayauthn.NewIssuer(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
 
-		publicAuth = gatewaymiddleware.NewAuthMiddleware(publicAPIKeyRepo, cfg.JWTSecret, jwtIssuer, logger)
+		publicAuth = middleware.NewAuthMiddleware(publicAPIKeyRepo, cfg.JWTSecret, jwtIssuer, logger)
 		compositeAuth = middleware.NewCompositeAuthMiddleware(authMiddleware, publicAuth, logger)
-		rateLimiter, err = gatewaymiddleware.NewTeamQuotaRateLimiterWithConfig(context.Background(), pool, cfg.GatewayConfig, logger)
+		rateLimiter, err = middleware.NewTeamQuotaRateLimiterWithConfig(context.Background(), pool, cfg.GatewayConfig, logger)
 		if err != nil {
 			return nil, fmt.Errorf("create team quota rate limiter: %w", err)
 		}
@@ -307,20 +299,20 @@ func NewServer(
 	}
 
 	meteringHandler := gatewayhandlers.NewMeteringHandler(options.meteringReader, cfg.RegionID, logger)
-	admissionStore := options.admissionStore
-	if admissionStore == nil && pool != nil {
+	var admissionStore admission.Store
+	if pool != nil {
 		admissionStore = admission.NewRepository(pool)
 	}
-	observabilityOptions := []gatewayhandlers.SandboxObservabilityHandlerOption(nil)
+	observabilityOptions := []SandboxObservabilityHandlerOption(nil)
 	if cfg.SandboxObservability.AuditEnabled {
-		observabilityOptions = append(observabilityOptions, gatewayhandlers.WithAuditIntegrityPolicy(gatewayhandlers.AuditIntegrityPolicy{
+		observabilityOptions = append(observabilityOptions, WithAuditIntegrityPolicy(AuditIntegrityPolicy{
 			RegionID:        cfg.RegionID,
 			ClusterID:       cfg.ClusterID,
 			SigningKey:      auditSigningPrivateKey,
 			VerificationKey: auditSigningPublicKey,
 		}))
 	}
-	observabilityHandler := gatewayhandlers.NewSandboxObservabilityHandler(options.sandboxObservabilityRepo, logger, observabilityOptions...)
+	observabilityHandler := NewSandboxObservabilityHandler(options.sandboxObservabilityRepo, logger, observabilityOptions...)
 	var auditWriter auditEventInserter
 	if writer, ok := options.sandboxObservabilityRepo.(auditEventInserter); ok {
 		auditWriter = writer
@@ -342,7 +334,7 @@ func NewServer(
 			return nil, fmt.Errorf("initialize sandbox audit delivery: %w", err)
 		}
 	}
-	sandboxServiceLimiter, err := ratelimit.New(context.Background(), gatewaymiddleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig))
+	sandboxServiceLimiter, err := ratelimit.New(context.Background(), middleware.RateLimitConfigFromGatewayConfig(cfg.GatewayConfig))
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox service rate limiter: %w", err)
 	}
@@ -436,18 +428,13 @@ func resolveClusterGatewayEntitlementsWithLoader(
 	return publicEntitlements, auditEntitlements, nil
 }
 
-// Handler exposes the HTTP handler for tests.
-func (s *Server) Handler() http.Handler {
-	return s.router
-}
-
-func (s *Server) sandboxObservabilityHandler() *gatewayhandlers.SandboxObservabilityHandler {
+func (s *Server) sandboxObservabilityHandler() *SandboxObservabilityHandler {
 	if s.observabilityHandler == nil {
 		logger := zap.NewNop()
 		if s.logger != nil {
 			logger = s.logger
 		}
-		s.observabilityHandler = gatewayhandlers.NewSandboxObservabilityHandler(nil, logger)
+		s.observabilityHandler = NewSandboxObservabilityHandler(nil, logger)
 	}
 	return s.observabilityHandler
 }
@@ -469,8 +456,8 @@ func (s *Server) setupRoutes() {
 	s.router.Use(httpobs.GinMiddleware(s.obsProvider.HTTPServerConfig(nil)))
 	s.router.Use(middleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
-	s.router.Use(gatewaymiddleware.MarkLongLivedRequests())
-	s.router.Use(gatewaymiddleware.UpstreamTimeoutWhitelist())
+	s.router.Use(middleware.MarkLongLivedRequests())
+	s.router.Use(middleware.UpstreamTimeoutWhitelist())
 
 	// Health check endpoints (no auth required)
 	s.router.GET("/healthz", s.healthCheck)
@@ -772,7 +759,7 @@ func (s *Server) setupMeteringRoutes() {
 
 func requireInternalOrSystemAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		authCtx := gatewaymiddleware.GetAuthContext(c)
+		authCtx := middleware.GetAuthContext(c)
 		if authCtx == nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error": "not authenticated",

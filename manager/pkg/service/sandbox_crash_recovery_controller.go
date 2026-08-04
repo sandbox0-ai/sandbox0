@@ -80,10 +80,10 @@ func (c *SandboxCrashRecoveryController) ResourceEventHandler() cache.ResourceEv
 	}
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
-			c.enqueueRuntimeRecovery(nil, extractPod(obj))
+			c.enqueueRuntimeRecovery(nil, sandboxPodFromInformerEvent(obj))
 		},
 		UpdateFunc: func(oldObj, newObj any) {
-			c.enqueueRuntimeRecovery(extractPod(oldObj), extractPod(newObj))
+			c.enqueueRuntimeRecovery(sandboxPodFromInformerEvent(oldObj), sandboxPodFromInformerEvent(newObj))
 		},
 	}
 }

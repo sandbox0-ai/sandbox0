@@ -14,11 +14,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"go.uber.org/zap"
 )
 

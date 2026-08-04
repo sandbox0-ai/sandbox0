@@ -13,8 +13,3 @@ const (
 type ProcdConfig struct {
 	procdconfig.Config `yaml:",inline" json:",inline"`
 }
-
-// LoadProcdConfig returns the process-wide procd configuration.
-func LoadProcdConfig() *ProcdConfig {
-	return &ProcdConfig{Config: *procdconfig.Load()}
-}

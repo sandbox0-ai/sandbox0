@@ -1,8 +1,8 @@
 package http
 
 import (
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
+	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	sharedssh "github.com/sandbox0-ai/sandbox0/pkg/sshgateway"
 )
 

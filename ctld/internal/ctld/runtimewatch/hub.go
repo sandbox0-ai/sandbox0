@@ -191,12 +191,6 @@ func (h *Hub) processNextPodEvent(ctx context.Context) bool {
 	return true
 }
 
-func (h *Hub) UpdatePod(pod *corev1.Pod) {
-	if err := h.updatePod(context.Background(), pod); err != nil && pod != nil {
-		log.Printf("ctld runtime watch apply pod %s/%s: %v", pod.Namespace, pod.Name, err)
-	}
-}
-
 func (h *Hub) updatePod(parent context.Context, pod *corev1.Pod) error {
 	if h == nil || pod == nil || pod.UID == "" {
 		return nil

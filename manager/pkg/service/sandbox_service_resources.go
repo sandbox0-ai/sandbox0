@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -21,7 +22,7 @@ const (
 	defaultSandboxMaxMemory = "32Gi"
 )
 
-func (s *SandboxService) effectiveSandboxResourceQuota(template *v1alpha1.SandboxTemplate, cfg *SandboxConfig) (v1alpha1.ResourceQuota, error) {
+func (s *SandboxService) effectiveSandboxResourceQuota(template *v1alpha1.SandboxTemplate, cfg *sandboxstore.SandboxConfig) (v1alpha1.ResourceQuota, error) {
 	if template == nil {
 		return v1alpha1.ResourceQuota{}, fmt.Errorf("%w: template is required", ErrInvalidClaimRequest)
 	}

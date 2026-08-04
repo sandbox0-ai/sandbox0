@@ -902,7 +902,7 @@ func TestS0FSMutationRedirectsWhenRemotePrimary(t *testing.T) {
 		Epoch:         9,
 		LocalPrimary:  false,
 	})
-	server.SetVolumeRouter(volumeRouter)
+	server.volumeRouter = volumeRouter
 
 	_, err := server.Create(authContext("team-a", ""), &pb.CreateRequest{
 		VolumeId: "vol-1",

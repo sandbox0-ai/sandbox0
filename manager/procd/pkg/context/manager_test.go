@@ -11,6 +11,10 @@ import (
 	"go.uber.org/zap"
 )
 
+func createDefaultContext(manager *Manager, config process.ProcessConfig) (*Context, error) {
+	return manager.CreateContextWithPolicyAndREPLConfig(config, nil, CleanupPolicy{})
+}
+
 // TestNewManager tests manager creation.
 func TestNewManager(t *testing.T) {
 	m := NewManager()
@@ -40,7 +44,7 @@ func TestManagerWithSupervisorUsesSharedLifecycle(t *testing.T) {
 	defer supervisor.Close()
 
 	manager := NewManagerWithSupervisor(supervisor)
-	ctx, err := manager.CreateContext(process.ProcessConfig{
+	ctx, err := createDefaultContext(manager, process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
 		Command: []string{"/bin/sleep", "30"},
 	})
@@ -82,7 +86,7 @@ func TestManager_CreateContext(t *testing.T) {
 		Command: []string{"/bin/echo", "test"},
 	}
 
-	ctx1, err := m.CreateContext(config)
+	ctx1, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -100,7 +104,7 @@ func TestManager_CreateContext(t *testing.T) {
 	}
 
 	// Create second context
-	ctx2, err := m.CreateContext(config)
+	ctx2, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -119,7 +123,7 @@ func TestManager_CreateContextMergesSandboxEnvVars(t *testing.T) {
 		"OVERRIDE":    "sandbox",
 	})
 
-	ctx, err := m.CreateContext(process.ProcessConfig{
+	ctx, err := createDefaultContext(m, process.ProcessConfig{
 		Type:    process.ProcessTypeCMD,
 		Command: []string{"/bin/sh", "-c", "true"},
 		EnvVars: map[string]string{
@@ -188,7 +192,7 @@ func TestManager_CreateContextErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := m.CreateContext(tt.config)
+			_, err := createDefaultContext(m, tt.config)
 			if err == nil {
 				t.Error("CreateContext() expected error, got nil")
 			}
@@ -212,7 +216,7 @@ func TestManager_GetContext(t *testing.T) {
 	}
 
 	// Create a context
-	ctx, err := m.CreateContext(config)
+	ctx, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -239,7 +243,7 @@ func TestManager_DeleteContext(t *testing.T) {
 	}
 
 	// Create a context
-	ctx, err := m.CreateContext(config)
+	ctx, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -378,7 +382,7 @@ func TestManager_ListContexts(t *testing.T) {
 	// Create some contexts
 	var ids []string
 	for i := 0; i < 3; i++ {
-		ctx, err := m.CreateContext(config)
+		ctx, err := createDefaultContext(m, config)
 		if err != nil {
 			t.Fatalf("CreateContext() failed = %v", err)
 		}
@@ -414,7 +418,7 @@ func TestManager_RestartContext(t *testing.T) {
 		Command: []string{"/bin/echo", "test"},
 	}
 
-	ctx, err := m.CreateContext(config)
+	ctx, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -450,7 +454,7 @@ func TestManager_PauseAllResumeAll(t *testing.T) {
 
 	// Create some contexts
 	for i := 0; i < 3; i++ {
-		_, err := m.CreateContext(config)
+		_, err := createDefaultContext(m, config)
 		if err != nil {
 			t.Fatalf("CreateContext() failed = %v", err)
 		}
@@ -485,7 +489,7 @@ func TestManager_GetResourceUsage(t *testing.T) {
 	}
 
 	// Create a context
-	ctx, err := m.CreateContext(config)
+	ctx, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -530,7 +534,7 @@ func TestManager_GetAllResourceUsage(t *testing.T) {
 
 	// Create some contexts
 	for i := 0; i < 3; i++ {
-		_, err := m.CreateContext(config)
+		_, err := createDefaultContext(m, config)
 		if err != nil {
 			t.Fatalf("CreateContext() failed = %v", err)
 		}
@@ -574,7 +578,7 @@ func TestManager_ConcurrentAccess(t *testing.T) {
 				case <-done:
 					return
 				default:
-					m.CreateContext(config)
+					createDefaultContext(m, config)
 				}
 			}
 		}()
@@ -627,8 +631,8 @@ func TestManager_ConcurrentAccess(t *testing.T) {
 	m.Cleanup()
 }
 
-// TestManager_WriteInputReadOutput tests input/output operations.
-func TestManager_WriteInputReadOutput(t *testing.T) {
+// TestManager_WriteInput tests context input error handling.
+func TestManager_WriteInput(t *testing.T) {
 	m := NewManager()
 
 	config := process.ProcessConfig{
@@ -636,7 +640,7 @@ func TestManager_WriteInputReadOutput(t *testing.T) {
 		Command: []string{"/bin/echo", "test"},
 	}
 
-	ctx, err := m.CreateContext(config)
+	ctx, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -646,27 +650,10 @@ func TestManager_WriteInputReadOutput(t *testing.T) {
 	// We don't check the result since CMD processes exit immediately
 	_ = err
 
-	// Try to read output
-	ch, err := m.ReadOutput(ctx.ID)
-	if err != nil {
-		// This is expected for CMD processes that exit quickly
-		t.Logf("ReadOutput() failed (expected for CMD): %v", err)
-	} else {
-		// If we got a channel, it should be valid
-		if ch == nil {
-			t.Error("ReadOutput() returned nil channel")
-		}
-	}
-
 	// Try with non-existent context
 	err = m.WriteInput("non-existent", []byte("test"))
 	if err == nil {
 		t.Error("WriteInput() to non-existent context should fail")
-	}
-
-	_, err = m.ReadOutput("non-existent")
-	if err == nil {
-		t.Error("ReadOutput() from non-existent context should fail")
 	}
 
 	m.Cleanup()
@@ -681,7 +668,7 @@ func TestContext_StateMethods(t *testing.T) {
 		Command: []string{"/bin/echo", "test"},
 	}
 
-	ctx, err := m.CreateContext(config)
+	ctx, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -710,7 +697,7 @@ func TestContext_ResourceUsage(t *testing.T) {
 		Command: []string{"/bin/echo", "test"},
 	}
 
-	ctx, err := m.CreateContext(config)
+	ctx, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -737,7 +724,7 @@ func TestManager_Cleanup(t *testing.T) {
 
 	// Create some contexts
 	for i := 0; i < 3; i++ {
-		_, err := m.CreateContext(config)
+		_, err := createDefaultContext(m, config)
 		if err != nil {
 			t.Fatalf("CreateContext() failed = %v", err)
 		}
@@ -759,7 +746,7 @@ func TestManager_Cleanup(t *testing.T) {
 	}
 
 	// Should be able to create new contexts after cleanup
-	_, err := m.CreateContext(config)
+	_, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Errorf("CreateContext() after cleanup failed = %v", err)
 	}
@@ -777,7 +764,7 @@ func TestSandboxResourceUsage_Fields(t *testing.T) {
 	}
 
 	// Create a context
-	_, err := m.CreateContext(config)
+	_, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -834,7 +821,7 @@ func TestContext_TypesAndAlias(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, err := m.CreateContext(tt.config)
+			ctx, err := createDefaultContext(m, tt.config)
 			// We expect some failures due to missing interpreters
 			if err != nil {
 				t.Skipf("CreateContext() failed (likely missing interpreter): %v", err)
@@ -882,7 +869,7 @@ func TestContext_AddHandlers(t *testing.T) {
 	})
 
 	// Create context with global handlers
-	ctx, err := m.CreateContext(config)
+	ctx, err := createDefaultContext(m, config)
 	if err != nil {
 		t.Fatalf("CreateContext() failed = %v", err)
 	}
@@ -900,13 +887,13 @@ func TestContext_AddHandlers(t *testing.T) {
 		mu.Unlock()
 	})
 
-	ctx.AddStartHandler(func(event process.StartEvent) {
+	ctx.MainProcess.AddStartHandler(func(event process.StartEvent) {
 		mu.Lock()
 		startCalls = append(startCalls, "middleware1")
 		mu.Unlock()
 	})
 
-	ctx.AddStartHandler(func(event process.StartEvent) {
+	ctx.MainProcess.AddStartHandler(func(event process.StartEvent) {
 		mu.Lock()
 		startCalls = append(startCalls, "middleware2")
 		mu.Unlock()
@@ -995,7 +982,7 @@ func TestContext_AddHandlers_AfterCreation(t *testing.T) {
 		mu.Unlock()
 	})
 
-	ctx.AddStartHandler(func(event process.StartEvent) {
+	ctx.MainProcess.AddStartHandler(func(event process.StartEvent) {
 		mu.Lock()
 		startCalled = true
 		mu.Unlock()

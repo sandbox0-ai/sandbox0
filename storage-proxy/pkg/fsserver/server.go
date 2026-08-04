@@ -76,13 +76,6 @@ func NewFileSystemServer(volMgr volumeManager, volumeRepo VolumeRepository, even
 	}
 }
 
-func (s *FileSystemServer) SetVolumeRouter(volumeRouter *router.VolumeRouter) {
-	if s == nil || volumeRouter == nil {
-		return
-	}
-	s.volumeRouter = volumeRouter
-}
-
 func (s *FileSystemServer) SetNowFunc(now func() time.Time) {
 	if now == nil {
 		return

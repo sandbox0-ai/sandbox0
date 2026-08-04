@@ -15,17 +15,6 @@ type EventBase struct {
 	Timestamp time.Time    `json:"ts"`
 }
 
-// NewEventBase creates a base event with a synchronized clock.
-func NewEventBase(clk *clock.Clock) EventBase {
-	eb := EventBase{Clock: clk}
-	if clk != nil {
-		eb.Timestamp = clk.Now().UTC()
-	} else {
-		eb.Timestamp = time.Now().UTC()
-	}
-	return eb
-}
-
 // TemplateIdleEvent represents template idle/active counts in a cluster.
 type TemplateIdleEvent struct {
 	EventBase

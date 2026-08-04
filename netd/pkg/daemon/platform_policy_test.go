@@ -50,13 +50,12 @@ func TestPlatformPolicyStateTracksSandboxPodIPs(t *testing.T) {
 		Name:      "sandbox-b",
 		PodIP:     "10.0.0.3",
 	}
-	if changed, _ := store.UpsertFromSandbox(source); changed {
-		t.Fatalf("expected initial sandbox policy upsert to report unchanged")
+	if got := store.ReconcileSandboxes([]*watcher.SandboxInfo{source}).Upserted; got != 1 {
+		t.Fatalf("initial sandbox policy upserts = %d, want 1", got)
 	}
 
 	state := newPlatformPolicyState(&apiconfig.NetdConfig{}, store, zap.NewNop())
-	state.OnSandboxUpsert(source)
-	state.OnSandboxUpsert(peer)
+	state.Reconcile([]*watcher.SandboxInfo{source, peer}, nil, nil)
 
 	compiled := store.GetByIP(source.PodIP)
 	if compiled == nil || compiled.Platform == nil {
@@ -69,7 +68,7 @@ func TestPlatformPolicyStateTracksSandboxPodIPs(t *testing.T) {
 		t.Fatalf("expected self sandbox pod ip to remain allowed")
 	}
 
-	state.OnSandboxDelete(peer)
+	state.Reconcile([]*watcher.SandboxInfo{source}, nil, nil)
 
 	compiled = store.GetByIP(source.PodIP)
 	if compiled == nil || compiled.Platform == nil {
@@ -87,22 +86,22 @@ func TestPlatformPolicyStateAllowsClusterDNSService(t *testing.T) {
 		Name:      "sandbox-a",
 		PodIP:     "10.0.0.2",
 	}
-	if changed, _ := store.UpsertFromSandbox(source); changed {
-		t.Fatalf("expected initial sandbox policy upsert to report unchanged")
+	if got := store.ReconcileSandboxes([]*watcher.SandboxInfo{source}).Upserted; got != 1 {
+		t.Fatalf("initial sandbox policy upserts = %d, want 1", got)
 	}
 
 	state := newPlatformPolicyState(&apiconfig.NetdConfig{}, store, zap.NewNop())
-	state.OnSandboxUpsert(source)
-	state.OnServiceUpsert(&watcher.ServiceInfo{
+	service := &watcher.ServiceInfo{
 		Namespace: "kube-system",
 		Name:      "kube-dns",
 		ClusterIP: "10.96.0.10",
-	})
-	state.OnEndpointsUpsert(&watcher.EndpointsInfo{
+	}
+	endpoints := &watcher.EndpointsInfo{
 		Namespace: "kube-system",
 		Name:      "kube-dns",
 		Addresses: []string{"10.244.0.53"},
-	})
+	}
+	state.Reconcile([]*watcher.SandboxInfo{source}, []*watcher.ServiceInfo{service}, []*watcher.EndpointsInfo{endpoints})
 
 	compiled := store.GetByIP(source.PodIP)
 	if compiled == nil || compiled.Platform == nil {
@@ -145,32 +144,32 @@ func TestPlatformPolicyStateLogsOnlyWhenEffectivePolicyChanges(t *testing.T) {
 		Addresses: []string{"10.244.0.53"},
 	}
 
-	state.OnSandboxUpsert(sandbox)
+	state.Reconcile([]*watcher.SandboxInfo{sandbox}, nil, nil)
 	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 1 {
 		t.Fatalf("log count after sandbox upsert = %d, want 1", got)
 	}
 
-	state.OnSandboxUpsert(sandbox)
+	state.Reconcile([]*watcher.SandboxInfo{sandbox}, nil, nil)
 	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 1 {
 		t.Fatalf("log count after duplicate sandbox upsert = %d, want 1", got)
 	}
 
-	state.OnServiceUpsert(service)
+	state.Reconcile([]*watcher.SandboxInfo{sandbox}, []*watcher.ServiceInfo{service}, nil)
 	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 2 {
 		t.Fatalf("log count after service upsert = %d, want 2", got)
 	}
 
-	state.OnServiceUpsert(service)
+	state.Reconcile([]*watcher.SandboxInfo{sandbox}, []*watcher.ServiceInfo{service}, nil)
 	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 2 {
 		t.Fatalf("log count after duplicate service upsert = %d, want 2", got)
 	}
 
-	state.OnEndpointsUpsert(endpoints)
+	state.Reconcile([]*watcher.SandboxInfo{sandbox}, []*watcher.ServiceInfo{service}, []*watcher.EndpointsInfo{endpoints})
 	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 3 {
 		t.Fatalf("log count after endpoints upsert = %d, want 3", got)
 	}
 
-	state.OnEndpointsUpsert(endpoints)
+	state.Reconcile([]*watcher.SandboxInfo{sandbox}, []*watcher.ServiceInfo{service}, []*watcher.EndpointsInfo{endpoints})
 	if got := strings.Count(logBuffer.String(), logPattern) - initialLogs; got != 3 {
 		t.Fatalf("log count after duplicate endpoints upsert = %d, want 3", got)
 	}

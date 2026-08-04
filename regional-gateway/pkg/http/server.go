@@ -11,9 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	internalmiddleware "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	registryprovider "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/apikey"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/auth/builtin"
@@ -32,6 +30,7 @@ import (
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	registryprovider "github.com/sandbox0-ai/sandbox0/pkg/registry"
 	"go.uber.org/zap"
 )
 
@@ -39,18 +38,11 @@ type ServerOption func(*serverOptions)
 
 type serverOptions struct {
 	meteringReader gatewayhandlers.MeteringReader
-	admissionStore admission.Store
 }
 
 func WithMeteringReader(reader gatewayhandlers.MeteringReader) ServerOption {
 	return func(opts *serverOptions) {
 		opts.meteringReader = reader
-	}
-}
-
-func WithAdmissionStore(store admission.Store) ServerOption {
-	return func(opts *serverOptions) {
-		opts.admissionStore = store
 	}
 }
 
@@ -64,7 +56,7 @@ type Server struct {
 	clusterGatewayRouter *proxy.Router
 	schedulerRouter      *proxy.Router // Optional: proxy to scheduler for templates
 	authMiddleware       *middleware.AuthMiddleware
-	internalAuth         *internalmiddleware.InternalAuthMiddleware
+	internalAuth         *middleware.InternalAuthMiddleware
 	rateLimiter          *middleware.RateLimiter
 	requestLogger        *middleware.RequestLogger
 	logger               *zap.Logger
@@ -200,7 +192,7 @@ func NewServer(
 		AllowedCallers:     []string{internalauth.ServiceSSHGateway},
 		ClockSkewTolerance: 10 * time.Second,
 	})
-	internalAuth := internalmiddleware.NewInternalAuthMiddleware(internalValidator, logger)
+	internalAuth := middleware.NewInternalAuthMiddleware(internalValidator, logger)
 
 	// Initialize JWT issuer
 	jwtIssuer, err := authn.NewIssuerFromConfig(cfg.JWTIssuer, cfg.JWTSecret, cfg.JWTPrivateKeyPEM, cfg.JWTPublicKeyPEM, cfg.JWTPrivateKeyFile, cfg.JWTPublicKeyFile, cfg.JWTAccessTokenTTL.Duration, cfg.JWTRefreshTokenTTL.Duration)
@@ -221,8 +213,8 @@ func NewServer(
 		return nil, fmt.Errorf("create team quota rate limiter: %w", err)
 	}
 	requestLogger := middleware.NewRequestLogger(logger)
-	admissionStore := options.admissionStore
-	if admissionStore == nil && pool != nil {
+	var admissionStore admission.Store
+	if pool != nil {
 		admissionStore = admission.NewRepository(pool)
 	}
 

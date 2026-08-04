@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -86,7 +87,7 @@ func TestPodToSandboxHidesAddressWhileRuntimeObservationIsStale(t *testing.T) {
 	pod.Annotations[runtimecontrol.AnnotationObservedRevision] = "stale"
 
 	sandbox := (&SandboxService{config: SandboxServiceConfig{ProcdPort: 49983}}).podToSandbox(pod, "sandbox-1")
-	if sandbox.Status != SandboxStatusStarting {
+	if sandbox.Status != managerapi.SandboxStatusStarting {
 		t.Fatalf("status = %q, want starting", sandbox.Status)
 	}
 	if sandbox.InternalAddr != "" {

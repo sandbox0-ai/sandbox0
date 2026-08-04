@@ -11,7 +11,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"go.uber.org/zap"
 )
 
@@ -37,6 +36,14 @@ type coalescingProjectionStore interface {
 	MarkFailedBatches(context.Context, []int64, string, string, time.Time) error
 }
 
+// Metrics records process-owned delivery observations for the generic
+// metering projector. Each hosting service owns its concrete metric registry.
+type Metrics interface {
+	ObserveMeteringOutboxStats(pending int64, oldestPendingAgeSeconds float64)
+	ObserveMeteringOutboxBatch(result string)
+	ObserveMeteringOutboxOperation(operationType, result string)
+}
+
 // ProjectorConfig controls PostgreSQL outbox delivery to ClickHouse.
 type ProjectorConfig struct {
 	WorkerID           string
@@ -55,12 +62,12 @@ type Projector struct {
 	sink        Sink
 	config      ProjectorConfig
 	logger      *zap.Logger
-	metrics     *obsmetrics.ManagerMetrics
+	metrics     Metrics
 	now         func() time.Time
 	lastStatsAt time.Time
 }
 
-func (p *Projector) SetMetrics(metrics *obsmetrics.ManagerMetrics) {
+func (p *Projector) SetMetrics(metrics Metrics) {
 	if p != nil {
 		p.metrics = metrics
 	}
@@ -412,23 +419,22 @@ func (p *Projector) observeStats(ctx context.Context) {
 		p.logger.Warn("Failed to observe metering outbox backlog", zap.Error(err))
 		return
 	}
-	p.metrics.MeteringOutboxPendingOperations.Set(float64(stats.Pending))
 	age := 0.0
 	if stats.OldestPending != nil {
 		age = max(0, now.Sub(stats.OldestPending.UTC()).Seconds())
 	}
-	p.metrics.MeteringOutboxOldestPendingAge.Set(age)
+	p.metrics.ObserveMeteringOutboxStats(stats.Pending, age)
 }
 
 func (p *Projector) recordBatch(result string) {
 	if p != nil && p.metrics != nil {
-		p.metrics.MeteringOutboxBatchesTotal.WithLabelValues(result).Inc()
+		p.metrics.ObserveMeteringOutboxBatch(result)
 	}
 }
 
 func (p *Projector) recordOperation(operationType OperationType, result string) {
 	if p != nil && p.metrics != nil {
-		p.metrics.MeteringOutboxOperationsTotal.WithLabelValues(string(operationType), result).Inc()
+		p.metrics.ObserveMeteringOutboxOperation(string(operationType), result)
 	}
 }
 

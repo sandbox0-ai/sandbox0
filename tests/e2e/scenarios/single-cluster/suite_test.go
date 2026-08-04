@@ -3,7 +3,7 @@ package singlecluster
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	"github.com/sandbox0-ai/sandbox0/tests/e2e/cases"
 
 	. "github.com/onsi/ginkgo/v2"

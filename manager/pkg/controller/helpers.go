@@ -9,9 +9,11 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	managernaming "github.com/sandbox0-ai/sandbox0/manager/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/podmeta"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,7 +36,7 @@ func EnsureProcdConfigSecret(
 	template *v1alpha1.SandboxTemplate,
 ) error {
 	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	name, err := naming.ProcdConfigSecretName(clusterID, template.Name)
+	name, err := managernaming.ProcdConfigSecretName(clusterID, template.Name)
 	if err != nil {
 		return fmt.Errorf("generate procd config secret name: %w", err)
 	}
@@ -110,200 +112,11 @@ func EnsureProcdConfigSecret(
 // IsPodReady returns true only when the pod is running and reports the
 // Kubernetes PodReady condition as true.
 func IsPodReady(pod *corev1.Pod) bool {
-	if pod == nil || pod.Status.Phase != corev1.PodRunning {
-		return false
-	}
-	if !podConditionTrue(pod.Status.Conditions, corev1.PodReady) {
-		return false
-	}
-	if HasSandboxPodReadinessGate(pod) {
-		if !podConditionTrue(pod.Status.Conditions, v1alpha1.SandboxPodReadinessConditionType) {
-			return false
-		}
-		live := findPodCondition(pod.Status.Conditions, v1alpha1.SandboxPodLivenessConditionType)
-		return live == nil || live.Status != corev1.ConditionFalse
-	}
-	return true
+	return podmeta.IsReady(pod)
 }
 
 func HasSandboxPodReadinessGate(pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-	for _, gate := range pod.Spec.ReadinessGates {
-		if gate.ConditionType == v1alpha1.SandboxPodReadinessConditionType {
-			return true
-		}
-	}
-	return false
-}
-
-func EnsureSandboxPodProbeConditions(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, startup, readiness, liveness *sandboxprobe.Response) (*corev1.Pod, error) {
-	if client == nil || pod == nil || !HasSandboxPodReadinessGate(pod) {
-		return pod, nil
-	}
-
-	var updated *corev1.Pod
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if !HasSandboxPodReadinessGate(current) {
-			updated = current
-			return nil
-		}
-
-		current = current.DeepCopy()
-		changed := false
-		apply := func(condition corev1.PodCondition) {
-			existing := findPodCondition(current.Status.Conditions, condition.Type)
-			if existing != nil && existing.Status == condition.Status && existing.Reason == condition.Reason && existing.Message == condition.Message {
-				return
-			}
-			setPodCondition(&current.Status.Conditions, condition)
-			changed = true
-		}
-
-		if startup != nil {
-			apply(podConditionFromProbe(v1alpha1.SandboxPodStartupConditionType, *startup, corev1.ConditionFalse))
-		}
-		if liveness != nil {
-			apply(podConditionFromProbe(v1alpha1.SandboxPodLivenessConditionType, *liveness, corev1.ConditionUnknown))
-		}
-		if readiness != nil {
-			readyCondition := podConditionFromProbe(v1alpha1.SandboxPodReadinessConditionType, *readiness, corev1.ConditionFalse)
-			if startup != nil && startup.Status != sandboxprobe.StatusPassed {
-				readyCondition.Status = corev1.ConditionFalse
-				readyCondition.Reason = "SandboxStartupProbeFailed"
-				readyCondition.Message = startup.Message
-			}
-			if liveness != nil && liveness.Status == sandboxprobe.StatusFailed {
-				readyCondition.Status = corev1.ConditionFalse
-				readyCondition.Reason = "SandboxLivenessProbeFailed"
-				readyCondition.Message = liveness.Message
-			}
-			apply(readyCondition)
-		}
-
-		if !changed {
-			updated = current
-			return nil
-		}
-		updated, err = client.CoreV1().Pods(current.Namespace).UpdateStatus(ctx, current, metav1.UpdateOptions{})
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	return updated, nil
-}
-
-func podConditionFromProbe(conditionType corev1.PodConditionType, result sandboxprobe.Response, suspendedStatus corev1.ConditionStatus) corev1.PodCondition {
-	status := corev1.ConditionFalse
-	switch result.Status {
-	case sandboxprobe.StatusPassed:
-		status = corev1.ConditionTrue
-	case sandboxprobe.StatusSuspended:
-		status = suspendedStatus
-	}
-	reason := result.Reason
-	if reason == "" {
-		reason = "SandboxProbe" + string(result.Status)
-	}
-	return corev1.PodCondition{
-		Type:               conditionType,
-		Status:             status,
-		LastTransitionTime: metav1.Now(),
-		Reason:             reason,
-		Message:            result.Message,
-	}
-}
-
-func DesiredSandboxPodReadiness(pod *corev1.Pod) (corev1.ConditionStatus, string, string) {
-	if pod == nil {
-		return corev1.ConditionFalse, "PodMissing", "pod is missing"
-	}
-	if pod.Status.Phase != corev1.PodRunning {
-		return corev1.ConditionFalse, "PodNotRunning", fmt.Sprintf("pod phase is %s", pod.Status.Phase)
-	}
-	return corev1.ConditionTrue, "SandboxActive", "sandbox is active and ready"
-}
-
-func EnsureSandboxPodReadinessCondition(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod) (*corev1.Pod, error) {
-	if client == nil || pod == nil || !HasSandboxPodReadinessGate(pod) {
-		return pod, nil
-	}
-
-	var updated *corev1.Pod
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if !HasSandboxPodReadinessGate(current) {
-			updated = current
-			return nil
-		}
-
-		status, reason, message := DesiredSandboxPodReadiness(current)
-		existing := findPodCondition(current.Status.Conditions, v1alpha1.SandboxPodReadinessConditionType)
-		if existing != nil && existing.Status == status && existing.Reason == reason && existing.Message == message {
-			updated = current
-			return nil
-		}
-
-		current = current.DeepCopy()
-		setPodCondition(&current.Status.Conditions, corev1.PodCondition{
-			Type:               v1alpha1.SandboxPodReadinessConditionType,
-			Status:             status,
-			LastTransitionTime: metav1.Now(),
-			Reason:             reason,
-			Message:            message,
-		})
-
-		updated, err = client.CoreV1().Pods(current.Namespace).UpdateStatus(ctx, current, metav1.UpdateOptions{})
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	return updated, nil
-}
-
-func podConditionTrue(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) bool {
-	for _, condition := range conditions {
-		if condition.Type == conditionType {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-	return false
-}
-
-func findPodCondition(conditions []corev1.PodCondition, conditionType corev1.PodConditionType) *corev1.PodCondition {
-	for i := range conditions {
-		if conditions[i].Type == conditionType {
-			return &conditions[i]
-		}
-	}
-	return nil
-}
-
-func setPodCondition(conditions *[]corev1.PodCondition, condition corev1.PodCondition) {
-	if conditions == nil {
-		return
-	}
-	for i := range *conditions {
-		if (*conditions)[i].Type != condition.Type {
-			continue
-		}
-		if (*conditions)[i].Status == condition.Status {
-			condition.LastTransitionTime = (*conditions)[i].LastTransitionTime
-		}
-		(*conditions)[i] = condition
-		return
-	}
-	*conditions = append(*conditions, condition)
+	return sandboxpod.HasReadinessGate(pod)
 }
 
 // EnsureNetdMITMCASecret copies the manager-local network-runtime MITM CA certificate into the template namespace.

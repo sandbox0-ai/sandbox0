@@ -3,7 +3,6 @@ package http
 import (
 	"bufio"
 	"context"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -20,8 +19,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/pathnorm"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -30,7 +27,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-type volumeRepository interface {
+// VolumeRepository is the storage persistence contract required by the HTTP API.
+type VolumeRepository interface {
 	WithTx(ctx context.Context, fn func(pgx.Tx) error) error
 	CreateSandboxVolumeTx(ctx context.Context, tx pgx.Tx, volume *db.SandboxVolume) error
 	CreateSandboxVolumeOwnerTx(ctx context.Context, tx pgx.Tx, owner *db.SandboxVolumeOwner) error
@@ -47,7 +45,10 @@ type volumeRepository interface {
 	MarkOwnedSandboxVolumeCleanupAttempt(ctx context.Context, volumeID string, cleanupErr error) error
 }
 
-type meteringRepository interface {
+type volumeRepository = VolumeRepository
+
+// MeteringRepository records and queries storage usage projections.
+type MeteringRepository interface {
 	AppendEventTx(ctx context.Context, tx pgx.Tx, event *meteringpkg.Event) error
 	RecordStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error
 	CloseStorageObservationTx(ctx context.Context, tx pgx.Tx, observation *meteringpkg.StorageObservation) error
@@ -55,6 +56,8 @@ type meteringRepository interface {
 	GetStorageProjectionState(ctx context.Context, subjectType, subjectID string) (*meteringpkg.StorageProjectionState, error)
 	ListStorageProjectionStatesByTeam(ctx context.Context, subjectType, teamID string) ([]*meteringpkg.StorageProjectionState, error)
 }
+
+type meteringRepository = MeteringRepository
 
 func configuredMeteringRepository(repo meteringRepository) (meteringRepository, bool) {
 	if repo == nil {
@@ -70,13 +73,11 @@ func configuredMeteringRepository(repo meteringRepository) (meteringRepository, 
 	return repo, true
 }
 
-type snapshotManager interface {
+// SnapshotManager provides snapshot and fork operations to the HTTP API.
+type SnapshotManager interface {
 	CreateSnapshotSimple(ctx context.Context, req *snapshot.CreateSnapshotRequest) (*db.Snapshot, error)
 	ListSnapshots(ctx context.Context, volumeID, teamID string) ([]*db.Snapshot, error)
 	GetSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) (*db.Snapshot, error)
-	ListSnapshotCasefoldCollisions(ctx context.Context, req *snapshot.ListSnapshotCasefoldCollisionsRequest) ([]snapshot.SnapshotCasefoldCollision, error)
-	ListSnapshotCompatibilityIssues(ctx context.Context, req *snapshot.ListSnapshotCompatibilityIssuesRequest) ([]pathnorm.CompatibilityIssue, error)
-	ExportSnapshotArchive(ctx context.Context, req *snapshot.ExportSnapshotRequest, w io.Writer) error
 	RestoreSnapshot(ctx context.Context, req *snapshot.RestoreSnapshotRequest) error
 	DeleteSnapshot(ctx context.Context, volumeID, snapshotID, teamID string) error
 	DeleteSnapshotsForVolumeTx(ctx context.Context, tx pgx.Tx, volumeID, teamID string, deletedAt time.Time) error
@@ -85,23 +86,32 @@ type snapshotManager interface {
 	CreateVolumeFromSnapshot(ctx context.Context, req *snapshot.CreateVolumeFromSnapshotRequest) (*db.SandboxVolume, error)
 }
 
-type volumeMutationBarrier interface {
+type snapshotManager = SnapshotManager
+
+// VolumeMutationBarrier serializes shared and exclusive volume mutations.
+type VolumeMutationBarrier interface {
 	WithShared(ctx context.Context, volumeID string, fn func(context.Context) error) error
 	WithExclusive(ctx context.Context, volumeID string, fn func(context.Context) error) error
 }
 
-type volumeMountManager interface {
+type volumeMutationBarrier = VolumeMutationBarrier
+
+// VolumeMountManager provides mounted volume access for file operations.
+type VolumeMountManager interface {
 	GetVolume(volumeID string) (*volume.VolumeContext, error)
 	UnmountVolume(ctx context.Context, volumeID, sessionID string) error
 	AcquireDirectVolumeFileMount(ctx context.Context, volumeID string, mountFn func(context.Context) (string, error)) (func(), error)
 	CleanupIdleDirectVolumeFileMount(ctx context.Context, volumeID string) (bool, error)
 }
 
+type volumeMountManager = VolumeMountManager
+
 type directVolumeMountSyncer interface {
 	SyncDirectVolumeFileMount(ctx context.Context, volumeID string) error
 }
 
-type volumeFileRPC interface {
+// VolumeFileRPC is the file-operation contract shared with the filesystem server.
+type VolumeFileRPC interface {
 	MountVolume(ctx context.Context, req *pb.MountVolumeRequest) (*pb.MountVolumeResponse, error)
 	GetAttr(ctx context.Context, req *pb.GetAttrRequest) (*pb.GetAttrResponse, error)
 	Lookup(ctx context.Context, req *pb.LookupRequest) (*pb.NodeResponse, error)
@@ -120,9 +130,14 @@ type volumeFileRPC interface {
 	Release(ctx context.Context, req *pb.ReleaseRequest) (*pb.Empty, error)
 }
 
-type volumeEventHub interface {
+type volumeFileRPC = VolumeFileRPC
+
+// VolumeEventHub publishes file watch events.
+type VolumeEventHub interface {
 	Subscribe(req *pb.WatchRequest) (string, <-chan *pb.WatchEvent, func())
 }
+
+type volumeEventHub = VolumeEventHub
 
 // Server provides HTTP management API for health checks and metrics
 type Server struct {
@@ -148,12 +163,28 @@ type Server struct {
 	selfClusterID        string
 }
 
-func (s *Server) SetQuotaRepository(repo *quota.Repository) {
-	s.quotaRepo = repo
+// ServerDependencies names the collaborators required by the storage HTTP API.
+type ServerDependencies struct {
+	Logger           *logrus.Logger
+	Config           *config.StorageProxyConfig
+	KubernetesClient kubernetes.Interface
+	Volumes          VolumeRepository
+	Metering         MeteringRepository
+	Quota            *quota.Repository
+	RegionID         string
+	Authenticator    *auth.HTTPAuthenticator
+	Snapshots        SnapshotManager
+	MutationBarrier  VolumeMutationBarrier
+	Mounts           VolumeMountManager
+	Files            VolumeFileRPC
+	Events           VolumeEventHub
 }
 
-// NewServer creates a new HTTP server
-func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient kubernetes.Interface, repo volumeRepository, meteringRepo meteringRepository, regionID string, authenticator *auth.HTTPAuthenticator, snapshotMgr snapshotManager, barrier volumeMutationBarrier, volMgr volumeMountManager, fileRPC volumeFileRPC, eventHub *notify.Hub) *Server {
+// NewServerWithDependencies creates a storage HTTP server from named dependencies.
+func NewServerWithDependencies(deps ServerDependencies) *Server {
+	logger := deps.Logger
+	cfg := deps.Config
+	k8sClient := deps.KubernetesClient
 	selfPodID, err := os.Hostname()
 	if err != nil {
 		selfPodID = ""
@@ -164,15 +195,16 @@ func NewServer(logger *logrus.Logger, cfg *config.StorageProxyConfig, k8sClient 
 		logger:               logger,
 		mux:                  http.NewServeMux(),
 		cfg:                  cfg,
-		repo:                 repo,
-		meteringRepo:         meteringRepo,
-		regionID:             regionID,
-		authenticator:        authenticator,
-		snapshotMgr:          snapshotMgr,
-		barrier:              barrier,
-		volMgr:               volMgr,
-		fileRPC:              fileRPC,
-		eventHub:             eventHub,
+		repo:                 deps.Volumes,
+		meteringRepo:         deps.Metering,
+		quotaRepo:            deps.Quota,
+		regionID:             deps.RegionID,
+		authenticator:        deps.Authenticator,
+		snapshotMgr:          deps.Snapshots,
+		barrier:              deps.MutationBarrier,
+		volMgr:               deps.Mounts,
+		fileRPC:              deps.Files,
+		eventHub:             deps.Events,
 		s3CredentialCodec:    s3CredentialCodec,
 		s3CredentialCodecErr: s3CredentialCodecErr,
 		podResolver:          newKubernetesVolumeFilePodResolver(logger, k8sClient, cfg),

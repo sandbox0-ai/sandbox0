@@ -8,7 +8,7 @@ import (
 	"time"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -65,28 +65,12 @@ func RegisterInfraOperatorLifecycleSuite(envProvider func() *framework.ScenarioE
 
 		It("disables builtin storage and retains builtin storage stateful resources", func() {
 			env := shouldRunApiScenario(envProvider, "fullmode")
-
-			ctx := env.TestCtx.Context
-			kubeconfig := env.Config.Kubeconfig
-			namespace := env.Infra.Namespace
-			infraName := env.Infra.Name
-
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "statefulset", infraName+"-rustfs", "--namespace", namespace)).To(Succeed())
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "service", infraName+"-rustfs", "--namespace", namespace)).To(Succeed())
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "secret", infraName+"-sandbox0-rustfs-credentials", "--namespace", namespace)).To(Succeed())
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "pvc", infraName+"-rustfs-data", "--namespace", namespace)).To(Succeed())
-
-			patch := `{"spec":{"storage":{"type":"builtin","builtin":{"enabled":false,"statefulResourcePolicy":"Retain"}}}}`
-			Expect(framework.KubectlPatch(ctx, kubeconfig, namespace, "sandbox0infra", infraName, patch)).To(Succeed())
-
-			expectResourceAbsentEventually(ctx, kubeconfig, namespace, "statefulset", infraName+"-rustfs")
-			expectResourceAbsentEventually(ctx, kubeconfig, namespace, "service", infraName+"-rustfs")
-			expectResourcePresentEventually(ctx, kubeconfig, namespace, "secret", infraName+"-sandbox0-rustfs-credentials")
-			expectResourcePresentEventually(ctx, kubeconfig, namespace, "pvc", infraName+"-rustfs-data")
-
-			expectRetainedResourcesEventually(ctx, kubeconfig, namespace, infraName, []retainedResourceExpectation{
-				{Component: "storage", Kind: "Secret", Name: infraName + "-sandbox0-rustfs-credentials"},
-				{Component: "storage", Kind: "PersistentVolumeClaim", Name: infraName + "-rustfs-data"},
+			disableBuiltinStatefulComponentAndRetainResources(env, builtinStatefulComponent{
+				component:             "storage",
+				workloadName:          env.Infra.Name + "-rustfs",
+				credentialSecretName:  env.Infra.Name + "-sandbox0-rustfs-credentials",
+				persistentVolumeClaim: env.Infra.Name + "-rustfs-data",
+				disablePatch:          `{"spec":{"storage":{"type":"builtin","builtin":{"enabled":false,"statefulResourcePolicy":"Retain"}}}}`,
 			})
 		})
 
@@ -111,28 +95,12 @@ func RegisterInfraOperatorLifecycleSuite(envProvider func() *framework.ScenarioE
 
 		It("disables builtin database and retains builtin database stateful resources", func() {
 			env := shouldRunApiScenario(envProvider, "fullmode")
-
-			ctx := env.TestCtx.Context
-			kubeconfig := env.Config.Kubeconfig
-			namespace := env.Infra.Namespace
-			infraName := env.Infra.Name
-
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "statefulset", infraName+"-postgres", "--namespace", namespace)).To(Succeed())
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "service", infraName+"-postgres", "--namespace", namespace)).To(Succeed())
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "secret", infraName+"-sandbox0-database-credentials", "--namespace", namespace)).To(Succeed())
-			Expect(framework.Kubectl(ctx, kubeconfig, "get", "pvc", infraName+"-postgres-data", "--namespace", namespace)).To(Succeed())
-
-			patch := `{"spec":{"database":{"type":"builtin","builtin":{"enabled":false,"statefulResourcePolicy":"Retain"}}}}`
-			Expect(framework.KubectlPatch(ctx, kubeconfig, namespace, "sandbox0infra", infraName, patch)).To(Succeed())
-
-			expectResourceAbsentEventually(ctx, kubeconfig, namespace, "statefulset", infraName+"-postgres")
-			expectResourceAbsentEventually(ctx, kubeconfig, namespace, "service", infraName+"-postgres")
-			expectResourcePresentEventually(ctx, kubeconfig, namespace, "secret", infraName+"-sandbox0-database-credentials")
-			expectResourcePresentEventually(ctx, kubeconfig, namespace, "pvc", infraName+"-postgres-data")
-
-			expectRetainedResourcesEventually(ctx, kubeconfig, namespace, infraName, []retainedResourceExpectation{
-				{Component: "database", Kind: "Secret", Name: infraName + "-sandbox0-database-credentials"},
-				{Component: "database", Kind: "PersistentVolumeClaim", Name: infraName + "-postgres-data"},
+			disableBuiltinStatefulComponentAndRetainResources(env, builtinStatefulComponent{
+				component:             "database",
+				workloadName:          env.Infra.Name + "-postgres",
+				credentialSecretName:  env.Infra.Name + "-sandbox0-database-credentials",
+				persistentVolumeClaim: env.Infra.Name + "-postgres-data",
+				disablePatch:          `{"spec":{"database":{"type":"builtin","builtin":{"enabled":false,"statefulResourcePolicy":"Retain"}}}}`,
 			})
 		})
 
@@ -164,6 +132,38 @@ type retainedResourceExpectation struct {
 	Component string
 	Kind      string
 	Name      string
+}
+
+type builtinStatefulComponent struct {
+	component             string
+	workloadName          string
+	credentialSecretName  string
+	persistentVolumeClaim string
+	disablePatch          string
+}
+
+func disableBuiltinStatefulComponentAndRetainResources(env *framework.ScenarioEnv, component builtinStatefulComponent) {
+	ctx := env.TestCtx.Context
+	kubeconfig := env.Config.Kubeconfig
+	namespace := env.Infra.Namespace
+	infraName := env.Infra.Name
+
+	Expect(framework.Kubectl(ctx, kubeconfig, "get", "statefulset", component.workloadName, "--namespace", namespace)).To(Succeed())
+	Expect(framework.Kubectl(ctx, kubeconfig, "get", "service", component.workloadName, "--namespace", namespace)).To(Succeed())
+	Expect(framework.Kubectl(ctx, kubeconfig, "get", "secret", component.credentialSecretName, "--namespace", namespace)).To(Succeed())
+	Expect(framework.Kubectl(ctx, kubeconfig, "get", "pvc", component.persistentVolumeClaim, "--namespace", namespace)).To(Succeed())
+
+	Expect(framework.KubectlPatch(ctx, kubeconfig, namespace, "sandbox0infra", infraName, component.disablePatch)).To(Succeed())
+
+	expectResourceAbsentEventually(ctx, kubeconfig, namespace, "statefulset", component.workloadName)
+	expectResourceAbsentEventually(ctx, kubeconfig, namespace, "service", component.workloadName)
+	expectResourcePresentEventually(ctx, kubeconfig, namespace, "secret", component.credentialSecretName)
+	expectResourcePresentEventually(ctx, kubeconfig, namespace, "pvc", component.persistentVolumeClaim)
+
+	expectRetainedResourcesEventually(ctx, kubeconfig, namespace, infraName, []retainedResourceExpectation{
+		{Component: component.component, Kind: "Secret", Name: component.credentialSecretName},
+		{Component: component.component, Kind: "PersistentVolumeClaim", Name: component.persistentVolumeClaim},
+	})
 }
 
 func fetchSandbox0Infra(ctx context.Context, kubeconfig, namespace, name string) (*infrav1alpha1.Sandbox0Infra, error) {

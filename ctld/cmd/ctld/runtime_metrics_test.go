@@ -13,10 +13,10 @@ import (
 
 	ctldruntimemetrics "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/runtimemetrics"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -74,12 +74,12 @@ func TestCtldRuntimeMetricsProducerPostsAuthorizedRuntimeSample(t *testing.T) {
 			Name:      "pod-a",
 			UID:       types.UID("pod-uid-a"),
 			Labels: map[string]string{
-				controller.LabelPoolType:  controller.PoolTypeActive,
-				controller.LabelSandboxID: "sandbox-a",
+				sandboxpod.LabelPoolType:  sandboxpod.PoolTypeActive,
+				sandboxpod.LabelSandboxID: "sandbox-a",
 			},
 			Annotations: map[string]string{
-				controller.AnnotationTeamID:            "team-a",
-				controller.AnnotationRuntimeGeneration: "4",
+				sandboxpod.AnnotationTeamID:            "team-a",
+				sandboxpod.AnnotationRuntimeGeneration: "4",
 			},
 		},
 		Spec: corev1.PodSpec{

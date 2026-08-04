@@ -66,7 +66,7 @@ func TestSetupRoutesExposesTeamScopedUsageAPI(t *testing.T) {
 	server := testMeteringRouteServer()
 	server.obsProvider = obsProvider
 	server.requestLogger = gatewaymiddleware.NewRequestLogger(logger)
-	server.rateLimiter = gatewaymiddleware.NewRateLimiter(100, 200, time.Minute, logger)
+	server.rateLimiter = newTestRateLimiter(t)
 	server.setupRoutes()
 
 	tokens, err := server.jwtIssuer.IssueTokenPair("user-1", "user@example.com", "User", false, []authn.TeamGrant{{TeamID: "team-1", TeamRole: "viewer"}})

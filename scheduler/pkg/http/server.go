@@ -17,12 +17,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/scheduler/pkg/metrics"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
@@ -73,20 +73,35 @@ type ClusterRepository interface {
 	DeleteCluster(ctx context.Context, clusterID string) error
 }
 
-// NewServer creates a new HTTP server
-func NewServer(
-	cfg *config.SchedulerConfig,
-	repo ClusterRepository,
-	templateStore store.TemplateStore,
-	allocationStore store.AllocationStore,
-	sourceResolver templatehttp.SandboxTemplateSourceResolver,
-	authValidator *internalauth.Validator,
-	internalAuthGen *internalauth.Generator,
-	reconciler Reconciler,
-	logger *zap.Logger,
-	obsProvider *observability.Provider,
-	metrics *obsmetrics.SchedulerMetrics,
-) (*Server, error) {
+// ServerDependencies names the collaborators required by the scheduler HTTP server.
+type ServerDependencies struct {
+	Config         *config.SchedulerConfig
+	Clusters       ClusterRepository
+	Templates      store.TemplateStore
+	Allocations    store.AllocationStore
+	SourceResolver templatehttp.SandboxTemplateSourceResolver
+	AuthValidator  *internalauth.Validator
+	InternalAuth   *internalauth.Generator
+	Reconciler     Reconciler
+	Logger         *zap.Logger
+	Observability  *observability.Provider
+	Metrics        *obsmetrics.SchedulerMetrics
+}
+
+// NewServerWithDependencies creates a scheduler HTTP server from named dependencies.
+func NewServerWithDependencies(deps ServerDependencies) (*Server, error) {
+	cfg := deps.Config
+	repo := deps.Clusters
+	templateStore := deps.Templates
+	allocationStore := deps.Allocations
+	sourceResolver := deps.SourceResolver
+	authValidator := deps.AuthValidator
+	internalAuthGen := deps.InternalAuth
+	reconciler := deps.Reconciler
+	logger := deps.Logger
+	obsProvider := deps.Observability
+	metrics := deps.Metrics
+
 	if err := licensing.RequireLicenseFile(cfg.LicenseFile); err != nil {
 		return nil, fmt.Errorf("license_file is required for scheduler: %w", err)
 	}

@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -257,117 +255,6 @@ func (m *Manager) openS0FSEngine(ctx context.Context, teamID, volumeID string) (
 	return engine, engine.Close, nil
 }
 
-type s0fsArchiveMeta struct {
-	state *s0fs.SnapshotState
-}
-
-func (m *s0fsArchiveMeta) GetAttr(_ fsmeta.Context, inode fsmeta.Ino, attr *fsmeta.Attr) syscall.Errno {
-	if attr == nil {
-		return syscall.EINVAL
-	}
-	node, err := m.state.GetAttr(uint64(inode))
-	if err != nil {
-		return errnoForS0FSError(err)
-	}
-	*attr = fsmeta.Attr{
-		Typ:       metaTypeForS0FS(node.Type),
-		Mode:      uint16(node.Mode),
-		Uid:       node.UID,
-		Gid:       node.GID,
-		Nlink:     node.Nlink,
-		Length:    node.Size,
-		Atime:     node.Atime.Unix(),
-		Atimensec: uint32(node.Atime.Nanosecond()),
-		Mtime:     node.Mtime.Unix(),
-		Mtimensec: uint32(node.Mtime.Nanosecond()),
-		Ctime:     node.Ctime.Unix(),
-		Ctimensec: uint32(node.Ctime.Nanosecond()),
-	}
-	return 0
-}
-
-func (m *s0fsArchiveMeta) Readdir(_ fsmeta.Context, inode fsmeta.Ino, _ uint8, entries *[]*fsmeta.Entry) syscall.Errno {
-	dirEntries, err := m.state.ReadDir(uint64(inode))
-	if err != nil {
-		return errnoForS0FSError(err)
-	}
-	out := make([]*fsmeta.Entry, 0, len(dirEntries))
-	for _, entry := range dirEntries {
-		attr := &fsmeta.Attr{}
-		if errno := m.GetAttr(fsmeta.Background(), fsmeta.Ino(entry.Inode), attr); errno != 0 {
-			return errno
-		}
-		out = append(out, &fsmeta.Entry{
-			Inode: fsmeta.Ino(entry.Inode),
-			Name:  []byte(entry.Name),
-			Attr:  attr,
-		})
-	}
-	*entries = out
-	return 0
-}
-
-func (m *s0fsArchiveMeta) ReadLink(_ fsmeta.Context, inode fsmeta.Ino, target *[]byte) syscall.Errno {
-	node, err := m.state.GetAttr(uint64(inode))
-	if err != nil {
-		return errnoForS0FSError(err)
-	}
-	if node.Type != s0fs.TypeSymlink {
-		return syscall.EINVAL
-	}
-	*target = []byte(node.Target)
-	return 0
-}
-
-type s0fsArchiveReader struct {
-	reader *s0fs.SnapshotReader
-}
-
-func (r *s0fsArchiveReader) ReadFile(ctx context.Context, inode fsmeta.Ino, size uint64, w io.Writer) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	data, err := r.reader.Read(uint64(inode), 0, size)
-	if err != nil {
-		return err
-	}
-	if len(data) == 0 {
-		return nil
-	}
-	_, err = w.Write(data)
-	return err
-}
-
-func metaTypeForS0FS(fileType s0fs.FileType) uint8 {
-	switch fileType {
-	case s0fs.TypeDirectory:
-		return fsmeta.TypeDirectory
-	case s0fs.TypeSymlink:
-		return fsmeta.TypeSymlink
-	default:
-		return fsmeta.TypeFile
-	}
-}
-
-func errnoForS0FSError(err error) syscall.Errno {
-	switch {
-	case err == nil:
-		return 0
-	case errors.Is(err, s0fs.ErrNotFound), errors.Is(err, s0fs.ErrSnapshotNotFound):
-		return syscall.ENOENT
-	case errors.Is(err, s0fs.ErrNotDir):
-		return syscall.ENOTDIR
-	case errors.Is(err, s0fs.ErrIsDir):
-		return syscall.EISDIR
-	case errors.Is(err, s0fs.ErrExists):
-		return syscall.EEXIST
-	case errors.Is(err, s0fs.ErrNotEmpty):
-		return syscall.ENOTEMPTY
-	default:
-		return syscall.EIO
-	}
-}
-
 func cleanupS0FSVolume(volumeID string, cfg *config.StorageProxyConfig) error {
 	if cfg == nil || volumeID == "" {
 		return nil
@@ -408,35 +295,6 @@ func (m *Manager) resolveS0FSForkState(ctx context.Context, teamID, sourceVolume
 		}
 	}
 	return s0fs.PrepareForkState(state, sourceVolumeID)
-}
-
-func (m *Manager) openS0FSSnapshotArchiveSession(ctx context.Context, volumeID string, snapshot *db.Snapshot) (*snapshotArchiveSession, fsmeta.Ino, *fsmeta.Attr, error) {
-	if snapshot == nil {
-		return nil, 0, nil, fmt.Errorf("snapshot is required")
-	}
-	volumeRecord, err := m.repo.GetSandboxVolume(ctx, volumeID)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	cfg, err := m.s0fsConfig(volumeRecord.TeamID, volumeID)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	state, err := m.loadS0FSSnapshotState(ctx, cfg, snapshot)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	materializer := s0fs.NewMaterializer(volumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
-	materializer.SetEncryption(cfg.Encryption)
-	rootAttr := &fsmeta.Attr{}
-	metaView := &s0fsArchiveMeta{state: state}
-	if errno := metaView.GetAttr(fsmeta.Background(), fsmeta.RootInode, rootAttr); errno != 0 {
-		return nil, 0, nil, errno
-	}
-	return &snapshotArchiveSession{
-		meta:   metaView,
-		reader: &s0fsArchiveReader{reader: s0fs.NewSnapshotReader(state, materializer)},
-	}, fsmeta.RootInode, rootAttr, nil
 }
 
 func (m *Manager) createS0FSSnapshot(ctx context.Context, req *CreateSnapshotRequest) (*db.Snapshot, error) {

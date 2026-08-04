@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -126,10 +126,10 @@ func (c *SandboxCrashLogCollector) ResourceEventHandler() cache.ResourceEventHan
 	}
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
-			c.enqueueTermination(nil, extractPod(obj))
+			c.enqueueTermination(nil, sandboxPodFromInformerEvent(obj))
 		},
 		UpdateFunc: func(oldObj, newObj any) {
-			c.enqueueTermination(extractPod(oldObj), extractPod(newObj))
+			c.enqueueTermination(sandboxPodFromInformerEvent(oldObj), sandboxPodFromInformerEvent(newObj))
 		},
 	}
 }
@@ -224,7 +224,7 @@ func crashLogItem(
 		Namespace:         pod.Namespace,
 		PodName:           pod.Name,
 		PodUID:            string(pod.UID),
-		SandboxID:         sandboxIDFromPod(pod),
+		SandboxID:         sandboxPodID(pod),
 		TeamID:            strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID]),
 		RuntimeGeneration: runtimeGenerationFromPod(pod),
 		RestartCount:      status.RestartCount,
@@ -246,7 +246,7 @@ func sandboxCrashLogPodEligible(pod *corev1.Pod) bool {
 	if strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID]) == "" {
 		return false
 	}
-	return strings.TrimSpace(sandboxIDFromPod(pod)) != ""
+	return strings.TrimSpace(sandboxPodID(pod)) != ""
 }
 
 func procdContainerStatus(pod *corev1.Pod) *corev1.ContainerStatus {
@@ -354,7 +354,7 @@ func filterProcdCrashLogs(raw []byte) ([]byte, int, error) {
 	droppedProcessLines := 0
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if isSandboxProcessLogLine(line) {
+		if _, _, isProcessLog := ParseSandboxProcessLogLine(line); isProcessLog {
 			droppedProcessLines++
 			continue
 		}

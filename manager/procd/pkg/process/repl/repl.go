@@ -60,15 +60,6 @@ func New(id string, replConfig *REPLConfig, processConfig process.ProcessConfig)
 	return repl, nil
 }
 
-// NewFromRegistry creates a REPL using a config from the registry.
-func NewFromRegistry(id string, alias string, processConfig process.ProcessConfig) (*REPL, error) {
-	replConfig, ok := DefaultRegistry.Get(alias)
-	if !ok {
-		return nil, fmt.Errorf("unknown REPL alias: %s", alias)
-	}
-	return New(id, replConfig, processConfig)
-}
-
 // Start starts the REPL process.
 func (r *REPL) Start() error {
 	if r.IsRunning() {

@@ -52,10 +52,10 @@ func TestCPUUsageTrackerPrunesInactiveSeries(t *testing.T) {
 
 	tracker.observe(active, cpuUsage(10_000_000_000, 1_000_000_000))
 	tracker.observe(stale, cpuUsage(10_000_000_000, 1_000_000_000))
-	require.Equal(t, 2, tracker.size())
+	require.Equal(t, 2, len(tracker.baselines))
 
 	tracker.prune(map[cpuSeriesKey]struct{}{active: {}})
-	assert.Equal(t, 1, tracker.size())
+	assert.Equal(t, 1, len(tracker.baselines))
 	assert.Nil(t, tracker.observe(stale, cpuUsage(20_000_000_000, 2_000_000_000)), "a pruned series must start with a fresh baseline")
 }
 
@@ -87,7 +87,7 @@ func TestCPUUsageTrackerConcurrentAccess(t *testing.T) {
 	}
 
 	tracker.prune(active)
-	assert.Equal(t, len(active), tracker.size())
+	assert.Equal(t, len(active), len(tracker.baselines))
 }
 
 func cpuUsage(timestamp, cumulative uint64) *runtimeapi.CpuUsage {

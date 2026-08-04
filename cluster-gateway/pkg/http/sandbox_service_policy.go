@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"go.uber.org/zap"
 )
 

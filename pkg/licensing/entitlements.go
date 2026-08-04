@@ -2,8 +2,6 @@ package licensing
 
 import (
 	"fmt"
-
-	"github.com/sandbox0-ai/sandbox0/pkg/license"
 )
 
 type Feature string
@@ -37,13 +35,13 @@ func (e *FeatureNotLicensedError) Unwrap() error {
 }
 
 type fileEntitlements struct {
-	checker *license.Checker
+	checker *Checker
 	loadErr error
 }
 
 // LoadFileEntitlements loads a signed enterprise license once and serves feature checks.
 func LoadFileEntitlements(path string) Entitlements {
-	checker, err := license.LoadFromFile(path)
+	checker, err := LoadFromFile(path)
 	return &fileEntitlements{
 		checker: checker,
 		loadErr: err,

@@ -18,85 +18,58 @@ import (
 )
 
 func TestCleanupBuiltinResourcesRespectsStatefulResourcePolicy(t *testing.T) {
-	t.Run("retain keeps pvc and removes runtime secrets", func(t *testing.T) {
-		reconciler, client := newRegistryLifecycleTestReconciler(t,
-			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry", Namespace: "sandbox0-system"}},
-			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry", Namespace: "sandbox0-system"}},
-			&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry-auth", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry-pull", Namespace: "sandbox0-system"}},
-			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry-data", Namespace: "sandbox0-system"}},
-		)
+	for _, tt := range []struct {
+		name                 string
+		policy               infrav1alpha1.BuiltinStatefulResourcePolicy
+		retainStatefulVolume bool
+	}{
+		{name: "retain keeps pvc and removes runtime secrets", policy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain, retainStatefulVolume: true},
+		{name: "delete removes pvc too", policy: infrav1alpha1.BuiltinStatefulResourcePolicyDelete},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler, client := newRegistryLifecycleTestReconciler(t,
+				&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry", Namespace: "sandbox0-system"}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry", Namespace: "sandbox0-system"}},
+				&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry", Namespace: "sandbox0-system"}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry-auth", Namespace: "sandbox0-system"}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry-pull", Namespace: "sandbox0-system"}},
+				&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry-data", Namespace: "sandbox0-system"}},
+			)
 
-		err := reconciler.CleanupBuiltinResources(context.Background(), &infrav1alpha1.Sandbox0Infra{
-			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
-			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Registry: &infrav1alpha1.RegistryConfig{
-					Provider: infrav1alpha1.RegistryProviderHarbor,
-					Builtin: &infrav1alpha1.BuiltinRegistryConfig{
-						StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
-					},
-					Harbor: &infrav1alpha1.HarborRegistryConfig{
-						Registry:   "harbor.example.com",
-						PullSecret: infrav1alpha1.DockerConfigSecretRef{Name: "harbor-pull"},
-						CredentialsSecret: infrav1alpha1.HarborRegistryCredentialsSecret{
-							Name: "harbor-credentials",
+			err := reconciler.CleanupBuiltinResources(context.Background(), &infrav1alpha1.Sandbox0Infra{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+				Spec: infrav1alpha1.Sandbox0InfraSpec{
+					Registry: &infrav1alpha1.RegistryConfig{
+						Provider: infrav1alpha1.RegistryProviderHarbor,
+						Builtin: &infrav1alpha1.BuiltinRegistryConfig{
+							StatefulResourcePolicy: tt.policy,
+						},
+						Harbor: &infrav1alpha1.HarborRegistryConfig{
+							Registry:   "harbor.example.com",
+							PullSecret: infrav1alpha1.DockerConfigSecretRef{Name: "harbor-pull"},
+							CredentialsSecret: infrav1alpha1.HarborRegistryCredentialsSecret{
+								Name: "harbor-credentials",
+							},
 						},
 					},
 				},
-			},
+			})
+			if err != nil {
+				t.Fatalf("cleanup builtin resources: %v", err)
+			}
+
+			assertRegistryMissingObject(t, client, &appsv1.Deployment{}, "sandbox0-system", "demo-registry")
+			assertRegistryMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-registry")
+			assertRegistryMissingObject(t, client, &networkingv1.Ingress{}, "sandbox0-system", "demo-registry")
+			assertRegistryMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-auth")
+			assertRegistryMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-pull")
+			if tt.retainStatefulVolume {
+				assertRegistryPresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-registry-data")
+				return
+			}
+			assertRegistryMissingObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-registry-data")
 		})
-		if err != nil {
-			t.Fatalf("cleanup builtin resources: %v", err)
-		}
-
-		assertRegistryMissingObject(t, client, &appsv1.Deployment{}, "sandbox0-system", "demo-registry")
-		assertRegistryMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-registry")
-		assertRegistryMissingObject(t, client, &networkingv1.Ingress{}, "sandbox0-system", "demo-registry")
-		assertRegistryMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-auth")
-		assertRegistryMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-pull")
-		assertRegistryPresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-registry-data")
-	})
-
-	t.Run("delete removes pvc too", func(t *testing.T) {
-		reconciler, client := newRegistryLifecycleTestReconciler(t,
-			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry", Namespace: "sandbox0-system"}},
-			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry", Namespace: "sandbox0-system"}},
-			&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry-auth", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry-pull", Namespace: "sandbox0-system"}},
-			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-registry-data", Namespace: "sandbox0-system"}},
-		)
-
-		err := reconciler.CleanupBuiltinResources(context.Background(), &infrav1alpha1.Sandbox0Infra{
-			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
-			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Registry: &infrav1alpha1.RegistryConfig{
-					Provider: infrav1alpha1.RegistryProviderHarbor,
-					Builtin: &infrav1alpha1.BuiltinRegistryConfig{
-						StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyDelete,
-					},
-					Harbor: &infrav1alpha1.HarborRegistryConfig{
-						Registry:   "harbor.example.com",
-						PullSecret: infrav1alpha1.DockerConfigSecretRef{Name: "harbor-pull"},
-						CredentialsSecret: infrav1alpha1.HarborRegistryCredentialsSecret{
-							Name: "harbor-credentials",
-						},
-					},
-				},
-			},
-		})
-		if err != nil {
-			t.Fatalf("cleanup builtin resources: %v", err)
-		}
-
-		assertRegistryMissingObject(t, client, &appsv1.Deployment{}, "sandbox0-system", "demo-registry")
-		assertRegistryMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-registry")
-		assertRegistryMissingObject(t, client, &networkingv1.Ingress{}, "sandbox0-system", "demo-registry")
-		assertRegistryMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-auth")
-		assertRegistryMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-registry-pull")
-		assertRegistryMissingObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-registry-data")
-	})
+	}
 }
 
 func TestReconcileCreatesRuntimeResourcesBeforeDeploymentReady(t *testing.T) {

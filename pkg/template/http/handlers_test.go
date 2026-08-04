@@ -823,51 +823,12 @@ func TestUpdateTemplate_DerivesCPUWhenOmitted(t *testing.T) {
 func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 	t.Parallel()
 
-	store := &testTemplateStore{
-		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
-			return &template.Template{
-				TemplateID: "demo",
-				Scope:      "team",
-				TeamID:     "team-1",
-				Spec: v1alpha1.SandboxTemplateSpec{
-					MainContainer: v1alpha1.ContainerSpec{
-						Image: "ubuntu:22.04",
-						Resources: v1alpha1.ResourceQuota{
-							CPU:    resource.MustParse("1"),
-							Memory: resource.MustParse("4Gi"),
-						},
-					},
-					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
-				},
-			}, nil
-		},
-	}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
-
-	body := []byte(`{
+	assertRegularTeamTemplateUpdateRejected(t, []byte(`{
 		"spec":{
 			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"4Gi"}},
 			"pool":{"minIdle":2,"maxIdle":1}
 		}
-	}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
-	}
-	if store.updateCalled {
-		t.Fatalf("expected update not called for invalid request")
-	}
+	}`), http.StatusBadRequest)
 }
 
 func TestUpdateTemplate_RejectsUnsupportedDocumentedSpecFields(t *testing.T) {
@@ -907,6 +868,50 @@ func TestUpdateTemplate_RejectsUnsupportedDocumentedSpecFields(t *testing.T) {
 	}
 	if store.updateCalled {
 		t.Fatalf("expected update not called for unsupported spec field")
+	}
+}
+
+func assertRegularTeamTemplateUpdateRejected(t *testing.T, body []byte, wantStatus int) {
+	t.Helper()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+			return &template.Template{
+				TemplateID: "demo",
+				Scope:      "team",
+				TeamID:     "team-1",
+				Spec: v1alpha1.SandboxTemplateSpec{
+					MainContainer: v1alpha1.ContainerSpec{
+						Image: "ubuntu:22.04",
+						Resources: v1alpha1.ResourceQuota{
+							CPU:    resource.MustParse("1"),
+							Memory: resource.MustParse("4Gi"),
+						},
+					},
+					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
+				},
+			}, nil
+		},
+	}
+	h := &Handler{Store: store, Logger: zap.NewNop()}
+
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != wantStatus {
+		t.Fatalf("expected status %d, got %d: %s", wantStatus, rec.Code, rec.Body.String())
+	}
+	if store.updateCalled {
+		t.Fatal("expected update not called for rejected request")
 	}
 }
 
@@ -955,35 +960,7 @@ func TestUpdateTemplate_SystemWithoutTeamUpdatesPublicTemplate(t *testing.T) {
 func TestUpdateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 	t.Parallel()
 
-	store := &testTemplateStore{
-		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
-			return &template.Template{
-				TemplateID: "demo",
-				Scope:      "team",
-				TeamID:     "team-1",
-				Spec: v1alpha1.SandboxTemplateSpec{
-					MainContainer: v1alpha1.ContainerSpec{
-						Image: "ubuntu:22.04",
-						Resources: v1alpha1.ResourceQuota{
-							CPU:    resource.MustParse("1"),
-							Memory: resource.MustParse("4Gi"),
-						},
-					},
-					Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
-				},
-			}, nil
-		},
-	}
-	h := &Handler{Store: store, Logger: zap.NewNop()}
-
-	router := gin.New()
-	router.Use(withClaims(&internalauth.Claims{
-		TeamID: "team-1",
-		UserID: "user-1",
-	}))
-	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
-
-	body := []byte(`{
+	assertRegularTeamTemplateUpdateRejected(t, []byte(`{
 		"spec":{
 			"mainContainer":{
 				"image":"ubuntu:22.04",
@@ -992,18 +969,7 @@ func TestUpdateTemplate_RejectsImagePullPolicyForRegularTeam(t *testing.T) {
 			},
 			"pool":{"minIdle":0,"maxIdle":1}
 		}
-	}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected status %d, got %d", http.StatusForbidden, rec.Code)
-	}
-	if store.updateCalled {
-		t.Fatalf("expected update not called for forbidden request")
-	}
+	}`), http.StatusForbidden)
 }
 
 func TestCreateTemplate_RejectsUnclaimableNameBudget(t *testing.T) {
@@ -1058,9 +1024,9 @@ func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) 
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
-	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{
+	err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{
 		Permissions: []string{"*"},
-	})
+	}, configuredTemplateMemoryPerCPU())
 	if err == nil {
 		t.Fatalf("expected wildcard permission to be rejected")
 	}
@@ -1339,7 +1305,7 @@ func TestValidateTemplateSpec_AllowsExpandedSecurityContext(t *testing.T) {
 	if err := validateTemplateSpec(spec); err != nil {
 		t.Fatalf("validateTemplateSpec: %v", err)
 	}
-	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{IsSystem: true}); err != nil {
+	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{IsSystem: true}, configuredTemplateMemoryPerCPU()); err != nil {
 		t.Fatalf("expected system token to allow expanded security context, got %v", err)
 	}
 }
@@ -1373,11 +1339,11 @@ func TestValidateTemplateSpecForClaims_RequiresSystemIdentityForEmptyDirMounts(t
 		}},
 	}
 
-	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"})
+	err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{TeamID: "team-1"}, configuredTemplateMemoryPerCPU())
 	if err == nil || err.Error() != "spec.pod requires system identity" {
 		t.Fatalf("expected team token to reject pod emptyDir mounts, got %v", err)
 	}
-	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{IsSystem: true}); err != nil {
+	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{IsSystem: true}, configuredTemplateMemoryPerCPU()); err != nil {
 		t.Fatalf("expected system token to allow pod emptyDir mounts, got %v", err)
 	}
 }
@@ -1396,7 +1362,7 @@ func TestValidateTemplateSpecForClaims_RejectsMismatchedMainResources(t *testing
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
-	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"})
+	err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{TeamID: "team-1"}, configuredTemplateMemoryPerCPU())
 	if err == nil {
 		t.Fatal("expected aggregate resource ratio to be rejected")
 	}
@@ -1420,7 +1386,7 @@ func TestValidateTemplateSpecForClaims_RejectsSystemOwnedMismatchedMainResources
 	}
 
 	claims := &internalauth.Claims{IsSystem: true}
-	err := validateTemplateSpecForClaims(spec, claims)
+	err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, claims, configuredTemplateMemoryPerCPU())
 	if err == nil {
 		t.Fatal("expected system token to reject resource ratio mismatch")
 	}

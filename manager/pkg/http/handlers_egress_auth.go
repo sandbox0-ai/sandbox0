@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -47,7 +47,7 @@ func (s *Server) resolveEgressAuth(c *gin.Context) {
 	)
 	resp, err := s.egressAuthService.Resolve(c.Request.Context(), &req)
 	if err != nil {
-		statusCode, code, message := service.MapEgressAuthResolveError(err)
+		statusCode, code, message := egressauthservice.MapEgressAuthResolveError(err)
 		spec.JSONError(c, statusCode, code, message)
 		return
 	}

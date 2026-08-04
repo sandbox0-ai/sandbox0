@@ -20,8 +20,8 @@ func TestPersistProcessLocalS0FSHandleStateDropsLegacyDirectoryHandles(t *testin
 	}
 	legacy := want
 	legacy.DirHandles = map[uint64]uint64{3: 30}
-	if err := persistProcessLocalS0FSHandleState(path, "vol-1", legacy); err != nil {
-		t.Fatalf("persistProcessLocalS0FSHandleState() error = %v", err)
+	if err := persistS0FSHandleStateWithDurability(path, "vol-1", legacy, false); err != nil {
+		t.Fatalf("persistS0FSHandleStateWithDurability() error = %v", err)
 	}
 
 	got, err := loadS0FSHandleState(path, "vol-1")
@@ -47,8 +47,8 @@ func TestLoadS0FSHandleStateReplaysJournalAndClearsFinalUnlinkedHandle(t *testin
 		FileHandles:   map[uint64]uint64{1: 10, 2: 10},
 		UnlinkedFiles: []uint64{10},
 	}
-	if err := persistS0FSHandleState(path, "vol-1", initial); err != nil {
-		t.Fatalf("persistS0FSHandleState() error = %v", err)
+	if err := persistS0FSHandleStateWithDurability(path, "vol-1", initial, true); err != nil {
+		t.Fatalf("persistS0FSHandleStateWithDurability() error = %v", err)
 	}
 	journal, err := openS0FSHandleStateJournal(path)
 	if err != nil {
@@ -82,8 +82,8 @@ func TestLoadS0FSHandleStateReplaysJournalAndClearsFinalUnlinkedHandle(t *testin
 
 func TestLoadS0FSHandleStateIgnoresPartialTrailingJournalEvent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "handles.json")
-	if err := persistS0FSHandleState(path, "vol-1", volume.HandleState{}); err != nil {
-		t.Fatalf("persistS0FSHandleState() error = %v", err)
+	if err := persistS0FSHandleStateWithDurability(path, "vol-1", volume.HandleState{}, true); err != nil {
+		t.Fatalf("persistS0FSHandleStateWithDurability() error = %v", err)
 	}
 	payload := strings.Join([]string{
 		`{"version":1,"volume_id":"vol-1","operation":"open","handle_id":1,"inode":10}`,
@@ -145,8 +145,8 @@ func TestLoadS0FSHandleStateReplaysPreCompactionJournalIdempotently(t *testing.T
 		NextHandleID: 2,
 		FileHandles:  map[uint64]uint64{2: 20},
 	}
-	if err := persistS0FSHandleState(path, "vol-1", final); err != nil {
-		t.Fatalf("persistS0FSHandleState() error = %v", err)
+	if err := persistS0FSHandleStateWithDurability(path, "vol-1", final, true); err != nil {
+		t.Fatalf("persistS0FSHandleStateWithDurability() error = %v", err)
 	}
 	journal, err := openS0FSHandleStateJournal(path)
 	if err != nil {
@@ -182,7 +182,7 @@ func BenchmarkPersistS0FSHandleState(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				if err := persistProcessLocalS0FSHandleState(path, "vol-1", handles); err != nil {
+				if err := persistS0FSHandleStateWithDurability(path, "vol-1", handles, false); err != nil {
 					b.Fatal(err)
 				}
 			}

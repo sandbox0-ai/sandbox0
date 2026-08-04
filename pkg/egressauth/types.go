@@ -72,6 +72,15 @@ type PlaceholderSubstitutionDirective struct {
 	Replacements []PlaceholderSubstitutionReplacement `json:"replacements,omitempty"`
 }
 
+// PlaceholderSubstitutionLocation identifies an HTTP request location.
+type PlaceholderSubstitutionLocation string
+
+const (
+	PlaceholderSubstitutionLocationHeader PlaceholderSubstitutionLocation = "header"
+	PlaceholderSubstitutionLocationQuery  PlaceholderSubstitutionLocation = "query"
+	PlaceholderSubstitutionLocationBody   PlaceholderSubstitutionLocation = "body"
+)
+
 // PlaceholderSubstitutionReplacement is one resolved placeholder replacement.
 type PlaceholderSubstitutionReplacement struct {
 	Placeholder string                            `json:"placeholder"`
@@ -107,119 +116,6 @@ type resolveResponseWire struct {
 	Headers    map[string]string  `json:"headers,omitempty"`
 	ExpiresAt  *time.Time         `json:"expiresAt,omitempty"`
 	Source     *ResolveSource     `json:"source,omitempty"`
-}
-
-// NewHTTPHeadersResolveResponse constructs the first typed directive response
-// supported by the Phase 4 wire model.
-func NewHTTPHeadersResolveResponse(authRef string, headers map[string]string, expiresAt *time.Time) *ResolveResponse {
-	resp := &ResolveResponse{
-		AuthRef: authRef,
-	}
-	if len(headers) > 0 {
-		resp.Directives = []ResolveDirective{{
-			Kind: ResolveDirectiveKindHTTPHeaders,
-			HTTPHeaders: &HTTPHeadersDirective{
-				Headers: cloneStringMap(headers),
-			},
-		}}
-	}
-	if expiresAt != nil {
-		expiresCopy := *expiresAt
-		resp.ExpiresAt = &expiresCopy
-	}
-	resp.EnsureCompatibilityFields()
-	return resp
-}
-
-// NewPlaceholderSubstitutionResolveResponse constructs a typed placeholder substitution response.
-func NewPlaceholderSubstitutionResolveResponse(authRef string, directive *PlaceholderSubstitutionDirective, expiresAt *time.Time) *ResolveResponse {
-	resp := &ResolveResponse{
-		AuthRef: authRef,
-	}
-	if directive != nil {
-		resp.Directives = []ResolveDirective{{
-			Kind: ResolveDirectiveKindPlaceholderSubstitution,
-			PlaceholderSubstitution: &PlaceholderSubstitutionDirective{
-				Replacements: clonePlaceholderSubstitutionReplacements(directive.Replacements),
-			},
-		}}
-	}
-	if expiresAt != nil {
-		expiresCopy := *expiresAt
-		resp.ExpiresAt = &expiresCopy
-	}
-	resp.EnsureCompatibilityFields()
-	return resp
-}
-
-// NewTLSClientCertificateResolveResponse constructs a typed TLS client certificate response.
-func NewTLSClientCertificateResolveResponse(authRef string, directive *TLSClientCertificateDirective, expiresAt *time.Time) *ResolveResponse {
-	resp := &ResolveResponse{
-		AuthRef: authRef,
-	}
-	if directive != nil {
-		resp.Directives = []ResolveDirective{{
-			Kind: ResolveDirectiveKindTLSClientCertificate,
-			TLSClientCertificate: &TLSClientCertificateDirective{
-				CertificatePEM: directive.CertificatePEM,
-				PrivateKeyPEM:  directive.PrivateKeyPEM,
-				CAPEM:          directive.CAPEM,
-			},
-		}}
-	}
-	if expiresAt != nil {
-		expiresCopy := *expiresAt
-		resp.ExpiresAt = &expiresCopy
-	}
-	resp.EnsureCompatibilityFields()
-	return resp
-}
-
-// NewUsernamePasswordResolveResponse constructs a typed username/password response.
-func NewUsernamePasswordResolveResponse(authRef string, directive *UsernamePasswordDirective, expiresAt *time.Time) *ResolveResponse {
-	resp := &ResolveResponse{
-		AuthRef: authRef,
-	}
-	if directive != nil {
-		resp.Directives = []ResolveDirective{{
-			Kind: ResolveDirectiveKindUsernamePassword,
-			UsernamePassword: &UsernamePasswordDirective{
-				Username: directive.Username,
-				Password: directive.Password,
-			},
-		}}
-	}
-	if expiresAt != nil {
-		expiresCopy := *expiresAt
-		resp.ExpiresAt = &expiresCopy
-	}
-	resp.EnsureCompatibilityFields()
-	return resp
-}
-
-// NewSSHProxyResolveResponse constructs a typed transparent SSH proxy response.
-func NewSSHProxyResolveResponse(authRef string, directive *SSHProxyDirective, expiresAt *time.Time) *ResolveResponse {
-	resp := &ResolveResponse{
-		AuthRef: authRef,
-	}
-	if directive != nil {
-		resp.Directives = []ResolveDirective{{
-			Kind: ResolveDirectiveKindSSHProxy,
-			SSHProxy: &SSHProxyDirective{
-				SandboxPublicKeys: append([]string(nil), directive.SandboxPublicKeys...),
-				UpstreamUsername:  directive.UpstreamUsername,
-				PrivateKeyPEM:     directive.PrivateKeyPEM,
-				Passphrase:        directive.Passphrase,
-				KnownHosts:        append([]string(nil), directive.KnownHosts...),
-			},
-		}}
-	}
-	if expiresAt != nil {
-		expiresCopy := *expiresAt
-		resp.ExpiresAt = &expiresCopy
-	}
-	resp.EnsureCompatibilityFields()
-	return resp
 }
 
 // EnsureCompatibilityFields keeps in-memory compatibility fields consistent.

@@ -115,6 +115,41 @@ func TestNewMuxDefaultsToNotImplementedController(t *testing.T) {
 	assert.False(t, resp.Paused)
 }
 
+func TestNewMuxJSONPostRouteFailureResponses(t *testing.T) {
+	handler := NewMux(NotImplementedController{})
+
+	t.Run("unsupported volume portal controller", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/volume-portals/bind", bytes.NewBufferString(`{}`))
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotImplemented, rec.Code)
+		assert.JSONEq(t, `{"sandboxvolume_id":"","mount_point":"","mounted_at":""}`, rec.Body.String())
+	})
+
+	t.Run("invalid rootfs request", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/inspect", bytes.NewBufferString(`{"target":`))
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		var resp ctldapi.InspectRootFSResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.NotEmpty(t, resp.Error)
+	})
+
+	t.Run("wrong method", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/rootfs/inspect", nil)
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	})
+}
+
 func TestNewMuxDoesNotExposeRuntimeWatchOnControlPort(t *testing.T) {
 	handler := NewMux(&recordingController{})
 	req := httptest.NewRequest(http.MethodGet, runtimecontrol.WatchPath, nil)

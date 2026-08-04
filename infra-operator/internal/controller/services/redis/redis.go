@@ -217,18 +217,6 @@ func (r *Reconciler) cleanupBuiltinRedisResources(ctx context.Context, infra *in
 	return nil
 }
 
-func ApplyGatewayRedisConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.GatewayConfig) error {
-	if cfg == nil {
-		return nil
-	}
-	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
-	if err != nil {
-		return err
-	}
-	applyGatewayRedisConfig(cfg, redisCfg, ok)
-	return nil
-}
-
 // ApplyGatewayRateLimitConfig injects region-level Redis settings into gateway
 // process config. Without spec.redis, gateways keep memory rate limiting.
 func ApplyGatewayRateLimitConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.GatewayConfig) error {
@@ -328,15 +316,6 @@ func GetGatewayRedisConfig(ctx context.Context, c client.Client, infra *infrav1a
 		Timeout:   timeout,
 		FailOpen:  failOpen,
 	}, true, nil
-}
-
-func GetRateLimitConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra) (GatewayRedisConfig, bool, error) {
-	redisCfg, ok, err := GetGatewayRedisConfig(ctx, c, infra)
-	if !ok || err != nil {
-		return redisCfg, ok, err
-	}
-	redisCfg.KeyPrefix = rateLimitRedisKeyPrefix(infra, redisCfg)
-	return redisCfg, true, nil
 }
 
 func rateLimitRedisKeyPrefix(infra *infrav1alpha1.Sandbox0Infra, redisCfg GatewayRedisConfig) string {

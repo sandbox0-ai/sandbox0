@@ -192,7 +192,7 @@ func TestTLSAdapterInterceptsHTTPSAndInjectsHeaders(t *testing.T) {
 					AuthRef: "example-api",
 					TLSMode: v1alpha1.EgressTLSModeTerminateReoriginate,
 				},
-				Resolved: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+				Resolved: testHTTPHeadersResolveResponse("example-api", map[string]string{
 					"Authorization": "Bearer secure-token",
 				}, nil),
 			},
@@ -310,7 +310,7 @@ func TestTLSAdapterDefersHTTPSHeaderResolutionUntilAfterDownstreamHandshake(t *t
 	resolver := &blockingEgressAuthResolver{
 		called:  make(chan *egressauth.ResolveRequest, 1),
 		release: releaseResolver,
-		resp: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+		resp: testHTTPHeadersResolveResponse("example-api", map[string]string{
 			"Authorization": "Bearer delayed-token",
 		}, nil),
 	}
@@ -549,7 +549,7 @@ func testTLSAdapterInterceptsHTTPSOverHTTP2AndInjectsHeaders(t *testing.T, upstr
 					Protocol: v1alpha1.EgressAuthProtocolHTTPS,
 					TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
 				},
-				Resolved: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+				Resolved: testHTTPHeadersResolveResponse("example-api", map[string]string{
 					"Authorization": "Bearer h2-token",
 				}, nil),
 			},
@@ -1117,7 +1117,7 @@ func TestTLSAdapterTerminatesTLSAndPresentsClientCertificate(t *testing.T) {
 					Protocol: v1alpha1.EgressAuthProtocolTLS,
 					TLSMode:  v1alpha1.EgressTLSModeTerminateReoriginate,
 				},
-				Resolved: egressauth.NewTLSClientCertificateResolveResponse("example-cert", &egressauth.TLSClientCertificateDirective{
+				Resolved: testTLSClientCertificateResolveResponse("example-cert", &egressauth.TLSClientCertificateDirective{
 					CertificatePEM: string(clientCertPEM),
 					PrivateKeyPEM:  string(clientKeyPEM),
 				}, nil),

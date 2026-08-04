@@ -58,6 +58,14 @@ func NewClientWithTimeout(timeout time.Duration) *Client {
 	return NewClient(&http.Client{Timeout: timeout})
 }
 
+// RequestTimeout returns the HTTP timeout used by the client.
+func (c *Client) RequestTimeout() time.Duration {
+	if c == nil || c.httpClient == nil {
+		return DefaultRequestTimeout
+	}
+	return c.httpClient.Timeout
+}
+
 // RequestError describes a non-2xx response from ctld.
 type RequestError struct {
 	StatusCode int
@@ -134,16 +142,36 @@ func (c *Client) PrepareRootFSSnapshot(ctx context.Context, ctldAddress string, 
 	return PostJSON[PrepareRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotPrepare, req)
 }
 
+// PrepareRootFSSnapshotWithTimeout calls PrepareRootFSSnapshot with a per-request client timeout.
+func (c *Client) PrepareRootFSSnapshotWithTimeout(ctx context.Context, ctldAddress string, req PrepareRootFSSnapshotRequest, timeout time.Duration) (*PrepareRootFSSnapshotResponse, error) {
+	return c.withTimeout(timeout).PrepareRootFSSnapshot(ctx, ctldAddress, req)
+}
+
 func (c *Client) PublishRootFSSnapshot(ctx context.Context, ctldAddress string, req PublishRootFSSnapshotRequest) (*PublishRootFSSnapshotResponse, error) {
 	return PostJSON[PublishRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotPublish, req)
+}
+
+// PublishRootFSSnapshotWithTimeout calls PublishRootFSSnapshot with a per-request client timeout.
+func (c *Client) PublishRootFSSnapshotWithTimeout(ctx context.Context, ctldAddress string, req PublishRootFSSnapshotRequest, timeout time.Duration) (*PublishRootFSSnapshotResponse, error) {
+	return c.withTimeout(timeout).PublishRootFSSnapshot(ctx, ctldAddress, req)
 }
 
 func (c *Client) AbortRootFSSnapshot(ctx context.Context, ctldAddress string, req AbortRootFSSnapshotRequest) (*AbortRootFSSnapshotResponse, error) {
 	return PostJSON[AbortRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotAbort, req)
 }
 
+// AbortRootFSSnapshotWithTimeout calls AbortRootFSSnapshot with a per-request client timeout.
+func (c *Client) AbortRootFSSnapshotWithTimeout(ctx context.Context, ctldAddress string, req AbortRootFSSnapshotRequest, timeout time.Duration) (*AbortRootFSSnapshotResponse, error) {
+	return c.withTimeout(timeout).AbortRootFSSnapshot(ctx, ctldAddress, req)
+}
+
 func (c *Client) ApplyRootFS(ctx context.Context, ctldAddress string, req ApplyRootFSRequest) (*ApplyRootFSResponse, error) {
 	return PostJSON[ApplyRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSApply, req)
+}
+
+// ApplyRootFSWithTimeout calls ApplyRootFS with a per-request client timeout.
+func (c *Client) ApplyRootFSWithTimeout(ctx context.Context, ctldAddress string, req ApplyRootFSRequest, timeout time.Duration) (*ApplyRootFSResponse, error) {
+	return c.withTimeout(timeout).ApplyRootFS(ctx, ctldAddress, req)
 }
 
 func (c *Client) httpClientOrDefault() *http.Client {
@@ -151,6 +179,16 @@ func (c *Client) httpClientOrDefault() *http.Client {
 		return c.httpClient
 	}
 	return defaultHTTPClient
+}
+
+func (c *Client) withTimeout(timeout time.Duration) *Client {
+	if timeout <= 0 {
+		return c
+	}
+	httpClient := c.httpClientOrDefault()
+	clone := *httpClient
+	clone.Timeout = timeout
+	return NewClient(&clone)
 }
 
 // PostJSON sends a JSON POST request to ctld and decodes the response.

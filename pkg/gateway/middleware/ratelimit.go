@@ -29,17 +29,6 @@ type RateLimiter struct {
 	failOpen    bool
 }
 
-// NewRateLimiter creates a new rate limiter
-func NewRateLimiter(rps, burst int, cleanupInterval time.Duration, logger *zap.Logger) *RateLimiter {
-	limiter := ratelimit.NewMemoryLimiter(ratelimit.MemoryConfig{CleanupInterval: cleanupInterval})
-	return &RateLimiter{
-		logger:   logger,
-		limit:    ratelimit.Limit{RPS: rps, Burst: burst},
-		limiter:  limiter,
-		failOpen: true,
-	}
-}
-
 func NewRateLimiterWithConfig(ctx context.Context, rps, burst int, cfg ratelimit.Config, logger *zap.Logger) (*RateLimiter, error) {
 	limiter, err := ratelimit.New(ctx, cfg)
 	if err != nil {
@@ -209,10 +198,6 @@ type rateDecision struct {
 	RetryAfter time.Duration
 }
 
-func (rl *RateLimiter) allow(ctx context.Context, teamID string) (rateDecision, int64, error) {
-	return rl.allowDimension(ctx, teamID, quota.DimensionAPIRequests)
-}
-
 func (rl *RateLimiter) allowDimension(ctx context.Context, teamID string, dimension quota.Dimension) (rateDecision, int64, error) {
 	if rl.policyStore != nil {
 		policy, err := rl.policyStore.GetPolicy(ctx, teamID, dimension)
@@ -249,27 +234,6 @@ func (rl *RateLimiter) allowDimension(ctx context.Context, teamID string, dimens
 		Remaining:  int64(decision.Remaining),
 		RetryAfter: decision.RetryAfter,
 	}, int64(rl.limit.RPS), err
-}
-
-func (rl *RateLimiter) Close() error {
-	if rl == nil {
-		return nil
-	}
-	var err error
-	if rl.limiter != nil {
-		err = rl.limiter.Close()
-	}
-	if rl.bucket != nil {
-		if closeErr := rl.bucket.Close(); err == nil {
-			err = closeErr
-		}
-	}
-	if closer, ok := rl.policyStore.(interface{ Close() error }); ok {
-		if closeErr := closer.Close(); err == nil {
-			err = closeErr
-		}
-	}
-	return err
 }
 
 func retryAfterSeconds(d time.Duration) int {

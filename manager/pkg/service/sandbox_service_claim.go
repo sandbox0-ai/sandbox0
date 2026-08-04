@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
@@ -37,11 +39,11 @@ var errIdlePodClaimLost = errors.New("idle pod claim lost")
 type ClaimRequest struct {
 	TeamID     string
 	UserID     string
-	Template   string         `json:"template"`
-	SnapshotID string         `json:"snapshot_id,omitempty"`
-	Config     *SandboxConfig `json:"config,omitempty"`
-	Mounts     []ClaimMount   `json:"mounts,omitempty"`
-	Metadata   *ClaimMetadata `json:"-"`
+	Template   string                      `json:"template"`
+	SnapshotID string                      `json:"snapshot_id,omitempty"`
+	Config     *sandboxstore.SandboxConfig `json:"config,omitempty"`
+	Mounts     []managerapi.ClaimMount     `json:"mounts,omitempty"`
+	Metadata   *ClaimMetadata              `json:"-"`
 	// SandboxID is an internal stable ID used when recreating an existing sandbox.
 	SandboxID string `json:"-"`
 	// RuntimeGeneration identifies the current runtime pod incarnation.
@@ -51,11 +53,6 @@ type ClaimRequest struct {
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
 	WebhookStateVolumeID              string `json:"-"`
 	mayHaveExistingCredentialBindings bool
-}
-
-type ClaimMount struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-	MountPoint      string `json:"mount_point"`
 }
 
 type ClaimMetadata struct {
@@ -72,42 +69,24 @@ type BootstrapMountStatus struct {
 	ErrorMessage        string `json:"error_message,omitempty"`
 }
 
-// SandboxConfig represents sandbox configuration
-type SandboxConfig struct {
-	EnvVars    map[string]string              `json:"env_vars,omitempty"`
-	Resources  *SandboxResourceConfig         `json:"resources,omitempty"`
-	TTL        *int32                         `json:"ttl,omitempty"`      // Time-to-live in seconds (0 disables)
-	HardTTL    *int32                         `json:"hard_ttl,omitempty"` // Hard time-to-live in seconds (0 disables)
-	Network    *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
-	Webhook    *WebhookConfig                 `json:"webhook,omitempty"`
-	AutoResume *bool                          `json:"auto_resume,omitempty"`
-	Services   []SandboxAppService            `json:"services,omitempty"`
-}
-
 // SandboxUpdateConfig represents sandbox configuration fields that can be updated at runtime.
 // EnvVars updates only the default environment for new procd-managed processes.
 // Webhook is excluded because it requires reinitializing the sandbox runtime.
 type SandboxUpdateConfig struct {
-	EnvVars    map[string]string              `json:"env_vars,omitempty"`
-	Resources  *SandboxResourceConfig         `json:"resources,omitempty"`
-	TTL        *int32                         `json:"ttl,omitempty"`
-	HardTTL    *int32                         `json:"hard_ttl,omitempty"`
-	Network    *v1alpha1.SandboxNetworkPolicy `json:"network,omitempty"`
-	AutoResume *bool                          `json:"auto_resume,omitempty"`
-	Services   []SandboxAppService            `json:"services,omitempty"`
-}
-
-// SandboxResourceConfig is an instance-level resource override. Only memory is
-// accepted; CPU is derived from the platform memory-per-CPU ratio with a 150m minimum.
-type SandboxResourceConfig struct {
-	Memory string `json:"memory,omitempty"`
+	EnvVars    map[string]string                 `json:"env_vars,omitempty"`
+	Resources  *managerapi.SandboxResourceConfig `json:"resources,omitempty"`
+	TTL        *int32                            `json:"ttl,omitempty"`
+	HardTTL    *int32                            `json:"hard_ttl,omitempty"`
+	Network    *v1alpha1.SandboxNetworkPolicy    `json:"network,omitempty"`
+	AutoResume *bool                             `json:"auto_resume,omitempty"`
+	Services   []managerapi.SandboxAppService    `json:"services,omitempty"`
 }
 
 func int32Ptr(v int32) *int32 {
 	return &v
 }
 
-func cloneSandboxConfig(cfg *SandboxConfig) *SandboxConfig {
+func cloneSandboxConfig(cfg *sandboxstore.SandboxConfig) *sandboxstore.SandboxConfig {
 	if cfg == nil {
 		return nil
 	}
@@ -129,11 +108,11 @@ func cloneInt32Ptr(v *int32) *int32 {
 	return int32Ptr(*v)
 }
 
-func cloneSandboxResourceConfig(resources *SandboxResourceConfig) *SandboxResourceConfig {
+func cloneSandboxResourceConfig(resources *managerapi.SandboxResourceConfig) *managerapi.SandboxResourceConfig {
 	if resources == nil {
 		return nil
 	}
-	return &SandboxResourceConfig{Memory: strings.TrimSpace(resources.Memory)}
+	return &managerapi.SandboxResourceConfig{Memory: strings.TrimSpace(resources.Memory)}
 }
 
 func cloneEnvVars(envVars map[string]string) map[string]string {
@@ -147,13 +126,13 @@ func cloneEnvVars(envVars map[string]string) map[string]string {
 	return cloned
 }
 
-func (s *SandboxService) claimConfigForPersistence(cfg *SandboxConfig) *SandboxConfig {
+func (s *SandboxService) claimConfigForPersistence(cfg *sandboxstore.SandboxConfig) *sandboxstore.SandboxConfig {
 	persisted := cloneSandboxConfig(cfg)
 	if persisted == nil {
 		if s.config.DefaultTTL <= 0 {
 			return nil
 		}
-		persisted = &SandboxConfig{}
+		persisted = &sandboxstore.SandboxConfig{}
 	}
 	if persisted.TTL == nil && s.config.DefaultTTL > 0 {
 		persisted.TTL = int32Ptr(int32(s.config.DefaultTTL.Seconds()))
@@ -161,7 +140,7 @@ func (s *SandboxService) claimConfigForPersistence(cfg *SandboxConfig) *SandboxC
 	return persisted
 }
 
-func normalizeSandboxConfigForPersistence(cfg *SandboxConfig) error {
+func normalizeSandboxConfigForPersistence(cfg *sandboxstore.SandboxConfig) error {
 	if cfg == nil {
 		return nil
 	}
@@ -169,13 +148,13 @@ func normalizeSandboxConfigForPersistence(cfg *SandboxConfig) error {
 		return err
 	}
 	if len(cfg.Services) > 0 {
-		services, err := NormalizeSandboxAppServices(cfg.Services)
+		services, err := appservice.NormalizeSandboxAppServices(cfg.Services)
 		if err != nil {
 			return err
 		}
 		cfg.Services = services
 	}
-	if cfg.AutoResume != nil && !*cfg.AutoResume && SandboxAppServicesHaveResumeRoute(cfg.Services) {
+	if cfg.AutoResume != nil && !*cfg.AutoResume && appservice.SandboxAppServicesHaveResumeRoute(cfg.Services) {
 		return fmt.Errorf("cannot set resume=true on public routes when sandbox auto_resume is disabled")
 	}
 	return nil
@@ -252,7 +231,7 @@ func applyClaimMetadata(pod *corev1.Pod, metadata *ClaimMetadata) {
 	}
 }
 
-func setMountsAnnotation(annotations map[string]string, mounts []ClaimMount) error {
+func setMountsAnnotation(annotations map[string]string, mounts []managerapi.ClaimMount) error {
 	if annotations == nil {
 		return nil
 	}
@@ -280,11 +259,11 @@ func validateClaimMounts(req *ClaimRequest) error {
 	return nil
 }
 
-func normalizeClaimMounts(mounts []ClaimMount) ([]ClaimMount, error) {
+func normalizeClaimMounts(mounts []managerapi.ClaimMount) ([]managerapi.ClaimMount, error) {
 	if len(mounts) == 0 {
 		return nil, nil
 	}
-	normalized := append([]ClaimMount(nil), mounts...)
+	normalized := append([]managerapi.ClaimMount(nil), mounts...)
 	seenVolumes := make(map[string]struct{}, len(normalized))
 	seenMountPoints := make(map[string]string, len(normalized))
 	for i := range normalized {
@@ -311,13 +290,6 @@ func normalizeClaimMounts(mounts []ClaimMount) ([]ClaimMount, error) {
 		seenMountPoints[cleanMountPoint] = mount.SandboxVolumeID
 	}
 	return normalized, nil
-}
-
-// WebhookConfig represents outbound webhook configuration.
-type WebhookConfig struct {
-	URL      string `json:"url"`
-	Secret   string `json:"secret,omitempty"`
-	WatchDir string `json:"watch_dir,omitempty"`
 }
 
 // ClaimResponse represents a sandbox claim response
@@ -693,8 +665,8 @@ func (s *SandboxService) persistClaimedSandbox(ctx context.Context, pod *corev1.
 	return s.sandboxStore.UpsertSandbox(ctx, sandboxRecordForClaimedPod(s, pod, template, req))
 }
 
-func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest) *SandboxRecord {
-	sandboxID := sandboxIDFromPod(pod)
+func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest) *sandboxstore.SandboxRecord {
+	sandboxID := sandboxPodID(pod)
 	if sandboxID == "" {
 		sandboxID = req.SandboxID
 	}
@@ -703,7 +675,7 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 	}
 	cfg := parseSandboxConfig(pod.Annotations[controller.AnnotationConfig])
 	mounts := parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
-	record := &SandboxRecord{
+	record := &sandboxstore.SandboxRecord{
 		ID:                   sandboxID,
 		TeamID:               req.TeamID,
 		UserID:               req.UserID,
@@ -711,7 +683,7 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 		TemplateName:         template.Name,
 		TemplateNamespace:    template.Namespace,
 		ClusterID:            naming.ClusterIDOrDefault(template.Spec.ClusterId),
-		DesiredState:         SandboxDesiredStateActive,
+		DesiredState:         sandboxstore.SandboxDesiredStateActive,
 		Config:               cfg,
 		Mounts:               mounts,
 		TemplateSpec:         template.Spec,
@@ -734,7 +706,7 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 	}
 	snapshotID := strings.TrimSpace(req.SnapshotID)
 	if templatepkg.IsBuildSnapshotID(snapshotID) {
-		return pod, false, ErrRootFSSnapshotNotFound
+		return pod, false, sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	store, err := s.rootFSProductStore()
 	if err != nil {
@@ -751,7 +723,7 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 		return pod, false, err
 	}
 	restorer := sandboxRootFSRestorer(store)
-	if _, err := restorer.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+	if _, err := restorer.RestoreRootFSFromSnapshot(ctx, &sandboxstore.RestoreRootFSFromSnapshotRequest{
 		SandboxID:  record.ID,
 		SnapshotID: snapshotID,
 		TeamID:     req.TeamID,
@@ -763,7 +735,7 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 		return pod, true, fmt.Errorf("load rootfs snapshot state: %w", err)
 	}
 	if state == nil {
-		return pod, true, fmt.Errorf("%w: snapshot %s", ErrRootFSFilesystemNotFound, snapshotID)
+		return pod, true, fmt.Errorf("%w: snapshot %s", sandboxstore.ErrRootFSFilesystemNotFound, snapshotID)
 	}
 	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, state, true)
 	if err != nil {
@@ -833,7 +805,7 @@ func (s *SandboxService) observeIdleClaim(template, result string) {
 
 func validateClaimMountsForTemplate(req *ClaimRequest, template *v1alpha1.SandboxTemplate) error {
 	allowed := declaredVolumeMountsByPath(template)
-	var mounts []ClaimMount
+	var mounts []managerapi.ClaimMount
 	if req != nil {
 		mounts = req.Mounts
 	}
@@ -955,7 +927,7 @@ func (s *SandboxService) bindVolumePortal(ctx context.Context, pod *corev1.Pod, 
 	if pod == nil {
 		return nil, fmt.Errorf("pod is nil")
 	}
-	sandboxID := sandboxIDFromPod(pod)
+	sandboxID := sandboxPodID(pod)
 	if sandboxID == "" {
 		sandboxID = pod.Name
 	}
@@ -1557,7 +1529,7 @@ func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod
 	if !hasSandboxCleanupFinalizer(pod) {
 		if _, err := s.ensureSandboxDeletionFinalizer(cleanupCtx, pod); err != nil {
 			logger.Warn("Failed to ensure sandbox cleanup finalizer after claim failure",
-				zap.String("sandboxID", sandboxIDFromPod(pod)),
+				zap.String("sandboxID", sandboxPodID(pod)),
 				zap.String("namespace", pod.Namespace),
 				zap.String("reason", reason),
 				zap.Error(err),
@@ -1567,7 +1539,7 @@ func (s *SandboxService) requestSandboxDeletionAfterClaimFailure(pod *corev1.Pod
 
 	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(cleanupCtx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		logger.Warn("Delete pod failed after claim failure",
-			zap.String("sandboxID", sandboxIDFromPod(pod)),
+			zap.String("sandboxID", sandboxPodID(pod)),
 			zap.String("namespace", pod.Namespace),
 			zap.String("reason", reason),
 			zap.Error(err),
@@ -1583,7 +1555,7 @@ func (s *SandboxService) restoreIdlePodAfterHotClaimResizeConflict(ctx context.C
 		return nil
 	}
 	namespace, name := claimedPod.Namespace, claimedPod.Name
-	claimedSandboxID := sandboxIDFromPod(claimedPod)
+	claimedSandboxID := sandboxPodID(claimedPod)
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
@@ -1599,7 +1571,7 @@ func (s *SandboxService) restoreIdlePodAfterHotClaimResizeConflict(ctx context.C
 		if originalIdlePod.UID != "" && current.UID != "" && originalIdlePod.UID != current.UID {
 			return nil
 		}
-		if claimedSandboxID != "" && sandboxIDFromPod(current) != "" && sandboxIDFromPod(current) != claimedSandboxID {
+		if claimedSandboxID != "" && sandboxPodID(current) != "" && sandboxPodID(current) != claimedSandboxID {
 			return nil
 		}
 
@@ -1617,7 +1589,7 @@ func (s *SandboxService) podDataPlaneReady(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
 	}
-	if !dataplane.SelectorRequiresReadyNode(pod.Spec.NodeSelector) {
+	if !selectorRequiresReadyDataPlane(pod.Spec.NodeSelector) {
 		return true
 	}
 	if pod.Spec.NodeName == "" || s == nil || s.nodeLister == nil {
@@ -1627,11 +1599,11 @@ func (s *SandboxService) podDataPlaneReady(pod *corev1.Pod) bool {
 	if err != nil {
 		return false
 	}
-	return dataplane.NodeReady(node)
+	return nodeDataPlaneReady(node)
 }
 
 func (s *SandboxService) ensureDataPlaneReadyCapacity(spec corev1.PodSpec) error {
-	if !dataplane.SelectorRequiresReadyNode(spec.NodeSelector) {
+	if !selectorRequiresReadyDataPlane(spec.NodeSelector) {
 		return nil
 	}
 	if s == nil || s.nodeLister == nil {

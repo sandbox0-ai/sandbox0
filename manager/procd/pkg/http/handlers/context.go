@@ -18,6 +18,7 @@ import (
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process"
 	"github.com/sandbox0-ai/sandbox0/manager/procd/pkg/process/repl"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/streaming"
 	"go.uber.org/zap"
 )
@@ -46,51 +47,10 @@ func NewContextHandler(manager *ctxpkg.Manager, logger *zap.Logger) *ContextHand
 	}
 }
 
-// CreateContextRequest is the request body for creating a context.
-type CreateContextRequest struct {
-	Type process.ProcessType `json:"type"` // "repl" or "cmd"
-
-	Repl *CreateREPLContextRequest `json:"repl,omitempty"`
-	Cmd  *CreateCMDContextRequest  `json:"cmd,omitempty"`
-
-	WaitUntilDone bool `json:"wait_until_done"`
-
-	CWD            string            `json:"cwd"`
-	EnvVars        map[string]string `json:"env_vars"`
-	PTYSize        *process.PTYSize  `json:"pty_size"`
-	IdleTimeoutSec int32             `json:"idle_timeout_sec,omitempty"`
-	TTLSec         int32             `json:"ttl_sec,omitempty"`
-}
-
-// CreateREPLContextRequest is the request body for creating a REPL context.
-type CreateREPLContextRequest struct {
-	Alias      string           `json:"alias"`                 // python, node, bash, zsh, etc.
-	Input      string           `json:"input"`                 // code to execute
-	ReplConfig *repl.REPLConfig `json:"repl_config,omitempty"` // custom config
-}
-
-// CreateCMDContextRequest is the request body for creating a CMD context.
-type CreateCMDContextRequest struct {
-	Command []string `json:"command"` // command path and args, e.g., ["/bin/ls", "-la"]
-}
-
-// ContextResponse is the response body for a context.
-type ContextResponse struct {
-	ID        string              `json:"id"`
-	Type      process.ProcessType `json:"type"`
-	Alias     string              `json:"alias"`
-	Command   []string            `json:"command,omitempty"`
-	CWD       string              `json:"cwd"`
-	EnvVars   map[string]string   `json:"env_vars"`
-	Running   bool                `json:"running"`
-	Paused    bool                `json:"paused"`
-	CreatedAt string              `json:"created_at"`
-	OutputRaw string              `json:"output_raw,omitempty"`
-	Stdout    *string             `json:"stdout,omitempty"`
-	Stderr    *string             `json:"stderr,omitempty"`
-	ExitCode  *int                `json:"exit_code,omitempty"`
-	State     string              `json:"state,omitempty"`
-}
+type CreateContextRequest = procdapi.CreateContextRequest
+type CreateREPLContextRequest = procdapi.CreateREPLContextRequest
+type CreateCMDContextRequest = procdapi.CreateCMDContextRequest
+type ContextResponse = procdapi.ContextResponse
 
 func normalizeStringMap(value map[string]string) map[string]string {
 	if value == nil {
@@ -207,36 +167,14 @@ type SignalContextRequest struct {
 	Signal string `json:"signal"`
 }
 
-type wsControlMessage struct {
-	Type      string `json:"type"`
-	Data      string `json:"data"`
-	Rows      uint16 `json:"rows"`
-	Cols      uint16 `json:"cols"`
-	Signal    string `json:"signal"`
-	RequestID string `json:"request_id"`
-}
-
-type wsOutputMessage struct {
-	Type   string `json:"type"`
-	Source string `json:"source"`
-	Data   string `json:"data"`
-}
-
-type wsDoneMessage struct {
-	Type      string `json:"type"`
-	RequestID string `json:"request_id,omitempty"`
-	ExitCode  *int   `json:"exit_code,omitempty"`
-	State     string `json:"state,omitempty"`
-}
+type wsControlMessage = procdapi.WSControlMessage
+type wsOutputMessage = procdapi.WSOutputMessage
+type wsDoneMessage = procdapi.WSDoneMessage
 
 type execError struct {
 	status  int
 	code    string
 	message string
-}
-
-func (e *execError) Error() string {
-	return e.message
 }
 
 const execTimeout = 30 * time.Second
@@ -326,8 +264,14 @@ func (h *ContextHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Repl != nil {
 		alias = req.Repl.Alias
-		replConfig = req.Repl.ReplConfig
 		input = req.Repl.Input
+		if len(req.Repl.ReplConfig) > 0 && string(req.Repl.ReplConfig) != "null" {
+			replConfig = &repl.REPLConfig{}
+			if err := json.Unmarshal(req.Repl.ReplConfig, replConfig); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+				return
+			}
+		}
 	}
 	if req.Cmd != nil {
 		command = req.Cmd.Command

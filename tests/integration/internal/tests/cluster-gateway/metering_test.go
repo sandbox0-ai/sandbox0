@@ -87,8 +87,7 @@ func TestClusterGatewayIntegration_MeteringExportContract(t *testing.T) {
 		t.Fatalf("create cluster-gateway server: %v", err)
 	}
 
-	httpServer := httptest.NewServer(server.Handler())
-	t.Cleanup(httpServer.Close)
+	httpServer := startGatewayTestServer(t, server, cfg)
 
 	token := newInternalToken(t, internalauthGenerator(keys.privateKey), []string{"*:*"})
 

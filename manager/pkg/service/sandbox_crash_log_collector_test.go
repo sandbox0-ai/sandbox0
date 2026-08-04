@@ -14,7 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -324,7 +324,7 @@ func crashLogItemFromPod(pod *corev1.Pod) procdCrashLogItem {
 		Namespace:         pod.Namespace,
 		PodName:           pod.Name,
 		PodUID:            string(pod.UID),
-		SandboxID:         sandboxIDFromPod(pod),
+		SandboxID:         sandboxPodID(pod),
 		TeamID:            pod.Annotations[controller.AnnotationTeamID],
 		RuntimeGeneration: runtimeGenerationFromPod(pod),
 		RestartCount:      status.RestartCount,

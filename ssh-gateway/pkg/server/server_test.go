@@ -27,7 +27,7 @@ import (
 	procdfile "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/ssh-gateway/pkg/metrics"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 	sshcrypto "golang.org/x/crypto/ssh"

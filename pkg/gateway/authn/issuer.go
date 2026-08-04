@@ -305,15 +305,6 @@ func (i *Issuer) validateToken(tokenString string) (*Claims, error) {
 	return claims, nil
 }
 
-// GenerateRefreshTokenHash generates a random hash for DB storage.
-func GenerateRefreshTokenHash() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return base64.URLEncoding.EncodeToString(bytes), nil
-}
-
 // HashRefreshToken returns a deterministic hash for refresh token persistence/lookup.
 func HashRefreshToken(token string) string {
 	sum := sha256.Sum256([]byte(token))

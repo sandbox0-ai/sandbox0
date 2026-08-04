@@ -1521,19 +1521,6 @@ func TestCreateSnapshotPreservesColdSegments(t *testing.T) {
 			t.Fatalf("snapshot segment volume = %q, want vol-snapshot", segment.VolumeID)
 		}
 	}
-	snapNode, err := state.Lookup(RootInode, "snap.txt")
-	if err != nil {
-		t.Fatalf("snapshot Lookup() error = %v", err)
-	}
-	reader := NewSnapshotReader(state, engine.materializer)
-	payload, err := reader.Read(snapNode.Inode, 0, snapNode.Size)
-	if err != nil {
-		t.Fatalf("SnapshotReader.Read() error = %v", err)
-	}
-	if string(payload) != "snapshot-data" {
-		t.Fatalf("snapshot data = %q, want snapshot-data", payload)
-	}
-
 	localSnapshots, err := LoadLocalSnapshots(ctx, Config{
 		VolumeID:    "vol-snapshot",
 		WALPath:     walPath,
@@ -1670,14 +1657,6 @@ func TestCompactionGarbageCollectionRetainsSnapshotSegments(t *testing.T) {
 	if string(latest) != "aZcdef" {
 		t.Fatalf("latest payload = %q, want aZcdef", latest)
 	}
-	snapshotPayload, err := NewSnapshotReader(snapshotState, engine.materializer).Read(node.Inode, 0, 6)
-	if err != nil {
-		t.Fatalf("SnapshotReader.Read() error = %v", err)
-	}
-	if string(snapshotPayload) != "abcdef" {
-		t.Fatalf("snapshot payload = %q, want abcdef", snapshotPayload)
-	}
-
 	retainedManifests := map[string]struct{}{manifestKey(compacted.ManifestSeq): {}}
 	withSnapshot, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{compacted.State, snapshotState}, retainedManifests)
 	if err != nil {
@@ -1986,15 +1965,20 @@ func TestMaterializerBuildSegmentProducesRoundTrippableLayout(t *testing.T) {
 			3: []byte("world"),
 		},
 	}
-	segment, files, err := buildSegment(7, "vol-1", state)
+	manifestState, segments, err := buildMaterializedState(7, "vol-1", state, 0)
 	if err != nil {
-		t.Fatalf("buildSegment() error = %v", err)
+		t.Fatalf("buildMaterializedState() error = %v", err)
 	}
+	if len(segments) != 1 {
+		t.Fatalf("segments = %d, want 1", len(segments))
+	}
+	segment := segments[0]
+	files := manifestState.ColdFiles
 	if got := string(segment.Payload); got != "helloworld" {
 		t.Fatalf("segment payload = %q, want helloworld", got)
 	}
 	if !bytes.Equal(state.Data[2], []byte("hello")) || !bytes.Equal(state.Data[3], []byte("world")) {
-		t.Fatal("buildSegment() mutated input state")
+		t.Fatal("buildMaterializedState() mutated input state")
 	}
 	if len(files[2]) != 1 || files[2][0].Offset != 0 || files[2][0].Length != 5 {
 		t.Fatalf("files[2] = %+v", files[2])

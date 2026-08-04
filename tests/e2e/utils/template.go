@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 )
 
 type TemplateFromSandboxCreateRequest struct {

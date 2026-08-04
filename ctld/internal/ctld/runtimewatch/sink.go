@@ -5,7 +5,6 @@ import (
 	"reflect"
 	"strconv"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	corev1 "k8s.io/api/core/v1"
@@ -59,7 +58,7 @@ func (s *PodStatusSink) Desired(ctx context.Context, pod *corev1.Pod, snapshot r
 	default:
 		return nil
 	}
-	_, err := controller.EnsureSandboxPodProbeConditions(ctx, s.client, pod, nil, &readiness, nil)
+	_, err := s.ensureProbeConditions(ctx, pod, nil, &readiness, nil)
 	return err
 }
 
@@ -103,7 +102,7 @@ func (s *PodStatusSink) Observed(ctx context.Context, pod *corev1.Pod, observati
 	default:
 		readiness = sandboxprobe.Failed(sandboxprobe.KindReadiness, "RuntimeObservationInvalid", "runtime observation is invalid", nil)
 	}
-	_, err = controller.EnsureSandboxPodProbeConditions(ctx, s.client, updated, &startup, &readiness, &liveness)
+	_, err = s.ensureProbeConditions(ctx, updated, &startup, &readiness, &liveness)
 	return err
 }
 
@@ -118,7 +117,7 @@ func (s *PodStatusSink) Disconnected(ctx context.Context, pod *corev1.Pod) error
 	startup := sandboxprobe.Suspended(sandboxprobe.KindStartup, "RuntimeControlDisconnected", "runtime control stream is disconnected", nil)
 	readiness := sandboxprobe.Failed(sandboxprobe.KindReadiness, "RuntimeControlDisconnected", "runtime control stream is disconnected", nil)
 	liveness := sandboxprobe.Suspended(sandboxprobe.KindLiveness, "RuntimeControlDisconnected", "runtime control stream is disconnected", nil)
-	_, err = controller.EnsureSandboxPodProbeConditions(ctx, s.client, updated, &startup, &readiness, &liveness)
+	_, err = s.ensureProbeConditions(ctx, updated, &startup, &readiness, &liveness)
 	return err
 }
 

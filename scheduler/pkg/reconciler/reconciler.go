@@ -6,11 +6,11 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/scheduler/pkg/metrics"
 	"go.uber.org/zap"
 )
 

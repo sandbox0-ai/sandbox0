@@ -67,35 +67,3 @@ func startWithCandidates(base *process.BaseProcess, runner *process.PTYRunner, c
 	}
 	return fmt.Errorf("%w: no usable interpreter found (%s)", process.ErrProcessStartFailed, strings.Join(errs, "; "))
 }
-
-// CheckExecutable checks if an executable is available in PATH.
-func CheckExecutable(name string) (string, bool) {
-	path, err := exec.LookPath(name)
-	return path, err == nil
-}
-
-// CheckREPLAvailable checks if a REPL type is available on the system.
-func CheckREPLAvailable(language string) (string, bool) {
-	config, ok := DefaultRegistry.Get(language)
-	if !ok {
-		return "", false
-	}
-
-	for _, candidate := range config.Candidates {
-		if path, ok := CheckExecutable(candidate.Name); ok {
-			return path, true
-		}
-	}
-	return "", false
-}
-
-// ListAvailableREPLs returns the list of REPL types available on the system.
-func ListAvailableREPLs() []string {
-	var available []string
-	for _, name := range DefaultRegistry.List() {
-		if _, ok := CheckREPLAvailable(name); ok {
-			available = append(available, name)
-		}
-	}
-	return available
-}

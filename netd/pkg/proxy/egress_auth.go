@@ -109,30 +109,6 @@ func WithEgressAuthResolver(resolver egressAuthResolver) ServerOption {
 	}
 }
 
-func WithEgressAuthCache(cache egressAuthCache) ServerOption {
-	return func(s *Server) {
-		if s != nil {
-			s.authCache = cache
-		}
-	}
-}
-
-func WithTLSInterceptAuthority(authority tlsInterceptAuthority) ServerOption {
-	return func(s *Server) {
-		if s != nil {
-			s.tlsAuthority = authority
-		}
-	}
-}
-
-func WithUpstreamTLSConfig(cfg *tls.Config) ServerOption {
-	return func(s *Server) {
-		if s != nil {
-			s.upstreamTLSConfig = cloneTLSConfig(cfg)
-		}
-	}
-}
-
 func newMemoryEgressAuthCache() *memoryEgressAuthCache {
 	return &memoryEgressAuthCache{
 		entries:          make(map[egressAuthCacheKey]*egressauth.ResolveResponse),

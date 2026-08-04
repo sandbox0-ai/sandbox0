@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	gatewayspec "github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	e2eframework "github.com/sandbox0-ai/sandbox0/tests/e2e/internal/framework"
 )
 
 type PutTeamQuotaRequest struct {
@@ -123,7 +125,7 @@ func managerInternalBaseURL(ctx context.Context, env *framework.ScenarioEnv) (st
 		return "", nil, fmt.Errorf("scenario env is required")
 	}
 	serviceName := env.Infra.Name + "-manager"
-	port, err := framework.GetServicePort(ctx, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)
+	port, err := e2eframework.GetServicePort(ctx, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)
 	if err != nil {
 		return "", nil, err
 	}
@@ -161,6 +163,10 @@ func managerInternalSystemToken(ctx context.Context, env *framework.ScenarioEnv)
 	if err != nil {
 		return "", err
 	}
-	generator := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig(internalauth.ServiceClusterGateway, privateKey))
+	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     internalauth.ServiceClusterGateway,
+		PrivateKey: privateKey,
+		TTL:        30 * time.Second,
+	})
 	return generator.GenerateSystem(internalauth.ServiceManager, internalauth.GenerateOptions{Permissions: []string{"*:*"}})
 }

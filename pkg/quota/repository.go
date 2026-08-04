@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 )
 
@@ -36,15 +35,13 @@ type UsageStore interface {
 	AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error)
 }
 
-func NewRepository(pool *pgxpool.Pool) *Repository {
-	if pool == nil {
+// NewRepository creates a quota repository backed by db.
+func NewRepository(db DB) *Repository {
+	if db == nil {
 		return nil
 	}
-	return &Repository{db: pool}
-}
-
-func NewRepositoryWithDB(db DB) *Repository {
-	if db == nil {
+	value := reflect.ValueOf(db)
+	if value.Kind() == reflect.Pointer && value.IsNil() {
 		return nil
 	}
 	return &Repository{db: db}

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	managerobs "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxobservability"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	sandboxobsingest "github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability/ingest"
 	"github.com/stretchr/testify/assert"
@@ -19,7 +20,7 @@ import (
 
 func TestSandboxLogProducerProjectsProcessLogStream(t *testing.T) {
 	writer := newRecordingSandboxObservabilityWriter()
-	worker, err := sandboxobsingest.NewLogWorker(writer, sandboxobsingest.Config{
+	worker, err := managerobs.NewLogWorker(writer, sandboxobsingest.Config{
 		QueueSize:     10,
 		BatchSize:     1,
 		FlushInterval: time.Hour,

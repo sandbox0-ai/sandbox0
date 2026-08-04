@@ -37,75 +37,54 @@ func TestCleanupBuiltinResourcesRespectsStatefulResourcePolicy(t *testing.T) {
 		assertStoragePresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-rustfs-data")
 	})
 
-	t.Run("retain keeps pvc and secret", func(t *testing.T) {
-		reconciler, client := newStorageLifecycleTestReconciler(t,
-			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-rustfs", Namespace: "sandbox0-system"}},
-			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-rustfs", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox0-rustfs-credentials", Namespace: "sandbox0-system"}},
-			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-rustfs-data", Namespace: "sandbox0-system"}},
-		)
+	for _, tt := range []struct {
+		name                 string
+		policy               infrav1alpha1.BuiltinStatefulResourcePolicy
+		retainStatefulVolume bool
+	}{
+		{name: "retain keeps pvc and secret", policy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain, retainStatefulVolume: true},
+		{name: "delete removes pvc and secret", policy: infrav1alpha1.BuiltinStatefulResourcePolicyDelete},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler, client := newStorageLifecycleTestReconciler(t,
+				&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-rustfs", Namespace: "sandbox0-system"}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-rustfs", Namespace: "sandbox0-system"}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox0-rustfs-credentials", Namespace: "sandbox0-system"}},
+				&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-rustfs-data", Namespace: "sandbox0-system"}},
+			)
 
-		err := reconciler.CleanupBuiltinResources(context.Background(), &infrav1alpha1.Sandbox0Infra{
-			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
-			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Storage: &infrav1alpha1.StorageConfig{
-					Type: infrav1alpha1.StorageTypeS3,
-					Builtin: &infrav1alpha1.BuiltinStorageConfig{
-						StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
-					},
-					S3: &infrav1alpha1.S3StorageConfig{
-						Endpoint:          "https://s3.example.com",
-						Bucket:            "sandbox0",
-						Region:            "us-east-1",
-						CredentialsSecret: infrav1alpha1.S3CredentialsSecret{Name: "s3-credentials"},
-					},
-				},
-			},
-		})
-		if err != nil {
-			t.Fatalf("cleanup builtin resources: %v", err)
-		}
-
-		assertStorageMissingObject(t, client, &appsv1.StatefulSet{}, "sandbox0-system", "demo-rustfs")
-		assertStorageMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-rustfs")
-		assertStoragePresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-sandbox0-rustfs-credentials")
-		assertStoragePresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-rustfs-data")
-	})
-
-	t.Run("delete removes pvc and secret", func(t *testing.T) {
-		reconciler, client := newStorageLifecycleTestReconciler(t,
-			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-rustfs", Namespace: "sandbox0-system"}},
-			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-rustfs", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox0-rustfs-credentials", Namespace: "sandbox0-system"}},
-			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-rustfs-data", Namespace: "sandbox0-system"}},
-		)
-
-		err := reconciler.CleanupBuiltinResources(context.Background(), &infrav1alpha1.Sandbox0Infra{
-			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
-			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Storage: &infrav1alpha1.StorageConfig{
-					Type: infrav1alpha1.StorageTypeS3,
-					Builtin: &infrav1alpha1.BuiltinStorageConfig{
-						StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyDelete,
-					},
-					S3: &infrav1alpha1.S3StorageConfig{
-						Endpoint:          "https://s3.example.com",
-						Bucket:            "sandbox0",
-						Region:            "us-east-1",
-						CredentialsSecret: infrav1alpha1.S3CredentialsSecret{Name: "s3-credentials"},
+			err := reconciler.CleanupBuiltinResources(context.Background(), &infrav1alpha1.Sandbox0Infra{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+				Spec: infrav1alpha1.Sandbox0InfraSpec{
+					Storage: &infrav1alpha1.StorageConfig{
+						Type: infrav1alpha1.StorageTypeS3,
+						Builtin: &infrav1alpha1.BuiltinStorageConfig{
+							StatefulResourcePolicy: tt.policy,
+						},
+						S3: &infrav1alpha1.S3StorageConfig{
+							Endpoint:          "https://s3.example.com",
+							Bucket:            "sandbox0",
+							Region:            "us-east-1",
+							CredentialsSecret: infrav1alpha1.S3CredentialsSecret{Name: "s3-credentials"},
+						},
 					},
 				},
-			},
-		})
-		if err != nil {
-			t.Fatalf("cleanup builtin resources: %v", err)
-		}
+			})
+			if err != nil {
+				t.Fatalf("cleanup builtin resources: %v", err)
+			}
 
-		assertStorageMissingObject(t, client, &appsv1.StatefulSet{}, "sandbox0-system", "demo-rustfs")
-		assertStorageMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-rustfs")
-		assertStorageMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-sandbox0-rustfs-credentials")
-		assertStorageMissingObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-rustfs-data")
-	})
+			assertStorageMissingObject(t, client, &appsv1.StatefulSet{}, "sandbox0-system", "demo-rustfs")
+			assertStorageMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-rustfs")
+			if tt.retainStatefulVolume {
+				assertStoragePresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-sandbox0-rustfs-credentials")
+				assertStoragePresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-rustfs-data")
+				return
+			}
+			assertStorageMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-sandbox0-rustfs-credentials")
+			assertStorageMissingObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-rustfs-data")
+		})
+	}
 }
 
 func newStorageLifecycleTestReconciler(t *testing.T, objects ...runtime.Object) (*Reconciler, ctrlclient.Client) {

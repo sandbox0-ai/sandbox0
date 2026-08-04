@@ -611,22 +611,6 @@ func buildMaterializedState(manifestSeq uint64, volumeID string, state *Snapshot
 	return manifestState, segments, nil
 }
 
-func buildSegment(manifestSeq uint64, volumeID string, state *SnapshotState) (*materializedSegment, map[uint64][]FileExtent, error) {
-	manifestState, segments, err := buildMaterializedState(manifestSeq, volumeID, state, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	segment := &materializedSegment{
-		ID:       fmt.Sprintf("%020d-0", manifestSeq),
-		VolumeID: volumeID,
-		Key:      fmt.Sprintf("%s/%020d-0.bin", segmentDir, manifestSeq),
-	}
-	if len(segments) > 0 {
-		segment = segments[0]
-	}
-	return segment, manifestState.ColdFiles, nil
-}
-
 func materializeFileExtents(builder *segmentBuilder, state, manifestState *SnapshotState, inode uint64) ([]FileExtent, error) {
 	var out []FileExtent
 	for _, extent := range state.ColdFiles[inode] {

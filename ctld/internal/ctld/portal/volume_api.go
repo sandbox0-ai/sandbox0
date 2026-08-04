@@ -26,7 +26,14 @@ func newMountedVolumeAPIHandler(storageCfg *apiconfig.StorageProxyConfig, repo *
 	}
 	eventHub := notify.NewHub(logger, queueSize)
 	fileRPC := fsserver.NewFileSystemServer(volumes, repo, eventHub, notify.NewLocalBroadcaster(eventHub), logger, nil)
-	server := sphttp.NewServer(logger, storageCfg, nil, repo, nil, "", nil, nil, nil, volumes, fileRPC, eventHub)
+	server := sphttp.NewServerWithDependencies(sphttp.ServerDependencies{
+		Logger:  logger,
+		Config:  storageCfg,
+		Volumes: repo,
+		Mounts:  volumes,
+		Files:   fileRPC,
+		Events:  eventHub,
+	})
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isMountedVolumeAPIPath(r.URL.Path) {

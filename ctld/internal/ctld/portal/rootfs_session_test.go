@@ -18,7 +18,8 @@ import (
 
 func TestRootFSBackedSessionWritesThroughBackingDir(t *testing.T) {
 	backing := t.TempDir()
-	session := newRootFSBackedSession(backing)
+	session, err := newRootFSBackedSessionWithState(backing, "")
+	require.NoError(t, err)
 	defer session.Close()
 
 	ctx := context.Background()
@@ -69,7 +70,8 @@ func TestRootFSBackedSessionWritesThroughBackingDir(t *testing.T) {
 
 func TestRootFSBackedSessionPreservesRemoveErrnos(t *testing.T) {
 	backing := t.TempDir()
-	session := newRootFSBackedSession(backing)
+	session, err := newRootFSBackedSessionWithState(backing, "")
+	require.NoError(t, err)
 	defer session.Close()
 	ctx := context.Background()
 

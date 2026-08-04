@@ -9,10 +9,11 @@ func TestReplicasetAndSandboxNames(t *testing.T) {
 	clusterID := "aws-us-east-1"
 	templateName := "basic-template"
 
-	rsName, err := ReplicasetName(clusterID, templateName)
+	workloadName, err := NewSandboxWorkloadName(clusterID, templateName)
 	if err != nil {
-		t.Fatalf("replicaset name: %v", err)
+		t.Fatalf("NewSandboxWorkloadName: %v", err)
 	}
+	rsName := workloadName.ReplicaSetName()
 	if len(rsName) > replicaSetMaxLen {
 		t.Fatalf("replicaset name too long: %d", len(rsName))
 	}
@@ -49,10 +50,11 @@ func TestSandboxNameForLongTeamTemplateFitsExposureHostLabel(t *testing.T) {
 }
 
 func TestReplicasetNameFitsSandboxExposureBudget(t *testing.T) {
-	rsName, err := ReplicasetName(DefaultClusterID, strings.Repeat("long-template-", 8))
+	workloadName, err := NewSandboxWorkloadName(DefaultClusterID, strings.Repeat("long-template-", 8))
 	if err != nil {
-		t.Fatalf("ReplicasetName: %v", err)
+		t.Fatalf("NewSandboxWorkloadName: %v", err)
 	}
+	rsName := workloadName.ReplicaSetName()
 	maxReplicaSetNameForExposure := sandboxNameMaxLen - 1 - podRandSuffixLen
 	if len(rsName) > maxReplicaSetNameForExposure {
 		t.Fatalf("replicaset name too long for exposure-safe pods: %d > %d", len(rsName), maxReplicaSetNameForExposure)
@@ -106,30 +108,17 @@ func TestTemplateNameForCluster(t *testing.T) {
 	}
 }
 
-func TestSlugWithHashTruncates(t *testing.T) {
+func TestDNSLabelWithHashTruncates(t *testing.T) {
 	input := "This-Is-A-Very-Long-Template-Name-With-Invalid---Chars"
-	name, err := slugWithHash(input, 20)
+	name, err := DNSLabelWithHash(input, 20)
 	if err != nil {
-		t.Fatalf("slugWithHash: %v", err)
+		t.Fatalf("DNSLabelWithHash: %v", err)
 	}
 	if len(name) > 20 {
 		t.Fatalf("expected length <= 20, got %d", len(name))
 	}
 	if err := validateDNSLabel(name); err != nil {
 		t.Fatalf("generated name invalid: %v", err)
-	}
-}
-
-func TestClusterIDFromName(t *testing.T) {
-	clusterID, err := ClusterIDFromName("My Cluster East 1")
-	if err != nil {
-		t.Fatalf("ClusterIDFromName: %v", err)
-	}
-	if len(clusterID) > clusterIDMaxLen {
-		t.Fatalf("cluster_id too long: %d", len(clusterID))
-	}
-	if err := validateDNSLabel(clusterID); err != nil {
-		t.Fatalf("cluster_id invalid: %v", err)
 	}
 }
 

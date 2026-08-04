@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -49,19 +49,12 @@ type EndpointsInfo struct {
 	Ports           []corev1.EndpointPort
 }
 
-type NodeInfo struct {
-	Name            string
-	ResourceVersion string
-	InternalIPs     []string
-}
-
 type Watcher struct {
 	k8sClient       kubernetes.Interface
 	informerFactory informers.SharedInformerFactory
 	podInformer     cache.SharedIndexInformer
 	serviceInformer cache.SharedIndexInformer
 	sliceInformer   cache.SharedIndexInformer
-	nodeInformer    cache.SharedIndexInformer
 	logger          *zap.Logger
 
 	mu             sync.RWMutex
@@ -69,7 +62,6 @@ type Watcher struct {
 	services       map[string]*ServiceInfo
 	endpoints      map[string]*EndpointsInfo
 	endpointSlices map[string]*endpointSliceEntry
-	nodes          map[string]*NodeInfo
 
 	onSandboxUpsert   func(*SandboxInfo)
 	onSandboxDelete   func(*SandboxInfo)
@@ -77,8 +69,6 @@ type Watcher struct {
 	onServiceDelete   func(*ServiceInfo)
 	onEndpointsUpsert func(*EndpointsInfo)
 	onEndpointsDelete func(*EndpointsInfo)
-	onNodeUpsert      func(*NodeInfo)
-	onNodeDelete      func(*NodeInfo)
 }
 
 const podNodeIndex = "spec.nodeName"
@@ -99,7 +89,6 @@ func NewWatcher(
 		services:        make(map[string]*ServiceInfo),
 		endpoints:       make(map[string]*EndpointsInfo),
 		endpointSlices:  make(map[string]*endpointSliceEntry),
-		nodes:           make(map[string]*NodeInfo),
 	}
 }
 
@@ -127,14 +116,6 @@ func (w *Watcher) SetEndpointsHandlers(
 	w.onEndpointsDelete = onDelete
 }
 
-func (w *Watcher) SetNodeHandlers(
-	onUpsert func(*NodeInfo),
-	onDelete func(*NodeInfo),
-) {
-	w.onNodeUpsert = onUpsert
-	w.onNodeDelete = onDelete
-}
-
 func (w *Watcher) Start(ctx context.Context) error {
 	if w.k8sClient == nil {
 		return fmt.Errorf("k8s client is nil")
@@ -142,14 +123,12 @@ func (w *Watcher) Start(ctx context.Context) error {
 	podInformer := w.informerFactory.Core().V1().Pods().Informer()
 	serviceInformer := w.informerFactory.Core().V1().Services().Informer()
 	endpointSliceInformer := w.informerFactory.Discovery().V1().EndpointSlices().Informer()
-	nodeInformer := w.informerFactory.Core().V1().Nodes().Informer()
 	if err := podInformer.AddIndexers(cache.Indexers{podNodeIndex: indexPodByNode}); err != nil {
 		return fmt.Errorf("add pod node indexer: %w", err)
 	}
 	w.podInformer = podInformer
 	w.serviceInformer = serviceInformer
 	w.sliceInformer = endpointSliceInformer
-	w.nodeInformer = nodeInformer
 
 	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    w.handlePodUpsert,
@@ -166,12 +145,6 @@ func (w *Watcher) Start(ctx context.Context) error {
 		UpdateFunc: func(_, obj any) { w.handleEndpointSliceUpsert(obj) },
 		DeleteFunc: w.handleEndpointSliceDelete,
 	})
-	nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    w.handleNodeUpsert,
-		UpdateFunc: func(_, obj any) { w.handleNodeUpsert(obj) },
-		DeleteFunc: w.handleNodeDelete,
-	})
-
 	w.informerFactory.Start(ctx.Done())
 
 	w.logger.Info("Waiting for informer caches to sync")
@@ -180,7 +153,6 @@ func (w *Watcher) Start(ctx context.Context) error {
 		podInformer.HasSynced,
 		serviceInformer.HasSynced,
 		endpointSliceInformer.HasSynced,
-		nodeInformer.HasSynced,
 	) {
 		return fmt.Errorf("failed to sync informer cache")
 	}
@@ -259,38 +231,6 @@ func (w *Watcher) ListEndpoints() []*EndpointsInfo {
 		out = append(out, cloneEndpointsInfo(info))
 	}
 	return out
-}
-
-func (w *Watcher) GetService(namespace, name string) *ServiceInfo {
-	key := namespace + "/" + name
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	info := w.services[key]
-	if info == nil {
-		return nil
-	}
-	return cloneServiceInfo(info)
-}
-
-func (w *Watcher) GetEndpoints(namespace, name string) *EndpointsInfo {
-	key := namespace + "/" + name
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	info := w.endpoints[key]
-	if info == nil {
-		return nil
-	}
-	return cloneEndpointsInfo(info)
-}
-
-func (w *Watcher) GetNode(name string) *NodeInfo {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	info := w.nodes[name]
-	if info == nil {
-		return nil
-	}
-	return cloneNodeInfo(info)
 }
 
 func (w *Watcher) handlePodUpsert(obj any) {
@@ -534,62 +474,18 @@ func (w *Watcher) rebuildEndpointsForService(namespace, serviceName string) {
 	}
 }
 
-func (w *Watcher) handleNodeUpsert(obj any) {
-	node := getNode(obj)
-	if node == nil {
-		return
-	}
-	info := nodeInfoFromNode(node)
-	if info == nil {
-		return
-	}
-
-	w.mu.Lock()
-	if existing := w.nodes[node.Name]; existing != nil {
-		if !isResourceVersionNewer(existing.ResourceVersion, info.ResourceVersion) {
-			w.mu.Unlock()
-			return
-		}
-	}
-	w.nodes[node.Name] = info
-	w.mu.Unlock()
-
-	if w.onNodeUpsert != nil {
-		w.onNodeUpsert(cloneNodeInfo(info))
-	}
-}
-
-func (w *Watcher) handleNodeDelete(obj any) {
-	node := getNode(obj)
-	if node == nil {
-		return
-	}
-	info := nodeInfoFromNode(node)
-	if info == nil {
-		return
-	}
-
-	w.mu.Lock()
-	delete(w.nodes, node.Name)
-	w.mu.Unlock()
-
-	if w.onNodeDelete != nil {
-		w.onNodeDelete(cloneNodeInfo(info))
-	}
-}
-
 func sandboxInfoFromPod(pod *corev1.Pod) *SandboxInfo {
 	if pod == nil {
 		return nil
 	}
-	sandboxID := pod.Labels[controller.LabelSandboxID]
+	sandboxID := pod.Labels[sandboxpod.LabelSandboxID]
 	if sandboxID == "" {
 		return nil
 	}
-	if !controller.IsClaimedSandboxPod(pod) {
+	if !sandboxpod.IsClaimed(pod) {
 		return nil
 	}
-	teamID := pod.Annotations[controller.AnnotationTeamID]
+	teamID := pod.Annotations[sandboxpod.AnnotationTeamID]
 	return &SandboxInfo{
 		Namespace:          pod.Namespace,
 		Name:               pod.Name,
@@ -599,10 +495,10 @@ func sandboxInfoFromPod(pod *corev1.Pod) *SandboxInfo {
 		NodeName:           pod.Spec.NodeName,
 		SandboxID:          sandboxID,
 		TeamID:             teamID,
-		OwnerKind:          pod.Annotations[controller.AnnotationOwnerKind],
-		NetworkPolicy:      pod.Annotations[controller.AnnotationNetworkPolicy],
-		NetworkPolicyHash:  pod.Annotations[controller.AnnotationNetworkPolicyHash],
-		NetworkAppliedHash: pod.Annotations[controller.AnnotationNetworkPolicyAppliedHash],
+		OwnerKind:          pod.Annotations[sandboxpod.AnnotationOwnerKind],
+		NetworkPolicy:      pod.Annotations[sandboxpod.AnnotationNetworkPolicy],
+		NetworkPolicyHash:  pod.Annotations[sandboxpod.AnnotationNetworkPolicyHash],
+		NetworkAppliedHash: pod.Annotations[sandboxpod.AnnotationNetworkPolicyAppliedHash],
 	}
 }
 
@@ -700,22 +596,6 @@ func endpointSliceEntryFromSlice(slice *discoveryv1.EndpointSlice) *endpointSlic
 	return entry
 }
 
-func nodeInfoFromNode(node *corev1.Node) *NodeInfo {
-	if node == nil {
-		return nil
-	}
-	info := &NodeInfo{
-		Name:            node.Name,
-		ResourceVersion: node.ResourceVersion,
-	}
-	for _, addr := range node.Status.Addresses {
-		if addr.Type == corev1.NodeInternalIP && addr.Address != "" {
-			info.InternalIPs = append(info.InternalIPs, addr.Address)
-		}
-	}
-	return info
-}
-
 func getPod(obj any) *corev1.Pod {
 	pod, ok := obj.(*corev1.Pod)
 	if ok {
@@ -753,19 +633,6 @@ func getEndpointSlice(obj any) *discoveryv1.EndpointSlice {
 	}
 	slice, _ = tombstone.Obj.(*discoveryv1.EndpointSlice)
 	return slice
-}
-
-func getNode(obj any) *corev1.Node {
-	node, ok := obj.(*corev1.Node)
-	if ok {
-		return node
-	}
-	tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
-	if !ok {
-		return nil
-	}
-	node, _ = tombstone.Obj.(*corev1.Node)
-	return node
 }
 
 func indexPodByNode(obj any) ([]string, error) {
@@ -817,15 +684,6 @@ func endpointPortFromSlicePort(port discoveryv1.EndpointPort) corev1.EndpointPor
 	}
 	out.AppProtocol = port.AppProtocol
 	return out
-}
-
-func cloneNodeInfo(info *NodeInfo) *NodeInfo {
-	if info == nil {
-		return nil
-	}
-	clone := *info
-	clone.InternalIPs = append([]string(nil), info.InternalIPs...)
-	return &clone
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

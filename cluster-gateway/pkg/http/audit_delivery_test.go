@@ -14,7 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 	"go.uber.org/zap"
 )

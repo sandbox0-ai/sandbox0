@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/meteringbackend"
 	gatewaymigrations "github.com/sandbox0-ai/sandbox0/pkg/gateway/migrations"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -60,7 +61,7 @@ func main() {
 	if err := runMigrations(ctx, pool, logger); err != nil {
 		logger.Fatal("Failed to run database migrations", zap.Error(err))
 	}
-	meteringDB, meteringRepo, err := initMetering(ctx, cfg, logger)
+	meteringDB, meteringRepo, err := meteringbackend.Open(ctx, &cfg.Metering, logger)
 	if err != nil {
 		logger.Fatal("Failed to initialize metering backend", zap.Error(err))
 	}

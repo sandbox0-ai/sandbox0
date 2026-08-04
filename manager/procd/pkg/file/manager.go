@@ -7,29 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 )
 
 // FileType represents the type of a file.
-type FileType string
+type FileType = procdapi.FileType
 
 const (
-	FileTypeFile    FileType = "file"
-	FileTypeDir     FileType = "dir"
-	FileTypeSymlink FileType = "symlink"
+	FileTypeFile    = procdapi.FileTypeFile
+	FileTypeDir     = procdapi.FileTypeDir
+	FileTypeSymlink = procdapi.FileTypeSymlink
 )
 
 // FileInfo represents information about a file.
-type FileInfo struct {
-	Name       string    `json:"name"`
-	Path       string    `json:"path"`
-	Type       FileType  `json:"type"`
-	Size       int64     `json:"size"`
-	Mode       string    `json:"mode"`
-	ModTime    time.Time `json:"mod_time"`
-	IsLink     bool      `json:"is_link"`
-	LinkTarget string    `json:"link_target,omitempty"`
-}
+type FileInfo = procdapi.FileInfo
 
 // MaxFileSize is the maximum file size allowed for write operations.
 const MaxFileSize = 100 * 1024 * 1024 // 100MB
@@ -389,16 +381,6 @@ func (m *Manager) SubscribeWatch(path string, recursive bool, handler func(Watch
 // UnwatchDir stops watching a directory.
 func (m *Manager) UnwatchDir(watchID string) error {
 	return m.watcherMgr.UnwatchDir(watchID)
-}
-
-// Emit broadcasts an external event to watchers.
-func (m *Manager) Emit(event WatchEvent) {
-	m.watcherMgr.Emit(event)
-}
-
-// GetRootPath returns the root path.
-func (m *Manager) GetRootPath() string {
-	return m.rootPath
 }
 
 // Close closes the file manager.

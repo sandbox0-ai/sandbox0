@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -16,11 +17,14 @@ import (
 )
 
 func TestNewSandboxServiceInitializesCtldClientDefaults(t *testing.T) {
-	svc := NewSandboxService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, SandboxServiceConfig{CtldEnabled: true}, zap.NewNop(), nil)
+	svc := NewSandboxServiceWithDependencies(SandboxServiceDependencies{
+		Config: SandboxServiceConfig{CtldEnabled: true},
+		Logger: zap.NewNop(),
+	})
 	assert.Equal(t, 8095, svc.config.CtldPort)
 	assert.Equal(t, 15*time.Second, svc.config.CtldClientTimeout)
 	require.NotNil(t, svc.ctldClient)
-	assert.Equal(t, 15*time.Second, svc.ctldClient.httpClient.Timeout)
+	assert.Equal(t, 15*time.Second, svc.ctldClient.RequestTimeout())
 }
 
 func TestCheckpointPauseRequiresCtldEnabled(t *testing.T) {
@@ -34,11 +38,11 @@ func TestCheckpointPauseRequiresCtldEnabled(t *testing.T) {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-1": {
 			ID:           "sandbox-1",
 			TeamID:       "team-1",
-			DesiredState: SandboxDesiredStateActive,
+			DesiredState: sandboxstore.SandboxDesiredStateActive,
 		},
 	}}
 	svc := &SandboxService{

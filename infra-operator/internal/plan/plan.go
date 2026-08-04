@@ -523,8 +523,12 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 			if infra.Spec.Registry.Aliyun != nil {
 				cfg.Registry.Aliyun = &apiconfig.RegistryAliyunConfig{
 					Registry:          infra.Spec.Registry.Aliyun.Registry,
+					Namespace:         infra.Spec.Registry.Aliyun.Namespace,
 					Region:            infra.Spec.Registry.Aliyun.Region,
 					InstanceID:        infra.Spec.Registry.Aliyun.InstanceID,
+					AssumeRoleARN:     infra.Spec.Registry.Aliyun.AssumeRoleARN,
+					ExternalID:        infra.Spec.Registry.Aliyun.ExternalID,
+					SessionDuration:   infra.Spec.Registry.Aliyun.SessionDurationSeconds,
 					CredentialsSecret: infra.Spec.Registry.Aliyun.CredentialsSecret.Name,
 					AccessKeyKey:      infra.Spec.Registry.Aliyun.CredentialsSecret.AccessKeyKey,
 					SecretKeyKey:      infra.Spec.Registry.Aliyun.CredentialsSecret.SecretKeyKey,

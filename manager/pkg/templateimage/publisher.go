@@ -135,8 +135,13 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 	if err != nil {
 		return nil, err
 	}
-	pushTagRef := joinImageReference(pushRegistry, targetImage)
-	pullRepositoryRef := joinImageReference(pullRegistry, repository)
+	pushTagRef, pushRepositoryRef, pullRepositoryRef := publicationReferences(
+		pushRegistry,
+		pullRegistry,
+		repository,
+		targetImage,
+		credential.TargetTag,
+	)
 
 	targetResolver := p.newResolver(resolverOptions{
 		purpose:   resolverPurposeTarget,
@@ -223,11 +228,23 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 	}
 
 	return &Result{
-		PushReference:  joinImageReference(pushRegistry, repository) + "@" + manifestDesc.Digest.String(),
+		PushReference:  pushRepositoryRef + "@" + manifestDesc.Digest.String(),
 		PullReference:  pullRepositoryRef + "@" + manifestDesc.Digest.String(),
 		ManifestDigest: manifestDesc.Digest,
 		Platform:       platforms.Normalize(req.Platform),
 	}, nil
+}
+
+func publicationReferences(pushRegistry, pullRegistry, repository, targetImage, providerTag string) (pushTag, pushRepository, pullRepository string) {
+	pushTag = joinImageReference(pushRegistry, targetImage)
+	pushRepository = joinImageReference(pushRegistry, repository)
+	pullRepository = joinImageReference(pullRegistry, repository)
+	if targetTag := strings.TrimSpace(providerTag); targetTag != "" {
+		pushTag = pushRegistry + ":" + targetTag
+		pushRepository = pushRegistry
+		pullRepository = pullRegistry
+	}
+	return pushTag, pushRepository, pullRepository
 }
 
 func publicationEndpoints(

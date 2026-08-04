@@ -1987,12 +1987,18 @@ type RegisterRequest struct {
 
 // RegistryCredentials defines model for RegistryCredentials.
 type RegistryCredentials struct {
-	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
-	Password     string     `json:"password"`
-	Provider     string     `json:"provider"`
-	PullRegistry string     `json:"pullRegistry"`
-	PushRegistry string     `json:"pushRegistry"`
-	Username     string     `json:"username"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	Password  string     `json:"password"`
+	Provider  string     `json:"provider"`
+
+	// PullImage Complete image reference for templates and sandbox pulls. It may use a private regional endpoint.
+	PullImage    *string `json:"pullImage,omitempty"`
+	PullRegistry string  `json:"pullRegistry"`
+
+	// PushImage Complete provider-specific image reference to push. Clients should prefer this over composing pushRegistry and targetImage.
+	PushImage    *string `json:"pushImage,omitempty"`
+	PushRegistry string  `json:"pushRegistry"`
+	Username     string  `json:"username"`
 }
 
 // RegistryCredentialsRequest defines model for RegistryCredentialsRequest.

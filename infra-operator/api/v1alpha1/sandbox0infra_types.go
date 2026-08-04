@@ -1141,11 +1141,30 @@ type AliyunRegistryConfig struct {
 	// +optional
 	InternalRegistry string `json:"internalRegistry,omitempty"`
 
+	// Namespace is the shared ACR namespace that contains one private
+	// repository per Sandbox0 team.
+	Namespace string `json:"namespace"`
+
 	// Region specifies the Aliyun region.
 	Region string `json:"region"`
 
 	// InstanceID specifies the ACR instance ID.
 	InstanceID string `json:"instanceId"`
+
+	// AssumeRoleARN is the RAM role used to mint repository-scoped upload
+	// credentials. The role session is restricted again for each team.
+	AssumeRoleARN string `json:"assumeRoleArn"`
+
+	// ExternalID is passed to STS AssumeRole when configured.
+	// +optional
+	ExternalID string `json:"externalId,omitempty"`
+
+	// SessionDurationSeconds controls the repository upload session lifetime.
+	// +kubebuilder:default=21600
+	// +kubebuilder:validation:Minimum=3600
+	// +kubebuilder:validation:Maximum=43200
+	// +optional
+	SessionDurationSeconds int64 `json:"sessionDurationSeconds,omitempty"`
 
 	// PullSecret references the dockerconfigjson secret to use for image pulls.
 	PullSecret DockerConfigSecretRef `json:"pullSecret"`

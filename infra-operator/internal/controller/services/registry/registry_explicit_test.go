@@ -123,6 +123,7 @@ func TestResolveRegistryConfigUsesSplitAliyunEndpoints(t *testing.T) {
 					Registry:         "registry.example.com",
 					PullRegistry:     "registry-vpc.example.com",
 					InternalRegistry: "registry-service.example.com",
+					Namespace:        "sandbox0aliue1",
 					PullSecret: infrav1alpha1.DockerConfigSecretRef{
 						Name: "acr-pull-secret",
 					},
@@ -135,13 +136,13 @@ func TestResolveRegistryConfigUsesSplitAliyunEndpoints(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("expected resolved registry config")
 	}
-	if cfg.PushRegistry != "registry.example.com" {
+	if cfg.PushRegistry != "registry.example.com/sandbox0aliue1" {
 		t.Fatalf("unexpected push registry: %q", cfg.PushRegistry)
 	}
-	if cfg.PullRegistry != "registry-vpc.example.com" {
+	if cfg.PullRegistry != "registry-vpc.example.com/sandbox0aliue1" {
 		t.Fatalf("unexpected pull registry: %q", cfg.PullRegistry)
 	}
-	if cfg.InternalRegistry != "registry-service.example.com" {
+	if cfg.InternalRegistry != "registry-service.example.com/sandbox0aliue1" {
 		t.Fatalf("unexpected internal registry: %q", cfg.InternalRegistry)
 	}
 	if cfg.SourceSecretName != "acr-pull-secret" {
@@ -157,6 +158,7 @@ func TestResolveRegistryConfigDefaultsAliyunInternalEndpointToPullEndpoint(t *te
 				Aliyun: &infrav1alpha1.AliyunRegistryConfig{
 					Registry:     "registry.example.com",
 					PullRegistry: "registry-vpc.example.com",
+					Namespace:    "sandbox0aliue1",
 				},
 			},
 		},
@@ -166,7 +168,7 @@ func TestResolveRegistryConfigDefaultsAliyunInternalEndpointToPullEndpoint(t *te
 	if cfg == nil {
 		t.Fatal("expected resolved registry config")
 	}
-	if cfg.InternalRegistry != "registry-vpc.example.com" {
+	if cfg.InternalRegistry != "registry-vpc.example.com/sandbox0aliue1" {
 		t.Fatalf("unexpected internal registry: %q", cfg.InternalRegistry)
 	}
 }

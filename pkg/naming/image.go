@@ -69,27 +69,38 @@ func ValidateTeamScopedImageReference(imageRef, teamID string, privateRegistryHo
 	if err != nil {
 		return err
 	}
-	if !registryHostMatchesAny(registryHost, privateRegistryHosts) {
-		return nil
+	for _, allowed := range privateRegistryHosts {
+		requiredRepository, matches := teamRepositoryForRegistryRoot(registryHost, allowed, prefix)
+		if !matches {
+			continue
+		}
+		if repository == requiredRepository || strings.HasPrefix(repository, requiredRepository+"/") {
+			return nil
+		}
+		return fmt.Errorf("must use team registry repository %q for private registry %q", requiredRepository, registryHost)
 	}
-	if repository == prefix || strings.HasPrefix(repository, prefix+"/") {
-		return nil
-	}
-
-	return fmt.Errorf("must use team registry prefix %q for private registry %q", prefix, registryHost)
+	return nil
 }
 
-func registryHostMatchesAny(actual string, allowedHosts []string) bool {
+func teamRepositoryForRegistryRoot(actual, allowed, teamPrefix string) (string, bool) {
 	normalizedActual := NormalizeRegistryHost(actual)
-	if normalizedActual == "" {
-		return false
+	normalizedAllowed := NormalizeRegistryHost(allowed)
+	if normalizedActual == "" || normalizedAllowed == "" {
+		return "", false
 	}
-	for _, allowed := range allowedHosts {
-		if normalizedActual == NormalizeRegistryHost(allowed) {
-			return true
-		}
+	allowedHost := normalizedAllowed
+	allowedPath := ""
+	if slash := strings.Index(normalizedAllowed, "/"); slash >= 0 {
+		allowedHost = normalizedAllowed[:slash]
+		allowedPath = strings.Trim(normalizedAllowed[slash+1:], "/")
 	}
-	return false
+	if normalizedActual != allowedHost {
+		return "", false
+	}
+	if allowedPath == "" {
+		return teamPrefix, true
+	}
+	return allowedPath + "/" + teamPrefix, true
 }
 
 func isRegistryHost(candidate string) bool {

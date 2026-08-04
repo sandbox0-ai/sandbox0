@@ -21,10 +21,14 @@ const sandboxStoreSchemaName = "manager"
 var ErrSandboxRecordNotFound = errors.New("sandbox record not found")
 
 const (
-	SandboxStatusDeleted = "deleted"
+	SandboxDesiredStateActive      = "active"
+	SandboxDesiredStatePaused      = "paused"
+	SandboxDesiredStateTerminating = "terminating"
+	SandboxDesiredStateDeleted     = "deleted"
 )
 
-// SandboxRecord is the durable sandbox identity and configuration.
+// SandboxRecord is the durable sandbox identity, desired lifecycle state, and
+// configuration. Kubernetes owns observed runtime readiness and failure state.
 type SandboxRecord struct {
 	ID                   string
 	TeamID               string
@@ -33,7 +37,7 @@ type SandboxRecord struct {
 	TemplateName         string
 	TemplateNamespace    string
 	ClusterID            string
-	Status               string
+	DesiredState         string
 	Config               SandboxConfig
 	Mounts               []ClaimMount
 	TemplateSpec         v1alpha1.SandboxTemplateSpec
@@ -43,6 +47,7 @@ type SandboxRecord struct {
 	LifecycleEpoch       int64
 	WebhookStateVolumeID string
 	OwnerKind            string
+	HotClaimCompletedAt  time.Time
 	ClaimedAt            time.Time
 	ExpiresAt            time.Time
 	HardExpiresAt        time.Time
@@ -164,7 +169,7 @@ type SandboxRuntimeMetadata struct {
 // authoritative for whether the referenced runtime currently exists.
 type SandboxRuntimeReconcileCandidate struct {
 	SandboxID         string
-	Status            string
+	DesiredState      string
 	PodNamespace      string
 	PodName           string
 	RuntimeGeneration int64
@@ -187,7 +192,7 @@ type SandboxStore interface {
 // SandboxStoreTx is a locked sandbox store transaction.
 type SandboxStoreTx interface {
 	SaveSandbox(ctx context.Context, record *SandboxRecord) error
-	SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error
+	SaveRuntime(ctx context.Context, sandboxID, namespace, podName string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error
 	MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error
 	MarkRuntimeTerminating(ctx context.Context, sandboxID string) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
@@ -249,12 +254,12 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 	_, err = exec.Exec(ctx, `
 		INSERT INTO manager.sandboxes (
 			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, status, config, mounts, template_spec,
+			cluster_id, desired_state, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
-			webhook_state_volume_id, owner_kind,
+			webhook_state_volume_id, owner_kind, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, COALESCE($22, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, COALESCE($23, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -262,7 +267,7 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			template_name = EXCLUDED.template_name,
 			template_namespace = EXCLUDED.template_namespace,
 			cluster_id = EXCLUDED.cluster_id,
-			status = EXCLUDED.status,
+			desired_state = EXCLUDED.desired_state,
 			config = EXCLUDED.config,
 			mounts = EXCLUDED.mounts,
 			template_spec = EXCLUDED.template_spec,
@@ -272,19 +277,20 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			lifecycle_epoch = GREATEST(manager.sandboxes.lifecycle_epoch, EXCLUDED.lifecycle_epoch),
 			webhook_state_volume_id = EXCLUDED.webhook_state_volume_id,
 			owner_kind = EXCLUDED.owner_kind,
+			hot_claim_completed_at = COALESCE(EXCLUDED.hot_claim_completed_at, manager.sandboxes.hot_claim_completed_at),
 			claimed_at = EXCLUDED.claimed_at,
 			expires_at = EXCLUDED.expires_at,
 			hard_expires_at = EXCLUDED.hard_expires_at,
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
 		WHERE manager.sandboxes.deleted_at IS NULL
-			AND manager.sandboxes.status NOT IN ($23, $24)
+			AND manager.sandboxes.desired_state NOT IN ($24, $25)
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
-		record.ClusterID, record.Status, configJSON, mountsJSON, specJSON,
+		record.ClusterID, record.DesiredState, configJSON, mountsJSON, specJSON,
 		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
-		strings.TrimSpace(record.WebhookStateVolumeID), strings.TrimSpace(record.OwnerKind),
+		strings.TrimSpace(record.WebhookStateVolumeID), strings.TrimSpace(record.OwnerKind), nullableTime(record.HotClaimCompletedAt),
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt),
-		SandboxStatusTerminating, SandboxStatusDeleted)
+		SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
 	}
@@ -302,13 +308,14 @@ func (s *PGSandboxStore) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 	if s == nil || s.pool == nil || req == nil {
 		return nil, nil
 	}
+	// Public status is projected from the cached Pod after this query, so only
+	// durable filters belong in SQL.
 	rows, err := s.pool.Query(ctx, sandboxRecordSelectSQL()+`
 		WHERE team_id = $1
 			AND deleted_at IS NULL
-			AND ($2 = '' OR status = $2)
-			AND ($3 = '' OR template_id = $3)
+			AND ($2 = '' OR template_id = $2)
 		ORDER BY created_at DESC
-	`, req.TeamID, req.Status, req.TemplateID)
+	`, req.TeamID, req.TemplateID)
 	if err != nil {
 		return nil, fmt.Errorf("list sandboxes: %w", err)
 	}
@@ -339,8 +346,8 @@ func (s *PGSandboxStore) CountActiveSandboxes(ctx context.Context, teamID string
 		FROM manager.sandboxes
 		WHERE team_id = $1
 			AND deleted_at IS NULL
-			AND status IN ($2, $3)
-	`, strings.TrimSpace(teamID), SandboxStatusStarting, SandboxStatusRunning).Scan(&total); err != nil {
+			AND desired_state = $2
+	`, strings.TrimSpace(teamID), SandboxDesiredStateActive).Scan(&total); err != nil {
 		return 0, fmt.Errorf("count active sandboxes: %w", err)
 	}
 	return total, nil
@@ -398,14 +405,14 @@ func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Contex
 			LIMIT 1
 		) latest ON TRUE
 			WHERE s.deleted_at IS NULL
-				AND s.status = $2
+				AND s.desired_state = $2
 				AND latest.kind = $3
 				AND latest.source IN ($4, $5, $6)
 			ORDER BY s.updated_at ASC
 			LIMIT $7
 		`,
 		SandboxLifecyclePhaseCommitted,
-		SandboxStatusPaused,
+		SandboxDesiredStatePaused,
 		SandboxLifecycleKindPause,
 		SandboxLifecycleSourceCrash,
 		SandboxLifecycleSourceHealth,
@@ -442,24 +449,24 @@ func (s *PGSandboxStore) ListRuntimeReconcileCandidates(ctx context.Context, clu
 		limit = 500
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT sandbox_id, status, current_pod_namespace, current_pod_name, runtime_generation
+		SELECT sandbox_id, desired_state, current_pod_namespace, current_pod_name, runtime_generation
 		FROM manager.sandboxes
 		WHERE deleted_at IS NULL
 			AND (
-				status IN ($1, $2, $3, $4)
+				desired_state IN ($1, $2)
 				OR EXISTS (
 					SELECT 1
 					FROM manager.sandbox_lifecycle_txns txn
 					WHERE txn.sandbox_id = manager.sandboxes.sandbox_id
-						AND txn.kind = $5
+						AND txn.kind = $3
 						AND txn.phase IN ('preparing', 'barriered', 'publishing', 'committing')
 				)
 			)
-			AND cluster_id = $6
-			AND sandbox_id > $7
+			AND cluster_id = $4
+			AND sandbox_id > $5
 		ORDER BY sandbox_id ASC
-		LIMIT $8
-	`, SandboxStatusStarting, SandboxStatusRunning, SandboxStatusFailed, SandboxStatusTerminating, SandboxLifecycleKindResume, strings.TrimSpace(clusterID), strings.TrimSpace(afterSandboxID), limit)
+		LIMIT $6
+	`, SandboxDesiredStateActive, SandboxDesiredStateTerminating, SandboxLifecycleKindResume, strings.TrimSpace(clusterID), strings.TrimSpace(afterSandboxID), limit)
 	if err != nil {
 		return nil, fmt.Errorf("list sandbox runtime reconcile candidates: %w", err)
 	}
@@ -469,7 +476,7 @@ func (s *PGSandboxStore) ListRuntimeReconcileCandidates(ctx context.Context, clu
 		var candidate SandboxRuntimeReconcileCandidate
 		if err := rows.Scan(
 			&candidate.SandboxID,
-			&candidate.Status,
+			&candidate.DesiredState,
 			&candidate.PodNamespace,
 			&candidate.PodName,
 			&candidate.RuntimeGeneration,
@@ -538,33 +545,33 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 		return fmt.Errorf("begin mark sandbox deleted tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var currentStatus, teamID, webhookURL, webhookSecret string
+	var currentDesiredState, teamID, webhookURL, webhookSecret string
 	err = tx.QueryRow(ctx, `
-		SELECT status,
+		SELECT desired_state,
 			team_id,
 			COALESCE(config->'webhook'->>'url', ''),
 			COALESCE(config->'webhook'->>'secret', '')
 		FROM manager.sandboxes
 		WHERE sandbox_id = $1
 		FOR UPDATE
-	`, sandboxID).Scan(&currentStatus, &teamID, &webhookURL, &webhookSecret)
+	`, sandboxID).Scan(&currentDesiredState, &teamID, &webhookURL, &webhookSecret)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("lock sandbox before marking deleted: %w", err)
 	}
-	if err == nil && currentStatus == SandboxStatusTerminating && strings.TrimSpace(webhookURL) != "" {
+	if err == nil && currentDesiredState == SandboxDesiredStateTerminating && strings.TrimSpace(webhookURL) != "" {
 		if err := enqueueSandboxDeletionWebhook(ctx, tx, sandboxID, teamID, webhookURL, webhookSecret, deletedAt); err != nil {
 			return err
 		}
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE manager.sandboxes
-		SET status = $2,
+		SET desired_state = $2,
 			current_pod_name = '',
 			current_pod_namespace = '',
 			deleted_at = $3,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
-	`, sandboxID, SandboxStatusDeleted, deletedAt); err != nil {
+	`, sandboxID, SandboxDesiredStateDeleted, deletedAt); err != nil {
 		return fmt.Errorf("mark sandbox deleted: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -723,10 +730,10 @@ func (t sandboxStoreTx) SaveSandbox(ctx context.Context, record *SandboxRecord) 
 	return upsertSandboxRecord(ctx, t.tx, record)
 }
 
-func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error {
+func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, podName string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error {
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
-		SET status = $2,
+		SET desired_state = $2,
 			current_pod_namespace = $3,
 			current_pod_name = $4,
 			runtime_generation = $5,
@@ -738,8 +745,8 @@ func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, p
 			updated_at = NOW()
 		WHERE sandbox_id = $1
 			AND deleted_at IS NULL
-			AND status NOT IN ($10, $11)
-	`, sandboxID, status, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt), strings.TrimSpace(metadata.WebhookStateVolumeID), strings.TrimSpace(metadata.OwnerKind), SandboxStatusTerminating, SandboxStatusDeleted)
+			AND desired_state NOT IN ($10, $11)
+	`, sandboxID, SandboxDesiredStateActive, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt), strings.TrimSpace(metadata.WebhookStateVolumeID), strings.TrimSpace(metadata.OwnerKind), SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
 	if err != nil {
 		return fmt.Errorf("save sandbox runtime: %w", err)
 	}
@@ -752,7 +759,7 @@ func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, p
 func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error {
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
-		SET status = $2,
+		SET desired_state = $2,
 			current_pod_namespace = '',
 			current_pod_name = '',
 			runtime_generation = GREATEST(runtime_generation, $3),
@@ -760,8 +767,8 @@ func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
 			AND deleted_at IS NULL
-			AND status NOT IN ($4, $5)
-	`, sandboxID, SandboxStatusPaused, generation, SandboxStatusTerminating, SandboxStatusDeleted)
+			AND desired_state NOT IN ($4, $5)
+	`, sandboxID, SandboxDesiredStatePaused, generation, SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
 	if err != nil {
 		return fmt.Errorf("mark sandbox runtime paused: %w", err)
 	}
@@ -774,11 +781,11 @@ func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string,
 func (t sandboxStoreTx) MarkRuntimeTerminating(ctx context.Context, sandboxID string) error {
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
-		SET status = $2,
+		SET desired_state = $2,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
 			AND deleted_at IS NULL
-	`, sandboxID, SandboxStatusTerminating)
+	`, sandboxID, SandboxDesiredStateTerminating)
 	if err != nil {
 		return fmt.Errorf("mark sandbox runtime terminating: %w", err)
 	}
@@ -1004,9 +1011,9 @@ func (t sandboxStoreTx) UpsertSandbox(ctx context.Context, record *SandboxRecord
 func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, status, config, mounts, template_spec,
+			cluster_id, desired_state, config, mounts, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
-			webhook_state_volume_id, owner_kind,
+			webhook_state_volume_id, owner_kind, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
 }
@@ -1392,12 +1399,12 @@ func scanSandboxRecordRows(rows pgx.Rows) (*SandboxRecord, error) {
 func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error) {
 	var record SandboxRecord
 	var configJSON, mountsJSON, specJSON []byte
-	var claimedAt, expiresAt, hardExpiresAt, deletedAt *time.Time
+	var hotClaimCompletedAt, claimedAt, expiresAt, hardExpiresAt, deletedAt *time.Time
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
-		&record.ClusterID, &record.Status, &configJSON, &mountsJSON, &specJSON,
+		&record.ClusterID, &record.DesiredState, &configJSON, &mountsJSON, &specJSON,
 		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
-		&record.WebhookStateVolumeID, &record.OwnerKind,
+		&record.WebhookStateVolumeID, &record.OwnerKind, &hotClaimCompletedAt,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -1412,6 +1419,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 		return nil, fmt.Errorf("unmarshal sandbox template spec: %w", err)
 	}
 	record.ClaimedAt = derefTime(claimedAt)
+	record.HotClaimCompletedAt = derefTime(hotClaimCompletedAt)
 	record.ExpiresAt = derefTime(expiresAt)
 	record.HardExpiresAt = derefTime(hardExpiresAt)
 	record.DeletedAt = derefTime(deletedAt)

@@ -134,5 +134,5 @@ func (s *SandboxService) systemVolumeOwnerSandboxExists(ctx context.Context, san
 	if err != nil {
 		return false, err
 	}
-	return record != nil && record.Status != SandboxStatusDeleted && record.DeletedAt.IsZero(), nil
+	return record != nil && record.DesiredState != SandboxDesiredStateDeleted && record.DeletedAt.IsZero(), nil
 }

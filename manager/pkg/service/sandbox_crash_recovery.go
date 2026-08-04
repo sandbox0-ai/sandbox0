@@ -32,7 +32,7 @@ func (s *SandboxService) RecoverTerminatedSandboxRuntime(ctx context.Context, po
 	enqueue := false
 	deleteStaleRuntime := false
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
-		if record == nil || record.Status == SandboxStatusDeleted || !record.DeletedAt.IsZero() || sandboxHardExpired(record.HardExpiresAt, s.now()) {
+		if record == nil || record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() || sandboxHardExpired(record.HardExpiresAt, s.now()) {
 			return nil
 		}
 		if !sandboxRecordReferencesPod(record, pod) {
@@ -49,7 +49,7 @@ func (s *SandboxService) RecoverTerminatedSandboxRuntime(ctx context.Context, po
 			}
 			return fmt.Errorf("%w: active %s transaction %s", errSandboxCrashRecoveryBlocked, activeTxn.Kind, activeTxn.ID)
 		}
-		if record.Status == SandboxStatusPaused {
+		if record.DesiredState == SandboxDesiredStatePaused {
 			deleteStaleRuntime = true
 			return nil
 		}
@@ -120,7 +120,7 @@ func (s *SandboxService) RecoverUnhealthySandboxRuntime(ctx context.Context, pod
 	sandboxID := sandboxIDFromPod(pod)
 	enqueue := false
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
-		if record == nil || record.Status == SandboxStatusDeleted || !record.DeletedAt.IsZero() ||
+		if record == nil || record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() ||
 			sandboxHardExpired(record.HardExpiresAt, s.now()) || !sandboxRecordReferencesPod(record, pod) {
 			return nil
 		}
@@ -135,7 +135,7 @@ func (s *SandboxService) RecoverUnhealthySandboxRuntime(ctx context.Context, pod
 			}
 			return fmt.Errorf("%w: active %s transaction %s", errSandboxCrashRecoveryBlocked, activeTxn.Kind, activeTxn.ID)
 		}
-		if record.Status == SandboxStatusPaused {
+		if record.DesiredState == SandboxDesiredStatePaused {
 			return nil
 		}
 		if err := beginHealthRecoveryTxn(lockCtx, tx, record, pod); err != nil {

@@ -159,18 +159,21 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 	}
 	summaries := make([]*SandboxSummary, 0, len(records))
 	for _, record := range records {
+		if record == nil {
+			continue
+		}
 		sandbox := s.recordToSandbox(record)
-		var activeTxn *SandboxLifecycleTxn
-		if record != nil && record.Status != SandboxStatusPaused {
-			activeTxn, err = s.sandboxStore.GetActiveLifecycleTxn(ctx, record.ID)
+		if record.DesiredState == SandboxDesiredStateActive {
+			// SandboxSummary does not expose runtime connectivity, so lifecycle
+			// transactions are irrelevant to list projection. Avoid one database
+			// lookup per active sandbox.
+			sandbox, err = s.projectSandboxRecordFromCache(ctx, record, nil)
 			if err != nil {
 				return nil, err
 			}
 		}
-		if record.CurrentPodName != "" && record.Status != SandboxStatusPaused && !sandboxLifecycleTxnHidesCommittedRuntime(activeTxn) {
-			if pod, err := s.getSandboxPod(ctx, record.ID); err == nil {
-				sandbox = s.podToSandbox(pod, record.ID)
-			}
+		if req.Status != "" && sandbox.Status != req.Status {
+			continue
 		}
 		if req.Paused != nil && sandbox.Paused != *req.Paused {
 			continue

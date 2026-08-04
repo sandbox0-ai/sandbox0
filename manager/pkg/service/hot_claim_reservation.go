@@ -9,7 +9,7 @@ import (
 )
 
 // completeHotClaimReservation durably records successful sandbox
-// initialization. The reservation controller uses this record transition to
+// initialization. The reservation controller uses this workflow marker to
 // detach the Pod, so the request path does not need a second Pod patch.
 func (s *SandboxService) completeHotClaimReservation(
 	ctx context.Context,
@@ -22,7 +22,7 @@ func (s *SandboxService) completeHotClaimReservation(
 		return nil
 	}
 	record := sandboxRecordForClaimedPod(s, pod, template, req)
-	record.Status = SandboxStatusRunning
+	record.HotClaimCompletedAt = s.clock.Now().UTC()
 	return s.sandboxStore.UpsertSandbox(ctx, record)
 }
 
@@ -30,7 +30,7 @@ func hotClaimUsesRecordCompletion(pod *corev1.Pod) bool {
 	return pod != nil &&
 		controller.IsHotClaimReservedPod(pod) &&
 		pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] ==
-			controller.HotClaimCompletionProtocolRecordV1
+			controller.HotClaimCompletionProtocolRecordV2
 }
 
 func (s *SandboxService) enqueueHotClaimReservation(pod *corev1.Pod) {

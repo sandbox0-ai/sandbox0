@@ -34,6 +34,7 @@ type memorySandboxStore struct {
 	saves             int
 	pauses            int
 	lockCalls         int
+	activeTxnGets     int
 	lockStarted       chan struct{}
 	blockLock         chan struct{}
 }
@@ -53,10 +54,14 @@ func (s *memorySandboxStore) UpsertSandbox(_ context.Context, record *SandboxRec
 		s.records = make(map[string]*SandboxRecord)
 	}
 	if existing := s.records[record.ID]; existing != nil &&
-		(existing.Status == SandboxStatusTerminating || existing.Status == SandboxStatusDeleted || !existing.DeletedAt.IsZero()) {
+		(existing.DesiredState == SandboxDesiredStateTerminating || existing.DesiredState == SandboxDesiredStateDeleted || !existing.DeletedAt.IsZero()) {
 		return nil
 	}
-	s.records[record.ID] = cloneSandboxRecord(record)
+	clone := cloneSandboxRecord(record)
+	if existing := s.records[record.ID]; existing != nil && clone.HotClaimCompletedAt.IsZero() {
+		clone.HotClaimCompletedAt = existing.HotClaimCompletedAt
+	}
+	s.records[record.ID] = clone
 	return nil
 }
 
@@ -88,9 +93,6 @@ func (s *memorySandboxStore) ListSandboxes(_ context.Context, req *ListSandboxes
 		}
 		if req != nil {
 			if req.TeamID != "" && record.TeamID != req.TeamID {
-				continue
-			}
-			if req.Status != "" && record.Status != req.Status {
 				continue
 			}
 			if req.TemplateID != "" && record.TemplateID != req.TemplateID {
@@ -142,7 +144,7 @@ func (s *memorySandboxStore) ListPendingRuntimeRecoverySandboxIDs(_ context.Cont
 	}
 	var sandboxIDs []string
 	for sandboxID, record := range s.records {
-		if record == nil || record.Status != SandboxStatusPaused || !record.DeletedAt.IsZero() {
+		if record == nil || record.DesiredState != SandboxDesiredStatePaused || !record.DeletedAt.IsZero() {
 			continue
 		}
 		var latest *SandboxLifecycleTxn
@@ -172,6 +174,7 @@ func (s *memorySandboxStore) GetActiveLifecycleTxn(_ context.Context, sandboxID 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.activeTxnGets++
 	for _, txn := range s.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && sandboxLifecyclePhaseActive(txn.Phase) {
 			return cloneSandboxLifecycleTxn(txn), nil
@@ -191,7 +194,7 @@ func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID str
 		record = &SandboxRecord{ID: sandboxID}
 		s.records[sandboxID] = record
 	}
-	record.Status = SandboxStatusDeleted
+	record.DesiredState = SandboxDesiredStateDeleted
 	record.DeletedAt = deletedAt
 	record.CurrentPodName = ""
 	record.CurrentPodNamespace = ""
@@ -289,24 +292,24 @@ func (s *memorySandboxStore) restore(snapshot memorySandboxStoreSnapshot) {
 	s.rootFSFilesystems = snapshot.rootFSFilesystems
 }
 
-func (s *memorySandboxStore) setSandboxStatus(sandboxID, status string) {
+func (s *memorySandboxStore) setSandboxDesiredState(sandboxID, desiredState string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if record := s.records[sandboxID]; record != nil {
-		record.Status = status
+		record.DesiredState = desiredState
 	}
 }
 
-func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespace, podName, status string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error {
+func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespace, podName string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
-	if record == nil || record.Status == SandboxStatusTerminating || !record.DeletedAt.IsZero() {
+	if record == nil || record.DesiredState == SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() {
 		return ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = namespace
 	record.CurrentPodName = podName
-	record.Status = status
+	record.DesiredState = SandboxDesiredStateActive
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
 	record.HardExpiresAt = hardExpiresAt
@@ -324,12 +327,12 @@ func (t memorySandboxStoreTx) MarkRuntimePaused(_ context.Context, sandboxID str
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
-	if record == nil || record.Status == SandboxStatusTerminating || !record.DeletedAt.IsZero() {
+	if record == nil || record.DesiredState == SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() {
 		return ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = ""
 	record.CurrentPodName = ""
-	record.Status = SandboxStatusPaused
+	record.DesiredState = SandboxDesiredStatePaused
 	if record.RuntimeGeneration < generation {
 		record.RuntimeGeneration = generation
 	}
@@ -344,7 +347,7 @@ func (t memorySandboxStoreTx) MarkRuntimeTerminating(_ context.Context, sandboxI
 	if record == nil || !record.DeletedAt.IsZero() {
 		return ErrSandboxRecordNotFound
 	}
-	record.Status = SandboxStatusTerminating
+	record.DesiredState = SandboxDesiredStateTerminating
 	return nil
 }
 
@@ -619,7 +622,7 @@ func TestResumePausedSandboxRuntimeWaitsWhileRuntimeDeleting(t *testing.T) {
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			Status:            SandboxStatusPaused,
+			DesiredState:      SandboxDesiredStatePaused,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
 	}}
@@ -667,7 +670,7 @@ func TestResumePausedSandboxRuntimeDeletesStaleUnhealthyRuntimeBeforeIdentityChe
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			Status:            SandboxStatusPaused,
+			DesiredState:      SandboxDesiredStatePaused,
 			RuntimeGeneration: 1,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
@@ -724,7 +727,7 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 			TemplateID:          "default",
 			TemplateName:        "default",
 			TemplateNamespace:   "tpl-default",
-			Status:              SandboxStatusRunning,
+			DesiredState:        SandboxDesiredStateActive,
 			CurrentPodName:      failedPod.Name,
 			CurrentPodNamespace: failedPod.Namespace,
 			RuntimeGeneration:   3,
@@ -741,8 +744,8 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 		record, err := store.GetSandbox(context.Background(), "sandbox-a")
 		if err != nil {
 			t.Errorf("GetSandbox() before failed pod delete error = %v", err)
-		} else if record.Status != SandboxStatusPaused {
-			t.Errorf("status before failed pod delete = %q, want paused", record.Status)
+		} else if record.DesiredState != SandboxDesiredStatePaused {
+			t.Errorf("desired state before failed pod delete = %q, want paused", record.DesiredState)
 		}
 		deletedFailedPod = true
 		if err := indexer.Delete(failedPod); err != nil {
@@ -785,8 +788,8 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if record.Status != SandboxStatusPaused {
-		t.Fatalf("status = %q, want paused before replacement claim", record.Status)
+	if record.DesiredState != SandboxDesiredStatePaused {
+		t.Fatalf("desired state = %q, want paused before replacement claim", record.DesiredState)
 	}
 	if record.CurrentPodName != "" || record.CurrentPodNamespace != "" {
 		t.Fatalf("current runtime = %s/%s, want empty", record.CurrentPodNamespace, record.CurrentPodName)
@@ -823,7 +826,7 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 				TemplateID:        "default",
 				TemplateName:      "default",
 				TemplateNamespace: "tpl-default",
-				Status:            SandboxStatusPaused,
+				DesiredState:      SandboxDesiredStatePaused,
 				RuntimeGeneration: 3,
 				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 			},
@@ -858,7 +861,7 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 		store.records["sandbox-a"].CurrentPodNamespace = "ns-a"
 		store.records["sandbox-a"].RuntimeGeneration = 4
 		store.mu.Unlock()
-		store.setSandboxStatus("sandbox-a", SandboxStatusRunning)
+		store.setSandboxDesiredState("sandbox-a", SandboxDesiredStateActive)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -894,7 +897,7 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 			TemplateID:          "default",
 			TemplateName:        "default",
 			TemplateNamespace:   "tpl-default",
-			Status:              SandboxStatusStarting,
+			DesiredState:        SandboxDesiredStateActive,
 			CurrentPodName:      "pod-a",
 			CurrentPodNamespace: "ns-a",
 			RuntimeGeneration:   4,
@@ -916,8 +919,8 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	if sandbox.Status != SandboxStatusRunning {
 		t.Fatalf("status = %q, want running", sandbox.Status)
 	}
-	if got := store.records["sandbox-a"].Status; got != SandboxStatusRunning {
-		t.Fatalf("stored status = %q, want running", got)
+	if got := store.records["sandbox-a"].DesiredState; got != SandboxDesiredStateActive {
+		t.Fatalf("stored desired state = %q, want active", got)
 	}
 	if store.saves != 1 {
 		t.Fatalf("store saves = %d, want 1", store.saves)
@@ -934,7 +937,7 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecordWithoutPod(t *te
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			Status:            SandboxStatusStarting,
+			DesiredState:      SandboxDesiredStateActive,
 			RuntimeGeneration: 3,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
@@ -968,8 +971,8 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecordWithoutPod(t *te
 	if store.pauses != 1 {
 		t.Fatalf("runtime pause reconciliations = %d, want 1", store.pauses)
 	}
-	if got := store.records["sandbox-a"].Status; got != SandboxStatusPaused {
-		t.Fatalf("stored status after failed claim = %q, want paused", got)
+	if got := store.records["sandbox-a"].DesiredState; got != SandboxDesiredStatePaused {
+		t.Fatalf("stored desired state after failed claim = %q, want paused", got)
 	}
 }
 
@@ -987,7 +990,7 @@ func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 			TemplateID:          "default",
 			TemplateName:        "default",
 			TemplateNamespace:   "tpl-default",
-			Status:              SandboxStatusStarting,
+			DesiredState:        SandboxDesiredStateActive,
 			CurrentPodName:      "pod-a",
 			CurrentPodNamespace: "ns-a",
 			RuntimeGeneration:   4,
@@ -1016,8 +1019,8 @@ func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	if status != SandboxStatusRunning {
 		t.Fatalf("status = %q, want running", status)
 	}
-	if got := store.records["sandbox-a"].Status; got != SandboxStatusRunning {
-		t.Fatalf("stored status = %q, want running", got)
+	if got := store.records["sandbox-a"].DesiredState; got != SandboxDesiredStateActive {
+		t.Fatalf("stored desired state = %q, want active", got)
 	}
 	active, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
 	if err != nil {
@@ -1048,7 +1051,7 @@ func TestResumeSandboxSingleflightPreventsConcurrentSandboxLocks(t *testing.T) {
 				TemplateID:          "default",
 				TemplateName:        "default",
 				TemplateNamespace:   "tpl-default",
-				Status:              SandboxStatusRunning,
+				DesiredState:        SandboxDesiredStateActive,
 				CurrentPodName:      "pod-a",
 				CurrentPodNamespace: "ns-a",
 				RuntimeGeneration:   4,
@@ -1112,7 +1115,7 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			Status:            SandboxStatusPaused,
+			DesiredState:      SandboxDesiredStatePaused,
 			RuntimeGeneration: 3,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
@@ -1189,7 +1192,7 @@ func TestResumePausedSandboxRuntimeWaitsForActivePauseTransaction(t *testing.T) 
 				TemplateID:          "default",
 				TemplateName:        "default",
 				TemplateNamespace:   "tpl-default",
-				Status:              SandboxStatusRunning,
+				DesiredState:        SandboxDesiredStateActive,
 				CurrentPodName:      "pod-a",
 				CurrentPodNamespace: "ns-a",
 				RuntimeGeneration:   4,
@@ -1244,7 +1247,7 @@ func TestResumePausedSandboxRuntimeCancelsAutoPauseTransaction(t *testing.T) {
 				TemplateID:          "default",
 				TemplateName:        "default",
 				TemplateNamespace:   "tpl-default",
-				Status:              SandboxStatusRunning,
+				DesiredState:        SandboxDesiredStateActive,
 				CurrentPodName:      "pod-a",
 				CurrentPodNamespace: "ns-a",
 				RuntimeGeneration:   4,
@@ -1343,7 +1346,7 @@ func TestCompletePausingSandboxRuntimeAbortsCanceledAutoPause(t *testing.T) {
 				TemplateID:          "default",
 				TemplateName:        "default",
 				TemplateNamespace:   "tpl-default",
-				Status:              SandboxStatusRunning,
+				DesiredState:        SandboxDesiredStateActive,
 				CurrentPodName:      "pod-a",
 				CurrentPodNamespace: "ns-a",
 				RuntimeGeneration:   4,
@@ -1381,8 +1384,8 @@ func TestCompletePausingSandboxRuntimeAbortsCanceledAutoPause(t *testing.T) {
 	if txn == nil || txn.Phase != SandboxLifecyclePhaseAborted {
 		t.Fatalf("pause txn = %+v, want aborted", txn)
 	}
-	if store.records["sandbox-a"].Status != SandboxStatusRunning {
-		t.Fatalf("record status = %q, want running", store.records["sandbox-a"].Status)
+	if store.records["sandbox-a"].DesiredState != SandboxDesiredStateActive {
+		t.Fatalf("record desired state = %q, want active", store.records["sandbox-a"].DesiredState)
 	}
 	for _, action := range client.Actions() {
 		if action.GetVerb() == "delete" && action.GetResource().Resource == "pods" {
@@ -1400,7 +1403,7 @@ func TestResumePausedSandboxRuntimeStartsRecoveryForRunningRecordWithoutPod(t *t
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			Status:            SandboxStatusRunning,
+			DesiredState:      SandboxDesiredStateActive,
 			RuntimeGeneration: 4,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
@@ -1449,7 +1452,7 @@ func TestResumePausedSandboxRuntimeRejectsHardExpiredRecord(t *testing.T) {
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			Status:            SandboxStatusPaused,
+			DesiredState:      SandboxDesiredStatePaused,
 			HardExpiresAt:     hardExpiresAt,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
@@ -1478,7 +1481,7 @@ func TestTerminatePausedSandboxCompletesPersistentCleanupWithoutWebhookDelivery(
 			ID:                   "sandbox-a",
 			TeamID:               "team-a",
 			UserID:               "user-a",
-			Status:               SandboxStatusPaused,
+			DesiredState:         SandboxDesiredStatePaused,
 			WebhookStateVolumeID: "volume-a",
 			Config: SandboxConfig{Webhook: &WebhookConfig{
 				URL:    "https://example.test/webhook",
@@ -1501,8 +1504,8 @@ func TestTerminatePausedSandboxCompletesPersistentCleanupWithoutWebhookDelivery(
 	if err := svc.TerminateSandbox(context.Background(), "sandbox-a"); err != nil {
 		t.Fatalf("TerminateSandbox() error = %v", err)
 	}
-	if store.records["sandbox-a"].Status != SandboxStatusDeleted {
-		t.Fatalf("status = %q, want deleted", store.records["sandbox-a"].Status)
+	if store.records["sandbox-a"].DesiredState != SandboxDesiredStateDeleted {
+		t.Fatalf("desired state = %q, want deleted", store.records["sandbox-a"].DesiredState)
 	}
 	if bindings.deleteCalls != 1 {
 		t.Fatalf("DeleteBindings calls = %d, want 1", bindings.deleteCalls)
@@ -1523,7 +1526,7 @@ func TestTerminateSandboxAbortsActivePauseTransaction(t *testing.T) {
 				TemplateID:        "default",
 				TemplateName:      "default",
 				TemplateNamespace: "tpl-default",
-				Status:            SandboxStatusRunning,
+				DesiredState:      SandboxDesiredStateActive,
 				RuntimeGeneration: 3,
 			},
 		},
@@ -1552,8 +1555,8 @@ func TestTerminateSandboxAbortsActivePauseTransaction(t *testing.T) {
 	if err := svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-a"); err != nil {
 		t.Fatalf("CompletePausingSandboxRuntime() error = %v", err)
 	}
-	if got := store.records["sandbox-a"].Status; got != SandboxStatusDeleted {
-		t.Fatalf("status = %q, want deleted", got)
+	if got := store.records["sandbox-a"].DesiredState; got != SandboxDesiredStateDeleted {
+		t.Fatalf("desired state = %q, want deleted", got)
 	}
 	if txn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a"); err != nil || txn != nil {
 		t.Fatalf("active txn = %+v, err = %v, want nil", txn, err)

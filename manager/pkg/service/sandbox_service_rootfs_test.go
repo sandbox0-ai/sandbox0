@@ -103,6 +103,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	addRootFSTestVolumePortal(pod, volumeportal.WebhookStatePortalName, volumeportal.WebhookStateMountPath)
 	setRootFSTestClaimMounts(t, pod, []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}})
 	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-state-vol-1"
+	markRuntimeIdentityPodReady(t, pod)
 	pod.Status.HostIP = ctldURL.Hostname()
 	k8sClient := fake.NewSimpleClientset(pod)
 	deleteCalled := false
@@ -121,7 +122,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 			ID:                "sandbox-1",
 			TeamID:            "team-1",
 			RuntimeGeneration: 3,
-			Status:            SandboxStatusRunning,
+			DesiredState:      SandboxDesiredStateActive,
 		},
 	}}
 	enqueuer := &recordingPauseEnqueuer{}
@@ -145,7 +146,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, SandboxStatusRunning, resp.Status)
 	assert.False(t, saveCalled, "pause request must not synchronously save rootfs")
 	assert.Equal(t, []string{"sandbox-1"}, enqueuer.calls)
-	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
+	assert.Equal(t, SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 	require.Len(t, store.lifecycleTxns, 1)
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
@@ -164,7 +165,7 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	assert.Equal(t, "sha256:diff", state.DiffDigest)
 	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", state.DiffObjectKey)
 	assert.NotEmpty(t, state.LayerID)
-	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
+	assert.Equal(t, SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 }
 
 func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
@@ -224,7 +225,7 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 				ID:                "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusRunning,
+				DesiredState:      SandboxDesiredStateActive,
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
@@ -267,7 +268,7 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 				ID:                "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusRunning,
+				DesiredState:      SandboxDesiredStateActive,
 			},
 		},
 	}
@@ -336,7 +337,7 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 	assert.False(t, deleteCalled)
 	assert.Nil(t, store.rootFSStates["sandbox-1"])
-	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
+	assert.Equal(t, SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 	deleter := svc.rootFSObjectDeleter.(*recordingRootFSObjectDeleter)
 	assert.Equal(t, []string{"sandbox-rootfs/team-1/sandbox-1/3/sha256/stale.tar"}, deleter.keys)
 }
@@ -419,7 +420,7 @@ func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
 				ID:                "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusRunning,
+				DesiredState:      SandboxDesiredStateActive,
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
@@ -517,7 +518,7 @@ func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing
 				ID:                "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusRunning,
+				DesiredState:      SandboxDesiredStateActive,
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
@@ -558,6 +559,7 @@ func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing
 
 func TestGetSandboxHidesRuntimeAfterPauseBarrier(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	markRuntimeIdentityPodReady(t, pod)
 	pod.Status.PodIP = "10.0.0.10"
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
@@ -569,7 +571,7 @@ func TestGetSandboxHidesRuntimeAfterPauseBarrier(t *testing.T) {
 				CurrentPodName:      "pod-1",
 				CurrentPodNamespace: "default",
 				RuntimeGeneration:   3,
-				Status:              SandboxStatusRunning,
+				DesiredState:        SandboxDesiredStateActive,
 			},
 		},
 	}
@@ -658,7 +660,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeRuntimeActivation(t *tes
 		TemplateNamespace: "template-default",
 		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		RuntimeGeneration: 3,
-		Status:            SandboxStatusPaused,
+		DesiredState:      SandboxDesiredStatePaused,
 	}
 
 	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
@@ -710,7 +712,7 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSLayerChain(t *testing.T) {
 		TemplateNamespace: "template-default",
 		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		RuntimeGeneration: 3,
-		Status:            SandboxStatusPaused,
+		DesiredState:      SandboxDesiredStatePaused,
 	}
 
 	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
@@ -776,7 +778,7 @@ func TestFinishRestoredSandboxRuntimeResetsSessionStateCopiedByFork(t *testing.T
 		TemplateName:      "template-1",
 		TemplateNamespace: "template-default",
 		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
-		Status:            SandboxStatusPaused,
+		DesiredState:      SandboxDesiredStatePaused,
 	}
 
 	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
@@ -904,7 +906,7 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 				TemplateNamespace: templateNamespace,
 				TemplateSpec:      template.Spec,
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusPaused,
+				DesiredState:      SandboxDesiredStatePaused,
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
@@ -963,7 +965,7 @@ func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T
 	assert.NotEqual(t, "pod-current", applyTargets[1])
 	assert.Equal(t, "docker.io/library/busybox@"+checkpointDigest, fallbackImage)
 	assert.Equal(t, applyTargets[1], store.records["sandbox-1"].CurrentPodName)
-	assert.Equal(t, SandboxStatusRunning, store.records["sandbox-1"].Status)
+	assert.Equal(t, SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 }
 
 func TestCheckpointBaseImageRefPinsDigest(t *testing.T) {
@@ -996,7 +998,7 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 				ID:                "sandbox-1",
 				TeamID:            "team-1",
 				RuntimeGeneration: 3,
-				Status:            SandboxStatusStarting,
+				DesiredState:      SandboxDesiredStateActive,
 			},
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
@@ -1017,7 +1019,7 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 
 	assert.False(t, saveCalled.Load())
 	assert.Equal(t, originalState.DiffObjectKey, store.rootFSStates["sandbox-1"].DiffObjectKey)
-	assert.Equal(t, SandboxStatusPaused, store.records["sandbox-1"].Status)
+	assert.Equal(t, SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 }
 
 func TestRootFSExcludedPathsForPodUsesBoundClaimMountPaths(t *testing.T) {
@@ -1173,7 +1175,7 @@ func addRootFSTestPauseTxn(store *memorySandboxStore, pod *corev1.Pod, phase str
 		FromPodName:      pod.Name,
 	}
 	if record := store.records[sandboxID]; record != nil {
-		record.Status = SandboxStatusRunning
+		record.DesiredState = SandboxDesiredStateActive
 		record.CurrentPodNamespace = pod.Namespace
 		record.CurrentPodName = pod.Name
 		record.RuntimeGeneration = runtimeGenerationFromPod(pod)

@@ -32,6 +32,10 @@ Sandbox0 Cloud clients should use `https://api.sandbox0.ai`. Set `SANDBOX0_BASE_
 | `failed` | Sandbox encountered an error |
 
 <Callout variant="info">
+`starting`, `running`, and `failed` reflect the current runtime Pod observed through manager's Kubernetes informer cache. Durable sandbox intent is stored separately, so a manager restart does not need to copy Pod readiness back into PostgreSQL. If an active sandbox temporarily has no cached runtime while recovery is in progress, its status is `starting`.
+</Callout>
+
+<Callout variant="info">
 Pause and resume use internal lifecycle transactions, but `pausing` and `resuming` are not caller-visible statuses. Use the `paused` boolean as a convenience for `status == "paused"`. Pause does not preserve running processes, memory, sockets, PID state, or live REPL sessions.
 </Callout>
 

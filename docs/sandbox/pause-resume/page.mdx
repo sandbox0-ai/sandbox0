@@ -168,7 +168,7 @@ console.log("Resume requested");`
 
 After requesting a pause or resume, fetch sandbox details to check the lifecycle status.
 
-During asynchronous pause, `paused` remains `false` and `status` continues to reflect the last committed runtime state, usually `running`. It becomes `true` only after checkpoint upload has completed, the runtime pod has been released, and the sandbox is safe to resume from durable state.
+During asynchronous pause, `paused` remains `false` and `status` continues to reflect the cached runtime Pod state, usually `running`. It becomes `true` only after checkpoint upload has completed, the runtime pod has been released, and the sandbox is safe to resume from durable state.
 
 During resume, callers may wait while Sandbox0 creates and initializes a new runtime generation. After the resume transaction commits, `status` is `running`, `paused` is `false`, and `runtime_generation` has advanced. If an automatic pause is canceled before commit, `status` remains `running`, `paused` remains `false`, and `runtime_generation` does not change.
 

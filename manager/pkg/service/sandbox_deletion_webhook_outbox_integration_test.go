@@ -25,7 +25,7 @@ func TestSandboxDeletionWebhookOutboxEnqueueIntegration(t *testing.T) {
 	defer server.Close()
 	deletedAt := time.Now().UTC().Truncate(time.Microsecond)
 	record := rootFSTestSandboxRecord("sandbox-webhook", "team-1")
-	record.Status = SandboxStatusTerminating
+	record.DesiredState = SandboxDesiredStateTerminating
 	record.Config.Webhook = &WebhookConfig{
 		URL:    server.URL,
 		Secret: "secret",
@@ -117,7 +117,7 @@ func TestSandboxDeletionWebhookEnqueueIsAtomicWithDeletedState(t *testing.T) {
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
 	record := rootFSTestSandboxRecord("sandbox-atomic", "team-1")
-	record.Status = SandboxStatusTerminating
+	record.DesiredState = SandboxDesiredStateTerminating
 	record.Config.Webhook = &WebhookConfig{URL: "https://example.test/webhook"}
 	require.NoError(t, store.UpsertSandbox(ctx, record))
 	_, err := pool.Exec(ctx, `DROP TABLE manager.sandbox_deletion_webhook_outbox`)
@@ -129,6 +129,6 @@ func TestSandboxDeletionWebhookEnqueueIsAtomicWithDeletedState(t *testing.T) {
 	loaded, err := store.GetSandbox(ctx, record.ID)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
-	assert.Equal(t, SandboxStatusTerminating, loaded.Status)
+	assert.Equal(t, SandboxDesiredStateTerminating, loaded.DesiredState)
 	assert.True(t, loaded.DeletedAt.IsZero())
 }

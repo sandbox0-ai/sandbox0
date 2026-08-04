@@ -479,7 +479,7 @@ func (s *SandboxService) runtimeDeletionDisposition(ctx context.Context, info Sa
 		return false, false, fmt.Errorf("get sandbox record for runtime deletion cleanup: %w", err)
 	}
 	runtimeOnly := SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration)
-	return runtimeOnly, runtimeOnly && record != nil && record.Status == SandboxStatusPaused, nil
+	return runtimeOnly, runtimeOnly && record != nil && record.DesiredState == SandboxDesiredStatePaused, nil
 }
 
 // SandboxRecordDeletionIsRuntimeOnly reports whether Pod deletion is limited to
@@ -490,8 +490,8 @@ func SandboxRecordDeletionIsRuntimeOnly(record *SandboxRecord, _ string, _ strin
 	if record == nil {
 		return false
 	}
-	switch record.Status {
-	case SandboxStatusTerminating, SandboxStatusDeleted:
+	switch record.DesiredState {
+	case SandboxDesiredStateTerminating, SandboxDesiredStateDeleted:
 		return false
 	default:
 		return true

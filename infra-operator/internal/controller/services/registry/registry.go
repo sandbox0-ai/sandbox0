@@ -778,9 +778,9 @@ func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interf
 		if typed == nil {
 			return nil
 		}
-		resolved.Registry = typed.Registry
-		resolved.PullRegistry = typed.PullRegistry
-		resolved.InternalRegistry = typed.InternalRegistry
+		resolved.Registry = joinRegistryPath(typed.Registry, typed.Namespace)
+		resolved.PullRegistry = joinRegistryPath(typed.PullRegistry, typed.Namespace)
+		resolved.InternalRegistry = joinRegistryPath(typed.InternalRegistry, typed.Namespace)
 		resolved.PullSecret = &typed.PullSecret
 	case *infrav1alpha1.HarborRegistryConfig:
 		if typed == nil {
@@ -821,6 +821,15 @@ func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interf
 		SourceSecretKey:  secretKey,
 		TargetSecretName: targetSecretName,
 	}
+}
+
+func joinRegistryPath(registryHost, repositoryPath string) string {
+	host := normalizeRegistryHost(registryHost)
+	path := strings.Trim(repositoryPath, "/")
+	if host == "" || path == "" {
+		return host
+	}
+	return host + "/" + path
 }
 
 func normalizeRegistryHost(raw string) string {

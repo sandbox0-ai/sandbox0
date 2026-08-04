@@ -81,7 +81,7 @@ Both methods use your local Docker daemon to build the image. Make sure Docker i
 
 ### Step 2 — Push to the Sandbox0 Registry
 
-Push the locally built image to the Sandbox0 registry. The CLI automatically retrieves short-lived credentials from the API and scopes the push to your team prefix:
+Push the locally built image to the Sandbox0 registry. The CLI automatically retrieves short-lived credentials and a team-scoped destination from the API:
 
 ```bash
 s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
@@ -93,7 +93,7 @@ s0 template image push my-app:v1.2.3 -t my-app:v1.2.3
 
 The push command:
 1. Calls `POST /api/v1/registry/credentials` to obtain short-lived credentials
-2. Re-tags the local image with the registry hostname prepended
+2. Re-tags the local image with the complete provider-specific `pushImage` reference returned by Sandbox0
 3. Pushes the image using your Docker daemon
 
 <Callout variant="info">
@@ -176,7 +176,7 @@ Sandbox0 supports multiple container registry backends. The registry provider is
 | `aws` | Amazon ECR | Short-lived tokens (12h). Can optionally use `AssumeRole` + session policy for team-scoped pushes. |
 | `gcp` | Google Artifact Registry / GCR | Uses service account credentials. |
 | `azure` | Azure Container Registry | Uses ACR credentials. |
-| `aliyun` | Alibaba Cloud Container Registry | Uses Aliyun ACR credentials. |
+| `aliyun` | Alibaba Cloud Container Registry | Uses a fixed namespace, one private repository per team, and repository-scoped STS credentials. |
 | `harbor` | Harbor | Uses Harbor robot/user credentials from Kubernetes Secret. |
 
 For all providers, the `s0 template image push` command handles credential retrieval transparently — you always use the same CLI command regardless of the backend.
@@ -191,7 +191,9 @@ normally use cluster DNS.
 Aliyun ACR can expose separate internet and VPC hostnames. Configure `registry`
 with the internet hostname so external developers and CI can push images, and
 configure `pullRegistry` plus `internalRegistry` with the VPC hostname so
-sandbox nodes and Sandbox0 services stay on the private path:
+sandbox nodes and Sandbox0 services stay on the private path. The configured
+RAM role must allow Sandbox0 to mint repository-scoped STS sessions. Sandbox0
+creates `t-<team-key>` repositories on demand inside the fixed namespace:
 
 ```yaml
 spec:
@@ -201,13 +203,27 @@ spec:
             registry: registry.example.com
             pullRegistry: registry-vpc.example.com
             internalRegistry: registry-vpc.example.com
+            namespace: sandbox0aliue1
             region: us-east-1
             instanceId: cri-example
+            assumeRoleArn: acs:ram::123456789012:role/sandbox0_acr_upload
+            sessionDurationSeconds: 21600
             pullSecret:
                 name: acr-pull-secret
             credentialsSecret:
                 name: aliyun-credentials
 ```
+
+Aliyun ACR image paths have the fixed shape
+`<registry>/<namespace>/<repository>:<tag>`. Sandbox0 therefore maps a logical
+target such as `my-app:v1.2.3` to a deterministic tag in the team's repository.
+Do not reconstruct this address yourself; use the `Image pushed successfully`
+and `Template image reference` values printed by the CLI. The push reference
+uses the internet endpoint, while the template reference uses the VPC endpoint.
+
+The upload role may allow Push/Pull across the shared namespace, but every
+issued STS session is restricted again to exactly one team repository. A
+customer upload credential cannot pull or push another team's repository.
 
 ---
 
@@ -222,18 +238,20 @@ flowchart LR
     creds["Short-lived creds"]
     docker["docker push"]
     registry["Registry"]
-    secret["imagePullSecret (auto-injected into all sandbox pods)"]
+    secret["Cluster-managed imagePullSecret"]
+    kubelet["Node kubelet / container runtime"]
     stored["image stored"]
 
     cli -->|"image push"| api
     api --> creds
     creds --> docker
     docker --> registry
-    secret --> registry
+    secret --> kubelet
+    kubelet --> registry
     registry --> stored
 ```
 
-The platform operator maintains a cluster-wide `imagePullSecret` that is automatically injected into every sandbox pod. As a template author, you only need to reference the correct image name — no credential configuration is required in the template spec.
+The platform operator maintains a cluster-managed `imagePullSecret` and references it from sandbox pod specs. The node kubelet/container runtime consumes that secret while pulling the image; it is not mounted into the sandbox container or exposed through the Sandbox0 API. As a template author, you only need to reference the correct image name — no credential configuration is required in the template spec.
 
 <Callout variant="info">
 For self-hosted deployments, the `builtin` registry provider automatically provisions and manages the pull secret. For external registries (ECR, GCP, ACR, Aliyun, Harbor), the platform operator pre-configures the credentials once during cluster setup.

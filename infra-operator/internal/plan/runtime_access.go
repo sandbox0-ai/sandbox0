@@ -220,8 +220,12 @@ func (p *InfraPlan) ConfigureRegionalGatewayRegistry(cfg *apiconfig.RegionalGate
 		cred := p.infra.Spec.Registry.Aliyun.CredentialsSecret
 		cfg.Registry.Aliyun = &apiconfig.RegistryAliyunConfig{
 			Registry:        p.infra.Spec.Registry.Aliyun.Registry,
+			Namespace:       p.infra.Spec.Registry.Aliyun.Namespace,
 			Region:          p.infra.Spec.Registry.Aliyun.Region,
 			InstanceID:      p.infra.Spec.Registry.Aliyun.InstanceID,
+			AssumeRoleARN:   p.infra.Spec.Registry.Aliyun.AssumeRoleARN,
+			ExternalID:      p.infra.Spec.Registry.Aliyun.ExternalID,
+			SessionDuration: p.infra.Spec.Registry.Aliyun.SessionDurationSeconds,
 			AccessKeyID:     "${S0_REGISTRY_ALIYUN_ACCESS_KEY_ID}",
 			AccessKeySecret: "${S0_REGISTRY_ALIYUN_ACCESS_KEY_SECRET}",
 		}

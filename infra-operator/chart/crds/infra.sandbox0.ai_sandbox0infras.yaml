@@ -2287,6 +2287,11 @@ spec:
                   aliyun:
                     description: Aliyun configures Aliyun registry integration.
                     properties:
+                      assumeRoleArn:
+                        description: |-
+                          AssumeRoleARN is the RAM role used to mint repository-scoped upload
+                          credentials. The role session is restricted again for each team.
+                        type: string
                       credentialsSecret:
                         description: CredentialsSecret references Aliyun credentials
                           for short-lived tokens.
@@ -2306,6 +2311,9 @@ spec:
                         required:
                         - name
                         type: object
+                      externalId:
+                        description: ExternalID is passed to STS AssumeRole when configured.
+                        type: string
                       instanceId:
                         description: InstanceID specifies the ACR instance ID.
                         type: string
@@ -2314,6 +2322,11 @@ spec:
                           InternalRegistry optionally specifies a private registry hostname used by
                           Sandbox0 services for server-side image publication. It defaults to
                           PullRegistry when configured, otherwise Registry.
+                        type: string
+                      namespace:
+                        description: |-
+                          Namespace is the shared ACR namespace that contains one private
+                          repository per Sandbox0 team.
                         type: string
                       pullRegistry:
                         description: |-
@@ -2341,9 +2354,19 @@ spec:
                         description: Registry specifies the public registry hostname
                           used for external image pushes.
                         type: string
+                      sessionDurationSeconds:
+                        default: 21600
+                        description: SessionDurationSeconds controls the repository
+                          upload session lifetime.
+                        format: int64
+                        maximum: 43200
+                        minimum: 3600
+                        type: integer
                     required:
+                    - assumeRoleArn
                     - credentialsSecret
                     - instanceId
+                    - namespace
                     - pullSecret
                     - region
                     - registry

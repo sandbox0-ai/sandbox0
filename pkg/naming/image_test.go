@@ -15,7 +15,7 @@ func TestTeamScopedImageRegistry(t *testing.T) {
 func TestValidateTeamScopedImageReference(t *testing.T) {
 	t.Parallel()
 
-	privateHosts := []string{"registry.internal.svc:5000", "registry.example.com"}
+	privateHosts := []string{"registry.internal.svc:5000", "registry.example.com", "acr.example.com/sandbox0"}
 	prefix := TeamImageRepositoryPrefix("team-123")
 
 	tests := []struct {
@@ -38,6 +38,15 @@ func TestValidateTeamScopedImageReference(t *testing.T) {
 		{
 			name:     "other team private image rejected",
 			imageRef: "registry.internal.svc:5000/t-other/my-app:v1",
+			wantErr:  true,
+		},
+		{
+			name:     "team repository under provider namespace accepted",
+			imageRef: "acr.example.com/sandbox0/" + prefix + ":v1",
+		},
+		{
+			name:     "other team under provider namespace rejected",
+			imageRef: "acr.example.com/sandbox0/t-other:v1",
 			wantErr:  true,
 		},
 	}

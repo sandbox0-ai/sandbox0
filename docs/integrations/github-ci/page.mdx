@@ -107,15 +107,15 @@ The push step obtains temporary registry credentials from Sandbox0 automatically
 
 1. Authenticates to Sandbox0 with `SANDBOX0_TOKEN`
 2. Calls the registry credentials endpoint for a short-lived push credential
-3. Tags the local image with the team-scoped push registry prefix
+3. Tags the local image with the complete team-scoped `pushImage` reference returned by Sandbox0
 4. Pushes the image with Docker
-5. Prints the template image reference that Sandbox0 should use at runtime
+5. Prints the provider-specific `pullImage` reference that Sandbox0 should use at runtime
 
 This keeps registry credentials short-lived while leaving the build itself on the CI runner.
 
 ## Using the pushed image in a template
 
-After a successful push, use the printed `Template image reference` value in your template spec.
+After a successful push, use the printed `Template image reference` value in your template spec. Treat the printed value as authoritative: providers such as Aliyun ACR may map the logical image name to a tag in a fixed team repository, and the runtime reference may use a VPC-only hostname.
 
 ```yaml
 spec:

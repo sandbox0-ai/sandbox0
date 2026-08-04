@@ -66,6 +66,10 @@ func TestRegistryCredentialsRequireRegistryWritePermission(t *testing.T) {
 		if got := registrySpy.callCount(); got != 1 {
 			t.Fatalf("registry call count = %d, want 1", got)
 		}
+		if body := rec.Body.String(); !strings.Contains(body, `"pushImage":"registry.example.com/t-team:my-app-v1"`) ||
+			!strings.Contains(body, `"pullImage":"registry-vpc.example.com/t-team:my-app-v1"`) {
+			t.Fatalf("response does not contain complete image references: %s", body)
+		}
 	})
 
 	t.Run("allowed with developer role", func(t *testing.T) {
@@ -155,6 +159,8 @@ func (s *registryProviderSpy) GetPushCredentials(_ context.Context, req registry
 	return &registryprovider.Credential{
 		Provider:     "builtin",
 		PushRegistry: "registry.example.com",
+		PushImage:    "registry.example.com/t-team:my-app-v1",
+		PullImage:    "registry-vpc.example.com/t-team:my-app-v1",
 		Username:     "user",
 		Password:     "password",
 	}, nil

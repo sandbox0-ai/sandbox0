@@ -655,6 +655,28 @@ func TestPublicationEndpointsExternalUsesInternalEndpointForServerSidePush(t *te
 	}
 }
 
+func TestPublicationReferencesUseProviderRepositoryTag(t *testing.T) {
+	t.Parallel()
+
+	pushTag, pushRepository, pullRepository := publicationReferences(
+		"registry-vpc.example.com/sandbox0/t-team",
+		"registry-vpc.example.com/sandbox0/t-team",
+		"template-workspace",
+		"template-workspace:build-1",
+		"template-workspace-build-1-hash",
+	)
+
+	if got, want := pushTag, "registry-vpc.example.com/sandbox0/t-team:template-workspace-build-1-hash"; got != want {
+		t.Fatalf("push tag = %q, want %q", got, want)
+	}
+	if got, want := pushRepository, "registry-vpc.example.com/sandbox0/t-team"; got != want {
+		t.Fatalf("push repository = %q, want %q", got, want)
+	}
+	if got, want := pullRepository, "registry-vpc.example.com/sandbox0/t-team"; got != want {
+		t.Fatalf("pull repository = %q, want %q", got, want)
+	}
+}
+
 func TestRegistryEndpointsWithPathsPreserveRepositoryAndCompareByAuthority(t *testing.T) {
 	t.Parallel()
 

@@ -19,9 +19,12 @@ type Credential struct {
 	Provider     string     `json:"provider"`
 	PushRegistry string     `json:"pushRegistry"`
 	PullRegistry string     `json:"pullRegistry,omitempty"`
+	PushImage    string     `json:"pushImage,omitempty"`
+	PullImage    string     `json:"pullImage,omitempty"`
 	Username     string     `json:"username"`
 	Password     string     `json:"password"`
 	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
+	TargetTag    string     `json:"-"`
 }
 
 // PushCredentialsRequest describes the image push the caller is preparing.
@@ -124,6 +127,10 @@ func (p *providerWithPullRegistry) GetPushCredentials(ctx context.Context, req P
 	if strings.TrimSpace(req.TeamID) != "" {
 		creds.PushRegistry = naming.TeamScopedImageRegistry(creds.PushRegistry, req.TeamID)
 		creds.PullRegistry = naming.TeamScopedImageRegistry(creds.PullRegistry, req.TeamID)
+	}
+	if strings.TrimSpace(creds.TargetTag) != "" {
+		creds.PushImage = creds.PushRegistry + ":" + creds.TargetTag
+		creds.PullImage = creds.PullRegistry + ":" + creds.TargetTag
 	}
 	return creds, nil
 }

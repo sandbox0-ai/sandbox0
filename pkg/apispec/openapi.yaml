@@ -4260,6 +4260,12 @@ components:
           type: string
         pullRegistry:
           type: string
+        pushImage:
+          type: string
+          description: Complete provider-specific image reference to push. Clients should prefer this over composing pushRegistry and targetImage.
+        pullImage:
+          type: string
+          description: Complete image reference for templates and sandbox pulls. It may use a private regional endpoint.
         username:
           type: string
         password:

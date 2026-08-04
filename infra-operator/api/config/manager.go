@@ -511,8 +511,12 @@ type RegistryAzureConfig struct {
 // RegistryAliyunConfig defines Aliyun registry config.
 type RegistryAliyunConfig struct {
 	Registry          string `yaml:"registry" json:"-"`
+	Namespace         string `yaml:"namespace" json:"-"`
 	Region            string `yaml:"region" json:"-"`
 	InstanceID        string `yaml:"instance_id" json:"-"`
+	AssumeRoleARN     string `yaml:"assume_role_arn" json:"-"`
+	ExternalID        string `yaml:"external_id" json:"-"`
+	SessionDuration   int64  `yaml:"session_duration_seconds" json:"-"`
 	CredentialsSecret string `yaml:"credentials_secret" json:"-"`
 	AccessKeyKey      string `yaml:"access_key_key" json:"-"`
 	SecretKeyKey      string `yaml:"secret_key_key" json:"-"`

@@ -240,11 +240,13 @@ func publicationEndpoints(
 	if pull == "" {
 		pull = push
 	}
-	if strings.EqualFold(strings.TrimSpace(credential.Provider), "builtin") {
-		serverRegistry := strings.Trim(naming.NormalizeRegistryHost(internalRegistry), "/")
-		if serverRegistry != "" {
-			push = naming.TeamScopedImageRegistry(serverRegistry, teamID)
-		} else {
+	provider := strings.TrimSpace(credential.Provider)
+	serverRegistry := strings.Trim(naming.NormalizeRegistryHost(internalRegistry), "/")
+	if serverRegistry != "" {
+		push = naming.TeamScopedImageRegistry(serverRegistry, teamID)
+	}
+	if strings.EqualFold(provider, "builtin") {
+		if serverRegistry == "" {
 			// Preserve compatibility with configs where PullRegistry carried
 			// the builtin service endpoint.
 			push = pull

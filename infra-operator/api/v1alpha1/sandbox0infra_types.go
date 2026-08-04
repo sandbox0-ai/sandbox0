@@ -1127,8 +1127,19 @@ type AzureRegistryCredentialsSecret struct {
 
 // AliyunRegistryConfig defines Aliyun registry configuration.
 type AliyunRegistryConfig struct {
-	// Registry specifies the registry hostname.
+	// Registry specifies the public registry hostname used for external image pushes.
 	Registry string `json:"registry"`
+
+	// PullRegistry optionally specifies a private registry hostname reachable by
+	// sandbox nodes. It defaults to Registry.
+	// +optional
+	PullRegistry string `json:"pullRegistry,omitempty"`
+
+	// InternalRegistry optionally specifies a private registry hostname used by
+	// Sandbox0 services for server-side image publication. It defaults to
+	// PullRegistry when configured, otherwise Registry.
+	// +optional
+	InternalRegistry string `json:"internalRegistry,omitempty"`
 
 	// Region specifies the Aliyun region.
 	Region string `json:"region"`

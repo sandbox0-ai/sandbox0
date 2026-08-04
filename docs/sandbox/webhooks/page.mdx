@@ -22,14 +22,14 @@ Webhooks are configured per-sandbox at creation time. Each sandbox can have its 
 
 ## Delivery Guarantees
 
-Webhook events are delivered at least once. Your endpoint should return a `2xx` status only after it has durably recorded the event, and should deduplicate by `event_id`.
+Webhook requests may be delivered more than once, so consumers must deduplicate by `event_id`. Your endpoint should return a `2xx` status only after it has durably recorded the event. Retries are best-effort and do not guarantee that an unavailable endpoint eventually receives every event.
 
-When a sandbox is created with a webhook, Sandbox0 creates a manager-owned SandboxVolume for webhook delivery state and mounts it at a reserved procd path outside the workspace. Procd writes signed delivery records to that volume before acknowledging the internal publish request, then retries delivery from the outbox until the endpoint accepts the event.
+When a sandbox is created with a webhook, Sandbox0 creates a manager-owned SandboxVolume for webhook delivery state and mounts it at a reserved procd path outside the workspace. Procd writes signed delivery records to that volume before acknowledging the internal publish request, then dispatches them from the durable outbox with backoff. This outbox remains scoped to the sandbox runtime state.
 
-Sandbox deletion has an additional manager-level path. If the sandbox pod is deleted directly, or procd exits before it can emit `sandbox.killed`, manager emits `sandbox.deleted` from the pod finalizer cleanup path.
+Sandbox deletion has an additional manager-level path. When manager commits a sandbox deletion, it writes the exact signed `sandbox.deleted` request to a PostgreSQL outbox in the same transaction. Sandbox and Pod cleanup never wait for the external endpoint. Manager retries transport errors and HTTP `408`, `425`, `429`, and `5xx` responses with exponential backoff for up to 24 hours. Other non-`2xx` responses are terminal. After the 24-hour delivery window expires, manager stops retrying and later removes the bounded outbox record.
 
 <Callout variant="info">
-Webhook delivery is eventually consistent. Temporary endpoint outages, procd container restarts, and manager restarts can cause retries. Consumers must treat repeated `event_id` values as duplicate deliveries.
+Webhook delivery is eventually consistent. Temporary endpoint outages, procd container restarts, and manager restarts can cause retries. A response can be delivered more than once when the receiver accepts it but manager cannot durably record the success.
 </Callout>
 
 ---
@@ -44,7 +44,7 @@ Webhook delivery is eventually consistent. Temporary endpoint outages, procd con
 | `sandbox.paused` | Sandbox has been paused |
 | `sandbox.resumed` | Sandbox has been resumed |
 | `sandbox.killed` | Sandbox has been killed |
-| `sandbox.deleted` | Sandbox pod has been deleted and manager is cleaning sandbox-scoped state |
+| `sandbox.deleted` | Manager has committed sandbox deletion and queued the final notification |
 
 ### Process Events
 
@@ -264,7 +264,7 @@ done`
 
 ### Sandbox Events
 
-`sandbox.ready` is emitted after initialization. `sandbox.paused` and `sandbox.resumed` are emitted when pause and resume requests complete. `sandbox.killed` is emitted by procd during graceful shutdown, and `sandbox.deleted` is emitted by manager when the sandbox pod deletion cleanup runs.
+`sandbox.ready` is emitted after initialization. `sandbox.paused` and `sandbox.resumed` are emitted when pause and resume requests complete. `sandbox.killed` is emitted by procd during graceful shutdown, and `sandbox.deleted` is durably queued by manager when sandbox deletion commits.
 
 <Tabs
   tabs={[

@@ -133,7 +133,6 @@ type SandboxService struct {
 	credentialStore                        egressauth.BindingStore
 	webhookStateVolumes                    SandboxSystemVolumeClient
 	volumeMetadata                         SandboxVolumeMetadataClient
-	deletionWebhookEmitter                 SandboxDeletionWebhookEmitter
 	quotaStore                             TeamQuotaLimitStore
 	sandboxStore                           SandboxStore
 	rootFSObjectDeleter                    RootFSObjectDeleter
@@ -348,11 +347,6 @@ func (s *SandboxService) SetWebhookStateVolumeClient(client SandboxSystemVolumeC
 // SetVolumeMetadataClient injects the metadata client used to validate user volume mounts.
 func (s *SandboxService) SetVolumeMetadataClient(client SandboxVolumeMetadataClient) {
 	s.volumeMetadata = client
-}
-
-// SetDeletionWebhookEmitter injects the emitter for manager-owned sandbox deletion events.
-func (s *SandboxService) SetDeletionWebhookEmitter(emitter SandboxDeletionWebhookEmitter) {
-	s.deletionWebhookEmitter = emitter
 }
 
 // SetQuotaStore injects the team quota limit store. Nil disables quota checks.

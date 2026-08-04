@@ -1475,7 +1475,7 @@ func TestResumePausedSandboxRuntimeRejectsHardExpiredRecord(t *testing.T) {
 	}
 }
 
-func TestTerminatePausedSandboxRecordRunsPersistentCleanup(t *testing.T) {
+func TestTerminatePausedSandboxCompletesPersistentCleanupWithoutWebhookDelivery(t *testing.T) {
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{
 		"sandbox-a": {
 			ID:                   "sandbox-a",
@@ -1491,16 +1491,14 @@ func TestTerminatePausedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 	}}
 	bindings := &deleteRecordingBindingStore{}
 	volumes := &recordingSystemVolumeClient{}
-	emitter := &recordingDeletionWebhookEmitter{}
 	svc := &SandboxService{
-		k8sClient:              fake.NewSimpleClientset(),
-		podLister:              runtimeIdentityPodLister(t),
-		credentialStore:        bindings,
-		webhookStateVolumes:    volumes,
-		deletionWebhookEmitter: emitter,
-		sandboxStore:           store,
-		clock:                  systemTime{},
-		logger:                 zap.NewNop(),
+		k8sClient:           fake.NewSimpleClientset(),
+		podLister:           runtimeIdentityPodLister(t),
+		credentialStore:     bindings,
+		webhookStateVolumes: volumes,
+		sandboxStore:        store,
+		clock:               systemTime{},
+		logger:              zap.NewNop(),
 	}
 
 	if err := svc.TerminateSandbox(context.Background(), "sandbox-a"); err != nil {
@@ -1511,12 +1509,6 @@ func TestTerminatePausedSandboxRecordRunsPersistentCleanup(t *testing.T) {
 	}
 	if bindings.deleteCalls != 1 {
 		t.Fatalf("DeleteBindings calls = %d, want 1", bindings.deleteCalls)
-	}
-	if len(emitter.calls) != 1 {
-		t.Fatalf("webhook calls = %d, want 1", len(emitter.calls))
-	}
-	if emitter.calls[0].WebhookStateVolumeID != "volume-a" {
-		t.Fatalf("webhook state volume = %q, want volume-a", emitter.calls[0].WebhookStateVolumeID)
 	}
 	if len(volumes.marked) != 1 || volumes.marked[0] != "sandbox-a:sandbox_deleted" {
 		t.Fatalf("marked volumes = %#v, want sandbox-a:sandbox_deleted", volumes.marked)

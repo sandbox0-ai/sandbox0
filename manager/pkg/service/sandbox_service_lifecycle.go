@@ -1419,7 +1419,6 @@ func sandboxLifecycleInfoFromRecord(record *SandboxRecord) SandboxLifecycleInfo 
 	}
 	if record.Config.Webhook != nil {
 		info.WebhookURL = strings.TrimSpace(record.Config.Webhook.URL)
-		info.WebhookSecret = strings.TrimSpace(record.Config.Webhook.Secret)
 	}
 	return info
 }

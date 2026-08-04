@@ -44,7 +44,6 @@ type SandboxLifecycleInfo struct {
 	TeamID               string
 	UserID               string
 	WebhookURL           string
-	WebhookSecret        string
 	WebhookStateVolumeID string
 	PodUID               string
 	NodeName             string
@@ -72,7 +71,6 @@ type sandboxLifecycleQueueItem struct {
 	TeamID               string
 	UserID               string
 	WebhookURL           string
-	WebhookSecret        string
 	WebhookStateVolumeID string
 	PodUID               string
 	NodeName             string
@@ -300,7 +298,6 @@ func (c *SandboxLifecycleController) cleanupDeletedSandbox(ctx context.Context, 
 		TeamID:               item.TeamID,
 		UserID:               item.UserID,
 		WebhookURL:           item.WebhookURL,
-		WebhookSecret:        item.WebhookSecret,
 		WebhookStateVolumeID: item.WebhookStateVolumeID,
 		PodUID:               item.PodUID,
 		NodeName:             item.NodeName,
@@ -396,13 +393,6 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 	}()
 
 	var errs []error
-	if !runtimeOnly && s.deletionWebhookEmitter != nil && strings.TrimSpace(info.WebhookURL) != "" {
-		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "emit_deletion_webhook", func() error {
-			return s.deletionWebhookEmitter.EmitSandboxDeleted(ctx, info)
-		}); isRetryableSandboxDeletionWebhookError(err) {
-			errs = append(errs, fmt.Errorf("emit deletion webhook: %w", err))
-		}
-	}
 	if s.networkProvider != nil && info.Namespace != "" {
 		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "remove_network_policy", func() error {
 			return s.networkProvider.RemoveSandboxPolicy(ctx, info.Namespace, sandboxID)
@@ -622,7 +612,6 @@ func sandboxLifecycleItemFromInfo(info SandboxLifecycleInfo, deleted bool) sandb
 		TeamID:               info.TeamID,
 		UserID:               info.UserID,
 		WebhookURL:           info.WebhookURL,
-		WebhookSecret:        info.WebhookSecret,
 		WebhookStateVolumeID: info.WebhookStateVolumeID,
 		PodUID:               info.PodUID,
 		NodeName:             info.NodeName,
@@ -669,7 +658,6 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 	teamID := ""
 	userID := ""
 	webhookURL := ""
-	webhookSecret := ""
 	webhookStateVolumeID := ""
 	if pod.Annotations != nil {
 		teamID = strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
@@ -679,7 +667,6 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 			var cfg SandboxConfig
 			if err := json.Unmarshal([]byte(configJSON), &cfg); err == nil && cfg.Webhook != nil {
 				webhookURL = strings.TrimSpace(cfg.Webhook.URL)
-				webhookSecret = strings.TrimSpace(cfg.Webhook.Secret)
 			}
 		}
 	}
@@ -690,7 +677,6 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 		TeamID:               teamID,
 		UserID:               userID,
 		WebhookURL:           webhookURL,
-		WebhookSecret:        webhookSecret,
 		WebhookStateVolumeID: webhookStateVolumeID,
 		PodUID:               string(pod.UID),
 		NodeName:             pod.Spec.NodeName,

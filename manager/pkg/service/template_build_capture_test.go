@@ -21,9 +21,9 @@ func TestEnsureTemplateBuildCaptureReadsPinnedHeadAfterSourceAdvances(t *testing
 	base := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
 			"sandbox-1": {
-				ID:     "sandbox-1",
-				TeamID: "team-1",
-				Status: SandboxStatusPaused,
+				ID:           "sandbox-1",
+				TeamID:       "team-1",
+				DesiredState: SandboxDesiredStatePaused,
 			},
 		},
 		rootFSSnapshots: map[string]*RootFSSnapshot{
@@ -161,9 +161,9 @@ func TestEnsureTemplateBuildCaptureRejectsMixedRootFSChain(t *testing.T) {
 				memorySandboxStore: &memorySandboxStore{
 					records: map[string]*SandboxRecord{
 						"sandbox-1": {
-							ID:     "sandbox-1",
-							TeamID: "team-1",
-							Status: SandboxStatusPaused,
+							ID:           "sandbox-1",
+							TeamID:       "team-1",
+							DesiredState: SandboxDesiredStatePaused,
 						},
 					},
 					rootFSSnapshots: map[string]*RootFSSnapshot{

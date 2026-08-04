@@ -17,10 +17,10 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestCompleteHotClaimReservationPersistsRunningRecordWithoutPodPatch(t *testing.T) {
+func TestCompleteHotClaimReservationPersistsCompletionMarkerWithoutPodPatch(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
 	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateInitializing)
-	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV1
+	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV2
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{}}
 	service := &SandboxService{
@@ -46,8 +46,8 @@ func TestCompleteHotClaimReservationPersistsRunningRecordWithoutPodPatch(t *test
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if record == nil || record.Status != SandboxStatusRunning {
-		t.Fatalf("sandbox record = %#v, want running", record)
+	if record == nil || record.DesiredState != SandboxDesiredStateActive || !record.HotClaimCompletedAt.Equal(now) {
+		t.Fatalf("sandbox record = %#v, want active with a completion marker", record)
 	}
 	if actions := client.Actions(); len(actions) != 0 {
 		t.Fatalf("Kubernetes actions = %v, want none on completion path", actions)
@@ -57,10 +57,10 @@ func TestCompleteHotClaimReservationPersistsRunningRecordWithoutPodPatch(t *test
 	}
 }
 
-func TestSandboxRecordForRecordCompletedHotClaimStartsInitializing(t *testing.T) {
+func TestSandboxRecordForHotClaimStartsActiveWithoutCompletionMarker(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
 	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateInitializing)
-	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV1
+	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV2
 	service := &SandboxService{clock: fixedClock{now: now}}
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: pod.Namespace},
@@ -73,17 +73,17 @@ func TestSandboxRecordForRecordCompletedHotClaimStartsInitializing(t *testing.T)
 		UserID:            "user-a",
 		RuntimeGeneration: 1,
 	})
-	if record.Status != SandboxStatusStarting {
-		t.Fatalf("sandbox record status = %q, want starting", record.Status)
+	if record.DesiredState != SandboxDesiredStateActive || !record.HotClaimCompletedAt.IsZero() {
+		t.Fatalf("sandbox record = %#v, want active without a completion marker", record)
 	}
 }
 
 func TestHotClaimReservationControllerFinalizesRecordCompletedClaim(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
 	pod := newHotClaimReservationTestPod(now, controller.HotClaimReservationStateInitializing)
-	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV1
+	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV2
 	record := hotClaimReservationTestRecord(pod)
-	record.UpdatedAt = now
+	record.HotClaimCompletedAt = now
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{"sandbox-a": record}}
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	reconciler := NewHotClaimReservationController(client, newClaimTestPodLister(t, pod), store, nil)
@@ -112,18 +112,17 @@ func TestHotClaimReservationControllerFinalizesRecordCompletedClaim(t *testing.T
 func TestHotClaimReservationControllerDoesNotCompleteUnsafeInitializingClaim(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name     string
-		protocol string
-		status   string
+		name      string
+		protocol  string
+		completed bool
 	}{
 		{
-			name:   "legacy running record lacks completion protocol",
-			status: SandboxStatusRunning,
+			name:      "completion marker lacks completion protocol",
+			completed: true,
 		},
 		{
-			name:     "record protocol is still starting",
-			protocol: controller.HotClaimCompletionProtocolRecordV1,
-			status:   SandboxStatusStarting,
+			name:     "record protocol lacks completion marker",
+			protocol: controller.HotClaimCompletionProtocolRecordV2,
 		},
 	}
 	for _, test := range tests {
@@ -133,7 +132,9 @@ func TestHotClaimReservationControllerDoesNotCompleteUnsafeInitializingClaim(t *
 				pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = test.protocol
 			}
 			record := hotClaimReservationTestRecord(pod)
-			record.Status = test.status
+			if test.completed {
+				record.HotClaimCompletedAt = now
+			}
 			store := &memorySandboxStore{records: map[string]*SandboxRecord{"sandbox-a": record}}
 			client := fake.NewSimpleClientset(pod.DeepCopy())
 			reconciler := NewHotClaimReservationController(client, newClaimTestPodLister(t, pod), store, nil)
@@ -358,7 +359,7 @@ func TestHotClaimReservationControllerDeletesAbandonedPartialClaim(t *testing.T)
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if gotRecord.Status != SandboxStatusDeleted || gotRecord.DeletedAt.IsZero() {
+	if gotRecord.DesiredState != SandboxDesiredStateDeleted || gotRecord.DeletedAt.IsZero() {
 		t.Fatalf("sandbox record = %#v, want deleted", gotRecord)
 	}
 }
@@ -370,7 +371,7 @@ func TestHotClaimReservationControllerPreservesPausedIdentityOnAbandonedResume(t
 		controller.HotClaimReservationStateInitializing,
 	)
 	record := hotClaimReservationTestRecord(pod)
-	record.Status = SandboxStatusPaused
+	record.DesiredState = SandboxDesiredStatePaused
 	record.CurrentPodName = ""
 	record.CurrentPodNamespace = ""
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{"sandbox-a": record}}
@@ -390,7 +391,7 @@ func TestHotClaimReservationControllerPreservesPausedIdentityOnAbandonedResume(t
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if gotRecord.Status != SandboxStatusPaused || !gotRecord.DeletedAt.IsZero() {
+	if gotRecord.DesiredState != SandboxDesiredStatePaused || !gotRecord.DeletedAt.IsZero() {
 		t.Fatalf("paused sandbox record = %#v, want preserved", gotRecord)
 	}
 }
@@ -473,7 +474,7 @@ func (p *recordingHotClaimDetachmentPacer) Wait(context.Context) error {
 func hotClaimReservationTestRecord(pod *corev1.Pod) *SandboxRecord {
 	return &SandboxRecord{
 		ID:                  sandboxIDFromPod(pod),
-		Status:              SandboxStatusRunning,
+		DesiredState:        SandboxDesiredStateActive,
 		CurrentPodNamespace: pod.Namespace,
 		CurrentPodName:      pod.Name,
 		RuntimeGeneration:   runtimeGenerationFromPod(pod),

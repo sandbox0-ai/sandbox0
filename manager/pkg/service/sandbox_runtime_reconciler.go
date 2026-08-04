@@ -166,7 +166,7 @@ func (c *SandboxRuntimeReconciler) enqueueDriftCandidates(ctx context.Context) {
 }
 
 func (c *SandboxRuntimeReconciler) candidateNeedsReconcile(candidate SandboxRuntimeReconcileCandidate) bool {
-	if candidate.Status == SandboxStatusTerminating {
+	if candidate.DesiredState == SandboxDesiredStateTerminating {
 		return true
 	}
 	if strings.TrimSpace(candidate.PodNamespace) == "" || strings.TrimSpace(candidate.PodName) == "" || c.podLister == nil {

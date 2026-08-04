@@ -4,25 +4,29 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestResolveSandboxTemplateSourceUsesDurableClaimSpec(t *testing.T) {
 	record := &SandboxRecord{
-		ID:         "sandbox-1",
-		TeamID:     "team-1",
-		UserID:     "user-1",
-		TemplateID: "base",
-		ClusterID:  "cluster-a",
-		Status:     SandboxStatusRunning,
+		ID:           "sandbox-1",
+		TeamID:       "team-1",
+		UserID:       "user-1",
+		TemplateID:   "base",
+		ClusterID:    "cluster-a",
+		DesiredState: SandboxDesiredStateActive,
 		TemplateSpec: v1alpha1.SandboxTemplateSpec{
 			MainContainer: v1alpha1.ContainerSpec{Image: "ubuntu:22.04"},
 		},
 	}
 	store := &memorySandboxStore{records: map[string]*SandboxRecord{record.ID: record}}
-	service := &SandboxService{sandboxStore: store}
+	pod := createTestPod(record.ID, record.TeamID, record.TemplateID, controller.PoolTypeActive, time.Now().Add(-time.Minute), time.Now().Add(time.Hour), false)
+	service := &SandboxService{sandboxStore: store, podLister: newTestPodLister(t, pod)}
 
 	source, err := service.ResolveSandboxTemplateSource(context.Background(), record.ID, record.TeamID)
 	if err != nil {
@@ -37,6 +41,41 @@ func TestResolveSandboxTemplateSourceUsesDurableClaimSpec(t *testing.T) {
 	source.Spec.MainContainer.Image = "changed"
 	if record.TemplateSpec.MainContainer.Image != "ubuntu:22.04" {
 		t.Fatal("resolved source spec must be a deep copy")
+	}
+}
+
+func TestResolveSandboxTemplateSourceRejectsActiveSourceWithoutRunningRuntime(t *testing.T) {
+	record := &SandboxRecord{
+		ID:           "sandbox-1",
+		TeamID:       "team-1",
+		DesiredState: SandboxDesiredStateActive,
+		TemplateSpec: v1alpha1.SandboxTemplateSpec{},
+	}
+	now := time.Now()
+	tests := []struct {
+		name string
+		pods []*corev1.Pod
+	}{
+		{name: "missing"},
+		{
+			name: "failed",
+			pods: []*corev1.Pod{
+				createTestPodWithPhase(record.ID, record.TeamID, "base", controller.PoolTypeActive, now.Add(-time.Minute), now.Add(time.Hour), false, corev1.PodFailed),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &memorySandboxStore{records: map[string]*SandboxRecord{record.ID: record}}
+			service := &SandboxService{sandboxStore: store, podLister: newTestPodLister(t, tt.pods...)}
+
+			_, err := service.ResolveSandboxTemplateSource(context.Background(), record.ID, record.TeamID)
+
+			if !errors.Is(err, template.ErrTemplateSourceNotReady) {
+				t.Fatalf("ResolveSandboxTemplateSource() error = %v, want %v", err, template.ErrTemplateSourceNotReady)
+			}
+		})
 	}
 }
 
@@ -64,9 +103,9 @@ func TestResolveSandboxTemplateSourceRejectsCrossTeamAndNonCaptureableState(t *t
 		{
 			name: "cross team",
 			record: &SandboxRecord{
-				ID:     "sandbox-1",
-				TeamID: "team-1",
-				Status: SandboxStatusRunning,
+				ID:           "sandbox-1",
+				TeamID:       "team-1",
+				DesiredState: SandboxDesiredStateActive,
 			},
 			teamID:      "team-2",
 			targetError: template.ErrTemplateSourceForbidden,
@@ -74,9 +113,9 @@ func TestResolveSandboxTemplateSourceRejectsCrossTeamAndNonCaptureableState(t *t
 		{
 			name: "deleted",
 			record: &SandboxRecord{
-				ID:     "sandbox-1",
-				TeamID: "team-1",
-				Status: SandboxStatusDeleted,
+				ID:           "sandbox-1",
+				TeamID:       "team-1",
+				DesiredState: SandboxDesiredStateDeleted,
 			},
 			teamID:      "team-1",
 			targetError: template.ErrTemplateSourceNotFound,
@@ -84,9 +123,9 @@ func TestResolveSandboxTemplateSourceRejectsCrossTeamAndNonCaptureableState(t *t
 		{
 			name: "transitional",
 			record: &SandboxRecord{
-				ID:     "sandbox-1",
-				TeamID: "team-1",
-				Status: "pausing",
+				ID:           "sandbox-1",
+				TeamID:       "team-1",
+				DesiredState: SandboxDesiredStateTerminating,
 			},
 			teamID:      "team-1",
 			targetError: template.ErrTemplateSourceNotReady,

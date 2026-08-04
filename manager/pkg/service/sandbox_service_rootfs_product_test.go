@@ -21,7 +21,7 @@ func TestSandboxRootFSProductRequiresPausedSandboxForRestore(t *testing.T) {
 	now := time.Now().UTC()
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusRunning, now),
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now),
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
@@ -54,7 +54,7 @@ func TestSandboxRootFSProductHidesInternalTemplateBuildSnapshots(t *testing.T) {
 	internalSnapshotID := "template-build-123456"
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now),
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now),
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
@@ -109,7 +109,7 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 	autoResume := true
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now),
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now),
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
@@ -226,7 +226,8 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	pod.Status.HostIP = ctldURL.Hostname()
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusRunning, now)
+	markRuntimeIdentityPodReady(t, pod)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now)
 	source.CurrentPodNamespace = pod.Namespace
 	source.CurrentPodName = pod.Name
 	source.RuntimeGeneration = runtimeGenerationFromPod(pod)
@@ -265,7 +266,7 @@ func TestSandboxRootFSProductSnapshotRunningSandboxCheckpointsWithoutPausingSour
 
 	sourceRecord := store.records["sandbox-1"]
 	require.NotNil(t, sourceRecord)
-	assert.Equal(t, SandboxStatusRunning, sourceRecord.Status)
+	assert.Equal(t, SandboxDesiredStateActive, sourceRecord.DesiredState)
 	assert.Equal(t, pod.Name, sourceRecord.CurrentPodName)
 	assert.Equal(t, pod.Namespace, sourceRecord.CurrentPodNamespace)
 	assert.Equal(t, 0, store.pauses)
@@ -338,7 +339,8 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	pod.Status.HostIP = ctldURL.Hostname()
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusRunning, now)
+	markRuntimeIdentityPodReady(t, pod)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now)
 	source.CurrentPodNamespace = pod.Namespace
 	source.CurrentPodName = pod.Name
 	source.RuntimeGeneration = runtimeGenerationFromPod(pod)
@@ -377,7 +379,7 @@ func TestSandboxRootFSProductForkRunningSandboxCheckpointsWithoutPausingSource(t
 
 	sourceRecord := store.records["sandbox-1"]
 	require.NotNil(t, sourceRecord)
-	assert.Equal(t, SandboxStatusRunning, sourceRecord.Status)
+	assert.Equal(t, SandboxDesiredStateActive, sourceRecord.DesiredState)
 	assert.Equal(t, pod.Name, sourceRecord.CurrentPodName)
 	assert.Equal(t, pod.Namespace, sourceRecord.CurrentPodNamespace)
 	assert.Equal(t, 0, store.pauses)
@@ -401,7 +403,7 @@ func TestSandboxRootFSProductWaitAbortsStaleForkTxn(t *testing.T) {
 	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusRunning, now),
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now),
 		},
 		lifecycleTxns: map[string]*SandboxLifecycleTxn{
 			"txn-1": {
@@ -429,7 +431,7 @@ func TestSandboxRootFSProductWaitAbortsStaleSnapshotTxn(t *testing.T) {
 	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusRunning, now),
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStateActive, now),
 		},
 		lifecycleTxns: map[string]*SandboxLifecycleTxn{
 			"txn-1": {
@@ -456,7 +458,7 @@ func TestSandboxRootFSProductWaitAbortsStaleSnapshotTxn(t *testing.T) {
 func TestSandboxRootFSProductForkSetsLifecycleExpirations(t *testing.T) {
 	claimedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	forkedAt := claimedAt.Add(5 * time.Minute)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, claimedAt)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, claimedAt)
 	source.Config.TTL = int32Ptr(900)
 	source.Config.HardTTL = int32Ptr(1800)
 	source.ExpiresAt = claimedAt.Add(15 * time.Minute)
@@ -492,7 +494,7 @@ func TestSandboxRootFSProductForkSetsLifecycleExpirations(t *testing.T) {
 func TestSandboxRootFSProductForkOverridesLifecycleConfig(t *testing.T) {
 	claimedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	forkedAt := claimedAt.Add(5 * time.Minute)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, claimedAt)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, claimedAt)
 	source.Config.TTL = int32Ptr(900)
 	source.Config.HardTTL = int32Ptr(1800)
 	source.ExpiresAt = claimedAt.Add(15 * time.Minute)
@@ -541,7 +543,7 @@ func TestSandboxRootFSProductForkOverridesLifecycleConfig(t *testing.T) {
 func TestSandboxRootFSProductForkCanDisableInheritedLifecycleConfig(t *testing.T) {
 	claimedAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	forkedAt := claimedAt.Add(5 * time.Minute)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, claimedAt)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, claimedAt)
 	source.Config.TTL = int32Ptr(900)
 	source.Config.HardTTL = int32Ptr(1800)
 	source.ExpiresAt = claimedAt.Add(15 * time.Minute)
@@ -582,7 +584,7 @@ func TestSandboxRootFSProductForkCanDisableInheritedLifecycleConfig(t *testing.T
 
 func TestSandboxRootFSProductForkRejectsInvalidLifecycleConfig(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now)
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
 			"sandbox-1": source,
@@ -608,7 +610,7 @@ func TestSandboxRootFSProductForkRejectsInvalidLifecycleConfig(t *testing.T) {
 
 func TestSandboxRootFSProductForkRejectsHardExpiredSource(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
-	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now.Add(-time.Hour))
+	source := rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now.Add(-time.Hour))
 	source.HardExpiresAt = now.Add(-time.Second)
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
@@ -633,7 +635,7 @@ func TestSandboxRootFSProductRejectsExpiredSnapshotExpiration(t *testing.T) {
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now),
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now),
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
@@ -655,7 +657,7 @@ func TestSandboxRootFSProductEnforcesTeamOwnership(t *testing.T) {
 	now := time.Now().UTC()
 	store := &memorySandboxStore{
 		records: map[string]*SandboxRecord{
-			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxStatusPaused, now),
+			"sandbox-1": rootFSProductTestRecord("sandbox-1", "team-1", SandboxDesiredStatePaused, now),
 		},
 		rootFSStates: map[string]*SandboxRootFSState{
 			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-1"),
@@ -804,7 +806,7 @@ func rootFSProductTestService(store *memorySandboxStore) *SandboxService {
 	}
 }
 
-func rootFSProductTestRecord(id, teamID, status string, now time.Time) *SandboxRecord {
+func rootFSProductTestRecord(id, teamID, desiredState string, now time.Time) *SandboxRecord {
 	return &SandboxRecord{
 		ID:                id,
 		TeamID:            teamID,
@@ -813,7 +815,7 @@ func rootFSProductTestRecord(id, teamID, status string, now time.Time) *SandboxR
 		TemplateName:      "template-1",
 		TemplateNamespace: "template-default",
 		ClusterID:         "default",
-		Status:            status,
+		DesiredState:      desiredState,
 		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		CreatedAt:         now,
 		UpdatedAt:         now,

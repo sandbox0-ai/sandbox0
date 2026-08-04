@@ -316,7 +316,7 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	return out
 }
 
-func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState, fallbackStatus string) (*corev1.Pod, error) {
+func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState, persistRuntime bool) (*corev1.Pod, error) {
 	if state == nil {
 		return pod, nil
 	}
@@ -357,8 +357,8 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 		s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image rootfs apply failed")
 		return readyPod, fmt.Errorf("%w; checkpoint base image retry failed: %v", err, fallbackErr)
 	}
-	if strings.TrimSpace(fallbackStatus) != "" {
-		if fallbackErr := s.saveRestoredRuntimePod(ctx, readyPod, record, fallbackStatus); fallbackErr != nil {
+	if persistRuntime {
+		if fallbackErr := s.saveRestoredRuntimePod(ctx, readyPod, record); fallbackErr != nil {
 			s.requestSandboxDeletionAfterClaimFailure(readyPod, "checkpoint base image runtime persistence failed")
 			return readyPod, fallbackErr
 		}
@@ -366,7 +366,7 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 	return readyPod, nil
 }
 
-func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, status string) error {
+func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *SandboxRecord) error {
 	if s == nil || s.sandboxStore == nil || pod == nil || record == nil {
 		return nil
 	}
@@ -378,13 +378,13 @@ func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1
 		return fmt.Errorf("sandbox_id is required")
 	}
 	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
-		if locked == nil || locked.Status == SandboxStatusTerminating || locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() {
+		if locked == nil || locked.DesiredState == SandboxDesiredStateTerminating || locked.DesiredState == SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() {
 			return nil
 		}
 		if runtimeGenerationFromPod(pod) < locked.RuntimeGeneration {
 			return nil
 		}
-		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, status, runtimeGenerationFromPod(pod), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt), sandboxRuntimeMetadataFromPod(pod))
+		return tx.SaveRuntime(lockCtx, sandboxID, pod.Namespace, pod.Name, runtimeGenerationFromPod(pod), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt), sandboxRuntimeMetadataFromPod(pod))
 	})
 }
 

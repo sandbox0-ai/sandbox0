@@ -472,7 +472,7 @@ func TestUpdatePausedSandboxValidatesAndPersistsMemory(t *testing.T) {
 		ID:           "sandbox-1",
 		TeamID:       "team-a",
 		TemplateID:   "default",
-		Status:       SandboxStatusPaused,
+		DesiredState: SandboxDesiredStatePaused,
 		Config:       SandboxConfig{},
 		ClaimedAt:    now,
 		CreatedAt:    now,

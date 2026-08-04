@@ -325,8 +325,8 @@ func hotClaimReservationReadyTime(pod *corev1.Pod, record *SandboxRecord) (time.
 	if pod == nil {
 		return time.Time{}, false
 	}
-	if hotClaimUsesRecordCompletion(pod) && record != nil && !record.UpdatedAt.IsZero() {
-		return record.UpdatedAt, true
+	if hotClaimUsesRecordCompletion(pod) && record != nil && !record.HotClaimCompletedAt.IsZero() {
+		return record.HotClaimCompletedAt, true
 	}
 	for _, key := range []string{
 		controller.AnnotationHotClaimReadyAt,
@@ -462,7 +462,7 @@ func hotClaimReservationMatchesRecord(pod *corev1.Pod, record *SandboxRecord) bo
 	if pod == nil || record == nil || !record.DeletedAt.IsZero() {
 		return false
 	}
-	if record.Status != SandboxStatusStarting && record.Status != SandboxStatusRunning {
+	if record.DesiredState != SandboxDesiredStateActive {
 		return false
 	}
 	if record.ID != sandboxIDFromPod(pod) ||
@@ -484,5 +484,5 @@ func hotClaimReservationCompleted(pod *corev1.Pod, record *SandboxRecord) bool {
 	}
 	return state == controller.HotClaimReservationStateInitializing &&
 		hotClaimUsesRecordCompletion(pod) &&
-		record.Status == SandboxStatusRunning
+		!record.HotClaimCompletedAt.IsZero()
 }

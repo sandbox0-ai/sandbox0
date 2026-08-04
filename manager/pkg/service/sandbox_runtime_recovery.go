@@ -45,7 +45,7 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 	var cleanupLostRuntime bool
 	var resumeTxn *SandboxLifecycleTxn
 	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
-		if locked == nil || locked.Status == SandboxStatusDeleted || !locked.DeletedAt.IsZero() || !s.sandboxRecordBelongsToCluster(locked) {
+		if locked == nil || locked.DesiredState == SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() || !s.sandboxRecordBelongsToCluster(locked) {
 			return nil
 		}
 		record = cloneSandboxRecordForLifecycle(locked)
@@ -54,17 +54,17 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 			return err
 		}
 
-		if locked.Status == SandboxStatusTerminating || sandboxHardExpired(locked.HardExpiresAt, s.now()) {
+		if locked.DesiredState == SandboxDesiredStateTerminating || sandboxHardExpired(locked.HardExpiresAt, s.now()) {
 			if activeTxn != nil {
 				if err := tx.AbortLifecycleTxn(lockCtx, activeTxn.ID, "sandbox termination requested"); err != nil {
 					return err
 				}
 			}
-			if locked.Status != SandboxStatusTerminating {
+			if locked.DesiredState != SandboxDesiredStateTerminating {
 				if err := tx.MarkRuntimeTerminating(lockCtx, sandboxID); err != nil {
 					return err
 				}
-				record.Status = SandboxStatusTerminating
+				record.DesiredState = SandboxDesiredStateTerminating
 			}
 			finishTermination = true
 			return nil
@@ -113,7 +113,7 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 			}
 		}
 
-		if locked.Status == SandboxStatusPaused {
+		if locked.DesiredState == SandboxDesiredStatePaused {
 			stalePods = append(stalePods, pods...)
 			return nil
 		}
@@ -143,7 +143,6 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 				sandboxID,
 				pod.Namespace,
 				pod.Name,
-				s.podToSandboxStatus(pod),
 				locked.RuntimeGeneration,
 				parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
 				parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),

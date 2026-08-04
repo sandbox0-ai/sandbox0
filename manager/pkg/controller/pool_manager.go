@@ -81,7 +81,7 @@ const (
 
 	HotClaimReservationStateInitializing = "initializing"
 	HotClaimReservationStateReady        = "ready"
-	HotClaimCompletionProtocolRecordV1   = "record-status-v1"
+	HotClaimCompletionProtocolRecordV2   = "record-completion-v2"
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
 	warmPoolRolloutRequeueAfter       = 10 * time.Second

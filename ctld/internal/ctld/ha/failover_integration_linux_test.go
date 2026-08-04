@@ -15,7 +15,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
-	"github.com/sandbox0-ai/sandbox0/pkg/fuseportal"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/fuseportal"
 	"golang.org/x/sys/unix"
 )
 

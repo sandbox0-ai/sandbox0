@@ -46,8 +46,12 @@ func TestWithRedirectPreservesErrno(t *testing.T) {
 	if !errors.Is(err, syscall.ENOTEMPTY) {
 		t.Fatal("WithRedirect() discarded ENOTEMPTY")
 	}
-	if got := RedirectOf(err); got != redirect {
-		t.Fatalf("RedirectOf() = %v, want %v", got, redirect)
+	fsErr, ok := FromError(err)
+	if !ok {
+		t.Fatal("FromError() did not return the redirect error")
+	}
+	if got := fsErr.Redirect(); got != redirect {
+		t.Fatalf("Redirect() = %v, want %v", got, redirect)
 	}
 }
 

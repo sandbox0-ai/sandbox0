@@ -15,8 +15,9 @@ func TestContainerLogForwarderForwardsProcessOutput(t *testing.T) {
 		Stderr:       &stderr,
 		MaxLineBytes: 64,
 	})
+	SetDefaultOutputForwarder(forwarder)
+	t.Cleanup(func() { SetDefaultOutputForwarder(nil) })
 	base := NewBaseProcess("ctx-test", ProcessTypeCMD, ProcessConfig{Type: ProcessTypeCMD, Alias: "worker"})
-	base.SetOutputForwarder(forwarder)
 	base.SetPID(123)
 	outputCh := base.ReadOutput()
 
@@ -47,8 +48,9 @@ func TestContainerLogForwarderForwardsProcessOutput(t *testing.T) {
 func TestContainerLogForwarderTruncatesLongLines(t *testing.T) {
 	var stdout bytes.Buffer
 	forwarder := NewContainerLogForwarder(ContainerLogForwarderOptions{Stdout: &stdout, MaxLineBytes: 5})
+	SetDefaultOutputForwarder(forwarder)
+	t.Cleanup(func() { SetDefaultOutputForwarder(nil) })
 	base := NewBaseProcess("ctx-test", ProcessTypeCMD, ProcessConfig{Type: ProcessTypeCMD})
-	base.SetOutputForwarder(forwarder)
 
 	base.PublishOutput(ProcessOutput{Source: OutputSourceStdout, Data: []byte("123456789\nnext\n")})
 

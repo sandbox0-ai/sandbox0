@@ -5,60 +5,51 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
-	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"go.uber.org/zap"
 )
 
 func (s *Server) getExposureDomain() string {
-	return service.SandboxAppDomain(s.publicRegionID, s.publicRootDomain)
+	return appservice.SandboxAppDomain(s.publicRegionID, s.publicRootDomain)
 }
 
 func (s *Server) listSandboxServices(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
 		return
 	}
-
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
-	}
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+	sandbox, ok := s.getOwnedSandbox(c, sandboxID, claims, "")
+	if !ok {
 		return
 	}
 
 	exposureDomain := s.getExposureDomain()
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
 		"sandbox_id":      sandboxID,
-		"services":        service.SandboxAppServiceViewsForExposure(sandboxID, exposureDomain, sandbox.Services),
+		"services":        appservice.SandboxAppServiceViewsForExposure(sandboxID, exposureDomain, sandbox.Services),
 		"exposure_domain": exposureDomain,
 	})
 }
 
 func (s *Server) updateSandboxServices(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
 		return
 	}
 
 	var req struct {
-		Services *[]service.SandboxAppService `json:"services"`
+		Services *[]managerapi.SandboxAppService `json:"services"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
@@ -70,16 +61,11 @@ func (s *Server) updateSandboxServices(c *gin.Context) {
 	}
 	services := *req.Services
 
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
+	sandbox, ok := s.getOwnedSandbox(c, sandboxID, claims, "")
+	if !ok {
 		return
 	}
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
-		return
-	}
-	if !sandbox.AutoResume && service.SandboxAppServicesHaveResumeRoute(services) {
+	if !sandbox.AutoResume && appservice.SandboxAppServicesHaveResumeRoute(services) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
 			"cannot set resume=true on public routes when sandbox auto_resume is disabled")
 		return
@@ -100,7 +86,7 @@ func (s *Server) updateSandboxServices(c *gin.Context) {
 	exposureDomain := s.getExposureDomain()
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
 		"sandbox_id":      sandboxID,
-		"services":        service.SandboxAppServiceViewsForExposure(sandboxID, exposureDomain, updated.Services),
+		"services":        appservice.SandboxAppServiceViewsForExposure(sandboxID, exposureDomain, updated.Services),
 		"exposure_domain": exposureDomain,
 	})
 }

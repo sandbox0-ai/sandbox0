@@ -17,10 +17,6 @@ func TestMultiplexedChannel_BasicFork(t *testing.T) {
 	ch2, cancel2 := mc.Fork()
 	defer cancel2()
 
-	if mc.SubscriberCount() != 2 {
-		t.Errorf("SubscriberCount() = %d, want 2", mc.SubscriberCount())
-	}
-
 	// Publish an event
 	event := ProcessOutput{
 		Source: OutputSourceStdout,
@@ -51,21 +47,11 @@ func TestMultiplexedChannel_Unsubscribe(t *testing.T) {
 
 	ch, cancel := mc.Fork()
 
-	// Initial subscriber count
-	if mc.SubscriberCount() != 1 {
-		t.Errorf("SubscriberCount() = %d, want 1", mc.SubscriberCount())
-	}
-
 	// Unsubscribe
 	cancel()
 
 	// Wait for dispatch goroutine to process
 	time.Sleep(100 * time.Millisecond)
-
-	// Subscriber count should be 0
-	if mc.SubscriberCount() != 0 {
-		t.Errorf("SubscriberCount() = %d, want 0", mc.SubscriberCount())
-	}
 
 	// Channel should be closed
 	select {
@@ -91,10 +77,6 @@ func TestMultiplexedChannel_MultipleSubscribers(t *testing.T) {
 		ch, cancel := mc.Fork()
 		subs = append(subs, ch)
 		cancels = append(cancels, cancel)
-	}
-
-	if mc.SubscriberCount() != numSubscribers {
-		t.Errorf("SubscriberCount() = %d, want %d", mc.SubscriberCount(), numSubscribers)
 	}
 
 	// Publish multiple events
@@ -273,9 +255,6 @@ func TestMultiplexedChannel_UnsubscribeNonExistent(t *testing.T) {
 	// Unsubscribing should not panic
 	mc.Unsubscribe(ch)
 
-	if mc.SubscriberCount() != 0 {
-		t.Errorf("SubscriberCount() = %d, want 0", mc.SubscriberCount())
-	}
 }
 
 // BenchmarkMultiplexedChannel_Publish benchmarks publish performance.

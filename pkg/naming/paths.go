@@ -34,33 +34,3 @@ func S3VolumePrefix(teamID, volumeID string) (string, error) {
 	}
 	return fmt.Sprintf("sandboxvolumes/%s/%s", teamID, volumeID), nil
 }
-
-// FilesystemVolumePath returns the internal S0FS directory where a volume lives.
-// Example: /volumes/<volumeID>
-func FilesystemVolumePath(volumeID string) (string, error) {
-	if err := validatePathID("volumeID", volumeID); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("/volumes/%s", volumeID), nil
-}
-
-// FilesystemSnapshotParentPath returns the parent directory for snapshots of a volume.
-// Example: /snapshots/<volumeID>
-func FilesystemSnapshotParentPath(volumeID string) (string, error) {
-	if err := validatePathID("volumeID", volumeID); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("/snapshots/%s", volumeID), nil
-}
-
-// FilesystemSnapshotPath returns the internal S0FS path for a specific snapshot.
-// Example: /snapshots/<volumeID>/<snapshotID>
-func FilesystemSnapshotPath(volumeID, snapshotID string) (string, error) {
-	if err := validatePathID("volumeID", volumeID); err != nil {
-		return "", err
-	}
-	if err := validatePathID("snapshotID", snapshotID); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("/snapshots/%s/%s", volumeID, snapshotID), nil
-}

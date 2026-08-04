@@ -6,23 +6,18 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 )
 
 // PauseSandboxResponse represents the response from pausing a sandbox.
 type PauseSandboxResponse struct {
-	SandboxID     string                `json:"sandbox_id"`
-	Paused        bool                  `json:"paused"`
-	Status        string                `json:"status,omitempty"`
-	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
-	UpdatedMemory string                `json:"updated_memory,omitempty"`
-	UpdatedCPU    string                `json:"updated_cpu,omitempty"`
-}
-
-// ResumeSandboxResponse represents the response from resuming a sandbox.
-type ResumeSandboxResponse struct {
-	SandboxID      string `json:"sandbox_id"`
-	Resumed        bool   `json:"resumed"`
-	RestoredMemory string `json:"restored_memory,omitempty"`
+	SandboxID     string                         `json:"sandbox_id"`
+	Paused        bool                           `json:"paused"`
+	Status        string                         `json:"status,omitempty"`
+	ResourceUsage *procdapi.SandboxResourceUsage `json:"resource_usage,omitempty"`
+	UpdatedMemory string                         `json:"updated_memory,omitempty"`
+	UpdatedCPU    string                         `json:"updated_cpu,omitempty"`
 }
 
 // PauseSandbox accepts a checkpointed pause request and returns the lifecycle state.
@@ -33,7 +28,7 @@ func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*P
 	}
 	return &PauseSandboxResponse{
 		SandboxID: sandboxID,
-		Paused:    status == SandboxStatusPaused,
+		Paused:    status == managerapi.SandboxStatusPaused,
 		Status:    status,
 	}, nil
 }
@@ -44,7 +39,7 @@ func (s *SandboxService) PauseSandboxAndWait(ctx context.Context, sandboxID stri
 }
 
 // ResumeSandbox creates or reuses a runtime and restores the latest rootfs checkpoint.
-func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
+func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*managerapi.ResumeSandboxResponse, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -59,7 +54,7 @@ func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*
 		if err != nil {
 			return nil, err
 		}
-		return &ResumeSandboxResponse{
+		return &managerapi.ResumeSandboxResponse{
 			SandboxID: key,
 			Resumed:   true,
 		}, nil
@@ -69,7 +64,7 @@ func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*
 		if result.Err != nil {
 			return nil, result.Err
 		}
-		resp, ok := result.Val.(*ResumeSandboxResponse)
+		resp, ok := result.Val.(*managerapi.ResumeSandboxResponse)
 		if !ok || resp == nil {
 			return nil, fmt.Errorf("resume sandbox returned invalid result")
 		}
@@ -80,7 +75,7 @@ func (s *SandboxService) ResumeSandbox(ctx context.Context, sandboxID string) (*
 }
 
 // ResumeSandboxAndWait creates or reuses a runtime and restores the latest rootfs checkpoint.
-func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID string) (*ResumeSandboxResponse, error) {
+func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID string) (*managerapi.ResumeSandboxResponse, error) {
 	return s.ResumeSandbox(ctx, sandboxID)
 }
 
@@ -91,7 +86,7 @@ func (s *SandboxService) TerminateSandboxByID(ctx context.Context, sandboxID str
 }
 
 // GetSandboxResourceUsage gets the resource usage of a sandbox.
-func (s *SandboxService) GetSandboxResourceUsage(ctx context.Context, sandboxID string) (*SandboxResourceUsage, error) {
+func (s *SandboxService) GetSandboxResourceUsage(ctx context.Context, sandboxID string) (*procdapi.SandboxResourceUsage, error) {
 	// Find the pod by sandbox ID
 	pod, err := s.getSandboxPod(ctx, sandboxID)
 	if err != nil {

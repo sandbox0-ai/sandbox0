@@ -143,46 +143,12 @@ func TestBuiltinConfigs(t *testing.T) {
 	}
 }
 
-// TestGetBuiltinConfig tests retrieving built-in configs.
-func TestGetBuiltinConfig(t *testing.T) {
-	config, ok := GetBuiltinConfig("python")
-	if !ok {
-		t.Fatal("GetBuiltinConfig() should find python")
-	}
-	if config.Name != "python" {
-		t.Errorf("Config name = %s, want python", config.Name)
-	}
-
-	_, ok = GetBuiltinConfig("nonexistent")
-	if ok {
-		t.Error("GetBuiltinConfig() should not find nonexistent")
-	}
-}
-
 // TestREPLRegistry tests the registry.
 func TestREPLRegistry(t *testing.T) {
 	registry := NewREPLRegistry()
 
 	if _, ok := registry.Get("python"); !ok {
 		t.Error("Registry should have python config")
-	}
-
-	customConfig := &REPLConfig{
-		Name: "custom",
-		Candidates: []ExecCandidate{
-			{Name: "custom-cmd", Args: []string{}},
-		},
-	}
-	if err := registry.Register(customConfig); err != nil {
-		t.Fatalf("Register() failed: %v", err)
-	}
-
-	config, ok := registry.Get("custom")
-	if !ok {
-		t.Error("Registry should have custom config after registration")
-	}
-	if config.Name != "custom" {
-		t.Errorf("Config name = %s, want custom", config.Name)
 	}
 
 	names := registry.List()
@@ -491,83 +457,4 @@ func TestNewCustomREPL(t *testing.T) {
 	if repl.Alias() != "custom-cli" {
 		t.Errorf("Language() = %s, want custom-cli", repl.Alias())
 	}
-}
-
-// TestCreateREPLConfig tests the helper for creating minimal configs.
-func TestCreateREPLConfig(t *testing.T) {
-	config := CreateREPLConfig("myrepl", []ExecCandidate{
-		{Name: "myrepl", Args: []string{"--interactive"}},
-	})
-
-	if config.Name != "myrepl" {
-		t.Errorf("Name = %s, want myrepl", config.Name)
-	}
-	if len(config.Candidates) != 1 {
-		t.Errorf("len(Candidates) = %d, want 1", len(config.Candidates))
-	}
-	if err := config.Validate(); err != nil {
-		t.Errorf("Config is invalid: %v", err)
-	}
-}
-
-// TestCheckExecutable tests executable checking.
-func TestCheckExecutable(t *testing.T) {
-	// sh should exist on any Unix system
-	path, ok := CheckExecutable("sh")
-	if !ok {
-		t.Skip("sh not found, skipping")
-	}
-	if path == "" {
-		t.Error("CheckExecutable() returned empty path")
-	}
-
-	// non-existent should not be found
-	_, ok = CheckExecutable("nonexistent-command-12345")
-	if ok {
-		t.Error("CheckExecutable() should not find nonexistent command")
-	}
-}
-
-// TestListBuiltinConfigs tests listing built-in configs.
-func TestListBuiltinConfigs(t *testing.T) {
-	names := ListBuiltinConfigs()
-	if len(names) == 0 {
-		t.Error("ListBuiltinConfigs() returned empty list")
-	}
-
-	expected := []string{"python", "node", "bash", "zsh", "ruby"}
-	for _, name := range expected {
-		found := false
-		for _, n := range names {
-			if n == name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("ListBuiltinConfigs() missing %s", name)
-		}
-	}
-}
-
-// TestCheckREPLAvailable tests REPL availability checking.
-func TestCheckREPLAvailable(t *testing.T) {
-	// bash/sh should be available on Unix
-	path, ok := CheckREPLAvailable("bash")
-	if ok && path == "" {
-		t.Error("CheckREPLAvailable() returned empty path when available")
-	}
-
-	// unknown language should not be available
-	_, ok = CheckREPLAvailable("unknown-language-12345")
-	if ok {
-		t.Error("CheckREPLAvailable() should not find unknown language")
-	}
-}
-
-// TestListAvailableREPLs tests listing available REPLs.
-func TestListAvailableREPLs(t *testing.T) {
-	available := ListAvailableREPLs()
-	// At minimum bash/sh should be available
-	t.Logf("Available REPLs: %v", available)
 }

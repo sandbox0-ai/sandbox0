@@ -517,25 +517,6 @@ func TestListDirEmptyReturnsEmptySlice(t *testing.T) {
 	}
 }
 
-// TestGetRootPath tests GetRootPath returns the configured root.
-func TestGetRootPath(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "test-file-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	m, err := NewManager(tempDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close()
-
-	if m.GetRootPath() != tempDir {
-		t.Errorf("GetRootPath() = %s, want %s", m.GetRootPath(), tempDir)
-	}
-}
-
 // TestMoveFile tests file and directory move operations.
 func TestMoveFile(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "test-file-")

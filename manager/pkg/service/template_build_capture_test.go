@@ -10,6 +10,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -19,14 +20,14 @@ func TestEnsureTemplateBuildCaptureReadsPinnedHeadAfterSourceAdvances(t *testing
 
 	now := time.Unix(100, 0).UTC()
 	base := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": {
 				ID:           "sandbox-1",
 				TeamID:       "team-1",
-				DesiredState: SandboxDesiredStatePaused,
+				DesiredState: sandboxstore.SandboxDesiredStatePaused,
 			},
 		},
-		rootFSSnapshots: map[string]*RootFSSnapshot{
+		rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
 			"template-build-1": {
 				ID:              "template-build-1",
 				FilesystemID:    "filesystem-1",
@@ -36,14 +37,14 @@ func TestEnsureTemplateBuildCaptureReadsPinnedHeadAfterSourceAdvances(t *testing
 				CreatedAt:       now,
 			},
 		},
-		rootFSStates: map[string]*SandboxRootFSState{
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
 			"sandbox-1": {
 				LayerID: "layer-newer",
 				TeamID:  "team-1",
 			},
 		},
 	}
-	pinned := &SandboxRootFSLayer{
+	pinned := &sandboxstore.SandboxRootFSLayer{
 		ID:                   "layer-pinned",
 		TeamID:               "team-1",
 		BaseImageRef:         "docker.io/library/busybox:1.36",
@@ -59,7 +60,7 @@ func TestEnsureTemplateBuildCaptureReadsPinnedHeadAfterSourceAdvances(t *testing
 	}
 	store := &templateCaptureMemoryStore{
 		memorySandboxStore: base,
-		chains: map[string][]*SandboxRootFSLayer{
+		chains: map[string][]*sandboxstore.SandboxRootFSLayer{
 			"layer-pinned": {pinned},
 			"layer-newer": {{
 				ID:                   "layer-newer",
@@ -98,26 +99,26 @@ func TestEnsureTemplateBuildCaptureRejectsMixedRootFSChain(t *testing.T) {
 	baseDigest := digest.FromString("base-index").String()
 	tests := []struct {
 		name       string
-		mutateRoot func(*SandboxRootFSLayer)
+		mutateRoot func(*sandboxstore.SandboxRootFSLayer)
 		wantError  string
 	}{
 		{
 			name: "base digest mismatch",
-			mutateRoot: func(layer *SandboxRootFSLayer) {
+			mutateRoot: func(layer *sandboxstore.SandboxRootFSLayer) {
 				layer.BaseImageDigest = digest.FromString("different-base").String()
 			},
 			wantError: "base image digest",
 		},
 		{
 			name: "base repository mismatch",
-			mutateRoot: func(layer *SandboxRootFSLayer) {
+			mutateRoot: func(layer *sandboxstore.SandboxRootFSLayer) {
 				layer.BaseImageRef = "registry.example.com/other/image:1"
 			},
 			wantError: "base image reference",
 		},
 		{
 			name: "platform mismatch",
-			mutateRoot: func(layer *SandboxRootFSLayer) {
+			mutateRoot: func(layer *sandboxstore.SandboxRootFSLayer) {
 				layer.PlatformArchitecture = "arm64"
 			},
 			wantError: "platform",
@@ -129,7 +130,7 @@ func TestEnsureTemplateBuildCaptureRejectsMixedRootFSChain(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			root := &SandboxRootFSLayer{
+			root := &sandboxstore.SandboxRootFSLayer{
 				ID:                   "layer-root",
 				TeamID:               "team-1",
 				BaseImageRef:         "busybox:1.36",
@@ -143,7 +144,7 @@ func TestEnsureTemplateBuildCaptureRejectsMixedRootFSChain(t *testing.T) {
 				DiffObjectKey:        "rootfs/root",
 			}
 			tt.mutateRoot(root)
-			head := &SandboxRootFSLayer{
+			head := &sandboxstore.SandboxRootFSLayer{
 				ID:                   "layer-head",
 				ParentLayerID:        root.ID,
 				TeamID:               "team-1",
@@ -159,14 +160,14 @@ func TestEnsureTemplateBuildCaptureRejectsMixedRootFSChain(t *testing.T) {
 			}
 			store := &templateCaptureMemoryStore{
 				memorySandboxStore: &memorySandboxStore{
-					records: map[string]*SandboxRecord{
+					records: map[string]*sandboxstore.SandboxRecord{
 						"sandbox-1": {
 							ID:           "sandbox-1",
 							TeamID:       "team-1",
-							DesiredState: SandboxDesiredStatePaused,
+							DesiredState: sandboxstore.SandboxDesiredStatePaused,
 						},
 					},
-					rootFSSnapshots: map[string]*RootFSSnapshot{
+					rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
 						"template-build-1": {
 							ID:              "template-build-1",
 							TeamID:          "team-1",
@@ -176,7 +177,7 @@ func TestEnsureTemplateBuildCaptureRejectsMixedRootFSChain(t *testing.T) {
 						},
 					},
 				},
-				chains: map[string][]*SandboxRootFSLayer{
+				chains: map[string][]*sandboxstore.SandboxRootFSLayer{
 					head.ID: {root, head},
 				},
 			}
@@ -226,12 +227,12 @@ func TestRootFSPlatformForPodUsesActualNodeLabels(t *testing.T) {
 
 type templateCaptureMemoryStore struct {
 	*memorySandboxStore
-	chains map[string][]*SandboxRootFSLayer
+	chains map[string][]*sandboxstore.SandboxRootFSLayer
 }
 
-func (s *templateCaptureMemoryStore) GetRootFSLayerChainByHead(_ context.Context, teamID, headLayerID string) ([]*SandboxRootFSLayer, error) {
+func (s *templateCaptureMemoryStore) GetRootFSLayerChainByHead(_ context.Context, teamID, headLayerID string) ([]*sandboxstore.SandboxRootFSLayer, error) {
 	chain := s.chains[headLayerID]
-	out := make([]*SandboxRootFSLayer, 0, len(chain))
+	out := make([]*sandboxstore.SandboxRootFSLayer, 0, len(chain))
 	for _, layer := range chain {
 		if layer == nil || (teamID != "" && layer.TeamID != teamID) {
 			continue

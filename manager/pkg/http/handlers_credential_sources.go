@@ -6,8 +6,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
-	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialsource"
+	egressauth "github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -65,7 +65,7 @@ func (s *Server) createCredentialSource(c *gin.Context) {
 
 	record, err := s.credentialSourceService.CreateSource(c.Request.Context(), claims.TeamID, &req)
 	if err != nil {
-		if errors.Is(err, service.ErrCredentialSourceAlreadyExists) {
+		if errors.Is(err, credentialsource.ErrCredentialSourceAlreadyExists) {
 			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "credential source already exists")
 			return
 		}
@@ -98,7 +98,7 @@ func (s *Server) updateCredentialSource(c *gin.Context) {
 
 	record, err := s.credentialSourceService.UpdateSource(c.Request.Context(), claims.TeamID, &req)
 	if err != nil {
-		if errors.Is(err, service.ErrCredentialSourceNotFound) {
+		if errors.Is(err, credentialsource.ErrCredentialSourceNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "credential source not found")
 			return
 		}

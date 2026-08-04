@@ -95,13 +95,6 @@ func reapOrphans(logger *zap.Logger) {
 	}
 }
 
-func isManaged(pid int) bool {
-	managedPIDs.RLock()
-	_, ok := managedPIDs.values[pid]
-	managedPIDs.RUnlock()
-	return ok
-}
-
 func parseProcStat(value string) (pid, ppid int, state string, ok bool) {
 	closing := strings.LastIndex(value, ")")
 	opening := strings.Index(value, "(")

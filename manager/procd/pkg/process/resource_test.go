@@ -121,57 +121,6 @@ func TestReadFileInt64(t *testing.T) {
 	})
 }
 
-// TestReadFileUint64 tests readFileUint64 with various inputs.
-func TestReadFileUint64(t *testing.T) {
-	t.Run("valid number", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		testFile := filepath.Join(tmpDir, "test.txt")
-		err := os.WriteFile(testFile, []byte("1234567890\n"), 0644)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		result, err := readFileUint64(testFile)
-		if err != nil {
-			t.Fatalf("readFileUint64() error = %v", err)
-		}
-		if result != 1234567890 {
-			t.Errorf("readFileUint64() = %d, want 1234567890", result)
-		}
-	})
-
-	t.Run("max uint64", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		testFile := filepath.Join(tmpDir, "test.txt")
-		err := os.WriteFile(testFile, []byte("18446744073709551615\n"), 0644)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		result, err := readFileUint64(testFile)
-		if err != nil {
-			t.Fatalf("readFileUint64() error = %v", err)
-		}
-		if result != 18446744073709551615 {
-			t.Errorf("readFileUint64() = %d, want 18446744073709551615", result)
-		}
-	})
-
-	t.Run("negative number should fail", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		testFile := filepath.Join(tmpDir, "test.txt")
-		err := os.WriteFile(testFile, []byte("-1\n"), 0644)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		_, err = readFileUint64(testFile)
-		if err == nil {
-			t.Error("readFileUint64() expected error for negative number, got nil")
-		}
-	})
-}
-
 // TestReadKeyValueFile tests readKeyValueFile parsing.
 func TestReadKeyValueFile(t *testing.T) {
 	t.Run("valid file", func(t *testing.T) {
@@ -624,23 +573,6 @@ func TestCgroupReader_ReadContainerMemoryStats(t *testing.T) {
 	// Working set should be <= usage
 	if stats.WorkingSet > stats.Usage {
 		t.Errorf("ReadContainerMemoryStats() WorkingSet %d > Usage %d", stats.WorkingSet, stats.Usage)
-	}
-}
-
-// TestCgroupReader_ReadContainerCPUStats tests container CPU stats.
-func TestCgroupReader_ReadContainerCPUStats(t *testing.T) {
-	reader := &cgroupReader{}
-
-	stats, err := reader.ReadContainerCPUStats()
-	if err != nil {
-		// This might fail on non-Linux systems or in certain container configurations
-		t.Skipf("ReadContainerCPUStats() failed: %v", err)
-		return
-	}
-
-	// Verify stats are reasonable
-	if stats.UsageTotal == 0 {
-		t.Log("ReadContainerCPUStats() UsageTotal is zero")
 	}
 }
 

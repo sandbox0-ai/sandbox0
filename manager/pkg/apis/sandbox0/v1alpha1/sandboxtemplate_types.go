@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -66,9 +67,9 @@ type ContainerSpec struct {
 }
 
 const (
-	SandboxPodStartupConditionType   corev1.PodConditionType = "sandbox0.ai/startup"
-	SandboxPodReadinessConditionType corev1.PodConditionType = "sandbox0.ai/ready"
-	SandboxPodLivenessConditionType  corev1.PodConditionType = "sandbox0.ai/live"
+	SandboxPodStartupConditionType   corev1.PodConditionType = sandboxpod.SandboxPodStartupConditionType
+	SandboxPodReadinessConditionType corev1.PodConditionType = sandboxpod.SandboxPodReadinessConditionType
+	SandboxPodLivenessConditionType  corev1.PodConditionType = sandboxpod.SandboxPodLivenessConditionType
 )
 
 type VolumeMountSpec struct {

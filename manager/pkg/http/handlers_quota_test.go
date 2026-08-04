@@ -110,7 +110,7 @@ func (r quotaHandlerFakeRow) Scan(dest ...any) error {
 func TestGetTeamQuotaReturnsUsageStatus(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	repo := quota.NewRepositoryWithDB(&quotaHandlerFakeDB{
+	repo := quota.NewRepository(&quotaHandlerFakeDB{
 		limit: &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 5},
 	})
 	repo.SetUsageStore(quotaHandlerUsageStore{current: 2})
@@ -148,7 +148,7 @@ func TestGetTeamQuotaReturnsUsageStatus(t *testing.T) {
 func TestGetTeamQuotaReturnsUnlimitedWhenLimitIsUnset(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	repo := quota.NewRepositoryWithDB(&quotaHandlerFakeDB{})
+	repo := quota.NewRepository(&quotaHandlerFakeDB{})
 	repo.SetUsageStore(quotaHandlerUsageStore{current: 7})
 	server := &Server{
 		quotaRepo: repo,
@@ -181,7 +181,7 @@ func TestGetTeamQuotaReturnsUnlimitedWhenLimitIsUnset(t *testing.T) {
 func TestGetTeamRateQuotaDoesNotReadCumulativeUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	repo := quota.NewRepositoryWithDB(&quotaHandlerFakeDB{
+	repo := quota.NewRepository(&quotaHandlerFakeDB{
 		limit:    &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionAPIRequests, LimitValue: 100},
 		source:   quota.SourceTeamOverride,
 		interval: 1000,
@@ -216,7 +216,7 @@ func TestGetTeamRateQuotaDoesNotReadCumulativeUsage(t *testing.T) {
 func TestGetTeamQuotaReturnsDefaultLimitWhenDBLimitIsUnset(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	repo := quota.NewRepositoryWithDB(&quotaHandlerFakeDB{
+	repo := quota.NewRepository(&quotaHandlerFakeDB{
 		limit:  &quota.Limit{TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 3},
 		source: quota.SourceRegionDefault,
 	})
@@ -296,7 +296,7 @@ func TestPutTeamQuotaInternalRejectsMissingLimitValue(t *testing.T) {
 func TestPutTeamQuotaInternalRequiresSystemToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	server := &Server{quotaRepo: quota.NewRepositoryWithDB(&quotaHandlerFakeDB{}), logger: zap.NewNop()}
+	server := &Server{quotaRepo: quota.NewRepository(&quotaHandlerFakeDB{}), logger: zap.NewNop()}
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	request := httptest.NewRequest(http.MethodPut, "/internal/v1/teams/team-1/quotas/active_sandboxes", strings.NewReader(`{"limit_value":1}`))

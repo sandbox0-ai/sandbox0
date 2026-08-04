@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,14 +19,16 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -220,7 +221,7 @@ func TestClaimIdlePodAllowsClaimMounts(t *testing.T) {
 	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
 		TeamID: "team-a",
 		UserID: "user-a",
-		Mounts: []ClaimMount{{
+		Mounts: []managerapi.ClaimMount{{
 			SandboxVolumeID: "vol-1",
 			MountPoint:      "/workspace/data",
 		}},
@@ -316,7 +317,7 @@ func TestClaimIdlePodUsesAbsoluteHardExpiresAtOverride(t *testing.T) {
 	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{
 		TeamID:        "team-a",
 		UserID:        "user-a",
-		Config:        &SandboxConfig{HardTTL: int32Ptr(3600)},
+		Config:        &sandboxstore.SandboxConfig{HardTTL: int32Ptr(3600)},
 		HardExpiresAt: hardExpiresAt,
 	})
 	if err != nil {
@@ -329,7 +330,7 @@ func TestClaimIdlePodUsesAbsoluteHardExpiresAtOverride(t *testing.T) {
 		t.Fatalf("hard-expires-at annotation = %q, want %q", got, hardExpiresAt.Format(time.RFC3339))
 	}
 
-	var cfg SandboxConfig
+	var cfg sandboxstore.SandboxConfig
 	if err := json.Unmarshal([]byte(pod.Annotations[controller.AnnotationConfig]), &cfg); err != nil {
 		t.Fatalf("unmarshal config: %v", err)
 	}
@@ -462,92 +463,69 @@ func TestClaimIdlePodFallsBackWhenPodStartsDeletingDuringClaim(t *testing.T) {
 	}
 }
 
-func TestClaimIdlePodFallsBackAfterRepeatedUpdateConflicts(t *testing.T) {
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "template-a",
-			Namespace: "ns-a",
+func TestClaimIdlePodFallsBackAfterRepeatedRetryablePatchFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		reason  metav1.StatusReason
+		message string
+	}{
+		{
+			name:    "update conflict",
+			reason:  metav1.StatusReasonConflict,
+			message: "pod was claimed by another manager",
+		},
+		{
+			name:    "metadata patch precondition failure",
+			reason:  metav1.StatusReasonInvalid,
+			message: "testing value /metadata/resourceVersion failed: test failed",
 		},
 	}
-	idlePods := []*corev1.Pod{
-		newClaimTestPod("ns-a", "idle-a", "template-a", true),
-		newClaimTestPod("ns-a", "idle-b", "template-a", true),
-		newClaimTestPod("ns-a", "idle-c", "template-a", true),
-	}
 
-	clientObjects := make([]runtime.Object, 0, len(idlePods))
-	for _, pod := range idlePods {
-		clientObjects = append(clientObjects, pod.DeepCopy())
-	}
-	client := fake.NewSimpleClientset(clientObjects...)
-	patchConflicts := 0
-	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
-		patchConflicts++
-		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
-			Reason:  metav1.StatusReasonConflict,
-			Message: "pod was claimed by another manager",
-		}}
-	})
-	svc := &SandboxService{
-		k8sClient: client,
-		podLister: newClaimTestPodLister(t, idlePods...),
-		clock:     systemTime{},
-		logger:    zap.NewNop(),
-	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			template := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "template-a",
+					Namespace: "ns-a",
+				},
+			}
+			idlePods := []*corev1.Pod{
+				newClaimTestPod("ns-a", "idle-a", "template-a", true),
+				newClaimTestPod("ns-a", "idle-b", "template-a", true),
+				newClaimTestPod("ns-a", "idle-c", "template-a", true),
+			}
+			clientObjects := make([]runtime.Object, 0, len(idlePods))
+			for _, pod := range idlePods {
+				clientObjects = append(clientObjects, pod.DeepCopy())
+			}
+			client := fake.NewSimpleClientset(clientObjects...)
+			patchAttempts := 0
+			client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				patchAttempts++
+				return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
+					Reason:  tt.reason,
+					Message: tt.message,
+				}}
+			})
+			svc := &SandboxService{
+				k8sClient: client,
+				podLister: newClaimTestPodLister(t, idlePods...),
+				clock:     systemTime{},
+				logger:    zap.NewNop(),
+			}
 
-	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
-	if err != nil {
-		t.Fatalf("claimIdlePod() error = %v, want nil fallback", err)
-	}
-	if pod != nil {
-		t.Fatalf("claimIdlePod() = %s, want nil after repeated update conflicts", pod.Name)
-	}
-	if patchConflicts != claimIdlePodBackoff.Steps {
-		t.Fatalf("patch conflicts = %d, want %d", patchConflicts, claimIdlePodBackoff.Steps)
-	}
-}
-
-func TestClaimIdlePodRetriesMetadataPatchPreconditionFailure(t *testing.T) {
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "template-a",
-			Namespace: "ns-a",
-		},
-	}
-	idlePods := []*corev1.Pod{
-		newClaimTestPod("ns-a", "idle-a", "template-a", true),
-		newClaimTestPod("ns-a", "idle-b", "template-a", true),
-		newClaimTestPod("ns-a", "idle-c", "template-a", true),
-	}
-	clientObjects := make([]runtime.Object, 0, len(idlePods))
-	for _, pod := range idlePods {
-		clientObjects = append(clientObjects, pod.DeepCopy())
-	}
-	client := fake.NewSimpleClientset(clientObjects...)
-	patchFailures := 0
-	client.PrependReactor("patch", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
-		patchFailures++
-		return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{
-			Reason:  metav1.StatusReasonInvalid,
-			Message: "testing value /metadata/resourceVersion failed: test failed",
-		}}
-	})
-	svc := &SandboxService{
-		k8sClient: client,
-		podLister: newClaimTestPodLister(t, idlePods...),
-		clock:     systemTime{},
-		logger:    zap.NewNop(),
-	}
-
-	pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
-	if err != nil {
-		t.Fatalf("claimIdlePod() error = %v, want nil fallback", err)
-	}
-	if pod != nil {
-		t.Fatalf("claimIdlePod() = %s, want nil after repeated patch precondition failures", pod.Name)
-	}
-	if patchFailures != claimIdlePodBackoff.Steps {
-		t.Fatalf("patch failures = %d, want %d", patchFailures, claimIdlePodBackoff.Steps)
+			pod, err := svc.claimIdlePod(context.Background(), template, &ClaimRequest{TeamID: "team-a", UserID: "user-a"})
+			if err != nil {
+				t.Fatalf("claimIdlePod() error = %v, want nil fallback", err)
+			}
+			if pod != nil {
+				t.Fatalf("claimIdlePod() = %s, want nil after repeated patch failures", pod.Name)
+			}
+			if patchAttempts != claimIdlePodBackoff.Steps {
+				t.Fatalf("patch attempts = %d, want %d", patchAttempts, claimIdlePodBackoff.Steps)
+			}
+		})
 	}
 }
 
@@ -630,7 +608,7 @@ func TestClaimIdlePodRequiresDataPlaneReadyNode(t *testing.T) {
 	}
 	readyPod := newClaimTestPod("ns-a", "idle-ready", "template-a", true)
 	readyPod.Spec.NodeName = "node-a"
-	readyPod.Spec.NodeSelector = dataplane.DataPlaneReadyNodeSelector()
+	readyPod.Spec.NodeSelector = map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue}
 
 	node := newClaimTestNode("node-a", "10.0.0.1")
 	node.Labels = map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.NotReadyLabelValue}
@@ -660,7 +638,7 @@ func TestEnsureDataPlaneReadyCapacityAllowsColdStartWithoutReadyNode(t *testing.
 		},
 	}
 	spec := corev1.PodSpec{
-		NodeSelector: dataplane.DataPlaneReadyNodeSelector(),
+		NodeSelector: map[string]string{dataplane.NodeDataPlaneReadyLabel: dataplane.ReadyLabelValue},
 	}
 
 	if err := svc.ensureDataPlaneReadyCapacity(spec); err != nil {
@@ -682,7 +660,7 @@ func TestClaimIdlePodRequestsDeleteAfterNetworkApplyFailure(t *testing.T) {
 	svc := &SandboxService{
 		k8sClient:            client,
 		podLister:            newClaimTestPodLister(t, readyPod),
-		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkPolicyService: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		networkProvider: &assertingNetworkProvider{
 			applyErr: applyErr,
 			removeFunc: func(namespace, sandboxID string) {
@@ -749,85 +727,74 @@ func TestWaitForPodClaimReadyWaitsForRuntimeControlConditions(t *testing.T) {
 	}
 }
 
-func TestWaitForPodNetworkIdentityWaitsForNodeNameAndPodIP(t *testing.T) {
-	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
-	indexer := newClaimTestPodIndexer(t, pod)
-	svc := &SandboxService{
-		podLister: corelisters.NewPodLister(indexer),
-		logger:    zap.NewNop(),
+func TestWaitForPodNetworkIdentityWaitsForBothFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  func(*corev1.Pod)
+		second func(*corev1.Pod)
+	}{
+		{
+			name: "node name before pod IP",
+			first: func(pod *corev1.Pod) {
+				pod.Spec.NodeName = "node-a"
+			},
+			second: func(pod *corev1.Pod) {
+				pod.Status.PodIP = "10.244.0.10"
+			},
+		},
+		{
+			name: "pod IP before node name",
+			first: func(pod *corev1.Pod) {
+				pod.Status.PodIP = "10.244.0.10"
+			},
+			second: func(pod *corev1.Pod) {
+				pod.Spec.NodeName = "node-a"
+			},
+		},
 	}
-	handler := svc.PodEventHandler()
 
-	go func() {
-		time.Sleep(80 * time.Millisecond)
-		nodeOnly := pod.DeepCopy()
-		nodeOnly.Spec.NodeName = "node-a"
-		if err := indexer.Update(nodeOnly); err != nil {
-			t.Errorf("update pod: %v", err)
-		}
-		handler.UpdateFunc(pod, nodeOnly)
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+			indexer := newClaimTestPodIndexer(t, pod)
+			svc := &SandboxService{
+				podLister: corelisters.NewPodLister(indexer),
+				logger:    zap.NewNop(),
+			}
+			handler := svc.PodEventHandler()
 
-		time.Sleep(80 * time.Millisecond)
-		updated := nodeOnly.DeepCopy()
-		updated.Status.PodIP = "10.244.0.10"
-		if err := indexer.Update(updated); err != nil {
-			t.Errorf("update pod: %v", err)
-		}
-		handler.UpdateFunc(nodeOnly, updated)
-	}()
+			go func() {
+				time.Sleep(80 * time.Millisecond)
+				first := pod.DeepCopy()
+				tt.first(first)
+				if err := indexer.Update(first); err != nil {
+					t.Errorf("update pod: %v", err)
+				}
+				handler.UpdateFunc(pod, first)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	readyPod, err := svc.waitForPodNetworkIdentity(ctx, "template-a", pod.Namespace, pod.Name)
-	if err != nil {
-		t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
-	}
-	if readyPod.Spec.NodeName != "node-a" {
-		t.Fatalf("node name = %q, want node-a", readyPod.Spec.NodeName)
-	}
-	if readyPod.Status.PodIP != "10.244.0.10" {
-		t.Fatalf("pod IP = %q, want 10.244.0.10", readyPod.Status.PodIP)
-	}
-}
+				time.Sleep(80 * time.Millisecond)
+				second := first.DeepCopy()
+				tt.second(second)
+				if err := indexer.Update(second); err != nil {
+					t.Errorf("update pod: %v", err)
+				}
+				handler.UpdateFunc(first, second)
+			}()
 
-func TestWaitForPodNetworkIdentityWaitsForNodeNameWhenPodIPArrivesFirst(t *testing.T) {
-	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
-	indexer := newClaimTestPodIndexer(t, pod)
-	svc := &SandboxService{
-		podLister: corelisters.NewPodLister(indexer),
-		logger:    zap.NewNop(),
-	}
-	handler := svc.PodEventHandler()
-
-	go func() {
-		time.Sleep(80 * time.Millisecond)
-		ipOnly := pod.DeepCopy()
-		ipOnly.Status.PodIP = "10.244.0.10"
-		if err := indexer.Update(ipOnly); err != nil {
-			t.Errorf("update pod: %v", err)
-		}
-		handler.UpdateFunc(pod, ipOnly)
-
-		time.Sleep(80 * time.Millisecond)
-		updated := ipOnly.DeepCopy()
-		updated.Spec.NodeName = "node-a"
-		if err := indexer.Update(updated); err != nil {
-			t.Errorf("update pod: %v", err)
-		}
-		handler.UpdateFunc(ipOnly, updated)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	readyPod, err := svc.waitForPodNetworkIdentity(ctx, "template-a", pod.Namespace, pod.Name)
-	if err != nil {
-		t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
-	}
-	if readyPod.Spec.NodeName != "node-a" {
-		t.Fatalf("node name = %q, want node-a", readyPod.Spec.NodeName)
-	}
-	if readyPod.Status.PodIP != "10.244.0.10" {
-		t.Fatalf("pod IP = %q, want 10.244.0.10", readyPod.Status.PodIP)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			readyPod, err := svc.waitForPodNetworkIdentity(ctx, "template-a", pod.Namespace, pod.Name)
+			if err != nil {
+				t.Fatalf("waitForPodNetworkIdentity() error = %v", err)
+			}
+			if readyPod.Spec.NodeName != "node-a" {
+				t.Fatalf("node name = %q, want node-a", readyPod.Spec.NodeName)
+			}
+			if readyPod.Status.PodIP != "10.244.0.10" {
+				t.Fatalf("pod IP = %q, want 10.244.0.10", readyPod.Status.PodIP)
+			}
+		})
 	}
 }
 
@@ -1010,7 +977,7 @@ func TestCreateNewPodDefersNetworkApplyUntilPodHasNetworkIdentity(t *testing.T) 
 	svc := &SandboxService{
 		k8sClient:            client,
 		secretLister:         newClaimTestSecretLister(t),
-		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkPolicyService: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		networkProvider: &assertingNetworkProvider{applyFunc: func(_ network.SandboxPolicyInput) {
 			applyCalls++
 		}},
@@ -1066,7 +1033,7 @@ func TestClaimSandboxDeletesColdPodAfterNetworkApplyFailure(t *testing.T) {
 		podLister:            corelisters.NewPodLister(indexer),
 		secretLister:         newClaimTestSecretLister(t),
 		templateLister:       staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkPolicyService: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		networkProvider:      &assertingNetworkProvider{applyErr: applyErr},
 		clock:                systemTime{},
 		logger:               zap.NewNop(),
@@ -1148,7 +1115,7 @@ func TestCreateNewPodPreMountsAllTemplateVolumePortals(t *testing.T) {
 	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
 		TeamID: "team-a",
 		UserID: "user-a",
-		Mounts: []ClaimMount{{
+		Mounts: []managerapi.ClaimMount{{
 			SandboxVolumeID: "vol-1",
 			MountPoint:      "/workspace/data",
 		}},
@@ -1225,7 +1192,7 @@ func TestCreateNewPodUsesAbsoluteHardExpiresAtOverride(t *testing.T) {
 	pod, err := svc.createNewPod(context.Background(), template, &ClaimRequest{
 		TeamID:        "team-a",
 		UserID:        "user-a",
-		Config:        &SandboxConfig{HardTTL: int32Ptr(3600)},
+		Config:        &sandboxstore.SandboxConfig{HardTTL: int32Ptr(3600)},
 		HardExpiresAt: hardExpiresAt,
 	})
 	if err != nil {
@@ -1235,7 +1202,7 @@ func TestCreateNewPodUsesAbsoluteHardExpiresAtOverride(t *testing.T) {
 		t.Fatalf("hard-expires-at annotation = %q, want %q", got, hardExpiresAt.Format(time.RFC3339))
 	}
 
-	var cfg SandboxConfig
+	var cfg sandboxstore.SandboxConfig
 	if err := json.Unmarshal([]byte(pod.Annotations[controller.AnnotationConfig]), &cfg); err != nil {
 		t.Fatalf("unmarshal config: %v", err)
 	}
@@ -1356,8 +1323,8 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 	idlePod.Status.HostIP = ctldURL.Hostname()
 	idlePod.Status.PodIP = "10.0.0.10"
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{},
-		rootFSSnapshots: map[string]*RootFSSnapshot{
+		records: map[string]*sandboxstore.SandboxRecord{},
+		rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
 			"rootfs-snapshot-1": {
 				ID:              "rootfs-snapshot-1",
 				FilesystemID:    "source-fs",
@@ -1382,7 +1349,7 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 		secretLister:           newClaimTestSecretLister(t),
 		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
 		sandboxStore:           store,
-		ctldClient:             NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		ctldClient:             ctldapi.NewClientWithTimeout(time.Second),
 		internalTokenGenerator: staticTokenGenerator{},
 		config: SandboxServiceConfig{
 			CtldEnabled:         true,
@@ -1422,7 +1389,7 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 		t.Fatalf("rootfs state = %+v, want layer-v1 for claimed sandbox", state)
 	}
 	record := store.records[resp.SandboxID]
-	if record == nil || record.DesiredState != SandboxDesiredStateActive {
+	if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive {
 		t.Fatalf("record = %+v, want active claimed sandbox", record)
 	}
 }
@@ -1446,7 +1413,7 @@ func TestClaimSandboxDoesNotActivateRuntimeBeforePersistence(t *testing.T) {
 	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
 	idlePod.Status.PodIP = "10.0.0.10"
 	store := &blockingClaimSandboxStore{
-		memorySandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{}},
+		memorySandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}},
 		started:            persistStarted,
 		release:            release,
 	}
@@ -1508,7 +1475,7 @@ func TestClaimSandboxDoesNotActivateRuntimeBeforePersistence(t *testing.T) {
 		t.Fatalf("sandbox records = %d, want 1", len(store.records))
 	}
 	for _, record := range store.records {
-		if record.DesiredState != SandboxDesiredStateActive {
+		if record.DesiredState != sandboxstore.SandboxDesiredStateActive {
 			t.Fatalf("sandbox record desired state = %q, want active", record.DesiredState)
 		}
 	}
@@ -1527,7 +1494,7 @@ func TestClaimSandboxDeletesConcurrentRecordWhenRuntimeActivationFails(t *testin
 	}
 	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
 	idlePod.Status.PodIP = "10.0.0.10"
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}}
 	indexer := newClaimTestPodIndexer(t, idlePod)
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
 	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedFailed, nil)
@@ -1557,7 +1524,7 @@ func TestClaimSandboxDeletesConcurrentRecordWhenRuntimeActivationFails(t *testin
 		t.Fatalf("sandbox records = %d, want 1", len(store.records))
 	}
 	for _, record := range store.records {
-		if record.DesiredState != SandboxDesiredStateDeleted || record.DeletedAt.IsZero() {
+		if record.DesiredState != sandboxstore.SandboxDesiredStateDeleted || record.DeletedAt.IsZero() {
 			t.Fatalf("sandbox record = %#v, want deleted", record)
 		}
 	}
@@ -1569,7 +1536,7 @@ type blockingClaimSandboxStore struct {
 	release <-chan struct{}
 }
 
-func (s *blockingClaimSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecord) error {
+func (s *blockingClaimSandboxStore) UpsertSandbox(ctx context.Context, record *sandboxstore.SandboxRecord) error {
 	select {
 	case s.started <- struct{}{}:
 	default:
@@ -1585,8 +1552,8 @@ func (s *blockingClaimSandboxStore) UpsertSandbox(ctx context.Context, record *S
 func TestInitializeClaimRootFSFromSnapshotRejectsInternalTemplateBuildSnapshot(t *testing.T) {
 	internalSnapshotID := "template-build-123456"
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{},
-		rootFSSnapshots: map[string]*RootFSSnapshot{
+		records: map[string]*sandboxstore.SandboxRecord{},
+		rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
 			internalSnapshotID: {
 				ID:              internalSnapshotID,
 				FilesystemID:    "source-fs",
@@ -1610,8 +1577,8 @@ func TestInitializeClaimRootFSFromSnapshotRejectsInternalTemplateBuildSnapshot(t
 			UserID:     "user-a",
 		},
 	)
-	if !errors.Is(err, ErrRootFSSnapshotNotFound) {
-		t.Fatalf("initializeClaimRootFSFromSnapshot() error = %v, want ErrRootFSSnapshotNotFound", err)
+	if !errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
+		t.Fatalf("initializeClaimRootFSFromSnapshot() error = %v, want sandboxstore.ErrRootFSSnapshotNotFound", err)
 	}
 	if gotPod != pod {
 		t.Fatal("initializeClaimRootFSFromSnapshot() replaced pod on rejected snapshot")
@@ -1653,7 +1620,7 @@ func TestClaimSandboxCleansColdPodWhenClaimReadinessFails(t *testing.T) {
 		podLister:            corelisters.NewPodLister(indexer),
 		secretLister:         newClaimTestSecretLister(t),
 		templateLister:       staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkPolicyService: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		networkProvider: &assertingNetworkProvider{applyFunc: func(_ network.SandboxPolicyInput) {
 			cancel()
 		}},
@@ -1706,7 +1673,7 @@ func TestObservePodNetworkIdentityStageRecordsMetric(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	svc := &SandboxService{metrics: obsmetrics.NewManager(registry)}
 
-	svc.observePodNetworkIdentityStage("automation", "pod_ip_assigned", "timeout", "pod IP is not assigned", time.Now().Add(-20*time.Millisecond))
+	svc.observePodNetworkIdentityStageDuration("automation", "pod_ip_assigned", "timeout", "pod IP is not assigned", 20*time.Millisecond)
 
 	families, err := registry.Gather()
 	if err != nil {
@@ -1916,72 +1883,9 @@ func TestWaitForPodClaimReadyReevaluatesOnlyAfterInformerEvent(t *testing.T) {
 	}
 }
 
-func TestProbeSandboxPodReadinessRequiresPublishedVolumePortals(t *testing.T) {
-	pod := newClaimReadyTestPod("ns-a", "pod-a", "template-a")
-	pod.UID = types.UID("pod-uid")
-	pod.Spec.Volumes = []corev1.Volume{{
-		Name: "workspace",
-		VolumeSource: corev1.VolumeSource{
-			CSI: &corev1.CSIVolumeSource{
-				Driver: volumeportal.DriverName,
-				VolumeAttributes: map[string]string{
-					volumeportal.AttributePortalName: "workspace",
-					volumeportal.AttributeMountPath:  "/workspace",
-				},
-			},
-		},
-	}}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v1/pods/ns-a/pod-a/probes/readiness":
-			_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
-		case "/api/v1/volume-portals/check":
-			var req ctldapi.CheckVolumePortalsRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode check request: %v", err)
-			}
-			if req.PodUID != "pod-uid" {
-				t.Fatalf("check pod UID = %q, want pod-uid", req.PodUID)
-			}
-			if len(req.Portals) != 1 || req.Portals[0].PortalName != "workspace" {
-				t.Fatalf("check portals = %+v, want workspace", req.Portals)
-			}
-			_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{
-				Ready:   false,
-				Missing: []string{"workspace"},
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	host, port := splitTestServerAddress(t, server)
-	svc := &SandboxService{
-		k8sClient:  fake.NewSimpleClientset(newClaimTestNode("node-a", host)),
-		ctldClient: NewCtldClient(CtldClientConfig{}),
-		config:     SandboxServiceConfig{CtldPort: port},
-	}
-
-	result, err := svc.ProbeSandboxPod(context.Background(), pod, sandboxprobe.KindReadiness)
-	if err != nil {
-		t.Fatalf("ProbeSandboxPod() error = %v", err)
-	}
-	if result == nil {
-		t.Fatal("ProbeSandboxPod() result = nil")
-	}
-	if result.Status != sandboxprobe.StatusFailed {
-		t.Fatalf("ProbeSandboxPod() status = %q, want failed", result.Status)
-	}
-	if result.Reason != "VolumePortalsNotReady" {
-		t.Fatalf("ProbeSandboxPod() reason = %q, want VolumePortalsNotReady", result.Reason)
-	}
-}
-
 func TestValidateClaimMountsRejectsDuplicateVolume(t *testing.T) {
 	req := &ClaimRequest{
-		Mounts: []ClaimMount{
+		Mounts: []managerapi.ClaimMount{
 			{SandboxVolumeID: "vol-1", MountPoint: "/workspace/a"},
 			{SandboxVolumeID: "vol-1", MountPoint: "/workspace/b"},
 		},
@@ -1997,7 +1901,7 @@ func TestValidateClaimMountsRejectsDuplicateVolume(t *testing.T) {
 }
 
 func TestNormalizeSandboxConfigRejectsTTLGreaterThanHardTTL(t *testing.T) {
-	cfg := &SandboxConfig{
+	cfg := &sandboxstore.SandboxConfig{
 		TTL:     int32Ptr(1000),
 		HardTTL: int32Ptr(10),
 	}
@@ -2013,7 +1917,7 @@ func TestNormalizeSandboxConfigRejectsTTLGreaterThanHardTTL(t *testing.T) {
 
 func TestValidateClaimMountsRejectsDuplicateMountPoint(t *testing.T) {
 	req := &ClaimRequest{
-		Mounts: []ClaimMount{
+		Mounts: []managerapi.ClaimMount{
 			{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"},
 			{SandboxVolumeID: "vol-2", MountPoint: "/workspace/data"},
 		},
@@ -2030,7 +1934,7 @@ func TestValidateClaimMountsRejectsDuplicateMountPoint(t *testing.T) {
 
 func TestValidateClaimMountsNormalizesMountPoint(t *testing.T) {
 	req := &ClaimRequest{
-		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}},
+		Mounts: []managerapi.ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}},
 	}
 
 	if err := validateClaimMounts(req); err != nil {
@@ -2043,7 +1947,7 @@ func TestValidateClaimMountsNormalizesMountPoint(t *testing.T) {
 
 func TestMountsAnnotationRoundTrip(t *testing.T) {
 	annotations := map[string]string{}
-	mounts := []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}}
+	mounts := []managerapi.ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}}
 	normalized, err := normalizeClaimMounts(mounts)
 	if err != nil {
 		t.Fatalf("normalizeClaimMounts() error = %v", err)
@@ -2062,7 +1966,7 @@ func TestMountsAnnotationRoundTrip(t *testing.T) {
 
 func TestValidateClaimMountsRejectsWebhookStatePath(t *testing.T) {
 	req := &ClaimRequest{
-		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: webhookStateMountPoint + "/custom"}},
+		Mounts: []managerapi.ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: webhookStateMountPoint + "/custom"}},
 	}
 
 	err := validateClaimMounts(req)
@@ -2076,7 +1980,7 @@ func TestValidateClaimMountsRejectsWebhookStatePath(t *testing.T) {
 
 func TestValidateClaimMountsForTemplateRequiresDeclaredMountPoint(t *testing.T) {
 	req := &ClaimRequest{
-		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
+		Mounts: []managerapi.ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
 	}
 	template := &v1alpha1.SandboxTemplate{
 		Spec: v1alpha1.SandboxTemplateSpec{
@@ -2095,7 +1999,7 @@ func TestValidateClaimMountsForTemplateRequiresDeclaredMountPoint(t *testing.T) 
 
 func TestValidateClaimMountsForTemplateRejectsMountWhenTemplateDeclaresNone(t *testing.T) {
 	req := &ClaimRequest{
-		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
+		Mounts: []managerapi.ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
 	}
 	template := &v1alpha1.SandboxTemplate{}
 
@@ -2123,7 +2027,7 @@ func TestValidateClaimMountsForTemplateAllowsOmittedDeclaredMountPoints(t *testi
 
 func TestValidateClaimMountsForTemplateAllowsPartialDeclaredMountPoints(t *testing.T) {
 	req := &ClaimRequest{
-		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
+		Mounts: []managerapi.ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}},
 	}
 	template := &v1alpha1.SandboxTemplate{
 		Spec: v1alpha1.SandboxTemplateSpec{
@@ -2141,7 +2045,7 @@ func TestValidateClaimMountsForTemplateAllowsPartialDeclaredMountPoints(t *testi
 
 func TestValidateClaimMountsForTemplateAllowsDeclaredMountPoint(t *testing.T) {
 	req := &ClaimRequest{
-		Mounts: []ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}},
+		Mounts: []managerapi.ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/project/../data"}},
 	}
 	if err := validateClaimMounts(req); err != nil {
 		t.Fatalf("validateClaimMounts() error = %v", err)
@@ -2255,7 +2159,7 @@ func TestBindVolumePortalTreatsPreparationConflictAsClaimConflict(t *testing.T) 
 	})
 	svc := &SandboxService{
 		k8sClient:      client,
-		ctldClient:     &CtldClient{},
+		ctldClient:     ctldapi.NewClient(nil),
 		volumeMetadata: metadata,
 		config:         SandboxServiceConfig{CtldPort: 8095},
 	}
@@ -2316,7 +2220,7 @@ func TestBindVolumePortalRetriesWhilePortalPublicationIsPending(t *testing.T) {
 	})
 	svc := &SandboxService{
 		k8sClient:  client,
-		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
 		config:     SandboxServiceConfig{CtldPort: ctldPort},
 	}
 	pod := &corev1.Pod{
@@ -2370,7 +2274,7 @@ func TestBindVolumePortalTreatsCtldConflictAsClaimConflict(t *testing.T) {
 	})
 	svc := &SandboxService{
 		k8sClient:  client,
-		ctldClient: NewCtldClient(CtldClientConfig{Timeout: time.Second}),
+		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
 		config:     SandboxServiceConfig{CtldPort: ctldPort},
 	}
 	pod := &corev1.Pod{
@@ -2582,23 +2486,6 @@ func newClaimTestNode(name, internalIP string) *corev1.Node {
 			Address: internalIP,
 		}}},
 	}
-}
-
-func splitTestServerAddress(t *testing.T, server *httptest.Server) (string, int) {
-	t.Helper()
-	parsed, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
-	}
-	host, portString, err := net.SplitHostPort(parsed.Host)
-	if err != nil {
-		t.Fatalf("split server host: %v", err)
-	}
-	port, err := strconv.Atoi(portString)
-	if err != nil {
-		t.Fatalf("parse server port: %v", err)
-	}
-	return host, port
 }
 
 func findMetric(families []*dto.MetricFamily, name string, labels map[string]string) *dto.Metric {

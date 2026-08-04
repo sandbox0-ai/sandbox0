@@ -17,6 +17,29 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxobservability"
 )
 
+func newCanonicalSyncAuditTestSink(t *testing.T, responseStatus int) (*auditSpool, *httpAuditSink, *atomic.Int32) {
+	t.Helper()
+
+	spool, err := newAuditSpool(t.TempDir())
+	if err != nil {
+		t.Fatalf("newAuditSpool() error = %v", err)
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(responseStatus)
+	}))
+	t.Cleanup(server.Close)
+
+	sink := newHTTPAuditSink(httpAuditSinkOptions{
+		Endpoint: server.URL, Spool: spool, QueueSize: 2, BatchSize: 100,
+		FlushInterval: time.Hour, RequestTimeout: time.Second,
+		DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
+	})
+	t.Cleanup(func() { _ = sink.Close() })
+	return spool, sink, &requests
+}
+
 func TestHTTPAuditSinkDefaultsAttemptsToDurableAsync(t *testing.T) {
 	for _, failure := range []string{"status", "timeout"} {
 		t.Run(failure, func(t *testing.T) {
@@ -204,23 +227,7 @@ func TestMultiAuditSinkKeepsDiagnosticErrorsInJSONLOnly(t *testing.T) {
 }
 
 func TestHTTPAuditSinkCanonicalSyncWaitsForAttemptACK(t *testing.T) {
-	spool, err := newAuditSpool(t.TempDir())
-	if err != nil {
-		t.Fatalf("newAuditSpool() error = %v", err)
-	}
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests.Add(1)
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer server.Close()
-
-	sink := newHTTPAuditSink(httpAuditSinkOptions{
-		Endpoint: server.URL, Spool: spool, QueueSize: 2, BatchSize: 100,
-		FlushInterval: time.Hour, RequestTimeout: time.Second,
-		DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
-	})
-	defer sink.Close()
+	spool, sink, requests := newCanonicalSyncAuditTestSink(t, http.StatusAccepted)
 
 	if err := sink.WriteAuditEvent(newAuditDeliveryTestEvent("22222222-2222-4222-8222-222222222222", sandboxobservability.EventPhaseAttempt)); err != nil {
 		t.Fatalf("WriteAuditEvent() error = %v", err)
@@ -289,23 +296,7 @@ func TestHTTPAuditSinkCanonicalSyncDoesNotRaceSpoolReplay(t *testing.T) {
 }
 
 func TestHTTPAuditSinkResultsRemainDurableAsyncInCanonicalSyncMode(t *testing.T) {
-	spool, err := newAuditSpool(t.TempDir())
-	if err != nil {
-		t.Fatalf("newAuditSpool() error = %v", err)
-	}
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests.Add(1)
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer server.Close()
-
-	sink := newHTTPAuditSink(httpAuditSinkOptions{
-		Endpoint: server.URL, Spool: spool, QueueSize: 2, BatchSize: 100,
-		FlushInterval: time.Hour, RequestTimeout: time.Second,
-		DeliveryMode: sandboxobservability.AuditDeliveryModeCanonicalSync,
-	})
-	defer sink.Close()
+	spool, sink, requests := newCanonicalSyncAuditTestSink(t, http.StatusServiceUnavailable)
 
 	if err := sink.WriteAuditEvent(newAuditDeliveryTestEvent("33333333-3333-4333-8333-333333333333", sandboxobservability.EventPhaseResult)); err != nil {
 		t.Fatalf("WriteAuditEvent() error = %v", err)

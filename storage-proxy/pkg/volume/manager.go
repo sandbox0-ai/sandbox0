@@ -8,9 +8,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sirupsen/logrus"
@@ -95,14 +95,6 @@ func NewManager(logger *logrus.Logger, cfg *config.StorageProxyConfig, repo *db.
 	return NewManagerWithBackends(logger, cfg, map[string]Backend{
 		BackendS0FS: NewS0FSBackend(logger, cfg, repo),
 	}, DefaultBackendType())
-}
-
-// NewManagerWithBackend creates a manager with an explicit storage backend.
-func NewManagerWithBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig, repo *db.Repository, backend Backend) *Manager {
-	if backend == nil {
-		return NewManager(logger, cfg, repo)
-	}
-	return NewManagerWithBackends(logger, cfg, map[string]Backend{"default": backend}, "default")
 }
 
 func NewManagerWithBackends(logger *logrus.Logger, cfg *config.StorageProxyConfig, backends map[string]Backend, defaultBackend string) *Manager {

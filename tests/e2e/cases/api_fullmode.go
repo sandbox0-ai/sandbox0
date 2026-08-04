@@ -1,6 +1,6 @@
 package cases
 
-import "github.com/sandbox0-ai/sandbox0/pkg/framework"
+import "github.com/sandbox0-ai/sandbox0/internal/framework"
 
 func registerApiFullModeSuite(envProvider func() *framework.ScenarioEnv) {
 	registerApiModeSuite(envProvider, apiModeSuiteOptions{

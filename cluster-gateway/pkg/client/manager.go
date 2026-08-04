@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"go.uber.org/zap"
 )
 

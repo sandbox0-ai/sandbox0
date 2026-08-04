@@ -304,13 +304,8 @@ func TestClock_Options(t *testing.T) {
 	ctx := context.Background()
 
 	syncInterval := 100 * time.Millisecond
-	syncTimeout := 2 * time.Second
-	maxOffsetDiff := 500 * time.Millisecond
-
 	c, err := New(ctx, db,
 		WithSyncInterval(syncInterval),
-		WithSyncTimeout(syncTimeout),
-		WithMaxOffsetDiff(maxOffsetDiff),
 		WithLogger(&testLogger{t}),
 	)
 	if err != nil {
@@ -321,12 +316,6 @@ func TestClock_Options(t *testing.T) {
 	if c.syncInterval != syncInterval {
 		t.Errorf("syncInterval = %v, want %v", c.syncInterval, syncInterval)
 	}
-	if c.syncTimeout != syncTimeout {
-		t.Errorf("syncTimeout = %v, want %v", c.syncTimeout, syncTimeout)
-	}
-	if c.maxOffsetDiff != maxOffsetDiff {
-		t.Errorf("maxOffsetDiff = %v, want %v", c.maxOffsetDiff, maxOffsetDiff)
-	}
 }
 
 func TestClock_LargeOffsetChange(t *testing.T) {
@@ -335,7 +324,6 @@ func TestClock_LargeOffsetChange(t *testing.T) {
 
 	c, err := New(ctx, db,
 		WithSyncInterval(30*time.Millisecond),
-		WithMaxOffsetDiff(100*time.Millisecond),
 		WithLogger(&testLogger{t}),
 	)
 	if err != nil {

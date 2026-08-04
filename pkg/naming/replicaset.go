@@ -5,56 +5,56 @@ import (
 	"strings"
 )
 
-// ProcdConfigSecretName generates a Kubernetes-safe Secret name for procd config.
-// Format: procd-secret-<clusterKey>-<templateKey>
-func ProcdConfigSecretName(clusterID, templateName string) (string, error) {
-	clusterKey, err := encodeClusterID(clusterID)
-	if err != nil {
-		return "", err
-	}
-	base := fmt.Sprintf("procd-secret-%s-%s", clusterKey, templateName)
-	return slugWithHash(base, dnsLabelMaxLen)
+// SandboxWorkloadName contains the stable name components shared by a
+// sandbox ReplicaSet and the pods it owns.
+//
+// Manager owns the resource-specific ReplicaSet facade. This type keeps the
+// underlying name construction shared with SandboxName so the two cannot
+// drift apart.
+type SandboxWorkloadName struct {
+	replicaSetName string
 }
 
-// ReplicasetName generates a Kubernetes-safe ReplicaSet name.
-// Format: rs-<clusterKey>-<templateKey>
-func ReplicasetName(clusterID, templateName string) (string, error) {
-	clusterKey, err := encodeClusterID(clusterID)
+// NewSandboxWorkloadName derives the shared ReplicaSet and pod name base for
+// one cluster-scoped template.
+func NewSandboxWorkloadName(clusterID, templateName string) (SandboxWorkloadName, error) {
+	clusterKey, err := ClusterKey(clusterID)
 	if err != nil {
-		return "", err
+		return SandboxWorkloadName{}, err
 	}
 	prefix := fmt.Sprintf("%s-%s-", sandboxNamePrefix, clusterKey)
 	remaining := replicaSetMaxLen - len(prefix)
 	if remaining <= 0 {
-		return "", fmt.Errorf("cluster key too long to build replicaset name")
+		return SandboxWorkloadName{}, fmt.Errorf("cluster key too long to build replicaset name")
 	}
 	templateKey, err := slugWithHash(templateName, remaining)
 	if err != nil {
-		return "", err
+		return SandboxWorkloadName{}, err
 	}
 	name := prefix + templateKey
 	if err := validateDNSLabel(name); err != nil {
-		return "", err
+		return SandboxWorkloadName{}, err
 	}
-	return name, nil
+	return SandboxWorkloadName{
+		replicaSetName: name,
+	}, nil
+}
+
+// ReplicaSetName returns the stable ReplicaSet name shared by the sandbox pods.
+func (n SandboxWorkloadName) ReplicaSetName() string {
+	return n.replicaSetName
 }
 
 // SandboxName generates a sandbox (pod) name using the ReplicaSet name and a random suffix.
 func SandboxName(clusterID, templateName, randSuffix string) (string, error) {
-	if randSuffix == "" {
-		return "", fmt.Errorf("randSuffix is empty")
+	if err := validateSandboxRandSuffix(randSuffix); err != nil {
+		return "", err
 	}
-	if strings.Contains(randSuffix, "-") {
-		return "", fmt.Errorf("randSuffix cannot contain hyphens")
-	}
-	if len(randSuffix) > podRandSuffixLen {
-		return "", fmt.Errorf("randSuffix is too long (%d > %d)", len(randSuffix), podRandSuffixLen)
-	}
-	rsName, err := ReplicasetName(clusterID, templateName)
+	workloadName, err := NewSandboxWorkloadName(clusterID, templateName)
 	if err != nil {
 		return "", err
 	}
-	name := fmt.Sprintf("%s-%s", rsName, randSuffix)
+	name := fmt.Sprintf("%s-%s", workloadName.ReplicaSetName(), randSuffix)
 	if err := validateDNSLabel(name); err != nil {
 		return "", err
 	}
@@ -64,8 +64,15 @@ func SandboxName(clusterID, templateName, randSuffix string) (string, error) {
 	return name, nil
 }
 
-// CheckTemplateName validates template naming constraints for K8s resources.
-func CheckTemplateName(clusterID, templateName string) error {
-	_, err := ReplicasetName(clusterID, templateName)
-	return err
+func validateSandboxRandSuffix(randSuffix string) error {
+	if randSuffix == "" {
+		return fmt.Errorf("randSuffix is empty")
+	}
+	if strings.Contains(randSuffix, "-") {
+		return fmt.Errorf("randSuffix cannot contain hyphens")
+	}
+	if len(randSuffix) > podRandSuffixLen {
+		return fmt.Errorf("randSuffix is too long (%d > %d)", len(randSuffix), podRandSuffixLen)
+	}
+	return nil
 }

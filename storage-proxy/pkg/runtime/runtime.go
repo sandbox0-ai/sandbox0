@@ -27,7 +27,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	spmigrations "github.com/sandbox0-ai/sandbox0/storage-proxy/migrations"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/auth"
@@ -35,6 +34,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
 	fsserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsserver"
 	httpserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/http"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/notify"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/snapshot"
@@ -146,8 +146,8 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		}
 		r.pool = pool
 
-		sharedClock, err := clock.New(ctx, &pgxPoolClockAdapter{pool: pool},
-			clock.WithLogger(&zapClockLogger{logger: r.logger}),
+		sharedClock, err := clock.NewPGX(ctx, pool,
+			clock.WithZapLogger(r.logger),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("initialize manager storage shared clock: %w", err)
@@ -269,8 +269,21 @@ func New(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		snapshotMgr.SetFlushCoordinator(r.coordinator)
 	}
 
-	storageHTTP := httpserver.NewServer(r.logrusLogger, r.cfg, r.k8sClient, repo, meteringRepo, r.cfg.RegionID, httpAuthenticator, snapshotMgr, volumeBarrier, r.volMgr, fsServer, eventHub)
-	storageHTTP.SetQuotaRepository(quotaRepo)
+	storageHTTP := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
+		Logger:           r.logrusLogger,
+		Config:           r.cfg,
+		KubernetesClient: r.k8sClient,
+		Volumes:          repo,
+		Metering:         meteringRepo,
+		Quota:            quotaRepo,
+		RegionID:         r.cfg.RegionID,
+		Authenticator:    httpAuthenticator,
+		Snapshots:        snapshotMgr,
+		MutationBarrier:  volumeBarrier,
+		Mounts:           r.volMgr,
+		Files:            fsServer,
+		Events:           eventHub,
+	})
 	r.httpHandler = storageHTTP
 	if r.observability != nil {
 		r.httpHandler = httpobs.ServerMiddleware(r.observability.HTTPServerConfig(nil))(r.httpHandler)
@@ -676,44 +689,6 @@ func buildDirectVolumeFileCleanupInterval(cfg *config.StorageProxyConfig, idleTT
 		cleanupInterval = time.Second
 	}
 	return cleanupInterval
-}
-
-type pgxPoolClockAdapter struct{ pool *pgxpool.Pool }
-
-func (a *pgxPoolClockAdapter) QueryRow(ctx context.Context, query string, args ...any) clock.Row {
-	return &pgxClockRowAdapter{row: a.pool.QueryRow(ctx, query, args...)}
-}
-
-type pgxClockRowAdapter struct {
-	row interface{ Scan(dest ...any) error }
-}
-
-func (r *pgxClockRowAdapter) Scan(dest ...any) error { return r.row.Scan(dest...) }
-
-type zapClockLogger struct{ logger *zap.Logger }
-
-func (z *zapClockLogger) Info(msg string, keysAndValues ...any) {
-	z.logger.Info(msg, toZapFields(keysAndValues)...)
-}
-func (z *zapClockLogger) Warn(msg string, keysAndValues ...any) {
-	z.logger.Warn(msg, toZapFields(keysAndValues)...)
-}
-func (z *zapClockLogger) Error(msg string, keysAndValues ...any) {
-	z.logger.Error(msg, toZapFields(keysAndValues)...)
-}
-
-func toZapFields(keysAndValues []any) []zap.Field {
-	if len(keysAndValues)%2 != 0 {
-		return []zap.Field{zap.Any("args", keysAndValues)}
-	}
-	fields := make([]zap.Field, 0, len(keysAndValues)/2)
-	for i := 0; i < len(keysAndValues); i += 2 {
-		key, ok := keysAndValues[i].(string)
-		if ok {
-			fields = append(fields, zap.Any(key, keysAndValues[i+1]))
-		}
-	}
-	return fields
 }
 
 type volumeProviderAdapter struct{ volMgr *volume.Manager }

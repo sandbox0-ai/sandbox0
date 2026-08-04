@@ -295,37 +295,6 @@ func TestResolveSandboxNodePlacementUsesSharedPlacement(t *testing.T) {
 	}
 }
 
-func TestConfigHashAnnotationChangesWithConfig(t *testing.T) {
-	sameA, err := ConfigHashAnnotation(map[string]any{
-		"http_port": 8080,
-		"metrics":   true,
-	})
-	if err != nil {
-		t.Fatalf("hash annotation for config A: %v", err)
-	}
-	sameB, err := ConfigHashAnnotation(map[string]any{
-		"http_port": 8080,
-		"metrics":   true,
-	})
-	if err != nil {
-		t.Fatalf("hash annotation for config B: %v", err)
-	}
-	changed, err := ConfigHashAnnotation(map[string]any{
-		"http_port": 18080,
-		"metrics":   true,
-	})
-	if err != nil {
-		t.Fatalf("hash annotation for changed config: %v", err)
-	}
-
-	if !reflect.DeepEqual(sameA, sameB) {
-		t.Fatalf("expected identical config to have identical hash annotation, got %#v vs %#v", sameA, sameB)
-	}
-	if sameA[PodTemplateConfigHashAnnotation] == changed[PodTemplateConfigHashAnnotation] {
-		t.Fatalf("expected changed config to produce a different hash, got %q", changed[PodTemplateConfigHashAnnotation])
-	}
-}
-
 func TestReconcileHashedServiceConfigMapCreatesImmutableContentAddressedConfigMap(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {

@@ -10,8 +10,9 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -159,14 +160,14 @@ func (c *SandboxLifecycleController) Run(ctx context.Context, workers int) error
 }
 
 func (c *SandboxLifecycleController) handlePodUpsert(obj any) {
-	pod := extractPod(obj)
+	pod := sandboxPodFromInformerEvent(obj)
 	if info, ok := sandboxLifecycleInfoFromPod(pod); ok {
 		c.queue.Add(sandboxLifecycleItemFromInfo(info, false))
 	}
 }
 
 func (c *SandboxLifecycleController) handlePodDelete(obj any) {
-	pod := extractPod(obj)
+	pod := sandboxPodFromInformerEvent(obj)
 	if pod == nil {
 		return
 	}
@@ -479,19 +480,19 @@ func (s *SandboxService) runtimeDeletionDisposition(ctx context.Context, info Sa
 		return false, false, fmt.Errorf("get sandbox record for runtime deletion cleanup: %w", err)
 	}
 	runtimeOnly := SandboxRecordDeletionIsRuntimeOnly(record, info.Namespace, info.PodName, info.RuntimeGeneration)
-	return runtimeOnly, runtimeOnly && record != nil && record.DesiredState == SandboxDesiredStatePaused, nil
+	return runtimeOnly, runtimeOnly && record != nil && record.DesiredState == sandboxstore.SandboxDesiredStatePaused, nil
 }
 
 // SandboxRecordDeletionIsRuntimeOnly reports whether Pod deletion is limited to
 // runtime-scoped cleanup. For a tracked sandbox, only durable
 // terminating/deleted intent authorizes sandbox-wide cleanup; untracked legacy
 // Pods retain the existing sandbox-wide cleanup behavior.
-func SandboxRecordDeletionIsRuntimeOnly(record *SandboxRecord, _ string, _ string, _ int64) bool {
+func SandboxRecordDeletionIsRuntimeOnly(record *sandboxstore.SandboxRecord, _ string, _ string, _ int64) bool {
 	if record == nil {
 		return false
 	}
 	switch record.DesiredState {
-	case SandboxDesiredStateTerminating, SandboxDesiredStateDeleted:
+	case sandboxstore.SandboxDesiredStateTerminating, sandboxstore.SandboxDesiredStateDeleted:
 		return false
 	default:
 		return true
@@ -664,7 +665,7 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 		userID = strings.TrimSpace(pod.Annotations[controller.AnnotationUserID])
 		webhookStateVolumeID = strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
 		if configJSON := strings.TrimSpace(pod.Annotations[controller.AnnotationConfig]); configJSON != "" {
-			var cfg SandboxConfig
+			var cfg sandboxstore.SandboxConfig
 			if err := json.Unmarshal([]byte(configJSON), &cfg); err == nil && cfg.Webhook != nil {
 				webhookURL = strings.TrimSpace(cfg.Webhook.URL)
 			}

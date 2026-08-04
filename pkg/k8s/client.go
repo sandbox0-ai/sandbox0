@@ -65,16 +65,6 @@ func ApplyDefaultRateLimit(config *rest.Config) {
 	}
 }
 
-// NewClient creates a new Kubernetes clientset using in-cluster config or kubeconfig
-func NewClient(kubeconfigPath string) (kubernetes.Interface, error) {
-	config, err := BuildRestConfig(kubeconfigPath)
-	if err != nil {
-		return nil, err
-	}
-
-	return kubernetes.NewForConfig(config)
-}
-
 // NewClientWithObservability creates a new Kubernetes clientset with observability instrumentation
 func NewClientWithObservability(kubeconfigPath string, obsProvider *observability.Provider) (kubernetes.Interface, error) {
 	config, err := BuildRestConfig(kubeconfigPath)

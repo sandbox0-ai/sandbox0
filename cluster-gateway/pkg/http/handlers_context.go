@@ -11,10 +11,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
-	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/proxy"
 	"go.uber.org/zap"
 )
@@ -49,7 +50,7 @@ func (s *Server) createContext(c *gin.Context) {
 		proxyTimeout = 10 * time.Second
 	}
 	reqURL := *procdURL
-	reqURL.Path = "/api/v1/contexts"
+	reqURL.Path = procdapi.ContextsPath
 	upReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, reqURL.String(), bytes.NewReader(body))
 	if err != nil {
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "proxy initialization failed")
@@ -86,7 +87,7 @@ func (s *Server) listContexts(c *gin.Context) {
 	if !ok {
 		return
 	}
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.ContextsPath)
 }
 
 // getContext gets a specific context
@@ -95,7 +96,7 @@ func (s *Server) getContext(c *gin.Context) {
 	if !ok {
 		return
 	}
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID)
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.ContextPath(ctxID))
 }
 
 // deleteContext deletes a context
@@ -104,7 +105,7 @@ func (s *Server) deleteContext(c *gin.Context) {
 	if !ok {
 		return
 	}
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID)
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.ContextPath(ctxID))
 }
 
 // restartContext restarts a context
@@ -113,7 +114,7 @@ func (s *Server) restartContext(c *gin.Context) {
 	if !ok {
 		return
 	}
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/restart")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.ContextPath(ctxID)+"/restart")
 }
 
 // contextInput sends input to a context
@@ -122,7 +123,7 @@ func (s *Server) contextInput(c *gin.Context) {
 	if !ok {
 		return
 	}
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/input")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.ContextPath(ctxID)+"/input")
 }
 
 // contextExec executes context input synchronously
@@ -131,7 +132,7 @@ func (s *Server) contextExec(c *gin.Context) {
 	if !ok {
 		return
 	}
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/exec")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.ContextPath(ctxID)+"/exec")
 }
 
 // contextResize resizes a context
@@ -140,7 +141,7 @@ func (s *Server) contextResize(c *gin.Context) {
 	if !ok {
 		return
 	}
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/resize")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.ContextPath(ctxID)+"/resize")
 }
 
 // contextSignal sends a signal to a context
@@ -149,7 +150,7 @@ func (s *Server) contextSignal(c *gin.Context) {
 	if !ok {
 		return
 	}
-	s.proxyToSandboxProcdPath(c, sandboxID, "/api/v1/contexts/"+ctxID+"/signal")
+	s.proxyToSandboxProcdPath(c, sandboxID, procdapi.ContextPath(ctxID)+"/signal")
 }
 
 // contextWebSocket handles WebSocket connections for context
@@ -173,7 +174,7 @@ func (s *Server) contextWebSocket(c *gin.Context) {
 
 	// Handle WebSocket upgrade
 	wsProxy := proxy.NewWebSocketProxy(s.logger, proxy.WithRequestModifier(requestModifier))
-	c.Request.URL.Path = "/api/v1/contexts/" + ctxID + "/ws"
+	c.Request.URL.Path = procdapi.ContextWebSocketPath(ctxID)
 	wsProxy.Proxy(procdURL)(c)
 }
 

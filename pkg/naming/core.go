@@ -31,6 +31,9 @@ const DefaultClusterID = defaultClusterID
 // ClusterIDMaxLen is the longest cluster ID that can be encoded into sandbox names.
 const ClusterIDMaxLen = clusterIDMaxLen
 
+// DNSLabelMaxLen is the Kubernetes DNS-1123 label length limit.
+const DNSLabelMaxLen = dnsLabelMaxLen
+
 // ClusterIDOrDefault returns the cluster ID or a default value.
 func ClusterIDOrDefault(clusterID *string) string {
 	if clusterID != nil && *clusterID != "" {
@@ -132,6 +135,12 @@ func slugWithHash(input string, maxLen int) (string, error) {
 	return slug, nil
 }
 
+// DNSLabelWithHash normalizes input into a DNS-1123 label and adds a stable
+// hash when normalization or truncation would otherwise lose uniqueness.
+func DNSLabelWithHash(input string, maxLen int) (string, error) {
+	return slugWithHash(input, maxLen)
+}
+
 func encodeClusterID(clusterID string) (string, error) {
 	if err := ValidateClusterID(clusterID); err != nil {
 		return "", err
@@ -144,6 +153,12 @@ func encodeClusterID(clusterID string) (string, error) {
 		return "", fmt.Errorf("encoded cluster key is invalid: %w", err)
 	}
 	return encoded, nil
+}
+
+// ClusterKey encodes a validated cluster ID into the DNS-safe key embedded in
+// sandbox workload names.
+func ClusterKey(clusterID string) (string, error) {
+	return encodeClusterID(clusterID)
 }
 
 func decodeClusterKey(clusterKey string) (string, error) {

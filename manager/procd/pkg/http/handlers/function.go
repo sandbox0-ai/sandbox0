@@ -352,13 +352,13 @@ func (h *FunctionHandler) requestTimeout(timeoutMS int) (time.Duration, error) {
 func (h *FunctionHandler) materializeSource(source sandboxfunction.Source) (string, error) {
 	digest := source.Digest
 	if digest == "" {
-		digest = sandboxfunction.InlineDigest(source.Code)
+		digest = inlineFunctionDigest(source.Code)
 	}
 	if !functionDigestPattern.MatchString(digest) {
 		return "", errors.New("source.digest must be a sha256 digest")
 	}
-	expected := sandboxfunction.InlineDigest(source.Code)
-	if source.Code != "" && digest != expected && digest != sandboxfunction.LegacyInlineDigest(source.Filename, source.Code) {
+	expected := inlineFunctionDigest(source.Code)
+	if source.Code != "" && digest != expected && digest != legacyInlineFunctionDigest(source.Filename, source.Code) {
 		return "", errors.New("source.digest does not match source code")
 	}
 	dirName := strings.TrimPrefix(digest, "sha256:")
@@ -830,7 +830,7 @@ func functionConcurrencyKey(req sandboxfunction.ExecuteRequest) string {
 	}
 	digest := req.Source.Digest
 	if digest == "" && req.Source.Code != "" {
-		digest = sandboxfunction.InlineDigest(req.Source.Code)
+		digest = inlineFunctionDigest(req.Source.Code)
 	}
 	return "source:" + req.Runtime + ":" + req.Handler + ":" + digest
 }

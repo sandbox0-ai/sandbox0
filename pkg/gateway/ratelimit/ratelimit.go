@@ -17,11 +17,6 @@ const (
 	DefaultCleanupInterval = tokenbucket.DefaultCleanupInterval
 )
 
-var (
-	ErrLimited = tokenbucket.ErrLimited
-	ErrClosed  = tokenbucket.ErrClosed
-)
-
 // Limit defines a token bucket rate limit.
 type Limit struct {
 	RPS   int

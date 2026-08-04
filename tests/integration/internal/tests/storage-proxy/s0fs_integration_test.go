@@ -183,14 +183,6 @@ func TestS0FSIntegrationSnapshotRetainsCompactedSegmentsUntilReleased(t *testing
 	}
 
 	materializer := s0fs.NewMaterializer(volumeID, store, heads)
-	snapshotPayload, err := s0fs.NewSnapshotReader(snapshotState, materializer).Read(node.Inode, 0, 6)
-	if err != nil {
-		t.Fatalf("SnapshotReader.Read() error = %v", err)
-	}
-	if string(snapshotPayload) != "abcdef" {
-		t.Fatalf("snapshot payload = %q, want abcdef", snapshotPayload)
-	}
-
 	head := loadCommittedHead(t, ctx, heads, volumeID)
 	retainedManifests := map[string]struct{}{head.ManifestKey: {}}
 	withSnapshot, err := materializer.PlanGarbageCollection(ctx, []*s0fs.SnapshotState{compacted.State, snapshotState}, retainedManifests)

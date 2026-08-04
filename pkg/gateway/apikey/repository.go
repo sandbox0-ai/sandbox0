@@ -23,6 +23,21 @@ var (
 const (
 	ScopeTeam     = "team"
 	ScopePlatform = "platform"
+
+	apiKeysByTeamIDQuery = `
+		SELECT id, key_value, team_id, created_by, name, roles, scope,
+		       is_active, expires_at, last_used_at, usage_count, created_at, updated_at
+		FROM api_keys
+		WHERE team_id = $1
+		ORDER BY created_at DESC
+	`
+	apiKeysByUserIDQuery = `
+		SELECT id, key_value, team_id, created_by, name, roles, scope,
+		       is_active, expires_at, last_used_at, usage_count, created_at, updated_at
+		FROM api_keys
+		WHERE user_id = $1
+		ORDER BY created_at DESC
+	`
 )
 
 // APIKey represents an API key stored in the database.
@@ -136,49 +151,16 @@ func (r *Repository) CreateAPIKey(ctx context.Context, teamID, regionID, userID,
 
 // GetAPIKeysByTeamID retrieves all API keys for a team.
 func (r *Repository) GetAPIKeysByTeamID(ctx context.Context, teamID string) ([]*APIKey, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, key_value, team_id, created_by, name, roles, scope,
-		       is_active, expires_at, last_used_at, usage_count, created_at, updated_at
-		FROM api_keys
-		WHERE team_id = $1
-		ORDER BY created_at DESC
-	`, teamID)
-	if err != nil {
-		return nil, fmt.Errorf("query api keys: %w", err)
-	}
-	defer rows.Close()
-
-	keys := make([]*APIKey, 0)
-	for rows.Next() {
-		var key APIKey
-		var rolesJSON []byte
-		if err := rows.Scan(
-			&key.ID, &key.KeyValue, &key.TeamID, &key.CreatedBy, &key.Name,
-			&rolesJSON, &key.Scope, &key.IsActive, &key.ExpiresAt,
-			&key.LastUsed, &key.UsageCount, &key.CreatedAt, &key.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan key: %w", err)
-		}
-		if err := normalizeAPIKeyRecord(&key, rolesJSON, true); err != nil {
-			return nil, err
-		}
-		keys = append(keys, &key)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate api keys: %w", err)
-	}
-	return keys, nil
+	return r.queryAPIKeys(ctx, apiKeysByTeamIDQuery, teamID)
 }
 
 // GetAPIKeysByUserID retrieves all API keys created by a user.
 func (r *Repository) GetAPIKeysByUserID(ctx context.Context, userID string) ([]*APIKey, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, key_value, team_id, created_by, name, roles, scope,
-		       is_active, expires_at, last_used_at, usage_count, created_at, updated_at
-		FROM api_keys
-		WHERE user_id = $1
-		ORDER BY created_at DESC
-	`, userID)
+	return r.queryAPIKeys(ctx, apiKeysByUserIDQuery, userID)
+}
+
+func (r *Repository) queryAPIKeys(ctx context.Context, query, ownerID string) ([]*APIKey, error) {
+	rows, err := r.pool.Query(ctx, query, ownerID)
 	if err != nil {
 		return nil, fmt.Errorf("query api keys: %w", err)
 	}

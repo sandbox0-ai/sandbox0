@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 )
 
 const (
@@ -17,15 +18,14 @@ const (
 	maxCapturedOutputBytes   = 1 << 20
 )
 
-// ProcessType defines the type of process.
-type ProcessType string
-
 const (
 	// ProcessTypeREPL represents a REPL process (Python, Node, Bash, Zsh, Ruby, Lua, PHP, R, Perl, etc.)
-	ProcessTypeREPL ProcessType = "repl"
+	ProcessTypeREPL = procdapi.ProcessTypeREPL
 	// ProcessTypeCMD represents a one-time command execution (e.g., /bin/ls, /bin/cat)
-	ProcessTypeCMD ProcessType = "cmd"
+	ProcessTypeCMD = procdapi.ProcessTypeCMD
 )
+
+type ProcessType = procdapi.ProcessType
 
 // OutputSource defines the source of process output.
 type OutputSource string
@@ -51,10 +51,7 @@ const (
 )
 
 // PTYSize represents terminal dimensions.
-type PTYSize struct {
-	Rows uint16 `json:"rows"`
-	Cols uint16 `json:"cols"`
-}
+type PTYSize = procdapi.PTYSize
 
 // ProcessConfig holds configuration for creating a process.
 type ProcessConfig struct {
@@ -275,13 +272,6 @@ func NewBaseProcess(id string, processType ProcessType, config ProcessConfig) *B
 		close(bp.inputReady)
 	}
 	return bp
-}
-
-// SetOutputForwarder configures an optional diagnostic sink for process output.
-func (bp *BaseProcess) SetOutputForwarder(forwarder OutputForwarder) {
-	bp.mu.Lock()
-	defer bp.mu.Unlock()
-	bp.outputForwarder = forwarder
 }
 
 // AddExitHandler appends an exit handler to the handler chain.

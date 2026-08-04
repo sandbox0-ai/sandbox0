@@ -8,11 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	mgrv1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
+	e2eframework "github.com/sandbox0-ai/sandbox0/tests/e2e/internal/framework"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -214,14 +215,36 @@ func assertTerminatedProcdAutonomousRecovery(env *framework.ScenarioEnv, session
 	_, err = execInSandboxPod(env, namespace, before.Metadata.Name, "printf recovered > "+shellQuote(markerPath)+"; sync")
 	Expect(err).NotTo(HaveOccurred())
 
-	_, _ = framework.KubectlExecContainerOutput(
+	err = e2eframework.StopKindPodContainer(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
 		namespace,
 		before.Metadata.Name,
 		"procd",
-		"/bin/sh", "-lc", "kill -KILL 1",
 	)
+	Expect(err).NotTo(HaveOccurred())
+
+	Eventually(func() error {
+		pods, err := listE2EPods(env, namespace, "")
+		if err != nil {
+			return err
+		}
+		for _, pod := range pods.Items {
+			if pod.Metadata.Name != before.Metadata.Name {
+				continue
+			}
+			status, found := e2eContainerStatusByName(pod.Status.ContainerStatuses, "procd")
+			if !found || status.State.Terminated == nil {
+				return fmt.Errorf("old procd container is not terminated")
+			}
+			if status.State.Terminated.ExitCode != 137 {
+				return fmt.Errorf("old procd container exited with %d, want 137", status.State.Terminated.ExitCode)
+			}
+			return nil
+		}
+		// Crash recovery may already have deleted the old Pod after CRI stop.
+		return nil
+	}).WithTimeout(30 * time.Second).WithPolling(runtimeRecoveryPolling).Should(Succeed())
 
 	var recovered e2ePod
 	Eventually(func() error {
@@ -359,6 +382,15 @@ func podCondition(pod e2ePod, conditionType string) e2ePodCondition {
 		}
 	}
 	return e2ePodCondition{}
+}
+
+func e2eContainerStatusByName(statuses []e2eContainerStatus, name string) (e2eContainerStatus, bool) {
+	for _, status := range statuses {
+		if status.Name == name {
+			return status, true
+		}
+	}
+	return e2eContainerStatus{}, false
 }
 
 func readyDefaultIdlePodCount(env *framework.ScenarioEnv, namespace string) int {

@@ -253,32 +253,7 @@ func (a *socks5Adapter) Capability() adapterCapability {
 }
 
 func (a *socks5Adapter) Handle(req *adapterRequest) error {
-	if req == nil || req.Server == nil || req.Conn == nil {
-		return fmt.Errorf("socks5 adapter requires connection")
-	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "socks5")
-	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
-		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "socks5", true); err != nil {
-			if req.EgressAuth.ShouldBypass() {
-				return req.Server.relayTCPRequest(req)
-			}
-			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
-				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
-			}
-			return fmt.Errorf("prepare username/password directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
-		}
-		if req.EgressAuth.ShouldBypass() {
-			return req.Server.relayTCPRequest(req)
-		}
-		if req.EgressAuth.ResolveError != nil {
-			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
-		}
-		if req.EgressAuth.ResolvedUsernamePassword == nil {
-			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
-		}
-		return req.Server.proxySOCKS5Session(req)
-	}
-	return req.Server.relayTCPRequest(req)
+	return handleUsernamePasswordTCPAdapter(req, "socks5", (*Server).proxySOCKS5Session)
 }
 
 type amqpAdapter struct{}
@@ -324,32 +299,7 @@ func (a *mqttAdapter) Capability() adapterCapability {
 }
 
 func (a *mqttAdapter) Handle(req *adapterRequest) error {
-	if req == nil || req.Server == nil || req.Conn == nil {
-		return fmt.Errorf("mqtt adapter requires connection")
-	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "mqtt")
-	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
-		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "mqtt", true); err != nil {
-			if req.EgressAuth.ShouldBypass() {
-				return req.Server.relayTCPRequest(req)
-			}
-			if errors.Is(err, errEgressAuthDirectiveUnsupported) {
-				return fmt.Errorf("egress auth directives unsupported for %q", req.EgressAuth.Rule.AuthRef)
-			}
-			return fmt.Errorf("prepare username/password directives for %q: %w", req.EgressAuth.Rule.AuthRef, err)
-		}
-		if req.EgressAuth.ShouldBypass() {
-			return req.Server.relayTCPRequest(req)
-		}
-		if req.EgressAuth.ResolveError != nil {
-			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
-		}
-		if req.EgressAuth.ResolvedUsernamePassword == nil {
-			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
-		}
-		return req.Server.proxyMQTTSession(req)
-	}
-	return req.Server.relayTCPRequest(req)
+	return handleUsernamePasswordTCPAdapter(req, "mqtt", (*Server).proxyMQTTSession)
 }
 
 type mongodbAdapter struct{}
@@ -379,12 +329,20 @@ func (a *redisAdapter) Capability() adapterCapability {
 }
 
 func (a *redisAdapter) Handle(req *adapterRequest) error {
+	return handleUsernamePasswordTCPAdapter(req, "redis", (*Server).proxyRedisSession)
+}
+
+func handleUsernamePasswordTCPAdapter(
+	req *adapterRequest,
+	protocol string,
+	proxySession func(*Server, *adapterRequest) error,
+) error {
 	if req == nil || req.Server == nil || req.Conn == nil {
-		return fmt.Errorf("redis adapter requires connection")
+		return fmt.Errorf("%s adapter requires connection", protocol)
 	}
-	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, "redis")
+	req.Server.recordFlow(req.SrcIP, req.DestIP, req.DestPort, "tcp", remotePort(req.Conn.RemoteAddr()), req.Host, protocol)
 	if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
-		if err := prepareUsernamePasswordDirectives(req.EgressAuth, "redis", true); err != nil {
+		if err := prepareUsernamePasswordDirectives(req.EgressAuth, protocol, true); err != nil {
 			if req.EgressAuth.ShouldBypass() {
 				return req.Server.relayTCPRequest(req)
 			}
@@ -402,7 +360,7 @@ func (a *redisAdapter) Handle(req *adapterRequest) error {
 		if req.EgressAuth.ResolvedUsernamePassword == nil {
 			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
 		}
-		return req.Server.proxyRedisSession(req)
+		return proxySession(req.Server, req)
 	}
 	return req.Server.relayTCPRequest(req)
 }

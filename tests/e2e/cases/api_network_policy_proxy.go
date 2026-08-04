@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	e2eframework "github.com/sandbox0-ai/sandbox0/tests/e2e/internal/framework"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -50,7 +51,7 @@ func setupEgressProxyFixture(env *framework.ScenarioEnv) (*egressProxyFixture, f
 
 	var serviceIP string
 	Eventually(func() string {
-		ip, err := framework.KubectlGetJSONPath(
+		ip, err := e2eframework.KubectlGetJSONPath(
 			env.TestCtx.Context,
 			env.Config.Kubeconfig,
 			egressProxyFixtureNamespace,
@@ -64,7 +65,7 @@ func setupEgressProxyFixture(env *framework.ScenarioEnv) (*egressProxyFixture, f
 		return strings.TrimSpace(ip)
 	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).ShouldNot(BeEmpty())
 
-	serviceIP, err := framework.KubectlGetJSONPath(
+	serviceIP, err := e2eframework.KubectlGetJSONPath(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
 		egressProxyFixtureNamespace,

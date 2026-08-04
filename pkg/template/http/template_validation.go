@@ -15,10 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func validateTemplateSpecForClaims(spec v1alpha1.SandboxTemplateSpec, claims *internalauth.Claims) error {
-	return validateTemplateSpecForClaimsWithMemoryPerCPU(spec, claims, configuredTemplateMemoryPerCPU())
-}
-
 func validateTemplateSpecForClaimsWithMemoryPerCPU(
 	spec v1alpha1.SandboxTemplateSpec,
 	claims *internalauth.Claims,

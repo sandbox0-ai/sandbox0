@@ -4,7 +4,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -21,7 +21,7 @@ func TestPodResolverResolvesSandboxPodWithoutCgroup(t *testing.T) {
 			Namespace: "default",
 			UID:       types.UID("uid-1"),
 			Labels: map[string]string{
-				controller.LabelSandboxID: "sandbox-1",
+				sandboxpod.LabelSandboxID: "sandbox-1",
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -56,7 +56,7 @@ func TestPodResolverRejectsPodOnDifferentNode(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pod-1",
 			Namespace: "default",
-			Labels:    map[string]string{controller.LabelSandboxID: "sandbox-1"},
+			Labels:    map[string]string{sandboxpod.LabelSandboxID: "sandbox-1"},
 		},
 		Spec: corev1.PodSpec{NodeName: "node-b"},
 	}

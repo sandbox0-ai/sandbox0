@@ -38,7 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -278,79 +277,6 @@ func (r *ResourceManager) EnsureDeploymentRolloutComplete(ctx context.Context, s
 		)
 	}
 	return nil
-}
-
-// ReconcileDaemonSet creates or updates a daemonset.
-func (r *ResourceManager) ReconcileDaemonSet(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, def ServiceDefinition) error {
-	return r.ReconcileDaemonSetWithScope(ctx, NewObjectScope(infra), name, labels, def)
-}
-
-func (r *ResourceManager) ReconcileDaemonSetWithScope(ctx context.Context, scope ObjectScope, name string, labels map[string]string, def ServiceDefinition) error {
-	defaultResources := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("100m"),
-			corev1.ResourceMemory: resource.MustParse("128Mi"),
-		},
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("500m"),
-			corev1.ResourceMemory: resource.MustParse("256Mi"),
-		},
-	}
-	if def.Resources != nil {
-		defaultResources = *def.Resources
-	}
-
-	desiredLabels := EnsureManagedLabels(labels, name)
-	desiredDs := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: scope.Namespace,
-			Labels:    desiredLabels,
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:      desiredLabels,
-					Annotations: EnsurePodTemplateAnnotations(def.PodAnnotations),
-				},
-				Spec: corev1.PodSpec{
-					ServiceAccountName: def.ServiceAccountName,
-					HostNetwork:        true,
-					HostPID:            true,
-					DNSPolicy:          corev1.DNSClusterFirstWithHostNet,
-					Containers: []corev1.Container{
-						{
-							Name:            def.Name,
-							Image:           def.Image,
-							ImagePullPolicy: ResolveImagePullPolicy(def, r.ImagePullPolicy),
-							Env:             def.EnvVars,
-							VolumeMounts:    def.VolumeMounts,
-							Ports:           ResolveContainerPorts(def),
-							SecurityContext: &corev1.SecurityContext{
-								Privileged: BoolPtr(true),
-								Capabilities: &corev1.Capabilities{
-									Add: []corev1.Capability{"NET_ADMIN", "SYS_ADMIN"},
-								},
-							},
-							Resources:      defaultResources,
-							LivenessProbe:  def.LivenessProbe,
-							ReadinessProbe: def.ReadinessProbe,
-						},
-					},
-					Volumes: def.Volumes,
-				},
-			},
-		},
-	}
-
-	if err := scope.SetControllerReference(desiredDs, r.Scheme); err != nil {
-		return err
-	}
-
-	return r.ApplyDaemonSetWithScope(ctx, scope, desiredDs)
 }
 
 // ApplyStatefulSet creates or updates a statefulset using fresh reads on each retry.
@@ -798,54 +724,6 @@ func normalizeHostList(values []string) []string {
 	return hosts
 }
 
-// ReconcileServiceConfigMap creates or updates a configmap for a service.
-func (r *ResourceManager) ReconcileServiceConfigMap(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, config any) error {
-	return r.ReconcileServiceConfigMapWithScope(ctx, NewObjectScope(infra), name, labels, config)
-}
-
-func (r *ResourceManager) ReconcileServiceConfigMapWithScope(ctx context.Context, scope ObjectScope, name string, labels map[string]string, config any) error {
-	if config == nil {
-		config = map[string]any{}
-	}
-
-	payload, err := yamlv3.Marshal(config)
-	if err != nil {
-		return fmt.Errorf("marshal config for %s: %w", name, err)
-	}
-
-	desiredLabels := EnsureManagedLabels(labels, name)
-	desired := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: scope.Namespace,
-			Labels:    desiredLabels,
-		},
-		Data: map[string]string{
-			"config.yaml": string(payload),
-		},
-	}
-
-	if err := scope.SetControllerReference(desired, r.Scheme); err != nil {
-		return err
-	}
-
-	existing := &corev1.ConfigMap{}
-	err = r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: scope.Namespace}, existing)
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
-	if errors.IsNotFound(err) {
-		return r.Client.Create(ctx, desired)
-	}
-
-	return r.UpdateObjectIfChanged(ctx, existing, func() {
-		existing.Data = desired.Data
-		existing.Labels = desired.Labels
-		existing.OwnerReferences = desired.OwnerReferences
-	})
-}
-
 func (r *ResourceManager) ReconcileHashedServiceConfigMap(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, name string, labels map[string]string, config any) (ServiceConfigRef, error) {
 	return r.ReconcileHashedServiceConfigMapWithScope(ctx, NewObjectScope(infra), name, labels, config)
 }
@@ -961,49 +839,6 @@ func (r *ResourceManager) cleanupUnusedServiceConfigMaps(ctx context.Context, sc
 // by any Pod are retained until that Pod is gone.
 func (r *ResourceManager) CleanupUnusedServiceConfigMapsWithScope(ctx context.Context, scope ObjectScope, baseName string) error {
 	return r.cleanupUnusedServiceConfigMaps(ctx, scope, baseName, "")
-}
-
-// ReconcileNamespace creates a namespace if it does not exist.
-// It ignores errors if the operator does not have permission to create the namespace.
-func (r *ResourceManager) ReconcileNamespace(ctx context.Context, name string) error {
-	ns := &corev1.Namespace{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: name}, ns)
-	if err == nil {
-		return nil
-	}
-
-	if !errors.IsNotFound(err) {
-		return err
-	}
-
-	desired := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
-	}
-
-	err = r.Client.Create(ctx, desired)
-	if err != nil {
-		if errors.IsForbidden(err) {
-			log.FromContext(ctx).Info("Forbidden to create namespace, skipping", "namespace", name)
-			return nil
-		}
-		return err
-	}
-
-	return nil
-}
-
-func GetOrInitMap(config map[string]any, key string) map[string]any {
-	if val, ok := config[key]; ok {
-		if typed, ok := val.(map[string]any); ok {
-			return typed
-		}
-	}
-
-	child := map[string]any{}
-	config[key] = child
-	return child
 }
 
 // GenerateRandomString generates a random string of specified length.
@@ -1246,14 +1081,6 @@ func ConfigHash(config any) (string, error) {
 func ConfigHashFromPayload(payload []byte) string {
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
-}
-
-func ConfigHashAnnotation(config any) (map[string]string, error) {
-	hash, err := ConfigHash(config)
-	if err != nil {
-		return nil, err
-	}
-	return ConfigHashAnnotationFromHash(hash), nil
 }
 
 func ConfigHashAnnotationFromHash(hash string) map[string]string {

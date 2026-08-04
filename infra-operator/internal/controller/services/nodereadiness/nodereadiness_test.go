@@ -21,7 +21,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
-func TestReconcileLabelsNodesFromComponentReadiness(t *testing.T) {
+func TestCheckLabelsNodesFromComponentReadiness(t *testing.T) {
 	infra := newNodeReadinessInfra()
 	nodeA := newNodeReadinessNode("node-a", map[string]string{"sandbox0.ai/node-role": "sandbox"})
 	nodeB := newNodeReadinessNode("node-b", map[string]string{"sandbox0.ai/node-role": "sandbox"})
@@ -41,8 +41,8 @@ func TestReconcileLabelsNodesFromComponentReadiness(t *testing.T) {
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
-	if err := reconciler.Reconcile(context.Background(), infra, infraplan.Compile(infra)); err != nil {
-		t.Fatalf("Reconcile() error = %v", err)
+	if err := reconciler.Check(context.Background(), infra, infraplan.Compile(infra)); err != nil {
+		t.Fatalf("Check() error = %v", err)
 	}
 
 	gotNodeA := getNodeReadinessNode(t, client, "node-a")
@@ -57,7 +57,7 @@ func TestReconcileLabelsNodesFromComponentReadiness(t *testing.T) {
 	}
 }
 
-func TestReconcileReturnsErrorAndClearsReadinessWhenNoNodeReady(t *testing.T) {
+func TestCheckReturnsErrorAndClearsReadinessWhenNoNodeReady(t *testing.T) {
 	infra := newNodeReadinessInfra()
 	node := newNodeReadinessNode("node-a", map[string]string{"sandbox0.ai/node-role": "sandbox"})
 	client, scheme := newNodeReadinessClient(t,
@@ -67,19 +67,19 @@ func TestReconcileReturnsErrorAndClearsReadinessWhenNoNodeReady(t *testing.T) {
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
-	err := reconciler.Reconcile(context.Background(), infra, infraplan.Compile(infra))
+	err := reconciler.Check(context.Background(), infra, infraplan.Compile(infra))
 	if err == nil {
-		t.Fatal("Reconcile() error = nil, want data-plane readiness error")
+		t.Fatal("Check() error = nil, want data-plane readiness error")
 	}
 	if !strings.Contains(err.Error(), "0/1 ready") {
-		t.Fatalf("Reconcile() error = %v, want 0/1 ready", err)
+		t.Fatalf("Check() error = %v, want 0/1 ready", err)
 	}
 
 	gotNode := getNodeReadinessNode(t, client, "node-a")
 	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
 }
 
-func TestReconcileRequiresKubeletCSIRegistration(t *testing.T) {
+func TestCheckRequiresKubeletCSIRegistration(t *testing.T) {
 	infra := newNodeReadinessInfra()
 	node := newNodeReadinessNode("node-a", map[string]string{"sandbox0.ai/node-role": "sandbox"})
 	client, scheme := newNodeReadinessClient(t,
@@ -92,8 +92,8 @@ func TestReconcileRequiresKubeletCSIRegistration(t *testing.T) {
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
-	if err := reconciler.Reconcile(context.Background(), infra, infraplan.Compile(infra)); err == nil {
-		t.Fatal("Reconcile() error = nil before kubelet CSI registration")
+	if err := reconciler.Check(context.Background(), infra, infraplan.Compile(infra)); err == nil {
+		t.Fatal("Check() error = nil before kubelet CSI registration")
 	}
 	gotNode := getNodeReadinessNode(t, client, "node-a")
 	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)

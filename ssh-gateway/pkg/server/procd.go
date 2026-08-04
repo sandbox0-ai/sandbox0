@@ -17,67 +17,21 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/sftp"
-	procdfile "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/file"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"golang.org/x/crypto/ssh"
 )
 
-type createContextRequest struct {
-	Type    string                `json:"type"`
-	Repl    *createREPLRequest    `json:"repl,omitempty"`
-	Cmd     *createCMDRequest     `json:"cmd,omitempty"`
-	EnvVars map[string]string     `json:"env_vars,omitempty"`
-	PTYSize *createContextPTYSize `json:"pty_size,omitempty"`
-}
-
-type createREPLRequest struct {
-	Alias string `json:"alias"`
-}
-
-type createCMDRequest struct {
-	Command []string `json:"command"`
-}
-
-type createContextPTYSize struct {
-	Rows uint16 `json:"rows"`
-	Cols uint16 `json:"cols"`
-}
-
-type procdContextResponse struct {
-	ID string `json:"id"`
-}
-
-type procdStatResponse struct {
-	Name       string    `json:"name"`
-	Path       string    `json:"path"`
-	Type       string    `json:"type"`
-	Size       int64     `json:"size"`
-	Mode       string    `json:"mode"`
-	ModTime    time.Time `json:"mod_time"`
-	IsLink     bool      `json:"is_link"`
-	LinkTarget string    `json:"link_target,omitempty"`
-}
-
-type procdListResponse struct {
-	Entries []procdStatResponse `json:"entries"`
-}
-
-type procdWSControlMessage struct {
-	Type   string `json:"type"`
-	Data   string `json:"data,omitempty"`
-	Rows   uint16 `json:"rows,omitempty"`
-	Cols   uint16 `json:"cols,omitempty"`
-	Signal string `json:"signal,omitempty"`
-}
-
-type procdWSMessage struct {
-	Type     string `json:"type"`
-	Source   string `json:"source,omitempty"`
-	Data     string `json:"data,omitempty"`
-	ExitCode *int   `json:"exit_code,omitempty"`
-	State    string `json:"state,omitempty"`
-}
+type createContextRequest = procdapi.CreateContextRequest
+type createREPLRequest = procdapi.CreateREPLContextRequest
+type createCMDRequest = procdapi.CreateCMDContextRequest
+type createContextPTYSize = procdapi.PTYSize
+type procdContextResponse = procdapi.ContextResponse
+type procdStatResponse = procdapi.FileInfo
+type procdListResponse = procdapi.FileListResponse
+type procdWSControlMessage = procdapi.WSControlMessage
+type procdWSMessage = procdapi.WSMessage
 
 type ptySpec struct {
 	Term string
@@ -240,7 +194,7 @@ func (s *Server) openExec(ctx context.Context, target *SessionTarget, pty ptySpe
 
 func (s *Server) createShellContext(ctx context.Context, target *SessionTarget, pty ptySpec, headers http.Header) (string, error) {
 	request := createContextRequest{
-		Type:    "repl",
+		Type:    procdapi.ProcessTypeREPL,
 		Repl:    &createREPLRequest{Alias: "bash"},
 		PTYSize: &createContextPTYSize{Rows: pty.Rows, Cols: pty.Cols},
 	}
@@ -253,7 +207,7 @@ func (s *Server) createShellContext(ctx context.Context, target *SessionTarget, 
 		return "", fmt.Errorf("marshal create context request: %w", err)
 	}
 
-	requestURL := strings.TrimRight(target.ProcdURL, "/") + "/api/v1/contexts"
+	requestURL := strings.TrimRight(target.ProcdURL, "/") + procdapi.ContextsPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create procd request: %w", err)
@@ -285,7 +239,7 @@ func (s *Server) createShellContext(ctx context.Context, target *SessionTarget, 
 
 func (s *Server) createExecContext(ctx context.Context, target *SessionTarget, pty ptySpec, command string, headers http.Header) (string, error) {
 	request := createContextRequest{
-		Type: "cmd",
+		Type: procdapi.ProcessTypeCMD,
 		Cmd: &createCMDRequest{
 			Command: []string{"/bin/sh", "-lc", command},
 		},
@@ -302,7 +256,7 @@ func (s *Server) createExecContext(ctx context.Context, target *SessionTarget, p
 		return "", fmt.Errorf("marshal exec context request: %w", err)
 	}
 
-	requestURL := strings.TrimRight(target.ProcdURL, "/") + "/api/v1/contexts"
+	requestURL := strings.TrimRight(target.ProcdURL, "/") + procdapi.ContextsPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create exec procd request: %w", err)
@@ -337,7 +291,7 @@ func (s *Server) readFile(ctx context.Context, target *SessionTarget, filePath s
 	if err != nil {
 		return nil, err
 	}
-	requestURL, err := s.procdFileURL(target.ProcdURL, "/api/v1/files", filePath, nil)
+	requestURL, err := s.procdFileURL(target.ProcdURL, procdapi.FilesPath, filePath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +317,7 @@ func (s *Server) writeFile(ctx context.Context, target *SessionTarget, filePath 
 	if err != nil {
 		return err
 	}
-	requestURL, err := s.procdFileURL(target.ProcdURL, "/api/v1/files", filePath, nil)
+	requestURL, err := s.procdFileURL(target.ProcdURL, procdapi.FilesPath, filePath, nil)
 	if err != nil {
 		return err
 	}
@@ -390,7 +344,7 @@ func (s *Server) statFile(ctx context.Context, target *SessionTarget, filePath s
 	if err != nil {
 		return nil, err
 	}
-	requestURL, err := s.procdFileURL(target.ProcdURL, "/api/v1/files/stat", filePath, nil)
+	requestURL, err := s.procdFileURL(target.ProcdURL, procdapi.FileStatPath, filePath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +378,7 @@ func (s *Server) listDir(ctx context.Context, target *SessionTarget, dirPath str
 	if err != nil {
 		return nil, err
 	}
-	requestURL, err := s.procdFileURL(target.ProcdURL, "/api/v1/files/list", dirPath, nil)
+	requestURL, err := s.procdFileURL(target.ProcdURL, procdapi.FileListPath, dirPath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +419,7 @@ func (s *Server) makeDir(ctx context.Context, target *SessionTarget, dirPath str
 	if recursive {
 		query["recursive"] = "true"
 	}
-	requestURL, err := s.procdFileURL(target.ProcdURL, "/api/v1/files", dirPath, query)
+	requestURL, err := s.procdFileURL(target.ProcdURL, procdapi.FilesPath, dirPath, query)
 	if err != nil {
 		return err
 	}
@@ -491,7 +445,7 @@ func (s *Server) removePath(ctx context.Context, target *SessionTarget, filePath
 	if err != nil {
 		return err
 	}
-	requestURL, err := s.procdFileURL(target.ProcdURL, "/api/v1/files", filePath, nil)
+	requestURL, err := s.procdFileURL(target.ProcdURL, procdapi.FilesPath, filePath, nil)
 	if err != nil {
 		return err
 	}
@@ -521,7 +475,7 @@ func (s *Server) movePath(ctx context.Context, target *SessionTarget, source, de
 	if err != nil {
 		return fmt.Errorf("marshal move request: %w", err)
 	}
-	requestURL := strings.TrimRight(target.ProcdURL, "/") + "/api/v1/files/move"
+	requestURL := strings.TrimRight(target.ProcdURL, "/") + procdapi.FileMovePath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create procd move request: %w", err)
@@ -617,8 +571,8 @@ func parseFileMode(mode string) uint32 {
 	return uint32(parsed)
 }
 
-func isDirType(fileType string) bool {
-	return fileType == string(procdfile.FileTypeDir)
+func isDirType(fileType procdapi.FileType) bool {
+	return fileType == procdapi.FileTypeDir
 }
 
 func (s *Server) dialContextWS(ctx context.Context, procdURL, contextID string, headers http.Header) (*websocket.Conn, error) {
@@ -634,7 +588,7 @@ func (s *Server) dialContextWS(ctx context.Context, procdURL, contextID string, 
 	default:
 		return nil, fmt.Errorf("unsupported procd url scheme %q", baseURL.Scheme)
 	}
-	baseURL.Path = strings.TrimRight(baseURL.Path, "/") + "/api/v1/contexts/" + contextID + "/ws"
+	baseURL.Path = strings.TrimRight(baseURL.Path, "/") + procdapi.ContextWebSocketPath(contextID)
 
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second

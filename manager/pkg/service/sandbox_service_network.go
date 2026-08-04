@@ -12,7 +12,10 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	egressauth "github.com/sandbox0-ai/sandbox0/pkg/egressauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
@@ -110,8 +113,8 @@ func (s *SandboxService) applyPoliciesForPod(
 	pod *corev1.Pod,
 	template *v1alpha1.SandboxTemplate,
 	req *ClaimRequest,
-) (*BuildNetworkPolicyResult, error) {
-	if s.NetworkPolicyService == nil || pod == nil || template == nil || req == nil {
+) (*networkpolicy.BuildNetworkPolicyResult, error) {
+	if s.networkPolicyService == nil || pod == nil || template == nil || req == nil {
 		return nil, nil
 	}
 
@@ -124,11 +127,11 @@ func (s *SandboxService) applyPoliciesForPod(
 		requestNetwork = s.appendWebhookNetworkPolicy(requestNetwork, webhookInfo.URL)
 	}
 
-	sandboxID := sandboxIDFromPod(pod)
+	sandboxID := sandboxPodID(pod)
 	if sandboxID == "" {
 		sandboxID = pod.Name
 	}
-	networkState := s.NetworkPolicyService.BuildNetworkPolicyState(&BuildNetworkPolicyRequest{
+	networkState := s.networkPolicyService.BuildNetworkPolicyState(&networkpolicy.BuildNetworkPolicyRequest{
 		SandboxID:        sandboxID,
 		TeamID:           req.TeamID,
 		TemplateSpec:     template.Spec.Network,
@@ -167,7 +170,7 @@ func (s *SandboxService) setNetworkPolicyAnnotations(pod *corev1.Pod, spec *v1al
 	return newHash, nil
 }
 
-func policySpecFromState(state *BuildNetworkPolicyResult) *v1alpha1.NetworkPolicySpec {
+func policySpecFromState(state *networkpolicy.BuildNetworkPolicyResult) *v1alpha1.NetworkPolicySpec {
 	if state == nil {
 		return nil
 	}
@@ -178,7 +181,7 @@ func noopCredentialBindingRollback(context.Context) error {
 	return nil
 }
 
-func requestCredentialBindings(cfg *SandboxConfig) []v1alpha1.CredentialBinding {
+func requestCredentialBindings(cfg *sandboxstore.SandboxConfig) []v1alpha1.CredentialBinding {
 	if cfg == nil || cfg.Network == nil || cfg.Network.CredentialBindings == nil {
 		return nil
 	}
@@ -196,18 +199,18 @@ func (s *SandboxService) syncCredentialBindings(
 	ctx context.Context,
 	pod *corev1.Pod,
 	teamID string,
-	state *BuildNetworkPolicyResult,
+	state *networkpolicy.BuildNetworkPolicyResult,
 	previousMayExist bool,
 ) (func(context.Context) error, error) {
 	if s.credentialStore == nil || pod == nil || state == nil {
 		return noopCredentialBindingRollback, nil
 	}
 
-	sandboxID := sandboxIDFromPod(pod)
+	sandboxID := sandboxPodID(pod)
 	if sandboxID == "" {
 		sandboxID = pod.Name
 	}
-	var previous *egressauth.BindingRecord
+	var previous *egressauthstore.BindingRecord
 	if previousMayExist {
 		var err error
 		previous, err = s.credentialStore.GetBindings(ctx, teamID, sandboxID)
@@ -239,7 +242,7 @@ func (s *SandboxService) syncCredentialBindings(
 		return nil, err
 	}
 
-	if err := s.credentialStore.UpsertBindings(ctx, &egressauth.BindingRecord{
+	if err := s.credentialStore.UpsertBindings(ctx, &egressauthstore.BindingRecord{
 		SandboxID: sandboxID,
 		TeamID:    teamID,
 		Bindings:  storeBindings,
@@ -249,7 +252,7 @@ func (s *SandboxService) syncCredentialBindings(
 	return rollback, nil
 }
 
-func cloneBindingRecord(record *egressauth.BindingRecord) *egressauth.BindingRecord {
+func cloneBindingRecord(record *egressauthstore.BindingRecord) *egressauthstore.BindingRecord {
 	if record == nil {
 		return nil
 	}
@@ -262,7 +265,7 @@ func (s *SandboxService) loadCredentialBindings(ctx context.Context, pod *corev1
 	if s.credentialStore == nil || pod == nil {
 		return nil, nil
 	}
-	sandboxID := sandboxIDFromPod(pod)
+	sandboxID := sandboxPodID(pod)
 	if sandboxID == "" {
 		sandboxID = pod.Name
 	}
@@ -294,14 +297,14 @@ func sandboxTeamID(pod *corev1.Pod) string {
 
 func toStoreCredentialBindings(
 	ctx context.Context,
-	store egressauth.BindingStore,
+	store egressauthstore.BindingStore,
 	teamID string,
 	in []v1alpha1.CredentialBinding,
-) ([]egressauth.CredentialBinding, error) {
+) ([]egressauthstore.CredentialBinding, error) {
 	if len(in) == 0 {
 		return nil, nil
 	}
-	out := make([]egressauth.CredentialBinding, 0, len(in))
+	out := make([]egressauthstore.CredentialBinding, 0, len(in))
 	for _, binding := range in {
 		source, err := store.GetSourceByRef(ctx, teamID, binding.SourceRef)
 		if err != nil {
@@ -310,7 +313,7 @@ func toStoreCredentialBindings(
 		if source == nil {
 			return nil, fmt.Errorf("credential source %q not found", binding.SourceRef)
 		}
-		storeBinding := egressauth.CredentialBinding{
+		storeBinding := egressauthstore.CredentialBinding{
 			Ref:           binding.Ref,
 			SourceRef:     binding.SourceRef,
 			SourceID:      source.ID,
@@ -323,13 +326,13 @@ func toStoreCredentialBindings(
 	return out, nil
 }
 
-func cloneStoreCredentialBindings(in []egressauth.CredentialBinding) []egressauth.CredentialBinding {
+func cloneStoreCredentialBindings(in []egressauthstore.CredentialBinding) []egressauthstore.CredentialBinding {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]egressauth.CredentialBinding, 0, len(in))
+	out := make([]egressauthstore.CredentialBinding, 0, len(in))
 	for _, binding := range in {
-		cloned := egressauth.CredentialBinding{
+		cloned := egressauthstore.CredentialBinding{
 			Ref:           binding.Ref,
 			SourceRef:     binding.SourceRef,
 			SourceID:      binding.SourceID,
@@ -342,7 +345,7 @@ func cloneStoreCredentialBindings(in []egressauth.CredentialBinding) []egressaut
 	return out
 }
 
-func fromStoreCredentialBindings(in []egressauth.CredentialBinding) []v1alpha1.CredentialBinding {
+func fromStoreCredentialBindings(in []egressauthstore.CredentialBinding) []v1alpha1.CredentialBinding {
 	if len(in) == 0 {
 		return nil
 	}
@@ -359,31 +362,33 @@ func fromStoreCredentialBindings(in []egressauth.CredentialBinding) []v1alpha1.C
 	return out
 }
 
-func toStoreProjection(in v1alpha1.ProjectionSpec) egressauth.ProjectionSpec {
-	out := egressauth.ProjectionSpec{
-		Type: egressauth.CredentialProjectionType(in.Type),
+// toStoreProjection maps the public CRD schema into egress auth storage state.
+// Keep the conversion explicit so schema changes and nested deep-copy requirements stay visible.
+func toStoreProjection(in v1alpha1.ProjectionSpec) egressauthstore.ProjectionSpec {
+	out := egressauthstore.ProjectionSpec{
+		Type: egressauthstore.CredentialProjectionType(in.Type),
 	}
 	if in.HTTPHeaders != nil {
-		out.HTTPHeaders = &egressauth.HTTPHeadersProjection{
-			Headers: make([]egressauth.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
+		out.HTTPHeaders = &egressauthstore.HTTPHeadersProjection{
+			Headers: make([]egressauthstore.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
 		}
 		for _, header := range in.HTTPHeaders.Headers {
-			out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, egressauth.ProjectedHeader{
+			out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, egressauthstore.ProjectedHeader{
 				Name:          header.Name,
 				ValueTemplate: header.ValueTemplate,
 			})
 		}
 	}
 	if in.PlaceholderSubstitution != nil {
-		out.PlaceholderSubstitution = &egressauth.PlaceholderSubstitutionProjection{
-			Replacements: make([]egressauth.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
+		out.PlaceholderSubstitution = &egressauthstore.PlaceholderSubstitutionProjection{
+			Replacements: make([]egressauthstore.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
 		}
 		for _, replacement := range in.PlaceholderSubstitution.Replacements {
 			locations := make([]egressauth.PlaceholderSubstitutionLocation, 0, len(replacement.Locations))
 			for _, location := range replacement.Locations {
 				locations = append(locations, egressauth.PlaceholderSubstitutionLocation(location))
 			}
-			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, egressauth.PlaceholderReplacement{
+			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, egressauthstore.PlaceholderReplacement{
 				Placeholder:   replacement.Placeholder,
 				ValueTemplate: replacement.ValueTemplate,
 				Locations:     locations,
@@ -391,13 +396,13 @@ func toStoreProjection(in v1alpha1.ProjectionSpec) egressauth.ProjectionSpec {
 		}
 	}
 	if in.TLSClientCertificate != nil {
-		out.TLSClientCertificate = &egressauth.TLSClientCertificateProjection{}
+		out.TLSClientCertificate = &egressauthstore.TLSClientCertificateProjection{}
 	}
 	if in.UsernamePassword != nil {
-		out.UsernamePassword = &egressauth.UsernamePasswordProjection{}
+		out.UsernamePassword = &egressauthstore.UsernamePasswordProjection{}
 	}
 	if in.SSHProxy != nil {
-		out.SSHProxy = &egressauth.SSHProxyProjection{
+		out.SSHProxy = &egressauthstore.SSHProxyProjection{
 			SandboxPublicKeys: append([]string(nil), in.SSHProxy.SandboxPublicKeys...),
 			UpstreamUsername:  in.SSHProxy.UpstreamUsername,
 			KnownHosts:        append([]string(nil), in.SSHProxy.KnownHosts...),
@@ -406,22 +411,22 @@ func toStoreProjection(in v1alpha1.ProjectionSpec) egressauth.ProjectionSpec {
 	return out
 }
 
-func cloneStoreProjection(in egressauth.ProjectionSpec) egressauth.ProjectionSpec {
-	out := egressauth.ProjectionSpec{
+func cloneStoreProjection(in egressauthstore.ProjectionSpec) egressauthstore.ProjectionSpec {
+	out := egressauthstore.ProjectionSpec{
 		Type: in.Type,
 	}
 	if in.HTTPHeaders != nil {
-		out.HTTPHeaders = &egressauth.HTTPHeadersProjection{
-			Headers: make([]egressauth.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
+		out.HTTPHeaders = &egressauthstore.HTTPHeadersProjection{
+			Headers: make([]egressauthstore.ProjectedHeader, 0, len(in.HTTPHeaders.Headers)),
 		}
 		out.HTTPHeaders.Headers = append(out.HTTPHeaders.Headers, in.HTTPHeaders.Headers...)
 	}
 	if in.PlaceholderSubstitution != nil {
-		out.PlaceholderSubstitution = &egressauth.PlaceholderSubstitutionProjection{
-			Replacements: make([]egressauth.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
+		out.PlaceholderSubstitution = &egressauthstore.PlaceholderSubstitutionProjection{
+			Replacements: make([]egressauthstore.PlaceholderReplacement, 0, len(in.PlaceholderSubstitution.Replacements)),
 		}
 		for _, replacement := range in.PlaceholderSubstitution.Replacements {
-			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, egressauth.PlaceholderReplacement{
+			out.PlaceholderSubstitution.Replacements = append(out.PlaceholderSubstitution.Replacements, egressauthstore.PlaceholderReplacement{
 				Placeholder:   replacement.Placeholder,
 				ValueTemplate: replacement.ValueTemplate,
 				Locations:     append([]egressauth.PlaceholderSubstitutionLocation(nil), replacement.Locations...),
@@ -429,13 +434,13 @@ func cloneStoreProjection(in egressauth.ProjectionSpec) egressauth.ProjectionSpe
 		}
 	}
 	if in.TLSClientCertificate != nil {
-		out.TLSClientCertificate = &egressauth.TLSClientCertificateProjection{}
+		out.TLSClientCertificate = &egressauthstore.TLSClientCertificateProjection{}
 	}
 	if in.UsernamePassword != nil {
-		out.UsernamePassword = &egressauth.UsernamePasswordProjection{}
+		out.UsernamePassword = &egressauthstore.UsernamePasswordProjection{}
 	}
 	if in.SSHProxy != nil {
-		out.SSHProxy = &egressauth.SSHProxyProjection{
+		out.SSHProxy = &egressauthstore.SSHProxyProjection{
 			SandboxPublicKeys: append([]string(nil), in.SSHProxy.SandboxPublicKeys...),
 			UpstreamUsername:  in.SSHProxy.UpstreamUsername,
 			KnownHosts:        append([]string(nil), in.SSHProxy.KnownHosts...),
@@ -444,7 +449,9 @@ func cloneStoreProjection(in egressauth.ProjectionSpec) egressauth.ProjectionSpe
 	return out
 }
 
-func fromStoreProjection(in egressauth.ProjectionSpec) v1alpha1.ProjectionSpec {
+// fromStoreProjection maps egress auth storage state back into the public CRD schema.
+// It intentionally mirrors toStoreProjection at this schema boundary.
+func fromStoreProjection(in egressauthstore.ProjectionSpec) v1alpha1.ProjectionSpec {
 	out := v1alpha1.ProjectionSpec{
 		Type: v1alpha1.CredentialProjectionType(in.Type),
 	}
@@ -491,21 +498,21 @@ func fromStoreProjection(in egressauth.ProjectionSpec) v1alpha1.ProjectionSpec {
 	return out
 }
 
-func toStoreCachePolicy(in *v1alpha1.CachePolicySpec) *egressauth.CachePolicySpec {
+func toStoreCachePolicy(in *v1alpha1.CachePolicySpec) *egressauthstore.CachePolicySpec {
 	if in == nil {
 		return nil
 	}
-	return &egressauth.CachePolicySpec{TTL: in.TTL}
+	return &egressauthstore.CachePolicySpec{TTL: in.TTL}
 }
 
-func cloneStoreCachePolicy(in *egressauth.CachePolicySpec) *egressauth.CachePolicySpec {
+func cloneStoreCachePolicy(in *egressauthstore.CachePolicySpec) *egressauthstore.CachePolicySpec {
 	if in == nil {
 		return nil
 	}
-	return &egressauth.CachePolicySpec{TTL: in.TTL}
+	return &egressauthstore.CachePolicySpec{TTL: in.TTL}
 }
 
-func fromStoreCachePolicy(in *egressauth.CachePolicySpec) *v1alpha1.CachePolicySpec {
+func fromStoreCachePolicy(in *egressauthstore.CachePolicySpec) *v1alpha1.CachePolicySpec {
 	if in == nil {
 		return nil
 	}
@@ -533,7 +540,7 @@ func (s *SandboxService) applyNetworkProvider(
 
 	providerName := s.networkProvider.Name()
 	started := time.Now()
-	sandboxID := sandboxIDFromPod(pod)
+	sandboxID := sandboxPodID(pod)
 	if sandboxID == "" {
 		sandboxID = pod.Name
 	}
@@ -641,7 +648,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 	if policy == nil {
 		return nil, fmt.Errorf("network policy is required")
 	}
-	if s.NetworkPolicyService == nil {
+	if s.networkPolicyService == nil {
 		return nil, fmt.Errorf("network policy service not configured")
 	}
 
@@ -650,7 +657,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		return nil, fmt.Errorf("get pod: %w", err)
 	}
 
-	var networkState *BuildNetworkPolicyResult
+	var networkState *networkpolicy.BuildNetworkPolicyResult
 	var updatedPod *corev1.Pod
 	var rollbackBindings func(context.Context) error
 
@@ -674,11 +681,11 @@ func (s *SandboxService) UpdateNetworkPolicy(
 			}
 		}
 
-		currentSandboxID := sandboxIDFromPod(current)
+		currentSandboxID := sandboxPodID(current)
 		if currentSandboxID == "" {
 			currentSandboxID = current.Name
 		}
-		buildReq := &BuildNetworkPolicyRequest{
+		buildReq := &networkpolicy.BuildNetworkPolicyRequest{
 			SandboxID:        currentSandboxID,
 			TeamID:           teamID,
 			TemplateSpec:     templateSpec,
@@ -686,10 +693,10 @@ func (s *SandboxService) UpdateNetworkPolicy(
 			TemplateBindings: templateBindings,
 			RequestBindings:  requestBindings,
 		}
-		if err := s.NetworkPolicyService.ValidateNetworkPolicyRequest(buildReq); err != nil {
+		if err := s.networkPolicyService.ValidateNetworkPolicyRequest(buildReq); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidNetworkPolicy, err)
 		}
-		networkState = s.NetworkPolicyService.BuildNetworkPolicyState(buildReq)
+		networkState = s.networkPolicyService.BuildNetworkPolicyState(buildReq)
 		rollbackBindings, err = s.syncCredentialBindings(ctx, current, teamID, networkState, true)
 		if err != nil {
 			return fmt.Errorf("stage credential bindings: %w", err)
@@ -704,7 +711,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 		}
 
 		if configJSON := updatedPod.Annotations[controller.AnnotationConfig]; configJSON != "" {
-			var storedConfig SandboxConfig
+			var storedConfig sandboxstore.SandboxConfig
 			if err := json.Unmarshal([]byte(configJSON), &storedConfig); err != nil {
 				s.logger.Warn("Failed to parse sandbox config annotation",
 					zap.String("sandboxID", sandboxID),
@@ -719,7 +726,7 @@ func (s *SandboxService) UpdateNetworkPolicy(
 				updatedPod.Annotations[controller.AnnotationConfig] = string(updatedConfigJSON)
 			}
 		} else {
-			storedConfig := SandboxConfig{Network: sanitizedNetworkPolicyForPersistence(policy)}
+			storedConfig := sandboxstore.SandboxConfig{Network: sanitizedNetworkPolicyForPersistence(policy)}
 			updatedConfigJSON, err := json.Marshal(storedConfig)
 			if err != nil {
 				return fmt.Errorf("marshal sandbox config: %w", err)
@@ -831,7 +838,7 @@ func networkPolicyFromSpec(spec *v1alpha1.NetworkPolicySpec) *v1alpha1.SandboxNe
 		egressProtocolRules = append(egressProtocolRules, spec.Egress.ProtocolRules...)
 		egressCredentialRules = append(egressCredentialRules, spec.Egress.CredentialRules...)
 		if spec.Egress.Proxy != nil {
-			egressProxy = cloneEgressProxyPolicy(spec.Egress.Proxy)
+			egressProxy = networkpolicy.CloneEgressProxyPolicy(spec.Egress.Proxy)
 		}
 	}
 
@@ -877,7 +884,7 @@ func sandboxNetworkPolicyFromParts(spec *v1alpha1.NetworkPolicySpec, bindings []
 	return sandboxNetworkPolicyWithBindings(networkPolicyFromSpec(spec), bindings)
 }
 
-func sandboxNetworkPolicyFromState(state *BuildNetworkPolicyResult) *v1alpha1.SandboxNetworkPolicy {
+func sandboxNetworkPolicyFromState(state *networkpolicy.BuildNetworkPolicyResult) *v1alpha1.SandboxNetworkPolicy {
 	if state == nil {
 		return &v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeAllowAll}
 	}

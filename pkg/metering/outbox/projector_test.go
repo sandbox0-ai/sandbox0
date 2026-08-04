@@ -20,6 +20,26 @@ type fakeProjectionStore struct {
 	cleanupHit int
 }
 
+type recordingMetrics struct {
+	pending    int64
+	oldestAge  float64
+	batches    []string
+	operations []string
+}
+
+func (m *recordingMetrics) ObserveMeteringOutboxStats(pending int64, oldestPendingAgeSeconds float64) {
+	m.pending = pending
+	m.oldestAge = oldestPendingAgeSeconds
+}
+
+func (m *recordingMetrics) ObserveMeteringOutboxBatch(result string) {
+	m.batches = append(m.batches, result)
+}
+
+func (m *recordingMetrics) ObserveMeteringOutboxOperation(operationType, result string) {
+	m.operations = append(m.operations, operationType+"/"+result)
+}
+
 func (f *fakeProjectionStore) ClaimNextBatch(context.Context, string, time.Duration) (*Batch, error) {
 	if f.batch == nil || f.claimed || f.delivered {
 		return nil, nil
@@ -171,6 +191,58 @@ func TestProjectorRetriesTheExactTransactionBatch(t *testing.T) {
 	if len(sink.windows) != 1 || sink.windows[0].WindowID != window.WindowID || sink.windows[0].Sequence != 2 || !sink.windows[0].RecordedAt.Equal(now) {
 		t.Fatalf("window retry changed payload: %#v", sink.windows)
 	}
+}
+
+func TestProjectorReportsMetricsThroughServiceOwnedObserver(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeProjectionStore{batch: &Batch{
+		ID: 42,
+		Operations: []*Operation{{
+			Sequence: 1,
+			BatchID:  42,
+			Type:     OperationEvent,
+			Payload: mustMarshal(t, &metering.Event{
+				EventID:     "event-1",
+				Producer:    "test",
+				EventType:   metering.EventTypeSandboxClaimed,
+				SubjectType: metering.SubjectTypeSandbox,
+				SubjectID:   "sandbox-1",
+				OccurredAt:  now,
+				RecordedAt:  now,
+			}),
+		}},
+	}}
+	metrics := &recordingMetrics{}
+	projector := NewProjector(store, &fakeSink{}, ProjectorConfig{WorkerID: "worker-1"}, nil)
+	projector.now = func() time.Time { return now }
+	projector.SetMetrics(metrics)
+
+	if processed, err := projector.ProjectOnce(context.Background()); !processed || err != nil {
+		t.Fatalf("ProjectOnce() = (%v, %v), want successful processing", processed, err)
+	}
+	projector.observeStats(context.Background())
+
+	if got, want := metrics.batches, []string{"success"}; !equalStrings(got, want) {
+		t.Fatalf("batch results = %#v, want %#v", got, want)
+	}
+	if got, want := metrics.operations, []string{"event/success"}; !equalStrings(got, want) {
+		t.Fatalf("operation results = %#v, want %#v", got, want)
+	}
+	if metrics.pending != 0 || metrics.oldestAge != 0 {
+		t.Fatalf("outbox stats = (pending=%d age=%v), want zero backlog", metrics.pending, metrics.oldestAge)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestProjectorAppliesProjectionStateOperations(t *testing.T) {

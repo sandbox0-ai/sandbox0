@@ -86,12 +86,3 @@ func (t *cpuUsageTracker) prune(active map[cpuSeriesKey]struct{}) {
 		}
 	}
 }
-
-func (t *cpuUsageTracker) size() int {
-	if t == nil {
-		return 0
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return len(t.baselines)
-}

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -80,7 +80,7 @@ func (r *PodResolver) resolvePodTarget(pod *corev1.Pod, sandboxID string) (Targe
 		return Target{}, fmt.Errorf("sandbox pod %s/%s is scheduled on node %s, not %s", pod.Namespace, pod.Name, pod.Spec.NodeName, r.NodeName)
 	}
 	if sandboxID == "" && pod.Labels != nil {
-		sandboxID = strings.TrimSpace(pod.Labels[controller.LabelSandboxID])
+		sandboxID = strings.TrimSpace(pod.Labels[sandboxpod.LabelSandboxID])
 	}
 	return Target{
 		SandboxID:    sandboxID,
@@ -148,7 +148,7 @@ func (r *PodResolver) lookupSandboxPod(ctx context.Context, sandboxID string) (*
 		return nil, ErrSandboxNotFound
 	}
 
-	selector := labels.SelectorFromSet(map[string]string{controller.LabelSandboxID: sandboxID}).String()
+	selector := labels.SelectorFromSet(map[string]string{sandboxpod.LabelSandboxID: sandboxID}).String()
 	pods, err := r.K8sClient.CoreV1().Pods(corev1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, fmt.Errorf("list sandbox pods: %w", err)

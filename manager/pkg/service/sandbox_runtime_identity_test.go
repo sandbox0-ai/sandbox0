@@ -11,6 +11,9 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -25,11 +28,11 @@ import (
 
 type memorySandboxStore struct {
 	mu                sync.Mutex
-	records           map[string]*SandboxRecord
-	lifecycleTxns     map[string]*SandboxLifecycleTxn
-	rootFSStates      map[string]*SandboxRootFSState
-	rootFSFilesystems map[string]*RootFSFilesystem
-	rootFSSnapshots   map[string]*RootFSSnapshot
+	records           map[string]*sandboxstore.SandboxRecord
+	lifecycleTxns     map[string]*sandboxstore.SandboxLifecycleTxn
+	rootFSStates      map[string]*sandboxstore.SandboxRootFSState
+	rootFSFilesystems map[string]*sandboxstore.RootFSFilesystem
+	rootFSSnapshots   map[string]*sandboxstore.RootFSSnapshot
 	deletes           []string
 	saves             int
 	pauses            int
@@ -43,18 +46,18 @@ type memorySandboxStoreTx struct {
 	store *memorySandboxStore
 }
 
-func (t memorySandboxStoreTx) SaveSandbox(_ context.Context, record *SandboxRecord) error {
+func (t memorySandboxStoreTx) SaveSandbox(_ context.Context, record *sandboxstore.SandboxRecord) error {
 	return t.store.UpsertSandbox(context.Background(), record)
 }
 
-func (s *memorySandboxStore) UpsertSandbox(_ context.Context, record *SandboxRecord) error {
+func (s *memorySandboxStore) UpsertSandbox(_ context.Context, record *sandboxstore.SandboxRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.records == nil {
-		s.records = make(map[string]*SandboxRecord)
+		s.records = make(map[string]*sandboxstore.SandboxRecord)
 	}
 	if existing := s.records[record.ID]; existing != nil &&
-		(existing.DesiredState == SandboxDesiredStateTerminating || existing.DesiredState == SandboxDesiredStateDeleted || !existing.DeletedAt.IsZero()) {
+		(existing.DesiredState == sandboxstore.SandboxDesiredStateTerminating || existing.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !existing.DeletedAt.IsZero()) {
 		return nil
 	}
 	clone := cloneSandboxRecord(record)
@@ -65,7 +68,7 @@ func (s *memorySandboxStore) UpsertSandbox(_ context.Context, record *SandboxRec
 	return nil
 }
 
-func (s *memorySandboxStore) GetSandbox(_ context.Context, sandboxID string) (*SandboxRecord, error) {
+func (s *memorySandboxStore) GetSandbox(_ context.Context, sandboxID string) (*sandboxstore.SandboxRecord, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -77,7 +80,7 @@ func (s *memorySandboxStore) GetSandbox(_ context.Context, sandboxID string) (*S
 	return cloneSandboxRecord(s.records[sandboxID]), nil
 }
 
-func (s *memorySandboxStore) ListSandboxes(_ context.Context, req *ListSandboxesRequest) ([]*SandboxRecord, error) {
+func (s *memorySandboxStore) ListSandboxes(_ context.Context, req *sandboxstore.ListSandboxesRequest) ([]*sandboxstore.SandboxRecord, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -86,7 +89,7 @@ func (s *memorySandboxStore) ListSandboxes(_ context.Context, req *ListSandboxes
 	if s.records == nil {
 		return nil, nil
 	}
-	var records []*SandboxRecord
+	var records []*sandboxstore.SandboxRecord
 	for _, record := range s.records {
 		if record == nil {
 			continue
@@ -104,11 +107,11 @@ func (s *memorySandboxStore) ListSandboxes(_ context.Context, req *ListSandboxes
 	return records, nil
 }
 
-func (s *memorySandboxStore) ListHardExpiredSandboxes(context.Context, time.Time, int) ([]*SandboxRecord, error) {
+func (s *memorySandboxStore) ListHardExpiredSandboxes(context.Context, time.Time, int) ([]*sandboxstore.SandboxRecord, error) {
 	return nil, nil
 }
 
-func (s *memorySandboxStore) ListActiveLifecycleTxns(_ context.Context, kind string, limit int) ([]*SandboxLifecycleTxn, error) {
+func (s *memorySandboxStore) ListActiveLifecycleTxns(_ context.Context, kind string, limit int) ([]*sandboxstore.SandboxLifecycleTxn, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -120,12 +123,12 @@ func (s *memorySandboxStore) ListActiveLifecycleTxns(_ context.Context, kind str
 	if limit <= 0 {
 		limit = len(s.lifecycleTxns)
 	}
-	txns := make([]*SandboxLifecycleTxn, 0, len(s.lifecycleTxns))
+	txns := make([]*sandboxstore.SandboxLifecycleTxn, 0, len(s.lifecycleTxns))
 	for _, txn := range s.lifecycleTxns {
 		if txn == nil || txn.Kind != kind || !sandboxLifecyclePhaseActive(txn.Phase) {
 			continue
 		}
-		txns = append(txns, cloneSandboxLifecycleTxn(txn))
+		txns = append(txns, sandboxstore.CloneSandboxLifecycleTxn(txn))
 		if len(txns) >= limit {
 			break
 		}
@@ -144,19 +147,19 @@ func (s *memorySandboxStore) ListPendingRuntimeRecoverySandboxIDs(_ context.Cont
 	}
 	var sandboxIDs []string
 	for sandboxID, record := range s.records {
-		if record == nil || record.DesiredState != SandboxDesiredStatePaused || !record.DeletedAt.IsZero() {
+		if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStatePaused || !record.DeletedAt.IsZero() {
 			continue
 		}
-		var latest *SandboxLifecycleTxn
+		var latest *sandboxstore.SandboxLifecycleTxn
 		for _, txn := range s.lifecycleTxns {
-			if txn == nil || txn.SandboxID != sandboxID || txn.Phase != SandboxLifecyclePhaseCommitted {
+			if txn == nil || txn.SandboxID != sandboxID || txn.Phase != sandboxstore.SandboxLifecyclePhaseCommitted {
 				continue
 			}
 			if latest == nil || txn.Epoch > latest.Epoch {
 				latest = txn
 			}
 		}
-		if latest == nil || latest.Kind != SandboxLifecycleKindPause ||
+		if latest == nil || latest.Kind != sandboxstore.SandboxLifecycleKindPause ||
 			!sandboxLifecycleSourceReconstructsRuntime(latest.Source) {
 			continue
 		}
@@ -168,7 +171,7 @@ func (s *memorySandboxStore) ListPendingRuntimeRecoverySandboxIDs(_ context.Cont
 	return sandboxIDs, nil
 }
 
-func (s *memorySandboxStore) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {
+func (s *memorySandboxStore) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*sandboxstore.SandboxLifecycleTxn, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -177,7 +180,7 @@ func (s *memorySandboxStore) GetActiveLifecycleTxn(_ context.Context, sandboxID 
 	s.activeTxnGets++
 	for _, txn := range s.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && sandboxLifecyclePhaseActive(txn.Phase) {
-			return cloneSandboxLifecycleTxn(txn), nil
+			return sandboxstore.CloneSandboxLifecycleTxn(txn), nil
 		}
 	}
 	return nil, nil
@@ -187,20 +190,20 @@ func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.records == nil {
-		s.records = make(map[string]*SandboxRecord)
+		s.records = make(map[string]*sandboxstore.SandboxRecord)
 	}
 	record := s.records[sandboxID]
 	if record == nil {
-		record = &SandboxRecord{ID: sandboxID}
+		record = &sandboxstore.SandboxRecord{ID: sandboxID}
 		s.records[sandboxID] = record
 	}
-	record.DesiredState = SandboxDesiredStateDeleted
+	record.DesiredState = sandboxstore.SandboxDesiredStateDeleted
 	record.DeletedAt = deletedAt
 	record.CurrentPodName = ""
 	record.CurrentPodNamespace = ""
 	for _, txn := range s.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && sandboxLifecyclePhaseActive(txn.Phase) {
-			txn.Phase = SandboxLifecyclePhaseAborted
+			txn.Phase = sandboxstore.SandboxLifecyclePhaseAborted
 			txn.Error = "sandbox deleted"
 			txn.AbortedAt = deletedAt
 		}
@@ -210,17 +213,17 @@ func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID str
 	return nil
 }
 
-func (s *memorySandboxStore) SaveRootFSState(_ context.Context, state *SandboxRootFSState) error {
+func (s *memorySandboxStore) SaveRootFSState(_ context.Context, state *sandboxstore.SandboxRootFSState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.rootFSStates == nil {
-		s.rootFSStates = make(map[string]*SandboxRootFSState)
+		s.rootFSStates = make(map[string]*sandboxstore.SandboxRootFSState)
 	}
 	s.rootFSStates[state.SandboxID] = cloneSandboxRootFSState(state)
 	return nil
 }
 
-func (s *memorySandboxStore) GetLatestRootFSState(_ context.Context, sandboxID string) (*SandboxRootFSState, error) {
+func (s *memorySandboxStore) GetLatestRootFSState(_ context.Context, sandboxID string) (*sandboxstore.SandboxRootFSState, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -232,9 +235,9 @@ func (s *memorySandboxStore) GetLatestRootFSState(_ context.Context, sandboxID s
 	return cloneSandboxRootFSState(s.rootFSStates[sandboxID]), nil
 }
 
-func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error {
+func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, sandboxstore.SandboxStoreTx, *sandboxstore.SandboxRecord) error) error {
 	if s == nil {
-		return ErrSandboxRecordNotFound
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	s.mu.Lock()
 	s.lockCalls++
@@ -255,7 +258,7 @@ func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID stri
 		}
 	}
 	if record == nil {
-		return ErrSandboxRecordNotFound
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	snapshot := s.snapshot()
 	if err := fn(ctx, memorySandboxStoreTx{store: s}, record); err != nil {
@@ -266,10 +269,10 @@ func (s *memorySandboxStore) WithSandboxLock(ctx context.Context, sandboxID stri
 }
 
 type memorySandboxStoreSnapshot struct {
-	records           map[string]*SandboxRecord
-	lifecycleTxns     map[string]*SandboxLifecycleTxn
-	rootFSStates      map[string]*SandboxRootFSState
-	rootFSFilesystems map[string]*RootFSFilesystem
+	records           map[string]*sandboxstore.SandboxRecord
+	lifecycleTxns     map[string]*sandboxstore.SandboxLifecycleTxn
+	rootFSStates      map[string]*sandboxstore.SandboxRootFSState
+	rootFSFilesystems map[string]*sandboxstore.RootFSFilesystem
 }
 
 func (s *memorySandboxStore) snapshot() memorySandboxStoreSnapshot {
@@ -300,16 +303,16 @@ func (s *memorySandboxStore) setSandboxDesiredState(sandboxID, desiredState stri
 	}
 }
 
-func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespace, podName string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error {
+func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespace, podName string, generation int64, expiresAt, hardExpiresAt time.Time, metadata sandboxstore.SandboxRuntimeMetadata) error {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
-	if record == nil || record.DesiredState == SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() {
-		return ErrSandboxRecordNotFound
+	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() {
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = namespace
 	record.CurrentPodName = podName
-	record.DesiredState = SandboxDesiredStateActive
+	record.DesiredState = sandboxstore.SandboxDesiredStateActive
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
 	record.HardExpiresAt = hardExpiresAt
@@ -327,8 +330,8 @@ func (t memorySandboxStoreTx) MarkHotClaimCompleted(_ context.Context, sandboxID
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
-	if record == nil || record.DesiredState == SandboxDesiredStateTerminating || record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
-		return ErrSandboxRecordNotFound
+	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	record.HotClaimCompletedAt = completedAt
 	return nil
@@ -338,12 +341,12 @@ func (t memorySandboxStoreTx) MarkRuntimePaused(_ context.Context, sandboxID str
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
-	if record == nil || record.DesiredState == SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() {
-		return ErrSandboxRecordNotFound
+	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() {
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = ""
 	record.CurrentPodName = ""
-	record.DesiredState = SandboxDesiredStatePaused
+	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
 	if record.RuntimeGeneration < generation {
 		record.RuntimeGeneration = generation
 	}
@@ -356,49 +359,49 @@ func (t memorySandboxStoreTx) MarkRuntimeTerminating(_ context.Context, sandboxI
 	defer t.store.mu.Unlock()
 	record := t.store.records[sandboxID]
 	if record == nil || !record.DeletedAt.IsZero() {
-		return ErrSandboxRecordNotFound
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
-	record.DesiredState = SandboxDesiredStateTerminating
+	record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
 	return nil
 }
 
-func (t memorySandboxStoreTx) SaveRootFSState(_ context.Context, state *SandboxRootFSState) error {
+func (t memorySandboxStoreTx) SaveRootFSState(_ context.Context, state *sandboxstore.SandboxRootFSState) error {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	if t.store.rootFSStates == nil {
-		t.store.rootFSStates = make(map[string]*SandboxRootFSState)
+		t.store.rootFSStates = make(map[string]*sandboxstore.SandboxRootFSState)
 	}
 	t.store.rootFSStates[state.SandboxID] = cloneSandboxRootFSState(state)
 	return nil
 }
 
-func (t memorySandboxStoreTx) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {
+func (t memorySandboxStoreTx) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*sandboxstore.SandboxLifecycleTxn, error) {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	for _, txn := range t.store.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && sandboxLifecyclePhaseActive(txn.Phase) {
-			return cloneSandboxLifecycleTxn(txn), nil
+			return sandboxstore.CloneSandboxLifecycleTxn(txn), nil
 		}
 	}
 	return nil, nil
 }
 
-func (t memorySandboxStoreTx) BeginLifecycleTxn(_ context.Context, txn *SandboxLifecycleTxn) error {
+func (t memorySandboxStoreTx) BeginLifecycleTxn(_ context.Context, txn *sandboxstore.SandboxLifecycleTxn) error {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	if t.store.lifecycleTxns == nil {
-		t.store.lifecycleTxns = make(map[string]*SandboxLifecycleTxn)
+		t.store.lifecycleTxns = make(map[string]*sandboxstore.SandboxLifecycleTxn)
 	}
 	record := t.store.records[txn.SandboxID]
 	record.LifecycleEpoch++
 	txn.Epoch = record.LifecycleEpoch
 	if txn.Phase == "" {
-		txn.Phase = SandboxLifecyclePhasePreparing
+		txn.Phase = sandboxstore.SandboxLifecyclePhasePreparing
 	}
 	if txn.Source == "" {
-		txn.Source = SandboxLifecycleSourceManual
+		txn.Source = sandboxstore.SandboxLifecycleSourceManual
 	}
-	t.store.lifecycleTxns[txn.ID] = cloneSandboxLifecycleTxn(txn)
+	t.store.lifecycleTxns[txn.ID] = sandboxstore.CloneSandboxLifecycleTxn(txn)
 	return nil
 }
 
@@ -459,7 +462,7 @@ func (t memorySandboxStoreTx) CommitLifecycleTxn(_ context.Context, txnID, prepa
 		if sandboxLifecycleTxnCancelRequested(txn) {
 			return fmt.Errorf("active lifecycle txn %s not found", txnID)
 		}
-		txn.Phase = SandboxLifecyclePhaseCommitted
+		txn.Phase = sandboxstore.SandboxLifecyclePhaseCommitted
 		txn.PreparedHeadLayerID = preparedHeadLayerID
 	}
 	return nil
@@ -469,50 +472,71 @@ func (t memorySandboxStoreTx) AbortLifecycleTxn(_ context.Context, txnID, reason
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()
 	if txn := t.store.lifecycleTxns[txnID]; txn != nil && sandboxLifecyclePhaseActive(txn.Phase) {
-		txn.Phase = SandboxLifecyclePhaseAborted
+		txn.Phase = sandboxstore.SandboxLifecyclePhaseAborted
 		txn.Error = reason
 	}
 	return nil
 }
 
-func cloneSandboxRecord(record *SandboxRecord) *SandboxRecord {
+func cloneSandboxRecord(record *sandboxstore.SandboxRecord) *sandboxstore.SandboxRecord {
 	if record == nil {
 		return nil
 	}
 	clone := *record
 	if record.Mounts != nil {
-		clone.Mounts = append([]ClaimMount(nil), record.Mounts...)
+		clone.Mounts = append([]managerapi.ClaimMount(nil), record.Mounts...)
 	}
 	if record.Config.Services != nil {
-		clone.Config.Services = append([]SandboxAppService(nil), record.Config.Services...)
+		clone.Config.Services = append([]managerapi.SandboxAppService(nil), record.Config.Services...)
 	}
 	clone.Config.Resources = cloneSandboxResourceConfig(record.Config.Resources)
 	return &clone
 }
 
-func cloneSandboxRecordMap(records map[string]*SandboxRecord) map[string]*SandboxRecord {
+func cloneSandboxRecordMap(records map[string]*sandboxstore.SandboxRecord) map[string]*sandboxstore.SandboxRecord {
 	if records == nil {
 		return nil
 	}
-	cloned := make(map[string]*SandboxRecord, len(records))
+	cloned := make(map[string]*sandboxstore.SandboxRecord, len(records))
 	for key, record := range records {
 		cloned[key] = cloneSandboxRecord(record)
 	}
 	return cloned
 }
 
-func cloneSandboxLifecycleTxnMap(txns map[string]*SandboxLifecycleTxn) map[string]*SandboxLifecycleTxn {
+func cloneSandboxLifecycleTxnMap(txns map[string]*sandboxstore.SandboxLifecycleTxn) map[string]*sandboxstore.SandboxLifecycleTxn {
 	if txns == nil {
 		return nil
 	}
-	cloned := make(map[string]*SandboxLifecycleTxn, len(txns))
+	cloned := make(map[string]*sandboxstore.SandboxLifecycleTxn, len(txns))
 	for key, txn := range txns {
-		cloned[key] = cloneSandboxLifecycleTxn(txn)
+		cloned[key] = sandboxstore.CloneSandboxLifecycleTxn(txn)
 	}
 	return cloned
 }
 
-func cloneSandboxRootFSState(state *SandboxRootFSState) *SandboxRootFSState {
+func sandboxLifecyclePhaseActive(phase string) bool {
+	return phase != sandboxstore.SandboxLifecyclePhaseCommitted && phase != sandboxstore.SandboxLifecyclePhaseAborted
+}
+
+func cloneSandboxRootFSLayers(layers []*sandboxstore.SandboxRootFSLayer) []*sandboxstore.SandboxRootFSLayer {
+	if len(layers) == 0 {
+		return nil
+	}
+	cloned := make([]*sandboxstore.SandboxRootFSLayer, 0, len(layers))
+	for _, layer := range layers {
+		if layer == nil {
+			cloned = append(cloned, nil)
+			continue
+		}
+		copy := *layer
+		copy.SnapshotParentChain = append([]string(nil), layer.SnapshotParentChain...)
+		cloned = append(cloned, &copy)
+	}
+	return cloned
+}
+
+func cloneSandboxRootFSState(state *sandboxstore.SandboxRootFSState) *sandboxstore.SandboxRootFSState {
 	if state == nil {
 		return nil
 	}
@@ -524,87 +548,26 @@ func cloneSandboxRootFSState(state *SandboxRootFSState) *SandboxRootFSState {
 	return &clone
 }
 
-func cloneSandboxRootFSStateMap(states map[string]*SandboxRootFSState) map[string]*SandboxRootFSState {
+func cloneSandboxRootFSStateMap(states map[string]*sandboxstore.SandboxRootFSState) map[string]*sandboxstore.SandboxRootFSState {
 	if states == nil {
 		return nil
 	}
-	cloned := make(map[string]*SandboxRootFSState, len(states))
+	cloned := make(map[string]*sandboxstore.SandboxRootFSState, len(states))
 	for key, state := range states {
 		cloned[key] = cloneSandboxRootFSState(state)
 	}
 	return cloned
 }
 
-func cloneRootFSFilesystemMap(filesystems map[string]*RootFSFilesystem) map[string]*RootFSFilesystem {
+func cloneRootFSFilesystemMap(filesystems map[string]*sandboxstore.RootFSFilesystem) map[string]*sandboxstore.RootFSFilesystem {
 	if filesystems == nil {
 		return nil
 	}
-	cloned := make(map[string]*RootFSFilesystem, len(filesystems))
+	cloned := make(map[string]*sandboxstore.RootFSFilesystem, len(filesystems))
 	for key, filesystem := range filesystems {
 		cloned[key] = cloneRootFSFilesystemForTest(filesystem)
 	}
 	return cloned
-}
-
-func TestRootFSStateFromLayerChainKeepsCurrentSandboxID(t *testing.T) {
-	state := rootFSStateFromLayerChain("child-sandbox", []*SandboxRootFSLayer{
-		{
-			ID:              "layer-parent",
-			SourceSandboxID: "parent-sandbox",
-			TeamID:          "team-1",
-			DiffDigest:      "sha256:parent",
-			DiffObjectKey:   "rootfs/parent.tar",
-		},
-		{
-			ID:              "layer-child",
-			ParentLayerID:   "layer-parent",
-			SourceSandboxID: "parent-sandbox",
-			TeamID:          "team-1",
-			DiffDigest:      "sha256:child",
-			DiffObjectKey:   "rootfs/child.tar",
-		},
-	})
-
-	if state == nil {
-		t.Fatal("state is nil")
-	}
-	if state.SandboxID != "child-sandbox" {
-		t.Fatalf("SandboxID = %q, want child-sandbox", state.SandboxID)
-	}
-	if state.LayerID != "layer-child" || state.ParentLayerID != "layer-parent" {
-		t.Fatalf("head = %q parent = %q, want layer-child/layer-parent", state.LayerID, state.ParentLayerID)
-	}
-	if len(state.LayerChain) != 2 {
-		t.Fatalf("LayerChain len = %d, want 2", len(state.LayerChain))
-	}
-}
-
-func TestSandboxIndexTracksMultipleRuntimePodsForSameSandbox(t *testing.T) {
-	index := NewSandboxIndex()
-	first := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
-	second := runtimeIdentityPod("ns-a", "pod-b", "sandbox-a")
-
-	index.handleAdd(first)
-	index.handleAdd(second)
-
-	refs := index.GetPodRefs("sandbox-a")
-	if len(refs) != 2 {
-		t.Fatalf("refs = %#v, want two runtime pod refs", refs)
-	}
-	ids := index.ListSandboxIDs("ns-a")
-	if len(ids) != 1 || ids[0] != "sandbox-a" {
-		t.Fatalf("sandbox ids = %#v, want sandbox-a", ids)
-	}
-
-	index.handleDelete(first)
-	refs = index.GetPodRefs("sandbox-a")
-	if len(refs) != 1 || refs[0].Name != "pod-b" {
-		t.Fatalf("refs after first delete = %#v, want pod-b", refs)
-	}
-	ids = index.ListSandboxIDs("ns-a")
-	if len(ids) != 1 || ids[0] != "sandbox-a" {
-		t.Fatalf("sandbox ids after first delete = %#v, want sandbox-a", ids)
-	}
 }
 
 func TestGetSandboxPodRejectsMultipleActiveRuntimePods(t *testing.T) {
@@ -625,7 +588,7 @@ func TestResumePausedSandboxRuntimeWaitsWhileRuntimeDeleting(t *testing.T) {
 	deletionTime := metav1.NewTime(time.Now().UTC())
 	pod := runtimeIdentityPod("ns-a", "pod-a", "sandbox-a")
 	pod.DeletionTimestamp = &deletionTime
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                "sandbox-a",
 			TeamID:            "team-a",
@@ -633,7 +596,7 @@ func TestResumePausedSandboxRuntimeWaitsWhileRuntimeDeleting(t *testing.T) {
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			DesiredState:      SandboxDesiredStatePaused,
+			DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
 	}}
@@ -673,7 +636,7 @@ func TestResumePausedSandboxRuntimeDeletesStaleUnhealthyRuntimeBeforeIdentityChe
 		Status:             corev1.ConditionFalse,
 		LastTransitionTime: metav1.NewTime(now.Add(-2 * time.Minute)),
 	}}
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                "sandbox-a",
 			TeamID:            "team-a",
@@ -681,7 +644,7 @@ func TestResumePausedSandboxRuntimeDeletesStaleUnhealthyRuntimeBeforeIdentityChe
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			DesiredState:      SandboxDesiredStatePaused,
+			DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 			RuntimeGeneration: 1,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
@@ -730,7 +693,7 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 	failedPod.Status.Phase = corev1.PodFailed
 	idlePod := newClaimTestPod("tpl-default", "idle-pod", "default", true)
 	indexer := newClaimTestPodIndexer(t, failedPod, idlePod)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                  "sandbox-a",
 			TeamID:              "team-a",
@@ -738,7 +701,7 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 			TemplateID:          "default",
 			TemplateName:        "default",
 			TemplateNamespace:   "tpl-default",
-			DesiredState:        SandboxDesiredStateActive,
+			DesiredState:        sandboxstore.SandboxDesiredStateActive,
 			CurrentPodName:      failedPod.Name,
 			CurrentPodNamespace: failedPod.Namespace,
 			RuntimeGeneration:   3,
@@ -755,7 +718,7 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 		record, err := store.GetSandbox(context.Background(), "sandbox-a")
 		if err != nil {
 			t.Errorf("GetSandbox() before failed pod delete error = %v", err)
-		} else if record.DesiredState != SandboxDesiredStatePaused {
+		} else if record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
 			t.Errorf("desired state before failed pod delete = %q, want paused", record.DesiredState)
 		}
 		deletedFailedPod = true
@@ -764,7 +727,7 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	observedTxn := make(chan *SandboxLifecycleTxn, 1)
+	observedTxn := make(chan *sandboxstore.SandboxLifecycleTxn, 1)
 	client.PrependReactor("patch", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
 		patchAction, ok := action.(ktesting.PatchAction)
 		if !ok || patchAction.GetName() != idlePod.Name {
@@ -799,7 +762,7 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox() error = %v", err)
 	}
-	if record.DesiredState != SandboxDesiredStatePaused {
+	if record.DesiredState != sandboxstore.SandboxDesiredStatePaused {
 		t.Fatalf("desired state = %q, want paused before replacement claim", record.DesiredState)
 	}
 	if record.CurrentPodName != "" || record.CurrentPodNamespace != "" {
@@ -808,13 +771,13 @@ func TestResumePausedSandboxRuntimeReplacesFailedRuntime(t *testing.T) {
 	if record.RuntimeGeneration != 3 {
 		t.Fatalf("runtime generation = %d, want 3", record.RuntimeGeneration)
 	}
-	var txn *SandboxLifecycleTxn
+	var txn *sandboxstore.SandboxLifecycleTxn
 	select {
 	case txn = <-observedTxn:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for replacement claim")
 	}
-	if txn == nil || txn.Kind != SandboxLifecycleKindResume {
+	if txn == nil || txn.Kind != sandboxstore.SandboxLifecycleKindResume {
 		t.Fatalf("replacement lifecycle txn = %+v, want resume txn", txn)
 	}
 	if txn.FromGeneration != 3 || txn.ToGeneration != 4 {
@@ -829,7 +792,7 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 	pod.Status.PodIP = "10.0.0.4"
 	markRuntimeIdentityPodReady(t, pod)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                "sandbox-a",
 				TeamID:            "team-a",
@@ -837,17 +800,17 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 				TemplateID:        "default",
 				TemplateName:      "default",
 				TemplateNamespace: "tpl-default",
-				DesiredState:      SandboxDesiredStatePaused,
+				DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 				RuntimeGeneration: 3,
 				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 			},
 		},
-		lifecycleTxns: map[string]*SandboxLifecycleTxn{
+		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
 			"txn-a": {
 				ID:             "txn-a",
 				SandboxID:      "sandbox-a",
-				Kind:           SandboxLifecycleKindResume,
-				Phase:          SandboxLifecyclePhasePreparing,
+				Kind:           sandboxstore.SandboxLifecycleKindResume,
+				Phase:          sandboxstore.SandboxLifecyclePhasePreparing,
 				FromGeneration: 3,
 				ToGeneration:   4,
 				ToPodNamespace: "ns-a",
@@ -867,12 +830,12 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 	go func() {
 		time.Sleep(2 * sandboxLifecycleWaitInterval)
 		store.mu.Lock()
-		store.lifecycleTxns["txn-a"].Phase = SandboxLifecyclePhaseCommitted
+		store.lifecycleTxns["txn-a"].Phase = sandboxstore.SandboxLifecyclePhaseCommitted
 		store.records["sandbox-a"].CurrentPodName = "pod-a"
 		store.records["sandbox-a"].CurrentPodNamespace = "ns-a"
 		store.records["sandbox-a"].RuntimeGeneration = 4
 		store.mu.Unlock()
-		store.setSandboxDesiredState("sandbox-a", SandboxDesiredStateActive)
+		store.setSandboxDesiredState("sandbox-a", sandboxstore.SandboxDesiredStateActive)
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -881,7 +844,7 @@ func TestResumePausedSandboxRuntimeJoinsResumingRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want nil", err)
 	}
-	if sandbox.Status != SandboxStatusRunning {
+	if sandbox.Status != managerapi.SandboxStatusRunning {
 		t.Fatalf("status = %q, want running", sandbox.Status)
 	}
 	if sandbox.RuntimeGeneration != 4 {
@@ -900,7 +863,7 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.PodIP = "10.0.0.4"
 	markRuntimeIdentityPodReady(t, pod)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                  "sandbox-a",
 			TeamID:              "team-a",
@@ -908,7 +871,7 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 			TemplateID:          "default",
 			TemplateName:        "default",
 			TemplateNamespace:   "tpl-default",
-			DesiredState:        SandboxDesiredStateActive,
+			DesiredState:        sandboxstore.SandboxDesiredStateActive,
 			CurrentPodName:      "pod-a",
 			CurrentPodNamespace: "ns-a",
 			RuntimeGeneration:   4,
@@ -927,10 +890,10 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want nil", err)
 	}
-	if sandbox.Status != SandboxStatusRunning {
+	if sandbox.Status != managerapi.SandboxStatusRunning {
 		t.Fatalf("status = %q, want running", sandbox.Status)
 	}
-	if got := store.records["sandbox-a"].DesiredState; got != SandboxDesiredStateActive {
+	if got := store.records["sandbox-a"].DesiredState; got != sandboxstore.SandboxDesiredStateActive {
 		t.Fatalf("stored desired state = %q, want active", got)
 	}
 	if store.saves != 1 {
@@ -940,7 +903,7 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 
 func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecordWithoutPod(t *testing.T) {
 	idlePod := newClaimTestPod("tpl-default", "idle-a", "default", true)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                "sandbox-a",
 			TeamID:            "team-a",
@@ -948,7 +911,7 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecordWithoutPod(t *te
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			DesiredState:      SandboxDesiredStateActive,
+			DesiredState:      sandboxstore.SandboxDesiredStateActive,
 			RuntimeGeneration: 3,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
@@ -961,7 +924,7 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecordWithoutPod(t *te
 		txn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
 		if err != nil {
 			t.Errorf("GetActiveLifecycleTxn() error = %v", err)
-		} else if txn == nil || txn.Kind != SandboxLifecycleKindResume {
+		} else if txn == nil || txn.Kind != sandboxstore.SandboxLifecycleKindResume {
 			t.Errorf("active lifecycle transaction = %+v, want resume", txn)
 		}
 		return true, nil, errors.New("stop reconciled hot claim")
@@ -982,7 +945,7 @@ func TestResumePausedSandboxRuntimeReconcilesStaleStartingRecordWithoutPod(t *te
 	if store.pauses != 1 {
 		t.Fatalf("runtime pause reconciliations = %d, want 1", store.pauses)
 	}
-	if got := store.records["sandbox-a"].DesiredState; got != SandboxDesiredStatePaused {
+	if got := store.records["sandbox-a"].DesiredState; got != sandboxstore.SandboxDesiredStatePaused {
 		t.Fatalf("stored desired state after failed claim = %q, want paused", got)
 	}
 }
@@ -993,7 +956,7 @@ func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.PodIP = "10.0.0.4"
 	markRuntimeIdentityPodReady(t, pod)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                  "sandbox-a",
 			TeamID:              "team-a",
@@ -1001,7 +964,7 @@ func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 			TemplateID:          "default",
 			TemplateName:        "default",
 			TemplateNamespace:   "tpl-default",
-			DesiredState:        SandboxDesiredStateActive,
+			DesiredState:        sandboxstore.SandboxDesiredStateActive,
 			CurrentPodName:      "pod-a",
 			CurrentPodNamespace: "ns-a",
 			RuntimeGeneration:   4,
@@ -1013,7 +976,7 @@ func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 		k8sClient:     fake.NewSimpleClientset(pod.DeepCopy()),
 		podLister:     runtimeIdentityPodLister(t, pod),
 		sandboxStore:  store,
-		ctldClient:    NewCtldClient(CtldClientConfig{}),
+		ctldClient:    ctldapi.NewClientWithTimeout(0),
 		pauseEnqueuer: enqueuer,
 		config: SandboxServiceConfig{
 			CtldEnabled: true,
@@ -1027,17 +990,17 @@ func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestPauseSandboxRuntime() error = %v, want nil", err)
 	}
-	if status != SandboxStatusRunning {
+	if status != managerapi.SandboxStatusRunning {
 		t.Fatalf("status = %q, want running", status)
 	}
-	if got := store.records["sandbox-a"].DesiredState; got != SandboxDesiredStateActive {
+	if got := store.records["sandbox-a"].DesiredState; got != sandboxstore.SandboxDesiredStateActive {
 		t.Fatalf("stored desired state = %q, want active", got)
 	}
 	active, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
 	if err != nil {
 		t.Fatalf("GetActiveLifecycleTxn() error = %v", err)
 	}
-	if active == nil || active.Kind != SandboxLifecycleKindPause {
+	if active == nil || active.Kind != sandboxstore.SandboxLifecycleKindPause {
 		t.Fatalf("active txn = %+v, want pause", active)
 	}
 	if len(enqueuer.calls) != 1 || enqueuer.calls[0] != "sandbox-a" {
@@ -1054,7 +1017,7 @@ func TestResumeSandboxSingleflightPreventsConcurrentSandboxLocks(t *testing.T) {
 	lockStarted := make(chan struct{}, 1)
 	blockLock := make(chan struct{})
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                  "sandbox-a",
 				TeamID:              "team-a",
@@ -1062,7 +1025,7 @@ func TestResumeSandboxSingleflightPreventsConcurrentSandboxLocks(t *testing.T) {
 				TemplateID:          "default",
 				TemplateName:        "default",
 				TemplateNamespace:   "tpl-default",
-				DesiredState:        SandboxDesiredStateActive,
+				DesiredState:        sandboxstore.SandboxDesiredStateActive,
 				CurrentPodName:      "pod-a",
 				CurrentPodNamespace: "ns-a",
 				RuntimeGeneration:   4,
@@ -1118,7 +1081,7 @@ func TestResumeSandboxSingleflightPreventsConcurrentSandboxLocks(t *testing.T) {
 
 func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing.T) {
 	idlePod := newClaimTestPod("tpl-default", "idle-a", "default", true)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                "sandbox-a",
 			TeamID:            "team-a",
@@ -1126,13 +1089,13 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			DesiredState:      SandboxDesiredStatePaused,
+			DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 			RuntimeGeneration: 3,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
 	}}
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
-	observedTxn := make(chan *SandboxLifecycleTxn, 1)
+	observedTxn := make(chan *sandboxstore.SandboxLifecycleTxn, 1)
 	client.PrependReactor("patch", "pods", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		txn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a")
 		if err != nil {
@@ -1154,7 +1117,7 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 	if err == nil || !strings.Contains(err.Error(), "stop hot claim") {
 		t.Fatalf("ResumePausedSandboxRuntime() error = %v, want hot claim failure", err)
 	}
-	var txn *SandboxLifecycleTxn
+	var txn *sandboxstore.SandboxLifecycleTxn
 	select {
 	case txn = <-observedTxn:
 	case <-time.After(time.Second):
@@ -1163,7 +1126,7 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 	if txn == nil {
 		t.Fatal("active resume txn was not visible before pod claim")
 	}
-	if txn.Kind != SandboxLifecycleKindResume || txn.Phase != SandboxLifecyclePhasePreparing {
+	if txn.Kind != sandboxstore.SandboxLifecycleKindResume || txn.Phase != sandboxstore.SandboxLifecyclePhasePreparing {
 		t.Fatalf("observed txn = %+v, want active resume preparing txn", txn)
 	}
 	if txn.FromGeneration != 3 || txn.ToGeneration != 4 {
@@ -1177,14 +1140,14 @@ func TestResumePausedSandboxRuntimeBeginsTransactionBeforeClaimingPod(t *testing
 	if active != nil {
 		t.Fatalf("active txn after failed claim = %+v, want nil", active)
 	}
-	var aborted *SandboxLifecycleTxn
+	var aborted *sandboxstore.SandboxLifecycleTxn
 	for _, candidate := range store.lifecycleTxns {
-		if candidate != nil && candidate.Kind == SandboxLifecycleKindResume {
+		if candidate != nil && candidate.Kind == sandboxstore.SandboxLifecycleKindResume {
 			aborted = candidate
 			break
 		}
 	}
-	if aborted == nil || aborted.Phase != SandboxLifecyclePhaseAborted {
+	if aborted == nil || aborted.Phase != sandboxstore.SandboxLifecyclePhaseAborted {
 		t.Fatalf("stored resume txn = %+v, want aborted", aborted)
 	}
 }
@@ -1195,7 +1158,7 @@ func TestResumePausedSandboxRuntimeWaitsForActivePauseTransaction(t *testing.T) 
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.PodIP = "10.0.0.4"
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                  "sandbox-a",
 				TeamID:              "team-a",
@@ -1203,19 +1166,19 @@ func TestResumePausedSandboxRuntimeWaitsForActivePauseTransaction(t *testing.T) 
 				TemplateID:          "default",
 				TemplateName:        "default",
 				TemplateNamespace:   "tpl-default",
-				DesiredState:        SandboxDesiredStateActive,
+				DesiredState:        sandboxstore.SandboxDesiredStateActive,
 				CurrentPodName:      "pod-a",
 				CurrentPodNamespace: "ns-a",
 				RuntimeGeneration:   4,
 				TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
 			},
 		},
-		lifecycleTxns: map[string]*SandboxLifecycleTxn{
+		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
 			"txn-a": {
 				ID:               "txn-a",
 				SandboxID:        "sandbox-a",
-				Kind:             SandboxLifecycleKindPause,
-				Phase:            SandboxLifecyclePhasePreparing,
+				Kind:             sandboxstore.SandboxLifecycleKindPause,
+				Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
 				FromGeneration:   4,
 				FromPodNamespace: "ns-a",
 				FromPodName:      "pod-a",
@@ -1238,7 +1201,7 @@ func TestResumePausedSandboxRuntimeWaitsForActivePauseTransaction(t *testing.T) 
 	if k8serrors.IsConflict(err) {
 		t.Fatalf("ResumePausedSandboxRuntime() returned conflict for active pause transaction")
 	}
-	if txn := store.lifecycleTxns["txn-a"]; txn == nil || txn.Phase != SandboxLifecyclePhasePreparing {
+	if txn := store.lifecycleTxns["txn-a"]; txn == nil || txn.Phase != sandboxstore.SandboxLifecyclePhasePreparing {
 		t.Fatalf("pause txn = %+v, want request path to leave it for the pause controller", txn)
 	}
 }
@@ -1250,7 +1213,7 @@ func TestResumePausedSandboxRuntimeCancelsAutoPauseTransaction(t *testing.T) {
 	pod.Status.PodIP = "10.0.0.4"
 	markRuntimeIdentityPodReady(t, pod)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                  "sandbox-a",
 				TeamID:              "team-a",
@@ -1258,20 +1221,20 @@ func TestResumePausedSandboxRuntimeCancelsAutoPauseTransaction(t *testing.T) {
 				TemplateID:          "default",
 				TemplateName:        "default",
 				TemplateNamespace:   "tpl-default",
-				DesiredState:        SandboxDesiredStateActive,
+				DesiredState:        sandboxstore.SandboxDesiredStateActive,
 				CurrentPodName:      "pod-a",
 				CurrentPodNamespace: "ns-a",
 				RuntimeGeneration:   4,
 				TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
 			},
 		},
-		lifecycleTxns: map[string]*SandboxLifecycleTxn{
+		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
 			"txn-a": {
 				ID:               "txn-a",
 				SandboxID:        "sandbox-a",
-				Kind:             SandboxLifecycleKindPause,
-				Phase:            SandboxLifecyclePhasePreparing,
-				Source:           SandboxLifecycleSourceAuto,
+				Kind:             sandboxstore.SandboxLifecycleKindPause,
+				Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
+				Source:           sandboxstore.SandboxLifecycleSourceAuto,
 				Cancelable:       true,
 				FromGeneration:   4,
 				FromPodNamespace: "ns-a",
@@ -1302,7 +1265,7 @@ func TestResumePausedSandboxRuntimeCancelsAutoPauseTransaction(t *testing.T) {
 			store.mu.Lock()
 			txn := store.lifecycleTxns["txn-a"]
 			if txn != nil && !txn.CancelRequestedAt.IsZero() {
-				txn.Phase = SandboxLifecyclePhaseAborted
+				txn.Phase = sandboxstore.SandboxLifecyclePhaseAborted
 				txn.Error = txn.CancelReason
 				store.mu.Unlock()
 				close(cancelObserved)
@@ -1323,7 +1286,7 @@ func TestResumePausedSandboxRuntimeCancelsAutoPauseTransaction(t *testing.T) {
 	default:
 		t.Fatal("resume path did not request auto pause cancellation")
 	}
-	if sandbox.Status != SandboxStatusRunning {
+	if sandbox.Status != managerapi.SandboxStatusRunning {
 		t.Fatalf("status = %q, want running", sandbox.Status)
 	}
 	if sandbox.InternalAddr == "" {
@@ -1338,7 +1301,7 @@ func TestResumePausedSandboxRuntimeCancelsAutoPauseTransaction(t *testing.T) {
 		}
 	}
 	txn := store.lifecycleTxns["txn-a"]
-	if txn == nil || txn.Phase != SandboxLifecyclePhaseAborted || txn.CancelReason == "" {
+	if txn == nil || txn.Phase != sandboxstore.SandboxLifecyclePhaseAborted || txn.CancelReason == "" {
 		t.Fatalf("pause txn = %+v, want aborted with cancel reason", txn)
 	}
 }
@@ -1349,7 +1312,7 @@ func TestCompletePausingSandboxRuntimeAbortsCanceledAutoPause(t *testing.T) {
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.PodIP = "10.0.0.4"
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                  "sandbox-a",
 				TeamID:              "team-a",
@@ -1357,20 +1320,20 @@ func TestCompletePausingSandboxRuntimeAbortsCanceledAutoPause(t *testing.T) {
 				TemplateID:          "default",
 				TemplateName:        "default",
 				TemplateNamespace:   "tpl-default",
-				DesiredState:        SandboxDesiredStateActive,
+				DesiredState:        sandboxstore.SandboxDesiredStateActive,
 				CurrentPodName:      "pod-a",
 				CurrentPodNamespace: "ns-a",
 				RuntimeGeneration:   4,
 				TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
 			},
 		},
-		lifecycleTxns: map[string]*SandboxLifecycleTxn{
+		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
 			"txn-a": {
 				ID:                "txn-a",
 				SandboxID:         "sandbox-a",
-				Kind:              SandboxLifecycleKindPause,
-				Phase:             SandboxLifecyclePhasePreparing,
-				Source:            SandboxLifecycleSourceAuto,
+				Kind:              sandboxstore.SandboxLifecycleKindPause,
+				Phase:             sandboxstore.SandboxLifecyclePhasePreparing,
+				Source:            sandboxstore.SandboxLifecycleSourceAuto,
 				Cancelable:        true,
 				FromGeneration:    4,
 				FromPodNamespace:  "ns-a",
@@ -1392,10 +1355,10 @@ func TestCompletePausingSandboxRuntimeAbortsCanceledAutoPause(t *testing.T) {
 		t.Fatalf("CompletePausingSandboxRuntime() error = %v, want nil", err)
 	}
 	txn := store.lifecycleTxns["txn-a"]
-	if txn == nil || txn.Phase != SandboxLifecyclePhaseAborted {
+	if txn == nil || txn.Phase != sandboxstore.SandboxLifecyclePhaseAborted {
 		t.Fatalf("pause txn = %+v, want aborted", txn)
 	}
-	if store.records["sandbox-a"].DesiredState != SandboxDesiredStateActive {
+	if store.records["sandbox-a"].DesiredState != sandboxstore.SandboxDesiredStateActive {
 		t.Fatalf("record desired state = %q, want active", store.records["sandbox-a"].DesiredState)
 	}
 	for _, action := range client.Actions() {
@@ -1406,7 +1369,7 @@ func TestCompletePausingSandboxRuntimeAbortsCanceledAutoPause(t *testing.T) {
 }
 
 func TestResumePausedSandboxRuntimeStartsRecoveryForRunningRecordWithoutPod(t *testing.T) {
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                "sandbox-a",
 			TeamID:            "team-a",
@@ -1414,7 +1377,7 @@ func TestResumePausedSandboxRuntimeStartsRecoveryForRunningRecordWithoutPod(t *t
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			DesiredState:      SandboxDesiredStateActive,
+			DesiredState:      sandboxstore.SandboxDesiredStateActive,
 			RuntimeGeneration: 4,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
@@ -1439,7 +1402,7 @@ func TestResumePausedSandboxRuntimeStartsRecoveryForRunningRecordWithoutPod(t *t
 	if getErr != nil {
 		t.Fatalf("GetActiveLifecycleTxn() error = %v", getErr)
 	}
-	if txn == nil || txn.Kind != SandboxLifecycleKindPause || txn.Source != SandboxLifecycleSourceLost {
+	if txn == nil || txn.Kind != sandboxstore.SandboxLifecycleKindPause || txn.Source != sandboxstore.SandboxLifecycleSourceLost {
 		t.Fatalf("lifecycle txn = %+v, want lost-runtime pause", txn)
 	}
 	if len(enqueuer.recoveryCalls) != 1 || enqueuer.recoveryCalls[0] != "sandbox-a" {
@@ -1455,7 +1418,7 @@ func TestResumePausedSandboxRuntimeStartsRecoveryForRunningRecordWithoutPod(t *t
 func TestResumePausedSandboxRuntimeRejectsHardExpiredRecord(t *testing.T) {
 	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
 	hardExpiresAt := now.Add(-time.Second)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                "sandbox-a",
 			TeamID:            "team-a",
@@ -1463,7 +1426,7 @@ func TestResumePausedSandboxRuntimeRejectsHardExpiredRecord(t *testing.T) {
 			TemplateID:        "default",
 			TemplateName:      "default",
 			TemplateNamespace: "tpl-default",
-			DesiredState:      SandboxDesiredStatePaused,
+			DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 			HardExpiresAt:     hardExpiresAt,
 			TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
 		},
@@ -1487,14 +1450,14 @@ func TestResumePausedSandboxRuntimeRejectsHardExpiredRecord(t *testing.T) {
 }
 
 func TestTerminatePausedSandboxCompletesPersistentCleanupWithoutWebhookDelivery(t *testing.T) {
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
 			ID:                   "sandbox-a",
 			TeamID:               "team-a",
 			UserID:               "user-a",
-			DesiredState:         SandboxDesiredStatePaused,
+			DesiredState:         sandboxstore.SandboxDesiredStatePaused,
 			WebhookStateVolumeID: "volume-a",
-			Config: SandboxConfig{Webhook: &WebhookConfig{
+			Config: sandboxstore.SandboxConfig{Webhook: &sandboxstore.WebhookConfig{
 				URL:    "https://example.test/webhook",
 				Secret: "secret",
 			}},
@@ -1515,7 +1478,7 @@ func TestTerminatePausedSandboxCompletesPersistentCleanupWithoutWebhookDelivery(
 	if err := svc.TerminateSandbox(context.Background(), "sandbox-a"); err != nil {
 		t.Fatalf("TerminateSandbox() error = %v", err)
 	}
-	if store.records["sandbox-a"].DesiredState != SandboxDesiredStateDeleted {
+	if store.records["sandbox-a"].DesiredState != sandboxstore.SandboxDesiredStateDeleted {
 		t.Fatalf("desired state = %q, want deleted", store.records["sandbox-a"].DesiredState)
 	}
 	if bindings.deleteCalls != 1 {
@@ -1529,7 +1492,7 @@ func TestTerminatePausedSandboxCompletesPersistentCleanupWithoutWebhookDelivery(
 func TestTerminateSandboxAbortsActivePauseTransaction(t *testing.T) {
 	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
 	store := &memorySandboxStore{
-		records: map[string]*SandboxRecord{
+		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                "sandbox-a",
 				TeamID:            "team-a",
@@ -1537,16 +1500,16 @@ func TestTerminateSandboxAbortsActivePauseTransaction(t *testing.T) {
 				TemplateID:        "default",
 				TemplateName:      "default",
 				TemplateNamespace: "tpl-default",
-				DesiredState:      SandboxDesiredStateActive,
+				DesiredState:      sandboxstore.SandboxDesiredStateActive,
 				RuntimeGeneration: 3,
 			},
 		},
-		lifecycleTxns: map[string]*SandboxLifecycleTxn{
+		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
 			"txn-a": {
 				ID:             "txn-a",
 				SandboxID:      "sandbox-a",
-				Kind:           SandboxLifecycleKindPause,
-				Phase:          SandboxLifecyclePhaseBarriered,
+				Kind:           sandboxstore.SandboxLifecycleKindPause,
+				Phase:          sandboxstore.SandboxLifecyclePhaseBarriered,
 				Epoch:          1,
 				FromGeneration: 3,
 			},
@@ -1566,7 +1529,7 @@ func TestTerminateSandboxAbortsActivePauseTransaction(t *testing.T) {
 	if err := svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-a"); err != nil {
 		t.Fatalf("CompletePausingSandboxRuntime() error = %v", err)
 	}
-	if got := store.records["sandbox-a"].DesiredState; got != SandboxDesiredStateDeleted {
+	if got := store.records["sandbox-a"].DesiredState; got != sandboxstore.SandboxDesiredStateDeleted {
 		t.Fatalf("desired state = %q, want deleted", got)
 	}
 	if txn, err := store.GetActiveLifecycleTxn(context.Background(), "sandbox-a"); err != nil || txn != nil {

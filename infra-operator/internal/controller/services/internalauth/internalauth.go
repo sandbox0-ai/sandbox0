@@ -307,31 +307,3 @@ func GetControlPlanePublicKeyRef(infra *infrav1alpha1.Sandbox0Infra) (secretName
 
 	return secretName, publicKeyKey
 }
-
-// GetControlPlaneKeySecret returns the control plane key secret name.
-func GetControlPlaneKeySecret(infra *infrav1alpha1.Sandbox0Infra) string {
-	if infra.Spec.InternalAuth != nil &&
-		infra.Spec.InternalAuth.ControlPlane != nil &&
-		infra.Spec.InternalAuth.ControlPlane.SecretRef != nil {
-		return infra.Spec.InternalAuth.ControlPlane.SecretRef.Name
-	}
-	return fmt.Sprintf("%s-%s", infra.Name, controlPlaneKeySecretName)
-}
-
-// GetDataPlaneKeySecret returns the data plane key secret name.
-func GetDataPlaneKeySecret(infra *infrav1alpha1.Sandbox0Infra) string {
-	if infra.Spec.InternalAuth != nil &&
-		infra.Spec.InternalAuth.DataPlane != nil &&
-		infra.Spec.InternalAuth.DataPlane.SecretRef != nil {
-		return infra.Spec.InternalAuth.DataPlane.SecretRef.Name
-	}
-	return fmt.Sprintf("%s-%s", infra.Name, dataPlaneKeySecretName)
-}
-
-// GetControlPlanePublicKeySecret returns the control plane public key secret name for data plane mode.
-func GetControlPlanePublicKeySecret(infra *infrav1alpha1.Sandbox0Infra) string {
-	if infra.Spec.ControlPlane != nil {
-		return infra.Spec.ControlPlane.InternalAuthPublicKeySecret.Name
-	}
-	return ""
-}

@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
@@ -124,10 +124,6 @@ func MarshalS3BackendConfig(cfg S3BackendConfig) (json.RawMessage, error) {
 	return json.RawMessage(raw), nil
 }
 
-func DecodeS3BackendConfig(raw json.RawMessage) (S3BackendConfig, error) {
-	return decodeS3BackendConfig(raw, true)
-}
-
 func decodeS3BackendConfig(raw json.RawMessage, validate bool) (S3BackendConfig, error) {
 	if len(raw) == 0 {
 		return S3BackendConfig{}, fmt.Errorf("s3 backend config is required")
@@ -143,15 +139,6 @@ func decodeS3BackendConfig(raw json.RawMessage, validate bool) (S3BackendConfig,
 		}
 	}
 	return cfg, nil
-}
-
-func SanitizeS3BackendConfig(cfg S3BackendConfig) S3BackendConfig {
-	cfg = NormalizeS3BackendConfig(cfg)
-	cfg.AccessKey = ""
-	cfg.SecretKey = ""
-	cfg.SessionToken = ""
-	cfg.EncryptedCredentials = nil
-	return cfg
 }
 
 func hasS3BackendEncryptedCredentials(cfg S3BackendConfig) bool {

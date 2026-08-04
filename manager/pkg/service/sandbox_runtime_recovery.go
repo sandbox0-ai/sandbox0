@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,15 +38,15 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 		return fmt.Errorf("confirm sandbox runtime state: %w", err)
 	}
 
-	var record *SandboxRecord
+	var record *sandboxstore.SandboxRecord
 	var stalePods []*corev1.Pod
 	var finishTermination bool
 	var enqueuePause bool
 	var enqueueRecovery bool
 	var cleanupLostRuntime bool
-	var resumeTxn *SandboxLifecycleTxn
-	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
-		if locked == nil || locked.DesiredState == SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() || !s.sandboxRecordBelongsToCluster(locked) {
+	var resumeTxn *sandboxstore.SandboxLifecycleTxn
+	err = s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, locked *sandboxstore.SandboxRecord) error {
+		if locked == nil || locked.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() || !s.sandboxRecordBelongsToCluster(locked) {
 			return nil
 		}
 		record = cloneSandboxRecordForLifecycle(locked)
@@ -54,17 +55,17 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 			return err
 		}
 
-		if locked.DesiredState == SandboxDesiredStateTerminating || sandboxHardExpired(locked.HardExpiresAt, s.now()) {
+		if locked.DesiredState == sandboxstore.SandboxDesiredStateTerminating || sandboxHardExpired(locked.HardExpiresAt, s.now()) {
 			if activeTxn != nil {
 				if err := tx.AbortLifecycleTxn(lockCtx, activeTxn.ID, "sandbox termination requested"); err != nil {
 					return err
 				}
 			}
-			if locked.DesiredState != SandboxDesiredStateTerminating {
+			if locked.DesiredState != sandboxstore.SandboxDesiredStateTerminating {
 				if err := tx.MarkRuntimeTerminating(lockCtx, sandboxID); err != nil {
 					return err
 				}
-				record.DesiredState = SandboxDesiredStateTerminating
+				record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
 			}
 			finishTermination = true
 			return nil
@@ -72,9 +73,9 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 
 		if activeTxn != nil {
 			switch activeTxn.Kind {
-			case SandboxLifecycleKindPause:
+			case sandboxstore.SandboxLifecycleKindPause:
 				if sandboxLifecycleSourceReconstructsRuntime(activeTxn.Source) {
-					if activeTxn.Source == SandboxLifecycleSourceLost {
+					if activeTxn.Source == sandboxstore.SandboxLifecycleSourceLost {
 						cleanupLostRuntime = true
 						for _, pod := range pods {
 							generation := runtimeGenerationFromPod(pod)
@@ -97,10 +98,10 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 					enqueuePause = true
 				}
 				return nil
-			case SandboxLifecycleKindResume:
-				resumeTxn = cloneSandboxLifecycleTxn(activeTxn)
+			case sandboxstore.SandboxLifecycleKindResume:
+				resumeTxn = sandboxstore.CloneSandboxLifecycleTxn(activeTxn)
 				return nil
-			case SandboxLifecycleKindFork, SandboxLifecycleKindSnapshot:
+			case sandboxstore.SandboxLifecycleKindFork, sandboxstore.SandboxLifecycleKindSnapshot:
 				if sandboxSourceRuntimeTxnPodAvailable(activeTxn, pods) ||
 					!sandboxLifecycleRootFSSourceCheckpointTxnStale(activeTxn, s.now()) {
 					return nil
@@ -113,7 +114,7 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 			}
 		}
 
-		if locked.DesiredState == SandboxDesiredStatePaused {
+		if locked.DesiredState == sandboxstore.SandboxDesiredStatePaused {
 			stalePods = append(stalePods, pods...)
 			return nil
 		}
@@ -170,7 +171,7 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 		cleanupLostRuntime = len(pods) == 0
 		return nil
 	})
-	if errors.Is(err, ErrSandboxRecordNotFound) {
+	if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 		return nil
 	}
 	if err != nil {
@@ -207,8 +208,8 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 	return nil
 }
 
-func (s *SandboxService) recoverStaleResumeTransaction(ctx context.Context, record *SandboxRecord, txn *SandboxLifecycleTxn, pods []*corev1.Pod) error {
-	if s == nil || record == nil || txn == nil || txn.Kind != SandboxLifecycleKindResume || txn.UpdatedAt.IsZero() {
+func (s *SandboxService) recoverStaleResumeTransaction(ctx context.Context, record *sandboxstore.SandboxRecord, txn *sandboxstore.SandboxLifecycleTxn, pods []*corev1.Pod) error {
+	if s == nil || record == nil || txn == nil || txn.Kind != sandboxstore.SandboxLifecycleKindResume || txn.UpdatedAt.IsZero() {
 		return nil
 	}
 	staleAfter := 2 * time.Minute
@@ -277,7 +278,7 @@ func (s *SandboxService) listSandboxRuntimePodsStrong(ctx context.Context, sandb
 	pods := make([]*corev1.Pod, 0, len(list.Items))
 	for i := range list.Items {
 		pod := &list.Items[i]
-		if sandboxIDFromPod(pod) != sandboxID || !sandboxRuntimePodOwnedBySandbox(pod) {
+		if sandboxPodID(pod) != sandboxID || !sandboxRuntimePodOwnedBySandbox(pod) {
 			continue
 		}
 		pods = append(pods, pod.DeepCopy())
@@ -296,7 +297,7 @@ func (s *SandboxService) listSandboxRuntimePodsStrong(ctx context.Context, sandb
 	return pods, nil
 }
 
-func (s *SandboxService) sandboxRecordBelongsToCluster(record *SandboxRecord) bool {
+func (s *SandboxService) sandboxRecordBelongsToCluster(record *sandboxstore.SandboxRecord) bool {
 	if s == nil || record == nil {
 		return false
 	}
@@ -318,7 +319,7 @@ func splitSandboxRuntimePods(pods []*corev1.Pod) (active, deleting []*corev1.Pod
 	return active, deleting
 }
 
-func matchingSandboxRuntimePods(record *SandboxRecord, pods []*corev1.Pod) []*corev1.Pod {
+func matchingSandboxRuntimePods(record *sandboxstore.SandboxRecord, pods []*corev1.Pod) []*corev1.Pod {
 	matching := make([]*corev1.Pod, 0, 1)
 	for _, pod := range pods {
 		if sandboxRecordReferencesPod(record, pod) {
@@ -328,7 +329,7 @@ func matchingSandboxRuntimePods(record *SandboxRecord, pods []*corev1.Pod) []*co
 	return matching
 }
 
-func sandboxSourceRuntimeTxnPodAvailable(txn *SandboxLifecycleTxn, pods []*corev1.Pod) bool {
+func sandboxSourceRuntimeTxnPodAvailable(txn *sandboxstore.SandboxLifecycleTxn, pods []*corev1.Pod) bool {
 	if txn == nil {
 		return false
 	}
@@ -344,16 +345,16 @@ func sandboxSourceRuntimeTxnPodAvailable(txn *SandboxLifecycleTxn, pods []*corev
 	return false
 }
 
-func beginLostRuntimeRecoveryTxn(ctx context.Context, tx SandboxStoreTx, record *SandboxRecord) error {
+func beginLostRuntimeRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 	if tx == nil || record == nil {
 		return nil
 	}
-	return tx.BeginLifecycleTxn(ctx, &SandboxLifecycleTxn{
+	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
 		ID:               uuid.NewString(),
 		SandboxID:        record.ID,
-		Kind:             SandboxLifecycleKindPause,
-		Phase:            SandboxLifecyclePhasePreparing,
-		Source:           SandboxLifecycleSourceLost,
+		Kind:             sandboxstore.SandboxLifecycleKindPause,
+		Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
+		Source:           sandboxstore.SandboxLifecycleSourceLost,
 		Cancelable:       false,
 		FromGeneration:   record.RuntimeGeneration,
 		FromPodNamespace: record.CurrentPodNamespace,
@@ -384,7 +385,7 @@ func (s *SandboxService) deleteSandboxRuntimePods(ctx context.Context, pods []*c
 	return nil
 }
 
-func (s *SandboxService) finishTerminatingSandbox(ctx context.Context, record *SandboxRecord, pods []*corev1.Pod) error {
+func (s *SandboxService) finishTerminatingSandbox(ctx context.Context, record *sandboxstore.SandboxRecord, pods []*corev1.Pod) error {
 	if s == nil || record == nil || s.sandboxStore == nil {
 		return nil
 	}

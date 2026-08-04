@@ -3,7 +3,7 @@ package runtimemetrics
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -23,10 +23,10 @@ func TestBuildIdentityIndexFiltersAndResolvesActiveLocalSandbox(t *testing.T) {
 	}
 	wrongNode := runtimeMetricPod("ns-a", "pod-b", "pod-uid-b", "node-b", "team-a", "sandbox-b", "1")
 	idle := runtimeMetricPod("ns-a", "pod-c", "pod-uid-c", "node-a", "team-a", "sandbox-c", "1")
-	idle.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
+	idle.Labels[sandboxpod.LabelPoolType] = sandboxpod.PoolTypeIdle
 	reserved := runtimeMetricPod("ns-a", "pod-f", "pod-uid-f", "node-a", "team-a", "sandbox-f", "2")
-	reserved.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
-	reserved.Annotations[controller.AnnotationHotClaimReservation] = "reservation-token"
+	reserved.Labels[sandboxpod.LabelPoolType] = sandboxpod.PoolTypeIdle
+	reserved.Annotations[sandboxpod.AnnotationHotClaimReservation] = "reservation-token"
 	invalidGeneration := runtimeMetricPod("ns-a", "pod-d", "pod-uid-d", "node-a", "team-a", "sandbox-d", "invalid")
 	terminal := runtimeMetricPod("ns-a", "pod-e", "pod-uid-e", "node-a", "team-a", "sandbox-e", "1")
 	terminal.Status.Phase = corev1.PodFailed
@@ -91,12 +91,12 @@ func runtimeMetricPod(namespace, name, uid, nodeName, teamID, sandboxID, generat
 			Name:      name,
 			UID:       types.UID(uid),
 			Labels: map[string]string{
-				controller.LabelPoolType:  controller.PoolTypeActive,
-				controller.LabelSandboxID: sandboxID,
+				sandboxpod.LabelPoolType:  sandboxpod.PoolTypeActive,
+				sandboxpod.LabelSandboxID: sandboxID,
 			},
 			Annotations: map[string]string{
-				controller.AnnotationTeamID:            teamID,
-				controller.AnnotationRuntimeGeneration: generation,
+				sandboxpod.AnnotationTeamID:            teamID,
+				sandboxpod.AnnotationRuntimeGeneration: generation,
 			},
 		},
 		Spec: corev1.PodSpec{

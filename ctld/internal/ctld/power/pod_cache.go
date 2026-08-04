@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -98,7 +98,7 @@ func podSandboxIDIndexFunc(obj interface{}) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	value := strings.TrimSpace(accessor.GetLabels()[controller.LabelSandboxID])
+	value := strings.TrimSpace(accessor.GetLabels()[sandboxpod.LabelSandboxID])
 	if value == "" {
 		return nil, nil
 	}

@@ -8,8 +8,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	meteringpkg "github.com/sandbox0-ai/sandbox0/pkg/metering"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

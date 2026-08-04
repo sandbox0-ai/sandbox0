@@ -11,10 +11,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
@@ -73,7 +76,7 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
 		}
-		if apierrors.IsNotFound(err) || errors.Is(err, service.ErrRootFSSnapshotNotFound) {
+		if apierrors.IsNotFound(err) || errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, err.Error())
 			return
 		}
@@ -125,7 +128,7 @@ func (s *Server) listSandboxes(c *gin.Context) {
 	}
 
 	// Parse query parameters
-	req := &service.ListSandboxesRequest{
+	req := &sandboxstore.ListSandboxesRequest{
 		TeamID:     claims.TeamID,
 		Status:     c.Query("status"),
 		TemplateID: c.Query("template_id"),
@@ -188,45 +191,66 @@ func (s *Server) listSandboxes(c *gin.Context) {
 
 func isValidSandboxListStatus(status string) bool {
 	switch status {
-	case service.SandboxStatusStarting,
-		service.SandboxStatusRunning,
-		service.SandboxStatusPaused,
-		service.SandboxStatusTerminating,
-		service.SandboxStatusFailed:
+	case managerapi.SandboxStatusStarting,
+		managerapi.SandboxStatusRunning,
+		managerapi.SandboxStatusPaused,
+		managerapi.SandboxStatusTerminating,
+		managerapi.SandboxStatusFailed:
 		return true
 	default:
 		return false
 	}
 }
 
-// getSandbox gets a sandbox
-func (s *Server) getSandbox(c *gin.Context) {
+func requireSandboxID(c *gin.Context) (string, bool) {
 	sandboxID := c.Param("id")
 	if sandboxID == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
-		return
+		return "", false
 	}
+	return sandboxID, true
+}
 
-	// Get team ID from claims for ownership verification
+func requireAuthenticatedClaims(c *gin.Context) (*internalauth.Claims, bool) {
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
-		return
+		return nil, false
 	}
+	return claims, true
+}
 
+func (s *Server) getOwnedSandbox(c *gin.Context, sandboxID string, claims *internalauth.Claims, failureLog string) (*managerapi.Sandbox, bool) {
 	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
-		s.logger.Error("Failed to get sandbox",
-			zap.String("sandboxID", sandboxID),
-			zap.Error(err),
-		)
+		if failureLog != "" {
+			s.logger.Error(failureLog,
+				zap.String("sandboxID", sandboxID),
+				zap.Error(err),
+			)
+		}
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
+		return nil, false
 	}
-
-	// Verify team ownership
 	if sandbox.TeamID != claims.TeamID {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+		return nil, false
+	}
+	return sandbox, true
+}
+
+// getSandbox gets a sandbox
+func (s *Server) getSandbox(c *gin.Context) {
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
+		return
+	}
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
+		return
+	}
+	sandbox, ok := s.getOwnedSandbox(c, sandboxID, claims, "Failed to get sandbox")
+	if !ok {
 		return
 	}
 
@@ -300,15 +324,12 @@ func hasInternalGatewayWildcard(permissions []string) bool {
 
 // updateSandbox updates sandbox configuration
 func (s *Server) updateSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
 		return
 	}
 
@@ -322,18 +343,13 @@ func (s *Server) updateSandbox(c *gin.Context) {
 		return
 	}
 
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
-	}
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+	sandbox, ok := s.getOwnedSandbox(c, sandboxID, claims, "")
+	if !ok {
 		return
 	}
 
 	if req.Config.AutoResume != nil && !*req.Config.AutoResume {
-		if service.SandboxAppServicesHaveResumeRoute(sandbox.Services) {
+		if appservice.SandboxAppServicesHaveResumeRoute(sandbox.Services) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
 				"cannot disable auto_resume while service routes have resume=true; remove or update those routes first")
 			return
@@ -343,7 +359,7 @@ func (s *Server) updateSandbox(c *gin.Context) {
 	if req.Config.AutoResume != nil {
 		resultAutoResume = *req.Config.AutoResume
 	}
-	if !resultAutoResume && service.SandboxAppServicesHaveResumeRoute(req.Config.Services) {
+	if !resultAutoResume && appservice.SandboxAppServicesHaveResumeRoute(req.Config.Services) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest,
 			"cannot set resume=true on public routes when sandbox auto_resume is disabled")
 		return
@@ -372,32 +388,15 @@ func (s *Server) updateSandbox(c *gin.Context) {
 
 // getSandboxStatus gets a sandbox status
 func (s *Server) getSandboxStatus(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-
-	// Get team ID from claims for ownership verification
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
 		return
 	}
-
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		s.logger.Error("Failed to get sandbox",
-			zap.String("sandboxID", sandboxID),
-			zap.Error(err),
-		)
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
-	}
-
-	// Verify team ownership
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+	if _, ok := s.getOwnedSandbox(c, sandboxID, claims, "Failed to get sandbox"); !ok {
 		return
 	}
 
@@ -416,31 +415,19 @@ func (s *Server) getSandboxStatus(c *gin.Context) {
 
 // terminateSandbox terminates a sandbox
 func (s *Server) terminateSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
+		return
+	}
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
+		return
+	}
+	if _, ok := s.getOwnedSandbox(c, sandboxID, claims, ""); !ok {
 		return
 	}
 
-	// Get team ID from claims for ownership verification
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
-		return
-	}
-
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
-	}
-
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
-		return
-	}
-
-	err = s.sandboxService.TerminateSandbox(c.Request.Context(), sandboxID)
+	err := s.sandboxService.TerminateSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to terminate sandbox",
 			zap.String("sandboxID", sandboxID),
@@ -457,28 +444,15 @@ func (s *Server) terminateSandbox(c *gin.Context) {
 
 // pauseSandbox pauses a sandbox
 func (s *Server) pauseSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-
-	// Get team ID from claims for ownership verification
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
 		return
 	}
-
-	// Verify ownership
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
-	}
-
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+	if _, ok := s.getOwnedSandbox(c, sandboxID, claims, ""); !ok {
 		return
 	}
 
@@ -493,28 +467,15 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 
 // resumeSandbox resumes a sandbox
 func (s *Server) resumeSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-
-	// Get team ID from claims for ownership verification
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
 		return
 	}
-
-	// Verify ownership
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
-	}
-
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+	if _, ok := s.getOwnedSandbox(c, sandboxID, claims, ""); !ok {
 		return
 	}
 
@@ -553,28 +514,15 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 
 // refreshSandbox refreshes sandbox TTL
 func (s *Server) refreshSandbox(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-
-	// Get team ID from claims for ownership verification
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
 		return
 	}
-
-	// Verify ownership
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
-	}
-
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+	if _, ok := s.getOwnedSandbox(c, sandboxID, claims, ""); !ok {
 		return
 	}
 

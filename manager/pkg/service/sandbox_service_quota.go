@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -102,7 +103,7 @@ func (s *SandboxService) currentSandboxStoreActiveQuotaUsage(ctx context.Context
 		}
 		return current, true, nil
 	}
-	records, err := s.sandboxStore.ListSandboxes(ctx, &ListSandboxesRequest{TeamID: teamID})
+	records, err := s.sandboxStore.ListSandboxes(ctx, &sandboxstore.ListSandboxesRequest{TeamID: teamID})
 	if err != nil {
 		return 0, true, fmt.Errorf("list sandbox records: %w", err)
 	}
@@ -115,12 +116,12 @@ func (s *SandboxService) currentSandboxStoreActiveQuotaUsage(ctx context.Context
 	return total, true, nil
 }
 
-func sandboxRecordCountsForActiveQuota(record *SandboxRecord) bool {
+func sandboxRecordCountsForActiveQuota(record *sandboxstore.SandboxRecord) bool {
 	if record == nil || !record.DeletedAt.IsZero() {
 		return false
 	}
 	switch record.DesiredState {
-	case SandboxDesiredStateActive:
+	case sandboxstore.SandboxDesiredStateActive:
 		return true
 	default:
 		return false

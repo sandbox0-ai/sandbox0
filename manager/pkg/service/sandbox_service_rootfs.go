@@ -14,7 +14,9 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -26,7 +28,7 @@ const sandboxRootFSSourceCheckpointLifecycleStaleAfter = sandboxRootFSOperationT
 const sandboxRootFSUncommittedObjectDeleteDelay = 15 * time.Minute
 const sandboxRootFSUncommittedObjectDeleteTimeout = 30 * time.Second
 
-func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, tx SandboxStoreTx) error {
+func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, record *sandboxstore.SandboxRecord, tx sandboxstore.SandboxStoreTx) error {
 	state, err := s.prepareSandboxRootFSCheckpoint(ctx, pod, record)
 	if err != nil {
 		return err
@@ -43,14 +45,14 @@ func (s *SandboxService) saveSandboxRootFSCheckpoint(ctx context.Context, pod *c
 	return nil
 }
 
-func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, record *SandboxRecord) (*SandboxRootFSState, error) {
+func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, record *sandboxstore.SandboxRecord) (*sandboxstore.SandboxRootFSState, error) {
 	if s == nil || !s.config.CtldEnabled || s.ctldClient == nil || pod == nil {
 		return nil, nil
 	}
 	if record == nil {
 		return nil, nil
 	}
-	sandboxID := sandboxIDFromPod(pod)
+	sandboxID := sandboxPodID(pod)
 	if sandboxID == "" {
 		sandboxID = record.ID
 	}
@@ -72,7 +74,7 @@ func (s *SandboxService) prepareSandboxRootFSCheckpoint(ctx context.Context, pod
 	generation := runtimeGenerationFromPod(pod)
 	parentLayerID := ""
 	expectedHeadLayerID := ""
-	var parentState *SandboxRootFSState
+	var parentState *sandboxstore.SandboxRootFSState
 	if parentState, err = s.latestRootFSState(ctx, sandboxID); err != nil {
 		return nil, fmt.Errorf("load current rootfs head: %w", err)
 	} else if parentState != nil {
@@ -209,7 +211,7 @@ func (s *SandboxService) prepareAndPublishSandboxRootFSSnapshot(ctx context.Cont
 	}, nil
 }
 
-func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootFSState) (bool, string) {
+func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *sandboxstore.SandboxRootFSState) (bool, string) {
 	if s == nil || s.config.RootFSSquashDisabled || state == nil {
 		return false, ""
 	}
@@ -237,7 +239,7 @@ func (s *SandboxService) shouldSquashSandboxRootFSCheckpoint(state *SandboxRootF
 	return false, ""
 }
 
-func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, state *SandboxRootFSState) error {
+func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *corev1.Pod, state *sandboxstore.SandboxRootFSState) error {
 	if state == nil {
 		return nil
 	}
@@ -287,7 +289,7 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	if pod == nil {
 		return nil
 	}
-	var mounts []ClaimMount
+	var mounts []managerapi.ClaimMount
 	if pod.Annotations != nil {
 		mounts = parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
 	}
@@ -316,7 +318,7 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	return out
 }
 
-func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *SandboxRootFSState, persistRuntime bool) (*corev1.Pod, error) {
+func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *sandboxstore.SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *sandboxstore.SandboxRootFSState, persistRuntime bool) (*corev1.Pod, error) {
 	if state == nil {
 		return pod, nil
 	}
@@ -366,19 +368,19 @@ func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Co
 	return readyPod, nil
 }
 
-func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *SandboxRecord) error {
+func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *sandboxstore.SandboxRecord) error {
 	if s == nil || s.sandboxStore == nil || pod == nil || record == nil {
 		return nil
 	}
 	sandboxID := strings.TrimSpace(record.ID)
 	if sandboxID == "" {
-		sandboxID = sandboxIDFromPod(pod)
+		sandboxID = sandboxPodID(pod)
 	}
 	if sandboxID == "" {
 		return fmt.Errorf("sandbox_id is required")
 	}
-	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx SandboxStoreTx, locked *SandboxRecord) error {
-		if locked == nil || locked.DesiredState == SandboxDesiredStateTerminating || locked.DesiredState == SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() {
+	return s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, locked *sandboxstore.SandboxRecord) error {
+		if locked == nil || locked.DesiredState == sandboxstore.SandboxDesiredStateTerminating || locked.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() {
 			return nil
 		}
 		if runtimeGenerationFromPod(pod) < locked.RuntimeGeneration {
@@ -388,7 +390,7 @@ func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1
 	})
 }
 
-func templateWithCheckpointBaseImage(template *v1alpha1.SandboxTemplate, state *SandboxRootFSState) (*v1alpha1.SandboxTemplate, error) {
+func templateWithCheckpointBaseImage(template *v1alpha1.SandboxTemplate, state *sandboxstore.SandboxRootFSState) (*v1alpha1.SandboxTemplate, error) {
 	if template == nil {
 		return nil, fmt.Errorf("template is required")
 	}
@@ -402,7 +404,7 @@ func templateWithCheckpointBaseImage(template *v1alpha1.SandboxTemplate, state *
 	return clone, nil
 }
 
-func checkpointBaseImageRef(state *SandboxRootFSState) (string, error) {
+func checkpointBaseImageRef(state *sandboxstore.SandboxRootFSState) (string, error) {
 	if state == nil {
 		return "", fmt.Errorf("rootfs state is required")
 	}
@@ -437,7 +439,7 @@ func imageRepositoryFromRef(ref string) string {
 	return strings.TrimSpace(ref)
 }
 
-func rootFSLayerDescriptors(state *SandboxRootFSState) []ctldapi.RootFSLayerDescriptor {
+func rootFSLayerDescriptors(state *sandboxstore.SandboxRootFSState) []ctldapi.RootFSLayerDescriptor {
 	if state == nil {
 		return nil
 	}
@@ -479,7 +481,7 @@ func rootFSLayerDescriptors(state *SandboxRootFSState) []ctldapi.RootFSLayerDesc
 	}}
 }
 
-func (s *SandboxService) latestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error) {
+func (s *SandboxService) latestRootFSState(ctx context.Context, sandboxID string) (*sandboxstore.SandboxRootFSState, error) {
 	if s == nil || s.sandboxStore == nil {
 		return nil, nil
 	}
@@ -503,7 +505,7 @@ func rootFSTargetForPod(pod *corev1.Pod) ctldapi.RootFSContainerRef {
 	}
 }
 
-func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, resp *ctldapi.SaveRootFSResponse) (*SandboxRootFSState, error) {
+func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, resp *ctldapi.SaveRootFSResponse) (*sandboxstore.SandboxRootFSState, error) {
 	if resp == nil {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: empty ctld response")
 	}
@@ -513,7 +515,7 @@ func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, res
 	if strings.TrimSpace(resp.Descriptor.ObjectKey) == "" {
 		return nil, fmt.Errorf("save sandbox rootfs checkpoint: diff object key is empty")
 	}
-	return &SandboxRootFSState{
+	return &sandboxstore.SandboxRootFSState{
 		SandboxID:           sandboxID,
 		TeamID:              teamID,
 		RuntimeGeneration:   generation,
@@ -532,11 +534,11 @@ func rootFSStateFromSaveResponse(sandboxID, teamID string, generation int64, res
 	}, nil
 }
 
-func rootFSStateFromPreparedSnapshot(sandboxID, teamID string, generation int64, layerID, objectKey string, prepared *ctldapi.PrepareRootFSSnapshotResponse) *SandboxRootFSState {
+func rootFSStateFromPreparedSnapshot(sandboxID, teamID string, generation int64, layerID, objectKey string, prepared *ctldapi.PrepareRootFSSnapshotResponse) *sandboxstore.SandboxRootFSState {
 	if prepared == nil {
 		return nil
 	}
-	return &SandboxRootFSState{
+	return &sandboxstore.SandboxRootFSState{
 		LayerID:             layerID,
 		SandboxID:           sandboxID,
 		TeamID:              teamID,
@@ -575,12 +577,12 @@ func defaultSandboxRootFSObjectKey(teamID, sandboxID string, generation int64, d
 	return path.Join("sandbox-rootfs", teamID, sandboxID, fmt.Sprintf("%d", generation), parts[0], parts[1]+".tar"), nil
 }
 
-func (s *SandboxService) queueUncommittedRootFSObjectDeletion(ctx context.Context, state *SandboxRootFSState, notBefore time.Time) error {
+func (s *SandboxService) queueUncommittedRootFSObjectDeletion(ctx context.Context, state *sandboxstore.SandboxRootFSState, notBefore time.Time) error {
 	if state == nil || strings.TrimSpace(state.DiffObjectKey) == "" {
 		return nil
 	}
 	store, ok := s.sandboxStore.(interface {
-		QueueUncommittedRootFSObjectDeletion(context.Context, *SandboxRootFSState, time.Time) error
+		QueueUncommittedRootFSObjectDeletion(context.Context, *sandboxstore.SandboxRootFSState, time.Time) error
 	})
 	if !ok || store == nil {
 		return nil
@@ -588,7 +590,7 @@ func (s *SandboxService) queueUncommittedRootFSObjectDeletion(ctx context.Contex
 	return store.QueueUncommittedRootFSObjectDeletion(ctx, state, notBefore)
 }
 
-func (s *SandboxService) deleteUncommittedRootFSObject(state *SandboxRootFSState, reason string) {
+func (s *SandboxService) deleteUncommittedRootFSObject(state *sandboxstore.SandboxRootFSState, reason string) {
 	if state == nil || strings.TrimSpace(state.DiffObjectKey) == "" {
 		return
 	}

@@ -142,10 +142,3 @@ func (mc *MultiplexedChannel[T]) Close() {
 	mc.closed = true
 	close(mc.Source)
 }
-
-// SubscriberCount returns the number of active subscribers.
-func (mc *MultiplexedChannel[T]) SubscriberCount() int {
-	mc.mu.RLock()
-	defer mc.mu.RUnlock()
-	return len(mc.subscribers)
-}

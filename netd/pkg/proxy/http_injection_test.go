@@ -74,7 +74,7 @@ func TestHTTPAdapterInjectsResolvedHeaders(t *testing.T) {
 					Name:    "example-http",
 					AuthRef: "example-api",
 				},
-				Resolved: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+				Resolved: testHTTPHeadersResolveResponse("example-api", map[string]string{
 					"Authorization": "Bearer injected-token",
 					"X-Auth-Ref":    "example-api",
 				}, nil),
@@ -185,7 +185,7 @@ func TestHTTPAdapterSubstitutesPlaceholdersInQueryHeaderAndBody(t *testing.T) {
 					Name:    "example-http",
 					AuthRef: "example-api",
 				},
-				Resolved: egressauth.NewPlaceholderSubstitutionResolveResponse("example-api", &egressauth.PlaceholderSubstitutionDirective{
+				Resolved: testPlaceholderSubstitutionResolveResponse("example-api", &egressauth.PlaceholderSubstitutionDirective{
 					Replacements: []egressauth.PlaceholderSubstitutionReplacement{{
 						Placeholder: "s0env_test_token",
 						Value:       "resolved-secret",
@@ -370,7 +370,7 @@ func TestHTTPAdapterInjectsHeadersOnlyWhenRequestMatcherMatches(t *testing.T) {
 	defer proxyListener.Close()
 
 	resolver := &stubEgressAuthResolver{
-		resp: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+		resp: testHTTPHeadersResolveResponse("example-api", map[string]string{
 			"Authorization": "Bearer matched-token",
 		}, nil),
 	}
@@ -465,7 +465,7 @@ func TestHTTPAdapterSkipsResolverWhenRequestMatcherDoesNotMatch(t *testing.T) {
 	defer proxyListener.Close()
 
 	resolver := &stubEgressAuthResolver{
-		resp: egressauth.NewHTTPHeadersResolveResponse("example-api", map[string]string{
+		resp: testHTTPHeadersResolveResponse("example-api", map[string]string{
 			"Authorization": "Bearer should-not-be-used",
 		}, nil),
 	}
@@ -567,10 +567,10 @@ func TestHTTPAdapterFallsThroughCredentialCandidatesByRequestMatcher(t *testing.
 	}
 	resolver := &stubEgressAuthResolver{
 		responses: map[string]*egressauth.ResolveResponse{
-			"github_emu": egressauth.NewHTTPHeadersResolveResponse("github_emu", map[string]string{
+			"github_emu": testHTTPHeadersResolveResponse("github_emu", map[string]string{
 				"Authorization": "Bearer emu-token",
 			}, nil),
-			"github_cloud": egressauth.NewHTTPHeadersResolveResponse("github_cloud", map[string]string{
+			"github_cloud": testHTTPHeadersResolveResponse("github_cloud", map[string]string{
 				"Authorization": "Bearer cloud-token",
 			}, nil),
 		},

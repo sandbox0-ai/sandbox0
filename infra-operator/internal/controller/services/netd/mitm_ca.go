@@ -10,7 +10,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -20,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	plan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 )
@@ -32,28 +30,6 @@ const (
 
 func managedMITMCASecretName(infraName string) string {
 	return fmt.Sprintf("%s-netd-mitm-ca", infraName)
-}
-
-func ResolveMITMCASecretName(infra *infrav1alpha1.Sandbox0Infra) string {
-	if infra == nil {
-		return ""
-	}
-	if infra.Spec.Network != nil {
-		if secretName := strings.TrimSpace(infra.Spec.Network.MITMCASecretName); secretName != "" {
-			return secretName
-		}
-	}
-	if infra.Name == "" {
-		return ""
-	}
-	return managedMITMCASecretName(infra.Name)
-}
-
-func EnsureMITMCASecret(ctx context.Context, resources *common.ResourceManager, infra *infrav1alpha1.Sandbox0Infra, labels map[string]string) (string, error) {
-	if infra == nil {
-		return "", nil
-	}
-	return EnsureMITMCASecretWithScope(ctx, resources, common.NewObjectScope(infra), plan.Compile(infra), labels)
 }
 
 func EnsureMITMCASecretWithScope(ctx context.Context, resources *common.ResourceManager, scope common.ObjectScope, compiledPlan *plan.InfraPlan, labels map[string]string) (string, error) {

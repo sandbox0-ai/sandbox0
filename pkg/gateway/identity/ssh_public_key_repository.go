@@ -2,10 +2,7 @@ package identity
 
 import (
 	"context"
-	"errors"
 	"fmt"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // CreateUserSSHPublicKey stores one SSH public key for a user in a team.
@@ -93,36 +90,6 @@ func (r *Repository) ListUserSSHPublicKeysByFingerprint(ctx context.Context, fin
 		keys = append(keys, &key)
 	}
 	return keys, nil
-}
-
-// GetUserSSHPublicKeyByFingerprint resolves one SSH public key by normalized fingerprint.
-func (r *Repository) GetUserSSHPublicKeyByFingerprint(ctx context.Context, fingerprint string) (*UserSSHPublicKey, error) {
-	var key UserSSHPublicKey
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, COALESCE(team_id, ''), user_id, name, public_key, key_type, fingerprint_sha256, comment, created_at, updated_at
-		FROM user_ssh_public_keys
-		WHERE fingerprint_sha256 = $1
-		ORDER BY created_at, id
-		LIMIT 1
-	`, fingerprint).Scan(
-		&key.ID,
-		&key.TeamID,
-		&key.UserID,
-		&key.Name,
-		&key.PublicKey,
-		&key.KeyType,
-		&key.FingerprintSHA256,
-		&key.Comment,
-		&key.CreatedAt,
-		&key.UpdatedAt,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrSSHPublicKeyNotFound
-		}
-		return nil, fmt.Errorf("query ssh public key by fingerprint: %w", err)
-	}
-	return &key, nil
 }
 
 // DeleteUserSSHPublicKeyByTeamAndUserID deletes one SSH public key owned by a user in a team.

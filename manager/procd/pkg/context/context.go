@@ -197,15 +197,6 @@ func (ctx *Context) AddExitHandler(handler process.ExitHandler) {
 	}
 }
 
-// AddStartHandler appends a start handler to the handler chain.
-// Handlers are executed in the order they were added, enabling middleware-like behavior.
-func (ctx *Context) AddStartHandler(handler process.StartHandler) {
-	if ctx.MainProcess != nil {
-		ctx.MainProcess.AddStartHandler(handler)
-		ctx.touch()
-	}
-}
-
 // Touch marks the context as recently active.
 func (ctx *Context) Touch() {
 	ctx.touch()

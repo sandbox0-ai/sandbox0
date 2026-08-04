@@ -69,54 +69,15 @@ type TemplateStats struct {
 
 // GetClusterSummary gets cluster summary from cluster-gateway
 func (c *ClusterGatewayClient) GetClusterSummary(ctx context.Context, baseURL string) (*ClusterSummary, error) {
-	// Generate system token for cluster-gateway
-	token, err := c.internalAuthGen.GenerateSystem("cluster-gateway", internalauth.GenerateOptions{
-		Permissions: []string{"*:*"},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("generate system token: %w", err)
-	}
-
-	// Build request URL
-	url := fmt.Sprintf("%s/internal/v1/cluster/summary", baseURL)
-
-	// Create request
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	// Set headers
-	req.Header.Set(internalauth.DefaultTokenHeader, token)
-	req.Header.Set("Content-Type", "application/json")
-
-	// Execute request
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("execute request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Check status code
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, clusterGatewayStatusError(resp.StatusCode, body)
-	}
-
-	// Parse response
-	summary, apiErr, err := spec.DecodeResponse[ClusterSummary](resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-	if apiErr != nil {
-		return nil, fmt.Errorf("cluster-gateway error: %s", apiErr.Message)
-	}
-
-	return summary, nil
+	return getClusterGatewayInternalResponse[ClusterSummary](c, ctx, baseURL, "/internal/v1/cluster/summary")
 }
 
 // GetTemplateStats gets template statistics from cluster-gateway
 func (c *ClusterGatewayClient) GetTemplateStats(ctx context.Context, baseURL string) (*TemplateStats, error) {
+	return getClusterGatewayInternalResponse[TemplateStats](c, ctx, baseURL, "/internal/v1/templates/stats")
+}
+
+func getClusterGatewayInternalResponse[T any](c *ClusterGatewayClient, ctx context.Context, baseURL, path string) (*T, error) {
 	// Generate system token for cluster-gateway
 	token, err := c.internalAuthGen.GenerateSystem("cluster-gateway", internalauth.GenerateOptions{
 		Permissions: []string{"*:*"},
@@ -125,11 +86,8 @@ func (c *ClusterGatewayClient) GetTemplateStats(ctx context.Context, baseURL str
 		return nil, fmt.Errorf("generate system token: %w", err)
 	}
 
-	// Build request URL
-	url := fmt.Sprintf("%s/internal/v1/templates/stats", baseURL)
-
 	// Create request
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s%s", baseURL, path), nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -152,7 +110,7 @@ func (c *ClusterGatewayClient) GetTemplateStats(ctx context.Context, baseURL str
 	}
 
 	// Parse response
-	stats, apiErr, err := spec.DecodeResponse[TemplateStats](resp.Body)
+	result, apiErr, err := spec.DecodeResponse[T](resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
@@ -160,7 +118,7 @@ func (c *ClusterGatewayClient) GetTemplateStats(ctx context.Context, baseURL str
 		return nil, fmt.Errorf("cluster-gateway error: %s", apiErr.Message)
 	}
 
-	return stats, nil
+	return result, nil
 }
 
 // GetSandboxTemplateSource gets durable source template context from the

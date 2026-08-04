@@ -7,6 +7,8 @@ import (
 
 	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +43,7 @@ func TestListSandboxes(t *testing.T) {
 	tests := []struct {
 		name            string
 		pods            []*corev1.Pod
-		req             *ListSandboxesRequest
+		req             *sandboxstore.ListSandboxesRequest
 		expectedCount   int
 		expectedIDs     []string
 		expectedHasMore bool
@@ -53,7 +55,7 @@ func TestListSandboxes(t *testing.T) {
 				createTestPod("sandbox-2", "team-a", "template-2", controller.PoolTypeActive, now.Add(-30*time.Minute), now.Add(2*time.Hour), false),
 				createTestPod("sandbox-3", "team-b", "template-1", controller.PoolTypeActive, now.Add(-2*time.Hour), now.Add(1*time.Hour), false),
 			},
-			req: &ListSandboxesRequest{
+			req: &sandboxstore.ListSandboxesRequest{
 				TeamID: "team-a",
 				Limit:  50,
 				Offset: 0,
@@ -69,9 +71,9 @@ func TestListSandboxes(t *testing.T) {
 				createTestPodWithPhase("sandbox-2", "team-a", "template-2", controller.PoolTypeActive, now, now, false, corev1.PodPending),
 				createTestPodWithPhase("sandbox-3", "team-a", "template-3", controller.PoolTypeActive, now, now, false, corev1.PodFailed),
 			},
-			req: &ListSandboxesRequest{
+			req: &sandboxstore.ListSandboxesRequest{
 				TeamID: "team-a",
-				Status: SandboxStatusRunning,
+				Status: managerapi.SandboxStatusRunning,
 				Limit:  50,
 				Offset: 0,
 			},
@@ -86,7 +88,7 @@ func TestListSandboxes(t *testing.T) {
 				createTestPod("sandbox-2", "team-a", "template-2", controller.PoolTypeActive, now, now, false),
 				createTestPod("sandbox-3", "team-a", "template-1", controller.PoolTypeActive, now, now, false),
 			},
-			req: &ListSandboxesRequest{
+			req: &sandboxstore.ListSandboxesRequest{
 				TeamID:     "team-a",
 				TemplateID: "template-1",
 				Limit:      50,
@@ -102,7 +104,7 @@ func TestListSandboxes(t *testing.T) {
 				createTestPod("sandbox-2", "team-a", "template-1", controller.PoolTypeActive, now, now, true),
 				createTestPod("sandbox-3", "team-a", "template-1", controller.PoolTypeActive, now, now, false),
 			},
-			req: &ListSandboxesRequest{
+			req: &sandboxstore.ListSandboxesRequest{
 				TeamID: "team-a",
 				Paused: boolPtr(true),
 				Limit:  50,
@@ -119,7 +121,7 @@ func TestListSandboxes(t *testing.T) {
 				createTestPod("sandbox-2", "team-a", "template-1", controller.PoolTypeActive, now.Add(-2*time.Hour), now, false),
 				createTestPod("sandbox-3", "team-a", "template-1", controller.PoolTypeActive, now.Add(-1*time.Hour), now, false),
 			},
-			req: &ListSandboxesRequest{
+			req: &sandboxstore.ListSandboxesRequest{
 				TeamID: "team-a",
 				Limit:  2,
 				Offset: 0,
@@ -135,7 +137,7 @@ func TestListSandboxes(t *testing.T) {
 				createTestPod("sandbox-2", "team-a", "template-1", controller.PoolTypeActive, now.Add(-2*time.Hour), now, false),
 				createTestPod("sandbox-3", "team-a", "template-1", controller.PoolTypeActive, now.Add(-1*time.Hour), now, false),
 			},
-			req: &ListSandboxesRequest{
+			req: &sandboxstore.ListSandboxesRequest{
 				TeamID: "team-a",
 				Limit:  2,
 				Offset: 1,
@@ -150,7 +152,7 @@ func TestListSandboxes(t *testing.T) {
 				createTestPod("sandbox-1", "team-a", "template-1", controller.PoolTypeActive, now, now, false),
 				createTestPod("sandbox-2", "team-a", "template-1", controller.PoolTypeIdle, now, now, false),
 			},
-			req: &ListSandboxesRequest{
+			req: &sandboxstore.ListSandboxesRequest{
 				TeamID: "team-a",
 				Limit:  50,
 				Offset: 0,
@@ -164,7 +166,7 @@ func TestListSandboxes(t *testing.T) {
 			pods: []*corev1.Pod{
 				createTestPod("sandbox-1", "team-b", "template-1", controller.PoolTypeActive, now, now, false),
 			},
-			req: &ListSandboxesRequest{
+			req: &sandboxstore.ListSandboxesRequest{
 				TeamID: "team-a",
 				Limit:  50,
 				Offset: 0,
@@ -238,7 +240,7 @@ func TestListSandboxes_HardExpiresAt(t *testing.T) {
 		logger:    logger,
 	}
 
-	resp, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+	resp, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{
 		TeamID: "team-a",
 		Limit:  50,
 		Offset: 0,
@@ -279,7 +281,7 @@ func TestListSandboxes_IncludesRuntimeGeneration(t *testing.T) {
 		logger:    logger,
 	}
 
-	resp, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+	resp, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{
 		TeamID: "team-a",
 		Limit:  50,
 		Offset: 0,
@@ -292,19 +294,19 @@ func TestListSandboxes_IncludesRuntimeGeneration(t *testing.T) {
 
 func TestListSandboxesFromStoreFiltersPausedState(t *testing.T) {
 	now := time.Now()
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-running": {
 			ID:           "sandbox-running",
 			TeamID:       "team-a",
 			TemplateID:   "template-1",
-			DesiredState: SandboxDesiredStateActive,
+			DesiredState: sandboxstore.SandboxDesiredStateActive,
 			CreatedAt:    now.Add(-time.Minute),
 		},
 		"sandbox-paused": {
 			ID:                "sandbox-paused",
 			TeamID:            "team-a",
 			TemplateID:        "template-1",
-			DesiredState:      SandboxDesiredStatePaused,
+			DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 			RuntimeGeneration: 3,
 			CreatedAt:         now,
 		},
@@ -316,7 +318,7 @@ func TestListSandboxesFromStoreFiltersPausedState(t *testing.T) {
 		logger:       zap.NewNop(),
 	}
 
-	resp, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+	resp, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{
 		TeamID: "team-a",
 		Paused: boolPtr(true),
 		Limit:  50,
@@ -332,26 +334,26 @@ func TestListSandboxesFromStoreProjectsAndFiltersCachedPodStatus(t *testing.T) {
 	now := time.Now()
 	runningPod := createTestPod("sandbox-running", "team-a", "template-1", controller.PoolTypeActive, now, now.Add(time.Hour), false)
 	failedPod := createTestPodWithPhase("sandbox-failed", "team-a", "template-1", controller.PoolTypeActive, now, now.Add(time.Hour), false, corev1.PodFailed)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-running": {
 			ID:           "sandbox-running",
 			TeamID:       "team-a",
 			TemplateID:   "template-1",
-			DesiredState: SandboxDesiredStateActive,
+			DesiredState: sandboxstore.SandboxDesiredStateActive,
 			CreatedAt:    now,
 		},
 		"sandbox-failed": {
 			ID:           "sandbox-failed",
 			TeamID:       "team-a",
 			TemplateID:   "template-1",
-			DesiredState: SandboxDesiredStateActive,
+			DesiredState: sandboxstore.SandboxDesiredStateActive,
 			CreatedAt:    now.Add(-time.Minute),
 		},
 		"sandbox-missing": {
 			ID:           "sandbox-missing",
 			TeamID:       "team-a",
 			TemplateID:   "template-1",
-			DesiredState: SandboxDesiredStateActive,
+			DesiredState: sandboxstore.SandboxDesiredStateActive,
 			CreatedAt:    now.Add(-2 * time.Minute),
 		},
 	}}
@@ -364,27 +366,27 @@ func TestListSandboxesFromStoreProjectsAndFiltersCachedPodStatus(t *testing.T) {
 		logger:       zap.NewNop(),
 	}
 
-	running, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+	running, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{
 		TeamID: "team-a",
-		Status: SandboxStatusRunning,
+		Status: managerapi.SandboxStatusRunning,
 		Limit:  50,
 	})
 	require.NoError(t, err)
 	require.Len(t, running.Sandboxes, 1)
 	assert.Equal(t, "sandbox-running", running.Sandboxes[0].ID)
 
-	failed, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+	failed, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{
 		TeamID: "team-a",
-		Status: SandboxStatusFailed,
+		Status: managerapi.SandboxStatusFailed,
 		Limit:  50,
 	})
 	require.NoError(t, err)
 	require.Len(t, failed.Sandboxes, 1)
 	assert.Equal(t, "sandbox-failed", failed.Sandboxes[0].ID)
 
-	starting, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+	starting, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{
 		TeamID: "team-a",
-		Status: SandboxStatusStarting,
+		Status: managerapi.SandboxStatusStarting,
 		Limit:  50,
 	})
 	require.NoError(t, err)
@@ -408,25 +410,25 @@ func TestListSandboxes_TerminatingPodStatus(t *testing.T) {
 		logger:    zap.NewNop(),
 	}
 
-	all, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+	all, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{
 		TeamID: "team-a",
 		Limit:  50,
 	})
 	require.NoError(t, err)
 	require.Len(t, all.Sandboxes, 1)
-	assert.Equal(t, SandboxStatusTerminating, all.Sandboxes[0].Status)
+	assert.Equal(t, managerapi.SandboxStatusTerminating, all.Sandboxes[0].Status)
 
-	running, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+	running, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{
 		TeamID: "team-a",
-		Status: SandboxStatusRunning,
+		Status: managerapi.SandboxStatusRunning,
 		Limit:  50,
 	})
 	require.NoError(t, err)
 	assert.Empty(t, running.Sandboxes)
 
-	terminating, err := svc.ListSandboxes(context.Background(), &ListSandboxesRequest{
+	terminating, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{
 		TeamID: "team-a",
-		Status: SandboxStatusTerminating,
+		Status: managerapi.SandboxStatusTerminating,
 		Limit:  50,
 	})
 	require.NoError(t, err)
@@ -446,7 +448,7 @@ func TestPodToSandboxStatusTreatsDeletionAsTerminating(t *testing.T) {
 	}
 
 	svc := &SandboxService{}
-	assert.Equal(t, SandboxStatusTerminating, svc.podToSandboxStatus(pod))
+	assert.Equal(t, managerapi.SandboxStatusTerminating, svc.podToSandboxStatus(pod))
 }
 
 func createTestPod(name, teamID, templateID, poolType string, createdAt, expiresAt time.Time, paused bool) *corev1.Pod {

@@ -8,7 +8,6 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -136,117 +135,6 @@ func TestIsPodReady(t *testing.T) {
 			t.Fatal("IsPodReady() = true, want false")
 		}
 	})
-}
-
-func TestDesiredSandboxPodReadiness(t *testing.T) {
-	t.Run("running active sandbox is ready", func(t *testing.T) {
-		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
-			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-		})
-		require.Equal(t, corev1.ConditionTrue, status)
-		require.Equal(t, "SandboxActive", reason)
-	})
-
-	t.Run("legacy paused annotation does not affect readiness", func(t *testing.T) {
-		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Annotations: map[string]string{AnnotationPaused: "true"},
-			},
-			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-		})
-		require.Equal(t, corev1.ConditionTrue, status)
-		require.Equal(t, "SandboxActive", reason)
-	})
-
-	t.Run("legacy power-state annotation does not affect readiness", func(t *testing.T) {
-		status, reason, _ := DesiredSandboxPodReadiness(&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Annotations: map[string]string{
-					AnnotationPowerStateDesired:  "active",
-					AnnotationPowerStateObserved: "paused",
-					AnnotationPowerStatePhase:    "resuming",
-				},
-			},
-			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-		})
-		require.Equal(t, corev1.ConditionTrue, status)
-		require.Equal(t, "SandboxActive", reason)
-	})
-
-}
-
-func TestEnsureSandboxPodReadinessConditionUpdatesGateStatus(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sandbox-a",
-			Namespace: "default",
-		},
-		Spec: corev1.PodSpec{
-			ReadinessGates: []corev1.PodReadinessGate{{
-				ConditionType: v1alpha1.SandboxPodReadinessConditionType,
-			}},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			Conditions: []corev1.PodCondition{
-				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
-			},
-		},
-	}
-
-	client := fake.NewSimpleClientset(pod.DeepCopy())
-	updated, err := EnsureSandboxPodReadinessCondition(context.Background(), client, pod)
-	require.NoError(t, err)
-	require.NotNil(t, updated)
-
-	var condition *corev1.PodCondition
-	for i := range updated.Status.Conditions {
-		if updated.Status.Conditions[i].Type == v1alpha1.SandboxPodReadinessConditionType {
-			condition = &updated.Status.Conditions[i]
-			break
-		}
-	}
-	require.NotNil(t, condition)
-	require.Equal(t, corev1.ConditionTrue, condition.Status)
-	require.Equal(t, "SandboxActive", condition.Reason)
-}
-
-func TestEnsureSandboxPodProbeConditionsUpdatesGateStatus(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sandbox-a",
-			Namespace: "default",
-		},
-		Spec: corev1.PodSpec{
-			ReadinessGates: []corev1.PodReadinessGate{{
-				ConditionType: v1alpha1.SandboxPodReadinessConditionType,
-			}},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			Conditions: []corev1.PodCondition{
-				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
-			},
-		},
-	}
-
-	client := fake.NewSimpleClientset(pod.DeepCopy())
-	startup := sandboxprobe.Passed(sandboxprobe.KindStartup, "StartupPassed", "startup passed", nil)
-	readiness := sandboxprobe.Passed(sandboxprobe.KindReadiness, "ReadinessPassed", "readiness passed", nil)
-	liveness := sandboxprobe.Failed(sandboxprobe.KindLiveness, "LivenessFailed", "liveness failed", nil)
-	updated, err := EnsureSandboxPodProbeConditions(context.Background(), client, pod, &startup, &readiness, &liveness)
-	require.NoError(t, err)
-	require.NotNil(t, updated)
-
-	ready := findPodCondition(updated.Status.Conditions, v1alpha1.SandboxPodReadinessConditionType)
-	require.NotNil(t, ready)
-	require.Equal(t, corev1.ConditionFalse, ready.Status)
-	require.Equal(t, "SandboxLivenessProbeFailed", ready.Reason)
-
-	live := findPodCondition(updated.Status.Conditions, v1alpha1.SandboxPodLivenessConditionType)
-	require.NotNil(t, live)
-	require.Equal(t, corev1.ConditionFalse, live.Status)
-	require.Equal(t, "LivenessFailed", live.Reason)
 }
 
 func TestEnsureNetdMITMCASecretCopiesCertIntoTemplateNamespace(t *testing.T) {

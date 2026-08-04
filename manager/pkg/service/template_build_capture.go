@@ -12,32 +12,20 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
-const templateBuildCaptureMetadataVersion = 1
+const templateBuildCaptureMetadataVersion = templatebuild.CaptureMetadataVersion
 
-var errTemplateBuildCaptureInvalid = errors.New("invalid template build capture")
-
-// TemplateBuildCaptureMetadata is the durable handoff between checkpointing
-// and publishing. It pins both the immutable rootfs head and the source
-// platform selected when the sandbox actually ran.
-type TemplateBuildCaptureMetadata struct {
-	Version         int                   `json:"version"`
-	SnapshotID      string                `json:"snapshot_id"`
-	HeadLayerID     string                `json:"head_layer_id"`
-	BaseImageRef    string                `json:"base_image_ref"`
-	BaseImageDigest string                `json:"base_image_digest"`
-	Platform        ocispec.Platform      `json:"platform"`
-	Layers          []templateimage.Layer `json:"layers"`
-	CapturedAt      time.Time             `json:"captured_at"`
-}
+var errTemplateBuildCaptureInvalid = templatebuild.ErrCaptureInvalid
 
 type templateBuildRootFSStore interface {
 	SandboxRootFSProductStore
-	GetRootFSLayerChainByHead(ctx context.Context, teamID, headLayerID string) ([]*SandboxRootFSLayer, error)
+	GetRootFSLayerChainByHead(ctx context.Context, teamID, headLayerID string) ([]*sandboxstore.SandboxRootFSLayer, error)
 }
 
 // EnsureTemplateBuildCapture creates or recovers a deterministic internal
@@ -46,7 +34,7 @@ func (s *SandboxService) EnsureTemplateBuildCapture(
 	ctx context.Context,
 	sandboxID, teamID, snapshotID string,
 	desiredSpec v1alpha1.SandboxTemplateSpec,
-) (*TemplateBuildCaptureMetadata, error) {
+) (*templatebuild.CaptureMetadata, error) {
 	if s == nil || s.sandboxStore == nil {
 		return nil, ErrSandboxRootFSStoreUnavailable
 	}
@@ -62,10 +50,10 @@ func (s *SandboxService) EnsureTemplateBuildCapture(
 	}
 
 	snapshot, err := store.GetRootFSSnapshot(ctx, snapshotID, teamID)
-	if err != nil && !errors.Is(err, ErrRootFSSnapshotNotFound) {
+	if err != nil && !errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
 		return nil, err
 	}
-	if errors.Is(err, ErrRootFSSnapshotNotFound) || snapshot == nil {
+	if errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) || snapshot == nil {
 		_, createErr := s.createSandboxRootFSSnapshotWithID(
 			ctx,
 			sandboxID,
@@ -126,7 +114,7 @@ func (s *SandboxService) EnsureTemplateBuildCapture(
 			Size:      layer.DiffSize,
 		})
 	}
-	return &TemplateBuildCaptureMetadata{
+	return &templatebuild.CaptureMetadata{
 		Version:         templateBuildCaptureMetadataVersion,
 		SnapshotID:      snapshot.ID,
 		HeadLayerID:     snapshot.HeadLayerID,
@@ -139,7 +127,7 @@ func (s *SandboxService) EnsureTemplateBuildCapture(
 }
 
 func validateTemplateBuildRootFSChain(
-	chain []*SandboxRootFSLayer,
+	chain []*sandboxstore.SandboxRootFSLayer,
 	teamID, baseImageRef, baseImageDigest string,
 	platform ocispec.Platform,
 ) error {
@@ -240,7 +228,7 @@ func normalizedTemplateBuildBaseRepository(raw string) (string, error) {
 	return distref.TrimNamed(named).Name(), nil
 }
 
-func templateBuildLayerPlatformMismatch(layer *SandboxRootFSLayer, expected ocispec.Platform) error {
+func templateBuildLayerPlatformMismatch(layer *sandboxstore.SandboxRootFSLayer, expected ocispec.Platform) error {
 	return fmt.Errorf(
 		"%w: rootfs layer %q platform %s/%s/%s does not match captured platform %s",
 		errTemplateBuildCaptureInvalid,
@@ -259,7 +247,7 @@ func (s *SandboxService) DeleteTemplateBuildCapture(ctx context.Context, snapsho
 		return err
 	}
 	err = store.DeleteRootFSSnapshot(ctx, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID))
-	if errors.Is(err, ErrRootFSSnapshotNotFound) {
+	if errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
 		return nil
 	}
 	return err
@@ -268,7 +256,7 @@ func (s *SandboxService) DeleteTemplateBuildCapture(ctx context.Context, snapsho
 func (s *SandboxService) templateBuildSourcePlatform(
 	ctx context.Context,
 	sandboxID string,
-	head *SandboxRootFSLayer,
+	head *sandboxstore.SandboxRootFSLayer,
 	desiredSpec v1alpha1.SandboxTemplateSpec,
 ) (ocispec.Platform, error) {
 	platform := ocispec.Platform{

@@ -13,15 +13,22 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestApplyManagerConfigInjectsLogsIngestURL(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+type sandboxObservabilityIngestSettings struct {
+	url            string
+	queueSize      int
+	batchSize      int
+	flushInterval  time.Duration
+	requestTimeout time.Duration
+	maxRetries     int
+	retryBackoff   time.Duration
+}
 
-	infra := &infrav1alpha1.Sandbox0Infra{
+func newExternalSandboxObservabilityInfra(settings sandboxObservabilityIngestSettings) *infrav1alpha1.Sandbox0Infra {
+	return &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "sandbox0", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
@@ -32,35 +39,79 @@ func TestApplyManagerConfigInjectsLogsIngestURL(t *testing.T) {
 					},
 				},
 				Ingest: infrav1alpha1.SandboxObservabilityIngestConfig{
-					QueueSize:      11,
-					BatchSize:      7,
-					FlushInterval:  metav1.Duration{Duration: 2 * time.Second},
-					RequestTimeout: metav1.Duration{Duration: 3 * time.Second},
-					MaxRetries:     5,
-					RetryBackoff:   metav1.Duration{Duration: 250 * time.Millisecond},
+					QueueSize:      settings.queueSize,
+					BatchSize:      settings.batchSize,
+					FlushInterval:  metav1.Duration{Duration: settings.flushInterval},
+					RequestTimeout: metav1.Duration{Duration: settings.requestTimeout},
+					MaxRetries:     settings.maxRetries,
+					RetryBackoff:   metav1.Duration{Duration: settings.retryBackoff},
 				},
 			},
 		},
 	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+}
+
+func newExternalSandboxObservabilityTestClient(t *testing.T, infra *infrav1alpha1.Sandbox0Infra) ctrlclient.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		infra,
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "sandbox-observability-dsn", Namespace: "sandbox0-system"},
 			Data:       map[string][]byte{"dsn": []byte("clickhouse://sandbox0:password@clickhouse:9000/sandbox0_observability")},
 		},
 	).Build()
-	cfg := &apiconfig.ManagerConfig{}
+}
 
-	err := ApplyManagerConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
+func TestApplyRuntimeConfigInjectsIngestURL(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		settings sandboxObservabilityIngestSettings
+		apply    func(context.Context, ctrlclient.Client, *infrav1alpha1.Sandbox0Infra) (sandboxObservabilityIngestSettings, error)
+	}{
+		{
+			name: "manager logs",
+			settings: sandboxObservabilityIngestSettings{
+				url: "http://cluster-gateway.svc/internal/v1/sandbox-observability/logs", queueSize: 11, batchSize: 7,
+				flushInterval: 2 * time.Second, requestTimeout: 3 * time.Second, maxRetries: 5, retryBackoff: 250 * time.Millisecond,
+			},
+			apply: func(ctx context.Context, client ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra) (sandboxObservabilityIngestSettings, error) {
+				cfg := &apiconfig.ManagerConfig{}
+				err := ApplyManagerConfig(ctx, client, infra, "http://cluster-gateway.svc/", cfg)
+				return sandboxObservabilityIngestSettings{
+					url: cfg.SandboxObservabilityLogsIngestURL, queueSize: cfg.SandboxObservabilityIngestQueueSize, batchSize: cfg.SandboxObservabilityIngestBatchSize,
+					flushInterval: cfg.SandboxObservabilityIngestFlushInterval.Duration, requestTimeout: cfg.SandboxObservabilityIngestRequestTimeout.Duration,
+					maxRetries: cfg.SandboxObservabilityIngestMaxRetries, retryBackoff: cfg.SandboxObservabilityIngestRetryBackoff.Duration,
+				}, err
+			},
+		},
+		{
+			name: "ctld runtime samples",
+			settings: sandboxObservabilityIngestSettings{
+				url: "http://cluster-gateway.svc/internal/v1/sandbox-observability/runtime-samples", queueSize: 23, batchSize: 9,
+				flushInterval: 2 * time.Second, requestTimeout: 3 * time.Second, maxRetries: 4, retryBackoff: 250 * time.Millisecond,
+			},
+			apply: func(ctx context.Context, client ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra) (sandboxObservabilityIngestSettings, error) {
+				cfg := &apiconfig.CtldConfig{}
+				err := ApplyCtldConfig(ctx, client, infra, "http://cluster-gateway.svc/", cfg)
+				return sandboxObservabilityIngestSettings{
+					url: cfg.SandboxObservabilityRuntimeSamplesIngestURL, queueSize: cfg.SandboxObservabilityIngestQueueSize, batchSize: cfg.SandboxObservabilityIngestBatchSize,
+					flushInterval: cfg.SandboxObservabilityIngestFlushInterval.Duration, requestTimeout: cfg.SandboxObservabilityIngestRequestTimeout.Duration,
+					maxRetries: cfg.SandboxObservabilityIngestMaxRetries, retryBackoff: cfg.SandboxObservabilityIngestRetryBackoff.Duration,
+				}, err
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			infra := newExternalSandboxObservabilityInfra(tt.settings)
+			got, err := tt.apply(context.Background(), newExternalSandboxObservabilityTestClient(t, infra), infra)
 
-	require.NoError(t, err)
-	assert.Equal(t, "http://cluster-gateway.svc/internal/v1/sandbox-observability/logs", cfg.SandboxObservabilityLogsIngestURL)
-	assert.Equal(t, 11, cfg.SandboxObservabilityIngestQueueSize)
-	assert.Equal(t, 7, cfg.SandboxObservabilityIngestBatchSize)
-	assert.Equal(t, 2*time.Second, cfg.SandboxObservabilityIngestFlushInterval.Duration)
-	assert.Equal(t, 3*time.Second, cfg.SandboxObservabilityIngestRequestTimeout.Duration)
-	assert.Equal(t, 5, cfg.SandboxObservabilityIngestMaxRetries)
-	assert.Equal(t, 250*time.Millisecond, cfg.SandboxObservabilityIngestRetryBackoff.Duration)
+			require.NoError(t, err)
+			assert.Equal(t, tt.settings, got)
+		})
+	}
 }
 
 func TestApplyNetdConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *testing.T) {
@@ -126,53 +177,6 @@ func TestApplyManagerConfigClearsIngestURLsWhenDisabled(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, cfg.SandboxObservabilityLogsIngestURL)
-}
-
-func TestApplyCtldConfigInjectsRuntimeSamplesIngestURL(t *testing.T) {
-	scheme := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
-
-	infra := &infrav1alpha1.Sandbox0Infra{
-		ObjectMeta: metav1.ObjectMeta{Name: "sandbox0", Namespace: "sandbox0-system"},
-		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			SandboxObservability: &infrav1alpha1.SandboxObservabilityConfig{
-				Type: infrav1alpha1.SandboxObservabilityTypeExternal,
-				External: &infrav1alpha1.ExternalSandboxObservabilityConfig{
-					ClickHouse: infrav1alpha1.ExternalSandboxObservabilityClickHouseConfig{
-						DSNSecret: infrav1alpha1.SandboxObservabilityClickHouseDSNSecretRef{Name: "sandbox-observability-dsn"},
-					},
-				},
-				Ingest: infrav1alpha1.SandboxObservabilityIngestConfig{
-					QueueSize:      23,
-					BatchSize:      9,
-					FlushInterval:  metav1.Duration{Duration: 2 * time.Second},
-					RequestTimeout: metav1.Duration{Duration: 3 * time.Second},
-					MaxRetries:     4,
-					RetryBackoff:   metav1.Duration{Duration: 250 * time.Millisecond},
-				},
-			},
-		},
-	}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		infra,
-		&corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "sandbox-observability-dsn", Namespace: "sandbox0-system"},
-			Data:       map[string][]byte{"dsn": []byte("clickhouse://sandbox0:password@clickhouse:9000/sandbox0_observability")},
-		},
-	).Build()
-	cfg := &apiconfig.CtldConfig{}
-
-	err := ApplyCtldConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
-
-	require.NoError(t, err)
-	assert.Equal(t, "http://cluster-gateway.svc/internal/v1/sandbox-observability/runtime-samples", cfg.SandboxObservabilityRuntimeSamplesIngestURL)
-	assert.Equal(t, 23, cfg.SandboxObservabilityIngestQueueSize)
-	assert.Equal(t, 9, cfg.SandboxObservabilityIngestBatchSize)
-	assert.Equal(t, 2*time.Second, cfg.SandboxObservabilityIngestFlushInterval.Duration)
-	assert.Equal(t, 3*time.Second, cfg.SandboxObservabilityIngestRequestTimeout.Duration)
-	assert.Equal(t, 4, cfg.SandboxObservabilityIngestMaxRetries)
-	assert.Equal(t, 250*time.Millisecond, cfg.SandboxObservabilityIngestRetryBackoff.Duration)
 }
 
 func TestApplyCtldConfigClearsIngestURLWhenDisabled(t *testing.T) {

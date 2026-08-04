@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/netd/pkg/watcher"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -118,7 +118,7 @@ func TestSyncAppliedHashesWritesPolicyHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get patched pod: %v", err)
 	}
-	if got := pod.Annotations[controller.AnnotationNetworkPolicyAppliedHash]; got != sandbox.NetworkPolicyHash {
+	if got := pod.Annotations[sandboxpod.AnnotationNetworkPolicyAppliedHash]; got != sandbox.NetworkPolicyHash {
 		t.Fatalf("applied hash = %q, want %q", got, sandbox.NetworkPolicyHash)
 	}
 }

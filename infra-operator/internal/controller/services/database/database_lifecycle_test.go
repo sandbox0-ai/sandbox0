@@ -16,73 +16,53 @@ import (
 )
 
 func TestCleanupBuiltinResourcesRespectsStatefulResourcePolicy(t *testing.T) {
-	t.Run("retain keeps pvc and secret", func(t *testing.T) {
-		reconciler, client := newLifecycleTestReconciler(t,
-			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres", Namespace: "sandbox0-system"}},
-			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox0-database-credentials", Namespace: "sandbox0-system"}},
-			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres-data", Namespace: "sandbox0-system"}},
-		)
+	for _, tt := range []struct {
+		name                 string
+		policy               infrav1alpha1.BuiltinStatefulResourcePolicy
+		retainStatefulVolume bool
+	}{
+		{name: "retain keeps pvc and secret", policy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain, retainStatefulVolume: true},
+		{name: "delete removes pvc and secret", policy: infrav1alpha1.BuiltinStatefulResourcePolicyDelete},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler, client := newLifecycleTestReconciler(t,
+				&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres", Namespace: "sandbox0-system"}},
+				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres", Namespace: "sandbox0-system"}},
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox0-database-credentials", Namespace: "sandbox0-system"}},
+				&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres-data", Namespace: "sandbox0-system"}},
+			)
 
-		err := reconciler.CleanupBuiltinResources(context.Background(), &infrav1alpha1.Sandbox0Infra{
-			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
-			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Database: &infrav1alpha1.DatabaseConfig{
-					Type: infrav1alpha1.DatabaseTypeExternal,
-					Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
-						StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyRetain,
-					},
-					External: &infrav1alpha1.ExternalDatabaseConfig{
-						Host:     "db.example.com",
-						Database: "sandbox0",
-						Username: "sandbox0",
-					},
-				},
-			},
-		})
-		if err != nil {
-			t.Fatalf("cleanup builtin resources: %v", err)
-		}
-
-		assertMissingObject(t, client, &appsv1.StatefulSet{}, "sandbox0-system", "demo-postgres")
-		assertMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-postgres")
-		assertPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-sandbox0-database-credentials")
-		assertPresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-postgres-data")
-	})
-
-	t.Run("delete removes pvc and secret", func(t *testing.T) {
-		reconciler, client := newLifecycleTestReconciler(t,
-			&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres", Namespace: "sandbox0-system"}},
-			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres", Namespace: "sandbox0-system"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-sandbox0-database-credentials", Namespace: "sandbox0-system"}},
-			&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "demo-postgres-data", Namespace: "sandbox0-system"}},
-		)
-
-		err := reconciler.CleanupBuiltinResources(context.Background(), &infrav1alpha1.Sandbox0Infra{
-			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
-			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Database: &infrav1alpha1.DatabaseConfig{
-					Type: infrav1alpha1.DatabaseTypeExternal,
-					Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
-						StatefulResourcePolicy: infrav1alpha1.BuiltinStatefulResourcePolicyDelete,
-					},
-					External: &infrav1alpha1.ExternalDatabaseConfig{
-						Host:     "db.example.com",
-						Database: "sandbox0",
-						Username: "sandbox0",
+			err := reconciler.CleanupBuiltinResources(context.Background(), &infrav1alpha1.Sandbox0Infra{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
+				Spec: infrav1alpha1.Sandbox0InfraSpec{
+					Database: &infrav1alpha1.DatabaseConfig{
+						Type: infrav1alpha1.DatabaseTypeExternal,
+						Builtin: &infrav1alpha1.BuiltinDatabaseConfig{
+							StatefulResourcePolicy: tt.policy,
+						},
+						External: &infrav1alpha1.ExternalDatabaseConfig{
+							Host:     "db.example.com",
+							Database: "sandbox0",
+							Username: "sandbox0",
+						},
 					},
 				},
-			},
-		})
-		if err != nil {
-			t.Fatalf("cleanup builtin resources: %v", err)
-		}
+			})
+			if err != nil {
+				t.Fatalf("cleanup builtin resources: %v", err)
+			}
 
-		assertMissingObject(t, client, &appsv1.StatefulSet{}, "sandbox0-system", "demo-postgres")
-		assertMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-postgres")
-		assertMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-sandbox0-database-credentials")
-		assertMissingObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-postgres-data")
-	})
+			assertMissingObject(t, client, &appsv1.StatefulSet{}, "sandbox0-system", "demo-postgres")
+			assertMissingObject(t, client, &corev1.Service{}, "sandbox0-system", "demo-postgres")
+			if tt.retainStatefulVolume {
+				assertPresentObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-sandbox0-database-credentials")
+				assertPresentObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-postgres-data")
+				return
+			}
+			assertMissingObject(t, client, &corev1.Secret{}, "sandbox0-system", "demo-sandbox0-database-credentials")
+			assertMissingObject(t, client, &corev1.PersistentVolumeClaim{}, "sandbox0-system", "demo-postgres-data")
+		})
+	}
 }
 
 func newLifecycleTestReconciler(t *testing.T, objects ...runtime.Object) (*Reconciler, ctrlclient.Client) {

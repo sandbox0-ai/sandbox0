@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 )
@@ -55,7 +56,7 @@ func TestPrepareWebhookStateVolumeReusesDurableVolume(t *testing.T) {
 		TeamID:               "team-1",
 		UserID:               "user-1",
 		WebhookStateVolumeID: "volume-existing",
-		Config: &SandboxConfig{Webhook: &WebhookConfig{
+		Config: &sandboxstore.SandboxConfig{Webhook: &sandboxstore.WebhookConfig{
 			URL: "https://example.test/webhook",
 		}},
 	}, "sandbox-1")

@@ -6,7 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"go.uber.org/zap"
@@ -137,7 +137,7 @@ func (s *Server) deleteTemplateLegacy(c *gin.Context) {
 }
 
 type clusterTemplateStatsProvider struct {
-	clusterService *service.ClusterService
+	clusterService *clusterservice.ClusterService
 }
 
 func (p *clusterTemplateStatsProvider) GetTemplateStats(ctx context.Context) (*templatehttp.TemplateStats, error) {

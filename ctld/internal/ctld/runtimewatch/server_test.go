@@ -16,7 +16,7 @@ func TestRuntimeWatchRejectsSourceOutsidePodNetworkIdentity(t *testing.T) {
 	pod := testPod()
 	pod.Status.PodIP = "10.0.0.5"
 	hub := NewHub(nil)
-	hub.UpdatePod(pod)
+	updateHubPod(t, hub, pod)
 	server := NewServer(hub)
 
 	request := httptest.NewRequest(
@@ -76,7 +76,7 @@ func TestRuntimeWatchClosesWhenPrimaryHubStops(t *testing.T) {
 	sink := &recordingSink{}
 	hub := NewHub(sink)
 	pod := testPod()
-	hub.UpdatePod(pod)
+	updateHubPod(t, hub, pod)
 
 	server := httptest.NewServer(NewServer(hub))
 	defer server.Close()

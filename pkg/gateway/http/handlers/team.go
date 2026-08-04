@@ -745,14 +745,6 @@ func resolveHomeRegionValidationError(err error) (int, string, string) {
 	}
 }
 
-// ValidateInitUserHomeRegion verifies the configured init user's home region for global-gateway bootstrap.
-func ValidateInitUserHomeRegion(ctx context.Context, regionLookup TeamRegionLookup, homeRegionID string) error {
-	if strings.TrimSpace(homeRegionID) == "" {
-		return errHomeRegionRequired
-	}
-	return validateRequiredRoutableHomeRegion(ctx, regionLookup, &homeRegionID)
-}
-
 // RemoveTeamMember removes a member from a team
 func (h *TeamHandler) RemoveTeamMember(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)

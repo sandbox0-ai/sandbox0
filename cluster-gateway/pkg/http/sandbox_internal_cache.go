@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
 	"go.uber.org/zap"
 )

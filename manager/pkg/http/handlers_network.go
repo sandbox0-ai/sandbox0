@@ -9,36 +9,20 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
-	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
 )
 
 // getNetworkPolicy gets the network policy for a sandbox.
 func (s *Server) getNetworkPolicy(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
-
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
 		return
 	}
-
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		s.logger.Error("Failed to get sandbox for network policy",
-			zap.String("sandboxID", sandboxID),
-			zap.Error(err),
-		)
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
-	}
-
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+	if _, ok := s.getOwnedSandbox(c, sandboxID, claims, "Failed to get sandbox for network policy"); !ok {
 		return
 	}
 
@@ -57,9 +41,8 @@ func (s *Server) getNetworkPolicy(c *gin.Context) {
 
 // updateNetworkPolicy updates the network policy for a sandbox.
 func (s *Server) updateNetworkPolicy(c *gin.Context) {
-	sandboxID := c.Param("id")
-	if sandboxID == "" {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "sandbox_id is required")
+	sandboxID, ok := requireSandboxID(c)
+	if !ok {
 		return
 	}
 
@@ -73,24 +56,11 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 		return
 	}
 
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-	if claims == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+	claims, ok := requireAuthenticatedClaims(c)
+	if !ok {
 		return
 	}
-
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
-	if err != nil {
-		s.logger.Error("Failed to get sandbox for network policy update",
-			zap.String("sandboxID", sandboxID),
-			zap.Error(err),
-		)
-		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
-		return
-	}
-
-	if sandbox.TeamID != claims.TeamID {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox belongs to a different team")
+	if _, ok := s.getOwnedSandbox(c, sandboxID, claims, "Failed to get sandbox for network policy update"); !ok {
 		return
 	}
 

@@ -14,7 +14,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/ssh-gateway/pkg/metrics"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/ssh"
 )

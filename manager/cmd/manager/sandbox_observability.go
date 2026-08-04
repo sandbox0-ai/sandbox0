@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	managerobs "github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxobservability"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -18,7 +19,7 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
-func buildSandboxObservabilityLogWorker(cfg *config.ManagerConfig, internalAuthGen *internalauth.Generator, obsProvider *observability.Provider, logger *zap.Logger) *sandboxobsingest.LogWorker {
+func buildSandboxObservabilityLogWorker(cfg *config.ManagerConfig, internalAuthGen *internalauth.Generator, obsProvider *observability.Provider, logger *zap.Logger) *managerobs.LogWorker {
 	if cfg == nil {
 		return nil
 	}
@@ -54,7 +55,7 @@ func buildSandboxObservabilityLogWorker(cfg *config.ManagerConfig, internalAuthG
 		MaxRetries:    cfg.SandboxObservabilityIngestMaxRetries,
 		RetryBackoff:  cfg.SandboxObservabilityIngestRetryBackoff.Duration,
 	}
-	worker, err := sandboxobsingest.NewLogWorker(writer, ingestCfg)
+	worker, err := managerobs.NewLogWorker(writer, ingestCfg)
 	if err != nil {
 		logger.Warn("Sandbox log observability producer disabled", zap.Error(err))
 		return nil
@@ -62,7 +63,7 @@ func buildSandboxObservabilityLogWorker(cfg *config.ManagerConfig, internalAuthG
 	return worker
 }
 
-func startSandboxObservabilityLogProducer(ctx context.Context, cfg *config.ManagerConfig, k8sClient kubernetes.Interface, podLister corelisters.PodLister, logWorker *sandboxobsingest.LogWorker, logger *zap.Logger, clock service.TimeProvider) {
+func startSandboxObservabilityLogProducer(ctx context.Context, cfg *config.ManagerConfig, k8sClient kubernetes.Interface, podLister corelisters.PodLister, logWorker *managerobs.LogWorker, logger *zap.Logger, clock service.TimeProvider) {
 	if cfg == nil {
 		return
 	}

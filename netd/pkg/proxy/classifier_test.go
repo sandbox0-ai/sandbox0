@@ -205,37 +205,49 @@ func TestClassifyTCPReadsFragmentedTLSClientHello(t *testing.T) {
 	}
 }
 
-func TestDefaultHTTPClassifiersFallbackToSSHBanner(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+func TestDefaultTCPClassifiersClassifySSHBanner(t *testing.T) {
+	const banner = "SSH-2.0-OpenSSH_9.0\r\n"
+	for _, tt := range []struct {
+		name string
+		port int
+	}{
+		{name: "HTTP classifier fallback", port: 22},
+		{name: "generic TCP classification", port: 443},
+	} {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
 
-	go func() {
-		_, _ = io.WriteString(client, "SSH-2.0-OpenSSH_9.0\r\n")
-		_ = client.Close()
-	}()
+			go func() {
+				_, _ = io.WriteString(client, banner)
+				_ = client.Close()
+			}()
 
-	ctx := &tcpClassifyContext{
-		OrigIP:      net.ParseIP("8.8.8.8"),
-		OrigPort:    22,
-		Conn:        server,
-		HeaderLimit: 1024,
-	}
-	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
-	if err != nil {
-		t.Fatalf("classifyTCP returned error: %v", err)
-	}
-	if result.Classification.Protocol != "ssh" {
-		t.Fatalf("protocol = %q, want ssh", result.Classification.Protocol)
-	}
-	req := &adapterRequest{}
-	result.Apply(req)
-	data, readErr := io.ReadAll(req.Prefix)
-	if readErr != nil {
-		t.Fatalf("failed to read replay prefix: %v", readErr)
-	}
-	if string(data) != "SSH-2.0-OpenSSH_9.0\r\n" {
-		t.Fatalf("replay prefix = %q", string(data))
+			ctx := &tcpClassifyContext{
+				OrigIP:      net.ParseIP("8.8.8.8"),
+				OrigPort:    tt.port,
+				Conn:        server,
+				HeaderLimit: 1024,
+			}
+			result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+			if err != nil {
+				t.Fatalf("classifyTCP returned error: %v", err)
+			}
+			if result.Classification.Protocol != "ssh" {
+				t.Fatalf("protocol = %q, want ssh", result.Classification.Protocol)
+			}
+			req := &adapterRequest{}
+			result.Apply(req)
+			data, readErr := io.ReadAll(req.Prefix)
+			if readErr != nil {
+				t.Fatalf("failed to read replay prefix: %v", readErr)
+			}
+			if string(data) != banner {
+				t.Fatalf("replay prefix = %q", string(data))
+			}
+		})
 	}
 }
 
@@ -387,41 +399,6 @@ func TestClassifyTCPReadsFragmentedMQTTConnect(t *testing.T) {
 	}
 }
 
-func TestDefaultTCPClassifiersClassifyMQTTConnect(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-
-	packet := buildMQTTConnectPacket()
-	go func() {
-		_, _ = client.Write(packet)
-		_ = client.Close()
-	}()
-
-	ctx := &tcpClassifyContext{
-		OrigIP:      net.ParseIP("8.8.8.8"),
-		OrigPort:    1883,
-		Conn:        server,
-		HeaderLimit: 1024,
-	}
-	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
-	if err != nil {
-		t.Fatalf("classifyTCP returned error: %v", err)
-	}
-	if result.Classification.Protocol != "mqtt" {
-		t.Fatalf("protocol = %q, want mqtt", result.Classification.Protocol)
-	}
-	req := &adapterRequest{}
-	result.Apply(req)
-	data, readErr := io.ReadAll(req.Prefix)
-	if readErr != nil {
-		t.Fatalf("failed to read replay prefix: %v", readErr)
-	}
-	if string(data) != string(packet) {
-		t.Fatalf("replay prefix = %v, want %v", data, packet)
-	}
-}
-
 func TestClassifyTCPReadsFragmentedMongoMessage(t *testing.T) {
 	packet := buildMongoOPMessage()
 	ctx := &tcpClassifyContext{
@@ -439,38 +416,50 @@ func TestClassifyTCPReadsFragmentedMongoMessage(t *testing.T) {
 	}
 }
 
-func TestDefaultTCPClassifiersClassifyMongoMessage(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+func TestDefaultTCPClassifiersReplayProtocolPayload(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		packet   []byte
+		port     int
+		protocol string
+	}{
+		{name: "MQTT connect", packet: buildMQTTConnectPacket(), port: 1883, protocol: "mqtt"},
+		{name: "Mongo message", packet: buildMongoOPMessage(), port: 27017, protocol: "mongodb"},
+	} {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
 
-	packet := buildMongoOPMessage()
-	go func() {
-		_, _ = client.Write(packet)
-		_ = client.Close()
-	}()
+			go func() {
+				_, _ = client.Write(tt.packet)
+				_ = client.Close()
+			}()
 
-	ctx := &tcpClassifyContext{
-		OrigIP:      net.ParseIP("8.8.8.8"),
-		OrigPort:    27017,
-		Conn:        server,
-		HeaderLimit: 1024,
-	}
-	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
-	if err != nil {
-		t.Fatalf("classifyTCP returned error: %v", err)
-	}
-	if result.Classification.Protocol != "mongodb" {
-		t.Fatalf("protocol = %q, want mongodb", result.Classification.Protocol)
-	}
-	req := &adapterRequest{}
-	result.Apply(req)
-	data, readErr := io.ReadAll(req.Prefix)
-	if readErr != nil {
-		t.Fatalf("failed to read replay prefix: %v", readErr)
-	}
-	if string(data) != string(packet) {
-		t.Fatalf("replay prefix = %v, want %v", data, packet)
+			ctx := &tcpClassifyContext{
+				OrigIP:      net.ParseIP("8.8.8.8"),
+				OrigPort:    tt.port,
+				Conn:        server,
+				HeaderLimit: 1024,
+			}
+			result, err := classifyTCP(defaultTCPClassifiers(), ctx)
+			if err != nil {
+				t.Fatalf("classifyTCP returned error: %v", err)
+			}
+			if result.Classification.Protocol != tt.protocol {
+				t.Fatalf("protocol = %q, want %q", result.Classification.Protocol, tt.protocol)
+			}
+			req := &adapterRequest{}
+			result.Apply(req)
+			data, readErr := io.ReadAll(req.Prefix)
+			if readErr != nil {
+				t.Fatalf("failed to read replay prefix: %v", readErr)
+			}
+			if string(data) != string(tt.packet) {
+				t.Fatalf("replay prefix = %v, want %v", data, tt.packet)
+			}
+		})
 	}
 }
 
@@ -575,40 +564,6 @@ func TestDefaultTCPClassifiersClassifySOCKS5Greeting(t *testing.T) {
 	}
 	if string(data) != string(greeting) {
 		t.Fatalf("replay prefix = %v, want %v", data, greeting)
-	}
-}
-
-func TestDefaultTCPClassifiersClassifySSHBanner(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-
-	go func() {
-		_, _ = io.WriteString(client, "SSH-2.0-OpenSSH_9.0\r\n")
-		_ = client.Close()
-	}()
-
-	ctx := &tcpClassifyContext{
-		OrigIP:      net.ParseIP("8.8.8.8"),
-		OrigPort:    443,
-		Conn:        server,
-		HeaderLimit: 1024,
-	}
-	result, err := classifyTCP(defaultTCPClassifiers(), ctx)
-	if err != nil {
-		t.Fatalf("classifyTCP returned error: %v", err)
-	}
-	if result.Classification.Protocol != "ssh" {
-		t.Fatalf("protocol = %q, want ssh", result.Classification.Protocol)
-	}
-	req := &adapterRequest{}
-	result.Apply(req)
-	data, readErr := io.ReadAll(req.Prefix)
-	if readErr != nil {
-		t.Fatalf("failed to read replay prefix: %v", readErr)
-	}
-	if string(data) != "SSH-2.0-OpenSSH_9.0\r\n" {
-		t.Fatalf("replay prefix = %q", string(data))
 	}
 }
 

@@ -13,33 +13,7 @@ import (
 const logCursorType = "log"
 
 func (r *Repository) InsertLogs(ctx context.Context, logs []sandboxobservability.LogEntry) error {
-	if len(logs) == 0 {
-		return nil
-	}
-	normalized := make([]sandboxobservability.LogEntry, 0, len(logs))
-	now := r.now()
-	for i, entry := range logs {
-		normalizedEntry, err := normalizeLogForInsert(entry, now)
-		if err != nil {
-			return fmt.Errorf("log %d: %w", i, err)
-		}
-		normalized = append(normalized, normalizedEntry)
-	}
-	for len(normalized) > 0 {
-		chunkSize := len(normalized)
-		if chunkSize > maxInsertBatchSize {
-			chunkSize = maxInsertBatchSize
-		}
-		query, args, err := r.buildLogInsertSQL(normalized[:chunkSize])
-		if err != nil {
-			return err
-		}
-		if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("%w: insert logs: %v", sandboxobservability.ErrBackendUnavailable, err)
-		}
-		normalized = normalized[chunkSize:]
-	}
-	return nil
+	return insertNormalizedRows(r, ctx, logs, normalizeLogForInsert, "log", "logs", r.buildLogInsertSQL)
 }
 
 func (r *Repository) ListLogs(ctx context.Context, query sandboxobservability.LogQuery) (*sandboxobservability.LogListResult, error) {

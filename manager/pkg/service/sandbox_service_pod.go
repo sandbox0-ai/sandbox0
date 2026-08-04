@@ -10,7 +10,7 @@ import (
 	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -254,10 +254,6 @@ func (s *SandboxService) observePodNetworkIdentityCheck(source, result, reason s
 		result = "unknown"
 	}
 	s.metrics.PodNetworkIdentityChecksTotal.WithLabelValues(source, result, podNetworkIdentityReasonLabel(reason)).Inc()
-}
-
-func (s *SandboxService) observePodNetworkIdentityStage(template, stage, status, reason string, started time.Time) {
-	s.observePodNetworkIdentityStageDuration(template, stage, status, reason, time.Since(started))
 }
 
 func (s *SandboxService) observePodNetworkIdentityStageDuration(template, stage, status, reason string, duration time.Duration) {
@@ -534,31 +530,6 @@ func podContainerRunning(pod *corev1.Pod, name string) bool {
 	return false
 }
 
-func (s *SandboxService) ProbeSandboxPod(ctx context.Context, pod *corev1.Pod, kind sandboxprobe.Kind) (*sandboxprobe.Response, error) {
-	if pod == nil {
-		return nil, fmt.Errorf("pod is nil")
-	}
-	if pod.Status.Phase != corev1.PodRunning {
-		result := sandboxprobe.Failed(kind, "PodNotRunning", fmt.Sprintf("pod phase is %s", pod.Status.Phase), nil)
-		return &result, nil
-	}
-	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
-	if err != nil {
-		return nil, err
-	}
-	result, err := s.ctldClient.ProbePod(ctx, ctldAddress, pod.Namespace, pod.Name, kind)
-	if err == nil && kind == sandboxprobe.KindReadiness && result != nil && result.Status == sandboxprobe.StatusPassed {
-		if portalErr := s.ensurePodVolumePortalsPublished(ctx, ctldAddress, pod); portalErr != nil {
-			failure := sandboxprobe.Failed(kind, "VolumePortalsNotReady", portalErr.Error(), nil)
-			return &failure, nil
-		}
-	}
-	if result != nil && result.Status != "" {
-		return result, nil
-	}
-	return result, err
-}
-
 func (s *SandboxService) ensurePodVolumePortalsPublished(ctx context.Context, ctldAddress string, pod *corev1.Pod) error {
 	if s == nil || s.ctldClient == nil || pod == nil {
 		return nil
@@ -621,20 +592,20 @@ func expectedVolumePortalsForPod(pod *corev1.Pod) []ctldapi.VolumePortalRef {
 // podToSandboxStatus converts pod state to sandbox status.
 func (s *SandboxService) podToSandboxStatus(pod *corev1.Pod) string {
 	if pod == nil {
-		return SandboxStatusStarting
+		return managerapi.SandboxStatusStarting
 	}
 	if pod.DeletionTimestamp != nil {
-		return SandboxStatusTerminating
+		return managerapi.SandboxStatusTerminating
 	}
 	if pod.Status.Phase == corev1.PodRunning {
 		ready, failed, _ := runtimeAssignmentObservation(pod, "")
 		switch {
 		case ready:
-			return SandboxStatusRunning
+			return managerapi.SandboxStatusRunning
 		case failed:
-			return SandboxStatusFailed
+			return managerapi.SandboxStatusFailed
 		default:
-			return SandboxStatusStarting
+			return managerapi.SandboxStatusStarting
 		}
 	}
 	return s.podPhaseToSandboxStatus(pod.Status.Phase)
@@ -644,14 +615,14 @@ func (s *SandboxService) podToSandboxStatus(pod *corev1.Pod) string {
 func (s *SandboxService) podPhaseToSandboxStatus(phase corev1.PodPhase) string {
 	switch phase {
 	case corev1.PodPending:
-		return SandboxStatusStarting
+		return managerapi.SandboxStatusStarting
 	case corev1.PodRunning:
-		return SandboxStatusRunning
+		return managerapi.SandboxStatusRunning
 	case corev1.PodSucceeded:
-		return SandboxStatusFailed
+		return managerapi.SandboxStatusFailed
 	case corev1.PodFailed:
-		return SandboxStatusFailed
+		return managerapi.SandboxStatusFailed
 	default:
-		return SandboxStatusStarting
+		return managerapi.SandboxStatusStarting
 	}
 }

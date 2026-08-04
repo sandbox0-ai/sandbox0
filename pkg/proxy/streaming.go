@@ -34,7 +34,7 @@ func PrepareStreamingProxyResponse(w http.ResponseWriter, req *http.Request) err
 	if IsWebSocketUpgrade(req) || LongLivedRequest(req.Context()) {
 		return DisableResponseDeadlines(w)
 	}
-	if UpstreamTimeoutDisabled(req.Context()) || StreamingResponseDeadlinesDisabled(req.Context()) {
+	if UpstreamTimeoutDisabled(req.Context()) {
 		return DisableResponseWriteDeadline(w)
 	}
 	return nil

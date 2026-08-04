@@ -47,7 +47,11 @@ func TestResolveResponseUnmarshalHydratesCompatibilityHeaders(t *testing.T) {
 }
 
 func TestResolveResponsePreservesSourceMetadata(t *testing.T) {
-	resp := NewHTTPHeadersResolveResponse("example-api", map[string]string{"Authorization": "Bearer token"}, nil)
+	resp := &ResolveResponse{
+		AuthRef: "example-api",
+		Headers: map[string]string{"Authorization": "Bearer token"},
+	}
+	resp.EnsureCompatibilityFields()
 	resp.Source = &ResolveSource{
 		TeamID:        "team-1",
 		SourceRef:     "github-token",
@@ -78,11 +82,17 @@ func TestResolveResponsePreservesSourceMetadata(t *testing.T) {
 }
 
 func TestResolveResponseMarshalPreservesTLSClientCertificateDirective(t *testing.T) {
-	payload, err := json.Marshal(NewTLSClientCertificateResolveResponse("example-cert", &TLSClientCertificateDirective{
-		CertificatePEM: "cert",
-		PrivateKeyPEM:  "key",
-		CAPEM:          "ca",
-	}, nil))
+	payload, err := json.Marshal(&ResolveResponse{
+		AuthRef: "example-cert",
+		Directives: []ResolveDirective{{
+			Kind: ResolveDirectiveKindTLSClientCertificate,
+			TLSClientCertificate: &TLSClientCertificateDirective{
+				CertificatePEM: "cert",
+				PrivateKeyPEM:  "key",
+				CAPEM:          "ca",
+			},
+		}},
+	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -100,10 +110,16 @@ func TestResolveResponseMarshalPreservesTLSClientCertificateDirective(t *testing
 }
 
 func TestResolveResponseMarshalPreservesUsernamePasswordDirective(t *testing.T) {
-	payload, err := json.Marshal(NewUsernamePasswordResolveResponse("corp-proxy", &UsernamePasswordDirective{
-		Username: "alice",
-		Password: "secret",
-	}, nil))
+	payload, err := json.Marshal(&ResolveResponse{
+		AuthRef: "corp-proxy",
+		Directives: []ResolveDirective{{
+			Kind: ResolveDirectiveKindUsernamePassword,
+			UsernamePassword: &UsernamePasswordDirective{
+				Username: "alice",
+				Password: "secret",
+			},
+		}},
+	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -121,17 +137,23 @@ func TestResolveResponseMarshalPreservesUsernamePasswordDirective(t *testing.T) 
 }
 
 func TestResolveResponseMarshalPreservesPlaceholderSubstitutionDirective(t *testing.T) {
-	payload, err := json.Marshal(NewPlaceholderSubstitutionResolveResponse("example-api", &PlaceholderSubstitutionDirective{
-		Replacements: []PlaceholderSubstitutionReplacement{{
-			Placeholder: "s0env_test_token",
-			Value:       "resolved-secret",
-			Locations: []PlaceholderSubstitutionLocation{
-				PlaceholderSubstitutionLocationHeader,
-				PlaceholderSubstitutionLocationQuery,
-				PlaceholderSubstitutionLocationBody,
+	payload, err := json.Marshal(&ResolveResponse{
+		AuthRef: "example-api",
+		Directives: []ResolveDirective{{
+			Kind: ResolveDirectiveKindPlaceholderSubstitution,
+			PlaceholderSubstitution: &PlaceholderSubstitutionDirective{
+				Replacements: []PlaceholderSubstitutionReplacement{{
+					Placeholder: "s0env_test_token",
+					Value:       "resolved-secret",
+					Locations: []PlaceholderSubstitutionLocation{
+						PlaceholderSubstitutionLocationHeader,
+						PlaceholderSubstitutionLocationQuery,
+						PlaceholderSubstitutionLocationBody,
+					},
+				}},
 			},
 		}},
-	}, nil))
+	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

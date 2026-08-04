@@ -13,8 +13,9 @@ import (
 
 	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	managernaming "github.com/sandbox0-ai/sandbox0/manager/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
+	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -33,55 +34,55 @@ import (
 
 const (
 	// Labels
-	LabelTemplateID        = "sandbox0.ai/template-id"
-	LabelTemplateLogicalID = "sandbox0.ai/template-logical-id"
-	LabelTemplateScope     = "sandbox0.ai/template-scope"
-	LabelPoolType          = "sandbox0.ai/pool-type"
-	LabelSandboxID         = "sandbox0.ai/sandbox-id"
-	LabelOwnerKind         = "sandbox0.ai/owner-kind"
+	LabelTemplateID        = sandboxpod.LabelTemplateID
+	LabelTemplateLogicalID = sandboxpod.LabelTemplateLogicalID
+	LabelTemplateScope     = sandboxpod.LabelTemplateScope
+	LabelPoolType          = sandboxpod.LabelPoolType
+	LabelSandboxID         = sandboxpod.LabelSandboxID
+	LabelOwnerKind         = sandboxpod.LabelOwnerKind
 
 	// Pool types
-	PoolTypeIdle   = "idle"
-	PoolTypeActive = "active"
+	PoolTypeIdle   = sandboxpod.PoolTypeIdle
+	PoolTypeActive = sandboxpod.PoolTypeActive
 
 	// Annotations
-	AnnotationTeamID                       = runtimecontrol.AnnotationTeamID
-	AnnotationUserID                       = "sandbox0.ai/user-id"
-	AnnotationClaimedAt                    = "sandbox0.ai/claimed-at"
-	AnnotationClaimType                    = "sandbox0.ai/claim-type" // "hot" or "cold"
-	AnnotationExpiresAt                    = "sandbox0.ai/expires-at"
-	AnnotationHardExpiresAt                = "sandbox0.ai/hard-expires-at"
-	AnnotationConfig                       = runtimecontrol.AnnotationConfig
-	AnnotationMounts                       = "sandbox0.ai/mounts"
-	AnnotationPaused                       = "sandbox0.ai/paused"
-	AnnotationPausedAt                     = "sandbox0.ai/paused-at"
-	AnnotationPausedState                  = "sandbox0.ai/paused-state"
-	AnnotationPowerStateDesired            = "sandbox0.ai/power-state-desired"
-	AnnotationPowerStateDesiredGeneration  = "sandbox0.ai/power-state-desired-generation"
-	AnnotationPowerStateObserved           = "sandbox0.ai/power-state-observed"
-	AnnotationPowerStateObservedGeneration = "sandbox0.ai/power-state-observed-generation"
-	AnnotationPowerStatePhase              = "sandbox0.ai/power-state-phase"
-	AnnotationNetworkPolicy                = "sandbox0.ai/network-policy" // JSON serialized network policy spec
-	AnnotationNetworkPolicyHash            = "sandbox0.ai/network-policy-hash"
-	AnnotationNetworkPolicyAppliedHash     = "sandbox0.ai/network-policy-applied-hash"
-	AnnotationSandboxID                    = runtimecontrol.AnnotationSandboxID
-	AnnotationRuntimeGeneration            = runtimecontrol.AnnotationRuntimeGeneration
-	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
-	AnnotationHotClaimReservation          = "sandbox0.ai/hot-claim-reservation"
-	AnnotationHotClaimReservationState     = "sandbox0.ai/hot-claim-reservation-state"
-	AnnotationHotClaimReservedAt           = "sandbox0.ai/hot-claim-reserved-at"
-	AnnotationHotClaimReadyAt              = "sandbox0.ai/hot-claim-ready-at"
-	AnnotationHotClaimCompletionProtocol   = "sandbox0.ai/hot-claim-completion-protocol"
-	AnnotationTemplateSpecHash             = "sandbox0.ai/template-spec-hash"
-	AnnotationTemplateTeamID               = "sandbox0.ai/template-team-id"
-	AnnotationTemplateUserID               = "sandbox0.ai/template-user-id"
-	AnnotationOwnerKind                    = "sandbox0.ai/owner-kind"
+	AnnotationTeamID                       = sandboxpod.AnnotationTeamID
+	AnnotationUserID                       = sandboxpod.AnnotationUserID
+	AnnotationClaimedAt                    = sandboxpod.AnnotationClaimedAt
+	AnnotationClaimType                    = sandboxpod.AnnotationClaimType
+	AnnotationExpiresAt                    = sandboxpod.AnnotationExpiresAt
+	AnnotationHardExpiresAt                = sandboxpod.AnnotationHardExpiresAt
+	AnnotationConfig                       = sandboxpod.AnnotationConfig
+	AnnotationMounts                       = sandboxpod.AnnotationMounts
+	AnnotationPaused                       = sandboxpod.AnnotationPaused
+	AnnotationPausedAt                     = sandboxpod.AnnotationPausedAt
+	AnnotationPausedState                  = sandboxpod.AnnotationPausedState
+	AnnotationPowerStateDesired            = sandboxpod.AnnotationPowerStateDesired
+	AnnotationPowerStateDesiredGeneration  = sandboxpod.AnnotationPowerStateDesiredGeneration
+	AnnotationPowerStateObserved           = sandboxpod.AnnotationPowerStateObserved
+	AnnotationPowerStateObservedGeneration = sandboxpod.AnnotationPowerStateObservedGeneration
+	AnnotationPowerStatePhase              = sandboxpod.AnnotationPowerStatePhase
+	AnnotationNetworkPolicy                = sandboxpod.AnnotationNetworkPolicy
+	AnnotationNetworkPolicyHash            = sandboxpod.AnnotationNetworkPolicyHash
+	AnnotationNetworkPolicyAppliedHash     = sandboxpod.AnnotationNetworkPolicyAppliedHash
+	AnnotationSandboxID                    = sandboxpod.AnnotationSandboxID
+	AnnotationRuntimeGeneration            = sandboxpod.AnnotationRuntimeGeneration
+	AnnotationWebhookStateVolumeID         = sandboxpod.AnnotationWebhookStateVolumeID
+	AnnotationHotClaimReservation          = sandboxpod.AnnotationHotClaimReservation
+	AnnotationHotClaimReservationState     = sandboxpod.AnnotationHotClaimReservationState
+	AnnotationHotClaimReservedAt           = sandboxpod.AnnotationHotClaimReservedAt
+	AnnotationHotClaimReadyAt              = sandboxpod.AnnotationHotClaimReadyAt
+	AnnotationHotClaimCompletionProtocol   = sandboxpod.AnnotationHotClaimCompletionProtocol
+	AnnotationTemplateSpecHash             = sandboxpod.AnnotationTemplateSpecHash
+	AnnotationTemplateTeamID               = sandboxpod.AnnotationTemplateTeamID
+	AnnotationTemplateUserID               = sandboxpod.AnnotationTemplateUserID
+	AnnotationOwnerKind                    = sandboxpod.AnnotationOwnerKind
 
-	OwnerKindTeamWarmPool = "team_warm_pool"
+	OwnerKindTeamWarmPool = sandboxpod.OwnerKindTeamWarmPool
 
-	HotClaimReservationStateInitializing = "initializing"
-	HotClaimReservationStateReady        = "ready"
-	HotClaimCompletionProtocolRecordV2   = "record-completion-v2"
+	HotClaimReservationStateInitializing = sandboxpod.HotClaimReservationStateInitializing
+	HotClaimReservationStateReady        = sandboxpod.HotClaimReservationStateReady
+	HotClaimCompletionProtocolRecordV2   = sandboxpod.HotClaimCompletionProtocolRecordV2
 
 	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
 	warmPoolRolloutRequeueAfter       = 10 * time.Second
@@ -151,17 +152,13 @@ func applyAutoscalerSafeToEvictAnnotations(annotations map[string]string, keys [
 // IsHotClaimReservedPod reports whether an idle warm-pool pod is reserved by a
 // sandbox claim and must no longer be exposed as idle capacity.
 func IsHotClaimReservedPod(pod *corev1.Pod) bool {
-	return pod != nil &&
-		strings.TrimSpace(pod.Annotations[AnnotationHotClaimReservation]) != ""
+	return sandboxpod.IsHotClaimReserved(pod)
 }
 
 // IsClaimedSandboxPod reports whether a pod is an active sandbox, including
 // the short interval in which a hot claim still belongs to its warm pool.
 func IsClaimedSandboxPod(pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-	return pod.Labels[LabelPoolType] == PoolTypeActive || IsHotClaimReservedPod(pod)
+	return sandboxpod.IsClaimed(pod)
 }
 
 // PoolManager manages the idle pool (ReplicaSet)
@@ -337,10 +334,25 @@ func desiredPoolReplicas(template *v1alpha1.SandboxTemplate) int32 {
 	return minIdle
 }
 
+func normalizedPoolBounds(template *v1alpha1.SandboxTemplate) (minIdle, maxIdle int32) {
+	if template == nil {
+		return 0, 0
+	}
+	minIdle = template.Spec.Pool.MinIdle
+	maxIdle = template.Spec.Pool.MaxIdle
+	if minIdle < 0 {
+		minIdle = 0
+	}
+	if maxIdle < minIdle {
+		maxIdle = minIdle
+	}
+	return minIdle, maxIdle
+}
+
 // getOrCreateReplicaSet gets or creates the ReplicaSet for a template
 func (pm *PoolManager) getOrCreateReplicaSet(ctx context.Context, template *v1alpha1.SandboxTemplate) (*appsv1.ReplicaSet, error) {
 	clusterID := naming.ClusterIDOrDefault(template.Spec.ClusterId)
-	rsName, err := naming.ReplicasetName(clusterID, template.Name)
+	rsName, err := managernaming.ReplicaSetName(clusterID, template.Name)
 	if err != nil {
 		return nil, fmt.Errorf("generate replicaset name: %w", err)
 	}

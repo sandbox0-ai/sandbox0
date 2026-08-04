@@ -57,9 +57,9 @@
 // # Usage
 //
 //	// Initialize with database
-//	c, err := clock.New(ctx, pool,
+//	c, err := clock.NewPGX(ctx, pool,
 //	    clock.WithSyncInterval(30*time.Second),
-//	    clock.WithLogger(logger),
+//	    clock.WithZapLogger(logger),
 //	)
 //	if err != nil {
 //	    return err

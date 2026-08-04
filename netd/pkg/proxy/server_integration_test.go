@@ -41,7 +41,7 @@ func TestHandleTCPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 		},
 		logger:   zap.NewNop(),
 		adapters: registry,
-		auditor:  newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		auditor:  newTestAuditLogger(nopWriteCloser{Writer: &auditBuf}),
 	}
 
 	done := make(chan struct{})
@@ -162,7 +162,7 @@ func TestHandleUDPDecisionPassThroughRelaysAndAudits(t *testing.T) {
 		logger:         zap.NewNop(),
 		udpHTTPConn:    proxyConn,
 		adapters:       registry,
-		auditor:        newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		auditor:        newTestAuditLogger(nopWriteCloser{Writer: &auditBuf}),
 		udpReplyDialer: dialUDPEphemeralForTest,
 	}
 
@@ -260,7 +260,7 @@ func TestHandleUDPDecisionPassThroughReusesUDPSession(t *testing.T) {
 		logger:         zap.NewNop(),
 		udpHTTPConn:    proxyConn,
 		adapters:       registry,
-		auditor:        newAuditLoggerFromWriter(nopWriteCloser{Writer: &auditBuf}),
+		auditor:        newTestAuditLogger(nopWriteCloser{Writer: &auditBuf}),
 		udpReplyDialer: dialUDPEphemeralForTest,
 	}
 	defer server.closeUDPSessions()

@@ -153,11 +153,6 @@ func (c *CMD) GetOutput() (stdout, stderr string) {
 	return "", ""
 }
 
-// GetCommand returns the command being executed.
-func (c *CMD) GetCommand() string {
-	return strings.Join(c.command, " ")
-}
-
 func (c *CMD) context() context.Context {
 	c.mu.RLock()
 	ctx := c.ctx

@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/eventbase"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/pubsub"
 	"go.uber.org/zap"
@@ -54,7 +55,7 @@ func (p *PGTemplateStatsPublisher) PublishTemplateStats(ctx context.Context, tem
 	}
 
 	event := pubsub.TemplateIdleEvent{
-		EventBase:   pubsub.NewEventBase(p.clk),
+		EventBase:   eventbase.New(p.clk),
 		ClusterID:   p.clusterID,
 		TemplateID:  template.Name,
 		IdleCount:   idleCount,

@@ -1,0 +1,196 @@
+// Package procdapi defines the manager-side contract for procd HTTP APIs.
+package procdapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+)
+
+// ProcdClientConfig holds configuration for ProcdClient
+type ProcdClientConfig struct {
+	Timeout time.Duration
+}
+
+// ProcdClient is an HTTP client for calling procd APIs.
+type ProcdClient struct {
+	httpClient *http.Client
+}
+
+// NewProcdClient creates a new procd client.
+func NewProcdClient(config ProcdClientConfig) *ProcdClient {
+	timeout := config.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	return &ProcdClient{
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
+	}
+}
+
+// NewProcdClientWithHTTPClient creates a procd client with a custom HTTP client.
+func NewProcdClientWithHTTPClient(httpClient *http.Client) *ProcdClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	return &ProcdClient{
+		httpClient: httpClient,
+	}
+}
+
+// ResourceUsage represents resource consumption from procd.
+type ResourceUsage struct {
+	CPUPercent                float64 `json:"cpu_percent"`
+	MemoryRSS                 int64   `json:"memory_rss"`
+	MemoryVMS                 int64   `json:"memory_vms"`
+	OpenFiles                 int     `json:"open_files"`
+	ThreadCount               int     `json:"thread_count"`
+	ContainerMemoryUsage      int64   `json:"container_memory_usage,omitempty"`
+	ContainerMemoryLimit      int64   `json:"container_memory_limit,omitempty"`
+	ContainerMemoryWorkingSet int64   `json:"container_memory_working_set,omitempty"`
+	IOReadBytes               int64   `json:"io_read_bytes,omitempty"`
+	IOWriteBytes              int64   `json:"io_write_bytes,omitempty"`
+	MemoryBytes               int64   `json:"memory_bytes"`
+}
+
+// ContextResourceUsage represents resource usage for a single context.
+type ContextResourceUsage struct {
+	ContextID string        `json:"context_id"`
+	Type      string        `json:"type"`
+	Language  string        `json:"language"`
+	Running   bool          `json:"running"`
+	Paused    bool          `json:"paused"`
+	Usage     ResourceUsage `json:"usage"`
+}
+
+// SandboxResourceUsage represents aggregated resource usage for the entire sandbox.
+type SandboxResourceUsage struct {
+	ContainerMemoryUsage      int64 `json:"container_memory_usage"`
+	ContainerMemoryLimit      int64 `json:"container_memory_limit"`
+	ContainerMemoryWorkingSet int64 `json:"container_memory_working_set"`
+	TotalMemoryRSS            int64 `json:"total_memory_rss"`
+	TotalMemoryVMS            int64 `json:"total_memory_vms"`
+	TotalOpenFiles            int   `json:"total_open_files"`
+	TotalThreadCount          int   `json:"total_thread_count"`
+	TotalIOReadBytes          int64 `json:"total_io_read_bytes"`
+	TotalIOWriteBytes         int64 `json:"total_io_write_bytes"`
+	ContextCount              int   `json:"context_count"`
+	RunningContextCount       int   `json:"running_context_count"`
+	PausedContextCount        int   `json:"paused_context_count"`
+
+	Contexts []ContextResourceUsage `json:"contexts"`
+}
+
+// StatsResponse represents the response from procd stats API.
+type StatsResponse struct {
+	SandboxResourceUsage
+}
+
+// ProcdLifecycleBarrierRequest controls the runtime operation barrier in procd.
+type ProcdLifecycleBarrierRequest struct {
+	Active            bool  `json:"active"`
+	Epoch             int64 `json:"epoch,omitempty"`
+	RuntimeGeneration int64 `json:"runtime_generation,omitempty"`
+	WaitTimeoutMS     int64 `json:"wait_timeout_ms,omitempty"`
+}
+
+// ProcdLifecycleBarrierResponse is returned after procd applies the barrier.
+type ProcdLifecycleBarrierResponse struct {
+	Active            bool  `json:"active"`
+	Epoch             int64 `json:"epoch,omitempty"`
+	RuntimeGeneration int64 `json:"runtime_generation,omitempty"`
+	InFlight          int   `json:"in_flight"`
+}
+
+// ProcdPauseResponse is returned after pausing all procd-managed processes.
+type ProcdPauseResponse struct {
+	Paused        bool                  `json:"paused"`
+	ResourceUsage *SandboxResourceUsage `json:"resource_usage,omitempty"`
+}
+
+// ProcdResumeResponse is returned after resuming all procd-managed processes.
+type ProcdResumeResponse struct {
+	Resumed bool `json:"resumed"`
+}
+
+// Stats calls the procd stats API.
+func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken string) (*StatsResponse, error) {
+	url := procdAddress + SandboxStatsPath
+	return doProcdRequest[StatsResponse](ctx, c.httpClient, http.MethodGet, url, internalToken, "stats", nil)
+}
+
+// SetLifecycleBarrier activates or releases the procd runtime operation barrier.
+func (c *ProcdClient) SetLifecycleBarrier(ctx context.Context, procdAddress string, req ProcdLifecycleBarrierRequest, internalToken string) (*ProcdLifecycleBarrierResponse, error) {
+	url := procdAddress + LifecycleBarrierPath
+	return doProcdRequest[ProcdLifecycleBarrierResponse](ctx, c.httpClient, http.MethodPut, url, internalToken, "set lifecycle barrier", req)
+}
+
+// PauseSandbox pauses all procd-managed processes inside the sandbox.
+func (c *ProcdClient) PauseSandbox(ctx context.Context, procdAddress, internalToken string) (*ProcdPauseResponse, error) {
+	url := procdAddress + SandboxPausePath
+	return doProcdRequest[ProcdPauseResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "pause procd sandbox", nil)
+}
+
+// ResumeSandbox resumes all procd-managed processes inside the sandbox.
+func (c *ProcdClient) ResumeSandbox(ctx context.Context, procdAddress, internalToken string) (*ProcdResumeResponse, error) {
+	url := procdAddress + SandboxResumePath
+	return doProcdRequest[ProcdResumeResponse](ctx, c.httpClient, http.MethodPost, url, internalToken, "resume procd sandbox", nil)
+}
+
+func doProcdRequest[T any](ctx context.Context, httpClient *http.Client, method, url, internalToken, action string, request any) (*T, error) {
+	var body io.Reader
+	if request != nil {
+		jsonBody, err := json.Marshal(request)
+		if err != nil {
+			return nil, fmt.Errorf("marshal body: %w", err)
+		}
+		body = bytes.NewReader(jsonBody)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", internalToken)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	result, errInfo, err := decodeProcdResponse[T](respBody)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s response: %w", action, err)
+	}
+	if errInfo != nil {
+		return nil, fmt.Errorf("%s failed: %s", action, errInfo.Message)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s failed with status %d", action, resp.StatusCode)
+	}
+
+	return result, nil
+}
+
+func decodeProcdResponse[T any](body []byte) (*T, *spec.Error, error) {
+	if len(body) == 0 {
+		return nil, nil, fmt.Errorf("empty response body")
+	}
+	return spec.DecodeResponse[T](bytes.NewReader(body))
+}

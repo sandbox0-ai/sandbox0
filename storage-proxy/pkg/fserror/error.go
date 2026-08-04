@@ -113,23 +113,6 @@ func CodeOf(err error) Code {
 	return Internal
 }
 
-func MessageOf(err error) string {
-	if err == nil {
-		return ""
-	}
-	if fsErr, ok := FromError(err); ok {
-		return fsErr.message
-	}
-	return err.Error()
-}
-
-func RedirectOf(err error) *pb.PrimaryRedirect {
-	if fsErr, ok := FromError(err); ok {
-		return fsErr.redirect
-	}
-	return nil
-}
-
 func (e *Error) Error() string {
 	if e == nil {
 		return ""

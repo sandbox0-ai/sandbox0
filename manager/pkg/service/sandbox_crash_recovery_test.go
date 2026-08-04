@@ -12,6 +12,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,13 +40,13 @@ func TestRecoverTerminatedSandboxRuntimeStartsDurableCrashPause(t *testing.T) {
 	require.NoError(t, svc.RecoverTerminatedSandboxRuntime(context.Background(), pod))
 
 	require.Len(t, store.lifecycleTxns, 1)
-	var txn *SandboxLifecycleTxn
+	var txn *sandboxstore.SandboxLifecycleTxn
 	for _, candidate := range store.lifecycleTxns {
 		txn = candidate
 	}
 	require.NotNil(t, txn)
-	assert.Equal(t, SandboxLifecycleKindPause, txn.Kind)
-	assert.Equal(t, SandboxLifecycleSourceCrash, txn.Source)
+	assert.Equal(t, sandboxstore.SandboxLifecycleKindPause, txn.Kind)
+	assert.Equal(t, sandboxstore.SandboxLifecycleSourceCrash, txn.Source)
 	assert.False(t, txn.Cancelable)
 	assert.Equal(t, int64(3), txn.FromGeneration)
 	assert.Equal(t, pod.Namespace, txn.FromPodNamespace)
@@ -98,7 +99,7 @@ func TestRecoverUnhealthySandboxRuntimeStartsDurableReconstruction(t *testing.T)
 	require.Len(t, store.lifecycleTxns, 1)
 	txn := activeLifecycleTxnForTest(store, "sandbox-1")
 	require.NotNil(t, txn)
-	assert.Equal(t, SandboxLifecycleSourceHealth, txn.Source)
+	assert.Equal(t, sandboxstore.SandboxLifecycleSourceHealth, txn.Source)
 	assert.False(t, txn.Cancelable)
 	assert.Equal(t, int64(3), txn.FromGeneration)
 	assert.Equal(t, []string{"sandbox-1", "sandbox-1"}, enqueuer.recoveryCalls)
@@ -124,7 +125,7 @@ func TestRecoverUnhealthySandboxRuntimeIgnoresAutoResumeAccessPolicy(t *testing.
 	require.Len(t, store.lifecycleTxns, 1)
 	txn := activeLifecycleTxnForTest(store, "sandbox-1")
 	require.NotNil(t, txn)
-	assert.Equal(t, SandboxLifecycleSourceHealth, txn.Source)
+	assert.Equal(t, sandboxstore.SandboxLifecycleSourceHealth, txn.Source)
 	assert.Equal(t, []string{"sandbox-1"}, enqueuer.recoveryCalls)
 }
 
@@ -151,13 +152,13 @@ func TestRecoverTerminatedSandboxRuntimeIgnoresStalePod(t *testing.T) {
 func TestRecoverTerminatedSandboxRuntimeWaitsForConflictingLifecycle(t *testing.T) {
 	pod := crashRecoveryTestPod(corev1.PodFailed, 2, "Error")
 	store := crashRecoveryTestStore(pod)
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"manual-pause": {
 			ID:        "manual-pause",
 			SandboxID: "sandbox-1",
-			Kind:      SandboxLifecycleKindPause,
-			Phase:     SandboxLifecyclePhasePublishing,
-			Source:    SandboxLifecycleSourceManual,
+			Kind:      sandboxstore.SandboxLifecycleKindPause,
+			Phase:     sandboxstore.SandboxLifecyclePhasePublishing,
+			Source:    sandboxstore.SandboxLifecycleSourceManual,
 		},
 	}
 	svc := &SandboxService{sandboxStore: store, clock: systemTime{}, logger: zap.NewNop()}
@@ -194,7 +195,7 @@ func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
 	client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
 		record, err := store.GetSandbox(context.Background(), "sandbox-1")
 		require.NoError(t, err)
-		require.Equal(t, SandboxDesiredStatePaused, record.DesiredState, "runtime must be fenced before pod deletion")
+		require.Equal(t, sandboxstore.SandboxDesiredStatePaused, record.DesiredState, "runtime must be fenced before pod deletion")
 		require.NotNil(t, store.rootFSStates["sandbox-1"], "rootfs head must commit before pod deletion")
 		deleted = true
 		return true, nil, nil
@@ -203,7 +204,7 @@ func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
 		k8sClient:     client,
 		podLister:     newTestPodLister(t, pod),
 		sandboxStore:  store,
-		ctldClient:    NewCtldClientWithHTTPClient(ctld.Client()),
+		ctldClient:    ctldapi.NewClient(ctld.Client()),
 		pauseEnqueuer: &recordingPauseEnqueuer{},
 		config:        SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
 		clock:         systemTime{},
@@ -216,7 +217,7 @@ func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
 	assert.True(t, deleted)
 	assert.Equal(t, "containerd://terminated-container", preparedTarget.ContainerID)
 	assert.Equal(t, string(pod.UID), preparedTarget.PodUID)
-	assert.Equal(t, SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 	state := store.rootFSStates["sandbox-1"]
 	require.NotNil(t, state)
@@ -240,7 +241,7 @@ func TestCompleteCrashRecoveryRetainsPodAndTransactionOnTransientCheckpointFailu
 		k8sClient:     client,
 		podLister:     newTestPodLister(t, pod),
 		sandboxStore:  store,
-		ctldClient:    NewCtldClientWithHTTPClient(ctld.Client()),
+		ctldClient:    ctldapi.NewClient(ctld.Client()),
 		pauseEnqueuer: &recordingPauseEnqueuer{},
 		config:        SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
 		clock:         systemTime{},
@@ -251,7 +252,7 @@ func TestCompleteCrashRecoveryRetainsPodAndTransactionOnTransientCheckpointFailu
 	err := svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1")
 
 	require.Error(t, err)
-	assert.Equal(t, SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 	require.NotNil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 	for _, action := range client.Actions() {
 		assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "pods")
@@ -270,7 +271,7 @@ func TestCompleteHealthRecoveryFallsBackAndFencesBeforeDeletingPod(t *testing.T)
 	pod := unhealthyRecoveryTestPod(now.Add(-2 * time.Minute))
 	pod.Status.HostIP = ctldURL.Hostname()
 	store := crashRecoveryTestStore(pod)
-	store.rootFSStates = map[string]*SandboxRootFSState{
+	store.rootFSStates = map[string]*sandboxstore.SandboxRootFSState{
 		"sandbox-1": {
 			SandboxID:         "sandbox-1",
 			TeamID:            "team-1",
@@ -283,7 +284,7 @@ func TestCompleteHealthRecoveryFallsBackAndFencesBeforeDeletingPod(t *testing.T)
 	client.PrependReactor("delete", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
 		record, err := store.GetSandbox(context.Background(), "sandbox-1")
 		require.NoError(t, err)
-		require.Equal(t, SandboxDesiredStatePaused, record.DesiredState, "runtime must be fenced before pod deletion")
+		require.Equal(t, sandboxstore.SandboxDesiredStatePaused, record.DesiredState, "runtime must be fenced before pod deletion")
 		deleted = true
 		return true, nil, nil
 	})
@@ -291,7 +292,7 @@ func TestCompleteHealthRecoveryFallsBackAndFencesBeforeDeletingPod(t *testing.T)
 		k8sClient:     client,
 		podLister:     newTestPodLister(t, pod),
 		sandboxStore:  store,
-		ctldClient:    NewCtldClientWithHTTPClient(ctld.Client()),
+		ctldClient:    ctldapi.NewClient(ctld.Client()),
 		pauseEnqueuer: &recordingPauseEnqueuer{},
 		config:        SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
 		clock:         fixedClock{now: now},
@@ -302,7 +303,7 @@ func TestCompleteHealthRecoveryFallsBackAndFencesBeforeDeletingPod(t *testing.T)
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
 	assert.True(t, deleted)
-	assert.Equal(t, SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 	assert.Equal(t, "previous-head", store.rootFSStates["sandbox-1"].LayerID)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 }
@@ -319,7 +320,7 @@ func TestCompleteCrashRecoveryFallsBackToLastCommittedHeadWhenSnapshotWasRemoved
 	pod.Status.ContainerStatuses = nil
 	pod.Status.HostIP = ctldURL.Hostname()
 	store := crashRecoveryTestStore(pod)
-	store.rootFSStates = map[string]*SandboxRootFSState{
+	store.rootFSStates = map[string]*sandboxstore.SandboxRootFSState{
 		"sandbox-1": {
 			SandboxID:         "sandbox-1",
 			TeamID:            "team-1",
@@ -337,7 +338,7 @@ func TestCompleteCrashRecoveryFallsBackToLastCommittedHeadWhenSnapshotWasRemoved
 		k8sClient:     client,
 		podLister:     newTestPodLister(t, pod),
 		sandboxStore:  store,
-		ctldClient:    NewCtldClientWithHTTPClient(ctld.Client()),
+		ctldClient:    ctldapi.NewClient(ctld.Client()),
 		pauseEnqueuer: &recordingPauseEnqueuer{},
 		config:        SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
 		clock:         systemTime{},
@@ -348,7 +349,7 @@ func TestCompleteCrashRecoveryFallsBackToLastCommittedHeadWhenSnapshotWasRemoved
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
 	assert.True(t, deleted)
-	assert.Equal(t, SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 	assert.Equal(t, "previous-head", store.rootFSStates["sandbox-1"].LayerID)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 }
@@ -367,7 +368,7 @@ func TestCrashRecoveryCommitDoesNotResurrectDeletedSandbox(t *testing.T) {
 	require.NotNil(t, txn)
 	require.NoError(t, store.MarkSandboxDeleted(context.Background(), "sandbox-1", time.Now().UTC()))
 
-	committed, err := svc.commitPausingRuntimePaused(context.Background(), "sandbox-1", txn, 3, &SandboxRootFSState{
+	committed, err := svc.commitPausingRuntimePaused(context.Background(), "sandbox-1", txn, 3, &sandboxstore.SandboxRootFSState{
 		SandboxID: "sandbox-1",
 		TeamID:    "team-1",
 		LayerID:   "uncommitted-crash-head",
@@ -375,7 +376,7 @@ func TestCrashRecoveryCommitDoesNotResurrectDeletedSandbox(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, committed)
-	assert.Equal(t, SandboxDesiredStateDeleted, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateDeleted, store.records["sandbox-1"].DesiredState)
 	assert.Nil(t, store.rootFSStates["sandbox-1"])
 }
 
@@ -400,7 +401,7 @@ func TestCompleteCrashRecoveryAbortsWhenRuntimeDeletionAlreadyStarted(t *testing
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
-	assert.Equal(t, SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 	for _, action := range client.Actions() {
 		assert.False(t, action.GetVerb() == "delete" && action.GetResource().Resource == "pods")
 	}
@@ -577,11 +578,11 @@ func TestCrashRecoveryControllerResyncsExistingUnhealthyPod(t *testing.T) {
 
 func TestSandboxPauseControllerReconstructsHealthRecoveryRegardlessOfAutoResume(t *testing.T) {
 	autoResume := false
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-1": {
 			ID:           "sandbox-1",
-			DesiredState: SandboxDesiredStateActive,
-			Config:       SandboxConfig{AutoResume: &autoResume},
+			DesiredState: sandboxstore.SandboxDesiredStateActive,
+			Config:       sandboxstore.SandboxConfig{AutoResume: &autoResume},
 		},
 	}}
 	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
@@ -605,13 +606,13 @@ func TestSandboxPauseControllerReconstructsHealthRecoveryRegardlessOfAutoResume(
 func TestSandboxPauseControllerFindsCrashRecoveryAfterManagerRestart(t *testing.T) {
 	pod := crashRecoveryTestPod(corev1.PodFailed, 137, "OOMKilled")
 	store := crashRecoveryTestStore(pod)
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"crash-pause": {
 			ID:        "crash-pause",
 			SandboxID: "sandbox-1",
-			Kind:      SandboxLifecycleKindPause,
-			Phase:     SandboxLifecyclePhasePublishing,
-			Source:    SandboxLifecycleSourceCrash,
+			Kind:      sandboxstore.SandboxLifecycleKindPause,
+			Phase:     sandboxstore.SandboxLifecyclePhasePublishing,
+			Source:    sandboxstore.SandboxLifecycleSourceCrash,
 		},
 	}
 	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
@@ -631,13 +632,13 @@ func TestSandboxPauseControllerFindsCrashRecoveryAfterManagerRestart(t *testing.
 func TestSandboxPauseControllerFindsHealthRecoveryAfterManagerRestart(t *testing.T) {
 	pod := unhealthyRecoveryTestPod(time.Now().Add(-2 * time.Minute))
 	store := crashRecoveryTestStore(pod)
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"health-pause": {
 			ID:        "health-pause",
 			SandboxID: "sandbox-1",
-			Kind:      SandboxLifecycleKindPause,
-			Phase:     SandboxLifecyclePhasePublishing,
-			Source:    SandboxLifecycleSourceHealth,
+			Kind:      sandboxstore.SandboxLifecycleKindPause,
+			Phase:     sandboxstore.SandboxLifecyclePhasePublishing,
+			Source:    sandboxstore.SandboxLifecycleSourceHealth,
 		},
 	}
 	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
@@ -657,21 +658,21 @@ func TestSandboxPauseControllerFindsHealthRecoveryAfterManagerRestart(t *testing
 func TestSandboxPauseControllerResumesCommittedHealthRecoveryAfterManagerRestart(t *testing.T) {
 	pod := unhealthyRecoveryTestPod(time.Now().Add(-2 * time.Minute))
 	store := crashRecoveryTestStore(pod)
-	store.records["sandbox-1"].DesiredState = SandboxDesiredStatePaused
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store.records["sandbox-1"].DesiredState = sandboxstore.SandboxDesiredStatePaused
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"health-pause": {
 			ID:        "health-pause",
 			SandboxID: "sandbox-1",
-			Kind:      SandboxLifecycleKindPause,
-			Phase:     SandboxLifecyclePhaseCommitted,
-			Source:    SandboxLifecycleSourceHealth,
+			Kind:      sandboxstore.SandboxLifecycleKindPause,
+			Phase:     sandboxstore.SandboxLifecyclePhaseCommitted,
+			Source:    sandboxstore.SandboxLifecycleSourceHealth,
 			Epoch:     4,
 		},
 		"failed-resume": {
 			ID:        "failed-resume",
 			SandboxID: "sandbox-1",
-			Kind:      SandboxLifecycleKindResume,
-			Phase:     SandboxLifecyclePhaseAborted,
+			Kind:      sandboxstore.SandboxLifecycleKindResume,
+			Phase:     sandboxstore.SandboxLifecyclePhaseAborted,
 			Epoch:     5,
 		},
 	}
@@ -692,21 +693,21 @@ func TestSandboxPauseControllerResumesCommittedHealthRecoveryAfterManagerRestart
 func TestSandboxPauseControllerResumesCommittedCrashRecoveryAfterManagerRestart(t *testing.T) {
 	pod := crashRecoveryTestPod(corev1.PodFailed, 137, "OOMKilled")
 	store := crashRecoveryTestStore(pod)
-	store.records["sandbox-1"].DesiredState = SandboxDesiredStatePaused
-	store.lifecycleTxns = map[string]*SandboxLifecycleTxn{
+	store.records["sandbox-1"].DesiredState = sandboxstore.SandboxDesiredStatePaused
+	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"crash-pause": {
 			ID:        "crash-pause",
 			SandboxID: "sandbox-1",
-			Kind:      SandboxLifecycleKindPause,
-			Phase:     SandboxLifecyclePhaseCommitted,
-			Source:    SandboxLifecycleSourceCrash,
+			Kind:      sandboxstore.SandboxLifecycleKindPause,
+			Phase:     sandboxstore.SandboxLifecyclePhaseCommitted,
+			Source:    sandboxstore.SandboxLifecycleSourceCrash,
 			Epoch:     4,
 		},
 		"failed-resume": {
 			ID:        "failed-resume",
 			SandboxID: "sandbox-1",
-			Kind:      SandboxLifecycleKindResume,
-			Phase:     SandboxLifecyclePhaseAborted,
+			Kind:      sandboxstore.SandboxLifecycleKindResume,
+			Phase:     sandboxstore.SandboxLifecyclePhaseAborted,
 			Epoch:     5,
 		},
 	}
@@ -761,12 +762,12 @@ func crashRecoveryTestPod(phase corev1.PodPhase, exitCode int32, reason string) 
 }
 
 func crashRecoveryTestStore(pod *corev1.Pod) *memorySandboxStore {
-	return &memorySandboxStore{records: map[string]*SandboxRecord{
+	return &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-1": {
 			ID:                  "sandbox-1",
 			TeamID:              "team-1",
 			UserID:              "user-1",
-			DesiredState:        SandboxDesiredStateActive,
+			DesiredState:        sandboxstore.SandboxDesiredStateActive,
 			CurrentPodNamespace: pod.Namespace,
 			CurrentPodName:      pod.Name,
 			RuntimeGeneration:   runtimeGenerationFromPod(pod),
@@ -801,7 +802,7 @@ func crashRecoveryPublishResponse() ctldapi.PublishRootFSSnapshotResponse {
 	}
 }
 
-func activeLifecycleTxnForTest(store *memorySandboxStore, sandboxID string) *SandboxLifecycleTxn {
+func activeLifecycleTxnForTest(store *memorySandboxStore, sandboxID string) *sandboxstore.SandboxLifecycleTxn {
 	txn, _ := store.GetActiveLifecycleTxn(context.Background(), sandboxID)
 	return txn
 }

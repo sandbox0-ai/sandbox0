@@ -9,6 +9,8 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/stretchr/testify/assert"
@@ -95,7 +97,7 @@ func TestClaimConfigForPersistence(t *testing.T) {
 
 	t.Run("explicit zero remains disabled", func(t *testing.T) {
 		svc := &SandboxService{config: SandboxServiceConfig{DefaultTTL: 5 * time.Minute}}
-		cfg := svc.claimConfigForPersistence(&SandboxConfig{
+		cfg := svc.claimConfigForPersistence(&sandboxstore.SandboxConfig{
 			TTL:     int32Ptr(0),
 			HardTTL: int32Ptr(0),
 		})
@@ -117,7 +119,7 @@ func TestDisabledExpirationResponsesMarshalNull(t *testing.T) {
 		name  string
 		value any
 	}{
-		{name: "sandbox", value: &Sandbox{}},
+		{name: "sandbox", value: &managerapi.Sandbox{}},
 		{name: "sandbox summary", value: &SandboxSummary{}},
 		{name: "refresh", value: &RefreshResponse{}},
 	}
@@ -173,7 +175,7 @@ func TestUpdateSandboxZeroTTLDisablesExpirations(t *testing.T) {
 	assert.Empty(t, stored.Annotations[controller.AnnotationExpiresAt])
 	assert.Empty(t, stored.Annotations[controller.AnnotationHardExpiresAt])
 
-	var cfg SandboxConfig
+	var cfg sandboxstore.SandboxConfig
 	require.NoError(t, json.Unmarshal([]byte(stored.Annotations[controller.AnnotationConfig]), &cfg))
 	require.NotNil(t, cfg.TTL)
 	require.NotNil(t, cfg.HardTTL)
@@ -187,7 +189,7 @@ func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
 	pod.Annotations[controller.AnnotationConfig] = `{"ttl":300}`
 
 	svc, client := newSandboxServiceForTTLTests(t, pod, 0)
-	svc.sandboxStore = &memorySandboxStore{records: map[string]*SandboxRecord{
+	svc.sandboxStore = &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-1": {
 			ID:                  "sandbox-1",
 			TeamID:              "team-1",
@@ -195,8 +197,8 @@ func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
 			TemplateID:          "default",
 			TemplateName:        "default",
 			TemplateNamespace:   "tpl-default",
-			DesiredState:        SandboxDesiredStatePaused,
-			Config:              SandboxConfig{TTL: int32Ptr(300)},
+			DesiredState:        sandboxstore.SandboxDesiredStatePaused,
+			Config:              sandboxstore.SandboxConfig{TTL: int32Ptr(300)},
 			CurrentPodName:      pod.Name,
 			CurrentPodNamespace: pod.Namespace,
 			RuntimeGeneration:   3,
@@ -208,13 +210,13 @@ func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
 		TTL: int32Ptr(0),
 	})
 	require.NoError(t, err)
-	assert.Equal(t, SandboxStatusPaused, updated.Status)
+	assert.Equal(t, managerapi.SandboxStatusPaused, updated.Status)
 	assert.Nil(t, updated.ExpiresAt)
 
 	record, err := svc.sandboxStore.GetSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)
 	require.NotNil(t, record.Config.TTL)
-	assert.Equal(t, SandboxDesiredStatePaused, record.DesiredState)
+	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, record.DesiredState)
 	assert.Equal(t, int32(0), *record.Config.TTL)
 	assert.True(t, record.ExpiresAt.IsZero())
 
@@ -229,13 +231,13 @@ func TestUpdateSandboxPausedRecordIgnoresStaleRuntimePod(t *testing.T) {
 }
 
 func TestPersistUpdatedSandboxPodDoesNotOverwriteDurableLifecycleState(t *testing.T) {
-	for _, desiredState := range []string{SandboxDesiredStatePaused, SandboxDesiredStateTerminating, SandboxDesiredStateDeleted} {
+	for _, desiredState := range []string{sandboxstore.SandboxDesiredStatePaused, sandboxstore.SandboxDesiredStateTerminating, sandboxstore.SandboxDesiredStateDeleted} {
 		t.Run(desiredState, func(t *testing.T) {
 			pod := testSandboxPod()
 			pod.Annotations[controller.AnnotationConfig] = `{"ttl":0}`
 
 			svc, _ := newSandboxServiceForTTLTests(t, pod, 0)
-			store := &memorySandboxStore{records: map[string]*SandboxRecord{
+			store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 				"sandbox-1": {
 					ID:                  "sandbox-1",
 					TeamID:              "team-1",
@@ -244,7 +246,7 @@ func TestPersistUpdatedSandboxPodDoesNotOverwriteDurableLifecycleState(t *testin
 					TemplateName:        "default",
 					TemplateNamespace:   "tpl-default",
 					DesiredState:        desiredState,
-					Config:              SandboxConfig{TTL: int32Ptr(300)},
+					Config:              sandboxstore.SandboxConfig{TTL: int32Ptr(300)},
 					CurrentPodName:      pod.Name,
 					CurrentPodNamespace: pod.Namespace,
 					RuntimeGeneration:   3,
@@ -272,7 +274,7 @@ func TestPersistUpdatedSandboxPodStoresRuntimeMetadata(t *testing.T) {
 	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-volume-1"
 
 	svc, _ := newSandboxServiceForTTLTests(t, pod, 0)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}}
 	templateNamespace, err := naming.TemplateNamespaceForTeam("team-1")
 	require.NoError(t, err)
 	svc.sandboxStore = store
@@ -297,7 +299,7 @@ func TestRefreshSandboxPersistsExpirationRecord(t *testing.T) {
 	pod.Annotations[controller.AnnotationHardExpiresAt] = "2026-03-07T12:02:00Z"
 
 	svc, _ := newSandboxServiceForTTLTests(t, pod, 0)
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}}
 	templateNamespace, err := naming.TemplateNamespaceForTeam("team-1")
 	require.NoError(t, err)
 	svc.sandboxStore = store
@@ -334,7 +336,7 @@ func TestUpdateSandboxEnvVarsPublishesRuntimeAssignmentAndConfig(t *testing.T) {
 
 	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
-	var cfg SandboxConfig
+	var cfg sandboxstore.SandboxConfig
 	require.NoError(t, json.Unmarshal([]byte(stored.Annotations[controller.AnnotationConfig]), &cfg))
 	assert.Equal(t, map[string]string{"APP_ENV": "test"}, cfg.EnvVars)
 	require.NotNil(t, cfg.TTL)
@@ -364,12 +366,32 @@ func TestUpdateSandboxEnvVarsClearsConfigThroughRuntimeAssignment(t *testing.T) 
 
 	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
-	var cfg SandboxConfig
+	var cfg sandboxstore.SandboxConfig
 	require.NoError(t, json.Unmarshal([]byte(stored.Annotations[controller.AnnotationConfig]), &cfg))
 	assert.Empty(t, cfg.EnvVars)
 	assignment, _, err := runtimecontrol.AssignmentFromPod(stored)
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"}, assignment.EnvVars)
+}
+
+func assertInvalidTTLMutationPreservesDeadlines(t *testing.T, mutate func(*SandboxService, string) error) {
+	t.Helper()
+
+	pod := testSandboxPod()
+	pod.Annotations[controller.AnnotationExpiresAt] = "2026-03-07T12:05:00Z"
+	pod.Annotations[controller.AnnotationHardExpiresAt] = "2026-03-07T12:10:00Z"
+	pod.Annotations[controller.AnnotationConfig] = `{"ttl":300,"hard_ttl":600}`
+
+	svc, client := newSandboxServiceForTTLTests(t, pod, 0)
+	err := mutate(svc, pod.Name)
+	if !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("mutation error = %v, want ErrInvalidClaimRequest", err)
+	}
+
+	stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "2026-03-07T12:05:00Z", stored.Annotations[controller.AnnotationExpiresAt])
+	assert.Equal(t, "2026-03-07T12:10:00Z", stored.Annotations[controller.AnnotationHardExpiresAt])
 }
 
 func TestUpdateSandboxRejectsInvalidTTLState(t *testing.T) {
@@ -385,22 +407,10 @@ func TestUpdateSandboxRejectsInvalidTTLState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pod := testSandboxPod()
-			pod.Annotations[controller.AnnotationExpiresAt] = "2026-03-07T12:05:00Z"
-			pod.Annotations[controller.AnnotationHardExpiresAt] = "2026-03-07T12:10:00Z"
-			pod.Annotations[controller.AnnotationConfig] = `{"ttl":300,"hard_ttl":600}`
-
-			svc, client := newSandboxServiceForTTLTests(t, pod, 0)
-
-			_, err := svc.UpdateSandbox(context.Background(), pod.Name, tt.cfg)
-			if !errors.Is(err, ErrInvalidClaimRequest) {
-				t.Fatalf("UpdateSandbox() error = %v, want ErrInvalidClaimRequest", err)
-			}
-
-			stored, getErr := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-			require.NoError(t, getErr)
-			assert.Equal(t, "2026-03-07T12:05:00Z", stored.Annotations[controller.AnnotationExpiresAt])
-			assert.Equal(t, "2026-03-07T12:10:00Z", stored.Annotations[controller.AnnotationHardExpiresAt])
+			assertInvalidTTLMutationPreservesDeadlines(t, func(svc *SandboxService, sandboxID string) error {
+				_, err := svc.UpdateSandbox(context.Background(), sandboxID, tt.cfg)
+				return err
+			})
 		})
 	}
 }
@@ -433,22 +443,10 @@ func TestRefreshSandboxRejectsInvalidTTLState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pod := testSandboxPod()
-			pod.Annotations[controller.AnnotationExpiresAt] = "2026-03-07T12:05:00Z"
-			pod.Annotations[controller.AnnotationHardExpiresAt] = "2026-03-07T12:10:00Z"
-			pod.Annotations[controller.AnnotationConfig] = `{"ttl":300,"hard_ttl":600}`
-
-			svc, client := newSandboxServiceForTTLTests(t, pod, 0)
-
-			_, err := svc.RefreshSandbox(context.Background(), pod.Name, tt.req)
-			if !errors.Is(err, ErrInvalidClaimRequest) {
-				t.Fatalf("RefreshSandbox() error = %v, want ErrInvalidClaimRequest", err)
-			}
-
-			stored, getErr := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-			require.NoError(t, getErr)
-			assert.Equal(t, "2026-03-07T12:05:00Z", stored.Annotations[controller.AnnotationExpiresAt])
-			assert.Equal(t, "2026-03-07T12:10:00Z", stored.Annotations[controller.AnnotationHardExpiresAt])
+			assertInvalidTTLMutationPreservesDeadlines(t, func(svc *SandboxService, sandboxID string) error {
+				_, err := svc.RefreshSandbox(context.Background(), sandboxID, tt.req)
+				return err
+			})
 		})
 	}
 }

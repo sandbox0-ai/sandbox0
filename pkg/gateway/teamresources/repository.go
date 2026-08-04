@@ -36,26 +36,12 @@ type Repository struct {
 	schemas SchemaConfig
 }
 
-// Option configures a Repository.
-type Option func(*Repository)
-
-// WithSchemaConfig overrides module schema names.
-func WithSchemaConfig(schemas SchemaConfig) Option {
-	return func(r *Repository) {
-		r.schemas = schemas
-	}
-}
-
 // NewRepository creates a team resource inventory repository.
-func NewRepository(pool *pgxpool.Pool, opts ...Option) *Repository {
-	r := &Repository{
+func NewRepository(pool *pgxpool.Pool) *Repository {
+	return &Repository{
 		pool:    pool,
 		schemas: DefaultSchemaConfig(),
 	}
-	for _, opt := range opts {
-		opt(r)
-	}
-	return r
 }
 
 // GetTeamResourceInventory returns resource counts that should block or survive team deletion.

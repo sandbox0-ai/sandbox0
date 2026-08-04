@@ -7,19 +7,11 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/labels"
 )
-
-// ListSandboxesRequest represents a request to list sandboxes
-type ListSandboxesRequest struct {
-	TeamID     string
-	Status     string
-	TemplateID string
-	Paused     *bool
-	Limit      int
-	Offset     int
-}
 
 // ListSandboxesResponse represents the response from listing sandboxes
 type ListSandboxesResponse struct {
@@ -42,7 +34,7 @@ type SandboxSummary struct {
 }
 
 // ListSandboxes lists all sandboxes for a team with optional filters
-func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRequest) (*ListSandboxesResponse, error) {
+func (s *SandboxService) ListSandboxes(ctx context.Context, req *sandboxstore.ListSandboxesRequest) (*ListSandboxesResponse, error) {
 	s.logger.Info("Listing sandboxes",
 		zap.String("teamID", req.TeamID),
 		zap.String("status", req.Status),
@@ -94,7 +86,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 		}
 
 		// Filter by paused state if specified.
-		paused := status == SandboxStatusPaused
+		paused := status == managerapi.SandboxStatusPaused
 		if req.Paused != nil && paused != *req.Paused {
 			continue
 		}
@@ -104,7 +96,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 		hardExpiresAt := parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt)
 
 		summaries = append(summaries, &SandboxSummary{
-			ID:                sandboxIDFromPod(pod),
+			ID:                sandboxPodID(pod),
 			TemplateID:        templateID,
 			Status:            status,
 			Paused:            paused,
@@ -152,7 +144,7 @@ func (s *SandboxService) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 	}, nil
 }
 
-func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSandboxesRequest) (*ListSandboxesResponse, error) {
+func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *sandboxstore.ListSandboxesRequest) (*ListSandboxesResponse, error) {
 	records, err := s.sandboxStore.ListSandboxes(ctx, req)
 	if err != nil {
 		return nil, err
@@ -163,7 +155,7 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *ListSa
 			continue
 		}
 		sandbox := s.recordToSandbox(record)
-		if record.DesiredState == SandboxDesiredStateActive {
+		if record.DesiredState == sandboxstore.SandboxDesiredStateActive {
 			// SandboxSummary does not expose runtime connectivity, so lifecycle
 			// transactions are irrelevant to list projection. Avoid one database
 			// lookup per active sandbox.

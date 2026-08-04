@@ -9,12 +9,24 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/allocator"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// Metrics records scheduler-owned observations emitted by the shared template
+// reconciler. The concrete Prometheus implementation belongs to scheduler.
+type Metrics interface {
+	allocator.Metrics
+	ObserveReconcileDuration(time.Duration)
+	ObserveReconcileResult(status string)
+	ObserveLastReconcileTimestamp()
+	ObserveClusterCapacity(clusterID, metric string, value float64)
+	ObserveClusterSummaryAge(clusterID string, ageSeconds float64)
+	ObserveTemplateSyncStatus(clusterID, templateID, tenant string, status float64)
+	ObserveOrphanRemoved(clusterID string)
+}
 
 // MultiClusterReconciler handles the reconciliation of templates across clusters.
 type MultiClusterReconciler struct {
@@ -36,7 +48,7 @@ type MultiClusterReconciler struct {
 	lastReconcileAt  time.Time
 	lastReconcileErr error
 	statusMu         sync.RWMutex
-	metrics          *obsmetrics.SchedulerMetrics
+	metrics          Metrics
 }
 
 // NewMultiClusterReconciler creates a new MultiClusterReconciler.
@@ -49,7 +61,7 @@ func NewMultiClusterReconciler(
 	clk *clock.Clock,
 	podsPerNode int,
 	logger *zap.Logger,
-	metrics *obsmetrics.SchedulerMetrics,
+	metrics Metrics,
 ) *MultiClusterReconciler {
 	if podsPerNode <= 0 {
 		podsPerNode = 10
@@ -220,7 +232,7 @@ func (r *MultiClusterReconciler) reconcile(ctx context.Context) {
 	defer func() {
 		duration := r.since(start)
 		if metrics != nil {
-			metrics.ReconcileDuration.Observe(duration.Seconds())
+			metrics.ObserveReconcileDuration(duration)
 		}
 
 		r.statusMu.Lock()
@@ -233,7 +245,7 @@ func (r *MultiClusterReconciler) reconcile(ctx context.Context) {
 	if err != nil {
 		r.logger.Error("Failed to list enabled clusters", zap.Error(err))
 		if metrics != nil {
-			metrics.ReconcileTotal.WithLabelValues("error").Inc()
+			metrics.ObserveReconcileResult("error")
 		}
 		r.statusMu.Lock()
 		r.lastReconcileErr = err
@@ -244,7 +256,7 @@ func (r *MultiClusterReconciler) reconcile(ctx context.Context) {
 	if len(clusters) == 0 {
 		r.logger.Debug("No enabled clusters found")
 		if metrics != nil {
-			metrics.ReconcileTotal.WithLabelValues("success").Inc()
+			metrics.ObserveReconcileResult("success")
 		}
 		return
 	}
@@ -322,8 +334,8 @@ func (r *MultiClusterReconciler) reconcile(ctx context.Context) {
 	}
 
 	if metrics != nil {
-		metrics.ReconcileTotal.WithLabelValues("success").Inc()
-		metrics.LastReconcileTimestamp.SetToCurrentTime()
+		metrics.ObserveReconcileResult("success")
+		metrics.ObserveLastReconcileTimestamp()
 	}
 
 	r.statusMu.Lock()
@@ -393,15 +405,15 @@ func (r *MultiClusterReconciler) fetchClusterSummaries(ctx context.Context, clus
 					headroom = 0
 				}
 
-				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "nodes").Set(float64(summary.NodeCount))
-				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "total_nodes").Set(float64(summary.TotalNodeCount))
-				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "sandbox_nodes").Set(float64(summary.SandboxNodeCount))
-				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "idle_pods").Set(float64(summary.IdlePodCount))
-				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "active_pods").Set(float64(summary.ActivePodCount))
-				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "pending_active_pods").Set(float64(summary.PendingActivePodCount))
-				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "total_pods").Set(float64(summary.TotalPodCount))
-				metrics.ClusterCapacity.WithLabelValues(c.ClusterID, "available_headroom").Set(float64(headroom))
-				metrics.ClusterSummaryAge.WithLabelValues(c.ClusterID).Set(0)
+				metrics.ObserveClusterCapacity(c.ClusterID, "nodes", float64(summary.NodeCount))
+				metrics.ObserveClusterCapacity(c.ClusterID, "total_nodes", float64(summary.TotalNodeCount))
+				metrics.ObserveClusterCapacity(c.ClusterID, "sandbox_nodes", float64(summary.SandboxNodeCount))
+				metrics.ObserveClusterCapacity(c.ClusterID, "idle_pods", float64(summary.IdlePodCount))
+				metrics.ObserveClusterCapacity(c.ClusterID, "active_pods", float64(summary.ActivePodCount))
+				metrics.ObserveClusterCapacity(c.ClusterID, "pending_active_pods", float64(summary.PendingActivePodCount))
+				metrics.ObserveClusterCapacity(c.ClusterID, "total_pods", float64(summary.TotalPodCount))
+				metrics.ObserveClusterCapacity(c.ClusterID, "available_headroom", float64(headroom))
+				metrics.ObserveClusterSummaryAge(c.ClusterID, 0)
 			}
 
 			if err := r.clusterStore.UpdateClusterLastSeen(ctx, c.ClusterID); err != nil {
@@ -488,7 +500,7 @@ func (r *MultiClusterReconciler) reconcileTemplate(ctx context.Context, tpl *tem
 		}
 
 		if metrics != nil {
-			metrics.TemplateSyncStatus.WithLabelValues(alloc.ClusterID, tpl.TemplateID, tenantLabel).Set(1.0)
+			metrics.ObserveTemplateSyncStatus(alloc.ClusterID, tpl.TemplateID, tenantLabel, 1.0)
 		}
 	}
 
@@ -577,7 +589,7 @@ func (r *MultiClusterReconciler) cleanupOrphanTemplates(ctx context.Context, clu
 			}
 			orphansRemoved++
 			if metrics != nil {
-				metrics.OrphansRemoved.WithLabelValues(cluster.ClusterID).Inc()
+				metrics.ObserveOrphanRemoved(cluster.ClusterID)
 			}
 		}
 	}

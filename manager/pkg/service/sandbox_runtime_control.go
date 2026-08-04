@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,7 +35,7 @@ func (s *SandboxService) publishRuntimeAssignment(
 		if current.Annotations == nil {
 			current.Annotations = make(map[string]string)
 		}
-		appDomain := SandboxAppDomain(s.config.PublicRegionID, s.config.PublicRootDomain)
+		appDomain := appservice.SandboxAppDomain(s.config.PublicRegionID, s.config.PublicRootDomain)
 		if appDomain == "" {
 			delete(current.Annotations, runtimecontrol.AnnotationAppDomain)
 		} else {

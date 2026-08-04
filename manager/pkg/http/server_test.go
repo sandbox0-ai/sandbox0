@@ -218,7 +218,11 @@ func TestRequireNetworkPolicyInBody(t *testing.T) {
 func newTestServerForCapability(t *testing.T, provider network.Provider) *Server {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	sandboxService := service.NewSandboxService(nil, nil, nil, nil, nil, nil, nil, provider, nil, nil, service.SandboxServiceConfig{}, zap.NewNop(), nil)
+	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
+		NetworkProvider: provider,
+		Config:          service.SandboxServiceConfig{},
+		Logger:          zap.NewNop(),
+	})
 	return &Server{sandboxService: sandboxService}
 }
 

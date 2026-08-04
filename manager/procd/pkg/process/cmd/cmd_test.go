@@ -102,11 +102,6 @@ func TestNewCMD(t *testing.T) {
 				t.Errorf("State() = %s, want %s", cmd.State(), process.ProcessStateCreated)
 			}
 
-			// GetCommand should return the expected string
-			wantCmd := strings.Join(tt.command, " ")
-			if gotCmd := cmd.GetCommand(); gotCmd != wantCmd {
-				t.Errorf("GetCommand() = %s, want %s", gotCmd, wantCmd)
-			}
 		})
 	}
 }

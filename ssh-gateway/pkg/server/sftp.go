@@ -284,7 +284,7 @@ func (w *pendingFileWriter) snapshotStat() procdStatResponse {
 type pendingWriteState struct {
 	Path    string
 	Name    string
-	Type    string
+	Type    procdfile.FileType
 	Mode    string
 	ModTime time.Time
 	Size    int64
@@ -294,7 +294,7 @@ func newPendingWriteState(filePath string, stat *procdStatResponse) pendingWrite
 	state := pendingWriteState{
 		Path:    filePath,
 		Name:    path.Base(strings.TrimSuffix(filePath, "/")),
-		Type:    string(procdfile.FileTypeFile),
+		Type:    procdfile.FileTypeFile,
 		Mode:    "0644",
 		ModTime: time.Now(),
 	}

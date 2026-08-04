@@ -270,47 +270,9 @@ func (h *APIKeyHandler) CreateAPIKey(c *gin.Context) {
 
 // DeleteAPIKey deletes an API key
 func (h *APIKeyHandler) DeleteAPIKey(c *gin.Context) {
-	authCtx := middleware.GetAuthContext(c)
-	if authCtx == nil || authCtx.UserID == "" {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+	keyID, ok := h.requireMutableAPIKey(c, "delete")
+	if !ok {
 		return
-	}
-	if !canManageTeamAPIKeys(authCtx) {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "API key management requires team admin access")
-		return
-	}
-
-	keyID := c.Param("id")
-	if !isValidUUID(keyID) {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid API key id")
-		return
-	}
-
-	// Get the key to verify ownership
-	key, err := h.keys.GetAPIKeyByID(c.Request.Context(), keyID)
-	if err != nil {
-		if errors.Is(err, apikey.ErrNotFound) {
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "API key not found")
-			return
-		}
-		h.logger.Error("Failed to get API key", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get API key")
-		return
-	}
-
-	if key.Scope == apikey.ScopePlatform && !canManagePlatformAPIKeys(authCtx) {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to delete this API key")
-		return
-	}
-
-	// Verify the key belongs to the user's team
-	if key.TeamID != authCtx.TeamID {
-		// Check if user is member of the key's team
-		_, err := h.identity.GetTeamMember(c.Request.Context(), key.TeamID, authCtx.UserID)
-		if err != nil {
-			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to delete this API key")
-			return
-		}
 	}
 
 	if err := h.keys.DeleteAPIKey(c.Request.Context(), keyID); err != nil {
@@ -324,46 +286,9 @@ func (h *APIKeyHandler) DeleteAPIKey(c *gin.Context) {
 
 // DeactivateAPIKey deactivates an API key without deleting it
 func (h *APIKeyHandler) DeactivateAPIKey(c *gin.Context) {
-	authCtx := middleware.GetAuthContext(c)
-	if authCtx == nil || authCtx.UserID == "" {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+	keyID, ok := h.requireMutableAPIKey(c, "deactivate")
+	if !ok {
 		return
-	}
-	if !canManageTeamAPIKeys(authCtx) {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "API key management requires team admin access")
-		return
-	}
-
-	keyID := c.Param("id")
-	if !isValidUUID(keyID) {
-		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid API key id")
-		return
-	}
-
-	// Get the key to verify ownership
-	key, err := h.keys.GetAPIKeyByID(c.Request.Context(), keyID)
-	if err != nil {
-		if errors.Is(err, apikey.ErrNotFound) {
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "API key not found")
-			return
-		}
-		h.logger.Error("Failed to get API key", zap.Error(err))
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get API key")
-		return
-	}
-
-	if key.Scope == apikey.ScopePlatform && !canManagePlatformAPIKeys(authCtx) {
-		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to deactivate this API key")
-		return
-	}
-
-	// Verify the key belongs to the user's team
-	if key.TeamID != authCtx.TeamID {
-		_, err := h.identity.GetTeamMember(c.Request.Context(), key.TeamID, authCtx.UserID)
-		if err != nil {
-			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to deactivate this API key")
-			return
-		}
 	}
 
 	if err := h.keys.DeactivateAPIKey(c.Request.Context(), keyID); err != nil {
@@ -373,6 +298,50 @@ func (h *APIKeyHandler) DeactivateAPIKey(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusOK, gin.H{"message": "API key deactivated"})
+}
+
+// requireMutableAPIKey validates caller authorization and target ownership for
+// API key mutation endpoints.
+func (h *APIKeyHandler) requireMutableAPIKey(c *gin.Context, action string) (string, bool) {
+	authCtx := middleware.GetAuthContext(c)
+	if authCtx == nil || authCtx.UserID == "" {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "not authenticated")
+		return "", false
+	}
+	if !canManageTeamAPIKeys(authCtx) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "API key management requires team admin access")
+		return "", false
+	}
+
+	keyID := c.Param("id")
+	if !isValidUUID(keyID) {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "invalid API key id")
+		return "", false
+	}
+
+	key, err := h.keys.GetAPIKeyByID(c.Request.Context(), keyID)
+	if err != nil {
+		if errors.Is(err, apikey.ErrNotFound) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "API key not found")
+			return "", false
+		}
+		h.logger.Error("Failed to get API key", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to get API key")
+		return "", false
+	}
+
+	if key.Scope == apikey.ScopePlatform && !canManagePlatformAPIKeys(authCtx) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to "+action+" this API key")
+		return "", false
+	}
+
+	if key.TeamID != authCtx.TeamID {
+		if _, err := h.identity.GetTeamMember(c.Request.Context(), key.TeamID, authCtx.UserID); err != nil {
+			spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "not authorized to "+action+" this API key")
+			return "", false
+		}
+	}
+	return keyID, true
 }
 
 func normalizeCreateAPIKeyScope(scope string) (string, error) {

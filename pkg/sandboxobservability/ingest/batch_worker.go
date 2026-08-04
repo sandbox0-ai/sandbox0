@@ -7,15 +7,12 @@ import (
 	"time"
 )
 
-type BatchStats struct {
-	InsertedItems uint64
-	DroppedItems  uint64
-	FailedBatches uint64
-}
-
 const shutdownFlushTimeout = 5 * time.Second
 
-type batchWorker[T any] struct {
+// BatchWorker batches one service-owned record type for asynchronous ingest.
+// It deliberately accepts a callback instead of a domain writer so this shared
+// package does not couple itself to a particular producer or record model.
+type BatchWorker[T any] struct {
 	insertBatch   func(context.Context, []T) error
 	cfg           Config
 	queue         chan T
@@ -24,7 +21,8 @@ type batchWorker[T any] struct {
 	failedBatches atomic.Uint64
 }
 
-func newBatchWorker[T any](insertBatch func(context.Context, []T) error, cfg Config) (*batchWorker[T], error) {
+// NewBatchWorker creates a bounded, retrying batch worker for values of T.
+func NewBatchWorker[T any](insertBatch func(context.Context, []T) error, cfg Config) (*BatchWorker[T], error) {
 	if insertBatch == nil {
 		return nil, fmt.Errorf("insert batch function is nil")
 	}
@@ -32,23 +30,14 @@ func newBatchWorker[T any](insertBatch func(context.Context, []T) error, cfg Con
 	if err != nil {
 		return nil, err
 	}
-	return &batchWorker[T]{
+	return &BatchWorker[T]{
 		insertBatch: insertBatch,
 		cfg:         normalized,
 		queue:       make(chan T, normalized.QueueSize),
 	}, nil
 }
 
-func (w *batchWorker[T]) Enqueue(ctx context.Context, item T) error {
-	select {
-	case w.queue <- item:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (w *batchWorker[T]) TryEnqueue(item T) bool {
+func (w *BatchWorker[T]) TryEnqueue(item T) bool {
 	select {
 	case w.queue <- item:
 		return true
@@ -58,7 +47,7 @@ func (w *batchWorker[T]) TryEnqueue(item T) bool {
 	}
 }
 
-func (w *batchWorker[T]) Run(ctx context.Context) {
+func (w *BatchWorker[T]) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.cfg.FlushInterval)
 	defer ticker.Stop()
 
@@ -99,15 +88,7 @@ func (w *batchWorker[T]) Run(ctx context.Context) {
 	}
 }
 
-func (w *batchWorker[T]) Stats() BatchStats {
-	return BatchStats{
-		InsertedItems: w.insertedCount.Load(),
-		DroppedItems:  w.droppedCount.Load(),
-		FailedBatches: w.failedBatches.Load(),
-	}
-}
-
-func (w *batchWorker[T]) flushBatch(ctx context.Context, batch []T) {
+func (w *BatchWorker[T]) flushBatch(ctx context.Context, batch []T) {
 	for attempt := 0; attempt <= w.cfg.MaxRetries; attempt++ {
 		err := w.insertBatch(ctx, batch)
 		if err == nil {

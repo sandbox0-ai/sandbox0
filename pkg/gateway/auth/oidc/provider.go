@@ -585,19 +585,3 @@ func (p *Provider) ValidateEmailDomain(email string) error {
 func (p *Provider) ShouldAutoProvision() bool {
 	return p.config.AutoProvision
 }
-
-// GetDefaultRole returns the default role for new users
-func (p *Provider) GetDefaultRole() string {
-	if p.config.TeamMapping != nil && p.config.TeamMapping.DefaultRole != "" {
-		return p.config.TeamMapping.DefaultRole
-	}
-	return "viewer"
-}
-
-// GetDefaultTeamID returns the default team ID for new users
-func (p *Provider) GetDefaultTeamID() string {
-	if p.config.TeamMapping != nil {
-		return p.config.TeamMapping.DefaultTeamID
-	}
-	return ""
-}

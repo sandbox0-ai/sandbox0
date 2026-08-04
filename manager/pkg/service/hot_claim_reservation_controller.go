@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
@@ -38,7 +39,7 @@ const (
 type HotClaimReservationController struct {
 	k8sClient      kubernetes.Interface
 	podLister      corelisters.PodLister
-	sandboxStore   SandboxStore
+	sandboxStore   sandboxstore.SandboxStore
 	clock          TimeProvider
 	logger         *zap.Logger
 	queue          workqueue.TypedRateLimitingInterface[string]
@@ -57,7 +58,7 @@ type hotClaimDetachmentPacer interface {
 func NewHotClaimReservationController(
 	k8sClient kubernetes.Interface,
 	podLister corelisters.PodLister,
-	sandboxStore SandboxStore,
+	sandboxStore sandboxstore.SandboxStore,
 	logger *zap.Logger,
 ) *HotClaimReservationController {
 	if logger == nil {
@@ -132,7 +133,7 @@ func (c *HotClaimReservationController) Run(ctx context.Context, _ int) error {
 }
 
 func (c *HotClaimReservationController) handlePod(obj any) {
-	pod := extractPod(obj)
+	pod := sandboxPodFromInformerEvent(obj)
 	if pod == nil || !controller.IsHotClaimReservedPod(pod) {
 		return
 	}
@@ -199,7 +200,7 @@ func (c *HotClaimReservationController) reconcile(ctx context.Context, key strin
 		return 0, nil
 	}
 
-	record, err := c.getSandboxRecord(ctx, sandboxIDFromPod(pod))
+	record, err := c.getSandboxRecord(ctx, sandboxPodID(pod))
 	if err != nil {
 		return 0, err
 	}
@@ -224,12 +225,12 @@ func (c *HotClaimReservationController) reconcile(ctx context.Context, key strin
 func (c *HotClaimReservationController) getSandboxRecord(
 	ctx context.Context,
 	sandboxID string,
-) (*SandboxRecord, error) {
+) (*sandboxstore.SandboxRecord, error) {
 	if c.sandboxStore == nil || strings.TrimSpace(sandboxID) == "" {
 		return nil, nil
 	}
 	record, err := c.sandboxStore.GetSandbox(ctx, sandboxID)
-	if errors.Is(err, ErrSandboxRecordNotFound) {
+	if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 		return nil, nil
 	}
 	return record, err
@@ -255,7 +256,7 @@ func (c *HotClaimReservationController) recoveryTimeRemaining(pod *corev1.Pod) t
 	return remaining
 }
 
-func (c *HotClaimReservationController) detachmentTimeRemaining(pod *corev1.Pod, record *SandboxRecord) time.Duration {
+func (c *HotClaimReservationController) detachmentTimeRemaining(pod *corev1.Pod, record *sandboxstore.SandboxRecord) time.Duration {
 	readyAt, ok := hotClaimReservationReadyTime(pod, record)
 	if !ok || c.settleWindow <= 0 || c.detachmentMaxDelayElapsedAt(readyAt) {
 		return 0
@@ -274,7 +275,7 @@ func (c *HotClaimReservationController) detachmentTimeRemaining(pod *corev1.Pod,
 	return remaining
 }
 
-func (c *HotClaimReservationController) detachmentMaxDelayElapsed(pod *corev1.Pod, record *SandboxRecord) bool {
+func (c *HotClaimReservationController) detachmentMaxDelayElapsed(pod *corev1.Pod, record *sandboxstore.SandboxRecord) bool {
 	readyAt, ok := hotClaimReservationReadyTime(pod, record)
 	return !ok || c.detachmentMaxDelayElapsedAt(readyAt)
 }
@@ -321,7 +322,7 @@ func (c *HotClaimReservationController) claimableIdleBelowLowWatermark(pod *core
 	return true
 }
 
-func hotClaimReservationReadyTime(pod *corev1.Pod, record *SandboxRecord) (time.Time, bool) {
+func hotClaimReservationReadyTime(pod *corev1.Pod, record *sandboxstore.SandboxRecord) (time.Time, bool) {
 	if pod == nil {
 		return time.Time{}, false
 	}
@@ -396,7 +397,7 @@ func (c *HotClaimReservationController) finalizeReservation(ctx context.Context,
 	if err == nil {
 		c.logger.Info("Detached completed hot claim from warm pool",
 			zap.String("pod", pod.Namespace+"/"+pod.Name),
-			zap.String("sandboxID", sandboxIDFromPod(pod)),
+			zap.String("sandboxID", sandboxPodID(pod)),
 		)
 	}
 	return err
@@ -433,7 +434,7 @@ func hotClaimReservationPreconditions(pod *corev1.Pod) []claimMetadataPatchOpera
 func (c *HotClaimReservationController) deleteAbandonedReservation(
 	ctx context.Context,
 	pod *corev1.Pod,
-	record *SandboxRecord,
+	record *sandboxstore.SandboxRecord,
 ) error {
 	if hotClaimReservationMatchesRecord(pod, record) && c.sandboxStore != nil {
 		if err := c.sandboxStore.MarkSandboxDeleted(ctx, record.ID, c.clock.Now().UTC()); err != nil {
@@ -453,19 +454,19 @@ func (c *HotClaimReservationController) deleteAbandonedReservation(
 	}
 	c.logger.Warn("Deleted abandoned hot claim reservation",
 		zap.String("pod", pod.Namespace+"/"+pod.Name),
-		zap.String("sandboxID", sandboxIDFromPod(pod)),
+		zap.String("sandboxID", sandboxPodID(pod)),
 	)
 	return nil
 }
 
-func hotClaimReservationMatchesRecord(pod *corev1.Pod, record *SandboxRecord) bool {
+func hotClaimReservationMatchesRecord(pod *corev1.Pod, record *sandboxstore.SandboxRecord) bool {
 	if pod == nil || record == nil || !record.DeletedAt.IsZero() {
 		return false
 	}
-	if record.DesiredState != SandboxDesiredStateActive {
+	if record.DesiredState != sandboxstore.SandboxDesiredStateActive {
 		return false
 	}
-	if record.ID != sandboxIDFromPod(pod) ||
+	if record.ID != sandboxPodID(pod) ||
 		record.CurrentPodNamespace != pod.Namespace ||
 		record.CurrentPodName != pod.Name {
 		return false
@@ -474,7 +475,7 @@ func hotClaimReservationMatchesRecord(pod *corev1.Pod, record *SandboxRecord) bo
 	return podGeneration <= 0 || record.RuntimeGeneration <= 0 || record.RuntimeGeneration == podGeneration
 }
 
-func hotClaimReservationCompleted(pod *corev1.Pod, record *SandboxRecord) bool {
+func hotClaimReservationCompleted(pod *corev1.Pod, record *sandboxstore.SandboxRecord) bool {
 	if !hotClaimReservationMatchesRecord(pod, record) {
 		return false
 	}

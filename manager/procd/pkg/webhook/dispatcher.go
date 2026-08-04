@@ -153,13 +153,6 @@ func (d *Dispatcher) SetIdentity(sandboxID, teamID string) {
 	d.teamID = teamID
 }
 
-// Identity returns the current identity context.
-func (d *Dispatcher) Identity() (string, string) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.sandbox, d.teamID
-}
-
 // Enqueue sends an event to the dispatcher queue and returns its event ID.
 func (d *Dispatcher) Enqueue(event Event) (string, error) {
 	if event.EventID == "" {

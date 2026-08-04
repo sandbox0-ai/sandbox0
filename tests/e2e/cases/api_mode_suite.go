@@ -12,13 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	mgrv1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
+	e2eframework "github.com/sandbox0-ai/sandbox0/tests/e2e/internal/framework"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -75,8 +76,22 @@ type e2ePodSpec struct {
 }
 
 type e2ePodStatus struct {
-	Phase      string            `json:"phase"`
-	Conditions []e2ePodCondition `json:"conditions"`
+	Phase             string               `json:"phase"`
+	Conditions        []e2ePodCondition    `json:"conditions"`
+	ContainerStatuses []e2eContainerStatus `json:"containerStatuses"`
+}
+
+type e2eContainerStatus struct {
+	Name  string            `json:"name"`
+	State e2eContainerState `json:"state"`
+}
+
+type e2eContainerState struct {
+	Terminated *e2eContainerStateTerminated `json:"terminated"`
+}
+
+type e2eContainerStateTerminated struct {
+	ExitCode int32 `json:"exitCode"`
 }
 
 type e2ePodCondition struct {
@@ -116,7 +131,7 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				}
 			})
 
-			password, err := framework.GetSecretValue(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "admin-password", "password")
+			password, err := e2eframework.GetSecretValue(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "admin-password", "password")
 			Expect(err).NotTo(HaveOccurred())
 			adminPassword = password
 
@@ -625,7 +640,7 @@ func assertSandboxWebhookDurabilityLifecycle(env *framework.ScenarioEnv, session
 	sandboxNamespace, err := naming.TemplateNamespaceForBuiltin(template)
 	Expect(err).NotTo(HaveOccurred())
 
-	volumeID, err := framework.KubectlGetJSONPath(
+	volumeID, err := e2eframework.KubectlGetJSONPath(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
 		sandboxNamespace,
@@ -767,7 +782,7 @@ func readWebhookReceiverEvents(env *framework.ScenarioEnv, name string) string {
 }
 
 func readWebhookReceiverFile(env *framework.ScenarioEnv, name, filename string) string {
-	podName, err := framework.KubectlGetJSONPath(
+	podName, err := e2eframework.KubectlGetJSONPath(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
 		env.Infra.Namespace,
@@ -776,7 +791,7 @@ func readWebhookReceiverFile(env *framework.ScenarioEnv, name, filename string) 
 		"{.items[0].metadata.name}",
 	)
 	Expect(err).NotTo(HaveOccurred())
-	output, err := framework.KubectlExecOutput(
+	output, err := e2eframework.KubectlExecOutput(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
 		env.Infra.Namespace,
@@ -1300,13 +1315,13 @@ spec:
 	Expect(framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "pod", "baseline-cluster-gateway", "Ready", "3m")).To(Succeed())
 	Expect(framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "pod", "baseline-manager", "Ready", "3m")).To(Succeed())
 
-	serverIP, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, testNamespace, "pod", "baseline-server", "{.status.podIP}")
+	serverIP, err := e2eframework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, testNamespace, "pod", "baseline-server", "{.status.podIP}")
 	Expect(err).NotTo(HaveOccurred())
 	serverIP = strings.TrimSpace(serverIP)
 	Expect(serverIP).NotTo(BeEmpty())
 
 	Eventually(func() error {
-		body, execErr := framework.KubectlExecOutput(
+		body, execErr := e2eframework.KubectlExecOutput(
 			env.TestCtx.Context,
 			env.Config.Kubeconfig,
 			env.Infra.Namespace,
@@ -1323,7 +1338,7 @@ spec:
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 
 	Eventually(func() error {
-		body, execErr := framework.KubectlExecOutput(
+		body, execErr := e2eframework.KubectlExecOutput(
 			env.TestCtx.Context,
 			env.Config.Kubeconfig,
 			env.Infra.Namespace,
@@ -1340,7 +1355,7 @@ spec:
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 
 	Eventually(func() error {
-		_, execErr := framework.KubectlExecOutput(
+		_, execErr := e2eframework.KubectlExecOutput(
 			env.TestCtx.Context,
 			env.Config.Kubeconfig,
 			testNamespace,
@@ -1354,7 +1369,7 @@ spec:
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 
 	Eventually(func() error {
-		_, execErr := framework.KubectlExecOutput(
+		_, execErr := e2eframework.KubectlExecOutput(
 			env.TestCtx.Context,
 			env.Config.Kubeconfig,
 			env.Infra.Namespace,
@@ -2176,9 +2191,9 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 	sandboxA := waitForSandboxPodReadyEventually(env, session, sandboxAID, templateANamespace)
 	sandboxB := waitForSandboxPodReadyEventually(env, session, sandboxBID, templateBNamespace)
 
-	nodeA, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateANamespace, "pod", sandboxA.PodName, "{.spec.nodeName}")
+	nodeA, err := e2eframework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateANamespace, "pod", sandboxA.PodName, "{.spec.nodeName}")
 	Expect(err).NotTo(HaveOccurred())
-	nodeB, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateBNamespace, "pod", sandboxB.PodName, "{.spec.nodeName}")
+	nodeB, err := e2eframework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateBNamespace, "pod", sandboxB.PodName, "{.spec.nodeName}")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(nodeA).To(Equal(workerNodes[0]))
 	Expect(nodeB).To(Equal(workerNodes[1]))
@@ -2199,7 +2214,7 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 		return nil
 	}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 
-	podIPB, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateBNamespace, "pod", sandboxB.PodName, "{.status.podIP}")
+	podIPB, err := e2eframework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, templateBNamespace, "pod", sandboxB.PodName, "{.status.podIP}")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(strings.TrimSpace(podIPB)).NotTo(BeEmpty())
 
@@ -2211,9 +2226,9 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 		return nil
 	}).WithTimeout(45 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 
-	clusterGatewayPort, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, env.Infra.Name+"-cluster-gateway")
+	clusterGatewayPort, err := e2eframework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, env.Infra.Name+"-cluster-gateway")
 	Expect(err).NotTo(HaveOccurred())
-	clusterGatewayIP, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "service", env.Infra.Name+"-cluster-gateway", "{.spec.clusterIP}")
+	clusterGatewayIP, err := e2eframework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, "service", env.Infra.Name+"-cluster-gateway", "{.spec.clusterIP}")
 	Expect(err).NotTo(HaveOccurred())
 	clusterGatewayIP = strings.TrimSpace(clusterGatewayIP)
 	Expect(clusterGatewayIP).NotTo(BeEmpty())
@@ -2263,28 +2278,14 @@ func assertSandboxNetworkIsolation(env *framework.ScenarioEnv, session *e2eutils
 }
 
 func assertNetworkEgressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
-	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusOK))
-	Expect(sandbox).NotTo(BeNil())
-	templateNamespace, err := naming.TemplateNamespaceForBuiltin(sandbox.TemplateId)
-	Expect(err).NotTo(HaveOccurred())
-	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
-
-	_, status, err = session.PutTeamRateQuota(env.TestCtx.Context, env, quota.DimensionNetworkEgress, 0, 1000, 0)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(status).To(Equal(http.StatusOK))
-	DeferCleanup(func() {
-		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionNetworkEgress)
-	})
-
-	Eventually(func() bool {
-		_, execErr := execInSandboxPod(env, templateNamespace, sandbox.PodName, "curl -fsS --max-time 5 http://example.com/")
-		return execErr != nil
-	}).WithTimeout(15 * time.Second).WithPolling(500 * time.Millisecond).Should(BeTrue())
+	assertNetworkQuota(env, session, sandboxID, quota.DimensionNetworkEgress)
 }
 
 func assertNetworkIngressQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string) {
+	assertNetworkQuota(env, session, sandboxID, quota.DimensionNetworkIngress)
+}
+
+func assertNetworkQuota(env *framework.ScenarioEnv, session *e2eutils.Session, sandboxID string, dimension quota.Dimension) {
 	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
@@ -2293,11 +2294,11 @@ func assertNetworkIngressQuota(env *framework.ScenarioEnv, session *e2eutils.Ses
 	Expect(err).NotTo(HaveOccurred())
 	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 
-	_, status, err = session.PutTeamRateQuota(env.TestCtx.Context, env, quota.DimensionNetworkIngress, 0, 1000, 0)
+	_, status, err = session.PutTeamRateQuota(env.TestCtx.Context, env, dimension, 0, 1000, 0)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(status).To(Equal(http.StatusOK))
 	DeferCleanup(func() {
-		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, quota.DimensionNetworkIngress)
+		_, _ = session.DeleteTeamQuota(env.TestCtx.Context, env, dimension)
 	})
 
 	Eventually(func() bool {
@@ -2979,7 +2980,7 @@ func assertManagerStorageService(env *framework.ScenarioEnv) {
 
 func assertNoPlaintextInStorage(env *framework.ScenarioEnv, target, root, sentinel string) {
 	command := fmt.Sprintf("grep -R -a -n -- %s %s || true", shellQuote(sentinel), shellQuote(root))
-	output, err := framework.KubectlExecOutput(
+	output, err := e2eframework.KubectlExecOutput(
 		env.TestCtx.Context,
 		env.Config.Kubeconfig,
 		env.Infra.Namespace,

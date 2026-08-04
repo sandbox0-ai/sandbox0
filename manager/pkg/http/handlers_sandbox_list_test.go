@@ -49,21 +49,12 @@ func TestListSandboxesReturnsOK(t *testing.T) {
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
-	sandboxService := service.NewSandboxService(
-		fake.NewSimpleClientset(pod),
-		newHTTPTestPodLister(t, pod),
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		service.SandboxServiceConfig{},
-		zap.NewNop(),
-		nil,
-	)
+	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
+		K8sClient: fake.NewSimpleClientset(pod),
+		PodLister: newHTTPTestPodLister(t, pod),
+		Config:    service.SandboxServiceConfig{},
+		Logger:    zap.NewNop(),
+	})
 
 	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
 	recorder := httptest.NewRecorder()
@@ -182,21 +173,14 @@ func TestClaimSandboxReturnsUnavailableWhenDataPlaneNotReady(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: templateNamespace},
 		Spec:       v1alpha1.SandboxTemplateSpec{MainContainer: v1alpha1.ContainerSpec{Image: "busybox"}},
 	}
-	sandboxService := service.NewSandboxService(
-		fake.NewSimpleClientset(),
-		newHTTPTestPodLister(t),
-		newHTTPTestNodeLister(t),
-		nil,
-		nil,
-		staticHTTPTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		nil,
-		nil,
-		nil,
-		nil,
-		service.SandboxServiceConfig{},
-		zap.NewNop(),
-		nil,
-	)
+	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
+		K8sClient:      fake.NewSimpleClientset(),
+		PodLister:      newHTTPTestPodLister(t),
+		NodeLister:     newHTTPTestNodeLister(t),
+		TemplateLister: staticHTTPTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		Config:         service.SandboxServiceConfig{},
+		Logger:         zap.NewNop(),
+	})
 
 	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
 	recorder := httptest.NewRecorder()
@@ -217,28 +201,19 @@ func TestClaimSandboxReturnsUnavailableWhenDataPlaneNotReady(t *testing.T) {
 
 func TestClaimSandboxReturnsTooManyRequestsWhenActiveSandboxQuotaExceeded(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	sandboxService := service.NewSandboxService(
-		fake.NewSimpleClientset(),
-		nil,
-		nil,
-		nil,
-		newHTTPTestSecretLister(t),
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		service.SandboxServiceConfig{},
-		zap.NewNop(),
-		nil,
-	)
-	sandboxService.SetQuotaStore(staticClaimQuotaStore{
-		limit: &quota.Limit{
-			TeamID:     "team-1",
-			Dimension:  quota.DimensionActiveSandboxes,
-			LimitValue: 1,
+	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
+		K8sClient:    fake.NewSimpleClientset(),
+		SecretLister: newHTTPTestSecretLister(t),
+		Config:       service.SandboxServiceConfig{},
+		Logger:       zap.NewNop(),
+		QuotaStore: staticClaimQuotaStore{
+			limit: &quota.Limit{
+				TeamID:     "team-1",
+				Dimension:  quota.DimensionActiveSandboxes,
+				LimitValue: 1,
+			},
+			usage: 1,
 		},
-		usage: 1,
 	})
 
 	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
@@ -279,21 +254,13 @@ func (s staticClaimQuotaStore) CurrentUsage(context.Context, string, quota.Dimen
 func TestClaimSandboxReturnsNotFoundForMissingTemplate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	sandboxService := service.NewSandboxService(
-		fake.NewSimpleClientset(),
-		newHTTPTestPodLister(t),
-		nil,
-		nil,
-		nil,
-		staticHTTPTemplateLister{},
-		nil,
-		nil,
-		nil,
-		nil,
-		service.SandboxServiceConfig{},
-		zap.NewNop(),
-		nil,
-	)
+	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
+		K8sClient:      fake.NewSimpleClientset(),
+		PodLister:      newHTTPTestPodLister(t),
+		TemplateLister: staticHTTPTemplateLister{},
+		Config:         service.SandboxServiceConfig{},
+		Logger:         zap.NewNop(),
+	})
 
 	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
 	recorder := httptest.NewRecorder()
@@ -344,21 +311,12 @@ func TestRefreshSandboxRejectsMalformedJSON(t *testing.T) {
 				},
 				Status: corev1.PodStatus{PodIP: "10.0.0.10"},
 			}
-			sandboxService := service.NewSandboxService(
-				fake.NewSimpleClientset(pod),
-				newHTTPTestPodLister(t, pod),
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
-				nil,
-				service.SandboxServiceConfig{},
-				zap.NewNop(),
-				nil,
-			)
+			sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
+				K8sClient: fake.NewSimpleClientset(pod),
+				PodLister: newHTTPTestPodLister(t, pod),
+				Config:    service.SandboxServiceConfig{},
+				Logger:    zap.NewNop(),
+			})
 
 			server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
 			recorder := httptest.NewRecorder()

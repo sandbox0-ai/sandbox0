@@ -3,7 +3,6 @@ package spec
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 )
@@ -130,47 +129,4 @@ func DecodeErrorMessage(body []byte) (string, bool) {
 		return "", false
 	}
 	return apiErr.Message, true
-}
-
-// DecodeResponseOrRaw decodes either a standardized response envelope or a raw
-// JSON payload. This is for compatibility paths where an upstream service may
-// still return a bare response body.
-func DecodeResponseOrRaw[T any](r io.Reader) (*T, error) {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-
-	var raw rawResponse
-	if err := json.Unmarshal(body, &raw); err == nil && looksLikeEnvelope(raw) {
-		if raw.Error != nil {
-			return nil, errors.New(raw.Error.Message)
-		}
-		if !raw.Success {
-			return nil, errors.New("response was not successful")
-		}
-		if rawDataIsEmpty(raw.Data) {
-			return nil, errors.New("response missing data")
-		}
-		var out T
-		if err := json.Unmarshal(raw.Data, &out); err != nil {
-			return nil, err
-		}
-		return &out, nil
-	}
-
-	var out T
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func looksLikeEnvelope(raw rawResponse) bool {
-	return raw.Success || len(raw.Data) > 0 || raw.Error != nil
-}
-
-func rawDataIsEmpty(data json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(data)
-	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }

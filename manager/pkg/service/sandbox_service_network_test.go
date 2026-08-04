@@ -10,10 +10,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/network"
-	"github.com/sandbox0-ai/sandbox0/pkg/egressauth"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -29,9 +31,9 @@ import (
 )
 
 type memoryBindingStore struct {
-	records        map[string]*egressauth.BindingRecord
-	sourcesByRef   map[string]*egressauth.CredentialSource
-	sourceVersions map[string]*egressauth.CredentialSourceVersion
+	records        map[string]*egressauthstore.BindingRecord
+	sourcesByRef   map[string]*egressauthstore.CredentialSource
+	sourceVersions map[string]*egressauthstore.CredentialSourceVersion
 	getCalls       int
 	upsertCalls    int
 	deleteCalls    int
@@ -39,18 +41,18 @@ type memoryBindingStore struct {
 
 func newMemoryBindingStore() *memoryBindingStore {
 	return &memoryBindingStore{
-		records:        make(map[string]*egressauth.BindingRecord),
-		sourcesByRef:   make(map[string]*egressauth.CredentialSource),
-		sourceVersions: make(map[string]*egressauth.CredentialSourceVersion),
+		records:        make(map[string]*egressauthstore.BindingRecord),
+		sourcesByRef:   make(map[string]*egressauthstore.CredentialSource),
+		sourceVersions: make(map[string]*egressauthstore.CredentialSourceVersion),
 	}
 }
 
-func (s *memoryBindingStore) GetBindings(_ context.Context, teamID, sandboxID string) (*egressauth.BindingRecord, error) {
+func (s *memoryBindingStore) GetBindings(_ context.Context, teamID, sandboxID string) (*egressauthstore.BindingRecord, error) {
 	s.getCalls++
 	return cloneBindingRecord(s.records[s.bindingKey(teamID, sandboxID)]), nil
 }
 
-func (s *memoryBindingStore) UpsertBindings(_ context.Context, record *egressauth.BindingRecord) error {
+func (s *memoryBindingStore) UpsertBindings(_ context.Context, record *egressauthstore.BindingRecord) error {
 	if record == nil {
 		return nil
 	}
@@ -65,11 +67,11 @@ func (s *memoryBindingStore) DeleteBindings(_ context.Context, teamID, sandboxID
 	return nil
 }
 
-func (s *memoryBindingStore) GetSourceByRef(_ context.Context, teamID, ref string) (*egressauth.CredentialSource, error) {
+func (s *memoryBindingStore) GetSourceByRef(_ context.Context, teamID, ref string) (*egressauthstore.CredentialSource, error) {
 	return cloneCredentialSource(s.sourcesByRef[s.sourceRefKey(teamID, ref)]), nil
 }
 
-func (s *memoryBindingStore) GetSourceVersion(_ context.Context, sourceID, version int64) (*egressauth.CredentialSourceVersion, error) {
+func (s *memoryBindingStore) GetSourceVersion(_ context.Context, sourceID, version int64) (*egressauthstore.CredentialSourceVersion, error) {
 	return cloneCredentialSourceVersion(s.sourceVersions[s.sourceVersionKey(sourceID, version)]), nil
 }
 
@@ -86,7 +88,7 @@ func (s *memoryBindingStore) sourceVersionKey(sourceID, version int64) string {
 }
 
 func (s *memoryBindingStore) addStaticHeadersSource(teamID, ref string, sourceID, version int64, values map[string]string) {
-	s.sourcesByRef[s.sourceRefKey(teamID, ref)] = &egressauth.CredentialSource{
+	s.sourcesByRef[s.sourceRefKey(teamID, ref)] = &egressauthstore.CredentialSource{
 		ID:             sourceID,
 		TeamID:         teamID,
 		Name:           ref,
@@ -94,12 +96,12 @@ func (s *memoryBindingStore) addStaticHeadersSource(teamID, ref string, sourceID
 		CurrentVersion: version,
 		Status:         "active",
 	}
-	s.sourceVersions[s.sourceVersionKey(sourceID, version)] = &egressauth.CredentialSourceVersion{
+	s.sourceVersions[s.sourceVersionKey(sourceID, version)] = &egressauthstore.CredentialSourceVersion{
 		SourceID:     sourceID,
 		Version:      version,
 		ResolverKind: "static_headers",
-		Spec: egressauth.CredentialSourceSecretSpec{
-			StaticHeaders: &egressauth.StaticHeadersSourceSpec{
+		Spec: egressauthstore.CredentialSourceSecretSpec{
+			StaticHeaders: &egressauthstore.StaticHeadersSourceSpec{
 				Values: cloneStringMap(values),
 			},
 		},
@@ -189,7 +191,7 @@ func TestApplyNetworkProviderRecordsMetric(t *testing.T) {
 func newSandboxServiceForNetworkTests(
 	t *testing.T,
 	pod *corev1.Pod,
-	store egressauth.BindingStore,
+	store egressauthstore.BindingStore,
 	provider network.Provider,
 ) (*SandboxService, *fake.Clientset, cache.Indexer) {
 	t.Helper()
@@ -203,7 +205,7 @@ func newSandboxServiceForNetworkTests(
 	svc := &SandboxService{
 		k8sClient:            client,
 		podLister:            corelisters.NewPodLister(indexer),
-		NetworkPolicyService: NewNetworkPolicyService(zap.NewNop()),
+		networkPolicyService: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		networkProvider:      provider,
 		credentialStore:      store,
 		clock:                systemTime{},
@@ -274,18 +276,18 @@ func TestUpdateNetworkPolicyRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	pod := testSandboxNetworkPod()
 	store := newMemoryBindingStore()
 	store.addStaticHeadersSource("team-1", "new-ref", 2, 1, map[string]string{"token": "new"})
-	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
+	require.NoError(t, store.UpsertBindings(ctx, &egressauthstore.BindingRecord{
 		SandboxID: pod.Name,
 		TeamID:    "team-1",
-		Bindings: []egressauth.CredentialBinding{{
+		Bindings: []egressauthstore.CredentialBinding{{
 			Ref:           "existing-ref",
 			SourceRef:     "existing-ref",
 			SourceID:      1,
 			SourceVersion: 1,
-			Projection: egressauth.ProjectionSpec{
-				Type: egressauth.CredentialProjectionTypeHTTPHeaders,
-				HTTPHeaders: &egressauth.HTTPHeadersProjection{
-					Headers: []egressauth.ProjectedHeader{{
+			Projection: egressauthstore.ProjectionSpec{
+				Type: egressauthstore.CredentialProjectionTypeHTTPHeaders,
+				HTTPHeaders: &egressauthstore.HTTPHeadersProjection{
+					Headers: []egressauthstore.ProjectedHeader{{
 						Name:          "Authorization",
 						ValueTemplate: "Bearer {{ .token }}",
 					}},
@@ -314,15 +316,15 @@ func TestUpdateNetworkPolicyDoesNotRollbackBindingsOnTransientConflict(t *testin
 	pod := testSandboxNetworkPod()
 	store := newMemoryBindingStore()
 	store.addStaticHeadersSource("team-1", "new-ref", 2, 1, map[string]string{"token": "new"})
-	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
+	require.NoError(t, store.UpsertBindings(ctx, &egressauthstore.BindingRecord{
 		SandboxID: pod.Name,
 		TeamID:    "team-1",
-		Bindings: []egressauth.CredentialBinding{{
+		Bindings: []egressauthstore.CredentialBinding{{
 			Ref:           "existing-ref",
 			SourceRef:     "existing-ref",
 			SourceID:      1,
 			SourceVersion: 1,
-			Projection:    egressauth.ProjectionSpec{Type: egressauth.CredentialProjectionTypeHTTPHeaders},
+			Projection:    egressauthstore.ProjectionSpec{Type: egressauthstore.CredentialProjectionTypeHTTPHeaders},
 		}},
 	}))
 	initialUpserts := store.upsertCalls
@@ -444,18 +446,18 @@ func TestUpdateSandboxRollsBackBindingsWhenPodUpdateFails(t *testing.T) {
 	pod := testSandboxNetworkPod()
 	store := newMemoryBindingStore()
 	store.addStaticHeadersSource("team-1", "new-ref", 2, 1, map[string]string{"token": "new"})
-	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
+	require.NoError(t, store.UpsertBindings(ctx, &egressauthstore.BindingRecord{
 		SandboxID: pod.Name,
 		TeamID:    "team-1",
-		Bindings: []egressauth.CredentialBinding{{
+		Bindings: []egressauthstore.CredentialBinding{{
 			Ref:           "existing-ref",
 			SourceRef:     "existing-ref",
 			SourceID:      1,
 			SourceVersion: 1,
-			Projection: egressauth.ProjectionSpec{
-				Type: egressauth.CredentialProjectionTypeHTTPHeaders,
-				HTTPHeaders: &egressauth.HTTPHeadersProjection{
-					Headers: []egressauth.ProjectedHeader{{
+			Projection: egressauthstore.ProjectionSpec{
+				Type: egressauthstore.CredentialProjectionTypeHTTPHeaders,
+				HTTPHeaders: &egressauthstore.HTTPHeadersProjection{
+					Headers: []egressauthstore.ProjectedHeader{{
 						Name:          "Authorization",
 						ValueTemplate: "Bearer {{ .token }}",
 					}},
@@ -486,15 +488,15 @@ func TestUpdateSandboxDoesNotRollbackBindingsOnTransientConflict(t *testing.T) {
 	pod := testSandboxNetworkPod()
 	store := newMemoryBindingStore()
 	store.addStaticHeadersSource("team-1", "new-ref", 2, 1, map[string]string{"token": "new"})
-	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
+	require.NoError(t, store.UpsertBindings(ctx, &egressauthstore.BindingRecord{
 		SandboxID: pod.Name,
 		TeamID:    "team-1",
-		Bindings: []egressauth.CredentialBinding{{
+		Bindings: []egressauthstore.CredentialBinding{{
 			Ref:           "existing-ref",
 			SourceRef:     "existing-ref",
 			SourceID:      1,
 			SourceVersion: 1,
-			Projection:    egressauth.ProjectionSpec{Type: egressauth.CredentialProjectionTypeHTTPHeaders},
+			Projection:    egressauthstore.ProjectionSpec{Type: egressauthstore.CredentialProjectionTypeHTTPHeaders},
 		}},
 	}))
 	initialUpserts := store.upsertCalls
@@ -525,7 +527,7 @@ func TestUpdateSandboxDoesNotRollbackBindingsOnTransientConflict(t *testing.T) {
 }
 
 func TestRequestCredentialBindingsUsesNetworkBindings(t *testing.T) {
-	cfg := &SandboxConfig{
+	cfg := &sandboxstore.SandboxConfig{
 		Network: &v1alpha1.SandboxNetworkPolicy{
 			CredentialBindings: testCredentialBindings("nested-ref", "Bearer nested"),
 		},
@@ -548,18 +550,18 @@ func TestTemplateCredentialBindingsUsesNestedNetworkBindings(t *testing.T) {
 func TestRestoreResumeCredentialBindingsAddsPersistedBindingsToClaim(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryBindingStore()
-	require.NoError(t, store.UpsertBindings(ctx, &egressauth.BindingRecord{
+	require.NoError(t, store.UpsertBindings(ctx, &egressauthstore.BindingRecord{
 		SandboxID: "sandbox-a",
 		TeamID:    "team-a",
-		Bindings: []egressauth.CredentialBinding{{
+		Bindings: []egressauthstore.CredentialBinding{{
 			Ref:           "data-api",
 			SourceRef:     "data-api",
 			SourceID:      1,
 			SourceVersion: 1,
-			Projection: egressauth.ProjectionSpec{
-				Type: egressauth.CredentialProjectionTypeHTTPHeaders,
-				HTTPHeaders: &egressauth.HTTPHeadersProjection{
-					Headers: []egressauth.ProjectedHeader{{
+			Projection: egressauthstore.ProjectionSpec{
+				Type: egressauthstore.CredentialProjectionTypeHTTPHeaders,
+				HTTPHeaders: &egressauthstore.HTTPHeadersProjection{
+					Headers: []egressauthstore.ProjectedHeader{{
 						Name:          "Authorization",
 						ValueTemplate: "Basic {{ .value }}",
 					}},
@@ -573,7 +575,7 @@ func TestRestoreResumeCredentialBindingsAddsPersistedBindingsToClaim(t *testing.
 	req := &ClaimRequest{
 		TeamID:    "team-a",
 		SandboxID: "sandbox-a",
-		Config:    &SandboxConfig{Network: persistedPolicy},
+		Config:    &sandboxstore.SandboxConfig{Network: persistedPolicy},
 	}
 	svc := &SandboxService{credentialStore: store}
 
@@ -605,7 +607,7 @@ func TestSyncCredentialBindingsSkipsLookupForFreshSandbox(t *testing.T) {
 		context.Background(),
 		pod,
 		"team-a",
-		&BuildNetworkPolicyResult{},
+		&networkpolicy.BuildNetworkPolicyResult{},
 		false,
 	); err != nil {
 		t.Fatalf("syncCredentialBindings() error = %v", err)
@@ -618,7 +620,7 @@ func TestSyncCredentialBindingsSkipsLookupForFreshSandbox(t *testing.T) {
 		context.Background(),
 		pod,
 		"team-a",
-		&BuildNetworkPolicyResult{},
+		&networkpolicy.BuildNetworkPolicyResult{},
 		true,
 	); err != nil {
 		t.Fatalf("syncCredentialBindings(existing) error = %v", err)
@@ -650,7 +652,7 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	}
 
 	svc, client, indexer := newSandboxServiceForNetworkTests(t, pod, store, provider)
-	sandboxStore := &memorySandboxStore{records: map[string]*SandboxRecord{}}
+	sandboxStore := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}}
 	templateNamespace, err := naming.TemplateNamespaceForTeam("team-1")
 	require.NoError(t, err)
 	svc.sandboxStore = sandboxStore
@@ -667,7 +669,7 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	require.NoError(t, indexer.Update(storedPod.DeepCopy()))
 	svc.podLister = corelisters.NewPodLister(indexer)
 
-	var cfg SandboxConfig
+	var cfg sandboxstore.SandboxConfig
 	require.NoError(t, json.Unmarshal([]byte(storedPod.Annotations[controller.AnnotationConfig]), &cfg))
 	require.NotNil(t, cfg.Network)
 	assert.Nil(t, cfg.Network.CredentialBindings)
@@ -685,7 +687,7 @@ func TestUpdateNetworkPolicyStoresBindingsOutsidePodConfig(t *testing.T) {
 	assert.Nil(t, record.Config.Network.CredentialBindings)
 }
 
-func cloneCredentialSource(in *egressauth.CredentialSource) *egressauth.CredentialSource {
+func cloneCredentialSource(in *egressauthstore.CredentialSource) *egressauthstore.CredentialSource {
 	if in == nil {
 		return nil
 	}
@@ -693,13 +695,13 @@ func cloneCredentialSource(in *egressauth.CredentialSource) *egressauth.Credenti
 	return &cloned
 }
 
-func cloneCredentialSourceVersion(in *egressauth.CredentialSourceVersion) *egressauth.CredentialSourceVersion {
+func cloneCredentialSourceVersion(in *egressauthstore.CredentialSourceVersion) *egressauthstore.CredentialSourceVersion {
 	if in == nil {
 		return nil
 	}
 	cloned := *in
 	if in.Spec.StaticHeaders != nil {
-		cloned.Spec.StaticHeaders = &egressauth.StaticHeadersSourceSpec{
+		cloned.Spec.StaticHeaders = &egressauthstore.StaticHeadersSourceSpec{
 			Values: cloneStringMap(in.Spec.StaticHeaders.Values),
 		}
 	}

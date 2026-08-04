@@ -53,54 +53,6 @@ func NewStore(logger *zap.Logger) *Store {
 	}
 }
 
-func (s *Store) UpsertFromSandbox(info *watcher.SandboxInfo) (bool, string) {
-	if info == nil || info.PodIP == "" {
-		return false, ""
-	}
-	spec, err := v1alpha1.ParseNetworkPolicyFromAnnotation(info.NetworkPolicy)
-	if err != nil {
-		s.logger.Warn("Failed to parse network policy", zap.Error(err), zap.String("pod_ip", info.PodIP))
-		return false, ""
-	}
-	compiled, err := CompileNetworkPolicy(spec)
-	if err != nil {
-		s.logger.Warn("Failed to compile network policy", zap.Error(err), zap.String("pod_ip", info.PodIP))
-		return false, ""
-	}
-	applySandboxOwner(compiled, info)
-	key := info.Namespace + "/" + info.Name
-	changed := false
-	prevHash := ""
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if existing := s.byKey[key]; existing != nil {
-		prevHash = existing.policyHash
-		if existing.policyHash != info.NetworkPolicyHash {
-			changed = true
-		}
-		if existing.podIP != "" && existing.podIP != info.PodIP {
-			delete(s.byIP, existing.podIP)
-		}
-	}
-	entry := &policyEntry{
-		compiled:   compiled,
-		policyHash: info.NetworkPolicyHash,
-		podIP:      info.PodIP,
-		updatedAt:  time.Now(),
-	}
-	s.byKey[key] = entry
-	s.byIP[info.PodIP] = entry
-	s.logger.Info(
-		"Sandbox network policy updated",
-		zap.String("sandbox", key),
-		zap.String("pod_ip", info.PodIP),
-		zap.Bool("changed", changed),
-		zap.String("policy_hash", info.NetworkPolicyHash),
-		zap.String("prev_hash", prevHash),
-	)
-	return changed, prevHash
-}
-
 func (s *Store) ReconcileSandboxes(sandboxes []*watcher.SandboxInfo) SandboxPolicyReconcileResult {
 	result := SandboxPolicyReconcileResult{}
 	desired := make(map[string]*policyEntry, len(sandboxes))

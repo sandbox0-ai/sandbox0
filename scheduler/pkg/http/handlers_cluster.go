@@ -6,7 +6,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"github.com/sandbox0-ai/sandbox0/scheduler/pkg/db"
 	"go.uber.org/zap"
@@ -76,7 +75,7 @@ func (s *Server) createCluster(c *gin.Context) {
 		return
 	}
 
-	if err := naming.ValidateClusterName(req.ClusterName); err != nil {
+	if err := validateClusterName(req.ClusterName); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
@@ -91,7 +90,7 @@ func (s *Server) createCluster(c *gin.Context) {
 		req.Weight = 100
 	}
 
-	clusterID, err := naming.ClusterIDFromName(req.ClusterName)
+	clusterID, err := clusterIDFromName(req.ClusterName)
 	if err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
@@ -178,7 +177,7 @@ func (s *Server) updateCluster(c *gin.Context) {
 	if req.ClusterName == "" {
 		req.ClusterName = existing.ClusterName
 	}
-	if err := naming.ValidateClusterName(req.ClusterName); err != nil {
+	if err := validateClusterName(req.ClusterName); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}

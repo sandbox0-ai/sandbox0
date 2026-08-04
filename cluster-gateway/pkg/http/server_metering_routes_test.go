@@ -11,11 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	gatewayhandlers "github.com/sandbox0-ai/sandbox0/pkg/gateway/http/handlers"
-	gatewaymiddleware "github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/licensing"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
@@ -558,7 +557,7 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 		TTL:        time.Minute,
 	})
 	issuer := authn.NewIssuer("cluster-gateway", "secret", time.Minute, time.Hour)
-	publicAuth := gatewaymiddleware.NewAuthMiddleware(nil, "secret", issuer, zap.NewNop())
+	publicAuth := middleware.NewAuthMiddleware(nil, "secret", issuer, zap.NewNop())
 	internalAuth := middleware.NewInternalAuthMiddleware(validator, zap.NewNop())
 	sandboxObservabilityIngestValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target:             "cluster-gateway",
@@ -579,7 +578,7 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 		publicJWT:                                issuer,
 		logger:                                   zap.NewNop(),
 		meteringHandler:                          gatewayhandlers.NewMeteringHandler(nil, "aws-us-east-1", zap.NewNop()),
-		observabilityHandler:                     gatewayhandlers.NewSandboxObservabilityHandler(nil, zap.NewNop()),
+		observabilityHandler:                     NewSandboxObservabilityHandler(nil, zap.NewNop()),
 		sandboxAuditEntitlements:                 licensing.NewStaticEntitlements(),
 	}
 

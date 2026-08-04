@@ -12,8 +12,9 @@ import (
 	"time"
 )
 
-// DB is the minimal interface required for time synchronization.
-// It is compatible with pgxpool.Pool and pgx.Conn.
+// DB is the minimal interface required for time synchronization. Use NewPGX
+// with pgx connections and pools, whose concrete Row return type requires an
+// adapter.
 type DB interface {
 	QueryRow(ctx context.Context, sql string, args ...any) Row
 }
@@ -89,27 +90,6 @@ func WithSyncInterval(d time.Duration) Option {
 	return func(c *Clock) {
 		if d > 0 {
 			c.syncInterval = d
-		}
-	}
-}
-
-// WithSyncTimeout sets the timeout for each sync query.
-// Default is 5 seconds.
-func WithSyncTimeout(d time.Duration) Option {
-	return func(c *Clock) {
-		if d > 0 {
-			c.syncTimeout = d
-		}
-	}
-}
-
-// WithMaxOffsetDiff sets the maximum allowed offset change between syncs.
-// If the offset changes more than this, it will be logged as a warning.
-// Default is 1 second.
-func WithMaxOffsetDiff(d time.Duration) Option {
-	return func(c *Clock) {
-		if d > 0 {
-			c.maxOffsetDiff = d
 		}
 	}
 }

@@ -99,6 +99,61 @@ func (NotImplementedController) ApplyRootFS(_ *http.Request, _ ctldapi.ApplyRoot
 	return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
 }
 
+// registerJSONPostRoute keeps the control-plane JSON routes consistent while
+// preserving each route's request and response types.
+func registerJSONPostRoute[Request any, Response any, Target any](
+	mux *http.ServeMux,
+	path string,
+	controller Controller,
+	resolve func(Controller) (Target, bool),
+	unsupportedResponse any,
+	invalidRequestResponse func(error) any,
+	handle func(Target, *http.Request, Request) (Response, int),
+) {
+	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		target, ok := resolve(controller)
+		if !ok {
+			writeJSONResponse(w, http.StatusNotImplemented, unsupportedResponse)
+			return
+		}
+
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONResponse(w, http.StatusBadRequest, invalidRequestResponse(err))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		resp, status := handle(target, r, req)
+		writeJSONResponse(w, status, resp)
+	})
+}
+
+func writeJSONResponse(w http.ResponseWriter, status int, response any) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func volumePortalController(controller Controller) (VolumePortalController, bool) {
+	volumeController, ok := controller.(VolumePortalController)
+	return volumeController, ok
+}
+
+func rootFSController(controller Controller) (RootFSController, bool) {
+	rootFSController, ok := controller.(RootFSController)
+	return rootFSController, ok
+}
+
+func rootFSSnapshotController(controller Controller) (RootFSSnapshotController, bool) {
+	rootFSController, ok := controller.(RootFSSnapshotController)
+	return rootFSController, ok
+}
+
 func NewMux(controller Controller) http.Handler {
 	if controller == nil {
 		controller = NotImplementedController{}
@@ -128,314 +183,104 @@ func NewMux(controller Controller) http.Handler {
 			mux.Handle("/sandboxvolumes/", mountedHandler)
 		}
 	}
-	mux.HandleFunc("/api/v1/volume-portals/bind", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{})
-			return
-		}
-		var req ctldapi.BindVolumePortalRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.BindVolumePortal(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/unbind", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.UnbindVolumePortalResponse{Error: "ctld volume portals not implemented"})
-			return
-		}
-		var req ctldapi.UnbindVolumePortalRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.UnbindVolumePortalResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.UnbindVolumePortal(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/check", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Error: "ctld volume portals not implemented"})
-			return
-		}
-		var req ctldapi.CheckVolumePortalsRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.CheckVolumePortals(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/owners/attach", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.AttachVolumeOwnerResponse{Error: "ctld volume owners not implemented"})
-			return
-		}
-		var req ctldapi.AttachVolumeOwnerRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.AttachVolumeOwnerResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.AttachVolumeOwner(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/owners/release", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.ReleaseVolumeOwnerResponse{Error: "ctld volume owners not implemented"})
-			return
-		}
-		var req ctldapi.ReleaseVolumeOwnerRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.ReleaseVolumeOwnerResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.ReleaseVolumeOwner(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/snapshot-checkpoints/prepare", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"})
-			return
-		}
-		var req ctldapi.PrepareVolumeSnapshotCheckpointRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.PrepareVolumeSnapshotCheckpoint(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/snapshot-checkpoints/complete", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"})
-			return
-		}
-		var req ctldapi.CompleteVolumeSnapshotCheckpointRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.CompleteVolumeSnapshotCheckpoint(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/volume-portals/snapshot-checkpoints/abort", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		volumeController, ok := controller.(VolumePortalController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"})
-			return
-		}
-		var req ctldapi.AbortVolumeSnapshotCheckpointRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := volumeController.AbortVolumeSnapshotCheckpoint(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/inspect", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		rootFSController, ok := controller.(RootFSController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"})
-			return
-		}
-		var req ctldapi.InspectRootFSRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.InspectRootFSResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := rootFSController.InspectRootFS(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/save", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		rootFSController, ok := controller.(RootFSController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"})
-			return
-		}
-		var req ctldapi.SaveRootFSRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := rootFSController.SaveRootFS(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/snapshots/prepare", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		rootFSController, ok := controller.(RootFSSnapshotController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"})
-			return
-		}
-		var req ctldapi.PrepareRootFSSnapshotRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := rootFSController.PrepareRootFSSnapshot(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/snapshots/publish", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		rootFSController, ok := controller.(RootFSSnapshotController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{Error: "ctld rootfs snapshot publish not implemented"})
-			return
-		}
-		var req ctldapi.PublishRootFSSnapshotRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := rootFSController.PublishRootFSSnapshot(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/snapshots/abort", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		rootFSController, ok := controller.(RootFSSnapshotController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"})
-			return
-		}
-		var req ctldapi.AbortRootFSSnapshotRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.AbortRootFSSnapshotResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := rootFSController.AbortRootFSSnapshot(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-	mux.HandleFunc("/api/v1/rootfs/apply", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		rootFSController, ok := controller.(RootFSController)
-		if !ok {
-			w.WriteHeader(http.StatusNotImplemented)
-			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"})
-			return
-		}
-		var req ctldapi.ApplyRootFSRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Error: err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		resp, status := rootFSController.ApplyRootFS(r, req)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(resp)
-	})
+	registerJSONPostRoute(mux, "/api/v1/volume-portals/bind", controller, volumePortalController,
+		ctldapi.BindVolumePortalResponse{},
+		func(err error) any { return map[string]string{"error": err.Error()} },
+		func(c VolumePortalController, r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {
+			return c.BindVolumePortal(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/volume-portals/unbind", controller, volumePortalController,
+		ctldapi.UnbindVolumePortalResponse{Error: "ctld volume portals not implemented"},
+		func(err error) any { return ctldapi.UnbindVolumePortalResponse{Error: err.Error()} },
+		func(c VolumePortalController, r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int) {
+			return c.UnbindVolumePortal(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/volume-portals/check", controller, volumePortalController,
+		ctldapi.CheckVolumePortalsResponse{Error: "ctld volume portals not implemented"},
+		func(err error) any { return ctldapi.CheckVolumePortalsResponse{Error: err.Error()} },
+		func(c VolumePortalController, r *http.Request, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, int) {
+			return c.CheckVolumePortals(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/volume-portals/owners/attach", controller, volumePortalController,
+		ctldapi.AttachVolumeOwnerResponse{Error: "ctld volume owners not implemented"},
+		func(err error) any { return ctldapi.AttachVolumeOwnerResponse{Error: err.Error()} },
+		func(c VolumePortalController, r *http.Request, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, int) {
+			return c.AttachVolumeOwner(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/volume-portals/owners/release", controller, volumePortalController,
+		ctldapi.ReleaseVolumeOwnerResponse{Error: "ctld volume owners not implemented"},
+		func(err error) any { return ctldapi.ReleaseVolumeOwnerResponse{Error: err.Error()} },
+		func(c VolumePortalController, r *http.Request, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, int) {
+			return c.ReleaseVolumeOwner(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/volume-portals/snapshot-checkpoints/prepare", controller, volumePortalController,
+		ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"},
+		func(err error) any { return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: err.Error()} },
+		func(c VolumePortalController, r *http.Request, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, int) {
+			return c.PrepareVolumeSnapshotCheckpoint(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/volume-portals/snapshot-checkpoints/complete", controller, volumePortalController,
+		ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"},
+		func(err error) any { return ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: err.Error()} },
+		func(c VolumePortalController, r *http.Request, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, int) {
+			return c.CompleteVolumeSnapshotCheckpoint(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/volume-portals/snapshot-checkpoints/abort", controller, volumePortalController,
+		ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"},
+		func(err error) any { return ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: err.Error()} },
+		func(c VolumePortalController, r *http.Request, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, int) {
+			return c.AbortVolumeSnapshotCheckpoint(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/rootfs/inspect", controller, rootFSController,
+		ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"},
+		func(err error) any { return ctldapi.InspectRootFSResponse{Error: err.Error()} },
+		func(c RootFSController, r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
+			return c.InspectRootFS(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/rootfs/save", controller, rootFSController,
+		ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"},
+		func(err error) any { return ctldapi.SaveRootFSResponse{Error: err.Error()} },
+		func(c RootFSController, r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
+			return c.SaveRootFS(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/rootfs/snapshots/prepare", controller, rootFSSnapshotController,
+		ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"},
+		func(err error) any { return ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()} },
+		func(c RootFSSnapshotController, r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
+			return c.PrepareRootFSSnapshot(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/rootfs/snapshots/publish", controller, rootFSSnapshotController,
+		ctldapi.PublishRootFSSnapshotResponse{Error: "ctld rootfs snapshot publish not implemented"},
+		func(err error) any { return ctldapi.PublishRootFSSnapshotResponse{Error: err.Error()} },
+		func(c RootFSSnapshotController, r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
+			return c.PublishRootFSSnapshot(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/rootfs/snapshots/abort", controller, rootFSSnapshotController,
+		ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"},
+		func(err error) any { return ctldapi.AbortRootFSSnapshotResponse{Error: err.Error()} },
+		func(c RootFSSnapshotController, r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
+			return c.AbortRootFSSnapshot(r, req)
+		},
+	)
+	registerJSONPostRoute(mux, "/api/v1/rootfs/apply", controller, rootFSController,
+		ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"},
+		func(err error) any { return ctldapi.ApplyRootFSResponse{Error: err.Error()} },
+		func(c RootFSController, r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
+			return c.ApplyRootFS(r, req)
+		},
+	)
 	mux.HandleFunc("/api/v1/sandboxes/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

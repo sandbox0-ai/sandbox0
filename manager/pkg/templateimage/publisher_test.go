@@ -20,8 +20,8 @@ import (
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	managerconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	managerregistry "github.com/sandbox0-ai/sandbox0/manager/pkg/registry"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	managerregistry "github.com/sandbox0-ai/sandbox0/pkg/registry"
 )
 
 func TestPublisherPublishComposesPlatformImageAndStreamsRootFSLayers(t *testing.T) {

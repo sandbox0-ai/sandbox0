@@ -8,23 +8,24 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	corev1 "k8s.io/api/core/v1"
 )
 
 func TestResolveSandboxTemplateSourceUsesDurableClaimSpec(t *testing.T) {
-	record := &SandboxRecord{
+	record := &sandboxstore.SandboxRecord{
 		ID:           "sandbox-1",
 		TeamID:       "team-1",
 		UserID:       "user-1",
 		TemplateID:   "base",
 		ClusterID:    "cluster-a",
-		DesiredState: SandboxDesiredStateActive,
+		DesiredState: sandboxstore.SandboxDesiredStateActive,
 		TemplateSpec: v1alpha1.SandboxTemplateSpec{
 			MainContainer: v1alpha1.ContainerSpec{Image: "ubuntu:22.04"},
 		},
 	}
-	store := &memorySandboxStore{records: map[string]*SandboxRecord{record.ID: record}}
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{record.ID: record}}
 	pod := createTestPod(record.ID, record.TeamID, record.TemplateID, controller.PoolTypeActive, time.Now().Add(-time.Minute), time.Now().Add(time.Hour), false)
 	service := &SandboxService{sandboxStore: store, podLister: newTestPodLister(t, pod)}
 
@@ -45,10 +46,10 @@ func TestResolveSandboxTemplateSourceUsesDurableClaimSpec(t *testing.T) {
 }
 
 func TestResolveSandboxTemplateSourceRejectsActiveSourceWithoutRunningRuntime(t *testing.T) {
-	record := &SandboxRecord{
+	record := &sandboxstore.SandboxRecord{
 		ID:           "sandbox-1",
 		TeamID:       "team-1",
-		DesiredState: SandboxDesiredStateActive,
+		DesiredState: sandboxstore.SandboxDesiredStateActive,
 		TemplateSpec: v1alpha1.SandboxTemplateSpec{},
 	}
 	now := time.Now()
@@ -67,7 +68,7 @@ func TestResolveSandboxTemplateSourceRejectsActiveSourceWithoutRunningRuntime(t 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := &memorySandboxStore{records: map[string]*SandboxRecord{record.ID: record}}
+			store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{record.ID: record}}
 			service := &SandboxService{sandboxStore: store, podLister: newTestPodLister(t, tt.pods...)}
 
 			_, err := service.ResolveSandboxTemplateSource(context.Background(), record.ID, record.TeamID)
@@ -83,7 +84,7 @@ func TestResolveSandboxTemplateSourceRejectsUnavailableImageBuildCapability(t *t
 	t.Parallel()
 
 	service := &SandboxService{
-		sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{}},
+		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}},
 	}
 	service.SetTemplateImageBuildAvailable(false)
 
@@ -96,36 +97,36 @@ func TestResolveSandboxTemplateSourceRejectsUnavailableImageBuildCapability(t *t
 func TestResolveSandboxTemplateSourceRejectsCrossTeamAndNonCaptureableState(t *testing.T) {
 	tests := []struct {
 		name        string
-		record      *SandboxRecord
+		record      *sandboxstore.SandboxRecord
 		teamID      string
 		targetError error
 	}{
 		{
 			name: "cross team",
-			record: &SandboxRecord{
+			record: &sandboxstore.SandboxRecord{
 				ID:           "sandbox-1",
 				TeamID:       "team-1",
-				DesiredState: SandboxDesiredStateActive,
+				DesiredState: sandboxstore.SandboxDesiredStateActive,
 			},
 			teamID:      "team-2",
 			targetError: template.ErrTemplateSourceForbidden,
 		},
 		{
 			name: "deleted",
-			record: &SandboxRecord{
+			record: &sandboxstore.SandboxRecord{
 				ID:           "sandbox-1",
 				TeamID:       "team-1",
-				DesiredState: SandboxDesiredStateDeleted,
+				DesiredState: sandboxstore.SandboxDesiredStateDeleted,
 			},
 			teamID:      "team-1",
 			targetError: template.ErrTemplateSourceNotFound,
 		},
 		{
 			name: "transitional",
-			record: &SandboxRecord{
+			record: &sandboxstore.SandboxRecord{
 				ID:           "sandbox-1",
 				TeamID:       "team-1",
-				DesiredState: SandboxDesiredStateTerminating,
+				DesiredState: sandboxstore.SandboxDesiredStateTerminating,
 			},
 			teamID:      "team-1",
 			targetError: template.ErrTemplateSourceNotReady,
@@ -137,7 +138,7 @@ func TestResolveSandboxTemplateSourceRejectsCrossTeamAndNonCaptureableState(t *t
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			service := &SandboxService{
-				sandboxStore: &memorySandboxStore{records: map[string]*SandboxRecord{tt.record.ID: tt.record}},
+				sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{tt.record.ID: tt.record}},
 			}
 			_, err := service.ResolveSandboxTemplateSource(context.Background(), tt.record.ID, tt.teamID)
 			if !errors.Is(err, tt.targetError) {

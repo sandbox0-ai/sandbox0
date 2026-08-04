@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,18 +19,26 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	clientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned"
 	clientsetfake "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/fake"
 	managerhttp "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeauth"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxindex"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/tests/integration/internal/utils"
 	"go.uber.org/zap"
@@ -47,18 +56,37 @@ import (
 )
 
 type managerTestEnv struct {
-	server     *httptest.Server
+	server     *managerTestHTTPServer
 	token      string
 	podIndexer cache.Indexer
 	k8sClient  kubernetes.Interface
 }
 
+type managerTestHTTPServer struct {
+	URL    string
+	client *http.Client
+	cancel context.CancelFunc
+	done   <-chan error
+}
+
+func (s *managerTestHTTPServer) Client() *http.Client {
+	return s.client
+}
+
+func (s *managerTestHTTPServer) Close() {
+	s.cancel()
+	select {
+	case <-s.done:
+	case <-time.After(5 * time.Second):
+	}
+}
+
 type managerTestEnvOptions struct {
 	sandboxConfig             service.SandboxServiceConfig
 	internalTokenGenerator    service.TokenGenerator
-	procdClient               *service.ProcdClient
+	procdClient               *procdapi.ProcdClient
 	volumeMetadata            service.SandboxVolumeMetadataClient
-	sandboxStore              service.SandboxStore
+	sandboxStore              sandboxstore.SandboxStore
 	runtimeActivationObserver func(*corev1.Pod)
 }
 
@@ -77,7 +105,11 @@ func newManagerTestEnvWithProcd(t *testing.T) *managerTestEnv {
 	privateKey, _, err := createInternalKeys()
 	utils.RequireNoError(t, err, "create procd keys")
 
-	procdGen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("manager", privateKey))
+	procdGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "manager",
+		PrivateKey: privateKey,
+		TTL:        30 * time.Second,
+	})
 
 	return newManagerTestEnvWithOptions(t, managerTestEnvOptions{
 		sandboxConfig: service.SandboxServiceConfig{
@@ -90,7 +122,7 @@ func newManagerTestEnvWithProcd(t *testing.T) *managerTestEnv {
 			ProcdClientTimeout:     5 * time.Second,
 			RuntimeReadyTimeout:    5 * time.Second,
 		},
-		internalTokenGenerator: service.NewInternalTokenGenerator(procdGen),
+		internalTokenGenerator: runtimeauth.NewInternalTokenGenerator(procdGen),
 		procdClient:            procdClient,
 	})
 }
@@ -128,7 +160,7 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	namespaceLister := corelisters.NewNamespaceLister(namespaceIndexer)
 	serviceAccountLister := corelisters.NewServiceAccountLister(serviceAccountIndexer)
 	networkPolicyLister := networkinglisters.NewNetworkPolicyLister(networkPolicyIndexer)
-	sandboxIndex := service.NewSandboxIndex()
+	sandboxIndex := sandboxindex.NewSandboxIndex()
 
 	templateLister := &testTemplateLister{
 		client: crdClient,
@@ -150,30 +182,20 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	managerMetrics := obsmetrics.NewManager(obsProvider.MetricsRegistryOrNil())
 
 	managerCfg := config.LoadManagerConfig()
-	sandboxService := service.NewSandboxService(
-		k8sClient,
-		podLister,
-		nil,
-		sandboxIndex,
-		secretLister,
-		templateLister,
-		nil,
-		nil,
-		opts.internalTokenGenerator,
-		nil,
-		opts.sandboxConfig,
-		logger,
-		managerMetrics,
-	)
-	if opts.procdClient != nil {
-		sandboxService.SetProcdClient(opts.procdClient)
-	}
-	if opts.volumeMetadata != nil {
-		sandboxService.SetVolumeMetadataClient(opts.volumeMetadata)
-	}
-	if opts.sandboxStore != nil {
-		sandboxService.SetSandboxStore(opts.sandboxStore)
-	}
+	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
+		K8sClient:              k8sClient,
+		PodLister:              podLister,
+		SandboxIndex:           sandboxIndex,
+		SecretLister:           secretLister,
+		TemplateLister:         templateLister,
+		InternalTokenGenerator: opts.internalTokenGenerator,
+		Config:                 opts.sandboxConfig,
+		Logger:                 logger,
+		Metrics:                managerMetrics,
+		ProcdClient:            opts.procdClient,
+		VolumeMetadataClient:   opts.volumeMetadata,
+		SandboxStore:           opts.sandboxStore,
+	})
 	podEventHandler := sandboxService.PodEventHandler()
 	k8sClient.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		update, ok := action.(k8stesting.UpdateAction)
@@ -238,26 +260,25 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		return false, nil, nil
 	})
 
-	templateService := service.NewTemplateService(
-		k8sClient,
-		crdClient,
-		templateLister,
-		namespaceLister,
-		podLister,
-		secretLister,
-		serviceAccountLister,
-		nil,
-		managerCfg.Registry,
-		logger,
-	)
+	templateService := templateservice.New(templateservice.Dependencies{
+		KubernetesClient: k8sClient,
+		CRDClient:        crdClient,
+		Templates:        templateLister,
+		Namespaces:       namespaceLister,
+		Pods:             podLister,
+		Secrets:          secretLister,
+		ServiceAccounts:  serviceAccountLister,
+		Registry:         managerCfg.Registry,
+		Logger:           logger,
+	})
 	baselineReconciler, err := namespacepolicy.NewReconciler(k8sClient, networkPolicyLister, namespacepolicy.Config{
 		SystemNamespace: "sandbox0-system",
 		ProcdPort:       49983,
 	}, logger)
 	utils.RequireNoError(t, err, "create template namespace baseline reconciler")
 	templateService.SetNamespacePolicyReconciler(baselineReconciler)
-	registryService := service.NewRegistryService(nil, logger)
-	clusterService := service.NewClusterService(
+	registryService := registryservice.NewRegistryService(nil, logger)
+	clusterService := clusterservice.NewClusterService(
 		k8sClient,
 		podLister,
 		nodeLister,
@@ -268,33 +289,33 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	privateKey, publicKey, err := createInternalKeys()
 	utils.RequireNoError(t, err, "create internal keys")
 
-	gen := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig("cluster-gateway", privateKey))
+	gen := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     "cluster-gateway",
+		PrivateKey: privateKey,
+		TTL:        30 * time.Second,
+	})
 	token, err := gen.Generate("manager", "team-1", "user-1", internalauth.GenerateOptions{})
 	utils.RequireNoError(t, err, "generate internal token")
 
 	cfg := internalauth.DefaultValidatorConfig("manager", publicKey)
 	cfg.AllowedCallers = []string{"cluster-gateway"}
 	validator := internalauth.NewValidator(cfg)
+	port := reserveManagerTestPort(t)
 
-	server := managerhttp.NewServer(
-		sandboxService,
-		nil,
-		nil,
-		templateService,
-		registryService,
-		nil,
-		nil,
-		false,
-		clusterService,
-		validator,
-		logger,
-		0,
-		obsProvider,
-		"sandbox0.app",
-		"test-region",
-	)
+	server := managerhttp.NewServerWithDependencies(managerhttp.ServerDependencies{
+		SandboxService:        sandboxService,
+		TemplateService:       templateService,
+		RegistryService:       registryService,
+		ClusterService:        clusterService,
+		AuthValidator:         validator,
+		Logger:                logger,
+		ObservabilityProvider: obsProvider,
+		Port:                  port,
+		PublicRootDomain:      "sandbox0.app",
+		PublicRegionID:        "test-region",
+	})
 
-	httpServer := httptest.NewServer(server.Handler())
+	httpServer := startManagerTestHTTPServer(t, server, port)
 	t.Cleanup(httpServer.Close)
 
 	return &managerTestEnv{
@@ -302,6 +323,58 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		token:      token,
 		podIndexer: podIndexer,
 		k8sClient:  k8sClient,
+	}
+}
+
+func reserveManagerTestPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve manager HTTP port: %v", err)
+	}
+	defer listener.Close()
+
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("reserved manager listener has unexpected address type %T", listener.Addr())
+	}
+	return address.Port
+}
+
+func startManagerTestHTTPServer(t *testing.T, server *managerhttp.Server, port int) *managerTestHTTPServer {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Start(ctx)
+	}()
+
+	result := &managerTestHTTPServer{
+		URL:    "http://127.0.0.1:" + strconv.Itoa(port),
+		client: &http.Client{Timeout: time.Second},
+		cancel: cancel,
+		done:   done,
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		response, err := result.client.Get(result.URL + "/healthz")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return result
+			}
+		}
+
+		select {
+		case err := <-done:
+			cancel()
+			t.Fatalf("start manager HTTP server: %v", err)
+		case <-deadline.C:
+			cancel()
+			t.Fatal("wait for manager HTTP server readiness")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 
@@ -447,7 +520,7 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: namespace},
 	}
 	now := time.Now().UTC()
-	store := newMemorySandboxStoreForManagerIntegration(&service.SandboxRecord{
+	store := newMemorySandboxStoreForManagerIntegration(&sandboxstore.SandboxRecord{
 		ID:                "sandbox-1",
 		TeamID:            "team-1",
 		UserID:            "user-1",
@@ -455,12 +528,12 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 		TemplateName:      template.Name,
 		TemplateNamespace: template.Namespace,
 		ClusterID:         "default",
-		DesiredState:      service.SandboxDesiredStatePaused,
+		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 		TemplateSpec:      template.Spec,
 		RuntimeGeneration: 3,
 		ClaimedAt:         now,
 		CreatedAt:         now,
-	}, &service.SandboxRootFSState{
+	}, &sandboxstore.SandboxRootFSState{
 		SandboxID:           "sandbox-1",
 		TeamID:              "team-1",
 		RuntimeGeneration:   3,
@@ -513,7 +586,7 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("paused runtime resume status = %d, body = %s", resp.StatusCode, string(body))
 	}
-	resumeResp, errInfo, err := spec.DecodeResponse[service.ResumeSandboxResponse](bytes.NewReader(body))
+	resumeResp, errInfo, err := spec.DecodeResponse[managerapi.ResumeSandboxResponse](bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("decode paused runtime resume response: %v", err)
 	}
@@ -531,14 +604,14 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 	if err != nil {
 		t.Fatalf("get restored sandbox record: %v", err)
 	}
-	if record.DesiredState != service.SandboxDesiredStateActive || record.CurrentPodName != "idle-rootfs" || record.RuntimeGeneration != 4 {
+	if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.CurrentPodName != "idle-rootfs" || record.RuntimeGeneration != 4 {
 		t.Fatalf("restored record = %+v", record)
 	}
 }
 
 func TestSandboxRootFSProductAPI(t *testing.T) {
 	now := time.Now().UTC()
-	store := newMemorySandboxStoreForManagerIntegration(&service.SandboxRecord{
+	store := newMemorySandboxStoreForManagerIntegration(&sandboxstore.SandboxRecord{
 		ID:                "sandbox-1",
 		TeamID:            "team-1",
 		UserID:            "user-1",
@@ -546,10 +619,10 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 		TemplateName:      "template-1",
 		TemplateNamespace: "template-default",
 		ClusterID:         "default",
-		DesiredState:      service.SandboxDesiredStatePaused,
+		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 		CreatedAt:         now,
 		UpdatedAt:         now,
-	}, &service.SandboxRootFSState{
+	}, &sandboxstore.SandboxRootFSState{
 		SandboxID:         "sandbox-1",
 		TeamID:            "team-1",
 		LayerID:           "layer-v1",
@@ -598,7 +671,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	}
 
 	store.mu.Lock()
-	store.rootFSState["sandbox-1"] = &service.SandboxRootFSState{
+	store.rootFSState["sandbox-1"] = &sandboxstore.SandboxRootFSState{
 		SandboxID:         "sandbox-1",
 		TeamID:            "team-1",
 		LayerID:           "layer-v2",
@@ -626,7 +699,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	if errInfo != nil {
 		t.Fatalf("unexpected restore rootfs error: %+v", errInfo)
 	}
-	if restoreResp == nil || restoreResp.Status != service.SandboxStatusPaused {
+	if restoreResp == nil || restoreResp.Status != managerapi.SandboxStatusPaused {
 		t.Fatalf("unexpected restore response: %+v", restoreResp)
 	}
 	restoredState, err := store.GetLatestRootFSState(context.Background(), "sandbox-1")
@@ -656,7 +729,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	if forkResp == nil || forkResp.SourceSandboxID != "sandbox-1" || forkResp.Sandbox == nil {
 		t.Fatalf("unexpected fork response: %+v", forkResp)
 	}
-	if forkResp.Sandbox.ID == "sandbox-1" || forkResp.Sandbox.Status != service.SandboxStatusPaused {
+	if forkResp.Sandbox.ID == "sandbox-1" || forkResp.Sandbox.Status != managerapi.SandboxStatusPaused {
 		t.Fatalf("unexpected fork sandbox: %+v", forkResp.Sandbox)
 	}
 	forkRecord, err := store.GetSandbox(context.Background(), forkResp.Sandbox.ID)
@@ -685,7 +758,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	}
 
 	store.mu.Lock()
-	store.records["sandbox-1"].DesiredState = service.SandboxDesiredStateActive
+	store.records["sandbox-1"].DesiredState = sandboxstore.SandboxDesiredStateActive
 	store.mu.Unlock()
 	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/snapshots", env.token, nil)
 	if resp.StatusCode != http.StatusServiceUnavailable {
@@ -939,20 +1012,20 @@ func newRootFSApplyRecordingCtldServer(t *testing.T, events *orderedEvents, name
 
 type memorySandboxStoreForManagerIntegration struct {
 	mu                sync.Mutex
-	records           map[string]*service.SandboxRecord
-	lifecycleTxns     map[string]*service.SandboxLifecycleTxn
-	rootFSState       map[string]*service.SandboxRootFSState
-	rootFSFilesystems map[string]*service.RootFSFilesystem
-	rootFSSnapshots   map[string]*service.RootFSSnapshot
+	records           map[string]*sandboxstore.SandboxRecord
+	lifecycleTxns     map[string]*sandboxstore.SandboxLifecycleTxn
+	rootFSState       map[string]*sandboxstore.SandboxRootFSState
+	rootFSFilesystems map[string]*sandboxstore.RootFSFilesystem
+	rootFSSnapshots   map[string]*sandboxstore.RootFSSnapshot
 }
 
-func newMemorySandboxStoreForManagerIntegration(record *service.SandboxRecord, rootFSState *service.SandboxRootFSState) *memorySandboxStoreForManagerIntegration {
+func newMemorySandboxStoreForManagerIntegration(record *sandboxstore.SandboxRecord, rootFSState *sandboxstore.SandboxRootFSState) *memorySandboxStoreForManagerIntegration {
 	store := &memorySandboxStoreForManagerIntegration{
-		records:           map[string]*service.SandboxRecord{},
-		lifecycleTxns:     map[string]*service.SandboxLifecycleTxn{},
-		rootFSState:       map[string]*service.SandboxRootFSState{},
-		rootFSFilesystems: map[string]*service.RootFSFilesystem{},
-		rootFSSnapshots:   map[string]*service.RootFSSnapshot{},
+		records:           map[string]*sandboxstore.SandboxRecord{},
+		lifecycleTxns:     map[string]*sandboxstore.SandboxLifecycleTxn{},
+		rootFSState:       map[string]*sandboxstore.SandboxRootFSState{},
+		rootFSFilesystems: map[string]*sandboxstore.RootFSFilesystem{},
+		rootFSSnapshots:   map[string]*sandboxstore.RootFSSnapshot{},
 	}
 	if record != nil {
 		store.records[record.ID] = cloneSandboxRecordForManagerIntegration(record)
@@ -963,14 +1036,14 @@ func newMemorySandboxStoreForManagerIntegration(record *service.SandboxRecord, r
 	return store
 }
 
-func (s *memorySandboxStoreForManagerIntegration) UpsertSandbox(_ context.Context, record *service.SandboxRecord) error {
+func (s *memorySandboxStoreForManagerIntegration) UpsertSandbox(_ context.Context, record *sandboxstore.SandboxRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if record == nil || record.ID == "" {
 		return nil
 	}
 	if existing := s.records[record.ID]; existing != nil &&
-		(existing.DesiredState == service.SandboxDesiredStateTerminating || existing.DesiredState == service.SandboxDesiredStateDeleted || !existing.DeletedAt.IsZero()) {
+		(existing.DesiredState == sandboxstore.SandboxDesiredStateTerminating || existing.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !existing.DeletedAt.IsZero()) {
 		return nil
 	}
 	clone := cloneSandboxRecordForManagerIntegration(record)
@@ -981,33 +1054,33 @@ func (s *memorySandboxStoreForManagerIntegration) UpsertSandbox(_ context.Contex
 	return nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) GetSandbox(_ context.Context, sandboxID string) (*service.SandboxRecord, error) {
+func (s *memorySandboxStoreForManagerIntegration) GetSandbox(_ context.Context, sandboxID string) (*sandboxstore.SandboxRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record := s.records[sandboxID]
 	if record == nil {
-		return nil, service.ErrSandboxRecordNotFound
+		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
 	return cloneSandboxRecordForManagerIntegration(record), nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) ListSandboxes(_ context.Context, _ *service.ListSandboxesRequest) ([]*service.SandboxRecord, error) {
+func (s *memorySandboxStoreForManagerIntegration) ListSandboxes(_ context.Context, _ *sandboxstore.ListSandboxesRequest) ([]*sandboxstore.SandboxRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	records := make([]*service.SandboxRecord, 0, len(s.records))
+	records := make([]*sandboxstore.SandboxRecord, 0, len(s.records))
 	for _, record := range s.records {
 		records = append(records, cloneSandboxRecordForManagerIntegration(record))
 	}
 	return records, nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) ListHardExpiredSandboxes(_ context.Context, now time.Time, limit int) ([]*service.SandboxRecord, error) {
+func (s *memorySandboxStoreForManagerIntegration) ListHardExpiredSandboxes(_ context.Context, now time.Time, limit int) ([]*sandboxstore.SandboxRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if limit <= 0 {
 		limit = len(s.records)
 	}
-	records := make([]*service.SandboxRecord, 0, len(s.records))
+	records := make([]*sandboxstore.SandboxRecord, 0, len(s.records))
 	for _, record := range s.records {
 		if record == nil || record.DeletedAt.IsZero() == false || record.HardExpiresAt.IsZero() || record.HardExpiresAt.After(now) {
 			continue
@@ -1020,13 +1093,13 @@ func (s *memorySandboxStoreForManagerIntegration) ListHardExpiredSandboxes(_ con
 	return records, nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) ListActiveLifecycleTxns(_ context.Context, kind string, limit int) ([]*service.SandboxLifecycleTxn, error) {
+func (s *memorySandboxStoreForManagerIntegration) ListActiveLifecycleTxns(_ context.Context, kind string, limit int) ([]*sandboxstore.SandboxLifecycleTxn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if limit <= 0 {
 		limit = len(s.lifecycleTxns)
 	}
-	txns := make([]*service.SandboxLifecycleTxn, 0, len(s.lifecycleTxns))
+	txns := make([]*sandboxstore.SandboxLifecycleTxn, 0, len(s.lifecycleTxns))
 	for _, txn := range s.lifecycleTxns {
 		if txn == nil || txn.Kind != kind || !managerIntegrationLifecyclePhaseActive(txn.Phase) {
 			continue
@@ -1039,7 +1112,7 @@ func (s *memorySandboxStoreForManagerIntegration) ListActiveLifecycleTxns(_ cont
 	return txns, nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*service.SandboxLifecycleTxn, error) {
+func (s *memorySandboxStoreForManagerIntegration) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*sandboxstore.SandboxLifecycleTxn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, txn := range s.lifecycleTxns {
@@ -1055,13 +1128,13 @@ func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.C
 	defer s.mu.Unlock()
 	record := s.records[sandboxID]
 	if record == nil {
-		return service.ErrSandboxRecordNotFound
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
-	record.DesiredState = service.SandboxDesiredStateDeleted
+	record.DesiredState = sandboxstore.SandboxDesiredStateDeleted
 	record.DeletedAt = deletedAt
 	for _, txn := range s.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && managerIntegrationLifecyclePhaseActive(txn.Phase) {
-			txn.Phase = service.SandboxLifecyclePhaseAborted
+			txn.Phase = sandboxstore.SandboxLifecyclePhaseAborted
 			txn.Error = "sandbox deleted"
 			txn.AbortedAt = deletedAt
 		}
@@ -1070,7 +1143,7 @@ func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.C
 	return nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) SaveRootFSState(_ context.Context, state *service.SandboxRootFSState) error {
+func (s *memorySandboxStoreForManagerIntegration) SaveRootFSState(_ context.Context, state *sandboxstore.SandboxRootFSState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if state == nil || state.SandboxID == "" {
@@ -1080,7 +1153,7 @@ func (s *memorySandboxStoreForManagerIntegration) SaveRootFSState(_ context.Cont
 	return nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) GetLatestRootFSState(_ context.Context, sandboxID string) (*service.SandboxRootFSState, error) {
+func (s *memorySandboxStoreForManagerIntegration) GetLatestRootFSState(_ context.Context, sandboxID string) (*sandboxstore.SandboxRootFSState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state := s.rootFSState[sandboxID]
@@ -1090,18 +1163,18 @@ func (s *memorySandboxStoreForManagerIntegration) GetLatestRootFSState(_ context
 	return cloneRootFSStateForManagerIntegration(state), nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) CreateRootFSSnapshot(_ context.Context, req *service.CreateRootFSSnapshotRequest) (*service.RootFSSnapshot, error) {
+func (s *memorySandboxStoreForManagerIntegration) CreateRootFSSnapshot(_ context.Context, req *sandboxstore.CreateRootFSSnapshotRequest) (*sandboxstore.RootFSSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state := s.rootFSState[req.SandboxID]
 	if state == nil || state.LayerID == "" {
-		return nil, service.ErrRootFSFilesystemNotFound
+		return nil, sandboxstore.ErrRootFSFilesystemNotFound
 	}
 	record := s.records[req.SandboxID]
 	if record == nil {
-		return nil, service.ErrSandboxRecordNotFound
+		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
-	snapshot := &service.RootFSSnapshot{
+	snapshot := &sandboxstore.RootFSSnapshot{
 		ID:              req.SnapshotID,
 		FilesystemID:    req.SandboxID,
 		TeamID:          record.TeamID,
@@ -1116,10 +1189,10 @@ func (s *memorySandboxStoreForManagerIntegration) CreateRootFSSnapshot(_ context
 	return cloneRootFSSnapshotForManagerIntegration(snapshot), nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) ListRootFSSnapshots(_ context.Context, req *service.ListRootFSSnapshotsRequest) ([]*service.RootFSSnapshot, error) {
+func (s *memorySandboxStoreForManagerIntegration) ListRootFSSnapshots(_ context.Context, req *sandboxstore.ListRootFSSnapshotsRequest) ([]*sandboxstore.RootFSSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	snapshots := make([]*service.RootFSSnapshot, 0, len(s.rootFSSnapshots))
+	snapshots := make([]*sandboxstore.RootFSSnapshot, 0, len(s.rootFSSnapshots))
 	for _, snapshot := range s.rootFSSnapshots {
 		if snapshot == nil || snapshot.SourceSandboxID != req.SandboxID {
 			continue
@@ -1132,12 +1205,12 @@ func (s *memorySandboxStoreForManagerIntegration) ListRootFSSnapshots(_ context.
 	return snapshots, nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) GetRootFSSnapshot(_ context.Context, snapshotID, teamID string) (*service.RootFSSnapshot, error) {
+func (s *memorySandboxStoreForManagerIntegration) GetRootFSSnapshot(_ context.Context, snapshotID, teamID string) (*sandboxstore.RootFSSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snapshot := s.rootFSSnapshots[snapshotID]
 	if snapshot == nil || (teamID != "" && snapshot.TeamID != teamID) {
-		return nil, service.ErrRootFSSnapshotNotFound
+		return nil, sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	return cloneRootFSSnapshotForManagerIntegration(snapshot), nil
 }
@@ -1147,22 +1220,22 @@ func (s *memorySandboxStoreForManagerIntegration) DeleteRootFSSnapshot(_ context
 	defer s.mu.Unlock()
 	snapshot := s.rootFSSnapshots[snapshotID]
 	if snapshot == nil || (teamID != "" && snapshot.TeamID != teamID) {
-		return service.ErrRootFSSnapshotNotFound
+		return sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	delete(s.rootFSSnapshots, snapshotID)
 	return nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) ForkRootFSFilesystem(_ context.Context, req *service.ForkRootFSFilesystemRequest) (*service.RootFSFilesystem, error) {
+func (s *memorySandboxStoreForManagerIntegration) ForkRootFSFilesystem(_ context.Context, req *sandboxstore.ForkRootFSFilesystemRequest) (*sandboxstore.RootFSFilesystem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sourceState := s.rootFSState[req.SourceSandboxID]
 	if sourceState == nil || sourceState.LayerID == "" {
-		return nil, service.ErrRootFSFilesystemNotFound
+		return nil, sandboxstore.ErrRootFSFilesystemNotFound
 	}
 	target := s.records[req.TargetSandboxID]
 	if target == nil {
-		return nil, service.ErrSandboxRecordNotFound
+		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
 	targetTeamID := req.TargetTeamID
 	if targetTeamID == "" {
@@ -1172,7 +1245,7 @@ func (s *memorySandboxStoreForManagerIntegration) ForkRootFSFilesystem(_ context
 	state.SandboxID = req.TargetSandboxID
 	state.TeamID = targetTeamID
 	s.rootFSState[req.TargetSandboxID] = state
-	filesystem := &service.RootFSFilesystem{
+	filesystem := &sandboxstore.RootFSFilesystem{
 		ID:                 req.TargetSandboxID,
 		TeamID:             targetTeamID,
 		SourceFilesystemID: req.SourceSandboxID,
@@ -1184,19 +1257,19 @@ func (s *memorySandboxStoreForManagerIntegration) ForkRootFSFilesystem(_ context
 	return cloneRootFSFilesystemForManagerIntegration(filesystem), nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) RestoreRootFSFromSnapshot(_ context.Context, req *service.RestoreRootFSFromSnapshotRequest) (*service.RootFSFilesystem, error) {
+func (s *memorySandboxStoreForManagerIntegration) RestoreRootFSFromSnapshot(_ context.Context, req *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snapshot := s.rootFSSnapshots[req.SnapshotID]
 	if snapshot == nil || (req.TeamID != "" && snapshot.TeamID != req.TeamID) {
-		return nil, service.ErrRootFSSnapshotNotFound
+		return nil, sandboxstore.ErrRootFSSnapshotNotFound
 	}
 	target := s.records[req.SandboxID]
 	if target == nil {
-		return nil, service.ErrSandboxRecordNotFound
+		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
 	now := time.Now().UTC()
-	s.rootFSState[req.SandboxID] = &service.SandboxRootFSState{
+	s.rootFSState[req.SandboxID] = &sandboxstore.SandboxRootFSState{
 		SandboxID:         req.SandboxID,
 		TeamID:            target.TeamID,
 		LayerID:           snapshot.HeadLayerID,
@@ -1209,7 +1282,7 @@ func (s *memorySandboxStoreForManagerIntegration) RestoreRootFSFromSnapshot(_ co
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
-	filesystem := &service.RootFSFilesystem{
+	filesystem := &sandboxstore.RootFSFilesystem{
 		ID:                 req.SandboxID,
 		TeamID:             target.TeamID,
 		SourceFilesystemID: snapshot.FilesystemID,
@@ -1221,12 +1294,12 @@ func (s *memorySandboxStoreForManagerIntegration) RestoreRootFSFromSnapshot(_ co
 	return cloneRootFSFilesystemForManagerIntegration(filesystem), nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, service.SandboxStoreTx, *service.SandboxRecord) error) error {
+func (s *memorySandboxStoreForManagerIntegration) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, sandboxstore.SandboxStoreTx, *sandboxstore.SandboxRecord) error) error {
 	s.mu.Lock()
 	record := s.records[sandboxID]
 	if record == nil {
 		s.mu.Unlock()
-		return service.ErrSandboxRecordNotFound
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	cloned := cloneSandboxRecordForManagerIntegration(record)
 	s.mu.Unlock()
@@ -1238,20 +1311,20 @@ type memorySandboxStoreTxForManagerIntegration struct {
 	store *memorySandboxStoreForManagerIntegration
 }
 
-var _ service.SandboxStoreTx = memorySandboxStoreTxForManagerIntegration{}
+var _ sandboxstore.SandboxStoreTx = memorySandboxStoreTxForManagerIntegration{}
 
-func (t memorySandboxStoreTxForManagerIntegration) SaveSandbox(ctx context.Context, record *service.SandboxRecord) error {
+func (t memorySandboxStoreTxForManagerIntegration) SaveSandbox(ctx context.Context, record *sandboxstore.SandboxRecord) error {
 	return t.store.UpsertSandbox(ctx, record)
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName string, generation int64, expiresAt, hardExpiresAt time.Time, metadata service.SandboxRuntimeMetadata) error {
+func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context, sandboxID, namespace, podName string, generation int64, expiresAt, hardExpiresAt time.Time, metadata sandboxstore.SandboxRuntimeMetadata) error {
 	record := t.store.records[sandboxID]
-	if record == nil || record.DesiredState == service.SandboxDesiredStateTerminating || record.DesiredState == service.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
-		return service.ErrSandboxRecordNotFound
+	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = namespace
 	record.CurrentPodName = podName
-	record.DesiredState = service.SandboxDesiredStateActive
+	record.DesiredState = sandboxstore.SandboxDesiredStateActive
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
 	record.HardExpiresAt = hardExpiresAt
@@ -1266,8 +1339,8 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context
 
 func (t memorySandboxStoreTxForManagerIntegration) MarkHotClaimCompleted(_ context.Context, sandboxID string, completedAt time.Time) error {
 	record := t.store.records[sandboxID]
-	if record == nil || record.DesiredState == service.SandboxDesiredStateTerminating || record.DesiredState == service.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
-		return service.ErrSandboxRecordNotFound
+	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	record.HotClaimCompletedAt = completedAt
 	return nil
@@ -1275,12 +1348,12 @@ func (t memorySandboxStoreTxForManagerIntegration) MarkHotClaimCompleted(_ conte
 
 func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimePaused(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
 	record := t.store.records[sandboxID]
-	if record == nil || record.DesiredState == service.SandboxDesiredStateTerminating || record.DesiredState == service.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
-		return service.ErrSandboxRecordNotFound
+	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateTerminating || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	record.CurrentPodNamespace = ""
 	record.CurrentPodName = ""
-	record.DesiredState = service.SandboxDesiredStatePaused
+	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
 	if record.RuntimeGeneration < generation {
 		record.RuntimeGeneration = generation
 	}
@@ -1291,13 +1364,13 @@ func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimePaused(_ context.C
 func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimeTerminating(_ context.Context, sandboxID string) error {
 	record := t.store.records[sandboxID]
 	if record == nil || !record.DeletedAt.IsZero() {
-		return service.ErrSandboxRecordNotFound
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
-	record.DesiredState = service.SandboxDesiredStateTerminating
+	record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
 	return nil
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) SaveRootFSState(_ context.Context, state *service.SandboxRootFSState) error {
+func (t memorySandboxStoreTxForManagerIntegration) SaveRootFSState(_ context.Context, state *sandboxstore.SandboxRootFSState) error {
 	if state == nil || state.SandboxID == "" {
 		return nil
 	}
@@ -1305,7 +1378,7 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRootFSState(_ context.Con
 	return nil
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*service.SandboxLifecycleTxn, error) {
+func (t memorySandboxStoreTxForManagerIntegration) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*sandboxstore.SandboxLifecycleTxn, error) {
 	for _, txn := range t.store.lifecycleTxns {
 		if txn != nil && txn.SandboxID == sandboxID && managerIntegrationLifecyclePhaseActive(txn.Phase) {
 			return cloneSandboxLifecycleTxnForManagerIntegration(txn), nil
@@ -1314,21 +1387,21 @@ func (t memorySandboxStoreTxForManagerIntegration) GetActiveLifecycleTxn(_ conte
 	return nil, nil
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) BeginLifecycleTxn(_ context.Context, txn *service.SandboxLifecycleTxn) error {
+func (t memorySandboxStoreTxForManagerIntegration) BeginLifecycleTxn(_ context.Context, txn *sandboxstore.SandboxLifecycleTxn) error {
 	if txn == nil || txn.ID == "" {
 		return nil
 	}
 	record := t.store.records[txn.SandboxID]
 	if record == nil {
-		return service.ErrSandboxRecordNotFound
+		return sandboxstore.ErrSandboxRecordNotFound
 	}
 	record.LifecycleEpoch++
 	txn.Epoch = record.LifecycleEpoch
 	if txn.Phase == "" {
-		txn.Phase = service.SandboxLifecyclePhasePreparing
+		txn.Phase = sandboxstore.SandboxLifecyclePhasePreparing
 	}
 	if txn.Source == "" {
-		txn.Source = service.SandboxLifecycleSourceManual
+		txn.Source = sandboxstore.SandboxLifecycleSourceManual
 	}
 	t.store.lifecycleTxns[txn.ID] = cloneSandboxLifecycleTxnForManagerIntegration(txn)
 	return nil
@@ -1365,8 +1438,8 @@ func (t memorySandboxStoreTxForManagerIntegration) SetLifecycleTxnPreparedHead(_
 func (t memorySandboxStoreTxForManagerIntegration) RequestLifecycleTxnCancel(_ context.Context, txnID, reason string) (bool, error) {
 	txn := t.store.lifecycleTxns[txnID]
 	if txn == nil ||
-		txn.Kind != service.SandboxLifecycleKindPause ||
-		txn.Source != service.SandboxLifecycleSourceAuto ||
+		txn.Kind != sandboxstore.SandboxLifecycleKindPause ||
+		txn.Source != sandboxstore.SandboxLifecycleSourceAuto ||
 		!txn.Cancelable ||
 		!managerIntegrationLifecyclePhaseCancelable(txn.Phase) {
 		return false, nil
@@ -1385,7 +1458,7 @@ func (t memorySandboxStoreTxForManagerIntegration) CommitLifecycleTxn(_ context.
 		if !txn.CancelRequestedAt.IsZero() {
 			return stderrors.New("active lifecycle txn not found")
 		}
-		txn.Phase = service.SandboxLifecyclePhaseCommitted
+		txn.Phase = sandboxstore.SandboxLifecyclePhaseCommitted
 		txn.PreparedHeadLayerID = preparedHeadLayerID
 	}
 	return nil
@@ -1393,7 +1466,7 @@ func (t memorySandboxStoreTxForManagerIntegration) CommitLifecycleTxn(_ context.
 
 func (t memorySandboxStoreTxForManagerIntegration) AbortLifecycleTxn(_ context.Context, txnID, reason string) error {
 	if txn := t.store.lifecycleTxns[txnID]; txn != nil && managerIntegrationLifecyclePhaseActive(txn.Phase) {
-		txn.Phase = service.SandboxLifecyclePhaseAborted
+		txn.Phase = sandboxstore.SandboxLifecyclePhaseAborted
 		txn.Error = reason
 	}
 	return nil
@@ -1401,43 +1474,43 @@ func (t memorySandboxStoreTxForManagerIntegration) AbortLifecycleTxn(_ context.C
 
 func TestMemorySandboxStoreTxForManagerIntegrationFencesTerminatingRuntime(t *testing.T) {
 	const sandboxID = "sandbox-terminating"
-	store := newMemorySandboxStoreForManagerIntegration(&service.SandboxRecord{
+	store := newMemorySandboxStoreForManagerIntegration(&sandboxstore.SandboxRecord{
 		ID:           sandboxID,
-		DesiredState: service.SandboxDesiredStateActive,
+		DesiredState: sandboxstore.SandboxDesiredStateActive,
 	}, nil)
 	tx := memorySandboxStoreTxForManagerIntegration{store: store}
 
 	if err := tx.MarkRuntimeTerminating(t.Context(), sandboxID); err != nil {
 		t.Fatalf("mark runtime terminating: %v", err)
 	}
-	if got := store.records[sandboxID].DesiredState; got != service.SandboxDesiredStateTerminating {
+	if got := store.records[sandboxID].DesiredState; got != sandboxstore.SandboxDesiredStateTerminating {
 		t.Fatalf("expected terminating desired state, got %q", got)
 	}
-	if err := tx.MarkRuntimePaused(t.Context(), sandboxID, 2, time.Now()); !stderrors.Is(err, service.ErrSandboxRecordNotFound) {
+	if err := tx.MarkRuntimePaused(t.Context(), sandboxID, 2, time.Now()); !stderrors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 		t.Fatalf("expected paused write to be fenced, got %v", err)
 	}
-	if err := tx.SaveRuntime(t.Context(), sandboxID, "default", "replacement", 2, time.Time{}, time.Time{}, service.SandboxRuntimeMetadata{}); !stderrors.Is(err, service.ErrSandboxRecordNotFound) {
+	if err := tx.SaveRuntime(t.Context(), sandboxID, "default", "replacement", 2, time.Time{}, time.Time{}, sandboxstore.SandboxRuntimeMetadata{}); !stderrors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 		t.Fatalf("expected runtime write to be fenced, got %v", err)
 	}
-	if err := tx.SaveSandbox(t.Context(), &service.SandboxRecord{ID: sandboxID, DesiredState: service.SandboxDesiredStateActive}); err != nil {
+	if err := tx.SaveSandbox(t.Context(), &sandboxstore.SandboxRecord{ID: sandboxID, DesiredState: sandboxstore.SandboxDesiredStateActive}); err != nil {
 		t.Fatalf("save stale sandbox projection: %v", err)
 	}
-	if got := store.records[sandboxID].DesiredState; got != service.SandboxDesiredStateTerminating {
+	if got := store.records[sandboxID].DesiredState; got != sandboxstore.SandboxDesiredStateTerminating {
 		t.Fatalf("expected stale sandbox projection to remain fenced, got %q", got)
 	}
 }
 
-func cloneSandboxRecordForManagerIntegration(record *service.SandboxRecord) *service.SandboxRecord {
+func cloneSandboxRecordForManagerIntegration(record *sandboxstore.SandboxRecord) *sandboxstore.SandboxRecord {
 	if record == nil {
 		return nil
 	}
 	clone := *record
-	clone.Mounts = append([]service.ClaimMount(nil), record.Mounts...)
+	clone.Mounts = append([]managerapi.ClaimMount(nil), record.Mounts...)
 	clone.TemplateSpec = *record.TemplateSpec.DeepCopy()
 	return &clone
 }
 
-func cloneSandboxLifecycleTxnForManagerIntegration(txn *service.SandboxLifecycleTxn) *service.SandboxLifecycleTxn {
+func cloneSandboxLifecycleTxnForManagerIntegration(txn *sandboxstore.SandboxLifecycleTxn) *sandboxstore.SandboxLifecycleTxn {
 	if txn == nil {
 		return nil
 	}
@@ -1447,10 +1520,10 @@ func cloneSandboxLifecycleTxnForManagerIntegration(txn *service.SandboxLifecycle
 
 func managerIntegrationLifecyclePhaseActive(phase string) bool {
 	switch phase {
-	case service.SandboxLifecyclePhasePreparing,
-		service.SandboxLifecyclePhaseBarriered,
-		service.SandboxLifecyclePhasePublishing,
-		service.SandboxLifecyclePhaseCommitting:
+	case sandboxstore.SandboxLifecyclePhasePreparing,
+		sandboxstore.SandboxLifecyclePhaseBarriered,
+		sandboxstore.SandboxLifecyclePhasePublishing,
+		sandboxstore.SandboxLifecyclePhaseCommitting:
 		return true
 	default:
 		return false
@@ -1459,16 +1532,16 @@ func managerIntegrationLifecyclePhaseActive(phase string) bool {
 
 func managerIntegrationLifecyclePhaseCancelable(phase string) bool {
 	switch phase {
-	case service.SandboxLifecyclePhasePreparing,
-		service.SandboxLifecyclePhaseBarriered,
-		service.SandboxLifecyclePhasePublishing:
+	case sandboxstore.SandboxLifecyclePhasePreparing,
+		sandboxstore.SandboxLifecyclePhaseBarriered,
+		sandboxstore.SandboxLifecyclePhasePublishing:
 		return true
 	default:
 		return false
 	}
 }
 
-func cloneRootFSStateForManagerIntegration(state *service.SandboxRootFSState) *service.SandboxRootFSState {
+func cloneRootFSStateForManagerIntegration(state *sandboxstore.SandboxRootFSState) *sandboxstore.SandboxRootFSState {
 	if state == nil {
 		return nil
 	}
@@ -1478,11 +1551,11 @@ func cloneRootFSStateForManagerIntegration(state *service.SandboxRootFSState) *s
 	return &clone
 }
 
-func cloneRootFSLayersForManagerIntegration(layers []*service.SandboxRootFSLayer) []*service.SandboxRootFSLayer {
+func cloneRootFSLayersForManagerIntegration(layers []*sandboxstore.SandboxRootFSLayer) []*sandboxstore.SandboxRootFSLayer {
 	if len(layers) == 0 {
 		return nil
 	}
-	out := make([]*service.SandboxRootFSLayer, 0, len(layers))
+	out := make([]*sandboxstore.SandboxRootFSLayer, 0, len(layers))
 	for _, layer := range layers {
 		if layer == nil {
 			out = append(out, nil)
@@ -1495,7 +1568,7 @@ func cloneRootFSLayersForManagerIntegration(layers []*service.SandboxRootFSLayer
 	return out
 }
 
-func cloneRootFSSnapshotForManagerIntegration(snapshot *service.RootFSSnapshot) *service.RootFSSnapshot {
+func cloneRootFSSnapshotForManagerIntegration(snapshot *sandboxstore.RootFSSnapshot) *sandboxstore.RootFSSnapshot {
 	if snapshot == nil {
 		return nil
 	}
@@ -1503,7 +1576,7 @@ func cloneRootFSSnapshotForManagerIntegration(snapshot *service.RootFSSnapshot) 
 	return &clone
 }
 
-func cloneRootFSFilesystemForManagerIntegration(filesystem *service.RootFSFilesystem) *service.RootFSFilesystem {
+func cloneRootFSFilesystemForManagerIntegration(filesystem *sandboxstore.RootFSFilesystem) *sandboxstore.RootFSFilesystem {
 	if filesystem == nil {
 		return nil
 	}
@@ -1523,9 +1596,9 @@ func (r rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return r.transport.RoundTrip(clone)
 }
 
-func newProcdClientForURL(t *testing.T, baseURL string) *service.ProcdClient {
+func newProcdClientForURL(t *testing.T, baseURL string) *procdapi.ProcdClient {
 	t.Helper()
-	return service.NewProcdClientWithHTTPClient(newRewriteHTTPClientForURL(t, baseURL))
+	return procdapi.NewProcdClientWithHTTPClient(newRewriteHTTPClientForURL(t, baseURL))
 }
 
 func newRewriteHTTPClientForURL(t *testing.T, baseURL string) *http.Client {
@@ -1549,7 +1622,7 @@ func newProcdStubServer(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/api/v1/sandbox/pause", func(w http.ResponseWriter, r *http.Request) {
 		response := map[string]any{
 			"paused": true,
-			"resource_usage": &service.SandboxResourceUsage{
+			"resource_usage": &procdapi.SandboxResourceUsage{
 				ContainerMemoryWorkingSet: 64 * 1024 * 1024,
 			},
 		}
@@ -1560,8 +1633,8 @@ func newProcdStubServer(t *testing.T) *httptest.Server {
 		_ = json.NewEncoder(w).Encode(response)
 	})
 	mux.HandleFunc("/api/v1/sandbox/stats", func(w http.ResponseWriter, r *http.Request) {
-		response := service.StatsResponse{
-			SandboxResourceUsage: service.SandboxResourceUsage{
+		response := procdapi.StatsResponse{
+			SandboxResourceUsage: procdapi.SandboxResourceUsage{
 				ContainerMemoryWorkingSet: 64 * 1024 * 1024,
 				ContextCount:              1,
 			},

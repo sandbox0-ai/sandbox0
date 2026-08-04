@@ -107,7 +107,11 @@ func TestValidatorInvalidTarget(t *testing.T) {
 }
 
 func TestValidatorRejectsLegacyStorageProxyTarget(t *testing.T) {
-	generator := NewGenerator(DefaultGeneratorConfig(ServiceClusterGateway, testPrivateKey))
+	generator := NewGenerator(GeneratorConfig{
+		Caller:     ServiceClusterGateway,
+		PrivateKey: testPrivateKey,
+		TTL:        30 * time.Second,
+	})
 	validator := NewValidator(ValidatorConfig{
 		Target:    ServiceManagerStorage,
 		PublicKey: testPublicKey,
@@ -251,16 +255,8 @@ func TestContextHelpers(t *testing.T) {
 
 	ctx := WithClaims(context.Background(), claims)
 
-	if GetTeamID(ctx) != "team-123" {
-		t.Error("GetTeamID failed")
-	}
-
-	if GetUserID(ctx) != "user-456" {
-		t.Error("GetUserID failed")
-	}
-
-	if GetCaller(ctx) != "cluster-gateway" {
-		t.Error("GetCaller failed")
+	if got := ClaimsFromContext(ctx); got != claims {
+		t.Errorf("ClaimsFromContext() = %p, want %p", got, claims)
 	}
 
 	if !HasPermission(ctx, "read") {
@@ -275,9 +271,6 @@ func TestContextHelpers(t *testing.T) {
 		t.Error("HasAllPermissions failed")
 	}
 
-	if !HasAnyPermission(ctx, "delete", "read") {
-		t.Error("HasAnyPermission failed")
-	}
 }
 
 func TestReplayDetection(t *testing.T) {

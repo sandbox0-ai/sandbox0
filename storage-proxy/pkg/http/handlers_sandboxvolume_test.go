@@ -153,10 +153,11 @@ func TestCreateSandboxVolumeStoresS3BackendConfigAndRedactsResponse(t *testing.T
 	if created.Backend != volume.BackendS3 {
 		t.Fatalf("Backend = %q, want %q", created.Backend, volume.BackendS3)
 	}
-	cfg, err := volume.DecodeS3BackendConfig(created.BackendConfig)
-	if err != nil {
-		t.Fatalf("DecodeS3BackendConfig() error = %v", err)
+	var cfg volume.S3BackendConfig
+	if err := json.Unmarshal(created.BackendConfig, &cfg); err != nil {
+		t.Fatalf("decode stored backend config: %v", err)
 	}
+	cfg = volume.NormalizeS3BackendConfig(cfg)
 	if cfg.Provider != volume.S3ProviderR2 {
 		t.Fatalf("provider = %q, want %q", cfg.Provider, volume.S3ProviderR2)
 	}
@@ -175,7 +176,7 @@ func TestCreateSandboxVolumeStoresS3BackendConfigAndRedactsResponse(t *testing.T
 	if bytes.Contains(created.BackendConfig, []byte("access-secret")) || bytes.Contains(created.BackendConfig, []byte("secret-secret")) {
 		t.Fatalf("backend config leaked s3 credentials: %s", created.BackendConfig)
 	}
-	cfg, err = volume.DecodeS3BackendConfigWithCredentials(req.Context(), created.TeamID, created.ID, created.BackendConfig, server.s3CredentialCodec)
+	cfg, err := volume.DecodeS3BackendConfigWithCredentials(req.Context(), created.TeamID, created.ID, created.BackendConfig, server.s3CredentialCodec)
 	if err != nil {
 		t.Fatalf("DecodeS3BackendConfigWithCredentials() error = %v", err)
 	}

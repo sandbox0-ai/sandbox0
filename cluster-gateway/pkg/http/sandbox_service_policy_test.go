@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -21,11 +22,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/client"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	mgr "github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/ratelimit"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	mgr "github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxfunction"
 	"go.uber.org/zap"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1054,12 +1055,24 @@ func newSandboxServiceExposureTestServerWithAdmission(
 		logger:                zap.NewNop(),
 		managerClient:         client.NewManagerClient(managerURL, gen, zap.NewNop(), time.Second),
 		internalAuthGen:       gen,
-		sandboxServiceLimiter: ratelimit.NewMemoryLimiter(ratelimit.MemoryConfig{}),
+		sandboxServiceLimiter: newSandboxServiceRateLimiter(t),
 		admissionStore:        store,
 	}
 	router := gin.New()
 	router.NoRoute(s.handlePublicExposureNoRoute)
 	return router
+}
+
+func newSandboxServiceRateLimiter(t *testing.T) ratelimit.Limiter {
+	t.Helper()
+	limiter, err := ratelimit.New(context.Background(), ratelimit.Config{})
+	if err != nil {
+		t.Fatalf("create sandbox service rate limiter: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = limiter.Close()
+	})
+	return limiter
 }
 
 func serverPort(t *testing.T, rawURL string) int {

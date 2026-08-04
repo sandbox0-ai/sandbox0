@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	managernaming "github.com/sandbox0-ai/sandbox0/manager/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
@@ -55,6 +56,22 @@ func TestBuildPodTemplateIncludesTemplateHash(t *testing.T) {
 	assert.Equal(t, PoolTypeIdle, got.Labels[LabelPoolType])
 	assert.Equal(t, "template-a", got.Labels[LabelTemplateID])
 	assert.Equal(t, "logical-a", got.Labels[LabelTemplateLogicalID])
+}
+
+func TestNormalizedPoolBounds(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Pool: v1alpha1.PoolStrategy{MinIdle: 3, MaxIdle: 1},
+		},
+	}
+	minIdle, maxIdle := normalizedPoolBounds(template)
+	assert.Equal(t, int32(3), minIdle)
+	assert.Equal(t, int32(3), maxIdle)
+
+	template.Spec.Pool = v1alpha1.PoolStrategy{MinIdle: -1, MaxIdle: 5}
+	minIdle, maxIdle = normalizedPoolBounds(template)
+	assert.Equal(t, int32(0), minIdle)
+	assert.Equal(t, int32(5), maxIdle)
 }
 
 func TestAutoscalerSafeToEvictAnnotationKeysArePlatformConfigured(t *testing.T) {
@@ -859,7 +876,7 @@ func TestGetOrCreateReplicaSetAdoptsExistingReplicaSetForRecreatedTemplate(t *te
 			UID:       types.UID("new-template"),
 		},
 	}
-	rsName, err := naming.ReplicasetName(naming.DefaultClusterID, template.Name)
+	rsName, err := managernaming.ReplicaSetName(naming.DefaultClusterID, template.Name)
 	require.NoError(t, err)
 	rs := &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{

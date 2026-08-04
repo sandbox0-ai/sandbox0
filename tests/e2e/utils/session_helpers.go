@@ -10,9 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	e2eframework "github.com/sandbox0-ai/sandbox0/tests/e2e/internal/framework"
 )
 
 type Session struct {
@@ -33,7 +34,7 @@ func NewAPISession(env *framework.ScenarioEnv, useEdge bool) (*Session, func(), 
 		serviceName = env.Infra.Name + "-regional-gateway"
 	}
 
-	port, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)
+	port, err := e2eframework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)
 	if err != nil {
 		return nil, nil, err
 	}

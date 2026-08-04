@@ -1,0 +1,172 @@
+package credentialsource
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"strings"
+
+	egressauth "github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
+	"go.uber.org/zap"
+	"golang.org/x/crypto/ssh"
+)
+
+// CredentialSourceService manages team-scoped credential sources.
+type CredentialSourceService struct {
+	store  egressauth.SourceStore
+	logger *zap.Logger
+}
+
+var ErrCredentialSourceAlreadyExists = errors.New("credential source already exists")
+var ErrCredentialSourceNotFound = errors.New("credential source not found")
+
+func NewCredentialSourceService(store egressauth.SourceStore, logger *zap.Logger) *CredentialSourceService {
+	return &CredentialSourceService{
+		store:  store,
+		logger: logger,
+	}
+}
+
+func (s *CredentialSourceService) ListSources(ctx context.Context, teamID string) ([]egressauth.CredentialSourceMetadata, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("credential source store is not configured")
+	}
+	records, err := s.store.ListSourceMetadata(ctx, teamID)
+	if err != nil {
+		return nil, err
+	}
+	if records == nil {
+		records = []egressauth.CredentialSourceMetadata{}
+	}
+	return records, nil
+}
+
+func (s *CredentialSourceService) GetSource(ctx context.Context, teamID, name string) (*egressauth.CredentialSourceMetadata, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("credential source store is not configured")
+	}
+	return s.store.GetSourceMetadata(ctx, teamID, name)
+}
+
+func (s *CredentialSourceService) CreateSource(ctx context.Context, teamID string, record *egressauth.CredentialSourceWriteRequest) (*egressauth.CredentialSourceMetadata, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("credential source store is not configured")
+	}
+	if err := validateCredentialSourceWriteRequest(record); err != nil {
+		return nil, err
+	}
+	existing, err := s.store.GetSourceMetadata(ctx, teamID, record.Name)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, ErrCredentialSourceAlreadyExists
+	}
+	return s.store.PutSource(ctx, teamID, record)
+}
+
+func (s *CredentialSourceService) UpdateSource(ctx context.Context, teamID string, record *egressauth.CredentialSourceWriteRequest) (*egressauth.CredentialSourceMetadata, error) {
+	if s == nil || s.store == nil {
+		return nil, fmt.Errorf("credential source store is not configured")
+	}
+	if err := validateCredentialSourceWriteRequest(record); err != nil {
+		return nil, err
+	}
+	existing, err := s.store.GetSourceMetadata(ctx, teamID, record.Name)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, ErrCredentialSourceNotFound
+	}
+	if existing.ResolverKind != record.ResolverKind {
+		return nil, egressauth.ErrCredentialSourceResolverKindImmutable
+	}
+	return s.store.PutSource(ctx, teamID, record)
+}
+
+func (s *CredentialSourceService) DeleteSource(ctx context.Context, teamID, name string) error {
+	if s == nil || s.store == nil {
+		return fmt.Errorf("credential source store is not configured")
+	}
+	return s.store.DeleteSource(ctx, teamID, name)
+}
+
+func validateCredentialSourceWriteRequest(record *egressauth.CredentialSourceWriteRequest) error {
+	if record == nil {
+		return fmt.Errorf("credential source record is required")
+	}
+	if strings.TrimSpace(record.Name) == "" {
+		return fmt.Errorf("credential source name is required")
+	}
+	if strings.Contains(record.Name, "/") {
+		return fmt.Errorf("credential source name must not contain /")
+	}
+	if strings.TrimSpace(record.StorageKind) != "" {
+		return fmt.Errorf("credential source storage backend is configured by the platform")
+	}
+	if record.ExternalRef != nil {
+		return fmt.Errorf("credential source externalRef is configured by the platform")
+	}
+	return validateSecretBearingCredentialSource(record)
+}
+
+func validateSecretBearingCredentialSource(record *egressauth.CredentialSourceWriteRequest) error {
+	switch record.ResolverKind {
+	case "static_headers":
+		if record.Spec.StaticHeaders == nil {
+			return fmt.Errorf("static_headers spec is required")
+		}
+	case "static_username_password":
+		if record.Spec.StaticUsernamePassword == nil {
+			return fmt.Errorf("static_username_password spec is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticUsernamePassword.Username) == "" {
+			return fmt.Errorf("static_username_password username is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticUsernamePassword.Password) == "" {
+			return fmt.Errorf("static_username_password password is required")
+		}
+	case "static_tls_client_certificate":
+		if record.Spec.StaticTLSClientCertificate == nil {
+			return fmt.Errorf("static_tls_client_certificate spec is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticTLSClientCertificate.CertificatePEM) == "" {
+			return fmt.Errorf("static_tls_client_certificate certificatePem is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticTLSClientCertificate.PrivateKeyPEM) == "" {
+			return fmt.Errorf("static_tls_client_certificate privateKeyPem is required")
+		}
+		if _, err := tls.X509KeyPair(
+			[]byte(record.Spec.StaticTLSClientCertificate.CertificatePEM),
+			[]byte(record.Spec.StaticTLSClientCertificate.PrivateKeyPEM),
+		); err != nil {
+			return fmt.Errorf("static_tls_client_certificate keypair is invalid: %w", err)
+		}
+		if caPEM := strings.TrimSpace(record.Spec.StaticTLSClientCertificate.CAPEM); caPEM != "" {
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM([]byte(caPEM)) {
+				return fmt.Errorf("static_tls_client_certificate caPem is invalid")
+			}
+		}
+	case "static_ssh_private_key":
+		if record.Spec.StaticSSHPrivateKey == nil {
+			return fmt.Errorf("static_ssh_private_key spec is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticSSHPrivateKey.PrivateKeyPEM) == "" {
+			return fmt.Errorf("static_ssh_private_key privateKeyPem is required")
+		}
+		if strings.TrimSpace(record.Spec.StaticSSHPrivateKey.Passphrase) != "" {
+			if _, err := ssh.ParsePrivateKeyWithPassphrase([]byte(record.Spec.StaticSSHPrivateKey.PrivateKeyPEM), []byte(record.Spec.StaticSSHPrivateKey.Passphrase)); err != nil {
+				return fmt.Errorf("static_ssh_private_key privateKeyPem is invalid: %w", err)
+			}
+		} else if _, err := ssh.ParsePrivateKey([]byte(record.Spec.StaticSSHPrivateKey.PrivateKeyPEM)); err != nil {
+			return fmt.Errorf("static_ssh_private_key privateKeyPem is invalid: %w", err)
+		}
+	default:
+		return fmt.Errorf("credential source resolver_kind %q is not supported", record.ResolverKind)
+	}
+	return nil
+}

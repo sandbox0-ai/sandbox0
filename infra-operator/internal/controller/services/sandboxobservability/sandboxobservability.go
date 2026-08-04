@@ -40,10 +40,6 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
 }
 
-func (r *Reconciler) CleanupBuiltinResources(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
-	return nil
-}
-
 func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) error {
 	if infra == nil || !infrav1alpha1.IsSandboxObservabilityEnabled(infra) {
 		return nil

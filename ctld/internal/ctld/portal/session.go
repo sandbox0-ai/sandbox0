@@ -12,12 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	fsserver "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsserver"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
@@ -1091,123 +1090,3 @@ func (s *localSession) putReadCacheLocked(key string, data []byte) {
 	s.readCache[key] = data
 	s.readCacheBytes += len(data) - oldLen
 }
-
-type unboundSession struct{}
-
-func (unboundSession) Close() {}
-func unboundError() error {
-	return fserror.New(fserror.FailedPrecondition, "volume portal is not bound")
-}
-
-func (unboundSession) Lookup(context.Context, *pb.LookupRequest) (*pb.NodeResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) GetAttr(context.Context, *pb.GetAttrRequest) (*pb.GetAttrResponse, error) {
-	now := time.Now()
-	return &pb.GetAttrResponse{
-		Ino:       s0fs.RootInode,
-		Mode:      0o755 | 0o040000,
-		Nlink:     1,
-		AtimeSec:  now.Unix(),
-		AtimeNsec: int64(now.Nanosecond()),
-		MtimeSec:  now.Unix(),
-		MtimeNsec: int64(now.Nanosecond()),
-		CtimeSec:  now.Unix(),
-		CtimeNsec: int64(now.Nanosecond()),
-	}, nil
-}
-func (unboundSession) SetAttr(context.Context, *pb.SetAttrRequest) (*pb.SetAttrResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Mkdir(context.Context, *pb.MkdirRequest) (*pb.NodeResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Create(context.Context, *pb.CreateRequest) (*pb.NodeResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Unlink(context.Context, *pb.UnlinkRequest) (*pb.Empty, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Rmdir(context.Context, *pb.RmdirRequest) (*pb.Empty, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Rename(context.Context, *pb.RenameRequest) (*pb.Empty, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Link(context.Context, *pb.LinkRequest) (*pb.NodeResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Symlink(context.Context, *pb.SymlinkRequest) (*pb.NodeResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Readlink(context.Context, *pb.ReadlinkRequest) (*pb.ReadlinkResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Access(context.Context, *pb.AccessRequest) (*pb.Empty, error) {
-	return &pb.Empty{}, nil
-}
-func (unboundSession) Open(context.Context, *pb.OpenRequest) (*pb.OpenResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Read(context.Context, *pb.ReadRequest) (*pb.ReadResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Write(context.Context, *pb.WriteRequest) (*pb.WriteResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Release(context.Context, *pb.ReleaseRequest) (*pb.Empty, error) {
-	return &pb.Empty{}, nil
-}
-func (unboundSession) Flush(context.Context, *pb.FlushRequest) (*pb.Empty, error) {
-	return &pb.Empty{}, nil
-}
-func (unboundSession) Fsync(context.Context, *pb.FsyncRequest) (*pb.Empty, error) {
-	return &pb.Empty{}, nil
-}
-func (unboundSession) Fallocate(context.Context, *pb.FallocateRequest) (*pb.Empty, error) {
-	return nil, unboundError()
-}
-func (unboundSession) CopyFileRange(context.Context, *pb.CopyFileRangeRequest) (*pb.CopyFileRangeResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) OpenDir(context.Context, *pb.OpenDirRequest) (*pb.OpenDirResponse, error) {
-	return &pb.OpenDirResponse{HandleId: 1}, nil
-}
-func (unboundSession) ReadDir(context.Context, *pb.ReadDirRequest) (*pb.ReadDirResponse, error) {
-	return &pb.ReadDirResponse{}, nil
-}
-func (unboundSession) ReleaseDir(context.Context, *pb.ReleaseDirRequest) (*pb.Empty, error) {
-	return &pb.Empty{}, nil
-}
-func (unboundSession) StatFs(context.Context, *pb.StatFsRequest) (*pb.StatFsResponse, error) {
-	return &pb.StatFsResponse{Bsize: 4096, Frsize: 4096, Namelen: 255}, nil
-}
-func (unboundSession) GetXattr(context.Context, *pb.GetXattrRequest) (*pb.GetXattrResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) SetXattr(context.Context, *pb.SetXattrRequest) (*pb.Empty, error) {
-	return nil, unboundError()
-}
-func (unboundSession) ListXattr(context.Context, *pb.ListXattrRequest) (*pb.ListXattrResponse, error) {
-	return &pb.ListXattrResponse{}, nil
-}
-func (unboundSession) RemoveXattr(context.Context, *pb.RemoveXattrRequest) (*pb.Empty, error) {
-	return nil, unboundError()
-}
-func (unboundSession) Mknod(context.Context, *pb.MknodRequest) (*pb.NodeResponse, error) {
-	return nil, unboundError()
-}
-func (unboundSession) GetLk(context.Context, *pb.GetLkRequest) (*pb.GetLkResponse, error) {
-	return &pb.GetLkResponse{}, nil
-}
-func (unboundSession) SetLk(context.Context, *pb.SetLkRequest) (*pb.Empty, error) {
-	return &pb.Empty{}, nil
-}
-func (unboundSession) SetLkw(context.Context, *pb.SetLkRequest) (*pb.Empty, error) {
-	return &pb.Empty{}, nil
-}
-func (unboundSession) Flock(context.Context, *pb.FlockRequest) (*pb.Empty, error) {
-	return &pb.Empty{}, nil
-}
-
-var _ volumefuse.Session = unboundSession{}

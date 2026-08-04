@@ -73,7 +73,7 @@ func TestDialTCPUpstreamForRequestUsesSOCKS5Credentials(t *testing.T) {
 	proxyAddr, proxySeen := startTestSOCKS5Proxy(t, "alice", "secret")
 	expiresAt := time.Now().Add(time.Minute).UTC()
 	resolver := &stubEgressAuthResolver{
-		resp: egressauth.NewUsernamePasswordResolveResponse("corp-proxy", &egressauth.UsernamePasswordDirective{
+		resp: testUsernamePasswordResolveResponse("corp-proxy", &egressauth.UsernamePasswordDirective{
 			Username: "alice",
 			Password: "secret",
 		}, &expiresAt),

@@ -12,12 +12,6 @@ type ParsedSandboxName struct {
 	ClusterKey string
 }
 
-// ParsedReplicasetName provides decoded fields from a replicaset name.
-type ParsedReplicasetName struct {
-	ClusterID  string
-	ClusterKey string
-}
-
 // ParseSandboxName extracts the cluster ID from a sandbox (pod) name.
 // Accepts names generated from ReplicaSet-based sandbox names.
 func ParseSandboxName(name string) (*ParsedSandboxName, error) {
@@ -30,22 +24,6 @@ func ParseSandboxName(name string) (*ParsedSandboxName, error) {
 		return nil, err
 	}
 	return &ParsedSandboxName{
-		ClusterID:  clusterID,
-		ClusterKey: clusterKey,
-	}, nil
-}
-
-// ParseReplicasetName extracts the cluster ID from a replicaset name.
-func ParseReplicasetName(name string) (*ParsedReplicasetName, error) {
-	clusterKey, err := extractClusterKey(name, sandboxNamePrefix)
-	if err != nil {
-		return nil, err
-	}
-	clusterID, err := decodeClusterKey(clusterKey)
-	if err != nil {
-		return nil, err
-	}
-	return &ParsedReplicasetName{
 		ClusterID:  clusterID,
 		ClusterKey: clusterKey,
 	}, nil

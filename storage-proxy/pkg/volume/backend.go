@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	obsmetrics "github.com/sandbox0-ai/sandbox0/pkg/observability/metrics"
+	obsmetrics "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 )
@@ -100,12 +100,6 @@ func (v *VolumeContext) MarkUnlinkedFileIfOpen(inode uint64) bool {
 	}
 	v.unlinkedFiles[inode] = struct{}{}
 	return true
-}
-
-func (v *VolumeContext) FileOpenCount(inode uint64) int {
-	v.handleMu.Lock()
-	defer v.handleMu.Unlock()
-	return v.openFileCount[inode]
 }
 
 func (v *VolumeContext) ReleaseFileHandle(handleID uint64) (uint64, int, bool, bool) {

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumefuse"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -53,11 +53,6 @@ type rootFSStateEvent struct {
 
 type rootFSStateJournal struct {
 	file *os.File
-}
-
-func newRootFSBackedSession(root string) *rootFSBackedSession {
-	session, _ := newRootFSBackedSessionWithState(root, "")
-	return session
 }
 
 func newRootFSBackedSessionWithState(root, statePath string) (*rootFSBackedSession, error) {

@@ -22,7 +22,11 @@ func TestStorageAuthValidatorRejectsLegacyAudience(t *testing.T) {
 		t.Fatalf("generate key: %v", err)
 	}
 	validator := newStorageAuthValidator(publicKey)
-	generator := internalauth.NewGenerator(internalauth.DefaultGeneratorConfig(internalauth.ServiceClusterGateway, privateKey))
+	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller:     internalauth.ServiceClusterGateway,
+		PrivateKey: privateKey,
+		TTL:        30 * time.Second,
+	})
 
 	canonicalToken, err := generator.Generate(internalauth.ServiceManagerStorage, "team-1", "user-1", internalauth.GenerateOptions{})
 	if err != nil {

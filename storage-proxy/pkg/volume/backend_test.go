@@ -36,7 +36,7 @@ func (b *fakeBackend) UnmountVolume(_ context.Context, _ *VolumeContext) error {
 
 func TestManagerMountUsesBackend(t *testing.T) {
 	backend := &fakeBackend{}
-	mgr := NewManagerWithBackend(logrus.New(), &config.StorageProxyConfig{}, nil, backend)
+	mgr := NewManagerWithBackends(logrus.New(), &config.StorageProxyConfig{}, map[string]Backend{"default": backend}, "default")
 
 	sessionID, mountedAt, err := mgr.MountVolume(context.Background(), "team/team-a", "vol-1", "team-a", AccessModeRWO)
 	if err != nil {
@@ -75,7 +75,7 @@ func TestManagerMountUsesBackend(t *testing.T) {
 
 func TestManagerUnmountUsesBackend(t *testing.T) {
 	backend := &fakeBackend{}
-	mgr := NewManagerWithBackend(logrus.New(), &config.StorageProxyConfig{}, nil, backend)
+	mgr := NewManagerWithBackends(logrus.New(), &config.StorageProxyConfig{}, map[string]Backend{"default": backend}, "default")
 
 	sessionID, _, err := mgr.MountVolume(context.Background(), "", "vol-1", "team-a", AccessModeRWO)
 	if err != nil {
@@ -194,10 +194,6 @@ func TestVolumeContextReleaseFileHandleTracksUnlinkedInodes(t *testing.T) {
 	if !ok || inode != 10 || remaining != 1 || !unlinked {
 		t.Fatalf("first ReleaseFileHandle() = inode %d remaining %d unlinked %v ok %v", inode, remaining, unlinked, ok)
 	}
-	if got := volCtx.FileOpenCount(10); got != 1 {
-		t.Fatalf("FileOpenCount() after first release = %d, want 1", got)
-	}
-
 	inode, remaining, unlinked, ok = volCtx.ReleaseFileHandle(second)
 	if !ok || inode != 10 || remaining != 0 || !unlinked {
 		t.Fatalf("second ReleaseFileHandle() = inode %d remaining %d unlinked %v ok %v", inode, remaining, unlinked, ok)

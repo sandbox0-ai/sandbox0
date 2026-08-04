@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sandbox0-ai/sandbox0/cluster-gateway/pkg/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -16,64 +16,12 @@ import (
 
 // getClusterSummary proxies cluster summary request to manager
 func (s *Server) getClusterSummary(c *gin.Context) {
-	authCtx := middleware.GetAuthContext(c)
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-
-	// Generate internal token for manager
-	perms := s.cfg.SchedulerPermissions
-	if len(perms) == 0 {
-		perms = []string{"*:*"}
-	}
-	internalToken, err := s.generateManagerToken(authCtx, claims, perms)
-	if err != nil {
-		s.logger.Error("Failed to generate internal token for manager",
-			zap.String("team_id", authCtx.TeamID),
-			zap.Error(err),
-		)
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
-		return
-	}
-
-	// Set headers
-	c.Request.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
-	c.Request.Header.Set(internalauth.DefaultTokenHeader, internalToken)
-
-	// Rewrite path for manager
-	c.Request.URL.Path = "/internal/v1/cluster/summary"
-
-	// Forward to manager
-	s.proxy2Mgr.ProxyToTarget(c)
+	s.proxySchedulerManagerRequest(c, "/internal/v1/cluster/summary")
 }
 
 // getTemplateStats proxies template stats request to manager
 func (s *Server) getTemplateStats(c *gin.Context) {
-	authCtx := middleware.GetAuthContext(c)
-	claims := internalauth.ClaimsFromContext(c.Request.Context())
-
-	// Generate internal token for manager
-	perms := s.cfg.SchedulerPermissions
-	if len(perms) == 0 {
-		perms = []string{"*:*"}
-	}
-	internalToken, err := s.generateManagerToken(authCtx, claims, perms)
-	if err != nil {
-		s.logger.Error("Failed to generate internal token for manager",
-			zap.String("team_id", authCtx.TeamID),
-			zap.Error(err),
-		)
-		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
-		return
-	}
-
-	// Set headers
-	c.Request.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
-	c.Request.Header.Set(internalauth.DefaultTokenHeader, internalToken)
-
-	// Rewrite path for manager
-	c.Request.URL.Path = "/internal/v1/templates/stats"
-
-	// Forward to manager
-	s.proxy2Mgr.ProxyToTarget(c)
+	s.proxySchedulerManagerRequest(c, "/internal/v1/templates/stats")
 }
 
 // proxyInternalTemplateRequest forwards scheduler template sync requests to manager.
@@ -84,6 +32,12 @@ func (s *Server) proxyInternalTemplateRequest(c *gin.Context) {
 // proxyInternalManagerRequest forwards a trusted control-plane request to the
 // manager while preserving its internal path and caller team context.
 func (s *Server) proxyInternalManagerRequest(c *gin.Context) {
+	s.proxySchedulerManagerRequest(c, "")
+}
+
+// proxySchedulerManagerRequest forwards a scheduler request to the manager.
+// An empty managerPath preserves the incoming internal path.
+func (s *Server) proxySchedulerManagerRequest(c *gin.Context, managerPath string) {
 	authCtx := middleware.GetAuthContext(c)
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 
@@ -104,7 +58,10 @@ func (s *Server) proxyInternalManagerRequest(c *gin.Context) {
 	c.Request.Header.Set(internalauth.TeamIDHeader, authCtx.TeamID)
 	c.Request.Header.Set(internalauth.DefaultTokenHeader, internalToken)
 
-	// Preserve the incoming internal path and body.
+	if managerPath != "" {
+		c.Request.URL.Path = managerPath
+	}
+
 	s.proxy2Mgr.ProxyToTarget(c)
 }
 

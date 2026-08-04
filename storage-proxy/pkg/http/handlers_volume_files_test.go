@@ -756,7 +756,7 @@ func TestWriteVolumeFileChecksQuotaBeforeProxyingToOwner(t *testing.T) {
 
 	fileRPC := &fakeHTTPVolumeFileRPC{}
 	server, volMgr := newVolumeFileTestServer(fileRPC)
-	quotaRepo := quota.NewRepositoryWithDB(&fakeQuotaDB{
+	quotaRepo := quota.NewRepository(&fakeQuotaDB{
 		limit: &quota.Limit{
 			TeamID:     "team-a",
 			Dimension:  quota.DimensionVolumeStorageGB,

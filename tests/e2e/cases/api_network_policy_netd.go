@@ -13,12 +13,13 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/internal/framework"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
-	"github.com/sandbox0-ai/sandbox0/pkg/framework"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/rediscache"
+	e2eframework "github.com/sandbox0-ai/sandbox0/tests/e2e/internal/framework"
 	e2eutils "github.com/sandbox0-ai/sandbox0/tests/e2e/utils"
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -95,7 +96,7 @@ func assertNetdClusterDNSUDP(env *framework.ScenarioEnv, session *e2eutils.Sessi
 	sandbox = waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
 	waitForSandboxNetworkPolicyApplied(env, templateNamespace, sandbox.PodName)
 
-	dnsIP, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, "kube-system", "service", "kube-dns", "{.spec.clusterIP}")
+	dnsIP, err := e2eframework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, "kube-system", "service", "kube-dns", "{.spec.clusterIP}")
 	Expect(err).NotTo(HaveOccurred())
 	dnsIP = strings.TrimSpace(dnsIP)
 	Expect(dnsIP).NotTo(BeEmpty())
@@ -285,7 +286,7 @@ func clearNetdRedisTeamBandwidthKeys(env *framework.ScenarioEnv, teamID string) 
 	}
 
 	serviceName := env.Infra.Name + "-redis"
-	port, err := framework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)
+	port, err := e2eframework.GetServicePort(env.TestCtx.Context, env.Config.Kubeconfig, env.Infra.Namespace, serviceName)
 	if err != nil {
 		return err
 	}
@@ -411,11 +412,11 @@ func setupNetdHTTPFixture(env *framework.ScenarioEnv, sandboxNamespace, sandboxP
 	Expect(framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, namespace, "pod", "allow-http", "Ready", "2m")).To(Succeed())
 	Expect(framework.KubectlWaitForCondition(env.TestCtx.Context, env.Config.Kubeconfig, namespace, "pod", "deny-http", "Ready", "2m")).To(Succeed())
 
-	allowIP, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, namespace, "pod", "allow-http", "{.status.podIP}")
+	allowIP, err := e2eframework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, namespace, "pod", "allow-http", "{.status.podIP}")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(strings.TrimSpace(allowIP)).NotTo(BeEmpty())
 
-	denyIP, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, namespace, "pod", "deny-http", "{.status.podIP}")
+	denyIP, err := e2eframework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, namespace, "pod", "deny-http", "{.status.podIP}")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(strings.TrimSpace(denyIP)).NotTo(BeEmpty())
 
@@ -427,7 +428,7 @@ func setupNetdHTTPFixture(env *framework.ScenarioEnv, sandboxNamespace, sandboxP
 }
 
 func selectNetdHTTPFixtureNode(env *framework.ScenarioEnv, sandboxNamespace, sandboxPodName string) string {
-	sandboxNode, err := framework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, sandboxNamespace, "pod", sandboxPodName, "{.spec.nodeName}")
+	sandboxNode, err := e2eframework.KubectlGetJSONPath(env.TestCtx.Context, env.Config.Kubeconfig, sandboxNamespace, "pod", sandboxPodName, "{.spec.nodeName}")
 	Expect(err).NotTo(HaveOccurred())
 	sandboxNode = strings.TrimSpace(sandboxNode)
 

@@ -188,6 +188,27 @@ DNS name for manager's server-side publication only. Do not put a Kubernetes
 Service DNS name in a Template image reference: node container runtimes do not
 normally use cluster DNS.
 
+Aliyun ACR can expose separate internet and VPC hostnames. Configure `registry`
+with the internet hostname so external developers and CI can push images, and
+configure `pullRegistry` plus `internalRegistry` with the VPC hostname so
+sandbox nodes and Sandbox0 services stay on the private path:
+
+```yaml
+spec:
+    registry:
+        provider: aliyun
+        aliyun:
+            registry: registry.example.com
+            pullRegistry: registry-vpc.example.com
+            internalRegistry: registry-vpc.example.com
+            region: us-east-1
+            instanceId: cri-example
+            pullSecret:
+                name: acr-pull-secret
+            credentialsSecret:
+                name: aliyun-credentials
+```
+
 ---
 
 ## How Authentication Works

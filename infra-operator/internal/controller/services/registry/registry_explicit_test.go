@@ -113,3 +113,60 @@ func TestResolveRegistryConfigAllowsGCPWithoutPullSecret(t *testing.T) {
 		t.Fatalf("expected no source pull secret, got %#v", cfg)
 	}
 }
+
+func TestResolveRegistryConfigUsesSplitAliyunEndpoints(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Registry: &infrav1alpha1.RegistryConfig{
+				Provider: infrav1alpha1.RegistryProviderAliyun,
+				Aliyun: &infrav1alpha1.AliyunRegistryConfig{
+					Registry:         "registry.example.com",
+					PullRegistry:     "registry-vpc.example.com",
+					InternalRegistry: "registry-service.example.com",
+					PullSecret: infrav1alpha1.DockerConfigSecretRef{
+						Name: "acr-pull-secret",
+					},
+				},
+			},
+		},
+	}
+
+	cfg := ResolveRegistryConfig(infra)
+	if cfg == nil {
+		t.Fatal("expected resolved registry config")
+	}
+	if cfg.PushRegistry != "registry.example.com" {
+		t.Fatalf("unexpected push registry: %q", cfg.PushRegistry)
+	}
+	if cfg.PullRegistry != "registry-vpc.example.com" {
+		t.Fatalf("unexpected pull registry: %q", cfg.PullRegistry)
+	}
+	if cfg.InternalRegistry != "registry-service.example.com" {
+		t.Fatalf("unexpected internal registry: %q", cfg.InternalRegistry)
+	}
+	if cfg.SourceSecretName != "acr-pull-secret" {
+		t.Fatalf("unexpected source secret: %q", cfg.SourceSecretName)
+	}
+}
+
+func TestResolveRegistryConfigDefaultsAliyunInternalEndpointToPullEndpoint(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			Registry: &infrav1alpha1.RegistryConfig{
+				Provider: infrav1alpha1.RegistryProviderAliyun,
+				Aliyun: &infrav1alpha1.AliyunRegistryConfig{
+					Registry:     "registry.example.com",
+					PullRegistry: "registry-vpc.example.com",
+				},
+			},
+		},
+	}
+
+	cfg := ResolveRegistryConfig(infra)
+	if cfg == nil {
+		t.Fatal("expected resolved registry config")
+	}
+	if cfg.InternalRegistry != "registry-vpc.example.com" {
+		t.Fatalf("unexpected internal registry: %q", cfg.InternalRegistry)
+	}
+}

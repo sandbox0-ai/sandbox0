@@ -2309,6 +2309,17 @@ spec:
                       instanceId:
                         description: InstanceID specifies the ACR instance ID.
                         type: string
+                      internalRegistry:
+                        description: |-
+                          InternalRegistry optionally specifies a private registry hostname used by
+                          Sandbox0 services for server-side image publication. It defaults to
+                          PullRegistry when configured, otherwise Registry.
+                        type: string
+                      pullRegistry:
+                        description: |-
+                          PullRegistry optionally specifies a private registry hostname reachable by
+                          sandbox nodes. It defaults to Registry.
+                        type: string
                       pullSecret:
                         description: PullSecret references the dockerconfigjson secret
                           to use for image pulls.
@@ -2327,7 +2338,8 @@ spec:
                         description: Region specifies the Aliyun region.
                         type: string
                       registry:
-                        description: Registry specifies the registry hostname.
+                        description: Registry specifies the public registry hostname
+                          used for external image pushes.
                         type: string
                     required:
                     - credentialsSecret

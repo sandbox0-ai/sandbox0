@@ -632,6 +632,29 @@ func TestPublicationEndpointsExternalUsesPushAndPullEndpoints(t *testing.T) {
 	}
 }
 
+func TestPublicationEndpointsExternalUsesInternalEndpointForServerSidePush(t *testing.T) {
+	t.Parallel()
+
+	teamID := "team"
+	teamPrefix := naming.TeamImageRepositoryPrefix(teamID)
+	push, pull, plainHTTP, err := publicationEndpoints(
+		&managerregistry.Credential{
+			Provider:     "aliyun",
+			PushRegistry: "registry.example.com/" + teamPrefix,
+			PullRegistry: "registry-vpc.example.com/" + teamPrefix,
+		},
+		"registry-vpc.example.com",
+		teamID,
+	)
+	if err != nil {
+		t.Fatalf("publicationEndpoints() error = %v", err)
+	}
+	want := "registry-vpc.example.com/" + teamPrefix
+	if push != want || pull != want || plainHTTP {
+		t.Fatalf("publicationEndpoints() = %q, %q, %v", push, pull, plainHTTP)
+	}
+}
+
 func TestRegistryEndpointsWithPathsPreserveRepositoryAndCompareByAuthority(t *testing.T) {
 	t.Parallel()
 

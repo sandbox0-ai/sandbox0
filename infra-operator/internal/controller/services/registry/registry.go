@@ -743,10 +743,12 @@ func builtinInternalRegistry(infra *infrav1alpha1.Sandbox0Infra, builtin infrav1
 }
 
 type registryProviderConfig struct {
-	Registry   string
-	PullSecret *infrav1alpha1.DockerConfigSecretRef
-	Region     string
-	RegistryID string
+	Registry         string
+	PullRegistry     string
+	InternalRegistry string
+	PullSecret       *infrav1alpha1.DockerConfigSecretRef
+	Region           string
+	RegistryID       string
 }
 
 func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interface{}, targetSecretName string) *ResolvedRegistryConfig {
@@ -777,6 +779,8 @@ func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interf
 			return nil
 		}
 		resolved.Registry = typed.Registry
+		resolved.PullRegistry = typed.PullRegistry
+		resolved.InternalRegistry = typed.InternalRegistry
 		resolved.PullSecret = &typed.PullSecret
 	case *infrav1alpha1.HarborRegistryConfig:
 		if typed == nil {
@@ -800,11 +804,19 @@ func resolveExternalRegistry(provider infrav1alpha1.RegistryProvider, cfg interf
 	if resolved.Registry == "" && resolved.Region != "" && resolved.RegistryID != "" {
 		resolved.Registry = fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com", resolved.RegistryID, resolved.Region)
 	}
+	pullRegistry := resolved.PullRegistry
+	if pullRegistry == "" {
+		pullRegistry = resolved.Registry
+	}
+	internalRegistry := resolved.InternalRegistry
+	if internalRegistry == "" {
+		internalRegistry = pullRegistry
+	}
 	return &ResolvedRegistryConfig{
 		Provider:         provider,
 		PushRegistry:     resolved.Registry,
-		PullRegistry:     resolved.Registry,
-		InternalRegistry: resolved.Registry,
+		PullRegistry:     pullRegistry,
+		InternalRegistry: internalRegistry,
 		SourceSecretName: secretName,
 		SourceSecretKey:  secretKey,
 		TargetSecretName: targetSecretName,

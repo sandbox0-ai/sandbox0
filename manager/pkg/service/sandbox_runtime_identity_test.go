@@ -323,6 +323,17 @@ func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespac
 	return nil
 }
 
+func (t memorySandboxStoreTx) MarkHotClaimCompleted(_ context.Context, sandboxID string, completedAt time.Time) error {
+	t.store.mu.Lock()
+	defer t.store.mu.Unlock()
+	record := t.store.records[sandboxID]
+	if record == nil || record.DesiredState == SandboxDesiredStateTerminating || record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+		return ErrSandboxRecordNotFound
+	}
+	record.HotClaimCompletedAt = completedAt
+	return nil
+}
+
 func (t memorySandboxStoreTx) MarkRuntimePaused(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
 	t.store.mu.Lock()
 	defer t.store.mu.Unlock()

@@ -193,6 +193,7 @@ type SandboxStore interface {
 type SandboxStoreTx interface {
 	SaveSandbox(ctx context.Context, record *SandboxRecord) error
 	SaveRuntime(ctx context.Context, sandboxID, namespace, podName string, generation int64, expiresAt, hardExpiresAt time.Time, metadata SandboxRuntimeMetadata) error
+	MarkHotClaimCompleted(ctx context.Context, sandboxID string, completedAt time.Time) error
 	MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error
 	MarkRuntimeTerminating(ctx context.Context, sandboxID string) error
 	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
@@ -749,6 +750,26 @@ func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, p
 	`, sandboxID, SandboxDesiredStateActive, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt), strings.TrimSpace(metadata.WebhookStateVolumeID), strings.TrimSpace(metadata.OwnerKind), SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
 	if err != nil {
 		return fmt.Errorf("save sandbox runtime: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, sandboxID)
+	}
+	return nil
+}
+
+// MarkHotClaimCompleted records a hot-pool handoff inside the caller's locked
+// lifecycle transaction.
+func (t sandboxStoreTx) MarkHotClaimCompleted(ctx context.Context, sandboxID string, completedAt time.Time) error {
+	tag, err := t.tx.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET hot_claim_completed_at = $2,
+			updated_at = NOW()
+		WHERE sandbox_id = $1
+			AND deleted_at IS NULL
+			AND desired_state NOT IN ($3, $4)
+	`, sandboxID, completedAt, SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
+	if err != nil {
+		return fmt.Errorf("mark hot claim completed: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, sandboxID)

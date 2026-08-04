@@ -109,6 +109,81 @@ func TestHotClaimReservationControllerFinalizesRecordCompletedClaim(t *testing.T
 	}
 }
 
+func TestCommittedHotClaimResumeSurvivesReservationRecoveryGrace(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	pod := newHotClaimReservationTestPod(
+		now.Add(-hotClaimReservationRecoveryGracePeriod-time.Second),
+		controller.HotClaimReservationStateInitializing,
+	)
+	pod.Annotations[controller.AnnotationHotClaimCompletionProtocol] = controller.HotClaimCompletionProtocolRecordV2
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "2"
+	record := hotClaimReservationTestRecord(pod)
+	record.DesiredState = SandboxDesiredStatePaused
+	record.CurrentPodName = ""
+	record.CurrentPodNamespace = ""
+	record.RuntimeGeneration = 1
+	txn := &SandboxLifecycleTxn{
+		ID:             "resume-txn-sandbox-a",
+		SandboxID:      record.ID,
+		Kind:           SandboxLifecycleKindResume,
+		Phase:          SandboxLifecyclePhasePreparing,
+		FromGeneration: 1,
+		ToGeneration:   2,
+		ToPodNamespace: pod.Namespace,
+		ToPodName:      pod.Name,
+	}
+	store := &memorySandboxStore{
+		records:       map[string]*SandboxRecord{record.ID: record},
+		lifecycleTxns: map[string]*SandboxLifecycleTxn{txn.ID: txn},
+	}
+	service := &SandboxService{
+		sandboxStore: store,
+		clock:        fixedClock{now: now},
+	}
+
+	if err := service.commitResumedSandboxRuntime(context.Background(), pod, record, txn); err != nil {
+		t.Fatalf("commitResumedSandboxRuntime() error = %v", err)
+	}
+	gotRecord, err := store.GetSandbox(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if gotRecord.DesiredState != SandboxDesiredStateActive ||
+		gotRecord.CurrentPodNamespace != pod.Namespace ||
+		gotRecord.CurrentPodName != pod.Name ||
+		gotRecord.RuntimeGeneration != 2 ||
+		!gotRecord.HotClaimCompletedAt.Equal(now) {
+		t.Fatalf("sandbox record = %#v, want committed hot resume with completion marker", gotRecord)
+	}
+	if gotTxn := store.lifecycleTxns[txn.ID]; gotTxn == nil || gotTxn.Phase != SandboxLifecyclePhaseCommitted {
+		t.Fatalf("lifecycle transaction = %#v, want committed", gotTxn)
+	}
+
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	reconciler := NewHotClaimReservationController(client, newClaimTestPodLister(t, pod), store, nil)
+	reconciler.clock = fixedClock{now: now}
+	reconciler.settleWindow = 0
+	reconciler.detachPacer = &recordingHotClaimDetachmentPacer{}
+
+	if _, err := reconciler.reconcile(context.Background(), pod.Namespace+"/"+pod.Name); err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+	gotPod, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get finalized pod: %v", err)
+	}
+	if gotPod.Labels[controller.LabelPoolType] != controller.PoolTypeActive || controller.IsHotClaimReservedPod(gotPod) {
+		t.Fatalf("finalized pod = %#v, want active without a hot claim reservation", gotPod)
+	}
+	gotRecord, err = store.GetSandbox(context.Background(), record.ID)
+	if err != nil {
+		t.Fatalf("GetSandbox() after reconcile error = %v", err)
+	}
+	if gotRecord.DesiredState != SandboxDesiredStateActive || !gotRecord.DeletedAt.IsZero() {
+		t.Fatalf("sandbox record after recovery grace = %#v, want active and not deleted", gotRecord)
+	}
+}
+
 func TestHotClaimReservationControllerDoesNotCompleteUnsafeInitializingClaim(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
 	tests := []struct {

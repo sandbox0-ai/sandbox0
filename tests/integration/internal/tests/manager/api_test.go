@@ -1264,6 +1264,15 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context
 	return nil
 }
 
+func (t memorySandboxStoreTxForManagerIntegration) MarkHotClaimCompleted(_ context.Context, sandboxID string, completedAt time.Time) error {
+	record := t.store.records[sandboxID]
+	if record == nil || record.DesiredState == service.SandboxDesiredStateTerminating || record.DesiredState == service.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+		return service.ErrSandboxRecordNotFound
+	}
+	record.HotClaimCompletedAt = completedAt
+	return nil
+}
+
 func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimePaused(_ context.Context, sandboxID string, generation int64, _ time.Time) error {
 	record := t.store.records[sandboxID]
 	if record == nil || record.DesiredState == service.SandboxDesiredStateTerminating || record.DesiredState == service.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {

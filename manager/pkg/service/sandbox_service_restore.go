@@ -343,6 +343,11 @@ func (s *SandboxService) commitResumedSandboxRuntime(ctx context.Context, pod *c
 		if err := tx.SaveRuntime(lockCtx, record.ID, pod.Namespace, pod.Name, txn.ToGeneration, parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt), parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt), sandboxRuntimeMetadataFromPod(pod)); err != nil {
 			return err
 		}
+		if hotClaimUsesRecordCompletion(pod) {
+			if err := tx.MarkHotClaimCompleted(lockCtx, record.ID, s.clock.Now().UTC()); err != nil {
+				return err
+			}
+		}
 		return tx.CommitLifecycleTxn(lockCtx, txn.ID, "")
 	})
 }

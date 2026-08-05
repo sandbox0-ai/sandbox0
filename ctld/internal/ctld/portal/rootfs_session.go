@@ -470,7 +470,14 @@ func (s *rootFSBackedSession) Release(_ context.Context, req *pb.ReleaseRequest)
 	return &pb.Empty{}, nil
 }
 
-func (s *rootFSBackedSession) Flush(_ context.Context, req *pb.FlushRequest) (*pb.Empty, error) {
+func (*rootFSBackedSession) Flush(context.Context, *pb.FlushRequest) (*pb.Empty, error) {
+	// FUSE flush runs for every close and is not a durability boundary. Writes
+	// already reach the host overlay through WriteAt; syncing here would turn
+	// every close into fsync and severely penalize small-file workloads.
+	return &pb.Empty{}, nil
+}
+
+func (s *rootFSBackedSession) Fsync(_ context.Context, req *pb.FsyncRequest) (*pb.Empty, error) {
 	if handle := s.lookupHandle(req.GetHandleId()); handle != nil {
 		if err := handle.Sync(); err != nil {
 			return nil, mapRootFSBackedError(err)
@@ -492,10 +499,6 @@ func (s *rootFSBackedSession) Flush(_ context.Context, req *pb.FlushRequest) (*p
 		}
 	}
 	return &pb.Empty{}, nil
-}
-
-func (s *rootFSBackedSession) Fsync(_ context.Context, req *pb.FsyncRequest) (*pb.Empty, error) {
-	return s.Flush(context.Background(), &pb.FlushRequest{HandleId: req.GetHandleId()})
 }
 
 func (s *rootFSBackedSession) Fallocate(_ context.Context, req *pb.FallocateRequest) (*pb.Empty, error) {

@@ -68,6 +68,28 @@ func TestRootFSBackedSessionWritesThroughBackingDir(t *testing.T) {
 	assert.Equal(t, "state.txt", list.Entries[0].Name)
 }
 
+func TestRootFSBackedSessionFlushDoesNotImplyFsync(t *testing.T) {
+	session, err := newRootFSBackedSessionWithState(t.TempDir(), "")
+	require.NoError(t, err)
+	defer session.Close()
+
+	created, err := session.Create(context.Background(), &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "flush.txt",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	handle := session.lookupHandle(created.HandleId)
+	require.NotNil(t, handle)
+	require.NoError(t, handle.Close())
+
+	_, err = session.Flush(context.Background(), &pb.FlushRequest{HandleId: created.HandleId})
+	require.NoError(t, err)
+	_, err = session.Fsync(context.Background(), &pb.FsyncRequest{HandleId: created.HandleId})
+	require.Error(t, err)
+}
+
 func TestRootFSBackedSessionRebaseExposesRestoredFilesAndRedirectsWrites(t *testing.T) {
 	staging := t.TempDir()
 	upper := t.TempDir()

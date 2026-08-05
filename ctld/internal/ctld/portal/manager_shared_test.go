@@ -29,6 +29,9 @@ func TestPortalMountOptionsDisableUnsupportedIDMapCapability(t *testing.T) {
 	if opts.DisabledCapabilities&fuse.CAP_ALLOW_IDMAP == 0 {
 		t.Fatal("portal mount options enable FUSE_ALLOW_IDMAP without default_permissions")
 	}
+	if opts.MaxWrite != 1<<20 {
+		t.Fatalf("portal max write = %d, want %d", opts.MaxWrite, 1<<20)
+	}
 }
 
 func TestNewS0FSVolumeContextWiresStorageObserver(t *testing.T) {

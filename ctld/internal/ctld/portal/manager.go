@@ -614,7 +614,9 @@ func portalMountOptions() *fuse.MountOptions {
 		EnableLocks:   true,
 		AllowOther:    os.Getuid() == 0,
 		DirectMount:   true,
-		MaxWrite:      256 * 1024,
+		// Match the rootfs FUSE path and amortize local portal round trips for
+		// sequential I/O. fuseportal reuses these larger request buffers.
+		MaxWrite: 1 << 20,
 		// Linux 6.17 rejects ALLOW_IDMAP without default_permissions.
 		DisabledCapabilities: fuse.CAP_ALLOW_IDMAP,
 	}

@@ -32,6 +32,7 @@ var (
 
 type SessionConfig struct {
 	Capture                  *Capture
+	EventRoot                string
 	Protection               CaptureProtection
 	WatchFenceRoot           string
 	CaptureWorkers           int
@@ -89,11 +90,12 @@ type inodeIdentity struct {
 	inode  uint64
 }
 
-// Session continuously captures an active overlay upper. A healthy watcher is
-// fenced before Seal so the hot path only drains known dirty paths. Watcher
-// uncertainty falls back to a complete metadata reconciliation.
+// Session captures content from an active overlay upper while using the merged
+// rootfs as its event source. Seal fences events and verifies upper metadata so
+// watcher uncertainty cannot publish stale content.
 type Session struct {
-	capture *Capture
+	capture   *Capture
+	eventRoot string
 
 	mu                  sync.Mutex
 	dirty               map[string]dirtyPath
@@ -155,6 +157,17 @@ func StartSession(parent context.Context, cfg SessionConfig) (*Session, error) {
 	if cfg.Protection == nil {
 		return nil, fmt.Errorf("rootfs capture protection is required")
 	}
+	eventRoot := filepath.Clean(strings.TrimSpace(cfg.EventRoot))
+	if eventRoot == "" || eventRoot == "." || !filepath.IsAbs(eventRoot) {
+		return nil, fmt.Errorf("rootfs event root is required")
+	}
+	eventRootInfo, err := os.Stat(eventRoot)
+	if err != nil {
+		return nil, fmt.Errorf("inspect rootfs event root: %w", err)
+	}
+	if !eventRootInfo.IsDir() {
+		return nil, fmt.Errorf("rootfs event root %s is not a directory", eventRoot)
+	}
 	workers := cfg.CaptureWorkers
 	if workers <= 0 {
 		workers = defaultCaptureWorkers
@@ -199,6 +212,7 @@ func StartSession(parent context.Context, cfg SessionConfig) (*Session, error) {
 	}
 	session := &Session{
 		capture:           cfg.Capture,
+		eventRoot:         eventRoot,
 		dirty:             make(map[string]dirtyPath),
 		inflight:          make(map[string]bool),
 		known:             make(map[string]FileVersion),
@@ -329,22 +343,19 @@ func (s *Session) Seal(ctx context.Context, request SealRequest) (SealResult, er
 	}
 	s.mu.Lock()
 	s.accepting = false
-	needsFullReconcile := s.needsFullReconcile
 	s.mu.Unlock()
 	if err := s.waitIdle(ctx); err != nil {
 		s.recordSealError(err)
 		return SealResult{}, err
 	}
 	reconcileStarted := time.Now()
-	if needsFullReconcile {
-		if err := s.reconcileDirect(ctx); err != nil {
-			s.recordSealError(err)
-			return SealResult{}, err
-		}
-		s.mu.Lock()
-		s.needsFullReconcile = false
-		s.mu.Unlock()
+	if err := s.reconcileDirect(ctx); err != nil {
+		s.recordSealError(err)
+		return SealResult{}, err
 	}
+	s.mu.Lock()
+	s.needsFullReconcile = false
+	s.mu.Unlock()
 	reconcileDuration := time.Since(reconcileStarted)
 	flushStarted := time.Now()
 	root, err := s.capture.editor.Flush(ctx)
@@ -495,22 +506,12 @@ func (s *Session) watch() {
 			if s.handleWatchFence(event.Name) {
 				continue
 			}
-			relative, err := filepath.Rel(s.capture.Root(), event.Name)
-			if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			if relative, ok := relativeToRoot(s.capture.Root(), event.Name); ok {
+				s.handleUpperEvent(event, relative)
 				continue
 			}
-			relative = cleanRelativePath(relative)
-			if s.capture.Excludes(relative) {
-				continue
-			}
-			if event.Op&fsnotify.Create != 0 {
-				if err := s.addWatchTree(event.Name, true); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					s.markWatcherUnhealthy(err)
-				}
-			}
-			s.mark(relative)
-			if relative != "" {
-				s.mark(filepath.ToSlash(filepath.Dir(relative)))
+			if relative, ok := relativeToRoot(s.eventRoot, event.Name); ok {
+				s.handleMergedEvent(event, relative)
 			}
 		case _, ok := <-s.watcher.Errors:
 			if !ok {
@@ -521,6 +522,43 @@ func (s *Session) watch() {
 			}
 			s.markWatcherUnhealthy(fmt.Errorf("rootfs watcher reported an event queue error"))
 		}
+	}
+}
+
+func (s *Session) handleUpperEvent(event fsnotify.Event, relative string) {
+	if s.capture.Excludes(relative) {
+		return
+	}
+	if event.Op&fsnotify.Create != 0 {
+		if err := s.addWatchTree(event.Name, true); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			s.markWatcherUnhealthy(err)
+		}
+	}
+	s.markWithParent(relative)
+}
+
+func (s *Session) handleMergedEvent(event fsnotify.Event, relative string) {
+	if s.capture.Excludes(relative) {
+		return
+	}
+	if event.Op&fsnotify.Create != 0 {
+		if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+			if err := s.watcher.Add(event.Name); err != nil {
+				s.markWatcherUnhealthy(fmt.Errorf("watch merged rootfs directory %s: %w", event.Name, err))
+			}
+		}
+		upperPath := filepath.Join(s.capture.Root(), filepath.FromSlash(relative))
+		if err := s.addWatchTree(upperPath, true); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			s.markWatcherUnhealthy(err)
+		}
+	}
+	s.markWithParent(relative)
+}
+
+func (s *Session) markWithParent(relative string) {
+	s.mark(relative)
+	if relative != "" {
+		s.mark(filepath.ToSlash(filepath.Dir(relative)))
 	}
 }
 
@@ -966,8 +1004,13 @@ func (s *Session) addWatchTree(root string, markEntries bool) error {
 			return nil
 		}
 		if entry.IsDir() {
-			if err := s.watcher.Add(current); err != nil {
-				return fmt.Errorf("watch rootfs directory %s: %w", current, err)
+			if err := s.addMergedDirectoryWatch(relative); err != nil {
+				return err
+			}
+			if filepath.Clean(current) != filepath.Clean(filepath.Join(s.eventRoot, relative)) {
+				if err := s.watcher.Add(current); err != nil {
+					return fmt.Errorf("watch rootfs upper directory %s: %w", current, err)
+				}
 			}
 		}
 		if markEntries {
@@ -975,6 +1018,29 @@ func (s *Session) addWatchTree(root string, markEntries bool) error {
 		}
 		return nil
 	})
+}
+
+func (s *Session) addMergedDirectoryWatch(relative string) error {
+	path := filepath.Join(s.eventRoot, relative)
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("inspect merged rootfs directory %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("merged rootfs path %s is not a directory", path)
+	}
+	if err := s.watcher.Add(path); err != nil {
+		return fmt.Errorf("watch merged rootfs directory %s: %w", path, err)
+	}
+	return nil
+}
+
+func relativeToRoot(root, path string) (string, bool) {
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return cleanRelativePath(relative), true
 }
 
 func (s *Session) fenceWatcher(ctx context.Context) error {

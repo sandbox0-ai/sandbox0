@@ -19,6 +19,7 @@ import (
 type rootFSV3Runtime interface {
 	Inspect(context.Context, ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error)
 	ActiveUpperdir(context.Context, ctldapi.RootFSInfo) (string, error)
+	ActiveMergedRoot(context.Context, ctldapi.RootFSInfo, string) (string, error)
 	BaseIdentityAndConfig(context.Context, ctldapi.RootFSInfo, *rootfshead.BaseIdentity) (rootfshead.BaseIdentity, []byte, error)
 	MaterializeRootFSHead(context.Context, rootfshead.HeadReference, rootfshead.BaseIdentity, rootfshead.ImageReference, []byte, []byte) error
 }
@@ -97,6 +98,10 @@ func (c *Controller) BindRootFSSync(r *http.Request, req ctldapi.BindRootFSSyncR
 	if err != nil {
 		return ctldapi.BindRootFSSyncResponse{Info: info, Error: err.Error()}, statusForError(err)
 	}
+	mergedRoot, err := c.v3Runtime.ActiveMergedRoot(ctx, info, upperdir)
+	if err != nil {
+		return ctldapi.BindRootFSSyncResponse{Info: info, Error: err.Error()}, statusForError(err)
+	}
 	writer, err := rootfsstore.NewTeamWriter(c.store, req.TeamID)
 	if err != nil {
 		return ctldapi.BindRootFSSyncResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
@@ -139,7 +144,8 @@ func (c *Controller) BindRootFSSync(r *http.Request, req ctldapi.BindRootFSSyncR
 		return ctldapi.BindRootFSSyncResponse{Info: info, Error: err.Error()}, http.StatusServiceUnavailable
 	}
 	session, err := rootfscow.StartSession(c.v3Context, rootfscow.SessionConfig{
-		Capture: capture,
+		Capture:   capture,
+		EventRoot: mergedRoot,
 		Protection: &rootFSCaptureProtection{
 			store: c.captureLeases, sandboxID: req.SandboxID,
 			teamID: req.TeamID, generation: req.RuntimeGeneration,

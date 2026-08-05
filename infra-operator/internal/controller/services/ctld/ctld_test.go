@@ -487,6 +487,12 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	}
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "rootfs-snapshotter-state", rootFSSnapshotterStateRoot)
+	for _, current := range []*appsv1.DaemonSet{ds, standby} {
+		containerdMount, ok := volumeMountByName(current.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-sock")
+		require.True(t, ok)
+		require.NotNil(t, containerdMount.MountPropagation)
+		assert.Equal(t, corev1.MountPropagationHostToContainer, *containerdMount.MountPropagation)
+	}
 	rootfsStateMount, ok := volumeMountByName(ds.Spec.Template.Spec.Containers[0].VolumeMounts, "rootfs-snapshotter-state")
 	if !ok || !rootfsStateMount.ReadOnly {
 		t.Fatalf("ctld rootfs snapshotter state mount must be read-only, got %#v", rootfsStateMount)
@@ -520,6 +526,9 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	require.True(t, ok)
 	require.NotNil(t, stateMount.MountPropagation)
 	assert.Equal(t, corev1.MountPropagationBidirectional, *stateMount.MountPropagation)
+	snapshotterContainerdMount, ok := volumeMountByName(snapshotterContainer.VolumeMounts, "containerd-sock")
+	require.True(t, ok)
+	assert.Nil(t, snapshotterContainerdMount.MountPropagation)
 	require.NotNil(t, snapshotter.Spec.Template.Spec.AutomountServiceAccountToken)
 	assert.False(t, *snapshotter.Spec.Template.Spec.AutomountServiceAccountToken)
 

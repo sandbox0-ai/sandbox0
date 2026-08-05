@@ -402,6 +402,10 @@ func (r *fakeV3Runtime) ActiveUpperdir(context.Context, ctldapi.RootFSInfo) (str
 	return r.upperdir, nil
 }
 
+func (r *fakeV3Runtime) ActiveMergedRoot(context.Context, ctldapi.RootFSInfo, string) (string, error) {
+	return r.upperdir, nil
+}
+
 func (r *fakeV3Runtime) BaseIdentityAndConfig(context.Context, ctldapi.RootFSInfo, *rootfshead.BaseIdentity) (rootfshead.BaseIdentity, []byte, error) {
 	return r.base, append([]byte(nil), r.baseConfig...), nil
 }

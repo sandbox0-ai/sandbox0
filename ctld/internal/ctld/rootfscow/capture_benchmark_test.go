@@ -123,6 +123,28 @@ func BenchmarkCaptureSmallFileTree(b *testing.B) {
 	}
 }
 
+func BenchmarkCaptureUpperMetadataScan(b *testing.B) {
+	for _, fileCount := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("%dFiles", fileCount), func(b *testing.B) {
+			root := b.TempDir()
+			for index := range fileCount {
+				directory := filepath.Join(root, fmt.Sprintf("dir-%03d", index/100))
+				require.NoError(b, os.MkdirAll(directory, 0o755))
+				require.NoError(b, os.WriteFile(filepath.Join(directory, fmt.Sprintf("file-%05d", index)), nil, 0o644))
+			}
+			capture := newBenchmarkCapture(b, root, 1<<20)
+			b.ReportAllocs()
+			b.ReportMetric(float64(fileCount), "files/op")
+			b.ResetTimer()
+			for range b.N {
+				if err := capture.Scan(context.Background(), nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func newBenchmarkCapture(b *testing.B, root string, chunkSize int) *Capture {
 	b.Helper()
 	store := objectstore.NewMemoryStore(b.Name())

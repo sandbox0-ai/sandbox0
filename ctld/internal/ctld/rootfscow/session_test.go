@@ -30,7 +30,7 @@ func TestSessionInitialScanAndSeal(t *testing.T) {
 	result, err := session.Seal(testContext(t), SealRequest{HeadID: "head-1", Base: testBaseIdentity()})
 	require.NoError(t, err)
 	assert.True(t, session.Status().Sealed)
-	assert.Equal(t, reconciliationsBeforeSeal, session.Status().Reconciliations, "healthy seal must not scan the complete upper")
+	assert.Greater(t, session.Status().Reconciliations, reconciliationsBeforeSeal, "seal must verify upper metadata")
 	head, err := rootfsstore.LoadHead(context.Background(), store, result.Reference)
 	require.NoError(t, err)
 	entry := mustFindEntry(t, store, prefix, head.Root, "initial")
@@ -58,7 +58,7 @@ func TestSessionInitialScanRetriesTransientReconciliationFailure(t *testing.T) {
 		return capture.scan(ctx, visit)
 	}
 	session, err := StartSession(context.Background(), SessionConfig{
-		Capture: capture, Protection: noopCaptureProtection{}, WatchFenceRoot: t.TempDir(),
+		Capture: capture, EventRoot: root, Protection: noopCaptureProtection{}, WatchFenceRoot: t.TempDir(),
 		InitialScanRetryInterval: 10 * time.Millisecond,
 	})
 	require.NoError(t, err)
@@ -106,12 +106,22 @@ func TestStartSessionRejectsCanceledParentBeforeCreatingFence(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	session, err := StartSession(ctx, SessionConfig{Capture: capture, WatchFenceRoot: fenceRoot})
+	session, err := StartSession(ctx, SessionConfig{Capture: capture, EventRoot: capture.Root(), WatchFenceRoot: fenceRoot})
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Nil(t, session)
 	entries, readErr := os.ReadDir(fenceRoot)
 	require.NoError(t, readErr)
 	assert.Empty(t, entries)
+}
+
+func TestStartSessionRequiresEventRoot(t *testing.T) {
+	root := t.TempDir()
+	capture, _, _, _ := newTestCapture(t, root, 1<<20)
+	session, err := StartSession(context.Background(), SessionConfig{
+		Capture: capture, Protection: noopCaptureProtection{}, WatchFenceRoot: t.TempDir(),
+	})
+	require.ErrorContains(t, err, "rootfs event root is required")
+	assert.Nil(t, session)
 }
 
 func TestSessionSealFallsBackToFullReconciliationAfterWatcherUncertainty(t *testing.T) {
@@ -173,7 +183,7 @@ func TestSessionSealIsIdempotentUntilAcknowledgedThenContinues(t *testing.T) {
 	assert.NotEqual(t, first.Reference, third.Reference)
 }
 
-func TestHealthySealRefreshesEveryHardlinkAliasAfterOnePathChanges(t *testing.T) {
+func TestSealRefreshesEveryHardlinkAliasAfterOnePathChanges(t *testing.T) {
 	root := t.TempDir()
 	firstPath := filepath.Join(root, "first")
 	require.NoError(t, os.WriteFile(firstPath, []byte("before"), 0o644))
@@ -185,7 +195,7 @@ func TestHealthySealRefreshesEveryHardlinkAliasAfterOnePathChanges(t *testing.T)
 	require.NoError(t, os.WriteFile(firstPath, []byte("after"), 0o644))
 	result, err := session.Seal(testContext(t), SealRequest{HeadID: "head-hardlinks", Base: testBaseIdentity()})
 	require.NoError(t, err)
-	assert.Equal(t, reconciliationsBeforeSeal, session.Status().Reconciliations, "hardlink alias propagation must not require a full upper scan")
+	assert.Greater(t, session.Status().Reconciliations, reconciliationsBeforeSeal)
 	head, err := rootfsstore.LoadHead(context.Background(), store, result.Reference)
 	require.NoError(t, err)
 	first := mustFindEntry(t, store, prefix, head.Root, "first")
@@ -196,7 +206,7 @@ func TestHealthySealRefreshesEveryHardlinkAliasAfterOnePathChanges(t *testing.T)
 	assert.Equal(t, []byte("after"), readFileEntry(t, store, prefix, second))
 }
 
-func TestHealthySealRefreshesRemainingHardlinkAfterAliasRemoval(t *testing.T) {
+func TestSealRefreshesRemainingHardlinkAfterAliasRemoval(t *testing.T) {
 	root := t.TempDir()
 	firstPath := filepath.Join(root, "first")
 	secondPath := filepath.Join(root, "second")
@@ -209,7 +219,7 @@ func TestHealthySealRefreshesRemainingHardlinkAfterAliasRemoval(t *testing.T) {
 	require.NoError(t, os.Remove(secondPath))
 	result, err := session.Seal(testContext(t), SealRequest{HeadID: "head-hardlink-remove", Base: testBaseIdentity()})
 	require.NoError(t, err)
-	assert.Equal(t, reconciliationsBeforeSeal, session.Status().Reconciliations, "hardlink removal must not require a full upper scan")
+	assert.Greater(t, session.Status().Reconciliations, reconciliationsBeforeSeal)
 	head, err := rootfsstore.LoadHead(context.Background(), store, result.Reference)
 	require.NoError(t, err)
 	first := mustFindEntry(t, store, prefix, head.Root, "first")
@@ -249,6 +259,42 @@ func TestSessionTracksWatcherChangesBeforeSeal(t *testing.T) {
 	assert.Empty(t, session.Status().LastError)
 }
 
+func TestSessionCapturesMergedWriteWhenUpperWatcherMissesIt(t *testing.T) {
+	upper := t.TempDir()
+	merged := t.TempDir()
+	path := ".bashrc"
+	require.NoError(t, os.WriteFile(filepath.Join(merged, path), []byte("base"), 0o644))
+	session, store, prefix := newTestSessionWithEventRoot(t, upper, merged)
+	require.NoError(t, session.WaitInitial(testContext(t)))
+	require.NoError(t, session.watcher.Remove(upper))
+
+	require.NoError(t, os.WriteFile(filepath.Join(upper, path), nil, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(merged, path), nil, 0o644))
+	require.Eventually(t, func() bool {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		version, ok := session.known[path]
+		return ok && version.Size == 0
+	}, 5*time.Second, 10*time.Millisecond)
+
+	content := []byte("export ROOTFS_COW=durable\n")
+	require.NoError(t, os.WriteFile(filepath.Join(upper, path), content, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(merged, path), content, 0o644))
+	require.Eventually(t, func() bool {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		version, ok := session.known[path]
+		return ok && version.Size == int64(len(content))
+	}, 5*time.Second, 10*time.Millisecond)
+
+	result, err := session.Seal(testContext(t), SealRequest{HeadID: "head-merged-event", Base: testBaseIdentity()})
+	require.NoError(t, err)
+	head, err := rootfsstore.LoadHead(context.Background(), store, result.Reference)
+	require.NoError(t, err)
+	entry := mustFindEntry(t, store, prefix, head.Root, path)
+	assert.Equal(t, content, readFileEntry(t, store, prefix, entry))
+}
+
 func TestSessionInitialProtectionErrorRecoversBeforeCaptureStarts(t *testing.T) {
 	root := t.TempDir()
 	store := objectstore.NewMemoryStore(t.Name())
@@ -263,7 +309,7 @@ func TestSessionInitialProtectionErrorRecoversBeforeCaptureStarts(t *testing.T) 
 	require.NoError(t, err)
 	protection := &controlledCaptureProtection{checkpointErr: errors.New("database unavailable")}
 	session, err := StartSession(context.Background(), SessionConfig{
-		Capture: capture, Protection: protection, WatchFenceRoot: t.TempDir(),
+		Capture: capture, EventRoot: root, Protection: protection, WatchFenceRoot: t.TempDir(),
 		CaptureWorkers: 1, FlushInterval: time.Hour, ReconcileInterval: time.Hour,
 		InitialScanRetryInterval: 10 * time.Millisecond,
 	})
@@ -337,6 +383,16 @@ func newTestSession(t *testing.T, root string) (*Session, objectstore.Store, str
 
 func newTestSessionWithExcludes(t *testing.T, root string, excludes []string) (*Session, objectstore.Store, string) {
 	t.Helper()
+	return newTestSessionWithExcludesAndEventRoot(t, root, root, excludes)
+}
+
+func newTestSessionWithEventRoot(t *testing.T, root, eventRoot string) (*Session, objectstore.Store, string) {
+	t.Helper()
+	return newTestSessionWithExcludesAndEventRoot(t, root, eventRoot, nil)
+}
+
+func newTestSessionWithExcludesAndEventRoot(t *testing.T, root, eventRoot string, excludes []string) (*Session, objectstore.Store, string) {
+	t.Helper()
 	store := objectstore.NewMemoryStore(t.Name())
 	writer, err := rootfsstore.NewTeamWriter(store, "team-session")
 	require.NoError(t, err)
@@ -353,6 +409,7 @@ func newTestSessionWithExcludes(t *testing.T, root string, excludes []string) (*
 	require.NoError(t, err)
 	session, err := StartSession(context.Background(), SessionConfig{
 		Capture:           capture,
+		EventRoot:         eventRoot,
 		Protection:        noopCaptureProtection{},
 		WatchFenceRoot:    t.TempDir(),
 		CaptureWorkers:    2,

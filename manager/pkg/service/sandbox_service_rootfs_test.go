@@ -631,6 +631,80 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 	}
 }
 
+func TestFinishRestoredSandboxRuntimeUsesTemplateBaselineWithoutPublishedHead(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	var calls []string
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/rootfs/sync/bind":
+			calls = append(calls, "bind")
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
+				Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true},
+			}))
+		case "/api/v1/volume-portals/check":
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true}))
+		case "/api/v1/rootfs/heads/materialize":
+			t.Fatal("a sandbox without a published Head must resume from the template baseline")
+		default:
+			t.Fatalf("unexpected CTLD path %s", r.URL.Path)
+		}
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	const sandboxID = "sandbox-1"
+	currentPod := rootFSTestPod("pod-current", sandboxID, "team-1")
+	currentPod.Status.HostIP = ctldURL.Hostname()
+	currentPod.Status.PodIP = "10.0.0.10"
+	indexer := newClaimTestPodIndexer(t, currentPod)
+	client := fake.NewSimpleClientset(currentPod.DeepCopy())
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(activePod *corev1.Pod) {
+		require.Equal(t, []string{"bind"}, calls)
+		assert.NotEqual(t, "true", activePod.Annotations[runtimecontrol.AnnotationResetCopiedState])
+		calls = append(calls, "runtime")
+	})
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}}
+	svc := &SandboxService{
+		k8sClient:              client,
+		podLister:              corelisters.NewPodLister(indexer),
+		secretLister:           newClaimTestSecretLister(t),
+		sandboxStore:           store,
+		ctldClient:             ctldapi.NewClientWithTimeout(time.Second),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			CtldEnabled:         true,
+			CtldPort:            ctldPort,
+			RuntimeReadyTimeout: time.Second,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+	record := &sandboxstore.SandboxRecord{
+		ID:                sandboxID,
+		TeamID:            "team-1",
+		UserID:            "user-1",
+		TemplateID:        "template-1",
+		TemplateName:      "template-1",
+		TemplateNamespace: "template-default",
+		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		RuntimeGeneration: 3,
+		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
+	}
+
+	restoredPod, err := svc.finishRestoredSandboxRuntime(context.Background(), currentPod, record, "hot")
+
+	require.NoError(t, err)
+	assert.Equal(t, currentPod.Name, restoredPod.Name)
+	assert.Equal(t, currentPod.UID, restoredPod.UID)
+	assert.Equal(t, []string{"bind", "runtime"}, calls)
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource == "pods" && (action.GetVerb() == "create" || action.GetVerb() == "delete") {
+			t.Fatalf("unexpected pod replacement action: %s", action.GetVerb())
+		}
+	}
+}
+
 func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 	var sealCalled atomic.Bool
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

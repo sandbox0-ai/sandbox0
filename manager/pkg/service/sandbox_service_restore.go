@@ -495,34 +495,36 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return pod, fmt.Errorf("load rootfs Head: %w", err)
 	}
-	if rootFSHead == nil {
-		return pod, fmt.Errorf("%w: sandbox %s has no v3 Head", sandboxstore.ErrRootFSFilesystemNotFound, record.ID)
-	}
-	resetCopiedSessionState := strings.TrimSpace(rootFSHead.SourceSandboxID) != "" && strings.TrimSpace(rootFSHead.SourceSandboxID) != strings.TrimSpace(record.ID)
-	phaseStarted := time.Now()
-	pod, err = s.replaceRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead)
-	s.observeClaimPhase(record.TemplateID, claimType, "materialize_rootfs_head", phaseStarted, err)
-	if err != nil {
-		return pod, err
-	}
-	claimType = "cold"
-	phaseStarted = time.Now()
-	pod, err = s.waitForColdPodNetworkPolicy(ctx, pod, record.TeamID)
-	s.observeClaimPhase(record.TemplateID, claimType, "rootfs_head_network_policy", phaseStarted, err)
-	if err != nil {
-		return pod, err
-	}
-	phaseStarted = time.Now()
-	pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
-	s.observeClaimPhase(record.TemplateID, claimType, "rootfs_head_runtime_ready", phaseStarted, err)
-	if err != nil {
-		return pod, err
+	// A missing published Head means the lost runtime had no durable rootfs
+	// checkpoint. Keep the claimed template baseline and start a new sync below.
+	resetCopiedSessionState := false
+	if rootFSHead != nil {
+		resetCopiedSessionState = strings.TrimSpace(rootFSHead.SourceSandboxID) != "" && strings.TrimSpace(rootFSHead.SourceSandboxID) != strings.TrimSpace(record.ID)
+		phaseStarted := time.Now()
+		pod, err = s.replaceRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead)
+		s.observeClaimPhase(record.TemplateID, claimType, "materialize_rootfs_head", phaseStarted, err)
+		if err != nil {
+			return pod, err
+		}
+		claimType = "cold"
+		phaseStarted = time.Now()
+		pod, err = s.waitForColdPodNetworkPolicy(ctx, pod, record.TeamID)
+		s.observeClaimPhase(record.TemplateID, claimType, "rootfs_head_network_policy", phaseStarted, err)
+		if err != nil {
+			return pod, err
+		}
+		phaseStarted = time.Now()
+		pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+		s.observeClaimPhase(record.TemplateID, claimType, "rootfs_head_runtime_ready", phaseStarted, err)
+		if err != nil {
+			return pod, err
+		}
 	}
 	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
 	if err != nil {
 		return pod, err
 	}
-	phaseStarted = time.Now()
+	phaseStarted := time.Now()
 	_, err = s.bindVolumePortals(ctx, pod, req, template)
 	s.observeClaimPhase(record.TemplateID, claimType, "bind_volume_portals", phaseStarted, err)
 	if err != nil {

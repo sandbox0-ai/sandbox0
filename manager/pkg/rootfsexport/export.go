@@ -73,8 +73,8 @@ func Export(ctx context.Context, store objectstore.Store, teamID string, referen
 	if err != nil {
 		return Result{}, fmt.Errorf("create rootfs export compressor: %w", err)
 	}
-	gzipWriter.Header.ModTime = time.Unix(0, 0).UTC()
-	gzipWriter.Header.OS = 255
+	gzipWriter.ModTime = time.Unix(0, 0).UTC()
+	gzipWriter.OS = 255
 	uncompressedDigester := digest.Canonical.Digester()
 	tarWriter := tar.NewWriter(io.MultiWriter(gzipWriter, uncompressedDigester.Hash()))
 

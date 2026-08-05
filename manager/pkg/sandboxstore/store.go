@@ -1058,14 +1058,6 @@ func nullableTime(t time.Time) any {
 	return t
 }
 
-func nullableText(value string) any {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	return value
-}
-
 func derefTime(t *time.Time) time.Time {
 	if t == nil {
 		return time.Time{}

@@ -129,8 +129,8 @@ func encodeGZIPJSON(value any) ([]byte, error) {
 	var payload bytes.Buffer
 	writer := gzipWriterPool.Get().(*gzip.Writer)
 	writer.Reset(&payload)
-	writer.Header.ModTime = time.Unix(0, 0).UTC()
-	writer.Header.OS = 255
+	writer.ModTime = time.Unix(0, 0).UTC()
+	writer.OS = 255
 	release := func() {
 		writer.Reset(io.Discard)
 		gzipWriterPool.Put(writer)

@@ -1416,14 +1416,14 @@ type CtldServiceConfig struct {
 	// +kubebuilder:validation:Pattern=`^/.*`
 	ContainerdHostDataRoot string `json:"containerdHostDataRoot,omitempty"`
 
-	// RootFSObjectCacheMaxBytes caps the ctld node-local rootfs object cache.
+	// RootFSObjectCacheMaxBytes caps the rootfs snapshotter node-local object cache.
 	// Set 0 to disable the cache.
 	// +kubebuilder:default="20Gi"
 	// +optional
 	RootFSObjectCacheMaxBytes string `json:"rootfsObjectCacheMaxBytes,omitempty"`
 
-	// RootFSObjectCacheMinFreeBytes asks ctld GC to keep at least this much free
-	// space on the cache filesystem.
+	// RootFSObjectCacheMinFreeBytes asks snapshotter cache GC to keep at least
+	// this much free space on the cache filesystem.
 	// +optional
 	RootFSObjectCacheMinFreeBytes string `json:"rootfsObjectCacheMinFreeBytes,omitempty"`
 
@@ -1432,8 +1432,8 @@ type CtldServiceConfig struct {
 	// +optional
 	RootFSObjectCacheMaxAge metav1.Duration `json:"rootfsObjectCacheMaxAge,omitempty"`
 
-	// RootFSObjectCacheSweepInterval controls how often ctld sweeps the
-	// node-local rootfs object cache.
+	// RootFSObjectCacheSweepInterval controls how often the snapshotter sweeps
+	// the node-local rootfs object cache.
 	// +optional
 	RootFSObjectCacheSweepInterval metav1.Duration `json:"rootfsObjectCacheSweepInterval,omitempty"`
 }

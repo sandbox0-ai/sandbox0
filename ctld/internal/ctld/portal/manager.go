@@ -911,30 +911,6 @@ func (m *Manager) cleanStaleMountTarget(targetPath string) error {
 	return cleaner(targetPath)
 }
 
-func (m *Manager) RootFSPortalPaths(podUID string) []ctldapi.RootFSPortalPath {
-	if m == nil || strings.TrimSpace(podUID) == "" {
-		return nil
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	out := make([]ctldapi.RootFSPortalPath, 0)
-	for _, pm := range m.portals {
-		if pm == nil || pm.podUID != podUID || pm.volumeID != "" {
-			continue
-		}
-		if strings.TrimSpace(pm.mountPath) == "" || strings.TrimSpace(pm.rootfsBackingPath) == "" {
-			continue
-		}
-		out = append(out, ctldapi.RootFSPortalPath{
-			PortalName:  pm.name,
-			MountPath:   pm.mountPath,
-			BackingPath: pm.rootfsBackingPath,
-		})
-	}
-	return out
-}
-
 func (m *Manager) Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest) (response ctldapi.BindVolumePortalResponse, retErr error) {
 	started := time.Now()
 	backend := "unknown"

@@ -38,7 +38,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/python-runner ./manager/cmd/python-runner && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/scheduler ./scheduler/cmd/scheduler && \
     CGO_ENABLED=1 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/infra-operator ./infra-operator/cmd/infra-operator && \
-    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/ctld ./ctld/cmd/ctld
+    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/ctld ./ctld/cmd/ctld && \
+    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/rootfs-snapshotter ./ctld/cmd/rootfs-snapshotter
 
 FROM scratch AS procd-bin
 

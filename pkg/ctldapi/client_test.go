@@ -104,40 +104,62 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		path string
-		call func(*Client, string) error
+		name   string
+		method string
+		path   string
+		call   func(*Client, string) error
 	}{
 		{
-			name: "inspect",
-			path: "/api/v1/rootfs/inspect",
+			name:   "bind",
+			method: http.MethodPut,
+			path:   "/api/v1/rootfs/sync/bind",
 			call: func(client *Client, address string) error {
-				_, err := client.InspectRootFS(context.Background(), address, InspectRootFSRequest{
-					Target: RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "sandbox"},
-				})
-				return err
-			},
-		},
-		{
-			name: "save",
-			path: "/api/v1/rootfs/save",
-			call: func(client *Client, address string) error {
-				_, err := client.SaveRootFS(context.Background(), address, SaveRootFSRequest{
+				_, err := client.BindRootFSSync(context.Background(), address, BindRootFSSyncRequest{
 					Target:    RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "sandbox"},
-					SandboxID: "sandbox-1",
-					TeamID:    "team-1",
+					SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1,
 				})
 				return err
 			},
 		},
 		{
-			name: "apply",
-			path: "/api/v1/rootfs/apply",
+			name:   "status",
+			method: http.MethodPost,
+			path:   "/api/v1/rootfs/sync/status",
 			call: func(client *Client, address string) error {
-				_, err := client.ApplyRootFS(context.Background(), address, ApplyRootFSRequest{
-					Target:     RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "sandbox"},
-					Descriptor: RootFSDiffDescriptor{MediaType: "application/vnd.oci.image.layer.v1.tar", Digest: "sha256:abc", ObjectKey: "rootfs/diff.tar"},
+				_, err := client.GetRootFSSyncStatus(context.Background(), address, GetRootFSSyncStatusRequest{
+					SandboxID: "sandbox-1", RuntimeGeneration: 1,
 				})
+				return err
+			},
+		},
+		{
+			name:   "seal",
+			method: http.MethodPut,
+			path:   "/api/v1/rootfs/heads/seal",
+			call: func(client *Client, address string) error {
+				_, err := client.SealRootFSHead(context.Background(), address, SealRootFSHeadRequest{
+					SandboxID: "sandbox-1", TeamID: "team-1", HeadID: "head-1", ExpectedRuntimeGeneration: 1,
+				}, time.Second)
+				return err
+			},
+		},
+		{
+			name:   "materialize",
+			method: http.MethodPut,
+			path:   "/api/v1/rootfs/heads/materialize",
+			call: func(client *Client, address string) error {
+				_, err := client.MaterializeRootFSHead(context.Background(), address, MaterializeRootFSHeadRequest{}, time.Second)
+				return err
+			},
+		},
+		{
+			name:   "acknowledge",
+			method: http.MethodPut,
+			path:   "/api/v1/rootfs/heads/acknowledge",
+			call: func(client *Client, address string) error {
+				_, err := client.AcknowledgeRootFSHead(context.Background(), address, AcknowledgeRootFSHeadRequest{
+					SandboxID: "sandbox-1", TeamID: "team-1", HeadID: "head-1", RuntimeGeneration: 1, RuntimeContinues: true,
+				}, time.Second)
 				return err
 			},
 		},
@@ -149,19 +171,23 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 			t.Parallel()
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost {
-					t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
+				if r.Method != tt.method {
+					t.Fatalf("method = %s, want %s", r.Method, tt.method)
 				}
 				if r.URL.Path != tt.path {
 					t.Fatalf("path = %s, want %s", r.URL.Path, tt.path)
 				}
 				switch tt.name {
-				case "inspect":
-					_ = json.NewEncoder(w).Encode(InspectRootFSResponse{Info: RootFSInfo{Runtime: "runc"}})
-				case "save":
-					_ = json.NewEncoder(w).Encode(SaveRootFSResponse{Descriptor: RootFSDiffDescriptor{ObjectKey: "rootfs/diff.tar"}})
-				case "apply":
-					_ = json.NewEncoder(w).Encode(ApplyRootFSResponse{Applied: true})
+				case "bind":
+					_ = json.NewEncoder(w).Encode(BindRootFSSyncResponse{})
+				case "status":
+					_ = json.NewEncoder(w).Encode(GetRootFSSyncStatusResponse{})
+				case "seal":
+					_ = json.NewEncoder(w).Encode(SealRootFSHeadResponse{})
+				case "materialize":
+					_ = json.NewEncoder(w).Encode(MaterializeRootFSHeadResponse{Materialized: true})
+				case "acknowledge":
+					_ = json.NewEncoder(w).Encode(AcknowledgeRootFSHeadResponse{Acknowledged: true})
 				}
 			}))
 			defer server.Close()
@@ -283,31 +309,29 @@ func TestClientCheckVolumePortalsUsesSharedPath(t *testing.T) {
 	}
 }
 
-func TestClientRootFSMethodsCanUseExtendedTimeout(t *testing.T) {
+func TestClientRootFSSealCanUseExtendedTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/rootfs/save" {
-			t.Fatalf("path = %s, want /api/v1/rootfs/save", r.URL.Path)
+		if r.URL.Path != "/api/v1/rootfs/heads/seal" {
+			t.Fatalf("path = %s, want /api/v1/rootfs/heads/seal", r.URL.Path)
 		}
 		time.Sleep(80 * time.Millisecond)
-		_ = json.NewEncoder(w).Encode(SaveRootFSResponse{Descriptor: RootFSDiffDescriptor{Digest: "sha256:diff"}})
+		_ = json.NewEncoder(w).Encode(SealRootFSHeadResponse{})
 	}))
 	defer server.Close()
 
-	client := NewClient(&http.Client{Timeout: 20 * time.Millisecond})
-	req := SaveRootFSRequest{
-		Target:    RootFSContainerRef{Namespace: "default", PodName: "pod-1", ContainerName: "procd"},
-		SandboxID: "sandbox-1",
-		TeamID:    "team-1",
+	client := NewClient(server.Client())
+	req := SealRootFSHeadRequest{
+		SandboxID: "sandbox-1", TeamID: "team-1", HeadID: "head-1", ExpectedRuntimeGeneration: 1,
 	}
-	if _, err := client.SaveRootFS(context.Background(), server.URL, req); err == nil {
-		t.Fatal("SaveRootFS returned nil error with a short timeout")
+	if _, err := client.SealRootFSHead(context.Background(), server.URL, req, 20*time.Millisecond); err == nil {
+		t.Fatal("SealRootFSHead returned nil error with a short timeout")
 	}
 
-	resp, err := NewClientWithTimeout(time.Second).SaveRootFS(context.Background(), server.URL, req)
+	resp, err := client.SealRootFSHead(context.Background(), server.URL, req, time.Second)
 	if err != nil {
-		t.Fatalf("SaveRootFS with extended client timeout returned error: %v", err)
+		t.Fatalf("SealRootFSHead with extended client timeout returned error: %v", err)
 	}
-	if resp == nil || resp.Descriptor.Digest != "sha256:diff" {
-		t.Fatalf("response = %#v, want saved rootfs descriptor", resp)
+	if resp == nil {
+		t.Fatal("SealRootFSHead response is nil")
 	}
 }

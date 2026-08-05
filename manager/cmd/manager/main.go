@@ -374,7 +374,7 @@ func main() {
 		WebhookStateVolumeClient:    webhookStateVolumeClient,
 		QuotaStore:                  quotaRepo,
 		SandboxStore:                sandboxStore,
-		RootFSObjectDeleter:         rootFSObjectStore,
+		RootFSObjectStore:           rootFSObjectStore,
 	})
 	sandboxService.SetTemplateImageBuildAvailable(false)
 	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
@@ -468,7 +468,6 @@ func main() {
 			templateStore,
 			sandboxService,
 			imagePublisher,
-			rootFSObjectStore,
 			templatebuild.TemplateBuildWorkerConfig{
 				ClusterID: naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
 			},
@@ -905,6 +904,23 @@ func (i rootFSObjectStoreInspector) StatRootFSObject(key string) (sandboxstore.R
 		Size:     info.Size,
 		Modified: info.Modified,
 	}, nil
+}
+
+func (i rootFSObjectStoreInspector) ListRootFSObjects(prefix, startAfter string, limit int64) ([]sandboxstore.RootFSObjectInfo, bool, error) {
+	objects, more, _, err := i.store.List(prefix, startAfter, "", "", limit)
+	if err != nil {
+		return nil, false, err
+	}
+	result := make([]sandboxstore.RootFSObjectInfo, 0, len(objects))
+	for _, object := range objects {
+		if object.IsPrefix {
+			continue
+		}
+		result = append(result, sandboxstore.RootFSObjectInfo{
+			Key: object.Key, Size: object.Size, Modified: object.Modified,
+		})
+	}
+	return result, more, nil
 }
 
 func rootFSMaintenanceControllerConfig(cfg *config.ManagerConfig) rootfsmaintenance.Config {

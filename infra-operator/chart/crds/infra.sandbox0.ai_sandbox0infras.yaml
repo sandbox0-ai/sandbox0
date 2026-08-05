@@ -3926,7 +3926,10 @@ spec:
                             default: 30s
                             type: string
                           runtimeReadyTimeout:
-                            default: 90s
+                            default: 5m
+                            description: |-
+                              RuntimeReadyTimeout bounds sandbox pod startup, including image download,
+                              unpack, runtime initialization, and readiness observation.
                             type: string
                           sandboxMaxMemory:
                             default: 32Gi

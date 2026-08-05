@@ -973,8 +973,10 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	ProcdClientTimeout metav1.Duration `json:"procdClientTimeout,omitempty"`
+	// RuntimeReadyTimeout bounds sandbox pod startup, including image download,
+	// unpack, runtime initialization, and readiness observation.
 	// +optional
-	// +kubebuilder:default="90s"
+	// +kubebuilder:default="5m"
 	RuntimeReadyTimeout metav1.Duration `json:"runtimeReadyTimeout,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"

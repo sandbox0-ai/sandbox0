@@ -12,6 +12,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	// DefaultRuntimeReadyTimeout leaves enough time for large sandbox images to
+	// download and unpack before a cold claim is abandoned.
+	DefaultRuntimeReadyTimeout = 5 * time.Minute
+	// IdlePodRepairGraceBuffer prevents the warm-pool repair loop from racing a
+	// claim that is still inside its runtime readiness window.
+	IdlePodRepairGraceBuffer = 30 * time.Second
+)
+
 // ManagerLeaderElectionNameEnv identifies the Lease name shared by manager replicas.
 const ManagerLeaderElectionNameEnv = "MANAGER_LEADER_ELECTION_NAME"
 
@@ -178,8 +187,10 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="15s"
 	CtldClientTimeout metav1.Duration `yaml:"ctld_client_timeout" json:"-"`
+	// RuntimeReadyTimeout bounds sandbox pod startup, including image download,
+	// unpack, runtime initialization, and readiness observation.
 	// +optional
-	// +kubebuilder:default="90s"
+	// +kubebuilder:default="5m"
 	RuntimeReadyTimeout metav1.Duration `yaml:"runtime_ready_timeout" json:"runtimeReadyTimeout"`
 	// +optional
 	// +kubebuilder:default="30s"
@@ -578,6 +589,21 @@ func LoadManagerConfig() *ManagerConfig {
 	applySandboxObservabilityProducerDefaults(cfg)
 	applyPodTeardownDefaults(cfg)
 	return cfg
+}
+
+// EffectiveRuntimeReadyTimeout normalizes unset and legacy short values to the
+// minimum startup window supported by manager controllers.
+func EffectiveRuntimeReadyTimeout(configured time.Duration) time.Duration {
+	if configured < DefaultRuntimeReadyTimeout {
+		return DefaultRuntimeReadyTimeout
+	}
+	return configured
+}
+
+// IdlePodRepairGracePeriod keeps warm-pool repair behind the runtime readiness
+// deadline so a slow image pull is not mistaken for an unhealthy idle pod.
+func IdlePodRepairGracePeriod(runtimeReadyTimeout time.Duration) time.Duration {
+	return EffectiveRuntimeReadyTimeout(runtimeReadyTimeout) + IdlePodRepairGraceBuffer
 }
 
 func applyPodTeardownDefaults(cfg *ManagerConfig) {

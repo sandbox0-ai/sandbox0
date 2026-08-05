@@ -918,6 +918,11 @@ func TestWaitForPodNetworkIdentityReturnsOnDeleteOrTerminal(t *testing.T) {
 
 func TestWaitForPodNetworkIdentityTimesOut(t *testing.T) {
 	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	pod.Spec.NodeName = "node-a"
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:   corev1.PodScheduled,
+		Status: corev1.ConditionTrue,
+	})
 	indexer := newClaimTestPodIndexer(t, pod)
 	svc := &SandboxService{
 		podLister: corelisters.NewPodLister(indexer),
@@ -930,8 +935,33 @@ func TestWaitForPodNetworkIdentityTimesOut(t *testing.T) {
 	if err == nil {
 		t.Fatal("waitForPodNetworkIdentity() error = nil, want timeout")
 	}
-	if !strings.Contains(err.Error(), "network identity not ready") {
-		t.Fatalf("waitForPodNetworkIdentity() error = %v, want network identity timeout", err)
+	if !strings.Contains(err.Error(), "runtime setup is in progress") {
+		t.Fatalf("waitForPodNetworkIdentity() error = %v, want runtime setup attribution", err)
+	}
+	if strings.Contains(err.Error(), "pod IP is not assigned") {
+		t.Fatalf("waitForPodNetworkIdentity() error = %v, must not misattribute a pending runtime setup to Pod IP", err)
+	}
+}
+
+func TestPodNetworkIdentityPendingReasonReportsImagePull(t *testing.T) {
+	pod := newClaimTestPod("ns-a", "cold-pod", "template-a", false)
+	pod.Spec.NodeName = "node-a"
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "procd",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason: "ImagePullBackOff",
+		}},
+	}}
+
+	ready, reason := isPodNetworkIdentityReady(pod)
+	if ready {
+		t.Fatal("isPodNetworkIdentityReady() = true, want false")
+	}
+	if got, want := reason, "container image pull is pending: ImagePullBackOff"; got != want {
+		t.Fatalf("isPodNetworkIdentityReady() reason = %q, want %q", got, want)
+	}
+	if got, want := podNetworkIdentityReasonLabel(reason), "image_pull"; got != want {
+		t.Fatalf("podNetworkIdentityReasonLabel() = %q, want %q", got, want)
 	}
 }
 

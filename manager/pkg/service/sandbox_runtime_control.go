@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	managerconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
@@ -145,7 +146,7 @@ func (s *SandboxService) waitForRuntimeAssignmentReady(
 ) (*corev1.Pod, error) {
 	timeout := s.config.RuntimeReadyTimeout
 	if timeout <= 0 {
-		timeout = defaultPodClaimReadyTimeout
+		timeout = managerconfig.DefaultRuntimeReadyTimeout
 	}
 	readyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

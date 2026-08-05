@@ -40,12 +40,13 @@ type forceDeleteReservation struct {
 // controllers. Node slots are released once deletion is visible in the Pod
 // cache, while replacement slots are released only when pool readiness grows.
 type PodTeardownCoordinator struct {
-	podLister  corelisters.PodLister
-	nodeLister corelisters.NodeLister
-	limits     config.PodTeardownConfig
-	metrics    *obsmetrics.ManagerMetrics
-	logger     *zap.Logger
-	now        func() time.Time
+	podLister                corelisters.PodLister
+	nodeLister               corelisters.NodeLister
+	limits                   config.PodTeardownConfig
+	metrics                  *obsmetrics.ManagerMetrics
+	logger                   *zap.Logger
+	now                      func() time.Time
+	idlePodRepairGracePeriod time.Duration
 
 	mu                      sync.Mutex
 	nodeReservations        map[string]teardownReservation
@@ -89,6 +90,7 @@ func NewPodTeardownCoordinator(
 	podLister corelisters.PodLister,
 	nodeLister corelisters.NodeLister,
 	limits config.PodTeardownConfig,
+	runtimeReadyTimeout time.Duration,
 	metrics *obsmetrics.ManagerMetrics,
 	logger *zap.Logger,
 ) *PodTeardownCoordinator {
@@ -97,16 +99,17 @@ func NewPodTeardownCoordinator(
 		logger = zap.NewNop()
 	}
 	return &PodTeardownCoordinator{
-		podLister:               podLister,
-		nodeLister:              nodeLister,
-		limits:                  limits,
-		metrics:                 metrics,
-		logger:                  logger,
-		now:                     time.Now,
-		nodeReservations:        make(map[string]teardownReservation),
-		replacementReservations: make(map[string]teardownReservation),
-		forceDeleteReservations: make(map[string]forceDeleteReservation),
-		poolReadyUIDs:           make(map[string]map[string]struct{}),
+		podLister:                podLister,
+		nodeLister:               nodeLister,
+		limits:                   limits,
+		metrics:                  metrics,
+		logger:                   logger,
+		now:                      time.Now,
+		idlePodRepairGracePeriod: config.IdlePodRepairGracePeriod(runtimeReadyTimeout),
+		nodeReservations:         make(map[string]teardownReservation),
+		replacementReservations:  make(map[string]teardownReservation),
+		forceDeleteReservations:  make(map[string]forceDeleteReservation),
+		poolReadyUIDs:            make(map[string]map[string]struct{}),
 	}
 }
 
@@ -154,7 +157,7 @@ func (c *PodTeardownCoordinator) Acquire(candidates []*corev1.Pod, reason string
 			terminatingByNode[pod.Spec.NodeName]++
 			terminatingTotal++
 		}
-		if isYoungIdleReplacement(pod, now) {
+		if isYoungIdleReplacement(pod, now, c.idlePodRepairGracePeriod) {
 			youngReplacementPressure++
 		}
 	}
@@ -602,14 +605,14 @@ func teardownUsesNode(pod *corev1.Pod) bool {
 	return pod != nil && pod.Spec.NodeName != "" && !pod.Spec.HostNetwork
 }
 
-func isYoungIdleReplacement(pod *corev1.Pod, now time.Time) bool {
+func isYoungIdleReplacement(pod *corev1.Pod, now time.Time, gracePeriod time.Duration) bool {
 	if pod == nil || pod.DeletionTimestamp != nil || pod.Labels[LabelPoolType] != PoolTypeIdle || IsHotClaimReservedPod(pod) || IsPodReady(pod) {
 		return false
 	}
 	if pod.CreationTimestamp.IsZero() {
 		return false
 	}
-	return now.Sub(pod.CreationTimestamp.Time) < unhealthyIdlePodRepairGracePeriod
+	return now.Sub(pod.CreationTimestamp.Time) < gracePeriod
 }
 
 func readyIdlePodUIDsForPool(pods []*corev1.Pod, poolKey string) map[string]struct{} {

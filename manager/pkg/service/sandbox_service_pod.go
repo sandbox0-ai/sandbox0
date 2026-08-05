@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	managerconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
@@ -81,10 +82,7 @@ func (s *SandboxService) waitForPodClaimReady(ctx context.Context, namespace, na
 }
 
 func (s *SandboxService) waitForPodClaimReadyTracked(ctx context.Context, namespace, name string, lifecycle *podLifecycleStageTracker) (*corev1.Pod, error) {
-	timeout := s.config.RuntimeReadyTimeout
-	if timeout < defaultPodClaimReadyTimeout {
-		timeout = defaultPodClaimReadyTimeout
-	}
+	timeout := managerconfig.EffectiveRuntimeReadyTimeout(s.config.RuntimeReadyTimeout)
 
 	readyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -153,10 +151,7 @@ func (s *SandboxService) waitForPodNetworkIdentity(ctx context.Context, template
 }
 
 func (s *SandboxService) waitForPodNetworkIdentityTracked(ctx context.Context, template, namespace, name string, lifecycle *podLifecycleStageTracker) (*corev1.Pod, error) {
-	timeout := s.config.RuntimeReadyTimeout
-	if timeout < defaultPodClaimReadyTimeout {
-		timeout = defaultPodClaimReadyTimeout
-	}
+	timeout := managerconfig.EffectiveRuntimeReadyTimeout(s.config.RuntimeReadyTimeout)
 
 	readyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -217,11 +212,14 @@ func (s *SandboxService) waitForPodNetworkIdentityTracked(ctx context.Context, t
 	for {
 		select {
 		case <-readyCtx.Done():
-			if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.DeadlineExceeded) {
-				lastReason = ctxErr.Error()
-				s.observePodNetworkIdentityCheck("context", "canceled", lastReason)
-				tracker.observeFailure("canceled", lastReason)
-				return nil, fmt.Errorf("pod %s/%s network identity wait canceled: %w", namespace, name, ctxErr)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				status := "canceled"
+				if errors.Is(ctxErr, context.DeadlineExceeded) {
+					status = "timeout"
+				}
+				s.observePodNetworkIdentityCheck("context", status, lastReason)
+				tracker.observeFailure(status, lastReason)
+				return nil, fmt.Errorf("pod %s/%s network identity wait ended before readiness: %s: %w", namespace, name, lastReason, ctxErr)
 			}
 			s.observePodNetworkIdentityCheck("informer", "timeout", lastReason)
 			tracker.observeFailure("timeout", lastReason)
@@ -284,6 +282,12 @@ func podNetworkIdentityReasonLabel(reason string) string {
 		return "not_found"
 	case strings.Contains(reason, "node is not assigned"):
 		return "node_unassigned"
+	case strings.Contains(reason, "image pull"):
+		return "image_pull"
+	case strings.Contains(reason, "runtime setup"):
+		return "runtime_setup"
+	case strings.Contains(reason, "sandbox networking completed"):
+		return "ip_unreported"
 	case strings.Contains(reason, "ip is not assigned"):
 		return "ip_unassigned"
 	case strings.Contains(reason, "phase is terminal"):
@@ -487,9 +491,40 @@ func isPodNetworkIdentityReady(pod *corev1.Pod) (bool, string) {
 		return false, "pod node is not assigned"
 	}
 	if strings.TrimSpace(pod.Status.PodIP) == "" {
-		return false, "pod IP is not assigned"
+		return false, podNetworkIdentityPendingReason(pod)
 	}
 	return true, ""
+}
+
+func podNetworkIdentityPendingReason(pod *corev1.Pod) string {
+	if reason := imagePullWaitingReason(pod.Status.InitContainerStatuses); reason != "" {
+		return fmt.Sprintf("container image pull is pending: %s", reason)
+	}
+	if reason := imagePullWaitingReason(pod.Status.ContainerStatuses); reason != "" {
+		return fmt.Sprintf("container image pull is pending: %s", reason)
+	}
+	if podConditionIsTrue(pod, corev1.PodReadyToStartContainers) {
+		return "pod IP is not reported after pod sandbox networking completed"
+	}
+	return "pod runtime setup is in progress (image pull, pod sandbox setup, or kubelet status synchronization)"
+}
+
+func imagePullWaitingReason(statuses []corev1.ContainerStatus) string {
+	for i := range statuses {
+		waiting := statuses[i].State.Waiting
+		if waiting == nil {
+			continue
+		}
+		reason := strings.TrimSpace(waiting.Reason)
+		normalized := strings.ToLower(reason)
+		if strings.Contains(normalized, "imagepull") ||
+			strings.Contains(normalized, "pullimage") ||
+			normalized == "registryunavailable" ||
+			normalized == "invalidimagename" {
+			return reason
+		}
+	}
+	return ""
 }
 
 func (s *SandboxService) isPodClaimReady(_ context.Context, pod *corev1.Pod) (bool, string) {

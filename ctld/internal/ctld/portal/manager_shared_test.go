@@ -12,7 +12,6 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
@@ -160,33 +159,6 @@ func TestCheckPublishedReportsMissingPortals(t *testing.T) {
 	}
 	if len(resp.Missing) != 1 || resp.Missing[0] != "cache" {
 		t.Fatalf("CheckPublished() missing = %v, want [cache]", resp.Missing)
-	}
-}
-
-func TestRootFSPortalPathsIncludesUnboundSystemState(t *testing.T) {
-	mgr := &Manager{portals: map[string]*portalMount{
-		"system": {
-			podUID:            "pod-uid",
-			name:              volumeportal.WebhookStatePortalName,
-			mountPath:         volumeportal.WebhookStateMountPath,
-			rootfsBackingPath: "/var/lib/sandbox0/ctld/rootfs/pod-uid/system",
-		},
-		"bound": {
-			podUID:            "pod-uid",
-			name:              "workspace",
-			mountPath:         "/workspace",
-			rootfsBackingPath: "/var/lib/sandbox0/ctld/rootfs/pod-uid/workspace",
-			volumeID:          "vol-1",
-		},
-	}}
-
-	got := mgr.RootFSPortalPaths("pod-uid")
-	if len(got) != 1 {
-		t.Fatalf("RootFSPortalPaths() = %#v, want one unbound portal", got)
-	}
-	if got[0].PortalName != volumeportal.WebhookStatePortalName ||
-		got[0].MountPath != volumeportal.WebhookStateMountPath {
-		t.Fatalf("RootFSPortalPaths()[0] = %#v, want system state portal", got[0])
 	}
 }
 

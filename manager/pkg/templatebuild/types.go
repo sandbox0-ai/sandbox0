@@ -9,7 +9,7 @@ import (
 )
 
 // CaptureMetadataVersion is the durable template build handoff format version.
-const CaptureMetadataVersion = 1
+const CaptureMetadataVersion = 2
 
 // ErrCaptureInvalid marks capture state that cannot be published safely.
 var ErrCaptureInvalid = errors.New("invalid template build capture")
@@ -19,7 +19,7 @@ var ErrCaptureInvalid = errors.New("invalid template build capture")
 type CaptureMetadata struct {
 	Version         int                   `json:"version"`
 	SnapshotID      string                `json:"snapshot_id"`
-	HeadLayerID     string                `json:"head_layer_id"`
+	HeadID          string                `json:"head_id"`
 	BaseImageRef    string                `json:"base_image_ref"`
 	BaseImageDigest string                `json:"base_image_digest"`
 	Platform        ocispec.Platform      `json:"platform"`

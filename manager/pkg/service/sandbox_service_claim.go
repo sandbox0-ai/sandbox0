@@ -52,6 +52,8 @@ type ClaimRequest struct {
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
 	WebhookStateVolumeID              string `json:"-"`
+	PreferredNodeName                 string `json:"-"`
+	RootFSSnapshotterInstance         string `json:"-"`
 	mayHaveExistingCredentialBindings bool
 }
 
@@ -612,6 +614,17 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	phaseStarted = time.Now()
+	err = s.bindSandboxRootFSSync(ctx, pod, sandboxRecordForClaimedPod(s, pod, template, req))
+	s.observeClaimPhase(req.Template, claimType, "bind_rootfs_sync", phaseStarted, err)
+	if err != nil {
+		cleanupClaimFailure(pod, "rootfs sync bind failed")
+		if metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		return nil, fmt.Errorf("bind rootfs sync: %w", err)
+	}
+
+	phaseStarted = time.Now()
 	pod, err = s.activateRuntimeAssignment(ctx, pod, runtimeRevision)
 	s.observeClaimPhase(req.Template, claimType, "wait_for_runtime_ready", phaseStarted, err)
 	if err != nil {
@@ -730,15 +743,26 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 	}); err != nil {
 		return pod, true, err
 	}
-	state, err := s.latestRootFSState(ctx, record.ID)
+	head, err := s.latestRootFSHead(ctx, record.ID)
 	if err != nil {
-		return pod, true, fmt.Errorf("load rootfs snapshot state: %w", err)
+		return pod, true, fmt.Errorf("load rootfs snapshot Head: %w", err)
 	}
-	if state == nil {
+	if head == nil {
 		return pod, true, fmt.Errorf("%w: snapshot %s", sandboxstore.ErrRootFSFilesystemNotFound, snapshotID)
 	}
-	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, state, true)
+	pod, err = s.replaceRuntimeWithRootFSHead(ctx, pod, template, req, head)
 	if err != nil {
+		return pod, true, err
+	}
+	pod, err = s.waitForColdPodNetworkPolicy(ctx, pod, req.TeamID)
+	if err != nil {
+		return pod, true, fmt.Errorf("prepare rootfs snapshot runtime network policy: %w", err)
+	}
+	pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+	if err != nil {
+		return pod, true, fmt.Errorf("wait for rootfs snapshot runtime: %w", err)
+	}
+	if err := s.saveRestoredRuntimePod(ctx, pod, record); err != nil {
 		return pod, true, err
 	}
 	return pod, true, nil
@@ -1385,6 +1409,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	// Build pod spec before side-effecting resources so claims fail fast when the
 	// sandbox data plane has no ready nodes to receive the pod.
 	spec := v1alpha1.BuildPodSpec(template)
+	if preferredNodeName := strings.TrimSpace(req.PreferredNodeName); preferredNodeName != "" {
+		spec.NodeName = preferredNodeName
+	}
 	resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
 	if err != nil {
 		return nil, err
@@ -1433,6 +1460,9 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType:         "cold",
 	}, s.config.AutoscalerSafeToEvictAnnotationKeys)
+	if instance := strings.TrimSpace(req.RootFSSnapshotterInstance); instance != "" {
+		annotations[controller.AnnotationRootFSSnapshotterInstance] = instance
+	}
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}

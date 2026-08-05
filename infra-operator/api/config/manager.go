@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -575,6 +576,7 @@ func LoadManagerConfig() *ManagerConfig {
 		cfg.RedisTimeout = metav1.Duration{Duration: 100 * time.Millisecond}
 	}
 	applyRootFSMaintenanceDefaults(cfg)
+	cfg.SandboxRuntimeClassName = rootfshead.RuntimeClassName
 	applySandboxObservabilityProducerDefaults(cfg)
 	applyPodTeardownDefaults(cfg)
 	return cfg

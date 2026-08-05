@@ -123,13 +123,11 @@ func (r *Repository) blockingQueries() []countQuery {
 
 	managerSandboxes := tableRef(r.schemas.Manager, "sandboxes")
 	managerLifecycleTxns := tableRef(r.schemas.Manager, "sandbox_lifecycle_txns")
-	managerRootFSStates := tableRef(r.schemas.Manager, "sandbox_rootfs_states")
-	managerRootFSHeads := tableRef(r.schemas.Manager, "sandbox_rootfs_heads")
 	managerRootFSBindings := tableRef(r.schemas.Manager, "sandbox_rootfs_bindings")
 	managerRootFSFilesystems := tableRef(r.schemas.Manager, "rootfs_filesystems")
 	managerRootFSSnapshots := tableRef(r.schemas.Manager, "rootfs_snapshots")
-	managerRootFSLayers := tableRef(r.schemas.Manager, "rootfs_layers")
-	managerRootFSObjects := tableRef(r.schemas.Manager, "rootfs_objects")
+	managerRootFSHeads := tableRef(r.schemas.Manager, "rootfs_heads_v3")
+	managerRootFSObjects := tableRef(r.schemas.Manager, "rootfs_objects_v3")
 	managerRootFSObjectDeletions := tableRef(r.schemas.Manager, "rootfs_object_deletions")
 
 	storageVolumes := tableRef(r.schemas.StorageProxy, "sandbox_volumes")
@@ -212,16 +210,6 @@ func (r *Repository) blockingQueries() []countQuery {
 			`, managerLifecycleTxns, managerSandboxes),
 		},
 		{
-			category: "sandbox_rootfs_states",
-			table:    managerRootFSStates,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSStates),
-		},
-		{
-			category: "sandbox_rootfs_heads",
-			table:    managerRootFSHeads,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSHeads),
-		},
-		{
 			category: "sandbox_rootfs_bindings",
 			table:    managerRootFSBindings,
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSBindings),
@@ -237,12 +225,12 @@ func (r *Repository) blockingQueries() []countQuery {
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSSnapshots),
 		},
 		{
-			category: "rootfs_layers",
-			table:    managerRootFSLayers,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSLayers),
+			category: "rootfs_heads_v3",
+			table:    managerRootFSHeads,
+			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSHeads),
 		},
 		{
-			category: "rootfs_objects",
+			category: "rootfs_objects_v3",
 			table:    managerRootFSObjects,
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1 AND deleted_at IS NULL`, managerRootFSObjects),
 		},
@@ -367,11 +355,17 @@ func (r *Repository) blockingQueries() []countQuery {
 
 func (r *Repository) retainedQueries() []countQuery {
 	webhookOutbox := tableRef(r.schemas.Manager, "sandbox_deletion_webhook_outbox")
+	rootFSPrefixes := tableRef(r.schemas.Manager, "rootfs_team_prefixes_v3")
 	return []countQuery{
 		{
 			category: "sandbox_deletion_webhook_deliveries",
 			table:    webhookOutbox,
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, webhookOutbox),
+		},
+		{
+			category: "rootfs_request_attribution_mappings",
+			table:    rootFSPrefixes,
+			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, rootFSPrefixes),
 		},
 	}
 }

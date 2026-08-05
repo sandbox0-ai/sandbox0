@@ -47,9 +47,10 @@ type ManagerMetrics struct {
 	MeteringOutboxOldestPendingAge         prometheus.Gauge
 	RootFSMaintenanceRunsTotal             *prometheus.CounterVec
 	RootFSMaintenanceDuration              *prometheus.HistogramVec
-	RootFSGCLayersTotal                    prometheus.Counter
 	RootFSObjectDeletesTotal               *prometheus.CounterVec
 	RootFSObjectDeletionQueueDepth         *prometheus.GaugeVec
+	RootFSInventoryJobs                    *prometheus.GaugeVec
+	RootFSHeadPrefixGuards                 prometheus.Gauge
 	RootFSStorageBytes                     prometheus.Gauge
 	RootFSStorageObjects                   prometheus.Gauge
 }
@@ -235,10 +236,6 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Help:    "Duration of rootfs maintenance cycles",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"status"}),
-		RootFSGCLayersTotal: factory.NewCounter(prometheus.CounterOpts{
-			Name: "manager_rootfs_gc_layers_total",
-			Help: "Total number of rootfs layer metadata records garbage-collected",
-		}),
 		RootFSObjectDeletesTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "manager_rootfs_object_deletes_total",
 			Help: "Total number of rootfs object deletion attempts by status",
@@ -247,6 +244,14 @@ func NewManager(registry prometheus.Registerer) *ManagerMetrics {
 			Name: "manager_rootfs_object_deletion_queue_depth",
 			Help: "Rootfs object deletion queue depth by state",
 		}, []string{"state"}),
+		RootFSInventoryJobs: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "manager_rootfs_inventory_jobs",
+			Help: "Rootfs exact inventory jobs by state",
+		}, []string{"state"}),
+		RootFSHeadPrefixGuards: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "manager_rootfs_head_prefix_guards",
+			Help: "Uninventoried rootfs Heads using temporary team-prefix GC protection",
+		}),
 		RootFSStorageBytes: factory.NewGauge(prometheus.GaugeOpts{
 			Name: "manager_rootfs_storage_bytes",
 			Help: "Current reachable persistent rootfs COW object bytes",

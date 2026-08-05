@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	nodev1 "k8s.io/api/node/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -27,34 +29,48 @@ import (
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 type Reconciler struct {
-	Resources                *common.ResourceManager
-	expectedRolloutRevisions map[string]string
+	Resources                   *common.ResourceManager
+	expectedRolloutRevisions    map[string]string
+	expectedSnapshotterRevision string
 }
 
 const (
-	containerdDataMountPath        = "/host-var-lib/containerd"
-	defaultContainerdHostDataRoot  = "/var/lib/containerd"
-	defaultContainerdHostStateRoot = "/run/containerd"
-	ctldProbeTimeoutSeconds        = 15
-	ctldProbeFailureThreshold      = 12
-	ctldTerminationGraceSeconds    = int64(45)
-	ctldCPURequest                 = "250m"
-	ctldMemoryRequest              = "256Mi"
-	networkRuntimeCPURequest       = "100m"
-	networkRuntimeMemoryRequest    = "128Mi"
-	ctldHAProbeSocket              = "/run/sandbox0/ctld-ha.sock"
-	ctldKubeletRegistrationSocket  = "/var/lib/kubelet/plugins_registry/" + volumeportal.DriverName + "-reg.sock"
-	ctldKubeletCSIEndpoint         = "/var/lib/kubelet/plugins/" + volumeportal.DriverName + "/csi.sock"
-	ctldRolloutRevisionAnnotation  = "infra.sandbox0.ai/ctld-rollout-revision"
-	networkMetricsServiceSuffix    = "-ctld-network-metrics"
-	ctldHAMetricsPortA             = int32(9192)
-	ctldHAMetricsPortB             = int32(9193)
+	containerdDataMountPath                    = "/host-var-lib/containerd"
+	defaultContainerdHostDataRoot              = "/var/lib/containerd"
+	defaultContainerdHostStateRoot             = "/run/containerd"
+	ctldProbeTimeoutSeconds                    = 15
+	ctldProbeFailureThreshold                  = 12
+	ctldTerminationGraceSeconds                = int64(45)
+	ctldCPURequest                             = "250m"
+	ctldMemoryRequest                          = "256Mi"
+	networkRuntimeCPURequest                   = "100m"
+	networkRuntimeMemoryRequest                = "128Mi"
+	ctldHAProbeSocket                          = "/run/sandbox0/ctld-ha.sock"
+	ctldKubeletRegistrationSocket              = "/var/lib/kubelet/plugins_registry/" + volumeportal.DriverName + "-reg.sock"
+	ctldKubeletCSIEndpoint                     = "/var/lib/kubelet/plugins/" + volumeportal.DriverName + "/csi.sock"
+	ctldRolloutRevisionAnnotation              = "infra.sandbox0.ai/ctld-rollout-revision"
+	rootFSSnapshotterRolloutRevisionAnnotation = "infra.sandbox0.ai/rootfs-snapshotter-rollout-revision"
+	networkMetricsServiceSuffix                = "-ctld-network-metrics"
+	ctldHAMetricsPortA                         = int32(9192)
+	ctldHAMetricsPortB                         = int32(9193)
+	rootFSSnapshotterComponent                 = "rootfs-snapshotter"
+	rootFSSnapshotterSocket                    = "/host-run/containerd/sandbox0-rootfs.sock"
+	rootFSSnapshotterStateRoot                 = "/var/lib/sandbox0/rootfs-snapshotter"
+	rootFSSnapshotterHealthPort                = int32(8096)
+	rootFSSnapshotterCPURequest                = "250m"
+	rootFSSnapshotterMemoryRequest             = "256Mi"
+	rootFSSnapshotterTerminationGraceSeconds   = int64(60)
 )
+
+// RootFSSnapshotterComponent is the component label used by the singleton
+// node-local external snapshotter.
+const RootFSSnapshotterComponent = rootFSSnapshotterComponent
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
@@ -95,6 +111,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err := r.ensureCSIDriver(ctx, labels); err != nil {
 		return err
 	}
+	if err := r.ensureRootFSRuntimeClass(ctx, labels); err != nil {
+		return err
+	}
 	if netdAssets != nil {
 		if err := r.ensureNetworkMetricsService(ctx, infra, int32(netdAssets.Config.MetricsPort)); err != nil {
 			return err
@@ -112,7 +131,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	nodeSelector, tolerations := common.ResolveSandboxNodePlacement(infra)
 	containerdHostDataRoot := ctldContainerdHostDataRoot(infra)
-	args := ctldArgs(infra, containerdHostDataRoot)
+	args := ctldArgs(containerdHostDataRoot)
 	terminationGraceSeconds := ctldTerminationGraceSeconds
 	bidirectional := corev1.MountPropagationBidirectional
 	hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
@@ -123,6 +142,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
 		{Name: "containerd-data", MountPath: containerdDataMountPath, ReadOnly: true},
+		{Name: "rootfs-snapshotter-state", MountPath: rootFSSnapshotterStateRoot, ReadOnly: true},
 		{Name: netdsvc.RunVolumeName, MountPath: netdsvc.RunMountDirectory},
 	}
 	volumes := []corev1.Volume{
@@ -168,6 +188,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			Name: "containerd-data",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{Path: containerdHostDataRoot},
+			},
+		},
+		{
+			Name: "rootfs-snapshotter-state",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: rootFSSnapshotterStateRoot, Type: &hostPathDirectoryOrCreate},
 			},
 		},
 		{Name: netdsvc.RunVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
@@ -218,6 +244,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if netdAssets != nil {
 		volumeMounts = appendUniqueVolumeMounts(volumeMounts, netdAssets.VolumeMounts...)
 		volumes = appendUniqueVolumes(volumes, netdAssets.Volumes...)
+	}
+	snapshotter := buildRootFSSnapshotterDaemonSet(rootFSSnapshotterDaemonSetConfig{
+		Name:                 infra.Name + "-rootfs-snapshotter",
+		Namespace:            infra.Namespace,
+		Labels:               common.GetServiceLabels(infra.Name, rootFSSnapshotterComponent),
+		PodAnnotations:       configRef.PodAnnotations(),
+		Image:                image,
+		PullPolicy:           pullPolicy,
+		NodeSelector:         nodeSelector,
+		Tolerations:          tolerations,
+		ConfigMapName:        configRef.ConfigMapName,
+		StorageMounts:        credentialStoreMounts,
+		StorageVolumes:       credentialStoreVolumes,
+		EncryptionEnabled:    storageConfig.ObjectEncryptionEnabled,
+		EncryptionSecretName: common.ObjectEncryptionSecretName(infra.Name),
+		Infra:                infra,
+		CacheMaxBytes:        rootFSObjectCacheMaxBytes(infra),
+		CacheMinFreeBytes:    rootFSObjectCacheMinFreeBytes(infra),
+		CacheMaxAge:          rootFSObjectCacheMaxAge(infra),
+		CacheSweepInterval:   rootFSObjectCacheSweepInterval(infra),
+	})
+	snapshotterRevision, err := common.ConfigHash(snapshotter.Spec)
+	if err != nil {
+		return fmt.Errorf("hash rootfs snapshotter rollout: %w", err)
+	}
+	snapshotter.Spec.Template.Annotations[rootFSSnapshotterRolloutRevisionAnnotation] = snapshotterRevision
+	r.expectedSnapshotterRevision = snapshotterRevision
+	if err := r.Resources.ApplyDaemonSet(ctx, infra, snapshotter); err != nil {
+		return fmt.Errorf("reconcile rootfs snapshotter: %w", err)
 	}
 	desiredBySlot := make(map[string]*appsv1.DaemonSet, 2)
 	for _, slot := range []string{dataplane.CtldHASlotA, dataplane.CtldHASlotB} {
@@ -498,6 +553,170 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 	}
 }
 
+type rootFSSnapshotterDaemonSetConfig struct {
+	Name                 string
+	Namespace            string
+	Labels               map[string]string
+	PodAnnotations       map[string]string
+	Image                string
+	PullPolicy           corev1.PullPolicy
+	NodeSelector         map[string]string
+	Tolerations          []corev1.Toleration
+	ConfigMapName        string
+	StorageMounts        []corev1.VolumeMount
+	StorageVolumes       []corev1.Volume
+	EncryptionEnabled    bool
+	EncryptionSecretName string
+	Infra                *infrav1alpha1.Sandbox0Infra
+	CacheMaxBytes        string
+	CacheMinFreeBytes    string
+	CacheMaxAge          time.Duration
+	CacheSweepInterval   time.Duration
+}
+
+func buildRootFSSnapshotterDaemonSet(cfg rootFSSnapshotterDaemonSetConfig) *appsv1.DaemonSet {
+	directoryOrCreate := corev1.HostPathDirectoryOrCreate
+	charDevice := corev1.HostPathCharDev
+	bidirectional := corev1.MountPropagationBidirectional
+	falseValue := false
+	terminationGrace := rootFSSnapshotterTerminationGraceSeconds
+	labels := cloneStringMap(cfg.Labels)
+	args := []string{
+		"-root=" + rootFSSnapshotterStateRoot,
+		"-address=" + rootFSSnapshotterSocket,
+		"-containerd-address=/host-run/containerd/containerd.sock",
+		fmt.Sprintf("-health-address=:%d", rootFSSnapshotterHealthPort),
+	}
+	if value := strings.TrimSpace(cfg.CacheMaxBytes); value != "" {
+		args = append(args, "-object-cache-max-bytes="+value)
+	}
+	if value := strings.TrimSpace(cfg.CacheMinFreeBytes); value != "" {
+		args = append(args, "-object-cache-min-free-bytes="+value)
+	}
+	if cfg.CacheMaxAge > 0 {
+		args = append(args, "-object-cache-max-age="+cfg.CacheMaxAge.String())
+	}
+	if cfg.CacheSweepInterval > 0 {
+		args = append(args, "-object-cache-sweep-interval="+cfg.CacheSweepInterval.String())
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "config", MountPath: "/config/config.yaml", SubPath: "config.yaml", ReadOnly: true},
+		{Name: "rootfs-snapshotter-state", MountPath: rootFSSnapshotterStateRoot, MountPropagation: &bidirectional},
+		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
+		{Name: "dev-fuse", MountPath: "/dev/fuse"},
+	}
+	volumes := []corev1.Volume{
+		{
+			Name: "config",
+			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: cfg.ConfigMapName},
+			}},
+		},
+		{
+			Name: "rootfs-snapshotter-state",
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+				Path: rootFSSnapshotterStateRoot,
+				Type: &directoryOrCreate,
+			}},
+		},
+		{
+			Name: "containerd-sock",
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+				Path: defaultContainerdHostStateRoot,
+				Type: &directoryOrCreate,
+			}},
+		},
+		{
+			Name: "dev-fuse",
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+				Path: "/dev/fuse",
+				Type: &charDevice,
+			}},
+		},
+	}
+	mounts = appendUniqueVolumeMounts(mounts, cfg.StorageMounts...)
+	volumes = appendUniqueVolumes(volumes, cfg.StorageVolumes...)
+	if cfg.EncryptionEnabled {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name: "object-encryption-key", MountPath: common.ObjectEncryptionMountDir, ReadOnly: true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "object-encryption-key",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: cfg.EncryptionSecretName,
+				Items:      []corev1.KeyToPath{{Key: common.ObjectEncryptionSecretKey, Path: common.ObjectEncryptionKeyFilename}},
+			}},
+		})
+	}
+	container := corev1.Container{
+		Name:            rootFSSnapshotterComponent,
+		Image:           cfg.Image,
+		ImagePullPolicy: cfg.PullPolicy,
+		Command:         []string{"/usr/local/bin/rootfs-snapshotter"},
+		Args:            args,
+		Env: common.AppendObservabilityEnvVars([]corev1.EnvVar{
+			{Name: "SERVICE", Value: rootFSSnapshotterComponent},
+			{Name: "CONFIG_PATH", Value: "/config/config.yaml"},
+			{Name: "NODE_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"}}},
+			{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		}, cfg.Infra, common.ObservabilityEnvConfig{
+			ServiceName: rootFSSnapshotterComponent,
+			RegionID:    common.ResolveRegionID(cfg.Infra),
+			ClusterID:   common.ResolveClusterID(cfg.Infra),
+		}),
+		SecurityContext: &corev1.SecurityContext{Privileged: common.BoolPtr(true)},
+		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(rootFSSnapshotterCPURequest),
+			corev1.ResourceMemory: resource.MustParse(rootFSSnapshotterMemoryRequest),
+		}},
+		VolumeMounts: mounts,
+		Ports: []corev1.ContainerPort{{
+			Name: "health", ContainerPort: rootFSSnapshotterHealthPort, Protocol: corev1.ProtocolTCP,
+		}},
+		LivenessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+				Path: "/healthz", Port: intstr.FromString("health"),
+			}},
+			InitialDelaySeconds: 5, PeriodSeconds: 10, TimeoutSeconds: 3, FailureThreshold: 3,
+		},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+				Path: "/readyz", Port: intstr.FromString("health"),
+			}},
+			InitialDelaySeconds: 2, PeriodSeconds: 5, TimeoutSeconds: 3, FailureThreshold: 3,
+		},
+	}
+	revisionHistoryLimit := int32(1)
+	return &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Name: cfg.Name, Namespace: cfg.Namespace},
+		Spec: appsv1.DaemonSetSpec{
+			Selector:             &metav1.LabelSelector{MatchLabels: labels},
+			UpdateStrategy:       appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType},
+			MinReadySeconds:      2,
+			RevisionHistoryLimit: &revisionHistoryLimit,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: common.EnsurePodTemplateAnnotations(cfg.PodAnnotations)},
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken:  &falseValue,
+					NodeSelector:                  cfg.NodeSelector,
+					Tolerations:                   cfg.Tolerations,
+					TerminationGracePeriodSeconds: &terminationGrace,
+					Containers:                    []corev1.Container{container},
+					Volumes:                       volumes,
+				},
+			},
+		},
+	}
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
+}
+
 func ctldHAMetricsPort(slot string) int32 {
 	if slot == dataplane.CtldHASlotB {
 		return ctldHAMetricsPortB
@@ -541,6 +760,26 @@ func (r *Reconciler) Ready(ctx context.Context, infra *infrav1alpha1.Sandbox0Inf
 	if infra == nil {
 		return false, fmt.Errorf("sandbox0infra is required")
 	}
+	snapshotter := &appsv1.DaemonSet{}
+	if err := r.Resources.Client.Get(ctx, types.NamespacedName{
+		Name: infra.Name + "-rootfs-snapshotter", Namespace: infra.Namespace,
+	}, snapshotter); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if r.expectedSnapshotterRevision != "" &&
+		snapshotter.Spec.Template.Annotations[rootFSSnapshotterRolloutRevisionAnnotation] != r.expectedSnapshotterRevision {
+		return false, nil
+	}
+	if !daemonSetReady(snapshotter) {
+		return false, nil
+	}
+	snapshotterReady, err := r.currentRootFSSnapshotterPodsReady(ctx, snapshotter)
+	if err != nil || !snapshotterReady {
+		return false, err
+	}
 	name := fmt.Sprintf("%s-ctld", infra.Name)
 	for _, slot := range []string{dataplane.CtldHASlotA, dataplane.CtldHASlotB} {
 		ds := &appsv1.DaemonSet{}
@@ -567,6 +806,65 @@ func (r *Reconciler) Ready(ctx context.Context, infra *infrav1alpha1.Sandbox0Inf
 		}
 	}
 	return true, nil
+}
+
+func (r *Reconciler) currentRootFSSnapshotterPodsReady(ctx context.Context, ds *appsv1.DaemonSet) (bool, error) {
+	if ds == nil || ds.Status.DesiredNumberScheduled == 0 {
+		return true, nil
+	}
+	pods := &corev1.PodList{}
+	if err := r.Resources.Client.List(ctx, pods,
+		ctrlclient.InNamespace(ds.Namespace),
+		ctrlclient.MatchingLabels(ds.Spec.Selector.MatchLabels),
+	); err != nil {
+		return false, err
+	}
+	readyNodes := make(map[string]struct{}, ds.Status.DesiredNumberScheduled)
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if RootFSSnapshotterContainerRunning(pod) && !RootFSSnapshotterPodMatchesCurrentTemplate(pod, ds) {
+			return false, nil
+		}
+		if pod.DeletionTimestamp.IsZero() && pod.Spec.NodeName != "" && RootFSSnapshotterPodReadyForCurrentTemplate(pod, ds) {
+			readyNodes[pod.Spec.NodeName] = struct{}{}
+		}
+	}
+	return int32(len(readyNodes)) >= ds.Status.DesiredNumberScheduled, nil
+}
+
+// RootFSSnapshotterPodMatchesCurrentTemplate rejects an old process that may
+// still own FUSE mounts after the OnDelete DaemonSet template changes.
+func RootFSSnapshotterPodMatchesCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
+	if pod == nil || ds == nil || !mapContains(pod.Labels, ds.Spec.Template.Labels) || !mapContains(pod.Annotations, ds.Spec.Template.Annotations) {
+		return false
+	}
+	desired := containerByName(ds.Spec.Template.Spec.Containers, rootFSSnapshotterComponent)
+	actual := containerByName(pod.Spec.Containers, rootFSSnapshotterComponent)
+	return desired != nil && actual != nil && desired.Image == actual.Image && RootFSSnapshotterContainerRunning(pod)
+}
+
+// RootFSSnapshotterContainerRunning reports whether the singleton process may
+// still own live rootfs FUSE mounts on its node.
+func RootFSSnapshotterContainerRunning(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	status := containerStatusByName(pod.Status.ContainerStatuses, rootFSSnapshotterComponent)
+	return status != nil && status.State.Running != nil
+}
+
+// RootFSSnapshotterPodReadyForCurrentTemplate requires both the current
+// OnDelete revision and Kubernetes PodReady.
+func RootFSSnapshotterPodReadyForCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
+	if !RootFSSnapshotterPodMatchesCurrentTemplate(pod, ds) {
+		return false
+	}
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == corev1.PodReady {
+			return pod.Status.Conditions[i].Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // NetworkReady reports network readiness through the ctld HA pair.
@@ -707,7 +1005,7 @@ func volumeMountByName(mounts []corev1.VolumeMount, name string) (corev1.VolumeM
 	return corev1.VolumeMount{}, false
 }
 
-func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string) []string {
+func ctldArgs(containerdHostDataRoot string) []string {
 	if strings.TrimSpace(containerdHostDataRoot) == "" {
 		containerdHostDataRoot = defaultContainerdHostDataRoot
 	}
@@ -716,28 +1014,11 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string)
 		fmt.Sprintf("-runtime-watch-addr=:%d", runtimecontrol.DefaultCtldWatchPort),
 		"-cri-endpoint=/host-run/containerd/containerd.sock",
 		"-containerd-endpoint=/host-run/containerd/containerd.sock",
-		"-containerd-root=/host-run/containerd",
-		"-containerd-host-root=" + defaultContainerdHostStateRoot,
 		"-containerd-data-root=" + containerdDataMountPath,
 		"-containerd-host-data-root=" + containerdHostDataRoot,
 		"-volume-portal-root=/var/lib/sandbox0/ctld",
 		"-kubelet-pods-root=/var/lib/kubelet/pods",
 		"-csi-socket=/csi/csi.sock",
-	}
-	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Ctld != nil {
-		cfg := infra.Spec.Services.Ctld
-		if value := strings.TrimSpace(cfg.RootFSObjectCacheMaxBytes); value != "" {
-			args = append(args, "-rootfs-object-cache-max-bytes="+value)
-		}
-		if value := strings.TrimSpace(cfg.RootFSObjectCacheMinFreeBytes); value != "" {
-			args = append(args, "-rootfs-object-cache-min-free-bytes="+value)
-		}
-		if cfg.RootFSObjectCacheMaxAge.Duration > 0 {
-			args = append(args, "-rootfs-object-cache-max-age="+cfg.RootFSObjectCacheMaxAge.Duration.String())
-		}
-		if cfg.RootFSObjectCacheSweepInterval.Duration > 0 {
-			args = append(args, "-rootfs-object-cache-sweep-interval="+cfg.RootFSObjectCacheSweepInterval.Duration.String())
-		}
 	}
 	return args
 }
@@ -750,6 +1031,34 @@ func ctldContainerdHostDataRoot(infra *infrav1alpha1.Sandbox0Infra) string {
 		return root
 	}
 	return defaultContainerdHostDataRoot
+}
+
+func rootFSObjectCacheMaxBytes(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Ctld == nil {
+		return ""
+	}
+	return strings.TrimSpace(infra.Spec.Services.Ctld.RootFSObjectCacheMaxBytes)
+}
+
+func rootFSObjectCacheMinFreeBytes(infra *infrav1alpha1.Sandbox0Infra) string {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Ctld == nil {
+		return ""
+	}
+	return strings.TrimSpace(infra.Spec.Services.Ctld.RootFSObjectCacheMinFreeBytes)
+}
+
+func rootFSObjectCacheMaxAge(infra *infrav1alpha1.Sandbox0Infra) time.Duration {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Ctld == nil {
+		return 0
+	}
+	return infra.Spec.Services.Ctld.RootFSObjectCacheMaxAge.Duration
+}
+
+func rootFSObjectCacheSweepInterval(infra *infrav1alpha1.Sandbox0Infra) time.Duration {
+	if infra == nil || infra.Spec.Services == nil || infra.Spec.Services.Ctld == nil {
+		return 0
+	}
+	return infra.Spec.Services.Ctld.RootFSObjectCacheSweepInterval.Duration
 }
 
 func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]string) error {
@@ -778,6 +1087,25 @@ func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]stri
 	return r.Resources.UpdateObjectIfChanged(ctx, current, func() {
 		current.Labels = desired.Labels
 		current.Spec = desired.Spec
+	})
+}
+
+func (r *Reconciler) ensureRootFSRuntimeClass(ctx context.Context, labels map[string]string) error {
+	desired := &nodev1.RuntimeClass{
+		ObjectMeta: metav1.ObjectMeta{Name: rootfshead.RuntimeClassName, Labels: labels},
+		Handler:    rootfshead.RuntimeClassName,
+	}
+	current := &nodev1.RuntimeClass{}
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: desired.Name}, current)
+	if apierrors.IsNotFound(err) {
+		return r.Resources.Client.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	return r.Resources.UpdateObjectIfChanged(ctx, current, func() {
+		current.Labels = desired.Labels
+		current.Handler = desired.Handler
 	})
 }
 

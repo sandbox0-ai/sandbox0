@@ -929,7 +929,10 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="32Gi"
 	SandboxMaxMemory string `json:"sandboxMaxMemory,omitempty"`
+	// SandboxRuntimeClassName is fixed to the operator-managed gvisor-rootfs RuntimeClass.
 	// +optional
+	// +kubebuilder:default=gvisor-rootfs
+	// +kubebuilder:validation:Enum=gvisor-rootfs
 	SandboxRuntimeClassName string `json:"sandboxRuntimeClassName,omitempty"`
 	// ProcdBinImageRef overrides the OCI image used for the procd binary image volume.
 	// +optional

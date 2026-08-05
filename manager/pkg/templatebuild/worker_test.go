@@ -1,13 +1,10 @@
 package templatebuild
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"testing"
 	"time"
@@ -28,7 +25,7 @@ func TestTemplateBuildWorkerReconcilingClaimOnlyCleansUp(t *testing.T) {
 	queue := &fakeTemplateBuildQueue{build: build}
 	capturer := &fakeTemplateBuildCapturer{}
 	publisher := &fakeTemplateImagePublisher{err: fmt.Errorf("publisher must not be called")}
-	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher, emptyTemplateObjectReader{})
+	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher)
 
 	worked, err := worker.RunOnce(context.Background())
 	if err != nil {
@@ -48,17 +45,16 @@ func TestTemplateBuildWorkerReconcilingClaimOnlyCleansUp(t *testing.T) {
 	}
 }
 
-func TestTemplateBuildWorkerCapturesLegacyDiffIDPublishesAndCleansUp(t *testing.T) {
+func TestTemplateBuildWorkerCapturesPublishesAndCleansUp(t *testing.T) {
 	t.Parallel()
 
 	build := templateBuildWorkerTestBuild()
-	uncompressed := []byte("legacy rootfs layer")
-	compressed := templateBuildGzip(t, uncompressed)
-	objects := &templateBuildObjectReader{objects: map[string][]byte{"rootfs/layer": compressed}}
+	layer := []byte("rootfs Head export")
+	diffID := digest.FromBytes([]byte("uncompressed rootfs Head export")).String()
 	capture := &TemplateBuildCaptureMetadata{
 		Version:         templateBuildCaptureMetadataVersion,
 		SnapshotID:      build.SnapshotID,
-		HeadLayerID:     "layer-1",
+		HeadID:          "head-1",
 		BaseImageRef:    "docker.io/library/busybox:1.36",
 		BaseImageDigest: digest.FromString("base-index").String(),
 		Platform:        ocispec.Platform{OS: "linux", Architecture: "amd64"},
@@ -66,8 +62,9 @@ func TestTemplateBuildWorkerCapturesLegacyDiffIDPublishesAndCleansUp(t *testing.
 			ID:        "layer-1",
 			ObjectKey: "rootfs/layer",
 			MediaType: ocispec.MediaTypeImageLayerGzip,
-			Digest:    digest.FromBytes(compressed).String(),
-			Size:      int64(len(compressed)),
+			Digest:    digest.FromBytes(layer).String(),
+			DiffID:    diffID,
+			Size:      int64(len(layer)),
 		}},
 		CapturedAt: time.Unix(100, 0).UTC(),
 	}
@@ -77,7 +74,7 @@ func TestTemplateBuildWorkerCapturesLegacyDiffIDPublishesAndCleansUp(t *testing.
 		PullReference:  "registry.internal/t-team/template@sha256:published",
 		ManifestDigest: digest.FromString("published"),
 	}}
-	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher, objects)
+	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher)
 
 	worked, err := worker.RunOnce(context.Background())
 	if err != nil {
@@ -93,8 +90,8 @@ func TestTemplateBuildWorkerCapturesLegacyDiffIDPublishesAndCleansUp(t *testing.
 	if err := json.Unmarshal(queue.capturedMetadata, &persisted); err != nil {
 		t.Fatalf("decode persisted capture metadata: %v", err)
 	}
-	if got, want := persisted.Layers[0].DiffID, digest.FromBytes(uncompressed).String(); got != want {
-		t.Fatalf("legacy DiffID = %s, want %s", got, want)
+	if got := persisted.Layers[0].DiffID; got != diffID {
+		t.Fatalf("DiffID = %s, want %s", got, diffID)
 	}
 	if publisher.calls != 1 {
 		t.Fatalf("publisher calls = %d, want 1", publisher.calls)
@@ -102,7 +99,7 @@ func TestTemplateBuildWorkerCapturesLegacyDiffIDPublishesAndCleansUp(t *testing.
 	if got := publisher.request.Platform.Architecture; got != "amd64" {
 		t.Fatalf("publisher platform architecture = %q, want amd64", got)
 	}
-	if got := publisher.request.Layers[0].DiffID; got != digest.FromBytes(uncompressed).String() {
+	if got := publisher.request.Layers[0].DiffID; got != diffID {
 		t.Fatalf("publisher DiffID = %q", got)
 	}
 	if queue.publishedSpec.MainContainer.Image != publisher.result.PullReference {
@@ -126,7 +123,7 @@ func TestTemplateBuildWorkerCancellationInterruptsPublisherAndCleansUp(t *testin
 	}
 	capturer := &fakeTemplateBuildCapturer{}
 	publisher := &fakeTemplateImagePublisher{waitForCancellation: true}
-	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher, emptyTemplateObjectReader{})
+	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher)
 	worker.config.HeartbeatInterval = time.Millisecond
 	worker.config.LeaseDuration = 50 * time.Millisecond
 
@@ -162,7 +159,7 @@ func TestTemplateBuildWorkerPublishesCapturedBuildClaimedByAnotherCluster(t *tes
 		PullReference:  "registry.internal/t-team/template@sha256:takeover",
 		ManifestDigest: digest.FromString("takeover"),
 	}}
-	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher, emptyTemplateObjectReader{})
+	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher)
 	worker.config.ClusterID = "recovery-cluster"
 
 	worked, err := worker.RunOnce(context.Background())
@@ -195,7 +192,7 @@ func TestTemplateBuildWorkerInvalidCaptureFailsWithoutRetry(t *testing.T) {
 		err: fmt.Errorf("%w: mixed rootfs platform", errTemplateBuildCaptureInvalid),
 	}
 	publisher := &fakeTemplateImagePublisher{err: fmt.Errorf("publisher must not be called")}
-	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher, emptyTemplateObjectReader{})
+	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher)
 
 	worked, err := worker.RunOnce(context.Background())
 	if !worked || !errors.Is(err, errTemplateBuildCaptureInvalid) {
@@ -223,7 +220,7 @@ func TestTemplateBuildWorkerPublishingWithoutMetadataNeverRecapturesSource(t *te
 		capture: templateBuildWorkerTestCapture(build),
 	}
 	publisher := &fakeTemplateImagePublisher{err: fmt.Errorf("publisher must not be called")}
-	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher, emptyTemplateObjectReader{})
+	worker := newTemplateBuildWorkerForTest(t, queue, capturer, publisher)
 	worker.config.ClusterID = "recovery-cluster"
 
 	worked, err := worker.RunOnce(context.Background())
@@ -248,10 +245,9 @@ func newTemplateBuildWorkerForTest(
 	queue *fakeTemplateBuildQueue,
 	capturer *fakeTemplateBuildCapturer,
 	publisher *fakeTemplateImagePublisher,
-	objects templateimage.ObjectReader,
 ) *TemplateBuildWorker {
 	t.Helper()
-	worker, err := NewTemplateBuildWorker(queue, capturer, publisher, objects, TemplateBuildWorkerConfig{
+	worker, err := NewTemplateBuildWorker(queue, capturer, publisher, TemplateBuildWorkerConfig{
 		ClusterID:         "cluster-1",
 		WorkerID:          "worker-1",
 		PollInterval:      time.Hour,
@@ -286,7 +282,7 @@ func templateBuildWorkerTestCapture(build *template.TemplateBuild) *TemplateBuil
 	return &TemplateBuildCaptureMetadata{
 		Version:         templateBuildCaptureMetadataVersion,
 		SnapshotID:      build.SnapshotID,
-		HeadLayerID:     "layer-1",
+		HeadID:          "head-1",
 		BaseImageRef:    "busybox:1.36",
 		BaseImageDigest: digest.FromString("base").String(),
 		Platform:        ocispec.Platform{OS: "linux", Architecture: "amd64"},
@@ -414,39 +410,4 @@ func (p *fakeTemplateImagePublisher) Publish(ctx context.Context, req templateim
 		return nil, ctx.Err()
 	}
 	return p.result, p.err
-}
-
-type emptyTemplateObjectReader struct{}
-
-func (emptyTemplateObjectReader) Get(string, int64, int64) (io.ReadCloser, error) {
-	return nil, fmt.Errorf("unexpected object read")
-}
-
-type templateBuildObjectReader struct {
-	objects map[string][]byte
-}
-
-func (r *templateBuildObjectReader) Get(key string, offset, limit int64) (io.ReadCloser, error) {
-	payload, ok := r.objects[key]
-	if !ok {
-		return nil, fmt.Errorf("object not found")
-	}
-	end := int64(len(payload))
-	if limit >= 0 && offset+limit < end {
-		end = offset + limit
-	}
-	return io.NopCloser(bytes.NewReader(payload[offset:end])), nil
-}
-
-func templateBuildGzip(t *testing.T, payload []byte) []byte {
-	t.Helper()
-	var buffer bytes.Buffer
-	writer := gzip.NewWriter(&buffer)
-	if _, err := writer.Write(payload); err != nil {
-		t.Fatalf("gzip Write() error = %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("gzip Close() error = %v", err)
-	}
-	return buffer.Bytes()
 }

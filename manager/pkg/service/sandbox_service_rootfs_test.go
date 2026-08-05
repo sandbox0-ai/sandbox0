@@ -786,13 +786,14 @@ func TestRootFSExcludedPathsForPodUsesBoundClaimMountPaths(t *testing.T) {
 func TestRootFSExcludedPathsForPodIncludesRuntimeMountsButNotUnboundPortals(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
+	addRootFSTestVolumePortal(pod, volumeportal.WebhookStatePortalName, volumeportal.WebhookStateMountPath)
 	pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 		Name: "runtime-config", MountPath: "/config",
 	})
 
 	got := rootFSExcludedPathsForPod(pod)
 
-	assert.ElementsMatch(t, []string{"/tmp", "/procd", "/procd-image", "/config"}, got)
+	assert.ElementsMatch(t, []string{"/tmp", "/procd", "/procd-image", volumeportal.WebhookStateMountPath, "/config"}, got)
 }
 
 func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {

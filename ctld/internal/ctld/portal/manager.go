@@ -483,7 +483,7 @@ func (m *Manager) AttachRootFSBackings(ctx context.Context, podUID, upperRoot st
 	m.mu.Lock()
 	keys := make([]string, 0)
 	for key, current := range m.portals {
-		if current != nil && current.podUID == podUID && current.volumeID == "" {
+		if rootFSPersistedPortal(current, podUID) {
 			keys = append(keys, key)
 		}
 	}
@@ -496,7 +496,7 @@ func (m *Manager) AttachRootFSBackings(ctx context.Context, podUID, upperRoot st
 		}
 		m.mu.Lock()
 		current := m.portals[key]
-		if current == nil || current.podUID != podUID || current.volumeID != "" {
+		if !rootFSPersistedPortal(current, podUID) {
 			m.mu.Unlock()
 			continue
 		}
@@ -548,6 +548,13 @@ func (m *Manager) AttachRootFSBackings(ctx context.Context, podUID, upperRoot st
 		}
 	}
 	return nil
+}
+
+func rootFSPersistedPortal(current *portalMount, podUID string) bool {
+	if current == nil || current.podUID != podUID || current.volumeID != "" {
+		return false
+	}
+	return current.name != volumeportal.WebhookStatePortalName && current.mountPath != volumeportal.WebhookStateMountPath
 }
 
 func ensureRootFSBackingTarget(upperRoot, mountPath string) (string, error) {

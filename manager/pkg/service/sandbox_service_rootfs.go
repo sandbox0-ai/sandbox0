@@ -415,10 +415,15 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	add("/tmp")
 	add("/procd")
 	add("/procd-image")
-	portalVolumes := make(map[string]struct{})
+	rootFSBackedPortalVolumes := make(map[string]struct{})
 	for _, volume := range pod.Spec.Volumes {
 		if volume.CSI != nil && volume.CSI.Driver == volumeportal.DriverName {
-			portalVolumes[volume.Name] = struct{}{}
+			attributes := volume.CSI.VolumeAttributes
+			if attributes[volumeportal.AttributePortalName] == volumeportal.WebhookStatePortalName ||
+				path.Clean(strings.TrimSpace(attributes[volumeportal.AttributeMountPath])) == volumeportal.WebhookStateMountPath {
+				continue
+			}
+			rootFSBackedPortalVolumes[volume.Name] = struct{}{}
 		}
 	}
 	for _, container := range pod.Spec.Containers {
@@ -426,7 +431,7 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 			continue
 		}
 		for _, mount := range container.VolumeMounts {
-			if _, rootFSBackedPortal := portalVolumes[mount.Name]; rootFSBackedPortal {
+			if _, rootFSBackedPortal := rootFSBackedPortalVolumes[mount.Name]; rootFSBackedPortal {
 				// Unbound portals are rebased onto the overlay upper before
 				// rootfs sync starts. Bound SandboxVolumes are excluded below
 				// from the persisted claim mounts instead.

@@ -12,6 +12,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
@@ -378,6 +379,33 @@ func TestAttachRootFSBackingsSkipsBoundVolumes(t *testing.T) {
 	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
 	if err := mgr.AttachRootFSBackings(context.Background(), "pod-1", t.TempDir()); err != nil {
 		t.Fatalf("AttachRootFSBackings() error = %v", err)
+	}
+}
+
+func TestAttachRootFSBackingsSkipsRuntimeOwnedWebhookPortal(t *testing.T) {
+	mgr := NewManager(Config{RootDir: t.TempDir()})
+	staging := mgr.unboundRootFSBackingPath("pod-1", volumeportal.WebhookStatePortalName)
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", staging, err)
+	}
+	marker := filepath.Join(staging, "runtime-state")
+	if err := os.WriteFile(marker, []byte("runtime"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", marker, err)
+	}
+	pm := &portalMount{
+		podUID:            "pod-1",
+		name:              volumeportal.WebhookStatePortalName,
+		mountPath:         volumeportal.WebhookStateMountPath,
+		rootfsBackingPath: staging,
+	}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+
+	if err := mgr.AttachRootFSBackings(context.Background(), "pod-1", t.TempDir()); err != nil {
+		t.Fatalf("AttachRootFSBackings() error = %v", err)
+	}
+	payload, err := os.ReadFile(marker)
+	if err != nil || string(payload) != "runtime" {
+		t.Fatalf("runtime marker = %q, %v, want runtime", string(payload), err)
 	}
 }
 

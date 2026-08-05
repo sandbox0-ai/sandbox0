@@ -50,27 +50,31 @@ func (r *ContainerdRuntime) BaseIdentityAndConfig(
 	info ctldapi.RootFSInfo,
 	expected *rootfshead.BaseIdentity,
 ) (rootfshead.BaseIdentity, []byte, error) {
-	imageReference := strings.TrimSpace(info.BaseImageRef)
 	if expected != nil {
 		if err := expected.Validate(); err != nil {
 			return rootfshead.BaseIdentity{}, nil, err
 		}
-		imageReference = strings.TrimSpace(expected.ImageReference)
 	}
-	record, config, configData, err := r.imageConfig(ctx, imageReference)
-	loadedExpectedImage := expected != nil
-	if err != nil && expected != nil && strings.TrimSpace(info.BaseImageRef) != imageReference {
-		loadedExpectedImage = false
-		record, config, configData, err = r.imageConfig(ctx, info.BaseImageRef)
-	}
+	client, closeClient, err := r.client(ctx)
 	if err != nil {
 		return rootfshead.BaseIdentity{}, nil, err
 	}
+	defer closeClient()
 	if expected != nil {
-		if loadedExpectedImage && record.Target.Digest.String() != expected.ManifestDigest {
-			return rootfshead.BaseIdentity{}, nil, fmt.Errorf("rootfs base manifest is %s, expected %s", record.Target.Digest, expected.ManifestDigest)
+		configData, err := publishedBaseConfig(ctx, client, info, *expected)
+		if err != nil {
+			return rootfshead.BaseIdentity{}, nil, err
 		}
 		return *expected, configData, nil
+	}
+
+	imageReference := strings.TrimSpace(info.BaseImageRef)
+	record, config, configData, err := imageConfig(ctx, client, imageReference, platforms.DefaultStrict())
+	if err != nil {
+		return rootfshead.BaseIdentity{}, nil, err
+	}
+	if !platforms.DefaultStrict().Match(config.Platform) {
+		return rootfshead.BaseIdentity{}, nil, fmt.Errorf("rootfs base image platform %s does not match node platform %s", platforms.Format(config.Platform), platforms.Format(platforms.DefaultSpec()))
 	}
 	if len(config.RootFS.DiffIDs) == 0 {
 		return rootfshead.BaseIdentity{}, nil, fmt.Errorf("rootfs base image %s has no diff IDs", imageReference)
@@ -90,6 +94,53 @@ func (r *ContainerdRuntime) BaseIdentityAndConfig(
 		return rootfshead.BaseIdentity{}, nil, fmt.Errorf("active rootfs parent %s does not match base chain %s", parent, base.ChainID)
 	}
 	return base, configData, nil
+}
+
+// publishedBaseConfig preserves the OCI config carried by the running Head
+// marker and verifies the canonical base through snapshot metadata. A local
+// image record target is not a portable base identity: registry pulls may
+// retain an image index while Docker archive imports synthesize a manifest.
+func publishedBaseConfig(
+	ctx context.Context,
+	client containerdClient,
+	info ctldapi.RootFSInfo,
+	expected rootfshead.BaseIdentity,
+) ([]byte, error) {
+	expectedPlatform := ocispec.Platform{
+		OS:           expected.OS,
+		Architecture: expected.Architecture,
+		Variant:      expected.Variant,
+	}
+	record, config, configData, err := imageConfig(ctx, client, info.BaseImageRef, platforms.OnlyStrict(expectedPlatform))
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(record.Labels[rootFSHeadImageLabel]) == "" {
+		return nil, fmt.Errorf("runtime image %s is not a materialized rootfs Head", info.BaseImageRef)
+	}
+	if !platforms.OnlyStrict(expectedPlatform).Match(config.Platform) {
+		return nil, fmt.Errorf("rootfs Head image platform %s does not match published base platform %s", platforms.Format(config.Platform), platforms.Format(expectedPlatform))
+	}
+	parent := strings.TrimSpace(info.SnapshotParent)
+	if parent == "" {
+		return nil, fmt.Errorf("rootfs Head runtime has no committed marker parent")
+	}
+	snapshotter := client.SnapshotService(info.Snapshotter)
+	if snapshotter == nil {
+		return nil, fmt.Errorf("rootfs snapshotter %q is unavailable", info.Snapshotter)
+	}
+	marker, err := snapshotter.Stat(ctx, parent)
+	if err != nil {
+		return nil, fmt.Errorf("inspect rootfs Head marker snapshot %s: %w", parent, err)
+	}
+	if marker.Kind != snapshots.KindCommitted {
+		return nil, fmt.Errorf("rootfs Head marker snapshot %s is not committed", parent)
+	}
+	declaredBase := strings.TrimSpace(marker.Labels[rootfshead.LabelBaseChainID])
+	if declaredBase != expected.ChainID {
+		return nil, fmt.Errorf("rootfs Head marker base is %q, expected %q", declaredBase, expected.ChainID)
+	}
+	return configData, nil
 }
 
 func (r *ContainerdRuntime) MaterializeRootFSHead(
@@ -291,17 +342,17 @@ func ensureRootFSHeadSnapshot(
 	return validate(existing)
 }
 
-func (r *ContainerdRuntime) imageConfig(ctx context.Context, reference string) (images.Image, ocispec.Image, []byte, error) {
-	client, closeClient, err := r.client(ctx)
-	if err != nil {
-		return images.Image{}, ocispec.Image{}, nil, err
-	}
-	defer closeClient()
+func imageConfig(
+	ctx context.Context,
+	client containerdClient,
+	reference string,
+	platform platforms.MatchComparer,
+) (images.Image, ocispec.Image, []byte, error) {
 	record, err := client.ImageService().Get(ctx, strings.TrimSpace(reference))
 	if err != nil {
 		return images.Image{}, ocispec.Image{}, nil, fmt.Errorf("load rootfs base image %s: %w", reference, err)
 	}
-	configDescriptor, err := images.Config(ctx, client.ContentStore(), record.Target, platforms.All)
+	configDescriptor, err := images.Config(ctx, client.ContentStore(), record.Target, platform)
 	if err != nil {
 		return images.Image{}, ocispec.Image{}, nil, fmt.Errorf("resolve rootfs base image config: %w", err)
 	}

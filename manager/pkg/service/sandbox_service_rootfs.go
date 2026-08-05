@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -414,11 +415,23 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	add("/tmp")
 	add("/procd")
 	add("/procd-image")
+	portalVolumes := make(map[string]struct{})
+	for _, volume := range pod.Spec.Volumes {
+		if volume.CSI != nil && volume.CSI.Driver == volumeportal.DriverName {
+			portalVolumes[volume.Name] = struct{}{}
+		}
+	}
 	for _, container := range pod.Spec.Containers {
 		if container.Name != sandboxRootFSContainerName {
 			continue
 		}
 		for _, mount := range container.VolumeMounts {
+			if _, rootFSBackedPortal := portalVolumes[mount.Name]; rootFSBackedPortal {
+				// Unbound portals are rebased onto the overlay upper before
+				// rootfs sync starts. Bound SandboxVolumes are excluded below
+				// from the persisted claim mounts instead.
+				continue
+			}
 			add(strings.TrimSpace(mount.MountPath))
 		}
 		break

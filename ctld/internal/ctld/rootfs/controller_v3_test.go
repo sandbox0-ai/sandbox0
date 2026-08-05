@@ -208,6 +208,67 @@ func TestControllerBindRootFSSyncReleasesLeaseWhenSessionStartFails(t *testing.T
 	assert.Equal(t, int64(1), leases.releaseCalls.Load())
 }
 
+func TestControllerBindRootFSSyncAttachesPortalBackingsBeforeStartingSession(t *testing.T) {
+	base, baseConfig := testRootFSBase(t)
+	info := rootFSInfo("gvisor")
+	info.Snapshotter = rootfshead.SnapshotterName
+	upperdir := t.TempDir()
+	attacher := &fakePortalBackingAttacher{}
+	controller := NewController(Config{
+		Context: context.Background(),
+		Runtime: &fakeV3Runtime{
+			fakeRuntime: &fakeRuntime{info: info},
+			upperdir:    upperdir,
+			base:        base,
+			baseConfig:  baseConfig,
+		},
+		PortalBackings: attacher,
+		Store:          objectstore.NewMemoryStore(t.Name()),
+		WatchFenceRoot: t.TempDir(),
+		CaptureLeases:  &fakeCaptureLeases{},
+	})
+
+	response, status := controller.BindRootFSSync(httptest.NewRequest(http.MethodPut, "/", nil), ctldapi.BindRootFSSyncRequest{
+		Target:            rootFSTarget(),
+		SandboxID:         "sandbox-1",
+		TeamID:            "team-1",
+		RuntimeGeneration: 1,
+	})
+
+	require.Equal(t, http.StatusOK, status, response.Error)
+	assert.Equal(t, "pod-uid", attacher.podUID)
+	assert.Equal(t, upperdir, attacher.upperRoot)
+}
+
+func TestControllerBindRootFSSyncFailsWhenPortalBackingAttachmentFails(t *testing.T) {
+	base, baseConfig := testRootFSBase(t)
+	info := rootFSInfo("gvisor")
+	info.Snapshotter = rootfshead.SnapshotterName
+	controller := NewController(Config{
+		Context: context.Background(),
+		Runtime: &fakeV3Runtime{
+			fakeRuntime: &fakeRuntime{info: info},
+			upperdir:    t.TempDir(),
+			base:        base,
+			baseConfig:  baseConfig,
+		},
+		PortalBackings: &fakePortalBackingAttacher{err: errors.New("portal attachment failed")},
+		Store:          objectstore.NewMemoryStore(t.Name()),
+		WatchFenceRoot: t.TempDir(),
+		CaptureLeases:  &fakeCaptureLeases{},
+	})
+
+	response, status := controller.BindRootFSSync(httptest.NewRequest(http.MethodPut, "/", nil), ctldapi.BindRootFSSyncRequest{
+		Target:            rootFSTarget(),
+		SandboxID:         "sandbox-1",
+		TeamID:            "team-1",
+		RuntimeGeneration: 1,
+	})
+
+	assert.Equal(t, http.StatusInternalServerError, status)
+	assert.Contains(t, response.Error, "portal attachment failed")
+}
+
 func TestControllerExposesAndAbandonsHeadWhenMarkerUploadFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -327,6 +388,18 @@ type fakeCaptureLeases struct {
 	checkpointCalls atomic.Int64
 	resetCalls      atomic.Int64
 	releaseCalls    atomic.Int64
+}
+
+type fakePortalBackingAttacher struct {
+	podUID    string
+	upperRoot string
+	err       error
+}
+
+func (a *fakePortalBackingAttacher) AttachRootFSBackings(_ context.Context, podUID, upperRoot string) error {
+	a.podUID = podUID
+	a.upperRoot = upperRoot
+	return a.err
 }
 
 type failingRootFSStore struct {

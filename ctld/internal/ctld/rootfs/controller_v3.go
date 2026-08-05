@@ -98,6 +98,15 @@ func (c *Controller) BindRootFSSync(r *http.Request, req ctldapi.BindRootFSSyncR
 	if err != nil {
 		return ctldapi.BindRootFSSyncResponse{Info: info, Error: err.Error()}, statusForError(err)
 	}
+	if c.portalBackings != nil {
+		podUID := strings.TrimSpace(info.PodUID)
+		if podUID == "" {
+			podUID = strings.TrimSpace(req.Target.PodUID)
+		}
+		if err := c.portalBackings.AttachRootFSBackings(ctx, podUID, upperdir); err != nil {
+			return ctldapi.BindRootFSSyncResponse{Info: info, Error: err.Error()}, statusForError(err)
+		}
+	}
 	mergedRoot, err := c.v3Runtime.ActiveMergedRoot(ctx, info, upperdir)
 	if err != nil {
 		return ctldapi.BindRootFSSyncResponse{Info: info, Error: err.Error()}, statusForError(err)

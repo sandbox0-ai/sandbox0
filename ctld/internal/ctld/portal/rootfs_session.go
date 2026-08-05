@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,7 +28,7 @@ const rootFSBackedSessionRoot = ""
 const rootFSRecoveryDir = ".sandbox0-ha"
 
 type rootFSBackedSession struct {
-	root string
+	root atomic.Value
 
 	mu           sync.Mutex
 	nextInode    uint64
@@ -57,7 +58,6 @@ type rootFSStateJournal struct {
 
 func newRootFSBackedSessionWithState(root, statePath string) (*rootFSBackedSession, error) {
 	session := &rootFSBackedSession{
-		root:         filepath.Clean(root),
 		nextInode:    s0fs.RootInode + 1,
 		inodeByPath:  map[string]uint64{rootFSBackedSessionRoot: s0fs.RootInode},
 		pathByInode:  map[uint64]string{s0fs.RootInode: rootFSBackedSessionRoot},
@@ -65,6 +65,7 @@ func newRootFSBackedSessionWithState(root, statePath string) (*rootFSBackedSessi
 		handles:      make(map[uint64]*os.File),
 		handleInodes: make(map[uint64]uint64),
 	}
+	session.root.Store(filepath.Clean(root))
 	if strings.TrimSpace(statePath) == "" {
 		return session, nil
 	}
@@ -77,6 +78,44 @@ func newRootFSBackedSessionWithState(root, statePath string) (*rootFSBackedSessi
 		session.applyStateEventLocked(event)
 	}
 	return session, nil
+}
+
+// RebaseRoot moves an idle unbound portal onto its container overlay upper.
+// Manager calls this before releasing the runtime assignment barrier, so the
+// portal cannot split writes between its staging directory and durable rootfs.
+func (s *rootFSBackedSession) RebaseRoot(root string) error {
+	if s == nil {
+		return fmt.Errorf("rootfs-backed portal is required")
+	}
+	root = filepath.Clean(strings.TrimSpace(root))
+	if root == "" || root == "." || !filepath.IsAbs(root) {
+		return fmt.Errorf("rootfs-backed portal root must be absolute")
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("inspect rootfs-backed portal root: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("rootfs-backed portal root %s is not a directory", root)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fserror.New(fserror.FailedPrecondition, "rootfs-backed portal is closed")
+	}
+	if len(s.handles) != 0 {
+		return fserror.New(fserror.FailedPrecondition, "rootfs-backed portal has open file handles")
+	}
+	s.root.Store(root)
+	return nil
+}
+
+func (s *rootFSBackedSession) rootPath() string {
+	if s == nil {
+		return ""
+	}
+	value, _ := s.root.Load().(string)
+	return value
 }
 
 func (s *rootFSBackedSession) Close() {
@@ -542,7 +581,7 @@ func (s *rootFSBackedSession) ReleaseDir(context.Context, *pb.ReleaseDirRequest)
 
 func (s *rootFSBackedSession) StatFs(_ context.Context, _ *pb.StatFsRequest) (*pb.StatFsResponse, error) {
 	var stat unix.Statfs_t
-	if err := unix.Statfs(s.root, &stat); err != nil {
+	if err := unix.Statfs(s.rootPath(), &stat); err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
 	return &pb.StatFsResponse{
@@ -820,9 +859,9 @@ func (s *rootFSBackedSession) handleForWrite(inode, handleID uint64) (*os.File, 
 func (s *rootFSBackedSession) hostPath(rel string) string {
 	rel = cleanRootFSBackedRel(rel)
 	if rel == rootFSBackedSessionRoot {
-		return s.root
+		return s.rootPath()
 	}
-	return filepath.Join(s.root, filepath.FromSlash(rel))
+	return filepath.Join(s.rootPath(), filepath.FromSlash(rel))
 }
 
 func (s *rootFSBackedSession) dropPathIfMissing(rel string, err error) {

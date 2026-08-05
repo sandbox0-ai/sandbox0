@@ -68,6 +68,69 @@ func TestRootFSBackedSessionWritesThroughBackingDir(t *testing.T) {
 	assert.Equal(t, "state.txt", list.Entries[0].Name)
 }
 
+func TestRootFSBackedSessionRebaseExposesRestoredFilesAndRedirectsWrites(t *testing.T) {
+	staging := t.TempDir()
+	upper := t.TempDir()
+	backing := filepath.Join(upper, "workspace")
+	require.NoError(t, os.Mkdir(backing, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(backing, "restored.txt"), []byte("restored"), 0o640))
+
+	session, err := newRootFSBackedSessionWithState(staging, "")
+	require.NoError(t, err)
+	defer session.Close()
+	require.NoError(t, session.RebaseRoot(backing))
+
+	ctx := context.Background()
+	restored, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "restored.txt"})
+	require.NoError(t, err)
+	read, err := session.Read(ctx, &pb.ReadRequest{Inode: restored.Inode, Size: 64})
+	require.NoError(t, err)
+	assert.Equal(t, "restored", string(read.Data))
+
+	created, err := session.Create(ctx, &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "new.txt",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	_, err = session.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Data: []byte("new")})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId})
+	require.NoError(t, err)
+	assertFileContentForPortalTest(t, filepath.Join(backing, "new.txt"), "new")
+	_, err = os.Stat(filepath.Join(staging, "new.txt"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestRootFSBackedSessionRebaseRejectsOpenHandles(t *testing.T) {
+	staging := t.TempDir()
+	backing := t.TempDir()
+	session, err := newRootFSBackedSessionWithState(staging, "")
+	require.NoError(t, err)
+	defer session.Close()
+
+	ctx := context.Background()
+	created, err := session.Create(ctx, &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "active.txt",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	err = session.RebaseRoot(backing)
+	require.Error(t, err)
+	assert.Equal(t, fserror.FailedPrecondition, fserror.CodeOf(err))
+
+	_, err = session.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Data: []byte("staging")})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId})
+	require.NoError(t, err)
+	assertFileContentForPortalTest(t, filepath.Join(staging, "active.txt"), "staging")
+	_, err = os.Stat(filepath.Join(backing, "active.txt"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestRootFSBackedSessionPreservesRemoveErrnos(t *testing.T) {
 	backing := t.TempDir()
 	session, err := newRootFSBackedSessionWithState(backing, "")

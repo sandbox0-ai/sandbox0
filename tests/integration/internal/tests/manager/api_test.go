@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
@@ -33,12 +34,14 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/tests/integration/internal/utils"
 	"go.uber.org/zap"
@@ -56,10 +59,11 @@ import (
 )
 
 type managerTestEnv struct {
-	server     *managerTestHTTPServer
-	token      string
-	podIndexer cache.Indexer
-	k8sClient  kubernetes.Interface
+	server      *managerTestHTTPServer
+	token       string
+	podIndexer  cache.Indexer
+	nodeIndexer cache.Indexer
+	k8sClient   kubernetes.Interface
 }
 
 type managerTestHTTPServer struct {
@@ -185,6 +189,7 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
 		K8sClient:              k8sClient,
 		PodLister:              podLister,
+		NodeLister:             nodeLister,
 		SandboxIndex:           sandboxIndex,
 		SecretLister:           secretLister,
 		TemplateLister:         templateLister,
@@ -319,10 +324,11 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 	t.Cleanup(httpServer.Close)
 
 	return &managerTestEnv{
-		server:     httpServer,
-		token:      token,
-		podIndexer: podIndexer,
-		k8sClient:  k8sClient,
+		server:      httpServer,
+		token:       token,
+		podIndexer:  podIndexer,
+		nodeIndexer: nodeIndexer,
+		k8sClient:   k8sClient,
 	}
 }
 
@@ -509,11 +515,11 @@ func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
 	}
 }
 
-func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivation(t *testing.T) {
+func TestPausedSandboxRuntimeResumeMaterializesRootFSHeadBeforeRuntimeActivation(t *testing.T) {
 	events := &orderedEvents{}
 	namespace, err := naming.TemplateNamespaceForBuiltin("default")
 	utils.RequireNoError(t, err, "resolve template namespace")
-	ctldServer := newRootFSApplyRecordingCtldServer(t, events, namespace)
+	ctldServer := newRootFSMaterializeRecordingCtldServer(t, events)
 	t.Cleanup(ctldServer.Close)
 
 	template := &v1alpha1.SandboxTemplate{
@@ -533,24 +539,7 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 		RuntimeGeneration: 3,
 		ClaimedAt:         now,
 		CreatedAt:         now,
-	}, &sandboxstore.SandboxRootFSState{
-		SandboxID:           "sandbox-1",
-		TeamID:              "team-1",
-		RuntimeGeneration:   3,
-		Runtime:             "runc",
-		RuntimeHandler:      "runc",
-		BaseImageRef:        "docker.io/sandbox0ai/otemplates:default-v0.2.0",
-		BaseImageDigest:     "sha256:base",
-		Snapshotter:         "overlayfs",
-		SnapshotParent:      "sha256:parent",
-		SnapshotParentChain: []string{"sha256:parent"},
-		DiffDigest:          "sha256:diff",
-		DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
-		DiffSize:            128,
-		DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
-		CreatedAt:           now,
-		UpdatedAt:           now,
-	})
+	}, managerIntegrationRootFSHead(t, "sandbox-1", "team-1", "head-v1", 3))
 
 	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{
 		sandboxConfig: service.SandboxServiceConfig{
@@ -581,6 +570,52 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 	}
 	addNode(t, env, "node-a", "10.0.0.1")
 	addIdleReadyPodForTemplate(t, env, template, "idle-rootfs", "10.0.0.20", "node-a")
+	env.k8sClient.(*k8sfake.Clientset).PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deleteAction, ok := action.(k8stesting.DeleteAction)
+		if !ok {
+			return false, nil, nil
+		}
+		key := namespace + "/" + deleteAction.GetName()
+		pod, exists, err := env.podIndexer.GetByKey(key)
+		if err != nil {
+			return true, nil, err
+		}
+		if exists {
+			if err := env.podIndexer.Delete(pod); err != nil {
+				return true, nil, err
+			}
+		}
+		return false, nil, nil
+	})
+	env.k8sClient.(*k8sfake.Clientset).PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		createAction, ok := action.(k8stesting.CreateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		pod, ok := createAction.GetObject().(*corev1.Pod)
+		if !ok || pod == nil {
+			return false, nil, nil
+		}
+		pod.UID = types.UID("rootfs-runtime-uid")
+		pod.ResourceVersion = "2"
+		pod.Spec.NodeName = "node-a"
+		pod.Status.Phase = corev1.PodRunning
+		pod.Status.HostIP = "10.0.0.1"
+		pod.Status.PodIP = "10.0.0.21"
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  runtimecontrol.ProcdContainerName,
+			Ready: true,
+			State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{},
+			},
+		}}
+		setManagerIntegrationCondition(pod, corev1.PodReady, corev1.ConditionTrue)
+		setManagerIntegrationCondition(pod, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionTrue)
+		if err := env.podIndexer.Add(pod.DeepCopy()); err != nil {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
 
 	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/resume", env.token, nil)
 	if resp.StatusCode != http.StatusOK {
@@ -597,14 +632,14 @@ func TestPausedSandboxRuntimeResumeAppliesRootFSCheckpointBeforeRuntimeActivatio
 		t.Fatalf("paused runtime resume response = %+v, want resumed", resumeResp)
 	}
 
-	if got := events.List(); len(got) != 2 || got[0] != "apply-rootfs" || got[1] != "runtime-ready" {
-		t.Fatalf("event order = %#v, want apply-rootfs before runtime activation", got)
+	if got := events.List(); len(got) != 2 || got[0] != "materialize-rootfs" || got[1] != "runtime-ready" {
+		t.Fatalf("event order = %#v, want materialize-rootfs before runtime activation", got)
 	}
 	record, err := store.GetSandbox(context.Background(), "sandbox-1")
 	if err != nil {
 		t.Fatalf("get restored sandbox record: %v", err)
 	}
-	if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.CurrentPodName != "idle-rootfs" || record.RuntimeGeneration != 4 {
+	if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.CurrentPodName == "" || record.CurrentPodName == "idle-rootfs" || record.RuntimeGeneration != 4 {
 		t.Fatalf("restored record = %+v", record)
 	}
 }
@@ -622,19 +657,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 		CreatedAt:         now,
 		UpdatedAt:         now,
-	}, &sandboxstore.SandboxRootFSState{
-		SandboxID:         "sandbox-1",
-		TeamID:            "team-1",
-		LayerID:           "layer-v1",
-		RuntimeGeneration: 1,
-		Runtime:           "runc",
-		BaseImageDigest:   "sha256:base",
-		Snapshotter:       "overlayfs",
-		DiffDigest:        "sha256:layer-v1",
-		DiffObjectKey:     "rootfs/layer-v1.tar",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	})
+	}, managerIntegrationRootFSHead(t, "sandbox-1", "team-1", "layer-v1", 1))
 	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{sandboxStore: store})
 
 	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/snapshots", env.token, map[string]any{
@@ -671,19 +694,7 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	}
 
 	store.mu.Lock()
-	store.rootFSState["sandbox-1"] = &sandboxstore.SandboxRootFSState{
-		SandboxID:         "sandbox-1",
-		TeamID:            "team-1",
-		LayerID:           "layer-v2",
-		RuntimeGeneration: 2,
-		Runtime:           "runc",
-		BaseImageDigest:   "sha256:base",
-		Snapshotter:       "overlayfs",
-		DiffDigest:        "sha256:layer-v2",
-		DiffObjectKey:     "rootfs/layer-v2.tar",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
+	store.rootFSHeads["sandbox-1"] = managerIntegrationRootFSHead(t, "sandbox-1", "team-1", "layer-v2", 2)
 	store.mu.Unlock()
 
 	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes/sandbox-1/rootfs/restore", env.token, map[string]any{
@@ -702,11 +713,11 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	if restoreResp == nil || restoreResp.Status != managerapi.SandboxStatusPaused {
 		t.Fatalf("unexpected restore response: %+v", restoreResp)
 	}
-	restoredState, err := store.GetLatestRootFSState(context.Background(), "sandbox-1")
+	restoredState, err := store.GetRootFSHead(context.Background(), "sandbox-1")
 	if err != nil {
 		t.Fatalf("get restored rootfs state: %v", err)
 	}
-	if restoredState == nil || restoredState.LayerID != "layer-v1" {
+	if restoredState == nil || restoredState.Reference.HeadID != "layer-v1" {
 		t.Fatalf("restored rootfs state = %+v, want layer-v1", restoredState)
 	}
 
@@ -739,11 +750,11 @@ func TestSandboxRootFSProductAPI(t *testing.T) {
 	if forkRecord.Config.TTL == nil || *forkRecord.Config.TTL != 60 || forkRecord.Config.HardTTL == nil || *forkRecord.Config.HardTTL != 120 {
 		t.Fatalf("fork lifecycle config = %+v, want ttl=60 hard_ttl=120", forkRecord.Config)
 	}
-	forkState, err := store.GetLatestRootFSState(context.Background(), forkResp.Sandbox.ID)
+	forkState, err := store.GetRootFSHead(context.Background(), forkResp.Sandbox.ID)
 	if err != nil {
 		t.Fatalf("get fork rootfs state: %v", err)
 	}
-	if forkState == nil || forkState.LayerID != "layer-v1" {
+	if forkState == nil || forkState.Reference.HeadID != "layer-v1" {
 		t.Fatalf("fork rootfs state = %+v, want layer-v1", forkState)
 	}
 
@@ -914,7 +925,12 @@ func formatIntegrationGeneration(generation int64) string {
 func addNode(t *testing.T, env *managerTestEnv, name, internalIP string) {
 	t.Helper()
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Annotations: map[string]string{
+				dataplane.NodeRootFSSnapshotterInstanceAnnotation: "snapshotter-test",
+			},
+		},
 		Status: corev1.NodeStatus{
 			Addresses: []corev1.NodeAddress{{
 				Type:    corev1.NodeInternalIP,
@@ -924,6 +940,7 @@ func addNode(t *testing.T, env *managerTestEnv, name, internalIP string) {
 	}
 	_, err := env.k8sClient.CoreV1().Nodes().Create(context.Background(), node, metav1.CreateOptions{})
 	utils.RequireNoError(t, err, "create node in fake client")
+	utils.RequireNoError(t, env.nodeIndexer.Add(node.DeepCopy()), "add node to test informer cache")
 }
 
 type volumePortalBindRecorder struct {
@@ -984,54 +1001,69 @@ func (e *orderedEvents) List() []string {
 	return append([]string(nil), e.events...)
 }
 
-func newRootFSApplyRecordingCtldServer(t *testing.T, events *orderedEvents, namespace string) *httptest.Server {
+func newRootFSMaterializeRecordingCtldServer(t *testing.T, events *orderedEvents) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/rootfs/apply", func(w http.ResponseWriter, r *http.Request) {
-		var req ctldapi.ApplyRootFSRequest
+	mux.HandleFunc("/api/v1/rootfs/heads/materialize", func(w http.ResponseWriter, r *http.Request) {
+		var req ctldapi.MaterializeRootFSHeadRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode ctld rootfs apply request: %v", err)
+			t.Fatalf("decode ctld rootfs materialize request: %v", err)
 		}
-		if req.Target.Namespace != namespace || req.Target.PodName != "idle-rootfs" || req.Target.ContainerName != "procd" {
-			t.Fatalf("unexpected rootfs target: %+v", req.Target)
+		if req.Reference.HeadID != "head-v1" {
+			t.Fatalf("unexpected rootfs Head: %+v", req.Reference)
 		}
-		if req.ExpectedRuntime != "runc" || req.ExpectedRuntimeHandler != "runc" || req.ExpectedSnapshotter != "overlayfs" {
-			t.Fatalf("unexpected rootfs runtime validation: %+v", req)
+		if req.Image.Name == "" || req.Image.ManifestDigest == "" {
+			t.Fatalf("unexpected rootfs image reference: %+v", req.Image)
 		}
-		if req.ExpectedBaseImageDigest != "sha256:base" || len(req.ExpectedSnapshotParentChain) != 1 || req.ExpectedSnapshotParentChain[0] != "sha256:parent" {
-			t.Fatalf("unexpected rootfs base validation: %+v", req)
+		events.Add("materialize-rootfs")
+		_ = json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{ImageName: req.Image.Name, Materialized: true})
+	})
+	mux.HandleFunc("/api/v1/rootfs/sync/bind", func(w http.ResponseWriter, r *http.Request) {
+		var req ctldapi.BindRootFSSyncRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode ctld rootfs sync bind request: %v", err)
 		}
-		if req.Descriptor.Digest != "sha256:diff" || req.Descriptor.ObjectKey != "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar" {
-			t.Fatalf("unexpected rootfs descriptor: %+v", req.Descriptor)
+		if req.SandboxID != "sandbox-1" || req.TeamID != "team-1" || req.RuntimeGeneration != 4 {
+			t.Fatalf("unexpected rootfs sync bind request: %+v", req)
 		}
-		events.Add("apply-rootfs")
-		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+		if req.Parent == nil || req.Parent.HeadID != "head-v1" {
+			t.Fatalf("unexpected rootfs sync parent: %+v", req.Parent)
+		}
+		_ = json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
+			Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true},
+		})
+	})
+	mux.HandleFunc("/api/v1/volume-portals/check", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true})
 	})
 	return httptest.NewServer(mux)
 }
 
 type memorySandboxStoreForManagerIntegration struct {
-	mu                sync.Mutex
-	records           map[string]*sandboxstore.SandboxRecord
-	lifecycleTxns     map[string]*sandboxstore.SandboxLifecycleTxn
-	rootFSState       map[string]*sandboxstore.SandboxRootFSState
-	rootFSFilesystems map[string]*sandboxstore.RootFSFilesystem
-	rootFSSnapshots   map[string]*sandboxstore.RootFSSnapshot
+	mu                 sync.Mutex
+	records            map[string]*sandboxstore.SandboxRecord
+	lifecycleTxns      map[string]*sandboxstore.SandboxLifecycleTxn
+	rootFSHeads        map[string]*sandboxstore.SandboxRootFSHead
+	rootFSHeadVersions map[string]*sandboxstore.SandboxRootFSHead
+	rootFSFilesystems  map[string]*sandboxstore.RootFSFilesystem
+	rootFSSnapshots    map[string]*sandboxstore.RootFSSnapshot
 }
 
-func newMemorySandboxStoreForManagerIntegration(record *sandboxstore.SandboxRecord, rootFSState *sandboxstore.SandboxRootFSState) *memorySandboxStoreForManagerIntegration {
+func newMemorySandboxStoreForManagerIntegration(record *sandboxstore.SandboxRecord, rootFSHead *sandboxstore.SandboxRootFSHead) *memorySandboxStoreForManagerIntegration {
 	store := &memorySandboxStoreForManagerIntegration{
-		records:           map[string]*sandboxstore.SandboxRecord{},
-		lifecycleTxns:     map[string]*sandboxstore.SandboxLifecycleTxn{},
-		rootFSState:       map[string]*sandboxstore.SandboxRootFSState{},
-		rootFSFilesystems: map[string]*sandboxstore.RootFSFilesystem{},
-		rootFSSnapshots:   map[string]*sandboxstore.RootFSSnapshot{},
+		records:            map[string]*sandboxstore.SandboxRecord{},
+		lifecycleTxns:      map[string]*sandboxstore.SandboxLifecycleTxn{},
+		rootFSHeads:        map[string]*sandboxstore.SandboxRootFSHead{},
+		rootFSHeadVersions: map[string]*sandboxstore.SandboxRootFSHead{},
+		rootFSFilesystems:  map[string]*sandboxstore.RootFSFilesystem{},
+		rootFSSnapshots:    map[string]*sandboxstore.RootFSSnapshot{},
 	}
 	if record != nil {
 		store.records[record.ID] = cloneSandboxRecordForManagerIntegration(record)
 	}
-	if rootFSState != nil {
-		store.rootFSState[rootFSState.SandboxID] = cloneRootFSStateForManagerIntegration(rootFSState)
+	if rootFSHead != nil {
+		store.rootFSHeads[rootFSHead.SandboxID] = cloneRootFSHeadForManagerIntegration(rootFSHead)
+		store.rootFSHeadVersions[rootFSHead.Reference.HeadID] = cloneRootFSHeadForManagerIntegration(rootFSHead)
 	}
 	return store
 }
@@ -1139,35 +1171,46 @@ func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.C
 			txn.AbortedAt = deletedAt
 		}
 	}
-	delete(s.rootFSState, sandboxID)
+	delete(s.rootFSHeads, sandboxID)
 	return nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) SaveRootFSState(_ context.Context, state *sandboxstore.SandboxRootFSState) error {
+func (s *memorySandboxStoreForManagerIntegration) SaveRootFSHead(_ context.Context, head *sandboxstore.SandboxRootFSHead) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if state == nil || state.SandboxID == "" {
+	if head == nil || head.SandboxID == "" {
 		return nil
 	}
-	s.rootFSState[state.SandboxID] = cloneRootFSStateForManagerIntegration(state)
+	s.rootFSHeads[head.SandboxID] = cloneRootFSHeadForManagerIntegration(head)
+	s.rootFSHeadVersions[head.Reference.HeadID] = cloneRootFSHeadForManagerIntegration(head)
 	return nil
 }
 
-func (s *memorySandboxStoreForManagerIntegration) GetLatestRootFSState(_ context.Context, sandboxID string) (*sandboxstore.SandboxRootFSState, error) {
+func (s *memorySandboxStoreForManagerIntegration) StageRootFSHead(_ context.Context, head *sandboxstore.SandboxRootFSHead) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.rootFSState[sandboxID]
-	if state == nil {
+	if head == nil || head.Reference.HeadID == "" {
+		return nil
+	}
+	s.rootFSHeadVersions[head.Reference.HeadID] = cloneRootFSHeadForManagerIntegration(head)
+	return nil
+}
+
+func (s *memorySandboxStoreForManagerIntegration) GetRootFSHead(_ context.Context, sandboxID string) (*sandboxstore.SandboxRootFSHead, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	head := s.rootFSHeads[sandboxID]
+	if head == nil {
 		return nil, nil
 	}
-	return cloneRootFSStateForManagerIntegration(state), nil
+	return cloneRootFSHeadForManagerIntegration(head), nil
 }
 
 func (s *memorySandboxStoreForManagerIntegration) CreateRootFSSnapshot(_ context.Context, req *sandboxstore.CreateRootFSSnapshotRequest) (*sandboxstore.RootFSSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.rootFSState[req.SandboxID]
-	if state == nil || state.LayerID == "" {
+	head := s.rootFSHeads[req.SandboxID]
+	if head == nil || head.Reference.HeadID == "" {
 		return nil, sandboxstore.ErrRootFSFilesystemNotFound
 	}
 	record := s.records[req.SandboxID]
@@ -1179,13 +1222,14 @@ func (s *memorySandboxStoreForManagerIntegration) CreateRootFSSnapshot(_ context
 		FilesystemID:    req.SandboxID,
 		TeamID:          record.TeamID,
 		SourceSandboxID: req.SandboxID,
-		HeadLayerID:     state.LayerID,
+		HeadID:          head.Reference.HeadID,
 		Name:            req.Name,
 		Description:     req.Description,
 		CreatedAt:       time.Now().UTC(),
 		ExpiresAt:       req.ExpiresAt,
 	}
 	s.rootFSSnapshots[snapshot.ID] = cloneRootFSSnapshotForManagerIntegration(snapshot)
+	s.rootFSHeadVersions[head.Reference.HeadID] = cloneRootFSHeadForManagerIntegration(head)
 	return cloneRootFSSnapshotForManagerIntegration(snapshot), nil
 }
 
@@ -1229,8 +1273,8 @@ func (s *memorySandboxStoreForManagerIntegration) DeleteRootFSSnapshot(_ context
 func (s *memorySandboxStoreForManagerIntegration) ForkRootFSFilesystem(_ context.Context, req *sandboxstore.ForkRootFSFilesystemRequest) (*sandboxstore.RootFSFilesystem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sourceState := s.rootFSState[req.SourceSandboxID]
-	if sourceState == nil || sourceState.LayerID == "" {
+	sourceHead := s.rootFSHeads[req.SourceSandboxID]
+	if sourceHead == nil || sourceHead.Reference.HeadID == "" {
 		return nil, sandboxstore.ErrRootFSFilesystemNotFound
 	}
 	target := s.records[req.TargetSandboxID]
@@ -1241,15 +1285,15 @@ func (s *memorySandboxStoreForManagerIntegration) ForkRootFSFilesystem(_ context
 	if targetTeamID == "" {
 		targetTeamID = target.TeamID
 	}
-	state := cloneRootFSStateForManagerIntegration(sourceState)
-	state.SandboxID = req.TargetSandboxID
-	state.TeamID = targetTeamID
-	s.rootFSState[req.TargetSandboxID] = state
+	head := cloneRootFSHeadForManagerIntegration(sourceHead)
+	head.SandboxID = req.TargetSandboxID
+	head.TeamID = targetTeamID
+	s.rootFSHeads[req.TargetSandboxID] = head
 	filesystem := &sandboxstore.RootFSFilesystem{
 		ID:                 req.TargetSandboxID,
 		TeamID:             targetTeamID,
 		SourceFilesystemID: req.SourceSandboxID,
-		HeadLayerID:        sourceState.LayerID,
+		HeadID:             sourceHead.Reference.HeadID,
 		CreatedAt:          time.Now().UTC(),
 		UpdatedAt:          time.Now().UTC(),
 	}
@@ -1269,24 +1313,20 @@ func (s *memorySandboxStoreForManagerIntegration) RestoreRootFSFromSnapshot(_ co
 		return nil, sandboxstore.ErrSandboxRecordNotFound
 	}
 	now := time.Now().UTC()
-	s.rootFSState[req.SandboxID] = &sandboxstore.SandboxRootFSState{
-		SandboxID:         req.SandboxID,
-		TeamID:            target.TeamID,
-		LayerID:           snapshot.HeadLayerID,
-		RuntimeGeneration: target.RuntimeGeneration,
-		Runtime:           "runc",
-		BaseImageDigest:   "sha256:base",
-		Snapshotter:       "overlayfs",
-		DiffDigest:        "sha256:" + snapshot.HeadLayerID,
-		DiffObjectKey:     "rootfs/" + snapshot.HeadLayerID + ".tar",
-		CreatedAt:         now,
-		UpdatedAt:         now,
+	sourceHead := s.rootFSHeadVersions[snapshot.HeadID]
+	if sourceHead == nil {
+		return nil, sandboxstore.ErrRootFSFilesystemNotFound
 	}
+	restored := cloneRootFSHeadForManagerIntegration(sourceHead)
+	restored.SandboxID = req.SandboxID
+	restored.TeamID = target.TeamID
+	restored.RuntimeGeneration = target.RuntimeGeneration
+	s.rootFSHeads[req.SandboxID] = restored
 	filesystem := &sandboxstore.RootFSFilesystem{
 		ID:                 req.SandboxID,
 		TeamID:             target.TeamID,
 		SourceFilesystemID: snapshot.FilesystemID,
-		HeadLayerID:        snapshot.HeadLayerID,
+		HeadID:             snapshot.HeadID,
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
@@ -1370,12 +1410,17 @@ func (t memorySandboxStoreTxForManagerIntegration) MarkRuntimeTerminating(_ cont
 	return nil
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) SaveRootFSState(_ context.Context, state *sandboxstore.SandboxRootFSState) error {
-	if state == nil || state.SandboxID == "" {
+func (t memorySandboxStoreTxForManagerIntegration) SaveRootFSHead(_ context.Context, head *sandboxstore.SandboxRootFSHead) error {
+	if head == nil || head.SandboxID == "" {
 		return nil
 	}
-	t.store.rootFSState[state.SandboxID] = cloneRootFSStateForManagerIntegration(state)
+	t.store.rootFSHeads[head.SandboxID] = cloneRootFSHeadForManagerIntegration(head)
+	t.store.rootFSHeadVersions[head.Reference.HeadID] = cloneRootFSHeadForManagerIntegration(head)
 	return nil
+}
+
+func (t memorySandboxStoreTxForManagerIntegration) GetRootFSHead(_ context.Context, sandboxID string) (*sandboxstore.SandboxRootFSHead, error) {
+	return cloneRootFSHeadForManagerIntegration(t.store.rootFSHeads[sandboxID]), nil
 }
 
 func (t memorySandboxStoreTxForManagerIntegration) GetActiveLifecycleTxn(_ context.Context, sandboxID string) (*sandboxstore.SandboxLifecycleTxn, error) {
@@ -1425,12 +1470,12 @@ func (t memorySandboxStoreTxForManagerIntegration) UpdateLifecycleTxnPhase(_ con
 	return nil
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) SetLifecycleTxnPreparedHead(_ context.Context, txnID, preparedHeadLayerID string) error {
+func (t memorySandboxStoreTxForManagerIntegration) SetLifecycleTxnPreparedHead(_ context.Context, txnID, preparedHeadID string) error {
 	if txn := t.store.lifecycleTxns[txnID]; txn != nil && managerIntegrationLifecyclePhaseActive(txn.Phase) {
 		if !txn.CancelRequestedAt.IsZero() {
 			return stderrors.New("active lifecycle txn not found")
 		}
-		txn.PreparedHeadLayerID = preparedHeadLayerID
+		txn.PreparedHeadID = preparedHeadID
 	}
 	return nil
 }
@@ -1453,13 +1498,13 @@ func (t memorySandboxStoreTxForManagerIntegration) RequestLifecycleTxnCancel(_ c
 	return true, nil
 }
 
-func (t memorySandboxStoreTxForManagerIntegration) CommitLifecycleTxn(_ context.Context, txnID, preparedHeadLayerID string) error {
+func (t memorySandboxStoreTxForManagerIntegration) CommitLifecycleTxn(_ context.Context, txnID, preparedHeadID string) error {
 	if txn := t.store.lifecycleTxns[txnID]; txn != nil && managerIntegrationLifecyclePhaseActive(txn.Phase) {
 		if !txn.CancelRequestedAt.IsZero() {
 			return stderrors.New("active lifecycle txn not found")
 		}
 		txn.Phase = sandboxstore.SandboxLifecyclePhaseCommitted
-		txn.PreparedHeadLayerID = preparedHeadLayerID
+		txn.PreparedHeadID = preparedHeadID
 	}
 	return nil
 }
@@ -1541,31 +1586,49 @@ func managerIntegrationLifecyclePhaseCancelable(phase string) bool {
 	}
 }
 
-func cloneRootFSStateForManagerIntegration(state *sandboxstore.SandboxRootFSState) *sandboxstore.SandboxRootFSState {
-	if state == nil {
+func cloneRootFSHeadForManagerIntegration(head *sandboxstore.SandboxRootFSHead) *sandboxstore.SandboxRootFSHead {
+	if head == nil {
 		return nil
 	}
-	clone := *state
-	clone.SnapshotParentChain = append([]string(nil), state.SnapshotParentChain...)
-	clone.LayerChain = cloneRootFSLayersForManagerIntegration(state.LayerChain)
+	clone := *head
+	if head.Parent != nil {
+		parent := *head.Parent
+		clone.Parent = &parent
+	}
 	return &clone
 }
 
-func cloneRootFSLayersForManagerIntegration(layers []*sandboxstore.SandboxRootFSLayer) []*sandboxstore.SandboxRootFSLayer {
-	if len(layers) == 0 {
-		return nil
+func managerIntegrationRootFSHead(t *testing.T, sandboxID, teamID, headID string, generation int64) *sandboxstore.SandboxRootFSHead {
+	t.Helper()
+	prefix, err := rootfshead.TeamObjectPrefix(teamID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	out := make([]*sandboxstore.SandboxRootFSLayer, 0, len(layers))
-	for _, layer := range layers {
-		if layer == nil {
-			out = append(out, nil)
-			continue
+	object := func(mediaType, payload string) rootfshead.Object {
+		digestValue := digest.FromString(payload)
+		key, keyErr := rootfshead.ObjectKey(prefix, mediaType, digestValue.String())
+		if keyErr != nil {
+			t.Fatal(keyErr)
 		}
-		clone := *layer
-		clone.SnapshotParentChain = append([]string(nil), layer.SnapshotParentChain...)
-		out = append(out, &clone)
+		return rootfshead.Object{Key: key, Digest: digestValue.String(), Size: int64(len(payload)), MediaType: mediaType}
 	}
-	return out
+	manifest := object(rootfshead.HeadMediaType, "head:"+headID)
+	reference := rootfshead.HeadReference{Version: rootfshead.Version, HeadID: headID, Manifest: manifest}
+	base := rootfshead.BaseIdentity{
+		ImageReference: "docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ChainID:        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		OS:             "linux",
+		Architecture:   "amd64",
+	}
+	composed, err := rootfshead.ComposeImage(prefix, reference, []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &sandboxstore.SandboxRootFSHead{
+		SandboxID: sandboxID, SourceSandboxID: sandboxID, TeamID: teamID, RuntimeGeneration: generation,
+		Reference: reference, Base: base, Image: composed.Reference,
+	}
 }
 
 func cloneRootFSSnapshotForManagerIntegration(snapshot *sandboxstore.RootFSSnapshot) *sandboxstore.RootFSSnapshot {

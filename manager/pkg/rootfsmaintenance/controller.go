@@ -4,8 +4,11 @@ package rootfsmaintenance
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
@@ -18,14 +21,16 @@ const (
 	defaultRootFSMaintenanceBatchSize        = 100
 	defaultRootFSMaintenanceMaxBatchesPerRun = 10
 	defaultRootFSMaintenanceWorkers          = 1
+	defaultRootFSUnknownObjectGrace          = 24 * time.Hour
 )
 
 type Config struct {
-	Interval         time.Duration
-	BatchSize        int
-	MaxBatchesPerRun int
-	Workers          int
-	DeleteOptions    sandboxstore.DeletePendingRootFSObjectsOptions
+	Interval           time.Duration
+	BatchSize          int
+	MaxBatchesPerRun   int
+	Workers            int
+	DeleteOptions      sandboxstore.DeletePendingRootFSObjectsOptions
+	UnknownObjectGrace time.Duration
 }
 
 // Controller runs internal rootfs metadata and object-store maintenance. It is
@@ -37,7 +42,12 @@ type Controller struct {
 	logger           *zap.Logger
 	metrics          *obsmetrics.ManagerMetrics
 	objectInspector  sandboxstore.RootFSObjectInspector
+	objectLister     sandboxstore.RootFSObjectLister
+	objectReader     RootFSObjectReader
 	meteringRecorder sandboxstore.RootFSStorageMeteringRecorder
+	workerID         string
+	orphanScanMu     sync.Mutex
+	orphanScanCursor string
 }
 
 func New(store *sandboxstore.PGSandboxStore, deleter sandboxstore.RootFSObjectDeleter, cfg Config, logger *zap.Logger, metrics *obsmetrics.ManagerMetrics) *Controller {
@@ -45,13 +55,16 @@ func New(store *sandboxstore.PGSandboxStore, deleter sandboxstore.RootFSObjectDe
 		logger = zap.NewNop()
 	}
 	cfg = normalizeConfig(cfg)
-	return &Controller{
-		store:   store,
-		deleter: deleter,
-		cfg:     cfg,
-		logger:  logger,
-		metrics: metrics,
+	controller := &Controller{
+		store:    store,
+		deleter:  deleter,
+		cfg:      cfg,
+		logger:   logger,
+		metrics:  metrics,
+		workerID: "manager-rootfs-v3-" + uuid.NewString(),
 	}
+	controller.objectReader, _ = deleter.(RootFSObjectReader)
+	return controller
 }
 
 func (c *Controller) SetStorageMeteringRecorder(recorder sandboxstore.RootFSStorageMeteringRecorder) {
@@ -70,6 +83,12 @@ func (c *Controller) SetObjectInspector(inspector sandboxstore.RootFSObjectInspe
 		return
 	}
 	c.objectInspector = inspector
+}
+
+func (c *Controller) SetObjectLister(lister sandboxstore.RootFSObjectLister) {
+	if c != nil {
+		c.objectLister = lister
+	}
 }
 
 func (c *Controller) Run(ctx context.Context) error {
@@ -111,52 +130,77 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 	}
 	started := time.Now()
 	status := "success"
-	var totalLayers int
 	var totalObjects int
 	var runErr error
 	defer func() {
-		c.observeRun(status, time.Since(started), totalLayers, totalObjects)
+		c.observeRun(status, time.Since(started), totalObjects)
 		c.observeQueueStats(ctx)
 	}()
-
+	if err := c.processV3Inventory(ctx); err != nil {
+		status = "error"
+		runErr = errors.Join(runErr, err)
+	}
+	if _, err := c.scanUnknownRootFSObjects(ctx); err != nil {
+		status = "error"
+		runErr = errors.Join(runErr, err)
+	}
 	for batch := 0; batch < c.cfg.MaxBatchesPerRun; batch++ {
 		if err := ctx.Err(); err != nil {
 			status = "error"
 			return err
 		}
+		expiredSnapshots, err := c.store.DeleteExpiredRootFSSnapshots(ctx, "", c.cfg.BatchSize)
+		if err != nil {
+			status = "error"
+			runErr = errors.Join(runErr, err)
+			break
+		}
+		deletedFilesystems, err := c.store.DeleteUnreferencedRootFSFilesystems(ctx, "", c.cfg.BatchSize)
+		if err != nil {
+			status = "error"
+			runErr = errors.Join(runErr, err)
+			break
+		}
+		gcResult, err := c.store.GarbageCollectRootFSV3(ctx, "", 30*time.Minute, c.cfg.BatchSize)
+		if err != nil {
+			status = "error"
+			runErr = errors.Join(runErr, err)
+			break
+		}
+		queuedObjects := 0
+		if gcResult != nil {
+			queuedObjects = gcResult.QueuedObjects
+		}
 		opts := c.cfg.DeleteOptions
 		opts.Limit = c.cfg.BatchSize
 		opts.ContinueOnError = true
-		result, err := c.store.GarbageCollectRootFSFilesystemWithOptions(ctx, c.deleter, "", c.cfg.BatchSize, opts)
-		if result != nil {
-			totalLayers += len(result.Layers)
-			totalObjects += len(result.DeletedObjectKeys)
-		}
+		deletedObjectKeys, err := c.store.DeletePendingRootFSObjectsWithOptions(ctx, c.deleter, opts)
+		totalObjects += len(deletedObjectKeys)
 		if err != nil {
 			status = "error"
-			runErr = err
+			runErr = errors.Join(runErr, err)
 			break
 		}
-		if result == nil || (len(result.Layers) == 0 && len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0) {
+		deletedHeads := 0
+		if gcResult != nil {
+			deletedHeads = gcResult.DeletedHeads
+		}
+		if expiredSnapshots == 0 && deletedFilesystems == 0 && deletedHeads == 0 && queuedObjects == 0 && len(deletedObjectKeys) == 0 {
 			break
 		}
 	}
 	if err := c.auditRootFSObjects(ctx); err != nil {
 		status = "error"
-		if runErr == nil {
-			runErr = err
-		}
+		runErr = errors.Join(runErr, err)
 	}
 	if err := c.observeStorageUsage(ctx); err != nil {
 		status = "error"
-		if runErr == nil {
-			runErr = err
-		}
+		runErr = errors.Join(runErr, err)
 	}
 	return runErr
 }
 
-func (c *Controller) observeRun(status string, duration time.Duration, layers, objects int) {
+func (c *Controller) observeRun(status string, duration time.Duration, objects int) {
 	if c == nil || c.metrics == nil {
 		return
 	}
@@ -165,9 +209,6 @@ func (c *Controller) observeRun(status string, duration time.Duration, layers, o
 	}
 	if c.metrics.RootFSMaintenanceDuration != nil {
 		c.metrics.RootFSMaintenanceDuration.WithLabelValues(status).Observe(duration.Seconds())
-	}
-	if layers > 0 && c.metrics.RootFSGCLayersTotal != nil {
-		c.metrics.RootFSGCLayersTotal.Add(float64(layers))
 	}
 	if objects > 0 && c.metrics.RootFSObjectDeletesTotal != nil {
 		c.metrics.RootFSObjectDeletesTotal.WithLabelValues("success").Add(float64(objects))
@@ -178,20 +219,40 @@ func (c *Controller) observeRun(status string, duration time.Duration, layers, o
 }
 
 func (c *Controller) observeQueueStats(ctx context.Context) {
-	if c == nil || c.metrics == nil || c.metrics.RootFSObjectDeletionQueueDepth == nil || c.store == nil {
+	if c == nil || c.metrics == nil || c.store == nil {
 		return
 	}
-	stats, err := c.store.RootFSObjectDeletionQueueStats(ctx)
-	if err != nil || stats == nil {
+	if c.metrics.RootFSObjectDeletionQueueDepth != nil {
+		stats, err := c.store.RootFSObjectDeletionQueueStats(ctx)
 		if err != nil {
 			c.logger.Warn("Failed to collect rootfs deletion queue stats", zap.Error(err))
+		} else if stats != nil {
+			c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("pending").Set(float64(stats.Pending))
+			c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("due").Set(float64(stats.Due))
+			c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("claimed").Set(float64(stats.Claimed))
+			c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("dead_lettered").Set(float64(stats.DeadLettered))
 		}
+	}
+	if c.metrics.RootFSInventoryJobs == nil && c.metrics.RootFSHeadPrefixGuards == nil {
 		return
 	}
-	c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("pending").Set(float64(stats.Pending))
-	c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("due").Set(float64(stats.Due))
-	c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("claimed").Set(float64(stats.Claimed))
-	c.metrics.RootFSObjectDeletionQueueDepth.WithLabelValues("dead_lettered").Set(float64(stats.DeadLettered))
+	stats, err := c.store.RootFSInventoryStats(ctx)
+	if err != nil {
+		c.logger.Warn("Failed to collect rootfs inventory stats", zap.Error(err))
+		return
+	}
+	if stats == nil {
+		return
+	}
+	if c.metrics.RootFSInventoryJobs != nil {
+		c.metrics.RootFSInventoryJobs.WithLabelValues("pending").Set(float64(stats.Pending))
+		c.metrics.RootFSInventoryJobs.WithLabelValues("running").Set(float64(stats.Running))
+		c.metrics.RootFSInventoryJobs.WithLabelValues("complete").Set(float64(stats.Complete))
+		c.metrics.RootFSInventoryJobs.WithLabelValues("dead").Set(float64(stats.Dead))
+	}
+	if c.metrics.RootFSHeadPrefixGuards != nil {
+		c.metrics.RootFSHeadPrefixGuards.Set(float64(stats.PrefixGuards))
+	}
 }
 
 func (c *Controller) auditRootFSObjects(ctx context.Context) error {
@@ -261,6 +322,9 @@ func normalizeConfig(cfg Config) Config {
 	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = defaultRootFSMaintenanceWorkers
+	}
+	if cfg.UnknownObjectGrace <= 0 {
+		cfg.UnknownObjectGrace = defaultRootFSUnknownObjectGrace
 	}
 	if cfg.DeleteOptions.ClaimTTL <= 0 {
 		cfg.DeleteOptions.ClaimTTL = sandboxstore.DefaultRootFSObjectDeleteClaimTTL

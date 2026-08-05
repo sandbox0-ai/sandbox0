@@ -41,6 +41,19 @@ type Recorder interface {
 	RunInTx(context.Context, func(txRecorder) error) error
 }
 
+// RootFSTeamResolver maps an opaque v3 CAS prefix back to the owning team at
+// flush time. Request observers stay non-blocking and never expose team IDs in
+// object keys.
+type RootFSTeamResolver interface {
+	ResolveRootFSTeam(context.Context, string) (string, error)
+}
+
+type RootFSTeamResolverFunc func(context.Context, string) (string, error)
+
+func (f RootFSTeamResolverFunc) ResolveRootFSTeam(ctx context.Context, prefix string) (string, error) {
+	return f(ctx, prefix)
+}
+
 type repository interface {
 	InTx(context.Context, func(pgx.Tx) error) error
 	AppendWindowTx(context.Context, pgx.Tx, *meteringpkg.Window) error
@@ -79,13 +92,14 @@ func (r *repositoryTxRecorder) UpsertProducerWatermark(ctx context.Context, prod
 }
 
 type attribution struct {
-	costScope   string
-	prefixClass string
-	subjectType string
-	subjectID   string
-	teamID      string
-	sandboxID   string
-	volumeID    string
+	costScope    string
+	prefixClass  string
+	subjectType  string
+	subjectID    string
+	teamID       string
+	sandboxID    string
+	volumeID     string
+	rootFSPrefix string
 }
 
 type usageKey struct {
@@ -106,17 +120,24 @@ type usageBatch struct {
 // Aggregator converts successful OSS provider attempts into low-volume,
 // attributed usage windows. It implements objectstore.RequestObserver.
 type Aggregator struct {
-	recorder  Recorder
-	regionID  string
-	clusterID string
-	producer  string
-	logger    *zap.Logger
-	now       func() time.Time
+	recorder    Recorder
+	regionID    string
+	clusterID   string
+	producer    string
+	logger      *zap.Logger
+	now         func() time.Time
+	rootFSTeams RootFSTeamResolver
 
 	mu          sync.Mutex
 	windowStart time.Time
 	usage       map[usageKey]int64
 	pending     *usageBatch
+}
+
+func (a *Aggregator) SetRootFSTeamResolver(resolver RootFSTeamResolver) {
+	if a != nil {
+		a.rootFSTeams = resolver
+	}
 }
 
 // NewAggregator creates a one-minute request usage aggregator backed by the
@@ -217,6 +238,15 @@ func classifyAttribution(bucket, key string) attribution {
 		}
 		return bucketAttribution(bucket, CostScopeUnattributed, "volume_unknown")
 	case "sandbox-rootfs":
+		if prefix, ok := rootFSV3TeamPrefix(parts); ok {
+			return attribution{
+				costScope:    CostScopeCustomer,
+				prefixClass:  "rootfs_cas",
+				subjectType:  meteringpkg.SubjectTypeRootFS,
+				subjectID:    prefix,
+				rootFSPrefix: prefix,
+			}
+		}
 		if len(parts) >= 3 && parts[1] != "" && parts[2] != "" {
 			return attribution{
 				costScope:   CostScopeCustomer,
@@ -237,6 +267,16 @@ func classifyAttribution(bucket, key string) attribution {
 	default:
 		return bucketAttribution(bucket, CostScopeUnattributed, "other")
 	}
+}
+
+func rootFSV3TeamPrefix(parts []string) (string, bool) {
+	if len(parts) < 5 || parts[1] != "cow-v3" || parts[2] != "teams" || parts[3] != "sha256" || len(parts[4]) != 64 {
+		return "", false
+	}
+	if _, err := hex.DecodeString(parts[4]); err != nil {
+		return "", false
+	}
+	return strings.Join(parts[:5], "/"), true
 }
 
 func bucketAttribution(bucket, costScope, prefixClass string) attribution {
@@ -276,6 +316,9 @@ func (a *Aggregator) Flush(ctx context.Context) error {
 	}
 	for {
 		batch, retrying := a.pendingBatch()
+		if err := a.resolveRootFSAttribution(ctx, batch); err != nil {
+			return err
+		}
 		err := a.recorder.RunInTx(ctx, func(tx txRecorder) error {
 			for _, key := range sortedUsageKeys(batch.usage) {
 				if err := tx.AppendWindow(ctx, a.buildWindow(key, batch.start, batch.end, batch.usage[key])); err != nil {
@@ -304,6 +347,38 @@ func (a *Aggregator) Flush(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func (a *Aggregator) resolveRootFSAttribution(ctx context.Context, batch *usageBatch) error {
+	if batch == nil {
+		return nil
+	}
+	resolved := make(map[string]string)
+	for key := range batch.usage {
+		if key.rootFSPrefix == "" {
+			continue
+		}
+		teamID, ok := resolved[key.rootFSPrefix]
+		if !ok {
+			if a.rootFSTeams == nil {
+				return fmt.Errorf("resolve rootfs CAS request attribution for %s: resolver is not configured", key.rootFSPrefix)
+			}
+			var err error
+			teamID, err = a.rootFSTeams.ResolveRootFSTeam(ctx, key.rootFSPrefix)
+			if err != nil {
+				return fmt.Errorf("resolve rootfs CAS request attribution for %s: %w", key.rootFSPrefix, err)
+			}
+			resolved[key.rootFSPrefix] = teamID
+		}
+		value := batch.usage[key]
+		delete(batch.usage, key)
+		key.teamID = teamID
+		key.subjectID = teamID
+		key.sandboxID = ""
+		key.rootFSPrefix = ""
+		batch.usage[key] += value
+	}
+	return nil
 }
 
 func (a *Aggregator) pendingBatch() (*usageBatch, bool) {
@@ -389,6 +464,7 @@ func usageKeyIdentity(key usageKey) string {
 		key.teamID,
 		key.sandboxID,
 		key.volumeID,
+		key.rootFSPrefix,
 		key.provider,
 		key.bucket,
 		key.billingItem,

@@ -26,15 +26,23 @@ For cold-start diagnosis, collect `manager_pod_lifecycle_stage_duration_seconds`
 
 The sandbox boundary is a Kubernetes lifecycle timestamp, not an individual CRI call duration. Collect `kubelet_runtime_operations_duration_seconds{operation_type=~"run_podsandbox|create_container|start_container"}` when you need node-level CRI timing.
 
-For rootfs checkpoint and resume diagnosis, collect these ctld metrics:
+For rootfs checkpoint and lazy-read diagnosis, collect these metrics from ctld and the rootfs snapshotter:
 
-- `ctld_rootfs_operation_duration_seconds` for total save and apply latency
-- `ctld_rootfs_phase_duration_seconds` for cache lookup, cache validation, tar filtering, containerd ingest, diff apply, and baseline capture
-- `ctld_rootfs_checkpoint_bytes` for input, output, excluded, and Volume portal byte distributions
-- `ctld_rootfs_checkpoint_chain_depth` for the number of layers replayed by each operation
+- `ctld_rootfs_phase_duration_seconds` for cache lookup, cache validation, and object fetch/cache fill latency
 - `ctld_rootfs_object_cache_requests_total` for cache hit, miss, and error counts
+- `ctld_rootfs_sync_dirty_paths`, `ctld_rootfs_sync_dirty_bytes`, and `ctld_rootfs_sync_active_captures` for the node-wide capture backlog
+- `ctld_rootfs_sync_initial_scan_pending_sessions`, `ctld_rootfs_sync_full_reconcile_sessions`, `ctld_rootfs_sync_sealed_sessions`, and `ctld_rootfs_sync_error_sessions` for sessions that cannot yet produce a bounded dirty-tail seal
+- `manager_rootfs_maintenance_duration_seconds`, `manager_rootfs_inventory_jobs`, `manager_rootfs_head_prefix_guards`, `manager_rootfs_object_deletion_queue_depth`, `manager_rootfs_storage_bytes`, and `manager_rootfs_storage_objects` for inventory and GC health
 
-Manager also records `apply_rootfs_checkpoint`, `bind_volume_portals`, `bind_webhook_state_portal`, `activate_runtime`, and `resume_total` in `manager_sandbox_claim_phase_duration_seconds`. ctld emits a structured warning when a rootfs operation takes at least 10 seconds or handles a checkpoint of at least 512 MiB.
+An uninventoried Head uses a temporary team-prefix guard so lifecycle publication stays bounded without exposing objects to premature GC. Alert whenever `manager_rootfs_inventory_jobs{state="dead"} > 0`: the guard intentionally remains in place and pauses object deletion for that team until the inventory failure is repaired. A growing `manager_rootfs_head_prefix_guards` value without matching pending or running inventory work is also abnormal.
+
+Manager records `materialize_rootfs_head`, `bind_rootfs_sync`, `bind_volume_portals`, `activate_runtime`, and `resume_total` in `manager_sandbox_claim_phase_duration_seconds`. Report API acceptance, dirty-tail seal, Kubernetes scheduling/container start, procd readiness, and first cold lower read separately.
+
+`ctld_rootfs_sync_dirty_bytes` is an enqueue-time estimate from the most recent path metadata observation. It is intentionally collected without filesystem I/O and is a backlog signal, not an exact byte counter.
+
+Interpret these numbers with the I/O path in mind. Upper-layer reads and writes are native overlayfs operations. A cold lower miss can read one verified 1 MiB chunk, while a cache hit stays node-local. Capture of a changed regular file currently rereads the complete file even when only 4 KiB changed, so sustained random overwrites of large files should be correlated with dirty bytes, active captures, object-store PUT attempts, and pause seal latency.
+
+The Node annotation `sandbox0.ai/rootfs-snapshotter-instance` identifies the ready snapshotter process that new sandbox Pods pin. If the process restarts, the data-plane readiness label drops before the annotation advances. Alert on prolonged node not-readiness and manager rootfs recovery retries; do not interpret the new instance annotation as an in-place repair of existing FUSE mounts.
 
 Each sandbox node runs two ctld peers, but exactly one peer on that node should own the primary lock. More than one `ctld_ha_primary` across the whole cluster is normal when the cluster has multiple sandbox nodes. Scrape the `ha-metrics` port on both ctld Pods and group HA checks by the `node` label:
 

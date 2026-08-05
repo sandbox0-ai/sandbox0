@@ -15,7 +15,6 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
-	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
 	distref "github.com/distribution/reference"
@@ -101,15 +100,7 @@ func (p *Publisher) Publish(ctx context.Context, req BuildRequest) (*Result, err
 	if p == nil {
 		return nil, fmt.Errorf("template image publisher is required")
 	}
-	if err := req.validate(true); err != nil {
-		return nil, err
-	}
-	resolvedLayers, err := ResolveLayerDiffIDs(ctx, p.objects, req.Layers)
-	if err != nil {
-		return nil, err
-	}
-	req.Layers = resolvedLayers
-	if err := req.validate(false); err != nil {
+	if err := req.Validate(); err != nil {
 		return nil, err
 	}
 
@@ -551,125 +542,6 @@ func rootFSLayerDescriptor(layer Layer) (ocispec.Descriptor, error) {
 		Digest:    dgst,
 		Size:      layer.Size,
 	}, nil
-}
-
-// ResolveLayerDiffIDs fills missing DiffIDs from legacy rootfs layer rows.
-// Uncompressed layers are already addressed by their DiffID. Compressed layers
-// are decompressed and hashed as a stream, without buffering the layer.
-func ResolveLayerDiffIDs(ctx context.Context, objects ObjectReader, layers []Layer) ([]Layer, error) {
-	out := append([]Layer(nil), layers...)
-	for i := range out {
-		if strings.TrimSpace(out[i].DiffID) != "" {
-			continue
-		}
-		desc, err := rootFSLayerDescriptor(out[i])
-		if err != nil {
-			return nil, err
-		}
-		expectedCompression, ok := layerCompression(desc.MediaType)
-		if !ok {
-			return nil, fmt.Errorf("rootfs layer %d has unsupported media type %q", i, desc.MediaType)
-		}
-		if expectedCompression == compression.Uncompressed {
-			out[i].DiffID = desc.Digest.String()
-			continue
-		}
-		if objects == nil {
-			return nil, fmt.Errorf("rootfs layer %d has no diff_id and object reader is unavailable", i)
-		}
-		diffID, err := calculateCompressedLayerDiffID(ctx, objects, out[i], desc, expectedCompression)
-		if err != nil {
-			return nil, fmt.Errorf("calculate legacy rootfs layer %d diff_id: %w", i, err)
-		}
-		out[i].DiffID = diffID.String()
-	}
-	return out, nil
-}
-
-func layerCompression(mediaType string) (compression.Compression, bool) {
-	switch mediaType {
-	case ocispec.MediaTypeImageLayer,
-		ocispec.MediaTypeImageLayerNonDistributable,
-		images.MediaTypeDockerSchema2Layer,
-		images.MediaTypeDockerSchema2LayerForeign:
-		return compression.Uncompressed, true
-	case ocispec.MediaTypeImageLayerGzip,
-		ocispec.MediaTypeImageLayerNonDistributableGzip,
-		images.MediaTypeDockerSchema2LayerGzip,
-		images.MediaTypeDockerSchema2LayerForeignGzip:
-		return compression.Gzip, true
-	case ocispec.MediaTypeImageLayerZstd,
-		ocispec.MediaTypeImageLayerNonDistributableZstd,
-		images.MediaTypeDockerSchema2LayerZstd:
-		return compression.Zstd, true
-	default:
-		return compression.Unknown, false
-	}
-}
-
-func calculateCompressedLayerDiffID(
-	ctx context.Context,
-	objects ObjectReader,
-	layer Layer,
-	desc ocispec.Descriptor,
-	expectedCompression compression.Compression,
-) (digest.Digest, error) {
-	reader, err := objects.Get(layer.ObjectKey, 0, layer.Size)
-	if err != nil {
-		return "", err
-	}
-	defer reader.Close()
-	compressedDigester := digest.Canonical.Digester()
-	counted := &countingReader{
-		reader: io.TeeReader(io.LimitReader(reader, layer.Size+1), compressedDigester.Hash()),
-	}
-	decompressed, err := compression.DecompressStream(counted)
-	if err != nil {
-		return "", fmt.Errorf("open compressed layer: %w", err)
-	}
-	defer decompressed.Close()
-	if actualCompression := decompressed.GetCompression(); actualCompression != expectedCompression {
-		return "", fmt.Errorf(
-			"layer compression does not match media type %q: got %d, want %d",
-			desc.MediaType,
-			actualCompression,
-			expectedCompression,
-		)
-	}
-	diffDigester := digest.Canonical.Digester()
-	if _, err := io.Copy(diffDigester.Hash(), &contextReader{ctx: ctx, reader: decompressed}); err != nil {
-		return "", fmt.Errorf("decompress layer: %w", err)
-	}
-	if counted.read != layer.Size {
-		return "", fmt.Errorf("compressed layer size mismatch: got %d, want %d", counted.read, layer.Size)
-	}
-	if got := compressedDigester.Digest(); got != desc.Digest {
-		return "", fmt.Errorf("compressed layer digest mismatch: got %s, want %s", got, desc.Digest)
-	}
-	return diffDigester.Digest(), nil
-}
-
-type countingReader struct {
-	reader io.Reader
-	read   int64
-}
-
-func (r *countingReader) Read(p []byte) (int, error) {
-	n, err := r.reader.Read(p)
-	r.read += int64(n)
-	return n, err
-}
-
-type contextReader struct {
-	ctx    context.Context
-	reader io.Reader
-}
-
-func (r *contextReader) Read(p []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return r.reader.Read(p)
 }
 
 func descriptorFromBytes(mediaType string, data []byte) ocispec.Descriptor {

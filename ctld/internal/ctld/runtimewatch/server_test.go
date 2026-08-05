@@ -36,7 +36,7 @@ func TestRuntimeWatchRejectsSourceOutsidePodNetworkIdentity(t *testing.T) {
 
 func TestRuntimeWatchServerDoesNotExposeCtldControlPaths(t *testing.T) {
 	server := NewServer(NewHub(nil))
-	for _, path := range []string{"/readyz", "/api/v1/rootfs/save", "/api/v1/volume-portals/bind"} {
+	for _, path := range []string{"/readyz", "/api/v1/rootfs/sync/bind", "/api/v1/volume-portals/bind"} {
 		request := httptest.NewRequest(http.MethodPost, path, nil)
 		recorder := httptest.NewRecorder()
 

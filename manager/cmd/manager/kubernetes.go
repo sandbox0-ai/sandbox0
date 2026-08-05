@@ -142,6 +142,7 @@ func buildManagerInformerRuntime(
 		podLister,
 		nodeLister,
 		cfg.PodTeardown,
+		cfg.RuntimeReadyTimeout.Duration,
 		metrics,
 		logger,
 	)

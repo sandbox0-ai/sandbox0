@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	managernaming "github.com/sandbox0-ai/sandbox0/manager/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -696,7 +697,7 @@ func TestRepairUnhealthyIdlePodsDeletesStuckCurrentHashIdlePod(t *testing.T) {
 			Namespace:         "default",
 			UID:               types.UID("uid-stuck"),
 			ResourceVersion:   "31",
-			CreationTimestamp: metav1.NewTime(time.Now().Add(-unhealthyIdlePodRepairGracePeriod - time.Second)),
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-config.IdlePodRepairGracePeriod(0) - time.Second)),
 			Labels: map[string]string{
 				LabelTemplateID: "template-a",
 				LabelPoolType:   PoolTypeIdle,
@@ -715,7 +716,7 @@ func TestRepairUnhealthyIdlePodsDeletesStuckCurrentHashIdlePod(t *testing.T) {
 			Namespace:         "default",
 			UID:               types.UID("uid-ready"),
 			ResourceVersion:   "32",
-			CreationTimestamp: metav1.NewTime(time.Now().Add(-unhealthyIdlePodRepairGracePeriod - time.Second)),
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-config.IdlePodRepairGracePeriod(0) - time.Second)),
 			Labels: map[string]string{
 				LabelTemplateID: "template-a",
 				LabelPoolType:   PoolTypeIdle,
@@ -814,7 +815,56 @@ func TestRepairUnhealthyIdlePodsKeepsRecentlyCreatedPod(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, deleteActions)
 	assert.Greater(t, requeueAfter, time.Duration(0))
-	assert.LessOrEqual(t, requeueAfter, unhealthyIdlePodRepairGracePeriod)
+	assert.LessOrEqual(t, requeueAfter, config.IdlePodRepairGracePeriod(0))
+}
+
+func TestRepairUnhealthyIdlePodsFollowsRuntimeReadyTimeout(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-a", Namespace: "default"},
+	}
+	podAge := 5 * time.Minute
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "idle-pulling",
+			Namespace:         "default",
+			UID:               types.UID("uid-pulling"),
+			ResourceVersion:   "42",
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-podAge)),
+			Labels: map[string]string{
+				LabelTemplateID: "template-a",
+				LabelPoolType:   PoolTypeIdle,
+			},
+			Annotations: map[string]string{AnnotationTemplateSpecHash: "new-hash"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+
+	client := fake.NewSimpleClientset(pod)
+	podIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, podIndexer.Add(pod))
+	podLister := corelisters.NewPodLister(podIndexer)
+	runtimeReadyTimeout := 10 * time.Minute
+	teardown := NewPodTeardownCoordinator(
+		podLister,
+		nil,
+		config.PodTeardownConfig{},
+		runtimeReadyTimeout,
+		nil,
+		zap.NewNop(),
+	)
+	pm := &PoolManager{
+		k8sClient: client,
+		podLister: podLister,
+		recorder:  record.NewFakeRecorder(10),
+		logger:    zap.NewNop(),
+		teardown:  teardown,
+	}
+
+	requeueAfter, err := pm.repairUnhealthyIdlePods(context.Background(), template, "new-hash")
+	require.NoError(t, err)
+	assert.Empty(t, client.Actions())
+	want := config.IdlePodRepairGracePeriod(runtimeReadyTimeout) - podAge
+	assert.InDelta(t, want.Seconds(), requeueAfter.Seconds(), 1)
 }
 
 func TestReconcileReplicaSetTemplateUpdatesHash(t *testing.T) {

@@ -326,6 +326,7 @@ func newTeardownTestCoordinator(
 		corelisters.NewPodLister(podIndexer),
 		corelisters.NewNodeLister(nodeIndexer),
 		limits,
+		0,
 		nil,
 		zap.NewNop(),
 	)
@@ -347,7 +348,7 @@ func teardownTestPod(name, nodeName string, terminating bool) *corev1.Pod {
 			Name:              name,
 			Namespace:         "default",
 			UID:               types.UID("uid-" + name),
-			CreationTimestamp: metav1.NewTime(time.Now().Add(-unhealthyIdlePodRepairGracePeriod - time.Minute)),
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-config.IdlePodRepairGracePeriod(0) - time.Minute)),
 			Labels: map[string]string{
 				LabelTemplateID: "template-a",
 				LabelPoolType:   PoolTypeIdle,

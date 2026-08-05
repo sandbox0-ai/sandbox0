@@ -41,7 +41,6 @@ var ErrQuotaExceeded = errors.New("quota exceeded")
 var ErrInvalidNetworkPolicy = errors.New("invalid network policy")
 var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint requires ctld")
 
-const defaultPodClaimReadyTimeout = 90 * time.Second
 const defaultSandboxRestoreTimeout = 5 * time.Minute
 
 // claimIdlePodBackoff is the retry backoff for claiming idle pods.

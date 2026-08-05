@@ -101,7 +101,7 @@ func NewCleanupController(
 		hardExpiredLister: hardExpiredLister,
 		logger:            logger,
 		interval:          interval,
-		teardown:          NewPodTeardownCoordinator(podLister, nil, config.PodTeardownConfig{}, nil, logger),
+		teardown:          NewPodTeardownCoordinator(podLister, nil, config.PodTeardownConfig{}, 0, nil, logger),
 	}
 }
 

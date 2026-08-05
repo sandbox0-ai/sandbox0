@@ -4,7 +4,33 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestEffectiveRuntimeReadyTimeout(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured time.Duration
+		want       time.Duration
+	}{
+		{name: "unset", want: 5 * time.Minute},
+		{name: "legacy short value", configured: 90 * time.Second, want: 5 * time.Minute},
+		{name: "longer override", configured: 10 * time.Minute, want: 10 * time.Minute},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := EffectiveRuntimeReadyTimeout(test.configured); got != test.want {
+				t.Fatalf("EffectiveRuntimeReadyTimeout(%s) = %s, want %s", test.configured, got, test.want)
+			}
+		})
+	}
+}
+
+func TestIdlePodRepairGracePeriodFollowsRuntimeReadyTimeout(t *testing.T) {
+	if got, want := IdlePodRepairGracePeriod(10*time.Minute), 10*time.Minute+30*time.Second; got != want {
+		t.Fatalf("IdlePodRepairGracePeriod() = %s, want %s", got, want)
+	}
+}
 
 func TestLoadManagerConfigPreservesDefaultTeamQuotas(t *testing.T) {
 	dir := t.TempDir()

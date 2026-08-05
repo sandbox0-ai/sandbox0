@@ -84,9 +84,8 @@ const (
 	HotClaimReservationStateReady        = sandboxpod.HotClaimReservationStateReady
 	HotClaimCompletionProtocolRecordV2   = sandboxpod.HotClaimCompletionProtocolRecordV2
 
-	unhealthyIdlePodRepairGracePeriod = 2 * time.Minute
-	warmPoolRolloutRequeueAfter       = 10 * time.Second
-	claimedPodAnnotationRequeueAfter  = 2 * time.Second
+	warmPoolRolloutRequeueAfter      = 10 * time.Second
+	claimedPodAnnotationRequeueAfter = 2 * time.Second
 
 	warmPoolRolloutMaxUnavailablePercent   int32 = 10
 	warmPoolRolloutMaxUnavailableLimit     int32 = 10
@@ -872,6 +871,7 @@ func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1
 	}
 
 	now := time.Now()
+	gracePeriod := pm.teardownCoordinator().idlePodRepairGracePeriod
 	candidates := make([]*corev1.Pod, 0)
 	nextGraceCheck := time.Duration(0)
 	for _, pod := range pods {
@@ -881,14 +881,14 @@ func (pm *PoolManager) repairUnhealthyIdlePods(ctx context.Context, template *v1
 		if pod.Annotations[AnnotationTemplateSpecHash] != desiredTemplateHash {
 			continue
 		}
-		if shouldRepairUnhealthyIdlePod(pod, now) {
+		if shouldRepairUnhealthyIdlePod(pod, now, gracePeriod) {
 			candidates = append(candidates, pod)
 			continue
 		}
 		if pod.DeletionTimestamp != nil || IsPodReady(pod) || pod.CreationTimestamp.IsZero() {
 			continue
 		}
-		remaining := unhealthyIdlePodRepairGracePeriod - now.Sub(pod.CreationTimestamp.Time)
+		remaining := gracePeriod - now.Sub(pod.CreationTimestamp.Time)
 		if remaining > 0 && (nextGraceCheck <= 0 || remaining < nextGraceCheck) {
 			nextGraceCheck = remaining
 		}
@@ -934,12 +934,12 @@ func (pm *PoolManager) teardownCoordinator() *PodTeardownCoordinator {
 		// A missing node lister fails closed for scheduled Pods. This fallback is
 		// primarily useful to keep narrow controller tests safe; manager wiring
 		// always injects the shared, node-aware coordinator.
-		pm.teardown = NewPodTeardownCoordinator(pm.podLister, nil, config.PodTeardownConfig{}, nil, pm.logger)
+		pm.teardown = NewPodTeardownCoordinator(pm.podLister, nil, config.PodTeardownConfig{}, 0, nil, pm.logger)
 	}
 	return pm.teardown
 }
 
-func shouldRepairUnhealthyIdlePod(pod *corev1.Pod, now time.Time) bool {
+func shouldRepairUnhealthyIdlePod(pod *corev1.Pod, now time.Time, gracePeriod time.Duration) bool {
 	if pod == nil || pod.DeletionTimestamp != nil || IsHotClaimReservedPod(pod) || IsPodReady(pod) {
 		return false
 	}
@@ -950,11 +950,12 @@ func shouldRepairUnhealthyIdlePod(pod *corev1.Pod, now time.Time) bool {
 	if pod.CreationTimestamp.IsZero() {
 		return false
 	}
-	return now.Sub(pod.CreationTimestamp.Time) >= unhealthyIdlePodRepairGracePeriod
+	return now.Sub(pod.CreationTimestamp.Time) >= gracePeriod
 }
 
 func (pm *PoolManager) deleteUnhealthyIdlePodWithRetry(ctx context.Context, namespace, podName, desiredTemplateHash string) (bool, error) {
 	deleted := false
+	gracePeriod := pm.teardownCoordinator().idlePodRepairGracePeriod
 	retryErr := retry.OnError(retry.DefaultRetry, func(err error) bool {
 		return apierrors.IsConflict(err) || apierrors.IsInvalid(err)
 	}, func() error {
@@ -969,7 +970,7 @@ func (pm *PoolManager) deleteUnhealthyIdlePodWithRetry(ctx context.Context, name
 		if pod.Labels[LabelPoolType] != PoolTypeIdle ||
 			IsHotClaimReservedPod(pod) ||
 			pod.Annotations[AnnotationTemplateSpecHash] != desiredTemplateHash ||
-			!shouldRepairUnhealthyIdlePod(pod, time.Now()) {
+			!shouldRepairUnhealthyIdlePod(pod, time.Now(), gracePeriod) {
 			return nil
 		}
 

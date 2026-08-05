@@ -501,6 +501,22 @@ func (s *rootFSBackedSession) Fsync(_ context.Context, req *pb.FsyncRequest) (*p
 	return &pb.Empty{}, nil
 }
 
+func (s *rootFSBackedSession) FsyncDir(_ context.Context, inode uint64) error {
+	rel, err := s.relForInode(inode)
+	if err != nil {
+		return err
+	}
+	handle, err := os.Open(s.hostPath(rel))
+	if err != nil {
+		return mapRootFSBackedError(err)
+	}
+	defer handle.Close()
+	if err := handle.Sync(); err != nil {
+		return mapRootFSBackedError(err)
+	}
+	return nil
+}
+
 func (s *rootFSBackedSession) Fallocate(_ context.Context, req *pb.FallocateRequest) (*pb.Empty, error) {
 	handle, release, err := s.handleForWrite(req.GetInode(), req.GetHandleId())
 	if err != nil {

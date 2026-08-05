@@ -90,6 +90,20 @@ func TestRootFSBackedSessionFlushDoesNotImplyFsync(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestRootFSBackedSessionFsyncDir(t *testing.T) {
+	session, err := newRootFSBackedSessionWithState(t.TempDir(), "")
+	require.NoError(t, err)
+	defer session.Close()
+
+	dir, err := session.Mkdir(context.Background(), &pb.MkdirRequest{
+		Parent: s0fs.RootInode,
+		Name:   "durable",
+		Mode:   0o755,
+	})
+	require.NoError(t, err)
+	require.NoError(t, session.FsyncDir(context.Background(), dir.Inode))
+}
+
 func TestRootFSBackedSessionRebaseExposesRestoredFilesAndRedirectsWrites(t *testing.T) {
 	staging := t.TempDir()
 	upper := t.TempDir()

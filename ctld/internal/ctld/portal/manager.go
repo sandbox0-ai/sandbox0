@@ -462,9 +462,10 @@ func (m *Manager) PublishPortal(ctx context.Context, req publishRequest) error {
 }
 
 // AttachRootFSBackings rebases every unbound portal for a Pod onto the
-// container overlay upper. Rootfs sync calls this before runtime activation;
-// bound SandboxVolumes keep their independent backing and are not changed.
-func (m *Manager) AttachRootFSBackings(ctx context.Context, podUID, upperRoot string) error {
+// container's merged rootfs. Overlayfs keeps restored Head content visible and
+// directs new writes into the active upper. Rootfs sync calls this before
+// runtime activation; bound SandboxVolumes keep their independent backing.
+func (m *Manager) AttachRootFSBackings(ctx context.Context, podUID, mergedRoot string) error {
 	if m == nil {
 		return fmt.Errorf("volume portal manager is required")
 	}
@@ -475,9 +476,9 @@ func (m *Manager) AttachRootFSBackings(ctx context.Context, podUID, upperRoot st
 	if podUID == "" {
 		return fmt.Errorf("pod_uid is required to attach rootfs portal backings")
 	}
-	upperRoot = filepath.Clean(strings.TrimSpace(upperRoot))
-	if upperRoot == "" || upperRoot == "." || !filepath.IsAbs(upperRoot) {
-		return fmt.Errorf("overlay upper root must be absolute")
+	mergedRoot = filepath.Clean(strings.TrimSpace(mergedRoot))
+	if mergedRoot == "" || mergedRoot == "." || !filepath.IsAbs(mergedRoot) {
+		return fmt.Errorf("overlay merged root must be absolute")
 	}
 
 	m.mu.Lock()
@@ -506,7 +507,7 @@ func (m *Manager) AttachRootFSBackings(ctx context.Context, podUID, upperRoot st
 			return fmt.Errorf("unbound volume portal %s has no rootfs-backed session", current.name)
 		}
 		oldRoot := filepath.Clean(current.rootfsBackingPath)
-		targetRoot, err := ensureRootFSBackingTarget(upperRoot, current.mountPath)
+		targetRoot, err := ensureRootFSBackingTarget(mergedRoot, current.mountPath)
 		if err != nil {
 			m.mu.Unlock()
 			return fmt.Errorf("attach unbound volume portal %s: %w", current.name, err)
@@ -557,18 +558,18 @@ func rootFSPersistedPortal(current *portalMount, podUID string) bool {
 	return current.name != volumeportal.WebhookStatePortalName && current.mountPath != volumeportal.WebhookStateMountPath
 }
 
-func ensureRootFSBackingTarget(upperRoot, mountPath string) (string, error) {
-	upperRoot = filepath.Clean(upperRoot)
+func ensureRootFSBackingTarget(mergedRoot, mountPath string) (string, error) {
+	mergedRoot = filepath.Clean(mergedRoot)
 	mountPath = filepath.Clean(strings.TrimSpace(mountPath))
 	if !filepath.IsAbs(mountPath) || mountPath == string(filepath.Separator) {
 		return "", fmt.Errorf("portal mount path %q is not an absolute non-root path", mountPath)
 	}
 	relative := strings.TrimPrefix(mountPath, string(filepath.Separator))
-	target := filepath.Join(upperRoot, relative)
-	if target == upperRoot || !strings.HasPrefix(target, upperRoot+string(filepath.Separator)) {
-		return "", fmt.Errorf("portal mount path %q escapes overlay upper root", mountPath)
+	target := filepath.Join(mergedRoot, relative)
+	if target == mergedRoot || !strings.HasPrefix(target, mergedRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("portal mount path %q escapes overlay merged root", mountPath)
 	}
-	current := upperRoot
+	current := mergedRoot
 	for _, component := range strings.Split(relative, string(filepath.Separator)) {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
@@ -647,7 +648,7 @@ func (m *Manager) RestorePortal(ctx context.Context, manifest RecoveryManifest, 
 	}
 	m.mu.Unlock()
 
-	if err := os.MkdirAll(manifest.RootFSBackingPath, 0o755); err != nil {
+	if err := m.prepareRecoveryRootFSBacking(manifest.RootFSBackingPath); err != nil {
 		return fmt.Errorf("restore rootfs portal backing directory: %w", err)
 	}
 	statePath := strings.TrimSpace(manifest.RootFSStatePath)
@@ -2343,6 +2344,24 @@ func (m *Manager) ownsRootFSBackingPath(path string) bool {
 	root := filepath.Join(filepath.Clean(rootDir), "rootfs-portals")
 	relative, err := filepath.Rel(root, filepath.Clean(path))
 	return err == nil && relative != "." && relative != "" && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func (m *Manager) prepareRecoveryRootFSBacking(path string) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" || path == "." || !filepath.IsAbs(path) {
+		return fmt.Errorf("rootfs portal backing path must be absolute")
+	}
+	if m.ownsRootFSBackingPath(path) {
+		return os.MkdirAll(path, 0o755)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("external rootfs portal backing %s is not a real directory", path)
+	}
+	return nil
 }
 
 func (m *Manager) rootFSStatePath(key string) string {

@@ -80,7 +80,7 @@ func newRootFSBackedSessionWithState(root, statePath string) (*rootFSBackedSessi
 	return session, nil
 }
 
-// RebaseRoot moves an idle unbound portal onto its container overlay upper.
+// RebaseRoot moves an idle unbound portal onto its container's merged rootfs.
 // Manager calls this before releasing the runtime assignment barrier, so the
 // portal cannot split writes between its staging directory and durable rootfs.
 func (s *rootFSBackedSession) RebaseRoot(root string) error {

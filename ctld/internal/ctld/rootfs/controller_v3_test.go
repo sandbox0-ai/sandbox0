@@ -213,12 +213,14 @@ func TestControllerBindRootFSSyncAttachesPortalBackingsBeforeStartingSession(t *
 	info := rootFSInfo("gvisor")
 	info.Snapshotter = rootfshead.SnapshotterName
 	upperdir := t.TempDir()
+	mergedRoot := t.TempDir()
 	attacher := &fakePortalBackingAttacher{}
 	controller := NewController(Config{
 		Context: context.Background(),
 		Runtime: &fakeV3Runtime{
 			fakeRuntime: &fakeRuntime{info: info},
 			upperdir:    upperdir,
+			mergedRoot:  mergedRoot,
 			base:        base,
 			baseConfig:  baseConfig,
 		},
@@ -237,7 +239,7 @@ func TestControllerBindRootFSSyncAttachesPortalBackingsBeforeStartingSession(t *
 
 	require.Equal(t, http.StatusOK, status, response.Error)
 	assert.Equal(t, "pod-uid", attacher.podUID)
-	assert.Equal(t, upperdir, attacher.upperRoot)
+	assert.Equal(t, mergedRoot, attacher.mergedRoot)
 }
 
 func TestControllerBindRootFSSyncFailsWhenPortalBackingAttachmentFails(t *testing.T) {
@@ -369,6 +371,7 @@ func TestControllerBindRootFSSyncRejectsCrossTeamParent(t *testing.T) {
 type fakeV3Runtime struct {
 	*fakeRuntime
 	upperdir              string
+	mergedRoot            string
 	base                  rootfshead.BaseIdentity
 	baseConfig            []byte
 	materializedReference rootfshead.HeadReference
@@ -391,14 +394,14 @@ type fakeCaptureLeases struct {
 }
 
 type fakePortalBackingAttacher struct {
-	podUID    string
-	upperRoot string
-	err       error
+	podUID     string
+	mergedRoot string
+	err        error
 }
 
-func (a *fakePortalBackingAttacher) AttachRootFSBackings(_ context.Context, podUID, upperRoot string) error {
+func (a *fakePortalBackingAttacher) AttachRootFSBackings(_ context.Context, podUID, mergedRoot string) error {
 	a.podUID = podUID
-	a.upperRoot = upperRoot
+	a.mergedRoot = mergedRoot
 	return a.err
 }
 
@@ -476,6 +479,9 @@ func (r *fakeV3Runtime) ActiveUpperdir(context.Context, ctldapi.RootFSInfo) (str
 }
 
 func (r *fakeV3Runtime) ActiveMergedRoot(context.Context, ctldapi.RootFSInfo, string) (string, error) {
+	if r.mergedRoot != "" {
+		return r.mergedRoot, nil
+	}
 	return r.upperdir, nil
 }
 

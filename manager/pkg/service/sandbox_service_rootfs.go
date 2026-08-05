@@ -432,7 +432,7 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 		}
 		for _, mount := range container.VolumeMounts {
 			if _, rootFSBackedPortal := rootFSBackedPortalVolumes[mount.Name]; rootFSBackedPortal {
-				// Unbound portals are rebased onto the overlay upper before
+				// Unbound portals are rebased onto the merged rootfs before
 				// rootfs sync starts. Bound SandboxVolumes are excluded below
 				// from the persisted claim mounts instead.
 				continue

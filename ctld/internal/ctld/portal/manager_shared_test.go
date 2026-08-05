@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -332,7 +333,7 @@ func TestAttachRootFSBackingsFailsClosedAfterEarlyPortalWrite(t *testing.T) {
 	}
 }
 
-func TestAttachRootFSBackingsRebasesUnboundPortalOntoOverlayUpper(t *testing.T) {
+func TestAttachRootFSBackingsRebasesUnboundPortalOntoMergedRoot(t *testing.T) {
 	mgr := NewManager(Config{RootDir: t.TempDir()})
 	// This test exercises attachment behavior independently from recovery-store
 	// validation; production portals have a FUSE INIT request in their manifest.
@@ -354,14 +355,25 @@ func TestAttachRootFSBackingsRebasesUnboundPortalOntoOverlayUpper(t *testing.T) 
 		rootfsSession:     session,
 	}
 	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
-	upper := t.TempDir()
+	merged := t.TempDir()
+	want := filepath.Join(merged, "workspace")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", want, err)
+	}
+	restored := filepath.Join(want, "restored.txt")
+	if err := os.WriteFile(restored, []byte("from-head"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", restored, err)
+	}
 
-	if err := mgr.AttachRootFSBackings(context.Background(), "pod-1", upper); err != nil {
+	if err := mgr.AttachRootFSBackings(context.Background(), "pod-1", merged); err != nil {
 		t.Fatalf("AttachRootFSBackings() error = %v", err)
 	}
-	want := filepath.Join(upper, "workspace")
 	if pm.rootfsBackingPath != want || session.rootPath() != want {
 		t.Fatalf("attached roots = %q/%q, want %q", pm.rootfsBackingPath, session.rootPath(), want)
+	}
+	payload, err := os.ReadFile(session.hostPath("restored.txt"))
+	if err != nil || string(payload) != "from-head" {
+		t.Fatalf("restored portal content = %q, %v, want from-head", string(payload), err)
 	}
 	if _, err := os.Stat(staging); !os.IsNotExist(err) {
 		t.Fatalf("staging root stat error = %v, want not exist", err)
@@ -406,6 +418,27 @@ func TestAttachRootFSBackingsSkipsRuntimeOwnedWebhookPortal(t *testing.T) {
 	payload, err := os.ReadFile(marker)
 	if err != nil || string(payload) != "runtime" {
 		t.Fatalf("runtime marker = %q, %v, want runtime", string(payload), err)
+	}
+}
+
+func TestPrepareRecoveryRootFSBackingDoesNotRecreateExternalPath(t *testing.T) {
+	mgr := NewManager(Config{RootDir: t.TempDir()})
+	external := filepath.Join(t.TempDir(), "task-root", "workspace")
+
+	err := mgr.prepareRecoveryRootFSBacking(external)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prepareRecoveryRootFSBacking() error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Dir(external)); !os.IsNotExist(err) {
+		t.Fatalf("external parent stat error = %v, want not exist", err)
+	}
+
+	owned := mgr.unboundRootFSBackingPath("pod-1", "workspace")
+	if err := mgr.prepareRecoveryRootFSBacking(owned); err != nil {
+		t.Fatalf("prepareRecoveryRootFSBacking(owned) error = %v", err)
+	}
+	if info, err := os.Stat(owned); err != nil || !info.IsDir() {
+		t.Fatalf("owned backing stat = %#v, %v, want directory", info, err)
 	}
 }
 

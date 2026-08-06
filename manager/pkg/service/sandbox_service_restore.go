@@ -501,23 +501,26 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if rootFSHead != nil {
 		resetCopiedSessionState = strings.TrimSpace(rootFSHead.SourceSandboxID) != "" && strings.TrimSpace(rootFSHead.SourceSandboxID) != strings.TrimSpace(record.ID)
 		phaseStarted := time.Now()
-		pod, err = s.replaceRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead)
+		var recreated bool
+		pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead)
 		s.observeClaimPhase(record.TemplateID, claimType, "materialize_rootfs_head", phaseStarted, err)
 		if err != nil {
 			return pod, err
 		}
-		claimType = "cold"
-		phaseStarted = time.Now()
-		pod, err = s.waitForColdPodNetworkPolicy(ctx, pod, record.TeamID)
-		s.observeClaimPhase(record.TemplateID, claimType, "rootfs_head_network_policy", phaseStarted, err)
-		if err != nil {
-			return pod, err
-		}
-		phaseStarted = time.Now()
-		pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
-		s.observeClaimPhase(record.TemplateID, claimType, "rootfs_head_runtime_ready", phaseStarted, err)
-		if err != nil {
-			return pod, err
+		if recreated {
+			claimType = "cold"
+			phaseStarted = time.Now()
+			pod, err = s.waitForColdPodNetworkPolicy(ctx, pod, record.TeamID)
+			s.observeClaimPhase(record.TemplateID, claimType, "rootfs_head_network_policy", phaseStarted, err)
+			if err != nil {
+				return pod, err
+			}
+			phaseStarted = time.Now()
+			pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+			s.observeClaimPhase(record.TemplateID, claimType, "rootfs_head_runtime_ready", phaseStarted, err)
+			if err != nil {
+				return pod, err
+			}
 		}
 	}
 	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)

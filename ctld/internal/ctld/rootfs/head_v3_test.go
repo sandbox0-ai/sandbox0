@@ -21,7 +21,34 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
+
+func TestWaitForCRIImageWaitsForImageServiceVisibility(t *testing.T) {
+	imageClient := &sequencedCRIImageClient{visibleAt: 3}
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{CRIImageClient: imageClient})
+
+	require.NoError(t, runtime.waitForCRIImage(context.Background(), "sandbox0.local/rootfs-heads@sha256:test"))
+	assert.Equal(t, 3, imageClient.calls)
+}
+
+type sequencedCRIImageClient struct {
+	calls     int
+	visibleAt int
+}
+
+func (c *sequencedCRIImageClient) ImageStatus(
+	_ context.Context,
+	request *runtimeapi.ImageStatusRequest,
+	_ ...grpc.CallOption,
+) (*runtimeapi.ImageStatusResponse, error) {
+	c.calls++
+	if c.calls < c.visibleAt {
+		return &runtimeapi.ImageStatusResponse{}, nil
+	}
+	return &runtimeapi.ImageStatusResponse{Image: &runtimeapi.Image{Id: request.Image.Image}}, nil
+}
 
 func TestBaseIdentityAndConfigSelectsNodePlatformFromImageIndex(t *testing.T) {
 	client := newBaseIdentityClient(t)

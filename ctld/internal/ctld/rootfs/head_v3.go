@@ -22,6 +22,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfsstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 const (
@@ -266,7 +267,39 @@ func (r *ContainerdRuntime) MaterializeRootFSHead(
 	if err := localImage.Unpack(leaseCtx, rootfshead.SnapshotterName); err != nil {
 		return fmt.Errorf("unpack local rootfs Head image: %w", err)
 	}
+	if err := r.waitForCRIImage(leaseCtx, image.Name); err != nil {
+		return err
+	}
 	return nil
+}
+
+// waitForCRIImage closes the registration race between containerd's image
+// store and the CRI image service observed by kubelet.
+func (r *ContainerdRuntime) waitForCRIImage(ctx context.Context, image string) error {
+	client, err := r.imageClient(ctx)
+	if err != nil {
+		return err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		response, requestErr := client.ImageStatus(waitCtx, &runtimeapi.ImageStatusRequest{
+			Image: &runtimeapi.ImageSpec{Image: image},
+		})
+		if requestErr == nil && response != nil && response.Image != nil {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			if requestErr != nil {
+				return fmt.Errorf("wait for local rootfs Head image in CRI: %w", requestErr)
+			}
+			return fmt.Errorf("wait for local rootfs Head image in CRI: %w", waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // ensureRootFSHeadSnapshot explicitly commits the marker snapshot with its

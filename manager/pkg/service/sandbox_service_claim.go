@@ -750,13 +750,16 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 	if head == nil {
 		return pod, true, fmt.Errorf("%w: snapshot %s", sandboxstore.ErrRootFSFilesystemNotFound, snapshotID)
 	}
-	pod, err = s.replaceRuntimeWithRootFSHead(ctx, pod, template, req, head)
+	var recreated bool
+	pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, head)
 	if err != nil {
 		return pod, true, err
 	}
-	pod, err = s.waitForColdPodNetworkPolicy(ctx, pod, req.TeamID)
-	if err != nil {
-		return pod, true, fmt.Errorf("prepare rootfs snapshot runtime network policy: %w", err)
+	if recreated {
+		pod, err = s.waitForColdPodNetworkPolicy(ctx, pod, req.TeamID)
+		if err != nil {
+			return pod, true, fmt.Errorf("prepare rootfs snapshot runtime network policy: %w", err)
+		}
 	}
 	pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
 	if err != nil {

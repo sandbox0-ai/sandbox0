@@ -31,12 +31,17 @@ type criRuntimeService interface {
 	PodSandboxStats(ctx context.Context, in *runtimeapi.PodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.PodSandboxStatsResponse, error)
 }
 
+type criImageService interface {
+	ImageStatus(ctx context.Context, in *runtimeapi.ImageStatusRequest, opts ...grpc.CallOption) (*runtimeapi.ImageStatusResponse, error)
+}
+
 type ContainerdRuntimeConfig struct {
 	CRIEndpoint            string
 	ContainerdEndpoint     string
 	Namespace              string
 	DialTimeout            time.Duration
 	CRIClient              criRuntimeService
+	CRIImageClient         criImageService
 	CRIDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
 	ContainerdClient       containerdClient
 	ContainerdDataRoot     string
@@ -44,18 +49,20 @@ type ContainerdRuntimeConfig struct {
 }
 
 type ContainerdRuntime struct {
-	criEndpoint            string
-	containerdEndpoint     string
-	containerdDataRoot     string
-	containerdHostDataRoot string
-	namespace              string
-	dialTimeout            time.Duration
-	criClient              criRuntimeService
-	criDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
-	criMu                  sync.Mutex
-	criConn                *grpc.ClientConn
-	connectedCRIClient     criRuntimeService
-	containerdClient       containerdClient
+	criEndpoint             string
+	containerdEndpoint      string
+	containerdDataRoot      string
+	containerdHostDataRoot  string
+	namespace               string
+	dialTimeout             time.Duration
+	criClient               criRuntimeService
+	criImageClient          criImageService
+	criDialContext          func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
+	criMu                   sync.Mutex
+	criConn                 *grpc.ClientConn
+	connectedCRIClient      criRuntimeService
+	connectedCRIImageClient criImageService
+	containerdClient        containerdClient
 }
 
 type containerdClient interface {
@@ -83,6 +90,10 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 	if timeout <= 0 {
 		timeout = defaultDialTimeout
 	}
+	imageClient := cfg.CRIImageClient
+	if imageClient == nil {
+		imageClient, _ = cfg.CRIClient.(criImageService)
+	}
 	return &ContainerdRuntime{
 		criEndpoint:            criEndpoint,
 		containerdEndpoint:     containerdEndpoint,
@@ -91,6 +102,7 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 		namespace:              namespace,
 		dialTimeout:            timeout,
 		criClient:              cfg.CRIClient,
+		criImageClient:         imageClient,
 		criDialContext:         cfg.CRIDialContext,
 		containerdClient:       cfg.ContainerdClient,
 	}
@@ -200,6 +212,7 @@ func (r *ContainerdRuntime) Close() error {
 	conn := r.criConn
 	r.criConn = nil
 	r.connectedCRIClient = nil
+	r.connectedCRIImageClient = nil
 	r.criMu.Unlock()
 	if conn == nil {
 		return nil
@@ -233,7 +246,29 @@ func (r *ContainerdRuntime) runtimeClient(ctx context.Context) (criRuntimeServic
 	}
 	r.criConn = conn
 	r.connectedCRIClient = runtimeapi.NewRuntimeServiceClient(conn)
+	r.connectedCRIImageClient = runtimeapi.NewImageServiceClient(conn)
 	return r.connectedCRIClient, nil
+}
+
+func (r *ContainerdRuntime) imageClient(ctx context.Context) (criImageService, error) {
+	if r != nil && r.criImageClient != nil {
+		return r.criImageClient, nil
+	}
+	if r == nil {
+		return nil, fmt.Errorf("containerd runtime is nil")
+	}
+	if r.criClient != nil {
+		return nil, fmt.Errorf("cri image service client is not configured")
+	}
+	if _, err := r.runtimeClient(ctx); err != nil {
+		return nil, err
+	}
+	r.criMu.Lock()
+	defer r.criMu.Unlock()
+	if r.connectedCRIImageClient == nil {
+		return nil, fmt.Errorf("cri image service client is not connected")
+	}
+	return r.connectedCRIImageClient, nil
 }
 
 func (r *ContainerdRuntime) client(ctx context.Context) (containerdClient, func(), error) {

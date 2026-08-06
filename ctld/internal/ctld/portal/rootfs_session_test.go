@@ -182,6 +182,53 @@ func TestRootFSBackedSessionRecognizesRestoredHardlinks(t *testing.T) {
 	assert.Equal(t, uint32(2), peer.Attr.Nlink)
 }
 
+func TestRootFSBackedSessionRestoresHardlinkInodeMapping(t *testing.T) {
+	backing := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "portal.jsonl")
+	ctx := context.Background()
+	primary, err := newRootFSBackedSessionWithState(backing, statePath)
+	require.NoError(t, err)
+	source, err := primary.Create(ctx, &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "source.bin",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	_, err = primary.Write(ctx, &pb.WriteRequest{
+		Inode:    source.Inode,
+		HandleId: source.HandleId,
+		Data:     []byte("persisted"),
+	})
+	require.NoError(t, err)
+	_, err = primary.Release(ctx, &pb.ReleaseRequest{Inode: source.Inode, HandleId: source.HandleId})
+	require.NoError(t, err)
+	peer, err := primary.Link(ctx, &pb.LinkRequest{
+		Inode:     source.Inode,
+		NewParent: s0fs.RootInode,
+		NewName:   "peer.bin",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, source.Inode, peer.Inode)
+	primary.Close()
+
+	standby, err := newRootFSBackedSessionWithState(backing, statePath)
+	require.NoError(t, err)
+	defer standby.Close()
+	restoredSource, err := standby.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "source.bin"})
+	require.NoError(t, err)
+	restoredPeer, err := standby.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "peer.bin"})
+	require.NoError(t, err)
+	assert.Equal(t, source.Inode, restoredSource.Inode)
+	assert.Equal(t, source.Inode, restoredPeer.Inode)
+
+	_, err = standby.Unlink(ctx, &pb.UnlinkRequest{Parent: s0fs.RootInode, Name: "source.bin"})
+	require.NoError(t, err)
+	read, err := standby.Read(ctx, &pb.ReadRequest{Inode: restoredPeer.Inode, Size: 64})
+	require.NoError(t, err)
+	assert.Equal(t, "persisted", string(read.Data))
+}
+
 func TestRootFSBackedSessionSetAttrPreservesSymlinkTimes(t *testing.T) {
 	backing := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(backing, "target"), []byte("target"), 0o640))

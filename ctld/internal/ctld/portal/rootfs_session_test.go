@@ -106,6 +106,82 @@ func TestRootFSBackedSessionFsyncDir(t *testing.T) {
 	require.NoError(t, session.FsyncDir(context.Background(), dir.Inode))
 }
 
+func TestRootFSBackedSessionHardlinkSharesInodeAndContent(t *testing.T) {
+	backing := t.TempDir()
+	session, err := newRootFSBackedSessionWithState(backing, "")
+	require.NoError(t, err)
+	defer session.Close()
+	ctx := context.Background()
+
+	source, err := session.Create(ctx, &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "source.bin",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	_, err = session.Write(ctx, &pb.WriteRequest{
+		Inode:    source.Inode,
+		HandleId: source.HandleId,
+		Data:     []byte("before"),
+	})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: source.Inode, HandleId: source.HandleId})
+	require.NoError(t, err)
+
+	peer, err := session.Link(ctx, &pb.LinkRequest{
+		Inode:     source.Inode,
+		NewParent: s0fs.RootInode,
+		NewName:   "peer.bin",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, source.Inode, peer.Inode)
+
+	opened, err := session.Open(ctx, &pb.OpenRequest{Inode: peer.Inode, Flags: uint32(os.O_RDWR)})
+	require.NoError(t, err)
+	_, err = session.Write(ctx, &pb.WriteRequest{
+		Inode:    peer.Inode,
+		HandleId: opened.HandleId,
+		Offset:   int64(len("before")),
+		Data:     []byte("-after"),
+	})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: peer.Inode, HandleId: opened.HandleId})
+	require.NoError(t, err)
+
+	assertFileContentForPortalTest(t, filepath.Join(backing, "source.bin"), "before-after")
+	assertFileContentForPortalTest(t, filepath.Join(backing, "peer.bin"), "before-after")
+	peerAttr, err := session.GetAttr(ctx, &pb.GetAttrRequest{Inode: peer.Inode})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), peerAttr.Nlink)
+
+	_, err = session.Unlink(ctx, &pb.UnlinkRequest{Parent: s0fs.RootInode, Name: "source.bin"})
+	require.NoError(t, err)
+	read, err := session.Read(ctx, &pb.ReadRequest{Inode: peer.Inode, Size: 64})
+	require.NoError(t, err)
+	assert.Equal(t, "before-after", string(read.Data))
+}
+
+func TestRootFSBackedSessionRecognizesRestoredHardlinks(t *testing.T) {
+	backing := t.TempDir()
+	sourcePath := filepath.Join(backing, "source.bin")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("restored"), 0o600))
+	require.NoError(t, os.Link(sourcePath, filepath.Join(backing, "peer.bin")))
+
+	session, err := newRootFSBackedSessionWithState(backing, "")
+	require.NoError(t, err)
+	defer session.Close()
+	ctx := context.Background()
+	source, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "source.bin"})
+	require.NoError(t, err)
+	peer, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "peer.bin"})
+	require.NoError(t, err)
+
+	assert.Equal(t, source.Inode, peer.Inode)
+	assert.Equal(t, uint32(2), source.Attr.Nlink)
+	assert.Equal(t, uint32(2), peer.Attr.Nlink)
+}
+
 func TestRootFSBackedSessionSetAttrPreservesSymlinkTimes(t *testing.T) {
 	backing := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(backing, "target"), []byte("target"), 0o640))

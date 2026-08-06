@@ -30,16 +30,23 @@ const rootFSRecoveryDir = ".sandbox0-ha"
 type rootFSBackedSession struct {
 	root atomic.Value
 
-	mu           sync.Mutex
-	nextInode    uint64
-	inodeByPath  map[string]uint64
-	pathByInode  map[uint64]string
-	nextHandle   uint64
-	handles      map[uint64]*os.File
-	handleInodes map[uint64]uint64
-	state        *rootFSStateJournal
-	stateErr     error
-	closed       bool
+	mu              sync.Mutex
+	nextInode       uint64
+	inodeByPath     map[string]uint64
+	pathByInode     map[uint64]string
+	inodeByIdentity map[rootFSHostIdentity]uint64
+	identityByInode map[uint64]rootFSHostIdentity
+	nextHandle      uint64
+	handles         map[uint64]*os.File
+	handleInodes    map[uint64]uint64
+	state           *rootFSStateJournal
+	stateErr        error
+	closed          bool
+}
+
+type rootFSHostIdentity struct {
+	device uint64
+	inode  uint64
 }
 
 type rootFSStateEvent struct {
@@ -58,12 +65,14 @@ type rootFSStateJournal struct {
 
 func newRootFSBackedSessionWithState(root, statePath string) (*rootFSBackedSession, error) {
 	session := &rootFSBackedSession{
-		nextInode:    s0fs.RootInode + 1,
-		inodeByPath:  map[string]uint64{rootFSBackedSessionRoot: s0fs.RootInode},
-		pathByInode:  map[uint64]string{s0fs.RootInode: rootFSBackedSessionRoot},
-		nextHandle:   1,
-		handles:      make(map[uint64]*os.File),
-		handleInodes: make(map[uint64]uint64),
+		nextInode:       s0fs.RootInode + 1,
+		inodeByPath:     map[string]uint64{rootFSBackedSessionRoot: s0fs.RootInode},
+		pathByInode:     map[uint64]string{s0fs.RootInode: rootFSBackedSessionRoot},
+		inodeByIdentity: make(map[rootFSHostIdentity]uint64),
+		identityByInode: make(map[uint64]rootFSHostIdentity),
+		nextHandle:      1,
+		handles:         make(map[uint64]*os.File),
+		handleInodes:    make(map[uint64]uint64),
 	}
 	session.root.Store(filepath.Clean(root))
 	if strings.TrimSpace(statePath) == "" {
@@ -77,6 +86,7 @@ func newRootFSBackedSessionWithState(root, statePath string) (*rootFSBackedSessi
 	for _, event := range events {
 		session.applyStateEventLocked(event)
 	}
+	session.rebuildIdentityMappingsLocked()
 	return session, nil
 }
 
@@ -160,7 +170,7 @@ func (s *rootFSBackedSession) Lookup(_ context.Context, req *pb.LookupRequest) (
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
+	inode := s.inodeForPath(rel, info)
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
@@ -272,7 +282,7 @@ func (s *rootFSBackedSession) Mkdir(_ context.Context, req *pb.MkdirRequest) (*p
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
+	inode := s.inodeForPath(rel, info)
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
@@ -302,7 +312,7 @@ func (s *rootFSBackedSession) Create(_ context.Context, req *pb.CreateRequest) (
 		_ = handle.Close()
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
+	inode := s.inodeForPath(rel, info)
 	handleID := s.trackHandle(handle, inode)
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info), HandleId: handleID}, nil
 }
@@ -361,6 +371,15 @@ func (s *rootFSBackedSession) Rename(_ context.Context, req *pb.RenameRequest) (
 	if err != nil {
 		return nil, err
 	}
+	oldInfo, err := os.Lstat(s.hostPath(oldRel))
+	if err != nil {
+		return nil, mapRootFSBackedError(err)
+	}
+	if newInfo, statErr := os.Lstat(s.hostPath(newRel)); statErr == nil && os.SameFile(oldInfo, newInfo) {
+		return &pb.Empty{}, nil
+	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return nil, mapRootFSBackedError(statErr)
+	}
 	if err := os.Rename(s.hostPath(oldRel), s.hostPath(newRel)); err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
@@ -388,7 +407,7 @@ func (s *rootFSBackedSession) Link(_ context.Context, req *pb.LinkRequest) (*pb.
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(newRel)
+	inode := s.mapPathToInode(newRel, req.GetInode(), info)
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
@@ -408,7 +427,7 @@ func (s *rootFSBackedSession) Symlink(_ context.Context, req *pb.SymlinkRequest)
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
+	inode := s.inodeForPath(rel, info)
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
@@ -601,7 +620,7 @@ func (s *rootFSBackedSession) ReadDir(_ context.Context, req *pb.ReadDirRequest)
 		if err != nil {
 			return nil, mapRootFSBackedError(err)
 		}
-		inode := s.inodeForPath(child)
+		inode := s.inodeForPath(child, info)
 		attr := attrFromFileInfo(inode, info)
 		out = append(out, &pb.DirEntry{
 			Inode:  inode,
@@ -712,7 +731,7 @@ func (s *rootFSBackedSession) Mknod(_ context.Context, req *pb.MknodRequest) (*p
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}
-	inode := s.inodeForPath(rel)
+	inode := s.inodeForPath(rel, info)
 	return &pb.NodeResponse{Inode: inode, Generation: 1, Attr: attrFromFileInfo(inode, info)}, nil
 }
 
@@ -748,16 +767,26 @@ func (s *rootFSBackedSession) relForInode(inode uint64) (string, error) {
 	return rel, nil
 }
 
-func (s *rootFSBackedSession) inodeForPath(rel string) uint64 {
+func (s *rootFSBackedSession) inodeForPath(rel string, info os.FileInfo) uint64 {
 	rel = cleanRootFSBackedRel(rel)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.inodeForPathLocked(rel)
+	return s.inodeForPathLocked(rel, info)
 }
 
-func (s *rootFSBackedSession) inodeForPathLocked(rel string) uint64 {
+func (s *rootFSBackedSession) inodeForPathLocked(rel string, info os.FileInfo) uint64 {
 	if inode, ok := s.inodeByPath[rel]; ok {
 		return inode
+	}
+	if identity, ok := rootFSIdentityFromFileInfo(info); ok {
+		if inode, exists := s.inodeByIdentity[identity]; exists {
+			s.inodeByPath[rel] = inode
+			if _, hasPrimary := s.pathByInode[inode]; !hasPrimary {
+				s.pathByInode[inode] = rel
+			}
+			s.appendStateEventLocked(rootFSStateEvent{Operation: "map", Path: rel, Inode: inode, NextInode: s.nextInode})
+			return inode
+		}
 	}
 	inode := s.nextInode
 	s.nextInode++
@@ -767,8 +796,58 @@ func (s *rootFSBackedSession) inodeForPathLocked(rel string) uint64 {
 	}
 	s.inodeByPath[rel] = inode
 	s.pathByInode[inode] = rel
+	s.recordIdentityLocked(inode, info)
 	s.appendStateEventLocked(rootFSStateEvent{Operation: "map", Path: rel, Inode: inode, NextInode: s.nextInode})
 	return inode
+}
+
+func (s *rootFSBackedSession) mapPathToInode(rel string, inode uint64, info os.FileInfo) uint64 {
+	rel = cleanRootFSBackedRel(rel)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if inode == 0 {
+		return s.inodeForPathLocked(rel, info)
+	}
+	s.inodeByPath[rel] = inode
+	if _, ok := s.pathByInode[inode]; !ok {
+		s.pathByInode[inode] = rel
+	}
+	s.recordIdentityLocked(inode, info)
+	s.appendStateEventLocked(rootFSStateEvent{Operation: "map", Path: rel, Inode: inode, NextInode: s.nextInode})
+	return inode
+}
+
+func rootFSIdentityFromFileInfo(info os.FileInfo) (rootFSHostIdentity, bool) {
+	if info == nil {
+		return rootFSHostIdentity{}, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Ino == 0 {
+		return rootFSHostIdentity{}, false
+	}
+	return rootFSHostIdentity{device: uint64(stat.Dev), inode: stat.Ino}, true
+}
+
+func (s *rootFSBackedSession) recordIdentityLocked(inode uint64, info os.FileInfo) {
+	identity, ok := rootFSIdentityFromFileInfo(info)
+	if !ok {
+		return
+	}
+	if existing, found := s.inodeByIdentity[identity]; found && existing != inode {
+		return
+	}
+	s.inodeByIdentity[identity] = inode
+	s.identityByInode[inode] = identity
+}
+
+func (s *rootFSBackedSession) rebuildIdentityMappingsLocked() {
+	for rel, inode := range s.inodeByPath {
+		info, err := os.Lstat(s.hostPath(rel))
+		if err != nil {
+			continue
+		}
+		s.recordIdentityLocked(inode, info)
+	}
 }
 
 func (s *rootFSBackedSession) trackHandle(handle *os.File, inode uint64) uint64 {
@@ -914,9 +993,8 @@ func (s *rootFSBackedSession) dropPath(rel string) {
 	rel = cleanRootFSBackedRel(rel)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if inode, ok := s.inodeByPath[rel]; ok {
-		delete(s.inodeByPath, rel)
-		delete(s.pathByInode, inode)
+	if _, ok := s.inodeByPath[rel]; ok {
+		s.removePathMappingLocked(rel)
 		s.appendStateEventLocked(rootFSStateEvent{Operation: "drop", Path: rel})
 	}
 }
@@ -925,11 +1003,14 @@ func (s *rootFSBackedSession) dropPathTree(rel string) {
 	rel = cleanRootFSBackedRel(rel)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for path, inode := range s.inodeByPath {
+	paths := make([]string, 0)
+	for path := range s.inodeByPath {
 		if path == rel || strings.HasPrefix(path, rel+"/") {
-			delete(s.inodeByPath, path)
-			delete(s.pathByInode, inode)
+			paths = append(paths, path)
 		}
+	}
+	for _, path := range paths {
+		s.removePathMappingLocked(path)
 	}
 	s.appendStateEventLocked(rootFSStateEvent{Operation: "drop_tree", Path: rel})
 }
@@ -939,20 +1020,32 @@ func (s *rootFSBackedSession) renamePathTree(oldRel, newRel string) {
 	newRel = cleanRootFSBackedRel(newRel)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	updates := make(map[string]uint64)
-	for path, inode := range s.inodeByPath {
-		if path != oldRel && !strings.HasPrefix(path, oldRel+"/") {
-			continue
-		}
-		nextPath := newRel + strings.TrimPrefix(path, oldRel)
-		updates[nextPath] = inode
-		delete(s.inodeByPath, path)
-	}
-	for path, inode := range updates {
-		s.inodeByPath[path] = inode
-		s.pathByInode[inode] = path
-	}
+	s.applyRenameStateLocked(oldRel, newRel)
 	s.appendStateEventLocked(rootFSStateEvent{Operation: "rename_tree", Path: oldRel, NewPath: newRel})
+}
+
+func (s *rootFSBackedSession) removePathMappingLocked(rel string) {
+	inode, ok := s.inodeByPath[rel]
+	if !ok {
+		return
+	}
+	delete(s.inodeByPath, rel)
+	if s.pathByInode[inode] != rel {
+		return
+	}
+	for candidate, candidateInode := range s.inodeByPath {
+		if candidateInode == inode {
+			s.pathByInode[inode] = candidate
+			return
+		}
+	}
+	delete(s.pathByInode, inode)
+	if identity, exists := s.identityByInode[inode]; exists {
+		delete(s.identityByInode, inode)
+		if s.inodeByIdentity[identity] == inode {
+			delete(s.inodeByIdentity, identity)
+		}
+	}
 }
 
 func openRootFSStateJournal(path string) (*rootFSStateJournal, []rootFSStateEvent, error) {
@@ -1024,23 +1117,25 @@ func (s *rootFSBackedSession) applyStateEventLocked(event rootFSStateEvent) {
 	case "map":
 		rel := cleanRootFSBackedRel(event.Path)
 		s.inodeByPath[rel] = event.Inode
-		s.pathByInode[event.Inode] = rel
+		if _, ok := s.pathByInode[event.Inode]; !ok {
+			s.pathByInode[event.Inode] = rel
+		}
 		if event.NextInode > s.nextInode {
 			s.nextInode = event.NextInode
 		}
 	case "drop":
 		rel := cleanRootFSBackedRel(event.Path)
-		if inode, ok := s.inodeByPath[rel]; ok {
-			delete(s.inodeByPath, rel)
-			delete(s.pathByInode, inode)
-		}
+		s.removePathMappingLocked(rel)
 	case "drop_tree":
 		rel := cleanRootFSBackedRel(event.Path)
-		for path, inode := range s.inodeByPath {
+		paths := make([]string, 0)
+		for path := range s.inodeByPath {
 			if path == rel || strings.HasPrefix(path, rel+"/") {
-				delete(s.inodeByPath, path)
-				delete(s.pathByInode, inode)
+				paths = append(paths, path)
 			}
+		}
+		for _, path := range paths {
+			s.removePathMappingLocked(path)
 		}
 	case "rename_tree":
 		s.applyRenameStateLocked(event.Path, event.NewPath)
@@ -1068,17 +1163,35 @@ func (s *rootFSBackedSession) applyRenameStateLocked(oldRel, newRel string) {
 	oldRel = cleanRootFSBackedRel(oldRel)
 	newRel = cleanRootFSBackedRel(newRel)
 	updates := make(map[string]uint64)
+	replaced := make([]string, 0)
+	for path, inode := range s.inodeByPath {
+		if path == oldRel || strings.HasPrefix(path, oldRel+"/") {
+			nextPath := newRel + strings.TrimPrefix(path, oldRel)
+			updates[nextPath] = inode
+			continue
+		}
+		if path == newRel || strings.HasPrefix(path, newRel+"/") {
+			replaced = append(replaced, path)
+		}
+	}
+	for _, path := range replaced {
+		s.removePathMappingLocked(path)
+	}
 	for path, inode := range s.inodeByPath {
 		if path != oldRel && !strings.HasPrefix(path, oldRel+"/") {
 			continue
 		}
 		nextPath := newRel + strings.TrimPrefix(path, oldRel)
-		updates[nextPath] = inode
 		delete(s.inodeByPath, path)
+		if s.pathByInode[inode] == path {
+			s.pathByInode[inode] = nextPath
+		}
 	}
 	for path, inode := range updates {
 		s.inodeByPath[path] = inode
-		s.pathByInode[inode] = path
+		if _, ok := s.pathByInode[inode]; !ok {
+			s.pathByInode[inode] = path
+		}
 	}
 }
 

@@ -301,6 +301,48 @@ func TestHandleReadyIgnoresStaleReadiness(t *testing.T) {
 	}
 }
 
+func TestReadRequestIntoUsesCallerBuffer(t *testing.T) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("Socketpair() error = %v", err)
+	}
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+
+	want := testGetattrRequest(42)
+	if _, err := unix.Write(fds[1], want); err != nil {
+		t.Fatalf("Write(request) error = %v", err)
+	}
+	buffer := make([]byte, requestBufferSize(1<<20))
+	got, err := readRequestInto(fds[0], buffer)
+	if err != nil {
+		t.Fatalf("readRequestInto() error = %v", err)
+	}
+	if len(got) != len(want) || string(got) != string(want) {
+		t.Fatalf("readRequestInto() = %x, want %x", got, want)
+	}
+	if &got[0] != &buffer[0] {
+		t.Fatal("readRequestInto() copied instead of reusing the caller buffer")
+	}
+}
+
+func TestSharedRequestBufferPoolUsesSizeBuckets(t *testing.T) {
+	smallA := sharedRequestBufferPool(256 * 1024)
+	smallB := sharedRequestBufferPool(256 * 1024)
+	large := sharedRequestBufferPool(1 << 20)
+	if smallA != smallB {
+		t.Fatal("equal request buffer sizes do not share a pool")
+	}
+	if smallA == large {
+		t.Fatal("different request buffer sizes unexpectedly share a pool")
+	}
+	buffer := large.Get().(*[]byte)
+	defer large.Put(buffer)
+	if got := len(*buffer); got != requestBufferSize(1<<20) {
+		t.Fatalf("large request buffer size = %d, want %d", got, requestBufferSize(1<<20))
+	}
+}
+
 func TestSharedEpollStaleReadinessDoesNotBlockAnotherPortal(t *testing.T) {
 	mux, err := newEpollMultiplexer(multiplexerConfig{
 		watchdogInterval: 10 * time.Millisecond,

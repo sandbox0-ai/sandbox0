@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -66,6 +68,283 @@ func TestRootFSBackedSessionWritesThroughBackingDir(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list.Entries, 1)
 	assert.Equal(t, "state.txt", list.Entries[0].Name)
+}
+
+func TestRootFSBackedSessionFlushDoesNotImplyFsync(t *testing.T) {
+	session, err := newRootFSBackedSessionWithState(t.TempDir(), "")
+	require.NoError(t, err)
+	defer session.Close()
+
+	created, err := session.Create(context.Background(), &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "flush.txt",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	handle := session.lookupHandle(created.HandleId)
+	require.NotNil(t, handle)
+	require.NoError(t, handle.Close())
+
+	_, err = session.Flush(context.Background(), &pb.FlushRequest{HandleId: created.HandleId})
+	require.NoError(t, err)
+	_, err = session.Fsync(context.Background(), &pb.FsyncRequest{HandleId: created.HandleId})
+	require.Error(t, err)
+}
+
+func TestRootFSBackedSessionFsyncDir(t *testing.T) {
+	session, err := newRootFSBackedSessionWithState(t.TempDir(), "")
+	require.NoError(t, err)
+	defer session.Close()
+
+	dir, err := session.Mkdir(context.Background(), &pb.MkdirRequest{
+		Parent: s0fs.RootInode,
+		Name:   "durable",
+		Mode:   0o755,
+	})
+	require.NoError(t, err)
+	require.NoError(t, session.FsyncDir(context.Background(), dir.Inode))
+}
+
+func TestRootFSBackedSessionHardlinkSharesInodeAndContent(t *testing.T) {
+	backing := t.TempDir()
+	session, err := newRootFSBackedSessionWithState(backing, "")
+	require.NoError(t, err)
+	defer session.Close()
+	ctx := context.Background()
+
+	source, err := session.Create(ctx, &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "source.bin",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	_, err = session.Write(ctx, &pb.WriteRequest{
+		Inode:    source.Inode,
+		HandleId: source.HandleId,
+		Data:     []byte("before"),
+	})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: source.Inode, HandleId: source.HandleId})
+	require.NoError(t, err)
+
+	peer, err := session.Link(ctx, &pb.LinkRequest{
+		Inode:     source.Inode,
+		NewParent: s0fs.RootInode,
+		NewName:   "peer.bin",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, source.Inode, peer.Inode)
+
+	opened, err := session.Open(ctx, &pb.OpenRequest{Inode: peer.Inode, Flags: uint32(os.O_RDWR)})
+	require.NoError(t, err)
+	_, err = session.Write(ctx, &pb.WriteRequest{
+		Inode:    peer.Inode,
+		HandleId: opened.HandleId,
+		Offset:   int64(len("before")),
+		Data:     []byte("-after"),
+	})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: peer.Inode, HandleId: opened.HandleId})
+	require.NoError(t, err)
+
+	assertFileContentForPortalTest(t, filepath.Join(backing, "source.bin"), "before-after")
+	assertFileContentForPortalTest(t, filepath.Join(backing, "peer.bin"), "before-after")
+	peerAttr, err := session.GetAttr(ctx, &pb.GetAttrRequest{Inode: peer.Inode})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), peerAttr.Nlink)
+
+	_, err = session.Unlink(ctx, &pb.UnlinkRequest{Parent: s0fs.RootInode, Name: "source.bin"})
+	require.NoError(t, err)
+	read, err := session.Read(ctx, &pb.ReadRequest{Inode: peer.Inode, Size: 64})
+	require.NoError(t, err)
+	assert.Equal(t, "before-after", string(read.Data))
+}
+
+func TestRootFSBackedSessionRecognizesRestoredHardlinks(t *testing.T) {
+	backing := t.TempDir()
+	sourcePath := filepath.Join(backing, "source.bin")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("restored"), 0o600))
+	require.NoError(t, os.Link(sourcePath, filepath.Join(backing, "peer.bin")))
+
+	session, err := newRootFSBackedSessionWithState(backing, "")
+	require.NoError(t, err)
+	defer session.Close()
+	ctx := context.Background()
+	source, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "source.bin"})
+	require.NoError(t, err)
+	peer, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "peer.bin"})
+	require.NoError(t, err)
+
+	assert.Equal(t, source.Inode, peer.Inode)
+	assert.Equal(t, uint32(2), source.Attr.Nlink)
+	assert.Equal(t, uint32(2), peer.Attr.Nlink)
+}
+
+func TestRootFSBackedSessionRestoresHardlinkInodeMapping(t *testing.T) {
+	backing := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "portal.jsonl")
+	ctx := context.Background()
+	primary, err := newRootFSBackedSessionWithState(backing, statePath)
+	require.NoError(t, err)
+	source, err := primary.Create(ctx, &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "source.bin",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	_, err = primary.Write(ctx, &pb.WriteRequest{
+		Inode:    source.Inode,
+		HandleId: source.HandleId,
+		Data:     []byte("persisted"),
+	})
+	require.NoError(t, err)
+	_, err = primary.Release(ctx, &pb.ReleaseRequest{Inode: source.Inode, HandleId: source.HandleId})
+	require.NoError(t, err)
+	peer, err := primary.Link(ctx, &pb.LinkRequest{
+		Inode:     source.Inode,
+		NewParent: s0fs.RootInode,
+		NewName:   "peer.bin",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, source.Inode, peer.Inode)
+	primary.Close()
+
+	standby, err := newRootFSBackedSessionWithState(backing, statePath)
+	require.NoError(t, err)
+	defer standby.Close()
+	restoredSource, err := standby.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "source.bin"})
+	require.NoError(t, err)
+	restoredPeer, err := standby.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "peer.bin"})
+	require.NoError(t, err)
+	assert.Equal(t, source.Inode, restoredSource.Inode)
+	assert.Equal(t, source.Inode, restoredPeer.Inode)
+
+	_, err = standby.Unlink(ctx, &pb.UnlinkRequest{Parent: s0fs.RootInode, Name: "source.bin"})
+	require.NoError(t, err)
+	read, err := standby.Read(ctx, &pb.ReadRequest{Inode: restoredPeer.Inode, Size: 64})
+	require.NoError(t, err)
+	assert.Equal(t, "persisted", string(read.Data))
+}
+
+func TestRootFSBackedSessionSetAttrPreservesSymlinkTimes(t *testing.T) {
+	backing := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(backing, "target"), []byte("target"), 0o640))
+	session, err := newRootFSBackedSessionWithState(backing, "")
+	require.NoError(t, err)
+	defer session.Close()
+
+	link, err := session.Symlink(context.Background(), &pb.SymlinkRequest{
+		Parent: s0fs.RootInode,
+		Name:   "link",
+		Target: "target",
+	})
+	require.NoError(t, err)
+	targetBefore, err := os.Stat(filepath.Join(backing, "target"))
+	require.NoError(t, err)
+
+	const seconds = int64(1_700_000_000)
+	const nanoseconds = int64(123_456_789)
+	_, err = session.SetAttr(context.Background(), &pb.SetAttrRequest{
+		Inode: link.Inode,
+		Valid: fuse.FATTR_ATIME | fuse.FATTR_MTIME,
+		Attr: &pb.GetAttrResponse{
+			AtimeSec:  seconds,
+			AtimeNsec: nanoseconds,
+			MtimeSec:  seconds,
+			MtimeNsec: nanoseconds,
+		},
+	})
+	require.NoError(t, err)
+
+	linkAfter, err := os.Lstat(filepath.Join(backing, "link"))
+	require.NoError(t, err)
+	assert.Equal(t, time.Unix(seconds, nanoseconds), linkAfter.ModTime())
+	targetAfter, err := os.Stat(filepath.Join(backing, "target"))
+	require.NoError(t, err)
+	assert.Equal(t, targetBefore.ModTime(), targetAfter.ModTime())
+
+	_, err = session.SetAttr(context.Background(), &pb.SetAttrRequest{
+		Inode: link.Inode,
+		Valid: fuse.FATTR_SIZE,
+		Attr:  &pb.GetAttrResponse{},
+	})
+	require.ErrorIs(t, err, syscall.EINVAL)
+	_, err = session.SetAttr(context.Background(), &pb.SetAttrRequest{
+		Inode: link.Inode,
+		Valid: fuse.FATTR_MODE,
+		Attr:  &pb.GetAttrResponse{Mode: 0o600},
+	})
+	require.ErrorIs(t, err, syscall.EOPNOTSUPP)
+	assertFileContentForPortalTest(t, filepath.Join(backing, "target"), "target")
+	targetAfter, err = os.Stat(filepath.Join(backing, "target"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o640), targetAfter.Mode().Perm())
+}
+
+func TestRootFSBackedSessionRebaseExposesRestoredFilesAndRedirectsWrites(t *testing.T) {
+	staging := t.TempDir()
+	upper := t.TempDir()
+	backing := filepath.Join(upper, "workspace")
+	require.NoError(t, os.Mkdir(backing, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(backing, "restored.txt"), []byte("restored"), 0o640))
+
+	session, err := newRootFSBackedSessionWithState(staging, "")
+	require.NoError(t, err)
+	defer session.Close()
+	require.NoError(t, session.RebaseRoot(backing))
+
+	ctx := context.Background()
+	restored, err := session.Lookup(ctx, &pb.LookupRequest{Parent: s0fs.RootInode, Name: "restored.txt"})
+	require.NoError(t, err)
+	read, err := session.Read(ctx, &pb.ReadRequest{Inode: restored.Inode, Size: 64})
+	require.NoError(t, err)
+	assert.Equal(t, "restored", string(read.Data))
+
+	created, err := session.Create(ctx, &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "new.txt",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	_, err = session.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Data: []byte("new")})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId})
+	require.NoError(t, err)
+	assertFileContentForPortalTest(t, filepath.Join(backing, "new.txt"), "new")
+	_, err = os.Stat(filepath.Join(staging, "new.txt"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestRootFSBackedSessionRebaseRejectsOpenHandles(t *testing.T) {
+	staging := t.TempDir()
+	backing := t.TempDir()
+	session, err := newRootFSBackedSessionWithState(staging, "")
+	require.NoError(t, err)
+	defer session.Close()
+
+	ctx := context.Background()
+	created, err := session.Create(ctx, &pb.CreateRequest{
+		Parent: s0fs.RootInode,
+		Name:   "active.txt",
+		Mode:   0o600,
+		Flags:  uint32(os.O_RDWR),
+	})
+	require.NoError(t, err)
+	err = session.RebaseRoot(backing)
+	require.Error(t, err)
+	assert.Equal(t, fserror.FailedPrecondition, fserror.CodeOf(err))
+
+	_, err = session.Write(ctx, &pb.WriteRequest{Inode: created.Inode, HandleId: created.HandleId, Data: []byte("staging")})
+	require.NoError(t, err)
+	_, err = session.Release(ctx, &pb.ReleaseRequest{Inode: created.Inode, HandleId: created.HandleId})
+	require.NoError(t, err)
+	assertFileContentForPortalTest(t, filepath.Join(staging, "active.txt"), "staging")
+	_, err = os.Stat(filepath.Join(backing, "active.txt"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestRootFSBackedSessionPreservesRemoveErrnos(t *testing.T) {

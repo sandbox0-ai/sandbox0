@@ -185,6 +185,17 @@ func (s *rootFSBackedSession) SetAttr(_ context.Context, req *pb.SetAttrRequest)
 	hostPath := s.hostPath(rel)
 	attr := req.GetAttr()
 	valid := req.GetValid()
+	info, err := os.Lstat(hostPath)
+	if err != nil {
+		return nil, mapRootFSBackedError(err)
+	}
+	isSymlink := info.Mode()&os.ModeSymlink != 0
+	if isSymlink && valid&fuse.FATTR_MODE != 0 {
+		return nil, syscall.EOPNOTSUPP
+	}
+	if isSymlink && valid&fuse.FATTR_SIZE != 0 {
+		return nil, syscall.EINVAL
+	}
 	if valid&fuse.FATTR_MODE != 0 {
 		if err := os.Chmod(hostPath, os.FileMode(attr.GetMode()&0o7777)); err != nil {
 			return nil, mapRootFSBackedError(err)
@@ -209,20 +220,29 @@ func (s *rootFSBackedSession) SetAttr(_ context.Context, req *pb.SetAttrRequest)
 		}
 	}
 	if valid&(fuse.FATTR_ATIME|fuse.FATTR_MTIME|fuse.FATTR_ATIME_NOW|fuse.FATTR_MTIME_NOW) != 0 {
-		now := time.Now()
-		atime := now
-		mtime := now
+		times := []unix.Timespec{
+			{Nsec: unix.UTIME_OMIT},
+			{Nsec: unix.UTIME_OMIT},
+		}
 		if valid&fuse.FATTR_ATIME != 0 {
-			atime = time.Unix(attr.GetAtimeSec(), attr.GetAtimeNsec())
+			times[0] = unix.Timespec{Sec: attr.GetAtimeSec(), Nsec: attr.GetAtimeNsec()}
+		} else if valid&fuse.FATTR_ATIME_NOW != 0 {
+			times[0].Nsec = unix.UTIME_NOW
 		}
 		if valid&fuse.FATTR_MTIME != 0 {
-			mtime = time.Unix(attr.GetMtimeSec(), attr.GetMtimeNsec())
+			times[1] = unix.Timespec{Sec: attr.GetMtimeSec(), Nsec: attr.GetMtimeNsec()}
+		} else if valid&fuse.FATTR_MTIME_NOW != 0 {
+			times[1].Nsec = unix.UTIME_NOW
 		}
-		if err := os.Chtimes(hostPath, atime, mtime); err != nil {
+		flags := 0
+		if isSymlink {
+			flags = unix.AT_SYMLINK_NOFOLLOW
+		}
+		if err := unix.UtimesNanoAt(unix.AT_FDCWD, hostPath, times, flags); err != nil {
 			return nil, mapRootFSBackedError(err)
 		}
 	}
-	info, err := os.Lstat(hostPath)
+	info, err = os.Lstat(hostPath)
 	if err != nil {
 		return nil, mapRootFSBackedError(err)
 	}

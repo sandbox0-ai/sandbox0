@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
@@ -102,6 +104,61 @@ func TestRootFSBackedSessionFsyncDir(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, session.FsyncDir(context.Background(), dir.Inode))
+}
+
+func TestRootFSBackedSessionSetAttrPreservesSymlinkTimes(t *testing.T) {
+	backing := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(backing, "target"), []byte("target"), 0o640))
+	session, err := newRootFSBackedSessionWithState(backing, "")
+	require.NoError(t, err)
+	defer session.Close()
+
+	link, err := session.Symlink(context.Background(), &pb.SymlinkRequest{
+		Parent: s0fs.RootInode,
+		Name:   "link",
+		Target: "target",
+	})
+	require.NoError(t, err)
+	targetBefore, err := os.Stat(filepath.Join(backing, "target"))
+	require.NoError(t, err)
+
+	const seconds = int64(1_700_000_000)
+	const nanoseconds = int64(123_456_789)
+	_, err = session.SetAttr(context.Background(), &pb.SetAttrRequest{
+		Inode: link.Inode,
+		Valid: fuse.FATTR_ATIME | fuse.FATTR_MTIME,
+		Attr: &pb.GetAttrResponse{
+			AtimeSec:  seconds,
+			AtimeNsec: nanoseconds,
+			MtimeSec:  seconds,
+			MtimeNsec: nanoseconds,
+		},
+	})
+	require.NoError(t, err)
+
+	linkAfter, err := os.Lstat(filepath.Join(backing, "link"))
+	require.NoError(t, err)
+	assert.Equal(t, time.Unix(seconds, nanoseconds), linkAfter.ModTime())
+	targetAfter, err := os.Stat(filepath.Join(backing, "target"))
+	require.NoError(t, err)
+	assert.Equal(t, targetBefore.ModTime(), targetAfter.ModTime())
+
+	_, err = session.SetAttr(context.Background(), &pb.SetAttrRequest{
+		Inode: link.Inode,
+		Valid: fuse.FATTR_SIZE,
+		Attr:  &pb.GetAttrResponse{},
+	})
+	require.ErrorIs(t, err, syscall.EINVAL)
+	_, err = session.SetAttr(context.Background(), &pb.SetAttrRequest{
+		Inode: link.Inode,
+		Valid: fuse.FATTR_MODE,
+		Attr:  &pb.GetAttrResponse{Mode: 0o600},
+	})
+	require.ErrorIs(t, err, syscall.EOPNOTSUPP)
+	assertFileContentForPortalTest(t, filepath.Join(backing, "target"), "target")
+	targetAfter, err = os.Stat(filepath.Join(backing, "target"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o640), targetAfter.Mode().Perm())
 }
 
 func TestRootFSBackedSessionRebaseExposesRestoredFilesAndRedirectsWrites(t *testing.T) {

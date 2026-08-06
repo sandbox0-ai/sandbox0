@@ -170,8 +170,20 @@ func TestRecoverTerminatedSandboxRuntimeWaitsForConflictingLifecycle(t *testing.
 }
 
 func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
-	var sealed ctldapi.SealRootFSHeadRequest
-	ctld := newRootFSHeadCTLDServer(t, func(req ctldapi.SealRootFSHeadRequest) { sealed = req })
+	var preparedTarget ctldapi.RootFSContainerRef
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/rootfs/snapshots/prepare":
+			var req ctldapi.PrepareRootFSSnapshotRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			preparedTarget = req.Target
+			require.NoError(t, json.NewEncoder(w).Encode(crashRecoveryPrepareResponse()))
+		case "/api/v1/rootfs/snapshots/publish":
+			require.NoError(t, json.NewEncoder(w).Encode(crashRecoveryPublishResponse()))
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
+	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
@@ -184,7 +196,7 @@ func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
 		record, err := store.GetSandbox(context.Background(), "sandbox-1")
 		require.NoError(t, err)
 		require.Equal(t, sandboxstore.SandboxDesiredStatePaused, record.DesiredState, "runtime must be fenced before pod deletion")
-		require.NotNil(t, store.rootFSHeads["sandbox-1"], "rootfs Head must commit before pod deletion")
+		require.NotNil(t, store.rootFSStates["sandbox-1"], "rootfs head must commit before pod deletion")
 		deleted = true
 		return true, nil, nil
 	})
@@ -203,19 +215,20 @@ func TestCompleteCrashRecoveryCommitsRootFSBeforeDeletingPod(t *testing.T) {
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
 	assert.True(t, deleted)
-	assert.Equal(t, "sandbox-1", sealed.SandboxID)
-	assert.Equal(t, "team-1", sealed.TeamID)
+	assert.Equal(t, "containerd://terminated-container", preparedTarget.ContainerID)
+	assert.Equal(t, string(pod.UID), preparedTarget.PodUID)
 	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
-	head := store.rootFSHeads["sandbox-1"]
-	require.NotNil(t, head)
-	assert.NotEmpty(t, head.Reference.HeadID)
+	state := store.rootFSStates["sandbox-1"]
+	require.NotNil(t, state)
+	assert.Equal(t, "sha256:recovered", state.DiffDigest)
+	assert.NotEmpty(t, state.LayerID)
 }
 
 func TestCompleteCrashRecoveryRetainsPodAndTransactionOnTransientCheckpointFailure(t *testing.T) {
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(ctldapi.SealRootFSHeadResponse{Error: "object store temporarily unavailable"})
+		_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: "object store temporarily unavailable"})
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -249,7 +262,7 @@ func TestCompleteCrashRecoveryRetainsPodAndTransactionOnTransientCheckpointFailu
 func TestCompleteHealthRecoveryFallsBackAndFencesBeforeDeletingPod(t *testing.T) {
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(ctldapi.SealRootFSHeadResponse{Error: "runtime is unresponsive"})
+		_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: "runtime is unresponsive"})
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -258,8 +271,13 @@ func TestCompleteHealthRecoveryFallsBackAndFencesBeforeDeletingPod(t *testing.T)
 	pod := unhealthyRecoveryTestPod(now.Add(-2 * time.Minute))
 	pod.Status.HostIP = ctldURL.Hostname()
 	store := crashRecoveryTestStore(pod)
-	store.rootFSHeads = map[string]*sandboxstore.SandboxRootFSHead{
-		"sandbox-1": rootFSHeadTestFixture(t, "sandbox-1", "team-1", "previous-head", 2),
+	store.rootFSStates = map[string]*sandboxstore.SandboxRootFSState{
+		"sandbox-1": {
+			SandboxID:         "sandbox-1",
+			TeamID:            "team-1",
+			LayerID:           "previous-head",
+			RuntimeGeneration: 2,
+		},
 	}
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	deleted := false
@@ -286,14 +304,14 @@ func TestCompleteHealthRecoveryFallsBackAndFencesBeforeDeletingPod(t *testing.T)
 
 	assert.True(t, deleted)
 	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
-	assert.Equal(t, "previous-head", store.rootFSHeads["sandbox-1"].Reference.HeadID)
+	assert.Equal(t, "previous-head", store.rootFSStates["sandbox-1"].LayerID)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 }
 
 func TestCompleteCrashRecoveryFallsBackToLastCommittedHeadWhenSnapshotWasRemoved(t *testing.T) {
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(ctldapi.SealRootFSHeadResponse{Error: "container snapshot not found"})
+		_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: "container snapshot not found"})
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
@@ -302,8 +320,13 @@ func TestCompleteCrashRecoveryFallsBackToLastCommittedHeadWhenSnapshotWasRemoved
 	pod.Status.ContainerStatuses = nil
 	pod.Status.HostIP = ctldURL.Hostname()
 	store := crashRecoveryTestStore(pod)
-	store.rootFSHeads = map[string]*sandboxstore.SandboxRootFSHead{
-		"sandbox-1": rootFSHeadTestFixture(t, "sandbox-1", "team-1", "previous-head", 2),
+	store.rootFSStates = map[string]*sandboxstore.SandboxRootFSState{
+		"sandbox-1": {
+			SandboxID:         "sandbox-1",
+			TeamID:            "team-1",
+			LayerID:           "previous-head",
+			RuntimeGeneration: 2,
+		},
 	}
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	deleted := false
@@ -327,7 +350,7 @@ func TestCompleteCrashRecoveryFallsBackToLastCommittedHeadWhenSnapshotWasRemoved
 
 	assert.True(t, deleted)
 	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
-	assert.Equal(t, "previous-head", store.rootFSHeads["sandbox-1"].Reference.HeadID)
+	assert.Equal(t, "previous-head", store.rootFSStates["sandbox-1"].LayerID)
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 }
 
@@ -345,15 +368,16 @@ func TestCrashRecoveryCommitDoesNotResurrectDeletedSandbox(t *testing.T) {
 	require.NotNil(t, txn)
 	require.NoError(t, store.MarkSandboxDeleted(context.Background(), "sandbox-1", time.Now().UTC()))
 
-	committed, err := svc.commitPausingRuntimePaused(context.Background(), "sandbox-1", txn, 3, &sandboxstore.SandboxRootFSHead{
+	committed, err := svc.commitPausingRuntimePaused(context.Background(), "sandbox-1", txn, 3, &sandboxstore.SandboxRootFSState{
 		SandboxID: "sandbox-1",
 		TeamID:    "team-1",
+		LayerID:   "uncommitted-crash-head",
 	})
 
 	require.NoError(t, err)
 	assert.False(t, committed)
 	assert.Equal(t, sandboxstore.SandboxDesiredStateDeleted, store.records["sandbox-1"].DesiredState)
-	assert.Nil(t, store.rootFSHeads["sandbox-1"])
+	assert.Nil(t, store.rootFSStates["sandbox-1"])
 }
 
 func TestCompleteCrashRecoveryAbortsWhenRuntimeDeletionAlreadyStarted(t *testing.T) {
@@ -749,6 +773,33 @@ func crashRecoveryTestStore(pod *corev1.Pod) *memorySandboxStore {
 			RuntimeGeneration:   runtimeGenerationFromPod(pod),
 		},
 	}}
+}
+
+func crashRecoveryPrepareResponse() ctldapi.PrepareRootFSSnapshotResponse {
+	return ctldapi.PrepareRootFSSnapshotResponse{
+		Handle: "crash-handle",
+		Info: ctldapi.RootFSInfo{
+			Runtime:         "runc",
+			RuntimeHandler:  "io.containerd.runc.v2",
+			Snapshotter:     "overlayfs",
+			BaseImageDigest: "sha256:base",
+		},
+		Descriptor: ctldapi.RootFSDiffDescriptor{
+			MediaType: "application/vnd.oci.image.layer.v1.tar",
+			Digest:    "sha256:recovered",
+			Size:      42,
+		},
+	}
+}
+
+func crashRecoveryPublishResponse() ctldapi.PublishRootFSSnapshotResponse {
+	prepared := crashRecoveryPrepareResponse()
+	prepared.Descriptor.ObjectKey = "sandbox-rootfs/team-1/sandbox-1/3/sha256/recovered.tar"
+	return ctldapi.PublishRootFSSnapshotResponse{
+		Published:  true,
+		Info:       prepared.Info,
+		Descriptor: prepared.Descriptor,
+	}
 }
 
 func activeLifecycleTxnForTest(store *memorySandboxStore, sandboxID string) *sandboxstore.SandboxLifecycleTxn {

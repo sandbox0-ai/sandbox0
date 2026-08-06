@@ -164,7 +164,7 @@ func TestBuildConfigPropagatesNetworkMITMCASecretName(t *testing.T) {
 	})
 }
 
-func TestBuildConfigUsesRootFSRuntimeClassName(t *testing.T) {
+func TestBuildConfigPreservesSandboxRuntimeClassName(t *testing.T) {
 	reconciler := newManagerTestReconciler(t)
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{
@@ -196,8 +196,8 @@ func TestBuildConfigUsesRootFSRuntimeClassName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildConfig returned error: %v", err)
 	}
-	if cfg.SandboxRuntimeClassName != "gvisor-rootfs" {
-		t.Fatalf("sandbox runtime class = %q, want gvisor-rootfs", cfg.SandboxRuntimeClassName)
+	if cfg.SandboxRuntimeClassName != "kata-shared" {
+		t.Fatalf("sandbox runtime class = %q, want kata-shared", cfg.SandboxRuntimeClassName)
 	}
 }
 

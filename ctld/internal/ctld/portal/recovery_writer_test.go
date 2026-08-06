@@ -59,14 +59,10 @@ func TestPortalRecoveryWriterOrdersDeleteAfterPendingPut(t *testing.T) {
 func TestPortalRecoveryWriterRetriesFailedGroupCommit(t *testing.T) {
 	store := &flakyRecoveryPersistence{
 		base:       newPortalRecoveryStore(t.TempDir()),
-		failSync:   true,
+		failures:   1,
 		failedOnce: make(chan struct{}),
 	}
 	writer := newPortalRecoveryWriter(store, nil, nil)
-	t.Cleanup(func() {
-		store.allowSync()
-		_ = writer.Close(context.Background())
-	})
 	manifest := recoveryWriterTestManifest("pod-a\x00workspace")
 	if err := writer.EnqueuePut(manifest); err != nil {
 		t.Fatal(err)
@@ -76,14 +72,9 @@ func TestPortalRecoveryWriterRetriesFailedGroupCommit(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("group commit failure was not observed")
 	}
-	deadline := time.Now().Add(time.Second)
-	for writer.Error() == nil && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
 	if writer.Error() == nil {
 		t.Fatal("writer did not expose unresolved local commit failure")
 	}
-	store.allowSync()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := writer.Flush(ctx); err != nil {
@@ -182,7 +173,7 @@ func (readinessPortalReplicator) Remove(context.Context, string) error { return 
 type flakyRecoveryPersistence struct {
 	base       *portalRecoveryStore
 	mu         sync.Mutex
-	failSync   bool
+	failures   int
 	failedOnce chan struct{}
 	once       sync.Once
 }
@@ -214,17 +205,12 @@ func (s *flakyRecoveryPersistence) delete(key string) error {
 func (s *flakyRecoveryPersistence) syncDirectory() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.failSync {
+	if s.failures > 0 {
+		s.failures--
 		s.once.Do(func() { close(s.failedOnce) })
 		return errors.New("injected directory sync failure")
 	}
 	return s.base.syncDirectory()
-}
-
-func (s *flakyRecoveryPersistence) allowSync() {
-	s.mu.Lock()
-	s.failSync = false
-	s.mu.Unlock()
 }
 
 func recoveryWriterTestManifest(key string) RecoveryManifest {

@@ -9,7 +9,6 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -81,62 +80,6 @@ func TestReconcileSandboxRuntimeRepairsSameGenerationProjectionFromKubernetes(t 
 	assert.Equal(t, "pod-new", record.CurrentPodName)
 	assert.Equal(t, "default", record.CurrentPodNamespace)
 	assert.Equal(t, int64(3), record.RuntimeGeneration)
-	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
-}
-
-func TestReconcileSandboxRuntimeStartsRecoveryAfterRootFSSnapshotterRestart(t *testing.T) {
-	pod := runtimeRecoveryPod("pod-1", "sandbox-1", 3)
-	pod.Spec.NodeName = "node-1"
-	pod.Annotations[controller.AnnotationRootFSSnapshotterInstance] = "snapshotter-old"
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
-		Name: "node-1",
-		Annotations: map[string]string{
-			dataplane.NodeRootFSSnapshotterInstanceAnnotation: "snapshotter-new",
-		},
-	}}
-	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
-	store.rootFSHeads = map[string]*sandboxstore.SandboxRootFSHead{
-		"sandbox-1": rootFSHeadTestFixture(t, "sandbox-1", "team-1", "head-v1", 2),
-	}
-	enqueuer := &recordingPauseEnqueuer{}
-	svc := &SandboxService{
-		k8sClient:     fake.NewSimpleClientset(pod),
-		nodeLister:    newClaimTestNodeLister(t, node),
-		sandboxStore:  store,
-		pauseEnqueuer: enqueuer,
-		config:        SandboxServiceConfig{ClusterID: "cluster-a"},
-		logger:        zap.NewNop(),
-	}
-
-	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
-	txn := activeLifecycleTxnForTest(store, "sandbox-1")
-	require.NotNil(t, txn)
-	assert.Equal(t, sandboxstore.SandboxLifecycleSourceRootFS, txn.Source)
-	assert.Equal(t, "head-v1", txn.ExpectedHeadID)
-	assert.Equal(t, int64(3), txn.FromGeneration)
-	assert.Equal(t, []string{"sandbox-1"}, enqueuer.recoveryCalls)
-}
-
-func TestReconcileSandboxRuntimeKeepsRootFSRuntimeOnCurrentSnapshotter(t *testing.T) {
-	pod := runtimeRecoveryPod("pod-1", "sandbox-1", 3)
-	pod.Spec.NodeName = "node-1"
-	pod.Annotations[controller.AnnotationRootFSSnapshotterInstance] = "snapshotter-current"
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
-		Name: "node-1",
-		Annotations: map[string]string{
-			dataplane.NodeRootFSSnapshotterInstanceAnnotation: "snapshotter-current",
-		},
-	}}
-	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
-	svc := &SandboxService{
-		k8sClient:    fake.NewSimpleClientset(pod),
-		nodeLister:   newClaimTestNodeLister(t, node),
-		sandboxStore: store,
-		config:       SandboxServiceConfig{ClusterID: "cluster-a"},
-		logger:       zap.NewNop(),
-	}
-
-	require.NoError(t, svc.ReconcileSandboxRuntime(context.Background(), "sandbox-1"))
 	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-1"))
 }
 
@@ -493,8 +436,8 @@ func TestReconcileTerminatingSandboxAbortsResumeAndNeverRecovers(t *testing.T) {
 
 func TestCompleteLostRecoveryPreservesLastCommittedHeadWhenPodIsGone(t *testing.T) {
 	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
-	store.rootFSHeads = map[string]*sandboxstore.SandboxRootFSHead{
-		"sandbox-1": rootFSHeadTestFixture(t, "sandbox-1", "team-1", "committed-head", 2),
+	store.rootFSStates = map[string]*sandboxstore.SandboxRootFSState{
+		"sandbox-1": {SandboxID: "sandbox-1", LayerID: "committed-head", RuntimeGeneration: 2},
 	}
 	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{
 		"txn-lost": {
@@ -518,7 +461,7 @@ func TestCompleteLostRecoveryPreservesLastCommittedHeadWhenPodIsGone(t *testing.
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
-	assert.Equal(t, "committed-head", store.rootFSHeads["sandbox-1"].Reference.HeadID)
+	assert.Equal(t, "committed-head", store.rootFSStates["sandbox-1"].LayerID)
 	assert.Equal(t, sandboxstore.SandboxLifecyclePhaseCommitted, store.lifecycleTxns["txn-lost"].Phase)
 }
 

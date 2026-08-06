@@ -540,8 +540,61 @@ func TestComposeImageIsDeterministicAndRequiresDiffID(t *testing.T) {
 	}
 
 	req.Layers[0].DiffID = ""
-	if err := req.Validate(); err == nil || !strings.Contains(err.Error(), "diff_id") {
-		t.Fatalf("Validate() error = %v, want missing diff_id error", err)
+	if err := req.validate(false); err == nil || !strings.Contains(err.Error(), "diff_id") {
+		t.Fatalf("validate() error = %v, want missing diff_id error", err)
+	}
+}
+
+func TestResolveLayerDiffIDsSupportsLegacyUncompressedAndGzipLayers(t *testing.T) {
+	t.Parallel()
+
+	uncompressed := []byte("legacy uncompressed tar")
+	plain := []byte("legacy compressed tar")
+	compressed := gzipBytes(t, plain)
+	objects := &fakeObjectReader{objects: map[string][]byte{
+		"compressed": compressed,
+	}}
+	layers, err := ResolveLayerDiffIDs(context.Background(), objects, []Layer{
+		{
+			ObjectKey: "uncompressed",
+			MediaType: ocispec.MediaTypeImageLayer,
+			Digest:    digest.FromBytes(uncompressed).String(),
+			Size:      int64(len(uncompressed)),
+		},
+		{
+			ObjectKey: "compressed",
+			MediaType: ocispec.MediaTypeImageLayerGzip,
+			Digest:    digest.FromBytes(compressed).String(),
+			Size:      int64(len(compressed)),
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveLayerDiffIDs() error = %v", err)
+	}
+	if got, want := layers[0].DiffID, digest.FromBytes(uncompressed).String(); got != want {
+		t.Fatalf("uncompressed DiffID = %s, want %s", got, want)
+	}
+	if got, want := layers[1].DiffID, digest.FromBytes(plain).String(); got != want {
+		t.Fatalf("compressed DiffID = %s, want %s", got, want)
+	}
+	if got := len(objects.gets); got != 1 || objects.gets[0].key != "compressed" {
+		t.Fatalf("object reads = %#v, want only compressed legacy layer", objects.gets)
+	}
+}
+
+func TestResolveLayerDiffIDsRejectsCompressionThatDoesNotMatchMediaType(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("not gzip")
+	objects := &fakeObjectReader{objects: map[string][]byte{"layer": payload}}
+	_, err := ResolveLayerDiffIDs(context.Background(), objects, []Layer{{
+		ObjectKey: "layer",
+		MediaType: ocispec.MediaTypeImageLayerGzip,
+		Digest:    digest.FromBytes(payload).String(),
+		Size:      int64(len(payload)),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "compression does not match") {
+		t.Fatalf("ResolveLayerDiffIDs() error = %v, want compression mismatch", err)
 	}
 }
 

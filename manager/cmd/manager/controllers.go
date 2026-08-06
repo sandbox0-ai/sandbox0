@@ -121,7 +121,6 @@ func (s *managerControllerSet) startRootFSMaintenance(ctx context.Context) {
 		s.managerMetrics,
 	)
 	maintenance.SetObjectInspector(rootFSObjectStoreInspector{store: s.rootFSObjectStore})
-	maintenance.SetObjectLister(rootFSObjectStoreInspector{store: s.rootFSObjectStore})
 	if s.meteringRepo != nil {
 		maintenance.SetStorageMeteringRecorder(s.meteringRepo)
 	}

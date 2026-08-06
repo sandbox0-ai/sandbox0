@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -52,13 +51,6 @@ func (f *fakeRecorder) RunInTx(ctx context.Context, fn func(txRecorder) error) e
 func TestAggregatorFlushesAttributedOSSRequestWindows(t *testing.T) {
 	recorder := &fakeRecorder{tx: &fakeTxRecorder{}}
 	aggregator := NewAggregator(recorder, "ali-ue1", "cluster-1", ProducerName(ProducerManager, "manager-1"), nil)
-	const rootFSPrefix = "sandbox-rootfs/cow-v3/teams/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	aggregator.SetRootFSTeamResolver(RootFSTeamResolverFunc(func(_ context.Context, prefix string) (string, error) {
-		if prefix != rootFSPrefix {
-			t.Fatalf("resolved rootfs prefix = %q, want %q", prefix, rootFSPrefix)
-		}
-		return "team-2", nil
-	}))
 	start := time.Date(2026, 7, 27, 1, 0, 0, 0, time.UTC)
 	end := start.Add(time.Minute)
 	aggregator.windowStart = start
@@ -75,7 +67,7 @@ func TestAggregatorFlushesAttributedOSSRequestWindows(t *testing.T) {
 		Provider:   objectstore.TypeOSS,
 		Bucket:     "runtime-bucket",
 		Operation:  "ListObjectsV2",
-		Key:        rootFSPrefix + "/chunks/sha256/object",
+		Key:        "sandbox-rootfs/team-2/sandbox-2/1",
 		StatusCode: http.StatusOK,
 	})
 	aggregator.ObserveRequestAttempt(objectstore.RequestAttempt{
@@ -108,8 +100,7 @@ func TestAggregatorFlushesAttributedOSSRequestWindows(t *testing.T) {
 	if rootfs.WindowType != meteringpkg.WindowTypeSandboxObjectStorePutRequests ||
 		rootfs.TeamID != "team-2" ||
 		rootfs.SubjectType != meteringpkg.SubjectTypeRootFS ||
-		rootfs.SubjectID != "team-2" ||
-		rootfs.SandboxID != "" {
+		rootfs.SandboxID != "sandbox-2" {
 		t.Fatalf("unexpected rootfs window: %+v", rootfs)
 	}
 	platform := windows["PutObject"]
@@ -144,27 +135,6 @@ func TestAggregatorCountsRepeatedAttempts(t *testing.T) {
 	}
 	if len(recorder.tx.windows) != 1 || recorder.tx.windows[0].Value != 3 {
 		t.Fatalf("windows = %#v, want one count=3 window", recorder.tx.windows)
-	}
-}
-
-func TestAggregatorRetainsV3RootFSRequestsWhenAttributionCannotResolve(t *testing.T) {
-	recorder := &fakeRecorder{tx: &fakeTxRecorder{}}
-	aggregator := NewAggregator(recorder, "ali-ue1", "cluster-1", ProducerCtld, nil)
-	aggregator.ObserveRequestAttempt(objectstore.RequestAttempt{
-		Provider: objectstore.TypeOSS, Bucket: "runtime-bucket", Operation: "GetObject",
-		Key:        "sandbox-rootfs/cow-v3/teams/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/chunks/sha256/object",
-		StatusCode: http.StatusOK,
-	})
-
-	err := aggregator.Flush(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "resolver is not configured") {
-		t.Fatalf("Flush() error = %v, want missing rootfs resolver", err)
-	}
-	if recorder.runCalls != 0 {
-		t.Fatalf("recorder calls = %d, want 0 before attribution resolves", recorder.runCalls)
-	}
-	if aggregator.pending == nil || len(aggregator.pending.usage) != 1 {
-		t.Fatalf("pending usage = %#v, want one retained request", aggregator.pending)
 	}
 }
 
@@ -227,14 +197,13 @@ func TestAggregatorFlushFailureRetainsStableBatch(t *testing.T) {
 
 func TestClassifyAttribution(t *testing.T) {
 	tests := []struct {
-		name         string
-		key          string
-		scope        string
-		prefixClass  string
-		teamID       string
-		subjectType  string
-		subjectID    string
-		rootFSPrefix string
+		name        string
+		key         string
+		scope       string
+		prefixClass string
+		teamID      string
+		subjectType string
+		subjectID   string
 	}{
 		{
 			name: "volume", key: "sandboxvolumes/team-a/volume-a/s0fs/head",
@@ -245,14 +214,6 @@ func TestClassifyAttribution(t *testing.T) {
 			name: "rootfs", key: "sandbox-rootfs/team-a/sandbox-a/1/sha256/a.tar",
 			scope: CostScopeCustomer, prefixClass: "rootfs_data", teamID: "team-a",
 			subjectType: meteringpkg.SubjectTypeRootFS, subjectID: "sandbox-a",
-		},
-		{
-			name:  "rootfs v3 cas",
-			key:   "sandbox-rootfs/cow-v3/teams/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/chunks/sha256/object",
-			scope: CostScopeCustomer, prefixClass: "rootfs_cas",
-			subjectType:  meteringpkg.SubjectTypeRootFS,
-			subjectID:    "sandbox-rootfs/cow-v3/teams/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			rootFSPrefix: "sandbox-rootfs/cow-v3/teams/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		},
 		{
 			name: "legacy", key: ".juicefs/chunks/1",
@@ -269,7 +230,7 @@ func TestClassifyAttribution(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := classifyAttribution("runtime-bucket", tt.key)
 			if got.costScope != tt.scope || got.prefixClass != tt.prefixClass ||
-				got.teamID != tt.teamID || got.subjectType != tt.subjectType || got.subjectID != tt.subjectID || got.rootFSPrefix != tt.rootFSPrefix {
+				got.teamID != tt.teamID || got.subjectType != tt.subjectType || got.subjectID != tt.subjectID {
 				t.Fatalf("classifyAttribution() = %+v", got)
 			}
 		})

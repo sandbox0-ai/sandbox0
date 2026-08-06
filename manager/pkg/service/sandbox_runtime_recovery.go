@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -126,17 +125,6 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 			return runtimeReconcileConflict(sandboxID, "multiple active pods match the durable runtime identity")
 		}
 		if len(matching) == 1 {
-			staleRootFS, err := s.rootFSSnapshotterRuntimeStale(matching[0])
-			if err != nil {
-				return err
-			}
-			if staleRootFS {
-				if err := beginRootFSSnapshotterRecoveryTxn(lockCtx, tx, locked, matching[0]); err != nil {
-					return err
-				}
-				enqueueRecovery = true
-				return nil
-			}
 			for _, pod := range activePods {
 				if pod.UID == matching[0].UID {
 					continue
@@ -218,53 +206,6 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 		s.enqueueSandboxPause(sandboxID)
 	}
 	return nil
-}
-
-func (s *SandboxService) rootFSSnapshotterRuntimeStale(pod *corev1.Pod) (bool, error) {
-	if pod == nil {
-		return false, nil
-	}
-	expected := strings.TrimSpace(pod.Annotations[controller.AnnotationRootFSSnapshotterInstance])
-	if expected == "" {
-		return false, nil
-	}
-	if s == nil || s.nodeLister == nil || strings.TrimSpace(pod.Spec.NodeName) == "" {
-		return false, fmt.Errorf("inspect rootfs snapshotter runtime: node cache or assignment is unavailable")
-	}
-	node, err := s.nodeLister.Get(pod.Spec.NodeName)
-	if err != nil {
-		return false, fmt.Errorf("inspect rootfs snapshotter runtime on node %s: %w", pod.Spec.NodeName, err)
-	}
-	current := strings.TrimSpace(node.Annotations[dataplane.NodeRootFSSnapshotterInstanceAnnotation])
-	// An empty value means the operator has not observed a ready replacement.
-	// Keep the runtime fenced in place until an instance exists to receive the
-	// reconstructed sandbox.
-	return current != "" && current != expected, nil
-}
-
-func beginRootFSSnapshotterRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord, pod *corev1.Pod) error {
-	if tx == nil || record == nil || pod == nil {
-		return nil
-	}
-	if !sandboxRecordReferencesPod(record, pod) {
-		return fmt.Errorf("sandbox runtime identity changed before rootfs snapshotter recovery")
-	}
-	expectedHeadID, err := currentRootFSHeadID(ctx, tx, record.ID)
-	if err != nil {
-		return err
-	}
-	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
-		ID:               uuid.NewString(),
-		SandboxID:        record.ID,
-		Kind:             sandboxstore.SandboxLifecycleKindPause,
-		Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-		Source:           sandboxstore.SandboxLifecycleSourceRootFS,
-		Cancelable:       false,
-		FromGeneration:   runtimeGenerationFromPod(pod),
-		FromPodNamespace: pod.Namespace,
-		FromPodName:      pod.Name,
-		ExpectedHeadID:   expectedHeadID,
-	})
 }
 
 func (s *SandboxService) recoverStaleResumeTransaction(ctx context.Context, record *sandboxstore.SandboxRecord, txn *sandboxstore.SandboxLifecycleTxn, pods []*corev1.Pod) error {
@@ -408,10 +349,6 @@ func beginLostRuntimeRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxSto
 	if tx == nil || record == nil {
 		return nil
 	}
-	expectedHeadID, err := currentRootFSHeadID(ctx, tx, record.ID)
-	if err != nil {
-		return err
-	}
 	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
 		ID:               uuid.NewString(),
 		SandboxID:        record.ID,
@@ -422,7 +359,6 @@ func beginLostRuntimeRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxSto
 		FromGeneration:   record.RuntimeGeneration,
 		FromPodNamespace: record.CurrentPodNamespace,
 		FromPodName:      record.CurrentPodName,
-		ExpectedHeadID:   expectedHeadID,
 	})
 }
 

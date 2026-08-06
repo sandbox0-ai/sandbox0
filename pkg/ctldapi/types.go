@@ -1,11 +1,6 @@
 package ctldapi
 
-import (
-	"time"
-
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
-)
+import "github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 
 // SandboxResourceUsage is the whole-sandbox usage view returned by ctld.
 type SandboxResourceUsage struct {
@@ -66,96 +61,115 @@ type RootFSInfo struct {
 	BaseImageDigest     string   `json:"base_image_digest,omitempty"`
 }
 
-type BindRootFSSyncRequest struct {
-	Target            RootFSContainerRef        `json:"target"`
-	SandboxID         string                    `json:"sandbox_id"`
-	TeamID            string                    `json:"team_id"`
-	RuntimeGeneration int64                     `json:"runtime_generation"`
-	Parent            *rootfshead.HeadReference `json:"parent,omitempty"`
-	ExpectedBase      *rootfshead.BaseIdentity  `json:"expected_base,omitempty"`
-	ExcludedPaths     []string                  `json:"excluded_paths,omitempty"`
+type RootFSDiffDescriptor struct {
+	MediaType string `json:"media_type"`
+	Digest    string `json:"digest"`
+	DiffID    string `json:"diff_id,omitempty"`
+	Size      int64  `json:"size"`
+	ObjectKey string `json:"object_key,omitempty"`
 }
 
-type RootFSSyncStatus struct {
-	SandboxID           string                    `json:"sandbox_id"`
-	RuntimeGeneration   int64                     `json:"runtime_generation"`
-	InitialScanComplete bool                      `json:"initial_scan_complete"`
-	DirtyPaths          int                       `json:"dirty_paths"`
-	DirtyBytes          int64                     `json:"dirty_bytes"`
-	ActiveCaptures      int                       `json:"active_captures"`
-	WatcherErrors       uint64                    `json:"watcher_errors"`
-	Reconciliations     uint64                    `json:"reconciliations"`
-	NeedsFullReconcile  bool                      `json:"needs_full_reconcile"`
-	LastError           string                    `json:"last_error,omitempty"`
-	Sealing             bool                      `json:"sealing"`
-	Sealed              bool                      `json:"sealed"`
-	SealedReference     *rootfshead.HeadReference `json:"sealed_reference,omitempty"`
+// RootFSLayerDescriptor identifies one immutable rootfs diff layer in a
+// sandbox rootfs head chain.
+type RootFSLayerDescriptor struct {
+	LayerID       string               `json:"layer_id"`
+	ParentLayerID string               `json:"parent_layer_id,omitempty"`
+	Descriptor    RootFSDiffDescriptor `json:"descriptor"`
 }
 
-type BindRootFSSyncResponse struct {
-	Info   RootFSInfo       `json:"info,omitempty"`
-	Status RootFSSyncStatus `json:"status,omitempty"`
-	Error  string           `json:"error,omitempty"`
+// RootFSPortalPath maps an unbound volume portal's visible mount path to the
+// node-local backing directory that should be checkpointed as rootfs content.
+type RootFSPortalPath struct {
+	PortalName  string `json:"portal_name,omitempty"`
+	MountPath   string `json:"mount_path"`
+	BackingPath string `json:"backing_path"`
 }
 
-type GetRootFSSyncStatusRequest struct {
-	SandboxID         string `json:"sandbox_id"`
-	RuntimeGeneration int64  `json:"runtime_generation"`
+type InspectRootFSRequest struct {
+	Target RootFSContainerRef `json:"target"`
 }
 
-type GetRootFSSyncStatusResponse struct {
-	Status RootFSSyncStatus `json:"status,omitempty"`
-	Error  string           `json:"error,omitempty"`
+type InspectRootFSResponse struct {
+	Info  RootFSInfo `json:"info,omitempty"`
+	Error string     `json:"error,omitempty"`
 }
 
-type SealRootFSHeadRequest struct {
-	SandboxID                 string                    `json:"sandbox_id"`
-	TeamID                    string                    `json:"team_id"`
-	HeadID                    string                    `json:"head_id"`
-	ExpectedRuntimeGeneration int64                     `json:"expected_runtime_generation"`
-	ExpectedParent            *rootfshead.HeadReference `json:"expected_parent,omitempty"`
+type SaveRootFSRequest struct {
+	Target                    RootFSContainerRef `json:"target"`
+	SandboxID                 string             `json:"sandbox_id"`
+	TeamID                    string             `json:"team_id"`
+	ExpectedRuntimeGeneration int64              `json:"expected_runtime_generation,omitempty"`
+	ParentLayerID             string             `json:"parent_layer_id,omitempty"`
+	ObjectKey                 string             `json:"object_key,omitempty"`
+	ExcludedPaths             []string           `json:"excluded_paths,omitempty"`
+	PortalPaths               []RootFSPortalPath `json:"portal_paths,omitempty"`
 }
 
-type RootFSSealTimings struct {
-	Reconcile time.Duration `json:"reconcile"`
-	Flush     time.Duration `json:"flush"`
-	Total     time.Duration `json:"total"`
+type SaveRootFSResponse struct {
+	Info       RootFSInfo           `json:"info,omitempty"`
+	Descriptor RootFSDiffDescriptor `json:"descriptor,omitempty"`
+	Error      string               `json:"error,omitempty"`
 }
 
-type SealRootFSHeadResponse struct {
-	Reference      rootfshead.HeadReference  `json:"reference,omitempty"`
-	Head           rootfshead.Head           `json:"head,omitempty"`
-	Image          rootfshead.ImageReference `json:"image,omitempty"`
-	CreatedBytes   int64                     `json:"created_bytes"`
-	CreatedObjects int64                     `json:"created_objects"`
-	Timings        RootFSSealTimings         `json:"timings,omitempty"`
-	Error          string                    `json:"error,omitempty"`
+type PrepareRootFSSnapshotRequest struct {
+	Target        RootFSContainerRef `json:"target"`
+	ParentLayerID string             `json:"parent_layer_id,omitempty"`
+	ExcludedPaths []string           `json:"excluded_paths,omitempty"`
+	PortalPaths   []RootFSPortalPath `json:"portal_paths,omitempty"`
 }
 
-type AcknowledgeRootFSHeadRequest struct {
-	SandboxID         string `json:"sandbox_id"`
-	TeamID            string `json:"team_id"`
-	RuntimeGeneration int64  `json:"runtime_generation"`
-	HeadID            string `json:"head_id"`
-	Published         bool   `json:"published"`
-	RuntimeContinues  bool   `json:"runtime_continues"`
+type PrepareRootFSSnapshotResponse struct {
+	Handle     string               `json:"handle,omitempty"`
+	Info       RootFSInfo           `json:"info,omitempty"`
+	Descriptor RootFSDiffDescriptor `json:"descriptor,omitempty"`
+	Error      string               `json:"error,omitempty"`
 }
 
-type AcknowledgeRootFSHeadResponse struct {
-	Acknowledged bool             `json:"acknowledged"`
-	Status       RootFSSyncStatus `json:"status,omitempty"`
-	Error        string           `json:"error,omitempty"`
+type PublishRootFSSnapshotRequest struct {
+	Handle                    string `json:"handle"`
+	SandboxID                 string `json:"sandbox_id"`
+	TeamID                    string `json:"team_id"`
+	ExpectedRuntimeGeneration int64  `json:"expected_runtime_generation,omitempty"`
+	ObjectKey                 string `json:"object_key,omitempty"`
 }
 
-type MaterializeRootFSHeadRequest struct {
-	Reference rootfshead.HeadReference  `json:"reference"`
-	Image     rootfshead.ImageReference `json:"image"`
+type PublishRootFSSnapshotResponse struct {
+	Info       RootFSInfo           `json:"info,omitempty"`
+	Descriptor RootFSDiffDescriptor `json:"descriptor,omitempty"`
+	Published  bool                 `json:"published"`
+	Error      string               `json:"error,omitempty"`
 }
 
-type MaterializeRootFSHeadResponse struct {
-	ImageName    string `json:"image_name,omitempty"`
-	Materialized bool   `json:"materialized"`
-	Error        string `json:"error,omitempty"`
+type AbortRootFSSnapshotRequest struct {
+	Handle string `json:"handle"`
+}
+
+type AbortRootFSSnapshotResponse struct {
+	Aborted bool   `json:"aborted"`
+	Error   string `json:"error,omitempty"`
+}
+
+type ApplyRootFSRequest struct {
+	Target                      RootFSContainerRef      `json:"target"`
+	ExpectedRuntime             string                  `json:"expected_runtime,omitempty"`
+	ExpectedRuntimeHandler      string                  `json:"expected_runtime_handler,omitempty"`
+	ExpectedSnapshotter         string                  `json:"expected_snapshotter,omitempty"`
+	ExpectedBaseImageDigest     string                  `json:"expected_base_image_digest,omitempty"`
+	ExpectedSnapshotParent      string                  `json:"expected_snapshot_parent,omitempty"`
+	ExpectedSnapshotParentChain []string                `json:"expected_snapshot_parent_chain,omitempty"`
+	BaselineLayerID             string                  `json:"baseline_layer_id,omitempty"`
+	Layers                      []RootFSLayerDescriptor `json:"layers,omitempty"`
+	Descriptor                  RootFSDiffDescriptor    `json:"descriptor"`
+	ExcludedPaths               []string                `json:"excluded_paths,omitempty"`
+	PortalPaths                 []RootFSPortalPath      `json:"portal_paths,omitempty"`
+}
+
+type ApplyRootFSResponse struct {
+	Info       RootFSInfo              `json:"info,omitempty"`
+	Descriptor RootFSDiffDescriptor    `json:"descriptor,omitempty"`
+	Layers     []RootFSLayerDescriptor `json:"layers,omitempty"`
+	Applied    bool                    `json:"applied"`
+	Error      string                  `json:"error,omitempty"`
 }
 
 // BindVolumePortalRequest binds one pre-published pod portal to a concrete

@@ -7,43 +7,36 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/platforms"
+	distref "github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsexport"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 const templateBuildCaptureMetadataVersion = templatebuild.CaptureMetadataVersion
-
-const templateBuildRootFSWriteLeaseTTL = 6 * time.Hour
 
 var errTemplateBuildCaptureInvalid = templatebuild.ErrCaptureInvalid
 
 type templateBuildRootFSStore interface {
 	SandboxRootFSProductStore
-	GetRootFSHeadByID(ctx context.Context, headID, teamID string) (*sandboxstore.SandboxRootFSHead, error)
-	GetRootFSExport(ctx context.Context, headID, teamID string) (*sandboxstore.RootFSExport, error)
-	SaveRootFSExport(ctx context.Context, export *sandboxstore.RootFSExport) error
-	AcquireRootFSWriteLease(ctx context.Context, leaseID, teamID string, ttl time.Duration) error
-	ReleaseRootFSWriteLease(ctx context.Context, leaseID, teamID string) error
+	GetRootFSLayerChainByHead(ctx context.Context, teamID, headLayerID string) ([]*sandboxstore.SandboxRootFSLayer, error)
 }
 
 // EnsureTemplateBuildCapture creates or recovers a deterministic internal
-// snapshot and asynchronously exports its complete v3 Head as one OCI layer.
+// snapshot and reads its immutable layer chain.
 func (s *SandboxService) EnsureTemplateBuildCapture(
 	ctx context.Context,
 	sandboxID, teamID, snapshotID string,
-	_ v1alpha1.SandboxTemplateSpec,
+	desiredSpec v1alpha1.SandboxTemplateSpec,
 ) (*templatebuild.CaptureMetadata, error) {
 	if s == nil || s.sandboxStore == nil {
 		return nil, ErrSandboxRootFSStoreUnavailable
-	}
-	if s.rootFSObjectStore == nil {
-		return nil, fmt.Errorf("rootfs object store is unavailable for template image capture")
 	}
 	store, ok := s.sandboxStore.(templateBuildRootFSStore)
 	if !ok {
@@ -84,104 +77,167 @@ func (s *SandboxService) EnsureTemplateBuildCapture(
 			}
 		}
 	}
-	if snapshot == nil || snapshot.SourceSandboxID != sandboxID || snapshot.TeamID != teamID {
+	if snapshot.SourceSandboxID != sandboxID || snapshot.TeamID != teamID {
 		return nil, fmt.Errorf("template build snapshot %q belongs to a different sandbox or team", snapshotID)
 	}
-	headID := strings.TrimSpace(snapshot.HeadID)
-	if headID == "" {
-		return nil, fmt.Errorf("%w: template build snapshot %q has no v3 Head", errTemplateBuildCaptureInvalid, snapshotID)
-	}
-	head, err := store.GetRootFSHeadByID(ctx, headID, teamID)
+
+	chain, err := store.GetRootFSLayerChainByHead(ctx, teamID, snapshot.HeadLayerID)
 	if err != nil {
 		return nil, err
 	}
-	if head == nil || head.Reference.HeadID != headID || head.TeamID != teamID {
-		return nil, fmt.Errorf("%w: template build snapshot %q references an unavailable v3 Head", errTemplateBuildCaptureInvalid, snapshotID)
+	if len(chain) == 0 || chain[len(chain)-1] == nil || chain[len(chain)-1].ID != snapshot.HeadLayerID {
+		return nil, fmt.Errorf("%w: template build snapshot %q has no immutable rootfs chain", errTemplateBuildCaptureInvalid, snapshotID)
 	}
-	if head.Base.ImageReference == "" || head.Base.ManifestDigest == "" {
-		return nil, fmt.Errorf("%w: captured rootfs Head has no base image identity", errTemplateBuildCaptureInvalid)
-	}
-
-	export, err := store.GetRootFSExport(ctx, headID, teamID)
+	head := chain[len(chain)-1]
+	platform, err := s.templateBuildSourcePlatform(ctx, sandboxID, head, desiredSpec)
 	if err != nil {
 		return nil, err
 	}
-	if export == nil {
-		leaseID := "rootfs-export:" + headID
-		if err := store.AcquireRootFSWriteLease(ctx, leaseID, teamID, templateBuildRootFSWriteLeaseTTL); err != nil {
-			return nil, err
-		}
-		defer func() {
-			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = store.ReleaseRootFSWriteLease(releaseCtx, leaseID, teamID)
-		}()
-		result, exportErr := rootfsexport.Export(ctx, s.rootFSObjectStore, teamID, head.Reference)
-		if exportErr != nil {
-			return nil, exportErr
-		}
-		candidate := &sandboxstore.RootFSExport{
-			HeadID: headID,
-			TeamID: teamID,
-			Object: result.Object,
-			DiffID: result.DiffID,
-		}
-		if saveErr := store.SaveRootFSExport(ctx, candidate); saveErr != nil {
-			// Another durable worker may have won the deterministic export race.
-			export, err = store.GetRootFSExport(ctx, headID, teamID)
-			if err != nil || export == nil {
-				return nil, saveErr
-			}
-		} else {
-			export = candidate
-		}
+	if strings.TrimSpace(head.BaseImageRef) == "" || strings.TrimSpace(head.BaseImageDigest) == "" {
+		return nil, fmt.Errorf("%w: captured rootfs head has no base image identity", errTemplateBuildCaptureInvalid)
 	}
-	if err := validateTemplateBuildRootFSExport(export, head, teamID); err != nil {
+	if err := validateTemplateBuildRootFSChain(chain, teamID, head.BaseImageRef, head.BaseImageDigest, platform); err != nil {
 		return nil, err
 	}
 
+	layers := make([]templateimage.Layer, 0, len(chain))
+	for _, layer := range chain {
+		if layer == nil {
+			return nil, fmt.Errorf("captured rootfs chain contains an empty layer")
+		}
+		layers = append(layers, templateimage.Layer{
+			ID:        layer.ID,
+			ObjectKey: layer.DiffObjectKey,
+			MediaType: layer.DiffMediaType,
+			Digest:    layer.DiffDigest,
+			DiffID:    layer.DiffID,
+			Size:      layer.DiffSize,
+		})
+	}
 	return &templatebuild.CaptureMetadata{
 		Version:         templateBuildCaptureMetadataVersion,
 		SnapshotID:      snapshot.ID,
-		HeadID:          headID,
-		BaseImageRef:    head.Base.ImageReference,
-		BaseImageDigest: head.Base.ManifestDigest,
-		Platform: ocispec.Platform{
-			OS:           head.Base.OS,
-			Architecture: head.Base.Architecture,
-			Variant:      head.Base.Variant,
-		},
-		Layers: []templateimage.Layer{{
-			ID:        headID,
-			ObjectKey: export.Object.Key,
-			MediaType: export.Object.MediaType,
-			Digest:    export.Object.Digest,
-			DiffID:    export.DiffID,
-			Size:      export.Object.Size,
-		}},
-		CapturedAt: snapshot.CreatedAt.UTC(),
+		HeadLayerID:     snapshot.HeadLayerID,
+		BaseImageRef:    head.BaseImageRef,
+		BaseImageDigest: head.BaseImageDigest,
+		Platform:        platform,
+		Layers:          layers,
+		CapturedAt:      snapshot.CreatedAt.UTC(),
 	}, nil
 }
 
-func validateTemplateBuildRootFSExport(export *sandboxstore.RootFSExport, head *sandboxstore.SandboxRootFSHead, teamID string) error {
-	if export == nil || head == nil || export.HeadID != head.Reference.HeadID || export.TeamID != teamID {
-		return fmt.Errorf("%w: rootfs Head export ownership is inconsistent", errTemplateBuildCaptureInvalid)
-	}
-	if err := export.Object.Validate(rootfshead.ExportLayerMediaType); err != nil {
-		return fmt.Errorf("%w: %v", errTemplateBuildCaptureInvalid, err)
-	}
-	prefix, err := rootfshead.TeamObjectPrefix(teamID)
+func validateTemplateBuildRootFSChain(
+	chain []*sandboxstore.SandboxRootFSLayer,
+	teamID, baseImageRef, baseImageDigest string,
+	platform ocispec.Platform,
+) error {
+	expectedDigest, err := digest.Parse(strings.TrimSpace(baseImageDigest))
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: parse captured base image digest: %v", errTemplateBuildCaptureInvalid, err)
 	}
-	if err := rootfshead.ValidateObjectScope(prefix, export.Object); err != nil {
-		return fmt.Errorf("%w: %v", errTemplateBuildCaptureInvalid, err)
+	expectedRepository, err := normalizedTemplateBuildBaseRepository(baseImageRef)
+	if err != nil {
+		return fmt.Errorf("%w: parse captured base image reference: %v", errTemplateBuildCaptureInvalid, err)
 	}
-	parsedDiffID, err := digest.Parse(strings.TrimSpace(export.DiffID))
-	if err != nil || parsedDiffID.Algorithm() != digest.Canonical {
-		return fmt.Errorf("%w: rootfs Head export diff_id is invalid", errTemplateBuildCaptureInvalid)
+	expectedPlatform := platforms.Normalize(platform)
+
+	for i, layer := range chain {
+		if layer == nil {
+			return fmt.Errorf("%w: captured rootfs chain contains an empty layer", errTemplateBuildCaptureInvalid)
+		}
+		expectedParentID := ""
+		if i > 0 {
+			expectedParentID = strings.TrimSpace(chain[i-1].ID)
+		}
+		if strings.TrimSpace(layer.ParentLayerID) != expectedParentID {
+			return fmt.Errorf(
+				"%w: rootfs layer %q parent %q does not match chain parent %q",
+				errTemplateBuildCaptureInvalid,
+				layer.ID,
+				layer.ParentLayerID,
+				expectedParentID,
+			)
+		}
+		if strings.TrimSpace(layer.TeamID) != strings.TrimSpace(teamID) {
+			return fmt.Errorf("%w: rootfs layer %q belongs to a different team", errTemplateBuildCaptureInvalid, layer.ID)
+		}
+		if value := strings.TrimSpace(layer.BaseImageDigest); value != "" {
+			layerDigest, parseErr := digest.Parse(value)
+			if parseErr != nil || layerDigest != expectedDigest {
+				return fmt.Errorf(
+					"%w: rootfs layer %q base image digest %q does not match head digest %q",
+					errTemplateBuildCaptureInvalid,
+					layer.ID,
+					value,
+					expectedDigest,
+				)
+			}
+		}
+		if value := strings.TrimSpace(layer.BaseImageRef); value != "" {
+			layerRepository, parseErr := normalizedTemplateBuildBaseRepository(value)
+			if parseErr != nil || layerRepository != expectedRepository {
+				return fmt.Errorf(
+					"%w: rootfs layer %q base image reference %q is incompatible with head reference %q",
+					errTemplateBuildCaptureInvalid,
+					layer.ID,
+					value,
+					baseImageRef,
+				)
+			}
+			if named, parseErr := distref.ParseNormalizedNamed(value); parseErr == nil {
+				if digested, ok := named.(distref.Digested); ok && digest.Digest(digested.Digest()) != expectedDigest {
+					return fmt.Errorf(
+						"%w: rootfs layer %q base image reference digest does not match head digest %q",
+						errTemplateBuildCaptureInvalid,
+						layer.ID,
+						expectedDigest,
+					)
+				}
+			}
+		}
+
+		layerPlatform := expectedPlatform
+		if value := strings.TrimSpace(layer.PlatformOS); value != "" {
+			layerPlatform.OS = value
+		}
+		if value := strings.TrimSpace(layer.PlatformArchitecture); value != "" {
+			layerPlatform.Architecture = value
+		}
+		if value := strings.TrimSpace(layer.PlatformVariant); value != "" {
+			layerPlatform.Variant = value
+		}
+		layerPlatform = platforms.Normalize(layerPlatform)
+		if value := strings.TrimSpace(layer.PlatformOS); value != "" && layerPlatform.OS != expectedPlatform.OS {
+			return templateBuildLayerPlatformMismatch(layer, expectedPlatform)
+		}
+		if value := strings.TrimSpace(layer.PlatformArchitecture); value != "" && layerPlatform.Architecture != expectedPlatform.Architecture {
+			return templateBuildLayerPlatformMismatch(layer, expectedPlatform)
+		}
+		if value := strings.TrimSpace(layer.PlatformVariant); value != "" && layerPlatform.Variant != expectedPlatform.Variant {
+			return templateBuildLayerPlatformMismatch(layer, expectedPlatform)
+		}
 	}
 	return nil
+}
+
+func normalizedTemplateBuildBaseRepository(raw string) (string, error) {
+	named, err := distref.ParseNormalizedNamed(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	return distref.TrimNamed(named).Name(), nil
+}
+
+func templateBuildLayerPlatformMismatch(layer *sandboxstore.SandboxRootFSLayer, expected ocispec.Platform) error {
+	return fmt.Errorf(
+		"%w: rootfs layer %q platform %s/%s/%s does not match captured platform %s",
+		errTemplateBuildCaptureInvalid,
+		layer.ID,
+		layer.PlatformOS,
+		layer.PlatformArchitecture,
+		layer.PlatformVariant,
+		platforms.Format(expected),
+	)
 }
 
 // DeleteTemplateBuildCapture releases the temporary snapshot GC pin.
@@ -195,4 +251,83 @@ func (s *SandboxService) DeleteTemplateBuildCapture(ctx context.Context, snapsho
 		return nil
 	}
 	return err
+}
+
+func (s *SandboxService) templateBuildSourcePlatform(
+	ctx context.Context,
+	sandboxID string,
+	head *sandboxstore.SandboxRootFSLayer,
+	desiredSpec v1alpha1.SandboxTemplateSpec,
+) (ocispec.Platform, error) {
+	platform := ocispec.Platform{
+		OS:           strings.TrimSpace(head.PlatformOS),
+		Architecture: strings.TrimSpace(head.PlatformArchitecture),
+		Variant:      strings.TrimSpace(head.PlatformVariant),
+	}
+	if platform.OS != "" && platform.Architecture != "" {
+		return platform, nil
+	}
+
+	if s.podLister != nil {
+		if pod, err := s.getSandboxPod(ctx, sandboxID); err == nil && pod != nil {
+			platform = s.rootFSPlatformForPod(pod)
+			if platform.OS != "" && platform.Architecture != "" {
+				return platform, nil
+			}
+		} else if err != nil && !apierrors.IsNotFound(err) {
+			return ocispec.Platform{}, fmt.Errorf("resolve source sandbox pod platform: %w", err)
+		}
+	}
+
+	if desiredSpec.Pod != nil {
+		platform = ocispec.Platform{
+			OS:           strings.TrimSpace(desiredSpec.Pod.NodeSelector["kubernetes.io/os"]),
+			Architecture: strings.TrimSpace(desiredSpec.Pod.NodeSelector["kubernetes.io/arch"]),
+			Variant:      strings.TrimSpace(desiredSpec.Pod.NodeSelector[rootFSPlatformVariantLabel]),
+		}
+		if platform.OS != "" && platform.Architecture != "" {
+			return platform, nil
+		}
+	}
+
+	// Upgrade compatibility for old rootfs rows: inferring from the cluster is
+	// safe only when every cached node reports the same platform.
+	if s.nodeLister != nil {
+		nodes, err := s.nodeLister.List(labels.Everything())
+		if err != nil {
+			return ocispec.Platform{}, fmt.Errorf("list nodes for source platform: %w", err)
+		}
+		var unique *ocispec.Platform
+		for _, node := range nodes {
+			candidate := ocispec.Platform{
+				OS:           firstTemplateBuildValue(node.Labels["kubernetes.io/os"], node.Status.NodeInfo.OperatingSystem),
+				Architecture: firstTemplateBuildValue(node.Labels["kubernetes.io/arch"], node.Status.NodeInfo.Architecture),
+				Variant:      node.Labels[rootFSPlatformVariantLabel],
+			}
+			if candidate.OS == "" || candidate.Architecture == "" {
+				continue
+			}
+			if unique == nil {
+				copy := candidate
+				unique = &copy
+				continue
+			}
+			if unique.OS != candidate.OS || unique.Architecture != candidate.Architecture || unique.Variant != candidate.Variant {
+				return ocispec.Platform{}, fmt.Errorf("source platform is absent from legacy rootfs metadata and cluster nodes are multi-platform")
+			}
+		}
+		if unique != nil {
+			return *unique, nil
+		}
+	}
+	return ocispec.Platform{}, fmt.Errorf("source platform is unavailable; resume the sandbox on a known node and retry")
+}
+
+func firstTemplateBuildValue(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

@@ -231,7 +231,10 @@ func TestOnlyOneStandbyPromotesAndOtherRejoins(t *testing.T) {
 	t.Cleanup(func() { _ = promoted.Close() })
 	promoted.Replicator.SetSnapshotProvider(func(context.Context, ctldportal.PortalReplicator) error { return nil })
 	waitForStandbys(t, promoted.Replicator, 1)
-	waitForSynchronizedStandby(t, remaining, promoted.Epoch)
+	state := remaining.State()
+	if state.Role != RoleStandby || !state.Synchronized || state.Epoch != promoted.Epoch {
+		t.Fatalf("remaining coordinator state = %#v, want synchronized standby at epoch %d", state, promoted.Epoch)
+	}
 	remainingCancel()
 	select {
 	case result := <-remainingResult:
@@ -284,19 +287,6 @@ func waitForStandbys(t *testing.T, replicator *Replicator, want int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("standby count = %d, want %d", replicator.StandbyCount(), want)
-}
-
-func waitForSynchronizedStandby(t *testing.T, coordinator *Coordinator, epoch uint64) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		state := coordinator.State()
-		if state.Role == RoleStandby && state.Synchronized && state.Epoch == epoch {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("coordinator state = %#v, want synchronized standby at epoch %d", coordinator.State(), epoch)
 }
 
 func TestReplicatorRecoveryCapabilityRequiresEveryConnectedStandby(t *testing.T) {

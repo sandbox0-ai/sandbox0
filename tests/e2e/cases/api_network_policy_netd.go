@@ -149,7 +149,7 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 				cleanupErrs = append(cleanupErrs, err)
 			}
 		}
-		if err := session.DeleteTeamEventually(env.TestCtx.Context, GinkgoT(), team.Id, 2*time.Minute); err != nil {
+		if _, err := session.DeleteTeam(env.TestCtx.Context, GinkgoT(), team.Id); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
 		}
 		Expect(errors.Join(cleanupErrs...)).NotTo(HaveOccurred())

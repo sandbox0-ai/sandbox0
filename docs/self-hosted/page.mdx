@@ -15,14 +15,14 @@ Sandbox0 self-hosted is **operator-first**.
 ### Planes and Core Services
 
 - **Control plane** (optional in single-cluster): `regional-gateway`, `scheduler`
-- **Data plane** (runtime): `cluster-gateway`, `manager` with the storage API runtime, a node-local `ctld` HA pair for rootfs capture, volume portals, and network policy, plus one external rootfs snapshotter per sandbox node
+- **Data plane** (runtime): `cluster-gateway`, `manager` with the storage API runtime, and a node-local `ctld` HA pair for rootfs, volume portals, and network policy
 - **In-pod runtime**: `procd` runs inside each sandbox pod and handles process/files/volume mount operations
 
 ### Single-Cluster vs Multi-Cluster
 
 | Mode | Required services | Typical use |
 |---|---|---|
-| Single-cluster | `cluster-gateway` + `manager` + node-local `ctld` HA pair + rootfs snapshotter | Most users, fastest path |
+| Single-cluster | `cluster-gateway` + `manager` + node-local `ctld` HA pair | Most users, fastest path |
 | Multi-cluster | control plane (`regional-gateway` + `scheduler`) + one or more data planes | Regional scale-out |
 
 ### Fullmode Single-Cluster
@@ -40,9 +40,7 @@ flowchart TD
             igw --> pods[Sandbox Pods - procd inside]
             mgr --> pods
             mgr --> ctld[ctld-a / ctld-b - storage portal and network runtime]
-            mgr --> snapshotter[rootfs snapshotter - immutable FUSE lower]
             pods --> ctld
-            pods --> snapshotter
         end
 
         subgraph mw[Middleware Dependencies]
@@ -56,12 +54,11 @@ flowchart TD
         mgr --> pg
         mgr --> s3
         ctld --> s3
-        snapshotter --> s3
         mgr --> reg
     end
 ```
 
-In single-cluster fullmode, the storage API runtime runs in the `manager` Deployment. Each sandbox node has `ctld-a` and `ctld-b` for continuous upper capture, volume portals, and network policy, plus one external snapshotter for immutable FUSE lowers and the node cache. PostgreSQL, S3/OSS, and the optional image registry are middleware dependencies.
+In single-cluster fullmode, the storage API runtime runs in the `manager` Deployment. Each sandbox node has `ctld-a` and `ctld-b` DaemonSet Pods; the elected primary owns rootfs persistence, volume portals, and network policy, and the synchronized standby assumes those responsibilities after promotion. PostgreSQL, S3/OSS, and the optional image registry are middleware dependencies.
 
 ### Request Flow
 

@@ -12,7 +12,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy deployable binaries explicitly so stale local artifacts cannot enter the image.
-COPY bin/regional-gateway bin/ssh-gateway bin/global-gateway bin/cluster-gateway bin/manager bin/scheduler bin/ctld bin/rootfs-snapshotter bin/infra-operator /usr/local/bin/
+COPY bin/regional-gateway bin/ssh-gateway bin/global-gateway bin/cluster-gateway bin/manager bin/scheduler bin/ctld bin/infra-operator /usr/local/bin/
 
 # Copy entrypoint script
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint

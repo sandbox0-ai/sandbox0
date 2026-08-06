@@ -40,11 +40,13 @@ func TestRepositoryBlockingQueriesCoverTeamScopedStores(t *testing.T) {
 		"sandbox_egress_credential_bindings",
 		"sandboxes",
 		"sandbox_lifecycle_transactions",
+		"sandbox_rootfs_states",
+		"sandbox_rootfs_heads",
 		"sandbox_rootfs_bindings",
 		"rootfs_filesystems",
 		"rootfs_snapshots",
-		"rootfs_heads_v3",
-		"rootfs_objects_v3",
+		"rootfs_layers",
+		"rootfs_objects",
 		"rootfs_object_deletions",
 		"sandbox_volumes",
 		"sandbox_volume_snapshots",
@@ -72,8 +74,8 @@ func TestRepositoryBlockingQueriesCoverTeamScopedStores(t *testing.T) {
 func TestRepositoryRetainsBoundedWebhookDeliveriesWithoutQueryingPostgresMetering(t *testing.T) {
 	repo := NewRepository(nil)
 	got := repo.retainedQueries()
-	if len(got) != 2 || got[0].category != "sandbox_deletion_webhook_deliveries" || got[1].category != "rootfs_request_attribution_mappings" {
-		t.Fatalf("retained queries = %#v, want webhook deliveries and rootfs attribution mappings", got)
+	if len(got) != 1 || got[0].category != "sandbox_deletion_webhook_deliveries" {
+		t.Fatalf("retained queries = %#v, want sandbox deletion webhook deliveries only", got)
 	}
 	if MeteringRetentionPolicy == "" {
 		t.Fatal("metering retention policy must be explicit")

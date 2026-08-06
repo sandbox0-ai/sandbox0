@@ -13,7 +13,6 @@ import (
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	nodev1 "k8s.io/api/node/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -29,7 +28,6 @@ import (
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 )
 
 func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
@@ -482,21 +480,10 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	assertHAMetricsEndpoint(t, standby.Spec.Template.Spec.Containers[0], dataplane.CtldHASlotB, ctldHAMetricsPortB)
 	assertCtldRollingUpdate(t, ds, 1, 0)
 	assertCtldRollingUpdate(t, standby, 1, 0)
-	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 8 {
-		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket/data, and rootfs snapshotter state mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 7 {
+		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
-	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "rootfs-snapshotter-state", rootFSSnapshotterStateRoot)
-	for _, current := range []*appsv1.DaemonSet{ds, standby} {
-		containerdMount, ok := volumeMountByName(current.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-sock")
-		require.True(t, ok)
-		require.NotNil(t, containerdMount.MountPropagation)
-		assert.Equal(t, corev1.MountPropagationHostToContainer, *containerdMount.MountPropagation)
-	}
-	rootfsStateMount, ok := volumeMountByName(ds.Spec.Template.Spec.Containers[0].VolumeMounts, "rootfs-snapshotter-state")
-	if !ok || !rootfsStateMount.ReadOnly {
-		t.Fatalf("ctld rootfs snapshotter state mount must be read-only, got %#v", rootfsStateMount)
-	}
 	assertNoPodVolume(t, ds.Spec.Template.Spec.Volumes, "plugin-registration")
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
@@ -505,32 +492,6 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	if driver.Spec.PodInfoOnMount == nil || !*driver.Spec.PodInfoOnMount {
 		t.Fatal("expected csi driver podInfoOnMount=true")
 	}
-	runtimeClass := &nodev1.RuntimeClass{}
-	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: rootfshead.RuntimeClassName}, runtimeClass))
-	assert.Equal(t, rootfshead.RuntimeClassName, runtimeClass.Handler)
-	snapshotter := &appsv1.DaemonSet{}
-	require.NoError(t, client.Get(context.Background(), types.NamespacedName{
-		Name: infra.Name + "-rootfs-snapshotter", Namespace: infra.Namespace,
-	}, snapshotter))
-	assert.Equal(t, appsv1.OnDeleteDaemonSetStrategyType, snapshotter.Spec.UpdateStrategy.Type)
-	require.Len(t, snapshotter.Spec.Template.Spec.Containers, 1)
-	snapshotterContainer := snapshotter.Spec.Template.Spec.Containers[0]
-	assert.Equal(t, rootFSSnapshotterComponent, snapshotterContainer.Name)
-	assert.Equal(t, []string{"/usr/local/bin/rootfs-snapshotter"}, snapshotterContainer.Command)
-	assertContainsArg(t, snapshotterContainer.Args, "-address="+rootFSSnapshotterSocket)
-	assertContainsArg(t, snapshotterContainer.Args, "-root="+rootFSSnapshotterStateRoot)
-	assertContainerVolumeMount(t, snapshotterContainer.VolumeMounts, "containerd-sock", "/host-run/containerd")
-	assertContainerVolumeMount(t, snapshotterContainer.VolumeMounts, "rootfs-snapshotter-state", rootFSSnapshotterStateRoot)
-	assertContainerVolumeMount(t, snapshotterContainer.VolumeMounts, "dev-fuse", "/dev/fuse")
-	stateMount, ok := volumeMountByName(snapshotterContainer.VolumeMounts, "rootfs-snapshotter-state")
-	require.True(t, ok)
-	require.NotNil(t, stateMount.MountPropagation)
-	assert.Equal(t, corev1.MountPropagationBidirectional, *stateMount.MountPropagation)
-	snapshotterContainerdMount, ok := volumeMountByName(snapshotterContainer.VolumeMounts, "containerd-sock")
-	require.True(t, ok)
-	assert.Nil(t, snapshotterContainerdMount.MountPropagation)
-	require.NotNil(t, snapshotter.Spec.Template.Spec.AutomountServiceAccountToken)
-	assert.False(t, *snapshotter.Spec.Template.Spec.AutomountServiceAccountToken)
 
 	return ds, client
 }
@@ -543,9 +504,6 @@ func newCtldTestScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 scheme: %v", err)
-	}
-	if err := nodev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add nodev1 scheme: %v", err)
 	}
 	if err := storagev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storagev1 scheme: %v", err)
@@ -656,7 +614,6 @@ func TestReconcileUsesDefaultContainerdHostDataRoot(t *testing.T) {
 	assertContainsArg(t, args, "-runtime-watch-addr=:8096")
 	assertContainsArg(t, args, "-containerd-host-data-root=/var/lib/containerd")
 	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/containerd")
-	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "rootfs-snapshotter-state", rootFSSnapshotterStateRoot)
 }
 
 func TestReconcileUsesConfiguredContainerdHostDataRoot(t *testing.T) {
@@ -672,7 +629,7 @@ func TestReconcileUsesConfiguredContainerdHostDataRoot(t *testing.T) {
 	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/sandbox0-worker/containerd")
 }
 
-func TestReconcilePassesRootFSObjectCacheConfigOnlyToSnapshotter(t *testing.T) {
+func TestReconcilePassesRootFSObjectCacheConfig(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.Services.Ctld = &infrav1alpha1.CtldServiceConfig{
 		RootFSObjectCacheMaxBytes:      "10Gi",
@@ -681,20 +638,12 @@ func TestReconcilePassesRootFSObjectCacheConfigOnlyToSnapshotter(t *testing.T) {
 		RootFSObjectCacheSweepInterval: metav1.Duration{Duration: 30 * time.Second},
 	}
 
-	ds, client := reconcileCtldResources(t, infra)
-	ctldArgs := ds.Spec.Template.Spec.Containers[0].Args
-	assertNotContainsArgPrefix(t, ctldArgs, "-rootfs-object-cache-")
-
-	snapshotter := &appsv1.DaemonSet{}
-	require.NoError(t, client.Get(context.Background(), types.NamespacedName{
-		Name: infra.Name + "-rootfs-snapshotter", Namespace: infra.Namespace,
-	}, snapshotter))
-	require.Len(t, snapshotter.Spec.Template.Spec.Containers, 1)
-	args := snapshotter.Spec.Template.Spec.Containers[0].Args
-	assertContainsArg(t, args, "-object-cache-max-bytes=10Gi")
-	assertContainsArg(t, args, "-object-cache-min-free-bytes=2Gi")
-	assertContainsArg(t, args, "-object-cache-max-age=6h0m0s")
-	assertContainsArg(t, args, "-object-cache-sweep-interval=30s")
+	ds := reconcileCtldDaemonSet(t, infra)
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	assertContainsArg(t, args, "-rootfs-object-cache-max-bytes=10Gi")
+	assertContainsArg(t, args, "-rootfs-object-cache-min-free-bytes=2Gi")
+	assertContainsArg(t, args, "-rootfs-object-cache-max-age=6h0m0s")
+	assertContainsArg(t, args, "-rootfs-object-cache-sweep-interval=30s")
 }
 
 func TestReconcileDoesNotPassPauseConfigToCtld(t *testing.T) {

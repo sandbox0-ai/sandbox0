@@ -181,10 +181,6 @@ func beginCrashRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx, 
 	if !sandboxRecordReferencesPod(record, pod) {
 		return fmt.Errorf("sandbox runtime identity changed before crash recovery")
 	}
-	expectedHeadID, err := currentRootFSHeadID(ctx, tx, record.ID)
-	if err != nil {
-		return err
-	}
 	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
 		ID:               uuid.NewString(),
 		SandboxID:        record.ID,
@@ -195,7 +191,6 @@ func beginCrashRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx, 
 		FromGeneration:   runtimeGenerationFromPod(pod),
 		FromPodNamespace: pod.Namespace,
 		FromPodName:      pod.Name,
-		ExpectedHeadID:   expectedHeadID,
 	})
 }
 
@@ -210,10 +205,6 @@ func beginHealthRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx,
 	if !sandboxRecordReferencesPod(record, pod) {
 		return fmt.Errorf("sandbox runtime identity changed before health recovery")
 	}
-	expectedHeadID, err := currentRootFSHeadID(ctx, tx, record.ID)
-	if err != nil {
-		return err
-	}
 	return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
 		ID:               uuid.NewString(),
 		SandboxID:        record.ID,
@@ -224,7 +215,6 @@ func beginHealthRecoveryTxn(ctx context.Context, tx sandboxstore.SandboxStoreTx,
 		FromGeneration:   runtimeGenerationFromPod(pod),
 		FromPodNamespace: pod.Namespace,
 		FromPodName:      pod.Name,
-		ExpectedHeadID:   expectedHeadID,
 	})
 }
 

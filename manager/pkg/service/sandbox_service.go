@@ -17,7 +17,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -109,7 +108,7 @@ type SandboxService struct {
 	volumeMetadata                         SandboxVolumeMetadataClient
 	quotaStore                             TeamQuotaLimitStore
 	sandboxStore                           sandboxstore.SandboxStore
-	rootFSObjectStore                      objectstore.Store
+	rootFSObjectDeleter                    sandboxstore.RootFSObjectDeleter
 	templateImageBuildCapabilityConfigured bool
 	templateImageBuildAvailable            bool
 	resumeGroup                            singleflight.Group
@@ -185,7 +184,7 @@ type SandboxServiceDependencies struct {
 	VolumeMetadataClient        SandboxVolumeMetadataClient
 	QuotaStore                  TeamQuotaLimitStore
 	SandboxStore                sandboxstore.SandboxStore
-	RootFSObjectStore           objectstore.Store
+	RootFSObjectDeleter         sandboxstore.RootFSObjectDeleter
 }
 
 // NewSandboxServiceWithDependencies creates a SandboxService from named
@@ -254,7 +253,7 @@ func NewSandboxServiceWithDependencies(deps SandboxServiceDependencies) *Sandbox
 		volumeMetadata:              deps.VolumeMetadataClient,
 		quotaStore:                  deps.QuotaStore,
 		sandboxStore:                deps.SandboxStore,
-		rootFSObjectStore:           deps.RootFSObjectStore,
+		rootFSObjectDeleter:         deps.RootFSObjectDeleter,
 		idleClaimReservations:       make(map[string]string),
 		podWaiter:                   newPodEventWaiter(),
 	}

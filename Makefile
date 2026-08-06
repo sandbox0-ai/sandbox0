@@ -14,7 +14,7 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 PROTOC ?= protoc
 GO ?= env GOWORK=off go
 
-BINARIES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld rootfs-snapshotter procd infra-operator
+BINARIES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld procd infra-operator
 TEST_SUITES := $(BINARIES) storage-proxy netd
 E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
 E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
@@ -67,8 +67,6 @@ build: manifests proto apispec
 			dir="infra-operator"; bin="infra-operator"; src="./infra-operator/cmd/infra-operator"; \
 		elif [ "$$s" = "ctld" ]; then \
 			dir="ctld"; bin="ctld"; src="./ctld/cmd/ctld"; \
-		elif [ "$$s" = "rootfs-snapshotter" ]; then \
-			dir="ctld"; bin="rootfs-snapshotter"; src="./ctld/cmd/rootfs-snapshotter"; \
 		else \
 			dir="$$s"; bin="$$s"; src="./$$s/cmd/$$s"; \
 		fi; \
@@ -144,8 +142,6 @@ test:
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./storage-proxy/...; \
 		elif [ "$$service" = "ctld" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./ctld/...; \
-		elif [ "$$service" = "rootfs-snapshotter" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./ctld/cmd/rootfs-snapshotter/... ./ctld/internal/ctld/rootfsfuse/... ./ctld/internal/ctld/rootfsreader/... ./ctld/internal/ctld/rootfssnapshotter/...; \
 		elif [ "$$service" = "infra-operator" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./infra-operator/...; \
 		fi; \
@@ -292,7 +288,7 @@ test-e2e-network-cni:
 	unset http_proxy && unset https_proxy && unset all_proxy && E2E_SINGLE_CLUSTER_SCENARIOS=fullmode $(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster -run TestSingleCluster -ginkgo.focus="API fullmode.*(enforces transparent TCP egress through the ctld network runtime|resolves cluster DNS over UDP with the ctld network runtime active|blocks private sandbox traffic while preserving public exposure and cluster service access)" -timeout=30m
 
 # Prevent make from treating service names as targets
-regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld rootfs-snapshotter procd netd infra-operator:
+regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
 	@:
 
 lint:
@@ -309,8 +305,6 @@ clean:
 		printf "$(YELLOW)Cleaning $$service...$(RESET)\n"; \
 		if [ "$$service" = "procd" ]; then \
 			rm -rf manager/bin/procd manager/bin/python-runner; \
-		elif [ "$$service" = "rootfs-snapshotter" ]; then \
-			rm -rf ctld/bin/rootfs-snapshotter; \
 		else \
 			rm -rf $$service/bin; \
 		fi; \

@@ -39,9 +39,9 @@ Use [Volumes](/docs/sandbox/volume) when data must be mounted by multiple sandbo
 
 ### Rootfs Path Semantics
 
-Snapshots, snapshot claims, restore, and fork use the same persistence boundary as pause and resume. `/tmp` is ephemeral and is not captured or restored, while `/var/tmp` and ordinary writable rootfs paths remain persistent. A Sandbox Volume mounted beneath `/tmp` remains durable because Volume state is managed independently from rootfs checkpoints. Runtime-owned Kubernetes mounts such as `/procd`, `/procd-image`, webhook state, and other injected VolumeMounts are also excluded. UNIX domain socket paths are absent from the restored rootfs because live sockets belong to the discarded runtime process state. Named pipes (FIFOs) created inside gVisor are not guaranteed to persist because the runtime may not materialize their inode in the host overlay upper that rootfs capture observes.
+Snapshots, snapshot claims, restore, and fork use the same persistence boundary as pause and resume. `/tmp` is ephemeral and is not captured or restored, while `/var/tmp` and ordinary writable rootfs paths remain persistent. A Sandbox Volume mounted beneath `/tmp` remains durable because Volume state is managed independently from rootfs checkpoints.
 
-The v3 runtime has no online legacy-layer reader. Existing old-format sandboxes and snapshots must be deleted or converted offline during the cutover. See [Pause And Resume](/docs/sandbox/pause-resume#persistent-and-ephemeral-paths) for the complete path policy.
+Older snapshot layers are filtered when restored, so legacy `/tmp` entries do not reappear. Reading and filtering a large legacy layer can make its first restore slower; later checkpoints omit that data. See [Pause And Resume](/docs/sandbox/pause-resume#persistent-and-ephemeral-paths) for the complete path policy.
 
 <Callout variant="info">
 The rootfs snapshot API stores snapshot metadata including `name`, `description`, and optional `expires_at`. Delete snapshots explicitly when cleanup workflows no longer need them.
@@ -49,9 +49,9 @@ The rootfs snapshot API stores snapshot metadata including `name`, `description`
 
 ## Storage Encryption
 
-Application-layer object encryption is enabled by default. Before manager or ctld writes persisted rootfs objects to S3-compatible storage, Sandbox0 encrypts them with AES-256-GCM. Each object receives a random data key, its contents are stored in independently authenticated chunks, and the data key is wrapped with the installation's RSA key.
+Application-layer object encryption is enabled by default. Before manager or ctld writes persisted rootfs layer and checkpoint objects to S3-compatible storage, Sandbox0 encrypts them with AES-256-GCM. Each object receives a random data key, its contents are stored in independently authenticated chunks, and the data key is wrapped with the installation's RSA key.
 
-This is service-side encryption, not end-to-end encryption: manager, the active ctld, and the rootfs snapshotter hold the installation key and can decrypt rootfs objects while serving sandbox operations. Existing plaintext objects remain readable after encryption is enabled, while new object writes use the encrypted format; enabling encryption does not rewrite historical objects automatically. Self-hosted deployments can configure this behavior with `spec.storage.runtime.objectEncryptionEnabled`; see [Service and Runtime Config](/docs/sandbox/self-hosted/configuration#service-and-runtime-config).
+This is service-side encryption, not end-to-end encryption: manager and the active ctld hold the installation key and can decrypt rootfs objects while serving sandbox operations. Existing plaintext objects remain readable after encryption is enabled, while new object writes use the encrypted format; enabling encryption does not rewrite historical objects automatically. Self-hosted deployments can configure this behavior with `spec.storage.runtime.objectEncryptionEnabled`; see [Service and Runtime Config](/docs/sandbox/self-hosted/configuration#service-and-runtime-config).
 
 ## Initialize Once, Claim Many
 

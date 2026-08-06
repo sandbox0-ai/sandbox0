@@ -118,9 +118,7 @@ Object-store request windows are usage facts; Sandbox0 does not attach prices.
 
 - manager and ctld aggregate provider HTTP attempts for one minute before writing them to the PostgreSQL outbox
 - volume requests are attributed from `sandboxvolumes/<team_id>/<volume_id>`
-- v3 rootfs CAS keys use an opaque team hash under `sandbox-rootfs/cow-v3/teams/...`; a retained PostgreSQL mapping resolves that prefix back to the owning team when request windows flush
-- v3 rootfs CAS requests use `subject_type=rootfs` and the team ID as `subject_id` because immutable objects can be shared by multiple sandboxes in the same team; they are not falsely assigned to one sandbox
-- bucket-wide rootfs maintenance listings that do not identify one team remain `rootfs_unknown` rather than receiving fabricated customer attribution
+- rootfs requests are attributed from `sandbox-rootfs/<team_id>/<sandbox_id>`
 - window `data` records `provider`, `bucket`, `billing_item`, `operation`, `cost_scope`, and `prefix_class`
 - requests to customer-owned external S3 volumes are excluded
 
@@ -182,7 +180,7 @@ spec:
 
 ### Sandbox RuntimeClass
 
-Sandbox Pods use the single `gvisor-rootfs` runtime family. `infra-operator` creates that Kubernetes `RuntimeClass`; the node image or bootstrap process must install `runsc` and configure the matching containerd handler and external snapshotter proxy.
+Use `services.manager.config.sandboxRuntimeClassName` when sandbox Pods should run with a non-default runtime such as `runc`, `gvisor`, or a custom `gvisor-rootfs` handler.
 
 ```yaml
 spec:
@@ -192,7 +190,9 @@ spec:
                 sandboxRuntimeClassName: gvisor-rootfs
 ```
 
-The field is fixed to `gvisor-rootfs`; other values are rejected by the operator API. `infra-operator` does not install `runsc`, write `/etc/containerd/config.toml`, or restart containerd. Do that through your node image, node bootstrap automation, or a dedicated privileged node setup process before scheduling sandbox workloads there.
+This field only controls the `runtimeClassName` written onto sandbox Pods. The named Kubernetes `RuntimeClass` must already exist, and its `handler` must already be configured in the node CRI runtime on every eligible sandbox node.
+
+`infra-operator` does not install node runtime handlers. It does not install `runsc`, write `/etc/containerd/config.toml`, restart containerd, or create a `gvisor-rootfs` handler. Do that through your node image, node bootstrap automation, or a dedicated privileged node setup process before scheduling sandbox workloads there.
 
 ### Procd Binary Image Volume
 
@@ -230,7 +230,7 @@ spec:
 
 Sandbox0 derives CPU from memory using `services.manager.config.teamTemplateMemoryPerCpu`, so callers do not set CPU directly on a sandbox claim or update.
 
-Configure containerd so the `gvisor-rootfs` handler points to `runsc` and selects the `sandbox0` external snapshotter proxy:
+For `gVisor` rootfs checkpoint and restore support on self-managed clusters, use a dedicated containerd handler that points to `runsc` with shared file access and overlay disabled, then create a matching `RuntimeClass`:
 
 ```toml
 # /etc/containerd/config.toml
@@ -238,15 +238,10 @@ version = 2
 
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs]
     runtime_type = "io.containerd.runsc.v1"
-    snapshotter = "sandbox0"
 
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor-rootfs.options]
     TypeUrl = "io.containerd.runsc.v1.options"
     ConfigPath = "/etc/containerd/runsc-rootfs.toml"
-
-[proxy_plugins.sandbox0]
-    type = "snapshot"
-    address = "/run/containerd/sandbox0-rootfs.sock"
 ```
 
 ```toml
@@ -256,7 +251,15 @@ version = 2
     file-access = "shared"
 ```
 
-Restart containerd after installing this configuration. The operator-managed rootfs snapshotter DaemonSet publishes the proxy socket. `sandboxRuntimeClassName` applies only to sandbox Pods; do not run ctld or the snapshotter under `gvisor-rootfs`.
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+    name: gvisor-rootfs
+handler: gvisor-rootfs
+```
+
+`sandboxRuntimeClassName` applies only to sandbox Pods. Ctld is a node-local host component and must use a runtime that supports its required `hostNetwork`, `hostPath`, FUSE, and network-programming access; do not run ctld under `gvisor`, `gvisor-rootfs`, or `kata`.
 
 `ctld` assumes the node's containerd data root is `/var/lib/containerd` by default. If your nodes move containerd data to another host path, configure the same path so rootfs pause/resume can use the overlayfs fast path:
 
@@ -267,7 +270,7 @@ spec:
             containerdHostDataRoot: /var/lib/containerd/sandbox0
 ```
 
-The external rootfs snapshotter keeps a disposable shared node-local object cache. This cache accelerates metadata lookup and cold lower reads. The default cap is `20Gi` per node. Set `rootfsObjectCacheMaxBytes: "0"` to disable it, or tune the GC fields to fit your node disk:
+`ctld` also keeps a disposable node-local rootfs object cache under its host data directory. This cache accelerates pause/resume when the restoring ctld already has the needed rootfs layer objects. The default cap is `20Gi` per ctld node. Set `rootfsObjectCacheMaxBytes: "0"` to disable it, or tune the GC fields to fit your node disk:
 
 ```yaml
 spec:
@@ -279,19 +282,7 @@ spec:
             rootfsObjectCacheSweepInterval: 1m
 ```
 
-Cache contents are safe to delete. If a cached object is missing, corrupt, too old, or evicted to preserve free space, the snapshotter downloads and verifies it again.
-
-Writable-rootfs I/O has these performance characteristics:
-
-- sandbox writes and reads of upper-layer files use the native node-local overlayfs path, not FUSE
-- unchanged files restored from a Head are read lazily; the initial implementation uses 1 MiB chunks, so a cold 4 KiB read can fetch and verify up to 1 MiB before later reads hit the shared disk cache
-- a directory lookup loads its index and one hash shard; large `readdir` operations stream shards instead of materializing the complete directory at once
-- changing any content in a regular upper-layer file currently makes capture reread and rechunk the complete file; content-addressed chunks avoid storing unchanged chunks again, but do not avoid that local read and hashing cost
-- `/tmp`, `/procd`, `/procd-image`, webhook state, Sandbox Volumes, and every other runtime-owned Pod VolumeMount are excluded from rootfs capture; their owning subsystem supplies them after runtime reconstruction
-- UNIX domain sockets are treated as process state and become absent in the published Head instead of making capture fail or reappearing as stale socket paths
-- read-only access-time changes are not durable rootfs state; use explicit application metadata instead of persisted `atime` as a workflow signal
-
-The snapshotter owns live FUSE mounts and uses an `OnDelete` DaemonSet update strategy. Drain the node before a planned snapshotter Pod replacement. An unexpected process restart cannot reconnect an existing overlay child to the replacement FUSE superblock: the node first becomes not-ready, then publishes the replacement process instance after its full readiness checks pass. Manager detects that instance change, barriers and seals the affected sandbox through the durable rootfs lifecycle, and recreates its runtime. A cold lower read can fail until that reconstruction completes, so this is automatic recovery rather than transparent mount failover.
+Cache contents are safe to delete. If a cached object is missing, corrupt, too old, or evicted to preserve free space, `ctld` downloads the rootfs object from configured object storage.
 
 ### Shared Redis Rate Limiting
 

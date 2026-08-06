@@ -239,6 +239,52 @@ func TestBindSandboxRootFSSyncRejectsMalformedClaimMounts(t *testing.T) {
 	assert.False(t, called.Load())
 }
 
+func TestBindSandboxRootFSSyncRejectsMountMetadataMismatch(t *testing.T) {
+	tests := []struct {
+		name       string
+		annotation string
+	}{
+		{name: "missing"},
+		{name: "null", annotation: "null"},
+		{name: "empty", annotation: "[]"},
+		{name: "different volume", annotation: `[{"sandboxvolume_id":"vol-2","mount_point":"/workspace"}]`},
+		{name: "partial", annotation: `[{"sandboxvolume_id":"vol-1","mount_point":"/workspace"}]`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var called atomic.Bool
+			ctld := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				called.Store(true)
+			}))
+			defer ctld.Close()
+			ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+			pod := rootFSTestPod("pod-mount-mismatch", "sandbox-1", "team-1")
+			pod.Status.HostIP = ctldURL.Hostname()
+			if test.annotation != "" {
+				pod.Annotations[controller.AnnotationMounts] = test.annotation
+			}
+			record := &sandboxstore.SandboxRecord{
+				ID:                "sandbox-1",
+				TeamID:            "team-1",
+				RuntimeGeneration: 1,
+				Mounts: []managerapi.ClaimMount{
+					{SandboxVolumeID: "vol-1", MountPoint: "/workspace"},
+					{SandboxVolumeID: "vol-3", MountPoint: "/data"},
+				},
+			}
+			svc := &SandboxService{
+				ctldClient: ctldapi.NewClientWithTimeout(time.Second),
+				config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+			}
+
+			err := svc.bindSandboxRootFSSync(context.Background(), pod, record)
+
+			require.ErrorContains(t, err, "resolve sandbox rootfs exclusions")
+			assert.False(t, called.Load())
+		})
+	}
+}
+
 func TestPrepareRootFSCheckpointAbandonsPartialSeal(t *testing.T) {
 	const sandboxID = "sandbox-1"
 	const teamID = "team-1"
@@ -797,7 +843,11 @@ func TestRootFSExcludedPathsForPodUsesBoundClaimMountPaths(t *testing.T) {
 		},
 	})
 
-	got, err := rootFSExcludedPathsForPod(pod)
+	got, err := rootFSExcludedPathsForPod(pod, []managerapi.ClaimMount{
+		{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data/"},
+		{SandboxVolumeID: "vol-2", MountPoint: "/workspace/database"},
+		{SandboxVolumeID: "vol-3", MountPoint: "/tmp/sandbox0-volume"},
+	})
 	require.NoError(t, err)
 
 	assert.ElementsMatch(t, []string{
@@ -814,7 +864,7 @@ func TestRootFSExcludedPathsForPodIncludesRuntimeMountsButNotUnboundPortals(t *t
 		Name: "runtime-config", MountPath: "/config",
 	})
 
-	got, err := rootFSExcludedPathsForPod(pod)
+	got, err := rootFSExcludedPathsForPod(pod, nil)
 	require.NoError(t, err)
 
 	assert.ElementsMatch(t, []string{"/tmp", "/procd", "/procd-image", volumeportal.WebhookStateMountPath, "/config"}, got)
@@ -825,7 +875,7 @@ func TestRootFSExcludedPathsForPodRejectsMalformedClaimMounts(t *testing.T) {
 	addRootFSTestVolumePortal(pod, "workspace", "/workspace")
 	pod.Annotations[controller.AnnotationMounts] = "{"
 
-	_, err := rootFSExcludedPathsForPod(pod)
+	_, err := rootFSExcludedPathsForPod(pod, nil)
 
 	require.ErrorContains(t, err, "decode "+controller.AnnotationMounts+" annotation")
 }

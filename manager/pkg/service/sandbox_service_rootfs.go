@@ -155,7 +155,7 @@ func (s *SandboxService) bindSandboxRootFSSync(ctx context.Context, pod *corev1.
 	if err != nil {
 		return err
 	}
-	excludedPaths, err := rootFSExcludedPathsForPod(pod)
+	excludedPaths, err := rootFSExcludedPathsForPod(pod, record.Mounts)
 	if err != nil {
 		return fmt.Errorf("resolve sandbox rootfs exclusions: %w", err)
 	}
@@ -391,22 +391,38 @@ func (s *SandboxService) rootFSPlatformForPod(pod *corev1.Pod) ocispec.Platform 
 	return platform
 }
 
-func rootFSExcludedPathsForPod(pod *corev1.Pod) ([]string, error) {
+func rootFSExcludedPathsForPod(pod *corev1.Pod, expectedMounts []managerapi.ClaimMount) ([]string, error) {
 	if pod == nil {
 		return nil, nil
 	}
-	var mounts []managerapi.ClaimMount
+	mounts, err := normalizeClaimMounts(expectedMounts)
+	if err != nil {
+		return nil, fmt.Errorf("validate durable sandbox mounts: %w", err)
+	}
+	rawMounts := ""
 	if pod.Annotations != nil {
-		rawMounts := strings.TrimSpace(pod.Annotations[controller.AnnotationMounts])
+		rawMounts = strings.TrimSpace(pod.Annotations[controller.AnnotationMounts])
+	}
+	var annotatedMounts []managerapi.ClaimMount
+	if rawMounts != "" {
+		if err := json.Unmarshal([]byte(rawMounts), &annotatedMounts); err != nil {
+			return nil, fmt.Errorf("decode %s annotation: %w", controller.AnnotationMounts, err)
+		}
+		annotatedMounts, err = normalizeClaimMounts(annotatedMounts)
+		if err != nil {
+			return nil, fmt.Errorf("validate %s annotation: %w", controller.AnnotationMounts, err)
+		}
+	}
+	if len(mounts) == 0 {
 		if rawMounts != "" {
-			if err := json.Unmarshal([]byte(rawMounts), &mounts); err != nil {
-				return nil, fmt.Errorf("decode %s annotation: %w", controller.AnnotationMounts, err)
-			}
-			var err error
-			mounts, err = normalizeClaimMounts(mounts)
-			if err != nil {
-				return nil, fmt.Errorf("validate %s annotation: %w", controller.AnnotationMounts, err)
-			}
+			return nil, fmt.Errorf("validate %s annotation: unexpected mounts metadata for sandbox without durable mounts", controller.AnnotationMounts)
+		}
+	} else {
+		if rawMounts == "" {
+			return nil, fmt.Errorf("validate %s annotation: mounts metadata is missing", controller.AnnotationMounts)
+		}
+		if !sameClaimMounts(mounts, annotatedMounts) {
+			return nil, fmt.Errorf("validate %s annotation: mounts metadata does not match durable sandbox state", controller.AnnotationMounts)
 		}
 	}
 	seen := make(map[string]struct{}, len(mounts)+8)
@@ -463,6 +479,22 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) ([]string, error) {
 		add(webhookStateMountPoint)
 	}
 	return out, nil
+}
+
+func sameClaimMounts(left, right []managerapi.ClaimMount) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	byMountPoint := make(map[string]string, len(left))
+	for _, mount := range left {
+		byMountPoint[mount.MountPoint] = mount.SandboxVolumeID
+	}
+	for _, mount := range right {
+		if byMountPoint[mount.MountPoint] != mount.SandboxVolumeID {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *sandboxstore.SandboxRecord) error {

@@ -217,6 +217,28 @@ func TestBindSandboxRootFSSyncWaitsThroughTransientInitialError(t *testing.T) {
 	assert.GreaterOrEqual(t, statusCalls.Load(), int32(2))
 }
 
+func TestBindSandboxRootFSSyncRejectsMalformedClaimMounts(t *testing.T) {
+	var called atomic.Bool
+	ctld := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called.Store(true)
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+	pod := rootFSTestPod("pod-malformed-mounts", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	pod.Annotations[controller.AnnotationMounts] = "{"
+	record := &sandboxstore.SandboxRecord{ID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1}
+	svc := &SandboxService{
+		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
+		config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+	}
+
+	err := svc.bindSandboxRootFSSync(context.Background(), pod, record)
+
+	require.ErrorContains(t, err, "resolve sandbox rootfs exclusions")
+	assert.False(t, called.Load())
+}
+
 func TestPrepareRootFSCheckpointAbandonsPartialSeal(t *testing.T) {
 	const sandboxID = "sandbox-1"
 	const teamID = "team-1"
@@ -775,7 +797,8 @@ func TestRootFSExcludedPathsForPodUsesBoundClaimMountPaths(t *testing.T) {
 		},
 	})
 
-	got := rootFSExcludedPathsForPod(pod)
+	got, err := rootFSExcludedPathsForPod(pod)
+	require.NoError(t, err)
 
 	assert.ElementsMatch(t, []string{
 		"/tmp", "/procd", "/procd-image",
@@ -791,9 +814,20 @@ func TestRootFSExcludedPathsForPodIncludesRuntimeMountsButNotUnboundPortals(t *t
 		Name: "runtime-config", MountPath: "/config",
 	})
 
-	got := rootFSExcludedPathsForPod(pod)
+	got, err := rootFSExcludedPathsForPod(pod)
+	require.NoError(t, err)
 
 	assert.ElementsMatch(t, []string{"/tmp", "/procd", "/procd-image", volumeportal.WebhookStateMountPath, "/config"}, got)
+}
+
+func TestRootFSExcludedPathsForPodRejectsMalformedClaimMounts(t *testing.T) {
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	addRootFSTestVolumePortal(pod, "workspace", "/workspace")
+	pod.Annotations[controller.AnnotationMounts] = "{"
+
+	_, err := rootFSExcludedPathsForPod(pod)
+
+	require.ErrorContains(t, err, "decode "+controller.AnnotationMounts+" annotation")
 }
 
 func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {

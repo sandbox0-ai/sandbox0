@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -154,12 +155,16 @@ func (s *SandboxService) bindSandboxRootFSSync(ctx context.Context, pod *corev1.
 	if err != nil {
 		return err
 	}
+	excludedPaths, err := rootFSExcludedPathsForPod(pod)
+	if err != nil {
+		return fmt.Errorf("resolve sandbox rootfs exclusions: %w", err)
+	}
 	request := ctldapi.BindRootFSSyncRequest{
 		Target:            rootFSTargetForPod(pod),
 		SandboxID:         record.ID,
 		TeamID:            record.TeamID,
 		RuntimeGeneration: runtimeGenerationFromPod(pod),
-		ExcludedPaths:     rootFSExcludedPathsForPod(pod),
+		ExcludedPaths:     excludedPaths,
 	}
 	if parent != nil {
 		request.Parent = cloneRootFSHeadReference(&parent.Reference)
@@ -386,13 +391,23 @@ func (s *SandboxService) rootFSPlatformForPod(pod *corev1.Pod) ocispec.Platform 
 	return platform
 }
 
-func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
+func rootFSExcludedPathsForPod(pod *corev1.Pod) ([]string, error) {
 	if pod == nil {
-		return nil
+		return nil, nil
 	}
 	var mounts []managerapi.ClaimMount
 	if pod.Annotations != nil {
-		mounts = parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
+		rawMounts := strings.TrimSpace(pod.Annotations[controller.AnnotationMounts])
+		if rawMounts != "" {
+			if err := json.Unmarshal([]byte(rawMounts), &mounts); err != nil {
+				return nil, fmt.Errorf("decode %s annotation: %w", controller.AnnotationMounts, err)
+			}
+			var err error
+			mounts, err = normalizeClaimMounts(mounts)
+			if err != nil {
+				return nil, fmt.Errorf("validate %s annotation: %w", controller.AnnotationMounts, err)
+			}
+		}
 	}
 	seen := make(map[string]struct{}, len(mounts)+8)
 	out := make([]string, 0, len(mounts)+8)
@@ -447,7 +462,7 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	if pod.Annotations != nil && strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID]) != "" {
 		add(webhookStateMountPoint)
 	}
-	return out
+	return out, nil
 }
 
 func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *sandboxstore.SandboxRecord) error {

@@ -611,6 +611,14 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 
 			const sandboxID = "sandbox-1"
 			currentPod := rootFSTestPod("pod-current", sandboxID, "team-1")
+			currentPod.UID = types.UID("warm-runtime-uid")
+			currentPod.Spec.Containers[0].Image = "registry.example.com/template@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			currentPod.Spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
+			currentPod.Spec.Containers = append(currentPod.Spec.Containers, corev1.Container{
+				Name: "sidecar", Image: "registry.example.com/sidecar:v1", ImagePullPolicy: corev1.PullAlways,
+			})
+			currentPod.Status.ContainerStatuses[0].Image = currentPod.Spec.Containers[0].Image
+			currentPod.Status.ContainerStatuses[0].ImageID = "containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 			currentPod.Status.HostIP = ctldURL.Hostname()
 			currentPod.Status.PodIP = "10.0.0.10"
 			head := rootFSHeadTestFixture(t, sandboxID, "team-1", "head-v1", 3)
@@ -633,28 +641,28 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 					dataplane.NodeRootFSSnapshotterInstanceAnnotation: snapshotterInstance,
 				},
 			}}
-			client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
-				deleted, exists, err := indexer.GetByKey(currentPod.Namespace + "/" + action.(ktesting.DeleteAction).GetName())
-				if err == nil && exists {
-					_ = indexer.Delete(deleted)
+			client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+				updated := action.(ktesting.UpdateAction).GetObject().(*corev1.Pod)
+				if updated.Spec.Containers[0].Image != head.Image.Name {
+					return false, nil, nil
 				}
-				return false, nil, nil
-			})
-			scheduleCreatedClaimPodInIndexer(t, client, indexer, func(pod *corev1.Pod) {
-				require.Len(t, pod.Spec.Containers, 1)
-				assert.Equal(t, head.Image.Name, pod.Spec.Containers[0].Image)
-				assert.Equal(t, corev1.PullNever, pod.Spec.Containers[0].ImagePullPolicy)
-				assert.Equal(t, snapshotterInstance, pod.Annotations[controller.AnnotationRootFSSnapshotterInstance])
-				pod.UID = types.UID("rootfs-runtime-uid")
-				pod.Status.HostIP = ctldURL.Hostname()
-				pod.Status.PodIP = "10.0.0.11"
-				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-					Name: "procd", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				require.Equal(t, types.UID("warm-runtime-uid"), updated.UID)
+				assert.Equal(t, corev1.PullIfNotPresent, updated.Spec.Containers[0].ImagePullPolicy)
+				require.Len(t, updated.Spec.Containers, 2)
+				assert.Equal(t, "registry.example.com/sidecar:v1", updated.Spec.Containers[1].Image)
+				assert.Equal(t, corev1.PullAlways, updated.Spec.Containers[1].ImagePullPolicy)
+				assert.Equal(t, snapshotterInstance, updated.Annotations[controller.AnnotationRootFSSnapshotterInstance])
+				assert.Equal(t, head.Reference.HeadID, updated.Annotations[controller.AnnotationRootFSHeadID])
+				assert.Equal(t, head.Image.Name, updated.Annotations[controller.AnnotationRootFSHeadImage])
+				updated.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name:    "procd",
+					Image:   head.Image.Name,
+					ImageID: "containerd://" + head.Image.ManifestDigest,
+					Ready:   true,
+					State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 				}}
-				pod.Status.Conditions = []corev1.PodCondition{
-					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
-					{Type: v1alpha1.SandboxPodReadinessConditionType, Status: corev1.ConditionTrue},
-				}
+				require.NoError(t, indexer.Update(updated.DeepCopy()))
+				return false, nil, nil
 			})
 			installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(activePod *corev1.Pod) {
 				require.Equal(t, []string{"materialize", "bind"}, calls)
@@ -692,11 +700,141 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 			restoredPod, err := svc.finishRestoredSandboxRuntime(context.Background(), currentPod, record, "hot")
 
 			require.NoError(t, err)
-			assert.NotEqual(t, currentPod.Name, restoredPod.Name)
+			assert.Equal(t, currentPod.Name, restoredPod.Name)
+			assert.Equal(t, currentPod.UID, restoredPod.UID)
+			assert.Equal(t, currentPod.Status.PodIP, restoredPod.Status.PodIP)
 			assert.Equal(t, []string{"materialize", "bind", "runtime"}, calls)
 			assert.Equal(t, head.Reference.HeadID, materializeReq.Reference.HeadID)
+			for _, action := range client.Actions() {
+				assert.NotEqual(t, "create", action.GetVerb(), "warm rootfs activation must not create a second Pod")
+				assert.NotEqual(t, "delete", action.GetVerb(), "warm rootfs activation must not delete the claimed Pod")
+			}
 		})
 	}
+}
+
+func TestPodRootFSHeadReadyRejectsStaleContainerStatus(t *testing.T) {
+	head := rootFSHeadTestFixture(t, "sandbox-1", "team-1", "head-v1", 3)
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Spec.Containers[0].Image = head.Image.Name
+	pod.Annotations[controller.AnnotationRootFSHeadID] = head.Reference.HeadID
+	pod.Annotations[controller.AnnotationRootFSHeadImage] = head.Image.Name
+	pod.Status.ContainerStatuses[0].Image = "registry.example.com/previous:latest"
+	pod.Status.ContainerStatuses[0].ImageID = "containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	ready, reason := podRootFSHeadReady(pod, head)
+
+	assert.False(t, ready)
+	assert.Contains(t, reason, "previous image")
+	pod.Status.ContainerStatuses[0].ImageID = "containerd://" + head.Image.ManifestDigest
+	ready, reason = podRootFSHeadReady(pod, head)
+	assert.True(t, ready)
+	assert.Empty(t, reason)
+}
+
+func TestWaitForPodRootFSHeadReadyWaitsForNewContainerStatus(t *testing.T) {
+	head := rootFSHeadTestFixture(t, "sandbox-1", "team-1", "head-v1", 3)
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Spec.Containers[0].Image = head.Image.Name
+	pod.Annotations[controller.AnnotationRootFSHeadID] = head.Reference.HeadID
+	pod.Annotations[controller.AnnotationRootFSHeadImage] = head.Image.Name
+	pod.Status.ContainerStatuses[0].Image = "registry.example.com/previous:latest"
+	indexer := newClaimTestPodIndexer(t, pod)
+	svc := &SandboxService{
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
+	}
+	handler := svc.PodEventHandler()
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		updated := pod.DeepCopy()
+		updated.Status.ContainerStatuses[0].Image = head.Image.Name
+		updated.Status.ContainerStatuses[0].ImageID = "containerd://" + head.Image.ManifestDigest
+		if err := indexer.Update(updated); err != nil {
+			t.Errorf("update pod: %v", err)
+			return
+		}
+		handler.UpdateFunc(pod, updated)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyPod, err := svc.waitForPodRootFSHeadReady(ctx, pod.Namespace, pod.Name, head)
+
+	require.NoError(t, err)
+	ready, reason := podRootFSHeadReady(readyPod, head)
+	assert.True(t, ready, reason)
+}
+
+func TestActivateRuntimeWithRootFSHeadReplacesAlwaysPullPod(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	var materializeReq ctldapi.MaterializeRootFSHeadRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/heads/materialize", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&materializeReq))
+		require.NoError(t, json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{
+			Materialized: true,
+			ImageName:    materializeReq.Image.Name,
+		}))
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	current := rootFSTestPod("pod-current", "sandbox-1", "team-1")
+	current.Spec.Containers[0].Image = "registry.example.com/template:latest"
+	current.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+	current.Status.HostIP = ctldURL.Hostname()
+	indexer := newClaimTestPodIndexer(t, current)
+	client := fake.NewSimpleClientset(current.DeepCopy())
+	client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		deleted, exists, err := indexer.GetByKey(current.Namespace + "/" + action.(ktesting.DeleteAction).GetName())
+		if err == nil && exists {
+			_ = indexer.Delete(deleted)
+		}
+		return false, nil, nil
+	})
+	snapshotterInstance := "snapshotter-pod/0/containerd://snapshotter"
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: current.Spec.NodeName,
+		Annotations: map[string]string{
+			dataplane.NodeRootFSSnapshotterInstanceAnnotation: snapshotterInstance,
+		},
+	}}
+	head := rootFSHeadTestFixture(t, "sandbox-1", "team-1", "head-v1", 3)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-1", Namespace: current.Namespace},
+		Spec: v1alpha1.SandboxTemplateSpec{MainContainer: v1alpha1.ContainerSpec{
+			Image: "registry.example.com/template:latest", ImagePullPolicy: string(corev1.PullAlways),
+		}},
+	}
+	svc := &SandboxService{
+		k8sClient:              client,
+		podLister:              corelisters.NewPodLister(indexer),
+		nodeLister:             newClaimTestNodeLister(t, node),
+		secretLister:           newClaimTestSecretLister(t),
+		ctldClient:             ctldapi.NewClientWithTimeout(time.Second),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	replacement, recreated, err := svc.activateRuntimeWithRootFSHead(context.Background(), current, template, &ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "template-1", SandboxID: "sandbox-1", RuntimeGeneration: 4,
+	}, head)
+
+	require.NoError(t, err)
+	assert.True(t, recreated)
+	assert.NotEqual(t, current.Name, replacement.Name)
+	require.Len(t, replacement.Spec.Containers, 1)
+	assert.Equal(t, head.Image.Name, replacement.Spec.Containers[0].Image)
+	assert.Equal(t, corev1.PullNever, replacement.Spec.Containers[0].ImagePullPolicy)
+	assert.Equal(t, current.Spec.NodeName, replacement.Spec.NodeName)
+	assert.Equal(t, snapshotterInstance, replacement.Annotations[controller.AnnotationRootFSSnapshotterInstance])
 }
 
 func TestFinishRestoredSandboxRuntimeUsesTemplateBaselineWithoutPublishedHead(t *testing.T) {

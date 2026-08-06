@@ -41,6 +41,8 @@ const (
 	AnnotationSandboxID                    = "sandbox0.ai/sandbox-id"
 	AnnotationRuntimeGeneration            = "sandbox0.ai/runtime-generation"
 	AnnotationRootFSSnapshotterInstance    = "sandbox0.ai/rootfs-snapshotter-instance"
+	AnnotationRootFSHeadID                 = "sandbox0.ai/rootfs-head-id"
+	AnnotationRootFSHeadImage              = "sandbox0.ai/rootfs-head-image"
 	AnnotationWebhookStateVolumeID         = "sandbox0.ai/webhook-state-volume-id"
 	AnnotationHotClaimReservation          = "sandbox0.ai/hot-claim-reservation"
 	AnnotationHotClaimReservationState     = "sandbox0.ai/hot-claim-reservation-state"

@@ -11,17 +11,14 @@ import (
 	"time"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const sandboxRootFSContainerName = "procd"
@@ -296,63 +293,6 @@ func currentRootFSHeadID(ctx context.Context, tx sandboxstore.SandboxStoreTx, sa
 		return "", err
 	}
 	return head.Reference.HeadID, nil
-}
-
-func (s *SandboxService) replaceRuntimeWithRootFSHead(ctx context.Context, current *corev1.Pod, template *v1alpha1.SandboxTemplate, req *ClaimRequest, head *sandboxstore.SandboxRootFSHead) (*corev1.Pod, error) {
-	if s == nil || s.ctldClient == nil || current == nil || template == nil || req == nil || head == nil {
-		return current, fmt.Errorf("rootfs Head runtime replacement inputs are required")
-	}
-	nodeName := strings.TrimSpace(current.Spec.NodeName)
-	if nodeName == "" {
-		return current, fmt.Errorf("rootfs Head runtime source pod is not scheduled")
-	}
-	ctldAddress, err := s.ctldAddressForPod(ctx, current)
-	if err != nil {
-		return current, err
-	}
-	materialized, err := s.ctldClient.MaterializeRootFSHead(ctx, ctldAddress, ctldapi.MaterializeRootFSHeadRequest{
-		Reference: head.Reference,
-		Image:     head.Image,
-	}, sandboxRootFSOperationTimeout)
-	if err != nil {
-		message := ""
-		if materialized != nil {
-			message = materialized.Error
-		}
-		return current, fmt.Errorf("materialize sandbox rootfs Head: %w", rootFSResponseError(err, message))
-	}
-	if materialized == nil || !materialized.Materialized || materialized.ImageName != head.Image.Name {
-		return current, fmt.Errorf("materialize sandbox rootfs Head: ctld did not confirm image %s", head.Image.Name)
-	}
-	if s.nodeLister == nil {
-		return current, fmt.Errorf("resolve rootfs snapshotter instance: node cache is not configured")
-	}
-	node, err := s.nodeLister.Get(nodeName)
-	if err != nil {
-		return current, fmt.Errorf("resolve rootfs snapshotter instance on node %s: %w", nodeName, err)
-	}
-	snapshotterInstance := strings.TrimSpace(node.Annotations[dataplane.NodeRootFSSnapshotterInstanceAnnotation])
-	if snapshotterInstance == "" {
-		return current, fmt.Errorf("rootfs snapshotter instance is not published on node %s", nodeName)
-	}
-
-	rootFSTemplate := template.DeepCopy()
-	rootFSTemplate.Spec.MainContainer.Image = head.Image.Name
-	rootFSTemplate.Spec.MainContainer.ImagePullPolicy = string(corev1.PullNever)
-	if err := s.k8sClient.CoreV1().Pods(current.Namespace).Delete(ctx, current.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return current, fmt.Errorf("delete template runtime before rootfs Head attach: %w", err)
-	}
-	if err := s.waitForSandboxRuntimePodDeletion(ctx, current.Namespace, current.Name); err != nil {
-		return current, err
-	}
-	replacementRequest := *req
-	replacementRequest.PreferredNodeName = nodeName
-	replacementRequest.RootFSSnapshotterInstance = snapshotterInstance
-	replacement, err := s.createNewPod(ctx, rootFSTemplate, &replacementRequest)
-	if err != nil {
-		return current, fmt.Errorf("create rootfs Head runtime: %w", err)
-	}
-	return replacement, nil
 }
 
 const rootFSPlatformVariantLabel = "sandbox0.ai/platform-variant"

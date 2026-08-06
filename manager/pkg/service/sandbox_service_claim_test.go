@@ -1359,9 +1359,19 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
 	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
+	idlePod.UID = types.UID("warm-runtime-uid")
 	idlePod.Spec.NodeName = "node-a"
+	idlePod.Spec.Containers[0].Image = "registry.example.com/template@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	idlePod.Spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
 	idlePod.Status.HostIP = ctldURL.Hostname()
 	idlePod.Status.PodIP = "10.0.0.10"
+	idlePod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:    "procd",
+		Image:   idlePod.Spec.Containers[0].Image,
+		ImageID: "containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Ready:   true,
+		State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
 	snapshotterInstance := "snapshotter-pod/0/containerd://snapshotter"
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
 		Name: idlePod.Spec.NodeName,
@@ -1388,27 +1398,25 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 	}
 	indexer := newClaimTestPodIndexer(t, idlePod)
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
-	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		deleted, exists, err := indexer.GetByKey(templateNamespace + "/" + action.(k8stesting.DeleteAction).GetName())
-		if err == nil && exists {
-			_ = indexer.Delete(deleted)
+	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		updated := action.(k8stesting.UpdateAction).GetObject().(*corev1.Pod)
+		if updated.Spec.Containers[0].Image != sourceHead.Image.Name {
+			return false, nil, nil
 		}
-		return false, nil, nil
-	})
-	scheduleCreatedClaimPodInIndexer(t, client, indexer, func(pod *corev1.Pod) {
-		if got := pod.Annotations[controller.AnnotationRootFSSnapshotterInstance]; got != snapshotterInstance {
+		if got := updated.Annotations[controller.AnnotationRootFSSnapshotterInstance]; got != snapshotterInstance {
 			t.Fatalf("rootfs snapshotter instance = %q, want %q", got, snapshotterInstance)
 		}
-		pod.UID = types.UID("rootfs-runtime-uid")
-		pod.Status.HostIP = ctldURL.Hostname()
-		pod.Status.PodIP = "10.0.0.11"
-		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name: "procd", Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		updated.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:    "procd",
+			Image:   sourceHead.Image.Name,
+			ImageID: "containerd://" + sourceHead.Image.ManifestDigest,
+			Ready:   true,
+			State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 		}}
-		pod.Status.Conditions = []corev1.PodCondition{
-			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
-			{Type: v1alpha1.SandboxPodReadinessConditionType, Status: corev1.ConditionTrue},
+		if err := indexer.Update(updated.DeepCopy()); err != nil {
+			return true, nil, err
 		}
+		return false, nil, nil
 	})
 	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(*corev1.Pod) {
 		if len(calls) == 0 || calls[0] != "materialize" {
@@ -1459,6 +1467,14 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 	record := store.records[resp.SandboxID]
 	if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive {
 		t.Fatalf("record = %+v, want active claimed sandbox", record)
+	}
+	if record.CurrentPodName != idlePod.Name {
+		t.Fatalf("restored pod = %q, want warm pod %q", record.CurrentPodName, idlePod.Name)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "create" || action.GetVerb() == "delete" {
+			t.Fatalf("warm snapshot restore used %s instead of updating the claimed Pod", action.GetVerb())
+		}
 	}
 }
 

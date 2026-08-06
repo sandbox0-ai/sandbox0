@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/s0fs"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 )
@@ -26,6 +28,9 @@ func TestPortalMountOptionsDisableUnsupportedIDMapCapability(t *testing.T) {
 	opts := portalMountOptions()
 	if opts.DisabledCapabilities&fuse.CAP_ALLOW_IDMAP == 0 {
 		t.Fatal("portal mount options enable FUSE_ALLOW_IDMAP without default_permissions")
+	}
+	if opts.MaxWrite != 1<<20 {
+		t.Fatalf("portal max write = %d, want %d", opts.MaxWrite, 1<<20)
 	}
 }
 
@@ -166,6 +171,7 @@ func TestShutdownDrainsPublishedAndOwnerOnlyVolumes(t *testing.T) {
 	rootDir := t.TempDir()
 	var detachedTarget string
 	mgr := &Manager{
+		rootDir: rootDir,
 		staleMountCleaner: func(path string) error {
 			detachedTarget = path
 			return os.RemoveAll(path)
@@ -183,7 +189,7 @@ func TestShutdownDrainsPublishedAndOwnerOnlyVolumes(t *testing.T) {
 		podUID:            "pod-1",
 		name:              "workspace",
 		targetPath:        filepath.Join(rootDir, "target"),
-		rootfsBackingPath: filepath.Join(rootDir, "rootfs"),
+		rootfsBackingPath: filepath.Join(rootDir, "rootfs-portals", "pod-1", "workspace"),
 		volumeID:          "vol-portal",
 	}
 	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
@@ -223,6 +229,219 @@ func TestShutdownDrainsPublishedAndOwnerOnlyVolumes(t *testing.T) {
 	}
 	if _, err := os.Stat(pm.rootfsBackingPath); !os.IsNotExist(err) {
 		t.Fatalf("rootfs backing stat error = %v, want not exist", err)
+	}
+}
+
+func TestUnpublishPortalPreservesOverlayAttachedRootFSBacking(t *testing.T) {
+	managerRoot := t.TempDir()
+	overlayRoot := filepath.Join(t.TempDir(), "upper", "workspace")
+	if err := os.MkdirAll(overlayRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", overlayRoot, err)
+	}
+	marker := filepath.Join(overlayRoot, "marker.txt")
+	if err := os.WriteFile(marker, []byte("persistent"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", marker, err)
+	}
+	session, err := newRootFSBackedSessionWithState(overlayRoot, "")
+	if err != nil {
+		t.Fatalf("newRootFSBackedSessionWithState() error = %v", err)
+	}
+	mgr := NewManager(Config{RootDir: managerRoot})
+	pm := &portalMount{
+		podUID:            "pod-1",
+		name:              "workspace",
+		targetPath:        filepath.Join(managerRoot, "target"),
+		rootfsBackingPath: overlayRoot,
+		rootfsSession:     session,
+	}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+	mgr.portalsByTarget[pm.targetPath] = pm
+
+	if err := mgr.UnpublishPortal(pm.targetPath); err != nil {
+		t.Fatalf("UnpublishPortal() error = %v", err)
+	}
+	payload, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", marker, err)
+	}
+	if string(payload) != "persistent" {
+		t.Fatalf("marker content = %q, want persistent", string(payload))
+	}
+}
+
+func TestEnsureRootFSBackingTargetCreatesRealDirectories(t *testing.T) {
+	upper := t.TempDir()
+	target, err := ensureRootFSBackingTarget(upper, "/workspace/project")
+	if err != nil {
+		t.Fatalf("ensureRootFSBackingTarget() error = %v", err)
+	}
+	want := filepath.Join(upper, "workspace", "project")
+	if target != want {
+		t.Fatalf("target = %q, want %q", target, want)
+	}
+	info, err := os.Stat(target)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("target directory stat = %#v, %v", info, err)
+	}
+}
+
+func TestEnsureRootFSBackingTargetRejectsSymlinkAncestor(t *testing.T) {
+	upper := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(upper, "workspace")); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	if _, err := ensureRootFSBackingTarget(upper, "/workspace/project"); err == nil {
+		t.Fatal("ensureRootFSBackingTarget() error = nil, want symlink rejection")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "project")); !os.IsNotExist(err) {
+		t.Fatalf("outside project stat error = %v, want not exist", err)
+	}
+}
+
+func TestAttachRootFSBackingsFailsClosedAfterEarlyPortalWrite(t *testing.T) {
+	mgr := NewManager(Config{RootDir: t.TempDir()})
+	staging := mgr.unboundRootFSBackingPath("pod-1", "workspace")
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", staging, err)
+	}
+	marker := filepath.Join(staging, "early.txt")
+	if err := os.WriteFile(marker, []byte("early"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", marker, err)
+	}
+	session, err := newRootFSBackedSessionWithState(staging, "")
+	if err != nil {
+		t.Fatalf("newRootFSBackedSessionWithState() error = %v", err)
+	}
+	defer session.Close()
+	pm := &portalMount{
+		podUID:            "pod-1",
+		name:              "workspace",
+		mountPath:         "/workspace",
+		rootfsBackingPath: staging,
+		rootfsSession:     session,
+	}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+
+	err = mgr.AttachRootFSBackings(context.Background(), "pod-1", t.TempDir())
+	if err == nil {
+		t.Fatal("AttachRootFSBackings() error = nil, want early-write rejection")
+	}
+	payload, readErr := os.ReadFile(marker)
+	if readErr != nil || string(payload) != "early" {
+		t.Fatalf("staging marker = %q, %v, want early", string(payload), readErr)
+	}
+	if session.rootPath() != staging {
+		t.Fatalf("session root = %q, want %q", session.rootPath(), staging)
+	}
+}
+
+func TestAttachRootFSBackingsRebasesUnboundPortalOntoMergedRoot(t *testing.T) {
+	mgr := NewManager(Config{RootDir: t.TempDir()})
+	// This test exercises attachment behavior independently from recovery-store
+	// validation; production portals have a FUSE INIT request in their manifest.
+	mgr.recoveryStore = nil
+	staging := mgr.unboundRootFSBackingPath("pod-1", "workspace")
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", staging, err)
+	}
+	session, err := newRootFSBackedSessionWithState(staging, "")
+	if err != nil {
+		t.Fatalf("newRootFSBackedSessionWithState() error = %v", err)
+	}
+	defer session.Close()
+	pm := &portalMount{
+		podUID:            "pod-1",
+		name:              "workspace",
+		mountPath:         "/workspace",
+		rootfsBackingPath: staging,
+		rootfsSession:     session,
+	}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+	merged := t.TempDir()
+	want := filepath.Join(merged, "workspace")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", want, err)
+	}
+	restored := filepath.Join(want, "restored.txt")
+	if err := os.WriteFile(restored, []byte("from-head"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", restored, err)
+	}
+
+	if err := mgr.AttachRootFSBackings(context.Background(), "pod-1", merged); err != nil {
+		t.Fatalf("AttachRootFSBackings() error = %v", err)
+	}
+	if pm.rootfsBackingPath != want || session.rootPath() != want {
+		t.Fatalf("attached roots = %q/%q, want %q", pm.rootfsBackingPath, session.rootPath(), want)
+	}
+	payload, err := os.ReadFile(session.hostPath("restored.txt"))
+	if err != nil || string(payload) != "from-head" {
+		t.Fatalf("restored portal content = %q, %v, want from-head", string(payload), err)
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Fatalf("staging root stat error = %v, want not exist", err)
+	}
+}
+
+func TestAttachRootFSBackingsSkipsBoundVolumes(t *testing.T) {
+	mgr := NewManager(Config{RootDir: t.TempDir()})
+	pm := &portalMount{
+		podUID:    "pod-1",
+		name:      "workspace",
+		mountPath: "/workspace",
+		volumeID:  "volume-1",
+	}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+	if err := mgr.AttachRootFSBackings(context.Background(), "pod-1", t.TempDir()); err != nil {
+		t.Fatalf("AttachRootFSBackings() error = %v", err)
+	}
+}
+
+func TestAttachRootFSBackingsSkipsRuntimeOwnedWebhookPortal(t *testing.T) {
+	mgr := NewManager(Config{RootDir: t.TempDir()})
+	staging := mgr.unboundRootFSBackingPath("pod-1", volumeportal.WebhookStatePortalName)
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", staging, err)
+	}
+	marker := filepath.Join(staging, "runtime-state")
+	if err := os.WriteFile(marker, []byte("runtime"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", marker, err)
+	}
+	pm := &portalMount{
+		podUID:            "pod-1",
+		name:              volumeportal.WebhookStatePortalName,
+		mountPath:         volumeportal.WebhookStateMountPath,
+		rootfsBackingPath: staging,
+	}
+	mgr.portals[portalKey(pm.podUID, pm.name)] = pm
+
+	if err := mgr.AttachRootFSBackings(context.Background(), "pod-1", t.TempDir()); err != nil {
+		t.Fatalf("AttachRootFSBackings() error = %v", err)
+	}
+	payload, err := os.ReadFile(marker)
+	if err != nil || string(payload) != "runtime" {
+		t.Fatalf("runtime marker = %q, %v, want runtime", string(payload), err)
+	}
+}
+
+func TestPrepareRecoveryRootFSBackingDoesNotRecreateExternalPath(t *testing.T) {
+	mgr := NewManager(Config{RootDir: t.TempDir()})
+	external := filepath.Join(t.TempDir(), "task-root", "workspace")
+
+	err := mgr.prepareRecoveryRootFSBacking(external)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prepareRecoveryRootFSBacking() error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Dir(external)); !os.IsNotExist(err) {
+		t.Fatalf("external parent stat error = %v, want not exist", err)
+	}
+
+	owned := mgr.unboundRootFSBackingPath("pod-1", "workspace")
+	if err := mgr.prepareRecoveryRootFSBacking(owned); err != nil {
+		t.Fatalf("prepareRecoveryRootFSBacking(owned) error = %v", err)
+	}
+	if info, err := os.Stat(owned); err != nil || !info.IsDir() {
+		t.Fatalf("owned backing stat = %#v, %v, want directory", info, err)
 	}
 }
 

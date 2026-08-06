@@ -371,7 +371,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller:  probeController,
 		Portal:      portalManager,
-		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, containerdRuntime, dbPool, ctldMetricsRegistry),
+		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, containerdRuntime, portalManager, dbPool, ctldMetricsRegistry),
 		ReadyCheck:  serviceReady,
 		HealthCheck: serviceHealthy,
 	})
@@ -601,6 +601,7 @@ func buildRootFSController(
 	storageCfg *apiconfig.StorageProxyConfig,
 	requestObserver objectstore.RequestObserver,
 	runtime *ctldrootfs.ContainerdRuntime,
+	portalBackings *ctldportal.Manager,
 	dbPool *pgxpool.Pool,
 	metricsRegistry prometheus.Registerer,
 ) rootFSHandler {
@@ -611,6 +612,7 @@ func buildRootFSController(
 	return ctldrootfs.NewController(ctldrootfs.Config{
 		Context:         ctx,
 		Runtime:         runtime,
+		PortalBackings:  portalBackings,
 		Store:           store,
 		WatchFenceRoot:  filepath.Join(portalRoot, "rootfs-watch-fences", strings.TrimSpace(haSlot)),
 		CaptureLeases:   rootfslease.NewRepository(dbPool),

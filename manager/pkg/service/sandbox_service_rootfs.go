@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
+	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -153,12 +155,16 @@ func (s *SandboxService) bindSandboxRootFSSync(ctx context.Context, pod *corev1.
 	if err != nil {
 		return err
 	}
+	excludedPaths, err := rootFSExcludedPathsForPod(pod, record.Mounts)
+	if err != nil {
+		return fmt.Errorf("resolve sandbox rootfs exclusions: %w", err)
+	}
 	request := ctldapi.BindRootFSSyncRequest{
 		Target:            rootFSTargetForPod(pod),
 		SandboxID:         record.ID,
 		TeamID:            record.TeamID,
 		RuntimeGeneration: runtimeGenerationFromPod(pod),
-		ExcludedPaths:     rootFSExcludedPathsForPod(pod),
+		ExcludedPaths:     excludedPaths,
 	}
 	if parent != nil {
 		request.Parent = cloneRootFSHeadReference(&parent.Reference)
@@ -385,13 +391,39 @@ func (s *SandboxService) rootFSPlatformForPod(pod *corev1.Pod) ocispec.Platform 
 	return platform
 }
 
-func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
+func rootFSExcludedPathsForPod(pod *corev1.Pod, expectedMounts []managerapi.ClaimMount) ([]string, error) {
 	if pod == nil {
-		return nil
+		return nil, nil
 	}
-	var mounts []managerapi.ClaimMount
+	mounts, err := normalizeClaimMounts(expectedMounts)
+	if err != nil {
+		return nil, fmt.Errorf("validate durable sandbox mounts: %w", err)
+	}
+	rawMounts := ""
 	if pod.Annotations != nil {
-		mounts = parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
+		rawMounts = strings.TrimSpace(pod.Annotations[controller.AnnotationMounts])
+	}
+	var annotatedMounts []managerapi.ClaimMount
+	if rawMounts != "" {
+		if err := json.Unmarshal([]byte(rawMounts), &annotatedMounts); err != nil {
+			return nil, fmt.Errorf("decode %s annotation: %w", controller.AnnotationMounts, err)
+		}
+		annotatedMounts, err = normalizeClaimMounts(annotatedMounts)
+		if err != nil {
+			return nil, fmt.Errorf("validate %s annotation: %w", controller.AnnotationMounts, err)
+		}
+	}
+	if len(mounts) == 0 {
+		if rawMounts != "" {
+			return nil, fmt.Errorf("validate %s annotation: unexpected mounts metadata for sandbox without durable mounts", controller.AnnotationMounts)
+		}
+	} else {
+		if rawMounts == "" {
+			return nil, fmt.Errorf("validate %s annotation: mounts metadata is missing", controller.AnnotationMounts)
+		}
+		if !sameClaimMounts(mounts, annotatedMounts) {
+			return nil, fmt.Errorf("validate %s annotation: mounts metadata does not match durable sandbox state", controller.AnnotationMounts)
+		}
 	}
 	seen := make(map[string]struct{}, len(mounts)+8)
 	out := make([]string, 0, len(mounts)+8)
@@ -414,11 +446,28 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	add("/tmp")
 	add("/procd")
 	add("/procd-image")
+	rootFSBackedPortalVolumes := make(map[string]struct{})
+	for _, volume := range pod.Spec.Volumes {
+		if volume.CSI != nil && volume.CSI.Driver == volumeportal.DriverName {
+			attributes := volume.CSI.VolumeAttributes
+			if attributes[volumeportal.AttributePortalName] == volumeportal.WebhookStatePortalName ||
+				path.Clean(strings.TrimSpace(attributes[volumeportal.AttributeMountPath])) == volumeportal.WebhookStateMountPath {
+				continue
+			}
+			rootFSBackedPortalVolumes[volume.Name] = struct{}{}
+		}
+	}
 	for _, container := range pod.Spec.Containers {
 		if container.Name != sandboxRootFSContainerName {
 			continue
 		}
 		for _, mount := range container.VolumeMounts {
+			if _, rootFSBackedPortal := rootFSBackedPortalVolumes[mount.Name]; rootFSBackedPortal {
+				// Unbound portals are rebased onto the merged rootfs before
+				// rootfs sync starts. Bound SandboxVolumes are excluded below
+				// from the persisted claim mounts instead.
+				continue
+			}
 			add(strings.TrimSpace(mount.MountPath))
 		}
 		break
@@ -429,7 +478,23 @@ func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
 	if pod.Annotations != nil && strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID]) != "" {
 		add(webhookStateMountPoint)
 	}
-	return out
+	return out, nil
+}
+
+func sameClaimMounts(left, right []managerapi.ClaimMount) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	byMountPoint := make(map[string]string, len(left))
+	for _, mount := range left {
+		byMountPoint[mount.MountPoint] = mount.SandboxVolumeID
+	}
+	for _, mount := range right {
+		if byMountPoint[mount.MountPoint] != mount.SandboxVolumeID {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *SandboxService) saveRestoredRuntimePod(ctx context.Context, pod *corev1.Pod, record *sandboxstore.SandboxRecord) error {

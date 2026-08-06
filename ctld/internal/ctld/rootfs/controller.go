@@ -23,10 +23,15 @@ var (
 type Config struct {
 	Context         context.Context
 	Runtime         rootFSV3Runtime
+	PortalBackings  rootFSPortalBackingAttacher
 	Store           objectstore.Store
 	WatchFenceRoot  string
 	CaptureLeases   rootFSCaptureLeaseStore
 	MetricsRegistry prometheus.Registerer
+}
+
+type rootFSPortalBackingAttacher interface {
+	AttachRootFSBackings(context.Context, string, string) error
 }
 
 type rootFSCaptureLeaseStore interface {
@@ -40,6 +45,7 @@ type rootFSCaptureLeaseStore interface {
 type Controller struct {
 	store          objectstore.Store
 	v3Runtime      rootFSV3Runtime
+	portalBackings rootFSPortalBackingAttacher
 	v3Context      context.Context
 	watchFenceRoot string
 	captureLeases  rootFSCaptureLeaseStore
@@ -62,6 +68,7 @@ func NewController(cfg Config) *Controller {
 	controller := &Controller{
 		store:          cfg.Store,
 		v3Runtime:      cfg.Runtime,
+		portalBackings: cfg.PortalBackings,
 		v3Context:      v3Context,
 		watchFenceRoot: cfg.WatchFenceRoot,
 		captureLeases:  cfg.CaptureLeases,

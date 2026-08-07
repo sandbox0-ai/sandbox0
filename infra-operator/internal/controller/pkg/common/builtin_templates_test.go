@@ -296,6 +296,47 @@ func TestBuiltinTemplatePresetsSatisfyResourceRatio(t *testing.T) {
 	}
 }
 
+func TestApplyBuiltinTemplateResourcePolicyUsesConfiguredRatioForPreset(t *testing.T) {
+	t.Parallel()
+
+	builtin := infrav1alpha1.BuiltinTemplateConfig{}
+	spec := BuildBuiltinTemplateSpec(template.CodingAgentTemplateID, builtin)
+	memoryPerCPU := resource.MustParse("2Gi")
+
+	applyBuiltinTemplateResourcePolicy(&spec, builtin, memoryPerCPU)
+
+	wantCPU := resource.MustParse("2")
+	if spec.MainContainer.Resources.CPU.Cmp(wantCPU) != 0 {
+		t.Fatalf("cpu = %s, want %s", spec.MainContainer.Resources.CPU.String(), wantCPU.String())
+	}
+	if err := template.ValidateResourceRatio(spec, memoryPerCPU, "builtin template"); err != nil {
+		t.Fatalf("ValidateResourceRatio: %v", err)
+	}
+}
+
+func TestApplyBuiltinTemplateResourcePolicyPreservesExplicitSpec(t *testing.T) {
+	t.Parallel()
+
+	explicitCPU := resource.MustParse("1")
+	builtin := infrav1alpha1.BuiltinTemplateConfig{
+		Spec: &templatev1alpha1.SandboxTemplateSpec{
+			MainContainer: templatev1alpha1.ContainerSpec{
+				Resources: templatev1alpha1.ResourceQuota{
+					CPU:    explicitCPU,
+					Memory: resource.MustParse("4Gi"),
+				},
+			},
+		},
+	}
+	spec := BuildBuiltinTemplateSpec("custom", builtin)
+
+	applyBuiltinTemplateResourcePolicy(&spec, builtin, resource.MustParse("2Gi"))
+
+	if spec.MainContainer.Resources.CPU.Cmp(explicitCPU) != 0 {
+		t.Fatalf("cpu = %s, want explicit %s", spec.MainContainer.Resources.CPU.String(), explicitCPU.String())
+	}
+}
+
 func TestBuildBuiltinTemplateSpecPreservesExplicitZeroMinIdle(t *testing.T) {
 	t.Parallel()
 

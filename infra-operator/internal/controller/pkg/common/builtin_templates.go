@@ -89,8 +89,10 @@ func EnsureBuiltinTemplates(ctx context.Context, builtins []infrav1alpha1.Builti
 		}
 		desiredTemplateIDs[templateID] = struct{}{}
 
+		memoryPerCPU := builtinTemplateMemoryPerCPU(opts)
 		spec := BuildBuiltinTemplateSpec(templateID, builtin)
-		if err := template.ValidateResourceRatio(spec, builtinTemplateMemoryPerCPU(opts), "builtin template "+templateID); err != nil {
+		applyBuiltinTemplateResourcePolicy(&spec, builtin, memoryPerCPU)
+		if err := template.ValidateResourceRatio(spec, memoryPerCPU, "builtin template "+templateID); err != nil {
 			return fmt.Errorf("validate builtin template %s: %w", templateID, err)
 		}
 
@@ -124,6 +126,16 @@ func EnsureBuiltinTemplates(ctx context.Context, builtins []infrav1alpha1.Builti
 		return err
 	}
 	return nil
+}
+
+// applyBuiltinTemplateResourcePolicy keeps legacy builtin presets aligned with
+// the configured platform ratio. A full spec is an explicit resource contract
+// and remains validation-only.
+func applyBuiltinTemplateResourcePolicy(spec *templatev1alpha1.SandboxTemplateSpec, builtin infrav1alpha1.BuiltinTemplateConfig, memoryPerCPU resource.Quantity) {
+	if spec == nil || builtin.Spec != nil {
+		return
+	}
+	spec.MainContainer.Resources.CPU = template.CPUForMemory(spec.MainContainer.Resources.Memory, memoryPerCPU)
 }
 
 type builtinTemplatePruneStore interface {

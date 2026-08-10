@@ -124,6 +124,9 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 			head, headErr := materializer.loadCommittedHead(ctx)
 			reuseStarted := time.Now()
 			if headErr == nil && committedHeadMatchesCheckpoint(head, cfg.VolumeID, checkpointSequence(state)) {
+				if err := materializer.validateCommittedStateSegments(ctx, state); err != nil {
+					return nil, err
+				}
 				latestManifest = &Manifest{
 					VolumeID:      head.VolumeID,
 					ManifestSeq:   head.ManifestSeq,
@@ -147,6 +150,9 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 			}
 			emitOpenPhase(cfg, "state_load", "remote", remoteFormat, phaseStarted, -1, replayStats.RecordsScanned, latestState, latestErr)
 			if latestErr == nil {
+				if err := materializer.validateCommittedStateSegments(ctx, latestState); err != nil {
+					return nil, err
+				}
 				if baseErr := validateCommittedWALBase(localStateErr, latestState, firstWALRecord, hasWALRecords); baseErr != nil {
 					return nil, baseErr
 				}

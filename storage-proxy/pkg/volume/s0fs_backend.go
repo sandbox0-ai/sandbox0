@@ -2,7 +2,6 @@ package volume
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -22,7 +21,6 @@ import (
 type S0FSBackend struct {
 	logger          *logrus.Logger
 	config          *config.StorageProxyConfig
-	repo            *db.Repository
 	headStore       s0fs.HeadStore
 	requestObserver objectstore.RequestObserver
 }
@@ -43,7 +41,6 @@ func NewS0FSBackend(logger *logrus.Logger, cfg *config.StorageProxyConfig, repo 
 	return &S0FSBackend{
 		logger:    logger,
 		config:    cfg,
-		repo:      repo,
 		headStore: db.NewS0FSHeadStore(repo),
 	}
 }
@@ -207,7 +204,6 @@ func (b *S0FSBackend) UnmountVolume(ctx context.Context, volCtx *VolumeContext) 
 		return fmt.Errorf("materialize s0fs volume: %w", err)
 	}
 	b.logObservationError(volCtx.VolumeID, result.ObservationError)
-	b.garbageCollectRWO(ctx, volCtx, result.Manifest)
 	return volCtx.S0FS.Close()
 }
 
@@ -251,6 +247,8 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 	if volCtx == nil || volCtx.S0FS == nil {
 		return
 	}
+	// Mounted engines can retain recovery state that is not visible to a
+	// best-effort object listing, so this loop must not delete S0FS objects.
 	compactionInterval, err := S0FSCompactionInterval(b.config)
 	if err != nil {
 		b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Disabling s0fs compaction due to invalid configuration")
@@ -291,7 +289,6 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 					continue
 				}
 				b.logObservationError(volCtx.VolumeID, result.ObservationError)
-				b.garbageCollectRWO(ctx, volCtx, result.Manifest)
 			case <-compactionC:
 				materialization, result, err := volCtx.Compact(ctx, compactionOptions)
 				if err != nil {
@@ -307,7 +304,6 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 					}).Info("Compacted s0fs volume")
 				}
 				b.logObservationError(volCtx.VolumeID, materialization.ObservationError)
-				b.garbageCollectRWO(ctx, volCtx, materialization.Manifest)
 			}
 		}
 	}()
@@ -318,146 +314,4 @@ func (b *S0FSBackend) logObservationError(volumeID string, err error) {
 		return
 	}
 	b.logger.WithError(err).WithField("volume_id", volumeID).Warn("Failed to record volume storage observation")
-}
-
-func (b *S0FSBackend) garbageCollectRWO(ctx context.Context, volCtx *VolumeContext, manifest *s0fs.Manifest) {
-	if b == nil || b.repo == nil || volCtx == nil || manifest == nil || manifest.State == nil {
-		return
-	}
-	if volCtx.Access != AccessModeRWO {
-		return
-	}
-	result, err := b.garbageCollectVolumeObjects(ctx, volCtx, manifest)
-	if err != nil {
-		b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to garbage collect s0fs volume objects")
-		return
-	}
-	if result != nil && (len(result.DeletedSegments) > 0 || len(result.DeletedManifests) > 0) {
-		b.logger.WithFields(logrus.Fields{
-			"volume_id": volCtx.VolumeID,
-			"segments":  len(result.DeletedSegments),
-			"manifests": len(result.DeletedManifests),
-		}).Info("Garbage collected s0fs volume objects")
-	}
-}
-
-func (b *S0FSBackend) garbageCollectVolumeObjects(ctx context.Context, volCtx *VolumeContext, manifest *s0fs.Manifest) (*s0fs.GarbageCollectionResult, error) {
-	children, err := b.repo.ListSandboxVolumesBySource(ctx, volCtx.VolumeID)
-	if err != nil {
-		return nil, err
-	}
-	if len(children) > 0 {
-		return nil, nil
-	}
-	store, err := b.objectStoreForTeamVolume(volCtx.TeamID, volCtx.VolumeID)
-	if err != nil {
-		return nil, err
-	}
-	if store == nil {
-		return nil, nil
-	}
-	materializer := s0fs.NewMaterializer(volCtx.VolumeID, store, b.headStore, func(sourceVolumeID string) (objectstore.Store, error) {
-		return b.objectStoreForTeamVolume(volCtx.TeamID, sourceVolumeID)
-	})
-	if materializer == nil || !materializer.Enabled() {
-		return nil, nil
-	}
-	encryption, err := S0FSEncryptionConfig(b.config)
-	if err != nil {
-		return nil, err
-	}
-	materializer.SetEncryption(encryption)
-	stateFormatVersion, err := S0FSStateFormatVersion(b.config)
-	if err != nil {
-		return nil, err
-	}
-	materializer.SetStateFormatVersion(stateFormatVersion)
-
-	headBefore, err := b.headStore.LoadCommittedHead(ctx, volCtx.VolumeID)
-	if err != nil && !errors.Is(err, s0fs.ErrCommittedHeadNotFound) {
-		return nil, err
-	}
-	retainedStates := []*s0fs.SnapshotState{manifest.State}
-	cfg := s0fs.Config{
-		VolumeID:           volCtx.VolumeID,
-		WALPath:            filepath.Join(volCtx.CacheDir, "engine.wal"),
-		ObjectStore:        store,
-		HeadStore:          b.headStore,
-		Encryption:         encryption,
-		StateFormatVersion: stateFormatVersion,
-	}
-	localSnapshots, err := s0fs.LoadLocalSnapshots(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	retainedStates = append(retainedStates, localSnapshots...)
-	snapshots, err := b.repo.ListSnapshotsByVolume(ctx, volCtx.VolumeID)
-	if err != nil {
-		return nil, err
-	}
-	for _, snapshot := range snapshots {
-		state, err := s0fs.LoadSnapshot(ctx, cfg, snapshot.ID)
-		if err != nil {
-			if errors.Is(err, s0fs.ErrSnapshotNotFound) {
-				return nil, nil
-			}
-			return nil, err
-		}
-		retainedStates = append(retainedStates, state)
-	}
-	retainedManifests := map[string]struct{}{
-		"manifests/latest.json": {},
-	}
-	if manifest.ManifestSeq > 0 {
-		retainedManifests[fmt.Sprintf("manifests/%020d.json", manifest.ManifestSeq)] = struct{}{}
-	}
-	if headBefore != nil && strings.TrimSpace(headBefore.ManifestKey) != "" {
-		retainedManifests[headBefore.ManifestKey] = struct{}{}
-	}
-	plan, err := materializer.PlanGarbageCollection(ctx, retainedStates, retainedManifests)
-	if err != nil {
-		return nil, err
-	}
-	if len(plan.Segments) == 0 && len(plan.Manifests) == 0 {
-		return &s0fs.GarbageCollectionResult{}, nil
-	}
-	headAfter, err := b.headStore.LoadCommittedHead(ctx, volCtx.VolumeID)
-	if err != nil && !errors.Is(err, s0fs.ErrCommittedHeadNotFound) {
-		return nil, err
-	}
-	if !sameHeadKey(headBefore, headAfter) {
-		return nil, nil
-	}
-	return plan.Apply(ctx)
-}
-
-func (b *S0FSBackend) objectStoreForTeamVolume(teamID, volumeID string) (objectstore.Store, error) {
-	if b == nil || b.config == nil || teamID == "" || volumeID == "" || strings.TrimSpace(b.config.S3Bucket) == "" {
-		return nil, nil
-	}
-	prefix, err := naming.S3VolumePrefix(teamID, volumeID)
-	if err != nil {
-		return nil, err
-	}
-	store, err := objectstore.Create(objectstore.Config{
-		Type:            b.config.ObjectStorageType,
-		Bucket:          b.config.S3Bucket,
-		Region:          b.config.S3Region,
-		Endpoint:        b.config.S3Endpoint,
-		AccessKey:       b.config.S3AccessKey,
-		SecretKey:       b.config.S3SecretKey,
-		SessionToken:    b.config.S3SessionToken,
-		RequestObserver: b.requestObserver,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return objectstore.Prefix(store, prefix+"/s0fs/"), nil
-}
-
-func sameHeadKey(a, b *s0fs.CommittedHead) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return strings.TrimSpace(a.ManifestKey) == strings.TrimSpace(b.ManifestKey)
 }

@@ -49,6 +49,49 @@ func TestStateV2RoundTripDeterministic(t *testing.T) {
 	}
 }
 
+func TestMetadataStateV2StreamingWriterMatchesEagerEncoding(t *testing.T) {
+	state := richStateV2Fixture()
+	metadata := stateV2Metadata{
+		Role:          StateV2Role_STATE_V2_ROLE_MANIFEST,
+		ManifestSeq:   state.NextSeq - 1,
+		CheckpointSeq: state.NextSeq - 1,
+		CreatedAt:     time.Date(2026, 8, 2, 3, 4, 5, 6, time.UTC),
+	}
+	binding := stateBlobAAD("vol-stream-v2", "object:manifests/00000000000000000010.json")
+	want, err := encodeStateV2("vol-stream-v2", binding, state, metadata, nil)
+	if err != nil {
+		t.Fatalf("encodeStateV2() error = %v", err)
+	}
+	var got bytes.Buffer
+	if err := writeMetadataStateV2(context.Background(), &got, "vol-stream-v2", binding, newEagerMetadataStore(state), state.NextSeq, state.NextInode, metadata, nil); err != nil {
+		t.Fatalf("writeMetadataStateV2() error = %v", err)
+	}
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatal("streaming state v2 encoding differs from eager encoding")
+	}
+}
+
+func TestMetadataStateV2StreamingWriterReadsSQLiteIndex(t *testing.T) {
+	state := richStateV2Fixture()
+	store, err := newSQLiteMetadataStore(context.Background(), filepath.Join(t.TempDir(), "metadata.sqlite"), state, 1<<20)
+	if err != nil {
+		t.Fatalf("newSQLiteMetadataStore() error = %v", err)
+	}
+	defer store.Close()
+	binding := stateBlobAAD("vol-stream-sqlite", "head")
+	var payload bytes.Buffer
+	if err := writeMetadataStateV2(context.Background(), &payload, "vol-stream-sqlite", binding, store, state.NextSeq, state.NextInode, stateV2Metadata{Role: StateV2Role_STATE_V2_ROLE_HEAD}, nil); err != nil {
+		t.Fatalf("writeMetadataStateV2() error = %v", err)
+	}
+	decoded, err := decodeStateV2(bytes.NewReader(payload.Bytes()), "vol-stream-sqlite", binding, StateV2Role_STATE_V2_ROLE_HEAD, nil)
+	if err != nil {
+		t.Fatalf("decodeStateV2() error = %v", err)
+	}
+	if !reflect.DeepEqual(decoded.State, state) {
+		t.Fatal("SQLite streaming state v2 round trip mismatch")
+	}
+}
+
 func TestStateV2EncryptedChunksBindRoleAndObject(t *testing.T) {
 	state := richStateV2Fixture()
 	encryption := testEncryptionConfig(64 << 10)
@@ -348,6 +391,7 @@ func TestOpenRefreshesStaleLocalHeadFromCommittedManifest(t *testing.T) {
 	localCfg := Config{
 		VolumeID:           "vol-local-stale",
 		WALPath:            filepath.Join(t.TempDir(), "engine.wal"),
+		MetadataPath:       filepath.Join(t.TempDir(), "metadata.sqlite"),
 		ObjectStore:        store,
 		HeadStore:          heads,
 		StateFormatVersion: StateFormatV2,
@@ -372,9 +416,13 @@ func TestOpenRefreshesStaleLocalHeadFromCommittedManifest(t *testing.T) {
 
 	remoteCfg := localCfg
 	remoteCfg.WALPath = filepath.Join(t.TempDir(), "engine.wal")
+	remoteCfg.MetadataPath = filepath.Join(t.TempDir(), "metadata.sqlite")
 	remote, err := Open(ctx, remoteCfg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, ok := remote.metadata.(*sqliteMetadataStore); !ok {
+		t.Fatalf("remote metadata store = %T, want *sqliteMetadataStore", remote.metadata)
 	}
 	second, err := remote.CreateFile(RootInode, "second.txt", 0o644)
 	if err != nil {

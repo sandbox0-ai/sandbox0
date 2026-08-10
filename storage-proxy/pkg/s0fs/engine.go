@@ -1,12 +1,13 @@
 package s0fs
 
 import (
-	"cmp"
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,17 +22,15 @@ type Engine struct {
 
 	nextSeq   uint64
 	nextInode uint64
-	nodes     map[uint64]*Node
-	children  map[uint64]map[string]uint64
-	data      map[uint64][]byte
-	coldFiles map[uint64][]FileExtent
-	segments  map[string]*Segment
+	metadata  metadataStore
 
 	materializer            *Materializer
 	encryption              *EncryptionConfig
 	stateFormatVersion      int
 	localDiskGuard          *LocalDiskGuard
 	retainUnlinked          bool
+	metadataPath            string
+	metadataCacheBytes      int64
 	mutationVersion         uint64
 	lastCommittedManifest   uint64
 	lastMaterializedVersion uint64
@@ -45,6 +44,49 @@ type pendingMaterialization struct {
 	mutationVersion uint64
 	state           *SnapshotState
 	walCheckpoint   *walCheckpoint
+}
+
+type loadedEngineState struct {
+	state        *SnapshotState
+	metadata     metadataStore
+	nextSeq      uint64
+	nextInode    uint64
+	metadataPath string
+}
+
+func loadedEngineStateFromSnapshot(state *SnapshotState) *loadedEngineState {
+	if state == nil {
+		return nil
+	}
+	normalizeState(state)
+	return &loadedEngineState{state: state, nextSeq: state.NextSeq, nextInode: state.NextInode}
+}
+
+func (s *loadedEngineState) store() metadataStore {
+	if s == nil {
+		return nil
+	}
+	if s.metadata != nil {
+		return s.metadata
+	}
+	if s.state == nil {
+		return nil
+	}
+	return newEagerMetadataStore(s.state)
+}
+
+func (s *loadedEngineState) checkpointSequence() uint64 {
+	if s == nil || s.nextSeq == 0 {
+		return 0
+	}
+	return s.nextSeq - 1
+}
+
+func (s *loadedEngineState) close() {
+	if s != nil && s.metadata != nil {
+		_ = s.metadata.Close()
+		s.metadata = nil
+	}
 }
 
 func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
@@ -75,9 +117,9 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		}
 		if engine != nil {
 			engine.mu.RLock()
-			observation.Nodes = len(engine.nodes)
-			observation.DirectoryEntries = directoryEntryCount(engine.children)
-			observation.Segments = len(engine.segments)
+			observation.Nodes = engine.metadata.NodeCount()
+			observation.DirectoryEntries = engine.metadata.DirectoryEntryCount()
+			observation.Segments = engine.metadata.SegmentCount()
 			engine.mu.RUnlock()
 		}
 		emitOpenObservation(cfg.OpenObserver, observation)
@@ -107,7 +149,13 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 	}
 
 	phaseStarted = time.Now()
-	state, localFormat, localBytes, err := loadCurrentState(cfg)
+	state, localFormat, localBytes, err := loadCurrentEngineState(ctx, cfg)
+	localState := state
+	defer func() {
+		if localState != nil {
+			localState.close()
+		}
+	}()
 	localStateErr := err
 	emitOpenPhase(cfg, "state_load", "local", localFormat, phaseStarted, localBytes, replayStats.RecordsScanned, state, err)
 	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
@@ -118,13 +166,19 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		materializer.SetOpenObserver(cfg.OpenObserver)
 	}
 	var latestManifest *Manifest
+	var remoteState *loadedEngineState
+	defer func() {
+		if remoteState != nil {
+			remoteState.close()
+		}
+	}()
 	if materializer != nil {
 		localCommitted := false
 		if state != nil && localStateErr == nil && materializer.headStore != nil {
 			head, headErr := materializer.loadCommittedHead(ctx)
 			reuseStarted := time.Now()
-			if headErr == nil && committedHeadMatchesCheckpoint(head, cfg.VolumeID, checkpointSequence(state)) {
-				if err := materializer.validateCommittedStateSegments(ctx, state); err != nil {
+			if headErr == nil && committedHeadMatchesCheckpoint(head, cfg.VolumeID, state.checkpointSequence()) {
+				if err := materializer.validateCommittedLoadedStateSegments(ctx, state); err != nil {
 					return nil, err
 				}
 				latestManifest = &Manifest{
@@ -143,14 +197,19 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		}
 		if !localCommitted && (err == nil || errors.Is(err, ErrSnapshotNotFound)) {
 			phaseStarted = time.Now()
-			latestState, manifest, latestErr := materializer.loadLatestStateOwned(ctx)
+			remoteMetadataPath := ""
+			if strings.TrimSpace(cfg.MetadataPath) != "" {
+				remoteMetadataPath = cfg.MetadataPath + ".remote"
+			}
+			latestState, manifest, latestErr := materializer.loadLatestEngineState(ctx, remoteMetadataPath, cfg.MetadataCacheBytes)
+			remoteState = latestState
 			remoteFormat := 0
 			if manifest != nil && (manifest.Version == StateFormatV1 || manifest.Version == StateFormatV2) {
 				remoteFormat = manifest.Version
 			}
 			emitOpenPhase(cfg, "state_load", "remote", remoteFormat, phaseStarted, -1, replayStats.RecordsScanned, latestState, latestErr)
 			if latestErr == nil {
-				if err := materializer.validateCommittedStateSegments(ctx, latestState); err != nil {
+				if err := materializer.validateCommittedLoadedStateSegments(ctx, latestState); err != nil {
 					return nil, err
 				}
 				if baseErr := validateCommittedWALBase(localStateErr, latestState, firstWALRecord, hasWALRecords); baseErr != nil {
@@ -158,7 +217,7 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 				}
 			}
 			switch {
-			case latestErr == nil && shouldUseMaterializedState(state, err, latestState, hasWALRecords):
+			case latestErr == nil && shouldUseMaterializedLoadedState(state, err, latestState, hasWALRecords):
 				state = latestState
 				err = nil
 				latestManifest = manifest
@@ -181,7 +240,7 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 	}
 	if state == nil {
 		now := time.Now().UTC()
-		state = &SnapshotState{
+		state = loadedEngineStateFromSnapshot(&SnapshotState{
 			NextSeq:   1,
 			NextInode: RootInode + 1,
 			Nodes: map[uint64]*Node{
@@ -201,29 +260,70 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 			Data:      make(map[uint64][]byte),
 			ColdFiles: make(map[uint64][]FileExtent),
 			Segments:  make(map[string]*Segment),
-		}
+		})
 		selectedSource = "new"
 		selectedFormat = 0
 	} else if selectedSource == "new" && localStateErr == nil {
 		selectedSource = "local"
 		selectedFormat = localFormat
 	}
+	if state == remoteState && state != nil && state.metadata != nil && strings.TrimSpace(cfg.MetadataPath) != "" && state.metadataPath != cfg.MetadataPath {
+		if localState != nil {
+			localState.close()
+			localState = nil
+		}
+		if sqliteState, ok := state.metadata.(*sqliteMetadataStore); ok {
+			if err := sqliteState.relocate(cfg.MetadataPath); err != nil {
+				return nil, err
+			}
+			state.metadataPath = cfg.MetadataPath
+		}
+	}
+	if selectedFormat == StateFormatV1 && normalizedStateFormatVersion(cfg.StateFormatVersion) == StateFormatV2 && state.state != nil {
+		migrationStarted := time.Now()
+		migrationErr := saveSnapshotState(headStatePath(cfg.WALPath), cfg.VolumeID, "head", state.state, cfg.Encryption, StateFormatV2)
+		emitOpenPhase(cfg, "state_migrate", selectedSource, StateFormatV1, migrationStarted, fileSize(headStatePath(cfg.WALPath)), replayStats.RecordsScanned, state, migrationErr)
+		if migrationErr != nil {
+			return nil, fmt.Errorf("migrate state v1 to v2: %w", migrationErr)
+		}
+	}
 
+	var metadata metadataStore
+	metadataPath := cfg.MetadataPath
+	if state.metadata != nil {
+		metadata = state.metadata
+		state.metadata = nil
+		metadataPath = state.metadataPath
+	} else {
+		metadata, err = newEngineMetadataStore(ctx, cfg, state.state)
+		if err != nil {
+			return nil, err
+		}
+	}
 	e := &Engine{
 		volumeID:           cfg.VolumeID,
-		nextSeq:            state.NextSeq,
-		nextInode:          state.NextInode,
-		nodes:              state.Nodes,
-		children:           state.Children,
-		data:               state.Data,
-		coldFiles:          state.ColdFiles,
-		segments:           state.Segments,
+		nextSeq:            state.nextSeq,
+		nextInode:          state.nextInode,
+		metadata:           metadata,
 		materializer:       materializer,
 		encryption:         cfg.Encryption,
 		stateFormatVersion: normalizedStateFormatVersion(cfg.StateFormatVersion),
 		localDiskGuard:     cfg.LocalDiskGuard,
 		retainUnlinked:     cfg.RetainUnlinked,
+		metadataPath:       metadataPath,
+		metadataCacheBytes: cfg.MetadataCacheBytes,
 	}
+	defer func() {
+		if engine != nil {
+			return
+		}
+		if e.wal != nil {
+			_ = e.wal.close()
+		}
+		if e.metadata != nil {
+			_ = e.metadata.Close()
+		}
+	}()
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
 	}
@@ -234,7 +334,7 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		record, ok, replayErr := replay.Next(ctx)
 		replayStats = replay.Stats()
 		if replayErr != nil {
-			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), replayErr)
+			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
 			return nil, replayErr
 		}
 		if !ok {
@@ -246,12 +346,12 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		}
 		if record.Seq > e.nextSeq {
 			replayErr := fmt.Errorf("replay wal seq %d: %w: missing wal seq %d", record.Seq, ErrInvalidInput, e.nextSeq)
-			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), replayErr)
+			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
 			return nil, replayErr
 		}
 		if err := e.apply(record); err != nil {
 			replayErr := fmt.Errorf("replay wal seq %d: %w", record.Seq, err)
-			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), replayErr)
+			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
 			return nil, replayErr
 		}
 		appliedRecords++
@@ -264,17 +364,19 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		}
 	}
 	if err := replay.Close(); err != nil {
-		emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), err)
+		emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, err)
 		return nil, err
 	}
 	walFile, err := openWAL(cfg.WALPath, cfg.VolumeID, cfg.Encryption, cfg.WALSyncHook, replayStats)
 	if err != nil {
-		emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), err)
+		emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, err)
 		return nil, err
 	}
 	e.wal = walFile
 	if !e.retainUnlinked {
-		e.collectUnlinkedLocked()
+		if err := e.collectUnlinkedLocked(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if appliedRecords > 0 {
 		e.dirty = true
@@ -282,13 +384,13 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		e.mutationVersion = 1
 	}
 	walRecordsApplied = appliedRecords
-	emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.currentStateLocked(), nil)
+	emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, nil)
 
 	engine = e
 	return engine, nil
 }
 
-func emitWALOpenPhase(cfg Config, phase string, format int, started time.Time, stats walReplayStats, skipped, applied int, state *SnapshotState, err error) {
+func emitWALOpenPhase(cfg Config, phase string, format int, started time.Time, stats walReplayStats, skipped, applied int, metadata metadataStore, err error) {
 	bytes := stats.BytesScanned
 	if phase == "wal_open" {
 		bytes = walFileSize(cfg.WALPath)
@@ -307,15 +409,15 @@ func emitWALOpenPhase(cfg Config, phase string, format int, started time.Time, s
 		WALMaxDecodedBytes: stats.MaxDecodedBytes,
 		Err:                err,
 	}
-	if state != nil {
-		observation.Nodes = len(state.Nodes)
-		observation.DirectoryEntries = directoryEntryCount(state.Children)
-		observation.Segments = len(state.Segments)
+	if metadata != nil {
+		observation.Nodes = metadata.NodeCount()
+		observation.DirectoryEntries = metadata.DirectoryEntryCount()
+		observation.Segments = metadata.SegmentCount()
 	}
 	emitOpenObservation(cfg.OpenObserver, observation)
 }
 
-func emitOpenPhase(cfg Config, phase, source string, format int, started time.Time, bytes int64, walRecords int, state *SnapshotState, err error) {
+func emitOpenPhase(cfg Config, phase, source string, format int, started time.Time, bytes int64, walRecords int, state *loadedEngineState, err error) {
 	observation := OpenObservation{
 		VolumeID:   cfg.VolumeID,
 		Phase:      phase,
@@ -327,9 +429,12 @@ func emitOpenPhase(cfg Config, phase, source string, format int, started time.Ti
 		Err:        err,
 	}
 	if phase == "complete" && state != nil {
-		observation.Nodes = len(state.Nodes)
-		observation.DirectoryEntries = directoryEntryCount(state.Children)
-		observation.Segments = len(state.Segments)
+		metadata := state.store()
+		if metadata != nil {
+			observation.Nodes = metadata.NodeCount()
+			observation.DirectoryEntries = metadata.DirectoryEntryCount()
+			observation.Segments = metadata.SegmentCount()
+		}
 	}
 	emitOpenObservation(cfg.OpenObserver, observation)
 }
@@ -380,6 +485,9 @@ func (e *Engine) Close() error {
 	}
 	e.refreshLocalDiskGuardLocked()
 	e.closed = true
+	if err := e.metadata.Close(); err != nil {
+		return err
+	}
 	return e.wal.close()
 }
 
@@ -391,18 +499,7 @@ func (e *Engine) PruneUnlinked(retain map[uint64]struct{}) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	for inode, node := range e.nodes {
-		if inode == RootInode || node == nil || node.Nlink != 0 {
-			continue
-		}
-		if _, ok := retain[inode]; ok {
-			continue
-		}
-		delete(e.children, inode)
-		delete(e.nodes, inode)
-		delete(e.data, inode)
-		delete(e.coldFiles, inode)
-	}
+	_ = e.metadata.PruneUnlinked(context.Background(), retain)
 }
 
 func (e *Engine) Lookup(parent uint64, name string) (*Node, error) {
@@ -415,7 +512,11 @@ func (e *Engine) Lookup(parent uint64, name string) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cloneNode(e.nodes[inode]), nil
+	node, ok := e.metadata.Node(inode)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return node, nil
 }
 
 func (e *Engine) GetAttr(inode uint64) (*Node, error) {
@@ -424,11 +525,11 @@ func (e *Engine) GetAttr(inode uint64) (*Node, error) {
 	if err := e.checkOpen(); err != nil {
 		return nil, err
 	}
-	node, ok := e.nodes[inode]
+	node, ok := e.metadata.Node(inode)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return cloneNode(node), nil
+	return node, nil
 }
 
 func (e *Engine) Mkdir(parent uint64, name string, mode uint32) (*Node, error) {
@@ -436,31 +537,44 @@ func (e *Engine) Mkdir(parent uint64, name string, mode uint32) (*Node, error) {
 }
 
 func (e *Engine) ReadDir(inode uint64) ([]DirEntry, error) {
+	entries, _, err := e.ReadDirPage(inode, 0, 0)
+	return entries, err
+}
+
+// ReadDirPage returns directory entries in stable name order. Offset is the
+// number of entries already consumed; a zero limit preserves the legacy
+// unbounded helper behavior for in-process callers.
+func (e *Engine) ReadDirPage(inode, offset uint64, limit uint32) ([]DirEntry, bool, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if err := e.checkOpen(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := e.ensureDirLocked(inode); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	entries := make([]DirEntry, 0, len(e.children[inode]))
-	for name, childInode := range e.children[inode] {
-		node := e.nodes[childInode]
+	page, eof, ok := e.metadata.DirectoryPage(inode, offset, limit)
+	if err := e.metadata.Err(); err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, ErrNotDir
+	}
+	entries := make([]DirEntry, 0, len(page))
+	for _, entry := range page {
+		childInode := entry.Inode
+		node, _ := e.metadata.Node(childInode)
 		if node == nil {
 			continue
 		}
 		entries = append(entries, DirEntry{
-			Name:  name,
+			Name:  entry.Name,
 			Inode: childInode,
 			Type:  node.Type,
 		})
 	}
-	slices.SortFunc(entries, func(a, b DirEntry) int {
-		return cmp.Compare(a.Name, b.Name)
-	})
-	return entries, nil
+	return entries, eof, e.metadata.Err()
 }
 
 func (e *Engine) Path(inode uint64) (string, bool) {
@@ -515,7 +629,7 @@ func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, er
 	if newName == "" {
 		return nil, fmt.Errorf("%w: empty link name", ErrInvalidInput)
 	}
-	node, ok := e.nodes[inode]
+	node, ok := e.metadata.Node(inode)
 	if !ok || node == nil {
 		return nil, ErrNotFound
 	}
@@ -525,7 +639,7 @@ func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, er
 	if err := e.ensureDirLocked(newParent); err != nil {
 		return nil, err
 	}
-	if _, exists := e.children[newParent][newName]; exists {
+	if _, exists := e.metadata.Child(newParent, newName); exists {
 		return nil, ErrExists
 	}
 	record := e.newRecord("link")
@@ -535,7 +649,11 @@ func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, er
 	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
 		return nil, err
 	}
-	return cloneNode(e.nodes[inode]), nil
+	linked, ok := e.metadata.Node(inode)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return linked, nil
 }
 
 func (e *Engine) Write(inode uint64, offset uint64, payload []byte) (int, error) {
@@ -657,7 +775,10 @@ func (e *Engine) UnlinkWithInode(parent uint64, name string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	node := e.nodes[inode]
+	node, ok := e.metadata.Node(inode)
+	if !ok {
+		return 0, ErrNotFound
+	}
 	if node.Type == TypeDirectory {
 		return 0, ErrIsDir
 	}
@@ -679,13 +800,14 @@ func (e *Engine) Forget(inode uint64) error {
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
-	node, ok := e.nodes[inode]
+	node, ok := e.metadata.Node(inode)
 	if !ok || node == nil || node.Nlink != 0 {
 		return nil
 	}
-	delete(e.children, inode)
-	delete(e.nodes, inode)
-	delete(e.data, inode)
+	e.metadata.DeleteDirectory(inode)
+	e.metadata.DeleteNode(inode)
+	e.metadata.DeleteData(inode)
+	e.metadata.DeleteColdFile(inode)
 	return nil
 }
 
@@ -702,14 +824,18 @@ func (e *Engine) RemoveDir(parent uint64, name string) error {
 	if err != nil {
 		return err
 	}
-	node := e.nodes[inode]
+	node, _ := e.metadata.Node(inode)
 	if node == nil {
 		return ErrNotFound
 	}
 	if node.Type != TypeDirectory {
 		return ErrNotDir
 	}
-	if len(e.children[inode]) > 0 {
+	children, _, _ := e.metadata.DirectoryPage(inode, 0, 1)
+	if err := e.metadata.Err(); err != nil {
+		return err
+	}
+	if len(children) != 0 {
 		return ErrNotEmpty
 	}
 	record := e.newRecord("rmdir")
@@ -730,7 +856,7 @@ func (e *Engine) SetMode(inode uint64, mode uint32) error {
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
-	if _, ok := e.nodes[inode]; !ok {
+	if _, ok := e.metadata.Node(inode); !ok {
 		return ErrNotFound
 	}
 	record := e.newRecord("chmod")
@@ -751,7 +877,7 @@ func (e *Engine) SetOwner(inode uint64, uid, gid uint32) error {
 	if err := e.checkOpen(); err != nil {
 		return err
 	}
-	if _, ok := e.nodes[inode]; !ok {
+	if _, ok := e.metadata.Node(inode); !ok {
 		return ErrNotFound
 	}
 	record := e.newRecord("chown")
@@ -807,7 +933,7 @@ func (e *Engine) Fsync(_ uint64) error {
 func (e *Engine) SnapshotState() *SnapshotState {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return cloneState(e.currentStateLocked())
+	return e.currentStateLocked()
 }
 
 // SnapshotReferenceState returns a metadata snapshot for retaining live object
@@ -816,7 +942,7 @@ func (e *Engine) SnapshotState() *SnapshotState {
 func (e *Engine) SnapshotReferenceState() *SnapshotState {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return cloneStateForMaterialization(e.currentStateLocked())
+	return e.metadata.ReferenceSnapshot(e.nextSeq, e.nextInode)
 }
 
 // CommittedHeadCurrent reports whether this clean in-memory engine still
@@ -833,7 +959,10 @@ func (e *Engine) CommittedHeadCurrent(ctx context.Context) (bool, error) {
 	}
 	dirty := e.dirty
 	manifestSeq := e.lastCommittedManifest
-	checkpointSeq := checkpointSequence(e.currentStateLocked())
+	checkpointSeq := uint64(0)
+	if e.nextSeq > 0 {
+		checkpointSeq = e.nextSeq - 1
+	}
 	materializer := e.materializer
 	e.mu.RUnlock()
 	if dirty || materializer == nil || materializer.headStore == nil {
@@ -858,20 +987,30 @@ func committedHeadMatchesCheckpoint(head *CommittedHead, volumeID string, checkp
 		head.ManifestKey == manifestKey(head.ManifestSeq)
 }
 
-// EstimatedMemoryBytes returns a conservative size estimate for bounding the
-// node-local hot engine cache. It does not mutate or clone engine state.
+// EstimatedMemoryBytes returns a conservative size estimate for charging the
+// shared active-and-detached node budget. It does not clone engine state.
 func (e *Engine) EstimatedMemoryBytes() int64 {
 	if e == nil {
 		return 0
 	}
 	e.mu.RLock()
-	total := estimatedStateMemoryBytes(e.currentStateLocked())
+	total := e.metadata.EstimatedMemoryBytes()
 	materializer := e.materializer
 	e.mu.RUnlock()
 	if materializer != nil {
 		total += materializer.estimatedCacheMemoryBytes()
 	}
 	return total
+}
+
+// EngineMemoryReservationBytes returns the fixed upper-bound charge used
+// before opening a disk-indexed engine. It reserves both the SQLite page cache
+// and the segment cache so concurrent cold opens cannot bypass node admission.
+func EngineMemoryReservationBytes(metadataCacheBytes int64) int64 {
+	if metadataCacheBytes <= 0 {
+		metadataCacheBytes = defaultMetadataCacheBytes
+	}
+	return metadataCacheBytes + (1 << 20) + defaultSegmentCacheMaxBytes + (1 << 20)
 }
 
 func (e *Engine) ExportState() (*SnapshotState, error) {
@@ -913,7 +1052,16 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 		e.mutationMu.Unlock()
 		return nil, err
 	}
-	if e.materializer == nil || !e.materializer.Enabled() || (!e.dirty && (!force || !e.needsMaterializationLocked())) {
+	needsMaterialization := false
+	if force {
+		needsMaterialization = e.needsMaterializationLocked()
+		if err := e.metadata.Err(); err != nil {
+			e.mu.Unlock()
+			e.mutationMu.Unlock()
+			return nil, err
+		}
+	}
+	if e.materializer == nil || !e.materializer.Enabled() || (!e.dirty && (!force || !needsMaterialization)) {
 		e.mu.Unlock()
 		e.mutationMu.Unlock()
 		return nil, nil
@@ -934,7 +1082,7 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 	}
 	e.mutationMu.Unlock()
 
-	manifest, err := e.materializer.Materialize(ctx, state, expectedManifestSeq)
+	manifest, err := e.materializer.materializeOwned(ctx, state, expectedManifestSeq)
 	if err != nil || manifest == nil {
 		return manifest, err
 	}
@@ -984,7 +1132,9 @@ func (e *Engine) finalizePendingMaterializationLocked() error {
 		return err
 	}
 	if e.mutationVersion == pending.mutationVersion {
-		e.replaceStateLocked(cloneState(pending.state))
+		if err := e.replaceStateLocked(cloneState(pending.state)); err != nil {
+			return err
+		}
 		e.lastMaterializedVersion = pending.mutationVersion
 		e.dirty = false
 	}
@@ -1028,7 +1178,9 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	if e.dirty || state.NextSeq <= e.nextSeq {
 		return false, nil
 	}
-	e.replaceStateLocked(state)
+	if err := e.replaceStateLocked(state); err != nil {
+		return false, err
+	}
 	if err := e.persistCurrentStateLocked(); err != nil {
 		return false, err
 	}
@@ -1112,7 +1264,9 @@ func (e *Engine) restoreStateLocked(state *SnapshotState) error {
 	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
 		return err
 	}
-	e.replaceStateLocked(state)
+	if err := e.replaceStateLocked(state); err != nil {
+		return err
+	}
 	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
 		return err
 	}
@@ -1139,7 +1293,9 @@ func (e *Engine) ReplaceState(state *SnapshotState) error {
 	if err := e.reserveLocalDiskLocked(estimatedStateBytes(state)); err != nil {
 		return err
 	}
-	e.replaceStateLocked(state)
+	if err := e.replaceStateLocked(state); err != nil {
+		return err
+	}
 	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
 		return err
 	}
@@ -1187,7 +1343,7 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 		e.mu.Unlock()
 		return nil, err
 	}
-	if _, exists := e.children[parent][name]; exists {
+	if _, exists := e.metadata.Child(parent, name); exists {
 		e.mu.Unlock()
 		return nil, ErrExists
 	}
@@ -1220,7 +1376,11 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 	if err := e.appendPreparedAndApplyLocked(record, walPayload); err != nil {
 		return nil, err
 	}
-	return cloneNode(e.nodes[record.Inode]), nil
+	created, ok := e.metadata.Node(record.Inode)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return created, nil
 }
 
 func (e *Engine) newRecord(op string) walRecord {
@@ -1330,19 +1490,20 @@ func estimatedStateMemoryBytes(state *SnapshotState) int64 {
 }
 
 func (e *Engine) currentStateLocked() *SnapshotState {
-	return &SnapshotState{
-		NextSeq:   e.nextSeq,
-		NextInode: e.nextInode,
-		Nodes:     e.nodes,
-		Children:  e.children,
-		Data:      e.data,
-		ColdFiles: e.coldFiles,
-		Segments:  e.segments,
-	}
+	return e.metadata.Snapshot(e.nextSeq, e.nextInode)
 }
 
-func (e *Engine) replaceStateLocked(state *SnapshotState) {
+func (e *Engine) replaceStateLocked(state *SnapshotState) error {
 	normalizeState(state)
+	metadata, err := newEngineMetadataStore(context.Background(), Config{
+		MetadataPath:       e.metadataPath,
+		MetadataCacheBytes: e.metadataCacheBytes,
+		Encryption:         e.encryption,
+	}, state)
+	if err != nil {
+		return err
+	}
+	previous := e.metadata
 	e.nextSeq = state.NextSeq
 	if e.nextSeq == 0 {
 		e.nextSeq = 1
@@ -1351,14 +1512,25 @@ func (e *Engine) replaceStateLocked(state *SnapshotState) {
 	if e.nextInode <= RootInode {
 		e.nextInode = RootInode + 1
 	}
-	e.nodes = state.Nodes
-	e.children = state.Children
-	e.data = state.Data
-	e.coldFiles = state.ColdFiles
-	e.segments = state.Segments
-	if !e.retainUnlinked {
-		e.collectUnlinkedLocked()
+	e.metadata = metadata
+	if previous != nil {
+		if err := previous.Close(); err != nil {
+			return err
+		}
 	}
+	if !e.retainUnlinked {
+		if err := e.collectUnlinkedLocked(context.Background()); err != nil {
+			return err
+		}
+	}
+	return e.metadata.Err()
+}
+
+func newEngineMetadataStore(ctx context.Context, cfg Config, state *SnapshotState) (metadataStore, error) {
+	if strings.TrimSpace(cfg.MetadataPath) == "" {
+		return newEagerMetadataStore(state), nil
+	}
+	return newSQLiteMetadataStoreWithEncryption(ctx, cfg.MetadataPath, state, cfg.MetadataCacheBytes, cfg.Encryption)
 }
 
 func (e *Engine) persistCurrentStateLocked() error {
@@ -1366,10 +1538,27 @@ func (e *Engine) persistCurrentStateLocked() error {
 }
 
 func (e *Engine) persistCurrentStateLockedWithReserve(reserve bool) error {
+	if e.stateFormatVersion == StateFormatV2 {
+		if reserve {
+			if err := e.reserveLocalDiskLocked(e.metadata.EstimatedPersistentBytes()); err != nil {
+				return err
+			}
+		}
+		return saveMetadataStateV2(context.Background(), headStatePath(e.wal.path), e.volumeID, "head", e.metadata, e.nextSeq, e.nextInode, e.encryption)
+	}
 	return e.persistStateLocked(e.currentStateLocked(), reserve)
 }
 
 func (e *Engine) persistStateLocked(source *SnapshotState, reserve bool) error {
+	if e.stateFormatVersion == StateFormatV2 {
+		pruneUnreferencedSegments(source)
+		if reserve {
+			if err := e.reserveLocalDiskLocked(estimatedStateBytes(source)); err != nil {
+				return err
+			}
+		}
+		return saveMetadataStateV2(context.Background(), headStatePath(e.wal.path), e.volumeID, "head", newEagerMetadataStore(source), source.NextSeq, source.NextInode, e.encryption)
+	}
 	state := cloneState(source)
 	pruneUnreferencedSegments(state)
 	if reserve {
@@ -1380,14 +1569,54 @@ func (e *Engine) persistStateLocked(source *SnapshotState, reserve bool) error {
 	return saveSnapshotState(headStatePath(e.wal.path), e.volumeID, "head", state, e.encryption, e.stateFormatVersion)
 }
 
-func loadCurrentState(cfg Config) (*SnapshotState, int, int64, error) {
+func loadCurrentState(ctx context.Context, cfg Config) (*SnapshotState, int, int64, error) {
 	if cfg.WALPath == "" {
 		return nil, 0, -1, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
-	return loadSnapshotStateWithFormat(headStatePath(cfg.WALPath), cfg.VolumeID, "head", cfg.Encryption)
+	return loadSnapshotStateWithFormatContext(ctx, headStatePath(cfg.WALPath), cfg.VolumeID, "head", cfg.Encryption)
 }
 
-func shouldUseMaterializedState(current *SnapshotState, currentErr error, latest *SnapshotState, hasWALRecords bool) bool {
+func loadCurrentEngineState(ctx context.Context, cfg Config) (*loadedEngineState, int, int64, error) {
+	if cfg.WALPath == "" {
+		return nil, 0, -1, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
+	}
+	if strings.TrimSpace(cfg.MetadataPath) != "" {
+		path := headStatePath(cfg.WALPath)
+		file, err := os.Open(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, 0, -1, ErrSnapshotNotFound
+			}
+			return nil, 0, -1, fmt.Errorf("read snapshot state: %w", err)
+		}
+		buffered := bufio.NewReader(&contextReader{ctx: ctx, reader: file})
+		v2, inspectErr := hasStateV2Magic(buffered)
+		if inspectErr != nil {
+			_ = file.Close()
+			return nil, 0, -1, fmt.Errorf("inspect snapshot state: %w", inspectErr)
+		}
+		if v2 {
+			metadataPath := cfg.MetadataPath
+			metadata, stream, decodeErr := newSQLiteMetadataStoreFromStateV2(ctx, metadataPath, buffered, cfg.VolumeID, stateBlobAAD(cfg.VolumeID, "head"), StateV2Role_STATE_V2_ROLE_HEAD, cfg.Encryption, cfg.MetadataCacheBytes)
+			closeErr := file.Close()
+			if decodeErr != nil {
+				return nil, StateFormatV2, -1, fmt.Errorf("decode snapshot state v2: %w", decodeErr)
+			}
+			if closeErr != nil {
+				_ = metadata.Close()
+				return nil, StateFormatV2, stream.Bytes, closeErr
+			}
+			return &loadedEngineState{
+				metadata: metadata, nextSeq: stream.Header.NextSeq, nextInode: stream.Header.NextInode, metadataPath: metadataPath,
+			}, StateFormatV2, stream.Bytes, nil
+		}
+		_ = file.Close()
+	}
+	state, format, bytes, err := loadCurrentState(ctx, cfg)
+	return loadedEngineStateFromSnapshot(state), format, bytes, err
+}
+
+func shouldUseMaterializedLoadedState(current *loadedEngineState, currentErr error, latest *loadedEngineState, hasWALRecords bool) bool {
 	if latest == nil {
 		return false
 	}
@@ -1403,47 +1632,52 @@ func shouldUseMaterializedState(current *SnapshotState, currentErr error, latest
 	if hasWALRecords {
 		return false
 	}
-	return latest.NextSeq > current.NextSeq
+	return latest.nextSeq > current.nextSeq
 }
 
-func validateCommittedWALBase(localStateErr error, committed *SnapshotState, firstWALRecord walRecord, hasWALRecords bool) error {
+func validateCommittedWALBase(localStateErr error, committed *loadedEngineState, firstWALRecord walRecord, hasWALRecords bool) error {
 	if !hasWALRecords || !errors.Is(localStateErr, ErrSnapshotNotFound) || committed == nil {
 		return nil
 	}
-	if firstWALRecord.Seq == committed.NextSeq {
+	if firstWALRecord.Seq == committed.nextSeq {
 		return nil
 	}
 	return fmt.Errorf(
 		"%w: local head is missing, committed state expects wal seq %d, and local wal starts at seq %d",
 		ErrCommittedHeadConflict,
-		committed.NextSeq,
+		committed.nextSeq,
 		firstWALRecord.Seq,
 	)
 }
 
 func (e *Engine) apply(record walRecord) error {
+	var err error
 	switch record.Op {
 	case "create":
-		return e.applyCreate(record)
+		err = e.applyCreate(record)
 	case "write":
-		return e.applyWrite(record)
+		err = e.applyWrite(record)
 	case "link":
-		return e.applyLink(record)
+		err = e.applyLink(record)
 	case "rmdir":
-		return e.applyRemoveDir(record)
+		err = e.applyRemoveDir(record)
 	case "rename":
-		return e.applyRename(record)
+		err = e.applyRename(record)
 	case "chmod":
-		return e.applySetMode(record)
+		err = e.applySetMode(record)
 	case "chown":
-		return e.applySetOwner(record)
+		err = e.applySetOwner(record)
 	case "truncate":
-		return e.applyTruncate(record)
+		err = e.applyTruncate(record)
 	case "unlink":
-		return e.applyUnlink(record)
+		err = e.applyUnlink(record)
 	default:
 		return fmt.Errorf("unknown wal op %q", record.Op)
 	}
+	if err != nil {
+		return err
+	}
+	return e.metadata.Err()
 }
 
 func (e *Engine) applyCreate(record walRecord) error {
@@ -1453,7 +1687,7 @@ func (e *Engine) applyCreate(record walRecord) error {
 	if err := e.ensureDirLocked(record.Parent); err != nil {
 		return err
 	}
-	if _, exists := e.children[record.Parent][record.Name]; exists {
+	if _, exists := e.metadata.Child(record.Parent, record.Name); exists {
 		return ErrExists
 	}
 	now := time.Unix(0, record.TimeUnix).UTC()
@@ -1473,10 +1707,10 @@ func (e *Engine) applyCreate(record walRecord) error {
 		node.Type = TypeFile
 	}
 	if node.Type == TypeDirectory {
-		e.children[node.Inode] = map[string]uint64{}
+		e.metadata.EnsureDirectory(node.Inode)
 	}
-	e.nodes[node.Inode] = node
-	e.children[record.Parent][record.Name] = node.Inode
+	e.metadata.PutNode(node.Inode, node)
+	e.metadata.PutChild(record.Parent, record.Name, node.Inode)
 	if record.Inode >= e.nextInode {
 		e.nextInode = record.Inode + 1
 	}
@@ -1487,8 +1721,8 @@ func (e *Engine) applyLink(record walRecord) error {
 	if record.Inode == 0 || record.NewParent == 0 || record.NewName == "" {
 		return fmt.Errorf("%w: invalid link record", ErrInvalidInput)
 	}
-	node := e.nodes[record.Inode]
-	if node == nil {
+	node, ok := e.metadata.Node(record.Inode)
+	if !ok {
 		return ErrNotFound
 	}
 	if node.Type == TypeDirectory {
@@ -1497,12 +1731,13 @@ func (e *Engine) applyLink(record walRecord) error {
 	if err := e.ensureDirLocked(record.NewParent); err != nil {
 		return err
 	}
-	if _, exists := e.children[record.NewParent][record.NewName]; exists {
+	if _, exists := e.metadata.Child(record.NewParent, record.NewName); exists {
 		return ErrExists
 	}
-	e.children[record.NewParent][record.NewName] = record.Inode
+	e.metadata.PutChild(record.NewParent, record.NewName, record.Inode)
 	node.Nlink++
 	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	e.metadata.PutNode(record.Inode, node)
 	return nil
 }
 
@@ -1525,11 +1760,12 @@ func (e *Engine) applyWrite(record walRecord) error {
 		current = grown
 	}
 	copy(current[record.Offset:end], record.Data)
-	e.data[record.Inode] = current
+	e.metadata.PutData(record.Inode, current)
 	node.Size = uint64(len(current))
 	now := time.Unix(0, record.TimeUnix).UTC()
 	node.Mtime = now
 	node.Ctime = now
+	e.metadata.PutNode(record.Inode, node)
 	return nil
 }
 
@@ -1541,10 +1777,11 @@ func (e *Engine) applyRename(record walRecord) error {
 	if err := e.ensureDirLocked(record.NewParent); err != nil {
 		return err
 	}
-	delete(e.children[record.Parent], record.Name)
-	e.children[record.NewParent][record.NewName] = inode
-	if node := e.nodes[inode]; node != nil {
+	e.metadata.DeleteChild(record.Parent, record.Name)
+	e.metadata.PutChild(record.NewParent, record.NewName, inode)
+	if node, ok := e.metadata.Node(inode); ok {
 		node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+		e.metadata.PutNode(inode, node)
 	}
 	return nil
 }
@@ -1554,40 +1791,46 @@ func (e *Engine) applyRemoveDir(record walRecord) error {
 	if err != nil {
 		return err
 	}
-	node := e.nodes[inode]
-	if node == nil {
+	node, ok := e.metadata.Node(inode)
+	if !ok {
 		return ErrNotFound
 	}
 	if node.Type != TypeDirectory {
 		return ErrNotDir
 	}
-	if len(e.children[inode]) > 0 {
+	children, _, _ := e.metadata.DirectoryPage(inode, 0, 1)
+	if err := e.metadata.Err(); err != nil {
+		return err
+	}
+	if len(children) != 0 {
 		return ErrNotEmpty
 	}
-	delete(e.children[record.Parent], record.Name)
-	delete(e.children, inode)
-	delete(e.nodes, inode)
+	e.metadata.DeleteChild(record.Parent, record.Name)
+	e.metadata.DeleteDirectory(inode)
+	e.metadata.DeleteNode(inode)
 	return nil
 }
 
 func (e *Engine) applySetMode(record walRecord) error {
-	node, ok := e.nodes[record.Inode]
+	node, ok := e.metadata.Node(record.Inode)
 	if !ok {
 		return ErrNotFound
 	}
 	node.Mode = record.Mode
 	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	e.metadata.PutNode(record.Inode, node)
 	return nil
 }
 
 func (e *Engine) applySetOwner(record walRecord) error {
-	node, ok := e.nodes[record.Inode]
+	node, ok := e.metadata.Node(record.Inode)
 	if !ok {
 		return ErrNotFound
 	}
 	node.UID = record.Mode
 	node.GID = uint32(record.Offset)
 	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	e.metadata.PutNode(record.Inode, node)
 	return nil
 }
 
@@ -1614,11 +1857,12 @@ func (e *Engine) applyTruncate(record walRecord) error {
 	default:
 		current = slices.Clone(current)
 	}
-	e.data[record.Inode] = current
+	e.metadata.PutData(record.Inode, current)
 	node.Size = uint64(len(current))
 	now := time.Unix(0, record.TimeUnix).UTC()
 	node.Mtime = now
 	node.Ctime = now
+	e.metadata.PutNode(record.Inode, node)
 	return nil
 }
 
@@ -1627,14 +1871,15 @@ func (e *Engine) applyUnlink(record walRecord) error {
 	if err != nil {
 		return err
 	}
-	node := e.nodes[inode]
+	node, _ := e.metadata.Node(inode)
 	if node != nil && node.Type == TypeDirectory {
 		return ErrIsDir
 	}
-	delete(e.children[record.Parent], record.Name)
+	e.metadata.DeleteChild(record.Parent, record.Name)
 	if node != nil && node.Nlink > 0 {
 		node.Nlink--
 		node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+		e.metadata.PutNode(inode, node)
 	}
 	return nil
 }
@@ -1646,23 +1891,11 @@ func (e *Engine) markDirtyLocked() {
 }
 
 func (e *Engine) needsMaterializationLocked() bool {
-	for _, payload := range e.data {
-		if len(payload) > 0 {
-			return true
-		}
-	}
-	for _, extents := range e.coldFiles {
-		for _, extent := range extents {
-			if segment := e.segments[extent.SegmentID]; isInlineSegment(segment) {
-				return true
-			}
-		}
-	}
-	return false
+	return e.metadata.NeedsMaterialization()
 }
 
 func (e *Engine) snapshotStateLocked() *SnapshotState {
-	state := cloneState(e.currentStateLocked())
+	state := e.currentStateLocked()
 	for inode := range state.ColdFiles {
 		if state.Nodes[inode] == nil {
 			delete(state.ColdFiles, inode)
@@ -1673,7 +1906,7 @@ func (e *Engine) snapshotStateLocked() *SnapshotState {
 }
 
 func (e *Engine) exportStateLocked() (*SnapshotState, error) {
-	state := cloneState(e.currentStateLocked())
+	state := e.currentStateLocked()
 	if len(state.ColdFiles) == 0 {
 		state.Segments = make(map[string]*Segment)
 		return state, nil
@@ -1695,7 +1928,7 @@ func (e *Engine) exportStateLocked() (*SnapshotState, error) {
 }
 
 func (e *Engine) materializeStateLocked() (*SnapshotState, error) {
-	state := cloneStateForMaterialization(e.currentStateLocked())
+	state := e.currentStateLocked()
 	if len(state.ColdFiles) == 0 {
 		pruneUnreferencedSegments(state)
 		return state, nil
@@ -1716,7 +1949,9 @@ func (e *Engine) readFileLocked(node *Node, inode uint64, offset uint64, size ui
 	if offset >= node.Size {
 		return nil, nil
 	}
-	if payload := e.data[inode]; len(payload) > 0 || len(e.coldFiles[inode]) == 0 {
+	payload, hasData := e.metadata.Data(inode)
+	extents, _ := e.metadata.ColdFile(inode)
+	if len(payload) > 0 || (hasData && len(extents) == 0) || len(extents) == 0 {
 		if offset >= uint64(len(payload)) {
 			return nil, nil
 		}
@@ -1736,7 +1971,9 @@ func (e *Engine) readFileIntoLocked(node *Node, inode uint64, offset uint64, des
 	if len(dest) == 0 || offset >= node.Size {
 		return 0, nil
 	}
-	if payload := e.data[inode]; len(payload) > 0 || len(e.coldFiles[inode]) == 0 {
+	payload, hasData := e.metadata.Data(inode)
+	extents, _ := e.metadata.ColdFile(inode)
+	if len(payload) > 0 || (hasData && len(extents) == 0) || len(extents) == 0 {
 		if offset >= uint64(len(payload)) {
 			return 0, nil
 		}
@@ -1754,24 +1991,36 @@ func (e *Engine) readFileIntoLocked(node *Node, inode uint64, offset uint64, des
 }
 
 func (e *Engine) mutableFileDataLocked(inode uint64) ([]byte, error) {
-	if payload := e.data[inode]; len(payload) > 0 || len(e.coldFiles[inode]) == 0 {
+	payload, hasData := e.metadata.Data(inode)
+	extents, _ := e.metadata.ColdFile(inode)
+	if len(payload) > 0 || (hasData && len(extents) == 0) || len(extents) == 0 {
 		return payload, nil
 	}
-	node := e.nodes[inode]
-	if node == nil {
+	node, ok := e.metadata.Node(inode)
+	if !ok {
 		return nil, ErrNotFound
 	}
 	payload, err := e.readColdRangeLocked(inode, 0, node.Size)
 	if err != nil {
 		return nil, err
 	}
-	e.data[inode] = payload
-	delete(e.coldFiles, inode)
+	e.metadata.PutData(inode, payload)
+	e.metadata.DeleteColdFile(inode)
 	return payload, nil
 }
 
 func (e *Engine) readColdRangeLocked(inode uint64, offset uint64, size uint64) ([]byte, error) {
-	return readColdRange(e.materializer, e.coldFiles[inode], e.segments, offset, size)
+	extents, _ := e.metadata.ColdFile(inode)
+	segments := make(map[string]*Segment)
+	for _, extent := range extents {
+		if extent.SegmentID == "" {
+			continue
+		}
+		if segment, ok := e.metadata.Segment(extent.SegmentID); ok {
+			segments[extent.SegmentID] = segment
+		}
+	}
+	return readColdRange(e.materializer, extents, segments, offset, size)
 }
 
 func minUint64(a, b uint64) uint64 {
@@ -1792,20 +2041,24 @@ func (e *Engine) checkOpen() error {
 	if e == nil || e.closed {
 		return ErrClosed
 	}
+	if e.metadata != nil {
+		return e.metadata.Err()
+	}
 	return nil
 }
 
 func (e *Engine) ensureDirLocked(inode uint64) error {
-	node, ok := e.nodes[inode]
+	node, ok := e.metadata.Node(inode)
 	if !ok {
+		if err := e.metadata.Err(); err != nil {
+			return err
+		}
 		return ErrNotFound
 	}
 	if node.Type != TypeDirectory {
 		return ErrNotDir
 	}
-	if e.children[inode] == nil {
-		e.children[inode] = map[string]uint64{}
-	}
+	e.metadata.EnsureDirectory(inode)
 	return nil
 }
 
@@ -1813,16 +2066,22 @@ func (e *Engine) lookupLocked(parent uint64, name string) (uint64, error) {
 	if err := e.ensureDirLocked(parent); err != nil {
 		return 0, err
 	}
-	inode, ok := e.children[parent][name]
+	inode, ok := e.metadata.Child(parent, name)
 	if !ok {
+		if err := e.metadata.Err(); err != nil {
+			return 0, err
+		}
 		return 0, ErrNotFound
 	}
 	return inode, nil
 }
 
 func (e *Engine) fileNodeLocked(inode uint64) (*Node, error) {
-	node, ok := e.nodes[inode]
+	node, ok := e.metadata.Node(inode)
 	if !ok {
+		if err := e.metadata.Err(); err != nil {
+			return nil, err
+		}
 		return nil, ErrNotFound
 	}
 	if node.Type == TypeDirectory {
@@ -1832,60 +2091,9 @@ func (e *Engine) fileNodeLocked(inode uint64) (*Node, error) {
 }
 
 func (e *Engine) pathLocked(target uint64) (string, bool) {
-	if target == RootInode {
-		return "/", true
-	}
-	if e.nodes[target] == nil {
-		return "", false
-	}
-
-	type frame struct {
-		inode uint64
-		path  string
-	}
-	queue := []frame{{inode: RootInode, path: "/"}}
-	seen := map[uint64]struct{}{RootInode: {}}
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-		children := e.children[current.inode]
-		if len(children) == 0 {
-			continue
-		}
-		names := make([]string, 0, len(children))
-		for name := range children {
-			names = append(names, name)
-		}
-		slices.Sort(names)
-		for _, name := range names {
-			child := children[name]
-			childPath := current.path + name
-			if current.path != "/" {
-				childPath = current.path + "/" + name
-			}
-			if child == target {
-				return childPath, true
-			}
-			if _, ok := seen[child]; ok {
-				continue
-			}
-			seen[child] = struct{}{}
-			if node := e.nodes[child]; node != nil && node.Type == TypeDirectory {
-				queue = append(queue, frame{inode: child, path: childPath})
-			}
-		}
-	}
-	return "", false
+	return e.metadata.Path(target)
 }
 
-func (e *Engine) collectUnlinkedLocked() {
-	for inode, node := range e.nodes {
-		if inode == RootInode || node == nil || node.Nlink != 0 {
-			continue
-		}
-		delete(e.children, inode)
-		delete(e.nodes, inode)
-		delete(e.data, inode)
-		delete(e.coldFiles, inode)
-	}
+func (e *Engine) collectUnlinkedLocked(ctx context.Context) error {
+	return e.metadata.PruneUnlinked(ctx, nil)
 }

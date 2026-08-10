@@ -675,22 +675,19 @@ func (s *FileSystemServer) ReadDir(ctx context.Context, req *pb.ReadDirRequest) 
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		entries, err := volCtx.S0FS.ReadDir(req.Inode)
-		if err != nil {
-			return nil, MapS0FSError(err)
-		}
-		start := int(req.Offset)
+		start := req.Offset
 		if start < 0 {
 			start = 0
 		}
-		if start > len(entries) {
-			start = len(entries)
+		entries, eof, err := volCtx.S0FS.ReadDirPage(req.Inode, uint64(start), req.Size)
+		if err != nil {
+			return nil, MapS0FSError(err)
 		}
-		result := make([]*pb.DirEntry, 0, len(entries)-start)
-		for i, entry := range entries[start:] {
+		result := make([]*pb.DirEntry, 0, len(entries))
+		for i, entry := range entries {
 			item := &pb.DirEntry{
 				Inode:  entry.Inode,
-				Offset: uint64(start + i + 1),
+				Offset: uint64(start) + uint64(i) + 1,
 				Name:   entry.Name,
 				Type:   s0fsTypeNumber(entry.Type),
 			}
@@ -703,7 +700,7 @@ func (s *FileSystemServer) ReadDir(ctx context.Context, req *pb.ReadDirRequest) 
 			}
 			result = append(result, item)
 		}
-		return &pb.ReadDirResponse{Entries: result, Eof: true}, nil
+		return &pb.ReadDirResponse{Entries: result, Eof: eof}, nil
 	}
 
 	return nil, unsupportedVolumeBackend(volCtx)

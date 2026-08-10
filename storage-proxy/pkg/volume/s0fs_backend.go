@@ -78,8 +78,9 @@ func (b *S0FSBackend) MountVolume(ctx context.Context, req BackendMountRequest) 
 		ObjectStoreForVolume: func(volumeID string) (objectstore.Store, error) {
 			return b.createObjectStorageForVolume(req, volumeID)
 		},
-		HeadStore:  b.headStore,
-		Encryption: encryption,
+		HeadStore:    b.headStore,
+		Encryption:   encryption,
+		MetadataPath: filepath.Join(cacheDir, "metadata.sqlite"),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open s0fs engine: %w", err)

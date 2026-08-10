@@ -4948,8 +4948,8 @@ spec:
                       s0fsHotCacheMaxSize:
                         default: 1Gi
                         description: |-
-                          S0FSHotCacheMaxSize bounds conservatively estimated memory retained by clean engines.
-                          Engines are retained only after an intentional sandbox pause. Set 0 to disable retention.
+                          S0FSHotCacheMaxSize bounds conservatively estimated memory shared by active and detached engines.
+                          Set 0 to disable detached retention and active-engine admission enforcement.
                         type: string
                       s0fsSegmentTargetSize:
                         default: 4Mi

@@ -41,6 +41,88 @@ func (m *Manager) hotCacheEnabled() bool {
 	return m != nil && m.hotCacheMaxBytes > 0
 }
 
+func boundMetadataBytes(bound *boundVolume) int64 {
+	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
+		return 0
+	}
+	estimated := bound.volCtx.S0FS.EstimatedMemoryBytes()
+	if estimated < hotCacheMinimumEntryBytes {
+		estimated = hotCacheMinimumEntryBytes
+	}
+	return estimated
+}
+
+// admitActiveMetadata charges active and detached engines to the same node
+// budget. The caller holds the candidate volume activation, so detached
+// victims can be evicted without racing a second open of the candidate.
+func (m *Manager) admitActiveMetadata(bound *boundVolume) error {
+	return m.admitActiveMetadataBytes(bound, boundMetadataBytes(bound))
+}
+
+func (m *Manager) admitActiveMetadataBytes(bound *boundVolume, charge int64) error {
+	if m == nil || bound == nil || bound.metadataCharged {
+		return nil
+	}
+	if charge == 0 {
+		return nil
+	}
+	if m.hotCacheMaxBytes > 0 && charge > m.hotCacheMaxBytes {
+		m.observer.ObserveHotCacheAdmission("rejected", "active_oversize")
+		m.observer.ObserveMetadataBudgetPressure("active_oversize")
+		return fmt.Errorf("S0FS active metadata requires %d bytes, exceeding node budget %d", charge, m.hotCacheMaxBytes)
+	}
+	for {
+		m.mu.Lock()
+		if m.hotCacheMaxBytes <= 0 || m.activeMetadataBytes+m.hotCacheBytes+charge <= m.hotCacheMaxBytes {
+			m.activeMetadataBytes += charge
+			bound.metadataBytes = charge
+			bound.metadataCharged = true
+			m.observeMetadataResidencyLocked()
+			m.mu.Unlock()
+			return nil
+		}
+		victimID, victim := m.leastValuableProbationLocked()
+		if victim == nil {
+			victimID, victim = m.oldestProtectedExceptLocked(bound.volumeID)
+		}
+		activeBytes, detachedBytes, budgetBytes := m.activeMetadataBytes, m.hotCacheBytes, m.hotCacheMaxBytes
+		m.mu.Unlock()
+		if victim == nil {
+			m.observer.ObserveHotCacheAdmission("rejected", "active_capacity")
+			m.observer.ObserveMetadataBudgetPressure("active_capacity")
+			return fmt.Errorf("S0FS node metadata budget exhausted: active=%d detached=%d candidate=%d budget=%d", activeBytes, detachedBytes, charge, budgetBytes)
+		}
+		m.observer.ObserveMetadataBudgetPressure("active_evict_detached")
+		if !m.tryEvictHotVolumeEntry(victimID, victim, "active_capacity") {
+			m.observer.ObserveHotCacheAdmission("rejected", "active_victim_busy")
+			m.observer.ObserveMetadataBudgetPressure("active_victim_busy")
+			return fmt.Errorf("S0FS node metadata budget is blocked by a busy detached engine")
+		}
+	}
+}
+
+func (m *Manager) releaseActiveMetadata(bound *boundVolume) {
+	if m == nil || bound == nil || !bound.metadataCharged {
+		return
+	}
+	m.mu.Lock()
+	m.releaseActiveMetadataLocked(bound)
+	m.mu.Unlock()
+}
+
+func (m *Manager) releaseActiveMetadataLocked(bound *boundVolume) {
+	if bound == nil || !bound.metadataCharged {
+		return
+	}
+	m.activeMetadataBytes -= bound.metadataBytes
+	if m.activeMetadataBytes < 0 {
+		m.activeMetadataBytes = 0
+	}
+	bound.metadataBytes = 0
+	bound.metadataCharged = false
+	m.observeMetadataResidencyLocked()
+}
+
 func (m *Manager) activateHotBoundVolume(
 	_ context.Context,
 	req ctldapi.BindVolumePortalRequest,
@@ -74,8 +156,13 @@ func (m *Manager) activateHotBoundVolume(
 		session.statePath = bound.statePath
 		session.incrementalReady = m.incrementalS0FSHandleRecoveryReady
 	}
+	if err := m.admitActiveMetadata(bound); err != nil {
+		m.closeHotVolume(entry)
+		return nil, nil, true, err
+	}
 
 	cleanup := func() {
+		m.releaseActiveMetadata(bound)
 		if bound.ownerRegistered {
 			m.unregisterOwner(bound)
 		}
@@ -142,6 +229,7 @@ func (m *Manager) retainHotVolume(bound *boundVolume) {
 	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
 		return
 	}
+	m.releaseActiveMetadata(bound)
 	now := time.Now().UTC()
 	mountedDuration := time.Duration(0)
 	if !bound.mountedAt.IsZero() && now.After(bound.mountedAt) {
@@ -151,10 +239,7 @@ func (m *Manager) retainHotVolume(bound *boundVolume) {
 	if bound.hotReuse {
 		segment = hotCacheSegmentProtected
 	}
-	estimatedBytes := bound.volCtx.S0FS.EstimatedMemoryBytes()
-	if estimatedBytes < hotCacheMinimumEntryBytes {
-		estimatedBytes = hotCacheMinimumEntryBytes
-	}
+	estimatedBytes := boundMetadataBytes(bound)
 	entry := &hotVolume{
 		bound:            bound,
 		cachedAt:         now,
@@ -196,13 +281,14 @@ func (m *Manager) retainHotVolume(bound *boundVolume) {
 	}
 	for {
 		m.mu.Lock()
-		if m.hotCacheBytes <= m.hotCacheMaxBytes {
+		if m.activeMetadataBytes+m.hotCacheBytes <= m.hotCacheMaxBytes {
 			admittedSegment := entry.segment
 			m.observeHotCacheSizeLocked()
 			m.mu.Unlock()
 			m.observer.ObserveHotCacheAdmission("admitted", string(admittedSegment))
 			return
 		}
+		m.observer.ObserveMetadataBudgetPressure("detached_capacity")
 		victimID, victim := m.capacityVictimLocked(entry)
 		if victim == entry {
 			m.removeHotVolumeLocked(victimID, victim)
@@ -234,7 +320,11 @@ func (m *Manager) rebalanceProtectedSegment(candidate *hotVolume) {
 	if m == nil || candidate == nil {
 		return
 	}
-	target := m.hotCacheMaxBytes * hotCacheProtectedTargetNumerator / hotCacheProtectedTargetDenominator
+	available := m.hotCacheMaxBytes - m.activeMetadataBytes
+	if available < 0 {
+		available = 0
+	}
+	target := available * hotCacheProtectedTargetNumerator / hotCacheProtectedTargetDenominator
 	for {
 		m.mu.Lock()
 		if m.hotCacheProtectedBytes <= target {
@@ -334,6 +424,7 @@ func (m *Manager) drainHotVolumes(reason string) []*hotVolume {
 	m.hotCacheProbationBytes = 0
 	m.hotCacheProtectedBytes = 0
 	m.observeHotCacheSizeLocked()
+	m.observeMetadataResidencyLocked()
 	m.mu.Unlock()
 	for _, entry := range entries {
 		m.observer.ObserveHotCacheEviction(reason, string(entry.segment))
@@ -351,6 +442,7 @@ func (m *Manager) addHotVolumeLocked(volumeID string, entry *hotVolume) {
 	default:
 		m.hotCacheProbationBytes += entry.estimatedBytes
 	}
+	m.observeMetadataResidencyLocked()
 }
 
 func (m *Manager) removeHotVolumeLocked(volumeID string, entry *hotVolume) {
@@ -374,6 +466,7 @@ func (m *Manager) removeHotVolumeLocked(volumeID string, entry *hotVolume) {
 	if m.hotCacheProtectedBytes < 0 {
 		m.hotCacheProtectedBytes = 0
 	}
+	m.observeMetadataResidencyLocked()
 }
 
 func (m *Manager) setHotVolumeSegmentLocked(entry *hotVolume, segment hotCacheSegment) {
@@ -484,6 +577,13 @@ func (m *Manager) observeHotCacheSizeLocked() {
 		protectedEntries,
 		m.hotCacheProtectedBytes,
 	)
+}
+
+func (m *Manager) observeMetadataResidencyLocked() {
+	if m == nil || m.observer == nil {
+		return
+	}
+	m.observer.SetMetadataResidency(m.activeMetadataBytes, m.hotCacheBytes)
 }
 
 func (m *Manager) closeHotVolume(entry *hotVolume) {

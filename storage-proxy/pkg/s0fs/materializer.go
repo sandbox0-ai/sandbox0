@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,6 +128,14 @@ func (m *Materializer) loadCommittedHead(ctx context.Context) (*CommittedHead, e
 }
 
 func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64) (*Manifest, error) {
+	return m.materialize(ctx, state, expectedManifestSeq, false)
+}
+
+func (m *Materializer) materializeOwned(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64) (*Manifest, error) {
+	return m.materialize(ctx, state, expectedManifestSeq, true)
+}
+
+func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64, owned bool) (*Manifest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -140,7 +149,10 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 		return nil, fmt.Errorf("%w: snapshot state is required", ErrInvalidInput)
 	}
 
-	inline := cloneStateForMaterialization(state)
+	inline := state
+	if !owned {
+		inline = cloneStateForMaterialization(state)
+	}
 	normalizeState(inline)
 	defaultSegmentVolumeIDs(inline, m.volumeID)
 	ensureMaterializableSequence(inline)
@@ -325,6 +337,117 @@ func (m *Materializer) loadLatestStateOwned(ctx context.Context) (*SnapshotState
 		return nil, nil, err
 	}
 	return manifest.State, manifest, nil
+}
+
+func (m *Materializer) loadLatestEngineState(ctx context.Context, metadataPath string, metadataCacheBytes int64) (*loadedEngineState, *Manifest, error) {
+	if strings.TrimSpace(metadataPath) == "" {
+		state, manifest, err := m.loadLatestStateOwned(ctx)
+		return loadedEngineStateFromSnapshot(state), manifest, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	key := manifestLatestKey
+	var committed *CommittedHead
+	if m.headStore != nil {
+		head, err := m.loadCommittedHead(ctx)
+		switch {
+		case err == nil:
+			committed = head
+			key = head.ManifestKey
+		case !errors.Is(err, ErrCommittedHeadNotFound):
+			return nil, nil, err
+		}
+	}
+	state, manifest, err := m.loadManifestEngineStateByKey(ctx, key, metadataPath, metadataCacheBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	if committed != nil {
+		if !committedHeadMatchesCheckpoint(committed, m.volumeID, state.checkpointSequence()) || manifest.ManifestSeq != committed.ManifestSeq {
+			state.close()
+			return nil, nil, fmt.Errorf("%w: committed head does not match manifest state", ErrInvalidInput)
+		}
+		return state, manifest, nil
+	}
+	if m.headStore != nil {
+		head := &CommittedHead{
+			VolumeID:      m.volumeID,
+			ManifestSeq:   manifest.ManifestSeq,
+			CheckpointSeq: manifest.CheckpointSeq,
+			ManifestKey:   manifestKey(manifest.ManifestSeq),
+			UpdatedAt:     manifest.CreatedAt,
+		}
+		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, 0, head); err != nil {
+			state.close()
+			if errors.Is(err, ErrCommittedHeadConflict) {
+				return m.loadLatestEngineState(ctx, metadataPath, metadataCacheBytes)
+			}
+			return nil, nil, err
+		}
+	}
+	return state, manifest, nil
+}
+
+func (m *Materializer) loadManifestEngineStateByKey(ctx context.Context, key, metadataPath string, metadataCacheBytes int64) (*loadedEngineState, *Manifest, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, nil, ErrMaterializedManifestNotFound
+	}
+	reader, err := m.store.Get(key, 0, -1)
+	if err != nil {
+		if objectstore.IsNotFound(err) {
+			return nil, nil, ErrMaterializedManifestNotFound
+		}
+		return nil, nil, fmt.Errorf("get %s: %w", key, err)
+	}
+	buffered := bufio.NewReader(&contextReader{ctx: ctx, reader: reader})
+	v2, err := hasStateV2Magic(buffered)
+	if err != nil {
+		_ = reader.Close()
+		return nil, nil, fmt.Errorf("inspect %s: %w", key, err)
+	}
+	if !v2 {
+		_ = reader.Close()
+		manifest, err := m.loadManifestByKey(ctx, key)
+		if err != nil {
+			return nil, nil, err
+		}
+		return loadedEngineStateFromSnapshot(manifest.State), manifest, nil
+	}
+	metadata, stream, decodeErr := newSQLiteMetadataStoreFromStateV2(
+		ctx,
+		metadataPath,
+		buffered,
+		m.volumeID,
+		stateBlobAAD(m.volumeID, "object:"+key),
+		StateV2Role_STATE_V2_ROLE_MANIFEST,
+		m.encryption,
+		metadataCacheBytes,
+	)
+	closeErr := reader.Close()
+	if decodeErr != nil {
+		return nil, nil, fmt.Errorf("decode %s: %w", key, decodeErr)
+	}
+	if closeErr != nil {
+		_ = metadata.Close()
+		return nil, nil, closeErr
+	}
+	state := &loadedEngineState{
+		metadata: metadata, nextSeq: stream.Header.NextSeq, nextInode: stream.Header.NextInode, metadataPath: metadataPath,
+	}
+	manifest := &Manifest{
+		Version:       StateFormatV2,
+		VolumeID:      m.volumeID,
+		ManifestSeq:   stream.Metadata.ManifestSeq,
+		CheckpointSeq: stream.Metadata.CheckpointSeq,
+		CreatedAt:     stream.Metadata.CreatedAt,
+	}
+	root, ok := metadata.Node(RootInode)
+	if stream.Header.NextSeq == 0 || stream.Header.NextSeq-1 != manifest.ManifestSeq || manifest.CheckpointSeq != manifest.ManifestSeq || !ok || root.Type != TypeDirectory {
+		state.close()
+		return nil, nil, fmt.Errorf("%w: manifest %s has inconsistent state", ErrInvalidInput, key)
+	}
+	return state, manifest, nil
 }
 
 func (m *Materializer) persistSnapshot(ctx context.Context, snapshotID string, state *SnapshotState) error {
@@ -540,6 +663,23 @@ func (m *Materializer) validateCommittedStateSegments(ctx context.Context, state
 		return fmt.Errorf("%w: state is required", ErrCommittedStateIntegrity)
 	}
 	if err := m.validateRecoverySegments(ctx, state); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommittedStateIntegrity, err)
+	}
+	return nil
+}
+
+func (m *Materializer) validateCommittedLoadedStateSegments(ctx context.Context, state *loadedEngineState) error {
+	if state == nil {
+		return fmt.Errorf("%w: state is required", ErrCommittedStateIntegrity)
+	}
+	if state.state != nil {
+		return m.validateCommittedStateSegments(ctx, state.state)
+	}
+	sqliteState, ok := state.metadata.(*sqliteMetadataStore)
+	if !ok || sqliteState == nil {
+		return fmt.Errorf("%w: state metadata is required", ErrCommittedStateIntegrity)
+	}
+	if err := sqliteState.validateSegments(ctx, m); err != nil {
 		return fmt.Errorf("%w: %w", ErrCommittedStateIntegrity, err)
 	}
 	return nil
@@ -770,16 +910,12 @@ func (m *Materializer) putManifest(ctx context.Context, key string, manifest *Ma
 	if normalizedStateFormatVersion(manifest.Version) != StateFormatV2 {
 		return m.putJSON(ctx, key, manifest)
 	}
-	payload, err := encodeStateV2(m.volumeID, stateBlobAAD(m.volumeID, "object:"+key), manifest.State, stateV2Metadata{
+	return m.putMetadataStateV2(ctx, key, newEagerMetadataStore(manifest.State), manifest.State.NextSeq, manifest.State.NextInode, stateV2Metadata{
 		Role:          StateV2Role_STATE_V2_ROLE_MANIFEST,
 		ManifestSeq:   manifest.ManifestSeq,
 		CheckpointSeq: manifest.CheckpointSeq,
 		CreatedAt:     manifest.CreatedAt,
-	}, m.encryption)
-	if err != nil {
-		return fmt.Errorf("encode %s: %w", key, err)
-	}
-	return m.putBytes(ctx, key, payload)
+	})
 }
 
 func (m *Materializer) getManifest(ctx context.Context, key string) (*Manifest, error) {
@@ -811,11 +947,29 @@ func (m *Materializer) putSnapshotState(ctx context.Context, key string, state *
 	if m.stateFormatVersion != StateFormatV2 {
 		return m.putJSON(ctx, key, state)
 	}
-	payload, err := encodeStateV2(m.volumeID, stateBlobAAD(m.volumeID, "object:"+key), state, stateV2Metadata{Role: StateV2Role_STATE_V2_ROLE_SNAPSHOT}, m.encryption)
+	return m.putMetadataStateV2(ctx, key, newEagerMetadataStore(state), state.NextSeq, state.NextInode, stateV2Metadata{Role: StateV2Role_STATE_V2_ROLE_SNAPSHOT})
+}
+
+func (m *Materializer) putMetadataStateV2(ctx context.Context, key string, metadata metadataStore, nextSeq, nextInode uint64, stateMetadata stateV2Metadata) error {
+	file, err := os.CreateTemp("", "s0fs-state-v2-*.object")
 	if err != nil {
+		return fmt.Errorf("create %s spool: %w", key, err)
+	}
+	path := file.Name()
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	}()
+	if err := writeMetadataStateV2(ctx, file, m.volumeID, stateBlobAAD(m.volumeID, "object:"+key), metadata, nextSeq, nextInode, stateMetadata, m.encryption); err != nil {
 		return fmt.Errorf("encode %s: %w", key, err)
 	}
-	return m.putBytes(ctx, key, payload)
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := m.store.Put(key, file); err != nil {
+		return fmt.Errorf("put %s: %w", key, err)
+	}
+	return nil
 }
 
 func (m *Materializer) getSnapshotState(ctx context.Context, key string) (*SnapshotState, error) {
@@ -854,7 +1008,7 @@ func (m *Materializer) readStateObject(ctx context.Context, key string, role Sta
 		return nil, nil, fmt.Errorf("inspect %s: %w", key, err)
 	}
 	if v2 {
-		result, err := decodeStateV2(buffered, m.volumeID, stateBlobAAD(m.volumeID, "object:"+key), role, m.encryption)
+		result, err := decodeStateV2Context(ctx, buffered, m.volumeID, stateBlobAAD(m.volumeID, "object:"+key), role, m.encryption)
 		bytesRead := int64(-1)
 		var state *SnapshotState
 		if result != nil {
@@ -867,7 +1021,7 @@ func (m *Materializer) readStateObject(ctx context.Context, key string, role Sta
 		}
 		return result, nil, nil
 	}
-	payload, err := io.ReadAll(buffered)
+	payload, err := io.ReadAll(&contextReader{ctx: ctx, reader: buffered})
 	if err != nil {
 		m.observeOpenPhase("object_read", "remote", StateFormatV1, started, int64(len(payload)), nil, err)
 		return nil, nil, fmt.Errorf("read %s: %w", key, err)
@@ -1067,13 +1221,9 @@ func (c *segmentCache) estimatedMemoryBytes() int64 {
 	if c == nil {
 		return 0
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	total := c.size + int64(len(c.order))*16
-	for key := range c.entries {
-		total += int64(64 + len(key))
-	}
-	return total
+	// Admission charges the capacity rather than current occupancy so cache
+	// growth cannot make an already-active engine bypass the node budget.
+	return c.maxBytes + 1<<20
 }
 
 func cloneNodeMap(nodes map[uint64]*Node) map[uint64]*Node {

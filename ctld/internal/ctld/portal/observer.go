@@ -31,6 +31,8 @@ type Observer struct {
 	hotCacheActiveDuration *prometheus.HistogramVec
 	hotCacheOpenDuration   *prometheus.HistogramVec
 	hotCacheResidence      *prometheus.HistogramVec
+	metadataResidentBytes  *prometheus.GaugeVec
+	metadataBudgetPressure *prometheus.CounterVec
 }
 
 func NewObserver(registry prometheus.Registerer, logger *zap.Logger) *Observer {
@@ -114,6 +116,14 @@ func NewObserver(registry prometheus.Registerer, logger *zap.Logger) *Observer {
 		Help:    "Time S0FS engines remain in the hot cache before a hit or eviction",
 		Buckets: []float64{1, 5, 10, 30, 60, 300, 900, 3600, 21600, 86400},
 	}, []string{"segment", "outcome"})
+	observer.metadataResidentBytes = factory.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ctld_s0fs_metadata_resident_estimated_bytes",
+		Help: "Conservatively estimated S0FS engine memory by active or detached residency",
+	}, []string{"residency"})
+	observer.metadataBudgetPressure = factory.NewCounterVec(prometheus.CounterOpts{
+		Name: "ctld_s0fs_metadata_budget_pressure_total",
+		Help: "S0FS node metadata budget pressure observations",
+	}, []string{"result"})
 	return observer
 }
 
@@ -255,6 +265,22 @@ func (o *Observer) SetHotCacheSize(entries int, estimatedBytes int64, probationE
 	if o.hotCacheSegmentBytes != nil {
 		o.hotCacheSegmentBytes.WithLabelValues(string(hotCacheSegmentProbation)).Set(float64(probationBytes))
 		o.hotCacheSegmentBytes.WithLabelValues(string(hotCacheSegmentProtected)).Set(float64(protectedBytes))
+	}
+}
+
+func (o *Observer) SetMetadataResidency(activeBytes, detachedBytes int64) {
+	if o == nil {
+		return
+	}
+	if o.metadataResidentBytes != nil {
+		o.metadataResidentBytes.WithLabelValues("active").Set(float64(activeBytes))
+		o.metadataResidentBytes.WithLabelValues("detached").Set(float64(detachedBytes))
+	}
+}
+
+func (o *Observer) ObserveMetadataBudgetPressure(result string) {
+	if o != nil && o.metadataBudgetPressure != nil {
+		o.metadataBudgetPressure.WithLabelValues(result).Inc()
 	}
 }
 

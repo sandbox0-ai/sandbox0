@@ -1837,6 +1837,9 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 	if bound == nil || bound.volCtx == nil || bound.volCtx.S0FS == nil {
 		return
 	}
+	// A mounted owner may retain local recovery state across a runtime failure.
+	// Keep background work non-destructive until inactive-volume GC can prove
+	// that no recovery path can still reference an immutable object.
 	compactionInterval, err := volume.S0FSCompactionInterval(m.storage)
 	if err != nil {
 		if m.logger != nil {
@@ -1889,7 +1892,6 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 						return err
 					}
 					m.logStorageObservationError(volumeID, materialization.ObservationError)
-					m.garbageCollectBoundS0FS(ctx, bound, materialization.Manifest)
 					return nil
 				})
 				if !ran {
@@ -1908,7 +1910,6 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 						return compactErr
 					}
 					m.logStorageObservationError(volumeID, materialization.ObservationError)
-					m.garbageCollectBoundS0FS(ctx, bound, materialization.Manifest)
 					return nil
 				})
 				if !ran {
@@ -1967,129 +1968,6 @@ func materializerInitialJitter(volumeID string) time.Duration {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(volumeID))
 	return time.Duration(h.Sum32()%slots) * time.Millisecond
-}
-
-func (m *Manager) garbageCollectBoundS0FS(ctx context.Context, bound *boundVolume, manifest *s0fs.Manifest) {
-	if m == nil || bound == nil || manifest == nil || manifest.State == nil {
-		return
-	}
-	if !volume.S0FSBackgroundCompactionEnabled(bound.access) {
-		return
-	}
-	result, err := m.garbageCollectBoundS0FSObjects(ctx, bound, manifest)
-	if err != nil {
-		if m.logger != nil {
-			m.logger.Warn("ctld volume garbage collection failed", zap.String("volume_id", bound.volumeID), zap.Error(err))
-		}
-		return
-	}
-	if result != nil && (len(result.DeletedSegments) > 0 || len(result.DeletedManifests) > 0) && m.logger != nil {
-		m.logger.Info("ctld volume garbage collected",
-			zap.String("volume_id", bound.volumeID),
-			zap.Int("segments", len(result.DeletedSegments)),
-			zap.Int("manifests", len(result.DeletedManifests)),
-		)
-	}
-}
-
-func (m *Manager) garbageCollectBoundS0FSObjects(ctx context.Context, bound *boundVolume, manifest *s0fs.Manifest) (*s0fs.GarbageCollectionResult, error) {
-	if m == nil || m.repo == nil || m.volumes == nil || bound == nil || bound.volCtx == nil || manifest == nil || manifest.State == nil {
-		return nil, nil
-	}
-	if !volume.S0FSBackgroundCompactionEnabled(bound.access) || !m.volumes.canGarbageCollectS0FS(bound.volumeID) {
-		return nil, nil
-	}
-	children, err := m.repo.ListSandboxVolumesBySource(ctx, bound.volumeID)
-	if err != nil {
-		return nil, err
-	}
-	if len(children) > 0 {
-		return nil, nil
-	}
-	snapshots, err := m.repo.ListSnapshotsByVolume(ctx, bound.volumeID)
-	if err != nil {
-		return nil, err
-	}
-	if len(snapshots) > 0 {
-		return nil, nil
-	}
-	store, err := m.createObjectStore(bound.teamID, bound.volumeID)
-	if err != nil {
-		return nil, err
-	}
-	encryption, err := volume.S0FSEncryptionConfig(m.storage)
-	if err != nil {
-		return nil, err
-	}
-	headStore := db.NewS0FSHeadStore(m.repo)
-	materializer := s0fs.NewMaterializer(bound.volumeID, store, headStore, func(sourceVolumeID string) (objectstore.Store, error) {
-		return m.createObjectStore(bound.teamID, sourceVolumeID)
-	})
-	if materializer == nil || !materializer.Enabled() {
-		return nil, nil
-	}
-	materializer.SetEncryption(encryption)
-	stateFormatVersion, err := volume.S0FSStateFormatVersion(m.storage)
-	if err != nil {
-		return nil, err
-	}
-	materializer.SetStateFormatVersion(stateFormatVersion)
-
-	headBefore, err := headStore.LoadCommittedHead(ctx, bound.volumeID)
-	if err != nil && !errors.Is(err, s0fs.ErrCommittedHeadNotFound) {
-		return nil, err
-	}
-	retainedStates := []*s0fs.SnapshotState{manifest.State}
-	if current := bound.volCtx.S0FS.SnapshotReferenceState(); current != nil {
-		retainedStates = append(retainedStates, current)
-	}
-	cfg := s0fs.Config{
-		VolumeID:           bound.volumeID,
-		WALPath:            filepath.Join(bound.volCtx.CacheDir, "engine.wal"),
-		ObjectStore:        store,
-		HeadStore:          headStore,
-		Encryption:         encryption,
-		StateFormatVersion: stateFormatVersion,
-	}
-	localSnapshots, err := s0fs.LoadLocalSnapshots(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	retainedStates = append(retainedStates, localSnapshots...)
-	retainedManifests := map[string]struct{}{
-		"manifests/latest.json": {},
-	}
-	if manifest.ManifestSeq > 0 {
-		retainedManifests[fmt.Sprintf("manifests/%020d.json", manifest.ManifestSeq)] = struct{}{}
-	}
-	if headBefore != nil && strings.TrimSpace(headBefore.ManifestKey) != "" {
-		retainedManifests[headBefore.ManifestKey] = struct{}{}
-	}
-	plan, err := materializer.PlanGarbageCollection(ctx, retainedStates, retainedManifests)
-	if err != nil {
-		return nil, err
-	}
-	if len(plan.Segments) == 0 && len(plan.Manifests) == 0 {
-		return &s0fs.GarbageCollectionResult{}, nil
-	}
-	if !m.volumes.canGarbageCollectS0FS(bound.volumeID) {
-		return nil, nil
-	}
-	headAfter, err := headStore.LoadCommittedHead(ctx, bound.volumeID)
-	if err != nil && !errors.Is(err, s0fs.ErrCommittedHeadNotFound) {
-		return nil, err
-	}
-	if !sameS0FSHeadKey(headBefore, headAfter) {
-		return nil, nil
-	}
-	return plan.Apply(ctx)
-}
-
-func sameS0FSHeadKey(a, b *s0fs.CommittedHead) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return strings.TrimSpace(a.ManifestKey) == strings.TrimSpace(b.ManifestKey)
 }
 
 func (m *Manager) attachPortalLocked(pm *portalMount, bound *boundVolume, mountedAt time.Time) {

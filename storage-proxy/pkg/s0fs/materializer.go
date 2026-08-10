@@ -535,6 +535,16 @@ func (m *Materializer) validateRecoverySegments(ctx context.Context, state *Snap
 	return nil
 }
 
+func (m *Materializer) validateCommittedStateSegments(ctx context.Context, state *SnapshotState) error {
+	if state == nil {
+		return fmt.Errorf("%w: state is required", ErrCommittedStateIntegrity)
+	}
+	if err := m.validateRecoverySegments(ctx, state); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommittedStateIntegrity, err)
+	}
+	return nil
+}
+
 type materializedSegment struct {
 	ID         string
 	VolumeID   string

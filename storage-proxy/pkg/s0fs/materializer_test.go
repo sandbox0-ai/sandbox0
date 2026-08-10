@@ -224,6 +224,62 @@ func TestEngineMaterializeRecoversViaColdRangeRead(t *testing.T) {
 	}
 }
 
+func TestEngineOpenRejectsCommittedStateWithMissingSegment(t *testing.T) {
+	ctx := context.Background()
+	store := newPrefixedRecordingStore(t, "vol-open-integrity")
+	heads := newMemoryHeadStore()
+	walPath := filepath.Join(t.TempDir(), "engine.wal")
+	config := Config{
+		VolumeID:    "vol-open-integrity",
+		WALPath:     walPath,
+		ObjectStore: store,
+		HeadStore:   heads,
+	}
+
+	engine, err := Open(ctx, config)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	node, err := engine.CreateFile(RootInode, "committed.txt", 0o644)
+	if err != nil {
+		t.Fatalf("CreateFile() error = %v", err)
+	}
+	if _, err := engine.Write(node.Inode, 0, []byte("committed payload")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	manifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatalf("SyncMaterialize() error = %v", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var segmentKey string
+	for _, segment := range manifest.State.Segments {
+		segmentKey = segment.Key
+	}
+	if segmentKey == "" {
+		t.Fatal("materialized state did not contain a segment")
+	}
+	if err := store.Delete(segmentKey); err != nil {
+		t.Fatalf("Delete(%q) error = %v", segmentKey, err)
+	}
+
+	if _, err := Open(ctx, config); !errors.Is(err, ErrCommittedStateIntegrity) {
+		t.Fatalf("Open(local state) error = %v, want ErrCommittedStateIntegrity", err)
+	}
+	if err := os.Remove(headStatePath(walPath)); err != nil {
+		t.Fatalf("Remove(local head state) error = %v", err)
+	}
+	if err := os.Remove(walPath); err != nil {
+		t.Fatalf("Remove(WAL) error = %v", err)
+	}
+	if _, err := Open(ctx, config); !errors.Is(err, ErrCommittedStateIntegrity) {
+		t.Fatalf("Open(remote state) error = %v, want ErrCommittedStateIntegrity", err)
+	}
+}
+
 func TestEngineMaterializeRetainsUnlinkedInodeWhenConfigured(t *testing.T) {
 	ctx := context.Background()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")

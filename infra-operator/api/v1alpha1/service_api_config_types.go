@@ -1051,8 +1051,8 @@ type StorageProxyConfig struct {
 	// +kubebuilder:validation:Enum=1;2
 	S0FSStateFormatVersion int `json:"s0fsStateFormatVersion,omitempty"`
 	// +optional
-	// S0FSHotCacheMaxSize bounds conservatively estimated memory retained by clean engines.
-	// Engines are retained only after an intentional sandbox pause. Set 0 to disable retention.
+	// S0FSHotCacheMaxSize bounds conservatively estimated memory shared by active and detached engines.
+	// Set 0 to disable detached retention and active-engine admission enforcement.
 	// +kubebuilder:default="1Gi"
 	S0FSHotCacheMaxSize string `json:"s0fsHotCacheMaxSize,omitempty"`
 	// +optional

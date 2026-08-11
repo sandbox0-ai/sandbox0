@@ -3,6 +3,7 @@ package s0fs
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
@@ -38,6 +39,12 @@ type stateV2Metadata struct {
 
 type stateV2DecodeResult struct {
 	State    *SnapshotState
+	Metadata stateV2Metadata
+	Bytes    int64
+}
+
+type stateV2StreamResult struct {
+	Header   *StateV2Header
 	Metadata stateV2Metadata
 	Bytes    int64
 }
@@ -172,6 +179,52 @@ func encodeStateV2(volumeID string, binding []byte, state *SnapshotState, metada
 }
 
 func decodeStateV2(reader io.Reader, expectedVolumeID string, binding []byte, expectedRole StateV2Role, encryption *EncryptionConfig) (*stateV2DecodeResult, error) {
+	return decodeStateV2Context(context.Background(), reader, expectedVolumeID, binding, expectedRole, encryption)
+}
+
+func decodeStateV2Context(ctx context.Context, reader io.Reader, expectedVolumeID string, binding []byte, expectedRole StateV2Role, encryption *EncryptionConfig) (*stateV2DecodeResult, error) {
+	var state *SnapshotState
+	stream, err := streamStateV2Chunks(ctx, reader, expectedVolumeID, binding, expectedRole, encryption, func(header *StateV2Header, descriptor *StateV2ChunkDescriptor, chunk *StateV2Chunk) error {
+		if state == nil {
+			state = newStateV2Snapshot(header)
+		}
+		return applyStateV2Chunk(state, descriptor, chunk)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if state == nil {
+		state = newStateV2Snapshot(stream.Header)
+	}
+	normalizeState(state)
+	return &stateV2DecodeResult{State: state, Metadata: stream.Metadata, Bytes: stream.Bytes}, nil
+}
+
+func newStateV2Snapshot(header *StateV2Header) *SnapshotState {
+	return &SnapshotState{
+		NextSeq:   header.NextSeq,
+		NextInode: header.NextInode,
+		Nodes:     make(map[uint64]*Node, stateV2RecordCapacity(header.Chunks, StateV2ChunkKind_STATE_V2_CHUNK_KIND_NODES)),
+		Children:  make(map[uint64]map[string]uint64),
+		Data:      make(map[uint64][]byte),
+		ColdFiles: make(map[uint64][]FileExtent),
+		Segments:  make(map[string]*Segment, stateV2RecordCapacity(header.Chunks, StateV2ChunkKind_STATE_V2_CHUNK_KIND_SEGMENTS)),
+	}
+}
+
+func streamStateV2Chunks(
+	ctx context.Context,
+	reader io.Reader,
+	expectedVolumeID string,
+	binding []byte,
+	expectedRole StateV2Role,
+	encryption *EncryptionConfig,
+	visit func(*StateV2Header, *StateV2ChunkDescriptor, *StateV2Chunk) error,
+) (*stateV2StreamResult, error) {
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	counted := &countingReader{reader: reader}
 	magic := make([]byte, len(stateV2Magic))
 	if _, err := io.ReadFull(counted, magic); err != nil {
@@ -219,15 +272,6 @@ func decodeStateV2(reader io.Reader, expectedVolumeID string, binding []byte, ex
 		return nil, fmt.Errorf("%w: unencrypted state v2 has encryption metadata", ErrInvalidInput)
 	}
 
-	state := &SnapshotState{
-		NextSeq:   header.NextSeq,
-		NextInode: header.NextInode,
-		Nodes:     make(map[uint64]*Node, stateV2RecordCapacity(header.Chunks, StateV2ChunkKind_STATE_V2_CHUNK_KIND_NODES)),
-		Children:  make(map[uint64]map[string]uint64),
-		Data:      make(map[uint64][]byte),
-		ColdFiles: make(map[uint64][]FileExtent),
-		Segments:  make(map[string]*Segment, stateV2RecordCapacity(header.Chunks, StateV2ChunkKind_STATE_V2_CHUNK_KIND_SEGMENTS)),
-	}
 	decoder, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(stateV2MaxEncodedChunkSize*2))
 	if err != nil {
 		return nil, fmt.Errorf("create state v2 decompressor: %w", err)
@@ -236,6 +280,9 @@ func decodeStateV2(reader io.Reader, expectedVolumeID string, binding []byte, ex
 	var expectedOffset uint64
 	var previousKind StateV2ChunkKind
 	for index, descriptor := range header.Chunks {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := validateStateV2ChunkDescriptor(descriptor, index, expectedOffset, aead != nil); err != nil {
 			return nil, err
 		}
@@ -246,6 +293,9 @@ func decodeStateV2(reader io.Reader, expectedVolumeID string, binding []byte, ex
 		stored := make([]byte, int(descriptor.StoredSize))
 		if _, err := io.ReadFull(counted, stored); err != nil {
 			return nil, fmt.Errorf("read state v2 chunk %d: %w", index, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		expectedOffset += descriptor.StoredSize
 		compressed := stored
@@ -267,17 +317,21 @@ func decodeStateV2(reader io.Reader, expectedVolumeID string, binding []byte, ex
 		if err := proto.Unmarshal(encoded, &chunk); err != nil {
 			return nil, fmt.Errorf("decode state v2 chunk %d: %w", index, err)
 		}
-		if err := applyStateV2Chunk(state, descriptor, &chunk); err != nil {
-			return nil, fmt.Errorf("apply state v2 chunk %d: %w", index, err)
+		if visit != nil {
+			if err := visit(&header, descriptor, &chunk); err != nil {
+				return nil, fmt.Errorf("apply state v2 chunk %d: %w", index, err)
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 	}
 	var trailing [1]byte
 	if n, err := counted.Read(trailing[:]); n != 0 || (err != nil && !errors.Is(err, io.EOF)) {
 		return nil, fmt.Errorf("%w: state v2 has trailing payload", ErrInvalidInput)
 	}
-	normalizeState(state)
-	return &stateV2DecodeResult{
-		State: state,
+	return &stateV2StreamResult{
+		Header: &header,
 		Metadata: stateV2Metadata{
 			Role:          header.Role,
 			ManifestSeq:   header.ManifestSeq,

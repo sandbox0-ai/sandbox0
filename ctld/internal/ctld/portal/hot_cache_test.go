@@ -35,6 +35,68 @@ func TestNewManagerAllowsHotCacheDisable(t *testing.T) {
 	}
 }
 
+func TestActiveMetadataAdmissionEvictsDetachedEngine(t *testing.T) {
+	mgr := newHotCacheTestManager(t, 2*hotCacheMinimumEntryBytes)
+	active := newHotCacheTestBound(t, mgr, "vol-active")
+	detached := newHotCacheTestBound(t, mgr, "vol-detached")
+	candidate := newHotCacheTestBound(t, mgr, "vol-candidate-active")
+	t.Cleanup(func() {
+		mgr.releaseActiveMetadata(active)
+		mgr.releaseActiveMetadata(candidate)
+		_ = active.volCtx.S0FS.Close()
+		_ = candidate.volCtx.S0FS.Close()
+	})
+	if err := mgr.admitActiveMetadata(active); err != nil {
+		t.Fatalf("admitActiveMetadata(active) error = %v", err)
+	}
+	mgr.retainHotVolume(detached)
+	if err := mgr.admitActiveMetadata(candidate); err != nil {
+		t.Fatalf("admitActiveMetadata(candidate) error = %v", err)
+	}
+	if mgr.hotVolumes[detached.volumeID] != nil {
+		t.Fatal("detached engine was not evicted for active admission")
+	}
+	if got := mgr.activeMetadataBytes; got != 2*hotCacheMinimumEntryBytes {
+		t.Fatalf("active metadata bytes = %d, want %d", got, 2*hotCacheMinimumEntryBytes)
+	}
+}
+
+func TestActiveMetadataAdmissionRejectsWhenActiveBudgetIsFull(t *testing.T) {
+	mgr := newHotCacheTestManager(t, hotCacheMinimumEntryBytes)
+	active := newHotCacheTestBound(t, mgr, "vol-active-full")
+	candidate := newHotCacheTestBound(t, mgr, "vol-active-rejected")
+	t.Cleanup(func() {
+		mgr.releaseActiveMetadata(active)
+		_ = active.volCtx.S0FS.Close()
+		_ = candidate.volCtx.S0FS.Close()
+	})
+	if err := mgr.admitActiveMetadata(active); err != nil {
+		t.Fatalf("admitActiveMetadata(active) error = %v", err)
+	}
+	if err := mgr.admitActiveMetadata(candidate); err == nil {
+		t.Fatal("admitActiveMetadata(candidate) succeeded with a full active budget")
+	}
+	if candidate.metadataCharged {
+		t.Fatal("rejected candidate retained an active metadata charge")
+	}
+}
+
+func TestActiveMetadataReservationIsChargedBeforeEngineOpen(t *testing.T) {
+	reservation := s0fs.EngineMemoryReservationBytes(0)
+	mgr := newHotCacheTestManager(t, reservation)
+	bound := &boundVolume{volumeID: "vol-reserved-before-open"}
+	if err := mgr.admitActiveMetadataBytes(bound, reservation); err != nil {
+		t.Fatalf("admitActiveMetadataBytes() error = %v", err)
+	}
+	t.Cleanup(func() { mgr.releaseActiveMetadata(bound) })
+	if !bound.metadataCharged || bound.metadataBytes != reservation {
+		t.Fatalf("active reservation = charged:%v bytes:%d, want true/%d", bound.metadataCharged, bound.metadataBytes, reservation)
+	}
+	if err := mgr.admitActiveMetadataBytes(&boundVolume{volumeID: "vol-over-budget"}, reservation); err == nil {
+		t.Fatal("second active reservation succeeded with the budget full")
+	}
+}
+
 func TestFinishBoundVolumeCleanupRetainsCleanS0FSEngine(t *testing.T) {
 	mgr := newHotCacheTestManager(t, 64<<20)
 	bound := newHotCacheTestBound(t, mgr, "vol-hot")

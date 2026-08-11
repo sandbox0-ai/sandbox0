@@ -119,7 +119,8 @@ func TestEngineSnapshotReferenceStateSharesInlinePayload(t *testing.T) {
 	}
 
 	var segmentID string
-	for id, segment := range engine.segments {
+	eager := engine.metadata.(*eagerMetadataStore)
+	for id, segment := range eager.state.Segments {
 		if len(segment.InlineData) > 0 {
 			segmentID = id
 			break
@@ -128,7 +129,7 @@ func TestEngineSnapshotReferenceStateSharesInlinePayload(t *testing.T) {
 	if segmentID == "" {
 		t.Fatal("engine did not retain an inline segment")
 	}
-	engineSegment := engine.segments[segmentID]
+	engineSegment := eager.state.Segments[segmentID]
 
 	full := engine.SnapshotState()
 	fullSegment := full.Segments[segmentID]

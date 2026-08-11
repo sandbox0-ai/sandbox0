@@ -18,13 +18,14 @@ func (e *Engine) FilesystemUsage() (FilesystemUsage, error) {
 	}
 
 	var usage FilesystemUsage
-	for _, node := range e.nodes {
+	e.metadata.RangeNodes(func(_ uint64, node *Node) bool {
 		if node == nil {
-			continue
+			return true
 		}
 		usage.Inodes++
 		usage.DataBytes = addUint64Saturating(usage.DataBytes, node.Size)
-	}
+		return true
+	})
 	return usage, nil
 }
 

@@ -215,11 +215,15 @@ func headStatePath(walPath string) string {
 }
 
 func loadSnapshotState(path, volumeID, role string, encryption *EncryptionConfig) (*SnapshotState, error) {
-	state, _, _, err := loadSnapshotStateWithFormat(path, volumeID, role, encryption)
+	state, _, _, err := loadSnapshotStateWithFormatContext(context.Background(), path, volumeID, role, encryption)
 	return state, err
 }
 
-func loadSnapshotStateWithFormat(path, volumeID, role string, encryption *EncryptionConfig) (*SnapshotState, int, int64, error) {
+func loadSnapshotStateWithFormatContext(ctx context.Context, path, volumeID, role string, encryption *EncryptionConfig) (*SnapshotState, int, int64, error) {
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, 0, -1, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -228,13 +232,13 @@ func loadSnapshotStateWithFormat(path, volumeID, role string, encryption *Encryp
 		return nil, 0, -1, fmt.Errorf("read snapshot state: %w", err)
 	}
 	defer file.Close()
-	reader := bufio.NewReader(file)
+	reader := bufio.NewReader(&contextReader{ctx: ctx, reader: file})
 	v2, err := hasStateV2Magic(reader)
 	if err != nil {
 		return nil, 0, -1, fmt.Errorf("inspect snapshot state: %w", err)
 	}
 	if v2 {
-		result, err := decodeStateV2(reader, volumeID, stateBlobAAD(volumeID, role), stateV2RoleForStateRole(role), encryption)
+		result, err := decodeStateV2Context(ctx, reader, volumeID, stateBlobAAD(volumeID, role), stateV2RoleForStateRole(role), encryption)
 		if err != nil {
 			return nil, StateFormatV2, -1, fmt.Errorf("decode snapshot state v2: %w", err)
 		}
@@ -251,6 +255,9 @@ func loadSnapshotStateWithFormat(path, volumeID, role string, encryption *Encryp
 		}
 		data = plaintext
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, StateFormatV1, readBytes, err
+	}
 
 	var state SnapshotState
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -258,6 +265,18 @@ func loadSnapshotStateWithFormat(path, volumeID, role string, encryption *Encryp
 	}
 	normalizeState(&state)
 	return &state, StateFormatV1, readBytes, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(payload []byte) (int, error) {
+	if err := nonNilContext(r.ctx).Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(payload)
 }
 
 func saveSnapshotState(path, volumeID, role string, state *SnapshotState, encryption *EncryptionConfig, versions ...int) error {
@@ -292,6 +311,38 @@ func saveSnapshotState(path, volumeID, role string, state *SnapshotState, encryp
 		return fmt.Errorf("write snapshot state: %w", err)
 	}
 	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace snapshot state: %w", err)
+	}
+	return nil
+}
+
+func saveMetadataStateV2(ctx context.Context, path, volumeID, role string, metadata metadataStore, nextSeq, nextInode uint64, encryption *EncryptionConfig) error {
+	if metadata == nil {
+		return fmt.Errorf("%w: metadata is required", ErrInvalidInput)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create snapshot directory: %w", err)
+	}
+	tempPath := path + ".tmp"
+	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create snapshot state: %w", err)
+	}
+	writeErr := writeMetadataStateV2(ctx, file, volumeID, stateBlobAAD(volumeID, role), metadata, nextSeq, nextInode, stateV2Metadata{Role: stateV2RoleForStateRole(role)}, encryption)
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("write snapshot state v2: %w", writeErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("close snapshot state v2: %w", closeErr)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		_ = os.Remove(tempPath)
 		return fmt.Errorf("replace snapshot state: %w", err)
 	}
 	return nil

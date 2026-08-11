@@ -38,14 +38,14 @@ func (e *Engine) Compact(ctx context.Context, opts CompactionOptions) (*Manifest
 		return nil, nil, nil
 	}
 	version := e.mutationVersion
-	state := cloneState(e.currentStateLocked())
+	state := e.currentStateLocked()
 	expectedManifestSeq := e.lastCommittedManifest
 	if state.NextSeq <= expectedManifestSeq+1 {
 		state.NextSeq = expectedManifestSeq + 2
 	}
 	e.mu.RUnlock()
 
-	manifest, result, err := e.materializer.Compact(ctx, state, expectedManifestSeq, opts)
+	manifest, result, err := e.materializer.compactOwned(ctx, state, expectedManifestSeq, opts)
 	if err != nil || manifest == nil {
 		return manifest, result, err
 	}
@@ -71,13 +71,24 @@ func (e *Engine) Compact(ctx context.Context, opts CompactionOptions) (*Manifest
 }
 
 func (m *Materializer) Compact(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64, opts CompactionOptions) (*Manifest, *CompactionResult, error) {
+	return m.compact(ctx, state, expectedManifestSeq, opts, false)
+}
+
+func (m *Materializer) compactOwned(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64, opts CompactionOptions) (*Manifest, *CompactionResult, error) {
+	return m.compact(ctx, state, expectedManifestSeq, opts, true)
+}
+
+func (m *Materializer) compact(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64, opts CompactionOptions, owned bool) (*Manifest, *CompactionResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
 	if !m.Enabled() {
 		return nil, nil, nil
 	}
-	inline := cloneState(state)
+	inline := state
+	if !owned {
+		inline = cloneState(state)
+	}
 	normalizeState(inline)
 	defaultSegmentVolumeIDs(inline, m.volumeID)
 	if inline.NextSeq <= expectedManifestSeq+1 {

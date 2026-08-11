@@ -685,6 +685,36 @@ func TestS0FSReadDirHonorsOffset(t *testing.T) {
 	}
 }
 
+func TestS0FSReadDirHonorsPageSize(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-1", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{volumes: map[string]*volume.VolumeContext{"vol-1": volCtx}}, nil, nil)
+	ctx := authContext("team-a", "")
+	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		if _, err := server.Create(ctx, &pb.CreateRequest{VolumeId: "vol-1", Parent: 1, Name: name, Mode: 0o644}); err != nil {
+			t.Fatalf("Create(%s) error = %v", name, err)
+		}
+	}
+
+	first, err := server.ReadDir(ctx, &pb.ReadDirRequest{VolumeId: "vol-1", Inode: 1, Size: 2})
+	if err != nil {
+		t.Fatalf("ReadDir(first page) error = %v", err)
+	}
+	assertEntryNames(t, first.Entries, []string{"a.txt", "b.txt"})
+	if first.Eof {
+		t.Fatal("ReadDir(first page) reported EOF")
+	}
+	second, err := server.ReadDir(ctx, &pb.ReadDirRequest{VolumeId: "vol-1", Inode: 1, Offset: 2, Size: 2})
+	if err != nil {
+		t.Fatalf("ReadDir(second page) error = %v", err)
+	}
+	assertEntryNames(t, second.Entries, []string{"c.txt"})
+	if !second.Eof {
+		t.Fatal("ReadDir(second page) did not report EOF")
+	}
+}
+
 func TestS0FSUnlinkAfterOpenUntilRelease(t *testing.T) {
 	t.Parallel()
 

@@ -30,6 +30,10 @@ type Config struct {
 	OpenObserver         OpenObserver
 	LocalDiskGuard       *LocalDiskGuard
 	RetainUnlinked       bool
+	// MetadataPath enables the rebuildable disk-backed namespace index. The
+	// committed state plus WAL remain authoritative.
+	MetadataPath       string
+	MetadataCacheBytes int64
 }
 
 type ObjectStoreResolver func(volumeID string) (objectstore.Store, error)

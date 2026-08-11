@@ -70,6 +70,7 @@ type Manager struct {
 	replicator             PortalReplicator
 	requireStandby         bool
 	hotCacheMaxBytes       int64
+	activeMetadataBytes    int64
 	hotCacheBytes          int64
 	hotCacheProbationBytes int64
 	hotCacheProtectedBytes int64
@@ -124,6 +125,8 @@ type boundVolume struct {
 	ownerRegistered   bool
 	hotReuse          bool
 	coldOpenDuration  time.Duration
+	metadataBytes     int64
+	metadataCharged   bool
 }
 
 type boundVolumeCleanup struct {
@@ -258,6 +261,7 @@ func NewManager(cfg Config) *Manager {
 	manager.volumeAPI = newMountedVolumeAPIHandler(storageConfig, cfg.Repository, manager.volumes, l)
 	manager.observer.SetHotCacheBudget(hotCacheMaxBytes)
 	manager.observer.SetHotCacheSize(0, 0, 0, 0, 0, 0)
+	manager.observer.SetMetadataResidency(0, 0)
 	return manager
 }
 
@@ -584,12 +588,13 @@ func (m *Manager) RestorePortal(ctx context.Context, manifest RecoveryManifest, 
 				return fmt.Errorf("open restored portal volume: %w", err)
 			}
 		}
+		var redundantCleanup func()
 		m.mu.Lock()
 		if existing := m.boundVolumes[manifest.VolumeID]; existing != nil {
 			bound = existing
 			newlyOwned = false
 			if cleanupNewBound != nil {
-				cleanupNewBound()
+				redundantCleanup = cleanupNewBound
 			}
 		} else {
 			m.boundVolumes[manifest.VolumeID] = bound
@@ -619,6 +624,9 @@ func (m *Manager) RestorePortal(ctx context.Context, manifest RecoveryManifest, 
 			bound.refCount++
 		}
 		m.mu.Unlock()
+		if redundantCleanup != nil {
+			redundantCleanup()
+		}
 		boundAttached = true
 	}
 
@@ -1199,6 +1207,23 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 	if err != nil {
 		return nil, nil, err
 	}
+	bound := &boundVolume{
+		volumeID:  req.SandboxVolumeID,
+		teamID:    volumeRecord.TeamID,
+		access:    accessMode,
+		mountedAt: mountedAt,
+		refCount:  1,
+		statePath: statePath,
+	}
+	if err := m.admitActiveMetadataBytes(bound, s0fs.EngineMemoryReservationBytes(0)); err != nil {
+		return nil, nil, err
+	}
+	keepReservation := false
+	defer func() {
+		if !keepReservation {
+			m.releaseActiveMetadata(bound)
+		}
+	}()
 	engine, err := s0fs.Open(ctx, s0fs.Config{
 		VolumeID:           req.SandboxVolumeID,
 		WALPath:            filepath.Join(cacheDir, "engine.wal"),
@@ -1213,6 +1238,7 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 		OpenObserver:   m.observer.ObserveS0FSOpen,
 		LocalDiskGuard: m.localDiskGuard(cacheDir),
 		RetainUnlinked: true,
+		MetadataPath:   filepath.Join(cacheDir, "metadata.sqlite"),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("open local s0fs engine: %w", err)
@@ -1230,17 +1256,13 @@ func (m *Manager) openS0FSBoundVolume(ctx context.Context, req ctldapi.BindVolum
 		return nil, nil, err
 	}
 	m.observer.ObservePhase("bind", "handle_state_compact", "local", 0, req.SandboxVolumeID, compactStarted, nil)
-	bound := &boundVolume{
-		volumeID:  req.SandboxVolumeID,
-		teamID:    volumeRecord.TeamID,
-		access:    accessMode,
-		mountedAt: mountedAt,
-		refCount:  1,
-		volCtx:    volCtx,
-		session:   session,
-		statePath: statePath,
-	}
-	return bound, func() { _ = engine.Close() }, nil
+	bound.volCtx = volCtx
+	bound.session = session
+	keepReservation = true
+	return bound, func() {
+		m.releaseActiveMetadata(bound)
+		_ = engine.Close()
+	}, nil
 }
 
 func (m *Manager) newS0FSVolumeContext(
@@ -1434,6 +1456,22 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 	if err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, err
 	}
+	newBound := &boundVolume{
+		volumeID:  req.SandboxVolumeID,
+		teamID:    volumeRecord.TeamID,
+		access:    accessMode,
+		mountedAt: mountedAt,
+		refCount:  0,
+	}
+	if err := m.admitActiveMetadataBytes(newBound, s0fs.EngineMemoryReservationBytes(0)); err != nil {
+		return ctldapi.AttachVolumeOwnerResponse{}, err
+	}
+	keepReservation := false
+	defer func() {
+		if !keepReservation {
+			m.releaseActiveMetadata(newBound)
+		}
+	}()
 	engine, err := s0fs.Open(ctx, s0fs.Config{
 		VolumeID:           req.SandboxVolumeID,
 		WALPath:            filepath.Join(cacheDir, "engine.wal"),
@@ -1447,38 +1485,36 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 		Encryption:     encryption,
 		OpenObserver:   m.observer.ObserveS0FSOpen,
 		LocalDiskGuard: m.localDiskGuard(cacheDir),
+		MetadataPath:   filepath.Join(cacheDir, "metadata.sqlite"),
 	})
 	if err != nil {
 		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("open local s0fs engine: %w", err)
 	}
 	volCtx := m.newS0FSVolumeContext(req.SandboxVolumeID, volumeRecord.TeamID, engine, accessMode, mountedAt, cacheDir)
+	newBound.volCtx = volCtx
+	newBound.session = newLocalSession(req.SandboxVolumeID, m.volumes, m.logrus)
 
 	m.mu.Lock()
 	if bound := m.boundVolumes[req.SandboxVolumeID]; bound != nil {
 		if bound.closing {
+			m.releaseActiveMetadataLocked(newBound)
 			m.mu.Unlock()
 			_ = engine.Close()
 			return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("volume %s is closing", req.SandboxVolumeID)
 		}
+		m.releaseActiveMetadataLocked(newBound)
 		m.mu.Unlock()
 		_ = engine.Close()
 		m.volumes.touch(req.SandboxVolumeID)
 		return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
 	}
-	bound := &boundVolume{
-		volumeID:  req.SandboxVolumeID,
-		teamID:    volumeRecord.TeamID,
-		access:    accessMode,
-		mountedAt: mountedAt,
-		refCount:  0,
-		volCtx:    volCtx,
-		session:   newLocalSession(req.SandboxVolumeID, m.volumes, m.logrus),
-	}
+	bound := newBound
 	m.boundVolumes[req.SandboxVolumeID] = bound
 	m.volumes.add(volCtx)
 	if err := m.registerOwner(ctx, bound); err != nil {
 		delete(m.boundVolumes, req.SandboxVolumeID)
 		m.volumes.remove(req.SandboxVolumeID)
+		m.releaseActiveMetadataLocked(bound)
 		m.mu.Unlock()
 		_ = engine.Close()
 		return ctldapi.AttachVolumeOwnerResponse{}, fmt.Errorf("register ctld volume owner: %w", err)
@@ -1486,6 +1522,7 @@ func (m *Manager) AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwner
 	m.startMaterializer(bound)
 	m.mu.Unlock()
 
+	keepReservation = true
 	return ctldapi.AttachVolumeOwnerResponse{Attached: true}, nil
 }
 
@@ -1707,6 +1744,7 @@ func (m *Manager) finishBoundVolumeCleanup(ctx context.Context, cleanup *boundVo
 		m.mu.Lock()
 		if m.boundVolumes[cleanup.volumeID] == cleanup.bound {
 			delete(m.boundVolumes, cleanup.volumeID)
+			m.releaseActiveMetadataLocked(cleanup.bound)
 		}
 		m.mu.Unlock()
 		m.unregisterOwner(cleanup.bound)
@@ -1726,6 +1764,7 @@ func (m *Manager) finishBoundVolumeCleanup(ctx context.Context, cleanup *boundVo
 	m.mu.Lock()
 	if m.boundVolumes[cleanup.volumeID] == cleanup.bound {
 		delete(m.boundVolumes, cleanup.volumeID)
+		m.releaseActiveMetadataLocked(cleanup.bound)
 		unregister = true
 	}
 	m.mu.Unlock()
@@ -1766,6 +1805,7 @@ func (m *Manager) finishBoundVolumeHandoff(ctx context.Context, cleanup *boundVo
 	m.mu.Lock()
 	if m.boundVolumes[cleanup.volumeID] == cleanup.bound {
 		delete(m.boundVolumes, cleanup.volumeID)
+		m.releaseActiveMetadataLocked(cleanup.bound)
 	}
 	m.mu.Unlock()
 	m.stopOwnerHeartbeat(cleanup.bound)

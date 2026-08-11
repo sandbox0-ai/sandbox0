@@ -616,13 +616,13 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, volumeID, snapshotID, team
 		m.logger.WithError(cleanupErr).Warn("Failed to delete s0fs snapshot state")
 	}
 	if gcResult, gcErr := m.garbageCollectS0FSVolumeObjects(cleanupCtx, volumeID, teamID); gcErr != nil {
-		m.logger.WithError(gcErr).Warn("Failed to garbage collect unreferenced s0fs objects")
+		m.logger.WithError(gcErr).Warn("Failed to stage fenced s0fs garbage collection")
 	} else if gcResult != nil && (len(gcResult.DeletedSegments) > 0 || len(gcResult.DeletedManifests) > 0) {
 		m.logger.WithFields(logrus.Fields{
 			"volume_id": volumeID,
 			"segments":  len(gcResult.DeletedSegments),
 			"manifests": len(gcResult.DeletedManifests),
-		}).Info("Garbage collected unreferenced s0fs objects after snapshot delete")
+		}).Info("Garbage collected grace-expired s0fs objects after snapshot delete")
 	}
 
 	// Record success metrics

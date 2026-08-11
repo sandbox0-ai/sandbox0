@@ -27,7 +27,7 @@ func (rejectingHeadStore) LoadCommittedHead(context.Context, string) (*s0fs.Comm
 	return nil, s0fs.ErrCommittedHeadNotFound
 }
 
-func (rejectingHeadStore) CompareAndSwapCommittedHead(context.Context, string, uint64, *s0fs.CommittedHead) error {
+func (rejectingHeadStore) CompareAndSwapCommittedHead(context.Context, string, *s0fs.CommittedHead, *s0fs.CommittedHead) error {
 	return s0fs.ErrCommittedHeadConflict
 }
 

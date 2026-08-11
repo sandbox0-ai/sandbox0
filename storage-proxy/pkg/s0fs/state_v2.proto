@@ -43,6 +43,13 @@ message StateV2Header {
   bytes wrapped_key = 13;
   bytes nonce_prefix = 14;
   repeated StateV2ChunkDescriptor chunks = 15;
+  string commit_id = 16;
+  string state_digest = 17;
+  string manifest_digest = 18;
+  string parent_manifest_key = 19;
+  string parent_manifest_digest = 20;
+  string parent_commit_id = 21;
+  uint64 parent_generation = 22;
 }
 
 message StateV2ChunkDescriptor {

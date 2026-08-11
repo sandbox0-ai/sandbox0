@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"strings"
@@ -16,12 +18,13 @@ import (
 )
 
 type stateV2SpoolEncoder struct {
-	ctx     context.Context
-	header  *StateV2Header
-	aead    cipher.AEAD
-	encoder *zstd.Encoder
-	spool   *os.File
-	offset  uint64
+	ctx       context.Context
+	header    *StateV2Header
+	aead      cipher.AEAD
+	encoder   *zstd.Encoder
+	spool     *os.File
+	offset    uint64
+	stateHash hash.Hash
 }
 
 func writeMetadataStateV2(
@@ -46,17 +49,24 @@ func writeMetadataStateV2(
 		return fmt.Errorf("%w: state v2 role is required", ErrInvalidInput)
 	}
 	header := &StateV2Header{
-		FormatVersion:    StateFormatV2,
-		Role:             stateMetadata.Role,
-		VolumeId:         volumeID,
-		BindingSha256:    hashBytes(binding),
-		NextSeq:          nextSeq,
-		NextInode:        nextInode,
-		ManifestSeq:      stateMetadata.ManifestSeq,
-		CheckpointSeq:    stateMetadata.CheckpointSeq,
-		CreatedAtSeconds: stateMetadata.CreatedAt.Unix(),
-		CreatedAtNanos:   int32(stateMetadata.CreatedAt.Nanosecond()),
-		Compression:      stateV2Compression,
+		FormatVersion:        StateFormatV2,
+		Role:                 stateMetadata.Role,
+		VolumeId:             volumeID,
+		BindingSha256:        hashBytes(binding),
+		NextSeq:              nextSeq,
+		NextInode:            nextInode,
+		ManifestSeq:          stateMetadata.ManifestSeq,
+		CheckpointSeq:        stateMetadata.CheckpointSeq,
+		CreatedAtSeconds:     stateMetadata.CreatedAt.Unix(),
+		CreatedAtNanos:       int32(stateMetadata.CreatedAt.Nanosecond()),
+		Compression:          stateV2Compression,
+		CommitId:             stateMetadata.CommitID,
+		StateDigest:          stateMetadata.StateDigest,
+		ManifestDigest:       stateMetadata.ManifestDigest,
+		ParentManifestKey:    stateMetadata.ParentManifestKey,
+		ParentManifestDigest: stateMetadata.ParentManifestDigest,
+		ParentCommitId:       stateMetadata.ParentCommitID,
+		ParentGeneration:     stateMetadata.ParentGeneration,
 	}
 	var aead cipher.AEAD
 	if encryption.enabled() {
@@ -94,7 +104,7 @@ func writeMetadataStateV2(
 		return fmt.Errorf("create state v2 compressor: %w", err)
 	}
 	defer encoder.Close()
-	stream := &stateV2SpoolEncoder{ctx: ctx, header: header, aead: aead, encoder: encoder, spool: spool}
+	stream := &stateV2SpoolEncoder{ctx: ctx, header: header, aead: aead, encoder: encoder, spool: spool, stateHash: newStateDigest(nextSeq, nextInode)}
 	if err := streamMetadataStateV2Chunks(metadata, stream.emit); err != nil {
 		return err
 	}
@@ -103,6 +113,11 @@ func writeMetadataStateV2(
 			return err
 		}
 	}
+	computedStateDigest := hex.EncodeToString(stream.stateHash.Sum(nil))
+	if header.StateDigest != "" && header.StateDigest != computedStateDigest {
+		return fmt.Errorf("%w: supplied state digest does not match metadata", ErrInvalidInput)
+	}
+	header.StateDigest = computedStateDigest
 	headerBytes, err := (proto.MarshalOptions{Deterministic: true}).Marshal(header)
 	if err != nil {
 		return fmt.Errorf("encode state v2 header: %w", err)
@@ -158,6 +173,7 @@ func (e *stateV2SpoolEncoder) emit(raw stateV2RawChunk) error {
 	if len(encoded) > stateV2MaxEncodedChunkSize {
 		return fmt.Errorf("%w: state v2 chunk is too large", ErrInvalidInput)
 	}
+	writeStateDigestChunk(e.stateHash, raw.kind, uint32(len(e.header.Chunks)), encoded)
 	compressed := e.encoder.EncodeAll(encoded, nil)
 	storedSize := len(compressed)
 	if e.aead != nil {

@@ -184,24 +184,31 @@ func (StateV2FileType) EnumDescriptor() ([]byte, []int) {
 }
 
 type StateV2Header struct {
-	state               protoimpl.MessageState    `protogen:"open.v1"`
-	FormatVersion       uint32                    `protobuf:"varint,1,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
-	Role                StateV2Role               `protobuf:"varint,2,opt,name=role,proto3,enum=sandbox0.s0fs.internal.StateV2Role" json:"role,omitempty"`
-	VolumeId            string                    `protobuf:"bytes,3,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
-	BindingSha256       []byte                    `protobuf:"bytes,4,opt,name=binding_sha256,json=bindingSha256,proto3" json:"binding_sha256,omitempty"`
-	NextSeq             uint64                    `protobuf:"varint,5,opt,name=next_seq,json=nextSeq,proto3" json:"next_seq,omitempty"`
-	NextInode           uint64                    `protobuf:"varint,6,opt,name=next_inode,json=nextInode,proto3" json:"next_inode,omitempty"`
-	ManifestSeq         uint64                    `protobuf:"varint,7,opt,name=manifest_seq,json=manifestSeq,proto3" json:"manifest_seq,omitempty"`
-	CheckpointSeq       uint64                    `protobuf:"varint,8,opt,name=checkpoint_seq,json=checkpointSeq,proto3" json:"checkpoint_seq,omitempty"`
-	CreatedAtSeconds    int64                     `protobuf:"varint,9,opt,name=created_at_seconds,json=createdAtSeconds,proto3" json:"created_at_seconds,omitempty"`
-	CreatedAtNanos      int32                     `protobuf:"varint,10,opt,name=created_at_nanos,json=createdAtNanos,proto3" json:"created_at_nanos,omitempty"`
-	Compression         string                    `protobuf:"bytes,11,opt,name=compression,proto3" json:"compression,omitempty"`
-	EncryptionAlgorithm string                    `protobuf:"bytes,12,opt,name=encryption_algorithm,json=encryptionAlgorithm,proto3" json:"encryption_algorithm,omitempty"`
-	WrappedKey          []byte                    `protobuf:"bytes,13,opt,name=wrapped_key,json=wrappedKey,proto3" json:"wrapped_key,omitempty"`
-	NoncePrefix         []byte                    `protobuf:"bytes,14,opt,name=nonce_prefix,json=noncePrefix,proto3" json:"nonce_prefix,omitempty"`
-	Chunks              []*StateV2ChunkDescriptor `protobuf:"bytes,15,rep,name=chunks,proto3" json:"chunks,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	state                protoimpl.MessageState    `protogen:"open.v1"`
+	FormatVersion        uint32                    `protobuf:"varint,1,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
+	Role                 StateV2Role               `protobuf:"varint,2,opt,name=role,proto3,enum=sandbox0.s0fs.internal.StateV2Role" json:"role,omitempty"`
+	VolumeId             string                    `protobuf:"bytes,3,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	BindingSha256        []byte                    `protobuf:"bytes,4,opt,name=binding_sha256,json=bindingSha256,proto3" json:"binding_sha256,omitempty"`
+	NextSeq              uint64                    `protobuf:"varint,5,opt,name=next_seq,json=nextSeq,proto3" json:"next_seq,omitempty"`
+	NextInode            uint64                    `protobuf:"varint,6,opt,name=next_inode,json=nextInode,proto3" json:"next_inode,omitempty"`
+	ManifestSeq          uint64                    `protobuf:"varint,7,opt,name=manifest_seq,json=manifestSeq,proto3" json:"manifest_seq,omitempty"`
+	CheckpointSeq        uint64                    `protobuf:"varint,8,opt,name=checkpoint_seq,json=checkpointSeq,proto3" json:"checkpoint_seq,omitempty"`
+	CreatedAtSeconds     int64                     `protobuf:"varint,9,opt,name=created_at_seconds,json=createdAtSeconds,proto3" json:"created_at_seconds,omitempty"`
+	CreatedAtNanos       int32                     `protobuf:"varint,10,opt,name=created_at_nanos,json=createdAtNanos,proto3" json:"created_at_nanos,omitempty"`
+	Compression          string                    `protobuf:"bytes,11,opt,name=compression,proto3" json:"compression,omitempty"`
+	EncryptionAlgorithm  string                    `protobuf:"bytes,12,opt,name=encryption_algorithm,json=encryptionAlgorithm,proto3" json:"encryption_algorithm,omitempty"`
+	WrappedKey           []byte                    `protobuf:"bytes,13,opt,name=wrapped_key,json=wrappedKey,proto3" json:"wrapped_key,omitempty"`
+	NoncePrefix          []byte                    `protobuf:"bytes,14,opt,name=nonce_prefix,json=noncePrefix,proto3" json:"nonce_prefix,omitempty"`
+	Chunks               []*StateV2ChunkDescriptor `protobuf:"bytes,15,rep,name=chunks,proto3" json:"chunks,omitempty"`
+	CommitId             string                    `protobuf:"bytes,16,opt,name=commit_id,json=commitId,proto3" json:"commit_id,omitempty"`
+	StateDigest          string                    `protobuf:"bytes,17,opt,name=state_digest,json=stateDigest,proto3" json:"state_digest,omitempty"`
+	ManifestDigest       string                    `protobuf:"bytes,18,opt,name=manifest_digest,json=manifestDigest,proto3" json:"manifest_digest,omitempty"`
+	ParentManifestKey    string                    `protobuf:"bytes,19,opt,name=parent_manifest_key,json=parentManifestKey,proto3" json:"parent_manifest_key,omitempty"`
+	ParentManifestDigest string                    `protobuf:"bytes,20,opt,name=parent_manifest_digest,json=parentManifestDigest,proto3" json:"parent_manifest_digest,omitempty"`
+	ParentCommitId       string                    `protobuf:"bytes,21,opt,name=parent_commit_id,json=parentCommitId,proto3" json:"parent_commit_id,omitempty"`
+	ParentGeneration     uint64                    `protobuf:"varint,22,opt,name=parent_generation,json=parentGeneration,proto3" json:"parent_generation,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *StateV2Header) Reset() {
@@ -337,6 +344,55 @@ func (x *StateV2Header) GetChunks() []*StateV2ChunkDescriptor {
 		return x.Chunks
 	}
 	return nil
+}
+
+func (x *StateV2Header) GetCommitId() string {
+	if x != nil {
+		return x.CommitId
+	}
+	return ""
+}
+
+func (x *StateV2Header) GetStateDigest() string {
+	if x != nil {
+		return x.StateDigest
+	}
+	return ""
+}
+
+func (x *StateV2Header) GetManifestDigest() string {
+	if x != nil {
+		return x.ManifestDigest
+	}
+	return ""
+}
+
+func (x *StateV2Header) GetParentManifestKey() string {
+	if x != nil {
+		return x.ParentManifestKey
+	}
+	return ""
+}
+
+func (x *StateV2Header) GetParentManifestDigest() string {
+	if x != nil {
+		return x.ParentManifestDigest
+	}
+	return ""
+}
+
+func (x *StateV2Header) GetParentCommitId() string {
+	if x != nil {
+		return x.ParentCommitId
+	}
+	return ""
+}
+
+func (x *StateV2Header) GetParentGeneration() uint64 {
+	if x != nil {
+		return x.ParentGeneration
+	}
+	return 0
 }
 
 type StateV2ChunkDescriptor struct {
@@ -1135,7 +1191,7 @@ var File_storage_proxy_pkg_s0fs_state_v2_proto protoreflect.FileDescriptor
 
 const file_storage_proxy_pkg_s0fs_state_v2_proto_rawDesc = "" +
 	"\n" +
-	"%storage-proxy/pkg/s0fs/state_v2.proto\x12\x16sandbox0.s0fs.internal\"\xf0\x04\n" +
+	"%storage-proxy/pkg/s0fs/state_v2.proto\x12\x16sandbox0.s0fs.internal\"\x96\a\n" +
 	"\rStateV2Header\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x127\n" +
 	"\x04role\x18\x02 \x01(\x0e2#.sandbox0.s0fs.internal.StateV2RoleR\x04role\x12\x1b\n" +
@@ -1154,7 +1210,14 @@ const file_storage_proxy_pkg_s0fs_state_v2_proto_rawDesc = "" +
 	"\vwrapped_key\x18\r \x01(\fR\n" +
 	"wrappedKey\x12!\n" +
 	"\fnonce_prefix\x18\x0e \x01(\fR\vnoncePrefix\x12F\n" +
-	"\x06chunks\x18\x0f \x03(\v2..sandbox0.s0fs.internal.StateV2ChunkDescriptorR\x06chunks\"\xd2\x02\n" +
+	"\x06chunks\x18\x0f \x03(\v2..sandbox0.s0fs.internal.StateV2ChunkDescriptorR\x06chunks\x12\x1b\n" +
+	"\tcommit_id\x18\x10 \x01(\tR\bcommitId\x12!\n" +
+	"\fstate_digest\x18\x11 \x01(\tR\vstateDigest\x12'\n" +
+	"\x0fmanifest_digest\x18\x12 \x01(\tR\x0emanifestDigest\x12.\n" +
+	"\x13parent_manifest_key\x18\x13 \x01(\tR\x11parentManifestKey\x124\n" +
+	"\x16parent_manifest_digest\x18\x14 \x01(\tR\x14parentManifestDigest\x12(\n" +
+	"\x10parent_commit_id\x18\x15 \x01(\tR\x0eparentCommitId\x12+\n" +
+	"\x11parent_generation\x18\x16 \x01(\x04R\x10parentGeneration\"\xd2\x02\n" +
 	"\x16StateV2ChunkDescriptor\x12<\n" +
 	"\x04kind\x18\x01 \x01(\x0e2(.sandbox0.s0fs.internal.StateV2ChunkKindR\x04kind\x12\x14\n" +
 	"\x05index\x18\x02 \x01(\rR\x05index\x12\x16\n" +

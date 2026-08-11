@@ -38,19 +38,19 @@ func (s *memoryHeadStore) LoadCommittedHead(_ context.Context, volumeID string) 
 	return &clone, nil
 }
 
-func (s *memoryHeadStore) CompareAndSwapCommittedHead(_ context.Context, volumeID string, expectedManifestSeq uint64, head *CommittedHead) error {
+func (s *memoryHeadStore) CompareAndSwapCommittedHead(_ context.Context, volumeID string, expected, head *CommittedHead) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current := s.heads[volumeID]
 	if current == nil {
-		if expectedManifestSeq != 0 {
+		if expected != nil {
 			return ErrCommittedHeadConflict
 		}
 		clone := *head
 		s.heads[volumeID] = &clone
 		return nil
 	}
-	if current.ManifestSeq != expectedManifestSeq || head.ManifestSeq <= current.ManifestSeq {
+	if !sameCommittedHeadIdentity(current, expected) || head.ManifestSeq <= current.ManifestSeq || head.Generation != current.Generation+1 {
 		return ErrCommittedHeadConflict
 	}
 	clone := *head
@@ -79,7 +79,7 @@ func newNthBlockingHeadStore(blockOn int32) *blockingHeadStore {
 	}
 }
 
-func (s *blockingHeadStore) CompareAndSwapCommittedHead(ctx context.Context, volumeID string, expectedManifestSeq uint64, head *CommittedHead) error {
+func (s *blockingHeadStore) CompareAndSwapCommittedHead(ctx context.Context, volumeID string, expected, head *CommittedHead) error {
 	if s.calls.Add(1) == s.blockOn {
 		close(s.firstEntered)
 		select {
@@ -88,7 +88,7 @@ func (s *blockingHeadStore) CompareAndSwapCommittedHead(ctx context.Context, vol
 			return ctx.Err()
 		}
 	}
-	return s.memoryHeadStore.CompareAndSwapCommittedHead(ctx, volumeID, expectedManifestSeq, head)
+	return s.memoryHeadStore.CompareAndSwapCommittedHead(ctx, volumeID, expected, head)
 }
 
 type getCall struct {
@@ -727,10 +727,10 @@ func TestMaterializerCoalescesSmallFilesAndKeepsManifestMonotonic(t *testing.T) 
 	if latest.ManifestSeq != second.ManifestSeq {
 		t.Fatalf("latest manifest seq = %d, want %d", latest.ManifestSeq, second.ManifestSeq)
 	}
-	if _, err := store.Head(manifestKey(first.ManifestSeq)); err != nil {
+	if _, err := store.Head(manifestKey(first.ManifestSeq, first.CommitID)); err != nil {
 		t.Fatalf("Head(manifest %d) error = %v", first.ManifestSeq, err)
 	}
-	if _, err := store.Head(manifestKey(second.ManifestSeq)); err != nil {
+	if _, err := store.Head(manifestKey(second.ManifestSeq, second.CommitID)); err != nil {
 		t.Fatalf("Head(manifest %d) error = %v", second.ManifestSeq, err)
 	}
 
@@ -875,8 +875,9 @@ func TestMaterializerWithCommittedHeadStoreSkipsLegacyLatestObject(t *testing.T)
 	if err != nil {
 		t.Fatalf("LoadCommittedHead() error = %v", err)
 	}
-	if head.ManifestSeq != manifest.ManifestSeq || head.ManifestKey != manifestKey(manifest.ManifestSeq) {
-		t.Fatalf("committed head = %+v, want manifest seq %d key %s", head, manifest.ManifestSeq, manifestKey(manifest.ManifestSeq))
+	wantKey := manifestKey(manifest.ManifestSeq, manifest.CommitID)
+	if head.ManifestSeq != manifest.ManifestSeq || head.ManifestKey != wantKey || head.ManifestDigest != manifest.ManifestDigest || head.CommitID != manifest.CommitID || head.Generation != 1 {
+		t.Fatalf("committed head = %+v, want exact manifest identity %+v", head, manifest)
 	}
 }
 
@@ -922,11 +923,57 @@ func TestEngineSyncMaterializeDetectsCommittedHeadConflicts(t *testing.T) {
 		t.Fatalf("Write(second) error = %v", err)
 	}
 
-	if _, err := first.SyncMaterialize(ctx); err != nil {
+	firstManifest, err := first.SyncMaterialize(ctx)
+	if err != nil {
 		t.Fatalf("SyncMaterialize(first) error = %v", err)
+	}
+	winnerHead, err := heads.LoadCommittedHead(ctx, "vol-conflict")
+	if err != nil {
+		t.Fatalf("LoadCommittedHead(winner) error = %v", err)
+	}
+	winnerReader, err := store.Get(winnerHead.ManifestKey, 0, -1)
+	if err != nil {
+		t.Fatalf("Get(winner manifest) error = %v", err)
+	}
+	winnerBytes, err := io.ReadAll(winnerReader)
+	_ = winnerReader.Close()
+	if err != nil {
+		t.Fatalf("ReadAll(winner manifest) error = %v", err)
 	}
 	if _, err := second.SyncMaterialize(ctx); !errors.Is(err, ErrCommittedHeadConflict) {
 		t.Fatalf("SyncMaterialize(second) err = %v, want %v", err, ErrCommittedHeadConflict)
+	}
+	loadedHead, err := heads.LoadCommittedHead(ctx, "vol-conflict")
+	if err != nil {
+		t.Fatalf("LoadCommittedHead(after conflict) error = %v", err)
+	}
+	if !sameCommittedHeadIdentity(loadedHead, winnerHead) {
+		t.Fatalf("losing writer changed committed head: got %+v want %+v", loadedHead, winnerHead)
+	}
+	winnerReader, err = store.Get(winnerHead.ManifestKey, 0, -1)
+	if err != nil {
+		t.Fatalf("Get(winner manifest after conflict) error = %v", err)
+	}
+	winnerBytesAfter, err := io.ReadAll(winnerReader)
+	_ = winnerReader.Close()
+	if err != nil {
+		t.Fatalf("ReadAll(winner manifest after conflict) error = %v", err)
+	}
+	if !bytes.Equal(winnerBytesAfter, winnerBytes) {
+		t.Fatal("losing writer overwrote the winning immutable manifest")
+	}
+	manifestKeys, err := listObjectKeys(ctx, store, manifestDir+"/")
+	if err != nil {
+		t.Fatalf("listObjectKeys(manifests) error = %v", err)
+	}
+	var competingKeys []string
+	for _, key := range manifestKeys {
+		if seq, ok := immutableManifestSequence(key); ok && seq == firstManifest.ManifestSeq {
+			competingKeys = append(competingKeys, key)
+		}
+	}
+	if len(competingKeys) != 2 || competingKeys[0] == competingKeys[1] {
+		t.Fatalf("same-sequence manifest keys = %v, want two unique immutable objects", competingKeys)
 	}
 	info, err := os.Stat(second.wal.path)
 	if err != nil {
@@ -1145,7 +1192,7 @@ func TestEngineSyncMaterializeRetriesLocalCheckpointAfterRemoteCommit(t *testing
 	}
 }
 
-func TestEngineCompactKeepsConcurrentMutations(t *testing.T) {
+func TestEngineCompactFencesConcurrentMutationsUntilPublished(t *testing.T) {
 	ctx := context.Background()
 	store := newPrefixedRecordingStore(t, "vol-compact-dirty")
 	heads := newNthBlockingHeadStore(2)
@@ -1196,12 +1243,18 @@ func TestEngineCompactKeepsConcurrentMutations(t *testing.T) {
 		t.Fatal("Compact did not reach committed head CAS")
 	}
 
-	concurrent, err := engine.CreateFile(RootInode, "concurrent.txt", 0o644)
-	if err != nil {
-		t.Fatalf("CreateFile(concurrent) error = %v", err)
-	}
-	if _, err := engine.Write(concurrent.Inode, 0, []byte("concurrent-data")); err != nil {
-		t.Fatalf("Write(concurrent) error = %v", err)
+	mutationDone := make(chan error, 1)
+	go func() {
+		concurrent, err := engine.CreateFile(RootInode, "concurrent.txt", 0o644)
+		if err == nil {
+			_, err = engine.Write(concurrent.Inode, 0, []byte("concurrent-data"))
+		}
+		mutationDone <- err
+	}()
+	select {
+	case err := <-mutationDone:
+		t.Fatalf("concurrent mutation completed before compaction publication: %v", err)
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	close(heads.releaseFirst)
@@ -1218,6 +1271,14 @@ func TestEngineCompactKeepsConcurrentMutations(t *testing.T) {
 	if compactedManifest == nil || compactedManifest.State == nil {
 		t.Fatal("Compact() returned no manifest")
 	}
+	select {
+	case err := <-mutationDone:
+		if err != nil {
+			t.Fatalf("concurrent mutation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent mutation remained blocked after compaction")
+	}
 
 	node, err := engine.Lookup(RootInode, "concurrent.txt")
 	if err != nil {
@@ -1231,24 +1292,11 @@ func TestEngineCompactKeepsConcurrentMutations(t *testing.T) {
 		t.Fatalf("Read(concurrent) = %q, want %q", data, "concurrent-data")
 	}
 
-	retainedManifests := map[string]struct{}{manifestKey(compactedManifest.ManifestSeq): {}}
-	withoutLiveState, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{compactedManifest.State}, retainedManifests)
-	if err != nil {
-		t.Fatalf("PlanGarbageCollection(without live state) error = %v", err)
-	}
-	if !slices.Contains(withoutLiveState.Segments, oldSegmentKey) {
-		t.Fatalf("old live segment %s was not collectible without live state retention: %v", oldSegmentKey, withoutLiveState.Segments)
-	}
-	withLiveState, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{compactedManifest.State, engine.SnapshotState()}, retainedManifests)
-	if err != nil {
-		t.Fatalf("PlanGarbageCollection(with live state) error = %v", err)
-	}
-	if slices.Contains(withLiveState.Segments, oldSegmentKey) {
-		t.Fatalf("old live segment %s was planned for deletion despite live state retention", oldSegmentKey)
-	}
-
 	if _, err := engine.SyncMaterialize(ctx); err != nil {
 		t.Fatalf("SyncMaterialize(concurrent) error = %v", err)
+	}
+	if _, err := store.Head(oldSegmentKey); err != nil {
+		t.Fatalf("old segment disappeared before fenced garbage collection: %v", err)
 	}
 }
 
@@ -1613,7 +1661,8 @@ func TestMaterializerGarbageCollectionPlanDeletesUnreferencedObjects(t *testing.
 	if _, err := engine.Write(node.Inode, 0, []byte("old")); err != nil {
 		t.Fatalf("Write(old) error = %v", err)
 	}
-	if _, err := engine.SyncMaterialize(ctx); err != nil {
+	previous, err := engine.SyncMaterialize(ctx)
+	if err != nil {
 		t.Fatalf("SyncMaterialize(old) error = %v", err)
 	}
 	if err := engine.Truncate(node.Inode, 0); err != nil {
@@ -1628,31 +1677,41 @@ func TestMaterializerGarbageCollectionPlanDeletesUnreferencedObjects(t *testing.
 	}
 
 	retained := map[string]struct{}{
-		manifestKey(latest.ManifestSeq): {},
+		manifestKey(latest.ManifestSeq, latest.CommitID): {},
 	}
 	plan, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{latest.State}, retained)
 	if err != nil {
 		t.Fatalf("PlanGarbageCollection() error = %v", err)
 	}
-	if got, want := plan.Segments, []string{"segments/00000000000000000002-0.bin"}; !equalStrings(got, want) {
+	var previousSegment string
+	for _, segment := range previous.State.Segments {
+		previousSegment = segment.Key
+	}
+	previousManifest := manifestKey(previous.ManifestSeq, previous.CommitID)
+	var latestSegment string
+	for _, segment := range latest.State.Segments {
+		latestSegment = segment.Key
+	}
+	latestManifest := manifestKey(latest.ManifestSeq, latest.CommitID)
+	if got, want := plan.Segments, []string{previousSegment}; !equalStrings(got, want) {
 		t.Fatalf("plan segments = %v, want %v", got, want)
 	}
-	if got, want := plan.Manifests, []string{"manifests/00000000000000000002.json"}; !equalStrings(got, want) {
+	if got, want := plan.Manifests, []string{previousManifest}; !equalStrings(got, want) {
 		t.Fatalf("plan manifests = %v, want %v", got, want)
 	}
 	if _, err := plan.Apply(ctx); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	if _, err := store.Head("segments/00000000000000000002-0.bin"); err == nil {
+	if _, err := store.Head(previousSegment); err == nil {
 		t.Fatal("old segment still exists after GC")
 	}
-	if _, err := store.Head("manifests/00000000000000000002.json"); err == nil {
+	if _, err := store.Head(previousManifest); err == nil {
 		t.Fatal("old manifest still exists after GC")
 	}
-	if _, err := store.Head("segments/00000000000000000004-0.bin"); err != nil {
+	if _, err := store.Head(latestSegment); err != nil {
 		t.Fatalf("current segment missing after GC: %v", err)
 	}
-	if _, err := store.Head("manifests/00000000000000000004.json"); err != nil {
+	if _, err := store.Head(latestManifest); err != nil {
 		t.Fatalf("current manifest missing after GC: %v", err)
 	}
 }
@@ -2021,7 +2080,7 @@ func TestMaterializerBuildSegmentProducesRoundTrippableLayout(t *testing.T) {
 			3: []byte("world"),
 		},
 	}
-	manifestState, segments, err := buildMaterializedState(7, "vol-1", state, 0)
+	manifestState, segments, err := buildMaterializedState(7, "commit-7", "vol-1", state, 0)
 	if err != nil {
 		t.Fatalf("buildMaterializedState() error = %v", err)
 	}

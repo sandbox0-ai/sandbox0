@@ -1937,6 +1937,12 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 				if !ran {
 					continue
 				}
+				if errors.Is(err, s0fs.ErrCommittedStateIntegrity) || errors.Is(err, s0fs.ErrCommittedHeadConflict) {
+					if m.logger != nil {
+						m.logger.Error("ctld s0fs stopped after a terminal consistency failure", zap.String("volume_id", volumeID), zap.Error(err))
+					}
+					return
+				}
 				if err != nil && m.logger != nil {
 					m.logger.Warn("ctld volume materialize failed", zap.String("volume_id", volumeID), zap.Error(err))
 				}
@@ -1955,8 +1961,16 @@ func (m *Manager) startMaterializer(bound *boundVolume) {
 				if !ran {
 					continue
 				}
-				if err != nil && m.logger != nil {
-					m.logger.Warn("ctld volume compaction failed", zap.String("volume_id", volumeID), zap.Error(err))
+				if errors.Is(err, s0fs.ErrCommittedStateIntegrity) || errors.Is(err, s0fs.ErrCommittedHeadConflict) {
+					if m.logger != nil {
+						m.logger.Error("ctld s0fs stopped after a terminal consistency failure", zap.String("volume_id", volumeID), zap.Error(err))
+					}
+					return
+				}
+				if err != nil {
+					if m.logger != nil {
+						m.logger.Warn("ctld volume compaction failed", zap.String("volume_id", volumeID), zap.Error(err))
+					}
 					continue
 				}
 				if result != nil && len(result.CompactedSegments) > 0 && m.logger != nil {

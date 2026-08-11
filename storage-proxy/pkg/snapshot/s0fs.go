@@ -23,7 +23,32 @@ import (
 
 type s0fsHeadRepository interface {
 	GetS0FSCommittedHead(ctx context.Context, volumeID string) (*db.S0FSCommittedHead, error)
-	CompareAndSwapS0FSCommittedHead(ctx context.Context, volumeID string, expectedManifestSeq uint64, head *db.S0FSCommittedHead) error
+	CompareAndSwapS0FSCommittedHead(ctx context.Context, volumeID string, expected, head *db.S0FSCommittedHead) error
+	BeginS0FSCommit(ctx context.Context, volumeID, commitID string, expected *db.S0FSCommittedHead, expiresAt time.Time) error
+	RenewS0FSCommit(ctx context.Context, volumeID, commitID string, expiresAt time.Time) error
+	AbortS0FSCommit(ctx context.Context, volumeID, commitID string) error
+	AcquireS0FSGarbageCollection(ctx context.Context, volumeID, token string, expected *db.S0FSCommittedHead, expiresAt time.Time) error
+	ValidateS0FSGarbageCollection(ctx context.Context, volumeID, token string, expected *db.S0FSCommittedHead) error
+	ReleaseS0FSGarbageCollection(ctx context.Context, volumeID, token string) error
+	StageS0FSGarbageCollection(ctx context.Context, volumeID, token string, expected *db.S0FSCommittedHead, candidates []string, deleteAfter time.Time) ([]string, error)
+}
+
+func snapshotDBHead(head *s0fs.CommittedHead) *db.S0FSCommittedHead {
+	if head == nil {
+		return nil
+	}
+	return &db.S0FSCommittedHead{
+		VolumeID: head.VolumeID, ManifestSeq: head.ManifestSeq, CheckpointSeq: head.CheckpointSeq,
+		ManifestKey: head.ManifestKey, ManifestDigest: head.ManifestDigest,
+		CommitID: head.CommitID, Generation: head.Generation, UpdatedAt: head.UpdatedAt,
+	}
+}
+
+func mapSnapshotS0FSConflict(err error) error {
+	if errors.Is(err, db.ErrConflict) {
+		return s0fs.ErrCommittedHeadConflict
+	}
+	return err
 }
 
 type activeMountRepository interface {
@@ -50,29 +75,71 @@ func (s *snapshotHeadStore) LoadCommittedHead(ctx context.Context, volumeID stri
 		return nil, err
 	}
 	return &s0fs.CommittedHead{
-		VolumeID:      head.VolumeID,
-		ManifestSeq:   head.ManifestSeq,
-		CheckpointSeq: head.CheckpointSeq,
-		ManifestKey:   head.ManifestKey,
-		UpdatedAt:     head.UpdatedAt,
+		VolumeID:       head.VolumeID,
+		ManifestSeq:    head.ManifestSeq,
+		CheckpointSeq:  head.CheckpointSeq,
+		ManifestKey:    head.ManifestKey,
+		ManifestDigest: head.ManifestDigest,
+		CommitID:       head.CommitID,
+		Generation:     head.Generation,
+		UpdatedAt:      head.UpdatedAt,
 	}, nil
 }
 
-func (s *snapshotHeadStore) CompareAndSwapCommittedHead(ctx context.Context, volumeID string, expectedManifestSeq uint64, head *s0fs.CommittedHead) error {
+func (s *snapshotHeadStore) CompareAndSwapCommittedHead(ctx context.Context, volumeID string, expected, head *s0fs.CommittedHead) error {
 	if s == nil || s.repo == nil {
 		return s0fs.ErrCommittedHeadNotFound
 	}
-	err := s.repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, expectedManifestSeq, &db.S0FSCommittedHead{
-		VolumeID:      head.VolumeID,
-		ManifestSeq:   head.ManifestSeq,
-		CheckpointSeq: head.CheckpointSeq,
-		ManifestKey:   head.ManifestKey,
-		UpdatedAt:     head.UpdatedAt,
+	var expectedDB *db.S0FSCommittedHead
+	if expected != nil {
+		expectedDB = &db.S0FSCommittedHead{
+			VolumeID: expected.VolumeID, ManifestSeq: expected.ManifestSeq, CheckpointSeq: expected.CheckpointSeq,
+			ManifestKey: expected.ManifestKey, ManifestDigest: expected.ManifestDigest, CommitID: expected.CommitID, Generation: expected.Generation,
+		}
+	}
+	err := s.repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, expectedDB, &db.S0FSCommittedHead{
+		VolumeID:       head.VolumeID,
+		ManifestSeq:    head.ManifestSeq,
+		CheckpointSeq:  head.CheckpointSeq,
+		ManifestKey:    head.ManifestKey,
+		ManifestDigest: head.ManifestDigest,
+		CommitID:       head.CommitID,
+		Generation:     head.Generation,
+		UpdatedAt:      head.UpdatedAt,
 	})
 	if errors.Is(err, db.ErrConflict) {
 		return s0fs.ErrCommittedHeadConflict
 	}
 	return err
+}
+
+func (s *snapshotHeadStore) BeginCommit(ctx context.Context, volumeID, commitID string, expected *s0fs.CommittedHead, expiresAt time.Time) error {
+	return mapSnapshotS0FSConflict(s.repo.BeginS0FSCommit(ctx, volumeID, commitID, snapshotDBHead(expected), expiresAt))
+}
+
+func (s *snapshotHeadStore) RenewCommit(ctx context.Context, volumeID, commitID string, expiresAt time.Time) error {
+	return mapSnapshotS0FSConflict(s.repo.RenewS0FSCommit(ctx, volumeID, commitID, expiresAt))
+}
+
+func (s *snapshotHeadStore) AbortCommit(ctx context.Context, volumeID, commitID string) error {
+	return s.repo.AbortS0FSCommit(ctx, volumeID, commitID)
+}
+
+func (s *snapshotHeadStore) AcquireGarbageCollection(ctx context.Context, volumeID, token string, expected *s0fs.CommittedHead, expiresAt time.Time) error {
+	return mapSnapshotS0FSConflict(s.repo.AcquireS0FSGarbageCollection(ctx, volumeID, token, snapshotDBHead(expected), expiresAt))
+}
+
+func (s *snapshotHeadStore) ReleaseGarbageCollection(ctx context.Context, volumeID, token string) error {
+	return s.repo.ReleaseS0FSGarbageCollection(ctx, volumeID, token)
+}
+
+func (s *snapshotHeadStore) ValidateGarbageCollection(ctx context.Context, volumeID, token string, expected *s0fs.CommittedHead) error {
+	return mapSnapshotS0FSConflict(s.repo.ValidateS0FSGarbageCollection(ctx, volumeID, token, snapshotDBHead(expected)))
+}
+
+func (s *snapshotHeadStore) StageGarbageCollection(ctx context.Context, volumeID, token string, expected *s0fs.CommittedHead, candidates []string, deleteAfter time.Time) ([]string, error) {
+	due, err := s.repo.StageS0FSGarbageCollection(ctx, volumeID, token, snapshotDBHead(expected), candidates, deleteAfter)
+	return due, mapSnapshotS0FSConflict(err)
 }
 
 func (m *Manager) s0fsConfig(teamID, volumeID string) (s0fs.Config, error) {
@@ -100,9 +167,11 @@ func (m *Manager) s0fsConfig(teamID, volumeID string) (s0fs.Config, error) {
 		return s0fs.Config{}, err
 	}
 	cfg.ObjectStore = store
-	if repo, ok := any(m.repo).(s0fsHeadRepository); ok {
-		cfg.HeadStore = &snapshotHeadStore{repo: repo}
+	repo, ok := any(m.repo).(s0fsHeadRepository)
+	if !ok || repo == nil {
+		return s0fs.Config{}, fmt.Errorf("s0fs committed-head coordination repository is not configured")
 	}
+	cfg.HeadStore = &snapshotHeadStore{repo: repo}
 	cfg.ObjectStoreForVolume = func(sourceVolumeID string) (objectstore.Store, error) {
 		return m.s0fsObjectStore(teamID, sourceVolumeID)
 	}
@@ -644,17 +713,37 @@ func (m *Manager) restoreS0FSSnapshot(ctx context.Context, req *RestoreSnapshotR
 		return err
 	}
 	engine, closeFn, err := m.openS0FSEngine(ctx, snapshot.TeamID, req.VolumeID)
+	var manifest *s0fs.Manifest
 	if err != nil {
-		return err
-	}
-	defer closeFn()
-
-	if err := engine.RestoreState(state); err != nil {
-		return err
-	}
-	manifest, err := engine.SyncMaterialize(ctx)
-	if err != nil {
-		return err
+		if !errors.Is(err, s0fs.ErrCommittedStateIntegrity) && !errors.Is(err, s0fs.ErrCommittedHeadConflict) {
+			return err
+		}
+		manifest, err = s0fs.RepairCommittedState(ctx, cfg, state)
+		if err != nil {
+			return fmt.Errorf("repair s0fs from snapshot: %w", err)
+		}
+	} else {
+		defer closeFn()
+		if err := engine.RestoreState(state); err != nil {
+			if !errors.Is(err, s0fs.ErrCommittedStateIntegrity) && !errors.Is(err, s0fs.ErrCommittedHeadConflict) {
+				return err
+			}
+			manifest, err = s0fs.RepairCommittedState(ctx, cfg, state)
+			if err != nil {
+				return fmt.Errorf("repair failed s0fs engine from snapshot: %w", err)
+			}
+		} else {
+			manifest, err = engine.SyncMaterialize(ctx)
+			if err != nil {
+				if !errors.Is(err, s0fs.ErrCommittedStateIntegrity) && !errors.Is(err, s0fs.ErrCommittedHeadConflict) {
+					return err
+				}
+				manifest, err = s0fs.RepairCommittedState(ctx, cfg, state)
+				if err != nil {
+					return fmt.Errorf("repair conflicted s0fs restore from snapshot: %w", err)
+				}
+			}
+		}
 	}
 	if manifest != nil && manifest.State != nil {
 		vol := &db.SandboxVolume{
@@ -766,8 +855,34 @@ func (m *Manager) garbageCollectS0FSVolumeObjects(ctx context.Context, volumeID,
 	if materializer == nil || !materializer.Enabled() {
 		return nil, nil
 	}
+	coordinator, ok := cfg.HeadStore.(s0fs.CommitCoordinator)
+	if !ok || coordinator == nil {
+		return nil, nil
+	}
+	head, err := cfg.HeadStore.LoadCommittedHead(ctx, volumeID)
+	if errors.Is(err, s0fs.ErrCommittedHeadNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	token := uuid.NewString()
+	if err := coordinator.AcquireGarbageCollection(ctx, volumeID, token, head, time.Now().UTC().Add(30*time.Minute)); err != nil {
+		if errors.Is(err, s0fs.ErrCommittedHeadConflict) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = coordinator.ReleaseGarbageCollection(releaseCtx, volumeID, token)
+	}()
+	if safe, err = m.canCollectS0FSVolume(ctx, volumeID); err != nil || !safe {
+		return nil, err
+	}
 
-	latestState, latestManifest, err := materializer.LoadLatestState(ctx)
+	latestState, _, err := materializer.LoadLatestState(ctx)
 	if err != nil {
 		if errors.Is(err, s0fs.ErrMaterializedManifestNotFound) {
 			return nil, nil
@@ -792,43 +907,26 @@ func (m *Manager) garbageCollectS0FSVolumeObjects(ctx context.Context, volumeID,
 
 	retainedManifests := map[string]struct{}{
 		s0fsLegacyLatestManifestKey: {},
+		head.ManifestKey:            {},
 	}
-	if latestManifest.ManifestSeq > 0 {
-		retainedManifests[s0fsManifestKey(latestManifest.ManifestSeq)] = struct{}{}
-	}
-	headBefore, err := m.currentS0FSManifestKey(ctx, volumeID, latestManifest)
-	if err != nil {
-		return nil, err
-	}
-	retainedManifests[headBefore] = struct{}{}
 
 	plan, err := materializer.PlanGarbageCollection(ctx, retainedStates, retainedManifests)
 	if err != nil {
 		return nil, err
 	}
+	due, err := coordinator.StageGarbageCollection(
+		ctx, volumeID, token, head, plan.Candidates(), time.Now().UTC().Add(24*time.Hour),
+	)
+	if err != nil {
+		return nil, err
+	}
+	plan = plan.RetainCandidates(due)
 	if len(plan.Segments) == 0 && len(plan.Manifests) == 0 {
 		return &s0fs.GarbageCollectionResult{}, nil
 	}
-
-	safe, err = m.canCollectS0FSVolume(ctx, volumeID)
-	if err != nil {
-		return nil, err
-	}
-	if !safe {
-		return nil, nil
-	}
-	headAfter, err := m.currentS0FSManifestKey(ctx, volumeID, latestManifest)
-	if err != nil {
-		return nil, err
-	}
-	if headAfter != headBefore {
-		m.logger.WithFields(map[string]any{
-			"volume_id":   volumeID,
-			"head_before": headBefore,
-			"head_after":  headAfter,
-		}).Info("Skipping s0fs garbage collection because committed head changed")
-		return nil, nil
-	}
+	plan.SetDeleteGuard(func(runCtx context.Context) error {
+		return coordinator.ValidateGarbageCollection(runCtx, volumeID, token, head)
+	})
 	result, err := plan.Apply(ctx)
 	if err != nil {
 		return nil, err
@@ -867,31 +965,11 @@ func (m *Manager) canCollectS0FSVolume(ctx context.Context, volumeID string) (bo
 	return true, nil
 }
 
-func (m *Manager) currentS0FSManifestKey(ctx context.Context, volumeID string, fallback *s0fs.Manifest) (string, error) {
-	if repo, ok := any(m.repo).(s0fsHeadRepository); ok && repo != nil {
-		head, err := repo.GetS0FSCommittedHead(ctx, volumeID)
-		if err == nil && strings.TrimSpace(head.ManifestKey) != "" {
-			return head.ManifestKey, nil
-		}
-		if err != nil && !errors.Is(err, db.ErrNotFound) {
-			return "", err
-		}
-	}
-	if fallback != nil && fallback.ManifestSeq > 0 {
-		return s0fsManifestKey(fallback.ManifestSeq), nil
-	}
-	return s0fsLegacyLatestManifestKey, nil
-}
-
 func (m *Manager) heartbeatTimeout() int {
 	if m != nil && m.config != nil && m.config.HeartbeatTimeout > 0 {
 		return m.config.HeartbeatTimeout
 	}
 	return 15
-}
-
-func s0fsManifestKey(seq uint64) string {
-	return fmt.Sprintf("manifests/%020d.json", seq)
 }
 
 const s0fsLegacyLatestManifestKey = "manifests/latest.json"

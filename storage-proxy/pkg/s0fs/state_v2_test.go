@@ -41,6 +41,10 @@ func TestStateV2RoundTripDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeStateV2() error = %v", err)
 	}
+	metadata.StateDigest, err = snapshotStateDigest(state)
+	if err != nil {
+		t.Fatalf("snapshotStateDigest() error = %v", err)
+	}
 	if result.Metadata != metadata {
 		t.Fatalf("metadata = %+v, want %+v", result.Metadata, metadata)
 	}
@@ -271,7 +275,7 @@ func TestMaterializerDualReadsAndWritesStateFormats(t *testing.T) {
 	if manifestV2.Version != StateFormatV2 {
 		t.Fatalf("v2 manifest version = %d", manifestV2.Version)
 	}
-	reader, err := store.Get(manifestKey(manifestV2.ManifestSeq), 0, int64(len(stateV2Magic)))
+	reader, err := store.Get(manifestKey(manifestV2.ManifestSeq, manifestV2.CommitID), 0, int64(len(stateV2Magic)))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -307,11 +307,26 @@ func saveSnapshotState(path, volumeID, role string, state *SnapshotState, encryp
 	}
 
 	tempPath := path + ".tmp"
-	if err := os.WriteFile(tempPath, data, 0o600); err != nil {
-		return fmt.Errorf("write snapshot state: %w", err)
+	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create snapshot state: %w", err)
+	}
+	writeErr := error(nil)
+	if _, err := file.Write(data); err != nil {
+		writeErr = err
+	} else if err := file.Sync(); err != nil {
+		writeErr = err
+	}
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("write snapshot state: %w", errors.Join(writeErr, closeErr))
 	}
 	if err := os.Rename(tempPath, path); err != nil {
 		return fmt.Errorf("replace snapshot state: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync snapshot state directory: %w", err)
 	}
 	return nil
 }
@@ -344,6 +359,9 @@ func saveMetadataStateV2(ctx context.Context, path, volumeID, role string, metad
 	if err := os.Rename(tempPath, path); err != nil {
 		_ = os.Remove(tempPath)
 		return fmt.Errorf("replace snapshot state: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync snapshot state directory: %w", err)
 	}
 	return nil
 }

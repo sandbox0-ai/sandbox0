@@ -90,8 +90,8 @@ func TestEncryptedS0FSObjectsAndLocalStateHidePlaintext(t *testing.T) {
 	}
 	assertFileDoesNotContain(t, filepath.Join(dir, "head.json"), []byte(secretName))
 	assertFileDoesNotContain(t, filepath.Join(dir, "head.json"), secretPayload)
-	assertObjectDoesNotContain(t, store, manifestKey(manifest.ManifestSeq), []byte(secretName))
-	assertObjectDoesNotContain(t, store, manifestKey(manifest.ManifestSeq), secretPayload)
+	assertObjectDoesNotContain(t, store, manifestKey(manifest.ManifestSeq, manifest.CommitID), []byte(secretName))
+	assertObjectDoesNotContain(t, store, manifestKey(manifest.ManifestSeq, manifest.CommitID), secretPayload)
 	if len(manifest.State.Segments) != 1 {
 		t.Fatalf("manifest segment count = %d, want 1", len(manifest.State.Segments))
 	}
@@ -275,11 +275,13 @@ func TestEncryptedSegmentRangeReadFetchesOnlyNeededCiphertextChunks(t *testing.T
 	}
 
 	gets := store.snapshotGets()
-	if len(gets) != 2 {
-		t.Fatalf("Get calls = %#v, want two encrypted chunk ranges", gets)
+	if len(gets) != 4 {
+		t.Fatalf("Get calls = %#v, want all encrypted chunks for integrity verification", gets)
 	}
-	if gets[0].off != 24 || gets[0].limit != 24 || gets[1].off != 48 || gets[1].limit != 24 {
-		t.Fatalf("Get calls = %#v, want ciphertext ranges [24,24] and [48,24]", gets)
+	for i, call := range gets {
+		if call.off != int64(i*24) || call.limit != 24 {
+			t.Fatalf("Get calls = %#v, want four contiguous ciphertext chunks", gets)
+		}
 	}
 }
 

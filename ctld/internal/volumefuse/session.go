@@ -41,6 +41,7 @@ type Session interface {
 	SetLk(context.Context, *pb.SetLkRequest) (*pb.Empty, error)
 	SetLkw(context.Context, *pb.SetLkRequest) (*pb.Empty, error)
 	Flock(context.Context, *pb.FlockRequest) (*pb.Empty, error)
+	Ioctl(context.Context, *pb.IoctlRequest) (*pb.IoctlResponse, error)
 }
 
 type ReadIntoSession interface {

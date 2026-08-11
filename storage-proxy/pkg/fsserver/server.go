@@ -2,6 +2,7 @@ package fsserver
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"strconv"
 	"strings"
@@ -20,6 +21,18 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"github.com/sirupsen/logrus"
+)
+
+const (
+	fsIOCGetFlags                = uint32(0x80086601)
+	fsIOCSetFlags                = uint32(0x40086602)
+	fsIOCGetVersion              = uint32(0x80087601)
+	fsIOCFSGetXattr              = uint32(0x801c581f)
+	fsIOCFSSetXattr              = uint32(0x401c5820)
+	fsIOCFIClone                 = uint32(0x40049409)
+	fsIOCFICloneRange            = uint32(0x4020940d)
+	s0fsPersistedInodeFlagsXattr = "user.sandbox0.inode_flags"
+	s0fsSupportedInodeFlags      = uint32(0x40 | 0x80) // FS_NODUMP_FL | FS_NOATIME_FL
 )
 
 // FileSystemServer implements manager storage filesystem operations.
@@ -876,12 +889,10 @@ func (s *FileSystemServer) Flush(ctx context.Context, req *pb.FlushRequest) (*pb
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		if dirty, ok := s.peekDirtyWrite(req.VolumeId, req.HandleId); ok {
-			if err := s.syncS0FSHandle(volCtx, dirty.inode); err != nil {
-				return nil, err
-			}
-			s.clearDirtyWrite(req.VolumeId, req.HandleId)
-		}
+		// FUSE flush is invoked by close(2), which is not a durability barrier.
+		// Writes are already appended to the authoritative S0FS WAL; forcing an
+		// fsync here serialized every small-file close. Explicit fsync/fdatasync,
+		// snapshot, detach, and pause paths retain their durability barriers.
 		return &pb.Empty{}, nil
 	}
 
@@ -919,16 +930,8 @@ func (s *FileSystemServer) Release(ctx context.Context, req *pb.ReleaseRequest) 
 	}
 	if isS0FSVolume(volCtx) {
 		s.locks.releaseHandle(req.VolumeId, req.HandleId)
-		var syncErr error
-		if dirty, ok := s.peekDirtyWrite(req.VolumeId, req.HandleId); ok {
-			syncErr = s.syncS0FSHandle(volCtx, dirty.inode)
-		}
 		if inode, remaining, unlinked, ok := volCtx.ReleaseFileHandle(req.HandleId); ok && remaining == 0 && unlinked {
 			_ = volCtx.S0FS.Forget(inode)
-		}
-		if syncErr != nil {
-			s.clearDirtyWrite(req.VolumeId, req.HandleId)
-			return nil, syncErr
 		}
 		s.clearDirtyWrite(req.VolumeId, req.HandleId)
 		return &pb.Empty{}, nil
@@ -1229,7 +1232,63 @@ func (s *FileSystemServer) Ioctl(ctx context.Context, req *pb.IoctlRequest) (*pb
 		return nil, err
 	}
 	if isS0FSVolume(volCtx) {
-		return nil, fserror.New(fserror.Unimplemented, "ioctl is not implemented for s0fs")
+		if _, err := volCtx.S0FS.GetAttr(req.Inode); err != nil {
+			return nil, MapS0FSError(err)
+		}
+		switch req.Cmd {
+		case fsIOCGetFlags:
+			flags := uint32(0)
+			value, err := volCtx.S0FS.GetXattr(req.Inode, s0fsPersistedInodeFlagsXattr)
+			if err == nil && len(value) == 4 {
+				flags = binary.LittleEndian.Uint32(value)
+			} else if err != nil && !errors.Is(err, s0fs.ErrXattrNotFound) {
+				return nil, MapS0FSError(err)
+			}
+			if req.DataOutSize < 4 {
+				return nil, fserror.NewErrno(syscall.EOVERFLOW, "FS_IOC_GETFLAGS output buffer is too small")
+			}
+			data := make([]byte, 4)
+			binary.LittleEndian.PutUint32(data, flags)
+			return &pb.IoctlResponse{DataOut: data}, nil
+		case fsIOCSetFlags:
+			if len(req.DataIn) < 4 {
+				return nil, fserror.NewErrno(syscall.EINVAL, "FS_IOC_SETFLAGS input buffer is too small")
+			}
+			flags := binary.LittleEndian.Uint32(req.DataIn)
+			if flags&^s0fsSupportedInodeFlags != 0 {
+				return nil, fserror.NewErrno(syscall.EOPNOTSUPP, "requested inode flags are not supported")
+			}
+			value := make([]byte, 4)
+			binary.LittleEndian.PutUint32(value, flags)
+			if err := volCtx.S0FS.SetXattr(req.Inode, s0fsPersistedInodeFlagsXattr, value, 0); err != nil {
+				return nil, MapS0FSError(err)
+			}
+			return &pb.IoctlResponse{}, nil
+		case fsIOCGetVersion:
+			if req.DataOutSize < 8 {
+				return nil, fserror.NewErrno(syscall.EOVERFLOW, "FS_IOC_GETVERSION output buffer is too small")
+			}
+			return &pb.IoctlResponse{DataOut: make([]byte, 8)}, nil
+		case fsIOCFSGetXattr:
+			if req.DataOutSize < 28 {
+				return nil, fserror.NewErrno(syscall.EOVERFLOW, "FS_IOC_FSGETXATTR output buffer is too small")
+			}
+			return &pb.IoctlResponse{DataOut: make([]byte, 28)}, nil
+		case fsIOCFSSetXattr:
+			if len(req.DataIn) < 28 {
+				return nil, fserror.NewErrno(syscall.EINVAL, "FS_IOC_FSSETXATTR input buffer is too small")
+			}
+			for _, value := range req.DataIn[:28] {
+				if value != 0 {
+					return nil, fserror.NewErrno(syscall.EOPNOTSUPP, "non-zero fsxattr values are not supported")
+				}
+			}
+			return &pb.IoctlResponse{}, nil
+		case fsIOCFIClone, fsIOCFICloneRange:
+			return nil, fserror.NewErrno(syscall.EOPNOTSUPP, "reflink ioctl is not supported; use copy_file_range")
+		default:
+			return nil, fserror.NewErrno(syscall.ENOTTY, "ioctl is not supported")
+		}
 	}
 
 	return nil, unsupportedVolumeBackend(volCtx)

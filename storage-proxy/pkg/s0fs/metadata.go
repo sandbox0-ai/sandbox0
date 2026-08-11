@@ -50,6 +50,7 @@ type metadataStore interface {
 
 	ColdFile(uint64) ([]FileExtent, bool)
 	PutColdFile(uint64, []FileExtent)
+	PutNewColdFile(uint64, []FileExtent)
 	DeleteColdFile(uint64)
 	RangeColdFiles(func(uint64, []FileExtent) bool)
 
@@ -58,6 +59,8 @@ type metadataStore interface {
 	DeleteSegment(string)
 	RangeSegments(func(string, *Segment) bool)
 	SegmentCount() int
+	PruneSegments([]string)
+	Usage() (FilesystemUsage, error)
 	NeedsMaterialization() bool
 	PruneUnlinked(context.Context, map[uint64]struct{}) error
 
@@ -249,6 +252,9 @@ func (s *eagerMetadataStore) ColdFile(inode uint64) ([]FileExtent, bool) {
 func (s *eagerMetadataStore) PutColdFile(inode uint64, extents []FileExtent) {
 	s.state.ColdFiles[inode] = slices.Clone(extents)
 }
+func (s *eagerMetadataStore) PutNewColdFile(inode uint64, extents []FileExtent) {
+	s.PutColdFile(inode, extents)
+}
 func (s *eagerMetadataStore) DeleteColdFile(inode uint64) { delete(s.state.ColdFiles, inode) }
 func (s *eagerMetadataStore) RangeColdFiles(yield func(uint64, []FileExtent) bool) {
 	for _, inode := range sortedUint64Keys(s.state.ColdFiles) {
@@ -276,6 +282,34 @@ func (s *eagerMetadataStore) RangeSegments(yield func(string, *Segment) bool) {
 	}
 }
 func (s *eagerMetadataStore) SegmentCount() int { return len(s.state.Segments) }
+func (s *eagerMetadataStore) PruneSegments(ids []string) {
+	for _, id := range ids {
+		referenced := false
+		for _, extents := range s.state.ColdFiles {
+			for _, extent := range extents {
+				if extent.SegmentID == id {
+					referenced = true
+					break
+				}
+			}
+			if referenced {
+				break
+			}
+		}
+		if !referenced {
+			delete(s.state.Segments, id)
+		}
+	}
+}
+func (s *eagerMetadataStore) Usage() (FilesystemUsage, error) {
+	usage := FilesystemUsage{Inodes: uint64(len(s.state.Nodes))}
+	for _, node := range s.state.Nodes {
+		if node != nil {
+			usage.DataBytes = addUint64Saturating(usage.DataBytes, node.Size)
+		}
+	}
+	return usage, nil
+}
 func (s *eagerMetadataStore) NeedsMaterialization() bool {
 	for _, payload := range s.state.Data {
 		if len(payload) != 0 {

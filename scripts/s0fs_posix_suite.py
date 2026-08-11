@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 REMOTE_RUNNER = r'''
 import hashlib
 import concurrent.futures
+import errno
+import fcntl
 import json
 import os
 import shutil
@@ -362,12 +364,103 @@ def run_one_smoke_target(target):
             "f_ffree": vfs.f_ffree,
         }
 
+    def xattr_roundtrip():
+        path = os.path.join(root, "xattr.txt")
+        Path(path).write_bytes(b"xattr")
+        os.setxattr(path, "user.s0fs_test", b"value")
+        if os.getxattr(path, "user.s0fs_test") != b"value":
+            raise AssertionError("xattr readback mismatch")
+        if "user.s0fs_test" not in os.listxattr(path):
+            raise AssertionError("xattr missing from list")
+        os.removexattr(path, "user.s0fs_test")
+        return {"removed": "user.s0fs_test" not in os.listxattr(path)}
+
+    def mknod_fifo():
+        path = os.path.join(root, "named-pipe")
+        os.mkfifo(path, 0o600)
+        st = os.lstat(path)
+        if not stat.S_ISFIFO(st.st_mode):
+            raise AssertionError("mknod FIFO type mismatch")
+        return {"mode": oct(st.st_mode)}
+
+    def fallocate_roundtrip():
+        source = os.path.join(root, "allocation-source.bin")
+        with open(source, "w+b") as handle:
+            handle.write(b"abcdefgh")
+            handle.flush()
+            os.posix_fallocate(handle.fileno(), 0, 8192)
+            handle.flush()
+            size = os.fstat(handle.fileno()).st_size
+        data = Path(source).read_bytes()
+        if size != 8192 or data[:8] != b"abcdefgh" or data[8:] != bytes(8192 - 8):
+            raise AssertionError("fallocate did not preserve data while extending the file")
+        return {"size": size, "prefix_sha256": sha256_bytes(data[:8])}
+
+    def lseek_data_hole():
+        source = os.path.join(root, "lseek-source.bin")
+        Path(source).write_bytes(b"abcdefgh")
+        try:
+            with open(source, "rb") as handle:
+                data_offset = os.lseek(handle.fileno(), 0, os.SEEK_DATA)
+                hole_offset = os.lseek(handle.fileno(), 0, os.SEEK_HOLE)
+        except OSError as exc:
+            if exc.errno in (errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.ENXIO):
+                return {"supported": False, "errno": exc.errno, "reason": exc.strerror}
+            raise
+        if data_offset != 0 or hole_offset < 8:
+            raise AssertionError("unexpected SEEK_DATA/SEEK_HOLE result")
+        return {"supported": True, "data_offset": data_offset, "hole_offset": hole_offset}
+
+    def copy_file_range_roundtrip():
+        source = os.path.join(root, "copy-source.bin")
+        copied = os.path.join(root, "copy-destination.bin")
+        Path(source).write_bytes(b"abcdefgh")
+        try:
+            with open(source, "rb") as src, open(copied, "w+b") as dst:
+                copied_bytes = os.copy_file_range(src.fileno(), dst.fileno(), 8)
+        except OSError as exc:
+            if exc.errno in (errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
+                return {"supported": False, "errno": exc.errno, "reason": exc.strerror}
+            raise
+        if Path(copied).read_bytes() != b"abcdefgh" or copied_bytes != 8:
+            raise AssertionError("copy_file_range data mismatch")
+        return {"supported": True, "copied": copied_bytes}
+
+    def locks_roundtrip():
+        path = os.path.join(root, "locks.bin")
+        Path(path).write_bytes(b"locks")
+        with open(path, "r+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.lockf(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB, 1, 0)
+            fcntl.lockf(handle.fileno(), fcntl.LOCK_UN, 1, 0)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return {"flock": True, "record_lock": True}
+
+    def inode_flags_ioctl():
+        path = os.path.join(root, "ioctl.bin")
+        Path(path).write_bytes(b"ioctl")
+        try:
+            with open(path, "r+b") as handle:
+                flags = fcntl.ioctl(handle.fileno(), 0x80086601, bytes(4))
+        except OSError as exc:
+            if exc.errno in (errno.ENOTTY, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP):
+                return {"supported": False, "errno": exc.errno, "reason": exc.strerror}
+            raise
+        return {"supported": True, "inode_flags": int.from_bytes(flags, "little")}
+
     record("basic_read_after_write_fsync", basic_rw)
     record("o_append_and_truncate", append_and_truncate)
     record("rename_hardlink_symlink", rename_link_symlink)
     record("negative_lookup_then_create", negative_lookup_then_create)
     record("directory_tree_digest", directory_digest)
     record("statfs", statfs_check)
+    record("xattr_roundtrip", xattr_roundtrip)
+    record("mknod_fifo", mknod_fifo)
+    record("fallocate_preserves_data", fallocate_roundtrip)
+    record("lseek_data_hole", lseek_data_hole)
+    record("copy_file_range", copy_file_range_roundtrip)
+    record("flock_and_record_lock", locks_roundtrip)
+    record("inode_flags_ioctl", inode_flags_ioctl)
     return {
         "target": target,
         "passed": all(item["passed"] for item in checks),
@@ -377,10 +470,26 @@ def run_one_smoke_target(target):
 
 def run_smoke(cfg):
     results = [run_one_smoke_target(target) for target in target_roots(cfg)]
+    capability_parity = []
+    if len(results) == 2:
+        local_checks = {item["name"]: item for item in results[0]["checks"]}
+        s0fs_checks = {item["name"]: item for item in results[1]["checks"]}
+        for name in ("lseek_data_hole", "copy_file_range", "inode_flags_ioctl"):
+            local_detail = local_checks.get(name, {}).get("detail", {})
+            s0fs_detail = s0fs_checks.get(name, {}).get("detail", {})
+            local_supported = bool(local_detail.get("supported"))
+            s0fs_supported = bool(s0fs_detail.get("supported"))
+            capability_parity.append({
+                "name": name,
+                "passed": not local_supported or s0fs_supported,
+                "local_supported": local_supported,
+                "s0fs_supported": s0fs_supported,
+            })
     return {
         "suite": "smoke",
-        "passed": all(item["passed"] for item in results),
+        "passed": all(item["passed"] for item in results) and all(item["passed"] for item in capability_parity),
         "targets": results,
+        "capability_parity": capability_parity,
     }
 
 

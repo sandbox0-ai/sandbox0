@@ -12,6 +12,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
+	"golang.org/x/sys/unix"
 )
 
 type readIntoSession struct {
@@ -62,6 +63,82 @@ func TestReadUsesReadIntoSession(t *testing.T) {
 type openFlagsTestSession struct {
 	Session
 	flags uint32
+}
+
+type lseekIoctlTestSession struct {
+	Session
+	ioctlRequest *pb.IoctlRequest
+}
+
+func (s *lseekIoctlTestSession) GetAttr(context.Context, *pb.GetAttrRequest) (*pb.GetAttrResponse, error) {
+	return &pb.GetAttrResponse{Size: 10}, nil
+}
+
+func (s *lseekIoctlTestSession) Ioctl(_ context.Context, req *pb.IoctlRequest) (*pb.IoctlResponse, error) {
+	s.ioctlRequest = req
+	return &pb.IoctlResponse{DataOut: []byte{4, 3, 2, 1}}, nil
+}
+
+func TestLseekReportsDenseDataExtent(t *testing.T) {
+	session := &lseekIoctlTestSession{}
+	fs := New("vol-1", time.Second, session)
+
+	for _, tt := range []struct {
+		name    string
+		offset  uint64
+		whence  uint32
+		want    uint64
+		wantErr fuse.Status
+	}{
+		{name: "data", offset: 2, whence: uint32(unix.SEEK_DATA), want: 2},
+		{name: "hole", offset: 2, whence: uint32(unix.SEEK_HOLE), want: 10},
+		{name: "hole at eof", offset: 10, whence: uint32(unix.SEEK_HOLE), want: 10},
+		{name: "data at eof", offset: 10, whence: uint32(unix.SEEK_DATA), wantErr: fuse.Status(syscall.ENXIO)},
+		{name: "beyond eof", offset: 11, whence: uint32(unix.SEEK_HOLE), wantErr: fuse.Status(syscall.ENXIO)},
+		{name: "invalid whence", offset: 0, whence: uint32(unix.SEEK_SET), wantErr: fuse.EINVAL},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var out fuse.LseekOut
+			status := fs.Lseek(nil, &fuse.LseekIn{
+				InHeader: fuse.InHeader{NodeId: 42},
+				Offset:   tt.offset,
+				Whence:   tt.whence,
+			}, &out)
+			if status != tt.wantErr {
+				t.Fatalf("Lseek() status = %v, want %v", status, tt.wantErr)
+			}
+			if status == fuse.OK && out.Offset != tt.want {
+				t.Fatalf("Lseek() offset = %d, want %d", out.Offset, tt.want)
+			}
+		})
+	}
+}
+
+func TestIoctlForwardsBuffers(t *testing.T) {
+	session := &lseekIoctlTestSession{}
+	fs := New("vol-1", time.Second, session)
+	input := &fuse.IoctlIn{
+		InHeader: fuse.InHeader{NodeId: 42},
+		Cmd:      0x80086601,
+		Arg:      99,
+	}
+	bufOut := make([]byte, 8)
+	var out fuse.IoctlOut
+	if status := fs.Ioctl(nil, input, []byte{1, 2, 3}, &out, bufOut); status != fuse.OK {
+		t.Fatalf("Ioctl() status = %v, want OK", status)
+	}
+	if session.ioctlRequest == nil {
+		t.Fatal("Ioctl() did not forward the request")
+	}
+	if session.ioctlRequest.VolumeId != "vol-1" || session.ioctlRequest.Inode != 42 || session.ioctlRequest.Cmd != input.Cmd || session.ioctlRequest.Arg != input.Arg {
+		t.Fatalf("Ioctl() request = %+v", session.ioctlRequest)
+	}
+	if !bytes.Equal(session.ioctlRequest.DataIn, []byte{1, 2, 3}) || session.ioctlRequest.DataOutSize != uint32(len(bufOut)) {
+		t.Fatalf("Ioctl() buffers = %+v", session.ioctlRequest)
+	}
+	if !bytes.Equal(bufOut[:4], []byte{4, 3, 2, 1}) {
+		t.Fatalf("Ioctl() output = %v", bufOut)
+	}
 }
 
 func (s openFlagsTestSession) OpenFlags() uint32 {

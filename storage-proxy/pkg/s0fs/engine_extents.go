@@ -18,9 +18,12 @@ func (e *Engine) applyExtentWrite(record walRecord) error {
 		return err
 	}
 	oldSize := node.Size
-	extents, err := e.extentsForMutationLocked(record.Inode, record.Seq)
-	if err != nil {
-		return err
+	var extents []FileExtent
+	if oldSize > 0 {
+		extents, err = e.extentsForMutationLocked(record.Inode, record.Seq)
+		if err != nil {
+			return err
+		}
 	}
 
 	writeEnd := record.Offset + uint64(len(record.Data))
@@ -30,19 +33,24 @@ func (e *Engine) applyExtentWrite(record walRecord) error {
 		next = append(next, FileExtent{Length: record.Offset - oldSize})
 	}
 	if len(record.Data) > 0 {
-		next = append(next, e.appendInlineSegmentLocked(record.Seq, "write", record.Data))
+		next = append(next, e.appendInlineSegmentLocked(record.Seq, fmt.Sprintf("write-%020d", record.Inode), record.Data))
 	}
 	if writeEnd < oldSize {
 		next = append(next, sliceExtents(extents, writeEnd, oldSize)...)
 	}
 
-	e.metadata.DeleteData(record.Inode)
+	if oldSize > 0 {
+		e.metadata.DeleteData(record.Inode)
+	}
 	next = coalesceExtents(next)
 	if len(next) == 0 {
 		e.metadata.DeleteColdFile(record.Inode)
+	} else if oldSize == 0 {
+		e.metadata.PutNewColdFile(record.Inode, next)
 	} else {
 		e.metadata.PutColdFile(record.Inode, next)
 	}
+	e.pruneExtentSegmentsLocked(extents)
 	node.Size = maxUint64(oldSize, writeEnd)
 	now := time.Unix(0, record.TimeUnix).UTC()
 	node.Mtime = now
@@ -59,8 +67,10 @@ func (e *Engine) applyExtentTruncate(record walRecord) error {
 	oldSize := node.Size
 	target := record.Offset
 	if target == 0 {
+		extents, _ := e.metadata.ColdFile(record.Inode)
 		e.metadata.DeleteData(record.Inode)
 		e.metadata.DeleteColdFile(record.Inode)
+		e.pruneExtentSegmentsLocked(extents)
 		node.Size = 0
 		now := time.Unix(0, record.TimeUnix).UTC()
 		node.Mtime = now
@@ -89,6 +99,7 @@ func (e *Engine) applyExtentTruncate(record walRecord) error {
 	} else {
 		e.metadata.PutColdFile(record.Inode, next)
 	}
+	e.pruneExtentSegmentsLocked(extents)
 	node.Size = target
 	now := time.Unix(0, record.TimeUnix).UTC()
 	node.Mtime = now
@@ -140,6 +151,7 @@ func (e *Engine) applyFallocate(record walRecord) error {
 	} else {
 		e.metadata.PutColdFile(record.Inode, next)
 	}
+	e.pruneExtentSegmentsLocked(extents)
 	if zeroRange && !keepSize && end > node.Size {
 		node.Size = end
 	}
@@ -234,6 +246,7 @@ func (e *Engine) applyCopyFileRange(record walRecord) error {
 	next = coalesceExtents(next)
 	e.metadata.DeleteData(record.Inode)
 	e.metadata.PutColdFile(record.Inode, next)
+	e.pruneExtentSegmentsLocked(destinationExtents)
 	destination.Size = maxUint64(oldSize, copyEnd)
 	now := time.Unix(0, record.TimeUnix).UTC()
 	destination.Mtime, destination.Ctime = now, now
@@ -298,7 +311,7 @@ func (e *Engine) extentsForMutationLocked(inode uint64, seq uint64) ([]FileExten
 			}
 			return nil, nil
 		}
-		return []FileExtent{e.appendInlineSegmentLocked(seq, "base", payload)}, nil
+		return []FileExtent{e.appendInlineSegmentLocked(seq, fmt.Sprintf("base-%020d", inode), payload)}, nil
 	}
 	if extents, _ := e.metadata.ColdFile(inode); len(extents) > 0 {
 		return cloneExtents(extents), nil
@@ -311,15 +324,6 @@ func (e *Engine) extentsForMutationLocked(inode uint64, seq uint64) ([]FileExten
 
 func (e *Engine) appendInlineSegmentLocked(seq uint64, suffix string, payload []byte) FileExtent {
 	segmentID := fmt.Sprintf("inline-%020d-%s", seq, suffix)
-	if _, exists := e.metadata.Segment(segmentID); exists {
-		for i := 1; ; i++ {
-			candidate := fmt.Sprintf("inline-%020d-%s-%d", seq, suffix, i)
-			if _, exists := e.metadata.Segment(candidate); !exists {
-				segmentID = candidate
-				break
-			}
-		}
-	}
 	e.metadata.PutSegment(segmentID, &Segment{
 		ID:         segmentID,
 		VolumeID:   e.volumeID,
@@ -331,4 +335,23 @@ func (e *Engine) appendInlineSegmentLocked(seq uint64, suffix string, payload []
 		Offset:    0,
 		Length:    uint64(len(payload)),
 	}
+}
+
+func (e *Engine) pruneExtentSegmentsLocked(extents []FileExtent) {
+	if len(extents) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(extents))
+	ids := make([]string, 0, len(extents))
+	for _, extent := range extents {
+		if extent.SegmentID == "" {
+			continue
+		}
+		if _, ok := seen[extent.SegmentID]; ok {
+			continue
+		}
+		seen[extent.SegmentID] = struct{}{}
+		ids = append(ids, extent.SegmentID)
+	}
+	e.metadata.PruneSegments(ids)
 }

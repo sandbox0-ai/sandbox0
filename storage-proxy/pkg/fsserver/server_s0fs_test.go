@@ -3,6 +3,7 @@ package fsserver
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"path/filepath"
 	"sync/atomic"
@@ -18,6 +19,59 @@ import (
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 	"google.golang.org/protobuf/proto"
 )
+
+func TestS0FSIoctlCompatibility(t *testing.T) {
+	t.Parallel()
+
+	volCtx := newMountedS0FSVolumeContext(t, "vol-ioctl", "team-a")
+	server := newTestFileSystemServer(&fakeVolumeManager{
+		volumes: map[string]*volume.VolumeContext{"vol-ioctl": volCtx},
+	}, nil, nil)
+	ctx := authContext("team-a", "")
+	node, err := volCtx.S0FS.CreateFile(s0fs.RootInode, "flags", 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	set := make([]byte, 4)
+	binary.LittleEndian.PutUint32(set, s0fsSupportedInodeFlags)
+	if _, err := server.Ioctl(ctx, &pb.IoctlRequest{
+		VolumeId: "vol-ioctl", Inode: node.Inode, Cmd: fsIOCSetFlags, DataIn: set,
+	}); err != nil {
+		t.Fatalf("Ioctl(FS_IOC_SETFLAGS) error = %v", err)
+	}
+	get, err := server.Ioctl(ctx, &pb.IoctlRequest{
+		VolumeId: "vol-ioctl", Inode: node.Inode, Cmd: fsIOCGetFlags, DataOutSize: 4,
+	})
+	if err != nil {
+		t.Fatalf("Ioctl(FS_IOC_GETFLAGS) error = %v", err)
+	}
+	if len(get.DataOut) != 4 || binary.LittleEndian.Uint32(get.DataOut) != s0fsSupportedInodeFlags {
+		t.Fatalf("Ioctl(FS_IOC_GETFLAGS) data = %v", get.DataOut)
+	}
+	persisted, err := volCtx.S0FS.GetXattr(node.Inode, s0fsPersistedInodeFlagsXattr)
+	if err != nil || !bytes.Equal(persisted, set) {
+		t.Fatalf("persisted flags = %v, %v", persisted, err)
+	}
+
+	unsupported := make([]byte, 4)
+	binary.LittleEndian.PutUint32(unsupported, 1)
+	if _, err := server.Ioctl(ctx, &pb.IoctlRequest{
+		VolumeId: "vol-ioctl", Inode: node.Inode, Cmd: fsIOCSetFlags, DataIn: unsupported,
+	}); !errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Fatalf("Ioctl(unsupported flags) error = %v, want EOPNOTSUPP", err)
+	}
+	if _, err := server.Ioctl(ctx, &pb.IoctlRequest{
+		VolumeId: "vol-ioctl", Inode: node.Inode, Cmd: fsIOCFIClone,
+	}); !errors.Is(err, syscall.EOPNOTSUPP) {
+		t.Fatalf("Ioctl(FICLONE) error = %v, want EOPNOTSUPP", err)
+	}
+	if _, err := server.Ioctl(ctx, &pb.IoctlRequest{
+		VolumeId: "vol-ioctl", Inode: node.Inode, Cmd: 0xdeadbeef,
+	}); !errors.Is(err, syscall.ENOTTY) {
+		t.Fatalf("Ioctl(unknown) error = %v, want ENOTTY", err)
+	}
+}
 
 func TestS0FSFileLifecycle(t *testing.T) {
 	t.Parallel()
@@ -330,7 +384,7 @@ func TestS0FSOpenTruncatesExistingFile(t *testing.T) {
 	}
 }
 
-func TestS0FSFlushSyncsDirtyWrites(t *testing.T) {
+func TestS0FSFlushDoesNotForceDirtyWriteDurability(t *testing.T) {
 	t.Parallel()
 
 	volCtx, syncs := newMountedS0FSVolumeContextWithSyncCounter(t, "vol-1", "team-a")
@@ -368,8 +422,8 @@ func TestS0FSFlushSyncsDirtyWrites(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
-	if got := syncs.Load(); got != 1 {
-		t.Fatalf("sync count after Flush() = %d, want 1", got)
+	if got := syncs.Load(); got != 0 {
+		t.Fatalf("sync count after Flush() = %d, want 0", got)
 	}
 	if _, err := server.Flush(ctx, &pb.FlushRequest{
 		VolumeId: "vol-1",
@@ -377,12 +431,21 @@ func TestS0FSFlushSyncsDirtyWrites(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("second Flush() error = %v", err)
 	}
+	if got := syncs.Load(); got != 0 {
+		t.Fatalf("sync count after second Flush() = %d, want 0", got)
+	}
+	if _, err := server.Fsync(ctx, &pb.FsyncRequest{
+		VolumeId: "vol-1",
+		HandleId: createResp.HandleId,
+	}); err != nil {
+		t.Fatalf("Fsync() error = %v", err)
+	}
 	if got := syncs.Load(); got != 1 {
-		t.Fatalf("sync count after second Flush() = %d, want 1", got)
+		t.Fatalf("sync count after Fsync() = %d, want 1", got)
 	}
 }
 
-func TestS0FSFlushSkipsRedundantWALSyncAfterBatch(t *testing.T) {
+func TestS0FSExplicitFsyncCoversWritesAcrossFlushedHandles(t *testing.T) {
 	t.Parallel()
 
 	volCtx, syncs := newMountedS0FSVolumeContextWithSyncCounter(t, "vol-1", "team-a")
@@ -435,8 +498,8 @@ func TestS0FSFlushSkipsRedundantWALSyncAfterBatch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Flush(first) error = %v", err)
 	}
-	if got := syncs.Load(); got != 1 {
-		t.Fatalf("sync count after first Flush() = %d, want 1", got)
+	if got := syncs.Load(); got != 0 {
+		t.Fatalf("sync count after first Flush() = %d, want 0", got)
 	}
 	if _, err := server.Flush(ctx, &pb.FlushRequest{
 		VolumeId: "vol-1",
@@ -444,12 +507,24 @@ func TestS0FSFlushSkipsRedundantWALSyncAfterBatch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Flush(second) error = %v", err)
 	}
+	if got := syncs.Load(); got != 0 {
+		t.Fatalf("sync count after second Flush() = %d, want 0", got)
+	}
+	if _, err := server.Fsync(ctx, &pb.FsyncRequest{VolumeId: "vol-1", HandleId: first.HandleId}); err != nil {
+		t.Fatalf("Fsync(first) error = %v", err)
+	}
 	if got := syncs.Load(); got != 1 {
-		t.Fatalf("sync count after second Flush() = %d, want 1", got)
+		t.Fatalf("sync count after Fsync(first) = %d, want 1", got)
+	}
+	if _, err := server.Fsync(ctx, &pb.FsyncRequest{VolumeId: "vol-1", HandleId: second.HandleId}); err != nil {
+		t.Fatalf("Fsync(second) error = %v", err)
+	}
+	if got := syncs.Load(); got != 1 {
+		t.Fatalf("sync count after Fsync(second) = %d, want 1", got)
 	}
 }
 
-func TestS0FSReleaseSyncsDirtyWritesWithoutExplicitFsync(t *testing.T) {
+func TestS0FSReleaseDoesNotAddImplicitFsync(t *testing.T) {
 	t.Parallel()
 
 	volCtx, syncs := newMountedS0FSVolumeContextWithSyncCounter(t, "vol-1", "team-a")
@@ -488,8 +563,8 @@ func TestS0FSReleaseSyncsDirtyWritesWithoutExplicitFsync(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Release() error = %v", err)
 	}
-	if got := syncs.Load(); got != 1 {
-		t.Fatalf("sync count after Release() = %d, want 1", got)
+	if got := syncs.Load(); got != 0 {
+		t.Fatalf("sync count after Release() = %d, want 0", got)
 	}
 }
 

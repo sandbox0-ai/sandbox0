@@ -2,12 +2,15 @@ package s0fs
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
 func BenchmarkOpenLargeNamespaceMetadata(b *testing.B) {
@@ -151,6 +154,57 @@ func BenchmarkSQLiteWALMutation(b *testing.B) {
 				}
 				if err != nil {
 					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkEngineSmallFileLifecycle(b *testing.B) {
+	for _, benchmark := range []struct {
+		name     string
+		parallel bool
+	}{
+		{name: "serial"},
+		{name: "parallel", parallel: true},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			base := objectstore.NewMemoryStore("s0fs-small-file-bench")
+			store := objectstore.Prefix(base, "sandboxvolumes/team-a/vol-small-file-bench/s0fs/")
+			engine, err := Open(context.Background(), Config{
+				VolumeID: "vol-small-file-bench", WALPath: filepath.Join(b.TempDir(), "engine.wal"),
+				MetadataPath: filepath.Join(b.TempDir(), "metadata.sqlite"), ObjectStore: store, HeadStore: newMemoryHeadStore(),
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer engine.Close()
+			payload := make([]byte, 4096)
+			var next atomic.Uint64
+			operation := func() {
+				index := next.Add(1)
+				node, err := engine.CreateFile(RootInode, fmt.Sprintf("file-%09d", index), 0o644)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if _, err := engine.Write(node.Inode, 0, payload); err != nil {
+					b.Fatal(err)
+				}
+				if err := engine.Fsync(node.Inode); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			if benchmark.parallel {
+				b.RunParallel(func(pb *testing.PB) {
+					for pb.Next() {
+						operation()
+					}
+				})
+			} else {
+				for iteration := 0; iteration < b.N; iteration++ {
+					operation()
 				}
 			}
 		})

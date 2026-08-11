@@ -34,22 +34,24 @@ type Engine struct {
 	nextInode uint64
 	metadata  metadataStore
 
-	materializer            *Materializer
-	encryption              *EncryptionConfig
-	stateFormatVersion      int
-	localDiskGuard          *LocalDiskGuard
-	retainUnlinked          bool
-	metadataPath            string
-	metadataCacheBytes      int64
-	segmentValidation       SegmentValidationMode
-	mutationVersion         uint64
-	lastCommittedManifest   uint64
-	lastCommittedHead       *CommittedHead
-	lastMaterializedVersion uint64
-	pendingMaterialization  *pendingMaterialization
-	dirty                   bool
-	dirtyAt                 time.Time
-	failure                 atomic.Pointer[engineFailure]
+	materializer             *Materializer
+	encryption               *EncryptionConfig
+	stateFormatVersion       int
+	localDiskGuard           *LocalDiskGuard
+	retainUnlinked           bool
+	metadataPath             string
+	metadataCacheBytes       int64
+	segmentValidation        SegmentValidationMode
+	mutationVersion          uint64
+	lastCommittedManifest    uint64
+	lastCommittedHead        *CommittedHead
+	lastCommittedStateDigest string
+	lastCommittedDeltaDepth  uint32
+	lastMaterializedVersion  uint64
+	pendingMaterialization   *pendingMaterialization
+	dirty                    bool
+	dirtyAt                  time.Time
+	failure                  atomic.Pointer[engineFailure]
 }
 
 type engineFailure struct {
@@ -65,6 +67,7 @@ type pendingMaterialization struct {
 	changes         *metadataChanges
 	walCheckpoint   *walCheckpoint
 	statePersisted  bool
+	incremental     bool
 }
 
 type loadedEngineState struct {
@@ -74,6 +77,7 @@ type loadedEngineState struct {
 	nextInode    uint64
 	metadataPath string
 	stateDigest  string
+	deltaDepth   uint32
 }
 
 func loadedEngineStateFromSnapshot(state *SnapshotState) *loadedEngineState {
@@ -241,7 +245,7 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 						return nil, err
 					}
 				}
-				latestManifest = manifestFromCommittedHead(committedHead, stateDigest)
+				latestManifest = manifestFromCommittedHead(committedHead, stateDigest, state.deltaDepth)
 				localCommitted = true
 				selectedSource = "local"
 				selectedFormat = localFormat
@@ -403,6 +407,8 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
 		e.lastCommittedHead = cloneCommittedHead(committedHead)
+		e.lastCommittedStateDigest = latestManifest.StateDigest
+		e.lastCommittedDeltaDepth = latestManifest.DeltaDepth
 	}
 
 	phaseStarted = time.Now()
@@ -467,6 +473,14 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		e.dirty = true
 		e.dirtyAt = time.Now().UTC()
 		e.mutationVersion = 1
+	} else if e.lastCommittedHead != nil && e.lastCommittedStateDigest != "" {
+		if persisted, err := e.persistMetadataCheckpointLocked(e.lastCommittedHead, e.lastCommittedStateDigest); err != nil {
+			return nil, fmt.Errorf("persist opened sqlite metadata checkpoint: %w", err)
+		} else if persisted {
+			if err := saveRecoveryBinding(localHeadBindingPath(cfg.WALPath), cfg.VolumeID, e.lastCommittedHead, e.lastCommittedStateDigest); err != nil {
+				return nil, fmt.Errorf("persist opened local binding: %w", err)
+			}
+		}
 	}
 	if err := saveRecoveryBinding(walBaseBindingPath(cfg.WALPath), cfg.VolumeID, e.lastCommittedHead, ""); err != nil {
 		return nil, fmt.Errorf("persist wal committed base: %w", err)
@@ -577,13 +591,27 @@ func (e *Engine) Close() error {
 			}
 		}
 	} else {
-		if err := e.persistCurrentStateLocked(); err != nil {
-			return err
-		}
-		if e.lastCommittedHead != nil {
-			stateDigest, err := snapshotStateDigest(e.currentStateLocked())
+		persistedMetadata := false
+		if e.lastCommittedHead != nil && e.lastCommittedStateDigest != "" {
+			var err error
+			persistedMetadata, err = e.persistMetadataCheckpointLocked(e.lastCommittedHead, e.lastCommittedStateDigest)
 			if err != nil {
 				return err
+			}
+		}
+		if !persistedMetadata {
+			if err := e.persistCurrentStateLocked(); err != nil {
+				return err
+			}
+		}
+		if e.lastCommittedHead != nil {
+			stateDigest := e.lastCommittedStateDigest
+			if stateDigest == "" {
+				var err error
+				stateDigest, err = snapshotStateDigest(e.currentStateLocked())
+				if err != nil {
+					return err
+				}
 			}
 			if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, e.lastCommittedHead, stateDigest); err != nil {
 				return err
@@ -1250,18 +1278,25 @@ func (e *Engine) Fsync(_ uint64) error {
 // ScrubSegments verifies the complete immutable object inventory. It is kept
 // off the activation path so open latency does not grow with volume capacity.
 func (e *Engine) ScrubSegments(ctx context.Context) error {
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
 	e.mu.RLock()
 	if err := e.checkOpen(); err != nil {
 		e.mu.RUnlock()
 		return err
 	}
-	state := e.metadata.ReferenceSnapshot(e.nextSeq, e.nextInode)
+	metadata := e.metadata
 	materializer := e.materializer
 	e.mu.RUnlock()
 	if materializer == nil || !materializer.Enabled() {
 		return nil
 	}
-	err := materializer.validateCommittedStateSegments(nonNilContext(ctx), state)
+	var err error
+	if sqliteState, ok := metadata.(*sqliteMetadataStore); ok {
+		err = classifyCommittedSegmentValidationError(sqliteState.validateSegments(nonNilContext(ctx), materializer))
+	} else {
+		err = materializer.validateCommittedStateSegments(nonNilContext(ctx), metadata.ReferenceSnapshot(e.nextSeq, e.nextInode))
+	}
 	if errors.Is(err, ErrCommittedStateIntegrity) {
 		e.failClosed(err)
 	}
@@ -1348,7 +1383,7 @@ func EngineMemoryReservationBytes(metadataCacheBytes int64) int64 {
 	if metadataCacheBytes <= 0 {
 		metadataCacheBytes = defaultMetadataCacheBytes
 	}
-	return metadataCacheBytes + (1 << 20) + defaultSegmentCacheMaxBytes + (1 << 20)
+	return metadataCacheBytes + sqliteMetadataHotCacheBytes + defaultSegmentCacheMaxBytes + (1 << 20)
 }
 
 func (e *Engine) ExportState() (*SnapshotState, error) {
@@ -1405,31 +1440,53 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 		return nil, nil
 	}
 	version := e.mutationVersion
-	state, err := e.materializeStateLocked()
-	if err != nil {
-		e.mu.Unlock()
-		e.mutationMu.Unlock()
-		return nil, err
-	}
+	checkpointSeq := e.nextSeq - 1
 	expected := cloneCommittedHead(e.lastCommittedHead)
-	changes, err := collectMetadataChanges(ctx, e.wal.path, e.volumeID, e.encryption, checkpointSequence(state))
+	parentStateDigest := e.lastCommittedStateDigest
+	changes, err := collectMetadataChanges(ctx, e.wal.path, e.volumeID, e.encryption, checkpointSeq)
 	if err != nil {
 		e.mu.Unlock()
 		e.mutationMu.Unlock()
 		return nil, err
 	}
-	if len(changes.inodes) == 0 && len(changes.dirs) == 0 {
+	if len(changes.inodes) == 0 && len(changes.dirs) == 0 && len(changes.dirents) == 0 && len(changes.dirMarkers) == 0 {
 		changes.full = true
 	}
+	parentDeltaDepth := e.lastCommittedDeltaDepth
+	useDelta := expected != nil && !changes.full && parentStateDigest != "" && parentDeltaDepth < maxManifestDeltaDepth
+	var state *SnapshotState
+	var delta *SnapshotDelta
+	storageBytes := int64(0)
+	if useDelta {
+		delta, err = buildMetadataDelta(e.metadata, e.nextSeq, e.nextInode, changes)
+		if err == nil {
+			var usage FilesystemUsage
+			usage, err = e.metadata.Usage()
+			storageBytes = saturatingInt64(usage.DataBytes)
+		}
+	} else {
+		changes.full = true
+		state, err = e.materializeStateLocked()
+	}
+	if err != nil {
+		e.mu.Unlock()
+		e.mutationMu.Unlock()
+		return nil, err
+	}
 	e.mu.Unlock()
-	checkpoint, err := e.wal.checkpoint(checkpointSequence(state))
+	checkpoint, err := e.wal.checkpoint(checkpointSeq)
 	if err != nil {
 		e.mutationMu.Unlock()
 		return nil, err
 	}
 	e.mutationMu.Unlock()
 
-	manifest, err := e.materializer.materializeOwned(ctx, state, expected, changes)
+	var manifest *Manifest
+	if useDelta {
+		manifest, err = e.materializer.materializeDeltaOwned(ctx, delta, expected, parentStateDigest, parentDeltaDepth, storageBytes)
+	} else {
+		manifest, err = e.materializer.materializeOwned(ctx, state, expected, changes)
+	}
 	if err != nil || manifest == nil {
 		e.failClosed(err)
 		return manifest, err
@@ -1451,14 +1508,22 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 	}
 	committedHead := committedHeadForManifest(manifest, manifestKey(manifest.ManifestSeq, manifest.CommitID), expected)
 	e.lastCommittedHead = cloneCommittedHead(committedHead)
+	e.lastCommittedStateDigest = manifest.StateDigest
+	e.lastCommittedDeltaDepth = manifest.DeltaDepth
+	materializedState := manifest.State
+	if useDelta {
+		materializedState = manifest.materializedState
+	}
 	e.pendingMaterialization = &pendingMaterialization{
 		manifestSeq:     manifest.ManifestSeq,
 		head:            committedHead,
 		stateDigest:     manifest.StateDigest,
 		mutationVersion: version,
-		state:           manifest.State,
+		state:           materializedState,
 		changes:         changes,
 		walCheckpoint:   checkpoint,
+		incremental:     useDelta,
+		statePersisted:  useDelta,
 	}
 	e.mu.Unlock()
 	e.mutationMu.Unlock()
@@ -1468,8 +1533,10 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 	// serializing and fsyncing a large local recovery checkpoint does not stop
 	// unrelated filesystem operations. Restore/ReplaceState take materializeMu
 	// as well, so they cannot race this head-file replacement.
-	if err := e.persistMaterializedState(manifest.State, true); err != nil {
-		return manifest, err
+	if !useDelta {
+		if err := e.persistMaterializedState(manifest.State, true); err != nil {
+			return manifest, err
+		}
 	}
 
 	e.mutationMu.Lock()
@@ -1510,8 +1577,26 @@ func (e *Engine) finalizePendingMaterializationLocked() error {
 	if pending.head == nil || pending.head.ManifestSeq != pending.manifestSeq || pending.stateDigest == "" {
 		return fmt.Errorf("%w: pending materialization identity is invalid", ErrInvalidInput)
 	}
-	if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, pending.head, pending.stateDigest); err != nil {
-		return fmt.Errorf("persist local committed binding: %w", err)
+	installedExactState := e.mutationVersion == pending.mutationVersion
+	if installedExactState {
+		if err := e.installMaterializedStateLocked(pending.state, pending.changes); err != nil {
+			return err
+		}
+		e.lastMaterializedVersion = pending.mutationVersion
+		e.dirty = false
+	}
+	persistedMetadata := false
+	if installedExactState {
+		var err error
+		persistedMetadata, err = e.persistMetadataCheckpointLocked(pending.head, pending.stateDigest)
+		if err != nil {
+			return fmt.Errorf("persist sqlite metadata checkpoint: %w", err)
+		}
+	}
+	if !pending.incremental || persistedMetadata {
+		if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, pending.head, pending.stateDigest); err != nil {
+			return fmt.Errorf("persist local committed binding: %w", err)
+		}
 	}
 	if err := saveRecoveryBinding(walBaseBindingPath(e.wal.path), e.volumeID, pending.head, ""); err != nil {
 		return fmt.Errorf("persist wal committed base: %w", err)
@@ -1521,13 +1606,6 @@ func (e *Engine) finalizePendingMaterializationLocked() error {
 	}
 	if err := e.wal.discardThrough(pending.walCheckpoint); err != nil {
 		return err
-	}
-	if e.mutationVersion == pending.mutationVersion {
-		if err := e.installMaterializedStateLocked(pending.state, pending.changes); err != nil {
-			return err
-		}
-		e.lastMaterializedVersion = pending.mutationVersion
-		e.dirty = false
 	}
 	e.pendingMaterialization = nil
 	e.refreshLocalDiskGuardLocked()
@@ -1625,6 +1703,8 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	if manifest != nil {
 		e.lastCommittedManifest = manifest.ManifestSeq
 		e.lastCommittedHead = cloneCommittedHead(refreshedHead)
+		e.lastCommittedStateDigest = manifest.StateDigest
+		e.lastCommittedDeltaDepth = manifest.DeltaDepth
 	}
 	return true, nil
 }
@@ -1975,13 +2055,12 @@ func (e *Engine) installMaterializedStateLocked(state *SnapshotState, changes *m
 	}
 
 	return e.metadata.ApplyMutation(func() error {
-		oldInlineSegments := make(map[string]struct{})
+		oldSegments := make(map[string]struct{})
 		for inode := range changes.inodes {
 			if extents, ok := e.metadata.ColdFile(inode); ok {
 				for _, extent := range extents {
-					segment, exists := e.metadata.Segment(extent.SegmentID)
-					if exists && isInlineSegment(segment) {
-						oldInlineSegments[extent.SegmentID] = struct{}{}
+					if extent.SegmentID != "" {
+						oldSegments[extent.SegmentID] = struct{}{}
 					}
 				}
 			}
@@ -2005,9 +2084,11 @@ func (e *Engine) installMaterializedStateLocked(state *SnapshotState, changes *m
 				e.metadata.PutColdFile(inode, extents)
 			}
 		}
-		for id := range oldInlineSegments {
-			e.metadata.DeleteSegment(id)
+		candidates := make([]string, 0, len(oldSegments))
+		for id := range oldSegments {
+			candidates = append(candidates, id)
 		}
+		e.metadata.PruneSegments(candidates)
 		return e.metadata.Err()
 	})
 }
@@ -2074,6 +2155,16 @@ func loadCurrentEngineState(ctx context.Context, cfg Config) (*loadedEngineState
 		return nil, 0, -1, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
 	if strings.TrimSpace(cfg.MetadataPath) != "" {
+		metadata, checkpoint, openErr := openExistingSQLiteMetadataStore(ctx, cfg.MetadataPath, cfg.MetadataCacheBytes, cfg.Encryption)
+		if openErr == nil {
+			if checkpoint.VolumeID == cfg.VolumeID {
+				return &loadedEngineState{
+					metadata: metadata, nextSeq: checkpoint.NextSeq, nextInode: checkpoint.NextInode,
+					metadataPath: cfg.MetadataPath, stateDigest: checkpoint.StateDigest, deltaDepth: checkpoint.DeltaDepth,
+				}, StateFormatV2, fileSize(cfg.MetadataPath), nil
+			}
+			_ = metadata.Close()
+		}
 		path := headStatePath(cfg.WALPath)
 		file, err := os.Open(path)
 		if err != nil {
@@ -2110,14 +2201,30 @@ func loadCurrentEngineState(ctx context.Context, cfg Config) (*loadedEngineState
 	return loadedEngineStateFromSnapshot(state), format, bytes, err
 }
 
-func manifestFromCommittedHead(head *CommittedHead, stateDigest string) *Manifest {
+func (e *Engine) persistMetadataCheckpointLocked(head *CommittedHead, stateDigest string) (bool, error) {
+	metadata, ok := e.metadata.(*sqliteMetadataStore)
+	if !ok || metadata == nil {
+		return false, nil
+	}
+	checkpoint := &sqliteMetadataCheckpoint{
+		Version: sqliteMetadataCheckpointVersion, VolumeID: e.volumeID,
+		NextSeq: e.nextSeq, NextInode: e.nextInode,
+		Head: cloneCommittedHead(head), StateDigest: stateDigest, DeltaDepth: e.lastCommittedDeltaDepth,
+	}
+	if err := metadata.saveCheckpoint(context.Background(), checkpoint); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func manifestFromCommittedHead(head *CommittedHead, stateDigest string, deltaDepth uint32) *Manifest {
 	if head == nil {
 		return nil
 	}
 	return &Manifest{
 		VolumeID: head.VolumeID, ManifestSeq: head.ManifestSeq, CheckpointSeq: head.CheckpointSeq,
 		CommitID: head.CommitID, StateDigest: stateDigest, ManifestDigest: head.ManifestDigest,
-		CreatedAt: head.UpdatedAt,
+		CreatedAt: head.UpdatedAt, DeltaDepth: deltaDepth,
 	}
 }
 

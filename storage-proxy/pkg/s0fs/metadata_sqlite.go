@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,7 +23,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const defaultMetadataCacheBytes int64 = 4 << 20
+const (
+	defaultMetadataCacheBytes       int64 = 4 << 20
+	sqliteMetadataHotCacheBytes     int64 = 2 << 20
+	sqliteMetadataNodeCacheEntries        = 2048
+	sqliteMetadataChildCacheEntries       = 4096
+)
 
 // sqliteMetadataStore is a rebuildable namespace index. Committed state and
 // the WAL remain authoritative; this database may be discarded after any
@@ -33,16 +39,58 @@ type sqliteMetadataStore struct {
 	path       string
 	cacheBytes int64
 	codec      *sqliteMetadataCodec
+	encryption *EncryptionConfig
 	errMu      sync.Mutex
 	err        error
+	cacheMu    sync.Mutex
+	nodeCache  map[uint64]*Node
+	nodeOrder  []uint64
+	childCache map[sqliteMetadataChildCacheKey]sqliteMetadataChildCacheValue
+	childOrder []sqliteMetadataChildCacheKey
 }
 
-// sqliteMetadataCodec protects the disposable index with an ephemeral key.
-// The key is intentionally not persisted: committed state and the WAL are the
-// recovery boundary, so an index left by a dead process is rebuilt.
+type sqliteMetadataChildCacheKey struct {
+	parent uint64
+	name   string
+}
+
+type sqliteMetadataChildCacheValue struct {
+	inode uint64
+	found bool
+}
+
+// sqliteMetadataCodec protects the disposable index with a local data key.
+// Encrypted volumes persist only a wrapped copy of that key so a clean,
+// committed index can be reused without exposing plaintext metadata at rest.
 type sqliteMetadataCodec struct {
-	aead cipher.AEAD
-	key  []byte
+	aead      cipher.AEAD
+	key       []byte
+	algorithm string
+}
+
+const (
+	sqliteMetadataControlCodec      = "codec"
+	sqliteMetadataControlCheckpoint = "checkpoint"
+	sqliteMetadataControlDirty      = "dirty"
+	sqliteMetadataCheckpointVersion = 1
+	sqliteMetadataCodecVersion      = 1
+)
+
+type sqliteMetadataCodecEnvelope struct {
+	Version    int    `json:"version"`
+	Algorithm  string `json:"algorithm"`
+	WrappedKey []byte `json:"wrapped_key"`
+}
+
+type sqliteMetadataCheckpoint struct {
+	Version     int            `json:"version"`
+	VolumeID    string         `json:"volume_id"`
+	NextSeq     uint64         `json:"next_seq"`
+	NextInode   uint64         `json:"next_inode"`
+	Head        *CommittedHead `json:"head"`
+	StateDigest string         `json:"state_digest"`
+	DeltaDepth  uint32         `json:"delta_depth,omitempty"`
+	Checksum    string         `json:"checksum"`
 }
 
 func newSQLiteMetadataCodec(encryption *EncryptionConfig) (*sqliteMetadataCodec, error) {
@@ -61,7 +109,7 @@ func newSQLiteMetadataCodec(encryption *EncryptionConfig) (*sqliteMetadataCodec,
 	if err != nil {
 		return nil, err
 	}
-	return &sqliteMetadataCodec{aead: aead, key: key}, nil
+	return &sqliteMetadataCodec{aead: aead, key: key, algorithm: encryption.normalizedAlgorithm()}, nil
 }
 
 func (c *sqliteMetadataCodec) seal(kind string, key, plaintext []byte) ([]byte, error) {
@@ -149,7 +197,7 @@ func newSQLiteMetadataStoreWithEncryption(ctx context.Context, path string, stat
 		_ = db.Close()
 		_ = os.Remove(tempPath)
 	}
-	tempStore := &sqliteMetadataStore{db: db, path: tempPath, cacheBytes: cacheBytes, codec: codec}
+	tempStore := &sqliteMetadataStore{db: db, path: tempPath, cacheBytes: cacheBytes, codec: codec, encryption: encryption}
 	if err := initializeSQLiteMetadata(ctx, tempStore, state); err != nil {
 		cleanup()
 		return nil, err
@@ -158,6 +206,7 @@ func newSQLiteMetadataStoreWithEncryption(ctx context.Context, path string, stat
 		_ = os.Remove(tempPath)
 		return nil, fmt.Errorf("close rebuilt metadata index: %w", err)
 	}
+	removeSQLiteMetadataSidecars(path)
 	if err := os.Rename(tempPath, path); err != nil {
 		_ = os.Remove(tempPath)
 		return nil, fmt.Errorf("replace metadata index: %w", err)
@@ -166,7 +215,7 @@ func newSQLiteMetadataStoreWithEncryption(ctx context.Context, path string, stat
 	if err != nil {
 		return nil, err
 	}
-	return &sqliteMetadataStore{db: db, path: path, cacheBytes: cacheBytes, codec: codec}, nil
+	return &sqliteMetadataStore{db: db, path: path, cacheBytes: cacheBytes, codec: codec, encryption: encryption}, nil
 }
 
 func newSQLiteMetadataStoreFromStateV2(
@@ -210,7 +259,11 @@ func newSQLiteMetadataStoreFromStateV2(
 		cleanup()
 		return nil, nil, err
 	}
-	tempStore := &sqliteMetadataStore{db: db, path: tempPath, cacheBytes: cacheBytes, codec: codec}
+	tempStore := &sqliteMetadataStore{db: db, path: tempPath, cacheBytes: cacheBytes, codec: codec, encryption: encryption}
+	if err := persistSQLiteMetadataCodec(ctx, tempStore); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
 	stream, err := streamStateV2Chunks(ctx, reader, volumeID, binding, role, encryption, func(_ *StateV2Header, descriptor *StateV2ChunkDescriptor, chunk *StateV2Chunk) error {
 		return applyStateV2ChunkToSQLite(ctx, tempStore, descriptor, chunk)
 	})
@@ -222,6 +275,7 @@ func newSQLiteMetadataStoreFromStateV2(
 		_ = os.Remove(tempPath)
 		return nil, nil, fmt.Errorf("close rebuilt metadata index: %w", err)
 	}
+	removeSQLiteMetadataSidecars(path)
 	if err := os.Rename(tempPath, path); err != nil {
 		_ = os.Remove(tempPath)
 		return nil, nil, fmt.Errorf("replace metadata index: %w", err)
@@ -230,7 +284,12 @@ func newSQLiteMetadataStoreFromStateV2(
 	if err != nil {
 		return nil, nil, err
 	}
-	return &sqliteMetadataStore{db: db, path: path, cacheBytes: cacheBytes, codec: codec}, stream, nil
+	return &sqliteMetadataStore{db: db, path: path, cacheBytes: cacheBytes, codec: codec, encryption: encryption}, stream, nil
+}
+
+func removeSQLiteMetadataSidecars(path string) {
+	_ = os.Remove(path + "-wal")
+	_ = os.Remove(path + "-shm")
 }
 
 func openSQLiteMetadataDB(path string, cacheBytes int64) (*sql.DB, error) {
@@ -245,10 +304,15 @@ func openSQLiteMetadataDB(path string, cacheBytes int64) (*sql.DB, error) {
 		cacheKiB = 256
 	}
 	pragmas := []string{
-		"PRAGMA journal_mode=OFF",
+		"PRAGMA journal_mode=WAL",
+		// The SQLite index is a disposable acceleration structure; the S0FS WAL
+		// is the mutation durability boundary. Avoid a second fsync on every
+		// namespace mutation and explicitly durably checkpoint SQLite only when
+		// publishing a clean local-cache checkpoint.
 		"PRAGMA synchronous=OFF",
 		"PRAGMA temp_store=FILE",
 		"PRAGMA mmap_size=0",
+		"PRAGMA wal_autocheckpoint=0",
 		fmt.Sprintf("PRAGMA cache_size=-%d", cacheKiB),
 	}
 	for _, statement := range pragmas {
@@ -269,18 +333,28 @@ func initializeSQLiteMetadata(ctx context.Context, store *sqliteMetadataStore, s
 	if err := createSQLiteMetadataSchema(ctx, store.db); err != nil {
 		return err
 	}
+	if err := persistSQLiteMetadataCodec(ctx, store); err != nil {
+		return err
+	}
 	return populateSQLiteMetadata(ctx, store, state)
 }
 
 func createSQLiteMetadataSchema(ctx context.Context, db *sql.DB) error {
 	statements := []string{
-		`CREATE TABLE nodes (inode BLOB PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID`,
+		`CREATE TABLE metadata_control (key TEXT PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID`,
+		`CREATE TABLE metadata_usage (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), data_bytes INTEGER NOT NULL, inodes INTEGER NOT NULL)`,
+		`INSERT INTO metadata_usage(singleton, data_bytes, inodes) VALUES(1, 0, 0)`,
+		`CREATE TABLE nodes (inode BLOB PRIMARY KEY, value BLOB NOT NULL, size INTEGER NOT NULL) WITHOUT ROWID`,
+		`CREATE TRIGGER nodes_usage_insert AFTER INSERT ON nodes BEGIN UPDATE metadata_usage SET data_bytes = data_bytes + NEW.size, inodes = inodes + 1 WHERE singleton = 1; END`,
+		`CREATE TRIGGER nodes_usage_update AFTER UPDATE OF size ON nodes BEGIN UPDATE metadata_usage SET data_bytes = data_bytes - OLD.size + NEW.size WHERE singleton = 1; END`,
+		`CREATE TRIGGER nodes_usage_delete AFTER DELETE ON nodes BEGIN UPDATE metadata_usage SET data_bytes = data_bytes - OLD.size, inodes = inodes - 1 WHERE singleton = 1; END`,
 		`CREATE TABLE directories (inode BLOB PRIMARY KEY) WITHOUT ROWID`,
 		`CREATE TABLE dirents (parent BLOB NOT NULL, name_key BLOB NOT NULL, name BLOB NOT NULL, inode BLOB NOT NULL, PRIMARY KEY(parent, name_key)) WITHOUT ROWID`,
 		`CREATE INDEX dirents_inode ON dirents(inode, name_key, parent)`,
 		`CREATE TABLE file_data (inode BLOB PRIMARY KEY, value BLOB NOT NULL) WITHOUT ROWID`,
 		`CREATE TABLE cold_files (inode BLOB PRIMARY KEY) WITHOUT ROWID`,
 		`CREATE TABLE file_extents (inode BLOB NOT NULL, position INTEGER NOT NULL, segment_id TEXT NOT NULL, offset BLOB NOT NULL, length BLOB NOT NULL, PRIMARY KEY(inode, position)) WITHOUT ROWID`,
+		`CREATE INDEX file_extents_segment ON file_extents(segment_id, inode)`,
 		`CREATE TABLE segments (id TEXT PRIMARY KEY, value BLOB NOT NULL, inline INTEGER NOT NULL) WITHOUT ROWID`,
 	}
 	for _, statement := range statements {
@@ -291,13 +365,87 @@ func createSQLiteMetadataSchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func persistSQLiteMetadataCodec(ctx context.Context, store *sqliteMetadataStore) error {
+	if store == nil || store.db == nil || store.codec == nil {
+		return nil
+	}
+	if !store.encryption.enabled() {
+		return fmt.Errorf("%w: encrypted metadata codec has no key encryptor", ErrInvalidInput)
+	}
+	wrapped, err := store.encryption.KeyEncryptor.Encrypt(store.codec.key)
+	if err != nil {
+		return fmt.Errorf("wrap sqlite metadata key: %w", err)
+	}
+	payload, err := json.Marshal(sqliteMetadataCodecEnvelope{
+		Version: sqliteMetadataCodecVersion, Algorithm: store.codec.algorithm, WrappedKey: wrapped,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = store.db.ExecContext(ctx, `INSERT INTO metadata_control(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, sqliteMetadataControlCodec, payload)
+	return err
+}
+
+func loadSQLiteMetadataCodec(ctx context.Context, db *sql.DB, encryption *EncryptionConfig) (*sqliteMetadataCodec, error) {
+	var payload []byte
+	err := db.QueryRowContext(ctx, `SELECT value FROM metadata_control WHERE key = ?`, sqliteMetadataControlCodec).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) && !encryption.enabled() {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !encryption.enabled() {
+		return nil, fmt.Errorf("%w: encrypted metadata cache requires encryption config", ErrInvalidInput)
+	}
+	var envelope sqliteMetadataCodecEnvelope
+	if err := json.Unmarshal(payload, &envelope); err != nil || envelope.Version != sqliteMetadataCodecVersion || len(envelope.WrappedKey) == 0 {
+		return nil, fmt.Errorf("%w: invalid sqlite metadata key envelope", ErrInvalidInput)
+	}
+	key, err := encryption.KeyEncryptor.Decrypt(envelope.WrappedKey)
+	if err != nil {
+		return nil, fmt.Errorf("unwrap sqlite metadata key: %w", err)
+	}
+	aead, err := newAEADForAlgorithm(envelope.Algorithm, key)
+	if err != nil {
+		return nil, err
+	}
+	return &sqliteMetadataCodec{aead: aead, key: key, algorithm: envelope.Algorithm}, nil
+}
+
+func openExistingSQLiteMetadataStore(ctx context.Context, path string, cacheBytes int64, encryption *EncryptionConfig) (*sqliteMetadataStore, *sqliteMetadataCheckpoint, error) {
+	ctx = nonNilContext(ctx)
+	if _, err := os.Stat(path); err != nil {
+		return nil, nil, err
+	}
+	if cacheBytes <= 0 {
+		cacheBytes = defaultMetadataCacheBytes
+	}
+	db, err := openSQLiteMetadataDB(path, cacheBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	codec, err := loadSQLiteMetadataCodec(ctx, db, encryption)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	store := &sqliteMetadataStore{db: db, path: path, cacheBytes: cacheBytes, codec: codec, encryption: encryption}
+	checkpoint, err := store.loadCheckpoint(ctx)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	return store, checkpoint, nil
+}
+
 func populateSQLiteMetadata(ctx context.Context, store *sqliteMetadataStore, state *SnapshotState) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin metadata index rebuild: %w", err)
 	}
 	defer tx.Rollback()
-	nodeStmt, err := tx.PrepareContext(ctx, `INSERT INTO nodes(inode, value) VALUES(?, ?)`)
+	nodeStmt, err := tx.PrepareContext(ctx, `INSERT INTO nodes(inode, value, size) VALUES(?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -311,7 +459,11 @@ func populateSQLiteMetadata(ctx context.Context, store *sqliteMetadataStore, sta
 		if err != nil {
 			return fmt.Errorf("protect node %d: %w", inode, err)
 		}
-		if _, err := nodeStmt.ExecContext(ctx, metadataInodeKey(inode), payload); err != nil {
+		size, err := sqliteMetadataNodeSize(node)
+		if err != nil {
+			return err
+		}
+		if _, err := nodeStmt.ExecContext(ctx, metadataInodeKey(inode), payload, size); err != nil {
 			return fmt.Errorf("index node %d: %w", inode, err)
 		}
 	}
@@ -432,7 +584,11 @@ func applyStateV2ChunkToSQLite(ctx context.Context, store *sqliteMetadataStore, 
 			if err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(inode, value) VALUES(?, ?)`, key, payload); err != nil {
+			size, err := sqliteMetadataNodeSize(node)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(inode, value, size) VALUES(?, ?, ?)`, key, payload, size); err != nil {
 				return fmt.Errorf("%w: duplicate inode %d", ErrInvalidInput, node.Inode)
 			}
 		}
@@ -631,18 +787,139 @@ func (s *sqliteMetadataStore) ApplyMutation(apply func() error) error {
 	if applyErr == nil {
 		applyErr = s.Err()
 	}
+	if applyErr == nil {
+		_, applyErr = tx.Exec(`INSERT INTO metadata_control(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, sqliteMetadataControlDirty, []byte("1"))
+	}
 	if applyErr != nil {
 		s.mutationTx = nil
 		_ = tx.Rollback()
+		s.clearHotCaches()
 		return applyErr
 	}
 	commitErr := tx.Commit()
 	s.mutationTx = nil
 	if commitErr != nil {
 		s.setErr(commitErr)
+		s.clearHotCaches()
 		return commitErr
 	}
 	return nil
+}
+
+func sqliteMetadataCheckpointChecksum(checkpoint *sqliteMetadataCheckpoint) (string, error) {
+	if checkpoint == nil {
+		return "", fmt.Errorf("%w: sqlite metadata checkpoint is required", ErrInvalidInput)
+	}
+	clone := *checkpoint
+	clone.Checksum = ""
+	clone.Head = cloneCommittedHead(checkpoint.Head)
+	if clone.Head != nil {
+		clone.Head.UpdatedAt = clone.Head.UpdatedAt.UTC()
+	}
+	payload, err := json.Marshal(&clone)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return fmt.Sprintf("%x", digest[:]), nil
+}
+
+func (s *sqliteMetadataStore) saveCheckpoint(ctx context.Context, checkpoint *sqliteMetadataCheckpoint) error {
+	ctx = nonNilContext(ctx)
+	if s == nil || s.db == nil || checkpoint == nil || checkpoint.Version != sqliteMetadataCheckpointVersion || checkpoint.VolumeID == "" || checkpoint.NextSeq == 0 || checkpoint.NextInode == 0 || checkpoint.Head == nil || checkpoint.StateDigest == "" {
+		return fmt.Errorf("%w: invalid sqlite metadata checkpoint", ErrInvalidInput)
+	}
+	checksum, err := sqliteMetadataCheckpointChecksum(checkpoint)
+	if err != nil {
+		return err
+	}
+	clone := *checkpoint
+	clone.Head = cloneCommittedHead(checkpoint.Head)
+	clone.Checksum = checksum
+	payload, err := json.Marshal(&clone)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO metadata_control(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, sqliteMetadataControlCheckpoint, payload); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO metadata_control(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, sqliteMetadataControlDirty, []byte("0")); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.syncCheckpoint(ctx)
+}
+
+func (s *sqliteMetadataStore) syncCheckpoint(ctx context.Context) (retErr error) {
+	if s == nil || s.db == nil || s.path == "" {
+		return ErrClosed
+	}
+	// Commits run with synchronous=OFF because the authoritative S0FS WAL is
+	// separately fsynced. A clean cache checkpoint is different: make SQLite's
+	// one connection fully synchronous, fold and truncate its WAL, then fsync
+	// the database before allowing the local binding to advertise the cache.
+	if _, err := s.db.ExecContext(ctx, `PRAGMA synchronous=FULL`); err != nil {
+		return fmt.Errorf("enable durable sqlite metadata checkpoint: %w", err)
+	}
+	defer func() {
+		_, restoreErr := s.db.ExecContext(context.Background(), `PRAGMA synchronous=OFF`)
+		if restoreErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore sqlite metadata synchronous mode: %w", restoreErr))
+		}
+	}()
+	if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return fmt.Errorf("checkpoint sqlite metadata wal: %w", err)
+	}
+	file, err := os.OpenFile(s.path, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open sqlite metadata checkpoint: %w", err)
+	}
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if syncErr != nil || closeErr != nil {
+		return fmt.Errorf("sync sqlite metadata checkpoint: %w", errors.Join(syncErr, closeErr))
+	}
+	return syncDirectory(filepath.Dir(s.path))
+}
+
+func (s *sqliteMetadataStore) loadCheckpoint(ctx context.Context) (*sqliteMetadataCheckpoint, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrClosed
+	}
+	var dirty []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM metadata_control WHERE key = ?`, sqliteMetadataControlDirty).Scan(&dirty); err != nil {
+		return nil, err
+	}
+	if string(dirty) != "0" {
+		return nil, fmt.Errorf("%w: sqlite metadata cache contains uncommitted mutations", ErrSnapshotNotFound)
+	}
+	var payload []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM metadata_control WHERE key = ?`, sqliteMetadataControlCheckpoint).Scan(&payload); err != nil {
+		return nil, err
+	}
+	var checkpoint sqliteMetadataCheckpoint
+	if err := json.Unmarshal(payload, &checkpoint); err != nil {
+		return nil, err
+	}
+	want, err := sqliteMetadataCheckpointChecksum(&checkpoint)
+	if err != nil {
+		return nil, err
+	}
+	if checkpoint.Version != sqliteMetadataCheckpointVersion || checkpoint.NextSeq == 0 || checkpoint.NextInode == 0 || checkpoint.Head == nil || checkpoint.StateDigest == "" || checkpoint.Checksum != want {
+		return nil, fmt.Errorf("%w: invalid sqlite metadata checkpoint", ErrCommittedStateIntegrity)
+	}
+	root, ok := s.Node(RootInode)
+	if !ok || root == nil || root.Type != TypeDirectory {
+		return nil, fmt.Errorf("%w: sqlite metadata checkpoint has no root", ErrCommittedStateIntegrity)
+	}
+	return &checkpoint, nil
 }
 
 func (s *sqliteMetadataStore) exec(query string, args ...any) (sql.Result, error) {
@@ -680,7 +957,95 @@ func (s *sqliteMetadataStore) withMutation(apply func() error) error {
 	return s.ApplyMutation(apply)
 }
 
+func (s *sqliteMetadataStore) cachedNode(inode uint64) (*Node, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	node, ok := s.nodeCache[inode]
+	return cloneNode(node), ok && node != nil
+}
+
+func (s *sqliteMetadataStore) cacheNode(inode uint64, node *Node) {
+	if s == nil || node == nil {
+		return
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if s.nodeCache == nil {
+		s.nodeCache = make(map[uint64]*Node, sqliteMetadataNodeCacheEntries)
+	}
+	if _, exists := s.nodeCache[inode]; !exists {
+		s.nodeOrder = append(s.nodeOrder, inode)
+	}
+	s.nodeCache[inode] = cloneNode(node)
+	for len(s.nodeCache) > sqliteMetadataNodeCacheEntries && len(s.nodeOrder) > 0 {
+		evict := s.nodeOrder[0]
+		s.nodeOrder = s.nodeOrder[1:]
+		if _, exists := s.nodeCache[evict]; exists {
+			delete(s.nodeCache, evict)
+		}
+	}
+}
+
+func (s *sqliteMetadataStore) deleteCachedNode(inode uint64) {
+	if s == nil {
+		return
+	}
+	s.cacheMu.Lock()
+	delete(s.nodeCache, inode)
+	s.cacheMu.Unlock()
+}
+
+func (s *sqliteMetadataStore) cachedChild(key sqliteMetadataChildCacheKey) (sqliteMetadataChildCacheValue, bool) {
+	if s == nil {
+		return sqliteMetadataChildCacheValue{}, false
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	value, ok := s.childCache[key]
+	return value, ok
+}
+
+func (s *sqliteMetadataStore) cacheChild(key sqliteMetadataChildCacheKey, value sqliteMetadataChildCacheValue) {
+	if s == nil {
+		return
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	if s.childCache == nil {
+		s.childCache = make(map[sqliteMetadataChildCacheKey]sqliteMetadataChildCacheValue, sqliteMetadataChildCacheEntries)
+	}
+	if _, exists := s.childCache[key]; !exists {
+		s.childOrder = append(s.childOrder, key)
+	}
+	s.childCache[key] = value
+	for len(s.childCache) > sqliteMetadataChildCacheEntries && len(s.childOrder) > 0 {
+		evict := s.childOrder[0]
+		s.childOrder = s.childOrder[1:]
+		if _, exists := s.childCache[evict]; exists {
+			delete(s.childCache, evict)
+		}
+	}
+}
+
+func (s *sqliteMetadataStore) clearHotCaches() {
+	if s == nil {
+		return
+	}
+	s.cacheMu.Lock()
+	s.nodeCache = nil
+	s.nodeOrder = nil
+	s.childCache = nil
+	s.childOrder = nil
+	s.cacheMu.Unlock()
+}
+
 func (s *sqliteMetadataStore) Node(inode uint64) (*Node, bool) {
+	if node, ok := s.cachedNode(inode); ok {
+		return node, true
+	}
 	var payload []byte
 	key := metadataInodeKey(inode)
 	err := s.queryRow(`SELECT value FROM nodes WHERE inode = ?`, key).Scan(&payload)
@@ -701,6 +1066,7 @@ func (s *sqliteMetadataStore) Node(inode uint64) (*Node, bool) {
 		s.setErr(fmt.Errorf("decode node %d: %w", inode, err))
 		return nil, false
 	}
+	s.cacheNode(inode, &node)
 	return &node, true
 }
 
@@ -709,14 +1075,24 @@ func (s *sqliteMetadataStore) PutNode(inode uint64, node *Node) {
 	if err == nil {
 		payload, err = s.codec.seal("node", metadataInodeKey(inode), payload)
 	}
+	var size int64
 	if err == nil {
-		_, err = s.exec(`INSERT INTO nodes(inode, value) VALUES(?, ?) ON CONFLICT(inode) DO UPDATE SET value=excluded.value`, metadataInodeKey(inode), payload)
+		size, err = sqliteMetadataNodeSize(node)
+	}
+	if err == nil {
+		_, err = s.exec(`INSERT INTO nodes(inode, value, size) VALUES(?, ?, ?) ON CONFLICT(inode) DO UPDATE SET value=excluded.value, size=excluded.size`, metadataInodeKey(inode), payload, size)
+	}
+	if err == nil {
+		s.cacheNode(inode, node)
 	}
 	s.setErr(err)
 }
 
 func (s *sqliteMetadataStore) DeleteNode(inode uint64) {
 	_, err := s.exec(`DELETE FROM nodes WHERE inode = ?`, metadataInodeKey(inode))
+	if err == nil {
+		s.deleteCachedNode(inode)
+	}
 	s.setErr(err)
 }
 
@@ -767,9 +1143,14 @@ func (s *sqliteMetadataStore) count(query string) int {
 func (s *sqliteMetadataStore) NodeCount() int { return s.count(`SELECT COUNT(*) FROM nodes`) }
 
 func (s *sqliteMetadataStore) Child(parent uint64, name string) (uint64, bool) {
+	cacheKey := sqliteMetadataChildCacheKey{parent: parent, name: name}
+	if value, ok := s.cachedChild(cacheKey); ok {
+		return value.inode, value.found
+	}
 	var key []byte
 	err := s.queryRow(`SELECT inode FROM dirents WHERE parent = ? AND name_key = ?`, metadataInodeKey(parent), s.codec.directoryNameKey(parent, name)).Scan(&key)
 	if errors.Is(err, sql.ErrNoRows) {
+		s.cacheChild(cacheKey, sqliteMetadataChildCacheValue{})
 		return 0, false
 	}
 	if err != nil {
@@ -778,6 +1159,9 @@ func (s *sqliteMetadataStore) Child(parent uint64, name string) (uint64, bool) {
 	}
 	inode, err := metadataInodeFromKey(key)
 	s.setErr(err)
+	if err == nil {
+		s.cacheChild(cacheKey, sqliteMetadataChildCacheValue{inode: inode, found: true})
+	}
 	return inode, err == nil
 }
 
@@ -787,11 +1171,17 @@ func (s *sqliteMetadataStore) PutChild(parent uint64, name string, inode uint64)
 	if err == nil {
 		_, err = s.exec(`INSERT INTO dirents(parent, name_key, name, inode) VALUES(?, ?, ?, ?) ON CONFLICT(parent, name_key) DO UPDATE SET name=excluded.name, inode=excluded.inode`, metadataInodeKey(parent), nameKey, payload, metadataInodeKey(inode))
 	}
+	if err == nil {
+		s.cacheChild(sqliteMetadataChildCacheKey{parent: parent, name: name}, sqliteMetadataChildCacheValue{inode: inode, found: true})
+	}
 	s.setErr(err)
 }
 
 func (s *sqliteMetadataStore) DeleteChild(parent uint64, name string) {
 	_, err := s.exec(`DELETE FROM dirents WHERE parent = ? AND name_key = ?`, metadataInodeKey(parent), s.codec.directoryNameKey(parent, name))
+	if err == nil {
+		s.cacheChild(sqliteMetadataChildCacheKey{parent: parent, name: name}, sqliteMetadataChildCacheValue{})
+	}
 	s.setErr(err)
 }
 
@@ -894,53 +1284,74 @@ func (s *sqliteMetadataStore) DirectoryPage(inode, offset uint64, limit uint32) 
 }
 
 func (s *sqliteMetadataStore) DirectoryPageWithNodes(inode, offset uint64, limit uint32) ([]metadataDirNodeEntry, bool, bool) {
-	page, eof, ok := s.DirectoryPage(inode, offset, limit)
-	if !ok || len(page) == 0 {
-		return nil, eof, ok
+	var exists int
+	if err := s.queryRow(`SELECT 1 FROM directories WHERE inode = ?`, metadataInodeKey(inode)).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return nil, false, false
+	} else if err != nil {
+		s.setErr(err)
+		return nil, false, false
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(page)), ",")
-	args := make([]any, 0, len(page))
-	for _, entry := range page {
-		args = append(args, metadataInodeKey(entry.Inode))
+	queryLimit := int64(limit)
+	if queryLimit <= 0 {
+		queryLimit = 1<<31 - 1
 	}
-	rows, err := s.query(`SELECT inode, value FROM nodes WHERE inode IN (`+placeholders+`)`, args...)
+	rows, err := s.query(`
+		WITH page AS MATERIALIZED (
+			SELECT name_key, name, inode
+			FROM dirents
+			WHERE parent = ?
+			ORDER BY name_key
+			LIMIT ? OFFSET ?
+		)
+		SELECT page.name_key, page.name, page.inode, nodes.value
+		FROM page
+		JOIN nodes ON nodes.inode = page.inode
+		ORDER BY page.name_key`, metadataInodeKey(inode), queryLimit+1, offset)
 	if err != nil {
 		s.setErr(err)
-		return nil, false, ok
+		return nil, false, true
 	}
 	defer rows.Close()
-	nodes := make(map[uint64]*Node, len(page))
+	entries := make([]metadataDirNodeEntry, 0, min(int(queryLimit), 1024))
 	for rows.Next() {
-		var inodeKey, nodePayload []byte
-		if err := rows.Scan(&inodeKey, &nodePayload); err != nil {
+		var nameKey, namePayload, inodeKey, nodePayload []byte
+		if err := rows.Scan(&nameKey, &namePayload, &inodeKey, &nodePayload); err != nil {
 			s.setErr(err)
-			return nil, false, ok
+			return nil, false, true
 		}
 		child, err := metadataInodeFromKey(inodeKey)
 		if err != nil {
 			s.setErr(err)
-			return nil, false, ok
+			return nil, false, true
+		}
+		name, err := s.codec.decodeDirectoryName(inode, nameKey, namePayload)
+		if err != nil {
+			s.setErr(err)
+			return nil, false, true
 		}
 		nodePayload, err = s.codec.open("node", inodeKey, nodePayload)
 		if err != nil {
 			s.setErr(err)
-			return nil, false, ok
+			return nil, false, true
 		}
 		var node Node
 		if err := json.Unmarshal(nodePayload, &node); err != nil {
 			s.setErr(err)
-			return nil, false, ok
+			return nil, false, true
 		}
-		nodes[child] = &node
+		entries = append(entries, metadataDirNodeEntry{
+			metadataDirEntry: metadataDirEntry{Name: name, Inode: child},
+			Node:             &node,
+		})
 	}
-	s.setErr(rows.Err())
-	entries := make([]metadataDirNodeEntry, 0, len(page))
-	for _, entry := range page {
-		if node := nodes[entry.Inode]; node != nil {
-			entries = append(entries, metadataDirNodeEntry{metadataDirEntry: entry, Node: node})
-		}
+	if err := rows.Err(); err != nil {
+		s.setErr(err)
+		return nil, false, true
 	}
-	return entries, eof, ok
+	if int64(len(entries)) > queryLimit {
+		return entries[:queryLimit], false, true
+	}
+	return entries, true, true
 }
 
 func (s *sqliteMetadataStore) RangeDirectories(yield func(uint64, map[string]uint64) bool) {
@@ -1184,6 +1595,21 @@ func (s *sqliteMetadataStore) PutColdFile(inode uint64, extents []FileExtent) {
 	})
 	s.setErr(err)
 }
+func (s *sqliteMetadataStore) PutNewColdFile(inode uint64, extents []FileExtent) {
+	key := metadataInodeKey(inode)
+	err := s.withMutation(func() error {
+		if _, err := s.exec(`INSERT INTO cold_files(inode) VALUES(?)`, key); err != nil {
+			return err
+		}
+		for position, extent := range extents {
+			if _, err := s.exec(`INSERT INTO file_extents(inode, position, segment_id, offset, length) VALUES(?, ?, ?, ?, ?)`, key, position, extent.SegmentID, metadataInodeKey(extent.Offset), metadataInodeKey(extent.Length)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	s.setErr(err)
+}
 func (s *sqliteMetadataStore) DeleteColdFile(inode uint64) {
 	key := metadataInodeKey(inode)
 	err := s.withMutation(func() error {
@@ -1348,6 +1774,47 @@ func (s *sqliteMetadataStore) RangeSegments(yield func(string, *Segment) bool) {
 
 func (s *sqliteMetadataStore) SegmentCount() int { return s.count(`SELECT COUNT(*) FROM segments`) }
 
+func (s *sqliteMetadataStore) PruneSegments(ids []string) {
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		var referenced int
+		err := s.queryRow(`SELECT EXISTS(SELECT 1 FROM file_extents WHERE segment_id = ? LIMIT 1)`, id).Scan(&referenced)
+		if err == nil && referenced == 0 {
+			_, err = s.exec(`DELETE FROM segments WHERE id = ?`, id)
+		}
+		if err != nil {
+			s.setErr(err)
+			return
+		}
+	}
+}
+
+func sqliteMetadataNodeSize(node *Node) (int64, error) {
+	if node == nil {
+		return 0, fmt.Errorf("%w: metadata node is required", ErrInvalidInput)
+	}
+	if node.Size > math.MaxInt64 {
+		return 0, fmt.Errorf("%w: inode %d size exceeds sqlite accounting range", ErrInvalidInput, node.Inode)
+	}
+	return int64(node.Size), nil
+}
+
+func (s *sqliteMetadataStore) Usage() (FilesystemUsage, error) {
+	var dataBytes, inodes int64
+	if err := s.queryRow(`SELECT data_bytes, inodes FROM metadata_usage WHERE singleton = 1`).Scan(&dataBytes, &inodes); err != nil {
+		s.setErr(err)
+		return FilesystemUsage{}, err
+	}
+	if dataBytes < 0 || inodes < 0 {
+		err := fmt.Errorf("%w: invalid sqlite metadata usage", ErrCommittedStateIntegrity)
+		s.setErr(err)
+		return FilesystemUsage{}, err
+	}
+	return FilesystemUsage{DataBytes: uint64(dataBytes), Inodes: uint64(inodes)}, nil
+}
+
 func (s *sqliteMetadataStore) NeedsMaterialization() bool {
 	var exists int
 	err := s.queryRow(`
@@ -1503,7 +1970,9 @@ func (s *sqliteMetadataStore) validateSegments(ctx context.Context, materializer
 	return rows.Err()
 }
 
-func (s *sqliteMetadataStore) EstimatedMemoryBytes() int64 { return s.cacheBytes + 1<<20 }
+func (s *sqliteMetadataStore) EstimatedMemoryBytes() int64 {
+	return s.cacheBytes + sqliteMetadataHotCacheBytes
+}
 
 func (s *sqliteMetadataStore) EstimatedPersistentBytes() int64 {
 	info, err := os.Stat(s.path)

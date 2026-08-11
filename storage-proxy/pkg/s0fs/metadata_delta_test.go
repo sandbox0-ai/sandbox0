@@ -4,12 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
+
+type snapshotGuardMetadata struct {
+	metadataStore
+	snapshots int
+}
+
+func (s *snapshotGuardMetadata) Snapshot(uint64, uint64) *SnapshotState {
+	s.snapshots++
+	return nil
+}
 
 func TestMetadataDeltaPublicationIsSmallAndReconstructsState(t *testing.T) {
 	ctx := context.Background()
@@ -93,6 +105,190 @@ func TestMetadataDeltaPublicationIsSmallAndReconstructsState(t *testing.T) {
 		t.Fatalf("cold open object GETs = %d (%+v), want bounded delta head reads", len(gets), gets)
 	} else {
 		t.Logf("cold open object GETs = %d", len(gets))
+	}
+}
+
+func TestIncrementalPublicationDoesNotSnapshotCompleteMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore(t.Name())
+	heads := newMemoryHeadStore()
+	engine, err := Open(ctx, Config{VolumeID: "vol-no-full-snapshot", WALPath: filepath.Join(t.TempDir(), "engine.wal"), ObjectStore: store, HeadStore: heads})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := engine.CreateFile(RootInode, "file", 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	underlying := engine.metadata
+	guard := &snapshotGuardMetadata{metadataStore: underlying}
+	engine.metadata = guard
+	if err := engine.SetMode(node.Inode, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Delta == nil || guard.snapshots != 0 {
+		t.Fatalf("delta = %#v, complete snapshots = %d", manifest.Delta, guard.snapshots)
+	}
+	engine.metadata = underlying
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDirectoryDeltaIsPerEntryForHighFanoutDirectory(t *testing.T) {
+	ctx := context.Background()
+	const volumeID = "vol-dirent-delta"
+	store := newPrefixedRecordingStore(t, volumeID)
+	heads := newMemoryHeadStore()
+	engine, err := Open(ctx, Config{VolumeID: volumeID, WALPath: filepath.Join(t.TempDir(), "engine.wal"), ObjectStore: store, HeadStore: heads})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	for index := 0; index < 10_000; index++ {
+		if _, err := engine.CreateFile(RootInode, fmt.Sprintf("file-%05d", index), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store.resetCalls()
+	if _, err := engine.CreateFile(RootInode, "one-more", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Delta == nil || len(manifest.Delta.Dirents) != 1 || len(manifest.Delta.Children) != 0 {
+		t.Fatalf("directory delta = %+v, want one dirent and no directory replacement", manifest.Delta)
+	}
+	if size := lastManifestPutSize(t, store.putCalls()); size > 4096 {
+		t.Fatalf("single-entry delta publication = %d bytes, want <= 4096", size)
+	}
+}
+
+func TestSQLiteCommittedCacheReopensWithoutRemoteMetadataRead(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("encrypted_%t", encrypted), func(t *testing.T) {
+			ctx := context.Background()
+			const volumeID = "vol-persistent-sqlite"
+			dir := t.TempDir()
+			store := newPrefixedRecordingStore(t, volumeID)
+			heads := newMemoryHeadStore()
+			var encryption *EncryptionConfig
+			if encrypted {
+				encryption = testEncryptionConfig(64 << 10)
+			}
+			cfg := Config{
+				VolumeID: volumeID, WALPath: filepath.Join(dir, "engine.wal"), MetadataPath: filepath.Join(dir, "metadata.sqlite"),
+				ObjectStore: store, HeadStore: heads, Encryption: encryption, StateFormatVersion: StateFormatV2,
+			}
+			engine, err := Open(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			node, err := engine.CreateFile(RootInode, "file", 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := engine.SyncMaterialize(ctx); err != nil {
+				t.Fatal(err)
+			}
+			headPath := headStatePath(cfg.WALPath)
+			before, err := os.Stat(headPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(10 * time.Millisecond)
+			if err := engine.SetMode(node.Inode, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := engine.SyncMaterialize(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := engine.Close(); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.Stat(headPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !after.ModTime().Equal(before.ModTime()) || after.Size() != before.Size() {
+				t.Fatalf("full local head changed across delta+close: before=%v/%d after=%v/%d", before.ModTime(), before.Size(), after.ModTime(), after.Size())
+			}
+			store.resetCalls()
+			reopened, err := Open(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			attr, err := reopened.GetAttr(node.Inode)
+			if err != nil || attr.Mode != 0o600 {
+				t.Fatalf("GetAttr() = %+v, %v", attr, err)
+			}
+			if calls := store.calls(); len(calls) != 0 {
+				t.Fatalf("local committed reopen made remote object calls: %+v", calls)
+			}
+		})
+	}
+}
+
+func TestColdOpenAppliesDeltaChainDirectlyToSQLite(t *testing.T) {
+	ctx := context.Background()
+	const volumeID = "vol-delta-sqlite-open"
+	store := newPrefixedRecordingStore(t, volumeID)
+	heads := newMemoryHeadStore()
+	engine, err := Open(ctx, Config{VolumeID: volumeID, WALPath: filepath.Join(t.TempDir(), "writer.wal"), ObjectStore: store, HeadStore: heads})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 5000; index++ {
+		if _, err := engine.CreateFile(RootInode, fmt.Sprintf("file-%05d", index), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	node, err := engine.CreateFile(RootInode, "tail", 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, err := engine.SyncMaterialize(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	materializer := NewMaterializer(volumeID, store, heads)
+	loaded, manifest, err := materializer.loadLatestEngineState(ctx, filepath.Join(t.TempDir(), "metadata.sqlite"), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loaded.close()
+	if loaded.state != nil || loaded.metadata == nil {
+		t.Fatalf("loaded state = %+v metadata = %T, want disk-only metadata", loaded.state, loaded.metadata)
+	}
+	if manifest.ManifestSeq != latest.ManifestSeq || loaded.deltaDepth != latest.DeltaDepth {
+		t.Fatalf("loaded manifest/depth = %d/%d, want %d/%d", manifest.ManifestSeq, loaded.deltaDepth, latest.ManifestSeq, latest.DeltaDepth)
+	}
+	if loaded.metadata.NodeCount() != 5002 {
+		t.Fatalf("node count = %d, want 5002", loaded.metadata.NodeCount())
+	}
+	attr, ok := loaded.metadata.Node(node.Inode)
+	if !ok || attr.Mode != 0o600 {
+		t.Fatalf("tail attr = %+v, %v", attr, ok)
 	}
 }
 
@@ -192,6 +388,50 @@ func TestMetadataDeltaChainPublishesBoundedCheckpoint(t *testing.T) {
 	defer reopened.Close()
 	if gets := store.calls(); len(gets) > 2 {
 		t.Fatalf("checkpoint cold open object GETs = %d (%+v), want constant", len(gets), gets)
+	}
+}
+
+func TestMetadataDeltaChainCompactsToCheckpointInBackgroundPath(t *testing.T) {
+	ctx := context.Background()
+	const volumeID = "vol-background-metadata-checkpoint"
+	store := newPrefixedRecordingStore(t, volumeID)
+	heads := newMemoryHeadStore()
+	engine, err := Open(ctx, Config{
+		VolumeID: volumeID, WALPath: filepath.Join(t.TempDir(), "writer.wal"), ObjectStore: store, HeadStore: heads,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	node, err := engine.CreateFile(RootInode, "file", 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.SyncMaterialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for generation := uint32(1); generation <= metadataCompactionDeltaDepth; generation++ {
+		if err := engine.SetMode(node.Inode, 0o600+generation%2); err != nil {
+			t.Fatal(err)
+		}
+		manifest, err := engine.SyncMaterialize(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if manifest.DeltaDepth != generation {
+			t.Fatalf("generation %d depth = %d", generation, manifest.DeltaDepth)
+		}
+	}
+
+	checkpoint, result, err := engine.Compact(ctx, CompactionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint == nil || result == nil {
+		t.Fatalf("Compact() = %#v, %#v, want metadata checkpoint", checkpoint, result)
+	}
+	if checkpoint.Delta != nil || checkpoint.DeltaDepth != 0 || checkpoint.State == nil {
+		t.Fatalf("metadata checkpoint = %#v", checkpoint)
 	}
 }
 

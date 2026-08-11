@@ -63,6 +63,13 @@ func (o *VolumeStorageObserver) ObserveVolumeState(ctx context.Context, volumeID
 	if o == nil || o.repo == nil || o.write == nil || state == nil || volumeID == "" {
 		return nil
 	}
+	return o.ObserveVolumeBytes(ctx, volumeID, teamID, s0fs.StateStorageBytes(state), observedAt)
+}
+
+func (o *VolumeStorageObserver) ObserveVolumeBytes(ctx context.Context, volumeID, teamID string, sizeBytes int64, observedAt time.Time) error {
+	if o == nil || o.repo == nil || o.write == nil || volumeID == "" {
+		return nil
+	}
 	vol, err := o.repo.GetSandboxVolume(ctx, volumeID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -79,7 +86,7 @@ func (o *VolumeStorageObserver) ObserveVolumeState(ctx context.Context, volumeID
 		vol,
 		o.regionID,
 		o.clusterID,
-		s0fs.StateStorageBytes(state),
+		sizeBytes,
 		observedAt,
 	))
 }

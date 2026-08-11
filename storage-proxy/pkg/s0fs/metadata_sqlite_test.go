@@ -134,7 +134,7 @@ func TestSQLiteMetadataMemoryChargeDoesNotScaleWithNamespace(t *testing.T) {
 		t.Fatalf("newSQLiteMetadataStore() error = %v", err)
 	}
 	defer store.Close()
-	if got, want := store.EstimatedMemoryBytes(), int64(cacheBytes+1<<20); got != want {
+	if got, want := store.EstimatedMemoryBytes(), int64(cacheBytes+sqliteMetadataHotCacheBytes); got != want {
 		t.Fatalf("EstimatedMemoryBytes() = %d, want %d", got, want)
 	}
 	if got := store.NodeCount(); got != 20_001 {
@@ -154,7 +154,7 @@ func TestSQLiteMetadataMemoryChargeDoesNotScaleWithNamespace(t *testing.T) {
 
 func TestEngineMemoryReservationIncludesBoundedCaches(t *testing.T) {
 	const metadataCacheBytes = 2 << 20
-	want := int64(metadataCacheBytes + (1 << 20) + defaultSegmentCacheMaxBytes + (1 << 20))
+	want := int64(metadataCacheBytes + sqliteMetadataHotCacheBytes + defaultSegmentCacheMaxBytes + (1 << 20))
 	if got := EngineMemoryReservationBytes(metadataCacheBytes); got != want {
 		t.Fatalf("EngineMemoryReservationBytes() = %d, want %d", got, want)
 	}

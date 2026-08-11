@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fsmeta"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
@@ -20,6 +21,14 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
 )
+
+func TestLocalSessionOpenFlagsSuppressCloseFlush(t *testing.T) {
+	session := newLocalSession("volume-a", newLocalVolumeManager(), nil)
+	want := uint32(fuse.FOPEN_KEEP_CACHE | fuse.FOPEN_NOFLUSH)
+	if got := session.OpenFlags(); got != want {
+		t.Fatalf("OpenFlags() = %#x, want %#x", got, want)
+	}
+}
 
 type rejectingHeadStore struct{}
 
@@ -390,7 +399,7 @@ func TestLocalSessionReadCacheTracksSmallWrites(t *testing.T) {
 	}
 }
 
-func TestLocalSessionReleaseSyncsDirtyWrites(t *testing.T) {
+func TestLocalSessionReleaseDoesNotAddImplicitFsync(t *testing.T) {
 	counter := &walSyncCounter{}
 	engine, err := s0fs.Open(context.Background(), s0fs.Config{
 		VolumeID:    "vol-1",
@@ -443,8 +452,8 @@ func TestLocalSessionReleaseSyncsDirtyWrites(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Release() error = %v", err)
 	}
-	if got := counter.Load(); got != 1 {
-		t.Fatalf("sync count after Release() = %d, want 1", got)
+	if got := counter.Load(); got != 0 {
+		t.Fatalf("sync count after Release() = %d, want 0", got)
 	}
 }
 

@@ -31,6 +31,12 @@ type StorageObserver interface {
 	ObserveVolumeState(ctx context.Context, volumeID, teamID string, state *s0fs.SnapshotState, observedAt time.Time) error
 }
 
+// StorageBytesObserver lets incremental S0FS publications report metering
+// without reconstructing a complete SnapshotState solely to count bytes.
+type StorageBytesObserver interface {
+	ObserveVolumeBytes(ctx context.Context, volumeID, teamID string, sizeBytes int64, observedAt time.Time) error
+}
+
 type HandleState struct {
 	NextHandleID uint64            `json:"next_handle_id"`
 	FileHandles  map[uint64]uint64 `json:"file_handles,omitempty"`

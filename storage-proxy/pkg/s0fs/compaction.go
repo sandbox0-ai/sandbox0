@@ -10,10 +10,11 @@ import (
 )
 
 type CompactionOptions struct {
-	SegmentTargetSize uint64
-	MinDeadRatio      float64
-	MinReclaimBytes   uint64
-	Force             bool
+	SegmentTargetSize  uint64
+	MinDeadRatio       float64
+	MinReclaimBytes    uint64
+	Force              bool
+	MetadataCheckpoint bool
 }
 
 type CompactionResult struct {
@@ -40,6 +41,9 @@ func (e *Engine) Compact(ctx context.Context, opts CompactionOptions) (*Manifest
 		return nil, nil, nil
 	}
 	version := e.mutationVersion
+	if e.lastCommittedDeltaDepth >= metadataCompactionDeltaDepth {
+		opts.MetadataCheckpoint = true
+	}
 	state := e.currentStateLocked()
 	expectedManifestSeq := e.lastCommittedManifest
 	expected := cloneCommittedHead(e.lastCommittedHead)
@@ -76,6 +80,8 @@ func (e *Engine) Compact(ctx context.Context, opts CompactionOptions) (*Manifest
 	committedHead := committedHeadForManifest(manifest, manifestKey(manifest.ManifestSeq, manifest.CommitID), expected)
 	e.lastCommittedManifest = manifest.ManifestSeq
 	e.lastCommittedHead = committedHead
+	e.lastCommittedStateDigest = manifest.StateDigest
+	e.lastCommittedDeltaDepth = 0
 	installFailed := func(phase string, installErr error) (*Manifest, *CompactionResult, error) {
 		terminalErr := fmt.Errorf("%w: %s after committed compaction: %w", ErrCommittedHeadConflict, phase, installErr)
 		e.failClosed(terminalErr)
@@ -150,7 +156,7 @@ func (m *Materializer) prepareCompaction(ctx context.Context, state *SnapshotSta
 	}
 
 	selected, result := planCompactionSegments(inline, opts)
-	if len(selected) == 0 && !hasInlineSegments(inline) && !opts.Force {
+	if len(selected) == 0 && !hasInlineSegments(inline) && !opts.Force && !opts.MetadataCheckpoint {
 		return nil, result, nil
 	}
 	commitID := uuid.NewString()
@@ -166,6 +172,7 @@ func (m *Materializer) prepareCompaction(ctx context.Context, state *SnapshotSta
 		CommitID:      commitID,
 		CreatedAt:     time.Now().UTC(),
 		State:         manifestState,
+		StorageBytes:  snapshotLogicalBytes(manifestState),
 	}
 	if err := m.beginCommit(ctx, commitID, expected); err != nil {
 		return nil, nil, err

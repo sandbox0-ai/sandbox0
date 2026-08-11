@@ -1,5 +1,7 @@
 package s0fs
 
+import "math"
+
 // StateStorageBytes returns the S3-backed payload bytes referenced by a state.
 // Inline data is included because it becomes object storage on the next materialization.
 func StateStorageBytes(state *SnapshotState) int64 {
@@ -28,4 +30,24 @@ func StateStorageBytes(state *SnapshotState) int64 {
 		}
 	}
 	return size
+}
+
+func snapshotLogicalBytes(state *SnapshotState) int64 {
+	if state == nil {
+		return 0
+	}
+	var total uint64
+	for _, node := range state.Nodes {
+		if node != nil {
+			total = addUint64Saturating(total, node.Size)
+		}
+	}
+	return saturatingInt64(total)
+}
+
+func saturatingInt64(value uint64) int64 {
+	if value > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(value)
 }

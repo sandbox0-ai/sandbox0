@@ -58,7 +58,13 @@ func (v *VolumeContext) Compact(ctx context.Context, opts s0fs.CompactionOptions
 }
 
 func (v *VolumeContext) observeMaterializedManifest(ctx context.Context, manifest *s0fs.Manifest) error {
-	if v == nil || v.Observer == nil || manifest == nil || manifest.State == nil {
+	if v == nil || v.Observer == nil || manifest == nil {
+		return nil
+	}
+	if observer, ok := v.Observer.(StorageBytesObserver); ok && manifest.StorageBytes >= 0 {
+		return observer.ObserveVolumeBytes(ctx, v.VolumeID, v.TeamID, manifest.StorageBytes, time.Now().UTC())
+	}
+	if manifest.State == nil {
 		return nil
 	}
 	return v.Observer.ObserveVolumeState(ctx, v.VolumeID, v.TeamID, manifest.State, time.Now().UTC())

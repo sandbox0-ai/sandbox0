@@ -219,6 +219,8 @@ func (s *Server) setupRoutes() {
 			sandboxes.Any("/:id", s.proxySandbox)
 			sandboxes.Any("/:id/*path", s.proxySandbox)
 		}
+
+		v1.POST("/teams/:team_id/pause-running-sandboxes", s.pauseRunningSandboxesForTeam)
 	}
 }
 

@@ -387,6 +387,7 @@ func (s *Server) setupAdmissionRoutes() {
 	internal.Use(s.authMiddleware.Authenticate())
 	internal.Use(s.authMiddleware.RequireSystemAdmin())
 	internal.PUT("/teams/:team_id/admission-state", handler.Put)
+	internal.POST("/teams/:team_id/pause-running-sandboxes", s.pauseRunningSandboxesForRestrictedTeam)
 }
 
 func (s *Server) setupInternalSSHRoutes() {

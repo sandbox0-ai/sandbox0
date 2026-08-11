@@ -790,6 +790,7 @@ func (s *Server) setupAdmissionRoutes() {
 		internal.Use(s.authMiddleware.Authenticate())
 	}
 	internal.PUT("/teams/:team_id/admission-state", handler.Put)
+	internal.POST("/teams/:team_id/pause-running-sandboxes", s.proxyInternalSystemPauseRequest)
 }
 
 // Start starts the HTTP server

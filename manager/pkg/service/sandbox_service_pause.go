@@ -20,6 +20,60 @@ type PauseSandboxResponse struct {
 	UpdatedCPU    string                         `json:"updated_cpu,omitempty"`
 }
 
+const teamPauseBatchSize = 100
+
+// TeamPauseResult summarizes accepted pause requests for one team's running
+// sandboxes in the local data-plane cluster.
+type TeamPauseResult struct {
+	Requested int `json:"requested"`
+}
+
+type activeSandboxIDLister interface {
+	ListActiveSandboxIDs(context.Context, string, string, string, int) ([]string, error)
+}
+
+// PauseActiveSandboxesForTeam requests durable checkpoint pauses for every
+// running sandbox owned by teamID in this manager's cluster. The operation is
+// idempotent: existing pause transactions are reused, and a keyset scan makes
+// one enforcement pass visit each currently active identity only once while
+// asynchronous checkpoint work is still pending.
+func (s *SandboxService) PauseActiveSandboxesForTeam(ctx context.Context, teamID string) (TeamPauseResult, error) {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return TeamPauseResult{}, fmt.Errorf("team_id is required")
+	}
+	if s == nil || s.sandboxStore == nil {
+		return TeamPauseResult{}, fmt.Errorf("sandbox store is unavailable")
+	}
+
+	lister, ok := s.sandboxStore.(activeSandboxIDLister)
+	if !ok {
+		return TeamPauseResult{}, fmt.Errorf("sandbox store does not support listing active sandbox ids")
+	}
+
+	var result TeamPauseResult
+	afterSandboxID := ""
+	for {
+		ids, err := lister.ListActiveSandboxIDs(ctx, teamID, s.config.ClusterID, afterSandboxID, teamPauseBatchSize)
+		if err != nil {
+			return result, fmt.Errorf("list active sandboxes for team: %w", err)
+		}
+		if len(ids) == 0 {
+			return result, nil
+		}
+		for _, sandboxID := range ids {
+			if _, err := s.requestBillingPauseSandboxRuntime(ctx, sandboxID); err != nil {
+				return result, fmt.Errorf("pause sandbox %q: %w", sandboxID, err)
+			}
+			result.Requested++
+		}
+		if len(ids) < teamPauseBatchSize {
+			return result, nil
+		}
+		afterSandboxID = ids[len(ids)-1]
+	}
+}
+
 // PauseSandbox accepts a checkpointed pause request and returns the lifecycle state.
 func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
 	status, err := s.RequestPauseSandboxRuntime(ctx, sandboxID)

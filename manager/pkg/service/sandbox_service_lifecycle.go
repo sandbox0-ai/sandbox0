@@ -116,6 +116,12 @@ func (s *SandboxService) requestAutoPauseSandboxRuntime(ctx context.Context, san
 	})
 }
 
+func (s *SandboxService) requestBillingPauseSandboxRuntime(ctx context.Context, sandboxID string) (string, error) {
+	return s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{
+		source: sandboxstore.SandboxLifecycleSourceBilling,
+	})
+}
+
 func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandboxID string, opts pauseSandboxRuntimeOptions) (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("sandbox service is nil")

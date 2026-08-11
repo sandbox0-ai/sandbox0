@@ -254,6 +254,8 @@ func (s *Server) setupRoutes() {
 			internalTeamQuotas.PUT("/:dimension", s.putTeamQuotaInternal)
 			internalTeamQuotas.DELETE("/:dimension", s.deleteTeamQuotaInternal)
 		}
+
+		internal.POST("/teams/:team_id/pause-running-sandboxes", s.pauseRunningSandboxesForTeamInternal)
 	}
 }
 

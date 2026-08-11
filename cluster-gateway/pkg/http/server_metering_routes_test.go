@@ -58,6 +58,9 @@ func TestSetupRoutesMountsMeteringEndpointsInPublicMode(t *testing.T) {
 	if !hasRoute(server.router, http.MethodPut, "/internal/v1/teams/:team_id/admission-state") {
 		t.Fatal("expected team admission state route to be mounted")
 	}
+	if !hasRoute(server.router, http.MethodPost, "/internal/v1/teams/:team_id/pause-running-sandboxes") {
+		t.Fatal("expected team running sandbox pause route to be mounted")
+	}
 }
 
 func TestSetupRoutesSkipsControlPlaneEndpointsInPublicMode(t *testing.T) {

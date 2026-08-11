@@ -28,6 +28,7 @@ func TestSetupRoutesMountsTemplateFromSandboxEndpoints(t *testing.T) {
 	}{
 		{method: http.MethodPost, path: "/api/v1/templates/from-sandbox"},
 		{method: http.MethodGet, path: "/internal/v1/sandboxes/:id/template-source"},
+		{method: http.MethodPost, path: "/internal/v1/teams/:team_id/pause-running-sandboxes"},
 	} {
 		if !managerHasRoute(server.router, route.method, route.path) {
 			t.Fatalf("expected %s %s route", route.method, route.path)

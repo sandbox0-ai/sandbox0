@@ -118,11 +118,12 @@ const (
 	SandboxLifecycleKindFork     = "fork"
 	SandboxLifecycleKindSnapshot = "snapshot"
 
-	SandboxLifecycleSourceManual = "manual"
-	SandboxLifecycleSourceAuto   = "auto"
-	SandboxLifecycleSourceCrash  = "crash"
-	SandboxLifecycleSourceHealth = "health"
-	SandboxLifecycleSourceLost   = "lost"
+	SandboxLifecycleSourceManual  = "manual"
+	SandboxLifecycleSourceAuto    = "auto"
+	SandboxLifecycleSourceBilling = "billing"
+	SandboxLifecycleSourceCrash   = "crash"
+	SandboxLifecycleSourceHealth  = "health"
+	SandboxLifecycleSourceLost    = "lost"
 
 	SandboxLifecyclePhasePreparing  = "preparing"
 	SandboxLifecyclePhaseBarriered  = "barriered"
@@ -334,6 +335,56 @@ func (s *PGSandboxStore) ListSandboxes(ctx context.Context, req *ListSandboxesRe
 		return nil, fmt.Errorf("iterate sandboxes: %w", err)
 	}
 	return records, nil
+}
+
+// ListActiveSandboxIDs returns a bounded, keyset-paginated batch of active
+// sandbox identities owned by one team in this data-plane cluster. It is used
+// by control-plane enforcement that must release running compute without
+// reading Pods from another cluster that shares the regional database.
+func (s *PGSandboxStore) ListActiveSandboxIDs(ctx context.Context, teamID, clusterID, afterSandboxID string, limit int) ([]string, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	teamID = strings.TrimSpace(teamID)
+	clusterID = strings.TrimSpace(clusterID)
+	if teamID == "" {
+		return nil, fmt.Errorf("team_id is required")
+	}
+	if clusterID == "" {
+		return nil, fmt.Errorf("cluster_id is required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT sandbox_id
+		FROM manager.sandboxes
+		WHERE team_id = $1
+			AND cluster_id = $2
+			AND sandbox_id > $3
+			AND desired_state = $4
+			AND deleted_at IS NULL
+		ORDER BY sandbox_id ASC
+		LIMIT $5
+	`, teamID, clusterID, strings.TrimSpace(afterSandboxID), SandboxDesiredStateActive, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list active sandbox ids: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, limit)
+	for rows.Next() {
+		var sandboxID string
+		if err := rows.Scan(&sandboxID); err != nil {
+			return nil, fmt.Errorf("scan active sandbox id: %w", err)
+		}
+		ids = append(ids, sandboxID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active sandbox ids: %w", err)
+	}
+	return ids, nil
 }
 
 // CountActiveSandboxes returns the region-wide operational count used by the

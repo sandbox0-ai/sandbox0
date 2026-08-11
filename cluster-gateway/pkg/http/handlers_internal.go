@@ -66,12 +66,33 @@ func (s *Server) proxySchedulerManagerRequest(c *gin.Context, managerPath string
 }
 
 func (s *Server) proxyInternalSystemQuotaRequest(c *gin.Context) {
+	s.proxyInternalSystemManagerRequest(c)
+}
+
+// proxyInternalSystemPauseRequest forwards a trusted billing enforcement
+// request to manager. Billing callers are system identities and must never be
+// able to select an arbitrary team-scoped user identity.
+func (s *Server) proxyInternalSystemPauseRequest(c *gin.Context) {
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	authCtx := middleware.GetAuthContext(c)
+	if (claims == nil || !claims.IsSystemToken()) && (authCtx == nil || !authCtx.IsSystemAdmin) {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "system token is required")
+		return
+	}
+	s.forwardInternalSystemManagerRequest(c, claims, authCtx)
+}
+
+func (s *Server) proxyInternalSystemManagerRequest(c *gin.Context) {
 	claims := internalauth.ClaimsFromContext(c.Request.Context())
 	if claims == nil || !claims.IsSystemToken() {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "system token is required")
 		return
 	}
 	authCtx := middleware.GetAuthContext(c)
+	s.forwardInternalSystemManagerRequest(c, claims, authCtx)
+}
+
+func (s *Server) forwardInternalSystemManagerRequest(c *gin.Context, claims *internalauth.Claims, authCtx *authn.AuthContext) {
 
 	internalToken, err := s.generateManagerToken(authCtx, claims, []string{"*:*"})
 	if err != nil {

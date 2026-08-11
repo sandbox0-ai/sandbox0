@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,77 @@ import (
 
 type SandboxClaimRequest struct {
 	Template string `json:"template"` // template id
+}
+
+// pauseRunningSandboxesForTeam fans a trusted billing enforcement request out
+// to each enabled data-plane cluster. A failed cluster keeps the caller's
+// outbox entry pending so retries cannot silently leave billable runtimes up.
+func (s *Server) pauseRunningSandboxesForTeam(c *gin.Context) {
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+	if !claims.IsSystemToken() {
+		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "system token is required")
+		return
+	}
+	teamID := strings.TrimSpace(c.Param("team_id"))
+	if teamID == "" {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "team_id is required")
+		return
+	}
+	clusters, err := s.repo.ListEnabledClusters(c.Request.Context())
+	if err != nil {
+		s.logger.Error("Failed to list enabled clusters for billing pause", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to list clusters")
+		return
+	}
+
+	type clusterResult struct {
+		clusterID string
+		requested int
+		err       error
+	}
+	results := make(chan clusterResult, len(clusters))
+	var wg sync.WaitGroup
+	pauseClient := client.NewClusterGatewayClient(s.internalAuthGen, s.logger, s.obsProvider)
+	for _, cluster := range clusters {
+		wg.Add(1)
+		go func(clusterID, clusterGatewayURL string) {
+			defer wg.Done()
+			result, err := pauseClient.PauseRunningSandboxesForTeam(c.Request.Context(), clusterGatewayURL, teamID)
+			if err != nil {
+				results <- clusterResult{clusterID: clusterID, err: err}
+				return
+			}
+			results <- clusterResult{clusterID: clusterID, requested: result.Requested}
+		}(cluster.ClusterID, cluster.ClusterGatewayURL)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	requested := 0
+	var pauseErr error
+	for result := range results {
+		if result.err != nil {
+			s.logger.Warn("Failed to pause running sandboxes in cluster",
+				zap.String("team_id", teamID),
+				zap.String("cluster_id", result.clusterID),
+				zap.Error(result.err),
+			)
+			pauseErr = errors.Join(pauseErr, fmt.Errorf("cluster %q: %w", result.clusterID, result.err))
+			continue
+		}
+		requested += result.requested
+	}
+	if pauseErr != nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "failed to pause running sandboxes")
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, gin.H{"requested": requested})
 }
 
 // createSandbox routes and proxies sandbox claim to the selected cluster-gateway.

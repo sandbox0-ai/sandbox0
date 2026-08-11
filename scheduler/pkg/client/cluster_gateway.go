@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -67,6 +68,12 @@ type TemplateStats struct {
 	Templates []TemplateStat `json:"templates"`
 }
 
+// TeamPauseResult is the accepted pause count returned by one data-plane
+// manager through its cluster gateway.
+type TeamPauseResult struct {
+	Requested int `json:"requested"`
+}
+
 // GetClusterSummary gets cluster summary from cluster-gateway
 func (c *ClusterGatewayClient) GetClusterSummary(ctx context.Context, baseURL string) (*ClusterSummary, error) {
 	return getClusterGatewayInternalResponse[ClusterSummary](c, ctx, baseURL, "/internal/v1/cluster/summary")
@@ -75,6 +82,45 @@ func (c *ClusterGatewayClient) GetClusterSummary(ctx context.Context, baseURL st
 // GetTemplateStats gets template statistics from cluster-gateway
 func (c *ClusterGatewayClient) GetTemplateStats(ctx context.Context, baseURL string) (*TemplateStats, error) {
 	return getClusterGatewayInternalResponse[TemplateStats](c, ctx, baseURL, "/internal/v1/templates/stats")
+}
+
+// PauseRunningSandboxesForTeam asks one cluster to queue checkpoint pauses for
+// all running sandboxes owned by teamID. The caller uses a system token because
+// this is an account-level billing enforcement action.
+func (c *ClusterGatewayClient) PauseRunningSandboxesForTeam(ctx context.Context, baseURL, teamID string) (*TeamPauseResult, error) {
+	token, err := c.internalAuthGen.GenerateSystem("cluster-gateway", internalauth.GenerateOptions{
+		Permissions: []string{"*:*"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("generate system token: %w", err)
+	}
+	requestURL := fmt.Sprintf("%s/internal/v1/teams/%s/pause-running-sandboxes", strings.TrimRight(baseURL, "/"), url.PathEscape(teamID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set(internalauth.DefaultTokenHeader, token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("execute request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, clusterGatewayStatusError(resp.StatusCode, body)
+	}
+	result, apiErr, err := spec.DecodeResponse[TeamPauseResult](resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	if apiErr != nil {
+		return nil, fmt.Errorf("cluster-gateway error: %s", apiErr.Message)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("cluster-gateway pause response missing data")
+	}
+	return result, nil
 }
 
 func getClusterGatewayInternalResponse[T any](c *ClusterGatewayClient, ctx context.Context, baseURL, path string) (*T, error) {

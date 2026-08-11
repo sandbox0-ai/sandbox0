@@ -116,6 +116,39 @@ func (s *Server) proxyToDefaultClusterGateway(c *gin.Context) {
 	s.clusterGatewayRouter.ProxyToTarget(c)
 }
 
+// proxySystemToDefaultClusterGateway forwards a system-owned operation to the
+// default cluster gateway with a fresh internal system token. Public billing
+// credentials are only valid at the regional boundary and must not become a
+// team-scoped credential in the data plane.
+func (s *Server) proxySystemToDefaultClusterGateway(c *gin.Context) {
+	s.proxySystemRequest(c, s.clusterGatewayRouter, internalauth.ServiceClusterGateway)
+}
+
+// proxySystemToScheduler forwards a system-owned operation to scheduler with
+// a fresh internal system token. Scheduler only accepts internal system
+// callers for account-level fanout operations.
+func (s *Server) proxySystemToScheduler(c *gin.Context) {
+	s.proxySystemRequest(c, s.schedulerRouter, internalauth.ServiceScheduler)
+}
+
+func (s *Server) proxySystemRequest(c *gin.Context, router *proxy.Router, target string) {
+	if router == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, target+" not available")
+		return
+	}
+	token, err := s.generateInternalToken(nil, target)
+	if err != nil {
+		s.logger.Error("Failed to generate system internal token", zap.String("target", target), zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal authentication failed")
+		return
+	}
+	c.Request.Header.Set(internalauth.DefaultTokenHeader, token)
+	c.Request.Header.Del(internalauth.TeamIDHeader)
+	c.Request.Header.Del(internalauth.UserIDHeader)
+	c.Request.Header.Del("X-Auth-Method")
+	router.ProxyToTarget(c)
+}
+
 func sandboxObservabilityWatchRequested(c *gin.Context) bool {
 	return middleware.RequestShouldBeLongLived(c.Request)
 }

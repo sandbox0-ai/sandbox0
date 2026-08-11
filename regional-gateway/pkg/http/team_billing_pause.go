@@ -1,16 +1,17 @@
 package http
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/admission"
-	"github.com/sandbox0-ai/sandbox0/pkg/gateway/middleware"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"go.uber.org/zap"
 )
@@ -45,6 +46,17 @@ func (s *Server) pauseRunningSandboxesForRestrictedTeam(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "version must not be negative")
 		return
 	}
+	// The request is proxied to the data plane below. Rebuild the body after
+	// validation because decoding consumed the original stream.
+	body, err := json.Marshal(request)
+	if err != nil {
+		s.logger.Error("Failed to encode billing pause request", zap.Error(err))
+		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "failed to encode pause request")
+		return
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	c.Request.ContentLength = int64(len(body))
+	c.Request.Header.Set("Content-Length", strconv.FormatInt(c.Request.ContentLength, 10))
 	if s.admissionStore == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "admission state store is unavailable")
 		return
@@ -62,15 +74,10 @@ func (s *Server) pauseRunningSandboxesForRestrictedTeam(c *gin.Context) {
 	}
 
 	if s.schedulerRouter == nil {
-		s.proxyToDefaultClusterGateway(c)
-		return
-	}
-	authCtx := middleware.GetAuthContext(c)
-	if authCtx == nil {
-		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		s.proxySystemToDefaultClusterGateway(c)
 		return
 	}
 	c.Request.URL.Path = "/api/v1/teams/" + teamID + "/pause-running-sandboxes"
 	c.Request.URL.RawPath = ""
-	s.proxyToScheduler(c, authCtx)
+	s.proxySystemToScheduler(c)
 }

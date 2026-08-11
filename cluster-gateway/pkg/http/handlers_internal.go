@@ -93,8 +93,12 @@ func (s *Server) proxyInternalSystemManagerRequest(c *gin.Context) {
 }
 
 func (s *Server) forwardInternalSystemManagerRequest(c *gin.Context, claims *internalauth.Claims, authCtx *authn.AuthContext) {
-
-	internalToken, err := s.generateManagerToken(authCtx, claims, []string{"*:*"})
+	// The caller was authenticated as a system identity before reaching this
+	// point. Reissue a system token for manager instead of translating public
+	// billing credentials into a team-scoped manager token.
+	internalToken, err := s.internalAuthGen.GenerateSystem("manager", internalauth.GenerateOptions{
+		Permissions: []string{"*:*"},
+	})
 	if err != nil {
 		s.logger.Error("Failed to generate internal token for manager",
 			zap.String("team_id", c.Param("team_id")),

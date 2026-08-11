@@ -388,6 +388,12 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		}
 	}
 	s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, nil)
+	phaseStarted = time.Now()
+	if _, err := s.effectiveSandboxResourceQuota(template, req.Config); err != nil {
+		s.observeClaimPhase(req.Template, "unknown", "validate_resources", phaseStarted, err)
+		return nil, err
+	}
+	s.observeClaimPhase(req.Template, "unknown", "validate_resources", phaseStarted, nil)
 	if strings.TrimSpace(req.SandboxID) == "" {
 		req.SandboxID, err = s.generateStableSandboxID(template)
 		if err != nil {

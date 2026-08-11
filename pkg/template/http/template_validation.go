@@ -6,19 +6,17 @@ import (
 	"path/filepath"
 	"strings"
 
-	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func validateTemplateSpecForClaimsWithMemoryPerCPU(
+func validateTemplateSpecForClaims(
 	spec v1alpha1.SandboxTemplateSpec,
 	claims *internalauth.Claims,
-	memoryPerCPU resource.Quantity,
+	resourcePolicy s0template.ResourcePolicy,
 ) error {
 	isSystem := claims != nil && claims.IsSystemToken()
 	if !isSystem {
@@ -40,7 +38,7 @@ func validateTemplateSpecForClaimsWithMemoryPerCPU(
 	if isSystem {
 		subject = "system template"
 	}
-	if err := s0template.ValidateResourceRatio(spec, memoryPerCPU, subject); err != nil {
+	if err := resourcePolicy.ValidateTemplate(spec, subject); err != nil {
 		return err
 	}
 	return nil
@@ -279,14 +277,6 @@ func validateReservedMountPath(path, field string) error {
 		}
 	}
 	return nil
-}
-
-func configuredTemplateMemoryPerCPU() resource.Quantity {
-	cfg := config.LoadManagerConfig()
-	if cfg == nil {
-		return s0template.MemoryPerCPUOrDefault("")
-	}
-	return s0template.MemoryPerCPUOrDefault(cfg.TeamTemplateMemoryPerCPU)
 }
 
 func validateCIDRs(values []string, field string) error {

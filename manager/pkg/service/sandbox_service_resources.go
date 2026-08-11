@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
@@ -15,11 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
-)
-
-const (
-	defaultSandboxMinMemory = "128Mi"
-	defaultSandboxMaxMemory = "32Gi"
 )
 
 func (s *SandboxService) effectiveSandboxResourceQuota(template *v1alpha1.SandboxTemplate, cfg *sandboxstore.SandboxConfig) (v1alpha1.ResourceQuota, error) {
@@ -34,6 +28,9 @@ func (s *SandboxService) effectiveSandboxResourceQuota(template *v1alpha1.Sandbo
 		}
 		quota.Memory = memory
 		quota.CPU = s0template.CPUForMemory(memory, s.sandboxMemoryPerCPU())
+	}
+	if err := s.resourcePolicy().ValidateMaxMemory(quota.Memory, "sandbox memory limit"); err != nil {
+		return v1alpha1.ResourceQuota{}, fmt.Errorf("%w: %v", ErrInvalidClaimRequest, err)
 	}
 	return v1alpha1.NormalizeSandboxResourceQuota(quota), nil
 }
@@ -207,46 +204,20 @@ func ensureSandboxResizePolicy(container *corev1.Container) {
 }
 
 func (s *SandboxService) validateSandboxMemory(value string) (resource.Quantity, error) {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		return resource.Quantity{}, fmt.Errorf("%w: config.resources.memory is required", ErrInvalidClaimRequest)
-	}
-	memory, err := resource.ParseQuantity(raw)
+	memory, err := s.resourcePolicy().ParseMemory(value, "config.resources.memory")
 	if err != nil {
-		return resource.Quantity{}, fmt.Errorf("%w: config.resources.memory is invalid: %v", ErrInvalidClaimRequest, err)
-	}
-	if memory.Sign() <= 0 {
-		return resource.Quantity{}, fmt.Errorf("%w: config.resources.memory must be > 0", ErrInvalidClaimRequest)
-	}
-	minMemory := sandboxMemoryQuantityOrDefault(defaultSandboxMinMemory, defaultSandboxMinMemory)
-	if memory.Cmp(minMemory) < 0 {
-		return resource.Quantity{}, fmt.Errorf("%w: config.resources.memory must be >= %s", ErrInvalidClaimRequest, minMemory.String())
-	}
-	maxMemory := s.sandboxMaxMemory()
-	if memory.Cmp(maxMemory) > 0 {
-		return resource.Quantity{}, fmt.Errorf("%w: config.resources.memory must be <= %s", ErrInvalidClaimRequest, maxMemory.String())
+		return resource.Quantity{}, fmt.Errorf("%w: %v", ErrInvalidClaimRequest, err)
 	}
 	return memory, nil
 }
 
 func (s *SandboxService) sandboxMemoryPerCPU() resource.Quantity {
-	if s == nil {
-		return s0template.MemoryPerCPUOrDefault("")
-	}
-	return s0template.MemoryPerCPUOrDefault(s.config.SandboxMemoryPerCPU)
+	return s.resourcePolicy().MemoryPerCPU()
 }
 
-func (s *SandboxService) sandboxMaxMemory() resource.Quantity {
+func (s *SandboxService) resourcePolicy() s0template.ResourcePolicy {
 	if s == nil {
-		return sandboxMemoryQuantityOrDefault("", defaultSandboxMaxMemory)
+		return s0template.NewResourcePolicy("", "")
 	}
-	return sandboxMemoryQuantityOrDefault(s.config.SandboxMaxMemory, defaultSandboxMaxMemory)
-}
-
-func sandboxMemoryQuantityOrDefault(value, fallback string) resource.Quantity {
-	parsed, err := resource.ParseQuantity(strings.TrimSpace(value))
-	if err == nil && parsed.Sign() > 0 {
-		return parsed
-	}
-	return resource.MustParse(fallback)
+	return s0template.NewResourcePolicy(s.config.SandboxMemoryPerCPU, s.config.SandboxMaxMemory)
 }

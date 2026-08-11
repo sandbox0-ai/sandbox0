@@ -158,6 +158,12 @@ func TestBuildConfigPropagatesRegistryHosts(t *testing.T) {
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
 					},
 				},
+				Manager: &infrav1alpha1.ManagerServiceConfig{
+					Config: &infrav1alpha1.ManagerConfig{
+						TeamTemplateMemoryPerCPU: "2Gi",
+						SandboxMaxMemory:         "16Gi",
+					},
+				},
 			},
 		},
 	}
@@ -174,5 +180,11 @@ func TestBuildConfigPropagatesRegistryHosts(t *testing.T) {
 	}
 	if cfg.RegistryInternalRegistry != "demo-registry.sandbox0-system.svc:5000" {
 		t.Fatalf("unexpected internal registry %q", cfg.RegistryInternalRegistry)
+	}
+	if cfg.TeamTemplateMemoryPerCPU != "2Gi" {
+		t.Fatalf("unexpected template memory per CPU %q", cfg.TeamTemplateMemoryPerCPU)
+	}
+	if cfg.SandboxMaxMemory != "16Gi" {
+		t.Fatalf("unexpected sandbox max memory %q", cfg.SandboxMaxMemory)
 	}
 }

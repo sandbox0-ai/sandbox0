@@ -5058,7 +5058,7 @@ components:
       properties:
         memory:
           type: string
-          description: Sandbox memory limit. Must be at least 128Mi and no more than the platform sandbox maximum, which defaults to 32Gi.
+          description: Sandbox memory limit. Must be at least 128Mi and no more than the platform sandbox maximum, which defaults to 16Gi. The same maximum applies to template defaults and every sandbox lifecycle operation.
     SandboxAppServiceRouteAuth:
       type: object
       properties:
@@ -7669,7 +7669,7 @@ components:
       properties:
         memory:
           type: string
-          description: Memory limit used by default when a sandbox claim does not provide a memory override. Sandbox0 derives the internal CPU limit from platform configuration.
+          description: Memory limit used by default when a sandbox claim does not provide a memory override. It cannot exceed the platform sandbox maximum, which defaults to 16Gi. Sandbox0 derives the internal CPU limit from platform configuration.
         ephemeralStorage:
           type: string
           description: Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 8Gi when omitted.

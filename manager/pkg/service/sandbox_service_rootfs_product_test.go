@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -543,6 +544,29 @@ func TestSandboxRootFSProductForkRejectsInvalidLifecycleConfig(t *testing.T) {
 	})
 
 	require.ErrorIs(t, err, ErrInvalidClaimRequest)
+	assert.Len(t, store.records, 1)
+}
+
+func TestSandboxRootFSProductForkRejectsMemoryAbovePlatformMaximum(t *testing.T) {
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	source := rootFSProductTestRecord("sandbox-1", "team-1", sandboxstore.SandboxDesiredStatePaused, now)
+	source.TemplateSpec.MainContainer.Resources.CPU = resource.MustParse("8")
+	source.TemplateSpec.MainContainer.Resources.Memory = resource.MustParse("32Gi")
+	store := &memorySandboxStore{
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-1": source,
+		},
+		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
+			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		},
+	}
+	svc := rootFSProductTestService(store)
+	svc.config.SandboxMaxMemory = "16Gi"
+
+	_, err := svc.ForkSandbox(context.Background(), "sandbox-1", "team-1", "user-2", nil)
+
+	require.ErrorIs(t, err, ErrInvalidClaimRequest)
+	assert.Contains(t, err.Error(), "sandbox memory limit must be <= 16Gi")
 	assert.Len(t, store.records, 1)
 }
 

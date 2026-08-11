@@ -67,6 +67,21 @@ func TestEffectiveSandboxResourceQuotaAppliesMinimumCPUToTemplateWithoutCPU(t *t
 	assertQuantity(t, quota.CPU, "150m")
 }
 
+func TestEffectiveSandboxResourceQuotaRejectsTemplateAbovePlatformMaximum(t *testing.T) {
+	svc := &SandboxService{config: SandboxServiceConfig{SandboxMaxMemory: "16Gi"}}
+	template := newSandboxResourceTestTemplate(t)
+	template.Spec.MainContainer.Resources.CPU = resource.MustParse("8")
+	template.Spec.MainContainer.Resources.Memory = resource.MustParse("32Gi")
+
+	_, err := svc.effectiveSandboxResourceQuota(template, nil)
+	if err == nil || !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("effectiveSandboxResourceQuota() error = %v, want ErrInvalidClaimRequest", err)
+	}
+	if got := err.Error(); !contains(got, "sandbox memory limit must be <= 16Gi") {
+		t.Fatalf("effectiveSandboxResourceQuota() error = %q, want max-memory rejection", got)
+	}
+}
+
 func TestValidateSandboxMemoryBounds(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -76,8 +91,8 @@ func TestValidateSandboxMemoryBounds(t *testing.T) {
 	}{
 		{name: "minimum accepted", memory: "128Mi"},
 		{name: "below minimum rejected", memory: "127Mi", wantErr: "must be >= 128Mi"},
-		{name: "default max accepted", memory: "32Gi"},
-		{name: "above default max rejected", memory: "33Gi", wantErr: "must be <= 32Gi"},
+		{name: "default max accepted", memory: "16Gi"},
+		{name: "above default max rejected", memory: "17Gi", wantErr: "must be <= 16Gi"},
 		{name: "custom max accepted", maxMemory: "64Gi", memory: "64Gi"},
 		{name: "above custom max rejected", maxMemory: "64Gi", memory: "65Gi", wantErr: "must be <= 64Gi"},
 		{name: "invalid rejected", memory: "large", wantErr: "is invalid"},
@@ -466,6 +481,42 @@ func TestUpdateSandboxAppliesMinimumCPUResourcesAndPersistsConfig(t *testing.T) 
 		t.Fatalf("config annotation = %s, want resources memory", got)
 	}
 	assertResizeSubresourceUpdate(t, client.Actions())
+}
+
+func TestUpdateSandboxRejectsMemoryAbovePlatformMaximum(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	if err := indexer.Add(pod.DeepCopy()); err != nil {
+		t.Fatalf("add pod: %v", err)
+	}
+	svc := &SandboxService{
+		k8sClient:      client,
+		podLister:      corelisters.NewPodLister(indexer),
+		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		clock:          systemTime{},
+		config: SandboxServiceConfig{
+			SandboxMemoryPerCPU: "4Gi",
+			SandboxMaxMemory:    "16Gi",
+		},
+		logger: zap.NewNop(),
+	}
+
+	_, err := svc.UpdateSandbox(context.Background(), "sandbox-1", &SandboxUpdateConfig{
+		Resources: &managerapi.SandboxResourceConfig{Memory: "17Gi"},
+	})
+	if err == nil || !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("UpdateSandbox() error = %v, want ErrInvalidClaimRequest", err)
+	}
+	if got := err.Error(); !contains(got, "config.resources.memory must be <= 16Gi") {
+		t.Fatalf("UpdateSandbox() error = %q, want max-memory rejection", got)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "patch" && action.GetSubresource() == "resize" {
+			t.Fatal("sandbox resources were resized after max-memory rejection")
+		}
+	}
 }
 
 func TestUpdatePausedSandboxValidatesAndPersistsMemory(t *testing.T) {

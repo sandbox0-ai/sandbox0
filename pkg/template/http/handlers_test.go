@@ -363,6 +363,42 @@ func TestCreateTemplate_DerivesCPUWhenOmitted(t *testing.T) {
 	assertTemplateResponseOmitsCPU(t, rec.Body.Bytes())
 }
 
+func TestCreateTemplate_RejectsMemoryAbovePlatformMaximum(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{}
+	h := &Handler{
+		Store:          store,
+		ResourcePolicy: template.NewResourcePolicy("2Gi", "16Gi"),
+		Logger:         zap.NewNop(),
+	}
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	router.POST("/api/v1/templates", h.CreateTemplate)
+
+	body := []byte(`{
+		"template_id":"demo",
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"32Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "spec.mainContainer.resources.memory must be") || !strings.Contains(rec.Body.String(), "16Gi") {
+		t.Fatalf("response = %s, want max-memory rejection", rec.Body.String())
+	}
+	if store.createCalled {
+		t.Fatal("expected create not called for memory above platform maximum")
+	}
+}
+
 func TestDeriveTemplateCPUUsesConfiguredMemoryPerCPU(t *testing.T) {
 	t.Parallel()
 
@@ -820,6 +856,45 @@ func TestUpdateTemplate_DerivesCPUWhenOmitted(t *testing.T) {
 	assertTemplateResponseOmitsCPU(t, rec.Body.Bytes())
 }
 
+func TestUpdateTemplate_RejectsMemoryAbovePlatformMaximum(t *testing.T) {
+	t.Parallel()
+
+	store := &testTemplateStore{
+		getTemplateFn: func(context.Context, string, string, string) (*template.Template, error) {
+			return &template.Template{TemplateID: "demo", Scope: "team", TeamID: "team-1", Spec: validTemplateSpec()}, nil
+		},
+	}
+	h := &Handler{
+		Store:          store,
+		ResourcePolicy: template.NewResourcePolicy("2Gi", "16Gi"),
+		Logger:         zap.NewNop(),
+	}
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{TeamID: "team-1", UserID: "user-1"}))
+	router.PUT("/api/v1/templates/:id", h.UpdateTemplate)
+
+	body := []byte(`{
+		"spec":{
+			"mainContainer":{"image":"ubuntu:22.04","resources":{"memory":"32Gi"}},
+			"pool":{"minIdle":0,"maxIdle":1}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/demo", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusForbidden, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "spec.mainContainer.resources.memory must be") || !strings.Contains(rec.Body.String(), "16Gi") {
+		t.Fatalf("response = %s, want max-memory rejection", rec.Body.String())
+	}
+	if store.updateCalled {
+		t.Fatal("expected update not called for memory above platform maximum")
+	}
+}
+
 func TestUpdateTemplate_RejectsInvalidPoolRange(t *testing.T) {
 	t.Parallel()
 
@@ -1024,9 +1099,9 @@ func TestValidateTemplateSpecForClaims_WildcardPermissionRejected(t *testing.T) 
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
-	err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{
+	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{
 		Permissions: []string{"*"},
-	}, configuredTemplateMemoryPerCPU())
+	}, template.ResourcePolicy{})
 	if err == nil {
 		t.Fatalf("expected wildcard permission to be rejected")
 	}
@@ -1305,7 +1380,7 @@ func TestValidateTemplateSpec_AllowsExpandedSecurityContext(t *testing.T) {
 	if err := validateTemplateSpec(spec); err != nil {
 		t.Fatalf("validateTemplateSpec: %v", err)
 	}
-	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{IsSystem: true}, configuredTemplateMemoryPerCPU()); err != nil {
+	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{IsSystem: true}, template.ResourcePolicy{}); err != nil {
 		t.Fatalf("expected system token to allow expanded security context, got %v", err)
 	}
 }
@@ -1339,11 +1414,11 @@ func TestValidateTemplateSpecForClaims_RequiresSystemIdentityForEmptyDirMounts(t
 		}},
 	}
 
-	err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{TeamID: "team-1"}, configuredTemplateMemoryPerCPU())
+	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"}, template.ResourcePolicy{})
 	if err == nil || err.Error() != "spec.pod requires system identity" {
 		t.Fatalf("expected team token to reject pod emptyDir mounts, got %v", err)
 	}
-	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{IsSystem: true}, configuredTemplateMemoryPerCPU()); err != nil {
+	if err := validateTemplateSpecForClaims(spec, &internalauth.Claims{IsSystem: true}, template.ResourcePolicy{}); err != nil {
 		t.Fatalf("expected system token to allow pod emptyDir mounts, got %v", err)
 	}
 }
@@ -1362,7 +1437,7 @@ func TestValidateTemplateSpecForClaims_RejectsMismatchedMainResources(t *testing
 		Pool: v1alpha1.PoolStrategy{MinIdle: 0, MaxIdle: 1},
 	}
 
-	err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, &internalauth.Claims{TeamID: "team-1"}, configuredTemplateMemoryPerCPU())
+	err := validateTemplateSpecForClaims(spec, &internalauth.Claims{TeamID: "team-1"}, template.ResourcePolicy{})
 	if err == nil {
 		t.Fatal("expected aggregate resource ratio to be rejected")
 	}
@@ -1386,7 +1461,7 @@ func TestValidateTemplateSpecForClaims_RejectsSystemOwnedMismatchedMainResources
 	}
 
 	claims := &internalauth.Claims{IsSystem: true}
-	err := validateTemplateSpecForClaimsWithMemoryPerCPU(spec, claims, configuredTemplateMemoryPerCPU())
+	err := validateTemplateSpecForClaims(spec, claims, template.ResourcePolicy{})
 	if err == nil {
 		t.Fatal("expected system token to reject resource ratio mismatch")
 	}

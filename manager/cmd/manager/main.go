@@ -44,6 +44,7 @@ import (
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	registryprovider "github.com/sandbox0-ai/sandbox0/pkg/registry"
+	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
@@ -539,6 +540,7 @@ func main() {
 		TemplateStore:           templateStore,
 		TemplateReconciler:      templateReconciler,
 		TemplateStoreEnabled:    cfg.TemplateStoreEnabled,
+		TemplateResourcePolicy:  s0template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory),
 		ClusterService:          clusterService,
 		QuotaRepository:         quotaRepo,
 		AuthValidator:           authValidator,

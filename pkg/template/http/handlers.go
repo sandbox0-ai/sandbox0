@@ -69,6 +69,7 @@ type Handler struct {
 	ClusterStore         ClusterStore
 	Reconciler           Reconciler
 	StatsProvider        TemplateStatsProvider
+	ResourcePolicy       template.ResourcePolicy
 	PrivateRegistryHosts []string
 	Logger               *zap.Logger
 }
@@ -374,13 +375,13 @@ func (h *Handler) CreateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	memoryPerCPU := configuredTemplateMemoryPerCPU()
-	deriveTemplateCPU(&templateSpec, memoryPerCPU)
+	resourcePolicy := h.ResourcePolicy
+	deriveTemplateCPU(&templateSpec, resourcePolicy.MemoryPerCPU())
 	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(templateSpec, claims, memoryPerCPU); err != nil {
+	if err := validateTemplateSpecForClaims(templateSpec, claims, resourcePolicy); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
@@ -572,14 +573,14 @@ func (h *Handler) CreateTemplateFromSandbox(c *gin.Context) {
 	}
 
 	templateSpec := templateSpecFromSandboxSource(source.Spec, req.SpecOverrides)
-	memoryPerCPU := configuredTemplateMemoryPerCPU()
+	resourcePolicy := h.ResourcePolicy
 	templateSpec.MainContainer.Resources.CPU = resource.Quantity{}
-	deriveTemplateCPU(&templateSpec, memoryPerCPU)
+	deriveTemplateCPU(&templateSpec, resourcePolicy.MemoryPerCPU())
 	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "source template is not reusable: "+err.Error())
 		return
 	}
-	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(templateSpec, claims, memoryPerCPU); err != nil {
+	if err := validateTemplateSpecForClaims(templateSpec, claims, resourcePolicy); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}
@@ -785,13 +786,13 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	memoryPerCPU := configuredTemplateMemoryPerCPU()
-	deriveTemplateCPU(&templateSpec, memoryPerCPU)
+	resourcePolicy := h.ResourcePolicy
+	deriveTemplateCPU(&templateSpec, resourcePolicy.MemoryPerCPU())
 	if err := validateTemplateSpec(templateSpec); err != nil {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 		return
 	}
-	if err := validateTemplateSpecForClaimsWithMemoryPerCPU(templateSpec, claims, memoryPerCPU); err != nil {
+	if err := validateTemplateSpecForClaims(templateSpec, claims, resourcePolicy); err != nil {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, err.Error())
 		return
 	}

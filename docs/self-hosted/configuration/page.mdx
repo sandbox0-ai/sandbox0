@@ -214,7 +214,7 @@ Kubernetes image volume support is part of the Sandbox0 cluster baseline. Unsupp
 
 ### Sandbox Memory Limits
 
-Sandbox claims and runtime updates can set `config.resources.memory`. The minimum accepted value is `128Mi`. The platform maximum defaults to `32Gi`. Manager derives CPU from the configured memory-per-CPU ratio and enforces a minimum CPU limit of `150m` for claimed sandboxes.
+Sandbox claims and runtime updates can set `config.resources.memory`. The minimum accepted value is `128Mi`. The platform maximum defaults to `16Gi`. The same maximum is enforced for template creation and updates, sandbox claims and updates, resumes, and forks. Manager derives CPU from the configured memory-per-CPU ratio and enforces a minimum CPU limit of `150m` for claimed sandboxes.
 
 The minimum applies when a sandbox is claimed, resumed, or resized. Upgrading manager does not resize sandbox pods that were already running before the upgrade.
 
@@ -497,7 +497,7 @@ Examples:
 - `services.clusterGateway.config.authMode` switches between `public`, `internal`, and `both`
 - `services.manager.config.autoscaler.*` is a legacy compatibility surface and is currently ignored; manager keeps each warm pool fixed at the template's `minIdle`
 - `services.manager.config.k8sClientQps` and `k8sClientBurst` tune the manager Kubernetes client token bucket rate limit; defaults are `50` and `100`
-- `services.manager.config.sandboxMaxMemory` caps per-sandbox memory overrides; the default is `32Gi`
+- `services.manager.config.sandboxMaxMemory` caps template defaults and every sandbox lifecycle operation; the default is `16Gi`
 - `services.manager.config.procdBinImageRef` overrides the derived procd artifact image used by sandbox Pods
 - `services.manager.config.allowColdStartWithoutReadyDataPlane` lets cold claims create Pending pods for external node autoscaler scale-from-zero deployments; keep it disabled unless the cluster autoscaler can provision matching sandbox nodes
 - `services.manager.config.autoscalerSafeToEvictAnnotationKeys` lists the platform autoscaler's pod annotation keys; manager writes `true` on idle pods and `false` on claimed pods without embedding a vendor-specific key

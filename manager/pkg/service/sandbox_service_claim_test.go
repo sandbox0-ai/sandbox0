@@ -46,6 +46,30 @@ import (
 
 const testAutoscalerSafeToEvictAnnotation = "example.com/safe-to-evict"
 
+func TestClaimSandboxRejectsTemplateMemoryAbovePlatformMaximum(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	template.Name = naming.TemplateNameForCluster(naming.ScopeTeam, "team-a", "default")
+	template.Spec.MainContainer.Resources.CPU = resource.MustParse("8")
+	template.Spec.MainContainer.Resources.Memory = resource.MustParse("32Gi")
+	svc := &SandboxService{
+		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		config:         SandboxServiceConfig{SandboxMaxMemory: "16Gi"},
+		logger:         zap.NewNop(),
+	}
+
+	_, err := svc.ClaimSandbox(context.Background(), &ClaimRequest{
+		Template: "default",
+		TeamID:   "team-a",
+		UserID:   "user-a",
+	})
+	if err == nil || !errors.Is(err, ErrInvalidClaimRequest) {
+		t.Fatalf("ClaimSandbox() error = %v, want ErrInvalidClaimRequest", err)
+	}
+	if got := err.Error(); !strings.Contains(got, "sandbox memory limit must be <= 16Gi") {
+		t.Fatalf("ClaimSandbox() error = %q, want max-memory rejection", got)
+	}
+}
+
 func TestClaimIdlePodRequiresPodReady(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

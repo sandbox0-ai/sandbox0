@@ -2018,7 +2018,7 @@ type ResourceQuota struct {
 	// EphemeralStorage Ephemeral storage limit for the sandbox writable layer and container logs. Defaults to 8Gi when omitted.
 	EphemeralStorage *string `json:"ephemeralStorage,omitempty"`
 
-	// Memory Memory limit used by default when a sandbox claim does not provide a memory override. Sandbox0 derives the internal CPU limit from platform configuration.
+	// Memory Memory limit used by default when a sandbox claim does not provide a memory override. It cannot exceed the platform sandbox maximum, which defaults to 16Gi. Sandbox0 derives the internal CPU limit from platform configuration.
 	Memory string `json:"memory"`
 }
 
@@ -2494,7 +2494,7 @@ type SandboxRefreshRequest struct {
 
 // SandboxResourceConfig Instance-level sandbox resource override. Sandbox0 exposes memory only and derives CPU from the platform memory-per-CPU ratio, with a minimum CPU limit of 150m.
 type SandboxResourceConfig struct {
-	// Memory Sandbox memory limit. Must be at least 128Mi and no more than the platform sandbox maximum, which defaults to 32Gi.
+	// Memory Sandbox memory limit. Must be at least 128Mi and no more than the platform sandbox maximum, which defaults to 16Gi. The same maximum applies to template defaults and every sandbox lifecycle operation.
 	Memory *string `json:"memory,omitempty"`
 }
 

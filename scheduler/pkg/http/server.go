@@ -144,6 +144,7 @@ func NewServerWithDependencies(deps ServerDependencies) (*Server, error) {
 		AllocationStore: allocationStore,
 		ClusterStore:    repo,
 		Reconciler:      reconciler,
+		ResourcePolicy:  template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory),
 		PrivateRegistryHosts: privateRegistryHosts(
 			cfg.RegistryPushRegistry,
 			cfg.RegistryPullRegistry,

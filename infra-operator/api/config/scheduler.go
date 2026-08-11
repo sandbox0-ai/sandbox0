@@ -69,6 +69,11 @@ type SchedulerConfig struct {
 	// RegistryInternalRegistry is the registry service endpoint reserved for server-side access.
 	// +optional
 	RegistryInternalRegistry string `yaml:"registry_internal_registry" json:"-"`
+
+	// TeamTemplateMemoryPerCPU is derived from manager platform configuration.
+	TeamTemplateMemoryPerCPU string `yaml:"team_template_memory_per_cpu" json:"-"`
+	// SandboxMaxMemory is derived from manager platform configuration.
+	SandboxMaxMemory string `yaml:"sandbox_max_memory" json:"-"`
 }
 
 type DatabasePoolConfig struct {

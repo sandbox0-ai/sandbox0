@@ -42,7 +42,7 @@ type BuiltinTemplateOptions struct {
 	DatabaseMinConns     int32
 	TemplateStoreEnabled bool
 	Owner                string
-	MemoryPerCPU         resource.Quantity
+	ResourcePolicy       template.ResourcePolicy
 }
 
 // EnsureBuiltinTemplates creates or updates builtin templates in the template store.
@@ -89,10 +89,11 @@ func EnsureBuiltinTemplates(ctx context.Context, builtins []infrav1alpha1.Builti
 		}
 		desiredTemplateIDs[templateID] = struct{}{}
 
-		memoryPerCPU := builtinTemplateMemoryPerCPU(opts)
+		resourcePolicy := opts.ResourcePolicy
+		memoryPerCPU := resourcePolicy.MemoryPerCPU()
 		spec := BuildBuiltinTemplateSpec(templateID, builtin)
 		applyBuiltinTemplateResourcePolicy(&spec, builtin, memoryPerCPU)
-		if err := template.ValidateResourceRatio(spec, memoryPerCPU, "builtin template "+templateID); err != nil {
+		if err := resourcePolicy.ValidateTemplate(spec, "builtin template "+templateID); err != nil {
 			return fmt.Errorf("validate builtin template %s: %w", templateID, err)
 		}
 
@@ -162,19 +163,13 @@ func pruneUnconfiguredBuiltinTemplates(ctx context.Context, store builtinTemplat
 	return nil
 }
 
-func builtinTemplateMemoryPerCPU(opts BuiltinTemplateOptions) resource.Quantity {
-	if opts.MemoryPerCPU.Sign() <= 0 {
-		return template.MemoryPerCPUOrDefault("")
-	}
-	return opts.MemoryPerCPU
-}
-
-// TemplateMemoryPerCPUFromManagerConfig resolves the template resource shape used by manager API validation.
-func TemplateMemoryPerCPUFromManagerConfig(cfg *apiconfig.ManagerConfig) resource.Quantity {
+// TemplateResourcePolicyFromManagerConfig resolves the resource policy shared
+// by builtin synchronization and public template validation.
+func TemplateResourcePolicyFromManagerConfig(cfg *apiconfig.ManagerConfig) template.ResourcePolicy {
 	if cfg == nil {
-		return template.MemoryPerCPUOrDefault("")
+		return template.NewResourcePolicy("", "")
 	}
-	return template.MemoryPerCPUOrDefault(cfg.TeamTemplateMemoryPerCPU)
+	return template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory)
 }
 
 // BuildBuiltinTemplateSpec returns the effective SandboxTemplate spec for a builtin template config.

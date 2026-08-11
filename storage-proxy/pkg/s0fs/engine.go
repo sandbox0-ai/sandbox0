@@ -9,7 +9,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
 type Engine struct {
@@ -33,14 +36,22 @@ type Engine struct {
 	metadataCacheBytes      int64
 	mutationVersion         uint64
 	lastCommittedManifest   uint64
+	lastCommittedHead       *CommittedHead
 	lastMaterializedVersion uint64
 	pendingMaterialization  *pendingMaterialization
 	dirty                   bool
 	dirtyAt                 time.Time
+	failure                 atomic.Pointer[engineFailure]
+}
+
+type engineFailure struct {
+	err error
 }
 
 type pendingMaterialization struct {
 	manifestSeq     uint64
+	head            *CommittedHead
+	stateDigest     string
 	mutationVersion uint64
 	state           *SnapshotState
 	walCheckpoint   *walCheckpoint
@@ -52,6 +63,7 @@ type loadedEngineState struct {
 	nextSeq      uint64
 	nextInode    uint64
 	metadataPath string
+	stateDigest  string
 }
 
 func loadedEngineStateFromSnapshot(state *SnapshotState) *loadedEngineState {
@@ -80,6 +92,25 @@ func (s *loadedEngineState) checkpointSequence() uint64 {
 		return 0
 	}
 	return s.nextSeq - 1
+}
+
+func (s *loadedEngineState) digest() (string, error) {
+	if s == nil {
+		return "", nil
+	}
+	if s.stateDigest != "" {
+		return s.stateDigest, nil
+	}
+	state := s.state
+	if state == nil && s.metadata != nil {
+		state = s.metadata.Snapshot(s.nextSeq, s.nextInode)
+	}
+	digest, err := snapshotStateDigest(state)
+	if err != nil {
+		return "", err
+	}
+	s.stateDigest = digest
+	return digest, nil
 }
 
 func (s *loadedEngineState) close() {
@@ -141,7 +172,7 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		return nil, err
 	}
 	defer replay.Close()
-	firstWALRecord, hasWALRecords, err := replay.Peek(ctx)
+	_, hasWALRecords, err := replay.Peek(ctx)
 	replayStats = replay.Stats()
 	emitWALOpenPhase(cfg, "wal_open", 0, phaseStarted, replayStats, 0, 0, nil, err)
 	if err != nil {
@@ -158,6 +189,8 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 	}()
 	localStateErr := err
 	emitOpenPhase(cfg, "state_load", "local", localFormat, phaseStarted, localBytes, replayStats.RecordsScanned, state, err)
+	localBinding, localBindingErr := loadRecoveryBinding(localHeadBindingPath(cfg.WALPath), cfg.VolumeID)
+	walBinding, walBindingErr := loadRecoveryBinding(walBaseBindingPath(cfg.WALPath), cfg.VolumeID)
 	materializer := NewMaterializer(cfg.VolumeID, cfg.ObjectStore, cfg.HeadStore, cfg.ObjectStoreForVolume)
 	if materializer != nil {
 		materializer.SetEncryption(cfg.Encryption)
@@ -166,36 +199,45 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		materializer.SetOpenObserver(cfg.OpenObserver)
 	}
 	var latestManifest *Manifest
+	var committedHead *CommittedHead
 	var remoteState *loadedEngineState
+	replayTrusted := true
 	defer func() {
 		if remoteState != nil {
 			remoteState.close()
 		}
 	}()
 	if materializer != nil {
-		localCommitted := false
-		if state != nil && localStateErr == nil && materializer.headStore != nil {
+		if materializer.headStore != nil {
 			head, headErr := materializer.loadCommittedHead(ctx)
+			if headErr == nil {
+				committedHead = head
+			} else if !errors.Is(headErr, ErrCommittedHeadNotFound) {
+				return nil, headErr
+			}
+		}
+
+		localCommitted := false
+		if committedHead != nil && committedHead.ManifestDigest != "" && state != nil && localStateErr == nil && localBindingErr == nil {
 			reuseStarted := time.Now()
-			if headErr == nil && committedHeadMatchesCheckpoint(head, cfg.VolumeID, state.checkpointSequence()) {
+			stateDigest, digestErr := state.digest()
+			if digestErr != nil {
+				return nil, digestErr
+			}
+			if committedHeadMatchesCheckpoint(committedHead, cfg.VolumeID, state.checkpointSequence()) &&
+				recoveryBindingMatches(localBinding, committedHead, stateDigest) {
 				if err := materializer.validateCommittedLoadedStateSegments(ctx, state); err != nil {
 					return nil, err
 				}
-				latestManifest = &Manifest{
-					VolumeID:      head.VolumeID,
-					ManifestSeq:   head.ManifestSeq,
-					CheckpointSeq: head.CheckpointSeq,
-					CreatedAt:     head.UpdatedAt,
-				}
+				latestManifest = manifestFromCommittedHead(committedHead, stateDigest)
 				localCommitted = true
 				selectedSource = "local"
 				selectedFormat = localFormat
 				emitOpenPhase(cfg, "state_reuse", "local", localFormat, reuseStarted, localBytes, replayStats.RecordsScanned, state, nil)
-			} else if headErr != nil && !errors.Is(headErr, ErrCommittedHeadNotFound) {
-				err = headErr
 			}
 		}
-		if !localCommitted && (err == nil || errors.Is(err, ErrSnapshotNotFound)) {
+
+		if !localCommitted {
 			phaseStarted = time.Now()
 			remoteMetadataPath := ""
 			if strings.TrimSpace(cfg.MetadataPath) != "" {
@@ -212,27 +254,46 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 				if err := materializer.validateCommittedLoadedStateSegments(ctx, latestState); err != nil {
 					return nil, err
 				}
-				if baseErr := validateCommittedWALBase(localStateErr, latestState, firstWALRecord, hasWALRecords); baseErr != nil {
-					return nil, baseErr
-				}
 			}
-			switch {
-			case latestErr == nil && shouldUseMaterializedLoadedState(state, err, latestState, hasWALRecords):
+			if latestErr == nil {
 				state = latestState
 				err = nil
 				latestManifest = manifest
 				selectedSource = "remote"
 				selectedFormat = remoteFormat
-			case latestErr == nil:
-				latestManifest = manifest
-				if localStateErr == nil {
-					selectedSource = "local"
-					selectedFormat = localFormat
+				if materializer.headStore != nil {
+					head, headErr := materializer.loadCommittedHead(ctx)
+					if headErr != nil {
+						return nil, headErr
+					}
+					committedHead = head
+					if err := validateManifestHead(committedHead, manifest); err != nil {
+						return nil, err
+					}
+				} else {
+					committedHead = committedHeadForManifest(manifest, manifestLatestKey, nil)
 				}
-			case errors.Is(err, ErrSnapshotNotFound) && latestErr != nil && !errors.Is(latestErr, ErrMaterializedManifestNotFound):
+			} else if committedHead != nil {
+				if errors.Is(latestErr, ErrMaterializedManifestNotFound) || objectstore.IsNotFound(latestErr) {
+					return nil, fmt.Errorf("%w: committed manifest %s is missing", ErrCommittedStateIntegrity, committedHead.ManifestKey)
+				}
+				return nil, latestErr
+			} else if materializer.headStore != nil {
+				state = nil
+				err = latestErr
+			} else if localStateErr != nil && !errors.Is(latestErr, ErrMaterializedManifestNotFound) {
 				err = latestErr
 			}
 		}
+		trusted, lineageErr := validateCommittedWALLineage(
+			committedHead, latestManifest, localState, localStateErr,
+			localBinding, localBindingErr, walBinding, walBindingErr,
+			hasWALRecords,
+		)
+		if lineageErr != nil {
+			return nil, lineageErr
+		}
+		replayTrusted = trusted
 		materializer.SetOpenObserver(nil)
 	}
 	if err != nil && !errors.Is(err, ErrSnapshotNotFound) && !errors.Is(err, ErrMaterializedManifestNotFound) {
@@ -326,46 +387,55 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 	}()
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
+		e.lastCommittedHead = cloneCommittedHead(committedHead)
 	}
 
 	phaseStarted = time.Now()
 	appliedRecords := 0
-	for {
-		record, ok, replayErr := replay.Next(ctx)
-		replayStats = replay.Stats()
-		if replayErr != nil {
-			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
-			return nil, replayErr
-		}
-		if !ok {
-			break
-		}
-		if record.Seq < e.nextSeq {
-			walRecordsSkipped++
-			continue
-		}
-		if record.Seq > e.nextSeq {
-			replayErr := fmt.Errorf("replay wal seq %d: %w: missing wal seq %d", record.Seq, ErrInvalidInput, e.nextSeq)
-			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
-			return nil, replayErr
-		}
-		if err := e.apply(record); err != nil {
-			replayErr := fmt.Errorf("replay wal seq %d: %w", record.Seq, err)
-			emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
-			return nil, replayErr
-		}
-		appliedRecords++
-		walRecordsApplied = appliedRecords
-		if record.Seq >= e.nextSeq {
-			e.nextSeq = record.Seq + 1
-		}
-		if record.Inode >= e.nextInode {
-			e.nextInode = record.Inode + 1
+	if replayTrusted {
+		for {
+			record, ok, replayErr := replay.Next(ctx)
+			replayStats = replay.Stats()
+			if replayErr != nil {
+				emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
+				return nil, replayErr
+			}
+			if !ok {
+				break
+			}
+			if record.Seq < e.nextSeq {
+				walRecordsSkipped++
+				continue
+			}
+			if record.Seq > e.nextSeq {
+				replayErr := fmt.Errorf("replay wal seq %d: %w: missing wal seq %d", record.Seq, ErrInvalidInput, e.nextSeq)
+				emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
+				return nil, replayErr
+			}
+			if err := e.apply(record); err != nil {
+				replayErr := fmt.Errorf("replay wal seq %d: %w", record.Seq, err)
+				emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
+				return nil, replayErr
+			}
+			appliedRecords++
+			walRecordsApplied = appliedRecords
+			if record.Seq >= e.nextSeq {
+				e.nextSeq = record.Seq + 1
+			}
+			if record.Inode >= e.nextInode {
+				e.nextInode = record.Inode + 1
+			}
 		}
 	}
 	if err := replay.Close(); err != nil {
 		emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, err)
 		return nil, err
+	}
+	if !replayTrusted {
+		if _, err := quarantineRecoveryEvidence(cfg.WALPath); err != nil {
+			return nil, fmt.Errorf("quarantine untrusted s0fs recovery evidence: %w", err)
+		}
+		replayStats = walReplayStats{}
 	}
 	walFile, err := openWAL(cfg.WALPath, cfg.VolumeID, cfg.Encryption, cfg.WALSyncHook, replayStats)
 	if err != nil {
@@ -382,6 +452,9 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		e.dirty = true
 		e.dirtyAt = time.Now().UTC()
 		e.mutationVersion = 1
+	}
+	if err := saveRecoveryBinding(walBaseBindingPath(cfg.WALPath), cfg.VolumeID, e.lastCommittedHead, ""); err != nil {
+		return nil, fmt.Errorf("persist wal committed base: %w", err)
 	}
 	walRecordsApplied = appliedRecords
 	emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, nil)
@@ -477,11 +550,36 @@ func (e *Engine) Close() error {
 	if e.closed {
 		return nil
 	}
-	if err := e.persistCurrentStateLocked(); err != nil {
-		return err
-	}
-	if err := e.wal.reset(); err != nil {
-		return err
+	terminalFailure := e.failure.Load() != nil
+	if terminalFailure || (e.dirty && e.materializer != nil && e.materializer.Enabled()) {
+		wait, err := e.wal.beginSyncCurrent()
+		if err != nil {
+			return err
+		}
+		if wait != nil {
+			if err := wait(); err != nil {
+				return err
+			}
+		}
+	} else {
+		if err := e.persistCurrentStateLocked(); err != nil {
+			return err
+		}
+		if e.lastCommittedHead != nil {
+			stateDigest, err := snapshotStateDigest(e.currentStateLocked())
+			if err != nil {
+				return err
+			}
+			if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, e.lastCommittedHead, stateDigest); err != nil {
+				return err
+			}
+			if err := saveRecoveryBinding(walBaseBindingPath(e.wal.path), e.volumeID, e.lastCommittedHead, ""); err != nil {
+				return err
+			}
+		}
+		if err := e.wal.reset(); err != nil {
+			return err
+		}
 	}
 	e.refreshLocalDiskGuardLocked()
 	e.closed = true
@@ -711,7 +809,11 @@ func (e *Engine) Read(inode uint64, offset uint64, size uint64) ([]byte, error) 
 	if err != nil {
 		return nil, err
 	}
-	return e.readFileLocked(node, inode, offset, size)
+	payload, err := e.readFileLocked(node, inode, offset, size)
+	if err != nil {
+		e.failClosed(err)
+	}
+	return payload, err
 }
 
 func (e *Engine) ReadInto(inode uint64, offset uint64, dest []byte) (int, error) {
@@ -724,7 +826,11 @@ func (e *Engine) ReadInto(inode uint64, offset uint64, dest []byte) (int, error)
 	if err != nil {
 		return 0, err
 	}
-	return e.readFileIntoLocked(node, inode, offset, dest)
+	n, err := e.readFileIntoLocked(node, inode, offset, dest)
+	if err != nil {
+		e.failClosed(err)
+	}
+	return n, err
 }
 
 func (e *Engine) Rename(oldParent uint64, oldName string, newParent uint64, newName string) error {
@@ -958,7 +1064,7 @@ func (e *Engine) CommittedHeadCurrent(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	dirty := e.dirty
-	manifestSeq := e.lastCommittedManifest
+	expectedHead := cloneCommittedHead(e.lastCommittedHead)
 	checkpointSeq := uint64(0)
 	if e.nextSeq > 0 {
 		checkpointSeq = e.nextSeq - 1
@@ -970,12 +1076,12 @@ func (e *Engine) CommittedHeadCurrent(ctx context.Context) (bool, error) {
 	}
 	head, err := materializer.headStore.LoadCommittedHead(ctx, e.volumeID)
 	if errors.Is(err, ErrCommittedHeadNotFound) {
-		return manifestSeq == 0, nil
+		return expectedHead == nil, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return committedHeadMatchesCheckpoint(head, e.volumeID, checkpointSeq) && head.ManifestSeq == manifestSeq, nil
+	return committedHeadMatchesCheckpoint(head, e.volumeID, checkpointSeq) && sameCommittedHeadIdentity(head, expectedHead), nil
 }
 
 func committedHeadMatchesCheckpoint(head *CommittedHead, volumeID string, checkpointSeq uint64) bool {
@@ -984,7 +1090,7 @@ func committedHeadMatchesCheckpoint(head *CommittedHead, volumeID string, checkp
 		head.ManifestSeq != 0 &&
 		head.ManifestSeq == checkpointSeq &&
 		head.CheckpointSeq == checkpointSeq &&
-		head.ManifestKey == manifestKey(head.ManifestSeq)
+		strings.TrimSpace(head.ManifestKey) != ""
 }
 
 // EstimatedMemoryBytes returns a conservative size estimate for charging the
@@ -1073,7 +1179,7 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 		e.mutationMu.Unlock()
 		return nil, err
 	}
-	expectedManifestSeq := e.lastCommittedManifest
+	expected := cloneCommittedHead(e.lastCommittedHead)
 	e.mu.Unlock()
 	checkpoint, err := e.wal.checkpoint(checkpointSequence(state))
 	if err != nil {
@@ -1082,8 +1188,9 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 	}
 	e.mutationMu.Unlock()
 
-	manifest, err := e.materializer.materializeOwned(ctx, state, expectedManifestSeq)
+	manifest, err := e.materializer.materializeOwned(ctx, state, expected)
 	if err != nil || manifest == nil {
+		e.failClosed(err)
 		return manifest, err
 	}
 
@@ -1098,8 +1205,12 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 	if manifest.ManifestSeq > e.lastCommittedManifest {
 		e.lastCommittedManifest = manifest.ManifestSeq
 	}
+	committedHead := committedHeadForManifest(manifest, manifestKey(manifest.ManifestSeq, manifest.CommitID), expected)
+	e.lastCommittedHead = cloneCommittedHead(committedHead)
 	e.pendingMaterialization = &pendingMaterialization{
 		manifestSeq:     manifest.ManifestSeq,
+		head:            committedHead,
+		stateDigest:     manifest.StateDigest,
 		mutationVersion: version,
 		state:           manifest.State,
 		walCheckpoint:   checkpoint,
@@ -1125,6 +1236,15 @@ func (e *Engine) finalizePendingMaterializationLocked() error {
 	if err := e.persistStateLocked(pending.state, true); err != nil {
 		return err
 	}
+	if pending.head == nil || pending.head.ManifestSeq != pending.manifestSeq || pending.stateDigest == "" {
+		return fmt.Errorf("%w: pending materialization identity is invalid", ErrInvalidInput)
+	}
+	if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, pending.head, pending.stateDigest); err != nil {
+		return fmt.Errorf("persist local committed binding: %w", err)
+	}
+	if err := saveRecoveryBinding(walBaseBindingPath(e.wal.path), e.volumeID, pending.head, ""); err != nil {
+		return fmt.Errorf("persist wal committed base: %w", err)
+	}
 	if pending.walCheckpoint == nil || pending.walCheckpoint.throughSeq != pending.manifestSeq {
 		return fmt.Errorf("%w: pending materialization wal checkpoint is invalid", ErrInvalidInput)
 	}
@@ -1144,6 +1264,9 @@ func (e *Engine) finalizePendingMaterializationLocked() error {
 }
 
 func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
+
 	e.mu.RLock()
 	if err := e.checkOpen(); err != nil {
 		e.mu.RUnlock()
@@ -1161,10 +1284,15 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
+		e.failClosed(err)
 		return false, err
 	}
 	if state == nil || state.NextSeq <= currentNextSeq {
 		return false, nil
+	}
+	if err := e.materializer.validateCommittedStateSegments(ctx, state); err != nil {
+		e.failClosed(err)
+		return false, err
 	}
 
 	e.mutationMu.Lock()
@@ -1178,18 +1306,54 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	if e.dirty || state.NextSeq <= e.nextSeq {
 		return false, nil
 	}
-	if err := e.replaceStateLocked(state); err != nil {
+	var refreshedHead *CommittedHead
+	if manifest != nil {
+		if e.materializer.headStore != nil {
+			head, headErr := e.materializer.loadCommittedHead(ctx)
+			if headErr != nil {
+				return false, headErr
+			}
+			if head.ManifestKey != manifestKey(manifest.ManifestSeq, manifest.CommitID) || validateManifestHead(head, manifest) != nil {
+				// The committed head advanced while this state was loading. Leave the
+				// current engine untouched and let the caller retry the newer head.
+				return false, nil
+			}
+			refreshedHead = head
+		} else {
+			refreshedHead = committedHeadForManifest(manifest, manifestLatestKey, nil)
+		}
+	}
+	if err := e.persistStateLocked(state, true); err != nil {
+		err = fmt.Errorf("%w: persist refreshed committed state: %w", ErrCommittedHeadConflict, err)
+		e.failClosed(err)
 		return false, err
 	}
-	if err := e.persistCurrentStateLocked(); err != nil {
-		return false, err
+	if refreshedHead != nil {
+		if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, refreshedHead, manifest.StateDigest); err != nil {
+			err = fmt.Errorf("%w: persist refreshed committed binding: %w", ErrCommittedHeadConflict, err)
+			e.failClosed(err)
+			return false, err
+		}
+		if err := saveRecoveryBinding(walBaseBindingPath(e.wal.path), e.volumeID, refreshedHead, ""); err != nil {
+			err = fmt.Errorf("%w: persist refreshed wal base: %w", ErrCommittedHeadConflict, err)
+			e.failClosed(err)
+			return false, err
+		}
 	}
 	if err := e.wal.reset(); err != nil {
+		err = fmt.Errorf("%w: reset refreshed wal: %w", ErrCommittedHeadConflict, err)
+		e.failClosed(err)
+		return false, err
+	}
+	if err := e.replaceStateLocked(state); err != nil {
+		err = fmt.Errorf("%w: install refreshed committed state: %w", ErrCommittedHeadConflict, err)
+		e.failClosed(err)
 		return false, err
 	}
 	e.refreshLocalDiskGuardLocked()
 	if manifest != nil {
 		e.lastCommittedManifest = manifest.ManifestSeq
+		e.lastCommittedHead = cloneCommittedHead(refreshedHead)
 	}
 	return true, nil
 }
@@ -1267,12 +1431,6 @@ func (e *Engine) restoreStateLocked(state *SnapshotState) error {
 	if err := e.replaceStateLocked(state); err != nil {
 		return err
 	}
-	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
-		return err
-	}
-	if err := e.wal.reset(); err != nil {
-		return err
-	}
 	e.refreshLocalDiskGuardLocked()
 	e.markDirtyLocked()
 	return nil
@@ -1294,12 +1452,6 @@ func (e *Engine) ReplaceState(state *SnapshotState) error {
 		return err
 	}
 	if err := e.replaceStateLocked(state); err != nil {
-		return err
-	}
-	if err := e.persistCurrentStateLockedWithReserve(false); err != nil {
-		return err
-	}
-	if err := e.wal.reset(); err != nil {
 		return err
 	}
 	e.refreshLocalDiskGuardLocked()
@@ -1607,7 +1759,8 @@ func loadCurrentEngineState(ctx context.Context, cfg Config) (*loadedEngineState
 				return nil, StateFormatV2, stream.Bytes, closeErr
 			}
 			return &loadedEngineState{
-				metadata: metadata, nextSeq: stream.Header.NextSeq, nextInode: stream.Header.NextInode, metadataPath: metadataPath,
+				metadata: metadata, nextSeq: stream.Header.NextSeq, nextInode: stream.Header.NextInode,
+				metadataPath: metadataPath, stateDigest: stream.Metadata.StateDigest,
 			}, StateFormatV2, stream.Bytes, nil
 		}
 		_ = file.Close()
@@ -1616,38 +1769,47 @@ func loadCurrentEngineState(ctx context.Context, cfg Config) (*loadedEngineState
 	return loadedEngineStateFromSnapshot(state), format, bytes, err
 }
 
-func shouldUseMaterializedLoadedState(current *loadedEngineState, currentErr error, latest *loadedEngineState, hasWALRecords bool) bool {
-	if latest == nil {
-		return false
+func manifestFromCommittedHead(head *CommittedHead, stateDigest string) *Manifest {
+	if head == nil {
+		return nil
 	}
-	if errors.Is(currentErr, ErrSnapshotNotFound) {
-		return true
+	return &Manifest{
+		VolumeID: head.VolumeID, ManifestSeq: head.ManifestSeq, CheckpointSeq: head.CheckpointSeq,
+		CommitID: head.CommitID, StateDigest: stateDigest, ManifestDigest: head.ManifestDigest,
+		CreatedAt: head.UpdatedAt,
 	}
-	if currentErr != nil {
-		return false
-	}
-	if current == nil {
-		return true
-	}
-	if hasWALRecords {
-		return false
-	}
-	return latest.nextSeq > current.nextSeq
 }
 
-func validateCommittedWALBase(localStateErr error, committed *loadedEngineState, firstWALRecord walRecord, hasWALRecords bool) error {
-	if !hasWALRecords || !errors.Is(localStateErr, ErrSnapshotNotFound) || committed == nil {
-		return nil
+func validateCommittedWALLineage(
+	head *CommittedHead,
+	manifest *Manifest,
+	local *loadedEngineState,
+	localErr error,
+	localBinding *recoveryBinding,
+	localBindingErr error,
+	walBinding *recoveryBinding,
+	walBindingErr error,
+	hasRecords bool,
+) (bool, error) {
+	if !hasRecords || head == nil {
+		return true, nil
 	}
-	if firstWALRecord.Seq == committed.nextSeq {
-		return nil
+	if walBindingErr == nil && recoveryBindingMatches(walBinding, head, "") {
+		return true, nil
 	}
-	return fmt.Errorf(
-		"%w: local head is missing, committed state expects wal seq %d, and local wal starts at seq %d",
-		ErrCommittedHeadConflict,
-		committed.nextSeq,
-		firstWALRecord.Seq,
-	)
+	if localErr == nil && local != nil && local.checkpointSequence() == head.CheckpointSeq {
+		localDigest, err := local.digest()
+		if err != nil {
+			return false, err
+		}
+		if localBindingErr == nil && recoveryBindingMatches(localBinding, head, localDigest) {
+			return true, nil
+		}
+		if manifest != nil && manifest.StateDigest != "" && localDigest == manifest.StateDigest {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (e *Engine) apply(record walRecord) error {
@@ -2041,10 +2203,20 @@ func (e *Engine) checkOpen() error {
 	if e == nil || e.closed {
 		return ErrClosed
 	}
+	if failure := e.failure.Load(); failure != nil {
+		return failure.err
+	}
 	if e.metadata != nil {
 		return e.metadata.Err()
 	}
 	return nil
+}
+
+func (e *Engine) failClosed(err error) {
+	if e == nil || err == nil || (!errors.Is(err, ErrCommittedStateIntegrity) && !errors.Is(err, ErrCommittedHeadConflict)) {
+		return
+	}
+	e.failure.CompareAndSwap(nil, &engineFailure{err: err})
 }
 
 func (e *Engine) ensureDirLocked(inode uint64) error {

@@ -8,8 +8,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"sort"
 	"strings"
@@ -31,10 +33,17 @@ const (
 )
 
 type stateV2Metadata struct {
-	Role          StateV2Role
-	ManifestSeq   uint64
-	CheckpointSeq uint64
-	CreatedAt     time.Time
+	Role                 StateV2Role
+	ManifestSeq          uint64
+	CheckpointSeq        uint64
+	CreatedAt            time.Time
+	CommitID             string
+	StateDigest          string
+	ManifestDigest       string
+	ParentManifestKey    string
+	ParentManifestDigest string
+	ParentCommitID       string
+	ParentGeneration     uint64
 }
 
 type stateV2DecodeResult struct {
@@ -83,17 +92,24 @@ func encodeStateV2(volumeID string, binding []byte, state *SnapshotState, metada
 	defer encoder.Close()
 
 	header := &StateV2Header{
-		FormatVersion:    StateFormatV2,
-		Role:             metadata.Role,
-		VolumeId:         volumeID,
-		BindingSha256:    hashBytes(binding),
-		NextSeq:          state.NextSeq,
-		NextInode:        state.NextInode,
-		ManifestSeq:      metadata.ManifestSeq,
-		CheckpointSeq:    metadata.CheckpointSeq,
-		CreatedAtSeconds: metadata.CreatedAt.Unix(),
-		CreatedAtNanos:   int32(metadata.CreatedAt.Nanosecond()),
-		Compression:      stateV2Compression,
+		FormatVersion:        StateFormatV2,
+		Role:                 metadata.Role,
+		VolumeId:             volumeID,
+		BindingSha256:        hashBytes(binding),
+		NextSeq:              state.NextSeq,
+		NextInode:            state.NextInode,
+		ManifestSeq:          metadata.ManifestSeq,
+		CheckpointSeq:        metadata.CheckpointSeq,
+		CreatedAtSeconds:     metadata.CreatedAt.Unix(),
+		CreatedAtNanos:       int32(metadata.CreatedAt.Nanosecond()),
+		Compression:          stateV2Compression,
+		CommitId:             metadata.CommitID,
+		StateDigest:          metadata.StateDigest,
+		ManifestDigest:       metadata.ManifestDigest,
+		ParentManifestKey:    metadata.ParentManifestKey,
+		ParentManifestDigest: metadata.ParentManifestDigest,
+		ParentCommitId:       metadata.ParentCommitID,
+		ParentGeneration:     metadata.ParentGeneration,
 	}
 
 	var aead cipher.AEAD
@@ -121,6 +137,7 @@ func encodeStateV2(volumeID string, binding []byte, state *SnapshotState, metada
 
 	marshal := proto.MarshalOptions{Deterministic: true}
 	encodedChunks := make([]stateV2EncodedChunk, 0, len(rawChunks))
+	stateHash := newStateDigest(state.NextSeq, state.NextInode)
 	var offset uint64
 	for index, rawChunk := range rawChunks {
 		encoded, err := marshal.Marshal(rawChunk.message)
@@ -130,6 +147,7 @@ func encodeStateV2(volumeID string, binding []byte, state *SnapshotState, metada
 		if len(encoded) > stateV2MaxEncodedChunkSize {
 			return nil, fmt.Errorf("%w: state v2 chunk %d is too large", ErrInvalidInput, index)
 		}
+		writeStateDigestChunk(stateHash, rawChunk.kind, uint32(index), encoded)
 		compressed := encoder.EncodeAll(encoded, nil)
 		storedSize := len(compressed)
 		if aead != nil {
@@ -152,6 +170,11 @@ func encodeStateV2(volumeID string, binding []byte, state *SnapshotState, metada
 		encodedChunks = append(encodedChunks, stateV2EncodedChunk{descriptor: descriptor, compressed: compressed})
 		offset += uint64(storedSize)
 	}
+	computedStateDigest := hex.EncodeToString(stateHash.Sum(nil))
+	if header.StateDigest != "" && header.StateDigest != computedStateDigest {
+		return nil, fmt.Errorf("%w: supplied state digest does not match state", ErrInvalidInput)
+	}
+	header.StateDigest = computedStateDigest
 
 	headerBytes, err := marshal.Marshal(header)
 	if err != nil {
@@ -279,6 +302,7 @@ func streamStateV2Chunks(
 	defer decoder.Close()
 	var expectedOffset uint64
 	var previousKind StateV2ChunkKind
+	stateHash := newStateDigest(header.NextSeq, header.NextInode)
 	for index, descriptor := range header.Chunks {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -313,6 +337,7 @@ func streamStateV2Chunks(
 		if uint64(len(encoded)) != descriptor.EncodedSize || (aead == nil && !bytes.Equal(hashBytes(encoded), descriptor.EncodedSha256)) {
 			return nil, fmt.Errorf("%w: state v2 chunk %d checksum mismatch", ErrInvalidInput, index)
 		}
+		writeStateDigestChunk(stateHash, descriptor.Kind, descriptor.Index, encoded)
 		var chunk StateV2Chunk
 		if err := proto.Unmarshal(encoded, &chunk); err != nil {
 			return nil, fmt.Errorf("decode state v2 chunk %d: %w", index, err)
@@ -330,16 +355,65 @@ func streamStateV2Chunks(
 	if n, err := counted.Read(trailing[:]); n != 0 || (err != nil && !errors.Is(err, io.EOF)) {
 		return nil, fmt.Errorf("%w: state v2 has trailing payload", ErrInvalidInput)
 	}
+	computedStateDigest := hex.EncodeToString(stateHash.Sum(nil))
+	if header.StateDigest != "" && header.StateDigest != computedStateDigest {
+		return nil, fmt.Errorf("%w: state v2 state digest mismatch", ErrInvalidInput)
+	}
 	return &stateV2StreamResult{
 		Header: &header,
 		Metadata: stateV2Metadata{
-			Role:          header.Role,
-			ManifestSeq:   header.ManifestSeq,
-			CheckpointSeq: header.CheckpointSeq,
-			CreatedAt:     time.Unix(header.CreatedAtSeconds, int64(header.CreatedAtNanos)).UTC(),
+			Role:                 header.Role,
+			ManifestSeq:          header.ManifestSeq,
+			CheckpointSeq:        header.CheckpointSeq,
+			CreatedAt:            time.Unix(header.CreatedAtSeconds, int64(header.CreatedAtNanos)).UTC(),
+			CommitID:             header.CommitId,
+			StateDigest:          computedStateDigest,
+			ManifestDigest:       header.ManifestDigest,
+			ParentManifestKey:    header.ParentManifestKey,
+			ParentManifestDigest: header.ParentManifestDigest,
+			ParentCommitID:       header.ParentCommitId,
+			ParentGeneration:     header.ParentGeneration,
 		},
 		Bytes: counted.count,
 	}, nil
+}
+
+func newStateDigest(nextSeq, nextInode uint64) hash.Hash {
+	hasher := sha256.New()
+	var header [16]byte
+	binary.BigEndian.PutUint64(header[:8], nextSeq)
+	binary.BigEndian.PutUint64(header[8:], nextInode)
+	_, _ = hasher.Write(header[:])
+	return hasher
+}
+
+func writeStateDigestChunk(hasher hash.Hash, kind StateV2ChunkKind, index uint32, encoded []byte) {
+	var metadata [16]byte
+	binary.BigEndian.PutUint32(metadata[:4], uint32(kind))
+	binary.BigEndian.PutUint32(metadata[4:8], index)
+	binary.BigEndian.PutUint64(metadata[8:], uint64(len(encoded)))
+	_, _ = hasher.Write(metadata[:])
+	_, _ = hasher.Write(encoded)
+}
+
+func snapshotStateDigest(state *SnapshotState) (string, error) {
+	if state == nil {
+		return "", fmt.Errorf("%w: state is required", ErrInvalidInput)
+	}
+	rawChunks, err := buildStateV2Chunks(state)
+	if err != nil {
+		return "", err
+	}
+	hasher := newStateDigest(state.NextSeq, state.NextInode)
+	marshal := proto.MarshalOptions{Deterministic: true}
+	for index, raw := range rawChunks {
+		encoded, err := marshal.Marshal(raw.message)
+		if err != nil {
+			return "", err
+		}
+		writeStateDigestChunk(hasher, raw.kind, uint32(index), encoded)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func buildStateV2Chunks(state *SnapshotState) ([]stateV2RawChunk, error) {

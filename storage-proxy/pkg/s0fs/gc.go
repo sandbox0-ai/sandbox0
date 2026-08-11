@@ -14,9 +14,50 @@ import (
 // has already established the required consistency guards.
 type GarbageCollectionPlan struct {
 	store        objectstore.Store
+	deleteGuard  func(context.Context) error
 	Segments     []string
 	Manifests    []string
 	LiveSegments int
+}
+
+// RetainCandidates restricts a plan to keys whose tombstone grace period has
+// elapsed. The returned plan preserves the original object store and guard.
+func (p *GarbageCollectionPlan) RetainCandidates(keys []string) *GarbageCollectionPlan {
+	if p == nil {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		allowed[key] = struct{}{}
+	}
+	filtered := &GarbageCollectionPlan{store: p.store, deleteGuard: p.deleteGuard, LiveSegments: p.LiveSegments}
+	for _, key := range p.Segments {
+		if _, ok := allowed[key]; ok {
+			filtered.Segments = append(filtered.Segments, key)
+		}
+	}
+	for _, key := range p.Manifests {
+		if _, ok := allowed[key]; ok {
+			filtered.Manifests = append(filtered.Manifests, key)
+		}
+	}
+	return filtered
+}
+
+func (p *GarbageCollectionPlan) Candidates() []string {
+	if p == nil {
+		return nil
+	}
+	keys := append([]string(nil), p.Segments...)
+	keys = append(keys, p.Manifests...)
+	sort.Strings(keys)
+	return keys
+}
+
+func (p *GarbageCollectionPlan) SetDeleteGuard(guard func(context.Context) error) {
+	if p != nil {
+		p.deleteGuard = guard
+	}
 }
 
 type GarbageCollectionResult struct {
@@ -71,6 +112,11 @@ func (p *GarbageCollectionPlan) Apply(ctx context.Context) (*GarbageCollectionRe
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
+		if p.deleteGuard != nil {
+			if err := p.deleteGuard(ctx); err != nil {
+				return result, err
+			}
+		}
 		if err := p.store.Delete(key); err != nil {
 			return result, fmt.Errorf("delete s0fs segment %s: %w", key, err)
 		}
@@ -79,6 +125,11 @@ func (p *GarbageCollectionPlan) Apply(ctx context.Context) (*GarbageCollectionRe
 	for _, key := range p.Manifests {
 		if err := ctx.Err(); err != nil {
 			return result, err
+		}
+		if p.deleteGuard != nil {
+			if err := p.deleteGuard(ctx); err != nil {
+				return result, err
+			}
 		}
 		if err := p.store.Delete(key); err != nil {
 			return result, fmt.Errorf("delete s0fs manifest %s: %w", key, err)

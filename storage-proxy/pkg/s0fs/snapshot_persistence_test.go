@@ -472,7 +472,7 @@ func (s *changingRecoveryHeadStore) LoadCommittedHead(context.Context, string) (
 	return &copy, nil
 }
 
-func (s *changingRecoveryHeadStore) CompareAndSwapCommittedHead(context.Context, string, uint64, *CommittedHead) error {
+func (s *changingRecoveryHeadStore) CompareAndSwapCommittedHead(context.Context, string, *CommittedHead, *CommittedHead) error {
 	return nil
 }
 

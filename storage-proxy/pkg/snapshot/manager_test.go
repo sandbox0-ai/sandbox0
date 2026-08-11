@@ -52,6 +52,8 @@ type fakeRepo struct {
 	snapshots    map[string]*db.Snapshot
 	heads        map[string]*db.S0FSCommittedHead
 	activeMounts map[string][]*db.VolumeMount
+	gcTombstones map[string]map[string]time.Time
+	gcNow        time.Time
 	deleted      []string
 	deleteErr    error
 }
@@ -63,6 +65,7 @@ func newFakeRepo() *fakeRepo {
 		snapshots:    make(map[string]*db.Snapshot),
 		heads:        make(map[string]*db.S0FSCommittedHead),
 		activeMounts: make(map[string][]*db.VolumeMount),
+		gcTombstones: make(map[string]map[string]time.Time),
 	}
 }
 
@@ -181,21 +184,70 @@ func (r *fakeRepo) GetS0FSCommittedHead(_ context.Context, volumeID string) (*db
 	return &copy, nil
 }
 
-func (r *fakeRepo) CompareAndSwapS0FSCommittedHead(_ context.Context, volumeID string, expectedManifestSeq uint64, head *db.S0FSCommittedHead) error {
+func (r *fakeRepo) CompareAndSwapS0FSCommittedHead(_ context.Context, volumeID string, expected, head *db.S0FSCommittedHead) error {
 	if _, ok := r.volumes[volumeID]; !ok {
 		return db.ErrNotFound
 	}
 	current, ok := r.heads[volumeID]
 	if !ok {
-		if expectedManifestSeq != 0 {
+		if expected != nil {
 			return db.ErrConflict
 		}
-	} else if current.ManifestSeq != expectedManifestSeq {
+	} else if expected == nil || current.VolumeID != expected.VolumeID || current.ManifestSeq != expected.ManifestSeq ||
+		current.CheckpointSeq != expected.CheckpointSeq || current.ManifestKey != expected.ManifestKey ||
+		current.ManifestDigest != expected.ManifestDigest || current.CommitID != expected.CommitID || current.Generation != expected.Generation ||
+		head.ManifestSeq <= current.ManifestSeq || head.Generation != current.Generation+1 {
 		return db.ErrConflict
 	}
 	copy := *head
 	r.heads[volumeID] = &copy
 	return nil
+}
+
+func (r *fakeRepo) BeginS0FSCommit(context.Context, string, string, *db.S0FSCommittedHead, time.Time) error {
+	return nil
+}
+
+func (r *fakeRepo) RenewS0FSCommit(context.Context, string, string, time.Time) error { return nil }
+func (r *fakeRepo) AbortS0FSCommit(context.Context, string, string) error            { return nil }
+func (r *fakeRepo) AcquireS0FSGarbageCollection(context.Context, string, string, *db.S0FSCommittedHead, time.Time) error {
+	return nil
+}
+func (r *fakeRepo) ReleaseS0FSGarbageCollection(context.Context, string, string) error { return nil }
+func (r *fakeRepo) ValidateS0FSGarbageCollection(context.Context, string, string, *db.S0FSCommittedHead) error {
+	return nil
+}
+func (r *fakeRepo) StageS0FSGarbageCollection(_ context.Context, volumeID string, _ string, _ *db.S0FSCommittedHead, candidates []string, deleteAfter time.Time) ([]string, error) {
+	now := r.gcNow
+	if now.IsZero() {
+		now = time.Now()
+	}
+	retained := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		retained[candidate] = struct{}{}
+	}
+	tombstones := r.gcTombstones[volumeID]
+	if tombstones == nil {
+		tombstones = make(map[string]time.Time)
+		r.gcTombstones[volumeID] = tombstones
+	}
+	for candidate := range tombstones {
+		if _, ok := retained[candidate]; !ok {
+			delete(tombstones, candidate)
+		}
+	}
+	var due []string
+	for _, candidate := range candidates {
+		deadline, ok := tombstones[candidate]
+		if !ok {
+			deadline = deleteAfter
+			tombstones[candidate] = deadline
+		}
+		if !deadline.After(now) {
+			due = append(due, candidate)
+		}
+	}
+	return due, nil
 }
 
 func (r *fakeRepo) GetActiveMounts(_ context.Context, volumeID string, _ int) ([]*db.VolumeMount, error) {

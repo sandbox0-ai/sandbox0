@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 )
 
@@ -29,6 +30,7 @@ const (
 const (
 	DefaultSegmentTargetSizeBytes uint64 = 4 << 20
 	defaultSegmentCacheMaxBytes   int64  = 64 << 20
+	defaultCommitIntentTTL               = 15 * time.Minute
 )
 
 var segmentCacheMaxBytes int64 = defaultSegmentCacheMaxBytes
@@ -36,12 +38,85 @@ var segmentCacheMaxBytes int64 = defaultSegmentCacheMaxBytes
 var ErrMaterializedManifestNotFound = errors.New("materialized manifest not found")
 
 type Manifest struct {
-	Version       int            `json:"version"`
-	VolumeID      string         `json:"volume_id"`
-	ManifestSeq   uint64         `json:"manifest_seq"`
-	CheckpointSeq uint64         `json:"checkpoint_seq"`
-	CreatedAt     time.Time      `json:"created_at"`
-	State         *SnapshotState `json:"state"`
+	Version              int            `json:"version"`
+	VolumeID             string         `json:"volume_id"`
+	ManifestSeq          uint64         `json:"manifest_seq"`
+	CheckpointSeq        uint64         `json:"checkpoint_seq"`
+	CommitID             string         `json:"commit_id,omitempty"`
+	StateDigest          string         `json:"state_digest,omitempty"`
+	ManifestDigest       string         `json:"manifest_digest,omitempty"`
+	ParentManifestKey    string         `json:"parent_manifest_key,omitempty"`
+	ParentManifestDigest string         `json:"parent_manifest_digest,omitempty"`
+	ParentCommitID       string         `json:"parent_commit_id,omitempty"`
+	ParentGeneration     uint64         `json:"parent_generation,omitempty"`
+	CreatedAt            time.Time      `json:"created_at"`
+	State                *SnapshotState `json:"state"`
+}
+
+type manifestCommitment struct {
+	Version              int    `json:"version"`
+	VolumeID             string `json:"volume_id"`
+	ManifestSeq          uint64 `json:"manifest_seq"`
+	CheckpointSeq        uint64 `json:"checkpoint_seq"`
+	CommitID             string `json:"commit_id"`
+	StateDigest          string `json:"state_digest"`
+	ParentManifestKey    string `json:"parent_manifest_key"`
+	ParentManifestDigest string `json:"parent_manifest_digest"`
+	ParentCommitID       string `json:"parent_commit_id"`
+	ParentGeneration     uint64 `json:"parent_generation"`
+	CreatedAtUnixNano    int64  `json:"created_at_unix_nano"`
+}
+
+func finalizeManifest(manifest *Manifest, parent *CommittedHead) error {
+	if manifest == nil || manifest.State == nil {
+		return fmt.Errorf("%w: manifest state is required", ErrInvalidInput)
+	}
+	if strings.TrimSpace(manifest.CommitID) == "" {
+		manifest.CommitID = uuid.NewString()
+	}
+	stateDigest, err := snapshotStateDigest(manifest.State)
+	if err != nil {
+		return err
+	}
+	if manifest.StateDigest != "" && manifest.StateDigest != stateDigest {
+		return fmt.Errorf("%w: manifest state digest mismatch", ErrCommittedStateIntegrity)
+	}
+	manifest.StateDigest = stateDigest
+	if parent != nil {
+		manifest.ParentManifestKey = parent.ManifestKey
+		manifest.ParentManifestDigest = parent.ManifestDigest
+		manifest.ParentCommitID = parent.CommitID
+		manifest.ParentGeneration = parent.Generation
+	}
+	manifest.ManifestDigest = calculateManifestDigest(manifest)
+	return nil
+}
+
+func calculateManifestDigest(manifest *Manifest) string {
+	if manifest == nil {
+		return ""
+	}
+	payload, _ := json.Marshal(manifestCommitment{
+		Version: manifest.Version, VolumeID: manifest.VolumeID, ManifestSeq: manifest.ManifestSeq,
+		CheckpointSeq: manifest.CheckpointSeq, CommitID: manifest.CommitID, StateDigest: manifest.StateDigest,
+		ParentManifestKey: manifest.ParentManifestKey, ParentManifestDigest: manifest.ParentManifestDigest,
+		ParentCommitID: manifest.ParentCommitID, ParentGeneration: manifest.ParentGeneration,
+		CreatedAtUnixNano: manifest.CreatedAt.UTC().UnixNano(),
+	})
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
+func committedHeadForManifest(manifest *Manifest, key string, parent *CommittedHead) *CommittedHead {
+	generation := uint64(1)
+	if parent != nil {
+		generation = parent.Generation + 1
+	}
+	return &CommittedHead{
+		VolumeID: manifest.VolumeID, ManifestSeq: manifest.ManifestSeq, CheckpointSeq: manifest.CheckpointSeq,
+		ManifestKey: key, ManifestDigest: manifest.ManifestDigest, CommitID: manifest.CommitID,
+		Generation: generation, UpdatedAt: manifest.CreatedAt,
+	}
 }
 
 type Materializer struct {
@@ -128,14 +203,18 @@ func (m *Materializer) loadCommittedHead(ctx context.Context) (*CommittedHead, e
 }
 
 func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64) (*Manifest, error) {
-	return m.materialize(ctx, state, expectedManifestSeq, false)
+	expected, err := m.expectedHeadForSequence(ctx, expectedManifestSeq)
+	if err != nil {
+		return nil, err
+	}
+	return m.materialize(ctx, state, expected, false)
 }
 
-func (m *Materializer) materializeOwned(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64) (*Manifest, error) {
-	return m.materialize(ctx, state, expectedManifestSeq, true)
+func (m *Materializer) materializeOwned(ctx context.Context, state *SnapshotState, expected *CommittedHead) (*Manifest, error) {
+	return m.materialize(ctx, state, expected, true)
 }
 
-func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64, owned bool) (*Manifest, error) {
+func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, expected *CommittedHead, owned bool) (*Manifest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -158,6 +237,10 @@ func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, ex
 	ensureMaterializableSequence(inline)
 
 	nextSeq := checkpointSequence(inline)
+	expectedManifestSeq := uint64(0)
+	if expected != nil {
+		expectedManifestSeq = expected.ManifestSeq
+	}
 	if nextSeq == 0 {
 		return nil, fmt.Errorf("%w: manifest sequence must be non-zero", ErrInvalidInput)
 	}
@@ -165,7 +248,8 @@ func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, ex
 		return nil, fmt.Errorf("%w: manifest seq %d must advance beyond %d", ErrCommittedHeadConflict, nextSeq, expectedManifestSeq)
 	}
 
-	manifestState, segments, err := buildMaterializedState(nextSeq, m.volumeID, inline, m.segmentTargetSize)
+	commitID := uuid.NewString()
+	manifestState, segments, err := buildMaterializedState(nextSeq, commitID, m.volumeID, inline, m.segmentTargetSize)
 	if err != nil {
 		return nil, err
 	}
@@ -174,11 +258,19 @@ func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, ex
 		VolumeID:      m.volumeID,
 		ManifestSeq:   nextSeq,
 		CheckpointSeq: checkpointSequence(inline),
+		CommitID:      commitID,
 		CreatedAt:     time.Now().UTC(),
 		State:         manifestState,
 	}
+	if err := m.beginCommit(ctx, commitID, expected); err != nil {
+		return nil, err
+	}
+	defer func() { _ = m.abortCommit(context.Background(), commitID) }()
 
 	for _, segment := range segments {
+		if err := m.renewCommit(ctx, commitID); err != nil {
+			return nil, err
+		}
 		storedSegmentPayload, segmentEncryption, err := m.encryption.encryptSegment(m.volumeID, segment)
 		if err != nil {
 			return nil, err
@@ -192,18 +284,22 @@ func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, ex
 		}
 		m.cache.put(segmentCacheKey(segment.VolumeID, segment.Key), segment.Payload)
 	}
-	if err := m.putManifest(ctx, manifestKey(nextSeq), manifest); err != nil {
+	if err := finalizeManifest(manifest, expected); err != nil {
+		return nil, err
+	}
+	key := manifestKey(nextSeq, commitID)
+	if err := m.renewCommit(ctx, commitID); err != nil {
+		return nil, err
+	}
+	if err := m.putManifest(ctx, key, manifest); err != nil {
 		return nil, err
 	}
 	if m.headStore != nil {
-		head := &CommittedHead{
-			VolumeID:      m.volumeID,
-			ManifestSeq:   manifest.ManifestSeq,
-			CheckpointSeq: manifest.CheckpointSeq,
-			ManifestKey:   manifestKey(manifest.ManifestSeq),
-			UpdatedAt:     manifest.CreatedAt,
+		head := committedHeadForManifest(manifest, key, expected)
+		if err := m.renewCommit(ctx, commitID); err != nil {
+			return nil, err
 		}
-		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, expectedManifestSeq, head); err != nil {
+		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, expected, head); err != nil {
 			return nil, err
 		}
 	} else if err := m.putManifest(ctx, manifestLatestKey, manifest); err != nil {
@@ -211,6 +307,53 @@ func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, ex
 	}
 
 	return manifest, nil
+}
+
+func (m *Materializer) beginCommit(ctx context.Context, commitID string, expected *CommittedHead) error {
+	coordinator, ok := m.headStore.(CommitCoordinator)
+	if !ok || coordinator == nil {
+		return nil
+	}
+	return coordinator.BeginCommit(ctx, m.volumeID, commitID, expected, time.Now().UTC().Add(defaultCommitIntentTTL))
+}
+
+func (m *Materializer) renewCommit(ctx context.Context, commitID string) error {
+	coordinator, ok := m.headStore.(CommitCoordinator)
+	if !ok || coordinator == nil {
+		return nil
+	}
+	return coordinator.RenewCommit(ctx, m.volumeID, commitID, time.Now().UTC().Add(defaultCommitIntentTTL))
+}
+
+func (m *Materializer) abortCommit(ctx context.Context, commitID string) error {
+	coordinator, ok := m.headStore.(CommitCoordinator)
+	if !ok || coordinator == nil || strings.TrimSpace(commitID) == "" {
+		return nil
+	}
+	return coordinator.AbortCommit(ctx, m.volumeID, commitID)
+}
+
+func (m *Materializer) expectedHeadForSequence(ctx context.Context, expectedManifestSeq uint64) (*CommittedHead, error) {
+	if m == nil || m.headStore == nil {
+		if expectedManifestSeq == 0 {
+			return nil, nil
+		}
+		return &CommittedHead{VolumeID: m.volumeID, ManifestSeq: expectedManifestSeq, CheckpointSeq: expectedManifestSeq}, nil
+	}
+	head, err := m.loadCommittedHead(ctx)
+	if errors.Is(err, ErrCommittedHeadNotFound) {
+		if expectedManifestSeq == 0 {
+			return nil, nil
+		}
+		return nil, ErrCommittedHeadConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+	if head.ManifestSeq != expectedManifestSeq {
+		return nil, ErrCommittedHeadConflict
+	}
+	return head, nil
 }
 
 func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]byte, error) {
@@ -231,51 +374,53 @@ func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]b
 		return nil, err
 	}
 	cacheKey := segmentCacheKey(volumeID, segment.Key)
-
-	if segment.Length > 0 && int64(segment.Length) <= segmentCacheMaxBytes {
-		if payload, ok := m.cache.get(cacheKey); ok {
-			return cloneByteRange(payload, off, limit), nil
-		}
-		if segment.Encryption != nil {
-			payload, err := m.encryption.decryptSegmentRange(store, volumeID, segment, 0, int64(segment.Length))
-			if err != nil {
-				return nil, err
-			}
-			m.cache.put(cacheKey, payload)
-			return cloneByteRange(payload, off, limit), nil
-		}
-		reader, err := store.Get(segment.Key, 0, int64(segment.Length))
-		if err != nil {
-			return nil, err
-		}
-		payload, readErr := io.ReadAll(reader)
-		closeErr := reader.Close()
-		if readErr != nil {
-			return nil, readErr
-		}
-		if closeErr != nil {
-			return nil, closeErr
-		}
-		m.cache.put(cacheKey, payload)
+	if payload, ok := m.cache.get(cacheKey); ok {
 		return cloneByteRange(payload, off, limit), nil
 	}
-
-	if segment.Encryption != nil {
-		return m.encryption.decryptSegmentRange(store, volumeID, segment, off, limit)
+	if segment.Length >= uint64(^uint64(0)>>1) {
+		return nil, fmt.Errorf("%w: segment %s length is too large", ErrCommittedStateIntegrity, segment.ID)
 	}
-	reader, err := store.Get(segment.Key, off, limit)
+	var payload []byte
+	if segment.Encryption != nil {
+		payload, err = m.encryption.decryptSegmentRange(store, volumeID, segment, 0, int64(segment.Length))
+	} else {
+		var reader io.ReadCloser
+		reader, err = store.Get(segment.Key, 0, int64(segment.Length))
+		if err == nil {
+			payload, err = io.ReadAll(io.LimitReader(reader, int64(segment.Length)+1))
+			closeErr := reader.Close()
+			if err == nil {
+				err = closeErr
+			}
+		}
+	}
 	if err != nil {
+		if objectstore.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: segment %s is missing: %w", ErrCommittedStateIntegrity, segment.Key, err)
+		}
 		return nil, err
 	}
-	payload, readErr := io.ReadAll(reader)
-	closeErr := reader.Close()
-	if readErr != nil {
-		return nil, readErr
+	if err := verifySegmentPayload(segment, payload); err != nil {
+		return nil, err
 	}
-	if closeErr != nil {
-		return nil, closeErr
+	if int64(len(payload)) <= segmentCacheMaxBytes {
+		m.cache.put(cacheKey, payload)
 	}
-	return payload, nil
+	return cloneByteRange(payload, off, limit), nil
+}
+
+func verifySegmentPayload(segment *Segment, payload []byte) error {
+	if segment == nil || uint64(len(payload)) != segment.Length {
+		return fmt.Errorf("%w: segment length mismatch", ErrCommittedStateIntegrity)
+	}
+	if segment.SHA256 == "" {
+		return nil
+	}
+	digest := sha256.Sum256(payload)
+	if hex.EncodeToString(digest[:]) != strings.ToLower(segment.SHA256) {
+		return fmt.Errorf("%w: segment %s checksum mismatch", ErrCommittedStateIntegrity, segment.Key)
+	}
+	return nil
 }
 
 func (m *Materializer) LoadLatestManifest(ctx context.Context) (*Manifest, error) {
@@ -289,7 +434,20 @@ func (m *Materializer) LoadLatestManifest(ctx context.Context) (*Manifest, error
 		head, err := m.loadCommittedHead(ctx)
 		switch {
 		case err == nil:
-			return m.loadManifestByKey(ctx, head.ManifestKey)
+			manifest, loadErr := m.loadManifestByKey(ctx, head.ManifestKey)
+			if loadErr != nil {
+				if errors.Is(loadErr, ErrMaterializedManifestNotFound) || objectstore.IsNotFound(loadErr) {
+					return nil, fmt.Errorf("%w: committed manifest %s is missing", ErrCommittedStateIntegrity, head.ManifestKey)
+				}
+				return nil, loadErr
+			}
+			if validateErr := validateManifestHead(head, manifest); validateErr != nil {
+				return nil, validateErr
+			}
+			if validateErr := m.validateRecoveryManifest(head.ManifestKey, head.ManifestSeq, manifest); validateErr != nil {
+				return nil, fmt.Errorf("%w: %w", ErrCommittedStateIntegrity, validateErr)
+			}
+			return manifest, nil
 		case !errors.Is(err, ErrCommittedHeadNotFound):
 			return nil, err
 		}
@@ -298,14 +456,8 @@ func (m *Materializer) LoadLatestManifest(ctx context.Context) (*Manifest, error
 		if err != nil {
 			return nil, err
 		}
-		head = &CommittedHead{
-			VolumeID:      m.volumeID,
-			ManifestSeq:   manifest.ManifestSeq,
-			CheckpointSeq: manifest.CheckpointSeq,
-			ManifestKey:   manifestKey(manifest.ManifestSeq),
-			UpdatedAt:     manifest.CreatedAt,
-		}
-		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, 0, head); err != nil {
+		head = committedHeadForManifest(manifest, manifestKey(manifest.ManifestSeq), nil)
+		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, nil, head); err != nil {
 			if errors.Is(err, ErrCommittedHeadConflict) {
 				return m.LoadLatestManifest(ctx)
 			}
@@ -361,24 +513,31 @@ func (m *Materializer) loadLatestEngineState(ctx context.Context, metadataPath s
 	}
 	state, manifest, err := m.loadManifestEngineStateByKey(ctx, key, metadataPath, metadataCacheBytes)
 	if err != nil {
+		if committed != nil && errors.Is(err, ErrInvalidInput) {
+			return nil, nil, fmt.Errorf("%w: %w", ErrCommittedStateIntegrity, err)
+		}
 		return nil, nil, err
 	}
 	if committed != nil {
+		if manifest.State != nil {
+			if validateErr := m.validateRecoveryManifest(key, committed.ManifestSeq, manifest); validateErr != nil {
+				state.close()
+				return nil, nil, fmt.Errorf("%w: %w", ErrCommittedStateIntegrity, validateErr)
+			}
+		}
 		if !committedHeadMatchesCheckpoint(committed, m.volumeID, state.checkpointSequence()) || manifest.ManifestSeq != committed.ManifestSeq {
 			state.close()
-			return nil, nil, fmt.Errorf("%w: committed head does not match manifest state", ErrInvalidInput)
+			return nil, nil, fmt.Errorf("%w: committed head does not match manifest state", ErrCommittedStateIntegrity)
+		}
+		if validateErr := validateManifestHead(committed, manifest); validateErr != nil {
+			state.close()
+			return nil, nil, validateErr
 		}
 		return state, manifest, nil
 	}
 	if m.headStore != nil {
-		head := &CommittedHead{
-			VolumeID:      m.volumeID,
-			ManifestSeq:   manifest.ManifestSeq,
-			CheckpointSeq: manifest.CheckpointSeq,
-			ManifestKey:   manifestKey(manifest.ManifestSeq),
-			UpdatedAt:     manifest.CreatedAt,
-		}
-		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, 0, head); err != nil {
+		head := committedHeadForManifest(manifest, manifestKey(manifest.ManifestSeq), nil)
+		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, nil, head); err != nil {
 			state.close()
 			if errors.Is(err, ErrCommittedHeadConflict) {
 				return m.loadLatestEngineState(ctx, metadataPath, metadataCacheBytes)
@@ -433,14 +592,26 @@ func (m *Materializer) loadManifestEngineStateByKey(ctx context.Context, key, me
 		return nil, nil, closeErr
 	}
 	state := &loadedEngineState{
-		metadata: metadata, nextSeq: stream.Header.NextSeq, nextInode: stream.Header.NextInode, metadataPath: metadataPath,
+		metadata: metadata, nextSeq: stream.Header.NextSeq, nextInode: stream.Header.NextInode,
+		metadataPath: metadataPath, stateDigest: stream.Metadata.StateDigest,
 	}
 	manifest := &Manifest{
-		Version:       StateFormatV2,
-		VolumeID:      m.volumeID,
-		ManifestSeq:   stream.Metadata.ManifestSeq,
-		CheckpointSeq: stream.Metadata.CheckpointSeq,
-		CreatedAt:     stream.Metadata.CreatedAt,
+		Version:              StateFormatV2,
+		VolumeID:             m.volumeID,
+		ManifestSeq:          stream.Metadata.ManifestSeq,
+		CheckpointSeq:        stream.Metadata.CheckpointSeq,
+		CreatedAt:            stream.Metadata.CreatedAt,
+		CommitID:             stream.Metadata.CommitID,
+		StateDigest:          stream.Metadata.StateDigest,
+		ManifestDigest:       stream.Metadata.ManifestDigest,
+		ParentManifestKey:    stream.Metadata.ParentManifestKey,
+		ParentManifestDigest: stream.Metadata.ParentManifestDigest,
+		ParentCommitID:       stream.Metadata.ParentCommitID,
+		ParentGeneration:     stream.Metadata.ParentGeneration,
+	}
+	if err := hydrateAndValidateManifest(manifest); err != nil {
+		state.close()
+		return nil, nil, err
 	}
 	root, ok := metadata.Node(RootInode)
 	if stream.Header.NextSeq == 0 || stream.Header.NextSeq-1 != manifest.ManifestSeq || manifest.CheckpointSeq != manifest.ManifestSeq || !ok || root.Type != TypeDirectory {
@@ -557,7 +728,7 @@ func (m *Materializer) loadUniqueManifestAtOrBefore(ctx context.Context, cutoff 
 	if err != nil {
 		return nil, err
 	}
-	if headBefore.ManifestSeq != headAfter.ManifestSeq || headBefore.ManifestKey != headAfter.ManifestKey {
+	if !sameCommittedHeadIdentity(headBefore, headAfter) {
 		return nil, fmt.Errorf("%w: committed head changed during legacy snapshot recovery", ErrCommittedHeadConflict)
 	}
 	return candidates[0], nil
@@ -573,7 +744,7 @@ func (m *Materializer) loadRecoveryHead(ctx context.Context) (*CommittedHead, er
 			return nil, err
 		}
 		if head == nil || head.VolumeID != m.volumeID || head.ManifestSeq == 0 ||
-			head.CheckpointSeq != head.ManifestSeq || head.ManifestKey != manifestKey(head.ManifestSeq) {
+			head.CheckpointSeq != head.ManifestSeq || strings.TrimSpace(head.ManifestKey) == "" {
 			return nil, fmt.Errorf("%w: invalid committed head for volume %s", ErrInvalidInput, m.volumeID)
 		}
 		copy := *head
@@ -587,13 +758,7 @@ func (m *Materializer) loadRecoveryHead(ctx context.Context) (*CommittedHead, er
 	if err := m.validateRecoveryManifest(manifestKey(manifest.ManifestSeq), manifest.ManifestSeq, manifest); err != nil {
 		return nil, err
 	}
-	return &CommittedHead{
-		VolumeID:      manifest.VolumeID,
-		ManifestSeq:   manifest.ManifestSeq,
-		CheckpointSeq: manifest.CheckpointSeq,
-		ManifestKey:   manifestKey(manifest.ManifestSeq),
-		UpdatedAt:     manifest.CreatedAt,
-	}, nil
+	return committedHeadForManifest(manifest, manifestKey(manifest.ManifestSeq), nil), nil
 }
 
 func (m *Materializer) validateRecoveryManifest(key string, keySequence uint64, manifest *Manifest) error {
@@ -663,7 +828,7 @@ func (m *Materializer) validateCommittedStateSegments(ctx context.Context, state
 		return fmt.Errorf("%w: state is required", ErrCommittedStateIntegrity)
 	}
 	if err := m.validateRecoverySegments(ctx, state); err != nil {
-		return fmt.Errorf("%w: %w", ErrCommittedStateIntegrity, err)
+		return classifyCommittedSegmentValidationError(err)
 	}
 	return nil
 }
@@ -680,9 +845,21 @@ func (m *Materializer) validateCommittedLoadedStateSegments(ctx context.Context,
 		return fmt.Errorf("%w: state metadata is required", ErrCommittedStateIntegrity)
 	}
 	if err := sqliteState.validateSegments(ctx, m); err != nil {
-		return fmt.Errorf("%w: %w", ErrCommittedStateIntegrity, err)
+		return classifyCommittedSegmentValidationError(err)
 	}
 	return nil
+}
+
+func classifyCommittedSegmentValidationError(err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, ErrInvalidInput) || errors.Is(err, ErrCommittedStateIntegrity) || objectstore.IsNotFound(err) {
+		return fmt.Errorf("%w: %w", ErrCommittedStateIntegrity, err)
+	}
+	// Provider transport errors and 5xx responses are availability failures,
+	// not proof that an immutable committed object is missing or corrupt.
+	return err
 }
 
 type materializedSegment struct {
@@ -694,7 +871,7 @@ type materializedSegment struct {
 	Encryption *SegmentEncryption
 }
 
-func buildMaterializedState(manifestSeq uint64, volumeID string, state *SnapshotState, targetSize uint64) (*SnapshotState, []*materializedSegment, error) {
+func buildMaterializedState(manifestSeq uint64, commitID, volumeID string, state *SnapshotState, targetSize uint64) (*SnapshotState, []*materializedSegment, error) {
 	manifestState := &SnapshotState{
 		NextSeq:   state.NextSeq,
 		NextInode: state.NextInode,
@@ -705,7 +882,7 @@ func buildMaterializedState(manifestSeq uint64, volumeID string, state *Snapshot
 		Segments:  make(map[string]*Segment),
 	}
 
-	builder := newSegmentBuilder(manifestSeq, volumeID, targetSize)
+	builder := newSegmentBuilder(manifestSeq, commitID, volumeID, targetSize)
 	inodes := make([]uint64, 0, len(state.Data)+len(state.ColdFiles))
 	seen := make(map[uint64]struct{}, len(state.Data)+len(state.ColdFiles))
 	for inode := range state.Data {
@@ -795,6 +972,7 @@ func materializeFileExtents(builder *segmentBuilder, state, manifestState *Snaps
 
 type segmentBuilder struct {
 	manifestSeq uint64
+	commitID    string
 	volumeID    string
 	targetSize  uint64
 	nextIndex   int
@@ -802,12 +980,13 @@ type segmentBuilder struct {
 	segments    []*materializedSegment
 }
 
-func newSegmentBuilder(manifestSeq uint64, volumeID string, targetSize uint64) *segmentBuilder {
+func newSegmentBuilder(manifestSeq uint64, commitID, volumeID string, targetSize uint64) *segmentBuilder {
 	if targetSize == 0 {
 		targetSize = DefaultSegmentTargetSizeBytes
 	}
 	return &segmentBuilder{
 		manifestSeq: manifestSeq,
+		commitID:    commitID,
 		volumeID:    volumeID,
 		targetSize:  targetSize,
 	}
@@ -845,7 +1024,10 @@ func (b *segmentBuilder) ensureCurrent() *materializedSegment {
 	if b.current != nil && uint64(len(b.current.Payload)) < b.targetSize {
 		return b.current
 	}
-	segmentID := fmt.Sprintf("%020d-%d", b.manifestSeq, b.nextIndex)
+	segmentID := fmt.Sprintf("%s-%d", b.commitID, b.nextIndex)
+	if b.commitID == "" {
+		segmentID = fmt.Sprintf("%020d-%d", b.manifestSeq, b.nextIndex)
+	}
 	b.nextIndex++
 	b.current = &materializedSegment{
 		ID:       segmentID,
@@ -865,7 +1047,10 @@ func (b *segmentBuilder) finish() []*materializedSegment {
 	return b.segments
 }
 
-func manifestKey(seq uint64) string {
+func manifestKey(seq uint64, commitIDs ...string) string {
+	if len(commitIDs) > 0 && strings.TrimSpace(commitIDs[0]) != "" {
+		return fmt.Sprintf("%s/%020d-%s.json", manifestDir, seq, strings.TrimSpace(commitIDs[0]))
+	}
 	return fmt.Sprintf("%s/%020d.json", manifestDir, seq)
 }
 
@@ -879,7 +1064,11 @@ func immutableManifestSequence(key string) (uint64, bool) {
 	if name == key || !strings.HasSuffix(name, suffix) {
 		return 0, false
 	}
-	digits := strings.TrimSuffix(name, suffix)
+	base := strings.TrimSuffix(name, suffix)
+	digits := base
+	if separator := strings.IndexByte(base, '-'); separator >= 0 {
+		digits = base[:separator]
+	}
 	if len(digits) != 20 {
 		return 0, false
 	}
@@ -911,10 +1100,11 @@ func (m *Materializer) putManifest(ctx context.Context, key string, manifest *Ma
 		return m.putJSON(ctx, key, manifest)
 	}
 	return m.putMetadataStateV2(ctx, key, newEagerMetadataStore(manifest.State), manifest.State.NextSeq, manifest.State.NextInode, stateV2Metadata{
-		Role:          StateV2Role_STATE_V2_ROLE_MANIFEST,
-		ManifestSeq:   manifest.ManifestSeq,
-		CheckpointSeq: manifest.CheckpointSeq,
-		CreatedAt:     manifest.CreatedAt,
+		Role: StateV2Role_STATE_V2_ROLE_MANIFEST, ManifestSeq: manifest.ManifestSeq,
+		CheckpointSeq: manifest.CheckpointSeq, CreatedAt: manifest.CreatedAt,
+		CommitID: manifest.CommitID, StateDigest: manifest.StateDigest, ManifestDigest: manifest.ManifestDigest,
+		ParentManifestKey: manifest.ParentManifestKey, ParentManifestDigest: manifest.ParentManifestDigest,
+		ParentCommitID: manifest.ParentCommitID, ParentGeneration: manifest.ParentGeneration,
 	})
 }
 
@@ -924,14 +1114,25 @@ func (m *Materializer) getManifest(ctx context.Context, key string) (*Manifest, 
 		return nil, err
 	}
 	if result != nil {
-		return &Manifest{
-			Version:       StateFormatV2,
-			VolumeID:      m.volumeID,
-			ManifestSeq:   result.Metadata.ManifestSeq,
-			CheckpointSeq: result.Metadata.CheckpointSeq,
-			CreatedAt:     result.Metadata.CreatedAt,
-			State:         result.State,
-		}, nil
+		manifest := &Manifest{
+			Version:              StateFormatV2,
+			VolumeID:             m.volumeID,
+			ManifestSeq:          result.Metadata.ManifestSeq,
+			CheckpointSeq:        result.Metadata.CheckpointSeq,
+			CreatedAt:            result.Metadata.CreatedAt,
+			CommitID:             result.Metadata.CommitID,
+			StateDigest:          result.Metadata.StateDigest,
+			ManifestDigest:       result.Metadata.ManifestDigest,
+			ParentManifestKey:    result.Metadata.ParentManifestKey,
+			ParentManifestDigest: result.Metadata.ParentManifestDigest,
+			ParentCommitID:       result.Metadata.ParentCommitID,
+			ParentGeneration:     result.Metadata.ParentGeneration,
+			State:                result.State,
+		}
+		if err := hydrateAndValidateManifest(manifest); err != nil {
+			return nil, err
+		}
+		return manifest, nil
 	}
 	started := time.Now()
 	var manifest Manifest
@@ -939,8 +1140,47 @@ func (m *Materializer) getManifest(ctx context.Context, key string) (*Manifest, 
 		m.observeOpenPhase("decode", "remote", StateFormatV1, started, int64(len(legacy)), nil, err)
 		return nil, fmt.Errorf("decode %s: %w", key, err)
 	}
+	if err := hydrateAndValidateManifest(&manifest); err != nil {
+		return nil, err
+	}
 	m.observeOpenPhase("decode", "remote", StateFormatV1, started, int64(len(legacy)), manifest.State, nil)
 	return &manifest, nil
+}
+
+func hydrateAndValidateManifest(manifest *Manifest) error {
+	if manifest == nil {
+		return fmt.Errorf("%w: manifest is required", ErrCommittedStateIntegrity)
+	}
+	if manifest.State != nil {
+		stateDigest, err := snapshotStateDigest(manifest.State)
+		if err != nil {
+			return err
+		}
+		if manifest.StateDigest != "" && manifest.StateDigest != stateDigest {
+			return fmt.Errorf("%w: manifest state digest mismatch", ErrCommittedStateIntegrity)
+		}
+		manifest.StateDigest = stateDigest
+	}
+	calculated := calculateManifestDigest(manifest)
+	if manifest.ManifestDigest != "" && manifest.ManifestDigest != calculated {
+		return fmt.Errorf("%w: manifest digest mismatch", ErrCommittedStateIntegrity)
+	}
+	manifest.ManifestDigest = calculated
+	return nil
+}
+
+func validateManifestHead(head *CommittedHead, manifest *Manifest) error {
+	if head == nil || manifest == nil || head.VolumeID != manifest.VolumeID ||
+		head.ManifestSeq != manifest.ManifestSeq || head.CheckpointSeq != manifest.CheckpointSeq {
+		return fmt.Errorf("%w: committed head does not identify the loaded manifest", ErrCommittedStateIntegrity)
+	}
+	if head.ManifestDigest != "" && head.ManifestDigest != manifest.ManifestDigest {
+		return fmt.Errorf("%w: committed manifest digest mismatch", ErrCommittedStateIntegrity)
+	}
+	if head.CommitID != "" && head.CommitID != manifest.CommitID {
+		return fmt.Errorf("%w: committed manifest id mismatch", ErrCommittedStateIntegrity)
+	}
+	return nil
 }
 
 func (m *Materializer) putSnapshotState(ctx context.Context, key string, state *SnapshotState) error {

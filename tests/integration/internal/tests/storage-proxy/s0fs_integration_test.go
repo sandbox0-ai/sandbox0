@@ -35,20 +35,23 @@ func (s *integrationHeadStore) LoadCommittedHead(_ context.Context, volumeID str
 	return &clone, nil
 }
 
-func (s *integrationHeadStore) CompareAndSwapCommittedHead(_ context.Context, volumeID string, expectedManifestSeq uint64, head *s0fs.CommittedHead) error {
+func (s *integrationHeadStore) CompareAndSwapCommittedHead(_ context.Context, volumeID string, expected, head *s0fs.CommittedHead) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	current := s.heads[volumeID]
 	if current == nil {
-		if expectedManifestSeq != 0 {
+		if expected != nil {
 			return s0fs.ErrCommittedHeadConflict
 		}
 		clone := *head
 		s.heads[volumeID] = &clone
 		return nil
 	}
-	if current.ManifestSeq != expectedManifestSeq || head.ManifestSeq <= current.ManifestSeq {
+	if expected == nil || current.VolumeID != expected.VolumeID || current.ManifestSeq != expected.ManifestSeq ||
+		current.CheckpointSeq != expected.CheckpointSeq || current.ManifestKey != expected.ManifestKey ||
+		current.ManifestDigest != expected.ManifestDigest || current.CommitID != expected.CommitID || current.Generation != expected.Generation ||
+		head.ManifestSeq <= current.ManifestSeq || head.Generation != current.Generation+1 {
 		return s0fs.ErrCommittedHeadConflict
 	}
 	clone := *head

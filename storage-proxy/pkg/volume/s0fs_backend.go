@@ -2,6 +2,7 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -286,6 +287,10 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 			case <-ticker.C:
 				result, err := volCtx.SyncMaterialize(ctx)
 				if err != nil {
+					if errors.Is(err, s0fs.ErrCommittedStateIntegrity) || errors.Is(err, s0fs.ErrCommittedHeadConflict) {
+						b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Error("S0FS stopped after a terminal consistency failure")
+						return
+					}
 					b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to materialize s0fs volume")
 					continue
 				}
@@ -293,6 +298,10 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 			case <-compactionC:
 				materialization, result, err := volCtx.Compact(ctx, compactionOptions)
 				if err != nil {
+					if errors.Is(err, s0fs.ErrCommittedStateIntegrity) || errors.Is(err, s0fs.ErrCommittedHeadConflict) {
+						b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Error("S0FS stopped after a terminal consistency failure")
+						return
+					}
 					b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("Failed to compact s0fs volume")
 					continue
 				}

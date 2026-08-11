@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -27,13 +28,19 @@ func TestS0FSCommittedHeadCompareAndSwapLifecycle(t *testing.T) {
 	createTestSandboxVolume(t, repo, volumeID)
 
 	headOne := &S0FSCommittedHead{
-		VolumeID:      volumeID,
-		ManifestSeq:   7,
-		CheckpointSeq: 7,
-		ManifestKey:   "manifests/00000000000000000007.json",
-		UpdatedAt:     time.Now().UTC(),
+		VolumeID:       volumeID,
+		ManifestSeq:    7,
+		CheckpointSeq:  7,
+		ManifestKey:    "manifests/00000000000000000007.json",
+		ManifestDigest: "digest-7",
+		CommitID:       "commit-7",
+		Generation:     1,
+		UpdatedAt:      time.Now().UTC(),
 	}
-	if err := repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, 0, headOne); err != nil {
+	if err := repo.BeginS0FSCommit(ctx, volumeID, headOne.CommitID, nil, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("BeginS0FSCommit(first) error = %v", err)
+	}
+	if err := repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, nil, headOne); err != nil {
 		t.Fatalf("CompareAndSwapS0FSCommittedHead(insert) error = %v", err)
 	}
 
@@ -46,16 +53,22 @@ func TestS0FSCommittedHeadCompareAndSwapLifecycle(t *testing.T) {
 	}
 
 	headTwo := &S0FSCommittedHead{
-		VolumeID:      volumeID,
-		ManifestSeq:   9,
-		CheckpointSeq: 9,
-		ManifestKey:   "manifests/00000000000000000009.json",
-		UpdatedAt:     time.Now().UTC(),
+		VolumeID:       volumeID,
+		ManifestSeq:    9,
+		CheckpointSeq:  9,
+		ManifestKey:    "manifests/00000000000000000009.json",
+		ManifestDigest: "digest-9",
+		CommitID:       "commit-9",
+		Generation:     2,
+		UpdatedAt:      time.Now().UTC(),
 	}
-	if err := repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, 0, headTwo); err != ErrConflict {
+	if err := repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, nil, headTwo); err != ErrConflict {
 		t.Fatalf("CompareAndSwapS0FSCommittedHead(stale insert) err = %v, want %v", err, ErrConflict)
 	}
-	if err := repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, headOne.ManifestSeq, headTwo); err != nil {
+	if err := repo.BeginS0FSCommit(ctx, volumeID, headTwo.CommitID, headOne, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("BeginS0FSCommit(second) error = %v", err)
+	}
+	if err := repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, headOne, headTwo); err != nil {
 		t.Fatalf("CompareAndSwapS0FSCommittedHead(update) error = %v", err)
 	}
 	loaded, err = repo.GetS0FSCommittedHead(ctx, volumeID)
@@ -64,6 +77,134 @@ func TestS0FSCommittedHeadCompareAndSwapLifecycle(t *testing.T) {
 	}
 	if loaded.ManifestSeq != headTwo.ManifestSeq || loaded.ManifestKey != headTwo.ManifestKey {
 		t.Fatalf("loaded head after update = %+v, want %+v", loaded, headTwo)
+	}
+}
+
+func TestS0FSConcurrentInitialCommitsReturnExactCASConflict(t *testing.T) {
+	repo := newS0FSCommittedHeadTestRepository(t)
+	if repo == nil {
+		return
+	}
+
+	ctx := context.Background()
+	volumeID := "vol-" + uuid.NewString()
+	createTestSandboxVolume(t, repo, volumeID)
+	heads := []*S0FSCommittedHead{
+		{
+			VolumeID: volumeID, ManifestSeq: 1, CheckpointSeq: 1,
+			ManifestKey: "manifests/00000000000000000001-a.json", ManifestDigest: "digest-a",
+			CommitID: "commit-a", Generation: 1, UpdatedAt: time.Now().UTC(),
+		},
+		{
+			VolumeID: volumeID, ManifestSeq: 1, CheckpointSeq: 1,
+			ManifestKey: "manifests/00000000000000000001-b.json", ManifestDigest: "digest-b",
+			CommitID: "commit-b", Generation: 1, UpdatedAt: time.Now().UTC(),
+		},
+	}
+	for _, head := range heads {
+		if err := repo.BeginS0FSCommit(ctx, volumeID, head.CommitID, nil, time.Now().Add(time.Minute)); err != nil {
+			t.Fatalf("BeginS0FSCommit(%s) error = %v", head.CommitID, err)
+		}
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, len(heads))
+	for _, head := range heads {
+		head := head
+		go func() {
+			<-start
+			results <- repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, nil, head)
+		}()
+	}
+	close(start)
+
+	var succeeded, conflicted int
+	for range heads {
+		switch err := <-results; {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrConflict):
+			conflicted++
+		default:
+			t.Fatalf("concurrent initial CAS returned non-conflict error: %v", err)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("concurrent initial CAS results = succeeded:%d conflicted:%d, want 1/1", succeeded, conflicted)
+	}
+}
+
+func TestS0FSCommitAndGarbageCollectionFencingWithDurableGrace(t *testing.T) {
+	repo := newS0FSCommittedHeadTestRepository(t)
+	if repo == nil {
+		return
+	}
+
+	ctx := context.Background()
+	volumeID := "vol-" + uuid.NewString()
+	createTestSandboxVolume(t, repo, volumeID)
+	head := &S0FSCommittedHead{
+		VolumeID: volumeID, ManifestSeq: 2, CheckpointSeq: 2,
+		ManifestKey: "manifests/00000000000000000002-base.json", ManifestDigest: "digest-base",
+		CommitID: "commit-base", Generation: 1, UpdatedAt: time.Now().UTC(),
+	}
+	if err := repo.BeginS0FSCommit(ctx, volumeID, head.CommitID, nil, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("BeginS0FSCommit(base) error = %v", err)
+	}
+	if err := repo.CompareAndSwapS0FSCommittedHead(ctx, volumeID, nil, head); err != nil {
+		t.Fatalf("CompareAndSwapS0FSCommittedHead(base) error = %v", err)
+	}
+
+	gcToken := "gc-" + uuid.NewString()
+	if err := repo.AcquireS0FSGarbageCollection(ctx, volumeID, gcToken, head, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("AcquireS0FSGarbageCollection() error = %v", err)
+	}
+	if err := repo.BeginS0FSCommit(ctx, volumeID, "commit-blocked", head, time.Now().Add(time.Minute)); err != ErrConflict {
+		t.Fatalf("BeginS0FSCommit(during GC) error = %v, want ErrConflict", err)
+	}
+	if err := repo.ReleaseS0FSGarbageCollection(ctx, volumeID, gcToken); err != nil {
+		t.Fatalf("ReleaseS0FSGarbageCollection() error = %v", err)
+	}
+
+	commitID := "commit-" + uuid.NewString()
+	if err := repo.BeginS0FSCommit(ctx, volumeID, commitID, head, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("BeginS0FSCommit() error = %v", err)
+	}
+	if err := repo.AcquireS0FSGarbageCollection(ctx, volumeID, gcToken, head, time.Now().Add(time.Minute)); err != ErrConflict {
+		t.Fatalf("AcquireS0FSGarbageCollection(during commit) error = %v, want ErrConflict", err)
+	}
+	if err := repo.AbortS0FSCommit(ctx, volumeID, commitID); err != nil {
+		t.Fatalf("AbortS0FSCommit() error = %v", err)
+	}
+	if err := repo.AcquireS0FSGarbageCollection(ctx, volumeID, gcToken, head, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("AcquireS0FSGarbageCollection(after abort) error = %v", err)
+	}
+
+	candidates := []string{"segments/orphan.bin", "manifests/orphan.json"}
+	due, err := repo.StageS0FSGarbageCollection(ctx, volumeID, gcToken, head, candidates, time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("StageS0FSGarbageCollection(first) error = %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("new tombstones due = %v, want none before grace", due)
+	}
+	if _, err := repo.pool.Exec(ctx, `
+		UPDATE sandbox_volume_s0fs_gc_tombstones SET delete_after = NOW() - INTERVAL '1 second'
+		WHERE volume_id = $1
+	`, volumeID); err != nil {
+		t.Fatalf("expire tombstones: %v", err)
+	}
+	due, err = repo.StageS0FSGarbageCollection(ctx, volumeID, gcToken, head, candidates, time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("StageS0FSGarbageCollection(second) error = %v", err)
+	}
+	if len(due) != len(candidates) {
+		t.Fatalf("grace-expired tombstones due = %v, want %v", due, candidates)
+	}
+	staleHead := *head
+	staleHead.ManifestDigest = "stale"
+	if err := repo.ValidateS0FSGarbageCollection(ctx, volumeID, gcToken, &staleHead); err != ErrConflict {
+		t.Fatalf("ValidateS0FSGarbageCollection(stale head) error = %v, want ErrConflict", err)
 	}
 }
 
@@ -79,24 +220,33 @@ func TestS0FSHeadStoreAdapterMapsConflicts(t *testing.T) {
 	store := NewS0FSHeadStore(repo)
 
 	first := &s0fs.CommittedHead{
-		VolumeID:      volumeID,
-		ManifestSeq:   3,
-		CheckpointSeq: 3,
-		ManifestKey:   "manifests/00000000000000000003.json",
-		UpdatedAt:     time.Now().UTC(),
+		VolumeID:       volumeID,
+		ManifestSeq:    3,
+		CheckpointSeq:  3,
+		ManifestKey:    "manifests/00000000000000000003.json",
+		ManifestDigest: "digest-3",
+		CommitID:       "commit-3",
+		Generation:     1,
+		UpdatedAt:      time.Now().UTC(),
 	}
-	if err := store.CompareAndSwapCommittedHead(ctx, volumeID, 0, first); err != nil {
+	if err := store.BeginCommit(ctx, volumeID, first.CommitID, nil, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("BeginCommit(first) error = %v", err)
+	}
+	if err := store.CompareAndSwapCommittedHead(ctx, volumeID, nil, first); err != nil {
 		t.Fatalf("CompareAndSwapCommittedHead(first) error = %v", err)
 	}
 
 	second := &s0fs.CommittedHead{
-		VolumeID:      volumeID,
-		ManifestSeq:   4,
-		CheckpointSeq: 4,
-		ManifestKey:   "manifests/00000000000000000004.json",
-		UpdatedAt:     time.Now().UTC(),
+		VolumeID:       volumeID,
+		ManifestSeq:    4,
+		CheckpointSeq:  4,
+		ManifestKey:    "manifests/00000000000000000004.json",
+		ManifestDigest: "digest-4",
+		CommitID:       "commit-4",
+		Generation:     2,
+		UpdatedAt:      time.Now().UTC(),
 	}
-	if err := store.CompareAndSwapCommittedHead(ctx, volumeID, 0, second); err != s0fs.ErrCommittedHeadConflict {
+	if err := store.CompareAndSwapCommittedHead(ctx, volumeID, nil, second); err != s0fs.ErrCommittedHeadConflict {
 		t.Fatalf("CompareAndSwapCommittedHead(conflict) err = %v, want %v", err, s0fs.ErrCommittedHeadConflict)
 	}
 
@@ -315,6 +465,7 @@ func newS0FSCommittedHeadTestRepository(t *testing.T) *Repository {
 	schema := fmt.Sprintf("storage_proxy_s0fs_head_test_%s", strings.ReplaceAll(uuid.NewString(), "-", ""))
 	pool, err := dbpool.New(ctx, dbpool.Options{
 		DatabaseURL: dbURL,
+		MaxConns:    4,
 		Schema:      schema,
 	})
 	if err != nil {

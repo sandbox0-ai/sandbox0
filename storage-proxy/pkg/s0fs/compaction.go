@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type CompactionOptions struct {
@@ -40,45 +42,89 @@ func (e *Engine) Compact(ctx context.Context, opts CompactionOptions) (*Manifest
 	version := e.mutationVersion
 	state := e.currentStateLocked()
 	expectedManifestSeq := e.lastCommittedManifest
+	expected := cloneCommittedHead(e.lastCommittedHead)
 	if state.NextSeq <= expectedManifestSeq+1 {
 		state.NextSeq = expectedManifestSeq + 2
 	}
 	e.mu.RUnlock()
 
-	manifest, result, err := e.materializer.compactOwned(ctx, state, expectedManifestSeq, opts)
+	manifest, result, err := e.materializer.prepareCompaction(ctx, state, expected, opts, true)
 	if err != nil || manifest == nil {
+		e.failClosed(err)
 		return manifest, result, err
 	}
+	defer func() { _ = e.materializer.abortCommit(context.Background(), manifest.CommitID) }()
+
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.mutationVersion == version && e.lastCommittedManifest == expectedManifestSeq {
-		e.replaceStateLocked(cloneState(manifest.State))
-		if err := e.persistCurrentStateLocked(); err != nil {
-			return nil, nil, err
-		}
-		if err := e.wal.reset(); err != nil {
-			return nil, nil, err
-		}
-		e.refreshLocalDiskGuardLocked()
-		e.lastCommittedManifest = manifest.ManifestSeq
-		e.lastMaterializedVersion = e.mutationVersion
-		e.dirty = false
-	} else if manifest.ManifestSeq > e.lastCommittedManifest {
-		e.lastCommittedManifest = manifest.ManifestSeq
+	if err := e.checkOpen(); err != nil {
+		return nil, nil, err
 	}
+	if e.mutationVersion != version || e.lastCommittedManifest != expectedManifestSeq || !sameCommittedHeadIdentity(e.lastCommittedHead, expected) {
+		// Mutations may proceed while immutable compaction objects are being
+		// prepared. If they do, leave the committed head and live state untouched;
+		// the unique candidate objects are safe for a later fenced GC pass.
+		return nil, nil, nil
+	}
+	if err := e.materializer.publishManifest(ctx, manifest, expected); err != nil {
+		e.failClosed(err)
+		return nil, nil, err
+	}
+	committedHead := committedHeadForManifest(manifest, manifestKey(manifest.ManifestSeq, manifest.CommitID), expected)
+	e.lastCommittedManifest = manifest.ManifestSeq
+	e.lastCommittedHead = committedHead
+	installFailed := func(phase string, installErr error) (*Manifest, *CompactionResult, error) {
+		terminalErr := fmt.Errorf("%w: %s after committed compaction: %w", ErrCommittedHeadConflict, phase, installErr)
+		e.failClosed(terminalErr)
+		return nil, nil, terminalErr
+	}
+	if err := e.persistStateLocked(manifest.State, true); err != nil {
+		return installFailed("persist local state", err)
+	}
+	if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, committedHead, manifest.StateDigest); err != nil {
+		return installFailed("persist local binding", err)
+	}
+	if err := saveRecoveryBinding(walBaseBindingPath(e.wal.path), e.volumeID, committedHead, ""); err != nil {
+		return installFailed("persist wal base", err)
+	}
+	if err := e.wal.reset(); err != nil {
+		return installFailed("reset wal", err)
+	}
+	if err := e.replaceStateLocked(cloneState(manifest.State)); err != nil {
+		return installFailed("install local state", err)
+	}
+	e.refreshLocalDiskGuardLocked()
+	e.lastMaterializedVersion = e.mutationVersion
+	e.dirty = false
 	return manifest, result, nil
 }
 
 func (m *Materializer) Compact(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64, opts CompactionOptions) (*Manifest, *CompactionResult, error) {
-	return m.compact(ctx, state, expectedManifestSeq, opts, false)
+	expected, err := m.expectedHeadForSequence(ctx, expectedManifestSeq)
+	if err != nil {
+		return nil, nil, err
+	}
+	return m.compact(ctx, state, expected, opts, false)
 }
 
-func (m *Materializer) compactOwned(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64, opts CompactionOptions) (*Manifest, *CompactionResult, error) {
-	return m.compact(ctx, state, expectedManifestSeq, opts, true)
+func (m *Materializer) compact(ctx context.Context, state *SnapshotState, expected *CommittedHead, opts CompactionOptions, owned bool) (*Manifest, *CompactionResult, error) {
+	manifest, result, err := m.prepareCompaction(ctx, state, expected, opts, owned)
+	if err != nil || manifest == nil {
+		return manifest, result, err
+	}
+	if err := m.publishManifest(ctx, manifest, expected); err != nil {
+		return nil, nil, err
+	}
+	return manifest, result, nil
 }
 
-func (m *Materializer) compact(ctx context.Context, state *SnapshotState, expectedManifestSeq uint64, opts CompactionOptions, owned bool) (*Manifest, *CompactionResult, error) {
+// prepareCompaction uploads the immutable objects for a candidate compacted
+// state without making that state authoritative. The engine must revalidate
+// its mutation version before publishing the prepared manifest.
+func (m *Materializer) prepareCompaction(ctx context.Context, state *SnapshotState, expected *CommittedHead, opts CompactionOptions, owned bool) (*Manifest, *CompactionResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -91,6 +137,10 @@ func (m *Materializer) compact(ctx context.Context, state *SnapshotState, expect
 	}
 	normalizeState(inline)
 	defaultSegmentVolumeIDs(inline, m.volumeID)
+	expectedManifestSeq := uint64(0)
+	if expected != nil {
+		expectedManifestSeq = expected.ManifestSeq
+	}
 	if inline.NextSeq <= expectedManifestSeq+1 {
 		inline.NextSeq = expectedManifestSeq + 2
 	}
@@ -100,10 +150,11 @@ func (m *Materializer) compact(ctx context.Context, state *SnapshotState, expect
 	}
 
 	selected, result := planCompactionSegments(inline, opts)
-	if len(selected) == 0 && !hasInlineSegments(inline) {
+	if len(selected) == 0 && !hasInlineSegments(inline) && !opts.Force {
 		return nil, result, nil
 	}
-	manifestState, segments, err := buildCompactedState(ctx, m, nextSeq, m.volumeID, inline, selected, opts.SegmentTargetSize)
+	commitID := uuid.NewString()
+	manifestState, segments, err := buildCompactedState(ctx, m, nextSeq, commitID, m.volumeID, inline, selected, opts.SegmentTargetSize)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -112,10 +163,23 @@ func (m *Materializer) compact(ctx context.Context, state *SnapshotState, expect
 		VolumeID:      m.volumeID,
 		ManifestSeq:   nextSeq,
 		CheckpointSeq: checkpointSequence(inline),
+		CommitID:      commitID,
 		CreatedAt:     time.Now().UTC(),
 		State:         manifestState,
 	}
+	if err := m.beginCommit(ctx, commitID, expected); err != nil {
+		return nil, nil, err
+	}
+	keepIntent := false
+	defer func() {
+		if !keepIntent {
+			_ = m.abortCommit(context.Background(), commitID)
+		}
+	}()
 	for _, segment := range segments {
+		if err := m.renewCommit(ctx, commitID); err != nil {
+			return nil, nil, err
+		}
 		storedSegmentPayload, segmentEncryption, err := m.encryption.encryptSegment(m.volumeID, segment)
 		if err != nil {
 			return nil, nil, err
@@ -129,24 +193,37 @@ func (m *Materializer) compact(ctx context.Context, state *SnapshotState, expect
 		}
 		m.cache.put(segmentCacheKey(segment.VolumeID, segment.Key), segment.Payload)
 	}
-	if err := m.putManifest(ctx, manifestKey(nextSeq), manifest); err != nil {
+	if err := finalizeManifest(manifest, expected); err != nil {
 		return nil, nil, err
+	}
+	if err := m.renewCommit(ctx, commitID); err != nil {
+		return nil, nil, err
+	}
+	if err := m.putManifest(ctx, manifestKey(nextSeq, commitID), manifest); err != nil {
+		return nil, nil, err
+	}
+	keepIntent = true
+	return manifest, result, nil
+}
+
+func (m *Materializer) publishManifest(ctx context.Context, manifest *Manifest, expected *CommittedHead) error {
+	if manifest == nil {
+		return fmt.Errorf("%w: manifest is required", ErrInvalidInput)
 	}
 	if m.headStore != nil {
-		head := &CommittedHead{
-			VolumeID:      m.volumeID,
-			ManifestSeq:   manifest.ManifestSeq,
-			CheckpointSeq: manifest.CheckpointSeq,
-			ManifestKey:   manifestKey(manifest.ManifestSeq),
-			UpdatedAt:     manifest.CreatedAt,
+		key := manifestKey(manifest.ManifestSeq, manifest.CommitID)
+		head := committedHeadForManifest(manifest, key, expected)
+		if err := m.renewCommit(ctx, manifest.CommitID); err != nil {
+			return err
 		}
-		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, expectedManifestSeq, head); err != nil {
-			return nil, nil, err
+		if err := m.headStore.CompareAndSwapCommittedHead(ctx, m.volumeID, expected, head); err != nil {
+			_ = m.abortCommit(context.Background(), manifest.CommitID)
+			return err
 		}
 	} else if err := m.putManifest(ctx, manifestLatestKey, manifest); err != nil {
-		return nil, nil, err
+		return err
 	}
-	return manifest, result, nil
+	return nil
 }
 
 func planCompactionSegments(state *SnapshotState, opts CompactionOptions) (map[string]struct{}, *CompactionResult) {
@@ -190,7 +267,7 @@ func planCompactionSegments(state *SnapshotState, opts CompactionOptions) (map[s
 	return selected, result
 }
 
-func buildCompactedState(ctx context.Context, materializer *Materializer, manifestSeq uint64, volumeID string, state *SnapshotState, selected map[string]struct{}, targetSize uint64) (*SnapshotState, []*materializedSegment, error) {
+func buildCompactedState(ctx context.Context, materializer *Materializer, manifestSeq uint64, commitID, volumeID string, state *SnapshotState, selected map[string]struct{}, targetSize uint64) (*SnapshotState, []*materializedSegment, error) {
 	manifestState := &SnapshotState{
 		NextSeq:   state.NextSeq,
 		NextInode: state.NextInode,
@@ -200,7 +277,7 @@ func buildCompactedState(ctx context.Context, materializer *Materializer, manife
 		ColdFiles: make(map[uint64][]FileExtent),
 		Segments:  make(map[string]*Segment),
 	}
-	builder := newSegmentBuilder(manifestSeq, volumeID, targetSize)
+	builder := newSegmentBuilder(manifestSeq, commitID, volumeID, targetSize)
 	inodes := make([]uint64, 0, len(state.ColdFiles)+len(state.Data))
 	seen := make(map[uint64]struct{}, len(state.ColdFiles)+len(state.Data))
 	for inode := range state.ColdFiles {

@@ -98,11 +98,14 @@ func (v SandboxVolume) MarshalJSON() ([]byte, error) {
 
 // S0FSCommittedHead stores the current committed immutable manifest pointer for one volume.
 type S0FSCommittedHead struct {
-	VolumeID      string    `json:"volume_id"`
-	ManifestSeq   uint64    `json:"manifest_seq"`
-	CheckpointSeq uint64    `json:"checkpoint_seq"`
-	ManifestKey   string    `json:"manifest_key"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	VolumeID       string    `json:"volume_id"`
+	ManifestSeq    uint64    `json:"manifest_seq"`
+	CheckpointSeq  uint64    `json:"checkpoint_seq"`
+	ManifestKey    string    `json:"manifest_key"`
+	ManifestDigest string    `json:"manifest_digest"`
+	CommitID       string    `json:"commit_id"`
+	Generation     uint64    `json:"generation"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 const (

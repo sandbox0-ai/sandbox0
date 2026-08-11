@@ -3,7 +3,9 @@ package snapshot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +80,58 @@ func TestS0FSSnapshotCreateRestoreAndDelete(t *testing.T) {
 	}
 	if len(repo.deleted) != 1 || repo.deleted[0] != snap.ID {
 		t.Fatalf("deleted snapshots = %v", repo.deleted)
+	}
+}
+
+func TestS0FSSnapshotRestoreRepairsTerminalIntegrityFailure(t *testing.T) {
+	mgr, _, volMgr, engine := newS0FSSnapshotTestManagerWithFormat(t, "vol-restore-repair", s0fs.StateFormatV2)
+	writeS0FSFile(t, engine, "state.txt", "recoverable")
+	snapshot, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
+		VolumeID: "vol-restore-repair", Name: "known-good", TeamID: "team-1", UserID: "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSnapshot() error = %v", err)
+	}
+	writeS0FSFile(t, engine, "state.txt", "broken")
+	broken, err := engine.SyncMaterialize(context.Background())
+	if err != nil {
+		t.Fatalf("SyncMaterialize(broken) error = %v", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("Close(original) error = %v", err)
+	}
+
+	runtime := openFreshS0FSEngine(t, mgr, "team-1", "vol-restore-repair")
+	defer runtime.Close()
+	volMgr.ctx.S0FS = runtime
+	var brokenSegment string
+	for _, segment := range broken.State.Segments {
+		brokenSegment = segment.Key
+	}
+	cfg, err := mgr.s0fsConfig("team-1", "vol-restore-repair")
+	if err != nil {
+		t.Fatalf("s0fsConfig() error = %v", err)
+	}
+	if err := cfg.ObjectStore.Delete(brokenSegment); err != nil {
+		t.Fatalf("Delete(broken segment) error = %v", err)
+	}
+	node, err := runtime.Lookup(s0fs.RootInode, "state.txt")
+	if err != nil {
+		t.Fatalf("Lookup(state.txt) error = %v", err)
+	}
+	if _, err := runtime.Read(node.Inode, 0, 32); !errors.Is(err, s0fs.ErrCommittedStateIntegrity) {
+		t.Fatalf("Read(broken runtime) error = %v, want ErrCommittedStateIntegrity", err)
+	}
+
+	if err := mgr.RestoreSnapshot(context.Background(), &RestoreSnapshotRequest{
+		VolumeID: "vol-restore-repair", SnapshotID: snapshot.ID, TeamID: "team-1", UserID: "user-1",
+	}); err != nil {
+		t.Fatalf("RestoreSnapshot() error = %v", err)
+	}
+	reopened := openFreshS0FSEngine(t, mgr, "team-1", "vol-restore-repair")
+	defer reopened.Close()
+	if got := readS0FSFile(t, reopened, "state.txt"); got != "recoverable" {
+		t.Fatalf("restored file = %q, want recoverable", got)
 	}
 }
 
@@ -465,9 +519,10 @@ func TestS0FSCreateVolumeFromSnapshotUsesCopyOnWriteState(t *testing.T) {
 func TestS0FSGarbageCollectsObjectsAfterSnapshotDelete(t *testing.T) {
 	t.Parallel()
 
-	mgr, _, _, engine := newS0FSSnapshotTestManagerWithFormat(t, "vol-gc-delete", s0fs.StateFormatV2)
+	mgr, repo, _, engine := newS0FSSnapshotTestManagerWithFormat(t, "vol-gc-delete", s0fs.StateFormatV2)
 	writeS0FSFile(t, engine, "state.txt", "old")
-	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+	previous, err := engine.SyncMaterialize(context.Background())
+	if err != nil {
 		t.Fatalf("SyncMaterialize(old) error = %v", err)
 	}
 	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
@@ -480,7 +535,8 @@ func TestS0FSGarbageCollectsObjectsAfterSnapshotDelete(t *testing.T) {
 		t.Fatalf("CreateSnapshot() error = %v", err)
 	}
 	writeS0FSFile(t, engine, "state.txt", "new")
-	if _, err := engine.SyncMaterialize(context.Background()); err != nil {
+	current, err := engine.SyncMaterialize(context.Background())
+	if err != nil {
 		t.Fatalf("SyncMaterialize(new) error = %v", err)
 	}
 
@@ -491,10 +547,34 @@ func TestS0FSGarbageCollectsObjectsAfterSnapshotDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("s0fsConfig() error = %v", err)
 	}
-	if got, want := listS0FSKeys(t, cfg.ObjectStore, "segments/"), []string{"segments/00000000000000000005-0.bin"}; !sameStrings(got, want) {
+	var previousSegment string
+	for _, segment := range previous.State.Segments {
+		previousSegment = segment.Key
+	}
+	var currentSegment string
+	for _, segment := range current.State.Segments {
+		currentSegment = segment.Key
+	}
+	wantSegmentsBeforeGrace := []string{previousSegment, currentSegment}
+	sort.Strings(wantSegmentsBeforeGrace)
+	if got, want := listS0FSKeys(t, cfg.ObjectStore, "segments/"), wantSegmentsBeforeGrace; !sameStrings(got, want) {
+		t.Fatalf("segments before GC grace = %v, want %v", got, want)
+	}
+	previousManifest := fmt.Sprintf("manifests/%020d-%s.json", previous.ManifestSeq, previous.CommitID)
+	currentManifest := fmt.Sprintf("manifests/%020d-%s.json", current.ManifestSeq, current.CommitID)
+	wantManifestsBeforeGrace := []string{previousManifest, currentManifest}
+	sort.Strings(wantManifestsBeforeGrace)
+	if got, want := listS0FSKeys(t, cfg.ObjectStore, "manifests/"), wantManifestsBeforeGrace; !sameStrings(got, want) {
+		t.Fatalf("manifests before GC grace = %v, want %v", got, want)
+	}
+	repo.gcNow = time.Now().Add(25 * time.Hour)
+	if _, err := mgr.garbageCollectS0FSVolumeObjects(context.Background(), "vol-gc-delete", "team-1"); err != nil {
+		t.Fatalf("garbageCollectS0FSVolumeObjects(after grace) error = %v", err)
+	}
+	if got, want := listS0FSKeys(t, cfg.ObjectStore, "segments/"), []string{currentSegment}; !sameStrings(got, want) {
 		t.Fatalf("segments after GC = %v, want %v", got, want)
 	}
-	if got, want := listS0FSKeys(t, cfg.ObjectStore, "manifests/"), []string{"manifests/00000000000000000005.json"}; !sameStrings(got, want) {
+	if got, want := listS0FSKeys(t, cfg.ObjectStore, "manifests/"), []string{currentManifest}; !sameStrings(got, want) {
 		t.Fatalf("manifests after GC = %v, want %v", got, want)
 	}
 }
@@ -531,17 +611,15 @@ func TestS0FSGarbageCollectionSkipsWhenForkExists(t *testing.T) {
 		t.Fatalf("SyncMaterialize(new) error = %v", err)
 	}
 
-	if err := mgr.DeleteSnapshot(context.Background(), "vol-gc-fork-source", snap.ID, "team-1"); err != nil {
-		t.Fatalf("DeleteSnapshot() error = %v", err)
-	}
 	cfg, err := mgr.s0fsConfig("team-1", "vol-gc-fork-source")
 	if err != nil {
 		t.Fatalf("s0fsConfig() error = %v", err)
 	}
-	if got, want := listS0FSKeys(t, cfg.ObjectStore, "segments/"), []string{
-		"segments/00000000000000000003-0.bin",
-		"segments/00000000000000000005-0.bin",
-	}; !sameStrings(got, want) {
+	want := listS0FSKeys(t, cfg.ObjectStore, "segments/")
+	if err := mgr.DeleteSnapshot(context.Background(), "vol-gc-fork-source", snap.ID, "team-1"); err != nil {
+		t.Fatalf("DeleteSnapshot() error = %v", err)
+	}
+	if got := listS0FSKeys(t, cfg.ObjectStore, "segments/"); !sameStrings(got, want) {
 		t.Fatalf("segments with fork child = %v, want %v", got, want)
 	}
 }

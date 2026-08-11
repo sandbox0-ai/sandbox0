@@ -297,33 +297,56 @@ func TestOpenRejectsCorruptWALRecord(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsUnprovenWALPrefixWithoutLocalHead(t *testing.T) {
+func TestOpenQuarantinesUnprovenWALAndUsesCommittedManifest(t *testing.T) {
 	store, heads, inode := createCommittedWALBase(t, "vol-unproven-wal")
 	walPath := filepath.Join(t.TempDir(), "volume.wal")
 	appendPlainWALRecords(t, walPath,
 		walRecord{Seq: 1, Op: "create", Inode: inode, Parent: RootInode, Name: "conflicting.txt", Type: TypeFile, Mode: 0o644, TimeUnix: time.Now().UnixNano()},
 	)
 
-	_, err := Open(context.Background(), Config{
+	engine, err := Open(context.Background(), Config{
 		VolumeID:    "vol-unproven-wal",
 		WALPath:     walPath,
 		ObjectStore: store,
 		HeadStore:   heads,
 	})
-	if !errors.Is(err, ErrCommittedHeadConflict) {
-		t.Fatalf("Open() error = %v, want ErrCommittedHeadConflict", err)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer engine.Close()
+	payload, err := engine.Read(inode, 0, 16)
+	if err != nil || string(payload) != "base" {
+		t.Fatalf("Read(committed manifest) = %q, %v; want base", payload, err)
+	}
+	if _, err := engine.Lookup(RootInode, "conflicting.txt"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Lookup(untrusted WAL entry) error = %v, want ErrNotFound", err)
+	}
+	evidence, err := filepath.Glob(walPath + ".untrusted-*")
+	if err != nil {
+		t.Fatalf("Glob(untrusted evidence) error = %v", err)
+	}
+	if len(evidence) == 0 {
+		t.Fatal("unproven WAL was not preserved as recovery evidence")
 	}
 }
 
 func TestOpenUsesCommittedStateForProvenWALSuffix(t *testing.T) {
-	store, heads, inode := createCommittedWALBase(t, "vol-proven-wal")
+	const volumeID = "vol-proven-wal"
+	store, heads, inode := createCommittedWALBase(t, volumeID)
 	walPath := filepath.Join(t.TempDir(), "volume.wal")
+	head, err := heads.LoadCommittedHead(context.Background(), volumeID)
+	if err != nil {
+		t.Fatalf("LoadCommittedHead() error = %v", err)
+	}
+	if err := saveRecoveryBinding(walBaseBindingPath(walPath), volumeID, head, ""); err != nil {
+		t.Fatalf("saveRecoveryBinding() error = %v", err)
+	}
 	appendPlainWALRecords(t, walPath,
 		walRecord{Seq: 3, Op: "write", Inode: inode, Offset: 4, Data: []byte("++"), TimeUnix: time.Now().UnixNano()},
 	)
 
 	engine, err := Open(context.Background(), Config{
-		VolumeID:    "vol-proven-wal",
+		VolumeID:    volumeID,
 		WALPath:     walPath,
 		ObjectStore: store,
 		HeadStore:   heads,

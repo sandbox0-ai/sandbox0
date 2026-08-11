@@ -11,10 +11,19 @@ type metadataDirEntry struct {
 	Inode uint64
 }
 
+type metadataDirNodeEntry struct {
+	metadataDirEntry
+	Node *Node
+}
+
 // metadataStore is the engine-facing namespace boundary. Implementations may
 // keep metadata eagerly in memory or resolve it from an indexed backing store.
 // Returned values are owned by the caller and must be written back explicitly.
 type metadataStore interface {
+	// ApplyMutation groups all metadata reads and writes performed for one WAL
+	// record into a single atomic backend transaction.
+	ApplyMutation(func() error) error
+
 	Node(uint64) (*Node, bool)
 	PutNode(uint64, *Node)
 	DeleteNode(uint64)
@@ -28,6 +37,7 @@ type metadataStore interface {
 	DeleteDirectory(uint64)
 	DirectoryEntries(uint64) (map[string]uint64, bool)
 	DirectoryPage(uint64, uint64, uint32) ([]metadataDirEntry, bool, bool)
+	DirectoryPageWithNodes(uint64, uint64, uint32) ([]metadataDirNodeEntry, bool, bool)
 	RangeDirectoryRecords(func(parent uint64, name string, inode uint64, first bool) bool)
 	RangeDirectories(func(uint64, map[string]uint64) bool)
 	DirectoryEntryCount() int
@@ -66,6 +76,13 @@ type eagerMetadataStore struct {
 func newEagerMetadataStore(state *SnapshotState) *eagerMetadataStore {
 	normalizeState(state)
 	return &eagerMetadataStore{state: state}
+}
+
+func (s *eagerMetadataStore) ApplyMutation(apply func() error) error {
+	if apply == nil {
+		return nil
+	}
+	return apply()
 }
 
 func (s *eagerMetadataStore) Node(inode uint64) (*Node, bool) {
@@ -133,6 +150,17 @@ func (s *eagerMetadataStore) DirectoryPage(inode, offset uint64, limit uint32) (
 		return entries, true, true
 	}
 	return entries[:limit], false, true
+}
+func (s *eagerMetadataStore) DirectoryPageWithNodes(inode, offset uint64, limit uint32) ([]metadataDirNodeEntry, bool, bool) {
+	entries, eof, ok := s.DirectoryPage(inode, offset, limit)
+	result := make([]metadataDirNodeEntry, 0, len(entries))
+	for _, entry := range entries {
+		node, exists := s.Node(entry.Inode)
+		if exists {
+			result = append(result, metadataDirNodeEntry{metadataDirEntry: entry, Node: node})
+		}
+	}
+	return result, eof, ok
 }
 func (s *eagerMetadataStore) RangeDirectories(yield func(uint64, map[string]uint64) bool) {
 	for _, inode := range sortedUint64Keys(s.state.Children) {

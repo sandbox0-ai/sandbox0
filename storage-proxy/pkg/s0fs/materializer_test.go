@@ -230,10 +230,11 @@ func TestEngineOpenRejectsCommittedStateWithMissingSegment(t *testing.T) {
 	heads := newMemoryHeadStore()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")
 	config := Config{
-		VolumeID:    "vol-open-integrity",
-		WALPath:     walPath,
-		ObjectStore: store,
-		HeadStore:   heads,
+		VolumeID:          "vol-open-integrity",
+		WALPath:           walPath,
+		ObjectStore:       store,
+		HeadStore:         heads,
+		SegmentValidation: SegmentValidationStrict,
 	}
 
 	engine, err := Open(ctx, config)

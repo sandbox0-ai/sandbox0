@@ -29,6 +29,7 @@ const defaultMetadataCacheBytes int64 = 4 << 20
 // unclean shutdown and reconstructed without losing mutations.
 type sqliteMetadataStore struct {
 	db         *sql.DB
+	mutationTx *sql.Tx
 	path       string
 	cacheBytes int64
 	codec      *sqliteMetadataCodec
@@ -613,10 +614,76 @@ func (s *sqliteMetadataStore) Err() error {
 	return s.err
 }
 
+func (s *sqliteMetadataStore) ApplyMutation(apply func() error) error {
+	if apply == nil {
+		return nil
+	}
+	if s.mutationTx != nil {
+		return apply()
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		s.setErr(err)
+		return err
+	}
+	s.mutationTx = tx
+	applyErr := apply()
+	if applyErr == nil {
+		applyErr = s.Err()
+	}
+	if applyErr != nil {
+		s.mutationTx = nil
+		_ = tx.Rollback()
+		return applyErr
+	}
+	commitErr := tx.Commit()
+	s.mutationTx = nil
+	if commitErr != nil {
+		s.setErr(commitErr)
+		return commitErr
+	}
+	return nil
+}
+
+func (s *sqliteMetadataStore) exec(query string, args ...any) (sql.Result, error) {
+	if s.mutationTx != nil {
+		return s.mutationTx.Exec(query, args...)
+	}
+	return s.db.Exec(query, args...)
+}
+
+func (s *sqliteMetadataStore) query(query string, args ...any) (*sql.Rows, error) {
+	if s.mutationTx != nil {
+		return s.mutationTx.Query(query, args...)
+	}
+	return s.db.Query(query, args...)
+}
+
+func (s *sqliteMetadataStore) queryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if s.mutationTx != nil {
+		return s.mutationTx.QueryContext(ctx, query, args...)
+	}
+	return s.db.QueryContext(ctx, query, args...)
+}
+
+func (s *sqliteMetadataStore) queryRow(query string, args ...any) *sql.Row {
+	if s.mutationTx != nil {
+		return s.mutationTx.QueryRow(query, args...)
+	}
+	return s.db.QueryRow(query, args...)
+}
+
+func (s *sqliteMetadataStore) withMutation(apply func() error) error {
+	if s.mutationTx != nil {
+		return apply()
+	}
+	return s.ApplyMutation(apply)
+}
+
 func (s *sqliteMetadataStore) Node(inode uint64) (*Node, bool) {
 	var payload []byte
 	key := metadataInodeKey(inode)
-	err := s.db.QueryRow(`SELECT value FROM nodes WHERE inode = ?`, key).Scan(&payload)
+	err := s.queryRow(`SELECT value FROM nodes WHERE inode = ?`, key).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false
 	}
@@ -643,18 +710,18 @@ func (s *sqliteMetadataStore) PutNode(inode uint64, node *Node) {
 		payload, err = s.codec.seal("node", metadataInodeKey(inode), payload)
 	}
 	if err == nil {
-		_, err = s.db.Exec(`INSERT INTO nodes(inode, value) VALUES(?, ?) ON CONFLICT(inode) DO UPDATE SET value=excluded.value`, metadataInodeKey(inode), payload)
+		_, err = s.exec(`INSERT INTO nodes(inode, value) VALUES(?, ?) ON CONFLICT(inode) DO UPDATE SET value=excluded.value`, metadataInodeKey(inode), payload)
 	}
 	s.setErr(err)
 }
 
 func (s *sqliteMetadataStore) DeleteNode(inode uint64) {
-	_, err := s.db.Exec(`DELETE FROM nodes WHERE inode = ?`, metadataInodeKey(inode))
+	_, err := s.exec(`DELETE FROM nodes WHERE inode = ?`, metadataInodeKey(inode))
 	s.setErr(err)
 }
 
 func (s *sqliteMetadataStore) RangeNodes(yield func(uint64, *Node) bool) {
-	rows, err := s.db.Query(`SELECT inode, value FROM nodes ORDER BY inode`)
+	rows, err := s.query(`SELECT inode, value FROM nodes ORDER BY inode`)
 	if err != nil {
 		s.setErr(err)
 		return
@@ -690,7 +757,7 @@ func (s *sqliteMetadataStore) RangeNodes(yield func(uint64, *Node) bool) {
 
 func (s *sqliteMetadataStore) count(query string) int {
 	var count int
-	if err := s.db.QueryRow(query).Scan(&count); err != nil {
+	if err := s.queryRow(query).Scan(&count); err != nil {
 		s.setErr(err)
 		return 0
 	}
@@ -701,7 +768,7 @@ func (s *sqliteMetadataStore) NodeCount() int { return s.count(`SELECT COUNT(*) 
 
 func (s *sqliteMetadataStore) Child(parent uint64, name string) (uint64, bool) {
 	var key []byte
-	err := s.db.QueryRow(`SELECT inode FROM dirents WHERE parent = ? AND name_key = ?`, metadataInodeKey(parent), s.codec.directoryNameKey(parent, name)).Scan(&key)
+	err := s.queryRow(`SELECT inode FROM dirents WHERE parent = ? AND name_key = ?`, metadataInodeKey(parent), s.codec.directoryNameKey(parent, name)).Scan(&key)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false
 	}
@@ -718,47 +785,41 @@ func (s *sqliteMetadataStore) PutChild(parent uint64, name string, inode uint64)
 	nameKey := s.codec.directoryNameKey(parent, name)
 	payload, err := s.codec.encodeDirectoryName(parent, nameKey, name)
 	if err == nil {
-		_, err = s.db.Exec(`INSERT INTO dirents(parent, name_key, name, inode) VALUES(?, ?, ?, ?) ON CONFLICT(parent, name_key) DO UPDATE SET name=excluded.name, inode=excluded.inode`, metadataInodeKey(parent), nameKey, payload, metadataInodeKey(inode))
+		_, err = s.exec(`INSERT INTO dirents(parent, name_key, name, inode) VALUES(?, ?, ?, ?) ON CONFLICT(parent, name_key) DO UPDATE SET name=excluded.name, inode=excluded.inode`, metadataInodeKey(parent), nameKey, payload, metadataInodeKey(inode))
 	}
 	s.setErr(err)
 }
 
 func (s *sqliteMetadataStore) DeleteChild(parent uint64, name string) {
-	_, err := s.db.Exec(`DELETE FROM dirents WHERE parent = ? AND name_key = ?`, metadataInodeKey(parent), s.codec.directoryNameKey(parent, name))
+	_, err := s.exec(`DELETE FROM dirents WHERE parent = ? AND name_key = ?`, metadataInodeKey(parent), s.codec.directoryNameKey(parent, name))
 	s.setErr(err)
 }
 
 func (s *sqliteMetadataStore) EnsureDirectory(inode uint64) {
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO directories(inode) VALUES(?)`, metadataInodeKey(inode))
+	_, err := s.exec(`INSERT OR IGNORE INTO directories(inode) VALUES(?)`, metadataInodeKey(inode))
 	s.setErr(err)
 }
 
 func (s *sqliteMetadataStore) DeleteDirectory(inode uint64) {
-	tx, err := s.db.Begin()
-	if err != nil {
-		s.setErr(err)
-		return
-	}
-	if _, err = tx.Exec(`DELETE FROM dirents WHERE parent = ?`, metadataInodeKey(inode)); err == nil {
-		_, err = tx.Exec(`DELETE FROM directories WHERE inode = ?`, metadataInodeKey(inode))
-	}
-	if err == nil {
-		err = tx.Commit()
-	} else {
-		_ = tx.Rollback()
-	}
+	err := s.withMutation(func() error {
+		if _, err := s.exec(`DELETE FROM dirents WHERE parent = ?`, metadataInodeKey(inode)); err != nil {
+			return err
+		}
+		_, err := s.exec(`DELETE FROM directories WHERE inode = ?`, metadataInodeKey(inode))
+		return err
+	})
 	s.setErr(err)
 }
 
 func (s *sqliteMetadataStore) DirectoryEntries(inode uint64) (map[string]uint64, bool) {
 	var exists int
-	if err := s.db.QueryRow(`SELECT 1 FROM directories WHERE inode = ?`, metadataInodeKey(inode)).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+	if err := s.queryRow(`SELECT 1 FROM directories WHERE inode = ?`, metadataInodeKey(inode)).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return nil, false
 	} else if err != nil {
 		s.setErr(err)
 		return nil, false
 	}
-	rows, err := s.db.Query(`SELECT name_key, name, inode FROM dirents WHERE parent = ? ORDER BY name_key`, metadataInodeKey(inode))
+	rows, err := s.query(`SELECT name_key, name, inode FROM dirents WHERE parent = ? ORDER BY name_key`, metadataInodeKey(inode))
 	if err != nil {
 		s.setErr(err)
 		return nil, false
@@ -789,7 +850,7 @@ func (s *sqliteMetadataStore) DirectoryEntries(inode uint64) (map[string]uint64,
 
 func (s *sqliteMetadataStore) DirectoryPage(inode, offset uint64, limit uint32) ([]metadataDirEntry, bool, bool) {
 	var exists int
-	if err := s.db.QueryRow(`SELECT 1 FROM directories WHERE inode = ?`, metadataInodeKey(inode)).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+	if err := s.queryRow(`SELECT 1 FROM directories WHERE inode = ?`, metadataInodeKey(inode)).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return nil, false, false
 	} else if err != nil {
 		s.setErr(err)
@@ -799,7 +860,7 @@ func (s *sqliteMetadataStore) DirectoryPage(inode, offset uint64, limit uint32) 
 	if queryLimit <= 0 {
 		queryLimit = 1<<31 - 1
 	}
-	rows, err := s.db.Query(`SELECT name_key, name, inode FROM dirents WHERE parent = ? ORDER BY name_key LIMIT ? OFFSET ?`, metadataInodeKey(inode), queryLimit+1, offset)
+	rows, err := s.query(`SELECT name_key, name, inode FROM dirents WHERE parent = ? ORDER BY name_key LIMIT ? OFFSET ?`, metadataInodeKey(inode), queryLimit+1, offset)
 	if err != nil {
 		s.setErr(err)
 		return nil, false, true
@@ -832,8 +893,58 @@ func (s *sqliteMetadataStore) DirectoryPage(inode, offset uint64, limit uint32) 
 	return entries, true, true
 }
 
+func (s *sqliteMetadataStore) DirectoryPageWithNodes(inode, offset uint64, limit uint32) ([]metadataDirNodeEntry, bool, bool) {
+	page, eof, ok := s.DirectoryPage(inode, offset, limit)
+	if !ok || len(page) == 0 {
+		return nil, eof, ok
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(page)), ",")
+	args := make([]any, 0, len(page))
+	for _, entry := range page {
+		args = append(args, metadataInodeKey(entry.Inode))
+	}
+	rows, err := s.query(`SELECT inode, value FROM nodes WHERE inode IN (`+placeholders+`)`, args...)
+	if err != nil {
+		s.setErr(err)
+		return nil, false, ok
+	}
+	defer rows.Close()
+	nodes := make(map[uint64]*Node, len(page))
+	for rows.Next() {
+		var inodeKey, nodePayload []byte
+		if err := rows.Scan(&inodeKey, &nodePayload); err != nil {
+			s.setErr(err)
+			return nil, false, ok
+		}
+		child, err := metadataInodeFromKey(inodeKey)
+		if err != nil {
+			s.setErr(err)
+			return nil, false, ok
+		}
+		nodePayload, err = s.codec.open("node", inodeKey, nodePayload)
+		if err != nil {
+			s.setErr(err)
+			return nil, false, ok
+		}
+		var node Node
+		if err := json.Unmarshal(nodePayload, &node); err != nil {
+			s.setErr(err)
+			return nil, false, ok
+		}
+		nodes[child] = &node
+	}
+	s.setErr(rows.Err())
+	entries := make([]metadataDirNodeEntry, 0, len(page))
+	for _, entry := range page {
+		if node := nodes[entry.Inode]; node != nil {
+			entries = append(entries, metadataDirNodeEntry{metadataDirEntry: entry, Node: node})
+		}
+	}
+	return entries, eof, ok
+}
+
 func (s *sqliteMetadataStore) RangeDirectories(yield func(uint64, map[string]uint64) bool) {
-	rows, err := s.db.Query(`SELECT d.inode, e.name_key, e.name, e.inode FROM directories d LEFT JOIN dirents e ON e.parent = d.inode ORDER BY d.inode, e.name_key`)
+	rows, err := s.query(`SELECT d.inode, e.name_key, e.name, e.inode FROM directories d LEFT JOIN dirents e ON e.parent = d.inode ORDER BY d.inode, e.name_key`)
 	if err != nil {
 		s.setErr(err)
 		return
@@ -884,7 +995,7 @@ func (s *sqliteMetadataStore) RangeDirectories(yield func(uint64, map[string]uin
 }
 
 func (s *sqliteMetadataStore) RangeDirectoryRecords(yield func(parent uint64, name string, inode uint64, first bool) bool) {
-	rows, err := s.db.Query(`SELECT d.inode, e.name_key, e.name, e.inode FROM directories d LEFT JOIN dirents e ON e.parent = d.inode ORDER BY d.inode, e.name_key`)
+	rows, err := s.query(`SELECT d.inode, e.name_key, e.name, e.inode FROM directories d LEFT JOIN dirents e ON e.parent = d.inode ORDER BY d.inode, e.name_key`)
 	if err != nil {
 		s.setErr(err)
 		return
@@ -949,7 +1060,7 @@ func (s *sqliteMetadataStore) Path(target uint64) (string, bool) {
 		}
 		seen[target] = struct{}{}
 		var parentKey, nameKey, namePayload []byte
-		err := s.db.QueryRow(`SELECT parent, name_key, name FROM dirents WHERE inode = ? ORDER BY name_key, parent LIMIT 1`, metadataInodeKey(target)).Scan(&parentKey, &nameKey, &namePayload)
+		err := s.queryRow(`SELECT parent, name_key, name FROM dirents WHERE inode = ? ORDER BY name_key, parent LIMIT 1`, metadataInodeKey(target)).Scan(&parentKey, &nameKey, &namePayload)
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", false
 		}
@@ -977,7 +1088,7 @@ func (s *sqliteMetadataStore) Path(target uint64) (string, bool) {
 func (s *sqliteMetadataStore) Data(inode uint64) ([]byte, bool) {
 	var payload []byte
 	key := metadataInodeKey(inode)
-	err := s.db.QueryRow(`SELECT value FROM file_data WHERE inode = ?`, key).Scan(&payload)
+	err := s.queryRow(`SELECT value FROM file_data WHERE inode = ?`, key).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false
 	}
@@ -997,12 +1108,12 @@ func (s *sqliteMetadataStore) PutData(inode uint64, payload []byte) {
 	key := metadataInodeKey(inode)
 	protected, err := s.codec.seal("data", key, payload)
 	if err == nil {
-		_, err = s.db.Exec(`INSERT INTO file_data(inode, value) VALUES(?, ?) ON CONFLICT(inode) DO UPDATE SET value=excluded.value`, key, protected)
+		_, err = s.exec(`INSERT INTO file_data(inode, value) VALUES(?, ?) ON CONFLICT(inode) DO UPDATE SET value=excluded.value`, key, protected)
 	}
 	s.setErr(err)
 }
 func (s *sqliteMetadataStore) DeleteData(inode uint64) {
-	_, err := s.db.Exec(`DELETE FROM file_data WHERE inode = ?`, metadataInodeKey(inode))
+	_, err := s.exec(`DELETE FROM file_data WHERE inode = ?`, metadataInodeKey(inode))
 	s.setErr(err)
 }
 func (s *sqliteMetadataStore) RangeData(yield func(uint64, []byte) bool) {
@@ -1014,7 +1125,7 @@ func (s *sqliteMetadataStore) RangeData(yield func(uint64, []byte) bool) {
 func (s *sqliteMetadataStore) ColdFile(inode uint64) ([]FileExtent, bool) {
 	key := metadataInodeKey(inode)
 	var exists int
-	err := s.db.QueryRow(`SELECT 1 FROM cold_files WHERE inode = ?`, key).Scan(&exists)
+	err := s.queryRow(`SELECT 1 FROM cold_files WHERE inode = ?`, key).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false
 	}
@@ -1022,7 +1133,7 @@ func (s *sqliteMetadataStore) ColdFile(inode uint64) ([]FileExtent, bool) {
 		s.setErr(err)
 		return nil, false
 	}
-	rows, err := s.db.Query(`SELECT segment_id, offset, length FROM file_extents WHERE inode = ? ORDER BY position`, key)
+	rows, err := s.query(`SELECT segment_id, offset, length FROM file_extents WHERE inode = ? ORDER BY position`, key)
 	if err != nil {
 		s.setErr(err)
 		return nil, false
@@ -1057,44 +1168,35 @@ func (s *sqliteMetadataStore) ColdFile(inode uint64) ([]FileExtent, bool) {
 
 func (s *sqliteMetadataStore) PutColdFile(inode uint64, extents []FileExtent) {
 	key := metadataInodeKey(inode)
-	tx, err := s.db.Begin()
-	if err != nil {
-		s.setErr(err)
-		return
-	}
-	defer tx.Rollback()
-	if _, err = tx.Exec(`INSERT INTO cold_files(inode) VALUES(?) ON CONFLICT(inode) DO NOTHING`, key); err == nil {
-		_, err = tx.Exec(`DELETE FROM file_extents WHERE inode = ?`, key)
-	}
-	for position, extent := range extents {
-		if err != nil {
-			break
+	err := s.withMutation(func() error {
+		if _, err := s.exec(`INSERT INTO cold_files(inode) VALUES(?) ON CONFLICT(inode) DO NOTHING`, key); err != nil {
+			return err
 		}
-		_, err = tx.Exec(`INSERT INTO file_extents(inode, position, segment_id, offset, length) VALUES(?, ?, ?, ?, ?)`, key, position, extent.SegmentID, metadataInodeKey(extent.Offset), metadataInodeKey(extent.Length))
-	}
-	if err == nil {
-		err = tx.Commit()
-	}
+		if _, err := s.exec(`DELETE FROM file_extents WHERE inode = ?`, key); err != nil {
+			return err
+		}
+		for position, extent := range extents {
+			if _, err := s.exec(`INSERT INTO file_extents(inode, position, segment_id, offset, length) VALUES(?, ?, ?, ?, ?)`, key, position, extent.SegmentID, metadataInodeKey(extent.Offset), metadataInodeKey(extent.Length)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	s.setErr(err)
 }
 func (s *sqliteMetadataStore) DeleteColdFile(inode uint64) {
 	key := metadataInodeKey(inode)
-	tx, err := s.db.Begin()
-	if err == nil {
-		_, err = tx.Exec(`DELETE FROM file_extents WHERE inode = ?`, key)
-	}
-	if err == nil {
-		_, err = tx.Exec(`DELETE FROM cold_files WHERE inode = ?`, key)
-	}
-	if err == nil {
-		err = tx.Commit()
-	} else if tx != nil {
-		_ = tx.Rollback()
-	}
+	err := s.withMutation(func() error {
+		if _, err := s.exec(`DELETE FROM file_extents WHERE inode = ?`, key); err != nil {
+			return err
+		}
+		_, err := s.exec(`DELETE FROM cold_files WHERE inode = ?`, key)
+		return err
+	})
 	s.setErr(err)
 }
 func (s *sqliteMetadataStore) RangeColdFiles(yield func(uint64, []FileExtent) bool) {
-	rows, err := s.db.Query(`SELECT c.inode, e.segment_id, e.offset, e.length FROM cold_files c LEFT JOIN file_extents e ON e.inode = c.inode ORDER BY c.inode, e.position`)
+	rows, err := s.query(`SELECT c.inode, e.segment_id, e.offset, e.length FROM cold_files c LEFT JOIN file_extents e ON e.inode = c.inode ORDER BY c.inode, e.position`)
 	if err != nil {
 		s.setErr(err)
 		return
@@ -1147,7 +1249,7 @@ func (s *sqliteMetadataStore) RangeColdFiles(yield func(uint64, []FileExtent) bo
 }
 
 func (s *sqliteMetadataStore) rangeInodePayload(query, kind string, yield func(uint64, []byte) bool) {
-	rows, err := s.db.Query(query)
+	rows, err := s.query(query)
 	if err != nil {
 		s.setErr(err)
 		return
@@ -1178,7 +1280,7 @@ func (s *sqliteMetadataStore) rangeInodePayload(query, kind string, yield func(u
 
 func (s *sqliteMetadataStore) Segment(id string) (*Segment, bool) {
 	var payload []byte
-	err := s.db.QueryRow(`SELECT value FROM segments WHERE id = ?`, id).Scan(&payload)
+	err := s.queryRow(`SELECT value FROM segments WHERE id = ?`, id).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false
 	}
@@ -1205,16 +1307,16 @@ func (s *sqliteMetadataStore) PutSegment(id string, segment *Segment) {
 		payload, err = s.codec.seal("segment", []byte(id), payload)
 	}
 	if err == nil {
-		_, err = s.db.Exec(`INSERT INTO segments(id, value, inline) VALUES(?, ?, ?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, inline=excluded.inline`, id, payload, isInlineSegment(segment))
+		_, err = s.exec(`INSERT INTO segments(id, value, inline) VALUES(?, ?, ?) ON CONFLICT(id) DO UPDATE SET value=excluded.value, inline=excluded.inline`, id, payload, isInlineSegment(segment))
 	}
 	s.setErr(err)
 }
 func (s *sqliteMetadataStore) DeleteSegment(id string) {
-	_, err := s.db.Exec(`DELETE FROM segments WHERE id = ?`, id)
+	_, err := s.exec(`DELETE FROM segments WHERE id = ?`, id)
 	s.setErr(err)
 }
 func (s *sqliteMetadataStore) RangeSegments(yield func(string, *Segment) bool) {
-	rows, err := s.db.Query(`SELECT id, value FROM segments ORDER BY id`)
+	rows, err := s.query(`SELECT id, value FROM segments ORDER BY id`)
 	if err != nil {
 		s.setErr(err)
 		return
@@ -1248,7 +1350,7 @@ func (s *sqliteMetadataStore) SegmentCount() int { return s.count(`SELECT COUNT(
 
 func (s *sqliteMetadataStore) NeedsMaterialization() bool {
 	var exists int
-	err := s.db.QueryRow(`
+	err := s.queryRow(`
 		SELECT EXISTS(SELECT 1 FROM file_data WHERE length(value) > ?)
 		OR EXISTS(
 			SELECT 1 FROM file_extents
@@ -1269,7 +1371,7 @@ func (s *sqliteMetadataStore) PruneUnlinked(ctx context.Context, retain map[uint
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rows, err := s.db.QueryContext(ctx, `SELECT inode, value FROM nodes WHERE inode > ? ORDER BY inode LIMIT 256`, metadataInodeKey(after))
+		rows, err := s.queryContext(ctx, `SELECT inode, value FROM nodes WHERE inode > ? ORDER BY inode LIMIT 256`, metadataInodeKey(after))
 		if err != nil {
 			s.setErr(err)
 			return err
@@ -1334,7 +1436,7 @@ func (s *sqliteMetadataStore) PruneUnlinked(ctx context.Context, retain map[uint
 }
 
 func (s *sqliteMetadataStore) validateSegments(ctx context.Context, materializer *Materializer) error {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryContext(ctx, `
 		SELECT e.segment_id, e.offset, e.length, segments.value
 		FROM file_extents e
 		LEFT JOIN segments ON segments.id = e.segment_id

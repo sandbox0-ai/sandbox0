@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ const (
 const (
 	DefaultSegmentTargetSizeBytes uint64 = 4 << 20
 	defaultSegmentCacheMaxBytes   int64  = 64 << 20
+	defaultSegmentChunkSizeBytes  uint64 = 256 << 10
 	defaultCommitIntentTTL               = 15 * time.Minute
 )
 
@@ -50,7 +52,27 @@ type Manifest struct {
 	ParentCommitID       string         `json:"parent_commit_id,omitempty"`
 	ParentGeneration     uint64         `json:"parent_generation,omitempty"`
 	CreatedAt            time.Time      `json:"created_at"`
-	State                *SnapshotState `json:"state"`
+	State                *SnapshotState `json:"state,omitempty"`
+	Delta                *SnapshotDelta `json:"delta,omitempty"`
+	DeltaDepth           uint32         `json:"delta_depth,omitempty"`
+}
+
+// SnapshotDelta is an immutable LSM-style metadata update. Directory and file
+// maps are replacements for the listed inode; tombstones remove old values.
+// Referenced segment descriptors are carried with the delta, while unchanged
+// descriptors remain reachable through the bounded parent chain.
+type SnapshotDelta struct {
+	NextSeq            uint64                       `json:"next_seq"`
+	NextInode          uint64                       `json:"next_inode"`
+	Nodes              map[uint64]*Node             `json:"nodes,omitempty"`
+	DeletedNodes       []uint64                     `json:"deleted_nodes,omitempty"`
+	Children           map[uint64]map[string]uint64 `json:"children,omitempty"`
+	DeletedDirectories []uint64                     `json:"deleted_directories,omitempty"`
+	Data               map[uint64][]byte            `json:"data,omitempty"`
+	DeletedData        []uint64                     `json:"deleted_data,omitempty"`
+	ColdFiles          map[uint64][]FileExtent      `json:"cold_files,omitempty"`
+	DeletedColdFiles   []uint64                     `json:"deleted_cold_files,omitempty"`
+	Segments           map[string]*Segment          `json:"segments,omitempty"`
 }
 
 type manifestCommitment struct {
@@ -210,11 +232,15 @@ func (m *Materializer) Materialize(ctx context.Context, state *SnapshotState, ex
 	return m.materialize(ctx, state, expected, false)
 }
 
-func (m *Materializer) materializeOwned(ctx context.Context, state *SnapshotState, expected *CommittedHead) (*Manifest, error) {
-	return m.materialize(ctx, state, expected, true)
+func (m *Materializer) materializeOwned(ctx context.Context, state *SnapshotState, expected *CommittedHead, changes *metadataChanges) (*Manifest, error) {
+	return m.materializeWithChanges(ctx, state, expected, true, changes)
 }
 
 func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, expected *CommittedHead, owned bool) (*Manifest, error) {
+	return m.materializeWithChanges(ctx, state, expected, owned, nil)
+}
+
+func (m *Materializer) materializeWithChanges(ctx context.Context, state *SnapshotState, expected *CommittedHead, owned bool, changes *metadataChanges) (*Manifest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -286,6 +312,14 @@ func (m *Materializer) materialize(ctx context.Context, state *SnapshotState, ex
 	}
 	if err := finalizeManifest(manifest, expected); err != nil {
 		return nil, err
+	}
+	if expected != nil && changes != nil && !changes.full && expected.Generation%uint64(maxManifestDeltaDepth+1) != 0 {
+		delta, err := buildSnapshotDelta(manifest.State, changes)
+		if err != nil {
+			return nil, err
+		}
+		manifest.Delta = delta
+		manifest.DeltaDepth = uint32(expected.Generation % uint64(maxManifestDeltaDepth+1))
 	}
 	key := manifestKey(nextSeq, commitID)
 	if err := m.renewCommit(ctx, commitID); err != nil {
@@ -380,18 +414,27 @@ func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]b
 	if segment.Length >= uint64(^uint64(0)>>1) {
 		return nil, fmt.Errorf("%w: segment %s length is too large", ErrCommittedStateIntegrity, segment.ID)
 	}
-	var payload []byte
 	if segment.Encryption != nil {
-		payload, err = m.encryption.decryptSegmentRange(store, volumeID, segment, 0, int64(segment.Length))
-	} else {
-		var reader io.ReadCloser
-		reader, err = store.Get(segment.Key, 0, int64(segment.Length))
-		if err == nil {
-			payload, err = io.ReadAll(io.LimitReader(reader, int64(segment.Length)+1))
-			closeErr := reader.Close()
-			if err == nil {
-				err = closeErr
+		payload, err := m.encryption.decryptSegmentRange(store, volumeID, segment, off, limit)
+		if err != nil {
+			if objectstore.IsNotFound(err) {
+				return nil, fmt.Errorf("%w: segment %s is missing: %w", ErrCommittedStateIntegrity, segment.Key, err)
 			}
+			return nil, err
+		}
+		return payload, nil
+	}
+	if segment.ChunkSize > 0 && len(segment.ChunkSHA256) > 0 {
+		return m.readVerifiedSegmentChunks(store, volumeID, segment, off, limit)
+	}
+	var payload []byte
+	var reader io.ReadCloser
+	reader, err = store.Get(segment.Key, 0, int64(segment.Length))
+	if err == nil {
+		payload, err = io.ReadAll(io.LimitReader(reader, int64(segment.Length)+1))
+		closeErr := reader.Close()
+		if err == nil {
+			err = closeErr
 		}
 	}
 	if err != nil {
@@ -407,6 +450,59 @@ func (m *Materializer) ReadSegmentRange(segment *Segment, off, limit int64) ([]b
 		m.cache.put(cacheKey, payload)
 	}
 	return cloneByteRange(payload, off, limit), nil
+}
+
+func (m *Materializer) readVerifiedSegmentChunks(store objectstore.Store, volumeID string, segment *Segment, off, limit int64) ([]byte, error) {
+	if uint64(off) >= segment.Length || limit == 0 {
+		return nil, nil
+	}
+	end := segment.Length
+	if limit >= 0 && uint64(off)+uint64(limit) < end {
+		end = uint64(off) + uint64(limit)
+	}
+	startChunk := uint64(off) / segment.ChunkSize
+	endChunk := (end - 1) / segment.ChunkSize
+	if endChunk >= uint64(len(segment.ChunkSHA256)) {
+		return nil, fmt.Errorf("%w: segment chunk index is incomplete", ErrCommittedStateIntegrity)
+	}
+	var out bytes.Buffer
+	for index := startChunk; index <= endChunk; index++ {
+		chunkStart := index * segment.ChunkSize
+		chunkLength := minUint64(segment.ChunkSize, segment.Length-chunkStart)
+		chunkKey := fmt.Sprintf("%s#%d", segmentCacheKey(volumeID, segment.Key), index)
+		chunk, ok := m.cache.get(chunkKey)
+		if !ok {
+			reader, err := store.Get(segment.Key, int64(chunkStart), int64(chunkLength))
+			if err != nil {
+				if objectstore.IsNotFound(err) {
+					return nil, fmt.Errorf("%w: segment %s is missing: %w", ErrCommittedStateIntegrity, segment.Key, err)
+				}
+				return nil, err
+			}
+			chunk, err = io.ReadAll(io.LimitReader(reader, int64(chunkLength)+1))
+			closeErr := reader.Close()
+			if err != nil {
+				return nil, err
+			}
+			if closeErr != nil {
+				return nil, closeErr
+			}
+			digest := sha256.Sum256(chunk)
+			if len(chunk) != int(chunkLength) || !bytes.Equal(digest[:], segment.ChunkSHA256[index]) {
+				return nil, fmt.Errorf("%w: segment %s chunk %d checksum mismatch", ErrCommittedStateIntegrity, segment.Key, index)
+			}
+			m.cache.put(chunkKey, chunk)
+		}
+		from, to := uint64(0), chunkLength
+		if uint64(off) > chunkStart {
+			from = uint64(off) - chunkStart
+		}
+		if end < chunkStart+chunkLength {
+			to = end - chunkStart
+		}
+		out.Write(chunk[from:to])
+	}
+	return out.Bytes(), nil
 }
 
 func verifySegmentPayload(segment *Segment, payload []byte) error {
@@ -571,7 +667,17 @@ func (m *Materializer) loadManifestEngineStateByKey(ctx context.Context, key, me
 		if err != nil {
 			return nil, nil, err
 		}
-		return loadedEngineStateFromSnapshot(manifest.State), manifest, nil
+		if strings.TrimSpace(metadataPath) == "" {
+			return loadedEngineStateFromSnapshot(manifest.State), manifest, nil
+		}
+		metadata, err := newSQLiteMetadataStoreWithEncryption(ctx, metadataPath, manifest.State, metadataCacheBytes, m.encryption)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &loadedEngineState{
+			metadata: metadata, nextSeq: manifest.State.NextSeq, nextInode: manifest.State.NextInode,
+			metadataPath: metadataPath, stateDigest: manifest.StateDigest,
+		}, manifest, nil
 	}
 	metadata, stream, decodeErr := newSQLiteMetadataStoreFromStateV2(
 		ctx,
@@ -928,14 +1034,29 @@ func buildMaterializedState(manifestSeq uint64, commitID, volumeID string, state
 	segments := builder.finish()
 	for _, segment := range segments {
 		manifestState.Segments[segment.ID] = &Segment{
-			ID:       segment.ID,
-			VolumeID: segment.VolumeID,
-			Key:      segment.Key,
-			Length:   uint64(len(segment.Payload)),
-			SHA256:   segment.SHA256,
+			ID:          segment.ID,
+			VolumeID:    segment.VolumeID,
+			Key:         segment.Key,
+			Length:      uint64(len(segment.Payload)),
+			SHA256:      segment.SHA256,
+			ChunkSize:   defaultSegmentChunkSizeBytes,
+			ChunkSHA256: segmentChunkDigests(segment.Payload, defaultSegmentChunkSizeBytes),
 		}
 	}
 	return manifestState, segments, nil
+}
+
+func segmentChunkDigests(payload []byte, chunkSize uint64) [][]byte {
+	if len(payload) == 0 || chunkSize == 0 {
+		return nil
+	}
+	digests := make([][]byte, 0, (uint64(len(payload))+chunkSize-1)/chunkSize)
+	for offset := uint64(0); offset < uint64(len(payload)); offset += chunkSize {
+		end := minUint64(uint64(len(payload)), offset+chunkSize)
+		digest := sha256.Sum256(payload[offset:end])
+		digests = append(digests, slices.Clone(digest[:]))
+	}
+	return digests
 }
 
 func materializeFileExtents(builder *segmentBuilder, state, manifestState *SnapshotState, inode uint64) ([]FileExtent, error) {
@@ -1095,6 +1216,11 @@ func ensureMaterializableSequence(state *SnapshotState) {
 func (m *Materializer) putManifest(ctx context.Context, key string, manifest *Manifest) error {
 	if manifest == nil || manifest.State == nil {
 		return fmt.Errorf("%w: manifest state is required", ErrInvalidInput)
+	}
+	if manifest.Delta != nil {
+		publication := *manifest
+		publication.State = nil
+		return m.putJSON(ctx, key, &publication)
 	}
 	if normalizedStateFormatVersion(manifest.Version) != StateFormatV2 {
 		return m.putJSON(ctx, key, manifest)
@@ -1316,15 +1442,48 @@ func (m *Materializer) observeOpenPhase(phase, source string, format int, starte
 }
 
 func (m *Materializer) loadManifestByKey(ctx context.Context, key string) (*Manifest, error) {
+	return m.loadManifestByKeyDepth(ctx, key, 0, make(map[string]struct{}))
+}
+
+func (m *Materializer) loadManifestByKeyDepth(ctx context.Context, key string, depth uint32, seen map[string]struct{}) (*Manifest, error) {
 	if strings.TrimSpace(key) == "" {
 		return nil, ErrMaterializedManifestNotFound
 	}
+	if depth > maxManifestDeltaDepth {
+		return nil, fmt.Errorf("%w: manifest delta chain exceeds %d", ErrCommittedStateIntegrity, maxManifestDeltaDepth)
+	}
+	if _, ok := seen[key]; ok {
+		return nil, fmt.Errorf("%w: manifest delta chain contains a cycle", ErrCommittedStateIntegrity)
+	}
+	seen[key] = struct{}{}
+	defer delete(seen, key)
 	manifest, err := m.getManifest(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	if manifest.State == nil {
-		return nil, fmt.Errorf("materialized manifest %s has no state", key)
+	if manifest.Delta != nil {
+		if manifest.State != nil || manifest.ParentManifestKey == "" || manifest.DeltaDepth == 0 || manifest.DeltaDepth > maxManifestDeltaDepth {
+			return nil, fmt.Errorf("%w: manifest %s has invalid delta metadata", ErrCommittedStateIntegrity, key)
+		}
+		parent, err := m.loadManifestByKeyDepth(ctx, manifest.ParentManifestKey, depth+1, seen)
+		if err != nil {
+			return nil, err
+		}
+		if parent.ManifestDigest != manifest.ParentManifestDigest || parent.CommitID != manifest.ParentCommitID || parent.ManifestSeq >= manifest.ManifestSeq {
+			return nil, fmt.Errorf("%w: manifest %s has invalid delta parent", ErrCommittedStateIntegrity, key)
+		}
+		manifest.State, err = applySnapshotDelta(parent.State, manifest.Delta)
+		if err != nil {
+			return nil, err
+		}
+		if checkpointSequence(manifest.State) != manifest.ManifestSeq {
+			return nil, fmt.Errorf("%w: manifest %s delta sequence mismatch", ErrCommittedStateIntegrity, key)
+		}
+		if err := hydrateAndValidateManifest(manifest); err != nil {
+			return nil, err
+		}
+	} else if manifest.State == nil {
+		return nil, fmt.Errorf("%w: materialized manifest %s has no state", ErrCommittedStateIntegrity, key)
 	}
 	normalizeState(manifest.State)
 	sourceVolumeID := manifest.VolumeID
@@ -1491,6 +1650,10 @@ func cloneSegment(segment *Segment) *Segment {
 		return nil
 	}
 	copy := *segment
+	copy.ChunkSHA256 = make([][]byte, len(segment.ChunkSHA256))
+	for index, digest := range segment.ChunkSHA256 {
+		copy.ChunkSHA256[index] = slices.Clone(digest)
+	}
 	if segment.Encryption != nil {
 		enc := *segment.Encryption
 		enc.WrappedKey = append([]byte(nil), segment.Encryption.WrappedKey...)

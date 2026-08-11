@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"slices"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func (e *Engine) usesExtentLayoutLocked() bool {
@@ -93,6 +95,198 @@ func (e *Engine) applyExtentTruncate(record walRecord) error {
 	node.Ctime = now
 	e.metadata.PutNode(record.Inode, node)
 	return nil
+}
+
+func (e *Engine) applyFallocate(record walRecord) error {
+	if !e.usesExtentLayoutLocked() {
+		return e.applyDenseFallocate(record)
+	}
+	node, err := e.fileNodeLocked(record.Inode)
+	if err != nil {
+		return err
+	}
+	end := record.Offset + record.Length
+	keepSize := record.Mode&uint32(unix.FALLOC_FL_KEEP_SIZE) != 0
+	zeroRange := record.Mode&uint32(unix.FALLOC_FL_ZERO_RANGE) != 0
+	punchHole := record.Mode&uint32(unix.FALLOC_FL_PUNCH_HOLE) != 0
+	if !zeroRange && !punchHole {
+		if !keepSize && end > node.Size {
+			record.Offset = end
+			return e.applyExtentTruncate(record)
+		}
+		node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+		e.metadata.PutNode(record.Inode, node)
+		return nil
+	}
+	extents, err := e.extentsForMutationLocked(record.Inode, record.Seq)
+	if err != nil {
+		return err
+	}
+	visibleEnd := minUint64(end, node.Size)
+	next := sliceExtents(extents, 0, minUint64(record.Offset, node.Size))
+	if zeroRange && !keepSize && end > node.Size {
+		visibleEnd = end
+	}
+	if visibleEnd > record.Offset {
+		next = append(next, FileExtent{Length: visibleEnd - record.Offset})
+	}
+	if end < node.Size {
+		next = append(next, sliceExtents(extents, end, node.Size)...)
+	}
+	next = coalesceExtents(next)
+	e.metadata.DeleteData(record.Inode)
+	if len(next) == 0 {
+		e.metadata.DeleteColdFile(record.Inode)
+	} else {
+		e.metadata.PutColdFile(record.Inode, next)
+	}
+	if zeroRange && !keepSize && end > node.Size {
+		node.Size = end
+	}
+	now := time.Unix(0, record.TimeUnix).UTC()
+	node.Mtime, node.Ctime = now, now
+	e.metadata.PutNode(record.Inode, node)
+	return nil
+}
+
+func (e *Engine) applyDenseFallocate(record walRecord) error {
+	node, err := e.fileNodeLocked(record.Inode)
+	if err != nil {
+		return err
+	}
+	end := record.Offset + record.Length
+	keepSize := record.Mode&uint32(unix.FALLOC_FL_KEEP_SIZE) != 0
+	zeroRange := record.Mode&uint32(unix.FALLOC_FL_ZERO_RANGE) != 0
+	punchHole := record.Mode&uint32(unix.FALLOC_FL_PUNCH_HOLE) != 0
+	current, err := e.mutableFileDataLocked(record.Inode)
+	if err != nil {
+		return err
+	}
+	targetSize := node.Size
+	if !keepSize && end > targetSize {
+		targetSize = end
+	}
+	if targetSize > uint64(maxInt()) {
+		return fmt.Errorf("%w: dense file is too large", ErrInvalidInput)
+	}
+	if targetSize > uint64(len(current)) {
+		grown := make([]byte, int(targetSize))
+		copy(grown, current)
+		current = grown
+	} else {
+		current = slices.Clone(current)
+	}
+	if zeroRange || punchHole {
+		zeroEnd := minUint64(end, node.Size)
+		if zeroRange && !keepSize {
+			zeroEnd = end
+		}
+		for index := record.Offset; index < zeroEnd; index++ {
+			current[int(index)] = 0
+		}
+	}
+	e.metadata.PutData(record.Inode, current)
+	e.metadata.DeleteColdFile(record.Inode)
+	node.Size = targetSize
+	now := time.Unix(0, record.TimeUnix).UTC()
+	node.Mtime, node.Ctime = now, now
+	e.metadata.PutNode(record.Inode, node)
+	return nil
+}
+
+func (e *Engine) applyCopyFileRange(record walRecord) error {
+	if !e.usesExtentLayoutLocked() {
+		return e.applyDenseCopyFileRange(record)
+	}
+	source, err := e.fileNodeLocked(record.SourceInode)
+	if err != nil {
+		return err
+	}
+	destination, err := e.fileNodeLocked(record.Inode)
+	if err != nil {
+		return err
+	}
+	if record.SourceOffset >= source.Size || record.Length == 0 {
+		return nil
+	}
+	copyLength := minUint64(record.Length, source.Size-record.SourceOffset)
+	sourceExtents, err := e.extentsForMutationLocked(record.SourceInode, record.Seq)
+	if err != nil {
+		return err
+	}
+	// Capture source extents before rewriting the destination so overlapping
+	// copies within one inode preserve copy_file_range snapshot semantics.
+	copied := sliceExtents(sourceExtents, record.SourceOffset, record.SourceOffset+copyLength)
+	destinationExtents, err := e.extentsForMutationLocked(record.Inode, record.Seq)
+	if err != nil {
+		return err
+	}
+	oldSize := destination.Size
+	next := sliceExtents(destinationExtents, 0, minUint64(record.Offset, oldSize))
+	if record.Offset > oldSize {
+		next = append(next, FileExtent{Length: record.Offset - oldSize})
+	}
+	next = append(next, copied...)
+	copyEnd := record.Offset + copyLength
+	if copyEnd < oldSize {
+		next = append(next, sliceExtents(destinationExtents, copyEnd, oldSize)...)
+	}
+	next = coalesceExtents(next)
+	e.metadata.DeleteData(record.Inode)
+	e.metadata.PutColdFile(record.Inode, next)
+	destination.Size = maxUint64(oldSize, copyEnd)
+	now := time.Unix(0, record.TimeUnix).UTC()
+	destination.Mtime, destination.Ctime = now, now
+	e.metadata.PutNode(record.Inode, destination)
+	return nil
+}
+
+func (e *Engine) applyDenseCopyFileRange(record walRecord) error {
+	source, err := e.fileNodeLocked(record.SourceInode)
+	if err != nil {
+		return err
+	}
+	destination, err := e.fileNodeLocked(record.Inode)
+	if err != nil {
+		return err
+	}
+	if record.SourceOffset >= source.Size || record.Length == 0 {
+		return nil
+	}
+	copyLength := minUint64(record.Length, source.Size-record.SourceOffset)
+	sourceData, err := e.mutableFileDataLocked(record.SourceInode)
+	if err != nil {
+		return err
+	}
+	sourceEnd := record.SourceOffset + copyLength
+	copied := slices.Clone(sourceData[int(record.SourceOffset):int(sourceEnd)])
+	destinationData, err := e.mutableFileDataLocked(record.Inode)
+	if err != nil {
+		return err
+	}
+	copyEnd := record.Offset + copyLength
+	if copyEnd > uint64(maxInt()) {
+		return fmt.Errorf("%w: dense file is too large", ErrInvalidInput)
+	}
+	if copyEnd > uint64(len(destinationData)) {
+		grown := make([]byte, int(copyEnd))
+		copy(grown, destinationData)
+		destinationData = grown
+	} else {
+		destinationData = slices.Clone(destinationData)
+	}
+	copy(destinationData[int(record.Offset):int(copyEnd)], copied)
+	e.metadata.PutData(record.Inode, destinationData)
+	e.metadata.DeleteColdFile(record.Inode)
+	destination.Size = maxUint64(destination.Size, copyEnd)
+	now := time.Unix(0, record.TimeUnix).UTC()
+	destination.Mtime, destination.Ctime = now, now
+	e.metadata.PutNode(record.Inode, destination)
+	return nil
+}
+
+func maxInt() int {
+	return int(^uint(0) >> 1)
 }
 
 func (e *Engine) extentsForMutationLocked(inode uint64, seq uint64) ([]FileExtent, error) {

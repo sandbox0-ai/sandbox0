@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+const s0fsSegmentScrubInterval = 6 * time.Hour
+
 // S0FSBackend mounts the in-process active volume engine.
 type S0FSBackend struct {
 	logger          *logrus.Logger
@@ -273,6 +275,8 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 		defer close(done)
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
+		scrubTicker := time.NewTicker(s0fsSegmentScrubInterval)
+		defer scrubTicker.Stop()
 		var compactionTicker *time.Ticker
 		var compactionC <-chan time.Time
 		if compactionInterval > 0 {
@@ -314,6 +318,14 @@ func (b *S0FSBackend) startMaterializer(volCtx *VolumeContext) {
 					}).Info("Compacted s0fs volume")
 				}
 				b.logObservationError(volCtx.VolumeID, materialization.ObservationError)
+			case <-scrubTicker.C:
+				if err := volCtx.S0FS.ScrubSegments(ctx); err != nil {
+					if errors.Is(err, s0fs.ErrCommittedStateIntegrity) {
+						b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Error("S0FS stopped after background segment scrub found an integrity failure")
+						return
+					}
+					b.logger.WithError(err).WithField("volume_id", volCtx.VolumeID).Warn("S0FS background segment scrub failed")
+				}
 			}
 		}
 	}()

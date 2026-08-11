@@ -380,6 +380,13 @@ func validateStateFormatVersion(version int) error {
 	return fmt.Errorf("%w: unsupported state format version %d", ErrInvalidInput, version)
 }
 
+func normalizedSegmentValidationMode(mode SegmentValidationMode) SegmentValidationMode {
+	if mode == SegmentValidationStrict {
+		return SegmentValidationStrict
+	}
+	return SegmentValidationLazy
+}
+
 func normalizeState(state *SnapshotState) {
 	if state == nil {
 		return

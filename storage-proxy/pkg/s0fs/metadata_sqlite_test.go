@@ -75,6 +75,30 @@ func TestSQLiteMetadataEngineRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSQLiteMetadataMutationRollsBackAtomically(t *testing.T) {
+	store, err := newSQLiteMetadataStore(context.Background(), filepath.Join(t.TempDir(), "metadata.sqlite"), sqliteMetadataFixture(0), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	injected := errors.New("injected mutation failure")
+	err = store.ApplyMutation(func() error {
+		store.PutNode(42, &Node{Inode: 42, Type: TypeFile, Mode: 0o644, Nlink: 1})
+		store.PutChild(RootInode, "rolled-back", 42)
+		return injected
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("ApplyMutation() error = %v, want injected failure", err)
+	}
+	if _, ok := store.Node(42); ok {
+		t.Fatal("rolled-back inode remains visible")
+	}
+	if _, ok := store.Child(RootInode, "rolled-back"); ok {
+		t.Fatal("rolled-back directory entry remains visible")
+	}
+}
+
 func TestSQLiteMetadataRebuildHonorsCancellation(t *testing.T) {
 	state := sqliteMetadataFixture(10_000)
 	ctx, cancel := context.WithCancel(context.Background())

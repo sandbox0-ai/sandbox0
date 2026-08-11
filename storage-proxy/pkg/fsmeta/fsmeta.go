@@ -17,6 +17,11 @@ const (
 	SetAttrUID
 	SetAttrGID
 	SetAttrSize
+	SetAttrAtime
+	SetAttrMtime
+	SetAttrFH
+	SetAttrAtimeNow
+	SetAttrMtimeNow
 )
 
 const ENOATTR = 61

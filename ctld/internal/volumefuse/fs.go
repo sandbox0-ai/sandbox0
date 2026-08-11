@@ -934,7 +934,23 @@ func (fs *FileSystem) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFile
 }
 
 func (fs *FileSystem) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Status {
-	return fuse.ENOSYS
+	if isCanceled(cancel) {
+		return fuse.EINTR
+	}
+	session, st := fs.requireSession()
+	if st != fuse.OK {
+		return st
+	}
+	_, err := session.Fsync(context.Background(), &pb.FsyncRequest{
+		VolumeId: fs.volumeID,
+		HandleId: input.Fh,
+		Datasync: input.FsyncFlags != 0,
+		Actor:    actorFromCaller(input.Caller),
+	})
+	if err != nil {
+		return statusToFuse(err)
+	}
+	return fuse.OK
 }
 
 func (fs *FileSystem) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, bufIn []byte, out *fuse.IoctlOut, bufOut []byte) fuse.Status {

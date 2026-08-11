@@ -22,6 +22,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatehttp "github.com/sandbox0-ai/sandbox0/pkg/template/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.opentelemetry.io/otel/trace"
@@ -82,6 +83,7 @@ type ServerDependencies struct {
 	TemplateStore           store.TemplateStore
 	TemplateReconciler      TemplateReconciler
 	TemplateStoreEnabled    bool
+	TemplateResourcePolicy  template.ResourcePolicy
 	ClusterService          *clusterservice.ClusterService
 	QuotaRepository         *quota.Repository
 	AuthValidator           *internalauth.Validator
@@ -134,6 +136,7 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 			SourceResolver:       deps.SandboxService,
 			Reconciler:           deps.TemplateReconciler,
 			StatsProvider:        &clusterTemplateStatsProvider{clusterService: deps.ClusterService},
+			ResourcePolicy:       deps.TemplateResourcePolicy,
 			PrivateRegistryHosts: registryHosts,
 			Logger:               deps.Logger,
 		}

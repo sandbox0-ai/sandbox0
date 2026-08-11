@@ -46,7 +46,7 @@ Rootfs snapshot behavior:
 
 - snapshots do not create template IDs and do not appear in `s0 template list`
 - claiming with `snapshot_id` creates a new running sandbox; the requested template still supplies the image, default resources, mounts, services, and network defaults
-- resource overrides at claim or runtime update can change memory only; CPU follows the platform memory-per-CPU ratio with a `150m` minimum limit
+- template defaults and resource overrides at claim or runtime update can change memory only; all are capped by the platform maximum (`16Gi` by default), and CPU follows the platform memory-per-CPU ratio with a `150m` minimum limit
 - snapshot and fork accept a running or paused source; restore rolls an existing paused sandbox back
 
 See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for lifecycle requirements and APIs, or [Initialize Once, Claim Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes) for the custom-rootfs pattern.

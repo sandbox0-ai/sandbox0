@@ -72,7 +72,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		DatabaseMinConns:     config.DatabasePool.MinConns,
 		TemplateStoreEnabled: true,
 		Owner:                "scheduler",
-		MemoryPerCPU:         common.TemplateMemoryPerCPUFromManagerConfig(compiledPlan.Manager.Config),
+		ResourcePolicy:       common.TemplateResourcePolicyFromManagerConfig(compiledPlan.Manager.Config),
 	}); err != nil {
 		return err
 	}
@@ -225,6 +225,10 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 	cfg := &apiconfig.SchedulerConfig{}
 	if compiledPlan != nil && compiledPlan.Scheduler.Config != nil {
 		cfg = compiledPlan.Scheduler.Config.DeepCopy()
+	}
+	if compiledPlan != nil && compiledPlan.Manager.Config != nil {
+		cfg.TeamTemplateMemoryPerCPU = compiledPlan.Manager.Config.TeamTemplateMemoryPerCPU
+		cfg.SandboxMaxMemory = compiledPlan.Manager.Config.SandboxMaxMemory
 	}
 	if dsn, err := compiledPlan.DatabaseDSN(ctx, r.Resources.Client); err == nil {
 		cfg.DatabaseURL = dsn

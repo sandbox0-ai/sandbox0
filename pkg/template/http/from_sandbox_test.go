@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -300,6 +302,69 @@ func TestCreateTemplateFromSandboxRequiresCreateAndSourceReadPermissions(t *test
 				t.Fatalf("source resolver calls = %d, want 0", resolver.calls)
 			}
 		})
+	}
+}
+
+func TestCreateTemplateFromSandboxRejectsMemoryAbovePlatformMaximum(t *testing.T) {
+	t.Parallel()
+
+	sandboxID, err := naming.SandboxName("default", "source-template", "abcde")
+	if err != nil {
+		t.Fatalf("SandboxName() error = %v", err)
+	}
+	sourceSpec := validTemplateSpec()
+	sourceSpec.MainContainer.Resources.Memory = resource.MustParse("32Gi")
+	store := &testTemplateStore{}
+	buildStore := &fromSandboxBuildStore{
+		create: func(context.Context, *template.Template, *template.TemplateBuild) (*template.Template, bool, error) {
+			t.Fatal("CreateTemplateBuild must not run for memory above the platform maximum")
+			return nil, false, nil
+		},
+	}
+	resolver := &fromSandboxSourceResolver{
+		resolve: func(context.Context, string, string) (*template.SandboxTemplateSource, error) {
+			return &template.SandboxTemplateSource{
+				TeamID:    "team-1",
+				ClusterID: "cluster-1",
+				Spec:      sourceSpec,
+			}, nil
+		},
+	}
+	handler := &Handler{
+		Store:          store,
+		BuildStore:     buildStore,
+		SourceResolver: resolver,
+		ResourcePolicy: template.NewResourcePolicy("2Gi", "16Gi"),
+		Logger:         zap.NewNop(),
+	}
+	router := gin.New()
+	router.Use(withClaims(&internalauth.Claims{
+		TeamID:      "team-1",
+		UserID:      "user-1",
+		Permissions: []string{gatewayauthn.PermTemplateCreate, gatewayauthn.PermSandboxRead},
+	}))
+	router.POST("/api/v1/templates/from-sandbox", handler.CreateTemplateFromSandbox)
+
+	body, err := json.Marshal(TemplateFromSandboxRequest{
+		TemplateID: "derived",
+		SandboxID:  sandboxID,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates/from-sandbox", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "spec.mainContainer.resources.memory must be") || !strings.Contains(rec.Body.String(), "16Gi") {
+		t.Fatalf("response = %s, want max-memory rejection", rec.Body.String())
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("source resolver calls = %d, want 1", resolver.calls)
 	}
 }
 

@@ -352,6 +352,12 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		}
 		return nil, err
 	}
+	if _, err := s.effectiveSandboxResourceQuota(template, &targetConfig); err != nil {
+		if checkpoint != nil {
+			checkpoint.close(s, false)
+		}
+		return nil, err
+	}
 	expiresAt := expirationFromTTL(now, targetConfig.TTL)
 	if expiresAt.IsZero() && targetConfig.TTL == nil {
 		expiresAt = source.ExpiresAt

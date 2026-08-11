@@ -124,7 +124,7 @@ type ManagerConfig struct {
 	TeamTemplateMemoryPerCPU string `yaml:"team_template_memory_per_cpu" json:"teamTemplateMemoryPerCpu"`
 	// SandboxMaxMemory is the maximum memory limit accepted for a single sandbox.
 	// +optional
-	// +kubebuilder:default="32Gi"
+	// +kubebuilder:default="16Gi"
 	SandboxMaxMemory string `yaml:"sandbox_max_memory" json:"sandboxMaxMemory"`
 	// +optional
 	SandboxRuntimeClassName string `yaml:"sandbox_runtime_class_name" json:"sandboxRuntimeClassName"`

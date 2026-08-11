@@ -3932,7 +3932,7 @@ spec:
                               unpack, runtime initialization, and readiness observation.
                             type: string
                           sandboxMaxMemory:
-                            default: 32Gi
+                            default: 16Gi
                             description: SandboxMaxMemory is the maximum memory limit
                               accepted for a single sandbox.
                             type: string

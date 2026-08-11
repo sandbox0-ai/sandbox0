@@ -1,0 +1,44 @@
+name: Cloud feedback
+description: Share product feedback about Sandbox0 Cloud.
+title: "[Cloud feedback]: "
+labels:
+  - feedback
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Sandbox0 Cloud. GitHub issues are public.
+        Do not include API keys, tokens, kubeconfigs, customer data, private repository URLs, or other sensitive information.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Feedback type
+      description: Choose the category that best fits your feedback.
+      options:
+        - Product experience
+        - Feature request
+        - Bug report
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: feedback
+    attributes:
+      label: What would you like to share?
+      description: Describe what happened, what you expected, or the problem this would solve.
+      placeholder: Tell us what would make Sandbox0 Cloud better.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context (optional)
+      description: Include a minimal reproduction, relevant non-sensitive logs, or the dashboard area involved when useful.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Public issue acknowledgement
+      options:
+        - label: I removed API keys, tokens, kubeconfigs, customer data, private repository URLs, and other sensitive information.
+          required: true

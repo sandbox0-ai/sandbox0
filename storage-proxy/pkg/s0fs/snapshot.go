@@ -219,10 +219,6 @@ func loadSnapshotState(path, volumeID, role string, encryption *EncryptionConfig
 	return state, err
 }
 
-func loadSnapshotStateWithFormat(path, volumeID, role string, encryption *EncryptionConfig) (*SnapshotState, int, int64, error) {
-	return loadSnapshotStateWithFormatContext(context.Background(), path, volumeID, role, encryption)
-}
-
 func loadSnapshotStateWithFormatContext(ctx context.Context, path, volumeID, role string, encryption *EncryptionConfig) (*SnapshotState, int, int64, error) {
 	ctx = nonNilContext(ctx)
 	if err := ctx.Err(); err != nil {

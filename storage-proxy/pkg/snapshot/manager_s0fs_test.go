@@ -93,7 +93,7 @@ func TestS0FSSnapshotRestoreRepairsTerminalIntegrityFailure(t *testing.T) {
 		t.Fatalf("CreateSnapshot() error = %v", err)
 	}
 	writeS0FSFile(t, engine, "state.txt", "broken")
-	broken, err := engine.SyncMaterialize(context.Background())
+	_, err = engine.SyncMaterialize(context.Background())
 	if err != nil {
 		t.Fatalf("SyncMaterialize(broken) error = %v", err)
 	}
@@ -104,10 +104,12 @@ func TestS0FSSnapshotRestoreRepairsTerminalIntegrityFailure(t *testing.T) {
 	runtime := openFreshS0FSEngine(t, mgr, "team-1", "vol-restore-repair")
 	defer runtime.Close()
 	volMgr.ctx.S0FS = runtime
-	var brokenSegment string
-	for _, segment := range broken.State.Segments {
-		brokenSegment = segment.Key
+	brokenState := runtime.SnapshotState()
+	brokenNode, err := runtime.Lookup(s0fs.RootInode, "state.txt")
+	if err != nil {
+		t.Fatalf("Lookup(state.txt) before corruption error = %v", err)
 	}
+	brokenSegment := liveS0FSSegmentKey(t, brokenState, brokenNode.Inode)
 	cfg, err := mgr.s0fsConfig("team-1", "vol-restore-repair")
 	if err != nil {
 		t.Fatalf("s0fsConfig() error = %v", err)
@@ -525,6 +527,7 @@ func TestS0FSGarbageCollectsObjectsAfterSnapshotDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncMaterialize(old) error = %v", err)
 	}
+	previousState := engine.SnapshotState()
 	snap, err := mgr.CreateSnapshot(context.Background(), &CreateSnapshotRequest{
 		VolumeID: "vol-gc-delete",
 		Name:     "snap-old",
@@ -539,6 +542,7 @@ func TestS0FSGarbageCollectsObjectsAfterSnapshotDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncMaterialize(new) error = %v", err)
 	}
+	currentState := engine.SnapshotState()
 
 	if err := mgr.DeleteSnapshot(context.Background(), "vol-gc-delete", snap.ID, "team-1"); err != nil {
 		t.Fatalf("DeleteSnapshot() error = %v", err)
@@ -547,14 +551,12 @@ func TestS0FSGarbageCollectsObjectsAfterSnapshotDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("s0fsConfig() error = %v", err)
 	}
-	var previousSegment string
-	for _, segment := range previous.State.Segments {
-		previousSegment = segment.Key
+	node, err := engine.Lookup(s0fs.RootInode, "state.txt")
+	if err != nil {
+		t.Fatalf("Lookup(state.txt) error = %v", err)
 	}
-	var currentSegment string
-	for _, segment := range current.State.Segments {
-		currentSegment = segment.Key
-	}
+	previousSegment := liveS0FSSegmentKey(t, previousState, node.Inode)
+	currentSegment := liveS0FSSegmentKey(t, currentState, node.Inode)
 	wantSegmentsBeforeGrace := []string{previousSegment, currentSegment}
 	sort.Strings(wantSegmentsBeforeGrace)
 	if got, want := listS0FSKeys(t, cfg.ObjectStore, "segments/"), wantSegmentsBeforeGrace; !sameStrings(got, want) {
@@ -794,6 +796,25 @@ func sameStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func liveS0FSSegmentKey(t *testing.T, state *s0fs.SnapshotState, inode uint64) string {
+	t.Helper()
+	if state == nil {
+		t.Fatal("S0FS state is nil")
+	}
+	extents := state.ColdFiles[inode]
+	for _, extent := range extents {
+		if extent.SegmentID == "" {
+			continue
+		}
+		segment := state.Segments[extent.SegmentID]
+		if segment != nil && segment.Key != "" {
+			return segment.Key
+		}
+	}
+	t.Fatalf("inode %d has no live remote segment: extents=%+v segments=%+v", inode, extents, state.Segments)
+	return ""
 }
 
 type cancelAfterTxRepo struct {

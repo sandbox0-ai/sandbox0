@@ -10,9 +10,16 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"golang.org/x/sys/unix"
+)
+
+const (
+	XattrCreate  uint32 = 1
+	XattrReplace uint32 = 2
 )
 
 type Engine struct {
@@ -27,21 +34,24 @@ type Engine struct {
 	nextInode uint64
 	metadata  metadataStore
 
-	materializer            *Materializer
-	encryption              *EncryptionConfig
-	stateFormatVersion      int
-	localDiskGuard          *LocalDiskGuard
-	retainUnlinked          bool
-	metadataPath            string
-	metadataCacheBytes      int64
-	mutationVersion         uint64
-	lastCommittedManifest   uint64
-	lastCommittedHead       *CommittedHead
-	lastMaterializedVersion uint64
-	pendingMaterialization  *pendingMaterialization
-	dirty                   bool
-	dirtyAt                 time.Time
-	failure                 atomic.Pointer[engineFailure]
+	materializer             *Materializer
+	encryption               *EncryptionConfig
+	stateFormatVersion       int
+	localDiskGuard           *LocalDiskGuard
+	retainUnlinked           bool
+	metadataPath             string
+	metadataCacheBytes       int64
+	segmentValidation        SegmentValidationMode
+	mutationVersion          uint64
+	lastCommittedManifest    uint64
+	lastCommittedHead        *CommittedHead
+	lastCommittedStateDigest string
+	lastCommittedDeltaDepth  uint32
+	lastMaterializedVersion  uint64
+	pendingMaterialization   *pendingMaterialization
+	dirty                    bool
+	dirtyAt                  time.Time
+	failure                  atomic.Pointer[engineFailure]
 }
 
 type engineFailure struct {
@@ -54,7 +64,10 @@ type pendingMaterialization struct {
 	stateDigest     string
 	mutationVersion uint64
 	state           *SnapshotState
+	changes         *metadataChanges
 	walCheckpoint   *walCheckpoint
+	statePersisted  bool
+	incremental     bool
 }
 
 type loadedEngineState struct {
@@ -64,6 +77,7 @@ type loadedEngineState struct {
 	nextInode    uint64
 	metadataPath string
 	stateDigest  string
+	deltaDepth   uint32
 }
 
 func loadedEngineStateFromSnapshot(state *SnapshotState) *loadedEngineState {
@@ -226,10 +240,12 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 			}
 			if committedHeadMatchesCheckpoint(committedHead, cfg.VolumeID, state.checkpointSequence()) &&
 				recoveryBindingMatches(localBinding, committedHead, stateDigest) {
-				if err := materializer.validateCommittedLoadedStateSegments(ctx, state); err != nil {
-					return nil, err
+				if normalizedSegmentValidationMode(cfg.SegmentValidation) == SegmentValidationStrict {
+					if err := materializer.validateCommittedLoadedStateSegments(ctx, state); err != nil {
+						return nil, err
+					}
 				}
-				latestManifest = manifestFromCommittedHead(committedHead, stateDigest)
+				latestManifest = manifestFromCommittedHead(committedHead, stateDigest, state.deltaDepth)
 				localCommitted = true
 				selectedSource = "local"
 				selectedFormat = localFormat
@@ -251,8 +267,10 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 			}
 			emitOpenPhase(cfg, "state_load", "remote", remoteFormat, phaseStarted, -1, replayStats.RecordsScanned, latestState, latestErr)
 			if latestErr == nil {
-				if err := materializer.validateCommittedLoadedStateSegments(ctx, latestState); err != nil {
-					return nil, err
+				if normalizedSegmentValidationMode(cfg.SegmentValidation) == SegmentValidationStrict {
+					if err := materializer.validateCommittedLoadedStateSegments(ctx, latestState); err != nil {
+						return nil, err
+					}
 				}
 			}
 			if latestErr == nil {
@@ -373,6 +391,7 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		retainUnlinked:     cfg.RetainUnlinked,
 		metadataPath:       metadataPath,
 		metadataCacheBytes: cfg.MetadataCacheBytes,
+		segmentValidation:  normalizedSegmentValidationMode(cfg.SegmentValidation),
 	}
 	defer func() {
 		if engine != nil {
@@ -388,6 +407,8 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 	if latestManifest != nil {
 		e.lastCommittedManifest = latestManifest.ManifestSeq
 		e.lastCommittedHead = cloneCommittedHead(committedHead)
+		e.lastCommittedStateDigest = latestManifest.StateDigest
+		e.lastCommittedDeltaDepth = latestManifest.DeltaDepth
 	}
 
 	phaseStarted = time.Now()
@@ -412,7 +433,7 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 				emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
 				return nil, replayErr
 			}
-			if err := e.apply(record); err != nil {
+			if err := e.metadata.ApplyMutation(func() error { return e.apply(record) }); err != nil {
 				replayErr := fmt.Errorf("replay wal seq %d: %w", record.Seq, err)
 				emitWALOpenPhase(cfg, "wal_replay", selectedFormat, phaseStarted, replayStats, walRecordsSkipped, appliedRecords, e.metadata, replayErr)
 				return nil, replayErr
@@ -452,6 +473,14 @@ func Open(ctx context.Context, cfg Config) (engine *Engine, retErr error) {
 		e.dirty = true
 		e.dirtyAt = time.Now().UTC()
 		e.mutationVersion = 1
+	} else if e.lastCommittedHead != nil && e.lastCommittedStateDigest != "" {
+		if persisted, err := e.persistMetadataCheckpointLocked(e.lastCommittedHead, e.lastCommittedStateDigest); err != nil {
+			return nil, fmt.Errorf("persist opened sqlite metadata checkpoint: %w", err)
+		} else if persisted {
+			if err := saveRecoveryBinding(localHeadBindingPath(cfg.WALPath), cfg.VolumeID, e.lastCommittedHead, e.lastCommittedStateDigest); err != nil {
+				return nil, fmt.Errorf("persist opened local binding: %w", err)
+			}
+		}
 	}
 	if err := saveRecoveryBinding(walBaseBindingPath(cfg.WALPath), cfg.VolumeID, e.lastCommittedHead, ""); err != nil {
 		return nil, fmt.Errorf("persist wal committed base: %w", err)
@@ -562,13 +591,27 @@ func (e *Engine) Close() error {
 			}
 		}
 	} else {
-		if err := e.persistCurrentStateLocked(); err != nil {
-			return err
-		}
-		if e.lastCommittedHead != nil {
-			stateDigest, err := snapshotStateDigest(e.currentStateLocked())
+		persistedMetadata := false
+		if e.lastCommittedHead != nil && e.lastCommittedStateDigest != "" {
+			var err error
+			persistedMetadata, err = e.persistMetadataCheckpointLocked(e.lastCommittedHead, e.lastCommittedStateDigest)
 			if err != nil {
 				return err
+			}
+		}
+		if !persistedMetadata {
+			if err := e.persistCurrentStateLocked(); err != nil {
+				return err
+			}
+		}
+		if e.lastCommittedHead != nil {
+			stateDigest := e.lastCommittedStateDigest
+			if stateDigest == "" {
+				var err error
+				stateDigest, err = snapshotStateDigest(e.currentStateLocked())
+				if err != nil {
+					return err
+				}
 			}
 			if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, e.lastCommittedHead, stateDigest); err != nil {
 				return err
@@ -652,7 +695,7 @@ func (e *Engine) ReadDirPage(inode, offset uint64, limit uint32) ([]DirEntry, bo
 		return nil, false, err
 	}
 
-	page, eof, ok := e.metadata.DirectoryPage(inode, offset, limit)
+	page, eof, ok := e.metadata.DirectoryPageWithNodes(inode, offset, limit)
 	if err := e.metadata.Err(); err != nil {
 		return nil, false, err
 	}
@@ -662,7 +705,7 @@ func (e *Engine) ReadDirPage(inode, offset uint64, limit uint32) ([]DirEntry, bo
 	entries := make([]DirEntry, 0, len(page))
 	for _, entry := range page {
 		childInode := entry.Inode
-		node, _ := e.metadata.Node(childInode)
+		node := entry.Node
 		if node == nil {
 			continue
 		}
@@ -670,6 +713,7 @@ func (e *Engine) ReadDirPage(inode, offset uint64, limit uint32) ([]DirEntry, bo
 			Name:  entry.Name,
 			Inode: childInode,
 			Type:  node.Type,
+			Node:  node,
 		})
 	}
 	return entries, eof, e.metadata.Err()
@@ -713,6 +757,14 @@ func (e *Engine) Symlink(parent uint64, name, target string, mode uint32) (*Node
 		return nil, fmt.Errorf("%w: symlink target is required", ErrInvalidInput)
 	}
 	return e.create(parent, name, TypeSymlink, mode, target, CreateOptions{})
+}
+
+func (e *Engine) Mknod(parent uint64, name string, mode uint32, rdev uint64) (*Node, error) {
+	typ, err := fileTypeFromMode(mode)
+	if err != nil {
+		return nil, err
+	}
+	return e.create(parent, name, typ, mode&0o7777, "", CreateOptions{Rdev: rdev})
 }
 
 func (e *Engine) Link(inode uint64, newParent uint64, newName string) (*Node, error) {
@@ -834,6 +886,14 @@ func (e *Engine) ReadInto(inode uint64, offset uint64, dest []byte) (int, error)
 }
 
 func (e *Engine) Rename(oldParent uint64, oldName string, newParent uint64, newName string) error {
+	return e.RenameWithFlags(oldParent, oldName, newParent, newName, 0)
+}
+
+func (e *Engine) RenameWithFlags(oldParent uint64, oldName string, newParent uint64, newName string, flags uint32) error {
+	const supported = uint32(unix.RENAME_NOREPLACE | unix.RENAME_EXCHANGE)
+	if flags&^supported != 0 || flags == supported {
+		return fmt.Errorf("%w: unsupported rename flags %#x", ErrInvalidInput, flags)
+	}
 	e.mutationMu.Lock()
 	defer e.mutationMu.Unlock()
 
@@ -845,13 +905,24 @@ func (e *Engine) Rename(oldParent uint64, oldName string, newParent uint64, newN
 	if oldName == "" || newName == "" {
 		return fmt.Errorf("%w: empty rename component", ErrInvalidInput)
 	}
-	if _, err := e.lookupLocked(oldParent, oldName); err != nil {
+	inode, err := e.lookupLocked(oldParent, oldName)
+	if err != nil {
 		return err
 	}
 	if err := e.ensureDirLocked(newParent); err != nil {
 		return err
 	}
+	destination, destinationExists := e.metadata.Child(newParent, newName)
+	if flags&uint32(unix.RENAME_NOREPLACE) != 0 && destinationExists {
+		return ErrExists
+	}
+	if flags&uint32(unix.RENAME_EXCHANGE) != 0 && !destinationExists {
+		return ErrNotFound
+	}
 	record := e.newRecord("rename")
+	record.Inode = inode
+	record.SourceInode = destination
+	record.Mode = flags
 	record.Parent = oldParent
 	record.Name = oldName
 	record.NewParent = newParent
@@ -889,6 +960,7 @@ func (e *Engine) UnlinkWithInode(parent uint64, name string) (uint64, error) {
 		return 0, ErrIsDir
 	}
 	record := e.newRecord("unlink")
+	record.Inode = inode
 	record.Parent = parent
 	record.Name = name
 	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
@@ -945,6 +1017,7 @@ func (e *Engine) RemoveDir(parent uint64, name string) error {
 		return ErrNotEmpty
 	}
 	record := e.newRecord("rmdir")
+	record.Inode = inode
 	record.Parent = parent
 	record.Name = name
 	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
@@ -1022,6 +1095,172 @@ func (e *Engine) Truncate(inode uint64, size uint64) error {
 	return nil
 }
 
+func (e *Engine) Fallocate(inode uint64, mode uint32, offset, length uint64) error {
+	if length == 0 || offset > ^uint64(0)-length {
+		return fmt.Errorf("%w: invalid fallocate range", ErrInvalidInput)
+	}
+	const supported = uint32(unix.FALLOC_FL_KEEP_SIZE | unix.FALLOC_FL_PUNCH_HOLE | unix.FALLOC_FL_ZERO_RANGE)
+	if mode&^supported != 0 || mode&uint32(unix.FALLOC_FL_PUNCH_HOLE) != 0 && mode&uint32(unix.FALLOC_FL_KEEP_SIZE) == 0 {
+		return fmt.Errorf("%w: unsupported fallocate mode %#x", ErrInvalidInput, mode)
+	}
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if _, err := e.fileNodeLocked(inode); err != nil {
+		return err
+	}
+	record := e.newRecord("fallocate")
+	record.Inode, record.Mode, record.Offset, record.Length = inode, mode, offset, length
+	return e.appendAndApplyLocked(record, estimatedWALRecordBytes(record))
+}
+
+func (e *Engine) CopyFileRange(sourceInode, sourceOffset, destinationInode, destinationOffset, length uint64) (uint64, error) {
+	if length == 0 {
+		return 0, nil
+	}
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return 0, err
+	}
+	source, err := e.fileNodeLocked(sourceInode)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := e.fileNodeLocked(destinationInode); err != nil {
+		return 0, err
+	}
+	if sourceOffset >= source.Size {
+		return 0, nil
+	}
+	length = minUint64(length, source.Size-sourceOffset)
+	if destinationOffset > ^uint64(0)-length {
+		return 0, fmt.Errorf("%w: copy range overflows", ErrInvalidInput)
+	}
+	record := e.newRecord("copy_file_range")
+	record.Inode, record.Offset = destinationInode, destinationOffset
+	record.SourceInode, record.SourceOffset, record.Length = sourceInode, sourceOffset, length
+	if err := e.appendAndApplyLocked(record, estimatedWALRecordBytes(record)); err != nil {
+		return 0, err
+	}
+	return length, nil
+}
+
+func (e *Engine) GetXattr(inode uint64, name string) ([]byte, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	if err := validateXattrName(name); err != nil {
+		return nil, err
+	}
+	node, ok := e.metadata.Node(inode)
+	if !ok || node == nil {
+		return nil, ErrNotFound
+	}
+	value, ok := node.Xattrs[name]
+	if !ok {
+		return nil, ErrXattrNotFound
+	}
+	return slices.Clone(value), nil
+}
+
+func (e *Engine) SetXattr(inode uint64, name string, value []byte, flags uint32) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if err := validateXattrName(name); err != nil {
+		return err
+	}
+	if err := validateXattrFlags(flags); err != nil {
+		return err
+	}
+	node, ok := e.metadata.Node(inode)
+	if !ok || node == nil {
+		return ErrNotFound
+	}
+	_, exists := node.Xattrs[name]
+	if flags&XattrCreate != 0 && exists {
+		return ErrExists
+	}
+	if flags&XattrReplace != 0 && !exists {
+		return ErrXattrNotFound
+	}
+	record := e.newRecord("set_xattr")
+	record.Inode, record.Name, record.Data, record.Mode = inode, name, slices.Clone(value), flags
+	return e.appendAndApplyLocked(record, estimatedWALRecordBytes(record))
+}
+
+func (e *Engine) ListXattrs(inode uint64) ([]string, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	node, ok := e.metadata.Node(inode)
+	if !ok || node == nil {
+		return nil, ErrNotFound
+	}
+	names := make([]string, 0, len(node.Xattrs))
+	for name := range node.Xattrs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+func (e *Engine) RemoveXattr(inode uint64, name string) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if err := validateXattrName(name); err != nil {
+		return err
+	}
+	node, ok := e.metadata.Node(inode)
+	if !ok || node == nil {
+		return ErrNotFound
+	}
+	if _, ok := node.Xattrs[name]; !ok {
+		return ErrXattrNotFound
+	}
+	record := e.newRecord("remove_xattr")
+	record.Inode, record.Name = inode, name
+	return e.appendAndApplyLocked(record, estimatedWALRecordBytes(record))
+}
+
+func (e *Engine) SetTimes(inode uint64, atime, mtime time.Time) error {
+	e.mutationMu.Lock()
+	defer e.mutationMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	if _, ok := e.metadata.Node(inode); !ok {
+		return ErrNotFound
+	}
+	record := e.newRecord("set_times")
+	record.Inode = inode
+	record.AtimeUnix = atime.UTC().UnixNano()
+	record.MtimeUnix = mtime.UTC().UnixNano()
+	return e.appendAndApplyLocked(record, estimatedWALRecordBytes(record))
+}
+
 func (e *Engine) Fsync(_ uint64) error {
 	e.mu.RLock()
 	if err := e.checkOpen(); err != nil {
@@ -1034,6 +1273,34 @@ func (e *Engine) Fsync(_ uint64) error {
 		return err
 	}
 	return wait()
+}
+
+// ScrubSegments verifies the complete immutable object inventory. It is kept
+// off the activation path so open latency does not grow with volume capacity.
+func (e *Engine) ScrubSegments(ctx context.Context) error {
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
+	e.mu.RLock()
+	if err := e.checkOpen(); err != nil {
+		e.mu.RUnlock()
+		return err
+	}
+	metadata := e.metadata
+	materializer := e.materializer
+	e.mu.RUnlock()
+	if materializer == nil || !materializer.Enabled() {
+		return nil
+	}
+	var err error
+	if sqliteState, ok := metadata.(*sqliteMetadataStore); ok {
+		err = classifyCommittedSegmentValidationError(sqliteState.validateSegments(nonNilContext(ctx), materializer))
+	} else {
+		err = materializer.validateCommittedStateSegments(nonNilContext(ctx), metadata.ReferenceSnapshot(e.nextSeq, e.nextInode))
+	}
+	if errors.Is(err, ErrCommittedStateIntegrity) {
+		e.failClosed(err)
+	}
+	return err
 }
 
 func (e *Engine) SnapshotState() *SnapshotState {
@@ -1116,7 +1383,7 @@ func EngineMemoryReservationBytes(metadataCacheBytes int64) int64 {
 	if metadataCacheBytes <= 0 {
 		metadataCacheBytes = defaultMetadataCacheBytes
 	}
-	return metadataCacheBytes + (1 << 20) + defaultSegmentCacheMaxBytes + (1 << 20)
+	return metadataCacheBytes + sqliteMetadataHotCacheBytes + defaultSegmentCacheMaxBytes + (1 << 20)
 }
 
 func (e *Engine) ExportState() (*SnapshotState, error) {
@@ -1173,25 +1440,103 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 		return nil, nil
 	}
 	version := e.mutationVersion
-	state, err := e.materializeStateLocked()
+	checkpointSeq := e.nextSeq - 1
+	expected := cloneCommittedHead(e.lastCommittedHead)
+	parentStateDigest := e.lastCommittedStateDigest
+	changes, err := collectMetadataChanges(ctx, e.wal.path, e.volumeID, e.encryption, checkpointSeq)
 	if err != nil {
 		e.mu.Unlock()
 		e.mutationMu.Unlock()
 		return nil, err
 	}
-	expected := cloneCommittedHead(e.lastCommittedHead)
+	if len(changes.inodes) == 0 && len(changes.dirs) == 0 && len(changes.dirents) == 0 && len(changes.dirMarkers) == 0 {
+		changes.full = true
+	}
+	parentDeltaDepth := e.lastCommittedDeltaDepth
+	useDelta := expected != nil && !changes.full && parentStateDigest != "" && parentDeltaDepth < maxManifestDeltaDepth
+	var state *SnapshotState
+	var delta *SnapshotDelta
+	storageBytes := int64(0)
+	if useDelta {
+		delta, err = buildMetadataDelta(e.metadata, e.nextSeq, e.nextInode, changes)
+		if err == nil {
+			var usage FilesystemUsage
+			usage, err = e.metadata.Usage()
+			storageBytes = saturatingInt64(usage.DataBytes)
+		}
+	} else {
+		changes.full = true
+		state, err = e.materializeStateLocked()
+	}
+	if err != nil {
+		e.mu.Unlock()
+		e.mutationMu.Unlock()
+		return nil, err
+	}
 	e.mu.Unlock()
-	checkpoint, err := e.wal.checkpoint(checkpointSequence(state))
+	checkpoint, err := e.wal.checkpoint(checkpointSeq)
 	if err != nil {
 		e.mutationMu.Unlock()
 		return nil, err
 	}
 	e.mutationMu.Unlock()
 
-	manifest, err := e.materializer.materializeOwned(ctx, state, expected)
+	var manifest *Manifest
+	if useDelta {
+		manifest, err = e.materializer.materializeDeltaOwned(ctx, delta, expected, parentStateDigest, parentDeltaDepth, storageBytes)
+	} else {
+		manifest, err = e.materializer.materializeOwned(ctx, state, expected, changes)
+	}
 	if err != nil || manifest == nil {
 		e.failClosed(err)
 		return manifest, err
+	}
+
+	// Record the already-published remote commit before starting the local
+	// checkpoint. If local persistence fails (for example, the cache limit is
+	// reached), the next sync can retry it without publishing another manifest
+	// or discarding the WAL recovery prefix.
+	e.mutationMu.Lock()
+	e.mu.Lock()
+	if err := e.checkOpen(); err != nil {
+		e.mu.Unlock()
+		e.mutationMu.Unlock()
+		return nil, err
+	}
+	if manifest.ManifestSeq > e.lastCommittedManifest {
+		e.lastCommittedManifest = manifest.ManifestSeq
+	}
+	committedHead := committedHeadForManifest(manifest, manifestKey(manifest.ManifestSeq, manifest.CommitID), expected)
+	e.lastCommittedHead = cloneCommittedHead(committedHead)
+	e.lastCommittedStateDigest = manifest.StateDigest
+	e.lastCommittedDeltaDepth = manifest.DeltaDepth
+	materializedState := manifest.State
+	if useDelta {
+		materializedState = manifest.materializedState
+	}
+	e.pendingMaterialization = &pendingMaterialization{
+		manifestSeq:     manifest.ManifestSeq,
+		head:            committedHead,
+		stateDigest:     manifest.StateDigest,
+		mutationVersion: version,
+		state:           materializedState,
+		changes:         changes,
+		walCheckpoint:   checkpoint,
+		incremental:     useDelta,
+		statePersisted:  useDelta,
+	}
+	e.mu.Unlock()
+	e.mutationMu.Unlock()
+
+	// The materialized state is immutable and materializeMu excludes Close and
+	// other materializations. Persist it before reacquiring the mutation lock so
+	// serializing and fsyncing a large local recovery checkpoint does not stop
+	// unrelated filesystem operations. Restore/ReplaceState take materializeMu
+	// as well, so they cannot race this head-file replacement.
+	if !useDelta {
+		if err := e.persistMaterializedState(manifest.State, true); err != nil {
+			return manifest, err
+		}
 	}
 
 	e.mutationMu.Lock()
@@ -1202,19 +1547,10 @@ func (e *Engine) syncMaterialize(ctx context.Context, force bool) (*Manifest, er
 	if err := e.checkOpen(); err != nil {
 		return nil, err
 	}
-	if manifest.ManifestSeq > e.lastCommittedManifest {
-		e.lastCommittedManifest = manifest.ManifestSeq
+	if e.pendingMaterialization == nil || e.pendingMaterialization.manifestSeq != manifest.ManifestSeq {
+		return nil, fmt.Errorf("%w: pending materialization changed during local checkpoint", ErrCommittedHeadConflict)
 	}
-	committedHead := committedHeadForManifest(manifest, manifestKey(manifest.ManifestSeq, manifest.CommitID), expected)
-	e.lastCommittedHead = cloneCommittedHead(committedHead)
-	e.pendingMaterialization = &pendingMaterialization{
-		manifestSeq:     manifest.ManifestSeq,
-		head:            committedHead,
-		stateDigest:     manifest.StateDigest,
-		mutationVersion: version,
-		state:           manifest.State,
-		walCheckpoint:   checkpoint,
-	}
+	e.pendingMaterialization.statePersisted = true
 	if err := e.finalizePendingMaterializationLocked(); err != nil {
 		return nil, err
 	}
@@ -1233,14 +1569,34 @@ func (e *Engine) finalizePendingMaterializationLocked() error {
 	if pending.state == nil || checkpointSequence(pending.state) != pending.manifestSeq {
 		return fmt.Errorf("%w: pending materialization checkpoint is invalid", ErrInvalidInput)
 	}
-	if err := e.persistStateLocked(pending.state, true); err != nil {
-		return err
+	if !pending.statePersisted {
+		if err := e.persistStateLocked(pending.state, true); err != nil {
+			return err
+		}
 	}
 	if pending.head == nil || pending.head.ManifestSeq != pending.manifestSeq || pending.stateDigest == "" {
 		return fmt.Errorf("%w: pending materialization identity is invalid", ErrInvalidInput)
 	}
-	if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, pending.head, pending.stateDigest); err != nil {
-		return fmt.Errorf("persist local committed binding: %w", err)
+	installedExactState := e.mutationVersion == pending.mutationVersion
+	if installedExactState {
+		if err := e.installMaterializedStateLocked(pending.state, pending.changes); err != nil {
+			return err
+		}
+		e.lastMaterializedVersion = pending.mutationVersion
+		e.dirty = false
+	}
+	persistedMetadata := false
+	if installedExactState {
+		var err error
+		persistedMetadata, err = e.persistMetadataCheckpointLocked(pending.head, pending.stateDigest)
+		if err != nil {
+			return fmt.Errorf("persist sqlite metadata checkpoint: %w", err)
+		}
+	}
+	if !pending.incremental || persistedMetadata {
+		if err := saveRecoveryBinding(localHeadBindingPath(e.wal.path), e.volumeID, pending.head, pending.stateDigest); err != nil {
+			return fmt.Errorf("persist local committed binding: %w", err)
+		}
 	}
 	if err := saveRecoveryBinding(walBaseBindingPath(e.wal.path), e.volumeID, pending.head, ""); err != nil {
 		return fmt.Errorf("persist wal committed base: %w", err)
@@ -1250,13 +1606,6 @@ func (e *Engine) finalizePendingMaterializationLocked() error {
 	}
 	if err := e.wal.discardThrough(pending.walCheckpoint); err != nil {
 		return err
-	}
-	if e.mutationVersion == pending.mutationVersion {
-		if err := e.replaceStateLocked(cloneState(pending.state)); err != nil {
-			return err
-		}
-		e.lastMaterializedVersion = pending.mutationVersion
-		e.dirty = false
 	}
 	e.pendingMaterialization = nil
 	e.refreshLocalDiskGuardLocked()
@@ -1354,6 +1703,8 @@ func (e *Engine) RefreshMaterialized(ctx context.Context) (bool, error) {
 	if manifest != nil {
 		e.lastCommittedManifest = manifest.ManifestSeq
 		e.lastCommittedHead = cloneCommittedHead(refreshedHead)
+		e.lastCommittedStateDigest = manifest.StateDigest
+		e.lastCommittedDeltaDepth = manifest.DeltaDepth
 	}
 	return true, nil
 }
@@ -1382,6 +1733,9 @@ func (e *Engine) RestoreSnapshot(snapshotID string) error {
 	if err := validateSnapshotID(snapshotID); err != nil {
 		return err
 	}
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
+
 	e.mutationMu.Lock()
 	defer e.mutationMu.Unlock()
 
@@ -1405,6 +1759,9 @@ func (e *Engine) RestoreState(state *SnapshotState) error {
 	}
 	state = cloneState(state)
 	normalizeState(state)
+
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
 
 	e.mutationMu.Lock()
 	defer e.mutationMu.Unlock()
@@ -1439,6 +1796,9 @@ func (e *Engine) restoreStateLocked(state *SnapshotState) error {
 func (e *Engine) ReplaceState(state *SnapshotState) error {
 	state = cloneState(state)
 	ensureMaterializableSequence(state)
+
+	e.materializeMu.Lock()
+	defer e.materializeMu.Unlock()
 
 	e.mutationMu.Lock()
 	defer e.mutationMu.Unlock()
@@ -1509,6 +1869,7 @@ func (e *Engine) create(parent uint64, name string, typ FileType, mode uint32, t
 	record.UID = opts.UID
 	record.GID = opts.GID
 	record.Target = target
+	record.Rdev = opts.Rdev
 	if err := e.reserveLocalDiskLocked(estimatedWALRecordBytes(record)); err != nil {
 		e.mu.Unlock()
 		return nil, err
@@ -1558,7 +1919,7 @@ func (e *Engine) appendPreparedAndApplyLocked(record walRecord, walPayload []byt
 	if err := e.wal.appendPrepared(record, walPayload); err != nil {
 		return err
 	}
-	if err := e.apply(record); err != nil {
+	if err := e.metadata.ApplyMutation(func() error { return e.apply(record) }); err != nil {
 		return err
 	}
 	e.advanceSeqLocked(record)
@@ -1604,6 +1965,9 @@ func estimatedStateBytes(state *SnapshotState) int64 {
 	for _, node := range state.Nodes {
 		if node != nil {
 			total += int64(256 + len(node.Target))
+			for name, value := range node.Xattrs {
+				total += int64(64 + len(name) + len(value)*2)
+			}
 		}
 	}
 	for _, children := range state.Children {
@@ -1678,6 +2042,57 @@ func (e *Engine) replaceStateLocked(state *SnapshotState) error {
 	return e.metadata.Err()
 }
 
+// installMaterializedStateLocked installs the cold-data layout produced by a
+// commit without rebuilding the namespace index. Materialization does not
+// change nodes or directory entries; when the mutation version still matches,
+// only file payload placement and segment descriptors can differ.
+func (e *Engine) installMaterializedStateLocked(state *SnapshotState, changes *metadataChanges) error {
+	if state == nil {
+		return fmt.Errorf("%w: materialized state is required", ErrInvalidInput)
+	}
+	if changes == nil || changes.full {
+		return e.replaceStateLocked(cloneState(state))
+	}
+
+	return e.metadata.ApplyMutation(func() error {
+		oldSegments := make(map[string]struct{})
+		for inode := range changes.inodes {
+			if extents, ok := e.metadata.ColdFile(inode); ok {
+				for _, extent := range extents {
+					if extent.SegmentID != "" {
+						oldSegments[extent.SegmentID] = struct{}{}
+					}
+				}
+			}
+
+			e.metadata.DeleteData(inode)
+			e.metadata.DeleteColdFile(inode)
+			if payload, ok := state.Data[inode]; ok {
+				e.metadata.PutData(inode, payload)
+			}
+			if extents, ok := state.ColdFiles[inode]; ok {
+				for _, extent := range extents {
+					if extent.SegmentID == "" {
+						continue
+					}
+					segment := state.Segments[extent.SegmentID]
+					if segment == nil {
+						return fmt.Errorf("%w: materialized inode %d references missing segment %s", ErrInvalidInput, inode, extent.SegmentID)
+					}
+					e.metadata.PutSegment(extent.SegmentID, segment)
+				}
+				e.metadata.PutColdFile(inode, extents)
+			}
+		}
+		candidates := make([]string, 0, len(oldSegments))
+		for id := range oldSegments {
+			candidates = append(candidates, id)
+		}
+		e.metadata.PruneSegments(candidates)
+		return e.metadata.Err()
+	})
+}
+
 func newEngineMetadataStore(ctx context.Context, cfg Config, state *SnapshotState) (metadataStore, error) {
 	if strings.TrimSpace(cfg.MetadataPath) == "" {
 		return newEagerMetadataStore(state), nil
@@ -1702,6 +2117,13 @@ func (e *Engine) persistCurrentStateLockedWithReserve(reserve bool) error {
 }
 
 func (e *Engine) persistStateLocked(source *SnapshotState, reserve bool) error {
+	return e.persistMaterializedState(source, reserve)
+}
+
+// persistMaterializedState only reads the supplied immutable snapshot and the
+// engine's immutable configuration. It is safe to run without e.mu while
+// materializeMu excludes other local head writers.
+func (e *Engine) persistMaterializedState(source *SnapshotState, reserve bool) error {
 	if e.stateFormatVersion == StateFormatV2 {
 		pruneUnreferencedSegments(source)
 		if reserve {
@@ -1733,6 +2155,16 @@ func loadCurrentEngineState(ctx context.Context, cfg Config) (*loadedEngineState
 		return nil, 0, -1, fmt.Errorf("%w: wal path is required", ErrInvalidInput)
 	}
 	if strings.TrimSpace(cfg.MetadataPath) != "" {
+		metadata, checkpoint, openErr := openExistingSQLiteMetadataStore(ctx, cfg.MetadataPath, cfg.MetadataCacheBytes, cfg.Encryption)
+		if openErr == nil {
+			if checkpoint.VolumeID == cfg.VolumeID {
+				return &loadedEngineState{
+					metadata: metadata, nextSeq: checkpoint.NextSeq, nextInode: checkpoint.NextInode,
+					metadataPath: cfg.MetadataPath, stateDigest: checkpoint.StateDigest, deltaDepth: checkpoint.DeltaDepth,
+				}, StateFormatV2, fileSize(cfg.MetadataPath), nil
+			}
+			_ = metadata.Close()
+		}
 		path := headStatePath(cfg.WALPath)
 		file, err := os.Open(path)
 		if err != nil {
@@ -1769,14 +2201,30 @@ func loadCurrentEngineState(ctx context.Context, cfg Config) (*loadedEngineState
 	return loadedEngineStateFromSnapshot(state), format, bytes, err
 }
 
-func manifestFromCommittedHead(head *CommittedHead, stateDigest string) *Manifest {
+func (e *Engine) persistMetadataCheckpointLocked(head *CommittedHead, stateDigest string) (bool, error) {
+	metadata, ok := e.metadata.(*sqliteMetadataStore)
+	if !ok || metadata == nil {
+		return false, nil
+	}
+	checkpoint := &sqliteMetadataCheckpoint{
+		Version: sqliteMetadataCheckpointVersion, VolumeID: e.volumeID,
+		NextSeq: e.nextSeq, NextInode: e.nextInode,
+		Head: cloneCommittedHead(head), StateDigest: stateDigest, DeltaDepth: e.lastCommittedDeltaDepth,
+	}
+	if err := metadata.saveCheckpoint(context.Background(), checkpoint); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func manifestFromCommittedHead(head *CommittedHead, stateDigest string, deltaDepth uint32) *Manifest {
 	if head == nil {
 		return nil
 	}
 	return &Manifest{
 		VolumeID: head.VolumeID, ManifestSeq: head.ManifestSeq, CheckpointSeq: head.CheckpointSeq,
 		CommitID: head.CommitID, StateDigest: stateDigest, ManifestDigest: head.ManifestDigest,
-		CreatedAt: head.UpdatedAt,
+		CreatedAt: head.UpdatedAt, DeltaDepth: deltaDepth,
 	}
 }
 
@@ -1833,6 +2281,16 @@ func (e *Engine) apply(record walRecord) error {
 		err = e.applyTruncate(record)
 	case "unlink":
 		err = e.applyUnlink(record)
+	case "set_xattr":
+		err = e.applySetXattr(record)
+	case "remove_xattr":
+		err = e.applyRemoveXattr(record)
+	case "set_times":
+		err = e.applySetTimes(record)
+	case "fallocate":
+		err = e.applyFallocate(record)
+	case "copy_file_range":
+		err = e.applyCopyFileRange(record)
 	default:
 		return fmt.Errorf("unknown wal op %q", record.Op)
 	}
@@ -1861,6 +2319,7 @@ func (e *Engine) applyCreate(record walRecord) error {
 		GID:    record.GID,
 		Nlink:  1,
 		Target: record.Target,
+		Rdev:   record.Rdev,
 		Atime:  now,
 		Mtime:  now,
 		Ctime:  now,
@@ -1938,6 +2397,55 @@ func (e *Engine) applyRename(record walRecord) error {
 	}
 	if err := e.ensureDirLocked(record.NewParent); err != nil {
 		return err
+	}
+	if record.Inode != 0 && inode != record.Inode {
+		return fmt.Errorf("%w: rename source changed", ErrInvalidInput)
+	}
+	destination, destinationExists := e.metadata.Child(record.NewParent, record.NewName)
+	if record.Mode&uint32(unix.RENAME_NOREPLACE) != 0 && destinationExists {
+		return ErrExists
+	}
+	if record.Mode&uint32(unix.RENAME_EXCHANGE) != 0 {
+		if !destinationExists {
+			return ErrNotFound
+		}
+		e.metadata.PutChild(record.Parent, record.Name, destination)
+		e.metadata.PutChild(record.NewParent, record.NewName, inode)
+		now := time.Unix(0, record.TimeUnix).UTC()
+		for _, changed := range []uint64{inode, destination} {
+			if node, ok := e.metadata.Node(changed); ok {
+				node.Ctime = now
+				e.metadata.PutNode(changed, node)
+			}
+		}
+		return nil
+	}
+	if destinationExists && destination != inode {
+		sourceNode, _ := e.metadata.Node(inode)
+		destinationNode, _ := e.metadata.Node(destination)
+		if sourceNode == nil || destinationNode == nil {
+			return ErrNotFound
+		}
+		if sourceNode.Type == TypeDirectory && destinationNode.Type != TypeDirectory {
+			return ErrNotDir
+		}
+		if sourceNode.Type != TypeDirectory && destinationNode.Type == TypeDirectory {
+			return ErrIsDir
+		}
+		if destinationNode.Type == TypeDirectory {
+			children, _, _ := e.metadata.DirectoryPage(destination, 0, 1)
+			if len(children) != 0 {
+				return ErrNotEmpty
+			}
+			e.metadata.DeleteDirectory(destination)
+			e.metadata.DeleteNode(destination)
+		} else {
+			if destinationNode.Nlink > 0 {
+				destinationNode.Nlink--
+			}
+			destinationNode.Ctime = time.Unix(0, record.TimeUnix).UTC()
+			e.metadata.PutNode(destination, destinationNode)
+		}
 	}
 	e.metadata.DeleteChild(record.Parent, record.Name)
 	e.metadata.PutChild(record.NewParent, record.NewName, inode)
@@ -2043,6 +2551,62 @@ func (e *Engine) applyUnlink(record walRecord) error {
 		node.Ctime = time.Unix(0, record.TimeUnix).UTC()
 		e.metadata.PutNode(inode, node)
 	}
+	return nil
+}
+
+func (e *Engine) applySetXattr(record walRecord) error {
+	node, ok := e.metadata.Node(record.Inode)
+	if !ok || node == nil {
+		return ErrNotFound
+	}
+	if err := validateXattrName(record.Name); err != nil {
+		return err
+	}
+	if err := validateXattrFlags(record.Mode); err != nil {
+		return err
+	}
+	_, exists := node.Xattrs[record.Name]
+	if record.Mode&XattrCreate != 0 && exists {
+		return ErrExists
+	}
+	if record.Mode&XattrReplace != 0 && !exists {
+		return ErrXattrNotFound
+	}
+	if node.Xattrs == nil {
+		node.Xattrs = make(map[string][]byte)
+	}
+	node.Xattrs[record.Name] = slices.Clone(record.Data)
+	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	e.metadata.PutNode(record.Inode, node)
+	return nil
+}
+
+func (e *Engine) applyRemoveXattr(record walRecord) error {
+	node, ok := e.metadata.Node(record.Inode)
+	if !ok || node == nil {
+		return ErrNotFound
+	}
+	if _, ok := node.Xattrs[record.Name]; !ok {
+		return ErrXattrNotFound
+	}
+	delete(node.Xattrs, record.Name)
+	if len(node.Xattrs) == 0 {
+		node.Xattrs = nil
+	}
+	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	e.metadata.PutNode(record.Inode, node)
+	return nil
+}
+
+func (e *Engine) applySetTimes(record walRecord) error {
+	node, ok := e.metadata.Node(record.Inode)
+	if !ok || node == nil {
+		return ErrNotFound
+	}
+	node.Atime = time.Unix(0, record.AtimeUnix).UTC()
+	node.Mtime = time.Unix(0, record.MtimeUnix).UTC()
+	node.Ctime = time.Unix(0, record.TimeUnix).UTC()
+	e.metadata.PutNode(record.Inode, node)
 	return nil
 }
 
@@ -2197,6 +2761,37 @@ func maxUint64(a, b uint64) uint64 {
 		return a
 	}
 	return b
+}
+
+func validateXattrName(name string) error {
+	if name == "" || strings.IndexByte(name, 0) >= 0 {
+		return fmt.Errorf("%w: invalid xattr name", ErrInvalidInput)
+	}
+	return nil
+}
+
+func validateXattrFlags(flags uint32) error {
+	if flags&^(XattrCreate|XattrReplace) != 0 || flags == (XattrCreate|XattrReplace) {
+		return fmt.Errorf("%w: unsupported xattr flags", ErrInvalidInput)
+	}
+	return nil
+}
+
+func fileTypeFromMode(mode uint32) (FileType, error) {
+	switch mode & syscall.S_IFMT {
+	case 0, syscall.S_IFREG:
+		return TypeFile, nil
+	case syscall.S_IFIFO:
+		return TypeFIFO, nil
+	case syscall.S_IFCHR:
+		return TypeChar, nil
+	case syscall.S_IFBLK:
+		return TypeBlock, nil
+	case syscall.S_IFSOCK:
+		return TypeSocket, nil
+	default:
+		return "", fmt.Errorf("%w: unsupported mknod file type", ErrInvalidInput)
+	}
 }
 
 func (e *Engine) checkOpen() error {

@@ -25,6 +25,10 @@ enum StateV2FileType {
   STATE_V2_FILE_TYPE_DIRECTORY = 1;
   STATE_V2_FILE_TYPE_FILE = 2;
   STATE_V2_FILE_TYPE_SYMLINK = 3;
+  STATE_V2_FILE_TYPE_FIFO = 4;
+  STATE_V2_FILE_TYPE_CHAR_DEVICE = 5;
+  STATE_V2_FILE_TYPE_BLOCK_DEVICE = 6;
+  STATE_V2_FILE_TYPE_SOCKET = 7;
 }
 
 message StateV2Header {
@@ -87,6 +91,13 @@ message StateV2Node {
   int32 mtime_nanos = 12;
   int64 ctime_seconds = 13;
   int32 ctime_nanos = 14;
+  uint64 rdev = 15;
+  repeated StateV2Xattr xattrs = 16;
+}
+
+message StateV2Xattr {
+  string name = 1;
+  bytes value = 2;
 }
 
 message StateV2Directory {
@@ -124,6 +135,8 @@ message StateV2Segment {
   string sha256 = 5;
   StateV2SegmentEncryption encryption = 6;
   bytes inline_data = 7;
+  uint64 chunk_size = 8;
+  repeated bytes chunk_sha256 = 9;
 }
 
 message StateV2SegmentEncryption {

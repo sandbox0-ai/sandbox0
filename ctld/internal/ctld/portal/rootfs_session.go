@@ -654,6 +654,10 @@ func (s *rootFSBackedSession) Flock(context.Context, *pb.FlockRequest) (*pb.Empt
 	return &pb.Empty{}, nil
 }
 
+func (s *rootFSBackedSession) Ioctl(context.Context, *pb.IoctlRequest) (*pb.IoctlResponse, error) {
+	return nil, syscall.EOPNOTSUPP
+}
+
 func (s *rootFSBackedSession) relForInode(inode uint64) (string, error) {
 	if inode == 0 {
 		inode = s0fs.RootInode

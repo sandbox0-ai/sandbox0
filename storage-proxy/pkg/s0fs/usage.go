@@ -17,16 +17,7 @@ func (e *Engine) FilesystemUsage() (FilesystemUsage, error) {
 		return FilesystemUsage{}, err
 	}
 
-	var usage FilesystemUsage
-	e.metadata.RangeNodes(func(_ uint64, node *Node) bool {
-		if node == nil {
-			return true
-		}
-		usage.Inodes++
-		usage.DataBytes = addUint64Saturating(usage.DataBytes, node.Size)
-		return true
-	})
-	return usage, nil
+	return e.metadata.Usage()
 }
 
 func addUint64Saturating(left, right uint64) uint64 {

@@ -275,12 +275,12 @@ func TestEncryptedSegmentRangeReadFetchesOnlyNeededCiphertextChunks(t *testing.T
 	}
 
 	gets := store.snapshotGets()
-	if len(gets) != 4 {
-		t.Fatalf("Get calls = %#v, want all encrypted chunks for integrity verification", gets)
+	if len(gets) != 2 {
+		t.Fatalf("Get calls = %#v, want only the two overlapping encrypted chunks", gets)
 	}
 	for i, call := range gets {
-		if call.off != int64(i*24) || call.limit != 24 {
-			t.Fatalf("Get calls = %#v, want four contiguous ciphertext chunks", gets)
+		if call.off != int64((i+1)*24) || call.limit != 24 {
+			t.Fatalf("Get calls = %#v, want the two overlapping ciphertext chunks", gets)
 		}
 	}
 }

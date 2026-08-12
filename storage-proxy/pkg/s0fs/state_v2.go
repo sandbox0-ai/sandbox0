@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -839,7 +840,7 @@ func coldFileChunkInodeRange(records []*StateV2ColdFile) stateV2InodeRange {
 }
 
 func encodeStateV2Node(node *Node) *StateV2Node {
-	return &StateV2Node{
+	record := &StateV2Node{
 		Inode:        node.Inode,
 		Type:         encodeStateV2FileType(node.Type),
 		Mode:         node.Mode,
@@ -854,7 +855,17 @@ func encodeStateV2Node(node *Node) *StateV2Node {
 		MtimeNanos:   int32(node.Mtime.Nanosecond()),
 		CtimeSeconds: node.Ctime.Unix(),
 		CtimeNanos:   int32(node.Ctime.Nanosecond()),
+		Rdev:         node.Rdev,
 	}
+	names := make([]string, 0, len(node.Xattrs))
+	for name := range node.Xattrs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		record.Xattrs = append(record.Xattrs, &StateV2Xattr{Name: name, Value: slices.Clone(node.Xattrs[name])})
+	}
+	return record
 }
 
 func decodeStateV2Node(record *StateV2Node) (*Node, error) {
@@ -870,7 +881,7 @@ func decodeStateV2Node(record *StateV2Node) (*Node, error) {
 			return nil, fmt.Errorf("%w: invalid state v2 node timestamp", ErrInvalidInput)
 		}
 	}
-	return &Node{
+	node := &Node{
 		Inode:  record.Inode,
 		Type:   fileType,
 		Mode:   record.Mode,
@@ -879,10 +890,24 @@ func decodeStateV2Node(record *StateV2Node) (*Node, error) {
 		Nlink:  record.Nlink,
 		Size:   record.Size,
 		Target: record.Target,
+		Rdev:   record.Rdev,
 		Atime:  time.Unix(record.AtimeSeconds, int64(record.AtimeNanos)).UTC(),
 		Mtime:  time.Unix(record.MtimeSeconds, int64(record.MtimeNanos)).UTC(),
 		Ctime:  time.Unix(record.CtimeSeconds, int64(record.CtimeNanos)).UTC(),
-	}, nil
+	}
+	for _, xattr := range record.Xattrs {
+		if xattr == nil || validateXattrName(xattr.Name) != nil {
+			return nil, fmt.Errorf("%w: invalid state v2 xattr", ErrInvalidInput)
+		}
+		if node.Xattrs == nil {
+			node.Xattrs = make(map[string][]byte)
+		}
+		if _, exists := node.Xattrs[xattr.Name]; exists {
+			return nil, fmt.Errorf("%w: duplicate state v2 xattr %q", ErrInvalidInput, xattr.Name)
+		}
+		node.Xattrs[xattr.Name] = slices.Clone(xattr.Value)
+	}
+	return node, nil
 }
 
 func encodeStateV2Segment(segment *Segment) *StateV2Segment {
@@ -893,6 +918,10 @@ func encodeStateV2Segment(segment *Segment) *StateV2Segment {
 		Length:     segment.Length,
 		Sha256:     segment.SHA256,
 		InlineData: segment.InlineData,
+		ChunkSize:  segment.ChunkSize,
+	}
+	for _, digest := range segment.ChunkSHA256 {
+		record.ChunkSha256 = append(record.ChunkSha256, slices.Clone(digest))
 	}
 	if segment.Encryption != nil {
 		record.Encryption = &StateV2SegmentEncryption{
@@ -919,6 +948,10 @@ func decodeStateV2Segment(record *StateV2Segment) (*Segment, error) {
 		Length:     record.Length,
 		SHA256:     record.Sha256,
 		InlineData: record.InlineData,
+		ChunkSize:  record.ChunkSize,
+	}
+	for _, digest := range record.ChunkSha256 {
+		segment.ChunkSHA256 = append(segment.ChunkSHA256, slices.Clone(digest))
 	}
 	if record.Encryption != nil {
 		segment.Encryption = &SegmentEncryption{
@@ -942,6 +975,14 @@ func encodeStateV2FileType(fileType FileType) StateV2FileType {
 		return StateV2FileType_STATE_V2_FILE_TYPE_FILE
 	case TypeSymlink:
 		return StateV2FileType_STATE_V2_FILE_TYPE_SYMLINK
+	case TypeFIFO:
+		return StateV2FileType_STATE_V2_FILE_TYPE_FIFO
+	case TypeChar:
+		return StateV2FileType_STATE_V2_FILE_TYPE_CHAR_DEVICE
+	case TypeBlock:
+		return StateV2FileType_STATE_V2_FILE_TYPE_BLOCK_DEVICE
+	case TypeSocket:
+		return StateV2FileType_STATE_V2_FILE_TYPE_SOCKET
 	default:
 		return StateV2FileType_STATE_V2_FILE_TYPE_UNSPECIFIED
 	}
@@ -955,6 +996,14 @@ func decodeStateV2FileType(fileType StateV2FileType) (FileType, error) {
 		return TypeFile, nil
 	case StateV2FileType_STATE_V2_FILE_TYPE_SYMLINK:
 		return TypeSymlink, nil
+	case StateV2FileType_STATE_V2_FILE_TYPE_FIFO:
+		return TypeFIFO, nil
+	case StateV2FileType_STATE_V2_FILE_TYPE_CHAR_DEVICE:
+		return TypeChar, nil
+	case StateV2FileType_STATE_V2_FILE_TYPE_BLOCK_DEVICE:
+		return TypeBlock, nil
+	case StateV2FileType_STATE_V2_FILE_TYPE_SOCKET:
+		return TypeSocket, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported state v2 file type %d", ErrInvalidInput, fileType)
 	}

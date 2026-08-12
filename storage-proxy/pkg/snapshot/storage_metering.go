@@ -17,6 +17,13 @@ func (m *Manager) ObserveVolumeState(ctx context.Context, volumeID, teamID strin
 	return m.volumeObserver.ObserveVolumeState(ctx, volumeID, teamID, state, observedAt)
 }
 
+func (m *Manager) ObserveVolumeBytes(ctx context.Context, volumeID, teamID string, sizeBytes int64, observedAt time.Time) error {
+	if m == nil || m.volumeObserver == nil {
+		return nil
+	}
+	return m.volumeObserver.ObserveVolumeBytes(ctx, volumeID, teamID, sizeBytes, observedAt)
+}
+
 func (m *Manager) recordVolumeStorageState(ctx context.Context, vol *db.SandboxVolume, state *s0fs.SnapshotState, observedAt time.Time) error {
 	return m.recordVolumeStorageStateWithMetadata(ctx, vol, state, observedAt, nil)
 }

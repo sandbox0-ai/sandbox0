@@ -11,10 +11,19 @@ type metadataDirEntry struct {
 	Inode uint64
 }
 
+type metadataDirNodeEntry struct {
+	metadataDirEntry
+	Node *Node
+}
+
 // metadataStore is the engine-facing namespace boundary. Implementations may
 // keep metadata eagerly in memory or resolve it from an indexed backing store.
 // Returned values are owned by the caller and must be written back explicitly.
 type metadataStore interface {
+	// ApplyMutation groups all metadata reads and writes performed for one WAL
+	// record into a single atomic backend transaction.
+	ApplyMutation(func() error) error
+
 	Node(uint64) (*Node, bool)
 	PutNode(uint64, *Node)
 	DeleteNode(uint64)
@@ -28,6 +37,7 @@ type metadataStore interface {
 	DeleteDirectory(uint64)
 	DirectoryEntries(uint64) (map[string]uint64, bool)
 	DirectoryPage(uint64, uint64, uint32) ([]metadataDirEntry, bool, bool)
+	DirectoryPageWithNodes(uint64, uint64, uint32) ([]metadataDirNodeEntry, bool, bool)
 	RangeDirectoryRecords(func(parent uint64, name string, inode uint64, first bool) bool)
 	RangeDirectories(func(uint64, map[string]uint64) bool)
 	DirectoryEntryCount() int
@@ -40,6 +50,7 @@ type metadataStore interface {
 
 	ColdFile(uint64) ([]FileExtent, bool)
 	PutColdFile(uint64, []FileExtent)
+	PutNewColdFile(uint64, []FileExtent)
 	DeleteColdFile(uint64)
 	RangeColdFiles(func(uint64, []FileExtent) bool)
 
@@ -48,6 +59,8 @@ type metadataStore interface {
 	DeleteSegment(string)
 	RangeSegments(func(string, *Segment) bool)
 	SegmentCount() int
+	PruneSegments([]string)
+	Usage() (FilesystemUsage, error)
 	NeedsMaterialization() bool
 	PruneUnlinked(context.Context, map[uint64]struct{}) error
 
@@ -66,6 +79,13 @@ type eagerMetadataStore struct {
 func newEagerMetadataStore(state *SnapshotState) *eagerMetadataStore {
 	normalizeState(state)
 	return &eagerMetadataStore{state: state}
+}
+
+func (s *eagerMetadataStore) ApplyMutation(apply func() error) error {
+	if apply == nil {
+		return nil
+	}
+	return apply()
 }
 
 func (s *eagerMetadataStore) Node(inode uint64) (*Node, bool) {
@@ -133,6 +153,17 @@ func (s *eagerMetadataStore) DirectoryPage(inode, offset uint64, limit uint32) (
 		return entries, true, true
 	}
 	return entries[:limit], false, true
+}
+func (s *eagerMetadataStore) DirectoryPageWithNodes(inode, offset uint64, limit uint32) ([]metadataDirNodeEntry, bool, bool) {
+	entries, eof, ok := s.DirectoryPage(inode, offset, limit)
+	result := make([]metadataDirNodeEntry, 0, len(entries))
+	for _, entry := range entries {
+		node, exists := s.Node(entry.Inode)
+		if exists {
+			result = append(result, metadataDirNodeEntry{metadataDirEntry: entry, Node: node})
+		}
+	}
+	return result, eof, ok
 }
 func (s *eagerMetadataStore) RangeDirectories(yield func(uint64, map[string]uint64) bool) {
 	for _, inode := range sortedUint64Keys(s.state.Children) {
@@ -221,6 +252,9 @@ func (s *eagerMetadataStore) ColdFile(inode uint64) ([]FileExtent, bool) {
 func (s *eagerMetadataStore) PutColdFile(inode uint64, extents []FileExtent) {
 	s.state.ColdFiles[inode] = slices.Clone(extents)
 }
+func (s *eagerMetadataStore) PutNewColdFile(inode uint64, extents []FileExtent) {
+	s.PutColdFile(inode, extents)
+}
 func (s *eagerMetadataStore) DeleteColdFile(inode uint64) { delete(s.state.ColdFiles, inode) }
 func (s *eagerMetadataStore) RangeColdFiles(yield func(uint64, []FileExtent) bool) {
 	for _, inode := range sortedUint64Keys(s.state.ColdFiles) {
@@ -248,6 +282,34 @@ func (s *eagerMetadataStore) RangeSegments(yield func(string, *Segment) bool) {
 	}
 }
 func (s *eagerMetadataStore) SegmentCount() int { return len(s.state.Segments) }
+func (s *eagerMetadataStore) PruneSegments(ids []string) {
+	for _, id := range ids {
+		referenced := false
+		for _, extents := range s.state.ColdFiles {
+			for _, extent := range extents {
+				if extent.SegmentID == id {
+					referenced = true
+					break
+				}
+			}
+			if referenced {
+				break
+			}
+		}
+		if !referenced {
+			delete(s.state.Segments, id)
+		}
+	}
+}
+func (s *eagerMetadataStore) Usage() (FilesystemUsage, error) {
+	usage := FilesystemUsage{Inodes: uint64(len(s.state.Nodes))}
+	for _, node := range s.state.Nodes {
+		if node != nil {
+			usage.DataBytes = addUint64Saturating(usage.DataBytes, node.Size)
+		}
+	}
+	return usage, nil
+}
 func (s *eagerMetadataStore) NeedsMaterialization() bool {
 	for _, payload := range s.state.Data {
 		if len(payload) != 0 {

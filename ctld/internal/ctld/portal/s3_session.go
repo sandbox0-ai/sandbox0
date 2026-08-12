@@ -879,6 +879,10 @@ func (s *s3Session) Flock(context.Context, *pb.FlockRequest) (*pb.Empty, error) 
 	return nil, syscall.EOPNOTSUPP
 }
 
+func (s *s3Session) Ioctl(context.Context, *pb.IoctlRequest) (*pb.IoctlResponse, error) {
+	return nil, syscall.EOPNOTSUPP
+}
+
 func (s *s3Session) resolvePath(ctx context.Context, key string) (*s3Node, error) {
 	key = cleanS3Path(key)
 	if key == "" {

@@ -11,6 +11,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
 	pb "github.com/sandbox0-ai/sandbox0/storage-proxy/proto/fs"
+	"golang.org/x/sys/unix"
 )
 
 type FileSystem struct {
@@ -863,7 +864,40 @@ func (fs *FileSystem) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name st
 }
 
 func (fs *FileSystem) Lseek(cancel <-chan struct{}, input *fuse.LseekIn, out *fuse.LseekOut) fuse.Status {
-	return fuse.ENOSYS
+	if isCanceled(cancel) {
+		return fuse.EINTR
+	}
+	session, st := fs.requireSession()
+	if st != fuse.OK {
+		return st
+	}
+	attr, err := session.GetAttr(context.Background(), &pb.GetAttrRequest{
+		VolumeId: fs.volumeID, Inode: input.NodeId, Actor: actorFromCaller(input.Caller),
+	})
+	if err != nil {
+		return statusToFuse(err)
+	}
+	if attr == nil {
+		return fuse.EIO
+	}
+	switch input.Whence {
+	case uint32(unix.SEEK_DATA):
+		if input.Offset >= attr.Size {
+			return fuse.Status(syscall.ENXIO)
+		}
+		out.Offset = input.Offset
+		return fuse.OK
+	case uint32(unix.SEEK_HOLE):
+		if input.Offset > attr.Size {
+			return fuse.Status(syscall.ENXIO)
+		}
+		// Reporting one dense data extent followed by the implicit EOF hole is
+		// POSIX compliant even when the backend internally stores sparse extents.
+		out.Offset = attr.Size
+		return fuse.OK
+	default:
+		return fuse.EINVAL
+	}
 }
 
 func (fs *FileSystem) GetLk(cancel <-chan struct{}, input *fuse.LkIn, out *fuse.LkOut) fuse.Status {
@@ -934,14 +968,49 @@ func (fs *FileSystem) CopyFileRange(cancel <-chan struct{}, input *fuse.CopyFile
 }
 
 func (fs *FileSystem) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Status {
-	return fuse.ENOSYS
+	if isCanceled(cancel) {
+		return fuse.EINTR
+	}
+	session, st := fs.requireSession()
+	if st != fuse.OK {
+		return st
+	}
+	_, err := session.Fsync(context.Background(), &pb.FsyncRequest{
+		VolumeId: fs.volumeID,
+		HandleId: input.Fh,
+		Datasync: input.FsyncFlags != 0,
+		Actor:    actorFromCaller(input.Caller),
+	})
+	if err != nil {
+		return statusToFuse(err)
+	}
+	return fuse.OK
 }
 
 func (fs *FileSystem) Ioctl(cancel <-chan struct{}, in *fuse.IoctlIn, bufIn []byte, out *fuse.IoctlOut, bufOut []byte) fuse.Status {
 	if isCanceled(cancel) {
 		return fuse.EINTR
 	}
-	return fuse.ENOSYS
+	session, st := fs.requireSession()
+	if st != fuse.OK {
+		return st
+	}
+	resp, err := session.Ioctl(context.Background(), &pb.IoctlRequest{
+		VolumeId: fs.volumeID, Inode: in.NodeId, Cmd: in.Cmd, Arg: in.Arg,
+		DataIn: append([]byte(nil), bufIn...), DataOutSize: uint32(len(bufOut)), Actor: actorFromCaller(in.Caller),
+	})
+	if err != nil {
+		return statusToFuse(err)
+	}
+	if resp == nil {
+		return fuse.EIO
+	}
+	if len(resp.DataOut) > len(bufOut) {
+		return fuse.Status(syscall.EOVERFLOW)
+	}
+	copy(bufOut, resp.DataOut)
+	out.Result = 0
+	return fuse.OK
 }
 
 func (fs *FileSystem) setLk(cancel <-chan struct{}, input *fuse.LkIn, block bool) fuse.Status {

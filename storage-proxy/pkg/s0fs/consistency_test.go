@@ -189,6 +189,7 @@ func TestTransientSegmentValidationFailureIsNotIntegrityFailure(t *testing.T) {
 	store.setFailure(errTransientSegmentHead)
 	_, err := Open(ctx, Config{
 		VolumeID: volumeID, WALPath: filepath.Join(dir, "reader.wal"), ObjectStore: store, HeadStore: heads,
+		SegmentValidation: SegmentValidationStrict,
 	})
 	if !errors.Is(err, errTransientSegmentHead) || errors.Is(err, ErrCommittedStateIntegrity) {
 		t.Fatalf("Open() error = %v, want transient provider error without integrity classification", err)

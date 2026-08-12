@@ -230,10 +230,11 @@ func TestEngineOpenRejectsCommittedStateWithMissingSegment(t *testing.T) {
 	heads := newMemoryHeadStore()
 	walPath := filepath.Join(t.TempDir(), "engine.wal")
 	config := Config{
-		VolumeID:    "vol-open-integrity",
-		WALPath:     walPath,
-		ObjectStore: store,
-		HeadStore:   heads,
+		VolumeID:          "vol-open-integrity",
+		WALPath:           walPath,
+		ObjectStore:       store,
+		HeadStore:         heads,
+		SegmentValidation: SegmentValidationStrict,
 	}
 
 	engine, err := Open(ctx, config)
@@ -801,13 +802,14 @@ func TestMaterializerRetainsColdFilesAndWritesOnlyHotData(t *testing.T) {
 	if second.ManifestSeq <= first.ManifestSeq {
 		t.Fatalf("second manifest seq = %d, want > %d", second.ManifestSeq, first.ManifestSeq)
 	}
-	if len(second.State.Segments) != 2 {
-		t.Fatalf("second manifest segment count = %d, want 2", len(second.State.Segments))
+	secondState := engine.SnapshotState()
+	if len(secondState.Segments) != 2 {
+		t.Fatalf("second manifest segment count = %d, want 2", len(secondState.Segments))
 	}
-	if got := second.State.ColdFiles[baseA.Inode][0].SegmentID; got != firstSegmentID {
+	if got := secondState.ColdFiles[baseA.Inode][0].SegmentID; got != firstSegmentID {
 		t.Fatalf("a.txt segment = %s, want retained %s", got, firstSegmentID)
 	}
-	if got := second.State.ColdFiles[tail.Inode][0].SegmentID; got == firstSegmentID {
+	if got := secondState.ColdFiles[tail.Inode][0].SegmentID; got == firstSegmentID {
 		t.Fatalf("tail.txt reused base segment %s", got)
 	}
 
@@ -1679,7 +1681,8 @@ func TestMaterializerGarbageCollectionPlanDeletesUnreferencedObjects(t *testing.
 	retained := map[string]struct{}{
 		manifestKey(latest.ManifestSeq, latest.CommitID): {},
 	}
-	plan, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{latest.State}, retained)
+	latestState := engine.SnapshotState()
+	plan, err := engine.materializer.PlanGarbageCollection(ctx, []*SnapshotState{latestState}, retained)
 	if err != nil {
 		t.Fatalf("PlanGarbageCollection() error = %v", err)
 	}
@@ -1688,10 +1691,11 @@ func TestMaterializerGarbageCollectionPlanDeletesUnreferencedObjects(t *testing.
 		previousSegment = segment.Key
 	}
 	previousManifest := manifestKey(previous.ManifestSeq, previous.CommitID)
-	var latestSegment string
-	for _, segment := range latest.State.Segments {
-		latestSegment = segment.Key
+	latestExtents := latestState.ColdFiles[node.Inode]
+	if len(latestExtents) != 1 || latestState.Segments[latestExtents[0].SegmentID] == nil {
+		t.Fatalf("latest state extents = %+v segments = %+v", latestExtents, latestState.Segments)
 	}
+	latestSegment := latestState.Segments[latestExtents[0].SegmentID].Key
 	latestManifest := manifestKey(latest.ManifestSeq, latest.CommitID)
 	if got, want := plan.Segments, []string{previousSegment}; !equalStrings(got, want) {
 		t.Fatalf("plan segments = %v, want %v", got, want)
@@ -1835,17 +1839,18 @@ func TestExtentWriteDoesNotRewriteUnmodifiedColdData(t *testing.T) {
 	if _, err := engine.Write(a.Inode, 10, []byte("Z")); err != nil {
 		t.Fatalf("overwrite a byte: %v", err)
 	}
-	second, err := engine.SyncMaterialize(ctx)
+	_, err = engine.SyncMaterialize(ctx)
 	if err != nil {
 		t.Fatalf("SyncMaterialize(second) error = %v", err)
 	}
 	if gets := store.calls(); len(gets) != 0 {
 		t.Fatalf("overwrite materialization read cold segments = %+v, want none", gets)
 	}
-	if len(second.State.Segments) != 2 {
-		t.Fatalf("second segment count = %d, want old segment plus 1-byte segment", len(second.State.Segments))
+	secondState := engine.SnapshotState()
+	if len(secondState.Segments) != 2 {
+		t.Fatalf("second segment count = %d, want old segment plus 1-byte segment", len(secondState.Segments))
 	}
-	if got, want := StateStorageBytes(second.State), int64(len(aPayload)+len(bPayload)+1); got != want {
+	if got, want := StateStorageBytes(secondState), int64(len(aPayload)+len(bPayload)+1); got != want {
 		t.Fatalf("StateStorageBytes() = %d, want %d", got, want)
 	}
 	updated, err := engine.Read(a.Inode, 0, uint64(len(aPayload)))

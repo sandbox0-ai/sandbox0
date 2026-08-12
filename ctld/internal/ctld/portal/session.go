@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/volumefuse"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/fserror"
@@ -346,6 +347,13 @@ func newLocalSession(volumeID string, mgr *localVolumeManager, logger *logrus.Lo
 			IsSystem: true,
 		}),
 	}
+}
+
+// OpenFlags suppresses FUSE_FLUSH for S0FS handles. Flush is a close-time
+// hook, not a POSIX durability boundary, and the S0FS implementation has no
+// per-close work; explicit fsync/fdatasync still reaches FileSystem.Fsync.
+func (s *localSession) OpenFlags() uint32 {
+	return fuse.FOPEN_KEEP_CACHE | fuse.FOPEN_NOFLUSH
 }
 
 func (s *localSession) Close() {
@@ -870,9 +878,14 @@ func (s *localSession) Flock(ctx context.Context, req *pb.FlockRequest) (*pb.Emp
 	defer release()
 	return s.fs.Flock(s.ctx(ctx), req)
 }
+func (s *localSession) Ioctl(ctx context.Context, req *pb.IoctlRequest) (*pb.IoctlResponse, error) {
+	s.fix(&req.VolumeId)
+	return s.fs.Ioctl(s.ctx(ctx), req)
+}
 
 var _ volumefuse.Session = (*localSession)(nil)
 var _ volumefuse.ReadIntoSession = (*localSession)(nil)
+var _ volumefuse.OpenFlagsSession = (*localSession)(nil)
 
 func (s *localSession) trackReadOnlyHandle(volumeID string, handleID uint64) {
 	if s == nil {

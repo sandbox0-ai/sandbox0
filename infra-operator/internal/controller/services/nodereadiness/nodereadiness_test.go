@@ -32,11 +32,14 @@ func TestCheckLabelsNodesFromComponentReadiness(t *testing.T) {
 		nodeSystem,
 		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotA),
 		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotB),
+		newNodeReadinessRootFSSnapshotterDaemonSet(infra.Namespace, infra.Name),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-a", "node-a", dataplane.CtldHASlotA, true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-b", "node-a", dataplane.CtldHASlotB, true),
+		newNodeReadinessRootFSSnapshotterPod(infra.Namespace, infra.Name, "rootfs-a", "node-a", true),
 		newNodeReadinessCSINode("node-a", true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b-a", "node-b", dataplane.CtldHASlotA, true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b-b", "node-b", dataplane.CtldHASlotB, false),
+		newNodeReadinessRootFSSnapshotterPod(infra.Namespace, infra.Name, "rootfs-b", "node-b", true),
 		newNodeReadinessCSINode("node-b", true),
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
@@ -47,6 +50,9 @@ func TestCheckLabelsNodesFromComponentReadiness(t *testing.T) {
 
 	gotNodeA := getNodeReadinessNode(t, client, "node-a")
 	assertNodeReadinessLabels(t, gotNodeA, dataplane.ReadyLabelValue, dataplane.ReadyLabelValue)
+	if got := gotNodeA.Annotations[dataplane.NodeRootFSSnapshotterInstanceAnnotation]; got == "" {
+		t.Fatal("node-a rootfs snapshotter instance annotation is empty")
+	}
 
 	gotNodeB := getNodeReadinessNode(t, client, "node-b")
 	assertNodeReadinessLabels(t, gotNodeB, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
@@ -86,8 +92,10 @@ func TestCheckRequiresKubeletCSIRegistration(t *testing.T) {
 		node,
 		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotA),
 		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotB),
+		newNodeReadinessRootFSSnapshotterDaemonSet(infra.Namespace, infra.Name),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a", "node-a", dataplane.CtldHASlotA, true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b", "node-a", dataplane.CtldHASlotB, true),
+		newNodeReadinessRootFSSnapshotterPod(infra.Namespace, infra.Name, "rootfs", "node-a", true),
 		newNodeReadinessCSINode("node-a", false),
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
@@ -97,6 +105,62 @@ func TestCheckRequiresKubeletCSIRegistration(t *testing.T) {
 	}
 	gotNode := getNodeReadinessNode(t, client, "node-a")
 	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
+}
+
+func TestRefreshRetainsOldSnapshotterInstanceUntilReplacementIsReady(t *testing.T) {
+	ctx := context.Background()
+	infra := newNodeReadinessInfra()
+	node := newNodeReadinessNode("node-a", map[string]string{"sandbox0.ai/node-role": "sandbox"})
+	node.Annotations = map[string]string{dataplane.NodeRootFSSnapshotterInstanceAnnotation: "old-instance"}
+	replacement := newNodeReadinessRootFSSnapshotterPod(infra.Namespace, infra.Name, "rootfs-new", node.Name, false)
+	client, scheme := newNodeReadinessClient(t,
+		node,
+		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotA),
+		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotB),
+		newNodeReadinessRootFSSnapshotterDaemonSet(infra.Namespace, infra.Name),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a", node.Name, dataplane.CtldHASlotA, true),
+		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b", node.Name, dataplane.CtldHASlotB, true),
+		replacement,
+		newNodeReadinessCSINode(node.Name, true),
+	)
+	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
+
+	summary, err := reconciler.Refresh(ctx, infra, infraplan.Compile(infra))
+	if err != nil {
+		t.Fatalf("Refresh() before replacement readiness error = %v", err)
+	}
+	if summary.ReadyNodes != 0 {
+		t.Fatalf("Refresh() ready nodes = %d, want 0", summary.ReadyNodes)
+	}
+	gotNode := getNodeReadinessNode(t, client, node.Name)
+	if got := gotNode.Annotations[dataplane.NodeRootFSSnapshotterInstanceAnnotation]; got != "old-instance" {
+		t.Fatalf("snapshotter instance = %q before replacement readiness, want old-instance", got)
+	}
+
+	current := &corev1.Pod{}
+	if err := client.Get(ctx, types.NamespacedName{Name: replacement.Name, Namespace: replacement.Namespace}, current); err != nil {
+		t.Fatalf("get replacement pod: %v", err)
+	}
+	current.Status.Conditions[0].Status = corev1.ConditionTrue
+	current.Status.ContainerStatuses[0].Ready = true
+	current.Status.ContainerStatuses[0].RestartCount = 1
+	current.Status.ContainerStatuses[0].ContainerID = "containerd://replacement-process"
+	if err := client.Status().Update(ctx, current); err != nil {
+		t.Fatalf("update replacement pod: %v", err)
+	}
+
+	summary, err = reconciler.Refresh(ctx, infra, infraplan.Compile(infra))
+	if err != nil {
+		t.Fatalf("Refresh() after replacement readiness error = %v", err)
+	}
+	if summary.ReadyNodes != 1 {
+		t.Fatalf("Refresh() ready nodes = %d, want 1", summary.ReadyNodes)
+	}
+	gotNode = getNodeReadinessNode(t, client, node.Name)
+	wantInstance := rootFSSnapshotterInstance(current)
+	if got := gotNode.Annotations[dataplane.NodeRootFSSnapshotterInstanceAnnotation]; got != wantInstance || got == "old-instance" {
+		t.Fatalf("snapshotter instance = %q, want replacement %q", got, wantInstance)
+	}
 }
 
 func TestRefreshRejectsReadySurgePredecessorsWithoutGating(t *testing.T) {
@@ -114,10 +178,12 @@ func TestRefreshRejectsReadySurgePredecessorsWithoutGating(t *testing.T) {
 		node,
 		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotA),
 		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotB),
+		newNodeReadinessRootFSSnapshotterDaemonSet(infra.Namespace, infra.Name),
 		oldSlotA,
 		oldSlotB,
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "current-ctld-a", node.Name, dataplane.CtldHASlotA, true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "current-ctld-b", node.Name, dataplane.CtldHASlotB, true),
+		newNodeReadinessRootFSSnapshotterPod(infra.Namespace, infra.Name, "rootfs", node.Name, true),
 		newNodeReadinessCSINode(node.Name, true),
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
@@ -149,9 +215,11 @@ func TestRefreshRejectsTerminatingRunningSurgePredecessor(t *testing.T) {
 		node,
 		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotA),
 		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotB),
+		newNodeReadinessRootFSSnapshotterDaemonSet(infra.Namespace, infra.Name),
 		predecessor,
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "current-ctld-a", node.Name, dataplane.CtldHASlotA, true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "current-ctld-b", node.Name, dataplane.CtldHASlotB, true),
+		newNodeReadinessRootFSSnapshotterPod(infra.Namespace, infra.Name, "rootfs", node.Name, true),
 		newNodeReadinessCSINode(node.Name, true),
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
@@ -316,6 +384,44 @@ func newNodeReadinessCtldDaemonSet(namespace, instance, slot string) *appsv1.Dae
 			},
 		},
 	}
+}
+
+func newNodeReadinessRootFSSnapshotterDaemonSet(namespace, instance string) *appsv1.DaemonSet {
+	labels := map[string]string{
+		labelManagedBy: "sandbox0infra-operator",
+		labelInstance:  instance,
+		labelComponent: "rootfs-snapshotter",
+	}
+	return &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Name: instance + "-rootfs-snapshotter", Namespace: namespace},
+		Spec: appsv1.DaemonSetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      labels,
+					Annotations: map[string]string{"infra.sandbox0.ai/rootfs-snapshotter-rollout-revision": "current"},
+				},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: "rootfs-snapshotter", Image: "rootfs-snapshotter:test",
+				}}},
+			},
+		},
+	}
+}
+
+func newNodeReadinessRootFSSnapshotterPod(namespace, instance, name, nodeName string, ready bool) *corev1.Pod {
+	ds := newNodeReadinessRootFSSnapshotterDaemonSet(namespace, instance)
+	pod := newNodeReadinessPod(namespace, instance, "rootfs-snapshotter", name, nodeName, ready)
+	pod.Labels = cloneNodeReadinessStrings(ds.Spec.Template.Labels)
+	pod.Annotations = cloneNodeReadinessStrings(ds.Spec.Template.Annotations)
+	pod.Spec = *ds.Spec.Template.Spec.DeepCopy()
+	pod.Spec.NodeName = nodeName
+	pod.UID = types.UID(name + "-uid")
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "rootfs-snapshotter", Ready: ready, ContainerID: "containerd://" + name,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
+	return pod
 }
 
 func cloneNodeReadinessStrings(values map[string]string) map[string]string {

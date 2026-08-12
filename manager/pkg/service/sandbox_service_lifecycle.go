@@ -177,6 +177,10 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 		if source == "" {
 			source = sandboxstore.SandboxLifecycleSourceManual
 		}
+		expectedHeadID, err := currentRootFSHeadID(lockCtx, tx, sandboxID)
+		if err != nil {
+			return err
+		}
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
 			ID:               uuid.NewString(),
 			SandboxID:        sandboxID,
@@ -187,6 +191,7 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 			FromGeneration:   generation,
 			FromPodNamespace: pod.Namespace,
 			FromPodName:      pod.Name,
+			ExpectedHeadID:   expectedHeadID,
 		})
 	})
 	if err != nil {
@@ -317,7 +322,8 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 			if s == nil || !s.config.CtldEnabled || s.ctldClient == nil {
 				return ErrSandboxCheckpointRequiresCtld
 			}
-			if err := s.saveSandboxRootFSCheckpoint(ctx, pod, record, tx); err != nil {
+			headID := fmt.Sprintf("runtime:%s:%d", sandboxID, generation)
+			if err := s.saveSandboxRootFSCheckpoint(ctx, pod, record, tx, headID); err != nil {
 				return err
 			}
 		}
@@ -379,7 +385,8 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	crashRecovery := txn.Source == sandboxstore.SandboxLifecycleSourceCrash
 	healthRecovery := txn.Source == sandboxstore.SandboxLifecycleSourceHealth
 	lostRecovery := txn.Source == sandboxstore.SandboxLifecycleSourceLost
-	runtimeRecovery := crashRecovery || healthRecovery || lostRecovery
+	rootFSRecovery := txn.Source == sandboxstore.SandboxLifecycleSourceRootFS
+	runtimeRecovery := crashRecovery || healthRecovery || lostRecovery || rootFSRecovery
 	abortOnError := func(completionErr error) {
 		if !runtimeRecovery && completionErr != nil {
 			_ = s.abortLifecycleTxn(ctx, sandboxID, txn.ID, completionErr.Error())
@@ -429,13 +436,16 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	if lostRecovery && pod.DeletionTimestamp != nil {
 		return errSandboxRuntimeDeleting
 	}
+	if rootFSRecovery && pod.DeletionTimestamp != nil {
+		return errSandboxRuntimeDeleting
+	}
 	if crashRecovery {
 		_, terminated := terminatedProcdContainer(pod)
 		if terminated == nil && !sandboxRuntimePodTerminal(pod) {
 			return fmt.Errorf("crash recovery expected terminated procd container in pod %s/%s", pod.Namespace, pod.Name)
 		}
 	}
-	if !runtimeRecovery && (!s.config.CtldEnabled || s.ctldClient == nil) {
+	if (!runtimeRecovery || rootFSRecovery) && (!s.config.CtldEnabled || s.ctldClient == nil) {
 		return ErrSandboxCheckpointRequiresCtld
 	}
 	if canceled, err := s.abortPauseIfCancelRequested(ctx, sandboxID, txn.ID); err != nil || canceled {
@@ -450,7 +460,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	procdAddress := ""
 	internalToken := ""
 	barrierActive := false
-	if !runtimeRecovery {
+	if !runtimeRecovery || rootFSRecovery {
 		procdAddress, internalToken, err = s.activatePauseRuntimeBarrier(ctx, pod, record, txn)
 		if err != nil {
 			abortOnError(err)
@@ -473,7 +483,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		abortOnError(err)
 		return err
 	}
-	var rootFSState *sandboxstore.SandboxRootFSState
+	var rootFSHead *sandboxstore.SandboxRootFSHead
 	rootFSSnapshotMissing := false
 	if !s.config.CtldEnabled || s.ctldClient == nil {
 		rootFSSnapshotMissing = true
@@ -483,7 +493,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		if healthRecovery {
 			checkpointCtx, cancelCheckpoint = context.WithTimeout(ctx, defaultSandboxUnhealthyCheckpointTimeout)
 		}
-		rootFSState, err = s.prepareSandboxRootFSCheckpoint(checkpointCtx, pod, record)
+		rootFSHead, err = s.prepareSandboxRootFSHeadCheckpoint(checkpointCtx, pod, record, txn.ID)
 		cancelCheckpoint()
 		if err != nil {
 			if crashRecovery && rootFSTerminatedSnapshotMissing(err) {
@@ -514,14 +524,8 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 			zap.String("source", txn.Source),
 		)
 	}
-	rootFSCommitted := false
-	defer func() {
-		if rootFSState != nil && !rootFSCommitted {
-			s.deleteUncommittedRootFSObject(rootFSState, "pause transaction did not commit")
-		}
-	}()
-	if rootFSState != nil {
-		if err := s.markLifecycleTxnPreparedHead(ctx, sandboxID, txn.ID, rootFSState.LayerID); err != nil {
+	if rootFSHead != nil {
+		if err := s.markLifecycleTxnPreparedHead(ctx, sandboxID, txn.ID, rootFSHead.Reference.HeadID); err != nil {
 			if errors.Is(err, errSandboxLifecycleCanceled) {
 				return nil
 			}
@@ -548,7 +552,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		abortOnError(err)
 		return err
 	}
-	committed, err := s.commitPausingRuntimePaused(ctx, sandboxID, txn, generation, rootFSState)
+	committed, err := s.commitPausingRuntimePaused(ctx, sandboxID, txn, generation, rootFSHead)
 	if err != nil {
 		abortOnError(err)
 		return err
@@ -556,7 +560,34 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	if !committed {
 		return nil
 	}
-	rootFSCommitted = rootFSState != nil
+	if rootFSHead != nil {
+		ctldAddress, addressErr := s.ctldAddressForPod(ctx, pod)
+		if addressErr == nil {
+			ackErr := s.acknowledgeSandboxRootFSHead(
+				ctx,
+				ctldAddress,
+				sandboxID,
+				record.TeamID,
+				rootFSHead.Reference.HeadID,
+				generation,
+				true,
+				false,
+			)
+			if ackErr != nil && s.logger != nil {
+				s.logger.Warn("Committed sandbox pause but failed to release rootfs sync binding",
+					zap.String("sandboxID", sandboxID),
+					zap.String("headID", rootFSHead.Reference.HeadID),
+					zap.Error(ackErr),
+				)
+			}
+		} else if s.logger != nil {
+			s.logger.Warn("Committed sandbox pause but could not resolve ctld for rootfs sync release",
+				zap.String("sandboxID", sandboxID),
+				zap.String("headID", rootFSHead.Reference.HeadID),
+				zap.Error(addressErr),
+			)
+		}
+	}
 	barrierActive = false
 	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		if s.logger != nil {
@@ -573,7 +604,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 			zap.String("namespace", pod.Namespace),
 			zap.String("pod", pod.Name),
 			zap.Int64("runtimeGeneration", generation),
-			zap.Bool("snapshotRecovered", rootFSState != nil),
+			zap.Bool("snapshotRecovered", rootFSHead != nil),
 			zap.String("source", txn.Source),
 		)
 	}
@@ -591,8 +622,8 @@ func (s *SandboxService) sandboxStillPausing(ctx context.Context, sandboxID, txn
 	return txn != nil && txn.ID == txnID && txn.Kind == sandboxstore.SandboxLifecycleKindPause, nil
 }
 
-func (s *SandboxService) markLifecycleTxnPreparedHead(ctx context.Context, sandboxID, txnID, preparedHeadLayerID string) error {
-	if s == nil || s.sandboxStore == nil || strings.TrimSpace(txnID) == "" || strings.TrimSpace(preparedHeadLayerID) == "" {
+func (s *SandboxService) markLifecycleTxnPreparedHead(ctx context.Context, sandboxID, txnID, preparedHeadID string) error {
+	if s == nil || s.sandboxStore == nil || strings.TrimSpace(txnID) == "" || strings.TrimSpace(preparedHeadID) == "" {
 		return nil
 	}
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, _ *sandboxstore.SandboxRecord) error {
@@ -603,7 +634,7 @@ func (s *SandboxService) markLifecycleTxnPreparedHead(ctx context.Context, sandb
 		if activeTxn == nil || activeTxn.ID != txnID {
 			return nil
 		}
-		return tx.SetLifecycleTxnPreparedHead(lockCtx, txnID, preparedHeadLayerID)
+		return tx.SetLifecycleTxnPreparedHead(lockCtx, txnID, preparedHeadID)
 	})
 	if err == nil {
 		return nil
@@ -616,7 +647,7 @@ func (s *SandboxService) markLifecycleTxnPreparedHead(ctx context.Context, sandb
 	return err
 }
 
-func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandboxID string, txn *sandboxstore.SandboxLifecycleTxn, generation int64, rootFSState *sandboxstore.SandboxRootFSState) (bool, error) {
+func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandboxID string, txn *sandboxstore.SandboxLifecycleTxn, generation int64, rootFSHead *sandboxstore.SandboxRootFSHead) (bool, error) {
 	if s == nil || s.sandboxStore == nil {
 		return false, nil
 	}
@@ -629,8 +660,15 @@ func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandbox
 		if activeTxn == nil || activeTxn.Kind != sandboxstore.SandboxLifecycleKindPause || txn == nil || activeTxn.ID != txn.ID {
 			return nil
 		}
-		if rootFSState != nil {
-			if err := tx.SaveRootFSState(lockCtx, rootFSState); err != nil {
+		if rootFSHead != nil {
+			expectedHeadID := ""
+			if rootFSHead.Parent != nil {
+				expectedHeadID = rootFSHead.Parent.HeadID
+			}
+			if strings.TrimSpace(activeTxn.ExpectedHeadID) != expectedHeadID {
+				return fmt.Errorf("rootfs Head changed during pause: transaction expected %q, sealed from %q", activeTxn.ExpectedHeadID, expectedHeadID)
+			}
+			if err := tx.SaveRootFSHead(lockCtx, rootFSHead); err != nil {
 				return err
 			}
 		}
@@ -638,8 +676,8 @@ func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandbox
 			return err
 		}
 		preparedHead := ""
-		if rootFSState != nil {
-			preparedHead = rootFSState.LayerID
+		if rootFSHead != nil {
+			preparedHead = rootFSHead.Reference.HeadID
 		}
 		if err := tx.CommitLifecycleTxn(lockCtx, txn.ID, preparedHead); err != nil {
 			return err

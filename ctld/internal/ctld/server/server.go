@@ -28,16 +28,12 @@ type VolumePortalController interface {
 	AbortVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, int)
 }
 
-type RootFSController interface {
-	InspectRootFS(r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int)
-	SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int)
-	ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int)
-}
-
-type RootFSSnapshotController interface {
-	PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int)
-	PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int)
-	AbortRootFSSnapshot(r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int)
+type RootFSSyncController interface {
+	BindRootFSSync(r *http.Request, req ctldapi.BindRootFSSyncRequest) (ctldapi.BindRootFSSyncResponse, int)
+	GetRootFSSyncStatus(r *http.Request, req ctldapi.GetRootFSSyncStatusRequest) (ctldapi.GetRootFSSyncStatusResponse, int)
+	SealRootFSHead(r *http.Request, req ctldapi.SealRootFSHeadRequest) (ctldapi.SealRootFSHeadResponse, int)
+	AcknowledgeRootFSHead(r *http.Request, req ctldapi.AcknowledgeRootFSHeadRequest) (ctldapi.AcknowledgeRootFSHeadResponse, int)
+	MaterializeRootFSHead(r *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int)
 }
 
 type MountedVolumeController interface {
@@ -75,30 +71,6 @@ func (NotImplementedController) ProbePod(_ *http.Request, _, _ string, kind sand
 	return sandboxprobe.Failed(kind, "ProbeNotImplemented", "ctld pod probe not implemented", nil), http.StatusNotImplemented
 }
 
-func (NotImplementedController) InspectRootFS(_ *http.Request, _ ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
-	return ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"}, http.StatusNotImplemented
-}
-
-func (NotImplementedController) SaveRootFS(_ *http.Request, _ ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
-	return ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"}, http.StatusNotImplemented
-}
-
-func (NotImplementedController) PrepareRootFSSnapshot(_ *http.Request, _ ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
-	return ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"}, http.StatusNotImplemented
-}
-
-func (NotImplementedController) PublishRootFSSnapshot(_ *http.Request, _ ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
-	return ctldapi.PublishRootFSSnapshotResponse{Error: "ctld rootfs snapshot publish not implemented"}, http.StatusNotImplemented
-}
-
-func (NotImplementedController) AbortRootFSSnapshot(_ *http.Request, _ ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
-	return ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"}, http.StatusNotImplemented
-}
-
-func (NotImplementedController) ApplyRootFS(_ *http.Request, _ ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
-	return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
-}
-
 // registerJSONPostRoute keeps the control-plane JSON routes consistent while
 // preserving each route's request and response types.
 func registerJSONPostRoute[Request any, Response any, Target any](
@@ -110,8 +82,33 @@ func registerJSONPostRoute[Request any, Response any, Target any](
 	invalidRequestResponse func(error) any,
 	handle func(Target, *http.Request, Request) (Response, int),
 ) {
+	registerJSONRoute(mux, http.MethodPost, path, controller, resolve, unsupportedResponse, invalidRequestResponse, handle)
+}
+
+func registerJSONPutRoute[Request any, Response any, Target any](
+	mux *http.ServeMux,
+	path string,
+	controller Controller,
+	resolve func(Controller) (Target, bool),
+	unsupportedResponse any,
+	invalidRequestResponse func(error) any,
+	handle func(Target, *http.Request, Request) (Response, int),
+) {
+	registerJSONRoute(mux, http.MethodPut, path, controller, resolve, unsupportedResponse, invalidRequestResponse, handle)
+}
+
+func registerJSONRoute[Request any, Response any, Target any](
+	mux *http.ServeMux,
+	method string,
+	path string,
+	controller Controller,
+	resolve func(Controller) (Target, bool),
+	unsupportedResponse any,
+	invalidRequestResponse func(error) any,
+	handle func(Target, *http.Request, Request) (Response, int),
+) {
 	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+		if r.Method != method {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -144,13 +141,8 @@ func volumePortalController(controller Controller) (VolumePortalController, bool
 	return volumeController, ok
 }
 
-func rootFSController(controller Controller) (RootFSController, bool) {
-	rootFSController, ok := controller.(RootFSController)
-	return rootFSController, ok
-}
-
-func rootFSSnapshotController(controller Controller) (RootFSSnapshotController, bool) {
-	rootFSController, ok := controller.(RootFSSnapshotController)
+func rootFSSyncController(controller Controller) (RootFSSyncController, bool) {
+	rootFSController, ok := controller.(RootFSSyncController)
 	return rootFSController, ok
 }
 
@@ -239,48 +231,6 @@ func NewMux(controller Controller) http.Handler {
 			return c.AbortVolumeSnapshotCheckpoint(r, req)
 		},
 	)
-	registerJSONPostRoute(mux, "/api/v1/rootfs/inspect", controller, rootFSController,
-		ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"},
-		func(err error) any { return ctldapi.InspectRootFSResponse{Error: err.Error()} },
-		func(c RootFSController, r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
-			return c.InspectRootFS(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/rootfs/save", controller, rootFSController,
-		ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"},
-		func(err error) any { return ctldapi.SaveRootFSResponse{Error: err.Error()} },
-		func(c RootFSController, r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
-			return c.SaveRootFS(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/rootfs/snapshots/prepare", controller, rootFSSnapshotController,
-		ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"},
-		func(err error) any { return ctldapi.PrepareRootFSSnapshotResponse{Error: err.Error()} },
-		func(c RootFSSnapshotController, r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
-			return c.PrepareRootFSSnapshot(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/rootfs/snapshots/publish", controller, rootFSSnapshotController,
-		ctldapi.PublishRootFSSnapshotResponse{Error: "ctld rootfs snapshot publish not implemented"},
-		func(err error) any { return ctldapi.PublishRootFSSnapshotResponse{Error: err.Error()} },
-		func(c RootFSSnapshotController, r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
-			return c.PublishRootFSSnapshot(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/rootfs/snapshots/abort", controller, rootFSSnapshotController,
-		ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"},
-		func(err error) any { return ctldapi.AbortRootFSSnapshotResponse{Error: err.Error()} },
-		func(c RootFSSnapshotController, r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
-			return c.AbortRootFSSnapshot(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/rootfs/apply", controller, rootFSController,
-		ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"},
-		func(err error) any { return ctldapi.ApplyRootFSResponse{Error: err.Error()} },
-		func(c RootFSController, r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
-			return c.ApplyRootFS(r, req)
-		},
-	)
 	mux.HandleFunc("/api/v1/sandboxes/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -313,6 +263,36 @@ func NewMux(controller Controller) http.Handler {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	})
+	registerJSONPutRoute(mux, "/api/v1/rootfs/sync/bind", controller, rootFSSyncController,
+		ctldapi.BindRootFSSyncResponse{Error: "ctld rootfs sync not implemented"},
+		func(err error) any { return ctldapi.BindRootFSSyncResponse{Error: err.Error()} },
+		func(c RootFSSyncController, r *http.Request, req ctldapi.BindRootFSSyncRequest) (ctldapi.BindRootFSSyncResponse, int) {
+			return c.BindRootFSSync(r, req)
+		})
+	registerJSONPostRoute(mux, "/api/v1/rootfs/sync/status", controller, rootFSSyncController,
+		ctldapi.GetRootFSSyncStatusResponse{Error: "ctld rootfs sync not implemented"},
+		func(err error) any { return ctldapi.GetRootFSSyncStatusResponse{Error: err.Error()} },
+		func(c RootFSSyncController, r *http.Request, req ctldapi.GetRootFSSyncStatusRequest) (ctldapi.GetRootFSSyncStatusResponse, int) {
+			return c.GetRootFSSyncStatus(r, req)
+		})
+	registerJSONPutRoute(mux, "/api/v1/rootfs/heads/seal", controller, rootFSSyncController,
+		ctldapi.SealRootFSHeadResponse{Error: "ctld rootfs sync not implemented"},
+		func(err error) any { return ctldapi.SealRootFSHeadResponse{Error: err.Error()} },
+		func(c RootFSSyncController, r *http.Request, req ctldapi.SealRootFSHeadRequest) (ctldapi.SealRootFSHeadResponse, int) {
+			return c.SealRootFSHead(r, req)
+		})
+	registerJSONPutRoute(mux, "/api/v1/rootfs/heads/acknowledge", controller, rootFSSyncController,
+		ctldapi.AcknowledgeRootFSHeadResponse{Error: "ctld rootfs sync not implemented"},
+		func(err error) any { return ctldapi.AcknowledgeRootFSHeadResponse{Error: err.Error()} },
+		func(c RootFSSyncController, r *http.Request, req ctldapi.AcknowledgeRootFSHeadRequest) (ctldapi.AcknowledgeRootFSHeadResponse, int) {
+			return c.AcknowledgeRootFSHead(r, req)
+		})
+	registerJSONPutRoute(mux, "/api/v1/rootfs/heads/materialize", controller, rootFSSyncController,
+		ctldapi.MaterializeRootFSHeadResponse{Error: "ctld rootfs sync not implemented"},
+		func(err error) any { return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()} },
+		func(c RootFSSyncController, r *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
+			return c.MaterializeRootFSHead(r, req)
+		})
 	mux.HandleFunc("/api/v1/pods/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

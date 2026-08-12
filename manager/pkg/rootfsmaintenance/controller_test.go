@@ -23,3 +23,14 @@ func TestControllerClearsTypedNilRecorder(t *testing.T) {
 		t.Fatal("typed-nil rootfs storage metering recorder should not be stored")
 	}
 }
+
+func TestControllersUseUniqueInventoryWorkerIDs(t *testing.T) {
+	first := New(nil, nil, Config{}, nil, nil)
+	second := New(nil, nil, Config{}, nil, nil)
+	if first.workerID == "" || second.workerID == "" {
+		t.Fatal("rootfs inventory worker id must not be empty")
+	}
+	if first.workerID == second.workerID {
+		t.Fatalf("rootfs inventory worker ids must be unique: %q", first.workerID)
+	}
+}

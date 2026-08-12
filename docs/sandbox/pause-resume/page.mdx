@@ -14,7 +14,7 @@ Pause is a runtime lifecycle operation. It checkpoints the writable rootfs and d
 </Callout>
 
 <Callout variant="warning">
-Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/resume. Pause saves the writable rootfs checkpoint and releases the runtime pod; it does not preserve process state.
+Self-hosted deployments must run `ctld`, the external rootfs snapshotter, and the `gvisor-rootfs` containerd handler on sandbox nodes. Pause publishes the writable rootfs Head and releases the runtime pod; it does not preserve process state.
 </Callout>
 
 ## What Persists
@@ -28,7 +28,7 @@ Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/
 
 The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. It is different from a Sandbox Volume: it is tied to sandbox rootfs lifecycle and does not provide volume sharing or direct Volume file APIs. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
 
-On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
+Sandbox writes stay on a native node-local overlayfs upper. `ctld` continuously converts changed upper entries into team-scoped immutable chunks and metadata, while each published Head describes the complete logical writable rootfs. After manager atomically commits the filesystem-to-Head pointer, resume attaches that Head lazily through the external snapshotter and creates a fresh native overlay upper. Resume does not replay a historical layer chain.
 
 ## Pause A Sandbox
 
@@ -56,6 +56,7 @@ Sandbox0 uses the durable pause flow to replace a failed runtime.
 | Runtime liveness failure is transient | The existing runtime is not replaced |
 | Runtime liveness fails continuously for 90 seconds | Manager starts the same durable pause flow and reconstructs the sandbox with a new `runtime_generation` |
 | Runtime Pod disappears, including while manager is restarting | Manager confirms the absence through the Kubernetes API and reconstructs the same sandbox identity from its last committed rootfs head. A periodic anti-entropy scan covers missed Pod events |
+| The node rootfs snapshotter process changes | The node becomes unavailable for new claims until the replacement passes containerd, object-store, and FUSE readiness. Manager then durably seals and recreates affected runtimes against the replacement instance; existing overlays are not transparently reconnected |
 | Kubernetes API is unavailable | Manager waits and retries; API unavailability is never treated as proof that a runtime is missing |
 | Runtime cannot produce a checkpoint within the bounded attempt | Recovery keeps the last committed rootfs head and replaces the stuck runtime |
 | Explicit delete or `hard_ttl` occurs | Deletion takes precedence over crash recovery |
@@ -122,8 +123,12 @@ The writable rootfs persists across pause and resume except for runtime-owned ep
 - `/var/tmp` remains part of the persistent rootfs.
 - Other writable rootfs paths, such as `/root` and workspace directories, remain persistent.
 - Mounted Sandbox Volumes keep their independent durable state, including a Volume mounted beneath `/tmp`.
+- Runtime-owned mounts are excluded from rootfs capture. This includes the `/procd` and `/procd-image` mounts, webhook state, and any other Kubernetes VolumeMount injected into the sandbox Pod.
+- UNIX domain sockets are process state, not restorable filesystem data. A socket created in the writable rootfs is absent after resume, including when an older lower layer had an entry at the same path.
+- Named pipes (FIFOs) created inside the current gVisor runtime are not guaranteed to persist. gVisor can keep the FIFO inode in its virtual filesystem without materializing it in the host overlay upper that `ctld` captures. Use a regular file or Sandbox Volume for durable state instead of relying on a FIFO path surviving runtime replacement.
+- File reads alone do not make access-time changes durable across a Head publication. Applications that need a persistent last-access signal should write explicit metadata.
 
-This policy is applied while saving checkpoints, restoring checkpoint layers, and capturing incremental baselines. Sandbox0 also filters `/tmp` from older checkpoint layers during restore. The first restore of a large older checkpoint can still take time because the layer must be read once; the next pause writes a checkpoint without those `/tmp` contents.
+This policy is applied by continuous capture and by every newly published complete Head. The v3 reader does not accept legacy checkpoint formats; upgrade or cutover procedures must delete old sandboxes or migrate them offline before enabling the new runtime.
 
 <Callout variant="warning">
 Do not use `/tmp` for dependency caches, downloaded tools, or other state that must survive runtime replacement. Store that data under a persistent rootfs path or mount a Sandbox Volume.

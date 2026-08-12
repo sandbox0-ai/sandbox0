@@ -3372,18 +3372,18 @@ spec:
                       rootfsObjectCacheMaxBytes:
                         default: 20Gi
                         description: |-
-                          RootFSObjectCacheMaxBytes caps the ctld node-local rootfs object cache.
+                          RootFSObjectCacheMaxBytes caps the rootfs snapshotter node-local object cache.
                           Set 0 to disable the cache.
                         type: string
                       rootfsObjectCacheMinFreeBytes:
                         description: |-
-                          RootFSObjectCacheMinFreeBytes asks ctld GC to keep at least this much free
-                          space on the cache filesystem.
+                          RootFSObjectCacheMinFreeBytes asks snapshotter cache GC to keep at least
+                          this much free space on the cache filesystem.
                         type: string
                       rootfsObjectCacheSweepInterval:
                         description: |-
-                          RootFSObjectCacheSweepInterval controls how often ctld sweeps the
-                          node-local rootfs object cache.
+                          RootFSObjectCacheSweepInterval controls how often the snapshotter sweeps
+                          the node-local rootfs object cache.
                         type: string
                     type: object
                   globalGateway:
@@ -3937,6 +3937,11 @@ spec:
                               accepted for a single sandbox.
                             type: string
                           sandboxRuntimeClassName:
+                            default: gvisor-rootfs
+                            description: SandboxRuntimeClassName is fixed to the operator-managed
+                              gvisor-rootfs RuntimeClass.
+                            enum:
+                            - gvisor-rootfs
                             type: string
                           shutdownTimeout:
                             default: 30s

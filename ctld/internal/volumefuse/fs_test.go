@@ -168,6 +168,38 @@ func TestOpenUsesSessionOpenFlags(t *testing.T) {
 	}
 }
 
+type fsyncDirTestSession struct {
+	Session
+	inode uint64
+	err   error
+}
+
+func (s *fsyncDirTestSession) FsyncDir(_ context.Context, inode uint64) error {
+	s.inode = inode
+	return s.err
+}
+
+func TestFsyncDirUsesOptInSession(t *testing.T) {
+	session := &fsyncDirTestSession{}
+	fs := New("vol-1", time.Second, session)
+
+	st := fs.FsyncDir(nil, &fuse.FsyncIn{InHeader: fuse.InHeader{NodeId: 42}})
+	if st != fuse.OK {
+		t.Fatalf("FsyncDir() status = %v, want OK", st)
+	}
+	if session.inode != 42 {
+		t.Fatalf("FsyncDir() inode = %d, want 42", session.inode)
+	}
+}
+
+func TestFsyncDirWithoutOptInReturnsNotImplemented(t *testing.T) {
+	fs := New("vol-1", time.Second, &readIntoSession{})
+
+	if st := fs.FsyncDir(nil, &fuse.FsyncIn{}); st != fuse.ENOSYS {
+		t.Fatalf("FsyncDir() status = %v, want ENOSYS", st)
+	}
+}
+
 func TestStatusToFusePreservesPOSIXErrno(t *testing.T) {
 	tests := []struct {
 		name string

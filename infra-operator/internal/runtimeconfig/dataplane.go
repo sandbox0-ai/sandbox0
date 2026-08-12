@@ -4,6 +4,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 )
 
 func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
@@ -39,7 +40,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.DefaultSandboxTTL = spec.DefaultSandboxTTL
 	cfg.TeamTemplateMemoryPerCPU = spec.TeamTemplateMemoryPerCPU
 	cfg.SandboxMaxMemory = spec.SandboxMaxMemory
-	cfg.SandboxRuntimeClassName = spec.SandboxRuntimeClassName
+	cfg.SandboxRuntimeClassName = rootfshead.RuntimeClassName
 	cfg.ProcdBinImageRef = spec.ProcdBinImageRef
 	cfg.DefaultTeamQuotas = cloneTeamQuotaLimitConfigs(spec.DefaultTeamQuotas)
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane

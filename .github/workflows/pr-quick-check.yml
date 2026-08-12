@@ -34,6 +34,7 @@ jobs:
       - name: Setup protoc
         uses: arduino/setup-protoc@v3
         with:
+          version: "25.1"
           repo-token: ${{ github.token }}
 
       - name: Setup Helm

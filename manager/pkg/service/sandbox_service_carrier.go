@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -14,9 +15,12 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	corelisters "k8s.io/client-go/listers/core/v1"
 )
 
 type rootFSHeadByIDStore interface {
@@ -39,7 +43,9 @@ func (s *SandboxService) claimS0FSCarrier(ctx context.Context, template *api.San
 	if !ok {
 		return nil, true, fmt.Errorf("sandbox store does not support S0FS ImageFS binding")
 	}
-	pod, _, err := s.allocateS0FSCarrier(ctx, template, req)
+	phaseStarted := time.Now()
+	pod, claimType, err := s.allocateS0FSCarrier(ctx, template, req)
+	s.observeClaimPhase(req.Template, claimType, "allocate_s0fs_carrier", phaseStarted, err)
 	if err != nil {
 		return nil, true, err
 	}
@@ -50,40 +56,66 @@ func (s *SandboxService) claimS0FSCarrier(ctx context.Context, template *api.San
 		}
 		return nil, true, err
 	}
+	phaseStarted = time.Now()
 	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, false)
+	s.observeClaimPhase(req.Template, claimType, "publish_runtime_assignment", phaseStarted, err)
 	if err != nil {
 		return fail("carrier runtime assignment failed", err)
 	}
 	record := sandboxRecordForClaimedPod(s, pod, template, req)
 	record.RootFSRuntimeVersion = sandboxstore.RootFSRuntimeS0FSV2
-	if err := s.sandboxStore.UpsertSandbox(ctx, record); err != nil {
+	phaseStarted = time.Now()
+	err = s.sandboxStore.UpsertSandbox(ctx, record)
+	s.observeClaimPhase(req.Template, claimType, "persist_sandbox", phaseStarted, err)
+	if err != nil {
 		return fail("carrier persistence failed", err)
 	}
-	if err := store.BindSandboxToRootFSHead(ctx, record.ID, req.TeamID, revision.ImageFSHeadID); err != nil {
+	phaseStarted = time.Now()
+	err = store.BindSandboxToRootFSHead(ctx, record.ID, req.TeamID, revision.ImageFSHeadID)
+	s.observeClaimPhase(req.Template, claimType, "bind_imagefs_head", phaseStarted, err)
+	if err != nil {
 		return fail("ImageFS binding failed", err)
 	}
+	phaseStarted = time.Now()
 	head, err := store.GetRootFSHeadByID(ctx, revision.ImageFSHeadID, req.TeamID)
 	if err != nil || head == nil {
 		if err == nil {
 			err = fmt.Errorf("ImageFS Head %s is missing", revision.ImageFSHeadID)
 		}
+		s.observeClaimPhase(req.Template, claimType, "load_imagefs_head", phaseStarted, err)
 		return fail("ImageFS lookup failed", err)
 	}
-	pod, err = s.activateS0FSCarrierHead(ctx, pod, head)
+	s.observeClaimPhase(req.Template, claimType, "load_imagefs_head", phaseStarted, nil)
+	phaseStarted = time.Now()
+	pod, err = s.activateS0FSCarrierHead(ctx, pod, head, req.Template, claimType)
+	s.observeClaimPhase(req.Template, claimType, "materialize_rootfs_head", phaseStarted, err)
 	if err != nil {
 		return fail("carrier rootfs activation failed", err)
 	}
-	if err := s.bindSandboxRootFSSync(ctx, pod, record); err != nil {
-		return fail("carrier rootfs sync failed", err)
+	pod, err = s.waitForS0FSCarrierReady(ctx, pod, req.Template, claimType, func(readyCtx context.Context, readyPod *corev1.Pod) error {
+		phaseStarted := time.Now()
+		bindErr := s.bindSandboxRootFSSync(readyCtx, readyPod, record)
+		s.observeClaimPhase(req.Template, claimType, "bind_rootfs_sync", phaseStarted, bindErr)
+		return bindErr
+	})
+	if err != nil {
+		return fail("carrier runtime readiness failed", err)
 	}
+	phaseStarted = time.Now()
 	pod, err = s.activateRuntimeAssignment(ctx, pod, runtimeRevision)
+	s.observeClaimPhase(req.Template, claimType, "activate_runtime", phaseStarted, err)
 	if err != nil {
 		return fail("carrier procd readiness failed", err)
 	}
-	if err := s.persistUpdatedSandboxPod(ctx, pod); err != nil {
+	phaseStarted = time.Now()
+	err = s.persistUpdatedSandboxPod(ctx, pod)
+	s.observeClaimPhase(req.Template, claimType, "persist_ready_sandbox", phaseStarted, err)
+	if err != nil {
 		return fail("carrier readiness persistence failed", err)
 	}
+	phaseStarted = time.Now()
 	procdAddress, err := s.prodAddress(ctx, pod)
+	s.observeClaimPhase(req.Template, claimType, "resolve_procd_address", phaseStarted, err)
 	if err != nil {
 		return fail("carrier procd address failed", err)
 	}
@@ -102,21 +134,30 @@ func (s *SandboxService) allocateS0FSCarrier(ctx context.Context, template *api.
 	var err error
 	claimType := "shared"
 	if compatible {
+		phaseStarted := time.Now()
 		pod, err = s.sharedCarrierPool.Reserve(ctx)
+		s.observeClaimPhase(req.Template, claimType, "reserve_shared_carrier", phaseStarted, err)
 	}
 	if err != nil {
 		return nil, "", fmt.Errorf("reserve shared carrier: %w", err)
 	}
 	if pod == nil {
 		claimType = "cold-s0fs"
-		if err := controller.EnsureProcdConfigSecret(ctx, s.k8sClient, s.secretLister, template); err != nil {
+		phaseStarted := time.Now()
+		err = controller.EnsureProcdConfigSecret(ctx, s.k8sClient, s.secretLister, template)
+		s.observeClaimPhase(req.Template, claimType, "ensure_cold_carrier_config", phaseStarted, err)
+		if err != nil {
 			return nil, "", fmt.Errorf("ensure cold carrier procd config: %w", err)
 		}
+		phaseStarted = time.Now()
 		pod, err = s.sharedCarrierPool.CreateCold(ctx, template)
+		s.observeClaimPhase(req.Template, claimType, "create_cold_carrier", phaseStarted, err)
 		if err != nil {
 			return nil, "", fmt.Errorf("create cold S0FS carrier: %w", err)
 		}
+		phaseStarted = time.Now()
 		pod, err = s.waitForCarrierGate(ctx, pod.Namespace, pod.Name, pod.Labels[carrier.LabelGeneration])
+		s.observeClaimPhase(req.Template, claimType, "wait_cold_carrier_gate", phaseStarted, err)
 		if err != nil {
 			s.deleteFailedCarrier(pod)
 			return nil, "", err
@@ -126,7 +167,9 @@ func (s *SandboxService) allocateS0FSCarrier(ctx context.Context, template *api.
 		s.deleteFailedCarrier(pod)
 		return nil, "", fmt.Errorf("%s: %w", reason, err)
 	}
+	phaseStarted := time.Now()
 	pod, err = s.assignCarrier(ctx, pod, template, req, claimType)
+	s.observeClaimPhase(req.Template, claimType, "assign_carrier_metadata", phaseStarted, err)
 	if err != nil {
 		return fail("carrier assignment failed", err)
 	}
@@ -135,22 +178,35 @@ func (s *SandboxService) allocateS0FSCarrier(ctx context.Context, template *api.
 		return fail("carrier resource validation failed", err)
 	}
 	if sandboxPodNeedsResourceResize(pod, resourceQuota) {
+		phaseStarted = time.Now()
 		pod, err = s.resizeSandboxPodResourcesWithClient(ctx, s.hotClaimClient(), pod, resourceQuota)
+		s.observeClaimPhase(req.Template, claimType, "resize_carrier_resources", phaseStarted, err)
 		if err != nil {
 			return fail("carrier resize failed", fmt.Errorf("resize S0FS carrier: %w", err))
 		}
 	}
-	if err := s.applyNetworkProviderFromPod(ctx, pod, req.TeamID); err != nil {
+	phaseStarted = time.Now()
+	err = s.applyNetworkProviderFromPod(ctx, pod, req.TeamID)
+	s.observeClaimPhase(req.Template, claimType, "apply_network_policy", phaseStarted, err)
+	if err != nil {
 		return fail("carrier network policy failed", err)
 	}
 	return pod, claimType, nil
 }
 
-func (s *SandboxService) activateS0FSCarrierHead(ctx context.Context, pod *corev1.Pod, head *sandboxstore.SandboxRootFSHead) (*corev1.Pod, error) {
+func (s *SandboxService) activateS0FSCarrierHead(
+	ctx context.Context,
+	pod *corev1.Pod,
+	head *sandboxstore.SandboxRootFSHead,
+	template string,
+	claimType string,
+) (*corev1.Pod, error) {
 	if pod == nil || head == nil {
 		return pod, fmt.Errorf("carrier Pod and rootfs Head are required")
 	}
+	phaseStarted := time.Now()
 	ctldAddress, err := s.ctldAddressForPod(ctx, pod)
+	s.observeClaimPhase(template, claimType, "resolve_carrier_ctld", phaseStarted, err)
 	if err != nil {
 		return pod, fmt.Errorf("resolve carrier ctld: %w", err)
 	}
@@ -159,6 +215,7 @@ func (s *SandboxService) activateS0FSCarrierHead(ctx context.Context, pod *corev
 	if err != nil {
 		return pod, err
 	}
+	phaseStarted = time.Now()
 	materialized, err := s.ctldClient.MaterializeRootFSHead(ctx, ctldAddress, ctldapi.MaterializeRootFSHeadRequest{
 		Reference: head.Reference, Image: head.Image, CarrierSlot: slot, TargetImageName: markerImage,
 	}, sandboxRootFSOperationTimeout)
@@ -166,60 +223,121 @@ func (s *SandboxService) activateS0FSCarrierHead(ctx context.Context, pod *corev
 		if err == nil {
 			err = fmt.Errorf("ctld did not confirm carrier marker %s", markerImage)
 		}
+		s.observeClaimPhase(template, claimType, "materialize_carrier_image", phaseStarted, err)
 		return pod, fmt.Errorf("materialize carrier rootfs: %w", err)
 	}
+	s.observeClaimPhase(template, claimType, "materialize_carrier_image", phaseStarted, nil)
+	phaseStarted = time.Now()
 	released, err := s.ctldClient.ReleaseCarrierGate(ctx, ctldAddress, ctldapi.ReleaseCarrierGateRequest{
 		Namespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID), Slot: slot,
+		SandboxID: strings.TrimSpace(pod.Annotations[controller.AnnotationSandboxID]), RuntimeGeneration: runtimeGenerationFromPod(pod),
+		ContainerName: runtimecontrol.ProcdContainerName,
 	}, sandboxRootFSOperationTimeout)
 	if err != nil || released == nil || !released.Released {
 		if err == nil {
 			err = fmt.Errorf("ctld did not confirm carrier gate release")
 		}
+		s.observeClaimPhase(template, claimType, "release_carrier_gate", phaseStarted, err)
 		return pod, fmt.Errorf("release carrier gate: %w", err)
 	}
-	pod, err = s.waitForCarrierRuntimeStarted(ctx, pod.Namespace, pod.Name)
-	if err != nil {
-		return pod, fmt.Errorf("wait for carrier runtime: %w", err)
+	if released.Namespace != pod.Namespace || released.PodName != pod.Name || released.PodUID != string(pod.UID) || released.Slot != slot ||
+		released.SandboxID != strings.TrimSpace(pod.Annotations[controller.AnnotationSandboxID]) || released.RuntimeGeneration != runtimeGenerationFromPod(pod) ||
+		released.ContainerName != runtimecontrol.ProcdContainerName || strings.TrimSpace(released.PodIP) == "" {
+		err = fmt.Errorf("release carrier gate returned a conflicting runtime identity")
+		s.observeClaimPhase(template, claimType, "release_carrier_gate", phaseStarted, err)
+		return pod, err
 	}
-	return pod, nil
+	s.observeClaimPhase(template, claimType, "release_carrier_gate", phaseStarted, nil)
+	started := pod.DeepCopy()
+	started.Status.PodIP = strings.TrimSpace(released.PodIP)
+	return started, nil
 }
 
-// waitForCarrierRuntimeStarted waits only for the gated main container. The
-// sandbox readiness gate depends on the runtime assignment, which is activated
-// after rootfs binding, so waiting for full Pod readiness here would deadlock.
-func (s *SandboxService) waitForCarrierRuntimeStarted(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
+// waitForS0FSCarrierReady overlaps the two independent direct readiness paths:
+// procd must serve the exact Pod identity while ctld prepares the exact rootfs
+// target. Both must complete before runtime assignment activation.
+func (s *SandboxService) waitForS0FSCarrierReady(
+	ctx context.Context,
+	pod *corev1.Pod,
+	template string,
+	claimType string,
+	prepareRootFS func(context.Context, *corev1.Pod) error,
+) (*corev1.Pod, error) {
+	if pod == nil || strings.TrimSpace(pod.Status.PodIP) == "" || prepareRootFS == nil {
+		return pod, fmt.Errorf("carrier Pod IP and rootfs preparation are required")
+	}
+	group, readyCtx := errgroup.WithContext(ctx)
+	var started *corev1.Pod
+	group.Go(func() error {
+		phaseStarted := time.Now()
+		var err error
+		started, err = s.waitForCarrierRuntimeStarted(readyCtx, pod, pod.Status.PodIP)
+		s.observeClaimPhase(template, claimType, "wait_procd_startup", phaseStarted, err)
+		return err
+	})
+	group.Go(func() error {
+		return prepareRootFS(readyCtx, pod)
+	})
+	if err := group.Wait(); err != nil {
+		return pod, err
+	}
+	return started, nil
+}
+
+// waitForCarrierRuntimeStarted waits for procd's own immutable Pod identity.
+// Kubelet Pod status is deliberately outside the claim critical path because
+// Generic PLEG can publish ContainerStatus.Running almost a second late.
+func (s *SandboxService) waitForCarrierRuntimeStarted(ctx context.Context, pod *corev1.Pod, podIP string) (*corev1.Pod, error) {
+	if pod == nil || s.procdClient == nil {
+		return nil, fmt.Errorf("carrier Pod and procd client are required")
+	}
 	timeout := s.config.RuntimeReadyTimeout
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
-	var started *corev1.Pod
-	err := wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
-		pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return false, err
-		}
-		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
-			return false, fmt.Errorf("carrier Pod entered terminal state %s", pod.Status.Phase)
-		}
-		for i := range pod.Status.ContainerStatuses {
-			status := &pod.Status.ContainerStatuses[i]
-			if status.Name != "procd" {
-				continue
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	address := "http://" + net.JoinHostPort(strings.TrimSpace(podIP), strconv.Itoa(s.config.ProcdPort))
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(waitCtx, 200*time.Millisecond)
+		startup, err := s.procdClient.Startup(attemptCtx, address)
+		attemptCancel()
+		if err == nil {
+			if startup.Status != "started" || startup.Namespace != pod.Namespace || startup.PodName != pod.Name || startup.PodUID != string(pod.UID) {
+				return nil, fmt.Errorf("procd startup identity conflicts with carrier Pod")
 			}
-			if status.State.Terminated != nil {
-				return false, fmt.Errorf("carrier runtime terminated: %s", status.State.Terminated.Reason)
-			}
-			if status.State.Running != nil && strings.TrimSpace(pod.Status.PodIP) != "" {
-				started = pod
-				return true, nil
-			}
+			started := pod.DeepCopy()
+			started.Status.PodIP = strings.TrimSpace(podIP)
+			return started, nil
 		}
-		return false, nil
-	})
-	if err != nil {
-		return nil, err
+		if terminal, reason := terminalPodForRuntimeWait(s.podLister, pod); terminal {
+			return nil, fmt.Errorf("carrier Pod %s while waiting for procd startup", reason)
+		}
+		select {
+		case <-waitCtx.Done():
+			return nil, fmt.Errorf("wait for procd startup at %s: %w", address, waitCtx.Err())
+		case <-ticker.C:
+		}
 	}
-	return started, nil
+}
+
+func terminalPodForRuntimeWait(podLister corelisters.PodLister, pod *corev1.Pod) (bool, string) {
+	if podLister == nil || pod == nil {
+		return false, ""
+	}
+	current, err := podLister.Pods(pod.Namespace).Get(pod.Name)
+	if err != nil {
+		return false, ""
+	}
+	if current.DeletionTimestamp != nil {
+		return true, "is terminating"
+	}
+	if current.Status.Phase == corev1.PodFailed || current.Status.Phase == corev1.PodSucceeded {
+		return true, fmt.Sprintf("entered terminal state %s", current.Status.Phase)
+	}
+	return false, ""
 }
 
 func (s *SandboxService) assignCarrier(ctx context.Context, pod *corev1.Pod, template *api.SandboxTemplate, req *ClaimRequest, claimType string) (*corev1.Pod, error) {

@@ -20,6 +20,7 @@ func TestNewCarrierPodUsesUniquePullNeverMarkerAndInitGate(t *testing.T) {
 		CarrierImageRef: "sandbox0ai/infra:carrier-base-v1", WaiterImageRef: "alpine:3.20", Generation: "generation-a",
 	}, nil)
 	require.NoError(t, err)
+	assert.Equal(t, 5*time.Second, pool.config.ReconcileInterval)
 	first, err := pool.newCarrierPod(false, nil)
 	require.NoError(t, err)
 	second, err := pool.newCarrierPod(false, nil)
@@ -37,6 +38,15 @@ func TestNewCarrierPodUsesUniquePullNeverMarkerAndInitGate(t *testing.T) {
 	require.Len(t, first.Spec.InitContainers, 1)
 	assert.Equal(t, "carrier-wait", first.Spec.InitContainers[0].Name)
 	assert.Equal(t, "alpine:3.20", first.Spec.InitContainers[0].Image)
+	assert.Equal(t, []string{"/bin/sh", "-ec", "while [ ! -f /var/run/sandbox0/carrier/release ]; do sleep 0.20; done"}, first.Spec.InitContainers[0].Command)
+	require.Len(t, first.Spec.InitContainers[0].VolumeMounts, 2)
+	assert.Equal(t, carrierBaseVolumeName, first.Spec.InitContainers[0].VolumeMounts[0].Name)
+	assert.Equal(t, carrierBaseMountPath, first.Spec.InitContainers[0].VolumeMounts[0].MountPath)
+	assert.True(t, first.Spec.InitContainers[0].VolumeMounts[0].ReadOnly)
+	baseVolume := first.Spec.Volumes[len(first.Spec.Volumes)-2]
+	require.NotNil(t, baseVolume.Image)
+	assert.Equal(t, "sandbox0ai/infra:carrier-base-v1", baseVolume.Image.Reference)
+	assert.Equal(t, corev1.PullIfNotPresent, baseVolume.Image.PullPolicy)
 	assert.Equal(t, carrier.GateVolumeName, first.Spec.Volumes[len(first.Spec.Volumes)-1].Name)
 	require.Len(t, first.Spec.TopologySpreadConstraints, 1)
 	spread := first.Spec.TopologySpreadConstraints[0]

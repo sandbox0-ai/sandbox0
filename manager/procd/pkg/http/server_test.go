@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
@@ -89,6 +90,27 @@ func TestSandboxProbeHandlerWritesProbeResponse(t *testing.T) {
 	}
 	if result.Kind != sandboxprobe.KindReadiness || result.Status != sandboxprobe.StatusFailed {
 		t.Fatalf("result = %#v, want failed readiness", result)
+	}
+}
+
+func TestStartupHandlerReturnsPodIdentityBeforeRuntimeReadiness(t *testing.T) {
+	server := &Server{startup: procdapi.StartupResponse{
+		Status: "started", Namespace: "sandbox0", PodName: "carrier", PodUID: "pod-uid",
+	}}
+	recorder := httptest.NewRecorder()
+	server.startupHandler(recorder, httptest.NewRequest(http.MethodGet, procdapi.StartupPath, nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var envelope struct {
+		Data procdapi.StartupResponse `json:"data"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Data.PodUID != "pod-uid" || envelope.Data.Status != "started" {
+		t.Fatalf("response = %#v", envelope.Data)
 	}
 }
 

@@ -39,6 +39,11 @@ type materializerClient interface {
 	GetImage(context.Context, string) (containerd.Image, error)
 }
 
+type baseImageMaterializer interface {
+	containerdClient
+	GetImage(context.Context, string) (containerd.Image, error)
+}
+
 func (r *ContainerdRuntime) ActiveUpperdir(ctx context.Context, info ctldapi.RootFSInfo) (string, error) {
 	client, closeClient, err := r.client(ctx)
 	if err != nil {
@@ -196,12 +201,8 @@ func (r *ContainerdRuntime) MaterializeRootFSHead(
 	}
 	ctx = namespaces.WithNamespace(ctx, r.namespace)
 	snapshotter := client.SnapshotService(rootfshead.SnapshotterName)
-	baseSnapshot, err := snapshotter.Stat(ctx, base.ChainID)
-	if err != nil {
-		return fmt.Errorf("canonical rootfs base snapshot %s is not available: %w", base.ChainID, err)
-	}
-	if baseSnapshot.Kind != snapshots.KindCommitted {
-		return fmt.Errorf("canonical rootfs base snapshot %s is not committed", base.ChainID)
+	if err := ensureCanonicalBaseSnapshot(ctx, client, snapshotter, base); err != nil {
+		return err
 	}
 	lease, err := client.LeasesService().Create(ctx, leases.WithRandomID(), leases.WithExpiration(5*time.Minute))
 	if err != nil {
@@ -276,6 +277,61 @@ func (r *ContainerdRuntime) MaterializeRootFSHead(
 	}
 	if err := r.waitForCRIImage(leaseCtx, targetImageName); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ensureCanonicalBaseSnapshot makes an ImageFS Head portable across nodes. A
+// carrier Pod pre-pulls the tiny platform base through an image volume, while
+// this method verifies the immutable identity recorded in the Head before
+// unpacking that image into the S0FS snapshotter local to the carrier node.
+func ensureCanonicalBaseSnapshot(
+	ctx context.Context,
+	client baseImageMaterializer,
+	snapshotter snapshots.Snapshotter,
+	base rootfshead.BaseIdentity,
+) error {
+	if snapshotter == nil {
+		return fmt.Errorf("rootfs snapshotter %q is unavailable", rootfshead.SnapshotterName)
+	}
+	if info, err := snapshotter.Stat(ctx, base.ChainID); err == nil {
+		if info.Kind != snapshots.KindCommitted {
+			return fmt.Errorf("canonical rootfs base snapshot %s is not committed", base.ChainID)
+		}
+		return nil
+	} else if !errdefs.IsNotFound(err) {
+		return fmt.Errorf("inspect canonical rootfs base snapshot %s: %w", base.ChainID, err)
+	}
+
+	expectedPlatform := ocispec.Platform{OS: base.OS, Architecture: base.Architecture, Variant: base.Variant}
+	record, config, _, err := imageConfig(ctx, client, base.ImageReference, platforms.OnlyStrict(expectedPlatform))
+	if err != nil {
+		return fmt.Errorf("load canonical rootfs base on carrier node: %w", err)
+	}
+	actual := rootfshead.BaseIdentity{
+		ImageReference: record.Name,
+		ManifestDigest: record.Target.Digest.String(),
+		ChainID:        identity.ChainID(config.RootFS.DiffIDs).String(),
+		OS:             config.OS,
+		Architecture:   config.Architecture,
+		Variant:        config.Variant,
+	}
+	if actual != base {
+		return fmt.Errorf("carrier node rootfs base identity does not match ImageFS Head: got %+v, expected %+v", actual, base)
+	}
+	image, err := client.GetImage(ctx, record.Name)
+	if err != nil {
+		return fmt.Errorf("load canonical rootfs base image %s: %w", record.Name, err)
+	}
+	if err := image.Unpack(ctx, rootfshead.SnapshotterName); err != nil {
+		return fmt.Errorf("unpack canonical rootfs base image: %w", err)
+	}
+	info, err := snapshotter.Stat(ctx, base.ChainID)
+	if err != nil {
+		return fmt.Errorf("canonical rootfs base snapshot %s is not available after unpack: %w", base.ChainID, err)
+	}
+	if info.Kind != snapshots.KindCommitted {
+		return fmt.Errorf("canonical rootfs base snapshot %s is not committed after unpack", base.ChainID)
 	}
 	return nil
 }

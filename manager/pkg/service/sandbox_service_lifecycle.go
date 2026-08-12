@@ -591,7 +591,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		}
 	}
 	barrierActive = false
-	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, immediatePodDeletionOptions()); err != nil && !k8serrors.IsNotFound(err) {
 		if s.logger != nil {
 			s.logger.Warn("Committed sandbox pause but failed to delete old runtime pod",
 				zap.String("sandboxID", sandboxID),
@@ -611,6 +611,14 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		)
 	}
 	return nil
+}
+
+// immediatePodDeletionOptions is safe after the durable paused state and
+// rootfs checkpoint have committed. Waiting out the normal process grace
+// period would otherwise leak completed pause cleanup into an immediate resume.
+func immediatePodDeletionOptions() metav1.DeleteOptions {
+	gracePeriodSeconds := int64(0)
+	return metav1.DeleteOptions{GracePeriodSeconds: &gracePeriodSeconds}
 }
 
 func (s *SandboxService) sandboxStillPausing(ctx context.Context, sandboxID, txnID string) (bool, error) {

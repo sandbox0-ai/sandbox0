@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -23,21 +24,27 @@ func TestReleaseCarrierGateValidatesPodIdentityAndIsIdempotent(t *testing.T) {
 		slot   = "s0-0123456789abcdef"
 	)
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "carrier", Namespace: "sandbox0", UID: types.UID(podUID), Annotations: map[string]string{carrier.AnnotationSlot: slot}},
+		ObjectMeta: metav1.ObjectMeta{Name: "carrier", Namespace: "sandbox0", UID: types.UID(podUID), Annotations: map[string]string{
+			carrier.AnnotationSlot: slot, runtimecontrol.AnnotationSandboxID: "sandbox-1", runtimecontrol.AnnotationRuntimeGeneration: "2",
+		}},
 		Spec: corev1.PodSpec{NodeName: "node-a", Volumes: []corev1.Volume{{
 			Name: carrier.GateVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-		}}},
+		}}, Containers: []corev1.Container{{Name: runtimecontrol.ProcdContainerName}}},
+		Status: corev1.PodStatus{PodIP: "10.0.0.2"},
 	}
 	kubeletRoot := t.TempDir()
 	gateDir := filepath.Join(kubeletRoot, podUID, "volumes", "kubernetes.io~empty-dir", carrier.GateVolumeName)
 	require.NoError(t, os.MkdirAll(gateDir, 0o755))
 	controller := NewController(Config{KubernetesClient: fake.NewSimpleClientset(pod), NodeName: "node-a", KubeletPodsRoot: kubeletRoot})
-	req := ctldapi.ReleaseCarrierGateRequest{Namespace: "sandbox0", PodName: "carrier", PodUID: podUID, Slot: slot}
+	req := ctldapi.ReleaseCarrierGateRequest{
+		Namespace: "sandbox0", PodName: "carrier", PodUID: podUID, Slot: slot, SandboxID: "sandbox-1", RuntimeGeneration: 2, ContainerName: runtimecontrol.ProcdContainerName,
+	}
 
 	for range 2 {
 		response, status := controller.ReleaseCarrierGate(httptest.NewRequest(http.MethodPost, "/", nil), req)
 		require.Equal(t, http.StatusOK, status, response.Error)
 		assert.True(t, response.Released)
+		assert.Equal(t, "10.0.0.2", response.PodIP)
 	}
 	payload, err := os.ReadFile(filepath.Join(gateDir, carrier.GateReleaseFile))
 	require.NoError(t, err)
@@ -56,8 +63,11 @@ func TestReleaseCarrierGateRejectsPreexistingSymlink(t *testing.T) {
 		slot   = "s0-0123456789abcdef"
 	)
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "carrier", Namespace: "sandbox0", UID: types.UID(podUID), Annotations: map[string]string{carrier.AnnotationSlot: slot}},
-		Spec:       corev1.PodSpec{NodeName: "node-a", Volumes: []corev1.Volume{{Name: carrier.GateVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}},
+		ObjectMeta: metav1.ObjectMeta{Name: "carrier", Namespace: "sandbox0", UID: types.UID(podUID), Annotations: map[string]string{
+			carrier.AnnotationSlot: slot, runtimecontrol.AnnotationSandboxID: "sandbox-1", runtimecontrol.AnnotationRuntimeGeneration: "2",
+		}},
+		Spec:   corev1.PodSpec{NodeName: "node-a", Volumes: []corev1.Volume{{Name: carrier.GateVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}, Containers: []corev1.Container{{Name: runtimecontrol.ProcdContainerName}}},
+		Status: corev1.PodStatus{PodIP: "10.0.0.2"},
 	}
 	root := t.TempDir()
 	dir := filepath.Join(root, podUID, "volumes", "kubernetes.io~empty-dir", carrier.GateVolumeName)
@@ -65,7 +75,7 @@ func TestReleaseCarrierGateRejectsPreexistingSymlink(t *testing.T) {
 	require.NoError(t, os.Symlink("elsewhere", filepath.Join(dir, carrier.GateReleaseFile)))
 	controller := NewController(Config{KubernetesClient: fake.NewSimpleClientset(pod), NodeName: "node-a", KubeletPodsRoot: root})
 	response, status := controller.ReleaseCarrierGate(httptest.NewRequest(http.MethodPost, "/", nil), ctldapi.ReleaseCarrierGateRequest{
-		Namespace: "sandbox0", PodName: "carrier", PodUID: podUID, Slot: slot,
+		Namespace: "sandbox0", PodName: "carrier", PodUID: podUID, Slot: slot, SandboxID: "sandbox-1", RuntimeGeneration: 2, ContainerName: runtimecontrol.ProcdContainerName,
 	})
 	assert.Equal(t, http.StatusConflict, status)
 	assert.Contains(t, response.Error, "regular file")

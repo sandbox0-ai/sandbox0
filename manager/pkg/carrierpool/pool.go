@@ -30,6 +30,9 @@ import (
 const (
 	sharedTemplateName                 = "shared-carrier"
 	procdSecretKey                     = "internal_jwt_public.key"
+	carrierBaseVolumeName              = "carrier-base"
+	carrierBaseMountPath               = "/run/sandbox0/carrier-base"
+	carrierGatePollInterval            = 200 * time.Millisecond
 	sharedCarrierImmutableShapeVersion = "v2-ephemeral-8Gi"
 )
 
@@ -68,7 +71,7 @@ func New(k8sClient kubernetes.Interface, cfg Config, logger *zap.Logger) (*Pool,
 		return nil, fmt.Errorf("invalid carrier pool bounds %d..%d", cfg.MinIdle, cfg.MaxIdle)
 	}
 	if cfg.ReconcileInterval <= 0 {
-		cfg.ReconcileInterval = 2 * time.Second
+		cfg.ReconcileInterval = 5 * time.Second
 	}
 	if cfg.ActivationTimeout <= 0 {
 		cfg.ActivationTimeout = 15 * time.Second
@@ -270,12 +273,24 @@ func (p *Pool) newCarrierPod(reserved bool, coldTemplate *api.SandboxTemplate) (
 	spec.Containers[0].Image = marker
 	spec.Containers[0].ImagePullPolicy = corev1.PullNever
 	spec.RestartPolicy = corev1.RestartPolicyNever
-	spec.Volumes = append(spec.Volumes, corev1.Volume{Name: carrier.GateVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+	spec.Volumes = append(spec.Volumes,
+		corev1.Volume{
+			Name: carrierBaseVolumeName,
+			VolumeSource: corev1.VolumeSource{Image: &corev1.ImageVolumeSource{
+				Reference:  p.config.CarrierImageRef,
+				PullPolicy: corev1.PullIfNotPresent,
+			}},
+		},
+		corev1.Volume{Name: carrier.GateVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	)
 	spec.InitContainers = []corev1.Container{{
 		Name: "carrier-wait", Image: p.config.WaiterImageRef, ImagePullPolicy: corev1.PullIfNotPresent,
-		Command:      []string{"/bin/sh", "-ec", "while [ ! -f " + carrier.GateMountPath + "/" + carrier.GateReleaseFile + " ]; do sleep 0.01; done"},
-		VolumeMounts: []corev1.VolumeMount{{Name: carrier.GateVolumeName, MountPath: carrier.GateMountPath}},
-		Resources:    corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1m"), corev1.ResourceMemory: resource.MustParse("4Mi")}},
+		Command: []string{"/bin/sh", "-ec", fmt.Sprintf("while [ ! -f %s/%s ]; do sleep %.2f; done", carrier.GateMountPath, carrier.GateReleaseFile, carrierGatePollInterval.Seconds())},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: carrierBaseVolumeName, MountPath: carrierBaseMountPath, ReadOnly: true},
+			{Name: carrier.GateVolumeName, MountPath: carrier.GateMountPath},
+		},
+		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1m"), corev1.ResourceMemory: resource.MustParse("4Mi")}},
 	}}
 	state := carrier.StateReady
 	if reserved {

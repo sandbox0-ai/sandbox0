@@ -46,6 +46,10 @@ nodes:
     apiServer:
       extraArgs:
         enable-aggregator-routing: "true"
+  - |
+    kind: KubeletConfiguration
+    featureGates:
+      EventedPLEG: true
   extraPortMappings:
   # cluster-gateway HTTP port
   - containerPort: 30080

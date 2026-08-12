@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,8 +27,10 @@ func (c *Controller) ReleaseCarrierGate(r *http.Request, req ctldapi.ReleaseCarr
 	req.PodName = strings.TrimSpace(req.PodName)
 	req.PodUID = strings.TrimSpace(req.PodUID)
 	req.Slot = strings.TrimSpace(req.Slot)
-	if req.Namespace == "" || req.PodName == "" || req.PodUID == "" {
-		return ctldapi.ReleaseCarrierGateResponse{Error: "namespace, pod_name, and pod_uid are required"}, http.StatusBadRequest
+	req.SandboxID = strings.TrimSpace(req.SandboxID)
+	req.ContainerName = strings.TrimSpace(req.ContainerName)
+	if req.Namespace == "" || req.PodName == "" || req.PodUID == "" || req.SandboxID == "" || req.RuntimeGeneration <= 0 || req.ContainerName == "" {
+		return ctldapi.ReleaseCarrierGateResponse{Error: "namespace, pod_name, pod_uid, sandbox_id, positive runtime_generation, and container_name are required"}, http.StatusBadRequest
 	}
 	if err := carrier.ValidateSlot(req.Slot); err != nil {
 		return ctldapi.ReleaseCarrierGateResponse{Error: err.Error()}, http.StatusBadRequest
@@ -38,8 +42,21 @@ func (c *Controller) ReleaseCarrierGate(r *http.Request, req ctldapi.ReleaseCarr
 	if err != nil {
 		return ctldapi.ReleaseCarrierGateResponse{Error: err.Error()}, http.StatusServiceUnavailable
 	}
-	if string(pod.UID) != req.PodUID || pod.Spec.NodeName != c.nodeName || pod.Annotations[carrier.AnnotationSlot] != req.Slot {
-		return ctldapi.ReleaseCarrierGateResponse{Error: "carrier Pod identity, node, or slot conflict"}, http.StatusConflict
+	generation, generationErr := strconv.ParseInt(strings.TrimSpace(pod.Annotations[runtimecontrol.AnnotationRuntimeGeneration]), 10, 64)
+	containerFound := false
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == req.ContainerName {
+			containerFound = true
+			break
+		}
+	}
+	if string(pod.UID) != req.PodUID || pod.Spec.NodeName != c.nodeName || pod.Annotations[carrier.AnnotationSlot] != req.Slot ||
+		strings.TrimSpace(pod.Annotations[runtimecontrol.AnnotationSandboxID]) != req.SandboxID || generationErr != nil || generation != req.RuntimeGeneration || !containerFound {
+		return ctldapi.ReleaseCarrierGateResponse{Error: "carrier Pod identity, node, slot, sandbox, generation, or container conflict"}, http.StatusConflict
+	}
+	podIP := strings.TrimSpace(pod.Status.PodIP)
+	if podIP == "" {
+		return ctldapi.ReleaseCarrierGateResponse{Error: "carrier Pod has no IP"}, http.StatusConflict
 	}
 	if !hasCarrierGateVolume(pod) {
 		return ctldapi.ReleaseCarrierGateResponse{Error: "carrier Pod has no gate volume"}, http.StatusConflict
@@ -52,7 +69,7 @@ func (c *Controller) ReleaseCarrierGate(r *http.Request, req ctldapi.ReleaseCarr
 	if exists, err := validateExistingCarrierRelease(releasePath, req.Slot); err != nil {
 		return ctldapi.ReleaseCarrierGateResponse{Error: err.Error()}, http.StatusConflict
 	} else if exists {
-		return ctldapi.ReleaseCarrierGateResponse{Released: true}, http.StatusOK
+		return carrierGateReleasedResponse(req, podIP), http.StatusOK
 	}
 	file, err := os.CreateTemp(filepath.Dir(releasePath), "."+carrier.GateReleaseFile+"."+req.Slot+".")
 	if err != nil {
@@ -81,7 +98,7 @@ func (c *Controller) ReleaseCarrierGate(r *http.Request, req ctldapi.ReleaseCarr
 			if exists, validationErr := validateExistingCarrierRelease(releasePath, req.Slot); validationErr != nil {
 				return ctldapi.ReleaseCarrierGateResponse{Error: validationErr.Error()}, http.StatusConflict
 			} else if exists {
-				return ctldapi.ReleaseCarrierGateResponse{Released: true}, http.StatusOK
+				return carrierGateReleasedResponse(req, podIP), http.StatusOK
 			}
 		}
 		return ctldapi.ReleaseCarrierGateResponse{Error: fmt.Sprintf("publish carrier gate release: %v", err)}, http.StatusInternalServerError
@@ -93,7 +110,14 @@ func (c *Controller) ReleaseCarrierGate(r *http.Request, req ctldapi.ReleaseCarr
 	if err := syncCarrierGateDirectory(filepath.Dir(releasePath)); err != nil {
 		return ctldapi.ReleaseCarrierGateResponse{Error: fmt.Sprintf("sync carrier gate directory: %v", err)}, http.StatusInternalServerError
 	}
-	return ctldapi.ReleaseCarrierGateResponse{Released: true}, http.StatusOK
+	return carrierGateReleasedResponse(req, podIP), http.StatusOK
+}
+
+func carrierGateReleasedResponse(req ctldapi.ReleaseCarrierGateRequest, podIP string) ctldapi.ReleaseCarrierGateResponse {
+	return ctldapi.ReleaseCarrierGateResponse{
+		Released: true, Namespace: req.Namespace, PodName: req.PodName, PodUID: req.PodUID, PodIP: podIP,
+		Slot: req.Slot, SandboxID: req.SandboxID, RuntimeGeneration: req.RuntimeGeneration, ContainerName: req.ContainerName,
+	}
 }
 
 func validateExistingCarrierRelease(path, slot string) (bool, error) {

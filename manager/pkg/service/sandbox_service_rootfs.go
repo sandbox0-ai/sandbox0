@@ -170,9 +170,23 @@ func (s *SandboxService) bindSandboxRootFSSync(ctx context.Context, pod *corev1.
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, sandboxRootFSOperationTimeout)
 	defer cancel()
-	bound, err := s.ctldClient.BindRootFSSync(waitCtx, ctldAddress, request)
-	if err != nil {
-		return fmt.Errorf("bind sandbox rootfs sync: %w", rootFSResponseError(err, bindRootFSSyncError(bound)))
+	var bound *ctldapi.BindRootFSSyncResponse
+	for {
+		bound, err = s.ctldClient.BindRootFSSync(waitCtx, ctldAddress, request)
+		if err == nil {
+			break
+		}
+		if !ctldapi.IsNotFoundError(err) {
+			return fmt.Errorf("bind sandbox rootfs sync: %w", rootFSResponseError(err, bindRootFSSyncError(bound)))
+		}
+		if terminal, reason := terminalPodForRuntimeWait(s.podLister, pod); terminal {
+			return fmt.Errorf("bind sandbox rootfs sync: carrier Pod %s while waiting for ctld rootfs target", reason)
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("wait for ctld rootfs target: %w", waitCtx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	if bound != nil && bound.Status.SealedReference != nil {
 		return s.reconcilePendingRootFSSeal(waitCtx, ctldAddress, record, bound.Status)

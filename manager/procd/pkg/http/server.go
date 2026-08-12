@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -21,7 +22,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	coreobs "github.com/sandbox0-ai/sandbox0/pkg/observability/core"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability/httpserver"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -49,6 +52,7 @@ type Server struct {
 
 	probeRunner func(sandboxprobe.Kind) sandboxprobe.Response
 	runtimeGate func() (bool, string)
+	startup     procdapi.StartupResponse
 }
 
 // NewServer creates a new HTTP server.
@@ -77,6 +81,10 @@ func NewServer(
 		obsProvider:       obsProvider,
 		probeRunner:       probeRunner,
 		runtimeGate:       runtimeGate,
+		startup: procdapi.StartupResponse{
+			Status: "started", Namespace: strings.TrimSpace(os.Getenv(runtimecontrol.EnvPodNamespace)),
+			PodName: strings.TrimSpace(os.Getenv(runtimecontrol.EnvPodName)), PodUID: strings.TrimSpace(os.Getenv(runtimecontrol.EnvPodUID)),
+		},
 	}
 
 	s.setupRoutes()
@@ -90,6 +98,7 @@ func (s *Server) setupRoutes() {
 	s.router.Use(s.recoveryMiddleware)
 
 	// Health check endpoints (no auth required)
+	s.router.HandleFunc(procdapi.StartupPath, s.startupHandler).Methods("GET")
 	s.router.HandleFunc("/healthz", s.healthHandler).Methods("GET")
 	s.router.HandleFunc("/readyz", s.readyHandler).Methods("GET")
 	s.router.HandleFunc("/sandbox-probes/{kind}", s.sandboxProbeHandler).Methods("GET", "POST")
@@ -165,6 +174,14 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/files", fileHandler.Handle).Methods("GET", "POST", "DELETE")
 	api.HandleFunc("/files/stat", fileHandler.Stat).Methods("GET")
 	api.HandleFunc("/files/list", fileHandler.List).Methods("GET")
+}
+
+func (s *Server) startupHandler(w http.ResponseWriter, _ *http.Request) {
+	if s.startup.Namespace == "" || s.startup.PodName == "" || s.startup.PodUID == "" {
+		_ = spec.WriteError(w, http.StatusServiceUnavailable, spec.CodeUnavailable, "procd Pod identity is unavailable")
+		return
+	}
+	_ = spec.WriteSuccess(w, http.StatusOK, s.startup)
 }
 
 func (s *Server) runtimeReadyMiddleware(next http.Handler) http.Handler {

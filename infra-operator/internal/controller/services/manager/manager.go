@@ -445,7 +445,7 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 		cfg.SharedCarrierPool.MaxIdle = cfg.SharedCarrierPool.MinIdle
 	}
 	if cfg.SharedCarrierPool.ReconcileInterval.Duration <= 0 {
-		cfg.SharedCarrierPool.ReconcileInterval = metav1.Duration{Duration: 2 * time.Second}
+		cfg.SharedCarrierPool.ReconcileInterval = metav1.Duration{Duration: 5 * time.Second}
 	}
 	if cfg.SharedCarrierPool.ActivationTimeout.Duration <= 0 {
 		cfg.SharedCarrierPool.ActivationTimeout = metav1.Duration{Duration: 15 * time.Second}

@@ -218,6 +218,43 @@ func TestBindSandboxRootFSSyncWaitsThroughTransientInitialError(t *testing.T) {
 	assert.GreaterOrEqual(t, statusCalls.Load(), int32(2))
 }
 
+func TestBindSandboxRootFSSyncWaitsForDirectCTLDTarget(t *testing.T) {
+	var bindCalls atomic.Int32
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/sync/bind", r.URL.Path)
+		var req ctldapi.BindRootFSSyncRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		require.Equal(t, "pod-pending", req.Target.PodName)
+		require.Equal(t, "pod-uid", req.Target.PodUID)
+		require.Equal(t, sandboxRootFSContainerName, req.Target.ContainerName)
+		if bindCalls.Add(1) < 3 {
+			w.WriteHeader(http.StatusNotFound)
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
+				Error: "rootfs target not found: running container procd in pod sandbox0-system/pod-pending",
+			}))
+			return
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
+			Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true},
+		}))
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+	pod := rootFSTestPod("pod-pending", "sandbox-1", "team-1")
+	pod.UID = types.UID("pod-uid")
+	pod.Status.Phase = corev1.PodPending
+	pod.Status.HostIP = ctldURL.Hostname()
+	record := &sandboxstore.SandboxRecord{ID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1}
+	svc := &SandboxService{
+		podLister:  newTestPodLister(t, pod),
+		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
+		config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+	}
+
+	require.NoError(t, svc.bindSandboxRootFSSync(context.Background(), pod, record))
+	assert.Equal(t, int32(3), bindCalls.Load())
+}
+
 func TestBindSandboxRootFSSyncRejectsMalformedClaimMounts(t *testing.T) {
 	var called atomic.Bool
 	ctld := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -350,6 +387,9 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	deleteCalled := false
 	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
 		require.True(t, saveCalled, "pod delete must happen after rootfs checkpoint save")
+		deleteAction := action.(ktesting.DeleteAction)
+		require.NotNil(t, deleteAction.GetDeleteOptions().GracePeriodSeconds)
+		assert.Equal(t, int64(0), *deleteAction.GetDeleteOptions().GracePeriodSeconds)
 		deleteCalled = true
 		return true, nil, nil
 	})
@@ -718,6 +758,7 @@ func TestFinishRestoredS0FSRuntimeUsesCarrierSlotWithoutPodImageMutation(t *test
 	withClaimTestPublicKey(t)
 	var calls []string
 	var materializeReq ctldapi.MaterializeRootFSHeadRequest
+	var procdPodIP string
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/rootfs/heads/materialize":
@@ -725,8 +766,13 @@ func TestFinishRestoredS0FSRuntimeUsesCarrierSlotWithoutPodImageMutation(t *test
 			calls = append(calls, "materialize")
 			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{Materialized: true, ImageName: materializeReq.TargetImageName}))
 		case "/api/v1/carriers/gate/release":
+			var req ctldapi.ReleaseCarrierGateRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 			calls = append(calls, "gate")
-			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.ReleaseCarrierGateResponse{Released: true}))
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.ReleaseCarrierGateResponse{
+				Released: true, Namespace: req.Namespace, PodName: req.PodName, PodUID: req.PodUID, PodIP: procdPodIP,
+				Slot: req.Slot, SandboxID: req.SandboxID, RuntimeGeneration: req.RuntimeGeneration, ContainerName: req.ContainerName,
+			}))
 		case "/api/v1/rootfs/sync/bind":
 			calls = append(calls, "bind")
 			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true}}))
@@ -747,11 +793,20 @@ func TestFinishRestoredS0FSRuntimeUsesCarrierSlotWithoutPodImageMutation(t *test
 	require.NoError(t, err)
 	pod := rootFSTestPod("carrier-pod", sandboxID, "team-1")
 	pod.UID = types.UID("carrier-uid")
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, procdapi.StartupPath, r.URL.Path)
+		require.NoError(t, spec.WriteSuccess(w, http.StatusOK, procdapi.StartupResponse{
+			Status: "started", Namespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID),
+		}))
+	}))
+	defer procd.Close()
+	procdURL, procdPort := parsedTestServer(t, procd.URL)
+	procdPodIP = procdURL.Hostname()
 	pod.Spec.Containers[0].Image = markerImage
 	pod.Spec.Containers[0].ImagePullPolicy = corev1.PullNever
 	pod.Annotations[carrier.AnnotationSlot] = slot
 	pod.Status.HostIP = ctldURL.Hostname()
-	pod.Status.PodIP = "10.0.0.10"
+	pod.Status.PodIP = procdPodIP
 	head := rootFSHeadTestFixture(t, sandboxID, "team-1", "head-v1", 3)
 	store := &memorySandboxStore{
 		records:            map[string]*sandboxstore.SandboxRecord{},
@@ -772,8 +827,9 @@ func TestFinishRestoredS0FSRuntimeUsesCarrierSlotWithoutPodImageMutation(t *test
 	svc := &SandboxService{
 		k8sClient: client, podLister: corelisters.NewPodLister(indexer), secretLister: newClaimTestSecretLister(t),
 		sandboxStore: store, ctldClient: ctldapi.NewClientWithTimeout(time.Second), internalTokenGenerator: staticTokenGenerator{},
-		config: SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort, RuntimeReadyTimeout: time.Second},
-		clock:  systemTime{}, logger: zap.NewNop(),
+		procdClient: procdapi.NewProcdClient(procdapi.ProcdClientConfig{Timeout: time.Second}),
+		config:      SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort, ProcdPort: procdPort, RuntimeReadyTimeout: time.Second},
+		clock:       systemTime{}, logger: zap.NewNop(),
 	}
 	record := &sandboxstore.SandboxRecord{
 		ID: sandboxID, TeamID: "team-1", UserID: "user-1", TemplateID: "template-1", TemplateName: "template-1",

@@ -240,6 +240,9 @@ func TestBuildConfigDerivesProcdBinImageRef(t *testing.T) {
 	if cfg.SharedCarrierPool.CarrierImageRef != "sandbox0ai/infra:carrier-base-v1" {
 		t.Fatalf("carrier base image ref = %q, want sandbox0ai/infra:carrier-base-v1", cfg.SharedCarrierPool.CarrierImageRef)
 	}
+	if cfg.SharedCarrierPool.ReconcileInterval.Duration != 5*time.Second {
+		t.Fatalf("carrier reconcile interval = %s, want 5s", cfg.SharedCarrierPool.ReconcileInterval.Duration)
+	}
 }
 
 func TestBuildConfigPreservesExplicitProcdBinImageRef(t *testing.T) {

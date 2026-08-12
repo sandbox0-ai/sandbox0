@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"testing"
 
+	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
@@ -213,6 +214,72 @@ func TestEnsureRootFSHeadSnapshotHandlesConcurrentCommit(t *testing.T) {
 	assert.Equal(t, 1, snapshotter.removeCalls)
 }
 
+func TestEnsureCanonicalBaseSnapshotUnpacksVerifiedBaseOnCarrierNode(t *testing.T) {
+	client := newBaseIdentityClient(t)
+	platform := platforms.Normalize(platforms.DefaultSpec())
+	platform.OSVersion = ""
+	platform.OSFeatures = nil
+	diffID := digest.FromString("carrier base layer")
+	config := ocispec.Image{
+		Platform: platform,
+		RootFS:   ocispec.RootFS{Type: "layers", DiffIDs: []digest.Digest{diffID}},
+	}
+	configDescriptor, _ := writeImageJSON(t, client.contentStore, ocispec.MediaTypeImageConfig, config)
+	manifestDescriptor, _ := writeImageJSON(t, client.contentStore, ocispec.MediaTypeImageManifest, ocispec.Manifest{Config: configDescriptor})
+	imageReference := "docker.io/sandbox0ai/infra:carrier-base-v1"
+	record := images.Image{Name: imageReference, Target: manifestDescriptor}
+	client.imageStore.records[imageReference] = record
+	snapshotter := newMarkerSnapshotter()
+	client.snapshotter = snapshotter
+	base := rootfshead.BaseIdentity{
+		ImageReference: imageReference,
+		ManifestDigest: manifestDescriptor.Digest.String(),
+		ChainID:        identity.ChainID(config.RootFS.DiffIDs).String(),
+		OS:             platform.OS,
+		Architecture:   platform.Architecture,
+		Variant:        platform.Variant,
+	}
+	image := &unpackingImage{record: record, store: client.contentStore, snapshotter: snapshotter, chainID: base.ChainID}
+	client.images[imageReference] = image
+
+	require.NoError(t, ensureCanonicalBaseSnapshot(context.Background(), client, snapshotter, base))
+	assert.Equal(t, 1, image.unpackCalls)
+	info, err := snapshotter.Stat(context.Background(), base.ChainID)
+	require.NoError(t, err)
+	assert.Equal(t, snapshots.KindCommitted, info.Kind)
+
+	require.NoError(t, ensureCanonicalBaseSnapshot(context.Background(), client, snapshotter, base))
+	assert.Equal(t, 1, image.unpackCalls, "an existing committed base must be reused")
+}
+
+func TestEnsureCanonicalBaseSnapshotRejectsMutableTagDrift(t *testing.T) {
+	client := newBaseIdentityClient(t)
+	platform := platforms.Normalize(platforms.DefaultSpec())
+	platform.OSVersion = ""
+	platform.OSFeatures = nil
+	config := ocispec.Image{
+		Platform: platform,
+		RootFS:   ocispec.RootFS{Type: "layers", DiffIDs: []digest.Digest{digest.FromString("replacement layer")}},
+	}
+	configDescriptor, _ := writeImageJSON(t, client.contentStore, ocispec.MediaTypeImageConfig, config)
+	manifestDescriptor, _ := writeImageJSON(t, client.contentStore, ocispec.MediaTypeImageManifest, ocispec.Manifest{Config: configDescriptor})
+	imageReference := "docker.io/sandbox0ai/infra:carrier-base-v1"
+	client.imageStore.records[imageReference] = images.Image{Name: imageReference, Target: manifestDescriptor}
+	snapshotter := newMarkerSnapshotter()
+	client.snapshotter = snapshotter
+	base := rootfshead.BaseIdentity{
+		ImageReference: imageReference,
+		ManifestDigest: digest.FromString("original manifest").String(),
+		ChainID:        digest.FromString("original chain").String(),
+		OS:             platform.OS,
+		Architecture:   platform.Architecture,
+		Variant:        platform.Variant,
+	}
+
+	err := ensureCanonicalBaseSnapshot(context.Background(), client, snapshotter, base)
+	assert.ErrorContains(t, err, "does not match ImageFS Head")
+}
+
 type markerSnapshotter struct {
 	snapshots.Snapshotter
 	infos        map[string]snapshots.Info
@@ -289,6 +356,7 @@ type baseIdentityClient struct {
 	contentStore content.Store
 	imageStore   *baseIdentityImageStore
 	snapshotter  snapshots.Snapshotter
+	images       map[string]containerd.Image
 }
 
 func newBaseIdentityClient(t *testing.T) *baseIdentityClient {
@@ -298,6 +366,7 @@ func newBaseIdentityClient(t *testing.T) *baseIdentityClient {
 	return &baseIdentityClient{
 		contentStore: store,
 		imageStore:   &baseIdentityImageStore{records: make(map[string]images.Image)},
+		images:       make(map[string]containerd.Image),
 	}
 }
 
@@ -316,6 +385,44 @@ func (c *baseIdentityClient) SnapshotService(string) snapshots.Snapshotter {
 func (c *baseIdentityClient) Close() error {
 	return nil
 }
+
+func (c *baseIdentityClient) GetImage(_ context.Context, name string) (containerd.Image, error) {
+	image, ok := c.images[name]
+	if !ok {
+		return nil, fmt.Errorf("image %s: %w", name, errdefs.ErrNotFound)
+	}
+	return image, nil
+}
+
+type unpackingImage struct {
+	record      images.Image
+	store       content.Store
+	snapshotter *markerSnapshotter
+	chainID     string
+	unpackCalls int
+}
+
+func (i *unpackingImage) Name() string               { return i.record.Name }
+func (i *unpackingImage) Target() ocispec.Descriptor { return i.record.Target }
+func (i *unpackingImage) Labels() map[string]string  { return i.record.Labels }
+func (i *unpackingImage) Unpack(_ context.Context, _ string, _ ...containerd.UnpackOpt) error {
+	i.unpackCalls++
+	i.snapshotter.infos[i.chainID] = snapshots.Info{Name: i.chainID, Kind: snapshots.KindCommitted}
+	return nil
+}
+func (i *unpackingImage) RootFS(context.Context) ([]digest.Digest, error)              { return nil, nil }
+func (i *unpackingImage) Size(context.Context) (int64, error)                          { return 0, nil }
+func (i *unpackingImage) Usage(context.Context, ...containerd.UsageOpt) (int64, error) { return 0, nil }
+func (i *unpackingImage) Config(context.Context) (ocispec.Descriptor, error) {
+	return ocispec.Descriptor{}, nil
+}
+func (i *unpackingImage) IsUnpacked(context.Context, string) (bool, error) {
+	return i.unpackCalls > 0, nil
+}
+func (i *unpackingImage) ContentStore() content.Store                 { return i.store }
+func (i *unpackingImage) Metadata() images.Image                      { return i.record }
+func (i *unpackingImage) Platform() platforms.MatchComparer           { return nil }
+func (i *unpackingImage) Spec(context.Context) (ocispec.Image, error) { return ocispec.Image{}, nil }
 
 type baseIdentityImageStore struct {
 	images.Store

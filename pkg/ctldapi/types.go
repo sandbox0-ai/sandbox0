@@ -177,15 +177,26 @@ type ImportRootFSImageResponse struct {
 }
 
 type ReleaseCarrierGateRequest struct {
-	Namespace string `json:"namespace"`
-	PodName   string `json:"pod_name"`
-	PodUID    string `json:"pod_uid"`
-	Slot      string `json:"slot"`
+	Namespace         string `json:"namespace"`
+	PodName           string `json:"pod_name"`
+	PodUID            string `json:"pod_uid"`
+	Slot              string `json:"slot"`
+	SandboxID         string `json:"sandbox_id"`
+	RuntimeGeneration int64  `json:"runtime_generation"`
+	ContainerName     string `json:"container_name"`
 }
 
 type ReleaseCarrierGateResponse struct {
-	Released bool   `json:"released"`
-	Error    string `json:"error,omitempty"`
+	Released          bool   `json:"released"`
+	Namespace         string `json:"namespace,omitempty"`
+	PodName           string `json:"pod_name,omitempty"`
+	PodUID            string `json:"pod_uid,omitempty"`
+	PodIP             string `json:"pod_ip,omitempty"`
+	Slot              string `json:"slot,omitempty"`
+	SandboxID         string `json:"sandbox_id,omitempty"`
+	RuntimeGeneration int64  `json:"runtime_generation,omitempty"`
+	ContainerName     string `json:"container_name,omitempty"`
+	Error             string `json:"error,omitempty"`
 }
 
 type MaterializeRootFSHeadResponse struct {

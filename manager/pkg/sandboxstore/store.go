@@ -26,6 +26,9 @@ const (
 	SandboxDesiredStatePaused      = "paused"
 	SandboxDesiredStateTerminating = "terminating"
 	SandboxDesiredStateDeleted     = "deleted"
+
+	RootFSRuntimeLegacyV1 = "legacy-v1"
+	RootFSRuntimeS0FSV2   = "s0fs-v2"
 )
 
 // SandboxRecord is the durable sandbox identity, desired lifecycle state, and
@@ -46,6 +49,7 @@ type SandboxRecord struct {
 	CurrentPodNamespace  string
 	RuntimeGeneration    int64
 	LifecycleEpoch       int64
+	RootFSRuntimeVersion string
 	WebhookStateVolumeID string
 	OwnerKind            string
 	HotClaimCompletedAt  time.Time
@@ -81,28 +85,29 @@ const (
 // SandboxLifecycleTxn is the durable prepare/commit record for a sandbox
 // runtime generation transition.
 type SandboxLifecycleTxn struct {
-	ID                string
-	SandboxID         string
-	Kind              string
-	Phase             string
-	Source            string
-	Cancelable        bool
-	Epoch             int64
-	FromGeneration    int64
-	ToGeneration      int64
-	FromPodNamespace  string
-	FromPodName       string
-	ToPodNamespace    string
-	ToPodName         string
-	ExpectedHeadID    string
-	PreparedHeadID    string
-	Error             string
-	CancelReason      string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	CancelRequestedAt time.Time
-	CommittedAt       time.Time
-	AbortedAt         time.Time
+	ID                   string
+	SandboxID            string
+	Kind                 string
+	Phase                string
+	Source               string
+	Cancelable           bool
+	Epoch                int64
+	FromGeneration       int64
+	ToGeneration         int64
+	FromPodNamespace     string
+	FromPodName          string
+	ToPodNamespace       string
+	ToPodName            string
+	ExpectedHeadID       string
+	PreparedHeadID       string
+	RootFSRuntimeVersion string
+	Error                string
+	CancelReason         string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	CancelRequestedAt    time.Time
+	CommittedAt          time.Time
+	AbortedAt            time.Time
 }
 
 // SandboxRuntimeMetadata is durable metadata projected onto a runtime pod.
@@ -209,11 +214,11 @@ func upsertSandboxRecord(ctx context.Context, exec sandboxStoreExecutor, record 
 		INSERT INTO manager.sandboxes (
 			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, desired_state, config, mounts, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
+			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch, rootfs_runtime_version,
 			webhook_state_volume_id, owner_kind, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, COALESCE($23, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, COALESCE($24, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -229,6 +234,7 @@ func upsertSandboxRecord(ctx context.Context, exec sandboxStoreExecutor, record 
 			current_pod_namespace = EXCLUDED.current_pod_namespace,
 			runtime_generation = EXCLUDED.runtime_generation,
 			lifecycle_epoch = GREATEST(manager.sandboxes.lifecycle_epoch, EXCLUDED.lifecycle_epoch),
+			rootfs_runtime_version = EXCLUDED.rootfs_runtime_version,
 			webhook_state_volume_id = EXCLUDED.webhook_state_volume_id,
 			owner_kind = EXCLUDED.owner_kind,
 			hot_claim_completed_at = COALESCE(EXCLUDED.hot_claim_completed_at, manager.sandboxes.hot_claim_completed_at),
@@ -238,10 +244,10 @@ func upsertSandboxRecord(ctx context.Context, exec sandboxStoreExecutor, record 
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
 		WHERE manager.sandboxes.deleted_at IS NULL
-			AND manager.sandboxes.desired_state NOT IN ($24, $25)
+			AND manager.sandboxes.desired_state NOT IN ($25, $26)
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
 		record.ClusterID, record.DesiredState, configJSON, mountsJSON, specJSON,
-		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
+		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch, normalizedRootFSRuntimeVersion(record.RootFSRuntimeVersion),
 		strings.TrimSpace(record.WebhookStateVolumeID), strings.TrimSpace(record.OwnerKind), nullableTime(record.HotClaimCompletedAt),
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt),
 		SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
@@ -745,14 +751,15 @@ func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifec
 			from_pod_namespace, from_pod_name,
 			to_pod_namespace, to_pod_name,
 			expected_head_id_v3, prepared_head_id_v3,
+			rootfs_runtime_version,
 			created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
 	`, txn.ID, txn.SandboxID, txn.Kind, phase, source, txn.Cancelable, txn.Epoch,
 		txn.FromGeneration, txn.ToGeneration,
 		txn.FromPodNamespace, txn.FromPodName,
 		txn.ToPodNamespace, txn.ToPodName,
-		txn.ExpectedHeadID, txn.PreparedHeadID)
+		txn.ExpectedHeadID, txn.PreparedHeadID, normalizedRootFSRuntimeVersion(txn.RootFSRuntimeVersion))
 	if err != nil {
 		return fmt.Errorf("begin lifecycle txn: %w", err)
 	}
@@ -909,7 +916,7 @@ func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, desired_state, config, mounts, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
+			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch, rootfs_runtime_version,
 			webhook_state_volume_id, owner_kind, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
@@ -922,6 +929,7 @@ func lifecycleTxnSelectSQL() string {
 			from_pod_namespace, from_pod_name,
 			to_pod_namespace, to_pod_name,
 			expected_head_id_v3, prepared_head_id_v3,
+			rootfs_runtime_version,
 			error, cancel_reason, created_at, updated_at,
 			cancel_requested_at, committed_at, aborted_at
 		FROM manager.sandbox_lifecycle_txns`
@@ -968,7 +976,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
 		&record.ClusterID, &record.DesiredState, &configJSON, &mountsJSON, &specJSON,
-		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
+		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch, &record.RootFSRuntimeVersion,
 		&record.WebhookStateVolumeID, &record.OwnerKind, &hotClaimCompletedAt,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
@@ -989,6 +997,15 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	record.HardExpiresAt = derefTime(hardExpiresAt)
 	record.DeletedAt = derefTime(deletedAt)
 	return &record, nil
+}
+
+func normalizedRootFSRuntimeVersion(version string) string {
+	switch strings.TrimSpace(version) {
+	case RootFSRuntimeS0FSV2:
+		return RootFSRuntimeS0FSV2
+	default:
+		return RootFSRuntimeLegacyV1
+	}
 }
 
 func scanLifecycleTxn(row sandboxRecordScanner) (*SandboxLifecycleTxn, error) {
@@ -1015,6 +1032,7 @@ func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, e
 		&txn.FromPodNamespace, &txn.FromPodName,
 		&txn.ToPodNamespace, &txn.ToPodName,
 		&txn.ExpectedHeadID, &txn.PreparedHeadID,
+		&txn.RootFSRuntimeVersion,
 		&txn.Error, &txn.CancelReason, &txn.CreatedAt, &txn.UpdatedAt,
 		&cancelRequestedAt, &committedAt, &abortedAt,
 	); err != nil {

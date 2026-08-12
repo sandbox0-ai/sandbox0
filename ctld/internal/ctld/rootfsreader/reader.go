@@ -371,7 +371,7 @@ func (r *Reader) ReadFileManifest(ctx context.Context, manifest rootfshead.FileM
 }
 
 func (r *Reader) readObjectRange(ctx context.Context, object rootfshead.Object, destination []byte, offset uint64) (int, error) {
-	if err := rootfshead.ValidateObjectScope(r.prefix, object); err != nil {
+	if err := rootfshead.ValidateReadableObjectScope(r.prefix, object); err != nil {
 		return 0, err
 	}
 	if object.Size < 0 {
@@ -477,7 +477,7 @@ func (r *Reader) readMetadata(ctx context.Context, object rootfshead.Object) ([]
 }
 
 func (r *Reader) readObject(ctx context.Context, object rootfshead.Object, cacheMetadata bool) ([]byte, error) {
-	if err := rootfshead.ValidateObjectScope(r.prefix, object); err != nil {
+	if err := rootfshead.ValidateReadableObjectScope(r.prefix, object); err != nil {
 		return nil, err
 	}
 	cacheKey := fmt.Sprintf("%s\x00%s\x00%s\x00%d", object.Key, object.Digest, object.MediaType, object.Size)

@@ -371,7 +371,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller:  probeController,
 		Portal:      portalManager,
-		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, containerdRuntime, portalManager, dbPool, ctldMetricsRegistry),
+		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, containerdRuntime, portalManager, dbPool, ctldMetricsRegistry, k8sClient),
 		ReadyCheck:  serviceReady,
 		HealthCheck: serviceHealthy,
 	})
@@ -604,19 +604,23 @@ func buildRootFSController(
 	portalBackings *ctldportal.Manager,
 	dbPool *pgxpool.Pool,
 	metricsRegistry prometheus.Registerer,
+	k8sClient kubernetes.Interface,
 ) rootFSHandler {
 	store, err := buildRootFSObjectStore(storageCfg, requestObserver)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
 	return ctldrootfs.NewController(ctldrootfs.Config{
-		Context:         ctx,
-		Runtime:         runtime,
-		PortalBackings:  portalBackings,
-		Store:           store,
-		WatchFenceRoot:  filepath.Join(portalRoot, "rootfs-watch-fences", strings.TrimSpace(haSlot)),
-		CaptureLeases:   rootfslease.NewRepository(dbPool),
-		MetricsRegistry: metricsRegistry,
+		Context:          ctx,
+		Runtime:          runtime,
+		PortalBackings:   portalBackings,
+		Store:            store,
+		WatchFenceRoot:   filepath.Join(portalRoot, "rootfs-watch-fences", strings.TrimSpace(haSlot)),
+		CaptureLeases:    rootfslease.NewRepository(dbPool),
+		MetricsRegistry:  metricsRegistry,
+		KubernetesClient: k8sClient,
+		NodeName:         nodeName,
+		KubeletPodsRoot:  kubeletPodsRoot,
 	})
 }
 
@@ -867,6 +871,20 @@ func (c combinedController) MaterializeRootFSHead(r *http.Request, req ctldapi.M
 		return ctldapi.MaterializeRootFSHeadResponse{Error: "ctld rootfs sync not implemented"}, http.StatusNotImplemented
 	}
 	return c.RootFS.MaterializeRootFSHead(r, req)
+}
+
+func (c combinedController) ImportRootFSImage(r *http.Request, req ctldapi.ImportRootFSImageRequest) (ctldapi.ImportRootFSImageResponse, int) {
+	if c.RootFS == nil {
+		return ctldapi.ImportRootFSImageResponse{Error: "ctld S0FS ImageFS importer not implemented"}, http.StatusNotImplemented
+	}
+	return c.RootFS.ImportRootFSImage(r, req)
+}
+
+func (c combinedController) ReleaseCarrierGate(r *http.Request, req ctldapi.ReleaseCarrierGateRequest) (ctldapi.ReleaseCarrierGateResponse, int) {
+	if c.RootFS == nil {
+		return ctldapi.ReleaseCarrierGateResponse{Error: "ctld carrier gate not implemented"}, http.StatusNotImplemented
+	}
+	return c.RootFS.ReleaseCarrierGate(r, req)
 }
 
 type rootFSHandler interface {

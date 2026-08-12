@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"go.uber.org/zap"
@@ -164,13 +165,14 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 				return err
 			}
 			txn = &sandboxstore.SandboxLifecycleTxn{
-				ID:             uuid.NewString(),
-				SandboxID:      sandboxID,
-				Kind:           sandboxstore.SandboxLifecycleKindResume,
-				Phase:          sandboxstore.SandboxLifecyclePhasePreparing,
-				FromGeneration: locked.RuntimeGeneration,
-				ToGeneration:   generation,
-				ExpectedHeadID: expectedHeadID,
+				ID:                   uuid.NewString(),
+				SandboxID:            sandboxID,
+				Kind:                 sandboxstore.SandboxLifecycleKindResume,
+				Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+				FromGeneration:       locked.RuntimeGeneration,
+				ToGeneration:         generation,
+				ExpectedHeadID:       expectedHeadID,
+				RootFSRuntimeVersion: locked.RootFSRuntimeVersion,
 			}
 			return tx.BeginLifecycleTxn(lockCtx, txn)
 		})
@@ -232,17 +234,30 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			return nil, fmt.Errorf("restore credential bindings: %w", err)
 		}
 		var err error
-		pod, err = s.claimIdlePod(ctx, template, req)
-		if err != nil {
-			_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
-			return nil, fmt.Errorf("claim idle pod: %w", err)
-		}
-		if pod == nil {
-			claimType = "cold"
-			pod, err = s.createNewPod(ctx, template, req)
+		if record.RootFSRuntimeVersion == sandboxstore.RootFSRuntimeS0FSV2 {
+			if s.sharedCarrierPool == nil {
+				err = fmt.Errorf("S0FS carrier runtime is not configured")
+				_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
+				return nil, err
+			}
+			pod, claimType, err = s.allocateS0FSCarrier(ctx, template, req)
 			if err != nil {
 				_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
-				return nil, fmt.Errorf("create runtime pod: %w", err)
+				return nil, fmt.Errorf("allocate S0FS carrier: %w", err)
+			}
+		} else {
+			pod, err = s.claimIdlePod(ctx, template, req)
+			if err != nil {
+				_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
+				return nil, fmt.Errorf("claim idle pod: %w", err)
+			}
+			if pod == nil {
+				claimType = "cold"
+				pod, err = s.createNewPod(ctx, template, req)
+				if err != nil {
+					_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
+					return nil, fmt.Errorf("create runtime pod: %w", err)
+				}
 			}
 		}
 		txn.ToPodNamespace = pod.Namespace
@@ -465,7 +480,8 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return pod, err
 	}
-	if claimType == "cold" {
+	s0fsCarrier := record.RootFSRuntimeVersion == sandboxstore.RootFSRuntimeS0FSV2 && strings.TrimSpace(pod.Annotations[carrier.AnnotationSlot]) != ""
+	if claimType == "cold" && !s0fsCarrier {
 		networkPod, err := s.waitForColdPodNetworkPolicy(ctx, pod, record.TeamID)
 		if err != nil {
 			return pod, err
@@ -498,11 +514,23 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	// A missing published Head means the lost runtime had no durable rootfs
 	// checkpoint. Keep the claimed template baseline and start a new sync below.
 	resetCopiedSessionState := false
+	runtimeRevision := ""
+	if s0fsCarrier && rootFSHead == nil {
+		return pod, fmt.Errorf("S0FS carrier resume requires a published rootfs Head")
+	}
 	if rootFSHead != nil {
 		resetCopiedSessionState = strings.TrimSpace(rootFSHead.SourceSandboxID) != "" && strings.TrimSpace(rootFSHead.SourceSandboxID) != strings.TrimSpace(record.ID)
 		phaseStarted := time.Now()
 		var recreated bool
-		pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead)
+		if s0fsCarrier {
+			pod, runtimeRevision, err = s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
+			if err != nil {
+				return pod, err
+			}
+			pod, err = s.activateS0FSCarrierHead(ctx, pod, rootFSHead)
+		} else {
+			pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead)
+		}
 		s.observeClaimPhase(record.TemplateID, claimType, "materialize_rootfs_head", phaseStarted, err)
 		if err != nil {
 			return pod, err
@@ -523,9 +551,11 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 			}
 		}
 	}
-	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
-	if err != nil {
-		return pod, err
+	if runtimeRevision == "" {
+		pod, runtimeRevision, err = s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
+		if err != nil {
+			return pod, err
+		}
 	}
 	phaseStarted := time.Now()
 	_, err = s.bindVolumePortals(ctx, pod, req, template)

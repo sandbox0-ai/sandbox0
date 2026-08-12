@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -51,7 +52,10 @@ type ClaimRequest struct {
 	// HardExpiresAt preserves the absolute hard deadline when recreating a paused sandbox.
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
-	WebhookStateVolumeID              string `json:"-"`
+	WebhookStateVolumeID string `json:"-"`
+	// ExpectedTemplateImageRevisionID prevents a control-plane Ready revision from
+	// falling through to the legacy image path while its data-plane projection lags.
+	ExpectedTemplateImageRevisionID   string `json:"-"`
 	PreferredNodeName                 string `json:"-"`
 	RootFSSnapshotterInstance         string `json:"-"`
 	mayHaveExistingCredentialBindings bool
@@ -389,6 +393,17 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			return nil, err
 		}
 	}
+	if expectedRevisionID := strings.TrimSpace(req.ExpectedTemplateImageRevisionID); expectedRevisionID != "" {
+		revision := template.Status.ImageRevision
+		if revision == nil ||
+			revision.State != v1alpha1.TemplateImageRevisionStateReady ||
+			strings.TrimSpace(revision.ImageFSHeadID) == "" ||
+			strings.TrimSpace(revision.RevisionID) != expectedRevisionID {
+			err := fmt.Errorf("%w: template image revision %q has not reached this cluster", ErrDataPlaneNotReady, expectedRevisionID)
+			s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, err)
+			return nil, err
+		}
+	}
 	s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, nil)
 	phaseStarted = time.Now()
 	if _, err := s.effectiveSandboxResourceQuota(template, req.Config); err != nil {
@@ -413,6 +428,16 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	s.observeClaimPhase(req.Template, "unknown", "validate_template_mounts", phaseStarted, nil)
+	if response, handled, carrierErr := s.claimS0FSCarrier(ctx, template, req); handled {
+		if carrierErr != nil && metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
+		}
+		if carrierErr == nil && metrics != nil {
+			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
+			metrics.SandboxClaimDuration.WithLabelValues(req.Template, "carrier").Observe(time.Since(start).Seconds())
+		}
+		return response, carrierErr
+	}
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
 
@@ -715,6 +740,9 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 		WebhookStateVolumeID: webhookStateVolumeIDFromPod(pod),
 		OwnerKind:            ownerKindFromPod(pod),
 		CreatedAt:            s.clock.Now(),
+	}
+	if pod.Annotations != nil && strings.TrimSpace(pod.Annotations[carrier.AnnotationSlot]) != "" {
+		record.RootFSRuntimeVersion = sandboxstore.RootFSRuntimeS0FSV2
 	}
 	return record
 }

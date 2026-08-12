@@ -966,17 +966,18 @@ func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	markRuntimeIdentityPodReady(t, pod)
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
-			ID:                  "sandbox-a",
-			TeamID:              "team-a",
-			UserID:              "user-a",
-			TemplateID:          "default",
-			TemplateName:        "default",
-			TemplateNamespace:   "tpl-default",
-			DesiredState:        sandboxstore.SandboxDesiredStateActive,
-			CurrentPodName:      "pod-a",
-			CurrentPodNamespace: "ns-a",
-			RuntimeGeneration:   4,
-			TemplateSpec:        v1alpha1.SandboxTemplateSpec{},
+			ID:                   "sandbox-a",
+			TeamID:               "team-a",
+			UserID:               "user-a",
+			TemplateID:           "default",
+			TemplateName:         "default",
+			TemplateNamespace:    "tpl-default",
+			DesiredState:         sandboxstore.SandboxDesiredStateActive,
+			CurrentPodName:       "pod-a",
+			CurrentPodNamespace:  "ns-a",
+			RuntimeGeneration:    4,
+			RootFSRuntimeVersion: sandboxstore.RootFSRuntimeS0FSV2,
+			TemplateSpec:         v1alpha1.SandboxTemplateSpec{},
 		},
 	}}
 	enqueuer := &recordingPauseEnqueuer{}
@@ -1010,6 +1011,9 @@ func TestRequestPauseSandboxRuntimeReconcilesStaleStartingRecord(t *testing.T) {
 	}
 	if active == nil || active.Kind != sandboxstore.SandboxLifecycleKindPause {
 		t.Fatalf("active txn = %+v, want pause", active)
+	}
+	if active.RootFSRuntimeVersion != sandboxstore.RootFSRuntimeS0FSV2 {
+		t.Fatalf("pause runtime version = %q, want %q", active.RootFSRuntimeVersion, sandboxstore.RootFSRuntimeS0FSV2)
 	}
 	if len(enqueuer.calls) != 1 || enqueuer.calls[0] != "sandbox-a" {
 		t.Fatalf("pause queue calls = %#v, want sandbox-a", enqueuer.calls)

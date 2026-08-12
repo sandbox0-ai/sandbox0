@@ -83,6 +83,18 @@ func (c *recordingController) MaterializeRootFSHead(_ *http.Request, req ctldapi
 	return ctldapi.MaterializeRootFSHeadResponse{ImageName: req.Image.Name, Materialized: true}, http.StatusOK
 }
 
+func (c *recordingController) ImportRootFSImage(_ *http.Request, req ctldapi.ImportRootFSImageRequest) (ctldapi.ImportRootFSImageResponse, int) {
+	c.rootFSAction = "import"
+	c.rootFSHead = req.HeadID
+	return ctldapi.ImportRootFSImageResponse{}, http.StatusOK
+}
+
+func (c *recordingController) ReleaseCarrierGate(_ *http.Request, req ctldapi.ReleaseCarrierGateRequest) (ctldapi.ReleaseCarrierGateResponse, int) {
+	c.rootFSAction = "release"
+	c.rootFSHead = req.Slot
+	return ctldapi.ReleaseCarrierGateResponse{Released: true}, http.StatusOK
+}
+
 func TestNewMuxRoutesPauseResume(t *testing.T) {
 	controller := &recordingController{}
 	handler := NewMux(controller)

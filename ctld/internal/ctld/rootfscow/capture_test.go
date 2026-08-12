@@ -130,7 +130,12 @@ func TestCaptureHardlinkAliasesReuseCurrentInodeManifest(t *testing.T) {
 	require.True(t, exists)
 	identity := inodeIdentity{device: version.Device, inode: version.Inode}
 	capture.fileMu.Lock()
-	capture.fileCache[identity] = capturedFileManifest{version: version, object: alternate}
+	capture.fileCache[identity] = capturedFileManifest{
+		version: version,
+		object:  alternate,
+		size:    manifest.Size,
+		blocks:  manifest.Blocks,
+	}
 	capture.fileMu.Unlock()
 
 	require.NoError(t, capturePath(t, capture, "second"))
@@ -139,6 +144,36 @@ func TestCaptureHardlinkAliasesReuseCurrentInodeManifest(t *testing.T) {
 	secondEntry := mustFindEntry(t, store, prefix, rootEntry, "second")
 	assert.Equal(t, alternate, *secondEntry.File)
 	assert.Equal(t, []byte("same inode"), readFileEntry(t, store, prefix, secondEntry))
+}
+
+func TestCaptureUsesManifestBlocksWhenOverlayStatChanges(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "copy-up.bin")
+	require.NoError(t, os.WriteFile(path, bytes.Repeat([]byte("x"), 4096), 0o644))
+	capture, store, prefix, editor := newTestCapture(t, root, 1<<20)
+
+	version, exists, err := capture.Version("copy-up.bin")
+	require.NoError(t, err)
+	require.True(t, exists)
+	manifest := rootfshead.FileManifest{Version: rootfshead.Version, Size: 4096, Blocks: 1}
+	payload, err := rootfshead.EncodeFileManifest(manifest)
+	require.NoError(t, err)
+	object, err := capture.writer.Put(context.Background(), rootfshead.FileMediaType, payload)
+	require.NoError(t, err)
+	identity := inodeIdentity{device: version.Device, inode: version.Inode}
+	capture.fileCache[identity] = capturedFileManifest{
+		version: version,
+		object:  object,
+		size:    manifest.Size,
+		blocks:  manifest.Blocks,
+	}
+
+	require.NoError(t, capturePath(t, capture, "copy-up.bin"))
+	rootEntry, err := editor.Flush(context.Background())
+	require.NoError(t, err)
+	entry := mustFindEntry(t, store, prefix, rootEntry, "copy-up.bin")
+	assert.Equal(t, manifest.Size, entry.Size)
+	assert.Equal(t, manifest.Blocks, entry.Blocks)
 }
 
 func TestCaptureMasksSocketWithWhiteout(t *testing.T) {

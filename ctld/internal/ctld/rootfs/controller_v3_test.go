@@ -365,7 +365,40 @@ func TestControllerBindRootFSSyncRejectsCrossTeamParent(t *testing.T) {
 		Parent:            &sealed.Reference,
 	})
 	assert.Equal(t, http.StatusForbidden, status)
-	assert.Contains(t, response.Error, "team prefix")
+	assert.Contains(t, response.Error, "tenant and public ImageFS scopes")
+}
+
+func TestControllerBindRootFSSyncAllowsPublicImageFSParent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	base, baseConfig := testRootFSBase(t)
+	info := rootFSInfo("gvisor")
+	info.Snapshotter = rootfshead.SnapshotterName
+	runtime := &fakeV3Runtime{
+		fakeRuntime: &fakeRuntime{info: info}, upperdir: t.TempDir(),
+		base: base, baseConfig: baseConfig,
+	}
+	store := objectstore.NewMemoryStore(t.Name())
+	controller := NewController(Config{Context: ctx, Runtime: runtime, Store: store, WatchFenceRoot: t.TempDir(), CaptureLeases: &fakeCaptureLeases{}})
+	request := httptest.NewRequest(http.MethodPost, "/", nil)
+
+	_, status := controller.BindRootFSSync(request, ctldapi.BindRootFSSyncRequest{
+		Target: rootFSTarget(), SandboxID: "imagefs", TeamID: rootfshead.PublicImageFSTeamID, RuntimeGeneration: 1,
+	})
+	require.Equal(t, http.StatusOK, status)
+	require.Eventually(t, func() bool {
+		current, currentStatus := controller.GetRootFSSyncStatus(request, ctldapi.GetRootFSSyncStatusRequest{SandboxID: "imagefs", RuntimeGeneration: 1})
+		return currentStatus == http.StatusOK && current.Status.InitialScanComplete
+	}, 5*time.Second, 10*time.Millisecond)
+	sealed, status := controller.SealRootFSHead(request, ctldapi.SealRootFSHeadRequest{
+		SandboxID: "imagefs", TeamID: rootfshead.PublicImageFSTeamID, HeadID: "public-imagefs-head", ExpectedRuntimeGeneration: 1,
+	})
+	require.Equal(t, http.StatusOK, status, sealed.Error)
+
+	bound, status := controller.BindRootFSSync(request, ctldapi.BindRootFSSyncRequest{
+		Target: rootFSTarget(), SandboxID: "tenant-sandbox", TeamID: "team-1", RuntimeGeneration: 2, Parent: &sealed.Reference,
+	})
+	require.Equal(t, http.StatusOK, status, bound.Error)
 }
 
 type fakeV3Runtime struct {
@@ -489,7 +522,11 @@ func (r *fakeV3Runtime) BaseIdentityAndConfig(context.Context, ctldapi.RootFSInf
 	return r.base, append([]byte(nil), r.baseConfig...), nil
 }
 
-func (r *fakeV3Runtime) MaterializeRootFSHead(_ context.Context, reference rootfshead.HeadReference, base rootfshead.BaseIdentity, image rootfshead.ImageReference, envelope, marker []byte) error {
+func (r *fakeV3Runtime) EnsureBaseImage(context.Context, string) (rootfshead.BaseIdentity, error) {
+	return r.base, nil
+}
+
+func (r *fakeV3Runtime) MaterializeRootFSHead(_ context.Context, reference rootfshead.HeadReference, base rootfshead.BaseIdentity, image rootfshead.ImageReference, _ string, envelope, marker []byte) error {
 	r.materializedReference = reference
 	r.materializedBase = base
 	r.materializedImage = image

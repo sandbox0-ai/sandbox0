@@ -50,6 +50,20 @@ func TestTeamScopeRejectsCrossTeamObject(t *testing.T) {
 	assert.Error(t, ValidateObjectScope(targetPrefix, object))
 }
 
+func TestReadableScopeAllowsOnlyTenantAndPublicImageFS(t *testing.T) {
+	tenantPrefix, err := TeamObjectPrefix("team-1")
+	require.NoError(t, err)
+	publicPrefix, err := TeamObjectPrefix(PublicImageFSTeamID)
+	require.NoError(t, err)
+	otherPrefix, err := TeamObjectPrefix("team-2")
+	require.NoError(t, err)
+
+	publicObject := testObject(t, publicPrefix, ChunkMediaType, []byte("public"))
+	require.NoError(t, ValidateReadableObjectScope(tenantPrefix, publicObject))
+	otherObject := testObject(t, otherPrefix, ChunkMediaType, []byte("private"))
+	assert.Error(t, ValidateReadableObjectScope(tenantPrefix, otherObject))
+}
+
 func TestObjectKeyRequiresKnownMediaType(t *testing.T) {
 	_, err := ObjectKey("prefix", "unknown", digest.FromString("payload").String())
 	assert.Error(t, err)

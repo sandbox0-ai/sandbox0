@@ -57,6 +57,7 @@ type CaptureConfig struct {
 	ChunkWorkers  int
 	Editor        *Editor
 	Writer        *rootfsstore.Writer
+	OpaqueRoot    bool
 }
 
 // Capture converts one local overlay upper into immutable metadata and chunks.
@@ -68,6 +69,7 @@ type Capture struct {
 	chunkWorkers int
 	editor       *Editor
 	writer       *rootfsstore.Writer
+	opaqueRoot   bool
 	fileMu       sync.Mutex
 	fileCache    map[inodeIdentity]capturedFileManifest
 	fileLoads    singleflight.Group
@@ -77,6 +79,8 @@ type Capture struct {
 type capturedFileManifest struct {
 	version FileVersion
 	object  rootfshead.Object
+	size    uint64
+	blocks  uint64
 }
 
 func NewCapture(cfg CaptureConfig) (*Capture, error) {
@@ -114,6 +118,7 @@ func NewCapture(cfg CaptureConfig) (*Capture, error) {
 		chunkWorkers: chunkWorkers,
 		editor:       cfg.Editor,
 		writer:       cfg.Writer,
+		opaqueRoot:   cfg.OpaqueRoot,
 		fileCache:    make(map[inodeIdentity]capturedFileManifest),
 	}, nil
 }
@@ -211,6 +216,9 @@ func (c *Capture) Path(ctx context.Context, relative string) (CaptureResult, err
 		return CaptureResult{}, err
 	}
 	if logical == "" {
+		if c.opaqueRoot {
+			entry.Opaque = true
+		}
 		err = c.editor.SetRoot(entry)
 	} else {
 		err = c.editor.Set(ctx, logical, entry, opaque)
@@ -279,7 +287,12 @@ func (c *Capture) entry(ctx context.Context, hostPath, relative string, info os.
 		if err != nil {
 			return rootfshead.Entry{}, false, err
 		}
-		entry.File = &manifest
+		entry.File = &manifest.object
+		// Opening an overlay file can complete copy-up and change st_blocks
+		// without changing the file version fields. Keep the directory entry
+		// metadata identical to the manifest captured from the open descriptor.
+		entry.Size = manifest.size
+		entry.Blocks = manifest.blocks
 	case info.Mode()&os.ModeSymlink != 0:
 		entry.Kind = rootfshead.EntrySymlink
 		target, err := os.Readlink(hostPath)
@@ -324,7 +337,7 @@ func normalizeWhiteoutEntry(entry *rootfshead.Entry) {
 	entry.Opaque = false
 }
 
-func (c *Capture) captureFile(ctx context.Context, hostPath string, before *syscall.Stat_t) (rootfshead.Object, error) {
+func (c *Capture) captureFile(ctx context.Context, hostPath string, before *syscall.Stat_t) (capturedFileManifest, error) {
 	version := fileVersionFromStat(before)
 	identity := inodeIdentity{device: version.Device, inode: version.Inode}
 	if object, ok := c.cachedFileManifest(identity, version); ok {
@@ -334,33 +347,33 @@ func (c *Capture) captureFile(ctx context.Context, hostPath string, before *sysc
 		if object, ok := c.cachedFileManifest(identity, version); ok {
 			return object, nil
 		}
-		object, err := c.captureFileUncached(ctx, hostPath, before)
+		manifest, err := c.captureFileUncached(ctx, hostPath, before)
 		if err != nil {
-			return rootfshead.Object{}, err
+			return capturedFileManifest{}, err
 		}
 		c.fileMu.Lock()
-		c.fileCache[identity] = capturedFileManifest{version: version, object: object}
+		c.fileCache[identity] = manifest
 		c.fileMu.Unlock()
-		return object, nil
+		return manifest, nil
 	})
 	if err != nil {
-		return rootfshead.Object{}, err
+		return capturedFileManifest{}, err
 	}
-	return value.(rootfshead.Object), nil
+	return value.(capturedFileManifest), nil
 }
 
-func (c *Capture) captureFileUncached(ctx context.Context, hostPath string, before *syscall.Stat_t) (rootfshead.Object, error) {
+func (c *Capture) captureFileUncached(ctx context.Context, hostPath string, before *syscall.Stat_t) (capturedFileManifest, error) {
 	file, err := openFileNoAtime(hostPath)
 	if err != nil {
-		return rootfshead.Object{}, err
+		return capturedFileManifest{}, err
 	}
 	defer file.Close()
 	var opened syscall.Stat_t
 	if err := syscall.Fstat(int(file.Fd()), &opened); err != nil {
-		return rootfshead.Object{}, err
+		return capturedFileManifest{}, err
 	}
 	if !sameFileVersion(before, &opened) || opened.Mode&syscall.S_IFMT != syscall.S_IFREG {
-		return rootfshead.Object{}, ErrUnstable
+		return capturedFileManifest{}, ErrUnstable
 	}
 	manifest := rootfshead.FileManifest{
 		Version: rootfshead.Version,
@@ -370,28 +383,37 @@ func (c *Capture) captureFileUncached(ctx context.Context, hostPath string, befo
 	if manifest.Size > 0 {
 		manifest.Extents, err = c.captureFileExtents(ctx, file, manifest.Size)
 		if err != nil {
-			return rootfshead.Object{}, err
+			return capturedFileManifest{}, err
 		}
 	}
 	var after syscall.Stat_t
 	if err := syscall.Fstat(int(file.Fd()), &after); err != nil {
-		return rootfshead.Object{}, err
+		return capturedFileManifest{}, err
 	}
 	if !sameFileVersion(&opened, &after) {
-		return rootfshead.Object{}, ErrUnstable
+		return capturedFileManifest{}, ErrUnstable
 	}
 	payload, err := rootfshead.EncodeFileManifest(manifest)
 	if err != nil {
-		return rootfshead.Object{}, err
+		return capturedFileManifest{}, err
 	}
-	return c.writer.Put(ctx, rootfshead.FileMediaType, payload)
+	object, err := c.writer.Put(ctx, rootfshead.FileMediaType, payload)
+	if err != nil {
+		return capturedFileManifest{}, err
+	}
+	return capturedFileManifest{
+		version: fileVersionFromStat(&after),
+		object:  object,
+		size:    manifest.Size,
+		blocks:  manifest.Blocks,
+	}, nil
 }
 
-func (c *Capture) cachedFileManifest(identity inodeIdentity, version FileVersion) (rootfshead.Object, bool) {
+func (c *Capture) cachedFileManifest(identity inodeIdentity, version FileVersion) (capturedFileManifest, bool) {
 	c.fileMu.Lock()
 	defer c.fileMu.Unlock()
 	cached, ok := c.fileCache[identity]
-	return cached.object, ok && cached.version == version
+	return cached, ok && cached.version == version
 }
 
 // ForgetFile releases the manifest cache entry after the last known alias of

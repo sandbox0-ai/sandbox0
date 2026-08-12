@@ -64,7 +64,7 @@ func (s *SandboxService) resizeSandboxPodResourcesWithClient(
 
 	namespace, name := pod.Namespace, pod.Name
 	var updated *corev1.Pod
-	resources := v1alpha1.BuildResourceRequirements(quota)
+	resources := buildResizableResourceRequirements(quota)
 	patch, err := json.Marshal(map[string]any{
 		"spec": map[string]any{
 			"containers": []map[string]any{{
@@ -90,7 +90,7 @@ func (s *SandboxService) resizeSandboxPodResourcesWithClient(
 		}
 		if result == nil || result.Name == "" {
 			updated = pod.DeepCopy()
-			if applyErr := s.applySandboxResourceQuota(updated, quota); applyErr != nil {
+			if applyErr := applySandboxComputeResourceQuotaToPodSpec(&updated.Spec, quota); applyErr != nil {
 				return applyErr
 			}
 		} else {
@@ -102,6 +102,65 @@ func (s *SandboxService) resizeSandboxPodResourcesWithClient(
 		return nil, err
 	}
 	return updated, nil
+}
+
+// buildResizableResourceRequirements deliberately excludes ephemeral storage.
+// Kubernetes Pod in-place resize supports CPU and memory only; the carrier's
+// immutable ephemeral-storage shape is selected before the Pod is scheduled.
+func buildResizableResourceRequirements(quota v1alpha1.ResourceQuota) corev1.ResourceRequirements {
+	desired := v1alpha1.BuildResourceRequirements(quota)
+	resizable := corev1.ResourceRequirements{
+		Requests: make(corev1.ResourceList, 2),
+		Limits:   make(corev1.ResourceList, 2),
+	}
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		if value, ok := desired.Requests[name]; ok {
+			resizable.Requests[name] = value
+		}
+		if value, ok := desired.Limits[name]; ok {
+			resizable.Limits[name] = value
+		}
+	}
+	if len(resizable.Requests) == 0 {
+		resizable.Requests = nil
+	}
+	if len(resizable.Limits) == 0 {
+		resizable.Limits = nil
+	}
+	return resizable
+}
+
+func applySandboxComputeResourceQuotaToPodSpec(spec *corev1.PodSpec, quota v1alpha1.ResourceQuota) error {
+	if spec == nil {
+		return fmt.Errorf("%w: pod spec is required", ErrInvalidClaimRequest)
+	}
+	desired := buildResizableResourceRequirements(quota)
+	for i := range spec.Containers {
+		if spec.Containers[i].Name != "procd" {
+			continue
+		}
+		if spec.Containers[i].Resources.Requests == nil {
+			spec.Containers[i].Resources.Requests = corev1.ResourceList{}
+		}
+		if spec.Containers[i].Resources.Limits == nil {
+			spec.Containers[i].Resources.Limits = corev1.ResourceList{}
+		}
+		for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			if value, ok := desired.Requests[name]; ok {
+				spec.Containers[i].Resources.Requests[name] = value
+			} else {
+				delete(spec.Containers[i].Resources.Requests, name)
+			}
+			if value, ok := desired.Limits[name]; ok {
+				spec.Containers[i].Resources.Limits[name] = value
+			} else {
+				delete(spec.Containers[i].Resources.Limits, name)
+			}
+		}
+		ensureSandboxResizePolicy(&spec.Containers[i])
+		return nil
+	}
+	return fmt.Errorf("%w: sandbox runtime container not found", ErrInvalidClaimRequest)
 }
 
 func mergeSandboxMetadataAfterResize(resizedPod, metadataPod *corev1.Pod) *corev1.Pod {

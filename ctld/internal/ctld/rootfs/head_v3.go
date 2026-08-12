@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
+	distref "github.com/distribution/reference"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfsstore"
@@ -81,7 +83,7 @@ func (r *ContainerdRuntime) BaseIdentityAndConfig(
 		return rootfshead.BaseIdentity{}, nil, fmt.Errorf("rootfs base image %s has no diff IDs", imageReference)
 	}
 	base := rootfshead.BaseIdentity{
-		ImageReference: imageReference,
+		ImageReference: record.Name,
 		ManifestDigest: record.Target.Digest.String(),
 		ChainID:        identity.ChainID(config.RootFS.DiffIDs).String(),
 		OS:             config.OS,
@@ -149,6 +151,7 @@ func (r *ContainerdRuntime) MaterializeRootFSHead(
 	reference rootfshead.HeadReference,
 	base rootfshead.BaseIdentity,
 	image rootfshead.ImageReference,
+	targetImageName string,
 	envelopePayload []byte,
 	marker []byte,
 ) error {
@@ -160,6 +163,10 @@ func (r *ContainerdRuntime) MaterializeRootFSHead(
 	}
 	if err := base.Validate(); err != nil {
 		return err
+	}
+	targetImageName = strings.TrimSpace(targetImageName)
+	if targetImageName == "" {
+		targetImageName = image.Name
 	}
 	envelope, err := rootfshead.DecodeImageEnvelope(envelopePayload)
 	if err != nil {
@@ -229,15 +236,15 @@ func (r *ContainerdRuntime) MaterializeRootFSHead(
 		return fmt.Errorf("protect rootfs Head image content: %w", err)
 	}
 	record := images.Image{
-		Name:   image.Name,
+		Name:   targetImageName,
 		Target: envelope.Manifest,
 		Labels: map[string]string{criManagedImageLabel: criManagedImageValue, rootFSHeadImageLabel: reference.HeadID},
 	}
 	created, err := client.ImageService().Create(leaseCtx, record)
 	if errdefs.IsAlreadyExists(err) {
-		created, err = client.ImageService().Get(leaseCtx, image.Name)
+		created, err = client.ImageService().Get(leaseCtx, targetImageName)
 		if err == nil && created.Target.Digest != envelope.Manifest.Digest {
-			return fmt.Errorf("local rootfs Head image %s has manifest %s, expected %s", image.Name, created.Target.Digest, envelope.Manifest.Digest)
+			return fmt.Errorf("local rootfs Head image %s has manifest %s, expected %s", targetImageName, created.Target.Digest, envelope.Manifest.Digest)
 		}
 		if err == nil {
 			created.Labels = record.Labels
@@ -267,10 +274,38 @@ func (r *ContainerdRuntime) MaterializeRootFSHead(
 	if err := localImage.Unpack(leaseCtx, rootfshead.SnapshotterName); err != nil {
 		return fmt.Errorf("unpack local rootfs Head image: %w", err)
 	}
-	if err := r.waitForCRIImage(leaseCtx, image.Name); err != nil {
+	if err := r.waitForCRIImage(leaseCtx, targetImageName); err != nil {
 		return err
 	}
 	return nil
+}
+
+// EnsureBaseImage verifies that the fixed platform carrier image exists and
+// unpacks its canonical snapshot into the external snapshotter delegate.
+func (r *ContainerdRuntime) EnsureBaseImage(ctx context.Context, imageReference string) (rootfshead.BaseIdentity, error) {
+	info := ctldapi.RootFSInfo{BaseImageRef: strings.TrimSpace(imageReference)}
+	base, _, err := r.BaseIdentityAndConfig(ctx, info, nil)
+	if err != nil {
+		return rootfshead.BaseIdentity{}, err
+	}
+	rawClient, closeClient, err := r.client(ctx)
+	if err != nil {
+		return rootfshead.BaseIdentity{}, err
+	}
+	defer closeClient()
+	client, ok := rawClient.(materializerClient)
+	if !ok {
+		return rootfshead.BaseIdentity{}, fmt.Errorf("containerd client does not support carrier base unpack")
+	}
+	ctx = namespaces.WithNamespace(ctx, r.namespace)
+	image, err := client.GetImage(ctx, base.ImageReference)
+	if err != nil {
+		return rootfshead.BaseIdentity{}, fmt.Errorf("load carrier base image: %w", err)
+	}
+	if err := image.Unpack(ctx, rootfshead.SnapshotterName); err != nil {
+		return rootfshead.BaseIdentity{}, fmt.Errorf("unpack carrier base image: %w", err)
+	}
+	return base, nil
 }
 
 // waitForCRIImage closes the registration race between containerd's image
@@ -381,7 +416,8 @@ func imageConfig(
 	reference string,
 	platform platforms.MatchComparer,
 ) (images.Image, ocispec.Image, []byte, error) {
-	record, err := client.ImageService().Get(ctx, strings.TrimSpace(reference))
+	reference = strings.TrimSpace(reference)
+	record, err := getImageRecord(ctx, client.ImageService(), reference)
 	if err != nil {
 		return images.Image{}, ocispec.Image{}, nil, fmt.Errorf("load rootfs base image %s: %w", reference, err)
 	}
@@ -398,4 +434,32 @@ func imageConfig(
 		return images.Image{}, ocispec.Image{}, nil, err
 	}
 	return record, config, payload, nil
+}
+
+func getImageRecord(ctx context.Context, store images.Store, imageReference string) (images.Image, error) {
+	candidates := []string{strings.TrimSpace(imageReference)}
+	if named, err := distref.ParseNormalizedNamed(imageReference); err == nil {
+		candidates = appendUniqueString(candidates, named.String())
+		candidates = appendUniqueString(candidates, distref.TagNameOnly(named).String())
+	}
+	var lastErr error
+	for _, candidate := range candidates {
+		record, err := store.Get(ctx, candidate)
+		if err == nil {
+			return record, nil
+		}
+		lastErr = err
+		if !errdefs.IsNotFound(err) {
+			return images.Image{}, err
+		}
+	}
+	return images.Image{}, lastErr
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" || slices.Contains(values, value) {
+		return values
+	}
+	return append(values, value)
 }

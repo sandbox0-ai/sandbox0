@@ -68,6 +68,9 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			writeManagerTemplateNotReady(c, tpl)
 			return
 		}
+		if tpl != nil && tpl.Status != nil && tpl.Status.ImageRevision != nil {
+			req.ExpectedTemplateImageRevisionID = tpl.Status.ImageRevision.RevisionID
+		}
 	}
 
 	resp, err := s.sandboxService.ClaimSandbox(c.Request.Context(), &req)

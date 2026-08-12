@@ -220,7 +220,7 @@ func Read(ctx context.Context, store objectstore.Store, prefix string, object ro
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := rootfshead.ValidateObjectScope(prefix, object); err != nil {
+	if err := rootfshead.ValidateReadableObjectScope(prefix, object); err != nil {
 		return nil, err
 	}
 	reader, err := store.Get(object.Key, 0, object.Size)

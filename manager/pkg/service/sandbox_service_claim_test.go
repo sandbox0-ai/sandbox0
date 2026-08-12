@@ -70,6 +70,29 @@ func TestClaimSandboxRejectsTemplateMemoryAbovePlatformMaximum(t *testing.T) {
 	}
 }
 
+func TestClaimSandboxWaitsForExpectedImageRevisionProjection(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	template.Name = naming.TemplateNameForCluster(naming.ScopeTeam, "team-a", "default")
+	template.Status.ImageRevision = &v1alpha1.TemplateImageRevisionStatus{
+		RevisionID: "revision-old",
+		State:      v1alpha1.TemplateImageRevisionStateImporting,
+	}
+	svc := &SandboxService{
+		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		logger:         zap.NewNop(),
+	}
+
+	_, err := svc.ClaimSandbox(context.Background(), &ClaimRequest{
+		Template:                        "default",
+		TeamID:                          "team-a",
+		UserID:                          "user-a",
+		ExpectedTemplateImageRevisionID: "revision-ready",
+	})
+	if !errors.Is(err, ErrDataPlaneNotReady) {
+		t.Fatalf("ClaimSandbox() error = %v, want ErrDataPlaneNotReady", err)
+	}
+}
+
 func TestClaimIdlePodRequiresPodReady(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

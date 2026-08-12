@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -227,7 +228,16 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
 	maxAge := s.cfg.ReconcileInterval.Duration * 2
 
-	selected, selectedBy := s.selectClusterByIdleWithAllocations(allocations, clusterMap, tpl, clusterTemplateID, maxAge)
+	var selected *template.Cluster
+	selectedBy := ""
+	if templateUsesReadyS0FSImageRevision(tpl) {
+		selected = s.selectClusterBySharedCarrierWithAllocations(allocations, clusterMap, maxAge)
+		if selected != nil {
+			selectedBy = "shared_carrier"
+		}
+	} else {
+		selected, selectedBy = s.selectClusterByIdleWithAllocations(allocations, clusterMap, tpl, clusterTemplateID, maxAge)
+	}
 	if selected == nil {
 		selected = s.selectClusterByHeadroomWithAllocations(allocations, clusterMap, maxAge)
 		if selected != nil {
@@ -266,6 +276,46 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	)
 
 	return selected, tpl, selectedBy, nil
+}
+
+func templateUsesReadyS0FSImageRevision(tpl *template.Template) bool {
+	return tpl != nil && tpl.Status != nil && tpl.Status.ImageRevision != nil &&
+		tpl.Status.ImageRevision.State == v1alpha1.TemplateImageRevisionStateReady &&
+		strings.TrimSpace(tpl.Status.ImageRevision.ImageFSHeadID) != ""
+}
+
+func (s *Server) selectClusterBySharedCarrierWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) *template.Cluster {
+	var selected *template.Cluster
+	var bestReady int32 = -1
+	var bestHeadroom int32 = -1
+
+	for _, alloc := range allocations {
+		cluster := clusterMap[alloc.ClusterID]
+		if cluster == nil || !cluster.Enabled {
+			continue
+		}
+		age, ok := s.reconciler.GetClusterSummaryAge(cluster.ClusterID)
+		s.recordClusterSummaryAge(cluster.ClusterID)
+		if !ok || age > maxAge {
+			continue
+		}
+		summary, ok := s.reconciler.GetClusterSummary(cluster.ClusterID)
+		if !ok || summary == nil || summary.SharedCarrierReadyCount <= 0 {
+			continue
+		}
+		headroom := clusterAvailableHeadroom(summary, s.cfg.PodsPerNode)
+		if selected == nil ||
+			summary.SharedCarrierReadyCount > bestReady ||
+			(summary.SharedCarrierReadyCount == bestReady && headroom > bestHeadroom) ||
+			(summary.SharedCarrierReadyCount == bestReady && headroom == bestHeadroom && cluster.Weight > selected.Weight) ||
+			(summary.SharedCarrierReadyCount == bestReady && headroom == bestHeadroom && cluster.Weight == selected.Weight && cluster.ClusterID < selected.ClusterID) {
+			selected = cluster
+			bestReady = summary.SharedCarrierReadyCount
+			bestHeadroom = headroom
+		}
+	}
+
+	return selected
 }
 
 func (s *Server) selectClusterByIdleWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, tpl *template.Template, clusterTemplateID string, maxAge time.Duration) (*template.Cluster, string) {

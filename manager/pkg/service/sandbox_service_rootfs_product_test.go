@@ -508,8 +508,8 @@ func TestSandboxRootFSProductForkRejectsMemoryAbovePlatformMaximum(t *testing.T)
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": source,
 		},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			"sandbox-1": rootFSProductTestState("sandbox-1", "team-1", "layer-v1"),
+		rootFSHeads: map[string]*sandboxstore.SandboxRootFSHead{
+			"sandbox-1": rootFSProductTestHead(t, "sandbox-1", "team-1", "head-v1"),
 		},
 	}
 	svc := rootFSProductTestService(store)

@@ -638,6 +638,10 @@ func (s *PGSandboxStore) ListRootFSStorageUsage(ctx context.Context, teamID stri
 			WHERE phase IN ('preparing', 'barriered', 'publishing', 'committing')
 				AND prepared_head_id_v3 <> ''
 			UNION
+			SELECT image_fs_head_id AS head_id
+			FROM scheduler_template_image_revisions
+			WHERE state = 'ready' AND image_fs_head_id IS NOT NULL
+			UNION
 			SELECT child_head_id FROM manager.rootfs_head_parent_guards_v3
 			UNION
 			SELECT parent_head_id FROM manager.rootfs_head_parent_guards_v3

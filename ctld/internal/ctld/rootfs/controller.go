@@ -12,6 +12,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"k8s.io/client-go/kubernetes"
 )
 
 var (
@@ -21,13 +22,16 @@ var (
 )
 
 type Config struct {
-	Context         context.Context
-	Runtime         rootFSV3Runtime
-	PortalBackings  rootFSPortalBackingAttacher
-	Store           objectstore.Store
-	WatchFenceRoot  string
-	CaptureLeases   rootFSCaptureLeaseStore
-	MetricsRegistry prometheus.Registerer
+	Context          context.Context
+	Runtime          rootFSV3Runtime
+	PortalBackings   rootFSPortalBackingAttacher
+	Store            objectstore.Store
+	WatchFenceRoot   string
+	CaptureLeases    rootFSCaptureLeaseStore
+	MetricsRegistry  prometheus.Registerer
+	KubernetesClient kubernetes.Interface
+	NodeName         string
+	KubeletPodsRoot  string
 }
 
 type rootFSPortalBackingAttacher interface {
@@ -43,16 +47,19 @@ type rootFSCaptureLeaseStore interface {
 }
 
 type Controller struct {
-	store          objectstore.Store
-	v3Runtime      rootFSV3Runtime
-	portalBackings rootFSPortalBackingAttacher
-	v3Context      context.Context
-	watchFenceRoot string
-	captureLeases  rootFSCaptureLeaseStore
-	v3Mu           sync.Mutex
-	v3Sessions     map[string]*rootFSSyncBinding
-	v3InitMu       sync.Mutex
-	v3InitLocks    map[string]*rootFSSyncInitLock
+	store           objectstore.Store
+	v3Runtime       rootFSV3Runtime
+	portalBackings  rootFSPortalBackingAttacher
+	v3Context       context.Context
+	watchFenceRoot  string
+	captureLeases   rootFSCaptureLeaseStore
+	v3Mu            sync.Mutex
+	v3Sessions      map[string]*rootFSSyncBinding
+	v3InitMu        sync.Mutex
+	v3InitLocks     map[string]*rootFSSyncInitLock
+	k8sClient       kubernetes.Interface
+	nodeName        string
+	kubeletPodsRoot string
 }
 
 type rootFSSyncInitLock struct {
@@ -66,14 +73,17 @@ func NewController(cfg Config) *Controller {
 		v3Context = context.Background()
 	}
 	controller := &Controller{
-		store:          cfg.Store,
-		v3Runtime:      cfg.Runtime,
-		portalBackings: cfg.PortalBackings,
-		v3Context:      v3Context,
-		watchFenceRoot: cfg.WatchFenceRoot,
-		captureLeases:  cfg.CaptureLeases,
-		v3Sessions:     make(map[string]*rootFSSyncBinding),
-		v3InitLocks:    make(map[string]*rootFSSyncInitLock),
+		store:           cfg.Store,
+		v3Runtime:       cfg.Runtime,
+		portalBackings:  cfg.PortalBackings,
+		v3Context:       v3Context,
+		watchFenceRoot:  cfg.WatchFenceRoot,
+		captureLeases:   cfg.CaptureLeases,
+		v3Sessions:      make(map[string]*rootFSSyncBinding),
+		v3InitLocks:     make(map[string]*rootFSSyncInitLock),
+		k8sClient:       cfg.KubernetesClient,
+		nodeName:        strings.TrimSpace(cfg.NodeName),
+		kubeletPodsRoot: strings.TrimSpace(cfg.KubeletPodsRoot),
 	}
 	if cfg.MetricsRegistry != nil {
 		cfg.MetricsRegistry.MustRegister(newRootFSSyncCollector(controller))

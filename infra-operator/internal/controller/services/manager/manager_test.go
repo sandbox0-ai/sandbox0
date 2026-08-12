@@ -237,6 +237,9 @@ func TestBuildConfigDerivesProcdBinImageRef(t *testing.T) {
 	if cfg.ProcdBinImageRef != "sandbox0ai/infra:test-procd-bin" {
 		t.Fatalf("procd bin image ref = %q, want sandbox0ai/infra:test-procd-bin", cfg.ProcdBinImageRef)
 	}
+	if cfg.SharedCarrierPool.CarrierImageRef != "sandbox0ai/infra:carrier-base-v1" {
+		t.Fatalf("carrier base image ref = %q, want sandbox0ai/infra:carrier-base-v1", cfg.SharedCarrierPool.CarrierImageRef)
+	}
 }
 
 func TestBuildConfigPreservesExplicitProcdBinImageRef(t *testing.T) {

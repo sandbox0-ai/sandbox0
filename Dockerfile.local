@@ -3,6 +3,12 @@ FROM scratch AS procd-bin
 COPY bin/procd /usr/local/bin/procd
 COPY bin/python-runner /usr/local/bin/python-runner
 
+# Keep this filesystem identical across releases. ImageFS Heads use it as
+# their durable canonical base instead of the much larger infra image.
+FROM scratch AS carrier-base
+
+COPY LICENSE /proc/.sandbox0-carrier
+
 FROM debian:bookworm-slim
 
 # Install runtime dependencies

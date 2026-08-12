@@ -12,6 +12,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfscow"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfsstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 )
@@ -21,7 +22,8 @@ type rootFSV3Runtime interface {
 	ActiveUpperdir(context.Context, ctldapi.RootFSInfo) (string, error)
 	ActiveMergedRoot(context.Context, ctldapi.RootFSInfo, string) (string, error)
 	BaseIdentityAndConfig(context.Context, ctldapi.RootFSInfo, *rootfshead.BaseIdentity) (rootfshead.BaseIdentity, []byte, error)
-	MaterializeRootFSHead(context.Context, rootfshead.HeadReference, rootfshead.BaseIdentity, rootfshead.ImageReference, []byte, []byte) error
+	EnsureBaseImage(context.Context, string) (rootfshead.BaseIdentity, error)
+	MaterializeRootFSHead(context.Context, rootfshead.HeadReference, rootfshead.BaseIdentity, rootfshead.ImageReference, string, []byte, []byte) error
 }
 
 type rootFSSyncBinding struct {
@@ -117,7 +119,7 @@ func (c *Controller) BindRootFSSync(r *http.Request, req ctldapi.BindRootFSSyncR
 	}
 	var parentHead *rootfshead.Head
 	if req.Parent != nil {
-		if err := rootfshead.ValidateObjectScope(writer.Prefix(), req.Parent.Manifest); err != nil {
+		if err := rootfshead.ValidateReadableObjectScope(writer.Prefix(), req.Parent.Manifest); err != nil {
 			return ctldapi.BindRootFSSyncResponse{Info: info, Error: err.Error()}, http.StatusForbidden
 		}
 		head, err := rootfsstore.LoadHead(ctx, c.store, *req.Parent)
@@ -347,6 +349,12 @@ func (c *Controller) MaterializeRootFSHead(r *http.Request, req ctldapi.Material
 	if err := req.Image.Validate(); err != nil {
 		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, http.StatusBadRequest
 	}
+	targetImageName := strings.TrimSpace(req.TargetImageName)
+	if targetImageName == "" {
+		targetImageName = req.Image.Name
+	} else if err := carrier.ValidateMarkerImage(req.CarrierSlot, targetImageName); err != nil {
+		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, http.StatusBadRequest
+	}
 	prefix, err := rootfsstore.PrefixFromObject(req.Reference.Manifest)
 	if err != nil {
 		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, http.StatusBadRequest
@@ -369,10 +377,10 @@ func (c *Controller) MaterializeRootFSHead(r *http.Request, req ctldapi.Material
 	if err != nil {
 		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, http.StatusBadGateway
 	}
-	if err := c.v3Runtime.MaterializeRootFSHead(requestContext(r), req.Reference, head.Base, req.Image, envelopePayload, marker); err != nil {
+	if err := c.v3Runtime.MaterializeRootFSHead(requestContext(r), req.Reference, head.Base, req.Image, targetImageName, envelopePayload, marker); err != nil {
 		return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()}, statusForError(err)
 	}
-	return ctldapi.MaterializeRootFSHeadResponse{ImageName: req.Image.Name, Materialized: true}, http.StatusOK
+	return ctldapi.MaterializeRootFSHeadResponse{ImageName: targetImageName, Materialized: true}, http.StatusOK
 }
 
 func (c *Controller) rootFSSyncBinding(sandboxID string, generation int64) *rootFSSyncBinding {

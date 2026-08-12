@@ -284,6 +284,14 @@ func (fakeRootFSHandler) MaterializeRootFSHead(_ *http.Request, _ ctldapi.Materi
 	return ctldapi.MaterializeRootFSHeadResponse{Materialized: true}, http.StatusOK
 }
 
+func (fakeRootFSHandler) ImportRootFSImage(_ *http.Request, _ ctldapi.ImportRootFSImageRequest) (ctldapi.ImportRootFSImageResponse, int) {
+	return ctldapi.ImportRootFSImageResponse{}, http.StatusOK
+}
+
+func (fakeRootFSHandler) ReleaseCarrierGate(_ *http.Request, _ ctldapi.ReleaseCarrierGateRequest) (ctldapi.ReleaseCarrierGateResponse, int) {
+	return ctldapi.ReleaseCarrierGateResponse{Released: true}, http.StatusOK
+}
+
 type fakeVolumePortalHandler struct {
 	mountedHandler http.Handler
 	bindErr        error

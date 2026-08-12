@@ -153,13 +153,26 @@ func (s *PGSandboxStore) CompleteRootFSInventoryJob(ctx context.Context, worker,
 	if err != nil {
 		return err
 	}
+	publicPrefix, err := rootfshead.TeamObjectPrefix(rootfshead.PublicImageFSTeamID)
+	if err != nil {
+		return err
+	}
+	objectOwners := make(map[string]string, len(objects))
 	for _, object := range objects {
 		if err := object.Validate(""); err != nil {
 			return err
 		}
-		if err := rootfshead.ValidateObjectScope(prefix, object); err != nil {
+		if err := rootfshead.ValidateReadableObjectScope(prefix, object); err != nil {
 			return err
 		}
+		owner := teamID
+		if rootfshead.ValidateObjectScope(prefix, object) != nil {
+			if err := rootfshead.ValidateObjectScope(publicPrefix, object); err != nil {
+				return err
+			}
+			owner = rootfshead.PublicImageFSTeamID
+		}
+		objectOwners[object.Key] = owner
 	}
 	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
 	unique := objects[:0]
@@ -200,6 +213,7 @@ func (s *PGSandboxStore) CompleteRootFSInventoryJob(ctx context.Context, worker,
 	if _, err := tx.Exec(ctx, `
 		CREATE TEMP TABLE rootfs_inventory_stage_v3 (
 			object_key TEXT PRIMARY KEY,
+			team_id TEXT NOT NULL,
 			digest TEXT NOT NULL,
 			media_type TEXT NOT NULL,
 			size BIGINT NOT NULL
@@ -210,10 +224,10 @@ func (s *PGSandboxStore) CompleteRootFSInventoryJob(ctx context.Context, worker,
 	copied, err := tx.CopyFrom(
 		ctx,
 		pgx.Identifier{"rootfs_inventory_stage_v3"},
-		[]string{"object_key", "digest", "media_type", "size"},
+		[]string{"object_key", "team_id", "digest", "media_type", "size"},
 		pgx.CopyFromSlice(len(objects), func(index int) ([]any, error) {
 			object := objects[index]
-			return []any{object.Key, object.Digest, object.MediaType, object.Size}, nil
+			return []any{object.Key, objectOwners[object.Key], object.Digest, object.MediaType, object.Size}, nil
 		}),
 	)
 	if err != nil {
@@ -227,7 +241,7 @@ func (s *PGSandboxStore) CompleteRootFSInventoryJob(ctx context.Context, worker,
 			object_key, team_id, digest, media_type, size,
 			last_referenced_at, created_at, updated_at
 		)
-		SELECT object_key, $1, digest, media_type, size, NOW(), NOW(), NOW()
+		SELECT object_key, team_id, digest, media_type, size, NOW(), NOW(), NOW()
 		FROM rootfs_inventory_stage_v3
 		ON CONFLICT (object_key) DO UPDATE SET
 			last_referenced_at = NOW(),
@@ -239,7 +253,7 @@ func (s *PGSandboxStore) CompleteRootFSInventoryJob(ctx context.Context, worker,
 			AND manager.rootfs_objects_v3.digest = EXCLUDED.digest
 			AND manager.rootfs_objects_v3.media_type = EXCLUDED.media_type
 			AND manager.rootfs_objects_v3.size = EXCLUDED.size
-	`, teamID)
+	`)
 	if err != nil {
 		return fmt.Errorf("register rootfs v3 inventory objects: %w", err)
 	}
@@ -349,6 +363,10 @@ func (s *PGSandboxStore) GarbageCollectRootFSV3(ctx context.Context, teamID stri
 			WHERE ($1 = '' OR h.team_id = $1)
 				AND h.created_at < NOW() - ($2::bigint * INTERVAL '1 millisecond')
 				AND NOT EXISTS (SELECT 1 FROM manager.rootfs_filesystems f WHERE f.head_id_v3 = h.head_id)
+				AND NOT EXISTS (
+					SELECT 1 FROM scheduler_template_image_revisions r
+					WHERE r.image_fs_head_id = h.head_id AND r.state = 'ready'
+				)
 				AND NOT EXISTS (SELECT 1 FROM manager.rootfs_snapshots s WHERE s.head_id_v3 = h.head_id AND (s.expires_at IS NULL OR s.expires_at > NOW()))
 				AND NOT EXISTS (
 					SELECT 1 FROM manager.sandbox_lifecycle_txns t

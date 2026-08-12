@@ -61,8 +61,8 @@ func NewEditor(store objectstore.Store, writer *rootfsstore.Writer, parent *root
 	if err := parent.Validate(); err != nil {
 		return nil, err
 	}
-	if err := rootfshead.ValidateObjectScope(editor.prefix, *parent.Root.Directory); err != nil {
-		return nil, fmt.Errorf("parent rootfs head escapes team scope: %w", err)
+	if err := rootfshead.ValidateReadableObjectScope(editor.prefix, *parent.Root.Directory); err != nil {
+		return nil, fmt.Errorf("parent rootfs head escapes tenant and public ImageFS scopes: %w", err)
 	}
 	editor.root = cloneEntry(parent.Root)
 	rootRef := *parent.Root.Directory

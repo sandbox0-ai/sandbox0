@@ -16,6 +16,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
@@ -710,6 +711,85 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 				assert.NotEqual(t, "delete", action.GetVerb(), "warm rootfs activation must not delete the claimed Pod")
 			}
 		})
+	}
+}
+
+func TestFinishRestoredS0FSRuntimeUsesCarrierSlotWithoutPodImageMutation(t *testing.T) {
+	withClaimTestPublicKey(t)
+	var calls []string
+	var materializeReq ctldapi.MaterializeRootFSHeadRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/rootfs/heads/materialize":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&materializeReq))
+			calls = append(calls, "materialize")
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{Materialized: true, ImageName: materializeReq.TargetImageName}))
+		case "/api/v1/carriers/gate/release":
+			calls = append(calls, "gate")
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.ReleaseCarrierGateResponse{Released: true}))
+		case "/api/v1/rootfs/sync/bind":
+			calls = append(calls, "bind")
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true}}))
+		case "/api/v1/volume-portals/check":
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true}))
+		default:
+			t.Fatalf("unexpected CTLD path %s", r.URL.Path)
+		}
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	const (
+		sandboxID = "sandbox-1"
+		slot      = "s0-0123456789abcdef"
+	)
+	markerImage, err := carrier.MarkerImage(slot)
+	require.NoError(t, err)
+	pod := rootFSTestPod("carrier-pod", sandboxID, "team-1")
+	pod.UID = types.UID("carrier-uid")
+	pod.Spec.Containers[0].Image = markerImage
+	pod.Spec.Containers[0].ImagePullPolicy = corev1.PullNever
+	pod.Annotations[carrier.AnnotationSlot] = slot
+	pod.Status.HostIP = ctldURL.Hostname()
+	pod.Status.PodIP = "10.0.0.10"
+	head := rootFSHeadTestFixture(t, sandboxID, "team-1", "head-v1", 3)
+	store := &memorySandboxStore{
+		records:            map[string]*sandboxstore.SandboxRecord{},
+		rootFSHeads:        map[string]*sandboxstore.SandboxRootFSHead{sandboxID: head},
+		rootFSHeadVersions: map[string]*sandboxstore.SandboxRootFSHead{head.Reference.HeadID: head},
+	}
+	indexer := newClaimTestPodIndexer(t, pod)
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		updated := action.(ktesting.UpdateAction).GetObject().(*corev1.Pod)
+		assert.Equal(t, markerImage, updated.Spec.Containers[0].Image)
+		assert.Equal(t, corev1.PullNever, updated.Spec.Containers[0].ImagePullPolicy)
+		return false, nil, nil
+	})
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(_ *corev1.Pod) {
+		calls = append(calls, "runtime")
+	})
+	svc := &SandboxService{
+		k8sClient: client, podLister: corelisters.NewPodLister(indexer), secretLister: newClaimTestSecretLister(t),
+		sandboxStore: store, ctldClient: ctldapi.NewClientWithTimeout(time.Second), internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort, RuntimeReadyTimeout: time.Second},
+		clock:  systemTime{}, logger: zap.NewNop(),
+	}
+	record := &sandboxstore.SandboxRecord{
+		ID: sandboxID, TeamID: "team-1", UserID: "user-1", TemplateID: "template-1", TemplateName: "template-1",
+		TemplateNamespace: "template-default", RuntimeGeneration: 3, DesiredState: sandboxstore.SandboxDesiredStatePaused,
+		RootFSRuntimeVersion: sandboxstore.RootFSRuntimeS0FSV2,
+	}
+
+	restored, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "shared")
+	require.NoError(t, err)
+	assert.Equal(t, pod.UID, restored.UID)
+	assert.Equal(t, []string{"materialize", "gate", "bind", "runtime"}, calls)
+	assert.Equal(t, slot, materializeReq.CarrierSlot)
+	assert.Equal(t, markerImage, materializeReq.TargetImageName)
+	for _, action := range client.Actions() {
+		assert.NotEqual(t, "create", action.GetVerb())
+		assert.NotEqual(t, "delete", action.GetVerb())
 	}
 }
 

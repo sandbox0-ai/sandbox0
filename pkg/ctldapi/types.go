@@ -148,8 +148,44 @@ type AcknowledgeRootFSHeadResponse struct {
 }
 
 type MaterializeRootFSHeadRequest struct {
-	Reference rootfshead.HeadReference  `json:"reference"`
-	Image     rootfshead.ImageReference `json:"image"`
+	Reference       rootfshead.HeadReference  `json:"reference"`
+	Image           rootfshead.ImageReference `json:"image"`
+	CarrierSlot     string                    `json:"carrier_slot,omitempty"`
+	TargetImageName string                    `json:"target_image_name,omitempty"`
+}
+
+// ImportRootFSImageRequest captures the complete merged root of an OCI-backed
+// import container into one immutable S0FS ImageFS Head.
+type ImportRootFSImageRequest struct {
+	Target       RootFSContainerRef `json:"target"`
+	RevisionID   string             `json:"revision_id"`
+	TeamID       string             `json:"team_id"`
+	HeadID       string             `json:"head_id"`
+	BaseImageRef string             `json:"base_image_ref"`
+}
+
+type ImportRootFSImageResponse struct {
+	Reference      rootfshead.HeadReference  `json:"reference,omitempty"`
+	Head           rootfshead.Head           `json:"head,omitempty"`
+	Image          rootfshead.ImageReference `json:"image,omitempty"`
+	SourceDigest   string                    `json:"source_digest,omitempty"`
+	OCIConfig      []byte                    `json:"oci_config,omitempty"`
+	CreatedBytes   int64                     `json:"created_bytes"`
+	CreatedObjects int64                     `json:"created_objects"`
+	Duration       time.Duration             `json:"duration,omitempty"`
+	Error          string                    `json:"error,omitempty"`
+}
+
+type ReleaseCarrierGateRequest struct {
+	Namespace string `json:"namespace"`
+	PodName   string `json:"pod_name"`
+	PodUID    string `json:"pod_uid"`
+	Slot      string `json:"slot"`
+}
+
+type ReleaseCarrierGateResponse struct {
+	Released bool   `json:"released"`
+	Error    string `json:"error,omitempty"`
 }
 
 type MaterializeRootFSHeadResponse struct {

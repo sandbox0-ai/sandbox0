@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
@@ -182,16 +183,17 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 			return err
 		}
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
-			ID:               uuid.NewString(),
-			SandboxID:        sandboxID,
-			Kind:             sandboxstore.SandboxLifecycleKindPause,
-			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
-			Source:           source,
-			Cancelable:       opts.cancelable,
-			FromGeneration:   generation,
-			FromPodNamespace: pod.Namespace,
-			FromPodName:      pod.Name,
-			ExpectedHeadID:   expectedHeadID,
+			ID:                   uuid.NewString(),
+			SandboxID:            sandboxID,
+			Kind:                 sandboxstore.SandboxLifecycleKindPause,
+			Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:               source,
+			Cancelable:           opts.cancelable,
+			FromGeneration:       generation,
+			FromPodNamespace:     pod.Namespace,
+			FromPodName:          pod.Name,
+			ExpectedHeadID:       expectedHeadID,
+			RootFSRuntimeVersion: record.RootFSRuntimeVersion,
 		})
 	})
 	if err != nil {
@@ -1227,7 +1229,13 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		OwnerKind:            ownerKindFromPod(pod),
 		CreatedAt:            pod.CreationTimestamp.Time,
 	}
+	if strings.TrimSpace(pod.Annotations[carrier.AnnotationSlot]) != "" {
+		record.RootFSRuntimeVersion = sandboxstore.RootFSRuntimeS0FSV2
+	}
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, locked *sandboxstore.SandboxRecord) error {
+		if record.RootFSRuntimeVersion == "" {
+			record.RootFSRuntimeVersion = locked.RootFSRuntimeVersion
+		}
 		if locked.DesiredState == sandboxstore.SandboxDesiredStatePaused || locked.DesiredState == sandboxstore.SandboxDesiredStateTerminating || locked.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() {
 			return nil
 		}

@@ -380,6 +380,38 @@ func TestResizeSandboxPodResourcesUsesUpdatedPodWithoutPreflightGet(t *testing.T
 	}
 }
 
+func TestResizeSandboxPodResourcesDoesNotPatchEphemeralStorage(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
+	originalEphemeralStorage := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceEphemeralStorage]
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	client.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		patchAction, ok := action.(k8stesting.PatchAction)
+		if !ok || action.GetSubresource() != "resize" {
+			return false, nil, nil
+		}
+		if strings.Contains(string(patchAction.GetPatch()), string(corev1.ResourceEphemeralStorage)) {
+			t.Fatalf("resize patch includes immutable ephemeral storage: %s", patchAction.GetPatch())
+		}
+		return false, nil, nil
+	})
+	svc := &SandboxService{k8sClient: client, config: SandboxServiceConfig{SandboxMemoryPerCPU: "4Gi"}, logger: zap.NewNop()}
+	quota, err := svc.effectiveSandboxResourceQuota(template, &sandboxstore.SandboxConfig{
+		Resources: &managerapi.SandboxResourceConfig{Memory: "2Gi"},
+	})
+	if err != nil {
+		t.Fatalf("effectiveSandboxResourceQuota() error = %v", err)
+	}
+	quota.EphemeralStorage = resource.MustParse("32Gi")
+
+	resized, err := svc.resizeSandboxPodResources(context.Background(), pod, quota)
+	if err != nil {
+		t.Fatalf("resizeSandboxPodResources() error = %v", err)
+	}
+	container := sandboxRuntimeContainer(t, resized)
+	assertQuantity(t, container.Resources.Limits[corev1.ResourceEphemeralStorage], originalEphemeralStorage.String())
+}
+
 func TestClaimIdlePodRestoresIdlePodAfterResizeConflict(t *testing.T) {
 	template := newSandboxResourceTestTemplate(t)
 	idlePod := newSandboxResourceTestIdlePod(t, template, "idle-ready")

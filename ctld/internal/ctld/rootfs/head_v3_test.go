@@ -96,6 +96,27 @@ func TestBaseIdentityAndConfigSelectsNodePlatformFromImageIndex(t *testing.T) {
 	assert.Equal(t, hostConfigData, configData)
 }
 
+func TestBaseIdentityAndConfigResolvesFamiliarImageReference(t *testing.T) {
+	client := newBaseIdentityClient(t)
+	platform := platforms.Normalize(platforms.DefaultSpec())
+	platform.OSVersion = ""
+	platform.OSFeatures = nil
+	config := ocispec.Image{
+		Platform: platform,
+		RootFS:   ocispec.RootFS{Type: "layers", DiffIDs: []digest.Digest{digest.FromString("base layer")}},
+	}
+	configDescriptor, _ := writeImageJSON(t, client.contentStore, ocispec.MediaTypeImageConfig, config)
+	manifestDescriptor, _ := writeImageJSON(t, client.contentStore, ocispec.MediaTypeImageManifest, ocispec.Manifest{Config: configDescriptor})
+	canonical := "docker.io/sandbox0ai/base:latest"
+	client.imageStore.records[canonical] = images.Image{Name: canonical, Target: manifestDescriptor}
+	runtime := NewContainerdRuntime(ContainerdRuntimeConfig{ContainerdClient: client})
+
+	base, _, err := runtime.BaseIdentityAndConfig(context.Background(), ctldapi.RootFSInfo{BaseImageRef: "sandbox0ai/base:latest"}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, canonical, base.ImageReference)
+	assert.Equal(t, []string{"sandbox0ai/base:latest", canonical}, client.imageStore.gets)
+}
+
 func TestBaseIdentityAndConfigUsesPublishedHeadMarkerAcrossLocalImageRecords(t *testing.T) {
 	runtime, client, info, expected, markerConfigData := publishedBaseFixture(t, ocispec.Platform{OS: "linux", Architecture: "amd64"}, "")
 

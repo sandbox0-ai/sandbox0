@@ -32,6 +32,8 @@ const (
 	pathRootFSHeadSeal           = "/api/v1/rootfs/heads/seal"
 	pathRootFSHeadAcknowledge    = "/api/v1/rootfs/heads/acknowledge"
 	pathRootFSHeadMaterialize    = "/api/v1/rootfs/heads/materialize"
+	pathRootFSImageImport        = "/api/v1/rootfs/images/import"
+	pathCarrierGateRelease       = "/api/v1/carriers/gate/release"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -149,6 +151,14 @@ func (c *Client) MaterializeRootFSHead(ctx context.Context, ctldAddress string, 
 	return PutJSON[MaterializeRootFSHeadResponse](ctx, c.withTimeout(timeout).httpClientOrDefault(), ctldAddress, pathRootFSHeadMaterialize, req)
 }
 
+func (c *Client) ImportRootFSImage(ctx context.Context, ctldAddress string, req ImportRootFSImageRequest, timeout time.Duration) (*ImportRootFSImageResponse, error) {
+	return PutJSON[ImportRootFSImageResponse](ctx, c.withTimeout(timeout).httpClientOrDefault(), ctldAddress, pathRootFSImageImport, req)
+}
+
+func (c *Client) ReleaseCarrierGate(ctx context.Context, ctldAddress string, req ReleaseCarrierGateRequest, timeout time.Duration) (*ReleaseCarrierGateResponse, error) {
+	return PutJSON[ReleaseCarrierGateResponse](ctx, c.withTimeout(timeout).httpClientOrDefault(), ctldAddress, pathCarrierGateRelease, req)
+}
+
 func (c *Client) httpClientOrDefault() *http.Client {
 	if c != nil && c.httpClient != nil {
 		return c.httpClient
@@ -250,6 +260,10 @@ func responseError(resp any) string {
 	case *AcknowledgeRootFSHeadResponse:
 		return strings.TrimSpace(typed.Error)
 	case *MaterializeRootFSHeadResponse:
+		return strings.TrimSpace(typed.Error)
+	case *ImportRootFSImageResponse:
+		return strings.TrimSpace(typed.Error)
+	case *ReleaseCarrierGateResponse:
 		return strings.TrimSpace(typed.Error)
 	default:
 		return ""

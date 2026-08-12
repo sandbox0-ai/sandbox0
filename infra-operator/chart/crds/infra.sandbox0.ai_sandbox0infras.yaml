@@ -1091,9 +1091,13 @@ spec:
                           description: Pool strategy
                           properties:
                             maxIdle:
+                              description: 'Deprecated: shared carrier pool capacity
+                                is platform-owned.'
                               format: int32
                               type: integer
                             minIdle:
+                              description: 'Deprecated: shared carrier pool capacity
+                                is platform-owned.'
                               format: int32
                               type: integer
                           required:
@@ -3943,6 +3947,38 @@ spec:
                             enum:
                             - gvisor-rootfs
                             type: string
+                          sharedCarrierPool:
+                            default: {}
+                            description: SharedCarrierPool configures the one platform-owned
+                              warm pool in each data-plane cluster.
+                            properties:
+                              activationTimeout:
+                                default: 15s
+                                type: string
+                              carrierImageRef:
+                                description: CarrierImageRef overrides the small canonical
+                                  base used by S0FS carrier markers.
+                                type: string
+                              enabled:
+                                type: boolean
+                              maxIdle:
+                                default: 2
+                                format: int32
+                                minimum: 0
+                                type: integer
+                              minIdle:
+                                default: 1
+                                format: int32
+                                minimum: 0
+                                type: integer
+                              namespace:
+                                description: Namespace defaults to the Sandbox0 data-plane
+                                  namespace.
+                                type: string
+                              reconcileInterval:
+                                default: 2s
+                                type: string
+                            type: object
                           shutdownTimeout:
                             default: 30s
                             type: string

@@ -42,6 +42,15 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.SandboxMaxMemory = spec.SandboxMaxMemory
 	cfg.SandboxRuntimeClassName = rootfshead.RuntimeClassName
 	cfg.ProcdBinImageRef = spec.ProcdBinImageRef
+	cfg.SharedCarrierPool = apiconfig.SharedCarrierPoolConfig{
+		Enabled:           spec.SharedCarrierPool.Enabled,
+		Namespace:         spec.SharedCarrierPool.Namespace,
+		MinIdle:           spec.SharedCarrierPool.MinIdle,
+		MaxIdle:           spec.SharedCarrierPool.MaxIdle,
+		CarrierImageRef:   spec.SharedCarrierPool.CarrierImageRef,
+		ReconcileInterval: spec.SharedCarrierPool.ReconcileInterval,
+		ActivationTimeout: spec.SharedCarrierPool.ActivationTimeout,
+	}
 	cfg.DefaultTeamQuotas = cloneTeamQuotaLimitConfigs(spec.DefaultTeamQuotas)
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout

@@ -410,6 +410,13 @@ const (
 	SandboxRuntimeMetricUnitSeconds        SandboxRuntimeMetricUnit = "seconds"
 )
 
+// Defines values for SandboxTemplateStatusPoolMode.
+const (
+	Cold   SandboxTemplateStatusPoolMode = "cold"
+	Legacy SandboxTemplateStatusPoolMode = "legacy"
+	Shared SandboxTemplateStatusPoolMode = "shared"
+)
+
 // Defines values for SandboxVolumeS3ConfigProvider.
 const (
 	SandboxVolumeS3ConfigProviderAli SandboxVolumeS3ConfigProvider = "ali"
@@ -798,6 +805,14 @@ const (
 	TemplateCreationStatusStateCreating TemplateCreationStatusState = "creating"
 	TemplateCreationStatusStateFailed   TemplateCreationStatusState = "failed"
 	TemplateCreationStatusStateReady    TemplateCreationStatusState = "ready"
+)
+
+// Defines values for TemplateImageRevisionStatusState.
+const (
+	TemplateImageRevisionStatusStateFailed    TemplateImageRevisionStatusState = "failed"
+	TemplateImageRevisionStatusStateImporting TemplateImageRevisionStatusState = "importing"
+	TemplateImageRevisionStatusStateReady     TemplateImageRevisionStatusState = "ready"
+	TemplateImageRevisionStatusStateResolving TemplateImageRevisionStatusState = "resolving"
 )
 
 // Defines values for TrafficRuleAction.
@@ -1843,7 +1858,12 @@ type PodSpecOverride struct {
 
 // PoolStrategy defines model for PoolStrategy.
 type PoolStrategy struct {
+	// MaxIdle Deprecated. Shared carrier pool capacity is configured by the platform.
+	// Deprecated:
 	MaxIdle int32 `json:"maxIdle"`
+
+	// MinIdle Deprecated. Shared carrier pool capacity is configured by the platform.
+	// Deprecated:
 	MinIdle int32 `json:"minIdle"`
 }
 
@@ -2693,15 +2713,22 @@ type SandboxTemplateStatus struct {
 	Conditions  *[]SandboxTemplateCondition `json:"conditions,omitempty"`
 
 	// Creation Asynchronous creation status for templates built from a sandbox.
-	// Traditional image-based templates omit this object and are ready
-	// immediately after creation. Ready means the template is visible in at
-	// least one data-plane cluster and the claim API accepts it; when the
-	// pool is zero, it does not imply that a sandbox image has already been
-	// pulled.
-	Creation       *TemplateCreationStatus `json:"creation,omitempty"`
-	IdleCount      *int32                  `json:"idleCount,omitempty"`
-	LastUpdateTime *time.Time              `json:"lastUpdateTime"`
+	// This object is specific to templates built from a sandbox. All templates,
+	// including traditional image-based templates, use imageRevision and are
+	// ready for new claims only after OCI resolution and S0FS import complete.
+	Creation  *TemplateCreationStatus `json:"creation,omitempty"`
+	IdleCount *int32                  `json:"idleCount,omitempty"`
+
+	// ImageRevision Immutable OCI resolution and S0FS ImageFS import selected for new claims.
+	ImageRevision  *TemplateImageRevisionStatus `json:"imageRevision,omitempty"`
+	LastUpdateTime *time.Time                   `json:"lastUpdateTime"`
+
+	// PoolMode Allocation mode for new sandbox claims. Legacy is reported only during migration.
+	PoolMode *SandboxTemplateStatusPoolMode `json:"poolMode,omitempty"`
 }
+
+// SandboxTemplateStatusPoolMode Allocation mode for new sandbox claims. Legacy is reported only during migration.
+type SandboxTemplateStatusPoolMode string
 
 // SandboxUpdateConfig Subset of SandboxConfig fields that can be updated at runtime without restarting the sandbox.
 // Note: env_vars only affect new processes. webhook is not included as it requires restart.
@@ -3614,11 +3641,9 @@ type TemplateCreateRequest struct {
 }
 
 // TemplateCreationStatus Asynchronous creation status for templates built from a sandbox.
-// Traditional image-based templates omit this object and are ready
-// immediately after creation. Ready means the template is visible in at
-// least one data-plane cluster and the claim API accepts it; when the
-// pool is zero, it does not imply that a sandbox image has already been
-// pulled.
+// This object is specific to templates built from a sandbox. All templates,
+// including traditional image-based templates, use imageRevision and are
+// ready for new claims only after OCI resolution and S0FS import complete.
 type TemplateCreationStatus struct {
 	CapturedAt  *time.Time `json:"capturedAt,omitempty"`
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
@@ -3658,6 +3683,23 @@ type TemplateFromSandboxSpecOverrides struct {
 	Pool        *PoolStrategy `json:"pool,omitempty"`
 	Tags        *[]string     `json:"tags,omitempty"`
 }
+
+// TemplateImageRevisionStatus Immutable OCI resolution and S0FS ImageFS import selected for new claims.
+type TemplateImageRevisionStatus struct {
+	CompletedAt    *time.Time                       `json:"completedAt,omitempty"`
+	ImageFsHeadId  *string                          `json:"imageFsHeadId,omitempty"`
+	Message        *string                          `json:"message,omitempty"`
+	Platform       *string                          `json:"platform,omitempty"`
+	Reason         *string                          `json:"reason,omitempty"`
+	ResolvedDigest *string                          `json:"resolvedDigest,omitempty"`
+	RevisionId     string                           `json:"revisionId"`
+	SourceImage    string                           `json:"sourceImage"`
+	StartedAt      *time.Time                       `json:"startedAt,omitempty"`
+	State          TemplateImageRevisionStatusState `json:"state"`
+}
+
+// TemplateImageRevisionStatusState defines model for TemplateImageRevisionStatus.State.
+type TemplateImageRevisionStatusState string
 
 // TemplateUpdateRequest defines model for TemplateUpdateRequest.
 type TemplateUpdateRequest struct {

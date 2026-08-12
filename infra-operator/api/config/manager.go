@@ -37,6 +37,10 @@ type ManagerConfig struct {
 	// ProcdBinImageRef is an OCI image mounted read-only at /procd-image inside sandbox pods.
 	ProcdBinImageRef string `yaml:"procd_bin_image_ref" json:"-"`
 
+	// SharedCarrierPool configures the cluster-wide platform carrier pool. It is
+	// disabled during migration and replaces template-owned ReplicaSets when enabled.
+	SharedCarrierPool SharedCarrierPoolConfig `yaml:"shared_carrier_pool" json:"sharedCarrierPool"`
+
 	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
 	RegionID         string `yaml:"region_id" json:"-"`
 	// +optional
@@ -259,6 +263,17 @@ type ManagerConfig struct {
 	// topology without requiring users to duplicate network runtime settings per template.
 	// +optional
 	SandboxPodPlacement SandboxPodPlacementConfig `yaml:"sandbox_pod_placement" json:"-"`
+}
+
+// SharedCarrierPoolConfig defines the one standard warm carrier shape for a cluster.
+type SharedCarrierPoolConfig struct {
+	Enabled           bool            `yaml:"enabled" json:"enabled"`
+	Namespace         string          `yaml:"namespace" json:"namespace"`
+	MinIdle           int32           `yaml:"min_idle" json:"minIdle"`
+	MaxIdle           int32           `yaml:"max_idle" json:"maxIdle"`
+	CarrierImageRef   string          `yaml:"carrier_image_ref" json:"carrierImageRef"`
+	ReconcileInterval metav1.Duration `yaml:"reconcile_interval" json:"reconcileInterval"`
+	ActivationTimeout metav1.Duration `yaml:"activation_timeout" json:"activationTimeout"`
 }
 
 // TeamQuotaLimitConfig configures a region default for teams without an

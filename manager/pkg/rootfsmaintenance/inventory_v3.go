@@ -100,7 +100,7 @@ func inventoryRootFSHead(ctx context.Context, reader RootFSObjectReader, job san
 	objects := make([]rootfshead.Object, 0, 1024)
 	positions := make(map[string]int, 1024)
 	add := func(object rootfshead.Object) (bool, error) {
-		if err := rootfshead.ValidateObjectScope(prefix, object); err != nil {
+		if err := rootfshead.ValidateReadableObjectScope(prefix, object); err != nil {
 			return false, err
 		}
 		if position, ok := positions[object.Key]; ok {

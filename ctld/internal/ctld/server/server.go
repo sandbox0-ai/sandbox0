@@ -34,6 +34,8 @@ type RootFSSyncController interface {
 	SealRootFSHead(r *http.Request, req ctldapi.SealRootFSHeadRequest) (ctldapi.SealRootFSHeadResponse, int)
 	AcknowledgeRootFSHead(r *http.Request, req ctldapi.AcknowledgeRootFSHeadRequest) (ctldapi.AcknowledgeRootFSHeadResponse, int)
 	MaterializeRootFSHead(r *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int)
+	ImportRootFSImage(r *http.Request, req ctldapi.ImportRootFSImageRequest) (ctldapi.ImportRootFSImageResponse, int)
+	ReleaseCarrierGate(r *http.Request, req ctldapi.ReleaseCarrierGateRequest) (ctldapi.ReleaseCarrierGateResponse, int)
 }
 
 type MountedVolumeController interface {
@@ -292,6 +294,18 @@ func NewMux(controller Controller) http.Handler {
 		func(err error) any { return ctldapi.MaterializeRootFSHeadResponse{Error: err.Error()} },
 		func(c RootFSSyncController, r *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
 			return c.MaterializeRootFSHead(r, req)
+		})
+	registerJSONPutRoute(mux, "/api/v1/rootfs/images/import", controller, rootFSSyncController,
+		ctldapi.ImportRootFSImageResponse{Error: "ctld S0FS ImageFS importer not implemented"},
+		func(err error) any { return ctldapi.ImportRootFSImageResponse{Error: err.Error()} },
+		func(c RootFSSyncController, r *http.Request, req ctldapi.ImportRootFSImageRequest) (ctldapi.ImportRootFSImageResponse, int) {
+			return c.ImportRootFSImage(r, req)
+		})
+	registerJSONPutRoute(mux, "/api/v1/carriers/gate/release", controller, rootFSSyncController,
+		ctldapi.ReleaseCarrierGateResponse{Error: "ctld carrier gate not implemented"},
+		func(err error) any { return ctldapi.ReleaseCarrierGateResponse{Error: err.Error()} },
+		func(c RootFSSyncController, r *http.Request, req ctldapi.ReleaseCarrierGateRequest) (ctldapi.ReleaseCarrierGateResponse, int) {
+			return c.ReleaseCarrierGate(r, req)
 		})
 	mux.HandleFunc("/api/v1/pods/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

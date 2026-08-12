@@ -10,7 +10,13 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-const objectRoot = "sandbox-rootfs/cow-v3"
+const (
+	objectRoot = "sandbox-rootfs/cow-v3"
+
+	// PublicImageFSTeamID is the only cross-tenant readable rootfs scope. It is
+	// written exclusively by the platform image importer and is immutable.
+	PublicImageFSTeamID = "sandbox0-public-imagefs"
+)
 
 func ObjectRootPrefix() string { return objectRoot }
 
@@ -78,6 +84,23 @@ func ValidateObjectScope(prefix string, object Object) error {
 	}
 	if object.Key != expected {
 		return fmt.Errorf("rootfs object key %s does not match canonical key %s", object.Key, expected)
+	}
+	return nil
+}
+
+// ValidateReadableObjectScope permits objects owned by the caller and objects
+// in the platform-managed public ImageFS scope. It never permits another
+// tenant prefix.
+func ValidateReadableObjectScope(prefix string, object Object) error {
+	if err := ValidateObjectScope(prefix, object); err == nil {
+		return nil
+	}
+	publicPrefix, err := TeamObjectPrefix(PublicImageFSTeamID)
+	if err != nil {
+		return err
+	}
+	if err := ValidateObjectScope(publicPrefix, object); err != nil {
+		return fmt.Errorf("rootfs object %s is outside tenant and public ImageFS scopes", object.Key)
 	}
 	return nil
 }

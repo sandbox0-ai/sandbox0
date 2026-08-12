@@ -88,6 +88,55 @@ func (s *PGSandboxStore) GetRootFSHeadByID(ctx context.Context, headID, teamID s
 	return getRootFSHeadByID(ctx, s.pool, headID, teamID)
 }
 
+// BindSandboxToRootFSHead creates an O(1) SandboxFS branch whose initial state
+// is the immutable team-scoped ImageFS Head. The first writable checkpoint is
+// published as a child Head by the normal ctld capture path.
+func (s *PGSandboxStore) BindSandboxToRootFSHead(ctx context.Context, sandboxID, teamID, headID string) error {
+	if s == nil || s.pool == nil {
+		return nil
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	teamID = strings.TrimSpace(teamID)
+	headID = strings.TrimSpace(headID)
+	if sandboxID == "" || teamID == "" || headID == "" {
+		return fmt.Errorf("sandbox_id, team_id, and head_id are required")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO manager.rootfs_filesystems (
+			filesystem_id, team_id, base_image_ref, base_image_digest, head_id_v3, created_at, updated_at
+		)
+		SELECT $1, $2, h.base_image_ref, h.base_manifest_digest, h.head_id, NOW(), NOW()
+		FROM manager.rootfs_heads_v3 h
+		WHERE h.head_id = $3 AND h.team_id IN ($2, $4)
+		ON CONFLICT (filesystem_id) DO UPDATE SET
+			head_id_v3 = EXCLUDED.head_id_v3,
+			updated_at = NOW()
+		WHERE manager.rootfs_filesystems.team_id = EXCLUDED.team_id
+	`, sandboxID, teamID, headID, rootfshead.PublicImageFSTeamID)
+	if err != nil {
+		return fmt.Errorf("bind sandbox ImageFS filesystem: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("%w: ImageFS Head %s", ErrRootFSHeadConflict, headID)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO manager.sandbox_rootfs_bindings (sandbox_id, filesystem_id, team_id, created_at, updated_at)
+		VALUES ($1, $1, $2, NOW(), NOW())
+		ON CONFLICT (sandbox_id) DO UPDATE SET
+			filesystem_id = EXCLUDED.filesystem_id,
+			team_id = EXCLUDED.team_id,
+			updated_at = NOW()
+	`, sandboxID, teamID); err != nil {
+		return fmt.Errorf("bind sandbox to ImageFS Head: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *PGSandboxStore) SaveRootFSExport(ctx context.Context, export *RootFSExport) error {
 	if s == nil || s.pool == nil || export == nil {
 		return nil
@@ -326,7 +375,7 @@ func saveRootFSHead(ctx context.Context, db rootFSStoreDB, head *SandboxRootFSHe
 			FROM manager.rootfs_heads_v3 child
 			JOIN manager.rootfs_heads_v3 parent
 				ON parent.head_id = $2
-				AND parent.team_id = child.team_id
+				AND parent.team_id IN (child.team_id, $7)
 				AND parent.manifest_key = $3
 				AND parent.manifest_digest = $4
 				AND parent.manifest_media_type = $5
@@ -336,7 +385,8 @@ func saveRootFSHead(ctx context.Context, db rootFSStoreDB, head *SandboxRootFSHe
 			ON CONFLICT (child_head_id) DO UPDATE SET parent_head_id = EXCLUDED.parent_head_id
 			WHERE manager.rootfs_head_parent_guards_v3.parent_head_id = EXCLUDED.parent_head_id
 		`, head.Reference.HeadID, head.Parent.HeadID,
-			head.Parent.Manifest.Key, head.Parent.Manifest.Digest, head.Parent.Manifest.MediaType, head.Parent.Manifest.Size)
+			head.Parent.Manifest.Key, head.Parent.Manifest.Digest, head.Parent.Manifest.MediaType, head.Parent.Manifest.Size,
+			rootfshead.PublicImageFSTeamID)
 		if err != nil {
 			return fmt.Errorf("protect parent rootfs v3 Head: %w", err)
 		}
@@ -459,7 +509,7 @@ func validateRootFSHeadPublication(head *SandboxRootFSHead) ([]rootfshead.Object
 		if head.Parent.HeadID == head.Reference.HeadID {
 			return nil, fmt.Errorf("rootfs Head cannot reference itself as parent")
 		}
-		if err := rootfshead.ValidateObjectScope(prefix, head.Parent.Manifest); err != nil {
+		if err := rootfshead.ValidateReadableObjectScope(prefix, head.Parent.Manifest); err != nil {
 			return nil, err
 		}
 	}
@@ -482,10 +532,10 @@ func getRootFSHead(ctx context.Context, db rootFSStoreDB, sandboxID string) (*Sa
 			p.head_id, p.manifest_key, p.manifest_digest, p.manifest_media_type, p.manifest_size
 		FROM manager.sandbox_rootfs_bindings b
 		JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
-		JOIN manager.rootfs_heads_v3 h ON h.head_id = f.head_id_v3 AND h.team_id = b.team_id
-		LEFT JOIN manager.rootfs_heads_v3 p ON p.head_id = NULLIF(h.parent_head_id, '') AND p.team_id = h.team_id
+		JOIN manager.rootfs_heads_v3 h ON h.head_id = f.head_id_v3 AND h.team_id IN (b.team_id, $2)
+		LEFT JOIN manager.rootfs_heads_v3 p ON p.head_id = NULLIF(h.parent_head_id, '') AND p.team_id IN (h.team_id, $2)
 		WHERE b.sandbox_id = $1
-	`, strings.TrimSpace(sandboxID)).Scan(
+	`, strings.TrimSpace(sandboxID), rootfshead.PublicImageFSTeamID).Scan(
 		&head.SandboxID, &head.SourceSandboxID, &head.TeamID, &head.RuntimeGeneration,
 		&head.Reference.HeadID, &head.Reference.Manifest.Key, &head.Reference.Manifest.Digest,
 		&head.Reference.Manifest.MediaType, &head.Reference.Manifest.Size,
@@ -534,9 +584,9 @@ func getRootFSHeadByID(ctx context.Context, db rootFSStoreDB, headID, teamID str
 			h.inventory_complete, h.created_at,
 			p.head_id, p.manifest_key, p.manifest_digest, p.manifest_media_type, p.manifest_size
 		FROM manager.rootfs_heads_v3 h
-		LEFT JOIN manager.rootfs_heads_v3 p ON p.head_id = NULLIF(h.parent_head_id, '') AND p.team_id = h.team_id
-		WHERE h.head_id = $1 AND h.team_id = $2
-	`, strings.TrimSpace(headID), strings.TrimSpace(teamID)).Scan(
+		LEFT JOIN manager.rootfs_heads_v3 p ON p.head_id = NULLIF(h.parent_head_id, '') AND p.team_id IN (h.team_id, $3)
+		WHERE h.head_id = $1 AND h.team_id IN ($2, $3)
+	`, strings.TrimSpace(headID), strings.TrimSpace(teamID), rootfshead.PublicImageFSTeamID).Scan(
 		&head.SandboxID, &head.SourceSandboxID, &head.TeamID, &head.RuntimeGeneration,
 		&head.Reference.HeadID, &head.Reference.Manifest.Key, &head.Reference.Manifest.Digest,
 		&head.Reference.Manifest.MediaType, &head.Reference.Manifest.Size,

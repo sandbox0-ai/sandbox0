@@ -93,12 +93,6 @@ func (c *metadataChanges) addInode(inode uint64) {
 	}
 }
 
-func (c *metadataChanges) addDir(inode uint64) {
-	if c != nil && inode != 0 {
-		c.dirs[inode] = struct{}{}
-	}
-}
-
 func (c *metadataChanges) addDirent(parent uint64, name string) {
 	if c == nil || parent == 0 || name == "" {
 		return

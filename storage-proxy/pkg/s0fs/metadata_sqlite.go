@@ -983,9 +983,7 @@ func (s *sqliteMetadataStore) cacheNode(inode uint64, node *Node) {
 	for len(s.nodeCache) > sqliteMetadataNodeCacheEntries && len(s.nodeOrder) > 0 {
 		evict := s.nodeOrder[0]
 		s.nodeOrder = s.nodeOrder[1:]
-		if _, exists := s.nodeCache[evict]; exists {
-			delete(s.nodeCache, evict)
-		}
+		delete(s.nodeCache, evict)
 	}
 }
 
@@ -1024,9 +1022,7 @@ func (s *sqliteMetadataStore) cacheChild(key sqliteMetadataChildCacheKey, value 
 	for len(s.childCache) > sqliteMetadataChildCacheEntries && len(s.childOrder) > 0 {
 		evict := s.childOrder[0]
 		s.childOrder = s.childOrder[1:]
-		if _, exists := s.childCache[evict]; exists {
-			delete(s.childCache, evict)
-		}
+		delete(s.childCache, evict)
 	}
 }
 

@@ -440,14 +440,14 @@ func main() {
 	}
 	registryService := registryservice.NewRegistryService(registryProvider, logger)
 	templateStore := templstorepg.NewStore(pool)
-	var templateReconciler *templreconciler.SingleClusterReconciler
+	var singleClusterReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
 		templateApplier := templateservice.NewTemplateApplier(templateService)
 		reconcileInterval := cfg.ResyncPeriod.Duration
 		if reconcileInterval == 0 {
 			reconcileInterval = 30 * time.Second
 		}
-		templateReconciler = templreconciler.NewSingleClusterReconciler(
+		singleClusterReconciler = templreconciler.NewSingleClusterReconciler(
 			templateStore,
 			templateApplier,
 			cfg.DefaultClusterId,
@@ -458,6 +458,7 @@ func main() {
 	} else {
 		logger.Info("Template reconciliation disabled; durable template build queue remains enabled")
 	}
+	templateReconciler := optionalManagerTemplateReconciler(singleClusterReconciler)
 	var templateBuildWorker *templatebuild.TemplateBuildWorker
 	switch {
 	case registryProvider == nil:
@@ -660,6 +661,19 @@ func main() {
 
 type templateReconcilerQuiescer interface {
 	Quiesce(context.Context) error
+}
+
+type managerTemplateReconciler interface {
+	templateReconcilerRunner
+	templateReconcilerQuiescer
+	httpserver.TemplateReconciler
+}
+
+func optionalManagerTemplateReconciler(reconciler *templreconciler.SingleClusterReconciler) managerTemplateReconciler {
+	if reconciler == nil {
+		return nil
+	}
+	return reconciler
 }
 
 const (

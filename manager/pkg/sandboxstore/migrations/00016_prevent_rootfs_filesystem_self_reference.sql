@@ -5,11 +5,14 @@ SET source_filesystem_id = NULL,
     updated_at = NOW()
 WHERE source_filesystem_id = filesystem_id;
 
-ALTER TABLE manager.rootfs_filesystems
-    ADD CONSTRAINT rootfs_filesystems_source_not_self
-    CHECK (source_filesystem_id IS NULL OR source_filesystem_id <> filesystem_id);
+-- Do not add a CHECK constraint while a region may still run a legacy manager.
+-- The legacy same-sandbox restore statement can temporarily write this value,
+-- so enforcing it here would make the additive schema incompatible with an old
+-- data-plane cluster. Current writers already avoid self-references. Add the
+-- constraint in a later migration after every legacy writer has been retired
+-- and the cleanup above has been repeated.
 
 -- +goose Down
 
-ALTER TABLE manager.rootfs_filesystems
-    DROP CONSTRAINT rootfs_filesystems_source_not_self;
+-- The cleanup is intentionally irreversible. Restoring a corrupt
+-- self-reference would recreate a cycle in the legacy filesystem graph.

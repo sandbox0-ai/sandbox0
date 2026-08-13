@@ -88,6 +88,35 @@ func TestSandboxDesiredStateMigrationRepairsLegacyObservedStatuses(t *testing.T)
 	assert.Equal(t, int64(3), active)
 }
 
+func TestMixedVersionSchemaAllowsLegacySameSandboxRestore(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO manager.rootfs_filesystems (filesystem_id, team_id)
+		VALUES ('legacy-sandbox', 'team-1')
+	`)
+	require.NoError(t, err)
+
+	// A manager from before the COW v3 rollout can write this transient value
+	// when it restores a snapshot into its source sandbox. The additive schema
+	// must accept that statement until every legacy writer has been retired.
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.rootfs_filesystems
+		SET source_filesystem_id = filesystem_id
+		WHERE filesystem_id = 'legacy-sandbox'
+	`)
+	require.NoError(t, err)
+
+	var sourceFilesystemID string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT source_filesystem_id
+		FROM manager.rootfs_filesystems
+		WHERE filesystem_id = 'legacy-sandbox'
+	`).Scan(&sourceFilesystemID))
+	assert.Equal(t, "legacy-sandbox", sourceFilesystemID)
+}
+
 func TestRootFSV3PersistenceSnapshotForkRestoreAndCAS(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)

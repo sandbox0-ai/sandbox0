@@ -2,7 +2,9 @@ package templateimagefs
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	api "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
@@ -10,10 +12,51 @@ import (
 	templstore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+func TestRunReportsClaimFailure(t *testing.T) {
+	queue := &workerQueueStub{claimErr: errors.New("claim queue unavailable")}
+	logCore, observedLogs := observer.New(zap.WarnLevel)
+	worker := &Worker{
+		queue:  queue,
+		config: Config{PollInterval: time.Millisecond, ClaimTimeout: time.Second, EnsureInterval: time.Second},
+		logger: zap.New(logCore),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+	require.Eventually(t, func() bool {
+		return observedLogs.FilterMessage("Failed to claim template ImageFS revision").Len() == 1
+	}, time.Second, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+	require.GreaterOrEqual(t, queue.claimCalls, 1)
+	require.Equal(t, "claim queue unavailable", observedLogs.All()[0].ContextMap()["error"])
+}
+
+func TestRunBoundsStuckClaim(t *testing.T) {
+	queue := &workerQueueStub{blockClaim: true}
+	logCore, observedLogs := observer.New(zap.WarnLevel)
+	worker := &Worker{
+		queue:  queue,
+		config: Config{PollInterval: time.Millisecond, ClaimTimeout: 10 * time.Millisecond, EnsureInterval: time.Second},
+		logger: zap.New(logCore),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+	require.Eventually(t, func() bool {
+		entries := observedLogs.FilterMessage("Failed to claim template ImageFS revision").All()
+		return len(entries) == 1 && entries[0].ContextMap()["error"] == context.DeadlineExceeded.Error()
+	}, time.Second, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+}
 
 func TestEnsureTemplateRevisionImportsInShadowWithoutSelecting(t *testing.T) {
 	tpl := imageFSWorkerTestTemplate()
@@ -112,6 +155,22 @@ type workerQueueStub struct {
 	ensureCalls int
 	selectCalls int
 	clearCalls  int
+	claimCalls  int
+	claimErr    error
+	blockClaim  bool
+}
+
+func (s *workerQueueStub) ListTemplates(context.Context) ([]*template.Template, error) {
+	return nil, nil
+}
+
+func (s *workerQueueStub) ClaimTemplateImageRevision(ctx context.Context, _ string, _ time.Duration, _, _ []string) (*template.TemplateImageRevision, error) {
+	s.claimCalls++
+	if s.blockClaim {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return nil, s.claimErr
 }
 
 func (s *workerQueueStub) EnsureTemplateImageRevision(_ context.Context, tpl *template.Template) (*template.TemplateImageRevision, bool, error) {

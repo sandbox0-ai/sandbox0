@@ -58,6 +58,8 @@ type ClaimRequest struct {
 	ExpectedTemplateImageRevisionID   string `json:"-"`
 	PreferredNodeName                 string `json:"-"`
 	RootFSSnapshotterInstance         string `json:"-"`
+	RootFSHeadID                      string `json:"-"`
+	RootFSHeadImage                   string `json:"-"`
 	mayHaveExistingCredentialBindings bool
 }
 
@@ -795,9 +797,11 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 			return pod, true, fmt.Errorf("prepare rootfs snapshot runtime network policy: %w", err)
 		}
 	}
-	pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+	// Full claim readiness depends on the runtime assignment that the caller
+	// republishes after a replacement Pod is returned.
+	pod, err = s.waitForPodRootFSHeadReady(ctx, pod.Namespace, pod.Name, head)
 	if err != nil {
-		return pod, true, fmt.Errorf("wait for rootfs snapshot runtime: %w", err)
+		return pod, true, fmt.Errorf("wait for rootfs snapshot Head runtime: %w", err)
 	}
 	if err := s.saveRestoredRuntimePod(ctx, pod, record); err != nil {
 		return pod, true, err
@@ -1499,6 +1503,12 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	}, s.config.AutoscalerSafeToEvictAnnotationKeys)
 	if instance := strings.TrimSpace(req.RootFSSnapshotterInstance); instance != "" {
 		annotations[controller.AnnotationRootFSSnapshotterInstance] = instance
+	}
+	if headID := strings.TrimSpace(req.RootFSHeadID); headID != "" {
+		annotations[controller.AnnotationRootFSHeadID] = headID
+	}
+	if headImage := strings.TrimSpace(req.RootFSHeadImage); headImage != "" {
+		annotations[controller.AnnotationRootFSHeadImage] = headImage
 	}
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID

@@ -695,11 +695,16 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 				if updated.Spec.Containers[0].Image != head.Image.Name || updated.Annotations[controller.AnnotationRootFSHeadID] == "" {
 					return false, nil, nil
 				}
-				require.Equal(t, types.UID("warm-runtime-uid"), updated.UID)
-				assert.Equal(t, corev1.PullIfNotPresent, updated.Spec.Containers[0].ImagePullPolicy)
-				require.Len(t, updated.Spec.Containers, 2)
-				assert.Equal(t, "registry.example.com/sidecar:v1", updated.Spec.Containers[1].Image)
-				assert.Equal(t, corev1.PullAlways, updated.Spec.Containers[1].ImagePullPolicy)
+				if test.wantReplacement {
+					require.Equal(t, types.UID("replacement-runtime-uid"), updated.UID)
+					assert.Equal(t, corev1.PullNever, updated.Spec.Containers[0].ImagePullPolicy)
+				} else {
+					require.Equal(t, types.UID("warm-runtime-uid"), updated.UID)
+					assert.Equal(t, corev1.PullIfNotPresent, updated.Spec.Containers[0].ImagePullPolicy)
+					require.Len(t, updated.Spec.Containers, 2)
+					assert.Equal(t, "registry.example.com/sidecar:v1", updated.Spec.Containers[1].Image)
+					assert.Equal(t, corev1.PullAlways, updated.Spec.Containers[1].ImagePullPolicy)
+				}
 				assert.Equal(t, snapshotterInstance, updated.Annotations[controller.AnnotationRootFSSnapshotterInstance])
 				assert.Equal(t, head.Reference.HeadID, updated.Annotations[controller.AnnotationRootFSHeadID])
 				assert.Equal(t, head.Image.Name, updated.Annotations[controller.AnnotationRootFSHeadImage])
@@ -739,8 +744,11 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 					Ready:   true,
 					State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 				}}
-				setRuntimeTestCondition(created, corev1.PodReady, corev1.ConditionTrue, "RuntimeReady", "runtime is ready")
-				setRuntimeTestCondition(created, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionTrue, "RuntimeReady", "runtime is ready")
+				// A replacement Pod cannot be runtime-ready before its assignment is
+				// published and storage is bound. Head identity readiness must not
+				// introduce a circular dependency on that later activation.
+				setRuntimeTestCondition(created, corev1.PodReady, corev1.ConditionFalse, "RuntimePending", "runtime assignment is not active")
+				setRuntimeTestCondition(created, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionFalse, "RuntimePending", "runtime assignment is not active")
 				require.NoError(t, indexer.Add(created.DeepCopy()))
 				return false, nil, nil
 			})
@@ -1021,6 +1029,8 @@ func TestActivateRuntimeWithRootFSHeadReplacesAlwaysPullPod(t *testing.T) {
 	assert.Equal(t, corev1.PullNever, replacement.Spec.Containers[0].ImagePullPolicy)
 	assert.Equal(t, current.Spec.NodeName, replacement.Spec.NodeName)
 	assert.Equal(t, snapshotterInstance, replacement.Annotations[controller.AnnotationRootFSSnapshotterInstance])
+	assert.Equal(t, head.Reference.HeadID, replacement.Annotations[controller.AnnotationRootFSHeadID])
+	assert.Equal(t, head.Image.Name, replacement.Annotations[controller.AnnotationRootFSHeadImage])
 }
 
 func TestFinishRestoredSandboxRuntimeUsesTemplateBaselineWithoutPublishedHead(t *testing.T) {

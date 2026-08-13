@@ -578,7 +578,8 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 				return pod, err
 			}
 			phaseStarted = time.Now()
-			pod, err = s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+			// Full claim readiness depends on the runtime assignment published below.
+			pod, err = s.waitForPodRootFSHeadReady(ctx, pod.Namespace, pod.Name, rootFSHead)
 			s.observeClaimPhase(record.TemplateID, claimType, "rootfs_head_runtime_ready", phaseStarted, err)
 			if err != nil {
 				return pod, err

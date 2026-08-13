@@ -277,6 +277,8 @@ func (s *SandboxService) createRootFSHeadReplacementPod(
 	replacementRequest := *req
 	replacementRequest.PreferredNodeName = current.Spec.NodeName
 	replacementRequest.RootFSSnapshotterInstance = snapshotterInstance
+	replacementRequest.RootFSHeadID = head.Reference.HeadID
+	replacementRequest.RootFSHeadImage = head.Image.Name
 	replacement, err := s.createNewPod(ctx, rootFSTemplate, &replacementRequest)
 	if err != nil {
 		return current, fmt.Errorf("create rootfs Head runtime: %w", err)

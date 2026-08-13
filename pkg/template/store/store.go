@@ -23,6 +23,8 @@ type TemplateStore interface {
 // TemplateImageRevisionStore owns region-wide OCI resolution and ImageFS import leases.
 type TemplateImageRevisionStore interface {
 	EnsureTemplateImageRevision(ctx context.Context, tpl *template.Template) (*template.TemplateImageRevision, bool, error)
+	SelectCurrentTemplateImageRevision(ctx context.Context, revision *template.TemplateImageRevision) error
+	ClearCurrentTemplateImageRevision(ctx context.Context, scope, teamID, templateID string) error
 	GetCurrentTemplateImageRevision(ctx context.Context, scope, teamID, templateID string) (*template.TemplateImageRevision, error)
 	ClaimTemplateImageRevision(ctx context.Context, workerID string, leaseDuration time.Duration) (*template.TemplateImageRevision, error)
 	RenewTemplateImageRevisionLease(ctx context.Context, revisionID, workerID string, leaseDuration time.Duration) error

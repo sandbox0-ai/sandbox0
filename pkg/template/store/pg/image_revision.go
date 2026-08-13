@@ -20,7 +20,9 @@ const templateImageRevisionSelectColumns = `
 	created_at, updated_at
 `
 
-// EnsureTemplateImageRevision creates or reuses the immutable revision for a template spec.
+// EnsureTemplateImageRevision creates or reuses the immutable revision for a
+// template spec without selecting it for claims. Selection is a separate
+// rollout decision so imports can run in shadow mode.
 func (s *Store) EnsureTemplateImageRevision(ctx context.Context, tpl *template.Template) (*template.TemplateImageRevision, bool, error) {
 	if s == nil || s.pool == nil {
 		return nil, false, fmt.Errorf("template store is not configured")
@@ -56,17 +58,54 @@ func (s *Store) EnsureTemplateImageRevision(ctx context.Context, tpl *template.T
 	if err != nil {
 		return nil, false, fmt.Errorf("load template image revision: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE scheduler_templates
-		SET current_image_revision_id = $4
-		WHERE scope = $1 AND team_id = $2 AND template_id = $3
-	`, revision.Scope, revision.TeamID, revision.TemplateID, stored.RevisionID); err != nil {
-		return nil, false, fmt.Errorf("select current template image revision: %w", err)
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("commit template image revision: %w", err)
 	}
 	return stored, tag.RowsAffected() == 1, nil
+}
+
+// SelectCurrentTemplateImageRevision makes one immutable revision visible to
+// readiness checks and routing. The revision must belong to the same template.
+func (s *Store) SelectCurrentTemplateImageRevision(ctx context.Context, revision *template.TemplateImageRevision) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("template store is not configured")
+	}
+	if revision == nil || strings.TrimSpace(revision.RevisionID) == "" {
+		return fmt.Errorf("template image revision is required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE scheduler_templates t
+		SET current_image_revision_id = r.revision_id
+		FROM scheduler_template_image_revisions r
+		WHERE t.scope = $1 AND t.team_id = $2 AND t.template_id = $3
+			AND r.revision_id = $4
+			AND r.scope = t.scope AND r.team_id = t.team_id AND r.template_id = t.template_id
+	`, revision.Scope, revision.TeamID, revision.TemplateID, revision.RevisionID)
+	if err != nil {
+		return fmt.Errorf("select current template image revision: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("select current template image revision %q: template or revision not found", revision.RevisionID)
+	}
+	return nil
+}
+
+// ClearCurrentTemplateImageRevision returns a template to the legacy claim
+// path without deleting shadow-imported immutable revisions.
+func (s *Store) ClearCurrentTemplateImageRevision(ctx context.Context, scope, teamID, templateID string) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("template store is not configured")
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE scheduler_templates
+		SET current_image_revision_id = NULL
+		WHERE scope = $1 AND team_id = $2 AND template_id = $3
+			AND current_image_revision_id IS NOT NULL
+	`, scope, teamID, templateID)
+	if err != nil {
+		return fmt.Errorf("clear current template image revision: %w", err)
+	}
+	return nil
 }
 
 // GetCurrentTemplateImageRevision loads the revision selected by the template.

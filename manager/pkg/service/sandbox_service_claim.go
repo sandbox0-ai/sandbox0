@@ -413,6 +413,26 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	s.observeClaimPhase(req.Template, "unknown", "validate_resources", phaseStarted, nil)
+	logicalTemplateID := req.Template
+	templateScope := ""
+	if template.Labels != nil {
+		if value := strings.TrimSpace(template.Labels["sandbox0.ai/template-logical-id"]); value != "" {
+			logicalTemplateID = value
+		}
+		templateScope = strings.TrimSpace(template.Labels["sandbox0.ai/template-scope"])
+	}
+	admittedToS0FS := s.config.S0FSAdmission.Admits(templateScope, req.TeamID, logicalTemplateID)
+	if admittedToS0FS {
+		if req.SnapshotID != "" {
+			return nil, fmt.Errorf("%w: S0FS admission does not support legacy snapshot claims", ErrDataPlaneNotReady)
+		}
+		revision := template.Status.ImageRevision
+		if revision == nil || revision.State != v1alpha1.TemplateImageRevisionStateReady || strings.TrimSpace(revision.ImageFSHeadID) == "" {
+			return nil, fmt.Errorf("%w: admitted template image revision is not ready", ErrDataPlaneNotReady)
+		}
+	} else if s.config.S0FSAdmission.RejectLegacyClaims() {
+		return nil, fmt.Errorf("%w: legacy rootfs claims are disabled on this data plane", ErrDataPlaneNotReady)
+	}
 	if strings.TrimSpace(req.SandboxID) == "" {
 		req.SandboxID, err = s.generateStableSandboxID(template)
 		if err != nil {
@@ -430,7 +450,11 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	s.observeClaimPhase(req.Template, "unknown", "validate_template_mounts", phaseStarted, nil)
-	if response, handled, carrierErr := s.claimS0FSCarrier(ctx, template, req); handled {
+	if admittedToS0FS {
+		response, handled, carrierErr := s.claimS0FSCarrier(ctx, template, req)
+		if !handled {
+			carrierErr = fmt.Errorf("%w: S0FS carrier runtime is not configured", ErrDataPlaneNotReady)
+		}
 		if carrierErr != nil && metrics != nil {
 			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
 		}

@@ -29,6 +29,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -90,6 +91,52 @@ func TestClaimSandboxWaitsForExpectedImageRevisionProjection(t *testing.T) {
 	})
 	if !errors.Is(err, ErrDataPlaneNotReady) {
 		t.Fatalf("ClaimSandbox() error = %v, want ErrDataPlaneNotReady", err)
+	}
+}
+
+func TestClaimSandboxRejectsUnmatchedLegacyClaimOnGreenDataPlane(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	template.Name = naming.TemplateNameForCluster(naming.ScopeTeam, "team-a", "default")
+	template.Labels = map[string]string{
+		"sandbox0.ai/template-scope":      naming.ScopeTeam,
+		"sandbox0.ai/template-logical-id": "default",
+	}
+	admission, err := s0fsrollout.NewAdmission("cold", []string{"team-b"}, nil, true, false)
+	if err != nil {
+		t.Fatalf("NewAdmission() error = %v", err)
+	}
+	svc := &SandboxService{
+		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		config:         SandboxServiceConfig{S0FSAdmission: admission},
+		logger:         zap.NewNop(),
+	}
+
+	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{Template: "default", TeamID: "team-a", UserID: "user-a"})
+	if !errors.Is(err, ErrDataPlaneNotReady) || !strings.Contains(err.Error(), "legacy rootfs claims are disabled") {
+		t.Fatalf("ClaimSandbox() error = %v, want fail-closed legacy rejection", err)
+	}
+}
+
+func TestClaimSandboxDoesNotFallbackWhenAdmittedRevisionIsNotReady(t *testing.T) {
+	template := newSandboxResourceTestTemplate(t)
+	template.Name = naming.TemplateNameForCluster(naming.ScopeTeam, "team-a", "default")
+	template.Labels = map[string]string{
+		"sandbox0.ai/template-scope":      naming.ScopeTeam,
+		"sandbox0.ai/template-logical-id": "default",
+	}
+	admission, err := s0fsrollout.NewAdmission("cold", []string{"team-a"}, nil, true, false)
+	if err != nil {
+		t.Fatalf("NewAdmission() error = %v", err)
+	}
+	svc := &SandboxService{
+		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
+		config:         SandboxServiceConfig{S0FSAdmission: admission},
+		logger:         zap.NewNop(),
+	}
+
+	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{Template: "default", TeamID: "team-a", UserID: "user-a"})
+	if !errors.Is(err, ErrDataPlaneNotReady) || !strings.Contains(err.Error(), "revision is not ready") {
+		t.Fatalf("ClaimSandbox() error = %v, want admitted revision not-ready rejection", err)
 	}
 }
 

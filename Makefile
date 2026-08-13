@@ -40,7 +40,7 @@ S0FS_POSIX_CI_FSSTRESS_PROCESSES ?= 4
 VERSION ?= latest
 TAG ?= $(VERSION)
 PROCD_BIN_TAG ?= $(TAG)-procd-bin
-CARRIER_BASE_TAG ?= carrier-base-v1
+CARRIER_BASE_TAG ?= $(TAG)-carrier-base
 
 # Colors for output
 YELLOW := \033[1;33m

@@ -250,7 +250,7 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 				_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())
 				return nil, err
 			}
-			pod, claimType, err = s.allocateS0FSCarrier(ctx, template, req)
+			pod, claimType, err = s.allocateS0FSCarrier(ctx, template, req, s.config.S0FSAdmission.UsesSharedCarrier())
 			s.observeClaimPhase(record.TemplateID, claimType, "allocate_s0fs_carrier", phaseStarted, err)
 			if err != nil {
 				_ = s.abortLifecycleTxn(context.Background(), sandboxID, txn.ID, err.Error())

@@ -230,7 +230,13 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 
 	var selected *template.Cluster
 	selectedBy := ""
-	if templateUsesReadyS0FSImageRevision(tpl) {
+	usesS0FS := templateUsesReadyS0FSImageRevision(tpl)
+	if usesS0FS {
+		allocations = s.s0fsCapableAllocations(allocations, clusterMap, maxAge)
+		if len(allocations) == 0 {
+			s.recordRoutingDecision("", "s0fs_runtime_unavailable")
+			return nil, tpl, "", nil
+		}
 		selected = s.selectClusterBySharedCarrierWithAllocations(allocations, clusterMap, maxAge)
 		if selected != nil {
 			selectedBy = "shared_carrier"
@@ -278,6 +284,27 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	return selected, tpl, selectedBy, nil
 }
 
+func (s *Server) s0fsCapableAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) []*template.TemplateAllocation {
+	capable := make([]*template.TemplateAllocation, 0, len(allocations))
+	for _, alloc := range allocations {
+		cluster := clusterMap[alloc.ClusterID]
+		if cluster == nil || !cluster.Enabled {
+			continue
+		}
+		age, ok := s.reconciler.GetClusterSummaryAge(cluster.ClusterID)
+		s.recordClusterSummaryAge(cluster.ClusterID)
+		if !ok || age > maxAge {
+			continue
+		}
+		summary, ok := s.reconciler.GetClusterSummary(cluster.ClusterID)
+		if !ok || summary == nil || !summary.S0FSRuntimeReady {
+			continue
+		}
+		capable = append(capable, alloc)
+	}
+	return capable
+}
+
 func templateUsesReadyS0FSImageRevision(tpl *template.Template) bool {
 	return tpl != nil && tpl.Status != nil && tpl.Status.ImageRevision != nil &&
 		tpl.Status.ImageRevision.State == v1alpha1.TemplateImageRevisionStateReady &&
@@ -300,7 +327,7 @@ func (s *Server) selectClusterBySharedCarrierWithAllocations(allocations []*temp
 			continue
 		}
 		summary, ok := s.reconciler.GetClusterSummary(cluster.ClusterID)
-		if !ok || summary == nil || summary.SharedCarrierReadyCount <= 0 {
+		if !ok || summary == nil || !summary.S0FSRuntimeReady || summary.SharedCarrierReadyCount <= 0 {
 			continue
 		}
 		headroom := clusterAvailableHeadroom(summary, s.cfg.PodsPerNode)

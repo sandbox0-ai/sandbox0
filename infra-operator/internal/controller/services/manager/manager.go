@@ -435,9 +435,9 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 		cfg.SharedCarrierPool.Namespace = compiledPlan.Scope.Namespace
 	}
 	if cfg.SharedCarrierPool.CarrierImageRef == "" {
-		cfg.SharedCarrierPool.CarrierImageRef = fmt.Sprintf("%s:carrier-base-v1", imageRepo)
+		cfg.SharedCarrierPool.CarrierImageRef = fmt.Sprintf("%s:%s-carrier-base", imageRepo, imageTag)
 	}
-	if cfg.SharedCarrierPool.MinIdle == 0 && cfg.SharedCarrierPool.MaxIdle == 0 {
+	if cfg.SharedCarrierPool.Enabled && cfg.SharedCarrierPool.MinIdle == 0 && cfg.SharedCarrierPool.MaxIdle == 0 {
 		cfg.SharedCarrierPool.MinIdle = 1
 		cfg.SharedCarrierPool.MaxIdle = 2
 	}

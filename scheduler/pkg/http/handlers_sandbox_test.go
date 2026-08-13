@@ -89,8 +89,8 @@ func TestSelectClusterForS0FSTemplatePrefersSharedCarrierCapacity(t *testing.T) 
 			templateIdle:     map[string]map[string]int32{"cluster-a": {clusterTemplateID: 5}},
 			templateStatsAge: map[string]time.Duration{"cluster-a": time.Second},
 			clusterSummaries: map[string]*templreconciler.ClusterSummary{
-				"cluster-a": {SandboxNodeCount: 2, TotalNodeCount: 2, SharedCarrierReadyCount: 1, TotalPodCount: 5},
-				"cluster-b": {SandboxNodeCount: 2, TotalNodeCount: 2, SharedCarrierReadyCount: 3, TotalPodCount: 10},
+				"cluster-a": {SandboxNodeCount: 2, TotalNodeCount: 2, SharedCarrierReadyCount: 1, S0FSRuntimeReady: true, TotalPodCount: 5},
+				"cluster-b": {SandboxNodeCount: 2, TotalNodeCount: 2, SharedCarrierReadyCount: 3, S0FSRuntimeReady: true, TotalPodCount: 10},
 			},
 			clusterSummaryAge: map[string]time.Duration{"cluster-a": time.Second, "cluster-b": time.Second},
 		},
@@ -119,8 +119,8 @@ func TestSelectClusterForS0FSTemplateUsesHeadroomWhenSharedPoolIsEmpty(t *testin
 			templateIdle:     map[string]map[string]int32{"cluster-a": {clusterTemplateID: 5}},
 			templateStatsAge: map[string]time.Duration{"cluster-a": time.Second},
 			clusterSummaries: map[string]*templreconciler.ClusterSummary{
-				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 1, TotalPodCount: 9},
-				"cluster-b": {SandboxNodeCount: 2, TotalNodeCount: 2, TotalPodCount: 5},
+				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 1, S0FSRuntimeReady: true, TotalPodCount: 9},
+				"cluster-b": {SandboxNodeCount: 2, TotalNodeCount: 2, S0FSRuntimeReady: true, TotalPodCount: 5},
 			},
 			clusterSummaryAge: map[string]time.Duration{"cluster-a": time.Second, "cluster-b": time.Second},
 		},
@@ -132,6 +132,59 @@ func TestSelectClusterForS0FSTemplateUsesHeadroomWhenSharedPoolIsEmpty(t *testin
 	}
 	if selected == nil || selected.ClusterID != "cluster-b" || selectedBy != "headroom" {
 		t.Fatalf("selection = (%v,%q), want (cluster-b,headroom)", clusterID(selected), selectedBy)
+	}
+}
+
+func TestSelectClusterForS0FSTemplateNeverRoutesToLegacyRuntime(t *testing.T) {
+	tpl := newRoutingTemplate("tmpl-a")
+	tpl.Status = &v1alpha1.SandboxTemplateStatus{ImageRevision: &v1alpha1.TemplateImageRevisionStatus{
+		State: v1alpha1.TemplateImageRevisionStateReady, ImageFSHeadID: "head-1",
+	}}
+	server := newRoutingTestServer(
+		tpl,
+		[]*template.TemplateAllocation{newRoutingAllocation("legacy", 1, 2), newRoutingAllocation("green", 1, 2)},
+		[]*template.Cluster{newRoutingCluster("legacy", 100), newRoutingCluster("green", 1)},
+		&fakeRoutingReconciler{
+			clusterSummaries: map[string]*templreconciler.ClusterSummary{
+				"legacy": {SandboxNodeCount: 10, TotalNodeCount: 10, TotalPodCount: 0},
+				"green":  {SandboxNodeCount: 1, TotalNodeCount: 1, S0FSRuntimeReady: true, TotalPodCount: 9},
+			},
+			clusterSummaryAge: map[string]time.Duration{"legacy": time.Second, "green": time.Second},
+		},
+	)
+
+	selected, _, _, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
+	if err != nil {
+		t.Fatalf("selectClusterForTemplate() error = %v", err)
+	}
+	if selected == nil || selected.ClusterID != "green" {
+		t.Fatalf("selected cluster = %v, want S0FS-capable green", clusterID(selected))
+	}
+}
+
+func TestSelectClusterForS0FSTemplateFailsClosedWithoutCapableRuntime(t *testing.T) {
+	tpl := newRoutingTemplate("tmpl-a")
+	tpl.Status = &v1alpha1.SandboxTemplateStatus{ImageRevision: &v1alpha1.TemplateImageRevisionStatus{
+		State: v1alpha1.TemplateImageRevisionStateReady, ImageFSHeadID: "head-1",
+	}}
+	server := newRoutingTestServer(
+		tpl,
+		[]*template.TemplateAllocation{newRoutingAllocation("legacy", 1, 2)},
+		[]*template.Cluster{newRoutingCluster("legacy", 100)},
+		&fakeRoutingReconciler{
+			clusterSummaries: map[string]*templreconciler.ClusterSummary{
+				"legacy": {SandboxNodeCount: 10, TotalNodeCount: 10, SharedCarrierReadyCount: 10},
+			},
+			clusterSummaryAge: map[string]time.Duration{"legacy": time.Second},
+		},
+	)
+
+	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
+	if err != nil {
+		t.Fatalf("selectClusterForTemplate() error = %v", err)
+	}
+	if selected != nil || selectedBy != "" {
+		t.Fatalf("selection = (%v,%q), want unavailable", clusterID(selected), selectedBy)
 	}
 }
 

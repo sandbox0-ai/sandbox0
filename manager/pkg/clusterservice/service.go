@@ -27,6 +27,7 @@ type ClusterSummary struct {
 	PendingActivePodCount      int32  `json:"pending_active_pod_count"`
 	SharedCarrierReadyCount    int32  `json:"shared_carrier_ready_count"`
 	SharedCarrierCreatingCount int32  `json:"shared_carrier_creating_count"`
+	S0FSRuntimeReady           bool   `json:"s0fs_runtime_ready"`
 	TotalPodCount              int32  `json:"total_pod_count"`
 }
 
@@ -54,10 +55,19 @@ type TemplateLister interface {
 
 // ClusterService handles cluster-related operations
 type ClusterService struct {
-	podLister      corelisters.PodLister
-	nodeLister     corelisters.NodeLister
-	templateLister TemplateLister
-	logger         *zap.Logger
+	podLister        corelisters.PodLister
+	nodeLister       corelisters.NodeLister
+	templateLister   TemplateLister
+	logger           *zap.Logger
+	s0fsRuntimeReady bool
+}
+
+// SetS0FSRuntimeReady publishes whether this manager has a working carrier
+// allocator for S0FS create and resume operations.
+func (s *ClusterService) SetS0FSRuntimeReady(ready bool) {
+	if s != nil {
+		s.s0fsRuntimeReady = ready
+	}
 }
 
 // NewClusterService creates a new ClusterService
@@ -166,6 +176,7 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 		PendingActivePodCount:      pendingActiveCount,
 		SharedCarrierReadyCount:    sharedCarrierReadyCount,
 		SharedCarrierCreatingCount: sharedCarrierCreatingCount,
+		S0FSRuntimeReady:           s.s0fsRuntimeReady,
 		TotalPodCount:              idleCount + activeCount + sharedCarrierReadyCount + sharedCarrierCreatingCount,
 	}
 	return summary, nil

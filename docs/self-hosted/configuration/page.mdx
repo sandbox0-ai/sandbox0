@@ -70,9 +70,9 @@ Team Quota is the claim admission boundary. The `sandbox_claims` rate policy con
 
 After quota admission, manager claims a ready idle pod or creates a cold pod directly. By default, warm-pool ReplicaSets scale to each template's configured `minIdle`. In multi-cluster mode, scheduler routing prefers ready idle capacity, then estimated cluster headroom, configured weight, and deterministic fallback order.
 
-### Experimental Shared Carrier Pool
+### S0FS Rootfs Rollout
 
-`services.manager.config.sharedCarrierPool` enables one platform-owned warm pool for the data-plane cluster. User template images are resolved to immutable revisions and imported into S0FS before they become claimable. A compatible template takes a unique pre-created carrier Pod; a template with an unsupported Pod shape, or a claim made while the pool is empty, uses a cold S0FS carrier instead of creating another warm pool.
+S0FS template imports, new-claim admission, and shared warm capacity are independent rollout controls. This lets an operator import images in shadow mode, admit an explicit cohort through cold carriers, and only then enable the single platform-owned warm pool. Existing S0FS sandboxes remain resumable when new admission is switched off.
 
 ```yaml
 spec:
@@ -80,12 +80,23 @@ spec:
         manager:
             config:
                 sharedCarrierPool:
-                    enabled: true
+                    enabled: false
                     minIdle: 2
                     maxIdle: 4
+                templateImageFS:
+                    enabled: true
+                s0fsRuntime:
+                    enabled: true
+                    admission:
+                        mode: cold
+                        teamIds:
+                            - internal-canary-team
+                        rejectLegacyClaims: true
 ```
 
-When enabled, template `pool.minIdle` and `pool.maxIdle` are deprecated compatibility fields and do not own S0FS carrier capacity. The operator derives `carrierImageRef` as `<infra-image-repository>:carrier-base-v1`; override it only when you publish the tiny carrier-base artifact in another repository. The init waiter and importer primer continue to use the manager infra image, because the carrier base intentionally contains no shell.
+`templateImageFS.enabled` imports every eligible template revision even when admission mode is `off`; only admitted revisions are selected for claims. `teamIds` applies only to private templates, while `templateIds` matches the logical template ID in either scope. Empty allowlists admit nothing. Set mode to `shared` and `sharedCarrierPool.enabled: true` after the cold cohort is healthy. On a dedicated green data plane, `rejectLegacyClaims: true` prevents an unmatched request from creating a legacy rootfs.
+
+When shared admission is enabled, template `pool.minIdle` and `pool.maxIdle` are deprecated compatibility fields and do not own S0FS carrier capacity. The operator derives the immutable carrier artifact as `<infra-image-repository>:<infra-image-tag>-carrier-base`; override `carrierImageRef` only when you publish that artifact elsewhere. The init waiter and importer primer continue to use the manager infra image, because the carrier base intentionally contains no shell.
 
 Treat this mode as experimental until your production-like cluster demonstrates stable claim and resume latency. A revision that is ready in the control plane but has not reached the selected data plane returns a retryable unavailable response rather than falling back to a legacy image Pod.
 

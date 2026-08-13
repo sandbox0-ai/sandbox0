@@ -133,7 +133,6 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 	Expect(team).NotTo(BeNil())
 
 	originalTeamID := session.SelectedTeamID()
-	var sandboxIDs []string
 	defer func() {
 		defer session.SelectTeam(originalTeamID)
 		session.SelectTeam(team.Id)
@@ -144,10 +143,8 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 		if err := clearNetdRedisTeamBandwidthKeys(env, team.Id); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
 		}
-		for _, id := range sandboxIDs {
-			if err := session.DeleteSandbox(env.TestCtx.Context, GinkgoT(), id); err != nil {
-				cleanupErrs = append(cleanupErrs, err)
-			}
+		if err := session.DeleteAllSandboxesEventually(env.TestCtx.Context, GinkgoT(), 2*time.Minute); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
 		}
 		if err := session.DeleteTeamEventually(env.TestCtx.Context, GinkgoT(), team.Id, 2*time.Minute); err != nil {
 			cleanupErrs = append(cleanupErrs, err)
@@ -169,9 +166,7 @@ func assertNetdRedisTeamBandwidthLimit(env *framework.ScenarioEnv, session *e2eu
 	Expect(status).To(Equal(http.StatusOK))
 
 	first := claimSandboxEventually(env, session, "default")
-	sandboxIDs = append(sandboxIDs, first.SandboxId)
 	second := claimSandboxEventually(env, session, "default")
-	sandboxIDs = append(sandboxIDs, second.SandboxId)
 
 	sandbox, status, err := session.GetSandbox(env.TestCtx.Context, GinkgoT(), first.SandboxId)
 	Expect(err).NotTo(HaveOccurred())

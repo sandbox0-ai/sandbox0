@@ -504,17 +504,34 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		return pod, err
 	}
 	s0fsCarrier := record.RootFSRuntimeVersion == sandboxstore.RootFSRuntimeS0FSV2 && strings.TrimSpace(pod.Annotations[carrier.AnnotationSlot]) != ""
+	phaseStarted := time.Now()
+	rootFSHead, err := s.latestRootFSHead(ctx, record.ID)
+	s.observeClaimPhase(record.TemplateID, claimType, "load_rootfs_head", phaseStarted, err)
+	if err != nil {
+		return pod, fmt.Errorf("load rootfs Head: %w", err)
+	}
+	// A missing published Head means the lost runtime had no durable rootfs
+	// checkpoint. Keep the claimed template baseline and start a new sync below.
+	if s0fsCarrier && rootFSHead == nil {
+		return pod, fmt.Errorf("S0FS carrier resume requires a published rootfs Head")
+	}
 	if claimType == "cold" && !s0fsCarrier {
 		networkPod, err := s.waitForColdPodNetworkPolicy(ctx, pod, record.TeamID)
 		if err != nil {
 			return pod, err
 		}
 		pod = networkPod
-		readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
-		if err != nil {
-			return pod, fmt.Errorf("wait for pod claim readiness: %w", err)
+		// A published Head replaces the template container below. Waiting for the
+		// template container's full readiness first adds an entire probe period
+		// without protecting the restored runtime. The Head container still has
+		// its image identity checked before storage and assignment activation.
+		if rootFSHead == nil {
+			readyPod, err := s.waitForPodClaimReady(ctx, pod.Namespace, pod.Name)
+			if err != nil {
+				return pod, fmt.Errorf("wait for pod claim readiness: %w", err)
+			}
+			pod = readyPod
 		}
-		pod = readyPod
 	}
 	req := &ClaimRequest{
 		TeamID:               record.TeamID,
@@ -530,19 +547,8 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if strings.TrimSpace(record.OwnerKind) != "" {
 		req.Metadata = &ClaimMetadata{OwnerKind: record.OwnerKind}
 	}
-	phaseStarted := time.Now()
-	rootFSHead, err := s.latestRootFSHead(ctx, record.ID)
-	s.observeClaimPhase(record.TemplateID, claimType, "load_rootfs_head", phaseStarted, err)
-	if err != nil {
-		return pod, fmt.Errorf("load rootfs Head: %w", err)
-	}
-	// A missing published Head means the lost runtime had no durable rootfs
-	// checkpoint. Keep the claimed template baseline and start a new sync below.
 	resetCopiedSessionState := false
 	runtimeRevision := ""
-	if s0fsCarrier && rootFSHead == nil {
-		return pod, fmt.Errorf("S0FS carrier resume requires a published rootfs Head")
-	}
 	if rootFSHead != nil {
 		resetCopiedSessionState = strings.TrimSpace(rootFSHead.SourceSandboxID) != "" && strings.TrimSpace(rootFSHead.SourceSandboxID) != strings.TrimSpace(record.ID)
 		var recreated bool

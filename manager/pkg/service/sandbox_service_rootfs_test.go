@@ -620,9 +620,12 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 		name            string
 		sourceSandboxID string
 		wantReset       bool
+		claimType       string
+		unreadyTemplate bool
 	}{
-		{name: "own Head", sourceSandboxID: "sandbox-1"},
-		{name: "forked Head", sourceSandboxID: "source-sandbox", wantReset: true},
+		{name: "own Head", sourceSandboxID: "sandbox-1", claimType: "hot"},
+		{name: "forked Head", sourceSandboxID: "source-sandbox", wantReset: true, claimType: "hot"},
+		{name: "cold unready template", sourceSandboxID: "sandbox-1", claimType: "cold", unreadyTemplate: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var calls []string
@@ -662,6 +665,10 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 			currentPod.Status.ContainerStatuses[0].ImageID = "containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 			currentPod.Status.HostIP = ctldURL.Hostname()
 			currentPod.Status.PodIP = "10.0.0.10"
+			if test.unreadyTemplate {
+				currentPod.Spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: v1alpha1.SandboxPodReadinessConditionType}}
+				setRuntimeTestCondition(currentPod, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionFalse, "RuntimePending", "template runtime is not ready")
+			}
 			head := rootFSHeadTestFixture(t, sandboxID, "team-1", "head-v1", 3)
 			head.SourceSandboxID = test.sourceSandboxID
 			store := &memorySandboxStore{
@@ -738,7 +745,9 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 				DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 			}
 
-			restoredPod, err := svc.finishRestoredSandboxRuntime(context.Background(), currentPod, record, "hot")
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			restoredPod, err := svc.finishRestoredSandboxRuntime(ctx, currentPod, record, test.claimType)
 
 			require.NoError(t, err)
 			assert.Equal(t, currentPod.Name, restoredPod.Name)

@@ -20,7 +20,9 @@ func TestToManagerPreservesEgressAuthDefaultResolveTTL(t *testing.T) {
 func TestToManagerPreservesS0FSRolloutControls(t *testing.T) {
 	enabled := true
 	cfg := ToManager(&infrav1alpha1.ManagerConfig{
-		TemplateImageFS: infrav1alpha1.TemplateImageFSConfig{Enabled: &enabled},
+		TemplateImageFS: infrav1alpha1.TemplateImageFSConfig{
+			Enabled: &enabled, TeamIDs: []string{"shadow-team"}, TemplateIDs: []string{"shadow-template"},
+		},
 		S0FSRuntime: infrav1alpha1.S0FSRuntimeConfig{
 			Enabled: true,
 			Admission: infrav1alpha1.S0FSAdmissionConfig{
@@ -30,6 +32,10 @@ func TestToManagerPreservesS0FSRolloutControls(t *testing.T) {
 	})
 	if cfg.TemplateImageFS.Enabled == nil || !*cfg.TemplateImageFS.Enabled || !cfg.S0FSRuntime.Enabled {
 		t.Fatalf("runtime controls = %#v / %#v", cfg.TemplateImageFS, cfg.S0FSRuntime)
+	}
+	if len(cfg.TemplateImageFS.TeamIDs) != 1 || cfg.TemplateImageFS.TeamIDs[0] != "shadow-team" ||
+		len(cfg.TemplateImageFS.TemplateIDs) != 1 || cfg.TemplateImageFS.TemplateIDs[0] != "shadow-template" {
+		t.Fatalf("template ImageFS cohort = %#v, want preserved selectors", cfg.TemplateImageFS)
 	}
 	if cfg.S0FSRuntime.Admission.Mode != "cold" ||
 		len(cfg.S0FSRuntime.Admission.TeamIDs) != 1 ||

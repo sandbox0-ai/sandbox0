@@ -55,6 +55,8 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		enabled := *spec.TemplateImageFS.Enabled
 		cfg.TemplateImageFS.Enabled = &enabled
 	}
+	cfg.TemplateImageFS.TeamIDs = cloneStrings(spec.TemplateImageFS.TeamIDs)
+	cfg.TemplateImageFS.TemplateIDs = cloneStrings(spec.TemplateImageFS.TemplateIDs)
 	cfg.S0FSRuntime = apiconfig.S0FSRuntimeConfig{
 		Enabled: spec.S0FSRuntime.Enabled,
 		Admission: apiconfig.S0FSAdmissionConfig{

@@ -61,3 +61,26 @@ func TestAdmissionRejectsUnknownMode(t *testing.T) {
 		t.Fatal("NewAdmission() error = nil, want unsupported mode error")
 	}
 }
+
+func TestCohortMatchesPrivateTeamAndLogicalTemplate(t *testing.T) {
+	cohort := NewCohort([]string{" team-a "}, []string{" python "})
+	if cohort.Empty() {
+		t.Fatal("explicit cohort is empty")
+	}
+	if !cohort.Matches(naming.ScopeTeam, "team-a", "other") {
+		t.Fatal("private team selector did not match")
+	}
+	if !cohort.Matches(naming.ScopePublic, "", "python") {
+		t.Fatal("public template selector did not match")
+	}
+	if cohort.Matches(naming.ScopePublic, "team-a", "other") {
+		t.Fatal("team selector matched a public template")
+	}
+}
+
+func TestEmptyCohortMatchesNothing(t *testing.T) {
+	cohort := NewCohort(nil, nil)
+	if !cohort.Empty() || cohort.Matches(naming.ScopeTeam, "team-a", "python") {
+		t.Fatal("empty cohort must remain empty and match nothing")
+	}
+}

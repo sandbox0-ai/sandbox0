@@ -26,6 +26,34 @@ func TestEnsureTemplateRevisionImportsInShadowWithoutSelecting(t *testing.T) {
 	require.Equal(t, 1, queue.clearCalls)
 }
 
+func TestEnsureTemplateRevisionSkipsTemplateOutsideImportCohort(t *testing.T) {
+	tpl := imageFSWorkerTestTemplate()
+	queue := &workerQueueStub{}
+	worker := &Worker{queue: queue, config: Config{
+		ImportCohort: s0fsrollout.NewCohort([]string{"team-2"}, []string{"node"}),
+		Admission:    mustAdmission(t, "off", nil, nil),
+	}}
+
+	require.NoError(t, worker.ensureTemplateRevision(context.Background(), tpl))
+	require.Equal(t, 0, queue.ensureCalls)
+	require.Equal(t, 0, queue.selectCalls)
+	require.Equal(t, 1, queue.clearCalls)
+}
+
+func TestEnsureTemplateRevisionImportsTemplateInsideImportCohort(t *testing.T) {
+	tpl := imageFSWorkerTestTemplate()
+	queue := &workerQueueStub{}
+	worker := &Worker{queue: queue, config: Config{
+		ImportCohort: s0fsrollout.NewCohort(nil, []string{"python"}),
+		Admission:    mustAdmission(t, "off", nil, nil),
+	}}
+
+	require.NoError(t, worker.ensureTemplateRevision(context.Background(), tpl))
+	require.Equal(t, 1, queue.ensureCalls)
+	require.Equal(t, 0, queue.selectCalls)
+	require.Equal(t, 1, queue.clearCalls)
+}
+
 func TestEnsureTemplateRevisionSelectsOnlyAdmittedPrivateTeam(t *testing.T) {
 	tpl := imageFSWorkerTestTemplate()
 	queue := &workerQueueStub{}

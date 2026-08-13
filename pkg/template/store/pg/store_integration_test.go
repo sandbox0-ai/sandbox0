@@ -71,6 +71,67 @@ func TestEnsureTemplateImageRevisionStaysShadowUntilSelected(t *testing.T) {
 	}
 }
 
+func TestClaimTemplateImageRevisionFiltersShadowImportCohort(t *testing.T) {
+	store, _ := newTemplateStoreIntegrationTest(t)
+	ctx := context.Background()
+	templates := []*template.Template{
+		{
+			TemplateID: "private-a", Scope: naming.ScopeTeam, TeamID: "team-a", UserID: "user-1",
+			Spec: integrationTemplateSpec("ubuntu:24.04"), CreatedAt: time.Now().UTC(),
+		},
+		{
+			TemplateID: "public-a", Scope: naming.ScopePublic, UserID: "user-1",
+			Spec: integrationTemplateSpec("alpine:3.20"), CreatedAt: time.Now().UTC(),
+		},
+		{
+			TemplateID: "private-b", Scope: naming.ScopeTeam, TeamID: "team-b", UserID: "user-1",
+			Spec: integrationTemplateSpec("debian:12"), CreatedAt: time.Now().UTC(),
+		},
+	}
+	for _, tpl := range templates {
+		if err := store.CreateTemplate(ctx, tpl); err != nil {
+			t.Fatalf("CreateTemplate(%s) error = %v", tpl.TemplateID, err)
+		}
+		if _, created, err := store.EnsureTemplateImageRevision(ctx, tpl); err != nil {
+			t.Fatalf("EnsureTemplateImageRevision(%s) error = %v", tpl.TemplateID, err)
+		} else if !created {
+			t.Fatalf("EnsureTemplateImageRevision(%s) created = false, want true", tpl.TemplateID)
+		}
+	}
+
+	claimed, err := store.ClaimTemplateImageRevision(ctx, "team-worker", time.Minute, []string{"team-a"}, nil)
+	if err != nil {
+		t.Fatalf("team cohort claim error = %v", err)
+	}
+	if claimed == nil || claimed.TemplateID != "private-a" {
+		t.Fatalf("team cohort claim = %#v, want private-a", claimed)
+	}
+
+	claimed, err = store.ClaimTemplateImageRevision(ctx, "template-worker", time.Minute, nil, []string{"public-a"})
+	if err != nil {
+		t.Fatalf("template cohort claim error = %v", err)
+	}
+	if claimed == nil || claimed.TemplateID != "public-a" {
+		t.Fatalf("template cohort claim = %#v, want public-a", claimed)
+	}
+
+	claimed, err = store.ClaimTemplateImageRevision(ctx, "empty-worker", time.Minute, []string{"team-missing"}, []string{"missing"})
+	if err != nil {
+		t.Fatalf("unmatched cohort claim error = %v", err)
+	}
+	if claimed != nil {
+		t.Fatalf("unmatched cohort claim = %#v, want nil", claimed)
+	}
+
+	claimed, err = store.ClaimTemplateImageRevision(ctx, "all-worker", time.Minute, nil, nil)
+	if err != nil {
+		t.Fatalf("import-all claim error = %v", err)
+	}
+	if claimed == nil || claimed.TemplateID != "private-b" {
+		t.Fatalf("import-all claim = %#v, want private-b", claimed)
+	}
+}
+
 func TestClaimTemplateBuildRecoversReconcilingCleanupAfterWorkerCrash(t *testing.T) {
 	store, pool := newTemplateStoreIntegrationTest(t)
 	ctx := context.Background()
@@ -508,7 +569,7 @@ func newTemplateStoreIntegrationTest(t *testing.T) (*Store, *pgxpool.Pool) {
 
 	ctx := context.Background()
 	schema := "template_store_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	pool, err := dbpool.New(ctx, dbpool.Options{DatabaseURL: databaseURL, Schema: schema})
+	pool, err := dbpool.New(ctx, dbpool.Options{DatabaseURL: databaseURL, Schema: schema, MaxConns: 4})
 	if err != nil {
 		t.Fatalf("connect test database: %v", err)
 	}

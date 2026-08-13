@@ -4042,6 +4042,23 @@ spec:
                                   Enabled is intentionally optional. When omitted, sharedCarrierPool.enabled
                                   preserves the pre-rollout behavior during the compatibility window.
                                 type: boolean
+                              teamIds:
+                                description: |-
+                                  TeamIDs imports private templates owned by these teams. When both
+                                  selectors are empty, enabling ImageFS preserves import-all behavior.
+                                items:
+                                  type: string
+                                maxItems: 100
+                                type: array
+                                x-kubernetes-list-type: set
+                              templateIds:
+                                description: TemplateIDs imports matching logical
+                                  template IDs in either scope.
+                                items:
+                                  type: string
+                                maxItems: 100
+                                type: array
+                                x-kubernetes-list-type: set
                             type: object
                           webhookCertPath:
                             default: /tmp/k8s-webhook-server/serving-certs/tls.crt

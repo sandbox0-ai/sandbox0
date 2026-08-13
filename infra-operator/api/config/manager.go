@@ -288,6 +288,11 @@ type TemplateImageFSConfig struct {
 	// Enabled is a pointer so an omitted field can preserve the original
 	// sharedCarrierPool.enabled behavior during the compatibility window.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// TeamIDs imports private templates owned by these teams. Empty team and
+	// template selectors preserve the existing import-all behavior.
+	TeamIDs []string `yaml:"team_ids" json:"teamIds"`
+	// TemplateIDs imports matching logical template IDs in either scope.
+	TemplateIDs []string `yaml:"template_ids" json:"templateIds"`
 }
 
 // S0FSRuntimeConfig controls S0FS carrier capability and new claim admission.

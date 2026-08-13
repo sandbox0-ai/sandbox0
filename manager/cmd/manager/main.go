@@ -46,6 +46,7 @@ import (
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	registryprovider "github.com/sandbox0-ai/sandbox0/pkg/registry"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
@@ -507,6 +508,7 @@ func main() {
 					ClusterID:      naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
 					BaseImageRef:   baseImageRef,
 					PrimerImageRef: cfg.ManagerImage,
+					ImportCohort:   s0fsrollout.NewCohort(cfg.TemplateImageFS.TeamIDs, cfg.TemplateImageFS.TemplateIDs),
 					Admission:      s0fsAdmission,
 				},
 				logger,

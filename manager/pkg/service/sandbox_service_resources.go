@@ -35,13 +35,6 @@ func (s *SandboxService) effectiveSandboxResourceQuota(template *v1alpha1.Sandbo
 	return v1alpha1.NormalizeSandboxResourceQuota(quota), nil
 }
 
-func (s *SandboxService) applySandboxResourceQuota(pod *corev1.Pod, quota v1alpha1.ResourceQuota) error {
-	if pod == nil {
-		return fmt.Errorf("%w: pod is required", ErrInvalidClaimRequest)
-	}
-	return applySandboxResourceQuotaToPodSpec(&pod.Spec, quota)
-}
-
 func (s *SandboxService) resizeSandboxPodResources(ctx context.Context, pod *corev1.Pod, quota v1alpha1.ResourceQuota) (*corev1.Pod, error) {
 	if s == nil {
 		return nil, fmt.Errorf("%w: kubernetes client is not configured", ErrInvalidClaimRequest)

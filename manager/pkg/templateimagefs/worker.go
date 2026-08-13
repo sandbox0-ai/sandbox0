@@ -30,7 +30,7 @@ const (
 	defaultPollInterval = 500 * time.Millisecond
 	defaultClaimTimeout = 5 * time.Second
 	defaultLease        = 10 * time.Minute
-	defaultImportTTL    = 20 * time.Minute
+	defaultImportTTL    = 4 * time.Hour
 	claimErrorLogPeriod = 30 * time.Second
 )
 
@@ -191,6 +191,12 @@ func (w *Worker) ensureTemplateRevision(ctx context.Context, tpl *template.Templ
 }
 
 func (w *Worker) process(parent context.Context, revision *template.TemplateImageRevision) {
+	started := time.Now()
+	w.logger.Info("Template ImageFS import started",
+		zap.String("revisionID", revision.RevisionID),
+		zap.String("templateID", revision.TemplateID),
+		zap.Int("attempt", revision.AttemptCount),
+	)
 	ctx, cancel := context.WithTimeout(parent, w.config.ImportTimeout)
 	defer cancel()
 	stopRenew := make(chan struct{})
@@ -204,7 +210,7 @@ func (w *Worker) process(parent context.Context, revision *template.TemplateImag
 		if releaseErr := w.queue.ReleaseTemplateImageRevision(context.WithoutCancel(parent), revision.RevisionID, w.config.WorkerID, retryAt, err.Error()); releaseErr != nil && !errors.Is(releaseErr, template.ErrTemplateImageRevisionLeaseLost) {
 			w.logger.Warn("Failed to release template ImageFS revision", zap.String("revisionID", revision.RevisionID), zap.Error(releaseErr))
 		}
-		w.logger.Warn("Template ImageFS import failed", zap.String("revisionID", revision.RevisionID), zap.Error(err))
+		w.logger.Warn("Template ImageFS import failed", zap.String("revisionID", revision.RevisionID), zap.Duration("duration", time.Since(started)), zap.Error(err))
 	}
 }
 

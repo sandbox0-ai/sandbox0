@@ -7,6 +7,7 @@ import (
 	"time"
 
 	api "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templstore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
@@ -18,6 +19,34 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+func TestNewWorkerDefaultsToLargeImageImportWindow(t *testing.T) {
+	worker, err := NewWorker(
+		&workerQueueStub{},
+		workerHeadStoreStub{},
+		fake.NewSimpleClientset(),
+		nil,
+		func(context.Context, *corev1.Pod) (string, error) { return "http://ctld", nil },
+		Config{WorkerID: "manager/green", BaseImageRef: "sandbox0ai/infra:carrier-base"},
+		zap.NewNop(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, 4*time.Hour, worker.config.ImportTimeout)
+}
+
+func TestNewWorkerPreservesExplicitImportTimeout(t *testing.T) {
+	worker, err := NewWorker(
+		&workerQueueStub{},
+		workerHeadStoreStub{},
+		fake.NewSimpleClientset(),
+		nil,
+		func(context.Context, *corev1.Pod) (string, error) { return "http://ctld", nil },
+		Config{WorkerID: "manager/green", BaseImageRef: "sandbox0ai/infra:carrier-base", ImportTimeout: 30 * time.Minute},
+		zap.NewNop(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Minute, worker.config.ImportTimeout)
+}
 
 func TestRunReportsClaimFailure(t *testing.T) {
 	queue := &workerQueueStub{claimErr: errors.New("claim queue unavailable")}
@@ -158,6 +187,12 @@ type workerQueueStub struct {
 	claimCalls  int
 	claimErr    error
 	blockClaim  bool
+}
+
+type workerHeadStoreStub struct{}
+
+func (workerHeadStoreStub) StageRootFSHead(context.Context, *sandboxstore.SandboxRootFSHead) error {
+	return nil
 }
 
 func (s *workerQueueStub) ListTemplates(context.Context) ([]*template.Template, error) {

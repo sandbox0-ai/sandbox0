@@ -624,8 +624,8 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 		unreadyTemplate bool
 		wantReplacement bool
 	}{
-		{name: "own Head", sourceSandboxID: "sandbox-1", claimType: "hot"},
-		{name: "forked Head", sourceSandboxID: "source-sandbox", wantReset: true, claimType: "hot"},
+		{name: "own Head", sourceSandboxID: "sandbox-1", claimType: "hot", wantReplacement: true},
+		{name: "forked Head", sourceSandboxID: "source-sandbox", wantReset: true, claimType: "hot", wantReplacement: true},
 		{name: "cold unready template", sourceSandboxID: "sandbox-1", claimType: "cold", unreadyTemplate: true, wantReplacement: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

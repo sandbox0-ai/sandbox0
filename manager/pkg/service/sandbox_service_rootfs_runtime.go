@@ -19,16 +19,16 @@ import (
 )
 
 // activateRuntimeWithRootFSHead activates a materialized Head on the claimed
-// Pod. Reusing a warm Pod preserves its sandbox, network identity, and mounts.
-// Cold Pods are replaced because kubelet can defer an in-place image update
-// until its next sync; there is no published runtime identity to preserve yet.
+// Pod. An unpublished claimed Pod is replaced because kubelet can defer an
+// in-place image update until its next sync. Existing published runtimes keep
+// the in-place fallback so their network identity and mounts are preserved.
 func (s *SandboxService) activateRuntimeWithRootFSHead(
 	ctx context.Context,
 	current *corev1.Pod,
 	template *v1alpha1.SandboxTemplate,
 	req *ClaimRequest,
 	head *sandboxstore.SandboxRootFSHead,
-	replaceColdPod bool,
+	replaceUnpublishedPod bool,
 ) (*corev1.Pod, bool, error) {
 	if s == nil || s.ctldClient == nil || current == nil || template == nil || req == nil || head == nil {
 		return current, false, fmt.Errorf("rootfs Head runtime activation inputs are required")
@@ -58,20 +58,20 @@ func (s *SandboxService) activateRuntimeWithRootFSHead(
 
 	// imagePullPolicy is immutable on an existing Pod. Always would make
 	// kubelet contact sandbox0.local even though ctld has installed the image.
-	// A cold Pod also has no externally visible identity worth retaining, and
-	// replacing it avoids waiting for kubelet's periodic image-change sync.
-	if replaceColdPod || current.Spec.Containers[containerIndex].ImagePullPolicy == corev1.PullAlways {
+	// An unpublished claimed Pod has no externally visible identity worth
+	// retaining, and replacing it avoids kubelet's periodic image-change sync.
+	if replaceUnpublishedPod || current.Spec.Containers[containerIndex].ImagePullPolicy == corev1.PullAlways {
 		if s.logger != nil {
 			reason := "procd imagePullPolicy is Always"
-			if replaceColdPod {
-				reason = "cold rootfs Head activation"
+			if replaceUnpublishedPod {
+				reason = "unpublished rootfs Head activation"
 			}
 			s.logger.Warn("Falling back to a replacement Pod for rootfs Head activation",
 				zap.String("pod", current.Namespace+"/"+current.Name),
 				zap.String("reason", reason),
 			)
 		}
-		replacement, err := s.createRootFSHeadReplacementPod(ctx, current, template, req, head, snapshotterInstance, replaceColdPod)
+		replacement, err := s.createRootFSHeadReplacementPod(ctx, current, template, req, head, snapshotterInstance, replaceUnpublishedPod)
 		return replacement, true, err
 	}
 

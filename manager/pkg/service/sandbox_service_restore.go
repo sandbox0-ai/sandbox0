@@ -563,7 +563,10 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 			pod, err = s.activateS0FSCarrierHead(ctx, pod, rootFSHead, record.TemplateID, claimType)
 		} else {
 			phaseStarted = time.Now()
-			pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead, claimType == "cold")
+			// The replacement runtime is not published until the assignment and
+			// durable record are committed below, so both hot and cold claims can
+			// avoid kubelet's periodic in-place image sync.
+			pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead, true)
 		}
 		s.observeClaimPhase(record.TemplateID, claimType, "materialize_rootfs_head", phaseStarted, err)
 		if err != nil {

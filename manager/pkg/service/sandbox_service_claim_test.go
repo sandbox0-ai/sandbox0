@@ -1445,6 +1445,33 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 	}
 	indexer := newClaimTestPodIndexer(t, idlePod)
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deleteAction := action.(k8stesting.DeleteAction)
+		gracePeriod := deleteAction.GetDeleteOptions().GracePeriodSeconds
+		if gracePeriod == nil || *gracePeriod != 0 {
+			t.Fatalf("replacement delete grace period = %v, want 0", gracePeriod)
+		}
+		deleted, exists, err := indexer.GetByKey(idlePod.Namespace + "/" + deleteAction.GetName())
+		if err == nil && exists {
+			err = indexer.Delete(deleted)
+		}
+		return false, nil, err
+	})
+	var replacementPodName string
+	scheduleCreatedClaimPodInIndexer(t, client, indexer, func(created *corev1.Pod) {
+		replacementPodName = created.Name
+		created.UID = types.UID("replacement-runtime-uid")
+		created.Status.HostIP = ctldURL.Hostname()
+		created.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:    "procd",
+			Image:   sourceHead.Image.Name,
+			ImageID: "containerd://" + sourceHead.Image.ManifestDigest,
+			Ready:   true,
+			State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}
+		setRuntimeTestCondition(created, corev1.PodReady, corev1.ConditionFalse, "RuntimePending", "runtime assignment is not active")
+		setRuntimeTestCondition(created, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionFalse, "RuntimePending", "runtime assignment is not active")
+	})
 	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		updated := action.(k8stesting.UpdateAction).GetObject().(*corev1.Pod)
 		if updated.Spec.Containers[0].Image != sourceHead.Image.Name {
@@ -1515,13 +1542,16 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 	if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive {
 		t.Fatalf("record = %+v, want active claimed sandbox", record)
 	}
-	if record.CurrentPodName != idlePod.Name {
-		t.Fatalf("restored pod = %q, want warm pod %q", record.CurrentPodName, idlePod.Name)
+	if replacementPodName == "" || record.CurrentPodName != replacementPodName {
+		t.Fatalf("restored pod = %q, want replacement pod %q", record.CurrentPodName, replacementPodName)
 	}
+	var created, deleted bool
 	for _, action := range client.Actions() {
-		if action.GetVerb() == "create" || action.GetVerb() == "delete" {
-			t.Fatalf("warm snapshot restore used %s instead of updating the claimed Pod", action.GetVerb())
-		}
+		created = created || action.GetVerb() == "create" && action.GetResource().Resource == "pods"
+		deleted = deleted || action.GetVerb() == "delete" && action.GetResource().Resource == "pods"
+	}
+	if !created || !deleted {
+		t.Fatalf("snapshot restore Pod actions: created=%t deleted=%t, want both true", created, deleted)
 	}
 }
 

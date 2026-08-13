@@ -787,7 +787,9 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 		return pod, true, fmt.Errorf("%w: snapshot %s", sandboxstore.ErrRootFSFilesystemNotFound, snapshotID)
 	}
 	var recreated bool
-	pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, head, false)
+	// The claimed Pod is not externally visible yet. Replace it with the Head
+	// image atomically instead of waiting for kubelet's periodic image sync.
+	pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, head, true)
 	if err != nil {
 		return pod, true, err
 	}

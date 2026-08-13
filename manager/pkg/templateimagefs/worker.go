@@ -28,8 +28,10 @@ import (
 const (
 	importerLabel       = "sandbox0.ai/imagefs-import"
 	defaultPollInterval = 500 * time.Millisecond
+	defaultClaimTimeout = 5 * time.Second
 	defaultLease        = 10 * time.Minute
 	defaultImportTTL    = 20 * time.Minute
+	claimErrorLogPeriod = 30 * time.Second
 )
 
 type queue interface {
@@ -49,6 +51,7 @@ type Config struct {
 	LeaseDuration  time.Duration
 	ImportTimeout  time.Duration
 	PollInterval   time.Duration
+	ClaimTimeout   time.Duration
 	EnsureInterval time.Duration
 	ImportCohort   s0fsrollout.Cohort
 	Admission      s0fsrollout.Admission
@@ -89,6 +92,9 @@ func NewWorker(q queue, heads headStore, k8sClient kubernetes.Interface, ctldCli
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = defaultPollInterval
 	}
+	if cfg.ClaimTimeout <= 0 {
+		cfg.ClaimTimeout = defaultClaimTimeout
+	}
 	if cfg.EnsureInterval <= 0 {
 		cfg.EnsureInterval = 5 * time.Second
 	}
@@ -103,6 +109,8 @@ func NewWorker(q queue, heads headStore, k8sClient kubernetes.Interface, ctldCli
 
 func (w *Worker) Run(ctx context.Context) error {
 	var group sync.WaitGroup
+	var lastClaimError string
+	var lastClaimErrorAt time.Time
 	group.Add(1)
 	go func() {
 		defer group.Done()
@@ -110,19 +118,32 @@ func (w *Worker) Run(ctx context.Context) error {
 	}()
 	defer group.Wait()
 	for ctx.Err() == nil {
+		claimCtx, cancelClaim := context.WithTimeout(ctx, w.config.ClaimTimeout)
 		revision, err := w.queue.ClaimTemplateImageRevision(
-			ctx,
+			claimCtx,
 			w.config.WorkerID,
 			w.config.LeaseDuration,
 			w.config.ImportCohort.TeamIDs(),
 			w.config.ImportCohort.TemplateIDs(),
 		)
+		cancelClaim()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			now := time.Now()
+			if err.Error() != lastClaimError || now.Sub(lastClaimErrorAt) >= claimErrorLogPeriod {
+				w.logger.Warn("Failed to claim template ImageFS revision", zap.Error(err))
+				lastClaimError = err.Error()
+				lastClaimErrorAt = now
+			}
 			if !waitForContext(ctx, w.config.PollInterval) {
 				return ctx.Err()
 			}
 			continue
 		}
+		lastClaimError = ""
+		lastClaimErrorAt = time.Time{}
 		if revision == nil {
 			if !waitForContext(ctx, w.config.PollInterval) {
 				return ctx.Err()

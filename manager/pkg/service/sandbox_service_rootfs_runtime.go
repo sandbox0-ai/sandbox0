@@ -19,15 +19,16 @@ import (
 )
 
 // activateRuntimeWithRootFSHead activates a materialized Head on the claimed
-// Pod. Reusing the Pod preserves its sandbox, network identity, and mounts; a
-// replacement is retained only for Pods whose immutable pull policy would
-// force the node-local image through a registry.
+// Pod. Reusing a warm Pod preserves its sandbox, network identity, and mounts.
+// Cold Pods are replaced because kubelet can defer an in-place image update
+// until its next sync; there is no published runtime identity to preserve yet.
 func (s *SandboxService) activateRuntimeWithRootFSHead(
 	ctx context.Context,
 	current *corev1.Pod,
 	template *v1alpha1.SandboxTemplate,
 	req *ClaimRequest,
 	head *sandboxstore.SandboxRootFSHead,
+	replaceColdPod bool,
 ) (*corev1.Pod, bool, error) {
 	if s == nil || s.ctldClient == nil || current == nil || template == nil || req == nil || head == nil {
 		return current, false, fmt.Errorf("rootfs Head runtime activation inputs are required")
@@ -57,11 +58,17 @@ func (s *SandboxService) activateRuntimeWithRootFSHead(
 
 	// imagePullPolicy is immutable on an existing Pod. Always would make
 	// kubelet contact sandbox0.local even though ctld has installed the image.
-	if current.Spec.Containers[containerIndex].ImagePullPolicy == corev1.PullAlways {
+	// A cold Pod also has no externally visible identity worth retaining, and
+	// replacing it avoids waiting for kubelet's periodic image-change sync.
+	if replaceColdPod || current.Spec.Containers[containerIndex].ImagePullPolicy == corev1.PullAlways {
 		if s.logger != nil {
+			reason := "procd imagePullPolicy is Always"
+			if replaceColdPod {
+				reason = "cold rootfs Head activation"
+			}
 			s.logger.Warn("Falling back to a replacement Pod for rootfs Head activation",
 				zap.String("pod", current.Namespace+"/"+current.Name),
-				zap.String("reason", "procd imagePullPolicy is Always"),
+				zap.String("reason", reason),
 			)
 		}
 		replacement, err := s.createRootFSHeadReplacementPod(ctx, current, template, req, head, snapshotterInstance)

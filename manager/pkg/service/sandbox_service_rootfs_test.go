@@ -622,10 +622,11 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 		wantReset       bool
 		claimType       string
 		unreadyTemplate bool
+		wantReplacement bool
 	}{
 		{name: "own Head", sourceSandboxID: "sandbox-1", claimType: "hot"},
 		{name: "forked Head", sourceSandboxID: "source-sandbox", wantReset: true, claimType: "hot"},
-		{name: "cold unready template", sourceSandboxID: "sandbox-1", claimType: "cold", unreadyTemplate: true},
+		{name: "cold unready template", sourceSandboxID: "sandbox-1", claimType: "cold", unreadyTemplate: true, wantReplacement: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var calls []string
@@ -691,7 +692,7 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 			}}
 			client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
 				updated := action.(ktesting.UpdateAction).GetObject().(*corev1.Pod)
-				if updated.Spec.Containers[0].Image != head.Image.Name {
+				if updated.Spec.Containers[0].Image != head.Image.Name || updated.Annotations[controller.AnnotationRootFSHeadID] == "" {
 					return false, nil, nil
 				}
 				require.Equal(t, types.UID("warm-runtime-uid"), updated.UID)
@@ -710,6 +711,32 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 					State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 				}}
 				require.NoError(t, indexer.Update(updated.DeepCopy()))
+				return false, nil, nil
+			})
+			client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+				deleted, exists, err := indexer.GetByKey(currentPod.Namespace + "/" + action.(ktesting.DeleteAction).GetName())
+				if err == nil && exists {
+					err = indexer.Delete(deleted)
+				}
+				return false, nil, err
+			})
+			client.PrependReactor("create", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+				created := action.(ktesting.CreateAction).GetObject().(*corev1.Pod)
+				created.UID = types.UID("replacement-runtime-uid")
+				created.ResourceVersion = "2"
+				created.Status.Phase = corev1.PodRunning
+				created.Status.HostIP = ctldURL.Hostname()
+				created.Status.PodIP = "10.0.0.11"
+				created.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name:    "procd",
+					Image:   head.Image.Name,
+					ImageID: "containerd://" + head.Image.ManifestDigest,
+					Ready:   true,
+					State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}}
+				setRuntimeTestCondition(created, corev1.PodReady, corev1.ConditionTrue, "RuntimeReady", "runtime is ready")
+				setRuntimeTestCondition(created, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionTrue, "RuntimeReady", "runtime is ready")
+				require.NoError(t, indexer.Add(created.DeepCopy()))
 				return false, nil, nil
 			})
 			installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(activePod *corev1.Pod) {
@@ -750,15 +777,24 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 			restoredPod, err := svc.finishRestoredSandboxRuntime(ctx, currentPod, record, test.claimType)
 
 			require.NoError(t, err)
-			assert.Equal(t, currentPod.Name, restoredPod.Name)
-			assert.Equal(t, currentPod.UID, restoredPod.UID)
-			assert.Equal(t, currentPod.Status.PodIP, restoredPod.Status.PodIP)
+			if test.wantReplacement {
+				assert.NotEqual(t, currentPod.Name, restoredPod.Name)
+				assert.Equal(t, types.UID("replacement-runtime-uid"), restoredPod.UID)
+				assert.Equal(t, "10.0.0.11", restoredPod.Status.PodIP)
+			} else {
+				assert.Equal(t, currentPod.Name, restoredPod.Name)
+				assert.Equal(t, currentPod.UID, restoredPod.UID)
+				assert.Equal(t, currentPod.Status.PodIP, restoredPod.Status.PodIP)
+			}
 			assert.Equal(t, []string{"materialize", "bind", "runtime"}, calls)
 			assert.Equal(t, head.Reference.HeadID, materializeReq.Reference.HeadID)
+			var created, deleted bool
 			for _, action := range client.Actions() {
-				assert.NotEqual(t, "create", action.GetVerb(), "warm rootfs activation must not create a second Pod")
-				assert.NotEqual(t, "delete", action.GetVerb(), "warm rootfs activation must not delete the claimed Pod")
+				created = created || action.GetVerb() == "create" && action.GetResource().Resource == "pods"
+				deleted = deleted || action.GetVerb() == "delete" && action.GetResource().Resource == "pods"
 			}
+			assert.Equal(t, test.wantReplacement, created)
+			assert.Equal(t, test.wantReplacement, deleted)
 		})
 	}
 }
@@ -970,7 +1006,7 @@ func TestActivateRuntimeWithRootFSHeadReplacesAlwaysPullPod(t *testing.T) {
 
 	replacement, recreated, err := svc.activateRuntimeWithRootFSHead(context.Background(), current, template, &ClaimRequest{
 		TeamID: "team-1", UserID: "user-1", Template: "template-1", SandboxID: "sandbox-1", RuntimeGeneration: 4,
-	}, head)
+	}, head, false)
 
 	require.NoError(t, err)
 	assert.True(t, recreated)

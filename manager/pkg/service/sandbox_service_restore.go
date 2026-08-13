@@ -563,7 +563,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 			pod, err = s.activateS0FSCarrierHead(ctx, pod, rootFSHead, record.TemplateID, claimType)
 		} else {
 			phaseStarted = time.Now()
-			pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead)
+			pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, rootFSHead, claimType == "cold")
 		}
 		s.observeClaimPhase(record.TemplateID, claimType, "materialize_rootfs_head", phaseStarted, err)
 		if err != nil {

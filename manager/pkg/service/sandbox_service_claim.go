@@ -785,7 +785,7 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 		return pod, true, fmt.Errorf("%w: snapshot %s", sandboxstore.ErrRootFSFilesystemNotFound, snapshotID)
 	}
 	var recreated bool
-	pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, head)
+	pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, head, false)
 	if err != nil {
 		return pod, true, err
 	}

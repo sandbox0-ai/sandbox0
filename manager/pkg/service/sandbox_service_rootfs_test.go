@@ -714,7 +714,12 @@ func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *
 				return false, nil, nil
 			})
 			client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
-				deleted, exists, err := indexer.GetByKey(currentPod.Namespace + "/" + action.(ktesting.DeleteAction).GetName())
+				deleteAction := action.(ktesting.DeleteAction)
+				if test.wantReplacement {
+					require.NotNil(t, deleteAction.GetDeleteOptions().GracePeriodSeconds)
+					assert.Zero(t, *deleteAction.GetDeleteOptions().GracePeriodSeconds)
+				}
+				deleted, exists, err := indexer.GetByKey(currentPod.Namespace + "/" + deleteAction.GetName())
 				if err == nil && exists {
 					err = indexer.Delete(deleted)
 				}

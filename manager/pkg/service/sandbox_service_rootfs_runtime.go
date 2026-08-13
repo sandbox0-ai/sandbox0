@@ -71,7 +71,7 @@ func (s *SandboxService) activateRuntimeWithRootFSHead(
 				zap.String("reason", reason),
 			)
 		}
-		replacement, err := s.createRootFSHeadReplacementPod(ctx, current, template, req, head, snapshotterInstance)
+		replacement, err := s.createRootFSHeadReplacementPod(ctx, current, template, req, head, snapshotterInstance, replaceColdPod)
 		return replacement, true, err
 	}
 
@@ -259,11 +259,16 @@ func (s *SandboxService) createRootFSHeadReplacementPod(
 	req *ClaimRequest,
 	head *sandboxstore.SandboxRootFSHead,
 	snapshotterInstance string,
+	immediate bool,
 ) (*corev1.Pod, error) {
 	rootFSTemplate := template.DeepCopy()
 	rootFSTemplate.Spec.MainContainer.Image = head.Image.Name
 	rootFSTemplate.Spec.MainContainer.ImagePullPolicy = string(corev1.PullNever)
-	if err := s.k8sClient.CoreV1().Pods(current.Namespace).Delete(ctx, current.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+	deleteOptions := metav1.DeleteOptions{}
+	if immediate {
+		deleteOptions = immediatePodDeletionOptions()
+	}
+	if err := s.k8sClient.CoreV1().Pods(current.Namespace).Delete(ctx, current.Name, deleteOptions); err != nil && !k8serrors.IsNotFound(err) {
 		return current, fmt.Errorf("delete template runtime before rootfs Head attach: %w", err)
 	}
 	if err := s.waitForSandboxRuntimePodDeletion(ctx, current.Namespace, current.Name); err != nil {

@@ -937,10 +937,18 @@ type ManagerConfig struct {
 	// ProcdBinImageRef overrides the OCI image used for the procd binary image volume.
 	// +optional
 	ProcdBinImageRef string `json:"procdBinImageRef,omitempty"`
-	// SharedCarrierPool configures the one platform-owned warm pool in each data-plane cluster.
+	// SharedCarrierPool configures optional warm capacity for shared S0FS admission.
 	// +optional
 	// +kubebuilder:default={}
 	SharedCarrierPool SharedCarrierPoolConfig `json:"sharedCarrierPool,omitempty"`
+	// TemplateImageFS controls background OCI-to-S0FS shadow imports.
+	// +optional
+	// +kubebuilder:default={}
+	TemplateImageFS TemplateImageFSConfig `json:"templateImageFS,omitempty"`
+	// S0FSRuntime controls S0FS carrier capability and new claim admission.
+	// +optional
+	// +kubebuilder:default={}
+	S0FSRuntime S0FSRuntimeConfig `json:"s0fsRuntime,omitempty"`
 	// DefaultTeamQuotas declaratively reconciles region-wide quota defaults.
 	// Team-specific database policies override these defaults.
 	// +optional
@@ -1020,6 +1028,48 @@ type SharedCarrierPoolConfig struct {
 	// +optional
 	// +kubebuilder:default="15s"
 	ActivationTimeout metav1.Duration `json:"activationTimeout,omitempty"`
+}
+
+// TemplateImageFSConfig controls background template rootfs imports.
+type TemplateImageFSConfig struct {
+	// Enabled is intentionally optional. When omitted, sharedCarrierPool.enabled
+	// preserves the pre-rollout behavior during the compatibility window.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// S0FSRuntimeConfig controls S0FS carrier capability and new claim admission.
+type S0FSRuntimeConfig struct {
+	// Enabled keeps the cold carrier allocator available for new and resumed
+	// S0FS sandboxes independently of shared warm capacity.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// +optional
+	// +kubebuilder:default={}
+	Admission S0FSAdmissionConfig `json:"admission,omitempty"`
+}
+
+// S0FSAdmissionConfig defines one explicit S0FS rollout cohort.
+type S0FSAdmissionConfig struct {
+	// Mode is empty only for compatibility with the original shared carrier
+	// switch. New configurations use off, cold, or shared.
+	// +optional
+	// +kubebuilder:validation:Enum=off;cold;shared
+	Mode string `json:"mode,omitempty"`
+	// TeamIDs admits private templates owned by these teams.
+	// +optional
+	// +kubebuilder:validation:MaxItems=100
+	// +listType=set
+	TeamIDs []string `json:"teamIds,omitempty"`
+	// TemplateIDs admits matching logical template IDs in any scope.
+	// +optional
+	// +kubebuilder:validation:MaxItems=100
+	// +listType=set
+	TemplateIDs []string `json:"templateIds,omitempty"`
+	// RejectLegacyClaims makes unmatched new claims fail closed on a green
+	// data-plane cluster instead of falling back to legacy rootfs creation.
+	// +optional
+	RejectLegacyClaims bool `json:"rejectLegacyClaims,omitempty"`
 }
 
 // TeamQuotaLimitConfig configures a region default for teams without an

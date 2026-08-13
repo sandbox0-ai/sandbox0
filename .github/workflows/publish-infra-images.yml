@@ -162,7 +162,7 @@ jobs:
 
       - name: Build and push carrier base image
         env:
-          TAG: ${{ env.IMAGE_REPO }}:carrier-base-v1-${{ matrix.arch }}
+          TAG: ${{ env.IMAGE_REPO }}:${{ inputs.version }}-carrier-base-${{ matrix.arch }}
         run: |
           docker build --target carrier-base -t "${TAG}" -f Dockerfile.local .
           docker push "${TAG}"
@@ -191,8 +191,8 @@ jobs:
           ARM64_IMAGE="${IMAGE_REPO}:${VERSION}-arm64"
           AMD64_PROCD_BIN_IMAGE="${IMAGE_REPO}:${VERSION}-amd64-procd-bin"
           ARM64_PROCD_BIN_IMAGE="${IMAGE_REPO}:${VERSION}-arm64-procd-bin"
-          AMD64_CARRIER_BASE_IMAGE="${IMAGE_REPO}:carrier-base-v1-amd64"
-          ARM64_CARRIER_BASE_IMAGE="${IMAGE_REPO}:carrier-base-v1-arm64"
+          AMD64_CARRIER_BASE_IMAGE="${IMAGE_REPO}:${VERSION}-carrier-base-amd64"
+          ARM64_CARRIER_BASE_IMAGE="${IMAGE_REPO}:${VERSION}-carrier-base-arm64"
 
           docker buildx imagetools create \
             -t "${IMAGE_REPO}:${VERSION}" \
@@ -205,7 +205,7 @@ jobs:
             "${ARM64_PROCD_BIN_IMAGE}"
 
           docker buildx imagetools create \
-            -t "${IMAGE_REPO}:carrier-base-v1" \
+            -t "${IMAGE_REPO}:${VERSION}-carrier-base" \
             "${AMD64_CARRIER_BASE_IMAGE}" \
             "${ARM64_CARRIER_BASE_IMAGE}"
 

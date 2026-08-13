@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
@@ -84,6 +85,7 @@ type SandboxServiceConfig struct {
 	PublicRootDomain                    string
 	PublicRegionID                      string
 	AutoscalerSafeToEvictAnnotationKeys []string
+	S0FSAdmission                       s0fsrollout.Admission
 }
 
 // SandboxService handles sandbox operations

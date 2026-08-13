@@ -45,6 +45,7 @@ sandbox_pod_placement:
 		),
 		logger: zap.NewNop(),
 	}
+	svc.SetS0FSRuntimeReady(true)
 
 	summary, err := svc.GetClusterSummary(context.Background())
 	if err != nil {
@@ -74,6 +75,9 @@ sandbox_pod_placement:
 	}
 	if summary.TotalPodCount != 6 {
 		t.Fatalf("TotalPodCount = %d, want 6", summary.TotalPodCount)
+	}
+	if !summary.S0FSRuntimeReady {
+		t.Fatal("S0FSRuntimeReady = false, want true")
 	}
 }
 

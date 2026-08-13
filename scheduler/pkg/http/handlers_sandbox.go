@@ -242,6 +242,7 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 			selectedBy = "shared_carrier"
 		}
 	} else {
+		allocations = s.legacyCapableAllocations(allocations, clusterMap)
 		selected, selectedBy = s.selectClusterByIdleWithAllocations(allocations, clusterMap, tpl, clusterTemplateID, maxAge)
 	}
 	if selected == nil {
@@ -282,6 +283,23 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	)
 
 	return selected, tpl, selectedBy, nil
+}
+
+func (s *Server) legacyCapableAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster) []*template.TemplateAllocation {
+	capable := make([]*template.TemplateAllocation, 0, len(allocations))
+	for _, alloc := range allocations {
+		cluster := clusterMap[alloc.ClusterID]
+		if cluster == nil {
+			capable = append(capable, alloc)
+			continue
+		}
+		summary, ok := s.reconciler.GetClusterSummary(alloc.ClusterID)
+		if ok && summary != nil && summary.LegacyClaimsRejected {
+			continue
+		}
+		capable = append(capable, alloc)
+	}
+	return capable
 }
 
 func (s *Server) s0fsCapableAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) []*template.TemplateAllocation {

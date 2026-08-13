@@ -1151,8 +1151,8 @@ spec:
                 type: string
               poolMode:
                 description: |-
-                  PoolMode reports whether claims use the cluster shared carrier pool or a
-                  cold S0FS carrier. Legacy is reported only during migration.
+                  PoolMode reports whether claims use the cluster shared carrier pool, cold
+                  S0FS allocation, a legacy pool, or no pool on this cluster.
                 type: string
             required:
             - activeCount

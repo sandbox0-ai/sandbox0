@@ -251,7 +251,7 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 
 	poolTemplate := template
 	poolMode := v1alpha1.SandboxTemplatePoolModeLegacy
-	if admissionMode, admitted := templateS0FSAdmissionMode(template); admitted {
+	if admissionMode, admitted, rejectLegacy := templateS0FSRollout(template); admitted {
 		poolTemplate = template.DeepCopy()
 		poolTemplate.Spec.Pool.MinIdle = 0
 		poolTemplate.Spec.Pool.MaxIdle = 0
@@ -261,6 +261,11 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 				poolMode = v1alpha1.SandboxTemplatePoolModeShared
 			}
 		}
+	} else if rejectLegacy {
+		poolTemplate = template.DeepCopy()
+		poolTemplate.Spec.Pool.MinIdle = 0
+		poolTemplate.Spec.Pool.MaxIdle = 0
+		poolMode = v1alpha1.SandboxTemplatePoolModeDisabled
 	}
 	// During migration, a zero-sized legacy ReplicaSet drains old idle Pods
 	// without letting the shared cohort create template-owned capacity.
@@ -418,17 +423,18 @@ func (op *Operator) persistTemplateStatus(
 	return nil
 }
 
-func templateS0FSAdmissionMode(template *v1alpha1.SandboxTemplate) (s0fsrollout.AdmissionMode, bool) {
+func templateS0FSRollout(template *v1alpha1.SandboxTemplate) (s0fsrollout.AdmissionMode, bool, bool) {
 	cfg := managerconfig.LoadManagerConfig()
-	if cfg == nil || !cfg.S0FSRuntimeEnabled() || template == nil ||
-		template.Status.ImageRevision == nil ||
-		template.Status.ImageRevision.State != v1alpha1.TemplateImageRevisionStateReady ||
-		strings.TrimSpace(template.Status.ImageRevision.ImageFSHeadID) == "" {
-		return "", false
+	if cfg == nil {
+		return "", false, false
 	}
 	admission, err := cfg.S0FSAdmission()
 	if err != nil {
-		return "", false
+		return "", false, false
+	}
+	rejectLegacy := admission.RejectLegacyClaims()
+	if cfg == nil || !cfg.S0FSRuntimeEnabled() || template == nil {
+		return "", false, rejectLegacy
 	}
 	scope := ""
 	logicalTemplateID := template.Name
@@ -443,9 +449,14 @@ func templateS0FSAdmissionMode(template *v1alpha1.SandboxTemplate) (s0fsrollout.
 		teamID = strings.TrimSpace(template.Annotations["sandbox0.ai/template-team-id"])
 	}
 	if !admission.Admits(scope, teamID, logicalTemplateID) {
-		return "", false
+		return "", false, rejectLegacy
 	}
-	return admission.Mode(), true
+	if template.Status.ImageRevision == nil ||
+		template.Status.ImageRevision.State != v1alpha1.TemplateImageRevisionStateReady ||
+		strings.TrimSpace(template.Status.ImageRevision.ImageFSHeadID) == "" {
+		return "", false, true
+	}
+	return admission.Mode(), true, rejectLegacy
 }
 
 func preserveConditionTransitionTimes(

@@ -79,6 +79,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer logger.Sync()
+	s0fsAdmission, err := cfg.S0FSAdmission()
+	if err != nil {
+		logger.Fatal("Invalid S0FS admission configuration", zap.Error(err))
+	}
 
 	logger.Info("Starting Manager",
 		zap.String("version", "v0.1.0"),
@@ -323,6 +327,7 @@ func main() {
 		PublicRootDomain:                    cfg.PublicRootDomain,
 		PublicRegionID:                      cfg.PublicRegionID,
 		AutoscalerSafeToEvictAnnotationKeys: autoscalerAnnotationKeys,
+		S0FSAdmission:                       s0fsAdmission,
 	}
 
 	var quotaUsageStore quota.UsageStore
@@ -484,46 +489,57 @@ func main() {
 	}
 	var templateImageFSWorker *templateimagefs.Worker
 	var sharedCarrierPool *carrierpool.Pool
-	if cfg.SharedCarrierPool.Enabled {
+	if cfg.TemplateImageFSEnabled() || cfg.S0FSRuntimeEnabled() {
 		baseImageRef := strings.TrimSpace(cfg.SharedCarrierPool.CarrierImageRef)
 		if baseImageRef == "" {
 			baseImageRef = strings.TrimSpace(cfg.ManagerImage)
 		}
-		templateImageFSWorker, err = templateimagefs.NewWorker(
-			templateStore,
-			sandboxStore,
-			k8sClient,
-			nil,
-			sandboxService.CtldAddressForPod,
-			templateimagefs.Config{
-				WorkerID:       "manager/" + naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-				ClusterID:      naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-				BaseImageRef:   baseImageRef,
-				PrimerImageRef: cfg.ManagerImage,
-			},
-			logger,
-		)
-		if err != nil {
-			logger.Warn("Template ImageFS worker disabled", zap.Error(err))
-			templateImageFSWorker = nil
+		if cfg.TemplateImageFSEnabled() {
+			templateImageFSWorker, err = templateimagefs.NewWorker(
+				templateStore,
+				sandboxStore,
+				k8sClient,
+				nil,
+				sandboxService.CtldAddressForPod,
+				templateimagefs.Config{
+					WorkerID:       "manager/" + naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+					ClusterID:      naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+					BaseImageRef:   baseImageRef,
+					PrimerImageRef: cfg.ManagerImage,
+					Admission:      s0fsAdmission,
+				},
+				logger,
+			)
+			if err != nil {
+				logger.Warn("Template ImageFS worker disabled", zap.Error(err))
+				templateImageFSWorker = nil
+			}
 		}
-		sharedCarrierPool, err = carrierpool.New(k8sClient, carrierpool.Config{
-			Namespace:         cfg.SharedCarrierPool.Namespace,
-			ClusterID:         naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-			MinIdle:           int(cfg.SharedCarrierPool.MinIdle),
-			MaxIdle:           int(cfg.SharedCarrierPool.MaxIdle),
-			CarrierImageRef:   baseImageRef,
-			WaiterImageRef:    cfg.ManagerImage,
-			ReconcileInterval: cfg.SharedCarrierPool.ReconcileInterval.Duration,
-			ActivationTimeout: cfg.SharedCarrierPool.ActivationTimeout.Duration,
-			Generation:        carrierpool.GenerationForConfig(baseImageRef, cfg.ManagerImage, cfg.ProcdBinImageRef, cfg.SandboxRuntimeClassName),
-		}, logger)
-		if err != nil {
-			logger.Warn("Shared carrier pool disabled", zap.Error(err))
-			sharedCarrierPool = nil
-		}
-		if sharedCarrierPool != nil {
-			sandboxService.SetSharedCarrierPool(sharedCarrierPool)
+		if cfg.S0FSRuntimeEnabled() {
+			minIdle := 0
+			maxIdle := 0
+			if cfg.SharedCarrierPool.Enabled {
+				minIdle = int(cfg.SharedCarrierPool.MinIdle)
+				maxIdle = int(cfg.SharedCarrierPool.MaxIdle)
+			}
+			sharedCarrierPool, err = carrierpool.New(k8sClient, carrierpool.Config{
+				Namespace:         cfg.SharedCarrierPool.Namespace,
+				ClusterID:         naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+				MinIdle:           minIdle,
+				MaxIdle:           maxIdle,
+				CarrierImageRef:   baseImageRef,
+				WaiterImageRef:    cfg.ManagerImage,
+				ReconcileInterval: cfg.SharedCarrierPool.ReconcileInterval.Duration,
+				ActivationTimeout: cfg.SharedCarrierPool.ActivationTimeout.Duration,
+				Generation:        carrierpool.GenerationForConfig(baseImageRef, cfg.ManagerImage, cfg.ProcdBinImageRef, cfg.SandboxRuntimeClassName),
+			}, logger)
+			if err != nil {
+				logger.Warn("S0FS carrier runtime disabled", zap.Error(err))
+				sharedCarrierPool = nil
+			}
+			if sharedCarrierPool != nil {
+				sandboxService.SetSharedCarrierPool(sharedCarrierPool)
+			}
 		}
 	}
 	go serveTemplateReconcilerQuiesceSignals(
@@ -543,6 +559,8 @@ func main() {
 		operator.GetTemplateLister(),
 		logger,
 	)
+	clusterService.SetS0FSRuntimeReady(sharedCarrierPool != nil)
+	clusterService.SetLegacyClaimsRejected(s0fsAdmission.RejectLegacyClaims())
 	// Create cleanup controller
 	cleanupController := controller.NewCleanupController(
 		k8sClient,

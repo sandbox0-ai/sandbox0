@@ -111,6 +111,8 @@ func (a *clusterGatewayAdapter) GetClusterSummary(ctx context.Context, baseURL s
 		PendingActivePodCount:      summary.PendingActivePodCount,
 		SharedCarrierReadyCount:    summary.SharedCarrierReadyCount,
 		SharedCarrierCreatingCount: summary.SharedCarrierCreatingCount,
+		S0FSRuntimeReady:           summary.S0FSRuntimeReady,
+		LegacyClaimsRejected:       summary.LegacyClaimsRejected,
 		TotalPodCount:              summary.TotalPodCount,
 	}, nil
 }

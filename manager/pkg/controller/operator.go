@@ -13,6 +13,7 @@ import (
 	clientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -250,14 +251,21 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 
 	poolTemplate := template
 	poolMode := v1alpha1.SandboxTemplatePoolModeLegacy
-	if templateUsesS0FSCarrier(template) {
+	if admissionMode, admitted, rejectLegacy := templateS0FSRollout(template); admitted {
 		poolTemplate = template.DeepCopy()
 		poolTemplate.Spec.Pool.MinIdle = 0
 		poolTemplate.Spec.Pool.MaxIdle = 0
-		poolMode = v1alpha1.SandboxTemplatePoolModeShared
-		if compatible, _ := carrierpool.Compatible(template); !compatible {
-			poolMode = v1alpha1.SandboxTemplatePoolModeCold
+		poolMode = v1alpha1.SandboxTemplatePoolModeCold
+		if admissionMode == s0fsrollout.AdmissionModeShared {
+			if compatible, _ := carrierpool.Compatible(template); compatible {
+				poolMode = v1alpha1.SandboxTemplatePoolModeShared
+			}
 		}
+	} else if rejectLegacy {
+		poolTemplate = template.DeepCopy()
+		poolTemplate.Spec.Pool.MinIdle = 0
+		poolTemplate.Spec.Pool.MaxIdle = 0
+		poolMode = v1alpha1.SandboxTemplatePoolModeDisabled
 	}
 	// During migration, a zero-sized legacy ReplicaSet drains old idle Pods
 	// without letting the shared cohort create template-owned capacity.
@@ -415,12 +423,40 @@ func (op *Operator) persistTemplateStatus(
 	return nil
 }
 
-func templateUsesS0FSCarrier(template *v1alpha1.SandboxTemplate) bool {
+func templateS0FSRollout(template *v1alpha1.SandboxTemplate) (s0fsrollout.AdmissionMode, bool, bool) {
 	cfg := managerconfig.LoadManagerConfig()
-	return cfg != nil && cfg.SharedCarrierPool.Enabled && template != nil &&
-		template.Status.ImageRevision != nil &&
-		template.Status.ImageRevision.State == v1alpha1.TemplateImageRevisionStateReady &&
-		strings.TrimSpace(template.Status.ImageRevision.ImageFSHeadID) != ""
+	if cfg == nil {
+		return "", false, false
+	}
+	admission, err := cfg.S0FSAdmission()
+	if err != nil {
+		return "", false, false
+	}
+	rejectLegacy := admission.RejectLegacyClaims()
+	if cfg == nil || !cfg.S0FSRuntimeEnabled() || template == nil {
+		return "", false, rejectLegacy
+	}
+	scope := ""
+	logicalTemplateID := template.Name
+	teamID := ""
+	if template.Labels != nil {
+		scope = strings.TrimSpace(template.Labels["sandbox0.ai/template-scope"])
+		if value := strings.TrimSpace(template.Labels["sandbox0.ai/template-logical-id"]); value != "" {
+			logicalTemplateID = value
+		}
+	}
+	if template.Annotations != nil {
+		teamID = strings.TrimSpace(template.Annotations["sandbox0.ai/template-team-id"])
+	}
+	if !admission.Admits(scope, teamID, logicalTemplateID) {
+		return "", false, rejectLegacy
+	}
+	if template.Status.ImageRevision == nil ||
+		template.Status.ImageRevision.State != v1alpha1.TemplateImageRevisionStateReady ||
+		strings.TrimSpace(template.Status.ImageRevision.ImageFSHeadID) == "" {
+		return "", false, true
+	}
+	return admission.Mode(), true, rejectLegacy
 }
 
 func preserveConditionTransitionTimes(

@@ -645,8 +645,8 @@ type SandboxTemplateStatus struct {
 	// Creation reports asynchronous image creation for templates created from a sandbox.
 	Creation *TemplateCreationStatus `json:"creation,omitempty"`
 
-	// PoolMode reports whether claims use the cluster shared carrier pool or a
-	// cold S0FS carrier. Legacy is reported only during migration.
+	// PoolMode reports whether claims use the cluster shared carrier pool, cold
+	// S0FS allocation, a legacy pool, or no pool on this cluster.
 	PoolMode SandboxTemplatePoolMode `json:"poolMode,omitempty"`
 
 	// ImageRevision reports the immutable OCI-to-S0FS revision selected for new
@@ -664,9 +664,10 @@ type SandboxTemplateStatus struct {
 type SandboxTemplatePoolMode string
 
 const (
-	SandboxTemplatePoolModeLegacy SandboxTemplatePoolMode = "legacy"
-	SandboxTemplatePoolModeShared SandboxTemplatePoolMode = "shared"
-	SandboxTemplatePoolModeCold   SandboxTemplatePoolMode = "cold"
+	SandboxTemplatePoolModeLegacy   SandboxTemplatePoolMode = "legacy"
+	SandboxTemplatePoolModeShared   SandboxTemplatePoolMode = "shared"
+	SandboxTemplatePoolModeCold     SandboxTemplatePoolMode = "cold"
+	SandboxTemplatePoolModeDisabled SandboxTemplatePoolMode = "disabled"
 )
 
 // TemplateImageRevisionStatus reports immutable OCI resolution and S0FS import.

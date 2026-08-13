@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templstore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
@@ -49,6 +50,7 @@ type Config struct {
 	ImportTimeout  time.Duration
 	PollInterval   time.Duration
 	EnsureInterval time.Duration
+	Admission      s0fsrollout.Admission
 }
 
 // Worker owns both revision discovery and region-wide leased imports. The
@@ -133,7 +135,7 @@ func (w *Worker) ensureLoop(ctx context.Context) {
 				if tpl == nil || !tpl.ReadyForReconcile() || strings.TrimSpace(tpl.Spec.MainContainer.Image) == "" {
 					continue
 				}
-				if _, _, err := w.queue.EnsureTemplateImageRevision(ctx, tpl); err != nil {
+				if err := w.ensureTemplateRevision(ctx, tpl); err != nil {
 					w.logger.Warn("Failed to ensure template image revision", zap.String("templateID", tpl.TemplateID), zap.Error(err))
 				}
 			}
@@ -144,6 +146,17 @@ func (w *Worker) ensureLoop(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (w *Worker) ensureTemplateRevision(ctx context.Context, tpl *template.Template) error {
+	revision, _, err := w.queue.EnsureTemplateImageRevision(ctx, tpl)
+	if err != nil {
+		return err
+	}
+	if w.config.Admission.Admits(tpl.Scope, tpl.TeamID, tpl.TemplateID) {
+		return w.queue.SelectCurrentTemplateImageRevision(ctx, revision)
+	}
+	return w.queue.ClearCurrentTemplateImageRevision(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
 }
 
 func (w *Worker) process(parent context.Context, revision *template.TemplateImageRevision) {

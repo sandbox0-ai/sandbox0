@@ -51,6 +51,19 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		ReconcileInterval: spec.SharedCarrierPool.ReconcileInterval,
 		ActivationTimeout: spec.SharedCarrierPool.ActivationTimeout,
 	}
+	if spec.TemplateImageFS.Enabled != nil {
+		enabled := *spec.TemplateImageFS.Enabled
+		cfg.TemplateImageFS.Enabled = &enabled
+	}
+	cfg.S0FSRuntime = apiconfig.S0FSRuntimeConfig{
+		Enabled: spec.S0FSRuntime.Enabled,
+		Admission: apiconfig.S0FSAdmissionConfig{
+			Mode:               spec.S0FSRuntime.Admission.Mode,
+			TeamIDs:            cloneStrings(spec.S0FSRuntime.Admission.TeamIDs),
+			TemplateIDs:        cloneStrings(spec.S0FSRuntime.Admission.TemplateIDs),
+			RejectLegacyClaims: spec.S0FSRuntime.Admission.RejectLegacyClaims,
+		},
+	}
 	cfg.DefaultTeamQuotas = cloneTeamQuotaLimitConfigs(spec.DefaultTeamQuotas)
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout

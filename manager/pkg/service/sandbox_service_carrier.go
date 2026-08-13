@@ -28,23 +28,26 @@ type rootFSHeadByIDStore interface {
 	BindSandboxToRootFSHead(context.Context, string, string, string) error
 }
 
-// claimS0FSCarrier handles revisions that have completed OCI-to-ImageFS import.
-// It returns handled=false while the feature is disabled or a revision is not
-// ready, leaving the legacy cohort untouched before any carrier side effect.
+// claimS0FSCarrier handles an admitted revision that completed OCI-to-ImageFS
+// import. Admission is decided before this method so it never falls back to a
+// legacy rootfs after entering the S0FS path.
 func (s *SandboxService) claimS0FSCarrier(ctx context.Context, template *api.SandboxTemplate, req *ClaimRequest) (*ClaimResponse, bool, error) {
-	if s == nil || s.sharedCarrierPool == nil || template == nil || req == nil || strings.TrimSpace(req.SnapshotID) != "" {
+	if s == nil || template == nil || req == nil {
 		return nil, false, nil
+	}
+	if s.sharedCarrierPool == nil {
+		return nil, true, fmt.Errorf("%w: S0FS carrier runtime is not configured", ErrDataPlaneNotReady)
 	}
 	revision := template.Status.ImageRevision
 	if revision == nil || revision.State != api.TemplateImageRevisionStateReady || strings.TrimSpace(revision.ImageFSHeadID) == "" {
-		return nil, false, nil
+		return nil, true, fmt.Errorf("%w: admitted template image revision is not ready", ErrDataPlaneNotReady)
 	}
 	store, ok := s.sandboxStore.(rootFSHeadByIDStore)
 	if !ok {
 		return nil, true, fmt.Errorf("sandbox store does not support S0FS ImageFS binding")
 	}
 	phaseStarted := time.Now()
-	pod, claimType, err := s.allocateS0FSCarrier(ctx, template, req)
+	pod, claimType, err := s.allocateS0FSCarrier(ctx, template, req, s.config.S0FSAdmission.UsesSharedCarrier())
 	s.observeClaimPhase(req.Template, claimType, "allocate_s0fs_carrier", phaseStarted, err)
 	if err != nil {
 		return nil, true, err
@@ -125,7 +128,7 @@ func (s *SandboxService) claimS0FSCarrier(ctx context.Context, template *api.San
 	}, true, nil
 }
 
-func (s *SandboxService) allocateS0FSCarrier(ctx context.Context, template *api.SandboxTemplate, req *ClaimRequest) (*corev1.Pod, string, error) {
+func (s *SandboxService) allocateS0FSCarrier(ctx context.Context, template *api.SandboxTemplate, req *ClaimRequest, allowShared bool) (*corev1.Pod, string, error) {
 	if s == nil || s.sharedCarrierPool == nil || template == nil || req == nil {
 		return nil, "", fmt.Errorf("S0FS carrier allocator is not configured")
 	}
@@ -133,7 +136,7 @@ func (s *SandboxService) allocateS0FSCarrier(ctx context.Context, template *api.
 	var pod *corev1.Pod
 	var err error
 	claimType := "shared"
-	if compatible {
+	if allowShared && compatible {
 		phaseStarted := time.Now()
 		pod, err = s.sharedCarrierPool.Reserve(ctx)
 		s.observeClaimPhase(req.Template, claimType, "reserve_shared_carrier", phaseStarted, err)

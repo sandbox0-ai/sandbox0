@@ -19,6 +19,58 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+func TestEnsureTemplateImageRevisionStaysShadowUntilSelected(t *testing.T) {
+	store, _ := newTemplateStoreIntegrationTest(t)
+	ctx := context.Background()
+	tpl := &template.Template{
+		TemplateID: "shadow-imagefs",
+		Scope:      naming.ScopeTeam,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+		Spec:       integrationTemplateSpec("ubuntu:24.04"),
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := store.CreateTemplate(ctx, tpl); err != nil {
+		t.Fatalf("CreateTemplate() error = %v", err)
+	}
+	revision, created, err := store.EnsureTemplateImageRevision(ctx, tpl)
+	if err != nil {
+		t.Fatalf("EnsureTemplateImageRevision() error = %v", err)
+	}
+	if !created || revision == nil {
+		t.Fatalf("EnsureTemplateImageRevision() = (%#v,%v), want new revision", revision, created)
+	}
+	loaded, err := store.GetTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate() after shadow ensure error = %v", err)
+	}
+	if loaded.Status != nil && loaded.Status.ImageRevision != nil {
+		t.Fatalf("shadow ensure selected revision %#v", loaded.Status.ImageRevision)
+	}
+
+	if err := store.SelectCurrentTemplateImageRevision(ctx, revision); err != nil {
+		t.Fatalf("SelectCurrentTemplateImageRevision() error = %v", err)
+	}
+	loaded, err = store.GetTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate() after selection error = %v", err)
+	}
+	if loaded.Status == nil || loaded.Status.ImageRevision == nil || loaded.Status.ImageRevision.RevisionID != revision.RevisionID {
+		t.Fatalf("selected revision = %#v, want %q", loaded.Status, revision.RevisionID)
+	}
+
+	if err := store.ClearCurrentTemplateImageRevision(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID); err != nil {
+		t.Fatalf("ClearCurrentTemplateImageRevision() error = %v", err)
+	}
+	loaded, err = store.GetTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate() after clear error = %v", err)
+	}
+	if loaded.Status != nil && loaded.Status.ImageRevision != nil {
+		t.Fatalf("cleared template still selected revision %#v", loaded.Status.ImageRevision)
+	}
+}
+
 func TestClaimTemplateBuildRecoversReconcilingCleanupAfterWorkerCrash(t *testing.T) {
 	store, pool := newTemplateStoreIntegrationTest(t)
 	ctx := context.Background()

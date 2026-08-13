@@ -43,6 +43,8 @@ type ClusterSummary struct {
 	PendingActivePodCount      int32  `json:"pending_active_pod_count"`
 	SharedCarrierReadyCount    int32  `json:"shared_carrier_ready_count"`
 	SharedCarrierCreatingCount int32  `json:"shared_carrier_creating_count"`
+	S0FSRuntimeReady           bool   `json:"s0fs_runtime_ready"`
+	LegacyClaimsRejected       bool   `json:"legacy_claims_rejected"`
 	TotalPodCount              int32  `json:"total_pod_count"`
 }
 

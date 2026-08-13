@@ -129,7 +129,9 @@ func (s *Store) GetCurrentTemplateImageRevision(ctx context.Context, scope, team
 }
 
 // ClaimTemplateImageRevision leases one due resolve/import job region-wide.
-func (s *Store) ClaimTemplateImageRevision(ctx context.Context, workerID string, leaseDuration time.Duration) (*template.TemplateImageRevision, error) {
+// Explicit selectors prevent revisions left by an earlier, wider cohort from
+// being imported after a rollout narrows.
+func (s *Store) ClaimTemplateImageRevision(ctx context.Context, workerID string, leaseDuration time.Duration, teamIDs, templateIDs []string) (*template.TemplateImageRevision, error) {
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
 		return nil, fmt.Errorf("template image revision worker id is required")
@@ -137,6 +139,7 @@ func (s *Store) ClaimTemplateImageRevision(ctx context.Context, workerID string,
 	if leaseDuration <= 0 {
 		return nil, fmt.Errorf("template image revision lease duration must be positive")
 	}
+	importAll := len(teamIDs) == 0 && len(templateIDs) == 0
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin claim template image revision: %w", err)
@@ -149,10 +152,12 @@ func (s *Store) ClaimTemplateImageRevision(ctx context.Context, workerID string,
 		WHERE state IN ('resolving', 'importing')
 			AND next_attempt_at <= NOW()
 			AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+			AND ($1 OR template_id = ANY($2::text[])
+				OR (scope = 'team' AND team_id = ANY($3::text[])))
 		ORDER BY next_attempt_at, created_at
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1
-	`))
+	`, importAll, templateIDs, teamIDs))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

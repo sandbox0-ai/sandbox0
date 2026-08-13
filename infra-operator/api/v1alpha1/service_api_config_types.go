@@ -1036,6 +1036,17 @@ type TemplateImageFSConfig struct {
 	// preserves the pre-rollout behavior during the compatibility window.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
+	// TeamIDs imports private templates owned by these teams. When both
+	// selectors are empty, enabling ImageFS preserves import-all behavior.
+	// +optional
+	// +kubebuilder:validation:MaxItems=100
+	// +listType=set
+	TeamIDs []string `json:"teamIds,omitempty"`
+	// TemplateIDs imports matching logical template IDs in either scope.
+	// +optional
+	// +kubebuilder:validation:MaxItems=100
+	// +listType=set
+	TemplateIDs []string `json:"templateIds,omitempty"`
 }
 
 // S0FSRuntimeConfig controls S0FS carrier capability and new claim admission.

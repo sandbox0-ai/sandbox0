@@ -50,6 +50,7 @@ type Config struct {
 	ImportTimeout  time.Duration
 	PollInterval   time.Duration
 	EnsureInterval time.Duration
+	ImportCohort   s0fsrollout.Cohort
 	Admission      s0fsrollout.Admission
 }
 
@@ -109,7 +110,13 @@ func (w *Worker) Run(ctx context.Context) error {
 	}()
 	defer group.Wait()
 	for ctx.Err() == nil {
-		revision, err := w.queue.ClaimTemplateImageRevision(ctx, w.config.WorkerID, w.config.LeaseDuration)
+		revision, err := w.queue.ClaimTemplateImageRevision(
+			ctx,
+			w.config.WorkerID,
+			w.config.LeaseDuration,
+			w.config.ImportCohort.TeamIDs(),
+			w.config.ImportCohort.TemplateIDs(),
+		)
 		if err != nil {
 			if !waitForContext(ctx, w.config.PollInterval) {
 				return ctx.Err()
@@ -149,6 +156,9 @@ func (w *Worker) ensureLoop(ctx context.Context) {
 }
 
 func (w *Worker) ensureTemplateRevision(ctx context.Context, tpl *template.Template) error {
+	if !w.config.ImportCohort.Empty() && !w.config.ImportCohort.Matches(tpl.Scope, tpl.TeamID, tpl.TemplateID) {
+		return w.queue.ClearCurrentTemplateImageRevision(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	}
 	revision, _, err := w.queue.EnsureTemplateImageRevision(ctx, tpl)
 	if err != nil {
 		return err

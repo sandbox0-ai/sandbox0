@@ -27,7 +27,9 @@ func TestS0FSRolloutControlsPreserveLegacySharedPoolBehavior(t *testing.T) {
 func TestS0FSRolloutControlsAllowShadowImportWithAdmissionOff(t *testing.T) {
 	enabled := true
 	cfg := &ManagerConfig{
-		TemplateImageFS: TemplateImageFSConfig{Enabled: &enabled},
+		TemplateImageFS: TemplateImageFSConfig{
+			Enabled: &enabled, TeamIDs: []string{"shadow-team"}, TemplateIDs: []string{"shadow-template"},
+		},
 		S0FSRuntime: S0FSRuntimeConfig{Enabled: true, Admission: S0FSAdmissionConfig{
 			Mode: "off", TeamIDs: []string{"team-a"}, RejectLegacyClaims: true,
 		}},
@@ -41,6 +43,9 @@ func TestS0FSRolloutControlsAllowShadowImportWithAdmissionOff(t *testing.T) {
 	}
 	if admission.Admits(naming.ScopeTeam, "team-a", "template-a") || !admission.RejectLegacyClaims() {
 		t.Fatal("off admission did not remain fail-closed")
+	}
+	if len(cfg.TemplateImageFS.TeamIDs) != 1 || len(cfg.TemplateImageFS.TemplateIDs) != 1 {
+		t.Fatalf("template ImageFS cohort = %#v, want explicit shadow selectors", cfg.TemplateImageFS)
 	}
 }
 

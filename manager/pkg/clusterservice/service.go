@@ -28,6 +28,7 @@ type ClusterSummary struct {
 	SharedCarrierReadyCount    int32  `json:"shared_carrier_ready_count"`
 	SharedCarrierCreatingCount int32  `json:"shared_carrier_creating_count"`
 	S0FSRuntimeReady           bool   `json:"s0fs_runtime_ready"`
+	LegacyClaimsRejected       bool   `json:"legacy_claims_rejected"`
 	TotalPodCount              int32  `json:"total_pod_count"`
 }
 
@@ -55,11 +56,12 @@ type TemplateLister interface {
 
 // ClusterService handles cluster-related operations
 type ClusterService struct {
-	podLister        corelisters.PodLister
-	nodeLister       corelisters.NodeLister
-	templateLister   TemplateLister
-	logger           *zap.Logger
-	s0fsRuntimeReady bool
+	podLister            corelisters.PodLister
+	nodeLister           corelisters.NodeLister
+	templateLister       TemplateLister
+	logger               *zap.Logger
+	s0fsRuntimeReady     bool
+	legacyClaimsRejected bool
 }
 
 // SetS0FSRuntimeReady publishes whether this manager has a working carrier
@@ -67,6 +69,15 @@ type ClusterService struct {
 func (s *ClusterService) SetS0FSRuntimeReady(ready bool) {
 	if s != nil {
 		s.s0fsRuntimeReady = ready
+	}
+}
+
+// SetLegacyClaimsRejected publishes whether this manager refuses claims that
+// are not admitted to the S0FS runtime. Schedulers use this signal to keep
+// legacy templates away from green clusters during rollout.
+func (s *ClusterService) SetLegacyClaimsRejected(rejected bool) {
+	if s != nil {
+		s.legacyClaimsRejected = rejected
 	}
 }
 
@@ -177,6 +188,7 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 		SharedCarrierReadyCount:    sharedCarrierReadyCount,
 		SharedCarrierCreatingCount: sharedCarrierCreatingCount,
 		S0FSRuntimeReady:           s.s0fsRuntimeReady,
+		LegacyClaimsRejected:       s.legacyClaimsRejected,
 		TotalPodCount:              idleCount + activeCount + sharedCarrierReadyCount + sharedCarrierCreatingCount,
 	}
 	return summary, nil

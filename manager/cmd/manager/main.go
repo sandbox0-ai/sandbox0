@@ -560,6 +560,7 @@ func main() {
 		logger,
 	)
 	clusterService.SetS0FSRuntimeReady(sharedCarrierPool != nil)
+	clusterService.SetLegacyClaimsRejected(s0fsAdmission.RejectLegacyClaims())
 	// Create cleanup controller
 	cleanupController := controller.NewCleanupController(
 		k8sClient,

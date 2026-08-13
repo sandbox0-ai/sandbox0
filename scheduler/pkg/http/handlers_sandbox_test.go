@@ -188,6 +188,36 @@ func TestSelectClusterForS0FSTemplateFailsClosedWithoutCapableRuntime(t *testing
 	}
 }
 
+func TestSelectClusterForLegacyTemplateNeverRoutesToRejectingRuntime(t *testing.T) {
+	tpl := newRoutingTemplate("tmpl-a")
+	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	server := newRoutingTestServer(
+		tpl,
+		[]*template.TemplateAllocation{newRoutingAllocation("legacy", 1, 2), newRoutingAllocation("green", 1, 2)},
+		[]*template.Cluster{newRoutingCluster("legacy", 1), newRoutingCluster("green", 100)},
+		&fakeRoutingReconciler{
+			templateIdle: map[string]map[string]int32{
+				"legacy": {clusterTemplateID: 1},
+				"green":  {clusterTemplateID: 10},
+			},
+			templateStatsAge: map[string]time.Duration{"legacy": time.Second, "green": time.Second},
+			clusterSummaries: map[string]*templreconciler.ClusterSummary{
+				"legacy": {SandboxNodeCount: 1, TotalNodeCount: 1, TotalPodCount: 9},
+				"green":  {SandboxNodeCount: 10, TotalNodeCount: 10, TotalPodCount: 0, LegacyClaimsRejected: true},
+			},
+			clusterSummaryAge: map[string]time.Duration{"legacy": time.Second, "green": time.Second},
+		},
+	)
+
+	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
+	if err != nil {
+		t.Fatalf("selectClusterForTemplate() error = %v", err)
+	}
+	if selected == nil || selected.ClusterID != "legacy" || selectedBy != "idle" {
+		t.Fatalf("selection = (%v,%q), want (legacy,idle)", clusterID(selected), selectedBy)
+	}
+}
+
 func TestSelectClusterForTemplatePrefersHeadroomWhenIdleUnavailable(t *testing.T) {
 	tpl := newRoutingTemplate("tmpl-a")
 	server := newRoutingTestServer(

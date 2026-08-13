@@ -3086,6 +3086,24 @@ test "$(cat %s)" = %s
 		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, filePath)
 		return body, readErr
 	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(content))
+
+	pauseResp, status, err := session.PauseSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(pauseResp).NotTo(BeNil())
+	waitForSandboxLifecycleStatusEventually(env, session, sandboxID, apispec.SandboxLifecycleStatusPaused)
+
+	resumeResp, status, err := session.ResumeSandbox(env.TestCtx.Context, GinkgoT(), sandboxID)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(status).To(Equal(http.StatusOK))
+	Expect(resumeResp).NotTo(BeNil())
+	Expect(resumeResp.Resumed).To(BeTrue())
+	waitForSandboxPodReadyEventually(env, session, sandboxID, templateNamespace)
+
+	Eventually(func() ([]byte, error) {
+		body, _, readErr := session.ReadFile(env.TestCtx.Context, GinkgoT(), sandboxID, filePath)
+		return body, readErr
+	}).WithTimeout(20 * time.Second).WithPolling(1 * time.Second).Should(Equal(content))
 }
 
 func assertClaimMountedVolumeWritable(env *framework.ScenarioEnv, session *e2eutils.Session) {

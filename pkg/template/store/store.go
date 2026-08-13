@@ -20,6 +20,18 @@ type TemplateStore interface {
 	DeleteTemplate(ctx context.Context, scope, teamID, templateID string) error
 }
 
+// TemplateImageRevisionStore owns region-wide OCI resolution and ImageFS import leases.
+type TemplateImageRevisionStore interface {
+	EnsureTemplateImageRevision(ctx context.Context, tpl *template.Template) (*template.TemplateImageRevision, bool, error)
+	GetCurrentTemplateImageRevision(ctx context.Context, scope, teamID, templateID string) (*template.TemplateImageRevision, error)
+	ClaimTemplateImageRevision(ctx context.Context, workerID string, leaseDuration time.Duration) (*template.TemplateImageRevision, error)
+	RenewTemplateImageRevisionLease(ctx context.Context, revisionID, workerID string, leaseDuration time.Duration) error
+	MarkTemplateImageRevisionResolved(ctx context.Context, revisionID, workerID, digest, os, architecture, variant string, ociConfig json.RawMessage) error
+	MarkTemplateImageRevisionReady(ctx context.Context, revisionID, workerID, imageFSHeadID string, completedAt time.Time) error
+	FailTemplateImageRevision(ctx context.Context, revisionID, workerID, reason, message string) error
+	ReleaseTemplateImageRevision(ctx context.Context, revisionID, workerID string, retryAt time.Time, message string) error
+}
+
 // AllocationStore provides CRUD operations for template allocations.
 type AllocationStore interface {
 	UpsertAllocation(ctx context.Context, alloc *template.TemplateAllocation) error

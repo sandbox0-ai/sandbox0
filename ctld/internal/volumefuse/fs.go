@@ -975,12 +975,11 @@ func (fs *FileSystem) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) fuse
 	if st != fuse.OK {
 		return st
 	}
-	_, err := session.Fsync(context.Background(), &pb.FsyncRequest{
-		VolumeId: fs.volumeID,
-		HandleId: input.Fh,
-		Datasync: input.FsyncFlags != 0,
-		Actor:    actorFromCaller(input.Caller),
-	})
+	dirSession, ok := session.(FsyncDirSession)
+	if !ok {
+		return fuse.ENOSYS
+	}
+	err := dirSession.FsyncDir(context.Background(), input.NodeId)
 	if err != nil {
 		return statusToFuse(err)
 	}

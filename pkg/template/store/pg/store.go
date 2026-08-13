@@ -35,7 +35,19 @@ const templateSelectColumns = `
 	template_id, scope, team_id, user_id, spec, created_at, updated_at,
 	creation_build_id::text, creation_idempotency_key, creation_request_hash,
 	creation_state, creation_stage, creation_started_at, creation_captured_at,
-	creation_completed_at, creation_output_image, creation_reason, creation_message
+	creation_completed_at, creation_output_image, creation_reason, creation_message,
+	(SELECT r.revision_id FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.source_image FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.resolved_digest FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.platform_os FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.platform_architecture FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.platform_variant FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.image_fs_head_id FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.state FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.reason FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.message FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.started_at FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id),
+	(SELECT r.completed_at FROM scheduler_template_image_revisions r WHERE r.revision_id = scheduler_templates.current_image_revision_id)
 `
 
 type rowScanner interface {
@@ -49,6 +61,9 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 	var creationState string
 	var creationStage, outputImage, reason, message *string
 	var startedAt, capturedAt, completedAt *time.Time
+	var revisionID, revisionSource, revisionDigest, platformOS, platformArchitecture, platformVariant *string
+	var imageFSHeadID, revisionState, revisionReason, revisionMessage *string
+	var revisionStartedAt, revisionCompletedAt *time.Time
 	if err := row.Scan(
 		&tpl.TemplateID,
 		&tpl.Scope,
@@ -68,6 +83,18 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 		&outputImage,
 		&reason,
 		&message,
+		&revisionID,
+		&revisionSource,
+		&revisionDigest,
+		&platformOS,
+		&platformArchitecture,
+		&platformVariant,
+		&imageFSHeadID,
+		&revisionState,
+		&revisionReason,
+		&revisionMessage,
+		&revisionStartedAt,
+		&revisionCompletedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -91,6 +118,26 @@ func scanTemplate(row rowScanner) (*template.Template, error) {
 				Message:     stringValue(message),
 			},
 		}
+	}
+	if revisionID != nil {
+		if tpl.Status == nil {
+			tpl.Status = &v1alpha1.SandboxTemplateStatus{}
+		}
+		revision := &template.TemplateImageRevision{
+			RevisionID:           stringValue(revisionID),
+			SourceImage:          stringValue(revisionSource),
+			ResolvedDigest:       stringValue(revisionDigest),
+			PlatformOS:           stringValue(platformOS),
+			PlatformArchitecture: stringValue(platformArchitecture),
+			PlatformVariant:      stringValue(platformVariant),
+			ImageFSHeadID:        stringValue(imageFSHeadID),
+			State:                stringValue(revisionState),
+			Reason:               stringValue(revisionReason),
+			Message:              stringValue(revisionMessage),
+			StartedAt:            timeValue(revisionStartedAt),
+			CompletedAt:          timeValue(revisionCompletedAt),
+		}
+		tpl.Status.ImageRevision = revision.Status()
 	}
 	return &tpl, nil
 }

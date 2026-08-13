@@ -1007,9 +1007,11 @@ spec:
                 description: Pool strategy
                 properties:
                   maxIdle:
+                    description: 'Deprecated: shared carrier pool capacity is platform-owned.'
                     format: int32
                     type: integer
                   minIdle:
+                    description: 'Deprecated: shared carrier pool capacity is platform-owned.'
                     format: int32
                     type: integer
                 required:
@@ -1109,9 +1111,48 @@ spec:
                 description: Pool statistics
                 format: int32
                 type: integer
+              imageRevision:
+                description: |-
+                  ImageRevision reports the immutable OCI-to-S0FS revision selected for new
+                  claims. Templates are not ready until this revision is ready.
+                properties:
+                  completedAt:
+                    format: date-time
+                    type: string
+                  imageFsHeadId:
+                    type: string
+                  message:
+                    type: string
+                  platform:
+                    type: string
+                  reason:
+                    type: string
+                  resolvedDigest:
+                    type: string
+                  revisionId:
+                    type: string
+                  sourceImage:
+                    type: string
+                  startedAt:
+                    format: date-time
+                    type: string
+                  state:
+                    description: TemplateImageRevisionState is the OCI-to-S0FS import
+                      state.
+                    type: string
+                required:
+                - revisionId
+                - sourceImage
+                - state
+                type: object
               lastUpdateTime:
                 description: Last updated time
                 format: date-time
+                type: string
+              poolMode:
+                description: |-
+                  PoolMode reports whether claims use the cluster shared carrier pool or a
+                  cold S0FS carrier. Legacy is reported only during migration.
                 type: string
             required:
             - activeCount
@@ -1122,3 +1163,5 @@ spec:
         type: object
     served: true
     storage: true
+    subresources:
+      status: {}

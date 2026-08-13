@@ -7961,9 +7961,13 @@ components:
         minIdle:
           type: integer
           format: int32
+          deprecated: true
+          description: Deprecated. Shared carrier pool capacity is configured by the platform.
         maxIdle:
           type: integer
           format: int32
+          deprecated: true
+          description: Deprecated. Shared carrier pool capacity is configured by the platform.
       required: [minIdle, maxIdle]
     SandboxNetworkPolicy:
       type: object
@@ -8524,6 +8528,12 @@ components:
         activeCount:
           type: integer
           format: int32
+        poolMode:
+          type: string
+          enum: [legacy, shared, cold]
+          description: Allocation mode for new sandbox claims. Legacy is reported only during migration.
+        imageRevision:
+          $ref: "#/components/schemas/TemplateImageRevisionStatus"
         conditions:
           type: array
           items:
@@ -8534,15 +8544,46 @@ components:
           nullable: true
         creation:
           $ref: "#/components/schemas/TemplateCreationStatus"
+    TemplateImageRevisionStatus:
+      type: object
+      description: Immutable OCI resolution and S0FS ImageFS import selected for new claims.
+      properties:
+        revisionId:
+          type: string
+        sourceImage:
+          type: string
+        resolvedDigest:
+          type: string
+        platform:
+          type: string
+        imageFsHeadId:
+          type: string
+        state:
+          type: string
+          enum: [resolving, importing, ready, failed]
+          x-enum-varnames:
+            - TemplateImageRevisionStatusStateResolving
+            - TemplateImageRevisionStatusStateImporting
+            - TemplateImageRevisionStatusStateReady
+            - TemplateImageRevisionStatusStateFailed
+        reason:
+          type: string
+        message:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+      required: [revisionId, sourceImage, state]
     TemplateCreationStatus:
       type: object
       description: |
         Asynchronous creation status for templates built from a sandbox.
-        Traditional image-based templates omit this object and are ready
-        immediately after creation. Ready means the template is visible in at
-        least one data-plane cluster and the claim API accepts it; when the
-        pool is zero, it does not imply that a sandbox image has already been
-        pulled.
+        This object is specific to templates built from a sandbox. All templates,
+        including traditional image-based templates, use imageRevision and are
+        ready for new claims only after OCI resolution and S0FS import complete.
       properties:
         state:
           type: string

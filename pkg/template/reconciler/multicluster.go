@@ -411,6 +411,8 @@ func (r *MultiClusterReconciler) fetchClusterSummaries(ctx context.Context, clus
 				metrics.ObserveClusterCapacity(c.ClusterID, "idle_pods", float64(summary.IdlePodCount))
 				metrics.ObserveClusterCapacity(c.ClusterID, "active_pods", float64(summary.ActivePodCount))
 				metrics.ObserveClusterCapacity(c.ClusterID, "pending_active_pods", float64(summary.PendingActivePodCount))
+				metrics.ObserveClusterCapacity(c.ClusterID, "shared_carrier_ready", float64(summary.SharedCarrierReadyCount))
+				metrics.ObserveClusterCapacity(c.ClusterID, "shared_carrier_creating", float64(summary.SharedCarrierCreatingCount))
 				metrics.ObserveClusterCapacity(c.ClusterID, "total_pods", float64(summary.TotalPodCount))
 				metrics.ObserveClusterCapacity(c.ClusterID, "available_headroom", float64(headroom))
 				metrics.ObserveClusterSummaryAge(c.ClusterID, 0)
@@ -468,7 +470,8 @@ func (r *MultiClusterReconciler) reconcileTemplate(ctx context.Context, tpl *tem
 					"sandbox0.ai/template-user-id": tpl.UserID,
 				},
 			},
-			Spec: clusterSpec,
+			Spec:   clusterSpec,
+			Status: projectedTemplateStatus(tpl),
 		}
 
 		if err := r.clusterClient.CreateOrUpdateTemplate(ctx, cluster.ClusterGatewayURL, crd); err != nil {

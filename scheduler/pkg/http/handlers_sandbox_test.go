@@ -17,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -71,6 +72,66 @@ func TestSelectClusterForTemplatePrefersIdleCapacity(t *testing.T) {
 	}
 	if selectedBy != "idle" {
 		t.Fatalf("selectedBy = %q, want %q", selectedBy, "idle")
+	}
+}
+
+func TestSelectClusterForS0FSTemplatePrefersSharedCarrierCapacity(t *testing.T) {
+	tpl := newRoutingTemplate("tmpl-a")
+	tpl.Status = &v1alpha1.SandboxTemplateStatus{ImageRevision: &v1alpha1.TemplateImageRevisionStatus{
+		State: v1alpha1.TemplateImageRevisionStateReady, ImageFSHeadID: "head-1",
+	}}
+	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	server := newRoutingTestServer(
+		tpl,
+		[]*template.TemplateAllocation{newRoutingAllocation("cluster-a", 1, 2), newRoutingAllocation("cluster-b", 1, 2)},
+		[]*template.Cluster{newRoutingCluster("cluster-a", 1), newRoutingCluster("cluster-b", 1)},
+		&fakeRoutingReconciler{
+			templateIdle:     map[string]map[string]int32{"cluster-a": {clusterTemplateID: 5}},
+			templateStatsAge: map[string]time.Duration{"cluster-a": time.Second},
+			clusterSummaries: map[string]*templreconciler.ClusterSummary{
+				"cluster-a": {SandboxNodeCount: 2, TotalNodeCount: 2, SharedCarrierReadyCount: 1, TotalPodCount: 5},
+				"cluster-b": {SandboxNodeCount: 2, TotalNodeCount: 2, SharedCarrierReadyCount: 3, TotalPodCount: 10},
+			},
+			clusterSummaryAge: map[string]time.Duration{"cluster-a": time.Second, "cluster-b": time.Second},
+		},
+	)
+
+	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
+	if err != nil {
+		t.Fatalf("selectClusterForTemplate() error = %v", err)
+	}
+	if selected == nil || selected.ClusterID != "cluster-b" || selectedBy != "shared_carrier" {
+		t.Fatalf("selection = (%v,%q), want (cluster-b,shared_carrier)", clusterID(selected), selectedBy)
+	}
+}
+
+func TestSelectClusterForS0FSTemplateUsesHeadroomWhenSharedPoolIsEmpty(t *testing.T) {
+	tpl := newRoutingTemplate("tmpl-a")
+	tpl.Status = &v1alpha1.SandboxTemplateStatus{ImageRevision: &v1alpha1.TemplateImageRevisionStatus{
+		State: v1alpha1.TemplateImageRevisionStateReady, ImageFSHeadID: "head-1",
+	}}
+	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	server := newRoutingTestServer(
+		tpl,
+		[]*template.TemplateAllocation{newRoutingAllocation("cluster-a", 1, 2), newRoutingAllocation("cluster-b", 1, 2)},
+		[]*template.Cluster{newRoutingCluster("cluster-a", 1), newRoutingCluster("cluster-b", 1)},
+		&fakeRoutingReconciler{
+			templateIdle:     map[string]map[string]int32{"cluster-a": {clusterTemplateID: 5}},
+			templateStatsAge: map[string]time.Duration{"cluster-a": time.Second},
+			clusterSummaries: map[string]*templreconciler.ClusterSummary{
+				"cluster-a": {SandboxNodeCount: 1, TotalNodeCount: 1, TotalPodCount: 9},
+				"cluster-b": {SandboxNodeCount: 2, TotalNodeCount: 2, TotalPodCount: 5},
+			},
+			clusterSummaryAge: map[string]time.Duration{"cluster-a": time.Second, "cluster-b": time.Second},
+		},
+	)
+
+	selected, _, selectedBy, err := server.selectClusterForTemplate(newRoutingContext(), "tmpl-a", "team-a")
+	if err != nil {
+		t.Fatalf("selectClusterForTemplate() error = %v", err)
+	}
+	if selected == nil || selected.ClusterID != "cluster-b" || selectedBy != "headroom" {
+		t.Fatalf("selection = (%v,%q), want (cluster-b,headroom)", clusterID(selected), selectedBy)
 	}
 }
 

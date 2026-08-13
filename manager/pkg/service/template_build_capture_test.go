@@ -1,76 +1,47 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
+	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestEnsureTemplateBuildCaptureReadsPinnedHeadAfterSourceAdvances(t *testing.T) {
+func TestEnsureTemplateBuildCaptureExportsPinnedV3Head(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(100, 0).UTC()
-	base := &memorySandboxStore{
-		records: map[string]*sandboxstore.SandboxRecord{
-			"sandbox-1": {
-				ID:           "sandbox-1",
-				TeamID:       "team-1",
-				DesiredState: sandboxstore.SandboxDesiredStatePaused,
-			},
-		},
-		rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
-			"template-build-1": {
-				ID:              "template-build-1",
-				FilesystemID:    "filesystem-1",
-				TeamID:          "team-1",
-				SourceSandboxID: "sandbox-1",
-				HeadLayerID:     "layer-pinned",
-				CreatedAt:       now,
-			},
-		},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			"sandbox-1": {
-				LayerID: "layer-newer",
-				TeamID:  "team-1",
-			},
-		},
-	}
-	pinned := &sandboxstore.SandboxRootFSLayer{
-		ID:                   "layer-pinned",
-		TeamID:               "team-1",
-		BaseImageRef:         "docker.io/library/busybox:1.36",
-		BaseImageDigest:      digest.FromString("base-index").String(),
-		PlatformOS:           "linux",
-		PlatformArchitecture: "arm64",
-		PlatformVariant:      "v8",
-		DiffDigest:           digest.FromString("pinned layer").String(),
-		DiffID:               digest.FromString("pinned diff").String(),
-		DiffMediaType:        ocispec.MediaTypeImageLayerGzip,
-		DiffSize:             42,
-		DiffObjectKey:        "rootfs/pinned.tar.gz",
-	}
+	objects := objectstore.NewMemoryStore(t.Name())
+	pinned := templateCaptureHeadFixture(t, objects, "team-1", "sandbox-1", "head-pinned", "arm64", "v8")
+	newer := templateCaptureHeadFixture(t, objects, "team-1", "sandbox-1", "head-newer", "amd64", "")
 	store := &templateCaptureMemoryStore{
-		memorySandboxStore: base,
-		chains: map[string][]*sandboxstore.SandboxRootFSLayer{
-			"layer-pinned": {pinned},
-			"layer-newer": {{
-				ID:                   "layer-newer",
-				TeamID:               "team-1",
-				PlatformOS:           "linux",
-				PlatformArchitecture: "amd64",
-			}},
+		memorySandboxStore: &memorySandboxStore{
+			records: map[string]*sandboxstore.SandboxRecord{
+				"sandbox-1": {ID: "sandbox-1", TeamID: "team-1", DesiredState: sandboxstore.SandboxDesiredStatePaused},
+			},
+			rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
+				"template-build-1": {
+					ID: "template-build-1", FilesystemID: "filesystem-1", TeamID: "team-1",
+					SourceSandboxID: "sandbox-1", HeadID: pinned.Reference.HeadID, CreatedAt: now,
+				},
+			},
 		},
+		heads: map[string]*sandboxstore.SandboxRootFSHead{
+			pinned.Reference.HeadID: pinned,
+			newer.Reference.HeadID:  newer,
+		},
+		exports: make(map[string]*sandboxstore.RootFSExport),
 	}
-	service := &SandboxService{sandboxStore: store, clock: systemTime{}}
+	service := &SandboxService{sandboxStore: store, rootFSObjectStore: objects, clock: systemTime{}}
 
 	capture, err := service.EnsureTemplateBuildCapture(
 		context.Background(),
@@ -82,118 +53,59 @@ func TestEnsureTemplateBuildCaptureReadsPinnedHeadAfterSourceAdvances(t *testing
 	if err != nil {
 		t.Fatalf("EnsureTemplateBuildCapture() error = %v", err)
 	}
-	if capture.HeadLayerID != "layer-pinned" || capture.Layers[0].ID != "layer-pinned" {
-		t.Fatalf("capture followed mutable sandbox head: %#v", capture)
+	if capture.HeadID != pinned.Reference.HeadID || len(capture.Layers) != 1 || capture.Layers[0].ID != pinned.Reference.HeadID {
+		t.Fatalf("capture followed mutable sandbox Head: %#v", capture)
 	}
 	if capture.Platform.Architecture != "arm64" || capture.Platform.Variant != "v8" {
 		t.Fatalf("capture platform = %#v, want pinned arm64/v8", capture.Platform)
 	}
+	if capture.Layers[0].MediaType != rootfshead.ExportLayerMediaType || capture.Layers[0].DiffID == "" {
+		t.Fatalf("capture layer = %#v, want v3 Head OCI export", capture.Layers[0])
+	}
 	if !capture.CapturedAt.Equal(now) {
 		t.Fatalf("capture time = %v, want %v", capture.CapturedAt, now)
 	}
-}
-
-func TestEnsureTemplateBuildCaptureRejectsMixedRootFSChain(t *testing.T) {
-	t.Parallel()
-
-	baseDigest := digest.FromString("base-index").String()
-	tests := []struct {
-		name       string
-		mutateRoot func(*sandboxstore.SandboxRootFSLayer)
-		wantError  string
-	}{
-		{
-			name: "base digest mismatch",
-			mutateRoot: func(layer *sandboxstore.SandboxRootFSLayer) {
-				layer.BaseImageDigest = digest.FromString("different-base").String()
-			},
-			wantError: "base image digest",
-		},
-		{
-			name: "base repository mismatch",
-			mutateRoot: func(layer *sandboxstore.SandboxRootFSLayer) {
-				layer.BaseImageRef = "registry.example.com/other/image:1"
-			},
-			wantError: "base image reference",
-		},
-		{
-			name: "platform mismatch",
-			mutateRoot: func(layer *sandboxstore.SandboxRootFSLayer) {
-				layer.PlatformArchitecture = "arm64"
-			},
-			wantError: "platform",
-		},
+	if store.exports[pinned.Reference.HeadID] == nil {
+		t.Fatal("v3 Head export was not persisted")
 	}
 
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	second, err := service.EnsureTemplateBuildCapture(
+		context.Background(), "sandbox-1", "team-1", "template-build-1", v1alpha1.SandboxTemplateSpec{},
+	)
+	if err != nil {
+		t.Fatalf("second EnsureTemplateBuildCapture() error = %v", err)
+	}
+	if second.Layers[0] != capture.Layers[0] {
+		t.Fatalf("durable export was not reused: first=%#v second=%#v", capture.Layers[0], second.Layers[0])
+	}
+}
 
-			root := &sandboxstore.SandboxRootFSLayer{
-				ID:                   "layer-root",
-				TeamID:               "team-1",
-				BaseImageRef:         "busybox:1.36",
-				BaseImageDigest:      baseDigest,
-				PlatformOS:           "linux",
-				PlatformArchitecture: "amd64",
-				DiffDigest:           digest.FromString("root").String(),
-				DiffID:               digest.FromString("root").String(),
-				DiffMediaType:        ocispec.MediaTypeImageLayer,
-				DiffSize:             4,
-				DiffObjectKey:        "rootfs/root",
-			}
-			tt.mutateRoot(root)
-			head := &sandboxstore.SandboxRootFSLayer{
-				ID:                   "layer-head",
-				ParentLayerID:        root.ID,
-				TeamID:               "team-1",
-				BaseImageRef:         "docker.io/library/busybox:1.36",
-				BaseImageDigest:      baseDigest,
-				PlatformOS:           "linux",
-				PlatformArchitecture: "amd64",
-				DiffDigest:           digest.FromString("head").String(),
-				DiffID:               digest.FromString("head").String(),
-				DiffMediaType:        ocispec.MediaTypeImageLayer,
-				DiffSize:             4,
-				DiffObjectKey:        "rootfs/head",
-			}
-			store := &templateCaptureMemoryStore{
-				memorySandboxStore: &memorySandboxStore{
-					records: map[string]*sandboxstore.SandboxRecord{
-						"sandbox-1": {
-							ID:           "sandbox-1",
-							TeamID:       "team-1",
-							DesiredState: sandboxstore.SandboxDesiredStatePaused,
-						},
-					},
-					rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
-						"template-build-1": {
-							ID:              "template-build-1",
-							TeamID:          "team-1",
-							SourceSandboxID: "sandbox-1",
-							HeadLayerID:     head.ID,
-							CreatedAt:       time.Unix(100, 0).UTC(),
-						},
-					},
-				},
-				chains: map[string][]*sandboxstore.SandboxRootFSLayer{
-					head.ID: {root, head},
-				},
-			}
-			service := &SandboxService{sandboxStore: store, clock: systemTime{}}
+func TestEnsureTemplateBuildCaptureRejectsMissingV3Head(t *testing.T) {
+	t.Parallel()
 
-			_, err := service.EnsureTemplateBuildCapture(
-				context.Background(),
-				"sandbox-1",
-				"team-1",
-				"template-build-1",
-				v1alpha1.SandboxTemplateSpec{},
-			)
-			if !errors.Is(err, errTemplateBuildCaptureInvalid) || !strings.Contains(err.Error(), tt.wantError) {
-				t.Fatalf("EnsureTemplateBuildCapture() error = %v, want terminal %q mismatch", err, tt.wantError)
-			}
-		})
+	objects := objectstore.NewMemoryStore(t.Name())
+	store := &templateCaptureMemoryStore{
+		memorySandboxStore: &memorySandboxStore{
+			records: map[string]*sandboxstore.SandboxRecord{
+				"sandbox-1": {ID: "sandbox-1", TeamID: "team-1", DesiredState: sandboxstore.SandboxDesiredStatePaused},
+			},
+			rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
+				"template-build-1": {
+					ID: "template-build-1", TeamID: "team-1", SourceSandboxID: "sandbox-1",
+					HeadID: "missing-head", CreatedAt: time.Unix(100, 0).UTC(),
+				},
+			},
+		},
+		heads:   make(map[string]*sandboxstore.SandboxRootFSHead),
+		exports: make(map[string]*sandboxstore.RootFSExport),
+	}
+	service := &SandboxService{sandboxStore: store, rootFSObjectStore: objects, clock: systemTime{}}
+
+	_, err := service.EnsureTemplateBuildCapture(
+		context.Background(), "sandbox-1", "team-1", "template-build-1", v1alpha1.SandboxTemplateSpec{},
+	)
+	if !errors.Is(err, errTemplateBuildCaptureInvalid) {
+		t.Fatalf("EnsureTemplateBuildCapture() error = %v, want invalid capture", err)
 	}
 }
 
@@ -227,18 +139,97 @@ func TestRootFSPlatformForPodUsesActualNodeLabels(t *testing.T) {
 
 type templateCaptureMemoryStore struct {
 	*memorySandboxStore
-	chains map[string][]*sandboxstore.SandboxRootFSLayer
+	heads   map[string]*sandboxstore.SandboxRootFSHead
+	exports map[string]*sandboxstore.RootFSExport
 }
 
-func (s *templateCaptureMemoryStore) GetRootFSLayerChainByHead(_ context.Context, teamID, headLayerID string) ([]*sandboxstore.SandboxRootFSLayer, error) {
-	chain := s.chains[headLayerID]
-	out := make([]*sandboxstore.SandboxRootFSLayer, 0, len(chain))
-	for _, layer := range chain {
-		if layer == nil || (teamID != "" && layer.TeamID != teamID) {
-			continue
-		}
-		copy := *layer
-		out = append(out, &copy)
+func (s *templateCaptureMemoryStore) GetRootFSHeadByID(_ context.Context, headID, teamID string) (*sandboxstore.SandboxRootFSHead, error) {
+	head := s.heads[headID]
+	if head == nil || head.TeamID != teamID {
+		return nil, nil
 	}
-	return out, nil
+	copy := *head
+	return &copy, nil
+}
+
+func (s *templateCaptureMemoryStore) GetRootFSExport(_ context.Context, headID, teamID string) (*sandboxstore.RootFSExport, error) {
+	export := s.exports[headID]
+	if export == nil || export.TeamID != teamID {
+		return nil, nil
+	}
+	copy := *export
+	return &copy, nil
+}
+
+func (s *templateCaptureMemoryStore) SaveRootFSExport(_ context.Context, export *sandboxstore.RootFSExport) error {
+	if existing := s.exports[export.HeadID]; existing != nil {
+		if *existing == *export {
+			return nil
+		}
+		return sandboxstore.ErrRootFSHeadConflict
+	}
+	copy := *export
+	s.exports[export.HeadID] = &copy
+	return nil
+}
+
+func (*templateCaptureMemoryStore) AcquireRootFSWriteLease(context.Context, string, string, time.Duration) error {
+	return nil
+}
+
+func (*templateCaptureMemoryStore) ReleaseRootFSWriteLease(context.Context, string, string) error {
+	return nil
+}
+
+func templateCaptureHeadFixture(
+	t *testing.T,
+	store objectstore.Store,
+	teamID, sandboxID, headID, architecture, variant string,
+) *sandboxstore.SandboxRootFSHead {
+	t.Helper()
+	prefix, err := rootfshead.TeamObjectPrefix(teamID)
+	if err != nil {
+		t.Fatalf("TeamObjectPrefix() error = %v", err)
+	}
+	put := func(mediaType string, payload []byte) rootfshead.Object {
+		digestValue := digest.FromBytes(payload)
+		key, err := rootfshead.ObjectKey(prefix, mediaType, digestValue.String())
+		if err != nil {
+			t.Fatalf("ObjectKey() error = %v", err)
+		}
+		if err := store.Put(key, bytes.NewReader(payload)); err != nil {
+			t.Fatalf("store fixture object: %v", err)
+		}
+		return rootfshead.Object{Key: key, Digest: digestValue.String(), Size: int64(len(payload)), MediaType: mediaType}
+	}
+	indexPayload, err := rootfshead.EncodeDirectoryIndex(rootfshead.DirectoryIndex{Version: rootfshead.Version})
+	if err != nil {
+		t.Fatalf("EncodeDirectoryIndex() error = %v", err)
+	}
+	indexObject := put(rootfshead.DirectoryIndexMediaType, indexPayload)
+	base := rootfshead.BaseIdentity{
+		ImageReference: "docker.io/library/busybox:1.36",
+		ManifestDigest: digest.FromString("base manifest").String(),
+		ChainID:        digest.FromString("base chain").String(),
+		OS:             "linux",
+		Architecture:   architecture,
+		Variant:        variant,
+	}
+	headPayload, err := rootfshead.EncodeHead(rootfshead.Head{
+		Version: rootfshead.Version,
+		HeadID:  headID,
+		Base:    base,
+		Root: rootfshead.Entry{
+			Inode: "root", Kind: rootfshead.EntryDirectory, Mode: 0o040755, Nlink: 2, Directory: &indexObject,
+		},
+	})
+	if err != nil {
+		t.Fatalf("EncodeHead() error = %v", err)
+	}
+	manifest := put(rootfshead.HeadMediaType, headPayload)
+	return &sandboxstore.SandboxRootFSHead{
+		SandboxID: sandboxID, SourceSandboxID: sandboxID, TeamID: teamID, RuntimeGeneration: 1,
+		Reference: rootfshead.HeadReference{Version: rootfshead.Version, HeadID: headID, Manifest: manifest},
+		Base:      base,
+	}
 }

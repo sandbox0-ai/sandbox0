@@ -26,6 +26,9 @@ const (
 	SandboxDesiredStatePaused      = "paused"
 	SandboxDesiredStateTerminating = "terminating"
 	SandboxDesiredStateDeleted     = "deleted"
+
+	RootFSRuntimeLegacyV1 = "legacy-v1"
+	RootFSRuntimeS0FSV2   = "s0fs-v2"
 )
 
 // SandboxRecord is the durable sandbox identity, desired lifecycle state, and
@@ -46,6 +49,7 @@ type SandboxRecord struct {
 	CurrentPodNamespace  string
 	RuntimeGeneration    int64
 	LifecycleEpoch       int64
+	RootFSRuntimeVersion string
 	WebhookStateVolumeID string
 	OwnerKind            string
 	HotClaimCompletedAt  time.Time
@@ -55,61 +59,6 @@ type SandboxRecord struct {
 	DeletedAt            time.Time
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
-}
-
-// SandboxRootFSState is manager-internal metadata for one persisted sandbox
-// writable rootfs diff.
-type SandboxRootFSState struct {
-	LayerID       string
-	ParentLayerID string
-	// ExpectedHeadLayerID overrides ParentLayerID as the head CAS precondition.
-	ExpectedHeadLayerID  string
-	SandboxID            string
-	TeamID               string
-	RuntimeGeneration    int64
-	Runtime              string
-	RuntimeHandler       string
-	BaseImageRef         string
-	BaseImageDigest      string
-	PlatformOS           string
-	PlatformArchitecture string
-	PlatformVariant      string
-	Snapshotter          string
-	SnapshotParent       string
-	SnapshotParentChain  []string
-	DiffDigest           string
-	DiffID               string
-	DiffMediaType        string
-	DiffSize             int64
-	DiffObjectKey        string
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-	LayerChain           []*SandboxRootFSLayer
-}
-
-// SandboxRootFSLayer is one immutable OCI diff layer in a sandbox rootfs chain.
-type SandboxRootFSLayer struct {
-	ID                   string
-	ParentLayerID        string
-	SourceSandboxID      string
-	TeamID               string
-	RuntimeGeneration    int64
-	Runtime              string
-	RuntimeHandler       string
-	BaseImageRef         string
-	BaseImageDigest      string
-	PlatformOS           string
-	PlatformArchitecture string
-	PlatformVariant      string
-	Snapshotter          string
-	SnapshotParent       string
-	SnapshotParentChain  []string
-	DiffDigest           string
-	DiffID               string
-	DiffMediaType        string
-	DiffSize             int64
-	DiffObjectKey        string
-	CreatedAt            time.Time
 }
 
 const (
@@ -123,6 +72,7 @@ const (
 	SandboxLifecycleSourceCrash  = "crash"
 	SandboxLifecycleSourceHealth = "health"
 	SandboxLifecycleSourceLost   = "lost"
+	SandboxLifecycleSourceRootFS = "rootfs"
 
 	SandboxLifecyclePhasePreparing  = "preparing"
 	SandboxLifecyclePhaseBarriered  = "barriered"
@@ -135,28 +85,29 @@ const (
 // SandboxLifecycleTxn is the durable prepare/commit record for a sandbox
 // runtime generation transition.
 type SandboxLifecycleTxn struct {
-	ID                  string
-	SandboxID           string
-	Kind                string
-	Phase               string
-	Source              string
-	Cancelable          bool
-	Epoch               int64
-	FromGeneration      int64
-	ToGeneration        int64
-	FromPodNamespace    string
-	FromPodName         string
-	ToPodNamespace      string
-	ToPodName           string
-	ExpectedHeadLayerID string
-	PreparedHeadLayerID string
-	Error               string
-	CancelReason        string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	CancelRequestedAt   time.Time
-	CommittedAt         time.Time
-	AbortedAt           time.Time
+	ID                   string
+	SandboxID            string
+	Kind                 string
+	Phase                string
+	Source               string
+	Cancelable           bool
+	Epoch                int64
+	FromGeneration       int64
+	ToGeneration         int64
+	FromPodNamespace     string
+	FromPodName          string
+	ToPodNamespace       string
+	ToPodName            string
+	ExpectedHeadID       string
+	PreparedHeadID       string
+	RootFSRuntimeVersion string
+	Error                string
+	CancelReason         string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	CancelRequestedAt    time.Time
+	CommittedAt          time.Time
+	AbortedAt            time.Time
 }
 
 // SandboxRuntimeMetadata is durable metadata projected onto a runtime pod.
@@ -185,8 +136,9 @@ type SandboxStore interface {
 	GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error)
 	ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error)
 	MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error
-	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
-	GetLatestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error)
+	SaveRootFSHead(ctx context.Context, head *SandboxRootFSHead) error
+	StageRootFSHead(ctx context.Context, head *SandboxRootFSHead) error
+	GetRootFSHead(ctx context.Context, sandboxID string) (*SandboxRootFSHead, error)
 	WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error
 }
 
@@ -197,14 +149,15 @@ type SandboxStoreTx interface {
 	MarkHotClaimCompleted(ctx context.Context, sandboxID string, completedAt time.Time) error
 	MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error
 	MarkRuntimeTerminating(ctx context.Context, sandboxID string) error
-	SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error
+	SaveRootFSHead(ctx context.Context, head *SandboxRootFSHead) error
+	GetRootFSHead(ctx context.Context, sandboxID string) (*SandboxRootFSHead, error)
 	GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error)
 	BeginLifecycleTxn(ctx context.Context, txn *SandboxLifecycleTxn) error
 	SetLifecycleTxnRuntime(ctx context.Context, txnID, namespace, podName string) error
 	UpdateLifecycleTxnPhase(ctx context.Context, txnID, phase string) error
-	SetLifecycleTxnPreparedHead(ctx context.Context, txnID, preparedHeadLayerID string) error
+	SetLifecycleTxnPreparedHead(ctx context.Context, txnID, preparedHeadID string) error
 	RequestLifecycleTxnCancel(ctx context.Context, txnID, reason string) (bool, error)
-	CommitLifecycleTxn(ctx context.Context, txnID, preparedHeadLayerID string) error
+	CommitLifecycleTxn(ctx context.Context, txnID, preparedHeadID string) error
 	AbortLifecycleTxn(ctx context.Context, txnID, reason string) error
 }
 
@@ -242,7 +195,11 @@ func (s *PGSandboxStore) UpsertSandbox(ctx context.Context, record *SandboxRecor
 	return upsertSandboxRecord(ctx, s.pool, record)
 }
 
-func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *SandboxRecord) error {
+type sandboxStoreExecutor interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+func upsertSandboxRecord(ctx context.Context, exec sandboxStoreExecutor, record *SandboxRecord) error {
 	if exec == nil || record == nil {
 		return nil
 	}
@@ -257,11 +214,11 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 		INSERT INTO manager.sandboxes (
 			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, desired_state, config, mounts, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
+			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch, rootfs_runtime_version,
 			webhook_state_volume_id, owner_kind, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, COALESCE($23, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, COALESCE($24, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -277,6 +234,7 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			current_pod_namespace = EXCLUDED.current_pod_namespace,
 			runtime_generation = EXCLUDED.runtime_generation,
 			lifecycle_epoch = GREATEST(manager.sandboxes.lifecycle_epoch, EXCLUDED.lifecycle_epoch),
+			rootfs_runtime_version = EXCLUDED.rootfs_runtime_version,
 			webhook_state_volume_id = EXCLUDED.webhook_state_volume_id,
 			owner_kind = EXCLUDED.owner_kind,
 			hot_claim_completed_at = COALESCE(EXCLUDED.hot_claim_completed_at, manager.sandboxes.hot_claim_completed_at),
@@ -286,10 +244,10 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
 		WHERE manager.sandboxes.deleted_at IS NULL
-			AND manager.sandboxes.desired_state NOT IN ($24, $25)
+			AND manager.sandboxes.desired_state NOT IN ($25, $26)
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
 		record.ClusterID, record.DesiredState, configJSON, mountsJSON, specJSON,
-		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
+		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch, normalizedRootFSRuntimeVersion(record.RootFSRuntimeVersion),
 		strings.TrimSpace(record.WebhookStateVolumeID), strings.TrimSpace(record.OwnerKind), nullableTime(record.HotClaimCompletedAt),
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt),
 		SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
@@ -409,9 +367,9 @@ func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Contex
 			WHERE s.deleted_at IS NULL
 				AND s.desired_state = $2
 				AND latest.kind = $3
-				AND latest.source IN ($4, $5, $6)
+				AND latest.source IN ($4, $5, $6, $7)
 			ORDER BY s.updated_at ASC
-			LIMIT $7
+			LIMIT $8
 		`,
 		SandboxLifecyclePhaseCommitted,
 		SandboxDesiredStatePaused,
@@ -419,6 +377,7 @@ func (s *PGSandboxStore) ListPendingRuntimeRecoverySandboxIDs(ctx context.Contex
 		SandboxLifecycleSourceCrash,
 		SandboxLifecycleSourceHealth,
 		SandboxLifecycleSourceLost,
+		SandboxLifecycleSourceRootFS,
 		limit,
 	)
 	if err != nil {
@@ -587,15 +546,19 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID, SandboxLifecyclePhaseAborted, "sandbox deleted"); err != nil {
 		return fmt.Errorf("abort sandbox lifecycle txns for deleted sandbox: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
-		WITH removed AS (
-			DELETE FROM manager.sandbox_rootfs_bindings
-			WHERE sandbox_id = $1
-			RETURNING filesystem_id
-		)
+	var filesystemID string
+	err = tx.QueryRow(ctx, `
+		DELETE FROM manager.sandbox_rootfs_bindings
+		WHERE sandbox_id = $1
+		RETURNING filesystem_id
+	`, sandboxID).Scan(&filesystemID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("delete sandbox rootfs binding: %w", err)
+	}
+	if filesystemID != "" {
+		if _, err := tx.Exec(ctx, `
 		DELETE FROM manager.rootfs_filesystems f
-		USING removed r
-		WHERE f.filesystem_id = r.filesystem_id
+		WHERE f.filesystem_id = $1
 			AND NOT EXISTS (
 				SELECT 1
 				FROM manager.sandbox_rootfs_bindings b
@@ -611,92 +574,14 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 				FROM manager.rootfs_filesystems child
 				WHERE child.source_filesystem_id = f.filesystem_id
 			)
-	`, sandboxID); err != nil {
-		return fmt.Errorf("delete sandbox rootfs binding: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_states WHERE sandbox_id = $1`, sandboxID); err != nil {
-		return fmt.Errorf("delete sandbox rootfs states: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_heads WHERE sandbox_id = $1`, sandboxID); err != nil {
-		return fmt.Errorf("delete sandbox rootfs head: %w", err)
+		`, filesystemID); err != nil {
+			return fmt.Errorf("delete unreferenced sandbox rootfs filesystem: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit mark sandbox deleted tx: %w", err)
 	}
 	return nil
-}
-
-func (s *PGSandboxStore) SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error {
-	if s == nil || s.pool == nil || state == nil {
-		return nil
-	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("begin rootfs state tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := saveRootFSState(ctx, tx, state); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit rootfs state tx: %w", err)
-	}
-	return nil
-}
-
-func (s *PGSandboxStore) GetLatestRootFSState(ctx context.Context, sandboxID string) (*SandboxRootFSState, error) {
-	if s == nil || s.pool == nil {
-		return nil, nil
-	}
-	chain, err := s.GetRootFSLayerChain(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	if len(chain) > 0 {
-		return rootFSStateFromLayerChain(sandboxID, chain), nil
-	}
-	return nil, nil
-}
-
-func (s *PGSandboxStore) GetRootFSLayerChain(ctx context.Context, sandboxID string) ([]*SandboxRootFSLayer, error) {
-	if s == nil || s.pool == nil || strings.TrimSpace(sandboxID) == "" {
-		return nil, nil
-	}
-	rows, err := s.pool.Query(ctx, rootFSLayerChainSQL(), sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("get rootfs layer chain: %w", err)
-	}
-	return scanRootFSLayerChain(rows)
-}
-
-// GetRootFSLayerChainByHead returns the immutable ancestor chain ending at
-// headLayerID. It is used by point-in-time products that must not follow a
-// sandbox head after the source sandbox continues running.
-func (s *PGSandboxStore) GetRootFSLayerChainByHead(ctx context.Context, teamID, headLayerID string) ([]*SandboxRootFSLayer, error) {
-	if s == nil || s.pool == nil || strings.TrimSpace(headLayerID) == "" {
-		return nil, nil
-	}
-	rows, err := s.pool.Query(ctx, rootFSLayerChainByHeadSQL(), strings.TrimSpace(headLayerID), strings.TrimSpace(teamID))
-	if err != nil {
-		return nil, fmt.Errorf("get rootfs layer chain by head: %w", err)
-	}
-	return scanRootFSLayerChain(rows)
-}
-
-func scanRootFSLayerChain(rows pgx.Rows) ([]*SandboxRootFSLayer, error) {
-	defer rows.Close()
-	var layers []*SandboxRootFSLayer
-	for rows.Next() {
-		layer, err := scanRootFSLayerRows(rows)
-		if err != nil {
-			return nil, err
-		}
-		layers = append(layers, layer)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rootfs layer chain: %w", err)
-	}
-	return layers, nil
 }
 
 func (s *PGSandboxStore) WithSandboxLock(ctx context.Context, sandboxID string, fn func(context.Context, SandboxStoreTx, *SandboxRecord) error) error {
@@ -817,10 +702,6 @@ func (t sandboxStoreTx) MarkRuntimeTerminating(ctx context.Context, sandboxID st
 	return nil
 }
 
-func (t sandboxStoreTx) SaveRootFSState(ctx context.Context, state *SandboxRootFSState) error {
-	return saveRootFSState(ctx, t.tx, state)
-}
-
 func (t sandboxStoreTx) GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error) {
 	return getActiveLifecycleTxn(ctx, t.tx, sandboxID)
 }
@@ -869,15 +750,16 @@ func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifec
 			from_generation, to_generation,
 			from_pod_namespace, from_pod_name,
 			to_pod_namespace, to_pod_name,
-			expected_head_layer_id, prepared_head_layer_id,
+			expected_head_id_v3, prepared_head_id_v3,
+			rootfs_runtime_version,
 			created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())
 	`, txn.ID, txn.SandboxID, txn.Kind, phase, source, txn.Cancelable, txn.Epoch,
 		txn.FromGeneration, txn.ToGeneration,
 		txn.FromPodNamespace, txn.FromPodName,
 		txn.ToPodNamespace, txn.ToPodName,
-		txn.ExpectedHeadLayerID, txn.PreparedHeadLayerID)
+		txn.ExpectedHeadID, txn.PreparedHeadID, normalizedRootFSRuntimeVersion(txn.RootFSRuntimeVersion))
 	if err != nil {
 		return fmt.Errorf("begin lifecycle txn: %w", err)
 	}
@@ -931,20 +813,20 @@ func (t sandboxStoreTx) UpdateLifecycleTxnPhase(ctx context.Context, txnID, phas
 	return nil
 }
 
-func (t sandboxStoreTx) SetLifecycleTxnPreparedHead(ctx context.Context, txnID, preparedHeadLayerID string) error {
+func (t sandboxStoreTx) SetLifecycleTxnPreparedHead(ctx context.Context, txnID, preparedHeadID string) error {
 	txnID = strings.TrimSpace(txnID)
-	preparedHeadLayerID = strings.TrimSpace(preparedHeadLayerID)
-	if txnID == "" || preparedHeadLayerID == "" {
+	preparedHeadID = strings.TrimSpace(preparedHeadID)
+	if txnID == "" || preparedHeadID == "" {
 		return nil
 	}
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandbox_lifecycle_txns
-		SET prepared_head_layer_id = $2,
+		SET prepared_head_id_v3 = $2,
 			updated_at = NOW()
 		WHERE txn_id = $1
 			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
 			AND cancel_requested_at IS NULL
-	`, txnID, preparedHeadLayerID)
+	`, txnID, preparedHeadID)
 	if err != nil {
 		return fmt.Errorf("set lifecycle txn prepared head: %w", err)
 	}
@@ -979,7 +861,7 @@ func (t sandboxStoreTx) RequestLifecycleTxnCancel(ctx context.Context, txnID, re
 	return tag.RowsAffected() > 0, nil
 }
 
-func (t sandboxStoreTx) CommitLifecycleTxn(ctx context.Context, txnID, preparedHeadLayerID string) error {
+func (t sandboxStoreTx) CommitLifecycleTxn(ctx context.Context, txnID, preparedHeadID string) error {
 	txnID = strings.TrimSpace(txnID)
 	if txnID == "" {
 		return nil
@@ -987,13 +869,13 @@ func (t sandboxStoreTx) CommitLifecycleTxn(ctx context.Context, txnID, preparedH
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandbox_lifecycle_txns
 		SET phase = $2,
-			prepared_head_layer_id = $3,
+			prepared_head_id_v3 = $3,
 			committed_at = NOW(),
 			updated_at = NOW()
 		WHERE txn_id = $1
 			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
 			AND cancel_requested_at IS NULL
-	`, txnID, SandboxLifecyclePhaseCommitted, strings.TrimSpace(preparedHeadLayerID))
+	`, txnID, SandboxLifecyclePhaseCommitted, strings.TrimSpace(preparedHeadID))
 	if err != nil {
 		return fmt.Errorf("commit lifecycle txn: %w", err)
 	}
@@ -1034,7 +916,7 @@ func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
 			cluster_id, desired_state, config, mounts, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
+			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch, rootfs_runtime_version,
 			webhook_state_volume_id, owner_kind, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
@@ -1046,7 +928,8 @@ func lifecycleTxnSelectSQL() string {
 			from_generation, to_generation,
 			from_pod_namespace, from_pod_name,
 			to_pod_namespace, to_pod_name,
-			expected_head_layer_id, prepared_head_layer_id,
+			expected_head_id_v3, prepared_head_id_v3,
+			rootfs_runtime_version,
 			error, cancel_reason, created_at, updated_at,
 			cancel_requested_at, committed_at, aborted_at
 		FROM manager.sandbox_lifecycle_txns`
@@ -1061,338 +944,6 @@ func getActiveLifecycleTxn(ctx context.Context, exec interface {
 		ORDER BY updated_at DESC
 		LIMIT 1
 	`, sandboxID))
-}
-
-type rootFSStateExecutor interface {
-	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-}
-
-func saveRootFSState(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
-	if exec == nil || state == nil {
-		return nil
-	}
-	if err := validateRootFSState(state); err != nil {
-		return err
-	}
-	if err := saveRootFSLayer(ctx, exec, state); err != nil {
-		return err
-	}
-	return advanceSandboxRootFSFilesystemHead(ctx, exec, state)
-}
-
-func validateRootFSState(state *SandboxRootFSState) error {
-	if state == nil {
-		return nil
-	}
-	if strings.TrimSpace(state.SandboxID) == "" {
-		return fmt.Errorf("sandbox_id is required")
-	}
-	if strings.TrimSpace(state.TeamID) == "" {
-		return fmt.Errorf("team_id is required")
-	}
-	if strings.TrimSpace(state.DiffDigest) == "" {
-		return fmt.Errorf("diff_digest is required")
-	}
-	if strings.TrimSpace(state.DiffObjectKey) == "" {
-		return fmt.Errorf("diff_object_key is required")
-	}
-	if strings.TrimSpace(state.LayerID) == "" {
-		return fmt.Errorf("layer_id is required")
-	}
-	return nil
-}
-
-func saveRootFSLayer(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
-	if exec == nil || state == nil {
-		return nil
-	}
-	if strings.TrimSpace(state.LayerID) == "" {
-		return fmt.Errorf("layer_id is required")
-	}
-	if strings.TrimSpace(state.ParentLayerID) == strings.TrimSpace(state.LayerID) {
-		return fmt.Errorf("parent_layer_id cannot reference layer_id")
-	}
-	if err := saveRootFSObject(ctx, exec, state); err != nil {
-		return err
-	}
-	parentLayerID := nullableText(state.ParentLayerID)
-	parentChainJSON, err := json.Marshal(state.SnapshotParentChain)
-	if err != nil {
-		return fmt.Errorf("marshal rootfs layer snapshot parent chain: %w", err)
-	}
-	_, err = exec.Exec(ctx, `
-		INSERT INTO manager.rootfs_layers (
-			layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
-			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, platform_os, platform_architecture,
-			platform_variant, created_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21, NOW()))
-		ON CONFLICT (layer_id) DO NOTHING
-	`, state.LayerID, parentLayerID, state.SandboxID, state.TeamID, state.RuntimeGeneration,
-		state.Runtime, state.RuntimeHandler, state.BaseImageRef, state.BaseImageDigest, state.Snapshotter,
-		state.SnapshotParent, parentChainJSON, state.DiffDigest, state.DiffID, state.DiffMediaType,
-		state.DiffSize, state.DiffObjectKey, state.PlatformOS, state.PlatformArchitecture,
-		state.PlatformVariant, nullableTime(state.CreatedAt))
-	if err != nil {
-		return fmt.Errorf("save rootfs layer: %w", err)
-	}
-	return nil
-}
-
-func saveRootFSObject(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
-	if exec == nil || state == nil {
-		return nil
-	}
-	tag, err := exec.Exec(ctx, `
-		INSERT INTO manager.rootfs_objects (
-			object_key, team_id, diff_digest, diff_media_type, diff_size,
-			first_layer_id, last_referenced_at, missing_at, deleted_at,
-			last_error, created_at, updated_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, NOW()), NULL, NULL, '', COALESCE($7, NOW()), NOW())
-		ON CONFLICT (object_key) DO UPDATE SET
-			team_id = EXCLUDED.team_id,
-			diff_digest = EXCLUDED.diff_digest,
-			diff_media_type = EXCLUDED.diff_media_type,
-			diff_size = EXCLUDED.diff_size,
-			last_referenced_at = NOW(),
-			missing_at = NULL,
-			deleted_at = NULL,
-			last_error = '',
-			updated_at = NOW()
-		WHERE manager.rootfs_objects.team_id = EXCLUDED.team_id
-			AND manager.rootfs_objects.diff_digest = EXCLUDED.diff_digest
-			AND manager.rootfs_objects.diff_size = EXCLUDED.diff_size
-	`, state.DiffObjectKey, state.TeamID, state.DiffDigest, state.DiffMediaType,
-		state.DiffSize, state.LayerID, nullableTime(state.CreatedAt))
-	if err != nil {
-		return fmt.Errorf("save rootfs object: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: %s", ErrRootFSObjectConflict, state.DiffObjectKey)
-	}
-	if _, err := exec.Exec(ctx, `
-		DELETE FROM manager.rootfs_object_deletions
-		WHERE object_key = $1
-	`, state.DiffObjectKey); err != nil {
-		return fmt.Errorf("clear pending rootfs object deletion: %w", err)
-	}
-	return nil
-}
-
-func advanceSandboxRootFSFilesystemHead(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState) error {
-	expectedHeadLayerID := state.ParentLayerID
-	if strings.TrimSpace(state.ExpectedHeadLayerID) != "" {
-		expectedHeadLayerID = state.ExpectedHeadLayerID
-	}
-	return advanceRootFSFilesystemHead(ctx, exec, state, nullableText(expectedHeadLayerID))
-}
-
-func advanceRootFSFilesystemHead(ctx context.Context, exec rootFSStateExecutor, state *SandboxRootFSState, expectedHeadLayerID any) error {
-	if exec == nil || state == nil {
-		return nil
-	}
-	tag, err := exec.Exec(ctx, `
-		WITH binding AS (
-			SELECT filesystem_id
-			FROM manager.sandbox_rootfs_bindings
-			WHERE sandbox_id = $1
-			UNION ALL
-			SELECT $1
-			WHERE NOT EXISTS (
-				SELECT 1
-				FROM manager.sandbox_rootfs_bindings
-				WHERE sandbox_id = $1
-			)
-			LIMIT 1
-		),
-		advanced AS (
-			INSERT INTO manager.rootfs_filesystems (
-				filesystem_id, team_id, head_layer_id, base_image_ref,
-				base_image_digest, created_at, updated_at
-			)
-			SELECT
-				binding.filesystem_id,
-				$2,
-				$3,
-				$5,
-				$6,
-				COALESCE($7, NOW()),
-				NOW()
-			FROM binding
-			WHERE $4::text IS NULL OR EXISTS (
-				SELECT 1
-				FROM manager.rootfs_filesystems current
-				WHERE current.filesystem_id = binding.filesystem_id
-					AND current.head_layer_id IS NOT DISTINCT FROM $4
-			)
-			ON CONFLICT (filesystem_id) DO UPDATE SET
-				team_id = EXCLUDED.team_id,
-				head_layer_id = EXCLUDED.head_layer_id,
-				base_image_ref = EXCLUDED.base_image_ref,
-				base_image_digest = EXCLUDED.base_image_digest,
-				updated_at = NOW()
-			WHERE manager.rootfs_filesystems.head_layer_id IS NOT DISTINCT FROM $4
-			RETURNING filesystem_id
-		),
-		ensured_binding AS (
-			INSERT INTO manager.sandbox_rootfs_bindings (
-				sandbox_id, filesystem_id, team_id, created_at, updated_at
-			)
-			SELECT $1, filesystem_id, $2, NOW(), NOW()
-			FROM advanced
-			ON CONFLICT (sandbox_id) DO UPDATE SET
-				team_id = EXCLUDED.team_id
-			RETURNING filesystem_id
-		)
-		SELECT filesystem_id FROM ensured_binding
-	`, state.SandboxID, state.TeamID, state.LayerID, expectedHeadLayerID,
-		state.BaseImageRef, state.BaseImageDigest, nullableTime(state.CreatedAt))
-	if err != nil {
-		return fmt.Errorf("advance rootfs filesystem head: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: sandbox %s", ErrRootFSHeadConflict, state.SandboxID)
-	}
-	return nil
-}
-
-func rootFSLayerChainSQL() string {
-	return `
-		WITH RECURSIVE head AS (
-			SELECT f.head_layer_id
-			FROM manager.sandbox_rootfs_bindings b
-			JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
-			WHERE b.sandbox_id = $1
-				AND f.head_layer_id IS NOT NULL
-			UNION ALL
-			SELECT h.head_layer_id
-			FROM manager.sandbox_rootfs_heads h
-			WHERE h.sandbox_id = $1
-				AND NOT EXISTS (
-					SELECT 1
-					FROM manager.sandbox_rootfs_bindings b
-					WHERE b.sandbox_id = $1
-				)
-		),
-		chain AS (
-			SELECT
-				l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
-				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
-				l.base_image_digest, l.snapshotter, l.snapshot_parent,
-				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
-				l.diff_size, l.diff_object_key, l.platform_os, l.platform_architecture,
-				l.platform_variant, l.created_at, 0 AS depth
-			FROM head h
-			JOIN manager.rootfs_layers l ON l.layer_id = h.head_layer_id
-			UNION ALL
-			SELECT
-				p.layer_id, p.parent_layer_id, p.source_sandbox_id, p.team_id,
-				p.runtime_generation, p.runtime, p.runtime_handler, p.base_image_ref,
-				p.base_image_digest, p.snapshotter, p.snapshot_parent,
-				p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
-				p.diff_size, p.diff_object_key, p.platform_os, p.platform_architecture,
-				p.platform_variant, p.created_at, c.depth + 1 AS depth
-			FROM manager.rootfs_layers p
-			JOIN chain c ON p.layer_id = c.parent_layer_id
-		)
-		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
-			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, platform_os, platform_architecture,
-			platform_variant, created_at
-		FROM chain
-		ORDER BY depth DESC`
-}
-
-func rootFSLayerChainByHeadSQL() string {
-	return `WITH RECURSIVE chain AS (
-			SELECT
-				l.layer_id, l.parent_layer_id, l.source_sandbox_id, l.team_id,
-				l.runtime_generation, l.runtime, l.runtime_handler, l.base_image_ref,
-				l.base_image_digest, l.snapshotter, l.snapshot_parent,
-				l.snapshot_parent_chain, l.diff_digest, l.diff_id, l.diff_media_type,
-				l.diff_size, l.diff_object_key, l.platform_os, l.platform_architecture,
-				l.platform_variant, l.created_at, 0 AS depth
-			FROM manager.rootfs_layers l
-			WHERE l.layer_id = $1
-				AND ($2 = '' OR l.team_id = $2)
-			UNION ALL
-			SELECT
-				p.layer_id, p.parent_layer_id, p.source_sandbox_id, p.team_id,
-				p.runtime_generation, p.runtime, p.runtime_handler, p.base_image_ref,
-				p.base_image_digest, p.snapshotter, p.snapshot_parent,
-				p.snapshot_parent_chain, p.diff_digest, p.diff_id, p.diff_media_type,
-				p.diff_size, p.diff_object_key, p.platform_os, p.platform_architecture,
-				p.platform_variant, p.created_at, c.depth + 1 AS depth
-			FROM manager.rootfs_layers p
-			JOIN chain c ON p.layer_id = c.parent_layer_id
-				AND p.team_id = c.team_id
-		)
-		SELECT layer_id, parent_layer_id, source_sandbox_id, team_id, runtime_generation,
-			runtime, runtime_handler, base_image_ref, base_image_digest, snapshotter,
-			snapshot_parent, snapshot_parent_chain, diff_digest, diff_id, diff_media_type,
-			diff_size, diff_object_key, platform_os, platform_architecture,
-			platform_variant, created_at
-		FROM chain
-		ORDER BY depth DESC`
-}
-
-func scanRootFSLayerRows(rows pgx.Rows) (*SandboxRootFSLayer, error) {
-	var layer SandboxRootFSLayer
-	var parentLayerID *string
-	var parentChainJSON []byte
-	if err := rows.Scan(
-		&layer.ID, &parentLayerID, &layer.SourceSandboxID, &layer.TeamID, &layer.RuntimeGeneration,
-		&layer.Runtime, &layer.RuntimeHandler, &layer.BaseImageRef, &layer.BaseImageDigest, &layer.Snapshotter,
-		&layer.SnapshotParent, &parentChainJSON, &layer.DiffDigest, &layer.DiffID, &layer.DiffMediaType,
-		&layer.DiffSize, &layer.DiffObjectKey, &layer.PlatformOS, &layer.PlatformArchitecture,
-		&layer.PlatformVariant, &layer.CreatedAt,
-	); err != nil {
-		return nil, err
-	}
-	if parentLayerID != nil {
-		layer.ParentLayerID = *parentLayerID
-	}
-	if len(parentChainJSON) > 0 {
-		if err := json.Unmarshal(parentChainJSON, &layer.SnapshotParentChain); err != nil {
-			return nil, fmt.Errorf("unmarshal rootfs layer snapshot parent chain: %w", err)
-		}
-	}
-	return &layer, nil
-}
-
-func rootFSStateFromLayerChain(sandboxID string, chain []*SandboxRootFSLayer) *SandboxRootFSState {
-	if len(chain) == 0 {
-		return nil
-	}
-	head := chain[len(chain)-1]
-	return &SandboxRootFSState{
-		LayerID:              head.ID,
-		ParentLayerID:        head.ParentLayerID,
-		SandboxID:            sandboxID,
-		TeamID:               head.TeamID,
-		RuntimeGeneration:    head.RuntimeGeneration,
-		Runtime:              head.Runtime,
-		RuntimeHandler:       head.RuntimeHandler,
-		BaseImageRef:         head.BaseImageRef,
-		BaseImageDigest:      head.BaseImageDigest,
-		PlatformOS:           head.PlatformOS,
-		PlatformArchitecture: head.PlatformArchitecture,
-		PlatformVariant:      head.PlatformVariant,
-		Snapshotter:          head.Snapshotter,
-		SnapshotParent:       head.SnapshotParent,
-		SnapshotParentChain:  append([]string(nil), head.SnapshotParentChain...),
-		DiffDigest:           head.DiffDigest,
-		DiffID:               head.DiffID,
-		DiffMediaType:        head.DiffMediaType,
-		DiffSize:             head.DiffSize,
-		DiffObjectKey:        head.DiffObjectKey,
-		CreatedAt:            head.CreatedAt,
-		LayerChain:           cloneSandboxRootFSLayers(chain),
-	}
 }
 
 type sandboxRecordScanner interface {
@@ -1425,7 +976,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
 		&record.ClusterID, &record.DesiredState, &configJSON, &mountsJSON, &specJSON,
-		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
+		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch, &record.RootFSRuntimeVersion,
 		&record.WebhookStateVolumeID, &record.OwnerKind, &hotClaimCompletedAt,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
@@ -1446,6 +997,15 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	record.HardExpiresAt = derefTime(hardExpiresAt)
 	record.DeletedAt = derefTime(deletedAt)
 	return &record, nil
+}
+
+func normalizedRootFSRuntimeVersion(version string) string {
+	switch strings.TrimSpace(version) {
+	case RootFSRuntimeS0FSV2:
+		return RootFSRuntimeS0FSV2
+	default:
+		return RootFSRuntimeLegacyV1
+	}
 }
 
 func scanLifecycleTxn(row sandboxRecordScanner) (*SandboxLifecycleTxn, error) {
@@ -1471,7 +1031,8 @@ func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, e
 		&txn.FromGeneration, &txn.ToGeneration,
 		&txn.FromPodNamespace, &txn.FromPodName,
 		&txn.ToPodNamespace, &txn.ToPodName,
-		&txn.ExpectedHeadLayerID, &txn.PreparedHeadLayerID,
+		&txn.ExpectedHeadID, &txn.PreparedHeadID,
+		&txn.RootFSRuntimeVersion,
 		&txn.Error, &txn.CancelReason, &txn.CreatedAt, &txn.UpdatedAt,
 		&cancelRequestedAt, &committedAt, &abortedAt,
 	); err != nil {
@@ -1515,34 +1076,9 @@ func nullableTime(t time.Time) any {
 	return t
 }
 
-func nullableText(value string) any {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	return value
-}
-
 func derefTime(t *time.Time) time.Time {
 	if t == nil {
 		return time.Time{}
 	}
 	return *t
-}
-
-func cloneSandboxRootFSLayers(layers []*SandboxRootFSLayer) []*SandboxRootFSLayer {
-	if len(layers) == 0 {
-		return nil
-	}
-	out := make([]*SandboxRootFSLayer, 0, len(layers))
-	for _, layer := range layers {
-		if layer == nil {
-			out = append(out, nil)
-			continue
-		}
-		clone := *layer
-		clone.SnapshotParentChain = append([]string(nil), layer.SnapshotParentChain...)
-		out = append(out, &clone)
-	}
-	return out
 }

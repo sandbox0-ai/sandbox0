@@ -67,6 +67,9 @@ const (
 	AnnotationNetworkPolicyAppliedHash     = sandboxpod.AnnotationNetworkPolicyAppliedHash
 	AnnotationSandboxID                    = sandboxpod.AnnotationSandboxID
 	AnnotationRuntimeGeneration            = sandboxpod.AnnotationRuntimeGeneration
+	AnnotationRootFSSnapshotterInstance    = sandboxpod.AnnotationRootFSSnapshotterInstance
+	AnnotationRootFSHeadID                 = sandboxpod.AnnotationRootFSHeadID
+	AnnotationRootFSHeadImage              = sandboxpod.AnnotationRootFSHeadImage
 	AnnotationWebhookStateVolumeID         = sandboxpod.AnnotationWebhookStateVolumeID
 	AnnotationHotClaimReservation          = sandboxpod.AnnotationHotClaimReservation
 	AnnotationHotClaimReservationState     = sandboxpod.AnnotationHotClaimReservationState

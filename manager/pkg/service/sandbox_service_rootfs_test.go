@@ -8,21 +8,22 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
-	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,111 +37,342 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
-func rootFSSnapshotTestInfo() ctldapi.RootFSInfo {
-	return ctldapi.RootFSInfo{
-		Runtime:             "runc",
-		RuntimeHandler:      "io.containerd.runc.v2",
-		BaseImageRef:        "docker.io/library/busybox:1.36",
-		BaseImageDigest:     "sha256:base",
-		Snapshotter:         "overlayfs",
-		SnapshotParent:      "parent-1",
-		SnapshotParentChain: []string{"parent-1", "parent-0"},
-	}
-}
-
-func newRootFSSnapshotCTLDServer(
-	t *testing.T,
-	prepareResponse ctldapi.PrepareRootFSSnapshotResponse,
-	publishResponse ctldapi.PublishRootFSSnapshotResponse,
-	onPrepare func(ctldapi.PrepareRootFSSnapshotRequest),
-	onPublish func(ctldapi.PublishRootFSSnapshotRequest),
-) *httptest.Server {
+func newRootFSHeadCTLDServer(t *testing.T, onSeal func(ctldapi.SealRootFSHeadRequest)) *httptest.Server {
 	t.Helper()
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/rootfs/snapshots/prepare":
-			if onPrepare != nil {
-				var req ctldapi.PrepareRootFSSnapshotRequest
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-				onPrepare(req)
+		case "/api/v1/rootfs/heads/seal":
+			var req ctldapi.SealRootFSHeadRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			if onSeal != nil {
+				onSeal(req)
 			}
-			require.NoError(t, json.NewEncoder(w).Encode(prepareResponse))
-		case "/api/v1/rootfs/snapshots/publish":
-			if onPublish != nil {
-				var req ctldapi.PublishRootFSSnapshotRequest
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-				onPublish(req)
-			}
-			require.NoError(t, json.NewEncoder(w).Encode(publishResponse))
+			require.NoError(t, json.NewEncoder(w).Encode(rootFSHeadTestSealResponse(t, req)))
+		case "/api/v1/rootfs/heads/acknowledge":
+			var req ctldapi.AcknowledgeRootFSHeadRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.AcknowledgeRootFSHeadResponse{Acknowledged: true}))
 		default:
 			t.Fatalf("unexpected ctld path %s", r.URL.Path)
 		}
 	}))
 }
 
-func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
-	saveCalled := false
+func rootFSHeadTestSealResponse(t *testing.T, req ctldapi.SealRootFSHeadRequest) ctldapi.SealRootFSHeadResponse {
+	t.Helper()
+	prefix, err := rootfshead.TeamObjectPrefix(req.TeamID)
+	require.NoError(t, err)
+	object := func(mediaType, payload string) rootfshead.Object {
+		digestValue := digest.FromString(payload)
+		key, keyErr := rootfshead.ObjectKey(prefix, mediaType, digestValue.String())
+		require.NoError(t, keyErr)
+		return rootfshead.Object{Key: key, Digest: digestValue.String(), Size: int64(len(payload)), MediaType: mediaType}
+	}
+	directory := object(rootfshead.DirectoryIndexMediaType, "directory:"+req.HeadID)
+	manifest := object(rootfshead.HeadMediaType, "head:"+req.HeadID)
+	base := rootfshead.BaseIdentity{
+		ImageReference: "docker.io/library/busybox@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ChainID:        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		OS:             "linux", Architecture: "amd64",
+	}
+	reference := rootfshead.HeadReference{Version: rootfshead.Version, HeadID: req.HeadID, Manifest: manifest}
+	composed, err := rootfshead.ComposeImage(prefix, reference, []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}`))
+	require.NoError(t, err)
+	return ctldapi.SealRootFSHeadResponse{
+		Reference: reference,
+		Head: rootfshead.Head{
+			Version: rootfshead.Version,
+			HeadID:  req.HeadID,
+			Base:    base,
+			Root:    rootfshead.Entry{Inode: "root", Kind: rootfshead.EntryDirectory, Mode: 0o040755, Nlink: 2, Directory: &directory},
+		},
+		Image: composed.Reference,
+	}
+}
+
+func rootFSHeadTestFixture(t *testing.T, sandboxID, teamID, headID string, generation int64) *sandboxstore.SandboxRootFSHead {
+	t.Helper()
+	response := rootFSHeadTestSealResponse(t, ctldapi.SealRootFSHeadRequest{SandboxID: sandboxID, TeamID: teamID, HeadID: headID})
+	return &sandboxstore.SandboxRootFSHead{
+		SandboxID: sandboxID, SourceSandboxID: sandboxID, TeamID: teamID, RuntimeGeneration: generation,
+		Reference: response.Reference, Base: response.Head.Base, Image: response.Image,
+	}
+}
+
+func TestEnsureSandboxRootFSSyncRecoversLostSealAcknowledgement(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		published     bool
+		activeTxn     bool
+		wantErr       bool
+		wantPublished bool
+	}{
+		{name: "published Head", published: true, wantPublished: true},
+		{name: "abandoned Head"},
+		{name: "active transaction retains authority", activeTxn: true, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const sandboxID = "sandbox-1"
+			const teamID = "team-1"
+			sealed := rootFSHeadTestFixture(t, sandboxID, teamID, "sealed-head", 3)
+			parent := rootFSHeadTestFixture(t, sandboxID, teamID, "parent-head", 2)
+			var acknowledged *ctldapi.AcknowledgeRootFSHeadRequest
+			ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/rootfs/sync/bind":
+					require.Equal(t, http.MethodPut, r.Method)
+					require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{Status: ctldapi.RootFSSyncStatus{
+						SandboxID: sandboxID, RuntimeGeneration: 3, InitialScanComplete: true,
+						Sealed: true, SealedReference: &sealed.Reference,
+					}}))
+				case "/api/v1/rootfs/heads/acknowledge":
+					require.Equal(t, http.MethodPut, r.Method)
+					var req ctldapi.AcknowledgeRootFSHeadRequest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+					acknowledged = &req
+					require.NoError(t, json.NewEncoder(w).Encode(ctldapi.AcknowledgeRootFSHeadResponse{Acknowledged: true}))
+				default:
+					t.Fatalf("unexpected ctld path %s", r.URL.Path)
+				}
+			}))
+			defer ctld.Close()
+			ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+			pod := rootFSTestPod("pod-1", sandboxID, teamID)
+			markRuntimeIdentityPodReady(t, pod)
+			pod.Status.HostIP = ctldURL.Hostname()
+			record := &sandboxstore.SandboxRecord{
+				ID: sandboxID, TeamID: teamID, RuntimeGeneration: 3,
+				CurrentPodNamespace: pod.Namespace, CurrentPodName: pod.Name,
+				DesiredState: sandboxstore.SandboxDesiredStateActive,
+			}
+			current := parent
+			if test.published {
+				current = sealed
+			}
+			store := &memorySandboxStore{
+				records:     map[string]*sandboxstore.SandboxRecord{sandboxID: record},
+				rootFSHeads: map[string]*sandboxstore.SandboxRootFSHead{sandboxID: current},
+			}
+			if test.activeTxn {
+				addRootFSTestPauseTxn(store, pod, sandboxstore.SandboxLifecyclePhasePublishing)
+			}
+			svc := &SandboxService{
+				k8sClient:    fake.NewSimpleClientset(pod),
+				podLister:    newTestPodLister(t, pod),
+				sandboxStore: store,
+				ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
+				config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+				clock:        systemTime{},
+				logger:       zap.NewNop(),
+			}
+
+			err := svc.EnsureSandboxRootFSSync(context.Background(), sandboxID)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "active lifecycle transaction")
+				assert.Nil(t, acknowledged)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, acknowledged)
+			assert.Equal(t, sealed.Reference.HeadID, acknowledged.HeadID)
+			assert.Equal(t, test.wantPublished, acknowledged.Published)
+			assert.True(t, acknowledged.RuntimeContinues)
+		})
+	}
+}
+
+func TestBindSandboxRootFSSyncWaitsThroughTransientInitialError(t *testing.T) {
+	var statusCalls atomic.Int32
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/rootfs/snapshots/prepare":
-			var req ctldapi.PrepareRootFSSnapshotRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-			assert.Empty(t, req.ParentLayerID)
-			assert.Equal(t, ctldapi.RootFSContainerRef{
-				Namespace:     "default",
-				PodName:       "pod-1",
-				PodUID:        "pod-uid",
-				ContainerName: "procd",
-			}, req.Target)
-			assert.ElementsMatch(t, []string{"/workspace/data", volumeportal.WebhookStateMountPath}, req.ExcludedPaths)
-			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
-				Handle: "handle-1",
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff",
-					Size:      123,
-				},
-			})
-		case "/api/v1/rootfs/snapshots/publish":
-			var req ctldapi.PublishRootFSSnapshotRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-			assert.Equal(t, "handle-1", req.Handle)
-			assert.Equal(t, "sandbox-1", req.SandboxID)
-			assert.Equal(t, "team-1", req.TeamID)
-			assert.Equal(t, int64(3), req.ExpectedRuntimeGeneration)
-			saveCalled = true
-			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
-				Published: true,
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:diff",
-					Size:      123,
-					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
-				},
-			})
+		case "/api/v1/rootfs/sync/bind":
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
+				Status: ctldapi.RootFSSyncStatus{LastError: "reconcile: transient upper scan failure"},
+			}))
+		case "/api/v1/rootfs/sync/status":
+			call := statusCalls.Add(1)
+			status := ctldapi.RootFSSyncStatus{LastError: "reconcile: transient upper scan failure"}
+			if call >= 2 {
+				status = ctldapi.RootFSSyncStatus{InitialScanComplete: true}
+			}
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.GetRootFSSyncStatusResponse{Status: status}))
 		default:
 			t.Fatalf("unexpected ctld path %s", r.URL.Path)
 		}
 	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+	pod := rootFSTestPod("pod-initial-retry", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	record := &sandboxstore.SandboxRecord{ID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1}
+	svc := &SandboxService{
+		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
+		config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+	}
+
+	require.NoError(t, svc.bindSandboxRootFSSync(context.Background(), pod, record))
+	assert.GreaterOrEqual(t, statusCalls.Load(), int32(2))
+}
+
+func TestBindSandboxRootFSSyncWaitsForDirectCTLDTarget(t *testing.T) {
+	var bindCalls atomic.Int32
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/rootfs/sync/bind", r.URL.Path)
+		var req ctldapi.BindRootFSSyncRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		require.Equal(t, "pod-pending", req.Target.PodName)
+		require.Equal(t, "pod-uid", req.Target.PodUID)
+		require.Equal(t, sandboxRootFSContainerName, req.Target.ContainerName)
+		if bindCalls.Add(1) < 3 {
+			w.WriteHeader(http.StatusNotFound)
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
+				Error: "rootfs target not found: running container procd in pod sandbox0-system/pod-pending",
+			}))
+			return
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
+			Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true},
+		}))
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+	pod := rootFSTestPod("pod-pending", "sandbox-1", "team-1")
+	pod.UID = types.UID("pod-uid")
+	pod.Status.Phase = corev1.PodPending
+	pod.Status.HostIP = ctldURL.Hostname()
+	record := &sandboxstore.SandboxRecord{ID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1}
+	svc := &SandboxService{
+		podLister:  newTestPodLister(t, pod),
+		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
+		config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+	}
+
+	require.NoError(t, svc.bindSandboxRootFSSync(context.Background(), pod, record))
+	assert.Equal(t, int32(3), bindCalls.Load())
+}
+
+func TestBindSandboxRootFSSyncRejectsMalformedClaimMounts(t *testing.T) {
+	var called atomic.Bool
+	ctld := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called.Store(true)
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+	pod := rootFSTestPod("pod-malformed-mounts", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	pod.Annotations[controller.AnnotationMounts] = "{"
+	record := &sandboxstore.SandboxRecord{ID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1}
+	svc := &SandboxService{
+		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
+		config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+	}
+
+	err := svc.bindSandboxRootFSSync(context.Background(), pod, record)
+
+	require.ErrorContains(t, err, "resolve sandbox rootfs exclusions")
+	assert.False(t, called.Load())
+}
+
+func TestBindSandboxRootFSSyncRejectsMountMetadataMismatch(t *testing.T) {
+	tests := []struct {
+		name       string
+		annotation string
+	}{
+		{name: "missing"},
+		{name: "null", annotation: "null"},
+		{name: "empty", annotation: "[]"},
+		{name: "different volume", annotation: `[{"sandboxvolume_id":"vol-2","mount_point":"/workspace"}]`},
+		{name: "partial", annotation: `[{"sandboxvolume_id":"vol-1","mount_point":"/workspace"}]`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var called atomic.Bool
+			ctld := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				called.Store(true)
+			}))
+			defer ctld.Close()
+			ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+			pod := rootFSTestPod("pod-mount-mismatch", "sandbox-1", "team-1")
+			pod.Status.HostIP = ctldURL.Hostname()
+			if test.annotation != "" {
+				pod.Annotations[controller.AnnotationMounts] = test.annotation
+			}
+			record := &sandboxstore.SandboxRecord{
+				ID:                "sandbox-1",
+				TeamID:            "team-1",
+				RuntimeGeneration: 1,
+				Mounts: []managerapi.ClaimMount{
+					{SandboxVolumeID: "vol-1", MountPoint: "/workspace"},
+					{SandboxVolumeID: "vol-3", MountPoint: "/data"},
+				},
+			}
+			svc := &SandboxService{
+				ctldClient: ctldapi.NewClientWithTimeout(time.Second),
+				config:     SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+			}
+
+			err := svc.bindSandboxRootFSSync(context.Background(), pod, record)
+
+			require.ErrorContains(t, err, "resolve sandbox rootfs exclusions")
+			assert.False(t, called.Load())
+		})
+	}
+}
+
+func TestPrepareRootFSCheckpointAbandonsPartialSeal(t *testing.T) {
+	const sandboxID = "sandbox-1"
+	const teamID = "team-1"
+	const headID = "head-partial"
+	var acknowledged *ctldapi.AcknowledgeRootFSHeadRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/rootfs/heads/seal":
+			response := rootFSHeadTestSealResponse(t, ctldapi.SealRootFSHeadRequest{SandboxID: sandboxID, TeamID: teamID, HeadID: headID})
+			response.Image = rootfshead.ImageReference{}
+			response.Error = "injected marker upload failure"
+			w.WriteHeader(http.StatusInternalServerError)
+			require.NoError(t, json.NewEncoder(w).Encode(response))
+		case "/api/v1/rootfs/heads/acknowledge":
+			var req ctldapi.AcknowledgeRootFSHeadRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			acknowledged = &req
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.AcknowledgeRootFSHeadResponse{Acknowledged: true}))
+		default:
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+	pod := rootFSTestPod("pod-1", sandboxID, teamID)
+	pod.Status.HostIP = ctldURL.Hostname()
+	record := &sandboxstore.SandboxRecord{ID: sandboxID, TeamID: teamID, RuntimeGeneration: 3}
+	svc := &SandboxService{
+		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{sandboxID: record}},
+		ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
+		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:        systemTime{},
+	}
+	_, err := svc.prepareSandboxRootFSHeadCheckpoint(context.Background(), pod, record, headID)
+	require.Error(t, err)
+	require.NotNil(t, acknowledged)
+	assert.Equal(t, headID, acknowledged.HeadID)
+	assert.False(t, acknowledged.Published)
+	assert.True(t, acknowledged.RuntimeContinues)
+}
+
+func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
+	saveCalled := false
+	ctld := newRootFSHeadCTLDServer(t, func(req ctldapi.SealRootFSHeadRequest) {
+		assert.Equal(t, "sandbox-1", req.SandboxID)
+		assert.Equal(t, "team-1", req.TeamID)
+		assert.Equal(t, int64(3), req.ExpectedRuntimeGeneration)
+		assert.Nil(t, req.ExpectedParent)
+		saveCalled = true
+	})
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
@@ -155,6 +387,9 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	deleteCalled := false
 	k8sClient.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
 		require.True(t, saveCalled, "pod delete must happen after rootfs checkpoint save")
+		deleteAction := action.(ktesting.DeleteAction)
+		require.NotNil(t, deleteAction.GetDeleteOptions().GracePeriodSeconds)
+		assert.Equal(t, int64(0), *deleteAction.GetDeleteOptions().GracePeriodSeconds)
 		deleteCalled = true
 		return true, nil, nil
 	})
@@ -202,43 +437,19 @@ func TestPauseSandboxRuntimeQueuesRootFSSaveBeforeDeletingPod(t *testing.T) {
 	assert.Contains(t, procdCalls, "pause")
 	_, err = k8sClient.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 	require.NoError(t, err, "pause completion should not wait for the pod to disappear after delete is accepted")
-	state := store.rootFSStates["sandbox-1"]
-	require.NotNil(t, state)
-	assert.Equal(t, int64(3), state.RuntimeGeneration)
-	assert.Equal(t, "runc", state.Runtime)
-	assert.Equal(t, "sha256:base", state.BaseImageDigest)
-	assert.Equal(t, []string{"parent-1", "parent-0"}, state.SnapshotParentChain)
-	assert.Equal(t, "sha256:diff", state.DiffDigest)
-	assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", state.DiffObjectKey)
-	assert.NotEmpty(t, state.LayerID)
+	head := store.rootFSHeads["sandbox-1"]
+	require.NotNil(t, head)
+	assert.Equal(t, int64(3), head.RuntimeGeneration)
+	assert.Equal(t, "team-1", head.TeamID)
+	assert.NotEmpty(t, head.Reference.HeadID)
+	assert.Nil(t, head.Parent)
 	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 }
 
-func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
-	var savedReq ctldapi.PrepareRootFSSnapshotRequest
-	ctld := newRootFSSnapshotCTLDServer(t,
-		ctldapi.PrepareRootFSSnapshotResponse{
-			Handle: "handle-1",
-			Info:   rootFSSnapshotTestInfo(),
-			Descriptor: ctldapi.RootFSDiffDescriptor{
-				MediaType: "application/vnd.oci.image.layer.v1.tar",
-				Digest:    "sha256:child",
-				Size:      123,
-			},
-		},
-		ctldapi.PublishRootFSSnapshotResponse{
-			Published: true,
-			Info:      rootFSSnapshotTestInfo(),
-			Descriptor: ctldapi.RootFSDiffDescriptor{
-				MediaType: "application/vnd.oci.image.layer.v1.tar",
-				Digest:    "sha256:child",
-				Size:      123,
-				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/4/sha256/child.tar",
-			},
-		},
-		func(req ctldapi.PrepareRootFSSnapshotRequest) { savedReq = req },
-		nil,
-	)
+func TestPauseSandboxRuntimeSealsFromExpectedParentHead(t *testing.T) {
+	parent := rootFSHeadTestFixture(t, "sandbox-1", "team-1", "head-parent", 2)
+	var savedReq ctldapi.SealRootFSHeadRequest
+	ctld := newRootFSHeadCTLDServer(t, func(req ctldapi.SealRootFSHeadRequest) { savedReq = req })
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
@@ -253,16 +464,7 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 				DesiredState:      sandboxstore.SandboxDesiredStateActive,
 			},
 		},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			"sandbox-1": {
-				LayerID:           "layer-parent",
-				SandboxID:         "sandbox-1",
-				TeamID:            "team-1",
-				RuntimeGeneration: 3,
-				DiffDigest:        "sha256:parent",
-				DiffObjectKey:     "sandbox-rootfs/team-1/sandbox-1/3/sha256/parent.tar",
-			},
-		},
+		rootFSHeads: map[string]*sandboxstore.SandboxRootFSHead{"sandbox-1": parent},
 	}
 	svc := &SandboxService{
 		k8sClient:    fake.NewSimpleClientset(pod),
@@ -278,12 +480,54 @@ func TestPauseSandboxRuntimeSavesChildLayerFromParentHead(t *testing.T) {
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
 
-	assert.Equal(t, "layer-parent", savedReq.ParentLayerID)
-	state := store.rootFSStates["sandbox-1"]
-	require.NotNil(t, state)
-	assert.NotEmpty(t, state.LayerID)
-	assert.Equal(t, "layer-parent", state.ParentLayerID)
-	assert.Equal(t, "sha256:child", state.DiffDigest)
+	require.NotNil(t, savedReq.ExpectedParent)
+	assert.Equal(t, parent.Reference, *savedReq.ExpectedParent)
+	head := store.rootFSHeads["sandbox-1"]
+	require.NotNil(t, head)
+	require.NotNil(t, head.Parent)
+	assert.Equal(t, parent.Reference, *head.Parent)
+	assert.NotEqual(t, parent.Reference.HeadID, head.Reference.HeadID)
+}
+
+func TestRootFSSnapshotterRecoveryFreezesRuntimeBeforeSeal(t *testing.T) {
+	var sealed bool
+	ctld := newRootFSHeadCTLDServer(t, func(ctldapi.SealRootFSHeadRequest) { sealed = true })
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Status.HostIP = ctldURL.Hostname()
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
+		"sandbox-1": {
+			ID:                "sandbox-1",
+			TeamID:            "team-1",
+			UserID:            "user-1",
+			RuntimeGeneration: 3,
+			DesiredState:      sandboxstore.SandboxDesiredStateActive,
+		},
+	}}
+	txnID := addRootFSTestPauseTxn(store, pod, sandboxstore.SandboxLifecyclePhasePreparing)
+	store.lifecycleTxns[txnID].Source = sandboxstore.SandboxLifecycleSourceRootFS
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	svc := &SandboxService{
+		k8sClient:    client,
+		podLister:    newTestPodLister(t, pod),
+		sandboxStore: store,
+		ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
+		config:       SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
+		clock:        systemTime{},
+		logger:       zap.NewNop(),
+	}
+	var procdCalls []string
+	defer attachRootFSTestProcd(t, pod, svc, &procdCalls)()
+
+	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
+
+	assert.True(t, sealed)
+	assert.Contains(t, procdCalls, "barrier:true")
+	assert.Contains(t, procdCalls, "pause")
+	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
+	assert.Equal(t, sandboxstore.SandboxLifecyclePhaseCommitted, store.lifecycleTxns[txnID].Phase)
 }
 
 func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T) {
@@ -298,43 +542,11 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 		},
 	}
 	txnID := ""
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/rootfs/snapshots/prepare":
-			store.mu.Lock()
-			store.lifecycleTxns[txnID].Phase = sandboxstore.SandboxLifecyclePhaseAborted
-			store.mu.Unlock()
-			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
-				Handle: "handle-1",
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:stale",
-					Size:      123,
-				},
-			})
-		case "/api/v1/rootfs/snapshots/publish":
-			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
-				Published: true,
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:stale",
-					Size:      123,
-					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/stale.tar",
-				},
-			})
-		default:
-			t.Fatalf("unexpected ctld path %s", r.URL.Path)
-		}
-	}))
+	ctld := newRootFSHeadCTLDServer(t, func(ctldapi.SealRootFSHeadRequest) {
+		store.mu.Lock()
+		store.lifecycleTxns[txnID].Phase = sandboxstore.SandboxLifecyclePhaseAborted
+		store.mu.Unlock()
+	})
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
@@ -347,197 +559,7 @@ func TestCompletePausingSandboxRuntimeDoesNotCommitStaleCheckpoint(t *testing.T)
 		return true, nil, nil
 	})
 	svc := &SandboxService{
-		k8sClient:           k8sClient,
-		podLister:           newTestPodLister(t, pod),
-		sandboxStore:        store,
-		ctldClient:          ctldapi.NewClientWithTimeout(time.Second),
-		config:              SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort},
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
-		rootFSObjectDeleter: &recordingSandboxRootFSObjectDeleter{},
-	}
-	defer attachRootFSTestProcd(t, pod, svc, nil)()
-	txnID = addRootFSTestPauseTxn(store, pod, sandboxstore.SandboxLifecyclePhasePreparing)
-
-	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
-	assert.False(t, deleteCalled)
-	assert.Nil(t, store.rootFSStates["sandbox-1"])
-	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
-	deleter := svc.rootFSObjectDeleter.(*recordingSandboxRootFSObjectDeleter)
-	assert.Equal(t, []string{"sandbox-rootfs/team-1/sandbox-1/3/sha256/stale.tar"}, deleter.keys)
-}
-
-func TestPauseSandboxRuntimeSquashesRootFSWhenChainIsTooDeep(t *testing.T) {
-	var savedReq ctldapi.PrepareRootFSSnapshotRequest
-	ctld := newRootFSSnapshotCTLDServer(t,
-		ctldapi.PrepareRootFSSnapshotResponse{
-			Handle: "handle-1",
-			Info:   rootFSSnapshotTestInfo(),
-			Descriptor: ctldapi.RootFSDiffDescriptor{
-				MediaType: "application/vnd.oci.image.layer.v1.tar",
-				Digest:    "sha256:squashed",
-				Size:      456,
-			},
-		},
-		ctldapi.PublishRootFSSnapshotResponse{
-			Published: true,
-			Info:      rootFSSnapshotTestInfo(),
-			Descriptor: ctldapi.RootFSDiffDescriptor{
-				MediaType: "application/vnd.oci.image.layer.v1.tar",
-				Digest:    "sha256:squashed",
-				Size:      456,
-				ObjectKey: "sandbox-rootfs/team-1/sandbox-1/4/sha256/squashed.tar",
-			},
-		},
-		func(req ctldapi.PrepareRootFSSnapshotRequest) { savedReq = req },
-		nil,
-	)
-	defer ctld.Close()
-	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
-
-	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
-	pod.Status.HostIP = ctldURL.Hostname()
-	parentState := &sandboxstore.SandboxRootFSState{
-		LayerID:           "layer-8",
-		SandboxID:         "sandbox-1",
-		TeamID:            "team-1",
-		RuntimeGeneration: 3,
-		DiffDigest:        "sha256:parent",
-		DiffObjectKey:     "sandbox-rootfs/team-1/sandbox-1/3/sha256/parent.tar",
-	}
-	for i := 1; i <= 8; i++ {
-		layer := &sandboxstore.SandboxRootFSLayer{
-			ID:            "layer-" + strconv.Itoa(i),
-			TeamID:        "team-1",
-			DiffDigest:    "sha256:layer",
-			DiffObjectKey: "rootfs/layer.tar",
-			DiffSize:      1,
-		}
-		if i > 1 {
-			layer.ParentLayerID = "layer-" + strconv.Itoa(i-1)
-		}
-		parentState.LayerChain = append(parentState.LayerChain, layer)
-	}
-	store := &memorySandboxStore{
-		records: map[string]*sandboxstore.SandboxRecord{
-			"sandbox-1": {
-				ID:                "sandbox-1",
-				TeamID:            "team-1",
-				RuntimeGeneration: 3,
-				DesiredState:      sandboxstore.SandboxDesiredStateActive,
-			},
-		},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			"sandbox-1": parentState,
-		},
-	}
-	svc := &SandboxService{
-		k8sClient:    fake.NewSimpleClientset(pod),
-		podLister:    newTestPodLister(t, pod),
-		sandboxStore: store,
-		ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
-		config: SandboxServiceConfig{
-			CtldEnabled:               true,
-			CtldPort:                  ctldPort,
-			RootFSSquashMaxChainDepth: 8,
-		},
-		clock:  systemTime{},
-		logger: zap.NewNop(),
-	}
-	defer attachRootFSTestProcd(t, pod, svc, nil)()
-	addRootFSTestPauseTxn(store, pod, sandboxstore.SandboxLifecyclePhasePreparing)
-
-	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
-
-	assert.Empty(t, savedReq.ParentLayerID)
-	state := store.rootFSStates["sandbox-1"]
-	require.NotNil(t, state)
-	assert.NotEmpty(t, state.LayerID)
-	assert.Empty(t, state.ParentLayerID)
-	assert.Equal(t, "layer-8", state.ExpectedHeadLayerID)
-	assert.Equal(t, "sha256:squashed", state.DiffDigest)
-}
-
-func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing.T) {
-	var saveRequests []ctldapi.PrepareRootFSSnapshotRequest
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/rootfs/snapshots/prepare":
-			var req ctldapi.PrepareRootFSSnapshotRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-			saveRequests = append(saveRequests, req)
-			if req.ParentLayerID != "" {
-				w.WriteHeader(http.StatusNotFound)
-				_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{Error: "create rootfs diff: rootfs baseline layer-parent is not captured"})
-				return
-			}
-			_ = json.NewEncoder(w).Encode(ctldapi.PrepareRootFSSnapshotResponse{
-				Handle: "handle-2",
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:full",
-					Size:      456,
-				},
-			})
-		case "/api/v1/rootfs/snapshots/publish":
-			_ = json.NewEncoder(w).Encode(ctldapi.PublishRootFSSnapshotResponse{
-				Published: true,
-				Info: ctldapi.RootFSInfo{
-					Runtime:             "runc",
-					RuntimeHandler:      "io.containerd.runc.v2",
-					BaseImageRef:        "docker.io/library/busybox:1.36",
-					BaseImageDigest:     "sha256:base",
-					Snapshotter:         "overlayfs",
-					SnapshotParent:      "parent-1",
-					SnapshotParentChain: []string{"parent-1", "parent-0"},
-				},
-				Descriptor: ctldapi.RootFSDiffDescriptor{
-					MediaType: "application/vnd.oci.image.layer.v1.tar",
-					Digest:    "sha256:full",
-					Size:      456,
-					ObjectKey: "sandbox-rootfs/team-1/sandbox-1/3/sha256/full.tar",
-				},
-			})
-		default:
-			t.Fatalf("unexpected ctld path %s", r.URL.Path)
-		}
-	}))
-	defer ctld.Close()
-	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
-
-	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
-	pod.Status.HostIP = ctldURL.Hostname()
-	store := &memorySandboxStore{
-		records: map[string]*sandboxstore.SandboxRecord{
-			"sandbox-1": {
-				ID:                "sandbox-1",
-				TeamID:            "team-1",
-				RuntimeGeneration: 3,
-				DesiredState:      sandboxstore.SandboxDesiredStateActive,
-			},
-		},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			"sandbox-1": {
-				LayerID:           "layer-parent",
-				SandboxID:         "sandbox-1",
-				TeamID:            "team-1",
-				RuntimeGeneration: 2,
-				DiffDigest:        "sha256:parent",
-				DiffObjectKey:     "sandbox-rootfs/team-1/sandbox-1/2/sha256/parent.tar",
-			},
-		},
-	}
-	svc := &SandboxService{
-		k8sClient:    fake.NewSimpleClientset(pod),
+		k8sClient:    k8sClient,
 		podLister:    newTestPodLister(t, pod),
 		sandboxStore: store,
 		ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
@@ -546,19 +568,12 @@ func TestPauseSandboxRuntimeFallsBackToRootLayerWhenBaselineIsMissing(t *testing
 		logger:       zap.NewNop(),
 	}
 	defer attachRootFSTestProcd(t, pod, svc, nil)()
-	addRootFSTestPauseTxn(store, pod, sandboxstore.SandboxLifecyclePhasePreparing)
+	txnID = addRootFSTestPauseTxn(store, pod, sandboxstore.SandboxLifecyclePhasePreparing)
 
 	require.NoError(t, svc.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"))
-
-	require.Len(t, saveRequests, 2)
-	assert.Equal(t, "layer-parent", saveRequests[0].ParentLayerID)
-	assert.Empty(t, saveRequests[1].ParentLayerID)
-	state := store.rootFSStates["sandbox-1"]
-	require.NotNil(t, state)
-	assert.NotEmpty(t, state.LayerID)
-	assert.Empty(t, state.ParentLayerID)
-	assert.Equal(t, "layer-parent", state.ExpectedHeadLayerID)
-	assert.Equal(t, "sha256:full", state.DiffDigest)
+	assert.False(t, deleteCalled)
+	assert.Nil(t, store.rootFSHeads["sandbox-1"])
+	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 }
 
 func TestGetSandboxHidesRuntimeAfterPauseBarrier(t *testing.T) {
@@ -598,26 +613,229 @@ func TestGetSandboxHidesRuntimeAfterPauseBarrier(t *testing.T) {
 	assert.Equal(t, "pod-1", sandbox.PodName)
 }
 
-func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeRuntimeActivation(t *testing.T) {
+func TestFinishRestoredSandboxRuntimeMaterializesHeadBeforeRuntimeActivation(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	for _, test := range []struct {
+		name            string
+		sourceSandboxID string
+		wantReset       bool
+		claimType       string
+		unreadyTemplate bool
+		wantReplacement bool
+	}{
+		{name: "own Head", sourceSandboxID: "sandbox-1", claimType: "hot", wantReplacement: true},
+		{name: "forked Head", sourceSandboxID: "source-sandbox", wantReset: true, claimType: "hot", wantReplacement: true},
+		{name: "cold unready template", sourceSandboxID: "sandbox-1", claimType: "cold", unreadyTemplate: true, wantReplacement: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls []string
+			var materializeReq ctldapi.MaterializeRootFSHeadRequest
+			ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/rootfs/heads/materialize":
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&materializeReq))
+					calls = append(calls, "materialize")
+					require.NoError(t, json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{
+						Materialized: true,
+						ImageName:    materializeReq.Image.Name,
+					}))
+				case "/api/v1/rootfs/sync/bind":
+					calls = append(calls, "bind")
+					require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
+						Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true},
+					}))
+				case "/api/v1/volume-portals/check":
+					require.NoError(t, json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true}))
+				default:
+					t.Fatalf("unexpected CTLD path %s", r.URL.Path)
+				}
+			}))
+			defer ctld.Close()
+			ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+			const sandboxID = "sandbox-1"
+			currentPod := rootFSTestPod("pod-current", sandboxID, "team-1")
+			currentPod.UID = types.UID("warm-runtime-uid")
+			currentPod.Spec.Containers[0].Image = "registry.example.com/template@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			currentPod.Spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
+			currentPod.Spec.Containers = append(currentPod.Spec.Containers, corev1.Container{
+				Name: "sidecar", Image: "registry.example.com/sidecar:v1", ImagePullPolicy: corev1.PullAlways,
+			})
+			currentPod.Status.ContainerStatuses[0].Image = currentPod.Spec.Containers[0].Image
+			currentPod.Status.ContainerStatuses[0].ImageID = "containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			currentPod.Status.HostIP = ctldURL.Hostname()
+			currentPod.Status.PodIP = "10.0.0.10"
+			if test.unreadyTemplate {
+				currentPod.Spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: v1alpha1.SandboxPodReadinessConditionType}}
+				setRuntimeTestCondition(currentPod, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionFalse, "RuntimePending", "template runtime is not ready")
+			}
+			head := rootFSHeadTestFixture(t, sandboxID, "team-1", "head-v1", 3)
+			head.SourceSandboxID = test.sourceSandboxID
+			store := &memorySandboxStore{
+				records: map[string]*sandboxstore.SandboxRecord{},
+				rootFSHeads: map[string]*sandboxstore.SandboxRootFSHead{
+					sandboxID: head,
+				},
+				rootFSHeadVersions: map[string]*sandboxstore.SandboxRootFSHead{
+					head.Reference.HeadID: head,
+				},
+			}
+			indexer := newClaimTestPodIndexer(t, currentPod)
+			client := fake.NewSimpleClientset(currentPod.DeepCopy())
+			snapshotterInstance := "snapshotter-pod/0/containerd://snapshotter"
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name: currentPod.Spec.NodeName,
+				Annotations: map[string]string{
+					dataplane.NodeRootFSSnapshotterInstanceAnnotation: snapshotterInstance,
+				},
+			}}
+			client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+				updated := action.(ktesting.UpdateAction).GetObject().(*corev1.Pod)
+				if updated.Spec.Containers[0].Image != head.Image.Name || updated.Annotations[controller.AnnotationRootFSHeadID] == "" {
+					return false, nil, nil
+				}
+				if test.wantReplacement {
+					require.Equal(t, types.UID("replacement-runtime-uid"), updated.UID)
+					assert.Equal(t, corev1.PullNever, updated.Spec.Containers[0].ImagePullPolicy)
+				} else {
+					require.Equal(t, types.UID("warm-runtime-uid"), updated.UID)
+					assert.Equal(t, corev1.PullIfNotPresent, updated.Spec.Containers[0].ImagePullPolicy)
+					require.Len(t, updated.Spec.Containers, 2)
+					assert.Equal(t, "registry.example.com/sidecar:v1", updated.Spec.Containers[1].Image)
+					assert.Equal(t, corev1.PullAlways, updated.Spec.Containers[1].ImagePullPolicy)
+				}
+				assert.Equal(t, snapshotterInstance, updated.Annotations[controller.AnnotationRootFSSnapshotterInstance])
+				assert.Equal(t, head.Reference.HeadID, updated.Annotations[controller.AnnotationRootFSHeadID])
+				assert.Equal(t, head.Image.Name, updated.Annotations[controller.AnnotationRootFSHeadImage])
+				updated.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name:    "procd",
+					Image:   head.Image.Name,
+					ImageID: "containerd://" + head.Image.ManifestDigest,
+					Ready:   true,
+					State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}}
+				require.NoError(t, indexer.Update(updated.DeepCopy()))
+				return false, nil, nil
+			})
+			client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+				deleteAction := action.(ktesting.DeleteAction)
+				if test.wantReplacement {
+					require.NotNil(t, deleteAction.GetDeleteOptions().GracePeriodSeconds)
+					assert.Zero(t, *deleteAction.GetDeleteOptions().GracePeriodSeconds)
+				}
+				deleted, exists, err := indexer.GetByKey(currentPod.Namespace + "/" + deleteAction.GetName())
+				if err == nil && exists {
+					err = indexer.Delete(deleted)
+				}
+				return false, nil, err
+			})
+			client.PrependReactor("create", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+				created := action.(ktesting.CreateAction).GetObject().(*corev1.Pod)
+				created.UID = types.UID("replacement-runtime-uid")
+				created.ResourceVersion = "2"
+				created.Status.Phase = corev1.PodRunning
+				created.Status.HostIP = ctldURL.Hostname()
+				created.Status.PodIP = "10.0.0.11"
+				created.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name:    "procd",
+					Image:   head.Image.Name,
+					ImageID: "containerd://" + head.Image.ManifestDigest,
+					Ready:   true,
+					State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}}
+				// A replacement Pod cannot be runtime-ready before its assignment is
+				// published and storage is bound. Head identity readiness must not
+				// introduce a circular dependency on that later activation.
+				setRuntimeTestCondition(created, corev1.PodReady, corev1.ConditionFalse, "RuntimePending", "runtime assignment is not active")
+				setRuntimeTestCondition(created, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionFalse, "RuntimePending", "runtime assignment is not active")
+				require.NoError(t, indexer.Add(created.DeepCopy()))
+				return false, nil, nil
+			})
+			installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(activePod *corev1.Pod) {
+				require.Equal(t, []string{"materialize", "bind"}, calls)
+				assert.Equal(t, test.wantReset, activePod.Annotations[runtimecontrol.AnnotationResetCopiedState] == "true")
+				calls = append(calls, "runtime")
+			})
+			svc := &SandboxService{
+				k8sClient:              client,
+				podLister:              corelisters.NewPodLister(indexer),
+				nodeLister:             newClaimTestNodeLister(t, node),
+				secretLister:           newClaimTestSecretLister(t),
+				sandboxStore:           store,
+				ctldClient:             ctldapi.NewClientWithTimeout(time.Second),
+				internalTokenGenerator: staticTokenGenerator{},
+				config: SandboxServiceConfig{
+					CtldEnabled:         true,
+					CtldPort:            ctldPort,
+					RuntimeReadyTimeout: time.Second,
+				},
+				clock:  systemTime{},
+				logger: zap.NewNop(),
+			}
+			record := &sandboxstore.SandboxRecord{
+				ID:                sandboxID,
+				TeamID:            "team-1",
+				UserID:            "user-1",
+				TemplateID:        "template-1",
+				TemplateName:      "template-1",
+				TemplateNamespace: "template-default",
+				TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+				RuntimeGeneration: 3,
+				DesiredState:      sandboxstore.SandboxDesiredStatePaused,
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			restoredPod, err := svc.finishRestoredSandboxRuntime(ctx, currentPod, record, test.claimType)
+
+			require.NoError(t, err)
+			if test.wantReplacement {
+				assert.NotEqual(t, currentPod.Name, restoredPod.Name)
+				assert.Equal(t, types.UID("replacement-runtime-uid"), restoredPod.UID)
+				assert.Equal(t, "10.0.0.11", restoredPod.Status.PodIP)
+			} else {
+				assert.Equal(t, currentPod.Name, restoredPod.Name)
+				assert.Equal(t, currentPod.UID, restoredPod.UID)
+				assert.Equal(t, currentPod.Status.PodIP, restoredPod.Status.PodIP)
+			}
+			assert.Equal(t, []string{"materialize", "bind", "runtime"}, calls)
+			assert.Equal(t, head.Reference.HeadID, materializeReq.Reference.HeadID)
+			var created, deleted bool
+			for _, action := range client.Actions() {
+				created = created || action.GetVerb() == "create" && action.GetResource().Resource == "pods"
+				deleted = deleted || action.GetVerb() == "delete" && action.GetResource().Resource == "pods"
+			}
+			assert.Equal(t, test.wantReplacement, created)
+			assert.Equal(t, test.wantReplacement, deleted)
+		})
+	}
+}
+
+func TestFinishRestoredS0FSRuntimeUsesCarrierSlotWithoutPodImageMutation(t *testing.T) {
+	withClaimTestPublicKey(t)
 	var calls []string
+	var materializeReq ctldapi.MaterializeRootFSHeadRequest
+	var procdPodIP string
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/rootfs/apply":
-			var req ctldapi.ApplyRootFSRequest
+		case "/api/v1/rootfs/heads/materialize":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&materializeReq))
+			calls = append(calls, "materialize")
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{Materialized: true, ImageName: materializeReq.TargetImageName}))
+		case "/api/v1/carriers/gate/release":
+			var req ctldapi.ReleaseCarrierGateRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-			assert.Equal(t, "runc", req.ExpectedRuntime)
-			assert.Equal(t, "io.containerd.runc.v2", req.ExpectedRuntimeHandler)
-			assert.Equal(t, "overlayfs", req.ExpectedSnapshotter)
-			assert.Equal(t, "sha256:base", req.ExpectedBaseImageDigest)
-			assert.Equal(t, "parent-1", req.ExpectedSnapshotParent)
-			assert.Equal(t, []string{"parent-1", "parent-0"}, req.ExpectedSnapshotParentChain)
-			assert.Equal(t, "sha256:diff", req.Descriptor.Digest)
-			assert.Equal(t, "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar", req.Descriptor.ObjectKey)
-			assert.ElementsMatch(t, []string{"/workspace/data"}, req.ExcludedPaths)
-			calls = append(calls, "apply")
-			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+			calls = append(calls, "gate")
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.ReleaseCarrierGateResponse{
+				Released: true, Namespace: req.Namespace, PodName: req.PodName, PodUID: req.PodUID, PodIP: procdPodIP,
+				Slot: req.Slot, SandboxID: req.SandboxID, RuntimeGeneration: req.RuntimeGeneration, ContainerName: req.ContainerName,
+			}))
+		case "/api/v1/rootfs/sync/bind":
+			calls = append(calls, "bind")
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true}}))
 		case "/api/v1/volume-portals/check":
-			_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true})
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true}))
 		default:
 			t.Fatalf("unexpected CTLD path %s", r.URL.Path)
 		}
@@ -625,147 +843,237 @@ func TestFinishRestoredSandboxRuntimeAppliesRootFSBeforeRuntimeActivation(t *tes
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
-	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
-	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
-	setRootFSTestClaimMounts(t, pod, []managerapi.ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data"}})
+	const (
+		sandboxID = "sandbox-1"
+		slot      = "s0-0123456789abcdef"
+	)
+	markerImage, err := carrier.MarkerImage(slot)
+	require.NoError(t, err)
+	pod := rootFSTestPod("carrier-pod", sandboxID, "team-1")
+	pod.UID = types.UID("carrier-uid")
+	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, procdapi.StartupPath, r.URL.Path)
+		require.NoError(t, spec.WriteSuccess(w, http.StatusOK, procdapi.StartupResponse{
+			Status: "started", Namespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID),
+		}))
+	}))
+	defer procd.Close()
+	procdURL, procdPort := parsedTestServer(t, procd.URL)
+	procdPodIP = procdURL.Hostname()
+	pod.Spec.Containers[0].Image = markerImage
+	pod.Spec.Containers[0].ImagePullPolicy = corev1.PullNever
+	pod.Annotations[carrier.AnnotationSlot] = slot
 	pod.Status.HostIP = ctldURL.Hostname()
-	pod.Status.PodIP = "10.0.0.10"
+	pod.Status.PodIP = procdPodIP
+	head := rootFSHeadTestFixture(t, sandboxID, "team-1", "head-v1", 3)
 	store := &memorySandboxStore{
-		records: map[string]*sandboxstore.SandboxRecord{},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			"sandbox-1": rootFSTestState(),
-		},
+		records:            map[string]*sandboxstore.SandboxRecord{},
+		rootFSHeads:        map[string]*sandboxstore.SandboxRootFSHead{sandboxID: head},
+		rootFSHeadVersions: map[string]*sandboxstore.SandboxRootFSHead{head.Reference.HeadID: head},
 	}
 	indexer := newClaimTestPodIndexer(t, pod)
-	client := fake.NewSimpleClientset(pod)
-	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(*corev1.Pod) {
-		require.Equal(t, []string{"apply"}, calls)
+	client := fake.NewSimpleClientset(pod.DeepCopy())
+	client.PrependReactor("update", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		updated := action.(ktesting.UpdateAction).GetObject().(*corev1.Pod)
+		assert.Equal(t, markerImage, updated.Spec.Containers[0].Image)
+		assert.Equal(t, corev1.PullNever, updated.Spec.Containers[0].ImagePullPolicy)
+		return false, nil, nil
+	})
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(_ *corev1.Pod) {
 		calls = append(calls, "runtime")
 	})
 	svc := &SandboxService{
-		k8sClient:    client,
-		podLister:    corelisters.NewPodLister(indexer),
-		sandboxStore: store,
-		ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
-		config: SandboxServiceConfig{
-			CtldEnabled:         true,
-			CtldPort:            ctldPort,
-			RuntimeReadyTimeout: time.Second,
-		},
-		clock:  systemTime{},
-		logger: zap.NewNop(),
+		k8sClient: client, podLister: corelisters.NewPodLister(indexer), secretLister: newClaimTestSecretLister(t),
+		sandboxStore: store, ctldClient: ctldapi.NewClientWithTimeout(time.Second), internalTokenGenerator: staticTokenGenerator{},
+		procdClient: procdapi.NewProcdClient(procdapi.ProcdClientConfig{Timeout: time.Second}),
+		config:      SandboxServiceConfig{CtldEnabled: true, CtldPort: ctldPort, ProcdPort: procdPort, RuntimeReadyTimeout: time.Second},
+		clock:       systemTime{}, logger: zap.NewNop(),
 	}
 	record := &sandboxstore.SandboxRecord{
-		ID:                "sandbox-1",
-		TeamID:            "team-1",
-		UserID:            "user-1",
-		TemplateID:        "template-1",
-		TemplateName:      "template-1",
-		TemplateNamespace: "template-default",
-		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
-		RuntimeGeneration: 3,
-		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
+		ID: sandboxID, TeamID: "team-1", UserID: "user-1", TemplateID: "template-1", TemplateName: "template-1",
+		TemplateNamespace: "template-default", RuntimeGeneration: 3, DesiredState: sandboxstore.SandboxDesiredStatePaused,
+		RootFSRuntimeVersion: sandboxstore.RootFSRuntimeS0FSV2,
 	}
 
-	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
+	restored, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "shared")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"apply", "runtime"}, calls)
+	assert.Equal(t, pod.UID, restored.UID)
+	assert.Equal(t, []string{"materialize", "gate", "bind", "runtime"}, calls)
+	assert.Equal(t, slot, materializeReq.CarrierSlot)
+	assert.Equal(t, markerImage, materializeReq.TargetImageName)
+	for _, action := range client.Actions() {
+		assert.NotEqual(t, "create", action.GetVerb())
+		assert.NotEqual(t, "delete", action.GetVerb())
+	}
 }
 
-func TestFinishRestoredSandboxRuntimeAppliesRootFSLayerChain(t *testing.T) {
-	var applyReq ctldapi.ApplyRootFSRequest
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&applyReq))
-		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
-	}))
-	defer ctld.Close()
-	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
-
+func TestPodRootFSHeadReadyRejectsStaleContainerStatus(t *testing.T) {
+	head := rootFSHeadTestFixture(t, "sandbox-1", "team-1", "head-v1", 3)
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
-	pod.Status.HostIP = ctldURL.Hostname()
-	pod.Status.PodIP = "10.0.0.10"
-	store := &memorySandboxStore{
-		records: map[string]*sandboxstore.SandboxRecord{},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			"sandbox-1": rootFSTestLayerState(),
-		},
-	}
-	indexer := newClaimTestPodIndexer(t, pod)
-	client := fake.NewSimpleClientset(pod)
-	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, nil)
-	svc := &SandboxService{
-		k8sClient:    client,
-		podLister:    corelisters.NewPodLister(indexer),
-		sandboxStore: store,
-		ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
-		config: SandboxServiceConfig{
-			CtldEnabled:         true,
-			CtldPort:            ctldPort,
-			RuntimeReadyTimeout: time.Second,
-		},
-		clock:  systemTime{},
-		logger: zap.NewNop(),
-	}
-	record := &sandboxstore.SandboxRecord{
-		ID:                "sandbox-1",
-		TeamID:            "team-1",
-		UserID:            "user-1",
-		TemplateID:        "template-1",
-		TemplateName:      "template-1",
-		TemplateNamespace: "template-default",
-		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
-		RuntimeGeneration: 3,
-		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
-	}
+	pod.Spec.Containers[0].Image = head.Image.Name
+	pod.Annotations[controller.AnnotationRootFSHeadID] = head.Reference.HeadID
+	pod.Annotations[controller.AnnotationRootFSHeadImage] = head.Image.Name
+	pod.Status.ContainerStatuses[0].Image = "registry.example.com/previous:latest"
+	pod.Status.ContainerStatuses[0].ImageID = "containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
-	require.NoError(t, err)
+	ready, reason := podRootFSHeadReady(pod, head)
 
-	assert.Empty(t, applyReq.Descriptor.Digest)
-	assert.Equal(t, "layer-child", applyReq.BaselineLayerID)
-	require.Len(t, applyReq.Layers, 2)
-	assert.Equal(t, "layer-parent", applyReq.Layers[0].LayerID)
-	assert.Empty(t, applyReq.Layers[0].ParentLayerID)
-	assert.Equal(t, "rootfs/parent.tar", applyReq.Layers[0].Descriptor.ObjectKey)
-	assert.Equal(t, "layer-child", applyReq.Layers[1].LayerID)
-	assert.Equal(t, "layer-parent", applyReq.Layers[1].ParentLayerID)
-	assert.Equal(t, "rootfs/child.tar", applyReq.Layers[1].Descriptor.ObjectKey)
+	assert.False(t, ready)
+	assert.Contains(t, reason, "previous image")
+	pod.Status.ContainerStatuses[0].ImageID = "containerd://" + head.Image.ManifestDigest
+	ready, reason = podRootFSHeadReady(pod, head)
+	assert.True(t, ready)
+	assert.Empty(t, reason)
 }
 
-func TestFinishRestoredSandboxRuntimeResetsSessionStateCopiedByFork(t *testing.T) {
+func TestWaitForPodRootFSHeadReadyWaitsForNewContainerStatus(t *testing.T) {
+	head := rootFSHeadTestFixture(t, "sandbox-1", "team-1", "head-v1", 3)
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	pod.Spec.Containers[0].Image = head.Image.Name
+	pod.Annotations[controller.AnnotationRootFSHeadID] = head.Reference.HeadID
+	pod.Annotations[controller.AnnotationRootFSHeadImage] = head.Image.Name
+	pod.Status.ContainerStatuses[0].Image = "registry.example.com/previous:latest"
+	indexer := newClaimTestPodIndexer(t, pod)
+	svc := &SandboxService{
+		podLister: corelisters.NewPodLister(indexer),
+		logger:    zap.NewNop(),
+	}
+	handler := svc.PodEventHandler()
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		updated := pod.DeepCopy()
+		updated.Status.ContainerStatuses[0].Image = head.Image.Name
+		updated.Status.ContainerStatuses[0].ImageID = "containerd://" + head.Image.ManifestDigest
+		if err := indexer.Update(updated); err != nil {
+			t.Errorf("update pod: %v", err)
+			return
+		}
+		handler.UpdateFunc(pod, updated)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	readyPod, err := svc.waitForPodRootFSHeadReady(ctx, pod.Namespace, pod.Name, head)
+
+	require.NoError(t, err)
+	ready, reason := podRootFSHeadReady(readyPod, head)
+	assert.True(t, ready, reason)
+}
+
+func TestActivateRuntimeWithRootFSHeadReplacesAlwaysPullPod(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	var materializeReq ctldapi.MaterializeRootFSHeadRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/api/v1/rootfs/apply", r.URL.Path)
-		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
+		require.Equal(t, "/api/v1/rootfs/heads/materialize", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&materializeReq))
+		require.NoError(t, json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{
+			Materialized: true,
+			ImageName:    materializeReq.Image.Name,
+		}))
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
-	const sandboxID = "forked-sandbox"
-	pod := rootFSTestPod("pod-1", sandboxID, "team-1")
-	pod.Status.HostIP = ctldURL.Hostname()
-	pod.Status.PodIP = "10.0.0.10"
-	state := rootFSTestLayerState()
-	state.SandboxID = sandboxID
-	for _, layer := range state.LayerChain {
-		layer.SourceSandboxID = "source-sandbox"
-	}
-	store := &memorySandboxStore{
-		records: map[string]*sandboxstore.SandboxRecord{},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			sandboxID: state,
-		},
-	}
-	indexer := newClaimTestPodIndexer(t, pod)
-	client := fake.NewSimpleClientset(pod)
-	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(activePod *corev1.Pod) {
-		assert.Equal(t, "true", activePod.Annotations[runtimecontrol.AnnotationResetCopiedState])
+	current := rootFSTestPod("pod-current", "sandbox-1", "team-1")
+	current.Spec.Containers[0].Image = "registry.example.com/template:latest"
+	current.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
+	current.Status.HostIP = ctldURL.Hostname()
+	indexer := newClaimTestPodIndexer(t, current)
+	client := fake.NewSimpleClientset(current.DeepCopy())
+	client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		deleted, exists, err := indexer.GetByKey(current.Namespace + "/" + action.(ktesting.DeleteAction).GetName())
+		if err == nil && exists {
+			_ = indexer.Delete(deleted)
+		}
+		return false, nil, nil
 	})
+	snapshotterInstance := "snapshotter-pod/0/containerd://snapshotter"
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: current.Spec.NodeName,
+		Annotations: map[string]string{
+			dataplane.NodeRootFSSnapshotterInstanceAnnotation: snapshotterInstance,
+		},
+	}}
+	head := rootFSHeadTestFixture(t, "sandbox-1", "team-1", "head-v1", 3)
+	template := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template-1", Namespace: current.Namespace},
+		Spec: v1alpha1.SandboxTemplateSpec{MainContainer: v1alpha1.ContainerSpec{
+			Image: "registry.example.com/template:latest", ImagePullPolicy: string(corev1.PullAlways),
+		}},
+	}
 	svc := &SandboxService{
-		k8sClient:    client,
-		podLister:    corelisters.NewPodLister(indexer),
-		sandboxStore: store,
-		ctldClient:   ctldapi.NewClientWithTimeout(time.Second),
+		k8sClient:              client,
+		podLister:              corelisters.NewPodLister(indexer),
+		nodeLister:             newClaimTestNodeLister(t, node),
+		secretLister:           newClaimTestSecretLister(t),
+		ctldClient:             ctldapi.NewClientWithTimeout(time.Second),
+		internalTokenGenerator: staticTokenGenerator{},
+		config: SandboxServiceConfig{
+			CtldEnabled: true,
+			CtldPort:    ctldPort,
+		},
+		clock:  systemTime{},
+		logger: zap.NewNop(),
+	}
+
+	replacement, recreated, err := svc.activateRuntimeWithRootFSHead(context.Background(), current, template, &ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "template-1", SandboxID: "sandbox-1", RuntimeGeneration: 4,
+	}, head, false)
+
+	require.NoError(t, err)
+	assert.True(t, recreated)
+	assert.NotEqual(t, current.Name, replacement.Name)
+	require.Len(t, replacement.Spec.Containers, 1)
+	assert.Equal(t, head.Image.Name, replacement.Spec.Containers[0].Image)
+	assert.Equal(t, corev1.PullNever, replacement.Spec.Containers[0].ImagePullPolicy)
+	assert.Equal(t, current.Spec.NodeName, replacement.Spec.NodeName)
+	assert.Equal(t, snapshotterInstance, replacement.Annotations[controller.AnnotationRootFSSnapshotterInstance])
+	assert.Equal(t, head.Reference.HeadID, replacement.Annotations[controller.AnnotationRootFSHeadID])
+	assert.Equal(t, head.Image.Name, replacement.Annotations[controller.AnnotationRootFSHeadImage])
+}
+
+func TestFinishRestoredSandboxRuntimeUsesTemplateBaselineWithoutPublishedHead(t *testing.T) {
+	withClaimTestPublicKey(t)
+
+	var calls []string
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/rootfs/sync/bind":
+			calls = append(calls, "bind")
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
+				Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true},
+			}))
+		case "/api/v1/volume-portals/check":
+			require.NoError(t, json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true}))
+		case "/api/v1/rootfs/heads/materialize":
+			t.Fatal("a sandbox without a published Head must resume from the template baseline")
+		default:
+			t.Fatalf("unexpected CTLD path %s", r.URL.Path)
+		}
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	const sandboxID = "sandbox-1"
+	currentPod := rootFSTestPod("pod-current", sandboxID, "team-1")
+	currentPod.Status.HostIP = ctldURL.Hostname()
+	currentPod.Status.PodIP = "10.0.0.10"
+	indexer := newClaimTestPodIndexer(t, currentPod)
+	client := fake.NewSimpleClientset(currentPod.DeepCopy())
+	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(activePod *corev1.Pod) {
+		require.Equal(t, []string{"bind"}, calls)
+		assert.NotEqual(t, "true", activePod.Annotations[runtimecontrol.AnnotationResetCopiedState])
+		calls = append(calls, "runtime")
+	})
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}}
+	svc := &SandboxService{
+		k8sClient:              client,
+		podLister:              corelisters.NewPodLister(indexer),
+		secretLister:           newClaimTestSecretLister(t),
+		sandboxStore:           store,
+		ctldClient:             ctldapi.NewClientWithTimeout(time.Second),
+		internalTokenGenerator: staticTokenGenerator{},
 		config: SandboxServiceConfig{
 			CtldEnabled:         true,
 			CtldPort:            ctldPort,
@@ -782,220 +1090,37 @@ func TestFinishRestoredSandboxRuntimeResetsSessionStateCopiedByFork(t *testing.T
 		TemplateName:      "template-1",
 		TemplateNamespace: "template-default",
 		TemplateSpec:      v1alpha1.SandboxTemplateSpec{},
+		RuntimeGeneration: 3,
 		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
 	}
-
-	_, err := svc.finishRestoredSandboxRuntime(context.Background(), pod, record, "hot")
-	require.NoError(t, err)
-}
-
-func TestCopiedSessionStateRequiresResetUsesRootFSHeadProvenance(t *testing.T) {
-	tests := []struct {
-		name      string
-		sandboxID string
-		state     *sandboxstore.SandboxRootFSState
-		want      bool
-	}{
-		{name: "missing state", sandboxID: "sandbox-1"},
-		{
-			name:      "own head",
-			sandboxID: "sandbox-1",
-			state: &sandboxstore.SandboxRootFSState{LayerChain: []*sandboxstore.SandboxRootFSLayer{
-				{SourceSandboxID: "source-sandbox"},
-				{SourceSandboxID: "sandbox-1"},
-			}},
-		},
-		{
-			name:      "copied head",
-			sandboxID: "sandbox-1",
-			state: &sandboxstore.SandboxRootFSState{LayerChain: []*sandboxstore.SandboxRootFSLayer{
-				{SourceSandboxID: "source-sandbox"},
-			}},
-			want: true,
-		},
-		{
-			name:      "legacy head without provenance fails closed",
-			sandboxID: "sandbox-1",
-			state:     &sandboxstore.SandboxRootFSState{LayerChain: []*sandboxstore.SandboxRootFSLayer{{}}},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := copiedSessionStateRequiresReset(tt.sandboxID, tt.state); got != tt.want {
-				t.Fatalf("copiedSessionStateRequiresReset() = %t, want %t", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T) {
-	withClaimTestPublicKey(t)
-
-	const checkpointDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	templateNamespace, err := naming.TemplateNamespaceForTeam("team-1")
-	require.NoError(t, err)
-
-	var applyTargets []string
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v1/rootfs/apply":
-			var req ctldapi.ApplyRootFSRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-			applyTargets = append(applyTargets, req.Target.PodName)
-			assert.Equal(t, checkpointDigest, req.ExpectedBaseImageDigest)
-			if req.Target.PodName == "pod-current" {
-				w.WriteHeader(http.StatusInternalServerError)
-				_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Error: "apply rootfs diff: simulated conflict"})
-				return
-			}
-			_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
-		case strings.HasSuffix(r.URL.Path, "/probes/readiness"):
-			_ = json.NewEncoder(w).Encode(sandboxprobe.Passed(sandboxprobe.KindReadiness, "SandboxProbePassed", "sandbox probe passed", nil))
-		case r.URL.Path == "/api/v1/volume-portals/check":
-			_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true})
-		default:
-			t.Fatalf("unexpected ctld path: %s", r.URL.Path)
-		}
-	}))
-	defer ctld.Close()
-	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
-
-	currentPod := rootFSTestPod("pod-current", "sandbox-1", "team-1")
-	currentPod.Namespace = templateNamespace
-	currentPod.Status.HostIP = ctldURL.Hostname()
-	currentPod.Status.PodIP = "10.0.0.10"
-	indexer := newClaimTestPodIndexer(t, currentPod)
-	k8sClient := fake.NewSimpleClientset(currentPod)
-	var fallbackImage string
-	k8sClient.PrependReactor("create", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
-		pod := action.(ktesting.CreateAction).GetObject().(*corev1.Pod)
-		require.Len(t, pod.Spec.Containers, 1)
-		fallbackImage = pod.Spec.Containers[0].Image
-
-		pod.UID = types.UID("fallback-uid")
-		pod.Status.Phase = corev1.PodRunning
-		pod.Status.HostIP = ctldURL.Hostname()
-		pod.Status.PodIP = "10.0.0.11"
-		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:  "procd",
-			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-		}}
-		pod.Status.Conditions = []corev1.PodCondition{
-			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
-			{Type: v1alpha1.SandboxPodReadinessConditionType, Status: corev1.ConditionTrue},
-		}
-		require.NoError(t, indexer.Add(pod.DeepCopy()))
-		return false, nil, nil
-	})
-	installRuntimeObservationReactor(t, k8sClient, indexer, runtimecontrol.ObservedReady, func(*corev1.Pod) {
-		require.Len(t, applyTargets, 2)
-	})
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "template-1",
-			Namespace: templateNamespace,
-		},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			MainContainer: v1alpha1.ContainerSpec{Image: "docker.io/library/busybox:1.37"},
-		},
-	}
-	store := &memorySandboxStore{
-		records: map[string]*sandboxstore.SandboxRecord{
-			"sandbox-1": {
-				ID:                "sandbox-1",
-				TeamID:            "team-1",
-				UserID:            "user-1",
-				TemplateID:        "template-1",
-				TemplateName:      "template-1",
-				TemplateNamespace: templateNamespace,
-				TemplateSpec:      template.Spec,
-				RuntimeGeneration: 3,
-				DesiredState:      sandboxstore.SandboxDesiredStatePaused,
-			},
-		},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			"sandbox-1": {
-				SandboxID:           "sandbox-1",
-				TeamID:              "team-1",
-				RuntimeGeneration:   3,
-				Runtime:             "runc",
-				RuntimeHandler:      "io.containerd.runc.v2",
-				BaseImageRef:        "docker.io/library/busybox:1.36",
-				BaseImageDigest:     checkpointDigest,
-				Snapshotter:         "overlayfs",
-				SnapshotParent:      "parent-1",
-				SnapshotParentChain: []string{"parent-1", "parent-0"},
-				DiffDigest:          "sha256:diff",
-				DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
-				DiffSize:            123,
-				DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
-			},
-		},
-	}
-	svc := &SandboxService{
-		k8sClient:      k8sClient,
-		podLister:      corelisters.NewPodLister(indexer),
-		secretLister:   newClaimTestSecretLister(t),
-		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		sandboxStore:   store,
-		ctldClient:     ctldapi.NewClientWithTimeout(time.Second),
-		config: SandboxServiceConfig{
-			CtldEnabled:         true,
-			CtldPort:            ctldPort,
-			RuntimeReadyTimeout: time.Second,
-		},
-		clock:  systemTime{},
-		logger: zap.NewNop(),
-	}
-	record := store.records["sandbox-1"]
 
 	restoredPod, err := svc.finishRestoredSandboxRuntime(context.Background(), currentPod, record, "hot")
 
 	require.NoError(t, err)
-	txn := &sandboxstore.SandboxLifecycleTxn{
-		ID:             "resume-txn-sandbox-1",
-		SandboxID:      "sandbox-1",
-		Kind:           sandboxstore.SandboxLifecycleKindResume,
-		Phase:          sandboxstore.SandboxLifecyclePhasePreparing,
-		FromGeneration: 3,
-		ToGeneration:   runtimeGenerationFromPod(restoredPod),
-		ToPodNamespace: restoredPod.Namespace,
-		ToPodName:      restoredPod.Name,
+	assert.Equal(t, currentPod.Name, restoredPod.Name)
+	assert.Equal(t, currentPod.UID, restoredPod.UID)
+	assert.Equal(t, []string{"bind", "runtime"}, calls)
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource == "pods" && (action.GetVerb() == "create" || action.GetVerb() == "delete") {
+			t.Fatalf("unexpected pod replacement action: %s", action.GetVerb())
+		}
 	}
-	store.lifecycleTxns = map[string]*sandboxstore.SandboxLifecycleTxn{txn.ID: txn}
-	require.NoError(t, svc.commitResumedSandboxRuntime(context.Background(), restoredPod, record, txn))
-	require.Len(t, applyTargets, 2)
-	assert.Equal(t, "pod-current", applyTargets[0])
-	assert.NotEqual(t, "pod-current", applyTargets[1])
-	assert.Equal(t, "docker.io/library/busybox@"+checkpointDigest, fallbackImage)
-	assert.Equal(t, applyTargets[1], store.records["sandbox-1"].CurrentPodName)
-	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
-}
-
-func TestCheckpointBaseImageRefPinsDigest(t *testing.T) {
-	ref, err := checkpointBaseImageRef(&sandboxstore.SandboxRootFSState{
-		BaseImageRef:    "registry.example.com:5000/team/image:old-tag",
-		BaseImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, "registry.example.com:5000/team/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ref)
 }
 
 func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
-	var saveCalled atomic.Bool
+	var sealCalled atomic.Bool
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/rootfs/save" {
-			saveCalled.Store(true)
+		if r.URL.Path == "/api/v1/rootfs/heads/seal" {
+			sealCalled.Store(true)
 		}
-		_ = json.NewEncoder(w).Encode(ctldapi.SaveRootFSResponse{})
+		_ = json.NewEncoder(w).Encode(ctldapi.SealRootFSHeadResponse{})
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	pod.Status.HostIP = ctldURL.Hostname()
-	originalState := rootFSTestState()
+	originalHead := rootFSHeadTestFixture(t, "sandbox-1", "team-1", "head-previous", 2)
 	store := &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-1": {
@@ -1005,8 +1130,8 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 				DesiredState:      sandboxstore.SandboxDesiredStateActive,
 			},
 		},
-		rootFSStates: map[string]*sandboxstore.SandboxRootFSState{
-			"sandbox-1": originalState,
+		rootFSHeads: map[string]*sandboxstore.SandboxRootFSHead{
+			"sandbox-1": originalHead,
 		},
 	}
 	svc := &SandboxService{
@@ -1021,8 +1146,8 @@ func TestRestoreFailureCleanupCanSkipRootFSSave(t *testing.T) {
 
 	require.NoError(t, svc.pauseSandboxRuntime(context.Background(), "sandbox-1", false))
 
-	assert.False(t, saveCalled.Load())
-	assert.Equal(t, originalState.DiffObjectKey, store.rootFSStates["sandbox-1"].DiffObjectKey)
+	assert.False(t, sealCalled.Load())
+	assert.Equal(t, originalHead.Reference.HeadID, store.rootFSHeads["sandbox-1"].Reference.HeadID)
 	assert.Equal(t, sandboxstore.SandboxDesiredStatePaused, store.records["sandbox-1"].DesiredState)
 }
 
@@ -1052,18 +1177,41 @@ func TestRootFSExcludedPathsForPodUsesBoundClaimMountPaths(t *testing.T) {
 		},
 	})
 
-	got := rootFSExcludedPathsForPod(pod)
+	got, err := rootFSExcludedPathsForPod(pod, []managerapi.ClaimMount{
+		{SandboxVolumeID: "vol-1", MountPoint: "/workspace/data/"},
+		{SandboxVolumeID: "vol-2", MountPoint: "/workspace/database"},
+		{SandboxVolumeID: "vol-3", MountPoint: "/tmp/sandbox0-volume"},
+	})
+	require.NoError(t, err)
 
-	assert.ElementsMatch(t, []string{"/workspace/data", "/workspace/database", "/tmp/sandbox0-volume", volumeportal.WebhookStateMountPath}, got)
+	assert.ElementsMatch(t, []string{
+		"/tmp", "/procd", "/procd-image",
+		"/workspace/data", "/workspace/database", "/tmp/sandbox0-volume", volumeportal.WebhookStateMountPath,
+	}, got)
 }
 
-func TestRootFSExcludedPathsForPodIgnoresUnboundVolumePortals(t *testing.T) {
+func TestRootFSExcludedPathsForPodIncludesRuntimeMountsButNotUnboundPortals(t *testing.T) {
 	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
 	addRootFSTestVolumePortal(pod, "data", "/workspace/data")
+	addRootFSTestVolumePortal(pod, volumeportal.WebhookStatePortalName, volumeportal.WebhookStateMountPath)
+	pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name: "runtime-config", MountPath: "/config",
+	})
 
-	got := rootFSExcludedPathsForPod(pod)
+	got, err := rootFSExcludedPathsForPod(pod, nil)
+	require.NoError(t, err)
 
-	assert.Empty(t, got)
+	assert.ElementsMatch(t, []string{"/tmp", "/procd", "/procd-image", volumeportal.WebhookStateMountPath, "/config"}, got)
+}
+
+func TestRootFSExcludedPathsForPodRejectsMalformedClaimMounts(t *testing.T) {
+	pod := rootFSTestPod("pod-1", "sandbox-1", "team-1")
+	addRootFSTestVolumePortal(pod, "workspace", "/workspace")
+	pod.Annotations[controller.AnnotationMounts] = "{"
+
+	_, err := rootFSExcludedPathsForPod(pod, nil)
+
+	require.ErrorContains(t, err, "decode "+controller.AnnotationMounts+" annotation")
 }
 
 func rootFSTestPod(name, sandboxID, teamID string) *corev1.Pod {
@@ -1168,7 +1316,7 @@ func addRootFSTestPauseTxn(store *memorySandboxStore, pod *corev1.Pod, phase str
 	if store.lifecycleTxns == nil {
 		store.lifecycleTxns = make(map[string]*sandboxstore.SandboxLifecycleTxn)
 	}
-	store.lifecycleTxns[txnID] = &sandboxstore.SandboxLifecycleTxn{
+	txn := &sandboxstore.SandboxLifecycleTxn{
 		ID:               txnID,
 		SandboxID:        sandboxID,
 		Kind:             sandboxstore.SandboxLifecycleKindPause,
@@ -1178,6 +1326,10 @@ func addRootFSTestPauseTxn(store *memorySandboxStore, pod *corev1.Pod, phase str
 		FromPodNamespace: pod.Namespace,
 		FromPodName:      pod.Name,
 	}
+	if head := store.rootFSHeads[sandboxID]; head != nil {
+		txn.ExpectedHeadID = head.Reference.HeadID
+	}
+	store.lifecycleTxns[txnID] = txn
 	if record := store.records[sandboxID]; record != nil {
 		record.DesiredState = sandboxstore.SandboxDesiredStateActive
 		record.CurrentPodNamespace = pod.Namespace
@@ -1221,81 +1373,6 @@ func metav1ObjectMeta(name, sandboxID, teamID string) metav1.ObjectMeta {
 			controller.AnnotationClaimType:         "hot",
 		},
 	}
-}
-
-func rootFSTestState() *sandboxstore.SandboxRootFSState {
-	return &sandboxstore.SandboxRootFSState{
-		SandboxID:           "sandbox-1",
-		TeamID:              "team-1",
-		RuntimeGeneration:   3,
-		Runtime:             "runc",
-		RuntimeHandler:      "io.containerd.runc.v2",
-		BaseImageRef:        "docker.io/library/busybox:1.36",
-		BaseImageDigest:     "sha256:base",
-		Snapshotter:         "overlayfs",
-		SnapshotParent:      "parent-1",
-		SnapshotParentChain: []string{"parent-1", "parent-0"},
-		DiffDigest:          "sha256:diff",
-		DiffID:              "sha256:diff",
-		DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
-		DiffSize:            123,
-		DiffObjectKey:       "sandbox-rootfs/team-1/sandbox-1/3/sha256/diff.tar",
-	}
-}
-
-type recordingSandboxRootFSObjectDeleter struct {
-	keys []string
-}
-
-func (d *recordingSandboxRootFSObjectDeleter) Delete(key string) error {
-	d.keys = append(d.keys, key)
-	return nil
-}
-
-func rootFSTestLayerState() *sandboxstore.SandboxRootFSState {
-	state := rootFSTestState()
-	state.LayerID = "layer-child"
-	state.ParentLayerID = "layer-parent"
-	state.DiffDigest = "sha256:child"
-	state.DiffObjectKey = "rootfs/child.tar"
-	state.LayerChain = []*sandboxstore.SandboxRootFSLayer{
-		{
-			ID:                  "layer-parent",
-			SourceSandboxID:     "sandbox-1",
-			TeamID:              "team-1",
-			RuntimeGeneration:   2,
-			Runtime:             "runc",
-			RuntimeHandler:      "io.containerd.runc.v2",
-			BaseImageRef:        "docker.io/library/busybox:1.36",
-			BaseImageDigest:     "sha256:base",
-			Snapshotter:         "overlayfs",
-			SnapshotParent:      "parent-1",
-			SnapshotParentChain: []string{"parent-1", "parent-0"},
-			DiffDigest:          "sha256:parent",
-			DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
-			DiffSize:            100,
-			DiffObjectKey:       "rootfs/parent.tar",
-		},
-		{
-			ID:                  "layer-child",
-			ParentLayerID:       "layer-parent",
-			SourceSandboxID:     "sandbox-1",
-			TeamID:              "team-1",
-			RuntimeGeneration:   3,
-			Runtime:             "runc",
-			RuntimeHandler:      "io.containerd.runc.v2",
-			BaseImageRef:        "docker.io/library/busybox:1.36",
-			BaseImageDigest:     "sha256:base",
-			Snapshotter:         "overlayfs",
-			SnapshotParent:      "parent-1",
-			SnapshotParentChain: []string{"parent-1", "parent-0"},
-			DiffDigest:          "sha256:child",
-			DiffMediaType:       "application/vnd.oci.image.layer.v1.tar",
-			DiffSize:            123,
-			DiffObjectKey:       "rootfs/child.tar",
-		},
-	}
-	return state
 }
 
 func parsedTestServer(t *testing.T, rawURL string) (*url.URL, int) {

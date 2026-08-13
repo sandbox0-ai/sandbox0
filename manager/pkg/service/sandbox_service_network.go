@@ -582,12 +582,12 @@ func (s *SandboxService) waitForColdPodNetworkPolicy(ctx context.Context, pod *c
 	if pod == nil {
 		return nil, fmt.Errorf("pod is nil")
 	}
-	if s.networkProvider == nil {
-		return pod, nil
-	}
 	networkPod, err := s.waitForPodNetworkIdentity(ctx, podNetworkIdentityTemplateLabel(pod), pod.Namespace, pod.Name)
 	if err != nil {
 		return pod, fmt.Errorf("wait for pod network identity: %w", err)
+	}
+	if s.networkProvider == nil {
+		return networkPod, nil
 	}
 	if err := s.applyNetworkProviderFromPod(ctx, networkPod, teamID); err != nil {
 		return networkPod, fmt.Errorf("apply network policy: %w", err)

@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/carrierpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialsource"
@@ -31,6 +32,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimagefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
@@ -375,7 +377,7 @@ func main() {
 		WebhookStateVolumeClient:    webhookStateVolumeClient,
 		QuotaStore:                  quotaRepo,
 		SandboxStore:                sandboxStore,
-		RootFSObjectDeleter:         rootFSObjectStore,
+		RootFSObjectStore:           rootFSObjectStore,
 	})
 	sandboxService.SetTemplateImageBuildAvailable(false)
 	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
@@ -469,7 +471,6 @@ func main() {
 			templateStore,
 			sandboxService,
 			imagePublisher,
-			rootFSObjectStore,
 			templatebuild.TemplateBuildWorkerConfig{
 				ClusterID: naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
 			},
@@ -479,6 +480,50 @@ func main() {
 			logger.Warn("Template image build worker disabled", zap.Error(err))
 		} else {
 			sandboxService.SetTemplateImageBuildAvailable(true)
+		}
+	}
+	var templateImageFSWorker *templateimagefs.Worker
+	var sharedCarrierPool *carrierpool.Pool
+	if cfg.SharedCarrierPool.Enabled {
+		baseImageRef := strings.TrimSpace(cfg.SharedCarrierPool.CarrierImageRef)
+		if baseImageRef == "" {
+			baseImageRef = strings.TrimSpace(cfg.ManagerImage)
+		}
+		templateImageFSWorker, err = templateimagefs.NewWorker(
+			templateStore,
+			sandboxStore,
+			k8sClient,
+			nil,
+			sandboxService.CtldAddressForPod,
+			templateimagefs.Config{
+				WorkerID:       "manager/" + naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+				ClusterID:      naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+				BaseImageRef:   baseImageRef,
+				PrimerImageRef: cfg.ManagerImage,
+			},
+			logger,
+		)
+		if err != nil {
+			logger.Warn("Template ImageFS worker disabled", zap.Error(err))
+			templateImageFSWorker = nil
+		}
+		sharedCarrierPool, err = carrierpool.New(k8sClient, carrierpool.Config{
+			Namespace:         cfg.SharedCarrierPool.Namespace,
+			ClusterID:         naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
+			MinIdle:           int(cfg.SharedCarrierPool.MinIdle),
+			MaxIdle:           int(cfg.SharedCarrierPool.MaxIdle),
+			CarrierImageRef:   baseImageRef,
+			WaiterImageRef:    cfg.ManagerImage,
+			ReconcileInterval: cfg.SharedCarrierPool.ReconcileInterval.Duration,
+			ActivationTimeout: cfg.SharedCarrierPool.ActivationTimeout.Duration,
+			Generation:        carrierpool.GenerationForConfig(baseImageRef, cfg.ManagerImage, cfg.ProcdBinImageRef, cfg.SandboxRuntimeClassName),
+		}, logger)
+		if err != nil {
+			logger.Warn("Shared carrier pool disabled", zap.Error(err))
+			sharedCarrierPool = nil
+		}
+		if sharedCarrierPool != nil {
+			sandboxService.SetSharedCarrierPool(sharedCarrierPool)
 		}
 	}
 	go serveTemplateReconcilerQuiesceSignals(
@@ -568,6 +613,8 @@ func main() {
 		sandboxPauseController:         sandboxPauseController,
 		templateReconciler:             templateReconciler,
 		templateBuildWorker:            templateBuildWorker,
+		templateImageFSWorker:          templateImageFSWorker,
+		carrierPool:                    sharedCarrierPool,
 		sandboxLogWorker:               sandboxLogWorker,
 		sandboxStore:                   sandboxStore,
 		rootFSObjectStore:              rootFSObjectStore,
@@ -907,6 +954,23 @@ func (i rootFSObjectStoreInspector) StatRootFSObject(key string) (sandboxstore.R
 		Size:     info.Size,
 		Modified: info.Modified,
 	}, nil
+}
+
+func (i rootFSObjectStoreInspector) ListRootFSObjects(prefix, startAfter string, limit int64) ([]sandboxstore.RootFSObjectInfo, bool, error) {
+	objects, more, _, err := i.store.List(prefix, startAfter, "", "", limit)
+	if err != nil {
+		return nil, false, err
+	}
+	result := make([]sandboxstore.RootFSObjectInfo, 0, len(objects))
+	for _, object := range objects {
+		if object.IsPrefix {
+			continue
+		}
+		result = append(result, sandboxstore.RootFSObjectInfo{
+			Key: object.Key, Size: object.Size, Modified: object.Modified,
+		})
+	}
+	return result, more, nil
 }
 
 func rootFSMaintenanceControllerConfig(cfg *config.ManagerConfig) rootfsmaintenance.Config {

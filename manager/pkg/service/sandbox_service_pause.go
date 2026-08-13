@@ -33,9 +33,38 @@ func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*P
 	}, nil
 }
 
-// PauseSandboxAndWait accepts a pause request. Checkpoint completion is asynchronous.
+// PauseSandboxAndWait accepts a pause request and waits for the durable
+// checkpoint transaction to finish.
 func (s *SandboxService) PauseSandboxAndWait(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	return s.PauseSandbox(ctx, sandboxID)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pauseCtx, cancel := sandboxRestoreContext(ctx)
+	defer cancel()
+
+	response, err := s.PauseSandbox(pauseCtx, sandboxID)
+	if err != nil || response.Paused || s.sandboxStore == nil {
+		return response, err
+	}
+	if err := s.waitForSandboxLifecycleTxnExit(pauseCtx, sandboxID); err != nil {
+		return nil, fmt.Errorf("wait for sandbox pause: %w", err)
+	}
+	sandbox, err := s.GetSandbox(pauseCtx, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("get sandbox after pause: %w", err)
+	}
+	if sandbox == nil || sandbox.Status != managerapi.SandboxStatusPaused || !sandbox.Paused {
+		status := "unknown"
+		if sandbox != nil && strings.TrimSpace(sandbox.Status) != "" {
+			status = sandbox.Status
+		}
+		return nil, fmt.Errorf("sandbox pause did not complete: status is %q", status)
+	}
+	return &PauseSandboxResponse{
+		SandboxID: sandboxID,
+		Paused:    true,
+		Status:    managerapi.SandboxStatusPaused,
+	}, nil
 }
 
 // ResumeSandbox creates or reuses a runtime and restores the latest rootfs checkpoint.

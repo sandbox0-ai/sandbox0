@@ -130,7 +130,7 @@ sandbox_pod_placement:
 	}
 }
 
-func TestBuildPodSpecAppliesConfiguredSandboxRuntimeClass(t *testing.T) {
+func TestBuildPodSpecUsesRootFSRuntimeClass(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 sandbox_runtime_class_name: kata-shared
@@ -140,8 +140,8 @@ sandbox_runtime_class_name: kata-shared
 	template := newTestTemplate()
 
 	spec := BuildPodSpec(template)
-	if spec.RuntimeClassName == nil || *spec.RuntimeClassName != "kata-shared" {
-		t.Fatalf("expected sandbox runtime class kata-shared, got %#v", spec.RuntimeClassName)
+	if spec.RuntimeClassName == nil || *spec.RuntimeClassName != "gvisor-rootfs" {
+		t.Fatalf("expected sandbox runtime class gvisor-rootfs, got %#v", spec.RuntimeClassName)
 	}
 }
 

@@ -3,10 +3,13 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	managerconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/carrierpool"
 	clientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
@@ -245,14 +248,26 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 		}
 	}
 
-	// Reconcile the pool (ReplicaSet)
-	poolRequeueAfter, err := op.poolManager.ReconcilePool(ctx, template)
+	poolTemplate := template
+	poolMode := v1alpha1.SandboxTemplatePoolModeLegacy
+	if templateUsesS0FSCarrier(template) {
+		poolTemplate = template.DeepCopy()
+		poolTemplate.Spec.Pool.MinIdle = 0
+		poolTemplate.Spec.Pool.MaxIdle = 0
+		poolMode = v1alpha1.SandboxTemplatePoolModeShared
+		if compatible, _ := carrierpool.Compatible(template); !compatible {
+			poolMode = v1alpha1.SandboxTemplatePoolModeCold
+		}
+	}
+	// During migration, a zero-sized legacy ReplicaSet drains old idle Pods
+	// without letting the shared cohort create template-owned capacity.
+	poolRequeueAfter, err := op.poolManager.ReconcilePool(ctx, poolTemplate)
 	if err != nil {
 		return fmt.Errorf("reconcile pool: %w", err)
 	}
 
 	// Update status
-	if err := op.updateTemplateStatus(ctx, template); err != nil {
+	if err := op.updateTemplateStatus(ctx, template, poolMode); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
 	requeueAfter := poolRequeueAfter
@@ -264,7 +279,11 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 }
 
 // updateTemplateStatus updates the status of a SandboxTemplate
-func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1.SandboxTemplate) error {
+func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1.SandboxTemplate, poolModes ...v1alpha1.SandboxTemplatePoolMode) error {
+	poolMode := v1alpha1.SandboxTemplatePoolModeLegacy
+	if len(poolModes) > 0 && poolModes[0] != "" {
+		poolMode = poolModes[0]
+	}
 	// Get idle pods
 	idlePods, err := op.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
@@ -333,7 +352,7 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		}
 	}
 
-	if err := op.persistTemplateStatus(ctx, template.Namespace, template.Name, idleCount, activeCount); err != nil {
+	if err := op.persistTemplateStatus(ctx, template.Namespace, template.Name, idleCount, activeCount, poolMode); err != nil {
 		return err
 	}
 
@@ -348,6 +367,7 @@ func (op *Operator) persistTemplateStatus(
 	name string,
 	idleCount int32,
 	activeCount int32,
+	poolMode v1alpha1.SandboxTemplatePoolMode,
 ) error {
 	if op.crdClient == nil {
 		return fmt.Errorf("sandbox template client is not configured")
@@ -365,6 +385,7 @@ func (op *Operator) persistTemplateStatus(
 		preserveConditionTransitionTimes(current.Status.Conditions, conditions)
 		if current.Status.IdleCount == idleCount &&
 			current.Status.ActiveCount == activeCount &&
+			current.Status.PoolMode == poolMode &&
 			templateConditionsEqual(current.Status.Conditions, conditions) {
 			return nil
 		}
@@ -372,9 +393,10 @@ func (op *Operator) persistTemplateStatus(
 		next := current.DeepCopy()
 		next.Status.IdleCount = idleCount
 		next.Status.ActiveCount = activeCount
+		next.Status.PoolMode = poolMode
 		next.Status.Conditions = conditions
 		next.Status.LastUpdateTime = metav1.Now()
-		if _, err := templates.Update(ctx, next, metav1.UpdateOptions{}); err != nil {
+		if _, err := templates.UpdateStatus(ctx, next, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
 		updated = true
@@ -391,6 +413,14 @@ func (op *Operator) persistTemplateStatus(
 		)
 	}
 	return nil
+}
+
+func templateUsesS0FSCarrier(template *v1alpha1.SandboxTemplate) bool {
+	cfg := managerconfig.LoadManagerConfig()
+	return cfg != nil && cfg.SharedCarrierPool.Enabled && template != nil &&
+		template.Status.ImageRevision != nil &&
+		template.Status.ImageRevision.State == v1alpha1.TemplateImageRevisionStateReady &&
+		strings.TrimSpace(template.Status.ImageRevision.ImageFSHeadID) != ""
 }
 
 func preserveConditionTransitionTimes(

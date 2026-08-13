@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
@@ -79,4 +80,37 @@ func (s *Session) DeleteTeam(ctx context.Context, t ContractT, teamID string) (i
 		return status, fmt.Errorf("delete team failed with status %d: %s", status, formatAPIError(body))
 	}
 	return status, nil
+}
+
+// DeleteTeamEventually waits for asynchronous resource cleanup to stop
+// blocking deletion. Only conflict responses are retried; other failures are
+// returned immediately.
+func (s *Session) DeleteTeamEventually(ctx context.Context, t ContractT, teamID string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	retry := time.NewTicker(500 * time.Millisecond)
+	defer retry.Stop()
+
+	var lastErr error
+	for {
+		status, err := s.DeleteTeam(ctx, t, teamID)
+		if err == nil {
+			return nil
+		}
+		if status != http.StatusConflict {
+			return err
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait to delete team %q: %w", teamID, ctx.Err())
+		case <-deadline.C:
+			return fmt.Errorf("delete team %q remained blocked after %s: %w", teamID, timeout, lastErr)
+		case <-retry.C:
+		}
+	}
 }

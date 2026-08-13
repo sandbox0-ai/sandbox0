@@ -56,7 +56,8 @@ type Result struct {
 	Platform       ocispec.Platform
 }
 
-func (r BuildRequest) validate(allowLegacyDiffID bool) error {
+// Validate checks that a build request contains a complete v3 Head export.
+func (r BuildRequest) Validate() error {
 	switch {
 	case strings.TrimSpace(r.BuildID) == "":
 		return fmt.Errorf("build_id is required")
@@ -90,9 +91,6 @@ func (r BuildRequest) validate(allowLegacyDiffID bool) error {
 		}
 		if _, err := digest.Parse(strings.TrimSpace(layer.Digest)); err != nil {
 			return fmt.Errorf("parse rootfs layer %d digest: %w", i, err)
-		}
-		if strings.TrimSpace(layer.DiffID) == "" && allowLegacyDiffID {
-			continue
 		}
 		if _, err := digest.Parse(strings.TrimSpace(layer.DiffID)); err != nil {
 			return fmt.Errorf("parse rootfs layer %d diff_id: %w", i, err)

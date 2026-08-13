@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"go.uber.org/zap"
@@ -116,6 +117,40 @@ sandbox_pod_placement:
 	}
 	if summary.SandboxNodeCount != 1 {
 		t.Fatalf("SandboxNodeCount = %d, want 1", summary.SandboxNodeCount)
+	}
+}
+
+func TestGetClusterSummaryReportsUnreservedSharedCarrierCapacity(t *testing.T) {
+	configPath := writeClusterServiceManagerConfig(t, `
+default_cluster_id: cluster-a
+`)
+	t.Setenv("CONFIG_PATH", configPath)
+
+	ready := newSharedCarrierPod("ready", carrier.StateReady)
+	ready.Spec.NodeName = "node-a"
+	ready.Status.Phase = corev1.PodPending
+	ready.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReadyToStartContainers, Status: corev1.ConditionTrue}}
+	ready.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "carrier-wait", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+	ready.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "procd"}}
+	creating := newSharedCarrierPod("creating", carrier.StateReady)
+	creating.Status.Phase = corev1.PodPending
+	reserved := newSharedCarrierPod("reserved", carrier.StateReserved)
+	reserved.Status.Phase = corev1.PodPending
+
+	svc := &ClusterService{
+		podLister:  newClusterServicePodLister(t, ready, creating, reserved),
+		nodeLister: newClusterServiceNodeLister(t, newClusterServiceNode("node-a", nil)),
+		logger:     zap.NewNop(),
+	}
+	summary, err := svc.GetClusterSummary(context.Background())
+	if err != nil {
+		t.Fatalf("GetClusterSummary() error = %v", err)
+	}
+	if summary.SharedCarrierReadyCount != 1 || summary.SharedCarrierCreatingCount != 1 {
+		t.Fatalf("shared carrier counts = (%d,%d), want (1,1)", summary.SharedCarrierReadyCount, summary.SharedCarrierCreatingCount)
+	}
+	if summary.TotalPodCount != 2 {
+		t.Fatalf("TotalPodCount = %d, want 2", summary.TotalPodCount)
 	}
 }
 
@@ -292,6 +327,14 @@ func newReservedClusterServicePod(namespace, name, templateID string, phase core
 		sandboxpod.AnnotationHotClaimReservationState: sandboxpod.HotClaimReservationStateInitializing,
 	}
 	return pod
+}
+
+func newSharedCarrierPod(name, state string) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "sandbox0", Name: name,
+		Labels:      map[string]string{carrier.LabelPool: "shared", carrier.LabelGeneration: "g"},
+		Annotations: map[string]string{carrier.AnnotationState: state},
+	}}
 }
 
 func newClusterServiceNode(name string, labels map[string]string) *corev1.Node {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfslease"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore/requestmetering"
 	"go.uber.org/zap"
 )
@@ -34,6 +35,7 @@ func startManagerObjectStoreRequestMetering(
 		requestmetering.ProducerName(requestmetering.ProducerManager, instance),
 		logger,
 	)
+	aggregator.SetRootFSTeamResolver(rootfslease.NewRepository(repo.Pool()))
 	go aggregator.Run(ctx, requestmetering.DefaultFlushInterval)
 	return aggregator
 }

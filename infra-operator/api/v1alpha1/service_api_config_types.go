@@ -929,11 +929,18 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="16Gi"
 	SandboxMaxMemory string `json:"sandboxMaxMemory,omitempty"`
+	// SandboxRuntimeClassName is fixed to the operator-managed gvisor-rootfs RuntimeClass.
 	// +optional
+	// +kubebuilder:default=gvisor-rootfs
+	// +kubebuilder:validation:Enum=gvisor-rootfs
 	SandboxRuntimeClassName string `json:"sandboxRuntimeClassName,omitempty"`
 	// ProcdBinImageRef overrides the OCI image used for the procd binary image volume.
 	// +optional
 	ProcdBinImageRef string `json:"procdBinImageRef,omitempty"`
+	// SharedCarrierPool configures the one platform-owned warm pool in each data-plane cluster.
+	// +optional
+	// +kubebuilder:default={}
+	SharedCarrierPool SharedCarrierPoolConfig `json:"sharedCarrierPool,omitempty"`
 	// DefaultTeamQuotas declaratively reconciles region-wide quota defaults.
 	// Team-specific database policies override these defaults.
 	// +optional
@@ -987,6 +994,32 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	Autoscaler AutoscalerConfig `json:"autoscaler,omitempty"`
+}
+
+// SharedCarrierPoolConfig defines the standard cluster carrier shape and capacity.
+type SharedCarrierPoolConfig struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// Namespace defaults to the Sandbox0 data-plane namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	MinIdle int32 `json:"minIdle,omitempty"`
+	// +optional
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=0
+	MaxIdle int32 `json:"maxIdle,omitempty"`
+	// CarrierImageRef overrides the small canonical base used by S0FS carrier markers.
+	// +optional
+	CarrierImageRef string `json:"carrierImageRef,omitempty"`
+	// +optional
+	// +kubebuilder:default="2s"
+	ReconcileInterval metav1.Duration `json:"reconcileInterval,omitempty"`
+	// +optional
+	// +kubebuilder:default="15s"
+	ActivationTimeout metav1.Duration `json:"activationTimeout,omitempty"`
 }
 
 // TeamQuotaLimitConfig configures a region default for teams without an

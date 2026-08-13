@@ -145,21 +145,21 @@ func TestWrapRootFSObjectStoreEncryptionReadsLogicalRanges(t *testing.T) {
 		t.Fatalf("rootfs object range = %q, want %q", rangeGot, rangeWant)
 	}
 
-	const legacyObjectKey = "sandbox-rootfs/team/sandbox/legacy-layer.tar"
-	if err := rawStore.Put(legacyObjectKey, bytes.NewReader(want)); err != nil {
-		t.Fatalf("put legacy rootfs object: %v", err)
+	const plaintextObjectKey = "sandbox-rootfs/cow-v3/plaintext-transition-object"
+	if err := rawStore.Put(plaintextObjectKey, bytes.NewReader(want)); err != nil {
+		t.Fatalf("put plaintext transition object: %v", err)
 	}
-	legacyReader, err := managerStore.Get(legacyObjectKey, 0, -1)
+	plaintextReader, err := managerStore.Get(plaintextObjectKey, 0, -1)
 	if err != nil {
-		t.Fatalf("get legacy rootfs object: %v", err)
+		t.Fatalf("get plaintext transition object: %v", err)
 	}
-	defer legacyReader.Close()
-	legacyGot, err := io.ReadAll(legacyReader)
+	defer plaintextReader.Close()
+	plaintextGot, err := io.ReadAll(plaintextReader)
 	if err != nil {
-		t.Fatalf("read legacy rootfs object: %v", err)
+		t.Fatalf("read plaintext transition object: %v", err)
 	}
-	if !bytes.Equal(legacyGot, want) {
-		t.Fatalf("legacy rootfs object = %q, want %q", legacyGot, want)
+	if !bytes.Equal(plaintextGot, want) {
+		t.Fatalf("plaintext transition object = %q, want %q", plaintextGot, want)
 	}
 }
 

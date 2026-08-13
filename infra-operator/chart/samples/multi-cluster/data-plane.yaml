@@ -146,4 +146,4 @@ spec:
       enabled: true
       replicas: 1
       # config:
-      #   sandboxRuntimeClassName: kata
+      #   sandboxRuntimeClassName: gvisor-rootfs

@@ -2,14 +2,7 @@ package rootfs
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -17,13 +10,8 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
-	crootfs "github.com/containerd/containerd/v2/pkg/rootfs"
-	"github.com/containerd/continuity/fs"
-	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -31,15 +19,10 @@ import (
 )
 
 const (
-	defaultCRIEndpoint            = "/host-run/containerd/containerd.sock"
-	defaultContainerdEndpoint     = "/host-run/containerd/containerd.sock"
-	defaultContainerdRoot         = "/host-run/containerd"
-	defaultContainerdHostRoot     = "/run/containerd"
-	defaultContainerdDataRoot     = "/host-var-lib/containerd"
-	defaultContainerdHostDataRoot = "/var/lib/containerd"
-	defaultRootFSCacheDir         = "/var/lib/sandbox0/ctld/rootfs"
-	defaultNamespace              = "k8s.io"
-	defaultDialTimeout            = 10 * time.Second
+	defaultCRIEndpoint        = "/host-run/containerd/containerd.sock"
+	defaultContainerdEndpoint = "/host-run/containerd/containerd.sock"
+	defaultNamespace          = "k8s.io"
+	defaultDialTimeout        = 10 * time.Second
 )
 
 type criRuntimeService interface {
@@ -48,45 +31,43 @@ type criRuntimeService interface {
 	PodSandboxStats(ctx context.Context, in *runtimeapi.PodSandboxStatsRequest, opts ...grpc.CallOption) (*runtimeapi.PodSandboxStatsResponse, error)
 }
 
+type criImageService interface {
+	ImageStatus(ctx context.Context, in *runtimeapi.ImageStatusRequest, opts ...grpc.CallOption) (*runtimeapi.ImageStatusResponse, error)
+}
+
 type ContainerdRuntimeConfig struct {
 	CRIEndpoint            string
 	ContainerdEndpoint     string
-	ContainerdRoot         string
-	ContainerdHostRoot     string
-	ContainerdDataRoot     string
-	ContainerdHostDataRoot string
-	RootFSCacheDir         string
 	Namespace              string
 	DialTimeout            time.Duration
 	CRIClient              criRuntimeService
+	CRIImageClient         criImageService
 	CRIDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
 	ContainerdClient       containerdClient
-	Observer               *Observer
+	ContainerdDataRoot     string
+	ContainerdHostDataRoot string
 }
 
 type ContainerdRuntime struct {
-	criEndpoint            string
-	containerdEndpoint     string
-	containerdRoot         string
-	containerdHostRoot     string
-	containerdDataRoot     string
-	containerdHostDataRoot string
-	rootFSCacheDir         string
-	namespace              string
-	dialTimeout            time.Duration
-	criClient              criRuntimeService
-	criDialContext         func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
-	criMu                  sync.Mutex
-	criConn                *grpc.ClientConn
-	connectedCRIClient     criRuntimeService
-	containerdClient       containerdClient
-	observer               *Observer
+	criEndpoint             string
+	containerdEndpoint      string
+	containerdDataRoot      string
+	containerdHostDataRoot  string
+	namespace               string
+	dialTimeout             time.Duration
+	criClient               criRuntimeService
+	criImageClient          criImageService
+	criDialContext          func(ctx context.Context, endpoint string) (*grpc.ClientConn, error)
+	criMu                   sync.Mutex
+	criConn                 *grpc.ClientConn
+	connectedCRIClient      criRuntimeService
+	connectedCRIImageClient criImageService
+	containerdClient        containerdClient
 }
 
 type containerdClient interface {
 	LoadContainer(ctx context.Context, id string) (containerd.Container, error)
 	SnapshotService(snapshotterName string) snapshots.Snapshotter
-	DiffService() containerd.DiffService
 	ContentStore() content.Store
 	ImageService() images.Store
 	Close() error
@@ -101,26 +82,6 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 	if containerdEndpoint == "" {
 		containerdEndpoint = defaultContainerdEndpoint
 	}
-	containerdRoot := strings.TrimSpace(cfg.ContainerdRoot)
-	if containerdRoot == "" {
-		containerdRoot = defaultContainerdRoot
-	}
-	containerdHostRoot := strings.TrimSpace(cfg.ContainerdHostRoot)
-	if containerdHostRoot == "" {
-		containerdHostRoot = defaultContainerdHostRoot
-	}
-	containerdDataRoot := strings.TrimSpace(cfg.ContainerdDataRoot)
-	if containerdDataRoot == "" {
-		containerdDataRoot = defaultContainerdDataRoot
-	}
-	containerdHostDataRoot := strings.TrimSpace(cfg.ContainerdHostDataRoot)
-	if containerdHostDataRoot == "" {
-		containerdHostDataRoot = defaultContainerdHostDataRoot
-	}
-	rootFSCacheDir := strings.TrimSpace(cfg.RootFSCacheDir)
-	if rootFSCacheDir == "" {
-		rootFSCacheDir = defaultRootFSCacheDir
-	}
 	namespace := strings.TrimSpace(cfg.Namespace)
 	if namespace == "" {
 		namespace = defaultNamespace
@@ -129,20 +90,21 @@ func NewContainerdRuntime(cfg ContainerdRuntimeConfig) *ContainerdRuntime {
 	if timeout <= 0 {
 		timeout = defaultDialTimeout
 	}
+	imageClient := cfg.CRIImageClient
+	if imageClient == nil {
+		imageClient, _ = cfg.CRIClient.(criImageService)
+	}
 	return &ContainerdRuntime{
 		criEndpoint:            criEndpoint,
 		containerdEndpoint:     containerdEndpoint,
-		containerdRoot:         containerdRoot,
-		containerdHostRoot:     containerdHostRoot,
-		containerdDataRoot:     containerdDataRoot,
-		containerdHostDataRoot: containerdHostDataRoot,
-		rootFSCacheDir:         rootFSCacheDir,
+		containerdDataRoot:     strings.TrimSpace(cfg.ContainerdDataRoot),
+		containerdHostDataRoot: strings.TrimSpace(cfg.ContainerdHostDataRoot),
 		namespace:              namespace,
 		dialTimeout:            timeout,
 		criClient:              cfg.CRIClient,
+		criImageClient:         imageClient,
 		criDialContext:         cfg.CRIDialContext,
 		containerdClient:       cfg.ContainerdClient,
-		observer:               cfg.Observer,
 	}
 }
 
@@ -156,291 +118,7 @@ func (r *ContainerdRuntime) Inspect(ctx context.Context, target ctldapi.RootFSCo
 		return ctldapi.RootFSInfo{}, err
 	}
 	defer closeClient()
-
-	info, err := inspectContainer(ctx, client, r.containerdRoot, r.namespace, target, containerID, podUID)
-	if err != nil {
-		return ctldapi.RootFSInfo{}, err
-	}
-	return info, nil
-}
-
-func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (result ctldapi.RootFSDiffDescriptor, resultReader io.ReadSeekCloser, resultErr error) {
-	started := time.Now()
-	defer func() {
-		r.observer.ObservePhase("save", "diff_create", started, resultErr)
-	}()
-	if strings.TrimSpace(info.SnapshotKey) == "" || strings.TrimSpace(info.Snapshotter) == "" {
-		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: snapshot key and snapshotter are required", ErrBadRequest)
-	}
-	client, closeClient, err := r.client(ctx)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-
-	if desc, reader, ok, fastErr := r.createOverlayUpperDiff(ctx, client, info, excludedPaths, portalPaths); ok && fastErr == nil {
-		closeClient()
-		return desc, reader, nil
-	} else if ok && fastErr != nil {
-		desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
-		if err != nil {
-			closeClient()
-			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("overlayfs fast diff: %v; containerd diff: %w", fastErr, err)
-		}
-		rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
-		if err != nil {
-			closeClient()
-			return ctldapi.RootFSDiffDescriptor{}, nil, err
-		}
-		if !needsClient {
-			closeClient()
-			return rootDesc, reader, nil
-		}
-		return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
-	}
-
-	desc, err := crootfs.CreateDiff(ctx, info.SnapshotKey, client.SnapshotService(info.Snapshotter), client.DiffService())
-	if err != nil {
-		closeClient()
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-	rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
-	if err != nil {
-		closeClient()
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-	if !needsClient {
-		closeClient()
-		return rootDesc, reader, nil
-	}
-	return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
-}
-
-func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (result ctldapi.RootFSDiffDescriptor, resultReader io.ReadSeekCloser, resultErr error) {
-	started := time.Now()
-	defer func() {
-		r.observer.ObservePhase("save", "incremental_diff_create", started, resultErr)
-	}()
-	if strings.TrimSpace(baselineLayerID) == "" {
-		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
-	}
-	client, closeClient, err := r.client(ctx)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-	defer closeClient()
-
-	upperdir, err := r.activeOverlayUpperdir(ctx, client, info)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, err
-	}
-	baselineDir := r.rootFSBaselinePath(info, baselineLayerID)
-	if st, err := os.Stat(baselineDir); err != nil {
-		if os.IsNotExist(err) {
-			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline %s is not captured", ErrNotFound, baselineLayerID)
-		}
-		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("inspect rootfs baseline: %w", err)
-	} else if !st.IsDir() {
-		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline path is not a directory", ErrConflict)
-	}
-	return writeOverlayUpperDiffFromBaseline(ctx, baselineDir, upperdir, excludedPaths, portalPaths)
-}
-
-func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (result ctldapi.RootFSDiffDescriptor, resultErr error) {
-	started := time.Now()
-	defer func() {
-		r.observer.ObservePhase("apply", "total", started, resultErr)
-	}()
-	if strings.TrimSpace(info.ContainerID) == "" {
-		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("%w: container id is required", ErrBadRequest)
-	}
-	client, closeClient, err := r.client(ctx)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, err
-	}
-	defer closeClient()
-
-	phaseStarted := time.Now()
-	liveRootFS, err := liveRootFSPath(r.containerdRoot, r.containerdHostRoot, r.namespace, info)
-	r.observer.ObservePhase("apply", "live_rootfs_lookup", phaseStarted, err)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, err
-	}
-	phaseStarted = time.Now()
-	ingestedDesc, stats, err := ingestRootFSDiffForApply(ctx, client.ContentStore(), desc, reader, excludedPaths, portalPaths)
-	r.observer.ObservePhase("apply", "filter_containerd_ingest", phaseStarted, err)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("ingest rootfs diff: %w", err)
-	}
-	r.observer.ObservePhaseDuration("apply", "tar_filter", stats.FilterDuration, nil)
-	r.observer.ObservePhaseDuration("apply", "containerd_ingest", stats.IngestDuration, nil)
-	r.observer.ObserveBytes("apply", "portal", stats.PortalBytes)
-	desc = ingestedDesc
-
-	ociDesc, err := descriptorToOCI(desc)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, err
-	}
-	phaseStarted = time.Now()
-	applied, err := client.DiffService().Apply(ctx, ociDesc, []mount.Mount{{
-		Type:    "bind",
-		Source:  liveRootFS,
-		Options: []string{"rbind", "rw"},
-	}})
-	r.observer.ObservePhase("apply", "diff_apply", phaseStarted, err)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, err
-	}
-	return descriptorFromOCI(applied), nil
-}
-
-func ingestRootFSDiffForApply(ctx context.Context, store content.Store, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, rootFSDiffFilterStats, error) {
-	if !shouldFilterRootFSDiffTar(desc) {
-		ociDesc, err := descriptorToOCI(desc)
-		if err != nil {
-			return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, err
-		}
-		ref := rootFSApplyIngestRef(desc, excludedPaths, portalPaths)
-		started := time.Now()
-		if err := content.WriteBlob(ctx, store, ref, reader, ociDesc); err != nil {
-			return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, fmt.Errorf("write rootfs diff into containerd content store: %w", err)
-		}
-		return desc, rootFSDiffFilterStats{InputBytes: desc.Size, OutputBytes: desc.Size, IngestDuration: time.Since(started)}, nil
-	}
-
-	setupStarted := time.Now()
-	writer, err := content.OpenWriter(ctx, store, content.WithRef(rootFSApplyIngestRef(desc, excludedPaths, portalPaths)))
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, fmt.Errorf("open containerd rootfs content writer: %w", err)
-	}
-	defer writer.Close()
-	if err := writer.Truncate(0); err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, fmt.Errorf("reset containerd rootfs content writer: %w", err)
-	}
-	setupDuration := time.Since(setupStarted)
-
-	filteredDesc, stats, err := writeRootFSDiffTarForApply(writer, desc, reader, excludedPaths, portalPaths)
-	stats.IngestDuration += setupDuration
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, stats, fmt.Errorf("filter rootfs diff into containerd content store: %w", err)
-	}
-	filteredDigest, err := digest.Parse(filteredDesc.Digest)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, stats, fmt.Errorf("parse filtered rootfs digest: %w", err)
-	}
-	commitStarted := time.Now()
-	commitErr := writer.Commit(ctx, filteredDesc.Size, filteredDigest)
-	stats.IngestDuration += time.Since(commitStarted)
-	if commitErr != nil && !errdefs.IsAlreadyExists(commitErr) {
-		return ctldapi.RootFSDiffDescriptor{}, stats, fmt.Errorf("commit rootfs diff to containerd content store: %w", commitErr)
-	}
-	return filteredDesc, stats, nil
-}
-
-func rootFSApplyIngestRef(desc ctldapi.RootFSDiffDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) string {
-	portalPaths = filterRootFSPortalPaths(portalPaths, excludedPaths)
-	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
-	paths := append([]string(nil), filter.excluded...)
-	sort.Strings(paths)
-	sum := sha256.Sum256([]byte(strings.TrimSpace(desc.Digest) + "\x00" + strings.Join(paths, "\x00")))
-	return "sandbox0-rootfs-apply-" + hex.EncodeToString(sum[:])
-}
-
-func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (resultErr error) {
-	started := time.Now()
-	defer func() {
-		r.observer.ObservePhase("apply", "baseline_capture", started, resultErr)
-	}()
-	if strings.TrimSpace(baselineLayerID) == "" {
-		return fmt.Errorf("%w: baseline layer id is required", ErrBadRequest)
-	}
-	client, closeClient, err := r.client(ctx)
-	if err != nil {
-		return err
-	}
-	defer closeClient()
-
-	upperdir, err := r.activeOverlayUpperdir(ctx, client, info)
-	if err != nil {
-		return err
-	}
-	target := r.rootFSBaselinePath(info, baselineLayerID)
-	parent := filepath.Dir(target)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return fmt.Errorf("create rootfs baseline parent: %w", err)
-	}
-	tmp, err := os.MkdirTemp(parent, ".baseline-*")
-	if err != nil {
-		return fmt.Errorf("create rootfs baseline temp dir: %w", err)
-	}
-	removeTmp := true
-	defer func() {
-		if removeTmp {
-			_ = os.RemoveAll(tmp)
-		}
-	}()
-	phaseStarted := time.Now()
-	if err := fs.CopyDir(tmp, upperdir); err != nil {
-		r.observer.ObservePhase("apply", "baseline_copy", phaseStarted, err)
-		return fmt.Errorf("copy rootfs baseline: %w", err)
-	}
-	r.observer.ObservePhase("apply", "baseline_copy", phaseStarted, nil)
-	phaseStarted = time.Now()
-	if err := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths)).RemoveAll(tmp); err != nil {
-		r.observer.ObservePhase("apply", "baseline_filter", phaseStarted, err)
-		return fmt.Errorf("filter rootfs baseline: %w", err)
-	}
-	r.observer.ObservePhase("apply", "baseline_filter", phaseStarted, nil)
-	if err := os.RemoveAll(target); err != nil {
-		return fmt.Errorf("replace rootfs baseline: %w", err)
-	}
-	if err := os.Rename(tmp, target); err != nil {
-		return fmt.Errorf("publish rootfs baseline: %w", err)
-	}
-	removeTmp = false
-	return nil
-}
-
-func rootFSDiffReaderFromContent(ctx context.Context, client containerdClient, desc ocispec.Descriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
-	rootDesc := descriptorFromOCI(desc)
-	diffID, err := images.GetDiffID(ctx, client.ContentStore(), desc)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, fmt.Errorf("resolve rootfs diff id: %w", err)
-	}
-	rootDesc.DiffID = diffID.String()
-	reader, err := content.BlobReadSeeker(ctx, client.ContentStore(), desc)
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, err
-	}
-	if !shouldFilterRootFSDiffTar(rootDesc) {
-		return rootDesc, reader, true, nil
-	}
-
-	filteredDesc, filteredReader, err := filterRootFSDiffTarForSave(rootDesc, reader, excludedPaths, portalPaths)
-	closeErr := reader.Close()
-	if err != nil {
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, err
-	}
-	if closeErr != nil {
-		_ = filteredReader.Close()
-		return ctldapi.RootFSDiffDescriptor{}, nil, false, closeErr
-	}
-	return filteredDesc, filteredReader, false, nil
-}
-
-func (r *ContainerdRuntime) rootFSBaselinePath(info ctldapi.RootFSInfo, baselineLayerID string) string {
-	root := defaultRootFSCacheDir
-	if r != nil && strings.TrimSpace(r.rootFSCacheDir) != "" {
-		root = r.rootFSCacheDir
-	}
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		info.PodNamespace,
-		info.PodName,
-		info.PodUID,
-		info.ContainerName,
-		info.ContainerID,
-		strings.TrimSpace(baselineLayerID),
-	}, "\x00")))
-	return filepath.Join(root, "baselines", hex.EncodeToString(sum[:]))
+	return inspectContainer(ctx, client, r.namespace, target, containerID, podUID)
 }
 
 func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctldapi.RootFSContainerRef) (string, string, error) {
@@ -455,9 +133,7 @@ func (r *ContainerdRuntime) resolveContainerID(ctx context.Context, target ctlda
 	} else {
 		filter.State = &runtimeapi.ContainerStateValue{State: runtimeapi.ContainerState_CONTAINER_RUNNING}
 	}
-	resp, err := client.ListContainers(ctx, &runtimeapi.ListContainersRequest{
-		Filter: filter,
-	})
+	resp, err := client.ListContainers(ctx, &runtimeapi.ListContainersRequest{Filter: filter})
 	if err != nil {
 		return "", "", fmt.Errorf("list cri containers: %w", err)
 	}
@@ -496,18 +172,14 @@ func normalizeContainerID(containerID string) string {
 	return containerID
 }
 
-// ListPodSandboxes returns ready node-local CRI sandboxes for isolated stats
-// collection. Callers match this cheap metadata snapshot against claimed pods
-// before requesting individual sandbox stats.
+// ListPodSandboxes returns ready node-local CRI sandboxes for isolated stats collection.
 func (r *ContainerdRuntime) ListPodSandboxes(ctx context.Context) ([]*runtimeapi.PodSandbox, error) {
 	client, err := r.runtimeClient(ctx)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := client.ListPodSandbox(ctx, &runtimeapi.ListPodSandboxRequest{
-		Filter: &runtimeapi.PodSandboxFilter{
-			State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY},
-		},
+		Filter: &runtimeapi.PodSandboxFilter{State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY}},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list CRI pod sandboxes: %w", err)
@@ -531,8 +203,7 @@ func (r *ContainerdRuntime) PodSandboxStats(ctx context.Context, sandboxID strin
 	return resp.GetStats(), nil
 }
 
-// Close releases the cached CRI connection. Injected CRI clients are not owned
-// by ContainerdRuntime and are left open.
+// Close releases the cached CRI connection. Injected clients are not owned.
 func (r *ContainerdRuntime) Close() error {
 	if r == nil {
 		return nil
@@ -541,6 +212,7 @@ func (r *ContainerdRuntime) Close() error {
 	conn := r.criConn
 	r.criConn = nil
 	r.connectedCRIClient = nil
+	r.connectedCRIImageClient = nil
 	r.criMu.Unlock()
 	if conn == nil {
 		return nil
@@ -560,14 +232,8 @@ func (r *ContainerdRuntime) runtimeClient(ctx context.Context) (criRuntimeServic
 	if r.connectedCRIClient != nil {
 		return r.connectedCRIClient, nil
 	}
-	endpoint := defaultCRIEndpoint
-	if strings.TrimSpace(r.criEndpoint) != "" {
-		endpoint = r.criEndpoint
-	}
-	timeout := defaultDialTimeout
-	if r.dialTimeout > 0 {
-		timeout = r.dialTimeout
-	}
+	endpoint := r.criEndpoint
+	timeout := r.dialTimeout
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	dialer := dialCRIEndpoint
@@ -580,7 +246,29 @@ func (r *ContainerdRuntime) runtimeClient(ctx context.Context) (criRuntimeServic
 	}
 	r.criConn = conn
 	r.connectedCRIClient = runtimeapi.NewRuntimeServiceClient(conn)
+	r.connectedCRIImageClient = runtimeapi.NewImageServiceClient(conn)
 	return r.connectedCRIClient, nil
+}
+
+func (r *ContainerdRuntime) imageClient(ctx context.Context) (criImageService, error) {
+	if r != nil && r.criImageClient != nil {
+		return r.criImageClient, nil
+	}
+	if r == nil {
+		return nil, fmt.Errorf("containerd runtime is nil")
+	}
+	if r.criClient != nil {
+		return nil, fmt.Errorf("cri image service client is not configured")
+	}
+	if _, err := r.runtimeClient(ctx); err != nil {
+		return nil, err
+	}
+	r.criMu.Lock()
+	defer r.criMu.Unlock()
+	if r.connectedCRIImageClient == nil {
+		return nil, fmt.Errorf("cri image service client is not connected")
+	}
+	return r.connectedCRIImageClient, nil
 }
 
 func (r *ContainerdRuntime) client(ctx context.Context) (containerdClient, func(), error) {
@@ -591,32 +279,22 @@ func (r *ContainerdRuntime) client(ctx context.Context) (containerdClient, func(
 	namespace := defaultNamespace
 	timeout := defaultDialTimeout
 	if r != nil {
-		if strings.TrimSpace(r.containerdEndpoint) != "" {
-			endpoint = r.containerdEndpoint
-		}
-		if strings.TrimSpace(r.namespace) != "" {
-			namespace = r.namespace
-		}
-		if r.dialTimeout > 0 {
-			timeout = r.dialTimeout
-		}
+		endpoint = r.containerdEndpoint
+		namespace = r.namespace
+		timeout = r.dialTimeout
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	client, err := containerd.New(endpoint, containerd.WithDefaultNamespace(namespace), containerd.WithTimeout(timeout))
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect containerd endpoint %s: %w", endpoint, err)
 	}
-	select {
-	case <-dialCtx.Done():
+	if err := ctx.Err(); err != nil {
 		_ = client.Close()
-		return nil, nil, dialCtx.Err()
-	default:
+		return nil, nil, err
 	}
 	return client, func() { _ = client.Close() }, nil
 }
 
-func inspectContainer(ctx context.Context, client containerdClient, containerdRoot, namespace string, target ctldapi.RootFSContainerRef, containerID, podUID string) (ctldapi.RootFSInfo, error) {
+func inspectContainer(ctx context.Context, client containerdClient, namespace string, target ctldapi.RootFSContainerRef, containerID, podUID string) (ctldapi.RootFSInfo, error) {
 	container, err := client.LoadContainer(ctx, containerID)
 	if err != nil {
 		return ctldapi.RootFSInfo{}, fmt.Errorf("load container %s: %w", containerID, err)
@@ -630,18 +308,12 @@ func inspectContainer(ctx context.Context, client containerdClient, containerdRo
 		containerdID = containerID
 	}
 	info := ctldapi.RootFSInfo{
-		ContainerID:    containerdID,
-		ContainerName:  target.ContainerName,
-		PodNamespace:   target.Namespace,
-		PodName:        target.PodName,
-		PodUID:         firstNonEmpty(target.PodUID, podUID),
-		RuntimeHandler: containerInfo.Runtime.Name,
-		Snapshotter:    containerInfo.Snapshotter,
-		SnapshotKey:    containerInfo.SnapshotKey,
-		BaseImageRef:   containerInfo.Image,
+		ContainerID: containerdID, ContainerName: target.ContainerName,
+		PodNamespace: target.Namespace, PodName: target.PodName, PodUID: firstNonEmpty(target.PodUID, podUID),
+		RuntimeHandler: containerInfo.Runtime.Name, Snapshotter: containerInfo.Snapshotter,
+		SnapshotKey: containerInfo.SnapshotKey, BaseImageRef: containerInfo.Image,
 	}
 	info.Runtime = runtimeFamily(containerInfo.Runtime.Name)
-
 	if imageDigest, err := imageDigest(ctx, client, containerInfo.Image); err == nil {
 		info.BaseImageDigest = imageDigest
 	}
@@ -654,84 +326,8 @@ func inspectContainer(ctx context.Context, client containerdClient, containerdRo
 	}
 	info.SnapshotParent = parent
 	info.SnapshotParentChain = chain
+	_ = namespace
 	return info, nil
-}
-
-func liveRootFSPath(containerdRoot, containerdHostRoot, namespace string, info ctldapi.RootFSInfo) (string, error) {
-	taskRoot := filepath.Join(containerdRoot, "io.containerd.runtime.v2.task", namespace)
-	hostTaskRoot := filepath.Join(containerdHostRoot, "io.containerd.runtime.v2.task", namespace)
-	if id := strings.TrimSpace(info.ContainerID); id != "" {
-		liveRootFS := filepath.Join(taskRoot, id, "rootfs")
-		if st, err := os.Stat(liveRootFS); err == nil && st.IsDir() {
-			return filepath.Join(hostTaskRoot, id, "rootfs"), nil
-		} else if err != nil && !os.IsNotExist(err) {
-			return "", fmt.Errorf("inspect live rootfs %s: %w", liveRootFS, err)
-		}
-	}
-
-	liveRootFS, err := findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot, info)
-	if err == nil {
-		return liveRootFS, nil
-	}
-	return "", err
-}
-
-func findLiveRootFSByTaskAnnotations(taskRoot, hostTaskRoot string, info ctldapi.RootFSInfo) (string, error) {
-	entries, err := os.ReadDir(taskRoot)
-	if err != nil {
-		return "", fmt.Errorf("scan containerd task root %s: %w", taskRoot, err)
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		taskDir := filepath.Join(taskRoot, entry.Name())
-		raw, err := os.ReadFile(filepath.Join(taskDir, "config.json"))
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return "", fmt.Errorf("read task config %s: %w", taskDir, err)
-		}
-		var spec struct {
-			Annotations map[string]string `json:"annotations"`
-		}
-		if err := json.Unmarshal(raw, &spec); err != nil {
-			return "", fmt.Errorf("parse task config %s: %w", taskDir, err)
-		}
-		if !rootFSTaskMatches(spec.Annotations, info) {
-			continue
-		}
-		liveRootFS := filepath.Join(taskDir, "rootfs")
-		if st, err := os.Stat(liveRootFS); err == nil && st.IsDir() {
-			return filepath.Join(hostTaskRoot, entry.Name(), "rootfs"), nil
-		} else if err != nil && !os.IsNotExist(err) {
-			return "", fmt.Errorf("inspect live rootfs %s: %w", liveRootFS, err)
-		}
-	}
-	return "", fmt.Errorf("%w: live rootfs for container %s in pod %s/%s", ErrNotFound, info.ContainerName, info.PodNamespace, info.PodName)
-}
-
-func rootFSTaskMatches(annotations map[string]string, info ctldapi.RootFSInfo) bool {
-	if annotations == nil {
-		return false
-	}
-	if annotations["io.kubernetes.cri.container-type"] != "container" {
-		return false
-	}
-	if annotations["io.kubernetes.cri.container-name"] != info.ContainerName {
-		return false
-	}
-	if annotations["io.kubernetes.cri.sandbox-namespace"] != info.PodNamespace {
-		return false
-	}
-	if annotations["io.kubernetes.cri.sandbox-name"] != info.PodName {
-		return false
-	}
-	if info.PodUID != "" && annotations["io.kubernetes.cri.sandbox-uid"] != info.PodUID {
-		return false
-	}
-	return true
 }
 
 func snapshotParentChain(ctx context.Context, snapshotter snapshots.Snapshotter, snapshotKey string) (string, []string, error) {
@@ -764,31 +360,10 @@ func imageDigest(ctx context.Context, client containerdClient, imageRef string) 
 	if err != nil {
 		return "", err
 	}
-	d := image.Target.Digest
-	if d == "" {
+	if image.Target.Digest == "" {
 		return "", nil
 	}
-	return d.String(), nil
-}
-
-func descriptorFromOCI(desc ocispec.Descriptor) ctldapi.RootFSDiffDescriptor {
-	return ctldapi.RootFSDiffDescriptor{
-		MediaType: desc.MediaType,
-		Digest:    desc.Digest.String(),
-		Size:      desc.Size,
-	}
-}
-
-func descriptorToOCI(desc ctldapi.RootFSDiffDescriptor) (ocispec.Descriptor, error) {
-	d, err := digest.Parse(strings.TrimSpace(desc.Digest))
-	if err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("%w: invalid descriptor digest: %v", ErrBadRequest, err)
-	}
-	return ocispec.Descriptor{
-		MediaType: strings.TrimSpace(desc.MediaType),
-		Digest:    d,
-		Size:      desc.Size,
-	}, nil
+	return image.Target.Digest.String(), nil
 }
 
 func runtimeFamily(handler string) string {
@@ -806,9 +381,9 @@ func runtimeFamily(handler string) string {
 }
 
 func digestFromReference(ref string) string {
-	if idx := strings.LastIndex(ref, "@"); idx >= 0 && idx+1 < len(ref) {
-		if d, err := digest.Parse(ref[idx+1:]); err == nil {
-			return d.String()
+	if position := strings.LastIndex(ref, "@"); position >= 0 && position+1 < len(ref) {
+		if value, err := digest.Parse(ref[position+1:]); err == nil {
+			return value.String()
 		}
 	}
 	return ""
@@ -839,17 +414,4 @@ func normalizeCRIEndpoint(endpoint string) string {
 		return "unix://" + endpoint
 	}
 	return endpoint
-}
-
-type closeReadSeekWithFunc struct {
-	io.ReadSeekCloser
-	closeFunc func()
-}
-
-func (r closeReadSeekWithFunc) Close() error {
-	err := r.ReadSeekCloser.Close()
-	if r.closeFunc != nil {
-		r.closeFunc()
-	}
-	return err
 }

@@ -76,10 +76,24 @@ func (s *Session) doJSONSpecRequestWithHeaders(
 	withAuth bool,
 	headers http.Header,
 ) (int, []byte, error) {
+	return s.doJSONSpecRequestWithHeadersAndTimeout(t, ctx, method, specPath, requestPath, body, withAuth, headers, 0)
+}
+
+func (s *Session) doJSONSpecRequestWithHeadersAndTimeout(
+	t ContractT,
+	ctx context.Context,
+	method string,
+	specPath string,
+	requestPath string,
+	body any,
+	withAuth bool,
+	headers http.Header,
+	requestTimeout time.Duration,
+) (int, []byte, error) {
 	if t != nil {
 		ValidateRequestExample(t, method, specPath, defaultContentType, body)
 	}
-	status, respBody, err := s.doJSONRequestWithHeaders(ctx, method, requestPath, body, withAuth, headers)
+	status, respBody, err := s.doJSONRequestWithHeadersAndTimeout(ctx, method, requestPath, body, withAuth, headers, requestTimeout)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -118,8 +132,23 @@ func (s *Session) doJSONRequest(ctx context.Context, method, path string, body a
 }
 
 func (s *Session) doJSONRequestWithHeaders(ctx context.Context, method, path string, body any, withAuth bool, headers http.Header) (int, []byte, error) {
+	return s.doJSONRequestWithHeadersAndTimeout(ctx, method, path, body, withAuth, headers, 0)
+}
+
+func (s *Session) doJSONRequestWithHeadersAndTimeout(
+	ctx context.Context,
+	method string,
+	path string,
+	body any,
+	withAuth bool,
+	headers http.Header,
+	requestTimeout time.Duration,
+) (int, []byte, error) {
 	if s == nil {
 		return 0, nil, fmt.Errorf("api session is nil")
+	}
+	if s.client == nil {
+		return 0, nil, fmt.Errorf("api session HTTP client is nil")
 	}
 	path = ensureLeadingSlash(path)
 
@@ -142,7 +171,13 @@ func (s *Session) doJSONRequestWithHeaders(ctx context.Context, method, path str
 	}
 	s.setAuthHeaders(req, withAuth)
 
-	resp, err := s.client.Do(req)
+	client := s.client
+	if requestTimeout > 0 && requestTimeout != s.client.Timeout {
+		clientCopy := *s.client
+		clientCopy.Timeout = requestTimeout
+		client = &clientCopy
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}

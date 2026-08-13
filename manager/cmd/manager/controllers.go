@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/carrierpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaintenance"
@@ -12,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimagefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -41,6 +43,8 @@ type managerControllerSet struct {
 	sandboxPauseController         *service.SandboxPauseController
 	templateReconciler             templateReconcilerRunner
 	templateBuildWorker            *templatebuild.TemplateBuildWorker
+	templateImageFSWorker          *templateimagefs.Worker
+	carrierPool                    *carrierpool.Pool
 	sandboxLogWorker               *managerobs.LogWorker
 	sandboxStore                   *sandboxstore.PGSandboxStore
 	rootFSObjectStore              objectstore.Store
@@ -54,6 +58,12 @@ type templateReconcilerRunner interface {
 }
 
 func (s *managerControllerSet) Start(ctx context.Context) {
+	if s.carrierPool != nil {
+		go logControllerError(ctx, s.logger, "Shared carrier pool stopped", func() error {
+			return s.carrierPool.Run(ctx)
+		})
+		s.logger.Info("Shared carrier pool started")
+	}
 	if s.templateReconciler != nil {
 		go s.templateReconciler.Start(ctx)
 	}
@@ -75,6 +85,12 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 		s.logger.Info("Template image build worker started",
 			zap.String("clusterID", naming.ClusterIDOrDefault(&s.cfg.DefaultClusterId)),
 		)
+	}
+	if s.templateImageFSWorker != nil {
+		go logControllerError(ctx, s.logger, "Template ImageFS worker stopped", func() error {
+			return s.templateImageFSWorker.Run(ctx)
+		})
+		s.logger.Info("Template ImageFS worker started")
 	}
 
 	go func() {
@@ -121,6 +137,7 @@ func (s *managerControllerSet) startRootFSMaintenance(ctx context.Context) {
 		s.managerMetrics,
 	)
 	maintenance.SetObjectInspector(rootFSObjectStoreInspector{store: s.rootFSObjectStore})
+	maintenance.SetObjectLister(rootFSObjectStoreInspector{store: s.rootFSObjectStore})
 	if s.meteringRepo != nil {
 		maintenance.SetStorageMeteringRecorder(s.meteringRepo)
 	}

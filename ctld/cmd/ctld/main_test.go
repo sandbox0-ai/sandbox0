@@ -200,74 +200,96 @@ func TestReleaseVolumeOwnerReturnsConflictForBusyOwner(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
-func TestCombinedControllerRoutesRootFSSnapshotAPI(t *testing.T) {
+func TestCombinedControllerRoutesRootFSSyncAPI(t *testing.T) {
 	server := newHTTPServer(":0", combinedController{
 		Controller: ctldserver.NotImplementedController{},
 		RootFS:     fakeRootFSHandler{},
 	})
 
-	t.Run("prepare", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/prepare", strings.NewReader(`{"target":{"namespace":"ns","pod_name":"pod","container_name":"sandbox"}}`))
+	t.Run("bind", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/rootfs/sync/bind", strings.NewReader(`{"target":{"namespace":"ns","pod_name":"pod","container_name":"sandbox"},"sandbox_id":"sandbox-1","team_id":"team-1","runtime_generation":1}`))
 		rec := httptest.NewRecorder()
 		server.Handler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
-		var resp ctldapi.PrepareRootFSSnapshotResponse
+		var resp ctldapi.BindRootFSSyncResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		assert.Equal(t, "snapshot-handle", resp.Handle)
+		assert.Equal(t, "sandbox-1", resp.Status.SandboxID)
 	})
 
-	t.Run("publish", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/publish", strings.NewReader(`{"handle":"snapshot-handle","sandbox_id":"sandbox-1","team_id":"team-1"}`))
+	t.Run("status", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/sync/status", strings.NewReader(`{"sandbox_id":"sandbox-1","runtime_generation":1}`))
 		rec := httptest.NewRecorder()
 		server.Handler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
-		var resp ctldapi.PublishRootFSSnapshotResponse
+		var resp ctldapi.GetRootFSSyncStatusResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		assert.True(t, resp.Published)
-		assert.Equal(t, "sha256:test", resp.Descriptor.Digest)
+		assert.Equal(t, "sandbox-1", resp.Status.SandboxID)
 	})
 
-	t.Run("abort", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/snapshots/abort", strings.NewReader(`{"handle":"snapshot-handle"}`))
+	t.Run("seal", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/rootfs/heads/seal", strings.NewReader(`{"sandbox_id":"sandbox-1","team_id":"team-1","head_id":"head-1","expected_runtime_generation":1}`))
 		rec := httptest.NewRecorder()
 		server.Handler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
-		var resp ctldapi.AbortRootFSSnapshotResponse
+		var resp ctldapi.SealRootFSHeadResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		assert.True(t, resp.Aborted)
+		assert.Empty(t, resp.Error)
+	})
+
+	t.Run("materialize", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/rootfs/heads/materialize", strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		server.Handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var resp ctldapi.MaterializeRootFSHeadResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.True(t, resp.Materialized)
+	})
+
+	t.Run("acknowledge", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/rootfs/heads/acknowledge", strings.NewReader(`{"sandbox_id":"sandbox-1","team_id":"team-1","head_id":"head-1","runtime_generation":1,"runtime_continues":true}`))
+		rec := httptest.NewRecorder()
+		server.Handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		var resp ctldapi.AcknowledgeRootFSHeadResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.True(t, resp.Acknowledged)
 	})
 }
 
 type fakeRootFSHandler struct{}
 
-func (fakeRootFSHandler) InspectRootFS(_ *http.Request, _ ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
-	return ctldapi.InspectRootFSResponse{}, http.StatusOK
+func (fakeRootFSHandler) BindRootFSSync(_ *http.Request, req ctldapi.BindRootFSSyncRequest) (ctldapi.BindRootFSSyncResponse, int) {
+	return ctldapi.BindRootFSSyncResponse{Status: ctldapi.RootFSSyncStatus{SandboxID: req.SandboxID}}, http.StatusOK
 }
 
-func (fakeRootFSHandler) SaveRootFS(_ *http.Request, _ ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
-	return ctldapi.SaveRootFSResponse{}, http.StatusOK
+func (fakeRootFSHandler) GetRootFSSyncStatus(_ *http.Request, req ctldapi.GetRootFSSyncStatusRequest) (ctldapi.GetRootFSSyncStatusResponse, int) {
+	return ctldapi.GetRootFSSyncStatusResponse{Status: ctldapi.RootFSSyncStatus{SandboxID: req.SandboxID}}, http.StatusOK
 }
 
-func (fakeRootFSHandler) PrepareRootFSSnapshot(_ *http.Request, _ ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
-	return ctldapi.PrepareRootFSSnapshotResponse{Handle: "snapshot-handle"}, http.StatusOK
+func (fakeRootFSHandler) SealRootFSHead(_ *http.Request, _ ctldapi.SealRootFSHeadRequest) (ctldapi.SealRootFSHeadResponse, int) {
+	return ctldapi.SealRootFSHeadResponse{}, http.StatusOK
 }
 
-func (fakeRootFSHandler) PublishRootFSSnapshot(_ *http.Request, _ ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
-	return ctldapi.PublishRootFSSnapshotResponse{
-		Published:  true,
-		Descriptor: ctldapi.RootFSDiffDescriptor{Digest: "sha256:test"},
-	}, http.StatusOK
+func (fakeRootFSHandler) AcknowledgeRootFSHead(_ *http.Request, _ ctldapi.AcknowledgeRootFSHeadRequest) (ctldapi.AcknowledgeRootFSHeadResponse, int) {
+	return ctldapi.AcknowledgeRootFSHeadResponse{Acknowledged: true}, http.StatusOK
 }
 
-func (fakeRootFSHandler) AbortRootFSSnapshot(_ *http.Request, _ ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
-	return ctldapi.AbortRootFSSnapshotResponse{Aborted: true}, http.StatusOK
+func (fakeRootFSHandler) MaterializeRootFSHead(_ *http.Request, _ ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
+	return ctldapi.MaterializeRootFSHeadResponse{Materialized: true}, http.StatusOK
 }
 
-func (fakeRootFSHandler) ApplyRootFS(_ *http.Request, _ ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
-	return ctldapi.ApplyRootFSResponse{}, http.StatusOK
+func (fakeRootFSHandler) ImportRootFSImage(_ *http.Request, _ ctldapi.ImportRootFSImageRequest) (ctldapi.ImportRootFSImageResponse, int) {
+	return ctldapi.ImportRootFSImageResponse{}, http.StatusOK
+}
+
+func (fakeRootFSHandler) ReleaseCarrierGate(_ *http.Request, _ ctldapi.ReleaseCarrierGateRequest) (ctldapi.ReleaseCarrierGateResponse, int) {
+	return ctldapi.ReleaseCarrierGateResponse{Released: true}, http.StatusOK
 }
 
 type fakeVolumePortalHandler struct {

@@ -165,6 +165,28 @@ func TestCreateTemplateFailsWhenNamespaceBaselineFails(t *testing.T) {
 	assert.Len(t, reconciler.calls, 1)
 }
 
+func TestPublishProjectedTemplateStatusUsesResolvedNamespace(t *testing.T) {
+	ctx := context.Background()
+	namespace := "tpl-demo"
+	current := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
+		Name: "demo", Namespace: namespace, ResourceVersion: "1",
+	}}
+	crdClient := clientsetfake.NewSimpleClientset(current.DeepCopy())
+	service := &TemplateService{crdClient: crdClient}
+	responseWithoutNamespace := current.DeepCopy()
+	responseWithoutNamespace.Namespace = ""
+
+	updated, err := service.publishProjectedTemplateStatus(ctx, namespace, responseWithoutNamespace, v1alpha1.SandboxTemplateStatus{
+		ImageRevision: &v1alpha1.TemplateImageRevisionStatus{
+			RevisionID: "revision-1", State: v1alpha1.TemplateImageRevisionStateReady, ImageFSHeadID: "head-1",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	require.NotNil(t, updated.Status.ImageRevision)
+	assert.Equal(t, "revision-1", updated.Status.ImageRevision.RevisionID)
+}
+
 func TestDeletePublicTemplateDeletesManagedNamespace(t *testing.T) {
 	ctx := context.Background()
 	namespace, err := naming.TemplateNamespaceForBuiltin("demo")

@@ -98,6 +98,22 @@ func TestEnsureTemplateRevisionImportsInShadowWithoutSelecting(t *testing.T) {
 	require.Equal(t, 1, queue.clearCalls)
 }
 
+func TestEnsureTemplateRevisionKeepsSelectedRevisionWhenAdmissionTurnsOff(t *testing.T) {
+	tpl := imageFSWorkerTestTemplate()
+	tpl.Status = &api.SandboxTemplateStatus{ImageRevision: &api.TemplateImageRevisionStatus{
+		RevisionID:    "tir-selected",
+		ImageFSHeadID: "head-selected",
+		State:         api.TemplateImageRevisionStateReady,
+	}}
+	queue := &workerQueueStub{}
+	worker := &Worker{queue: queue, config: Config{Admission: mustAdmission(t, "off", nil, nil)}}
+
+	require.NoError(t, worker.ensureTemplateRevision(context.Background(), tpl))
+	require.Equal(t, 1, queue.ensureCalls)
+	require.Equal(t, 0, queue.selectCalls)
+	require.Equal(t, 0, queue.clearCalls)
+}
+
 func TestEnsureTemplateRevisionSkipsTemplateOutsideImportCohort(t *testing.T) {
 	tpl := imageFSWorkerTestTemplate()
 	queue := &workerQueueStub{}

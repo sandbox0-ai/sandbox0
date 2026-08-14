@@ -189,6 +189,16 @@ func (w *Worker) ensureTemplateRevision(ctx context.Context, tpl *template.Templ
 	if w.config.Admission.Admits(tpl.Scope, tpl.TeamID, tpl.TemplateID) {
 		return w.queue.SelectCurrentTemplateImageRevision(ctx, revision)
 	}
+	// Admission off has two distinct rollout states. A shadow-imported template
+	// that has never selected a revision stays on the legacy path. Once a
+	// revision has been selected, however, off is a traffic-stop rollback: keep
+	// the existing selection so the scheduler cannot fall through to a legacy
+	// cluster while the green manager rejects new claims. Resume does not use
+	// admission and continues to serve existing S0FS sandboxes.
+	if w.config.Admission.Mode() == s0fsrollout.AdmissionModeOff &&
+		tpl.Status != nil && tpl.Status.ImageRevision != nil {
+		return nil
+	}
 	return w.queue.ClearCurrentTemplateImageRevision(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID)
 }
 

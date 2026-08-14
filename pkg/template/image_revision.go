@@ -14,11 +14,12 @@ import (
 )
 
 const (
-	TemplateImageRevisionStateResolving = "resolving"
-	TemplateImageRevisionStateImporting = "importing"
-	TemplateImageRevisionStateReady     = "ready"
-	TemplateImageRevisionStateFailed    = "failed"
-	PublicImageFSStorageScope           = rootfshead.PublicImageFSTeamID
+	TemplateImageRevisionStateResolving   = "resolving"
+	TemplateImageRevisionStateImporting   = "importing"
+	TemplateImageRevisionStateReady       = "ready"
+	TemplateImageRevisionStateFailed      = "failed"
+	TemplateImageRevisionReasonSuperseded = "Superseded"
+	PublicImageFSStorageScope             = rootfshead.PublicImageFSTeamID
 )
 
 // TemplateImageRevision is one immutable OCI resolution and S0FS ImageFS import.

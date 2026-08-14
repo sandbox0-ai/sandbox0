@@ -34,6 +34,8 @@ const (
 	claimErrorLogPeriod = 30 * time.Second
 )
 
+var errTemplateImageRevisionSuperseded = errors.New("template ImageFS revision is superseded")
+
 type queue interface {
 	templstore.TemplateStore
 	templstore.TemplateImageRevisionStore
@@ -206,6 +208,22 @@ func (w *Worker) process(parent context.Context, revision *template.TemplateImag
 		if errors.Is(err, template.ErrTemplateImageRevisionLeaseLost) {
 			return
 		}
+		if errors.Is(err, errTemplateImageRevisionSuperseded) {
+			if failErr := w.queue.FailTemplateImageRevision(
+				context.WithoutCancel(parent),
+				revision.RevisionID,
+				w.config.WorkerID,
+				template.TemplateImageRevisionReasonSuperseded,
+				err.Error(),
+			); failErr != nil {
+				if !errors.Is(failErr, template.ErrTemplateImageRevisionLeaseLost) {
+					w.logger.Warn("Failed to supersede template ImageFS revision", zap.String("revisionID", revision.RevisionID), zap.Error(failErr))
+				}
+				return
+			}
+			w.logger.Info("Template ImageFS revision superseded", zap.String("revisionID", revision.RevisionID), zap.Duration("duration", time.Since(started)))
+			return
+		}
 		retryAt := time.Now().UTC().Add(time.Duration(min(revision.AttemptCount+1, 12)) * 5 * time.Second)
 		if releaseErr := w.queue.ReleaseTemplateImageRevision(context.WithoutCancel(parent), revision.RevisionID, w.config.WorkerID, retryAt, err.Error()); releaseErr != nil && !errors.Is(releaseErr, template.ErrTemplateImageRevisionLeaseLost) {
 			w.logger.Warn("Failed to release template ImageFS revision", zap.String("revisionID", revision.RevisionID), zap.Error(releaseErr))
@@ -218,6 +236,18 @@ func (w *Worker) importRevision(ctx context.Context, revision *template.Template
 	tpl, err := w.queue.GetTemplate(ctx, revision.Scope, revision.TeamID, revision.TemplateID)
 	if err != nil || tpl == nil {
 		return fmt.Errorf("load template for ImageFS revision: %w", err)
+	}
+	desiredRevision, err := template.NewTemplateImageRevision(tpl)
+	if err != nil {
+		return fmt.Errorf("derive current template ImageFS revision: %w", err)
+	}
+	if desiredRevision.RevisionID != revision.RevisionID {
+		return fmt.Errorf(
+			"%w: claimed %s but current template requires %s",
+			errTemplateImageRevisionSuperseded,
+			revision.RevisionID,
+			desiredRevision.RevisionID,
+		)
 	}
 	namespace, err := templateNamespace(tpl)
 	if err != nil {

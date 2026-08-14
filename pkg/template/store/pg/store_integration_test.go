@@ -71,6 +71,73 @@ func TestEnsureTemplateImageRevisionStaysShadowUntilSelected(t *testing.T) {
 	}
 }
 
+func TestEnsureTemplateImageRevisionRevivesOnlySupersededSpec(t *testing.T) {
+	store, _ := newTemplateStoreIntegrationTest(t)
+	ctx := context.Background()
+	tpl := &template.Template{
+		TemplateID: "revived-imagefs",
+		Scope:      naming.ScopeTeam,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+		Spec:       integrationTemplateSpec("ubuntu:24.04"),
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := store.CreateTemplate(ctx, tpl); err != nil {
+		t.Fatalf("CreateTemplate() error = %v", err)
+	}
+	oldRevision, _, err := store.EnsureTemplateImageRevision(ctx, tpl)
+	if err != nil {
+		t.Fatalf("EnsureTemplateImageRevision() error = %v", err)
+	}
+	claimed, err := store.ClaimTemplateImageRevision(ctx, "worker-a", time.Minute, nil, nil)
+	if err != nil {
+		t.Fatalf("ClaimTemplateImageRevision() error = %v", err)
+	}
+	if claimed == nil || claimed.RevisionID != oldRevision.RevisionID {
+		t.Fatalf("claimed revision = %#v, want %q", claimed, oldRevision.RevisionID)
+	}
+	if err := store.FailTemplateImageRevision(
+		ctx,
+		claimed.RevisionID,
+		"worker-a",
+		template.TemplateImageRevisionReasonSuperseded,
+		"template changed",
+	); err != nil {
+		t.Fatalf("FailTemplateImageRevision() error = %v", err)
+	}
+
+	tpl.Spec = integrationTemplateSpec("ubuntu:24.10")
+	if err := store.UpdateTemplate(ctx, tpl); err != nil {
+		t.Fatalf("UpdateTemplate(new spec) error = %v", err)
+	}
+	if _, created, err := store.EnsureTemplateImageRevision(ctx, tpl); err != nil {
+		t.Fatalf("EnsureTemplateImageRevision(new spec) error = %v", err)
+	} else if !created {
+		t.Fatal("EnsureTemplateImageRevision(new spec) created = false, want true")
+	}
+
+	tpl.Spec = integrationTemplateSpec("ubuntu:24.04")
+	if err := store.UpdateTemplate(ctx, tpl); err != nil {
+		t.Fatalf("UpdateTemplate(old spec) error = %v", err)
+	}
+	revived, created, err := store.EnsureTemplateImageRevision(ctx, tpl)
+	if err != nil {
+		t.Fatalf("EnsureTemplateImageRevision(revived spec) error = %v", err)
+	}
+	if created {
+		t.Fatal("EnsureTemplateImageRevision(revived spec) created = true, want reused revision")
+	}
+	if revived.RevisionID != oldRevision.RevisionID {
+		t.Fatalf("revived revision = %q, want %q", revived.RevisionID, oldRevision.RevisionID)
+	}
+	if revived.State != template.TemplateImageRevisionStateResolving || revived.AttemptCount != 0 {
+		t.Fatalf("revived revision state = %q attempts = %d, want resolving/0", revived.State, revived.AttemptCount)
+	}
+	if revived.Reason != "" || revived.Message != "" || !revived.CompletedAt.IsZero() {
+		t.Fatalf("revived revision retained terminal status: %#v", revived)
+	}
+}
+
 func TestClaimTemplateImageRevisionFiltersShadowImportCohort(t *testing.T) {
 	store, _ := newTemplateStoreIntegrationTest(t)
 	ctx := context.Background()

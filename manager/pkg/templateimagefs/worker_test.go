@@ -137,6 +137,31 @@ func TestEnsureTemplateRevisionSelectsOnlyAdmittedPrivateTeam(t *testing.T) {
 	require.Equal(t, 0, queue.clearCalls)
 }
 
+func TestProcessSupersedesClaimWhoseSpecIsNoLongerCurrent(t *testing.T) {
+	claimedTemplate := imageFSWorkerTestTemplate()
+	claimed, err := template.NewTemplateImageRevision(claimedTemplate)
+	require.NoError(t, err)
+	currentTemplate := imageFSWorkerTestTemplate()
+	currentTemplate.Spec.MainContainer.Image = "python:3.14"
+	queue := &workerQueueStub{template: currentTemplate}
+	worker := &Worker{
+		queue: queue,
+		config: Config{
+			WorkerID:      "manager/green",
+			LeaseDuration: time.Hour,
+			ImportTimeout: time.Minute,
+		},
+		logger: zap.NewNop(),
+	}
+
+	worker.process(context.Background(), claimed)
+
+	require.Equal(t, 1, queue.failCalls)
+	require.Equal(t, claimed.RevisionID, queue.failedRevisionID)
+	require.Equal(t, template.TemplateImageRevisionReasonSuperseded, queue.failedReason)
+	require.Contains(t, queue.failedMessage, "current template requires")
+}
+
 func TestCreateImportPodPrimesFixedCarrierBaseOnTargetNode(t *testing.T) {
 	worker := &Worker{
 		k8s: fake.NewSimpleClientset(),
@@ -181,12 +206,17 @@ func TestTemplateNamespaceKeepsPublicAndTeamImportsIsolated(t *testing.T) {
 type workerQueueStub struct {
 	templstore.TemplateStore
 	templstore.TemplateImageRevisionStore
-	ensureCalls int
-	selectCalls int
-	clearCalls  int
-	claimCalls  int
-	claimErr    error
-	blockClaim  bool
+	ensureCalls      int
+	selectCalls      int
+	clearCalls       int
+	claimCalls       int
+	claimErr         error
+	blockClaim       bool
+	template         *template.Template
+	failCalls        int
+	failedRevisionID string
+	failedReason     string
+	failedMessage    string
 }
 
 type workerHeadStoreStub struct{}
@@ -221,6 +251,18 @@ func (s *workerQueueStub) SelectCurrentTemplateImageRevision(_ context.Context, 
 
 func (s *workerQueueStub) ClearCurrentTemplateImageRevision(_ context.Context, _, _, _ string) error {
 	s.clearCalls++
+	return nil
+}
+
+func (s *workerQueueStub) GetTemplate(context.Context, string, string, string) (*template.Template, error) {
+	return s.template, nil
+}
+
+func (s *workerQueueStub) FailTemplateImageRevision(_ context.Context, revisionID, _ string, reason, message string) error {
+	s.failCalls++
+	s.failedRevisionID = revisionID
+	s.failedReason = reason
+	s.failedMessage = message
 	return nil
 }
 

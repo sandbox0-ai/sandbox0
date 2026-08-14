@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -21,6 +22,34 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/client-go/rest"
 )
+
+func TestStartManagerControllersOwnsReadiness(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var ready atomic.Bool
+	started := false
+
+	startManagerControllers(ctx, func(context.Context) {
+		if ready.Load() {
+			t.Fatal("manager became ready before controllers started")
+		}
+		started = true
+	}, &ready)
+	if !started {
+		t.Fatal("controllers were not started")
+	}
+	if !ready.Load() {
+		t.Fatal("manager did not become ready after controllers started")
+	}
+
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for ready.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if ready.Load() {
+		t.Fatal("manager remained ready after controller context ended")
+	}
+}
 
 type recordingTemplateReconcilerQuiescer struct {
 	called  chan struct{}

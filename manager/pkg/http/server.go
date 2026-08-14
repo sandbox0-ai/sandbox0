@@ -47,6 +47,7 @@ type Server struct {
 	logger                  *zap.Logger
 	port                    int
 	obsProvider             *observability.Provider
+	isReady                 func() bool
 	// Public exposure config
 	publicRootDomain string
 	publicRegionID   string
@@ -90,6 +91,7 @@ type ServerDependencies struct {
 	Logger                  *zap.Logger
 	Port                    int
 	ObservabilityProvider   *observability.Provider
+	ReadinessCheck          func() bool
 	PublicRootDomain        string
 	PublicRegionID          string
 }
@@ -121,6 +123,7 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 		logger:                  deps.Logger,
 		port:                    deps.Port,
 		obsProvider:             deps.ObservabilityProvider,
+		isReady:                 deps.ReadinessCheck,
 		publicRootDomain:        deps.PublicRootDomain,
 		publicRegionID:          deps.PublicRegionID,
 	}
@@ -297,6 +300,10 @@ func (s *Server) healthCheck(c *gin.Context) {
 }
 
 func (s *Server) readinessCheck(c *gin.Context) {
+	if s.isReady != nil && !s.isReady() {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager controllers are not ready")
+		return
+	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
 		"status": "ready",
 	})

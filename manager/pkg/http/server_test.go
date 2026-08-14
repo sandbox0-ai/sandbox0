@@ -35,6 +35,40 @@ func TestSetupRoutesMountsTemplateFromSandboxEndpoints(t *testing.T) {
 	}
 }
 
+func TestReadinessCheckRequiresConfiguredCondition(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ready := false
+	server := &Server{isReady: func() bool { return ready }}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	server.readinessCheck(ctx)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status before readiness = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+
+	ready = true
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	server.readinessCheck(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status after readiness = %d, want %d", recorder.Code, http.StatusOK)
+	}
+}
+
+func TestReadinessCheckDefaultsToReady(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := &Server{}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+
+	server.readinessCheck(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+}
+
 func managerHasRoute(router *gin.Engine, method, path string) bool {
 	for _, route := range router.Routes() {
 		if route.Method == method && route.Path == path {

@@ -18,10 +18,12 @@ func TestAdmissionCohortScope(t *testing.T) {
 		templateID string
 		want       bool
 	}{
-		{name: "private team cohort", scope: naming.ScopeTeam, teamID: "team-a", templateID: "private", want: true},
+		{name: "private exact cohort", scope: naming.ScopeTeam, teamID: "team-a", templateID: "public-canary", want: true},
+		{name: "private team alone does not match", scope: naming.ScopeTeam, teamID: "team-a", templateID: "private", want: false},
 		{name: "team cohort does not admit public", scope: naming.ScopePublic, teamID: "team-a", templateID: "private", want: false},
 		{name: "template cohort admits public", scope: naming.ScopePublic, templateID: "public-canary", want: true},
-		{name: "template cohort admits private", scope: naming.ScopeTeam, teamID: "team-b", templateID: "public-canary", want: true},
+		{name: "private template alone does not match", scope: naming.ScopeTeam, teamID: "team-b", templateID: "public-canary", want: false},
+		{name: "unknown scope fails closed", scope: "unknown", teamID: "team-a", templateID: "public-canary", want: false},
 		{name: "unmatched", scope: naming.ScopeTeam, teamID: "team-b", templateID: "private", want: false},
 	}
 	for _, tt := range tests {
@@ -67,14 +69,29 @@ func TestCohortMatchesPrivateTeamAndLogicalTemplate(t *testing.T) {
 	if cohort.Empty() {
 		t.Fatal("explicit cohort is empty")
 	}
-	if !cohort.Matches(naming.ScopeTeam, "team-a", "other") {
-		t.Fatal("private team selector did not match")
+	if !cohort.Matches(naming.ScopeTeam, "team-a", "python") {
+		t.Fatal("exact private team and template selectors did not match")
 	}
 	if !cohort.Matches(naming.ScopePublic, "", "python") {
 		t.Fatal("public template selector did not match")
 	}
+	if cohort.Matches(naming.ScopeTeam, "team-a", "other") {
+		t.Fatal("private team selector matched without the configured template")
+	}
+	if cohort.Matches(naming.ScopeTeam, "team-b", "python") {
+		t.Fatal("private template selector matched without the configured team")
+	}
 	if cohort.Matches(naming.ScopePublic, "team-a", "other") {
 		t.Fatal("team selector matched a public template")
+	}
+}
+
+func TestCohortPreservesSingleSelectorBehavior(t *testing.T) {
+	if !NewCohort([]string{"team-a"}, nil).Matches(naming.ScopeTeam, "team-a", "other") {
+		t.Fatal("team-only selector did not match a private template")
+	}
+	if !NewCohort(nil, []string{"python"}).Matches(naming.ScopeTeam, "team-b", "python") {
+		t.Fatal("template-only selector did not match a private template")
 	}
 }
 

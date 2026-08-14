@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfsstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
@@ -145,6 +146,9 @@ func statusForError(err error) int {
 	}
 	if errors.Is(err, ErrNotFound) {
 		return http.StatusNotFound
+	}
+	if errors.Is(err, rootfsstore.ErrBackendUnavailable) {
+		return http.StatusServiceUnavailable
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return http.StatusRequestTimeout

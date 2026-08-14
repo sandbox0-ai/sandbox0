@@ -300,7 +300,7 @@ func TestControllerExposesAndAbandonsHeadWhenMarkerUploadFails(t *testing.T) {
 	partial, status := controller.SealRootFSHead(request, ctldapi.SealRootFSHeadRequest{
 		SandboxID: "sandbox-1", TeamID: "team-1", HeadID: "failed-head", ExpectedRuntimeGeneration: 1,
 	})
-	require.Equal(t, http.StatusInternalServerError, status)
+	require.Equal(t, http.StatusServiceUnavailable, status)
 	assert.Equal(t, "failed-head", partial.Reference.HeadID)
 	current, status := controller.GetRootFSSyncStatus(request, ctldapi.GetRootFSSyncStatusRequest{SandboxID: "sandbox-1", RuntimeGeneration: 1})
 	require.Equal(t, http.StatusOK, status)
@@ -318,6 +318,39 @@ func TestControllerExposesAndAbandonsHeadWhenMarkerUploadFails(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, status, retried.Error)
 	assert.Equal(t, "replacement-head", retried.Reference.HeadID)
+}
+
+func TestControllerReturnsServiceUnavailableWhenSealCannotReachObjectStore(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	base, baseConfig := testRootFSBase(t)
+	store := &failingRootFSStore{Store: objectstore.NewMemoryStore(t.Name())}
+	controller := NewController(Config{
+		Context: ctx,
+		Runtime: &fakeV3Runtime{
+			fakeRuntime: &fakeRuntime{info: rootFSInfo("gvisor")},
+			upperdir:    t.TempDir(),
+			base:        base,
+			baseConfig:  baseConfig,
+		},
+		Store: store, WatchFenceRoot: t.TempDir(), CaptureLeases: &fakeCaptureLeases{},
+	})
+	request := httptest.NewRequest(http.MethodPut, "/", nil)
+	bound, status := controller.BindRootFSSync(request, ctldapi.BindRootFSSyncRequest{
+		Target: rootFSTarget(), SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1,
+	})
+	require.Equal(t, http.StatusOK, status, bound.Error)
+	require.Eventually(t, func() bool {
+		current, currentStatus := controller.GetRootFSSyncStatus(request, ctldapi.GetRootFSSyncStatusRequest{SandboxID: "sandbox-1", RuntimeGeneration: 1})
+		return currentStatus == http.StatusOK && current.Status.InitialScanComplete
+	}, 5*time.Second, 10*time.Millisecond)
+
+	store.failHeads.Store(true)
+	response, status := controller.SealRootFSHead(request, ctldapi.SealRootFSHeadRequest{
+		SandboxID: "sandbox-1", TeamID: "team-1", HeadID: "unavailable-head", ExpectedRuntimeGeneration: 1,
+	})
+	assert.Equal(t, http.StatusServiceUnavailable, status)
+	assert.Contains(t, response.Error, rootfsstore.ErrBackendUnavailable.Error())
 }
 
 func TestControllerBindRootFSSyncRejectsCrossTeamParent(t *testing.T) {
@@ -441,6 +474,14 @@ func (a *fakePortalBackingAttacher) AttachRootFSBackings(_ context.Context, podU
 type failingRootFSStore struct {
 	objectstore.Store
 	failMarkers bool
+	failHeads   atomic.Bool
+}
+
+func (s *failingRootFSStore) Head(key string) (objectstore.Info, error) {
+	if s.failHeads.Load() {
+		return objectstore.Info{}, errors.New("injected object store head failure")
+	}
+	return s.Store.Head(key)
 }
 
 func (s *failingRootFSStore) Put(key string, reader io.Reader) error {

@@ -17,6 +17,11 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// ErrBackendUnavailable identifies failures while communicating with the
+// object storage backend. Callers may use it to distinguish retryable
+// dependency failures from invalid rootfs data or requests.
+var ErrBackendUnavailable = errors.New("rootfs object store backend unavailable")
+
 type Writer struct {
 	store  objectstore.Store
 	prefix string
@@ -202,10 +207,10 @@ func PutImmutable(ctx context.Context, store objectstore.Store, prefix string, o
 		return false, ctx.Err()
 	}
 	if !objectstore.IsNotFound(err) {
-		return false, fmt.Errorf("inspect rootfs object %s: %w", object.Key, err)
+		return false, fmt.Errorf("%w: inspect rootfs object %s: %w", ErrBackendUnavailable, object.Key, err)
 	}
 	if err := store.Put(object.Key, bytes.NewReader(payload)); err != nil {
-		return false, fmt.Errorf("store rootfs object %s: %w", object.Key, err)
+		return false, fmt.Errorf("%w: store rootfs object %s: %w", ErrBackendUnavailable, object.Key, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return true, err
@@ -225,12 +230,15 @@ func Read(ctx context.Context, store objectstore.Store, prefix string, object ro
 	}
 	reader, err := store.Get(object.Key, 0, object.Size)
 	if err != nil {
+		if !objectstore.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: read rootfs object %s: %w", ErrBackendUnavailable, object.Key, err)
+		}
 		return nil, fmt.Errorf("read rootfs object %s: %w", object.Key, err)
 	}
 	payload, readErr := io.ReadAll(io.LimitReader(reader, object.Size+1))
 	closeErr := reader.Close()
 	if readErr != nil || closeErr != nil {
-		return nil, fmt.Errorf("read rootfs object %s: %w", object.Key, errors.Join(readErr, closeErr))
+		return nil, fmt.Errorf("%w: read rootfs object %s: %w", ErrBackendUnavailable, object.Key, errors.Join(readErr, closeErr))
 	}
 	if int64(len(payload)) != object.Size || digest.FromBytes(payload).String() != object.Digest {
 		return nil, fmt.Errorf("rootfs object %s failed size or digest validation", object.Key)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -64,6 +65,22 @@ func TestPostJSONReturnsStatusErrorWithTypedMessage(t *testing.T) {
 	want := "ctld request failed with status 409: volume is busy"
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestIsUnavailableErrorRecognizesWrappedRequestError(t *testing.T) {
+	t.Parallel()
+
+	err := fmt.Errorf("seal rootfs: %w", &RequestError{
+		StatusCode: http.StatusServiceUnavailable,
+		Message:    "object store unavailable",
+	})
+
+	if !IsUnavailableError(err) {
+		t.Fatal("IsUnavailableError returned false")
+	}
+	if IsUnavailableError(&RequestError{StatusCode: http.StatusConflict}) {
+		t.Fatal("IsUnavailableError returned true for a conflict")
 	}
 }
 

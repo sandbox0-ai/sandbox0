@@ -1456,6 +1456,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Sandbox state store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
     put:
       tags: [sandboxes]
       summary: Update sandbox configuration
@@ -1490,6 +1496,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Sandbox state store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
     delete:
       tags: [sandboxes]
       summary: Delete (terminate) a sandbox
@@ -1518,6 +1530,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Sandbox state store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandboxes/{id}/status:
     get:
       tags: [sandboxes]
@@ -1537,6 +1555,12 @@ paths:
                 $ref: "#/components/schemas/SuccessSandboxStatusResponse"
         "404":
           description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Sandbox state store unavailable
           content:
             application/json:
               schema:

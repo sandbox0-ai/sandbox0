@@ -601,7 +601,9 @@ func cloneLabels(values map[string]string) map[string]string {
 
 type fuseMount struct {
 	server *fuse.Server
+	target string
 	done   chan struct{}
+	detach func(string, int) error
 }
 
 func mountFUSEHead(target string, reader *rootfsreader.Reader, head rootfshead.Head) (mountedHead, error) {
@@ -615,7 +617,7 @@ func mountFUSEHead(target string, reader *rootfsreader.Reader, head rootfshead.H
 	if err != nil {
 		return nil, err
 	}
-	mounted := &fuseMount{server: server, done: make(chan struct{})}
+	mounted := &fuseMount{server: server, target: target, done: make(chan struct{}), detach: unix.Unmount}
 	go func() {
 		server.Wait()
 		close(mounted.done)
@@ -635,10 +637,22 @@ func mountFUSEHead(target string, reader *rootfsreader.Reader, head rootfshead.H
 }
 
 func (m *fuseMount) Unmount() error {
-	if m == nil || m.server == nil {
+	if m == nil || strings.TrimSpace(m.target) == "" {
 		return nil
 	}
-	return m.server.Unmount()
+	detach := m.detach
+	if detach == nil {
+		detach = unix.Unmount
+	}
+	// The last snapshot child can disappear while gVisor still holds a lowerdir
+	// reference during teardown. A regular go-fuse unmount waits for every FUSE
+	// loop to exit and would hold the per-Head lock indefinitely. Lazy detach
+	// removes the mount from this namespace immediately; the kernel releases the
+	// old FUSE connection after the remaining references drain.
+	if err := detach(m.target, unix.MNT_DETACH); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOENT) {
+		return fmt.Errorf("detach rootfs FUSE Head: %w", err)
+	}
+	return nil
 }
 
 func (m *fuseMount) HealthError() error {

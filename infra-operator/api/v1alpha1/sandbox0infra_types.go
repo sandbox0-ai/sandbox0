@@ -226,6 +226,12 @@ type Sandbox0InfraSpec struct {
 	// BuiltinTemplates defines system builtin templates to seed the template store
 	// +optional
 	BuiltinTemplates []BuiltinTemplateConfig `json:"builtinTemplates,omitempty"`
+
+	// BuiltinTemplateSyncEnabled controls whether this infra instance writes
+	// builtin templates to the region-scoped template store. Disable it on
+	// additional data-plane clusters that share a control-plane database.
+	// +optional
+	BuiltinTemplateSyncEnabled *bool `json:"builtinTemplateSyncEnabled,omitempty"`
 }
 
 // SandboxNodePlacementConfig defines shared scheduling constraints for sandbox

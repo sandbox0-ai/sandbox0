@@ -3,6 +3,8 @@ package rootfsstore
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"sync"
 	"testing"
 
@@ -122,6 +124,22 @@ func TestReadRejectsCorruptPayload(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestPutImmutableMarksBackendFailuresUnavailable(t *testing.T) {
+	store := &failingStore{Store: objectstore.NewMemoryStore(t.Name()), headErr: errors.New("head failed")}
+	writer, err := NewTeamWriter(store, "team-1")
+	require.NoError(t, err)
+
+	_, err = writer.Put(context.Background(), rootfshead.ChunkMediaType, []byte("payload"))
+	assert.ErrorIs(t, err, ErrBackendUnavailable)
+	assert.ErrorContains(t, err, "head failed")
+
+	store.headErr = nil
+	store.putErr = errors.New("put failed")
+	_, err = writer.Put(context.Background(), rootfshead.ChunkMediaType, []byte("different payload"))
+	assert.ErrorIs(t, err, ErrBackendUnavailable)
+	assert.ErrorContains(t, err, "put failed")
+}
+
 func TestPrefixFromObjectRoundTrip(t *testing.T) {
 	store := objectstore.NewMemoryStore(t.Name())
 	writer, err := NewTeamWriter(store, "team-1")
@@ -134,6 +152,26 @@ func TestPrefixFromObjectRoundTrip(t *testing.T) {
 }
 
 type copyEncryptor struct{}
+
+type failingStore struct {
+	objectstore.Store
+	headErr error
+	putErr  error
+}
+
+func (s *failingStore) Head(key string) (objectstore.Info, error) {
+	if s.headErr != nil {
+		return objectstore.Info{}, s.headErr
+	}
+	return s.Store.Head(key)
+}
+
+func (s *failingStore) Put(key string, reader io.Reader) error {
+	if s.putErr != nil {
+		return s.putErr
+	}
+	return s.Store.Put(key, reader)
+}
 
 func (copyEncryptor) Encrypt(payload []byte) ([]byte, error) {
 	return append([]byte(nil), payload...), nil

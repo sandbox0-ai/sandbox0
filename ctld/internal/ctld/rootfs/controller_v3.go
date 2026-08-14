@@ -241,11 +241,11 @@ func (c *Controller) SealRootFSHead(r *http.Request, req ctldapi.SealRootFSHeadR
 	}
 	if _, err := binding.writer.PutObject(requestContext(r), composed.Reference.Marker, composed.MarkerPayload); err != nil {
 		response.Error = err.Error()
-		return *response, http.StatusInternalServerError
+		return *response, statusForError(err)
 	}
 	if _, err := binding.writer.PutObject(requestContext(r), composed.Reference.Envelope, composed.EnvelopePayload); err != nil {
 		response.Error = err.Error()
-		return *response, http.StatusInternalServerError
+		return *response, statusForError(err)
 	}
 	createdBytes, createdObjects := binding.writer.CreatedMetrics()
 	response.Image = composed.Reference

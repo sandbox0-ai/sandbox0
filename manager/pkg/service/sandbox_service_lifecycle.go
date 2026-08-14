@@ -154,9 +154,12 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 			return nil
 		}
 
-		pod, err := s.getSandboxPod(lockCtx, sandboxID)
+		pod, err := s.getRecordedSandboxRuntimePod(lockCtx, record)
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
+				if recordedSandboxRuntimeIdentity(record) {
+					return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("recorded runtime pod disappeared before pause"))
+				}
 				status = managerapi.SandboxStatusPaused
 				return tx.MarkRuntimePaused(lockCtx, sandboxID, 0, s.clock.Now())
 			}
@@ -398,9 +401,14 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		return err
 	}
 
-	pod, err := s.getSandboxPod(ctx, sandboxID)
+	pod, err := s.getRecordedSandboxRuntimePod(ctx, record)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
+			if !runtimeRecovery {
+				completionErr := fmt.Errorf("recorded runtime pod disappeared before rootfs checkpoint: %w", err)
+				abortOnError(completionErr)
+				return completionErr
+			}
 			if runtimeRecovery && s.logger != nil {
 				fields := []zap.Field{
 					zap.String("sandboxID", sandboxID),
@@ -1299,6 +1307,60 @@ func (s *SandboxService) getSandboxPod(ctx context.Context, sandboxID string) (*
 		return nil, err
 	}
 	return selectSandboxRuntimePod(sandboxID, pods)
+}
+
+// getRecordedSandboxRuntimePod resolves the durable runtime identity from the
+// informer cache and confirms a cache miss with an exact Kubernetes API read.
+// A restarting manager may serve requests before its namespace-scoped pod
+// cache is warm, so cache absence alone must never be treated as runtime loss.
+func (s *SandboxService) getRecordedSandboxRuntimePod(ctx context.Context, record *sandboxstore.SandboxRecord) (*corev1.Pod, error) {
+	if record == nil {
+		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, "")
+	}
+	sandboxID := strings.TrimSpace(record.ID)
+	namespace := strings.TrimSpace(record.CurrentPodNamespace)
+	name := strings.TrimSpace(record.CurrentPodName)
+	if namespace == "" && name == "" {
+		return s.getSandboxPod(ctx, sandboxID)
+	}
+	if namespace == "" || name == "" {
+		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("recorded runtime pod identity is incomplete"))
+	}
+
+	if s.podLister != nil {
+		pod, err := s.podLister.Pods(namespace).Get(name)
+		if err == nil {
+			return validateRecordedSandboxRuntimePod(record, pod)
+		}
+		if !k8serrors.IsNotFound(err) {
+			return nil, err
+		}
+	}
+	if s.k8sClient == nil {
+		return nil, fmt.Errorf("confirm recorded runtime pod %s/%s: kubernetes client is not configured", namespace, name)
+	}
+	pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return validateRecordedSandboxRuntimePod(record, pod)
+}
+
+func recordedSandboxRuntimeIdentity(record *sandboxstore.SandboxRecord) bool {
+	return record != nil && strings.TrimSpace(record.CurrentPodNamespace) != "" && strings.TrimSpace(record.CurrentPodName) != ""
+}
+
+func validateRecordedSandboxRuntimePod(record *sandboxstore.SandboxRecord, pod *corev1.Pod) (*corev1.Pod, error) {
+	if record == nil || pod == nil {
+		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "pod"}, "")
+	}
+	if sandboxPodID(pod) != record.ID || !sandboxRuntimePodOwnedBySandbox(pod) {
+		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pod does not belong to sandbox %s", record.ID))
+	}
+	if !sandboxRecordReferencesPod(record, pod) {
+		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pod does not match the recorded runtime identity"))
+	}
+	return pod, nil
 }
 
 func selectSandboxRuntimePod(sandboxID string, pods []*corev1.Pod) (*corev1.Pod, error) {

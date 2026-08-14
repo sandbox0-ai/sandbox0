@@ -29,7 +29,8 @@ type Admission struct {
 
 // Cohort matches logical templates for staged rollout controls. Team IDs only
 // match private templates, while template IDs match both public and private
-// templates.
+// templates. When both selectors are present, private templates must match
+// both; public templates continue to match only by template ID.
 type Cohort struct {
 	teamIDs     map[string]struct{}
 	templateIDs map[string]struct{}
@@ -60,14 +61,19 @@ func (c Cohort) TemplateIDs() []string {
 
 // Matches reports whether one logical template belongs to the cohort.
 func (c Cohort) Matches(scope, teamID, templateID string) bool {
-	if _, ok := c.templateIDs[strings.TrimSpace(templateID)]; ok {
-		return true
+	_, templateMatches := c.templateIDs[strings.TrimSpace(templateID)]
+	scope = strings.TrimSpace(scope)
+	if scope == naming.ScopePublic {
+		return templateMatches
 	}
-	if strings.TrimSpace(scope) != naming.ScopeTeam {
+	if scope != naming.ScopeTeam {
 		return false
 	}
-	_, ok := c.teamIDs[strings.TrimSpace(teamID)]
-	return ok
+	_, teamMatches := c.teamIDs[strings.TrimSpace(teamID)]
+	if len(c.teamIDs) > 0 && len(c.templateIDs) > 0 {
+		return teamMatches && templateMatches
+	}
+	return teamMatches || templateMatches
 }
 
 // NewAdmission validates and normalizes one rollout policy. An empty mode
@@ -112,7 +118,8 @@ func (a Admission) RejectLegacyClaims() bool {
 
 // Admits reports whether a logical template belongs to the configured cohort.
 // Team allowlists apply only to private templates; template allowlists apply
-// to both public and private templates.
+// to both public and private templates. Configuring both makes private
+// admission require an exact team-and-template match.
 func (a Admission) Admits(scope, teamID, templateID string) bool {
 	if a.mode == AdmissionModeOff {
 		return false

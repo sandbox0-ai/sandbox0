@@ -164,6 +164,7 @@ func (s *Store) ClaimTemplateImageRevision(ctx context.Context, workerID string,
 		return nil, fmt.Errorf("template image revision lease duration must be positive")
 	}
 	importAll := len(teamIDs) == 0 && len(templateIDs) == 0
+	requirePrivateIntersection := len(teamIDs) > 0 && len(templateIDs) > 0
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin claim template image revision: %w", err)
@@ -176,12 +177,18 @@ func (s *Store) ClaimTemplateImageRevision(ctx context.Context, workerID string,
 		WHERE state IN ('resolving', 'importing')
 			AND next_attempt_at <= NOW()
 			AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
-			AND ($1 OR template_id = ANY($2::text[])
-				OR (scope = 'team' AND team_id = ANY($3::text[])))
+			AND (
+				$1
+				OR (scope = 'public' AND template_id = ANY($2::text[]))
+				OR (scope = 'team' AND (
+					($4 AND template_id = ANY($2::text[]) AND team_id = ANY($3::text[]))
+					OR (NOT $4 AND (template_id = ANY($2::text[]) OR team_id = ANY($3::text[])))
+				))
+			)
 		ORDER BY next_attempt_at, created_at
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1
-	`, importAll, templateIDs, teamIDs))
+	`, importAll, templateIDs, teamIDs, requirePrivateIntersection))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

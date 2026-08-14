@@ -199,6 +199,61 @@ func TestClaimTemplateImageRevisionFiltersShadowImportCohort(t *testing.T) {
 	}
 }
 
+func TestClaimTemplateImageRevisionRequiresExactPrivateCohort(t *testing.T) {
+	store, _ := newTemplateStoreIntegrationTest(t)
+	ctx := context.Background()
+	templates := []*template.Template{
+		{
+			TemplateID: "canary", Scope: naming.ScopeTeam, TeamID: "team-a", UserID: "user-1",
+			Spec: integrationTemplateSpec("ubuntu:24.04"), CreatedAt: time.Now().UTC(),
+		},
+		{
+			TemplateID: "canary", Scope: naming.ScopeTeam, TeamID: "team-b", UserID: "user-1",
+			Spec: integrationTemplateSpec("alpine:3.20"), CreatedAt: time.Now().UTC(),
+		},
+		{
+			TemplateID: "other", Scope: naming.ScopeTeam, TeamID: "team-a", UserID: "user-1",
+			Spec: integrationTemplateSpec("debian:12"), CreatedAt: time.Now().UTC(),
+		},
+		{
+			TemplateID: "canary", Scope: naming.ScopePublic, UserID: "user-1",
+			Spec: integrationTemplateSpec("busybox:1.37"), CreatedAt: time.Now().UTC(),
+		},
+	}
+	for _, tpl := range templates {
+		if err := store.CreateTemplate(ctx, tpl); err != nil {
+			t.Fatalf("CreateTemplate(%s/%s) error = %v", tpl.TeamID, tpl.TemplateID, err)
+		}
+		if _, created, err := store.EnsureTemplateImageRevision(ctx, tpl); err != nil {
+			t.Fatalf("EnsureTemplateImageRevision(%s/%s) error = %v", tpl.TeamID, tpl.TemplateID, err)
+		} else if !created {
+			t.Fatalf("EnsureTemplateImageRevision(%s/%s) created = false, want true", tpl.TeamID, tpl.TemplateID)
+		}
+	}
+
+	claimedKeys := make(map[string]bool)
+	for range 2 {
+		claimed, err := store.ClaimTemplateImageRevision(ctx, "exact-worker", time.Minute, []string{"team-a"}, []string{"canary"})
+		if err != nil {
+			t.Fatalf("exact cohort claim error = %v", err)
+		}
+		if claimed == nil {
+			t.Fatal("exact cohort claim = nil, want private exact or public template match")
+		}
+		claimedKeys[claimed.Scope+"/"+claimed.TeamID+"/"+claimed.TemplateID] = true
+	}
+	if !claimedKeys[naming.ScopeTeam+"/team-a/canary"] || !claimedKeys[naming.ScopePublic+"//canary"] {
+		t.Fatalf("exact cohort claims = %#v, want team/team-a/canary and public//canary", claimedKeys)
+	}
+	claimed, err := store.ClaimTemplateImageRevision(ctx, "exact-worker", time.Minute, []string{"team-a"}, []string{"canary"})
+	if err != nil {
+		t.Fatalf("exhausted exact cohort claim error = %v", err)
+	}
+	if claimed != nil {
+		t.Fatalf("exhausted exact cohort claim = %#v, want nil", claimed)
+	}
+}
+
 func TestClaimTemplateBuildRecoversReconcilingCleanupAfterWorkerCrash(t *testing.T) {
 	store, pool := newTemplateStoreIntegrationTest(t)
 	ctx := context.Background()

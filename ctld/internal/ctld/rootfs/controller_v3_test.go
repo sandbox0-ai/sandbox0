@@ -351,6 +351,13 @@ func TestControllerReturnsServiceUnavailableWhenSealCannotReachObjectStore(t *te
 	})
 	assert.Equal(t, http.StatusServiceUnavailable, status)
 	assert.Contains(t, response.Error, rootfsstore.ErrBackendUnavailable.Error())
+
+	store.failHeads.Store(false)
+	retried, status := controller.SealRootFSHead(request, ctldapi.SealRootFSHeadRequest{
+		SandboxID: "sandbox-1", TeamID: "team-1", HeadID: "recovered-head", ExpectedRuntimeGeneration: 1,
+	})
+	require.Equal(t, http.StatusOK, status, retried.Error)
+	assert.Equal(t, "recovered-head", retried.Reference.HeadID)
 }
 
 func TestControllerBindRootFSSyncRejectsCrossTeamParent(t *testing.T) {

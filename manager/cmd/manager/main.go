@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -596,6 +597,11 @@ func main() {
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
+	// A manager that has not acquired controller leadership cannot complete
+	// controller-backed lifecycle mutations such as pause. Keep it out of the
+	// Service until those workers have started.
+	var controllerReady atomic.Bool
+
 	// Create HTTP server
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
 		SandboxService:          sandboxService,
@@ -613,6 +619,7 @@ func main() {
 		Logger:                  logger,
 		Port:                    cfg.HTTPPort,
 		ObservabilityProvider:   obsProvider,
+		ReadinessCheck:          controllerReady.Load,
 		PublicRootDomain:        cfg.PublicRootDomain,
 		PublicRegionID:          cfg.PublicRegionID,
 	})
@@ -655,8 +662,10 @@ func main() {
 		crdInformerFactory:    crdInformerFactory,
 		metricsPort:           cfg.MetricsPort,
 		leaderElectionEnabled: cfg.LeaderElection,
-		startControllers:      controllers.Start,
-		cacheSyncs:            informerRuntime.cacheSyncs(),
+		startControllers: func(ctx context.Context) {
+			startManagerControllers(ctx, controllers.Start, &controllerReady)
+		},
+		cacheSyncs: informerRuntime.cacheSyncs(),
 	}
 	app.Run()
 }

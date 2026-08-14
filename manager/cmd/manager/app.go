@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions"
@@ -13,6 +14,22 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
+
+// startManagerControllers marks the HTTP server ready only after leader-scoped
+// controllers have started, and withdraws readiness when their context ends.
+func startManagerControllers(ctx context.Context, start func(context.Context), ready *atomic.Bool) {
+	if start != nil {
+		start(ctx)
+	}
+	if ready == nil {
+		return
+	}
+	ready.Store(true)
+	go func() {
+		<-ctx.Done()
+		ready.Store(false)
+	}()
+}
 
 // managerApp owns process-level startup, leader election, and shutdown. Feature
 // construction stays outside this lifecycle object so dependencies are fully

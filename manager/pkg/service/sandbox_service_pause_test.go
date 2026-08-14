@@ -123,7 +123,29 @@ func TestPauseSandboxAndWaitRejectsAbortedCheckpoint(t *testing.T) {
 	response, err := service.PauseSandboxAndWait(context.Background(), "sandbox-1")
 	require.Error(t, err)
 	assert.Nil(t, response)
-	assert.Contains(t, err.Error(), "pause did not complete")
+	assert.Contains(t, err.Error(), "sandbox pause checkpoint failed")
+	require.Error(t, <-enqueuer.done)
+	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
+}
+
+func TestPauseSandboxAndWaitPreservesUnavailableCheckpointOutcome(t *testing.T) {
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"object store unavailable"}`))
+	}))
+	defer ctld.Close()
+
+	service, store, pod := newPauseAndWaitTestService(t, ctld)
+	enqueuer := &completingPauseEnqueuer{service: service, done: make(chan error, 1)}
+	service.pauseEnqueuer = enqueuer
+	var procdCalls []string
+	defer attachRootFSTestProcd(t, pod, service, &procdCalls)()
+
+	response, err := service.PauseSandboxAndWait(context.Background(), "sandbox-1")
+	require.Error(t, err)
+	assert.Nil(t, response)
+	assert.True(t, ctldapi.IsUnavailableError(err), "error should preserve the ctld 503 outcome: %v", err)
 	require.Error(t, <-enqueuer.done)
 	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 }

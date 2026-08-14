@@ -187,6 +187,15 @@ func (s *memorySandboxStore) GetActiveLifecycleTxn(_ context.Context, sandboxID 
 	return nil, nil
 }
 
+func (s *memorySandboxStore) GetLifecycleTxn(_ context.Context, txnID string) (*sandboxstore.SandboxLifecycleTxn, error) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sandboxstore.CloneSandboxLifecycleTxn(s.lifecycleTxns[txnID]), nil
+}
+
 func (s *memorySandboxStore) MarkSandboxDeleted(_ context.Context, sandboxID string, deletedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

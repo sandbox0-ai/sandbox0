@@ -134,6 +134,7 @@ type SandboxStore interface {
 	ListSandboxes(ctx context.Context, req *ListSandboxesRequest) ([]*SandboxRecord, error)
 	ListActiveLifecycleTxns(ctx context.Context, kind string, limit int) ([]*SandboxLifecycleTxn, error)
 	GetActiveLifecycleTxn(ctx context.Context, sandboxID string) (*SandboxLifecycleTxn, error)
+	GetLifecycleTxn(ctx context.Context, txnID string) (*SandboxLifecycleTxn, error)
 	ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error)
 	MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error
 	SaveRootFSHead(ctx context.Context, head *SandboxRootFSHead) error
@@ -457,6 +458,16 @@ func (s *PGSandboxStore) GetActiveLifecycleTxn(ctx context.Context, sandboxID st
 		return nil, nil
 	}
 	return getActiveLifecycleTxn(ctx, s.pool, sandboxID)
+}
+
+// GetLifecycleTxn returns a lifecycle transaction by its durable id.
+func (s *PGSandboxStore) GetLifecycleTxn(ctx context.Context, txnID string) (*SandboxLifecycleTxn, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(txnID) == "" {
+		return nil, nil
+	}
+	return scanLifecycleTxn(s.pool.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1
+	`, strings.TrimSpace(txnID)))
 }
 
 func (s *PGSandboxStore) ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error) {

@@ -15,6 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
@@ -107,28 +108,31 @@ type pauseSandboxRuntimeOptions struct {
 // RequestPauseSandboxRuntime records a durable pause transaction and returns
 // without waiting for rootfs checkpoint upload.
 func (s *SandboxService) RequestPauseSandboxRuntime(ctx context.Context, sandboxID string) (string, error) {
-	return s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{source: sandboxstore.SandboxLifecycleSourceManual})
+	status, _, err := s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{source: sandboxstore.SandboxLifecycleSourceManual})
+	return status, err
 }
 
 func (s *SandboxService) requestAutoPauseSandboxRuntime(ctx context.Context, sandboxID string) (string, error) {
-	return s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{
+	status, _, err := s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{
 		source:     sandboxstore.SandboxLifecycleSourceAuto,
 		cancelable: true,
 	})
+	return status, err
 }
 
-func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandboxID string, opts pauseSandboxRuntimeOptions) (string, error) {
+func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandboxID string, opts pauseSandboxRuntimeOptions) (string, string, error) {
 	if s == nil {
-		return "", fmt.Errorf("sandbox service is nil")
+		return "", "", fmt.Errorf("sandbox service is nil")
 	}
 	if s.sandboxStore == nil {
 		if err := s.pauseSandboxRuntime(ctx, sandboxID, true); err != nil {
-			return "", err
+			return "", "", err
 		}
-		return managerapi.SandboxStatusPaused, nil
+		return managerapi.SandboxStatusPaused, "", nil
 	}
 
 	status := managerapi.SandboxStatusStarting
+	txnID := ""
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		activeTxn, err := tx.GetActiveLifecycleTxn(lockCtx, sandboxID)
 		if err != nil {
@@ -138,6 +142,7 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 			if activeTxn.Kind != sandboxstore.SandboxLifecycleKindPause {
 				return errSandboxLifecycleResuming
 			}
+			txnID = activeTxn.ID
 			projected, err := s.projectSandboxRecordFromCache(lockCtx, record, activeTxn)
 			if projected != nil {
 				status = projected.Status
@@ -185,8 +190,9 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 		if err != nil {
 			return err
 		}
+		txnID = uuid.NewString()
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
-			ID:                   uuid.NewString(),
+			ID:                   txnID,
 			SandboxID:            sandboxID,
 			Kind:                 sandboxstore.SandboxLifecycleKindPause,
 			Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
@@ -202,27 +208,40 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 	if err != nil {
 		if errors.Is(err, errSandboxLifecycleResuming) {
 			if waitErr := s.waitForSandboxLifecycleTxnExit(ctx, sandboxID); waitErr != nil {
-				return "", waitErr
+				return "", "", waitErr
 			}
 			return s.requestPauseSandboxRuntime(ctx, sandboxID, opts)
 		}
 		if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 			if fallbackErr := s.pauseSandboxRuntime(ctx, sandboxID, true); fallbackErr != nil {
-				return "", fallbackErr
+				return "", "", fallbackErr
 			}
-			return managerapi.SandboxStatusPaused, nil
+			return managerapi.SandboxStatusPaused, "", nil
 		}
-		return "", err
+		return "", "", err
 	}
 	if status != managerapi.SandboxStatusPaused {
 		s.enqueueSandboxPause(sandboxID)
 	}
-	return status, nil
+	return status, txnID, nil
 }
 
 const sandboxLifecycleBarrierWaitTimeout = 30 * time.Second
 
 var errSandboxLifecycleCanceled = errors.New("sandbox lifecycle transaction canceled")
+
+const sandboxLifecycleTxnUnavailablePrefix = "dependency_unavailable: "
+
+func sandboxLifecycleTxnAbortReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	reason := err.Error()
+	if ctldapi.IsUnavailableError(err) {
+		return sandboxLifecycleTxnUnavailablePrefix + reason
+	}
+	return reason
+}
 
 func (s *SandboxService) enqueueSandboxPause(sandboxID string) {
 	if s == nil || strings.TrimSpace(sandboxID) == "" {
@@ -394,7 +413,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	runtimeRecovery := crashRecovery || healthRecovery || lostRecovery || rootFSRecovery
 	abortOnError := func(completionErr error) {
 		if !runtimeRecovery && completionErr != nil {
-			_ = s.abortLifecycleTxn(ctx, sandboxID, txn.ID, completionErr.Error())
+			_ = s.abortLifecycleTxn(ctx, sandboxID, txn.ID, sandboxLifecycleTxnAbortReason(completionErr))
 		}
 	}
 	if canceled, err := s.abortPauseIfCancelRequested(ctx, sandboxID, txn.ID); err != nil || canceled {

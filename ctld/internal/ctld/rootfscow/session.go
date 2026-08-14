@@ -1247,6 +1247,12 @@ func (s *Session) setProtectionError(err error) {
 func (s *Session) recordSealError(err error) {
 	s.mu.Lock()
 	s.sealing = false
+	// A failed seal has not published an immutable Head, so its request ID must
+	// not fence a later retry. Callers may generate a fresh Head ID when the
+	// dependency recovers.
+	if s.sealResult == nil {
+		s.sealHeadID = ""
+	}
 	s.sealError = err
 	if !s.backgroundStopped {
 		s.accepting = true

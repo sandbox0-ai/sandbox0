@@ -2,10 +2,14 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 )
@@ -18,11 +22,12 @@ type PauseSandboxResponse struct {
 	ResourceUsage *procdapi.SandboxResourceUsage `json:"resource_usage,omitempty"`
 	UpdatedMemory string                         `json:"updated_memory,omitempty"`
 	UpdatedCPU    string                         `json:"updated_cpu,omitempty"`
+	txnID         string
 }
 
 // PauseSandbox accepts a checkpointed pause request and returns the lifecycle state.
 func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*PauseSandboxResponse, error) {
-	status, err := s.RequestPauseSandboxRuntime(ctx, sandboxID)
+	status, txnID, err := s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{source: sandboxstore.SandboxLifecycleSourceManual})
 	if err != nil {
 		return nil, err
 	}
@@ -30,6 +35,7 @@ func (s *SandboxService) PauseSandbox(ctx context.Context, sandboxID string) (*P
 		SandboxID: sandboxID,
 		Paused:    status == managerapi.SandboxStatusPaused,
 		Status:    status,
+		txnID:     txnID,
 	}, nil
 }
 
@@ -54,6 +60,15 @@ func (s *SandboxService) PauseSandboxAndWait(ctx context.Context, sandboxID stri
 		return nil, fmt.Errorf("get sandbox after pause: %w", err)
 	}
 	if sandbox == nil || sandbox.Status != managerapi.SandboxStatusPaused || !sandbox.Paused {
+		if response.txnID != "" {
+			txn, txnErr := s.sandboxStore.GetLifecycleTxn(pauseCtx, response.txnID)
+			if txnErr != nil {
+				return nil, fmt.Errorf("load sandbox pause outcome: %w", txnErr)
+			}
+			if outcomeErr := sandboxPauseOutcomeError(txn); outcomeErr != nil {
+				return nil, outcomeErr
+			}
+		}
 		status := "unknown"
 		if sandbox != nil && strings.TrimSpace(sandbox.Status) != "" {
 			status = sandbox.Status
@@ -65,6 +80,24 @@ func (s *SandboxService) PauseSandboxAndWait(ctx context.Context, sandboxID stri
 		Paused:    true,
 		Status:    managerapi.SandboxStatusPaused,
 	}, nil
+}
+
+func sandboxPauseOutcomeError(txn *sandboxstore.SandboxLifecycleTxn) error {
+	if txn == nil || txn.Kind != sandboxstore.SandboxLifecycleKindPause || txn.Phase != sandboxstore.SandboxLifecyclePhaseAborted {
+		return nil
+	}
+	reason := strings.TrimSpace(txn.Error)
+	if reason == "" {
+		reason = "checkpoint transaction aborted"
+	}
+	if strings.HasPrefix(reason, sandboxLifecycleTxnUnavailablePrefix) {
+		reason = strings.TrimSpace(strings.TrimPrefix(reason, sandboxLifecycleTxnUnavailablePrefix))
+		return fmt.Errorf("sandbox pause checkpoint failed: %w", &ctldapi.RequestError{
+			StatusCode: http.StatusServiceUnavailable,
+			Message:    reason,
+		})
+	}
+	return fmt.Errorf("sandbox pause checkpoint failed: %w", errors.New(reason))
 }
 
 // ResumeSandbox creates or reuses a runtime and restores the latest rootfs checkpoint.

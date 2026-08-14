@@ -127,6 +127,7 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 		SandboxVolumeID: "volume-1",
 		MountPoint:      "/workspace/data",
 	}}
+	store.records["sandbox-1"].RootFSRuntimeVersion = sandboxstore.RootFSRuntimeS0FSV2
 	svc := rootFSProductTestService(store)
 
 	snapshot, err := svc.CreateSandboxRootFSSnapshot(context.Background(), "sandbox-1", "team-1", &CreateSandboxRootFSSnapshotRequest{
@@ -166,6 +167,7 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 	assert.Empty(t, forkResp.Sandbox.Mounts)
 	assert.Len(t, forkResp.Sandbox.Services, 1)
 	assert.Equal(t, "layer-v1", store.rootFSHeads[forkResp.Sandbox.ID].Reference.HeadID)
+	assert.Equal(t, sandboxstore.RootFSRuntimeS0FSV2, store.records[forkResp.Sandbox.ID].RootFSRuntimeVersion)
 
 	require.NoError(t, svc.DeleteSandboxRootFSSnapshot(context.Background(), snapshot.ID, "team-1"))
 	_, err = svc.GetSandboxRootFSSnapshot(context.Background(), snapshot.ID, "team-1")

@@ -368,21 +368,22 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		hardExpiresAt = source.HardExpiresAt
 	}
 	target := &sandboxstore.SandboxRecord{
-		ID:                targetID,
-		TeamID:            teamID,
-		UserID:            userID,
-		TemplateID:        source.TemplateID,
-		TemplateName:      source.TemplateName,
-		TemplateNamespace: source.TemplateNamespace,
-		ClusterID:         source.ClusterID,
-		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
-		Config:            targetConfig,
-		TemplateSpec:      *source.TemplateSpec.DeepCopy(),
-		ClaimedAt:         now,
-		ExpiresAt:         expiresAt,
-		HardExpiresAt:     hardExpiresAt,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                   targetID,
+		TeamID:               teamID,
+		UserID:               userID,
+		TemplateID:           source.TemplateID,
+		TemplateName:         source.TemplateName,
+		TemplateNamespace:    source.TemplateNamespace,
+		ClusterID:            source.ClusterID,
+		DesiredState:         sandboxstore.SandboxDesiredStatePaused,
+		Config:               targetConfig,
+		TemplateSpec:         *source.TemplateSpec.DeepCopy(),
+		RootFSRuntimeVersion: source.RootFSRuntimeVersion,
+		ClaimedAt:            now,
+		ExpiresAt:            expiresAt,
+		HardExpiresAt:        hardExpiresAt,
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}
 	checkpointCommitted := false
 	if checkpoint != nil {

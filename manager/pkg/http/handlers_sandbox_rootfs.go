@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"go.uber.org/zap"
@@ -164,6 +165,8 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox checkpoint requires ctld")
 	case errors.Is(err, service.ErrSandboxRootFSStoreUnavailable):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox rootfs store is unavailable")
+	case ctldapi.IsUnavailableError(err):
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox rootfs dependency is unavailable")
 	default:
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, fmt.Sprintf("failed to %s: %v", action, err))
 	}

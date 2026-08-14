@@ -95,6 +95,12 @@ func IsNotFoundError(err error) bool {
 	return errors.As(err, &reqErr) && reqErr != nil && reqErr.StatusCode == http.StatusNotFound
 }
 
+// IsUnavailableError reports whether err contains a ctld HTTP 503 response.
+func IsUnavailableError(err error) bool {
+	var reqErr *RequestError
+	return errors.As(err, &reqErr) && reqErr != nil && reqErr.StatusCode == http.StatusServiceUnavailable
+}
+
 func (c *Client) Probe(ctx context.Context, ctldAddress, sandboxID string, kind sandboxprobe.Kind) (*sandboxprobe.Response, error) {
 	path := fmt.Sprintf("/api/v1/sandboxes/%s/probes/%s", url.PathEscape(sandboxID), url.PathEscape(string(kind)))
 	return PostJSON[sandboxprobe.Response](ctx, c.httpClientOrDefault(), ctldAddress, path, nil)

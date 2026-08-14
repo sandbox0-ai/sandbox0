@@ -1155,6 +1155,16 @@ func (s *memorySandboxStoreForManagerIntegration) GetActiveLifecycleTxn(_ contex
 	return nil, nil
 }
 
+func (s *memorySandboxStoreForManagerIntegration) GetLifecycleTxn(_ context.Context, txnID string) (*sandboxstore.SandboxLifecycleTxn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	txn := s.lifecycleTxns[txnID]
+	if txn == nil {
+		return nil, nil
+	}
+	return cloneSandboxLifecycleTxnForManagerIntegration(txn), nil
+}
+
 func (s *memorySandboxStoreForManagerIntegration) MarkSandboxDeleted(_ context.Context, sandboxID string, deletedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

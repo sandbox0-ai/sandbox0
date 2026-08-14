@@ -49,19 +49,43 @@ func (s *Store) EnsureTemplateImageRevision(ctx context.Context, tpl *template.T
 	if err != nil {
 		return nil, false, fmt.Errorf("create template image revision: %w", err)
 	}
+	created := tag.RowsAffected() == 1
 
-	stored, err := scanTemplateImageRevision(tx.QueryRow(ctx, `
-		SELECT `+templateImageRevisionSelectColumns+`
-		FROM scheduler_template_image_revisions
-		WHERE scope = $1 AND team_id = $2 AND template_id = $3 AND spec_hash = $4
-	`, revision.Scope, revision.TeamID, revision.TemplateID, revision.SpecHash))
+	loadStored := func() (*template.TemplateImageRevision, error) {
+		return scanTemplateImageRevision(tx.QueryRow(ctx, `
+			SELECT `+templateImageRevisionSelectColumns+`
+			FROM scheduler_template_image_revisions
+			WHERE scope = $1 AND team_id = $2 AND template_id = $3 AND spec_hash = $4
+		`, revision.Scope, revision.TeamID, revision.TemplateID, revision.SpecHash))
+	}
+	stored, err := loadStored()
 	if err != nil {
 		return nil, false, fmt.Errorf("load template image revision: %w", err)
+	}
+	if !created && stored.State == template.TemplateImageRevisionStateFailed &&
+		stored.Reason == template.TemplateImageRevisionReasonSuperseded {
+		if _, err := tx.Exec(ctx, `
+			UPDATE scheduler_template_image_revisions
+			SET resolved_digest = '', platform_os = '', platform_architecture = '',
+				platform_variant = '', image_fs_head_id = NULL, oci_config = NULL,
+				state = 'resolving', attempt_count = 0, next_attempt_at = NOW(),
+				lease_owner = NULL, lease_expires_at = NULL,
+				reason = '', message = '', started_at = NULL, completed_at = NULL
+			WHERE scope = $1 AND team_id = $2 AND template_id = $3 AND spec_hash = $4
+				AND state = 'failed' AND reason = $5
+		`, revision.Scope, revision.TeamID, revision.TemplateID, revision.SpecHash,
+			template.TemplateImageRevisionReasonSuperseded); err != nil {
+			return nil, false, fmt.Errorf("revive superseded template image revision: %w", err)
+		}
+		stored, err = loadStored()
+		if err != nil {
+			return nil, false, fmt.Errorf("reload revived template image revision: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("commit template image revision: %w", err)
 	}
-	return stored, tag.RowsAffected() == 1, nil
+	return stored, created, nil
 }
 
 // SelectCurrentTemplateImageRevision makes one immutable revision visible to

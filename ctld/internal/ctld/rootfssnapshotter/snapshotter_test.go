@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func TestMarkerCommitPinsDurableBaseAndMountsLazily(t *testing.T) {
@@ -272,6 +274,48 @@ func TestPrepareFailsWhenHeadObjectIsCorrupt(t *testing.T) {
 	fixture.snapshotter.metadata = metadata
 	_, err := fixture.snapshotter.Prepare(context.Background(), "sandbox-child", fixture.headChain)
 	assert.ErrorContains(t, err, "failed size or digest validation")
+}
+
+func TestFuseMountUnmountLazilyDetachesWithoutWaitingForServer(t *testing.T) {
+	done := make(chan struct{})
+	called := false
+	mounted := &fuseMount{
+		target: "/rootfs/head",
+		done:   done,
+		detach: func(target string, flags int) error {
+			called = true
+			assert.Equal(t, "/rootfs/head", target)
+			assert.Equal(t, unix.MNT_DETACH, flags)
+			return nil
+		},
+	}
+
+	require.NoError(t, mounted.Unmount())
+	assert.True(t, called)
+	select {
+	case <-done:
+		t.Fatal("lazy detach must not wait for or close the FUSE server loop")
+	default:
+	}
+}
+
+func TestFuseMountUnmountToleratesAlreadyDetachedTarget(t *testing.T) {
+	for _, detachErr := range []error{syscall.EINVAL, syscall.ENOENT} {
+		mounted := &fuseMount{
+			target: "/rootfs/head",
+			detach: func(string, int) error { return detachErr },
+		}
+		require.NoError(t, mounted.Unmount())
+	}
+}
+
+func TestFuseMountUnmountReturnsDetachFailure(t *testing.T) {
+	mounted := &fuseMount{
+		target: "/rootfs/head",
+		detach: func(string, int) error { return syscall.EPERM },
+	}
+
+	assert.ErrorContains(t, mounted.Unmount(), "detach rootfs FUSE Head")
 }
 
 type snapshotterFixture struct {

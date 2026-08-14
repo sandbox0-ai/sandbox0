@@ -32,6 +32,15 @@ func (p *InfraPlan) BuiltinTemplates() []infrav1alpha1.BuiltinTemplateConfig {
 	return out
 }
 
+// BuiltinTemplateSyncEnabled reports whether this infra instance owns builtin
+// template writes in the region-scoped template store.
+func (p *InfraPlan) BuiltinTemplateSyncEnabled() bool {
+	if p == nil || p.infra == nil || p.infra.Spec.BuiltinTemplateSyncEnabled == nil {
+		return true
+	}
+	return *p.infra.Spec.BuiltinTemplateSyncEnabled
+}
+
 func defaultBuiltinTemplates() []infrav1alpha1.BuiltinTemplateConfig {
 	return []infrav1alpha1.BuiltinTemplateConfig{
 		{TemplateID: s0template.DefaultTemplateID},

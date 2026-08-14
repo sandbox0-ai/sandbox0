@@ -195,6 +195,23 @@ func TestBuiltinTemplatesDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestBuiltinTemplateSyncDefaultsEnabledAndAllowsExplicitDisable(t *testing.T) {
+	t.Parallel()
+
+	if !Compile(&infrav1alpha1.Sandbox0Infra{}).BuiltinTemplateSyncEnabled() {
+		t.Fatal("builtin template sync should default to enabled")
+	}
+
+	disabled := false
+	if Compile(&infrav1alpha1.Sandbox0Infra{
+		Spec: infrav1alpha1.Sandbox0InfraSpec{
+			BuiltinTemplateSyncEnabled: &disabled,
+		},
+	}).BuiltinTemplateSyncEnabled() {
+		t.Fatal("explicitly disabled builtin template sync should remain disabled")
+	}
+}
+
 func TestCompileEnablesClickHouseBeforeSandboxObservability(t *testing.T) {
 	enabled := true
 	infra := &infrav1alpha1.Sandbox0Infra{

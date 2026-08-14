@@ -327,6 +327,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		DatabaseMaxConns:     config.DatabaseMaxConns,
 		DatabaseMinConns:     config.DatabaseMinConns,
 		TemplateStoreEnabled: config.TemplateStoreEnabled,
+		DisableSync:          !compiledPlan.BuiltinTemplateSyncEnabled(),
 		Owner:                "manager",
 		ResourcePolicy:       common.TemplateResourcePolicyFromManagerConfig(config),
 	}); err != nil {

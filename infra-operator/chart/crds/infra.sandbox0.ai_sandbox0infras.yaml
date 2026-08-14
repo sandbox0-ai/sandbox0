@@ -54,6 +54,12 @@ spec:
           spec:
             description: Sandbox0InfraSpec defines the desired state of Sandbox0Infra
             properties:
+              builtinTemplateSyncEnabled:
+                description: |-
+                  BuiltinTemplateSyncEnabled controls whether this infra instance writes
+                  builtin templates to the region-scoped template store. Disable it on
+                  additional data-plane clusters that share a control-plane database.
+                type: boolean
               builtinTemplates:
                 description: BuiltinTemplates defines system builtin templates to
                   seed the template store

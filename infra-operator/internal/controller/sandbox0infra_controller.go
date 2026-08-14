@@ -460,7 +460,7 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 			if err := rbacReconciler.ReconcileCtldRBAC(ctx, infra); err != nil {
 				return err
 			}
-			return ctldReconciler.Reconcile(ctx, infra, imageRepo, imageTag, compiledPlan.Services.ClusterGateway.URL)
+			return ctldReconciler.Reconcile(ctx, infra, imageRepo, imageTag, r.getRootFSSnapshotterImageTag(ctx), compiledPlan.Services.ClusterGateway.URL)
 		}, nil
 	case "ctld-ready":
 		return func(ctx context.Context) error {

@@ -264,7 +264,7 @@ func TestWaitForImportContainerObservesFailureAfterPodCreation(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "importer", Namespace: "sandbox-team"}}
 	client := fake.NewSimpleClientset(pod)
 	getCalls := 0
-	client.Fake.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		getCalls++
 		current := pod.DeepCopy()
 		if getCalls > 1 {
@@ -305,10 +305,10 @@ func TestProcessStartupFailureDeletesImporterAndReleasesRevision(t *testing.T) {
 		}}},
 	}
 	client := fake.NewSimpleClientset()
-	client.Fake.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, importPod.DeepCopy(), nil
 	})
-	client.Fake.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, importPod.DeepCopy(), nil
 	})
 	queue := &workerQueueStub{template: tpl}

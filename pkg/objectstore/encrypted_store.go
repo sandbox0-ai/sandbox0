@@ -58,6 +58,27 @@ func (c EncryptionConfig) enabled() bool {
 	return c.Enabled && c.KeyEncryptor != nil
 }
 
+// IsEnabled reports whether the configuration can encrypt and decrypt objects.
+func (c EncryptionConfig) IsEnabled() bool {
+	return c.enabled()
+}
+
+// HasEncryptedObjectHeader reports whether a reader starts with the Sandbox0
+// encrypted-object format marker. The consumed bytes are not restored.
+func HasEncryptedObjectHeader(in io.Reader) (bool, error) {
+	if in == nil {
+		return false, nil
+	}
+	prefix := make([]byte, len(encryptedObjectMagic))
+	if _, err := io.ReadFull(in, prefix); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return false, nil
+		}
+		return false, err
+	}
+	return string(prefix) == encryptedObjectMagic, nil
+}
+
 func (c EncryptionConfig) normalizedAlgorithm() string {
 	if strings.TrimSpace(c.Algorithm) == "" {
 		return EncryptionAlgoAES256GCMRSA

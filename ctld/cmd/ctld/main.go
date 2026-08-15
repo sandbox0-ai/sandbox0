@@ -447,11 +447,11 @@ func buildRootFSController(
 	runtime *ctldrootfs.ContainerdRuntime,
 	observer *ctldrootfs.Observer,
 ) rootFSHandler {
-	store, err := buildRootFSObjectStore(storageCfg, requestObserver)
+	store, cacheEncryption, err := buildRootFSObjectStore(storageCfg, requestObserver)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
-	objectCache := buildRootFSObjectCache(ctx, observer)
+	objectCache := buildRootFSObjectCache(ctx, observer, cacheEncryption)
 	return ctldrootfs.NewController(ctldrootfs.Config{
 		Runtime:     runtime,
 		Store:       store,
@@ -475,7 +475,7 @@ func buildContainerdRuntime(observer *ctldrootfs.Observer) *ctldrootfs.Container
 	})
 }
 
-func buildRootFSObjectCache(ctx context.Context, observer *ctldrootfs.Observer) *ctldrootfs.ObjectCache {
+func buildRootFSObjectCache(ctx context.Context, observer *ctldrootfs.Observer, encryption objectstore.EncryptionConfig) *ctldrootfs.ObjectCache {
 	maxBytes, err := parseByteQuantity(rootFSObjectCacheMaxBytes)
 	if err != nil {
 		log.Printf("ctld rootfs object cache disabled: %v", err)
@@ -493,6 +493,7 @@ func buildRootFSObjectCache(ctx context.Context, observer *ctldrootfs.Observer) 
 		MaxAge:        rootFSObjectCacheMaxAge,
 		SweepInterval: rootFSObjectCacheSweepInterval,
 		Observer:      observer,
+		Encryption:    encryption,
 	})
 	if cache != nil {
 		cache.Start(ctx)
@@ -518,9 +519,9 @@ func parseByteQuantity(raw string) (int64, error) {
 	return bytes, nil
 }
 
-func buildRootFSObjectStore(cfg *apiconfig.RootFSObjectStorageConfig, requestObserver objectstore.RequestObserver) (objectstore.Store, error) {
+func buildRootFSObjectStore(cfg *apiconfig.RootFSObjectStorageConfig, requestObserver objectstore.RequestObserver) (objectstore.Store, objectstore.EncryptionConfig, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("storage config is not configured")
+		return nil, objectstore.EncryptionConfig{}, fmt.Errorf("storage config is not configured")
 	}
 	store, err := objectstore.Create(objectstore.Config{
 		Type:            cfg.Type,
@@ -533,24 +534,26 @@ func buildRootFSObjectStore(cfg *apiconfig.RootFSObjectStorageConfig, requestObs
 		RequestObserver: requestObserver,
 	})
 	if err != nil {
-		return nil, err
+		return nil, objectstore.EncryptionConfig{}, err
 	}
+	encryption := objectstore.EncryptionConfig{}
 	if cfg.ObjectEncryptionEnabled {
 		keyPEM, err := objectstore.LoadEncryptionKey(cfg.ObjectEncryptionKeyPath)
 		if err != nil {
-			return nil, err
+			return nil, objectstore.EncryptionConfig{}, err
 		}
 		keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, cfg.ObjectEncryptionPassphrase)
 		if err != nil {
-			return nil, err
+			return nil, objectstore.EncryptionConfig{}, err
 		}
-		store = objectstore.Encrypting(store, objectstore.EncryptionConfig{
+		encryption = objectstore.EncryptionConfig{
 			Enabled:      true,
 			Algorithm:    cfg.ObjectEncryptionAlgo,
 			KeyEncryptor: keyEncryptor,
-		})
+		}
+		store = objectstore.Encrypting(store, encryption)
 	}
-	return store, nil
+	return store, encryption, nil
 }
 
 func initCtldDatabase(ctx context.Context, cfg *apiconfig.CtldConfig, obsProvider *observability.Provider) (*pgxpool.Pool, error) {

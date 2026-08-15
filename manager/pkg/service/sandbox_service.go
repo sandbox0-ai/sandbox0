@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	egressauth "github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
@@ -18,11 +17,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -85,7 +81,6 @@ type SandboxServiceConfig struct {
 	PublicRootDomain                    string
 	PublicRegionID                      string
 	AutoscalerSafeToEvictAnnotationKeys []string
-	S0FSAdmission                       s0fsrollout.Admission
 }
 
 // SandboxService handles sandbox operations
@@ -113,29 +108,14 @@ type SandboxService struct {
 	volumeMetadata                         SandboxVolumeMetadataClient
 	quotaStore                             TeamQuotaLimitStore
 	sandboxStore                           sandboxstore.SandboxStore
-	rootFSObjectStore                      objectstore.Store
+	rootFSObjectDeleter                    sandboxstore.RootFSObjectDeleter
 	templateImageBuildCapabilityConfigured bool
 	templateImageBuildAvailable            bool
 	resumeGroup                            singleflight.Group
 	idleClaimMu                            sync.Mutex
 	idleClaimReservations                  map[string]string
-	sharedCarrierPool                      SharedCarrierPool
 	podWaiterMu                            sync.Mutex
 	podWaiter                              *podEventWaiter
-}
-
-// SharedCarrierPool is the manager-owned cluster-wide carrier allocator.
-type SharedCarrierPool interface {
-	Reserve(context.Context) (*corev1.Pod, error)
-	CreateCold(context.Context, *v1alpha1.SandboxTemplate) (*corev1.Pod, error)
-	Delete(context.Context, *corev1.Pod) error
-}
-
-// SetSharedCarrierPool enables the S0FS carrier claim path.
-func (s *SandboxService) SetSharedCarrierPool(pool SharedCarrierPool) {
-	if s != nil {
-		s.sharedCarrierPool = pool
-	}
 }
 
 type TeamQuotaLimitStore interface {
@@ -204,7 +184,7 @@ type SandboxServiceDependencies struct {
 	VolumeMetadataClient        SandboxVolumeMetadataClient
 	QuotaStore                  TeamQuotaLimitStore
 	SandboxStore                sandboxstore.SandboxStore
-	RootFSObjectStore           objectstore.Store
+	RootFSObjectDeleter         sandboxstore.RootFSObjectDeleter
 }
 
 // NewSandboxServiceWithDependencies creates a SandboxService from named
@@ -273,7 +253,7 @@ func NewSandboxServiceWithDependencies(deps SandboxServiceDependencies) *Sandbox
 		volumeMetadata:              deps.VolumeMetadataClient,
 		quotaStore:                  deps.QuotaStore,
 		sandboxStore:                deps.SandboxStore,
-		rootFSObjectStore:           deps.RootFSObjectStore,
+		rootFSObjectDeleter:         deps.RootFSObjectDeleter,
 		idleClaimReservations:       make(map[string]string),
 		podWaiter:                   newPodEventWaiter(),
 	}

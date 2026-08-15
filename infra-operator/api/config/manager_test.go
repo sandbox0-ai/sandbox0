@@ -5,65 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 )
-
-func TestS0FSRolloutControlsPreserveLegacySharedPoolBehavior(t *testing.T) {
-	cfg := &ManagerConfig{SharedCarrierPool: SharedCarrierPoolConfig{Enabled: true}}
-	if !cfg.TemplateImageFSEnabled() || !cfg.S0FSRuntimeEnabled() {
-		t.Fatal("legacy shared carrier switch did not enable import and runtime capability")
-	}
-	admission, err := cfg.S0FSAdmission()
-	if err != nil {
-		t.Fatalf("S0FSAdmission() error = %v", err)
-	}
-	if admission.Mode() != s0fsrollout.AdmissionModeShared || !admission.Admits(naming.ScopePublic, "", "template-a") {
-		t.Fatalf("legacy admission mode = %q, want shared admit-all", admission.Mode())
-	}
-}
-
-func TestS0FSRolloutControlsAllowShadowImportWithAdmissionOff(t *testing.T) {
-	enabled := true
-	cfg := &ManagerConfig{
-		TemplateImageFS: TemplateImageFSConfig{
-			Enabled: &enabled, TeamIDs: []string{"shadow-team"}, TemplateIDs: []string{"shadow-template"},
-		},
-		S0FSRuntime: S0FSRuntimeConfig{Enabled: true, Admission: S0FSAdmissionConfig{
-			Mode: "off", TeamIDs: []string{"team-a"}, RejectLegacyClaims: true,
-		}},
-	}
-	if !cfg.TemplateImageFSEnabled() || !cfg.S0FSRuntimeEnabled() {
-		t.Fatal("explicit shadow import configuration is disabled")
-	}
-	admission, err := cfg.S0FSAdmission()
-	if err != nil {
-		t.Fatalf("S0FSAdmission() error = %v", err)
-	}
-	if admission.Admits(naming.ScopeTeam, "team-a", "template-a") || !admission.RejectLegacyClaims() {
-		t.Fatal("off admission did not remain fail-closed")
-	}
-	if len(cfg.TemplateImageFS.TeamIDs) != 1 || len(cfg.TemplateImageFS.TemplateIDs) != 1 {
-		t.Fatalf("template ImageFS cohort = %#v, want explicit shadow selectors", cfg.TemplateImageFS)
-	}
-}
-
-func TestS0FSRolloutControlsAllowExplicitAdmissionForAllTemplates(t *testing.T) {
-	cfg := &ManagerConfig{
-		S0FSRuntime: S0FSRuntimeConfig{Enabled: true, Admission: S0FSAdmissionConfig{
-			Mode: "shared", AdmitAll: true, RejectLegacyClaims: true,
-		}},
-	}
-	admission, err := cfg.S0FSAdmission()
-	if err != nil {
-		t.Fatalf("S0FSAdmission() error = %v", err)
-	}
-	if !admission.Admits(naming.ScopePublic, "", "public-template") ||
-		!admission.Admits(naming.ScopeTeam, "team-a", "private-template") {
-		t.Fatal("explicit admit-all configuration did not admit every template scope")
-	}
-}
 
 func TestEffectiveRuntimeReadyTimeout(t *testing.T) {
 	tests := []struct {

@@ -632,14 +632,16 @@ func (s *SandboxService) podToSandboxStatus(pod *corev1.Pod) string {
 	if pod.DeletionTimestamp != nil {
 		return managerapi.SandboxStatusTerminating
 	}
-	ready, failed, _ := runtimeAssignmentObservation(pod, "")
-	switch {
-	case ready:
-		return managerapi.SandboxStatusRunning
-	case failed:
-		return managerapi.SandboxStatusFailed
-	case pod.Status.Phase == corev1.PodRunning:
-		return managerapi.SandboxStatusStarting
+	if pod.Status.Phase == corev1.PodRunning {
+		ready, failed, _ := runtimeAssignmentObservation(pod, "")
+		switch {
+		case ready:
+			return managerapi.SandboxStatusRunning
+		case failed:
+			return managerapi.SandboxStatusFailed
+		default:
+			return managerapi.SandboxStatusStarting
+		}
 	}
 	return s.podPhaseToSandboxStatus(pod.Status.Phase)
 }

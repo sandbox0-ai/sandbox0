@@ -36,12 +36,6 @@ func (s *SandboxService) ctldAddressForPod(ctx context.Context, pod *corev1.Pod)
 	return ctldAddressForNode(node, s.config.CtldPort)
 }
 
-// CtldAddressForPod resolves the node-local ctld endpoint for manager-owned
-// background workflows such as OCI-to-ImageFS import.
-func (s *SandboxService) CtldAddressForPod(ctx context.Context, pod *corev1.Pod) (string, error) {
-	return s.ctldAddressForPod(ctx, pod)
-}
-
 func ctldAddressForNode(node *corev1.Node, port int) (string, error) {
 	if node == nil {
 		return "", fmt.Errorf("node is nil")

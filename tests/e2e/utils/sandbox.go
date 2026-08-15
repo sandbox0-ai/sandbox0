@@ -6,12 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/apispec"
 )
-
-const sandboxClaimRequestTimeout = 2 * time.Minute
 
 // ListSandboxesResponse represents the response from listing sandboxes
 type ListSandboxesResponse struct {
@@ -95,17 +92,7 @@ func (s *Session) ClaimSandboxDetailed(ctx context.Context, t ContractT, req api
 	if s.teamID == "" || s.userID == "" {
 		return nil, 0, fmt.Errorf("team or user id missing")
 	}
-	status, body, err := s.doJSONSpecRequestWithHeadersAndTimeout(
-		t,
-		ctx,
-		http.MethodPost,
-		"/api/v1/sandboxes",
-		"/api/v1/sandboxes",
-		req,
-		true,
-		nil,
-		sandboxClaimRequestTimeout,
-	)
+	status, body, err := s.doJSONSpecRequest(t, ctx, http.MethodPost, "/api/v1/sandboxes", "/api/v1/sandboxes", req, true)
 	if err != nil {
 		return nil, status, err
 	}
@@ -136,48 +123,6 @@ func (s *Session) DeleteSandbox(ctx context.Context, t ContractT, sandboxID stri
 		return fmt.Errorf("delete sandbox failed with status %d: %s", status, formatAPIError(body))
 	}
 	return nil
-}
-
-// DeleteAllSandboxesEventually removes every sandbox visible to the selected
-// team. Re-listing is required because a timed-out create request can complete
-// server-side without returning its sandbox ID to the test process.
-func (s *Session) DeleteAllSandboxesEventually(ctx context.Context, t ContractT, timeout time.Duration) error {
-	if timeout <= 0 {
-		timeout = 2 * time.Minute
-	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	retry := time.NewTicker(500 * time.Millisecond)
-	defer retry.Stop()
-
-	limit := 200
-	remaining := 0
-	for {
-		listed, _, err := s.ListSandboxes(ctx, t, &ListSandboxesOptions{Limit: &limit})
-		if err != nil {
-			return fmt.Errorf("list sandboxes for cleanup: %w", err)
-		}
-		remaining = listed.Count
-		if remaining == 0 {
-			return nil
-		}
-		if len(listed.Sandboxes) == 0 {
-			return fmt.Errorf("list sandboxes reported %d remaining but returned no resources", remaining)
-		}
-		for _, sandbox := range listed.Sandboxes {
-			if err := s.DeleteSandbox(ctx, t, sandbox.Id); err != nil {
-				return fmt.Errorf("delete sandbox %q during cleanup: %w", sandbox.Id, err)
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("delete all sandboxes: %w", ctx.Err())
-		case <-deadline.C:
-			return fmt.Errorf("delete all sandboxes remained blocked after %s: %d resources remain", timeout, remaining)
-		case <-retry.C:
-		}
-	}
 }
 
 func (s *Session) GetSandbox(ctx context.Context, t ContractT, sandboxID string) (*apispec.Sandbox, int, error) {

@@ -41,7 +41,6 @@ type BuiltinTemplateOptions struct {
 	DatabaseMaxConns     int32
 	DatabaseMinConns     int32
 	TemplateStoreEnabled bool
-	DisableSync          bool
 	Owner                string
 	ResourcePolicy       template.ResourcePolicy
 }
@@ -78,12 +77,6 @@ func EnsureBuiltinTemplates(ctx context.Context, builtins []infrav1alpha1.Builti
 		migrate.WithSchema("scheduler"),
 	); err != nil {
 		return fmt.Errorf("migrate template store: %w", err)
-	}
-	// Reader clusters still apply additive schema migrations; only builtin
-	// template writes and pruning are single-writer operations.
-	if opts.DisableSync {
-		logger.Info("Builtin template writes disabled; preserving region-scoped template store")
-		return nil
 	}
 
 	store := templstorepg.NewStore(pool)

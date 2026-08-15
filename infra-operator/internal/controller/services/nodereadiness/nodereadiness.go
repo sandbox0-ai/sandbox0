@@ -83,8 +83,6 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 	requireCtld := compiledPlan.Components.EnableCtld
 
 	ctldReadyByNode := make(map[string]bool)
-	rootFSSnapshotterReadyByNode := make(map[string]bool)
-	rootFSSnapshotterInstanceByNode := make(map[string]string)
 	csiRegisteredByNode := make(map[string]bool)
 	if managerEnabled && (requireCtld || requireNetwork) {
 		podList := &corev1.PodList{}
@@ -102,12 +100,6 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 			return summary, err
 		}
 		ctldReadyByNode = readyCtldPodsByNode(podList.Items, ctldDaemonSets, requireNetwork)
-		rootFSSnapshotterDaemonSet, err := r.currentRootFSSnapshotterDaemonSet(ctx, compiledPlan)
-		if err != nil {
-			return summary, err
-		}
-		rootFSSnapshotterReadyByNode = readyRootFSSnapshotterPodsByNode(podList.Items, rootFSSnapshotterDaemonSet)
-		rootFSSnapshotterInstanceByNode = readyRootFSSnapshotterInstancesByNode(podList.Items, rootFSSnapshotterDaemonSet)
 	}
 	if managerEnabled && requireCtld {
 		csiNodeList := &storagev1.CSINodeList{}
@@ -136,7 +128,7 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 			continue
 		}
 
-		ctldReady := !requireCtld || (ctldReadyByNode[node.Name] && rootFSSnapshotterReadyByNode[node.Name] && csiRegisteredByNode[node.Name])
+		ctldReady := !requireCtld || (ctldReadyByNode[node.Name] && csiRegisteredByNode[node.Name])
 		// Active ctld readiness includes the network runtime, while standby
 		// readiness proves that the HA peer can take over.
 		networkReady := !requireNetwork || ctldReady
@@ -145,26 +137,11 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 			summary.ReadyNodes++
 		}
 
-		if err := r.patchNodeReadiness(ctx, node, ready, requireCtld, ctldReady, rootFSSnapshotterInstanceByNode[node.Name]); err != nil {
+		if err := r.patchNodeReadiness(ctx, node, ready, requireCtld, ctldReady); err != nil {
 			return summary, err
 		}
 	}
 	return summary, nil
-}
-
-func (r *Reconciler) currentRootFSSnapshotterDaemonSet(ctx context.Context, compiledPlan *infraplan.InfraPlan) (*appsv1.DaemonSet, error) {
-	ds := &appsv1.DaemonSet{}
-	key := types.NamespacedName{
-		Name:      compiledPlan.Scope.Name + "-rootfs-snapshotter",
-		Namespace: compiledPlan.Scope.Namespace,
-	}
-	if err := r.Resources.Client.Get(ctx, key, ds); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get rootfs snapshotter daemonset: %w", err)
-	}
-	return ds, nil
 }
 
 func (r *Reconciler) currentCtldDaemonSets(ctx context.Context, compiledPlan *infraplan.InfraPlan) (map[string]*appsv1.DaemonSet, error) {
@@ -193,8 +170,7 @@ func (r *Reconciler) clearNodeReadiness(ctx context.Context, node *corev1.Node) 
 	original := node.DeepCopy()
 	delete(node.Labels, dataplane.NodeDataPlaneReadyLabel)
 	delete(node.Labels, dataplane.NodeCtldReadyLabel)
-	delete(node.Annotations, dataplane.NodeRootFSSnapshotterInstanceAnnotation)
-	if labelsEqual(original.Labels, node.Labels) && labelsEqual(original.Annotations, node.Annotations) {
+	if labelsEqual(original.Labels, node.Labels) {
 		return nil
 	}
 	if err := r.Resources.Client.Patch(ctx, node, client.MergeFrom(original)); err != nil {
@@ -209,7 +185,6 @@ func (r *Reconciler) patchNodeReadiness(
 	dataPlaneReady bool,
 	requireCtld bool,
 	ctldReady bool,
-	rootFSSnapshotterInstance string,
 ) error {
 	if node == nil {
 		return nil
@@ -218,17 +193,11 @@ func (r *Reconciler) patchNodeReadiness(
 	if node.Labels == nil {
 		node.Labels = make(map[string]string)
 	}
-	if node.Annotations == nil {
-		node.Annotations = make(map[string]string)
-	}
 
 	setBoolLabel(node.Labels, dataplane.NodeDataPlaneReadyLabel, dataPlaneReady)
 	setOptionalBoolLabel(node.Labels, dataplane.NodeCtldReadyLabel, requireCtld, ctldReady)
-	if rootFSSnapshotterInstance != "" {
-		node.Annotations[dataplane.NodeRootFSSnapshotterInstanceAnnotation] = rootFSSnapshotterInstance
-	}
 
-	if labelsEqual(original.Labels, node.Labels) && labelsEqual(original.Annotations, node.Annotations) {
+	if labelsEqual(original.Labels, node.Labels) {
 		return nil
 	}
 	if err := r.Resources.Client.Patch(ctx, node, client.MergeFrom(original)); err != nil {
@@ -278,68 +247,6 @@ func readyCtldPodsByNode(pods []corev1.Pod, daemonSets map[string]*appsv1.Daemon
 		readyByNode[nodeName] = slotAReady && slotBReady && !blockedByPredecessor[nodeName]
 	}
 	return readyByNode
-}
-
-func readyRootFSSnapshotterPodsByNode(pods []corev1.Pod, daemonSet *appsv1.DaemonSet) map[string]bool {
-	readyByNode := make(map[string]bool)
-	blockedByPredecessor := make(map[string]bool)
-	for i := range pods {
-		pod := &pods[i]
-		if pod.Spec.NodeName == "" || pod.Labels[labelComponent] != ctldsvc.RootFSSnapshotterComponent {
-			continue
-		}
-		if ctldsvc.RootFSSnapshotterContainerRunning(pod) && !ctldsvc.RootFSSnapshotterPodMatchesCurrentTemplate(pod, daemonSet) {
-			blockedByPredecessor[pod.Spec.NodeName] = true
-			continue
-		}
-		if !pod.DeletionTimestamp.IsZero() || !ctldsvc.RootFSSnapshotterPodReadyForCurrentTemplate(pod, daemonSet) {
-			continue
-		}
-		readyByNode[pod.Spec.NodeName] = true
-	}
-	for nodeName := range blockedByPredecessor {
-		readyByNode[nodeName] = false
-	}
-	return readyByNode
-}
-
-func readyRootFSSnapshotterInstancesByNode(pods []corev1.Pod, daemonSet *appsv1.DaemonSet) map[string]string {
-	instances := make(map[string]string)
-	blockedByPredecessor := make(map[string]bool)
-	for i := range pods {
-		pod := &pods[i]
-		if pod.Spec.NodeName == "" || pod.Labels[labelComponent] != ctldsvc.RootFSSnapshotterComponent {
-			continue
-		}
-		if ctldsvc.RootFSSnapshotterContainerRunning(pod) && !ctldsvc.RootFSSnapshotterPodMatchesCurrentTemplate(pod, daemonSet) {
-			blockedByPredecessor[pod.Spec.NodeName] = true
-			continue
-		}
-		if !pod.DeletionTimestamp.IsZero() || !ctldsvc.RootFSSnapshotterPodReadyForCurrentTemplate(pod, daemonSet) {
-			continue
-		}
-		if instance := rootFSSnapshotterInstance(pod); instance != "" {
-			instances[pod.Spec.NodeName] = instance
-		}
-	}
-	for nodeName := range blockedByPredecessor {
-		delete(instances, nodeName)
-	}
-	return instances
-}
-
-func rootFSSnapshotterInstance(pod *corev1.Pod) string {
-	if pod == nil || pod.UID == "" {
-		return ""
-	}
-	for i := range pod.Status.ContainerStatuses {
-		status := &pod.Status.ContainerStatuses[i]
-		if status.Name != ctldsvc.RootFSSnapshotterComponent || status.State.Running == nil || status.ContainerID == "" {
-			continue
-		}
-		return fmt.Sprintf("%s/%d/%s", pod.UID, status.RestartCount, status.ContainerID)
-	}
-	return ""
 }
 
 func daemonSetHasNetworkRuntime(ds *appsv1.DaemonSet) bool {

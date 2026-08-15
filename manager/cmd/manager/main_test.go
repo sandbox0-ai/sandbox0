@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -22,34 +21,6 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/client-go/rest"
 )
-
-func TestStartManagerControllersOwnsReadiness(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	var ready atomic.Bool
-	started := false
-
-	startManagerControllers(ctx, func(context.Context) {
-		if ready.Load() {
-			t.Fatal("manager became ready before controllers started")
-		}
-		started = true
-	}, &ready)
-	if !started {
-		t.Fatal("controllers were not started")
-	}
-	if !ready.Load() {
-		t.Fatal("manager did not become ready after controllers started")
-	}
-
-	cancel()
-	deadline := time.Now().Add(time.Second)
-	for ready.Load() && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if ready.Load() {
-		t.Fatal("manager remained ready after controller context ended")
-	}
-}
 
 type recordingTemplateReconcilerQuiescer struct {
 	called  chan struct{}
@@ -174,21 +145,21 @@ func TestWrapRootFSObjectStoreEncryptionReadsLogicalRanges(t *testing.T) {
 		t.Fatalf("rootfs object range = %q, want %q", rangeGot, rangeWant)
 	}
 
-	const plaintextObjectKey = "sandbox-rootfs/cow-v3/plaintext-transition-object"
-	if err := rawStore.Put(plaintextObjectKey, bytes.NewReader(want)); err != nil {
-		t.Fatalf("put plaintext transition object: %v", err)
+	const legacyObjectKey = "sandbox-rootfs/team/sandbox/legacy-layer.tar"
+	if err := rawStore.Put(legacyObjectKey, bytes.NewReader(want)); err != nil {
+		t.Fatalf("put legacy rootfs object: %v", err)
 	}
-	plaintextReader, err := managerStore.Get(plaintextObjectKey, 0, -1)
+	legacyReader, err := managerStore.Get(legacyObjectKey, 0, -1)
 	if err != nil {
-		t.Fatalf("get plaintext transition object: %v", err)
+		t.Fatalf("get legacy rootfs object: %v", err)
 	}
-	defer plaintextReader.Close()
-	plaintextGot, err := io.ReadAll(plaintextReader)
+	defer legacyReader.Close()
+	legacyGot, err := io.ReadAll(legacyReader)
 	if err != nil {
-		t.Fatalf("read plaintext transition object: %v", err)
+		t.Fatalf("read legacy rootfs object: %v", err)
 	}
-	if !bytes.Equal(plaintextGot, want) {
-		t.Fatalf("plaintext transition object = %q, want %q", plaintextGot, want)
+	if !bytes.Equal(legacyGot, want) {
+		t.Fatalf("legacy rootfs object = %q, want %q", legacyGot, want)
 	}
 }
 

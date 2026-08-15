@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
@@ -368,22 +367,21 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 		hardExpiresAt = source.HardExpiresAt
 	}
 	target := &sandboxstore.SandboxRecord{
-		ID:                   targetID,
-		TeamID:               teamID,
-		UserID:               userID,
-		TemplateID:           source.TemplateID,
-		TemplateName:         source.TemplateName,
-		TemplateNamespace:    source.TemplateNamespace,
-		ClusterID:            source.ClusterID,
-		DesiredState:         sandboxstore.SandboxDesiredStatePaused,
-		Config:               targetConfig,
-		TemplateSpec:         *source.TemplateSpec.DeepCopy(),
-		RootFSRuntimeVersion: source.RootFSRuntimeVersion,
-		ClaimedAt:            now,
-		ExpiresAt:            expiresAt,
-		HardExpiresAt:        hardExpiresAt,
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		ID:                targetID,
+		TeamID:            teamID,
+		UserID:            userID,
+		TemplateID:        source.TemplateID,
+		TemplateName:      source.TemplateName,
+		TemplateNamespace: source.TemplateNamespace,
+		ClusterID:         source.ClusterID,
+		DesiredState:      sandboxstore.SandboxDesiredStatePaused,
+		Config:            targetConfig,
+		TemplateSpec:      *source.TemplateSpec.DeepCopy(),
+		ClaimedAt:         now,
+		ExpiresAt:         expiresAt,
+		HardExpiresAt:     hardExpiresAt,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	checkpointCommitted := false
 	if checkpoint != nil {
@@ -404,12 +402,7 @@ func (s *SandboxService) ForkSandbox(ctx context.Context, sourceSandboxID, teamI
 
 type rootFSSourceCheckpoint struct {
 	txn           *sandboxstore.SandboxLifecycleTxn
-	rootFSHead    *sandboxstore.SandboxRootFSHead
-	ctldAddress   string
-	sandboxID     string
-	teamID        string
-	generation    int64
-	headID        string
+	rootFSState   *sandboxstore.SandboxRootFSState
 	procdAddress  string
 	internalToken string
 }
@@ -420,28 +413,10 @@ func (c *rootFSSourceCheckpoint) close(s *SandboxService, committed bool) {
 	}
 	if !committed {
 		reason := rootFSSourceCheckpointTxnReason(c.txn, "transaction did not commit")
+		s.deleteUncommittedRootFSObject(c.rootFSState, reason)
 		if c.txn != nil {
 			_ = s.abortLifecycleTxn(context.Background(), c.txn.SandboxID, c.txn.ID, reason)
 		}
-	}
-	ackCtx, cancelAck := context.WithTimeout(context.Background(), ctldapi.DefaultRequestTimeout)
-	defer cancelAck()
-	if err := s.acknowledgeSandboxRootFSHead(
-		ackCtx,
-		c.ctldAddress,
-		c.sandboxID,
-		c.teamID,
-		c.headID,
-		c.generation,
-		committed,
-		true,
-	); err != nil && s.logger != nil {
-		s.logger.Warn("Failed to acknowledge running rootfs checkpoint",
-			zap.String("sandboxID", c.sandboxID),
-			zap.String("headID", c.headID),
-			zap.Bool("published", committed),
-			zap.Error(err),
-		)
 	}
 	s.releasePauseRuntimeBarrier(context.Background(), c.procdAddress, c.internalToken)
 }
@@ -513,11 +488,6 @@ func (s *SandboxService) prepareRootFSSourceCheckpoint(ctx context.Context, sour
 			FromPodNamespace: pod.Namespace,
 			FromPodName:      pod.Name,
 		}
-		expectedHeadID, err := currentRootFSHeadID(lockCtx, tx, sourceSandboxID)
-		if err != nil {
-			return err
-		}
-		txn.ExpectedHeadID = expectedHeadID
 		return tx.BeginLifecycleTxn(lockCtx, txn)
 	})
 	if err != nil {
@@ -570,29 +540,21 @@ func (s *SandboxService) prepareRunningRootFSSourceCheckpoint(ctx context.Contex
 	}
 	checkpoint := &rootFSSourceCheckpoint{
 		txn:           txn,
-		sandboxID:     source.ID,
-		teamID:        source.TeamID,
-		generation:    generation,
-		headID:        txn.ID,
 		procdAddress:  procdAddress,
 		internalToken: internalToken,
-	}
-	checkpoint.ctldAddress, err = s.ctldAddressForPod(ctx, pod)
-	if err != nil {
-		return checkpoint, err
 	}
 	if err := s.markLifecycleTxnPhase(ctx, source.ID, txn.ID, sandboxstore.SandboxLifecyclePhasePublishing); err != nil {
 		return checkpoint, err
 	}
-	rootFSHead, err := s.prepareSandboxRootFSHeadCheckpoint(ctx, pod, source, txn.ID)
+	rootFSState, err := s.prepareSandboxRootFSCheckpoint(ctx, pod, source)
 	if err != nil {
 		return checkpoint, err
 	}
-	if rootFSHead == nil {
+	if rootFSState == nil {
 		return checkpoint, fmt.Errorf("rootfs checkpoint produced no state")
 	}
-	checkpoint.rootFSHead = rootFSHead
-	if err := s.markLifecycleTxnPreparedHead(ctx, source.ID, txn.ID, rootFSHead.Reference.HeadID); err != nil {
+	checkpoint.rootFSState = rootFSState
+	if err := s.markLifecycleTxnPreparedHead(ctx, source.ID, txn.ID, rootFSState.LayerID); err != nil {
 		return checkpoint, err
 	}
 	return checkpoint, nil
@@ -615,15 +577,8 @@ func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store Sandbox
 			if err := tx.UpdateLifecycleTxnPhase(lockCtx, checkpoint.txn.ID, sandboxstore.SandboxLifecyclePhaseCommitting); err != nil {
 				return err
 			}
-			if checkpoint.rootFSHead != nil {
-				expectedHeadID := ""
-				if checkpoint.rootFSHead.Parent != nil {
-					expectedHeadID = checkpoint.rootFSHead.Parent.HeadID
-				}
-				if strings.TrimSpace(activeTxn.ExpectedHeadID) != expectedHeadID {
-					return fmt.Errorf("rootfs Head changed during snapshot: transaction expected %q, sealed from %q", activeTxn.ExpectedHeadID, expectedHeadID)
-				}
-				if err := tx.SaveRootFSHead(lockCtx, checkpoint.rootFSHead); err != nil {
+			if checkpoint.rootFSState != nil {
+				if err := tx.SaveRootFSState(lockCtx, checkpoint.rootFSState); err != nil {
 					return err
 				}
 			}
@@ -653,8 +608,8 @@ func (s *SandboxService) commitRootFSSnapshot(ctx context.Context, store Sandbox
 		}
 		if checkpoint != nil && checkpoint.txn != nil {
 			preparedHead := ""
-			if checkpoint.rootFSHead != nil {
-				preparedHead = checkpoint.rootFSHead.Reference.HeadID
+			if checkpoint.rootFSState != nil {
+				preparedHead = checkpoint.rootFSState.LayerID
 			}
 			if err := tx.CommitLifecycleTxn(lockCtx, checkpoint.txn.ID, preparedHead); err != nil {
 				return err
@@ -687,15 +642,8 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 			if err := tx.UpdateLifecycleTxnPhase(lockCtx, checkpoint.txn.ID, sandboxstore.SandboxLifecyclePhaseCommitting); err != nil {
 				return err
 			}
-			if checkpoint.rootFSHead != nil {
-				expectedHeadID := ""
-				if checkpoint.rootFSHead.Parent != nil {
-					expectedHeadID = checkpoint.rootFSHead.Parent.HeadID
-				}
-				if strings.TrimSpace(activeTxn.ExpectedHeadID) != expectedHeadID {
-					return fmt.Errorf("rootfs Head changed during fork: transaction expected %q, sealed from %q", activeTxn.ExpectedHeadID, expectedHeadID)
-				}
-				if err := tx.SaveRootFSHead(lockCtx, checkpoint.rootFSHead); err != nil {
+			if checkpoint.rootFSState != nil {
+				if err := tx.SaveRootFSState(lockCtx, checkpoint.rootFSState); err != nil {
 					return err
 				}
 			}
@@ -740,8 +688,8 @@ func (s *SandboxService) commitForkSandbox(ctx context.Context, store SandboxRoo
 		}
 		if checkpoint != nil && checkpoint.txn != nil {
 			preparedHead := ""
-			if checkpoint.rootFSHead != nil {
-				preparedHead = checkpoint.rootFSHead.Reference.HeadID
+			if checkpoint.rootFSState != nil {
+				preparedHead = checkpoint.rootFSState.LayerID
 			}
 			if err := tx.CommitLifecycleTxn(lockCtx, checkpoint.txn.ID, preparedHead); err != nil {
 				return err

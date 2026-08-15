@@ -49,13 +49,8 @@ func EnsureProcdConfigSecret(
 	labels := map[string]string{
 		LabelTemplateID: template.Name,
 	}
-	var ownerRefs []metav1.OwnerReference
-	// Resume can reconstruct a template after its CR has been deleted. Such a
-	// synthetic object has no UID and cannot be a Kubernetes owner.
-	if template.UID != "" {
-		ownerRefs = []metav1.OwnerReference{
-			*metav1.NewControllerRef(template, v1alpha1.SchemeGroupVersion.WithKind("SandboxTemplate")),
-		}
+	ownerRefs := []metav1.OwnerReference{
+		*metav1.NewControllerRef(template, v1alpha1.SchemeGroupVersion.WithKind("SandboxTemplate")),
 	}
 	desired := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

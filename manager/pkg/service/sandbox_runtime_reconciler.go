@@ -19,7 +19,6 @@ import (
 
 const (
 	defaultSandboxRuntimeReconcilePeriod   = 30 * time.Second
-	defaultSandboxRootFSSyncRebindPeriod   = 5 * time.Second
 	defaultSandboxRuntimeReconcilePageSize = 500
 )
 
@@ -29,10 +28,6 @@ type sandboxRuntimeReconcileStore interface {
 
 type sandboxRuntimeStateReconciler interface {
 	ReconcileSandboxRuntime(ctx context.Context, sandboxID string) error
-}
-
-type sandboxRootFSSyncReconciler interface {
-	EnsureSandboxRootFSSync(ctx context.Context, sandboxID string) error
 }
 
 // SandboxRuntimeReconciler repairs drift between durable sandbox intent and
@@ -59,7 +54,7 @@ func NewSandboxRuntimeReconciler(
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	reconcilerController := &SandboxRuntimeReconciler{
+	return &SandboxRuntimeReconciler{
 		clusterID:    strings.TrimSpace(clusterID),
 		store:        store,
 		podLister:    podLister,
@@ -69,10 +64,6 @@ func NewSandboxRuntimeReconciler(
 		resyncPeriod: defaultSandboxRuntimeReconcilePeriod,
 		pageSize:     defaultSandboxRuntimeReconcilePageSize,
 	}
-	if _, ok := reconciler.(sandboxRootFSSyncReconciler); ok {
-		reconcilerController.resyncPeriod = defaultSandboxRootFSSyncRebindPeriod
-	}
-	return reconcilerController
 }
 
 func (c *SandboxRuntimeReconciler) ResourceEventHandler() cache.ResourceEventHandlerFuncs {
@@ -189,15 +180,10 @@ func (c *SandboxRuntimeReconciler) candidateNeedsReconcile(candidate sandboxstor
 		}
 		return true
 	}
-	drifted := pod.DeletionTimestamp != nil ||
+	return pod.DeletionTimestamp != nil ||
 		!sandboxRuntimePodOwnedBySandbox(pod) ||
 		sandboxPodID(pod) != candidate.SandboxID ||
 		runtimeGenerationFromPod(pod) != candidate.RuntimeGeneration
-	if drifted {
-		return true
-	}
-	_, rootFSSyncEnabled := c.reconciler.(sandboxRootFSSyncReconciler)
-	return rootFSSyncEnabled && candidate.DesiredState == sandboxstore.SandboxDesiredStateActive
 }
 
 func (c *SandboxRuntimeReconciler) runWorker(ctx context.Context) {
@@ -220,13 +206,6 @@ func (c *SandboxRuntimeReconciler) processNextWorkItem(ctx context.Context) bool
 		c.queue.AddRateLimited(sandboxID)
 		return true
 	}
-	if rootFSSyncer, ok := c.reconciler.(sandboxRootFSSyncReconciler); ok {
-		if err := rootFSSyncer.EnsureSandboxRootFSSync(ctx, sandboxID); err != nil {
-			c.logger.Warn("Sandbox rootfs sync reconcile failed, requeueing", zap.String("sandboxID", sandboxID), zap.Error(err))
-			c.queue.AddRateLimited(sandboxID)
-			return true
-		}
-	}
 	c.queue.Forget(sandboxID)
 	return true
 }
@@ -236,4 +215,3 @@ func sandboxRuntimePodOwnedBySandbox(pod *corev1.Pod) bool {
 }
 
 var _ sandboxRuntimeStateReconciler = (*SandboxService)(nil)
-var _ sandboxRootFSSyncReconciler = (*SandboxService)(nil)

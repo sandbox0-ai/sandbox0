@@ -13,7 +13,6 @@ import (
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	nodev1 "k8s.io/api/node/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -29,7 +28,6 @@ import (
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 )
 
 func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
@@ -54,38 +52,6 @@ func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
 	if len(ds.Spec.Template.Spec.Tolerations) != 1 || ds.Spec.Template.Spec.Tolerations[0].Key != "sandbox0.ai/sandbox" {
 		t.Fatalf("expected shared toleration, got %#v", ds.Spec.Template.Spec.Tolerations)
 	}
-}
-
-func TestReconcileKeepsPinnedRootFSSnapshotterDuringServiceRollout(t *testing.T) {
-	ctx := context.Background()
-	infra := newCtldTestInfra()
-	_, client := reconcileCtldResources(t, infra)
-	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	before := &appsv1.DaemonSet{}
-	require.NoError(t, client.Get(ctx, types.NamespacedName{
-		Name: infra.Name + "-rootfs-snapshotter", Namespace: infra.Namespace,
-	}, before))
-
-	require.NoError(t, reconciler.Reconcile(
-		ctx,
-		infra,
-		"ghcr.io/sandbox0-ai/sandbox0",
-		"service-next",
-		"latest",
-		"http://demo-cluster-gateway:8443",
-	))
-
-	snapshotter := &appsv1.DaemonSet{}
-	require.NoError(t, client.Get(ctx, types.NamespacedName{
-		Name: infra.Name + "-rootfs-snapshotter", Namespace: infra.Namespace,
-	}, snapshotter))
-	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", snapshotter.Spec.Template.Spec.Containers[0].Image)
-	assert.Equal(t,
-		before.Spec.Template.Annotations[rootFSSnapshotterRolloutRevisionAnnotation],
-		snapshotter.Spec.Template.Annotations[rootFSSnapshotterRolloutRevisionAnnotation],
-	)
-	standby := getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
-	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:service-next", standby.Spec.Template.Spec.Containers[0].Image)
 }
 
 func TestReconcileConfiguresNetworkRuntimeInBothHASlots(t *testing.T) {
@@ -195,7 +161,7 @@ func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 	require.NoError(t, client.Create(ctx, standbyPod))
 
 	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", primary.Spec.Template.Spec.Containers[0].Image)
@@ -205,7 +171,7 @@ func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 
 	// An observed DaemonSet status is not enough while its live predecessor is
 	// still present; slot A must remain untouched.
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", primary.Spec.Template.Spec.Containers[0].Image)
 
@@ -213,7 +179,7 @@ func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	markCtldDaemonSetReady(t, ctx, client, standby)
 	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(standby, "ctld-b-next", "node-a")))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:next", primary.Spec.Template.Spec.Containers[0].Image)
 }
@@ -234,7 +200,7 @@ func TestReadyRejectsHealthyPreviousRevisionDuringNetworkDisableRollout(t *testi
 
 	infra.Spec.Network = nil
 	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "latest", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "http://demo-cluster-gateway:8443"))
 
 	ready, err := reconciler.Ready(ctx, infra)
 	require.NoError(t, err)
@@ -251,7 +217,7 @@ func TestReconcileRepairsMissingSlotBeforeRollingPeer(t *testing.T) {
 	require.NoError(t, client.Delete(ctx, primary))
 
 	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:next", primary.Spec.Template.Spec.Containers[0].Image)
@@ -263,12 +229,12 @@ func TestReconcileRepairsMissingSlotBeforeRollingPeer(t *testing.T) {
 
 	// The surviving peer remains unchanged until the repaired slot is actually
 	// ready on its desired nodes.
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", standby.Spec.Template.Spec.Containers[0].Image)
 	markCtldDaemonSetReady(t, ctx, client, primary)
 	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(primary, "ctld-a-next", "node-a")))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:next", standby.Spec.Template.Spec.Containers[0].Image)
 }
@@ -282,7 +248,7 @@ func TestReconcileDoesNotMutateEitherDegradedPeer(t *testing.T) {
 	markCtldDaemonSetNotReady(t, ctx, client, standby)
 
 	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", primary.Spec.Template.Spec.Containers[0].Image)
@@ -292,7 +258,7 @@ func TestReconcileDoesNotMutateEitherDegradedPeer(t *testing.T) {
 	// simultaneous restart.
 	markCtldDaemonSetReady(t, ctx, client, standby)
 	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(standby, "ctld-b-old", "node-a")))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:next", primary.Spec.Template.Spec.Containers[0].Image)
@@ -460,7 +426,7 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 		Build()
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "latest", "http://demo-cluster-gateway:8443"); err != nil {
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "http://demo-cluster-gateway:8443"); err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
 
@@ -514,21 +480,10 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	assertHAMetricsEndpoint(t, standby.Spec.Template.Spec.Containers[0], dataplane.CtldHASlotB, ctldHAMetricsPortB)
 	assertCtldRollingUpdate(t, ds, 1, 0)
 	assertCtldRollingUpdate(t, standby, 1, 0)
-	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 8 {
-		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket/data, and rootfs snapshotter state mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 7 {
+		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
-	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "rootfs-snapshotter-state", rootFSSnapshotterStateRoot)
-	for _, current := range []*appsv1.DaemonSet{ds, standby} {
-		containerdMount, ok := volumeMountByName(current.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-sock")
-		require.True(t, ok)
-		require.NotNil(t, containerdMount.MountPropagation)
-		assert.Equal(t, corev1.MountPropagationHostToContainer, *containerdMount.MountPropagation)
-	}
-	rootfsStateMount, ok := volumeMountByName(ds.Spec.Template.Spec.Containers[0].VolumeMounts, "rootfs-snapshotter-state")
-	if !ok || !rootfsStateMount.ReadOnly {
-		t.Fatalf("ctld rootfs snapshotter state mount must be read-only, got %#v", rootfsStateMount)
-	}
 	assertNoPodVolume(t, ds.Spec.Template.Spec.Volumes, "plugin-registration")
 	driver := &storagev1.CSIDriver{}
 	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
@@ -537,32 +492,6 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	if driver.Spec.PodInfoOnMount == nil || !*driver.Spec.PodInfoOnMount {
 		t.Fatal("expected csi driver podInfoOnMount=true")
 	}
-	runtimeClass := &nodev1.RuntimeClass{}
-	require.NoError(t, client.Get(context.Background(), types.NamespacedName{Name: rootfshead.RuntimeClassName}, runtimeClass))
-	assert.Equal(t, rootfshead.RuntimeClassName, runtimeClass.Handler)
-	snapshotter := &appsv1.DaemonSet{}
-	require.NoError(t, client.Get(context.Background(), types.NamespacedName{
-		Name: infra.Name + "-rootfs-snapshotter", Namespace: infra.Namespace,
-	}, snapshotter))
-	assert.Equal(t, appsv1.OnDeleteDaemonSetStrategyType, snapshotter.Spec.UpdateStrategy.Type)
-	require.Len(t, snapshotter.Spec.Template.Spec.Containers, 1)
-	snapshotterContainer := snapshotter.Spec.Template.Spec.Containers[0]
-	assert.Equal(t, rootFSSnapshotterComponent, snapshotterContainer.Name)
-	assert.Equal(t, []string{"/usr/local/bin/rootfs-snapshotter"}, snapshotterContainer.Command)
-	assertContainsArg(t, snapshotterContainer.Args, "-address="+rootFSSnapshotterSocket)
-	assertContainsArg(t, snapshotterContainer.Args, "-root="+rootFSSnapshotterStateRoot)
-	assertContainerVolumeMount(t, snapshotterContainer.VolumeMounts, "containerd-sock", "/host-run/containerd")
-	assertContainerVolumeMount(t, snapshotterContainer.VolumeMounts, "rootfs-snapshotter-state", rootFSSnapshotterStateRoot)
-	assertContainerVolumeMount(t, snapshotterContainer.VolumeMounts, "dev-fuse", "/dev/fuse")
-	stateMount, ok := volumeMountByName(snapshotterContainer.VolumeMounts, "rootfs-snapshotter-state")
-	require.True(t, ok)
-	require.NotNil(t, stateMount.MountPropagation)
-	assert.Equal(t, corev1.MountPropagationBidirectional, *stateMount.MountPropagation)
-	snapshotterContainerdMount, ok := volumeMountByName(snapshotterContainer.VolumeMounts, "containerd-sock")
-	require.True(t, ok)
-	assert.Nil(t, snapshotterContainerdMount.MountPropagation)
-	require.NotNil(t, snapshotter.Spec.Template.Spec.AutomountServiceAccountToken)
-	assert.False(t, *snapshotter.Spec.Template.Spec.AutomountServiceAccountToken)
 
 	return ds, client
 }
@@ -575,9 +504,6 @@ func newCtldTestScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 scheme: %v", err)
-	}
-	if err := nodev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add nodev1 scheme: %v", err)
 	}
 	if err := storagev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storagev1 scheme: %v", err)
@@ -688,7 +614,6 @@ func TestReconcileUsesDefaultContainerdHostDataRoot(t *testing.T) {
 	assertContainsArg(t, args, "-runtime-watch-addr=:8096")
 	assertContainsArg(t, args, "-containerd-host-data-root=/var/lib/containerd")
 	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/containerd")
-	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "rootfs-snapshotter-state", rootFSSnapshotterStateRoot)
 }
 
 func TestReconcileUsesConfiguredContainerdHostDataRoot(t *testing.T) {
@@ -704,7 +629,7 @@ func TestReconcileUsesConfiguredContainerdHostDataRoot(t *testing.T) {
 	assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "containerd-data", "/var/lib/sandbox0-worker/containerd")
 }
 
-func TestReconcilePassesRootFSObjectCacheConfigOnlyToSnapshotter(t *testing.T) {
+func TestReconcilePassesRootFSObjectCacheConfig(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.Services.Ctld = &infrav1alpha1.CtldServiceConfig{
 		RootFSObjectCacheMaxBytes:      "10Gi",
@@ -713,20 +638,12 @@ func TestReconcilePassesRootFSObjectCacheConfigOnlyToSnapshotter(t *testing.T) {
 		RootFSObjectCacheSweepInterval: metav1.Duration{Duration: 30 * time.Second},
 	}
 
-	ds, client := reconcileCtldResources(t, infra)
-	ctldArgs := ds.Spec.Template.Spec.Containers[0].Args
-	assertNotContainsArgPrefix(t, ctldArgs, "-rootfs-object-cache-")
-
-	snapshotter := &appsv1.DaemonSet{}
-	require.NoError(t, client.Get(context.Background(), types.NamespacedName{
-		Name: infra.Name + "-rootfs-snapshotter", Namespace: infra.Namespace,
-	}, snapshotter))
-	require.Len(t, snapshotter.Spec.Template.Spec.Containers, 1)
-	args := snapshotter.Spec.Template.Spec.Containers[0].Args
-	assertContainsArg(t, args, "-object-cache-max-bytes=10Gi")
-	assertContainsArg(t, args, "-object-cache-min-free-bytes=2Gi")
-	assertContainsArg(t, args, "-object-cache-max-age=6h0m0s")
-	assertContainsArg(t, args, "-object-cache-sweep-interval=30s")
+	ds := reconcileCtldDaemonSet(t, infra)
+	args := ds.Spec.Template.Spec.Containers[0].Args
+	assertContainsArg(t, args, "-rootfs-object-cache-max-bytes=10Gi")
+	assertContainsArg(t, args, "-rootfs-object-cache-min-free-bytes=2Gi")
+	assertContainsArg(t, args, "-rootfs-object-cache-max-age=6h0m0s")
+	assertContainsArg(t, args, "-rootfs-object-cache-sweep-interval=30s")
 }
 
 func TestReconcileDoesNotPassPauseConfigToCtld(t *testing.T) {

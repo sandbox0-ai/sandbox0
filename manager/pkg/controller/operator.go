@@ -3,17 +3,13 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
-	managerconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/carrierpool"
 	clientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/namespacepolicy"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -249,33 +245,14 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 		}
 	}
 
-	poolTemplate := template
-	poolMode := v1alpha1.SandboxTemplatePoolModeLegacy
-	if admissionMode, admitted, rejectLegacy := templateS0FSRollout(template); admitted {
-		poolTemplate = template.DeepCopy()
-		poolTemplate.Spec.Pool.MinIdle = 0
-		poolTemplate.Spec.Pool.MaxIdle = 0
-		poolMode = v1alpha1.SandboxTemplatePoolModeCold
-		if admissionMode == s0fsrollout.AdmissionModeShared {
-			if compatible, _ := carrierpool.Compatible(template); compatible {
-				poolMode = v1alpha1.SandboxTemplatePoolModeShared
-			}
-		}
-	} else if rejectLegacy {
-		poolTemplate = template.DeepCopy()
-		poolTemplate.Spec.Pool.MinIdle = 0
-		poolTemplate.Spec.Pool.MaxIdle = 0
-		poolMode = v1alpha1.SandboxTemplatePoolModeDisabled
-	}
-	// During migration, a zero-sized legacy ReplicaSet drains old idle Pods
-	// without letting the shared cohort create template-owned capacity.
-	poolRequeueAfter, err := op.poolManager.ReconcilePool(ctx, poolTemplate)
+	// Reconcile the pool (ReplicaSet)
+	poolRequeueAfter, err := op.poolManager.ReconcilePool(ctx, template)
 	if err != nil {
 		return fmt.Errorf("reconcile pool: %w", err)
 	}
 
 	// Update status
-	if err := op.updateTemplateStatus(ctx, template, poolMode); err != nil {
+	if err := op.updateTemplateStatus(ctx, template); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
 	requeueAfter := poolRequeueAfter
@@ -287,11 +264,7 @@ func (op *Operator) syncHandler(ctx context.Context, key string) error {
 }
 
 // updateTemplateStatus updates the status of a SandboxTemplate
-func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1.SandboxTemplate, poolModes ...v1alpha1.SandboxTemplatePoolMode) error {
-	poolMode := v1alpha1.SandboxTemplatePoolModeLegacy
-	if len(poolModes) > 0 && poolModes[0] != "" {
-		poolMode = poolModes[0]
-	}
+func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1.SandboxTemplate) error {
 	// Get idle pods
 	idlePods, err := op.podLister.Pods(template.Namespace).List(labels.SelectorFromSet(map[string]string{
 		LabelTemplateID: template.Name,
@@ -360,7 +333,7 @@ func (op *Operator) updateTemplateStatus(ctx context.Context, template *v1alpha1
 		}
 	}
 
-	if err := op.persistTemplateStatus(ctx, template.Namespace, template.Name, idleCount, activeCount, poolMode); err != nil {
+	if err := op.persistTemplateStatus(ctx, template.Namespace, template.Name, idleCount, activeCount); err != nil {
 		return err
 	}
 
@@ -375,7 +348,6 @@ func (op *Operator) persistTemplateStatus(
 	name string,
 	idleCount int32,
 	activeCount int32,
-	poolMode v1alpha1.SandboxTemplatePoolMode,
 ) error {
 	if op.crdClient == nil {
 		return fmt.Errorf("sandbox template client is not configured")
@@ -393,7 +365,6 @@ func (op *Operator) persistTemplateStatus(
 		preserveConditionTransitionTimes(current.Status.Conditions, conditions)
 		if current.Status.IdleCount == idleCount &&
 			current.Status.ActiveCount == activeCount &&
-			current.Status.PoolMode == poolMode &&
 			templateConditionsEqual(current.Status.Conditions, conditions) {
 			return nil
 		}
@@ -401,10 +372,9 @@ func (op *Operator) persistTemplateStatus(
 		next := current.DeepCopy()
 		next.Status.IdleCount = idleCount
 		next.Status.ActiveCount = activeCount
-		next.Status.PoolMode = poolMode
 		next.Status.Conditions = conditions
 		next.Status.LastUpdateTime = metav1.Now()
-		if _, err := templates.UpdateStatus(ctx, next, metav1.UpdateOptions{}); err != nil {
+		if _, err := templates.Update(ctx, next, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
 		updated = true
@@ -421,42 +391,6 @@ func (op *Operator) persistTemplateStatus(
 		)
 	}
 	return nil
-}
-
-func templateS0FSRollout(template *v1alpha1.SandboxTemplate) (s0fsrollout.AdmissionMode, bool, bool) {
-	cfg := managerconfig.LoadManagerConfig()
-	if cfg == nil {
-		return "", false, false
-	}
-	admission, err := cfg.S0FSAdmission()
-	if err != nil {
-		return "", false, false
-	}
-	rejectLegacy := admission.RejectLegacyClaims()
-	if cfg == nil || !cfg.S0FSRuntimeEnabled() || template == nil {
-		return "", false, rejectLegacy
-	}
-	scope := ""
-	logicalTemplateID := template.Name
-	teamID := ""
-	if template.Labels != nil {
-		scope = strings.TrimSpace(template.Labels["sandbox0.ai/template-scope"])
-		if value := strings.TrimSpace(template.Labels["sandbox0.ai/template-logical-id"]); value != "" {
-			logicalTemplateID = value
-		}
-	}
-	if template.Annotations != nil {
-		teamID = strings.TrimSpace(template.Annotations["sandbox0.ai/template-team-id"])
-	}
-	if !admission.Admits(scope, teamID, logicalTemplateID) {
-		return "", false, rejectLegacy
-	}
-	if template.Status.ImageRevision == nil ||
-		template.Status.ImageRevision.State != v1alpha1.TemplateImageRevisionStateReady ||
-		strings.TrimSpace(template.Status.ImageRevision.ImageFSHeadID) == "" {
-		return "", false, true
-	}
-	return admission.Mode(), true, rejectLegacy
 }
 
 func preserveConditionTransitionTimes(

@@ -58,28 +58,3 @@ func TestStatsReturnsProcdErrorMessage(t *testing.T) {
 		t.Fatalf("Stats() error = %v", err)
 	}
 }
-
-func TestStartupReturnsImmutablePodIdentityWithoutToken(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != StartupPath {
-			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
-		}
-		if got := r.Header.Get("X-Internal-Token"); got != "" {
-			t.Fatalf("X-Internal-Token = %q, want empty", got)
-		}
-		if err := spec.WriteSuccess(w, http.StatusOK, StartupResponse{
-			Status: "started", Namespace: "sandbox0", PodName: "carrier", PodUID: "pod-uid",
-		}); err != nil {
-			t.Fatalf("write response: %v", err)
-		}
-	}))
-	defer server.Close()
-
-	response, err := NewProcdClient(ProcdClientConfig{}).Startup(context.Background(), server.URL)
-	if err != nil {
-		t.Fatalf("Startup() error = %v", err)
-	}
-	if response.PodUID != "pod-uid" || response.Status != "started" {
-		t.Fatalf("Startup() response = %#v", response)
-	}
-}

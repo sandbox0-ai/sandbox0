@@ -214,8 +214,8 @@ func runtimeAssignmentObservation(pod *corev1.Pod, expectedRevision string) (rea
 	if pod == nil || pod.DeletionTimestamp != nil {
 		return false, false, "pod is missing or deleting"
 	}
-	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
-		return false, true, fmt.Sprintf("pod phase is terminal: %s", pod.Status.Phase)
+	if pod.Status.Phase != corev1.PodRunning {
+		return false, false, fmt.Sprintf("pod phase is %s", pod.Status.Phase)
 	}
 	assignment, revision, err := runtimecontrol.AssignmentFromPod(pod)
 	if err != nil {

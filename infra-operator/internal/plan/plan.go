@@ -829,7 +829,6 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 		cleanup.DeleteNamespaced = append(cleanup.DeleteNamespaced,
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld-a", infra.Name)),
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld-b", infra.Name)),
-			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-rootfs-snapshotter", infra.Name)),
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-ctld-network-metrics", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),

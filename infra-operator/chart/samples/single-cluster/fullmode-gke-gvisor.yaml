@@ -73,14 +73,20 @@ spec:
       pool:
         minIdle: 0
         maxIdle: 2
-  # Shared placement for sandbox Pods, ctld, and the rootfs snapshotter.
+  # Shared placement for sandbox template Pods and the node-local ctld runtime.
   sandboxNodePlacement:
+    # Reuse the native GKE Sandbox node label so sandbox placement does not
+    # depend on an extra custom node label.
     nodeSelector:
-      sandbox0.ai/node: sandbox
+      sandbox.gke.io/runtime: gvisor
     tolerations:
       - key: sandbox0.ai/sandbox
         operator: Equal
         value: "true"
+        effect: NoSchedule
+      - key: sandbox.gke.io/runtime
+        operator: Equal
+        value: gvisor
         effect: NoSchedule
   network:
     config:
@@ -99,6 +105,6 @@ spec:
       enabled: true
       replicas: 1
       config:
-        sandboxRuntimeClassName: gvisor-rootfs
+        sandboxRuntimeClassName: gvisor
   initUser:
     email: "admin@example.com"

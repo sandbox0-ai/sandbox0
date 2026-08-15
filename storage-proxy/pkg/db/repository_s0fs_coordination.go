@@ -206,16 +206,10 @@ func (r *Repository) lockS0FSVolume(ctx context.Context, tx pgx.Tx, volumeID str
 
 func (r *Repository) requireS0FSHeadIdentity(ctx context.Context, tx pgx.Tx, volumeID string, expected *S0FSCommittedHead) error {
 	current, err := r.getS0FSCommittedHead(ctx, tx, volumeID, true)
-	if errors.Is(err, ErrNotFound) {
-		if expected == nil {
-			return nil
-		}
-		return ErrConflict
+	if errors.Is(err, ErrNotFound) && expected == nil {
+		return nil
 	}
-	if err != nil {
-		return err
-	}
-	if !sameS0FSCommittedHeadIdentity(current, expected) {
+	if err != nil || !sameS0FSCommittedHeadIdentity(current, expected) {
 		return ErrConflict
 	}
 	return nil

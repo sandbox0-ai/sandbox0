@@ -8,8 +8,6 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	crdfake "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/fake"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -18,66 +16,6 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
-
-func TestTemplateS0FSRolloutDisablesLegacyPoolsOnGreenCluster(t *testing.T) {
-	configPath := writeManagerConfig(t, `
-shared_carrier_pool:
-  enabled: false
-template_image_fs:
-  enabled: true
-s0fs_runtime:
-  enabled: true
-  admission:
-    mode: "off"
-    reject_legacy_claims: true
-`)
-	t.Setenv("CONFIG_PATH", configPath)
-
-	mode, admitted, rejectLegacy := templateS0FSRollout(&v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "template-a"},
-	})
-	assert.Empty(t, mode)
-	assert.False(t, admitted)
-	assert.True(t, rejectLegacy)
-}
-
-func TestTemplateS0FSRolloutAdmitsOnlyReadyCohort(t *testing.T) {
-	configPath := writeManagerConfig(t, `
-shared_carrier_pool:
-  enabled: false
-template_image_fs:
-  enabled: true
-s0fs_runtime:
-  enabled: true
-  admission:
-    mode: "cold"
-    team_ids:
-      - team-a
-    reject_legacy_claims: true
-`)
-	t.Setenv("CONFIG_PATH", configPath)
-
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "cluster-template-a",
-			Labels:      map[string]string{"sandbox0.ai/template-scope": naming.ScopeTeam, "sandbox0.ai/template-logical-id": "template-a"},
-			Annotations: map[string]string{"sandbox0.ai/template-team-id": "team-a"},
-		},
-	}
-	mode, admitted, rejectLegacy := templateS0FSRollout(template)
-	assert.Empty(t, mode)
-	assert.False(t, admitted)
-	assert.True(t, rejectLegacy)
-
-	template.Status.ImageRevision = &v1alpha1.TemplateImageRevisionStatus{
-		State:         v1alpha1.TemplateImageRevisionStateReady,
-		ImageFSHeadID: "head-1",
-	}
-	mode, admitted, rejectLegacy = templateS0FSRollout(template)
-	assert.Equal(t, s0fsrollout.AdmissionModeCold, mode)
-	assert.True(t, admitted)
-	assert.True(t, rejectLegacy)
-}
 
 func TestOperatorUpdateTemplateStatusUsesReadyIdlePods(t *testing.T) {
 	transitionTime := metav1.NewTime(time.Unix(1_700_000_000, 0))

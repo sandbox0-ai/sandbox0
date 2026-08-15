@@ -30,10 +30,9 @@ const (
 )
 
 type OperatorConfig struct {
-	ImageRepo                 string `json:"imageRepo" yaml:"imageRepo"`
-	ImageTag                  string `json:"imageTag" yaml:"imageTag"`
-	RootFSSnapshotterImageTag string `json:"rootfsSnapshotterImageTag" yaml:"rootfsSnapshotterImageTag"`
-	ImagePullPolicy           string `json:"imagePullPolicy" yaml:"imagePullPolicy"`
+	ImageRepo       string `json:"imageRepo" yaml:"imageRepo"`
+	ImageTag        string `json:"imageTag" yaml:"imageTag"`
+	ImagePullPolicy string `json:"imagePullPolicy" yaml:"imagePullPolicy"`
 }
 
 func LoadOperatorConfig(configPath string) (OperatorConfig, error) {
@@ -43,7 +42,6 @@ func LoadOperatorConfig(configPath string) (OperatorConfig, error) {
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		config.RootFSSnapshotterImageTag = config.ImageTag
 		return config, nil
 	}
 
@@ -61,9 +59,6 @@ func LoadOperatorConfig(configPath string) (OperatorConfig, error) {
 	}
 	if config.ImageTag == "" {
 		config.ImageTag = DefaultImageTag
-	}
-	if config.RootFSSnapshotterImageTag == "" {
-		config.RootFSSnapshotterImageTag = config.ImageTag
 	}
 
 	return config, nil

@@ -10,14 +10,12 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/carrierpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialsource"
@@ -33,7 +31,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimage"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateimagefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
@@ -47,7 +44,6 @@ import (
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	registryprovider "github.com/sandbox0-ai/sandbox0/pkg/registry"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
@@ -81,10 +77,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer logger.Sync()
-	s0fsAdmission, err := cfg.S0FSAdmission()
-	if err != nil {
-		logger.Fatal("Invalid S0FS admission configuration", zap.Error(err))
-	}
 
 	logger.Info("Starting Manager",
 		zap.String("version", "v0.1.0"),
@@ -329,7 +321,6 @@ func main() {
 		PublicRootDomain:                    cfg.PublicRootDomain,
 		PublicRegionID:                      cfg.PublicRegionID,
 		AutoscalerSafeToEvictAnnotationKeys: autoscalerAnnotationKeys,
-		S0FSAdmission:                       s0fsAdmission,
 	}
 
 	var quotaUsageStore quota.UsageStore
@@ -384,7 +375,7 @@ func main() {
 		WebhookStateVolumeClient:    webhookStateVolumeClient,
 		QuotaStore:                  quotaRepo,
 		SandboxStore:                sandboxStore,
-		RootFSObjectStore:           rootFSObjectStore,
+		RootFSObjectDeleter:         rootFSObjectStore,
 	})
 	sandboxService.SetTemplateImageBuildAvailable(false)
 	podInformer.Informer().AddEventHandler(sandboxService.PodEventHandler())
@@ -442,14 +433,14 @@ func main() {
 	}
 	registryService := registryservice.NewRegistryService(registryProvider, logger)
 	templateStore := templstorepg.NewStore(pool)
-	var singleClusterReconciler *templreconciler.SingleClusterReconciler
+	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
 		templateApplier := templateservice.NewTemplateApplier(templateService)
 		reconcileInterval := cfg.ResyncPeriod.Duration
 		if reconcileInterval == 0 {
 			reconcileInterval = 30 * time.Second
 		}
-		singleClusterReconciler = templreconciler.NewSingleClusterReconciler(
+		templateReconciler = templreconciler.NewSingleClusterReconciler(
 			templateStore,
 			templateApplier,
 			cfg.DefaultClusterId,
@@ -460,7 +451,6 @@ func main() {
 	} else {
 		logger.Info("Template reconciliation disabled; durable template build queue remains enabled")
 	}
-	templateReconciler := optionalManagerTemplateReconciler(singleClusterReconciler)
 	var templateBuildWorker *templatebuild.TemplateBuildWorker
 	switch {
 	case registryProvider == nil:
@@ -479,6 +469,7 @@ func main() {
 			templateStore,
 			sandboxService,
 			imagePublisher,
+			rootFSObjectStore,
 			templatebuild.TemplateBuildWorkerConfig{
 				ClusterID: naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
 			},
@@ -488,63 +479,6 @@ func main() {
 			logger.Warn("Template image build worker disabled", zap.Error(err))
 		} else {
 			sandboxService.SetTemplateImageBuildAvailable(true)
-		}
-	}
-	var templateImageFSWorker *templateimagefs.Worker
-	var sharedCarrierPool *carrierpool.Pool
-	if cfg.TemplateImageFSEnabled() || cfg.S0FSRuntimeEnabled() {
-		baseImageRef := strings.TrimSpace(cfg.SharedCarrierPool.CarrierImageRef)
-		if baseImageRef == "" {
-			baseImageRef = strings.TrimSpace(cfg.ManagerImage)
-		}
-		if cfg.TemplateImageFSEnabled() {
-			templateImageFSWorker, err = templateimagefs.NewWorker(
-				templateStore,
-				sandboxStore,
-				k8sClient,
-				crdClient.Sandbox0V1alpha1(),
-				nil,
-				sandboxService.CtldAddressForPod,
-				templateimagefs.Config{
-					WorkerID:       "manager/" + naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-					ClusterID:      naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-					BaseImageRef:   baseImageRef,
-					PrimerImageRef: cfg.ManagerImage,
-					ImportCohort:   s0fsrollout.NewCohort(cfg.TemplateImageFS.TeamIDs, cfg.TemplateImageFS.TemplateIDs),
-					Admission:      s0fsAdmission,
-				},
-				logger,
-			)
-			if err != nil {
-				logger.Warn("Template ImageFS worker disabled", zap.Error(err))
-				templateImageFSWorker = nil
-			}
-		}
-		if cfg.S0FSRuntimeEnabled() {
-			minIdle := 0
-			maxIdle := 0
-			if cfg.SharedCarrierPool.Enabled {
-				minIdle = int(cfg.SharedCarrierPool.MinIdle)
-				maxIdle = int(cfg.SharedCarrierPool.MaxIdle)
-			}
-			sharedCarrierPool, err = carrierpool.New(k8sClient, carrierpool.Config{
-				Namespace:         cfg.SharedCarrierPool.Namespace,
-				ClusterID:         naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-				MinIdle:           minIdle,
-				MaxIdle:           maxIdle,
-				CarrierImageRef:   baseImageRef,
-				WaiterImageRef:    cfg.ManagerImage,
-				ReconcileInterval: cfg.SharedCarrierPool.ReconcileInterval.Duration,
-				ActivationTimeout: cfg.SharedCarrierPool.ActivationTimeout.Duration,
-				Generation:        carrierpool.GenerationForConfig(baseImageRef, cfg.ManagerImage, cfg.ProcdBinImageRef, cfg.SandboxRuntimeClassName),
-			}, logger)
-			if err != nil {
-				logger.Warn("S0FS carrier runtime disabled", zap.Error(err))
-				sharedCarrierPool = nil
-			}
-			if sharedCarrierPool != nil {
-				sandboxService.SetSharedCarrierPool(sharedCarrierPool)
-			}
 		}
 	}
 	go serveTemplateReconcilerQuiesceSignals(
@@ -564,8 +498,6 @@ func main() {
 		operator.GetTemplateLister(),
 		logger,
 	)
-	clusterService.SetS0FSRuntimeReady(sharedCarrierPool != nil)
-	clusterService.SetLegacyClaimsRejected(s0fsAdmission.RejectLegacyClaims())
 	// Create cleanup controller
 	cleanupController := controller.NewCleanupController(
 		k8sClient,
@@ -598,11 +530,6 @@ func main() {
 		zap.Strings("allowed_callers", validatorConfig.AllowedCallers),
 	)
 
-	// A manager that has not acquired controller leadership cannot complete
-	// controller-backed lifecycle mutations such as pause. Keep it out of the
-	// Service until those workers have started.
-	var controllerReady atomic.Bool
-
 	// Create HTTP server
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
 		SandboxService:          sandboxService,
@@ -620,7 +547,6 @@ func main() {
 		Logger:                  logger,
 		Port:                    cfg.HTTPPort,
 		ObservabilityProvider:   obsProvider,
-		ReadinessCheck:          controllerReady.Load,
 		PublicRootDomain:        cfg.PublicRootDomain,
 		PublicRegionID:          cfg.PublicRegionID,
 	})
@@ -642,8 +568,6 @@ func main() {
 		sandboxPauseController:         sandboxPauseController,
 		templateReconciler:             templateReconciler,
 		templateBuildWorker:            templateBuildWorker,
-		templateImageFSWorker:          templateImageFSWorker,
-		carrierPool:                    sharedCarrierPool,
 		sandboxLogWorker:               sandboxLogWorker,
 		sandboxStore:                   sandboxStore,
 		rootFSObjectStore:              rootFSObjectStore,
@@ -663,29 +587,14 @@ func main() {
 		crdInformerFactory:    crdInformerFactory,
 		metricsPort:           cfg.MetricsPort,
 		leaderElectionEnabled: cfg.LeaderElection,
-		startControllers: func(ctx context.Context) {
-			startManagerControllers(ctx, controllers.Start, &controllerReady)
-		},
-		cacheSyncs: informerRuntime.cacheSyncs(),
+		startControllers:      controllers.Start,
+		cacheSyncs:            informerRuntime.cacheSyncs(),
 	}
 	app.Run()
 }
 
 type templateReconcilerQuiescer interface {
 	Quiesce(context.Context) error
-}
-
-type managerTemplateReconciler interface {
-	templateReconcilerRunner
-	templateReconcilerQuiescer
-	httpserver.TemplateReconciler
-}
-
-func optionalManagerTemplateReconciler(reconciler *templreconciler.SingleClusterReconciler) managerTemplateReconciler {
-	if reconciler == nil {
-		return nil
-	}
-	return reconciler
 }
 
 const (
@@ -998,23 +907,6 @@ func (i rootFSObjectStoreInspector) StatRootFSObject(key string) (sandboxstore.R
 		Size:     info.Size,
 		Modified: info.Modified,
 	}, nil
-}
-
-func (i rootFSObjectStoreInspector) ListRootFSObjects(prefix, startAfter string, limit int64) ([]sandboxstore.RootFSObjectInfo, bool, error) {
-	objects, more, _, err := i.store.List(prefix, startAfter, "", "", limit)
-	if err != nil {
-		return nil, false, err
-	}
-	result := make([]sandboxstore.RootFSObjectInfo, 0, len(objects))
-	for _, object := range objects {
-		if object.IsPrefix {
-			continue
-		}
-		result = append(result, sandboxstore.RootFSObjectInfo{
-			Key: object.Key, Size: object.Size, Modified: object.Modified,
-		})
-	}
-	return result, more, nil
 }
 
 func rootFSMaintenanceControllerConfig(cfg *config.ManagerConfig) rootfsmaintenance.Config {

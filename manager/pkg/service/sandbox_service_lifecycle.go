@@ -14,8 +14,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
@@ -108,31 +106,28 @@ type pauseSandboxRuntimeOptions struct {
 // RequestPauseSandboxRuntime records a durable pause transaction and returns
 // without waiting for rootfs checkpoint upload.
 func (s *SandboxService) RequestPauseSandboxRuntime(ctx context.Context, sandboxID string) (string, error) {
-	status, _, err := s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{source: sandboxstore.SandboxLifecycleSourceManual})
-	return status, err
+	return s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{source: sandboxstore.SandboxLifecycleSourceManual})
 }
 
 func (s *SandboxService) requestAutoPauseSandboxRuntime(ctx context.Context, sandboxID string) (string, error) {
-	status, _, err := s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{
+	return s.requestPauseSandboxRuntime(ctx, sandboxID, pauseSandboxRuntimeOptions{
 		source:     sandboxstore.SandboxLifecycleSourceAuto,
 		cancelable: true,
 	})
-	return status, err
 }
 
-func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandboxID string, opts pauseSandboxRuntimeOptions) (string, string, error) {
+func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandboxID string, opts pauseSandboxRuntimeOptions) (string, error) {
 	if s == nil {
-		return "", "", fmt.Errorf("sandbox service is nil")
+		return "", fmt.Errorf("sandbox service is nil")
 	}
 	if s.sandboxStore == nil {
 		if err := s.pauseSandboxRuntime(ctx, sandboxID, true); err != nil {
-			return "", "", err
+			return "", err
 		}
-		return managerapi.SandboxStatusPaused, "", nil
+		return managerapi.SandboxStatusPaused, nil
 	}
 
 	status := managerapi.SandboxStatusStarting
-	txnID := ""
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
 		activeTxn, err := tx.GetActiveLifecycleTxn(lockCtx, sandboxID)
 		if err != nil {
@@ -142,7 +137,6 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 			if activeTxn.Kind != sandboxstore.SandboxLifecycleKindPause {
 				return errSandboxLifecycleResuming
 			}
-			txnID = activeTxn.ID
 			projected, err := s.projectSandboxRecordFromCache(lockCtx, record, activeTxn)
 			if projected != nil {
 				status = projected.Status
@@ -159,12 +153,9 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 			return nil
 		}
 
-		pod, err := s.getRecordedSandboxRuntimePod(lockCtx, record)
+		pod, err := s.getSandboxPod(lockCtx, sandboxID)
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
-				if recordedSandboxRuntimeIdentity(record) {
-					return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("recorded runtime pod disappeared before pause"))
-				}
 				status = managerapi.SandboxStatusPaused
 				return tx.MarkRuntimePaused(lockCtx, sandboxID, 0, s.clock.Now())
 			}
@@ -186,62 +177,42 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 		if source == "" {
 			source = sandboxstore.SandboxLifecycleSourceManual
 		}
-		expectedHeadID, err := currentRootFSHeadID(lockCtx, tx, sandboxID)
-		if err != nil {
-			return err
-		}
-		txnID = uuid.NewString()
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
-			ID:                   txnID,
-			SandboxID:            sandboxID,
-			Kind:                 sandboxstore.SandboxLifecycleKindPause,
-			Phase:                sandboxstore.SandboxLifecyclePhasePreparing,
-			Source:               source,
-			Cancelable:           opts.cancelable,
-			FromGeneration:       generation,
-			FromPodNamespace:     pod.Namespace,
-			FromPodName:          pod.Name,
-			ExpectedHeadID:       expectedHeadID,
-			RootFSRuntimeVersion: record.RootFSRuntimeVersion,
+			ID:               uuid.NewString(),
+			SandboxID:        sandboxID,
+			Kind:             sandboxstore.SandboxLifecycleKindPause,
+			Phase:            sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:           source,
+			Cancelable:       opts.cancelable,
+			FromGeneration:   generation,
+			FromPodNamespace: pod.Namespace,
+			FromPodName:      pod.Name,
 		})
 	})
 	if err != nil {
 		if errors.Is(err, errSandboxLifecycleResuming) {
 			if waitErr := s.waitForSandboxLifecycleTxnExit(ctx, sandboxID); waitErr != nil {
-				return "", "", waitErr
+				return "", waitErr
 			}
 			return s.requestPauseSandboxRuntime(ctx, sandboxID, opts)
 		}
 		if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
 			if fallbackErr := s.pauseSandboxRuntime(ctx, sandboxID, true); fallbackErr != nil {
-				return "", "", fallbackErr
+				return "", fallbackErr
 			}
-			return managerapi.SandboxStatusPaused, "", nil
+			return managerapi.SandboxStatusPaused, nil
 		}
-		return "", "", err
+		return "", err
 	}
 	if status != managerapi.SandboxStatusPaused {
 		s.enqueueSandboxPause(sandboxID)
 	}
-	return status, txnID, nil
+	return status, nil
 }
 
 const sandboxLifecycleBarrierWaitTimeout = 30 * time.Second
 
 var errSandboxLifecycleCanceled = errors.New("sandbox lifecycle transaction canceled")
-
-const sandboxLifecycleTxnUnavailablePrefix = "dependency_unavailable: "
-
-func sandboxLifecycleTxnAbortReason(err error) string {
-	if err == nil {
-		return ""
-	}
-	reason := err.Error()
-	if ctldapi.IsUnavailableError(err) {
-		return sandboxLifecycleTxnUnavailablePrefix + reason
-	}
-	return reason
-}
 
 func (s *SandboxService) enqueueSandboxPause(sandboxID string) {
 	if s == nil || strings.TrimSpace(sandboxID) == "" {
@@ -346,8 +317,7 @@ func (s *SandboxService) pauseSandboxRuntime(ctx context.Context, sandboxID stri
 			if s == nil || !s.config.CtldEnabled || s.ctldClient == nil {
 				return ErrSandboxCheckpointRequiresCtld
 			}
-			headID := fmt.Sprintf("runtime:%s:%d", sandboxID, generation)
-			if err := s.saveSandboxRootFSCheckpoint(ctx, pod, record, tx, headID); err != nil {
+			if err := s.saveSandboxRootFSCheckpoint(ctx, pod, record, tx); err != nil {
 				return err
 			}
 		}
@@ -409,25 +379,19 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	crashRecovery := txn.Source == sandboxstore.SandboxLifecycleSourceCrash
 	healthRecovery := txn.Source == sandboxstore.SandboxLifecycleSourceHealth
 	lostRecovery := txn.Source == sandboxstore.SandboxLifecycleSourceLost
-	rootFSRecovery := txn.Source == sandboxstore.SandboxLifecycleSourceRootFS
-	runtimeRecovery := crashRecovery || healthRecovery || lostRecovery || rootFSRecovery
+	runtimeRecovery := crashRecovery || healthRecovery || lostRecovery
 	abortOnError := func(completionErr error) {
 		if !runtimeRecovery && completionErr != nil {
-			_ = s.abortLifecycleTxn(ctx, sandboxID, txn.ID, sandboxLifecycleTxnAbortReason(completionErr))
+			_ = s.abortLifecycleTxn(ctx, sandboxID, txn.ID, completionErr.Error())
 		}
 	}
 	if canceled, err := s.abortPauseIfCancelRequested(ctx, sandboxID, txn.ID); err != nil || canceled {
 		return err
 	}
 
-	pod, err := s.getRecordedSandboxRuntimePod(ctx, record)
+	pod, err := s.getSandboxPod(ctx, sandboxID)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			if !runtimeRecovery {
-				completionErr := fmt.Errorf("recorded runtime pod disappeared before rootfs checkpoint: %w", err)
-				abortOnError(completionErr)
-				return completionErr
-			}
 			if runtimeRecovery && s.logger != nil {
 				fields := []zap.Field{
 					zap.String("sandboxID", sandboxID),
@@ -465,16 +429,13 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	if lostRecovery && pod.DeletionTimestamp != nil {
 		return errSandboxRuntimeDeleting
 	}
-	if rootFSRecovery && pod.DeletionTimestamp != nil {
-		return errSandboxRuntimeDeleting
-	}
 	if crashRecovery {
 		_, terminated := terminatedProcdContainer(pod)
 		if terminated == nil && !sandboxRuntimePodTerminal(pod) {
 			return fmt.Errorf("crash recovery expected terminated procd container in pod %s/%s", pod.Namespace, pod.Name)
 		}
 	}
-	if (!runtimeRecovery || rootFSRecovery) && (!s.config.CtldEnabled || s.ctldClient == nil) {
+	if !runtimeRecovery && (!s.config.CtldEnabled || s.ctldClient == nil) {
 		return ErrSandboxCheckpointRequiresCtld
 	}
 	if canceled, err := s.abortPauseIfCancelRequested(ctx, sandboxID, txn.ID); err != nil || canceled {
@@ -489,7 +450,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	procdAddress := ""
 	internalToken := ""
 	barrierActive := false
-	if !runtimeRecovery || rootFSRecovery {
+	if !runtimeRecovery {
 		procdAddress, internalToken, err = s.activatePauseRuntimeBarrier(ctx, pod, record, txn)
 		if err != nil {
 			abortOnError(err)
@@ -512,7 +473,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		abortOnError(err)
 		return err
 	}
-	var rootFSHead *sandboxstore.SandboxRootFSHead
+	var rootFSState *sandboxstore.SandboxRootFSState
 	rootFSSnapshotMissing := false
 	if !s.config.CtldEnabled || s.ctldClient == nil {
 		rootFSSnapshotMissing = true
@@ -522,7 +483,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		if healthRecovery {
 			checkpointCtx, cancelCheckpoint = context.WithTimeout(ctx, defaultSandboxUnhealthyCheckpointTimeout)
 		}
-		rootFSHead, err = s.prepareSandboxRootFSHeadCheckpoint(checkpointCtx, pod, record, txn.ID)
+		rootFSState, err = s.prepareSandboxRootFSCheckpoint(checkpointCtx, pod, record)
 		cancelCheckpoint()
 		if err != nil {
 			if crashRecovery && rootFSTerminatedSnapshotMissing(err) {
@@ -553,8 +514,14 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 			zap.String("source", txn.Source),
 		)
 	}
-	if rootFSHead != nil {
-		if err := s.markLifecycleTxnPreparedHead(ctx, sandboxID, txn.ID, rootFSHead.Reference.HeadID); err != nil {
+	rootFSCommitted := false
+	defer func() {
+		if rootFSState != nil && !rootFSCommitted {
+			s.deleteUncommittedRootFSObject(rootFSState, "pause transaction did not commit")
+		}
+	}()
+	if rootFSState != nil {
+		if err := s.markLifecycleTxnPreparedHead(ctx, sandboxID, txn.ID, rootFSState.LayerID); err != nil {
 			if errors.Is(err, errSandboxLifecycleCanceled) {
 				return nil
 			}
@@ -581,7 +548,7 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 		abortOnError(err)
 		return err
 	}
-	committed, err := s.commitPausingRuntimePaused(ctx, sandboxID, txn, generation, rootFSHead)
+	committed, err := s.commitPausingRuntimePaused(ctx, sandboxID, txn, generation, rootFSState)
 	if err != nil {
 		abortOnError(err)
 		return err
@@ -589,36 +556,9 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 	if !committed {
 		return nil
 	}
-	if rootFSHead != nil {
-		ctldAddress, addressErr := s.ctldAddressForPod(ctx, pod)
-		if addressErr == nil {
-			ackErr := s.acknowledgeSandboxRootFSHead(
-				ctx,
-				ctldAddress,
-				sandboxID,
-				record.TeamID,
-				rootFSHead.Reference.HeadID,
-				generation,
-				true,
-				false,
-			)
-			if ackErr != nil && s.logger != nil {
-				s.logger.Warn("Committed sandbox pause but failed to release rootfs sync binding",
-					zap.String("sandboxID", sandboxID),
-					zap.String("headID", rootFSHead.Reference.HeadID),
-					zap.Error(ackErr),
-				)
-			}
-		} else if s.logger != nil {
-			s.logger.Warn("Committed sandbox pause but could not resolve ctld for rootfs sync release",
-				zap.String("sandboxID", sandboxID),
-				zap.String("headID", rootFSHead.Reference.HeadID),
-				zap.Error(addressErr),
-			)
-		}
-	}
+	rootFSCommitted = rootFSState != nil
 	barrierActive = false
-	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, immediatePodDeletionOptions()); err != nil && !k8serrors.IsNotFound(err) {
+	if err := s.k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		if s.logger != nil {
 			s.logger.Warn("Committed sandbox pause but failed to delete old runtime pod",
 				zap.String("sandboxID", sandboxID),
@@ -633,19 +573,11 @@ func (s *SandboxService) CompletePausingSandboxRuntime(ctx context.Context, sand
 			zap.String("namespace", pod.Namespace),
 			zap.String("pod", pod.Name),
 			zap.Int64("runtimeGeneration", generation),
-			zap.Bool("snapshotRecovered", rootFSHead != nil),
+			zap.Bool("snapshotRecovered", rootFSState != nil),
 			zap.String("source", txn.Source),
 		)
 	}
 	return nil
-}
-
-// immediatePodDeletionOptions is safe after the durable paused state and
-// rootfs checkpoint have committed. Waiting out the normal process grace
-// period would otherwise leak completed pause cleanup into an immediate resume.
-func immediatePodDeletionOptions() metav1.DeleteOptions {
-	gracePeriodSeconds := int64(0)
-	return metav1.DeleteOptions{GracePeriodSeconds: &gracePeriodSeconds}
 }
 
 func (s *SandboxService) sandboxStillPausing(ctx context.Context, sandboxID, txnID string) (bool, error) {
@@ -659,8 +591,8 @@ func (s *SandboxService) sandboxStillPausing(ctx context.Context, sandboxID, txn
 	return txn != nil && txn.ID == txnID && txn.Kind == sandboxstore.SandboxLifecycleKindPause, nil
 }
 
-func (s *SandboxService) markLifecycleTxnPreparedHead(ctx context.Context, sandboxID, txnID, preparedHeadID string) error {
-	if s == nil || s.sandboxStore == nil || strings.TrimSpace(txnID) == "" || strings.TrimSpace(preparedHeadID) == "" {
+func (s *SandboxService) markLifecycleTxnPreparedHead(ctx context.Context, sandboxID, txnID, preparedHeadLayerID string) error {
+	if s == nil || s.sandboxStore == nil || strings.TrimSpace(txnID) == "" || strings.TrimSpace(preparedHeadLayerID) == "" {
 		return nil
 	}
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, _ *sandboxstore.SandboxRecord) error {
@@ -671,7 +603,7 @@ func (s *SandboxService) markLifecycleTxnPreparedHead(ctx context.Context, sandb
 		if activeTxn == nil || activeTxn.ID != txnID {
 			return nil
 		}
-		return tx.SetLifecycleTxnPreparedHead(lockCtx, txnID, preparedHeadID)
+		return tx.SetLifecycleTxnPreparedHead(lockCtx, txnID, preparedHeadLayerID)
 	})
 	if err == nil {
 		return nil
@@ -684,7 +616,7 @@ func (s *SandboxService) markLifecycleTxnPreparedHead(ctx context.Context, sandb
 	return err
 }
 
-func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandboxID string, txn *sandboxstore.SandboxLifecycleTxn, generation int64, rootFSHead *sandboxstore.SandboxRootFSHead) (bool, error) {
+func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandboxID string, txn *sandboxstore.SandboxLifecycleTxn, generation int64, rootFSState *sandboxstore.SandboxRootFSState) (bool, error) {
 	if s == nil || s.sandboxStore == nil {
 		return false, nil
 	}
@@ -697,15 +629,8 @@ func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandbox
 		if activeTxn == nil || activeTxn.Kind != sandboxstore.SandboxLifecycleKindPause || txn == nil || activeTxn.ID != txn.ID {
 			return nil
 		}
-		if rootFSHead != nil {
-			expectedHeadID := ""
-			if rootFSHead.Parent != nil {
-				expectedHeadID = rootFSHead.Parent.HeadID
-			}
-			if strings.TrimSpace(activeTxn.ExpectedHeadID) != expectedHeadID {
-				return fmt.Errorf("rootfs Head changed during pause: transaction expected %q, sealed from %q", activeTxn.ExpectedHeadID, expectedHeadID)
-			}
-			if err := tx.SaveRootFSHead(lockCtx, rootFSHead); err != nil {
+		if rootFSState != nil {
+			if err := tx.SaveRootFSState(lockCtx, rootFSState); err != nil {
 				return err
 			}
 		}
@@ -713,8 +638,8 @@ func (s *SandboxService) commitPausingRuntimePaused(ctx context.Context, sandbox
 			return err
 		}
 		preparedHead := ""
-		if rootFSHead != nil {
-			preparedHead = rootFSHead.Reference.HeadID
+		if rootFSState != nil {
+			preparedHead = rootFSState.LayerID
 		}
 		if err := tx.CommitLifecycleTxn(lockCtx, txn.ID, preparedHead); err != nil {
 			return err
@@ -1264,13 +1189,7 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		OwnerKind:            ownerKindFromPod(pod),
 		CreatedAt:            pod.CreationTimestamp.Time,
 	}
-	if strings.TrimSpace(pod.Annotations[carrier.AnnotationSlot]) != "" {
-		record.RootFSRuntimeVersion = sandboxstore.RootFSRuntimeS0FSV2
-	}
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, locked *sandboxstore.SandboxRecord) error {
-		if record.RootFSRuntimeVersion == "" {
-			record.RootFSRuntimeVersion = locked.RootFSRuntimeVersion
-		}
 		if locked.DesiredState == sandboxstore.SandboxDesiredStatePaused || locked.DesiredState == sandboxstore.SandboxDesiredStateTerminating || locked.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() {
 			return nil
 		}
@@ -1326,60 +1245,6 @@ func (s *SandboxService) getSandboxPod(ctx context.Context, sandboxID string) (*
 		return nil, err
 	}
 	return selectSandboxRuntimePod(sandboxID, pods)
-}
-
-// getRecordedSandboxRuntimePod resolves the durable runtime identity from the
-// informer cache and confirms a cache miss with an exact Kubernetes API read.
-// A restarting manager may serve requests before its namespace-scoped pod
-// cache is warm, so cache absence alone must never be treated as runtime loss.
-func (s *SandboxService) getRecordedSandboxRuntimePod(ctx context.Context, record *sandboxstore.SandboxRecord) (*corev1.Pod, error) {
-	if record == nil {
-		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, "")
-	}
-	sandboxID := strings.TrimSpace(record.ID)
-	namespace := strings.TrimSpace(record.CurrentPodNamespace)
-	name := strings.TrimSpace(record.CurrentPodName)
-	if namespace == "" && name == "" {
-		return s.getSandboxPod(ctx, sandboxID)
-	}
-	if namespace == "" || name == "" {
-		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("recorded runtime pod identity is incomplete"))
-	}
-
-	if s.podLister != nil {
-		pod, err := s.podLister.Pods(namespace).Get(name)
-		if err == nil {
-			return validateRecordedSandboxRuntimePod(record, pod)
-		}
-		if !k8serrors.IsNotFound(err) {
-			return nil, err
-		}
-	}
-	if s.k8sClient == nil {
-		return nil, fmt.Errorf("confirm recorded runtime pod %s/%s: kubernetes client is not configured", namespace, name)
-	}
-	pod, err := s.k8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	return validateRecordedSandboxRuntimePod(record, pod)
-}
-
-func recordedSandboxRuntimeIdentity(record *sandboxstore.SandboxRecord) bool {
-	return record != nil && strings.TrimSpace(record.CurrentPodNamespace) != "" && strings.TrimSpace(record.CurrentPodName) != ""
-}
-
-func validateRecordedSandboxRuntimePod(record *sandboxstore.SandboxRecord, pod *corev1.Pod) (*corev1.Pod, error) {
-	if record == nil || pod == nil {
-		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "pod"}, "")
-	}
-	if sandboxPodID(pod) != record.ID || !sandboxRuntimePodOwnedBySandbox(pod) {
-		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pod does not belong to sandbox %s", record.ID))
-	}
-	if !sandboxRecordReferencesPod(record, pod) {
-		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "pod"}, pod.Name, fmt.Errorf("pod does not match the recorded runtime identity"))
-	}
-	return pod, nil
 }
 
 func selectSandboxRuntimePod(sandboxID string, pods []*corev1.Pod) (*corev1.Pod, error) {

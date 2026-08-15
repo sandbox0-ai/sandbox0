@@ -24,7 +24,7 @@ Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, volumes,
 | --- | --- |
 | **Storage and compute are separated** | Persisted rootfs checkpoints and SandboxVolume objects are application-encrypted and stored in horizontally scalable S3-compatible object storage. Sandbox worker nodes keep disposable caches, not the durable source of truth. |
 | **The sandbox lifetime is your policy** | `ttl` and `hard_ttl` both default to `0` (disabled), so the API imposes no fixed execution window. Keep a runtime running, or pause idle compute and resume the same sandbox identity later. |
-| **One hardened runtime path** | Sandbox Pods use the operator-managed `gvisor-rootfs` RuntimeClass. Its `runsc` handler uses the Sandbox0 external snapshotter, so isolation and persistent rootfs behavior do not diverge across runtime families. |
+| **Choose `runc` or `gVisor`** | Sandbox Pods use Kubernetes `RuntimeClass`. Run trusted or compatibility-sensitive workloads with `runc`, or untrusted multi-tenant workloads with `gVisor`/`runsc`; Sandbox0 supports rootfs checkpoint and restore on both runtime families. |
 | **Fast starts, warm or cold** | Ready template pools make common claims a metadata handoff instead of a Pod boot. When a pool is empty, the cold path avoids a per-Pod init copy by mounting `procd` from a small OCI artifact and can work with cloud node autoscaling. |
 | **Small-file performance is measured** | The checked-in SandboxVolume suite covers 30,000-file writes, content-verified reads, metadata operations, destruction, reattachment, and byte-for-byte durability instead of relying on a storage bandwidth claim. |
 
@@ -110,12 +110,10 @@ More examples:
 
 ```mermaid
 flowchart LR
-    api["Sandbox0 API"] --> pod["Replaceable sandbox Pod<br/>gvisor-rootfs"]
+    api["Sandbox0 API"] --> pod["Replaceable sandbox Pod<br/>runc or gVisor"]
     pod --> procd["procd<br/>cmd, REPL, files, services"]
-    pod <--> ctld["ctld<br/>rootfs capture + volume runtime"]
-    pod --> snapshotter["rootfs snapshotter<br/>immutable FUSE lower"]
-    ctld --> rootfs["Complete immutable rootfs Head"]
-    snapshotter --> rootfs
+    pod <--> ctld["ctld<br/>rootfs + volume runtime"]
+    ctld --> rootfs["Writable rootfs checkpoint"]
     ctld --> volume["SandboxVolume"]
     rootfs --> encryption["Application-layer<br/>object encryption"]
     volume --> encryption
@@ -130,9 +128,9 @@ flowchart LR
 | SandboxVolume | Durable storage independent of one sandbox identity | Yes | Repos, caches, agent memory, artifacts, shared data, snapshots, forks |
 | Metering, quota, and policy state | Control-plane storage | Yes | Usage truth, policy audit, quota, showback, and export |
 
-By default, Sandbox0 applies envelope encryption to persisted rootfs checkpoint objects and S0FS Volume objects before writing them to S3-compatible storage. This is service-side rather than end-to-end encryption: `manager`, the active `ctld`, and the rootfs snapshotter hold the installation key and can decrypt objects while serving sandbox operations. Self-hosted deployments control this behavior with `spec.storage.runtime.objectEncryptionEnabled`.
+By default, Sandbox0 applies envelope encryption to persisted rootfs checkpoint objects and S0FS Volume objects before writing them to S3-compatible storage. This is service-side rather than end-to-end encryption: `manager` and the active `ctld` hold the installation key and can decrypt objects while serving sandbox operations. Self-hosted deployments control this behavior with `spec.storage.runtime.objectEncryptionEnabled`.
 
-During execution, `ctld` continuously persists changes from the native overlayfs upper into a complete immutable Head. Pause freezes user processes, reconciles only the dirty tail when the watcher is healthy, and publishes the Head transactionally before releasing the Pod. Resume attaches that Head as a lazy, read-only FUSE lower beneath a fresh native overlay upper. Running processes, memory, and sockets are intentionally not checkpointed.
+On pause, `ctld` captures the writable containerd rootfs, uploads the encrypted checkpoint, and releases the runtime Pod. Resume creates a new Pod for the same sandbox identity and restores that rootfs. Running processes, memory, and sockets are intentionally not checkpointed.
 
 This model lets storage capacity scale independently of compute nodes and lets long-running agents survive idle periods, node replacement, and runtime restarts. Set `ttl` to pause idle compute, set `hard_ttl` when you need a cleanup deadline, or leave either value at `0` to disable that expiration path.
 
@@ -144,9 +142,9 @@ This model lets storage capacity scale independently of compute nodes and lets l
 | --- | --- |
 | **Use the cloud's managed control plane** | Major clouds already operate Kubernetes as a managed service: [Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html), [Google GKE](https://cloud.google.com/kubernetes-engine/docs/concepts/kubernetes-engine-overview), [Azure AKS](https://learn.microsoft.com/en-us/azure/aks/core-aks-concepts), and [Alibaba Cloud ACK](https://www.alibabacloud.com/help/en/ack/product-overview/product-introduction). Sandbox0 can use their cluster lifecycle, version upgrades, node pools, networking integrations, and horizontal node autoscaling instead of building a separate microVM control plane. |
 | **Add a multi-tenant isolation layer** | [gVisor](https://gvisor.dev/docs/architecture_guide/intro/) handles guest system calls in a per-sandbox application kernel, reducing direct exposure to the host Linux kernel while retaining the Pod resource model. |
-| **Keep deployment portable** | `runsc` integrates with [Kubernetes and containerd](https://gvisor.dev/docs/user_guide/quick_start/kubernetes/) through a `RuntimeClass`. Sandbox0 keeps one `gvisor-rootfs` handler across supported self-managed Kubernetes environments. |
+| **Keep deployment portable** | GKE exposes gVisor as [GKE Sandbox](https://cloud.google.com/kubernetes-engine/docs/concepts/sandbox-pods). On other Kubernetes clusters, `runsc` integrates with [Kubernetes and containerd](https://gvisor.dev/docs/user_guide/quick_start/kubernetes/) through a `RuntimeClass`. Sandbox0 can also use the cluster's standard `runc` runtime. |
 | **Scale with ordinary Kubernetes primitives** | Sandbox workloads remain Pods, so the scheduler, quotas, node pools, rolling upgrades, observability, and cluster autoscaler stay on the normal operational path. |
-| **Persist and restore the writable rootfs** | Sandbox0's `gvisor-rootfs` handler uses the Sandbox0 external snapshotter: a native overlay upper stays on the write path while immutable encrypted Heads are attached lazily as FUSE lowers. |
+| **Persist and restore the writable rootfs** | Sandbox0's `gvisor-rootfs` containerd handler uses shared rootfs access so `ctld` can checkpoint writable layers to encrypted S3-compatible storage. Pause releases compute; resume restores the rootfs into a replacement Pod. |
 
 This is a tradeoff, not a claim that gVisor has a stronger isolation boundary than a Firecracker microVM. Sandbox0 chooses gVisor when teams want a substantial isolation layer without giving up managed Kubernetes operations, elastic Pod scheduling, or containerd-backed rootfs pause/resume.
 
@@ -180,24 +178,21 @@ flowchart TB
     cgw --> mgr["manager<br/>lifecycle + storage runtime"]
     cgw --> pod["sandbox pod with procd"]
     mgr --> pod
-    mgr --> ctld["ctld HA pair (node-local)<br/>capture + storage portal + network"]
-    mgr --> snapshotter["rootfs snapshotter (node-local)<br/>FUSE lower + object cache"]
+    mgr --> ctld["ctld HA pair (node-local)<br/>storage portal + network runtime"]
     pod --> ctld
-    pod --> snapshotter
     mgr --> pg[("PostgreSQL")]
     mgr --> s3[("S3-compatible storage")]
     ctld --> s3
-    snapshotter --> s3
 ```
 
 Sandbox0 separates region-scoped control-plane services from cluster-scoped data-plane services. In single-cluster mode, `cluster-gateway` can act as the entrypoint. In multi-cluster mode, `regional-gateway` and `scheduler` select and route to one of the data-plane clusters in the same region.
 
-`manager` owns sandbox lifecycle, PostgreSQL Head publication, and the storage API runtime. Each sandbox node runs the `ctld-a` and `ctld-b` HA pair for continuous upper capture, volume portals, and network policy, plus one external rootfs snapshotter that owns live FUSE lowers and the shared disk cache.
+`manager` owns sandbox lifecycle and the storage API runtime. Each sandbox node runs the `ctld-a` and `ctld-b` HA pair; the elected primary owns the volume portal, rootfs persistence, and network policy runtime, while the synchronized standby takes over those responsibilities after promotion.
 
 | Layer | Components | Responsibility |
 | --- | --- | --- |
 | Control plane | Optional `regional-gateway`, optional `scheduler` | Tenant/API key management, cluster selection, internal routing, template distribution |
-| Data plane | `cluster-gateway`, `manager`, `ctld-a` / `ctld-b`, rootfs snapshotter | Sandbox lifecycle, rootfs capture and lazy restore, process/file APIs, volume storage, network enforcement |
+| Data plane | `cluster-gateway`, `manager`, `ctld-a` / `ctld-b` | Sandbox lifecycle, rootfs checkpoints, process/file APIs, volume storage, network enforcement |
 | In-pod runtime | `procd` | PID 1 inside each sandbox pod, process abstraction, file I/O, volume mount operations |
 | Storage | PostgreSQL, ClickHouse, and S3-compatible object storage | Transactional state and metering producer state/outbox in PostgreSQL, asynchronous metering query projection in ClickHouse, encrypted rootfs/volume objects in S3 |
 
@@ -229,7 +224,7 @@ For API changes, `pkg/apispec/openapi.yaml` is the source of truth. Generated SD
 - Sandbox0 is a runtime boundary, not a complete agent framework. Bring your own harness or use the documented use-case templates when you want a framework gateway to live inside the sandbox boundary.
 - Pause/resume does not preserve live processes, sockets, or memory. Runtime requests are routed to a committed generation; during lifecycle transitions they may wait for the transaction to commit and continue after resume.
 - Cold-claim latency includes Kubernetes scheduling, CNI setup, image locality, and, when necessary, node provisioning.
-- `infra-operator` creates the `gvisor-rootfs` RuntimeClass, but self-hosted operators must install `runsc`, configure its containerd handler and `sandbox0` snapshotter proxy, and restart containerd on every sandbox node.
+- Sandbox0 selects an existing Kubernetes `RuntimeClass`; self-hosted operators must install and maintain `runsc` and the matching containerd handler when using gVisor outside a managed integration such as GKE Sandbox.
 - SandboxVolume numbers above are measured baselines, not an availability or performance SLA. Historical JuiceFS/EFS comparisons are not current same-environment provider tests.
 - Self-hosted production installs require deliberate choices for Kubernetes runtime isolation, CNI, PostgreSQL, S3-compatible storage, registry, ingress, and credential policy.
 - Browser and computer-use workloads require templates and integrations that include the browser/runtime tools you need.

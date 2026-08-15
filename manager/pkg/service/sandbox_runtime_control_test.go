@@ -81,19 +81,6 @@ func TestRuntimeAssignmentObservationRequiresExactPublishedReadyState(t *testing
 	}
 }
 
-func TestRuntimeAssignmentObservationDoesNotWaitForKubeletPhasePropagation(t *testing.T) {
-	pod, revision := readyRuntimeControlTestPod(t)
-	pod.Status.Phase = corev1.PodPending
-
-	ready, failed, reason := runtimeAssignmentObservation(pod, revision)
-	if !ready || failed || reason != "" {
-		t.Fatalf("pending-phase ready observation = (%t, %t, %q)", ready, failed, reason)
-	}
-	if status := (&SandboxService{}).podToSandboxStatus(pod); status != managerapi.SandboxStatusRunning {
-		t.Fatalf("sandbox status = %q, want running", status)
-	}
-}
-
 func TestPodToSandboxHidesAddressWhileRuntimeObservationIsStale(t *testing.T) {
 	pod, _ := readyRuntimeControlTestPod(t)
 	pod.Status.PodIP = "10.0.0.10"

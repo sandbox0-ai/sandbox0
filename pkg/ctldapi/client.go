@@ -27,13 +27,12 @@ const (
 	pathVolumeSnapshotPrepare    = "/api/v1/volume-portals/snapshot-checkpoints/prepare"
 	pathVolumeSnapshotComplete   = "/api/v1/volume-portals/snapshot-checkpoints/complete"
 	pathVolumeSnapshotAbort      = "/api/v1/volume-portals/snapshot-checkpoints/abort"
-	pathRootFSSyncBind           = "/api/v1/rootfs/sync/bind"
-	pathRootFSSyncStatus         = "/api/v1/rootfs/sync/status"
-	pathRootFSHeadSeal           = "/api/v1/rootfs/heads/seal"
-	pathRootFSHeadAcknowledge    = "/api/v1/rootfs/heads/acknowledge"
-	pathRootFSHeadMaterialize    = "/api/v1/rootfs/heads/materialize"
-	pathRootFSImageImport        = "/api/v1/rootfs/images/import"
-	pathCarrierGateRelease       = "/api/v1/carriers/gate/release"
+	pathRootFSInspect            = "/api/v1/rootfs/inspect"
+	pathRootFSSave               = "/api/v1/rootfs/save"
+	pathRootFSSnapshotPrepare    = "/api/v1/rootfs/snapshots/prepare"
+	pathRootFSSnapshotPublish    = "/api/v1/rootfs/snapshots/publish"
+	pathRootFSSnapshotAbort      = "/api/v1/rootfs/snapshots/abort"
+	pathRootFSApply              = "/api/v1/rootfs/apply"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -89,18 +88,6 @@ func IsConflictError(err error) bool {
 	return errors.As(err, &reqErr) && reqErr != nil && reqErr.StatusCode == http.StatusConflict
 }
 
-// IsNotFoundError reports whether err is a ctld HTTP 404 response.
-func IsNotFoundError(err error) bool {
-	var reqErr *RequestError
-	return errors.As(err, &reqErr) && reqErr != nil && reqErr.StatusCode == http.StatusNotFound
-}
-
-// IsUnavailableError reports whether err contains a ctld HTTP 503 response.
-func IsUnavailableError(err error) bool {
-	var reqErr *RequestError
-	return errors.As(err, &reqErr) && reqErr != nil && reqErr.StatusCode == http.StatusServiceUnavailable
-}
-
 func (c *Client) Probe(ctx context.Context, ctldAddress, sandboxID string, kind sandboxprobe.Kind) (*sandboxprobe.Response, error) {
 	path := fmt.Sprintf("/api/v1/sandboxes/%s/probes/%s", url.PathEscape(sandboxID), url.PathEscape(string(kind)))
 	return PostJSON[sandboxprobe.Response](ctx, c.httpClientOrDefault(), ctldAddress, path, nil)
@@ -143,32 +130,48 @@ func (c *Client) AbortVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress 
 	return PostJSON[AbortVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotAbort, req)
 }
 
-func (c *Client) BindRootFSSync(ctx context.Context, ctldAddress string, req BindRootFSSyncRequest) (*BindRootFSSyncResponse, error) {
-	return PutJSON[BindRootFSSyncResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSyncBind, req)
+func (c *Client) InspectRootFS(ctx context.Context, ctldAddress string, req InspectRootFSRequest) (*InspectRootFSResponse, error) {
+	return PostJSON[InspectRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSInspect, req)
 }
 
-func (c *Client) GetRootFSSyncStatus(ctx context.Context, ctldAddress string, req GetRootFSSyncStatusRequest) (*GetRootFSSyncStatusResponse, error) {
-	return PostJSON[GetRootFSSyncStatusResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSyncStatus, req)
+func (c *Client) SaveRootFS(ctx context.Context, ctldAddress string, req SaveRootFSRequest) (*SaveRootFSResponse, error) {
+	return PostJSON[SaveRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSave, req)
 }
 
-func (c *Client) SealRootFSHead(ctx context.Context, ctldAddress string, req SealRootFSHeadRequest, timeout time.Duration) (*SealRootFSHeadResponse, error) {
-	return PutJSON[SealRootFSHeadResponse](ctx, c.withTimeout(timeout).httpClientOrDefault(), ctldAddress, pathRootFSHeadSeal, req)
+func (c *Client) PrepareRootFSSnapshot(ctx context.Context, ctldAddress string, req PrepareRootFSSnapshotRequest) (*PrepareRootFSSnapshotResponse, error) {
+	return PostJSON[PrepareRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotPrepare, req)
 }
 
-func (c *Client) AcknowledgeRootFSHead(ctx context.Context, ctldAddress string, req AcknowledgeRootFSHeadRequest, timeout time.Duration) (*AcknowledgeRootFSHeadResponse, error) {
-	return PutJSON[AcknowledgeRootFSHeadResponse](ctx, c.withTimeout(timeout).httpClientOrDefault(), ctldAddress, pathRootFSHeadAcknowledge, req)
+// PrepareRootFSSnapshotWithTimeout calls PrepareRootFSSnapshot with a per-request client timeout.
+func (c *Client) PrepareRootFSSnapshotWithTimeout(ctx context.Context, ctldAddress string, req PrepareRootFSSnapshotRequest, timeout time.Duration) (*PrepareRootFSSnapshotResponse, error) {
+	return c.withTimeout(timeout).PrepareRootFSSnapshot(ctx, ctldAddress, req)
 }
 
-func (c *Client) MaterializeRootFSHead(ctx context.Context, ctldAddress string, req MaterializeRootFSHeadRequest, timeout time.Duration) (*MaterializeRootFSHeadResponse, error) {
-	return PutJSON[MaterializeRootFSHeadResponse](ctx, c.withTimeout(timeout).httpClientOrDefault(), ctldAddress, pathRootFSHeadMaterialize, req)
+func (c *Client) PublishRootFSSnapshot(ctx context.Context, ctldAddress string, req PublishRootFSSnapshotRequest) (*PublishRootFSSnapshotResponse, error) {
+	return PostJSON[PublishRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotPublish, req)
 }
 
-func (c *Client) ImportRootFSImage(ctx context.Context, ctldAddress string, req ImportRootFSImageRequest, timeout time.Duration) (*ImportRootFSImageResponse, error) {
-	return PutJSON[ImportRootFSImageResponse](ctx, c.withTimeout(timeout).httpClientOrDefault(), ctldAddress, pathRootFSImageImport, req)
+// PublishRootFSSnapshotWithTimeout calls PublishRootFSSnapshot with a per-request client timeout.
+func (c *Client) PublishRootFSSnapshotWithTimeout(ctx context.Context, ctldAddress string, req PublishRootFSSnapshotRequest, timeout time.Duration) (*PublishRootFSSnapshotResponse, error) {
+	return c.withTimeout(timeout).PublishRootFSSnapshot(ctx, ctldAddress, req)
 }
 
-func (c *Client) ReleaseCarrierGate(ctx context.Context, ctldAddress string, req ReleaseCarrierGateRequest, timeout time.Duration) (*ReleaseCarrierGateResponse, error) {
-	return PutJSON[ReleaseCarrierGateResponse](ctx, c.withTimeout(timeout).httpClientOrDefault(), ctldAddress, pathCarrierGateRelease, req)
+func (c *Client) AbortRootFSSnapshot(ctx context.Context, ctldAddress string, req AbortRootFSSnapshotRequest) (*AbortRootFSSnapshotResponse, error) {
+	return PostJSON[AbortRootFSSnapshotResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSSnapshotAbort, req)
+}
+
+// AbortRootFSSnapshotWithTimeout calls AbortRootFSSnapshot with a per-request client timeout.
+func (c *Client) AbortRootFSSnapshotWithTimeout(ctx context.Context, ctldAddress string, req AbortRootFSSnapshotRequest, timeout time.Duration) (*AbortRootFSSnapshotResponse, error) {
+	return c.withTimeout(timeout).AbortRootFSSnapshot(ctx, ctldAddress, req)
+}
+
+func (c *Client) ApplyRootFS(ctx context.Context, ctldAddress string, req ApplyRootFSRequest) (*ApplyRootFSResponse, error) {
+	return PostJSON[ApplyRootFSResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathRootFSApply, req)
+}
+
+// ApplyRootFSWithTimeout calls ApplyRootFS with a per-request client timeout.
+func (c *Client) ApplyRootFSWithTimeout(ctx context.Context, ctldAddress string, req ApplyRootFSRequest, timeout time.Duration) (*ApplyRootFSResponse, error) {
+	return c.withTimeout(timeout).ApplyRootFS(ctx, ctldAddress, req)
 }
 
 func (c *Client) httpClientOrDefault() *http.Client {
@@ -190,15 +193,6 @@ func (c *Client) withTimeout(timeout time.Duration) *Client {
 
 // PostJSON sends a JSON POST request to ctld and decodes the response.
 func PostJSON[T any](ctx context.Context, httpClient *http.Client, baseURL, path string, request any) (*T, error) {
-	return sendJSON[T](ctx, httpClient, http.MethodPost, baseURL, path, request)
-}
-
-// PutJSON sends a JSON PUT request to ctld and decodes the response.
-func PutJSON[T any](ctx context.Context, httpClient *http.Client, baseURL, path string, request any) (*T, error) {
-	return sendJSON[T](ctx, httpClient, http.MethodPut, baseURL, path, request)
-}
-
-func sendJSON[T any](ctx context.Context, httpClient *http.Client, method, baseURL, path string, request any) (*T, error) {
 	if httpClient == nil {
 		httpClient = defaultHTTPClient
 	}
@@ -212,7 +206,7 @@ func sendJSON[T any](ctx context.Context, httpClient *http.Client, method, baseU
 		reader = bytes.NewReader(payload)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(baseURL, "/")+path, reader)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+path, reader)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -263,19 +257,17 @@ func responseError(resp any) string {
 		return strings.TrimSpace(typed.Error)
 	case *UnbindVolumePortalResponse:
 		return strings.TrimSpace(typed.Error)
-	case *BindRootFSSyncResponse:
+	case *InspectRootFSResponse:
 		return strings.TrimSpace(typed.Error)
-	case *GetRootFSSyncStatusResponse:
+	case *SaveRootFSResponse:
 		return strings.TrimSpace(typed.Error)
-	case *SealRootFSHeadResponse:
+	case *PrepareRootFSSnapshotResponse:
 		return strings.TrimSpace(typed.Error)
-	case *AcknowledgeRootFSHeadResponse:
+	case *PublishRootFSSnapshotResponse:
 		return strings.TrimSpace(typed.Error)
-	case *MaterializeRootFSHeadResponse:
+	case *AbortRootFSSnapshotResponse:
 		return strings.TrimSpace(typed.Error)
-	case *ImportRootFSImageResponse:
-		return strings.TrimSpace(typed.Error)
-	case *ReleaseCarrierGateResponse:
+	case *ApplyRootFSResponse:
 		return strings.TrimSpace(typed.Error)
 	default:
 		return ""

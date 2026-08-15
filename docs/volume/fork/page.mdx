@@ -2,6 +2,10 @@
 
 Volume Fork creates a new Volume from an existing Volume using s0fs Copy-on-Write (COW) clone.
 
+<Callout variant="warning">
+Sandbox Volumes will be retired soon and replaced by persistent Sandbox rootfs. Use Sandbox rootfs for new workloads and plan to migrate existing Volume data. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for rootfs snapshots, restore, and forks.
+</Callout>
+
 <Callout variant="info">
 Volume fork is supported only for the `s0fs` backend. Forking an `s3` backend Volume returns a bad request because the external bucket prefix remains the source of truth. See [Volume Backends](/docs/sandbox/volume/backends) for the compatibility matrix.
 </Callout>

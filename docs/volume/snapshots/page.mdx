@@ -2,6 +2,10 @@
 
 A Snapshot is a point-in-time, read-only copy of a Volume. Snapshots are designed for backup, rollback, and reproducible environments.
 
+<Callout variant="warning">
+Sandbox Volumes will be retired soon and replaced by persistent Sandbox rootfs. Use Sandbox rootfs for new workloads and plan to migrate existing Volume data. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for rootfs snapshots, restore, and forks.
+</Callout>
+
 <Callout variant="info">
 Volume snapshots, restore, and creating a Volume from `snapshot_id` are supported only for the `s0fs` backend. `s3` backend Volumes return a bad request because they expose an external object prefix rather than Sandbox0-managed snapshot state. See [Volume Backends](/docs/sandbox/volume/backends) for the compatibility matrix.
 </Callout>

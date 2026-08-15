@@ -716,10 +716,25 @@ func TestVolumeRuntimeMetadataRetirementMigration(t *testing.T) {
 	ctx := context.Background()
 	assertSandboxStoreColumnExists(t, ctx, pool, "mounts", true)
 	assertSandboxStoreColumnExists(t, ctx, pool, "webhook_state_volume_id", true)
+	_, err := pool.Exec(ctx, `
+		INSERT INTO manager.goose_db_version (version_id, is_applied)
+		SELECT version_id, FALSE
+		FROM generate_series(13, 18) AS version_id
+	`)
+	require.NoError(t, err)
 
 	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
 	assertSandboxStoreColumnExists(t, ctx, pool, "mounts", false)
 	assertSandboxStoreColumnExists(t, ctx, pool, "webhook_state_volume_id", false)
+	var terminalMigrationApplied bool
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM manager.goose_db_version
+			WHERE version_id = 19 AND is_applied
+		)
+	`).Scan(&terminalMigrationApplied))
+	require.True(t, terminalMigrationApplied)
 
 	require.NoError(t, migrate.Down(ctx, pool, ".",
 		migrate.WithBaseFS(storemigrations.FS),

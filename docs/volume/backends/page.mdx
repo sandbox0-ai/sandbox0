@@ -2,6 +2,10 @@
 
 Volume backend selection controls where Volume data lives and which storage operations are available.
 
+<Callout variant="warning">
+Sandbox Volumes will be retired soon and replaced by persistent Sandbox rootfs. Use Sandbox rootfs for new workloads and plan to migrate existing Volume data. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for rootfs snapshots, restore, and forks.
+</Callout>
+
 The default backend is `s0fs`. It stores Sandbox0-managed filesystem state in S3-compatible object storage and keeps filesystem metadata under Sandbox0 control. Use `s0fs` for agent workspaces that need direct file APIs, snapshots, restore, forks, and small-file write-heavy behavior.
 
 The `s3` backend mounts an existing S3-compatible bucket prefix through the same ctld volume portal used by normal Sandbox mounts. Use `s3` when the bucket prefix is the source of truth and a Sandbox should read or write objects through a mounted filesystem path.

@@ -2,6 +2,10 @@
 
 Volume provides persistent storage for Sandbox0. It is a storage unit independent of the Sandbox lifecycle, allowing data sharing and reuse across multiple Sandboxes.
 
+<Callout variant="warning">
+Sandbox Volumes will be retired soon and replaced by persistent Sandbox rootfs. Use Sandbox rootfs for new workloads and plan to migrate existing Volume data. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for rootfs snapshots, restore, and forks.
+</Callout>
+
 ## Why Volumes?
 
 The default Sandbox writable filesystem is checkpointed across pause/resume for the same Sandbox identity. Sandbox rootfs snapshots and forks can preserve or branch that rootfs state, but they still operate at the sandbox rootfs boundary. Volumes solve the cases where data must be mounted by multiple Sandboxes or accessed directly through storage APIs:

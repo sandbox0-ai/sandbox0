@@ -14,7 +14,6 @@ import (
 	managernaming "github.com/sandbox0-ai/sandbox0/manager/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -119,28 +118,6 @@ func TestBuildPodTemplateAnnotatesTeamOwnedWarmPool(t *testing.T) {
 	assert.Equal(t, OwnerKindTeamWarmPool, got.Labels[LabelOwnerKind])
 }
 
-func TestBuildPodTemplatePreMountsUserVolumePortalsForIdlePool(t *testing.T) {
-	pm := &PoolManager{}
-	template := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "template-a",
-			Namespace: "default",
-		},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			MainContainer: v1alpha1.ContainerSpec{Image: "busybox"},
-			VolumeMounts: []v1alpha1.VolumeMountSpec{{
-				Name:      "data",
-				MountPath: "/workspace/data",
-			}},
-		},
-	}
-
-	got, err := pm.buildPodTemplate(template, "hash-v1")
-	require.NoError(t, err)
-	assert.NotNil(t, findCSIVolumeByPortal(got.Spec.Volumes, "data"))
-	assert.NotNil(t, findCSIVolumeByPortal(got.Spec.Volumes, volumeportal.WebhookStatePortalName))
-}
-
 func TestDesiredPoolReplicasUsesMinIdle(t *testing.T) {
 	template := &v1alpha1.SandboxTemplate{
 		Spec: v1alpha1.SandboxTemplateSpec{
@@ -219,18 +196,6 @@ func TestUpdateReplicaSetReplicasRetriesConflict(t *testing.T) {
 	require.NotNil(t, updated)
 	assert.Equal(t, 2, updates)
 	assert.Equal(t, int32(15), getInt32Value(updated.Spec.Replicas))
-}
-
-func findCSIVolumeByPortal(volumes []corev1.Volume, portalName string) *corev1.Volume {
-	for i := range volumes {
-		if volumes[i].CSI == nil {
-			continue
-		}
-		if volumes[i].CSI.VolumeAttributes[volumeportal.AttributePortalName] == portalName {
-			return &volumes[i]
-		}
-	}
-	return nil
 }
 
 func TestDrainStaleIdlePodsUsesDeletePreconditions(t *testing.T) {

@@ -11,9 +11,9 @@ A `Sandbox0Infra` spec is easier to reason about when you split it into six laye
 | Layer | Main fields | What it controls |
 |---|---|---|
 | Platform release | `infra-operator` chart / image version | Which sandbox0 component version to deploy |
-| Core dependencies | `spec.database`, `spec.metadataDatabase`, `spec.storage`, `spec.redis`, `spec.registry` | PostgreSQL, s0fs metadata, object storage, gateway rate-limit Redis, registry integration |
+| Core dependencies | `spec.database`, `spec.storage`, `spec.redis`, `spec.registry` | PostgreSQL, rootfs object storage, gateway rate-limit Redis, registry integration |
 | Topology | `spec.services.*`, `spec.controlPlane`, `spec.cluster`, `spec.region` | Single-cluster vs multi-cluster shape and service placement |
-| Data-plane runtimes | `spec.storage.runtime`, `spec.network`, `spec.sandboxNodePlacement` | Manager storage behavior and node-local ctld networking and placement |
+| Data-plane runtimes | `spec.services.manager.config`, `spec.services.ctld.config`, `spec.network`, `spec.sandboxNodePlacement` | Rootfs lifecycle, node-local networking, and placement |
 | Public routing | `spec.publicExposure`, `spec.internalAuth` | Public sandbox URLs and inter-service trust |
 | Runtime bootstrap | `spec.builtinTemplates`, `spec.initUser` | Default templates, warm pools, initial admin bootstrap |
 
@@ -62,7 +62,7 @@ Sandbox0 Cloud handles the mutable-tag policy at the platform layer: managed-reg
 | Multi-cluster control plane | `services.regionalGateway`, `services.scheduler` | You coordinate multiple data-plane clusters in one region |
 | Multi-cluster data plane | `controlPlane`, `cluster`, `storage`, `network`, `services.clusterGateway`, `services.manager` | You attach a complete data-plane cluster to an external control plane |
 
-The single-cluster sample is always fullmode. `manager` hosts lifecycle control and the storage API runtime. Each sandbox node runs the `ctld-a` and `ctld-b` DaemonSets; the elected primary owns rootfs persistence, volume portals, and the network runtime, and the synchronized standby takes over after promotion. Configure storage behavior under `spec.storage.runtime`, network behavior under `spec.network`, and shared sandbox-node placement under `spec.sandboxNodePlacement`.
+The single-cluster sample is always fullmode. `manager` hosts lifecycle control and rootfs metadata. Each sandbox node runs the `ctld-a` and `ctld-b` DaemonSets; the elected primary owns rootfs persistence and the network runtime, and the standby takes over after promotion. Configure the rootfs object store under `spec.storage`, network behavior under `spec.network`, and shared sandbox-node placement under `spec.sandboxNodePlacement`.
 
 ## Sandbox Claim Admission
 
@@ -76,7 +76,7 @@ Metering is disabled by default. Set `spec.metering.enabled: true` and configure
 
 | Component | Responsibility |
 |-----------|----------------|
-| PostgreSQL | Transactional producer state and an ordered delivery outbox; storage mutations enqueue usage in the same business transaction |
+| PostgreSQL | Transactional producer state and an ordered delivery outbox; rootfs storage observations enqueue usage in the same business transaction |
 | Manager projector | Retries the oldest stable, idempotent operation batch until ClickHouse accepts it |
 | ClickHouse | Long-term usage ledger and the only metering query and export backend |
 | Billing system | Consumes exported windows and watermarks, then applies pricing outside the open-source data plane |
@@ -85,7 +85,7 @@ Metering export is eventually consistent:
 
 | Producer | Normal additional delay |
 |----------|-------------------------|
-| Manager lifecycle and storage mutations | Projector poll, about two seconds |
+| Manager lifecycle and rootfs observations | Projector poll, about two seconds |
 | ctld network byte windows | `meteringReportInterval`, 10 seconds by default |
 | Periodic storage byte-hour windows | Up to one minute |
 
@@ -107,20 +107,17 @@ Sandbox compute uses a serverless-style contract:
 | `sandbox.runtime_mib_milliseconds` | `mib_milliseconds` | Active sandbox runtime and team-owned warm pool runtime multiplied by allocated memory |
 | `sandbox.egress_bytes` | `bytes` | Egress traffic observed by the ctld network runtime |
 | `sandbox.ingress_bytes` | `bytes` | Ingress traffic observed by the ctld network runtime |
-| `sandbox.volume_byte_hours` | `byte_hours` | Persisted volume and volume snapshot storage over time. Snapshot rows keep `subject_type=snapshot` |
 | `sandbox.rootfs_byte_hours` | `byte_hours` | Persisted sandbox rootfs COW object storage over time |
-| `sandbox.object_store_get_requests` | `count` | Successful GetRequest-class OSS HTTP attempts for platform-owned volume and rootfs storage |
-| `sandbox.object_store_put_requests` | `count` | Successful PutRequest-class OSS HTTP attempts for platform-owned volume and rootfs storage, including ListObjectsV2 |
+| `sandbox.object_store_get_requests` | `count` | Successful GetRequest-class OSS HTTP attempts for platform-owned rootfs storage |
+| `sandbox.object_store_put_requests` | `count` | Successful PutRequest-class OSS HTTP attempts for platform-owned rootfs storage, including ListObjectsV2 |
 
 Public template idle pools are platform cost. Team-owned template warm pools are attributed to the owning team with `subject_type=template`.
 
 Object-store request windows are usage facts; Sandbox0 does not attach prices.
 
 - manager and ctld aggregate provider HTTP attempts for one minute before writing them to the PostgreSQL outbox
-- volume requests are attributed from `sandboxvolumes/<team_id>/<volume_id>`
 - rootfs requests are attributed from `sandbox-rootfs/<team_id>/<sandbox_id>`
 - window `data` records `provider`, `bucket`, `billing_item`, `operation`, `cost_scope`, and `prefix_class`
-- requests to customer-owned external S3 volumes are excluded
 
 Reconcile these windows with provider access and metering logs before using them for cost reporting.
 
@@ -160,7 +157,7 @@ spec:
 
 ### S3 or OSS Backing Storage
 
-Configure the object-storage backend and manager storage runtime together under `spec.storage`.
+Configure the rootfs object-storage backend under `spec.storage`. Persisted rootfs objects are application-encrypted by default.
 
 ```yaml
 spec:
@@ -174,8 +171,6 @@ spec:
                 name: aws-credentials
                 accessKeyKey: accessKeyId
                 secretKeyKey: secretAccessKey
-        runtime:
-            objectEncryptionEnabled: true
 ```
 
 ### Sandbox RuntimeClass
@@ -490,7 +485,7 @@ spec:
 
 ## Service and Runtime Config
 
-Use `spec.services.<service>.config` for deployable services, `spec.storage.runtime` for manager storage behavior, and `spec.network.config` for the network runtime in ctld.
+Use `spec.services.<service>.config` for deployable services and `spec.network.config` for the network runtime in ctld.
 
 Examples:
 
@@ -502,13 +497,7 @@ Examples:
 - `services.manager.config.allowColdStartWithoutReadyDataPlane` lets cold claims create Pending pods for external node autoscaler scale-from-zero deployments; keep it disabled unless the cluster autoscaler can provision matching sandbox nodes
 - `services.manager.config.autoscalerSafeToEvictAnnotationKeys` lists the platform autoscaler's pod annotation keys; manager writes `true` on idle pods and `false` on claimed pods without embedding a vendor-specific key
 - `services.manager.config.podTeardown.*` bounds warm-pool rollout and repair work per node and across the cluster
-- `storage.runtime.filesystem*` tunes the manager storage runtime; `services.manager.config.procdConfig.volume*` tunes mounted volume cache sizing
-- `storage.runtime.s0fsSegmentTargetSize` sets the target S0FS segment size for materialized volume data; the default is `4Mi`
-- `storage.runtime.s0fsStateFormatVersion` selects the format used for new S0FS state writes; readers accept versions `1` and `2`, and the default remains `1`
-- `storage.runtime.s0fsHotCacheMaxSize` is the shared node budget for conservatively estimated active and detached S0FS engine memory; cold activation reserves the bounded metadata and segment caches before opening state, first evicts detached engines, then fails explicitly if active engines already consume the budget. Detached retention has no age-based expiry, uses probation/protected admission to resist short-lived churn, defaults to `1Gi`, and both retention and active admission enforcement are disabled by setting the value to `0`
-- `storage.runtime.s0fsCompaction*` tunes background S0FS compaction for RWO volume owners; `s0fsCompactionInterval` accepts `0`, `off`, or `disabled` to turn it off
-- `storage.runtime.cacheSizeLimit` and `logSizeLimit` cap storage cache and logs in the manager Pod; `volumePortalCacheSizeLimit` and `volumePortalRootMinFree` tune the volume portals used by ctld
-- `storage.runtime.objectEncryptionEnabled` controls application-layer encryption for persisted rootfs checkpoint objects, S0FS Volume objects, and node-local S0FS volume cache files; it is enabled by default
+- `services.ctld.config.rootfsObjectCache*` tunes the bounded node-local cache for encrypted rootfs objects
 - `network.config.egressBandwidthBytesPerSecond`, `ingressBandwidthBytesPerSecond`, and `bandwidthBurstBytes` apply per-sandbox bandwidth throttling when set above zero
 - `services.manager.config.defaultTeamQuotas` configures region-wide capacity, API request, and network bandwidth defaults; see [Team Quotas](/docs/sandbox/self-hosted/quotas)
 - `network.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
@@ -532,32 +521,12 @@ spec:
 
 Manager also creates a PodDisruptionBudget for each idle pool. It protects ready capacity from autoscalers that use the Eviction API, while the node-aware manager budget controls direct rollout and repair deletes.
 
-Monitor S0FS engine residency with `ctld_s0fs_metadata_resident_estimated_bytes` split by `active` and `detached`, plus `ctld_s0fs_metadata_budget_pressure_total`. Resume-cache behavior remains available through `ctld_s0fs_hot_cache_requests_total`, `ctld_s0fs_hot_cache_admissions_total`, `ctld_s0fs_hot_cache_evictions_total`, and the entry, segment, and budget gauges under the `ctld_s0fs_hot_cache_` prefix. Labels are intentionally low-cardinality; sandbox and volume IDs appear only in structured logs.
-
-### S0FS State Format Rollout
-
-Treat S0FS state format `2` as a two-phase rollout. First deploy the dual-reader build to every manager and both ctld DaemonSets while leaving `s0fsStateFormatVersion: 1`. After every old reader is gone, set the field to `2`. Once any committed head or snapshot has been written as version `2`, roll back only to a build that can read both versions; changing the field back to `1` changes future writes but does not rewrite existing version `2` objects.
-
-The first open of an encrypted version `1` head after switching to version `2` decrypts the legacy whole-object AEAD payload and rewrites the local head as version `2`. Budget extra memory for that one-time migration; later opens decode chunks directly into the disk-backed metadata index.
-
 ```yaml
 spec:
     redis:
         type: builtin
         builtin:
             enabled: true
-    storage:
-        runtime:
-            cacheSizeLimit: 20Gi
-            logSizeLimit: 1Gi
-            s0fsSegmentTargetSize: 4Mi
-            s0fsStateFormatVersion: 1
-            s0fsHotCacheMaxSize: 1Gi
-            s0fsCompactionInterval: 1m
-            s0fsCompactionMinDeadRatio: "0.5"
-            s0fsCompactionMinReclaimSize: 1Mi
-            volumePortalCacheSizeLimit: 20Gi
-            volumePortalRootMinFree: 5Gi
     network:
         config:
             egressBandwidthBytesPerSecond: 10485760
@@ -615,7 +584,7 @@ The reference below is generated from the `Sandbox0Infra` CRD schema produced by
 
 - Pin the `infra-operator` chart version in production instead of relying on floating tags.
 - Prefer external PostgreSQL and external object storage for serious deployments.
-- Configure `spec.storage` and `spec.storage.runtime` for volume and snapshot features.
+- Configure `spec.storage` as the object-storage backend for rootfs checkpoints and named rootfs snapshots.
 - Configure `spec.network` for sandbox network policy; enforcement runs in the active ctld process on Linux nodes.
 - Use `sandboxNodePlacement.nodeSelector` and `tolerations` to keep sandbox workloads and the node-local ctld pair on the same node set. Use `preferredNodeSelector` only for soft sandbox-Pod placement and hot-claim ordering.
 - Treat `sandbox0.ai/data-plane-ready` as operator-owned; use your own labels under `sandboxNodePlacement` and let `infra-operator` manage readiness.

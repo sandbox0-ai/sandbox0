@@ -14,7 +14,7 @@ import (
 
 	godigest "github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/wait"
 )

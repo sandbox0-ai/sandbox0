@@ -12,7 +12,6 @@ import (
 	"time"
 
 	ctldha "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/ha"
-	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 )
 
 type fakePrimaryService struct {
@@ -154,19 +153,18 @@ func TestRunHAPrimaryReleasesLeaseAfterNetworkRuntimeFailure(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	replicatorReady := make(chan *ctldha.Replicator, 1)
+	primaryReady := make(chan struct{})
 	failPrimary := make(chan struct{})
 	wantErr := errors.New("network runtime failed")
 	primaryResult := make(chan error, 1)
 	go func() {
-		primaryResult <- runHAPrimary(ctx, primaryCoordinator, nil, nil, func(_ context.Context, options primaryRunOptions) error {
-			options.replicator.SetSnapshotProvider(func(context.Context, ctldportal.PortalReplicator) error { return nil })
-			replicatorReady <- options.replicator
+		primaryResult <- runHAPrimary(ctx, primaryCoordinator, nil, nil, func(_ context.Context, _ primaryRunOptions) error {
+			close(primaryReady)
 			<-failPrimary
 			return wantErr
 		})
 	}()
-	replicator := <-replicatorReady
+	<-primaryReady
 
 	standbyResult := make(chan *ctldha.PrimaryLease, 1)
 	standbyErrors := make(chan error, 1)
@@ -178,7 +176,7 @@ func TestRunHAPrimaryReleasesLeaseAfterNetworkRuntimeFailure(t *testing.T) {
 		}
 		standbyResult <- lease
 	}()
-	waitForReplicatorReady(t, replicator)
+	waitForCoordinatorRole(t, standbyCoordinator, ctldha.RoleStandby)
 	close(failPrimary)
 
 	select {
@@ -202,12 +200,12 @@ func TestRunHAPrimaryReleasesLeaseAfterNetworkRuntimeFailure(t *testing.T) {
 	}
 }
 
-func waitForReplicatorReady(t *testing.T, replicator *ctldha.Replicator) {
+func waitForCoordinatorRole(t *testing.T, coordinator *ctldha.Coordinator, role ctldha.Role) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
-	for !replicator.Ready() {
+	for coordinator.State().Role != role {
 		if time.Now().After(deadline) {
-			t.Fatal("standby did not synchronize with the primary")
+			t.Fatalf("coordinator role = %q, want %q", coordinator.State().Role, role)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -2,18 +2,14 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,25 +35,12 @@ const (
 
 // SandboxLifecycleInfo carries the durable identity needed to clean sandbox-scoped state.
 type SandboxLifecycleInfo struct {
-	Namespace            string
-	PodName              string
-	SandboxID            string
-	TeamID               string
-	UserID               string
-	WebhookURL           string
-	WebhookStateVolumeID string
-	PodUID               string
-	NodeName             string
-	HostIP               string
-	RuntimeGeneration    int64
-	VolumePortals        []SandboxLifecycleVolumePortal
-}
-
-// SandboxLifecycleVolumePortal carries the ctld identity for a bound sandbox volume portal.
-type SandboxLifecycleVolumePortal struct {
-	SandboxVolumeID string
-	MountPoint      string
-	PortalName      string
+	Namespace         string
+	PodName           string
+	SandboxID         string
+	TeamID            string
+	UserID            string
+	RuntimeGeneration int64
 }
 
 // SandboxDeletionCleaner cleans external state for a deleted sandbox.
@@ -66,19 +49,13 @@ type SandboxDeletionCleaner interface {
 }
 
 type sandboxLifecycleQueueItem struct {
-	Namespace            string
-	PodName              string
-	SandboxID            string
-	TeamID               string
-	UserID               string
-	WebhookURL           string
-	WebhookStateVolumeID string
-	PodUID               string
-	NodeName             string
-	HostIP               string
-	RuntimeGeneration    int64
-	VolumePortalsJSON    string
-	Deleted              bool
+	Namespace         string
+	PodName           string
+	SandboxID         string
+	TeamID            string
+	UserID            string
+	RuntimeGeneration int64
+	Deleted           bool
 }
 
 // SandboxLifecycleController reconciles sandbox deletion side effects from Pod lifecycle state.
@@ -293,18 +270,12 @@ func (c *SandboxLifecycleController) ensurePodCleanupFinalizer(ctx context.Conte
 
 func (c *SandboxLifecycleController) cleanupDeletedSandbox(ctx context.Context, item sandboxLifecycleQueueItem) error {
 	info := SandboxLifecycleInfo{
-		Namespace:            item.Namespace,
-		PodName:              item.PodName,
-		SandboxID:            item.SandboxID,
-		TeamID:               item.TeamID,
-		UserID:               item.UserID,
-		WebhookURL:           item.WebhookURL,
-		WebhookStateVolumeID: item.WebhookStateVolumeID,
-		PodUID:               item.PodUID,
-		NodeName:             item.NodeName,
-		HostIP:               item.HostIP,
-		RuntimeGeneration:    item.RuntimeGeneration,
-		VolumePortals:        decodeSandboxLifecycleVolumePortals(item.VolumePortalsJSON),
+		Namespace:         item.Namespace,
+		PodName:           item.PodName,
+		SandboxID:         item.SandboxID,
+		TeamID:            item.TeamID,
+		UserID:            item.UserID,
+		RuntimeGeneration: item.RuntimeGeneration,
 	}
 	if info.SandboxID == "" {
 		info.SandboxID = info.PodName
@@ -357,7 +328,7 @@ func (s *SandboxService) CleanupDeletedSandbox(ctx context.Context, info Sandbox
 	return s.cleanupDeletedSandbox(ctx, info, runtimeOnly, retainHot)
 }
 
-func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info SandboxLifecycleInfo, runtimeOnly, retainHot bool) (cleanupErr error) {
+func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info SandboxLifecycleInfo, runtimeOnly, _ bool) (cleanupErr error) {
 	logger := s.logger
 	if logger == nil {
 		logger = zap.NewNop()
@@ -414,20 +385,6 @@ func (s *SandboxService) cleanupDeletedSandbox(ctx context.Context, info Sandbox
 			errs = append(errs, fmt.Errorf("delete credential bindings: %w", err))
 		}
 	}
-	if !runtimeOnly && shouldDeleteWebhookStateVolume(info) {
-		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "mark_webhook_state_volume_cleanup", func() error {
-			return s.deleteWebhookStateVolume(ctx, info)
-		}); err != nil {
-			errs = append(errs, fmt.Errorf("delete webhook state volume: %w", err))
-		}
-	}
-	if s.shouldUnbindDeletedSandboxVolumePortals(info) {
-		if err := s.runSandboxDeleteCleanupPhase(ctx, info, scope, "unbind_volume_portals", func() error {
-			return s.unbindDeletedSandboxVolumePortals(ctx, info, retainHot)
-		}); err != nil {
-			errs = append(errs, fmt.Errorf("unbind sandbox volume portals: %w", err))
-		}
-	}
 	cleanupErr = errors.Join(errs...)
 	return cleanupErr
 }
@@ -454,14 +411,6 @@ func (s *SandboxService) runSandboxDeleteCleanupPhase(_ context.Context, info Sa
 	}
 	logger.Debug("Sandbox delete cleanup phase completed", fields...)
 	return nil
-}
-
-func shouldDeleteWebhookStateVolume(info SandboxLifecycleInfo) bool {
-	return strings.TrimSpace(info.WebhookStateVolumeID) != "" || strings.TrimSpace(info.WebhookURL) != ""
-}
-
-func (s *SandboxService) shouldUnbindDeletedSandboxVolumePortals(info SandboxLifecycleInfo) bool {
-	return s != nil && s.config.CtldEnabled && len(info.VolumePortals) > 0
 }
 
 func (s *SandboxService) runtimeDeletionDisposition(ctx context.Context, info SandboxLifecycleInfo) (bool, bool, error) {
@@ -499,87 +448,6 @@ func SandboxRecordDeletionIsRuntimeOnly(record *sandboxstore.SandboxRecord, _ st
 	}
 }
 
-func (s *SandboxService) unbindDeletedSandboxVolumePortals(ctx context.Context, info SandboxLifecycleInfo, retainHot bool) error {
-	if s == nil || !s.config.CtldEnabled || len(info.VolumePortals) == 0 {
-		return nil
-	}
-	if strings.TrimSpace(info.HostIP) == "" && strings.TrimSpace(info.NodeName) == "" {
-		// A pod that was never assigned to a node could not have bound a ctld
-		// volume portal. Treat the absent node identity as proof that there is
-		// no node-local state to clean up so deletion can finish.
-		if s.logger != nil {
-			s.logger.Info("Skipping sandbox volume portal cleanup for unscheduled pod",
-				zap.String("sandboxID", info.SandboxID),
-				zap.String("namespace", info.Namespace),
-				zap.String("pod", info.PodName),
-			)
-		}
-		return nil
-	}
-	if s.ctldClient == nil {
-		return fmt.Errorf("ctld client is not configured")
-	}
-	if strings.TrimSpace(info.PodUID) == "" {
-		if s.logger != nil {
-			s.logger.Warn("Skipping sandbox volume portal cleanup without pod UID",
-				zap.String("sandboxID", info.SandboxID),
-				zap.String("namespace", info.Namespace),
-				zap.String("pod", info.PodName),
-			)
-		}
-		return nil
-	}
-	ctldAddress, err := s.ctldAddressForLifecycleInfo(ctx, info)
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, portal := range info.VolumePortals {
-		volumeID := strings.TrimSpace(portal.SandboxVolumeID)
-		mountPoint := filepath.Clean(strings.TrimSpace(portal.MountPoint))
-		portalName := volumeportal.NormalizePortalName(portal.PortalName, mountPoint)
-		if volumeID == "" || mountPoint == "." || !filepath.IsAbs(mountPoint) || portalName == "" {
-			continue
-		}
-		if _, err := s.ctldClient.UnbindVolumePortal(ctx, ctldAddress, ctldapi.UnbindVolumePortalRequest{
-			Namespace:       info.Namespace,
-			PodName:         info.PodName,
-			PodUID:          info.PodUID,
-			PortalName:      portalName,
-			MountPath:       mountPoint,
-			SandboxVolumeID: volumeID,
-			RetainHot:       retainHot,
-		}); err != nil {
-			errs = append(errs, fmt.Errorf("%s at %s: %w", volumeID, mountPoint, err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func (s *SandboxService) ctldAddressForLifecycleInfo(ctx context.Context, info SandboxLifecycleInfo) (string, error) {
-	if strings.TrimSpace(info.HostIP) != "" {
-		return fmt.Sprintf("http://%s:%d", strings.TrimSpace(info.HostIP), s.config.CtldPort), nil
-	}
-	nodeName := strings.TrimSpace(info.NodeName)
-	if nodeName == "" {
-		return "", fmt.Errorf("sandbox pod %s/%s has no node identity for ctld cleanup", info.Namespace, info.PodName)
-	}
-	if s.nodeLister != nil {
-		node, err := s.nodeLister.Get(nodeName)
-		if err == nil {
-			return ctldAddressForNode(node, s.config.CtldPort)
-		}
-	}
-	if s.k8sClient == nil {
-		return "", fmt.Errorf("kubernetes client is not configured")
-	}
-	node, err := s.k8sClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-	if err != nil {
-		return "", fmt.Errorf("get node %s: %w", nodeName, err)
-	}
-	return ctldAddressForNode(node, s.config.CtldPort)
-}
-
 func (s *SandboxService) ensureSandboxDeletionFinalizer(ctx context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
 	if s == nil || pod == nil || s.k8sClient == nil || hasSandboxCleanupFinalizer(pod) || pod.DeletionTimestamp != nil {
 		return pod, nil
@@ -607,42 +475,14 @@ func (s *SandboxService) ensureSandboxDeletionFinalizer(ctx context.Context, pod
 
 func sandboxLifecycleItemFromInfo(info SandboxLifecycleInfo, deleted bool) sandboxLifecycleQueueItem {
 	return sandboxLifecycleQueueItem{
-		Namespace:            info.Namespace,
-		PodName:              info.PodName,
-		SandboxID:            info.SandboxID,
-		TeamID:               info.TeamID,
-		UserID:               info.UserID,
-		WebhookURL:           info.WebhookURL,
-		WebhookStateVolumeID: info.WebhookStateVolumeID,
-		PodUID:               info.PodUID,
-		NodeName:             info.NodeName,
-		HostIP:               info.HostIP,
-		RuntimeGeneration:    info.RuntimeGeneration,
-		VolumePortalsJSON:    encodeSandboxLifecycleVolumePortals(info.VolumePortals),
-		Deleted:              deleted,
+		Namespace:         info.Namespace,
+		PodName:           info.PodName,
+		SandboxID:         info.SandboxID,
+		TeamID:            info.TeamID,
+		UserID:            info.UserID,
+		RuntimeGeneration: info.RuntimeGeneration,
+		Deleted:           deleted,
 	}
-}
-
-func encodeSandboxLifecycleVolumePortals(portals []SandboxLifecycleVolumePortal) string {
-	if len(portals) == 0 {
-		return ""
-	}
-	data, err := json.Marshal(portals)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
-func decodeSandboxLifecycleVolumePortals(portalsJSON string) []SandboxLifecycleVolumePortal {
-	if portalsJSON == "" {
-		return nil
-	}
-	var portals []SandboxLifecycleVolumePortal
-	if err := json.Unmarshal([]byte(portalsJSON), &portals); err != nil {
-		return nil
-	}
-	return portals
 }
 
 func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
@@ -658,80 +498,18 @@ func sandboxLifecycleInfoFromPod(pod *corev1.Pod) (SandboxLifecycleInfo, bool) {
 	}
 	teamID := ""
 	userID := ""
-	webhookURL := ""
-	webhookStateVolumeID := ""
 	if pod.Annotations != nil {
 		teamID = strings.TrimSpace(pod.Annotations[controller.AnnotationTeamID])
 		userID = strings.TrimSpace(pod.Annotations[controller.AnnotationUserID])
-		webhookStateVolumeID = strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
-		if configJSON := strings.TrimSpace(pod.Annotations[controller.AnnotationConfig]); configJSON != "" {
-			var cfg sandboxstore.SandboxConfig
-			if err := json.Unmarshal([]byte(configJSON), &cfg); err == nil && cfg.Webhook != nil {
-				webhookURL = strings.TrimSpace(cfg.Webhook.URL)
-			}
-		}
 	}
 	return SandboxLifecycleInfo{
-		Namespace:            pod.Namespace,
-		PodName:              pod.Name,
-		SandboxID:            sandboxID,
-		TeamID:               teamID,
-		UserID:               userID,
-		WebhookURL:           webhookURL,
-		WebhookStateVolumeID: webhookStateVolumeID,
-		PodUID:               string(pod.UID),
-		NodeName:             pod.Spec.NodeName,
-		HostIP:               pod.Status.HostIP,
-		RuntimeGeneration:    runtimeGenerationFromPod(pod),
-		VolumePortals:        sandboxLifecycleVolumePortalsFromPod(pod, webhookStateVolumeID),
+		Namespace:         pod.Namespace,
+		PodName:           pod.Name,
+		SandboxID:         sandboxID,
+		TeamID:            teamID,
+		UserID:            userID,
+		RuntimeGeneration: runtimeGenerationFromPod(pod),
 	}, true
-}
-
-func sandboxLifecycleVolumePortalsFromPod(pod *corev1.Pod, webhookStateVolumeID string) []SandboxLifecycleVolumePortal {
-	if pod == nil {
-		return nil
-	}
-	portalNamesByMountPath := make(map[string]string)
-	for _, ref := range expectedVolumePortalsForPod(pod) {
-		mountPoint := filepath.Clean(strings.TrimSpace(ref.MountPath))
-		if mountPoint == "." || !filepath.IsAbs(mountPoint) {
-			continue
-		}
-		portalName := volumeportal.NormalizePortalName(ref.PortalName, mountPoint)
-		if portalName != "" {
-			portalNamesByMountPath[mountPoint] = portalName
-		}
-	}
-
-	var out []SandboxLifecycleVolumePortal
-	addPortal := func(volumeID, mountPoint, fallbackPortalName string) {
-		volumeID = strings.TrimSpace(volumeID)
-		mountPoint = filepath.Clean(strings.TrimSpace(mountPoint))
-		if volumeID == "" || mountPoint == "." || !filepath.IsAbs(mountPoint) {
-			return
-		}
-		portalName := portalNamesByMountPath[mountPoint]
-		if portalName == "" {
-			portalName = fallbackPortalName
-		}
-		portalName = volumeportal.NormalizePortalName(portalName, mountPoint)
-		if portalName == "" {
-			return
-		}
-		out = append(out, SandboxLifecycleVolumePortal{
-			SandboxVolumeID: volumeID,
-			MountPoint:      mountPoint,
-			PortalName:      portalName,
-		})
-	}
-
-	if pod.Annotations != nil {
-		for _, mount := range parseClaimMounts(pod.Annotations[controller.AnnotationMounts]) {
-			addPortal(mount.SandboxVolumeID, mount.MountPoint, "")
-		}
-	}
-	addPortal(webhookStateVolumeID, webhookStateMountPoint, volumeportal.WebhookStatePortalName)
-	return out
 }
 
 func ensureSandboxCleanupFinalizer(pod *corev1.Pod) {

@@ -24,7 +24,7 @@ Webhooks are configured per-sandbox at creation time. Each sandbox can have its 
 
 Webhook requests may be delivered more than once, so consumers must deduplicate by `event_id`. Your endpoint should return a `2xx` status only after it has durably recorded the event. Retries are best-effort and do not guarantee that an unavailable endpoint eventually receives every event.
 
-When a sandbox is created with a webhook, Sandbox0 creates a manager-owned SandboxVolume for webhook delivery state and mounts it at a reserved procd path outside the workspace. Procd writes signed delivery records to that volume before acknowledging the internal publish request, then dispatches them from the durable outbox with backoff. This outbox remains scoped to the sandbox runtime state.
+When a sandbox is created with a webhook, procd writes signed delivery records to a reserved outbox under `/var/lib/sandbox0/procd/webhook-outbox` before acknowledging the internal publish request, then dispatches them with backoff. The outbox is part of the persistent sandbox rootfs and remains scoped to the sandbox identity.
 
 Sandbox deletion has an additional manager-level path. When manager commits a sandbox deletion, it writes the exact signed `sandbox.deleted` request to a PostgreSQL outbox in the same transaction. Sandbox and Pod cleanup never wait for the external endpoint. Manager retries transport errors and HTTP `408`, `425`, `429`, and `5xx` responses with exponential backoff for up to 24 hours. Other non-`2xx` responses are terminal. After the 24-hour delivery window expires, manager stops retrying and later removes the bounded outbox record.
 

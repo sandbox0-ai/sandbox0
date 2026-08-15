@@ -46,7 +46,7 @@ func TestIngestRootFSDiffForApplyStreamsFilteredLayerIntoContentStore(t *testing
 	store, err := contentlocal.NewStore(t.TempDir())
 	require.NoError(t, err)
 
-	filtered, stats, err := ingestRootFSDiffForApply(context.Background(), store, desc, bytes.NewReader(input.Bytes()), nil, nil)
+	filtered, stats, err := ingestRootFSDiffForApply(context.Background(), store, desc, bytes.NewReader(input.Bytes()), nil)
 	require.NoError(t, err)
 	assert.NotEqual(t, desc.Digest, filtered.Digest)
 	assert.Equal(t, int64(input.Len()), stats.InputBytes)
@@ -62,7 +62,7 @@ func TestIngestRootFSDiffForApplyStreamsFilteredLayerIntoContentStore(t *testing
 	assert.Contains(t, entries, "root/sentinel")
 	assert.Contains(t, entries, "var/tmp/state")
 
-	filteredAgain, _, err := ingestRootFSDiffForApply(context.Background(), store, desc, bytes.NewReader(input.Bytes()), nil, nil)
+	filteredAgain, _, err := ingestRootFSDiffForApply(context.Background(), store, desc, bytes.NewReader(input.Bytes()), nil)
 	require.NoError(t, err)
 	assert.Equal(t, filtered.Digest, filteredAgain.Digest)
 }

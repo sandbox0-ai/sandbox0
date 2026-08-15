@@ -15,7 +15,7 @@ Sandbox0 has two categories of templates:
 | **Builtin** | System-provided templates managed by the platform operator | Public — visible to all teams |
 | **Custom** | Templates created and owned by your team | Private — visible to your team only (configurable) |
 
-Builtin templates use curated public images and are ready to use immediately. Custom templates let you bring your own image, fine-tune resources, mount volumes, configure environment variables, and define default network policy.
+Builtin templates use curated public images and are ready to use immediately. Custom templates let you bring your own image, fine-tune resources, configure environment variables, and define default network policy.
 
 ---
 
@@ -28,7 +28,6 @@ Sandbox0 supports three ways to reuse an environment:
 | A reproducible, source-controlled image build or a different base image | Create a custom template from an image |
 | A reusable template ID backed by the current root filesystem of an initialized sandbox | Create a custom template from a sandbox |
 | Fast reuse of initialized rootfs state with the same existing template | Rootfs snapshot and claim with `snapshot_id` |
-| Data that must outlive sandbox identity, be mounted by multiple sandboxes, or be accessed through direct storage APIs | Sandbox Volume |
 
 Creating a template from a sandbox captures its current writable root filesystem, publishes an OCI image to the registry configured for the team, and changes the template to use a digest-pinned image. This is useful when initialization is interactive or agent-driven and you want the result to become a normal template that can be listed, shared within the team, reconciled across clusters, and assigned its own warm pool.
 
@@ -45,7 +44,7 @@ For platform-owned builtin templates, the operator manages the warm pool. That l
 Rootfs snapshot behavior:
 
 - snapshots do not create template IDs and do not appear in `s0 template list`
-- claiming with `snapshot_id` creates a new running sandbox; the requested template still supplies the image, default resources, mounts, services, and network defaults
+- claiming with `snapshot_id` creates a new running sandbox; the requested template still supplies the image, default resources, services, and network defaults
 - template defaults and resource overrides at claim or runtime update can change memory only; all are capped by the platform maximum (`16Gi` by default), and CPU follows the platform memory-per-CPU ratio with a `150m` minimum limit
 - snapshot and fork accept a running or paused source; restore rolls an existing paused sandbox back
 
@@ -174,7 +173,7 @@ Create a custom template from the current root filesystem of an existing sandbox
 | `sandbox_id` | string | Source sandbox whose current root filesystem will be captured |
 | `spec_overrides` | object | Optional safe overrides: `description`, `displayName`, `tags`, and `pool` |
 
-The new template inherits safe settings from the source sandbox's template. Sandbox0 does not copy sandbox identity, active processes, memory contents, sessions, claim-time environment or network overrides, attached Sandbox Volumes, services, or privileged pod and security fields. If `pool` is omitted, it defaults to `minIdle: 0` and `maxIdle: 0`.
+The new template inherits safe settings from the source sandbox's template. Sandbox0 does not copy sandbox identity, active processes, memory contents, sessions, claim-time environment or network overrides, services, or privileged pod and security fields. If `pool` is omitted, it defaults to `minIdle: 0` and `maxIdle: 0`.
 
 The source sandbox may be running or paused. Because capture is asynchronous, request acceptance is not the rootfs capture point. Keep the source sandbox available and avoid rootfs writes while the template is in the `capturing` stage. Sandbox0 briefly barriers and checkpoints a running source, then records the exact capture point in `status.creation.capturedAt`; after that, the source can continue changing or be deleted without changing the image build.
 

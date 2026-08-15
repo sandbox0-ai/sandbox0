@@ -76,7 +76,7 @@ Pass an existing Sandbox0 sandbox ID when the sandbox should survive the Deep Ag
 dcode --sandbox sandbox0 --sandbox-id sb_abc123
 ```
 
-In this mode, the provider reattaches to the existing sandbox and Deep Agents Code does not delete it on exit. The sandbox keeps whatever `ttl`, `hard_ttl`, network policy, mounted volumes, services, and rootfs state it already has.
+In this mode, the provider reattaches to the existing sandbox and Deep Agents Code does not delete it on exit. The sandbox keeps whatever `ttl`, `hard_ttl`, network policy, services, and rootfs state it already has.
 
 Use Sandbox0 APIs or `s0` to pause, resume, snapshot, fork, or delete the sandbox later.
 
@@ -143,13 +143,13 @@ The adapter inherits Deep Agents `BaseSandbox` behavior.
 
 Deep Agents file transfer APIs expect absolute sandbox paths. Relative upload or download paths return `invalid_path`.
 
-The default Deep Agents working directory is `/workspace`, but file APIs can still access absolute paths that the sandbox process can access. Use Sandbox0 templates, mounted volumes, network policy, and credential boundaries to decide what should be reachable inside the sandbox.
+The default Deep Agents working directory is `/workspace`, but file APIs can still access absolute paths that the sandbox process can access. Use Sandbox0 templates, rootfs layout, network policy, and credential boundaries to decide what should be reachable inside the sandbox.
 
 ## Production Guidance
 
 - Use `dcode --sandbox sandbox0` for disposable agent sessions.
 - Use `--sandbox-id` when an operator or application owns retention and cleanup.
-- Keep important files under mounted durable storage when they must survive sandbox deletion.
+- Create a named rootfs snapshot before deletion when the workspace must be reused, or export important files to an external system.
 - Treat the default `ttl` and `hard_ttl` as safety limits, not as a substitute for explicit cleanup.
 - Keep broad cloud credentials outside the sandbox. Prefer Sandbox0 network policy, protocol controls, credential sources, and egress auth for destination-scoped access.
 - Use Sandbox0 pause, resume, snapshot, and fork APIs when you need to inspect or preserve an agent workspace.
@@ -166,6 +166,6 @@ The default Deep Agents working directory is `/workspace`, but file APIs can sti
   </Card>
 
   <Card title="OpenAI Agents" href="/docs/sandbox/integrations/openai-agents" cta="Continue">
-    Compare the OpenAI Agents SDK integration and its volume-backed workspace lifecycle.
+    Compare the OpenAI Agents SDK integration and its rootfs snapshot lifecycle.
   </Card>
 </CardGroup>

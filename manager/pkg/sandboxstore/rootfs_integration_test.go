@@ -711,6 +711,46 @@ func newSandboxStoreIntegrationPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+func TestVolumeRuntimeMetadataRetirementMigration(t *testing.T) {
+	pool := newSandboxStoreIntegrationPoolThrough(t, "00012")
+	ctx := context.Background()
+	assertSandboxStoreColumnExists(t, ctx, pool, "mounts", true)
+	assertSandboxStoreColumnExists(t, ctx, pool, "webhook_state_volume_id", true)
+
+	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+	assertSandboxStoreColumnExists(t, ctx, pool, "mounts", false)
+	assertSandboxStoreColumnExists(t, ctx, pool, "webhook_state_volume_id", false)
+
+	require.NoError(t, migrate.Down(ctx, pool, ".",
+		migrate.WithBaseFS(storemigrations.FS),
+		migrate.WithLogger(noopSandboxStoreMigrateLogger{}),
+		migrate.WithSchema(sandboxStoreSchemaName),
+	))
+	assertSandboxStoreColumnExists(t, ctx, pool, "mounts", false)
+	assertSandboxStoreColumnExists(t, ctx, pool, "webhook_state_volume_id", false)
+}
+
+func assertSandboxStoreColumnExists(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	column string,
+	want bool,
+) {
+	t.Helper()
+	var exists bool
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'manager'
+      AND table_name = 'sandboxes'
+      AND column_name = $1
+)
+`, column).Scan(&exists))
+	require.Equal(t, want, exists, "column %s existence", column)
+}
+
 func newSandboxStoreIntegrationPoolThrough(t *testing.T, maximumPrefix string) *pgxpool.Pool {
 	t.Helper()
 	pool := newSandboxStoreIntegrationDatabase(t)

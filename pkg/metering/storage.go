@@ -24,22 +24,16 @@ func StorageWindowFromState(state *StorageProjectionState, end time.Time) (*Wind
 	if value <= 0 {
 		return nil, remainder
 	}
-	windowType := WindowTypeSandboxVolumeByteHours
-	if state.SubjectType == SubjectTypeRootFS {
-		windowType = WindowTypeSandboxRootFSByteHours
-	}
 	return &Window{
 		WindowID:    fmt.Sprintf("storage/%s/%s/%d/%d", state.SubjectType, state.SubjectID, start.UnixNano(), end.UnixNano()),
-		Producer:    ProducerStorage,
+		Producer:    ProducerRootFSStorage,
 		RegionID:    state.RegionID,
-		WindowType:  windowType,
+		WindowType:  WindowTypeSandboxRootFSByteHours,
 		SubjectType: state.SubjectType,
 		SubjectID:   state.SubjectID,
 		TeamID:      state.TeamID,
 		UserID:      state.UserID,
 		SandboxID:   state.SandboxID,
-		VolumeID:    state.VolumeID,
-		SnapshotID:  state.SnapshotID,
 		ClusterID:   state.ClusterID,
 		WindowStart: start,
 		WindowEnd:   end,

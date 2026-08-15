@@ -2,7 +2,6 @@ package runtimecontroller
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	ctxpkg "github.com/sandbox0-ai/sandbox0/manager/procd/pkg/context"
@@ -36,7 +35,6 @@ func TestControllerTransitionsStandbyWaitingAndReady(t *testing.T) {
 		SandboxID:         "sandbox-1",
 		RuntimeGeneration: 2,
 		EnvVars:           map[string]string{"MODE": "test"},
-		MountDirs:         []string{filepath.Join(t.TempDir(), "workspace")},
 	}
 	revision, err := assignment.Revision()
 	if err != nil {

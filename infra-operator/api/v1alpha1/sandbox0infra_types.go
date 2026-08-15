@@ -135,11 +135,7 @@ type Sandbox0InfraSpec struct {
 	// +optional
 	Database *DatabaseConfig `json:"database,omitempty"`
 
-	// MetadataDatabase configures the S0FS metadata database
-	// +optional
-	MetadataDatabase *MetadataDatabaseConfig `json:"metadataDatabase,omitempty"`
-
-	// Storage configures the storage backend (S0FS S3 backend)
+	// Storage configures the rootfs object-storage backend.
 	// +optional
 	Storage *StorageConfig `json:"storage,omitempty"`
 
@@ -529,17 +525,6 @@ type SecretKeyRef struct {
 	Key string `json:"key,omitempty"`
 }
 
-// MetadataDatabaseConfig defines S0FS metadata database configuration
-type MetadataDatabaseConfig struct {
-	// ShareWithMain uses the main database for S0FS metadata
-	// +kubebuilder:default=true
-	ShareWithMain bool `json:"shareWithMain,omitempty"`
-
-	// External configures an independent database for S0FS
-	// +optional
-	External *ExternalDatabaseConfig `json:"external,omitempty"`
-}
-
 // RedisConfig defines region-level Redis configuration.
 type RedisConfig struct {
 	// Type specifies the Redis backend type: builtin or external.
@@ -731,10 +716,6 @@ type StorageConfig struct {
 	// GCS configures Google Cloud Storage using native GCS credentials.
 	// +optional
 	GCS *GCSStorageConfig `json:"gcs,omitempty"`
-
-	// Runtime configures the sandbox volume runtime hosted by manager and ctld.
-	// +optional
-	Runtime *StorageProxyConfig `json:"runtime,omitempty"`
 }
 
 // NetworkConfig defines the node-local sandbox network runtime configuration.
@@ -1486,19 +1467,6 @@ func IsManagerEnabled(infra *Sandbox0Infra) bool {
 	return infra.Spec.Services.Manager.Enabled
 }
 
-// IsStorageRuntimeEnabled returns true when manager should serve volume APIs.
-func IsStorageRuntimeEnabled(infra *Sandbox0Infra) bool {
-	return infra != nil && infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil
-}
-
-// ResolveStorageRuntimeConfig returns manager's volume runtime configuration.
-func ResolveStorageRuntimeConfig(infra *Sandbox0Infra) *StorageProxyConfig {
-	if infra == nil || infra.Spec.Storage == nil {
-		return nil
-	}
-	return infra.Spec.Storage.Runtime
-}
-
 // IsNetworkEnabled returns true when ctld should enforce sandbox networking.
 func IsNetworkEnabled(infra *Sandbox0Infra) bool {
 	return infra != nil && infra.Spec.Network != nil
@@ -1696,7 +1664,7 @@ func HasControlPlaneServices(infra *Sandbox0Infra) bool {
 
 // HasDataPlaneServices returns true when any data-plane service is enabled.
 func HasDataPlaneServices(infra *Sandbox0Infra) bool {
-	return IsClusterGatewayEnabled(infra) || IsManagerEnabled(infra) || IsStorageRuntimeEnabled(infra) || IsNetworkEnabled(infra)
+	return IsClusterGatewayEnabled(infra) || IsManagerEnabled(infra) || IsNetworkEnabled(infra)
 }
 
 // ServiceNetworkConfig defines service network configuration
@@ -2023,7 +1991,6 @@ const (
 	ConditionTypeSSHGatewayReady           = "SSHGatewayReady"
 	ConditionTypeClusterGatewayReady       = "ClusterGatewayReady"
 	ConditionTypeManagerReady              = "ManagerReady"
-	ConditionTypeStorageRuntimeReady       = "StorageRuntimeReady"
 	ConditionTypeCtldReady                 = "CtldReady"
 	ConditionTypeNetworkReady              = "NetworkReady"
 	ConditionTypeSchedulerReady            = "SchedulerReady"

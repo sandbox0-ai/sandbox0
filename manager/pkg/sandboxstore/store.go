@@ -31,30 +31,28 @@ const (
 // SandboxRecord is the durable sandbox identity, desired lifecycle state, and
 // configuration. Kubernetes owns observed runtime readiness and failure state.
 type SandboxRecord struct {
-	ID                   string
-	TeamID               string
-	UserID               string
-	TemplateID           string
-	TemplateName         string
-	TemplateNamespace    string
-	ClusterID            string
-	DesiredState         string
-	Config               SandboxConfig
-	Mounts               []ClaimMount
-	TemplateSpec         v1alpha1.SandboxTemplateSpec
-	CurrentPodName       string
-	CurrentPodNamespace  string
-	RuntimeGeneration    int64
-	LifecycleEpoch       int64
-	WebhookStateVolumeID string
-	OwnerKind            string
-	HotClaimCompletedAt  time.Time
-	ClaimedAt            time.Time
-	ExpiresAt            time.Time
-	HardExpiresAt        time.Time
-	DeletedAt            time.Time
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                  string
+	TeamID              string
+	UserID              string
+	TemplateID          string
+	TemplateName        string
+	TemplateNamespace   string
+	ClusterID           string
+	DesiredState        string
+	Config              SandboxConfig
+	TemplateSpec        v1alpha1.SandboxTemplateSpec
+	CurrentPodName      string
+	CurrentPodNamespace string
+	RuntimeGeneration   int64
+	LifecycleEpoch      int64
+	OwnerKind           string
+	HotClaimCompletedAt time.Time
+	ClaimedAt           time.Time
+	ExpiresAt           time.Time
+	HardExpiresAt       time.Time
+	DeletedAt           time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // SandboxRootFSState is manager-internal metadata for one persisted sandbox
@@ -161,8 +159,7 @@ type SandboxLifecycleTxn struct {
 
 // SandboxRuntimeMetadata is durable metadata projected onto a runtime pod.
 type SandboxRuntimeMetadata struct {
-	WebhookStateVolumeID string
-	OwnerKind            string
+	OwnerKind string
 }
 
 // SandboxRuntimeReconcileCandidate is the durable runtime projection used by
@@ -249,19 +246,19 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 	if strings.TrimSpace(record.ID) == "" {
 		return fmt.Errorf("sandbox_id is required")
 	}
-	configJSON, mountsJSON, specJSON, err := marshalSandboxRecordJSON(record)
+	configJSON, specJSON, err := marshalSandboxRecordJSON(record)
 	if err != nil {
 		return err
 	}
 	_, err = exec.Exec(ctx, `
 		INSERT INTO manager.sandboxes (
 			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, desired_state, config, mounts, template_spec,
+			cluster_id, desired_state, config, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
-			webhook_state_volume_id, owner_kind, hot_claim_completed_at,
+			owner_kind, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, COALESCE($23, NOW()), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21, NOW()), NOW())
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -271,13 +268,11 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			cluster_id = EXCLUDED.cluster_id,
 			desired_state = EXCLUDED.desired_state,
 			config = EXCLUDED.config,
-			mounts = EXCLUDED.mounts,
 			template_spec = EXCLUDED.template_spec,
 			current_pod_name = EXCLUDED.current_pod_name,
 			current_pod_namespace = EXCLUDED.current_pod_namespace,
 			runtime_generation = EXCLUDED.runtime_generation,
 			lifecycle_epoch = GREATEST(manager.sandboxes.lifecycle_epoch, EXCLUDED.lifecycle_epoch),
-			webhook_state_volume_id = EXCLUDED.webhook_state_volume_id,
 			owner_kind = EXCLUDED.owner_kind,
 			hot_claim_completed_at = COALESCE(EXCLUDED.hot_claim_completed_at, manager.sandboxes.hot_claim_completed_at),
 			claimed_at = EXCLUDED.claimed_at,
@@ -286,11 +281,11 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
 		WHERE manager.sandboxes.deleted_at IS NULL
-			AND manager.sandboxes.desired_state NOT IN ($24, $25)
+			AND manager.sandboxes.desired_state NOT IN ($22, $23)
 	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
-		record.ClusterID, record.DesiredState, configJSON, mountsJSON, specJSON,
+		record.ClusterID, record.DesiredState, configJSON, specJSON,
 		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
-		strings.TrimSpace(record.WebhookStateVolumeID), strings.TrimSpace(record.OwnerKind), nullableTime(record.HotClaimCompletedAt),
+		strings.TrimSpace(record.OwnerKind), nullableTime(record.HotClaimCompletedAt),
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt),
 		SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
 	if err != nil {
@@ -741,14 +736,13 @@ func (t sandboxStoreTx) SaveRuntime(ctx context.Context, sandboxID, namespace, p
 			runtime_generation = $5,
 			expires_at = $6,
 			hard_expires_at = $7,
-			webhook_state_volume_id = COALESCE(NULLIF($8, ''), webhook_state_volume_id),
-			owner_kind = COALESCE(NULLIF($9, ''), owner_kind),
+			owner_kind = COALESCE(NULLIF($8, ''), owner_kind),
 			deleted_at = NULL,
 			updated_at = NOW()
 		WHERE sandbox_id = $1
 			AND deleted_at IS NULL
-			AND desired_state NOT IN ($10, $11)
-	`, sandboxID, SandboxDesiredStateActive, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt), strings.TrimSpace(metadata.WebhookStateVolumeID), strings.TrimSpace(metadata.OwnerKind), SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
+			AND desired_state NOT IN ($9, $10)
+	`, sandboxID, SandboxDesiredStateActive, namespace, podName, generation, nullableTime(expiresAt), nullableTime(hardExpiresAt), strings.TrimSpace(metadata.OwnerKind), SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
 	if err != nil {
 		return fmt.Errorf("save sandbox runtime: %w", err)
 	}
@@ -1033,9 +1027,9 @@ func (t sandboxStoreTx) UpsertSandbox(ctx context.Context, record *SandboxRecord
 func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, desired_state, config, mounts, template_spec,
+			cluster_id, desired_state, config, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
-			webhook_state_volume_id, owner_kind, hot_claim_completed_at,
+			owner_kind, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 		FROM manager.sandboxes`
 }
@@ -1420,22 +1414,19 @@ func scanSandboxRecordRows(rows pgx.Rows) (*SandboxRecord, error) {
 
 func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error) {
 	var record SandboxRecord
-	var configJSON, mountsJSON, specJSON []byte
+	var configJSON, specJSON []byte
 	var hotClaimCompletedAt, claimedAt, expiresAt, hardExpiresAt, deletedAt *time.Time
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
-		&record.ClusterID, &record.DesiredState, &configJSON, &mountsJSON, &specJSON,
+		&record.ClusterID, &record.DesiredState, &configJSON, &specJSON,
 		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
-		&record.WebhookStateVolumeID, &record.OwnerKind, &hotClaimCompletedAt,
+		&record.OwnerKind, &hotClaimCompletedAt,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(configJSON, &record.Config); err != nil {
 		return nil, fmt.Errorf("unmarshal sandbox config: %w", err)
-	}
-	if err := json.Unmarshal(mountsJSON, &record.Mounts); err != nil {
-		return nil, fmt.Errorf("unmarshal sandbox mounts: %w", err)
 	}
 	if err := json.Unmarshal(specJSON, &record.TemplateSpec); err != nil {
 		return nil, fmt.Errorf("unmarshal sandbox template spec: %w", err)
@@ -1492,20 +1483,16 @@ func CloneSandboxLifecycleTxn(txn *SandboxLifecycleTxn) *SandboxLifecycleTxn {
 	return &clone
 }
 
-func marshalSandboxRecordJSON(record *SandboxRecord) ([]byte, []byte, []byte, error) {
+func marshalSandboxRecordJSON(record *SandboxRecord) ([]byte, []byte, error) {
 	configJSON, err := json.Marshal(record.Config)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("marshal sandbox config: %w", err)
-	}
-	mountsJSON, err := json.Marshal(record.Mounts)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("marshal sandbox mounts: %w", err)
+		return nil, nil, fmt.Errorf("marshal sandbox config: %w", err)
 	}
 	specJSON, err := json.Marshal(record.TemplateSpec)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("marshal sandbox template spec: %w", err)
+		return nil, nil, fmt.Errorf("marshal sandbox template spec: %w", err)
 	}
-	return configJSON, mountsJSON, specJSON, nil
+	return configJSON, specJSON, nil
 }
 
 func nullableTime(t time.Time) any {

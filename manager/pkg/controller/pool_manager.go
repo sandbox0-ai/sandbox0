@@ -53,7 +53,6 @@ const (
 	AnnotationExpiresAt                    = sandboxpod.AnnotationExpiresAt
 	AnnotationHardExpiresAt                = sandboxpod.AnnotationHardExpiresAt
 	AnnotationConfig                       = sandboxpod.AnnotationConfig
-	AnnotationMounts                       = sandboxpod.AnnotationMounts
 	AnnotationPaused                       = sandboxpod.AnnotationPaused
 	AnnotationPausedAt                     = sandboxpod.AnnotationPausedAt
 	AnnotationPausedState                  = sandboxpod.AnnotationPausedState
@@ -67,7 +66,6 @@ const (
 	AnnotationNetworkPolicyAppliedHash     = sandboxpod.AnnotationNetworkPolicyAppliedHash
 	AnnotationSandboxID                    = sandboxpod.AnnotationSandboxID
 	AnnotationRuntimeGeneration            = sandboxpod.AnnotationRuntimeGeneration
-	AnnotationWebhookStateVolumeID         = sandboxpod.AnnotationWebhookStateVolumeID
 	AnnotationHotClaimReservation          = sandboxpod.AnnotationHotClaimReservation
 	AnnotationHotClaimReservationState     = sandboxpod.AnnotationHotClaimReservationState
 	AnnotationHotClaimReservedAt           = sandboxpod.AnnotationHotClaimReservedAt

@@ -26,7 +26,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -493,100 +492,11 @@ func (r *Sandbox0InfraReconciler) workflowStepRunner(
 		return func(ctx context.Context) error {
 			return nodeReadinessReconciler.Check(ctx, infra, compiledPlan)
 		}, nil
-	case "storage-runtime-ready":
-		return func(ctx context.Context) error {
-			return r.ensureManagerStorageRuntimeReady(ctx, infra, common.GetServiceLabels(infra.Name, "manager"))
-		}, nil
 	case "register-cluster":
 		return func(ctx context.Context) error { return r.registerCluster(ctx, infra) }, nil
 	default:
 		return nil, fmt.Errorf("unsupported workflow step %q", name)
 	}
-}
-
-func (r *Sandbox0InfraReconciler) ensureManagerStorageRuntimeReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, managerLabels map[string]string) error {
-	name := fmt.Sprintf("%s-manager", infra.Name)
-	service := &corev1.Service{}
-	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: infra.Namespace}, service); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("manager storage service %q is not ready", name)
-		}
-		return err
-	}
-	for key, expected := range managerLabels {
-		if service.Spec.Selector[key] != expected {
-			return fmt.Errorf("manager storage service %q does not select manager pods", name)
-		}
-	}
-	storagePortReady := false
-	for _, port := range service.Spec.Ports {
-		if port.Name == "storage-http" && port.Port > 0 {
-			storagePortReady = true
-			break
-		}
-	}
-	if !storagePortReady {
-		return fmt.Errorf("manager storage service %q has no storage-http port", name)
-	}
-	endpointsReady, err := r.serviceEndpointsReady(ctx, infra, name, managerLabels)
-	if err != nil {
-		return err
-	}
-	if !endpointsReady {
-		return fmt.Errorf("manager storage service %q endpoints are not ready", name)
-	}
-	return nil
-}
-
-// serviceEndpointsReady verifies that every published endpoint belongs to a
-// current manager Pod and that at least one endpoint is ready.
-func (r *Sandbox0InfraReconciler) serviceEndpointsReady(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, serviceName string, managerLabels map[string]string) (bool, error) {
-	if infra == nil {
-		return false, fmt.Errorf("sandbox0infra is required")
-	}
-	slices := &discoveryv1.EndpointSliceList{}
-	if err := r.List(ctx, slices,
-		client.InNamespace(infra.Namespace),
-		client.MatchingLabels{discoveryv1.LabelServiceName: serviceName},
-	); err != nil {
-		return false, err
-	}
-	readyManagers := 0
-	for i := range slices.Items {
-		for j := range slices.Items[i].Endpoints {
-			endpoint := &slices.Items[i].Endpoints[j]
-			if endpoint.TargetRef == nil || endpoint.TargetRef.Name == "" {
-				return false, nil
-			}
-			podNamespace := endpoint.TargetRef.Namespace
-			if podNamespace == "" {
-				podNamespace = infra.Namespace
-			}
-			pod := &corev1.Pod{}
-			if err := r.Get(ctx, types.NamespacedName{Name: endpoint.TargetRef.Name, Namespace: podNamespace}, pod); err != nil {
-				if apierrors.IsNotFound(err) {
-					return false, nil
-				}
-				return false, err
-			}
-			if !pod.DeletionTimestamp.IsZero() || !labelsContain(pod.Labels, managerLabels) {
-				return false, nil
-			}
-			if endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready {
-				readyManagers++
-			}
-		}
-	}
-	return readyManagers > 0, nil
-}
-
-func labelsContain(actual, expected map[string]string) bool {
-	for key, value := range expected {
-		if actual[key] != value {
-			return false
-		}
-	}
-	return true
 }
 
 func (r *Sandbox0InfraReconciler) cleanupDisabledServiceResources(
@@ -978,7 +888,6 @@ func managedConditionTypeSet() map[string]struct{} {
 		infrav1alpha1.ConditionTypeSchedulerReady:       {},
 		infrav1alpha1.ConditionTypeClusterGatewayReady:  {},
 		infrav1alpha1.ConditionTypeManagerReady:         {},
-		infrav1alpha1.ConditionTypeStorageRuntimeReady:  {},
 		infrav1alpha1.ConditionTypeNetworkReady:         {},
 		infrav1alpha1.ConditionTypeCtldReady:            {},
 		infrav1alpha1.ConditionTypeClusterRegistered:    {},

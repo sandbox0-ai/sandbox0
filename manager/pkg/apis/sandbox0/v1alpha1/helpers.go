@@ -11,7 +11,6 @@ import (
 	managernaming "github.com/sandbox0-ai/sandbox0/manager/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -42,20 +41,19 @@ const (
 	MinimumSandboxCPULimitMilli = int64(150)
 )
 
-// BuildPodSpec builds a pod spec with every template-declared user volume portal.
+// BuildPodSpec builds a pod spec for a sandbox template.
 func BuildPodSpec(template *SandboxTemplate) corev1.PodSpec {
-	return buildPodSpec(template, template.Spec.VolumeMounts)
+	return buildPodSpec(template)
 }
 
-// BuildIdlePodSpec builds the idle-pool pod spec. User volume portals stay
-// pre-mounted so hot claims can bind selected portals without recreating pods.
+// BuildIdlePodSpec builds the idle-pool pod spec.
 func BuildIdlePodSpec(template *SandboxTemplate) corev1.PodSpec {
 	spec := BuildPodSpec(template)
 	applyIdleResourceQuotaToPodSpec(&spec, template)
 	return spec
 }
 
-func buildPodSpec(template *SandboxTemplate, volumeMounts []VolumeMountSpec) corev1.PodSpec {
+func buildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 	automountServiceAccountToken := false
 	spec := corev1.PodSpec{
 		RestartPolicy:                corev1.RestartPolicyAlways,
@@ -68,7 +66,6 @@ func buildPodSpec(template *SandboxTemplate, volumeMounts []VolumeMountSpec) cor
 
 	applyProcdSecretVolume(&spec, template)
 	applyNetdMITMCATrustMaterial(&spec)
-	applyVolumePortals(&spec, volumeMounts)
 	applyEmptyDirMounts(&spec, template)
 	applyProcdBinImageVolume(&spec)
 	applyDefaultSandboxPlacement(&spec)
@@ -224,57 +221,6 @@ func tolerationKey(tol corev1.Toleration) string {
 	return string(tol.Operator) + "\x00" + tol.Key + "\x00" + tol.Value + "\x00" + string(tol.Effect)
 }
 
-func applyVolumePortals(spec *corev1.PodSpec, volumeMounts []VolumeMountSpec) {
-	if spec == nil {
-		return
-	}
-	mounts := make([]VolumeMountSpec, 0, len(volumeMounts)+1)
-	mounts = append(mounts, VolumeMountSpec{
-		Name:      volumeportal.WebhookStatePortalName,
-		MountPath: volumeportal.WebhookStateMountPath,
-	})
-	mounts = append(mounts, volumeMounts...)
-
-	seenMountPaths := make(map[string]struct{}, len(mounts))
-	for i, mount := range mounts {
-		mountPath := path.Clean(strings.TrimSpace(mount.MountPath))
-		if mountPath == "." || !strings.HasPrefix(mountPath, "/") || mountPath == "/" {
-			continue
-		}
-		if _, exists := seenMountPaths[mountPath]; exists {
-			continue
-		}
-		seenMountPaths[mountPath] = struct{}{}
-
-		portalName := volumeportal.NormalizePortalName(mount.Name, mountPath)
-		if portalName == "" {
-			continue
-		}
-		volumeName := volumePortalVolumeName(i, portalName)
-		readOnly := mount.ReadOnly
-		spec.Volumes = append(spec.Volumes, corev1.Volume{
-			Name: volumeName,
-			VolumeSource: corev1.VolumeSource{
-				CSI: &corev1.CSIVolumeSource{
-					Driver:   volumeportal.DriverName,
-					ReadOnly: &readOnly,
-					VolumeAttributes: map[string]string{
-						volumeportal.AttributePortalName: portalName,
-						volumeportal.AttributeMountPath:  mountPath,
-					},
-				},
-			},
-		})
-		for j := range spec.Containers {
-			ensureContainerVolumeMount(&spec.Containers[j], corev1.VolumeMount{
-				Name:      volumeName,
-				MountPath: mountPath,
-				ReadOnly:  readOnly,
-			})
-		}
-	}
-}
-
 func applyEmptyDirMounts(spec *corev1.PodSpec, template *SandboxTemplate) {
 	if spec == nil || template == nil || template.Spec.Pod == nil || len(template.Spec.Pod.EmptyDirMounts) == 0 {
 		return
@@ -306,33 +252,6 @@ func applyEmptyDirMounts(spec *corev1.PodSpec, template *SandboxTemplate) {
 			})
 		}
 	}
-}
-
-func volumePortalVolumeName(index int, portalName string) string {
-	name := strings.ToLower(strings.TrimSpace(portalName))
-	var b strings.Builder
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('-')
-		}
-	}
-	name = strings.Trim(b.String(), "-")
-	if name == "" {
-		name = "volume"
-	}
-	prefix := fmt.Sprintf("sandbox0-volume-%d-", index)
-	maxName := 63 - len(prefix)
-	if len(name) > maxName {
-		name = strings.TrimRight(name[:maxName], "-")
-	}
-	return prefix + name
 }
 
 func emptyDirVolumeName(index int, mountPath string) string {

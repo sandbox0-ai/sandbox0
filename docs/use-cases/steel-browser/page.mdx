@@ -2,11 +2,11 @@
 
 Run a browser automation API inside a Sandbox0 sandbox when you want CDP, browser profile state, cookies, downloads, and a live browser view behind Sandbox0 lifecycle and public ingress.
 
-The builtin `browser` template uses the upstream Steel Browser image. It stores Chrome profile data under `/browser/profile` on the sandbox rootfs and declares `/files` as the SandboxVolume mount point for downloads and file exchange.
+The builtin `browser` template uses the upstream Steel Browser image. It stores Chrome profile data under `/browser/profile` and downloads under `/files` on the sandbox writable rootfs.
 
 ## Create The Service
 
-Create a SandboxVolume, claim the builtin `browser` template, mount that volume at `/files`, and expose Steel Browser as a `cmd` Sandbox Service. The service command runs the Steel image entrypoint directly; no wrapper image or script is required.
+Claim the builtin `browser` template and expose Steel Browser as a `cmd` Sandbox Service. The service command runs the Steel image entrypoint directly; no wrapper image or script is required.
 
 ```json
 {
@@ -77,7 +77,7 @@ await page.goto("https://example.com");
 
 ## Persistence
 
-Chrome profile data, cookies, local storage, and extension state live in `/browser/profile`, which is part of the sandbox rootfs. Downloads and file exchange live under `/files`; mount a SandboxVolume there when the files need to outlive a runtime pod or be shared with other workflows.
+Chrome profile data, cookies, local storage, extension state, downloads, and file exchange live on the sandbox rootfs. Pause/resume preserves them for the same sandbox identity. Create a named rootfs snapshot when you need a reusable restore point or an isolated copy in another sandbox.
 
 Do not pass Steel `persist` or `userDataDir` session options unless you intentionally want to override the template's `CHROME_USER_DATA_DIR`.
 
@@ -108,7 +108,7 @@ The builtin template is configurable through `Sandbox0Infra.spec.builtinTemplate
     Tune route auth, resume behavior, timeouts, and public service exposure.
   </Card>
 
-  <Card title="Volume Mounts" href="/docs/sandbox/volume/mounts" cta="Continue">
-    Keep downloads and shared browser artifacts on a SandboxVolume.
+  <Card title="Snapshot And Restore" href="/docs/sandbox/snapshot-restore" cta="Continue">
+    Publish initialized browser state and downloads as a rootfs snapshot.
   </Card>
 </CardGroup>

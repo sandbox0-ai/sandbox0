@@ -23,16 +23,15 @@ Self-hosted deployments must run `ctld` on sandbox nodes for checkpointed pause/
 |-------|---------------------|-------------------------------------|
 | Sandbox identity and configuration | Preserved | Deleted |
 | Writable root filesystem | Latest checkpoint is restored | Deleted with the sandbox identity |
-| Mounted Volumes | Remounted if configured | Preserved until the Volume is deleted |
 | Processes, memory, sockets, PID state, live REPL sessions | Not preserved | Deleted |
 
-The rootfs checkpoint covers files written inside the sandbox filesystem, including files outside mounted volumes. It is different from a Sandbox Volume: it is tied to sandbox rootfs lifecycle and does not provide volume sharing or direct Volume file APIs. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
+The rootfs checkpoint covers files written inside the sandbox filesystem. It is tied to the sandbox lifecycle. For named rootfs snapshots, restore, and fork operations, see [Snapshot And Restore](/docs/sandbox/snapshot-restore).
 
 On nodes using the containerd overlayfs snapshotter, `ctld` checkpoints only the active snapshot upperdir and stores it as a standard OCI layer diff. Other snapshotters, or nodes where the overlayfs upperdir is not readable by `ctld`, fall back to containerd's built-in diff path.
 
 ## Pause A Sandbox
 
-Pause a sandbox to release compute while keeping its identity, configuration, services, mounted durable storage, and latest writable rootfs checkpoint available for a later resume.
+Pause a sandbox to release compute while keeping its identity, configuration, services, and latest writable rootfs checkpoint available for a later resume.
 
 The pause request is asynchronous. Poll sandbox details until `status` is `paused` and `paused` is `true` before treating the checkpoint as resume-ready.
 
@@ -63,7 +62,7 @@ Sandbox0 uses the durable pause flow to replace a failed runtime.
 Recovery is independent of the sandbox `auto_resume` access policy. A supported runtime request waits for recovery to commit, then resumes when auto-resume is allowed.
 
 <Callout variant="warning">
-Recovering the latest writes requires the terminated containerd snapshot to remain available on the same node. If the old pod or snapshot disappears first, Sandbox0 falls back to the last committed rootfs checkpoint and records degraded recovery. Files written after that checkpoint may be lost; mounted Sandbox Volumes retain their independently durable state.
+Recovering the latest writes requires the terminated containerd snapshot to remain available on the same node. If the old pod or snapshot disappears first, Sandbox0 falls back to the last committed rootfs checkpoint and records degraded recovery. Files written after that checkpoint may be lost.
 </Callout>
 
 <Endpoint method="POST">
@@ -112,8 +111,6 @@ Resume a sandbox that was paused manually or by TTL expiry.
 | Existing runtime pod is terminal | Waits for crash recovery to commit, then restores the recovered rootfs head |
 | Terminated snapshot is unavailable | Restores the last committed checkpoint |
 
-Mounted Sandbox Volumes are remounted from their durable state.
-
 ## Persistent And Ephemeral Paths
 
 The writable rootfs persists across pause and resume except for runtime-owned ephemeral paths:
@@ -121,12 +118,11 @@ The writable rootfs persists across pause and resume except for runtime-owned ep
 - `/tmp` is recreated from the clean carrier or template state. Files written there do not survive pause and resume.
 - `/var/tmp` remains part of the persistent rootfs.
 - Other writable rootfs paths, such as `/root` and workspace directories, remain persistent.
-- Mounted Sandbox Volumes keep their independent durable state, including a Volume mounted beneath `/tmp`.
 
 This policy is applied while saving checkpoints, restoring checkpoint layers, and capturing incremental baselines. Sandbox0 also filters `/tmp` from older checkpoint layers during restore. The first restore of a large older checkpoint can still take time because the layer must be read once; the next pause writes a checkpoint without those `/tmp` contents.
 
 <Callout variant="warning">
-Do not use `/tmp` for dependency caches, downloaded tools, or other state that must survive runtime replacement. Store that data under a persistent rootfs path or mount a Sandbox Volume.
+Do not use `/tmp` for dependency caches, downloaded tools, or other state that must survive runtime replacement. Store that data under a persistent rootfs path.
 </Callout>
 
 <Endpoint method="POST">

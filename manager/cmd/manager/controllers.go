@@ -15,7 +15,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/clock"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"go.uber.org/zap"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -96,7 +96,6 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 	})
 
 	s.startRootFSMaintenance(ctx)
-	go s.sandboxService.StartSystemVolumeReconciler(ctx, s.cfg.ResyncPeriod.Duration)
 }
 
 func (s *managerControllerSet) startRootFSMaintenance(ctx context.Context) {

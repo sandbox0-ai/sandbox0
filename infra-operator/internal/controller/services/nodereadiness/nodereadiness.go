@@ -6,7 +6,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,7 +15,6 @@ import (
 	ctldsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/ctld"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 const (
@@ -83,7 +81,6 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 	requireCtld := compiledPlan.Components.EnableCtld
 
 	ctldReadyByNode := make(map[string]bool)
-	csiRegisteredByNode := make(map[string]bool)
 	if managerEnabled && (requireCtld || requireNetwork) {
 		podList := &corev1.PodList{}
 		if err := r.Resources.Client.List(ctx, podList,
@@ -101,14 +98,6 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 		}
 		ctldReadyByNode = readyCtldPodsByNode(podList.Items, ctldDaemonSets, requireNetwork)
 	}
-	if managerEnabled && requireCtld {
-		csiNodeList := &storagev1.CSINodeList{}
-		if err := r.Resources.Client.List(ctx, csiNodeList); err != nil {
-			return summary, fmt.Errorf("list CSI nodes: %w", err)
-		}
-		csiRegisteredByNode = registeredCSIDriverByNode(csiNodeList.Items, volumeportal.DriverName)
-	}
-
 	nodeList := &corev1.NodeList{}
 	if err := r.Resources.Client.List(ctx, nodeList); err != nil {
 		return summary, fmt.Errorf("list nodes: %w", err)
@@ -128,7 +117,7 @@ func (r *Reconciler) Refresh(ctx context.Context, infra *infrav1alpha1.Sandbox0I
 			continue
 		}
 
-		ctldReady := !requireCtld || (ctldReadyByNode[node.Name] && csiRegisteredByNode[node.Name])
+		ctldReady := !requireCtld || ctldReadyByNode[node.Name]
 		// Active ctld readiness includes the network runtime, while standby
 		// readiness proves that the HA peer can take over.
 		networkReady := !requireNetwork || ctldReady
@@ -206,9 +195,8 @@ func (r *Reconciler) patchNodeReadiness(
 	return nil
 }
 
-// readyCtldPodsByNode requires one ready pod from each HA slot. A synchronized
-// standby can become ready before the active ctld has completed kubelet CSI
-// registration, so a single ready ctld pod is not a sufficient node signal.
+// readyCtldPodsByNode requires one ready pod from each HA slot so a single
+// ready ctld pod is not treated as a sufficient node signal.
 func readyCtldPodsByNode(pods []corev1.Pod, daemonSets map[string]*appsv1.DaemonSet, requireNetworkRuntime bool) map[string]bool {
 	readySlotsByNode := make(map[string]map[string]struct{})
 	blockedByPredecessor := make(map[string]bool)
@@ -266,20 +254,6 @@ func daemonSetHasNetworkRuntime(ds *appsv1.DaemonSet) bool {
 		return false
 	}
 	return false
-}
-
-func registeredCSIDriverByNode(csiNodes []storagev1.CSINode, driverName string) map[string]bool {
-	registeredByNode := make(map[string]bool)
-	for i := range csiNodes {
-		csiNode := &csiNodes[i]
-		for _, driver := range csiNode.Spec.Drivers {
-			if driver.Name == driverName {
-				registeredByNode[csiNode.Name] = true
-				break
-			}
-		}
-	}
-	return registeredByNode
 }
 
 func nodeMatchesSelector(node *corev1.Node, selector map[string]string) bool {

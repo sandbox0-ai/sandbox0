@@ -1028,61 +1028,9 @@ SELECT toInt64(COUNT())
 FROM %s FINAL
 WHERE team_id = ? AND claimed_at IS NOT NULL AND terminated_at IS NULL AND paused = 0
 `, qualified(r.cfg.Database, r.cfg.SandboxStateTable)), teamID)
-	case quota.DimensionVolumeStorageGB:
-		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeVolume)
-		return quota.BytesToGBRoundUp(current), err
-	case quota.DimensionSnapshotGB:
-		current, err := r.currentStorageUsageBytes(ctx, teamID, metering.SubjectTypeSnapshot)
-		return quota.BytesToGBRoundUp(current), err
 	default:
 		return 0, fmt.Errorf("unsupported quota usage dimension %q", dimension)
 	}
-}
-
-func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension quota.Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
-	if teamID == "" {
-		return 0, fmt.Errorf("team_id is required")
-	}
-	if subjectID == "" {
-		return 0, fmt.Errorf("subject_id is required")
-	}
-	if sizeBytes < 0 {
-		return 0, fmt.Errorf("size_bytes must be non-negative")
-	}
-	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
-		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
-	}
-	otherBytes, err := r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(size_bytes), 0)
-FROM %s FINAL
-WHERE deleted = 0 AND team_id = ? AND subject_type = ? AND subject_id != ?
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable)), teamID, subjectType, subjectID)
-	if err != nil {
-		return 0, fmt.Errorf("query projected storage quota usage: %w", err)
-	}
-	return quota.BytesToGBRoundUp(otherBytes + sizeBytes), nil
-}
-
-func (r *Repository) AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension quota.Dimension, subjectType string, additionalBytes int64) (int64, error) {
-	if additionalBytes < 0 {
-		return 0, fmt.Errorf("additional_bytes must be non-negative")
-	}
-	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
-		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
-	}
-	current, err := r.currentStorageUsageBytes(ctx, teamID, subjectType)
-	if err != nil {
-		return 0, err
-	}
-	return quota.BytesToGBRoundUp(current + additionalBytes), nil
-}
-
-func (r *Repository) currentStorageUsageBytes(ctx context.Context, teamID, subjectType string) (int64, error) {
-	return r.currentScalar(ctx, fmt.Sprintf(`
-SELECT COALESCE(SUM(size_bytes), 0)
-FROM %s FINAL
-WHERE deleted = 0 AND team_id = ? AND subject_type = ?
-`, qualified(r.cfg.Database, r.cfg.StorageStateTable)), teamID, subjectType)
 }
 
 func (r *Repository) currentScalar(ctx context.Context, query string, args ...any) (int64, error) {
@@ -1091,17 +1039,6 @@ func (r *Repository) currentScalar(ctx context.Context, query string, args ...an
 		return 0, err
 	}
 	return value, nil
-}
-
-func storageDimensionMatchesSubjectType(dimension quota.Dimension, subjectType string) bool {
-	switch dimension {
-	case quota.DimensionVolumeStorageGB:
-		return subjectType == metering.SubjectTypeVolume
-	case quota.DimensionSnapshotGB:
-		return subjectType == metering.SubjectTypeSnapshot
-	default:
-		return false
-	}
 }
 
 func dateTime64NanoArg(value time.Time) int64 {

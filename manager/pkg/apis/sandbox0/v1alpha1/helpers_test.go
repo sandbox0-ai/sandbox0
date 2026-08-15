@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -321,70 +320,6 @@ manager_image: sandbox0/manager:test
 	}
 }
 
-func TestBuildPodSpecInjectsVolumePortalMounts(t *testing.T) {
-	configPath := writeManagerConfig(t, `
-manager_image: sandbox0/manager:test
-`)
-	t.Setenv("CONFIG_PATH", configPath)
-
-	template := newTestTemplate()
-	template.Spec.VolumeMounts = []VolumeMountSpec{
-		{Name: "workspace", MountPath: "/workspace/bench-volume"},
-	}
-
-	spec := BuildPodSpec(template)
-	userVolume := findCSIVolumeByPortal(spec.Volumes, "workspace")
-	if userVolume == nil {
-		t.Fatalf("expected workspace csi volume, got %#v", spec.Volumes)
-	}
-	if userVolume.CSI.Driver != volumeportal.DriverName {
-		t.Fatalf("csi driver = %q, want %q", userVolume.CSI.Driver, volumeportal.DriverName)
-	}
-	if got := userVolume.CSI.VolumeAttributes[volumeportal.AttributeMountPath]; got != "/workspace/bench-volume" {
-		t.Fatalf("mount path attr = %q", got)
-	}
-	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, userVolume.Name); mount == nil || mount.MountPath != "/workspace/bench-volume" {
-		t.Fatalf("expected container mount for workspace volume, got %#v", spec.Containers[0].VolumeMounts)
-	}
-
-	webhookVolume := findCSIVolumeByPortal(spec.Volumes, volumeportal.WebhookStatePortalName)
-	if webhookVolume == nil {
-		t.Fatalf("expected webhook state portal volume, got %#v", spec.Volumes)
-	}
-	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, webhookVolume.Name); mount == nil || mount.MountPath != volumeportal.WebhookStateMountPath {
-		t.Fatalf("expected webhook state mount, got %#v", spec.Containers[0].VolumeMounts)
-	}
-}
-
-func TestBuildIdlePodSpecPreMountsUserVolumePortals(t *testing.T) {
-	configPath := writeManagerConfig(t, `
-manager_image: sandbox0/manager:test
-`)
-	t.Setenv("CONFIG_PATH", configPath)
-
-	template := newTestTemplate()
-	template.Spec.VolumeMounts = []VolumeMountSpec{
-		{Name: "workspace", MountPath: "/workspace/bench-volume"},
-	}
-
-	spec := BuildIdlePodSpec(template)
-	userVolume := findCSIVolumeByPortal(spec.Volumes, "workspace")
-	if userVolume == nil {
-		t.Fatalf("expected user csi volume in idle pod spec, got %#v", spec.Volumes)
-	}
-	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, userVolume.Name); mount == nil || mount.MountPath != "/workspace/bench-volume" {
-		t.Fatalf("expected user volume mount, got %#v", spec.Containers[0].VolumeMounts)
-	}
-
-	webhookVolume := findCSIVolumeByPortal(spec.Volumes, volumeportal.WebhookStatePortalName)
-	if webhookVolume == nil {
-		t.Fatalf("expected webhook state portal volume, got %#v", spec.Volumes)
-	}
-	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, webhookVolume.Name); mount == nil || mount.MountPath != volumeportal.WebhookStateMountPath {
-		t.Fatalf("expected webhook state mount, got %#v", spec.Containers[0].VolumeMounts)
-	}
-}
-
 func TestBuildPodSpecInjectsEmptyDirMounts(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
@@ -691,18 +626,6 @@ func writeManagerConfig(t *testing.T, contents string) string {
 func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
 	for i := range volumes {
 		if volumes[i].Name == name {
-			return &volumes[i]
-		}
-	}
-	return nil
-}
-
-func findCSIVolumeByPortal(volumes []corev1.Volume, portalName string) *corev1.Volume {
-	for i := range volumes {
-		if volumes[i].CSI == nil {
-			continue
-		}
-		if volumes[i].CSI.VolumeAttributes[volumeportal.AttributePortalName] == portalName {
 			return &volumes[i]
 		}
 	}

@@ -19,16 +19,15 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
-	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
+	databasesvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	internalauthsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
+	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
 	netdsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
-	storageruntimesvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storageruntime"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 type Reconciler struct {
@@ -48,8 +47,7 @@ const (
 	networkRuntimeCPURequest       = "100m"
 	networkRuntimeMemoryRequest    = "128Mi"
 	ctldHAProbeSocket              = "/run/sandbox0/ctld-ha.sock"
-	ctldKubeletRegistrationSocket  = "/var/lib/kubelet/plugins_registry/" + volumeportal.DriverName + "-reg.sock"
-	ctldKubeletCSIEndpoint         = "/var/lib/kubelet/plugins/" + volumeportal.DriverName + "/csi.sock"
+	legacyVolumeCSIDriverName      = "volume.sandbox0.ai"
 	ctldRolloutRevisionAnnotation  = "infra.sandbox0.ai/ctld-rollout-revision"
 	networkMetricsServiceSuffix    = "-ctld-network-metrics"
 	ctldHAMetricsPortA             = int32(9192)
@@ -69,11 +67,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	name := fmt.Sprintf("%s-ctld", infra.Name)
 	labels := common.GetServiceLabels(infra.Name, "ctld")
-	storageConfig, err := r.buildStorageConfig(ctx, infra)
+	compiledPlan := infraplan.Compile(infra)
+	compiledPlan.Services.ClusterGateway.URL = clusterGatewayURL
+	config, err := r.buildConfig(ctx, infra, compiledPlan)
 	if err != nil {
 		return err
 	}
-	config := &apiconfig.CtldConfig{StorageProxyConfig: *storageConfig}
 	if err := sandboxobssvc.ApplyCtldConfig(ctx, r.Resources.Client, infra, clusterGatewayURL, config); err != nil {
 		return err
 	}
@@ -82,8 +81,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 	podAnnotations := configRef.PodAnnotations()
-	compiledPlan := infraplan.Compile(infra)
-	compiledPlan.Services.ClusterGateway.URL = clusterGatewayURL
 	var netdAssets *netdsvc.RuntimeAssets
 	if compiledPlan.Network.Enabled {
 		netdAssets, err = netdsvc.NewReconciler(r.Resources).BuildRuntimeAssets(ctx, compiledPlan)
@@ -92,7 +89,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		}
 		podAnnotations[netdsvc.ConfigHashAnnotation] = netdAssets.ConfigRef.Hash
 	}
-	if err := r.ensureCSIDriver(ctx, labels); err != nil {
+	if err := r.cleanupLegacyCSIDriver(ctx); err != nil {
 		return err
 	}
 	if netdAssets != nil {
@@ -114,12 +111,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	containerdHostDataRoot := ctldContainerdHostDataRoot(infra)
 	args := ctldArgs(infra, containerdHostDataRoot)
 	terminationGraceSeconds := ctldTerminationGraceSeconds
-	bidirectional := corev1.MountPropagationBidirectional
 	hostPathDirectoryOrCreate := corev1.HostPathDirectoryOrCreate
 	volumeMounts := []corev1.VolumeMount{
 		{Name: "config", MountPath: "/config/config.yaml", SubPath: "config.yaml", ReadOnly: true},
-		{Name: "csi-plugin", MountPath: "/csi"},
-		{Name: "kubelet", MountPath: "/var/lib/kubelet", MountPropagation: &bidirectional},
 		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
 		{Name: "containerd-data", MountPath: containerdDataMountPath, ReadOnly: true},
@@ -132,21 +126,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{Name: configRef.ConfigMapName},
 				},
-			},
-		},
-		{
-			Name: "csi-plugin",
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{
-					Path: "/var/lib/kubelet/plugins/volume.sandbox0.ai",
-					Type: &hostPathDirectoryOrCreate,
-				},
-			},
-		},
-		{
-			Name: "kubelet",
-			VolumeSource: corev1.VolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/kubelet"},
 			},
 		},
 		{
@@ -193,10 +172,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		})
 	}
-	credentialStoreMounts, credentialStoreVolumes := credentialstoresvc.CredentialStoreVolumes(common.NewObjectScope(infra), &storageConfig.CredentialStore)
-	volumeMounts = append(volumeMounts, credentialStoreMounts...)
-	volumes = append(volumes, credentialStoreVolumes...)
-	if storageConfig.ObjectEncryptionEnabled {
+	if config.RootFSObjectStorage.ObjectEncryptionEnabled {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "object-encryption-key",
 			MountPath: common.ObjectEncryptionMountDir,
@@ -398,8 +374,6 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 		"-ha-slot="+cfg.Slot,
 		"-ha-probe-socket="+ctldHAProbeSocket,
 		fmt.Sprintf("-ha-metrics-addr=:%d", haMetricsPort),
-		"-kubelet-registration-socket="+ctldKubeletRegistrationSocket,
-		"-kubelet-registration-endpoint="+ctldKubeletCSIEndpoint,
 	)
 	probeCommand := func(kind string) []string {
 		return []string{
@@ -720,9 +694,7 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string)
 		"-containerd-host-root=" + defaultContainerdHostStateRoot,
 		"-containerd-data-root=" + containerdDataMountPath,
 		"-containerd-host-data-root=" + containerdHostDataRoot,
-		"-volume-portal-root=/var/lib/sandbox0/ctld",
-		"-kubelet-pods-root=/var/lib/kubelet/pods",
-		"-csi-socket=/csi/csi.sock",
+		"-state-root=/var/lib/sandbox0/ctld",
 	}
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Ctld != nil {
 		cfg := infra.Spec.Services.Ctld
@@ -752,33 +724,12 @@ func ctldContainerdHostDataRoot(infra *infrav1alpha1.Sandbox0Infra) string {
 	return defaultContainerdHostDataRoot
 }
 
-func (r *Reconciler) ensureCSIDriver(ctx context.Context, labels map[string]string) error {
-	attachRequired := false
-	podInfoOnMount := true
-	lifecycleModes := []storagev1.VolumeLifecycleMode{storagev1.VolumeLifecycleEphemeral}
-	desired := &storagev1.CSIDriver{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   volumeportal.DriverName,
-			Labels: labels,
-		},
-		Spec: storagev1.CSIDriverSpec{
-			AttachRequired:       &attachRequired,
-			PodInfoOnMount:       &podInfoOnMount,
-			VolumeLifecycleModes: lifecycleModes,
-		},
+func (r *Reconciler) cleanupLegacyCSIDriver(ctx context.Context) error {
+	driver := &storagev1.CSIDriver{ObjectMeta: metav1.ObjectMeta{Name: legacyVolumeCSIDriverName}}
+	if err := r.Resources.Client.Delete(ctx, driver); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete legacy volume CSI driver: %w", err)
 	}
-	current := &storagev1.CSIDriver{}
-	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: volumeportal.DriverName}, current)
-	if apierrors.IsNotFound(err) {
-		return r.Resources.Client.Create(ctx, desired)
-	}
-	if err != nil {
-		return err
-	}
-	return r.Resources.UpdateObjectIfChanged(ctx, current, func() {
-		current.Labels = desired.Labels
-		current.Spec = desired.Spec
-	})
+	return nil
 }
 
 // ensureNetworkMetricsService preserves named-port endpoint discovery without
@@ -815,9 +766,34 @@ func (r *Reconciler) cleanupNetworkMetricsService(ctx context.Context, infra *in
 	return nil
 }
 
-func (r *Reconciler) buildStorageConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra) (*apiconfig.StorageProxyConfig, error) {
-	if r == nil {
+func (r *Reconciler) buildConfig(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, compiledPlan *infraplan.InfraPlan) (*apiconfig.CtldConfig, error) {
+	if r == nil || r.Resources == nil {
 		return nil, fmt.Errorf("ctld reconciler is required")
 	}
-	return storageruntimesvc.BuildRuntimeConfig(ctx, r.Resources, infra)
+	if infra == nil || compiledPlan == nil {
+		return nil, fmt.Errorf("compiled infra plan is required")
+	}
+	cfg := &apiconfig.CtldConfig{
+		RegionID:         common.ResolveRegionID(infra),
+		DefaultClusterId: common.ResolveClusterID(infra),
+	}
+	if dsn, err := databasesvc.GetDatabaseDSN(ctx, r.Resources.Client, infra); err == nil {
+		cfg.DatabaseURL = dsn
+	}
+	rootFSObjectStorage, err := compiledPlan.RootFSObjectStorage(ctx, r.Resources.Client)
+	if err != nil {
+		return nil, fmt.Errorf("resolve rootfs object storage config: %w", err)
+	}
+	if rootFSObjectStorage != nil {
+		cfg.RootFSObjectStorage = *rootFSObjectStorage
+		if rootFSObjectStorage.ObjectEncryptionEnabled {
+			if err := common.EnsureObjectEncryptionKeySecret(ctx, r.Resources, infra); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := meteringsvc.ApplyCtldConfig(ctx, r.Resources.Client, infra, cfg); err != nil {
+		return nil, fmt.Errorf("apply ctld metering config: %w", err)
+	}
+	return cfg, nil
 }

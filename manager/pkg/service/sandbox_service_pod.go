@@ -10,9 +10,7 @@ import (
 	managerconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	v1alpha1 "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -563,65 +561,6 @@ func podContainerRunning(pod *corev1.Pod, name string) bool {
 		}
 	}
 	return false
-}
-
-func (s *SandboxService) ensurePodVolumePortalsPublished(ctx context.Context, ctldAddress string, pod *corev1.Pod) error {
-	if s == nil || s.ctldClient == nil || pod == nil {
-		return nil
-	}
-	portals := expectedVolumePortalsForPod(pod)
-	if len(portals) == 0 {
-		return nil
-	}
-	podUID := strings.TrimSpace(string(pod.UID))
-	if podUID == "" {
-		return fmt.Errorf("pod UID is not assigned")
-	}
-	resp, err := s.ctldClient.CheckVolumePortals(ctx, ctldAddress, ctldapi.CheckVolumePortalsRequest{
-		PodUID:  podUID,
-		Portals: portals,
-	})
-	if err != nil {
-		return fmt.Errorf("check volume portals: %w", err)
-	}
-	if resp == nil {
-		return fmt.Errorf("check volume portals returned no response")
-	}
-	if resp.Ready {
-		return nil
-	}
-	if len(resp.Missing) == 0 {
-		return fmt.Errorf("volume portals are not published")
-	}
-	return fmt.Errorf("volume portals are not published: %s", strings.Join(resp.Missing, ", "))
-}
-
-func expectedVolumePortalsForPod(pod *corev1.Pod) []ctldapi.VolumePortalRef {
-	if pod == nil {
-		return nil
-	}
-	portals := make([]ctldapi.VolumePortalRef, 0)
-	seen := make(map[string]struct{})
-	for _, volume := range pod.Spec.Volumes {
-		if volume.CSI == nil || volume.CSI.Driver != volumeportal.DriverName {
-			continue
-		}
-		attrs := volume.CSI.VolumeAttributes
-		mountPath := strings.TrimSpace(attrs[volumeportal.AttributeMountPath])
-		portalName := volumeportal.NormalizePortalName(attrs[volumeportal.AttributePortalName], mountPath)
-		if portalName == "" {
-			continue
-		}
-		if _, ok := seen[portalName]; ok {
-			continue
-		}
-		seen[portalName] = struct{}{}
-		portals = append(portals, ctldapi.VolumePortalRef{
-			PortalName: portalName,
-			MountPath:  mountPath,
-		})
-	}
-	return portals
 }
 
 // podToSandboxStatus converts pod state to sandbox status.

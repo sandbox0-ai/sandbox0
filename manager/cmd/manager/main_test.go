@@ -17,7 +17,7 @@ import (
 
 	managerconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	s0k8s "github.com/sandbox0-ai/sandbox0/pkg/k8s"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"go.uber.org/zap"
 	"k8s.io/client-go/rest"
 )
@@ -96,7 +96,7 @@ func TestWrapRootFSObjectStoreEncryptionReadsLogicalRanges(t *testing.T) {
 		t.Fatalf("write test encryption key: %v", err)
 	}
 
-	encryptionConfig := &managerconfig.StorageProxyConfig{
+	encryptionConfig := managerconfig.RootFSObjectStorageConfig{
 		ObjectEncryptionEnabled: true,
 		ObjectEncryptionKeyPath: keyPath,
 		ObjectEncryptionAlgo:    "aes256gcm-rsa",

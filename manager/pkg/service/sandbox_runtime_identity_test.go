@@ -316,9 +316,6 @@ func (t memorySandboxStoreTx) SaveRuntime(_ context.Context, sandboxID, namespac
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
 	record.HardExpiresAt = hardExpiresAt
-	if metadata.WebhookStateVolumeID != "" {
-		record.WebhookStateVolumeID = metadata.WebhookStateVolumeID
-	}
 	if metadata.OwnerKind != "" {
 		record.OwnerKind = metadata.OwnerKind
 	}
@@ -483,9 +480,6 @@ func cloneSandboxRecord(record *sandboxstore.SandboxRecord) *sandboxstore.Sandbo
 		return nil
 	}
 	clone := *record
-	if record.Mounts != nil {
-		clone.Mounts = append([]managerapi.ClaimMount(nil), record.Mounts...)
-	}
 	if record.Config.Services != nil {
 		clone.Config.Services = append([]managerapi.SandboxAppService(nil), record.Config.Services...)
 	}
@@ -1452,11 +1446,10 @@ func TestResumePausedSandboxRuntimeRejectsHardExpiredRecord(t *testing.T) {
 func TestTerminatePausedSandboxCompletesPersistentCleanupWithoutWebhookDelivery(t *testing.T) {
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 		"sandbox-a": {
-			ID:                   "sandbox-a",
-			TeamID:               "team-a",
-			UserID:               "user-a",
-			DesiredState:         sandboxstore.SandboxDesiredStatePaused,
-			WebhookStateVolumeID: "volume-a",
+			ID:           "sandbox-a",
+			TeamID:       "team-a",
+			UserID:       "user-a",
+			DesiredState: sandboxstore.SandboxDesiredStatePaused,
 			Config: sandboxstore.SandboxConfig{Webhook: &sandboxstore.WebhookConfig{
 				URL:    "https://example.test/webhook",
 				Secret: "secret",
@@ -1464,15 +1457,13 @@ func TestTerminatePausedSandboxCompletesPersistentCleanupWithoutWebhookDelivery(
 		},
 	}}
 	bindings := &deleteRecordingBindingStore{}
-	volumes := &recordingSystemVolumeClient{}
 	svc := &SandboxService{
-		k8sClient:           fake.NewSimpleClientset(),
-		podLister:           runtimeIdentityPodLister(t),
-		credentialStore:     bindings,
-		webhookStateVolumes: volumes,
-		sandboxStore:        store,
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
+		k8sClient:       fake.NewSimpleClientset(),
+		podLister:       runtimeIdentityPodLister(t),
+		credentialStore: bindings,
+		sandboxStore:    store,
+		clock:           systemTime{},
+		logger:          zap.NewNop(),
 	}
 
 	if err := svc.TerminateSandbox(context.Background(), "sandbox-a"); err != nil {
@@ -1483,9 +1474,6 @@ func TestTerminatePausedSandboxCompletesPersistentCleanupWithoutWebhookDelivery(
 	}
 	if bindings.deleteCalls != 1 {
 		t.Fatalf("DeleteBindings calls = %d, want 1", bindings.deleteCalls)
-	}
-	if len(volumes.marked) != 1 || volumes.marked[0] != "sandbox-a:sandbox_deleted" {
-		t.Fatalf("marked volumes = %#v, want sandbox-a:sandbox_deleted", volumes.marked)
 	}
 }
 

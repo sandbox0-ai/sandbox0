@@ -5,15 +5,11 @@ import (
 	"fmt"
 )
 
-const BytesPerGB int64 = 1_000_000_000
-
 type Dimension string
 
 const (
 	DimensionActiveSandboxes Dimension = "active_sandboxes"
 	DimensionSandboxClaims   Dimension = "sandbox_claims"
-	DimensionVolumeStorageGB Dimension = "volume_storage_gb"
-	DimensionSnapshotGB      Dimension = "snapshot_storage_gb"
 	DimensionAPIRequests     Dimension = "api_requests"
 	DimensionNetworkEgress   Dimension = "network_egress_bytes"
 	DimensionNetworkIngress  Dimension = "network_ingress_bytes"
@@ -22,8 +18,6 @@ const (
 var dimensions = []Dimension{
 	DimensionActiveSandboxes,
 	DimensionSandboxClaims,
-	DimensionVolumeStorageGB,
-	DimensionSnapshotGB,
 	DimensionAPIRequests,
 	DimensionNetworkEgress,
 	DimensionNetworkIngress,
@@ -38,8 +32,6 @@ func KnownDimension(d Dimension) bool {
 	switch d {
 	case DimensionActiveSandboxes,
 		DimensionSandboxClaims,
-		DimensionVolumeStorageGB,
-		DimensionSnapshotGB,
 		DimensionAPIRequests,
 		DimensionNetworkEgress,
 		DimensionNetworkIngress:
@@ -59,9 +51,7 @@ const (
 // KindForDimension returns the admission model used by a quota dimension.
 func KindForDimension(d Dimension) Kind {
 	switch d {
-	case DimensionActiveSandboxes,
-		DimensionVolumeStorageGB,
-		DimensionSnapshotGB:
+	case DimensionActiveSandboxes:
 		return KindCapacity
 	case DimensionSandboxClaims,
 		DimensionAPIRequests,
@@ -160,8 +150,6 @@ func UnitForDimension(d Dimension) string {
 		return "count"
 	case DimensionSandboxClaims:
 		return "claims"
-	case DimensionVolumeStorageGB, DimensionSnapshotGB:
-		return "GB"
 	case DimensionAPIRequests:
 		return "requests"
 	case DimensionNetworkEgress, DimensionNetworkIngress:
@@ -239,13 +227,6 @@ func (e *ExceededError) Error() string {
 func IsExceeded(err error) bool {
 	var exceeded *ExceededError
 	return errors.As(err, &exceeded)
-}
-
-func BytesToGBRoundUp(value int64) int64 {
-	if value <= 0 {
-		return 0
-	}
-	return (value + BytesPerGB - 1) / BytesPerGB
 }
 
 func Check(teamID string, dimension Dimension, current, requested int64, limit *Limit) Decision {

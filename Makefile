@@ -1,4 +1,4 @@
-.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-setup-gvisor-rootfs test-e2e-specific test-e2e-mountpoint-s3-compat test-e2e-s0fs-posix test-e2e-s0fs-posix-prepare test-e2e-network-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push proto manifests apispec oapi-codegen
+.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-setup-gvisor-rootfs test-e2e-specific test-e2e-network-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push manifests apispec oapi-codegen
 
 # Tool Binaries
 LOCALBIN ?= $(shell pwd)/bin
@@ -11,31 +11,15 @@ CONTROLLER_TOOLS_VERSION ?= v0.20.0
 OAPI_CODEGEN ?= $(LOCALBIN)/oapi-codegen
 OAPI_CODEGEN_VERSION ?= v2.4.1
 
-PROTOC ?= protoc
 GO ?= env GOWORK=off go
 
 BINARIES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld procd infra-operator
-TEST_SUITES := $(BINARIES) storage-proxy netd
+TEST_SUITES := $(BINARIES) netd
 E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
 E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
 E2E_DEPENDENCY_IMAGES := postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3 sandbox0ai/otemplates:default-v0.2.0 $(E2E_SSH_FIXTURE_IMAGE)
 E2E_IMAGE_PLATFORM ?= linux/$(shell uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 E2E_CLUSTER_NAME ?= sandbox0-e2e
-S0FS_POSIX_PREPARE_INFRA ?= true
-S0FS_POSIX_CI_INSTALL_DEPS ?= true
-S0FS_POSIX_CI_GIT_FILE_COUNT ?= 120
-S0FS_POSIX_CI_GIT_FILE_SIZE ?= 2048
-S0FS_POSIX_CI_BULK_FILE_COUNT ?= 1000
-S0FS_POSIX_CI_BULK_TOTAL_BYTES ?= 16777216
-S0FS_POSIX_CI_BULK_CONCURRENCY ?= 4
-S0FS_POSIX_CI_BULK_FSYNC_EVERY ?= 25
-S0FS_POSIX_CI_ARCHIVE_FILE_COUNT ?= 200
-S0FS_POSIX_CI_ARCHIVE_TOTAL_BYTES ?= 2097152
-S0FS_POSIX_CI_ARCHIVE_CONCURRENCY ?= 4
-S0FS_POSIX_CI_FSX_OPERATIONS ?= 1000
-S0FS_POSIX_CI_FSSTRESS_OPERATIONS ?= 1000
-S0FS_POSIX_CI_FSSTRESS_PROCESSES ?= 4
-
 # Default version
 VERSION ?= latest
 TAG ?= $(VERSION)
@@ -47,13 +31,13 @@ GREEN  := \033[1;32m
 CYAN   := \033[1;36m
 RESET  := \033[0m
 
-all: manifests proto apispec
+all: manifests apispec
 	@for service in $(BINARIES); do \
 		$(MAKE) build SERVICE=$$service GOOS=$(GOOS); \
 	done
 
 # Build specific service: make build <service>
-build: manifests proto apispec
+build: manifests apispec
 	@service="$(filter-out build test test-all lint tidy vendor clean helm-update docker-build docker-build-local build-local-all docker-push,$(MAKECMDGOALS))"; \
 	[ -z "$$service" ] && service="$(SERVICE)"; \
 	for s in $$service; do \
@@ -104,7 +88,7 @@ docker-push:
 	docker push sandbox0ai/infra:$(TAG)
 	docker push sandbox0ai/infra:$(PROCD_BIN_TAG)
 
-build-local-all: manifests proto apispec
+build-local-all: manifests apispec
 	@for service in $(BINARIES); do \
 		$(MAKE) build SERVICE=$$service BIN_DIR=$(shell pwd)/bin GOOS=linux; \
 	done
@@ -138,8 +122,6 @@ test:
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./netd/...; \
 		elif [ "$$service" = "scheduler" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./scheduler/...; \
-		elif [ "$$service" = "storage-proxy" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./storage-proxy/...; \
 		elif [ "$$service" = "ctld" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./ctld/...; \
 		elif [ "$$service" = "infra-operator" ]; then \
@@ -235,60 +217,12 @@ test-e2e-specific:
 	@printf "$(CYAN)Running E2E test: $(SPEC)...$(RESET)\n"
 	unset http_proxy && unset https_proxy && unset all_proxy && $(GO) test -v ./tests/e2e/... -focus="$(SPEC)" -timeout=30m
 
-test-e2e-mountpoint-s3-compat:
-	@printf "$(CYAN)Running mountpoint-s3 compatibility E2E suite...$(RESET)\n"
-	unset http_proxy && unset https_proxy && unset all_proxy && \
-		E2E_SINGLE_CLUSTER_SCENARIOS=fullmode \
-		E2E_MOUNTPOINT_S3_COMPAT=true \
-		E2E_USE_EXISTING_CLUSTER=true \
-		$(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster \
-		-run TestSingleCluster \
-		-ginkgo.focus="API fullmode.*mountpoint-s3 general bucket compatibility semantics" \
-		-timeout=30m
-
-test-e2e-s0fs-posix-prepare:
-	@printf "$(CYAN)Preparing fullmode infra for S0FS POSIX E2E suite...$(RESET)\n"
-	unset http_proxy && unset https_proxy && unset all_proxy && \
-		E2E_USE_EXISTING_CLUSTER=true \
-		E2E_CLUSTER_NAME="$(E2E_CLUSTER_NAME)" \
-		E2E_OPERATOR_IMAGE_TAG="$(TAG)" \
-		$(GO) run ./tests/e2e/cmd/prepare-s0fs-posix
-
-test-e2e-s0fs-posix:
-	@if [ "$(S0FS_POSIX_PREPARE_INFRA)" = "true" ]; then \
-		$(MAKE) test-e2e-s0fs-posix-prepare; \
-	fi
-	@printf "$(CYAN)Running S0FS POSIX E2E suite...$(RESET)\n"
-	unset http_proxy && unset https_proxy && unset all_proxy && python3 scripts/s0fs_posix_suite.py \
-		--kind-cluster "$(E2E_CLUSTER_NAME)" \
-		--kube-context "kind-$(E2E_CLUSTER_NAME)" \
-		$(if $(filter true,$(S0FS_POSIX_CI_INSTALL_DEPS)),--install-deps,) \
-		--suite smoke \
-		--suite git-integrity \
-		--suite bulk-smallfile-integrity \
-		--suite archive-copy-rsync \
-		--suite fsx \
-		--suite fsstress \
-		--git-file-count "$(S0FS_POSIX_CI_GIT_FILE_COUNT)" \
-		--git-file-size "$(S0FS_POSIX_CI_GIT_FILE_SIZE)" \
-		--bulk-file-count "$(S0FS_POSIX_CI_BULK_FILE_COUNT)" \
-		--bulk-total-bytes "$(S0FS_POSIX_CI_BULK_TOTAL_BYTES)" \
-		--bulk-concurrency "$(S0FS_POSIX_CI_BULK_CONCURRENCY)" \
-		--bulk-fsync-every "$(S0FS_POSIX_CI_BULK_FSYNC_EVERY)" \
-		--bulk-post-write-stat \
-		--archive-file-count "$(S0FS_POSIX_CI_ARCHIVE_FILE_COUNT)" \
-		--archive-total-bytes "$(S0FS_POSIX_CI_ARCHIVE_TOTAL_BYTES)" \
-		--archive-concurrency "$(S0FS_POSIX_CI_ARCHIVE_CONCURRENCY)" \
-		--fsx-operations "$(S0FS_POSIX_CI_FSX_OPERATIONS)" \
-		--fsstress-operations "$(S0FS_POSIX_CI_FSSTRESS_OPERATIONS)" \
-		--fsstress-processes "$(S0FS_POSIX_CI_FSSTRESS_PROCESSES)"
-
 test-e2e-network-cni:
 	@printf "$(CYAN)Running network CNI E2E tests...$(RESET)\n"
 	unset http_proxy && unset https_proxy && unset all_proxy && E2E_SINGLE_CLUSTER_SCENARIOS=fullmode $(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster -run TestSingleCluster -ginkgo.focus="API fullmode.*(enforces transparent TCP egress through the ctld network runtime|resolves cluster DNS over UDP with the ctld network runtime active|blocks private sandbox traffic while preserving public exposure and cluster service access)" -timeout=30m
 
 # Prevent make from treating service names as targets
-regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
+regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld procd netd infra-operator:
 	@:
 
 lint:
@@ -309,22 +243,12 @@ clean:
 			rm -rf $$service/bin; \
 		fi; \
 	done
-	rm -rf storage-proxy/proto/fs/*.pb.go
 	rm -rf vendor
 	rm -rf bin
 
 app-configs:
 	@printf "$(CYAN)Generating default Helm configs...$(RESET)\n"
 	@CONFIG_PATH=/dev/null $(GO) run ./tools/configdump
-
-proto: protoc
-	@printf "$(CYAN)Generating storage runtime protobufs...$(RESET)\n"
-	@rm -f storage-proxy/proto/*.pb.go storage-proxy/proto/fs/*.pb.go storage-proxy/pkg/s0fs/state_v2.pb.go
-	@mkdir -p storage-proxy/proto/fs
-	@PATH="$(LOCALBIN):$(PATH)" $(PROTOC) --go_out=. --go_opt=paths=source_relative \
-		storage-proxy/proto/filesystem.proto \
-		storage-proxy/pkg/s0fs/state_v2.proto
-	@mv storage-proxy/proto/*.pb.go storage-proxy/proto/fs/
 
 .PHONY: apispec oapi-codegen
 apispec: oapi-codegen

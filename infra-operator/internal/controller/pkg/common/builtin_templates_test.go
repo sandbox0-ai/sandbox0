@@ -31,13 +31,6 @@ func TestBuildBuiltinTemplateSpecUsesDefaultPreset(t *testing.T) {
 	if spec.MainContainer.Resources.EphemeralStorage.Cmp(resource.MustParse(template.DefaultTemplateEphemeralStorage)) != 0 {
 		t.Fatalf("ephemeralStorage = %s, want %s", spec.MainContainer.Resources.EphemeralStorage.String(), template.DefaultTemplateEphemeralStorage)
 	}
-	if len(spec.VolumeMounts) != 1 {
-		t.Fatalf("volumeMounts = %#v, want one workspace mount", spec.VolumeMounts)
-	}
-	mount := spec.VolumeMounts[0]
-	if mount.Name != template.DefaultTemplateWorkspaceName || mount.MountPath != template.DefaultTemplateWorkspaceMount || mount.ReadOnly {
-		t.Fatalf("volumeMounts[0] = %#v, want writable %s at %s", mount, template.DefaultTemplateWorkspaceName, template.DefaultTemplateWorkspaceMount)
-	}
 	assertDockerRuntimeShape(t, spec, template.DefaultTemplateEphemeralStorage)
 }
 
@@ -46,9 +39,6 @@ func TestBuildBuiltinTemplateSpecDoesNotAddDefaultRuntimeShapeToGenericPreset(t 
 
 	spec := BuildBuiltinTemplateSpec("custom", infrav1alpha1.BuiltinTemplateConfig{})
 
-	if len(spec.VolumeMounts) != 0 {
-		t.Fatalf("volumeMounts = %#v, want none for generic builtin preset", spec.VolumeMounts)
-	}
 	if spec.MainContainer.SecurityContext != nil {
 		t.Fatalf("securityContext = %#v, want nil for generic builtin preset", spec.MainContainer.SecurityContext)
 	}
@@ -76,12 +66,6 @@ func TestBuildBuiltinTemplateSpecUsesCodingAgentPreset(t *testing.T) {
 	}
 	if spec.MainContainer.Resources.EphemeralStorage.Cmp(resource.MustParse(template.CodingAgentEphemeralStorage)) != 0 {
 		t.Fatalf("ephemeralStorage = %s, want %s", spec.MainContainer.Resources.EphemeralStorage.String(), template.CodingAgentEphemeralStorage)
-	}
-	if len(spec.VolumeMounts) != 1 {
-		t.Fatalf("volumeMounts = %#v, want one workspace mount", spec.VolumeMounts)
-	}
-	if spec.VolumeMounts[0].Name != template.DefaultTemplateWorkspaceName || spec.VolumeMounts[0].MountPath != template.DefaultTemplateWorkspaceMount {
-		t.Fatalf("volumeMounts[0] = %#v, want workspace mount", spec.VolumeMounts[0])
 	}
 	security := spec.MainContainer.SecurityContext
 	if security == nil || security.RunAsUser == nil || *security.RunAsUser != 0 || security.RunAsNonRoot == nil || *security.RunAsNonRoot {
@@ -181,9 +165,6 @@ func TestBuildBuiltinTemplateSpecUsesOpenClawPreset(t *testing.T) {
 	if spec.MainContainer.Resources.Memory.Cmp(resource.MustParse(template.OpenClawMemory)) != 0 {
 		t.Fatalf("memory = %s, want %s", spec.MainContainer.Resources.Memory.String(), template.OpenClawMemory)
 	}
-	if len(spec.VolumeMounts) != 1 || spec.VolumeMounts[0].MountPath != template.OpenClawDataMount {
-		t.Fatalf("volumeMounts = %#v, want one mount at %s", spec.VolumeMounts, template.OpenClawDataMount)
-	}
 	assertAgentRuntimePodShape(t, spec)
 	if spec.EnvVars["OPENCLAW_CONFIG_PATH"] != template.OpenClawDataMount+"/openclaw.json" {
 		t.Fatalf("OPENCLAW_CONFIG_PATH = %q", spec.EnvVars["OPENCLAW_CONFIG_PATH"])
@@ -209,9 +190,6 @@ func TestBuildBuiltinTemplateSpecUsesHermesPreset(t *testing.T) {
 	}
 	if spec.MainContainer.Resources.Memory.Cmp(resource.MustParse(template.HermesMemory)) != 0 {
 		t.Fatalf("memory = %s, want %s", spec.MainContainer.Resources.Memory.String(), template.HermesMemory)
-	}
-	if len(spec.VolumeMounts) != 1 || spec.VolumeMounts[0].MountPath != template.HermesDataMount {
-		t.Fatalf("volumeMounts = %#v, want one mount at %s", spec.VolumeMounts, template.HermesDataMount)
 	}
 	assertAgentRuntimePodShape(t, spec)
 	if spec.EnvVars["HERMES_HOME"] != template.HermesRuntimeHome {
@@ -244,13 +222,6 @@ func TestBuildBuiltinTemplateSpecUsesBrowserPreset(t *testing.T) {
 	}
 	if spec.MainContainer.Resources.EphemeralStorage.Cmp(resource.MustParse(template.BrowserEphemeralStorage)) != 0 {
 		t.Fatalf("ephemeralStorage = %s, want %s", spec.MainContainer.Resources.EphemeralStorage.String(), template.BrowserEphemeralStorage)
-	}
-	if len(spec.VolumeMounts) != 1 {
-		t.Fatalf("volumeMounts = %#v, want one downloads mount", spec.VolumeMounts)
-	}
-	mount := spec.VolumeMounts[0]
-	if mount.Name != template.BrowserDownloadsMountName || mount.MountPath != template.BrowserDownloadsMount || mount.ReadOnly {
-		t.Fatalf("volumeMounts[0] = %#v, want writable %s at %s", mount, template.BrowserDownloadsMountName, template.BrowserDownloadsMount)
 	}
 	if spec.Pod == nil || len(spec.Pod.EmptyDirMounts) != 1 {
 		t.Fatalf("emptyDirMounts = %#v, want one /dev/shm mount", spec.Pod)

@@ -759,9 +759,6 @@ func cloneSandboxRecordForLifecycle(record *sandboxstore.SandboxRecord) *sandbox
 		return nil
 	}
 	clone := *record
-	if record.Mounts != nil {
-		clone.Mounts = append([]managerapi.ClaimMount(nil), record.Mounts...)
-	}
 	if record.Config.Services != nil {
 		clone.Config.Services = append([]managerapi.SandboxAppService(nil), record.Config.Services...)
 	}
@@ -1126,13 +1123,6 @@ func (s *SandboxService) now() time.Time {
 	return time.Now()
 }
 
-func webhookStateVolumeIDFromPod(pod *corev1.Pod) string {
-	if pod == nil || pod.Annotations == nil {
-		return ""
-	}
-	return strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID])
-}
-
 func ownerKindFromPod(pod *corev1.Pod) string {
 	if pod == nil {
 		return ""
@@ -1150,8 +1140,7 @@ func ownerKindFromPod(pod *corev1.Pod) string {
 
 func sandboxRuntimeMetadataFromPod(pod *corev1.Pod) sandboxstore.SandboxRuntimeMetadata {
 	return sandboxstore.SandboxRuntimeMetadata{
-		WebhookStateVolumeID: webhookStateVolumeIDFromPod(pod),
-		OwnerKind:            ownerKindFromPod(pod),
+		OwnerKind: ownerKindFromPod(pod),
 	}
 }
 
@@ -1168,26 +1157,24 @@ func (s *SandboxService) persistUpdatedSandboxPod(ctx context.Context, pod *core
 		return nil
 	}
 	record := &sandboxstore.SandboxRecord{
-		ID:                   sandboxID,
-		TeamID:               pod.Annotations[controller.AnnotationTeamID],
-		UserID:               pod.Annotations[controller.AnnotationUserID],
-		TemplateID:           sandboxTemplateIDFromLabels(pod.Labels),
-		TemplateName:         template.Name,
-		TemplateNamespace:    template.Namespace,
-		ClusterID:            naming.ClusterIDOrDefault(template.Spec.ClusterId),
-		DesiredState:         sandboxstore.SandboxDesiredStateActive,
-		Config:               parseSandboxConfig(pod.Annotations[controller.AnnotationConfig]),
-		Mounts:               parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
-		TemplateSpec:         template.Spec,
-		CurrentPodName:       pod.Name,
-		CurrentPodNamespace:  pod.Namespace,
-		RuntimeGeneration:    runtimeGenerationFromPod(pod),
-		ClaimedAt:            parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
-		ExpiresAt:            parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
-		HardExpiresAt:        parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
-		WebhookStateVolumeID: webhookStateVolumeIDFromPod(pod),
-		OwnerKind:            ownerKindFromPod(pod),
-		CreatedAt:            pod.CreationTimestamp.Time,
+		ID:                  sandboxID,
+		TeamID:              pod.Annotations[controller.AnnotationTeamID],
+		UserID:              pod.Annotations[controller.AnnotationUserID],
+		TemplateID:          sandboxTemplateIDFromLabels(pod.Labels),
+		TemplateName:        template.Name,
+		TemplateNamespace:   template.Namespace,
+		ClusterID:           naming.ClusterIDOrDefault(template.Spec.ClusterId),
+		DesiredState:        sandboxstore.SandboxDesiredStateActive,
+		Config:              parseSandboxConfig(pod.Annotations[controller.AnnotationConfig]),
+		TemplateSpec:        template.Spec,
+		CurrentPodName:      pod.Name,
+		CurrentPodNamespace: pod.Namespace,
+		RuntimeGeneration:   runtimeGenerationFromPod(pod),
+		ClaimedAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationClaimedAt),
+		ExpiresAt:           parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationExpiresAt),
+		HardExpiresAt:       parseRFC3339AnnotationTime(pod.Annotations, controller.AnnotationHardExpiresAt),
+		OwnerKind:           ownerKindFromPod(pod),
+		CreatedAt:           pod.CreationTimestamp.Time,
 	}
 	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, locked *sandboxstore.SandboxRecord) error {
 		if locked.DesiredState == sandboxstore.SandboxDesiredStatePaused || locked.DesiredState == sandboxstore.SandboxDesiredStateTerminating || locked.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !locked.DeletedAt.IsZero() {
@@ -1308,7 +1295,6 @@ func (s *SandboxService) podToSandbox(pod *corev1.Pod, sandboxID string) *manage
 		AutoResume:        autoResume,
 		Resources:         cloneSandboxResourceConfig(cfg.Resources),
 		Services:          cfg.Services,
-		Mounts:            parseClaimMounts(pod.Annotations[controller.AnnotationMounts]),
 		PodName:           pod.Name,
 		RuntimeGeneration: runtimeGenerationFromPod(pod),
 		ExpiresAt:         optionalTime(expiresAt),
@@ -1337,7 +1323,6 @@ func (s *SandboxService) recordToSandbox(record *sandboxstore.SandboxRecord) *ma
 		AutoResume:        autoResume,
 		Resources:         cloneSandboxResourceConfig(record.Config.Resources),
 		Services:          record.Config.Services,
-		Mounts:            record.Mounts,
 		PodName:           record.CurrentPodName,
 		RuntimeGeneration: record.RuntimeGeneration,
 		ExpiresAt:         optionalTime(record.ExpiresAt),
@@ -1414,16 +1399,12 @@ func sandboxLifecycleInfoFromRecord(record *sandboxstore.SandboxRecord) SandboxL
 		return SandboxLifecycleInfo{}
 	}
 	info := SandboxLifecycleInfo{
-		Namespace:            record.CurrentPodNamespace,
-		PodName:              record.CurrentPodName,
-		SandboxID:            record.ID,
-		TeamID:               record.TeamID,
-		UserID:               record.UserID,
-		WebhookStateVolumeID: record.WebhookStateVolumeID,
-		RuntimeGeneration:    record.RuntimeGeneration,
-	}
-	if record.Config.Webhook != nil {
-		info.WebhookURL = strings.TrimSpace(record.Config.Webhook.URL)
+		Namespace:         record.CurrentPodNamespace,
+		PodName:           record.CurrentPodName,
+		SandboxID:         record.ID,
+		TeamID:            record.TeamID,
+		UserID:            record.UserID,
+		RuntimeGeneration: record.RuntimeGeneration,
 	}
 	return info
 }
@@ -1462,21 +1443,6 @@ func parseSandboxConfig(configJSON string) sandboxstore.SandboxConfig {
 		return sandboxstore.SandboxConfig{}
 	}
 	return cfg
-}
-
-func parseClaimMounts(mountsJSON string) []managerapi.ClaimMount {
-	if mountsJSON == "" {
-		return nil
-	}
-	var mounts []managerapi.ClaimMount
-	if err := json.Unmarshal([]byte(mountsJSON), &mounts); err != nil {
-		return nil
-	}
-	normalized, err := normalizeClaimMounts(mounts)
-	if err != nil {
-		return nil
-	}
-	return normalized
 }
 
 // GetSandboxStatus gets the status of a sandbox

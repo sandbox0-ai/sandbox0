@@ -29,8 +29,7 @@ type ClusterGatewayConfig struct {
 	LogLevel string `yaml:"log_level" json:"logLevel"`
 
 	// Upstream services
-	ManagerURL        string `yaml:"manager_url" json:"-"`
-	ManagerStorageURL string `yaml:"manager_storage_url" json:"-"`
+	ManagerURL string `yaml:"manager_url" json:"-"`
 
 	// Internal authentication (for validating requests from regional-gateway and
 	// generating tokens for downstream services)

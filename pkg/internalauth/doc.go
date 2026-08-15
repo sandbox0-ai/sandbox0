@@ -40,9 +40,9 @@
 //	    PrivateKey: privateKey,
 //	})
 //
-//	token, err := generator.Generate("manager-storage", "team-123", "user-456",
+//	token, err := generator.Generate("manager", "team-123", "user-456",
 //	    internalauth.GenerateOptions{
-//	        Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
+//	        Permissions: []string{"sandbox:read", "sandbox:write"},
 //	    })
 //
 //	// Make authenticated request
@@ -53,7 +53,7 @@
 //	// Step 3: Validator (manager storage/procd) - load public key and verify
 //	publicKey, _ := internalauth.LoadEd25519PublicKeyFromFile("/config/internal_jwt_public.key")
 //	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-//	    Target:    "manager-storage",
+//	    Target:    "manager",
 //	    PublicKey: publicKey,
 //	})
 //
@@ -69,7 +69,7 @@
 //
 //	ctx = internalauth.WithClaims(ctx, claims)
 //	claims = internalauth.ClaimsFromContext(ctx)
-//	if claims != nil && internalauth.HasPermission(ctx, "sandboxvolume:write") {
+//	if claims != nil && internalauth.HasPermission(ctx, "sandbox:write") {
 //	    // Allow the operation.
 //	}
 //
@@ -80,12 +80,12 @@
 //	{
 //	  "iss": "cluster-gateway",      // Issuer (caller service)
 //	  "sub": "team-123",              // Subject (team ID)
-//	  "aud": "manager-storage",       // Audience (target service)
+//	  "aud": "manager",       // Audience (target service)
 //	  "iat": 1706745600,              // Issued at
 //	  "exp": 1706745630,              // Expires at (30s default)
 //	  "jti": "unique-id",             // JWT ID (for replay detection)
 //	  "caller": "cluster-gateway",   // Caller service
-//	  "target": "manager-storage",    // Target service
+//	  "target": "manager",    // Target service
 //	  "team_id": "team-123",          // Team ID
 //	  "user_id": "user-456",          // User ID (optional)
 //	  "permissions": ["..."]          // Granted permissions
@@ -131,6 +131,5 @@
 //   - "cluster-gateway"  - API gateway and router
 //   - "manager"           - Template and sandbox management
 //   - "procd"             - Sandbox process manager (untrusted, uses public key only)
-//   - "manager-storage"   - Manager storage and volume endpoint
 //   - "e2b-gateway"       - E2B compatibility layer
 package internalauth

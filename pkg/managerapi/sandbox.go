@@ -22,7 +22,6 @@ type Sandbox struct {
 	AutoResume        bool                   `json:"auto_resume"`
 	Resources         *SandboxResourceConfig `json:"resources,omitempty"`
 	Services          []SandboxAppService    `json:"services,omitempty"`
-	Mounts            []ClaimMount           `json:"mounts,omitempty"`
 	PodName           string                 `json:"pod_name"`
 	RuntimeGeneration int64                  `json:"runtime_generation"`
 	ExpiresAt         *time.Time             `json:"expires_at"`
@@ -30,12 +29,6 @@ type Sandbox struct {
 	ClaimedAt         time.Time              `json:"claimed_at"`
 	CreatedAt         time.Time              `json:"created_at"`
 	UpdatedAt         time.Time              `json:"updated_at"`
-}
-
-// ClaimMount binds one SandboxVolume to a declared sandbox mount point.
-type ClaimMount struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-	MountPoint      string `json:"mount_point"`
 }
 
 // SandboxResourceConfig is an instance-level resource override.

@@ -8,7 +8,7 @@ Typical uses:
 - Build a throwaway image from code generated inside the sandbox.
 - Run tools that require `docker build`, `docker run`, or `docker compose` style workflows.
 
-`/var/lib/docker` is ephemeral. Images, containers, layers, and Docker volumes are discarded when the sandbox is deleted. Store source code and durable outputs in Sandbox volumes instead.
+`/var/lib/docker` uses ephemeral runtime storage. Images, containers, layers, and Docker-managed volumes are discarded when the sandbox runtime is replaced or deleted. Store source code and durable outputs elsewhere in the sandbox rootfs so pause, resume, and named rootfs snapshots can retain them.
 
 <Callout variant="info">
 The built-in `default` and `coding-agent` templates provide Docker binaries and writable Docker state, but they do not start `dockerd` before the sandbox is claimed. The examples below use `default`; claim `coding-agent` instead when the same sandbox also needs the bundled coding agents and Playwright CLI.
@@ -501,7 +501,7 @@ For projects that require kind, run that part of the workflow in a VM, a CI runn
 - Containers launched by Docker are sandbox-local. In Sandbox0 Cloud, use `--network=host` for Redis, PostgreSQL, nginx, and similar service containers, then connect to `127.0.0.1` from commands inside the sandbox.
 - If you run against an environment where Docker port publishing works, `-p hostPort:containerPort` is also fine. The Cloud examples use `--network=host` because it avoids relying on Docker bridge/NAT.
 - Use Sandbox Services when a containerized HTTP service needs to be reachable from outside the sandbox.
-- Docker state is not durable. Use Sandbox Volumes for source, generated files, or database dumps that must survive sandbox cleanup.
+- Docker state does not survive runtime replacement. Keep source, generated files, or database dumps outside `/var/lib/docker`, then use a named rootfs snapshot or a custom template when they must survive sandbox cleanup.
 - Docker state uses the selected template's ephemeral storage limit. Hosted `default` sandboxes provide `500m` CPU, `2Gi` memory, and `8Gi` ephemeral storage; `coding-agent` provides 1 CPU, `4Gi` memory, and `16Gi` ephemeral storage.
 - Pulling images can take longer than a single synchronous command request. Start long Docker setup commands asynchronously, then poll readiness with short commands.
 - kind and similar nested Kubernetes tools require cgroup namespace and networking support beyond ordinary Docker builds. Use a VM or CI runner when those kernel features are not available.
@@ -516,7 +516,7 @@ For projects that require kind, run that part of the workflow in a VM, a CI runn
     Expose named sandbox ports through public HTTP service routes.
   </Card>
 
-  <Card title="Volumes" href="/docs/sandbox/volume" cta="Continue">
-    Persist source code, test fixtures, and generated artifacts beyond sandbox runtime cleanup.
+  <Card title="Snapshot And Restore" href="/docs/sandbox/snapshot-restore" cta="Continue">
+    Publish initialized source code, test fixtures, and generated artifacts as rootfs state.
   </Card>
 </CardGroup>

@@ -11,8 +11,6 @@ team-specific policy overrides the default for the same key.
 |---|---|---|---|
 | `active_sandboxes` | capacity | count | Sandbox claim |
 | `sandbox_claims` | rate | claims | External regional or full-mode gateway claim |
-| `volume_storage_gb` | capacity | GB | Volume mutation |
-| `snapshot_storage_gb` | capacity | GB | Snapshot mutation |
 | `api_requests` | rate | requests | External regional or full-mode gateway request |
 | `network_egress_bytes` | rate | bytes | Sandbox traffic sent through the ctld network runtime |
 | `network_ingress_bytes` | rate | bytes | Sandbox traffic received through the ctld network runtime |
@@ -28,8 +26,7 @@ not block a ctld worker indefinitely.
 
 CPU and memory remain sandbox resource settings and metered usage, but are not
 Team Quota dimensions. Rootfs is persisted in object storage and metered for
-billing, but it is not a separate quota dimension. Omit volume and snapshot
-policies when those dimensions should remain unlimited.
+billing, but it is not a separate quota dimension.
 
 ## Configure Region Defaults
 

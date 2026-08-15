@@ -11,7 +11,6 @@ const (
 	DefaultTemplateDisplayName      = "Default"
 	DefaultTemplateMinIdle          = int32(1)
 	DefaultTemplateMaxIdle          = int32(5)
-	DefaultTemplateWorkspaceName    = "workspace"
 	DefaultTemplateWorkspaceMount   = "/workspace"
 	DockerDataRootMount             = "/var/lib/docker"
 
@@ -52,8 +51,6 @@ const (
 	BrowserMemory              = "8Gi"
 	BrowserEphemeralStorage    = "16Gi"
 	BrowserProfileDir          = "/browser/profile"
-	BrowserDownloadsMountName  = "browser-downloads"
-	BrowserDownloadsMount      = "/files"
 	BrowserDevShmMount         = "/dev/shm"
 	BrowserDevShmSizeLimit     = "2Gi"
 )

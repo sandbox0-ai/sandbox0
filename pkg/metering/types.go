@@ -9,25 +9,17 @@ import (
 const (
 	ProductSandbox = "sandbox"
 
-	ProducerStorage = "storage-proxy.storage"
+	ProducerRootFSStorage = "manager.rootfs.storage"
 
 	EventTypeSandboxClaimed    = "sandbox.claimed"
 	EventTypeSandboxPaused     = "sandbox.paused"
 	EventTypeSandboxResumed    = "sandbox.resumed"
 	EventTypeSandboxTerminated = "sandbox.terminated"
 
-	EventTypeVolumeCreated    = "volume.created"
-	EventTypeVolumeDeleted    = "volume.deleted"
-	EventTypeVolumeForked     = "volume.forked"
-	EventTypeSnapshotCreated  = "snapshot.created"
-	EventTypeSnapshotDeleted  = "snapshot.deleted"
-	EventTypeSnapshotRestored = "snapshot.restored"
-
 	WindowTypeSandboxIngressBytes = "sandbox.ingress_bytes"
 	WindowTypeSandboxEgressBytes  = "sandbox.egress_bytes"
 
 	WindowTypeSandboxRuntimeMiBMilliseconds = "sandbox.runtime_mib_milliseconds"
-	WindowTypeSandboxVolumeByteHours        = "sandbox.volume_byte_hours"
 	WindowTypeSandboxRootFSByteHours        = "sandbox.rootfs_byte_hours"
 	WindowTypeSandboxObjectStoreGetRequests = "sandbox.object_store_get_requests"
 	WindowTypeSandboxObjectStorePutRequests = "sandbox.object_store_put_requests"
@@ -39,8 +31,6 @@ const (
 	WindowUnitMiBMilliseconds = "mib_milliseconds"
 
 	SubjectTypeSandbox           = "sandbox"
-	SubjectTypeVolume            = "volume"
-	SubjectTypeSnapshot          = "snapshot"
 	SubjectTypeRootFS            = "rootfs"
 	SubjectTypeObjectStoreBucket = "object_store_bucket"
 	SubjectTypeTemplate          = "template"

@@ -18,7 +18,6 @@ on:
       - "netd/**"
       - "pkg/**"
       - "scheduler/**"
-      - "storage-proxy/**"
       - "tests/**"
       - "go.mod"
       - "go.sum"

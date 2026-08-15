@@ -30,13 +30,6 @@ const (
 	AppArmorProfileTypeUnconfined     AppArmorProfileType = "Unconfined"
 )
 
-// Defines values for CreateSandboxVolumeS3ConfigProvider.
-const (
-	CreateSandboxVolumeS3ConfigProviderAli CreateSandboxVolumeS3ConfigProvider = "ali"
-	CreateSandboxVolumeS3ConfigProviderAws CreateSandboxVolumeS3ConfigProvider = "aws"
-	CreateSandboxVolumeS3ConfigProviderR2  CreateSandboxVolumeS3ConfigProvider = "r2"
-)
-
 // Defines values for CredentialProjectionType.
 const (
 	HttpHeaders             CredentialProjectionType = "http_headers"
@@ -172,14 +165,6 @@ const (
 	Global GatewayMetadataGatewayMode = "global"
 )
 
-// Defines values for MountStatusState.
-const (
-	MountStatusStateFailed   MountStatusState = "failed"
-	MountStatusStateMounted  MountStatusState = "mounted"
-	MountStatusStateMounting MountStatusState = "mounting"
-	MountStatusStatePending  MountStatusState = "pending"
-)
-
 // Defines values for ObservabilityEventSource.
 const (
 	ClusterGateway ObservabilityEventSource = "cluster_gateway"
@@ -187,7 +172,6 @@ const (
 	Manager        ObservabilityEventSource = "manager"
 	Netd           ObservabilityEventSource = "netd"
 	Procd          ObservabilityEventSource = "procd"
-	StorageProxy   ObservabilityEventSource = "storage_proxy"
 )
 
 // Defines values for PlaceholderSubstitutionLocation.
@@ -216,8 +200,6 @@ const (
 	NetworkEgressBytes  QuotaDimension = "network_egress_bytes"
 	NetworkIngressBytes QuotaDimension = "network_ingress_bytes"
 	SandboxClaims       QuotaDimension = "sandbox_claims"
-	SnapshotStorageGb   QuotaDimension = "snapshot_storage_gb"
-	VolumeStorageGb     QuotaDimension = "volume_storage_gb"
 )
 
 // Defines values for REPLReadyMode.
@@ -410,13 +392,6 @@ const (
 	SandboxRuntimeMetricUnitSeconds        SandboxRuntimeMetricUnit = "seconds"
 )
 
-// Defines values for SandboxVolumeS3ConfigProvider.
-const (
-	SandboxVolumeS3ConfigProviderAli SandboxVolumeS3ConfigProvider = "ali"
-	SandboxVolumeS3ConfigProviderAws SandboxVolumeS3ConfigProvider = "aws"
-	SandboxVolumeS3ConfigProviderR2  SandboxVolumeS3ConfigProvider = "r2"
-)
-
 // Defines values for SeccompProfileType.
 const (
 	SeccompProfileTypeLocalhost      SeccompProfileType = "Localhost"
@@ -599,11 +574,6 @@ const (
 	SuccessResizedResponseSuccessTrue SuccessResizedResponseSuccess = true
 )
 
-// Defines values for SuccessRestoreResponseSuccess.
-const (
-	SuccessRestoreResponseSuccessTrue SuccessRestoreResponseSuccess = true
-)
-
 // Defines values for SuccessRestoreSandboxRootFSResponseSuccess.
 const (
 	SuccessRestoreSandboxRootFSResponseSuccessTrue SuccessRestoreSandboxRootFSResponseSuccess = true
@@ -684,29 +654,9 @@ const (
 	SuccessSandboxStatusResponseSuccessTrue SuccessSandboxStatusResponseSuccess = true
 )
 
-// Defines values for SuccessSandboxVolumeListResponseSuccess.
-const (
-	SuccessSandboxVolumeListResponseSuccessTrue SuccessSandboxVolumeListResponseSuccess = true
-)
-
-// Defines values for SuccessSandboxVolumeResponseSuccess.
-const (
-	SuccessSandboxVolumeResponseSuccessTrue SuccessSandboxVolumeResponseSuccess = true
-)
-
 // Defines values for SuccessSignaledResponseSuccess.
 const (
 	SuccessSignaledResponseSuccessTrue SuccessSignaledResponseSuccess = true
-)
-
-// Defines values for SuccessSnapshotListResponseSuccess.
-const (
-	SuccessSnapshotListResponseSuccessTrue SuccessSnapshotListResponseSuccess = true
-)
-
-// Defines values for SuccessSnapshotResponseSuccess.
-const (
-	SuccessSnapshotResponseSuccessTrue SuccessSnapshotResponseSuccess = true
 )
 
 // Defines values for SuccessTeamListResponseSuccess.
@@ -752,11 +702,6 @@ const (
 // Defines values for SuccessUserResponseSuccess.
 const (
 	SuccessUserResponseSuccessTrue SuccessUserResponseSuccess = true
-)
-
-// Defines values for SuccessVolumeFileArchiveImportResponseSuccess.
-const (
-	SuccessVolumeFileArchiveImportResponseSuccessTrue SuccessVolumeFileArchiveImportResponseSuccess = true
 )
 
 // Defines values for SuccessWrittenResponseSuccess.
@@ -826,19 +771,6 @@ const (
 	UpdateTeamMemberRequestRoleBuilder   UpdateTeamMemberRequestRole = "builder"
 	UpdateTeamMemberRequestRoleDeveloper UpdateTeamMemberRequestRole = "developer"
 	UpdateTeamMemberRequestRoleViewer    UpdateTeamMemberRequestRole = "viewer"
-)
-
-// Defines values for VolumeAccessMode.
-const (
-	ROX VolumeAccessMode = "ROX"
-	RWO VolumeAccessMode = "RWO"
-	RWX VolumeAccessMode = "RWX"
-)
-
-// Defines values for VolumeBackend.
-const (
-	S0fs VolumeBackend = "s0fs"
-	S3   VolumeBackend = "s3"
 )
 
 // APIKey defines model for APIKey.
@@ -915,19 +847,9 @@ type ChangePasswordRequest struct {
 	OldPassword string `json:"old_password"`
 }
 
-// ClaimMountRequest defines model for ClaimMountRequest.
-type ClaimMountRequest struct {
-	MountPoint      string `json:"mount_point"`
-	SandboxvolumeId string `json:"sandboxvolume_id"`
-}
-
 // ClaimRequest defines model for ClaimRequest.
 type ClaimRequest struct {
 	Config *SandboxConfig `json:"config,omitempty"`
-
-	// Mounts Retired claim-time Sandbox Volume bindings. New claims with this field return 410 Gone. Use writable Sandbox rootfs paths instead.
-	// Deprecated:
-	Mounts *[]ClaimMountRequest `json:"mounts,omitempty"`
 
 	// SnapshotId Optional sandbox rootfs snapshot ID used to initialize the claimed sandbox writable root filesystem.
 	SnapshotId *string `json:"snapshot_id,omitempty"`
@@ -936,12 +858,11 @@ type ClaimRequest struct {
 
 // ClaimResponse defines model for ClaimResponse.
 type ClaimResponse struct {
-	BootstrapMounts *[]MountStatus         `json:"bootstrap_mounts,omitempty"`
-	ClusterId       *string                `json:"cluster_id"`
-	PodName         string                 `json:"pod_name"`
-	SandboxId       string                 `json:"sandbox_id"`
-	Status          SandboxLifecycleStatus `json:"status"`
-	Template        string                 `json:"template"`
+	ClusterId *string                `json:"cluster_id"`
+	PodName   string                 `json:"pod_name"`
+	SandboxId string                 `json:"sandbox_id"`
+	Status    SandboxLifecycleStatus `json:"status"`
+	Template  string                 `json:"template"`
 }
 
 // ContainerSpec defines model for ContainerSpec.
@@ -1097,59 +1018,6 @@ type CreateSandboxRootFSSnapshotRequest struct {
 	// ExpiresAt Optional snapshot expiration timestamp. Zero value means not set.
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	Name      *string    `json:"name,omitempty"`
-}
-
-// CreateSandboxVolumeRequest defines model for CreateSandboxVolumeRequest.
-type CreateSandboxVolumeRequest struct {
-	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
-	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
-
-	// Backend Storage backend for a SandboxVolume. s0fs is the default durable Sandbox0 volume backend. s3 mounts an existing S3-compatible prefix through the volume portal and supports mount-s3-like object projection.
-	Backend *VolumeBackend `json:"backend,omitempty"`
-
-	// DefaultPosixGid Default POSIX GID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
-	DefaultPosixGid *int64 `json:"default_posix_gid,omitempty"`
-
-	// DefaultPosixUid Default POSIX UID used by external volume access paths that do not carry caller identity. Defaults to 0 when omitted on create.
-	DefaultPosixUid *int64                       `json:"default_posix_uid,omitempty"`
-	S3              *CreateSandboxVolumeS3Config `json:"s3,omitempty"`
-
-	// SnapshotId Optional snapshot ID used to initialize the new volume from immutable snapshot state.
-	SnapshotId *string `json:"snapshot_id,omitempty"`
-}
-
-// CreateSandboxVolumeS3Config defines model for CreateSandboxVolumeS3Config.
-type CreateSandboxVolumeS3Config struct {
-	// AccessKey Access key for this S3 backend volume. Required with secret_key. Stored encrypted and omitted from API responses.
-	AccessKey string `json:"access_key"`
-	Bucket    string `json:"bucket"`
-
-	// EndpointUrl Optional endpoint override. Required for ali and r2. For aws, endpoint_url can be used instead of region for S3-compatible endpoints.
-	EndpointUrl *string `json:"endpoint_url,omitempty"`
-
-	// Prefix Optional object key prefix to expose as the volume root.
-	Prefix *string `json:"prefix,omitempty"`
-
-	// Provider S3-compatible provider. ali is Aliyun OSS; r2 is Cloudflare R2.
-	Provider *CreateSandboxVolumeS3ConfigProvider `json:"provider,omitempty"`
-
-	// Region AWS region for the target bucket. Required for provider aws unless endpoint_url is provided.
-	Region *string `json:"region,omitempty"`
-
-	// SecretKey Secret key for this S3 backend volume. Required with access_key. Stored encrypted and omitted from API responses.
-	SecretKey string `json:"secret_key"`
-
-	// SessionToken Optional temporary credential session token.
-	SessionToken *string `json:"session_token,omitempty"`
-}
-
-// CreateSandboxVolumeS3ConfigProvider S3-compatible provider. ali is Aliyun OSS; r2 is Cloudflare R2.
-type CreateSandboxVolumeS3ConfigProvider string
-
-// CreateSnapshotRequest defines model for CreateSnapshotRequest.
-type CreateSnapshotRequest struct {
-	Description *string `json:"description,omitempty"`
-	Name        string  `json:"name"`
 }
 
 // CreateTeamRequest defines model for CreateTeamRequest.
@@ -1549,18 +1417,6 @@ type ForkSandboxResponse struct {
 	SourceSandboxId string  `json:"source_sandbox_id"`
 }
 
-// ForkVolumeRequest defines model for ForkVolumeRequest.
-type ForkVolumeRequest struct {
-	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
-	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
-
-	// DefaultPosixGid Override the default POSIX GID for external volume access paths. Inherits from the source volume when omitted.
-	DefaultPosixGid *int64 `json:"default_posix_gid,omitempty"`
-
-	// DefaultPosixUid Override the default POSIX UID for external volume access paths. Inherits from the source volume when omitted.
-	DefaultPosixUid *int64 `json:"default_posix_uid,omitempty"`
-}
-
 // GatewayMetadata defines model for GatewayMetadata.
 type GatewayMetadata struct {
 	GatewayMode GatewayMetadataGatewayMode `json:"gateway_mode"`
@@ -1687,20 +1543,6 @@ type MCPToolPolicy struct {
 	// Denied Tool names denied before the allowed list is evaluated.
 	Denied *[]string `json:"denied,omitempty"`
 }
-
-// MountStatus defines model for MountStatus.
-type MountStatus struct {
-	ErrorCode          *string          `json:"error_code,omitempty"`
-	ErrorMessage       *string          `json:"error_message,omitempty"`
-	MountPoint         string           `json:"mount_point"`
-	MountedAt          *string          `json:"mounted_at,omitempty"`
-	MountedDurationSec *int64           `json:"mounted_duration_sec,omitempty"`
-	SandboxvolumeId    string           `json:"sandboxvolume_id"`
-	State              MountStatusState `json:"state"`
-}
-
-// MountStatusState defines model for MountStatus.State.
-type MountStatusState string
 
 // MoveFileRequest defines model for MoveFileRequest.
 type MoveFileRequest struct {
@@ -2091,9 +1933,8 @@ type Sandbox struct {
 	ExpiresAt *time.Time `json:"expires_at"`
 
 	// HardExpiresAt Hard expiration timestamp. Omitted or null means disabled or not set.
-	HardExpiresAt *time.Time           `json:"hard_expires_at"`
-	Id            string               `json:"id"`
-	Mounts        *[]ClaimMountRequest `json:"mounts,omitempty"`
+	HardExpiresAt *time.Time `json:"hard_expires_at"`
+	Id            string     `json:"id"`
 
 	// Paused True when status is paused.
 	Paused  bool   `json:"paused"`
@@ -2302,7 +2143,7 @@ type SandboxConfig struct {
 	// Ttl Runtime soft time-to-live in seconds. When it expires, Sandbox0 checkpoints the writable rootfs, pauses the sandbox, and releases runtime compute while preserving durable sandbox state.
 	Ttl *int32 `json:"ttl,omitempty"`
 
-	// Webhook Per-sandbox webhook configuration. Retries can deliver the same event more than once, so consumers should deduplicate by event_id and must not assume every unavailable endpoint eventually receives every event. Procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace. Manager transactionally queues sandbox.deleted in PostgreSQL, retries transient failures for up to 24 hours, and never waits for the external endpoint before completing sandbox cleanup.
+	// Webhook Per-sandbox webhook configuration. Retries can deliver the same event more than once, so consumers should deduplicate by event_id and must not assume every unavailable endpoint eventually receives every event. Sandbox0 persists delivery state outside the workspace, retries transient failures for up to 24 hours, and never waits for the external endpoint before completing sandbox cleanup.
 	Webhook *WebhookConfig `json:"webhook,omitempty"`
 }
 
@@ -2685,7 +2526,6 @@ type SandboxTemplateSpec struct {
 	Pod           *PodSpecOverride      `json:"pod,omitempty"`
 	Pool          *PoolStrategy         `json:"pool,omitempty"`
 	Tags          *[]string             `json:"tags,omitempty"`
-	VolumeMounts  *[]VolumeMountSpec    `json:"volumeMounts,omitempty"`
 }
 
 // SandboxTemplateStatus defines model for SandboxTemplateStatus.
@@ -2738,42 +2578,6 @@ type SandboxUpdateRequest struct {
 	Config *SandboxUpdateConfig `json:"config,omitempty"`
 }
 
-// SandboxVolume defines model for SandboxVolume.
-type SandboxVolume struct {
-	// AccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
-	AccessMode *VolumeAccessMode `json:"access_mode,omitempty"`
-
-	// Backend Storage backend for a SandboxVolume. s0fs is the default durable Sandbox0 volume backend. s3 mounts an existing S3-compatible prefix through the volume portal and supports mount-s3-like object projection.
-	Backend         VolumeBackend `json:"backend"`
-	CreatedAt       time.Time     `json:"created_at"`
-	DefaultPosixGid *int64        `json:"default_posix_gid"`
-	DefaultPosixUid *int64        `json:"default_posix_uid"`
-	Id              string        `json:"id"`
-
-	// MeteredStorageBytes Latest metered logical payload bytes stored by this S0FS volume. Null for external backends or when metering state is unavailable.
-	MeteredStorageBytes *int64                 `json:"metered_storage_bytes"`
-	S3                  *SandboxVolumeS3Config `json:"s3,omitempty"`
-	SourceVolumeId      *string                `json:"source_volume_id"`
-
-	// StorageObservedAt Time when metered_storage_bytes was last observed. Null for external backends or when metering state is unavailable.
-	StorageObservedAt *time.Time `json:"storage_observed_at"`
-	TeamId            string     `json:"team_id"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	UserId            string     `json:"user_id"`
-}
-
-// SandboxVolumeS3Config defines model for SandboxVolumeS3Config.
-type SandboxVolumeS3Config struct {
-	Bucket      string                        `json:"bucket"`
-	EndpointUrl *string                       `json:"endpoint_url,omitempty"`
-	Prefix      *string                       `json:"prefix,omitempty"`
-	Provider    SandboxVolumeS3ConfigProvider `json:"provider"`
-	Region      *string                       `json:"region,omitempty"`
-}
-
-// SandboxVolumeS3ConfigProvider defines model for SandboxVolumeS3Config.Provider.
-type SandboxVolumeS3ConfigProvider string
-
 // SeccompProfile defines model for SeccompProfile.
 type SeccompProfile struct {
 	LocalhostProfile *string            `json:"localhostProfile,omitempty"`
@@ -2799,17 +2603,6 @@ type SecurityContext struct {
 // SignalContextRequest defines model for SignalContextRequest.
 type SignalContextRequest struct {
 	Signal string `json:"signal"`
-}
-
-// Snapshot defines model for Snapshot.
-type Snapshot struct {
-	CreatedAt   string  `json:"created_at"`
-	Description *string `json:"description,omitempty"`
-	ExpiresAt   *string `json:"expires_at"`
-	Id          string  `json:"id"`
-	Name        string  `json:"name"`
-	SizeBytes   int64   `json:"size_bytes"`
-	VolumeId    string  `json:"volume_id"`
 }
 
 // StaticHeadersSourceSpec defines model for StaticHeadersSourceSpec.
@@ -3182,17 +2975,6 @@ type SuccessResizedResponse struct {
 // SuccessResizedResponseSuccess defines model for SuccessResizedResponse.Success.
 type SuccessResizedResponseSuccess bool
 
-// SuccessRestoreResponse defines model for SuccessRestoreResponse.
-type SuccessRestoreResponse struct {
-	Data *struct {
-		Status *string `json:"status,omitempty"`
-	} `json:"data,omitempty"`
-	Success SuccessRestoreResponseSuccess `json:"success"`
-}
-
-// SuccessRestoreResponseSuccess defines model for SuccessRestoreResponse.Success.
-type SuccessRestoreResponseSuccess bool
-
 // SuccessRestoreSandboxRootFSResponse defines model for SuccessRestoreSandboxRootFSResponse.
 type SuccessRestoreSandboxRootFSResponse struct {
 	Data    *RestoreSandboxRootFSResponse              `json:"data,omitempty"`
@@ -3350,24 +3132,6 @@ type SuccessSandboxStatusResponse struct {
 // SuccessSandboxStatusResponseSuccess defines model for SuccessSandboxStatusResponse.Success.
 type SuccessSandboxStatusResponseSuccess bool
 
-// SuccessSandboxVolumeListResponse defines model for SuccessSandboxVolumeListResponse.
-type SuccessSandboxVolumeListResponse struct {
-	Data    *[]SandboxVolume                        `json:"data,omitempty"`
-	Success SuccessSandboxVolumeListResponseSuccess `json:"success"`
-}
-
-// SuccessSandboxVolumeListResponseSuccess defines model for SuccessSandboxVolumeListResponse.Success.
-type SuccessSandboxVolumeListResponseSuccess bool
-
-// SuccessSandboxVolumeResponse defines model for SuccessSandboxVolumeResponse.
-type SuccessSandboxVolumeResponse struct {
-	Data    *SandboxVolume                      `json:"data,omitempty"`
-	Success SuccessSandboxVolumeResponseSuccess `json:"success"`
-}
-
-// SuccessSandboxVolumeResponseSuccess defines model for SuccessSandboxVolumeResponse.Success.
-type SuccessSandboxVolumeResponseSuccess bool
-
 // SuccessSignaledResponse defines model for SuccessSignaledResponse.
 type SuccessSignaledResponse struct {
 	Data *struct {
@@ -3378,24 +3142,6 @@ type SuccessSignaledResponse struct {
 
 // SuccessSignaledResponseSuccess defines model for SuccessSignaledResponse.Success.
 type SuccessSignaledResponseSuccess bool
-
-// SuccessSnapshotListResponse defines model for SuccessSnapshotListResponse.
-type SuccessSnapshotListResponse struct {
-	Data    *[]Snapshot                        `json:"data,omitempty"`
-	Success SuccessSnapshotListResponseSuccess `json:"success"`
-}
-
-// SuccessSnapshotListResponseSuccess defines model for SuccessSnapshotListResponse.Success.
-type SuccessSnapshotListResponseSuccess bool
-
-// SuccessSnapshotResponse defines model for SuccessSnapshotResponse.
-type SuccessSnapshotResponse struct {
-	Data    *Snapshot                      `json:"data,omitempty"`
-	Success SuccessSnapshotResponseSuccess `json:"success"`
-}
-
-// SuccessSnapshotResponseSuccess defines model for SuccessSnapshotResponse.Success.
-type SuccessSnapshotResponseSuccess bool
 
 // SuccessTeamListResponse defines model for SuccessTeamListResponse.
 type SuccessTeamListResponse struct {
@@ -3484,15 +3230,6 @@ type SuccessUserResponse struct {
 
 // SuccessUserResponseSuccess defines model for SuccessUserResponse.Success.
 type SuccessUserResponseSuccess bool
-
-// SuccessVolumeFileArchiveImportResponse defines model for SuccessVolumeFileArchiveImportResponse.
-type SuccessVolumeFileArchiveImportResponse struct {
-	Data    *VolumeFileArchiveImportResponse              `json:"data,omitempty"`
-	Success SuccessVolumeFileArchiveImportResponseSuccess `json:"success"`
-}
-
-// SuccessVolumeFileArchiveImportResponseSuccess defines model for SuccessVolumeFileArchiveImportResponse.Success.
-type SuccessVolumeFileArchiveImportResponseSuccess bool
 
 // SuccessWrittenResponse defines model for SuccessWrittenResponse.
 type SuccessWrittenResponse struct {
@@ -3772,27 +3509,6 @@ type User struct {
 // UsernamePasswordProjection Username/password projection used for SOCKS5 and MQTT auth handshakes.
 type UsernamePasswordProjection = map[string]interface{}
 
-// VolumeAccessMode Access mode for sandbox volumes. Enforcement is scoped to storage-proxy instances. RWO allows read-write mounts on a single instance; ROX allows read-only mounts across instances; RWX allows read-write mounts across instances.
-type VolumeAccessMode string
-
-// VolumeBackend Storage backend for a SandboxVolume. s0fs is the default durable Sandbox0 volume backend. s3 mounts an existing S3-compatible prefix through the volume portal and supports mount-s3-like object projection.
-type VolumeBackend string
-
-// VolumeFileArchiveImportResponse defines model for VolumeFileArchiveImportResponse.
-type VolumeFileArchiveImportResponse struct {
-	Bytes       int64 `json:"bytes"`
-	Directories int64 `json:"directories"`
-	Files       int64 `json:"files"`
-	Symlinks    int64 `json:"symlinks"`
-}
-
-// VolumeMountSpec defines model for VolumeMountSpec.
-type VolumeMountSpec struct {
-	MountPath string `json:"mountPath"`
-	Name      string `json:"name"`
-	ReadOnly  *bool  `json:"readOnly,omitempty"`
-}
-
 // WebLoginExchangeRequest defines model for WebLoginExchangeRequest.
 type WebLoginExchangeRequest struct {
 	// LoginCode Short-lived one-time code returned to the web login callback.
@@ -3802,7 +3518,7 @@ type WebLoginExchangeRequest struct {
 	ReturnUrl string `json:"return_url"`
 }
 
-// WebhookConfig Per-sandbox webhook configuration. Retries can deliver the same event more than once, so consumers should deduplicate by event_id and must not assume every unavailable endpoint eventually receives every event. Procd persists signed delivery records to a manager-owned SandboxVolume outside the workspace. Manager transactionally queues sandbox.deleted in PostgreSQL, retries transient failures for up to 24 hours, and never waits for the external endpoint before completing sandbox cleanup.
+// WebhookConfig Per-sandbox webhook configuration. Retries can deliver the same event more than once, so consumers should deduplicate by event_id and must not assume every unavailable endpoint eventually receives every event. Sandbox0 persists delivery state outside the workspace, retries transient failures for up to 24 hours, and never waits for the external endpoint before completing sandbox cleanup.
 type WebhookConfig struct {
 	// Secret Optional. Shared secret used to sign webhook payloads.
 	Secret *string `json:"secret,omitempty"`
@@ -3853,14 +3569,8 @@ type RootFSSnapshotID = string
 // SandboxID defines model for SandboxID.
 type SandboxID = string
 
-// SandboxVolumeID defines model for SandboxVolumeID.
-type SandboxVolumeID = string
-
 // SessionID defines model for SessionID.
 type SessionID = string
-
-// SnapshotID defines model for SnapshotID.
-type SnapshotID = string
 
 // TeamID defines model for TeamID.
 type TeamID = string
@@ -4011,44 +3721,6 @@ type GetApiV1SandboxesIdSessionsSessionIdWsParams struct {
 	After *int64 `form:"after,omitempty" json:"after,omitempty"`
 }
 
-// DeleteApiV1SandboxvolumesIdParams defines parameters for DeleteApiV1SandboxvolumesId.
-type DeleteApiV1SandboxvolumesIdParams struct {
-	// Force Force delete even if volume has active mounts
-	Force *bool `form:"force,omitempty" json:"force,omitempty"`
-}
-
-// DeleteApiV1SandboxvolumesIdFilesParams defines parameters for DeleteApiV1SandboxvolumesIdFiles.
-type DeleteApiV1SandboxvolumesIdFilesParams struct {
-	Path FilePath `form:"path" json:"path"`
-}
-
-// GetApiV1SandboxvolumesIdFilesParams defines parameters for GetApiV1SandboxvolumesIdFiles.
-type GetApiV1SandboxvolumesIdFilesParams struct {
-	Path FilePath `form:"path" json:"path"`
-}
-
-// PostApiV1SandboxvolumesIdFilesParams defines parameters for PostApiV1SandboxvolumesIdFiles.
-type PostApiV1SandboxvolumesIdFilesParams struct {
-	Path      FilePath        `form:"path" json:"path"`
-	Mkdir     *QueryMkdir     `form:"mkdir,omitempty" json:"mkdir,omitempty"`
-	Recursive *QueryRecursive `form:"recursive,omitempty" json:"recursive,omitempty"`
-}
-
-// PutApiV1SandboxvolumesIdFilesArchiveParams defines parameters for PutApiV1SandboxvolumesIdFilesArchive.
-type PutApiV1SandboxvolumesIdFilesArchiveParams struct {
-	Path FilePath `form:"path" json:"path"`
-}
-
-// GetApiV1SandboxvolumesIdFilesListParams defines parameters for GetApiV1SandboxvolumesIdFilesList.
-type GetApiV1SandboxvolumesIdFilesListParams struct {
-	Path FilePath `form:"path" json:"path"`
-}
-
-// GetApiV1SandboxvolumesIdFilesStatParams defines parameters for GetApiV1SandboxvolumesIdFilesStat.
-type GetApiV1SandboxvolumesIdFilesStatParams struct {
-	Path FilePath `form:"path" json:"path"`
-}
-
 // PostApiV1TemplatesFromSandboxParams defines parameters for PostApiV1TemplatesFromSandbox.
 type PostApiV1TemplatesFromSandboxParams struct {
 	// IdempotencyKey Optional key for retrying creation without starting a duplicate image build.
@@ -4167,18 +3839,6 @@ type PutApiV1SandboxesIdSessionsSessionIdTerminalJSONRequestBody = ExecutionSess
 
 // PostApiV1SandboxesIdSnapshotsJSONRequestBody defines body for PostApiV1SandboxesIdSnapshots for application/json ContentType.
 type PostApiV1SandboxesIdSnapshotsJSONRequestBody = CreateSandboxRootFSSnapshotRequest
-
-// PostApiV1SandboxvolumesJSONRequestBody defines body for PostApiV1Sandboxvolumes for application/json ContentType.
-type PostApiV1SandboxvolumesJSONRequestBody = CreateSandboxVolumeRequest
-
-// PostApiV1SandboxvolumesIdFilesMoveJSONRequestBody defines body for PostApiV1SandboxvolumesIdFilesMove for application/json ContentType.
-type PostApiV1SandboxvolumesIdFilesMoveJSONRequestBody = MoveFileRequest
-
-// PostApiV1SandboxvolumesIdForkJSONRequestBody defines body for PostApiV1SandboxvolumesIdFork for application/json ContentType.
-type PostApiV1SandboxvolumesIdForkJSONRequestBody = ForkVolumeRequest
-
-// PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody defines body for PostApiV1SandboxvolumesIdSnapshots for application/json ContentType.
-type PostApiV1SandboxvolumesIdSnapshotsJSONRequestBody = CreateSnapshotRequest
 
 // PostApiV1TemplatesJSONRequestBody defines body for PostApiV1Templates for application/json ContentType.
 type PostApiV1TemplatesJSONRequestBody = TemplateCreateRequest

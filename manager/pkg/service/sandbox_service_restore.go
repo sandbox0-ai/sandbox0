@@ -145,15 +145,13 @@ func (s *SandboxService) ResumePausedSandboxRuntime(ctx context.Context, sandbox
 			generation := locked.RuntimeGeneration + 1
 			record = cloneSandboxRecordForLifecycle(locked)
 			req = &ClaimRequest{
-				TeamID:               locked.TeamID,
-				UserID:               locked.UserID,
-				Template:             locked.TemplateID,
-				Config:               &locked.Config,
-				Mounts:               locked.Mounts,
-				SandboxID:            locked.ID,
-				RuntimeGeneration:    generation,
-				HardExpiresAt:        locked.HardExpiresAt,
-				WebhookStateVolumeID: locked.WebhookStateVolumeID,
+				TeamID:            locked.TeamID,
+				UserID:            locked.UserID,
+				Template:          locked.TemplateID,
+				Config:            &locked.Config,
+				SandboxID:         locked.ID,
+				RuntimeGeneration: generation,
+				HardExpiresAt:     locked.HardExpiresAt,
 			}
 			if strings.TrimSpace(locked.OwnerKind) != "" {
 				req.Metadata = &ClaimMetadata{OwnerKind: locked.OwnerKind}
@@ -466,15 +464,13 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		pod = readyPod
 	}
 	req := &ClaimRequest{
-		TeamID:               record.TeamID,
-		UserID:               record.UserID,
-		Template:             record.TemplateID,
-		Config:               &record.Config,
-		Mounts:               record.Mounts,
-		SandboxID:            record.ID,
-		RuntimeGeneration:    record.RuntimeGeneration + 1,
-		HardExpiresAt:        record.HardExpiresAt,
-		WebhookStateVolumeID: record.WebhookStateVolumeID,
+		TeamID:            record.TeamID,
+		UserID:            record.UserID,
+		Template:          record.TemplateID,
+		Config:            &record.Config,
+		SandboxID:         record.ID,
+		RuntimeGeneration: record.RuntimeGeneration + 1,
+		HardExpiresAt:     record.HardExpiresAt,
 	}
 	if strings.TrimSpace(record.OwnerKind) != "" {
 		req.Metadata = &ClaimMetadata{OwnerKind: record.OwnerKind}
@@ -500,18 +496,6 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 		if err != nil {
 			return pod, err
 		}
-	}
-	phaseStarted = time.Now()
-	_, err = s.bindVolumePortals(ctx, pod, req, template)
-	s.observeClaimPhase(record.TemplateID, claimType, "bind_volume_portals", phaseStarted, err)
-	if err != nil {
-		return pod, fmt.Errorf("bind volume portals: %w", err)
-	}
-	phaseStarted = time.Now()
-	err = s.bindWebhookStatePortal(ctx, pod, req)
-	s.observeClaimPhase(record.TemplateID, claimType, "bind_webhook_state_portal", phaseStarted, err)
-	if err != nil {
-		return pod, fmt.Errorf("bind webhook state portal: %w", err)
 	}
 	phaseStarted = time.Now()
 	pod, err = s.activateRuntimeAssignment(ctx, pod, runtimeRevision)

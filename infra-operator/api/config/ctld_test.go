@@ -61,24 +61,21 @@ func TestLoadCtldConfigAppliesProducerDefaults(t *testing.T) {
 	assert.Equal(t, sandboxobservability.DefaultRuntimeSampleJitter, cfg.SandboxObservabilityRuntimeSampleJitter.Duration)
 }
 
-func TestLoadCtldConfigPreservesStorageProxyLoaderValues(t *testing.T) {
+func TestLoadCtldConfigLoadsRootFSObjectStorage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ctld.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
-filesystem_name: sandbox-root
-filesystem_block_size: 8192
-cache_dir: /var/lib/custom-cache
-metrics_enabled: true
-metrics_port: 9191
+rootfs_object_storage:
+  type: s3
+  bucket: rootfs-bucket
+  region: us-east-1
+  endpoint: https://s3.example.com
 `), 0o600))
 
-	storageCfg, err := loadStorageProxyConfig(path)
-	require.NoError(t, err)
 	ctldCfg, err := loadCtldConfig(path)
 	require.NoError(t, err)
 
-	assert.Equal(t, storageCfg.FilesystemName, ctldCfg.FilesystemName)
-	assert.Equal(t, storageCfg.FilesystemBlockSize, ctldCfg.FilesystemBlockSize)
-	assert.Equal(t, storageCfg.CacheDir, ctldCfg.CacheDir)
-	assert.Equal(t, storageCfg.MetricsEnabled, ctldCfg.MetricsEnabled)
-	assert.Equal(t, storageCfg.MetricsPort, ctldCfg.MetricsPort)
+	assert.Equal(t, "s3", ctldCfg.RootFSObjectStorage.Type)
+	assert.Equal(t, "rootfs-bucket", ctldCfg.RootFSObjectStorage.Bucket)
+	assert.Equal(t, "us-east-1", ctldCfg.RootFSObjectStorage.Region)
+	assert.Equal(t, "https://s3.example.com", ctldCfg.RootFSObjectStorage.Endpoint)
 }

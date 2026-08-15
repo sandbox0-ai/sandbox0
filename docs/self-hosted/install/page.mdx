@@ -207,7 +207,7 @@ gcloud container clusters get-credentials sandbox0-gke-gvisor --region us-east1
 kubectl get nodes -o wide
 ```
 
-Keep a regular node pool for core system services. In the GKE `gVisor` sample, `cluster-gateway`, `manager` and its storage runtime, PostgreSQL, and the builtin registry run on the regular pool. The ctld HA pair and sandbox workloads run on the `gVisor` node pool, while ctld itself uses the node's host-compatible runtime.
+Keep a regular node pool for core system services. In the GKE `gVisor` sample, `cluster-gateway`, `manager`, PostgreSQL, and the builtin registry run on the regular pool. The ctld HA pair and sandbox workloads run on the `gVisor` node pool, while ctld itself uses the node's host-compatible runtime.
 
 ### 3) Add a `gVisor` Node Pool
 
@@ -274,10 +274,10 @@ Expected result:
 
 1. `Sandbox0Infra` becomes `Ready`
 2. `fullmode-cluster-gateway` is exposed as `LoadBalancer` on port `80`
-3. `fullmode-ctld-a` and `fullmode-ctld-b` run on `gvisor-lite`; the elected primary owns rootfs, volume portal, and network runtime responsibilities
+3. `fullmode-ctld-a` and `fullmode-ctld-b` run on `gvisor-lite`; the elected primary owns rootfs and network runtime responsibilities
 4. sandbox pods in `tpl-default` run on `gvisor-lite`
 
-`fullmode-manager` serves lifecycle and storage APIs. On every sandbox node, the elected ctld primary owns rootfs persistence, volume portals, kubelet registration, and network enforcement; the synchronized standby takes over after promotion.
+`fullmode-manager` serves lifecycle and rootfs metadata APIs. On every sandbox node, the elected ctld primary owns rootfs persistence and network enforcement; the standby takes over after promotion.
 
 This sample uses the native GKE node label `sandbox.gke.io/runtime=gvisor` for sandbox placement. You do not need to add a separate custom node label just to target `gVisor` nodes.
 

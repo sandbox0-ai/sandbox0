@@ -8,7 +8,7 @@ Use this page when you need to:
 - claim a new sandbox with a named rootfs snapshot
 - restore a paused sandbox rootfs from a snapshot
 - fork a running or paused sandbox into another paused sandbox
-- understand how rootfs snapshots differ from pause/resume and Volumes
+- understand how rootfs snapshots differ from pause/resume
 
 <Callout variant="warning">
 Creating snapshots and forking accept a running or paused source sandbox. Running sources are briefly barriered and checkpointed, then remain running. Restore still requires a paused target sandbox because it replaces that sandbox's rootfs head. Claiming with `snapshot_id` creates a new running sandbox from an existing snapshot and does not require a paused target sandbox.
@@ -26,7 +26,7 @@ Creating snapshots and forking accept a running or paused source sandbox. Runnin
 
 Pause/resume keeps the latest checkpoint for one sandbox identity. Rootfs snapshots are explicit records that you can list, fetch, claim from, restore, and delete. Fork creates a new sandbox with Copy-on-Write rootfs isolation from the source rootfs state.
 
-Use [Volumes](/docs/sandbox/volume) when data must be mounted by multiple sandboxes, accessed directly through the Volume file API, or managed independently from sandbox rootfs lifecycle. Use sandbox rootfs snapshots when the default writable filesystem is the state you want to version.
+Use sandbox rootfs snapshots when the default writable filesystem is the state you want to version or fan out into another sandbox identity.
 
 ## State Model
 
@@ -39,7 +39,7 @@ Use [Volumes](/docs/sandbox/volume) when data must be mounted by multiple sandbo
 
 ### Rootfs Path Semantics
 
-Snapshots, snapshot claims, restore, and fork use the same persistence boundary as pause and resume. `/tmp` is ephemeral and is not captured or restored, while `/var/tmp` and ordinary writable rootfs paths remain persistent. A Sandbox Volume mounted beneath `/tmp` remains durable because Volume state is managed independently from rootfs checkpoints.
+Snapshots, snapshot claims, restore, and fork use the same persistence boundary as pause and resume. `/tmp` is ephemeral and is not captured or restored, while `/var/tmp` and ordinary writable rootfs paths remain persistent.
 
 Older snapshot layers are filtered when restored, so legacy `/tmp` entries do not reappear. Reading and filtering a large legacy layer can make its first restore slower; later checkpoints omit that data. See [Pause And Resume](/docs/sandbox/pause-resume#persistent-and-ephemeral-paths) for the complete path policy.
 
@@ -94,7 +94,7 @@ Claiming with `snapshot_id` is the preferred path for reusable custom rootfs sta
 For a longer walkthrough of this pattern, see [Initialize Once, Claim Many](/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes).
 
 <Callout variant="warning">
-This pattern does not replace template-level configuration. Use a custom template when you need a different container image, resource limits, mount declarations, default network policy, environment defaults, or privileged runtime fields. Mounted Sandbox Volumes are separate from the sandbox rootfs and should be managed with Volume snapshot and fork APIs.
+This pattern does not replace template-level configuration. Use a custom template when you need a different container image, resource limits, default network policy, environment defaults, or privileged runtime fields.
 </Callout>
 
 ## Rootfs Operation Lifecycle
@@ -303,7 +303,6 @@ Use `snapshot_id` on sandbox claim when you want a new running sandbox initializ
 | `template` | string | Template ID to use |
 | `snapshot_id` | string | Rootfs snapshot ID used to initialize the new sandbox writable rootfs |
 | `config` | object | Optional sandbox configuration |
-| `mounts` | array | Optional claim-time Sandbox Volume mounts |
 
 <Tabs
   tabs={[
@@ -534,10 +533,6 @@ For coding-agent and test-generation workflows, a common pattern is:
 
   <Card title="Files" href="/docs/sandbox/files" cta="Continue">
     Read and write sandbox files before creating a rootfs snapshot.
-  </Card>
-
-  <Card title="Volumes" href="/docs/sandbox/volume" cta="Continue">
-    Use durable shared storage when rootfs snapshots are not the right persistence boundary.
   </Card>
 
   <Card title="Initialize Once, Claim Many" href="/blog/2026-06/initialize-once-fork-many-custom-ai-agent-sandboxes" cta="Read">

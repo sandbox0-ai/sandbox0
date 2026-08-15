@@ -1285,16 +1285,6 @@ func TestValidateTemplateSpec_StrictValidation(t *testing.T) {
 			wantErr: "spec.pod.emptyDirMounts[0].mountPath uses reserved path \"/config\"",
 		},
 		{
-			name: "reject emptyDir mount colliding with volume mount",
-			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
-				s.VolumeMounts = []v1alpha1.VolumeMountSpec{{Name: "cache", MountPath: "/cache"}}
-				s.Pod = &v1alpha1.PodSpecOverride{
-					EmptyDirMounts: []v1alpha1.EmptyDirMountSpec{{MountPath: "/cache"}},
-				}
-			},
-			wantErr: "spec.pod.emptyDirMounts[0].mountPath \"/cache\" duplicates spec.volumeMounts[0].mountPath",
-		},
-		{
 			name: "reject non-positive emptyDir size limit",
 			mutate: func(s *v1alpha1.SandboxTemplateSpec) {
 				sizeLimit := resource.MustParse("0")

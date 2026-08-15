@@ -299,13 +299,17 @@ type RootFSMaintenanceConfig struct {
 }
 
 type RootFSObjectStorageConfig struct {
-	Type         string `yaml:"type" json:"-"`
-	Bucket       string `yaml:"bucket" json:"-"`
-	Region       string `yaml:"region" json:"-"`
-	Endpoint     string `yaml:"endpoint" json:"-"`
-	AccessKey    string `yaml:"access_key" json:"-"`
-	SecretKey    string `yaml:"secret_key" json:"-"`
-	SessionToken string `yaml:"session_token" json:"-"`
+	Type                       string `yaml:"type" json:"-"`
+	Bucket                     string `yaml:"bucket" json:"-"`
+	Region                     string `yaml:"region" json:"-"`
+	Endpoint                   string `yaml:"endpoint" json:"-"`
+	AccessKey                  string `yaml:"access_key" json:"-"`
+	SecretKey                  string `yaml:"secret_key" json:"-"`
+	SessionToken               string `yaml:"session_token" json:"-"`
+	ObjectEncryptionEnabled    bool   `yaml:"object_encryption_enabled" json:"-"`
+	ObjectEncryptionKeyPath    string `yaml:"object_encryption_key_path" json:"-"`
+	ObjectEncryptionPassphrase string `yaml:"object_encryption_passphrase" json:"-"`
+	ObjectEncryptionAlgo       string `yaml:"object_encryption_algo" json:"-"`
 }
 
 type CredentialEncryptedPGConfig struct {

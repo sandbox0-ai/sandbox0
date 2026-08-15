@@ -18,31 +18,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	ctldha "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/ha"
-	ctldregistration "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/kubeletregistration"
-	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
 	ctldruntimewatch "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/runtimewatch"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
-	"github.com/sandbox0-ai/sandbox0/ctld/internal/fuseportal"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
 	"github.com/sandbox0-ai/sandbox0/pkg/k8s"
-	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
-	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
-	storagedb "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/db"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
-	storagevolume "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
@@ -59,11 +48,7 @@ var (
 	containerdHostDataRoot         = "/var/lib/containerd"
 	containerdNamespace            = "k8s.io"
 	nodeName                       = os.Getenv("NODE_NAME")
-	portalRoot                     = "/var/lib/sandbox0/ctld"
-	kubeletPodsRoot                = "/var/lib/kubelet/pods"
-	csiSocket                      = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
-	kubeletRegistrationSocket      string
-	kubeletRegistrationEndpoint    string
+	stateRoot                      = "/var/lib/sandbox0/ctld"
 	rootFSObjectCacheMaxBytes      = "20Gi"
 	rootFSObjectCacheMinFreeBytes  = "0"
 	rootFSObjectCacheMaxAge        time.Duration
@@ -80,9 +65,8 @@ var (
 const (
 	httpShutdownTimeout           = 5 * time.Second
 	runtimeMetricsShutdownTimeout = 7 * time.Second
-	portalShutdownTimeout         = 25 * time.Second
 	shutdownGraceMargin           = 5 * time.Second
-	minimumTerminationGrace       = httpShutdownTimeout + runtimeMetricsShutdownTimeout + portalShutdownTimeout + shutdownGraceMargin
+	minimumTerminationGrace       = httpShutdownTimeout + runtimeMetricsShutdownTimeout + shutdownGraceMargin
 )
 
 func main() {
@@ -102,11 +86,7 @@ func main() {
 	flag.StringVar(&containerdHostDataRoot, "containerd-host-data-root", "/var/lib/containerd", "host containerd data root path returned by containerd snapshotters")
 	flag.StringVar(&containerdNamespace, "containerd-namespace", "k8s.io", "containerd namespace used by Kubernetes")
 	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "current node name used to validate local sandbox ownership")
-	flag.StringVar(&portalRoot, "volume-portal-root", "/var/lib/sandbox0/ctld", "host-local root for ctld volume portal WAL and cache")
-	flag.StringVar(&kubeletPodsRoot, "kubelet-pods-root", "/var/lib/kubelet/pods", "host kubelet pod directory used to recover stale sandbox0 CSI mounts")
-	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
-	flag.StringVar(&kubeletRegistrationSocket, "kubelet-registration-socket", "", "kubelet plugin-registration socket; empty disables embedded registration")
-	flag.StringVar(&kubeletRegistrationEndpoint, "kubelet-registration-endpoint", "", "host-visible CSI endpoint returned to kubelet; defaults to csi-socket")
+	flag.StringVar(&stateRoot, "state-root", "/var/lib/sandbox0/ctld", "host-local root for ctld rootfs state and cache")
 	flag.StringVar(&rootFSObjectCacheMaxBytes, "rootfs-object-cache-max-bytes", "20Gi", "maximum node-local rootfs object cache size; set to 0 to disable")
 	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
 	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
@@ -137,7 +117,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("validate ctld network runtime config: %w", err)
 	}
-	coordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: portalRoot, Slot: haSlot})
+	coordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: stateRoot, Slot: haSlot})
 	if err != nil {
 		return err
 	}
@@ -187,23 +167,13 @@ func runHAPrimary(
 		return err
 	}
 	defer lease.Close()
-	ownerID := ""
-	if strings.TrimSpace(nodeName) != "" {
-		ownerID = "ctld-node/" + strings.TrimSpace(nodeName)
-	}
 	return runPrimaryFn(ctx, primaryRunOptions{
-		replicator:     lease.Replicator,
-		ownerID:        ownerID,
-		recovery:       lease.Recovery,
 		setReady:       setReady,
 		networkFactory: networkFactory,
 	})
 }
 
 type primaryRunOptions struct {
-	replicator     *ctldha.Replicator
-	ownerID        string
-	recovery       []ctldha.RecoveredPortal
 	setReady       func(bool)
 	networkFactory primaryServiceFactory
 }
@@ -239,21 +209,18 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	}
 
 	ctldCfg := apiconfig.LoadCtldConfig()
-	storageCfg := &ctldCfg.StorageProxyConfig
-	var repo *storagedb.Repository
 	var dbPool *pgxpool.Pool
-	if storageCfg.DatabaseURL != "" {
-		dbPool, err = initPortalDatabase(ctx, storageCfg, obsProvider)
+	if ctldCfg.DatabaseURL != "" {
+		dbPool, err = initCtldDatabase(ctx, ctldCfg, obsProvider)
 		if err != nil {
-			log.Printf("ctld volume registry disabled: %v", err)
+			log.Printf("ctld object store request metering disabled: %v", err)
 		} else {
-			repo = storagedb.NewRepository(dbPool)
 			defer dbPool.Close()
 		}
 	}
 	objectStoreRequestMeter := startCtldObjectStoreRequestMetering(
 		ctx,
-		storageCfg,
+		ctldCfg,
 		dbPool,
 		nodeName,
 		zapLogger,
@@ -264,99 +231,14 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		ctldMetricsRegistry = obsProvider.MetricsRegistryOrNil()
 	}
 
-	podUIDLister := activePodUIDLister(k8sClient, nodeName)
-	portalObserver := ctldportal.NewObserver(ctldMetricsRegistry, zapLogger)
-	portalManager := ctldportal.NewManager(ctldportal.Config{
-		NodeName:           nodeName,
-		RootDir:            portalRoot,
-		KubeletPodsRoot:    kubeletPodsRoot,
-		Logger:             zapLogger,
-		StorageConfig:      storageCfg,
-		StorageObserver:    newPortalStorageObserver(storageCfg, repo, dbPool),
-		RequestObserver:    objectStoreRequestMeter,
-		Observer:           portalObserver,
-		Repository:         repo,
-		PodName:            podName,
-		PodNamespace:       podNamespace,
-		OwnerID:            options.ownerID,
-		ActivePodUIDLister: podUIDLister,
-		Replicator:         options.replicator,
-		RequireStandby:     true,
-	})
-	for i := range options.recovery {
-		recovered := &options.recovery[i]
-		for {
-			err := portalManager.RestorePortal(ctx, recovered.Manifest, recovered.Channel)
-			if err == nil {
-				recovered.Channel = nil
-				break
-			}
-			log.Printf("ctld portal %q recovery failed; retrying: %v", recovered.Manifest.Key, err)
-			timer := time.NewTimer(time.Second)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil
-			case <-timer.C:
-			}
-		}
-	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 30*time.Second)
-	if err := portalManager.CleanupStalePortals(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
-		log.Printf("ctld stale portal cleanup completed with errors: %v", err)
-	}
-	if err := portalManager.CleanupStaleCSIMounts(cleanupCtx); err != nil && cleanupCtx.Err() == nil {
-		log.Printf("ctld stale CSI mount cleanup completed with errors: %v", err)
-	}
-	cleanupCancel()
-	if options.replicator != nil {
-		options.replicator.SetSnapshotProvider(func(ctx context.Context, target ctldportal.PortalReplicator) error {
-			return portalManager.SyncTo(ctx, target)
-		})
-	}
-	go portalManager.Run(ctx)
-	csiServer := ctldportal.NewCSIServer(nodeName, portalManager)
-	csiErrors, err := csiServer.Start(csiSocket)
-	if err != nil {
-		return fmt.Errorf("start ctld volume portal CSI server: %w", err)
-	}
-	defer csiServer.Stop()
-
-	var registrationServer *ctldregistration.Server
-	var registrationErrors <-chan error
-	if strings.TrimSpace(kubeletRegistrationSocket) != "" {
-		registrationEndpoint := strings.TrimSpace(kubeletRegistrationEndpoint)
-		if registrationEndpoint == "" {
-			registrationEndpoint = csiSocket
-		}
-		registrationServer, err = ctldregistration.NewServer(ctldregistration.Config{
-			SocketPath: kubeletRegistrationSocket,
-			DriverName: volumeportal.DriverName,
-			Endpoint:   registrationEndpoint,
-		})
-		if err != nil {
-			return err
-		}
-		if err := registrationServer.Start(); err != nil {
-			return fmt.Errorf("start kubelet CSI registration server: %w", err)
-		}
-		log.Printf("ctld primary kubelet registration server listening on %q for CSI endpoint %q", kubeletRegistrationSocket, registrationEndpoint)
-		defer registrationServer.Stop()
-		registrationErrors = registrationServer.Errors()
-	}
 	serviceErrors := make(chan error, 2)
 	networkRequired := options.networkFactory != nil
 	var networkHandle *primaryServiceHandle
-	multiplexerHealth := fuseportal.SharedMultiplexerHealth
-	if err := multiplexerHealth(); err != nil {
-		return fmt.Errorf("initialize shared FUSE multiplexer health: %w", err)
-	}
 	serviceHealthy := func() bool {
-		return ctx.Err() == nil && multiplexerHealth() == nil
+		return ctx.Err() == nil
 	}
 	serviceReady := func() bool {
-		return serviceHealthy() && portalManager.RecoveryError() == nil &&
-			(registrationServer == nil || registrationServer.Registered()) &&
+		return serviceHealthy() &&
 			(!networkRequired || (networkHandle != nil && networkHandle.Ready()))
 	}
 
@@ -382,8 +264,7 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	runtimeMetricsHandle := startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller:  probeController,
-		Portal:      portalManager,
-		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, portalManager, containerdRuntime, rootFSObserver),
+		RootFS:      buildRootFSController(ctx, &ctldCfg.RootFSObjectStorage, objectStoreRequestMeter, containerdRuntime, rootFSObserver),
 		ReadyCheck:  serviceReady,
 		HealthCheck: serviceHealthy,
 	})
@@ -435,8 +316,6 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 			}
 		}()
 	}
-	go monitorPrimaryServiceHealth(ctx, time.Second, multiplexerHealth, serviceErrors)
-
 	if options.setReady != nil {
 		options.setReady(serviceReady())
 		defer options.setReady(false)
@@ -462,12 +341,6 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	select {
 	case <-parent.Done():
 		log.Printf("ctld primary shutting down: %v", parent.Err())
-	case err := <-csiErrors:
-		runErr = fmt.Errorf("ctld volume portal CSI server: %w", err)
-		log.Printf("ctld primary service failed: %v", runErr)
-	case err := <-registrationErrors:
-		runErr = fmt.Errorf("ctld kubelet CSI registration server: %w", err)
-		log.Printf("ctld primary service failed: %v", runErr)
 	case runErr = <-serviceErrors:
 		log.Printf("ctld primary service failed: %v", runErr)
 	case err := <-networkErrors:
@@ -500,15 +373,6 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 		log.Printf("ctld runtime metric producer shutdown completed with errors: %v", err)
 	}
 	runtimeMetricsShutdownCancel()
-	if registrationServer != nil {
-		registrationServer.Stop()
-	}
-	csiServer.Stop()
-	portalShutdownCtx, portalShutdownCancel := context.WithTimeout(context.Background(), portalShutdownTimeout)
-	if err := portalManager.Shutdown(portalShutdownCtx); err != nil {
-		log.Printf("ctld volume portal shutdown completed with errors: %v", err)
-	}
-	portalShutdownCancel()
 	if networkHandle != nil {
 		if err := networkHandle.Wait(networkShutdownCtx); err != nil && !networkFailed {
 			runErr = errors.Join(runErr, fmt.Errorf("shutdown ctld network runtime: %w", err))
@@ -577,42 +441,10 @@ func buildNodePodCache(ctx context.Context, k8sClient kubernetes.Interface, hand
 	return podCache
 }
 
-func activePodUIDLister(k8sClient kubernetes.Interface, nodeName string) ctldportal.ActivePodUIDLister {
-	nodeName = strings.TrimSpace(nodeName)
-	if k8sClient == nil || nodeName == "" {
-		return nil
-	}
-	return func(ctx context.Context) (map[string]struct{}, error) {
-		pods, err := k8sClient.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
-			FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(),
-		})
-		if err != nil {
-			return nil, err
-		}
-		active := make(map[string]struct{}, len(pods.Items))
-		for i := range pods.Items {
-			pod := &pods.Items[i]
-			if podTerminalForMountCleanup(pod) || pod.UID == "" {
-				continue
-			}
-			active[string(pod.UID)] = struct{}{}
-		}
-		return active, nil
-	}
-}
-
-func podTerminalForMountCleanup(pod *corev1.Pod) bool {
-	if pod == nil {
-		return true
-	}
-	return pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
-}
-
 func buildRootFSController(
 	ctx context.Context,
-	storageCfg *apiconfig.StorageProxyConfig,
+	storageCfg *apiconfig.RootFSObjectStorageConfig,
 	requestObserver objectstore.RequestObserver,
-	portalResolver ctldrootfs.PortalResolver,
 	runtime *ctldrootfs.ContainerdRuntime,
 	observer *ctldrootfs.Observer,
 ) rootFSHandler {
@@ -622,12 +454,11 @@ func buildRootFSController(
 	}
 	objectCache := buildRootFSObjectCache(ctx, observer)
 	return ctldrootfs.NewController(ctldrootfs.Config{
-		Runtime:        runtime,
-		Store:          store,
-		PortalResolver: portalResolver,
-		SnapshotDir:    filepath.Join(portalRoot, "rootfs", "prepared"),
-		ObjectCache:    objectCache,
-		Observer:       observer,
+		Runtime:     runtime,
+		Store:       store,
+		SnapshotDir: filepath.Join(stateRoot, "rootfs", "prepared"),
+		ObjectCache: objectCache,
+		Observer:    observer,
 	})
 }
 
@@ -639,7 +470,7 @@ func buildContainerdRuntime(observer *ctldrootfs.Observer) *ctldrootfs.Container
 		ContainerdHostRoot:     containerdHostRoot,
 		ContainerdDataRoot:     containerdDataRoot,
 		ContainerdHostDataRoot: containerdHostDataRoot,
-		RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
+		RootFSCacheDir:         filepath.Join(stateRoot, "rootfs"),
 		Namespace:              containerdNamespace,
 		Observer:               observer,
 	})
@@ -657,7 +488,7 @@ func buildRootFSObjectCache(ctx context.Context, observer *ctldrootfs.Observer) 
 		return nil
 	}
 	cache := ctldrootfs.NewObjectCache(ctldrootfs.ObjectCacheConfig{
-		Dir:           filepath.Join(portalRoot, "rootfs", "objects"),
+		Dir:           filepath.Join(stateRoot, "rootfs", "objects"),
 		MaxBytes:      maxBytes,
 		MinFreeBytes:  minFreeBytes,
 		MaxAge:        rootFSObjectCacheMaxAge,
@@ -688,18 +519,18 @@ func parseByteQuantity(raw string) (int64, error) {
 	return bytes, nil
 }
 
-func buildRootFSObjectStore(cfg *apiconfig.StorageProxyConfig, requestObserver objectstore.RequestObserver) (objectstore.Store, error) {
+func buildRootFSObjectStore(cfg *apiconfig.RootFSObjectStorageConfig, requestObserver objectstore.RequestObserver) (objectstore.Store, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("storage config is not configured")
 	}
 	store, err := objectstore.Create(objectstore.Config{
-		Type:            cfg.ObjectStorageType,
-		Bucket:          cfg.S3Bucket,
-		Region:          cfg.S3Region,
-		Endpoint:        cfg.S3Endpoint,
-		AccessKey:       cfg.S3AccessKey,
-		SecretKey:       cfg.S3SecretKey,
-		SessionToken:    cfg.S3SessionToken,
+		Type:            cfg.Type,
+		Bucket:          cfg.Bucket,
+		Region:          cfg.Region,
+		Endpoint:        cfg.Endpoint,
+		AccessKey:       cfg.AccessKey,
+		SecretKey:       cfg.SecretKey,
+		SessionToken:    cfg.SessionToken,
 		RequestObserver: requestObserver,
 	})
 	if err != nil {
@@ -723,13 +554,9 @@ func buildRootFSObjectStore(cfg *apiconfig.StorageProxyConfig, requestObserver o
 	return store, nil
 }
 
-func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
+func initCtldDatabase(ctx context.Context, cfg *apiconfig.CtldConfig, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
 	if cfg == nil || cfg.DatabaseURL == "" {
 		return nil, nil
-	}
-	schema := cfg.DatabaseSchema
-	if schema == "" {
-		schema = "storage_proxy"
 	}
 	var modifier func(*pgxpool.Config) error
 	if obsProvider != nil {
@@ -741,30 +568,12 @@ func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, 
 		MinConns:        int32(cfg.DatabaseMinConns),
 		DefaultMaxConns: 5,
 		DefaultMinConns: 1,
-		Schema:          schema,
 		ConfigModifier:  modifier,
 	})
 }
 
-func newPortalStorageObserver(
-	cfg *apiconfig.StorageProxyConfig,
-	repo *storagedb.Repository,
-	pool *pgxpool.Pool,
-) storagevolume.StorageObserver {
-	if cfg == nil || !cfg.Metering.Enabled || repo == nil || pool == nil {
-		return nil
-	}
-	return storagevolume.NewVolumeStorageObserverWithRecorder(
-		repo,
-		meteringoutbox.NewRepository(pool),
-		cfg.RegionID,
-		naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
-	)
-}
-
 type combinedController struct {
 	ctldserver.Controller
-	Portal      volumePortalHandler
 	RootFS      rootFSHandler
 	ReadyCheck  func() bool
 	HealthCheck func() bool
@@ -776,147 +585,6 @@ func (c combinedController) Ready() bool {
 
 func (c combinedController) Healthy() bool {
 	return c.HealthCheck == nil || c.HealthCheck()
-}
-
-func monitorPrimaryServiceHealth(ctx context.Context, interval time.Duration, check func() error, failures chan<- error) {
-	if check == nil || failures == nil {
-		return
-	}
-	if interval <= 0 {
-		interval = time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		if err := check(); err != nil {
-			select {
-			case failures <- fmt.Errorf("ctld primary health: %w", err):
-			case <-ctx.Done():
-			}
-			return
-		}
-	}
-}
-
-func (c combinedController) BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.BindVolumePortalResponse{Error: "ctld volume portals not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.Bind(r.Context(), req)
-	if err != nil {
-		return ctldapi.BindVolumePortalResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) UnbindVolumePortal(r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.UnbindVolumePortalResponse{Error: "ctld volume portals not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.Unbind(r.Context(), req)
-	if err != nil {
-		return ctldapi.UnbindVolumePortalResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) CheckVolumePortals(r *http.Request, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.CheckVolumePortalsResponse{Error: "ctld volume portals not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.CheckPublished(r.Context(), req)
-	if err != nil {
-		return ctldapi.CheckVolumePortalsResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) AttachVolumeOwner(r *http.Request, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.AttachVolumeOwnerResponse{Error: "ctld volume owners not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.AttachOwner(r.Context(), req)
-	if err != nil {
-		return ctldapi.AttachVolumeOwnerResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) ReleaseVolumeOwner(r *http.Request, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.ReleaseVolumeOwnerResponse{Error: "ctld volume owners not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.ReleaseOwner(r.Context(), req)
-	if err != nil {
-		resp.Error = err.Error()
-		return resp, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) PrepareVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.PrepareSnapshotCheckpoint(r.Context(), req)
-	if err != nil {
-		return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) CompleteVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.CompleteSnapshotCheckpoint(r.Context(), req)
-	if err != nil {
-		return ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func (c combinedController) AbortVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, int) {
-	if c.Portal == nil {
-		return ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"}, http.StatusNotImplemented
-	}
-	resp, err := c.Portal.AbortSnapshotCheckpoint(r.Context(), req)
-	if err != nil {
-		return ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: err.Error()}, volumePortalErrorStatus(err)
-	}
-	return resp, http.StatusOK
-}
-
-func volumePortalErrorStatus(err error) int {
-	if err == nil {
-		return http.StatusOK
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return http.StatusRequestTimeout
-	}
-	message := strings.ToLower(strings.TrimSpace(err.Error()))
-	switch {
-	case strings.Contains(message, "already has an active owner"),
-		strings.Contains(message, "actively bound to a portal"),
-		strings.Contains(message, "still has active file requests"),
-		strings.Contains(message, "already bound to"),
-		strings.Contains(message, "snapshot checkpoint already in progress"):
-		return http.StatusConflict
-	default:
-		return http.StatusBadRequest
-	}
-}
-
-func (c combinedController) MountedVolumeHandler() http.Handler {
-	if c.Portal == nil {
-		return nil
-	}
-	return c.Portal.MountedVolumeHandler()
 }
 
 func (c combinedController) Probe(r *http.Request, sandboxID string, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
@@ -968,16 +636,4 @@ func (c combinedController) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFS
 type rootFSHandler interface {
 	ctldserver.RootFSController
 	ctldserver.RootFSSnapshotController
-}
-
-type volumePortalHandler interface {
-	Bind(ctx context.Context, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, error)
-	Unbind(ctx context.Context, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, error)
-	CheckPublished(ctx context.Context, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, error)
-	AttachOwner(ctx context.Context, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, error)
-	ReleaseOwner(ctx context.Context, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, error)
-	PrepareSnapshotCheckpoint(ctx context.Context, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, error)
-	CompleteSnapshotCheckpoint(ctx context.Context, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, error)
-	AbortSnapshotCheckpoint(ctx context.Context, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, error)
-	MountedVolumeHandler() http.Handler
 }

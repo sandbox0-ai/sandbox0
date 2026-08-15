@@ -20,12 +20,6 @@ func TestSandboxToAPIPreservesPublicDetailFields(t *testing.T) {
 		AutoResume: true,
 		Paused:     false,
 		Resources:  &mgr.SandboxResourceConfig{Memory: "512Mi"},
-		Mounts: []mgr.ClaimMount{
-			{
-				SandboxVolumeID: "volume-1",
-				MountPoint:      "/workspace",
-			},
-		},
 		ClaimedAt:     now,
 		CreatedAt:     now,
 		ExpiresAt:     &now,
@@ -50,12 +44,5 @@ func TestSandboxToAPIPreservesPublicDetailFields(t *testing.T) {
 	}
 	if payload.Resources == nil || payload.Resources.Memory == nil || *payload.Resources.Memory != "512Mi" {
 		t.Fatalf("resources = %#v, want memory 512Mi", payload.Resources)
-	}
-	if payload.Mounts == nil || len(*payload.Mounts) != 1 {
-		t.Fatalf("mounts = %#v, want one mount", payload.Mounts)
-	}
-	mount := (*payload.Mounts)[0]
-	if mount.SandboxvolumeId != "volume-1" || mount.MountPoint != "/workspace" {
-		t.Fatalf("mount = %#v, want volume-1 at /workspace", mount)
 	}
 }

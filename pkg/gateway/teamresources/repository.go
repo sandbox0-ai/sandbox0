@@ -14,19 +14,17 @@ import (
 
 // SchemaConfig names the module schemas that may hold team-owned resources.
 type SchemaConfig struct {
-	Scheduler    string
-	Manager      string
-	StorageProxy string
-	Quota        string
+	Scheduler string
+	Manager   string
+	Quota     string
 }
 
 // DefaultSchemaConfig returns the deployment defaults used by sandbox0 services.
 func DefaultSchemaConfig() SchemaConfig {
 	return SchemaConfig{
-		Scheduler:    "scheduler",
-		Manager:      "manager",
-		StorageProxy: "storage_proxy",
-		Quota:        "quota",
+		Scheduler: "scheduler",
+		Manager:   "manager",
+		Quota:     "quota",
 	}
 }
 
@@ -131,21 +129,6 @@ func (r *Repository) blockingQueries() []countQuery {
 	managerRootFSLayers := tableRef(r.schemas.Manager, "rootfs_layers")
 	managerRootFSObjects := tableRef(r.schemas.Manager, "rootfs_objects")
 	managerRootFSObjectDeletions := tableRef(r.schemas.Manager, "rootfs_object_deletions")
-
-	storageVolumes := tableRef(r.schemas.StorageProxy, "sandbox_volumes")
-	storageSnapshots := tableRef(r.schemas.StorageProxy, "sandbox_volume_snapshots")
-	storageMounts := tableRef(r.schemas.StorageProxy, "sandbox_volume_mounts")
-	storageCoordinations := tableRef(r.schemas.StorageProxy, "snapshot_coordinations")
-	storageFlushResponses := tableRef(r.schemas.StorageProxy, "snapshot_flush_responses")
-	storageOwners := tableRef(r.schemas.StorageProxy, "sandbox_volume_owners")
-	storageS0FSHeads := tableRef(r.schemas.StorageProxy, "sandbox_volume_s0fs_heads")
-	storageHandoffs := tableRef(r.schemas.StorageProxy, "sandbox_volume_handoffs")
-	storageSyncReplicas := tableRef(r.schemas.StorageProxy, "sandbox_volume_sync_replicas")
-	storageSyncJournal := tableRef(r.schemas.StorageProxy, "sandbox_volume_sync_journal")
-	storageSyncConflicts := tableRef(r.schemas.StorageProxy, "sandbox_volume_sync_conflicts")
-	storageSyncRequests := tableRef(r.schemas.StorageProxy, "sandbox_volume_sync_requests")
-	storageSyncRetention := tableRef(r.schemas.StorageProxy, "sandbox_volume_sync_retention")
-	storageSyncNamespacePolicy := tableRef(r.schemas.StorageProxy, "sandbox_volume_sync_namespace_policy")
 
 	quotaLimits := tableRef(r.schemas.Quota, "team_quota_limits")
 
@@ -252,112 +235,6 @@ func (r *Repository) blockingQueries() []countQuery {
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, managerRootFSObjectDeletions),
 		},
 		{
-			category: "sandbox_volumes",
-			table:    storageVolumes,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, storageVolumes),
-		},
-		{
-			category: "sandbox_volume_snapshots",
-			table:    storageSnapshots,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, storageSnapshots),
-		},
-		{
-			category: "sandbox_volume_mounts",
-			table:    storageMounts,
-			sql: fmt.Sprintf(`
-				SELECT COUNT(*)
-				FROM %s m
-				JOIN %s v ON v.id = m.volume_id
-				WHERE v.team_id = $1
-			`, storageMounts, storageVolumes),
-		},
-		{
-			category: "snapshot_coordinations",
-			table:    storageCoordinations,
-			sql: fmt.Sprintf(`
-				SELECT COUNT(*)
-				FROM %s c
-				JOIN %s v ON v.id = c.volume_id
-				WHERE v.team_id = $1
-			`, storageCoordinations, storageVolumes),
-		},
-		{
-			category: "snapshot_flush_responses",
-			table:    storageFlushResponses,
-			sql: fmt.Sprintf(`
-				SELECT COUNT(*)
-				FROM %s r
-				JOIN %s c ON c.id = r.coord_id
-				JOIN %s v ON v.id = c.volume_id
-				WHERE v.team_id = $1
-			`, storageFlushResponses, storageCoordinations, storageVolumes),
-		},
-		{
-			category: "sandbox_volume_owners",
-			table:    storageOwners,
-			sql: fmt.Sprintf(`
-				SELECT COUNT(*)
-				FROM %s o
-				JOIN %s v ON v.id = o.volume_id
-				WHERE v.team_id = $1
-			`, storageOwners, storageVolumes),
-		},
-		{
-			category: "sandbox_volume_s0fs_heads",
-			table:    storageS0FSHeads,
-			sql: fmt.Sprintf(`
-				SELECT COUNT(*)
-				FROM %s h
-				JOIN %s v ON v.id = h.volume_id
-				WHERE v.team_id = $1
-			`, storageS0FSHeads, storageVolumes),
-		},
-		{
-			category: "sandbox_volume_handoffs",
-			table:    storageHandoffs,
-			sql: fmt.Sprintf(`
-				SELECT COUNT(*)
-				FROM %s h
-				JOIN %s v ON v.id = h.volume_id
-				WHERE v.team_id = $1
-			`, storageHandoffs, storageVolumes),
-		},
-		{
-			category: "sandbox_volume_sync_replicas",
-			table:    storageSyncReplicas,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, storageSyncReplicas),
-		},
-		{
-			category: "sandbox_volume_sync_journal",
-			table:    storageSyncJournal,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, storageSyncJournal),
-		},
-		{
-			category: "sandbox_volume_sync_conflicts",
-			table:    storageSyncConflicts,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, storageSyncConflicts),
-		},
-		{
-			category: "sandbox_volume_sync_requests",
-			table:    storageSyncRequests,
-			sql: fmt.Sprintf(`
-				SELECT COUNT(*)
-				FROM %s r
-				JOIN %s v ON v.id = r.volume_id
-				WHERE v.team_id = $1
-			`, storageSyncRequests, storageVolumes),
-		},
-		{
-			category: "sandbox_volume_sync_retention",
-			table:    storageSyncRetention,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, storageSyncRetention),
-		},
-		{
-			category: "sandbox_volume_sync_namespace_policy",
-			table:    storageSyncNamespacePolicy,
-			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, storageSyncNamespacePolicy),
-		},
-		{
 			category: "team_quota_limits",
 			table:    quotaLimits,
 			sql:      fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE team_id = $1`, quotaLimits),
@@ -450,7 +327,6 @@ func (r *Repository) blockingDiscoverySchemas(ctx context.Context) ([]string, er
 		gatewaySchema,
 		r.schemas.Scheduler,
 		r.schemas.Manager,
-		r.schemas.StorageProxy,
 		r.schemas.Quota,
 	}, nil
 }

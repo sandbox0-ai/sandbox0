@@ -59,42 +59,6 @@ func TestClusterGatewayIntegration_PermissionDenied(t *testing.T) {
 	}
 }
 
-func TestClusterGatewayIntegration_VolumeEndpointsRequirePermissions(t *testing.T) {
-	keys := gatewayKeyPair{}
-	keys.privateKey, keys.publicKey = writeClusterGatewayKeys(t)
-
-	managerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected manager request: %s", r.URL.Path)
-	}))
-	t.Cleanup(managerServer.Close)
-
-	storageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected manager storage API request: %s", r.URL.Path)
-	}))
-	t.Cleanup(storageServer.Close)
-
-	env := newGatewayTestEnv(t, managerServer.URL, storageServer.URL, nil, keys)
-	readToken := newInternalToken(t, env.edgeGen, []string{authn.PermSandboxRead})
-	writeToken := newInternalToken(t, env.edgeGen, []string{authn.PermSandboxWrite})
-
-	resp, _ := doGatewayRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxvolumes", readToken, map[string]any{
-		"name": "vol-1",
-	})
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected forbidden for create, got %d", resp.StatusCode)
-	}
-
-	resp, _ = doGatewayRequest(t, env.server.Client(), http.MethodDelete, env.server.URL+"/api/v1/sandboxvolumes/vol-1", readToken, nil)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected forbidden for delete, got %d", resp.StatusCode)
-	}
-
-	resp, _ = doGatewayRequest(t, env.server.Client(), http.MethodGet, env.server.URL+"/api/v1/sandboxvolumes", writeToken, nil)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected forbidden for list, got %d", resp.StatusCode)
-	}
-}
-
 func TestClusterGatewayIntegration_RootFSEndpointsProxyToManager(t *testing.T) {
 	keys := gatewayKeyPair{}
 	keys.privateKey, keys.publicKey = writeClusterGatewayKeys(t)

@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -201,9 +199,6 @@ func (c *Controller) activate(ctx context.Context, snapshot runtimecontrol.Snaps
 	if err := c.observe(report, snapshot, runtimecontrol.ObservedLoading, "runtime assignment is loading"); err != nil {
 		return err
 	}
-	if err := ensureMountDirs(assignment.MountDirs); err != nil {
-		return c.failActiveSnapshot(report, snapshot, err)
-	}
 	if err := c.configureAssignment(*assignment); err != nil {
 		return c.failActiveSnapshot(report, snapshot, err)
 	}
@@ -380,17 +375,4 @@ func (c *Controller) Close() {
 	}
 	c.watch.path = ""
 	c.watch.unsubscribe = nil
-}
-
-func ensureMountDirs(dirs []string) error {
-	for i := range dirs {
-		dir := filepath.Clean(strings.TrimSpace(dirs[i]))
-		if dir == "." || dir == string(filepath.Separator) || !filepath.IsAbs(dir) {
-			return fmt.Errorf("mount_dirs[%d] must be an absolute non-root path", i)
-		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create mount dir %q: %w", dir, err)
-		}
-	}
-	return nil
 }

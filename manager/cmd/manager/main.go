@@ -23,6 +23,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/legacyvolumemigrations"
 	managermetering "github.com/sandbox0-ai/sandbox0/manager/pkg/metering"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
@@ -40,6 +41,7 @@ import (
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
@@ -48,7 +50,6 @@ import (
 	templmigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 	templreconciler "github.com/sandbox0-ai/sandbox0/pkg/template/reconciler"
 	templstorepg "github.com/sandbox0-ai/sandbox0/pkg/template/store/pg"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	"go.uber.org/zap"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -56,13 +57,6 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == volumeStorageMeteringReconcileCommand {
-		if err := runVolumeStorageMeteringReconcile(os.Args[2:], os.Stdout, os.Stderr); err != nil {
-			fmt.Fprintf(os.Stderr, "Volume storage metering reconciliation failed: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
 
 	// Load configuration
 	cfg := config.LoadManagerConfig()
@@ -272,21 +266,6 @@ func main() {
 	internalAuth := buildManagerInternalAuth(logger)
 	internalAuthGen := internalAuth.generator
 	internalTokenGenerator := internalAuth.procdTokenGenerator
-	managerStorageTokenGenerator := internalAuth.storageTokenGenerator
-
-	storageComponents, err := startManagerStorageRuntime(
-		ctx,
-		cancel,
-		obsProvider,
-		k8sClient,
-		objectStoreRequestMeter,
-		logger,
-	)
-	if err != nil {
-		logger.Fatal("Failed to start manager storage runtime", zap.Error(err))
-	}
-	managerStorageRuntime := storageComponents.runtime
-	managerStorageConfig := storageComponents.config
 
 	// Parse ratios
 	pauseMemoryBufferRatio, err := strconv.ParseFloat(cfg.PauseMemoryBufferRatio, 64)
@@ -337,23 +316,9 @@ func main() {
 		sandboxStore,
 		logger,
 	)
-	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg, managerStorageConfig, objectStoreRequestMeter)
+	rootFSObjectStore, rootFSObjectStoreErr := buildRootFSObjectStore(cfg, objectStoreRequestMeter)
 	if rootFSObjectStoreErr != nil {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
-	}
-	var webhookStateVolumeClient service.SandboxSystemVolumeClient
-	if managerStorageRuntime != nil && managerStorageTokenGenerator != nil {
-		internalHTTPClient := managerStorageRuntime.InternalHTTPClient()
-		internalHTTPClient.Timeout = cfg.ProcdClientTimeout.Duration
-		webhookStateVolumeClient = service.NewManagerStorageVolumeClient(service.ManagerStorageVolumeClientConfig{
-			BaseURL:        "http://manager-storage",
-			HTTPClient:     internalHTTPClient,
-			TokenGenerator: managerStorageTokenGenerator,
-			ClusterID:      cfg.DefaultClusterId,
-		})
-		logger.Info("Webhook state volumes use the manager storage runtime")
-	} else {
-		logger.Warn("Webhook state volumes disabled; sandbox claims with webhooks require storage.runtime")
 	}
 	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
 		K8sClient:                   k8sClient,
@@ -372,7 +337,6 @@ func main() {
 		Metrics:                     managerMetrics,
 		HotClaimReservationEnqueuer: hotClaimReservationController,
 		CredentialStore:             credentialStore,
-		WebhookStateVolumeClient:    webhookStateVolumeClient,
 		QuotaStore:                  quotaRepo,
 		SandboxStore:                sandboxStore,
 		RootFSObjectDeleter:         rootFSObjectStore,
@@ -582,7 +546,6 @@ func main() {
 		logger:                logger,
 		k8sClient:             k8sClient,
 		httpServer:            httpServer,
-		storageRuntime:        managerStorageRuntime,
 		informerFactory:       informerFactory,
 		crdInformerFactory:    crdInformerFactory,
 		metricsPort:           cfg.MetricsPort,
@@ -603,7 +566,7 @@ const (
 )
 
 // serveTemplateReconcilerQuiesceSignals exposes a process-local maintenance
-// barrier without stopping the manager APIs needed to drain sandbox volumes.
+// barrier without stopping the manager APIs needed to drain active sandboxes.
 func serveTemplateReconcilerQuiesceSignals(
 	ctx context.Context,
 	signals <-chan os.Signal,
@@ -848,7 +811,6 @@ func defaultTeamQuotaLimits(cfg *config.ManagerConfig) []quota.DefaultLimit {
 
 func buildRootFSObjectStore(
 	cfg *config.ManagerConfig,
-	storageRuntimeCfg *config.StorageProxyConfig,
 	requestObserver objectstore.RequestObserver,
 ) (objectstore.Store, error) {
 	if cfg == nil {
@@ -871,24 +833,24 @@ func buildRootFSObjectStore(
 	if err != nil {
 		return nil, err
 	}
-	return wrapRootFSObjectStoreEncryption(store, storageRuntimeCfg)
+	return wrapRootFSObjectStoreEncryption(store, objectStorageCfg)
 }
 
-func wrapRootFSObjectStoreEncryption(store objectstore.Store, storageRuntimeCfg *config.StorageProxyConfig) (objectstore.Store, error) {
-	if store == nil || storageRuntimeCfg == nil || !storageRuntimeCfg.ObjectEncryptionEnabled {
+func wrapRootFSObjectStoreEncryption(store objectstore.Store, objectStorageCfg config.RootFSObjectStorageConfig) (objectstore.Store, error) {
+	if store == nil || !objectStorageCfg.ObjectEncryptionEnabled {
 		return store, nil
 	}
-	keyPEM, err := objectstore.LoadEncryptionKey(storageRuntimeCfg.ObjectEncryptionKeyPath)
+	keyPEM, err := objectstore.LoadEncryptionKey(objectStorageCfg.ObjectEncryptionKeyPath)
 	if err != nil {
 		return nil, err
 	}
-	keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, storageRuntimeCfg.ObjectEncryptionPassphrase)
+	keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, objectStorageCfg.ObjectEncryptionPassphrase)
 	if err != nil {
 		return nil, err
 	}
 	return objectstore.Encrypting(store, objectstore.EncryptionConfig{
 		Enabled:      true,
-		Algorithm:    storageRuntimeCfg.ObjectEncryptionAlgo,
+		Algorithm:    objectStorageCfg.ObjectEncryptionAlgo,
 		KeyEncryptor: keyEncryptor,
 	}), nil
 }
@@ -1000,6 +962,9 @@ func runSandboxStoreMigrations(ctx context.Context, pool *pgxpool.Pool, logger *
 
 	if err := sandboxstore.RunSandboxStoreMigrations(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
 		return fmt.Errorf("sandbox store migrations: %w", err)
+	}
+	if err := legacyvolumemigrations.Run(ctx, pool, observability.NewMigrateLogger(logger)); err != nil {
+		return fmt.Errorf("legacy volume migrations: %w", err)
 	}
 
 	logger.Info("Sandbox store migrations completed successfully")

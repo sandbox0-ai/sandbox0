@@ -30,11 +30,11 @@ For rootfs checkpoint and resume diagnosis, collect these ctld metrics:
 
 - `ctld_rootfs_operation_duration_seconds` for total save and apply latency
 - `ctld_rootfs_phase_duration_seconds` for cache lookup, cache validation, tar filtering, containerd ingest, diff apply, and baseline capture
-- `ctld_rootfs_checkpoint_bytes` for input, output, excluded, and Volume portal byte distributions
+- `ctld_rootfs_checkpoint_bytes` for input, output, and excluded byte distributions
 - `ctld_rootfs_checkpoint_chain_depth` for the number of layers replayed by each operation
 - `ctld_rootfs_object_cache_requests_total` for cache hit, miss, and error counts
 
-Manager also records `apply_rootfs_checkpoint`, `bind_volume_portals`, `bind_webhook_state_portal`, `activate_runtime`, and `resume_total` in `manager_sandbox_claim_phase_duration_seconds`. ctld emits a structured warning when a rootfs operation takes at least 10 seconds or handles a checkpoint of at least 512 MiB.
+Manager also records `apply_rootfs_checkpoint`, `activate_runtime`, and `resume_total` in `manager_sandbox_claim_phase_duration_seconds`. ctld emits a structured warning when a rootfs operation takes at least 10 seconds or handles a checkpoint of at least 512 MiB.
 
 Each sandbox node runs two ctld peers, but exactly one peer on that node should own the primary lock. More than one `ctld_ha_primary` across the whole cluster is normal when the cluster has multiple sandbox nodes. Scrape the `ha-metrics` port on both ctld Pods and group HA checks by the `node` label:
 

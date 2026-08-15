@@ -9,7 +9,7 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore/requestmetering"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore/requestmetering"
 	"go.uber.org/zap"
 )
 
@@ -17,7 +17,7 @@ const ctldObjectStoreRequestFinalFlushTimeout = 10 * time.Second
 
 func startCtldObjectStoreRequestMetering(
 	ctx context.Context,
-	cfg *apiconfig.StorageProxyConfig,
+	cfg *apiconfig.CtldConfig,
 	pool *pgxpool.Pool,
 	nodeName string,
 	logger *zap.Logger,

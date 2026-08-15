@@ -248,7 +248,7 @@ func equalStrings(got, want []string) bool {
 func TestProjectorAppliesProjectionStateOperations(t *testing.T) {
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
 	sandboxState := &metering.SandboxProjectionState{SandboxID: "sandbox-1", Namespace: "default", LastObservedAt: now}
-	storageState := &metering.StorageProjectionState{SubjectType: metering.SubjectTypeVolume, SubjectID: "volume-1", ObservedAt: now}
+	storageState := &metering.StorageProjectionState{SubjectType: metering.SubjectTypeRootFS, SubjectID: "sandbox-1", ObservedAt: now}
 	deleted := &StorageStateDeleteOperation{State: storageState, DeletedAt: now.Add(time.Second)}
 	watermark := &WatermarkOperation{Producer: "producer-1", RegionID: "region-1", CompleteBefore: now}
 	store := &fakeProjectionStore{batch: &Batch{
@@ -365,8 +365,8 @@ func TestProjectorCoalescesConsecutiveTransactionsForBatchSink(t *testing.T) {
 		CompleteBefore: now.Add(time.Minute),
 	}
 	storageState := &metering.StorageProjectionState{
-		SubjectType: metering.SubjectTypeVolume,
-		SubjectID:   "volume-1",
+		SubjectType: metering.SubjectTypeRootFS,
+		SubjectID:   "sandbox-1",
 		ObservedAt:  now,
 	}
 	store := &fakeCoalescingProjectionStore{batches: []*Batch{

@@ -7,7 +7,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,7 +17,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 func TestCheckLabelsNodesFromComponentReadiness(t *testing.T) {
@@ -34,10 +32,8 @@ func TestCheckLabelsNodesFromComponentReadiness(t *testing.T) {
 		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotB),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-a", "node-a", dataplane.CtldHASlotA, true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a-b", "node-a", dataplane.CtldHASlotB, true),
-		newNodeReadinessCSINode("node-a", true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b-a", "node-b", dataplane.CtldHASlotA, true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b-b", "node-b", dataplane.CtldHASlotB, false),
-		newNodeReadinessCSINode("node-b", true),
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
@@ -79,26 +75,6 @@ func TestCheckReturnsErrorAndClearsReadinessWhenNoNodeReady(t *testing.T) {
 	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
 }
 
-func TestCheckRequiresKubeletCSIRegistration(t *testing.T) {
-	infra := newNodeReadinessInfra()
-	node := newNodeReadinessNode("node-a", map[string]string{"sandbox0.ai/node-role": "sandbox"})
-	client, scheme := newNodeReadinessClient(t,
-		node,
-		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotA),
-		newNodeReadinessCtldDaemonSet(infra.Namespace, infra.Name, dataplane.CtldHASlotB),
-		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-a", "node-a", dataplane.CtldHASlotA, true),
-		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "ctld-b", "node-a", dataplane.CtldHASlotB, true),
-		newNodeReadinessCSINode("node-a", false),
-	)
-	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-
-	if err := reconciler.Check(context.Background(), infra, infraplan.Compile(infra)); err == nil {
-		t.Fatal("Check() error = nil before kubelet CSI registration")
-	}
-	gotNode := getNodeReadinessNode(t, client, "node-a")
-	assertNodeReadinessLabels(t, gotNode, dataplane.NotReadyLabelValue, dataplane.NotReadyLabelValue)
-}
-
 func TestRefreshRejectsReadySurgePredecessorsWithoutGating(t *testing.T) {
 	infra := newNodeReadinessInfra()
 	node := newNodeReadinessNode("node-a", map[string]string{
@@ -118,7 +94,6 @@ func TestRefreshRejectsReadySurgePredecessorsWithoutGating(t *testing.T) {
 		oldSlotB,
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "current-ctld-a", node.Name, dataplane.CtldHASlotA, true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "current-ctld-b", node.Name, dataplane.CtldHASlotB, true),
-		newNodeReadinessCSINode(node.Name, true),
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
@@ -152,7 +127,6 @@ func TestRefreshRejectsTerminatingRunningSurgePredecessor(t *testing.T) {
 		predecessor,
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "current-ctld-a", node.Name, dataplane.CtldHASlotA, true),
 		newNodeReadinessCtldPod(infra.Namespace, infra.Name, "current-ctld-b", node.Name, dataplane.CtldHASlotB, true),
-		newNodeReadinessCSINode(node.Name, true),
 	)
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
 
@@ -238,9 +212,6 @@ func newNodeReadinessClient(t *testing.T, objects ...ctrlclient.Object) (ctrlcli
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 scheme: %v", err)
 	}
-	if err := storagev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add storagev1 scheme: %v", err)
-	}
 	if err := infrav1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add infra scheme: %v", err)
 	}
@@ -324,17 +295,6 @@ func cloneNodeReadinessStrings(values map[string]string) map[string]string {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func newNodeReadinessCSINode(nodeName string, registered bool) *storagev1.CSINode {
-	csiNode := &storagev1.CSINode{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
-	if registered {
-		csiNode.Spec.Drivers = []storagev1.CSINodeDriver{{
-			Name:   volumeportal.DriverName,
-			NodeID: nodeName,
-		}}
-	}
-	return csiNode
 }
 
 func getNodeReadinessNode(t *testing.T, client ctrlclient.Client, name string) *corev1.Node {

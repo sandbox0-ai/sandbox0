@@ -141,51 +141,6 @@ func TestToManagerPreservesPodTeardownAndAutoscalerAnnotations(t *testing.T) {
 	}
 }
 
-func TestToStorageProxyDefaultsObjectEncryptionEnabled(t *testing.T) {
-	cfg := ToStorageProxy(nil)
-	if !cfg.ObjectEncryptionEnabled {
-		t.Fatal("expected object encryption to be enabled by default")
-	}
-}
-
-func TestToStorageProxyPreservesExplicitObjectEncryptionDisabled(t *testing.T) {
-	cfg := ToStorageProxy(&infrav1alpha1.StorageProxyConfig{ObjectEncryptionEnabled: false})
-	if cfg.ObjectEncryptionEnabled {
-		t.Fatal("expected explicit object encryption disabled setting to be preserved")
-	}
-}
-
-func TestToStorageProxyPreservesLocalStorageLimits(t *testing.T) {
-	cfg := ToStorageProxy(&infrav1alpha1.StorageProxyConfig{
-		CacheSizeLimit:             "512Mi",
-		LogSizeLimit:               "64Mi",
-		VolumePortalCacheSizeLimit: "2Gi",
-		VolumePortalRootMinFree:    "1Gi",
-	})
-	if cfg.CacheSizeLimit != "512Mi" || cfg.LogSizeLimit != "64Mi" || cfg.VolumePortalCacheSizeLimit != "2Gi" || cfg.VolumePortalRootMinFree != "1Gi" {
-		t.Fatalf("local storage limits were not preserved: %#v", cfg)
-	}
-}
-
-func TestToStorageProxyPreservesS0FSLayoutConfig(t *testing.T) {
-	cfg := ToStorageProxy(&infrav1alpha1.StorageProxyConfig{
-		S0FSSegmentTargetSize:        "8Mi",
-		S0FSStateFormatVersion:       2,
-		S0FSHotCacheMaxSize:          "2Gi",
-		S0FSCompactionInterval:       "30s",
-		S0FSCompactionMinDeadRatio:   "0.25",
-		S0FSCompactionMinReclaimSize: "2Mi",
-	})
-	if cfg.S0FSSegmentTargetSize != "8Mi" ||
-		cfg.S0FSStateFormatVersion != 2 ||
-		cfg.S0FSHotCacheMaxSize != "2Gi" ||
-		cfg.S0FSCompactionInterval != "30s" ||
-		cfg.S0FSCompactionMinDeadRatio != "0.25" ||
-		cfg.S0FSCompactionMinReclaimSize != "2Mi" {
-		t.Fatalf("s0fs layout config was not preserved: %#v", cfg)
-	}
-}
-
 func TestToNetdPreservesBandwidthLimits(t *testing.T) {
 	cfg := ToNetd(&infrav1alpha1.NetdConfig{
 		EgressBandwidthBytesPerSecond:      1024,

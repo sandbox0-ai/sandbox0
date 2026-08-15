@@ -5,7 +5,6 @@ const (
 	ServiceCtld            = "ctld"
 	ServiceGlobalGateway   = "global-gateway"
 	ServiceManager         = "manager"
-	ServiceManagerStorage  = "manager-storage"
 	ServiceNetd            = "netd"
 	ServiceProcd           = "procd"
 	ServiceRegionalGateway = "regional-gateway"

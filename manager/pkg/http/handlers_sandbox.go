@@ -43,11 +43,6 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	}
 	req.TeamID = claims.TeamID
 	req.UserID = claims.UserID
-	if len(req.Mounts) > 0 {
-		spec.JSONError(c, http.StatusGone, spec.CodeGone, "Sandbox Volume mounts are retired; use the Sandbox rootfs instead")
-		return
-	}
-
 	if req.Template == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
 		return

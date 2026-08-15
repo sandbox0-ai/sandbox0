@@ -16,7 +16,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -286,36 +285,7 @@ func (s *SandboxService) applySandboxRootFSCheckpoint(ctx context.Context, pod *
 }
 
 func rootFSExcludedPathsForPod(pod *corev1.Pod) []string {
-	if pod == nil {
-		return nil
-	}
-	var mounts []managerapi.ClaimMount
-	if pod.Annotations != nil {
-		mounts = parseClaimMounts(pod.Annotations[controller.AnnotationMounts])
-	}
-	seen := make(map[string]struct{}, len(mounts)+1)
-	out := make([]string, 0, len(mounts)+1)
-	add := func(raw string) {
-		if raw == "" || !strings.HasPrefix(raw, "/") {
-			return
-		}
-		mountPath := path.Clean(raw)
-		if mountPath == "/" {
-			return
-		}
-		if _, ok := seen[mountPath]; ok {
-			return
-		}
-		seen[mountPath] = struct{}{}
-		out = append(out, mountPath)
-	}
-	for _, mount := range mounts {
-		add(strings.TrimSpace(mount.MountPoint))
-	}
-	if pod.Annotations != nil && strings.TrimSpace(pod.Annotations[controller.AnnotationWebhookStateVolumeID]) != "" {
-		add(webhookStateMountPoint)
-	}
-	return out
+	return nil
 }
 
 func (s *SandboxService) applySandboxRootFSCheckpointWithFallback(ctx context.Context, pod *corev1.Pod, record *sandboxstore.SandboxRecord, template *v1alpha1.SandboxTemplate, req *ClaimRequest, state *sandboxstore.SandboxRootFSState, persistRuntime bool) (*corev1.Pod, error) {

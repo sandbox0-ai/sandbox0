@@ -98,60 +98,6 @@ func cloneTeamQuotaLimitConfigs(in []infrav1alpha1.TeamQuotaLimitConfig) []apico
 	return out
 }
 
-func ToStorageProxy(spec *infrav1alpha1.StorageProxyConfig) *apiconfig.StorageProxyConfig {
-	cfg := &apiconfig.StorageProxyConfig{ObjectEncryptionEnabled: true}
-	if spec == nil {
-		return cfg
-	}
-
-	cfg.HTTPAddr = spec.HTTPAddr
-	cfg.HTTPPort = spec.HTTPPort
-	cfg.DatabaseMaxConns = spec.DatabaseMaxConns
-	cfg.DatabaseMinConns = spec.DatabaseMinConns
-	cfg.DatabaseSchema = spec.DatabaseSchema
-	cfg.FilesystemName = spec.FilesystemName
-	cfg.FilesystemBlockSize = spec.FilesystemBlockSize
-	cfg.FilesystemCompression = spec.FilesystemCompression
-	cfg.FilesystemTrashDays = spec.FilesystemTrashDays
-	cfg.FilesystemMetaRetries = spec.FilesystemMetaRetries
-	cfg.FilesystemMaxUpload = spec.FilesystemMaxUpload
-	cfg.S0FSSegmentTargetSize = spec.S0FSSegmentTargetSize
-	cfg.S0FSStateFormatVersion = spec.S0FSStateFormatVersion
-	cfg.S0FSHotCacheMaxSize = spec.S0FSHotCacheMaxSize
-	cfg.S0FSCompactionInterval = spec.S0FSCompactionInterval
-	cfg.S0FSCompactionMinDeadRatio = spec.S0FSCompactionMinDeadRatio
-	cfg.S0FSCompactionMinReclaimSize = spec.S0FSCompactionMinReclaimSize
-	cfg.ObjectEncryptionEnabled = spec.ObjectEncryptionEnabled
-	cfg.ObjectEncryptionPassphrase = spec.ObjectEncryptionPassphrase
-	cfg.ObjectEncryptionAlgo = spec.ObjectEncryptionAlgo
-	cfg.FilesystemAttrTimeout = spec.FilesystemAttrTimeout
-	cfg.FilesystemEntryTimeout = spec.FilesystemEntryTimeout
-	cfg.FilesystemDirEntryTimeout = spec.FilesystemDirEntryTimeout
-	cfg.HeartbeatInterval = spec.HeartbeatInterval
-	cfg.HeartbeatTimeout = spec.HeartbeatTimeout
-	cfg.FlushTimeout = spec.FlushTimeout
-	cfg.CleanupInterval = spec.CleanupInterval
-	cfg.DirectVolumeFileIdleTTL = spec.DirectVolumeFileIdleTTL
-	cfg.CacheDir = spec.CacheDir
-	cfg.CacheSizeLimit = spec.CacheSizeLimit
-	cfg.LogSizeLimit = spec.LogSizeLimit
-	cfg.VolumePortalCacheSizeLimit = spec.VolumePortalCacheSizeLimit
-	cfg.VolumePortalRootMinFree = spec.VolumePortalRootMinFree
-	cfg.MetricsEnabled = spec.MetricsEnabled
-	cfg.MetricsPort = spec.MetricsPort
-	cfg.LogLevel = spec.LogLevel
-	cfg.AuditLog = spec.AuditLog
-	cfg.AuditFile = spec.AuditFile
-	cfg.HTTPReadTimeout = spec.HTTPReadTimeout
-	cfg.HTTPWriteTimeout = spec.HTTPWriteTimeout
-	cfg.HTTPIdleTimeout = spec.HTTPIdleTimeout
-	cfg.WatchEventsEnabled = spec.WatchEventsEnabled
-	cfg.WatchEventQueueSize = spec.WatchEventQueueSize
-	cfg.RestoreRemountTimeout = spec.RestoreRemountTimeout
-	cfg.KubeconfigPath = spec.KubeconfigPath
-	return cfg
-}
-
 func ToNetd(spec *infrav1alpha1.NetdConfig) *apiconfig.NetdConfig {
 	cfg := &apiconfig.NetdConfig{}
 	if spec == nil {

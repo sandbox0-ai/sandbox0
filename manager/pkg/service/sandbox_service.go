@@ -104,8 +104,6 @@ type SandboxService struct {
 	pauseEnqueuer                          SandboxPauseEnqueuer
 	hotClaimReservationEnqueuer            HotClaimReservationEnqueuer
 	credentialStore                        egressauth.BindingStore
-	webhookStateVolumes                    SandboxSystemVolumeClient
-	volumeMetadata                         SandboxVolumeMetadataClient
 	quotaStore                             TeamQuotaLimitStore
 	sandboxStore                           sandboxstore.SandboxStore
 	rootFSObjectDeleter                    sandboxstore.RootFSObjectDeleter
@@ -180,8 +178,6 @@ type SandboxServiceDependencies struct {
 	PauseEnqueuer               SandboxPauseEnqueuer
 	HotClaimReservationEnqueuer HotClaimReservationEnqueuer
 	CredentialStore             egressauth.BindingStore
-	WebhookStateVolumeClient    SandboxSystemVolumeClient
-	VolumeMetadataClient        SandboxVolumeMetadataClient
 	QuotaStore                  TeamQuotaLimitStore
 	SandboxStore                sandboxstore.SandboxStore
 	RootFSObjectDeleter         sandboxstore.RootFSObjectDeleter
@@ -223,12 +219,6 @@ func NewSandboxServiceWithDependencies(deps SandboxServiceDependencies) *Sandbox
 			deps.ProcdClient = procdapi.NewProcdClientWithHTTPClient(config.ProcdHTTPClient)
 		}
 	}
-	if deps.VolumeMetadataClient == nil {
-		if metadataClient, ok := deps.WebhookStateVolumeClient.(SandboxVolumeMetadataClient); ok {
-			deps.VolumeMetadataClient = metadataClient
-		}
-	}
-
 	service := &SandboxService{
 		k8sClient:                   deps.K8sClient,
 		hotClaimK8sClient:           deps.HotClaimK8sClient,
@@ -249,8 +239,6 @@ func NewSandboxServiceWithDependencies(deps SandboxServiceDependencies) *Sandbox
 		pauseEnqueuer:               deps.PauseEnqueuer,
 		hotClaimReservationEnqueuer: deps.HotClaimReservationEnqueuer,
 		credentialStore:             deps.CredentialStore,
-		webhookStateVolumes:         deps.WebhookStateVolumeClient,
-		volumeMetadata:              deps.VolumeMetadataClient,
 		quotaStore:                  deps.QuotaStore,
 		sandboxStore:                deps.SandboxStore,
 		rootFSObjectDeleter:         deps.RootFSObjectDeleter,

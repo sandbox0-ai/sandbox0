@@ -225,7 +225,7 @@ Historical queries return `503` when their backend is disabled or unavailable. T
 ### Coverage Limits
 
 - Metering windows remain separate usage-ledger records for quota, showback, and billing export.
-- `process.*` and `file.*` facts prove authenticated gateway requests and their HTTP results. They do not observe every process effect, SSH/SFTP command, POSIX write, direct SandboxVolume operation, or manager-initiated reconciliation.
+- `process.*` and `file.*` facts prove authenticated gateway requests and their HTTP results. They do not observe every process effect, SSH/SFTP command, POSIX write, or manager-initiated reconciliation.
 - Public exposure streams and WebSockets record a durable open attempt, but abrupt node or process loss can prevent the eventual close result.
 - Cluster-gateway pending events require reattachable durable storage. Node-local network-flow buffers survive same-node Pod restarts, not permanent node loss.
 - Per-row signatures detect modified returned facts. They do not prove that a privileged ClickHouse administrator never deleted a row.

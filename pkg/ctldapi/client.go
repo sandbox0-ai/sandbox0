@@ -19,20 +19,12 @@ import (
 const DefaultRequestTimeout = 15 * time.Second
 
 const (
-	pathVolumePortalBind         = "/api/v1/volume-portals/bind"
-	pathVolumePortalUnbind       = "/api/v1/volume-portals/unbind"
-	pathVolumePortalCheck        = "/api/v1/volume-portals/check"
-	pathVolumePortalOwnerAttach  = "/api/v1/volume-portals/owners/attach"
-	pathVolumePortalOwnerRelease = "/api/v1/volume-portals/owners/release"
-	pathVolumeSnapshotPrepare    = "/api/v1/volume-portals/snapshot-checkpoints/prepare"
-	pathVolumeSnapshotComplete   = "/api/v1/volume-portals/snapshot-checkpoints/complete"
-	pathVolumeSnapshotAbort      = "/api/v1/volume-portals/snapshot-checkpoints/abort"
-	pathRootFSInspect            = "/api/v1/rootfs/inspect"
-	pathRootFSSave               = "/api/v1/rootfs/save"
-	pathRootFSSnapshotPrepare    = "/api/v1/rootfs/snapshots/prepare"
-	pathRootFSSnapshotPublish    = "/api/v1/rootfs/snapshots/publish"
-	pathRootFSSnapshotAbort      = "/api/v1/rootfs/snapshots/abort"
-	pathRootFSApply              = "/api/v1/rootfs/apply"
+	pathRootFSInspect         = "/api/v1/rootfs/inspect"
+	pathRootFSSave            = "/api/v1/rootfs/save"
+	pathRootFSSnapshotPrepare = "/api/v1/rootfs/snapshots/prepare"
+	pathRootFSSnapshotPublish = "/api/v1/rootfs/snapshots/publish"
+	pathRootFSSnapshotAbort   = "/api/v1/rootfs/snapshots/abort"
+	pathRootFSApply           = "/api/v1/rootfs/apply"
 )
 
 var defaultHTTPClient = &http.Client{Timeout: DefaultRequestTimeout}
@@ -96,38 +88,6 @@ func (c *Client) Probe(ctx context.Context, ctldAddress, sandboxID string, kind 
 func (c *Client) ProbePod(ctx context.Context, ctldAddress, namespace, podName string, kind sandboxprobe.Kind) (*sandboxprobe.Response, error) {
 	path := fmt.Sprintf("/api/v1/pods/%s/%s/probes/%s", url.PathEscape(namespace), url.PathEscape(podName), url.PathEscape(string(kind)))
 	return PostJSON[sandboxprobe.Response](ctx, c.httpClientOrDefault(), ctldAddress, path, nil)
-}
-
-func (c *Client) BindVolumePortal(ctx context.Context, ctldAddress string, req BindVolumePortalRequest) (*BindVolumePortalResponse, error) {
-	return PostJSON[BindVolumePortalResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalBind, req)
-}
-
-func (c *Client) UnbindVolumePortal(ctx context.Context, ctldAddress string, req UnbindVolumePortalRequest) (*UnbindVolumePortalResponse, error) {
-	return PostJSON[UnbindVolumePortalResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalUnbind, req)
-}
-
-func (c *Client) CheckVolumePortals(ctx context.Context, ctldAddress string, req CheckVolumePortalsRequest) (*CheckVolumePortalsResponse, error) {
-	return PostJSON[CheckVolumePortalsResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalCheck, req)
-}
-
-func (c *Client) AttachVolumeOwner(ctx context.Context, ctldAddress string, req AttachVolumeOwnerRequest) (*AttachVolumeOwnerResponse, error) {
-	return PostJSON[AttachVolumeOwnerResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalOwnerAttach, req)
-}
-
-func (c *Client) ReleaseVolumeOwner(ctx context.Context, ctldAddress string, req ReleaseVolumeOwnerRequest) (*ReleaseVolumeOwnerResponse, error) {
-	return PostJSON[ReleaseVolumeOwnerResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumePortalOwnerRelease, req)
-}
-
-func (c *Client) PrepareVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress string, req PrepareVolumeSnapshotCheckpointRequest) (*PrepareVolumeSnapshotCheckpointResponse, error) {
-	return PostJSON[PrepareVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotPrepare, req)
-}
-
-func (c *Client) CompleteVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress string, req CompleteVolumeSnapshotCheckpointRequest) (*CompleteVolumeSnapshotCheckpointResponse, error) {
-	return PostJSON[CompleteVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotComplete, req)
-}
-
-func (c *Client) AbortVolumeSnapshotCheckpoint(ctx context.Context, ctldAddress string, req AbortVolumeSnapshotCheckpointRequest) (*AbortVolumeSnapshotCheckpointResponse, error) {
-	return PostJSON[AbortVolumeSnapshotCheckpointResponse](ctx, c.httpClientOrDefault(), ctldAddress, pathVolumeSnapshotAbort, req)
 }
 
 func (c *Client) InspectRootFS(ctx context.Context, ctldAddress string, req InspectRootFSRequest) (*InspectRootFSResponse, error) {
@@ -240,22 +200,6 @@ func responseError(resp any) string {
 	case *PauseResponse:
 		return strings.TrimSpace(typed.Error)
 	case *ResumeResponse:
-		return strings.TrimSpace(typed.Error)
-	case *AttachVolumeOwnerResponse:
-		return strings.TrimSpace(typed.Error)
-	case *ReleaseVolumeOwnerResponse:
-		return strings.TrimSpace(typed.Error)
-	case *CheckVolumePortalsResponse:
-		return strings.TrimSpace(typed.Error)
-	case *PrepareVolumeSnapshotCheckpointResponse:
-		return strings.TrimSpace(typed.Error)
-	case *CompleteVolumeSnapshotCheckpointResponse:
-		return strings.TrimSpace(typed.Error)
-	case *AbortVolumeSnapshotCheckpointResponse:
-		return strings.TrimSpace(typed.Error)
-	case *BindVolumePortalResponse:
-		return strings.TrimSpace(typed.Error)
-	case *UnbindVolumePortalResponse:
 		return strings.TrimSpace(typed.Error)
 	case *InspectRootFSResponse:
 		return strings.TrimSpace(typed.Error)

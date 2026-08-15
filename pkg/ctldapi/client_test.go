@@ -19,19 +19,19 @@ func TestPostJSONReturnsDecodedResponse(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
 		}
-		if r.URL.Path != "/api/v1/volume-portals/check" {
-			t.Fatalf("path = %s, want /api/v1/volume-portals/check", r.URL.Path)
+		if r.URL.Path != "/api/v1/rootfs/inspect" {
+			t.Fatalf("path = %s, want /api/v1/rootfs/inspect", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(CheckVolumePortalsResponse{Ready: true})
+		_ = json.NewEncoder(w).Encode(InspectRootFSResponse{Info: RootFSInfo{Runtime: "runc"}})
 	}))
 	defer server.Close()
 
-	resp, err := PostJSON[CheckVolumePortalsResponse](context.Background(), server.Client(), server.URL, "/api/v1/volume-portals/check", CheckVolumePortalsRequest{PodUID: "pod-1"})
+	resp, err := PostJSON[InspectRootFSResponse](context.Background(), server.Client(), server.URL, "/api/v1/rootfs/inspect", InspectRootFSRequest{})
 	if err != nil {
 		t.Fatalf("PostJSON returned error: %v", err)
 	}
-	if resp == nil || !resp.Ready {
-		t.Fatalf("response = %#v, want ready response", resp)
+	if resp == nil || resp.Info.Runtime != "runc" {
+		t.Fatalf("response = %#v, want decoded rootfs response", resp)
 	}
 }
 
@@ -40,15 +40,15 @@ func TestPostJSONReturnsStatusErrorWithTypedMessage(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(BindVolumePortalResponse{Error: "volume is busy"})
+		_ = json.NewEncoder(w).Encode(ApplyRootFSResponse{Error: "rootfs is busy"})
 	}))
 	defer server.Close()
 
-	resp, err := PostJSON[BindVolumePortalResponse](context.Background(), server.Client(), server.URL, "/api/v1/volume-portals/bind", BindVolumePortalRequest{SandboxVolumeID: "vol-1"})
+	resp, err := PostJSON[ApplyRootFSResponse](context.Background(), server.Client(), server.URL, "/api/v1/rootfs/apply", ApplyRootFSRequest{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if resp == nil || resp.Error != "volume is busy" {
+	if resp == nil || resp.Error != "rootfs is busy" {
 		t.Fatalf("response = %#v, want decoded error response", resp)
 	}
 	var reqErr *RequestError
@@ -61,42 +61,9 @@ func TestPostJSONReturnsStatusErrorWithTypedMessage(t *testing.T) {
 	if !IsConflictError(err) {
 		t.Fatal("IsConflictError returned false")
 	}
-	want := "ctld request failed with status 409: volume is busy"
+	want := "ctld request failed with status 409: rootfs is busy"
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err.Error(), want)
-	}
-}
-
-func TestClientBindVolumePortalUsesSharedPath(t *testing.T) {
-	t.Parallel()
-
-	var gotReq BindVolumePortalRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
-		}
-		if r.URL.Path != "/api/v1/volume-portals/bind" {
-			t.Fatalf("path = %s, want /api/v1/volume-portals/bind", r.URL.Path)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		_ = json.NewEncoder(w).Encode(BindVolumePortalResponse{SandboxVolumeID: gotReq.SandboxVolumeID})
-	}))
-	defer server.Close()
-
-	resp, err := NewClient(server.Client()).BindVolumePortal(context.Background(), server.URL, BindVolumePortalRequest{
-		SandboxVolumeID: "vol-1",
-		PodUID:          "pod-1",
-	})
-	if err != nil {
-		t.Fatalf("BindVolumePortal() error = %v", err)
-	}
-	if resp == nil || resp.SandboxVolumeID != "vol-1" {
-		t.Fatalf("response = %#v, want vol-1", resp)
-	}
-	if gotReq.PodUID != "pod-1" {
-		t.Fatalf("PodUID = %q, want pod-1", gotReq.PodUID)
 	}
 }
 
@@ -173,25 +140,6 @@ func TestClientRootFSMethodsUseSharedPaths(t *testing.T) {
 	}
 }
 
-func TestPostJSONReturnsCheckVolumePortalErrorMessage(t *testing.T) {
-	t.Parallel()
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(CheckVolumePortalsResponse{Error: "portal data is not published"})
-	}))
-	defer server.Close()
-
-	_, err := NewClient(server.Client()).CheckVolumePortals(context.Background(), server.URL, CheckVolumePortalsRequest{PodUID: "pod-1"})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	want := "ctld request failed with status 503: portal data is not published"
-	if err.Error() != want {
-		t.Fatalf("error = %q, want %q", err.Error(), want)
-	}
-}
-
 func TestNewClientWithTimeoutUsesDefault(t *testing.T) {
 	client := NewClientWithTimeout(0)
 	if client == nil {
@@ -246,40 +194,6 @@ func TestClientProbePod(t *testing.T) {
 	}
 	if resp == nil || resp.Kind != sandboxprobe.KindReadiness || resp.Status != sandboxprobe.StatusPassed {
 		t.Fatalf("response = %#v, want passed readiness response", resp)
-	}
-}
-
-func TestClientCheckVolumePortalsUsesSharedPath(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
-		}
-		if r.URL.Path != "/api/v1/volume-portals/check" {
-			t.Fatalf("path = %s, want /api/v1/volume-portals/check", r.URL.Path)
-		}
-		var req CheckVolumePortalsRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		if req.PodUID != "pod-uid" {
-			t.Fatalf("PodUID = %q, want pod-uid", req.PodUID)
-		}
-		_ = json.NewEncoder(w).Encode(CheckVolumePortalsResponse{Ready: false, Missing: []string{"workspace"}})
-	}))
-	defer server.Close()
-
-	resp, err := NewClientWithTimeout(0).CheckVolumePortals(context.Background(), server.URL, CheckVolumePortalsRequest{
-		PodUID: "pod-uid",
-		Portals: []VolumePortalRef{{
-			PortalName: "workspace",
-			MountPath:  "/workspace",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("CheckVolumePortals returned error: %v", err)
-	}
-	if resp == nil || resp.Ready || len(resp.Missing) != 1 || resp.Missing[0] != "workspace" {
-		t.Fatalf("response = %#v, want missing workspace", resp)
 	}
 }
 

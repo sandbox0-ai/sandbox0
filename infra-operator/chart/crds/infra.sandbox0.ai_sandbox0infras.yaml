@@ -1104,23 +1104,6 @@ spec:
                           items:
                             type: string
                           type: array
-                        volumeMounts:
-                          description: |-
-                            VolumeMounts declares the fixed sandbox volume portal mount points that
-                            can be bound to concrete SandboxVolumes when a sandbox is claimed.
-                          items:
-                            properties:
-                              mountPath:
-                                type: string
-                              name:
-                                type: string
-                              readOnly:
-                                type: boolean
-                            required:
-                            - mountPath
-                            - name
-                            type: object
-                          type: array
                       required:
                       - mainContainer
                       - pool
@@ -1687,53 +1670,6 @@ spec:
                         - name
                         type: object
                     type: object
-                type: object
-              metadataDatabase:
-                description: MetadataDatabase configures the S0FS metadata database
-                properties:
-                  external:
-                    description: External configures an independent database for S0FS
-                    properties:
-                      database:
-                        description: Database specifies the database name
-                        type: string
-                      host:
-                        description: Host specifies the database host
-                        type: string
-                      passwordSecret:
-                        description: PasswordSecret references the secret containing
-                          the password
-                        properties:
-                          key:
-                            default: password
-                            description: Key is the key in the secret
-                            type: string
-                          name:
-                            description: Name is the name of the secret
-                            type: string
-                        type: object
-                      port:
-                        default: 5432
-                        description: Port specifies the database port
-                        format: int32
-                        type: integer
-                      sslMode:
-                        default: require
-                        description: SSLMode specifies the SSL mode for connection
-                        type: string
-                      username:
-                        description: Username specifies the database username
-                        type: string
-                    required:
-                    - database
-                    - host
-                    - passwordSecret
-                    - username
-                    type: object
-                  shareWithMain:
-                    default: true
-                    description: ShareWithMain uses the main database for S0FS metadata
-                    type: boolean
                 type: object
               metering:
                 default: {}
@@ -3783,8 +3719,6 @@ spec:
                                   enum:
                                   - active_sandboxes
                                   - sandbox_claims
-                                  - volume_storage_gb
-                                  - snapshot_storage_gb
                                   - api_requests
                                   - network_egress_bytes
                                   - network_ingress_bytes
@@ -4673,7 +4607,7 @@ spec:
                     type: object
                 type: object
               storage:
-                description: Storage configures the storage backend (S0FS S3 backend)
+                description: Storage configures the rootfs object-storage backend.
                 properties:
                   builtin:
                     default: {}
@@ -4828,153 +4762,6 @@ spec:
                     - credentialsSecret
                     - endpoint
                     - region
-                    type: object
-                  runtime:
-                    description: Runtime configures the sandbox volume runtime hosted
-                      by manager and ctld.
-                    properties:
-                      auditFile:
-                        default: /var/log/storage-proxy/audit.log
-                        type: string
-                      auditLog:
-                        default: true
-                        type: boolean
-                      cacheDir:
-                        default: /var/lib/storage-proxy/cache
-                        type: string
-                      cacheSizeLimit:
-                        default: 20Gi
-                        type: string
-                      cleanupInterval:
-                        default: 60s
-                        type: string
-                      databaseMaxConns:
-                        default: 30
-                        type: integer
-                      databaseMinConns:
-                        default: 5
-                        type: integer
-                      databaseSchema:
-                        default: storage_proxy
-                        type: string
-                      directVolumeFileIdleTTL:
-                        default: 30s
-                        type: string
-                      filesystemAttrTimeout:
-                        default: 1s
-                        type: string
-                      filesystemBlockSize:
-                        default: 4096
-                        type: integer
-                      filesystemCompression:
-                        default: lz4
-                        type: string
-                      filesystemDirEntryTimeout:
-                        default: 1s
-                        type: string
-                      filesystemEntryTimeout:
-                        default: 1s
-                        type: string
-                      filesystemMaxUpload:
-                        default: 20
-                        type: integer
-                      filesystemMetaRetries:
-                        default: 10
-                        type: integer
-                      filesystemName:
-                        default: sandbox0
-                        type: string
-                      filesystemTrashDays:
-                        default: 1
-                        type: integer
-                      flushTimeout:
-                        default: 30s
-                        type: string
-                      heartbeatInterval:
-                        default: 5s
-                        type: string
-                      heartbeatTimeout:
-                        default: 15
-                        type: integer
-                      httpAddr:
-                        default: 0.0.0.0
-                        type: string
-                      httpIdleTimeout:
-                        default: 60s
-                        type: string
-                      httpPort:
-                        default: 8081
-                        type: integer
-                      httpReadTimeout:
-                        default: 15s
-                        type: string
-                      httpWriteTimeout:
-                        default: 15s
-                        type: string
-                      kubeconfigPath:
-                        type: string
-                      logLevel:
-                        default: info
-                        type: string
-                      logSizeLimit:
-                        default: 1Gi
-                        type: string
-                      metricsEnabled:
-                        default: true
-                        type: boolean
-                      metricsPort:
-                        default: 9090
-                        type: integer
-                      objectEncryptionAlgo:
-                        default: aes256gcm-rsa
-                        type: string
-                      objectEncryptionEnabled:
-                        default: true
-                        type: boolean
-                      objectEncryptionPassphrase:
-                        type: string
-                      restoreRemountTimeout:
-                        default: 30s
-                        type: string
-                      s0fsCompactionInterval:
-                        default: 1m
-                        type: string
-                      s0fsCompactionMinDeadRatio:
-                        default: "0.5"
-                        type: string
-                      s0fsCompactionMinReclaimSize:
-                        default: 1Mi
-                        type: string
-                      s0fsHotCacheMaxSize:
-                        default: 1Gi
-                        description: |-
-                          S0FSHotCacheMaxSize bounds conservatively estimated memory shared by active and detached engines.
-                          Set 0 to disable detached retention and active-engine admission enforcement.
-                        type: string
-                      s0fsSegmentTargetSize:
-                        default: 4Mi
-                        type: string
-                      s0fsStateFormatVersion:
-                        default: 1
-                        description: |-
-                          S0FSStateFormatVersion selects the format for new S0FS state objects and local state files.
-                          Readers accept both versions. Keep version 1 until every manager and ctld runs a dual-reader build.
-                        enum:
-                        - 1
-                        - 2
-                        type: integer
-                      volumePortalCacheSizeLimit:
-                        default: 20Gi
-                        type: string
-                      volumePortalRootMinFree:
-                        default: 5Gi
-                        type: string
-                      watchEventQueueSize:
-                        default: 256
-                        type: integer
-                      watchEventsEnabled:
-                        default: true
-                        type: boolean
                     type: object
                   s3:
                     description: S3 configures S3 or S3-compatible storage

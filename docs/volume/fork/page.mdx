@@ -3,7 +3,7 @@
 Volume Fork creates a new Volume from an existing Volume using s0fs Copy-on-Write (COW) clone.
 
 <Callout variant="warning">
-Sandbox Volumes will be retired soon and replaced by persistent Sandbox rootfs. Use Sandbox rootfs for new workloads and plan to migrate existing Volume data. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for rootfs snapshots, restore, and forks.
+Sandbox Volumes are being retired and replaced by persistent Sandbox rootfs. Creating or mutating Volumes and attaching them to new Sandboxes is disabled. Existing Volume data remains readable for migration and can still be deleted after export. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for rootfs snapshots, restore, and forks.
 </Callout>
 
 <Callout variant="info">

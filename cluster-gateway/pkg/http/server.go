@@ -594,29 +594,29 @@ func (s *Server) setupRoutes() {
 		sandboxvolumes := v1.Group("/sandboxvolumes")
 		sandboxvolumes.Use(s.managerStorageUpstreamMiddleware())
 		{
-			sandboxvolumes.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeCreate), s.createSandboxVolume)
+			sandboxvolumes.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeCreate), s.rejectSandboxVolumeMutation)
 			sandboxvolumes.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.listSandboxVolumes)
 			sandboxvolumes.GET("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.getSandboxVolume)
 			sandboxvolumes.DELETE("/:id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeDelete), s.deleteSandboxVolume)
-			sandboxvolumes.POST("/:id/fork", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.forkSandboxVolume)
+			sandboxvolumes.POST("/:id/fork", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.rejectSandboxVolumeMutation)
 			files := sandboxvolumes.Group("/:id/files")
 			{
 				files.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileOperation)
-				files.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileOperation)
-				files.DELETE("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileOperation)
-				files.PUT("/archive", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileArchiveImport)
+				files.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.rejectSandboxVolumeMutation)
+				files.DELETE("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.rejectSandboxVolumeMutation)
+				files.PUT("/archive", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.rejectSandboxVolumeMutation)
 				files.GET("/watch", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileWatch)
-				files.POST("/move", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.handleVolumeFileMove)
+				files.POST("/move", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileWrite), s.rejectSandboxVolumeMutation)
 				files.GET("/stat", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileStat)
 				files.GET("/list", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeFileRead), s.handleVolumeFileList)
 			}
 			// Snapshot/Restore (→ Manager Storage)
 			snapshots := sandboxvolumes.Group("/:id/snapshots")
 			{
-				snapshots.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.createSandboxVolumeSnapshot)
+				snapshots.POST("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.rejectSandboxVolumeMutation)
 				snapshots.GET("", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.listSandboxVolumeSnapshots)
 				snapshots.GET("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeRead), s.getSandboxVolumeSnapshot)
-				snapshots.POST("/:snapshot_id/restore", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.restoreSandboxVolumeSnapshot)
+				snapshots.POST("/:snapshot_id/restore", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeWrite), s.rejectSandboxVolumeMutation)
 				snapshots.DELETE("/:snapshot_id", s.authMiddleware.RequirePermission(gatewayauthn.PermSandboxVolumeDelete), s.deleteSandboxVolumeSnapshot)
 			}
 

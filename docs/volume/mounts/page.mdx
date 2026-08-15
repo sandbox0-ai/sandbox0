@@ -3,7 +3,7 @@
 Volumes are mounted through template-declared mount points and bound when a Sandbox is claimed.
 
 <Callout variant="warning">
-Sandbox Volumes will be retired soon and replaced by persistent Sandbox rootfs. Use Sandbox rootfs for new workloads and plan to migrate existing Volume data. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for rootfs snapshots, restore, and forks.
+Sandbox Volumes are being retired and replaced by persistent Sandbox rootfs. Creating or mutating Volumes and attaching them to new Sandboxes is disabled. Existing Volume data remains readable for migration and can still be deleted after export. See [Snapshot And Restore](/docs/sandbox/snapshot-restore) for rootfs snapshots, restore, and forks.
 </Callout>
 
 Dynamic mount and unmount APIs are no longer part of the Sandbox API. Define the allowed mount paths in the template, then provide the Volume IDs for those paths in the claim request.

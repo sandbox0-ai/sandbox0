@@ -12,6 +12,15 @@ import (
 
 // === Sandbox Volume Management Handlers (→ Manager Storage) ===
 
+const sandboxVolumeRetiredMessage = "Sandbox Volumes are retired; use persistent Sandbox rootfs instead"
+
+// rejectSandboxVolumeMutation keeps legacy Volume reads and cleanup available
+// while preventing callers from creating or changing Volume data during the
+// retirement window.
+func (s *Server) rejectSandboxVolumeMutation(c *gin.Context) {
+	spec.JSONError(c, http.StatusGone, spec.CodeGone, sandboxVolumeRetiredMessage)
+}
+
 // proxyToManagerStorage forwards a volume request to manager storage.
 func (s *Server) proxyToManagerStorage(c *gin.Context) {
 	authCtx := middleware.GetAuthContext(c)

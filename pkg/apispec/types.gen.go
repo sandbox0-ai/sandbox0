@@ -925,7 +925,8 @@ type ClaimMountRequest struct {
 type ClaimRequest struct {
 	Config *SandboxConfig `json:"config,omitempty"`
 
-	// Mounts Optional claim-time Sandbox Volume bindings. A claim may bind any subset of template-declared mount points; omitted declared mount points remain writable rootfs-backed directories and are included in rootfs checkpoints.
+	// Mounts Retired claim-time Sandbox Volume bindings. New claims with this field return 410 Gone. Use writable Sandbox rootfs paths instead.
+	// Deprecated:
 	Mounts *[]ClaimMountRequest `json:"mounts,omitempty"`
 
 	// SnapshotId Optional sandbox rootfs snapshot ID used to initialize the claimed sandbox writable root filesystem.

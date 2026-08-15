@@ -94,6 +94,37 @@ func TestListSandboxesReturnsOK(t *testing.T) {
 	}
 }
 
+func TestClaimSandboxRejectsRetiredVolumeMounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	server := &Server{logger: zap.NewNop()}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{
+		"template":"default",
+		"mounts":[{"sandboxvolume_id":"vol-1","mount_point":"/workspace"}]
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{
+		TeamID: "team-1",
+		UserID: "user-1",
+	}))
+	ctx.Request = request
+
+	server.claimSandbox(ctx)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusGone)
+	}
+	var response spec.Response
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if response.Success || response.Error == nil || response.Error.Code != spec.CodeGone {
+		t.Fatalf("response = %+v, want gone error", response)
+	}
+}
+
 func TestListSandboxesRejectsNegativeOffset(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

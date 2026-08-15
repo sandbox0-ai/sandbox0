@@ -3472,6 +3472,7 @@ paths:
     post:
       tags: [sandbox-volumes]
       summary: Create sandbox volume
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3492,6 +3493,7 @@ paths:
     get:
       tags: [sandbox-volumes]
       summary: List sandbox volumes
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3507,6 +3509,7 @@ paths:
     get:
       tags: [sandbox-volumes]
       summary: Get sandbox volume
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3529,6 +3532,7 @@ paths:
     delete:
       tags: [sandbox-volumes]
       summary: Delete sandbox volume
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3559,6 +3563,7 @@ paths:
     post:
       tags: [sandbox-volumes]
       summary: Fork sandbox volume
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3588,6 +3593,7 @@ paths:
     post:
       tags: [files]
       summary: Move a volume file or directory
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3611,6 +3617,7 @@ paths:
     get:
       tags: [files]
       summary: Volume file watch WebSocket
+      deprecated: true
       description: |
         Upgrades to WebSocket for volume file watch events.
         Client messages:
@@ -3639,6 +3646,7 @@ paths:
     put:
       tags: [files]
       summary: Import a tar archive into a volume
+      deprecated: true
       description: |
         Streams a tar archive into a volume path. The archive is extracted under the `path` query parameter.
         Regular files overwrite existing files. Directories are created as needed. The import is not atomic;
@@ -3668,6 +3676,7 @@ paths:
     get:
       tags: [files]
       summary: Read volume file content
+      deprecated: true
       description: |
         Use query params:
         - path=/tmp/a.txt: target file path relative to the volume root
@@ -3698,6 +3707,7 @@ paths:
     post:
       tags: [files]
       summary: Write volume file or create directory
+      deprecated: true
       description: Use `path` query param and `mkdir=true` to create directories, otherwise writes file content.
       security:
         - bearerAuth: []
@@ -3731,6 +3741,7 @@ paths:
     delete:
       tags: [files]
       summary: Delete volume file or directory
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3749,6 +3760,7 @@ paths:
     get:
       tags: [files]
       summary: Stat a volume file
+      deprecated: true
       description: |
         Use query params:
         - path=/tmp/a.txt: target file path relative to the volume root
@@ -3770,6 +3782,7 @@ paths:
     get:
       tags: [files]
       summary: List volume directory entries
+      deprecated: true
       description: |
         Use query params:
         - path=/tmp: target directory path relative to the volume root
@@ -3791,6 +3804,7 @@ paths:
     post:
       tags: [snapshots]
       summary: Create snapshot
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3819,6 +3833,7 @@ paths:
     get:
       tags: [snapshots]
       summary: List snapshots
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3836,6 +3851,7 @@ paths:
     get:
       tags: [snapshots]
       summary: Get snapshot
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3859,6 +3875,7 @@ paths:
     delete:
       tags: [snapshots]
       summary: Delete snapshot
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -3877,6 +3894,7 @@ paths:
     post:
       tags: [snapshots]
       summary: Restore snapshot
+      deprecated: true
       security:
         - bearerAuth: []
       x-upstream-service: storage-proxy
@@ -5006,7 +5024,8 @@ components:
           $ref: "#/components/schemas/SandboxConfig"
         mounts:
           type: array
-          description: Optional claim-time Sandbox Volume bindings. A claim may bind any subset of template-declared mount points; omitted declared mount points remain writable rootfs-backed directories and are included in rootfs checkpoints.
+          deprecated: true
+          description: Retired claim-time Sandbox Volume bindings. New claims with this field return 410 Gone. Use writable Sandbox rootfs paths instead.
           items:
             $ref: "#/components/schemas/ClaimMountRequest"
       required: []

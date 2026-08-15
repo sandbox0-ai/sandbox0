@@ -33,6 +33,7 @@ const (
 	CodeUnauthorized        = "unauthorized"
 	CodeForbidden           = "forbidden"
 	CodeNotFound            = "not_found"
+	CodeGone                = "gone"
 	CodeConflict            = "conflict"
 	CodeTemplateNotReady    = "template_not_ready"
 	CodeSandboxResumeFailed = "sandbox_resume_failed"

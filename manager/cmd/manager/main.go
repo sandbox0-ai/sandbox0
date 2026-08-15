@@ -502,6 +502,7 @@ func main() {
 				templateStore,
 				sandboxStore,
 				k8sClient,
+				crdClient.Sandbox0V1alpha1(),
 				nil,
 				sandboxService.CtldAddressForPod,
 				templateimagefs.Config{

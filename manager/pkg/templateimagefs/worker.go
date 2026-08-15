@@ -12,6 +12,7 @@ import (
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	api "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	sandboxclient "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/typed/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -20,6 +21,7 @@ import (
 	templstore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -29,7 +31,7 @@ const (
 	importerLabel       = "sandbox0.ai/imagefs-import"
 	defaultPollInterval = 500 * time.Millisecond
 	defaultClaimTimeout = 5 * time.Second
-	defaultLease        = 10 * time.Minute
+	defaultLease        = 2 * time.Minute
 	defaultImportTTL    = 4 * time.Hour
 	claimErrorLogPeriod = 30 * time.Second
 )
@@ -66,14 +68,15 @@ type Worker struct {
 	queue       queue
 	heads       headStore
 	k8s         kubernetes.Interface
+	templates   sandboxclient.Sandbox0V1alpha1Interface
 	ctld        *ctldapi.Client
 	ctldAddress func(context.Context, *corev1.Pod) (string, error)
 	config      Config
 	logger      *zap.Logger
 }
 
-func NewWorker(q queue, heads headStore, k8sClient kubernetes.Interface, ctldClient *ctldapi.Client, ctldAddress func(context.Context, *corev1.Pod) (string, error), cfg Config, logger *zap.Logger) (*Worker, error) {
-	if q == nil || heads == nil || k8sClient == nil || ctldAddress == nil {
+func NewWorker(q queue, heads headStore, k8sClient kubernetes.Interface, templateClient sandboxclient.Sandbox0V1alpha1Interface, ctldClient *ctldapi.Client, ctldAddress func(context.Context, *corev1.Pod) (string, error), cfg Config, logger *zap.Logger) (*Worker, error) {
+	if q == nil || heads == nil || k8sClient == nil || templateClient == nil || ctldAddress == nil {
 		return nil, fmt.Errorf("template ImageFS worker dependencies are required")
 	}
 	cfg.WorkerID = strings.TrimSpace(cfg.WorkerID)
@@ -106,7 +109,7 @@ func NewWorker(q queue, heads headStore, k8sClient kubernetes.Interface, ctldCli
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Worker{queue: q, heads: heads, k8s: k8sClient, ctld: ctldClient, ctldAddress: ctldAddress, config: cfg, logger: logger}, nil
+	return &Worker{queue: q, heads: heads, k8s: k8sClient, templates: templateClient, ctld: ctldClient, ctldAddress: ctldAddress, config: cfg, logger: logger}, nil
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -247,6 +250,16 @@ func (w *Worker) importRevision(ctx context.Context, revision *template.Template
 	if err != nil || tpl == nil {
 		return fmt.Errorf("load template for ImageFS revision: %w", err)
 	}
+	namespace, err := templateNamespace(tpl)
+	if err != nil {
+		return err
+	}
+	// A manager can terminate after creating the importer but before its
+	// deferred cleanup runs. Once this worker owns the expired revision lease,
+	// any importer Pod for that revision is stale and safe to remove.
+	if err := w.deleteImportPods(ctx, namespace, revision.RevisionID); err != nil {
+		return err
+	}
 	desiredRevision, err := template.NewTemplateImageRevision(tpl)
 	if err != nil {
 		return fmt.Errorf("derive current template ImageFS revision: %w", err)
@@ -259,17 +272,14 @@ func (w *Worker) importRevision(ctx context.Context, revision *template.Template
 			desiredRevision.RevisionID,
 		)
 	}
-	namespace, err := templateNamespace(tpl)
-	if err != nil {
-		return err
-	}
 	pod, err := w.createImportPod(ctx, namespace, tpl, revision)
 	if err != nil {
 		return err
 	}
+	importPodNamespace, importPodName := pod.Namespace, pod.Name
 	defer func() {
 		grace := int64(0)
-		_ = w.k8s.CoreV1().Pods(pod.Namespace).Delete(context.WithoutCancel(ctx), pod.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+		_ = w.k8s.CoreV1().Pods(importPodNamespace).Delete(context.WithoutCancel(ctx), importPodName, metav1.DeleteOptions{GracePeriodSeconds: &grace})
 	}()
 	pod, err = w.waitForImportContainer(ctx, pod.Namespace, pod.Name)
 	if err != nil {
@@ -311,6 +321,10 @@ func (w *Worker) importRevision(ctx context.Context, revision *template.Template
 
 func (w *Worker) createImportPod(ctx context.Context, namespace string, tpl *template.Template, revision *template.TemplateImageRevision) (*corev1.Pod, error) {
 	resourceName := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	owner, err := w.templates.SandboxTemplates(namespace).Get(ctx, resourceName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("load ImageFS import Pod owner: %w", err)
+	}
 	resource := &api.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace}, Spec: *tpl.Spec.DeepCopy()}
 	resource.Spec.ClusterId = stringPointer(w.config.ClusterID)
 	resource.Spec.VolumeMounts = nil
@@ -337,12 +351,35 @@ func (w *Worker) createImportPod(ctx context.Context, namespace string, tpl *tem
 		Command:         []string{"/bin/sh", "-ec", "true"},
 		VolumeMounts:    []corev1.VolumeMount{{Name: primerVolume, MountPath: "/carrier-base", ReadOnly: true}},
 	}}, spec.InitContainers...)
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{GenerateName: "s0fs-import-", Namespace: namespace, Labels: map[string]string{importerLabel: revision.RevisionID}}, Spec: spec}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		GenerateName: "s0fs-import-",
+		Namespace:    namespace,
+		Labels:       map[string]string{importerLabel: revision.RevisionID},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: api.SchemeGroupVersion.String(), Kind: "SandboxTemplate", Name: owner.Name, UID: owner.UID,
+		}},
+	}, Spec: spec}
 	created, err := w.k8s.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("create ImageFS import Pod: %w", err)
 	}
 	return created, nil
+}
+
+func (w *Worker) deleteImportPods(ctx context.Context, namespace, revisionID string) error {
+	pods, err := w.k8s.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: importerLabel + "=" + revisionID,
+	})
+	if err != nil {
+		return fmt.Errorf("list stale ImageFS import Pods: %w", err)
+	}
+	grace := int64(0)
+	for i := range pods.Items {
+		if err := w.k8s.CoreV1().Pods(namespace).Delete(ctx, pods.Items[i].Name, metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete stale ImageFS import Pod %s: %w", pods.Items[i].Name, err)
+		}
+	}
+	return nil
 }
 
 func (w *Worker) waitForImportContainer(ctx context.Context, namespace, name string) (*corev1.Pod, error) {
@@ -352,8 +389,14 @@ func (w *Worker) waitForImportContainer(ctx context.Context, namespace, name str
 		if err != nil {
 			return false, err
 		}
-		for _, status := range pod.Status.ContainerStatuses {
+		for _, status := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
+			if status.State.Waiting != nil && isImportStartupFailure(status.State.Waiting.Reason) {
+				return false, fmt.Errorf("ImageFS import container %s failed to start (%s): %s", status.Name, status.State.Waiting.Reason, status.State.Waiting.Message)
+			}
 			if status.Name != "procd" {
+				if status.State.Terminated != nil && status.State.Terminated.ExitCode != 0 {
+					return false, fmt.Errorf("ImageFS import init container %s terminated: %s", status.Name, status.State.Terminated.Message)
+				}
 				continue
 			}
 			if status.State.Running != nil {
@@ -363,9 +406,6 @@ func (w *Worker) waitForImportContainer(ctx context.Context, namespace, name str
 			if status.State.Terminated != nil {
 				return false, fmt.Errorf("ImageFS import container terminated: %s", status.State.Terminated.Message)
 			}
-			if status.State.Waiting != nil && (status.State.Waiting.Reason == "ErrImagePull" || status.State.Waiting.Reason == "ImagePullBackOff") {
-				return false, fmt.Errorf("ImageFS import image pull failed: %s", status.State.Waiting.Message)
-			}
 		}
 		return false, nil
 	})
@@ -373,6 +413,15 @@ func (w *Worker) waitForImportContainer(ctx context.Context, namespace, name str
 		return nil, err
 	}
 	return ready, nil
+}
+
+func isImportStartupFailure(reason string) bool {
+	switch reason {
+	case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError", "RunContainerError":
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *Worker) renewLease(ctx context.Context, revisionID string, stop <-chan struct{}) {

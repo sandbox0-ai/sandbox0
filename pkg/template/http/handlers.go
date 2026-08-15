@@ -761,7 +761,8 @@ func (h *Handler) UpdateTemplate(c *gin.Context) {
 		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "template not found")
 		return
 	}
-	if !existing.ReadyForClaim() {
+	if existing.Status != nil && existing.Status.Creation != nil &&
+		existing.Status.Creation.State != v1alpha1.TemplateCreationStateReady {
 		message := "template is not ready"
 		if existing.Status != nil && existing.Status.Creation != nil {
 			creation := existing.Status.Creation

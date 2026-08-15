@@ -307,6 +307,13 @@ func TestMigrationsUpgradeLegacyVersionFiveSchema(t *testing.T) {
 			observed_at TIMESTAMPTZ NOT NULL, unbilled_byte_nanoseconds BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (subject_type, subject_id)
 		);
+		INSERT INTO metering.storage_projection_state (
+			subject_type, subject_id, team_id, sandbox_id, volume_id, snapshot_id,
+			region_id, size_bytes, observed_at
+		) VALUES
+			('rootfs', 'sandbox-1', 'team-1', 'sandbox-1', NULL, NULL, 'region-1', 1024, '2026-08-01T00:00:00Z'),
+			('volume', 'volume-1', 'team-1', NULL, 'volume-1', NULL, 'region-1', 2048, '2026-08-01T00:01:00Z'),
+			('snapshot', 'snapshot-1', 'team-1', NULL, 'volume-1', 'snapshot-1', 'region-1', 2048, '2026-08-01T00:02:00Z');
 	`)
 	if err != nil {
 		t.Fatalf("create legacy schema: %v", err)
@@ -317,6 +324,31 @@ func TestMigrationsUpgradeLegacyVersionFiveSchema(t *testing.T) {
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 6 AND is_applied`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 7 AND is_applied`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 8 AND is_applied`, 1)
+	assertCount(t, pool, `SELECT COUNT(*) FROM metering.storage_projection_state WHERE subject_type = 'rootfs'`, 1)
+	assertCount(t, pool, `SELECT COUNT(*) FROM metering.storage_projection_state WHERE subject_type IN ('volume', 'snapshot')`, 0)
+	assertCount(t, pool, `SELECT COUNT(*) FROM metering.projection_outbox WHERE operation_type = 'storage_state_delete'`, 2)
+	repo := NewRepository(pool)
+	batch, err := repo.ClaimNextBatch(ctx, "migration-test", time.Minute)
+	if err != nil || batch == nil {
+		t.Fatalf("claim retirement tombstones = (%#v, %v)", batch, err)
+	}
+	projectionBatch, err := decodeProjectionBatch(batch.Operations)
+	if err != nil {
+		t.Fatalf("decode retirement tombstones: %v", err)
+	}
+	if len(projectionBatch.StorageMutations) != 2 {
+		t.Fatalf("retirement storage mutations = %#v, want 2", projectionBatch.StorageMutations)
+	}
+	retiredSubjects := map[string]bool{}
+	for _, mutation := range projectionBatch.StorageMutations {
+		if mutation == nil || mutation.State == nil || !mutation.Deleted || mutation.DeletedAt.IsZero() {
+			t.Fatalf("invalid retirement tombstone: %#v", mutation)
+		}
+		retiredSubjects[mutation.State.SubjectType+"/"+mutation.State.SubjectID] = true
+	}
+	if !retiredSubjects["volume/volume-1"] || !retiredSubjects["snapshot/snapshot-1"] {
+		t.Fatalf("retired subjects = %#v", retiredSubjects)
+	}
 	var tableName string
 	if err := pool.QueryRow(ctx, `SELECT to_regclass('metering.projection_outbox')::text`).Scan(&tableName); err != nil || tableName == "" {
 		t.Fatalf("projection_outbox after migration = %q, %v", tableName, err)

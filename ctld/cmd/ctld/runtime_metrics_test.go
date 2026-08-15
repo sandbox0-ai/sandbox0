@@ -91,7 +91,8 @@ func TestCtldRuntimeMetricsProducerPostsAuthorizedRuntimeSample(t *testing.T) {
 	generator := internalauth.NewGenerator(internalauth.GeneratorConfig{Caller: "ctld", PrivateKey: privateKey, TTL: time.Minute})
 	statsCalled := make(chan struct{}, 1)
 	producer, err := newCtldRuntimeMetricsProducer(&config.CtldConfig{
-		StorageProxyConfig:                          config.StorageProxyConfig{RegionID: "region-a", DefaultClusterId: "cluster-a"},
+		RegionID:         "region-a",
+		DefaultClusterId: "cluster-a",
 		SandboxObservabilityRuntimeSamplesIngestURL: server.URL + "/internal/v1/sandbox-observability/runtime-samples",
 		SandboxObservabilityIngestQueueSize:         10,
 		SandboxObservabilityIngestBatchSize:         100,

@@ -4,7 +4,7 @@ This page explains Sandbox0 from an AI agent developer perspective: how to think
 
 ## The Mental Model
 
-Think in six building blocks:
+Think in five building blocks:
 
 | Concept | What It Is | Why Agent Developers Care |
 |-------|-------------|---------------------------|
@@ -13,25 +13,23 @@ Think in six building blocks:
 | Root filesystem | The sandbox writable filesystem checkpointed during pause/resume. | Keeps files written inside the sandbox available when compute is released and later restored. |
 | `Context` | A one-shot command or stateful REPL process inside the sandbox. | Provides direct command and REPL execution for active work. |
 | Supervised session | A stable process identity with attempts, lifecycle policy, and a replayable event journal. | Keeps long-running work controllable across client reconnects and sandbox runtime replacement. |
-| `Volume` | Persistent storage decoupled from sandbox lifecycle. | Keeps knowledge, artifacts, and checkpoints across sandbox recreation. |
 
 The key idea is separation of concerns:
 - Use `Template` for environment consistency.
 - Use `Sandbox` for isolated execution.
-- Use the root filesystem for same-sandbox file continuity across pause/resume.
+- Use the root filesystem for same-sandbox file continuity across pause/resume, and named rootfs snapshots for reusable restore points.
 - Use `Context` for one-shot commands and REPL interaction.
 - Use supervised sessions for long-running, reconnectable, restartable processes.
-- Use `Volume` for durable, shareable, or snapshot-ready memory.
 
 ## Agent Runtime vs Agent Memory
 
 A common confusion is mixing compute state and durable state.
 
 - Process state lives in the sandbox runtime and disappears when the runtime is paused or replaced. A supervised session can preserve its identity, specification, and journal, then start a new attempt; it does not preserve process memory or sockets.
-- Sandbox0 restores the writable root filesystem checkpoint for paused sandboxes, so files written outside mounted volumes survive pause/resume for the same sandbox identity.
-- The rootfs checkpoint is not a Volume. It is not shareable across sandboxes, does not expose volume snapshot/fork APIs, and is deleted with the sandbox identity.
-- Durable state that must survive sandbox delete or `hard_ttl`, needs snapshots, or needs sharing outside the sandbox identity should be written to volumes or external systems.
-- If your agent must recover after failures or redeploys, treat sandbox runtime as ephemeral and volumes as the source of truth.
+- Sandbox0 restores the writable root filesystem checkpoint for paused sandboxes, so files survive pause/resume for the same sandbox identity.
+- A named rootfs snapshot can initialize a new sandbox, restore a paused sandbox, or serve as the source for a fork.
+- Current rootfs state is deleted with the sandbox identity. Create a named snapshot before deletion when you need a reusable restore point; use an external system for data that must be shared independently of sandbox identity.
+- If your agent must recover after failures or redeploys, treat process state as ephemeral and checkpoint progress to the rootfs or an external system.
 
 <Callout variant="info">
 Design for restartability: assume any sandbox can be replaced, and your agent should still continue from persisted checkpoints.
@@ -80,7 +78,7 @@ In practice, many agents combine both:
 Sandbox0 works well for fan-out workloads:
 
 - Run separate sandboxes per task for strong isolation.
-- Share durable outputs through volumes or external storage.
+- Share durable outputs through an external storage or coordination service when they must cross sandbox identities.
 - Keep coordination outside the sandbox boundary (scheduler/orchestrator layer).
 
 This keeps each agent worker simple while allowing safe parallel execution.

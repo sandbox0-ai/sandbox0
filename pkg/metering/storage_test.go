@@ -8,8 +8,8 @@ import (
 func TestStorageWindowFromStateCarriesFractionalByteHours(t *testing.T) {
 	start := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
 	state := &StorageProjectionState{
-		SubjectType: SubjectTypeVolume,
-		SubjectID:   "volume-1",
+		SubjectType: SubjectTypeRootFS,
+		SubjectID:   "sandbox-1",
 		SizeBytes:   1,
 		ObservedAt:  start,
 	}

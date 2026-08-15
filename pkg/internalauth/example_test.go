@@ -31,11 +31,11 @@ func ExampleGenerator() {
 
 	// Generate a token for calling manager's storage endpoint.
 	token, err := generator.Generate(
-		"manager-storage", // target
-		"team-123",        // team ID
-		"user-456",        // user ID
+		"manager",  // target
+		"team-123", // team ID
+		"user-456", // user ID
 		internalauth.GenerateOptions{ // options
-			Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
+			Permissions: []string{"sandbox:read", "sandbox:write"},
 			UserID:      "user-456",
 		},
 	)
@@ -55,14 +55,14 @@ func ExampleValidator() {
 		Caller:     "cluster-gateway",
 		PrivateKey: examplePrivateKey,
 	})
-	token, _ := generator.Generate("manager-storage", "team-123", "user-456",
+	token, _ := generator.Generate("manager", "team-123", "user-456",
 		internalauth.GenerateOptions{
-			Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
+			Permissions: []string{"sandbox:read", "sandbox:write"},
 		})
 
 	// Create a validator for the target service
 	validator := internalauth.NewValidator(internalauth.ValidatorConfig{
-		Target:    "manager-storage",
+		Target:    "manager",
 		PublicKey: examplePublicKey,
 	})
 
@@ -74,5 +74,5 @@ func ExampleValidator() {
 
 	fmt.Printf("Caller: %s, Team: %s, Permissions: %v\n",
 		claims.Caller, claims.TeamID, claims.Permissions)
-	// Output: Caller: cluster-gateway, Team: team-123, Permissions: [sandboxvolume:read sandboxvolume:write]
+	// Output: Caller: cluster-gateway, Team: team-123, Permissions: [sandbox:read sandbox:write]
 }

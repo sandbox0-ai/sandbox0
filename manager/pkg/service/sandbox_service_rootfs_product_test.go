@@ -123,10 +123,6 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 			Ingress: managerapi.SandboxAppServiceIngress{Public: true},
 		}},
 	}
-	store.records["sandbox-1"].Mounts = []managerapi.ClaimMount{{
-		SandboxVolumeID: "volume-1",
-		MountPoint:      "/workspace/data",
-	}}
 	svc := rootFSProductTestService(store)
 
 	snapshot, err := svc.CreateSandboxRootFSSnapshot(context.Background(), "sandbox-1", "team-1", &CreateSandboxRootFSSnapshotRequest{
@@ -163,7 +159,6 @@ func TestSandboxRootFSProductSnapshotsRestoresAndForksPausedSandbox(t *testing.T
 	assert.Equal(t, "team-1", forkResp.Sandbox.TeamID)
 	assert.Equal(t, "user-2", forkResp.Sandbox.UserID)
 	assert.Equal(t, managerapi.SandboxStatusPaused, forkResp.Sandbox.Status)
-	assert.Empty(t, forkResp.Sandbox.Mounts)
 	assert.Len(t, forkResp.Sandbox.Services, 1)
 	assert.Equal(t, "layer-v1", store.rootFSStates[forkResp.Sandbox.ID].LayerID)
 

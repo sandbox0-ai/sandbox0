@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 )
 
 type DB interface {
@@ -31,8 +30,6 @@ type PolicyStore interface {
 
 type UsageStore interface {
 	CurrentUsage(ctx context.Context, teamID string, dimension Dimension) (int64, error)
-	ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error)
-	AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error)
 }
 
 // NewRepository creates a quota repository backed by db.
@@ -173,106 +170,6 @@ func (r *Repository) CurrentUsage(ctx context.Context, teamID string, dimension 
 		return store.CurrentUsage(ctx, teamID, dimension)
 	}
 	return 0, ErrUsageStoreNotConfigured
-}
-
-func (r *Repository) CheckProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (Decision, error) {
-	teamID = strings.TrimSpace(teamID)
-	if teamID == "" {
-		return Decision{}, fmt.Errorf("team_id is required")
-	}
-	limit, err := r.GetLimit(ctx, teamID, dimension)
-	if err != nil {
-		return Decision{}, err
-	}
-	if limit == nil {
-		return Check(teamID, dimension, 0, 0, nil), nil
-	}
-	requested := BytesToGBRoundUp(sizeBytes)
-	if decision := Check(teamID, dimension, 0, requested, limit); !decision.Allowed {
-		return decision, decision.Err()
-	}
-	projected, err := r.ProjectedStorageUsageGB(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
-	if err != nil {
-		return Decision{}, err
-	}
-	decision := Check(teamID, dimension, projected, 0, limit)
-	return decision, decision.Err()
-}
-
-func (r *Repository) CheckAdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (Decision, error) {
-	teamID = strings.TrimSpace(teamID)
-	if teamID == "" {
-		return Decision{}, fmt.Errorf("team_id is required")
-	}
-	if additionalBytes <= 0 {
-		return Check(teamID, dimension, 0, 0, nil), nil
-	}
-	limit, err := r.GetLimit(ctx, teamID, dimension)
-	if err != nil {
-		return Decision{}, err
-	}
-	if limit == nil {
-		return Check(teamID, dimension, 0, 0, nil), nil
-	}
-	requested := BytesToGBRoundUp(additionalBytes)
-	if decision := Check(teamID, dimension, 0, requested, limit); !decision.Allowed {
-		return decision, decision.Err()
-	}
-	projected, err := r.AdditionalStorageUsageGB(ctx, teamID, dimension, subjectType, additionalBytes)
-	if err != nil {
-		return Decision{}, err
-	}
-	decision := Check(teamID, dimension, projected, 0, limit)
-	return decision, decision.Err()
-}
-
-func (r *Repository) ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
-	teamID = strings.TrimSpace(teamID)
-	subjectID = strings.TrimSpace(subjectID)
-	if teamID == "" {
-		return 0, fmt.Errorf("team_id is required")
-	}
-	if subjectID == "" {
-		return 0, fmt.Errorf("subject_id is required")
-	}
-	if sizeBytes < 0 {
-		return 0, fmt.Errorf("size_bytes must be non-negative")
-	}
-	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
-		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
-	}
-	if store, ok := r.configuredUsageStore(); ok {
-		return store.ProjectedStorageUsageGB(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
-	}
-	return 0, ErrUsageStoreNotConfigured
-}
-
-func (r *Repository) AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error) {
-	teamID = strings.TrimSpace(teamID)
-	if teamID == "" {
-		return 0, fmt.Errorf("team_id is required")
-	}
-	if additionalBytes < 0 {
-		return 0, fmt.Errorf("additional_bytes must be non-negative")
-	}
-	if !storageDimensionMatchesSubjectType(dimension, subjectType) {
-		return 0, fmt.Errorf("quota dimension %q does not match storage subject_type %q", dimension, subjectType)
-	}
-	if store, ok := r.configuredUsageStore(); ok {
-		return store.AdditionalStorageUsageGB(ctx, teamID, dimension, subjectType, additionalBytes)
-	}
-	return 0, ErrUsageStoreNotConfigured
-}
-
-func storageDimensionMatchesSubjectType(dimension Dimension, subjectType string) bool {
-	switch dimension {
-	case DimensionVolumeStorageGB:
-		return subjectType == metering.SubjectTypeVolume
-	case DimensionSnapshotGB:
-		return subjectType == metering.SubjectTypeSnapshot
-	default:
-		return false
-	}
 }
 
 func (r *Repository) PutLimit(ctx context.Context, limit *Limit) error {

@@ -77,14 +77,6 @@ type RootFSLayerDescriptor struct {
 	Descriptor    RootFSDiffDescriptor `json:"descriptor"`
 }
 
-// RootFSPortalPath maps an unbound volume portal's visible mount path to the
-// node-local backing directory that should be checkpointed as rootfs content.
-type RootFSPortalPath struct {
-	PortalName  string `json:"portal_name,omitempty"`
-	MountPath   string `json:"mount_path"`
-	BackingPath string `json:"backing_path"`
-}
-
 type InspectRootFSRequest struct {
 	Target RootFSContainerRef `json:"target"`
 }
@@ -102,7 +94,6 @@ type SaveRootFSRequest struct {
 	ParentLayerID             string             `json:"parent_layer_id,omitempty"`
 	ObjectKey                 string             `json:"object_key,omitempty"`
 	ExcludedPaths             []string           `json:"excluded_paths,omitempty"`
-	PortalPaths               []RootFSPortalPath `json:"portal_paths,omitempty"`
 }
 
 type SaveRootFSResponse struct {
@@ -115,7 +106,6 @@ type PrepareRootFSSnapshotRequest struct {
 	Target        RootFSContainerRef `json:"target"`
 	ParentLayerID string             `json:"parent_layer_id,omitempty"`
 	ExcludedPaths []string           `json:"excluded_paths,omitempty"`
-	PortalPaths   []RootFSPortalPath `json:"portal_paths,omitempty"`
 }
 
 type PrepareRootFSSnapshotResponse struct {
@@ -161,7 +151,6 @@ type ApplyRootFSRequest struct {
 	Layers                      []RootFSLayerDescriptor `json:"layers,omitempty"`
 	Descriptor                  RootFSDiffDescriptor    `json:"descriptor"`
 	ExcludedPaths               []string                `json:"excluded_paths,omitempty"`
-	PortalPaths                 []RootFSPortalPath      `json:"portal_paths,omitempty"`
 }
 
 type ApplyRootFSResponse struct {
@@ -170,108 +159,4 @@ type ApplyRootFSResponse struct {
 	Layers     []RootFSLayerDescriptor `json:"layers,omitempty"`
 	Applied    bool                    `json:"applied"`
 	Error      string                  `json:"error,omitempty"`
-}
-
-// BindVolumePortalRequest binds one pre-published pod portal to a concrete
-// sandbox volume at claim time.
-type BindVolumePortalRequest struct {
-	Namespace       string `json:"namespace"`
-	PodName         string `json:"pod_name"`
-	PodUID          string `json:"pod_uid"`
-	PortalName      string `json:"portal_name,omitempty"`
-	MountPath       string `json:"mount_path"`
-	SandboxID       string `json:"sandbox_id"`
-	TeamID          string `json:"team_id"`
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-}
-
-// BindVolumePortalResponse describes the node-local mount session created by ctld.
-type BindVolumePortalResponse struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-	MountPoint      string `json:"mount_point"`
-	MountedAt       string `json:"mounted_at"`
-	Error           string `json:"error,omitempty"`
-}
-
-// UnbindVolumePortalRequest releases a bound portal and flushes local state.
-type UnbindVolumePortalRequest struct {
-	Namespace       string `json:"namespace"`
-	PodName         string `json:"pod_name"`
-	PodUID          string `json:"pod_uid"`
-	PortalName      string `json:"portal_name,omitempty"`
-	MountPath       string `json:"mount_path"`
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-	// RetainHot is set only for an intentional pause. Delete and stale-runtime
-	// cleanup must close the engine instead of polluting the resume cache.
-	RetainHot bool `json:"retain_hot,omitempty"`
-}
-
-type UnbindVolumePortalResponse struct {
-	Unbound bool   `json:"unbound"`
-	Error   string `json:"error,omitempty"`
-}
-
-// CheckVolumePortalsRequest checks that pod-local portal mounts have been
-// published by kubelet before the sandbox is considered claim-ready.
-type CheckVolumePortalsRequest struct {
-	PodUID  string            `json:"pod_uid"`
-	Portals []VolumePortalRef `json:"portals,omitempty"`
-}
-
-type VolumePortalRef struct {
-	PortalName string `json:"portal_name,omitempty"`
-	MountPath  string `json:"mount_path,omitempty"`
-}
-
-type CheckVolumePortalsResponse struct {
-	Ready   bool     `json:"ready"`
-	Missing []string `json:"missing,omitempty"`
-	Error   string   `json:"error,omitempty"`
-}
-
-type PrepareVolumeSnapshotCheckpointRequest struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-}
-
-type PrepareVolumeSnapshotCheckpointResponse struct {
-	Prepared bool   `json:"prepared"`
-	Error    string `json:"error,omitempty"`
-}
-
-type CompleteVolumeSnapshotCheckpointRequest struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-}
-
-type CompleteVolumeSnapshotCheckpointResponse struct {
-	Completed bool   `json:"completed"`
-	Error     string `json:"error,omitempty"`
-}
-
-type AbortVolumeSnapshotCheckpointRequest struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-}
-
-type AbortVolumeSnapshotCheckpointResponse struct {
-	Aborted bool   `json:"aborted"`
-	Error   string `json:"error,omitempty"`
-}
-
-type AttachVolumeOwnerRequest struct {
-	TeamID          string `json:"team_id"`
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-}
-
-type AttachVolumeOwnerResponse struct {
-	Attached bool   `json:"attached"`
-	Error    string `json:"error,omitempty"`
-}
-
-type ReleaseVolumeOwnerRequest struct {
-	SandboxVolumeID string `json:"sandboxvolume_id"`
-}
-
-type ReleaseVolumeOwnerResponse struct {
-	Released bool   `json:"released"`
-	Busy     bool   `json:"busy,omitempty"`
-	Error    string `json:"error,omitempty"`
 }

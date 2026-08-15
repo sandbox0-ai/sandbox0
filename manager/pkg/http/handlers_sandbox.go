@@ -43,7 +43,6 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	}
 	req.TeamID = claims.TeamID
 	req.UserID = claims.UserID
-
 	if req.Template == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
 		return

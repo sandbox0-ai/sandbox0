@@ -49,7 +49,6 @@ const (
 	SourceNetd           Source = "netd"
 	SourceProcd          Source = "procd"
 	SourceCtld           Source = "ctld"
-	SourceStorageProxy   Source = "storage_proxy"
 )
 
 type EventType string
@@ -526,7 +525,7 @@ func (DisabledRepository) InsertRuntimeSamples(context.Context, []RuntimeSample)
 
 func ValidSource(source Source) bool {
 	switch source {
-	case SourceClusterGateway, SourceManager, SourceNetd, SourceProcd, SourceCtld, SourceStorageProxy:
+	case SourceClusterGateway, SourceManager, SourceNetd, SourceProcd, SourceCtld:
 		return true
 	default:
 		return false

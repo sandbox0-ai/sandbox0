@@ -212,12 +212,6 @@ func codingAgentTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 				RunAsNonRoot: &runAsNonRoot,
 			},
 		},
-		VolumeMounts: []templatev1alpha1.VolumeMountSpec{
-			{
-				Name:      template.DefaultTemplateWorkspaceName,
-				MountPath: template.DefaultTemplateWorkspaceMount,
-			},
-		},
 		EnvVars: map[string]string{
 			"DISABLE_AUTOUPDATER":         "1",
 			"HOME":                        template.DefaultTemplateWorkspaceMount,
@@ -259,16 +253,12 @@ func defaultBuiltinTemplateSpec(templateID string) templatev1alpha1.SandboxTempl
 		},
 	}
 	if templateID == template.DefaultTemplateID {
-		spec.VolumeMounts = []templatev1alpha1.VolumeMountSpec{{
-			Name:      template.DefaultTemplateWorkspaceName,
-			MountPath: template.DefaultTemplateWorkspaceMount,
-		}}
 		applyDockerRuntime(&spec)
 	}
 	return spec
 }
 
-// applyDockerRuntime enables a sandbox-local Docker daemon and keeps its state outside the root filesystem.
+// applyDockerRuntime enables a sandbox-local Docker daemon with ephemeral Docker state.
 func applyDockerRuntime(spec *templatev1alpha1.SandboxTemplateSpec) {
 	if spec.MainContainer.SecurityContext == nil {
 		spec.MainContainer.SecurityContext = &templatev1alpha1.SecurityContext{}
@@ -306,10 +296,6 @@ func openClawTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 				RunAsNonRoot: &runAsNonRoot,
 			},
 		},
-		VolumeMounts: []templatev1alpha1.VolumeMountSpec{{
-			Name:      "openclaw-data",
-			MountPath: template.OpenClawDataMount,
-		}},
 		Pod: &templatev1alpha1.PodSpecOverride{
 			EmptyDirMounts: []templatev1alpha1.EmptyDirMountSpec{{
 				MountPath: template.AgentWorkspaceMount,
@@ -351,10 +337,6 @@ func hermesTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 				RunAsNonRoot: &runAsNonRoot,
 			},
 		},
-		VolumeMounts: []templatev1alpha1.VolumeMountSpec{{
-			Name:      "hermes-data",
-			MountPath: template.HermesDataMount,
-		}},
 		Pod: &templatev1alpha1.PodSpecOverride{
 			EmptyDirMounts: []templatev1alpha1.EmptyDirMountSpec{{
 				MountPath: template.AgentWorkspaceMount,
@@ -396,10 +378,6 @@ func browserTemplateSpec() templatev1alpha1.SandboxTemplateSpec {
 				RunAsNonRoot: &runAsNonRoot,
 			},
 		},
-		VolumeMounts: []templatev1alpha1.VolumeMountSpec{{
-			Name:      template.BrowserDownloadsMountName,
-			MountPath: template.BrowserDownloadsMount,
-		}},
 		Pod: &templatev1alpha1.PodSpecOverride{
 			EmptyDirMounts: []templatev1alpha1.EmptyDirMountSpec{{
 				MountPath: template.BrowserDevShmMount,

@@ -8,13 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -81,7 +78,6 @@ type Assignment struct {
 	RuntimeGeneration       int64             `json:"runtime_generation"`
 	EnvVars                 map[string]string `json:"env_vars,omitempty"`
 	Webhook                 *WebhookConfig    `json:"webhook,omitempty"`
-	MountDirs               []string          `json:"mount_dirs,omitempty"`
 	ResetCopiedSessionState bool              `json:"reset_copied_session_state,omitempty"`
 }
 
@@ -169,7 +165,6 @@ func AssignmentFromPod(pod *corev1.Pod) (*Assignment, string, error) {
 		RuntimeGeneration:       generation,
 		EnvVars:                 envVars,
 		Webhook:                 cfg.Webhook,
-		MountDirs:               portalMountDirs(pod),
 		ResetCopiedSessionState: strings.EqualFold(strings.TrimSpace(annotations[AnnotationResetCopiedState]), "true"),
 	}
 	revision, err := assignment.Revision()
@@ -188,37 +183,4 @@ func cloneStringMap(source map[string]string) map[string]string {
 		result[key] = value
 	}
 	return result
-}
-
-func portalMountDirs(pod *corev1.Pod) []string {
-	portalVolumes := make(map[string]struct{})
-	for i := range pod.Spec.Volumes {
-		volume := &pod.Spec.Volumes[i]
-		if volume.CSI == nil || volume.CSI.Driver != volumeportal.DriverName {
-			continue
-		}
-		if volume.CSI.VolumeAttributes[volumeportal.AttributePortalName] == volumeportal.WebhookStatePortalName {
-			continue
-		}
-		portalVolumes[volume.Name] = struct{}{}
-	}
-	var dirs []string
-	for i := range pod.Spec.Containers {
-		container := &pod.Spec.Containers[i]
-		if container.Name != ProcdContainerName {
-			continue
-		}
-		for _, mount := range container.VolumeMounts {
-			if _, ok := portalVolumes[mount.Name]; !ok {
-				continue
-			}
-			dir := filepath.Clean(strings.TrimSpace(mount.MountPath))
-			if dir == "." || dir == string(filepath.Separator) || !filepath.IsAbs(dir) {
-				continue
-			}
-			dirs = append(dirs, dir)
-		}
-	}
-	sort.Strings(dirs)
-	return dirs
 }

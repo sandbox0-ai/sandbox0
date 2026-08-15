@@ -666,7 +666,6 @@ func templateSpecFromSandboxSource(source v1alpha1.SandboxTemplateSpec, override
 	out.MainContainer.SecurityContext = nil
 	out.MainContainer.ImagePullPolicy = ""
 	out.ClusterId = nil
-	out.VolumeMounts = nil
 	out.Pool = v1alpha1.PoolStrategy{}
 	if overrides == nil {
 		return out

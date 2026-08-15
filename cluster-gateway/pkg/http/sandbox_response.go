@@ -35,16 +35,6 @@ func sandboxToAPI(sandbox *mgr.Sandbox, sshInfo *sharedssh.ConnectionInfo) *apis
 		memory := sandbox.Resources.Memory
 		payload.Resources = &apispec.SandboxResourceConfig{Memory: &memory}
 	}
-	if sandbox.Mounts != nil {
-		mounts := make([]apispec.ClaimMountRequest, len(sandbox.Mounts))
-		for i, mount := range sandbox.Mounts {
-			mounts[i] = apispec.ClaimMountRequest{
-				MountPoint:      mount.MountPoint,
-				SandboxvolumeId: mount.SandboxVolumeID,
-			}
-		}
-		payload.Mounts = &mounts
-	}
 	if sshInfo != nil {
 		payload.Ssh = &apispec.SandboxSSHConnection{
 			Host:     sshInfo.Host,

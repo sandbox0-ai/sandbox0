@@ -28,8 +28,8 @@ func TestGeneratorGenerate(t *testing.T) {
 		TTL:        30 * time.Second,
 	})
 
-	token, err := generator.Generate("manager-storage", "team-123", "user-456", GenerateOptions{
-		Permissions: []string{"sandboxvolume:read"},
+	token, err := generator.Generate("manager", "team-123", "user-456", GenerateOptions{
+		Permissions: []string{"sandbox:read"},
 	})
 
 	if err != nil {
@@ -54,12 +54,12 @@ func TestValidatorValidate(t *testing.T) {
 	})
 
 	validator := NewValidator(ValidatorConfig{
-		Target:    "manager-storage",
+		Target:    "manager",
 		PublicKey: testPublicKey,
 	})
 
-	token, _ := generator.Generate("manager-storage", "team-123", "user-456", GenerateOptions{
-		Permissions: []string{"sandboxvolume:read"},
+	token, _ := generator.Generate("manager", "team-123", "user-456", GenerateOptions{
+		Permissions: []string{"sandbox:read"},
 		SandboxID:   "sandbox-123",
 	})
 
@@ -97,40 +97,12 @@ func TestValidatorInvalidTarget(t *testing.T) {
 		PublicKey: testPublicKey,
 	})
 
-	token, _ := generator.Generate("manager-storage", "team-123", "user-456", GenerateOptions{})
+	token, _ := generator.Generate("procd", "team-123", "user-456", GenerateOptions{})
 
 	_, err := validator.Validate(token)
 
 	if !errors.Is(err, ErrInvalidTarget) {
 		t.Errorf("Expected ErrInvalidTarget, got: %v", err)
-	}
-}
-
-func TestValidatorRejectsLegacyStorageProxyTarget(t *testing.T) {
-	generator := NewGenerator(GeneratorConfig{
-		Caller:     ServiceClusterGateway,
-		PrivateKey: testPrivateKey,
-		TTL:        30 * time.Second,
-	})
-	validator := NewValidator(ValidatorConfig{
-		Target:    ServiceManagerStorage,
-		PublicKey: testPublicKey,
-	})
-
-	canonicalToken, err := generator.Generate(ServiceManagerStorage, "team-123", "user-456", GenerateOptions{})
-	if err != nil {
-		t.Fatalf("generate canonical token: %v", err)
-	}
-	if _, err := validator.Validate(canonicalToken); err != nil {
-		t.Fatalf("validate canonical token: %v", err)
-	}
-
-	legacyToken, err := generator.Generate("storage-proxy", "team-123", "user-456", GenerateOptions{})
-	if err != nil {
-		t.Fatalf("generate legacy token: %v", err)
-	}
-	if _, err := validator.Validate(legacyToken); !errors.Is(err, ErrInvalidTarget) {
-		t.Fatalf("validate legacy storage-proxy target error = %v, want ErrInvalidTarget", err)
 	}
 }
 
@@ -148,11 +120,11 @@ func TestValidatorInvalidSignature(t *testing.T) {
 	})
 
 	validator := NewValidator(ValidatorConfig{
-		Target:    "manager-storage",
+		Target:    "manager",
 		PublicKey: testPublicKey, // Different public key
 	})
 
-	token, _ := generator.Generate("manager-storage", "team-123", "user-456", GenerateOptions{})
+	token, _ := generator.Generate("manager", "team-123", "user-456", GenerateOptions{})
 
 	_, err = validator.Validate(token)
 
@@ -174,14 +146,14 @@ func TestValidatorTokenExpired(t *testing.T) {
 	})
 
 	validator := NewValidator(ValidatorConfig{
-		Target:    "manager-storage",
+		Target:    "manager",
 		PublicKey: testPublicKey,
 		NowFunc: func() time.Time {
 			return now.Add(2 * time.Second) // Time is past expiration
 		},
 	})
 
-	token, _ := generator.Generate("manager-storage", "team-123", "user-456", GenerateOptions{})
+	token, _ := generator.Generate("manager", "team-123", "user-456", GenerateOptions{})
 
 	_, err := validator.Validate(token)
 
@@ -197,12 +169,12 @@ func TestValidatorAllowedCallers(t *testing.T) {
 	})
 
 	validator := NewValidator(ValidatorConfig{
-		Target:         "manager-storage",
+		Target:         "manager",
 		PublicKey:      testPublicKey,
 		AllowedCallers: []string{"manager", "procd"}, // Not cluster-gateway
 	})
 
-	token, _ := generator.Generate("manager-storage", "team-123", "user-456", GenerateOptions{})
+	token, _ := generator.Generate("manager", "team-123", "user-456", GenerateOptions{})
 
 	_, err := validator.Validate(token)
 
@@ -218,17 +190,17 @@ func TestValidateWithOptions(t *testing.T) {
 	})
 
 	validator := NewValidator(ValidatorConfig{
-		Target:    "manager-storage",
+		Target:    "manager",
 		PublicKey: testPublicKey,
 	})
 
-	token, _ := generator.Generate("manager-storage", "team-123", "user-456", GenerateOptions{
-		Permissions: []string{"sandboxvolume:read", "sandboxvolume:write"},
+	token, _ := generator.Generate("manager", "team-123", "user-456", GenerateOptions{
+		Permissions: []string{"sandbox:read", "sandbox:write"},
 	})
 
 	// Test with required permissions
 	_, err := validator.ValidateWithOptions(token, ValidateOptions{
-		RequirePermissions: []string{"sandboxvolume:read"},
+		RequirePermissions: []string{"sandbox:read"},
 	})
 
 	if err != nil {
@@ -280,12 +252,12 @@ func TestReplayDetection(t *testing.T) {
 	})
 
 	validator := NewValidator(ValidatorConfig{
-		Target:                 "manager-storage",
+		Target:                 "manager",
 		PublicKey:              testPublicKey,
 		ReplayDetectionEnabled: true,
 	})
 
-	token, _ := generator.Generate("manager-storage", "team-123", "user-456", GenerateOptions{})
+	token, _ := generator.Generate("manager", "team-123", "user-456", GenerateOptions{})
 
 	// First validation should succeed
 	_, err := validator.Validate(token)

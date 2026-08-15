@@ -28,7 +28,7 @@ import (
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	"github.com/sandbox0-ai/sandbox0/internal/framework"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"

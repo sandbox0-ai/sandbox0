@@ -37,16 +37,16 @@ const (
 	ObjectEncryptionSecretSuffix = "object-encryption-key"
 	ObjectEncryptionSecretKey    = "private.key"
 	ObjectEncryptionKeyFilename  = "object_rsa_private.pem"
-	ObjectEncryptionMountDir     = "/etc/storage-proxy/objectstore"
+	ObjectEncryptionMountDir     = "/etc/sandbox0/objectstore"
 	ObjectEncryptionKeyPath      = ObjectEncryptionMountDir + "/" + ObjectEncryptionKeyFilename
 )
 
-// ObjectEncryptionSecretName returns the shared RSA key secret name for S0FS object encryption.
+// ObjectEncryptionSecretName returns the shared RSA key secret name for rootfs object encryption.
 func ObjectEncryptionSecretName(infraName string) string {
 	return fmt.Sprintf("%s-%s", infraName, ObjectEncryptionSecretSuffix)
 }
 
-// EnsureObjectEncryptionKeySecret creates or repairs the shared S0FS object encryption key secret.
+// EnsureObjectEncryptionKeySecret creates or repairs the shared rootfs object encryption key secret.
 func EnsureObjectEncryptionKeySecret(ctx context.Context, resources *ResourceManager, infra *infrav1alpha1.Sandbox0Infra) error {
 	logger := log.FromContext(ctx)
 	secretName := ObjectEncryptionSecretName(infra.Name)

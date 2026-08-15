@@ -22,7 +22,6 @@ func TestRuntimeServicesDoNotImportManagerImplementations(t *testing.T) {
 		"ctld",
 		"netd",
 		"ssh-gateway",
-		"storage-proxy",
 		"global-gateway",
 		"infra-operator",
 	}

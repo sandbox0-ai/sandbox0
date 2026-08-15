@@ -158,14 +158,13 @@ func StartsUsage(method, routePattern string) bool {
 		switch routePattern {
 		case "/api/v1/sandboxes",
 			"/api/v1/templates",
-			"/api/v1/templates/from-sandbox",
-			"/api/v1/sandboxvolumes":
+			"/api/v1/templates/from-sandbox":
 			return true
 		}
 		if hasResourceAction(routePattern, "/api/v1/sandboxes/", "resume", "fork", "snapshots") {
 			return true
 		}
-		return hasResourceAction(routePattern, "/api/v1/sandboxvolumes/", "fork", "snapshots")
+		return false
 	}
 	return false
 }

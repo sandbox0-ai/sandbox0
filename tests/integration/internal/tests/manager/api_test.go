@@ -85,7 +85,6 @@ type managerTestEnvOptions struct {
 	sandboxConfig             service.SandboxServiceConfig
 	internalTokenGenerator    service.TokenGenerator
 	procdClient               *procdapi.ProcdClient
-	volumeMetadata            service.SandboxVolumeMetadataClient
 	sandboxStore              sandboxstore.SandboxStore
 	runtimeActivationObserver func(*corev1.Pod)
 }
@@ -193,7 +192,6 @@ func newManagerTestEnvWithOptions(t *testing.T, opts managerTestEnvOptions) *man
 		Logger:                 logger,
 		Metrics:                managerMetrics,
 		ProcdClient:            opts.procdClient,
-		VolumeMetadataClient:   opts.volumeMetadata,
 		SandboxStore:           opts.sandboxStore,
 	})
 	podEventHandler := sandboxService.PodEventHandler()
@@ -412,100 +410,6 @@ func TestCreateTemplateLegacyEnsuresNamespaceIngressBaseline(t *testing.T) {
 	utils.RequireNoError(t, err, "list namespace baseline policies")
 	if len(policies.Items) != 2 {
 		t.Fatalf("networkpolicy count = %d, want 2", len(policies.Items))
-	}
-}
-
-func TestClaimSandboxBindsDeclaredVolumePortal(t *testing.T) {
-	ctldRecorder := &volumePortalBindRecorder{}
-	ctldServer := newVolumePortalBindRecordingCtldServer(t, ctldRecorder, ctldapi.BindVolumePortalResponse{
-		SandboxVolumeID: "vol-1",
-		MountPoint:      "/workspace/data",
-		MountedAt:       time.Now().UTC().Format(time.RFC3339),
-	})
-	t.Cleanup(ctldServer.Close)
-
-	ctldHTTPClient := newRewriteHTTPClientForURL(t, ctldServer.URL)
-
-	env := newManagerTestEnvWithOptions(t, managerTestEnvOptions{
-		sandboxConfig: service.SandboxServiceConfig{
-			DefaultTTL:             time.Hour,
-			PauseMinMemoryRequest:  "10Mi",
-			PauseMinMemoryLimit:    "32Mi",
-			PauseMemoryBufferRatio: 1.1,
-			PauseMinCPU:            "10m",
-			ProcdPort:              49983,
-			ProcdClientTimeout:     5 * time.Second,
-			RuntimeReadyTimeout:    5 * time.Second,
-			CtldPort:               8095,
-			CtldHTTPClient:         ctldHTTPClient,
-		},
-		volumeMetadata: staticVolumeMetadataClient{accessMode: "RWO"},
-	})
-
-	templateName := "claim-bootstrap"
-	resp, body := doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/internal/v1/templates", env.token, map[string]any{
-		"metadata": map[string]any{"name": templateName},
-		"spec": map[string]any{
-			"volumeMounts": []map[string]any{{
-				"name":      "data",
-				"mountPath": "/workspace/data",
-			}},
-		},
-	})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create template status = %d, body = %s", resp.StatusCode, string(body))
-	}
-
-	namespace, err := naming.TemplateNamespaceForBuiltin(templateName)
-	utils.RequireNoError(t, err, "resolve template namespace")
-	addNode(t, env, "node-a", "10.0.0.1")
-	addIdleReadyPodForTemplate(t, env, &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: namespace},
-		Spec: v1alpha1.SandboxTemplateSpec{
-			VolumeMounts: []v1alpha1.VolumeMountSpec{{Name: "data", MountPath: "/workspace/data"}},
-		},
-	}, "idle-bootstrap", "10.0.0.10", "node-a")
-
-	resp, body = doRequest(t, env.server.Client(), http.MethodPost, env.server.URL+"/api/v1/sandboxes", env.token, map[string]any{
-		"template": templateName,
-		"mounts": []map[string]any{{
-			"sandboxvolume_id": "vol-1",
-			"mount_point":      "/workspace/data",
-		}},
-	})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("claim status = %d, body = %s", resp.StatusCode, string(body))
-	}
-
-	claimResp, errInfo, err := spec.DecodeResponse[service.ClaimResponse](bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("decode claim response: %v", err)
-	}
-	if errInfo != nil {
-		t.Fatalf("unexpected claim error: %+v", errInfo)
-	}
-	if claimResp == nil || len(claimResp.BootstrapMounts) != 1 {
-		t.Fatalf("bootstrap mounts = %+v, want 1 entry", claimResp)
-	}
-	if claimResp.BootstrapMounts[0].State != "mounted" {
-		t.Fatalf("claim bootstrap state = %q, want mounted", claimResp.BootstrapMounts[0].State)
-	}
-	bindReq := ctldRecorder.Get()
-	if bindReq.SandboxVolumeID != "vol-1" || bindReq.MountPath != "/workspace/data" || bindReq.PortalName != "data" {
-		t.Fatalf("unexpected ctld bind request: %+v", bindReq)
-	}
-
-	claimedPod, err := env.k8sClient.CoreV1().Pods(namespace).Get(context.Background(), claimResp.PodName, metav1.GetOptions{})
-	utils.RequireNoError(t, err, "get claimed pod")
-	assignment, revision, err := runtimecontrol.AssignmentFromPod(claimedPod)
-	utils.RequireNoError(t, err, "derive runtime assignment")
-	if assignment == nil || assignment.SandboxID != claimResp.SandboxID || assignment.TeamID != "team-1" {
-		t.Fatalf("unexpected runtime assignment: %+v", assignment)
-	}
-	if claimedPod.Annotations[runtimecontrol.AnnotationAssignmentReady] != revision ||
-		claimedPod.Annotations[runtimecontrol.AnnotationObservedRevision] != revision ||
-		claimedPod.Annotations[runtimecontrol.AnnotationObservedState] != string(runtimecontrol.ObservedReady) {
-		t.Fatalf("runtime assignment was not observed as ready")
 	}
 }
 
@@ -926,47 +830,6 @@ func addNode(t *testing.T, env *managerTestEnv, name, internalIP string) {
 	utils.RequireNoError(t, err, "create node in fake client")
 }
 
-type volumePortalBindRecorder struct {
-	request ctldapi.BindVolumePortalRequest
-}
-
-type staticVolumeMetadataClient struct {
-	accessMode string
-}
-
-func (c staticVolumeMetadataClient) Get(_ context.Context, teamID, userID, volumeID string) (*service.SandboxVolumeInfo, error) {
-	return &service.SandboxVolumeInfo{
-		ID:         volumeID,
-		TeamID:     teamID,
-		UserID:     userID,
-		AccessMode: c.accessMode,
-	}, nil
-}
-
-func (r *volumePortalBindRecorder) Set(req ctldapi.BindVolumePortalRequest) {
-	r.request = req
-}
-
-func (r *volumePortalBindRecorder) Get() ctldapi.BindVolumePortalRequest {
-	return r.request
-}
-
-func newVolumePortalBindRecordingCtldServer(t *testing.T, recorder *volumePortalBindRecorder, response ctldapi.BindVolumePortalResponse) *httptest.Server {
-	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/volume-portals/bind", func(w http.ResponseWriter, r *http.Request) {
-		var req ctldapi.BindVolumePortalRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode ctld bind request: %v", err)
-		}
-		if recorder != nil {
-			recorder.Set(req)
-		}
-		_ = json.NewEncoder(w).Encode(response)
-	})
-	return httptest.NewServer(mux)
-}
-
 type orderedEvents struct {
 	mu     sync.Mutex
 	events []string
@@ -1328,9 +1191,6 @@ func (t memorySandboxStoreTxForManagerIntegration) SaveRuntime(_ context.Context
 	record.RuntimeGeneration = generation
 	record.ExpiresAt = expiresAt
 	record.HardExpiresAt = hardExpiresAt
-	if metadata.WebhookStateVolumeID != "" {
-		record.WebhookStateVolumeID = metadata.WebhookStateVolumeID
-	}
 	if metadata.OwnerKind != "" {
 		record.OwnerKind = metadata.OwnerKind
 	}
@@ -1505,7 +1365,6 @@ func cloneSandboxRecordForManagerIntegration(record *sandboxstore.SandboxRecord)
 		return nil
 	}
 	clone := *record
-	clone.Mounts = append([]managerapi.ClaimMount(nil), record.Mounts...)
 	clone.TemplateSpec = *record.TemplateSpec.DeepCopy()
 	return &clone
 }

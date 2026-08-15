@@ -827,7 +827,6 @@ func cloneSandboxRecordForRootFSProduct(record *sandboxstore.SandboxRecord) *san
 	}
 	clone := *record
 	clone.Config = cloneSandboxConfigValue(record.Config)
-	clone.Mounts = append([]managerapi.ClaimMount(nil), record.Mounts...)
 	clone.TemplateSpec = *record.TemplateSpec.DeepCopy()
 	return &clone
 }

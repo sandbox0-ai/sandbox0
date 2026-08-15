@@ -177,7 +177,7 @@ var _ = Describe("Sandbox0Infra transition semantics", func() {
 		))
 	})
 
-	It("cleans up disabled builtin storage runtime while retaining stateful resources in status", func() {
+	It("cleans up disabled builtin object storage while retaining stateful resources in status", func() {
 		infra := newTransitionInfra("storage-retain", &infrav1alpha1.Sandbox0InfraSpec{
 			Storage: &infrav1alpha1.StorageConfig{
 				Type: infrav1alpha1.StorageTypeBuiltin,

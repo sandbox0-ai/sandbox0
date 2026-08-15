@@ -10,7 +10,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 )
 
 func validateTemplateSpecForClaims(
@@ -77,11 +76,8 @@ func validateTemplateSpec(spec v1alpha1.SandboxTemplateSpec) error {
 	if err := validateSecurityContext(spec.MainContainer.SecurityContext, "spec.mainContainer.securityContext"); err != nil {
 		return err
 	}
-	if err := validateVolumeMounts(spec.VolumeMounts); err != nil {
-		return err
-	}
 	if spec.Pod != nil {
-		if err := validateEmptyDirMounts(spec.Pod.EmptyDirMounts, spec.VolumeMounts); err != nil {
+		if err := validateEmptyDirMounts(spec.Pod.EmptyDirMounts); err != nil {
 			return err
 		}
 	}
@@ -190,46 +186,8 @@ func validateAppArmorProfile(profile *v1alpha1.AppArmorProfile, field string) er
 	return nil
 }
 
-func validateVolumeMounts(mounts []v1alpha1.VolumeMountSpec) error {
-	seenNames := make(map[string]struct{}, len(mounts))
-	seenPaths := make(map[string]struct{}, len(mounts))
-	for i, mount := range mounts {
-		field := fmt.Sprintf("spec.volumeMounts[%d]", i)
-		name := strings.TrimSpace(mount.Name)
-		if name == "" {
-			return fmt.Errorf("%s.name is required", field)
-		}
-		if _, ok := seenNames[name]; ok {
-			return fmt.Errorf("%s.name %q is duplicated", field, name)
-		}
-		seenNames[name] = struct{}{}
-
-		mountPath := strings.TrimSpace(mount.MountPath)
-		cleanMountPath := filepath.Clean(mountPath)
-		if mountPath == "" || mountPath != cleanMountPath || !filepath.IsAbs(cleanMountPath) || cleanMountPath == string(filepath.Separator) {
-			return fmt.Errorf("%s.mountPath is invalid", field)
-		}
-		if cleanMountPath == volumeportal.WebhookStateMountPath || strings.HasPrefix(cleanMountPath, volumeportal.WebhookStateMountPath+string(filepath.Separator)) {
-			return fmt.Errorf("%s.mountPath uses a sandbox0 reserved path", field)
-		}
-		if _, ok := seenPaths[cleanMountPath]; ok {
-			return fmt.Errorf("%s.mountPath %q is duplicated", field, cleanMountPath)
-		}
-		seenPaths[cleanMountPath] = struct{}{}
-	}
-	return nil
-}
-
-func validateEmptyDirMounts(mounts []v1alpha1.EmptyDirMountSpec, volumeMounts []v1alpha1.VolumeMountSpec) error {
-	seenPaths := make(map[string]string, len(mounts)+len(volumeMounts))
-	for i, mount := range volumeMounts {
-		mountPath := strings.TrimSpace(mount.MountPath)
-		if mountPath == "" {
-			continue
-		}
-		cleanMountPath := filepath.Clean(mountPath)
-		seenPaths[cleanMountPath] = fmt.Sprintf("spec.volumeMounts[%d]", i)
-	}
+func validateEmptyDirMounts(mounts []v1alpha1.EmptyDirMountSpec) error {
+	seenPaths := make(map[string]string, len(mounts))
 
 	for i, mount := range mounts {
 		field := fmt.Sprintf("spec.pod.emptyDirMounts[%d]", i)

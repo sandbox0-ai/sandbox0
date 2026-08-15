@@ -23,7 +23,7 @@ This page covers the Eve sandbox backend integration. It does not replace Eve's 
 - a Sandbox0 API key
 - a Sandbox0 template with Bash and `/workspace`; the hosted `default` template already satisfies this
 
-The adapter does not require Sandbox0 Volumes for the default Eve lifecycle. Eve template state is captured with Sandbox0 rootfs snapshots, and durable session state is preserved by reusing or resuming the session sandbox.
+Eve template state is captured with Sandbox0 rootfs snapshots, and durable session state is preserved by reusing or resuming the session sandbox.
 
 ## Install
 
@@ -184,7 +184,7 @@ export NO_PROXY=localhost,127.0.0.1,::1
 - Use a dedicated Sandbox0 API key for the Eve deployment.
 - Set a hard TTL for live session sandboxes if your application does not manage long-lived sessions.
 - Keep `/workspace` available in custom templates; Eve tools and seed files assume that path.
-- Use Sandbox0 rootfs snapshots for Eve template state. Use Sandbox0 Volumes only for app-specific shared or externally managed durable data.
+- Use Sandbox0 rootfs snapshots for Eve template state, and use an external system for data that must be shared independently of sandbox identity.
 - Delete stale `.eve/sandbox0/` registry files when you intentionally remove the corresponding Sandbox0 rootfs snapshots.
 
 ---

@@ -68,13 +68,16 @@ func (p *InfraPlan) RootFSObjectStorage(ctx context.Context, kubeClient client.C
 		storageType = "s3"
 	}
 	return &apiconfig.RootFSObjectStorageConfig{
-		Type:         storageType,
-		Bucket:       storageConfig.Bucket,
-		Region:       storageConfig.Region,
-		Endpoint:     storageConfig.Endpoint,
-		AccessKey:    storageConfig.AccessKey,
-		SecretKey:    storageConfig.SecretKey,
-		SessionToken: storageConfig.SessionToken,
+		Type:                    storageType,
+		Bucket:                  storageConfig.Bucket,
+		Region:                  storageConfig.Region,
+		Endpoint:                storageConfig.Endpoint,
+		AccessKey:               storageConfig.AccessKey,
+		SecretKey:               storageConfig.SecretKey,
+		SessionToken:            storageConfig.SessionToken,
+		ObjectEncryptionEnabled: true,
+		ObjectEncryptionKeyPath: common.ObjectEncryptionKeyPath,
+		ObjectEncryptionAlgo:    "aes256gcm-rsa",
 	}, nil
 }
 

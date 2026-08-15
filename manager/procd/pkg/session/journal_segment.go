@@ -521,9 +521,8 @@ func writeJournalManifest(path string, manifest *journalManifest) error {
 	if err := writeFileAtomic(path, payload, 0o600); err != nil {
 		return fmt.Errorf("persist journal manifest: %w", err)
 	}
-	// Reopening and syncing the renamed file flushes the S0FS WAL entry that
-	// made the manifest visible. The directory sync below supplies the normal
-	// POSIX rename durability guarantee; S0FS reports that operation unsupported.
+	// Sync the renamed manifest before syncing its containing directory so both
+	// file content and the directory entry are durable before acknowledgement.
 	file, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("reopen journal manifest: %w", err)

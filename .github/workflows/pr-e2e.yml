@@ -30,12 +30,6 @@ jobs:
           - suite: core
             command: make test-e2e
             cluster_suffix: core
-          - suite: s0fs-posix
-            command: make test-e2e-s0fs-posix
-            cluster_suffix: s0fs-posix
-          - suite: mountpoint-s3
-            command: make test-e2e-mountpoint-s3-compat
-            cluster_suffix: mountpoint-s3
     env:
       KIND_CLUSTER_NAME: sandbox0-pr-e2e-${{ matrix.cluster_suffix }}
     steps:

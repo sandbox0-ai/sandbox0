@@ -449,9 +449,9 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	}
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-cri-endpoint=/host-run/containerd/containerd.sock")
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-data-root=/host-var-lib/containerd")
-	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-kubelet-pods-root=/var/lib/kubelet/pods")
-	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-kubelet-registration-socket="+ctldKubeletRegistrationSocket)
-	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-kubelet-registration-endpoint="+ctldKubeletCSIEndpoint)
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-state-root=/var/lib/sandbox0/ctld")
+	assertNotContainsArgPrefix(t, ds.Spec.Template.Spec.Containers[0].Args, "-kubelet-")
+	assertNotContainsArgPrefix(t, ds.Spec.Template.Spec.Containers[0].Args, "-csi-")
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
 		t.Fatal("expected ctld container to run privileged")
 	}
@@ -480,17 +480,16 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	assertHAMetricsEndpoint(t, standby.Spec.Template.Spec.Containers[0], dataplane.CtldHASlotB, ctldHAMetricsPortB)
 	assertCtldRollingUpdate(t, ds, 1, 0)
 	assertCtldRollingUpdate(t, standby, 1, 0)
-	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 7 {
-		t.Fatalf("expected ctld config, csi, kubelet, data, containerd socket, and containerd data mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
+	if len(ds.Spec.Template.Spec.Containers[0].VolumeMounts) < 5 {
+		t.Fatalf("expected ctld config, state, containerd socket, containerd data, and network runtime mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
+	assertNoContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "csi-plugin")
+	assertNoContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "kubelet")
 	assertNoPodVolume(t, ds.Spec.Template.Spec.Volumes, "plugin-registration")
 	driver := &storagev1.CSIDriver{}
-	if err := client.Get(context.Background(), types.NamespacedName{Name: "volume.sandbox0.ai"}, driver); err != nil {
-		t.Fatalf("expected csi driver to be created: %v", err)
-	}
-	if driver.Spec.PodInfoOnMount == nil || !*driver.Spec.PodInfoOnMount {
-		t.Fatal("expected csi driver podInfoOnMount=true")
+	if err := client.Get(context.Background(), types.NamespacedName{Name: legacyVolumeCSIDriverName}, driver); !apierrors.IsNotFound(err) {
+		t.Fatalf("legacy CSI driver lookup error = %v, want not found", err)
 	}
 
 	return ds, client
@@ -670,9 +669,6 @@ func TestReconcileMountsObjectEncryptionKeyWhenEnabled(t *testing.T) {
 	infra.Spec.Storage = &infrav1alpha1.StorageConfig{
 		Type: infrav1alpha1.StorageTypeGCS,
 		GCS:  &infrav1alpha1.GCSStorageConfig{Bucket: "sandbox0-test"},
-		Runtime: &infrav1alpha1.StorageProxyConfig{
-			ObjectEncryptionEnabled: true,
-		},
 	}
 
 	ds := reconcileCtldDaemonSet(t, infra)
@@ -733,7 +729,7 @@ func TestReconcileInjectsRuntimeSampleProducerConfigAndJWTKey(t *testing.T) {
 	assert.Equal(t, 3*time.Second, cfg.SandboxObservabilityIngestRequestTimeout.Duration)
 }
 
-func TestReconcileInjectsMeteringIntoCtldStorageConfig(t *testing.T) {
+func TestReconcileInjectsMeteringIntoCtldConfig(t *testing.T) {
 	infra := newCtldTestInfra()
 	enabled := true
 	infra.Spec.ClickHouse = &infrav1alpha1.ClickHouseConfig{
@@ -768,7 +764,7 @@ func TestReconcileInjectsMeteringIntoCtldStorageConfig(t *testing.T) {
 	assert.Equal(t, "storage_projection_state", cfg.Metering.ClickHouse.StorageStateTable)
 }
 
-func TestBuildStorageConfigDefaultsDataPlaneIdentity(t *testing.T) {
+func TestBuildConfigDefaultsDataPlaneIdentity(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.PublicExposure = &infrav1alpha1.PublicExposureConfig{
 		RegionID: "aws-us-east-1",
@@ -776,9 +772,9 @@ func TestBuildStorageConfigDefaultsDataPlaneIdentity(t *testing.T) {
 
 	_, client := reconcileCtldResources(t, infra)
 	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	cfg, err := reconciler.buildStorageConfig(context.Background(), infra)
+	cfg, err := reconciler.buildConfig(context.Background(), infra, infraplan.Compile(infra))
 	if err != nil {
-		t.Fatalf("buildStorageConfig returned error: %v", err)
+		t.Fatalf("buildConfig returned error: %v", err)
 	}
 	if cfg.RegionID != "aws-us-east-1" {
 		t.Fatalf("region_id = %q, want aws-us-east-1", cfg.RegionID)

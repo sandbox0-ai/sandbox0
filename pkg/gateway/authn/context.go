@@ -96,14 +96,6 @@ const (
 	PermCredentialSourceWrite  = "credentialsource:write"
 	PermCredentialSourceDelete = "credentialsource:delete"
 
-	PermSandboxVolumeCreate = "sandboxvolume:create"
-	PermSandboxVolumeRead   = "sandboxvolume:read"
-	PermSandboxVolumeWrite  = "sandboxvolume:write"
-	PermSandboxVolumeDelete = "sandboxvolume:delete"
-
-	PermSandboxVolumeFileRead  = "sandboxvolumefile:read"
-	PermSandboxVolumeFileWrite = "sandboxvolumefile:write"
-
 	PermQuotaRead = "quota:read"
 	PermUsageRead = "usage:read"
 
@@ -127,12 +119,6 @@ var RolePermissions = map[string][]string{
 		PermCredentialSourceRead,
 		PermCredentialSourceWrite,
 		PermCredentialSourceDelete,
-		PermSandboxVolumeCreate,
-		PermSandboxVolumeRead,
-		PermSandboxVolumeWrite,
-		PermSandboxVolumeDelete,
-		PermSandboxVolumeFileRead,
-		PermSandboxVolumeFileWrite,
 		PermQuotaRead,
 		PermUsageRead,
 		PermSandboxAuditRead,
@@ -147,12 +133,6 @@ var RolePermissions = map[string][]string{
 		PermCredentialSourceRead,
 		PermCredentialSourceWrite,
 		PermCredentialSourceDelete,
-		PermSandboxVolumeCreate,
-		PermSandboxVolumeRead,
-		PermSandboxVolumeWrite,
-		PermSandboxVolumeDelete,
-		PermSandboxVolumeFileRead,
-		PermSandboxVolumeFileWrite,
 		PermQuotaRead,
 		PermUsageRead,
 	},
@@ -164,8 +144,6 @@ var RolePermissions = map[string][]string{
 		PermSandboxRead,
 		PermTemplateRead,
 		PermCredentialSourceRead,
-		PermSandboxVolumeRead,
-		PermSandboxVolumeFileRead,
 		PermQuotaRead,
 		PermUsageRead,
 	},

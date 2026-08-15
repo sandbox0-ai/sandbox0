@@ -17,17 +17,6 @@ type Controller interface {
 	ProbePod(r *http.Request, namespace, name string, kind sandboxprobe.Kind) (sandboxprobe.Response, int)
 }
 
-type VolumePortalController interface {
-	BindVolumePortal(r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int)
-	UnbindVolumePortal(r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int)
-	CheckVolumePortals(r *http.Request, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, int)
-	AttachVolumeOwner(r *http.Request, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, int)
-	ReleaseVolumeOwner(r *http.Request, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, int)
-	PrepareVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, int)
-	CompleteVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, int)
-	AbortVolumeSnapshotCheckpoint(r *http.Request, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, int)
-}
-
 type RootFSController interface {
 	InspectRootFS(r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int)
 	SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int)
@@ -38,10 +27,6 @@ type RootFSSnapshotController interface {
 	PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int)
 	PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int)
 	AbortRootFSSnapshot(r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int)
-}
-
-type MountedVolumeController interface {
-	MountedVolumeHandler() http.Handler
 }
 
 // ReadinessController contributes primary service state to the ctld ready
@@ -139,11 +124,6 @@ func writeJSONResponse(w http.ResponseWriter, status int, response any) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func volumePortalController(controller Controller) (VolumePortalController, bool) {
-	volumeController, ok := controller.(VolumePortalController)
-	return volumeController, ok
-}
-
 func rootFSController(controller Controller) (RootFSController, bool) {
 	rootFSController, ok := controller.(RootFSController)
 	return rootFSController, ok
@@ -178,67 +158,6 @@ func NewMux(controller Controller) http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("/metrics", promhttp.Handler())
-	if mountedController, ok := controller.(MountedVolumeController); ok {
-		if mountedHandler := mountedController.MountedVolumeHandler(); mountedHandler != nil {
-			mux.Handle("/sandboxvolumes/", mountedHandler)
-		}
-	}
-	registerJSONPostRoute(mux, "/api/v1/volume-portals/bind", controller, volumePortalController,
-		ctldapi.BindVolumePortalResponse{},
-		func(err error) any { return map[string]string{"error": err.Error()} },
-		func(c VolumePortalController, r *http.Request, req ctldapi.BindVolumePortalRequest) (ctldapi.BindVolumePortalResponse, int) {
-			return c.BindVolumePortal(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/volume-portals/unbind", controller, volumePortalController,
-		ctldapi.UnbindVolumePortalResponse{Error: "ctld volume portals not implemented"},
-		func(err error) any { return ctldapi.UnbindVolumePortalResponse{Error: err.Error()} },
-		func(c VolumePortalController, r *http.Request, req ctldapi.UnbindVolumePortalRequest) (ctldapi.UnbindVolumePortalResponse, int) {
-			return c.UnbindVolumePortal(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/volume-portals/check", controller, volumePortalController,
-		ctldapi.CheckVolumePortalsResponse{Error: "ctld volume portals not implemented"},
-		func(err error) any { return ctldapi.CheckVolumePortalsResponse{Error: err.Error()} },
-		func(c VolumePortalController, r *http.Request, req ctldapi.CheckVolumePortalsRequest) (ctldapi.CheckVolumePortalsResponse, int) {
-			return c.CheckVolumePortals(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/volume-portals/owners/attach", controller, volumePortalController,
-		ctldapi.AttachVolumeOwnerResponse{Error: "ctld volume owners not implemented"},
-		func(err error) any { return ctldapi.AttachVolumeOwnerResponse{Error: err.Error()} },
-		func(c VolumePortalController, r *http.Request, req ctldapi.AttachVolumeOwnerRequest) (ctldapi.AttachVolumeOwnerResponse, int) {
-			return c.AttachVolumeOwner(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/volume-portals/owners/release", controller, volumePortalController,
-		ctldapi.ReleaseVolumeOwnerResponse{Error: "ctld volume owners not implemented"},
-		func(err error) any { return ctldapi.ReleaseVolumeOwnerResponse{Error: err.Error()} },
-		func(c VolumePortalController, r *http.Request, req ctldapi.ReleaseVolumeOwnerRequest) (ctldapi.ReleaseVolumeOwnerResponse, int) {
-			return c.ReleaseVolumeOwner(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/volume-portals/snapshot-checkpoints/prepare", controller, volumePortalController,
-		ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"},
-		func(err error) any { return ctldapi.PrepareVolumeSnapshotCheckpointResponse{Error: err.Error()} },
-		func(c VolumePortalController, r *http.Request, req ctldapi.PrepareVolumeSnapshotCheckpointRequest) (ctldapi.PrepareVolumeSnapshotCheckpointResponse, int) {
-			return c.PrepareVolumeSnapshotCheckpoint(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/volume-portals/snapshot-checkpoints/complete", controller, volumePortalController,
-		ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"},
-		func(err error) any { return ctldapi.CompleteVolumeSnapshotCheckpointResponse{Error: err.Error()} },
-		func(c VolumePortalController, r *http.Request, req ctldapi.CompleteVolumeSnapshotCheckpointRequest) (ctldapi.CompleteVolumeSnapshotCheckpointResponse, int) {
-			return c.CompleteVolumeSnapshotCheckpoint(r, req)
-		},
-	)
-	registerJSONPostRoute(mux, "/api/v1/volume-portals/snapshot-checkpoints/abort", controller, volumePortalController,
-		ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: "ctld volume snapshot checkpoint not implemented"},
-		func(err error) any { return ctldapi.AbortVolumeSnapshotCheckpointResponse{Error: err.Error()} },
-		func(c VolumePortalController, r *http.Request, req ctldapi.AbortVolumeSnapshotCheckpointRequest) (ctldapi.AbortVolumeSnapshotCheckpointResponse, int) {
-			return c.AbortVolumeSnapshotCheckpoint(r, req)
-		},
-	)
 	registerJSONPostRoute(mux, "/api/v1/rootfs/inspect", controller, rootFSController,
 		ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"},
 		func(err error) any { return ctldapi.InspectRootFSResponse{Error: err.Error()} },

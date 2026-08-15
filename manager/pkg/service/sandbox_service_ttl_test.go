@@ -264,14 +264,13 @@ func TestPersistUpdatedSandboxPodDoesNotOverwriteDurableLifecycleState(t *testin
 	}
 }
 
-func TestPersistUpdatedSandboxPodStoresRuntimeMetadata(t *testing.T) {
+func TestPersistUpdatedSandboxPodStoresOwnerMetadata(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Labels[controller.LabelTemplateID] = "default"
 	pod.Labels[controller.LabelTemplateLogicalID] = "default"
 	pod.Labels[controller.LabelOwnerKind] = "automation"
 	pod.Annotations[controller.AnnotationOwnerKind] = "automation"
 	pod.Annotations[controller.AnnotationConfig] = `{"ttl":300}`
-	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "webhook-volume-1"
 
 	svc, _ := newSandboxServiceForTTLTests(t, pod, 0)
 	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{}}
@@ -286,7 +285,6 @@ func TestPersistUpdatedSandboxPodStoresRuntimeMetadata(t *testing.T) {
 	record, err := store.GetSandbox(context.Background(), "sandbox-1")
 	require.NoError(t, err)
 	require.NotNil(t, record)
-	assert.Equal(t, "webhook-volume-1", record.WebhookStateVolumeID)
 	assert.Equal(t, "automation", record.OwnerKind)
 }
 

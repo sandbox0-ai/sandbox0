@@ -9,7 +9,6 @@ import (
 
 var upstreamTimeoutWhitelistPrefixes = []string{
 	"/api/v1/sandboxes",
-	"/api/v1/sandboxvolumes",
 }
 
 // UpstreamTimeoutWhitelist disables gateway proxy timeouts for long-running API

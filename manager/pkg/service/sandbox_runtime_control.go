@@ -99,16 +99,6 @@ func (s *SandboxService) activateRuntimeAssignment(
 		return pod, errors.New("runtime assignment revision is required")
 	}
 
-	if len(expectedVolumePortalsForPod(pod)) > 0 {
-		ctldAddress, err := s.ctldAddressForPod(ctx, pod)
-		if err != nil {
-			return pod, fmt.Errorf("resolve CTLD address: %w", err)
-		}
-		if err := s.ensurePodVolumePortalsPublished(ctx, ctldAddress, pod); err != nil {
-			return pod, err
-		}
-	}
-
 	var updated *corev1.Pod
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current, err := s.k8sClient.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})

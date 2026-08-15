@@ -13,7 +13,7 @@ A VM or VPS gives the agent a durable machine. That is simple, but it also makes
 - snapshot, fork, and cleanup behavior depends on host automation that must be built separately
 - every agent session tends to accumulate host-level drift unless you rebuild or re-image the machine
 
-Sandbox0 separates these concerns. The sandbox holds the agent runtime and workspace. Sandbox Volumes hold durable agent state. Network policy and egress auth sit outside the agent process. Public service routes can authenticate, rate-limit, and resume a paused sandbox before traffic reaches the agent framework.
+Sandbox0 separates these concerns. The sandbox rootfs holds the agent runtime and durable workspace, while named rootfs snapshots provide reusable restore points. Network policy and egress auth sit outside the agent process. Public service routes can authenticate, rate-limit, and resume a paused sandbox before traffic reaches the agent framework.
 
 This is a better fit for agents that process untrusted inputs, run tools, browse the network, or execute code because the runtime can be isolated and replaced without treating the VM as the durable source of truth.
 
@@ -22,7 +22,7 @@ This is a better fit for agents that process untrusted inputs, run tools, browse
 | Layer | Sandbox0 primitive |
 |-------|--------------------|
 | Runtime image | Builtin or custom Template |
-| Durable agent state | SandboxVolume |
+| Durable agent state | Sandbox rootfs and named rootfs snapshots |
 | Process restart | `cmd` Sandbox Service |
 | Public HTTP entrypoint | Sandbox Service route |
 | Wake-up path | Sandbox `auto_resume` plus route `resume` |
@@ -61,7 +61,7 @@ The examples in this section deliberately do not set `ttl` or `hard_ttl`.
 
 Agent gateways often maintain channel connections, scheduled jobs, local caches, or operator sessions. A short `ttl` can pause the runtime at the wrong time, while a short `hard_ttl` can delete the sandbox identity and rootfs checkpoints. Choose those values after you decide how the agent should be woken up and how long its identity should live.
 
-You can still pause a sandbox manually. If the sandbox has `auto_resume: true` and the service route has `resume: true`, a later public request can create a new runtime pod and restart the `cmd` service. Running processes, sockets, memory, and in-flight connections are not preserved across pause/resume; durable state should live in the mounted volume.
+You can still pause a sandbox manually. If the sandbox has `auto_resume: true` and the service route has `resume: true`, a later public request can create a new runtime pod and restart the `cmd` service. Running processes, sockets, memory, and in-flight connections are not preserved across pause/resume; durable state should live in the sandbox rootfs or an external system.
 
 ## Secret Boundary
 

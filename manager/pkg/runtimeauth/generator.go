@@ -22,35 +22,3 @@ func (g *InternalTokenGenerator) GenerateToken(teamID, userID, sandboxID string)
 	// The token authenticates the manager to call procd, procd will use the X-Sandbox-ID header
 	return g.generator.Generate("procd", teamID, userID, internalauth.GenerateOptions{})
 }
-
-// ManagerStorageAdminTokenGenerator generates manager tokens for volume lifecycle calls.
-type ManagerStorageAdminTokenGenerator struct {
-	generator *internalauth.Generator
-}
-
-func NewManagerStorageAdminTokenGenerator(generator *internalauth.Generator) *ManagerStorageAdminTokenGenerator {
-	return &ManagerStorageAdminTokenGenerator{generator: generator}
-}
-
-func (g *ManagerStorageAdminTokenGenerator) GenerateToken(teamID, userID, sandboxID string) (string, error) {
-	if teamID == "" {
-		return g.generator.GenerateSystem(internalauth.ServiceManagerStorage, internalauth.GenerateOptions{
-			Permissions: []string{
-				"sandboxvolume:create",
-				"sandboxvolume:read",
-				"sandboxvolume:write",
-				"sandboxvolume:delete",
-			},
-			SandboxID: sandboxID,
-		})
-	}
-	return g.generator.Generate(internalauth.ServiceManagerStorage, teamID, userID, internalauth.GenerateOptions{
-		Permissions: []string{
-			"sandboxvolume:create",
-			"sandboxvolume:read",
-			"sandboxvolume:write",
-			"sandboxvolume:delete",
-		},
-		SandboxID: sandboxID,
-	})
-}

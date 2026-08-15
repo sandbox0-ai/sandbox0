@@ -2,7 +2,7 @@ FROM golang:1.25-alpine AS builder
 
 WORKDIR /workspace
 
-RUN apk add --no-cache git make protobuf-dev protoc gcc musl-dev sqlite-dev zstd-dev lz4-dev
+RUN apk add --no-cache git make gcc musl-dev sqlite-dev zstd-dev lz4-dev
 
 ENV GOPROXY=https://goproxy.cn,direct
 ENV GOSUMDB=sum.golang.google.cn
@@ -13,17 +13,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
 COPY . .
-
-# Generate storage runtime protocol code.
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
-    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest && \
-    mkdir -p storage-proxy/proto/fs && \
-    protoc --go_out=. --go_opt=paths=source_relative \
-      --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-      storage-proxy/proto/filesystem.proto && \
-    mv storage-proxy/proto/*.pb.go storage-proxy/proto/fs/
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \

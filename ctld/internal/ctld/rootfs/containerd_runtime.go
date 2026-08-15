@@ -164,7 +164,7 @@ func (r *ContainerdRuntime) Inspect(ctx context.Context, target ctldapi.RootFSCo
 	return info, nil
 }
 
-func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (result ctldapi.RootFSDiffDescriptor, resultReader io.ReadSeekCloser, resultErr error) {
+func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string) (result ctldapi.RootFSDiffDescriptor, resultReader io.ReadSeekCloser, resultErr error) {
 	started := time.Now()
 	defer func() {
 		r.observer.ObservePhase("save", "diff_create", started, resultErr)
@@ -177,7 +177,7 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
 
-	if desc, reader, ok, fastErr := r.createOverlayUpperDiff(ctx, client, info, excludedPaths, portalPaths); ok && fastErr == nil {
+	if desc, reader, ok, fastErr := r.createOverlayUpperDiff(ctx, client, info, excludedPaths); ok && fastErr == nil {
 		closeClient()
 		return desc, reader, nil
 	} else if ok && fastErr != nil {
@@ -186,7 +186,7 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 			closeClient()
 			return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("overlayfs fast diff: %v; containerd diff: %w", fastErr, err)
 		}
-		rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
+		rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths)
 		if err != nil {
 			closeClient()
 			return ctldapi.RootFSDiffDescriptor{}, nil, err
@@ -203,7 +203,7 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 		closeClient()
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
 	}
-	rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths, portalPaths)
+	rootDesc, reader, needsClient, err := rootFSDiffReaderFromContent(ctx, client, desc, excludedPaths)
 	if err != nil {
 		closeClient()
 		return ctldapi.RootFSDiffDescriptor{}, nil, err
@@ -215,7 +215,7 @@ func (r *ContainerdRuntime) CreateDiff(ctx context.Context, info ctldapi.RootFSI
 	return rootDesc, closeReadSeekWithFunc{ReadSeekCloser: reader, closeFunc: closeClient}, nil
 }
 
-func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (result ctldapi.RootFSDiffDescriptor, resultReader io.ReadSeekCloser, resultErr error) {
+func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) (result ctldapi.RootFSDiffDescriptor, resultReader io.ReadSeekCloser, resultErr error) {
 	started := time.Now()
 	defer func() {
 		r.observer.ObservePhase("save", "incremental_diff_create", started, resultErr)
@@ -242,10 +242,10 @@ func (r *ContainerdRuntime) CreateDiffFromBaseline(ctx context.Context, info ctl
 	} else if !st.IsDir() {
 		return ctldapi.RootFSDiffDescriptor{}, nil, fmt.Errorf("%w: rootfs baseline path is not a directory", ErrConflict)
 	}
-	return writeOverlayUpperDiffFromBaseline(ctx, baselineDir, upperdir, excludedPaths, portalPaths)
+	return writeOverlayUpperDiffFromBaseline(ctx, baselineDir, upperdir, excludedPaths)
 }
 
-func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (result ctldapi.RootFSDiffDescriptor, resultErr error) {
+func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string) (result ctldapi.RootFSDiffDescriptor, resultErr error) {
 	started := time.Now()
 	defer func() {
 		r.observer.ObservePhase("apply", "total", started, resultErr)
@@ -266,14 +266,13 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 		return ctldapi.RootFSDiffDescriptor{}, err
 	}
 	phaseStarted = time.Now()
-	ingestedDesc, stats, err := ingestRootFSDiffForApply(ctx, client.ContentStore(), desc, reader, excludedPaths, portalPaths)
+	ingestedDesc, stats, err := ingestRootFSDiffForApply(ctx, client.ContentStore(), desc, reader, excludedPaths)
 	r.observer.ObservePhase("apply", "filter_containerd_ingest", phaseStarted, err)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("ingest rootfs diff: %w", err)
 	}
 	r.observer.ObservePhaseDuration("apply", "tar_filter", stats.FilterDuration, nil)
 	r.observer.ObservePhaseDuration("apply", "containerd_ingest", stats.IngestDuration, nil)
-	r.observer.ObserveBytes("apply", "portal", stats.PortalBytes)
 	desc = ingestedDesc
 
 	ociDesc, err := descriptorToOCI(desc)
@@ -293,13 +292,13 @@ func (r *ContainerdRuntime) ApplyDiff(ctx context.Context, info ctldapi.RootFSIn
 	return descriptorFromOCI(applied), nil
 }
 
-func ingestRootFSDiffForApply(ctx context.Context, store content.Store, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, rootFSDiffFilterStats, error) {
+func ingestRootFSDiffForApply(ctx context.Context, store content.Store, desc ctldapi.RootFSDiffDescriptor, reader io.Reader, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, rootFSDiffFilterStats, error) {
 	if !shouldFilterRootFSDiffTar(desc) {
 		ociDesc, err := descriptorToOCI(desc)
 		if err != nil {
 			return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, err
 		}
-		ref := rootFSApplyIngestRef(desc, excludedPaths, portalPaths)
+		ref := rootFSApplyIngestRef(desc, excludedPaths)
 		started := time.Now()
 		if err := content.WriteBlob(ctx, store, ref, reader, ociDesc); err != nil {
 			return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, fmt.Errorf("write rootfs diff into containerd content store: %w", err)
@@ -308,7 +307,7 @@ func ingestRootFSDiffForApply(ctx context.Context, store content.Store, desc ctl
 	}
 
 	setupStarted := time.Now()
-	writer, err := content.OpenWriter(ctx, store, content.WithRef(rootFSApplyIngestRef(desc, excludedPaths, portalPaths)))
+	writer, err := content.OpenWriter(ctx, store, content.WithRef(rootFSApplyIngestRef(desc, excludedPaths)))
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, rootFSDiffFilterStats{}, fmt.Errorf("open containerd rootfs content writer: %w", err)
 	}
@@ -318,7 +317,7 @@ func ingestRootFSDiffForApply(ctx context.Context, store content.Store, desc ctl
 	}
 	setupDuration := time.Since(setupStarted)
 
-	filteredDesc, stats, err := writeRootFSDiffTarForApply(writer, desc, reader, excludedPaths, portalPaths)
+	filteredDesc, stats, err := writeRootFSDiffTarForApply(writer, desc, reader, excludedPaths)
 	stats.IngestDuration += setupDuration
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, stats, fmt.Errorf("filter rootfs diff into containerd content store: %w", err)
@@ -336,16 +335,15 @@ func ingestRootFSDiffForApply(ctx context.Context, store content.Store, desc ctl
 	return filteredDesc, stats, nil
 }
 
-func rootFSApplyIngestRef(desc ctldapi.RootFSDiffDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) string {
-	portalPaths = filterRootFSPortalPaths(portalPaths, excludedPaths)
-	filter := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths))
+func rootFSApplyIngestRef(desc ctldapi.RootFSDiffDescriptor, excludedPaths []string) string {
+	filter := newRootFSPathFilter(excludedPaths)
 	paths := append([]string(nil), filter.excluded...)
 	sort.Strings(paths)
 	sum := sha256.Sum256([]byte(strings.TrimSpace(desc.Digest) + "\x00" + strings.Join(paths, "\x00")))
 	return "sandbox0-rootfs-apply-" + hex.EncodeToString(sum[:])
 }
 
-func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (resultErr error) {
+func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) (resultErr error) {
 	started := time.Now()
 	defer func() {
 		r.observer.ObservePhase("apply", "baseline_capture", started, resultErr)
@@ -385,7 +383,7 @@ func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.Ro
 	}
 	r.observer.ObservePhase("apply", "baseline_copy", phaseStarted, nil)
 	phaseStarted = time.Now()
-	if err := newRootFSPathFilter(rootFSExcludedPathsWithPortals(excludedPaths, portalPaths)).RemoveAll(tmp); err != nil {
+	if err := newRootFSPathFilter(excludedPaths).RemoveAll(tmp); err != nil {
 		r.observer.ObservePhase("apply", "baseline_filter", phaseStarted, err)
 		return fmt.Errorf("filter rootfs baseline: %w", err)
 	}
@@ -400,7 +398,7 @@ func (r *ContainerdRuntime) CaptureBaseline(ctx context.Context, info ctldapi.Ro
 	return nil
 }
 
-func rootFSDiffReaderFromContent(ctx context.Context, client containerdClient, desc ocispec.Descriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
+func rootFSDiffReaderFromContent(ctx context.Context, client containerdClient, desc ocispec.Descriptor, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, bool, error) {
 	rootDesc := descriptorFromOCI(desc)
 	diffID, err := images.GetDiffID(ctx, client.ContentStore(), desc)
 	if err != nil {
@@ -415,7 +413,7 @@ func rootFSDiffReaderFromContent(ctx context.Context, client containerdClient, d
 		return rootDesc, reader, true, nil
 	}
 
-	filteredDesc, filteredReader, err := filterRootFSDiffTarForSave(rootDesc, reader, excludedPaths, portalPaths)
+	filteredDesc, filteredReader, err := filterRootFSDiffTarForSave(rootDesc, reader, excludedPaths)
 	closeErr := reader.Close()
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, nil, false, err

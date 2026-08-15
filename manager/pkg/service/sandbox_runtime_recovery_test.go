@@ -511,26 +511,21 @@ func TestSandboxRecordDeletionScopeRequiresDurableDeleteIntent(t *testing.T) {
 
 func TestUnexpectedCurrentPodDeletionPreservesSandboxExternalState(t *testing.T) {
 	bindings := &deleteRecordingBindingStore{}
-	volumes := &recordingSystemVolumeClient{}
 	store := runtimeRecoveryStore("sandbox-1", "pod-1", 3, sandboxstore.SandboxDesiredStateActive)
 	svc := &SandboxService{
-		sandboxStore:        store,
-		credentialStore:     bindings,
-		webhookStateVolumes: volumes,
-		logger:              zap.NewNop(),
+		sandboxStore:    store,
+		credentialStore: bindings,
+		logger:          zap.NewNop(),
 	}
 
 	require.NoError(t, svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
-		SandboxID:            "sandbox-1",
-		Namespace:            "default",
-		PodName:              "pod-1",
-		RuntimeGeneration:    3,
-		TeamID:               "team-1",
-		WebhookURL:           "https://example.test/webhook",
-		WebhookStateVolumeID: "webhook-volume-1",
+		SandboxID:         "sandbox-1",
+		Namespace:         "default",
+		PodName:           "pod-1",
+		RuntimeGeneration: 3,
+		TeamID:            "team-1",
 	}))
 	assert.Zero(t, bindings.deleteCalls)
-	assert.Empty(t, volumes.marked)
 	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 }
 

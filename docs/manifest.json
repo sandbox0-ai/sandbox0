@@ -10,7 +10,6 @@
         "get-started",
         "sandbox",
         "template",
-        "volume",
         "credential",
         "integrations",
         "self-hosted",
@@ -176,36 +175,6 @@
         {
           "slug": "configuration",
           "title": "Configuration"
-        }
-      ]
-    },
-    {
-      "label": "VOLUME",
-      "slug": "volume",
-      "pages": [
-        {
-          "slug": "",
-          "title": "Overview"
-        },
-        {
-          "slug": "mounts",
-          "title": "Mounts"
-        },
-        {
-          "slug": "http",
-          "title": "HTTP"
-        },
-        {
-          "slug": "backends",
-          "title": "Backends"
-        },
-        {
-          "slug": "snapshots",
-          "title": "Snapshots"
-        },
-        {
-          "slug": "fork",
-          "title": "Fork"
         }
       ]
     },

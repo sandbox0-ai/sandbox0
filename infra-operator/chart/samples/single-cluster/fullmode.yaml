@@ -59,8 +59,6 @@ spec:
       enabled: true
       persistence:
         size: "20Gi"
-    runtime:
-      objectEncryptionEnabled: true
   # Example S3 storage:
   # storage:
   #   type: s3
@@ -72,8 +70,6 @@ spec:
   #       name: aws-credentials
   #       accessKeyKey: accessKeyId
   #       secretKeyKey: secretAccessKey
-  #   runtime:
-  #     objectEncryptionEnabled: true
   # Builtin Redis backs shared gateway rate limits and per-team network limits.
   redis:
     type: builtin

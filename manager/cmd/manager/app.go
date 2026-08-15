@@ -7,7 +7,6 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
-	storageproxyruntime "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/runtime"
 	"go.uber.org/zap"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -23,7 +22,6 @@ type managerApp struct {
 	logger                *zap.Logger
 	k8sClient             kubernetes.Interface
 	httpServer            *httpserver.Server
-	storageRuntime        *storageproxyruntime.Runtime
 	informerFactory       informers.SharedInformerFactory
 	crdInformerFactory    externalversions.SharedInformerFactory
 	cacheSyncs            []cache.InformerSynced
@@ -72,14 +70,6 @@ func (a *managerApp) Run() {
 	a.logger.Info("Manager is running", zap.Bool("leaderElection", a.leaderElectionEnabled))
 	<-a.ctx.Done()
 	a.logger.Info("Shutting down gracefully")
-	if a.storageRuntime != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := a.storageRuntime.Shutdown(shutdownCtx); err != nil {
-			a.logger.Error("Manager storage shutdown reported errors", zap.Error(err))
-		}
-		shutdownCancel()
-	}
-
 	// Give components time to finish their context-driven shutdown paths.
 	time.Sleep(2 * time.Second)
 	a.logger.Info("Manager stopped")

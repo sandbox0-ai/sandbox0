@@ -732,7 +732,7 @@ func (r *Repository) normalizeStorageObservation(ctx context.Context, tx pgx.Tx,
 	if observation.SubjectType == "" || observation.SubjectID == "" {
 		return nil, fmt.Errorf("storage subject_type and subject_id are required")
 	}
-	if observation.SubjectType != metering.SubjectTypeVolume && observation.SubjectType != metering.SubjectTypeSnapshot && observation.SubjectType != metering.SubjectTypeRootFS {
+	if observation.SubjectType != metering.SubjectTypeRootFS {
 		return nil, fmt.Errorf("unsupported storage subject_type %q", observation.SubjectType)
 	}
 	if observation.SizeBytes < 0 {

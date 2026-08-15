@@ -254,8 +254,8 @@ func TestApplyProjectionBatchUsesBoundedMultiRowInsertsAndAdvancesWatermarksLast
 		})
 		storageMutations = append(storageMutations, &metering.StorageProjectionMutation{
 			State: &metering.StorageProjectionState{
-				SubjectType: metering.SubjectTypeVolume,
-				SubjectID:   "volume-" + string(rune('0'+index)),
+				SubjectType: metering.SubjectTypeRootFS,
+				SubjectID:   "sandbox-" + string(rune('0'+index)),
 				ObservedAt:  now,
 			},
 		})
@@ -267,8 +267,8 @@ func TestApplyProjectionBatchUsesBoundedMultiRowInsertsAndAdvancesWatermarksLast
 	}
 	tombstone := &metering.StorageProjectionMutation{
 		State: &metering.StorageProjectionState{
-			SubjectType: metering.SubjectTypeVolume,
-			SubjectID:   "volume-deleted",
+			SubjectType: metering.SubjectTypeRootFS,
+			SubjectID:   "sandbox-deleted",
 			ObservedAt:  now.Add(-time.Minute),
 		},
 		Deleted:   true,
@@ -381,8 +381,8 @@ func TestApplyProjectionBatchPreservesStorageMutationOrder(t *testing.T) {
 	repo, conn := newCaptureRepository(t)
 	now := time.Now().UTC()
 	state := &metering.StorageProjectionState{
-		SubjectType: metering.SubjectTypeVolume,
-		SubjectID:   "volume-1",
+		SubjectType: metering.SubjectTypeRootFS,
+		SubjectID:   "sandbox-1",
 		ObservedAt:  now,
 	}
 

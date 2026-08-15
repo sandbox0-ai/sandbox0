@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-func TestDimensionsContainsSevenManagedKeys(t *testing.T) {
+func TestDimensionsContainsFiveManagedKeys(t *testing.T) {
 	got := Dimensions()
-	if len(got) != 7 {
-		t.Fatalf("Dimensions() len = %d, want 7: %v", len(got), got)
+	if len(got) != 5 {
+		t.Fatalf("Dimensions() len = %d, want 5: %v", len(got), got)
 	}
 	for _, dimension := range got {
 		if !KnownDimension(dimension) {
@@ -61,26 +61,6 @@ func TestIsExceeded(t *testing.T) {
 	}
 	if IsExceeded(errors.New("other")) {
 		t.Fatal("IsExceeded = true for non-quota error")
-	}
-}
-
-func TestBytesToGBRoundUp(t *testing.T) {
-	tests := []struct {
-		name  string
-		value int64
-		want  int64
-	}{
-		{name: "zero", value: 0, want: 0},
-		{name: "one byte", value: 1, want: 1},
-		{name: "one gb", value: BytesPerGB, want: 1},
-		{name: "one gb plus one byte", value: BytesPerGB + 1, want: 2},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := BytesToGBRoundUp(tt.value); got != tt.want {
-				t.Fatalf("BytesToGBRoundUp(%d) = %d, want %d", tt.value, got, tt.want)
-			}
-		})
 	}
 }
 

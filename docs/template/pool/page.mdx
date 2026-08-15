@@ -36,8 +36,7 @@ When a sandbox is claimed:
 
 As long as `minIdle` idle pods are available, every claim is a **zero-cold-start** operation.
 
-In practice, “available” means the pod is ready for claiming, not merely `Pod Running`.
-Template-declared Volume portals are pre-mounted in idle pods. A claim can bind any subset of those paths to Sandbox Volumes without bypassing the warm pool; declared paths omitted from the claim remain writable rootfs-backed directories and are captured by rootfs checkpoints.
+In practice, “available” means the pod is ready for claiming, not merely `Pod Running`. The writable rootfs is initialized before runtime activation and is captured by later rootfs checkpoints.
 
 ---
 
@@ -72,7 +71,7 @@ Warm-pool capacity is counted from idle pods that are ready for claiming.
 
 - An idle pod in `Running` phase but with `Ready=False` does not count toward `idleCount`
 - A hot claim only selects idle pods that are already `Ready`
-- Readiness is based on the sandbox container, procd, and volume portal state
+- Readiness is based on the sandbox container and procd state
 
 **Choosing `minIdle`:**
 

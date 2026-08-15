@@ -118,16 +118,6 @@ func TestNewMuxDefaultsToNotImplementedController(t *testing.T) {
 func TestNewMuxJSONPostRouteFailureResponses(t *testing.T) {
 	handler := NewMux(NotImplementedController{})
 
-	t.Run("unsupported volume portal controller", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/volume-portals/bind", bytes.NewBufferString(`{}`))
-		rec := httptest.NewRecorder()
-
-		handler.ServeHTTP(rec, req)
-
-		assert.Equal(t, http.StatusNotImplemented, rec.Code)
-		assert.JSONEq(t, `{"sandboxvolume_id":"","mount_point":"","mounted_at":""}`, rec.Body.String())
-	})
-
 	t.Run("invalid rootfs request", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/rootfs/inspect", bytes.NewBufferString(`{"target":`))
 		rec := httptest.NewRecorder()

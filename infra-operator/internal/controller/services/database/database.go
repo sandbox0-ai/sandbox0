@@ -629,42 +629,6 @@ func buildDatabaseHost(infra *infrav1alpha1.Sandbox0Infra) string {
 	return fmt.Sprintf("%s-postgres.%s.svc", infra.Name, infra.Namespace)
 }
 
-// GetStorageMetadataDSN returns the storage metadata database URL.
-func GetStorageMetadataDSN(ctx context.Context, client client.Client, infra *infrav1alpha1.Sandbox0Infra) (string, error) {
-	if infra.Spec.MetadataDatabase == nil || infra.Spec.MetadataDatabase.ShareWithMain {
-		return GetDatabaseDSN(ctx, client, infra)
-	}
-
-	ext := infra.Spec.MetadataDatabase.External
-	if ext == nil {
-		return "", fmt.Errorf("storage metadata external database configuration is required")
-	}
-
-	secret := &corev1.Secret{}
-	if err := client.Get(ctx, types.NamespacedName{Name: ext.PasswordSecret.Name, Namespace: infra.Namespace}, secret); err != nil {
-		return "", err
-	}
-
-	key := ext.PasswordSecret.Key
-	if key == "" {
-		key = "password"
-	}
-	password := string(secret.Data[key])
-
-	sslMode := ext.SSLMode
-	if sslMode == "" {
-		sslMode = "require"
-	}
-
-	port := ext.Port
-	if port == 0 {
-		port = databasePort
-	}
-
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		ext.Username, password, ext.Host, port, ext.Database, sslMode), nil
-}
-
 func resolveBuiltinDatabaseConfig(infra *infrav1alpha1.Sandbox0Infra) infrav1alpha1.BuiltinDatabaseConfig {
 	cfg := infrav1alpha1.BuiltinDatabaseConfig{
 		Enabled:                true,

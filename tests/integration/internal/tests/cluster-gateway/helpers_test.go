@@ -50,7 +50,7 @@ type gatewayKeyPair struct {
 	publicKey  internalauth.PublicKeyType
 }
 
-func newGatewayTestEnv(t *testing.T, managerURL, managerStorageURL string, schedulerPerms []string, keys gatewayKeyPair) *gatewayTestEnv {
+func newGatewayTestEnv(t *testing.T, managerURL, _ string, schedulerPerms []string, keys gatewayKeyPair) *gatewayTestEnv {
 	t.Helper()
 
 	edgeGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
@@ -66,7 +66,6 @@ func newGatewayTestEnv(t *testing.T, managerURL, managerStorageURL string, sched
 
 	cfg := &config.ClusterGatewayConfig{
 		ManagerURL:           managerURL,
-		ManagerStorageURL:    managerStorageURL,
 		AllowedCallers:       []string{"regional-gateway", "scheduler"},
 		ProxyTimeout:         metav1.Duration{Duration: 2 * time.Second},
 		SchedulerPermissions: schedulerPerms,
@@ -88,7 +87,7 @@ func newGatewayTestEnv(t *testing.T, managerURL, managerStorageURL string, sched
 	}
 }
 
-func newGatewayPublicTestEnv(t *testing.T, managerURL, managerStorageURL string, pool *pgxpool.Pool, jwtSecret, jwtIssuer string, keys gatewayKeyPair) *gatewayTestEnv {
+func newGatewayPublicTestEnv(t *testing.T, managerURL, _ string, pool *pgxpool.Pool, jwtSecret, jwtIssuer string, keys gatewayKeyPair) *gatewayTestEnv {
 	t.Helper()
 
 	edgeGen := internalauth.NewGenerator(internalauth.GeneratorConfig{
@@ -103,9 +102,8 @@ func newGatewayPublicTestEnv(t *testing.T, managerURL, managerStorageURL string,
 	})
 
 	cfg := &config.ClusterGatewayConfig{
-		AuthMode:          "public",
-		ManagerURL:        managerURL,
-		ManagerStorageURL: managerStorageURL,
+		AuthMode:   "public",
+		ManagerURL: managerURL,
 		GatewayConfig: config.GatewayConfig{
 			JWTSecret: jwtSecret,
 			JWTIssuer: jwtIssuer,

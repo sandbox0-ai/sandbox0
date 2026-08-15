@@ -75,14 +75,6 @@ func (s quotaHandlerUsageStore) CurrentUsage(context.Context, string, quota.Dime
 	return s.current, s.err
 }
 
-func (s quotaHandlerUsageStore) ProjectedStorageUsageGB(context.Context, string, quota.Dimension, string, string, int64) (int64, error) {
-	return 0, nil
-}
-
-func (s quotaHandlerUsageStore) AdditionalStorageUsageGB(context.Context, string, quota.Dimension, string, int64) (int64, error) {
-	return 0, nil
-}
-
 type quotaHandlerFakeRow struct {
 	values []any
 	err    error

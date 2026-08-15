@@ -7,7 +7,7 @@ import (
 	"time"
 
 	meteringoutbox "github.com/sandbox0-ai/sandbox0/pkg/metering/outbox"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore/requestmetering"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore/requestmetering"
 	"go.uber.org/zap"
 )
 

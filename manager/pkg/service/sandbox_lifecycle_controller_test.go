@@ -2,13 +2,7 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -17,9 +11,6 @@ import (
 	egressauth "github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,13 +29,6 @@ type recordingSandboxCleaner struct {
 
 type deleteRecordingBindingStore struct {
 	deleteCalls int
-}
-
-type recordingSystemVolumeClient struct {
-	created []string
-	deleted []string
-	marked  []string
-	list    []SandboxSystemVolume
 }
 
 func (c *recordingSandboxCleaner) CleanupDeletedSandbox(_ context.Context, info SandboxLifecycleInfo) error {
@@ -71,26 +55,6 @@ func (s *deleteRecordingBindingStore) GetSourceByRef(context.Context, string, st
 
 func (s *deleteRecordingBindingStore) GetSourceVersion(context.Context, int64, int64) (*egressauth.CredentialSourceVersion, error) {
 	return nil, nil
-}
-
-func (c *recordingSystemVolumeClient) Create(_ context.Context, _, _, sandboxID, kind string) (string, error) {
-	id := sandboxID + "-" + kind
-	c.created = append(c.created, id)
-	return id, nil
-}
-
-func (c *recordingSystemVolumeClient) Delete(_ context.Context, _, _, _, volumeID string) error {
-	c.deleted = append(c.deleted, volumeID)
-	return nil
-}
-
-func (c *recordingSystemVolumeClient) MarkSandboxForCleanup(_ context.Context, _, _, sandboxID, reason string) error {
-	c.marked = append(c.marked, sandboxID+":"+reason)
-	return nil
-}
-
-func (c *recordingSystemVolumeClient) List(_ context.Context) ([]SandboxSystemVolume, error) {
-	return c.list, nil
 }
 
 func TestSandboxLifecycleControllerCleansAndRemovesFinalizer(t *testing.T) {
@@ -132,7 +96,6 @@ func TestSandboxLifecycleControllerRemovesFinalizerForUnscheduledPod(t *testing.
 	pod.UID = types.UID("pod-uid-a")
 	pod.Finalizers = []string{sandboxCleanupFinalizer}
 	pod.DeletionTimestamp = &deletionTime
-	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "volume-a"
 	client := fake.NewSimpleClientset(pod.DeepCopy())
 	cleaner := &SandboxService{
 		config: SandboxServiceConfig{CtldEnabled: true},
@@ -343,40 +306,14 @@ func TestSandboxServiceCleanupDeletedSandboxRecordsPhaseMetrics(t *testing.T) {
 	}
 }
 
-func TestSandboxServiceCleanupDeletedSandboxMarksStateVolumeWithoutExternalDelivery(t *testing.T) {
-	volumeClient := &recordingSystemVolumeClient{}
-	svc := &SandboxService{
-		webhookStateVolumes: volumeClient,
-		logger:              zap.NewNop(),
-	}
-
-	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
-		Namespace:            "ns-a",
-		PodName:              "sandbox-a",
-		SandboxID:            "sandbox-a",
-		TeamID:               "team-a",
-		UserID:               "user-a",
-		WebhookURL:           "https://example.test/webhook",
-		WebhookStateVolumeID: "volume-a",
-	})
-	if err != nil {
-		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
-	}
-	if len(volumeClient.marked) != 1 || volumeClient.marked[0] != "sandbox-a:sandbox_deleted" {
-		t.Fatalf("marked volumes = %#v, want sandbox-a:sandbox_deleted", volumeClient.marked)
-	}
-}
-
 func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausingRuntime(t *testing.T) {
 	removed := make([]string, 0, 1)
 	store := &deleteRecordingBindingStore{}
-	volumeClient := &recordingSystemVolumeClient{}
 	svc := &SandboxService{
 		networkProvider: &assertingNetworkProvider{removeFunc: func(namespace, sandboxID string) {
 			removed = append(removed, namespace+"/"+sandboxID)
 		}},
-		credentialStore:     store,
-		webhookStateVolumes: volumeClient,
+		credentialStore: store,
 		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:           "sandbox-a",
@@ -388,13 +325,11 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausingRunti
 	}
 
 	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
-		Namespace:            "ns-a",
-		PodName:              "pod-a",
-		SandboxID:            "sandbox-a",
-		TeamID:               "team-a",
-		UserID:               "user-a",
-		WebhookURL:           "https://example.test/webhook",
-		WebhookStateVolumeID: "volume-a",
+		Namespace: "ns-a",
+		PodName:   "pod-a",
+		SandboxID: "sandbox-a",
+		TeamID:    "team-a",
+		UserID:    "user-a",
 	})
 	if err != nil {
 		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
@@ -405,21 +340,16 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForPausingRunti
 	if store.deleteCalls != 0 {
 		t.Fatalf("DeleteBindings calls = %d, want 0", store.deleteCalls)
 	}
-	if len(volumeClient.marked) != 0 {
-		t.Fatalf("marked volumes = %#v, want none", volumeClient.marked)
-	}
 }
 
 func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime(t *testing.T) {
 	removed := make([]string, 0, 1)
 	store := &deleteRecordingBindingStore{}
-	volumeClient := &recordingSystemVolumeClient{}
 	svc := &SandboxService{
 		networkProvider: &assertingNetworkProvider{removeFunc: func(namespace, sandboxID string) {
 			removed = append(removed, namespace+"/"+sandboxID)
 		}},
-		credentialStore:     store,
-		webhookStateVolumes: volumeClient,
+		credentialStore: store,
 		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
 			"sandbox-a": {
 				ID:                  "sandbox-a",
@@ -434,14 +364,12 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime
 	}
 
 	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
-		Namespace:            "ns-a",
-		PodName:              "pod-old",
-		SandboxID:            "sandbox-a",
-		TeamID:               "team-a",
-		UserID:               "user-a",
-		WebhookURL:           "https://example.test/webhook",
-		WebhookStateVolumeID: "volume-a",
-		RuntimeGeneration:    1,
+		Namespace:         "ns-a",
+		PodName:           "pod-old",
+		SandboxID:         "sandbox-a",
+		TeamID:            "team-a",
+		UserID:            "user-a",
+		RuntimeGeneration: 1,
 	})
 	if err != nil {
 		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
@@ -451,9 +379,6 @@ func TestSandboxServiceCleanupDeletedSandboxPreservesDurableStateForStaleRuntime
 	}
 	if store.deleteCalls != 0 {
 		t.Fatalf("DeleteBindings calls = %d, want 0", store.deleteCalls)
-	}
-	if len(volumeClient.marked) != 0 {
-		t.Fatalf("marked volumes = %#v, want none", volumeClient.marked)
 	}
 }
 
@@ -481,160 +406,6 @@ func TestRuntimeDeletionDispositionDoesNotCacheStaleRuntime(t *testing.T) {
 	}
 }
 
-func TestSandboxServiceCleanupDeletedSandboxUnbindsVolumePortals(t *testing.T) {
-	var got ctldapi.UnbindVolumePortalRequest
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/volume-portals/unbind" {
-			http.NotFound(w, r)
-			return
-		}
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("decode unbind request: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ctldapi.UnbindVolumePortalResponse{Unbound: true})
-	}))
-	defer ctld.Close()
-
-	ctldURL, err := url.Parse(ctld.URL)
-	if err != nil {
-		t.Fatalf("parse ctld url: %v", err)
-	}
-	ctldPort, err := strconv.Atoi(ctldURL.Port())
-	if err != nil {
-		t.Fatalf("parse ctld port: %v", err)
-	}
-	svc := &SandboxService{
-		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
-		config: SandboxServiceConfig{
-			CtldEnabled: true,
-			CtldPort:    ctldPort,
-		},
-		logger: zap.NewNop(),
-	}
-
-	err = svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
-		Namespace: "ns-a",
-		PodName:   "sandbox-a",
-		SandboxID: "sandbox-a",
-		PodUID:    "pod-uid-a",
-		HostIP:    ctldURL.Hostname(),
-		VolumePortals: []SandboxLifecycleVolumePortal{{
-			SandboxVolumeID: "vol-1",
-			MountPoint:      "/workspace/data",
-			PortalName:      "data",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
-	}
-	if got.Namespace != "ns-a" || got.PodName != "sandbox-a" || got.PodUID != "pod-uid-a" {
-		t.Fatalf("unexpected pod identity in unbind request: %+v", got)
-	}
-	if got.SandboxVolumeID != "vol-1" || got.MountPath != "/workspace/data" || got.PortalName != "data" {
-		t.Fatalf("unexpected volume portal unbind request: %+v", got)
-	}
-	if got.RetainHot {
-		t.Fatal("deleted sandbox requested hot engine retention")
-	}
-}
-
-func TestSandboxServicePausedSandboxRequestsHotVolumeRetention(t *testing.T) {
-	var got ctldapi.UnbindVolumePortalRequest
-	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("decode unbind request: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ctldapi.UnbindVolumePortalResponse{Unbound: true})
-	}))
-	defer ctld.Close()
-
-	ctldURL, err := url.Parse(ctld.URL)
-	if err != nil {
-		t.Fatalf("parse ctld url: %v", err)
-	}
-	ctldPort, err := strconv.Atoi(ctldURL.Port())
-	if err != nil {
-		t.Fatalf("parse ctld port: %v", err)
-	}
-	svc := &SandboxService{
-		ctldClient: ctldapi.NewClientWithTimeout(time.Second),
-		config: SandboxServiceConfig{
-			CtldEnabled: true,
-			CtldPort:    ctldPort,
-		},
-		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
-			"sandbox-a": {ID: "sandbox-a", DesiredState: sandboxstore.SandboxDesiredStatePaused},
-		}},
-		logger: zap.NewNop(),
-	}
-
-	err = svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
-		Namespace: "ns-a",
-		PodName:   "sandbox-a",
-		SandboxID: "sandbox-a",
-		PodUID:    "pod-uid-a",
-		HostIP:    ctldURL.Hostname(),
-		VolumePortals: []SandboxLifecycleVolumePortal{{
-			SandboxVolumeID: "vol-1",
-			MountPoint:      "/workspace/data",
-			PortalName:      "data",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("CleanupDeletedSandbox() error = %v", err)
-	}
-	if !got.RetainHot {
-		t.Fatal("intentional pause did not request hot engine retention")
-	}
-}
-
-func TestSandboxServiceCleanupDeletedSandboxStillRequiresCtldForScheduledPod(t *testing.T) {
-	svc := &SandboxService{
-		config: SandboxServiceConfig{CtldEnabled: true},
-		logger: zap.NewNop(),
-	}
-
-	err := svc.CleanupDeletedSandbox(context.Background(), SandboxLifecycleInfo{
-		Namespace: "ns-a",
-		PodName:   "sandbox-a",
-		SandboxID: "sandbox-a",
-		PodUID:    "pod-uid-a",
-		NodeName:  "sandbox-node-a",
-		VolumePortals: []SandboxLifecycleVolumePortal{{
-			SandboxVolumeID: "vol-1",
-			MountPoint:      "/workspace/data",
-			PortalName:      "data",
-		}},
-	})
-	if err == nil || !strings.Contains(err.Error(), "ctld client is not configured") {
-		t.Fatalf("CleanupDeletedSandbox() error = %v, want missing ctld client", err)
-	}
-}
-
-func TestSandboxLifecycleInfoFromPodIncludesWebhookMetadata(t *testing.T) {
-	pod := newLifecycleTestPod()
-	pod.Annotations[controller.AnnotationUserID] = "user-a"
-	pod.Annotations[controller.AnnotationWebhookStateVolumeID] = "volume-a"
-	pod.Annotations[controller.AnnotationRuntimeGeneration] = "7"
-	pod.Annotations[controller.AnnotationConfig] = `{"webhook":{"url":"https://example.test/webhook","secret":"secret"}}`
-
-	info, ok := sandboxLifecycleInfoFromPod(pod)
-	if !ok {
-		t.Fatal("expected lifecycle info")
-	}
-	if info.UserID != "user-a" || info.WebhookStateVolumeID != "volume-a" {
-		t.Fatalf("unexpected lifecycle metadata: %#v", info)
-	}
-	if info.WebhookURL != "https://example.test/webhook" {
-		t.Fatalf("unexpected webhook metadata: %#v", info)
-	}
-	if info.RuntimeGeneration != 7 {
-		t.Fatalf("runtime generation = %d, want 7", info.RuntimeGeneration)
-	}
-}
-
 func TestSandboxLifecycleInfoFromPodIncludesHotClaimReservation(t *testing.T) {
 	pod := newLifecycleTestPod()
 	pod.Labels[controller.LabelPoolType] = controller.PoolTypeIdle
@@ -647,168 +418,6 @@ func TestSandboxLifecycleInfoFromPodIncludesHotClaimReservation(t *testing.T) {
 	}
 	if info.SandboxID != "sandbox-a" {
 		t.Fatalf("sandbox ID = %q, want sandbox-a", info.SandboxID)
-	}
-}
-
-func TestSandboxLifecycleInfoFromPodIncludesVolumePortals(t *testing.T) {
-	pod := newLifecycleTestPod()
-	pod.UID = types.UID("pod-uid-a")
-	pod.Spec.NodeName = "node-a"
-	pod.Status.HostIP = "10.0.0.8"
-	mountsJSON, err := json.Marshal([]managerapi.ClaimMount{{
-		SandboxVolumeID: "vol-1",
-		MountPoint:      "/workspace/data",
-	}})
-	if err != nil {
-		t.Fatalf("marshal mounts: %v", err)
-	}
-	pod.Annotations[controller.AnnotationMounts] = string(mountsJSON)
-	pod.Spec.Volumes = []corev1.Volume{{
-		Name: "data",
-		VolumeSource: corev1.VolumeSource{
-			CSI: &corev1.CSIVolumeSource{
-				Driver: volumeportal.DriverName,
-				VolumeAttributes: map[string]string{
-					volumeportal.AttributePortalName: "data",
-					volumeportal.AttributeMountPath:  "/workspace/data",
-				},
-			},
-		},
-	}}
-
-	info, ok := sandboxLifecycleInfoFromPod(pod)
-	if !ok {
-		t.Fatal("expected lifecycle info")
-	}
-	if info.PodUID != "pod-uid-a" || info.NodeName != "node-a" || info.HostIP != "10.0.0.8" {
-		t.Fatalf("unexpected pod identity: %#v", info)
-	}
-	if len(info.VolumePortals) != 1 {
-		t.Fatalf("volume portals = %#v, want one", info.VolumePortals)
-	}
-	portal := info.VolumePortals[0]
-	if portal.SandboxVolumeID != "vol-1" || portal.MountPoint != "/workspace/data" || portal.PortalName != "data" {
-		t.Fatalf("volume portal = %+v, want vol-1 data", portal)
-	}
-}
-
-func TestSystemVolumeReconcilerMarksOrphanedOwnedVolume(t *testing.T) {
-	volumeClient := &recordingSystemVolumeClient{
-		list: []SandboxSystemVolume{{
-			VolumeID:       "volume-a",
-			TeamID:         "team-a",
-			UserID:         "user-a",
-			OwnerSandboxID: "sandbox-a",
-			OwnerClusterID: "cluster-a",
-			Purpose:        "webhook-state",
-		}},
-	}
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	svc := &SandboxService{
-		podLister:           corelisters.NewPodLister(indexer),
-		webhookStateVolumes: volumeClient,
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
-	}
-
-	if err := svc.reconcileSystemVolumes(context.Background()); err != nil {
-		t.Fatalf("reconcileSystemVolumes() error = %v", err)
-	}
-	if len(volumeClient.marked) != 1 || volumeClient.marked[0] != "sandbox-a:orphaned_sandbox" {
-		t.Fatalf("marked = %#v, want sandbox-a:orphaned_sandbox", volumeClient.marked)
-	}
-}
-
-func TestSystemVolumeReconcilerKeepsActiveOwnedVolume(t *testing.T) {
-	volumeClient := &recordingSystemVolumeClient{
-		list: []SandboxSystemVolume{{
-			VolumeID:       "volume-a",
-			TeamID:         "team-a",
-			UserID:         "user-a",
-			OwnerSandboxID: "sandbox-a",
-			OwnerClusterID: "cluster-a",
-			Purpose:        "webhook-state",
-		}},
-	}
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	if err := indexer.Add(newLifecycleTestPod()); err != nil {
-		t.Fatalf("add pod to indexer: %v", err)
-	}
-	svc := &SandboxService{
-		podLister:           corelisters.NewPodLister(indexer),
-		webhookStateVolumes: volumeClient,
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
-	}
-
-	if err := svc.reconcileSystemVolumes(context.Background()); err != nil {
-		t.Fatalf("reconcileSystemVolumes() error = %v", err)
-	}
-	if len(volumeClient.marked) != 0 {
-		t.Fatalf("marked = %#v, want none", volumeClient.marked)
-	}
-}
-
-func TestSystemVolumeReconcilerKeepsPausedOwnedVolume(t *testing.T) {
-	volumeClient := &recordingSystemVolumeClient{
-		list: []SandboxSystemVolume{{
-			VolumeID:       "volume-a",
-			TeamID:         "team-a",
-			UserID:         "user-a",
-			OwnerSandboxID: "sandbox-a",
-			OwnerClusterID: "cluster-a",
-			Purpose:        "webhook-state",
-		}},
-	}
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	svc := &SandboxService{
-		podLister:           corelisters.NewPodLister(indexer),
-		webhookStateVolumes: volumeClient,
-		sandboxStore: &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
-			"sandbox-a": {
-				ID:                   "sandbox-a",
-				TeamID:               "team-a",
-				UserID:               "user-a",
-				DesiredState:         sandboxstore.SandboxDesiredStatePaused,
-				WebhookStateVolumeID: "volume-a",
-			},
-		}},
-		clock:  systemTime{},
-		logger: zap.NewNop(),
-	}
-
-	if err := svc.reconcileSystemVolumes(context.Background()); err != nil {
-		t.Fatalf("reconcileSystemVolumes() error = %v", err)
-	}
-	if len(volumeClient.marked) != 0 {
-		t.Fatalf("marked = %#v, want none", volumeClient.marked)
-	}
-}
-
-func TestSystemVolumeReconcilerDeletesCleanupRequestedVolume(t *testing.T) {
-	cleanupRequestedAt := time.Now().Add(-time.Minute)
-	volumeClient := &recordingSystemVolumeClient{
-		list: []SandboxSystemVolume{{
-			VolumeID:           "volume-a",
-			TeamID:             "team-a",
-			UserID:             "user-a",
-			OwnerSandboxID:     "sandbox-a",
-			OwnerClusterID:     "cluster-a",
-			Purpose:            "webhook-state",
-			CleanupRequestedAt: &cleanupRequestedAt,
-		}},
-	}
-	svc := &SandboxService{
-		webhookStateVolumes: volumeClient,
-		clock:               systemTime{},
-		logger:              zap.NewNop(),
-	}
-
-	if err := svc.reconcileSystemVolumes(context.Background()); err != nil {
-		t.Fatalf("reconcileSystemVolumes() error = %v", err)
-	}
-	if len(volumeClient.deleted) != 1 || volumeClient.deleted[0] != "volume-a" {
-		t.Fatalf("deleted = %#v, want volume-a", volumeClient.deleted)
 	}
 }
 

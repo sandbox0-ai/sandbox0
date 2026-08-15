@@ -10,8 +10,6 @@ func TestRequestPathAllowedWithoutUpstreamTimeout(t *testing.T) {
 		{path: "/api/v1/sandboxes", want: true},
 		{path: "/api/v1/sandboxes/sb-1", want: true},
 		{path: "/api/v1/sandboxes/sb-1/contexts/ctx-1/exec", want: true},
-		{path: "/api/v1/sandboxvolumes", want: true},
-		{path: "/api/v1/sandboxvolumes/vol-1/snapshots/snap-1/restore", want: true},
 		{path: "/api/v1/templates", want: false},
 		{path: "/readyz", want: false},
 		{path: "/api/v1/sandboxes-extra", want: false},

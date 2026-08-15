@@ -15,7 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 )
 
 var (
@@ -26,21 +26,16 @@ var (
 
 type Runtime interface {
 	Inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error)
-	CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
-	CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
-	ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error)
-	CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) error
-}
-
-type PortalResolver interface {
-	RootFSPortalPaths(podUID string) []ctldapi.RootFSPortalPath
+	CreateDiff(ctx context.Context, info ctldapi.RootFSInfo, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
+	CreateDiffFromBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error)
+	ApplyDiff(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, content io.Reader, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, error)
+	CaptureBaseline(ctx context.Context, info ctldapi.RootFSInfo, baselineLayerID string, excludedPaths []string) error
 }
 
 type Config struct {
 	Runtime          Runtime
 	Store            objectstore.Store
 	OperationTimeout time.Duration
-	PortalResolver   PortalResolver
 	SnapshotDir      string
 	ObjectCache      *ObjectCache
 	Observer         *Observer
@@ -50,7 +45,6 @@ type Controller struct {
 	runtime          Runtime
 	store            objectstore.Store
 	operationTimeout time.Duration
-	portalResolver   PortalResolver
 	snapshotDir      string
 	objectCache      *ObjectCache
 	observer         *Observer
@@ -65,7 +59,6 @@ func NewController(cfg Config) *Controller {
 		runtime:          cfg.Runtime,
 		store:            cfg.Store,
 		operationTimeout: timeout,
-		portalResolver:   cfg.PortalResolver,
 		snapshotDir:      cfg.SnapshotDir,
 		objectCache:      cfg.ObjectCache,
 		observer:         cfg.Observer,
@@ -92,7 +85,6 @@ func (c *Controller) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) 
 		Target:        req.Target,
 		ParentLayerID: req.ParentLayerID,
 		ExcludedPaths: req.ExcludedPaths,
-		PortalPaths:   req.PortalPaths,
 	})
 	if status != http.StatusOK {
 		return ctldapi.SaveRootFSResponse{Info: prepared.Info, Error: prepared.Error}, status
@@ -129,8 +121,7 @@ func (c *Controller) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareR
 	if err := validateSupportedRuntime(info); err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: err.Error()}, http.StatusBadRequest
 	}
-	portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-	desc, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID), req.ExcludedPaths, portalPaths)
+	desc, reader, err := c.createDiff(ctx, info, strings.TrimSpace(req.ParentLayerID), req.ExcludedPaths)
 	if err != nil {
 		return ctldapi.PrepareRootFSSnapshotResponse{Info: info, Error: fmt.Sprintf("create rootfs diff: %v", err)}, statusForError(err)
 	}
@@ -223,38 +214,36 @@ func (c *Controller) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest
 		// The layer chain represents the sandbox's writable rootfs state. Replaying
 		// it across template image upgrades is valid; actual path-level conflicts
 		// are surfaced by the runtime apply step below.
-		portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-		applied, err := c.applyLayers(ctx, info, req.Layers, req.ExcludedPaths, portalPaths)
+		applied, err := c.applyLayers(ctx, info, req.Layers, req.ExcludedPaths)
 		if err != nil {
 			return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
 		}
 		if req.BaselineLayerID != "" {
-			if err := c.runtime.CaptureBaseline(ctx, info, req.BaselineLayerID, req.ExcludedPaths, portalPaths); err != nil {
+			if err := c.runtime.CaptureBaseline(ctx, info, req.BaselineLayerID, req.ExcludedPaths); err != nil {
 				return ctldapi.ApplyRootFSResponse{Info: info, Error: fmt.Sprintf("capture rootfs baseline: %v", err)}, statusForError(err)
 			}
 		}
 		return ctldapi.ApplyRootFSResponse{Info: info, Layers: applied, Applied: true}, http.StatusOK
 	}
 
-	portalPaths := c.portalPathsForRequest(info, req.Target, req.ExcludedPaths, req.PortalPaths)
-	applied, err := c.applyDescriptor(ctx, info, req.Descriptor, req.ExcludedPaths, portalPaths)
+	applied, err := c.applyDescriptor(ctx, info, req.Descriptor, req.ExcludedPaths)
 	if err != nil {
 		return ctldapi.ApplyRootFSResponse{Info: info, Error: err.Error()}, statusForError(err)
 	}
 	return ctldapi.ApplyRootFSResponse{Info: info, Descriptor: applied, Applied: true}, http.StatusOK
 }
 
-func (c *Controller) createDiff(ctx context.Context, info ctldapi.RootFSInfo, parentLayerID string, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
+func (c *Controller) createDiff(ctx context.Context, info ctldapi.RootFSInfo, parentLayerID string, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, io.ReadSeekCloser, error) {
 	if parentLayerID != "" {
-		return c.runtime.CreateDiffFromBaseline(ctx, info, parentLayerID, excludedPaths, portalPaths)
+		return c.runtime.CreateDiffFromBaseline(ctx, info, parentLayerID, excludedPaths)
 	}
-	return c.runtime.CreateDiff(ctx, info, excludedPaths, portalPaths)
+	return c.runtime.CreateDiff(ctx, info, excludedPaths)
 }
 
-func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, layers []ctldapi.RootFSLayerDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) ([]ctldapi.RootFSLayerDescriptor, error) {
+func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, layers []ctldapi.RootFSLayerDescriptor, excludedPaths []string) ([]ctldapi.RootFSLayerDescriptor, error) {
 	applied := make([]ctldapi.RootFSLayerDescriptor, 0, len(layers))
 	for _, layer := range layers {
-		desc, err := c.applyDescriptor(ctx, info, layer.Descriptor, excludedPaths, portalPaths)
+		desc, err := c.applyDescriptor(ctx, info, layer.Descriptor, excludedPaths)
 		if err != nil {
 			return nil, err
 		}
@@ -267,7 +256,7 @@ func (c *Controller) applyLayers(ctx context.Context, info ctldapi.RootFSInfo, l
 	return applied, nil
 }
 
-func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, excludedPaths []string, portalPaths []ctldapi.RootFSPortalPath) (ctldapi.RootFSDiffDescriptor, error) {
+func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInfo, desc ctldapi.RootFSDiffDescriptor, excludedPaths []string) (ctldapi.RootFSDiffDescriptor, error) {
 	var (
 		reader io.ReadCloser
 		err    error
@@ -282,7 +271,7 @@ func (c *Controller) applyDescriptor(ctx context.Context, info ctldapi.RootFSInf
 	}
 	defer reader.Close()
 
-	applied, err := c.runtime.ApplyDiff(ctx, info, desc, reader, excludedPaths, portalPaths)
+	applied, err := c.runtime.ApplyDiff(ctx, info, desc, reader, excludedPaths)
 	if err != nil {
 		return ctldapi.RootFSDiffDescriptor{}, fmt.Errorf("apply rootfs diff: %w", err)
 	}
@@ -428,18 +417,6 @@ func (c *Controller) preparedSnapshotDir() string {
 		return c.snapshotDir
 	}
 	return filepath.Join(os.TempDir(), "sandbox0-rootfs-snapshots")
-}
-
-func (c *Controller) portalPathsForRequest(info ctldapi.RootFSInfo, target ctldapi.RootFSContainerRef, excludedPaths []string, requested []ctldapi.RootFSPortalPath) []ctldapi.RootFSPortalPath {
-	podUID := strings.TrimSpace(info.PodUID)
-	if podUID == "" {
-		podUID = strings.TrimSpace(target.PodUID)
-	}
-	paths := append([]ctldapi.RootFSPortalPath(nil), requested...)
-	if podUID != "" && c != nil && c.portalResolver != nil {
-		paths = append(paths, c.portalResolver.RootFSPortalPaths(podUID)...)
-	}
-	return filterRootFSPortalPaths(paths, excludedPaths)
 }
 
 func (c *Controller) inspect(ctx context.Context, target ctldapi.RootFSContainerRef) (ctldapi.RootFSInfo, error) {

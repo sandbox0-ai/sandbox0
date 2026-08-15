@@ -45,7 +45,7 @@ func ApplyManagerConfig(ctx context.Context, c ctrlclient.Client, infra *infrav1
 	return apply(ctx, c, infra, &cfg.Metering)
 }
 
-func ApplyStorageProxyConfig(ctx context.Context, c ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.StorageProxyConfig) error {
+func ApplyCtldConfig(ctx context.Context, c ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.CtldConfig) error {
 	if cfg == nil {
 		return nil
 	}

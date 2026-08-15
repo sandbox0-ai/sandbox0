@@ -350,13 +350,10 @@ func TestCompileDefaultsDataPlaneIdentityFromPublicExposure(t *testing.T) {
 	}
 }
 
-func TestCompileStorageAndNetworkRuntimeConfig(t *testing.T) {
+func TestCompileNetworkRuntimeConfig(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Storage: &infrav1alpha1.StorageConfig{
-				Runtime: &infrav1alpha1.StorageProxyConfig{HTTPPort: 18082, CacheSizeLimit: "2Gi"},
-			},
 			Network: &infrav1alpha1.NetworkConfig{
 				MITMCASecretName: "canonical-mitm-ca",
 				Config: &infrav1alpha1.NetdConfig{
@@ -375,20 +372,11 @@ func TestCompileStorageAndNetworkRuntimeConfig(t *testing.T) {
 
 	compiled := Compile(infra)
 
-	if !compiled.Components.EnableStorageRuntime || !compiled.Components.EnableNetwork {
-		t.Fatalf("storage and network runtimes were not enabled: %#v", compiled.Components)
+	if !compiled.Components.EnableNetwork {
+		t.Fatalf("network runtime was not enabled: %#v", compiled.Components)
 	}
 	if compiled.Manager.Replicas != 2 {
 		t.Fatalf("manager replicas = %d, want canonical process replicas 2", compiled.Manager.Replicas)
-	}
-	if got := compiled.Services.ManagerStorage.Name; got != "demo-manager" {
-		t.Fatalf("storage runtime service name = %q, want manager", got)
-	}
-	if got := compiled.Services.ManagerStorage.URL; got != "http://demo-manager.sandbox0-system.svc.cluster.local:18082" {
-		t.Fatalf("storage runtime URL = %q, want manager storage port", got)
-	}
-	if got := compiled.Services.ManagerStorage.Port; got != 18082 {
-		t.Fatalf("manager storage runtime port = %d, want 18082", got)
 	}
 	if got := compiled.Network.Config.EgressAuthResolverURL; got != "http://canonical-resolver:9000" {
 		t.Fatalf("network resolver URL = %q, want canonical config", got)
@@ -1014,53 +1002,6 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 		}
 	})
 
-	t.Run("storage runtime requires at least one manager replica", func(t *testing.T) {
-		infra := &infrav1alpha1.Sandbox0Infra{
-			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Storage: &infrav1alpha1.StorageConfig{
-					Runtime: &infrav1alpha1.StorageProxyConfig{},
-				},
-				Services: &infrav1alpha1.ServicesConfig{
-					Manager: &infrav1alpha1.ManagerServiceConfig{
-						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-							Replicas:             0,
-						},
-					},
-				},
-			},
-		}
-
-		compiled := Compile(infra)
-		if !containsString(compiled.Validation.FatalErrors, "manager replicas must be at least 1 when the storage API is enabled") {
-			t.Fatalf("expected manager replica validation error, got %#v", compiled.Validation.FatalErrors)
-		}
-	})
-
-	t.Run("manager service ports must be distinct", func(t *testing.T) {
-		infra := &infrav1alpha1.Sandbox0Infra{
-			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Storage: &infrav1alpha1.StorageConfig{
-					Runtime: &infrav1alpha1.StorageProxyConfig{HTTPPort: 9090},
-				},
-				Services: &infrav1alpha1.ServicesConfig{
-					Manager: &infrav1alpha1.ManagerServiceConfig{
-						WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
-							EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-							Replicas:             1,
-						},
-					},
-				},
-			},
-		}
-
-		compiled := Compile(infra)
-		want := "manager Service port 9090 is configured by both services.manager.config.metricsPort and storage.runtime.httpPort; use distinct ports"
-		if !containsString(compiled.Validation.FatalErrors, want) {
-			t.Fatalf("expected manager Service port validation error, got %#v", compiled.Validation.FatalErrors)
-		}
-	})
-
 	t.Run("init user is invalid for federated regional gateways", func(t *testing.T) {
 		infra := &infrav1alpha1.Sandbox0Infra{
 			Spec: infrav1alpha1.Sandbox0InfraSpec{
@@ -1146,9 +1087,6 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 					Username: "sandbox0",
 				},
 			},
-			Storage: &infrav1alpha1.StorageConfig{
-				Runtime: &infrav1alpha1.StorageProxyConfig{},
-			},
 			Network: &infrav1alpha1.NetworkConfig{},
 			Services: &infrav1alpha1.ServicesConfig{
 				GlobalGateway: &infrav1alpha1.GlobalGatewayServiceConfig{
@@ -1206,7 +1144,6 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"control-plane-public-key",
 		"internal-auth",
 		"database",
-		"storage",
 		"global-gateway-enterprise-license",
 		"global-gateway",
 		"init-user-secret",
@@ -1219,7 +1156,6 @@ func TestCompileTracksWorkflowRequirements(t *testing.T) {
 		"manager",
 		"cluster-gateway-enterprise-license",
 		"cluster-gateway",
-		"storage-runtime-ready",
 		"ctld",
 		"ctld-ready",
 		"network-ready",

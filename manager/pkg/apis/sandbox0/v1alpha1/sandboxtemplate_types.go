@@ -38,10 +38,6 @@ type SandboxTemplateSpec struct {
 	// MainContainer configuration (required)
 	MainContainer ContainerSpec `json:"mainContainer"`
 
-	// VolumeMounts declares the fixed sandbox volume portal mount points that
-	// can be bound to concrete SandboxVolumes when a sandbox is claimed.
-	VolumeMounts []VolumeMountSpec `json:"volumeMounts,omitempty"`
-
 	// Pod-level configuration
 	Pod *PodSpecOverride `json:"pod,omitempty"`
 
@@ -71,12 +67,6 @@ const (
 	SandboxPodReadinessConditionType corev1.PodConditionType = sandboxpod.SandboxPodReadinessConditionType
 	SandboxPodLivenessConditionType  corev1.PodConditionType = sandboxpod.SandboxPodLivenessConditionType
 )
-
-type VolumeMountSpec struct {
-	Name      string `json:"name"`
-	MountPath string `json:"mountPath"`
-	ReadOnly  bool   `json:"readOnly,omitempty"`
-}
 
 // EnvVar represents an environment variable
 type EnvVar struct {

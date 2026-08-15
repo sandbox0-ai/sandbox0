@@ -8,7 +8,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/sandbox0-ai/sandbox0/pkg/metering"
 )
 
 type fakeDB struct {
@@ -181,28 +180,12 @@ func TestEnsureDefaultPoliciesRejectsInvalidLimits(t *testing.T) {
 }
 
 type fakeUsageStore struct {
-	currentFn    func(ctx context.Context, teamID string, dimension Dimension) (int64, error)
-	projectedFn  func(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error)
-	additionalFn func(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error)
+	currentFn func(ctx context.Context, teamID string, dimension Dimension) (int64, error)
 }
 
 func (f *fakeUsageStore) CurrentUsage(ctx context.Context, teamID string, dimension Dimension) (int64, error) {
 	if f.currentFn != nil {
 		return f.currentFn(ctx, teamID, dimension)
-	}
-	return 0, nil
-}
-
-func (f *fakeUsageStore) ProjectedStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
-	if f.projectedFn != nil {
-		return f.projectedFn(ctx, teamID, dimension, subjectType, subjectID, sizeBytes)
-	}
-	return 0, nil
-}
-
-func (f *fakeUsageStore) AdditionalStorageUsageGB(ctx context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error) {
-	if f.additionalFn != nil {
-		return f.additionalFn(ctx, teamID, dimension, subjectType, additionalBytes)
 	}
 	return 0, nil
 }
@@ -252,104 +235,5 @@ func TestCurrentUsageWithTypedNilUsageStoreReturnsUnavailable(t *testing.T) {
 	_, err := repo.CurrentUsage(context.Background(), "team-1", DimensionActiveSandboxes)
 	if !errors.Is(err, ErrUsageStoreNotConfigured) {
 		t.Fatalf("CurrentUsage error = %v, want ErrUsageStoreNotConfigured", err)
-	}
-}
-
-func TestProjectedStorageUsageGBDelegatesToUsageStore(t *testing.T) {
-	repo := NewRepository(&fakeDB{})
-	repo.SetUsageStore(&fakeUsageStore{
-		projectedFn: func(_ context.Context, teamID string, dimension Dimension, subjectType, subjectID string, sizeBytes int64) (int64, error) {
-			if teamID != "team-1" || dimension != DimensionVolumeStorageGB || subjectType != metering.SubjectTypeVolume || subjectID != "vol-1" || sizeBytes != 1 {
-				t.Fatalf("unexpected args: team=%q dimension=%q subjectType=%q subjectID=%q size=%d", teamID, dimension, subjectType, subjectID, sizeBytes)
-			}
-			return 2, nil
-		},
-	})
-
-	got, err := repo.ProjectedStorageUsageGB(context.Background(), " team-1 ", DimensionVolumeStorageGB, metering.SubjectTypeVolume, " vol-1 ", 1)
-	if err != nil {
-		t.Fatalf("ProjectedStorageUsageGB: %v", err)
-	}
-	if got != 2 {
-		t.Fatalf("ProjectedStorageUsageGB = %d, want 2", got)
-	}
-}
-
-func TestAdditionalStorageUsageGBDelegatesToUsageStore(t *testing.T) {
-	repo := NewRepository(&fakeDB{})
-	repo.SetUsageStore(&fakeUsageStore{
-		additionalFn: func(_ context.Context, teamID string, dimension Dimension, subjectType string, additionalBytes int64) (int64, error) {
-			if teamID != "team-1" || dimension != DimensionSnapshotGB || subjectType != metering.SubjectTypeSnapshot || additionalBytes != 1 {
-				t.Fatalf("unexpected args: team=%q dimension=%q subjectType=%q additional=%d", teamID, dimension, subjectType, additionalBytes)
-			}
-			return 3, nil
-		},
-	})
-
-	got, err := repo.AdditionalStorageUsageGB(context.Background(), " team-1 ", DimensionSnapshotGB, metering.SubjectTypeSnapshot, 1)
-	if err != nil {
-		t.Fatalf("AdditionalStorageUsageGB: %v", err)
-	}
-	if got != 3 {
-		t.Fatalf("AdditionalStorageUsageGB = %d, want 3", got)
-	}
-}
-
-func TestCheckProjectedStorageUsageRejectsRequestBeforeUsageLookup(t *testing.T) {
-	repo := NewRepository(&fakeDB{
-		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return fakeRow{values: []any{
-				"team-1",
-				DimensionSnapshotGB,
-				int64(0),
-				int64(0),
-				int64(0),
-				string(SourceTeamOverride),
-			}}
-		},
-	})
-
-	decision, err := repo.CheckProjectedStorageUsageGB(
-		context.Background(),
-		"team-1",
-		DimensionSnapshotGB,
-		metering.SubjectTypeSnapshot,
-		"snapshot-1",
-		1,
-	)
-	if !IsExceeded(err) {
-		t.Fatalf("CheckProjectedStorageUsageGB error = %v, want quota exceeded", err)
-	}
-	if decision.Allowed || decision.Requested != 1 || decision.LimitValue != 0 {
-		t.Fatalf("decision = %+v, want one requested GB rejected by zero limit", decision)
-	}
-}
-
-func TestCheckAdditionalStorageUsageRejectsRequestBeforeUsageLookup(t *testing.T) {
-	repo := NewRepository(&fakeDB{
-		queryRowFn: func(context.Context, string, ...any) pgx.Row {
-			return fakeRow{values: []any{
-				"team-1",
-				DimensionVolumeStorageGB,
-				int64(0),
-				int64(0),
-				int64(0),
-				string(SourceTeamOverride),
-			}}
-		},
-	})
-
-	decision, err := repo.CheckAdditionalStorageUsageGB(
-		context.Background(),
-		"team-1",
-		DimensionVolumeStorageGB,
-		metering.SubjectTypeVolume,
-		1,
-	)
-	if !IsExceeded(err) {
-		t.Fatalf("CheckAdditionalStorageUsageGB error = %v, want quota exceeded", err)
-	}
-	if decision.Allowed || decision.Requested != 1 || decision.LimitValue != 0 {
-		t.Fatalf("decision = %+v, want one requested GB rejected by zero limit", decision)
 	}
 }

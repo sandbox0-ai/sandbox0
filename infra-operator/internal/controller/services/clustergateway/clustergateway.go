@@ -411,12 +411,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, compiledPlan *infraplan.In
 		cfg.ManagerURL = ""
 	}
 
-	if compiledPlan.Components.EnableStorageRuntime {
-		cfg.ManagerStorageURL = compiledPlan.Services.ManagerStorage.URL
-	} else {
-		cfg.ManagerStorageURL = ""
-	}
-
 	if initUser := compiledPlan.InitUser(); initUser != nil && clusterGatewayPublicAuthEnabled(cfg.AuthMode) {
 		password := ""
 		if cfg.BuiltInAuth.Enabled || !apiconfig.HasEnabledOIDCProviders(cfg.OIDCProviders) {

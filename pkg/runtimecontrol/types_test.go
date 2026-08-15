@@ -3,7 +3,6 @@ package runtimecontrol
 import (
 	"testing"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -56,35 +55,6 @@ func TestAssignmentFromPodUsesExistingManifest(t *testing.T) {
 				AnnotationConfig:            `{"env_vars":{"USER_VALUE":"yes"},"webhook":{"url":"https://example.test/events","watch_dir":"/workspace"}}`,
 			},
 		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name: ProcdContainerName,
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "workspace", MountPath: "/workspace"},
-					{Name: "state", MountPath: volumeportal.WebhookStateMountPath},
-				},
-			}},
-			Volumes: []corev1.Volume{
-				{
-					Name: "workspace",
-					VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
-						Driver: volumeportal.DriverName,
-						VolumeAttributes: map[string]string{
-							volumeportal.AttributePortalName: "workspace",
-						},
-					}},
-				},
-				{
-					Name: "state",
-					VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
-						Driver: volumeportal.DriverName,
-						VolumeAttributes: map[string]string{
-							volumeportal.AttributePortalName: volumeportal.WebhookStatePortalName,
-						},
-					}},
-				},
-			},
-		},
 	}
 
 	assignment, revision, err := AssignmentFromPod(pod)
@@ -101,8 +71,5 @@ func TestAssignmentFromPodUsesExistingManifest(t *testing.T) {
 		assignment.EnvVars[EnvAppDomain] != "region.example.test" ||
 		assignment.EnvVars["USER_VALUE"] != "yes" {
 		t.Fatalf("AssignmentFromPod() env = %#v", assignment.EnvVars)
-	}
-	if len(assignment.MountDirs) != 1 || assignment.MountDirs[0] != "/workspace" {
-		t.Fatalf("AssignmentFromPod() mount dirs = %#v", assignment.MountDirs)
 	}
 }

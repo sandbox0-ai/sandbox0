@@ -10,10 +10,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// CtldConfig combines the storage settings used by volume portals with
-// node-local ctld runtime metric producer settings.
+// CtldConfig holds rootfs persistence, metering, and node-local runtime
+// metric producer settings.
 type CtldConfig struct {
-	StorageProxyConfig `yaml:",inline"`
+	DatabaseURL      string `yaml:"database_url" json:"-"`
+	DatabaseMaxConns int    `yaml:"database_max_conns" json:"-"`
+	DatabaseMinConns int    `yaml:"database_min_conns" json:"-"`
+	RegionID         string `yaml:"region_id" json:"-"`
+	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
+
+	RootFSObjectStorage RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
+	Metering            MeteringConfig            `yaml:"metering" json:"-"`
 
 	SandboxObservabilityRuntimeSamplesIngestURL string `yaml:"sandbox_observability_runtime_samples_ingest_url" json:"-"`
 	SandboxObservabilityIngestQueueSize         int    `yaml:"sandbox_observability_ingest_queue_size" json:"-"`
@@ -48,11 +55,7 @@ func loadCtldConfig(path string) (*CtldConfig, error) {
 		applyCtldDefaults(cfg)
 		return cfg, nil
 	}
-	storageCfg, err := loadStorageProxyConfig(path)
-	if err != nil {
-		return nil, err
-	}
-	cfg := &CtldConfig{StorageProxyConfig: *storageCfg}
+	cfg := &CtldConfig{}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)

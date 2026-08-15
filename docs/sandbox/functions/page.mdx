@@ -11,7 +11,7 @@ Use functions for:
 
 ## Use Case: Warm Repository Webhooks
 
-One common use case is keeping a coding-agent repository Volume warm. A GitHub push webhook calls a Sandbox Function, the handler refreshes the base workspace inside the sandbox, publishes a snapshot, and later agent tasks fork from that fresh snapshot instead of cloning from scratch. For the full workflow, see <DocLink href="https://sandbox0.ai/blog/2026-05/sandbox-functions-keep-coding-agent-repos-warm" newTab>Sandbox Functions: Keep Coding Agent Repositories Warm</DocLink>.
+One common use case is keeping a coding-agent repository workspace warm. A GitHub push webhook calls a Sandbox Function, the handler refreshes the repository inside the sandbox rootfs and publishes a named rootfs snapshot. Later agent tasks claim or fork from that snapshot instead of cloning from scratch.
 
 ## Runtime Model
 
@@ -107,7 +107,7 @@ Or with the API:
 }
 ```
 
-Set `max_concurrency` when a function must serialize access to shared sandbox state, such as refreshing a repository volume or publishing snapshots. The limit is enforced inside procd for one function service in one sandbox runtime. Omit it or set it to `0` for unlimited execution. When the limit is reached, Sandbox0 rejects new HTTP and SSE invocations with `429 Too Many Requests`; WebSocket invocations are closed by the function runtime.
+Set `max_concurrency` when a function must serialize access to shared sandbox state, such as refreshing a repository workspace or publishing snapshots. The limit is enforced inside procd for one function service in one sandbox runtime. Omit it or set it to `0` for unlimited execution. When the limit is reached, Sandbox0 rejects new HTTP and SSE invocations with `429 Too Many Requests`; WebSocket invocations are closed by the function runtime.
 
 ```bash
 curl -X PUT "$SANDBOX0_API_URL/api/v1/sandboxes/$SANDBOX_ID/services" \

@@ -1020,23 +1020,6 @@ spec:
                 items:
                   type: string
                 type: array
-              volumeMounts:
-                description: |-
-                  VolumeMounts declares the fixed sandbox volume portal mount points that
-                  can be bound to concrete SandboxVolumes when a sandbox is claimed.
-                items:
-                  properties:
-                    mountPath:
-                      type: string
-                    name:
-                      type: string
-                    readOnly:
-                      type: boolean
-                  required:
-                  - mountPath
-                  - name
-                  type: object
-                type: array
             required:
             - mainContainer
             - pool

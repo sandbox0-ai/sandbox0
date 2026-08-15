@@ -33,7 +33,6 @@ import (
 	netdservice "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
-	storageruntimesvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/storageruntime"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	pkginternalauth "github.com/sandbox0-ai/sandbox0/pkg/internalauth"
 )
@@ -44,10 +43,7 @@ type Reconciler struct {
 
 const (
 	registryCredentialsPath     = "/etc/sandbox0/registry/.dockerconfigjson"
-	storageRuntimeConfigPath    = "/config/storage-runtime.yaml"
 	managerConfigHashAnnotation = "infra.sandbox0.ai/manager-config-hash"
-	storageConfigHashAnnotation = "infra.sandbox0.ai/storage-config-hash"
-	storageRuntimeFallbackPort  = int32(18081)
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -84,38 +80,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		return err
 	}
 	podAnnotations := configRef.PodAnnotations()
-	var storageConfig *apiconfig.StorageProxyConfig
-	var storageConfigRef common.ServiceConfigRef
-	var storageServiceHTTPPort int32
-	if compiledPlan.Components.EnableStorageRuntime {
-		if scope.Owner() == nil {
-			return fmt.Errorf("infra owner is required for manager storage")
-		}
-		storageConfig, err = storageruntimesvc.BuildRuntimeConfig(ctx, r.Resources, scope.Owner())
-		if err != nil {
-			return fmt.Errorf("build manager storage config: %w", err)
-		}
-		storageServiceHTTPPort = int32(storageConfig.HTTPPort)
-		storageConfig.HTTPPort, err = resolveStorageRuntimeHTTPPort(storageServiceHTTPPort, httpPort, metricsPort, webhookPort)
-		if err != nil {
-			return err
-		}
-		storageConfigRef, err = r.Resources.ReconcileHashedServiceConfigMapWithScope(
-			ctx,
-			scope,
-			deploymentName+"-storage",
-			common.GetServiceLabels(scope.Name, "manager-storage"),
-			storageConfig,
-		)
-		if err != nil {
-			return err
-		}
-		podAnnotations = map[string]string{
-			common.PodTemplateConfigHashAnnotation: configRef.Hash + "." + storageConfigRef.Hash,
-			managerConfigHashAnnotation:            configRef.Hash,
-			storageConfigHashAnnotation:            storageConfigRef.Hash,
-		}
-	}
+	podAnnotations[managerConfigHashAnnotation] = configRef.Hash
 
 	resources := compiledPlan.Manager.Resources
 	serviceConfig := compiledPlan.Manager.ServiceConfig
@@ -179,19 +144,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			},
 		},
 	}
-	if storageConfig != nil {
-		storageMounts, storageVolumes, err := storageruntimesvc.BuildRuntimeVolumes(scope, storageConfig, storageruntimesvc.RuntimeVolumeOptions{
-			ConfigMapName:    storageConfigRef.ConfigMapName,
-			ConfigVolumeName: "storage-config",
-			ConfigMountPath:  storageRuntimeConfigPath,
-			CacheVolumeName:  "storage-cache",
-			LogVolumeName:    "storage-logs",
+	if config.RootFSObjectStorage.ObjectEncryptionEnabled {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "object-encryption-key",
+			MountPath: common.ObjectEncryptionMountDir,
+			ReadOnly:  true,
 		})
-		if err != nil {
-			return err
-		}
-		volumeMounts = append(volumeMounts, storageMounts...)
-		volumes = append(volumes, storageVolumes...)
+		volumes = append(volumes, corev1.Volume{
+			Name: "object-encryption-key",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: common.ObjectEncryptionSecretName(scope.Name),
+				Items:      []corev1.KeyToPath{{Key: common.ObjectEncryptionSecretKey, Path: common.ObjectEncryptionKeyFilename}},
+			}},
+		})
 	}
 
 	registrySecretName, registrySecretKey := compiledPlan.ManagerRegistryCredentialsSource()
@@ -231,13 +196,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		{Name: "SERVICE", Value: "manager"},
 		{Name: "CONFIG_PATH", Value: "/config/config.yaml"},
 		{Name: apiconfig.ManagerLeaderElectionNameEnv, Value: deploymentName},
-	}
-	if storageConfig != nil {
-		storageHTTPPort := int32(storageConfig.HTTPPort)
-		containerPorts = append(containerPorts,
-			corev1.ContainerPort{Name: "storage-http", ContainerPort: storageHTTPPort},
-		)
-		envVars = append(envVars, corev1.EnvVar{Name: "STORAGE_RUNTIME_CONFIG_PATH", Value: storageRuntimeConfigPath})
 	}
 	maxSurge := intstr.FromInt32(0)
 	maxUnavailable := intstr.FromInt32(1)
@@ -302,9 +260,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		common.BuildServicePort("metrics", metricsPort, metricsPort, serviceType),
 		common.BuildServicePort("webhook", webhookPort, webhookPort, serviceType),
 	}
-	if storageConfig != nil {
-		servicePorts = append(servicePorts, common.BuildServicePort("storage-http", storageServiceHTTPPort, int32(storageConfig.HTTPPort), serviceType))
-	}
 	if err := validateManagerServicePorts(servicePorts); err != nil {
 		return err
 	}
@@ -347,34 +302,6 @@ func validateManagerServicePorts(ports []corev1.ServicePort) error {
 	return nil
 }
 
-func resolveStorageRuntimeHTTPPort(requested int32, reserved ...int32) (int, error) {
-	if requested < 1 || requested > 65535 {
-		return 0, fmt.Errorf("storage runtime HTTP port %d is outside 1-65535", requested)
-	}
-	available := func(candidate int32) bool {
-		for _, port := range reserved {
-			if candidate == port {
-				return false
-			}
-		}
-		return true
-	}
-	if available(requested) {
-		return int(requested), nil
-	}
-	for candidate := storageRuntimeFallbackPort; candidate <= 65535; candidate++ {
-		if available(candidate) {
-			return int(candidate), nil
-		}
-	}
-	for candidate := int32(1024); candidate < storageRuntimeFallbackPort; candidate++ {
-		if available(candidate) {
-			return int(candidate), nil
-		}
-	}
-	return 0, fmt.Errorf("no available HTTP port for manager storage runtime")
-}
-
 func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string, compiledPlan *infraplan.InfraPlan) (*apiconfig.ManagerConfig, error) {
 	cfg := &apiconfig.ManagerConfig{}
 	if compiledPlan == nil {
@@ -391,6 +318,15 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 		return nil, fmt.Errorf("resolve rootfs object storage config: %w", err)
 	} else if rootFSObjectStorage != nil {
 		cfg.RootFSObjectStorage = *rootFSObjectStorage
+		if rootFSObjectStorage.ObjectEncryptionEnabled {
+			owner := compiledPlan.Scope.Owner()
+			if owner == nil {
+				return nil, fmt.Errorf("infra owner is required for rootfs object encryption")
+			}
+			if err := common.EnsureObjectEncryptionKeySecret(ctx, r.Resources, owner); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	if cfg.NetworkPolicyProvider == "netd" {

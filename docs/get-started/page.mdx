@@ -1,6 +1,6 @@
 # Get Started
 
-Sandbox0 provides isolated execution environments for AI agents with a persistent sandbox root filesystem across pause/resume, volume storage for durable and shared data, session state maintenance, and fast warm claims. Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, volumes, and credentials.
+Sandbox0 provides isolated execution environments for AI agents with a persistent sandbox root filesystem across pause/resume, named rootfs snapshots, session state maintenance, and fast warm claims. Sandbox0 Cloud uses `https://api.sandbox0.ai` for sandboxes, templates, and credentials.
 
 ## What is Sandbox0?
 
@@ -8,7 +8,7 @@ Sandbox0 is an enterprise-grade AI Agent Sandbox platform that enables you to:
 
 - **Run code securely** in isolated environments with full process control
 - **Persist sandbox files** across pause/resume with rootfs checkpoints tied to the sandbox identity
-- **Persist durable data** beyond one sandbox identity with volume storage, snapshots, and forks
+- **Version and fan out durable state** with rootfs snapshots, restore, and forks
 - **Control network access** with fine-grained policies
 - **Scale efficiently** with template-based sandbox pools and fast cold starts
 
@@ -23,7 +23,7 @@ Sandbox0 follows a control plane / data plane architecture:
 
 Each provider/region (e.g., `aws-us-east-1`) has an independent data plane and control plane deployment with dedicated PostgreSQL and S3 storage.
 
-`manager` hosts the storage API runtime. On each sandbox node, the active process in the `ctld` HA pair owns rootfs persistence, volume portals, and the network policy runtime; the standby takes over those responsibilities after promotion.
+`manager` owns lifecycle and rootfs metadata. On each sandbox node, the active process in the `ctld` HA pair owns rootfs persistence and the network policy runtime; the standby takes over those responsibilities after promotion.
 
 ---
 

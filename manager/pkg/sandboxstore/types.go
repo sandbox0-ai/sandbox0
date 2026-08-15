@@ -7,7 +7,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
-type ClaimMount = managerapi.ClaimMount
 type SandboxResourceConfig = managerapi.SandboxResourceConfig
 type SandboxAppService = managerapi.SandboxAppService
 type WebhookConfig = runtimecontrol.WebhookConfig

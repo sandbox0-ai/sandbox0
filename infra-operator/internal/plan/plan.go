@@ -25,7 +25,6 @@ const (
 	defaultClusterGatewayAuthMode  = "internal"
 	defaultRegionalGatewayAuthMode = "self_hosted"
 	defaultSSHGatewayPort          = 2222
-	defaultStorageRuntimeHTTPPort  = 8081
 	registryCredentialsPath        = "/etc/sandbox0/registry/.dockerconfigjson"
 )
 
@@ -54,7 +53,6 @@ type ComponentPlan struct {
 	EnableScheduler            bool
 	EnableClusterGateway       bool
 	EnableManager              bool
-	EnableStorageRuntime       bool
 	EnableCtld                 bool
 	EnableNetwork              bool
 	EnableInternalAuth         bool
@@ -97,7 +95,6 @@ type ServicePlan struct {
 	Manager        ServiceReference
 	Scheduler      ServiceReference
 	ClusterGateway ServiceReference
-	ManagerStorage ServiceReference
 }
 
 type ServiceReference struct {
@@ -208,7 +205,6 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 	enableScheduler := infrav1alpha1.IsSchedulerEnabled(infra)
 	enableClusterGateway := infrav1alpha1.IsClusterGatewayEnabled(infra)
 	enableManager := infrav1alpha1.IsManagerEnabled(infra)
-	enableStorageRuntime := infrav1alpha1.IsStorageRuntimeEnabled(infra)
 	enableDatabase := infrav1alpha1.IsDatabaseEnabled(infra)
 	enableRedis := infrav1alpha1.IsRedisEnabled(infra)
 	enableCredentialVault := infrav1alpha1.IsCredentialVaultEnabled(infra)
@@ -225,7 +221,6 @@ func compileComponents(infra *infrav1alpha1.Sandbox0Infra) ComponentPlan {
 		EnableScheduler:            enableScheduler,
 		EnableClusterGateway:       enableClusterGateway,
 		EnableManager:              enableManager,
-		EnableStorageRuntime:       enableStorageRuntime,
 		EnableCtld:                 enableManager,
 		EnableNetwork:              infrav1alpha1.IsNetworkEnabled(infra),
 		EnableInternalAuth:         hasControlPlane || hasDataPlane,
@@ -248,7 +243,6 @@ func compileServices(infra *infrav1alpha1.Sandbox0Infra) ServicePlan {
 		Manager:        compileManagerServiceReference(infra),
 		Scheduler:      compileSchedulerServiceReference(infra),
 		ClusterGateway: compileClusterGatewayServiceReference(infra),
-		ManagerStorage: compileManagerStorageServiceReference(infra),
 	}
 }
 
@@ -294,21 +288,6 @@ func compileClusterGatewayServiceReference(infra *infrav1alpha1.Sandbox0Infra) S
 		Name: name,
 		Port: port,
 		URL:  fmt.Sprintf("http://%s:%d", name, port),
-	}
-}
-
-func compileManagerStorageServiceReference(infra *infrav1alpha1.Sandbox0Infra) ServiceReference {
-	if infra == nil || infra.Name == "" || !infrav1alpha1.IsStorageRuntimeEnabled(infra) {
-		return ServiceReference{}
-	}
-
-	port := int32(storageRuntimeHTTPPort(infra))
-	name := fmt.Sprintf("%s-manager", infra.Name)
-
-	return ServiceReference{
-		Name: name,
-		Port: port,
-		URL:  fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", name, infra.Namespace, port),
 	}
 }
 
@@ -686,12 +665,6 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 			plan.FatalErrors = append(plan.FatalErrors, "cluster configuration requires at least one data-plane service")
 		}
 	}
-	if compiled != nil && compiled.Components.EnableStorageRuntime && !compiled.Components.EnableManager {
-		plan.FatalErrors = append(plan.FatalErrors, "storage.runtime requires services.manager to be enabled")
-	}
-	if compiled != nil && compiled.Components.EnableStorageRuntime && compiled.Manager.Replicas < 1 {
-		plan.FatalErrors = append(plan.FatalErrors, "manager replicas must be at least 1 when the storage API is enabled")
-	}
 	if compiled != nil {
 		plan.FatalErrors = append(plan.FatalErrors, managerServicePortValidationErrors(infra, compiled)...)
 	}
@@ -729,13 +702,6 @@ func managerServicePortValidationErrors(infra *infrav1alpha1.Sandbox0Infra, comp
 		{field: "services.manager.config.metricsPort", port: int32(managerMetricsPort(infra))},
 		{field: "services.manager.config.webhookPort", port: int32(managerWebhookPort(infra))},
 	}
-	if compiled.Components.EnableStorageRuntime {
-		ports = append(ports, struct {
-			field string
-			port  int32
-		}{field: "storage.runtime.httpPort", port: int32(storageRuntimeHTTPPort(infra))})
-	}
-
 	seen := make(map[int32]string, len(ports))
 	errors := make([]string, 0)
 	for _, entry := range ports {
@@ -947,9 +913,6 @@ func compileStatusPlan(compiled *InfraPlan) StatusPlan {
 	if components.EnableManager {
 		expected = append(expected, infrav1alpha1.ConditionTypeManagerReady)
 	}
-	if components.EnableStorageRuntime {
-		expected = append(expected, infrav1alpha1.ConditionTypeStorageRuntimeReady)
-	}
 	if components.EnableNetwork {
 		expected = append(expected, infrav1alpha1.ConditionTypeNetworkReady)
 	}
@@ -1059,9 +1022,6 @@ func compileWorkflowPlan(compiled *InfraPlan) WorkflowPlan {
 	}
 	if compiled.Components.EnableClusterGateway {
 		appendSuccessStep("cluster-gateway", infrav1alpha1.ConditionTypeClusterGatewayReady, "ClusterGatewayReady", "Internal gateway is ready", "ClusterGatewayFailed")
-	}
-	if compiled.Components.EnableStorageRuntime {
-		appendSuccessStep("storage-runtime-ready", infrav1alpha1.ConditionTypeStorageRuntimeReady, "StorageRuntimeReady", "Manager storage API is ready", "StorageRuntimeFailed")
 	}
 	if compiled.Components.EnableCtld {
 		appendCheckStep("ctld", infrav1alpha1.ConditionTypeCtldReady, "CtldFailed")
@@ -1213,16 +1173,6 @@ func schedulerServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.S
 		return infra.Spec.Services.Scheduler.Service
 	}
 	return nil
-}
-
-func storageRuntimeHTTPPort(infra *infrav1alpha1.Sandbox0Infra) int {
-	if infra != nil && infra.Spec.Storage != nil && infra.Spec.Storage.Runtime != nil {
-		if infra.Spec.Storage.Runtime.HTTPPort > 0 {
-			return infra.Spec.Storage.Runtime.HTTPPort
-		}
-		return defaultStorageRuntimeHTTPPort
-	}
-	return defaultStorageRuntimeHTTPPort
 }
 
 func globalGatewayServiceConfig(infra *infrav1alpha1.Sandbox0Infra) *infrav1alpha1.ServiceNetworkConfig {

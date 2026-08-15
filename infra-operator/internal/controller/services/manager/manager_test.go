@@ -381,7 +381,7 @@ func TestBuildConfigInjectsRootFSObjectStorage(t *testing.T) {
 	}
 }
 
-func TestReconcileStorageRuntimeUsesManagerBudgetAndService(t *testing.T) {
+func TestReconcileUsesManagerBudgetAndRootFSObjectStorage(t *testing.T) {
 	reconciler := newManagerTestReconciler(t)
 	ctx := context.Background()
 	infra := &infrav1alpha1.Sandbox0Infra{
@@ -397,12 +397,6 @@ func TestReconcileStorageRuntimeUsesManagerBudgetAndService(t *testing.T) {
 				Type: infrav1alpha1.StorageTypeBuiltin,
 				Builtin: &infrav1alpha1.BuiltinStorageConfig{
 					Enabled: true, Bucket: "sandbox0", Region: "us-east-1",
-				},
-				Runtime: &infrav1alpha1.StorageProxyConfig{
-					HTTPPort:                8081,
-					CacheSizeLimit:          "512Mi",
-					LogSizeLimit:            "64Mi",
-					ObjectEncryptionEnabled: true,
 				},
 			},
 			Services: &infrav1alpha1.ServicesConfig{
@@ -490,7 +484,11 @@ func TestReconcileStorageRuntimeUsesManagerBudgetAndService(t *testing.T) {
 	if err := reconciler.Resources.Client.Get(ctx, types.NamespacedName{Name: "demo-manager", Namespace: infra.Namespace}, service); err != nil {
 		t.Fatal(err)
 	}
-	assertManagerServicePort(t, service, "storage-http", 8081, 8081)
+	for _, port := range service.Spec.Ports {
+		if port.Name == "storage-http" {
+			t.Fatalf("retired storage-http port is still exposed: %#v", service.Spec.Ports)
+		}
+	}
 }
 
 func assertManagerObjectEncryptionMount(t *testing.T, deployment *appsv1.Deployment, infraName string) {
@@ -517,41 +515,12 @@ func assertManagerObjectEncryptionMount(t *testing.T, deployment *appsv1.Deploym
 	t.Fatalf("manager object encryption volume is missing: %#v", deployment.Spec.Template.Spec.Volumes)
 }
 
-func TestResolveStorageRuntimeHTTPPortRemapsManagerListeners(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		port int32
-	}{
-		{name: "http", port: 8080},
-		{name: "metrics", port: 9090},
-		{name: "webhook", port: 9443},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveStorageRuntimeHTTPPort(tc.port, 8080, 9090, 9443)
-			if err != nil {
-				t.Fatalf("resolve port %d: %v", tc.port, err)
-			}
-			if got != int(storageRuntimeFallbackPort) {
-				t.Fatalf("resolve port %d = %d, want %d", tc.port, got, storageRuntimeFallbackPort)
-			}
-		})
-	}
-	got, err := resolveStorageRuntimeHTTPPort(8081, 8080, 9090, 9443)
-	if err != nil || got != 8081 {
-		t.Fatalf("non-conflicting storage port = %d, %v; want 8081, nil", got, err)
-	}
-	got, err = resolveStorageRuntimeHTTPPort(8080, 8080, 9090, 9443, storageRuntimeFallbackPort)
-	if err != nil || got != int(storageRuntimeFallbackPort+1) {
-		t.Fatalf("occupied fallback port = %d, %v; want %d, nil", got, err, storageRuntimeFallbackPort+1)
-	}
-}
-
 func TestValidateManagerServicePortsRejectsDuplicatePorts(t *testing.T) {
 	err := validateManagerServicePorts([]corev1.ServicePort{
 		{Name: "metrics", Port: 9090},
-		{Name: "storage-http", Port: 9090},
+		{Name: "webhook", Port: 9090},
 	})
-	if err == nil || !strings.Contains(err.Error(), "manager Service port 9090 is used by both metrics and storage-http") {
+	if err == nil || !strings.Contains(err.Error(), "manager Service port 9090 is used by both metrics and webhook") {
 		t.Fatalf("validateManagerServicePorts() error = %v", err)
 	}
 }
@@ -586,19 +555,6 @@ func newManagerTestReconciler(t *testing.T) *Reconciler {
 		}).
 		Build()
 	return NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-}
-
-func assertManagerServicePort(t *testing.T, service *corev1.Service, name string, wantPort, wantTarget int32) {
-	t.Helper()
-	for _, port := range service.Spec.Ports {
-		if port.Name == name {
-			if port.Port != wantPort || int32(port.TargetPort.IntValue()) != wantTarget {
-				t.Fatalf("service port %s = %d->%d, want %d->%d", name, port.Port, port.TargetPort.IntValue(), wantPort, wantTarget)
-			}
-			return
-		}
-	}
-	t.Fatalf("service port %s not found", name)
 }
 
 func newValidMITMCASecret(t *testing.T, namespace, name string) *corev1.Secret {

@@ -14,7 +14,7 @@ import (
 
 	godigest "github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
-	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
@@ -26,6 +26,7 @@ type ObjectCacheConfig struct {
 	MaxAge        time.Duration
 	SweepInterval time.Duration
 	Observer      *Observer
+	Encryption    objectstore.EncryptionConfig
 }
 
 type ObjectCache struct {
@@ -37,6 +38,7 @@ type ObjectCache struct {
 	mu            sync.Mutex
 	validated     map[string]objectCacheFileIdentity
 	observer      *Observer
+	encryption    objectstore.EncryptionConfig
 }
 
 type objectCacheFileIdentity struct {
@@ -72,6 +74,7 @@ func NewObjectCache(cfg ObjectCacheConfig) *ObjectCache {
 		sweepInterval: interval,
 		validated:     make(map[string]objectCacheFileIdentity),
 		observer:      cfg.Observer,
+		encryption:    cfg.Encryption,
 	}
 }
 
@@ -143,7 +146,7 @@ func (c *ObjectCache) Open(desc ctldapi.RootFSDiffDescriptor) (io.ReadCloser, bo
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	file, err := os.Open(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			delete(c.validated, path)
@@ -151,23 +154,38 @@ func (c *ObjectCache) Open(desc ctldapi.RootFSDiffDescriptor) (io.ReadCloser, bo
 		}
 		return nil, false, err
 	}
-	if ok, err := c.validateOpenFile(desc, path, file); err != nil {
-		_ = file.Close()
+	if c.encryption.IsEnabled() {
+		encrypted, err := encryptedCacheFile(path)
+		if err != nil {
+			return nil, false, err
+		}
+		if !encrypted {
+			delete(c.validated, path)
+			_ = os.Remove(path)
+			return nil, false, nil
+		}
+	}
+	if ok, err := c.validateOpenFile(desc, path, info); err != nil {
 		delete(c.validated, path)
 		_ = os.Remove(path)
 		return nil, false, err
 	} else if !ok {
-		_ = file.Close()
 		delete(c.validated, path)
 		_ = os.Remove(path)
 		return nil, false, nil
 	}
 	now := time.Now()
 	_ = os.Chtimes(path, now, now)
-	if info, statErr := file.Stat(); statErr == nil {
+	if info, statErr := os.Stat(path); statErr == nil {
 		c.validated[path] = objectCacheIdentity(info)
 	}
-	return file, true, nil
+	reader, err := c.openCachedFile(path, desc.Digest)
+	if err != nil {
+		delete(c.validated, path)
+		_ = os.Remove(path)
+		return nil, false, err
+	}
+	return reader, true, nil
 }
 
 func (c *ObjectCache) PutFile(ctx context.Context, desc ctldapi.RootFSDiffDescriptor, sourcePath string) error {
@@ -182,6 +200,14 @@ func (c *ObjectCache) PutFile(ctx context.Context, desc ctldapi.RootFSDiffDescri
 		return err
 	} else if desc.Size > 0 && info.Size() != desc.Size {
 		return fmt.Errorf("rootfs object size mismatch: expected %d, got %d", desc.Size, info.Size())
+	}
+	if c.encryption.IsEnabled() {
+		source, err := os.Open(sourcePath)
+		if err != nil {
+			return err
+		}
+		defer source.Close()
+		return c.Put(ctx, desc, source)
 	}
 	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -244,20 +270,19 @@ func (c *ObjectCache) Put(ctx context.Context, desc ctldapi.RootFSDiffDescriptor
 		return fmt.Errorf("parse rootfs object digest: %w", err)
 	}
 	verifier := d.Verifier()
-	written, err := copyContext(ctx, io.MultiWriter(tmp, verifier), reader)
-	if err != nil {
+	tracked := &validatingCacheReader{ctx: ctx, reader: reader, verifier: verifier}
+	_ = tmp.Close()
+	_ = os.Remove(tmpPath)
+	if err := c.cachedFileStore(tmpPath).Put(desc.Digest, tracked); err != nil {
 		return err
 	}
+	written := tracked.read
 	if desc.Size > 0 && written != desc.Size {
 		return fmt.Errorf("rootfs object size mismatch: expected %d, got %d", desc.Size, written)
 	}
 	if !verifier.Verified() {
 		return fmt.Errorf("rootfs object digest mismatch: expected %s", d.String())
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-
 	return c.publishTemp(path, tmpPath, &removeTmp)
 }
 
@@ -340,6 +365,17 @@ func (c *ObjectCache) entriesLocked() ([]objectCacheEntry, int64, error) {
 			delete(c.validated, path)
 			return nil
 		}
+		if c.encryption.IsEnabled() {
+			encrypted, err := encryptedCacheFile(path)
+			if err != nil {
+				return err
+			}
+			if !encrypted {
+				_ = os.Remove(path)
+				delete(c.validated, path)
+				return nil
+			}
+		}
 		info, err := entry.Info()
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -370,21 +406,17 @@ func (c *ObjectCache) hasMinFreeLocked() bool {
 	return free >= c.minFreeBytes
 }
 
-func (c *ObjectCache) validateOpenFile(desc ctldapi.RootFSDiffDescriptor, path string, file *os.File) (valid bool, resultErr error) {
+func (c *ObjectCache) validateOpenFile(desc ctldapi.RootFSDiffDescriptor, path string, info os.FileInfo) (valid bool, resultErr error) {
 	var validationStarted time.Time
 	defer func() {
 		if !validationStarted.IsZero() {
 			c.observer.ObservePhase("apply", "cache_validation", validationStarted, resultErr)
 		}
 	}()
-	info, err := file.Stat()
-	if err != nil {
-		return false, err
-	}
 	if !info.Mode().IsRegular() {
 		return false, nil
 	}
-	if desc.Size > 0 && info.Size() != desc.Size {
+	if !c.encryption.IsEnabled() && desc.Size > 0 && info.Size() != desc.Size {
 		return false, nil
 	}
 	identity := objectCacheIdentity(info)
@@ -397,27 +429,128 @@ func (c *ObjectCache) validateOpenFile(desc ctldapi.RootFSDiffDescriptor, path s
 		return false, fmt.Errorf("parse rootfs object digest: %w", err)
 	}
 	verifier := d.Verifier()
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
+	reader, err := c.openCachedFile(path, desc.Digest)
+	if err != nil {
 		return false, err
 	}
-	if _, err := io.Copy(verifier, file); err != nil {
-		return false, err
+	written, copyErr := io.Copy(verifier, reader)
+	closeErr := reader.Close()
+	if copyErr != nil {
+		return false, copyErr
 	}
-	after, err := file.Stat()
+	if closeErr != nil {
+		return false, closeErr
+	}
+	if desc.Size > 0 && written != desc.Size {
+		return false, nil
+	}
+	after, err := os.Stat(path)
 	if err != nil {
 		return false, err
 	}
 	if objectCacheIdentity(after) != identity {
 		return false, fmt.Errorf("rootfs object changed while validating %s", desc.Digest)
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return false, err
-	}
 	if !verifier.Verified() {
 		return false, nil
 	}
 	c.validated[path] = identity
 	return true, nil
+}
+
+func (c *ObjectCache) cachedFileStore(path string) objectstore.Store {
+	return objectstore.Encrypting(&singleFileStore{path: path}, c.encryption)
+}
+
+func (c *ObjectCache) openCachedFile(path, objectKey string) (io.ReadCloser, error) {
+	return c.cachedFileStore(path).Get(objectKey, 0, -1)
+}
+
+func encryptedCacheFile(path string) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	return objectstore.HasEncryptedObjectHeader(file)
+}
+
+type validatingCacheReader struct {
+	ctx      context.Context
+	reader   io.Reader
+	verifier io.Writer
+	read     int64
+}
+
+func (r *validatingCacheReader) Read(p []byte) (int, error) {
+	if r.ctx != nil {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		if _, writeErr := r.verifier.Write(p[:n]); writeErr != nil {
+			return n, writeErr
+		}
+		r.read += int64(n)
+	}
+	return n, err
+}
+
+type singleFileStore struct {
+	path string
+}
+
+func (s *singleFileStore) String() string { return "file-cache" }
+
+func (s *singleFileStore) Create() error {
+	return os.MkdirAll(filepath.Dir(s.path), 0o700)
+}
+
+func (s *singleFileStore) Get(_ string, off, limit int64) (io.ReadCloser, error) {
+	file, err := os.Open(s.path)
+	if err != nil {
+		return nil, err
+	}
+	if off > 0 {
+		if _, err := file.Seek(off, io.SeekStart); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
+	if limit < 0 {
+		return file, nil
+	}
+	return &limitedReadCloser{Reader: io.LimitReader(file, limit), Closer: file}, nil
+}
+
+func (s *singleFileStore) Put(_ string, in io.Reader) error {
+	file, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(file, in)
+	return errors.Join(copyErr, file.Close())
+}
+
+func (s *singleFileStore) Delete(_ string) error { return os.Remove(s.path) }
+
+func (s *singleFileStore) Head(key string) (objectstore.Info, error) {
+	info, err := os.Stat(s.path)
+	if err != nil {
+		return objectstore.Info{}, err
+	}
+	return objectstore.Info{Key: key, Size: info.Size(), Modified: info.ModTime()}, nil
+}
+
+func (*singleFileStore) List(string, string, string, string, int64) ([]objectstore.Info, bool, string, error) {
+	return nil, false, "", errors.New("list is not supported by the rootfs cache file store")
+}
+
+type limitedReadCloser struct {
+	io.Reader
+	io.Closer
 }
 
 func verifyRootFSObjectFile(desc ctldapi.RootFSDiffDescriptor, path string) error {
@@ -478,34 +611,4 @@ func (c *ObjectCache) pathForDescriptor(desc ctldapi.RootFSDiffDescriptor) (stri
 		return "", fmt.Errorf("%w: descriptor object_key is required", ErrBadRequest)
 	}
 	return filepath.Join(c.dir, d.Algorithm().String(), d.Encoded()+".tar"), nil
-}
-
-func copyContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	buf := make([]byte, 256*1024)
-	var written int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return written, err
-		}
-		nr, er := src.Read(buf)
-		if nr > 0 {
-			nw, ew := dst.Write(buf[:nr])
-			written += int64(nw)
-			if ew != nil {
-				return written, ew
-			}
-			if nr != nw {
-				return written, io.ErrShortWrite
-			}
-		}
-		if er != nil {
-			if er == io.EOF {
-				return written, nil
-			}
-			return written, er
-		}
-	}
 }

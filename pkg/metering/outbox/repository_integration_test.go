@@ -127,22 +127,21 @@ func TestRepositoryStorageProjectionIsAtomicWithCallerTransaction(t *testing.T) 
 	if err := RunMigrations(ctx, pool, nil); err != nil {
 		t.Fatalf("RunMigrations: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `CREATE TABLE business_volume (id TEXT PRIMARY KEY)`); err != nil {
+	if _, err := pool.Exec(ctx, `CREATE TABLE business_rootfs (id TEXT PRIMARY KEY)`); err != nil {
 		t.Fatalf("create business table: %v", err)
 	}
 	repo := NewRepository(pool)
 	start := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
 	observation := &metering.StorageObservation{
-		SubjectType: metering.SubjectTypeVolume,
-		SubjectID:   "volume-1",
-		VolumeID:    "volume-1",
+		SubjectType: metering.SubjectTypeRootFS,
+		SubjectID:   "sandbox-1",
 		TeamID:      "team-1",
 		SizeBytes:   1024,
 		ObservedAt:  start,
 	}
-	rollback := errors.New("rollback volume")
+	rollback := errors.New("rollback rootfs")
 	err := repo.InTx(ctx, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO business_volume (id) VALUES ('volume-1')`); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO business_rootfs (id) VALUES ('rootfs-1')`); err != nil {
 			return err
 		}
 		if err := repo.RecordStorageObservationTx(ctx, tx, observation); err != nil {
@@ -153,12 +152,12 @@ func TestRepositoryStorageProjectionIsAtomicWithCallerTransaction(t *testing.T) 
 	if !errors.Is(err, rollback) {
 		t.Fatalf("rollback error = %v", err)
 	}
-	assertCount(t, pool, `SELECT COUNT(*) FROM business_volume`, 0)
+	assertCount(t, pool, `SELECT COUNT(*) FROM business_rootfs`, 0)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.storage_projection_state`, 0)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.projection_outbox`, 0)
 
 	if err := repo.InTx(ctx, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO business_volume (id) VALUES ('volume-1')`); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO business_rootfs (id) VALUES ('rootfs-1')`); err != nil {
 			return err
 		}
 		return repo.RecordStorageObservationTx(ctx, tx, observation)
@@ -173,21 +172,21 @@ func TestRepositoryStorageProjectionIsAtomicWithCallerTransaction(t *testing.T) 
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.projection_outbox WHERE operation_type = 'window'`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.projection_outbox WHERE operation_type = 'storage_state'`, 2)
 
-	state, err := repo.GetStorageProjectionState(ctx, metering.SubjectTypeVolume, "volume-1")
+	state, err := repo.GetStorageProjectionState(ctx, metering.SubjectTypeRootFS, "sandbox-1")
 	if err != nil {
 		t.Fatalf("get storage projection state: %v", err)
 	}
 	if state == nil || state.SizeBytes != 1024 || !state.ObservedAt.Equal(start.Add(time.Hour)) {
 		t.Fatalf("storage projection state = %+v, want size 1024 observed at %s", state, start.Add(time.Hour))
 	}
-	states, err := repo.ListStorageProjectionStatesByTeam(ctx, metering.SubjectTypeVolume, "team-1")
+	states, err := repo.ListStorageProjectionStatesByTeam(ctx, metering.SubjectTypeRootFS, "team-1")
 	if err != nil {
 		t.Fatalf("list storage projection states: %v", err)
 	}
-	if len(states) != 1 || states[0].SubjectID != "volume-1" {
-		t.Fatalf("storage projection states = %+v, want volume-1", states)
+	if len(states) != 1 || states[0].SubjectID != "sandbox-1" {
+		t.Fatalf("storage projection states = %+v, want sandbox-1", states)
 	}
-	otherTeamStates, err := repo.ListStorageProjectionStatesByTeam(ctx, metering.SubjectTypeVolume, "team-2")
+	otherTeamStates, err := repo.ListStorageProjectionStatesByTeam(ctx, metering.SubjectTypeRootFS, "team-2")
 	if err != nil {
 		t.Fatalf("list other team storage projection states: %v", err)
 	}
@@ -308,6 +307,13 @@ func TestMigrationsUpgradeLegacyVersionFiveSchema(t *testing.T) {
 			observed_at TIMESTAMPTZ NOT NULL, unbilled_byte_nanoseconds BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (subject_type, subject_id)
 		);
+		INSERT INTO metering.storage_projection_state (
+			subject_type, subject_id, team_id, sandbox_id, volume_id, snapshot_id,
+			region_id, size_bytes, observed_at
+		) VALUES
+			('rootfs', 'sandbox-1', 'team-1', 'sandbox-1', NULL, NULL, 'region-1', 1024, '2026-08-01T00:00:00Z'),
+			('volume', 'volume-1', 'team-1', NULL, 'volume-1', NULL, 'region-1', 2048, '2026-08-01T00:01:00Z'),
+			('snapshot', 'snapshot-1', 'team-1', NULL, 'volume-1', 'snapshot-1', 'region-1', 2048, '2026-08-01T00:02:00Z');
 	`)
 	if err != nil {
 		t.Fatalf("create legacy schema: %v", err)
@@ -317,6 +323,32 @@ func TestMigrationsUpgradeLegacyVersionFiveSchema(t *testing.T) {
 	}
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 6 AND is_applied`, 1)
 	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 7 AND is_applied`, 1)
+	assertCount(t, pool, `SELECT COUNT(*) FROM metering.goose_db_version WHERE version_id = 8 AND is_applied`, 1)
+	assertCount(t, pool, `SELECT COUNT(*) FROM metering.storage_projection_state WHERE subject_type = 'rootfs'`, 1)
+	assertCount(t, pool, `SELECT COUNT(*) FROM metering.storage_projection_state WHERE subject_type IN ('volume', 'snapshot')`, 0)
+	assertCount(t, pool, `SELECT COUNT(*) FROM metering.projection_outbox WHERE operation_type = 'storage_state_delete'`, 2)
+	repo := NewRepository(pool)
+	batch, err := repo.ClaimNextBatch(ctx, "migration-test", time.Minute)
+	if err != nil || batch == nil {
+		t.Fatalf("claim retirement tombstones = (%#v, %v)", batch, err)
+	}
+	projectionBatch, err := decodeProjectionBatch(batch.Operations)
+	if err != nil {
+		t.Fatalf("decode retirement tombstones: %v", err)
+	}
+	if len(projectionBatch.StorageMutations) != 2 {
+		t.Fatalf("retirement storage mutations = %#v, want 2", projectionBatch.StorageMutations)
+	}
+	retiredSubjects := map[string]bool{}
+	for _, mutation := range projectionBatch.StorageMutations {
+		if mutation == nil || mutation.State == nil || !mutation.Deleted || mutation.DeletedAt.IsZero() {
+			t.Fatalf("invalid retirement tombstone: %#v", mutation)
+		}
+		retiredSubjects[mutation.State.SubjectType+"/"+mutation.State.SubjectID] = true
+	}
+	if !retiredSubjects["volume/volume-1"] || !retiredSubjects["snapshot/snapshot-1"] {
+		t.Fatalf("retired subjects = %#v", retiredSubjects)
+	}
 	var tableName string
 	if err := pool.QueryRow(ctx, `SELECT to_regclass('metering.projection_outbox')::text`).Scan(&tableName); err != nil || tableName == "" {
 		t.Fatalf("projection_outbox after migration = %q, %v", tableName, err)
@@ -356,8 +388,8 @@ func TestBootstrapProjectionStatesKeepsNewerPostgresStateAndCopiesNoHistory(t *t
 			LastObservedAt: now,
 		}},
 		storage: []*metering.StorageProjectionState{{
-			SubjectType: metering.SubjectTypeVolume,
-			SubjectID:   "volume-1",
+			SubjectType: metering.SubjectTypeRootFS,
+			SubjectID:   "sandbox-1",
 			TeamID:      "team-current",
 			SizeBytes:   1024,
 			ObservedAt:  now,
@@ -385,7 +417,11 @@ func TestBootstrapProjectionStatesKeepsNewerPostgresStateAndCopiesNoHistory(t *t
 	if err := pool.QueryRow(ctx, `SELECT team_id FROM metering.manager_sandbox_projection_state WHERE sandbox_id = 'sandbox-1'`).Scan(&sandboxTeam); err != nil {
 		t.Fatalf("query sandbox bootstrap state: %v", err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT team_id FROM metering.storage_projection_state WHERE subject_id = 'volume-1'`).Scan(&storageTeam); err != nil {
+	if err := pool.QueryRow(ctx, `
+SELECT team_id
+FROM metering.storage_projection_state
+WHERE subject_type = 'rootfs' AND subject_id = 'sandbox-1'
+`).Scan(&storageTeam); err != nil {
 		t.Fatalf("query storage bootstrap state: %v", err)
 	}
 	if sandboxTeam != "team-current" || storageTeam != "team-current" {

@@ -20,7 +20,6 @@ func TestPlatformServiceAllowlistExcludesLegacyStorageProxy(t *testing.T) {
 	}{
 		{name: "cluster-gateway", want: true},
 		{name: "manager", want: true},
-		{name: "storage-proxy", want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			service := &watcher.ServiceInfo{

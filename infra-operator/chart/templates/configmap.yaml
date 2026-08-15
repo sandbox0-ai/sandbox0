@@ -8,6 +8,7 @@ data:
   config.yaml: |
     imageRepo: {{ .Values.image.repository }}
     imageTag: {{ .Values.image.tag | default .Chart.AppVersion }}
+    rootfsSnapshotterImageTag: {{ .Values.config.rootfsSnapshotterImageTag | default (.Values.image.tag | default .Chart.AppVersion) }}
     {{ if .Values.config.imagePullPolicy }}
     imagePullPolicy: {{ .Values.config.imagePullPolicy }}
     {{ end }}

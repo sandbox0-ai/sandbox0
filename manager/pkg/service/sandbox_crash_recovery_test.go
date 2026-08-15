@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -577,6 +578,50 @@ func TestSandboxPauseControllerReconstructsHealthRecoveryRegardlessOfAutoResume(
 	require.True(t, controller.processNextWorkItem(context.Background()))
 
 	assert.Equal(t, []string{"pause:sandbox-1", "resume:sandbox-1"}, calls)
+}
+
+func TestSandboxPauseControllerForgetsRecoveryForDeletedSandbox(t *testing.T) {
+	deletedAt := time.Now().UTC()
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
+		"sandbox-1": {
+			ID:           "sandbox-1",
+			DesiredState: sandboxstore.SandboxDesiredStateDeleted,
+			DeletedAt:    deletedAt,
+		},
+	}}
+	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
+	t.Cleanup(controller.queue.ShutDown)
+	controller.complete = func(context.Context, string) error { return nil }
+	controller.resume = func(_ context.Context, sandboxID string) error {
+		return k8serrors.NewNotFound(corev1.Resource("sandbox"), sandboxID)
+	}
+	item := sandboxPauseItem{SandboxID: "sandbox-1", Resume: true}
+	controller.queue.Add(item)
+
+	require.True(t, controller.processNextWorkItem(context.Background()))
+
+	assert.Zero(t, controller.queue.NumRequeues(item))
+}
+
+func TestSandboxPauseControllerRetriesNotFoundForActiveSandbox(t *testing.T) {
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
+		"sandbox-1": {
+			ID:           "sandbox-1",
+			DesiredState: sandboxstore.SandboxDesiredStateActive,
+		},
+	}}
+	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
+	t.Cleanup(controller.queue.ShutDown)
+	controller.complete = func(context.Context, string) error { return nil }
+	controller.resume = func(_ context.Context, sandboxID string) error {
+		return k8serrors.NewNotFound(corev1.Resource("sandbox-template"), sandboxID)
+	}
+	item := sandboxPauseItem{SandboxID: "sandbox-1", Resume: true}
+	controller.queue.Add(item)
+
+	require.True(t, controller.processNextWorkItem(context.Background()))
+
+	assert.Equal(t, 1, controller.queue.NumRequeues(item))
 }
 
 func TestSandboxPauseControllerFindsCrashRecoveryAfterManagerRestart(t *testing.T) {

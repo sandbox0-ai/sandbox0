@@ -53,6 +53,18 @@ func (r *Sandbox0InfraReconciler) getImageTag(ctx context.Context) string {
 	return config.ImageTag
 }
 
+func (r *Sandbox0InfraReconciler) getRootFSSnapshotterImageTag(ctx context.Context) string {
+	logger := log.FromContext(ctx)
+
+	config, err := operatorconfig.LoadOperatorConfig(operatorconfig.DefaultConfigPath)
+	if err != nil {
+		logger.Error(err, "Failed to load operator config")
+		return operatorconfig.DefaultImageTag
+	}
+
+	return config.RootFSSnapshotterImageTag
+}
+
 func (r *Sandbox0InfraReconciler) getImagePullPolicy(ctx context.Context) *corev1.PullPolicy {
 	logger := log.FromContext(ctx)
 

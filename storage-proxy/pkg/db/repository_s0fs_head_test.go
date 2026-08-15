@@ -259,6 +259,33 @@ func TestS0FSHeadStoreAdapterMapsConflicts(t *testing.T) {
 	}
 }
 
+func TestRequireS0FSHeadIdentityPreservesCanceledContext(t *testing.T) {
+	repo := newS0FSCommittedHeadTestRepository(t)
+	if repo == nil {
+		return
+	}
+
+	volumeID := "vol-" + uuid.NewString()
+	createTestSandboxVolume(t, repo, volumeID)
+	tx, err := repo.BeginTx(context.Background())
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = tx.Rollback(context.Background())
+	})
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = repo.requireS0FSHeadIdentity(canceledCtx, tx, volumeID, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("requireS0FSHeadIdentity() error = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, ErrConflict) {
+		t.Fatalf("requireS0FSHeadIdentity() error = %v, must not be classified as ErrConflict", err)
+	}
+}
+
 func TestListSandboxVolumesBySource(t *testing.T) {
 	repo := newS0FSCommittedHeadTestRepository(t)
 	if repo == nil {

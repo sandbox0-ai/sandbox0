@@ -56,6 +56,38 @@ func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
 	}
 }
 
+func TestReconcileKeepsPinnedRootFSSnapshotterDuringServiceRollout(t *testing.T) {
+	ctx := context.Background()
+	infra := newCtldTestInfra()
+	_, client := reconcileCtldResources(t, infra)
+	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
+	before := &appsv1.DaemonSet{}
+	require.NoError(t, client.Get(ctx, types.NamespacedName{
+		Name: infra.Name + "-rootfs-snapshotter", Namespace: infra.Namespace,
+	}, before))
+
+	require.NoError(t, reconciler.Reconcile(
+		ctx,
+		infra,
+		"ghcr.io/sandbox0-ai/sandbox0",
+		"service-next",
+		"latest",
+		"http://demo-cluster-gateway:8443",
+	))
+
+	snapshotter := &appsv1.DaemonSet{}
+	require.NoError(t, client.Get(ctx, types.NamespacedName{
+		Name: infra.Name + "-rootfs-snapshotter", Namespace: infra.Namespace,
+	}, snapshotter))
+	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", snapshotter.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t,
+		before.Spec.Template.Annotations[rootFSSnapshotterRolloutRevisionAnnotation],
+		snapshotter.Spec.Template.Annotations[rootFSSnapshotterRolloutRevisionAnnotation],
+	)
+	standby := getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
+	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:service-next", standby.Spec.Template.Spec.Containers[0].Image)
+}
+
 func TestReconcileConfiguresNetworkRuntimeInBothHASlots(t *testing.T) {
 	infra := newCtldTestInfra()
 	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{MetricsPort: 9191}}
@@ -163,7 +195,7 @@ func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 	require.NoError(t, client.Create(ctx, standbyPod))
 
 	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", primary.Spec.Template.Spec.Containers[0].Image)
@@ -173,7 +205,7 @@ func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 
 	// An observed DaemonSet status is not enough while its live predecessor is
 	// still present; slot A must remain untouched.
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", primary.Spec.Template.Spec.Containers[0].Image)
 
@@ -181,7 +213,7 @@ func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	markCtldDaemonSetReady(t, ctx, client, standby)
 	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(standby, "ctld-b-next", "node-a")))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:next", primary.Spec.Template.Spec.Containers[0].Image)
 }
@@ -202,7 +234,7 @@ func TestReadyRejectsHealthyPreviousRevisionDuringNetworkDisableRollout(t *testi
 
 	infra.Spec.Network = nil
 	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "latest", "http://demo-cluster-gateway:8443"))
 
 	ready, err := reconciler.Ready(ctx, infra)
 	require.NoError(t, err)
@@ -219,7 +251,7 @@ func TestReconcileRepairsMissingSlotBeforeRollingPeer(t *testing.T) {
 	require.NoError(t, client.Delete(ctx, primary))
 
 	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:next", primary.Spec.Template.Spec.Containers[0].Image)
@@ -231,12 +263,12 @@ func TestReconcileRepairsMissingSlotBeforeRollingPeer(t *testing.T) {
 
 	// The surviving peer remains unchanged until the repaired slot is actually
 	// ready on its desired nodes.
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", standby.Spec.Template.Spec.Containers[0].Image)
 	markCtldDaemonSetReady(t, ctx, client, primary)
 	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(primary, "ctld-a-next", "node-a")))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:next", standby.Spec.Template.Spec.Containers[0].Image)
 }
@@ -250,7 +282,7 @@ func TestReconcileDoesNotMutateEitherDegradedPeer(t *testing.T) {
 	markCtldDaemonSetNotReady(t, ctx, client, standby)
 
 	reconciler := NewReconciler(common.NewResourceManager(client, newCtldTestScheme(t), nil, common.LocalDevConfig{}))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:latest", primary.Spec.Template.Spec.Containers[0].Image)
@@ -260,7 +292,7 @@ func TestReconcileDoesNotMutateEitherDegradedPeer(t *testing.T) {
 	// simultaneous restart.
 	markCtldDaemonSetReady(t, ctx, client, standby)
 	require.NoError(t, client.Create(ctx, readyCtldPodForDaemonSet(standby, "ctld-b-old", "node-a")))
-	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "http://demo-cluster-gateway:8443"))
+	require.NoError(t, reconciler.Reconcile(ctx, infra, "ghcr.io/sandbox0-ai/sandbox0", "next", "next", "http://demo-cluster-gateway:8443"))
 	primary = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotA)
 	standby = getCtldDaemonSet(t, ctx, client, infra, dataplane.CtldHASlotB)
 	assert.Equal(t, "ghcr.io/sandbox0-ai/sandbox0:next", primary.Spec.Template.Spec.Containers[0].Image)
@@ -428,7 +460,7 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 		Build()
 
 	reconciler := NewReconciler(common.NewResourceManager(client, scheme, nil, common.LocalDevConfig{}))
-	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "http://demo-cluster-gateway:8443"); err != nil {
+	if err := reconciler.Reconcile(context.Background(), infra, "ghcr.io/sandbox0-ai/sandbox0", "latest", "latest", "http://demo-cluster-gateway:8443"); err != nil {
 		t.Fatalf("reconcile returned error: %v", err)
 	}
 

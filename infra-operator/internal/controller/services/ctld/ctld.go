@@ -76,7 +76,7 @@ func NewReconciler(resources *common.ResourceManager) *Reconciler {
 	return &Reconciler{Resources: resources}
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag, clusterGatewayURL string) error {
+func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, imageRepo, imageTag, rootFSSnapshotterImageTag, clusterGatewayURL string) error {
 	logger := log.FromContext(ctx)
 	if !infrav1alpha1.HasDataPlaneServices(infra) {
 		logger.Info("Data-plane services are disabled, skipping ctld")
@@ -124,6 +124,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	}
 
 	image := fmt.Sprintf("%s:%s", imageRepo, imageTag)
+	if strings.TrimSpace(rootFSSnapshotterImageTag) == "" {
+		rootFSSnapshotterImageTag = imageTag
+	}
+	rootFSSnapshotterImage := fmt.Sprintf("%s:%s", imageRepo, rootFSSnapshotterImageTag)
 	pullPolicy := corev1.PullIfNotPresent
 	if r.Resources.ImagePullPolicy != nil {
 		pullPolicy = *r.Resources.ImagePullPolicy
@@ -251,7 +255,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		Namespace:            infra.Namespace,
 		Labels:               common.GetServiceLabels(infra.Name, rootFSSnapshotterComponent),
 		PodAnnotations:       configRef.PodAnnotations(),
-		Image:                image,
+		Image:                rootFSSnapshotterImage,
 		PullPolicy:           pullPolicy,
 		NodeSelector:         nodeSelector,
 		Tolerations:          tolerations,

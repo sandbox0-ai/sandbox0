@@ -463,10 +463,7 @@ func (r *MultiClusterReconciler) reconcileTemplate(ctx context.Context, tpl *tem
 					"sandbox0.ai/template-scope":      tpl.Scope,
 					"sandbox0.ai/template-logical-id": tpl.TemplateID,
 				},
-				Annotations: map[string]string{
-					"sandbox0.ai/template-team-id": tpl.TeamID,
-					"sandbox0.ai/template-user-id": tpl.UserID,
-				},
+				Annotations: projectedTemplateAnnotations(tpl),
 			},
 			Spec: clusterSpec,
 		}

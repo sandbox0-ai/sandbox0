@@ -13,6 +13,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -479,7 +480,7 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 	if err != nil {
 		return pod, fmt.Errorf("load rootfs checkpoint: %w", err)
 	}
-	resetCopiedSessionState := copiedSessionStateRequiresReset(record.ID, rootFSState)
+	resetCopiedSessionState := copiedSessionStateRequiresReset(record.ID, rootFSState, template)
 	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
 	if err != nil {
 		return pod, err
@@ -516,10 +517,13 @@ func (s *SandboxService) finishRestoredSandboxRuntime(ctx context.Context, pod *
 // copiedSessionStateRequiresReset derives the one-time reset intent from the
 // authoritative rootfs head provenance. Once the target sandbox saves its own
 // layer, later resumes preserve that sandbox's session state.
-func copiedSessionStateRequiresReset(sandboxID string, state *sandboxstore.SandboxRootFSState) bool {
+func copiedSessionStateRequiresReset(sandboxID string, state *sandboxstore.SandboxRootFSState, template *v1alpha1.SandboxTemplate) bool {
 	sandboxID = strings.TrimSpace(sandboxID)
-	if sandboxID == "" || state == nil || len(state.LayerChain) == 0 {
+	if sandboxID == "" {
 		return false
+	}
+	if state == nil || len(state.LayerChain) == 0 {
+		return state == nil && template != nil && templatepkg.HasCopiedRootFS(template.Annotations)
 	}
 	head := state.LayerChain[len(state.LayerChain)-1]
 	if head == nil {

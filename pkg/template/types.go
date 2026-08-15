@@ -3,10 +3,21 @@ package template
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 )
+
+// AnnotationCopiedRootFS marks cluster templates whose image includes a
+// writable rootfs captured from another sandbox.
+const AnnotationCopiedRootFS = "sandbox0.ai/template-copied-rootfs"
+
+// HasCopiedRootFS reports whether projected template metadata requires a new
+// sandbox runtime to discard session identity copied into its base image.
+func HasCopiedRootFS(annotations map[string]string) bool {
+	return strings.EqualFold(strings.TrimSpace(annotations[AnnotationCopiedRootFS]), "true")
+}
 
 // Template represents a SandboxTemplate stored in PostgreSQL.
 type Template struct {

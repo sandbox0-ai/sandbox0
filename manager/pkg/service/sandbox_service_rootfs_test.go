@@ -23,6 +23,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
+	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -812,11 +813,22 @@ func TestCopiedSessionStateRequiresResetUsesRootFSHeadProvenance(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := copiedSessionStateRequiresReset(tt.sandboxID, tt.state); got != tt.want {
+			if got := copiedSessionStateRequiresReset(tt.sandboxID, tt.state, nil); got != tt.want {
 				t.Fatalf("copiedSessionStateRequiresReset() = %t, want %t", got, tt.want)
 			}
 		})
 	}
+}
+
+func TestCopiedSessionStateRequiresResetForTemplateRootFS(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		templatepkg.AnnotationCopiedRootFS: "true",
+	}}}
+
+	assert.True(t, copiedSessionStateRequiresReset("sandbox-1", nil, template))
+	assert.False(t, copiedSessionStateRequiresReset("sandbox-1", &sandboxstore.SandboxRootFSState{
+		LayerChain: []*sandboxstore.SandboxRootFSLayer{{SourceSandboxID: "sandbox-1"}},
+	}, template))
 }
 
 func TestFinishRestoredSandboxRuntimeRetriesWithCheckpointBaseImage(t *testing.T) {

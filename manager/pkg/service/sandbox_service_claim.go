@@ -402,7 +402,8 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	phaseStarted = time.Now()
-	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, req.SnapshotID != "")
+	resetCopiedSessionState := req.SnapshotID != "" || templatepkg.HasCopiedRootFS(template.Annotations)
+	pod, runtimeRevision, err := s.publishRuntimeAssignment(ctx, pod, resetCopiedSessionState)
 	s.observeClaimPhase(req.Template, claimType, "publish_runtime_assignment", phaseStarted, err)
 	if err != nil {
 		s.requestSandboxDeletionAfterClaimFailure(pod, "runtime assignment publication failed")

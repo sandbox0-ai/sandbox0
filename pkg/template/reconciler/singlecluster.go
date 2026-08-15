@@ -179,10 +179,7 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 					"sandbox0.ai/template-logical-id": tpl.TemplateID,
 					singleClusterManagedByLabel:       singleClusterManagedByValue,
 				},
-				Annotations: map[string]string{
-					"sandbox0.ai/template-team-id": tpl.TeamID,
-					"sandbox0.ai/template-user-id": tpl.UserID,
-				},
+				Annotations: projectedTemplateAnnotations(tpl),
 			},
 			Spec: clusterSpec,
 		}
@@ -254,6 +251,17 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 	r.statusMu.Lock()
 	r.lastReconcileErr = nil
 	r.statusMu.Unlock()
+}
+
+func projectedTemplateAnnotations(tpl *template.Template) map[string]string {
+	annotations := map[string]string{
+		"sandbox0.ai/template-team-id": tpl.TeamID,
+		"sandbox0.ai/template-user-id": tpl.UserID,
+	}
+	if tpl.CreationBuildID != "" {
+		annotations[template.AnnotationCopiedRootFS] = "true"
+	}
+	return annotations
 }
 
 func (r *SingleClusterReconciler) createOrUpdateTemplate(ctx context.Context, tpl *v1alpha1.SandboxTemplate) (bool, error) {

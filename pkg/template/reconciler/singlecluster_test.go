@@ -157,6 +157,19 @@ func TestSingleClusterReconcilerFinalizesVisibleReconcilingTemplate(t *testing.T
 	}
 }
 
+func TestProjectedTemplateAnnotationsMarkCopiedRootFS(t *testing.T) {
+	tpl := &template.Template{
+		TeamID:          "team-1",
+		UserID:          "user-1",
+		CreationBuildID: "build-1",
+	}
+
+	annotations := projectedTemplateAnnotations(tpl)
+	if !template.HasCopiedRootFS(annotations) {
+		t.Fatalf("annotations = %#v, want copied rootfs marker", annotations)
+	}
+}
+
 func TestSingleClusterReconcilerQuiesceBlocksNewWork(t *testing.T) {
 	store := &countingTemplateStore{}
 	reconciler := NewSingleClusterReconciler(

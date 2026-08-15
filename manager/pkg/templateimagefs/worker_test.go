@@ -7,7 +7,9 @@ import (
 	"time"
 
 	api "github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+	fakeclientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/fake"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templstore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
@@ -17,7 +19,11 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestNewWorkerDefaultsToLargeImageImportWindow(t *testing.T) {
@@ -25,6 +31,7 @@ func TestNewWorkerDefaultsToLargeImageImportWindow(t *testing.T) {
 		&workerQueueStub{},
 		workerHeadStoreStub{},
 		fake.NewSimpleClientset(),
+		fakeclientset.NewSimpleClientset().Sandbox0V1alpha1(),
 		nil,
 		func(context.Context, *corev1.Pod) (string, error) { return "http://ctld", nil },
 		Config{WorkerID: "manager/green", BaseImageRef: "sandbox0ai/infra:carrier-base"},
@@ -32,6 +39,7 @@ func TestNewWorkerDefaultsToLargeImageImportWindow(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, 4*time.Hour, worker.config.ImportTimeout)
+	require.Equal(t, 2*time.Minute, worker.config.LeaseDuration)
 }
 
 func TestNewWorkerPreservesExplicitImportTimeout(t *testing.T) {
@@ -39,6 +47,7 @@ func TestNewWorkerPreservesExplicitImportTimeout(t *testing.T) {
 		&workerQueueStub{},
 		workerHeadStoreStub{},
 		fake.NewSimpleClientset(),
+		fakeclientset.NewSimpleClientset().Sandbox0V1alpha1(),
 		nil,
 		func(context.Context, *corev1.Pod) (string, error) { return "http://ctld", nil },
 		Config{WorkerID: "manager/green", BaseImageRef: "sandbox0ai/infra:carrier-base", ImportTimeout: 30 * time.Minute},
@@ -162,6 +171,7 @@ func TestProcessSupersedesClaimWhoseSpecIsNoLongerCurrent(t *testing.T) {
 	queue := &workerQueueStub{template: currentTemplate}
 	worker := &Worker{
 		queue: queue,
+		k8s:   fake.NewSimpleClientset(),
 		config: Config{
 			WorkerID:      "manager/green",
 			LeaseDuration: time.Hour,
@@ -178,9 +188,165 @@ func TestProcessSupersedesClaimWhoseSpecIsNoLongerCurrent(t *testing.T) {
 	require.Contains(t, queue.failedMessage, "current template requires")
 }
 
-func TestCreateImportPodPrimesFixedCarrierBaseOnTargetNode(t *testing.T) {
+func TestProcessSupersededRevisionDeletesStaleImporterPod(t *testing.T) {
+	claimedTemplate := imageFSWorkerTestTemplate()
+	claimed, err := template.NewTemplateImageRevision(claimedTemplate)
+	require.NoError(t, err)
+	currentTemplate := imageFSWorkerTestTemplate()
+	currentTemplate.Spec.MainContainer.Image = "python:3.14"
+	namespace, err := templateNamespace(currentTemplate)
+	require.NoError(t, err)
+	client := fake.NewSimpleClientset(
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "stale-matching", Namespace: namespace, Labels: map[string]string{importerLabel: claimed.RevisionID}}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "different-revision", Namespace: namespace, Labels: map[string]string{importerLabel: "tir-other"}}},
+	)
+	queue := &workerQueueStub{template: currentTemplate}
 	worker := &Worker{
-		k8s: fake.NewSimpleClientset(),
+		queue: queue,
+		k8s:   client,
+		config: Config{
+			WorkerID:      "manager/green",
+			LeaseDuration: time.Hour,
+			ImportTimeout: time.Minute,
+		},
+		logger: zap.NewNop(),
+	}
+
+	worker.process(context.Background(), claimed)
+
+	pods, err := client.CoreV1().Pods(namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 1)
+	require.Equal(t, "different-revision", pods.Items[0].Name)
+	require.Equal(t, 1, queue.failCalls)
+}
+
+func TestWaitForImportContainerReturnsDeterministicStartupFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		init   bool
+	}{
+		{name: "image pull", reason: "ErrImagePull"},
+		{name: "pull backoff", reason: "ImagePullBackOff"},
+		{name: "invalid image", reason: "InvalidImageName"},
+		{name: "invalid config", reason: "CreateContainerConfigError"},
+		{name: "create failure", reason: "CreateContainerError"},
+		{name: "runtime failure", reason: "RunContainerError"},
+		{name: "init failure", reason: "CreateContainerError", init: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := corev1.ContainerStatus{
+				Name:  "procd",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: tt.reason, Message: "failed"}},
+			}
+			podStatus := corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{status}}
+			if tt.init {
+				status.Name = "carrier-base-primer"
+				podStatus = corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{status}}
+			}
+			client := fake.NewSimpleClientset(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "importer", Namespace: "sandbox-team"},
+				Status:     podStatus,
+			})
+			worker := &Worker{k8s: client, config: Config{PollInterval: time.Millisecond}}
+
+			_, err := worker.waitForImportContainer(context.Background(), "sandbox-team", "importer")
+
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.reason)
+		})
+	}
+}
+
+func TestWaitForImportContainerObservesFailureAfterPodCreation(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "importer", Namespace: "sandbox-team"}}
+	client := fake.NewSimpleClientset(pod)
+	getCalls := 0
+	client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		getCalls++
+		current := pod.DeepCopy()
+		if getCalls > 1 {
+			current.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: "procd",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "ErrImagePull", Message: "not found",
+				}},
+			}}
+		}
+		return true, current, nil
+	})
+	worker := &Worker{k8s: client, config: Config{PollInterval: time.Millisecond}}
+
+	_, err := worker.waitForImportContainer(context.Background(), "sandbox-team", "importer")
+
+	require.ErrorContains(t, err, "ErrImagePull")
+	require.GreaterOrEqual(t, getCalls, 2)
+}
+
+func TestProcessStartupFailureDeletesImporterAndReleasesRevision(t *testing.T) {
+	tpl := imageFSWorkerTestTemplate()
+	revision, err := template.NewTemplateImageRevision(tpl)
+	require.NoError(t, err)
+	namespace, err := templateNamespace(tpl)
+	require.NoError(t, err)
+	resourceName := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
+	owner := &api.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
+		Name: resourceName, Namespace: namespace, UID: types.UID("template-uid"),
+	}}
+	importPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "importer", Namespace: namespace, UID: types.UID("importer-uid")},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "procd",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+				Reason: "ErrImagePull", Message: "not found",
+			}},
+		}}},
+	}
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, importPod.DeepCopy(), nil
+	})
+	client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, importPod.DeepCopy(), nil
+	})
+	queue := &workerQueueStub{template: tpl}
+	worker := &Worker{
+		queue:     queue,
+		heads:     workerHeadStoreStub{},
+		k8s:       client,
+		templates: fakeclientset.NewSimpleClientset(owner).Sandbox0V1alpha1(),
+		config: Config{
+			WorkerID: "manager/green", ClusterID: "green",
+			BaseImageRef: "sandbox0ai/infra:carrier-base", PrimerImageRef: "sandbox0ai/infra:manager",
+			LeaseDuration: time.Hour, ImportTimeout: time.Minute, PollInterval: time.Millisecond,
+		},
+		logger: zap.NewNop(),
+	}
+
+	require.NotPanics(t, func() { worker.process(context.Background(), revision) })
+	require.Equal(t, 1, queue.releaseCalls)
+	require.Equal(t, revision.RevisionID, queue.releasedRevisionID)
+	deleteActions := 0
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "pods" {
+			deleteActions++
+			assert.Equal(t, "importer", action.(k8stesting.DeleteAction).GetName())
+		}
+	}
+	require.Equal(t, 1, deleteActions)
+}
+
+func TestCreateImportPodPrimesFixedCarrierBaseOnTargetNode(t *testing.T) {
+	namespace := "sandbox-team"
+	resourceName := naming.TemplateNameForCluster("team", "team-1", "python")
+	owner := &api.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
+		Name: resourceName, Namespace: namespace, UID: types.UID("template-uid"),
+	}}
+	worker := &Worker{
+		k8s:       fake.NewSimpleClientset(),
+		templates: fakeclientset.NewSimpleClientset(owner).Sandbox0V1alpha1(),
 		config: Config{
 			ClusterID: "cluster-a", BaseImageRef: "sandbox0ai/infra:carrier-base-v1", PrimerImageRef: "alpine:3.20",
 		},
@@ -193,8 +359,11 @@ func TestCreateImportPodPrimesFixedCarrierBaseOnTargetNode(t *testing.T) {
 	}
 	revision, err := template.NewTemplateImageRevision(tpl)
 	require.NoError(t, err)
-	pod, err := worker.createImportPod(context.Background(), "sandbox-team", tpl, revision)
+	pod, err := worker.createImportPod(context.Background(), namespace, tpl, revision)
 	require.NoError(t, err)
+	require.Len(t, pod.OwnerReferences, 1)
+	assert.Equal(t, owner.Name, pod.OwnerReferences[0].Name)
+	assert.Equal(t, owner.UID, pod.OwnerReferences[0].UID)
 	require.NotEmpty(t, pod.Spec.InitContainers)
 	assert.Equal(t, "carrier-base-primer", pod.Spec.InitContainers[0].Name)
 	assert.Equal(t, "alpine:3.20", pod.Spec.InitContainers[0].Image)
@@ -222,17 +391,19 @@ func TestTemplateNamespaceKeepsPublicAndTeamImportsIsolated(t *testing.T) {
 type workerQueueStub struct {
 	templstore.TemplateStore
 	templstore.TemplateImageRevisionStore
-	ensureCalls      int
-	selectCalls      int
-	clearCalls       int
-	claimCalls       int
-	claimErr         error
-	blockClaim       bool
-	template         *template.Template
-	failCalls        int
-	failedRevisionID string
-	failedReason     string
-	failedMessage    string
+	ensureCalls        int
+	selectCalls        int
+	clearCalls         int
+	claimCalls         int
+	claimErr           error
+	blockClaim         bool
+	template           *template.Template
+	failCalls          int
+	failedRevisionID   string
+	failedReason       string
+	failedMessage      string
+	releaseCalls       int
+	releasedRevisionID string
 }
 
 type workerHeadStoreStub struct{}
@@ -279,6 +450,12 @@ func (s *workerQueueStub) FailTemplateImageRevision(_ context.Context, revisionI
 	s.failedRevisionID = revisionID
 	s.failedReason = reason
 	s.failedMessage = message
+	return nil
+}
+
+func (s *workerQueueStub) ReleaseTemplateImageRevision(_ context.Context, revisionID, _ string, _ time.Time, _ string) error {
+	s.releaseCalls++
+	s.releasedRevisionID = revisionID
 	return nil
 }
 

@@ -101,7 +101,7 @@ func TestClaimSandboxRejectsUnmatchedLegacyClaimOnGreenDataPlane(t *testing.T) {
 		"sandbox0.ai/template-scope":      naming.ScopeTeam,
 		"sandbox0.ai/template-logical-id": "default",
 	}
-	admission, err := s0fsrollout.NewAdmission("cold", []string{"team-b"}, nil, true, false)
+	admission, err := s0fsrollout.NewAdmission("cold", []string{"team-b"}, nil, false, true, false)
 	if err != nil {
 		t.Fatalf("NewAdmission() error = %v", err)
 	}
@@ -124,7 +124,7 @@ func TestClaimSandboxDoesNotFallbackWhenAdmittedRevisionIsNotReady(t *testing.T)
 		"sandbox0.ai/template-scope":      naming.ScopeTeam,
 		"sandbox0.ai/template-logical-id": "default",
 	}
-	admission, err := s0fsrollout.NewAdmission("cold", []string{"team-a"}, nil, true, false)
+	admission, err := s0fsrollout.NewAdmission("cold", []string{"team-a"}, nil, false, true, false)
 	if err != nil {
 		t.Fatalf("NewAdmission() error = %v", err)
 	}

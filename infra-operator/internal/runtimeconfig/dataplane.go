@@ -63,6 +63,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 			Mode:               spec.S0FSRuntime.Admission.Mode,
 			TeamIDs:            cloneStrings(spec.S0FSRuntime.Admission.TeamIDs),
 			TemplateIDs:        cloneStrings(spec.S0FSRuntime.Admission.TemplateIDs),
+			AdmitAll:           spec.S0FSRuntime.Admission.AdmitAll,
 			RejectLegacyClaims: spec.S0FSRuntime.Admission.RejectLegacyClaims,
 		},
 	}

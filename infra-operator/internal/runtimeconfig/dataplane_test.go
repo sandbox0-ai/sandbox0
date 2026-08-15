@@ -45,6 +45,17 @@ func TestToManagerPreservesS0FSRolloutControls(t *testing.T) {
 	}
 }
 
+func TestToManagerPreservesS0FSAdmitAll(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		S0FSRuntime: infrav1alpha1.S0FSRuntimeConfig{
+			Admission: infrav1alpha1.S0FSAdmissionConfig{Mode: "shared", AdmitAll: true},
+		},
+	})
+	if !cfg.S0FSRuntime.Admission.AdmitAll {
+		t.Fatal("admission admit-all flag was not preserved")
+	}
+}
+
 func TestToManagerLeavesProcdWebhookOutboxDirUnsetWhenOmitted(t *testing.T) {
 	cfg := ToManager(&infrav1alpha1.ManagerConfig{})
 	if cfg.ProcdConfig.WebhookOutboxDir != "" {

@@ -49,6 +49,22 @@ func TestS0FSRolloutControlsAllowShadowImportWithAdmissionOff(t *testing.T) {
 	}
 }
 
+func TestS0FSRolloutControlsAllowExplicitAdmissionForAllTemplates(t *testing.T) {
+	cfg := &ManagerConfig{
+		S0FSRuntime: S0FSRuntimeConfig{Enabled: true, Admission: S0FSAdmissionConfig{
+			Mode: "shared", AdmitAll: true, RejectLegacyClaims: true,
+		}},
+	}
+	admission, err := cfg.S0FSAdmission()
+	if err != nil {
+		t.Fatalf("S0FSAdmission() error = %v", err)
+	}
+	if !admission.Admits(naming.ScopePublic, "", "public-template") ||
+		!admission.Admits(naming.ScopeTeam, "team-a", "private-template") {
+		t.Fatal("explicit admit-all configuration did not admit every template scope")
+	}
+}
+
 func TestEffectiveRuntimeReadyTimeout(t *testing.T) {
 	tests := []struct {
 		name       string

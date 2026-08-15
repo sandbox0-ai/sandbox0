@@ -533,7 +533,7 @@ func imageFSWorkerTestTemplate() *template.Template {
 
 func mustAdmission(t *testing.T, mode string, teamIDs, templateIDs []string) s0fsrollout.Admission {
 	t.Helper()
-	admission, err := s0fsrollout.NewAdmission(mode, teamIDs, templateIDs, false, false)
+	admission, err := s0fsrollout.NewAdmission(mode, teamIDs, templateIDs, false, false, false)
 	require.NoError(t, err)
 	return admission
 }

@@ -1077,6 +1077,10 @@ type S0FSAdmissionConfig struct {
 	// +kubebuilder:validation:MaxItems=100
 	// +listType=set
 	TemplateIDs []string `json:"templateIds,omitempty"`
+	// AdmitAll explicitly admits every public and private template. It cannot
+	// be combined with teamIds or templateIds.
+	// +optional
+	AdmitAll bool `json:"admitAll,omitempty"`
 	// RejectLegacyClaims makes unmatched new claims fail closed on a green
 	// data-plane cluster instead of falling back to legacy rootfs creation.
 	// +optional

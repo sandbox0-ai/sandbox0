@@ -3951,6 +3951,11 @@ spec:
                                 description: S0FSAdmissionConfig defines one explicit
                                   S0FS rollout cohort.
                                 properties:
+                                  admitAll:
+                                    description: |-
+                                      AdmitAll explicitly admits every public and private template. It cannot
+                                      be combined with teamIds or templateIds.
+                                    type: boolean
                                   mode:
                                     description: |-
                                       Mode is empty only for compatibility with the original shared carrier

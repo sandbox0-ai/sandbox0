@@ -7,7 +7,7 @@ import (
 )
 
 func TestAdmissionCohortScope(t *testing.T) {
-	admission, err := NewAdmission("cold", []string{" team-a "}, []string{"public-canary"}, true, false)
+	admission, err := NewAdmission("cold", []string{" team-a "}, []string{"public-canary"}, false, true, false)
 	if err != nil {
 		t.Fatalf("NewAdmission() error = %v", err)
 	}
@@ -39,7 +39,7 @@ func TestAdmissionCohortScope(t *testing.T) {
 }
 
 func TestAdmissionOffOverridesAllowlist(t *testing.T) {
-	admission, err := NewAdmission("off", []string{"team-a"}, []string{"template-a"}, true, true)
+	admission, err := NewAdmission("off", []string{"team-a"}, []string{"template-a"}, false, true, true)
 	if err != nil {
 		t.Fatalf("NewAdmission() error = %v", err)
 	}
@@ -49,7 +49,7 @@ func TestAdmissionOffOverridesAllowlist(t *testing.T) {
 }
 
 func TestAdmissionPreservesLegacySharedCarrierConfiguration(t *testing.T) {
-	admission, err := NewAdmission("", nil, nil, false, true)
+	admission, err := NewAdmission("", nil, nil, false, false, true)
 	if err != nil {
 		t.Fatalf("NewAdmission() error = %v", err)
 	}
@@ -59,8 +59,39 @@ func TestAdmissionPreservesLegacySharedCarrierConfiguration(t *testing.T) {
 }
 
 func TestAdmissionRejectsUnknownMode(t *testing.T) {
-	if _, err := NewAdmission("gradual", nil, nil, false, false); err == nil {
+	if _, err := NewAdmission("gradual", nil, nil, false, false, false); err == nil {
 		t.Fatal("NewAdmission() error = nil, want unsupported mode error")
+	}
+}
+
+func TestAdmissionExplicitAdmitAll(t *testing.T) {
+	admission, err := NewAdmission("shared", nil, nil, true, true, false)
+	if err != nil {
+		t.Fatalf("NewAdmission() error = %v", err)
+	}
+	if !admission.Admits(naming.ScopePublic, "", "public-template") ||
+		!admission.Admits(naming.ScopeTeam, "team-a", "private-template") ||
+		!admission.UsesSharedCarrier() || !admission.RejectLegacyClaims() {
+		t.Fatal("explicit admit-all policy did not admit every template in shared mode")
+	}
+}
+
+func TestAdmissionOffOverridesExplicitAdmitAll(t *testing.T) {
+	admission, err := NewAdmission("off", nil, nil, true, true, false)
+	if err != nil {
+		t.Fatalf("NewAdmission() error = %v", err)
+	}
+	if admission.Admits(naming.ScopePublic, "", "public-template") || admission.Admits(naming.ScopeTeam, "team-a", "private-template") {
+		t.Fatal("off admission admitted a template with admitAll configured")
+	}
+}
+
+func TestAdmissionRejectsAmbiguousAdmitAll(t *testing.T) {
+	if _, err := NewAdmission("shared", []string{"team-a"}, nil, true, true, false); err == nil {
+		t.Fatal("NewAdmission() error = nil, want admit-all selector conflict")
+	}
+	if _, err := NewAdmission("", nil, nil, true, true, true); err == nil {
+		t.Fatal("NewAdmission() error = nil, want explicit-mode requirement")
 	}
 }
 

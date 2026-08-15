@@ -306,6 +306,7 @@ type S0FSAdmissionConfig struct {
 	Mode               string   `yaml:"mode" json:"mode"`
 	TeamIDs            []string `yaml:"team_ids" json:"teamIds"`
 	TemplateIDs        []string `yaml:"template_ids" json:"templateIds"`
+	AdmitAll           bool     `yaml:"admit_all" json:"admitAll"`
 	RejectLegacyClaims bool     `yaml:"reject_legacy_claims" json:"rejectLegacyClaims"`
 }
 
@@ -329,12 +330,13 @@ func (c *ManagerConfig) S0FSRuntimeEnabled() bool {
 // S0FSAdmission returns the validated rollout policy for this manager.
 func (c *ManagerConfig) S0FSAdmission() (s0fsrollout.Admission, error) {
 	if c == nil {
-		return s0fsrollout.NewAdmission("off", nil, nil, false, false)
+		return s0fsrollout.NewAdmission("off", nil, nil, false, false, false)
 	}
 	return s0fsrollout.NewAdmission(
 		c.S0FSRuntime.Admission.Mode,
 		c.S0FSRuntime.Admission.TeamIDs,
 		c.S0FSRuntime.Admission.TemplateIDs,
+		c.S0FSRuntime.Admission.AdmitAll,
 		c.S0FSRuntime.Admission.RejectLegacyClaims,
 		c.SharedCarrierPool.Enabled,
 	)

@@ -23,6 +23,7 @@ const (
 type Admission struct {
 	mode               AdmissionMode
 	cohort             Cohort
+	admitAll           bool
 	rejectLegacyClaims bool
 	legacyAdmitAll     bool
 }
@@ -79,10 +80,11 @@ func (c Cohort) Matches(scope, teamID, templateID string) bool {
 // NewAdmission validates and normalizes one rollout policy. An empty mode
 // preserves the original sharedCarrierPool.enabled behavior for existing
 // configurations; explicit rollout configurations must use off, cold, or
-// shared and an allowlist.
-func NewAdmission(mode string, teamIDs, templateIDs []string, rejectLegacyClaims, legacySharedEnabled bool) (Admission, error) {
+// shared and either an allowlist or admitAll.
+func NewAdmission(mode string, teamIDs, templateIDs []string, admitAll, rejectLegacyClaims, legacySharedEnabled bool) (Admission, error) {
 	mode = strings.TrimSpace(strings.ToLower(mode))
 	legacyAdmitAll := false
+	explicitMode := mode != ""
 	if mode == "" {
 		if legacySharedEnabled {
 			mode = string(AdmissionModeShared)
@@ -97,10 +99,18 @@ func NewAdmission(mode string, teamIDs, templateIDs []string, rejectLegacyClaims
 	default:
 		return Admission{}, fmt.Errorf("unsupported S0FS admission mode %q", mode)
 	}
+	cohort := NewCohort(teamIDs, templateIDs)
+	if admitAll && !explicitMode {
+		return Admission{}, fmt.Errorf("S0FS admitAll requires an explicit admission mode")
+	}
+	if admitAll && !cohort.Empty() {
+		return Admission{}, fmt.Errorf("S0FS admitAll cannot be combined with team or template selectors")
+	}
 
 	return Admission{
 		mode:               admissionMode,
-		cohort:             NewCohort(teamIDs, templateIDs),
+		cohort:             cohort,
+		admitAll:           admitAll,
 		rejectLegacyClaims: rejectLegacyClaims,
 		legacyAdmitAll:     legacyAdmitAll,
 	}, nil
@@ -124,7 +134,7 @@ func (a Admission) Admits(scope, teamID, templateID string) bool {
 	if a.mode == AdmissionModeOff {
 		return false
 	}
-	if a.legacyAdmitAll {
+	if a.admitAll || a.legacyAdmitAll {
 		return true
 	}
 	return a.cohort.Matches(scope, teamID, templateID)

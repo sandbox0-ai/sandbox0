@@ -114,8 +114,7 @@ func (p *Pool) Reconcile(ctx context.Context) error {
 			continue
 		}
 		if pod.Labels[carrier.LabelGeneration] != p.config.Generation || carrierUnusable(&pod, p.config.Generation, p.config.ActivationTimeout, time.Now()) {
-			grace := int64(0)
-			if err := p.k8s.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil && !apierrors.IsNotFound(err) {
+			if err := p.deleteUnclaimed(ctx, &pod); err != nil {
 				return err
 			}
 			continue
@@ -134,13 +133,35 @@ func (p *Pool) Reconcile(ctx context.Context) error {
 			return current[i].CreationTimestamp.Time.Before(current[j].CreationTimestamp.Time)
 		})
 		for _, pod := range current[p.config.MaxIdle:] {
-			grace := int64(0)
-			if err := p.k8s.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil && !apierrors.IsNotFound(err) {
+			if err := p.deleteUnclaimed(ctx, &pod); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// deleteUnclaimed removes only the exact Pod version observed by Reconcile.
+// Reserving a carrier updates its resource version, so a concurrent prune then
+// fails its precondition instead of deleting a Pod that a claim already owns.
+func (p *Pool) deleteUnclaimed(ctx context.Context, pod *corev1.Pod) error {
+	if pod == nil || pod.UID == "" || pod.ResourceVersion == "" {
+		return fmt.Errorf("carrier Pod UID and resource version are required for safe deletion")
+	}
+	grace := int64(0)
+	uid := pod.UID
+	resourceVersion := pod.ResourceVersion
+	err := p.k8s.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
+		GracePeriodSeconds: &grace,
+		Preconditions: &metav1.Preconditions{
+			UID:             &uid,
+			ResourceVersion: &resourceVersion,
+		},
+	})
+	if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func carrierUnusable(pod *corev1.Pod, generation string, activationTimeout time.Duration, now time.Time) bool {

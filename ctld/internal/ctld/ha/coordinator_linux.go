@@ -190,7 +190,12 @@ func (c *Coordinator) WaitForPrimary(ctx context.Context) (*PrimaryLease, error)
 			_ = lockFile.Close()
 			return nil, epochErr
 		}
-		c.setState(func(state *State) { *state = State{Role: RoleStandby, Epoch: epoch} })
+		// The primary lock and epoch file are the complete shared HA state. Once a
+		// standby observes a committed epoch, it is ready to take over without a
+		// separate replication handshake.
+		c.setState(func(state *State) {
+			*state = State{Role: RoleStandby, Epoch: epoch, Synchronized: epoch > 0}
+		})
 		timer := time.NewTimer(connectInterval)
 		select {
 		case <-ctx.Done():

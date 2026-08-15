@@ -38,6 +38,9 @@ func TestCoordinatorPromotesStandbyAfterPrimaryCloses(t *testing.T) {
 		result <- primaryResult{lease: lease, err: waitErr}
 	}()
 	waitForRole(t, standbyCoordinator, RoleStandby)
+	if state := standbyCoordinator.State(); !state.Synchronized || state.Epoch != primary.Epoch {
+		t.Fatalf("standby state = %#v, want synchronized epoch %d", state, primary.Epoch)
+	}
 
 	if err := primary.Close(); err != nil {
 		t.Fatalf("Close(primary) error = %v", err)

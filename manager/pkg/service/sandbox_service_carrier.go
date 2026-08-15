@@ -95,11 +95,11 @@ func (s *SandboxService) claimS0FSCarrier(ctx context.Context, template *api.San
 	if err != nil {
 		return fail("carrier rootfs activation failed", err)
 	}
+	var portalMounts []BootstrapMountStatus
 	pod, err = s.waitForS0FSCarrierReady(ctx, pod, req.Template, claimType, func(readyCtx context.Context, readyPod *corev1.Pod) error {
-		phaseStarted := time.Now()
-		bindErr := s.bindSandboxRootFSSync(readyCtx, readyPod, record)
-		s.observeClaimPhase(req.Template, claimType, "bind_rootfs_sync", phaseStarted, bindErr)
-		return bindErr
+		var prepareErr error
+		portalMounts, prepareErr = s.prepareS0FSCarrierStorage(readyCtx, readyPod, template, req, record, claimType)
+		return prepareErr
 	})
 	if err != nil {
 		return fail("carrier runtime readiness failed", err)
@@ -124,8 +124,39 @@ func (s *SandboxService) claimS0FSCarrier(ctx context.Context, template *api.San
 	}
 	return &ClaimResponse{
 		SandboxID: req.SandboxID, Status: s.podToSandboxStatus(pod), ProcdAddress: procdAddress,
-		PodName: pod.Name, Template: req.Template, ClusterId: template.Spec.ClusterId,
+		PodName: pod.Name, Template: req.Template, ClusterId: template.Spec.ClusterId, BootstrapMounts: portalMounts,
 	}, true, nil
+}
+
+// prepareS0FSCarrierStorage binds durable volume portals before rootfs capture
+// starts so declared mounts are excluded from the sandbox rootfs checkpoint.
+func (s *SandboxService) prepareS0FSCarrierStorage(
+	ctx context.Context,
+	pod *corev1.Pod,
+	template *api.SandboxTemplate,
+	req *ClaimRequest,
+	record *sandboxstore.SandboxRecord,
+	claimType string,
+) ([]BootstrapMountStatus, error) {
+	phaseStarted := time.Now()
+	portalMounts, err := s.bindVolumePortals(ctx, pod, req, template)
+	s.observeClaimPhase(req.Template, claimType, "bind_volume_portals", phaseStarted, err)
+	if err != nil {
+		return nil, fmt.Errorf("bind volume portals: %w", err)
+	}
+	phaseStarted = time.Now()
+	err = s.bindWebhookStatePortal(ctx, pod, req)
+	s.observeClaimPhase(req.Template, claimType, "bind_webhook_state_portal", phaseStarted, err)
+	if err != nil {
+		return nil, fmt.Errorf("bind webhook state portal: %w", err)
+	}
+	phaseStarted = time.Now()
+	err = s.bindSandboxRootFSSync(ctx, pod, record)
+	s.observeClaimPhase(req.Template, claimType, "bind_rootfs_sync", phaseStarted, err)
+	if err != nil {
+		return nil, err
+	}
+	return portalMounts, nil
 }
 
 func (s *SandboxService) allocateS0FSCarrier(ctx context.Context, template *api.SandboxTemplate, req *ClaimRequest, allowShared bool) (*corev1.Pod, string, error) {

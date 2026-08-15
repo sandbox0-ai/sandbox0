@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,11 +12,67 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
+	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestPrepareS0FSCarrierStorageBindsDeclaredVolumes(t *testing.T) {
+	var bound ctldapi.BindVolumePortalRequest
+	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/volume-portals/bind" {
+			t.Fatalf("unexpected ctld path %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&bound); err != nil {
+			t.Fatalf("decode bind request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(ctldapi.BindVolumePortalResponse{
+			SandboxVolumeID: bound.SandboxVolumeID,
+			MountPoint:      bound.MountPath,
+			MountedAt:       "2026-08-15T00:00:00Z",
+		})
+	}))
+	defer ctld.Close()
+	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
+
+	template := newSandboxResourceTestTemplate(t)
+	template.Spec.VolumeMounts = []api.VolumeMountSpec{{
+		Name: "data", MountPath: "/tmp/sandbox0-volume",
+	}}
+	pod := newSandboxResourceTestActivePod(t, template, "sandbox-1")
+	pod.UID = "pod-uid"
+	pod.Status.HostIP = ctldURL.Hostname()
+	pod.Annotations[controller.AnnotationSandboxID] = "sandbox-1"
+	pod.Annotations[controller.AnnotationRuntimeGeneration] = "1"
+	metadata := &fakeVolumeMetadataClient{}
+	svc := &SandboxService{
+		ctldClient:     ctldapi.NewClientWithTimeout(time.Second),
+		volumeMetadata: metadata,
+		config:         SandboxServiceConfig{CtldPort: ctldPort},
+	}
+	req := &ClaimRequest{
+		SandboxID: "sandbox-1", TeamID: "team-a", UserID: "user-a", Template: template.Name,
+		Mounts: []managerapi.ClaimMount{{SandboxVolumeID: "vol-1", MountPoint: "/tmp/sandbox0-volume"}},
+	}
+	record := &sandboxstore.SandboxRecord{ID: req.SandboxID, TeamID: req.TeamID, RuntimeGeneration: 1, Mounts: req.Mounts}
+
+	mounts, err := svc.prepareS0FSCarrierStorage(context.Background(), pod, template, req, record, "shared")
+	if err != nil {
+		t.Fatalf("prepareS0FSCarrierStorage() error = %v", err)
+	}
+	if len(mounts) != 1 || mounts[0].SandboxVolumeID != "vol-1" || mounts[0].MountPoint != "/tmp/sandbox0-volume" || mounts[0].State != "mounted" {
+		t.Fatalf("prepareS0FSCarrierStorage() mounts = %+v, want mounted vol-1", mounts)
+	}
+	if bound.PodUID != "pod-uid" || bound.SandboxID != "sandbox-1" || bound.SandboxVolumeID != "vol-1" || bound.MountPath != "/tmp/sandbox0-volume" {
+		t.Fatalf("bind request = %+v, want exact carrier volume identity", bound)
+	}
+	if len(metadata.prepared) != 1 || metadata.prepared[0] != "team-a:user-a:vol-1:pod-uid" {
+		t.Fatalf("prepared calls = %v, want exact carrier volume preparation", metadata.prepared)
+	}
+}
 
 func TestPersistUpdatedCarrierPodPreservesS0FSRuntimeVersion(t *testing.T) {
 	template := newSandboxResourceTestTemplate(t)

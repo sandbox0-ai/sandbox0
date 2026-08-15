@@ -266,32 +266,6 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 	@test -s $(LOCALBIN)/controller-gen && $(LOCALBIN)/controller-gen --version | grep -q $(CONTROLLER_TOOLS_VERSION) || \
 	GOBIN=$(LOCALBIN) $(GO) install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
 
-.PHONY: protoc install-protoc
-protoc:
-	@command -v $(PROTOC) >/dev/null 2>&1 || $(MAKE) install-protoc
-	@if ! PATH="$(LOCALBIN):$(PATH)" command -v protoc-gen-go >/dev/null 2>&1; then \
-		GOBIN=$(LOCALBIN) $(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@latest; \
-	fi
-
-install-protoc: $(LOCALBIN)
-	@printf "$(CYAN)Installing protoc...$(RESET)\n"
-	@set -e; \
-	if command -v apt-get >/dev/null 2>&1; then \
-		apt-get update -y >/dev/null; \
-		apt-get install -y protobuf-compiler; \
-	elif command -v yum >/dev/null 2>&1; then \
-		yum install -y protobuf-compiler; \
-	elif command -v dnf >/dev/null 2>&1; then \
-		dnf install -y protobuf-compiler; \
-	elif command -v apk >/dev/null 2>&1; then \
-		apk add --no-cache protobuf; \
-	elif command -v brew >/dev/null 2>&1; then \
-		brew install protobuf; \
-	else \
-		echo "Error: protoc not found and no supported package manager detected."; \
-		exit 1; \
-	fi
-
 manifests: controller-gen
 	@printf "$(CYAN)Generating manager deepcopy code...$(RESET)\n"
 	@GOWORK=off $(CONTROLLER_GEN) object paths="./manager/pkg/apis/..."

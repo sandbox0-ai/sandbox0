@@ -57,11 +57,6 @@ runs:
     - name: Install Helm
       uses: azure/setup-helm@v4
 
-    - name: Setup protoc
-      uses: arduino/setup-protoc@v3
-      with:
-        repo-token: ${{ github.token }}
-
     - name: Disk diagnostics (before build)
       shell: bash
       run: |

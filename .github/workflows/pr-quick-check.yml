@@ -31,12 +31,6 @@ jobs:
         with:
           cache-key-suffix: pr-amd64
 
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.1"
-          repo-token: ${{ github.token }}
-
       - name: Setup Helm
         uses: azure/setup-helm@v4
 
@@ -65,7 +59,7 @@ jobs:
       - name: Verify generated artifacts are up to date
         shell: bash
         run: |
-          make proto manifests apispec
+          make manifests apispec
           git diff --exit-code
 
       - name: Verify go.mod/go.sum are tidy

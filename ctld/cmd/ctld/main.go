@@ -54,7 +54,6 @@ var (
 	rootFSObjectCacheMaxAge        time.Duration
 	rootFSObjectCacheSweepInterval = time.Minute
 	podName                        = os.Getenv("POD_NAME")
-	podNamespace                   = os.Getenv("POD_NAMESPACE")
 	haSlot                         = os.Getenv("CTLD_HA_SLOT")
 	haProbe                        string
 	haProbeSocket                  = "/run/sandbox0/ctld-ha.sock"

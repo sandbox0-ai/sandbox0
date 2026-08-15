@@ -2427,41 +2427,6 @@ func execInSandboxPod(env *framework.ScenarioEnv, namespace, podName, script str
 	return strings.ReplaceAll(output, "\r\n", "\n"), err
 }
 
-func deleteTeamTemplateAndWaitForNamespaceCleanup(env *framework.ScenarioEnv, session *e2eutils.Session, templateID, namespace string) {
-	if err := session.DeleteTemplate(env.TestCtx.Context, GinkgoT(), templateID); err != nil {
-		GinkgoWriter.Printf("delete template %q through API failed during cleanup, falling back to kubectl cleanup: %v\n", templateID, err)
-		_, _ = framework.KubectlOutput(
-			env.TestCtx.Context,
-			env.Config.Kubeconfig,
-			"delete", "sandboxtemplate", templateID,
-			"--namespace", namespace,
-			"--ignore-not-found=true",
-		)
-		_, _ = framework.KubectlOutput(
-			env.TestCtx.Context,
-			env.Config.Kubeconfig,
-			"delete", "namespace", namespace,
-			"--ignore-not-found=true",
-			"--wait=false",
-		)
-	}
-	Eventually(func() error {
-		output, err := framework.KubectlOutput(
-			env.TestCtx.Context,
-			env.Config.Kubeconfig,
-			"get", "namespace", namespace,
-			"--ignore-not-found",
-		)
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(output) != "" {
-			return fmt.Errorf("namespace %s still exists", namespace)
-		}
-		return nil
-	}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
-}
-
 func publicExposureHostForRoute(sandboxID string, port int32, exposureDomain string) string {
 	sandboxID = strings.TrimSpace(sandboxID)
 	exposureDomain = strings.Trim(strings.TrimSpace(exposureDomain), ".")

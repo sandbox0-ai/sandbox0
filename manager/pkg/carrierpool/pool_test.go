@@ -100,7 +100,7 @@ func TestReconcileDoesNotDeleteConcurrentlyReservedCarrier(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	client.Fake.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		deleteAction, ok := action.(k8stesting.DeleteAction)
 		require.True(t, ok)
 		require.Equal(t, "carrier-pruned", deleteAction.GetName())

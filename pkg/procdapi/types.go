@@ -6,7 +6,6 @@ import (
 )
 
 const (
-	StartupPath          = "/startupz"
 	ContextsPath         = "/api/v1/contexts"
 	FilesPath            = "/api/v1/files"
 	FileStatPath         = "/api/v1/files/stat"
@@ -18,15 +17,6 @@ const (
 	SandboxResumePath    = "/api/v1/sandbox/resume"
 	LifecycleBarrierPath = "/api/v1/lifecycle/barrier"
 )
-
-// StartupResponse identifies the exact Pod process serving the procd HTTP
-// socket. It is intentionally independent from runtime assignment readiness.
-type StartupResponse struct {
-	Status    string `json:"status"`
-	Namespace string `json:"namespace"`
-	PodName   string `json:"pod_name"`
-	PodUID    string `json:"pod_uid"`
-}
 
 func ContextPath(contextID string) string {
 	return ContextsPath + "/" + contextID

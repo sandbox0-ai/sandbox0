@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"reflect"
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -143,7 +142,7 @@ func (s *TemplateService) CreateTemplate(ctx context.Context, template *v1alpha1
 		return nil, fmt.Errorf("create template: %w", err)
 	}
 
-	return s.publishProjectedTemplateStatus(ctx, namespace, result, template.Status)
+	return result, nil
 }
 
 // GetTemplate gets a template by ID (name) from the configured namespace.
@@ -185,7 +184,8 @@ func (s *TemplateService) UpdateTemplate(ctx context.Context, template *v1alpha1
 		}
 		updated := desired.DeepCopy()
 		updated.ResourceVersion = current.ResourceVersion
-		updated.Status = mergeProjectedTemplateStatus(current.Status, desired.Status)
+		// Preserve status
+		updated.Status = current.Status
 		result, err = s.crdClient.Sandbox0V1alpha1().SandboxTemplates(namespace).Update(ctx, updated, metav1.UpdateOptions{})
 		return err
 	})
@@ -193,46 +193,7 @@ func (s *TemplateService) UpdateTemplate(ctx context.Context, template *v1alpha1
 		return nil, fmt.Errorf("update template: %w", err)
 	}
 
-	return s.publishProjectedTemplateStatus(ctx, namespace, result, desired.Status)
-}
-
-func mergeProjectedTemplateStatus(current, projected v1alpha1.SandboxTemplateStatus) v1alpha1.SandboxTemplateStatus {
-	current.Creation = projected.Creation.DeepCopy()
-	current.ImageRevision = cloneTemplateImageRevisionStatus(projected.ImageRevision)
-	if projected.PoolMode != "" {
-		current.PoolMode = projected.PoolMode
-	}
-	return current
-}
-
-func cloneTemplateImageRevisionStatus(value *v1alpha1.TemplateImageRevisionStatus) *v1alpha1.TemplateImageRevisionStatus {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	if value.StartedAt != nil {
-		cloned.StartedAt = value.StartedAt.DeepCopy()
-	}
-	if value.CompletedAt != nil {
-		cloned.CompletedAt = value.CompletedAt.DeepCopy()
-	}
-	return &cloned
-}
-
-func (s *TemplateService) publishProjectedTemplateStatus(ctx context.Context, namespace string, current *v1alpha1.SandboxTemplate, projected v1alpha1.SandboxTemplateStatus) (*v1alpha1.SandboxTemplate, error) {
-	if current == nil {
-		return nil, nil
-	}
-	desired := current.DeepCopy()
-	desired.Status = mergeProjectedTemplateStatus(current.Status, projected)
-	if reflect.DeepEqual(current.Status, desired.Status) {
-		return current, nil
-	}
-	updated, err := s.crdClient.Sandbox0V1alpha1().SandboxTemplates(namespace).UpdateStatus(ctx, desired, metav1.UpdateOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("update projected template status: %w", err)
-	}
-	return updated, nil
+	return result, nil
 }
 
 // DeleteTemplate deletes a template from the configured namespace.

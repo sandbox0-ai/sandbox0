@@ -14,7 +14,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	gatewayauthn "github.com/sandbox0-ai/sandbox0/pkg/gateway/authn"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
@@ -68,9 +67,6 @@ func (s *Server) claimSandbox(c *gin.Context) {
 		if tpl != nil && !tpl.ReadyForClaim() {
 			writeManagerTemplateNotReady(c, tpl)
 			return
-		}
-		if tpl != nil && tpl.Status != nil && tpl.Status.ImageRevision != nil {
-			req.ExpectedTemplateImageRevisionID = tpl.Status.ImageRevision.RevisionID
 		}
 	}
 
@@ -233,11 +229,7 @@ func (s *Server) getOwnedSandbox(c *gin.Context, sandboxID string, claims *inter
 				zap.Error(err),
 			)
 		}
-		if apierrors.IsNotFound(err) || errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
-			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
-		} else {
-			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox state is unavailable")
-		}
+		spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, fmt.Sprintf("sandbox not found: %v", err))
 		return nil, false
 	}
 	if sandbox.TeamID != claims.TeamID {
@@ -511,8 +503,6 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 		spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 	case errors.Is(err, service.ErrSandboxCheckpointRequiresCtld):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox checkpoint pause requires ctld")
-	case ctldapi.IsUnavailableError(err):
-		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox rootfs dependency is unavailable")
 	case errors.Is(err, context.DeadlineExceeded):
 		spec.JSONError(c, http.StatusGatewayTimeout, spec.CodeUnavailable, fmt.Sprintf("timed out waiting for sandbox to %s", action))
 	case errors.Is(err, context.Canceled):

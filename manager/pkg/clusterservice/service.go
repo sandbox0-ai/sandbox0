@@ -5,9 +5,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/carrierpool"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/podmeta"
-	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxpod"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -18,18 +16,14 @@ import (
 
 // ClusterSummary represents cluster-level sandbox capacity and demand signals.
 type ClusterSummary struct {
-	ClusterID                  string `json:"cluster_id"`
-	NodeCount                  int    `json:"node_count"`
-	TotalNodeCount             int    `json:"total_node_count"`
-	SandboxNodeCount           int    `json:"sandbox_node_count"`
-	IdlePodCount               int32  `json:"idle_pod_count"`
-	ActivePodCount             int32  `json:"active_pod_count"`
-	PendingActivePodCount      int32  `json:"pending_active_pod_count"`
-	SharedCarrierReadyCount    int32  `json:"shared_carrier_ready_count"`
-	SharedCarrierCreatingCount int32  `json:"shared_carrier_creating_count"`
-	S0FSRuntimeReady           bool   `json:"s0fs_runtime_ready"`
-	LegacyClaimsRejected       bool   `json:"legacy_claims_rejected"`
-	TotalPodCount              int32  `json:"total_pod_count"`
+	ClusterID             string `json:"cluster_id"`
+	NodeCount             int    `json:"node_count"`
+	TotalNodeCount        int    `json:"total_node_count"`
+	SandboxNodeCount      int    `json:"sandbox_node_count"`
+	IdlePodCount          int32  `json:"idle_pod_count"`
+	ActivePodCount        int32  `json:"active_pod_count"`
+	PendingActivePodCount int32  `json:"pending_active_pod_count"`
+	TotalPodCount         int32  `json:"total_pod_count"`
 }
 
 // TemplateStat represents per-template sandbox demand signals.
@@ -56,29 +50,10 @@ type TemplateLister interface {
 
 // ClusterService handles cluster-related operations
 type ClusterService struct {
-	podLister            corelisters.PodLister
-	nodeLister           corelisters.NodeLister
-	templateLister       TemplateLister
-	logger               *zap.Logger
-	s0fsRuntimeReady     bool
-	legacyClaimsRejected bool
-}
-
-// SetS0FSRuntimeReady publishes whether this manager has a working carrier
-// allocator for S0FS create and resume operations.
-func (s *ClusterService) SetS0FSRuntimeReady(ready bool) {
-	if s != nil {
-		s.s0fsRuntimeReady = ready
-	}
-}
-
-// SetLegacyClaimsRejected publishes whether this manager refuses claims that
-// are not admitted to the S0FS runtime. Schedulers use this signal to keep
-// legacy templates away from green clusters during rollout.
-func (s *ClusterService) SetLegacyClaimsRejected(rejected bool) {
-	if s != nil {
-		s.legacyClaimsRejected = rejected
-	}
+	podLister      corelisters.PodLister
+	nodeLister     corelisters.NodeLister
+	templateLister TemplateLister
+	logger         *zap.Logger
 }
 
 // NewClusterService creates a new ClusterService
@@ -127,14 +102,6 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 		return nil, err
 	}
 
-	sharedCarriers, err := s.podLister.List(labels.SelectorFromSet(map[string]string{
-		carrier.LabelPool: "shared",
-	}))
-	if err != nil {
-		s.logger.Error("Failed to list shared carrier pods", zap.Error(err))
-		return nil, err
-	}
-
 	// Count only ready idle pods as available pooled capacity.
 	idleCount := int32(0)
 	activeCount := int32(0)
@@ -163,33 +130,15 @@ func (s *ClusterService) GetClusterSummary(ctx context.Context) (*ClusterSummary
 		}
 	}
 
-	sharedCarrierReadyCount := int32(0)
-	sharedCarrierCreatingCount := int32(0)
-	for _, pod := range sharedCarriers {
-		if pod.DeletionTimestamp != nil || pod.Annotations[carrier.AnnotationState] == carrier.StateReserved ||
-			pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
-			continue
-		}
-		if carrierpool.CarrierReady(pod, pod.Labels[carrier.LabelGeneration]) {
-			sharedCarrierReadyCount++
-			continue
-		}
-		sharedCarrierCreatingCount++
-	}
-
 	summary := &ClusterSummary{
-		ClusterID:                  cfg.DefaultClusterId,
-		NodeCount:                  nodeCount,
-		TotalNodeCount:             nodeCount,
-		SandboxNodeCount:           sandboxNodeCount,
-		IdlePodCount:               idleCount,
-		ActivePodCount:             activeCount,
-		PendingActivePodCount:      pendingActiveCount,
-		SharedCarrierReadyCount:    sharedCarrierReadyCount,
-		SharedCarrierCreatingCount: sharedCarrierCreatingCount,
-		S0FSRuntimeReady:           s.s0fsRuntimeReady,
-		LegacyClaimsRejected:       s.legacyClaimsRejected,
-		TotalPodCount:              idleCount + activeCount + sharedCarrierReadyCount + sharedCarrierCreatingCount,
+		ClusterID:             cfg.DefaultClusterId,
+		NodeCount:             nodeCount,
+		TotalNodeCount:        nodeCount,
+		SandboxNodeCount:      sandboxNodeCount,
+		IdlePodCount:          idleCount,
+		ActivePodCount:        activeCount,
+		PendingActivePodCount: pendingActiveCount,
+		TotalPodCount:         idleCount + activeCount,
 	}
 	return summary, nil
 }

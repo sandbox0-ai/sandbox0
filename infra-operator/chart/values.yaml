@@ -38,5 +38,3 @@ affinity: {}
 
 config:
   imagePullPolicy: ""
-  # Pin this independently so ordinary service releases do not restart live rootfs mounts.
-  rootfsSnapshotterImageTag: ""

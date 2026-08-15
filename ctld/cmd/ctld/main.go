@@ -22,7 +22,6 @@ import (
 	ctldportal "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/portal"
 	ctldpower "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/power"
 	ctldrootfs "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfs"
-	ctldrootfsstore "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/rootfsstore"
 	ctldruntimewatch "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/runtimewatch"
 	ctldserver "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/server"
 	"github.com/sandbox0-ai/sandbox0/ctld/internal/fuseportal"
@@ -34,7 +33,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfslease"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
@@ -42,6 +40,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/objectstore"
 	storagevolume "github.com/sandbox0-ai/sandbox0/storage-proxy/pkg/volume"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
@@ -49,27 +48,33 @@ import (
 )
 
 var (
-	httpAddr                    = ":8095"
-	runtimeWatchAddr            = fmt.Sprintf(":%d", runtimecontrol.DefaultCtldWatchPort)
-	kubeconfig                  = ""
-	criEndpoint                 = "/host-run/containerd/containerd.sock"
-	containerdEndpoint          = "/host-run/containerd/containerd.sock"
-	containerdDataRoot          = "/host-var-lib/containerd"
-	containerdHostDataRoot      = "/var/lib/containerd"
-	containerdNamespace         = "k8s.io"
-	nodeName                    = os.Getenv("NODE_NAME")
-	portalRoot                  = "/var/lib/sandbox0/ctld"
-	kubeletPodsRoot             = "/var/lib/kubelet/pods"
-	csiSocket                   = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
-	kubeletRegistrationSocket   string
-	kubeletRegistrationEndpoint string
-	podName                     = os.Getenv("POD_NAME")
-	podNamespace                = os.Getenv("POD_NAMESPACE")
-	haSlot                      = os.Getenv("CTLD_HA_SLOT")
-	haProbe                     string
-	haProbeSocket               = "/run/sandbox0/ctld-ha.sock"
-	haMetricsAddr               string
-	networkRuntimeConfigPath    = strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH"))
+	httpAddr                       = ":8095"
+	runtimeWatchAddr               = fmt.Sprintf(":%d", runtimecontrol.DefaultCtldWatchPort)
+	kubeconfig                     = ""
+	criEndpoint                    = "/host-run/containerd/containerd.sock"
+	containerdEndpoint             = "/host-run/containerd/containerd.sock"
+	containerdRoot                 = "/host-run/containerd"
+	containerdHostRoot             = "/run/containerd"
+	containerdDataRoot             = "/host-var-lib/containerd"
+	containerdHostDataRoot         = "/var/lib/containerd"
+	containerdNamespace            = "k8s.io"
+	nodeName                       = os.Getenv("NODE_NAME")
+	portalRoot                     = "/var/lib/sandbox0/ctld"
+	kubeletPodsRoot                = "/var/lib/kubelet/pods"
+	csiSocket                      = "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock"
+	kubeletRegistrationSocket      string
+	kubeletRegistrationEndpoint    string
+	rootFSObjectCacheMaxBytes      = "20Gi"
+	rootFSObjectCacheMinFreeBytes  = "0"
+	rootFSObjectCacheMaxAge        time.Duration
+	rootFSObjectCacheSweepInterval = time.Minute
+	podName                        = os.Getenv("POD_NAME")
+	podNamespace                   = os.Getenv("POD_NAMESPACE")
+	haSlot                         = os.Getenv("CTLD_HA_SLOT")
+	haProbe                        string
+	haProbeSocket                  = "/run/sandbox0/ctld-ha.sock"
+	haMetricsAddr                  string
+	networkRuntimeConfigPath       = strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH"))
 )
 
 const (
@@ -91,6 +96,8 @@ func main() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "optional kubeconfig path used by ctld")
 	flag.StringVar(&criEndpoint, "cri-endpoint", "/host-run/containerd/containerd.sock", "host CRI socket used to read pod sandbox stats")
 	flag.StringVar(&containerdEndpoint, "containerd-endpoint", "/host-run/containerd/containerd.sock", "host containerd socket used for rootfs diff/apply")
+	flag.StringVar(&containerdRoot, "containerd-root", "/host-run/containerd", "host containerd runtime root mounted into ctld")
+	flag.StringVar(&containerdHostRoot, "containerd-host-root", "/run/containerd", "host containerd runtime root path used in containerd mount requests")
 	flag.StringVar(&containerdDataRoot, "containerd-data-root", "/host-var-lib/containerd", "host containerd data root mounted into ctld")
 	flag.StringVar(&containerdHostDataRoot, "containerd-host-data-root", "/var/lib/containerd", "host containerd data root path returned by containerd snapshotters")
 	flag.StringVar(&containerdNamespace, "containerd-namespace", "k8s.io", "containerd namespace used by Kubernetes")
@@ -100,6 +107,10 @@ func main() {
 	flag.StringVar(&csiSocket, "csi-socket", "/var/lib/kubelet/plugins/volume.sandbox0.ai/csi.sock", "CSI endpoint socket for sandbox volume portals")
 	flag.StringVar(&kubeletRegistrationSocket, "kubelet-registration-socket", "", "kubelet plugin-registration socket; empty disables embedded registration")
 	flag.StringVar(&kubeletRegistrationEndpoint, "kubelet-registration-endpoint", "", "host-visible CSI endpoint returned to kubelet; defaults to csi-socket")
+	flag.StringVar(&rootFSObjectCacheMaxBytes, "rootfs-object-cache-max-bytes", "20Gi", "maximum node-local rootfs object cache size; set to 0 to disable")
+	flag.StringVar(&rootFSObjectCacheMinFreeBytes, "rootfs-object-cache-min-free-bytes", "0", "minimum free bytes to preserve on the rootfs object cache filesystem")
+	flag.DurationVar(&rootFSObjectCacheMaxAge, "rootfs-object-cache-max-age", 0, "maximum age for node-local rootfs cache objects; 0 disables age-based eviction")
+	flag.DurationVar(&rootFSObjectCacheSweepInterval, "rootfs-object-cache-sweep-interval", time.Minute, "interval for node-local rootfs object cache garbage collection")
 	flag.StringVar(&haSlot, "ha-slot", os.Getenv("CTLD_HA_SLOT"), "stable ctld HA deployment slot")
 	flag.StringVar(&haProbe, "ha-probe", "", "run one ctld HA probe (live or ready) and exit")
 	flag.StringVar(&haProbeSocket, "ha-probe-socket", "/run/sandbox0/ctld-ha.sock", "container-local ctld HA probe socket")
@@ -365,13 +376,14 @@ func runPrimary(parent context.Context, options primaryRunOptions) error {
 	}
 	podCache := buildNodePodCache(ctx, k8sClient, runtimeWatchHandler)
 	probeController := buildProbeController(k8sClient, obsProvider, podCache)
-	containerdRuntime := buildContainerdRuntime()
+	rootFSObserver := ctldrootfs.NewObserver(ctldMetricsRegistry, zapLogger)
+	containerdRuntime := buildContainerdRuntime(rootFSObserver)
 	defer containerdRuntime.Close()
 	runtimeMetricsHandle := startCtldRuntimeMetrics(ctx, ctldCfg, containerdRuntime, podCache, obsProvider, zapLogger)
 	httpServer := newHTTPServer(httpAddr, combinedController{
 		Controller:  probeController,
 		Portal:      portalManager,
-		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, containerdRuntime, portalManager, dbPool, ctldMetricsRegistry, k8sClient),
+		RootFS:      buildRootFSController(ctx, storageCfg, objectStoreRequestMeter, portalManager, containerdRuntime, rootFSObserver),
 		ReadyCheck:  serviceReady,
 		HealthCheck: serviceHealthy,
 	})
@@ -600,42 +612,115 @@ func buildRootFSController(
 	ctx context.Context,
 	storageCfg *apiconfig.StorageProxyConfig,
 	requestObserver objectstore.RequestObserver,
+	portalResolver ctldrootfs.PortalResolver,
 	runtime *ctldrootfs.ContainerdRuntime,
-	portalBackings *ctldportal.Manager,
-	dbPool *pgxpool.Pool,
-	metricsRegistry prometheus.Registerer,
-	k8sClient kubernetes.Interface,
+	observer *ctldrootfs.Observer,
 ) rootFSHandler {
 	store, err := buildRootFSObjectStore(storageCfg, requestObserver)
 	if err != nil {
 		log.Printf("ctld rootfs object store disabled: %v", err)
 	}
+	objectCache := buildRootFSObjectCache(ctx, observer)
 	return ctldrootfs.NewController(ctldrootfs.Config{
-		Context:          ctx,
-		Runtime:          runtime,
-		PortalBackings:   portalBackings,
-		Store:            store,
-		WatchFenceRoot:   filepath.Join(portalRoot, "rootfs-watch-fences", strings.TrimSpace(haSlot)),
-		CaptureLeases:    rootfslease.NewRepository(dbPool),
-		MetricsRegistry:  metricsRegistry,
-		KubernetesClient: k8sClient,
-		NodeName:         nodeName,
-		KubeletPodsRoot:  kubeletPodsRoot,
+		Runtime:        runtime,
+		Store:          store,
+		PortalResolver: portalResolver,
+		SnapshotDir:    filepath.Join(portalRoot, "rootfs", "prepared"),
+		ObjectCache:    objectCache,
+		Observer:       observer,
 	})
 }
 
-func buildContainerdRuntime() *ctldrootfs.ContainerdRuntime {
+func buildContainerdRuntime(observer *ctldrootfs.Observer) *ctldrootfs.ContainerdRuntime {
 	return ctldrootfs.NewContainerdRuntime(ctldrootfs.ContainerdRuntimeConfig{
 		CRIEndpoint:            criEndpoint,
 		ContainerdEndpoint:     containerdEndpoint,
+		ContainerdRoot:         containerdRoot,
+		ContainerdHostRoot:     containerdHostRoot,
 		ContainerdDataRoot:     containerdDataRoot,
 		ContainerdHostDataRoot: containerdHostDataRoot,
+		RootFSCacheDir:         filepath.Join(portalRoot, "rootfs"),
 		Namespace:              containerdNamespace,
+		Observer:               observer,
 	})
 }
 
+func buildRootFSObjectCache(ctx context.Context, observer *ctldrootfs.Observer) *ctldrootfs.ObjectCache {
+	maxBytes, err := parseByteQuantity(rootFSObjectCacheMaxBytes)
+	if err != nil {
+		log.Printf("ctld rootfs object cache disabled: %v", err)
+		return nil
+	}
+	minFreeBytes, err := parseByteQuantity(rootFSObjectCacheMinFreeBytes)
+	if err != nil {
+		log.Printf("ctld rootfs object cache disabled: %v", err)
+		return nil
+	}
+	cache := ctldrootfs.NewObjectCache(ctldrootfs.ObjectCacheConfig{
+		Dir:           filepath.Join(portalRoot, "rootfs", "objects"),
+		MaxBytes:      maxBytes,
+		MinFreeBytes:  minFreeBytes,
+		MaxAge:        rootFSObjectCacheMaxAge,
+		SweepInterval: rootFSObjectCacheSweepInterval,
+		Observer:      observer,
+	})
+	if cache != nil {
+		cache.Start(ctx)
+		log.Printf("ctld rootfs object cache enabled: max_bytes=%d min_free_bytes=%d max_age=%s sweep_interval=%s", maxBytes, minFreeBytes, rootFSObjectCacheMaxAge, rootFSObjectCacheSweepInterval)
+	}
+	return cache
+}
+
+func parseByteQuantity(raw string) (int64, error) {
+	value := strings.TrimSpace(raw)
+	switch strings.ToLower(value) {
+	case "", "0", "off", "disabled", "false":
+		return 0, nil
+	}
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %q as byte quantity: %w", raw, err)
+	}
+	bytes := quantity.Value()
+	if bytes < 0 {
+		return 0, fmt.Errorf("byte quantity must be non-negative: %q", raw)
+	}
+	return bytes, nil
+}
+
 func buildRootFSObjectStore(cfg *apiconfig.StorageProxyConfig, requestObserver objectstore.RequestObserver) (objectstore.Store, error) {
-	return ctldrootfsstore.NewObjectStore(cfg, requestObserver)
+	if cfg == nil {
+		return nil, fmt.Errorf("storage config is not configured")
+	}
+	store, err := objectstore.Create(objectstore.Config{
+		Type:            cfg.ObjectStorageType,
+		Bucket:          cfg.S3Bucket,
+		Region:          cfg.S3Region,
+		Endpoint:        cfg.S3Endpoint,
+		AccessKey:       cfg.S3AccessKey,
+		SecretKey:       cfg.S3SecretKey,
+		SessionToken:    cfg.S3SessionToken,
+		RequestObserver: requestObserver,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ObjectEncryptionEnabled {
+		keyPEM, err := objectstore.LoadEncryptionKey(cfg.ObjectEncryptionKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		keyEncryptor, err := objectstore.NewKeyEncryptor(keyPEM, cfg.ObjectEncryptionPassphrase)
+		if err != nil {
+			return nil, err
+		}
+		store = objectstore.Encrypting(store, objectstore.EncryptionConfig{
+			Enabled:      true,
+			Algorithm:    cfg.ObjectEncryptionAlgo,
+			KeyEncryptor: keyEncryptor,
+		})
+	}
+	return store, nil
 }
 
 func initPortalDatabase(ctx context.Context, cfg *apiconfig.StorageProxyConfig, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
@@ -838,57 +923,51 @@ func (c combinedController) Probe(r *http.Request, sandboxID string, kind sandbo
 	return c.Controller.Probe(r, sandboxID, kind)
 }
 
-func (c combinedController) BindRootFSSync(r *http.Request, req ctldapi.BindRootFSSyncRequest) (ctldapi.BindRootFSSyncResponse, int) {
+func (c combinedController) InspectRootFS(r *http.Request, req ctldapi.InspectRootFSRequest) (ctldapi.InspectRootFSResponse, int) {
 	if c.RootFS == nil {
-		return ctldapi.BindRootFSSyncResponse{Error: "ctld rootfs sync not implemented"}, http.StatusNotImplemented
+		return ctldapi.InspectRootFSResponse{Error: "ctld rootfs inspect not implemented"}, http.StatusNotImplemented
 	}
-	return c.RootFS.BindRootFSSync(r, req)
+	return c.RootFS.InspectRootFS(r, req)
 }
 
-func (c combinedController) GetRootFSSyncStatus(r *http.Request, req ctldapi.GetRootFSSyncStatusRequest) (ctldapi.GetRootFSSyncStatusResponse, int) {
+func (c combinedController) SaveRootFS(r *http.Request, req ctldapi.SaveRootFSRequest) (ctldapi.SaveRootFSResponse, int) {
 	if c.RootFS == nil {
-		return ctldapi.GetRootFSSyncStatusResponse{Error: "ctld rootfs sync not implemented"}, http.StatusNotImplemented
+		return ctldapi.SaveRootFSResponse{Error: "ctld rootfs save not implemented"}, http.StatusNotImplemented
 	}
-	return c.RootFS.GetRootFSSyncStatus(r, req)
+	return c.RootFS.SaveRootFS(r, req)
 }
 
-func (c combinedController) SealRootFSHead(r *http.Request, req ctldapi.SealRootFSHeadRequest) (ctldapi.SealRootFSHeadResponse, int) {
+func (c combinedController) PrepareRootFSSnapshot(r *http.Request, req ctldapi.PrepareRootFSSnapshotRequest) (ctldapi.PrepareRootFSSnapshotResponse, int) {
 	if c.RootFS == nil {
-		return ctldapi.SealRootFSHeadResponse{Error: "ctld rootfs sync not implemented"}, http.StatusNotImplemented
+		return ctldapi.PrepareRootFSSnapshotResponse{Error: "ctld rootfs snapshot prepare not implemented"}, http.StatusNotImplemented
 	}
-	return c.RootFS.SealRootFSHead(r, req)
+	return c.RootFS.PrepareRootFSSnapshot(r, req)
 }
 
-func (c combinedController) AcknowledgeRootFSHead(r *http.Request, req ctldapi.AcknowledgeRootFSHeadRequest) (ctldapi.AcknowledgeRootFSHeadResponse, int) {
+func (c combinedController) PublishRootFSSnapshot(r *http.Request, req ctldapi.PublishRootFSSnapshotRequest) (ctldapi.PublishRootFSSnapshotResponse, int) {
 	if c.RootFS == nil {
-		return ctldapi.AcknowledgeRootFSHeadResponse{Error: "ctld rootfs sync not implemented"}, http.StatusNotImplemented
+		return ctldapi.PublishRootFSSnapshotResponse{Error: "ctld rootfs snapshot publish not implemented"}, http.StatusNotImplemented
 	}
-	return c.RootFS.AcknowledgeRootFSHead(r, req)
+	return c.RootFS.PublishRootFSSnapshot(r, req)
 }
 
-func (c combinedController) MaterializeRootFSHead(r *http.Request, req ctldapi.MaterializeRootFSHeadRequest) (ctldapi.MaterializeRootFSHeadResponse, int) {
+func (c combinedController) AbortRootFSSnapshot(r *http.Request, req ctldapi.AbortRootFSSnapshotRequest) (ctldapi.AbortRootFSSnapshotResponse, int) {
 	if c.RootFS == nil {
-		return ctldapi.MaterializeRootFSHeadResponse{Error: "ctld rootfs sync not implemented"}, http.StatusNotImplemented
+		return ctldapi.AbortRootFSSnapshotResponse{Error: "ctld rootfs snapshot abort not implemented"}, http.StatusNotImplemented
 	}
-	return c.RootFS.MaterializeRootFSHead(r, req)
+	return c.RootFS.AbortRootFSSnapshot(r, req)
 }
 
-func (c combinedController) ImportRootFSImage(r *http.Request, req ctldapi.ImportRootFSImageRequest) (ctldapi.ImportRootFSImageResponse, int) {
+func (c combinedController) ApplyRootFS(r *http.Request, req ctldapi.ApplyRootFSRequest) (ctldapi.ApplyRootFSResponse, int) {
 	if c.RootFS == nil {
-		return ctldapi.ImportRootFSImageResponse{Error: "ctld S0FS ImageFS importer not implemented"}, http.StatusNotImplemented
+		return ctldapi.ApplyRootFSResponse{Error: "ctld rootfs apply not implemented"}, http.StatusNotImplemented
 	}
-	return c.RootFS.ImportRootFSImage(r, req)
-}
-
-func (c combinedController) ReleaseCarrierGate(r *http.Request, req ctldapi.ReleaseCarrierGateRequest) (ctldapi.ReleaseCarrierGateResponse, int) {
-	if c.RootFS == nil {
-		return ctldapi.ReleaseCarrierGateResponse{Error: "ctld carrier gate not implemented"}, http.StatusNotImplemented
-	}
-	return c.RootFS.ReleaseCarrierGate(r, req)
+	return c.RootFS.ApplyRootFS(r, req)
 }
 
 type rootFSHandler interface {
-	ctldserver.RootFSSyncController
+	ctldserver.RootFSController
+	ctldserver.RootFSSnapshotController
 }
 
 type volumePortalHandler interface {

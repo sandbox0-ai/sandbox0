@@ -5,7 +5,6 @@ RUNSC_RELEASE="${RUNSC_RELEASE:-release/latest}"
 RUNSC_BIN="${RUNSC_BIN:-/usr/local/bin/runsc}"
 RUNSC_SHIM_BIN="${RUNSC_SHIM_BIN:-/usr/local/bin/containerd-shim-runsc-v1}"
 RUNSC_ROOTFS_CONFIG="${RUNSC_ROOTFS_CONFIG:-/etc/containerd/runsc-rootfs.toml}"
-RUNSC_RELEASE_MARKER="${RUNSC_RELEASE_MARKER:-/var/lib/sandbox0/gvisor-e2e-release}"
 
 log() {
   printf '[%s] %s\n' "$(date -Is)" "$*"
@@ -59,10 +58,9 @@ retry() {
 }
 
 install_runsc_binaries() {
-  if [[ "${RUNSC_RELEASE}" != "release/latest" && -x "${RUNSC_BIN}" && -x "${RUNSC_SHIM_BIN}" && -f "${RUNSC_RELEASE_MARKER}" ]] &&
-    [[ "$(<"${RUNSC_RELEASE_MARKER}")" == "${RUNSC_RELEASE}" ]]; then
-	log "Using existing gVisor binaries at ${RUNSC_BIN} and ${RUNSC_SHIM_BIN}"
-	return
+  if [[ -x "${RUNSC_BIN}" && -x "${RUNSC_SHIM_BIN}" ]]; then
+    log "Using existing gVisor binaries at ${RUNSC_BIN} and ${RUNSC_SHIM_BIN}"
+    return
   fi
 
   local arch tmp
@@ -74,8 +72,6 @@ install_runsc_binaries() {
   retry 5 curl -fsSL -o "${tmp}/containerd-shim-runsc-v1" "https://storage.googleapis.com/gvisor/releases/${RUNSC_RELEASE}/${arch}/containerd-shim-runsc-v1"
   run_as_root install -m 0755 "${tmp}/runsc" "${RUNSC_BIN}"
   run_as_root install -m 0755 "${tmp}/containerd-shim-runsc-v1" "${RUNSC_SHIM_BIN}"
-  run_as_root mkdir -p "$(dirname "${RUNSC_RELEASE_MARKER}")"
-  printf '%s\n' "${RUNSC_RELEASE}" | run_as_root tee "${RUNSC_RELEASE_MARKER}" >/dev/null
   rm -rf "${tmp}"
 }
 

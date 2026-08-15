@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,16 +35,6 @@ type ManagerConfig struct {
 	ManagerImage string `yaml:"manager_image" json:"-"`
 	// ProcdBinImageRef is an OCI image mounted read-only at /procd-image inside sandbox pods.
 	ProcdBinImageRef string `yaml:"procd_bin_image_ref" json:"-"`
-
-	// SharedCarrierPool configures optional warm capacity for shared admission.
-	// The S0FS runtime and shadow importer remain independently controllable.
-	SharedCarrierPool SharedCarrierPoolConfig `yaml:"shared_carrier_pool" json:"sharedCarrierPool"`
-	// TemplateImageFS controls background OCI-to-S0FS imports independently of
-	// whether imported revisions are selected for new sandbox claims.
-	TemplateImageFS TemplateImageFSConfig `yaml:"template_image_fs" json:"templateImageFS"`
-	// S0FSRuntime controls runtime capability and admission for new S0FS rootfs
-	// sandboxes. Existing S0FS sandboxes remain resumable while admission is off.
-	S0FSRuntime S0FSRuntimeConfig `yaml:"s0fs_runtime" json:"s0fsRuntime"`
 
 	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
 	RegionID         string `yaml:"region_id" json:"-"`
@@ -270,76 +258,6 @@ type ManagerConfig struct {
 	// topology without requiring users to duplicate network runtime settings per template.
 	// +optional
 	SandboxPodPlacement SandboxPodPlacementConfig `yaml:"sandbox_pod_placement" json:"-"`
-}
-
-// SharedCarrierPoolConfig defines the one standard warm carrier shape for a cluster.
-type SharedCarrierPoolConfig struct {
-	Enabled           bool            `yaml:"enabled" json:"enabled"`
-	Namespace         string          `yaml:"namespace" json:"namespace"`
-	MinIdle           int32           `yaml:"min_idle" json:"minIdle"`
-	MaxIdle           int32           `yaml:"max_idle" json:"maxIdle"`
-	CarrierImageRef   string          `yaml:"carrier_image_ref" json:"carrierImageRef"`
-	ReconcileInterval metav1.Duration `yaml:"reconcile_interval" json:"reconcileInterval"`
-	ActivationTimeout metav1.Duration `yaml:"activation_timeout" json:"activationTimeout"`
-}
-
-// TemplateImageFSConfig controls background template rootfs imports.
-type TemplateImageFSConfig struct {
-	// Enabled is a pointer so an omitted field can preserve the original
-	// sharedCarrierPool.enabled behavior during the compatibility window.
-	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	// TeamIDs imports private templates owned by these teams. Empty team and
-	// template selectors preserve the existing import-all behavior.
-	TeamIDs []string `yaml:"team_ids" json:"teamIds"`
-	// TemplateIDs imports matching logical template IDs in either scope.
-	TemplateIDs []string `yaml:"template_ids" json:"templateIds"`
-}
-
-// S0FSRuntimeConfig controls S0FS carrier capability and new claim admission.
-type S0FSRuntimeConfig struct {
-	Enabled   bool                `yaml:"enabled" json:"enabled"`
-	Admission S0FSAdmissionConfig `yaml:"admission" json:"admission"`
-}
-
-// S0FSAdmissionConfig defines one explicit S0FS rollout cohort.
-type S0FSAdmissionConfig struct {
-	Mode               string   `yaml:"mode" json:"mode"`
-	TeamIDs            []string `yaml:"team_ids" json:"teamIds"`
-	TemplateIDs        []string `yaml:"template_ids" json:"templateIds"`
-	AdmitAll           bool     `yaml:"admit_all" json:"admitAll"`
-	RejectLegacyClaims bool     `yaml:"reject_legacy_claims" json:"rejectLegacyClaims"`
-}
-
-// TemplateImageFSEnabled reports whether background shadow imports should run.
-func (c *ManagerConfig) TemplateImageFSEnabled() bool {
-	if c == nil {
-		return false
-	}
-	if c.TemplateImageFS.Enabled != nil {
-		return *c.TemplateImageFS.Enabled
-	}
-	return c.SharedCarrierPool.Enabled
-}
-
-// S0FSRuntimeEnabled reports whether this manager can create and resume S0FS
-// carrier runtimes. A legacy shared pool configuration implies capability.
-func (c *ManagerConfig) S0FSRuntimeEnabled() bool {
-	return c != nil && (c.S0FSRuntime.Enabled || c.SharedCarrierPool.Enabled)
-}
-
-// S0FSAdmission returns the validated rollout policy for this manager.
-func (c *ManagerConfig) S0FSAdmission() (s0fsrollout.Admission, error) {
-	if c == nil {
-		return s0fsrollout.NewAdmission("off", nil, nil, false, false, false)
-	}
-	return s0fsrollout.NewAdmission(
-		c.S0FSRuntime.Admission.Mode,
-		c.S0FSRuntime.Admission.TeamIDs,
-		c.S0FSRuntime.Admission.TemplateIDs,
-		c.S0FSRuntime.Admission.AdmitAll,
-		c.S0FSRuntime.Admission.RejectLegacyClaims,
-		c.SharedCarrierPool.Enabled,
-	)
 }
 
 // TeamQuotaLimitConfig configures a region default for teams without an
@@ -668,7 +586,6 @@ func LoadManagerConfig() *ManagerConfig {
 		cfg.RedisTimeout = metav1.Duration{Duration: 100 * time.Millisecond}
 	}
 	applyRootFSMaintenanceDefaults(cfg)
-	cfg.SandboxRuntimeClassName = rootfshead.RuntimeClassName
 	applySandboxObservabilityProducerDefaults(cfg)
 	applyPodTeardownDefaults(cfg)
 	return cfg

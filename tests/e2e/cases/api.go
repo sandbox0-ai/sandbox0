@@ -2,7 +2,6 @@ package cases
 
 import (
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -66,21 +65,9 @@ func waitForDefaultTemplateReady(env *framework.ScenarioEnv, session *e2eutils.S
 func claimSandboxEventually(env *framework.ScenarioEnv, session *e2eutils.Session, templateID string) *apispec.ClaimResponse {
 	var resp *apispec.ClaimResponse
 	Eventually(func() error {
-		var status int
 		var err error
-		resp, status, err = session.ClaimSandboxDetailed(
-			env.TestCtx.Context,
-			GinkgoT(),
-			apispec.ClaimRequest{Template: &templateID},
-		)
-		if err != nil && !isRetrySafeClaimStatus(status) {
-			return StopTrying("sandbox claim failed without a retry-safe response").Wrap(err)
-		}
+		resp, err = session.ClaimSandbox(env.TestCtx.Context, GinkgoT(), templateID)
 		return err
 	}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
 	return resp
-}
-
-func isRetrySafeClaimStatus(status int) bool {
-	return status == http.StatusNotFound || status == http.StatusServiceUnavailable
 }

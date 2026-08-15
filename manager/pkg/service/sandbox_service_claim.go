@@ -14,7 +14,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/appservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/controller"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	"github.com/sandbox0-ai/sandbox0/pkg/carrier"
 	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -52,14 +51,7 @@ type ClaimRequest struct {
 	// HardExpiresAt preserves the absolute hard deadline when recreating a paused sandbox.
 	HardExpiresAt time.Time `json:"-"`
 	// WebhookStateVolumeID preserves the manager-owned webhook state volume across pod recreation.
-	WebhookStateVolumeID string `json:"-"`
-	// ExpectedTemplateImageRevisionID prevents a control-plane Ready revision from
-	// falling through to the legacy image path while its data-plane projection lags.
-	ExpectedTemplateImageRevisionID   string `json:"-"`
-	PreferredNodeName                 string `json:"-"`
-	RootFSSnapshotterInstance         string `json:"-"`
-	RootFSHeadID                      string `json:"-"`
-	RootFSHeadImage                   string `json:"-"`
+	WebhookStateVolumeID              string `json:"-"`
 	mayHaveExistingCredentialBindings bool
 }
 
@@ -395,17 +387,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 			return nil, err
 		}
 	}
-	if expectedRevisionID := strings.TrimSpace(req.ExpectedTemplateImageRevisionID); expectedRevisionID != "" {
-		revision := template.Status.ImageRevision
-		if revision == nil ||
-			revision.State != v1alpha1.TemplateImageRevisionStateReady ||
-			strings.TrimSpace(revision.ImageFSHeadID) == "" ||
-			strings.TrimSpace(revision.RevisionID) != expectedRevisionID {
-			err := fmt.Errorf("%w: template image revision %q has not reached this cluster", ErrDataPlaneNotReady, expectedRevisionID)
-			s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, err)
-			return nil, err
-		}
-	}
 	s.observeClaimPhase(req.Template, "unknown", "resolve_template", phaseStarted, nil)
 	phaseStarted = time.Now()
 	if _, err := s.effectiveSandboxResourceQuota(template, req.Config); err != nil {
@@ -413,26 +394,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	s.observeClaimPhase(req.Template, "unknown", "validate_resources", phaseStarted, nil)
-	logicalTemplateID := req.Template
-	templateScope := ""
-	if template.Labels != nil {
-		if value := strings.TrimSpace(template.Labels["sandbox0.ai/template-logical-id"]); value != "" {
-			logicalTemplateID = value
-		}
-		templateScope = strings.TrimSpace(template.Labels["sandbox0.ai/template-scope"])
-	}
-	admittedToS0FS := s.config.S0FSAdmission.Admits(templateScope, req.TeamID, logicalTemplateID)
-	if admittedToS0FS {
-		if req.SnapshotID != "" {
-			return nil, fmt.Errorf("%w: S0FS admission does not support legacy snapshot claims", ErrDataPlaneNotReady)
-		}
-		revision := template.Status.ImageRevision
-		if revision == nil || revision.State != v1alpha1.TemplateImageRevisionStateReady || strings.TrimSpace(revision.ImageFSHeadID) == "" {
-			return nil, fmt.Errorf("%w: admitted template image revision is not ready", ErrDataPlaneNotReady)
-		}
-	} else if s.config.S0FSAdmission.RejectLegacyClaims() {
-		return nil, fmt.Errorf("%w: legacy rootfs claims are disabled on this data plane", ErrDataPlaneNotReady)
-	}
 	if strings.TrimSpace(req.SandboxID) == "" {
 		req.SandboxID, err = s.generateStableSandboxID(template)
 		if err != nil {
@@ -450,20 +411,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 		return nil, err
 	}
 	s.observeClaimPhase(req.Template, "unknown", "validate_template_mounts", phaseStarted, nil)
-	if admittedToS0FS {
-		response, handled, carrierErr := s.claimS0FSCarrier(ctx, template, req)
-		if !handled {
-			carrierErr = fmt.Errorf("%w: S0FS carrier runtime is not configured", ErrDataPlaneNotReady)
-		}
-		if carrierErr != nil && metrics != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-		}
-		if carrierErr == nil && metrics != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "success").Inc()
-			metrics.SandboxClaimDuration.WithLabelValues(req.Template, "carrier").Observe(time.Since(start).Seconds())
-		}
-		return response, carrierErr
-	}
 
 	_ = resolvedName // reserved for audit/debugging (name used is template.ObjectMeta.Name)
 
@@ -671,17 +618,6 @@ func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*
 	}
 
 	phaseStarted = time.Now()
-	err = s.bindSandboxRootFSSync(ctx, pod, sandboxRecordForClaimedPod(s, pod, template, req))
-	s.observeClaimPhase(req.Template, claimType, "bind_rootfs_sync", phaseStarted, err)
-	if err != nil {
-		cleanupClaimFailure(pod, "rootfs sync bind failed")
-		if metrics != nil {
-			metrics.SandboxClaimsTotal.WithLabelValues(req.Template, "error").Inc()
-		}
-		return nil, fmt.Errorf("bind rootfs sync: %w", err)
-	}
-
-	phaseStarted = time.Now()
 	pod, err = s.activateRuntimeAssignment(ctx, pod, runtimeRevision)
 	s.observeClaimPhase(req.Template, claimType, "wait_for_runtime_ready", phaseStarted, err)
 	if err != nil {
@@ -767,9 +703,6 @@ func sandboxRecordForClaimedPod(s *SandboxService, pod *corev1.Pod, template *v1
 		OwnerKind:            ownerKindFromPod(pod),
 		CreatedAt:            s.clock.Now(),
 	}
-	if pod.Annotations != nil && strings.TrimSpace(pod.Annotations[carrier.AnnotationSlot]) != "" {
-		record.RootFSRuntimeVersion = sandboxstore.RootFSRuntimeS0FSV2
-	}
 	return record
 }
 
@@ -803,33 +736,15 @@ func (s *SandboxService) initializeClaimRootFSFromSnapshot(ctx context.Context, 
 	}); err != nil {
 		return pod, true, err
 	}
-	head, err := s.latestRootFSHead(ctx, record.ID)
+	state, err := s.latestRootFSState(ctx, record.ID)
 	if err != nil {
-		return pod, true, fmt.Errorf("load rootfs snapshot Head: %w", err)
+		return pod, true, fmt.Errorf("load rootfs snapshot state: %w", err)
 	}
-	if head == nil {
+	if state == nil {
 		return pod, true, fmt.Errorf("%w: snapshot %s", sandboxstore.ErrRootFSFilesystemNotFound, snapshotID)
 	}
-	var recreated bool
-	// The claimed Pod is not externally visible yet. Replace it with the Head
-	// image atomically instead of waiting for kubelet's periodic image sync.
-	pod, recreated, err = s.activateRuntimeWithRootFSHead(ctx, pod, template, req, head, true)
+	pod, err = s.applySandboxRootFSCheckpointWithFallback(ctx, pod, record, template, req, state, true)
 	if err != nil {
-		return pod, true, err
-	}
-	if recreated {
-		pod, err = s.waitForColdPodNetworkPolicy(ctx, pod, req.TeamID)
-		if err != nil {
-			return pod, true, fmt.Errorf("prepare rootfs snapshot runtime network policy: %w", err)
-		}
-	}
-	// Full claim readiness depends on the runtime assignment that the caller
-	// republishes after a replacement Pod is returned.
-	pod, err = s.waitForPodRootFSHeadReady(ctx, pod.Namespace, pod.Name, head)
-	if err != nil {
-		return pod, true, fmt.Errorf("wait for rootfs snapshot Head runtime: %w", err)
-	}
-	if err := s.saveRestoredRuntimePod(ctx, pod, record); err != nil {
 		return pod, true, err
 	}
 	return pod, true, nil
@@ -1476,9 +1391,6 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	// Build pod spec before side-effecting resources so claims fail fast when the
 	// sandbox data plane has no ready nodes to receive the pod.
 	spec := v1alpha1.BuildPodSpec(template)
-	if preferredNodeName := strings.TrimSpace(req.PreferredNodeName); preferredNodeName != "" {
-		spec.NodeName = preferredNodeName
-	}
 	resourceQuota, err := s.effectiveSandboxResourceQuota(template, req.Config)
 	if err != nil {
 		return nil, err
@@ -1527,15 +1439,6 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 		controller.AnnotationClaimedAt:         s.clock.Now().Format(time.RFC3339),
 		controller.AnnotationClaimType:         "cold",
 	}, s.config.AutoscalerSafeToEvictAnnotationKeys)
-	if instance := strings.TrimSpace(req.RootFSSnapshotterInstance); instance != "" {
-		annotations[controller.AnnotationRootFSSnapshotterInstance] = instance
-	}
-	if headID := strings.TrimSpace(req.RootFSHeadID); headID != "" {
-		annotations[controller.AnnotationRootFSHeadID] = headID
-	}
-	if headImage := strings.TrimSpace(req.RootFSHeadImage); headImage != "" {
-		annotations[controller.AnnotationRootFSHeadImage] = headImage
-	}
 	if stateVolume != nil {
 		annotations[controller.AnnotationWebhookStateVolumeID] = stateVolume.VolumeID
 	}

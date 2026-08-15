@@ -51,10 +51,3 @@ type ReadIntoSession interface {
 type OpenFlagsSession interface {
 	OpenFlags() uint32
 }
-
-// FsyncDirSession is implemented by sessions that can durably synchronize a
-// directory. Sessions that do not implement it retain the existing ENOSYS
-// behavior for FUSE directory fsync requests.
-type FsyncDirSession interface {
-	FsyncDir(context.Context, uint64) error
-}

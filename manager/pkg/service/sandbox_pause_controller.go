@@ -2,13 +2,11 @@ package service
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"go.uber.org/zap"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
@@ -155,10 +153,7 @@ func (c *SandboxPauseController) enqueuePausingSandboxes(ctx context.Context) {
 }
 
 func sandboxLifecycleSourceReconstructsRuntime(source string) bool {
-	return source == sandboxstore.SandboxLifecycleSourceCrash ||
-		source == sandboxstore.SandboxLifecycleSourceHealth ||
-		source == sandboxstore.SandboxLifecycleSourceLost ||
-		source == sandboxstore.SandboxLifecycleSourceRootFS
+	return source == sandboxstore.SandboxLifecycleSourceCrash || source == sandboxstore.SandboxLifecycleSourceHealth || source == sandboxstore.SandboxLifecycleSourceLost
 }
 
 func (c *SandboxPauseController) runWorker(ctx context.Context) {
@@ -191,13 +186,6 @@ func (c *SandboxPauseController) processNextWorkItem(ctx context.Context) bool {
 			return true
 		}
 		if err := c.resume(ctx, item.SandboxID); err != nil {
-			if c.sandboxRecoveryTargetGone(ctx, item.SandboxID, err) {
-				c.logger.Info("Discarding sandbox runtime reconstruction for terminal sandbox",
-					zap.String("sandboxID", item.SandboxID),
-				)
-				c.queue.Forget(item)
-				return true
-			}
 			c.logger.Warn("Sandbox runtime reconstruction failed, requeueing",
 				zap.String("sandboxID", item.SandboxID),
 				zap.Error(err),
@@ -208,26 +196,4 @@ func (c *SandboxPauseController) processNextWorkItem(ctx context.Context) bool {
 	}
 	c.queue.Forget(item)
 	return true
-}
-
-// sandboxRecoveryTargetGone verifies that a not-found resume error refers to
-// the durable sandbox, rather than a missing dependency that should be retried.
-func (c *SandboxPauseController) sandboxRecoveryTargetGone(ctx context.Context, sandboxID string, resumeErr error) bool {
-	if errors.Is(resumeErr, sandboxstore.ErrSandboxRecordNotFound) {
-		return true
-	}
-	if !k8serrors.IsNotFound(resumeErr) || c == nil || c.service == nil || c.service.sandboxStore == nil {
-		return false
-	}
-	record, err := c.service.sandboxStore.GetSandbox(ctx, sandboxID)
-	if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) {
-		return true
-	}
-	if err != nil {
-		return false
-	}
-	return record == nil ||
-		record.DesiredState == sandboxstore.SandboxDesiredStateDeleted ||
-		!record.DeletedAt.IsZero() ||
-		sandboxHardExpired(record.HardExpiresAt, c.service.now())
 }

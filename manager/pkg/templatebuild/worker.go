@@ -64,6 +64,7 @@ type TemplateBuildWorker struct {
 	queue     Queue
 	capturer  Capturer
 	publisher Publisher
+	objects   templateimage.ObjectReader
 	config    TemplateBuildWorkerConfig
 	logger    *zap.Logger
 }
@@ -72,11 +73,12 @@ func NewTemplateBuildWorker(
 	queue Queue,
 	capturer Capturer,
 	publisher Publisher,
+	objects templateimage.ObjectReader,
 	config TemplateBuildWorkerConfig,
 	logger *zap.Logger,
 ) (*TemplateBuildWorker, error) {
-	if queue == nil || capturer == nil || publisher == nil {
-		return nil, fmt.Errorf("template build queue, capturer, and publisher are required")
+	if queue == nil || capturer == nil || publisher == nil || objects == nil {
+		return nil, fmt.Errorf("template build queue, capturer, publisher, and object reader are required")
 	}
 	if strings.TrimSpace(config.ClusterID) == "" {
 		return nil, fmt.Errorf("template build cluster_id is required")
@@ -112,6 +114,7 @@ func NewTemplateBuildWorker(
 		queue:     queue,
 		capturer:  capturer,
 		publisher: publisher,
+		objects:   objects,
 		config:    config,
 		logger:    logger,
 	}, nil
@@ -284,6 +287,10 @@ func (w *TemplateBuildWorker) captureMetadata(ctx context.Context, build *templa
 	if err != nil {
 		return nil, err
 	}
+	capture.Layers, err = templateimage.ResolveLayerDiffIDs(ctx, w.objects, capture.Layers)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateTemplateBuildCapture(build, capture); err != nil {
 		return nil, fmt.Errorf("%w: %v", errTemplateBuildCaptureInvalid, err)
 	}
@@ -310,27 +317,14 @@ func validateTemplateBuildCapture(build *template.TemplateBuild, capture *Templa
 	if strings.TrimSpace(capture.SnapshotID) == "" || capture.SnapshotID != build.SnapshotID {
 		return fmt.Errorf("template build capture snapshot does not match build")
 	}
-	if strings.TrimSpace(capture.HeadID) == "" || len(capture.Layers) != 1 {
-		return fmt.Errorf("template build capture must contain one rootfs Head export")
+	if strings.TrimSpace(capture.HeadLayerID) == "" || len(capture.Layers) == 0 {
+		return fmt.Errorf("template build capture has no rootfs layer chain")
 	}
 	if capture.Platform.OS == "" || capture.Platform.Architecture == "" {
 		return fmt.Errorf("template build capture has no source platform")
 	}
 	if capture.BaseImageRef == "" || capture.BaseImageDigest == "" {
 		return fmt.Errorf("template build capture has no base image identity")
-	}
-	if err := (templateimage.BuildRequest{
-		BuildID:         build.BuildID,
-		TeamID:          build.TeamID,
-		TemplateID:      build.TemplateID,
-		SourceSandboxID: build.SourceSandboxID,
-		BaseImageRef:    capture.BaseImageRef,
-		BaseImageDigest: capture.BaseImageDigest,
-		Platform:        capture.Platform,
-		Layers:          capture.Layers,
-		CreatedAt:       capture.CapturedAt,
-	}).Validate(); err != nil {
-		return fmt.Errorf("invalid rootfs Head export: %w", err)
 	}
 	return nil
 }

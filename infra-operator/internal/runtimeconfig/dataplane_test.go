@@ -17,45 +17,6 @@ func TestToManagerPreservesEgressAuthDefaultResolveTTL(t *testing.T) {
 	}
 }
 
-func TestToManagerPreservesS0FSRolloutControls(t *testing.T) {
-	enabled := true
-	cfg := ToManager(&infrav1alpha1.ManagerConfig{
-		TemplateImageFS: infrav1alpha1.TemplateImageFSConfig{
-			Enabled: &enabled, TeamIDs: []string{"shadow-team"}, TemplateIDs: []string{"shadow-template"},
-		},
-		S0FSRuntime: infrav1alpha1.S0FSRuntimeConfig{
-			Enabled: true,
-			Admission: infrav1alpha1.S0FSAdmissionConfig{
-				Mode: "cold", TeamIDs: []string{"team-a"}, TemplateIDs: []string{"template-a"}, RejectLegacyClaims: true,
-			},
-		},
-	})
-	if cfg.TemplateImageFS.Enabled == nil || !*cfg.TemplateImageFS.Enabled || !cfg.S0FSRuntime.Enabled {
-		t.Fatalf("runtime controls = %#v / %#v", cfg.TemplateImageFS, cfg.S0FSRuntime)
-	}
-	if len(cfg.TemplateImageFS.TeamIDs) != 1 || cfg.TemplateImageFS.TeamIDs[0] != "shadow-team" ||
-		len(cfg.TemplateImageFS.TemplateIDs) != 1 || cfg.TemplateImageFS.TemplateIDs[0] != "shadow-template" {
-		t.Fatalf("template ImageFS cohort = %#v, want preserved selectors", cfg.TemplateImageFS)
-	}
-	if cfg.S0FSRuntime.Admission.Mode != "cold" ||
-		len(cfg.S0FSRuntime.Admission.TeamIDs) != 1 ||
-		len(cfg.S0FSRuntime.Admission.TemplateIDs) != 1 ||
-		!cfg.S0FSRuntime.Admission.RejectLegacyClaims {
-		t.Fatalf("admission = %#v, want preserved cold cohort", cfg.S0FSRuntime.Admission)
-	}
-}
-
-func TestToManagerPreservesS0FSAdmitAll(t *testing.T) {
-	cfg := ToManager(&infrav1alpha1.ManagerConfig{
-		S0FSRuntime: infrav1alpha1.S0FSRuntimeConfig{
-			Admission: infrav1alpha1.S0FSAdmissionConfig{Mode: "shared", AdmitAll: true},
-		},
-	})
-	if !cfg.S0FSRuntime.Admission.AdmitAll {
-		t.Fatal("admission admit-all flag was not preserved")
-	}
-}
-
 func TestToManagerLeavesProcdWebhookOutboxDirUnsetWhenOmitted(t *testing.T) {
 	cfg := ToManager(&infrav1alpha1.ManagerConfig{})
 	if cfg.ProcdConfig.WebhookOutboxDir != "" {

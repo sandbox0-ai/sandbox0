@@ -102,18 +102,14 @@ func (a *clusterGatewayAdapter) GetClusterSummary(ctx context.Context, baseURL s
 		return nil, err
 	}
 	return &templreconciler.ClusterSummary{
-		ClusterID:                  summary.ClusterID,
-		NodeCount:                  summary.NodeCount,
-		TotalNodeCount:             summary.TotalNodeCount,
-		SandboxNodeCount:           summary.SandboxNodeCount,
-		IdlePodCount:               summary.IdlePodCount,
-		ActivePodCount:             summary.ActivePodCount,
-		PendingActivePodCount:      summary.PendingActivePodCount,
-		SharedCarrierReadyCount:    summary.SharedCarrierReadyCount,
-		SharedCarrierCreatingCount: summary.SharedCarrierCreatingCount,
-		S0FSRuntimeReady:           summary.S0FSRuntimeReady,
-		LegacyClaimsRejected:       summary.LegacyClaimsRejected,
-		TotalPodCount:              summary.TotalPodCount,
+		ClusterID:             summary.ClusterID,
+		NodeCount:             summary.NodeCount,
+		TotalNodeCount:        summary.TotalNodeCount,
+		SandboxNodeCount:      summary.SandboxNodeCount,
+		IdlePodCount:          summary.IdlePodCount,
+		ActivePodCount:        summary.ActivePodCount,
+		PendingActivePodCount: summary.PendingActivePodCount,
+		TotalPodCount:         summary.TotalPodCount,
 	}, nil
 }
 

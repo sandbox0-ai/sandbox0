@@ -54,12 +54,6 @@ spec:
           spec:
             description: Sandbox0InfraSpec defines the desired state of Sandbox0Infra
             properties:
-              builtinTemplateSyncEnabled:
-                description: |-
-                  BuiltinTemplateSyncEnabled controls whether this infra instance writes
-                  builtin templates to the region-scoped template store. Disable it on
-                  additional data-plane clusters that share a control-plane database.
-                type: boolean
               builtinTemplates:
                 description: BuiltinTemplates defines system builtin templates to
                   seed the template store
@@ -1097,13 +1091,9 @@ spec:
                           description: Pool strategy
                           properties:
                             maxIdle:
-                              description: 'Deprecated: shared carrier pool capacity
-                                is platform-owned.'
                               format: int32
                               type: integer
                             minIdle:
-                              description: 'Deprecated: shared carrier pool capacity
-                                is platform-owned.'
                               format: int32
                               type: integer
                           required:
@@ -3382,18 +3372,18 @@ spec:
                       rootfsObjectCacheMaxBytes:
                         default: 20Gi
                         description: |-
-                          RootFSObjectCacheMaxBytes caps the rootfs snapshotter node-local object cache.
+                          RootFSObjectCacheMaxBytes caps the ctld node-local rootfs object cache.
                           Set 0 to disable the cache.
                         type: string
                       rootfsObjectCacheMinFreeBytes:
                         description: |-
-                          RootFSObjectCacheMinFreeBytes asks snapshotter cache GC to keep at least
-                          this much free space on the cache filesystem.
+                          RootFSObjectCacheMinFreeBytes asks ctld GC to keep at least this much free
+                          space on the cache filesystem.
                         type: string
                       rootfsObjectCacheSweepInterval:
                         description: |-
-                          RootFSObjectCacheSweepInterval controls how often the snapshotter sweeps
-                          the node-local rootfs object cache.
+                          RootFSObjectCacheSweepInterval controls how often ctld sweeps the
+                          node-local rootfs object cache.
                         type: string
                     type: object
                   globalGateway:
@@ -3941,136 +3931,19 @@ spec:
                               RuntimeReadyTimeout bounds sandbox pod startup, including image download,
                               unpack, runtime initialization, and readiness observation.
                             type: string
-                          s0fsRuntime:
-                            default: {}
-                            description: S0FSRuntime controls S0FS carrier capability
-                              and new claim admission.
-                            properties:
-                              admission:
-                                default: {}
-                                description: S0FSAdmissionConfig defines one explicit
-                                  S0FS rollout cohort.
-                                properties:
-                                  admitAll:
-                                    description: |-
-                                      AdmitAll explicitly admits every public and private template. It cannot
-                                      be combined with teamIds or templateIds.
-                                    type: boolean
-                                  mode:
-                                    description: |-
-                                      Mode is empty only for compatibility with the original shared carrier
-                                      switch. New configurations use off, cold, or shared.
-                                    enum:
-                                    - "off"
-                                    - cold
-                                    - shared
-                                    type: string
-                                  rejectLegacyClaims:
-                                    description: |-
-                                      RejectLegacyClaims makes unmatched new claims fail closed on a green
-                                      data-plane cluster instead of falling back to legacy rootfs creation.
-                                    type: boolean
-                                  teamIds:
-                                    description: TeamIDs admits private templates
-                                      owned by these teams.
-                                    items:
-                                      type: string
-                                    maxItems: 100
-                                    type: array
-                                    x-kubernetes-list-type: set
-                                  templateIds:
-                                    description: TemplateIDs admits matching logical
-                                      template IDs in any scope.
-                                    items:
-                                      type: string
-                                    maxItems: 100
-                                    type: array
-                                    x-kubernetes-list-type: set
-                                type: object
-                              enabled:
-                                description: |-
-                                  Enabled keeps the cold carrier allocator available for new and resumed
-                                  S0FS sandboxes independently of shared warm capacity.
-                                type: boolean
-                            type: object
                           sandboxMaxMemory:
                             default: 16Gi
                             description: SandboxMaxMemory is the maximum memory limit
                               accepted for a single sandbox.
                             type: string
                           sandboxRuntimeClassName:
-                            default: gvisor-rootfs
-                            description: SandboxRuntimeClassName is fixed to the operator-managed
-                              gvisor-rootfs RuntimeClass.
-                            enum:
-                            - gvisor-rootfs
                             type: string
-                          sharedCarrierPool:
-                            default: {}
-                            description: SharedCarrierPool configures optional warm
-                              capacity for shared S0FS admission.
-                            properties:
-                              activationTimeout:
-                                default: 15s
-                                type: string
-                              carrierImageRef:
-                                description: CarrierImageRef overrides the small canonical
-                                  base used by S0FS carrier markers.
-                                type: string
-                              enabled:
-                                type: boolean
-                              maxIdle:
-                                default: 2
-                                format: int32
-                                minimum: 0
-                                type: integer
-                              minIdle:
-                                default: 1
-                                format: int32
-                                minimum: 0
-                                type: integer
-                              namespace:
-                                description: Namespace defaults to the Sandbox0 data-plane
-                                  namespace.
-                                type: string
-                              reconcileInterval:
-                                default: 2s
-                                type: string
-                            type: object
                           shutdownTimeout:
                             default: 30s
                             type: string
                           teamTemplateMemoryPerCpu:
                             default: 4Gi
                             type: string
-                          templateImageFS:
-                            default: {}
-                            description: TemplateImageFS controls background OCI-to-S0FS
-                              shadow imports.
-                            properties:
-                              enabled:
-                                description: |-
-                                  Enabled is intentionally optional. When omitted, sharedCarrierPool.enabled
-                                  preserves the pre-rollout behavior during the compatibility window.
-                                type: boolean
-                              teamIds:
-                                description: |-
-                                  TeamIDs imports private templates owned by these teams. When both
-                                  selectors are empty, enabling ImageFS preserves import-all behavior.
-                                items:
-                                  type: string
-                                maxItems: 100
-                                type: array
-                                x-kubernetes-list-type: set
-                              templateIds:
-                                description: TemplateIDs imports matching logical
-                                  template IDs in either scope.
-                                items:
-                                  type: string
-                                maxItems: 100
-                                type: array
-                                x-kubernetes-list-type: set
-                            type: object
                           webhookCertPath:
                             default: /tmp/k8s-webhook-server/serving-certs/tls.crt
                             type: string

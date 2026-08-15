@@ -66,7 +66,6 @@ type Server struct {
 	fs          fuse.RawFileSystem
 	protocol    *fuse.ProtocolServer
 	opts        fuse.MountOptions
-	requestPool *sync.Pool
 	mountPoint  string
 	initRequest []byte
 	fd          int
@@ -175,7 +174,6 @@ func newServer(fs fuse.RawFileSystem, fd int, mountPoint string, opts *fuse.Moun
 		fs:          fs,
 		protocol:    fuse.NewProtocolServer(fs, opts),
 		opts:        *opts,
-		requestPool: sharedRequestBufferPool(opts.MaxWrite),
 		mountPoint:  mountPoint,
 		fd:          fd,
 		mux:         mux,
@@ -332,25 +330,19 @@ func (s *Server) handleReady(events uint32) (bool, error) {
 	if channelFD < 0 {
 		return true, nil
 	}
-	requestBufferPtr := s.requestPool.Get().(*[]byte)
-	requestBuffer := *requestBufferPtr
-	request, err := readRequestInto(channelFD, requestBuffer)
+	request, err := readRequest(channelFD, s.opts.MaxWrite)
 	if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-		s.requestPool.Put(requestBufferPtr)
 		return false, nil
 	}
 	if errors.Is(err, unix.ENODEV) || errors.Is(err, unix.EBADF) {
-		s.requestPool.Put(requestBufferPtr)
 		return true, nil
 	}
 	if err != nil {
-		s.requestPool.Put(requestBufferPtr)
 		return true, fmt.Errorf("read FUSE request: %w", err)
 	}
 	s.requests.Add(1)
 	go func() {
 		defer s.requests.Done()
-		defer s.requestPool.Put(requestBufferPtr)
 		if err := s.handleAndReply(request); err != nil {
 			if s.opts.Logger != nil {
 				s.opts.Logger.Printf("handle FUSE request: %v", err)
@@ -507,44 +499,11 @@ func joinMountOptions(options []string) string {
 	return result
 }
 
-// requestBufferPools is process-wide so idle portal mounts do not each retain
-// a maximum-sized request buffer. Bucketing by negotiated size avoids handing
-// a connection a buffer smaller than the kernel may write.
-var requestBufferPools sync.Map
-
-func sharedRequestBufferPool(maxWrite int) *sync.Pool {
-	size := requestBufferSize(maxWrite)
-	if existing, ok := requestBufferPools.Load(size); ok {
-		return existing.(*sync.Pool)
-	}
-	pool := &sync.Pool{New: func() any {
-		buffer := make([]byte, size)
-		return &buffer
-	}}
-	actual, _ := requestBufferPools.LoadOrStore(size, pool)
-	return actual.(*sync.Pool)
-}
-
-func requestBufferSize(maxWrite int) int {
+func readRequest(fd, maxWrite int) ([]byte, error) {
 	if maxWrite < 128*1024 {
 		maxWrite = 128 * 1024
 	}
-	return maxWrite + 64*1024
-}
-
-func readRequest(fd, maxWrite int) ([]byte, error) {
-	buffer := make([]byte, requestBufferSize(maxWrite))
-	request, err := readRequestInto(fd, buffer)
-	if err != nil {
-		return nil, err
-	}
-	return append([]byte(nil), request...), nil
-}
-
-func readRequestInto(fd int, buffer []byte) ([]byte, error) {
-	if len(buffer) < fuseHeaderSize {
-		return nil, fmt.Errorf("FUSE request buffer is too small: %d", len(buffer))
-	}
+	buffer := make([]byte, maxWrite+64*1024)
 	for {
 		n, err := unix.Read(fd, buffer)
 		if errors.Is(err, unix.EINTR) {
@@ -560,7 +519,7 @@ func readRequestInto(fd int, buffer []byte) ([]byte, error) {
 		if length < fuseHeaderSize || length > n {
 			return nil, fmt.Errorf("invalid FUSE request length %d from read of %d", length, n)
 		}
-		return buffer[:length], nil
+		return append([]byte(nil), buffer[:length]...), nil
 	}
 }
 

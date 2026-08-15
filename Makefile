@@ -14,7 +14,7 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 PROTOC ?= protoc
 GO ?= env GOWORK=off go
 
-BINARIES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld rootfs-snapshotter procd infra-operator
+BINARIES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld procd infra-operator
 TEST_SUITES := $(BINARIES) storage-proxy netd
 E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
 E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
@@ -40,7 +40,6 @@ S0FS_POSIX_CI_FSSTRESS_PROCESSES ?= 4
 VERSION ?= latest
 TAG ?= $(VERSION)
 PROCD_BIN_TAG ?= $(TAG)-procd-bin
-CARRIER_BASE_TAG ?= $(TAG)-carrier-base
 
 # Colors for output
 YELLOW := \033[1;33m
@@ -68,8 +67,6 @@ build: manifests proto apispec
 			dir="infra-operator"; bin="infra-operator"; src="./infra-operator/cmd/infra-operator"; \
 		elif [ "$$s" = "ctld" ]; then \
 			dir="ctld"; bin="ctld"; src="./ctld/cmd/ctld"; \
-		elif [ "$$s" = "rootfs-snapshotter" ]; then \
-			dir="ctld"; bin="rootfs-snapshotter"; src="./ctld/cmd/rootfs-snapshotter"; \
 		else \
 			dir="$$s"; bin="$$s"; src="./$$s/cmd/$$s"; \
 		fi; \
@@ -100,14 +97,12 @@ docker-build:
 	@printf "$(GREEN)Docker building unified infra image...$(RESET)\n"
 	docker build -t sandbox0ai/infra:$(TAG) -f Dockerfile .
 	docker build --target procd-bin -t sandbox0ai/infra:$(PROCD_BIN_TAG) -f Dockerfile .
-	docker build --target carrier-base -t sandbox0ai/infra:$(CARRIER_BASE_TAG) -f Dockerfile .
 	#docker buildx build --platform=linux/amd64 -t sandbox0ai/infra:$(TAG) -f Dockerfile .
 
 docker-push:
 	@printf "$(GREEN)Docker pushing unified infra image...$(RESET)\n"
 	docker push sandbox0ai/infra:$(TAG)
 	docker push sandbox0ai/infra:$(PROCD_BIN_TAG)
-	docker push sandbox0ai/infra:$(CARRIER_BASE_TAG)
 
 build-local-all: manifests proto apispec
 	@for service in $(BINARIES); do \
@@ -118,7 +113,6 @@ docker-build-local: build-local-all
 	@printf "$(GREEN)Docker building with local binaries...$(RESET)\n"
 	docker build -t sandbox0ai/infra:$(TAG) -f Dockerfile.local .
 	docker build --target procd-bin -t sandbox0ai/infra:$(PROCD_BIN_TAG) -f Dockerfile.local .
-	docker build --target carrier-base -t sandbox0ai/infra:$(CARRIER_BASE_TAG) -f Dockerfile.local .
 
 test:
 	@service="$(filter-out build test test-all lint tidy vendor clean helm-update,$(MAKECMDGOALS))"; \
@@ -148,8 +142,6 @@ test:
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./storage-proxy/...; \
 		elif [ "$$service" = "ctld" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./ctld/...; \
-		elif [ "$$service" = "rootfs-snapshotter" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./ctld/cmd/rootfs-snapshotter/... ./ctld/internal/ctld/rootfsfuse/... ./ctld/internal/ctld/rootfsreader/... ./ctld/internal/ctld/rootfssnapshotter/...; \
 		elif [ "$$service" = "infra-operator" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./infra-operator/...; \
 		fi; \
@@ -206,10 +198,6 @@ test-e2e-load-images:
 		echo "sandbox0ai/infra:$(PROCD_BIN_TAG) is missing; run make docker-build-local first"; \
 		exit 1; \
 	fi
-	@if ! docker image inspect sandbox0ai/infra:$(CARRIER_BASE_TAG) >/dev/null 2>&1; then \
-		echo "sandbox0ai/infra:$(CARRIER_BASE_TAG) is missing; run make docker-build-local first"; \
-		exit 1; \
-	fi
 	@if ! docker image inspect "$(E2E_SSH_FIXTURE_IMAGE)" >/dev/null 2>&1; then \
 		printf "$(YELLOW)Pulling SSH fixture source $(E2E_SSH_FIXTURE_SOURCE_IMAGE)...$(RESET)\n"; \
 		docker pull --platform "$(E2E_IMAGE_PLATFORM)" "$(E2E_SSH_FIXTURE_SOURCE_IMAGE)" || exit 1; \
@@ -224,7 +212,6 @@ test-e2e-load-images:
 	}; \
 	load_image sandbox0ai/infra:$(TAG); \
 	load_image sandbox0ai/infra:$(PROCD_BIN_TAG); \
-	load_image sandbox0ai/infra:$(CARRIER_BASE_TAG); \
 	for image in $(E2E_DEPENDENCY_IMAGES); do \
 		if ! docker image inspect "$$image" >/dev/null 2>&1; then \
 			printf "$(YELLOW)Pulling $$image for $(E2E_IMAGE_PLATFORM)...$(RESET)\n"; \
@@ -301,7 +288,7 @@ test-e2e-network-cni:
 	unset http_proxy && unset https_proxy && unset all_proxy && E2E_SINGLE_CLUSTER_SCENARIOS=fullmode $(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster -run TestSingleCluster -ginkgo.focus="API fullmode.*(enforces transparent TCP egress through the ctld network runtime|resolves cluster DNS over UDP with the ctld network runtime active|blocks private sandbox traffic while preserving public exposure and cluster service access)" -timeout=30m
 
 # Prevent make from treating service names as targets
-regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld rootfs-snapshotter procd netd infra-operator:
+regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler storage-proxy ctld procd netd infra-operator:
 	@:
 
 lint:
@@ -318,8 +305,6 @@ clean:
 		printf "$(YELLOW)Cleaning $$service...$(RESET)\n"; \
 		if [ "$$service" = "procd" ]; then \
 			rm -rf manager/bin/procd manager/bin/python-runner; \
-		elif [ "$$service" = "rootfs-snapshotter" ]; then \
-			rm -rf ctld/bin/rootfs-snapshotter; \
 		else \
 			rm -rf $$service/bin; \
 		fi; \

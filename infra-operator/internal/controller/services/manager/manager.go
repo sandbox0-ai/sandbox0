@@ -19,7 +19,6 @@ package manager
 import (
 	"context"
 	"fmt"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -327,7 +326,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		DatabaseMaxConns:     config.DatabaseMaxConns,
 		DatabaseMinConns:     config.DatabaseMinConns,
 		TemplateStoreEnabled: config.TemplateStoreEnabled,
-		DisableSync:          !compiledPlan.BuiltinTemplateSyncEnabled(),
 		Owner:                "manager",
 		ResourcePolicy:       common.TemplateResourcePolicyFromManagerConfig(config),
 	}); err != nil {
@@ -431,25 +429,6 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 	cfg.ManagerImage = fmt.Sprintf("%s:%s", imageRepo, imageTag)
 	if cfg.ProcdBinImageRef == "" {
 		cfg.ProcdBinImageRef = fmt.Sprintf("%s:%s-procd-bin", imageRepo, imageTag)
-	}
-	if cfg.SharedCarrierPool.Namespace == "" {
-		cfg.SharedCarrierPool.Namespace = compiledPlan.Scope.Namespace
-	}
-	if cfg.SharedCarrierPool.CarrierImageRef == "" {
-		cfg.SharedCarrierPool.CarrierImageRef = fmt.Sprintf("%s:%s-carrier-base", imageRepo, imageTag)
-	}
-	if cfg.SharedCarrierPool.Enabled && cfg.SharedCarrierPool.MinIdle == 0 && cfg.SharedCarrierPool.MaxIdle == 0 {
-		cfg.SharedCarrierPool.MinIdle = 1
-		cfg.SharedCarrierPool.MaxIdle = 2
-	}
-	if cfg.SharedCarrierPool.MaxIdle < cfg.SharedCarrierPool.MinIdle {
-		cfg.SharedCarrierPool.MaxIdle = cfg.SharedCarrierPool.MinIdle
-	}
-	if cfg.SharedCarrierPool.ReconcileInterval.Duration <= 0 {
-		cfg.SharedCarrierPool.ReconcileInterval = metav1.Duration{Duration: 5 * time.Second}
-	}
-	if cfg.SharedCarrierPool.ActivationTimeout.Duration <= 0 {
-		cfg.SharedCarrierPool.ActivationTimeout = metav1.Duration{Duration: 15 * time.Second}
 	}
 
 	return cfg, nil

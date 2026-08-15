@@ -4,7 +4,6 @@ import (
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 )
 
 func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
@@ -40,33 +39,8 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.DefaultSandboxTTL = spec.DefaultSandboxTTL
 	cfg.TeamTemplateMemoryPerCPU = spec.TeamTemplateMemoryPerCPU
 	cfg.SandboxMaxMemory = spec.SandboxMaxMemory
-	cfg.SandboxRuntimeClassName = rootfshead.RuntimeClassName
+	cfg.SandboxRuntimeClassName = spec.SandboxRuntimeClassName
 	cfg.ProcdBinImageRef = spec.ProcdBinImageRef
-	cfg.SharedCarrierPool = apiconfig.SharedCarrierPoolConfig{
-		Enabled:           spec.SharedCarrierPool.Enabled,
-		Namespace:         spec.SharedCarrierPool.Namespace,
-		MinIdle:           spec.SharedCarrierPool.MinIdle,
-		MaxIdle:           spec.SharedCarrierPool.MaxIdle,
-		CarrierImageRef:   spec.SharedCarrierPool.CarrierImageRef,
-		ReconcileInterval: spec.SharedCarrierPool.ReconcileInterval,
-		ActivationTimeout: spec.SharedCarrierPool.ActivationTimeout,
-	}
-	if spec.TemplateImageFS.Enabled != nil {
-		enabled := *spec.TemplateImageFS.Enabled
-		cfg.TemplateImageFS.Enabled = &enabled
-	}
-	cfg.TemplateImageFS.TeamIDs = cloneStrings(spec.TemplateImageFS.TeamIDs)
-	cfg.TemplateImageFS.TemplateIDs = cloneStrings(spec.TemplateImageFS.TemplateIDs)
-	cfg.S0FSRuntime = apiconfig.S0FSRuntimeConfig{
-		Enabled: spec.S0FSRuntime.Enabled,
-		Admission: apiconfig.S0FSAdmissionConfig{
-			Mode:               spec.S0FSRuntime.Admission.Mode,
-			TeamIDs:            cloneStrings(spec.S0FSRuntime.Admission.TeamIDs),
-			TemplateIDs:        cloneStrings(spec.S0FSRuntime.Admission.TemplateIDs),
-			AdmitAll:           spec.S0FSRuntime.Admission.AdmitAll,
-			RejectLegacyClaims: spec.S0FSRuntime.Admission.RejectLegacyClaims,
-		},
-	}
 	cfg.DefaultTeamQuotas = cloneTeamQuotaLimitConfigs(spec.DefaultTeamQuotas)
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane
 	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout

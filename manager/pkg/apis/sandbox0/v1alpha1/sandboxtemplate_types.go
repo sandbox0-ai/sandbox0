@@ -9,7 +9,6 @@ import (
 
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:subresource:status
 
 // SandboxTemplate defines a template for creating sandboxes
 type SandboxTemplate struct {
@@ -240,10 +239,8 @@ type ResourceQuota struct {
 
 // PoolStrategy defines pool strategy
 type PoolStrategy struct {
-	// Deprecated: shared carrier pool capacity is platform-owned.
-	MinIdle int32 `json:"minIdle"`
-	// Deprecated: shared carrier pool capacity is platform-owned.
-	MaxIdle int32 `json:"maxIdle"`
+	MinIdle int32 `json:"minIdle"` // Minimum idle pods (ReplicaSet replicas)
+	MaxIdle int32 `json:"maxIdle"` // Maximum idle pods (enforced by CleanupController)
 }
 
 // NetworkPolicyMode defines network policy mode
@@ -645,54 +642,12 @@ type SandboxTemplateStatus struct {
 	// Creation reports asynchronous image creation for templates created from a sandbox.
 	Creation *TemplateCreationStatus `json:"creation,omitempty"`
 
-	// PoolMode reports whether claims use the cluster shared carrier pool, cold
-	// S0FS allocation, a legacy pool, or no pool on this cluster.
-	PoolMode SandboxTemplatePoolMode `json:"poolMode,omitempty"`
-
-	// ImageRevision reports the immutable OCI-to-S0FS revision selected for new
-	// claims. Templates are not ready until this revision is ready.
-	ImageRevision *TemplateImageRevisionStatus `json:"imageRevision,omitempty"`
-
 	// Conditions
 	Conditions []SandboxTemplateCondition `json:"conditions,omitempty"`
 
 	// Last updated time
 	LastUpdateTime metav1.Time `json:"lastUpdateTime,omitempty"`
 }
-
-// SandboxTemplatePoolMode identifies the carrier allocation path.
-type SandboxTemplatePoolMode string
-
-const (
-	SandboxTemplatePoolModeLegacy   SandboxTemplatePoolMode = "legacy"
-	SandboxTemplatePoolModeShared   SandboxTemplatePoolMode = "shared"
-	SandboxTemplatePoolModeCold     SandboxTemplatePoolMode = "cold"
-	SandboxTemplatePoolModeDisabled SandboxTemplatePoolMode = "disabled"
-)
-
-// TemplateImageRevisionStatus reports immutable OCI resolution and S0FS import.
-type TemplateImageRevisionStatus struct {
-	RevisionID     string                     `json:"revisionId"`
-	SourceImage    string                     `json:"sourceImage"`
-	ResolvedDigest string                     `json:"resolvedDigest,omitempty"`
-	Platform       string                     `json:"platform,omitempty"`
-	ImageFSHeadID  string                     `json:"imageFsHeadId,omitempty"`
-	State          TemplateImageRevisionState `json:"state"`
-	Reason         string                     `json:"reason,omitempty"`
-	Message        string                     `json:"message,omitempty"`
-	StartedAt      *metav1.Time               `json:"startedAt,omitempty"`
-	CompletedAt    *metav1.Time               `json:"completedAt,omitempty"`
-}
-
-// TemplateImageRevisionState is the OCI-to-S0FS import state.
-type TemplateImageRevisionState string
-
-const (
-	TemplateImageRevisionStateResolving TemplateImageRevisionState = "resolving"
-	TemplateImageRevisionStateImporting TemplateImageRevisionState = "importing"
-	TemplateImageRevisionStateReady     TemplateImageRevisionState = "ready"
-	TemplateImageRevisionStateFailed    TemplateImageRevisionState = "failed"
-)
 
 // TemplateCreationStatus reports asynchronous creation of a template image.
 type TemplateCreationStatus struct {

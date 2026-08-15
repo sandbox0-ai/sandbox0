@@ -38,19 +38,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/python-runner ./manager/cmd/python-runner && \
     CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/scheduler ./scheduler/cmd/scheduler && \
     CGO_ENABLED=1 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/infra-operator ./infra-operator/cmd/infra-operator && \
-    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/ctld ./ctld/cmd/ctld && \
-    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/rootfs-snapshotter ./ctld/cmd/rootfs-snapshotter
+    CGO_ENABLED=0 GOOS="${BUILD_GOOS}" GOARCH="${BUILD_GOARCH}" go build -o /out/ctld ./ctld/cmd/ctld
 
 FROM scratch AS procd-bin
 
 COPY --from=builder /out/procd /usr/local/bin/procd
 COPY --from=builder /out/python-runner /usr/local/bin/python-runner
-
-# The carrier base needs one real layer so containerd can create a canonical
-# parent snapshot. Its only file is hidden by the runtime /proc mount.
-FROM scratch AS carrier-base
-
-COPY LICENSE /proc/.sandbox0-carrier
 
 FROM alpine:3.19
 

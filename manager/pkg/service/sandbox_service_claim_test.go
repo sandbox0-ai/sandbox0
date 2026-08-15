@@ -29,7 +29,6 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
-	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"github.com/sandbox0-ai/sandbox0/pkg/volumeportal"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
@@ -68,75 +67,6 @@ func TestClaimSandboxRejectsTemplateMemoryAbovePlatformMaximum(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "sandbox memory limit must be <= 16Gi") {
 		t.Fatalf("ClaimSandbox() error = %q, want max-memory rejection", got)
-	}
-}
-
-func TestClaimSandboxWaitsForExpectedImageRevisionProjection(t *testing.T) {
-	template := newSandboxResourceTestTemplate(t)
-	template.Name = naming.TemplateNameForCluster(naming.ScopeTeam, "team-a", "default")
-	template.Status.ImageRevision = &v1alpha1.TemplateImageRevisionStatus{
-		RevisionID: "revision-old",
-		State:      v1alpha1.TemplateImageRevisionStateImporting,
-	}
-	svc := &SandboxService{
-		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		logger:         zap.NewNop(),
-	}
-
-	_, err := svc.ClaimSandbox(context.Background(), &ClaimRequest{
-		Template:                        "default",
-		TeamID:                          "team-a",
-		UserID:                          "user-a",
-		ExpectedTemplateImageRevisionID: "revision-ready",
-	})
-	if !errors.Is(err, ErrDataPlaneNotReady) {
-		t.Fatalf("ClaimSandbox() error = %v, want ErrDataPlaneNotReady", err)
-	}
-}
-
-func TestClaimSandboxRejectsUnmatchedLegacyClaimOnGreenDataPlane(t *testing.T) {
-	template := newSandboxResourceTestTemplate(t)
-	template.Name = naming.TemplateNameForCluster(naming.ScopeTeam, "team-a", "default")
-	template.Labels = map[string]string{
-		"sandbox0.ai/template-scope":      naming.ScopeTeam,
-		"sandbox0.ai/template-logical-id": "default",
-	}
-	admission, err := s0fsrollout.NewAdmission("cold", []string{"team-b"}, nil, false, true, false)
-	if err != nil {
-		t.Fatalf("NewAdmission() error = %v", err)
-	}
-	svc := &SandboxService{
-		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		config:         SandboxServiceConfig{S0FSAdmission: admission},
-		logger:         zap.NewNop(),
-	}
-
-	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{Template: "default", TeamID: "team-a", UserID: "user-a"})
-	if !errors.Is(err, ErrDataPlaneNotReady) || !strings.Contains(err.Error(), "legacy rootfs claims are disabled") {
-		t.Fatalf("ClaimSandbox() error = %v, want fail-closed legacy rejection", err)
-	}
-}
-
-func TestClaimSandboxDoesNotFallbackWhenAdmittedRevisionIsNotReady(t *testing.T) {
-	template := newSandboxResourceTestTemplate(t)
-	template.Name = naming.TemplateNameForCluster(naming.ScopeTeam, "team-a", "default")
-	template.Labels = map[string]string{
-		"sandbox0.ai/template-scope":      naming.ScopeTeam,
-		"sandbox0.ai/template-logical-id": "default",
-	}
-	admission, err := s0fsrollout.NewAdmission("cold", []string{"team-a"}, nil, false, true, false)
-	if err != nil {
-		t.Fatalf("NewAdmission() error = %v", err)
-	}
-	svc := &SandboxService{
-		templateLister: staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
-		config:         SandboxServiceConfig{S0FSAdmission: admission},
-		logger:         zap.NewNop(),
-	}
-
-	_, err = svc.ClaimSandbox(context.Background(), &ClaimRequest{Template: "default", TeamID: "team-a", UserID: "user-a"})
-	if !errors.Is(err, ErrDataPlaneNotReady) || !strings.Contains(err.Error(), "revision is not ready") {
-		t.Fatalf("ClaimSandbox() error = %v, want admitted revision not-ready rejection", err)
 	}
 }
 
@@ -1427,128 +1357,49 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 	}
 
 	var calls []string
-	var materializeReq ctldapi.MaterializeRootFSHeadRequest
+	var applyReq ctldapi.ApplyRootFSRequest
 	ctld := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v1/rootfs/heads/materialize":
-			if err := json.NewDecoder(r.Body).Decode(&materializeReq); err != nil {
-				t.Fatalf("decode materialize request: %v", err)
-			}
-			calls = append(calls, "materialize")
-			_ = json.NewEncoder(w).Encode(ctldapi.MaterializeRootFSHeadResponse{
-				Materialized: true, ImageName: materializeReq.Image.Name,
-			})
-		case "/api/v1/rootfs/sync/bind":
-			calls = append(calls, "bind")
-			_ = json.NewEncoder(w).Encode(ctldapi.BindRootFSSyncResponse{
-				Status: ctldapi.RootFSSyncStatus{InitialScanComplete: true},
-			})
-		case "/api/v1/volume-portals/check":
-			_ = json.NewEncoder(w).Encode(ctldapi.CheckVolumePortalsResponse{Ready: true})
-		default:
+		if r.URL.Path != "/api/v1/rootfs/apply" {
 			http.NotFound(w, r)
+			return
 		}
+		if err := json.NewDecoder(r.Body).Decode(&applyReq); err != nil {
+			t.Fatalf("decode apply request: %v", err)
+		}
+		calls = append(calls, "apply")
+		_ = json.NewEncoder(w).Encode(ctldapi.ApplyRootFSResponse{Applied: true})
 	}))
 	defer ctld.Close()
 	ctldURL, ctldPort := parsedTestServer(t, ctld.URL)
 
 	idlePod := newClaimTestPod(templateNamespace, "idle-ready", templateID, true)
-	idlePod.UID = types.UID("warm-runtime-uid")
 	idlePod.Spec.NodeName = "node-a"
-	idlePod.Spec.Containers[0].Image = "registry.example.com/template@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	idlePod.Spec.Containers[0].ImagePullPolicy = corev1.PullIfNotPresent
 	idlePod.Status.HostIP = ctldURL.Hostname()
 	idlePod.Status.PodIP = "10.0.0.10"
-	idlePod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name:    "procd",
-		Image:   idlePod.Spec.Containers[0].Image,
-		ImageID: "containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		Ready:   true,
-		State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-	}}
-	snapshotterInstance := "snapshotter-pod/0/containerd://snapshotter"
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
-		Name: idlePod.Spec.NodeName,
-		Annotations: map[string]string{
-			dataplane.NodeRootFSSnapshotterInstanceAnnotation: snapshotterInstance,
-		},
-	}}
-	sourceHead := rootFSHeadTestFixture(t, "source-sandbox", "team-a", "head-v1", 1)
 	store := &memorySandboxStore{
 		records: map[string]*sandboxstore.SandboxRecord{},
-		rootFSHeadVersions: map[string]*sandboxstore.SandboxRootFSHead{
-			sourceHead.Reference.HeadID: sourceHead,
-		},
 		rootFSSnapshots: map[string]*sandboxstore.RootFSSnapshot{
 			"rootfs-snapshot-1": {
 				ID:              "rootfs-snapshot-1",
 				FilesystemID:    "source-fs",
 				TeamID:          "team-a",
 				SourceSandboxID: "source-sandbox",
-				HeadID:          sourceHead.Reference.HeadID,
+				HeadLayerID:     "layer-v1",
 				CreatedAt:       time.Now().UTC(),
 			},
 		},
 	}
 	indexer := newClaimTestPodIndexer(t, idlePod)
 	client := fake.NewSimpleClientset(idlePod.DeepCopy())
-	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		deleteAction := action.(k8stesting.DeleteAction)
-		gracePeriod := deleteAction.GetDeleteOptions().GracePeriodSeconds
-		if gracePeriod == nil || *gracePeriod != 0 {
-			t.Fatalf("replacement delete grace period = %v, want 0", gracePeriod)
-		}
-		deleted, exists, err := indexer.GetByKey(idlePod.Namespace + "/" + deleteAction.GetName())
-		if err == nil && exists {
-			err = indexer.Delete(deleted)
-		}
-		return false, nil, err
-	})
-	var replacementPodName string
-	scheduleCreatedClaimPodInIndexer(t, client, indexer, func(created *corev1.Pod) {
-		replacementPodName = created.Name
-		created.UID = types.UID("replacement-runtime-uid")
-		created.Status.HostIP = ctldURL.Hostname()
-		created.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:    "procd",
-			Image:   sourceHead.Image.Name,
-			ImageID: "containerd://" + sourceHead.Image.ManifestDigest,
-			Ready:   true,
-			State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-		}}
-		setRuntimeTestCondition(created, corev1.PodReady, corev1.ConditionFalse, "RuntimePending", "runtime assignment is not active")
-		setRuntimeTestCondition(created, v1alpha1.SandboxPodReadinessConditionType, corev1.ConditionFalse, "RuntimePending", "runtime assignment is not active")
-	})
-	client.PrependReactor("update", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		updated := action.(k8stesting.UpdateAction).GetObject().(*corev1.Pod)
-		if updated.Spec.Containers[0].Image != sourceHead.Image.Name {
-			return false, nil, nil
-		}
-		if got := updated.Annotations[controller.AnnotationRootFSSnapshotterInstance]; got != snapshotterInstance {
-			t.Fatalf("rootfs snapshotter instance = %q, want %q", got, snapshotterInstance)
-		}
-		updated.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:    "procd",
-			Image:   sourceHead.Image.Name,
-			ImageID: "containerd://" + sourceHead.Image.ManifestDigest,
-			Ready:   true,
-			State:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-		}}
-		if err := indexer.Update(updated.DeepCopy()); err != nil {
-			return true, nil, err
-		}
-		return false, nil, nil
-	})
 	installRuntimeObservationReactor(t, client, indexer, runtimecontrol.ObservedReady, func(*corev1.Pod) {
-		if len(calls) == 0 || calls[0] != "materialize" {
-			t.Fatalf("calls before runtime activation = %v, want materialize first", calls)
+		if len(calls) != 1 || calls[0] != "apply" {
+			t.Fatalf("calls before runtime activation = %v, want [apply]", calls)
 		}
 		calls = append(calls, "runtime")
 	})
 	svc := &SandboxService{
 		k8sClient:              client,
 		podLister:              corelisters.NewPodLister(indexer),
-		nodeLister:             newClaimTestNodeLister(t, node),
 		secretLister:           newClaimTestSecretLister(t),
 		templateLister:         staticTemplateLister{templates: []*v1alpha1.SandboxTemplate{template}},
 		sandboxStore:           store,
@@ -1575,30 +1426,25 @@ func TestClaimSandboxAppliesRootFSFromSnapshotBeforeRuntimeActivation(t *testing
 	if resp == nil || resp.SandboxID == "" {
 		t.Fatalf("ClaimSandbox() response = %+v, want sandbox id", resp)
 	}
-	if len(calls) < 3 || calls[0] != "materialize" || calls[len(calls)-2] != "bind" || calls[len(calls)-1] != "runtime" {
-		t.Fatalf("calls = %v, want materialize before bind and runtime", calls)
+	if len(calls) != 2 || calls[0] != "apply" || calls[1] != "runtime" {
+		t.Fatalf("calls = %v, want [apply runtime]", calls)
 	}
-	if materializeReq.Reference.HeadID != sourceHead.Reference.HeadID {
-		t.Fatalf("materialized Head = %q, want %q", materializeReq.Reference.HeadID, sourceHead.Reference.HeadID)
+	if applyReq.Target.PodName != "idle-ready" {
+		t.Fatalf("apply target pod = %q, want idle-ready", applyReq.Target.PodName)
 	}
-	head := store.rootFSHeads[resp.SandboxID]
-	if head == nil || head.Reference.HeadID != sourceHead.Reference.HeadID {
-		t.Fatalf("rootfs Head = %+v, want %s for claimed sandbox", head, sourceHead.Reference.HeadID)
+	if applyReq.BaselineLayerID != "layer-v1" {
+		t.Fatalf("BaselineLayerID = %q, want layer-v1", applyReq.BaselineLayerID)
+	}
+	if len(applyReq.Layers) != 1 || applyReq.Layers[0].LayerID != "layer-v1" {
+		t.Fatalf("apply layers = %+v, want layer-v1", applyReq.Layers)
+	}
+	state := store.rootFSStates[resp.SandboxID]
+	if state == nil || state.LayerID != "layer-v1" {
+		t.Fatalf("rootfs state = %+v, want layer-v1 for claimed sandbox", state)
 	}
 	record := store.records[resp.SandboxID]
 	if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive {
 		t.Fatalf("record = %+v, want active claimed sandbox", record)
-	}
-	if replacementPodName == "" || record.CurrentPodName != replacementPodName {
-		t.Fatalf("restored pod = %q, want replacement pod %q", record.CurrentPodName, replacementPodName)
-	}
-	var created, deleted bool
-	for _, action := range client.Actions() {
-		created = created || action.GetVerb() == "create" && action.GetResource().Resource == "pods"
-		deleted = deleted || action.GetVerb() == "delete" && action.GetResource().Resource == "pods"
-	}
-	if !created || !deleted {
-		t.Fatalf("snapshot restore Pod actions: created=%t deleted=%t, want both true", created, deleted)
 	}
 }
 
@@ -1767,7 +1613,7 @@ func TestInitializeClaimRootFSFromSnapshotRejectsInternalTemplateBuildSnapshot(t
 				FilesystemID:    "source-fs",
 				TeamID:          "team-a",
 				SourceSandboxID: "source-sandbox",
-				HeadID:          "layer-v1",
+				HeadLayerID:     "layer-v1",
 				CreatedAt:       time.Now().UTC(),
 			},
 		},
@@ -2594,14 +2440,15 @@ func scheduleCreatedClaimPodInIndexer(t *testing.T, client *fake.Clientset, inde
 		if !ok || pod == nil {
 			return false, nil, nil
 		}
-		pod.ResourceVersion = "2"
-		pod.Spec.NodeName = "node-a"
-		pod.Status.Phase = corev1.PodRunning
-		pod.Status.PodIP = "10.244.0.10"
+		indexedPod := pod.DeepCopy()
+		indexedPod.ResourceVersion = "2"
+		indexedPod.Spec.NodeName = "node-a"
+		indexedPod.Status.Phase = corev1.PodRunning
+		indexedPod.Status.PodIP = "10.244.0.10"
 		if mutate != nil {
-			mutate(pod)
+			mutate(indexedPod)
 		}
-		if err := indexer.Add(pod.DeepCopy()); err != nil {
+		if err := indexer.Add(indexedPod); err != nil {
 			return true, nil, err
 		}
 		return false, nil, nil

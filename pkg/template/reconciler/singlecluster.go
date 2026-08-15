@@ -184,8 +184,7 @@ func (r *SingleClusterReconciler) reconcile(ctx context.Context) {
 					"sandbox0.ai/template-user-id": tpl.UserID,
 				},
 			},
-			Spec:   clusterSpec,
-			Status: projectedTemplateStatus(tpl),
+			Spec: clusterSpec,
 		}
 
 		visible, err := r.createOrUpdateTemplate(ctx, crd)
@@ -261,6 +260,7 @@ func (r *SingleClusterReconciler) createOrUpdateTemplate(ctx context.Context, tp
 	existing, err := r.applier.GetTemplate(ctx, tpl.Name)
 	if err == nil && existing != nil {
 		tpl.ResourceVersion = existing.ResourceVersion
+		tpl.Status = existing.Status
 		_, err = r.applier.UpdateTemplate(ctx, tpl)
 		if err != nil {
 			return false, fmt.Errorf("update template: %w", err)
@@ -276,13 +276,6 @@ func (r *SingleClusterReconciler) createOrUpdateTemplate(ctx context.Context, tp
 		return false, fmt.Errorf("create template: %w", err)
 	}
 	return false, nil
-}
-
-func projectedTemplateStatus(tpl *template.Template) v1alpha1.SandboxTemplateStatus {
-	if tpl == nil || tpl.Status == nil {
-		return v1alpha1.SandboxTemplateStatus{}
-	}
-	return *tpl.Status.DeepCopy()
 }
 
 func templateCreationAwaitingReconcile(tpl *template.Template) bool {

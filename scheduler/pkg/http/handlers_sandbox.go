@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -228,23 +227,7 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	clusterTemplateID := naming.TemplateNameForCluster(tpl.Scope, tpl.TeamID, tpl.TemplateID)
 	maxAge := s.cfg.ReconcileInterval.Duration * 2
 
-	var selected *template.Cluster
-	selectedBy := ""
-	usesS0FS := templateUsesReadyS0FSImageRevision(tpl)
-	if usesS0FS {
-		allocations = s.s0fsCapableAllocations(allocations, clusterMap, maxAge)
-		if len(allocations) == 0 {
-			s.recordRoutingDecision("", "s0fs_runtime_unavailable")
-			return nil, tpl, "", nil
-		}
-		selected = s.selectClusterBySharedCarrierWithAllocations(allocations, clusterMap, maxAge)
-		if selected != nil {
-			selectedBy = "shared_carrier"
-		}
-	} else {
-		allocations = s.legacyCapableAllocations(allocations, clusterMap)
-		selected, selectedBy = s.selectClusterByIdleWithAllocations(allocations, clusterMap, tpl, clusterTemplateID, maxAge)
-	}
+	selected, selectedBy := s.selectClusterByIdleWithAllocations(allocations, clusterMap, tpl, clusterTemplateID, maxAge)
 	if selected == nil {
 		selected = s.selectClusterByHeadroomWithAllocations(allocations, clusterMap, maxAge)
 		if selected != nil {
@@ -283,84 +266,6 @@ func (s *Server) selectClusterForTemplate(c *gin.Context, templateID, teamID str
 	)
 
 	return selected, tpl, selectedBy, nil
-}
-
-func (s *Server) legacyCapableAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster) []*template.TemplateAllocation {
-	capable := make([]*template.TemplateAllocation, 0, len(allocations))
-	for _, alloc := range allocations {
-		cluster := clusterMap[alloc.ClusterID]
-		if cluster == nil {
-			capable = append(capable, alloc)
-			continue
-		}
-		summary, ok := s.reconciler.GetClusterSummary(alloc.ClusterID)
-		if ok && summary != nil && summary.LegacyClaimsRejected {
-			continue
-		}
-		capable = append(capable, alloc)
-	}
-	return capable
-}
-
-func (s *Server) s0fsCapableAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) []*template.TemplateAllocation {
-	capable := make([]*template.TemplateAllocation, 0, len(allocations))
-	for _, alloc := range allocations {
-		cluster := clusterMap[alloc.ClusterID]
-		if cluster == nil || !cluster.Enabled {
-			continue
-		}
-		age, ok := s.reconciler.GetClusterSummaryAge(cluster.ClusterID)
-		s.recordClusterSummaryAge(cluster.ClusterID)
-		if !ok || age > maxAge {
-			continue
-		}
-		summary, ok := s.reconciler.GetClusterSummary(cluster.ClusterID)
-		if !ok || summary == nil || !summary.S0FSRuntimeReady {
-			continue
-		}
-		capable = append(capable, alloc)
-	}
-	return capable
-}
-
-func templateUsesReadyS0FSImageRevision(tpl *template.Template) bool {
-	return tpl != nil && tpl.Status != nil && tpl.Status.ImageRevision != nil &&
-		tpl.Status.ImageRevision.State == v1alpha1.TemplateImageRevisionStateReady &&
-		strings.TrimSpace(tpl.Status.ImageRevision.ImageFSHeadID) != ""
-}
-
-func (s *Server) selectClusterBySharedCarrierWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, maxAge time.Duration) *template.Cluster {
-	var selected *template.Cluster
-	var bestReady int32 = -1
-	var bestHeadroom int32 = -1
-
-	for _, alloc := range allocations {
-		cluster := clusterMap[alloc.ClusterID]
-		if cluster == nil || !cluster.Enabled {
-			continue
-		}
-		age, ok := s.reconciler.GetClusterSummaryAge(cluster.ClusterID)
-		s.recordClusterSummaryAge(cluster.ClusterID)
-		if !ok || age > maxAge {
-			continue
-		}
-		summary, ok := s.reconciler.GetClusterSummary(cluster.ClusterID)
-		if !ok || summary == nil || !summary.S0FSRuntimeReady || summary.SharedCarrierReadyCount <= 0 {
-			continue
-		}
-		headroom := clusterAvailableHeadroom(summary, s.cfg.PodsPerNode)
-		if selected == nil ||
-			summary.SharedCarrierReadyCount > bestReady ||
-			(summary.SharedCarrierReadyCount == bestReady && headroom > bestHeadroom) ||
-			(summary.SharedCarrierReadyCount == bestReady && headroom == bestHeadroom && cluster.Weight > selected.Weight) ||
-			(summary.SharedCarrierReadyCount == bestReady && headroom == bestHeadroom && cluster.Weight == selected.Weight && cluster.ClusterID < selected.ClusterID) {
-			selected = cluster
-			bestReady = summary.SharedCarrierReadyCount
-			bestHeadroom = headroom
-		}
-	}
-
-	return selected
 }
 
 func (s *Server) selectClusterByIdleWithAllocations(allocations []*template.TemplateAllocation, clusterMap map[string]*template.Cluster, tpl *template.Template, clusterTemplateID string, maxAge time.Duration) (*template.Cluster, string) {

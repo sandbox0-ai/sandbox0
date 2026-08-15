@@ -121,11 +121,6 @@ type ProcdResumeResponse struct {
 	Resumed bool `json:"resumed"`
 }
 
-// Startup probes the HTTP listener and returns its immutable Pod identity.
-func (c *ProcdClient) Startup(ctx context.Context, procdAddress string) (*StartupResponse, error) {
-	return doProcdRequest[StartupResponse](ctx, c.httpClient, http.MethodGet, procdAddress+StartupPath, "", "probe procd startup", nil)
-}
-
 // Stats calls the procd stats API.
 func (c *ProcdClient) Stats(ctx context.Context, procdAddress, internalToken string) (*StatsResponse, error) {
 	url := procdAddress + SandboxStatsPath

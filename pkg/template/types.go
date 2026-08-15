@@ -3,7 +3,6 @@ package template
 import (
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -28,22 +27,12 @@ type Template struct {
 }
 
 // ReadyForClaim reports whether a template may be used to create sandboxes.
-// Traditional image-based templates omit image revision status and are ready.
+// Traditional image-based templates omit creation status and are ready.
 func (t *Template) ReadyForClaim() bool {
-	if t == nil {
-		return false
-	}
-	if t.Status == nil {
+	if t == nil || t.Status == nil || t.Status.Creation == nil {
 		return true
 	}
-	if t.Status.Creation != nil && t.Status.Creation.State != v1alpha1.TemplateCreationStateReady {
-		return false
-	}
-	if t.Status.ImageRevision != nil {
-		return t.Status.ImageRevision.State == v1alpha1.TemplateImageRevisionStateReady &&
-			strings.TrimSpace(t.Status.ImageRevision.ImageFSHeadID) != ""
-	}
-	return true
+	return t.Status.Creation.State == v1alpha1.TemplateCreationStateReady
 }
 
 // ReadyForReconcile reports whether the template has a complete image spec
@@ -110,8 +99,6 @@ var (
 	ErrTemplateIdempotencyConflict = errors.New("idempotency key conflicts with an existing request")
 	// ErrTemplateBuildLeaseLost indicates a worker no longer owns a build lease.
 	ErrTemplateBuildLeaseLost = errors.New("template build lease lost")
-	// ErrTemplateImageRevisionLeaseLost indicates a worker no longer owns an image revision lease.
-	ErrTemplateImageRevisionLeaseLost = errors.New("template image revision lease lost")
 	// ErrTemplateNotReady indicates asynchronous creation has not produced a
 	// claimable template.
 	ErrTemplateNotReady = errors.New("template is not ready")

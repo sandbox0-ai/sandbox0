@@ -45,6 +45,7 @@ type queue interface {
 
 type headStore interface {
 	StageRootFSHead(context.Context, *sandboxstore.SandboxRootFSHead) error
+	GetRootFSHeadByID(context.Context, string, string) (*sandboxstore.SandboxRootFSHead, error)
 }
 
 type Config struct {
@@ -272,6 +273,16 @@ func (w *Worker) importRevision(ctx context.Context, revision *template.Template
 			desiredRevision.RevisionID,
 		)
 	}
+	headID := templateImageFSHeadID(revision)
+	if revision.State == template.TemplateImageRevisionStateImporting {
+		recovered, err := w.recoverPublishedHead(ctx, revision, headID)
+		if err != nil {
+			return err
+		}
+		if recovered {
+			return nil
+		}
+	}
 	pod, err := w.createImportPod(ctx, namespace, tpl, revision)
 	if err != nil {
 		return err
@@ -291,7 +302,7 @@ func (w *Worker) importRevision(ctx context.Context, revision *template.Template
 	}
 	response, err := w.ctld.ImportRootFSImage(ctx, address, ctldapi.ImportRootFSImageRequest{
 		Target:     ctldapi.RootFSContainerRef{Namespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID), ContainerName: "procd"},
-		RevisionID: revision.RevisionID, TeamID: revision.ImageFSStorageScope(), HeadID: "imagefs-" + revision.RevisionID,
+		RevisionID: revision.RevisionID, TeamID: revision.ImageFSStorageScope(), HeadID: headID,
 		BaseImageRef: w.config.BaseImageRef,
 	}, w.config.ImportTimeout)
 	if err != nil {
@@ -317,6 +328,41 @@ func (w *Worker) importRevision(ctx context.Context, revision *template.Template
 	}
 	w.logger.Info("Template ImageFS revision ready", zap.String("revisionID", revision.RevisionID), zap.String("headID", response.Reference.HeadID), zap.Int64("createdBytes", response.CreatedBytes), zap.Duration("duration", response.Duration))
 	return nil
+}
+
+func templateImageFSHeadID(revision *template.TemplateImageRevision) string {
+	if revision == nil {
+		return ""
+	}
+	incarnationID := strings.ReplaceAll(strings.TrimSpace(revision.IncarnationID), "-", "")
+	if incarnationID == "" {
+		return "imagefs-" + revision.RevisionID
+	}
+	return "imagefs-" + revision.RevisionID + "-" + incarnationID
+}
+
+func (w *Worker) recoverPublishedHead(ctx context.Context, revision *template.TemplateImageRevision, headID string) (bool, error) {
+	if strings.TrimSpace(revision.ResolvedDigest) == "" || len(revision.OCIConfig) == 0 {
+		return false, nil
+	}
+	head, err := w.heads.GetRootFSHeadByID(ctx, headID, revision.ImageFSStorageScope())
+	if err != nil {
+		return false, fmt.Errorf("load staged ImageFS Head: %w", err)
+	}
+	if head == nil {
+		return false, nil
+	}
+	sourceID := "imagefs:" + revision.RevisionID
+	if head.SandboxID != sourceID || head.SourceSandboxID != sourceID ||
+		head.TeamID != revision.ImageFSStorageScope() || head.RuntimeGeneration != 1 ||
+		head.Reference.HeadID != headID {
+		return false, fmt.Errorf("staged ImageFS Head %s does not match revision incarnation", headID)
+	}
+	if err := w.queue.MarkTemplateImageRevisionReady(ctx, revision.RevisionID, w.config.WorkerID, headID, time.Now().UTC()); err != nil {
+		return false, err
+	}
+	w.logger.Info("Template ImageFS revision recovered from staged Head", zap.String("revisionID", revision.RevisionID), zap.String("headID", headID))
+	return true, nil
 }
 
 func (w *Worker) createImportPod(ctx context.Context, namespace string, tpl *template.Template, revision *template.TemplateImageRevision) (*corev1.Pod, error) {

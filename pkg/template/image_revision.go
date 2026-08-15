@@ -25,6 +25,7 @@ const (
 // TemplateImageRevision is one immutable OCI resolution and S0FS ImageFS import.
 type TemplateImageRevision struct {
 	RevisionID           string
+	IncarnationID        string
 	TemplateID           string
 	Scope                string
 	TeamID               string

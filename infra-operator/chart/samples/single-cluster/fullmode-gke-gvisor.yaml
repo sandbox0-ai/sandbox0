@@ -26,8 +26,6 @@ spec:
       enabled: true
       persistence:
         size: "20Gi"
-    runtime:
-      objectEncryptionEnabled: false
   registry:
     provider: builtin
     builtin:

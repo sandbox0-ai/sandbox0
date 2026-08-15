@@ -42,7 +42,6 @@ spec:
         name: aws-credentials
         accessKeyKey: accessKeyId
         secretKeyKey: secretAccessKey
-    runtime: {}
   # Example OSS storage:
   # storage:
   #   type: oss
@@ -54,7 +53,6 @@ spec:
   #       name: oss-credentials
   #       accessKeyKey: accessKeyId
   #       secretKeyKey: accessKeySecret
-  #   runtime: {}
   controlPlane:
     url: https://api.sandbox0.ai
     internalAuthPublicKeySecret:

@@ -2497,7 +2497,9 @@ func assertObjectEncryptionLifecycle(env *framework.ScenarioEnv, session *e2euti
 	Expect(body).To(Equal(beforeContent))
 
 	for _, slot := range []string{"a", "b"} {
-		assertNoPlaintextInStorage(env, "daemonset/"+env.Infra.Name+"-ctld-"+slot, "/var/lib/sandbox0/ctld/rootfs", sentinel)
+		// Baselines contain the unpacked runtime view mounted into the sandbox, so
+		// only the persistent object cache is expected to remain opaque at rest.
+		assertNoPlaintextInStorage(env, "daemonset/"+env.Infra.Name+"-ctld-"+slot, "/var/lib/sandbox0/ctld/rootfs/objects", sentinel)
 	}
 	assertNoPlaintextInStorage(env, "pod/"+env.Infra.Name+"-rustfs-0", "/data", sentinel)
 }

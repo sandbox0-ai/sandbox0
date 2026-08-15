@@ -1,6 +1,8 @@
 package carrierpool
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,9 +11,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestNewCarrierPodUsesUniquePullNeverMarkerAndInitGate(t *testing.T) {
@@ -81,6 +88,77 @@ func TestCarrierUnusableRejectsExpiredGateAndStartedMain(t *testing.T) {
 	pod.CreationTimestamp = metav1.Now()
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "procd", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
 	assert.True(t, carrierUnusable(pod, "g", 15*time.Second, time.Now()))
+}
+
+func TestReconcileDoesNotDeleteConcurrentlyReservedCarrier(t *testing.T) {
+	oldest := readyCarrierPod("carrier-oldest", "uid-oldest", "rv-oldest", time.Now().Add(-time.Minute))
+	pruned := readyCarrierPod("carrier-pruned", "uid-pruned", "rv-pruned", time.Now())
+	client := fake.NewSimpleClientset(oldest, pruned)
+	pool, err := New(client, Config{
+		Namespace: "sandbox0", ClusterID: "default", MinIdle: 0, MaxIdle: 1,
+		CarrierImageRef: "sandbox0ai/infra:carrier-base-v1", Generation: "generation-a",
+	}, nil)
+	require.NoError(t, err)
+
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deleteAction, ok := action.(k8stesting.DeleteAction)
+		require.True(t, ok)
+		require.Equal(t, "carrier-pruned", deleteAction.GetName())
+		preconditions := deleteAction.GetDeleteOptions().Preconditions
+		require.NotNil(t, preconditions)
+		require.NotNil(t, preconditions.UID)
+		require.NotNil(t, preconditions.ResourceVersion)
+		assert.Equal(t, types.UID("uid-pruned"), *preconditions.UID)
+		assert.Equal(t, "rv-pruned", *preconditions.ResourceVersion)
+
+		resource := corev1.SchemeGroupVersion.WithResource("pods")
+		object, getErr := client.Tracker().Get(resource, "sandbox0", "carrier-pruned")
+		require.NoError(t, getErr)
+		reserved := object.(*corev1.Pod).DeepCopy()
+		reserved.Annotations[carrier.AnnotationState] = carrier.StateReserved
+		reserved.ResourceVersion = "rv-after-reserve"
+		require.NoError(t, client.Tracker().Update(resource, reserved, "sandbox0"))
+		return true, nil, apierrors.NewConflict(
+			schema.GroupResource{Resource: "pods"}, reserved.Name, errors.New("resource version changed"),
+		)
+	})
+
+	require.NoError(t, pool.Reconcile(context.Background()))
+	current, err := client.CoreV1().Pods("sandbox0").Get(context.Background(), "carrier-pruned", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, carrier.StateReserved, current.Annotations[carrier.AnnotationState])
+}
+
+func TestReconcilePrunesUnchangedExcessCarrier(t *testing.T) {
+	oldest := readyCarrierPod("carrier-oldest", "uid-oldest", "rv-oldest", time.Now().Add(-time.Minute))
+	pruned := readyCarrierPod("carrier-pruned", "uid-pruned", "rv-pruned", time.Now())
+	client := fake.NewSimpleClientset(oldest, pruned)
+	pool, err := New(client, Config{
+		Namespace: "sandbox0", ClusterID: "default", MinIdle: 0, MaxIdle: 1,
+		CarrierImageRef: "sandbox0ai/infra:carrier-base-v1", Generation: "generation-a",
+	}, nil)
+	require.NoError(t, err)
+
+	require.NoError(t, pool.Reconcile(context.Background()))
+	_, err = client.CoreV1().Pods("sandbox0").Get(context.Background(), "carrier-pruned", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "unchanged excess carrier should be pruned: %v", err)
+}
+
+func readyCarrierPod(name, uid, resourceVersion string, createdAt time.Time) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "sandbox0", UID: types.UID(uid), ResourceVersion: resourceVersion,
+			CreationTimestamp: metav1.NewTime(createdAt),
+			Labels:            map[string]string{carrier.LabelPool: "shared", carrier.LabelGeneration: "generation-a"},
+			Annotations:       map[string]string{carrier.AnnotationState: carrier.StateReady},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-a"},
+		Status: corev1.PodStatus{
+			Conditions:            []corev1.PodCondition{{Type: corev1.PodReadyToStartContainers, Status: corev1.ConditionTrue}},
+			InitContainerStatuses: []corev1.ContainerStatus{{Name: "carrier-wait", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+			ContainerStatuses:     []corev1.ContainerStatus{{Name: "procd"}},
+		},
+	}
 }
 
 func TestCompatibleRoutesDynamicShapeToColdCarrier(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -232,6 +233,7 @@ func TestEnsureProcdConfigSecretHandlesAlreadyExistsWhenListerIsStale(t *testing
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "template-a",
 			Namespace: "tpl-a",
+			UID:       types.UID("template-uid"),
 		},
 	}
 
@@ -261,6 +263,30 @@ func TestEnsureProcdConfigSecretHandlesAlreadyExistsWhenListerIsStale(t *testing
 	require.Len(t, updated.OwnerReferences, 1)
 	require.Equal(t, "SandboxTemplate", updated.OwnerReferences[0].Kind)
 	require.Equal(t, "template-a", updated.OwnerReferences[0].Name)
+}
+
+func TestEnsureProcdConfigSecretOmitsOwnerForReconstructedTemplate(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "internal_jwt_public.key")
+	require.NoError(t, os.WriteFile(keyPath, []byte("test-public-key"), 0o600))
+	previousPath := internalauth.DefaultInternalJWTPublicKeyPath
+	internalauth.DefaultInternalJWTPublicKeyPath = keyPath
+	t.Cleanup(func() {
+		internalauth.DefaultInternalJWTPublicKeyPath = previousPath
+	})
+
+	template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
+		Name: "template-a", Namespace: "tpl-a",
+	}}
+	client := fake.NewSimpleClientset()
+
+	require.NoError(t, EnsureProcdConfigSecret(
+		context.Background(), client, newHelpersSecretLister(t), template,
+	))
+	created, err := client.CoreV1().Secrets("tpl-a").Get(
+		context.Background(), "procd-secret-mrswmylvnr2a-template-a", metav1.GetOptions{},
+	)
+	require.NoError(t, err)
+	require.Empty(t, created.OwnerReferences)
 }
 
 func newHelpersSecretLister(t *testing.T, secrets ...*corev1.Secret) corelisters.SecretLister {

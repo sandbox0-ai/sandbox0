@@ -13,7 +13,7 @@ import (
 )
 
 const templateImageRevisionSelectColumns = `
-	revision_id, template_id, scope, team_id, source_image, spec_hash,
+	revision_id, incarnation_id::text, template_id, scope, team_id, source_image, spec_hash,
 	resolved_digest, platform_os, platform_architecture, platform_variant,
 	image_fs_head_id, oci_config, state, attempt_count, next_attempt_at,
 	lease_owner, lease_expires_at, reason, message, started_at, completed_at,
@@ -321,7 +321,7 @@ func scanTemplateImageRevision(row rowScanner) (*template.TemplateImageRevision,
 	var imageFSHeadID *string
 	var leaseExpiresAt, startedAt, completedAt *time.Time
 	if err := row.Scan(
-		&revision.RevisionID, &revision.TemplateID, &revision.Scope, &revision.TeamID,
+		&revision.RevisionID, &revision.IncarnationID, &revision.TemplateID, &revision.Scope, &revision.TeamID,
 		&revision.SourceImage, &revision.SpecHash, &revision.ResolvedDigest,
 		&revision.PlatformOS, &revision.PlatformArchitecture, &revision.PlatformVariant,
 		&imageFSHeadID, &ociConfig, &revision.State, &revision.AttemptCount,

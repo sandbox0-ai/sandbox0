@@ -16,6 +16,8 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	"github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -69,6 +71,34 @@ func TestEnsureTemplateImageRevisionStaysShadowUntilSelected(t *testing.T) {
 	if loaded.Status != nil && loaded.Status.ImageRevision != nil {
 		t.Fatalf("cleared template still selected revision %#v", loaded.Status.ImageRevision)
 	}
+}
+
+func TestRecreatedTemplateGetsNewImageRevisionIncarnation(t *testing.T) {
+	store, _ := newTemplateStoreIntegrationTest(t)
+	ctx := context.Background()
+	tpl := &template.Template{
+		TemplateID: "recreated-imagefs",
+		Scope:      naming.ScopeTeam,
+		TeamID:     "team-1",
+		UserID:     "user-1",
+		Spec:       integrationTemplateSpec("alpine:3.20"),
+	}
+	recreate := func() *template.TemplateImageRevision {
+		t.Helper()
+		require.NoError(t, store.CreateTemplate(ctx, tpl))
+		revision, created, err := store.EnsureTemplateImageRevision(ctx, tpl)
+		require.NoError(t, err)
+		require.True(t, created)
+		require.NotEmpty(t, revision.IncarnationID)
+		return revision
+	}
+
+	first := recreate()
+	require.NoError(t, store.DeleteTemplate(ctx, tpl.Scope, tpl.TeamID, tpl.TemplateID))
+	second := recreate()
+
+	assert.Equal(t, first.RevisionID, second.RevisionID)
+	assert.NotEqual(t, first.IncarnationID, second.IncarnationID)
 }
 
 func TestEnsureTemplateImageRevisionRevivesOnlySupersededSpec(t *testing.T) {

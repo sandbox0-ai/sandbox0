@@ -10,6 +10,7 @@ import (
 	fakeclientset "github.com/sandbox0-ai/sandbox0/manager/pkg/generated/clientset/versioned/fake"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshead"
 	"github.com/sandbox0-ai/sandbox0/pkg/s0fsrollout"
 	"github.com/sandbox0-ai/sandbox0/pkg/template"
 	templstore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
@@ -221,6 +222,51 @@ func TestProcessSupersededRevisionDeletesStaleImporterPod(t *testing.T) {
 	require.Equal(t, 1, queue.failCalls)
 }
 
+func TestImportRevisionRecoversHeadStagedBeforeReadyCommit(t *testing.T) {
+	tpl := imageFSWorkerTestTemplate()
+	revision, err := template.NewTemplateImageRevision(tpl)
+	require.NoError(t, err)
+	revision.IncarnationID = "11111111-2222-3333-4444-555555555555"
+	revision.State = template.TemplateImageRevisionStateImporting
+	revision.ResolvedDigest = "sha256:resolved"
+	revision.OCIConfig = []byte(`{"architecture":"amd64","os":"linux"}`)
+	headID := templateImageFSHeadID(revision)
+	sourceID := "imagefs:" + revision.RevisionID
+	queue := &workerQueueStub{template: tpl}
+	client := fake.NewSimpleClientset()
+	worker := &Worker{
+		queue: queue,
+		heads: workerHeadStoreStub{head: &sandboxstore.SandboxRootFSHead{
+			SandboxID: sourceID, SourceSandboxID: sourceID, TeamID: revision.ImageFSStorageScope(),
+			RuntimeGeneration: 1, Reference: rootfshead.HeadReference{HeadID: headID},
+		}},
+		k8s:    client,
+		config: Config{WorkerID: "manager/green"},
+		logger: zap.NewNop(),
+	}
+
+	require.NoError(t, worker.importRevision(context.Background(), revision))
+	require.Equal(t, 1, queue.readyCalls)
+	assert.Equal(t, revision.RevisionID, queue.readyRevisionID)
+	assert.Equal(t, headID, queue.readyHeadID)
+	for _, action := range client.Actions() {
+		assert.NotEqual(t, "create", action.GetVerb(), "recovery must not create another importer Pod")
+	}
+}
+
+func TestTemplateImageFSHeadIDSeparatesRevisionIncarnations(t *testing.T) {
+	first := &template.TemplateImageRevision{
+		RevisionID: "tir-stable", IncarnationID: "11111111-2222-3333-4444-555555555555",
+	}
+	second := &template.TemplateImageRevision{
+		RevisionID: "tir-stable", IncarnationID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+	}
+
+	assert.Equal(t, templateImageFSHeadID(first), templateImageFSHeadID(first))
+	assert.NotEqual(t, templateImageFSHeadID(first), templateImageFSHeadID(second))
+	assert.Equal(t, "imagefs-tir-stable-11111111222233334444555555555555", templateImageFSHeadID(first))
+}
+
 func TestWaitForImportContainerReturnsDeterministicStartupFailures(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -404,12 +450,22 @@ type workerQueueStub struct {
 	failedMessage      string
 	releaseCalls       int
 	releasedRevisionID string
+	readyCalls         int
+	readyRevisionID    string
+	readyHeadID        string
 }
 
-type workerHeadStoreStub struct{}
+type workerHeadStoreStub struct {
+	head   *sandboxstore.SandboxRootFSHead
+	getErr error
+}
 
 func (workerHeadStoreStub) StageRootFSHead(context.Context, *sandboxstore.SandboxRootFSHead) error {
 	return nil
+}
+
+func (s workerHeadStoreStub) GetRootFSHeadByID(context.Context, string, string) (*sandboxstore.SandboxRootFSHead, error) {
+	return s.head, s.getErr
 }
 
 func (s *workerQueueStub) ListTemplates(context.Context) ([]*template.Template, error) {
@@ -456,6 +512,13 @@ func (s *workerQueueStub) FailTemplateImageRevision(_ context.Context, revisionI
 func (s *workerQueueStub) ReleaseTemplateImageRevision(_ context.Context, revisionID, _ string, _ time.Time, _ string) error {
 	s.releaseCalls++
 	s.releasedRevisionID = revisionID
+	return nil
+}
+
+func (s *workerQueueStub) MarkTemplateImageRevisionReady(_ context.Context, revisionID, _ string, headID string, _ time.Time) error {
+	s.readyCalls++
+	s.readyRevisionID = revisionID
+	s.readyHeadID = headID
 	return nil
 }
 

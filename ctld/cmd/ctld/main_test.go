@@ -57,38 +57,19 @@ func TestCombinedControllerExposesPrimaryHealth(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestCtldPauseResumeStubsReturnNotImplemented(t *testing.T) {
+func TestCtldDoesNotExposeRemovedPauseResumeRoutes(t *testing.T) {
 	server := newHTTPServer(":0", nil)
-
-	t.Run("custom controller", func(t *testing.T) {
-		server := newHTTPServer(":0", ctldserver.NotImplementedController{})
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/pause", nil)
-		rec := httptest.NewRecorder()
-		server.Handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusNotImplemented, rec.Code)
-	})
-
-	t.Run("pause", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/pause", nil)
-		rec := httptest.NewRecorder()
-		server.Handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusNotImplemented, rec.Code)
-		var resp ctldapi.PauseResponse
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		assert.False(t, resp.Paused)
-		assert.Equal(t, "ctld pause not implemented", resp.Error)
-	})
-
-	t.Run("resume", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/resume", nil)
-		rec := httptest.NewRecorder()
-		server.Handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusNotImplemented, rec.Code)
-		var resp ctldapi.ResumeResponse
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-		assert.False(t, resp.Resumed)
-		assert.Equal(t, "ctld resume not implemented", resp.Error)
-	})
+	for _, path := range []string{
+		"/api/v1/sandboxes/sandbox-1/pause",
+		"/api/v1/sandboxes/sandbox-1/resume",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			rec := httptest.NewRecorder()
+			server.Handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusNotFound, rec.Code)
+		})
+	}
 }
 
 func TestCombinedControllerRoutesRootFSSnapshotAPI(t *testing.T) {

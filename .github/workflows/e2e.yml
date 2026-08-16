@@ -15,7 +15,7 @@ on:
       - "cluster-gateway/**"
       - "k8s-plugin/**"
       - "manager/**"
-      - "netd/**"
+      - "ctld/**"
       - "pkg/**"
       - "scheduler/**"
       - "tests/**"

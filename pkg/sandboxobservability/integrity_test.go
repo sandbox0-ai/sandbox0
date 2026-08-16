@@ -17,7 +17,7 @@ func TestEventIntegrityIsCanonicalAndDetectsTampering(t *testing.T) {
 		ClusterID:     "cluster-1",
 		OccurredAt:    time.Date(2026, 7, 13, 1, 2, 3, 4, time.FixedZone("offset", 8*60*60)),
 		IngestedAt:    time.Date(2026, 7, 13, 1, 2, 4, 4, time.UTC),
-		Source:        SourceNetd,
+		Source:        SourceCtld,
 		EventType:     EventTypeNetworkAudit,
 		Phase:         EventPhaseResult,
 		Outcome:       OutcomeCompleted,
@@ -25,7 +25,7 @@ func TestEventIntegrityIsCanonicalAndDetectsTampering(t *testing.T) {
 		Action:        "network.connect",
 		Resource:      AuditResource{Type: "sandbox_network", ID: "sb-1"},
 		OperationID:   "operation-1",
-		Producer:      AuditProducer{Service: "netd", Instance: "node-1", Sequence: 42},
+		Producer:      AuditProducer{Service: "ctld", Instance: "node-1", Sequence: 42},
 		Attributes:    map[string]any{"z": "last", "a": "first"},
 	}
 	if err := SignEvent(&event, key); err != nil {
@@ -58,7 +58,7 @@ func TestVerifyEventIntegrityRejectsMalformedPublicKey(t *testing.T) {
 		RegionID:      "region-1",
 		ClusterID:     "cluster-1",
 		OccurredAt:    time.Date(2026, 7, 13, 1, 2, 3, 4, time.UTC),
-		Source:        SourceNetd,
+		Source:        SourceCtld,
 		EventType:     EventTypeNetworkAudit,
 		Phase:         EventPhaseAttempt,
 		Outcome:       OutcomeAccepted,
@@ -66,7 +66,7 @@ func TestVerifyEventIntegrityRejectsMalformedPublicKey(t *testing.T) {
 		Action:        "network.connect",
 		Resource:      AuditResource{Type: "sandbox_network", ID: "sb-1"},
 		OperationID:   "operation-1",
-		Producer:      AuditProducer{Service: "netd"},
+		Producer:      AuditProducer{Service: "ctld"},
 	}
 	if err := SignEvent(&event, key); err != nil {
 		t.Fatalf("SignEvent() error = %v", err)

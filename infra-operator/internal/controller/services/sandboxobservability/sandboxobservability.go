@@ -89,7 +89,7 @@ func ApplyClusterGatewayConfig(ctx context.Context, c client.Client, infra *infr
 	return nil
 }
 
-func ApplyNetdConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, clusterGatewayURL string, cfg *apiconfig.NetdConfig) error {
+func ApplyNetworkRuntimeConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.Sandbox0Infra, clusterGatewayURL string, cfg *apiconfig.NetworkRuntimeConfig) error {
 	if cfg == nil {
 		return nil
 	}
@@ -104,7 +104,7 @@ func ApplyNetdConfig(ctx context.Context, c client.Client, infra *infrav1alpha1.
 		return nil
 	}
 	cfg.SandboxObservabilityIngestURL = strings.TrimRight(clusterGatewayURL, "/") + "/internal/v1/sandbox-observability/events"
-	cfg.SandboxObservabilityAuditSpoolDir = "/var/lib/sandbox0/netd/audit-spool"
+	cfg.SandboxObservabilityAuditSpoolDir = "/var/lib/sandbox0/ctld/networking/audit-spool"
 	cfg.SandboxObservabilityAuditDeliveryMode = runtimeCfg.AuditDeliveryMode
 	applyIngestConfig(runtimeCfg.Ingest, cfg)
 	return nil
@@ -225,7 +225,7 @@ func applyTableOverrides(infra *infrav1alpha1.Sandbox0Infra, cfg *RuntimeConfig)
 	}
 }
 
-func applyIngestConfig(ingest infrav1alpha1.SandboxObservabilityIngestConfig, cfg *apiconfig.NetdConfig) {
+func applyIngestConfig(ingest infrav1alpha1.SandboxObservabilityIngestConfig, cfg *apiconfig.NetworkRuntimeConfig) {
 	cfg.SandboxObservabilityIngestQueueSize = ingest.QueueSize
 	cfg.SandboxObservabilityIngestBatchSize = ingest.BatchSize
 	cfg.SandboxObservabilityIngestFlushInterval = ingest.FlushInterval

@@ -148,7 +148,7 @@ func newWorkflowNodeReadinessInfra() *infrav1alpha1.Sandbox0Infra {
 	return &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}},
+			Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetworkRuntimeConfig{}},
 			SandboxNodePlacement: &infrav1alpha1.SandboxNodePlacementConfig{
 				NodeSelector: map[string]string{"sandbox0.ai/node-role": "sandbox"},
 			},

@@ -33,7 +33,7 @@ func buildManagerNetworkComponents(
 		provider:      network.NewNoopProvider(),
 	}
 	baseline, err := namespacepolicy.NewReconciler(k8sClient, networkPolicyLister, namespacepolicy.Config{
-		SystemNamespace: cfg.NetdMITMCASecretNamespace,
+		SystemNamespace: cfg.NetworkMITMCASecretNamespace,
 		ProcdPort:       cfg.ProcdConfig.HTTPPort,
 	}, logger)
 	if err != nil {
@@ -41,7 +41,7 @@ func buildManagerNetworkComponents(
 	} else {
 		components.namespacePolicy = baseline
 		logger.Info("Template namespace ingress baseline enabled",
-			zap.String("systemNamespace", cfg.NetdMITMCASecretNamespace),
+			zap.String("systemNamespace", cfg.NetworkMITMCASecretNamespace),
 			zap.Int("procdPort", cfg.ProcdConfig.HTTPPort),
 		)
 	}
@@ -49,14 +49,14 @@ func buildManagerNetworkComponents(
 	switch strings.TrimSpace(strings.ToLower(cfg.NetworkPolicyProvider)) {
 	case "", "noop":
 		logger.Info("Network provider set to noop")
-	case "netd":
-		components.provider = network.NewNetdProvider(podInformer, podLister, network.NetdProviderConfig{
-			ApplyTimeout: cfg.NetdPolicyApplyTimeout.Duration,
-			PollInterval: cfg.NetdPolicyApplyPollInterval.Duration,
+	case "ctld":
+		components.provider = network.NewCtldProvider(podInformer, podLister, network.CtldProviderConfig{
+			ApplyTimeout: cfg.NetworkPolicyApplyTimeout.Duration,
+			PollInterval: cfg.NetworkPolicyApplyPollInterval.Duration,
 		}, logger)
 		logger.Info("Network provider set to ctld network runtime",
-			zap.Duration("applyTimeout", cfg.NetdPolicyApplyTimeout.Duration),
-			zap.Duration("pollInterval", cfg.NetdPolicyApplyPollInterval.Duration),
+			zap.Duration("applyTimeout", cfg.NetworkPolicyApplyTimeout.Duration),
+			zap.Duration("pollInterval", cfg.NetworkPolicyApplyPollInterval.Duration),
 		)
 	default:
 		logger.Warn("Unknown network policy provider, falling back to noop",

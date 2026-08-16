@@ -34,13 +34,13 @@ func TestCompilePlanSelectsNetworkPolicyProvider(t *testing.T) {
 		}
 	})
 
-	t.Run("uses netd when network is enabled", func(t *testing.T) {
+	t.Run("uses ctld when network is enabled", func(t *testing.T) {
 		infra := &infrav1alpha1.Sandbox0Infra{
 			Spec: infrav1alpha1.Sandbox0InfraSpec{
-				Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}},
+				Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetworkRuntimeConfig{}},
 			},
 		}
-		if got := infraplan.Compile(infra).Manager.NetworkPolicyProvider; got != "netd" {
+		if got := infraplan.Compile(infra).Manager.NetworkPolicyProvider; got != "ctld" {
 			t.Fatalf("expected ctld network runtime provider, got %q", got)
 		}
 	})
@@ -83,7 +83,7 @@ func TestCompilePlanSandboxPodPlacementPrefersSharedPlacement(t *testing.T) {
 func TestBuildConfigPropagatesNetworkMITMCASecretName(t *testing.T) {
 	t.Run("uses explicit secret name", func(t *testing.T) {
 		reconciler := newManagerTestReconciler(t)
-		if err := reconciler.Resources.Client.Create(context.Background(), newValidMITMCASecret(t, "sandbox0-system", "custom-netd-ca")); err != nil {
+		if err := reconciler.Resources.Client.Create(context.Background(), newValidMITMCASecret(t, "sandbox0-system", "custom-ctld-network-ca")); err != nil {
 			t.Fatalf("seed explicit network-runtime MITM CA secret: %v", err)
 		}
 		infra := &infrav1alpha1.Sandbox0Infra{
@@ -103,8 +103,8 @@ func TestBuildConfigPropagatesNetworkMITMCASecretName(t *testing.T) {
 					},
 				},
 				Network: &infrav1alpha1.NetworkConfig{
-					MITMCASecretName: "custom-netd-ca",
-					Config:           &infrav1alpha1.NetdConfig{},
+					MITMCASecretName: "custom-ctld-network-ca",
+					Config:           &infrav1alpha1.NetworkRuntimeConfig{},
 				},
 			},
 		}
@@ -113,11 +113,11 @@ func TestBuildConfigPropagatesNetworkMITMCASecretName(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildConfig returned error: %v", err)
 		}
-		if cfg.NetdMITMCASecretName != "custom-netd-ca" {
-			t.Fatalf("network-runtime MITM CA secret = %q, want custom-netd-ca", cfg.NetdMITMCASecretName)
+		if cfg.NetworkMITMCASecretName != "custom-ctld-network-ca" {
+			t.Fatalf("network-runtime MITM CA secret = %q, want custom-ctld-network-ca", cfg.NetworkMITMCASecretName)
 		}
-		if cfg.NetdMITMCASecretNamespace != "sandbox0-system" {
-			t.Fatalf("network-runtime MITM CA secret namespace = %q, want sandbox0-system", cfg.NetdMITMCASecretNamespace)
+		if cfg.NetworkMITMCASecretNamespace != "sandbox0-system" {
+			t.Fatalf("network-runtime MITM CA secret namespace = %q, want sandbox0-system", cfg.NetworkMITMCASecretNamespace)
 		}
 	})
 
@@ -139,7 +139,7 @@ func TestBuildConfigPropagatesNetworkMITMCASecretName(t *testing.T) {
 						SSLMode:  "disable",
 					},
 				},
-				Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}},
+				Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetworkRuntimeConfig{}},
 			},
 		}
 
@@ -147,17 +147,17 @@ func TestBuildConfigPropagatesNetworkMITMCASecretName(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildConfig returned error: %v", err)
 		}
-		if cfg.NetdMITMCASecretName != "demo-netd-mitm-ca" {
-			t.Fatalf("network-runtime MITM CA secret = %q, want demo-netd-mitm-ca", cfg.NetdMITMCASecretName)
+		if cfg.NetworkMITMCASecretName != "demo-ctld-network-mitm-ca" {
+			t.Fatalf("network-runtime MITM CA secret = %q, want demo-ctld-network-mitm-ca", cfg.NetworkMITMCASecretName)
 		}
-		if cfg.NetdMITMCASecretNamespace != "sandbox0-system" {
-			t.Fatalf("network-runtime MITM CA secret namespace = %q, want sandbox0-system", cfg.NetdMITMCASecretNamespace)
+		if cfg.NetworkMITMCASecretNamespace != "sandbox0-system" {
+			t.Fatalf("network-runtime MITM CA secret namespace = %q, want sandbox0-system", cfg.NetworkMITMCASecretNamespace)
 		}
 
 		secret := &corev1.Secret{}
 		if err := reconciler.Resources.Client.Get(context.Background(), types.NamespacedName{
 			Namespace: "sandbox0-system",
-			Name:      "demo-netd-mitm-ca",
+			Name:      "demo-ctld-network-mitm-ca",
 		}, secret); err != nil {
 			t.Fatalf("expected managed network-runtime MITM CA secret to be created: %v", err)
 		}
@@ -573,7 +573,7 @@ func newValidMITMCASecret(t *testing.T, namespace, name string) *corev1.Secret {
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName:   "test-netd-mitm-ca",
+			CommonName:   "test-ctld-network-mitm-ca",
 			Organization: []string{"sandbox0"},
 		},
 		NotBefore:             now.Add(-time.Hour),

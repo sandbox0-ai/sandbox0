@@ -113,7 +113,7 @@ func (c *Controller) Probe(kind sandboxprobe.Kind) sandboxprobe.Response {
 	switch state.Observed {
 	case runtimecontrol.ObservedStandby:
 		return sandboxprobe.Passed(kind, "RuntimeStandby", "runtime is ready for assignment", nil)
-	case runtimecontrol.ObservedWaiting:
+	case runtimecontrol.ObservedWaitingRootFS:
 		if kind == sandboxprobe.KindReadiness {
 			return sandboxprobe.Suspended(kind, "RuntimeWaitingStorage", "runtime assignment is waiting for storage", nil)
 		}
@@ -159,11 +159,11 @@ func (c *Controller) HandleSnapshot(ctx context.Context, snapshot runtimecontrol
 	switch snapshot.State {
 	case runtimecontrol.DesiredStandby:
 		return c.observe(report, snapshot, runtimecontrol.ObservedStandby, "")
-	case runtimecontrol.DesiredWaitingStorage:
+	case runtimecontrol.DesiredWaitingRootFS:
 		if snapshot.Assignment == nil {
 			return c.failActiveSnapshot(report, snapshot, errors.New("runtime assignment is missing"))
 		}
-		return c.observe(report, snapshot, runtimecontrol.ObservedWaiting, "runtime assignment is waiting for storage")
+		return c.observe(report, snapshot, runtimecontrol.ObservedWaitingRootFS, "runtime assignment is waiting for storage")
 	case runtimecontrol.DesiredActive:
 		return c.activate(ctx, snapshot, report)
 	case runtimecontrol.DesiredRevoked:

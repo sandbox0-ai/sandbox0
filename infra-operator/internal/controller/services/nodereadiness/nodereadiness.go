@@ -21,7 +21,7 @@ const (
 	labelManagedBy          = "app.kubernetes.io/managed-by"
 	labelInstance           = "app.kubernetes.io/instance"
 	labelComponent          = "app.kubernetes.io/component"
-	networkRuntimeConfigEnv = "NETD_CONFIG_PATH"
+	networkRuntimeConfigEnv = "CTLD_NETWORK_CONFIG_PATH"
 )
 
 type Reconciler struct {

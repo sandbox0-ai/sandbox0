@@ -111,17 +111,17 @@ func TestSandboxObservabilityHandlerParsesTypedQuery(t *testing.T) {
 				ClusterID:  "cluster-a",
 				OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC),
 				IngestedAt: time.Date(2026, 7, 1, 1, 2, 4, 0, time.UTC),
-				Source:     sandboxobservability.SourceNetd,
+				Source:     sandboxobservability.SourceCtld,
 				EventType:  sandboxobservability.EventTypeNetworkAudit,
 				Outcome:    sandboxobservability.OutcomeDenied,
 			}},
-			NextCursor: "netd:11",
-			Watermark:  "netd:10",
+			NextCursor: "ctld:11",
+			Watermark:  "ctld:10",
 		},
 	}
 	handler := NewSandboxObservabilityHandler(repo, zap.NewNop())
 
-	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?start_time="+start+"&end_time="+end+"&limit=5000&cursor=abc&source=netd&event_type=network_audit&outcome=denied&actor_kind=human&actor_id=user-1&action=sandbox.pause&resource_type=sandbox&operation_id=operation-1")
+	rec := serveSandboxObservabilityRequest(t, handler.ListEvents, "/api/v1/sandboxes/sb-1/observability/events?start_time="+start+"&end_time="+end+"&limit=5000&cursor=abc&source=ctld&event_type=network_audit&outcome=denied&actor_kind=human&actor_id=user-1&action=sandbox.pause&resource_type=sandbox&operation_id=operation-1")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -136,7 +136,7 @@ func TestSandboxObservabilityHandlerParsesTypedQuery(t *testing.T) {
 		t.Fatalf("limit = %d, want %d", repo.lastQuery.Limit, maxSandboxObservabilityLimit)
 	}
 	if repo.lastQuery.Cursor != "abc" ||
-		repo.lastQuery.Source != sandboxobservability.SourceNetd ||
+		repo.lastQuery.Source != sandboxobservability.SourceCtld ||
 		repo.lastQuery.EventType != sandboxobservability.EventTypeNetworkAudit ||
 		repo.lastQuery.Outcome != sandboxobservability.OutcomeDenied ||
 		repo.lastQuery.ActorKind != sandboxobservability.ActorKindHuman ||
@@ -580,7 +580,7 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
 		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
 	}))
-	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"event_id":"11111111-1111-4111-8111-111111111111","team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"netd","event_type":"network_audit","phase":"effect","outcome":"completed","operation_id":"99999999-9999-4999-8999-999999999999","producer":{"service":"netd"},"request":{"request_id":"spoofed","http_method":"POST","status_code":200},"attributes":{"action":"use-adapter","protocol_operations_truncated":true,"not_allowed":"drop-me"}}]}`)
+	rec := serveSandboxObservabilityIngestRequest(t, "/internal/v1/sandbox-observability/events", handler.IngestEvents, `{"events":[{"event_id":"11111111-1111-4111-8111-111111111111","team_id":"team-1","sandbox_id":"sb-1","occurred_at":"2026-07-01T01:02:03Z","source":"ctld","event_type":"network_audit","phase":"effect","outcome":"completed","operation_id":"99999999-9999-4999-8999-999999999999","producer":{"service":"ctld"},"request":{"request_id":"spoofed","http_method":"POST","status_code":200},"attributes":{"action":"use-adapter","protocol_operations_truncated":true,"not_allowed":"drop-me"}}]}`)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -589,7 +589,7 @@ func TestSandboxObservabilityHandlerIngestEvents(t *testing.T) {
 		t.Fatalf("ingest called=%v events=%d", repo.ingestCalled, len(repo.ingestEvents))
 	}
 	event := repo.ingestEvents[0]
-	if event.Source != sandboxobservability.SourceNetd || event.Actor.Kind != sandboxobservability.ActorKindSandboxWorkload || event.Action != "network.connect" {
+	if event.Source != sandboxobservability.SourceCtld || event.Actor.Kind != sandboxobservability.ActorKindSandboxWorkload || event.Action != "network.connect" {
 		t.Fatalf("normalized event = %+v", event)
 	}
 	if truncated, _ := event.Attributes["protocol_operations_truncated"].(bool); !truncated {
@@ -672,7 +672,7 @@ func TestSanitizeNetworkAuditAttributesBoundsEncodedSize(t *testing.T) {
 	}
 }
 
-func TestNormalizeNetdAuditReplayKeepsStableReplacingKey(t *testing.T) {
+func TestNormalizeNetworkingAuditReplayKeepsStableReplacingKey(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	now := time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC)
 	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
@@ -688,7 +688,7 @@ func TestNormalizeNetdAuditReplayKeepsStableReplacingKey(t *testing.T) {
 		Producer:    sandboxobservability.AuditProducer{Sequence: 42},
 		Attributes:  map[string]any{"action": "use-adapter", "host": "example.com"},
 	}
-	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{Caller: "netd", TeamID: "team-1", SandboxID: "sb-1"})
+	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{Caller: "ctld", TeamID: "team-1", SandboxID: "sb-1"})
 	first := []sandboxobservability.Event{raw}
 	if err := handler.normalizeAuditEvents(ctx, first); err != nil {
 		t.Fatalf("first normalizeAuditEvents() error = %v", err)
@@ -723,6 +723,31 @@ func TestNormalizeNetdAuditReplayKeepsStableReplacingKey(t *testing.T) {
 	}
 }
 
+func TestNormalizeNetworkingAuditCanonicalizesLegacyProducerDuringRollout(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
+		RegionID: "region-1", ClusterID: "cluster-1", SigningKey: key,
+		Now: func() time.Time { return time.Date(2026, 7, 1, 1, 3, 0, 0, time.UTC) },
+	}))
+	events := []sandboxobservability.Event{{
+		EventID: "88888888-8888-4888-8888-888888888888", TeamID: "team-1", SandboxID: "sb-1",
+		OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 0, time.UTC),
+		EventType:  sandboxobservability.EventTypeNetworkAudit,
+		Phase:      sandboxobservability.EventPhaseAttempt, Outcome: sandboxobservability.OutcomeAccepted,
+		OperationID: "99999999-9999-4999-8999-999999999999",
+		Attributes:  map[string]any{"action": "connect", "host": "example.com"},
+	}}
+	ctx := internalauth.WithClaims(context.Background(), &internalauth.Claims{
+		Caller: internalauth.ServiceLegacyNetworkRuntime, TeamID: "team-1", SandboxID: "sb-1",
+	})
+	if err := handler.normalizeAuditEvents(ctx, events); err != nil {
+		t.Fatalf("normalizeAuditEvents() error = %v", err)
+	}
+	if events[0].Source != sandboxobservability.SourceCtld || events[0].Producer.Service != internalauth.ServiceCtld {
+		t.Fatalf("legacy producer was not canonicalized: %#v", events[0])
+	}
+}
+
 func TestSandboxObservabilityHandlerRejectsUnscopedOrSpoofedAuditIngest(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	handler := NewSandboxObservabilityHandler(&fakeSandboxObservabilityRepo{}, zap.NewNop(), WithAuditIntegrityPolicy(AuditIntegrityPolicy{
@@ -739,10 +764,10 @@ func TestSandboxObservabilityHandlerRejectsUnscopedOrSpoofedAuditIngest(t *testi
 		claims *internalauth.Claims
 		event  sandboxobservability.Event
 	}{
-		{name: "system token", claims: &internalauth.Claims{Caller: "netd", IsSystem: true}, event: base},
-		{name: "team spoof", claims: &internalauth.Claims{Caller: "netd", TeamID: "team-2", SandboxID: "sb-1"}, event: base},
-		{name: "sandbox spoof", claims: &internalauth.Claims{Caller: "netd", TeamID: "team-1", SandboxID: "sb-2"}, event: base},
-		{name: "caller spoof", claims: &internalauth.Claims{Caller: "ctld", TeamID: "team-1", SandboxID: "sb-1"}, event: base},
+		{name: "system token", claims: &internalauth.Claims{Caller: "ctld", IsSystem: true}, event: base},
+		{name: "team spoof", claims: &internalauth.Claims{Caller: "ctld", TeamID: "team-2", SandboxID: "sb-1"}, event: base},
+		{name: "sandbox spoof", claims: &internalauth.Claims{Caller: "ctld", TeamID: "team-1", SandboxID: "sb-2"}, event: base},
+		{name: "caller spoof", claims: &internalauth.Claims{Caller: "manager", TeamID: "team-1", SandboxID: "sb-1"}, event: base},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -832,7 +857,7 @@ func withTestAuth(next gin.HandlerFunc) gin.HandlerFunc {
 		}
 		c.Request = c.Request.WithContext(authn.WithAuthContext(c.Request.Context(), authCtx))
 		c.Request = c.Request.WithContext(internalauth.WithClaims(c.Request.Context(), &internalauth.Claims{
-			Caller: "netd", TeamID: "team-1", SandboxID: "sb-1",
+			Caller: "ctld", TeamID: "team-1", SandboxID: "sb-1",
 		}))
 		next(c)
 	}

@@ -313,7 +313,7 @@ func (h *SandboxObservabilityHandler) normalizeAuditEvents(ctx context.Context, 
 	if claims == nil || claims.IsSystem || strings.TrimSpace(claims.TeamID) == "" || strings.TrimSpace(claims.SandboxID) == "" {
 		return fmt.Errorf("audit ingest requires a team and sandbox scoped token")
 	}
-	if strings.TrimSpace(claims.Caller) != "netd" {
+	if !internalauth.IsCtldNetworkCaller(strings.TrimSpace(claims.Caller)) {
 		return fmt.Errorf("audit producer is not allowed")
 	}
 	now := h.audit.Now().UTC()
@@ -338,8 +338,8 @@ func (h *SandboxObservabilityHandler) normalizeAuditEvents(ctx context.Context, 
 		event.RegionID = strings.TrimSpace(h.audit.RegionID)
 		event.ClusterID = strings.TrimSpace(h.audit.ClusterID)
 		event.IngestedAt = now
-		event.Source = sandboxobservability.SourceNetd
-		event.Producer.Service = claims.Caller
+		event.Source = sandboxobservability.SourceCtld
+		event.Producer.Service = internalauth.ServiceCtld
 		event.Actor = sandboxobservability.AuditActor{
 			Kind:       sandboxobservability.ActorKindSandboxWorkload,
 			ID:         event.SandboxID,

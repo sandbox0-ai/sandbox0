@@ -83,7 +83,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 
 	labels := common.GetServiceLabels(scope.Name, "cluster-gateway")
 	dataPlaneSecretName, dataPlanePrivateKey, _ := compiledPlan.DataPlaneKeyRefs()
-	auditKeySecretName, _, auditPublicKey := compiledPlan.AuditNetdKeyRefs()
+	auditKeySecretName, _, auditPublicKey := compiledPlan.NetworkAuditKeyRefs()
 	auditSigningSecretName, auditSigningPrivateKey, auditSigningPublicKey := compiledPlan.AuditSigningKeyRefs()
 
 	config, err := r.buildConfig(ctx, compiledPlan)

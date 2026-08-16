@@ -1021,7 +1021,7 @@ func (s *SandboxService) createNewPod(ctx context.Context, template *v1alpha1.Sa
 	if err := controller.EnsureProcdConfigSecret(ctx, s.k8sClient, s.secretLister, template); err != nil {
 		return nil, fmt.Errorf("ensure procd config secret: %w", err)
 	}
-	if err := controller.EnsureNetdMITMCASecret(ctx, s.k8sClient, s.secretLister, template.Namespace); err != nil {
+	if err := controller.EnsureNetworkMITMCASecret(ctx, s.k8sClient, s.secretLister, template.Namespace); err != nil {
 		return nil, fmt.Errorf("ensure network-runtime MITM CA secret: %w", err)
 	}
 

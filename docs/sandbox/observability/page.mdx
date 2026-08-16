@@ -114,7 +114,7 @@ The audit endpoint reads canonical signed facts from ClickHouse. It returns `403
 | `limit` | integer | Maximum events to return (default: 100, max: 1000); exact `event_id` lookup ignores it and returns at most two payload variants |
 | `cursor` | string | Opaque cursor from a previous response; in watch mode, use a `watermark` cursor |
 | `watch` | boolean | Stream matching records as NDJSON until the client disconnects |
-| `source` | string | Trusted producer, such as `cluster_gateway` or `netd`; `netd` identifies ctld network-runtime events |
+| `source` | string | Trusted producer, such as `cluster_gateway` or `ctld`; network audit events are produced by ctld's network runtime |
 | `event_type` | string | Category such as `api_access` or `network_audit` |
 | `outcome` | string | `completed`, `denied`, `error`, `succeeded`, `failed`, `accepted`, or `unknown` |
 | `actor_kind` | string | Trusted actor kind, such as `human`, `api_key`, `service`, or `sandbox_workload` |

@@ -13,7 +13,7 @@ func TestPageCursorRoundTrip(t *testing.T) {
 		EventID:    "11111111-1111-4111-8111-111111111111",
 		OccurredAt: time.Date(2026, 7, 1, 1, 2, 3, 4, time.FixedZone("offset", 8*60*60)),
 		IngestedAt: time.Date(2026, 7, 1, 1, 2, 4, 5, time.UTC),
-		Source:     sandboxobservability.SourceNetd,
+		Source:     sandboxobservability.SourceCtld,
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
 	}
 
@@ -46,7 +46,7 @@ func TestPageCursorRejectsInvalidValue(t *testing.T) {
 
 func TestTailCursorRoundTripAndRejectsWrongKind(t *testing.T) {
 	ingestedAt := time.Date(2026, 7, 1, 1, 2, 4, 5, time.FixedZone("offset", 8*60*60))
-	encoded, err := encodeTailCursor(eventTailCursorKind, ingestedAt, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "netd:cursor:1", "hash-1")
+	encoded, err := encodeTailCursor(eventTailCursorKind, ingestedAt, string(sandboxobservability.SourceCtld), string(sandboxobservability.EventTypeNetworkAudit), "ctld:cursor:1", "hash-1")
 	if err != nil {
 		t.Fatalf("encodeTailCursor() error = %v", err)
 	}
@@ -56,9 +56,9 @@ func TestTailCursorRoundTripAndRejectsWrongKind(t *testing.T) {
 	}
 	if decoded.Kind != eventTailCursorKind ||
 		!decoded.IngestedAt.Equal(ingestedAt) ||
-		decoded.Source != string(sandboxobservability.SourceNetd) ||
+		decoded.Source != string(sandboxobservability.SourceCtld) ||
 		decoded.EventType != string(sandboxobservability.EventTypeNetworkAudit) ||
-		decoded.Cursor != "netd:cursor:1" {
+		decoded.Cursor != "ctld:cursor:1" {
 		t.Fatalf("decoded cursor = %+v", decoded)
 	}
 	if decoded.IngestedAt.Location() != time.UTC {

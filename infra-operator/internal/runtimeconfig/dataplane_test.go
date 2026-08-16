@@ -96,8 +96,8 @@ func TestToManagerPreservesSandboxMaxMemory(t *testing.T) {
 	}
 }
 
-func TestToNetdLeavesSandboxObservabilityIngestUnset(t *testing.T) {
-	cfg := ToNetd(&infrav1alpha1.NetdConfig{})
+func TestToNetworkRuntimeLeavesSandboxObservabilityIngestUnset(t *testing.T) {
+	cfg := ToNetworkRuntime(&infrav1alpha1.NetworkRuntimeConfig{})
 	if cfg.SandboxObservabilityIngestURL != "" ||
 		cfg.SandboxObservabilityIngestQueueSize != 0 ||
 		cfg.SandboxObservabilityIngestBatchSize != 0 ||
@@ -141,8 +141,8 @@ func TestToManagerPreservesPodTeardownAndAutoscalerAnnotations(t *testing.T) {
 	}
 }
 
-func TestToNetdPreservesBandwidthLimits(t *testing.T) {
-	cfg := ToNetd(&infrav1alpha1.NetdConfig{
+func TestToNetworkRuntimePreservesBandwidthLimits(t *testing.T) {
+	cfg := ToNetworkRuntime(&infrav1alpha1.NetworkRuntimeConfig{
 		EgressBandwidthBytesPerSecond:      1024,
 		IngressBandwidthBytesPerSecond:     2048,
 		BandwidthBurstBytes:                4096,

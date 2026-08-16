@@ -24,7 +24,7 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
-	netdsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
+	ctldnetworkingassets "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/ctldnetworking"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
@@ -56,7 +56,7 @@ func TestReconcileUsesSharedSandboxNodePlacement(t *testing.T) {
 
 func TestReconcileConfiguresNetworkRuntimeInBothHASlots(t *testing.T) {
 	infra := newCtldTestInfra()
-	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{MetricsPort: 9191}}
+	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetworkRuntimeConfig{MetricsPort: 9191}}
 
 	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
@@ -71,8 +71,8 @@ func TestReconcileConfiguresNetworkRuntimeInBothHASlots(t *testing.T) {
 		if ds.Spec.Template.Annotations[ctldRolloutRevisionAnnotation] == "" {
 			t.Fatalf("%s is missing the staged rollout revision", ds.Name)
 		}
-		assertContainerEnv(t, container.Env, "NETD_CONFIG_PATH", netdsvc.ConfigPath)
-		assertContainerVolumeMount(t, container.VolumeMounts, netdsvc.ConfigVolumeName, netdsvc.ConfigPath)
+		assertContainerEnv(t, container.Env, "CTLD_NETWORK_CONFIG_PATH", ctldnetworkingassets.ConfigPath)
+		assertContainerVolumeMount(t, container.VolumeMounts, ctldnetworkingassets.ConfigVolumeName, ctldnetworkingassets.ConfigPath)
 		assertContainerVolumeMount(t, container.VolumeMounts, "bpf-fs", "/sys/fs/bpf")
 		assertContainerVolumeMount(t, container.VolumeMounts, "modules", "/lib/modules")
 		assertContainerVolumeMount(t, container.VolumeMounts, "internal-jwt-private-key", "/secrets/internal_jwt_private.key")
@@ -119,7 +119,16 @@ func TestReconcileRemovesDisabledNetworkRuntimeAssets(t *testing.T) {
 	infra.Spec.Network = nil
 	staleConfig := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "demo-netd-config-old",
+			Name:      "demo-ctld-networking-config-old",
+			Namespace: infra.Namespace,
+			Annotations: map[string]string{
+				common.ServiceConfigBaseNameAnnotation: infra.Name + "-ctld-networking",
+			},
+		},
+	}
+	legacyConfig := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-legacy-network-config-old",
 			Namespace: infra.Namespace,
 			Annotations: map[string]string{
 				common.ServiceConfigBaseNameAnnotation: infra.Name + "-netd",
@@ -130,10 +139,11 @@ func TestReconcileRemovesDisabledNetworkRuntimeAssets(t *testing.T) {
 		Name:      infra.Name + networkMetricsServiceSuffix,
 		Namespace: infra.Namespace,
 	}}
-	_, client := reconcileCtldResources(t, infra, staleConfig, staleMetrics)
+	_, client := reconcileCtldResources(t, infra, staleConfig, legacyConfig, staleMetrics)
 
 	for _, object := range []ctrlclient.Object{
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: staleConfig.Name, Namespace: staleConfig.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: legacyConfig.Name, Namespace: legacyConfig.Namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: staleMetrics.Name, Namespace: staleMetrics.Namespace}},
 	} {
 		err := client.Get(context.Background(), ctrlclient.ObjectKeyFromObject(object), object)
@@ -146,7 +156,7 @@ func TestReconcileRemovesDisabledNetworkRuntimeAssets(t *testing.T) {
 func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 	ctx := context.Background()
 	infra := newCtldTestInfra()
-	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}}
+	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetworkRuntimeConfig{}}
 	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
 		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.10"},
@@ -187,7 +197,7 @@ func TestReconcileStagesHASlotRolloutBThenA(t *testing.T) {
 func TestReadyRejectsHealthyPreviousRevisionDuringNetworkDisableRollout(t *testing.T) {
 	ctx := context.Background()
 	infra := newCtldTestInfra()
-	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}}
+	infra.Spec.Network = &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetworkRuntimeConfig{}}
 	primary, client := reconcileCtldResources(t, infra, &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
 		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.10"},

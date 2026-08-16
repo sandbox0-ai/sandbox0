@@ -347,15 +347,15 @@ func registerApiModeSuite(envProvider func() *framework.ScenarioEnv, opts apiMod
 				})
 
 				It("enforces transparent TCP egress through the ctld network runtime", func() {
-					assertNetdTransparentEgressPolicy(env, session, sandboxID)
+					assertNetworkingTransparentEgressPolicy(env, session, sandboxID)
 				})
 
 				It("resolves cluster DNS over UDP with the ctld network runtime active", func() {
-					assertNetdClusterDNSUDP(env, session, sandboxID)
+					assertNetworkingClusterDNSUDP(env, session, sandboxID)
 				})
 
 				It("enforces Redis-backed team bandwidth through the ctld network runtime", func() {
-					assertNetdRedisTeamBandwidthLimit(env, session, adminPassword)
+					assertNetworkRuntimeRedisTeamBandwidthLimit(env, session, adminPassword)
 				})
 
 				if opts.includeUsageQuotaAssertions {

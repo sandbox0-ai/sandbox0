@@ -137,16 +137,16 @@ func TestIsPodReady(t *testing.T) {
 	})
 }
 
-func TestEnsureNetdMITMCASecretCopiesCertIntoTemplateNamespace(t *testing.T) {
+func TestEnsureNetworkMITMCASecretCopiesCertIntoTemplateNamespace(t *testing.T) {
 	configPath := writeHelpersManagerConfig(t, `
-netd_mitm_ca_secret_name: fullmode-netd-mitm-ca
-netd_mitm_ca_secret_namespace: sandbox0-system
+network_mitm_ca_secret_name: fullmode-ctld-network-mitm-ca
+network_mitm_ca_secret_namespace: sandbox0-system
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
 	source := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "fullmode-netd-mitm-ca",
+			Name:      "fullmode-ctld-network-mitm-ca",
 			Namespace: "sandbox0-system",
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -157,10 +157,10 @@ netd_mitm_ca_secret_namespace: sandbox0-system
 	}
 	client := fake.NewSimpleClientset(source)
 
-	err := EnsureNetdMITMCASecret(context.Background(), client, newHelpersSecretLister(t, source), "tpl-default")
+	err := EnsureNetworkMITMCASecret(context.Background(), client, newHelpersSecretLister(t, source), "tpl-default")
 	require.NoError(t, err)
 
-	copied, err := client.CoreV1().Secrets("tpl-default").Get(context.Background(), "fullmode-netd-mitm-ca", metav1.GetOptions{})
+	copied, err := client.CoreV1().Secrets("tpl-default").Get(context.Background(), "fullmode-ctld-network-mitm-ca", metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Equal(t, corev1.SecretTypeOpaque, copied.Type)
 	require.Equal(t, map[string][]byte{
@@ -169,12 +169,12 @@ netd_mitm_ca_secret_namespace: sandbox0-system
 	require.Equal(t, "sandbox0-manager", copied.Labels["app.kubernetes.io/managed-by"])
 }
 
-func TestEnsureNetdMITMCASecretNoopsWithoutConfiguredSecret(t *testing.T) {
+func TestEnsureNetworkMITMCASecretNoopsWithoutConfiguredSecret(t *testing.T) {
 	configPath := writeHelpersManagerConfig(t, "{}\n")
 	t.Setenv("CONFIG_PATH", configPath)
 
 	client := fake.NewSimpleClientset()
-	err := EnsureNetdMITMCASecret(context.Background(), client, newHelpersSecretLister(t), "tpl-default")
+	err := EnsureNetworkMITMCASecret(context.Background(), client, newHelpersSecretLister(t), "tpl-default")
 	require.NoError(t, err)
 
 	secrets, err := client.CoreV1().Secrets("tpl-default").List(context.Background(), metav1.ListOptions{})
@@ -182,16 +182,16 @@ func TestEnsureNetdMITMCASecretNoopsWithoutConfiguredSecret(t *testing.T) {
 	require.Empty(t, secrets.Items)
 }
 
-func TestEnsureNetdMITMCASecretNoopsWhenCacheMatches(t *testing.T) {
+func TestEnsureNetworkMITMCASecretNoopsWhenCacheMatches(t *testing.T) {
 	configPath := writeHelpersManagerConfig(t, `
-netd_mitm_ca_secret_name: fullmode-netd-mitm-ca
-netd_mitm_ca_secret_namespace: sandbox0-system
+network_mitm_ca_secret_name: fullmode-ctld-network-mitm-ca
+network_mitm_ca_secret_namespace: sandbox0-system
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
 	source := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "fullmode-netd-mitm-ca",
+			Name:      "fullmode-ctld-network-mitm-ca",
 			Namespace: "sandbox0-system",
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -201,7 +201,7 @@ netd_mitm_ca_secret_namespace: sandbox0-system
 	}
 	target := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "fullmode-netd-mitm-ca",
+			Name:      "fullmode-ctld-network-mitm-ca",
 			Namespace: "tpl-default",
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "sandbox0-manager",
@@ -214,7 +214,7 @@ netd_mitm_ca_secret_namespace: sandbox0-system
 	}
 	client := fake.NewSimpleClientset()
 
-	err := EnsureNetdMITMCASecret(context.Background(), client, newHelpersSecretLister(t, source, target), "tpl-default")
+	err := EnsureNetworkMITMCASecret(context.Background(), client, newHelpersSecretLister(t, source, target), "tpl-default")
 	require.NoError(t, err)
 	require.Empty(t, client.Actions())
 }

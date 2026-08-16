@@ -86,7 +86,7 @@ func (r *SingleClusterReconciler) TriggerReconcile(ctx context.Context) {
 }
 
 // Quiesce permanently stops new reconciliation and waits for in-flight work.
-// The manager keeps serving its HTTP and embedded storage APIs while quiesced.
+// The manager keeps serving its other APIs and controllers while quiesced.
 func (r *SingleClusterReconciler) Quiesce(ctx context.Context) error {
 	r.lifecycleMu.Lock()
 	if !r.quiesced {

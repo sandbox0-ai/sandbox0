@@ -190,7 +190,7 @@ func TestRequireNetworkPolicyInBody(t *testing.T) {
 	})
 
 	t.Run("allows request with network config when supported", func(t *testing.T) {
-		server := newTestServerForCapability(t, testProvider("netd"))
+		server := newTestServerForCapability(t, testProvider("ctld"))
 		body := `{"config":{"network":{"mode":"allow_all"}}}`
 		recorder := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPut, "/api/v1/sandboxes/sb-1", strings.NewReader(body))

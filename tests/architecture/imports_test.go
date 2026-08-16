@@ -4,6 +4,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -20,7 +21,6 @@ func TestRuntimeServicesDoNotImportManagerImplementations(t *testing.T) {
 		"regional-gateway",
 		"scheduler",
 		"ctld",
-		"netd",
 		"ssh-gateway",
 		"global-gateway",
 		"infra-operator",
@@ -35,6 +35,16 @@ func TestRuntimeServicesDoNotImportManagerImplementations(t *testing.T) {
 		t.Run(service, func(t *testing.T) {
 			assertNoProductionImports(t, filepath.Join(root, service), forbidden)
 		})
+	}
+}
+
+func TestNetworkingIsInternalToCtld(t *testing.T) {
+	root := repositoryRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "netd")); !os.IsNotExist(err) {
+		t.Fatalf("top-level netd package must not exist: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(root, "ctld", "internal", "ctld", "networking")); err != nil || !info.IsDir() {
+		t.Fatalf("ctld networking package is missing: %v", err)
 	}
 }
 

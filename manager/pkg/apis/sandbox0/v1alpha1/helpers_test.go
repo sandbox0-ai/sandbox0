@@ -522,23 +522,23 @@ manager_image: sandbox0/manager:test
 	}
 }
 
-func TestBuildPodSpecInjectsNetdMITMCATrustMaterialIntoProcdContainer(t *testing.T) {
+func TestBuildPodSpecInjectsNetworkMITMCATrustMaterialIntoProcdContainer(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
-netd_mitm_ca_secret_name: fullmode-netd-mitm-ca
+network_mitm_ca_secret_name: fullmode-ctld-network-mitm-ca
 `)
 	t.Setenv("CONFIG_PATH", configPath)
 
 	spec := BuildPodSpec(newTestTemplate())
 
-	volume := findVolume(spec.Volumes, netdMITMCAVolume)
+	volume := findVolume(spec.Volumes, networkMITMCAVolume)
 	if volume == nil || volume.Secret == nil {
-		t.Fatalf("expected %s secret volume to be injected", netdMITMCAVolume)
+		t.Fatalf("expected %s secret volume to be injected", networkMITMCAVolume)
 	}
-	if volume.Secret.SecretName != "fullmode-netd-mitm-ca" {
-		t.Fatalf("mitm ca secret = %q, want fullmode-netd-mitm-ca", volume.Secret.SecretName)
+	if volume.Secret.SecretName != "fullmode-ctld-network-mitm-ca" {
+		t.Fatalf("mitm ca secret = %q, want fullmode-ctld-network-mitm-ca", volume.Secret.SecretName)
 	}
-	if len(volume.Secret.Items) != 1 || volume.Secret.Items[0].Key != netdMITMCACertKey || volume.Secret.Items[0].Path != "mitm-ca.crt" {
+	if len(volume.Secret.Items) != 1 || volume.Secret.Items[0].Key != networkMITMCACertKey || volume.Secret.Items[0].Path != "mitm-ca.crt" {
 		t.Fatalf("unexpected secret items: %#v", volume.Secret.Items)
 	}
 
@@ -548,22 +548,22 @@ netd_mitm_ca_secret_name: fullmode-netd-mitm-ca
 			t.Fatalf("expected container %q", name)
 		}
 
-		env := findEnvVar(container.Env, netdMITMCAEnvVar)
-		if env == nil || env.Value != netdMITMCACertPath {
-			t.Fatalf("%s env %s = %#v, want %q", name, netdMITMCAEnvVar, env, netdMITMCACertPath)
+		env := findEnvVar(container.Env, networkMITMCAEnvVar)
+		if env == nil || env.Value != networkMITMCACertPath {
+			t.Fatalf("%s env %s = %#v, want %q", name, networkMITMCAEnvVar, env, networkMITMCACertPath)
 		}
 
-		mount := findVolumeMount(container.VolumeMounts, netdMITMCAVolume)
+		mount := findVolumeMount(container.VolumeMounts, networkMITMCAVolume)
 		if mount == nil {
-			t.Fatalf("expected %s mount on %s", netdMITMCAVolume, name)
+			t.Fatalf("expected %s mount on %s", networkMITMCAVolume, name)
 		}
-		if mount.MountPath != netdMITMCADir || !mount.ReadOnly {
-			t.Fatalf("%s mount = %#v, want path %q readOnly", name, mount, netdMITMCADir)
+		if mount.MountPath != networkMITMCADir || !mount.ReadOnly {
+			t.Fatalf("%s mount = %#v, want path %q readOnly", name, mount, networkMITMCADir)
 		}
 	}
 }
 
-func TestBuildPodSpecSkipsNetdMITMCATrustMaterialWhenManagerConfigOmitsSecret(t *testing.T) {
+func TestBuildPodSpecSkipsNetworkMITMCATrustMaterialWhenManagerConfigOmitsSecret(t *testing.T) {
 	configPath := writeManagerConfig(t, `
 manager_image: sandbox0/manager:test
 `)
@@ -571,14 +571,14 @@ manager_image: sandbox0/manager:test
 
 	spec := BuildPodSpec(newTestTemplate())
 
-	if volume := findVolume(spec.Volumes, netdMITMCAVolume); volume != nil {
-		t.Fatalf("expected %s volume to be absent, got %#v", netdMITMCAVolume, volume)
+	if volume := findVolume(spec.Volumes, networkMITMCAVolume); volume != nil {
+		t.Fatalf("expected %s volume to be absent, got %#v", networkMITMCAVolume, volume)
 	}
-	if env := findEnvVar(spec.Containers[0].Env, netdMITMCAEnvVar); env != nil {
-		t.Fatalf("expected %s env to be absent, got %#v", netdMITMCAEnvVar, env)
+	if env := findEnvVar(spec.Containers[0].Env, networkMITMCAEnvVar); env != nil {
+		t.Fatalf("expected %s env to be absent, got %#v", networkMITMCAEnvVar, env)
 	}
-	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, netdMITMCAVolume); mount != nil {
-		t.Fatalf("expected %s mount to be absent, got %#v", netdMITMCAVolume, mount)
+	if mount := findVolumeMount(spec.Containers[0].VolumeMounts, networkMITMCAVolume); mount != nil {
+		t.Fatalf("expected %s mount to be absent, got %#v", networkMITMCAVolume, mount)
 	}
 }
 

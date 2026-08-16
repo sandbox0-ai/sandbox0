@@ -46,7 +46,6 @@ type Source string
 const (
 	SourceClusterGateway Source = "cluster_gateway"
 	SourceManager        Source = "manager"
-	SourceNetd           Source = "netd"
 	SourceProcd          Source = "procd"
 	SourceCtld           Source = "ctld"
 )
@@ -525,7 +524,7 @@ func (DisabledRepository) InsertRuntimeSamples(context.Context, []RuntimeSample)
 
 func ValidSource(source Source) bool {
 	switch source {
-	case SourceClusterGateway, SourceManager, SourceNetd, SourceProcd, SourceCtld:
+	case SourceClusterGateway, SourceManager, SourceProcd, SourceCtld:
 		return true
 	default:
 		return false

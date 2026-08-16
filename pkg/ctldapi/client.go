@@ -197,10 +197,6 @@ func PostJSON[T any](ctx context.Context, httpClient *http.Client, baseURL, path
 
 func responseError(resp any) string {
 	switch typed := resp.(type) {
-	case *PauseResponse:
-		return strings.TrimSpace(typed.Error)
-	case *ResumeResponse:
-		return strings.TrimSpace(typed.Error)
 	case *InspectRootFSResponse:
 		return strings.TrimSpace(typed.Error)
 	case *SaveRootFSResponse:

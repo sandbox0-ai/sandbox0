@@ -43,8 +43,8 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.ProcdBinImageRef = spec.ProcdBinImageRef
 	cfg.DefaultTeamQuotas = cloneTeamQuotaLimitConfigs(spec.DefaultTeamQuotas)
 	cfg.AllowColdStartWithoutReadyDataPlane = spec.AllowColdStartWithoutReadyDataPlane
-	cfg.NetdPolicyApplyTimeout = spec.NetdPolicyApplyTimeout
-	cfg.NetdPolicyApplyPollInterval = spec.NetdPolicyApplyPollInterval
+	cfg.NetworkPolicyApplyTimeout = spec.NetworkPolicyApplyTimeout
+	cfg.NetworkPolicyApplyPollInterval = spec.NetworkPolicyApplyPollInterval
 	cfg.EgressAuthDefaultResolveTTL = spec.EgressAuthDefaultResolveTTL
 	cfg.PauseMinMemoryRequest = spec.PauseMinMemoryRequest
 	cfg.PauseMinMemoryLimit = spec.PauseMinMemoryLimit
@@ -98,8 +98,8 @@ func cloneTeamQuotaLimitConfigs(in []infrav1alpha1.TeamQuotaLimitConfig) []apico
 	return out
 }
 
-func ToNetd(spec *infrav1alpha1.NetdConfig) *apiconfig.NetdConfig {
-	cfg := &apiconfig.NetdConfig{}
+func ToNetworkRuntime(spec *infrav1alpha1.NetworkRuntimeConfig) *apiconfig.NetworkRuntimeConfig {
+	cfg := &apiconfig.NetworkRuntimeConfig{}
 	if spec == nil {
 		return cfg
 	}

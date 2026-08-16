@@ -146,14 +146,14 @@ type ManagerConfig struct {
 	// Network policy apply wait
 	// +optional
 	// +kubebuilder:default="30s"
-	NetdPolicyApplyTimeout metav1.Duration `yaml:"netd_policy_apply_timeout" json:"netdPolicyApplyTimeout"`
+	NetworkPolicyApplyTimeout metav1.Duration `yaml:"network_policy_apply_timeout" json:"networkPolicyApplyTimeout"`
 	// +optional
 	// +kubebuilder:default="500ms"
-	NetdPolicyApplyPollInterval metav1.Duration `yaml:"netd_policy_apply_poll_interval" json:"netdPolicyApplyPollInterval"`
+	NetworkPolicyApplyPollInterval metav1.Duration `yaml:"network_policy_apply_poll_interval" json:"networkPolicyApplyPollInterval"`
 	// +optional
-	NetdMITMCASecretName string `yaml:"netd_mitm_ca_secret_name" json:"-"`
+	NetworkMITMCASecretName string `yaml:"network_mitm_ca_secret_name" json:"-"`
 	// +optional
-	NetdMITMCASecretNamespace string `yaml:"netd_mitm_ca_secret_namespace" json:"-"`
+	NetworkMITMCASecretNamespace string `yaml:"network_mitm_ca_secret_namespace" json:"-"`
 
 	// Pause/Resume
 	// +optional

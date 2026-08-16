@@ -15,7 +15,7 @@ func TestDisabledRepositoryReturnsBackendDisabled(t *testing.T) {
 }
 
 func TestFilterValidation(t *testing.T) {
-	if !ValidSource(SourceNetd) || ValidSource(Source("files")) || ValidSource(Source("metering")) {
+	if !ValidSource(SourceCtld) || ValidSource(Source("files")) || ValidSource(Source("metering")) {
 		t.Fatal("source validation mismatch")
 	}
 	if !ValidEventType(EventTypeNetworkAudit) || ValidEventType(EventType("usage_window")) || ValidEventType(EventType("file_audit")) {

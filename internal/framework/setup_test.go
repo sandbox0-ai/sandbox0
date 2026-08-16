@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestCleanupManagerNamespacesBeforeStoppingManagerPreservesStorageUntilCleanupCompletes(t *testing.T) {
+func TestCleanupManagerNamespacesBeforeStoppingManagerWaitsForCleanup(t *testing.T) {
 	var calls []string
 
 	namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
@@ -56,7 +56,7 @@ func TestCleanupManagerNamespacesBeforeStoppingManagerKeepsManagerRunningOnClean
 		t.Fatalf("manager stop returned error: %v", managerStopErr)
 	}
 	if managerStopped {
-		t.Fatal("manager was stopped while namespace cleanup still needed its embedded storage API")
+		t.Fatal("manager was stopped before namespace cleanup completed")
 	}
 }
 

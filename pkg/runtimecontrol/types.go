@@ -45,22 +45,24 @@ const (
 type DesiredState string
 
 const (
-	DesiredStandby        DesiredState = "standby"
-	DesiredWaitingStorage DesiredState = "waiting_storage"
-	DesiredActive         DesiredState = "active"
-	DesiredRevoked        DesiredState = "revoked"
+	DesiredStandby DesiredState = "standby"
+	// Keep the wire value stable while predecessor ctld/procd Pods drain.
+	DesiredWaitingRootFS DesiredState = "waiting_storage"
+	DesiredActive        DesiredState = "active"
+	DesiredRevoked       DesiredState = "revoked"
 )
 
 type ObservedState string
 
 const (
-	ObservedStandby      ObservedState = "standby"
-	ObservedWaiting      ObservedState = "waiting_storage"
-	ObservedLoading      ObservedState = "loading"
-	ObservedRecovering   ObservedState = "recovering"
-	ObservedReady        ObservedState = "ready"
-	ObservedFailed       ObservedState = "failed"
-	ObservedDisconnected ObservedState = "disconnected"
+	ObservedStandby ObservedState = "standby"
+	// Keep the wire value stable while predecessor ctld/procd Pods drain.
+	ObservedWaitingRootFS ObservedState = "waiting_storage"
+	ObservedLoading       ObservedState = "loading"
+	ObservedRecovering    ObservedState = "recovering"
+	ObservedReady         ObservedState = "ready"
+	ObservedFailed        ObservedState = "failed"
+	ObservedDisconnected  ObservedState = "disconnected"
 )
 
 // WebhookConfig configures sandbox-scoped event delivery from procd.

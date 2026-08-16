@@ -1,0 +1,373 @@
+package proxy
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+
+	"github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking/policy"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
+)
+
+func (s *Server) proxyHTTPSRequest(req *adapterRequest) error {
+	if s == nil {
+		return fmt.Errorf("server is nil")
+	}
+	if req == nil || req.Conn == nil {
+		return fmt.Errorf("https proxy request is nil")
+	}
+	if req.DestIP == nil || req.DestPort <= 0 {
+		return fmt.Errorf("https proxy destination is missing")
+	}
+	if req.Host == "" {
+		return fmt.Errorf("https interception requires host")
+	}
+	prefixBytes, err := readPrefixBytes(req.Prefix)
+	if err != nil {
+		return fmt.Errorf("read tls client hello prefix: %w", err)
+	}
+	prefixReader := bytes.NewReader(prefixBytes)
+	if req.EgressAuth != nil && req.EgressAuth.ShouldBypass() {
+		return s.relayTCPRequestWithPrefix(req, prefixReader)
+	}
+	clientConn := newPrefixedConn(req.Conn, prefixBytes)
+	if s.tlsAuthority == nil {
+		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
+			req.EgressAuth.BypassReason = "tls_intercept_unavailable"
+			return s.relayTCPRequestWithPrefix(req, prefixReader)
+		}
+		return fmt.Errorf("https interception authority is not configured")
+	}
+	cert, err := s.tlsAuthority.CertificateForHost(req.Host)
+	if err != nil {
+		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
+			req.EgressAuth.BypassReason = "tls_certificate_issue"
+			return s.relayTCPRequestWithPrefix(req, prefixReader)
+		}
+		return fmt.Errorf("issue downstream tls certificate: %w", err)
+	}
+	downstreamTLS := tls.Server(clientConn, &tls.Config{
+		Certificates: []tls.Certificate{*cert},
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   downstreamTLSNextProtos(req),
+	})
+	if err := downstreamTLS.Handshake(); err != nil {
+		return fmt.Errorf("handshake downstream tls: %w", err)
+	}
+	defer downstreamTLS.Close()
+	if req.EgressAuth != nil && req.EgressAuth.Rule != nil && !egressAuthNeedsHTTPMatch(req) && !egressAuthResolvesOnHTTPRequest(req) {
+		if req.EgressAuth.ResolveError != nil {
+			_ = writeHTTPProxyError(downstreamTLS, http.StatusServiceUnavailable, "egress auth resolution failed")
+			return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, req.EgressAuth.ResolveError)
+		}
+		if !hasResolvedHTTPAuthMaterial(req.EgressAuth) {
+			_ = writeHTTPProxyError(downstreamTLS, http.StatusServiceUnavailable, "egress auth material unavailable")
+			return fmt.Errorf("egress auth material missing for %q", req.EgressAuth.Rule.AuthRef)
+		}
+	}
+	if egressAuthRequiresGRPCH2(req.EgressAuth) && downstreamTLS.ConnectionState().NegotiatedProtocol != "h2" {
+		_ = writeHTTPProxyError(downstreamTLS, http.StatusBadRequest, "grpc interception requires h2 alpn")
+		return fmt.Errorf("grpc interception requires h2 alpn for host %q", req.Host)
+	}
+	if shouldProxyHTTP2(req, downstreamTLS.ConnectionState()) {
+		return s.proxyHTTP2FromConn(downstreamTLS, req)
+	}
+	upstream, err := s.dialUpstreamTLS(req)
+	if err != nil {
+		_ = writeHTTPProxyError(downstreamTLS, http.StatusBadGateway, "upstream tls connection failed")
+		return err
+	}
+	defer upstream.Close()
+	return s.proxyHTTPFromConn(downstreamTLS, req, upstream)
+}
+
+func (s *Server) proxyTLSStream(req *adapterRequest) error {
+	if s == nil {
+		return fmt.Errorf("server is nil")
+	}
+	if req == nil || req.Conn == nil {
+		return fmt.Errorf("tls proxy request is nil")
+	}
+	if req.DestIP == nil || req.DestPort <= 0 {
+		return fmt.Errorf("tls proxy destination is missing")
+	}
+	if req.Host == "" {
+		return fmt.Errorf("tls interception requires host")
+	}
+	prefixBytes, err := readPrefixBytes(req.Prefix)
+	if err != nil {
+		return fmt.Errorf("read tls client hello prefix: %w", err)
+	}
+	prefixReader := bytes.NewReader(prefixBytes)
+	if req.EgressAuth != nil && req.EgressAuth.ShouldBypass() {
+		return s.relayTCPRequestWithPrefix(req, prefixReader)
+	}
+	clientConn := newPrefixedConn(req.Conn, prefixBytes)
+	if s.tlsAuthority == nil {
+		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
+			req.EgressAuth.BypassReason = "tls_intercept_unavailable"
+			return s.relayTCPRequestWithPrefix(req, prefixReader)
+		}
+		return fmt.Errorf("tls interception authority is not configured")
+	}
+	cert, err := s.tlsAuthority.CertificateForHost(req.Host)
+	if err != nil {
+		if req.EgressAuth != nil && req.EgressAuth.FailOpen() {
+			req.EgressAuth.BypassReason = "tls_certificate_issue"
+			return s.relayTCPRequestWithPrefix(req, prefixReader)
+		}
+		return fmt.Errorf("issue downstream tls certificate: %w", err)
+	}
+	downstreamTLS := tls.Server(clientConn, &tls.Config{
+		Certificates: []tls.Certificate{*cert},
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   downstreamTLSNextProtos(req),
+	})
+	if err := downstreamTLS.Handshake(); err != nil {
+		return fmt.Errorf("handshake downstream tls: %w", err)
+	}
+	defer downstreamTLS.Close()
+
+	upstream, err := s.dialUpstreamTLS(req)
+	if err != nil {
+		return err
+	}
+	defer upstream.Close()
+	return s.pipeWithReader(downstreamTLS, upstream, downstreamTLS, req.Compiled, req.Audit)
+}
+
+func downstreamTLSNextProtos(req *adapterRequest) []string {
+	if req != nil && req.EgressAuth != nil && req.EgressAuth.Rule != nil && req.EgressAuth.Rule.Protocol == v1alpha1.EgressAuthProtocolTLS {
+		return nil
+	}
+	if req != nil && req.EgressAuth != nil && egressAuthMayUseGRPC(req.EgressAuth) {
+		if egressAuthMayUseHTTP1(req.EgressAuth) {
+			return []string{"h2", "http/1.1"}
+		}
+		return []string{"h2"}
+	}
+	if req != nil && req.EgressAuth != nil && egressAuthMayUseHTTPSH2(req.EgressAuth) {
+		return []string{"h2", "http/1.1"}
+	}
+	if req != nil && (policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "http") ||
+		policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")) {
+		return []string{"h2", "http/1.1"}
+	}
+	return []string{"http/1.1"}
+}
+
+func shouldProxyHTTP2(req *adapterRequest, state tls.ConnectionState) bool {
+	if req == nil {
+		return false
+	}
+	if state.NegotiatedProtocol == "h2" {
+		if req.EgressAuth != nil && req.EgressAuth.Rule != nil {
+			return true
+		}
+		return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "http") ||
+			policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
+	}
+	return false
+}
+
+func (s *Server) dialUpstreamTLS(req *adapterRequest) (net.Conn, error) {
+	if s == nil || req == nil || req.DestIP == nil || req.DestPort <= 0 {
+		return nil, fmt.Errorf("upstream tls request is incomplete")
+	}
+	if req.Host == "" {
+		return nil, fmt.Errorf("upstream tls server name is required")
+	}
+	cfg := cloneTLSConfig(s.upstreamTLSConfig)
+	if cfg.ServerName == "" {
+		cfg.ServerName = req.Host
+	}
+	if req.EgressAuth != nil && req.EgressAuth.ResolvedTLSClientCertificate != nil {
+		cfg.Certificates = []tls.Certificate{req.EgressAuth.ResolvedTLSClientCertificate.Certificate}
+		if req.EgressAuth.ResolvedTLSClientCertificate.RootCAs != nil {
+			cfg.RootCAs = req.EgressAuth.ResolvedTLSClientCertificate.RootCAs
+		}
+	}
+	if len(cfg.NextProtos) == 0 && (req.EgressAuth == nil || req.EgressAuth.Rule == nil || req.EgressAuth.Rule.Protocol != v1alpha1.EgressAuthProtocolTLS) {
+		cfg.NextProtos = []string{"http/1.1"}
+	}
+	rawConn, err := s.dialTCPUpstreamForRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("dial upstream tls: %w", err)
+	}
+	conn := tls.Client(rawConn, cfg)
+	if err := conn.Handshake(); err != nil {
+		_ = rawConn.Close()
+		return nil, fmt.Errorf("handshake upstream tls: %w", err)
+	}
+	return &countingConn{Conn: conn}, nil
+}
+
+func (s *Server) proxyHTTPFromConn(downstream net.Conn, req *adapterRequest, upstream net.Conn) error {
+	if s == nil {
+		return fmt.Errorf("server is nil")
+	}
+	if downstream == nil || upstream == nil {
+		return fmt.Errorf("http proxy connections are required")
+	}
+	reader := bufio.NewReader(downstream)
+	httpReq, err := http.ReadRequest(reader)
+	if err != nil {
+		return fmt.Errorf("read downstream http request: %w", err)
+	}
+	httpReq.RequestURI = ""
+	httpReq.Close = true
+	httpReq.Header.Set("Connection", "close")
+	if httpReq.Host == "" && req.Host != "" {
+		httpReq.Host = req.Host
+	}
+	s.prepareEgressAuthForHTTPRequest(req, httpReq, "tls")
+	if req.EgressAuth != nil && egressAuthNeedsHTTPMatch(req) {
+		if err := prepareHTTPHeaderDirectives(req.EgressAuth, "tls", true); err != nil {
+			if !req.EgressAuth.ShouldBypass() {
+				_ = writeHTTPProxyError(downstream, http.StatusServiceUnavailable, "egress auth resolution failed")
+				return fmt.Errorf("resolve egress auth for %q: %w", req.EgressAuth.Rule.AuthRef, err)
+			}
+		}
+	}
+	if req.EgressAuth != nil && len(req.EgressAuth.ResolvedHeaders) > 0 {
+		injectHTTPHeaders(httpReq, req.EgressAuth.ResolvedHeaders)
+	}
+	if err := applyResolvedHTTPPlaceholderSubstitutions(req.EgressAuth, "tls", httpReq); err != nil {
+		_ = writeHTTPProxyError(downstream, http.StatusServiceUnavailable, "egress auth placeholder substitution failed")
+		return fmt.Errorf("apply egress auth placeholder substitutions for %q: %w", egressAuthRuleRef(req.EgressAuth), err)
+	}
+	if err := s.enforceHTTPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
+		return writeHTTPProtocolPolicyResponse(downstream, status, body)
+	}); err != nil {
+		return err
+	}
+	if err := s.enforceMCPPolicyForHTTPRequest(req, httpReq, func(status int, body []byte) error {
+		return writeMCPPolicyHTTPResponse(downstream, status, body)
+	}); err != nil {
+		return err
+	}
+	upstreamCounter := &countingWriter{writer: s.bandwidthLimitedWriter(upstream, req.Compiled, bandwidthEgress)}
+	if err := httpReq.Write(upstreamCounter); err != nil {
+		s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
+		return fmt.Errorf("write upstream http request: %w", err)
+	}
+	s.recordEgressBytes(req.Compiled, upstreamCounter.WrittenBytes(), req.Audit)
+	clientCounter := &countingWriter{writer: s.bandwidthLimitedWriter(downstream, req.Compiled, bandwidthIngress)}
+	n, err := io.Copy(clientCounter, upstream)
+	s.recordIngressBytes(req.Compiled, n, req.Audit)
+	return normalizeRelayError(err)
+}
+
+func readPrefixBytes(prefix io.Reader) ([]byte, error) {
+	if prefix == nil {
+		return nil, nil
+	}
+	return io.ReadAll(prefix)
+}
+
+func tlsTerminationRequired(req *adapterRequest) bool {
+	if req == nil {
+		return false
+	}
+	if egressAuthRequiresTLSTermination(req.EgressAuth) {
+		return true
+	}
+	return policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "http") ||
+		policy.RequiresProtocolTLSTermination(req.Compiled, req.Host, req.DestPort, "mcp")
+}
+
+func egressAuthRequiresTLSTermination(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return ctx.Rule != nil && ctx.Rule.TLSMode == v1alpha1.EgressTLSModeTerminateReoriginate
+	}
+	for _, rule := range ctx.CandidateRules {
+		if rule != nil && rule.TLSMode == v1alpha1.EgressTLSModeTerminateReoriginate {
+			return true
+		}
+	}
+	return ctx.Rule != nil && ctx.Rule.TLSMode == v1alpha1.EgressTLSModeTerminateReoriginate
+}
+
+func egressAuthMayUseGRPC(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return ctx.Rule != nil && ctx.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
+	}
+	for _, rule := range ctx.CandidateRules {
+		if rule != nil && rule.Protocol == v1alpha1.EgressAuthProtocolGRPC {
+			return true
+		}
+	}
+	return ctx.Rule != nil && ctx.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
+}
+
+func egressAuthMayUseHTTP1(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return ctx.Rule != nil && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolGRPC && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolTLS
+	}
+	for _, rule := range ctx.CandidateRules {
+		if rule != nil && rule.Protocol != v1alpha1.EgressAuthProtocolGRPC && rule.Protocol != v1alpha1.EgressAuthProtocolTLS {
+			return true
+		}
+	}
+	return ctx.Rule != nil && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolGRPC && ctx.Rule.Protocol != v1alpha1.EgressAuthProtocolTLS
+}
+
+func egressAuthMayUseHTTPSH2(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return egressAuthRuleMayUseHTTPSH2(ctx.Rule)
+	}
+	for _, rule := range ctx.CandidateRules {
+		if egressAuthRuleMayUseHTTPSH2(rule) {
+			return true
+		}
+	}
+	return egressAuthRuleMayUseHTTPSH2(ctx.Rule)
+}
+
+func egressAuthRuleMayUseHTTPSH2(rule *policy.CompiledEgressAuthRule) bool {
+	if rule == nil || rule.TLSMode != v1alpha1.EgressTLSModeTerminateReoriginate {
+		return false
+	}
+	switch rule.Protocol {
+	case "", v1alpha1.EgressAuthProtocolHTTPS:
+		return true
+	default:
+		return false
+	}
+}
+
+func egressAuthRequiresGRPCH2(ctx *egressAuthContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if !ctx.RequestMatch {
+		return ctx.Rule != nil && ctx.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC
+	}
+	hasGRPC := false
+	for _, rule := range ctx.CandidateRules {
+		if rule == nil {
+			continue
+		}
+		if rule.Protocol != v1alpha1.EgressAuthProtocolGRPC {
+			return false
+		}
+		hasGRPC = true
+	}
+	return hasGRPC || (ctx.Rule != nil && ctx.Rule.Protocol == v1alpha1.EgressAuthProtocolGRPC)
+}

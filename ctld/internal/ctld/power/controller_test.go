@@ -27,21 +27,6 @@ func (r staticResolver) ResolvePod(_ *http.Request, _, _ string) (Target, error)
 	return r.target, r.err
 }
 
-func TestControllerPauseAndResumeAreRemoved(t *testing.T) {
-	controller := NewController(staticResolver{})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/pause", nil)
-
-	pauseResp, status := controller.Pause(req, "sandbox-1")
-	assert.Equal(t, http.StatusNotImplemented, status)
-	assert.False(t, pauseResp.Paused)
-	assert.Contains(t, pauseResp.Error, "removed")
-
-	resumeResp, status := controller.Resume(req, "sandbox-1")
-	assert.Equal(t, http.StatusNotImplemented, status)
-	assert.False(t, resumeResp.Resumed)
-	assert.Contains(t, resumeResp.Error, "removed")
-}
-
 func TestControllerProbeForwardsToProcd(t *testing.T) {
 	procd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)

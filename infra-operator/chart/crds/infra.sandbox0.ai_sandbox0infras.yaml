@@ -3769,10 +3769,10 @@ spec:
                           metricsPort:
                             default: 9090
                             type: integer
-                          netdPolicyApplyPollInterval:
+                          networkPolicyApplyPollInterval:
                             default: 500ms
                             type: string
-                          netdPolicyApplyTimeout:
+                          networkPolicyApplyTimeout:
                             default: 30s
                             type: string
                           pauseMemoryBufferRatio:

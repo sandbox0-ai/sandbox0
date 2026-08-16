@@ -28,9 +28,9 @@ import (
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	ctldnetworkingassets "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/ctldnetworking"
 	credentialstoresvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/credentialstore"
 	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
-	netdservice "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	redissvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/redis"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
@@ -329,13 +329,13 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 		}
 	}
 
-	if cfg.NetworkPolicyProvider == "netd" {
-		secretName, err := netdservice.EnsureMITMCASecretWithScope(ctx, r.Resources, compiledPlan.Scope, compiledPlan, common.GetServiceLabels(compiledPlan.Scope.Name, "netd"))
+	if cfg.NetworkPolicyProvider == "ctld" {
+		secretName, err := ctldnetworkingassets.EnsureMITMCASecretWithScope(ctx, r.Resources, compiledPlan.Scope, compiledPlan, common.GetServiceLabels(compiledPlan.Scope.Name, "ctld"))
 		if err != nil {
 			return nil, fmt.Errorf("ensure network-runtime MITM CA secret: %w", err)
 		}
-		cfg.NetdMITMCASecretName = secretName
-		cfg.NetdMITMCASecretNamespace = compiledPlan.Scope.Namespace
+		cfg.NetworkMITMCASecretName = secretName
+		cfg.NetworkMITMCASecretNamespace = compiledPlan.Scope.Namespace
 	}
 	if err := credentialstoresvc.ApplyManagerCredentialStoreConfig(ctx, r.Resources, compiledPlan.Scope, cfg); err != nil {
 		return nil, fmt.Errorf("apply credential store config: %w", err)

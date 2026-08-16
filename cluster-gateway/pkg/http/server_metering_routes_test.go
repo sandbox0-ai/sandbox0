@@ -535,7 +535,7 @@ func testMeteringRouteServer(t *testing.T, authMode string) (*Server, *internala
 	sandboxObservabilityIngestValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target:             "cluster-gateway",
 		PublicKey:          publicKey,
-		AllowedCallers:     []string{"netd"},
+		AllowedCallers:     []string{"ctld"},
 		ClockSkewTolerance: 5 * time.Second,
 	})
 	sandboxObservabilityIngestAuth := middleware.NewInternalAuthMiddleware(sandboxObservabilityIngestValidator, zap.NewNop())

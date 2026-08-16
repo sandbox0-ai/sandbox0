@@ -57,7 +57,7 @@ func main() {
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("root_path", cfg.RootPath),
 	)
-	if bundlePath, err := trust.ConfigureNetdMITMCATrust(); err != nil {
+	if bundlePath, err := trust.ConfigureNetworkMITMCATrust(); err != nil {
 		logger.Warn("Failed to configure network-runtime MITM CA trust", zap.Error(err))
 	} else if bundlePath != "" {
 		logger.Info("Configured network-runtime MITM CA trust", zap.String("bundle_path", bundlePath))

@@ -170,7 +170,6 @@ const (
 	ClusterGateway ObservabilityEventSource = "cluster_gateway"
 	Ctld           ObservabilityEventSource = "ctld"
 	Manager        ObservabilityEventSource = "manager"
-	Netd           ObservabilityEventSource = "netd"
 	Procd          ObservabilityEventSource = "procd"
 )
 
@@ -1907,7 +1906,7 @@ type SSHProxyProjection struct {
 	// SandboxPublicKeys Fake public keys accepted from sandbox-side SSH clients.
 	SandboxPublicKeys *[]string `json:"sandboxPublicKeys,omitempty"`
 
-	// UpstreamUsername Username used by netd when authenticating to the upstream SSH server.
+	// UpstreamUsername Username used by the ctld network runtime when authenticating to the upstream SSH server.
 	UpstreamUsername *string `json:"upstreamUsername,omitempty"`
 }
 

@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sandbox0-ai/sandbox0/pkg/ctldapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 )
 
@@ -46,9 +45,9 @@ func (c *Controller) Probe(r *http.Request, sandboxID string, kind sandboxprobe.
 	if !sandboxprobe.ValidKind(kind) {
 		return sandboxprobe.Failed(kind, "InvalidProbeKind", fmt.Sprintf("unsupported probe kind %q", kind), nil), http.StatusBadRequest
 	}
-	target, status, errResp := c.resolveTarget(r, sandboxID)
+	target, status, resolveError := c.resolveTarget(r, sandboxID)
 	if status != http.StatusOK {
-		return sandboxprobe.Failed(kind, "SandboxResolveFailed", errResp.Error, nil), status
+		return sandboxprobe.Failed(kind, "SandboxResolveFailed", resolveError, nil), status
 	}
 	return c.probeTarget(r, target, kind)
 }
@@ -57,9 +56,9 @@ func (c *Controller) ProbePod(r *http.Request, namespace, name string, kind sand
 	if !sandboxprobe.ValidKind(kind) {
 		return sandboxprobe.Failed(kind, "InvalidProbeKind", fmt.Sprintf("unsupported probe kind %q", kind), nil), http.StatusBadRequest
 	}
-	target, status, errResp := c.resolvePodTarget(r, namespace, name)
+	target, status, resolveError := c.resolvePodTarget(r, namespace, name)
 	if status != http.StatusOK {
-		return sandboxprobe.Failed(kind, "PodResolveFailed", errResp.Error, nil), status
+		return sandboxprobe.Failed(kind, "PodResolveFailed", resolveError, nil), status
 	}
 	return c.probeTarget(r, target, kind)
 }
@@ -100,39 +99,31 @@ func (c *Controller) probeTarget(r *http.Request, target Target, kind sandboxpro
 	return result, http.StatusOK
 }
 
-func (c *Controller) Pause(_ *http.Request, _ string) (ctldapi.PauseResponse, int) {
-	return ctldapi.PauseResponse{Paused: false, Error: "ctld cgroup pause has been removed"}, http.StatusNotImplemented
-}
-
-func (c *Controller) Resume(_ *http.Request, _ string) (ctldapi.ResumeResponse, int) {
-	return ctldapi.ResumeResponse{Resumed: false, Error: "ctld cgroup resume has been removed"}, http.StatusNotImplemented
-}
-
-func (c *Controller) resolveTarget(r *http.Request, sandboxID string) (Target, int, ctldapi.PauseResponse) {
+func (c *Controller) resolveTarget(r *http.Request, sandboxID string) (Target, int, string) {
 	if c == nil || c.Resolver == nil {
-		return Target{}, http.StatusNotImplemented, ctldapi.PauseResponse{Paused: false, Error: ErrNotImplemented.Error()}
+		return Target{}, http.StatusNotImplemented, ErrNotImplemented.Error()
 	}
 	target, err := c.Resolver.Resolve(r, sandboxID)
 	return mapResolveResult(target, err)
 }
 
-func (c *Controller) resolvePodTarget(r *http.Request, namespace, name string) (Target, int, ctldapi.PauseResponse) {
+func (c *Controller) resolvePodTarget(r *http.Request, namespace, name string) (Target, int, string) {
 	if c == nil || c.Resolver == nil {
-		return Target{}, http.StatusNotImplemented, ctldapi.PauseResponse{Paused: false, Error: ErrNotImplemented.Error()}
+		return Target{}, http.StatusNotImplemented, ErrNotImplemented.Error()
 	}
 	target, err := c.Resolver.ResolvePod(r, namespace, name)
 	return mapResolveResult(target, err)
 }
 
-func mapResolveResult(target Target, err error) (Target, int, ctldapi.PauseResponse) {
+func mapResolveResult(target Target, err error) (Target, int, string) {
 	if err == nil {
-		return target, http.StatusOK, ctldapi.PauseResponse{}
+		return target, http.StatusOK, ""
 	}
 	if errors.Is(err, ErrNotImplemented) {
-		return Target{}, http.StatusNotImplemented, ctldapi.PauseResponse{Paused: false, Error: err.Error()}
+		return Target{}, http.StatusNotImplemented, err.Error()
 	}
 	if errors.Is(err, ErrSandboxNotFound) || errors.Is(err, ErrPodNotFound) {
-		return Target{}, http.StatusNotFound, ctldapi.PauseResponse{Paused: false, Error: err.Error()}
+		return Target{}, http.StatusNotFound, err.Error()
 	}
-	return Target{}, http.StatusInternalServerError, ctldapi.PauseResponse{Paused: false, Error: err.Error()}
+	return Target{}, http.StatusInternalServerError, err.Error()
 }

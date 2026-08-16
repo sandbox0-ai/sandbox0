@@ -125,7 +125,7 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		if !workingCfg.SkipOperatorUninstall && !workingCfg.PreserveScenario {
 			appendCleanup(func() {
 				if preserveInfraForNamespaceCleanup {
-					fmt.Printf("Skipping infra-operator uninstall because manager-owned namespaces are still terminating; preserving CSI drivers for the next cleanup pass.\n")
+					fmt.Printf("Skipping infra-operator uninstall because manager-owned namespaces are still terminating; preserving manager cleanup controllers for the next pass.\n")
 					return
 				}
 				fmt.Printf("Uninstalling infra-operator...\n")
@@ -190,9 +190,9 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 		fmt.Printf("Preserving scenario %q for follow-up tests.\n", scenario.Name)
 	} else {
 		appendCleanup(func() {
-			// Pods can mount sandbox0 CSI volumes. Keep manager and its embedded storage
-			// API running until namespace deletion completes kubelet unpublish. Quiesce
-			// template syncing first so it cannot recreate namespaces during teardown.
+			// Keep manager running until its managed namespaces finish finalizing.
+			// Quiesce template syncing first so it cannot recreate namespaces during
+			// teardown.
 			namespaceCleanupErr, managerStopErr := cleanupManagerNamespacesBeforeStoppingManager(
 				func() error {
 					return KubectlQuiesceManagerTemplateReconcilers(testCtx.Context, workingCfg.Kubeconfig, scenario.InfraNamespace, "30s")
@@ -210,7 +210,7 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 			if namespaceCleanupErr != nil {
 				preserveInfraForNamespaceCleanup = true
 				fmt.Printf("Failed to clean up manager-owned namespaces: %v\n", namespaceCleanupErr)
-				fmt.Printf("Preserving scenario infra so CSI drivers remain available for the next cleanup pass.\n")
+				fmt.Printf("Preserving scenario infra so manager cleanup controllers remain available for the next pass.\n")
 				return
 			}
 			if err := KubectlDeleteManifest(testCtx.Context, workingCfg.Kubeconfig, manifestPath); err != nil {
@@ -227,8 +227,8 @@ func SetupScenario(cfg Config, scenario Scenario) (*ScenarioEnv, func(), error) 
 
 // cleanupManagerNamespacesBeforeStoppingManager quiesces template syncing while
 // preserving manager-hosted storage until kubelet unpublish operations complete.
-// If namespace cleanup fails, stopManager is deliberately not called so a later
-// cleanup pass can continue using the storage API.
+// If namespace cleanup fails, stopManager is deliberately not called so its
+// controllers remain available to finish finalizing managed resources.
 func cleanupManagerNamespacesBeforeStoppingManager(quiesceManager, cleanupNamespaces, stopManager func() error) (namespaceCleanupErr, managerStopErr error) {
 	if err := quiesceManager(); err != nil {
 		return fmt.Errorf("quiesce manager template reconciliation: %w", err), nil
@@ -239,8 +239,8 @@ func cleanupManagerNamespacesBeforeStoppingManager(quiesceManager, cleanupNamesp
 	return nil, stopManager()
 }
 
-// ScaleScenarioManagerToZero stops manager reconciliation and its embedded storage API.
-// Call it only after manager-owned namespaces have finished terminating.
+// ScaleScenarioManagerToZero stops manager reconciliation after manager-owned
+// namespaces have finished terminating.
 func ScaleScenarioManagerToZero(ctx context.Context, kubeconfig string, infra InfraConfig) error {
 	if ctx == nil {
 		return fmt.Errorf("context is required")

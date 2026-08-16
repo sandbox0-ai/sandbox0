@@ -15,23 +15,11 @@ import (
 )
 
 type recordingController struct {
-	pausedSandbox  string
-	resumedSandbox string
-	probedSandbox  string
-	probedPodNS    string
-	probedPodName  string
-	probedKind     sandboxprobe.Kind
-	rootFSTarget   ctldapi.RootFSContainerRef
-}
-
-func (c *recordingController) Pause(_ *http.Request, sandboxID string) (ctldapi.PauseResponse, int) {
-	c.pausedSandbox = sandboxID
-	return ctldapi.PauseResponse{Paused: true}, http.StatusOK
-}
-
-func (c *recordingController) Resume(_ *http.Request, sandboxID string) (ctldapi.ResumeResponse, int) {
-	c.resumedSandbox = sandboxID
-	return ctldapi.ResumeResponse{Resumed: true}, http.StatusOK
+	probedSandbox string
+	probedPodNS   string
+	probedPodName string
+	probedKind    sandboxprobe.Kind
+	rootFSTarget  ctldapi.RootFSContainerRef
 }
 
 func (c *recordingController) Probe(_ *http.Request, sandboxID string, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
@@ -64,25 +52,9 @@ func (c *recordingController) ApplyRootFS(_ *http.Request, req ctldapi.ApplyRoot
 	return ctldapi.ApplyRootFSResponse{Applied: true}, http.StatusOK
 }
 
-func TestNewMuxRoutesPauseResume(t *testing.T) {
+func TestNewMuxRoutesSandboxProbes(t *testing.T) {
 	controller := &recordingController{}
 	handler := NewMux(controller)
-
-	t.Run("pause", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/pause", nil)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "sandbox-1", controller.pausedSandbox)
-	})
-
-	t.Run("resume", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-2/resume", nil)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, "sandbox-2", controller.resumedSandbox)
-	})
 
 	t.Run("probe", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-3/probes/readiness", nil)
@@ -106,13 +78,26 @@ func TestNewMuxRoutesPauseResume(t *testing.T) {
 
 func TestNewMuxDefaultsToNotImplementedController(t *testing.T) {
 	handler := NewMux(nil)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/pause", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/probes/readiness", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotImplemented, rec.Code)
-	var resp ctldapi.PauseResponse
+	var resp sandboxprobe.Response
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.False(t, resp.Paused)
+	assert.Equal(t, sandboxprobe.StatusFailed, resp.Status)
+}
+
+func TestNewMuxDoesNotExposeRemovedPauseResumeRoutes(t *testing.T) {
+	handler := NewMux(&recordingController{})
+	for _, path := range []string{
+		"/api/v1/sandboxes/sandbox-1/pause",
+		"/api/v1/sandboxes/sandbox-1/resume",
+	} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code, path)
+	}
 }
 
 func TestNewMuxJSONPostRouteFailureResponses(t *testing.T) {

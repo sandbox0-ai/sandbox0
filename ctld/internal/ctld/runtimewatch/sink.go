@@ -34,7 +34,7 @@ func (s *PodStatusSink) Desired(ctx context.Context, pod *corev1.Pod, snapshot r
 			"runtime is waiting for the standby process to connect",
 			nil,
 		)
-	case runtimecontrol.DesiredWaitingStorage:
+	case runtimecontrol.DesiredWaitingRootFS:
 		readiness = sandboxprobe.Suspended(
 			sandboxprobe.KindReadiness,
 			"RuntimeWaitingStorage",
@@ -67,7 +67,7 @@ func (s *PodStatusSink) Observed(ctx context.Context, pod *corev1.Pod, observati
 		return nil
 	}
 	switch observation.State {
-	case runtimecontrol.ObservedWaiting, runtimecontrol.ObservedLoading, runtimecontrol.ObservedRecovering:
+	case runtimecontrol.ObservedWaitingRootFS, runtimecontrol.ObservedLoading, runtimecontrol.ObservedRecovering:
 		// Desired state already keeps the Pod unroutable. Avoid turning each
 		// transient activation step into metadata and status API writes.
 		return nil
@@ -89,7 +89,7 @@ func (s *PodStatusSink) Observed(ctx context.Context, pod *corev1.Pod, observati
 	switch observation.State {
 	case runtimecontrol.ObservedStandby:
 		readiness = sandboxprobe.Passed(sandboxprobe.KindReadiness, "RuntimeStandby", "runtime is ready for assignment", nil)
-	case runtimecontrol.ObservedWaiting:
+	case runtimecontrol.ObservedWaitingRootFS:
 		readiness = sandboxprobe.Suspended(sandboxprobe.KindReadiness, "RuntimeWaitingStorage", "runtime assignment is waiting for storage", nil)
 	case runtimecontrol.ObservedLoading:
 		readiness = sandboxprobe.Suspended(sandboxprobe.KindReadiness, "RuntimeLoading", "runtime state is loading", nil)

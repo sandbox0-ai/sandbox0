@@ -58,7 +58,7 @@ var (
 	haProbe                        string
 	haProbeSocket                  = "/run/sandbox0/ctld-ha.sock"
 	haMetricsAddr                  string
-	networkRuntimeConfigPath       = strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH"))
+	networkRuntimeConfigPath       = strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH"))
 )
 
 const (
@@ -94,7 +94,7 @@ func main() {
 	flag.StringVar(&haProbe, "ha-probe", "", "run one ctld HA probe (live or ready) and exit")
 	flag.StringVar(&haProbeSocket, "ha-probe-socket", "/run/sandbox0/ctld-ha.sock", "container-local ctld HA probe socket")
 	flag.StringVar(&haMetricsAddr, "ha-metrics-addr", "", "dedicated pre-election HTTP listen address for ctld HA metrics; empty disables it")
-	flag.StringVar(&networkRuntimeConfigPath, "netd-config-path", strings.TrimSpace(os.Getenv("NETD_CONFIG_PATH")), "explicit ctld network runtime config path; empty disables network policy enforcement")
+	flag.StringVar(&networkRuntimeConfigPath, "ctld-networking-config-path", strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH")), "explicit ctld network runtime config path; empty disables network policy enforcement")
 	flag.Parse()
 
 	log.Println("Starting ctld")

@@ -729,7 +729,7 @@ type NetworkConfig struct {
 	// Config contains network runtime configuration.
 	// +optional
 	// +kubebuilder:default={}
-	Config *NetdConfig `json:"config,omitempty"`
+	Config *NetworkRuntimeConfig `json:"config,omitempty"`
 }
 
 // BuiltinStorageConfig defines built-in storage configuration
@@ -1473,7 +1473,7 @@ func IsNetworkEnabled(infra *Sandbox0Infra) bool {
 }
 
 // ResolveNetworkRuntimeConfig returns ctld's network runtime configuration.
-func ResolveNetworkRuntimeConfig(infra *Sandbox0Infra) *NetdConfig {
+func ResolveNetworkRuntimeConfig(infra *Sandbox0Infra) *NetworkRuntimeConfig {
 	if infra == nil || infra.Spec.Network == nil {
 		return nil
 	}

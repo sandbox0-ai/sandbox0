@@ -36,10 +36,11 @@ import (
 )
 
 const (
-	controlPlaneKeySecretName = "sandbox0-internal-jwt-control-plane"
-	dataPlaneKeySecretName    = "sandbox0-internal-jwt-data-plane"
-	auditNetdKeySecretName    = "sandbox0-audit-netd-jwt"
-	auditSigningKeySecretName = "sandbox0-audit-signing"
+	controlPlaneKeySecretName       = "sandbox0-internal-jwt-control-plane"
+	dataPlaneKeySecretName          = "sandbox0-internal-jwt-data-plane"
+	networkAuditKeySecretName       = "sandbox0-audit-ctld-network-jwt"
+	legacyNetworkAuditKeySecretName = "sandbox0-audit-netd-jwt"
+	auditSigningKeySecretName       = "sandbox0-audit-signing"
 )
 
 type Reconciler struct {
@@ -71,8 +72,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		}
 	}
 	if infrav1alpha1.IsSandboxAuditEnabled(infra) {
-		netdSecretName, _, _ := GetAuditNetdKeyRefs(infra)
-		if err := r.createKeyPairSecret(ctx, infra, netdSecretName); err != nil {
+		networkingSecretName, _, _ := GetNetworkAuditKeyRefs(infra)
+		if err := r.reconcileNetworkAuditKey(ctx, infra, networkingSecretName); err != nil {
 			return err
 		}
 		signingSecretName, _, _ := GetAuditSigningKeyRefs(infra)
@@ -86,6 +87,51 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 
 	logger.Info("Internal auth keys reconciled successfully")
 	return nil
+}
+
+func (r *Reconciler) reconcileNetworkAuditKey(ctx context.Context, infra *infrav1alpha1.Sandbox0Infra, secretName string) error {
+	existing := &corev1.Secret{}
+	err := r.Resources.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: infra.Namespace}, existing)
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return err
+	}
+
+	legacyName := fmt.Sprintf("%s-%s", infra.Name, legacyNetworkAuditKeySecretName)
+	legacy := &corev1.Secret{}
+	err = r.Resources.Client.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: infra.Namespace}, legacy)
+	if errors.IsNotFound(err) {
+		return r.createKeyPairSecret(ctx, infra, secretName)
+	}
+	if err != nil {
+		return err
+	}
+	if len(legacy.Data["private.key"]) == 0 || len(legacy.Data["public.key"]) == 0 {
+		return fmt.Errorf("legacy network audit key secret %s/%s is incomplete", infra.Namespace, legacyName)
+	}
+
+	migrated := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: infra.Namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "sandbox0-internal-auth",
+				"app.kubernetes.io/instance":   infra.Name,
+				"app.kubernetes.io/managed-by": "sandbox0infra-operator",
+			},
+		},
+		Type: legacy.Type,
+		Data: map[string][]byte{
+			"private.key": append([]byte(nil), legacy.Data["private.key"]...),
+			"public.key":  append([]byte(nil), legacy.Data["public.key"]...),
+		},
+	}
+	if err := ctrl.SetControllerReference(infra, migrated, r.Resources.Scheme); err != nil {
+		return err
+	}
+	return r.Resources.Client.Create(ctx, migrated)
 }
 
 // reconcileControlPlaneKeys creates or updates control plane key pair.
@@ -280,12 +326,12 @@ func GetDataPlaneKeyRefs(infra *infrav1alpha1.Sandbox0Infra) (secretName, privat
 	return secretName, privateKeyKey, publicKeyKey
 }
 
-// GetAuditNetdKeyRefs returns the dedicated network audit producer key pair.
+// GetNetworkAuditKeyRefs returns the dedicated network audit producer key pair.
 // The private key is mounted only into the ctld network runtime and the public
 // key only into cluster-gateway, so other data-plane services cannot impersonate
 // the network audit producer.
-func GetAuditNetdKeyRefs(infra *infrav1alpha1.Sandbox0Infra) (secretName, privateKeyKey, publicKeyKey string) {
-	return fmt.Sprintf("%s-%s", infra.Name, auditNetdKeySecretName), "private.key", "public.key"
+func GetNetworkAuditKeyRefs(infra *infrav1alpha1.Sandbox0Infra) (secretName, privateKeyKey, publicKeyKey string) {
+	return fmt.Sprintf("%s-%s", infra.Name, networkAuditKeySecretName), "private.key", "public.key"
 }
 
 // GetAuditSigningKeyRefs returns the event signing key pair. Its private key

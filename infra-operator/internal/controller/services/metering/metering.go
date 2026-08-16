@@ -52,7 +52,7 @@ func ApplyCtldConfig(ctx context.Context, c ctrlclient.Client, infra *infrav1alp
 	return apply(ctx, c, infra, &cfg.Metering)
 }
 
-func ApplyNetdConfig(ctx context.Context, c ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.NetdConfig) error {
+func ApplyNetworkRuntimeConfig(ctx context.Context, c ctrlclient.Client, infra *infrav1alpha1.Sandbox0Infra, cfg *apiconfig.NetworkRuntimeConfig) error {
 	if cfg == nil {
 		return nil
 	}

@@ -5353,7 +5353,7 @@ components:
             $ref: "#/components/schemas/ContextResourceUsage"
     ObservabilityEventSource:
       type: string
-      enum: [cluster_gateway, manager, netd, procd, ctld]
+      enum: [cluster_gateway, manager, procd, ctld]
     SandboxObservabilityEventType:
       type: string
       enum: [lifecycle, network_audit, runtime_stats, api_access, process, file]
@@ -7630,7 +7630,7 @@ components:
             type: string
         upstreamUsername:
           type: string
-          description: Username used by netd when authenticating to the upstream SSH server.
+          description: Username used by the ctld network runtime when authenticating to the upstream SSH server.
         knownHosts:
           type: array
           description: OpenSSH known_hosts entries used to verify upstream host keys.

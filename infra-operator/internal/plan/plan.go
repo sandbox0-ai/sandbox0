@@ -127,7 +127,7 @@ type ManagerPlan struct {
 
 type NetworkPlan struct {
 	Enabled               bool
-	Config                *apiconfig.NetdConfig
+	Config                *apiconfig.NetworkRuntimeConfig
 	EgressAuthResolverURL string
 	RegionID              string
 	ClusterID             string
@@ -367,7 +367,7 @@ func compileManagerPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 	}
 
 	if compiled != nil && compiled.Components.EnableNetwork {
-		managerPlan.NetworkPolicyProvider = "netd"
+		managerPlan.NetworkPolicyProvider = "ctld"
 	}
 	if infra != nil {
 		managerPlan.RegionID = common.ResolveRegionID(infra)
@@ -534,18 +534,18 @@ func compileManagerRuntimeConfig(managerPlan *ManagerPlan, infra *infrav1alpha1.
 func compileNetworkPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan) NetworkPlan {
 	networkPlan := NetworkPlan{
 		Enabled: infrav1alpha1.IsNetworkEnabled(infra),
-		Config:  &apiconfig.NetdConfig{},
+		Config:  &apiconfig.NetworkRuntimeConfig{},
 	}
 
 	if infra != nil {
 		networkPlan.RegionID = common.ResolveRegionID(infra)
 		networkPlan.ClusterID = common.ResolveClusterID(infra)
 		if runtimeConfig := infrav1alpha1.ResolveNetworkRuntimeConfig(infra); runtimeConfig != nil {
-			networkPlan.Config = runtimeconfig.ToNetd(runtimeConfig)
+			networkPlan.Config = runtimeconfig.ToNetworkRuntime(runtimeConfig)
 		}
 	}
 
-	if explicit := netdEgressAuthResolverURL(infra); explicit != "" {
+	if explicit := networkingEgressAuthResolverURL(infra); explicit != "" {
 		networkPlan.EgressAuthResolverURL = explicit
 		return networkPlan
 	}
@@ -671,7 +671,7 @@ func compileValidationPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPl
 	if compiled != nil && compiled.Components.EnableNetwork && !compiled.Components.EnableCtld {
 		plan.FatalErrors = append(plan.FatalErrors, "network requires services.manager to be enabled")
 	}
-	if compiled != nil && compiled.Components.EnableNetwork && netdEgressAuthEnabled(infra) && !compiled.Components.EnableManager {
+	if compiled != nil && compiled.Components.EnableNetwork && networkingEgressAuthEnabled(infra) && !compiled.Components.EnableManager {
 		plan.FatalErrors = append(plan.FatalErrors, "network egress auth requires manager to be enabled")
 	}
 	if compiled != nil && compiled.Components.EnableSandboxObservability && !compiled.Components.EnableClickHouse {
@@ -797,6 +797,8 @@ func compileCleanupPlan(infra *infrav1alpha1.Sandbox0Infra, compiled *InfraPlan)
 			namespacedRef("DaemonSet", infra.Namespace, fmt.Sprintf("%s-ctld-b", infra.Name)),
 			namespacedRef("Service", infra.Namespace, fmt.Sprintf("%s-ctld-network-metrics", infra.Name)),
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
+			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-ctld-networking", infra.Name)),
+			// Compatibility cleanup for configs created before networking moved into ctld.
 			namespacedRef("ConfigMap", infra.Namespace, fmt.Sprintf("%s-netd", infra.Name)),
 			namespacedRef("ServiceAccount", infra.Namespace, fmt.Sprintf("%s-ctld", infra.Name)),
 		)
@@ -1434,7 +1436,7 @@ func hasEnabledOIDCProviders(providers []infrav1alpha1.OIDCProviderConfig) bool 
 	return false
 }
 
-func netdEgressAuthResolverURL(infra *infrav1alpha1.Sandbox0Infra) string {
+func networkingEgressAuthResolverURL(infra *infrav1alpha1.Sandbox0Infra) string {
 	cfg := infrav1alpha1.ResolveNetworkRuntimeConfig(infra)
 	if cfg == nil {
 		return ""
@@ -1442,7 +1444,7 @@ func netdEgressAuthResolverURL(infra *infrav1alpha1.Sandbox0Infra) string {
 	return cfg.EgressAuthResolverURL
 }
 
-func netdEgressAuthEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
+func networkingEgressAuthEnabled(infra *infrav1alpha1.Sandbox0Infra) bool {
 	cfg := infrav1alpha1.ResolveNetworkRuntimeConfig(infra)
 	if cfg == nil {
 		return false

@@ -61,7 +61,7 @@ func TestPrimaryServiceHandlePropagatesFailureAndReadiness(t *testing.T) {
 		t.Fatal("service readiness was not propagated")
 	}
 
-	wantErr := errors.New("netd proxy failed")
+	wantErr := errors.New("network proxy failed")
 	service.fail <- wantErr
 	select {
 	case err := <-handle.Errors():
@@ -120,7 +120,7 @@ func TestConfiguredNetworkRuntimeFactoryValidatesBeforePrimaryElection(t *testin
 		t.Fatal("configuredNetworkRuntimeFactory(missing) succeeded, want validation error")
 	}
 
-	configPath := filepath.Join(t.TempDir(), "netd.yaml")
+	configPath := filepath.Join(t.TempDir(), "ctld-networking.yaml")
 	if err := os.WriteFile(configPath, []byte("node_name: node-a\nhealth_port: 8095\n"), 0o600); err != nil {
 		t.Fatalf("write network runtime config: %v", err)
 	}

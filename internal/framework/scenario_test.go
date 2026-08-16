@@ -93,7 +93,7 @@ func TestBuildScenarioRolloutsUsesConsolidatedDataPlaneWorkloads(t *testing.T) {
 	infra := &infrav1alpha1.Sandbox0Infra{
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			Storage: &infrav1alpha1.StorageConfig{},
-			Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}},
+			Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetworkRuntimeConfig{}},
 			Services: &infrav1alpha1.ServicesConfig{
 				Manager: &infrav1alpha1.ManagerServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{

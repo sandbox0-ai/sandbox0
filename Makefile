@@ -14,7 +14,7 @@ OAPI_CODEGEN_VERSION ?= v2.4.1
 GO ?= env GOWORK=off go
 
 BINARIES := regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld procd infra-operator
-TEST_SUITES := $(BINARIES) netd
+TEST_SUITES := $(BINARIES)
 E2E_SSH_FIXTURE_SOURCE_IMAGE := lscr.io/linuxserver/openssh-server@sha256:68b605929e83b2efe000da09269688f6d82a44579e8a18e2d9e8c8d272917cf7
 E2E_SSH_FIXTURE_IMAGE := sandbox0ai/e2e-openssh-server:68b605929e83
 E2E_DEPENDENCY_IMAGES := postgres:16-alpine rustfs/rustfs:1.0.0-alpha.79 registry:2.8.3 sandbox0ai/otemplates:default-v0.2.0 $(E2E_SSH_FIXTURE_IMAGE)
@@ -118,8 +118,6 @@ test:
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/...; \
 		elif [ "$$service" = "procd" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./manager/procd/...; \
-		elif [ "$$service" = "netd" ]; then \
-			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./netd/...; \
 		elif [ "$$service" = "scheduler" ]; then \
 			GOTOOLCHAIN=go1.25.0+auto $(GO) test -v -race -cover ./scheduler/...; \
 		elif [ "$$service" = "ctld" ]; then \
@@ -222,7 +220,7 @@ test-e2e-network-cni:
 	unset http_proxy && unset https_proxy && unset all_proxy && E2E_SINGLE_CLUSTER_SCENARIOS=fullmode $(GO) test -v -count=1 ./tests/e2e/scenarios/single-cluster -run TestSingleCluster -ginkgo.focus="API fullmode.*(enforces transparent TCP egress through the ctld network runtime|resolves cluster DNS over UDP with the ctld network runtime active|blocks private sandbox traffic while preserving public exposure and cluster service access)" -timeout=30m
 
 # Prevent make from treating service names as targets
-regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld procd netd infra-operator:
+regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ctld procd infra-operator:
 	@:
 
 lint:

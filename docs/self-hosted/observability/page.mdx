@@ -270,8 +270,8 @@ At startup, an audit-enabled cluster-gateway validates the actual ClickHouse eng
 
 The ctld network runtime exports:
 
-- `sandbox0_netd_audit_ingest_events_total`
-- `sandbox0_netd_audit_ingest_batches_total`
+- `sandbox0_ctld_network_audit_ingest_events_total`
+- `sandbox0_ctld_network_audit_ingest_batches_total`
 
 Alert on `persist_failed`, `corrupt`, `retrying`, `replay_failed`, and `ack_failed` results. Also monitor the ClickHouse service, cluster-gateway delivery PVC capacity and latency, and audit query errors.
 

@@ -52,7 +52,7 @@ func TestHubSendsCurrentSnapshotAndActualChanges(t *testing.T) {
 	publishTestAssignment(t, claimed)
 	updateHubPod(t, hub, claimed)
 	waiting := receiveSnapshot(t, updates)
-	if waiting.State != runtimecontrol.DesiredWaitingStorage || waiting.Assignment == nil {
+	if waiting.State != runtimecontrol.DesiredWaitingRootFS || waiting.Assignment == nil {
 		t.Fatalf("waiting snapshot = %#v", waiting)
 	}
 
@@ -167,7 +167,7 @@ func TestHubRejectsReadyObservationBeforeStorageActivation(t *testing.T) {
 	}
 	defer unsubscribe()
 	snapshot := receiveSnapshot(t, updates)
-	if snapshot.State != runtimecontrol.DesiredWaitingStorage {
+	if snapshot.State != runtimecontrol.DesiredWaitingRootFS {
 		t.Fatalf("snapshot state = %q, want waiting_storage", snapshot.State)
 	}
 
@@ -225,11 +225,11 @@ func TestHubPublishesDesiredStateBeforeSnapshotCanBeObserved(t *testing.T) {
 	if err := <-updateDone; err != nil {
 		t.Fatalf("update claimed pod: %v", err)
 	}
-	if snapshot.State != runtimecontrol.DesiredWaitingStorage {
+	if snapshot.State != runtimecontrol.DesiredWaitingRootFS {
 		t.Fatalf("snapshot state = %q, want waiting_storage", snapshot.State)
 	}
 	if err := hub.Observe(context.Background(), string(pod.UID), subscriberID, runtimecontrol.Observation{
-		State:             runtimecontrol.ObservedWaiting,
+		State:             runtimecontrol.ObservedWaitingRootFS,
 		Revision:          snapshot.Revision,
 		RuntimeGeneration: snapshot.Assignment.RuntimeGeneration,
 	}); err != nil {
@@ -368,7 +368,7 @@ type blockingDesiredSink struct {
 }
 
 func (s *blockingDesiredSink) Desired(ctx context.Context, pod *corev1.Pod, snapshot runtimecontrol.Snapshot) error {
-	if snapshot.State == runtimecontrol.DesiredWaitingStorage {
+	if snapshot.State == runtimecontrol.DesiredWaitingRootFS {
 		s.once.Do(func() {
 			close(s.started)
 			select {

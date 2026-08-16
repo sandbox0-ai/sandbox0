@@ -41,7 +41,7 @@ func TestControllerTransitionsStandbyWaitingAndReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	waiting := runtimecontrol.Snapshot{
-		State:      runtimecontrol.DesiredWaitingStorage,
+		State:      runtimecontrol.DesiredWaitingRootFS,
 		Revision:   revision,
 		Assignment: &assignment,
 	}

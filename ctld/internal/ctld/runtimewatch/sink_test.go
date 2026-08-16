@@ -25,7 +25,7 @@ func TestPodStatusSinkDesiredStateOnlyUpdatesReadiness(t *testing.T) {
 	sink := NewPodStatusSink(client)
 
 	if err := sink.Desired(context.Background(), pod, runtimecontrol.Snapshot{
-		State: runtimecontrol.DesiredWaitingStorage,
+		State: runtimecontrol.DesiredWaitingRootFS,
 	}); err != nil {
 		t.Fatalf("Desired() error = %v", err)
 	}
@@ -49,7 +49,7 @@ func TestPodStatusSinkDesiredStateOnlyUpdatesReadiness(t *testing.T) {
 
 func TestPodStatusSinkDoesNotPersistTransientObservations(t *testing.T) {
 	for _, state := range []runtimecontrol.ObservedState{
-		runtimecontrol.ObservedWaiting,
+		runtimecontrol.ObservedWaitingRootFS,
 		runtimecontrol.ObservedLoading,
 		runtimecontrol.ObservedRecovering,
 	} {

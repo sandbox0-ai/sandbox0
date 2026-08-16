@@ -24,7 +24,7 @@ import (
 
 const (
 	procdInternalJWTPublicKey = "internal_jwt_public.key"
-	netdMITMCACertKey         = "ca.crt"
+	networkMITMCACertKey      = "ca.crt"
 	serviceAccountNamespace   = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
@@ -119,39 +119,39 @@ func HasSandboxPodReadinessGate(pod *corev1.Pod) bool {
 	return sandboxpod.HasReadinessGate(pod)
 }
 
-// EnsureNetdMITMCASecret copies the manager-local network-runtime MITM CA certificate into the template namespace.
-func EnsureNetdMITMCASecret(
+// EnsureNetworkMITMCASecret copies the manager-local network-runtime MITM CA certificate into the template namespace.
+func EnsureNetworkMITMCASecret(
 	ctx context.Context,
 	client kubernetes.Interface,
 	secretLister corelisters.SecretLister,
 	templateNamespace string,
 ) error {
 	cfg := config.LoadManagerConfig()
-	if cfg == nil || cfg.NetdMITMCASecretName == "" {
+	if cfg == nil || cfg.NetworkMITMCASecretName == "" {
 		return nil
 	}
 	if templateNamespace == "" {
 		return fmt.Errorf("template namespace is required to ensure network-runtime MITM CA secret")
 	}
 
-	sourceNamespace, err := resolveNetdMITMCASecretNamespace(cfg)
+	sourceNamespace, err := resolveNetworkMITMCASecretNamespace(cfg)
 	if err != nil {
 		return err
 	}
 
-	source, err := getSecret(ctx, client, secretLister, sourceNamespace, cfg.NetdMITMCASecretName)
+	source, err := getSecret(ctx, client, secretLister, sourceNamespace, cfg.NetworkMITMCASecretName)
 	if err != nil {
-		return fmt.Errorf("get network-runtime MITM CA secret %s/%s: %w", sourceNamespace, cfg.NetdMITMCASecretName, err)
+		return fmt.Errorf("get network-runtime MITM CA secret %s/%s: %w", sourceNamespace, cfg.NetworkMITMCASecretName, err)
 	}
 
-	certPEM := source.Data[netdMITMCACertKey]
+	certPEM := source.Data[networkMITMCACertKey]
 	if len(certPEM) == 0 {
-		return fmt.Errorf("network-runtime MITM CA secret %s/%s missing %q", sourceNamespace, cfg.NetdMITMCASecretName, netdMITMCACertKey)
+		return fmt.Errorf("network-runtime MITM CA secret %s/%s missing %q", sourceNamespace, cfg.NetworkMITMCASecretName, networkMITMCACertKey)
 	}
 
 	desired := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cfg.NetdMITMCASecretName,
+			Name:      cfg.NetworkMITMCASecretName,
 			Namespace: templateNamespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "sandbox0-manager",
@@ -159,11 +159,11 @@ func EnsureNetdMITMCASecret(
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			netdMITMCACertKey: append([]byte(nil), certPEM...),
+			networkMITMCACertKey: append([]byte(nil), certPEM...),
 		},
 	}
 
-	current, err := getSecret(ctx, client, secretLister, templateNamespace, cfg.NetdMITMCASecretName)
+	current, err := getSecret(ctx, client, secretLister, templateNamespace, cfg.NetworkMITMCASecretName)
 	if err == nil && secretMatches(current, desired) {
 		return nil
 	}
@@ -181,7 +181,7 @@ func EnsureNetdMITMCASecret(
 	}
 
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current, err := client.CoreV1().Secrets(templateNamespace).Get(ctx, cfg.NetdMITMCASecretName, metav1.GetOptions{})
+		current, err := client.CoreV1().Secrets(templateNamespace).Get(ctx, cfg.NetworkMITMCASecretName, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
@@ -221,9 +221,9 @@ func secretMatches(current, desired *corev1.Secret) bool {
 		reflect.DeepEqual(current.Type, desired.Type)
 }
 
-func resolveNetdMITMCASecretNamespace(cfg *config.ManagerConfig) (string, error) {
+func resolveNetworkMITMCASecretNamespace(cfg *config.ManagerConfig) (string, error) {
 	if cfg != nil {
-		if namespace := strings.TrimSpace(cfg.NetdMITMCASecretNamespace); namespace != "" {
+		if namespace := strings.TrimSpace(cfg.NetworkMITMCASecretNamespace); namespace != "" {
 			return namespace, nil
 		}
 	}

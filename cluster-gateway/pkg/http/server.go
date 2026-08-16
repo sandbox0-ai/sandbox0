@@ -162,14 +162,14 @@ func NewServer(
 			return nil, fmt.Errorf("load internal JWT public key: %w", err)
 		}
 	}
-	var auditNetdPublicKey ed25519.PublicKey
+	var networkAuditPublicKey ed25519.PublicKey
 	var auditSigningPrivateKey ed25519.PrivateKey
 	var auditSigningPublicKey ed25519.PublicKey
 	if cfg.SandboxObservability.AuditEnabled {
 		if strings.TrimSpace(cfg.RegionID) == "" || strings.TrimSpace(cfg.ClusterID) == "" {
 			return nil, fmt.Errorf("sandbox audit requires region_id and cluster_id")
 		}
-		auditNetdPublicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultAuditJWTPublicKeyPath)
+		networkAuditPublicKey, err = internalauth.LoadEd25519PublicKeyFromFile(internalauth.DefaultAuditJWTPublicKeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("load dedicated network audit producer JWT public key: %w", err)
 		}
@@ -200,7 +200,7 @@ func NewServer(
 		allowedCallers,
 		controlPlanePublicKey,
 		dataPlanePublicKey,
-		auditNetdPublicKey,
+		networkAuditPublicKey,
 	)
 
 	// Create middleware
@@ -854,7 +854,7 @@ func newInternalAuthValidators(
 	allowedControlPlaneCallers []string,
 	controlPlanePublicKey ed25519.PublicKey,
 	dataPlanePublicKey ed25519.PublicKey,
-	auditNetdPublicKey ed25519.PublicKey,
+	networkAuditPublicKey ed25519.PublicKey,
 ) (*internalauth.Validator, *internalauth.Validator, *internalauth.Validator) {
 	var controlPlaneValidator *internalauth.Validator
 	if authModeEnabled(authMode, authModeInternal) {
@@ -870,17 +870,18 @@ func newInternalAuthValidators(
 		PublicKey: dataPlanePublicKey,
 		AllowedCallers: []string{
 			internalauth.ServiceCtld,
+			internalauth.ServiceLegacyNetworkRuntime,
 			internalauth.ServiceManager,
 			internalauth.ServiceProcd,
 		},
 		ClockSkewTolerance: 10 * time.Second,
 	})
 	var auditIngestValidator *internalauth.Validator
-	if len(auditNetdPublicKey) == ed25519.PublicKeySize {
+	if len(networkAuditPublicKey) == ed25519.PublicKeySize {
 		auditIngestValidator = internalauth.NewValidator(internalauth.ValidatorConfig{
 			Target:             internalauth.ServiceClusterGateway,
-			PublicKey:          auditNetdPublicKey,
-			AllowedCallers:     []string{internalauth.ServiceNetd},
+			PublicKey:          networkAuditPublicKey,
+			AllowedCallers:     []string{internalauth.ServiceCtld, internalauth.ServiceLegacyNetworkRuntime},
 			ClockSkewTolerance: 10 * time.Second,
 		})
 	}

@@ -948,10 +948,10 @@ type ManagerConfig struct {
 	AllowColdStartWithoutReadyDataPlane bool `json:"allowColdStartWithoutReadyDataPlane,omitempty"`
 	// +optional
 	// +kubebuilder:default="30s"
-	NetdPolicyApplyTimeout metav1.Duration `json:"netdPolicyApplyTimeout,omitempty"`
+	NetworkPolicyApplyTimeout metav1.Duration `json:"networkPolicyApplyTimeout,omitempty"`
 	// +optional
 	// +kubebuilder:default="500ms"
-	NetdPolicyApplyPollInterval metav1.Duration `json:"netdPolicyApplyPollInterval,omitempty"`
+	NetworkPolicyApplyPollInterval metav1.Duration `json:"networkPolicyApplyPollInterval,omitempty"`
 	// EgressAuthDefaultResolveTTL controls the default lifetime of resolved
 	// egress auth material cached by the ctld network runtime when a binding does
 	// not set cachePolicy.ttl.
@@ -1006,7 +1006,7 @@ type TeamQuotaLimitConfig struct {
 	BurstValue int64 `json:"burstValue,omitempty"`
 }
 
-type NetdConfig struct {
+type NetworkRuntimeConfig struct {
 	// +optional
 	// +kubebuilder:default="info"
 	LogLevel string `json:"logLevel,omitempty"`

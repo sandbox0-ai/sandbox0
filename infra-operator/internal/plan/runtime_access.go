@@ -102,11 +102,11 @@ func (p *InfraPlan) DataPlaneKeyRefs() (string, string, string) {
 	return controllerinternalauth.GetDataPlaneKeyRefs(p.infra)
 }
 
-func (p *InfraPlan) AuditNetdKeyRefs() (string, string, string) {
+func (p *InfraPlan) NetworkAuditKeyRefs() (string, string, string) {
 	if p == nil || p.infra == nil {
 		return "", "", ""
 	}
-	return controllerinternalauth.GetAuditNetdKeyRefs(p.infra)
+	return controllerinternalauth.GetNetworkAuditKeyRefs(p.infra)
 }
 
 func (p *InfraPlan) AuditSigningKeyRefs() (string, string, string) {
@@ -285,7 +285,7 @@ func (p *InfraPlan) ClusterGatewayJWTSecretName() string {
 	return fmt.Sprintf("%s-cluster-gateway-jwt", p.Scope.Name)
 }
 
-func (p *InfraPlan) ResolveNetdMITMCASecretName() string {
+func (p *InfraPlan) ResolveNetworkMITMCASecretName() string {
 	if p == nil || p.infra == nil {
 		return ""
 	}
@@ -297,7 +297,7 @@ func (p *InfraPlan) ResolveNetdMITMCASecretName() string {
 	if p.Scope.Name == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s-netd-mitm-ca", p.Scope.Name)
+	return fmt.Sprintf("%s-ctld-network-mitm-ca", p.Scope.Name)
 }
 
 func (p *InfraPlan) registryConfig() *registry.ResolvedRegistryConfig {

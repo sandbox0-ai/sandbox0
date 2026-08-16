@@ -114,7 +114,7 @@ func TestApplyRuntimeConfigInjectsIngestURL(t *testing.T) {
 	}
 }
 
-func TestApplyNetdConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *testing.T) {
+func TestApplyNetworkRuntimeConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, infrav1alpha1.AddToScheme(scheme))
@@ -147,16 +147,16 @@ func TestApplyNetdConfigInjectsAuditIngestURLOnlyWhenLicensedAuditIsEnabled(t *t
 			Data:       map[string][]byte{"dsn": []byte("clickhouse://sandbox0:password@clickhouse:9000/default")},
 		},
 	).Build()
-	cfg := &apiconfig.NetdConfig{}
+	cfg := &apiconfig.NetworkRuntimeConfig{}
 
-	err := ApplyNetdConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
+	err := ApplyNetworkRuntimeConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
 
 	require.NoError(t, err)
 	assert.Equal(t, "http://cluster-gateway.svc/internal/v1/sandbox-observability/events", cfg.SandboxObservabilityIngestURL)
 	assert.Equal(t, sandboxobstypes.AuditDeliveryModeCanonicalSync, cfg.SandboxObservabilityAuditDeliveryMode)
 
 	infra.Spec.SandboxObservability.Audit.Enabled = false
-	err = ApplyNetdConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
+	err = ApplyNetworkRuntimeConfig(context.Background(), client, infra, "http://cluster-gateway.svc/", cfg)
 	require.NoError(t, err)
 	assert.Empty(t, cfg.SandboxObservabilityIngestURL)
 	assert.Empty(t, cfg.SandboxObservabilityAuditSpoolDir)

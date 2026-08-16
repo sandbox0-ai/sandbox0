@@ -11,8 +11,6 @@ import (
 )
 
 type Controller interface {
-	Pause(r *http.Request, sandboxID string) (ctldapi.PauseResponse, int)
-	Resume(r *http.Request, sandboxID string) (ctldapi.ResumeResponse, int)
 	Probe(r *http.Request, sandboxID string, kind sandboxprobe.Kind) (sandboxprobe.Response, int)
 	ProbePod(r *http.Request, namespace, name string, kind sandboxprobe.Kind) (sandboxprobe.Response, int)
 }
@@ -43,14 +41,6 @@ type HealthController interface {
 }
 
 type NotImplementedController struct{}
-
-func (NotImplementedController) Pause(_ *http.Request, _ string) (ctldapi.PauseResponse, int) {
-	return ctldapi.PauseResponse{Paused: false, Error: "ctld pause not implemented"}, http.StatusNotImplemented
-}
-
-func (NotImplementedController) Resume(_ *http.Request, _ string) (ctldapi.ResumeResponse, int) {
-	return ctldapi.ResumeResponse{Resumed: false, Error: "ctld resume not implemented"}, http.StatusNotImplemented
-}
 
 func (NotImplementedController) Probe(_ *http.Request, _ string, kind sandboxprobe.Kind) (sandboxprobe.Response, int) {
 	return sandboxprobe.Failed(kind, "ProbeNotImplemented", "ctld sandbox probe not implemented", nil), http.StatusNotImplemented
@@ -216,14 +206,6 @@ func NewMux(controller Controller) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		sandboxID := parts[0]
 		switch {
-		case len(parts) == 2 && parts[1] == "pause":
-			resp, status := controller.Pause(r, sandboxID)
-			w.WriteHeader(status)
-			_ = json.NewEncoder(w).Encode(resp)
-		case len(parts) == 2 && parts[1] == "resume":
-			resp, status := controller.Resume(r, sandboxID)
-			w.WriteHeader(status)
-			_ = json.NewEncoder(w).Encode(resp)
 		case len(parts) == 3 && parts[1] == "probes":
 			resp, status := controller.Probe(r, sandboxID, sandboxprobe.Kind(parts[2]))
 			w.WriteHeader(status)

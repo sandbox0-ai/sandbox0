@@ -22,7 +22,7 @@ func (s *Server) resolveEgressAuth(c *gin.Context) {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
 		return
 	}
-	if claims.Caller != "netd" {
+	if !internalauth.IsCtldNetworkCaller(claims.Caller) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "caller is not allowed to resolve egress auth")
 		return
 	}

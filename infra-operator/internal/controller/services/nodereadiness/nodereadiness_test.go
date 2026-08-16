@@ -188,7 +188,7 @@ func newNodeReadinessInfra() *infrav1alpha1.Sandbox0Infra {
 	return &infrav1alpha1.Sandbox0Infra{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "sandbox0-system"},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
-			Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetdConfig{}},
+			Network: &infrav1alpha1.NetworkConfig{Config: &infrav1alpha1.NetworkRuntimeConfig{}},
 			SandboxNodePlacement: &infrav1alpha1.SandboxNodePlacementConfig{
 				NodeSelector: map[string]string{"sandbox0.ai/node-role": "sandbox"},
 			},
@@ -282,7 +282,7 @@ func newNodeReadinessCtldDaemonSet(namespace, instance, slot string) *appsv1.Dae
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{
 					Name:  "ctld",
 					Image: "ctld:test",
-					Env:   []corev1.EnvVar{{Name: networkRuntimeConfigEnv, Value: "/config/netd.yaml"}},
+					Env:   []corev1.EnvVar{{Name: networkRuntimeConfigEnv, Value: "/config/ctld-networking.yaml"}},
 				}}},
 			},
 		},

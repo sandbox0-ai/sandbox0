@@ -16,15 +16,15 @@ import (
 )
 
 const (
-	procdBinVolumeName = "procd-bin"
-	procdBinMountPath  = "/procd-image"
-	procdPath          = procdBinMountPath + "/usr/local/bin/procd"
-	procdConfigVolume  = "procd-config"
-	netdMITMCAVolume   = "netd-mitm-ca"
-	netdMITMCACertKey  = "ca.crt"
-	netdMITMCAEnvVar   = "SANDBOX0_NETD_MITM_CA_FILE"
-	netdMITMCADir      = "/var/run/sandbox0/netd"
-	netdMITMCACertPath = netdMITMCADir + "/mitm-ca.crt"
+	procdBinVolumeName    = "procd-bin"
+	procdBinMountPath     = "/procd-image"
+	procdPath             = procdBinMountPath + "/usr/local/bin/procd"
+	procdConfigVolume     = "procd-config"
+	networkMITMCAVolume   = "network-mitm-ca"
+	networkMITMCACertKey  = "ca.crt"
+	networkMITMCAEnvVar   = "SANDBOX0_NETWORK_MITM_CA_FILE"
+	networkMITMCADir      = "/var/run/sandbox0/networking"
+	networkMITMCACertPath = networkMITMCADir + "/mitm-ca.crt"
 
 	// Template resources remain hard limits; requests reserve a smaller baseline
 	// so warm pools and cold-start sandboxes can be packed efficiently.
@@ -65,7 +65,7 @@ func buildPodSpec(template *SandboxTemplate) corev1.PodSpec {
 	}
 
 	applyProcdSecretVolume(&spec, template)
-	applyNetdMITMCATrustMaterial(&spec)
+	applyNetworkMITMCATrustMaterial(&spec)
 	applyEmptyDirMounts(&spec, template)
 	applyProcdBinImageVolume(&spec)
 	applyDefaultSandboxPlacement(&spec)
@@ -577,27 +577,27 @@ func applyProcdBinImageVolume(spec *corev1.PodSpec) {
 	})
 }
 
-func applyNetdMITMCATrustMaterial(spec *corev1.PodSpec) {
+func applyNetworkMITMCATrustMaterial(spec *corev1.PodSpec) {
 	if spec == nil {
 		return
 	}
 
 	cfg := config.LoadManagerConfig()
-	if cfg == nil || cfg.NetdMITMCASecretName == "" {
+	if cfg == nil || cfg.NetworkMITMCASecretName == "" {
 		return
 	}
 
 	volumeFound := false
 	for i := range spec.Volumes {
-		if spec.Volumes[i].Name != netdMITMCAVolume {
+		if spec.Volumes[i].Name != networkMITMCAVolume {
 			continue
 		}
 		volumeFound = true
 		spec.Volumes[i].Secret = &corev1.SecretVolumeSource{
-			SecretName: cfg.NetdMITMCASecretName,
+			SecretName: cfg.NetworkMITMCASecretName,
 			Items: []corev1.KeyToPath{
 				{
-					Key:  netdMITMCACertKey,
+					Key:  networkMITMCACertKey,
 					Path: "mitm-ca.crt",
 				},
 			},
@@ -606,13 +606,13 @@ func applyNetdMITMCATrustMaterial(spec *corev1.PodSpec) {
 	}
 	if !volumeFound {
 		spec.Volumes = append(spec.Volumes, corev1.Volume{
-			Name: netdMITMCAVolume,
+			Name: networkMITMCAVolume,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: cfg.NetdMITMCASecretName,
+					SecretName: cfg.NetworkMITMCASecretName,
 					Items: []corev1.KeyToPath{
 						{
-							Key:  netdMITMCACertKey,
+							Key:  networkMITMCACertKey,
 							Path: "mitm-ca.crt",
 						},
 					},
@@ -623,12 +623,12 @@ func applyNetdMITMCATrustMaterial(spec *corev1.PodSpec) {
 
 	for i := range spec.Containers {
 		ensureContainerEnvVar(&spec.Containers[i], corev1.EnvVar{
-			Name:  netdMITMCAEnvVar,
-			Value: netdMITMCACertPath,
+			Name:  networkMITMCAEnvVar,
+			Value: networkMITMCACertPath,
 		})
 		ensureContainerVolumeMount(&spec.Containers[i], corev1.VolumeMount{
-			Name:      netdMITMCAVolume,
-			MountPath: netdMITMCADir,
+			Name:      networkMITMCAVolume,
+			MountPath: networkMITMCADir,
 			ReadOnly:  true,
 		})
 	}

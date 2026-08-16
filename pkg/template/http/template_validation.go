@@ -227,7 +227,7 @@ func validateReservedMountPath(path, field string) error {
 	reserved := []string{
 		"/procd-image",
 		"/config",
-		"/var/run/sandbox0/netd",
+		"/var/run/sandbox0/networking",
 	}
 	for _, prefix := range reserved {
 		if path == prefix || strings.HasPrefix(path, prefix+string(filepath.Separator)) {

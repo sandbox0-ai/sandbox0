@@ -19,10 +19,10 @@ import (
 
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
+	ctldnetworkingassets "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/ctldnetworking"
 	databasesvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/database"
 	internalauthsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/internalauth"
 	meteringsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/metering"
-	netdsvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/netd"
 	sandboxobssvc "github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/services/sandboxobservability"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
 	"github.com/sandbox0-ai/sandbox0/pkg/dataplane"
@@ -81,23 +81,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		return err
 	}
 	podAnnotations := configRef.PodAnnotations()
-	var netdAssets *netdsvc.RuntimeAssets
+	var networkingAssets *ctldnetworkingassets.RuntimeAssets
 	if compiledPlan.Network.Enabled {
-		netdAssets, err = netdsvc.NewReconciler(r.Resources).BuildRuntimeAssets(ctx, compiledPlan)
+		networkingAssets, err = ctldnetworkingassets.NewReconciler(r.Resources).BuildRuntimeAssets(ctx, compiledPlan)
 		if err != nil {
 			return err
 		}
-		podAnnotations[netdsvc.ConfigHashAnnotation] = netdAssets.ConfigRef.Hash
+		podAnnotations[ctldnetworkingassets.ConfigHashAnnotation] = networkingAssets.ConfigRef.Hash
 	}
 	if err := r.cleanupLegacyCSIDriver(ctx); err != nil {
 		return err
 	}
-	if netdAssets != nil {
-		if err := r.ensureNetworkMetricsService(ctx, infra, int32(netdAssets.Config.MetricsPort)); err != nil {
+	if networkingAssets != nil {
+		if err := r.ensureNetworkMetricsService(ctx, infra, int32(networkingAssets.Config.MetricsPort)); err != nil {
 			return err
 		}
 	}
-	if err := r.cleanupNetworkMetricsService(ctx, infra, netdAssets != nil); err != nil {
+	if err := r.cleanupNetworkMetricsService(ctx, infra, networkingAssets != nil); err != nil {
 		return err
 	}
 
@@ -117,7 +117,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 		{Name: "ctld-data", MountPath: "/var/lib/sandbox0/ctld"},
 		{Name: "containerd-sock", MountPath: "/host-run/containerd"},
 		{Name: "containerd-data", MountPath: containerdDataMountPath, ReadOnly: true},
-		{Name: netdsvc.RunVolumeName, MountPath: netdsvc.RunMountDirectory},
+		{Name: ctldnetworkingassets.RunVolumeName, MountPath: ctldnetworkingassets.RunMountDirectory},
 	}
 	volumes := []corev1.Volume{
 		{
@@ -149,7 +149,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 				HostPath: &corev1.HostPathVolumeSource{Path: containerdHostDataRoot},
 			},
 		},
-		{Name: netdsvc.RunVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: ctldnetworkingassets.RunVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 	if strings.TrimSpace(config.SandboxObservabilityRuntimeSamplesIngestURL) != "" {
 		keySecretName, privateKeyKey, _ := internalauthsvc.GetDataPlaneKeyRefs(infra)
@@ -191,9 +191,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			},
 		})
 	}
-	if netdAssets != nil {
-		volumeMounts = appendUniqueVolumeMounts(volumeMounts, netdAssets.VolumeMounts...)
-		volumes = appendUniqueVolumes(volumes, netdAssets.Volumes...)
+	if networkingAssets != nil {
+		volumeMounts = appendUniqueVolumeMounts(volumeMounts, networkingAssets.VolumeMounts...)
+		volumes = appendUniqueVolumes(volumes, networkingAssets.Volumes...)
 	}
 	desiredBySlot := make(map[string]*appsv1.DaemonSet, 2)
 	for _, slot := range []string{dataplane.CtldHASlotA, dataplane.CtldHASlotB} {
@@ -212,7 +212,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 			VolumeMounts:            volumeMounts,
 			Volumes:                 volumes,
 			Infra:                   infra,
-			NetdEnabled:             netdAssets != nil,
+			NetworkingEnabled:       networkingAssets != nil,
 		})
 		revision, err := common.ConfigHash(desired.Spec)
 		if err != nil {
@@ -228,14 +228,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if err := r.reconcileHASlots(ctx, infra, desiredBySlot[dataplane.CtldHASlotA], desiredBySlot[dataplane.CtldHASlotB]); err != nil {
 		return err
 	}
-	if netdAssets == nil {
-		ready, err := r.Ready(ctx, infra)
-		if err != nil {
-			return err
-		}
-		if ready {
-			return r.Resources.CleanupUnusedServiceConfigMapsWithScope(ctx, compiledPlan.Scope, fmt.Sprintf("%s-netd", infra.Name))
-		}
+	ready, err := r.Ready(ctx, infra)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return nil
+	}
+	// The previous release used a separate netd config base name. Wait until
+	// both ctld HA slots are current before deleting configs still mounted by
+	// predecessor Pods.
+	if err := r.Resources.CleanupUnusedServiceConfigMapsWithScope(ctx, compiledPlan.Scope, fmt.Sprintf("%s-netd", infra.Name)); err != nil {
+		return err
+	}
+	if networkingAssets == nil {
+		return r.Resources.CleanupUnusedServiceConfigMapsWithScope(ctx, compiledPlan.Scope, fmt.Sprintf("%s-ctld-networking", infra.Name))
 	}
 	return nil
 }
@@ -359,7 +366,7 @@ type ctldDaemonSetConfig struct {
 	VolumeMounts            []corev1.VolumeMount
 	Volumes                 []corev1.Volume
 	Infra                   *infrav1alpha1.Sandbox0Infra
-	NetdEnabled             bool
+	NetworkingEnabled       bool
 }
 
 func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
@@ -387,7 +394,7 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 		corev1.ResourceCPU:    resource.MustParse(ctldCPURequest),
 		corev1.ResourceMemory: resource.MustParse(ctldMemoryRequest),
 	}
-	if cfg.NetdEnabled {
+	if cfg.NetworkingEnabled {
 		cpu := requests[corev1.ResourceCPU]
 		cpu.Add(resource.MustParse(networkRuntimeCPURequest))
 		requests[corev1.ResourceCPU] = cpu
@@ -435,9 +442,9 @@ func buildCtldDaemonSet(cfg ctldDaemonSetConfig) *appsv1.DaemonSet {
 			Protocol:      corev1.ProtocolTCP,
 		}},
 	}
-	if cfg.NetdEnabled {
+	if cfg.NetworkingEnabled {
 		ctldContainer.Env = append(ctldContainer.Env,
-			corev1.EnvVar{Name: "NETD_CONFIG_PATH", Value: netdsvc.ConfigPath},
+			corev1.EnvVar{Name: "CTLD_NETWORK_CONFIG_PATH", Value: ctldnetworkingassets.ConfigPath},
 		)
 	}
 	maxUnavailable := intstr.FromInt(1)
@@ -585,7 +592,7 @@ func PodMatchesCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
 	if pod == nil || ds == nil || !mapContains(pod.Labels, ds.Spec.Template.Labels) || !mapContains(pod.Annotations, ds.Spec.Template.Annotations) {
 		return false
 	}
-	if pod.Annotations[netdsvc.ConfigHashAnnotation] != ds.Spec.Template.Annotations[netdsvc.ConfigHashAnnotation] {
+	if pod.Annotations[ctldnetworkingassets.ConfigHashAnnotation] != ds.Spec.Template.Annotations[ctldnetworkingassets.ConfigHashAnnotation] {
 		return false
 	}
 	desired := containerByName(ds.Spec.Template.Spec.Containers, "ctld")
@@ -593,14 +600,14 @@ func PodMatchesCurrentTemplate(pod *corev1.Pod, ds *appsv1.DaemonSet) bool {
 	if desired == nil || actual == nil || desired.Image != actual.Image {
 		return false
 	}
-	for _, name := range []string{"NETD_CONFIG_PATH"} {
+	for _, name := range []string{"CTLD_NETWORK_CONFIG_PATH"} {
 		desiredValue, desiredFound := envValue(desired.Env, name)
 		actualValue, actualFound := envValue(actual.Env, name)
 		if desiredFound != actualFound || desiredValue != actualValue {
 			return false
 		}
 	}
-	for _, name := range []string{netdsvc.ConfigVolumeName} {
+	for _, name := range []string{ctldnetworkingassets.ConfigVolumeName} {
 		desiredMount, desiredFound := volumeMountByName(desired.VolumeMounts, name)
 		actualMount, actualFound := volumeMountByName(actual.VolumeMounts, name)
 		if desiredFound != actualFound || (desiredFound && desiredMount.MountPath != actualMount.MountPath) {

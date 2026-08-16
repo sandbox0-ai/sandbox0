@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
+	ctldnetworking "github.com/sandbox0-ai/sandbox0/ctld/internal/ctld/networking"
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
-	netddaemon "github.com/sandbox0-ai/sandbox0/netd/pkg/daemon"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	"go.uber.org/zap"
 )
@@ -139,13 +139,13 @@ func listenerPort(address, label string) (int, error) {
 }
 
 type networkRuntimeService struct {
-	daemon        *netddaemon.Daemon
+	daemon        *ctldnetworking.Daemon
 	logger        *zap.Logger
 	observability *observability.Provider
 }
 
-func loadNetworkRuntimeConfig(configPath string) (*apiconfig.NetdConfig, error) {
-	cfg, err := apiconfig.LoadNetdConfigFromPath(configPath)
+func loadNetworkRuntimeConfig(configPath string) (*apiconfig.NetworkRuntimeConfig, error) {
+	cfg, err := apiconfig.LoadNetworkRuntimeConfigFromPath(configPath)
 	if err != nil {
 		return nil, err
 	}
@@ -159,18 +159,18 @@ func loadNetworkRuntimeConfig(configPath string) (*apiconfig.NetdConfig, error) 
 	return cfg, nil
 }
 
-func newNetworkRuntimeService(cfg *apiconfig.NetdConfig, runtimeWatchPort int) (*networkRuntimeService, error) {
+func newNetworkRuntimeService(cfg *apiconfig.NetworkRuntimeConfig, runtimeWatchPort int) (*networkRuntimeService, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("network runtime config is nil")
 	}
 	logger, err := observability.NewLogger(observability.LoggerConfig{
-		ServiceName: "netd",
+		ServiceName: "ctld",
 		Level:       cfg.LogLevel,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create network runtime logger: %w", err)
 	}
-	provider, err := observability.New(observability.ConfigFromEnv("netd", logger))
+	provider, err := observability.New(observability.ConfigFromEnv("ctld", logger))
 	if err != nil {
 		_ = logger.Sync()
 		return nil, fmt.Errorf("create network runtime observability: %w", err)
@@ -183,7 +183,7 @@ func newNetworkRuntimeService(cfg *apiconfig.NetdConfig, runtimeWatchPort int) (
 		zap.Int("proxy_https_port", cfg.ProxyHTTPSPort),
 	)
 	return &networkRuntimeService{
-		daemon: netddaemon.New(cfg, logger, provider, netddaemon.Options{
+		daemon: ctldnetworking.New(cfg, logger, provider, ctldnetworking.Options{
 			RuntimeWatchTCPPorts: []int{runtimeWatchPort},
 		}),
 		logger:        logger,

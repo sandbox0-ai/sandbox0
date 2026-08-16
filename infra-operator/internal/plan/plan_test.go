@@ -100,7 +100,7 @@ func TestCompileDerivesCrossServiceReferences(t *testing.T) {
 	if !compiled.Manager.TemplateStoreEnabled {
 		t.Fatalf("expected template store to be enabled")
 	}
-	if got := compiled.Manager.NetworkPolicyProvider; got != "netd" {
+	if got := compiled.Manager.NetworkPolicyProvider; got != "ctld" {
 		t.Fatalf("expected ctld network runtime provider, got %q", got)
 	}
 	if got := compiled.Services.Manager.URL; got != "http://demo-manager.sandbox0-system.svc.cluster.local:18080" {
@@ -356,7 +356,7 @@ func TestCompileNetworkRuntimeConfig(t *testing.T) {
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			Network: &infrav1alpha1.NetworkConfig{
 				MITMCASecretName: "canonical-mitm-ca",
-				Config: &infrav1alpha1.NetdConfig{
+				Config: &infrav1alpha1.NetworkRuntimeConfig{
 					EgressAuthResolverURL: "http://canonical-resolver:9000",
 					MetricsPort:           19091,
 				},
@@ -384,7 +384,7 @@ func TestCompileNetworkRuntimeConfig(t *testing.T) {
 	if got := compiled.Network.Config.MetricsPort; got != 19091 {
 		t.Fatalf("network metrics port = %d, want canonical config", got)
 	}
-	if got := compiled.ResolveNetdMITMCASecretName(); got != "canonical-mitm-ca" {
+	if got := compiled.ResolveNetworkMITMCASecretName(); got != "canonical-mitm-ca" {
 		t.Fatalf("network MITM CA secret = %q, want canonical-mitm-ca", got)
 	}
 }
@@ -421,7 +421,7 @@ func TestCompilePreservesExplicitNetworkResolverURL(t *testing.T) {
 		},
 		Spec: infrav1alpha1.Sandbox0InfraSpec{
 			Network: &infrav1alpha1.NetworkConfig{
-				Config: &infrav1alpha1.NetdConfig{
+				Config: &infrav1alpha1.NetworkRuntimeConfig{
 					EgressAuthResolverURL: "http://explicit-resolver:9000",
 				},
 			},
@@ -986,7 +986,7 @@ func TestCompileTracksValidationRequirements(t *testing.T) {
 		infra := &infrav1alpha1.Sandbox0Infra{
 			Spec: infrav1alpha1.Sandbox0InfraSpec{
 				Network: &infrav1alpha1.NetworkConfig{
-					Config: &infrav1alpha1.NetdConfig{
+					Config: &infrav1alpha1.NetworkRuntimeConfig{
 						EgressAuthEnabled: true,
 					},
 				},
@@ -1301,6 +1301,7 @@ func TestCompileTracksCleanupPlan(t *testing.T) {
 		{Kind: "DaemonSet", Namespace: "sandbox0-system", Name: "demo-ctld-b"},
 		{Kind: "Service", Namespace: "sandbox0-system", Name: "demo-ctld-network-metrics"},
 		{Kind: "ConfigMap", Namespace: "sandbox0-system", Name: "demo-ctld"},
+		{Kind: "ConfigMap", Namespace: "sandbox0-system", Name: "demo-ctld-networking"},
 		{Kind: "ConfigMap", Namespace: "sandbox0-system", Name: "demo-netd"},
 		{Kind: "StatefulSet", Namespace: "sandbox0-system", Name: "demo-postgres"},
 		{Kind: "Deployment", Namespace: "sandbox0-system", Name: "demo-egress-broker"},

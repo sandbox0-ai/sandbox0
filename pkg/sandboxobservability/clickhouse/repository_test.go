@@ -51,7 +51,7 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 		RegionID:      "aws-us-east-1",
 		ClusterID:     "cluster-a",
 		OccurredAt:    occurredAt,
-		Source:        sandboxobservability.SourceNetd,
+		Source:        sandboxobservability.SourceCtld,
 		EventType:     sandboxobservability.EventTypeNetworkAudit,
 		Phase:         sandboxobservability.EventPhaseEffect,
 		Outcome:       sandboxobservability.OutcomeDenied,
@@ -59,7 +59,7 @@ func TestInsertEventsBuildsBatchInsertAndSerializesAttributes(t *testing.T) {
 		Action:        "network.deny",
 		Resource:      sandboxobservability.AuditResource{Type: "sandbox_network", ID: "sb-1"},
 		OperationID:   "operation-1",
-		Producer:      sandboxobservability.AuditProducer{Service: "netd", Instance: "node-1", Sequence: 1},
+		Producer:      sandboxobservability.AuditProducer{Service: "ctld", Instance: "node-1", Sequence: 1},
 		Attributes:    map[string]any{"destination": "example.com"},
 	}
 	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
@@ -117,13 +117,13 @@ func TestInsertEventsRejectsMutationOfSignedIdentityWhitespace(t *testing.T) {
 		TeamID:        " team-1",
 		SandboxID:     "sb-1",
 		OccurredAt:    time.Now().UTC(),
-		Source:        sandboxobservability.SourceNetd,
+		Source:        sandboxobservability.SourceCtld,
 		EventType:     sandboxobservability.EventTypeNetworkAudit,
 		Phase:         sandboxobservability.EventPhaseEffect,
 		Actor:         sandboxobservability.AuditActor{Kind: sandboxobservability.ActorKindSandboxWorkload},
 		Action:        "network.connect",
 		Resource:      sandboxobservability.AuditResource{Type: "sandbox_network", ID: "sb-1"},
-		Producer:      sandboxobservability.AuditProducer{Service: "netd"},
+		Producer:      sandboxobservability.AuditProducer{Service: "ctld"},
 	}
 	if err := repo.InsertEvents(context.Background(), []sandboxobservability.Event{event}); err == nil || !strings.Contains(err.Error(), "team_id must not contain surrounding whitespace") {
 		t.Fatalf("InsertEvents() error = %v, want non-canonical signed field rejection", err)
@@ -141,7 +141,7 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 		EventID:    "11111111-1111-4111-8111-111111111111",
 		OccurredAt: time.Date(2026, 7, 1, 1, 30, 0, 0, time.UTC),
 		IngestedAt: time.Date(2026, 7, 1, 1, 30, 1, 0, time.UTC),
-		Source:     sandboxobservability.SourceNetd,
+		Source:     sandboxobservability.SourceCtld,
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
 		Integrity:  sandboxobservability.AuditIntegrity{PayloadHash: strings.Repeat("a", 64)},
 	})
@@ -156,7 +156,7 @@ func TestBuildListSQLAppliesTypedFiltersAndCursor(t *testing.T) {
 		EndTime:   &end,
 		Limit:     10,
 		Cursor:    cursorValue,
-		Source:    sandboxobservability.SourceNetd,
+		Source:    sandboxobservability.SourceCtld,
 		EventType: sandboxobservability.EventTypeNetworkAudit,
 		Outcome:   sandboxobservability.OutcomeDenied,
 	})
@@ -194,7 +194,7 @@ func TestBuildWatchEventsSQLUsesIngestionOrderCursor(t *testing.T) {
 		SandboxID: "sb-1",
 		StartTime: &start,
 		Limit:     10,
-		Source:    sandboxobservability.SourceNetd,
+		Source:    sandboxobservability.SourceCtld,
 		EventType: sandboxobservability.EventTypeNetworkAudit,
 	}, sandboxobservability.WatchOptions{
 		AfterIngestedAt: &after,
@@ -287,7 +287,7 @@ func TestNormalizeEventCursorsRejectDateTime64NanoOverflow(t *testing.T) {
 		EventID:    "11111111-1111-4111-8111-111111111111",
 		OccurredAt: outside,
 		IngestedAt: time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC),
-		Source:     sandboxobservability.SourceNetd,
+		Source:     sandboxobservability.SourceCtld,
 		EventType:  sandboxobservability.EventTypeNetworkAudit,
 	})
 	if err != nil {
@@ -300,7 +300,7 @@ func TestNormalizeEventCursorsRejectDateTime64NanoOverflow(t *testing.T) {
 		t.Fatalf("normalizeQuery() error = %v, want ErrInvalidCursor", err)
 	}
 
-	tail, err := encodeTailCursor(eventTailCursorKind, outside, string(sandboxobservability.SourceNetd), string(sandboxobservability.EventTypeNetworkAudit), "11111111-1111-4111-8111-111111111111", "")
+	tail, err := encodeTailCursor(eventTailCursorKind, outside, string(sandboxobservability.SourceCtld), string(sandboxobservability.EventTypeNetworkAudit), "11111111-1111-4111-8111-111111111111", "")
 	if err != nil {
 		t.Fatalf("encodeTailCursor() error = %v", err)
 	}

@@ -155,7 +155,7 @@ func TestAppendEventAndWindowPreserveNanosecondTimestampsAndSequences(t *testing
 	window := &metering.Window{
 		Sequence:    42,
 		WindowID:    "window-1",
-		Producer:    "netd.byte_windows/node-1",
+		Producer:    "ctld.network.byte_windows/node-1",
 		WindowType:  metering.WindowTypeSandboxEgressBytes,
 		SubjectType: metering.SubjectTypeSandbox,
 		SubjectID:   "sandbox-1",

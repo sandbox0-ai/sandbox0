@@ -455,7 +455,7 @@ func snapshotForPod(pod *corev1.Pod) runtimecontrol.Snapshot {
 			Reason: "published runtime assignment revision does not match the manifest",
 		}
 	}
-	state := runtimecontrol.DesiredWaitingStorage
+	state := runtimecontrol.DesiredWaitingRootFS
 	if readyRevision == revision {
 		state = runtimecontrol.DesiredActive
 	} else if readyRevision != "" {
@@ -478,8 +478,8 @@ func validateObservation(snapshot runtimecontrol.Snapshot, observation runtimeco
 			return errors.New("standby observation does not match desired state")
 		}
 		return nil
-	case runtimecontrol.ObservedWaiting:
-		if snapshot.Assignment == nil || snapshot.State != runtimecontrol.DesiredWaitingStorage {
+	case runtimecontrol.ObservedWaitingRootFS:
+		if snapshot.Assignment == nil || snapshot.State != runtimecontrol.DesiredWaitingRootFS {
 			return errors.New("waiting observation does not match desired state")
 		}
 	case runtimecontrol.ObservedLoading,

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -165,8 +166,10 @@ type Plugin struct {
 	config  *PluginConfig
 	tasks   *taskStore
 
-	newRunner func(config PluginConfig) Runsc
-	rootfs    *rootfsRuntime
+	newRunner  func(config PluginConfig) Runsc
+	rootfs     *rootfsRuntime
+	rootfsOnce sync.Once
+	rootfsErr  error
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -259,16 +262,23 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	if err := validateRootFSConfig(decoded); err != nil {
 		return err
 	}
-	runtime, err := newRootFSRuntime(decoded)
-	if err != nil {
-		return err
-	}
-	if p.rootfs != nil {
-		_ = p.rootfs.Close()
-	}
 	p.config = decoded
-	p.rootfs = runtime
 	return nil
+}
+
+// rootfsRuntime lazily opens the singleton bbolt journal. Nomad probes plugin
+// configurations in short-lived loader processes, so doing this in SetConfig
+// can briefly create competing database lock holders.
+func (p *Plugin) rootfsRuntime() (RootFSRuntime, error) {
+	p.rootfsOnce.Do(func() {
+		if p.config.RootFSEnabled {
+			p.rootfs, p.rootfsErr = newRootFSRuntime(p.config)
+		}
+	})
+	if p.rootfsErr != nil {
+		return nil, p.rootfsErr
+	}
+	return p.rootfs, nil
 }
 
 // TaskConfigSchema returns the per-task HCL schema.
@@ -366,6 +376,10 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 	containerID := safeContainerID(config.ID)
 	rootMount := filepath.Join(bundleDir, "rootfs")
 	socketPath := controlSocketPath(p.config.ControlDir, config.ID)
+	rootfs, err := p.rootfsRuntime()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	handle := newTaskHandle(taskHandleOptions{
 		taskConfig:        config,
@@ -377,7 +391,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		mounter:           systemMounter{},
 		allowedRoot:       p.config.AllowedRootfsDir,
 		rootfsAllowedRoot: p.config.RootFSMountRoot,
-		rootfs:            p.rootfs,
+		rootfs:            rootfs,
 		logger:            p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
 	})
 
@@ -428,6 +442,10 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 	}
 
 	runner := p.newRunner(*p.config)
+	rootfs, err := p.rootfsRuntime()
+	if err != nil {
+		return err
+	}
 	recovered := newTaskHandle(taskHandleOptions{
 		taskConfig:        state.TaskConfig,
 		bundleDir:         state.BundleDir,
@@ -438,7 +456,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		mounter:           systemMounter{},
 		allowedRoot:       p.config.AllowedRootfsDir,
 		rootfsAllowedRoot: p.config.RootFSMountRoot,
-		rootfs:            p.rootfs,
+		rootfs:            rootfs,
 		logger:            p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
 	})
 	if err := recovered.Recover(state); err != nil {

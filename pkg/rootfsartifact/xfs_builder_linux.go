@@ -88,7 +88,10 @@ func (b XFSBuilder) Build(ctx context.Context, sourceRoot, destination string, l
 			return fmt.Errorf("create RootFS layout: %w", err)
 		}
 	}
-	if err := runner.Run(ctx, "cp", "-a", "--reflink=auto", "--sparse=always", filepath.Join(sourceRoot, "."), lower); err != nil {
+	// filepath.Join cleans a trailing "." away, which would copy sourceRoot as a
+	// nested child instead of copying its entries into lower/.
+	sourceEntries := sourceRoot + string(filepath.Separator) + "."
+	if err := runner.Run(ctx, "cp", "-a", "--reflink=auto", "--sparse=always", sourceEntries, lower); err != nil {
 		return fmt.Errorf("copy filesystem into XFS lower: %w", err)
 	}
 	rootFD, err := unix.Open(mountRoot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)

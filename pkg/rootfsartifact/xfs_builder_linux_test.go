@@ -28,7 +28,8 @@ import (
 func TestXFSBuilderUsesReflinkLayoutAndCleanUnmount(t *testing.T) {
 	runner := &recordingRunner{}
 	destination := filepath.Join(t.TempDir(), "base.xfs")
-	if err := (XFSBuilder{Runner: runner}).Build(context.Background(), t.TempDir(), destination, MinimumLogicalSizeBytes); err != nil {
+	source := t.TempDir()
+	if err := (XFSBuilder{Runner: runner}).Build(context.Background(), source, destination, MinimumLogicalSizeBytes); err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
 	info, err := os.Stat(destination)
@@ -40,6 +41,9 @@ func TestXFSBuilderUsesReflinkLayoutAndCleanUnmount(t *testing.T) {
 	}
 	if got, want := runner.names(), []string{"mkfs.xfs", "mount", "cp", "umount", "xfs_repair"}; !slices.Equal(got, want) {
 		t.Fatalf("commands = %v, want %v", got, want)
+	}
+	if got := runner.calls[2].args[3]; got != source+"/." {
+		t.Fatalf("cp source = %q, want %q", got, source+"/.")
 	}
 }
 

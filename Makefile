@@ -1,4 +1,4 @@
-.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-setup-gvisor-rootfs test-e2e-specific test-e2e-network-cni lint tidy vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push manifests apispec oapi-codegen
+.PHONY: all build test test-all test-integration test-integration-verbose test-e2e test-e2e-kind test-e2e-destroy test-e2e-load-images test-e2e-prepare-kind test-e2e-setup-gvisor-rootfs test-e2e-specific test-e2e-network-cni lint lint-nomad-driver tidy tidy-nomad-driver test-nomad-driver vendor clean helm-update helm-configs release docker-build docker-build-local build-local-all docker-push manifests apispec oapi-codegen
 
 # Tool Binaries
 LOCALBIN ?= $(shell pwd)/bin
@@ -226,8 +226,17 @@ regional-gateway ssh-gateway global-gateway cluster-gateway manager scheduler ct
 lint:
 	golangci-lint run ./...
 
+lint-nomad-driver:
+	cd nomad-driver-sandbox0 && $(GO) vet ./...
+
 tidy:
 	$(GO) mod tidy
+
+tidy-nomad-driver:
+	cd nomad-driver-sandbox0 && $(GO) mod tidy
+
+test-nomad-driver:
+	cd nomad-driver-sandbox0 && $(GO) test -race ./...
 
 vendor:
 	$(GO) mod vendor

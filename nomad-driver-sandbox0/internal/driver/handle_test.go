@@ -242,7 +242,7 @@ func newTestFixture(t *testing.T) *testFixture {
 	}
 }
 
-func TestPrepareCreatesWritableWarmOCIBundle(t *testing.T) {
+func TestPrepareCreatesGenericWarmSlotWithoutRunsc(t *testing.T) {
 	fixture := newTestFixture(t)
 	var config TaskConfig
 	if err := fixture.taskConfig.DecodeDriverConfig(&config); err != nil {
@@ -251,25 +251,11 @@ func TestPrepareCreatesWritableWarmOCIBundle(t *testing.T) {
 	if err := fixture.handle.Prepare(config); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	if calls := fixture.runner.callsSnapshot(); len(calls) != 1 || calls[0] != "create" {
-		t.Fatalf("runner calls = %v, want only create", calls)
+	if calls := fixture.runner.callsSnapshot(); len(calls) != 0 {
+		t.Fatalf("warm runner calls = %v, want none", calls)
 	}
-
-	data, err := os.ReadFile(filepath.Join(fixture.bundleDir, "config.json"))
-	if err != nil {
-		t.Fatalf("read OCI config: %v", err)
-	}
-	var spec map[string]any
-	if err := json.Unmarshal(data, &spec); err != nil {
-		t.Fatalf("decode OCI config: %v", err)
-	}
-	root := spec["root"].(map[string]any)
-	readonly, hasReadonly := root["readonly"]
-	if root["path"] != "rootfs" || (hasReadonly && readonly != false) {
-		t.Fatalf("OCI root = %v, want writable rootfs", root)
-	}
-	if got := spec["process"].(map[string]any)["args"].([]any); len(got) != 1 || got[0] != "/procd" {
-		t.Fatalf("OCI argv = %v, want /procd", got)
+	if _, err := os.Stat(filepath.Join(fixture.bundleDir, "config.json")); !os.IsNotExist(err) {
+		t.Fatalf("warm OCI config exists before claim: %v", err)
 	}
 	if status := fixture.handle.TaskStatus(); status.DriverAttributes["phase"] != string(phaseWarm) {
 		t.Fatalf("phase = %s, want warm", status.DriverAttributes["phase"])
@@ -280,7 +266,7 @@ func TestPrepareCreatesWritableWarmOCIBundle(t *testing.T) {
 	}
 }
 
-func TestClaimBindsRootAndStartsPrecreatedContainer(t *testing.T) {
+func TestClaimAttachesRootBeforeCreateAndStart(t *testing.T) {
 	fixture := newTestFixture(t)
 	if err := fixture.handle.Prepare(TaskConfig{Command: "/procd", WaitForClaim: true}); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
@@ -302,6 +288,19 @@ func TestClaimBindsRootAndStartsPrecreatedContainer(t *testing.T) {
 	if status := fixture.handle.TaskStatus(); status.DriverAttributes["phase"] != string(phaseActive) {
 		t.Fatalf("phase = %s, want active", status.DriverAttributes["phase"])
 	}
+	data, err := os.ReadFile(filepath.Join(fixture.bundleDir, "config.json"))
+	if err != nil {
+		t.Fatalf("read claim OCI config: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("decode claim OCI config: %v", err)
+	}
+	root := spec["root"].(map[string]any)
+	readonly, hasReadonly := root["readonly"]
+	if root["path"] != "rootfs" || (hasReadonly && readonly != false) {
+		t.Fatalf("OCI root = %v, want writable initial root", root)
+	}
 	persisted, err := readPersistedState(filepath.Join(fixture.bundleDir, ".sandbox0-driver-state.json"))
 	if err != nil || persisted.Phase != phaseActive || !persisted.RootMounted {
 		t.Fatalf("persisted state = %+v, err=%v; want durable active state", persisted, err)
@@ -315,8 +314,8 @@ func TestClaimBindsRootAndStartsPrecreatedContainer(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if !contains(calls, "start") || !contains(calls, "wait") {
-		t.Fatalf("runner calls = %v, want start and wait", calls)
+	if !contains(calls, "create") || !contains(calls, "start") || !contains(calls, "wait") {
+		t.Fatalf("runner calls = %v, want create, start, and wait", calls)
 	}
 }
 
@@ -361,7 +360,7 @@ func TestClaimStartFailureUnmountsAndPoisonsSlot(t *testing.T) {
 	}
 }
 
-func TestRecoverWarmCreatedSlotWithoutRootfs(t *testing.T) {
+func TestRecoverWarmSlotWithoutRootfs(t *testing.T) {
 	fixture := newTestFixture(t)
 	if err := fixture.handle.Prepare(TaskConfig{Command: "/procd", WaitForClaim: true}); err != nil {
 		t.Fatalf("Prepare() error = %v", err)

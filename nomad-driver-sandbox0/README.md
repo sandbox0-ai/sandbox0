@@ -3,11 +3,11 @@
 This task driver is part of an isolated Nomad + gVisor architecture PoC. It is
 not a replacement for the production Kubernetes runtime path.
 
-The driver creates a generic warm gVisor container with `runsc create`. The OCI
-root initially points to a private placeholder mount. After manager/ctld have
-attached a RootFS generation and applied network policy, an authorized caller
-bind-mounts that generation over the private root mount and invokes stock
-`runsc start`. The claim is one-shot and is rejected after the first attempt.
+The driver creates a generic warm Nomad allocation without a gVisor container.
+After manager/ctld have attached a RootFS generation and applied network policy,
+an authorized caller binds that generation to a private OCI root mount, writes
+the generic OCI spec, and invokes stock `runsc create` and `runsc start`. The
+claim is one-shot and is rejected after the first attempt.
 
 ## Status
 
@@ -16,7 +16,7 @@ Implemented:
 - Nomad task-driver plugin lifecycle and HCL schemas
 - stock `runsc` CLI adapter with `overlay2=none`
 - generic writable OCI bundle generation
-- pre-created warm container
+- generic warm allocation with no image-specific runtime state
 - local Unix control socket with `/status` and `/claim`
 - RootFS bind, start, stop, delete, signal, and cleanup paths
 - one-shot claim and basic recovery semantics

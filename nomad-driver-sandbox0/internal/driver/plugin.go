@@ -127,7 +127,7 @@ type TaskConfig struct {
 	RootfsPath   string   `codec:"rootfs_path"`
 }
 
-// Plugin implements a Nomad task driver for pre-created gVisor warm slots.
+// Plugin implements a Nomad task driver for generic gVisor warm slots.
 type Plugin struct {
 	eventer *eventer.Eventer
 	config  *PluginConfig
@@ -274,7 +274,7 @@ func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
 	}
 }
 
-// StartTask creates the pre-warmed runsc container and returns immediately.
+// StartTask creates a warm allocation and returns before any gVisor container exists.
 func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
 	if config == nil {
 		return nil, nil, errors.New("nil task config")

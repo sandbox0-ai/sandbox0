@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -133,8 +135,36 @@ func (r *CommandRunsc) command(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 func (r *CommandRunsc) run(ctx context.Context, args ...string) error {
-	_, err := r.output(ctx, args...)
-	return err
+	// gVisor's create/start commands leave Sentry and Gofer children running.
+	// Do not give them an exec.Cmd stdout/stderr pipe: the parent would block
+	// until those long-lived children close the inherited pipe descriptors.
+	cmd := r.command(ctx, args...)
+	temp, err := os.CreateTemp("", "sandbox0-runsc-stderr-*")
+	if err != nil {
+		return fmt.Errorf("create runsc stderr file: %w", err)
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+	cmd.Stdout = nil
+	cmd.Stderr = temp
+	err = cmd.Run()
+	_, seekErr := temp.Seek(0, io.SeekStart)
+	if seekErr != nil {
+		_ = temp.Close()
+		if err == nil {
+			return seekErr
+		}
+		return err
+	}
+	stderr, readErr := io.ReadAll(temp)
+	_ = temp.Close()
+	if err != nil {
+		return fmt.Errorf("runsc %s: %w: %s", args[0], err, strings.TrimSpace(string(stderr)))
+	}
+	if readErr != nil {
+		return readErr
+	}
+	return nil
 }
 
 func (r *CommandRunsc) output(ctx context.Context, args ...string) ([]byte, error) {

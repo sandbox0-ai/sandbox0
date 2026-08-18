@@ -66,29 +66,31 @@ type PersistedState struct {
 }
 
 type taskHandleOptions struct {
-	taskConfig  *drivers.TaskConfig
-	bundleDir   string
-	containerID string
-	rootMount   string
-	socketPath  string
-	runner      Runsc
-	mounter     Mounter
-	allowedRoot string
-	logger      hclog.Logger
+	taskConfig   *drivers.TaskConfig
+	driverConfig TaskConfig
+	bundleDir    string
+	containerID  string
+	rootMount    string
+	socketPath   string
+	runner       Runsc
+	mounter      Mounter
+	allowedRoot  string
+	logger       hclog.Logger
 }
 
 type taskHandle struct {
 	mu sync.Mutex
 
-	taskConfig  *drivers.TaskConfig
-	bundleDir   string
-	containerID string
-	rootMount   string
-	socketPath  string
-	allowedRoot string
-	runner      Runsc
-	mounter     Mounter
-	logger      hclog.Logger
+	taskConfig   *drivers.TaskConfig
+	driverConfig TaskConfig
+	bundleDir    string
+	containerID  string
+	rootMount    string
+	socketPath   string
+	allowedRoot  string
+	runner       Runsc
+	mounter      Mounter
+	logger       hclog.Logger
 
 	phase       slotPhase
 	startedAt   time.Time
@@ -187,7 +189,7 @@ func newTaskHandle(options taskHandleOptions) *taskHandle {
 	}
 }
 
-// Prepare writes a placeholder OCI bundle and creates the one-shot runsc container.
+// Prepare creates a generic warm allocation without creating a gVisor container.
 func (h *taskHandle) Prepare(config TaskConfig) error {
 	prepared := false
 	defer func() {
@@ -196,6 +198,7 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 		}
 	}()
 	h.mu.Lock()
+	h.driverConfig = config
 	h.phase = phaseWarm
 	h.startedAt = time.Now().Round(time.Millisecond)
 	h.mu.Unlock()
@@ -203,6 +206,18 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 	if err := os.MkdirAll(filepath.Dir(h.socketPath), 0o750); err != nil {
 		return fmt.Errorf("create control directory: %w", err)
 	}
+	if err := os.MkdirAll(h.rootMount, 0o755); err != nil {
+		return fmt.Errorf("create OCI rootfs mountpoint: %w", err)
+	}
+	if err := h.persist(); err != nil {
+		_ = h.Close(false)
+		return err
+	}
+	prepared = true
+	return nil
+}
+
+func (h *taskHandle) writeClaimBundle() error {
 	netnsPath := ""
 	if h.taskConfig.NetworkIsolation != nil {
 		netnsPath = h.taskConfig.NetworkIsolation.Path
@@ -220,9 +235,13 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 			MemoryLimitBytes: linux.MemoryLimitBytes,
 		}
 	}
+	h.mu.Lock()
+	command := h.driverConfig.Command
+	args := h.driverConfig.Args
+	h.mu.Unlock()
 	spec := buildSpec(specOptions{
-		Command:   config.Command,
-		Args:      config.Args,
+		Command:   command,
+		Args:      args,
 		AllocID:   h.taskConfig.AllocID,
 		TaskID:    h.taskConfig.ID,
 		NetNSPath: netnsPath,
@@ -231,20 +250,10 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 	if err := writeBundle(h.bundleDir, spec); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := h.runner.Create(ctx, h.bundleDir, h.containerID); err != nil {
-		return fmt.Errorf("create warm runsc container: %w", err)
-	}
-	if err := h.persist(); err != nil {
-		_ = h.Close(false)
-		return err
-	}
-	prepared = true
 	return nil
 }
 
-// Claim bind-mounts the authorized RootFS and starts the already-created container.
+// Claim writes the OCI bundle, attaches D as its initial root, then creates and starts runsc.
 func (h *taskHandle) Claim(request ClaimRequest) error {
 	h.mu.Lock()
 	if h.phase != phaseWarm {
@@ -264,39 +273,39 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		h.setPhase(phaseWarm)
 		return err
 	}
-	if err := h.mounter.Bind(resolvedRootfs, h.rootMount); err != nil {
+	if err := h.writeClaimBundle(); err != nil {
 		h.setPhase(phaseWarm)
 		return err
 	}
-
 	h.mu.Lock()
 	h.rootMounted = true
 	h.phase = phaseClaiming
 	h.mu.Unlock()
 	if err := h.persist(); err != nil {
-		_ = h.mounter.Unmount(h.rootMount)
-		_ = h.runner.Delete(context.Background(), h.containerID, true)
-		h.mu.Lock()
-		h.rootMounted = false
-		h.phase = phaseWarm
-		h.mu.Unlock()
+		_ = h.rollbackClaim()
 		return fmt.Errorf("persist claiming state: %w", err)
+	}
+
+	if err := h.mounter.Bind(resolvedRootfs, h.rootMount); err != nil {
+		_ = h.rollbackClaim()
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := h.runner.Start(ctx, h.containerID); err != nil {
+	if err := h.runner.Create(ctx, h.bundleDir, h.containerID); err != nil {
 		_ = h.mounter.Unmount(h.rootMount)
 		_ = h.runner.Delete(context.Background(), h.containerID, true)
-		h.mu.Lock()
-		h.rootMounted = false
-		h.phase = phasePoisoned
-		h.exitResult = &drivers.ExitResult{Err: fmt.Errorf("runsc start: %w", err)}
-		if h.completedAt.IsZero() {
-			h.completedAt = time.Now()
-		}
-		closeDoneLocked(h.done)
-		h.mu.Unlock()
+		_ = h.markClaimFailed(fmt.Errorf("runsc create: %w", err))
+		return fmt.Errorf("runsc create: %w", err)
+	}
+	cancel()
+	startCtx, startCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer startCancel()
+	if err := h.runner.Start(startCtx, h.containerID); err != nil {
+		_ = h.mounter.Unmount(h.rootMount)
+		_ = h.runner.Delete(context.Background(), h.containerID, true)
+		_ = h.markClaimFailed(fmt.Errorf("runsc start: %w", err))
 		_ = h.persist()
 		return fmt.Errorf("runsc start: %w", err)
 	}
@@ -323,6 +332,28 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	}
 	go h.waitForExit()
 	return nil
+}
+
+func (h *taskHandle) rollbackClaim() error {
+	_ = h.mounter.Unmount(h.rootMount)
+	h.mu.Lock()
+	h.rootMounted = false
+	h.phase = phaseWarm
+	h.mu.Unlock()
+	return h.persist()
+}
+
+func (h *taskHandle) markClaimFailed(err error) error {
+	h.mu.Lock()
+	h.rootMounted = false
+	h.phase = phasePoisoned
+	h.exitResult = &drivers.ExitResult{Err: err}
+	if h.completedAt.IsZero() {
+		h.completedAt = time.Now()
+	}
+	closeDoneLocked(h.done)
+	h.mu.Unlock()
+	return h.persist()
 }
 
 func (h *taskHandle) waitForExit() {
@@ -555,15 +586,21 @@ func (h *taskHandle) Recover(state PersistedState) error {
 	h.phase = phaseWarm
 	h.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	runscState, err := h.runner.State(ctx, h.containerID)
-	if err != nil {
-		h.markPoisoned(fmt.Errorf("recover runsc state: %w", err))
-		return err
+	status := ""
+	var runscState RunscState
+	if state.RootMounted {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		runscState, err := h.runner.State(ctx, h.containerID)
+		cancel()
+		if err != nil {
+			h.markPoisoned(fmt.Errorf("recover runsc state: %w", err))
+			return err
+		}
+		status = strings.ToLower(strings.TrimSpace(runscState.Status))
 	}
-	status := strings.ToLower(strings.TrimSpace(runscState.Status))
 	switch {
+	case !state.RootMounted:
+		h.setPhase(phaseWarm)
 	case status == "running":
 		h.setPhase(phaseActive)
 		go h.waitForExit()

@@ -105,24 +105,40 @@ func (s *encryptedStore) Create() error {
 }
 
 func (s *encryptedStore) Put(key string, in io.Reader) error {
+	_, err := s.put(key, in, false)
+	return err
+}
+
+func (s *encryptedStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
+	return s.put(key, in, true)
+}
+
+func (s *encryptedStore) put(key string, in io.Reader, conditional bool) (bool, error) {
 	if in == nil {
 		in = bytes.NewReader(nil)
 	}
 	tmp, err := os.CreateTemp("", "s0-object-encrypted-*")
 	if err != nil {
-		return fmt.Errorf("create encrypted object temp file: %w", err)
+		return false, fmt.Errorf("create encrypted object temp file: %w", err)
 	}
 	defer func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())
 	}()
 	if err := s.encryptTo(tmp, key, in); err != nil {
-		return err
+		return false, err
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("seek encrypted object temp file: %w", err)
+		return false, fmt.Errorf("seek encrypted object temp file: %w", err)
 	}
-	return s.store.Put(key, tmp)
+	if !conditional {
+		return true, s.store.Put(key, tmp)
+	}
+	store, ok := s.store.(ConditionalStore)
+	if !ok {
+		return false, fmt.Errorf("underlying object store does not support conditional create")
+	}
+	return store.PutIfAbsent(key, tmp)
 }
 
 func (s *encryptedStore) Get(key string, off, limit int64) (io.ReadCloser, error) {

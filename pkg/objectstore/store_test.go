@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"io"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -187,6 +188,28 @@ func TestPrefixedStoreListPreservesCommonPrefixes(t *testing.T) {
 	want := []string{"file:visible.txt", "prefix:dir/"}
 	if !equalStringSlices(got, want) {
 		t.Fatalf("List() = %#v, want %#v", got, want)
+	}
+}
+
+func TestPrefixedStoreConditionalCreateUsesPrefixedKey(t *testing.T) {
+	base := NewMemoryStore(t.Name())
+	store := Prefix(base, "tenant-a/rootfs").(ConditionalStore)
+	created, err := store.PutIfAbsent("packs/object", strings.NewReader("first"))
+	if err != nil || !created {
+		t.Fatalf("first PutIfAbsent() = %v, %v", created, err)
+	}
+	created, err = store.PutIfAbsent("packs/object", strings.NewReader("second"))
+	if err != nil || created {
+		t.Fatalf("second PutIfAbsent() = %v, %v", created, err)
+	}
+	reader, err := base.Get("tenant-a/rootfs/packs/object", 0, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(payload) != "first" {
+		t.Fatalf("stored payload = %q, %v", payload, err)
 	}
 }
 

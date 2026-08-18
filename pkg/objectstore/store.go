@@ -62,6 +62,14 @@ type Store interface {
 	List(prefix, startAfter, token, delimiter string, limit int64) ([]Info, bool, string, error)
 }
 
+// ConditionalStore can create an immutable object without overwriting an
+// existing key. created=false is not an error; callers must verify that the
+// existing object has the expected immutable content.
+type ConditionalStore interface {
+	Store
+	PutIfAbsent(key string, in io.Reader) (created bool, err error)
+}
+
 func NormalizeType(raw string) string {
 	value := strings.TrimSpace(strings.ToLower(raw))
 	switch value {
@@ -282,6 +290,17 @@ func (s *s3Store) Put(key string, in io.Reader) error {
 	return err
 }
 
+func (s *s3Store) PutIfAbsent(key string, in io.Reader) (bool, error) {
+	_, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket), Key: aws.String(strings.TrimLeft(key, "/")), Body: in,
+		IfNoneMatch: aws.String("*"),
+	})
+	if isConditionalCreateConflict(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *s3Store) Delete(key string) error {
 	_, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -453,6 +472,31 @@ func (s *gcsStore) Put(key string, in io.Reader) error {
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	return s.doNoContent(req)
+}
+
+func (s *gcsStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
+	values := url.Values{}
+	values.Set("uploadType", "media")
+	values.Set("name", gcsObjectName(key))
+	values.Set("ifGenerationMatch", "0")
+	rawURL := strings.TrimRight(s.baseURL, "/") + "/upload/storage/v1/b/" + url.PathEscape(s.bucket) + "/o?" + values.Encode()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, rawURL, in)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusPreconditionFailed || resp.StatusCode == http.StatusConflict {
+		return false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, gcsHTTPError(resp)
+	}
+	return true, nil
 }
 
 func (s *gcsStore) Delete(key string) error {
@@ -667,6 +711,14 @@ func (s *prefixedStore) Put(key string, in io.Reader) error {
 	return s.store.Put(s.prefixed(key), in)
 }
 
+func (s *prefixedStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
+	conditional, ok := s.store.(ConditionalStore)
+	if !ok {
+		return false, fmt.Errorf("underlying object store does not support conditional create")
+	}
+	return conditional.PutIfAbsent(s.prefixed(key), in)
+}
+
 func (s *prefixedStore) Delete(key string) error {
 	return s.store.Delete(s.prefixed(key))
 }
@@ -755,6 +807,37 @@ func (s *memoryStore) Put(key string, in io.Reader) error {
 	defer s.state.mu.Unlock()
 	s.state.objects[strings.TrimLeft(key, "/")] = payload
 	return nil
+}
+
+func (s *memoryStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
+	payload, err := io.ReadAll(in)
+	if err != nil {
+		return false, err
+	}
+	s.state.mu.Lock()
+	defer s.state.mu.Unlock()
+	key = strings.TrimLeft(key, "/")
+	if _, ok := s.state.objects[key]; ok {
+		return false, nil
+	}
+	s.state.objects[key] = payload
+	return true, nil
+}
+
+func isConditionalCreateConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch strings.ToLower(apiErr.ErrorCode()) {
+	case "preconditionfailed", "conditionnotmatch", "412":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *memoryStore) Delete(key string) error {

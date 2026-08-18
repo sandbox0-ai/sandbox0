@@ -95,6 +95,30 @@ func TestEncryptedStoreReadsExistingPlaintextObject(t *testing.T) {
 	}
 }
 
+func TestEncryptedStoreConditionalCreateDoesNotOverwrite(t *testing.T) {
+	base := NewMemoryStore(t.Name())
+	store := Encrypting(base, EncryptionConfig{
+		Enabled: true, KeyEncryptor: reversibleTestEncryptor{}, ChunkSize: 8,
+	}).(ConditionalStore)
+	created, err := store.PutIfAbsent("rootfs/object", strings.NewReader("first"))
+	if err != nil || !created {
+		t.Fatalf("first PutIfAbsent() = %v, %v", created, err)
+	}
+	created, err = store.PutIfAbsent("rootfs/object", strings.NewReader("second"))
+	if err != nil || created {
+		t.Fatalf("second PutIfAbsent() = %v, %v", created, err)
+	}
+	reader, err := store.Get("rootfs/object", 0, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(got) != "first" {
+		t.Fatalf("Get() = %q, %v, want first", got, err)
+	}
+}
+
 type reversibleTestEncryptor struct{}
 
 func (reversibleTestEncryptor) Encrypt(in []byte) ([]byte, error) {

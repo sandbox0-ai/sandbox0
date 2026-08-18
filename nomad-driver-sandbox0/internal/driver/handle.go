@@ -28,6 +28,8 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
 type slotPhase string
@@ -43,14 +45,16 @@ const (
 
 // ClaimRequest is the one-shot authorization sent by manager after RootFS and network handoff.
 type ClaimRequest struct {
-	RootfsPath  string `json:"rootfs_path"`
-	PolicyToken string `json:"policy_token"`
-	WriterEpoch string `json:"writer_epoch"`
+	RootfsPath  string                      `json:"rootfs_path"`
+	PolicyToken string                      `json:"policy_token"`
+	WriterEpoch string                      `json:"writer_epoch"`
+	Stage       *rootfshandoff.StageRequest `json:"stage,omitempty"`
 }
 
 type claimMetadata struct {
-	RootfsPath  string `json:"rootfs_path"`
-	WriterEpoch string `json:"writer_epoch"`
+	RootfsPath  string                      `json:"rootfs_path"`
+	WriterEpoch string                      `json:"writer_epoch"`
+	Stage       *rootfshandoff.StageRequest `json:"stage,omitempty"`
 }
 
 // PersistedState carries enough identity to recover a runsc task without reusing its claim token.
@@ -66,31 +70,35 @@ type PersistedState struct {
 }
 
 type taskHandleOptions struct {
-	taskConfig   *drivers.TaskConfig
-	driverConfig TaskConfig
-	bundleDir    string
-	containerID  string
-	rootMount    string
-	socketPath   string
-	runner       Runsc
-	mounter      Mounter
-	allowedRoot  string
-	logger       hclog.Logger
+	taskConfig        *drivers.TaskConfig
+	driverConfig      TaskConfig
+	bundleDir         string
+	containerID       string
+	rootMount         string
+	socketPath        string
+	runner            Runsc
+	mounter           Mounter
+	allowedRoot       string
+	rootfsAllowedRoot string
+	rootfs            RootFSRuntime
+	logger            hclog.Logger
 }
 
 type taskHandle struct {
 	mu sync.Mutex
 
-	taskConfig   *drivers.TaskConfig
-	driverConfig TaskConfig
-	bundleDir    string
-	containerID  string
-	rootMount    string
-	socketPath   string
-	allowedRoot  string
-	runner       Runsc
-	mounter      Mounter
-	logger       hclog.Logger
+	taskConfig        *drivers.TaskConfig
+	driverConfig      TaskConfig
+	bundleDir         string
+	containerID       string
+	rootMount         string
+	socketPath        string
+	allowedRoot       string
+	runner            Runsc
+	mounter           Mounter
+	rootfsAllowedRoot string
+	rootfs            RootFSRuntime
+	logger            hclog.Logger
 
 	phase       slotPhase
 	startedAt   time.Time
@@ -98,6 +106,7 @@ type taskHandle struct {
 	exitResult  *drivers.ExitResult
 	rootMounted bool
 	claim       *claimMetadata
+	stage       *rootfshandoff.StageRequest
 	closed      bool
 
 	done chan struct{}
@@ -175,17 +184,19 @@ func readPersistedState(path string) (PersistedState, error) {
 
 func newTaskHandle(options taskHandleOptions) *taskHandle {
 	return &taskHandle{
-		taskConfig:  options.taskConfig,
-		bundleDir:   options.bundleDir,
-		containerID: options.containerID,
-		rootMount:   options.rootMount,
-		socketPath:  options.socketPath,
-		allowedRoot: options.allowedRoot,
-		runner:      options.runner,
-		mounter:     options.mounter,
-		logger:      options.logger,
-		phase:       phaseWarm,
-		done:        make(chan struct{}),
+		taskConfig:        options.taskConfig,
+		bundleDir:         options.bundleDir,
+		containerID:       options.containerID,
+		rootMount:         options.rootMount,
+		socketPath:        options.socketPath,
+		allowedRoot:       options.allowedRoot,
+		runner:            options.runner,
+		mounter:           options.mounter,
+		rootfsAllowedRoot: options.rootfsAllowedRoot,
+		rootfs:            options.rootfs,
+		logger:            options.logger,
+		phase:             phaseWarm,
+		done:              make(chan struct{}),
 	}
 }
 
@@ -268,10 +279,49 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		h.setPhase(phaseWarm)
 		return errors.New("policy token and writer epoch are required")
 	}
-	resolvedRootfs, err := validateRootfsPath(request.RootfsPath, h.allowedRoot)
-	if err != nil {
-		h.setPhase(phaseWarm)
-		return err
+	rootfsSource := request.RootfsPath
+	allowedRoot := h.allowedRoot
+	var durableStage *rootfshandoff.StageRequest
+	sessionAttached := false
+	claimSucceeded := false
+	defer func() {
+		if durableStage == nil || !sessionAttached || claimSucceeded || h.rootfs == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := h.rootfs.Retire(ctx, *durableStage, newRetireOperationID()); err != nil {
+			h.logger.Error("failed RootFS abort after claim failure", "error", err)
+		}
+	}()
+	if request.Stage != nil {
+		if h.rootfs == nil {
+			h.setPhase(phaseWarm)
+			return errors.New("RootFS runtime is not enabled")
+		}
+		if err := request.Stage.Validate(); err != nil {
+			h.setPhase(phaseWarm)
+			return fmt.Errorf("validate RootFS stage: %w", err)
+		}
+		if request.PolicyToken != request.Stage.Identity.WriterGrantToken ||
+			request.WriterEpoch != fmt.Sprintf("%d", request.Stage.Identity.WriterEpoch) {
+			h.setPhase(phaseWarm)
+			return errors.New("claim credentials do not match RootFS stage")
+		}
+		if request.Stage.Identity.PodUID != h.taskConfig.AllocID ||
+			request.Stage.Identity.ContainerName != h.taskConfig.Name ||
+			request.Stage.Identity.RuntimeName != PluginName ||
+			request.Stage.Identity.Snapshotter != "nomad-driver" {
+			h.setPhase(phaseWarm)
+			return errors.New("RootFS stage is not bound to this Nomad allocation")
+		}
+		if request.RootfsPath != "" {
+			h.setPhase(phaseWarm)
+			return errors.New("RootFS stage and development rootfs_path are mutually exclusive")
+		}
+		durable := request.Stage.WithoutWriterGrantToken()
+		durableStage = &durable
+		allowedRoot = h.rootfsAllowedRoot
 	}
 	if err := h.writeClaimBundle(); err != nil {
 		h.setPhase(phaseWarm)
@@ -284,6 +334,21 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	if err := h.persist(); err != nil {
 		_ = h.rollbackClaim()
 		return fmt.Errorf("persist claiming state: %w", err)
+	}
+
+	if durableStage != nil {
+		mount, err := h.rootfs.Ensure(context.Background(), *request.Stage)
+		if err != nil {
+			_ = h.rollbackClaim()
+			return fmt.Errorf("attach RootFS session: %w", err)
+		}
+		rootfsSource = mount.Source
+		sessionAttached = true
+	}
+	resolvedRootfs, err := validateRootfsPath(rootfsSource, allowedRoot)
+	if err != nil {
+		_ = h.rollbackClaim()
+		return err
 	}
 
 	if err := h.mounter.Bind(resolvedRootfs, h.rootMount); err != nil {
@@ -312,7 +377,8 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 
 	h.mu.Lock()
 	h.phase = phaseActive
-	h.claim = &claimMetadata{RootfsPath: resolvedRootfs, WriterEpoch: request.WriterEpoch}
+	h.claim = &claimMetadata{RootfsPath: resolvedRootfs, WriterEpoch: request.WriterEpoch, Stage: durableStage}
+	h.stage = durableStage
 	h.mu.Unlock()
 	if err := h.persist(); err != nil {
 		_ = h.runner.Kill(context.Background(), h.containerID, "KILL")
@@ -330,6 +396,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		_ = h.persist()
 		return fmt.Errorf("persist active state: %w", err)
 	}
+	claimSucceeded = true
 	go h.waitForExit()
 	return nil
 }
@@ -481,6 +548,10 @@ func (h *taskHandle) Close(force bool) error {
 	}
 	h.closed = true
 	rootMounted := h.rootMounted
+	stage := h.stage
+	if stage == nil && h.claim != nil {
+		stage = h.claim.Stage
+	}
 	h.mu.Unlock()
 
 	h.stopControl()
@@ -494,6 +565,17 @@ func (h *taskHandle) Close(force bool) error {
 		if err := h.mounter.Unmount(h.rootMount); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if stage != nil && rootMounted && h.rootfs != nil {
+		retireCtx, retireCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		if err := h.rootfs.Retire(retireCtx, *stage, newRetireOperationID()); err != nil {
+			retireCancel()
+			h.mu.Lock()
+			h.closed = false
+			h.mu.Unlock()
+			return errors.Join(firstErr, fmt.Errorf("retire RootFS session: %w", err))
+		}
+		retireCancel()
 	}
 	if err := os.Remove(h.socketPath); err != nil && !os.IsNotExist(err) && firstErr == nil {
 		firstErr = err
@@ -583,6 +665,9 @@ func (h *taskHandle) Recover(state PersistedState) error {
 	h.startedAt = state.StartedAt
 	h.rootMounted = state.RootMounted
 	h.claim = state.Claim
+	if state.Claim != nil {
+		h.stage = state.Claim.Stage
+	}
 	h.phase = phaseWarm
 	h.mu.Unlock()
 

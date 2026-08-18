@@ -82,6 +82,26 @@ var (
 			hclspec.NewLiteral(`true`),
 		),
 		"dev_smoke_enabled": hclspec.NewAttr("dev_smoke_enabled", "bool", false),
+		"rootfs_enabled": hclspec.NewDefault(
+			hclspec.NewAttr("rootfs_enabled", "bool", false),
+			hclspec.NewLiteral(`false`),
+		),
+		"rootfs_state_path":  hclspec.NewAttr("rootfs_state_path", "string", false),
+		"rootfs_branch_root": hclspec.NewAttr("rootfs_branch_root", "string", false),
+		"rootfs_mount_root":  hclspec.NewAttr("rootfs_mount_root", "string", false),
+		"rootfs_nbd_devices": hclspec.NewAttr("rootfs_nbd_devices", "list(string)", false),
+		"rootfs_object_type": hclspec.NewDefault(
+			hclspec.NewAttr("rootfs_object_type", "string", false),
+			hclspec.NewLiteral(`"s3"`),
+		),
+		"rootfs_object_bucket": hclspec.NewAttr("rootfs_object_bucket", "string", false),
+		"rootfs_object_region": hclspec.NewDefault(
+			hclspec.NewAttr("rootfs_object_region", "string", false),
+			hclspec.NewLiteral(`"us-east-1"`),
+		),
+		"rootfs_object_endpoint":   hclspec.NewAttr("rootfs_object_endpoint", "string", false),
+		"rootfs_object_access_key": hclspec.NewAttr("rootfs_object_access_key", "string", false),
+		"rootfs_object_secret_key": hclspec.NewAttr("rootfs_object_secret_key", "string", false),
 	})
 
 	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -117,6 +137,18 @@ type PluginConfig struct {
 	FileAccess       string `codec:"file_access"`
 	DirectFS         bool   `codec:"directfs"`
 	DevSmokeEnabled  bool   `codec:"dev_smoke_enabled"`
+
+	RootFSEnabled         bool     `codec:"rootfs_enabled"`
+	RootFSStatePath       string   `codec:"rootfs_state_path"`
+	RootFSBranchRoot      string   `codec:"rootfs_branch_root"`
+	RootFSMountRoot       string   `codec:"rootfs_mount_root"`
+	RootFSNBDDevices      []string `codec:"rootfs_nbd_devices"`
+	RootFSObjectType      string   `codec:"rootfs_object_type"`
+	RootFSObjectBucket    string   `codec:"rootfs_object_bucket"`
+	RootFSObjectRegion    string   `codec:"rootfs_object_region"`
+	RootFSObjectEndpoint  string   `codec:"rootfs_object_endpoint"`
+	RootFSObjectAccessKey string   `codec:"rootfs_object_access_key"`
+	RootFSObjectSecretKey string   `codec:"rootfs_object_secret_key"`
 }
 
 // TaskConfig is the per-allocation driver configuration.
@@ -134,6 +166,7 @@ type Plugin struct {
 	tasks   *taskStore
 
 	newRunner func(config PluginConfig) Runsc
+	rootfs    *rootfsRuntime
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -215,7 +248,26 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	if decoded.Overlay2 != "none" {
 		return errors.New("sandbox0 gVisor driver requires overlay2=none for persistent upper writes")
 	}
+	decoded.RootFSObjectType = strings.TrimSpace(decoded.RootFSObjectType)
+	decoded.RootFSObjectBucket = strings.TrimSpace(decoded.RootFSObjectBucket)
+	decoded.RootFSObjectEndpoint = strings.TrimSpace(decoded.RootFSObjectEndpoint)
+	decoded.RootFSObjectAccessKey = strings.TrimSpace(decoded.RootFSObjectAccessKey)
+	decoded.RootFSObjectSecretKey = strings.TrimSpace(decoded.RootFSObjectSecretKey)
+	if decoded.RootFSObjectType == "" {
+		decoded.RootFSObjectType = "s3"
+	}
+	if err := validateRootFSConfig(decoded); err != nil {
+		return err
+	}
+	runtime, err := newRootFSRuntime(decoded)
+	if err != nil {
+		return err
+	}
+	if p.rootfs != nil {
+		_ = p.rootfs.Close()
+	}
 	p.config = decoded
+	p.rootfs = runtime
 	return nil
 }
 
@@ -316,15 +368,17 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 	socketPath := controlSocketPath(p.config.ControlDir, config.ID)
 
 	handle := newTaskHandle(taskHandleOptions{
-		taskConfig:  config,
-		bundleDir:   bundleDir,
-		containerID: containerID,
-		rootMount:   rootMount,
-		socketPath:  socketPath,
-		runner:      p.newRunner(*p.config),
-		mounter:     systemMounter{},
-		allowedRoot: p.config.AllowedRootfsDir,
-		logger:      p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
+		taskConfig:        config,
+		bundleDir:         bundleDir,
+		containerID:       containerID,
+		rootMount:         rootMount,
+		socketPath:        socketPath,
+		runner:            p.newRunner(*p.config),
+		mounter:           systemMounter{},
+		allowedRoot:       p.config.AllowedRootfsDir,
+		rootfsAllowedRoot: p.config.RootFSMountRoot,
+		rootfs:            p.rootfs,
+		logger:            p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
 	})
 
 	if err := handle.Prepare(taskConfig); err != nil {
@@ -375,15 +429,17 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 
 	runner := p.newRunner(*p.config)
 	recovered := newTaskHandle(taskHandleOptions{
-		taskConfig:  state.TaskConfig,
-		bundleDir:   state.BundleDir,
-		containerID: state.ContainerID,
-		rootMount:   state.RootMount,
-		socketPath:  controlSocketPath(p.config.ControlDir, state.TaskConfig.ID),
-		runner:      runner,
-		mounter:     systemMounter{},
-		allowedRoot: p.config.AllowedRootfsDir,
-		logger:      p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
+		taskConfig:        state.TaskConfig,
+		bundleDir:         state.BundleDir,
+		containerID:       state.ContainerID,
+		rootMount:         state.RootMount,
+		socketPath:        controlSocketPath(p.config.ControlDir, state.TaskConfig.ID),
+		runner:            runner,
+		mounter:           systemMounter{},
+		allowedRoot:       p.config.AllowedRootfsDir,
+		rootfsAllowedRoot: p.config.RootFSMountRoot,
+		rootfs:            p.rootfs,
+		logger:            p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
 	})
 	if err := recovered.Recover(state); err != nil {
 		return err

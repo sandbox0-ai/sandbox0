@@ -27,6 +27,11 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
+
+	"github.com/sandbox0-ai/sandbox0/nomad-driver-sandbox0/internal/rootfsbuilder"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
+	rootfshandoff "github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 )
 
 type fakeRunsc struct {
@@ -145,6 +150,42 @@ type fakeMounter struct {
 	binds    [][2]string
 	unmounts []string
 	bindErr  error
+}
+
+type fakeRootFSRuntime struct {
+	mu            sync.Mutex
+	source        string
+	ensureCalls   int
+	retireCalls   int
+	lastParent    string
+	lastOperation string
+}
+
+type noOpCommandRunner struct{}
+
+func (noOpCommandRunner) Run(context.Context, string, ...string) error { return nil }
+
+func (r *fakeRootFSRuntime) Ensure(_ context.Context, request rootfshandoff.StageRequest) (rootfssession.Mount, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureCalls++
+	r.lastParent = request.Parent
+	return rootfssession.Mount{Source: r.source, Type: "bind"}, nil
+}
+
+func (r *fakeRootFSRuntime) Retire(_ context.Context, request rootfshandoff.StageRequest, operationID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.retireCalls++
+	r.lastParent = request.Parent
+	r.lastOperation = operationID
+	return nil
+}
+
+func (r *fakeRootFSRuntime) snapshot() (ensureCalls, retireCalls int, parent, operation string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ensureCalls, r.retireCalls, r.lastParent, r.lastOperation
 }
 
 func (m *fakeMounter) Bind(source, target string) error {
@@ -335,6 +376,79 @@ func TestClaimIsOneShotAndRejectsRootfsOutsideAllowedRoot(t *testing.T) {
 	err = fixture.handle.Claim(ClaimRequest{RootfsPath: fixture.rootfs, PolicyToken: "token2", WriterEpoch: "epoch2"})
 	if err == nil || !strings.Contains(err.Error(), "only valid in warm phase") {
 		t.Fatalf("second claim error = %v, want one-shot rejection", err)
+	}
+}
+
+func TestClaimUsesAuthorizedRootFSSessionAndRetiresOnClose(t *testing.T) {
+	fixture := newTestFixture(t)
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := objectstore.NewMemoryStore(t.Name()).(objectstore.ConditionalStore)
+	descriptor, err := rootfsbuilder.Build(context.Background(), store, rootfsbuilder.Options{
+		SourceRoot: source, ImagePath: filepath.Join(t.TempDir(), "base.xfs"),
+		RootFSID: "rootfs-1", ObjectPrefix: "driver-test/rootfs", Runner: noOpCommandRunner{},
+	})
+	if err != nil {
+		t.Fatalf("build descriptor: %v", err)
+	}
+	token := "one-shot-writer-token"
+	zeroDigest := "sha256:" + strings.Repeat("0", 64)
+	stage := rootfshandoff.StageRequest{
+		BindingVersion: rootfshandoff.WriterBindingVersion,
+		Parent:         zeroDigest, InitialGeneration: descriptor.GenerationID,
+		Generation: &descriptor,
+		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{
+			PodUID: "alloc-1", PodSandboxID: "sandbox-1", ClaimID: "claim-1",
+			NetworkEpoch: 1, PolicyDigest: zeroDigest, PodIP: "172.26.64.2",
+			CtldGeneration: "ctld-1", NetNSIdentity: "netns-1",
+		},
+		Identity: rootfshandoff.Identity{
+			NodeUID: "node-1", BootID: "boot-1", RuntimeGeneration: "runtime-1",
+			PodUID: "alloc-1", PodSandboxID: "sandbox-1", ContainerName: "warm-slot",
+			Image: "image-1", Snapshotter: "nomad-driver", RuntimeName: PluginName,
+			SlotNonce: "slot-1", ClaimID: "claim-1", LaunchAttempt: "attempt-1",
+			RootFSID: "rootfs-1", WriterEpoch: 1, WriterGrantID: "grant-1",
+			WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest(token),
+			WriterGrantToken:       token,
+		},
+	}
+	if err := stage.Validate(); err != nil {
+		t.Fatalf("stage validation: %v", err)
+	}
+
+	runtime := &fakeRootFSRuntime{source: source}
+	fixture.handle.rootfs = runtime
+	fixture.handle.rootfsAllowedRoot = filepath.Dir(source)
+	// Keep the fake session source outside the development allowed root to prove
+	// that the session mount uses the RootFS-specific allowlist.
+	if _, err := validateRootfsPath(source, fixture.allowedRoot); err == nil {
+		t.Fatal("test source unexpectedly resolved under development root")
+	}
+	if err := fixture.handle.Prepare(TaskConfig{Command: "/bin/sh", WaitForClaim: true}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if err := fixture.handle.Claim(ClaimRequest{
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage,
+	}); err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	ensureCalls, retireCalls, parent, _ := runtime.snapshot()
+	if ensureCalls != 1 || retireCalls != 0 || parent != stage.Parent {
+		t.Fatalf("runtime calls=(%d,%d,%q), want one ensure and no retire", ensureCalls, retireCalls, parent)
+	}
+	persisted := fixture.handle.PersistedState()
+	if persisted.Claim == nil || persisted.Claim.Stage == nil ||
+		persisted.Claim.Stage.Identity.WriterGrantToken != "" {
+		t.Fatalf("persisted claim = %+v, want tokenless durable stage", persisted.Claim)
+	}
+	if err := fixture.handle.Close(true); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	ensureCalls, retireCalls, parent, operation := runtime.snapshot()
+	if ensureCalls != 1 || retireCalls != 1 || parent != stage.Parent || operation == "" {
+		t.Fatalf("runtime calls=(%d,%d,%q,%q), want one ensure and one retire", ensureCalls, retireCalls, parent, operation)
 	}
 }
 

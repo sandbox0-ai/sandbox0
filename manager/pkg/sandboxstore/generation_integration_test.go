@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -481,6 +482,90 @@ func TestForkRootFSFilesystemCarriesSharedGenerationEpoch(t *testing.T) {
 	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
 	require.NoError(t, err)
 	require.Equal(t, shared.WriterEpoch+1, issued.Grant.WriterEpoch)
+}
+
+func TestRootFSForkDepthAndFanoutScale(t *testing.T) {
+	if os.Getenv("ROOTFS_FORK_SCALE_TEST") != "1" {
+		t.Skip("set ROOTFS_FORK_SCALE_TEST=1 to run the 2,000-fork scale gate")
+	}
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	root := rootFSTestSandboxRecord("fork-scale-root", "team-scale")
+	root.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, root))
+	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	require.NoError(t, err)
+	_, generation, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+		SandboxID: root.ID, TeamID: root.TeamID, SourceOCIRef: artifact.SourceOCIRef,
+		SourceOCIDigest: artifact.SourceOCIDigest, BaseArtifactDigest: artifact.ArtifactDigest,
+	})
+	require.NoError(t, err)
+
+	const depth = 1000
+	depthStarted := time.Now()
+	parentID := root.ID
+	checkpointDurations := make(map[int]time.Duration)
+	for level := 1; level <= depth; level++ {
+		targetID := fmt.Sprintf("fork-scale-depth-%04d", level)
+		target := rootFSTestSandboxRecord(targetID, root.TeamID)
+		target.DesiredState = SandboxDesiredStatePaused
+		require.NoError(t, store.UpsertSandbox(ctx, target))
+		started := time.Now()
+		forked, forkErr := store.ForkRootFSFilesystem(ctx, &ForkRootFSFilesystemRequest{
+			SourceSandboxID: parentID, TargetSandboxID: targetID,
+		})
+		require.NoError(t, forkErr)
+		require.Equal(t, generation.ID, forked.HeadGenerationID)
+		if level == 1 || level == 10 || level == 100 || level == 1000 {
+			checkpointDurations[level] = time.Since(started)
+		}
+		parentID = targetID
+	}
+	depthDuration := time.Since(depthStarted)
+
+	const fanout = 1000
+	fanoutStarted := time.Now()
+	for index := 1; index <= fanout; index++ {
+		targetID := fmt.Sprintf("fork-scale-fanout-%04d", index)
+		target := rootFSTestSandboxRecord(targetID, root.TeamID)
+		target.DesiredState = SandboxDesiredStatePaused
+		require.NoError(t, store.UpsertSandbox(ctx, target))
+		forked, forkErr := store.ForkRootFSFilesystem(ctx, &ForkRootFSFilesystemRequest{
+			SourceSandboxID: root.ID, TargetSandboxID: targetID,
+		})
+		require.NoError(t, forkErr)
+		require.Equal(t, generation.ID, forked.HeadGenerationID)
+	}
+	fanoutDuration := time.Since(fanoutStarted)
+
+	var filesystemCount, generationCount int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM manager.rootfs_filesystems`).Scan(&filesystemCount))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM manager.rootfs_generations`).Scan(&generationCount))
+	require.Equal(t, 1+depth+fanout, filesystemCount)
+	require.Equal(t, 1, generationCount, "metadata forks must not duplicate immutable generations")
+	lookupStarted := time.Now()
+	for range 1000 {
+		deepest, lookupErr := store.GetRootFSFilesystem(ctx, parentID)
+		require.NoError(t, lookupErr)
+		require.Equal(t, generation.ID, deepest.HeadGenerationID)
+	}
+	lookupDuration := time.Since(lookupStarted)
+
+	binding := bytes.Repeat([]byte{0x53}, 32)
+	issue := rootFSWriterGrantTestIssueRequest(parentID, "grant-fork-depth-1000", "claim-fork-depth-1000", "slot-fork-depth-1000", binding)
+	issue.ExpectedFilesystemID = parentID
+	issue.InitialGenerationID = generation.ID
+	issue.ExpectedWriterEpoch = generation.WriterEpoch
+	claimStarted := time.Now()
+	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
+	require.NoError(t, err)
+	claimDuration := time.Since(claimStarted)
+	require.Equal(t, generation.WriterEpoch+1, issued.Grant.WriterEpoch)
+
+	t.Logf("fork scale: depth=%d total=%s checkpoints=%v fanout=%d total=%s lookup_1000=%s deepest_issue=%s filesystems=%d generations=%d",
+		depth, depthDuration, checkpointDurations, fanout, fanoutDuration,
+		lookupDuration, claimDuration, filesystemCount, generationCount)
 }
 
 func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {

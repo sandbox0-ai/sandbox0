@@ -33,6 +33,14 @@ Not implemented:
 - full cgroup and Nomad stats integration
 - production Nomad deployment and upgrade automation
 
+## Writer authority PoC
+
+`cmd/nomad-writer-authority` runs the PostgreSQL/mTLS writer-grant authority
+used by this experiment. It can issue an initial block-COW grant from a Stage
+JSON file, consume/renew grants over mTLS, and publish a locally sealed
+generation as the next PostgreSQL head. Run it with `--help` for the current
+flags.
+
 ## Build and test
 
 ```sh

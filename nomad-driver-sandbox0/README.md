@@ -52,11 +52,15 @@ Implemented:
   `starting` transition after RootFS writer consumption, network application,
   and root bind but before `runsc create`; the proof binds launch attempt,
   runsc container ID, RootFS binding, and network-incarnation digest
+- a real authenticated and runtime-gated procd command probe with a unique
+  per-process instance ID, plus root-only `PUT /command-ready` forwarding that
+  validates and hashes the complete probe proof before the idempotent regional
+  `starting -> active` transition
 
 Not implemented:
 
 - manager/ctld claim integration with the regional slot registry
-- real procd first-command-ready proof and task-driver `command-ready` transition
+- manager/ctld orchestration of the procd probe and driver `command-ready` call
 - production remote-block service and cross-node device ownership
 - full network-policy incarnation-token persistence
 - procd first-command-ready accounting
@@ -104,7 +108,12 @@ control endpoint, and compatibility digest. No production manager claim
 controller consumes the registry yet. When a trusted caller supplies the exact
 regional operation and claim IDs in `PUT /claim`, the driver reports `starting`
 before invoking runsc and retries an ambiguous response with the same proof.
-It does not report command readiness yet.
+Procd exposes `PUT /api/v1/runtime/command-ready-probe` behind its normal
+authentication, runtime-ready, and lifecycle-barrier middleware. A trusted
+caller submits the exact response and process identity to the driver's
+root-only `PUT /command-ready`; the driver then reports regional active with a
+canonical digest. Production manager/ctld orchestration of those calls remains
+to be implemented.
 
 The network policy implementation is intentionally minimal: production ctld
 owns policy compilation, TPROXY, applied-token persistence, and L7 handling.

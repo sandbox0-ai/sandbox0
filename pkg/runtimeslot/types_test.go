@@ -79,6 +79,33 @@ func TestRequestsDoNotCarryAuthenticatedNodeUID(t *testing.T) {
 	require.NotContains(t, string(payload), "node_uid")
 }
 
+func TestCommandReadyProofBindsCanonicalProcdCommand(t *testing.T) {
+	proof := CommandReadyProof{
+		Version: CommandReadyProofVersion, SlotID: "slot", OperationID: "operation", ClaimID: "claim",
+		LaunchAttempt: "attempt", RunscContainerID: "runsc", ProcdInstanceID: "procd",
+		RequestMethod: "PUT", RequestPath: ProcdCommandReadyProbePath, ResponseStatus: 200,
+		ResponseBodyDigest: strings.Repeat("ab", 32),
+	}
+	first, err := proof.Digest()
+	require.NoError(t, err)
+	require.Len(t, first, 64)
+	second, err := proof.Digest()
+	require.NoError(t, err)
+	require.Equal(t, first, second)
+
+	changed := proof
+	changed.ProcdInstanceID = "another-procd"
+	third, err := changed.Digest()
+	require.NoError(t, err)
+	require.NotEqual(t, first, third)
+	changed = proof
+	changed.RequestPath = "/readyz"
+	require.ErrorContains(t, changed.Validate(), "canonical procd probe")
+	changed = proof
+	changed.ResponseStatus = 503
+	require.ErrorContains(t, changed.Validate(), "canonical procd probe")
+}
+
 func testRegistrationRequest() RegistrationRequest {
 	return RegistrationRequest{
 		ClusterID: "cluster", AllocationID: "allocation", AllocationNamespace: "default",

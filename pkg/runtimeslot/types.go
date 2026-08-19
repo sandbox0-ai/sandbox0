@@ -3,7 +3,9 @@
 package runtimeslot
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -13,13 +15,75 @@ import (
 )
 
 const (
-	PathPrefix = "/internal/v1/runtime-slots/"
+	PathPrefix                  = "/internal/v1/runtime-slots/"
+	ProcdCommandReadyProbePath  = "/api/v1/runtime/command-ready-probe"
+	NodeCommandReadyControlPath = "/command-ready"
+	CommandReadyProofVersion    = 1
 
 	readyPathSuffix        = "/ready"
 	heartbeatPathSuffix    = "/heartbeat"
 	startingPathSuffix     = "/starting"
 	commandReadyPathSuffix = "/command-ready"
 )
+
+// CommandReadyProof is the canonical evidence produced after a manager has
+// completed an authenticated, runtime-gated command against one procd process.
+// It is submitted over the root-only node control socket; the driver hashes it
+// before advancing the regional slot.
+type CommandReadyProof struct {
+	Version            int    `json:"version"`
+	SlotID             string `json:"slot_id"`
+	OperationID        string `json:"operation_id"`
+	ClaimID            string `json:"claim_id"`
+	LaunchAttempt      string `json:"launch_attempt"`
+	RunscContainerID   string `json:"runsc_container_id"`
+	ProcdInstanceID    string `json:"procd_instance_id"`
+	RequestMethod      string `json:"request_method"`
+	RequestPath        string `json:"request_path"`
+	ResponseStatus     int    `json:"response_status"`
+	ResponseBodyDigest string `json:"response_body_digest"`
+}
+
+// CommandReadyControlRequest is sent by manager over the root-only driver
+// control socket after the procd probe succeeds.
+type CommandReadyControlRequest struct {
+	Proof CommandReadyProof `json:"proof"`
+}
+
+func (p CommandReadyProof) Validate() error {
+	if p.Version != CommandReadyProofVersion {
+		return fmt.Errorf("unsupported command-ready proof version %d", p.Version)
+	}
+	for name, value := range map[string]string{
+		"slot_id": p.SlotID, "operation_id": p.OperationID, "claim_id": p.ClaimID,
+		"launch_attempt": p.LaunchAttempt, "runsc_container_id": p.RunscContainerID,
+		"procd_instance_id": p.ProcdInstanceID,
+	} {
+		if err := validateRequiredID(name, value); err != nil {
+			return err
+		}
+	}
+	if p.RequestMethod != "PUT" || p.RequestPath != ProcdCommandReadyProbePath || p.ResponseStatus != 200 {
+		return fmt.Errorf("command-ready proof does not describe the canonical procd probe")
+	}
+	if _, err := DecodeProof("response_body_digest", p.ResponseBodyDigest); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Digest returns the canonical regional command-ready digest.
+func (p CommandReadyProof) Digest() (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return "", fmt.Errorf("encode command-ready proof: %w", err)
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 // State is the region-authoritative lifecycle of one physical warm slot.
 type State string

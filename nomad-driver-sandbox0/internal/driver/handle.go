@@ -57,12 +57,17 @@ type ClaimRequest struct {
 	NetworkPolicy string                      `json:"network_policy,omitempty"`
 }
 
+// CommandReadyRequest is the shared manager-to-driver command-ready contract.
+type CommandReadyRequest = protocol.CommandReadyControlRequest
+
 type claimMetadata struct {
 	OperationID         string                      `json:"operation_id,omitempty"`
 	ClaimID             string                      `json:"claim_id,omitempty"`
 	LaunchAttempt       string                      `json:"launch_attempt,omitempty"`
 	RootFSBindingDigest string                      `json:"rootfs_binding_digest,omitempty"`
 	ClaimNetworkDigest  string                      `json:"claim_network_digest,omitempty"`
+	ProcdInstanceID     string                      `json:"procd_instance_id,omitempty"`
+	CommandReadyDigest  string                      `json:"command_ready_digest,omitempty"`
 	RootfsPath          string                      `json:"rootfs_path"`
 	WriterEpoch         string                      `json:"writer_epoch"`
 	Stage               *rootfshandoff.StageRequest `json:"stage,omitempty"`

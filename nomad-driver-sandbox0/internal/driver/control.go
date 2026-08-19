@@ -19,11 +19,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/containerd/errdefs"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 type statusResponse struct {
@@ -76,13 +80,28 @@ func (h *taskHandle) ServeControl(ctx context.Context) {
 				return
 			}
 			var claim ClaimRequest
-			decoder := json.NewDecoder(http.MaxBytesReader(w, request.Body, 1<<20))
-			if err := decoder.Decode(&claim); err != nil {
+			if err := decodeControlJSON(w, request, &claim); err != nil {
 				writeControlError(w, http.StatusBadRequest, fmt.Sprintf("decode claim: %v", err))
 				return
 			}
 			if err := h.Claim(claim); err != nil {
-				writeControlError(w, http.StatusConflict, err.Error())
+				writeControlOperationError(w, err)
+				return
+			}
+			writeControlJSON(w, http.StatusOK, claimResponse{Phase: string(phaseActive)})
+		})
+		mux.HandleFunc(protocol.NodeCommandReadyControlPath, func(w http.ResponseWriter, request *http.Request) {
+			if request.Method != http.MethodPut {
+				writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			var commandReady CommandReadyRequest
+			if err := decodeControlJSON(w, request, &commandReady); err != nil {
+				writeControlError(w, http.StatusBadRequest, fmt.Sprintf("decode command readiness: %v", err))
+				return
+			}
+			if err := h.CommandReady(commandReady); err != nil {
+				writeControlOperationError(w, err)
 				return
 			}
 			writeControlJSON(w, http.StatusOK, claimResponse{Phase: string(phaseActive)})
@@ -107,6 +126,33 @@ func (h *taskHandle) ServeControl(ctx context.Context) {
 		case <-serveDone:
 		}
 	})
+}
+
+func decodeControlJSON(w http.ResponseWriter, request *http.Request, target any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("request contains trailing data")
+	}
+	return nil
+}
+
+func writeControlOperationError(w http.ResponseWriter, err error) {
+	status := http.StatusConflict
+	switch {
+	case errdefs.IsInvalidArgument(err):
+		status = http.StatusBadRequest
+	case errdefs.IsPermissionDenied(err):
+		status = http.StatusForbidden
+	case errdefs.IsNotFound(err):
+		status = http.StatusNotFound
+	case errdefs.IsUnavailable(err), errors.Is(err, context.DeadlineExceeded):
+		status = http.StatusServiceUnavailable
+	}
+	writeControlError(w, status, err.Error())
 }
 
 func (h *taskHandle) stopControl() {

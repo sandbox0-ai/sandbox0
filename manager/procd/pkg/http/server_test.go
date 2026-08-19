@@ -6,11 +6,42 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdconfig"
 	"github.com/sandbox0-ai/sandbox0/pkg/sandboxprobe"
 	"go.uber.org/zap"
 )
+
+func TestCommandReadyProbeReturnsStableProcessIdentity(t *testing.T) {
+	instanceID := uuid.NewString()
+	server := &Server{instanceID: instanceID}
+	for attempt := 0; attempt < 2; attempt++ {
+		recorder := httptest.NewRecorder()
+		server.commandReadyProbeHandler(recorder, httptest.NewRequest(http.MethodPut, "/api/v1/runtime/command-ready-probe", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, recorder.Code, http.StatusOK)
+		}
+		response, apiErr, err := spec.DecodeResponse[procdapi.CommandReadyProbeResponse](recorder.Body)
+		if err != nil || apiErr != nil {
+			t.Fatalf("attempt %d decode response: response=%+v apiErr=%+v err=%v", attempt, response, apiErr, err)
+		}
+		if response.InstanceID != instanceID || response.Status != "ready" {
+			t.Fatalf("attempt %d response = %+v", attempt, response)
+		}
+	}
+}
+
+func TestCommandReadyProbeFailsWithoutProcessIdentity(t *testing.T) {
+	server := &Server{}
+	recorder := httptest.NewRecorder()
+	server.commandReadyProbeHandler(recorder, httptest.NewRequest(http.MethodPut, "/api/v1/runtime/command-ready-probe", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+}
 
 func TestProbeHandlersUseProbeCheckers(t *testing.T) {
 	server := &Server{

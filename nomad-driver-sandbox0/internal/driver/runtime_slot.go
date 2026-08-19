@@ -42,6 +42,7 @@ const (
 	runtimeSlotControlTimeout    = 5 * time.Second
 	runtimeSlotMaxHeartbeatTTL   = 5 * time.Minute
 	runtimeSlotStartingTimeout   = 10 * time.Second
+	runtimeSlotCommandTimeout    = 10 * time.Second
 )
 
 type runtimeSlotAuthority interface {
@@ -427,6 +428,117 @@ func (l *runtimeSlotLifecycle) reportStarting(
 			timer.Stop()
 			return protocol.Observation{}, fmt.Errorf(
 				"report regional runtime slot starting: %w",
+				errors.Join(lastErr, ctx.Err(), errdefs.ErrUnavailable),
+			)
+		case <-timer.C:
+		}
+		backoff *= 2
+		if backoff > 2*time.Second {
+			backoff = 2 * time.Second
+		}
+	}
+}
+
+// CommandReady advances a locally running slot only after manager submits a
+// canonical response from the authenticated, runtime-gated procd probe.
+func (h *taskHandle) CommandReady(request CommandReadyRequest) error {
+	if err := request.Proof.Validate(); err != nil {
+		return fmt.Errorf("validate procd command-ready proof: %w", err)
+	}
+	h.mu.Lock()
+	if !h.runtimeSlotNeeded || h.runtimeSlot == nil {
+		h.mu.Unlock()
+		return fmt.Errorf("regional runtime slot is not enabled: %w", errdefs.ErrFailedPrecondition)
+	}
+	if h.phase != phaseActive || h.claim == nil {
+		phase := h.phase
+		h.mu.Unlock()
+		return fmt.Errorf("command readiness requires an active local claim, current phase %s: %w", phase, errdefs.ErrFailedPrecondition)
+	}
+	lifecycle := h.runtimeSlot
+	claim := *h.claim
+	containerID := h.containerID
+	slotID := h.taskConfig.ID
+	h.mu.Unlock()
+	proof := request.Proof
+	if proof.SlotID != slotID || proof.OperationID != claim.OperationID || proof.ClaimID != claim.ClaimID ||
+		proof.LaunchAttempt != claim.LaunchAttempt || proof.RunscContainerID != containerID {
+		return fmt.Errorf("procd command-ready proof does not match the local claim: %w", errdefs.ErrFailedPrecondition)
+	}
+	digest, err := proof.Digest()
+	if err != nil {
+		return err
+	}
+	if (claim.ProcdInstanceID != "" || claim.CommandReadyDigest != "") &&
+		(claim.ProcdInstanceID != proof.ProcdInstanceID || claim.CommandReadyDigest != digest) {
+		return fmt.Errorf("procd command-ready proof changed after acknowledgement: %w", errdefs.ErrFailedPrecondition)
+	}
+	authorityRequest := protocol.CommandReadyRequest{
+		AllocationID: lifecycle.heartbeat.AllocationID, NodeBootID: lifecycle.heartbeat.NodeBootID,
+		OperationID: proof.OperationID, ClaimID: proof.ClaimID,
+		ProcdInstanceID: proof.ProcdInstanceID, CommandReadyDigest: digest,
+	}
+	if err := authorityRequest.Validate(); err != nil {
+		return fmt.Errorf("validate regional command-ready request: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), runtimeSlotCommandTimeout)
+	_, err = lifecycle.reportCommandReady(ctx, authorityRequest)
+	cancel()
+	if err != nil {
+		if errdefs.IsInvalidArgument(err) || errdefs.IsPermissionDenied(err) ||
+			errdefs.IsNotFound(err) || errdefs.IsFailedPrecondition(err) {
+			h.handleWriterLeaseLoss(fmt.Errorf("regional command-ready rejection: %w", err))
+		}
+		return err
+	}
+	h.mu.Lock()
+	if h.phase != phaseActive || h.claim == nil ||
+		h.claim.OperationID != proof.OperationID || h.claim.ClaimID != proof.ClaimID {
+		h.mu.Unlock()
+		return fmt.Errorf("local claim changed during command readiness: %w", errdefs.ErrFailedPrecondition)
+	}
+	h.claim.ProcdInstanceID = proof.ProcdInstanceID
+	h.claim.CommandReadyDigest = digest
+	h.mu.Unlock()
+	if err := h.persist(); err != nil {
+		return fmt.Errorf("persist command readiness: %w", err)
+	}
+	return nil
+}
+
+// reportCommandReady retries only an exact proof so a lost regional response
+// cannot create another procd identity or command-ready observation.
+func (l *runtimeSlotLifecycle) reportCommandReady(
+	ctx context.Context,
+	request protocol.CommandReadyRequest,
+) (protocol.Observation, error) {
+	backoff := 100 * time.Millisecond
+	var lastErr error
+	for {
+		observation, err := l.authority.CommandReady(ctx, l.slotID, request)
+		if err == nil {
+			if err := validateRuntimeSlotObservation(l.slotID, observation); err != nil {
+				return protocol.Observation{}, err
+			}
+			if observation.State != protocol.StateActive ||
+				observation.ClaimOperationID != request.OperationID || observation.ClaimID != request.ClaimID {
+				return protocol.Observation{}, fmt.Errorf(
+					"regional runtime slot returned a different active claim: %w", errdefs.ErrFailedPrecondition,
+				)
+			}
+			return observation, nil
+		}
+		lastErr = err
+		if errdefs.IsInvalidArgument(err) || errdefs.IsPermissionDenied(err) ||
+			errdefs.IsNotFound(err) || errdefs.IsFailedPrecondition(err) {
+			return protocol.Observation{}, fmt.Errorf("report regional procd command readiness: %w", err)
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return protocol.Observation{}, fmt.Errorf(
+				"report regional procd command readiness: %w",
 				errors.Join(lastErr, ctx.Err(), errdefs.ErrUnavailable),
 			)
 		case <-timer.C:

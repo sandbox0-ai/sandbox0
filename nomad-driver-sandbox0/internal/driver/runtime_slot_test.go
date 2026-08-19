@@ -17,6 +17,7 @@ package driver
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -44,13 +45,16 @@ type fakeRuntimeSlotAuthority struct {
 	readyErr        error
 	heartbeatErrors []error
 	startingErrors  []error
+	commandErrors   []error
 	calls           []string
 	registrations   []protocol.RegistrationRequest
 	readiness       []protocol.ReadinessRequest
 	heartbeats      []protocol.HeartbeatRequest
 	starting        []protocol.StartingRequest
+	commands        []protocol.CommandReadyRequest
 	heartbeatNotify chan struct{}
 	startingHook    func(protocol.StartingRequest)
+	commandHook     func(protocol.CommandReadyRequest)
 	claimOperation  string
 	claimID         string
 }
@@ -191,16 +195,45 @@ func (a *fakeRuntimeSlotAuthority) startingSnapshot() []protocol.StartingRequest
 	return append([]protocol.StartingRequest(nil), a.starting...)
 }
 
+func (a *fakeRuntimeSlotAuthority) commandSnapshot() []protocol.CommandReadyRequest {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]protocol.CommandReadyRequest(nil), a.commands...)
+}
+
 func (a *fakeRuntimeSlotAuthority) CommandReady(
 	_ context.Context,
 	slotID string,
-	_ protocol.CommandReadyRequest,
+	request protocol.CommandReadyRequest,
 ) (protocol.Observation, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.calls = append(a.calls, "command-ready")
+	a.commands = append(a.commands, request)
+	a.claimOperation = request.OperationID
+	a.claimID = request.ClaimID
+	var err error
+	if len(a.commandErrors) != 0 {
+		err = a.commandErrors[0]
+		a.commandErrors = a.commandErrors[1:]
+	}
+	hook := a.commandHook
+	if err != nil {
+		if errdefs.IsUnavailable(err) {
+			a.state = protocol.StateActive
+		}
+		a.mu.Unlock()
+		if hook != nil {
+			hook(request)
+		}
+		return protocol.Observation{}, err
+	}
 	a.state = protocol.StateActive
-	return a.observationLocked(slotID), nil
+	observation := a.observationLocked(slotID)
+	a.mu.Unlock()
+	if hook != nil {
+		hook(request)
+	}
+	return observation, nil
 }
 
 func (a *fakeRuntimeSlotAuthority) snapshot() (
@@ -544,6 +577,109 @@ func TestRuntimeSlotClaimRequiresRegionalIdentityBeforeConsumingWriter(t *testin
 	}
 	if phase := handle.TaskStatus().DriverAttributes["phase"]; phase != string(phaseWarm) {
 		t.Fatalf("phase = %s, want reusable warm slot before writer consumption", phase)
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
+func commandReadyProof(fixture *runtimeSlotPluginFixture, stage rootfshandoff.StageRequest) protocol.CommandReadyProof {
+	return protocol.CommandReadyProof{
+		Version: protocol.CommandReadyProofVersion, SlotID: fixture.task.ID,
+		OperationID: "operation-1", ClaimID: "claim-1", LaunchAttempt: stage.Identity.LaunchAttempt,
+		RunscContainerID: safeContainerID(fixture.task.ID), ProcdInstanceID: "procd-instance-1",
+		RequestMethod: "PUT", RequestPath: protocol.ProcdCommandReadyProbePath, ResponseStatus: http.StatusOK,
+		ResponseBodyDigest: strings.Repeat("ab", 32),
+	}
+}
+
+func TestRuntimeSlotCommandReadyRetriesAcceptedResponseLoss(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
+	if err := handle.Claim(ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1",
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+	}); err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.authority.mu.Lock()
+	fixture.authority.commandErrors = []error{fmtErrorUnavailable("active response lost")}
+	fixture.authority.mu.Unlock()
+	proof := commandReadyProof(fixture, stage)
+	payload, err := json.Marshal(CommandReadyRequest{Proof: proof})
+	if err != nil {
+		t.Fatalf("encode command-ready request: %v", err)
+	}
+	client := unixHTTPClient(controlSocketPath(fixture.config.ControlDir, fixture.task.ID))
+	if _, err := awaitControl(client, http.MethodPut, protocol.NodeCommandReadyControlPath, payload, 2*time.Second); err != nil {
+		t.Fatalf("command-ready control request: %v", err)
+	}
+	requests := fixture.authority.commandSnapshot()
+	if len(requests) != 2 || !reflect.DeepEqual(requests[0], requests[1]) {
+		t.Fatalf("regional command-ready requests = %+v, want exact response-loss retry", requests)
+	}
+	expectedDigest, err := proof.Digest()
+	if err != nil {
+		t.Fatalf("derive expected command-ready digest: %v", err)
+	}
+	if requests[0].ProcdInstanceID != proof.ProcdInstanceID || requests[0].CommandReadyDigest != expectedDigest {
+		t.Fatalf("regional command-ready request = %+v", requests[0])
+	}
+	persisted := handle.PersistedState()
+	if persisted.Claim == nil || persisted.Claim.ProcdInstanceID != proof.ProcdInstanceID ||
+		persisted.Claim.CommandReadyDigest != expectedDigest {
+		t.Fatalf("persisted command readiness = %+v", persisted.Claim)
+	}
+	changed := proof
+	changed.ProcdInstanceID = "another-procd-instance"
+	if err := handle.CommandReady(CommandReadyRequest{Proof: changed}); !errdefs.IsFailedPrecondition(err) {
+		t.Fatalf("changed CommandReady() error = %v, want failed precondition", err)
+	}
+	if got := len(fixture.authority.commandSnapshot()); got != 2 {
+		t.Fatalf("authority command-ready calls = %d, changed local proof reached region", got)
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
+func TestRuntimeSlotCommandReadyRejectionFencesWriter(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
+	if err := handle.Claim(ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1",
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+	}); err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.authority.mu.Lock()
+	fixture.authority.commandErrors = []error{fmtErrorPermissionDenied("claim was revoked")}
+	fixture.authority.mu.Unlock()
+
+	err := handle.CommandReady(CommandReadyRequest{Proof: commandReadyProof(fixture, stage)})
+	if !errdefs.IsPermissionDenied(err) {
+		t.Fatalf("CommandReady() error = %v, want permission denied", err)
+	}
+	select {
+	case <-handle.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("regional command-ready rejection did not poison the writer")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fixture.rootfs.mu.Lock()
+		crashCalls := fixture.rootfs.crashCalls
+		fixture.rootfs.mu.Unlock()
+		if crashCalls == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	fixture.rootfs.mu.Lock()
+	crashCalls := fixture.rootfs.crashCalls
+	fixture.rootfs.mu.Unlock()
+	if crashCalls != 1 {
+		t.Fatalf("RootFS crash-fence calls = %d, want 1", crashCalls)
 	}
 	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
 		t.Fatalf("DestroyTask() error = %v", err)

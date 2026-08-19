@@ -32,6 +32,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 type slotPhase string
@@ -47,6 +48,8 @@ const (
 
 // ClaimRequest is the one-shot authorization sent by manager after RootFS and network handoff.
 type ClaimRequest struct {
+	OperationID   string                      `json:"operation_id,omitempty"`
+	ClaimID       string                      `json:"claim_id,omitempty"`
 	RootfsPath    string                      `json:"rootfs_path"`
 	PolicyToken   string                      `json:"policy_token"`
 	WriterEpoch   string                      `json:"writer_epoch"`
@@ -55,9 +58,14 @@ type ClaimRequest struct {
 }
 
 type claimMetadata struct {
-	RootfsPath  string                      `json:"rootfs_path"`
-	WriterEpoch string                      `json:"writer_epoch"`
-	Stage       *rootfshandoff.StageRequest `json:"stage,omitempty"`
+	OperationID         string                      `json:"operation_id,omitempty"`
+	ClaimID             string                      `json:"claim_id,omitempty"`
+	LaunchAttempt       string                      `json:"launch_attempt,omitempty"`
+	RootFSBindingDigest string                      `json:"rootfs_binding_digest,omitempty"`
+	ClaimNetworkDigest  string                      `json:"claim_network_digest,omitempty"`
+	RootfsPath          string                      `json:"rootfs_path"`
+	WriterEpoch         string                      `json:"writer_epoch"`
+	Stage               *rootfshandoff.StageRequest `json:"stage,omitempty"`
 }
 
 // PersistedState carries enough identity to recover a runsc task without reusing its claim token.
@@ -85,6 +93,7 @@ type taskHandleOptions struct {
 	rootfsAllowedRoot string
 	rootfs            RootFSRuntime
 	network           NetworkRuntime
+	runtimeSlotNeeded bool
 	logger            hclog.Logger
 }
 
@@ -106,6 +115,7 @@ type taskHandle struct {
 	rootfsAllowedRoot string
 	rootfs            RootFSRuntime
 	network           NetworkRuntime
+	runtimeSlotNeeded bool
 	networkChain      string
 	logger            hclog.Logger
 
@@ -127,6 +137,7 @@ type taskHandle struct {
 	controlReadyOnce sync.Once
 	leaseFenceOnce   sync.Once
 	consumerCancel   context.CancelFunc
+	runtimeSlot      *runtimeSlotLifecycle
 }
 
 func (h *taskHandle) statePath() string {
@@ -210,6 +221,7 @@ func newTaskHandle(options taskHandleOptions) *taskHandle {
 		rootfsAllowedRoot: options.rootfsAllowedRoot,
 		rootfs:            options.rootfs,
 		network:           options.network,
+		runtimeSlotNeeded: options.runtimeSlotNeeded,
 		logger:            options.logger,
 		networkChain:      networkChainName(options.containerID),
 		phase:             phaseWarm,
@@ -359,9 +371,18 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		h.setPhase(phaseWarm)
 		return err
 	}
+	h.mu.Lock()
+	runtimeSlotNeeded := h.runtimeSlotNeeded
+	h.mu.Unlock()
+	if runtimeSlotNeeded && request.Stage == nil {
+		h.setPhase(phaseWarm)
+		return errors.New("regional runtime slot claims require a RootFS stage")
+	}
 	rootfsSource := request.RootfsPath
 	allowedRoot := h.allowedRoot
 	var durableStage *rootfshandoff.StageRequest
+	var runtimeSlot *runtimeSlotLifecycle
+	var startingRequest *protocol.StartingRequest
 	sessionAttached := false
 	claimSucceeded := false
 	defer func() {
@@ -406,6 +427,11 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		durable := request.Stage.WithoutWriterGrantToken()
 		durableStage = &durable
 		allowedRoot = h.rootfsAllowedRoot
+		runtimeSlot, startingRequest, err = h.runtimeSlotStartingRequest(request, durable, networkDigest)
+		if err != nil {
+			h.setPhase(phaseWarm)
+			return err
+		}
 	}
 	if err := h.writeClaimBundle(); err != nil {
 		h.setPhase(phaseWarm)
@@ -422,6 +448,13 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	h.phase = phaseClaiming
 	if durableStage != nil {
 		h.claim = &claimMetadata{WriterEpoch: request.WriterEpoch, Stage: durableStage}
+		if startingRequest != nil {
+			h.claim.OperationID = startingRequest.OperationID
+			h.claim.ClaimID = startingRequest.ClaimID
+			h.claim.LaunchAttempt = startingRequest.LaunchAttempt
+			h.claim.RootFSBindingDigest = startingRequest.RootFSBindingDigest
+			h.claim.ClaimNetworkDigest = startingRequest.ClaimNetworkDigest
+		}
 		h.stage = durableStage
 	}
 	h.mu.Unlock()
@@ -480,29 +513,33 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		_ = h.rollbackClaim()
 		return err
 	}
+	if startingRequest != nil {
+		startingCtx, startingCancel := context.WithTimeout(context.Background(), runtimeSlotStartingTimeout)
+		_, err := runtimeSlot.reportStarting(startingCtx, *startingRequest)
+		startingCancel()
+		if err != nil {
+			return h.poisonClaimLaunch(err, false)
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := h.runner.Create(ctx, h.bundleDir, h.containerID); err != nil {
-		_ = h.mounter.Unmount(h.rootMount)
-		_ = h.runner.Delete(context.Background(), h.containerID, true)
-		_ = h.markClaimFailed(fmt.Errorf("runsc create: %w", err))
-		return fmt.Errorf("runsc create: %w", err)
+		return h.poisonClaimLaunch(fmt.Errorf("runsc create: %w", err), true)
 	}
 	cancel()
 	startCtx, startCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer startCancel()
 	if err := h.runner.Start(startCtx, h.containerID); err != nil {
-		_ = h.mounter.Unmount(h.rootMount)
-		_ = h.runner.Delete(context.Background(), h.containerID, true)
-		_ = h.markClaimFailed(fmt.Errorf("runsc start: %w", err))
-		_ = h.persist()
-		return fmt.Errorf("runsc start: %w", err)
+		return h.poisonClaimLaunch(fmt.Errorf("runsc start: %w", err), true)
 	}
 
 	h.mu.Lock()
 	h.phase = phaseActive
-	h.claim = &claimMetadata{RootfsPath: resolvedRootfs, WriterEpoch: request.WriterEpoch, Stage: durableStage}
+	if h.claim == nil {
+		h.claim = &claimMetadata{WriterEpoch: request.WriterEpoch, Stage: durableStage}
+	}
+	h.claim.RootfsPath = resolvedRootfs
 	h.stage = durableStage
 	h.mu.Unlock()
 	if err := h.persist(); err != nil {
@@ -587,17 +624,29 @@ func (h *taskHandle) rollbackClaim() error {
 	return h.persist()
 }
 
-func (h *taskHandle) markClaimFailed(err error) error {
+// poisonClaimLaunch prevents reuse after the writer was consumed or regional
+// starting may have committed, and leaves failed detach state recoverable.
+func (h *taskHandle) poisonClaimLaunch(cause error, deleteContainer bool) error {
+	h.stopConsumerRenewal()
+	unmountErr := h.mounter.Unmount(h.rootMount)
+	var deleteErr error
+	if deleteContainer {
+		deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		deleteErr = h.runner.Delete(deleteCtx, h.containerID, true)
+		deleteCancel()
+	}
+	h.resetNetworkPolicy()
+	result := errors.Join(cause, unmountErr, deleteErr)
 	h.mu.Lock()
-	h.rootMounted = false
+	h.rootMounted = unmountErr != nil
 	h.phase = phasePoisoned
-	h.exitResult = &drivers.ExitResult{Err: err}
+	h.exitResult = &drivers.ExitResult{Err: result}
 	if h.completedAt.IsZero() {
 		h.completedAt = time.Now()
 	}
 	closeDoneLocked(h.done)
 	h.mu.Unlock()
-	return h.persist()
+	return errors.Join(result, h.persist())
 }
 
 func (h *taskHandle) waitForExit() {
@@ -743,7 +792,7 @@ func (h *taskHandle) Close(force bool) error {
 		_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
 	}
 	firstErr := h.runner.Delete(cleanupCtx, h.containerID, true)
-	if rootMounted && phase != phasePoisoned {
+	if rootMounted && (phase != phasePoisoned || stage == nil) {
 		if err := h.mounter.Unmount(h.rootMount); err != nil && firstErr == nil {
 			firstErr = err
 		}

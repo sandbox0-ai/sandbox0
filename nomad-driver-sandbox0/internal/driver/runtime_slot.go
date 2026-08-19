@@ -31,6 +31,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
 	slotauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"golang.org/x/sys/unix"
 )
@@ -40,6 +41,7 @@ const (
 	runtimeSlotActivationTimeout = 10 * time.Second
 	runtimeSlotControlTimeout    = 5 * time.Second
 	runtimeSlotMaxHeartbeatTTL   = 5 * time.Minute
+	runtimeSlotStartingTimeout   = 10 * time.Second
 )
 
 type runtimeSlotAuthority interface {
@@ -99,6 +101,17 @@ type storageReadyProof struct {
 	SessiondSocket    string `json:"sessiond_socket"`
 	RootFSMountRoot   string `json:"rootfs_mount_root"`
 	MaxDirtyTailBytes int64  `json:"max_dirty_tail_bytes"`
+}
+
+type runtimeSlotClaimNetworkProof struct {
+	Version             int                              `json:"version"`
+	SlotID              string                           `json:"slot_id"`
+	OperationID         string                           `json:"operation_id"`
+	ClaimID             string                           `json:"claim_id"`
+	NetNSIdentity       string                           `json:"netns_identity"`
+	NetworkChain        string                           `json:"network_chain"`
+	PolicyDigest        string                           `json:"policy_digest"`
+	ExpectedPolicyToken rootfshandoff.NetworkPolicyToken `json:"expected_policy_token"`
 }
 
 type runtimeSlotStorageHealth interface {
@@ -211,6 +224,9 @@ func (p *Plugin) activateRuntimeSlot(
 	if err != nil {
 		return nil, protocol.Observation{}, err
 	}
+	handle.mu.Lock()
+	handle.runtimeSlot = lifecycle
+	handle.mu.Unlock()
 	return lifecycle, observation, nil
 }
 
@@ -318,6 +334,110 @@ func newRuntimeSlotLifecycle(
 	}, nil
 }
 
+// runtimeSlotStartingRequest binds the regional claim to the exact durable
+// RootFS grant, applied network incarnation, and runsc launch attempt.
+func (h *taskHandle) runtimeSlotStartingRequest(
+	claim ClaimRequest,
+	stage rootfshandoff.StageRequest,
+	policyDigest string,
+) (*runtimeSlotLifecycle, *protocol.StartingRequest, error) {
+	h.mu.Lock()
+	required := h.runtimeSlotNeeded
+	lifecycle := h.runtimeSlot
+	task := h.taskConfig
+	containerID := h.containerID
+	networkChain := h.networkChain
+	h.mu.Unlock()
+	if !required {
+		return nil, nil, nil
+	}
+	if lifecycle == nil || task == nil {
+		return nil, nil, fmt.Errorf("regional runtime slot is not registered: %w", errdefs.ErrFailedPrecondition)
+	}
+	if claim.ClaimID != stage.Identity.ClaimID {
+		return nil, nil, fmt.Errorf("runtime slot claim ID does not match RootFS stage: %w", errdefs.ErrFailedPrecondition)
+	}
+	netnsIdentity, err := networkNamespaceIdentity(h.netnsPath())
+	if err != nil {
+		return nil, nil, err
+	}
+	if lifecycle.registration.NetNSIdentity != netnsIdentity ||
+		stage.ExpectedPolicyToken.NetNSIdentity != netnsIdentity {
+		return nil, nil, fmt.Errorf("runtime slot network namespace changed before claim: %w", errdefs.ErrFailedPrecondition)
+	}
+	if stage.ExpectedPolicyToken.PolicyDigest != policyDigest {
+		return nil, nil, fmt.Errorf("runtime slot policy digest does not match RootFS stage: %w", errdefs.ErrFailedPrecondition)
+	}
+	bindingDigest, err := stage.BindingDigest()
+	if err != nil {
+		return nil, nil, fmt.Errorf("derive RootFS binding digest: %w", err)
+	}
+	networkDigest, err := proofDigest(runtimeSlotClaimNetworkProof{
+		Version: runtimeSlotProofVersion, SlotID: task.ID,
+		OperationID: claim.OperationID, ClaimID: claim.ClaimID,
+		NetNSIdentity: netnsIdentity, NetworkChain: networkChain,
+		PolicyDigest: policyDigest, ExpectedPolicyToken: stage.ExpectedPolicyToken,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	request := &protocol.StartingRequest{
+		AllocationID: lifecycle.heartbeat.AllocationID, NodeBootID: lifecycle.heartbeat.NodeBootID,
+		OperationID: claim.OperationID, ClaimID: claim.ClaimID,
+		LaunchAttempt: stage.Identity.LaunchAttempt, RunscContainerID: containerID,
+		RootFSBindingDigest: hex.EncodeToString(bindingDigest[:]), ClaimNetworkDigest: networkDigest,
+	}
+	if err := request.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("validate runtime slot starting request: %w", err)
+	}
+	return lifecycle, request, nil
+}
+
+// reportStarting retries only the exact idempotent transition. A terminal
+// authority error is returned immediately, while an ambiguous response is
+// retried within the caller's bounded launch deadline.
+func (l *runtimeSlotLifecycle) reportStarting(
+	ctx context.Context,
+	request protocol.StartingRequest,
+) (protocol.Observation, error) {
+	backoff := 100 * time.Millisecond
+	var lastErr error
+	for {
+		observation, err := l.authority.Starting(ctx, l.slotID, request)
+		if err == nil {
+			if err := validateRuntimeSlotObservation(l.slotID, observation); err != nil {
+				return protocol.Observation{}, err
+			}
+			if observation.State != protocol.StateStarting ||
+				observation.ClaimOperationID != request.OperationID || observation.ClaimID != request.ClaimID {
+				return protocol.Observation{}, fmt.Errorf(
+					"regional runtime slot returned a different starting claim: %w", errdefs.ErrFailedPrecondition,
+				)
+			}
+			return observation, nil
+		}
+		lastErr = err
+		if errdefs.IsInvalidArgument(err) || errdefs.IsPermissionDenied(err) ||
+			errdefs.IsNotFound(err) || errdefs.IsFailedPrecondition(err) {
+			return protocol.Observation{}, fmt.Errorf("report regional runtime slot starting: %w", err)
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return protocol.Observation{}, fmt.Errorf(
+				"report regional runtime slot starting: %w",
+				errors.Join(lastErr, ctx.Err(), errdefs.ErrUnavailable),
+			)
+		case <-timer.C:
+		}
+		backoff *= 2
+		if backoff > 2*time.Second {
+			backoff = 2 * time.Second
+		}
+	}
+}
+
 func (l *runtimeSlotLifecycle) activate(
 	ctx context.Context,
 	phase slotPhase,
@@ -368,11 +488,11 @@ func validateRecoveredRuntimeSlotState(state protocol.State, phase slotPhase) er
 	case protocol.StateFastpathReady:
 		valid = phase == phaseWarm
 	case protocol.StateClaiming:
-		valid = phase == phaseWarm || phase == phaseClaiming || phase == phaseActive
+		valid = phase == phaseWarm || phase == phaseClaiming || phase == phaseActive || phase == phasePoisoned
 	case protocol.StateStarting:
-		valid = phase == phaseClaiming || phase == phaseActive
+		valid = phase == phaseClaiming || phase == phaseActive || phase == phasePoisoned
 	case protocol.StateActive:
-		valid = phase == phaseActive
+		valid = phase == phaseActive || phase == phasePoisoned
 	case protocol.StateQuiescing:
 		valid = phase == phaseStopping || phase == phaseExited || phase == phasePoisoned
 	}

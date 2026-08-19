@@ -483,6 +483,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		rootfsAllowedRoot: p.config.RootFSMountRoot,
 		rootfs:            rootfs,
 		network:           p.newNetwork(p.config),
+		runtimeSlotNeeded: p.config.RuntimeSlotEnabled,
 		logger:            p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
 	})
 
@@ -579,6 +580,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		rootfsAllowedRoot: p.config.RootFSMountRoot,
 		rootfs:            rootfs,
 		network:           p.newNetwork(p.config),
+		runtimeSlotNeeded: p.config.RuntimeSlotEnabled,
 		logger:            p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
 	})
 	if err := recovered.Recover(state); err != nil {

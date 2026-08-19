@@ -48,11 +48,15 @@ Implemented:
   after a task-driver restart; a warm slot is poisoned if its authority lease is
   lost, while an already claimed writer remains fenced by the independent
   RootFS session daemon
+- exact claim operation/claim ID persistence and an idempotent regional
+  `starting` transition after RootFS writer consumption, network application,
+  and root bind but before `runsc create`; the proof binds launch attempt,
+  runsc container ID, RootFS binding, and network-incarnation digest
 
 Not implemented:
 
 - manager/ctld claim integration with the regional slot registry
-- task-driver `starting` transition and real procd first-command-ready proof
+- real procd first-command-ready proof and task-driver `command-ready` transition
 - production remote-block service and cross-node device ownership
 - full network-policy incarnation-token persistence
 - procd first-command-ready accounting
@@ -97,8 +101,10 @@ the task driver synchronously registers an exact physical allocation, reports
 its three readiness proofs, and starts heartbeats before returning the slot to
 Nomad. Recovery must reproduce the same allocation, node boot, netns inode,
 control endpoint, and compatibility digest. No production manager claim
-controller consumes the registry yet, and the driver does not report `starting`
-or command readiness yet.
+controller consumes the registry yet. When a trusted caller supplies the exact
+regional operation and claim IDs in `PUT /claim`, the driver reports `starting`
+before invoking runsc and retries an ambiguous response with the same proof.
+It does not report command readiness yet.
 
 The network policy implementation is intentionally minimal: production ctld
 owns policy compilation, TPROXY, applied-token persistence, and L7 handling.

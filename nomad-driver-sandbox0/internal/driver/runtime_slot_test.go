@@ -16,6 +16,7 @@ package driver
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -41,11 +43,16 @@ type fakeRuntimeSlotAuthority struct {
 	registerErr     error
 	readyErr        error
 	heartbeatErrors []error
+	startingErrors  []error
 	calls           []string
 	registrations   []protocol.RegistrationRequest
 	readiness       []protocol.ReadinessRequest
 	heartbeats      []protocol.HeartbeatRequest
+	starting        []protocol.StartingRequest
 	heartbeatNotify chan struct{}
+	startingHook    func(protocol.StartingRequest)
+	claimOperation  string
+	claimID         string
 }
 
 func newFakeRuntimeSlotAuthority() *fakeRuntimeSlotAuthority {
@@ -65,8 +72,16 @@ func (a *fakeRuntimeSlotAuthority) observationLocked(slotID string) protocol.Obs
 	switch a.state {
 	case protocol.StateClaiming, protocol.StateStarting, protocol.StateActive, protocol.StateQuiescing:
 		expiresAt := now.Add(time.Minute)
-		observation.ClaimOperationID = "operation-1"
-		observation.ClaimID = "claim-1"
+		operationID := a.claimOperation
+		if operationID == "" {
+			operationID = "operation-1"
+		}
+		claimID := a.claimID
+		if claimID == "" {
+			claimID = "claim-1"
+		}
+		observation.ClaimOperationID = operationID
+		observation.ClaimID = claimID
 		observation.ClaimLeaseExpiresAt = &expiresAt
 	}
 	return observation
@@ -138,13 +153,42 @@ func (a *fakeRuntimeSlotAuthority) Heartbeat(
 func (a *fakeRuntimeSlotAuthority) Starting(
 	_ context.Context,
 	slotID string,
-	_ protocol.StartingRequest,
+	request protocol.StartingRequest,
 ) (protocol.Observation, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.calls = append(a.calls, "starting")
+	a.starting = append(a.starting, request)
+	a.claimOperation = request.OperationID
+	a.claimID = request.ClaimID
+	var err error
+	if len(a.startingErrors) != 0 {
+		err = a.startingErrors[0]
+		a.startingErrors = a.startingErrors[1:]
+	}
+	hook := a.startingHook
+	if err != nil {
+		if errdefs.IsUnavailable(err) {
+			a.state = protocol.StateStarting
+		}
+		a.mu.Unlock()
+		if hook != nil {
+			hook(request)
+		}
+		return protocol.Observation{}, err
+	}
 	a.state = protocol.StateStarting
-	return a.observationLocked(slotID), nil
+	observation := a.observationLocked(slotID)
+	a.mu.Unlock()
+	if hook != nil {
+		hook(request)
+	}
+	return observation, nil
+}
+
+func (a *fakeRuntimeSlotAuthority) startingSnapshot() []protocol.StartingRequest {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]protocol.StartingRequest(nil), a.starting...)
 }
 
 func (a *fakeRuntimeSlotAuthority) CommandReady(
@@ -346,6 +390,166 @@ func TestStartTaskDoesNotRegisterBeforeControlEndpointIsReady(t *testing.T) {
 	}
 }
 
+func prepareRuntimeSlotClaim(
+	t *testing.T,
+	fixture *runtimeSlotPluginFixture,
+) (*taskHandle, rootfshandoff.StageRequest, string, string, *fakeMounter) {
+	t.Helper()
+	fixture.authority.heartbeatTTL = runtimeSlotMaxHeartbeatTTL
+	if _, _, err := fixture.plugin.StartTask(fixture.task); err != nil {
+		t.Fatalf("StartTask() error = %v", err)
+	}
+	handle, ok := fixture.plugin.tasks.Get(fixture.task.ID)
+	if !ok {
+		t.Fatal("runtime slot handle was not stored")
+	}
+	mounter := &fakeMounter{}
+	handle.mounter = mounter
+	source := filepath.Join(fixture.config.RootFSMountRoot, "claim-source")
+	if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
+		t.Fatalf("create RootFS claim source: %v", err)
+	}
+	stage, token, networkPolicy := newAuthorizedRootFSStage(t, source)
+	netnsIdentity, err := networkNamespaceIdentity(fixture.task.NetworkIsolation.Path)
+	if err != nil {
+		t.Fatalf("derive claim netns identity: %v", err)
+	}
+	stage.ExpectedPolicyToken.PodUID = fixture.task.AllocID
+	stage.ExpectedPolicyToken.ClaimID = "claim-1"
+	stage.ExpectedPolicyToken.NetNSIdentity = netnsIdentity
+	stage.Identity.NodeUID = fixture.task.NodeID
+	stage.Identity.BootID = "boot-1"
+	stage.Identity.PodUID = fixture.task.AllocID
+	stage.Identity.ContainerName = fixture.task.Name
+	stage.Identity.SlotNonce = fixture.task.ID
+	stage.Identity.ClaimID = "claim-1"
+	if err := stage.Validate(); err != nil {
+		t.Fatalf("validate regional runtime slot stage: %v", err)
+	}
+	fixture.rootfs.mu.Lock()
+	fixture.rootfs.source = source
+	fixture.rootfs.mu.Unlock()
+	fixture.authority.mu.Lock()
+	fixture.authority.state = protocol.StateClaiming
+	fixture.authority.claimOperation = "operation-1"
+	fixture.authority.claimID = "claim-1"
+	fixture.authority.mu.Unlock()
+	return handle, stage, token, networkPolicy, mounter
+}
+
+func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
+	fixture.authority.mu.Lock()
+	fixture.authority.startingErrors = []error{fmtErrorUnavailable("response lost")}
+	startedTooEarly := false
+	fixture.authority.startingHook = func(protocol.StartingRequest) {
+		if contains(fixture.runner.callsSnapshot(), "create") {
+			startedTooEarly = true
+		}
+	}
+	fixture.authority.mu.Unlock()
+
+	err := handle.Claim(ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1",
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+	})
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if startedTooEarly {
+		t.Fatal("runsc create happened before the regional starting transition")
+	}
+	requests := fixture.authority.startingSnapshot()
+	if len(requests) != 2 || !reflect.DeepEqual(requests[0], requests[1]) {
+		t.Fatalf("starting requests = %+v, want one byte-stable retry", requests)
+	}
+	request := requests[0]
+	if request.OperationID != "operation-1" || request.ClaimID != "claim-1" ||
+		request.LaunchAttempt != stage.Identity.LaunchAttempt || request.RunscContainerID != safeContainerID(fixture.task.ID) {
+		t.Fatalf("starting request identity = %+v", request)
+	}
+	bindingDigest, err := stage.BindingDigest()
+	if err != nil {
+		t.Fatalf("derive expected binding digest: %v", err)
+	}
+	if request.RootFSBindingDigest != hex.EncodeToString(bindingDigest[:]) {
+		t.Fatalf("RootFS binding digest = %q", request.RootFSBindingDigest)
+	}
+	if _, err := protocol.DecodeProof("claim_network_digest", request.ClaimNetworkDigest); err != nil {
+		t.Fatalf("claim network proof = %q: %v", request.ClaimNetworkDigest, err)
+	}
+	persisted := handle.PersistedState()
+	if persisted.Claim == nil || persisted.Claim.OperationID != request.OperationID ||
+		persisted.Claim.ClaimID != request.ClaimID ||
+		persisted.Claim.RootFSBindingDigest != request.RootFSBindingDigest ||
+		persisted.Claim.ClaimNetworkDigest != request.ClaimNetworkDigest {
+		t.Fatalf("persisted claim = %+v", persisted.Claim)
+	}
+	if calls := fixture.runner.callsSnapshot(); !contains(calls, "create") || !contains(calls, "start") {
+		t.Fatalf("runsc calls = %v, want create and start after regional starting", calls)
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
+func TestRuntimeSlotClaimStartingRejectionPoisonsWithoutRunsc(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, mounter := prepareRuntimeSlotClaim(t, fixture)
+	fixture.authority.mu.Lock()
+	fixture.authority.startingErrors = []error{fmtErrorPermissionDenied("claim revoked")}
+	fixture.authority.mu.Unlock()
+
+	err := handle.Claim(ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1",
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+	})
+	if !errdefs.IsPermissionDenied(err) {
+		t.Fatalf("Claim() error = %v, want permission denied", err)
+	}
+	if calls := fixture.runner.callsSnapshot(); contains(calls, "create") || contains(calls, "start") {
+		t.Fatalf("runsc calls = %v, rejected starting transition launched runsc", calls)
+	}
+	if phase := handle.TaskStatus().DriverAttributes["phase"]; phase != string(phasePoisoned) {
+		t.Fatalf("phase = %s, want poisoned", phase)
+	}
+	_, unmounts := mounter.snapshot()
+	if len(unmounts) == 0 || unmounts[len(unmounts)-1] != handle.rootMount {
+		t.Fatalf("unmounts = %v, want claimed root detached", unmounts)
+	}
+	_, retireCalls, _, _ := fixture.rootfs.snapshot()
+	if retireCalls != 1 {
+		t.Fatalf("RootFS retire calls = %d, want consumed writer retired", retireCalls)
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
+func TestRuntimeSlotClaimRequiresRegionalIdentityBeforeConsumingWriter(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
+
+	err := handle.Claim(ClaimRequest{
+		ClaimID: "claim-1", PolicyToken: token, WriterEpoch: "1",
+		Stage: &stage, NetworkPolicy: networkPolicy,
+	})
+	if err == nil || !strings.Contains(err.Error(), "operation_id") {
+		t.Fatalf("Claim() error = %v, want missing operation ID", err)
+	}
+	ensureCalls, retireCalls, _, _ := fixture.rootfs.snapshot()
+	if ensureCalls != 0 || retireCalls != 0 {
+		t.Fatalf("RootFS calls = ensure %d retire %d, invalid claim consumed writer", ensureCalls, retireCalls)
+	}
+	if phase := handle.TaskStatus().DriverAttributes["phase"]; phase != string(phaseWarm) {
+		t.Fatalf("phase = %s, want reusable warm slot before writer consumption", phase)
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
 func TestRecoverTaskResumesExactRuntimeSlotHeartbeat(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
 	fixture.authority.heartbeatTTL = 5 * time.Second
@@ -543,6 +747,19 @@ func TestRuntimeSlotHeartbeatRetriesTransientFailureWithinLease(t *testing.T) {
 	_, _, _, heartbeats := authority.snapshot()
 	if len(heartbeats) != 2 {
 		t.Fatalf("heartbeat attempts = %d, want one failure and one retry", len(heartbeats))
+	}
+}
+
+func TestRecoveredCrashFencedClaimRemainsInspectable(t *testing.T) {
+	for _, state := range []protocol.State{
+		protocol.StateClaiming, protocol.StateStarting, protocol.StateActive, protocol.StateQuiescing,
+	} {
+		if err := validateRecoveredRuntimeSlotState(state, phasePoisoned); err != nil {
+			t.Fatalf("state %s rejected crash-fenced local claim: %v", state, err)
+		}
+	}
+	if err := validateRecoveredRuntimeSlotState(protocol.StateFastpathReady, phasePoisoned); err == nil {
+		t.Fatal("unclaimed fast-path slot accepted poisoned local state")
 	}
 }
 

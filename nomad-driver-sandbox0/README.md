@@ -83,3 +83,26 @@ See `example/warm-slot.nomad` for a warm allocation. A development smoke task
 may set `wait_for_claim = false` and provide an allowed RootFS directory only
 when the client explicitly sets `dev_smoke_enabled = true`; the production path
 always waits for manager authorization.
+
+## Node boot prerequisites
+
+The experimental RootFS runtime needs the NBD and bridge modules before Nomad
+starts. Persist both the module list and the NBD pool size instead of relying on
+one-time `modprobe` commands:
+
+```text
+# /etc/modules-load.d/sandbox0.conf
+nbd
+bridge
+br_netfilter
+
+# /etc/modprobe.d/sandbox0-nbd.conf
+options nbd nbds_max=64 max_part=0
+```
+
+The Nomad unit must start after `systemd-modules-load.service`, and node
+readiness must verify every configured `rootfs_nbd_devices` path. PostgreSQL,
+the object store, and the mTLS writer authority must also be reachable before a
+RootFS claim is issued. A failed attach after grant consumption is
+crash-abandoned; it is never returned to the warm pool or published as a
+successful pause.

@@ -405,8 +405,19 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	if durableStage != nil {
 		mount, err := h.rootfs.Ensure(context.Background(), *request.Stage)
 		if err != nil {
-			_ = h.rollbackClaim()
-			return fmt.Errorf("attach RootFS session: %w", err)
+			attachErr := fmt.Errorf("attach RootFS session: %w", err)
+			var consumedErr *consumedRootFSAttachError
+			if !errors.As(err, &consumedErr) {
+				_ = h.rollbackClaim()
+				return attachErr
+			}
+			fenceErr := h.crashAbandonPersistedRootFS(errors.New("RootFS attach failed; writer was crash-abandoned"))
+			if fenceErr != nil {
+				h.markPoisoned(errors.Join(attachErr, fenceErr))
+				_ = h.persist()
+				return errors.Join(attachErr, fmt.Errorf("crash-abandon failed RootFS attach: %w", fenceErr))
+			}
+			return errors.Join(attachErr, errors.New("writer was crash-abandoned"))
 		}
 		rootfsSource = mount.Source
 		sessionAttached = true
@@ -617,6 +628,7 @@ func (h *taskHandle) Close(force bool) error {
 	}
 	h.closed = true
 	rootMounted := h.rootMounted
+	phase := h.phase
 	stage := h.stage
 	if stage == nil && h.claim != nil {
 		stage = h.claim.Stage
@@ -630,19 +642,25 @@ func (h *taskHandle) Close(force bool) error {
 		_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
 	}
 	firstErr := h.runner.Delete(cleanupCtx, h.containerID, true)
-	if rootMounted {
+	if rootMounted && phase != phasePoisoned {
 		if err := h.mounter.Unmount(h.rootMount); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	if stage != nil && rootMounted && h.rootfs != nil {
 		retireCtx, retireCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		if _, err := h.rootfs.Retire(retireCtx, *stage, newRetireOperationID()); err != nil {
+		var err error
+		if phase == phasePoisoned {
+			err = h.crashAbandonPersistedRootFS(errors.New("poisoned RootFS writer was crash-abandoned during task cleanup"))
+		} else {
+			_, err = h.rootfs.Retire(retireCtx, *stage, newRetireOperationID())
+		}
+		if err != nil {
 			retireCancel()
 			h.mu.Lock()
 			h.closed = false
 			h.mu.Unlock()
-			return errors.Join(firstErr, fmt.Errorf("retire RootFS session: %w", err))
+			return errors.Join(firstErr, fmt.Errorf("terminate RootFS session: %w", err))
 		}
 		retireCancel()
 	}
@@ -788,13 +806,20 @@ func (h *taskHandle) recoverCrashedRootFS() error {
 	if h.rootfs == nil || h.stage == nil {
 		return errors.New("recovered RootFS task has no storage runtime")
 	}
-	operationID := crashOperationID(*h.stage)
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cleanupCancel()
 	_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
 	if err := h.runner.Delete(cleanupCtx, h.containerID, true); err != nil {
 		return fmt.Errorf("delete crashed gVisor task: %w", err)
 	}
+	return h.crashAbandonPersistedRootFS(errors.New("task driver restarted; RootFS writer was crash-abandoned"))
+}
+
+func (h *taskHandle) crashAbandonPersistedRootFS(exitErr error) error {
+	if h.rootfs == nil || h.stage == nil {
+		return errors.New("crashed RootFS task has no storage runtime")
+	}
+	operationID := crashOperationID(*h.stage)
 	if err := h.mounter.Unmount(h.rootMount); err != nil {
 		return fmt.Errorf("unmount crashed task root: %w", err)
 	}
@@ -820,7 +845,7 @@ func (h *taskHandle) recoverCrashedRootFS() error {
 	h.mu.Lock()
 	h.rootMounted = false
 	h.phase = phasePoisoned
-	h.exitResult = &drivers.ExitResult{Err: errors.New("task driver restarted; RootFS writer was crash-abandoned")}
+	h.exitResult = &drivers.ExitResult{Err: exitErr}
 	if h.completedAt.IsZero() {
 		h.completedAt = time.Now()
 	}

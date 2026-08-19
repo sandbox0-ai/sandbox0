@@ -66,6 +66,13 @@ type rootfsRenewal struct {
 	cancel context.CancelFunc
 }
 
+type consumedRootFSAttachError struct {
+	err error
+}
+
+func (e *consumedRootFSAttachError) Error() string { return e.err.Error() }
+func (e *consumedRootFSAttachError) Unwrap() error { return e.err }
+
 func newRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootfsRuntime, error) {
 	if config == nil || !config.RootFSEnabled {
 		return nil, nil
@@ -136,7 +143,11 @@ func (r *rootfsRuntime) Ensure(ctx context.Context, request rootfshandoff.StageR
 		}
 		r.startRenewal(request, observation)
 	}
-	return r.sessions.Ensure(ctx, request)
+	mount, err := r.sessions.Ensure(ctx, request)
+	if err != nil && r.authority != nil {
+		return rootfssession.Mount{}, &consumedRootFSAttachError{err: err}
+	}
+	return mount, err
 }
 
 func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageRequest, operationID string) (rootfssession.RetireResult, error) {

@@ -155,6 +155,8 @@ type fakeMounter struct {
 type fakeRootFSRuntime struct {
 	mu            sync.Mutex
 	source        string
+	ensureErr     error
+	crashErr      error
 	ensureCalls   int
 	retireCalls   int
 	crashCalls    int
@@ -197,6 +199,9 @@ func (r *fakeRootFSRuntime) Ensure(_ context.Context, request rootfshandoff.Stag
 	defer r.mu.Unlock()
 	r.ensureCalls++
 	r.lastParent = request.Parent
+	if r.ensureErr != nil {
+		return rootfssession.Mount{}, r.ensureErr
+	}
 	return rootfssession.Mount{Source: r.source, Type: "bind"}, nil
 }
 
@@ -220,6 +225,9 @@ func (r *fakeRootFSRuntime) CrashFence(
 	r.crashCalls++
 	r.lastParent = request.Parent
 	r.lastOperation = operationID
+	if r.crashErr != nil {
+		return rootfshandoff.CrashFenceProof{}, r.crashErr
+	}
 	return rootfshandoff.CrashFenceProof{OperationID: operationID}, nil
 }
 
@@ -426,6 +434,44 @@ func TestClaimUsesAuthorizedRootFSSessionAndRetiresOnClose(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	stage, token, networkPolicy := newAuthorizedRootFSStage(t, source)
+
+	runtime := &fakeRootFSRuntime{source: source}
+	fixture.handle.rootfs = runtime
+	fixture.handle.rootfsAllowedRoot = filepath.Dir(source)
+	// Keep the fake session source outside the development allowed root to prove
+	// that the session mount uses the RootFS-specific allowlist.
+	if _, err := validateRootfsPath(source, fixture.allowedRoot); err == nil {
+		t.Fatal("test source unexpectedly resolved under development root")
+	}
+	if err := fixture.handle.Prepare(TaskConfig{Command: "/bin/sh", WaitForClaim: true}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if err := fixture.handle.Claim(ClaimRequest{
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+	}); err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	ensureCalls, retireCalls, parent, _ := runtime.snapshot()
+	if ensureCalls != 1 || retireCalls != 0 || parent != stage.Parent {
+		t.Fatalf("runtime calls=(%d,%d,%q), want one ensure and no retire", ensureCalls, retireCalls, parent)
+	}
+	persisted := fixture.handle.PersistedState()
+	if persisted.Claim == nil || persisted.Claim.Stage == nil ||
+		persisted.Claim.Stage.Identity.WriterGrantToken != "" {
+		t.Fatalf("persisted claim = %+v, want tokenless durable stage", persisted.Claim)
+	}
+	if err := fixture.handle.Close(true); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	ensureCalls, retireCalls, parent, operation := runtime.snapshot()
+	if ensureCalls != 1 || retireCalls != 1 || parent != stage.Parent || operation == "" {
+		t.Fatalf("runtime calls=(%d,%d,%q,%q), want one ensure and one retire", ensureCalls, retireCalls, parent, operation)
+	}
+}
+
+func newAuthorizedRootFSStage(t *testing.T, source string) (rootfshandoff.StageRequest, string, string) {
+	t.Helper()
 	store := objectstore.NewMemoryStore(t.Name()).(objectstore.ConditionalStore)
 	descriptor, err := rootfsbuilder.Build(context.Background(), store, rootfsbuilder.Options{
 		SourceRoot: source, ImagePath: filepath.Join(t.TempDir(), "base.xfs"),
@@ -459,38 +505,80 @@ func TestClaimUsesAuthorizedRootFSSessionAndRetiresOnClose(t *testing.T) {
 	if err := stage.Validate(); err != nil {
 		t.Fatalf("stage validation: %v", err)
 	}
+	return stage, token, networkPolicy
+}
 
-	runtime := &fakeRootFSRuntime{source: source}
+func TestClaimCrashAbandonsConsumedWriterWhenRootFSAttachFails(t *testing.T) {
+	fixture := newTestFixture(t)
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stage, token, networkPolicy := newAuthorizedRootFSStage(t, source)
+	runtime := &fakeRootFSRuntime{
+		source:    source,
+		ensureErr: &consumedRootFSAttachError{err: errors.New("NBD device is unavailable")},
+	}
 	fixture.handle.rootfs = runtime
 	fixture.handle.rootfsAllowedRoot = filepath.Dir(source)
-	// Keep the fake session source outside the development allowed root to prove
-	// that the session mount uses the RootFS-specific allowlist.
-	if _, err := validateRootfsPath(source, fixture.allowedRoot); err == nil {
-		t.Fatal("test source unexpectedly resolved under development root")
-	}
 	if err := fixture.handle.Prepare(TaskConfig{Command: "/bin/sh", WaitForClaim: true}); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	if err := fixture.handle.Claim(ClaimRequest{
+
+	err := fixture.handle.Claim(ClaimRequest{
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
-	}); err != nil {
-		t.Fatalf("Claim() error = %v", err)
+	})
+	if err == nil || !strings.Contains(err.Error(), "writer was crash-abandoned") {
+		t.Fatalf("Claim() error = %v, want crash-abandoned attach failure", err)
 	}
-	ensureCalls, retireCalls, parent, _ := runtime.snapshot()
-	if ensureCalls != 1 || retireCalls != 0 || parent != stage.Parent {
-		t.Fatalf("runtime calls=(%d,%d,%q), want one ensure and no retire", ensureCalls, retireCalls, parent)
+	status := fixture.handle.TaskStatus()
+	if status.DriverAttributes["phase"] != string(phasePoisoned) || status.DriverAttributes["root_mounted"] != "false" {
+		t.Fatalf("status = %+v, want poisoned and detached", status.DriverAttributes)
 	}
-	persisted := fixture.handle.PersistedState()
-	if persisted.Claim == nil || persisted.Claim.Stage == nil ||
-		persisted.Claim.Stage.Identity.WriterGrantToken != "" {
-		t.Fatalf("persisted claim = %+v, want tokenless durable stage", persisted.Claim)
+	runtime.mu.Lock()
+	ensureCalls, retireCalls, crashCalls, operation := runtime.ensureCalls, runtime.retireCalls, runtime.crashCalls, runtime.lastOperation
+	runtime.mu.Unlock()
+	if ensureCalls != 1 || retireCalls != 0 || crashCalls != 1 || operation != crashOperationID(stage) {
+		t.Fatalf("runtime ensure=%d retire=%d crash=%d operation=%q", ensureCalls, retireCalls, crashCalls, operation)
 	}
-	if err := fixture.handle.Close(true); err != nil {
-		t.Fatalf("Close() error = %v", err)
+	if calls := fixture.runner.callsSnapshot(); contains(calls, "create") || contains(calls, "start") {
+		t.Fatalf("runner calls = %v, runsc must not start after RootFS attach failure", calls)
 	}
-	ensureCalls, retireCalls, parent, operation := runtime.snapshot()
-	if ensureCalls != 1 || retireCalls != 1 || parent != stage.Parent || operation == "" {
-		t.Fatalf("runtime calls=(%d,%d,%q,%q), want one ensure and one retire", ensureCalls, retireCalls, parent, operation)
+	_, unmounts := fixture.mounter.snapshot()
+	if len(unmounts) != 1 || unmounts[0] != fixture.rootMount {
+		t.Fatalf("unmounts = %v, want crash cleanup", unmounts)
+	}
+}
+
+func TestClaimReturnsWarmWhenWriterGrantWasNotConsumed(t *testing.T) {
+	fixture := newTestFixture(t)
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stage, token, networkPolicy := newAuthorizedRootFSStage(t, source)
+	runtime := &fakeRootFSRuntime{source: source, ensureErr: errors.New("writer authority unavailable")}
+	fixture.handle.rootfs = runtime
+	fixture.handle.rootfsAllowedRoot = filepath.Dir(source)
+	if err := fixture.handle.Prepare(TaskConfig{Command: "/bin/sh", WaitForClaim: true}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+
+	err := fixture.handle.Claim(ClaimRequest{
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+	})
+	if err == nil || !strings.Contains(err.Error(), "writer authority unavailable") {
+		t.Fatalf("Claim() error = %v, want authority failure", err)
+	}
+	status := fixture.handle.TaskStatus()
+	if status.DriverAttributes["phase"] != string(phaseWarm) || status.DriverAttributes["root_mounted"] != "false" {
+		t.Fatalf("status = %+v, want reusable warm slot", status.DriverAttributes)
+	}
+	runtime.mu.Lock()
+	crashCalls := runtime.crashCalls
+	runtime.mu.Unlock()
+	if crashCalls != 0 {
+		t.Fatalf("crash calls = %d, writer was never consumed", crashCalls)
 	}
 }
 

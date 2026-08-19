@@ -25,6 +25,10 @@ var linuxNBDPath = regexp.MustCompile(`^/dev/nbd[0-9]+$`)
 const (
 	xfsMountFlags = unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOATIME
 	xfsMountData  = "nouuid,inode64"
+	// Linux asm-generic _IOWR('X', 119/120, int). Sandbox0's production
+	// architectures (amd64 and arm64) share this ioctl encoding.
+	fsIOCFreeze = uint(0xc0045877)
+	fsIOCThaw   = uint(0xc0045878)
 )
 
 // LinuxRuntimeConfig configures the host NBD/XFS/Overlay implementation.
@@ -316,6 +320,33 @@ func (r *LinuxRuntime) MountXFS(devicePath, target string) error {
 	}
 	if err := unix.Mount(devicePath, target, "xfs", xfsMountFlags, xfsMountData); err != nil {
 		return fmt.Errorf("mount %s on %s: %w", devicePath, target, err)
+	}
+	return nil
+}
+
+func (r *LinuxRuntime) FreezeXFS(target string) error {
+	return ioctlXFSFreeze(target, fsIOCFreeze, "freeze")
+}
+
+func (r *LinuxRuntime) ThawXFS(target string) error {
+	err := ioctlXFSFreeze(target, fsIOCThaw, "thaw")
+	if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTTY) || errors.Is(err, unix.ENOENT) || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func ioctlXFSFreeze(target string, request uint, operation string) error {
+	if err := requireTrustedDirectory(target); err != nil {
+		return err
+	}
+	file, err := os.Open(target)
+	if err != nil {
+		return fmt.Errorf("open XFS root to %s: %w", operation, err)
+	}
+	defer file.Close()
+	if err := unix.IoctlSetPointerInt(int(file.Fd()), request, 0); err != nil {
+		return fmt.Errorf("%s XFS root %s: %w", operation, target, err)
 	}
 	return nil
 }

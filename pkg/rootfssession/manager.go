@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	bolt "go.etcd.io/bbolt"
@@ -27,7 +29,8 @@ const (
 	DefaultMaxDirtyTailBytes       = int64(10 << 30)
 	legacySessionSchemaVersion     = 2
 	allocationSessionSchemaVersion = 3
-	sessionSchemaVersion           = 4
+	durableBindingSchemaVersion    = 4
+	sessionSchemaVersion           = 5
 	stateReserved                  = "reserved"
 	stateDeviceReserved            = "device_reserved"
 	stateDeviceReady               = "device_ready"
@@ -60,6 +63,8 @@ type HostRuntime interface {
 	AttachDevice(lifetime, readyContext context.Context, devicePath, allocationID string, backend rootfsblock.WritableBlockDevice) (Device, error)
 	RecoverOrphanDevice(ctx context.Context, devicePath, allocationID string) error
 	MountXFS(devicePath, target string) error
+	FreezeXFS(target string) error
+	ThawXFS(target string) error
 	MountOverlay(xfsRoot, mergedRoot string) error
 	UnmountOverlay(mergedRoot string, requireSync bool) error
 	UnmountXFS(xfsRoot string, requireSync bool) error
@@ -132,6 +137,7 @@ type record struct {
 	XFSRoot                   string                      `json:"xfs_root"`
 	MergedRoot                string                      `json:"merged_root"`
 	State                     string                      `json:"state"`
+	FreezeOperationID         string                      `json:"freeze_operation_id,omitempty"`
 	RetireOperationID         string                      `json:"retire_operation_id,omitempty"`
 	SealedDescriptor          []byte                      `json:"sealed_descriptor,omitempty"`
 	SealedBlockHead           string                      `json:"sealed_block_head,omitempty"`
@@ -323,6 +329,237 @@ func (m *Manager) ReconcileReleases(ctx context.Context) error {
 	return result
 }
 
+// ReconcileFreezes thaws every filesystem whose durable freeze intent
+// survived a session-owner crash. Thaw is idempotent for an already thawed or
+// absent mount, so clearing the intent is safe only after this call succeeds.
+func (m *Manager) ReconcileFreezes(ctx context.Context) error {
+	var parents []string
+	if err := m.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(sessionBucket).ForEach(func(key, payload []byte) error {
+			if payload == nil {
+				return nil
+			}
+			var current record
+			if err := json.Unmarshal(payload, &current); err != nil {
+				return fmt.Errorf("decode RootFS session %q: %w", key, err)
+			}
+			if current.Parent != string(key) || !supportedSessionVersion(current.Version) {
+				return fmt.Errorf("invalid RootFS recovery record %q version %d", key, current.Version)
+			}
+			if current.FreezeOperationID != "" {
+				parents = append(parents, current.Parent)
+			}
+			return nil
+		})
+	}); err != nil {
+		return fmt.Errorf("list interrupted RootFS freezes: %w", err)
+	}
+	var result error
+	for _, parent := range parents {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(result, err)
+		}
+		unlock := m.lock(parent)
+		current, err := m.load(parent)
+		if err == nil && current.FreezeOperationID != "" {
+			if err = m.runtime.ThawXFS(current.XFSRoot); err == nil {
+				current.FreezeOperationID = ""
+				err = m.save(current)
+			}
+		}
+		unlock()
+		if err != nil {
+			result = errors.Join(result, fmt.Errorf("recover RootFS freeze %q: %w", parent, err))
+		}
+	}
+	return result
+}
+
+// CaptureRunningFork briefly freezes XFS, captures an immutable branch
+// boundary, thaws the source, and only then performs potentially slow object
+// publication. The source branch remains writable throughout publication.
+func (m *Manager) CaptureRunningFork(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	request rootfshandoff.RunningForkCheckpointRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	if err := stage.ValidateDurableBinding(); err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	if err := request.Validate(); err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	if stage.Generation == nil || stage.Generation.LocatorVersion == math.MaxInt64 {
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("source generation locator cannot advance")
+	}
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	parent, _, err := m.findIdentity(stage.Identity.RootFSID, stage.Identity.WriterEpoch)
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+
+	unlock := m.lock(parent)
+	current, err := m.load(parent)
+	if err != nil {
+		unlock()
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	if !sameBinding(current, stage, hex.EncodeToString(binding[:])) || current.State != stateReady || current.Stage == nil {
+		unlock()
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("RootFS session is not a live matching writer: %w", errdefs.ErrFailedPrecondition)
+	}
+	m.mu.Lock()
+	live := m.live[parent]
+	m.mu.Unlock()
+	if live == nil {
+		unlock()
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("RootFS session has no live branch owner: %w", errdefs.ErrUnavailable)
+	}
+	if current.FreezeOperationID != "" {
+		if err := m.runtime.ThawXFS(current.XFSRoot); err != nil {
+			unlock()
+			return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("recover prior RootFS freeze: %w", err)
+		}
+		current.FreezeOperationID = ""
+		if err := m.save(current); err != nil {
+			unlock()
+			return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("clear prior RootFS freeze intent: %w", err)
+		}
+	}
+	current.FreezeOperationID = request.OperationID
+	current.Version = sessionSchemaVersion
+	if err := m.save(current); err != nil {
+		unlock()
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("persist RootFS freeze intent: %w", err)
+	}
+	if freezeErr := m.runtime.FreezeXFS(current.XFSRoot); freezeErr != nil {
+		thawErr := m.runtime.ThawXFS(current.XFSRoot)
+		if thawErr == nil {
+			current.FreezeOperationID = ""
+			thawErr = m.save(current)
+		}
+		unlock()
+		return rootfshandoff.RunningForkCheckpointResult{}, errors.Join(
+			fmt.Errorf("freeze running RootFS: %w", freezeErr),
+			wrapIfError("recover failed RootFS freeze", thawErr),
+		)
+	}
+	checkpoint, checkpointErr := live.branch.Checkpoint()
+	thawErr := m.runtime.ThawXFS(current.XFSRoot)
+	var clearErr error
+	if thawErr == nil {
+		current.FreezeOperationID = ""
+		clearErr = m.save(current)
+	}
+	unlock()
+	if checkpointErr != nil || thawErr != nil || clearErr != nil {
+		if checkpoint != nil {
+			_ = checkpoint.Close()
+		}
+		return rootfshandoff.RunningForkCheckpointResult{}, errors.Join(
+			wrapIfError("checkpoint running RootFS", checkpointErr),
+			wrapIfError("thaw running RootFS", thawErr),
+			wrapIfError("clear RootFS freeze intent", clearErr),
+		)
+	}
+
+	base, err := rootfsblock.DecodeDescriptor(current.BaseDescriptor)
+	if err != nil {
+		_ = checkpoint.Close()
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("decode running fork base generation: %w", err)
+	}
+	sealed, payload, durability, err := buildBranchCheckpoint(ctx, checkpoint, base, m.source, m.publisher)
+	checkpointSequence := checkpoint.Sequence()
+	err = errors.Join(err, checkpoint.Close())
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("publish running fork checkpoint: %w", err)
+	}
+	generation := rootfshandoff.GenerationDescriptor{
+		Version: rootfshandoff.GenerationDescriptorVersion, GenerationID: request.TargetGenerationID,
+		FilesystemID: request.TargetSandboxID, SourceOCIDigest: stage.Generation.SourceOCIDigest,
+		BaseArtifactDigest: stage.Generation.BaseArtifactDigest, BaseBlockRoot: stage.Generation.BaseBlockRoot,
+		CurrentBlockHead: sealed.MappingRoot.RootDigest, WriterEpoch: stage.Identity.WriterEpoch,
+		FormatGeneration: stage.Generation.FormatGeneration, DurabilityState: durability,
+		LocatorVersion: stage.Generation.LocatorVersion + 1, Descriptor: payload,
+	}
+	proof := rootfshandoff.RunningForkCheckpointProof{
+		Version: rootfshandoff.RunningForkCheckpointVersion, OperationID: request.OperationID,
+		SourceSandboxID: request.SourceSandboxID, SourceFilesystemID: stage.Identity.RootFSID,
+		TargetSandboxID: request.TargetSandboxID, SourceWriterGrantID: stage.Identity.WriterGrantID,
+		SourceWriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
+		BindingDigest: hex.EncodeToString(binding[:]), ExpectedSourceGenerationID: stage.InitialGeneration,
+		CheckpointGenerationID: request.TargetGenerationID, CheckpointSequence: checkpointSequence,
+		CheckpointDescriptorDigest: digest.FromBytes(payload).String(),
+	}
+	proofDigest, err := proof.Digest()
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	result := rootfshandoff.RunningForkCheckpointResult{
+		Generation: generation, Proof: proof, ProofDigest: hex.EncodeToString(proofDigest[:]),
+	}
+	if err := result.Validate(); err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	return result, nil
+}
+
+func wrapIfError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
+func buildBranchCheckpoint(
+	ctx context.Context,
+	checkpoint *rootfsblock.BranchCheckpoint,
+	base rootfsblock.Descriptor,
+	source rootfsblock.RangeSource,
+	publisher rootfsblock.ImmutableObjectPublisher,
+) (rootfsblock.Descriptor, []byte, string, error) {
+	records, err := checkpoint.DurableRecords()
+	materialize := false
+	var tooLarge *rootfsblock.CompositeTailTooLargeError
+	if errors.As(err, &tooLarge) {
+		err = nil
+		materialize = true
+	}
+	if err != nil {
+		return rootfsblock.Descriptor{}, nil, "", err
+	}
+	var sealed rootfsblock.Descriptor
+	var payload []byte
+	if !materialize {
+		sealed, payload, err = rootfsblock.BuildCompositeGeneration(base, records)
+		if errors.As(err, &tooLarge) {
+			err = nil
+			materialize = true
+		}
+	}
+	if materialize {
+		var built rootfsblock.BuildResult
+		built, err = rootfsblock.BuildIncrementalGenerationFromBlockReader(
+			ctx, source, base, checkpoint, publisher, rootfsblock.BuildOptions{},
+		)
+		if err == nil {
+			sealed = built.Descriptor
+			payload = built.Payload
+		}
+	}
+	if err != nil {
+		return rootfsblock.Descriptor{}, nil, "", err
+	}
+	durability := rootfsblock.DurabilityS3
+	if sealed.CompositeTail != nil {
+		durability = rootfsblock.DurabilityComposite
+	}
+	return sealed, payload, durability, nil
+}
+
 // RecoverySessions enumerates every durable session needed by an independent
 // node reconciler. Older records remain visible as RecoveryUnavailable and
 // must be fenced by their legacy owner; they are never guessed from partial
@@ -348,7 +585,7 @@ func (m *Manager) RecoverySessions() ([]RecoverySession, error) {
 			if current.Parent != string(key) || !supportedSessionVersion(current.Version) {
 				return fmt.Errorf("invalid RootFS recovery record %q version %d", key, current.Version)
 			}
-			if current.Version == sessionSchemaVersion && current.Stage == nil {
+			if current.Version >= durableBindingSchemaVersion && current.Stage == nil {
 				return fmt.Errorf("RootFS recovery record %q lacks its durable Stage binding", key)
 			}
 			recovery := RecoverySession{
@@ -1135,6 +1372,12 @@ func (m *Manager) Release(ctx context.Context, identity rootfshandoff.Identity) 
 func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 	parent := current.Parent
 	plannedRetire := current.RetireOperationID != ""
+	if current.FreezeOperationID != "" {
+		if err := m.runtime.ThawXFS(current.XFSRoot); err != nil {
+			return fmt.Errorf("thaw RootFS before release: %w", err)
+		}
+		current.FreezeOperationID = ""
+	}
 	current.State = stateReleasing
 	if err := m.save(current); err != nil {
 		return err
@@ -1169,53 +1412,18 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 				releaseErr = fmt.Errorf("checkpoint retiring branch: %w", releaseErr)
 			}
 		}
-		var records []rootfsblock.BlockUpdate
-		materialize := false
-		if releaseErr == nil {
-			records, releaseErr = checkpoint.DurableRecords()
-			var tooLarge *rootfsblock.CompositeTailTooLargeError
-			if errors.As(releaseErr, &tooLarge) {
-				releaseErr = nil
-				materialize = true
-			} else if releaseErr != nil {
-				releaseErr = fmt.Errorf("read retiring branch: %w", releaseErr)
-			}
-		}
 		if releaseErr == nil {
 			base, decodeErr := rootfsblock.DecodeDescriptor(current.BaseDescriptor)
 			if decodeErr != nil {
 				releaseErr = fmt.Errorf("decode retiring base generation: %w", decodeErr)
 			} else {
-				var sealed rootfsblock.Descriptor
-				var payload []byte
-				var buildErr error
-				if !materialize {
-					sealed, payload, buildErr = rootfsblock.BuildCompositeGeneration(base, records)
-					var tooLarge *rootfsblock.CompositeTailTooLargeError
-					if errors.As(buildErr, &tooLarge) {
-						buildErr = nil
-						materialize = true
-					}
-				}
-				if materialize {
-					var built rootfsblock.BuildResult
-					built, buildErr = rootfsblock.BuildIncrementalGenerationFromBlockReader(
-						ctx, m.source, base, checkpoint, m.publisher, rootfsblock.BuildOptions{},
-					)
-					if buildErr == nil {
-						sealed = built.Descriptor
-						payload = built.Payload
-					}
-				}
+				sealed, payload, durability, buildErr := buildBranchCheckpoint(ctx, checkpoint, base, m.source, m.publisher)
 				if buildErr != nil {
 					releaseErr = fmt.Errorf("seal durable generation: %w", buildErr)
 				} else {
 					sealedDescriptor = payload
 					sealedBlockHead = sealed.MappingRoot.RootDigest
-					sealedDurability = rootfsblock.DurabilityS3
-					if sealed.CompositeTail != nil {
-						sealedDurability = rootfsblock.DurabilityComposite
-					}
+					sealedDurability = durability
 				}
 			}
 		}

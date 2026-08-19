@@ -63,8 +63,17 @@ type RootFSRuntime interface {
 	Ensure(context.Context, rootfshandoff.StageRequest, func(error)) (rootfssession.Mount, error)
 	RegisterConsumer(context.Context, rootfshandoff.StageRequest, RootFSConsumerRequest) (RootFSConsumerLease, error)
 	RenewConsumer(context.Context, rootfshandoff.StageRequest, RootFSConsumerLease) (RootFSConsumerLease, error)
+	CaptureRunningFork(context.Context, rootfshandoff.StageRequest, rootfshandoff.RunningForkCheckpointRequest) (rootfshandoff.RunningForkCheckpointResult, error)
 	Retire(context.Context, rootfshandoff.StageRequest, string) (rootfssession.RetireResult, error)
 	CrashFence(context.Context, rootfshandoff.StageRequest, string, crashTaskObservation) (rootfshandoff.CrashFenceProof, error)
+}
+
+func (r *rootfsRuntime) CaptureRunningFork(
+	ctx context.Context,
+	request rootfshandoff.StageRequest,
+	fork rootfshandoff.RunningForkCheckpointRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	return r.sessions.CaptureRunningFork(ctx, request.WithoutWriterGrantToken(), fork)
 }
 
 // RootFSConsumerRequest binds the durable block writer to the exact host
@@ -149,7 +158,10 @@ func newEmbeddedRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootf
 		return nil, fmt.Errorf("create RootFS session manager: %w", err)
 	}
 	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	err = sessions.ReconcileReleases(reconcileCtx)
+	err = sessions.ReconcileFreezes(reconcileCtx)
+	if err == nil {
+		err = sessions.ReconcileReleases(reconcileCtx)
+	}
 	reconcileCancel()
 	if err != nil {
 		_ = sessions.Close()

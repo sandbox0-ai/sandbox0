@@ -405,6 +405,58 @@ type RunningForkCheckpointProof struct {
 	CheckpointDescriptorDigest string `json:"checkpoint_descriptor_digest"`
 }
 
+// RunningForkCheckpointRequest names the regional target before the node
+// freezes the source filesystem. IDs are stable across retries.
+type RunningForkCheckpointRequest struct {
+	OperationID        string `json:"operation_id"`
+	SourceSandboxID    string `json:"source_sandbox_id"`
+	TargetSandboxID    string `json:"target_sandbox_id"`
+	TargetGenerationID string `json:"target_generation_id"`
+}
+
+func (r RunningForkCheckpointRequest) Validate() error {
+	for name, value := range map[string]string{
+		"operation_id": r.OperationID, "source_sandbox_id": r.SourceSandboxID,
+		"target_sandbox_id": r.TargetSandboxID, "target_generation_id": r.TargetGenerationID,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s is required", name)
+		}
+	}
+	if r.SourceSandboxID == r.TargetSandboxID {
+		return fmt.Errorf("source and target sandboxes must differ")
+	}
+	return nil
+}
+
+// RunningForkCheckpointResult contains bounded regional control metadata. Its
+// block payload is either a PostgreSQL composite tail or immutable objects.
+type RunningForkCheckpointResult struct {
+	Generation  GenerationDescriptor       `json:"generation"`
+	Proof       RunningForkCheckpointProof `json:"proof"`
+	ProofDigest string                     `json:"proof_digest"`
+}
+
+func (r RunningForkCheckpointResult) Validate() error {
+	if err := r.Generation.Validate(); err != nil {
+		return fmt.Errorf("generation: %w", err)
+	}
+	proofDigest, err := r.Proof.Digest()
+	if err != nil {
+		return fmt.Errorf("proof: %w", err)
+	}
+	if r.ProofDigest != hex.EncodeToString(proofDigest[:]) {
+		return fmt.Errorf("proof_digest does not match proof")
+	}
+	if r.Proof.CheckpointGenerationID != r.Generation.GenerationID ||
+		r.Proof.TargetSandboxID != r.Generation.FilesystemID ||
+		r.Proof.SourceWriterEpoch != r.Generation.WriterEpoch ||
+		r.Proof.CheckpointDescriptorDigest != digest.FromBytes(r.Generation.Descriptor).String() {
+		return fmt.Errorf("proof does not match checkpoint generation")
+	}
+	return nil
+}
+
 func (p RunningForkCheckpointProof) Validate() error {
 	if p.Version != RunningForkCheckpointVersion {
 		return fmt.Errorf("unsupported running fork checkpoint proof version %d", p.Version)

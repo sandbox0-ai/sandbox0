@@ -18,6 +18,13 @@ func TestXFSMountOptionsKeepGenericFlagsOutOfFilesystemData(t *testing.T) {
 	require.Contains(t, strings.Split(xfsMountData, ","), "nouuid")
 }
 
+func TestLinuxRuntimeThawTreatsAbsentMountAsRecovered(t *testing.T) {
+	runtime := &LinuxRuntime{}
+	target := filepath.Join(t.TempDir(), "missing")
+	require.NoError(t, runtime.ThawXFS(target))
+	require.Error(t, runtime.FreezeXFS(target))
+}
+
 func TestLinuxRuntimeCrashFenceInspectsNBDPIDAndHolders(t *testing.T) {
 	sysRoot := t.TempDir()
 	deviceRoot := filepath.Join(sysRoot, "nbd0")

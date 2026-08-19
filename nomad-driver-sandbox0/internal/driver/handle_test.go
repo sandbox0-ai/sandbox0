@@ -233,6 +233,16 @@ func (r *fakeRootFSRuntime) RenewConsumer(
 	return lease, nil
 }
 
+func (r *fakeRootFSRuntime) CaptureRunningFork(
+	_ context.Context,
+	_ rootfshandoff.StageRequest,
+	request rootfshandoff.RunningForkCheckpointRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	return rootfshandoff.RunningForkCheckpointResult{
+		Proof: rootfshandoff.RunningForkCheckpointProof{OperationID: request.OperationID},
+	}, nil
+}
+
 func (r *fakeRootFSRuntime) RecoverySessions() ([]rootfssession.RecoverySession, error) {
 	return nil, nil
 }

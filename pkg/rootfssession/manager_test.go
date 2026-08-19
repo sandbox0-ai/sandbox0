@@ -789,6 +789,175 @@ func TestManagerPlannedRetireRetriesMaterializationAfterRestart(t *testing.T) {
 	require.Equal(t, rootfsblock.DurabilityS3, result.DurabilityState)
 }
 
+func TestManagerRunningForkThawsBeforeStreamingPublication(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "running-fork", 16)
+	publisher := &blockingPublisher{
+		next: objects, started: make(chan struct{}), release: make(chan struct{}),
+	}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: publisher, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(
+			bytes.Repeat([]byte{byte(block + 1)}, rootfsblock.LogicalBlockSize),
+			int64(block*rootfsblock.LogicalBlockSize),
+		)
+		require.NoError(t, err)
+	}
+
+	type captureResult struct {
+		value rootfshandoff.RunningForkCheckpointResult
+		err   error
+	}
+	done := make(chan captureResult, 1)
+	go func() {
+		value, captureErr := manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), rootfshandoff.RunningForkCheckpointRequest{
+			OperationID: "fork-running", SourceSandboxID: request.Identity.PodUID,
+			TargetSandboxID: "running-fork-target", TargetGenerationID: "running-fork-generation",
+		})
+		done <- captureResult{value: value, err: captureErr}
+	}()
+	select {
+	case <-publisher.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("running fork did not reach immutable publication")
+	}
+	calls := runtime.callsSnapshot()
+	freezeIndex, thawIndex := -1, -1
+	for index, call := range calls {
+		if call == "freeze-xfs" {
+			freezeIndex = index
+		}
+		if call == "thaw-xfs" {
+			thawIndex = index
+		}
+	}
+	require.Greater(t, freezeIndex, -1)
+	require.Greater(t, thawIndex, freezeIndex, "XFS must be thawed before object publication can block")
+	later := bytes.Repeat([]byte{0xf0}, rootfsblock.LogicalBlockSize)
+	_, err = branch.WriteAt(later, 0)
+	require.NoError(t, err, "source writes must continue while the checkpoint publishes")
+	close(publisher.release)
+	result := <-done
+	require.NoError(t, result.err)
+	require.NoError(t, result.value.Validate())
+	require.Equal(t, uint64(12), result.value.Proof.CheckpointSequence)
+	require.Equal(t, rootfsblock.DurabilityS3, result.value.Generation.DurabilityState)
+
+	descriptor, err := rootfsblock.DecodeDescriptor(result.value.Generation.Descriptor)
+	require.NoError(t, err)
+	reader, err := rootfsblock.NewReader(objects, descriptor, rootfsblock.DefaultReadCacheBytes)
+	require.NoError(t, err)
+	captured := make([]byte, rootfsblock.LogicalBlockSize)
+	_, err = reader.ReadAt(captured, 0)
+	require.NoError(t, err)
+	require.Equal(t, byte(1), captured[0], "later source writes must not mutate the fork checkpoint")
+	live := make([]byte, rootfsblock.LogicalBlockSize)
+	_, err = branch.ReadAt(live, 0)
+	require.NoError(t, err)
+	require.Equal(t, later, live)
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.FreezeOperationID)
+}
+
+func TestManagerReconcileFreezesKeepsIntentUntilThawSucceeds(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "freeze-recovery")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	stored.FreezeOperationID = "interrupted-fork"
+	require.NoError(t, manager.save(stored))
+	runtime.failAt = "thaw-xfs"
+	err = manager.ReconcileFreezes(t.Context())
+	require.ErrorContains(t, err, "injected XFS thaw failure")
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, "interrupted-fork", stored.FreezeOperationID)
+
+	runtime.failAt = ""
+	require.NoError(t, manager.ReconcileFreezes(t.Context()))
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.FreezeOperationID)
+	require.Equal(t, 2, runtime.count("thaw-xfs"))
+}
+
+func TestManagerRunningForkFreezeFailureClearsDurableIntent(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "freeze-failure")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	runtime.failAt = "freeze-xfs"
+
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "failed-freeze", SourceSandboxID: "source",
+		TargetSandboxID: "target", TargetGenerationID: "target-generation",
+	})
+	require.ErrorContains(t, err, "injected XFS freeze failure")
+	require.Equal(t, 1, runtime.count("freeze-xfs"))
+	require.Equal(t, 1, runtime.count("thaw-xfs"), "a partially successful freeze must be undone")
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.FreezeOperationID)
+	require.Equal(t, sessionSchemaVersion, stored.Version)
+}
+
+func TestManagerRunningForkThawFailureRetainsIntentWithoutPublication(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "thaw-failure", 16)
+	publisher := &blockingPublisher{next: objects, started: make(chan struct{}), release: make(chan struct{})}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: publisher, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(bytes.Repeat([]byte{byte(block + 1)}, rootfsblock.LogicalBlockSize), int64(block*rootfsblock.LogicalBlockSize))
+		require.NoError(t, err)
+	}
+	runtime.failAt = "thaw-xfs"
+
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "failed-thaw", SourceSandboxID: "source",
+		TargetSandboxID: "target", TargetGenerationID: "target-generation",
+	})
+	require.ErrorContains(t, err, "injected XFS thaw failure")
+	select {
+	case <-publisher.started:
+		t.Fatal("a checkpoint must not publish while its source remains frozen")
+	default:
+	}
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, "failed-thaw", stored.FreezeOperationID)
+
+	runtime.failAt = ""
+	require.NoError(t, manager.ReconcileFreezes(t.Context()))
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Empty(t, stored.FreezeOperationID)
+}
+
 func TestManagerPlannedRetireRecoversBranchAfterProcessRestart(t *testing.T) {
 	base := t.TempDir()
 	objects := newSessionObjectStore()
@@ -999,6 +1168,23 @@ type failOncePublisher struct {
 	fail bool
 }
 
+type blockingPublisher struct {
+	next    rootfsblock.ImmutableObjectPublisher
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingPublisher) PutImmutable(ctx context.Context, key string, payload []byte) error {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.release:
+	}
+	return p.next.PutImmutable(ctx, key, payload)
+}
+
 func (p *failOncePublisher) PutImmutable(ctx context.Context, key string, payload []byte) error {
 	p.mu.Lock()
 	if !p.fail {
@@ -1190,6 +1376,22 @@ func (r *fakeHostRuntime) MountXFS(_, _ string) error {
 	r.record("mount-xfs")
 	if r.failAt == "mount-xfs" {
 		return fmt.Errorf("injected XFS mount failure")
+	}
+	return nil
+}
+
+func (r *fakeHostRuntime) FreezeXFS(_ string) error {
+	r.record("freeze-xfs")
+	if r.failAt == "freeze-xfs" {
+		return fmt.Errorf("injected XFS freeze failure")
+	}
+	return nil
+}
+
+func (r *fakeHostRuntime) ThawXFS(_ string) error {
+	r.record("thaw-xfs")
+	if r.failAt == "thaw-xfs" {
+		return fmt.Errorf("injected XFS thaw failure")
 	}
 	return nil
 }

@@ -48,6 +48,11 @@ func TestRootFSSessionRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	require.Equal(t, "fake-consumer", lease.LeaseID)
 	_, err = clientRuntime.RenewConsumer(t.Context(), stage, lease)
 	require.NoError(t, err)
+	checkpoint, err := clientRuntime.CaptureRunningFork(t.Context(), stage, rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "fork", SourceSandboxID: "source", TargetSandboxID: "target", TargetGenerationID: "generation",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "fork", checkpoint.Proof.OperationID)
 	retired, err := clientRuntime.Retire(t.Context(), stage, "retire")
 	require.NoError(t, err)
 	require.Equal(t, "retire", retired.OperationID)

@@ -36,20 +36,22 @@ import (
 const rootFSSessionRPCMaxBytes = 2 << 20
 
 type rootFSSessionRPCRequest struct {
-	Stage       rootfshandoff.StageRequest `json:"stage"`
-	Consumer    RootFSConsumerRequest      `json:"consumer,omitempty"`
-	Lease       RootFSConsumerLease        `json:"lease,omitempty"`
-	OperationID string                     `json:"operation_id,omitempty"`
-	Observation crashTaskObservation       `json:"observation,omitempty"`
+	Stage       rootfshandoff.StageRequest                 `json:"stage"`
+	Consumer    RootFSConsumerRequest                      `json:"consumer,omitempty"`
+	Lease       RootFSConsumerLease                        `json:"lease,omitempty"`
+	Fork        rootfshandoff.RunningForkCheckpointRequest `json:"fork,omitempty"`
+	OperationID string                                     `json:"operation_id,omitempty"`
+	Observation crashTaskObservation                       `json:"observation,omitempty"`
 }
 
 type rootFSSessionRPCResponse struct {
-	Mount      rootfssession.Mount           `json:"mount,omitempty"`
-	Lease      RootFSConsumerLease           `json:"lease,omitempty"`
-	Retire     rootfssession.RetireResult    `json:"retire,omitempty"`
-	Crash      rootfshandoff.CrashFenceProof `json:"crash,omitempty"`
-	Error      string                        `json:"error,omitempty"`
-	ErrorClass string                        `json:"error_class,omitempty"`
+	Mount      rootfssession.Mount                       `json:"mount,omitempty"`
+	Lease      RootFSConsumerLease                       `json:"lease,omitempty"`
+	Retire     rootfssession.RetireResult                `json:"retire,omitempty"`
+	Crash      rootfshandoff.CrashFenceProof             `json:"crash,omitempty"`
+	Checkpoint rootfshandoff.RunningForkCheckpointResult `json:"checkpoint,omitempty"`
+	Error      string                                    `json:"error,omitempty"`
+	ErrorClass string                                    `json:"error_class,omitempty"`
 }
 
 type rootFSSessionClient struct {
@@ -118,6 +120,18 @@ func (c *rootFSSessionClient) Retire(
 		Stage: stage.WithoutWriterGrantToken(), OperationID: operationID,
 	}, &response)
 	return response.Retire, err
+}
+
+func (c *rootFSSessionClient) CaptureRunningFork(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	fork rootfshandoff.RunningForkCheckpointRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	var response rootFSSessionRPCResponse
+	err := c.call(ctx, "/v1/sessions/fork-running", rootFSSessionRPCRequest{
+		Stage: stage.WithoutWriterGrantToken(), Fork: fork,
+	}, &response)
+	return response.Checkpoint, err
 }
 
 func (c *rootFSSessionClient) CrashFence(
@@ -270,6 +284,10 @@ func rootFSSessionRPCHandler(
 	handle("/v1/sessions/consumer/renew", func(ctx context.Context, request rootFSSessionRPCRequest) (rootFSSessionRPCResponse, error) {
 		lease, err := runtime.RenewConsumer(ctx, request.Stage, request.Lease)
 		return rootFSSessionRPCResponse{Lease: lease}, err
+	})
+	handle("/v1/sessions/fork-running", func(ctx context.Context, request rootFSSessionRPCRequest) (rootFSSessionRPCResponse, error) {
+		checkpoint, err := runtime.CaptureRunningFork(ctx, request.Stage, request.Fork)
+		return rootFSSessionRPCResponse{Checkpoint: checkpoint}, err
 	})
 	handle("/v1/sessions/retire", func(ctx context.Context, request rootFSSessionRPCRequest) (rootFSSessionRPCResponse, error) {
 		result, err := runtime.Retire(ctx, request.Stage, request.OperationID)

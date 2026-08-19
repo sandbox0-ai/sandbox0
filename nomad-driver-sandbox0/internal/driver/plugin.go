@@ -83,6 +83,10 @@ var (
 			hclspec.NewLiteral(`true`),
 		),
 		"dev_smoke_enabled": hclspec.NewAttr("dev_smoke_enabled", "bool", false),
+		"network_policy_enabled": hclspec.NewDefault(
+			hclspec.NewAttr("network_policy_enabled", "bool", false),
+			hclspec.NewLiteral(`true`),
+		),
 		"rootfs_enabled": hclspec.NewDefault(
 			hclspec.NewAttr("rootfs_enabled", "bool", false),
 			hclspec.NewLiteral(`false`),
@@ -134,15 +138,16 @@ var (
 
 // PluginConfig is the node-wide driver configuration.
 type PluginConfig struct {
-	RunscPath        string `codec:"runsc_path"`
-	RunscRoot        string `codec:"runsc_root"`
-	ControlDir       string `codec:"control_dir"`
-	AllowedRootfsDir string `codec:"allowed_rootfs_dir"`
-	Platform         string `codec:"platform"`
-	Overlay2         string `codec:"overlay2"`
-	FileAccess       string `codec:"file_access"`
-	DirectFS         bool   `codec:"directfs"`
-	DevSmokeEnabled  bool   `codec:"dev_smoke_enabled"`
+	RunscPath            string `codec:"runsc_path"`
+	RunscRoot            string `codec:"runsc_root"`
+	ControlDir           string `codec:"control_dir"`
+	AllowedRootfsDir     string `codec:"allowed_rootfs_dir"`
+	Platform             string `codec:"platform"`
+	Overlay2             string `codec:"overlay2"`
+	FileAccess           string `codec:"file_access"`
+	DirectFS             bool   `codec:"directfs"`
+	DevSmokeEnabled      bool   `codec:"dev_smoke_enabled"`
+	NetworkPolicyEnabled bool   `codec:"network_policy_enabled"`
 
 	RootFSEnabled                 bool     `codec:"rootfs_enabled"`
 	RootFSStatePath               string   `codec:"rootfs_state_path"`
@@ -407,6 +412,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		allowedRoot:       p.config.AllowedRootfsDir,
 		rootfsAllowedRoot: p.config.RootFSMountRoot,
 		rootfs:            rootfs,
+		network:           networkRuntime(p.config),
 		logger:            p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
 	})
 
@@ -472,6 +478,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		allowedRoot:       p.config.AllowedRootfsDir,
 		rootfsAllowedRoot: p.config.RootFSMountRoot,
 		rootfs:            rootfs,
+		network:           networkRuntime(p.config),
 		logger:            p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
 	})
 	if err := recovered.Recover(state); err != nil {

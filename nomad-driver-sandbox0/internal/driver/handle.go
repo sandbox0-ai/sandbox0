@@ -16,6 +16,8 @@ package driver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,10 +47,11 @@ const (
 
 // ClaimRequest is the one-shot authorization sent by manager after RootFS and network handoff.
 type ClaimRequest struct {
-	RootfsPath  string                      `json:"rootfs_path"`
-	PolicyToken string                      `json:"policy_token"`
-	WriterEpoch string                      `json:"writer_epoch"`
-	Stage       *rootfshandoff.StageRequest `json:"stage,omitempty"`
+	RootfsPath    string                      `json:"rootfs_path"`
+	PolicyToken   string                      `json:"policy_token"`
+	WriterEpoch   string                      `json:"writer_epoch"`
+	Stage         *rootfshandoff.StageRequest `json:"stage,omitempty"`
+	NetworkPolicy string                      `json:"network_policy,omitempty"`
 }
 
 type claimMetadata struct {
@@ -81,6 +84,7 @@ type taskHandleOptions struct {
 	allowedRoot       string
 	rootfsAllowedRoot string
 	rootfs            RootFSRuntime
+	network           NetworkRuntime
 	logger            hclog.Logger
 }
 
@@ -98,6 +102,8 @@ type taskHandle struct {
 	mounter           Mounter
 	rootfsAllowedRoot string
 	rootfs            RootFSRuntime
+	network           NetworkRuntime
+	networkChain      string
 	logger            hclog.Logger
 
 	phase       slotPhase
@@ -194,10 +200,44 @@ func newTaskHandle(options taskHandleOptions) *taskHandle {
 		mounter:           options.mounter,
 		rootfsAllowedRoot: options.rootfsAllowedRoot,
 		rootfs:            options.rootfs,
+		network:           options.network,
 		logger:            options.logger,
 		phase:             phaseWarm,
 		done:              make(chan struct{}),
 	}
+}
+
+func (h *taskHandle) netnsPath() string {
+	if h.taskConfig == nil || h.taskConfig.NetworkIsolation == nil {
+		return ""
+	}
+	return h.taskConfig.NetworkIsolation.Path
+}
+
+func decodeNetworkPolicy(raw string) (NetworkPolicy, string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return NetworkPolicy{Mode: networkPolicyBlockAll}, digestString(raw), nil
+	}
+	var policy NetworkPolicy
+	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+		return NetworkPolicy{}, "", fmt.Errorf("decode network policy: %w", err)
+	}
+	if err := policy.Validate(); err != nil {
+		return NetworkPolicy{}, "", err
+	}
+	return policy, digestString(raw), nil
+}
+
+func digestString(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func (h *taskHandle) resetNetworkPolicy() {
+	if h.network == nil || h.networkChain == "" || h.netnsPath() == "" {
+		return
+	}
+	_ = h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, NetworkPolicy{Mode: networkPolicyBlockAll})
 }
 
 // Prepare creates a generic warm allocation without creating a gVisor container.
@@ -219,6 +259,13 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 	}
 	if err := os.MkdirAll(h.rootMount, 0o755); err != nil {
 		return fmt.Errorf("create OCI rootfs mountpoint: %w", err)
+	}
+	h.networkChain = networkChainName(h.containerID)
+	if h.network != nil && h.netnsPath() != "" {
+		if err := h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, NetworkPolicy{Mode: networkPolicyBlockAll}); err != nil {
+			_ = h.Close(false)
+			return fmt.Errorf("apply warm default-deny policy: %w", err)
+		}
 	}
 	if err := h.persist(); err != nil {
 		_ = h.Close(false)
@@ -279,6 +326,11 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		h.setPhase(phaseWarm)
 		return errors.New("policy token and writer epoch are required")
 	}
+	networkPolicy, networkDigest, err := decodeNetworkPolicy(request.NetworkPolicy)
+	if err != nil {
+		h.setPhase(phaseWarm)
+		return err
+	}
 	rootfsSource := request.RootfsPath
 	allowedRoot := h.allowedRoot
 	var durableStage *rootfshandoff.StageRequest
@@ -319,6 +371,10 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 			h.setPhase(phaseWarm)
 			return errors.New("RootFS stage and development rootfs_path are mutually exclusive")
 		}
+		if request.Stage.ExpectedPolicyToken.PolicyDigest != networkDigest {
+			h.setPhase(phaseWarm)
+			return errors.New("network policy does not match RootFS stage token")
+		}
 		durable := request.Stage.WithoutWriterGrantToken()
 		durableStage = &durable
 		allowedRoot = h.rootfsAllowedRoot
@@ -326,6 +382,12 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	if err := h.writeClaimBundle(); err != nil {
 		h.setPhase(phaseWarm)
 		return err
+	}
+	if h.network != nil && h.netnsPath() != "" {
+		if err := h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, networkPolicy); err != nil {
+			h.setPhase(phaseWarm)
+			return fmt.Errorf("apply claim network policy: %w", err)
+		}
 	}
 	h.mu.Lock()
 	h.rootMounted = true
@@ -407,6 +469,7 @@ func (h *taskHandle) rollbackClaim() error {
 	h.rootMounted = false
 	h.phase = phaseWarm
 	h.mu.Unlock()
+	h.resetNetworkPolicy()
 	return h.persist()
 }
 
@@ -576,6 +639,11 @@ func (h *taskHandle) Close(force bool) error {
 			return errors.Join(firstErr, fmt.Errorf("retire RootFS session: %w", err))
 		}
 		retireCancel()
+	}
+	if h.network != nil && h.networkChain != "" && h.netnsPath() != "" {
+		if err := h.network.Cleanup(context.Background(), h.netnsPath(), h.networkChain); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	if err := os.Remove(h.socketPath); err != nil && !os.IsNotExist(err) && firstErr == nil {
 		firstErr = err

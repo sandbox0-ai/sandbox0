@@ -161,6 +161,32 @@ type fakeRootFSRuntime struct {
 	lastOperation string
 }
 
+type fakeNetworkRuntime struct {
+	mu       sync.Mutex
+	applies  []NetworkPolicy
+	cleanups int
+}
+
+func (r *fakeNetworkRuntime) Apply(_ context.Context, _, _ string, policy NetworkPolicy) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.applies = append(r.applies, policy)
+	return nil
+}
+
+func (r *fakeNetworkRuntime) Cleanup(context.Context, string, string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cleanups++
+	return nil
+}
+
+func (r *fakeNetworkRuntime) snapshot() ([]NetworkPolicy, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]NetworkPolicy(nil), r.applies...), r.cleanups
+}
+
 type noOpCommandRunner struct{}
 
 func (noOpCommandRunner) Run(context.Context, string, ...string) error { return nil }
@@ -395,13 +421,14 @@ func TestClaimUsesAuthorizedRootFSSessionAndRetiresOnClose(t *testing.T) {
 	}
 	token := "one-shot-writer-token"
 	zeroDigest := "sha256:" + strings.Repeat("0", 64)
+	networkPolicy := `{"mode":"allow-all"}`
 	stage := rootfshandoff.StageRequest{
 		BindingVersion: rootfshandoff.WriterBindingVersion,
 		Parent:         zeroDigest, InitialGeneration: descriptor.GenerationID,
 		Generation: &descriptor,
 		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{
 			PodUID: "alloc-1", PodSandboxID: "sandbox-1", ClaimID: "claim-1",
-			NetworkEpoch: 1, PolicyDigest: zeroDigest, PodIP: "172.26.64.2",
+			NetworkEpoch: 1, PolicyDigest: digestString(networkPolicy), PodIP: "172.26.64.2",
 			CtldGeneration: "ctld-1", NetNSIdentity: "netns-1",
 		},
 		Identity: rootfshandoff.Identity{
@@ -430,7 +457,7 @@ func TestClaimUsesAuthorizedRootFSSessionAndRetiresOnClose(t *testing.T) {
 		t.Fatalf("Prepare() error = %v", err)
 	}
 	if err := fixture.handle.Claim(ClaimRequest{
-		PolicyToken: token, WriterEpoch: "1", Stage: &stage,
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
 	}); err != nil {
 		t.Fatalf("Claim() error = %v", err)
 	}
@@ -471,6 +498,32 @@ func TestClaimStartFailureUnmountsAndPoisonsSlot(t *testing.T) {
 	}
 	if status := fixture.handle.TaskStatus(); status.DriverAttributes["phase"] != string(phasePoisoned) {
 		t.Fatalf("phase = %s, want poisoned", status.DriverAttributes["phase"])
+	}
+}
+
+func TestNetworkPolicyStartsBlockAllAndAppliesClaimPolicy(t *testing.T) {
+	fixture := newTestFixture(t)
+	network := &fakeNetworkRuntime{}
+	fixture.handle.network = network
+	if err := fixture.handle.Prepare(TaskConfig{Command: "/bin/sh", WaitForClaim: true}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	policy := `{"mode":"block-all","allow":[{"protocol":"tcp","host":"203.0.113.7","port":443}]}`
+	if err := fixture.handle.Claim(ClaimRequest{
+		RootfsPath: fixture.rootfs, PolicyToken: "token", WriterEpoch: "epoch", NetworkPolicy: policy,
+	}); err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	applies, cleanups := network.snapshot()
+	if len(applies) != 2 || applies[0].Mode != networkPolicyBlockAll ||
+		applies[1].Mode != networkPolicyBlockAll || len(applies[1].Allow) != 1 {
+		t.Fatalf("network applications = %+v", applies)
+	}
+	if err := fixture.handle.Close(true); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, cleanups = network.snapshot(); cleanups != 1 {
+		t.Fatalf("cleanups = %d, want one", cleanups)
 	}
 }
 

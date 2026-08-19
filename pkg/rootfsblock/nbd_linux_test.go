@@ -4,12 +4,15 @@ package rootfsblock
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func TestValidateNBDDevicePath(t *testing.T) {
@@ -34,6 +37,25 @@ func TestKernelNBDGeometryUsesFilesystemSectorSize(t *testing.T) {
 	require.ErrorContains(t, err, "positive multiple")
 	_, err = kernelNBDGeometry(0)
 	require.ErrorContains(t, err, "positive multiple")
+}
+
+func TestKernelNBDWaitBlocksGoPreemptionSignal(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var before unix.Sigset_t
+	require.NoError(t, unix.PthreadSigmask(unix.SIG_BLOCK, nil, &before))
+
+	sentinel := errors.New("operation completed")
+	err := withKernelNBDSignalMask(func() error {
+		var current unix.Sigset_t
+		require.NoError(t, unix.PthreadSigmask(unix.SIG_BLOCK, nil, &current))
+		require.True(t, signalMaskContains(&current, unix.SIGURG))
+		return sentinel
+	})
+	require.ErrorIs(t, err, sentinel)
+	var after unix.Sigset_t
+	require.NoError(t, unix.PthreadSigmask(unix.SIG_BLOCK, nil, &after))
+	require.Equal(t, before, after)
 }
 
 func TestOrphanNBDIsUnusedRequiresZeroPIDAndSize(t *testing.T) {

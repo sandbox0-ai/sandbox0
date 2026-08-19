@@ -10,12 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -187,7 +189,7 @@ func StartKernelNBD(lifetime, readyContext context.Context, backend WritableBloc
 		}
 	}()
 	go func() {
-		doErr := ioctlSetInt(file, nbdDoIt, 0)
+		doErr := runKernelNBD(file)
 		cancel()
 		_ = connection.Close()
 		serverErr := <-serverDone
@@ -210,6 +212,52 @@ func StartKernelNBD(lifetime, readyContext context.Context, backend WritableBloc
 		return nil, err
 	}
 	return device, nil
+}
+
+// runKernelNBD prevents Go's asynchronous SIGURG preemption from interrupting
+// NBD_DO_IT. The kernel treats any signal that interrupts this ioctl as a
+// request to tear down every NBD socket, so the wait must own one OS thread and
+// mask the preemption signal for its entire lifetime.
+func runKernelNBD(file *os.File) error {
+	return withKernelNBDSignalMask(func() error { return ioctlSetInt(file, nbdDoIt, 0) })
+}
+
+func withKernelNBDSignalMask(operation func() error) (result error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	mask := unix.Sigset_t{}
+	setSignalMaskBit(&mask, unix.SIGURG)
+	var oldMask unix.Sigset_t
+	if err := unix.PthreadSigmask(unix.SIG_BLOCK, &mask, &oldMask); err != nil {
+		return fmt.Errorf("block NBD interrupt signal: %w", err)
+	}
+	defer func() {
+		if err := unix.PthreadSigmask(unix.SIG_SETMASK, &oldMask, nil); err != nil {
+			result = errors.Join(result, fmt.Errorf("restore NBD signal mask: %w", err))
+		}
+	}()
+	return operation()
+}
+
+func setSignalMaskBit(mask *unix.Sigset_t, signal unix.Signal) {
+	index := int(signal) - 1
+	bitsPerWord := int(8 * unsafe.Sizeof(uintptr(0)))
+	words := unsafe.Slice((*uintptr)(unsafe.Pointer(mask)), int(unsafe.Sizeof(*mask)/unsafe.Sizeof(uintptr(0))))
+	if index < 0 || index/bitsPerWord >= len(words) {
+		panic("signal is outside the native signal set")
+	}
+	words[index/bitsPerWord] |= uintptr(1) << uint(index%bitsPerWord)
+}
+
+func signalMaskContains(mask *unix.Sigset_t, signal unix.Signal) bool {
+	index := int(signal) - 1
+	bitsPerWord := int(8 * unsafe.Sizeof(uintptr(0)))
+	words := unsafe.Slice((*uintptr)(unsafe.Pointer(mask)), int(unsafe.Sizeof(*mask)/unsafe.Sizeof(uintptr(0))))
+	if index < 0 || index/bitsPerWord >= len(words) {
+		return false
+	}
+	return words[index/bitsPerWord]&(uintptr(1)<<uint(index%bitsPerWord)) != 0
 }
 
 func (d *KernelNBDDevice) Path() string { return d.path }

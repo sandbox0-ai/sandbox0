@@ -1,6 +1,7 @@
 package sandboxstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,8 +22,10 @@ const (
 
 	RootFSBaseArtifactStateReady = "ready"
 
-	RootFSGenerationStateS3Materialized = "s3_materialized"
-	RootFSGenerationDescriptorMaxBytes  = 64 << 10
+	RootFSGenerationStateLocalSealed      = "local_sealed"
+	RootFSGenerationStateCompositeDurable = "composite_durable"
+	RootFSGenerationStateS3Materialized   = "s3_materialized"
+	RootFSGenerationDescriptorMaxBytes    = 64 << 10
 )
 
 var (
@@ -30,6 +33,20 @@ var (
 	ErrRootFSBaseArtifactConflict = errors.New("rootfs base artifact conflict")
 	ErrRootFSGenerationConflict   = errors.New("rootfs generation conflict")
 )
+
+// PublishPausedRootFSRebaseRequest publishes the output of a privileged,
+// file-aware rebase worker. The worker must have already persisted the target
+// block objects and supplied a health-check digest over its immutable output.
+type PublishPausedRootFSRebaseRequest struct {
+	SandboxID                  string
+	TeamID                     string
+	OperationID                string
+	ExpectedSourceGenerationID string
+	ExpectedBaseArtifactDigest string
+	Generation                 *RootFSGeneration
+	HealthCheckDigest          []byte
+	RollbackExpiresAt          time.Time
+}
 
 // RootFSBaseArtifact is an immutable, trusted OCI-to-block conversion shared
 // by filesystems in one region. The descriptor is bounded control metadata;
@@ -88,6 +105,143 @@ type RootFSGenerationStore interface {
 	GetReadyRootFSBaseArtifact(context.Context, string, int) (*RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *EnsureInitialRootFSGenerationRequest) (*RootFSFilesystem, *RootFSGeneration, error)
 	GetRootFSGeneration(context.Context, string) (*RootFSGeneration, error)
+	PublishPausedRootFSRebase(context.Context, *PublishPausedRootFSRebaseRequest) (*RootFSFilesystem, error)
+}
+
+// PublishPausedRootFSRebase atomically installs a durable rebase generation
+// only if the paused source head and Base artifact still match the worker's
+// inputs. Physical migration is intentionally outside this method; this is the
+// regional CAS, writer-fence, and rollback-retention boundary.
+func (s *PGSandboxStore) PublishPausedRootFSRebase(
+	ctx context.Context,
+	req *PublishPausedRootFSRebaseRequest,
+) (*RootFSFilesystem, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("rootfs generation store is not configured")
+	}
+	normalized, err := validatePublishPausedRootFSRebaseRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	var published *RootFSFilesystem
+	err = s.WithSandboxLock(ctx, normalized.SandboxID, func(lockCtx context.Context, locked SandboxStoreTx, record *SandboxRecord) error {
+		txStore, ok := locked.(sandboxStoreTx)
+		if !ok {
+			return fmt.Errorf("paused rootfs rebase requires a PostgreSQL transaction")
+		}
+		if record == nil || record.TeamID != normalized.TeamID || record.DesiredState != SandboxDesiredStatePaused || !record.DeletedAt.IsZero() {
+			return fmt.Errorf("%w: sandbox %s is not a paused team-owned source", ErrRootFSGenerationConflict, normalized.SandboxID)
+		}
+		activeLifecycle, lifecycleErr := locked.GetActiveLifecycleTxn(lockCtx, normalized.SandboxID)
+		if lifecycleErr != nil {
+			return lifecycleErr
+		}
+		if activeLifecycle != nil {
+			return fmt.Errorf("%w: lifecycle operation %s is active", ErrRootFSGenerationConflict, activeLifecycle.ID)
+		}
+
+		filesystem, source, loadErr := getRootFSFilesystemAndGenerationForUpdate(lockCtx, txStore.tx, normalized.SandboxID)
+		if loadErr != nil {
+			return loadErr
+		}
+		if retry, retryErr := loadPublishedRootFSRebaseRetry(lockCtx, txStore.tx, filesystem, normalized); retryErr != nil {
+			return retryErr
+		} else if retry != nil {
+			published = retry
+			return nil
+		}
+		if filesystem.StorageFormat != RootFSStorageFormatBlockCOWV1 || filesystem.TeamID != normalized.TeamID ||
+			filesystem.HeadGenerationID != normalized.ExpectedSourceGenerationID ||
+			filesystem.BaseArtifactDigest != normalized.ExpectedBaseArtifactDigest ||
+			source.ID != normalized.ExpectedSourceGenerationID ||
+			(source.DurabilityState != RootFSGenerationStateCompositeDurable && source.DurabilityState != RootFSGenerationStateS3Materialized) {
+			return fmt.Errorf("%w: paused source head or Base artifact changed", ErrRootFSGenerationConflict)
+		}
+		if normalized.Generation.FilesystemID != filesystem.ID ||
+			normalized.Generation.ParentGenerationID != source.ID ||
+			normalized.Generation.WriterEpoch != filesystem.WriterEpoch+1 ||
+			normalized.Generation.BaseArtifactDigest == source.BaseArtifactDigest {
+			return fmt.Errorf("%w: target generation does not describe the next rebase branch", ErrRootFSGenerationConflict)
+		}
+		artifact, artifactErr := scanRootFSBaseArtifact(txStore.tx.QueryRow(lockCtx, rootFSBaseArtifactSelectSQL()+`
+			WHERE artifact_digest = $1 AND state = $2
+			FOR UPDATE
+		`, normalized.Generation.BaseArtifactDigest, RootFSBaseArtifactStateReady))
+		if errors.Is(artifactErr, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: target artifact %s", ErrRootFSBaseArtifactNotFound, normalized.Generation.BaseArtifactDigest)
+		}
+		if artifactErr != nil {
+			return fmt.Errorf("lock target rootfs base artifact: %w", artifactErr)
+		}
+		if artifact.SourceOCIDigest != normalized.Generation.SourceOCIDigest ||
+			artifact.BaseBlockRoot != normalized.Generation.BaseBlockRoot ||
+			artifact.FormatGeneration != normalized.Generation.FormatGeneration {
+			return fmt.Errorf("%w: target generation does not match its Base artifact", ErrRootFSBaseArtifactConflict)
+		}
+		var activeWriter bool
+		if queryErr := txStore.tx.QueryRow(lockCtx, `
+			SELECT EXISTS (
+				SELECT 1 FROM manager.rootfs_writer_grants
+				WHERE filesystem_id = $1 AND state IN ('issued', 'consumed', 'retiring')
+			)
+		`, filesystem.ID).Scan(&activeWriter); queryErr != nil {
+			return fmt.Errorf("check rootfs rebase writer fence: %w", queryErr)
+		}
+		if activeWriter {
+			return fmt.Errorf("%w: an active writer grant exists", ErrRootFSGenerationConflict)
+		}
+		if insertErr := insertPreparedRootFSRebaseGeneration(lockCtx, txStore.tx, normalized.Generation); insertErr != nil {
+			return insertErr
+		}
+		tag, updateErr := txStore.tx.Exec(lockCtx, `
+			UPDATE manager.rootfs_filesystems
+			SET head_generation_id = $1,
+				writer_epoch = $2,
+				base_artifact_digest = $3,
+				format_generation = $4,
+				base_image_ref = $5,
+				base_image_digest = $6,
+				updated_at = NOW()
+			WHERE filesystem_id = $7
+				AND head_generation_id = $8
+				AND base_artifact_digest = $9
+				AND writer_epoch = $10
+		`, normalized.Generation.ID, normalized.Generation.WriterEpoch,
+			normalized.Generation.BaseArtifactDigest, normalized.Generation.FormatGeneration,
+			artifact.SourceOCIRef, normalized.Generation.SourceOCIDigest, filesystem.ID,
+			normalized.ExpectedSourceGenerationID, normalized.ExpectedBaseArtifactDigest,
+			filesystem.WriterEpoch)
+		if updateErr != nil {
+			return fmt.Errorf("publish paused rootfs rebase: %w", updateErr)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: paused source head changed during publish", ErrRootFSGenerationConflict)
+		}
+		if _, pinErr := txStore.tx.Exec(lockCtx, `
+			INSERT INTO manager.rootfs_head_rollbacks (
+				operation_id, filesystem_id, sandbox_id, team_id, operation_kind,
+				old_generation_id, new_generation_id, health_check_digest,
+				state, created_at, expires_at
+			) VALUES ($1, $2, $3, $4, 'rebase', $5, $6, $7, 'available', NOW(), $8)
+		`, normalized.OperationID, filesystem.ID, normalized.SandboxID, normalized.TeamID,
+			source.ID, normalized.Generation.ID, normalized.HealthCheckDigest,
+			nullableTime(normalized.RollbackExpiresAt)); pinErr != nil {
+			return fmt.Errorf("retain paused rootfs rebase rollback: %w", pinErr)
+		}
+		published, loadErr = scanRootFSFilesystem(txStore.tx.QueryRow(lockCtx, `
+			SELECT filesystem_id, team_id, source_filesystem_id, head_layer_id,
+				writer_epoch, base_image_ref, base_image_digest, storage_format,
+				base_artifact_digest, format_generation, head_generation_id,
+				created_at, updated_at
+			FROM manager.rootfs_filesystems
+			WHERE filesystem_id = $1
+		`, filesystem.ID))
+		return loadErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return published, nil
 }
 
 func (s *PGSandboxStore) PutReadyRootFSBaseArtifact(
@@ -403,6 +557,191 @@ func validateEnsureInitialRootFSGeneration(req *EnsureInitialRootFSGenerationReq
 		}
 	}
 	return &normalized, nil
+}
+
+func validatePublishPausedRootFSRebaseRequest(req *PublishPausedRootFSRebaseRequest) (*PublishPausedRootFSRebaseRequest, error) {
+	if req == nil {
+		return nil, fmt.Errorf("publish paused rootfs rebase request is required")
+	}
+	normalized := *req
+	normalized.SandboxID = strings.TrimSpace(req.SandboxID)
+	normalized.TeamID = strings.TrimSpace(req.TeamID)
+	normalized.OperationID = strings.TrimSpace(req.OperationID)
+	normalized.ExpectedSourceGenerationID = strings.TrimSpace(req.ExpectedSourceGenerationID)
+	normalized.ExpectedBaseArtifactDigest = strings.TrimSpace(req.ExpectedBaseArtifactDigest)
+	normalized.HealthCheckDigest = append([]byte(nil), req.HealthCheckDigest...)
+	if normalized.SandboxID == "" || normalized.TeamID == "" || normalized.OperationID == "" ||
+		normalized.ExpectedSourceGenerationID == "" || normalized.ExpectedBaseArtifactDigest == "" {
+		return nil, fmt.Errorf("sandbox_id, team_id, operation_id, expected source generation, and expected Base artifact are required")
+	}
+	if parsed, err := digest.Parse(normalized.ExpectedBaseArtifactDigest); err != nil ||
+		parsed.Algorithm() != digest.SHA256 || parsed.String() != normalized.ExpectedBaseArtifactDigest {
+		return nil, fmt.Errorf("expected_base_artifact_digest must be a canonical sha256 digest")
+	}
+	if len(normalized.HealthCheckDigest) != sha256.Size {
+		return nil, fmt.Errorf("health_check_digest must be a 32-byte SHA-256 digest")
+	}
+	if req.Generation == nil {
+		return nil, fmt.Errorf("generation is required")
+	}
+	generation := *req.Generation
+	generation.ID = strings.TrimSpace(generation.ID)
+	generation.FilesystemID = strings.TrimSpace(generation.FilesystemID)
+	generation.ParentGenerationID = strings.TrimSpace(generation.ParentGenerationID)
+	generation.SourceOCIDigest = strings.TrimSpace(generation.SourceOCIDigest)
+	generation.BaseArtifactDigest = strings.TrimSpace(generation.BaseArtifactDigest)
+	generation.BaseBlockRoot = strings.TrimSpace(generation.BaseBlockRoot)
+	generation.CurrentBlockHead = strings.TrimSpace(generation.CurrentBlockHead)
+	generation.DurabilityState = strings.TrimSpace(generation.DurabilityState)
+	generation.Descriptor = append([]byte(nil), generation.Descriptor...)
+	for name, value := range map[string]string{
+		"generation_id": generation.ID, "filesystem_id": generation.FilesystemID,
+		"parent_generation_id": generation.ParentGenerationID,
+		"source_oci_digest":    generation.SourceOCIDigest,
+		"base_artifact_digest": generation.BaseArtifactDigest,
+		"base_block_root":      generation.BaseBlockRoot,
+		"current_block_head":   generation.CurrentBlockHead,
+	} {
+		if value == "" {
+			return nil, fmt.Errorf("%s is required", name)
+		}
+	}
+	for name, value := range map[string]string{
+		"source_oci_digest": generation.SourceOCIDigest, "base_artifact_digest": generation.BaseArtifactDigest,
+		"base_block_root": generation.BaseBlockRoot, "current_block_head": generation.CurrentBlockHead,
+	} {
+		parsed, err := digest.Parse(value)
+		if err != nil || parsed.Algorithm() != digest.SHA256 || parsed.String() != value {
+			return nil, fmt.Errorf("%s must be a canonical sha256 digest", name)
+		}
+	}
+	if generation.ParentGenerationID != normalized.ExpectedSourceGenerationID || generation.WriterEpoch <= 0 ||
+		generation.FormatGeneration <= 0 || generation.LocatorVersion <= 0 {
+		return nil, fmt.Errorf("generation parent, epoch, format, or locator version is invalid")
+	}
+	descriptor, err := rootfsblock.DecodeDescriptor(generation.Descriptor)
+	if err != nil {
+		return nil, fmt.Errorf("generation descriptor: %w", err)
+	}
+	if descriptor.MappingRoot.RootDigest != generation.CurrentBlockHead {
+		return nil, fmt.Errorf("generation descriptor does not match current_block_head")
+	}
+	switch generation.DurabilityState {
+	case RootFSGenerationStateS3Materialized:
+		if descriptor.CompositeTail != nil {
+			return nil, fmt.Errorf("s3_materialized generation cannot contain a composite tail")
+		}
+	case RootFSGenerationStateCompositeDurable:
+		if descriptor.CompositeTail == nil {
+			return nil, fmt.Errorf("composite_durable generation requires a composite tail")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported generation durability state %q", generation.DurabilityState)
+	}
+	normalized.Generation = &generation
+	return &normalized, nil
+}
+
+func getRootFSFilesystemAndGenerationForUpdate(
+	ctx context.Context,
+	tx pgx.Tx,
+	sandboxID string,
+) (*RootFSFilesystem, *RootFSGeneration, error) {
+	filesystem, generation, err := scanRootFSFilesystemAndGeneration(tx.QueryRow(ctx, `
+		SELECT f.filesystem_id, f.team_id, f.source_filesystem_id, f.head_layer_id,
+			f.writer_epoch, f.base_image_ref, f.base_image_digest, f.storage_format,
+			f.base_artifact_digest, f.format_generation, f.head_generation_id,
+			f.created_at, f.updated_at,
+			g.generation_id, g.filesystem_id, g.parent_generation_id,
+			g.source_oci_digest, g.base_artifact_digest, g.base_block_root,
+			g.current_block_head, g.writer_epoch, g.format_generation,
+			g.durability_state, g.locator_version, g.descriptor, g.created_at
+		FROM manager.sandbox_rootfs_bindings binding
+		JOIN manager.rootfs_filesystems f ON f.filesystem_id = binding.filesystem_id
+		JOIN manager.rootfs_generations g ON g.generation_id = f.head_generation_id
+		WHERE binding.sandbox_id = $1
+		FOR UPDATE OF f, g
+	`, sandboxID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, fmt.Errorf("%w: sandbox %s has no block generation", ErrRootFSGenerationConflict, sandboxID)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("lock paused rootfs rebase source: %w", err)
+	}
+	return filesystem, generation, nil
+}
+
+func loadPublishedRootFSRebaseRetry(
+	ctx context.Context,
+	tx pgx.Tx,
+	filesystem *RootFSFilesystem,
+	req *PublishPausedRootFSRebaseRequest,
+) (*RootFSFilesystem, error) {
+	if filesystem == nil || req == nil || req.Generation == nil || filesystem.HeadGenerationID != req.Generation.ID {
+		return nil, nil
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM manager.rootfs_head_rollbacks
+			WHERE operation_id = $1 AND filesystem_id = $2 AND sandbox_id = $3
+				AND team_id = $4 AND operation_kind = 'rebase'
+				AND old_generation_id = $5 AND new_generation_id = $6
+				AND health_check_digest = $7
+		)
+	`, req.OperationID, filesystem.ID, req.SandboxID, req.TeamID,
+		req.ExpectedSourceGenerationID, req.Generation.ID, req.HealthCheckDigest).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("check paused rootfs rebase retry: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: head already names target generation without matching operation", ErrRootFSGenerationConflict)
+	}
+	stored, err := scanRootFSGeneration(tx.QueryRow(ctx, rootFSGenerationSelectSQL()+`
+		WHERE generation_id = $1
+	`, req.Generation.ID))
+	if err != nil {
+		return nil, fmt.Errorf("load retried rootfs rebase generation: %w", err)
+	}
+	if !rootFSGenerationEqual(stored, req.Generation) {
+		return nil, fmt.Errorf("%w: retried target generation fields changed", ErrRootFSGenerationConflict)
+	}
+	clone := *filesystem
+	return &clone, nil
+}
+
+func insertPreparedRootFSRebaseGeneration(ctx context.Context, tx pgx.Tx, generation *RootFSGeneration) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO manager.rootfs_generations (
+			generation_id, filesystem_id, parent_generation_id, source_oci_digest,
+			base_artifact_digest, base_block_root, current_block_head, writer_epoch,
+			format_generation, durability_state, locator_version, descriptor, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+		ON CONFLICT (generation_id) DO NOTHING
+	`, generation.ID, generation.FilesystemID, generation.ParentGenerationID,
+		generation.SourceOCIDigest, generation.BaseArtifactDigest, generation.BaseBlockRoot,
+		generation.CurrentBlockHead, generation.WriterEpoch, generation.FormatGeneration,
+		generation.DurabilityState, generation.LocatorVersion, generation.Descriptor); err != nil {
+		return fmt.Errorf("insert prepared rootfs rebase generation: %w", err)
+	}
+	stored, err := scanRootFSGeneration(tx.QueryRow(ctx, rootFSGenerationSelectSQL()+`
+		WHERE generation_id = $1
+	`, generation.ID))
+	if err != nil {
+		return fmt.Errorf("load prepared rootfs rebase generation: %w", err)
+	}
+	if !rootFSGenerationEqual(stored, generation) {
+		return fmt.Errorf("%w: prepared target generation has different immutable fields", ErrRootFSGenerationConflict)
+	}
+	return nil
+}
+
+func rootFSGenerationEqual(left, right *RootFSGeneration) bool {
+	return left != nil && right != nil && left.ID == right.ID && left.FilesystemID == right.FilesystemID &&
+		left.ParentGenerationID == right.ParentGenerationID && left.SourceOCIDigest == right.SourceOCIDigest &&
+		left.BaseArtifactDigest == right.BaseArtifactDigest && left.BaseBlockRoot == right.BaseBlockRoot &&
+		left.CurrentBlockHead == right.CurrentBlockHead && left.WriterEpoch == right.WriterEpoch &&
+		left.FormatGeneration == right.FormatGeneration && left.DurabilityState == right.DurabilityState &&
+		left.LocatorVersion == right.LocatorVersion && bytes.Equal(left.Descriptor, right.Descriptor)
 }
 
 func initialRootFSGenerationID(filesystemID, artifactDigest string, formatGeneration int) string {

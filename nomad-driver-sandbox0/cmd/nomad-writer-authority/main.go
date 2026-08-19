@@ -53,7 +53,7 @@ func (l migrateLogger) Fatalf(format string, args ...any) {
 }
 
 func main() {
-	mode := flag.String("mode", "serve", "serve, issue, fork, cancel, or stage-digest")
+	mode := flag.String("mode", "serve", "serve, issue, fork, snapshot, restore, rebase-publish, rollback, cancel, or stage-digest")
 	stageFile := flag.String("stage-file", "", "stage-digest: StageRequest JSON path")
 	dbURL := flag.String("db-url", "", "PostgreSQL URL")
 	address := flag.String("address", "172.16.100.2:8421", "mTLS listen address")
@@ -84,6 +84,11 @@ func main() {
 	expectedWriterEpoch := flag.Int64("expected-writer-epoch", 0, "resume: previous writer epoch")
 	sourceSandboxID := flag.String("source-sandbox-id", "", "fork: source sandbox")
 	targetSandboxID := flag.String("target-sandbox-id", "", "fork: target sandbox")
+	snapshotID := flag.String("snapshot-id", "", "snapshot/restore: immutable snapshot ID")
+	rollbackTTL := flag.Duration("rollback-ttl", 24*time.Hour, "restore: old-head rollback retention")
+	generationFile := flag.String("generation-file", "", "rebase-publish: prepared RootFSGeneration JSON path")
+	expectedBaseArtifact := flag.String("expected-base-artifact", "", "rebase-publish: source Base artifact digest")
+	healthCheckHex := flag.String("health-check-digest", "", "rebase-publish: 32-byte hexadecimal health proof")
 	flag.Parse()
 
 	if *mode == "stage-digest" {
@@ -144,11 +149,64 @@ func main() {
 		if err != nil {
 			fatal("fork: %v", err)
 		}
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(filesystem); err != nil {
-			fatal("fork: encode: %v", err)
+		encodeResult("fork", filesystem)
+	case "snapshot":
+		snapshot, err := store.CreateRootFSSnapshot(ctx, &sandboxstore.CreateRootFSSnapshotRequest{
+			SandboxID: *sandboxID, SnapshotID: *snapshotID,
+		})
+		if err != nil {
+			fatal("snapshot: %v", err)
 		}
+		encodeResult("snapshot", snapshot)
+	case "restore":
+		restoreRequest := &sandboxstore.RestoreRootFSFromSnapshotRequest{
+			SandboxID: *sandboxID, SnapshotID: *snapshotID, TeamID: *teamID,
+			OperationID: *operationID,
+		}
+		if *rollbackTTL > 0 {
+			restoreRequest.RollbackExpiresAt = time.Now().UTC().Add(*rollbackTTL)
+		}
+		filesystem, err := store.RestoreRootFSFromSnapshot(ctx, restoreRequest)
+		if err != nil {
+			fatal("restore: %v", err)
+		}
+		encodeResult("restore", filesystem)
+	case "rebase-publish":
+		payload, err := os.ReadFile(strings.TrimSpace(*generationFile))
+		if err != nil {
+			fatal("rebase-publish: read generation: %v", err)
+		}
+		var generation sandboxstore.RootFSGeneration
+		if err := json.Unmarshal(payload, &generation); err != nil {
+			fatal("rebase-publish: decode generation: %v", err)
+		}
+		healthDigest, err := hex.DecodeString(strings.TrimSpace(*healthCheckHex))
+		if err != nil {
+			fatal("rebase-publish: decode health-check-digest: %v", err)
+		}
+		rebaseRequest := &sandboxstore.PublishPausedRootFSRebaseRequest{
+			SandboxID: *sandboxID, TeamID: *teamID, OperationID: *operationID,
+			ExpectedSourceGenerationID: *initialGenerationID,
+			ExpectedBaseArtifactDigest: *expectedBaseArtifact,
+			Generation:                 &generation,
+			HealthCheckDigest:          healthDigest,
+		}
+		if *rollbackTTL > 0 {
+			rebaseRequest.RollbackExpiresAt = time.Now().UTC().Add(*rollbackTTL)
+		}
+		filesystem, err := store.PublishPausedRootFSRebase(ctx, rebaseRequest)
+		if err != nil {
+			fatal("rebase-publish: %v", err)
+		}
+		encodeResult("rebase-publish", filesystem)
+	case "rollback":
+		filesystem, err := store.RollbackRootFSHead(ctx, &sandboxstore.RollbackRootFSHeadRequest{
+			SandboxID: *sandboxID, OperationID: *operationID, TeamID: *teamID,
+		})
+		if err != nil {
+			fatal("rollback: %v", err)
+		}
+		encodeResult("rollback", filesystem)
 	case "cancel":
 		digest, err := hex.DecodeString(strings.TrimSpace(*bindingHex))
 		if err != nil || len(digest) != 32 {
@@ -168,6 +226,14 @@ func main() {
 		fmt.Println(digest)
 	default:
 		fatal("unknown mode %q", *mode)
+	}
+}
+
+func encodeResult(operation string, value any) {
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		fatal("%s: encode: %v", operation, err)
 	}
 }
 

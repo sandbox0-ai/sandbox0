@@ -40,15 +40,20 @@ type RootFSFilesystem struct {
 
 // RootFSSnapshot is an immutable pointer to one rootfs filesystem head.
 type RootFSSnapshot struct {
-	ID              string
-	FilesystemID    string
-	TeamID          string
-	SourceSandboxID string
-	HeadLayerID     string
-	Name            string
-	Description     string
-	CreatedAt       time.Time
-	ExpiresAt       time.Time
+	ID                 string
+	FilesystemID       string
+	TeamID             string
+	SourceSandboxID    string
+	HeadLayerID        string
+	HeadGenerationID   string
+	StorageFormat      string
+	BaseArtifactDigest string
+	FormatGeneration   int
+	SourceOCIDigest    string
+	Name               string
+	Description        string
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
 }
 
 type CreateRootFSSnapshotRequest struct {
@@ -71,9 +76,34 @@ type ForkRootFSFilesystemRequest struct {
 }
 
 type RestoreRootFSFromSnapshotRequest struct {
-	SandboxID  string
-	SnapshotID string
-	TeamID     string
+	SandboxID         string
+	SnapshotID        string
+	TeamID            string
+	OperationID       string
+	RollbackExpiresAt time.Time
+}
+
+// RootFSHeadRollback retains the old immutable head for a bounded restore or
+// rebase rollback. It never grants write authority by itself.
+type RootFSHeadRollback struct {
+	OperationID       string
+	FilesystemID      string
+	SandboxID         string
+	TeamID            string
+	OperationKind     string
+	OldGenerationID   string
+	NewGenerationID   string
+	HealthCheckDigest []byte
+	State             string
+	CreatedAt         time.Time
+	ExpiresAt         time.Time
+	RolledBackAt      time.Time
+}
+
+type RollbackRootFSHeadRequest struct {
+	SandboxID   string
+	OperationID string
+	TeamID      string
 }
 
 type RootFSGarbageCollectionResult struct {
@@ -192,7 +222,17 @@ func (s *PGSandboxStore) CreateRootFSSnapshot(ctx context.Context, req *CreateRo
 	if s == nil || s.pool == nil || req == nil {
 		return nil, nil
 	}
-	return createRootFSSnapshot(ctx, s.pool, req)
+	var snapshot *RootFSSnapshot
+	err := s.WithSandboxLock(ctx, strings.TrimSpace(req.SandboxID), func(lockCtx context.Context, locked SandboxStoreTx, _ *SandboxRecord) error {
+		txStore, ok := locked.(sandboxStoreTx)
+		if !ok {
+			return fmt.Errorf("rootfs snapshot requires a PostgreSQL transaction")
+		}
+		var createErr error
+		snapshot, createErr = createRootFSSnapshot(lockCtx, txStore.tx, req)
+		return createErr
+	})
+	return snapshot, err
 }
 
 func (t sandboxStoreTx) CreateRootFSSnapshot(ctx context.Context, req *CreateRootFSSnapshotRequest) (*RootFSSnapshot, error) {
@@ -211,20 +251,54 @@ func createRootFSSnapshot(ctx context.Context, db rootFSStoreDB, req *CreateRoot
 	}
 	snapshot, err := scanRootFSSnapshot(db.QueryRow(ctx, `
 		WITH source AS (
-			SELECT b.filesystem_id, b.team_id, f.head_layer_id
+			SELECT b.filesystem_id, b.team_id, f.head_layer_id,
+				f.head_generation_id, f.storage_format,
+				f.base_artifact_digest, f.format_generation,
+				COALESCE(g.source_oci_digest, l.base_image_digest, '') AS source_oci_digest
 			FROM manager.sandbox_rootfs_bindings b
 			JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
+			JOIN manager.sandboxes sb ON sb.sandbox_id = b.sandbox_id
+			LEFT JOIN manager.rootfs_generations g ON g.generation_id = f.head_generation_id
+			LEFT JOIN manager.rootfs_layers l ON l.layer_id = f.head_layer_id
 			WHERE b.sandbox_id = $1
-				AND f.head_layer_id IS NOT NULL
+				AND (
+					(f.storage_format = 'legacy-layer' AND f.head_layer_id IS NOT NULL)
+					OR
+					(f.storage_format = 'block-cow-v1'
+						AND sb.desired_state = 'paused'
+						AND f.head_generation_id IS NOT NULL
+						AND g.durability_state IN ('composite_durable', 's3_materialized')
+						AND NOT EXISTS (
+							SELECT 1 FROM manager.rootfs_writer_grants wg
+							WHERE wg.filesystem_id = f.filesystem_id
+								AND wg.state IN ('issued', 'consumed', 'retiring')
+						)
+						AND NOT EXISTS (
+							SELECT 1 FROM manager.sandbox_lifecycle_txns lt
+							WHERE lt.sandbox_id = b.sandbox_id
+								AND lt.phase NOT IN ('committed', 'aborted')
+						)
+					)
+				)
+		),
+		inserted AS (
+			INSERT INTO manager.rootfs_snapshots (
+				snapshot_id, filesystem_id, team_id, source_sandbox_id,
+				head_layer_id, head_generation_id, name, description, created_at, expires_at
+			)
+			SELECT $2, filesystem_id, team_id, $1, head_layer_id, head_generation_id,
+				$3, $4, NOW(), $5
+			FROM source
+			RETURNING snapshot_id, filesystem_id, team_id, source_sandbox_id,
+				head_layer_id, head_generation_id, name, description, created_at, expires_at
 		)
-		INSERT INTO manager.rootfs_snapshots (
-			snapshot_id, filesystem_id, team_id, source_sandbox_id, head_layer_id,
-			name, description, created_at, expires_at
-		)
-		SELECT $2, filesystem_id, team_id, $1, head_layer_id, $3, $4, NOW(), $5
-		FROM source
-		RETURNING snapshot_id, filesystem_id, team_id, source_sandbox_id,
-			head_layer_id, name, description, created_at, expires_at
+		SELECT inserted.snapshot_id, inserted.filesystem_id, inserted.team_id,
+			inserted.source_sandbox_id, inserted.head_layer_id, inserted.head_generation_id,
+			source.storage_format, source.base_artifact_digest, source.format_generation,
+			source.source_oci_digest, inserted.name, inserted.description,
+			inserted.created_at, inserted.expires_at
+		FROM inserted
+		JOIN source ON source.filesystem_id = inserted.filesystem_id
 	`, req.SandboxID, req.SnapshotID, req.Name, req.Description, nullableTime(req.ExpiresAt)))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -240,13 +314,19 @@ func (s *PGSandboxStore) ListRootFSSnapshots(ctx context.Context, req *ListRootF
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT snapshot_id, filesystem_id, team_id, source_sandbox_id,
-			head_layer_id, name, description, created_at, expires_at
-		FROM manager.rootfs_snapshots
-		WHERE source_sandbox_id = $1
-			AND ($2 = '' OR team_id = $2)
-			AND (expires_at IS NULL OR expires_at > NOW())
-		ORDER BY created_at DESC
+		SELECT s.snapshot_id, s.filesystem_id, s.team_id, s.source_sandbox_id,
+			s.head_layer_id, s.head_generation_id,
+			CASE WHEN s.head_generation_id IS NULL THEN 'legacy-layer' ELSE 'block-cow-v1' END,
+			g.base_artifact_digest, g.format_generation,
+			COALESCE(g.source_oci_digest, l.base_image_digest, ''),
+			s.name, s.description, s.created_at, s.expires_at
+		FROM manager.rootfs_snapshots s
+		LEFT JOIN manager.rootfs_generations g ON g.generation_id = s.head_generation_id
+		LEFT JOIN manager.rootfs_layers l ON l.layer_id = s.head_layer_id
+		WHERE s.source_sandbox_id = $1
+			AND ($2 = '' OR s.team_id = $2)
+			AND (s.expires_at IS NULL OR s.expires_at > NOW())
+		ORDER BY s.created_at DESC
 	`, strings.TrimSpace(req.SandboxID), strings.TrimSpace(req.TeamID))
 	if err != nil {
 		return nil, fmt.Errorf("list rootfs snapshots: %w", err)
@@ -272,12 +352,18 @@ func (s *PGSandboxStore) GetRootFSSnapshot(ctx context.Context, snapshotID, team
 		return nil, nil
 	}
 	snapshot, err := scanRootFSSnapshot(s.pool.QueryRow(ctx, `
-		SELECT snapshot_id, filesystem_id, team_id, source_sandbox_id,
-			head_layer_id, name, description, created_at, expires_at
-		FROM manager.rootfs_snapshots
-		WHERE snapshot_id = $1
-			AND ($2 = '' OR team_id = $2)
-			AND (expires_at IS NULL OR expires_at > NOW())
+		SELECT s.snapshot_id, s.filesystem_id, s.team_id, s.source_sandbox_id,
+			s.head_layer_id, s.head_generation_id,
+			CASE WHEN s.head_generation_id IS NULL THEN 'legacy-layer' ELSE 'block-cow-v1' END,
+			g.base_artifact_digest, g.format_generation,
+			COALESCE(g.source_oci_digest, l.base_image_digest, ''),
+			s.name, s.description, s.created_at, s.expires_at
+		FROM manager.rootfs_snapshots s
+		LEFT JOIN manager.rootfs_generations g ON g.generation_id = s.head_generation_id
+		LEFT JOIN manager.rootfs_layers l ON l.layer_id = s.head_layer_id
+		WHERE s.snapshot_id = $1
+			AND ($2 = '' OR s.team_id = $2)
+			AND (s.expires_at IS NULL OR s.expires_at > NOW())
 	`, strings.TrimSpace(snapshotID), strings.TrimSpace(teamID)))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -310,7 +396,16 @@ func (s *PGSandboxStore) ForkRootFSFilesystem(ctx context.Context, req *ForkRoot
 	if s == nil || s.pool == nil || req == nil {
 		return nil, nil
 	}
-	filesystem, err := forkRootFSFilesystem(ctx, s.pool, req)
+	var filesystem *RootFSFilesystem
+	err := s.WithSandboxLock(ctx, strings.TrimSpace(req.SourceSandboxID), func(lockCtx context.Context, locked SandboxStoreTx, _ *SandboxRecord) error {
+		txStore, ok := locked.(sandboxStoreTx)
+		if !ok {
+			return fmt.Errorf("rootfs fork requires a PostgreSQL transaction")
+		}
+		var forkErr error
+		filesystem, forkErr = forkRootFSFilesystem(lockCtx, txStore.tx, req)
+		return forkErr
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, s.rootFSForkNoRowsError(ctx, req)
@@ -348,13 +443,33 @@ func forkRootFSFilesystem(ctx context.Context, db rootFSStoreDB, req *ForkRootFS
 				f.base_artifact_digest, f.format_generation
 			FROM manager.sandbox_rootfs_bindings b
 			JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
+			JOIN manager.sandboxes source_sandbox ON source_sandbox.sandbox_id = b.sandbox_id
 			WHERE b.sandbox_id = $1
-				AND (f.head_layer_id IS NOT NULL OR f.head_generation_id IS NOT NULL)
+				AND (
+					(f.storage_format = 'legacy-layer' AND f.head_layer_id IS NOT NULL)
+					OR
+					(f.storage_format = 'block-cow-v1'
+						AND f.head_generation_id IS NOT NULL
+						AND source_sandbox.desired_state = 'paused'
+						AND NOT EXISTS (
+							SELECT 1 FROM manager.rootfs_writer_grants writer_grant
+							WHERE writer_grant.filesystem_id = f.filesystem_id
+								AND writer_grant.state IN ('issued', 'consumed', 'retiring')
+						)
+						AND NOT EXISTS (
+							SELECT 1 FROM manager.sandbox_lifecycle_txns lifecycle
+							WHERE lifecycle.sandbox_id = b.sandbox_id
+								AND lifecycle.phase NOT IN ('committed', 'aborted')
+						)
+					)
+				)
 		),
 		target_sandbox AS (
-			SELECT sandbox_id, COALESCE(NULLIF($3, ''), team_id) AS team_id
+			SELECT sandbox_id, team_id, desired_state
 			FROM manager.sandboxes
 			WHERE sandbox_id = $2
+				AND deleted_at IS NULL
+				AND ($3 = '' OR team_id = $3)
 		),
 		created AS (
 			INSERT INTO manager.rootfs_filesystems (
@@ -379,6 +494,8 @@ func forkRootFSFilesystem(ctx context.Context, db rootFSStoreDB, req *ForkRootFS
 				NOW()
 			FROM source
 			CROSS JOIN target_sandbox
+			WHERE source.team_id = target_sandbox.team_id
+				AND (source.storage_format = 'legacy-layer' OR target_sandbox.desired_state = 'paused')
 			ON CONFLICT (filesystem_id) DO NOTHING
 			RETURNING filesystem_id, team_id, source_filesystem_id, head_layer_id,
 				writer_epoch, base_image_ref, base_image_digest, storage_format,
@@ -410,7 +527,16 @@ func (s *PGSandboxStore) RestoreRootFSFromSnapshot(ctx context.Context, req *Res
 	if s == nil || s.pool == nil || req == nil {
 		return nil, nil
 	}
-	filesystem, err := restoreRootFSFromSnapshot(ctx, s.pool, req)
+	var filesystem *RootFSFilesystem
+	err := s.WithSandboxLock(ctx, strings.TrimSpace(req.SandboxID), func(lockCtx context.Context, locked SandboxStoreTx, _ *SandboxRecord) error {
+		txStore, ok := locked.(sandboxStoreTx)
+		if !ok {
+			return fmt.Errorf("rootfs restore requires a PostgreSQL transaction")
+		}
+		var restoreErr error
+		filesystem, restoreErr = restoreRootFSFromSnapshot(lockCtx, txStore.tx, req)
+		return restoreErr
+	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, s.rootFSRestoreNoRowsError(ctx, req)
@@ -440,18 +566,32 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 	}
 	filesystem, err := scanRootFSFilesystem(db.QueryRow(ctx, `
 		WITH snapshot AS (
-			SELECT s.snapshot_id, s.filesystem_id, s.team_id, s.head_layer_id,
-				l.base_image_ref, l.base_image_digest
+			SELECT s.snapshot_id, s.filesystem_id, s.team_id,
+				s.head_layer_id, s.head_generation_id,
+				CASE WHEN s.head_generation_id IS NULL THEN 'legacy-layer' ELSE 'block-cow-v1' END AS storage_format,
+				COALESCE(l.base_image_ref, a.source_oci_ref, '') AS base_image_ref,
+				COALESCE(l.base_image_digest, g.source_oci_digest, '') AS base_image_digest,
+				g.base_artifact_digest, g.format_generation
 			FROM manager.rootfs_snapshots s
-			JOIN manager.rootfs_layers l ON l.layer_id = s.head_layer_id
+			LEFT JOIN manager.rootfs_layers l ON l.layer_id = s.head_layer_id
+			LEFT JOIN manager.rootfs_generations g ON g.generation_id = s.head_generation_id
+			LEFT JOIN manager.rootfs_base_artifacts a ON a.artifact_digest = g.base_artifact_digest
 			WHERE s.snapshot_id = $2
 				AND ($3 = '' OR s.team_id = $3)
 				AND (s.expires_at IS NULL OR s.expires_at > NOW())
+				AND (
+					(s.head_layer_id IS NOT NULL AND s.head_generation_id IS NULL)
+					OR
+					(s.head_layer_id IS NULL AND s.head_generation_id IS NOT NULL
+						AND g.durability_state IN ('composite_durable', 's3_materialized'))
+				)
 		),
 		target_sandbox AS (
-			SELECT sandbox_id, COALESCE(NULLIF($3, ''), team_id) AS team_id
+			SELECT sandbox_id, team_id, desired_state
 			FROM manager.sandboxes
 			WHERE sandbox_id = $1
+				AND deleted_at IS NULL
+				AND ($3 = '' OR team_id = $3)
 		),
 		binding AS (
 			SELECT filesystem_id
@@ -466,23 +606,45 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 			)
 			LIMIT 1
 		),
+		previous AS (
+			SELECT f.filesystem_id, f.head_generation_id
+			FROM binding
+			JOIN manager.rootfs_filesystems f ON f.filesystem_id = binding.filesystem_id
+		),
 		restored AS (
 			INSERT INTO manager.rootfs_filesystems (
 				filesystem_id, team_id, source_filesystem_id, head_layer_id,
-				base_image_ref, base_image_digest, created_at, updated_at
+				head_generation_id, storage_format, base_image_ref, base_image_digest,
+				base_artifact_digest, format_generation, created_at, updated_at
 			)
 			SELECT
 				binding.filesystem_id,
 				target_sandbox.team_id,
 				snapshot.filesystem_id,
 				snapshot.head_layer_id,
+				snapshot.head_generation_id,
+				snapshot.storage_format,
 				snapshot.base_image_ref,
 				snapshot.base_image_digest,
+				snapshot.base_artifact_digest,
+				snapshot.format_generation,
 				NOW(),
 				NOW()
 			FROM snapshot
 			CROSS JOIN target_sandbox
 			CROSS JOIN binding
+			WHERE snapshot.team_id = target_sandbox.team_id
+				AND (snapshot.storage_format = 'legacy-layer' OR target_sandbox.desired_state = 'paused')
+				AND NOT EXISTS (
+					SELECT 1 FROM manager.rootfs_writer_grants wg
+					WHERE wg.filesystem_id = binding.filesystem_id
+						AND wg.state IN ('issued', 'consumed', 'retiring')
+				)
+				AND NOT EXISTS (
+					SELECT 1 FROM manager.sandbox_lifecycle_txns lt
+					WHERE lt.sandbox_id = target_sandbox.sandbox_id
+						AND lt.phase NOT IN ('committed', 'aborted')
+				)
 			ON CONFLICT (filesystem_id) DO UPDATE SET
 				team_id = EXCLUDED.team_id,
 				source_filesystem_id = COALESCE(
@@ -490,10 +652,21 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 					EXCLUDED.source_filesystem_id
 				),
 				head_layer_id = EXCLUDED.head_layer_id,
+				head_generation_id = EXCLUDED.head_generation_id,
+				storage_format = EXCLUDED.storage_format,
 				base_image_ref = EXCLUDED.base_image_ref,
 				base_image_digest = EXCLUDED.base_image_digest,
+				base_artifact_digest = EXCLUDED.base_artifact_digest,
+				format_generation = EXCLUDED.format_generation,
 				updated_at = NOW()
-			WHERE manager.rootfs_filesystems.writer_epoch = 0
+			WHERE (
+				(manager.rootfs_filesystems.storage_format = 'legacy-layer'
+					AND EXCLUDED.storage_format = 'legacy-layer'
+					AND manager.rootfs_filesystems.writer_epoch = 0)
+				OR
+				(manager.rootfs_filesystems.storage_format = 'block-cow-v1'
+					AND EXCLUDED.storage_format = 'block-cow-v1')
+			)
 			RETURNING filesystem_id, team_id, source_filesystem_id, head_layer_id,
 				writer_epoch, base_image_ref, base_image_digest, storage_format,
 				base_artifact_digest, format_generation, head_generation_id, created_at, updated_at
@@ -507,6 +680,31 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 			ON CONFLICT (sandbox_id) DO UPDATE SET
 				team_id = EXCLUDED.team_id
 			RETURNING filesystem_id
+		),
+		rollback_pin AS (
+			INSERT INTO manager.rootfs_head_rollbacks (
+				operation_id, filesystem_id, sandbox_id, team_id, operation_kind,
+				old_generation_id, new_generation_id, state, created_at, expires_at
+			)
+			SELECT $4, restored.filesystem_id, $1, restored.team_id, 'restore',
+				previous.head_generation_id, restored.head_generation_id,
+				'available', NOW(), $5
+			FROM restored
+			JOIN previous ON previous.filesystem_id = restored.filesystem_id
+			WHERE $4 <> ''
+				AND previous.head_generation_id IS NOT NULL
+				AND restored.head_generation_id IS NOT NULL
+				AND previous.head_generation_id <> restored.head_generation_id
+			ON CONFLICT (operation_id) DO UPDATE SET
+				operation_id = EXCLUDED.operation_id
+			WHERE manager.rootfs_head_rollbacks.filesystem_id = EXCLUDED.filesystem_id
+				AND manager.rootfs_head_rollbacks.sandbox_id = EXCLUDED.sandbox_id
+				AND manager.rootfs_head_rollbacks.team_id = EXCLUDED.team_id
+				AND manager.rootfs_head_rollbacks.operation_kind = EXCLUDED.operation_kind
+				AND manager.rootfs_head_rollbacks.old_generation_id = EXCLUDED.old_generation_id
+				AND manager.rootfs_head_rollbacks.new_generation_id = EXCLUDED.new_generation_id
+				AND manager.rootfs_head_rollbacks.state = 'available'
+			RETURNING operation_id
 		)
 		SELECT restored.filesystem_id, restored.team_id, restored.source_filesystem_id,
 			restored.head_layer_id, restored.writer_epoch, restored.base_image_ref, restored.base_image_digest,
@@ -514,9 +712,120 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 			restored.head_generation_id, restored.created_at, restored.updated_at
 		FROM restored
 		JOIN bound ON bound.filesystem_id = restored.filesystem_id
-	`, req.SandboxID, req.SnapshotID, strings.TrimSpace(req.TeamID)))
+		LEFT JOIN previous ON previous.filesystem_id = restored.filesystem_id
+		LEFT JOIN rollback_pin ON rollback_pin.operation_id = $4
+		WHERE $4 = ''
+			OR previous.head_generation_id IS NULL
+			OR restored.head_generation_id IS NULL
+			OR previous.head_generation_id = restored.head_generation_id
+			OR rollback_pin.operation_id = $4
+	`, req.SandboxID, req.SnapshotID, strings.TrimSpace(req.TeamID),
+		strings.TrimSpace(req.OperationID), nullableTime(req.RollbackExpiresAt)))
 	if err != nil {
 		return nil, fmt.Errorf("restore rootfs filesystem from snapshot: %w", err)
+	}
+	return filesystem, nil
+}
+
+// RollbackRootFSHead atomically restores the head retained by a successful
+// block-COW restore or rebase. The sandbox must remain paused and writer-free;
+// the current head must still be the operation's published generation.
+func (s *PGSandboxStore) RollbackRootFSHead(ctx context.Context, req *RollbackRootFSHeadRequest) (*RootFSFilesystem, error) {
+	if s == nil || s.pool == nil || req == nil {
+		return nil, nil
+	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	if strings.TrimSpace(req.OperationID) == "" {
+		return nil, fmt.Errorf("operation_id is required")
+	}
+	var filesystem *RootFSFilesystem
+	err := s.WithSandboxLock(ctx, strings.TrimSpace(req.SandboxID), func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+		storeTx, ok := tx.(sandboxStoreTx)
+		if !ok {
+			return fmt.Errorf("rootfs rollback requires a PostgreSQL transaction")
+		}
+		var rollbackErr error
+		filesystem, rollbackErr = rollbackRootFSHead(lockCtx, storeTx.tx, req)
+		return rollbackErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return filesystem, nil
+}
+
+func rollbackRootFSHead(ctx context.Context, db rootFSStoreDB, req *RollbackRootFSHeadRequest) (*RootFSFilesystem, error) {
+	filesystem, err := scanRootFSFilesystem(db.QueryRow(ctx, `
+		WITH pin AS (
+			SELECT operation_id, filesystem_id, sandbox_id, team_id,
+				old_generation_id, new_generation_id
+			FROM manager.rootfs_head_rollbacks
+			WHERE operation_id = $2
+				AND sandbox_id = $1
+				AND ($3 = '' OR team_id = $3)
+				AND state = 'available'
+				AND (expires_at IS NULL OR expires_at > NOW())
+			FOR UPDATE
+		),
+		updated AS (
+			UPDATE manager.rootfs_filesystems f
+			SET head_generation_id = pin.old_generation_id,
+				base_artifact_digest = old_generation.base_artifact_digest,
+				format_generation = old_generation.format_generation,
+				base_image_ref = artifact.source_oci_ref,
+				base_image_digest = old_generation.source_oci_digest,
+				updated_at = NOW()
+			FROM pin
+			JOIN manager.rootfs_generations old_generation
+				ON old_generation.generation_id = pin.old_generation_id
+			JOIN manager.rootfs_base_artifacts artifact
+				ON artifact.artifact_digest = old_generation.base_artifact_digest
+			JOIN manager.sandbox_rootfs_bindings binding
+				ON binding.filesystem_id = pin.filesystem_id AND binding.sandbox_id = pin.sandbox_id
+			JOIN manager.sandboxes sandbox ON sandbox.sandbox_id = binding.sandbox_id
+			WHERE f.filesystem_id = pin.filesystem_id
+				AND f.storage_format = 'block-cow-v1'
+				AND f.head_generation_id = pin.new_generation_id
+				AND sandbox.desired_state = 'paused'
+				AND sandbox.deleted_at IS NULL
+				AND NOT EXISTS (
+					SELECT 1 FROM manager.rootfs_writer_grants writer_grant
+					WHERE writer_grant.filesystem_id = f.filesystem_id
+						AND writer_grant.state IN ('issued', 'consumed', 'retiring')
+				)
+				AND NOT EXISTS (
+					SELECT 1 FROM manager.sandbox_lifecycle_txns lifecycle
+					WHERE lifecycle.sandbox_id = pin.sandbox_id
+						AND lifecycle.phase NOT IN ('committed', 'aborted')
+				)
+			RETURNING f.filesystem_id, f.team_id, f.source_filesystem_id, f.head_layer_id,
+				f.writer_epoch, f.base_image_ref, f.base_image_digest, f.storage_format,
+				f.base_artifact_digest, f.format_generation, f.head_generation_id,
+				f.created_at, f.updated_at
+		),
+		consumed AS (
+			UPDATE manager.rootfs_head_rollbacks rollback
+			SET state = 'rolled_back', rolled_back_at = NOW()
+			FROM updated
+			WHERE rollback.operation_id = $2
+				AND rollback.filesystem_id = updated.filesystem_id
+			RETURNING rollback.operation_id
+		)
+		SELECT updated.filesystem_id, updated.team_id, updated.source_filesystem_id,
+			updated.head_layer_id, updated.writer_epoch, updated.base_image_ref,
+			updated.base_image_digest, updated.storage_format,
+			updated.base_artifact_digest, updated.format_generation,
+			updated.head_generation_id, updated.created_at, updated.updated_at
+		FROM updated
+		JOIN consumed ON consumed.operation_id = $2
+	`, strings.TrimSpace(req.SandboxID), strings.TrimSpace(req.OperationID), strings.TrimSpace(req.TeamID)))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: rollback operation %s", ErrRootFSHeadConflict, req.OperationID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("rollback rootfs head: %w", err)
 	}
 	return filesystem, nil
 }
@@ -1391,7 +1700,7 @@ func (s *PGSandboxStore) rootFSForkNoRowsError(ctx context.Context, req *ForkRoo
 	if err != nil {
 		return err
 	}
-	if source == nil || strings.TrimSpace(source.HeadLayerID) == "" {
+	if source == nil || (strings.TrimSpace(source.HeadLayerID) == "" && strings.TrimSpace(source.HeadGenerationID) == "") {
 		return fmt.Errorf("%w: sandbox %s", ErrRootFSFilesystemNotFound, req.SourceSandboxID)
 	}
 	if ok, err := s.sandboxExists(ctx, req.TargetSandboxID); err != nil {
@@ -1478,17 +1787,32 @@ func scanRootFSFilesystem(row sandboxRecordScanner) (*RootFSFilesystem, error) {
 
 func scanRootFSSnapshot(row sandboxRecordScanner) (*RootFSSnapshot, error) {
 	var snapshot RootFSSnapshot
-	var filesystemID *string
+	var filesystemID, headLayerID, headGenerationID, baseArtifactDigest *string
+	var formatGeneration *int
 	var expiresAt *time.Time
 	if err := row.Scan(
 		&snapshot.ID, &filesystemID, &snapshot.TeamID, &snapshot.SourceSandboxID,
-		&snapshot.HeadLayerID, &snapshot.Name, &snapshot.Description,
+		&headLayerID, &headGenerationID, &snapshot.StorageFormat,
+		&baseArtifactDigest, &formatGeneration, &snapshot.SourceOCIDigest,
+		&snapshot.Name, &snapshot.Description,
 		&snapshot.CreatedAt, &expiresAt,
 	); err != nil {
 		return nil, err
 	}
 	if filesystemID != nil {
 		snapshot.FilesystemID = *filesystemID
+	}
+	if headLayerID != nil {
+		snapshot.HeadLayerID = *headLayerID
+	}
+	if headGenerationID != nil {
+		snapshot.HeadGenerationID = *headGenerationID
+	}
+	if baseArtifactDigest != nil {
+		snapshot.BaseArtifactDigest = *baseArtifactDigest
+	}
+	if formatGeneration != nil {
+		snapshot.FormatGeneration = *formatGeneration
 	}
 	if expiresAt != nil {
 		snapshot.ExpiresAt = *expiresAt

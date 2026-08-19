@@ -246,8 +246,12 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *tes
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
-	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-fork-source", "team-1")))
-	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-fork-target", "team-1")))
+	sourceRecord := rootFSTestSandboxRecord("sandbox-fork-source", "team-1")
+	sourceRecord.DesiredState = SandboxDesiredStatePaused
+	targetRecord := rootFSTestSandboxRecord("sandbox-fork-target", "team-1")
+	targetRecord.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, sourceRecord))
+	require.NoError(t, store.UpsertSandbox(ctx, targetRecord))
 
 	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
 	require.NoError(t, err)
@@ -357,8 +361,11 @@ func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T)
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
-	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-crash-source", "team-1")))
+	sourceRecord := rootFSTestSandboxRecord("sandbox-crash-source", "team-1")
+	sourceRecord.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, sourceRecord))
 	targetRecord := rootFSTestSandboxRecord("sandbox-crash-target", "team-1")
+	targetRecord.DesiredState = SandboxDesiredStatePaused
 	targetRecord.RuntimeGeneration = 7
 	targetRecord.CurrentPodNamespace = "nomad"
 	targetRecord.CurrentPodName = "allocation-crashed"
@@ -376,6 +383,8 @@ func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T)
 	})
 	require.NoError(t, err)
 	require.Equal(t, initial.ID, target.HeadGenerationID)
+	targetRecord.DesiredState = SandboxDesiredStateActive
+	require.NoError(t, store.UpsertSandbox(ctx, targetRecord))
 
 	binding := sha256.Sum256([]byte("fork-crash-binding"))
 	issue := rootFSWriterGrantTestIssueRequest(
@@ -438,6 +447,260 @@ func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T)
 	record, err := store.GetSandbox(ctx, target.ID)
 	require.NoError(t, err)
 	require.Equal(t, SandboxDesiredStatePaused, record.DesiredState)
+}
+
+func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	sourceRecord := rootFSTestSandboxRecord("sandbox-snapshot-block", "team-1")
+	sourceRecord.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, sourceRecord))
+	copyRecord := rootFSTestSandboxRecord("sandbox-snapshot-copy", "team-1")
+	copyRecord.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, copyRecord))
+
+	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	require.NoError(t, err)
+	filesystem, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+		SandboxID: sourceRecord.ID, TeamID: sourceRecord.TeamID,
+		SourceOCIRef: artifact.SourceOCIRef, SourceOCIDigest: artifact.SourceOCIDigest,
+		BaseArtifactDigest: artifact.ArtifactDigest,
+	})
+	require.NoError(t, err)
+
+	snapshot, err := store.CreateRootFSSnapshot(ctx, &CreateRootFSSnapshotRequest{
+		SandboxID: sourceRecord.ID, SnapshotID: "snapshot-block-initial",
+	})
+	require.NoError(t, err)
+	require.Empty(t, snapshot.HeadLayerID)
+	require.Equal(t, initial.ID, snapshot.HeadGenerationID)
+	require.Equal(t, RootFSStorageFormatBlockCOWV1, snapshot.StorageFormat)
+	require.Equal(t, artifact.ArtifactDigest, snapshot.BaseArtifactDigest)
+	require.Equal(t, artifact.SourceOCIDigest, snapshot.SourceOCIDigest)
+
+	second := putTestDurableRootFSGeneration(t, ctx, pool, filesystem, initial, "snapshot-second", 1)
+	restored, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID: sourceRecord.ID, SnapshotID: snapshot.ID, TeamID: sourceRecord.TeamID,
+		OperationID: "restore-block-initial", RollbackExpiresAt: time.Now().Add(time.Hour),
+	})
+	require.NoError(t, err)
+	require.Equal(t, initial.ID, restored.HeadGenerationID)
+	require.Equal(t, int64(1), restored.WriterEpoch, "head restore must not rewind the writer epoch")
+
+	rolledBack, err := store.RollbackRootFSHead(ctx, &RollbackRootFSHeadRequest{
+		SandboxID: sourceRecord.ID, OperationID: "restore-block-initial", TeamID: sourceRecord.TeamID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, second.ID, rolledBack.HeadGenerationID)
+	require.Equal(t, int64(1), rolledBack.WriterEpoch)
+	_, err = store.RollbackRootFSHead(ctx, &RollbackRootFSHeadRequest{
+		SandboxID: sourceRecord.ID, OperationID: "restore-block-initial", TeamID: sourceRecord.TeamID,
+	})
+	require.ErrorIs(t, err, ErrRootFSHeadConflict)
+
+	copied, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID: copyRecord.ID, SnapshotID: snapshot.ID, TeamID: copyRecord.TeamID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, initial.ID, copied.HeadGenerationID)
+	require.Equal(t, filesystem.ID, copied.SourceFilesystemID)
+	require.Equal(t, RootFSStorageFormatBlockCOWV1, copied.StorageFormat)
+
+	loadedSnapshot, err := store.GetRootFSSnapshot(ctx, snapshot.ID, sourceRecord.TeamID)
+	require.NoError(t, err)
+	require.Equal(t, initial.ID, loadedSnapshot.HeadGenerationID,
+		"moving and rolling back the source head must not mutate the snapshot")
+}
+
+func TestBlockRootFSSnapshotRejectsActiveWriter(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	record := rootFSTestSandboxRecord("sandbox-snapshot-writer", "team-1")
+	record.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, record))
+	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	require.NoError(t, err)
+	filesystem, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+		SandboxID: record.ID, TeamID: record.TeamID, SourceOCIRef: artifact.SourceOCIRef,
+		SourceOCIDigest: artifact.SourceOCIDigest, BaseArtifactDigest: artifact.ArtifactDigest,
+	})
+	require.NoError(t, err)
+	binding := bytes.Repeat([]byte{0x7a}, 32)
+	issue := rootFSWriterGrantTestIssueRequest(record.ID, "grant-snapshot-active", "claim-snapshot-active", "slot-snapshot-active", binding)
+	issue.ExpectedFilesystemID = filesystem.ID
+	issue.InitialGenerationID = initial.ID
+	_, err = store.IssueRootFSWriterGrant(ctx, issue)
+	require.NoError(t, err)
+	_, err = store.CreateRootFSSnapshot(ctx, &CreateRootFSSnapshotRequest{
+		SandboxID: record.ID, SnapshotID: "snapshot-must-fail",
+	})
+	require.ErrorIs(t, err, ErrRootFSFilesystemNotFound)
+}
+
+func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	record := rootFSTestSandboxRecord("sandbox-rebase", "team-1")
+	record.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, record))
+	oldArtifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	require.NoError(t, err)
+	filesystem, source, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+		SandboxID: record.ID, TeamID: record.TeamID, SourceOCIRef: oldArtifact.SourceOCIRef,
+		SourceOCIDigest: oldArtifact.SourceOCIDigest, BaseArtifactDigest: oldArtifact.ArtifactDigest,
+	})
+	require.NoError(t, err)
+	_, err = store.CreateRootFSSnapshot(ctx, &CreateRootFSSnapshotRequest{
+		SandboxID: record.ID, SnapshotID: "snapshot-before-rebase",
+	})
+	require.NoError(t, err)
+
+	newArtifactRequest := readyRootFSBaseArtifactTestRequest()
+	newArtifactRequest.ArtifactDigest = digest.FromString("rebase-artifact-v2").String()
+	newArtifactRequest.SourceOCIRef = "registry.example/sandbox:v2@" + digest.FromString("rebase-oci-v2").String()
+	newArtifactRequest.SourceOCIDigest = digest.FromString("rebase-oci-v2").String()
+	newArtifactRequest.BaseBlockRoot = digest.FromString("rebase-base-root-v2").String()
+	newArtifactRequest.Descriptor = encodeTestRootFSDescriptor(t, "rebase-base-v2", newArtifactRequest.BaseBlockRoot)
+	newArtifact, err := store.PutReadyRootFSBaseArtifact(ctx, newArtifactRequest)
+	require.NoError(t, err)
+	targetHead := digest.FromString("rebase-target-head").String()
+	target := &RootFSGeneration{
+		ID: "generation-rebase-v2", FilesystemID: filesystem.ID,
+		ParentGenerationID: source.ID, SourceOCIDigest: newArtifact.SourceOCIDigest,
+		BaseArtifactDigest: newArtifact.ArtifactDigest, BaseBlockRoot: newArtifact.BaseBlockRoot,
+		CurrentBlockHead: targetHead, WriterEpoch: filesystem.WriterEpoch + 1,
+		FormatGeneration: newArtifact.FormatGeneration,
+		DurabilityState:  RootFSGenerationStateS3Materialized,
+		LocatorVersion:   source.LocatorVersion + 1,
+		Descriptor:       encodeTestRootFSDescriptor(t, "rebase-target-v2", targetHead),
+	}
+	health := sha256.Sum256([]byte("rebase-worker-health-proof"))
+	rebaseRequest := &PublishPausedRootFSRebaseRequest{
+		SandboxID: record.ID, TeamID: record.TeamID, OperationID: "rebase-v2",
+		ExpectedSourceGenerationID: source.ID,
+		ExpectedBaseArtifactDigest: oldArtifact.ArtifactDigest,
+		Generation:                 target, HealthCheckDigest: health[:],
+		RollbackExpiresAt: time.Now().Add(time.Hour),
+	}
+	published, err := store.PublishPausedRootFSRebase(ctx, rebaseRequest)
+	require.NoError(t, err)
+	require.Equal(t, target.ID, published.HeadGenerationID)
+	require.Equal(t, newArtifact.ArtifactDigest, published.BaseArtifactDigest)
+	require.Equal(t, target.WriterEpoch, published.WriterEpoch)
+	var storedHealth []byte
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT health_check_digest
+		FROM manager.rootfs_head_rollbacks
+		WHERE operation_id = $1
+	`, rebaseRequest.OperationID).Scan(&storedHealth))
+	require.Equal(t, health[:], storedHealth)
+	retried, err := store.PublishPausedRootFSRebase(ctx, rebaseRequest)
+	require.NoError(t, err)
+	require.Equal(t, published.HeadGenerationID, retried.HeadGenerationID)
+
+	rolledBack, err := store.RollbackRootFSHead(ctx, &RollbackRootFSHeadRequest{
+		SandboxID: record.ID, TeamID: record.TeamID, OperationID: rebaseRequest.OperationID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, source.ID, rolledBack.HeadGenerationID)
+	require.Equal(t, oldArtifact.ArtifactDigest, rolledBack.BaseArtifactDigest)
+	require.Equal(t, target.WriterEpoch, rolledBack.WriterEpoch,
+		"rollback must not make a consumed rebase epoch reusable")
+	snapshot, err := store.GetRootFSSnapshot(ctx, "snapshot-before-rebase", record.TeamID)
+	require.NoError(t, err)
+	require.Equal(t, source.ID, snapshot.HeadGenerationID)
+
+	binding := bytes.Repeat([]byte{0x6b}, 32)
+	issue := rootFSWriterGrantTestIssueRequest(record.ID, "grant-rebase-active", "claim-rebase-active", "slot-rebase-active", binding)
+	issue.ExpectedFilesystemID = filesystem.ID
+	issue.InitialGenerationID = source.ID
+	issue.ExpectedWriterEpoch = rolledBack.WriterEpoch
+	_, err = store.IssueRootFSWriterGrant(ctx, issue)
+	require.NoError(t, err)
+	activeTarget := *target
+	activeTarget.ID = "generation-rebase-active-writer"
+	activeTarget.WriterEpoch = rolledBack.WriterEpoch + 2
+	activeTarget.CurrentBlockHead = digest.FromString("rebase-active-writer-head").String()
+	activeTarget.Descriptor = encodeTestRootFSDescriptor(t, "rebase-active-writer", activeTarget.CurrentBlockHead)
+	_, err = store.PublishPausedRootFSRebase(ctx, &PublishPausedRootFSRebaseRequest{
+		SandboxID: record.ID, TeamID: record.TeamID, OperationID: "rebase-active-writer",
+		ExpectedSourceGenerationID: source.ID,
+		ExpectedBaseArtifactDigest: oldArtifact.ArtifactDigest,
+		Generation:                 &activeTarget, HealthCheckDigest: health[:],
+	})
+	require.ErrorIs(t, err, ErrRootFSGenerationConflict)
+}
+
+func encodeTestRootFSDescriptor(t *testing.T, suffix, blockHead string) []byte {
+	t.Helper()
+	descriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: 1 << 30,
+		BlockSizeBytes: rootfsblock.LogicalBlockSize,
+		MappingRoot: rootfsblock.MappingRootLocator{
+			Version: rootfsblock.MappingPageVersion, RootDigest: blockHead,
+			Object: rootfsblock.ObjectRange{
+				Key: "rootfs/" + suffix + "/map.page", Length: 4096,
+				Checksum: digest.FromString("map-page-" + suffix).String(),
+			},
+		},
+	})
+	require.NoError(t, err)
+	return descriptor
+}
+
+func putTestDurableRootFSGeneration(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	filesystem *RootFSFilesystem,
+	parent *RootFSGeneration,
+	suffix string,
+	writerEpoch int64,
+) *RootFSGeneration {
+	t.Helper()
+	blockHead := digest.FromString("block-head-" + suffix).String()
+	descriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: 1 << 30,
+		BlockSizeBytes: rootfsblock.LogicalBlockSize,
+		MappingRoot: rootfsblock.MappingRootLocator{
+			Version: rootfsblock.MappingPageVersion, RootDigest: blockHead,
+			Object: rootfsblock.ObjectRange{
+				Key: "rootfs/" + suffix + "/map.page", Length: 4096,
+				Checksum: digest.FromString("map-page-" + suffix).String(),
+			},
+		},
+	})
+	require.NoError(t, err)
+	generation := &RootFSGeneration{
+		ID: "generation-" + suffix, FilesystemID: filesystem.ID,
+		ParentGenerationID: parent.ID, SourceOCIDigest: parent.SourceOCIDigest,
+		BaseArtifactDigest: parent.BaseArtifactDigest, BaseBlockRoot: parent.BaseBlockRoot,
+		CurrentBlockHead: blockHead, WriterEpoch: writerEpoch,
+		FormatGeneration: parent.FormatGeneration,
+		DurabilityState:  RootFSGenerationStateS3Materialized,
+		LocatorVersion:   parent.LocatorVersion + 1, Descriptor: descriptor,
+	}
+	_, err = pool.Exec(ctx, `
+		INSERT INTO manager.rootfs_generations (
+			generation_id, filesystem_id, parent_generation_id, source_oci_digest,
+			base_artifact_digest, base_block_root, current_block_head, writer_epoch,
+			format_generation, durability_state, locator_version, descriptor, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+	`, generation.ID, generation.FilesystemID, generation.ParentGenerationID,
+		generation.SourceOCIDigest, generation.BaseArtifactDigest, generation.BaseBlockRoot,
+		generation.CurrentBlockHead, generation.WriterEpoch, generation.FormatGeneration,
+		generation.DurabilityState, generation.LocatorVersion, generation.Descriptor)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.rootfs_filesystems
+		SET head_generation_id = $1, writer_epoch = $2, updated_at = NOW()
+		WHERE filesystem_id = $3
+	`, generation.ID, generation.WriterEpoch, generation.FilesystemID)
+	require.NoError(t, err)
+	return generation
 }
 
 func assertBlockGenerationPublishState(

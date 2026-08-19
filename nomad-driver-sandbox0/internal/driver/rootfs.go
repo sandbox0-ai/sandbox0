@@ -141,7 +141,8 @@ func newEmbeddedRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootf
 	}
 	sessions, err := rootfssession.New(rootfssession.Config{
 		StatePath: config.RootFSStatePath, BranchRoot: config.RootFSBranchRoot,
-		MountRoot: config.RootFSMountRoot, Source: conditional,
+		MountRoot: config.RootFSMountRoot, MaxDirtyTailBytes: config.RootFSMaxDirtyTailBytes,
+		Source:    conditional,
 		Publisher: rootfsblock.ObjectStorePublisher{Store: conditional}, Runtime: hostRuntime,
 	})
 	if err != nil {
@@ -620,6 +621,9 @@ func (r *rootfsRuntime) stopAllRenewals() {
 func validateRootFSConfig(config *PluginConfig) error {
 	if config == nil || !config.RootFSEnabled {
 		return nil
+	}
+	if config.RootFSMaxDirtyTailBytes < 0 {
+		return fmt.Errorf("rootfs_max_dirty_tail_bytes must be non-negative")
 	}
 	if config.RootFSSessiondSocket != "" {
 		if !filepath.IsAbs(config.RootFSSessiondSocket) || filepath.Clean(config.RootFSSessiondSocket) == "/" {

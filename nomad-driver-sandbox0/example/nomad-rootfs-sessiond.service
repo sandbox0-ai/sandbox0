@@ -15,6 +15,7 @@ ExecStart=/usr/local/bin/nomad-rootfs-sessiond \
   --runsc-root=/run/sandbox0/runsc \
   --state=/var/lib/sandbox0/rootfs-sessions.db \
   --branch-root=/var/lib/sandbox0/rootfs-branches \
+  --max-dirty-tail-bytes=${SANDBOX0_ROOTFS_MAX_DIRTY_TAIL_BYTES} \
   --mount-root=/run/sandbox0/rootfs \
   --consumer-mount-root=/opt/nomad \
   --nbd-devices=${SANDBOX0_ROOTFS_NBD_DEVICES} \

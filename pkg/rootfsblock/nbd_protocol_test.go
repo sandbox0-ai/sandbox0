@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
@@ -118,6 +119,39 @@ func TestNBDTransmissionPreservesBackendPartialWriteAndFUAErrorSemantics(t *test
 		writeNBDRequest(t, client, nbdCommandDisconnect, [8]byte{14}, 0, nil)
 		require.NoError(t, <-done)
 	})
+}
+
+func TestNBDTransmissionMapsDirtyTailCapacityToENOSPC(t *testing.T) {
+	base := make([]byte, 2*LogicalBlockSize)
+	branch, err := OpenBranchWithOptions(
+		filepath.Join(t.TempDir(), "branch.log"), testBranchIdentity(int64(len(base))),
+		bytes.NewReader(base), BranchOptions{MaxDirtyTailBytes: LogicalBlockSize},
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+	_, err = branch.WriteAt(bytes.Repeat([]byte{1}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+
+	client, server := net.Pipe()
+	done := make(chan error, 1)
+	observed := make(chan error, 1)
+	go func() {
+		done <- (NBDTransmissionServer{
+			Backend: branch, OnBackendError: func(err error) { observed <- err },
+		}).Serve(t.Context(), server)
+	}()
+
+	handle := [8]byte{21}
+	writeNBDRequest(t, client, nbdCommandWrite, handle, LogicalBlockSize, bytes.Repeat([]byte{2}, LogicalBlockSize))
+	require.Equal(t, uint32(syscall.ENOSPC), readNBDReply(t, client, handle, 0))
+	require.ErrorIs(t, <-observed, syscall.ENOSPC)
+	actual := make([]byte, LogicalBlockSize)
+	_, err = branch.ReadAt(actual, LogicalBlockSize)
+	require.NoError(t, err)
+	require.Equal(t, make([]byte, LogicalBlockSize), actual)
+
+	writeNBDRequest(t, client, nbdCommandDisconnect, [8]byte{22}, 0, nil)
+	require.NoError(t, <-done)
 }
 
 func TestNBDTransmissionRejectsBadMagicAndOversizedWrite(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -64,6 +65,41 @@ type BlockUpdate struct {
 	Data     []byte
 }
 
+// BranchOptions bounds one writer's unpublished local dirty tail. The limit
+// counts logical 4 KiB record payloads, including repeated overwrites. Zero
+// leaves the branch unbounded and is intended only for compatibility tests;
+// production session owners must set an explicit positive limit.
+type BranchOptions struct {
+	MaxDirtyTailBytes int64
+}
+
+// DirtyTailUsage describes the exact local unpublished branch occupancy.
+// JournalBytes includes the record framing but excludes the bounded identity
+// header. DirtyBytes is the admission value compared with MaxBytes.
+type DirtyTailUsage struct {
+	DirtyBytes   int64
+	JournalBytes int64
+	MaxBytes     int64
+}
+
+// DirtyTailCapacityError rejects a complete block request before appending any
+// of its records. It unwraps to ENOSPC so the Linux NBD client and guest
+// filesystem receive a stable capacity error instead of a generic EIO.
+type DirtyTailCapacityError struct {
+	UsedBytes      int64
+	RequestedBytes int64
+	LimitBytes     int64
+}
+
+func (e *DirtyTailCapacityError) Error() string {
+	return fmt.Sprintf(
+		"rootfs dirty tail capacity exhausted: used %d bytes, request %d bytes, limit %d bytes",
+		e.UsedBytes, e.RequestedBytes, e.LimitBytes,
+	)
+}
+
+func (*DirtyTailCapacityError) Unwrap() error { return syscall.ENOSPC }
+
 // Branch is a local append-only writable COW layer over one immutable
 // generation. A successful Flush makes every preceding block record durable
 // on the current node. It does not claim region durability.
@@ -78,15 +114,27 @@ type Branch struct {
 	durable  uint64
 	blocks   map[uint64]branchRecord
 	records  []branchRecord
+	maxDirty int64
 	closed   bool
 }
 
 func OpenBranch(path string, identity BranchIdentity, base io.ReaderAt) (*Branch, error) {
+	return OpenBranchWithOptions(path, identity, base, BranchOptions{})
+}
+
+// OpenBranchWithOptions opens one branch and applies an immutable admission
+// limit for the lifetime of this handle. Lowering the limit below recovered
+// usage is allowed so retirement can still read and publish the branch, but
+// every subsequent write is rejected until it is retired.
+func OpenBranchWithOptions(path string, identity BranchIdentity, base io.ReaderAt, options BranchOptions) (*Branch, error) {
 	if err := identity.Validate(); err != nil {
 		return nil, err
 	}
 	if base == nil {
 		return nil, fmt.Errorf("base generation reader is required")
+	}
+	if options.MaxDirtyTailBytes < 0 {
+		return nil, fmt.Errorf("maximum dirty tail bytes must be non-negative")
 	}
 	path = filepath.Clean(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) || path == "/" {
@@ -103,7 +151,10 @@ func OpenBranch(path string, identity BranchIdentity, base io.ReaderAt) (*Branch
 		file.Close()
 		return nil, fmt.Errorf("protect branch journal: %w", err)
 	}
-	branch := &Branch{file: file, base: base, identity: identity, blocks: make(map[uint64]branchRecord)}
+	branch := &Branch{
+		file: file, base: base, identity: identity, blocks: make(map[uint64]branchRecord),
+		maxDirty: options.MaxDirtyTailBytes,
+	}
 	if err := branch.open(); err != nil {
 		file.Close()
 		return nil, err
@@ -141,6 +192,14 @@ func (b *Branch) WriteAt(payload []byte, offset int64) (int, error) {
 	if b.closed {
 		return 0, os.ErrClosed
 	}
+	records := mappingBlocksForRange(offset, int64(len(payload)))
+	if err := b.admitRecordsLocked(records); err != nil {
+		return 0, err
+	}
+	return b.writeAtLocked(payload, offset)
+}
+
+func (b *Branch) writeAtLocked(payload []byte, offset int64) (int, error) {
 	written := 0
 	for written < len(payload) {
 		absolute := offset + int64(written)
@@ -168,16 +227,40 @@ func (b *Branch) WriteZeroes(offset, length int64) error {
 	if offset < 0 || length < 0 || offset > b.Size() || length > b.Size()-offset {
 		return fmt.Errorf("zero range must be within the logical device")
 	}
+	if length == 0 {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return os.ErrClosed
+	}
+	if err := b.admitRecordsLocked(mappingBlocksForRange(offset, length)); err != nil {
+		return err
+	}
 	zero := make([]byte, LogicalBlockSize)
 	for current := int64(0); current < length; {
 		absolute := offset + current
 		chunk := min(length-current, int64(LogicalBlockSize)-absolute%LogicalBlockSize)
-		if _, err := b.WriteAt(zero[:chunk], absolute); err != nil {
+		if _, err := b.writeAtLocked(zero[:chunk], absolute); err != nil {
 			return err
 		}
 		current += chunk
 	}
 	return nil
+}
+
+// DirtyTailUsage returns a race-free snapshot suitable for metrics and
+// admission diagnostics. Repeated writes count separately because every
+// record consumes durable local journal capacity until publication.
+func (b *Branch) DirtyTailUsage() DirtyTailUsage {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	records := int64(len(b.records))
+	return DirtyTailUsage{
+		DirtyBytes: records * LogicalBlockSize, JournalBytes: records * branchRecordBytes,
+		MaxBytes: b.maxDirty,
+	}
 }
 
 func (b *Branch) Flush() error {
@@ -420,6 +503,29 @@ func (b *Branch) appendBlockLocked(block uint64, payload []byte) error {
 	b.records = append(b.records, branchRecord{sequence: b.sequence, block: block, offset: b.end + 64})
 	b.end += int64(len(record))
 	return nil
+}
+
+func (b *Branch) admitRecordsLocked(records int64) error {
+	if records <= 0 || b.maxDirty == 0 {
+		return nil
+	}
+	used := int64(len(b.records)) * LogicalBlockSize
+	requested := records * LogicalBlockSize
+	if used > b.maxDirty || requested > b.maxDirty-used {
+		return &DirtyTailCapacityError{
+			UsedBytes: used, RequestedBytes: requested, LimitBytes: b.maxDirty,
+		}
+	}
+	return nil
+}
+
+func mappingBlocksForRange(offset, length int64) int64 {
+	if length <= 0 {
+		return 0
+	}
+	first := offset / LogicalBlockSize
+	last := (offset + length - 1) / LogicalBlockSize
+	return last - first + 1
 }
 
 func branchRecordChecksum(metadata, payload []byte) [sha256.Size]byte {

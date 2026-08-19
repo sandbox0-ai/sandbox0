@@ -32,6 +32,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers/fsisolation"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
 	"github.com/hashicorp/nomad/plugins/shared/structs"
+	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 )
 
 const (
@@ -96,7 +97,11 @@ var (
 		"rootfs_state_path":          hclspec.NewAttr("rootfs_state_path", "string", false),
 		"rootfs_branch_root":         hclspec.NewAttr("rootfs_branch_root", "string", false),
 		"rootfs_mount_root":          hclspec.NewAttr("rootfs_mount_root", "string", false),
-		"rootfs_nbd_devices":         hclspec.NewAttr("rootfs_nbd_devices", "list(string)", false),
+		"rootfs_max_dirty_tail_bytes": hclspec.NewDefault(
+			hclspec.NewAttr("rootfs_max_dirty_tail_bytes", "number", false),
+			hclspec.NewLiteral(`10737418240`),
+		),
+		"rootfs_nbd_devices": hclspec.NewAttr("rootfs_nbd_devices", "list(string)", false),
 		"rootfs_object_type": hclspec.NewDefault(
 			hclspec.NewAttr("rootfs_object_type", "string", false),
 			hclspec.NewLiteral(`"s3"`),
@@ -157,6 +162,7 @@ type PluginConfig struct {
 	RootFSStatePath               string   `codec:"rootfs_state_path"`
 	RootFSBranchRoot              string   `codec:"rootfs_branch_root"`
 	RootFSMountRoot               string   `codec:"rootfs_mount_root"`
+	RootFSMaxDirtyTailBytes       int64    `codec:"rootfs_max_dirty_tail_bytes"`
 	RootFSNBDDevices              []string `codec:"rootfs_nbd_devices"`
 	RootFSObjectType              string   `codec:"rootfs_object_type"`
 	RootFSObjectBucket            string   `codec:"rootfs_object_bucket"`
@@ -218,15 +224,16 @@ func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) d
 
 func defaultPluginConfig() *PluginConfig {
 	return &PluginConfig{
-		RunscPath:        "/usr/local/bin/runsc",
-		RunscRoot:        "/var/run/sandbox0/runsc",
-		ControlDir:       "/var/run/sandbox0/nomad-slots",
-		AllowedRootfsDir: "/var/lib/sandbox0/rootfs",
-		Platform:         "systrap",
-		Overlay2:         "none",
-		FileAccess:       "shared",
-		DirectFS:         true,
-		DevSmokeEnabled:  false,
+		RunscPath:               "/usr/local/bin/runsc",
+		RunscRoot:               "/var/run/sandbox0/runsc",
+		ControlDir:              "/var/run/sandbox0/nomad-slots",
+		AllowedRootfsDir:        "/var/lib/sandbox0/rootfs",
+		Platform:                "systrap",
+		Overlay2:                "none",
+		FileAccess:              "shared",
+		DirectFS:                true,
+		DevSmokeEnabled:         false,
+		RootFSMaxDirtyTailBytes: rootfssession.DefaultMaxDirtyTailBytes,
 	}
 }
 

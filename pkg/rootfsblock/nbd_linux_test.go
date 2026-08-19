@@ -5,9 +5,11 @@ package rootfsblock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -37,6 +39,17 @@ func TestKernelNBDGeometryUsesFilesystemSectorSize(t *testing.T) {
 	require.ErrorContains(t, err, "positive multiple")
 	_, err = kernelNBDGeometry(0)
 	require.ErrorContains(t, err, "positive multiple")
+}
+
+func TestKernelNBDCapacityErrorDoesNotPoisonRetirement(t *testing.T) {
+	device := &KernelNBDDevice{}
+	device.recordRequestError(fmt.Errorf("write: %w", &DirtyTailCapacityError{
+		UsedBytes: LogicalBlockSize, RequestedBytes: LogicalBlockSize, LimitBytes: LogicalBlockSize,
+	}))
+	require.NoError(t, device.requestErr)
+
+	device.recordRequestError(fmt.Errorf("write: %w", syscall.EIO))
+	require.ErrorIs(t, device.requestErr, syscall.EIO)
 }
 
 func TestKernelNBDWaitBlocksGoPreemptionSignal(t *testing.T) {

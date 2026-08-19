@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -46,6 +47,42 @@ func TestManagerEnsureResolveAndReleaseExactlyOnce(t *testing.T) {
 	stored, err := manager.load(request.Parent)
 	require.NoError(t, err)
 	require.Equal(t, stateTombstoned, stored.State)
+}
+
+func TestManagerEnforcesDirtyTailCapacityWithoutBlockingRetirement(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: rootfsblock.LogicalBlockSize,
+		Source: objects, Publisher: objects, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	defer manager.Close()
+	request := testStageRequest(t, objects, "dirty-tail-cap")
+
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x41}, rootfsblock.LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = branch.WriteAt([]byte{0x42}, rootfsblock.LogicalBlockSize)
+	require.ErrorIs(t, err, syscall.ENOSPC)
+
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "retire-cap"))
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+	result, err := manager.RetireResult(request.Parent, request.Identity, "retire-cap")
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.DurabilityComposite, result.DurabilityState)
+	sealed, err := rootfsblock.DecodeDescriptor(result.Descriptor)
+	require.NoError(t, err)
+	require.NotNil(t, sealed.CompositeTail)
+
+	_, err = New(Config{MaxDirtyTailBytes: -1, Source: objects, Publisher: objects, Runtime: runtime})
+	require.ErrorContains(t, err, "non-negative")
 }
 
 func TestManagerReservePersistsTokenlessIndependentRecoveryBinding(t *testing.T) {

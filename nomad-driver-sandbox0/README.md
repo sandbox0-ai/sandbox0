@@ -26,6 +26,8 @@ Implemented:
 - tokenless durable Stage and exact runsc/stable-mount consumer journal
 - independent Nomad node-allocation catalog reconciliation, including purged
   allocation fencing when the task-driver misses `DestroyTask`
+- per-session unpublished dirty-tail capacity with request-atomic `ENOSPC`
+  backpressure that survives daemon restart
 - policy-digest verification against the immutable RootFS handoff
 - RootFS bind, start, stop, delete, signal, and cleanup paths
 - one-shot claim and basic recovery semantics
@@ -124,3 +126,12 @@ and a token with `node:read,namespace:read-job` through
 `SANDBOX0_ROOTFS_OBJECT_SECRET_KEY`; do not place them in Nomad plugin HCL.
 The driver fingerprint remains unhealthy until the daemon socket, durable
 journal, and Nomad allocation catalog are all readable.
+
+`--max-dirty-tail-bytes` bounds the logical 4 KiB payload represented by one
+session's local branch WAL. Repeated overwrites count because they consume WAL
+until publication. Once exhausted, the daemon rejects an entire NBD write or
+write-zeroes request with `ENOSPC`; already completed writes remain readable
+and flushable, and planned retirement can still publish them. The default is
+10 GiB. Size the branch volume for node concurrency and set the explicit value
+in `rootfs-sessiond.env`; this node-local bound does not replace the separate
+regional PostgreSQL composite-tail backlog quota.

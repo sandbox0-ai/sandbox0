@@ -3,9 +3,11 @@ package rootfsblock
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -198,6 +200,102 @@ func TestBranchConcurrentBlockWrites(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, byte(block+1), payload[0])
 	}
+}
+
+func TestBranchDirtyTailCapacityRejectsWholeRequestAndSurvivesRestart(t *testing.T) {
+	base := bytes.Repeat([]byte{0x11}, 4*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	identity := testBranchIdentity(int64(len(base)))
+	options := BranchOptions{MaxDirtyTailBytes: 2 * LogicalBlockSize}
+	branch, err := OpenBranchWithOptions(path, identity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+
+	first := bytes.Repeat([]byte{0x22}, LogicalBlockSize)
+	_, err = branch.WriteAt(first, 0)
+	require.NoError(t, err)
+	before, err := os.Stat(path)
+	require.NoError(t, err)
+
+	// This request spans two mapping blocks, but only one record remains. The
+	// capacity error must not leave the first half appended.
+	n, err := branch.WriteAt(bytes.Repeat([]byte{0x33}, 2*LogicalBlockSize), LogicalBlockSize)
+	require.Zero(t, n)
+	var exhausted *DirtyTailCapacityError
+	require.ErrorAs(t, err, &exhausted)
+	require.ErrorIs(t, err, syscall.ENOSPC)
+	require.Equal(t, int64(LogicalBlockSize), exhausted.UsedBytes)
+	require.Equal(t, int64(2*LogicalBlockSize), exhausted.RequestedBytes)
+	require.Equal(t, int64(2*LogicalBlockSize), exhausted.LimitBytes)
+	after, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, before.Size(), after.Size())
+
+	usage := branch.DirtyTailUsage()
+	require.Equal(t, DirtyTailUsage{
+		DirtyBytes: LogicalBlockSize, JournalBytes: branchRecordBytes,
+		MaxBytes: 2 * LogicalBlockSize,
+	}, usage)
+	require.NoError(t, branch.Flush(), "capacity must not prevent flushing completed writes")
+	require.NoError(t, branch.Close())
+
+	reopened, err := OpenBranchWithOptions(path, identity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+	defer reopened.Close()
+	require.Equal(t, usage, reopened.DirtyTailUsage())
+	actual := make([]byte, 3*LogicalBlockSize)
+	_, err = reopened.ReadAt(actual, 0)
+	require.NoError(t, err)
+	require.Equal(t, first, actual[:LogicalBlockSize])
+	require.Equal(t, base[LogicalBlockSize:3*LogicalBlockSize], actual[LogicalBlockSize:])
+}
+
+func TestBranchDirtyTailCapacityAppliesToRepeatedAndZeroWrites(t *testing.T) {
+	base := bytes.Repeat([]byte{0x55}, 3*LogicalBlockSize)
+	branch, err := OpenBranchWithOptions(
+		filepath.Join(t.TempDir(), "branch.log"), testBranchIdentity(int64(len(base))),
+		bytes.NewReader(base), BranchOptions{MaxDirtyTailBytes: 2 * LogicalBlockSize},
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x66}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x77}, LogicalBlockSize), 0)
+	require.NoError(t, err, "repeated overwrites consume durable journal capacity")
+	before := branch.DirtyTailUsage()
+	require.ErrorIs(t, branch.WriteZeroes(LogicalBlockSize-1, 2), syscall.ENOSPC)
+	require.Equal(t, before, branch.DirtyTailUsage(), "zero request must be admitted atomically")
+	actual := make([]byte, LogicalBlockSize+1)
+	_, err = branch.ReadAt(actual, 0)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x77), actual[LogicalBlockSize-1])
+	require.Equal(t, byte(0x55), actual[LogicalBlockSize])
+}
+
+func TestBranchDirtyTailOptionsAllowRetirementAfterLimitReduction(t *testing.T) {
+	base := make([]byte, 2*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	identity := testBranchIdentity(int64(len(base)))
+	branch, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{1}, 2*LogicalBlockSize), 0)
+	require.NoError(t, err)
+	require.NoError(t, branch.Flush())
+	require.NoError(t, branch.Close())
+
+	reopened, err := OpenBranchWithOptions(path, identity, bytes.NewReader(base), BranchOptions{MaxDirtyTailBytes: LogicalBlockSize})
+	require.NoError(t, err)
+	defer reopened.Close()
+	_, err = reopened.WriteAt([]byte{2}, 0)
+	require.ErrorIs(t, err, syscall.ENOSPC)
+	updates, err := reopened.DurableUpdates()
+	require.NoError(t, err, "a lowered limit must not prevent terminal publication")
+	require.Len(t, updates, 2)
+
+	_, err = OpenBranchWithOptions(path+"-invalid", identity, bytes.NewReader(base), BranchOptions{MaxDirtyTailBytes: -1})
+	require.ErrorContains(t, err, "non-negative")
+	var exhausted *DirtyTailCapacityError
+	require.False(t, errors.As(err, &exhausted))
 }
 
 func testBranchIdentity(logicalSize int64) BranchIdentity {

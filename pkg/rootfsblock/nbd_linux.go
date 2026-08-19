@@ -388,6 +388,13 @@ func (d *KernelNBDDevice) recordRequestError(err error) {
 	if err == nil {
 		return
 	}
+	// ENOSPC is a completed, guest-visible capacity decision. XFS may recover
+	// after reporting it to the caller, and retaining it as a fatal transport
+	// error would make an otherwise consistent branch impossible to retire.
+	// Integrity and I/O errors remain sticky and fail terminal cleanup.
+	if errors.Is(err, syscall.ENOSPC) {
+		return
+	}
 	d.resultMu.Lock()
 	defer d.resultMu.Unlock()
 	if d.requestErr == nil {

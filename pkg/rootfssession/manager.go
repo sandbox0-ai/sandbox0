@@ -21,6 +21,10 @@ import (
 )
 
 const (
+	// DefaultMaxDirtyTailBytes bounds one active writer to 10 GiB of local,
+	// unpublished block-record payload. Operators must also size the node's
+	// branch volume for configured session concurrency.
+	DefaultMaxDirtyTailBytes       = int64(10 << 30)
 	legacySessionSchemaVersion     = 2
 	allocationSessionSchemaVersion = 3
 	sessionSchemaVersion           = 4
@@ -96,12 +100,13 @@ type CrashFencePreAttachmentHostInspector interface {
 // StatePath and BranchRoot must survive process restarts; MountRoot is boot
 // local and must be in the same mount namespace as containerd.
 type Config struct {
-	StatePath  string
-	BranchRoot string
-	MountRoot  string
-	Source     rootfsblock.RangeSource
-	Publisher  rootfsblock.ImmutableObjectPublisher
-	Runtime    HostRuntime
+	StatePath         string
+	BranchRoot        string
+	MountRoot         string
+	MaxDirtyTailBytes int64
+	Source            rootfsblock.RangeSource
+	Publisher         rootfsblock.ImmutableObjectPublisher
+	Runtime           HostRuntime
 }
 
 // Mount is the storage-owned merged root exported to the Snapshotter's stable
@@ -213,6 +218,7 @@ type Manager struct {
 	publisher  rootfsblock.ImmutableObjectPublisher
 	readCache  *rootfsblock.ReadCache
 	runtime    HostRuntime
+	maxDirty   int64
 	mu         sync.Mutex
 	live       map[string]*liveSession
 	locks      sync.Map
@@ -223,6 +229,12 @@ type Manager struct {
 func New(config Config) (*Manager, error) {
 	if config.Source == nil || config.Publisher == nil || config.Runtime == nil {
 		return nil, fmt.Errorf("range source, immutable publisher, and host runtime are required")
+	}
+	if config.MaxDirtyTailBytes < 0 {
+		return nil, fmt.Errorf("maximum dirty tail bytes must be non-negative")
+	}
+	if config.MaxDirtyTailBytes == 0 {
+		config.MaxDirtyTailBytes = DefaultMaxDirtyTailBytes
 	}
 	statePath, err := privatePath(config.StatePath, false)
 	if err != nil {
@@ -258,7 +270,8 @@ func New(config Config) (*Manager, error) {
 	lifetime, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		db: db, branchRoot: branchRoot, mountRoot: mountRoot,
-		source: config.Source, publisher: config.Publisher, readCache: readCache, runtime: config.Runtime, live: make(map[string]*liveSession),
+		source: config.Source, publisher: config.Publisher, readCache: readCache,
+		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes, live: make(map[string]*liveSession),
 		lifetime: lifetime, cancel: cancel,
 	}, nil
 }
@@ -658,11 +671,11 @@ func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest
 	if err != nil {
 		return Mount{}, m.fail(current, fmt.Errorf("open immutable generation: %w", err))
 	}
-	branch, err := rootfsblock.OpenBranch(current.BranchPath, rootfsblock.BranchIdentity{
+	branch, err := rootfsblock.OpenBranchWithOptions(current.BranchPath, rootfsblock.BranchIdentity{
 		Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 		GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 		LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: durable.Generation.CurrentBlockHead,
-	}, reader)
+	}, reader, rootfsblock.BranchOptions{MaxDirtyTailBytes: m.maxDirty})
 	if err != nil {
 		return Mount{}, m.fail(current, fmt.Errorf("open writable branch: %w", err))
 	}
@@ -1255,11 +1268,11 @@ func (m *Manager) reopenBranch(current record) (*rootfsblock.Branch, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open session base generation: %w", err)
 	}
-	branch, err := rootfsblock.OpenBranch(current.BranchPath, rootfsblock.BranchIdentity{
+	branch, err := rootfsblock.OpenBranchWithOptions(current.BranchPath, rootfsblock.BranchIdentity{
 		Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 		GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 		LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: descriptor.MappingRoot.RootDigest,
-	}, reader)
+	}, reader, rootfsblock.BranchOptions{MaxDirtyTailBytes: m.maxDirty})
 	if err != nil {
 		return nil, fmt.Errorf("reopen session branch: %w", err)
 	}

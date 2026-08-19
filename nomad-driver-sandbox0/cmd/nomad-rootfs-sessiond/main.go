@@ -40,6 +40,7 @@ func main() {
 	flag.BoolVar(&config.DirectFS, "directfs", true, "enable gVisor DirectFS")
 	flag.StringVar(&config.RootFSStatePath, "state", "/var/lib/sandbox0/rootfs-sessions.db", "durable session journal")
 	flag.StringVar(&config.RootFSBranchRoot, "branch-root", "/var/lib/sandbox0/rootfs-branches", "durable branch journal root")
+	flag.Int64Var(&config.RootFSMaxDirtyTailBytes, "max-dirty-tail-bytes", 10<<30, "maximum unpublished local dirty-tail payload per session")
 	flag.StringVar(&config.RootFSMountRoot, "mount-root", "/run/sandbox0/rootfs", "boot-local storage mount root")
 	flag.StringVar(&config.RootFSConsumerMountRoot, "consumer-mount-root", "/opt/nomad", "allowed Nomad task mount root")
 	flag.StringVar(&devices, "nbd-devices", "/dev/nbd0", "comma-separated NBD device paths")

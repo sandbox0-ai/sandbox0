@@ -65,6 +65,9 @@ func TestRootFSSessionDaemonClientModeNeedsNoStorageCredentialsInPlugin(t *testi
 		RootFSMountRoot: "/run/sandbox0/rootfs", RootFSConsumerMountRoot: "/opt/nomad",
 	}
 	require.NoError(t, validateRootFSConfig(config))
+	config.RootFSMaxDirtyTailBytes = -1
+	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_max_dirty_tail_bytes")
+	config.RootFSMaxDirtyTailBytes = 0
 	config.RootFSConsumerMountRoot = ""
 	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_consumer_mount_root")
 }

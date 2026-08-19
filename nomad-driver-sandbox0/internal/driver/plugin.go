@@ -519,6 +519,7 @@ func (p *Plugin) DestroyTask(taskID string, force bool) error {
 	}
 	if err := handle.Close(force); err != nil {
 		p.logger.Error("task cleanup failed", "task_id", taskID, "error", err)
+		return fmt.Errorf("cleanup task %s: %w", taskID, err)
 	}
 	p.tasks.Delete(taskID)
 	return nil

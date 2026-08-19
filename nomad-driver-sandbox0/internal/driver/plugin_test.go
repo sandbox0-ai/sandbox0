@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -79,6 +80,38 @@ func TestStartTaskReturnsWarmSlotAndServesControlSocket(t *testing.T) {
 	}
 	if err := plugin.DestroyTask(taskConfig.ID, true); err != nil {
 		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
+func TestDestroyTaskRetainsHandleUntilCleanupSucceeds(t *testing.T) {
+	runner := newFakeRunsc()
+	cleanupFailure := fmt.Errorf("delete runsc state")
+	runner.deleteErr = cleanupFailure
+	plugin := newPlugin(hclog.NewNullLogger(), func(PluginConfig) Runsc { return runner }).(*Plugin)
+	taskID := "cleanup-retry-task"
+	handle := newTaskHandle(taskHandleOptions{
+		taskConfig: &drivers.TaskConfig{ID: taskID}, bundleDir: t.TempDir(),
+		containerID: safeContainerID(taskID), rootMount: filepath.Join(t.TempDir(), "root"),
+		socketPath: filepath.Join(t.TempDir(), "control.sock"), runner: runner,
+		mounter: &fakeMounter{}, logger: hclog.NewNullLogger(),
+	})
+	handle.setPhase(phaseExited)
+	plugin.tasks.Set(taskID, handle)
+
+	if err := plugin.DestroyTask(taskID, true); !errors.Is(err, cleanupFailure) {
+		t.Fatalf("first DestroyTask() error = %v, want %v", err, cleanupFailure)
+	}
+	if _, ok := plugin.tasks.Get(taskID); !ok {
+		t.Fatal("DestroyTask removed the handle after failed cleanup")
+	}
+	runner.mu.Lock()
+	runner.deleteErr = nil
+	runner.mu.Unlock()
+	if err := plugin.DestroyTask(taskID, true); err != nil {
+		t.Fatalf("retry DestroyTask() error = %v", err)
+	}
+	if _, ok := plugin.tasks.Get(taskID); ok {
+		t.Fatal("DestroyTask retained the handle after successful cleanup")
 	}
 }
 

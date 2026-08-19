@@ -43,6 +43,7 @@ type fakeRunsc struct {
 	waitErr      error
 	waitResult   WaitResult
 	stateErr     error
+	deleteErr    error
 	waitReleased chan struct{}
 	releaseOnce  sync.Once
 }
@@ -122,6 +123,9 @@ func (r *fakeRunsc) Delete(_ context.Context, _ string, force bool) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.deleteErr != nil {
+		return r.deleteErr
+	}
 	r.state = "deleted"
 	select {
 	case <-r.waitReleased:
@@ -157,6 +161,7 @@ type fakeRootFSRuntime struct {
 	source        string
 	ensureErr     error
 	crashErr      error
+	retireErr     error
 	ensureCalls   int
 	retireCalls   int
 	crashCalls    int
@@ -211,6 +216,9 @@ func (r *fakeRootFSRuntime) Retire(_ context.Context, request rootfshandoff.Stag
 	r.retireCalls++
 	r.lastParent = request.Parent
 	r.lastOperation = operationID
+	if r.retireErr != nil {
+		return rootfssession.RetireResult{}, r.retireErr
+	}
 	return rootfssession.RetireResult{Parent: request.Parent, OperationID: operationID}, nil
 }
 
@@ -756,6 +764,44 @@ func TestStopActiveContainerAndCloseCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(fixture.bundleDir); !os.IsNotExist(err) {
 		t.Fatalf("bundle dir still exists after Close(): %v", err)
+	}
+}
+
+func TestCloseRetriesRootFSRetirementWithStableOperation(t *testing.T) {
+	fixture := newTestFixture(t)
+	retireFailure := errors.New("XFS mount is busy")
+	runtime := &fakeRootFSRuntime{retireErr: retireFailure}
+	stage := rootfshandoff.StageRequest{
+		Parent: "sha256:" + strings.Repeat("d", 64),
+		Identity: rootfshandoff.Identity{
+			RootFSID: "retry-rootfs", WriterEpoch: 9, WriterGrantID: "retry-grant",
+		},
+	}
+	fixture.handle.mu.Lock()
+	fixture.handle.rootfs = runtime
+	fixture.handle.stage = &stage
+	fixture.handle.rootMounted = true
+	fixture.handle.phase = phaseExited
+	fixture.handle.mu.Unlock()
+
+	if err := fixture.handle.Close(true); !errors.Is(err, retireFailure) {
+		t.Fatalf("first Close() error = %v, want %v", err, retireFailure)
+	}
+	runtime.mu.Lock()
+	firstOperation := runtime.lastOperation
+	runtime.retireErr = nil
+	runtime.mu.Unlock()
+	if firstOperation != retireOperationID(stage) {
+		t.Fatalf("first retire operation = %q, want %q", firstOperation, retireOperationID(stage))
+	}
+	if err := fixture.handle.Close(true); err != nil {
+		t.Fatalf("retry Close() error = %v", err)
+	}
+	runtime.mu.Lock()
+	retireCalls, secondOperation := runtime.retireCalls, runtime.lastOperation
+	runtime.mu.Unlock()
+	if retireCalls != 2 || secondOperation != firstOperation {
+		t.Fatalf("retire calls = %d, operation = %q, want two calls with %q", retireCalls, secondOperation, firstOperation)
 	}
 }
 

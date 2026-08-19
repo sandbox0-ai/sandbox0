@@ -17,6 +17,7 @@ package driver
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -156,13 +157,13 @@ func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageR
 	}
 	// Sealing a metadata-heavy branch and publishing its immutable objects can
 	// take longer than one lease TTL. Keep the exact writer lease alive until
-	// the regional terminal CAS has completed; the physical session is revoked
-	// before PublishWriterGrant, so renewal does not extend user write access.
-	defer r.stopRenewal(request.Parent)
+	// the regional terminal CAS has completed. A failed cleanup remains
+	// retryable with the same operation, so it must keep renewing until either a
+	// retry publishes the head or crash recovery fences the writer.
 	if err := r.sessions.BeginRetire(request.Parent, request.Identity, operationID); err != nil {
 		return rootfssession.RetireResult{}, err
 	}
-	if err := r.sessions.Release(ctx, request.Identity); err != nil {
+	if err := r.releaseRetiringSession(ctx, request); err != nil {
 		return rootfssession.RetireResult{}, err
 	}
 	result, err := r.sessions.RetireResult(request.Parent, request.Identity, operationID)
@@ -194,7 +195,31 @@ func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageR
 			return result, fmt.Errorf("publish regional writer retirement: %w", err)
 		}
 	}
+	r.stopRenewal(request.Parent)
 	return result, nil
+}
+
+func (r *rootfsRuntime) releaseRetiringSession(ctx context.Context, request rootfshandoff.StageRequest) error {
+	delay := 100 * time.Millisecond
+	for {
+		err := r.sessions.Release(ctx, request.Identity)
+		if err == nil {
+			return nil
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(err, fmt.Errorf("retry retiring RootFS session: %w", ctx.Err()))
+		case <-timer.C:
+		}
+		if delay < time.Second {
+			delay *= 2
+			if delay > time.Second {
+				delay = time.Second
+			}
+		}
+	}
 }
 
 // CrashFence abandons an unsealed writer only after the regional lease fence
@@ -392,8 +417,4 @@ func validateRootFSConfig(config *PluginConfig) error {
 		}
 	}
 	return nil
-}
-
-func newRetireOperationID() string {
-	return fmt.Sprintf("nomad-retire-%d", time.Now().UnixNano())
 }

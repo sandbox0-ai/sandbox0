@@ -90,6 +90,9 @@ type taskHandleOptions struct {
 
 type taskHandle struct {
 	mu sync.Mutex
+	// closeMu keeps concurrent Nomad GC calls from treating an in-progress,
+	// retryable cleanup as complete.
+	closeMu sync.Mutex
 
 	taskConfig        *drivers.TaskConfig
 	driverConfig      TaskConfig
@@ -342,7 +345,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if _, err := h.rootfs.Retire(ctx, *durableStage, newRetireOperationID()); err != nil {
+		if _, err := h.rootfs.Retire(ctx, *durableStage, retireOperationID(*durableStage)); err != nil {
 			h.logger.Error("failed RootFS abort after claim failure", "error", err)
 		}
 	}()
@@ -621,6 +624,9 @@ func (h *taskHandle) Signal(signal string) error {
 
 // Close unmounts D, deletes runsc state, and removes the private bundle.
 func (h *taskHandle) Close(force bool) error {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
@@ -653,7 +659,7 @@ func (h *taskHandle) Close(force bool) error {
 		if phase == phasePoisoned {
 			err = h.crashAbandonPersistedRootFS(errors.New("poisoned RootFS writer was crash-abandoned during task cleanup"))
 		} else {
-			_, err = h.rootfs.Retire(retireCtx, *stage, newRetireOperationID())
+			_, err = h.rootfs.Retire(retireCtx, *stage, retireOperationID(*stage))
 		}
 		if err != nil {
 			retireCancel()
@@ -684,6 +690,11 @@ func (h *taskHandle) Close(force bool) error {
 		h.completedAt = time.Now()
 	}
 	closeDoneLocked(h.done)
+	if firstErr != nil {
+		h.closed = false
+	} else {
+		h.rootMounted = false
+	}
 	h.mu.Unlock()
 	return firstErr
 }
@@ -858,6 +869,12 @@ func crashOperationID(stage rootfshandoff.StageRequest) string {
 	payload := fmt.Sprintf("%s\x00%s\x00%d", stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
 	sum := sha256.Sum256([]byte(payload))
 	return "nomad-crash-" + hex.EncodeToString(sum[:16])
+}
+
+func retireOperationID(stage rootfshandoff.StageRequest) string {
+	payload := fmt.Sprintf("%s\x00%s\x00%d", stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
+	sum := sha256.Sum256([]byte(payload))
+	return "nomad-retire-" + hex.EncodeToString(sum[:16])
 }
 
 func (h *taskHandle) setPhase(phase slotPhase) {

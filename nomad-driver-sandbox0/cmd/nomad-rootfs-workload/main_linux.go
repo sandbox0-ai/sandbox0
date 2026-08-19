@@ -73,16 +73,27 @@ type result struct {
 func main() {
 	mode := flag.String("mode", "mutate", "mutate or verify")
 	root := flag.String("root", "/sandbox0-workload", "absolute workload directory")
+	zeroFlat := flag.Int("zero-flat", 20_000, "zero-byte files in one flat directory")
+	zeroDeep := flag.Int("zero-deep", 5_000, "zero-byte files distributed over a deep tree")
+	fourKiB := flag.Int("four-kib", 2_000, "4 KiB files")
+	sixtyFourKiB := flag.Int("sixty-four-kib", 200, "64 KiB files")
+	fsxOperations := flag.Int("fsx-operations", 12_000, "deterministic fsx-like operations")
 	flag.Parse()
 	if !filepath.IsAbs(*root) || filepath.Clean(*root) == "/" {
 		fatalf("root must be a safe absolute path")
+	}
+	if *zeroFlat < 2 || *zeroDeep < 0 || *fourKiB < 0 || *sixtyFourKiB < 0 || *fsxOperations <= 0 {
+		fatalf("workload counts are invalid")
 	}
 	started := time.Now().UTC()
 	output := result{Mode: *mode, StartedAt: started, PhaseDurationMS: make(map[string]int64)}
 	var err error
 	switch *mode {
 	case "mutate":
-		output.Manifest, err = mutate(*root, output.PhaseDurationMS)
+		output.Manifest, err = mutate(*root, output.PhaseDurationMS, manifest{
+			ZeroFlatCount: *zeroFlat, ZeroDeepCount: *zeroDeep,
+			FourKiBCount: *fourKiB, SixtyFourKiBCount: *sixtyFourKiB,
+		}, *fsxOperations)
 	case "verify":
 		output.Manifest, err = verify(*root, output.PhaseDurationMS)
 	default:
@@ -100,25 +111,25 @@ func main() {
 	}
 }
 
-func mutate(root string, timings map[string]int64) (manifest, error) {
+func mutate(root string, timings map[string]int64, counts manifest, fsxOperations int) (manifest, error) {
 	if err := os.RemoveAll(root); err != nil {
 		return manifest{}, err
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return manifest{}, err
 	}
-	out := manifest{
-		Version: 1, UserXAttr: "sandbox0-xattr-v1",
-		MetadataUID: uint32(os.Geteuid()), MetadataGID: uint32(os.Getegid()), MetadataMode: 0o641,
-		ZeroFlatCount: 20000, ZeroDeepCount: 5000,
-		FourKiBCount: 2000, SixtyFourKiBCount: 200,
-	}
+	out := counts
+	out.Version = 1
+	out.UserXAttr = "sandbox0-xattr-v1"
+	out.MetadataUID = uint32(os.Geteuid())
+	out.MetadataGID = uint32(os.Getegid())
+	out.MetadataMode = 0o641
 	if err := timed(timings, "small_files", func() error { return createSmallFiles(root, out) }); err != nil {
 		return manifest{}, err
 	}
 	if err := timed(timings, "fsx", func() error {
 		var err error
-		out.FSXSHA256, out.FSXSize, err = runFSX(filepath.Join(root, "fsx.bin"), 12000)
+		out.FSXSHA256, out.FSXSize, err = runFSX(filepath.Join(root, "fsx.bin"), fsxOperations)
 		return err
 	}); err != nil {
 		return manifest{}, err
@@ -241,12 +252,8 @@ func createSmallFiles(root string, counts manifest) error {
 }
 
 func verifySmallFiles(root string, counts manifest) error {
-	entries, err := os.ReadDir(filepath.Join(root, "zero-flat"))
-	if err != nil {
-		return err
-	}
-	if len(entries) != counts.ZeroFlatCount-1 {
-		return fmt.Errorf("zero-flat count %d, want %d", len(entries), counts.ZeroFlatCount-1)
+	if err := verifyTreeFiles(filepath.Join(root, "zero-flat"), counts.ZeroFlatCount-1, 0, 0); err != nil {
+		return fmt.Errorf("zero-flat: %w", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "zero-flat", "renamed-000000")); err != nil {
 		return err
@@ -254,14 +261,62 @@ func verifySmallFiles(root string, counts manifest) error {
 	if _, err := os.Stat(filepath.Join(root, "zero-flat", "000001")); !os.IsNotExist(err) {
 		return fmt.Errorf("unlinked small file is visible")
 	}
-	for path, count := range map[string]int{"4k": counts.FourKiBCount, "64k": counts.SixtyFourKiBCount} {
-		entries, err := os.ReadDir(filepath.Join(root, path))
+	if err := verifyTreeFiles(filepath.Join(root, "zero-deep"), counts.ZeroDeepCount, 0, 0); err != nil {
+		return fmt.Errorf("zero-deep: %w", err)
+	}
+	if err := verifyTreeFiles(filepath.Join(root, "4k"), counts.FourKiBCount, 4096, 0x4a); err != nil {
+		return fmt.Errorf("4k: %w", err)
+	}
+	if err := verifyTreeFiles(filepath.Join(root, "64k"), counts.SixtyFourKiBCount, 64<<10, 0x64); err != nil {
+		return fmt.Errorf("64k: %w", err)
+	}
+	return nil
+}
+
+func verifyTreeFiles(root string, expectedCount int, expectedSize int64, expectedByte byte) error {
+	count := 0
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if _, err := os.ReadDir(path); err != nil {
+				return err
+			}
+			return nil
+		}
+		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
-		if len(entries) != count {
-			return fmt.Errorf("%s count %d, want %d", path, len(entries), count)
+		if !info.Mode().IsRegular() || info.Size() != expectedSize {
+			return fmt.Errorf("%s has mode %s and size %d, want regular size %d", path, info.Mode(), info.Size(), expectedSize)
 		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		var first [1]byte
+		read, readErr := file.Read(first[:])
+		closeErr := file.Close()
+		if expectedSize == 0 {
+			if read != 0 || readErr != io.EOF {
+				return fmt.Errorf("zero-byte file %s returned %d bytes and %v", path, read, readErr)
+			}
+		} else if read != 1 || readErr != nil || first[0] != expectedByte {
+			return fmt.Errorf("file %s first byte/read = %x/%d/%v", path, first[0], read, readErr)
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		count++
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if count != expectedCount {
+		return fmt.Errorf("file count %d, want %d", count, expectedCount)
 	}
 	return nil
 }

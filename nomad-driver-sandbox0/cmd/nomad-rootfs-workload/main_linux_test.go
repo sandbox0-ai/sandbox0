@@ -68,6 +68,24 @@ func TestExerciseInotify(t *testing.T) {
 	}
 }
 
+func TestCreateAndVerifySmallFileTrees(t *testing.T) {
+	root := t.TempDir()
+	counts := manifest{ZeroFlatCount: 5, ZeroDeepCount: 7, FourKiBCount: 3, SixtyFourKiBCount: 2}
+	if err := createSmallFiles(root, counts); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySmallFiles(root, counts); err != nil {
+		t.Fatal(err)
+	}
+	deepFile := filepath.Join(root, "zero-deep", "00", "00", "000000")
+	if err := os.WriteFile(deepFile, []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifySmallFiles(root, counts); err == nil {
+		t.Fatal("verifySmallFiles accepted a corrupted deep-tree file")
+	}
+}
+
 func TestVerifyFileDigest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "payload")
 	payload := []byte("sandbox0-rootfs")

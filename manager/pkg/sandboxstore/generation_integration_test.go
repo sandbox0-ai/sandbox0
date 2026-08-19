@@ -242,6 +242,48 @@ func TestCompleteRootFSWriterRetirePublishesGenerationAndPauseAtomically(t *test
 	require.Equal(t, next.CurrentBlockHead, loaded.CurrentBlockHead)
 }
 
+func TestForkRootFSFilesystemSharesBlockGenerationAndIssuesChildWriter(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-fork-source", "team-1")))
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-fork-target", "team-1")))
+
+	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	require.NoError(t, err)
+	source, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+		SandboxID: "sandbox-fork-source", TeamID: "team-1",
+		SourceOCIRef: artifact.SourceOCIRef, SourceOCIDigest: artifact.SourceOCIDigest,
+		BaseArtifactDigest: artifact.ArtifactDigest,
+	})
+	require.NoError(t, err)
+
+	target, err := store.ForkRootFSFilesystem(ctx, &ForkRootFSFilesystemRequest{
+		SourceSandboxID: "sandbox-fork-source", TargetSandboxID: "sandbox-fork-target",
+	})
+	require.NoError(t, err)
+	require.Equal(t, source.ID, target.SourceFilesystemID)
+	require.Equal(t, initial.ID, target.HeadGenerationID)
+	require.Equal(t, RootFSStorageFormatBlockCOWV1, target.StorageFormat)
+	require.Equal(t, int64(0), target.WriterEpoch)
+
+	var generationCount int
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM manager.rootfs_generations WHERE generation_id = $1
+	`, initial.ID).Scan(&generationCount))
+	require.Equal(t, 1, generationCount)
+
+	issue := rootFSWriterGrantTestIssueRequest(
+		"sandbox-fork-target", "grant-fork-child", "claim-fork-child", "slot-fork-child", bytes.Repeat([]byte{0x66}, 32),
+	)
+	issue.ExpectedFilesystemID = target.ID
+	issue.InitialGenerationID = initial.ID
+	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
+	require.NoError(t, err)
+	require.Equal(t, initial.ID, issued.Grant.InitialGenerationID)
+	require.Equal(t, int64(1), issued.Grant.WriterEpoch)
+}
+
 func assertBlockGenerationPublishState(
 	t *testing.T,
 	ctx context.Context,

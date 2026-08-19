@@ -343,11 +343,13 @@ func forkRootFSFilesystem(ctx context.Context, db rootFSStoreDB, req *ForkRootFS
 	}
 	filesystem, err := scanRootFSFilesystem(db.QueryRow(ctx, `
 		WITH source AS (
-			SELECT f.filesystem_id, f.team_id, f.head_layer_id, f.base_image_ref, f.base_image_digest
+			SELECT f.filesystem_id, f.team_id, f.head_layer_id, f.head_generation_id,
+				f.storage_format, f.base_image_ref, f.base_image_digest,
+				f.base_artifact_digest, f.format_generation
 			FROM manager.sandbox_rootfs_bindings b
 			JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
 			WHERE b.sandbox_id = $1
-				AND f.head_layer_id IS NOT NULL
+				AND (f.head_layer_id IS NOT NULL OR f.head_generation_id IS NOT NULL)
 		),
 		target_sandbox AS (
 			SELECT sandbox_id, COALESCE(NULLIF($3, ''), team_id) AS team_id
@@ -357,15 +359,22 @@ func forkRootFSFilesystem(ctx context.Context, db rootFSStoreDB, req *ForkRootFS
 		created AS (
 			INSERT INTO manager.rootfs_filesystems (
 				filesystem_id, team_id, source_filesystem_id, head_layer_id,
-				base_image_ref, base_image_digest, created_at, updated_at
+				head_generation_id, writer_epoch, storage_format, base_image_ref,
+				base_image_digest, base_artifact_digest, format_generation,
+				created_at, updated_at
 			)
 			SELECT
 				$2,
 				target_sandbox.team_id,
 				source.filesystem_id,
 				source.head_layer_id,
+				source.head_generation_id,
+				0,
+				source.storage_format,
 				source.base_image_ref,
 				source.base_image_digest,
+				source.base_artifact_digest,
+				source.format_generation,
 				NOW(),
 				NOW()
 			FROM source

@@ -26,6 +26,7 @@ import (
 type specOptions struct {
 	Command   string
 	Args      []string
+	Env       []string
 	AllocID   string
 	TaskID    string
 	NetNSPath string
@@ -58,6 +59,7 @@ func buildSpec(options specOptions) specs.Spec {
 		},
 		Rlimits: []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 1024, Soft: 1024}},
 	}
+	process.Env = append(process.Env, options.Env...)
 
 	namespaces := []specs.LinuxNamespace{
 		{Type: specs.PIDNamespace},

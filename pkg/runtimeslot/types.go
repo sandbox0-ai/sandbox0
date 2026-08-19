@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 )
 
 const (
@@ -22,6 +24,9 @@ const (
 	NodeClaimControlPath        = "/claim"
 	NodeCommandReadyControlPath = "/command-ready"
 	CommandReadyProofVersion    = 1
+	NomadProcdPort              = 49983
+	NomadProcdPortLabel         = "procd"
+	NomadTaskName               = "slot"
 
 	readyPathSuffix        = "/ready"
 	heartbeatPathSuffix    = "/heartbeat"
@@ -40,6 +45,7 @@ type NodeClaimControlRequest struct {
 	WriterEpoch   string                      `json:"writer_epoch"`
 	Stage         *rootfshandoff.StageRequest `json:"stage,omitempty"`
 	NetworkPolicy string                      `json:"network_policy,omitempty"`
+	Runtime       *runtimecontrol.Assignment  `json:"runtime,omitempty"`
 }
 
 // ValidateRegional rejects development-only claims before they reach the
@@ -71,6 +77,22 @@ func (r NodeClaimControlRequest) ValidateRegional() error {
 	}
 	if NetworkPolicyDigest(r.NetworkPolicy) != r.Stage.ExpectedPolicyToken.PolicyDigest {
 		return fmt.Errorf("network_policy does not match stage policy token")
+	}
+	if r.Runtime == nil {
+		return fmt.Errorf("runtime assignment is required for regional claims")
+	}
+	if err := r.Runtime.Validate(); err != nil {
+		return fmt.Errorf("runtime assignment: %w", err)
+	}
+	if r.Runtime.EnvVars[runtimecontrol.EnvSandboxID] != r.Runtime.SandboxID {
+		return fmt.Errorf("runtime assignment sandbox environment does not match sandbox_id")
+	}
+	payload, err := json.Marshal(r.Runtime)
+	if err != nil {
+		return fmt.Errorf("encode runtime assignment: %w", err)
+	}
+	if len(payload) > 64<<10 {
+		return fmt.Errorf("runtime assignment exceeds 64 KiB")
 	}
 	return nil
 }
@@ -107,6 +129,7 @@ type CommandReadyProof struct {
 	LaunchAttempt      string `json:"launch_attempt"`
 	RunscContainerID   string `json:"runsc_container_id"`
 	ProcdInstanceID    string `json:"procd_instance_id"`
+	ProcdAddress       string `json:"procd_address"`
 	RequestMethod      string `json:"request_method"`
 	RequestPath        string `json:"request_path"`
 	ResponseStatus     int    `json:"response_status"`
@@ -126,7 +149,7 @@ func (p CommandReadyProof) Validate() error {
 	for name, value := range map[string]string{
 		"slot_id": p.SlotID, "operation_id": p.OperationID, "claim_id": p.ClaimID,
 		"launch_attempt": p.LaunchAttempt, "runsc_container_id": p.RunscContainerID,
-		"procd_instance_id": p.ProcdInstanceID,
+		"procd_instance_id": p.ProcdInstanceID, "procd_address": p.ProcdAddress,
 	} {
 		if err := validateRequiredID(name, value); err != nil {
 			return err
@@ -135,8 +158,40 @@ func (p CommandReadyProof) Validate() error {
 	if p.RequestMethod != "PUT" || p.RequestPath != ProcdCommandReadyProbePath || p.ResponseStatus != 200 {
 		return fmt.Errorf("command-ready proof does not describe the canonical procd probe")
 	}
+	if err := validateProcdAddress(p.ProcdAddress); err != nil {
+		return err
+	}
 	if _, err := DecodeProof("response_body_digest", p.ResponseBodyDigest); err != nil {
 		return err
+	}
+	return nil
+}
+
+// NomadProcdAddress returns the canonical allocation-local procd origin.
+func NomadProcdAddress(ip string) (string, error) {
+	if ip != strings.TrimSpace(ip) {
+		return "", fmt.Errorf("procd IP must be canonical")
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.String() != ip {
+		return "", fmt.Errorf("procd IP must be canonical")
+	}
+	return "http://" + net.JoinHostPort(parsed.String(), strconv.Itoa(NomadProcdPort)), nil
+}
+
+func validateProcdAddress(address string) error {
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || parsed.Path != "" {
+		return fmt.Errorf("procd_address must be a canonical HTTP origin")
+	}
+	host, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil || port != strconv.Itoa(NomadProcdPort) {
+		return fmt.Errorf("procd_address must use the Nomad procd port")
+	}
+	want, err := NomadProcdAddress(host)
+	if err != nil || want != address {
+		return fmt.Errorf("procd_address must be canonical")
 	}
 	return nil
 }

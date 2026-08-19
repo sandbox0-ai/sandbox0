@@ -21,9 +21,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +34,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers"
 	slotauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"golang.org/x/sys/unix"
 )
@@ -60,6 +63,7 @@ type runtimeSlotLifecycle struct {
 	registration protocol.RegistrationRequest
 	readiness    protocol.ReadinessRequest
 	heartbeat    protocol.HeartbeatRequest
+	procdAddress string
 	logger       hclog.Logger
 }
 
@@ -73,6 +77,8 @@ type runtimeCompatibilityProof struct {
 	FileAccess       string `json:"file_access"`
 	DirectFS         bool   `json:"directfs"`
 	Command          string `json:"command"`
+	ProcdPort        int    `json:"procd_port"`
+	RuntimeMode      string `json:"runtime_mode"`
 	CPUPeriod        int64  `json:"cpu_period"`
 	CPUQuota         int64  `json:"cpu_quota"`
 	CPUShares        int64  `json:"cpu_shares"`
@@ -94,6 +100,8 @@ type networkReadyProof struct {
 	NetNSIdentity string `json:"netns_identity"`
 	NetworkChain  string `json:"network_chain"`
 	DefaultPolicy string `json:"default_policy"`
+	AllocationIP  string `json:"allocation_ip"`
+	ProcdPort     int    `json:"procd_port"`
 }
 
 type storageReadyProof struct {
@@ -250,8 +258,15 @@ func newRuntimeSlotLifecycle(
 			return nil, fmt.Errorf("%s is required for a regional runtime slot", name)
 		}
 	}
+	if task.Name != protocol.NomadTaskName {
+		return nil, fmt.Errorf("regional runtime slot task name must be %q", protocol.NomadTaskName)
+	}
 	if task.NetworkIsolation == nil || strings.TrimSpace(task.NetworkIsolation.Path) == "" {
 		return nil, fmt.Errorf("a Nomad network namespace is required for a regional runtime slot")
+	}
+	allocationIP, procdAddress, err := nomadProcdEndpoint(task)
+	if err != nil {
+		return nil, err
 	}
 	netnsIdentity, err := networkNamespaceIdentity(task.NetworkIsolation.Path)
 	if err != nil {
@@ -299,6 +314,7 @@ func newRuntimeSlotLifecycle(
 	networkProof, err := proofDigest(networkReadyProof{
 		Version: runtimeSlotProofVersion, SlotID: task.ID, NetNSIdentity: netnsIdentity,
 		NetworkChain: handle.networkChain, DefaultPolicy: digestString(""),
+		AllocationIP: allocationIP, ProcdPort: protocol.NomadProcdPort,
 	})
 	if err != nil {
 		return nil, err
@@ -330,8 +346,8 @@ func newRuntimeSlotLifecycle(
 	}
 	return &runtimeSlotLifecycle{
 		authority: authority, slotID: task.ID, registration: registration, readiness: readiness,
-		heartbeat: protocol.HeartbeatRequest{AllocationID: task.AllocID, NodeBootID: bootID},
-		logger:    handle.logger.Named("runtime-slot"),
+		heartbeat:    protocol.HeartbeatRequest{AllocationID: task.AllocID, NodeBootID: bootID},
+		procdAddress: procdAddress, logger: handle.logger.Named("runtime-slot"),
 	}, nil
 }
 
@@ -368,6 +384,10 @@ func (h *taskHandle) runtimeSlotStartingRequest(
 	}
 	if stage.ExpectedPolicyToken.PolicyDigest != policyDigest {
 		return nil, nil, fmt.Errorf("runtime slot policy digest does not match RootFS stage: %w", errdefs.ErrFailedPrecondition)
+	}
+	expectedProcdAddress, err := protocol.NomadProcdAddress(stage.ExpectedPolicyToken.PodIP)
+	if err != nil || lifecycle.procdAddress != expectedProcdAddress {
+		return nil, nil, fmt.Errorf("runtime slot allocation address does not match RootFS network token: %w", errdefs.ErrFailedPrecondition)
 	}
 	bindingDigest, err := stage.BindingDigest()
 	if err != nil {
@@ -462,7 +482,8 @@ func (h *taskHandle) CommandReady(request CommandReadyRequest) error {
 	h.mu.Unlock()
 	proof := request.Proof
 	if proof.SlotID != slotID || proof.OperationID != claim.OperationID || proof.ClaimID != claim.ClaimID ||
-		proof.LaunchAttempt != claim.LaunchAttempt || proof.RunscContainerID != containerID {
+		proof.LaunchAttempt != claim.LaunchAttempt || proof.RunscContainerID != containerID ||
+		proof.ProcdAddress != lifecycle.procdAddress {
 		return fmt.Errorf("procd command-ready proof does not match the local claim: %w", errdefs.ErrFailedPrecondition)
 	}
 	digest, err := proof.Digest()
@@ -696,7 +717,8 @@ func runtimeCompatibilityDigest(config *PluginConfig, task *drivers.TaskConfig, 
 		Version: runtimeSlotProofVersion, Architecture: runtime.GOARCH,
 		DriverVersion: PluginVersion, RunscVersion: strings.TrimSpace(runscVersion),
 		Platform: config.Platform, Overlay2: config.Overlay2, FileAccess: config.FileAccess,
-		DirectFS: config.DirectFS, Command: "/procd", CPUPeriod: linux.CPUPeriod,
+		DirectFS: config.DirectFS, Command: "/procd", ProcdPort: protocol.NomadProcdPort,
+		RuntimeMode: runtimecontrol.ControlModeStatic, CPUPeriod: linux.CPUPeriod,
 		CPUQuota: linux.CPUQuota, CPUShares: linux.CPUShares, MemoryLimitBytes: linux.MemoryLimitBytes,
 	})
 	if err != nil {
@@ -704,6 +726,33 @@ func runtimeCompatibilityDigest(config *PluginConfig, task *drivers.TaskConfig, 
 	}
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func nomadProcdEndpoint(task *drivers.TaskConfig) (string, string, error) {
+	if task == nil {
+		return "", "", fmt.Errorf("Nomad task config is required")
+	}
+	name := "NOMAD_ALLOC_ADDR_" + protocol.NomadProcdPortLabel
+	raw, ok := task.Env[name]
+	if !ok || raw == "" {
+		return "", "", fmt.Errorf("%s is required for a regional runtime slot", name)
+	}
+	if raw != strings.TrimSpace(raw) {
+		return "", "", fmt.Errorf("%s must be canonical", name)
+	}
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil || port != strconv.Itoa(protocol.NomadProcdPort) {
+		return "", "", fmt.Errorf("%s must expose allocation port %d", name, protocol.NomadProcdPort)
+	}
+	parsed := net.ParseIP(host)
+	if parsed == nil || parsed.String() != host || net.JoinHostPort(host, port) != raw {
+		return "", "", fmt.Errorf("%s must contain a canonical allocation IP", name)
+	}
+	address, err := protocol.NomadProcdAddress(host)
+	if err != nil {
+		return "", "", fmt.Errorf("derive Nomad procd address: %w", err)
+	}
+	return host, address, nil
 }
 
 func proofDigest(value any) (string, error) {

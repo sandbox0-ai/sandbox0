@@ -9,6 +9,7 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,6 +86,7 @@ func TestCommandReadyProofBindsCanonicalProcdCommand(t *testing.T) {
 	proof := CommandReadyProof{
 		Version: CommandReadyProofVersion, SlotID: "slot", OperationID: "operation", ClaimID: "claim",
 		LaunchAttempt: "attempt", RunscContainerID: "runsc", ProcdInstanceID: "procd",
+		ProcdAddress:  "http://192.0.2.2:49983",
 		RequestMethod: "PUT", RequestPath: ProcdCommandReadyProbePath, ResponseStatus: 200,
 		ResponseBodyDigest: strings.Repeat("ab", 32),
 	}
@@ -106,6 +108,19 @@ func TestCommandReadyProofBindsCanonicalProcdCommand(t *testing.T) {
 	changed = proof
 	changed.ResponseStatus = 503
 	require.ErrorContains(t, changed.Validate(), "canonical procd probe")
+	changed = proof
+	changed.ProcdAddress = "https://192.0.2.2:49983"
+	require.ErrorContains(t, changed.Validate(), "canonical HTTP origin")
+	changed = proof
+	changed.ProcdAddress = "http://192.0.2.2:12345"
+	require.ErrorContains(t, changed.Validate(), "Nomad procd port")
+
+	address, err := NomadProcdAddress("2001:db8::1")
+	require.NoError(t, err)
+	require.Equal(t, "http://[2001:db8::1]:49983", address)
+	require.Error(t, validateProcdAddress("http://[2001:0db8::1]:49983"))
+	_, err = NomadProcdAddress(" 192.0.2.2")
+	require.Error(t, err)
 }
 
 func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
@@ -124,6 +139,15 @@ func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
 	changed = request
 	changed.NetworkPolicy = `{"mode":"allow-all"}`
 	require.ErrorContains(t, changed.ValidateRegional(), "network_policy")
+	changed = request
+	changed.Runtime = nil
+	require.ErrorContains(t, changed.ValidateRegional(), "runtime assignment")
+	changed = request
+	changed.Runtime = &runtimecontrol.Assignment{
+		SandboxID: "sandbox-1", RuntimeGeneration: 1,
+		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "another-sandbox"},
+	}
+	require.ErrorContains(t, changed.ValidateRegional(), "sandbox environment")
 }
 
 func testRegistrationRequest() RegistrationRequest {
@@ -159,6 +183,10 @@ func testNodeClaimControlRequest() NodeClaimControlRequest {
 		OperationID: "operation-1", ClaimID: stage.Identity.ClaimID,
 		PolicyToken: token, WriterEpoch: strconv.FormatInt(stage.Identity.WriterEpoch, 10),
 		Stage: stage, NetworkPolicy: networkPolicy,
+		Runtime: &runtimecontrol.Assignment{
+			SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1,
+			EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"},
+		},
 	}
 }
 

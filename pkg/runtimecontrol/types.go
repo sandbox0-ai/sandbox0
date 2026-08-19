@@ -39,6 +39,9 @@ const (
 	EnvPodUID               = "SANDBOX0_POD_UID"
 	EnvNodeHostIP           = "SANDBOX0_NODE_HOST_IP"
 	EnvCtldRuntimeWatchPort = "SANDBOX0_CTLD_RUNTIME_WATCH_PORT"
+	EnvControlMode          = "SANDBOX0_RUNTIME_CONTROL_MODE"
+	EnvStaticAssignment     = "SANDBOX0_RUNTIME_ASSIGNMENT"
+	ControlModeStatic       = "static"
 	ProcdContainerName      = "procd"
 )
 

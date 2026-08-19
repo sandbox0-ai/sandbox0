@@ -167,7 +167,8 @@ when the client explicitly sets `dev_smoke_enabled = true`; the production path
 always waits for manager authorization.
 
 Regional runtime slots additionally require an argument-free `/procd` command,
-a Nomad allocation network namespace, and the node-scoped RootFS session daemon.
+a task named `slot`, a Nomad bridge network with the `procd` allocation port
+fixed to `49983`, and the node-scoped RootFS session daemon.
 The task driver reuses the writer-authority mTLS endpoint and credentials for the
 runtime-slot API; it never accepts a caller-selected heartbeat TTL or node UID.
 

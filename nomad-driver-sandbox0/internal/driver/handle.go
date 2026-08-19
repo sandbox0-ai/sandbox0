@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers"
 
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -61,6 +63,7 @@ type claimMetadata struct {
 	ClaimNetworkDigest  string                      `json:"claim_network_digest,omitempty"`
 	ProcdInstanceID     string                      `json:"procd_instance_id,omitempty"`
 	CommandReadyDigest  string                      `json:"command_ready_digest,omitempty"`
+	RuntimeRevision     string                      `json:"runtime_revision,omitempty"`
 	RootfsPath          string                      `json:"rootfs_path"`
 	WriterEpoch         string                      `json:"writer_epoch"`
 	Stage               *rootfshandoff.StageRequest `json:"stage,omitempty"`
@@ -92,6 +95,7 @@ type taskHandleOptions struct {
 	rootfs            RootFSRuntime
 	network           NetworkRuntime
 	runtimeSlotNeeded bool
+	procdPort         int
 	logger            hclog.Logger
 }
 
@@ -114,6 +118,7 @@ type taskHandle struct {
 	rootfs            RootFSRuntime
 	network           NetworkRuntime
 	runtimeSlotNeeded bool
+	procdPort         int
 	networkChain      string
 	logger            hclog.Logger
 
@@ -221,6 +226,7 @@ func newTaskHandle(options taskHandleOptions) *taskHandle {
 		rootfs:            options.rootfs,
 		network:           options.network,
 		runtimeSlotNeeded: options.runtimeSlotNeeded,
+		procdPort:         options.procdPort,
 		logger:            options.logger,
 		networkChain:      networkChainName(options.containerID),
 		phase:             phaseWarm,
@@ -314,7 +320,7 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 	return nil
 }
 
-func (h *taskHandle) writeClaimBundle() error {
+func (h *taskHandle) writeClaimBundle(assignment *runtimecontrol.Assignment) error {
 	netnsPath := ""
 	if h.taskConfig.NetworkIsolation != nil {
 		netnsPath = h.taskConfig.NetworkIsolation.Path
@@ -335,10 +341,27 @@ func (h *taskHandle) writeClaimBundle() error {
 	h.mu.Lock()
 	command := h.driverConfig.Command
 	args := h.driverConfig.Args
+	procdPort := h.procdPort
 	h.mu.Unlock()
+	var runtimeEnv []string
+	if assignment != nil {
+		if procdPort != protocol.NomadProcdPort {
+			return fmt.Errorf("static procd port must be %d", protocol.NomadProcdPort)
+		}
+		payload, err := json.Marshal(assignment)
+		if err != nil {
+			return fmt.Errorf("encode static procd runtime assignment: %w", err)
+		}
+		runtimeEnv = []string{
+			"http_port=" + strconv.Itoa(procdPort),
+			runtimecontrol.EnvControlMode + "=" + runtimecontrol.ControlModeStatic,
+			runtimecontrol.EnvStaticAssignment + "=" + string(payload),
+		}
+	}
 	spec := buildSpec(specOptions{
 		Command:   command,
 		Args:      args,
+		Env:       runtimeEnv,
 		AllocID:   h.taskConfig.AllocID,
 		TaskID:    h.taskConfig.ID,
 		NetNSPath: netnsPath,
@@ -384,9 +407,22 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	h.mu.Lock()
 	runtimeSlotNeeded := h.runtimeSlotNeeded
 	h.mu.Unlock()
+	runtimeRevision := ""
 	if runtimeSlotNeeded && request.Stage == nil {
 		h.setPhase(phaseWarm)
 		return errors.New("regional runtime slot claims require a RootFS stage")
+	}
+	if runtimeSlotNeeded {
+		if err := request.ValidateRegional(); err != nil {
+			h.setPhase(phaseWarm)
+			return fmt.Errorf("validate regional runtime slot claim: %w: %w", err, errdefs.ErrInvalidArgument)
+		}
+		var err error
+		runtimeRevision, err = request.Runtime.Revision()
+		if err != nil {
+			h.setPhase(phaseWarm)
+			return fmt.Errorf("derive static runtime assignment revision: %w: %w", err, errdefs.ErrInvalidArgument)
+		}
 	}
 	rootfsSource := request.RootfsPath
 	allowedRoot := h.allowedRoot
@@ -443,7 +479,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 			return err
 		}
 	}
-	if err := h.writeClaimBundle(); err != nil {
+	if err := h.writeClaimBundle(request.Runtime); err != nil {
 		h.setPhase(phaseWarm)
 		return err
 	}
@@ -464,6 +500,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 			h.claim.LaunchAttempt = startingRequest.LaunchAttempt
 			h.claim.RootFSBindingDigest = startingRequest.RootFSBindingDigest
 			h.claim.ClaimNetworkDigest = startingRequest.ClaimNetworkDigest
+			h.claim.RuntimeRevision = runtimeRevision
 		}
 		h.stage = durableStage
 	}
@@ -592,7 +629,12 @@ func (h *taskHandle) activeRegionalClaimRetryMatchesLocked(request ClaimRequest)
 		return false, fmt.Errorf("derive persisted active claim binding: %w", err)
 	}
 	requestDigestHex := hex.EncodeToString(requestDigest[:])
-	return requestDigest == storedDigest && requestDigestHex == h.claim.RootFSBindingDigest, nil
+	runtimeRevision, err := request.Runtime.Revision()
+	if err != nil {
+		return false, fmt.Errorf("derive active runtime assignment revision: %w", err)
+	}
+	return requestDigest == storedDigest && requestDigestHex == h.claim.RootFSBindingDigest &&
+		runtimeRevision == h.claim.RuntimeRevision, nil
 }
 
 // handleWriterLeaseLoss poisons the one-shot slot before exposing its exit and

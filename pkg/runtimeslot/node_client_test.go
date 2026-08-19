@@ -39,7 +39,8 @@ func TestNodeClientCallsRootOwnedUnixControlSocket(t *testing.T) {
 	proof := CommandReadyProof{
 		Version: CommandReadyProofVersion, SlotID: "slot-1", OperationID: claim.OperationID,
 		ClaimID: claim.ClaimID, LaunchAttempt: claim.Stage.Identity.LaunchAttempt,
-		RunscContainerID: "runsc-1", ProcdInstanceID: "procd-1", RequestMethod: http.MethodPut,
+		RunscContainerID: "runsc-1", ProcdInstanceID: "procd-1",
+		ProcdAddress: "http://192.0.2.2:49983", RequestMethod: http.MethodPut,
 		RequestPath: ProcdCommandReadyProbePath, ResponseStatus: http.StatusOK,
 		ResponseBodyDigest: strings.Repeat("ab", 32),
 	}

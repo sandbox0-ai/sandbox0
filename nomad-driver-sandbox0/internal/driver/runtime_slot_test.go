@@ -31,7 +31,9 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -295,7 +297,11 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 	}
 	task := &drivers.TaskConfig{
 		ID: "slot-1", AllocID: "allocation-1", Namespace: "default", NodeID: "node-1",
-		Name: "runtime-slot", AllocDir: filepath.Join(tempDir, "allocation"),
+		Name: protocol.NomadTaskName, AllocDir: filepath.Join(tempDir, "allocation"),
+		Env: map[string]string{
+			"NOMAD_ALLOC_ADDR_" + protocol.NomadProcdPortLabel: "172.26.64.2:49983",
+			"UNTRUSTED_TASK_ENV":                               "must-not-enter-procd",
+		},
 		Resources: &drivers.Resources{},
 		NetworkIsolation: &drivers.NetworkIsolationSpec{
 			Mode: drivers.NetIsolationModeGroup,
@@ -423,6 +429,37 @@ func TestStartTaskDoesNotRegisterBeforeControlEndpointIsReady(t *testing.T) {
 	}
 }
 
+func TestStartTaskRejectsUnaddressableNomadProcdBeforeRegistration(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*drivers.TaskConfig)
+	}{
+		{name: "task name", mutate: func(task *drivers.TaskConfig) { task.Name = "warm-slot" }},
+		{name: "missing address", mutate: func(task *drivers.TaskConfig) {
+			delete(task.Env, "NOMAD_ALLOC_ADDR_"+protocol.NomadProcdPortLabel)
+		}},
+		{name: "wrong port", mutate: func(task *drivers.TaskConfig) {
+			task.Env["NOMAD_ALLOC_ADDR_"+protocol.NomadProcdPortLabel] = "172.26.64.2:49984"
+		}},
+		{name: "noncanonical address", mutate: func(task *drivers.TaskConfig) {
+			task.Env["NOMAD_ALLOC_ADDR_"+protocol.NomadProcdPortLabel] = " 172.26.64.2:49983"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newRuntimeSlotPluginFixture(t)
+			test.mutate(fixture.task)
+			if _, _, err := fixture.plugin.StartTask(fixture.task); err == nil {
+				t.Fatal("unaddressable Nomad procd task was accepted")
+			}
+			calls, _, _, _ := fixture.authority.snapshot()
+			if len(calls) != 0 {
+				t.Fatalf("authority calls = %v, invalid task was registered", calls)
+			}
+		})
+	}
+}
+
 func prepareRuntimeSlotClaim(
 	t *testing.T,
 	fixture *runtimeSlotPluginFixture,
@@ -470,6 +507,13 @@ func prepareRuntimeSlotClaim(
 	return handle, stage, token, networkPolicy, mounter
 }
 
+func runtimeSlotAssignment() *runtimecontrol.Assignment {
+	return &runtimecontrol.Assignment{
+		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1,
+		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"},
+	}
+}
+
 func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
 	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
@@ -486,6 +530,7 @@ func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 	err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(),
 	})
 	if err != nil {
 		t.Fatalf("Claim() error = %v", err)
@@ -513,14 +558,45 @@ func TestRuntimeSlotClaimRetriesStartingBeforeRunscCreate(t *testing.T) {
 		t.Fatalf("claim network proof = %q: %v", request.ClaimNetworkDigest, err)
 	}
 	persisted := handle.PersistedState()
+	runtimeRevision, err := runtimeSlotAssignment().Revision()
+	if err != nil {
+		t.Fatalf("derive expected runtime revision: %v", err)
+	}
 	if persisted.Claim == nil || persisted.Claim.OperationID != request.OperationID ||
 		persisted.Claim.ClaimID != request.ClaimID ||
 		persisted.Claim.RootFSBindingDigest != request.RootFSBindingDigest ||
-		persisted.Claim.ClaimNetworkDigest != request.ClaimNetworkDigest {
+		persisted.Claim.ClaimNetworkDigest != request.ClaimNetworkDigest ||
+		persisted.Claim.RuntimeRevision != runtimeRevision {
 		t.Fatalf("persisted claim = %+v", persisted.Claim)
 	}
 	if calls := fixture.runner.callsSnapshot(); !contains(calls, "create") || !contains(calls, "start") {
 		t.Fatalf("runsc calls = %v, want create and start after regional starting", calls)
+	}
+	configPayload, err := os.ReadFile(filepath.Join(handle.bundleDir, "config.json"))
+	if err != nil {
+		t.Fatalf("read claimed OCI config: %v", err)
+	}
+	var spec specs.Spec
+	if err := json.Unmarshal(configPayload, &spec); err != nil {
+		t.Fatalf("decode claimed OCI config: %v", err)
+	}
+	assignmentPayload, err := json.Marshal(runtimeSlotAssignment())
+	if err != nil {
+		t.Fatalf("encode expected runtime assignment: %v", err)
+	}
+	for _, expected := range []string{
+		"http_port=49983",
+		runtimecontrol.EnvControlMode + "=" + runtimecontrol.ControlModeStatic,
+		runtimecontrol.EnvStaticAssignment + "=" + string(assignmentPayload),
+	} {
+		if !contains(spec.Process.Env, expected) {
+			t.Fatalf("OCI environment = %q, missing %q", spec.Process.Env, expected)
+		}
+	}
+	for _, value := range spec.Process.Env {
+		if strings.HasPrefix(value, "UNTRUSTED_TASK_ENV=") || strings.HasPrefix(value, "NOMAD_ALLOC_ADDR_") {
+			t.Fatalf("Nomad task environment leaked into procd OCI environment: %q", value)
+		}
 	}
 	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
 		t.Fatalf("DestroyTask() error = %v", err)
@@ -537,6 +613,7 @@ func TestRuntimeSlotClaimStartingRejectionPoisonsWithoutRunsc(t *testing.T) {
 	err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(),
 	})
 	if !errdefs.IsPermissionDenied(err) {
 		t.Fatalf("Claim() error = %v, want permission denied", err)
@@ -566,6 +643,7 @@ func TestRuntimeSlotClaimAcceptsExactRetryAfterResponseLoss(t *testing.T) {
 	request := ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(),
 	}
 	if err := handle.Claim(request); err != nil {
 		t.Fatalf("first Claim() error = %v", err)
@@ -590,6 +668,12 @@ func TestRuntimeSlotClaimAcceptsExactRetryAfterResponseLoss(t *testing.T) {
 	if err := handle.Claim(changed); err == nil {
 		t.Fatal("changed active claim retry was accepted")
 	}
+	changed = request
+	changed.Runtime = runtimeSlotAssignment()
+	changed.Runtime.RuntimeGeneration++
+	if err := handle.Claim(changed); err == nil {
+		t.Fatal("changed active runtime assignment retry was accepted")
+	}
 	ensureCalls, _, _, _ = fixture.rootfs.snapshot()
 	if ensureCalls != 1 {
 		t.Fatalf("RootFS Ensure calls = %d after changed retry", ensureCalls)
@@ -606,6 +690,7 @@ func TestRuntimeSlotClaimRequiresRegionalIdentityBeforeConsumingWriter(t *testin
 	err := handle.Claim(ClaimRequest{
 		ClaimID: "claim-1", PolicyToken: token, WriterEpoch: "1",
 		Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "operation_id") {
 		t.Fatalf("Claim() error = %v, want missing operation ID", err)
@@ -622,11 +707,37 @@ func TestRuntimeSlotClaimRequiresRegionalIdentityBeforeConsumingWriter(t *testin
 	}
 }
 
+func TestRuntimeSlotClaimRejectsNetworkTokenForAnotherAllocationAddress(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
+	stage.ExpectedPolicyToken.PodIP = "172.26.64.3"
+
+	err := handle.Claim(ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1",
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(),
+	})
+	if !errdefs.IsFailedPrecondition(err) {
+		t.Fatalf("Claim() error = %v, want failed precondition", err)
+	}
+	ensureCalls, retireCalls, _, _ := fixture.rootfs.snapshot()
+	if ensureCalls != 0 || retireCalls != 0 {
+		t.Fatalf("RootFS calls = ensure %d retire %d, mismatched address consumed writer", ensureCalls, retireCalls)
+	}
+	if phase := handle.TaskStatus().DriverAttributes["phase"]; phase != string(phaseWarm) {
+		t.Fatalf("phase = %s, want warm", phase)
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
 func commandReadyProof(fixture *runtimeSlotPluginFixture, stage rootfshandoff.StageRequest) protocol.CommandReadyProof {
 	return protocol.CommandReadyProof{
 		Version: protocol.CommandReadyProofVersion, SlotID: fixture.task.ID,
 		OperationID: "operation-1", ClaimID: "claim-1", LaunchAttempt: stage.Identity.LaunchAttempt,
 		RunscContainerID: safeContainerID(fixture.task.ID), ProcdInstanceID: "procd-instance-1",
+		ProcdAddress:  "http://172.26.64.2:49983",
 		RequestMethod: "PUT", RequestPath: protocol.ProcdCommandReadyProbePath, ResponseStatus: http.StatusOK,
 		ResponseBodyDigest: strings.Repeat("ab", 32),
 	}
@@ -638,6 +749,7 @@ func TestRuntimeSlotCommandReadyRetriesAcceptedResponseLoss(t *testing.T) {
 	if err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(),
 	}); err != nil {
 		t.Fatalf("Claim() error = %v", err)
 	}
@@ -645,6 +757,14 @@ func TestRuntimeSlotCommandReadyRetriesAcceptedResponseLoss(t *testing.T) {
 	fixture.authority.commandErrors = []error{fmtErrorUnavailable("active response lost")}
 	fixture.authority.mu.Unlock()
 	proof := commandReadyProof(fixture, stage)
+	wrongAddress := proof
+	wrongAddress.ProcdAddress = "http://172.26.64.3:49983"
+	if err := handle.CommandReady(CommandReadyRequest{Proof: wrongAddress}); !errdefs.IsFailedPrecondition(err) {
+		t.Fatalf("wrong-address CommandReady() error = %v, want failed precondition", err)
+	}
+	if got := len(fixture.authority.commandSnapshot()); got != 0 {
+		t.Fatalf("authority command-ready calls = %d, wrong procd address reached region", got)
+	}
 	payload, err := json.Marshal(CommandReadyRequest{Proof: proof})
 	if err != nil {
 		t.Fatalf("encode command-ready request: %v", err)
@@ -688,6 +808,7 @@ func TestRuntimeSlotCommandReadyRejectionFencesWriter(t *testing.T) {
 	if err := handle.Claim(ClaimRequest{
 		OperationID: "operation-1", ClaimID: "claim-1",
 		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+		Runtime: runtimeSlotAssignment(),
 	}); err != nil {
 		t.Fatalf("Claim() error = %v", err)
 	}

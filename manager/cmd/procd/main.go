@@ -34,6 +34,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
 		os.Exit(1)
 	}
+	staticAssignment, staticControl, err := runtimecontroller.StaticAssignmentFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid runtime control configuration: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Initialize logger
 	logger, err := coreobs.NewLogger(coreobs.LoggerConfig{
@@ -179,16 +184,31 @@ func main() {
 		cfg.HTTPPort,
 		logger,
 	)
-	runtimeIdentity, err := runtimecontroller.IdentityFromEnv()
-	if err != nil {
-		logger.Fatal("Failed to load runtime control identity", zap.Error(err))
+	runtimeCancel := func() {}
+	if staticControl {
+		activationCtx, activationCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err = runtimecontroller.ActivateStatic(activationCtx, runtimeController, *staticAssignment)
+		activationCancel()
+		if err != nil {
+			logger.Fatal("Failed to activate static runtime assignment", zap.Error(err))
+		}
+		logger.Info("Static runtime assignment activated",
+			zap.String("sandbox_id", staticAssignment.SandboxID),
+			zap.Int64("runtime_generation", staticAssignment.RuntimeGeneration),
+		)
+	} else {
+		runtimeIdentity, identityErr := runtimecontroller.IdentityFromEnv()
+		if identityErr != nil {
+			logger.Fatal("Failed to load runtime control identity", zap.Error(identityErr))
+		}
+		runtimeClient, clientErr := runtimecontroller.NewClient(runtimeIdentity, runtimeController, logger)
+		if clientErr != nil {
+			logger.Fatal("Failed to create runtime control client", zap.Error(clientErr))
+		}
+		runtimeCtx, cancel := context.WithCancel(context.Background())
+		runtimeCancel = cancel
+		go runtimeClient.Run(runtimeCtx)
 	}
-	runtimeClient, err := runtimecontroller.NewClient(runtimeIdentity, runtimeController, logger)
-	if err != nil {
-		logger.Fatal("Failed to create runtime control client", zap.Error(err))
-	}
-	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
-	go runtimeClient.Run(runtimeCtx)
 
 	// Create and start HTTP server
 	server := procdhttp.NewServer(

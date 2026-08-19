@@ -7,6 +7,10 @@ job "sandbox0-warm-slots" {
 
     network {
       mode = "bridge"
+
+      port "procd" {
+        to = 49983
+      }
     }
 
     task "slot" {

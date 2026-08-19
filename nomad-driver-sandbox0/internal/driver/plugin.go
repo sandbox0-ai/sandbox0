@@ -33,6 +33,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
 	"github.com/hashicorp/nomad/plugins/shared/structs"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 const (
@@ -484,6 +485,7 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		rootfs:            rootfs,
 		network:           p.newNetwork(p.config),
 		runtimeSlotNeeded: p.config.RuntimeSlotEnabled,
+		procdPort:         protocol.NomadProcdPort,
 		logger:            p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
 	})
 
@@ -581,6 +583,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		rootfs:            rootfs,
 		network:           p.newNetwork(p.config),
 		runtimeSlotNeeded: p.config.RuntimeSlotEnabled,
+		procdPort:         protocol.NomadProcdPort,
 		logger:            p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
 	})
 	if err := recovered.Recover(state); err != nil {

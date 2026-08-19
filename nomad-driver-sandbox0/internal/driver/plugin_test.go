@@ -123,7 +123,7 @@ func TestControlClaimStartsSlot(t *testing.T) {
 	go fixture.handle.ServeControl(context.Background())
 	client := unixHTTPClient(fixture.socketPath)
 	body := fmt.Sprintf(`{"rootfs_path":%q,"policy_token":"token","writer_epoch":"epoch"}`, fixture.rootfs)
-	response, err := awaitControl(client, http.MethodPost, "/claim", []byte(body), 2*time.Second)
+	response, err := awaitControl(client, http.MethodPut, "/claim", []byte(body), 2*time.Second)
 	if err != nil {
 		t.Fatalf("control claim: %v", err)
 	}

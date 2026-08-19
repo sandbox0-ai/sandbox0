@@ -119,6 +119,15 @@ var (
 		"rootfs_authority_client_cert_file": hclspec.NewAttr("rootfs_authority_client_cert_file", "string", false),
 		"rootfs_authority_client_key_file":  hclspec.NewAttr("rootfs_authority_client_key_file", "string", false),
 		"rootfs_authority_token_file":       hclspec.NewAttr("rootfs_authority_token_file", "string", false),
+		"runtime_slot_enabled": hclspec.NewDefault(
+			hclspec.NewAttr("runtime_slot_enabled", "bool", false),
+			hclspec.NewLiteral(`false`),
+		),
+		"runtime_slot_cluster_id": hclspec.NewAttr("runtime_slot_cluster_id", "string", false),
+		"runtime_slot_node_boot_id_file": hclspec.NewDefault(
+			hclspec.NewAttr("runtime_slot_node_boot_id_file", "string", false),
+			hclspec.NewLiteral(`"/proc/sys/kernel/random/boot_id"`),
+		),
 	})
 
 	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -175,6 +184,10 @@ type PluginConfig struct {
 	RootFSAuthorityClientCertFile string   `codec:"rootfs_authority_client_cert_file"`
 	RootFSAuthorityClientKeyFile  string   `codec:"rootfs_authority_client_key_file"`
 	RootFSAuthorityTokenFile      string   `codec:"rootfs_authority_token_file"`
+
+	RuntimeSlotEnabled        bool   `codec:"runtime_slot_enabled"`
+	RuntimeSlotClusterID      string `codec:"runtime_slot_cluster_id"`
+	RuntimeSlotNodeBootIDFile string `codec:"runtime_slot_node_boot_id_file"`
 }
 
 // TaskConfig is the per-allocation driver configuration.
@@ -191,10 +204,15 @@ type Plugin struct {
 	config  *PluginConfig
 	tasks   *taskStore
 
-	newRunner  func(config PluginConfig) Runsc
-	rootfs     RootFSRuntime
-	rootfsOnce sync.Once
-	rootfsErr  error
+	newRunner         func(config PluginConfig) Runsc
+	newNetwork        func(config *PluginConfig) NetworkRuntime
+	rootfs            RootFSRuntime
+	rootfsOnce        sync.Once
+	rootfsErr         error
+	slotAuthority     runtimeSlotAuthority
+	slotAuthorityOnce sync.Once
+	slotAuthorityErr  error
+	newSlotAuthority  func(*PluginConfig) (runtimeSlotAuthority, error)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -212,28 +230,31 @@ func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) d
 	ctx, cancel := context.WithCancel(context.Background())
 	logger = logger.Named(PluginName)
 	return &Plugin{
-		eventer:   eventer.NewEventer(ctx, logger),
-		config:    defaultPluginConfig(),
-		tasks:     newTaskStore(),
-		newRunner: newRunner,
-		ctx:       ctx,
-		cancel:    cancel,
-		logger:    logger,
+		eventer:          eventer.NewEventer(ctx, logger),
+		config:           defaultPluginConfig(),
+		tasks:            newTaskStore(),
+		newRunner:        newRunner,
+		newNetwork:       networkRuntime,
+		newSlotAuthority: newRuntimeSlotAuthority,
+		ctx:              ctx,
+		cancel:           cancel,
+		logger:           logger,
 	}
 }
 
 func defaultPluginConfig() *PluginConfig {
 	return &PluginConfig{
-		RunscPath:               "/usr/local/bin/runsc",
-		RunscRoot:               "/var/run/sandbox0/runsc",
-		ControlDir:              "/var/run/sandbox0/nomad-slots",
-		AllowedRootfsDir:        "/var/lib/sandbox0/rootfs",
-		Platform:                "systrap",
-		Overlay2:                "none",
-		FileAccess:              "shared",
-		DirectFS:                true,
-		DevSmokeEnabled:         false,
-		RootFSMaxDirtyTailBytes: rootfssession.DefaultMaxDirtyTailBytes,
+		RunscPath:                 "/usr/local/bin/runsc",
+		RunscRoot:                 "/var/run/sandbox0/runsc",
+		ControlDir:                "/var/run/sandbox0/nomad-slots",
+		AllowedRootfsDir:          "/var/lib/sandbox0/rootfs",
+		Platform:                  "systrap",
+		Overlay2:                  "none",
+		FileAccess:                "shared",
+		DirectFS:                  true,
+		DevSmokeEnabled:           false,
+		RootFSMaxDirtyTailBytes:   rootfssession.DefaultMaxDirtyTailBytes,
+		RuntimeSlotNodeBootIDFile: "/proc/sys/kernel/random/boot_id",
 	}
 }
 
@@ -289,10 +310,15 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	decoded.RootFSAuthorityClientCertFile = strings.TrimSpace(decoded.RootFSAuthorityClientCertFile)
 	decoded.RootFSAuthorityClientKeyFile = strings.TrimSpace(decoded.RootFSAuthorityClientKeyFile)
 	decoded.RootFSAuthorityTokenFile = strings.TrimSpace(decoded.RootFSAuthorityTokenFile)
+	decoded.RuntimeSlotClusterID = strings.TrimSpace(decoded.RuntimeSlotClusterID)
+	decoded.RuntimeSlotNodeBootIDFile = strings.TrimSpace(decoded.RuntimeSlotNodeBootIDFile)
 	if decoded.RootFSObjectType == "" {
 		decoded.RootFSObjectType = "s3"
 	}
 	if err := validateRootFSConfig(decoded); err != nil {
+		return err
+	}
+	if err := validateRuntimeSlotConfig(decoded); err != nil {
 		return err
 	}
 	p.config = decoded
@@ -312,6 +338,18 @@ func (p *Plugin) rootfsRuntime() (RootFSRuntime, error) {
 		return nil, p.rootfsErr
 	}
 	return p.rootfs, nil
+}
+
+func (p *Plugin) runtimeSlotAuthority() (runtimeSlotAuthority, error) {
+	p.slotAuthorityOnce.Do(func() {
+		if p.config.RuntimeSlotEnabled {
+			p.slotAuthority, p.slotAuthorityErr = p.newSlotAuthority(p.config)
+		}
+	})
+	if p.slotAuthorityErr != nil {
+		return nil, p.slotAuthorityErr
+	}
+	return p.slotAuthority, nil
 }
 
 // TaskConfigSchema returns the per-task HCL schema.
@@ -419,6 +457,9 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 			return nil, nil, err
 		}
 	}
+	if err := validateRuntimeSlotTaskConfig(p.config, taskConfig); err != nil {
+		return nil, nil, err
+	}
 
 	taskDir := config.TaskDir().Dir
 	bundleDir := filepath.Join(taskDir, "gvisor-bundle")
@@ -441,11 +482,15 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		allowedRoot:       p.config.AllowedRootfsDir,
 		rootfsAllowedRoot: p.config.RootFSMountRoot,
 		rootfs:            rootfs,
-		network:           networkRuntime(p.config),
+		network:           p.newNetwork(p.config),
 		logger:            p.logger.Named("task").With("task_id", config.ID, "container_id", containerID),
 	})
 
 	if err := handle.Prepare(taskConfig); err != nil {
+		return nil, nil, err
+	}
+	if err := p.startTaskControl(handle); err != nil {
+		_ = handle.Close(false)
 		return nil, nil, err
 	}
 
@@ -455,10 +500,17 @@ func (p *Plugin) StartTask(config *drivers.TaskConfig) (*drivers.TaskHandle, *dr
 		_ = handle.Close(false)
 		return nil, nil, fmt.Errorf("persist driver state: %w", err)
 	}
+	lifecycle, observation, err := p.activateRuntimeSlot(handle, rootfs, true)
+	if err != nil {
+		_ = handle.Close(false)
+		return nil, nil, err
+	}
 
 	p.tasks.Set(config.ID, handle)
 	p.emit(config.ID, "warm-slot-created")
-	go handle.ServeControl(p.ctx)
+	if lifecycle != nil {
+		go lifecycle.runHeartbeat(p.ctx, handle.done, observation, handle.runtimeSlotHeartbeatLost)
+	}
 
 	if !taskConfig.WaitForClaim {
 		if err := handle.Claim(ClaimRequest{
@@ -490,6 +542,24 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 	if state.TaskConfig == nil || state.ContainerID == "" || state.BundleDir == "" || state.RootMount == "" {
 		return errors.New("persisted driver state is incomplete")
 	}
+	var taskConfig TaskConfig
+	if err := handle.Config.DecodeDriverConfig(&taskConfig); err != nil {
+		return fmt.Errorf("decode recovered task config: %w", err)
+	}
+	taskConfig.Command = strings.TrimSpace(taskConfig.Command)
+	if taskConfig.Command == "" {
+		taskConfig.Command = "/procd"
+	}
+	if !filepath.IsAbs(taskConfig.Command) {
+		return errors.New("recovered task command must be absolute")
+	}
+	if err := validateRuntimeSlotTaskConfig(p.config, taskConfig); err != nil {
+		return err
+	}
+	if state.TaskConfig.ID != handle.Config.ID || state.TaskConfig.AllocID != handle.Config.AllocID {
+		return errors.New("persisted task identity does not match the Nomad task handle")
+	}
+	state.TaskConfig = handle.Config
 
 	runner := p.newRunner(*p.config)
 	rootfs, err := p.rootfsRuntime()
@@ -498,6 +568,7 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 	}
 	recovered := newTaskHandle(taskHandleOptions{
 		taskConfig:        state.TaskConfig,
+		driverConfig:      taskConfig,
 		bundleDir:         state.BundleDir,
 		containerID:       state.ContainerID,
 		rootMount:         state.RootMount,
@@ -507,14 +578,24 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		allowedRoot:       p.config.AllowedRootfsDir,
 		rootfsAllowedRoot: p.config.RootFSMountRoot,
 		rootfs:            rootfs,
-		network:           networkRuntime(p.config),
+		network:           p.newNetwork(p.config),
 		logger:            p.logger.Named("task").With("task_id", state.TaskConfig.ID, "container_id", state.ContainerID),
 	})
 	if err := recovered.Recover(state); err != nil {
 		return err
 	}
+	if err := p.startTaskControl(recovered); err != nil {
+		return err
+	}
+	lifecycle, observation, err := p.activateRuntimeSlot(recovered, rootfs, false)
+	if err != nil {
+		p.stopTaskControl(recovered)
+		return err
+	}
 	p.tasks.Set(state.TaskConfig.ID, recovered)
-	go recovered.ServeControl(p.ctx)
+	if lifecycle != nil {
+		go lifecycle.runHeartbeat(p.ctx, recovered.done, observation, recovered.runtimeSlotHeartbeatLost)
+	}
 	p.emit(state.TaskConfig.ID, "warm-slot-recovered")
 	return nil
 }

@@ -17,7 +17,7 @@ Implemented:
 - stock `runsc` CLI adapter with `overlay2=none`
 - generic writable OCI bundle generation
 - generic warm allocation with no image-specific runtime state
-- local Unix control socket with `/status` and `/claim`
+- local Unix control socket with `GET /status` and `PUT /claim`
 - warm default-deny and claim-time L3/L4 network policy in the Nomad netns
 - block-map RootFS attach through NBD, XFS, and host OverlayFS
 - PostgreSQL writer consume, renewal, planned seal, and terminal publication
@@ -41,10 +41,18 @@ Implemented:
 - unit tests with a fake runsc runtime
 - PostgreSQL-backed regional warm-slot authority and authenticated v1 node API
   for register, readiness, heartbeat, runsc starting, and command readiness
+- synchronous task-driver registration after the control socket, default-deny
+  netns policy, root mount, runsc compatibility, and RootFS session-daemon
+  health proofs are ready
+- exact allocation/node-boot re-registration and bounded regional heartbeats
+  after a task-driver restart; a warm slot is poisoned if its authority lease is
+  lost, while an already claimed writer remains fenced by the independent
+  RootFS session daemon
 
 Not implemented:
 
-- manager/ctld/driver lifecycle integration with the regional slot registry
+- manager/ctld claim integration with the regional slot registry
+- task-driver `starting` transition and real procd first-command-ready proof
 - production remote-block service and cross-node device ownership
 - full network-policy incarnation-token persistence
 - procd first-command-ready accounting
@@ -84,9 +92,13 @@ The same mTLS listener exposes `/internal/v1/runtime-slots/{slot_id}` and its
 `ready`, `heartbeat`, `starting`, and `command-ready` PUT transitions.
 `--runtime-slot-heartbeat-ttl` is server policy; node requests cannot choose
 their own liveness duration or node UID. The PostgreSQL registry remains
-authoritative after a Nomad allocation is purged. The protocol and client are
-implemented, but the task driver does not register or heartbeat allocations
-yet, and no production manager claim controller consumes the registry.
+authoritative after a Nomad allocation is purged. With `runtime_slot_enabled`,
+the task driver synchronously registers an exact physical allocation, reports
+its three readiness proofs, and starts heartbeats before returning the slot to
+Nomad. Recovery must reproduce the same allocation, node boot, netns inode,
+control endpoint, and compatibility digest. No production manager claim
+controller consumes the registry yet, and the driver does not report `starting`
+or command readiness yet.
 
 The network policy implementation is intentionally minimal: production ctld
 owns policy compilation, TPROXY, applied-token persistence, and L7 handling.
@@ -117,10 +129,19 @@ plugin "sandbox0-gvisor" {
     overlay2           = "none"
     file_access        = "shared"
     directfs           = true
+    network_policy_enabled = true
     rootfs_enabled             = true
     rootfs_sessiond_socket     = "/run/sandbox0/rootfs-sessiond.sock"
     rootfs_mount_root          = "/run/sandbox0/rootfs"
     rootfs_consumer_mount_root = "/opt/nomad"
+    rootfs_authority_url              = "https://regional-authority.internal:9443"
+    rootfs_authority_ca_file          = "/etc/sandbox0/pki/ca.pem"
+    rootfs_authority_client_cert_file = "/etc/sandbox0/pki/node.pem"
+    rootfs_authority_client_key_file  = "/etc/sandbox0/pki/node-key.pem"
+    rootfs_authority_token_file       = "/run/credentials/sandbox0-node-token"
+    runtime_slot_enabled              = true
+    runtime_slot_cluster_id           = "cluster-uuid"
+    runtime_slot_node_boot_id_file    = "/proc/sys/kernel/random/boot_id"
   }
 }
 ```
@@ -129,6 +150,11 @@ See `example/warm-slot.nomad` for a warm allocation. A development smoke task
 may set `wait_for_claim = false` and provide an allowed RootFS directory only
 when the client explicitly sets `dev_smoke_enabled = true`; the production path
 always waits for manager authorization.
+
+Regional runtime slots additionally require an argument-free `/procd` command,
+a Nomad allocation network namespace, and the node-scoped RootFS session daemon.
+The task driver reuses the writer-authority mTLS endpoint and credentials for the
+runtime-slot API; it never accepts a caller-selected heartbeat TTL or node UID.
 
 ## Node boot prerequisites
 

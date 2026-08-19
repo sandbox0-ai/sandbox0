@@ -120,10 +120,13 @@ type taskHandle struct {
 
 	done chan struct{}
 
-	controlOnce    sync.Once
-	controlServer  *http.Server
-	leaseFenceOnce sync.Once
-	consumerCancel context.CancelFunc
+	controlOnce      sync.Once
+	controlServer    *http.Server
+	controlReady     chan struct{}
+	controlReadyErr  error
+	controlReadyOnce sync.Once
+	leaseFenceOnce   sync.Once
+	consumerCancel   context.CancelFunc
 }
 
 func (h *taskHandle) statePath() string {
@@ -196,6 +199,7 @@ func readPersistedState(path string) (PersistedState, error) {
 func newTaskHandle(options taskHandleOptions) *taskHandle {
 	return &taskHandle{
 		taskConfig:        options.taskConfig,
+		driverConfig:      options.driverConfig,
 		bundleDir:         options.bundleDir,
 		containerID:       options.containerID,
 		rootMount:         options.rootMount,
@@ -207,8 +211,28 @@ func newTaskHandle(options taskHandleOptions) *taskHandle {
 		rootfs:            options.rootfs,
 		network:           options.network,
 		logger:            options.logger,
+		networkChain:      networkChainName(options.containerID),
 		phase:             phaseWarm,
 		done:              make(chan struct{}),
+		controlReady:      make(chan struct{}),
+	}
+}
+
+func (h *taskHandle) signalControlReady(err error) {
+	h.mu.Lock()
+	h.controlReadyErr = err
+	h.mu.Unlock()
+	h.controlReadyOnce.Do(func() { close(h.controlReady) })
+}
+
+func (h *taskHandle) waitControlReady(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-h.controlReady:
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.controlReadyErr
 	}
 }
 
@@ -265,7 +289,6 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 	if err := os.MkdirAll(h.rootMount, 0o755); err != nil {
 		return fmt.Errorf("create OCI rootfs mountpoint: %w", err)
 	}
-	h.networkChain = networkChainName(h.containerID)
 	if h.network != nil && h.netnsPath() != "" {
 		if err := h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, NetworkPolicy{Mode: networkPolicyBlockAll}); err != nil {
 			_ = h.Close(false)

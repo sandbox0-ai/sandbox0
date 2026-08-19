@@ -159,6 +159,7 @@ type fakeMounter struct {
 type fakeRootFSRuntime struct {
 	mu            sync.Mutex
 	source        string
+	pingErr       error
 	ensureErr     error
 	crashErr      error
 	retireErr     error
@@ -168,6 +169,12 @@ type fakeRootFSRuntime struct {
 	lastParent    string
 	lastOperation string
 	leaseLoss     func(error)
+}
+
+func (r *fakeRootFSRuntime) Ping(context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pingErr
 }
 
 type fakeNetworkRuntime struct {

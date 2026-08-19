@@ -44,17 +44,20 @@ type claimResponse struct {
 func (h *taskHandle) ServeControl(ctx context.Context) {
 	h.controlOnce.Do(func() {
 		if err := os.MkdirAll(filepath.Dir(h.socketPath), 0o750); err != nil {
+			h.signalControlReady(err)
 			h.logger.Error("cannot create slot control directory", "error", err)
 			return
 		}
 		_ = os.Remove(h.socketPath)
 		listener, err := net.Listen("unix", h.socketPath)
 		if err != nil {
+			h.signalControlReady(err)
 			h.logger.Error("cannot listen on slot control socket", "path", h.socketPath, "error", err)
 			return
 		}
 		if err := os.Chmod(h.socketPath, 0o600); err != nil {
 			_ = listener.Close()
+			h.signalControlReady(err)
 			h.logger.Error("cannot secure slot control socket", "path", h.socketPath, "error", err)
 			return
 		}
@@ -68,7 +71,7 @@ func (h *taskHandle) ServeControl(ctx context.Context) {
 			writeControlJSON(w, http.StatusOK, h.statusSnapshot())
 		})
 		mux.HandleFunc("/claim", func(w http.ResponseWriter, request *http.Request) {
-			if request.Method != http.MethodPost {
+			if request.Method != http.MethodPut {
 				writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
@@ -89,6 +92,7 @@ func (h *taskHandle) ServeControl(ctx context.Context) {
 		h.mu.Lock()
 		h.controlServer = server
 		h.mu.Unlock()
+		h.signalControlReady(nil)
 
 		serveDone := make(chan struct{})
 		go func() {

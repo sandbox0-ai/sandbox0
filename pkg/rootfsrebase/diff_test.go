@@ -80,6 +80,23 @@ func TestDiffCountsChangedHardlinkInodeDataOnce(t *testing.T) {
 	}}, result.Changes)
 }
 
+func TestDiffReplacesACommonPathWhenItBecomesAHardlink(t *testing.T) {
+	old := Manifest{Version: ManifestVersion, LineageID: "filesystem", Nodes: []Node{
+		{Path: ".", Type: NodeDirectory, LinkCount: 1},
+		{Path: "a", Type: NodeRegular, Device: 1, Inode: 8, Generation: 1, GenerationKnown: true, LinkCount: 1},
+		{Path: "b", Type: NodeRegular, Device: 1, Inode: 9, Generation: 2, GenerationKnown: true, LinkCount: 1},
+	}}
+	source := Manifest{Version: ManifestVersion, LineageID: "filesystem", Nodes: []Node{
+		{Path: ".", Type: NodeDirectory, LinkCount: 1},
+		{Path: "a", Type: NodeRegular, Device: 2, Inode: 8, Generation: 1, GenerationKnown: true, LinkCount: 2},
+		{Path: "b", Type: NodeRegular, Device: 2, Inode: 8, Generation: 1, GenerationKnown: true, LinkCount: 2},
+	}}
+
+	result, err := Diff(old, source, nil)
+	require.NoError(t, err)
+	require.Equal(t, []Change{{Kind: ChangeReplace, Path: "b", HardlinkTarget: "a"}}, result.Changes)
+}
+
 func TestDiffResultRejectsDuplicatePathsAndOverlappingData(t *testing.T) {
 	result := DiffResult{Version: DiffVersion, Changes: []Change{
 		{Kind: ChangeRemove, Path: "same"},

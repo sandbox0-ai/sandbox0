@@ -2,6 +2,9 @@ package rootfsrebase
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -105,7 +108,7 @@ func validateMetadataChange(change MetadataChange) error {
 	previous := ""
 	for index, field := range change.Fields {
 		switch field {
-		case "gid", "link_target", "mode", "mtime", "rdev", "uid":
+		case "gid", "link_target", "mode", "mtime", "rdev", "size", "uid":
 		default:
 			return fmt.Errorf("unsupported metadata field %q", field)
 		}
@@ -133,6 +136,18 @@ func validateMetadataChange(change MetadataChange) error {
 		previous = name
 	}
 	return nil
+}
+
+func (r DiffResult) Digest() (string, error) {
+	if err := r.Validate(); err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(r)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 // Diff computes the user delta between two mounts of the same logical
@@ -198,7 +213,8 @@ func Diff(old, source Manifest, dirty map[string][]ByteRange) (*DiffResult, erro
 		if !exists {
 			continue
 		}
-		if oldNode.Type != sourceNode.Type {
+		trustedLineage := old.LineageID != "" && old.LineageID == source.LineageID
+		if oldNode.Type != sourceNode.Type || replacementRequired(oldNode, sourceNode, trustedLineage) {
 			change := Change{Kind: ChangeReplace, Path: path, Metadata: fullMetadata(sourceNode)}
 			if sourceNode.Type == NodeRegular {
 				change.Data = fullSourceData(sourceNode)
@@ -238,6 +254,15 @@ func Diff(old, source Manifest, dirty map[string][]ByteRange) (*DiffResult, erro
 		return nil, err
 	}
 	return result, nil
+}
+
+func replacementRequired(old, source Node, trustedLineage bool) bool {
+	if old.Type == NodeSymlink && old.LinkTarget != source.LinkTarget ||
+		(old.Type == NodeCharDevice || old.Type == NodeBlockDevice) && old.Rdev != source.Rdev {
+		return true
+	}
+	return trustedLineage && old.Type == NodeRegular && old.GenerationKnown && source.GenerationKnown &&
+		(old.Inode != source.Inode || old.Generation != source.Generation)
 }
 
 func nodesByPath(manifest Manifest) map[string]Node {
@@ -308,6 +333,9 @@ func metadataDelta(old, source Node) MetadataChange {
 	if old.Rdev != source.Rdev {
 		fields = append(fields, "rdev")
 	}
+	if old.Size != source.Size {
+		fields = append(fields, "size")
+	}
 	if old.LinkTarget != source.LinkTarget {
 		fields = append(fields, "link_target")
 	}
@@ -339,6 +367,9 @@ func fullMetadata(source Node) MetadataChange {
 	}
 	if source.Type == NodeCharDevice || source.Type == NodeBlockDevice {
 		fields = append(fields, "rdev")
+	}
+	if source.Type == NodeRegular {
+		fields = append(fields, "size")
 	}
 	sort.Strings(fields)
 	return MetadataChange{Fields: fields, SetXattrs: cloneXattrs(source.Xattrs)}

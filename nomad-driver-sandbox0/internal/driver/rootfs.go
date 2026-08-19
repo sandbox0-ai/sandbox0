@@ -202,7 +202,7 @@ func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageR
 			return result, fmt.Errorf("publish regional writer retirement: %w", err)
 		}
 		r.stopRenewal(request.Parent)
-		if err := r.sessions.RemoveTerminalBranch(request.Parent, request.Identity); err != nil {
+		if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil {
 			return result, fmt.Errorf("remove published RootFS branch: %w", err)
 		}
 		return result, nil
@@ -292,7 +292,7 @@ func (r *rootfsRuntime) CrashFence(
 	if err := r.authority.CompleteCrashAbandonWriterGrant(ctx, request, operationID, proof); err != nil {
 		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("complete regional writer crash abandon: %w", err)
 	}
-	if err := r.sessions.RemoveTerminalBranch(request.Parent, request.Identity); err != nil {
+	if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil {
 		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("remove crash-abandoned RootFS branch: %w", err)
 	}
 	return proof, nil

@@ -556,11 +556,12 @@ func (m *Manager) RetireResult(parent string, identity rootfshandoff.Identity, o
 	}, nil
 }
 
-// RemoveTerminalBranch deletes the node-local COW journal only after the
-// caller has made the corresponding planned publication or crash abandonment
-// terminal at the regional authority. The durable session record and terminal
-// proof remain available for idempotent retries and audit.
-func (m *Manager) RemoveTerminalBranch(parent string, identity rootfshandoff.Identity) error {
+// ReclaimTerminalArtifacts deletes the node-local COW journal and boot-local mount
+// directories only after the caller has made the corresponding planned
+// publication or crash abandonment terminal at the regional authority. The
+// durable session record and terminal proof remain available for idempotent
+// retries and audit.
+func (m *Manager) ReclaimTerminalArtifacts(parent string, identity rootfshandoff.Identity) error {
 	if strings.TrimSpace(parent) == "" || strings.TrimSpace(identity.RootFSID) == "" || identity.WriterEpoch <= 0 {
 		return fmt.Errorf("parent and writer identity are required: %w", errdefs.ErrInvalidArgument)
 	}
@@ -592,6 +593,13 @@ func (m *Manager) RemoveTerminalBranch(parent string, identity rootfshandoff.Ide
 		if err := m.save(current); err != nil {
 			return err
 		}
+	}
+	mountRoot := filepath.Dir(sessionPaths(m.branchRoot, m.mountRoot, parent).xfs)
+	if filepath.Dir(mountRoot) != m.mountRoot {
+		return fmt.Errorf("RootFS mount path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := os.RemoveAll(mountRoot); err != nil {
+		return fmt.Errorf("remove terminal RootFS mount directory: %w", err)
 	}
 	return nil
 }

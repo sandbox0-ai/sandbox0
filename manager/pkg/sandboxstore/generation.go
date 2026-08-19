@@ -105,6 +105,7 @@ type RootFSGenerationStore interface {
 	GetReadyRootFSBaseArtifact(context.Context, string, int) (*RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *EnsureInitialRootFSGenerationRequest) (*RootFSFilesystem, *RootFSGeneration, error)
 	GetRootFSGeneration(context.Context, string) (*RootFSGeneration, error)
+	ForkRunningRootFSFilesystem(context.Context, *ForkRunningRootFSFilesystemRequest) (*RootFSFilesystem, error)
 	PublishPausedRootFSRebase(context.Context, *PublishPausedRootFSRebaseRequest) (*RootFSFilesystem, error)
 }
 
@@ -190,7 +191,7 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 		if activeWriter {
 			return fmt.Errorf("%w: an active writer grant exists", ErrRootFSGenerationConflict)
 		}
-		if insertErr := insertPreparedRootFSRebaseGeneration(lockCtx, txStore.tx, normalized.Generation); insertErr != nil {
+		if insertErr := insertPreparedRootFSGeneration(lockCtx, txStore.tx, normalized.Generation); insertErr != nil {
 			return insertErr
 		}
 		tag, updateErr := txStore.tx.Exec(lockCtx, `
@@ -581,10 +582,19 @@ func validatePublishPausedRootFSRebaseRequest(req *PublishPausedRootFSRebaseRequ
 	if len(normalized.HealthCheckDigest) != sha256.Size {
 		return nil, fmt.Errorf("health_check_digest must be a 32-byte SHA-256 digest")
 	}
-	if req.Generation == nil {
+	generation, err := normalizeDurableRootFSGeneration(req.Generation, normalized.ExpectedSourceGenerationID)
+	if err != nil {
+		return nil, err
+	}
+	normalized.Generation = generation
+	return &normalized, nil
+}
+
+func normalizeDurableRootFSGeneration(input *RootFSGeneration, expectedParent string) (*RootFSGeneration, error) {
+	if input == nil {
 		return nil, fmt.Errorf("generation is required")
 	}
-	generation := *req.Generation
+	generation := *input
 	generation.ID = strings.TrimSpace(generation.ID)
 	generation.FilesystemID = strings.TrimSpace(generation.FilesystemID)
 	generation.ParentGenerationID = strings.TrimSpace(generation.ParentGenerationID)
@@ -615,7 +625,7 @@ func validatePublishPausedRootFSRebaseRequest(req *PublishPausedRootFSRebaseRequ
 			return nil, fmt.Errorf("%s must be a canonical sha256 digest", name)
 		}
 	}
-	if generation.ParentGenerationID != normalized.ExpectedSourceGenerationID || generation.WriterEpoch <= 0 ||
+	if generation.ParentGenerationID != strings.TrimSpace(expectedParent) || generation.WriterEpoch <= 0 ||
 		generation.FormatGeneration <= 0 || generation.LocatorVersion <= 0 {
 		return nil, fmt.Errorf("generation parent, epoch, format, or locator version is invalid")
 	}
@@ -638,8 +648,7 @@ func validatePublishPausedRootFSRebaseRequest(req *PublishPausedRootFSRebaseRequ
 	default:
 		return nil, fmt.Errorf("unsupported generation durability state %q", generation.DurabilityState)
 	}
-	normalized.Generation = &generation
-	return &normalized, nil
+	return &generation, nil
 }
 
 func getRootFSFilesystemAndGenerationForUpdate(
@@ -709,7 +718,7 @@ func loadPublishedRootFSRebaseRetry(
 	return &clone, nil
 }
 
-func insertPreparedRootFSRebaseGeneration(ctx context.Context, tx pgx.Tx, generation *RootFSGeneration) error {
+func insertPreparedRootFSGeneration(ctx context.Context, tx pgx.Tx, generation *RootFSGeneration) error {
 	if err := ensureRootFSCompositeBacklogCapacity(ctx, tx, generation); err != nil {
 		return err
 	}
@@ -724,13 +733,13 @@ func insertPreparedRootFSRebaseGeneration(ctx context.Context, tx pgx.Tx, genera
 		generation.SourceOCIDigest, generation.BaseArtifactDigest, generation.BaseBlockRoot,
 		generation.CurrentBlockHead, generation.WriterEpoch, generation.FormatGeneration,
 		generation.DurabilityState, generation.LocatorVersion, generation.Descriptor); err != nil {
-		return fmt.Errorf("insert prepared rootfs rebase generation: %w", err)
+		return fmt.Errorf("insert prepared rootfs generation: %w", err)
 	}
 	stored, err := scanRootFSGeneration(tx.QueryRow(ctx, rootFSGenerationSelectSQL()+`
 		WHERE generation_id = $1
 	`, generation.ID))
 	if err != nil {
-		return fmt.Errorf("load prepared rootfs rebase generation: %w", err)
+		return fmt.Errorf("load prepared rootfs generation: %w", err)
 	}
 	if !rootFSGenerationEqual(stored, generation) {
 		return fmt.Errorf("%w: prepared target generation has different immutable fields", ErrRootFSGenerationConflict)

@@ -2,6 +2,8 @@ package rootfshandoff
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -119,4 +121,26 @@ func TestWriterBindingDigestBindsCompleteRequestWithoutPersistingToken(t *testin
 	third, err := request.BindingDigest()
 	require.NoError(t, err)
 	require.NotEqual(t, first, third)
+}
+
+func TestRunningForkCheckpointProofBindsSequenceAndDescriptor(t *testing.T) {
+	binding := sha256.Sum256([]byte("running-fork-binding"))
+	proof := RunningForkCheckpointProof{
+		Version: RunningForkCheckpointVersion, OperationID: "fork-operation",
+		SourceSandboxID: "source", SourceFilesystemID: "source-rootfs", TargetSandboxID: "target",
+		SourceWriterGrantID: "grant", SourceWriterEpoch: 7,
+		BindingVersion: WriterBindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+		ExpectedSourceGenerationID: "source-generation", CheckpointGenerationID: "checkpoint-generation",
+		CheckpointSequence: 0, CheckpointDescriptorDigest: digest.FromString("checkpoint-descriptor").String(),
+	}
+	first, err := proof.Digest()
+	require.NoError(t, err)
+	proof.CheckpointSequence++
+	second, err := proof.Digest()
+	require.NoError(t, err)
+	require.NotEqual(t, first, second)
+	proof.CheckpointDescriptorDigest = digest.FromString("changed-descriptor").String()
+	third, err := proof.Digest()
+	require.NoError(t, err)
+	require.NotEqual(t, second, third)
 }

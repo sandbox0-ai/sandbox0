@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ const (
 	GenerationDescriptorVersion  = 1
 	GenerationDescriptorMaxBytes = rootfsblock.MaxDescriptorBytes
 	CrashFenceProofVersion       = 1
+	RunningForkCheckpointVersion = 1
 	CrashFenceHeadKeepInitial    = "keep_initial_generation"
 
 	StateConsuming  = "consuming"
@@ -382,6 +384,67 @@ func (p CrashFenceProof) Digest() ([sha256.Size]byte, error) {
 type CrashFenceResult struct {
 	Proof       CrashFenceProof `json:"proof"`
 	ProofDigest string          `json:"proof_digest"`
+}
+
+// RunningForkCheckpointProof binds one briefly frozen branch boundary to the
+// regional target generation. The descriptor digest remains stable evidence
+// after an asynchronous materializer advances the generation locator.
+type RunningForkCheckpointProof struct {
+	Version                    int    `json:"version"`
+	OperationID                string `json:"operation_id"`
+	SourceSandboxID            string `json:"source_sandbox_id"`
+	SourceFilesystemID         string `json:"source_filesystem_id"`
+	TargetSandboxID            string `json:"target_sandbox_id"`
+	SourceWriterGrantID        string `json:"source_writer_grant_id"`
+	SourceWriterEpoch          int64  `json:"source_writer_epoch"`
+	BindingVersion             int    `json:"binding_version"`
+	BindingDigest              string `json:"binding_digest"`
+	ExpectedSourceGenerationID string `json:"expected_source_generation_id"`
+	CheckpointGenerationID     string `json:"checkpoint_generation_id"`
+	CheckpointSequence         uint64 `json:"checkpoint_sequence"`
+	CheckpointDescriptorDigest string `json:"checkpoint_descriptor_digest"`
+}
+
+func (p RunningForkCheckpointProof) Validate() error {
+	if p.Version != RunningForkCheckpointVersion {
+		return fmt.Errorf("unsupported running fork checkpoint proof version %d", p.Version)
+	}
+	for name, value := range map[string]string{
+		"operation_id": p.OperationID, "source_sandbox_id": p.SourceSandboxID,
+		"source_filesystem_id": p.SourceFilesystemID, "target_sandbox_id": p.TargetSandboxID,
+		"source_writer_grant_id":        p.SourceWriterGrantID,
+		"expected_source_generation_id": p.ExpectedSourceGenerationID,
+		"checkpoint_generation_id":      p.CheckpointGenerationID,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s is required", name)
+		}
+	}
+	if p.SourceSandboxID == p.TargetSandboxID {
+		return fmt.Errorf("source and target sandboxes must differ")
+	}
+	if p.SourceWriterEpoch <= 0 || p.BindingVersion != WriterBindingVersion || p.CheckpointSequence > math.MaxInt64 {
+		return fmt.Errorf("writer epoch, binding version, or checkpoint sequence is invalid")
+	}
+	binding, err := hex.DecodeString(p.BindingDigest)
+	if err != nil || len(binding) != sha256.Size || hex.EncodeToString(binding) != p.BindingDigest {
+		return fmt.Errorf("binding_digest must be a canonical 32-byte hexadecimal digest")
+	}
+	if err := validateSHA256Digest(p.CheckpointDescriptorDigest); err != nil {
+		return fmt.Errorf("checkpoint_descriptor_digest: %w", err)
+	}
+	return nil
+}
+
+func (p RunningForkCheckpointProof) Digest() ([sha256.Size]byte, error) {
+	if err := p.Validate(); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(payload), nil
 }
 
 func (r CrashFenceResult) Validate() error {

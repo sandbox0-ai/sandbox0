@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/stretchr/testify/require"
 )
 
@@ -356,6 +358,130 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *tes
 	retired, err := store.GetRootFSWriterGrant(ctx, issue.GrantID)
 	require.NoError(t, err)
 	require.Equal(t, RootFSWriterGrantStateRetired, retired.State)
+}
+
+func TestForkRunningRootFSFilesystemKeepsSourceWriterLiveIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	sourceRecord := rootFSTestSandboxRecord("sandbox-running-fork-source", "team-1")
+	targetRecord := rootFSTestSandboxRecord("sandbox-running-fork-target", "team-1")
+	targetRecord.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, sourceRecord))
+	require.NoError(t, store.UpsertSandbox(ctx, targetRecord))
+
+	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	require.NoError(t, err)
+	source, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+		SandboxID: sourceRecord.ID, TeamID: sourceRecord.TeamID,
+		SourceOCIRef: artifact.SourceOCIRef, SourceOCIDigest: artifact.SourceOCIDigest,
+		BaseArtifactDigest: artifact.ArtifactDigest,
+	})
+	require.NoError(t, err)
+	binding := sha256.Sum256([]byte("running-fork-binding"))
+	issue := rootFSWriterGrantTestIssueRequest(
+		sourceRecord.ID, "grant-running-fork", "claim-running-fork", "slot-running-fork", binding[:],
+	)
+	issue.ExpectedFilesystemID = source.ID
+	issue.InitialGenerationID = initial.ID
+	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
+	require.NoError(t, err)
+	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
+		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
+		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
+
+	baseDescriptor, err := rootfsblock.DecodeDescriptor(initial.Descriptor)
+	require.NoError(t, err)
+	checkpointDescriptor, checkpointPayload, err := rootfsblock.BuildCompositeGeneration(
+		baseDescriptor,
+		[]rootfsblock.BlockUpdate{{Block: 3, Data: bytes.Repeat([]byte{0x73}, rootfsblock.LogicalBlockSize)}},
+	)
+	require.NoError(t, err)
+	checkpoint := &RootFSGeneration{
+		ID: "generation-running-fork-checkpoint", FilesystemID: targetRecord.ID,
+		ParentGenerationID: initial.ID, SourceOCIDigest: initial.SourceOCIDigest,
+		BaseArtifactDigest: initial.BaseArtifactDigest, BaseBlockRoot: initial.BaseBlockRoot,
+		CurrentBlockHead: checkpointDescriptor.MappingRoot.RootDigest,
+		WriterEpoch:      issued.Grant.WriterEpoch, FormatGeneration: initial.FormatGeneration,
+		DurabilityState: RootFSGenerationStateCompositeDurable,
+		LocatorVersion:  initial.LocatorVersion + 1, Descriptor: checkpointPayload,
+	}
+	checkpointProof := rootfshandoff.RunningForkCheckpointProof{
+		Version:     rootfshandoff.RunningForkCheckpointVersion,
+		OperationID: "running-fork-operation", SourceSandboxID: sourceRecord.ID,
+		SourceFilesystemID: source.ID, TargetSandboxID: targetRecord.ID,
+		SourceWriterGrantID: issue.GrantID, SourceWriterEpoch: issued.Grant.WriterEpoch,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+		ExpectedSourceGenerationID: initial.ID, CheckpointGenerationID: checkpoint.ID,
+		CheckpointSequence: 1, CheckpointDescriptorDigest: digest.FromBytes(checkpointPayload).String(),
+	}
+	proofDigest, err := checkpointProof.Digest()
+	require.NoError(t, err)
+	req := &ForkRunningRootFSFilesystemRequest{
+		OperationID: "running-fork-operation", SourceSandboxID: sourceRecord.ID,
+		TargetSandboxID: targetRecord.ID, TargetTeamID: targetRecord.TeamID,
+		SourceGrantID: issue.GrantID, SourceWriterEpoch: issued.Grant.WriterEpoch,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
+		CheckpointProof: checkpointProof, CheckpointProofDigest: proofDigest[:],
+		ExpectedSourceGenerationID: initial.ID,
+		Generation:                 checkpoint,
+	}
+	target, err := store.ForkRunningRootFSFilesystem(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, source.ID, target.SourceFilesystemID)
+	require.Equal(t, checkpoint.ID, target.HeadGenerationID)
+	require.Equal(t, issued.Grant.WriterEpoch, target.WriterEpoch)
+
+	loadedSource, err := store.GetRootFSFilesystem(ctx, sourceRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, initial.ID, loadedSource.HeadGenerationID, "running fork must not advance the source head")
+	require.Equal(t, issued.Grant.WriterEpoch, loadedSource.WriterEpoch)
+	grant, err := store.GetRootFSWriterGrant(ctx, issue.GrantID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateConsumed, grant.State)
+	materializedDescriptor := checkpointDescriptor
+	materializedDescriptor.CompositeTail = nil
+	materializedPayload, err := rootfsblock.EncodeDescriptor(materializedDescriptor)
+	require.NoError(t, err)
+	require.NoError(t, store.PublishRootFSGenerationMaterialization(ctx, &RootFSGenerationMaterialization{
+		GenerationID: checkpoint.ID, ExpectedLocatorVersion: checkpoint.LocatorVersion,
+		ExpectedDescriptor: checkpoint.Descriptor, MaterializedDescriptor: materializedPayload,
+	}))
+	renewed, err := store.RenewRootFSWriterGrant(ctx, &RenewRootFSWriterGrantRequest{
+		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:], ConsumerNodeUID: "node-a",
+	}, RootFSWriterLeaseRenewalPolicy{LeaseTTL: time.Minute, GracePeriod: time.Second})
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateConsumed, renewed.State)
+	childBinding := sha256.Sum256([]byte("running-fork-child-binding"))
+	childIssue := rootFSWriterGrantTestIssueRequest(
+		targetRecord.ID, "grant-running-fork-child", "claim-running-fork-child", "slot-running-fork-child", childBinding[:],
+	)
+	childIssue.ExpectedFilesystemID = target.ID
+	childIssue.InitialGenerationID = checkpoint.ID
+	childIssue.ExpectedWriterEpoch = target.WriterEpoch
+	child, err := store.IssueRootFSWriterGrant(ctx, childIssue)
+	require.NoError(t, err)
+	require.Equal(t, issued.Grant.WriterEpoch+1, child.Grant.WriterEpoch)
+	loadedSource, err = store.GetRootFSFilesystem(ctx, sourceRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, issued.Grant.WriterEpoch, loadedSource.WriterEpoch, "child authority must not fence the source writer")
+
+	retried, err := store.ForkRunningRootFSFilesystem(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, target.ID, retried.ID)
+	require.Equal(t, target.HeadGenerationID, retried.HeadGenerationID)
+
+	changed := *req
+	changed.CheckpointProof.CheckpointSequence++
+	changedDigest, digestErr := changed.CheckpointProof.Digest()
+	require.NoError(t, digestErr)
+	changed.CheckpointProofDigest = changedDigest[:]
+	_, err = store.ForkRunningRootFSFilesystem(ctx, &changed)
+	require.ErrorIs(t, err, ErrRootFSFilesystemConflict)
 }
 
 func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T) {

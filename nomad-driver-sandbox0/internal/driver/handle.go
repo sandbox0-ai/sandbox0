@@ -392,6 +392,10 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	h.mu.Lock()
 	h.rootMounted = true
 	h.phase = phaseClaiming
+	if durableStage != nil {
+		h.claim = &claimMetadata{WriterEpoch: request.WriterEpoch, Stage: durableStage}
+		h.stage = durableStage
+	}
 	h.mu.Unlock()
 	if err := h.persist(); err != nil {
 		_ = h.rollbackClaim()
@@ -468,6 +472,8 @@ func (h *taskHandle) rollbackClaim() error {
 	h.mu.Lock()
 	h.rootMounted = false
 	h.phase = phaseWarm
+	h.claim = nil
+	h.stage = nil
 	h.mu.Unlock()
 	h.resetNetworkPolicy()
 	return h.persist()
@@ -738,6 +744,9 @@ func (h *taskHandle) Recover(state PersistedState) error {
 	}
 	h.phase = phaseWarm
 	h.mu.Unlock()
+	if state.RootMounted && h.stage != nil {
+		return h.recoverCrashedRootFS()
+	}
 
 	status := ""
 	var runscState RunscState
@@ -773,6 +782,57 @@ func (h *taskHandle) Recover(state PersistedState) error {
 		h.markPoisoned(fmt.Errorf("unsupported recovered runsc state %q", runscState.Status))
 	}
 	return nil
+}
+
+func (h *taskHandle) recoverCrashedRootFS() error {
+	if h.rootfs == nil || h.stage == nil {
+		return errors.New("recovered RootFS task has no storage runtime")
+	}
+	operationID := crashOperationID(*h.stage)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cleanupCancel()
+	_ = h.runner.Kill(cleanupCtx, h.containerID, "KILL")
+	if err := h.runner.Delete(cleanupCtx, h.containerID, true); err != nil {
+		return fmt.Errorf("delete crashed gVisor task: %w", err)
+	}
+	if err := h.mounter.Unmount(h.rootMount); err != nil {
+		return fmt.Errorf("unmount crashed task root: %w", err)
+	}
+	mountNamespace, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		return fmt.Errorf("read host mount namespace: %w", err)
+	}
+	fenceCtx, fenceCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	_, err = h.rootfs.CrashFence(fenceCtx, *h.stage, operationID, crashTaskObservation{
+		ActiveKey: h.taskConfig.ID, ContainerID: h.containerID,
+		HostMountNamespaceID: mountNamespace, ContainerAbsent: true, TaskAbsent: true,
+		FrontendSnapshotAbsent: true, StableMountAbsent: true,
+	})
+	fenceCancel()
+	if err != nil {
+		return fmt.Errorf("crash-fence recovered RootFS task: %w", err)
+	}
+	if h.network != nil && h.networkChain != "" && h.netnsPath() != "" {
+		if err := h.network.Cleanup(context.Background(), h.netnsPath(), h.networkChain); err != nil {
+			return fmt.Errorf("cleanup crashed task network policy: %w", err)
+		}
+	}
+	h.mu.Lock()
+	h.rootMounted = false
+	h.phase = phasePoisoned
+	h.exitResult = &drivers.ExitResult{Err: errors.New("task driver restarted; RootFS writer was crash-abandoned")}
+	if h.completedAt.IsZero() {
+		h.completedAt = time.Now()
+	}
+	closeDoneLocked(h.done)
+	h.mu.Unlock()
+	return h.persist()
+}
+
+func crashOperationID(stage rootfshandoff.StageRequest) string {
+	payload := fmt.Sprintf("%s\x00%s\x00%d", stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
+	sum := sha256.Sum256([]byte(payload))
+	return "nomad-crash-" + hex.EncodeToString(sum[:16])
 }
 
 func (h *taskHandle) setPhase(phase slotPhase) {

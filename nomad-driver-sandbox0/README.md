@@ -19,16 +19,21 @@ Implemented:
 - generic warm allocation with no image-specific runtime state
 - local Unix control socket with `/status` and `/claim`
 - warm default-deny and claim-time L3/L4 network policy in the Nomad netns
+- block-map RootFS attach through NBD, XFS, and host OverlayFS
+- PostgreSQL writer consume, renewal, planned seal, and terminal publication
+- policy-digest verification against the immutable RootFS handoff
 - RootFS bind, start, stop, delete, signal, and cleanup paths
 - one-shot claim and basic recovery semantics
 - on-disk task state for driver crash recovery
+- fail-closed plugin-crash cleanup, regional crash abandonment, and fallback to
+  the last durable generation
 - unit tests with a fake runsc runtime
 
 Not implemented:
 
 - manager/ctld integration and slot registry
-- RootFS attach, PostgreSQL writer fencing, and S3 persistence
-- network-policy token verification
+- production remote-block service and cross-node device ownership
+- full network-policy incarnation-token persistence
 - procd first-command-ready accounting
 - guest stdout/stderr console forwarding
 - full cgroup and Nomad stats integration
@@ -39,8 +44,9 @@ Not implemented:
 `cmd/nomad-writer-authority` runs the PostgreSQL/mTLS writer-grant authority
 used by this experiment. It can issue an initial block-COW grant from a Stage
 JSON file, consume/renew grants over mTLS, and publish a locally sealed
-generation as the next PostgreSQL head. Run it with `--help` for the current
-flags.
+generation as the next PostgreSQL head. It also exposes the two-phase regional
+fence used to crash-abandon an unsealed writer without advancing the durable
+head. Run it with `--help` for the current flags.
 
 The network policy implementation is intentionally minimal: production ctld
 owns policy compilation, TPROXY, applied-token persistence, and L7 handling.

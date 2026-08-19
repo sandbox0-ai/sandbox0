@@ -36,6 +36,23 @@ type PublishGenerationRequest struct {
 	Generation              sandboxstore.RootFSGeneration `json:"generation"`
 }
 
+// CrashAbandonBeginRequest asks the regional authority to fence one expired
+// writer before the node discards its unsealed physical branch.
+type CrashAbandonBeginRequest struct {
+	WriterEpoch             int64  `json:"writer_epoch"`
+	BindingVersion          int    `json:"binding_version"`
+	BindingDigest           string `json:"binding_digest"`
+	OperationID             string `json:"operation_id"`
+	ExpectedOldGenerationID string `json:"expected_old_generation_id"`
+}
+
+// CrashAbandonCompleteRequest submits the node's terminal absence proof after
+// the regional fence has become authoritative.
+type CrashAbandonCompleteRequest struct {
+	CrashAbandonBeginRequest
+	Proof rootfshandoff.CrashFenceProof `json:"proof"`
+}
+
 type ManagerClientConfig struct {
 	BaseURL        string
 	CAFile         string
@@ -117,6 +134,68 @@ func (c *ManagerClient) PublishWriterGrant(ctx context.Context, stage rootfshand
 		return fmt.Errorf("invalid terminal writer publication: %w", errdefs.ErrInvalidArgument)
 	}
 	return c.putWriterGrant(ctx, "publish", protocol.TerminalPath(stage.Identity.WriterGrantID)+"/publish", request, nil)
+}
+
+// BeginCrashAbandonWriterGrant establishes the regional lease fence before
+// local unplanned cleanup. Callers may retry the exact operation while the
+// lease remains within the server's renewal grace period.
+func (c *ManagerClient) BeginCrashAbandonWriterGrant(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	operationID string,
+) error {
+	request, err := crashAbandonBeginRequest(stage, operationID)
+	if err != nil {
+		return err
+	}
+	path := protocol.TerminalPath(stage.Identity.WriterGrantID) + "/crash-abandon/begin"
+	return c.putWriterGrant(ctx, "begin crash abandon", path, request, nil)
+}
+
+// CompleteCrashAbandonWriterGrant retires the fenced grant without advancing
+// its durable generation.
+func (c *ManagerClient) CompleteCrashAbandonWriterGrant(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	operationID string,
+	proof rootfshandoff.CrashFenceProof,
+) error {
+	request, err := crashAbandonBeginRequest(stage, operationID)
+	if err != nil {
+		return err
+	}
+	if err := proof.Validate(); err != nil {
+		return fmt.Errorf("validate crash fence proof: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if proof.OperationID != request.OperationID || proof.WriterGrantID != stage.Identity.WriterGrantID ||
+		proof.WriterEpoch != request.WriterEpoch || proof.BindingVersion != request.BindingVersion ||
+		proof.BindingDigest != request.BindingDigest || proof.InitialGeneration != request.ExpectedOldGenerationID {
+		return fmt.Errorf("crash fence proof does not match the writer binding: %w", errdefs.ErrInvalidArgument)
+	}
+	path := protocol.TerminalPath(stage.Identity.WriterGrantID) + "/crash-abandon/complete"
+	return c.putWriterGrant(ctx, "complete crash abandon", path, CrashAbandonCompleteRequest{
+		CrashAbandonBeginRequest: request,
+		Proof:                    proof,
+	}, nil)
+}
+
+func crashAbandonBeginRequest(
+	stage rootfshandoff.StageRequest,
+	operationID string,
+) (CrashAbandonBeginRequest, error) {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return CrashAbandonBeginRequest{}, err
+	}
+	request := CrashAbandonBeginRequest{
+		WriterEpoch: binding.WriterEpoch, BindingVersion: binding.BindingVersion,
+		BindingDigest: binding.BindingDigest, OperationID: strings.TrimSpace(operationID),
+		ExpectedOldGenerationID: strings.TrimSpace(stage.InitialGeneration),
+	}
+	if request.OperationID == "" || request.ExpectedOldGenerationID == "" {
+		return CrashAbandonBeginRequest{}, fmt.Errorf("invalid crash abandon request: %w", errdefs.ErrInvalidArgument)
+	}
+	return request, nil
 }
 
 // RenewWriterGrant extends the lease for the exact consumed Stage binding.

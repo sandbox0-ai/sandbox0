@@ -1892,9 +1892,9 @@ func lockRootFSWriterCrashFallbackGeneration(
 		SELECT EXISTS (
 			SELECT 1
 			FROM manager.rootfs_generations
-			WHERE generation_id = $1 AND filesystem_id = $2
+			WHERE generation_id = $1
 		)
-	`, expectedOldGenerationID, record.FilesystemID).Scan(&oldGenerationExists); err != nil {
+	`, expectedOldGenerationID).Scan(&oldGenerationExists); err != nil {
 		return fmt.Errorf("verify crash fallback generation: %w", err)
 	}
 	if !oldGenerationExists {

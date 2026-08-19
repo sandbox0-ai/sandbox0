@@ -53,7 +53,7 @@ func (l migrateLogger) Fatalf(format string, args ...any) {
 }
 
 func main() {
-	mode := flag.String("mode", "serve", "serve or issue")
+	mode := flag.String("mode", "serve", "serve, issue, fork, cancel, or stage-digest")
 	stageFile := flag.String("stage-file", "", "stage-digest: StageRequest JSON path")
 	dbURL := flag.String("db-url", "", "PostgreSQL URL")
 	address := flag.String("address", "172.16.100.2:8421", "mTLS listen address")
@@ -298,12 +298,261 @@ func newPublishHandler(
 	next http.Handler,
 ) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.EscapedPath() != "/internal/v1/rootfs-writer-grants:renew" &&
-			strings.HasSuffix(request.URL.EscapedPath(), "/terminal/publish") {
+		path := request.URL.EscapedPath()
+		switch {
+		case path != "/internal/v1/rootfs-writer-grants:renew" && strings.HasSuffix(path, "/terminal/publish"):
 			servePublish(verifier, store, writer, request)
+			return
+		case strings.HasSuffix(path, "/terminal/crash-abandon/begin"):
+			serveCrashAbandonBegin(verifier, store, writer, request)
+			return
+		case strings.HasSuffix(path, "/terminal/crash-abandon/complete"):
+			serveCrashAbandonComplete(verifier, store, writer, request)
 			return
 		}
 		next.ServeHTTP(writer, request)
+	})
+}
+
+func serveCrashAbandonBegin(
+	verifier managerauthority.CallerVerifier,
+	store *sandboxstore.PGSandboxStore,
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	grantID, caller, body, grant, ok := decodeCrashAbandonBegin(
+		verifier, store, writer, request, "/terminal/crash-abandon/begin",
+	)
+	if !ok {
+		return
+	}
+	if grant.State == sandboxstore.RootFSWriterGrantStateRetired &&
+		grant.RetireKind == sandboxstore.RootFSWriterRetireKindCrashAbandon &&
+		grant.RetireOperationID == body.OperationID {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err := ensureCrashLifecycle(request.Context(), store, grant, body); err != nil {
+		http.Error(writer, "prepare crash lifecycle: "+err.Error(), http.StatusConflict)
+		return
+	}
+	binding, _ := hex.DecodeString(body.BindingDigest)
+	if _, err := store.BeginRootFSWriterCrashAbandon(request.Context(), &sandboxstore.BeginRootFSWriterCrashAbandonRequest{
+		GrantID: grantID, WriterEpoch: body.WriterEpoch, OperationID: body.OperationID,
+		BindingVersion: body.BindingVersion, BindingDigest: binding,
+		NodeUID: caller.NodeUID, NodeBootID: grant.NodeBootID,
+		ExpectedOldGenerationID: body.ExpectedOldGenerationID,
+	}); err != nil {
+		http.Error(writer, "begin crash abandon: "+err.Error(), http.StatusConflict)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func serveCrashAbandonComplete(
+	verifier managerauthority.CallerVerifier,
+	store *sandboxstore.PGSandboxStore,
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	grantID, caller, begin, grant, ok := decodeCrashAbandonComplete(verifier, store, writer, request)
+	if !ok {
+		return
+	}
+	proof := begin.Proof
+	proofDigest, err := proof.Digest()
+	if err != nil {
+		http.Error(writer, "invalid crash fence proof: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if grant.State == sandboxstore.RootFSWriterGrantStateRetired {
+		if grant.RetireKind == sandboxstore.RootFSWriterRetireKindCrashAbandon &&
+			grant.RetireOperationID == begin.OperationID && bytes.Equal(grant.RetireProofDigest, proofDigest[:]) {
+			writer.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.Error(writer, "writer grant has a different terminal result", http.StatusConflict)
+		return
+	}
+	if proof.OperationID != begin.OperationID || proof.WriterGrantID != grantID ||
+		proof.WriterEpoch != grant.WriterEpoch || proof.BindingVersion != grant.BindingVersion ||
+		proof.BindingDigest != begin.BindingDigest || proof.Parent != grant.GateParent ||
+		proof.ClaimID != grant.ClaimID || proof.NodeUID != caller.NodeUID ||
+		proof.BootID != grant.NodeBootID || proof.InitialGeneration != grant.InitialGenerationID {
+		http.Error(writer, "crash proof does not match writer grant", http.StatusConflict)
+		return
+	}
+	generation, err := store.GetRootFSGeneration(request.Context(), grant.InitialGenerationID)
+	if err != nil || generation.CurrentBlockHead != proof.InitialBlockHead {
+		http.Error(writer, "crash proof does not match durable generation", http.StatusConflict)
+		return
+	}
+	record, err := store.GetSandbox(request.Context(), grant.SandboxID)
+	if err != nil || record.CurrentPodName != proof.PodUID {
+		http.Error(writer, "crash proof does not match Nomad allocation", http.StatusConflict)
+		return
+	}
+	binding, _ := hex.DecodeString(begin.BindingDigest)
+	err = store.WithSandboxLock(request.Context(), grant.SandboxID, func(
+		ctx context.Context,
+		tx sandboxstore.SandboxStoreTx,
+		_ *sandboxstore.SandboxRecord,
+	) error {
+		crashTx, ok := tx.(sandboxstore.RootFSWriterCrashAbandonTx)
+		if !ok {
+			return fmt.Errorf("sandbox transaction cannot abandon rootfs writers")
+		}
+		_, err := crashTx.CompleteRootFSWriterCrashAbandon(ctx, &sandboxstore.CompleteRootFSWriterCrashAbandonRequest{
+			LifecycleTxnID: begin.OperationID, GrantID: grantID, WriterEpoch: grant.WriterEpoch,
+			OperationID: begin.OperationID, BindingVersion: grant.BindingVersion, BindingDigest: binding,
+			ProofVersion: sandboxstore.RootFSWriterCrashAbandonProofVersion, ProofDigest: proofDigest[:],
+			NodeUID: caller.NodeUID, NodeBootID: grant.NodeBootID,
+			ExpectedOldGenerationID: grant.InitialGenerationID,
+		})
+		return err
+	})
+	if err != nil {
+		http.Error(writer, "complete crash abandon: "+err.Error(), http.StatusConflict)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func decodeCrashAbandonBegin(
+	verifier managerauthority.CallerVerifier,
+	store *sandboxstore.PGSandboxStore,
+	writer http.ResponseWriter,
+	request *http.Request,
+	suffix string,
+) (string, managerauthority.CallerIdentity, managerauthority.CrashAbandonBeginRequest, *sandboxstore.RootFSWriterGrant, bool) {
+	var body managerauthority.CrashAbandonBeginRequest
+	if request.Method != http.MethodPut {
+		writer.Header().Set("Allow", http.MethodPut)
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	grantID, err := crashAbandonGrantID(request.URL.EscapedPath(), suffix)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	caller, err := verifier.Verify(request.Context(), request.Header.Get("Authorization"))
+	if err != nil {
+		http.Error(writer, "unknown writer authority client", http.StatusUnauthorized)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 128<<10)).Decode(&body); err != nil {
+		http.Error(writer, "invalid crash abandon request", http.StatusBadRequest)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	if body.WriterEpoch <= 0 || body.BindingVersion != sandboxstore.RootFSWriterBindingVersion ||
+		strings.TrimSpace(body.OperationID) == "" || strings.TrimSpace(body.ExpectedOldGenerationID) == "" {
+		http.Error(writer, "invalid crash abandon binding", http.StatusBadRequest)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	binding, err := hex.DecodeString(strings.TrimSpace(body.BindingDigest))
+	if err != nil || len(binding) != 32 || hex.EncodeToString(binding) != body.BindingDigest {
+		http.Error(writer, "binding_digest must be canonical", http.StatusBadRequest)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	grant, err := store.GetRootFSWriterGrant(request.Context(), grantID)
+	if err != nil || grant == nil || grant.NodeUID != caller.NodeUID ||
+		grant.WriterEpoch != body.WriterEpoch || grant.BindingVersion != body.BindingVersion ||
+		!bytes.Equal(grant.BindingDigest, binding) || grant.InitialGenerationID != body.ExpectedOldGenerationID {
+		http.Error(writer, "crash abandon request does not match writer grant", http.StatusConflict)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	return grantID, caller, body, grant, true
+}
+
+func decodeCrashAbandonComplete(
+	verifier managerauthority.CallerVerifier,
+	store *sandboxstore.PGSandboxStore,
+	writer http.ResponseWriter,
+	request *http.Request,
+) (string, managerauthority.CallerIdentity, managerauthority.CrashAbandonCompleteRequest, *sandboxstore.RootFSWriterGrant, bool) {
+	var body managerauthority.CrashAbandonCompleteRequest
+	if request.Method != http.MethodPut {
+		writer.Header().Set("Allow", http.MethodPut)
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	grantID, err := crashAbandonGrantID(request.URL.EscapedPath(), "/terminal/crash-abandon/complete")
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	caller, err := verifier.Verify(request.Context(), request.Header.Get("Authorization"))
+	if err != nil {
+		http.Error(writer, "unknown writer authority client", http.StatusUnauthorized)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 256<<10)).Decode(&body); err != nil {
+		http.Error(writer, "invalid crash abandon completion", http.StatusBadRequest)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	grant, err := store.GetRootFSWriterGrant(request.Context(), grantID)
+	binding, bindingErr := hex.DecodeString(strings.TrimSpace(body.BindingDigest))
+	if err != nil || grant == nil || bindingErr != nil || len(binding) != 32 ||
+		grant.NodeUID != caller.NodeUID || grant.WriterEpoch != body.WriterEpoch ||
+		grant.BindingVersion != body.BindingVersion || !bytes.Equal(grant.BindingDigest, binding) ||
+		grant.InitialGenerationID != body.ExpectedOldGenerationID || strings.TrimSpace(body.OperationID) == "" {
+		http.Error(writer, "crash abandon completion does not match writer grant", http.StatusConflict)
+		return "", managerauthority.CallerIdentity{}, body, nil, false
+	}
+	return grantID, caller, body, grant, true
+}
+
+func crashAbandonGrantID(path, suffix string) (string, error) {
+	relative := strings.TrimPrefix(path, "/internal/v1/rootfs-writer-grants/")
+	if relative == path || !strings.HasSuffix(relative, suffix) {
+		return "", fmt.Errorf("invalid crash abandon path")
+	}
+	grantID, err := url.PathUnescape(strings.TrimSuffix(relative, suffix))
+	if err != nil || grantID == "" || strings.Contains(grantID, "/") {
+		return "", fmt.Errorf("invalid writer grant")
+	}
+	return grantID, nil
+}
+
+func ensureCrashLifecycle(
+	ctx context.Context,
+	store *sandboxstore.PGSandboxStore,
+	grant *sandboxstore.RootFSWriterGrant,
+	body managerauthority.CrashAbandonBeginRequest,
+) error {
+	runtimeGeneration, err := strconv.ParseInt(grant.RuntimeGeneration, 10, 64)
+	if err != nil || runtimeGeneration <= 0 {
+		return fmt.Errorf("invalid writer runtime generation")
+	}
+	return store.WithSandboxLock(ctx, grant.SandboxID, func(
+		lockCtx context.Context,
+		tx sandboxstore.SandboxStoreTx,
+		record *sandboxstore.SandboxRecord,
+	) error {
+		active, activeErr := tx.GetActiveLifecycleTxn(lockCtx, grant.SandboxID)
+		if activeErr != nil {
+			return activeErr
+		}
+		if active != nil {
+			if active.ID == body.OperationID && active.Kind == sandboxstore.SandboxLifecycleKindPause &&
+				active.Source == sandboxstore.SandboxLifecycleSourceCrash &&
+				active.ExpectedHeadLayerID == body.ExpectedOldGenerationID {
+				return nil
+			}
+			return fmt.Errorf("another lifecycle transaction %s is active", active.ID)
+		}
+		if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive ||
+			record.RuntimeGeneration != runtimeGeneration || record.CurrentPodNamespace == "" || record.CurrentPodName == "" {
+			return fmt.Errorf("sandbox runtime does not match crashed writer")
+		}
+		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
+			ID: body.OperationID, SandboxID: grant.SandboxID, Kind: sandboxstore.SandboxLifecycleKindPause,
+			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceCrash,
+			Cancelable: false, FromGeneration: runtimeGeneration,
+			FromPodNamespace: record.CurrentPodNamespace, FromPodName: record.CurrentPodName,
+			ExpectedHeadLayerID: body.ExpectedOldGenerationID,
+		})
 	})
 }
 
@@ -429,10 +678,19 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 	if err != nil || len(binding) != 32 || hex.EncodeToString(binding) != strings.TrimSpace(options.bindingHex) {
 		return fmt.Errorf("binding-digest must be 32 canonical lowercase hexadecimal bytes")
 	}
+	runtimeGeneration, err := strconv.ParseInt(strings.TrimSpace(options.runtimeGeneration), 10, 64)
+	if err != nil || runtimeGeneration <= 0 {
+		return fmt.Errorf("runtime-generation must be a positive integer")
+	}
+	runtimeName := strings.TrimSpace(options.podUID)
+	if options.stage != nil && strings.TrimSpace(options.stage.Identity.PodUID) != "" {
+		runtimeName = strings.TrimSpace(options.stage.Identity.PodUID)
+	}
 	if err := store.UpsertSandbox(ctx, &sandboxstore.SandboxRecord{
 		ID: options.sandboxID, TeamID: options.teamID, UserID: "user-1",
 		TemplateID: "nomad-poc", TemplateName: "nomad-poc", TemplateNamespace: "default",
 		DesiredState: sandboxstore.SandboxDesiredStateActive, CreatedAt: time.Now().UTC(),
+		CurrentPodNamespace: "nomad", CurrentPodName: runtimeName, RuntimeGeneration: runtimeGeneration,
 	}); err != nil {
 		return fmt.Errorf("seed sandbox: %w", err)
 	}

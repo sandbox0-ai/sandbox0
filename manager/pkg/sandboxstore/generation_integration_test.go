@@ -353,6 +353,93 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *tes
 	require.Equal(t, RootFSWriterGrantStateRetired, retired.State)
 }
 
+func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-crash-source", "team-1")))
+	targetRecord := rootFSTestSandboxRecord("sandbox-crash-target", "team-1")
+	targetRecord.RuntimeGeneration = 7
+	targetRecord.CurrentPodNamespace = "nomad"
+	targetRecord.CurrentPodName = "allocation-crashed"
+	require.NoError(t, store.UpsertSandbox(ctx, targetRecord))
+
+	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	require.NoError(t, err)
+	_, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+		SandboxID: "sandbox-crash-source", TeamID: "team-1", SourceOCIRef: artifact.SourceOCIRef,
+		SourceOCIDigest: artifact.SourceOCIDigest, BaseArtifactDigest: artifact.ArtifactDigest,
+	})
+	require.NoError(t, err)
+	target, err := store.ForkRootFSFilesystem(ctx, &ForkRootFSFilesystemRequest{
+		SourceSandboxID: "sandbox-crash-source", TargetSandboxID: "sandbox-crash-target",
+	})
+	require.NoError(t, err)
+	require.Equal(t, initial.ID, target.HeadGenerationID)
+
+	binding := sha256.Sum256([]byte("fork-crash-binding"))
+	issue := rootFSWriterGrantTestIssueRequest(
+		"sandbox-crash-target", "grant-fork-crash", "claim-fork-crash", "slot-fork-crash", binding[:],
+	)
+	issue.ExpectedFilesystemID = target.ID
+	issue.InitialGenerationID = initial.ID
+	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
+	require.NoError(t, err)
+	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
+		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
+		ConsumerNodeUID: issue.NodeUID, ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.rootfs_writer_grants
+		SET lease_expires_at = NOW() - ($2::bigint * INTERVAL '1 millisecond')
+		WHERE grant_id = $1
+	`, issue.GrantID, RootFSWriterCrashAbandonGrace.Milliseconds()+1000)
+	require.NoError(t, err)
+	operationID := "fork-crash-abandon"
+	require.NoError(t, store.WithSandboxLock(ctx, target.ID, func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+			ID: operationID, SandboxID: target.ID, Kind: SandboxLifecycleKindPause,
+			Phase: SandboxLifecyclePhasePublishing, Source: SandboxLifecycleSourceCrash,
+			FromGeneration: 7, FromPodNamespace: "nomad", FromPodName: "allocation-crashed",
+			ExpectedHeadLayerID: initial.ID,
+		})
+	}))
+	_, err = store.BeginRootFSWriterCrashAbandon(ctx, &BeginRootFSWriterCrashAbandonRequest{
+		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, OperationID: operationID,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
+		NodeUID: issue.NodeUID, NodeBootID: issue.NodeBootID, ExpectedOldGenerationID: initial.ID,
+	})
+	require.NoError(t, err)
+	proof := sha256.Sum256([]byte("fork-crash-physical-absence-proof"))
+	require.NoError(t, store.WithSandboxLock(ctx, target.ID, func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+		crashTx, ok := tx.(RootFSWriterCrashAbandonTx)
+		require.True(t, ok)
+		_, completeErr := crashTx.CompleteRootFSWriterCrashAbandon(lockCtx, &CompleteRootFSWriterCrashAbandonRequest{
+			LifecycleTxnID: operationID, GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
+			OperationID: operationID, BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
+			ProofVersion: RootFSWriterCrashAbandonProofVersion, ProofDigest: proof[:],
+			NodeUID: issue.NodeUID, NodeBootID: issue.NodeBootID, ExpectedOldGenerationID: initial.ID,
+		})
+		return completeErr
+	}))
+
+	loadedTarget, err := store.GetRootFSFilesystem(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, initial.ID, loadedTarget.HeadGenerationID)
+	loadedSource, err := store.GetRootFSFilesystem(ctx, "sandbox-crash-source")
+	require.NoError(t, err)
+	require.Equal(t, initial.ID, loadedSource.HeadGenerationID)
+	grant, err := store.GetRootFSWriterGrant(ctx, issue.GrantID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetired, grant.State)
+	require.Equal(t, RootFSWriterRetireKindCrashAbandon, grant.RetireKind)
+	record, err := store.GetSandbox(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStatePaused, record.DesiredState)
+}
+
 func assertBlockGenerationPublishState(
 	t *testing.T,
 	ctx context.Context,

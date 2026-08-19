@@ -157,6 +157,7 @@ type fakeRootFSRuntime struct {
 	source        string
 	ensureCalls   int
 	retireCalls   int
+	crashCalls    int
 	lastParent    string
 	lastOperation string
 }
@@ -206,6 +207,20 @@ func (r *fakeRootFSRuntime) Retire(_ context.Context, request rootfshandoff.Stag
 	r.lastParent = request.Parent
 	r.lastOperation = operationID
 	return rootfssession.RetireResult{Parent: request.Parent, OperationID: operationID}, nil
+}
+
+func (r *fakeRootFSRuntime) CrashFence(
+	_ context.Context,
+	request rootfshandoff.StageRequest,
+	operationID string,
+	_ crashTaskObservation,
+) (rootfshandoff.CrashFenceProof, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.crashCalls++
+	r.lastParent = request.Parent
+	r.lastOperation = operationID
+	return rootfshandoff.CrashFenceProof{OperationID: operationID}, nil
 }
 
 func (r *fakeRootFSRuntime) snapshot() (ensureCalls, retireCalls int, parent, operation string) {
@@ -581,6 +596,55 @@ func TestRecoverPoisonsInterruptedClaim(t *testing.T) {
 	}
 	if status := recovered.TaskStatus(); status.DriverAttributes["phase"] != string(phasePoisoned) {
 		t.Fatalf("recovered phase = %s, want poisoned", status.DriverAttributes["phase"])
+	}
+}
+
+func TestRecoverCrashAbandonsActiveRootFSWriter(t *testing.T) {
+	fixture := newTestFixture(t)
+	if err := fixture.handle.Prepare(TaskConfig{Command: "/procd", WaitForClaim: true}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	stage := rootfshandoff.StageRequest{
+		BindingVersion:    rootfshandoff.WriterBindingVersion,
+		Parent:            "sha256:" + strings.Repeat("a", 64),
+		InitialGeneration: "generation-active",
+		Identity: rootfshandoff.Identity{
+			RootFSID: "rootfs-active", WriterEpoch: 4, WriterGrantID: "grant-active",
+		},
+	}
+	state := fixture.handle.PersistedState()
+	state.RootMounted = true
+	state.Phase = phaseActive
+	state.Claim = &claimMetadata{WriterEpoch: "4", Stage: &stage}
+	if err := writePersistedState(state, filepath.Join(state.BundleDir, ".sandbox0-driver-state.json")); err != nil {
+		t.Fatalf("write active state: %v", err)
+	}
+	runtime := &fakeRootFSRuntime{}
+	recovered := newTaskHandle(taskHandleOptions{
+		taskConfig: state.TaskConfig, bundleDir: state.BundleDir, containerID: state.ContainerID,
+		rootMount: state.RootMount, socketPath: filepath.Join(t.TempDir(), "recovered.sock"),
+		runner: fixture.runner, mounter: fixture.mounter, rootfs: runtime,
+		allowedRoot: fixture.allowedRoot, logger: hclog.NewNullLogger(),
+	})
+	if err := recovered.Recover(state); err != nil {
+		t.Fatalf("Recover() error = %v", err)
+	}
+	status := recovered.TaskStatus()
+	if status.DriverAttributes["phase"] != string(phasePoisoned) || status.DriverAttributes["root_mounted"] != "false" {
+		t.Fatalf("recovered status = %+v, want poisoned and detached", status.DriverAttributes)
+	}
+	runtime.mu.Lock()
+	crashCalls, retireCalls, operation := runtime.crashCalls, runtime.retireCalls, runtime.lastOperation
+	runtime.mu.Unlock()
+	if crashCalls != 1 || retireCalls != 0 || operation != crashOperationID(stage) {
+		t.Fatalf("runtime crash=%d retire=%d operation=%q", crashCalls, retireCalls, operation)
+	}
+	if calls := fixture.runner.callsSnapshot(); !contains(calls, "kill:KILL") || !contains(calls, "delete:force") {
+		t.Fatalf("runner calls = %v, want forced runtime removal", calls)
+	}
+	_, unmounts := fixture.mounter.snapshot()
+	if len(unmounts) != 1 || unmounts[0] != fixture.rootMount {
+		t.Fatalf("unmounts = %v, want task root detached", unmounts)
 	}
 }
 

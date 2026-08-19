@@ -440,10 +440,13 @@ func forkRootFSFilesystem(ctx context.Context, db rootFSStoreDB, req *ForkRootFS
 		WITH source AS (
 			SELECT f.filesystem_id, f.team_id, f.head_layer_id, f.head_generation_id,
 				f.storage_format, f.base_image_ref, f.base_image_digest,
-				f.base_artifact_digest, f.format_generation
+				f.base_artifact_digest, f.format_generation,
+				COALESCE(head_generation.writer_epoch, 0) AS head_writer_epoch
 			FROM manager.sandbox_rootfs_bindings b
 			JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
 			JOIN manager.sandboxes source_sandbox ON source_sandbox.sandbox_id = b.sandbox_id
+			LEFT JOIN manager.rootfs_generations head_generation
+				ON head_generation.generation_id = f.head_generation_id
 			WHERE b.sandbox_id = $1
 				AND (
 					(f.storage_format = 'legacy-layer' AND f.head_layer_id IS NOT NULL)
@@ -484,7 +487,8 @@ func forkRootFSFilesystem(ctx context.Context, db rootFSStoreDB, req *ForkRootFS
 				source.filesystem_id,
 				source.head_layer_id,
 				source.head_generation_id,
-				0,
+				CASE WHEN source.storage_format = 'block-cow-v1'
+					THEN source.head_writer_epoch ELSE 0 END,
 				source.storage_format,
 				source.base_image_ref,
 				source.base_image_digest,
@@ -571,7 +575,8 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 				CASE WHEN s.head_generation_id IS NULL THEN 'legacy-layer' ELSE 'block-cow-v1' END AS storage_format,
 				COALESCE(l.base_image_ref, a.source_oci_ref, '') AS base_image_ref,
 				COALESCE(l.base_image_digest, g.source_oci_digest, '') AS base_image_digest,
-				g.base_artifact_digest, g.format_generation
+				g.base_artifact_digest, g.format_generation,
+				COALESCE(g.writer_epoch, 0) AS head_writer_epoch
 			FROM manager.rootfs_snapshots s
 			LEFT JOIN manager.rootfs_layers l ON l.layer_id = s.head_layer_id
 			LEFT JOIN manager.rootfs_generations g ON g.generation_id = s.head_generation_id
@@ -614,7 +619,7 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 		restored AS (
 			INSERT INTO manager.rootfs_filesystems (
 				filesystem_id, team_id, source_filesystem_id, head_layer_id,
-				head_generation_id, storage_format, base_image_ref, base_image_digest,
+				head_generation_id, writer_epoch, storage_format, base_image_ref, base_image_digest,
 				base_artifact_digest, format_generation, created_at, updated_at
 			)
 			SELECT
@@ -623,6 +628,7 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 				snapshot.filesystem_id,
 				snapshot.head_layer_id,
 				snapshot.head_generation_id,
+				snapshot.head_writer_epoch,
 				snapshot.storage_format,
 				snapshot.base_image_ref,
 				snapshot.base_image_digest,

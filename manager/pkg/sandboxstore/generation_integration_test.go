@@ -449,6 +449,40 @@ func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T)
 	require.Equal(t, SandboxDesiredStatePaused, record.DesiredState)
 }
 
+func TestForkRootFSFilesystemCarriesSharedGenerationEpoch(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	sourceRecord := rootFSTestSandboxRecord("sandbox-fork-epoch-source", "team-1")
+	sourceRecord.DesiredState = SandboxDesiredStatePaused
+	targetRecord := rootFSTestSandboxRecord("sandbox-fork-epoch-target", "team-1")
+	targetRecord.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, sourceRecord))
+	require.NoError(t, store.UpsertSandbox(ctx, targetRecord))
+	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	require.NoError(t, err)
+	filesystem, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
+		SandboxID: sourceRecord.ID, TeamID: sourceRecord.TeamID, SourceOCIRef: artifact.SourceOCIRef,
+		SourceOCIDigest: artifact.SourceOCIDigest, BaseArtifactDigest: artifact.ArtifactDigest,
+	})
+	require.NoError(t, err)
+	shared := putTestDurableRootFSGeneration(t, ctx, pool, filesystem, initial, "fork-shared-epoch", 7)
+	target, err := store.ForkRootFSFilesystem(ctx, &ForkRootFSFilesystemRequest{
+		SourceSandboxID: sourceRecord.ID, TargetSandboxID: targetRecord.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, shared.ID, target.HeadGenerationID)
+	require.Equal(t, shared.WriterEpoch, target.WriterEpoch)
+	binding := bytes.Repeat([]byte{0x71}, 32)
+	issue := rootFSWriterGrantTestIssueRequest(targetRecord.ID, "grant-fork-epoch", "claim-fork-epoch", "slot-fork-epoch", binding)
+	issue.ExpectedFilesystemID = target.ID
+	issue.InitialGenerationID = shared.ID
+	issue.ExpectedWriterEpoch = shared.WriterEpoch
+	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
+	require.NoError(t, err)
+	require.Equal(t, shared.WriterEpoch+1, issued.Grant.WriterEpoch)
+}
+
 func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
@@ -459,6 +493,9 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 	copyRecord := rootFSTestSandboxRecord("sandbox-snapshot-copy", "team-1")
 	copyRecord.DesiredState = SandboxDesiredStatePaused
 	require.NoError(t, store.UpsertSandbox(ctx, copyRecord))
+	lateCopyRecord := rootFSTestSandboxRecord("sandbox-snapshot-late-copy", "team-1")
+	lateCopyRecord.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, lateCopyRecord))
 
 	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
 	require.NoError(t, err)
@@ -480,6 +517,18 @@ func TestBlockRootFSSnapshotRestoreCopyAndRollback(t *testing.T) {
 	require.Equal(t, artifact.SourceOCIDigest, snapshot.SourceOCIDigest)
 
 	second := putTestDurableRootFSGeneration(t, ctx, pool, filesystem, initial, "snapshot-second", 1)
+	secondSnapshot, err := store.CreateRootFSSnapshot(ctx, &CreateRootFSSnapshotRequest{
+		SandboxID: sourceRecord.ID, SnapshotID: "snapshot-block-second",
+	})
+	require.NoError(t, err)
+	require.Equal(t, second.ID, secondSnapshot.HeadGenerationID)
+	lateCopy, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
+		SandboxID: lateCopyRecord.ID, SnapshotID: secondSnapshot.ID, TeamID: lateCopyRecord.TeamID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, second.ID, lateCopy.HeadGenerationID)
+	require.Equal(t, second.WriterEpoch, lateCopy.WriterEpoch,
+		"a copied filesystem must issue epochs newer than its shared generation")
 	restored, err := store.RestoreRootFSFromSnapshot(ctx, &RestoreRootFSFromSnapshotRequest{
 		SandboxID: sourceRecord.ID, SnapshotID: snapshot.ID, TeamID: sourceRecord.TeamID,
 		OperationID: "restore-block-initial", RollbackExpiresAt: time.Now().Add(time.Hour),

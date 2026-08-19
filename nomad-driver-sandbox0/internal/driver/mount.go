@@ -15,6 +15,7 @@
 package driver
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,10 +43,21 @@ func (systemMounter) Bind(source, target string) error {
 }
 
 func (systemMounter) Unmount(target string) error {
-	if err := unix.Unmount(target, unix.MNT_DETACH); err != nil {
+	if err := normalizeUnmountError(target, unix.Unmount(target, unix.MNT_DETACH)); err != nil {
 		return fmt.Errorf("unmount %s: %w", target, err)
 	}
 	return nil
+}
+
+func normalizeUnmountError(_ string, err error) error {
+	// A node reboot removes every task mount before the Nomad driver can recover
+	// its persisted RootMounted bit. Treat an already absent mount as successful
+	// so recovery can continue to the regional writer fence instead of leaving a
+	// consumed grant orphaned.
+	if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	return err
 }
 
 func validateRootfsPath(source, allowedRoot string) (string, error) {

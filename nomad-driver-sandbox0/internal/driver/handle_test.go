@@ -173,13 +173,13 @@ func (r *fakeRootFSRuntime) Ensure(_ context.Context, request rootfshandoff.Stag
 	return rootfssession.Mount{Source: r.source, Type: "bind"}, nil
 }
 
-func (r *fakeRootFSRuntime) Retire(_ context.Context, request rootfshandoff.StageRequest, operationID string) error {
+func (r *fakeRootFSRuntime) Retire(_ context.Context, request rootfshandoff.StageRequest, operationID string) (rootfssession.RetireResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.retireCalls++
 	r.lastParent = request.Parent
 	r.lastOperation = operationID
-	return nil
+	return rootfssession.RetireResult{Parent: request.Parent, OperationID: operationID}, nil
 }
 
 func (r *fakeRootFSRuntime) snapshot() (ensureCalls, retireCalls int, parent, operation string) {

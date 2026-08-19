@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -24,8 +25,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,6 +117,7 @@ func main() {
 			slotID: *slotID, operationID: *operationID, rawToken: *rawToken,
 			bindingHex: *bindingHex, nodeUID: *nodeUID, nodeBootID: *nodeBootID,
 			podUID: *podUID, runtimeGeneration: *runtimeGeneration, gateParent: *gateParent,
+			stage: readStageOption(*stageFile),
 		}); err != nil {
 			fatal("issue: %v", err)
 		}
@@ -129,27 +133,46 @@ func main() {
 }
 
 func stageDigest(path string) (string, error) {
-	payload, err := os.ReadFile(strings.TrimSpace(path))
+	stage, err := readStage(path)
 	if err != nil {
 		return "", err
-	}
-	var envelope struct {
-		Stage rootfshandoff.StageRequest `json:"stage"`
-	}
-	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return "", err
-	}
-	stage := envelope.Stage
-	if stage.Parent == "" {
-		if err := json.Unmarshal(payload, &stage); err != nil {
-			return "", err
-		}
 	}
 	digest, err := stage.BindingDigest()
 	if err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func readStage(path string) (rootfshandoff.StageRequest, error) {
+	payload, err := os.ReadFile(strings.TrimSpace(path))
+	if err != nil {
+		return rootfshandoff.StageRequest{}, err
+	}
+	var envelope struct {
+		Stage rootfshandoff.StageRequest `json:"stage"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return rootfshandoff.StageRequest{}, err
+	}
+	stage := envelope.Stage
+	if stage.Parent == "" {
+		if err := json.Unmarshal(payload, &stage); err != nil {
+			return rootfshandoff.StageRequest{}, err
+		}
+	}
+	return stage, nil
+}
+
+func readStageOption(path string) *rootfshandoff.StageRequest {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	stage, err := readStage(path)
+	if err != nil {
+		fatal("read stage: %v", err)
+	}
+	return &stage
 }
 
 func serve(
@@ -182,9 +205,10 @@ func serve(
 	if err != nil {
 		return fmt.Errorf("create writer handler: %w", err)
 	}
+	verifier := writerauthority.NewCertVerifier(identities)
 	mux := http.NewServeMux()
 	mux.Handle("/internal/v1/rootfs-writer-grants", http.NotFoundHandler())
-	mux.Handle("/internal/v1/rootfs-writer-grants/", handler)
+	mux.Handle("/internal/v1/rootfs-writer-grants/", newPublishHandler(verifier, store, handler))
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("ok\n"))
@@ -229,6 +253,117 @@ func serve(
 	}
 }
 
+func newPublishHandler(
+	verifier managerauthority.CallerVerifier,
+	store *sandboxstore.PGSandboxStore,
+	next http.Handler,
+) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.EscapedPath() != "/internal/v1/rootfs-writer-grants:renew" &&
+			strings.HasSuffix(request.URL.EscapedPath(), "/terminal/publish") {
+			servePublish(verifier, store, writer, request)
+			return
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func servePublish(
+	verifier managerauthority.CallerVerifier,
+	store *sandboxstore.PGSandboxStore,
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	if request.Method != http.MethodPut {
+		writer.Header().Set("Allow", http.MethodPut)
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	relative := strings.TrimPrefix(request.URL.EscapedPath(), "/internal/v1/rootfs-writer-grants/")
+	grantID, err := url.PathUnescape(strings.TrimSuffix(relative, "/terminal/publish"))
+	if err != nil || grantID == "" || strings.Contains(grantID, "/") {
+		http.Error(writer, "invalid writer grant", http.StatusBadRequest)
+		return
+	}
+	caller, err := verifier.Verify(request.Context(), request.Header.Get("Authorization"))
+	if err != nil {
+		http.Error(writer, "unknown writer authority client", http.StatusUnauthorized)
+		return
+	}
+	var body managerauthority.PublishGenerationRequest
+	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 128<<10)).Decode(&body); err != nil {
+		http.Error(writer, "invalid publish request", http.StatusBadRequest)
+		return
+	}
+	proof, err := hex.DecodeString(strings.TrimSpace(body.ProofDigest))
+	if err != nil || len(proof) != 32 || hex.EncodeToString(proof) != strings.TrimSpace(body.ProofDigest) {
+		http.Error(writer, "proof_digest must be a canonical SHA-256 digest", http.StatusBadRequest)
+		return
+	}
+	grant, err := store.GetRootFSWriterGrant(request.Context(), grantID)
+	if err != nil || grant == nil || grant.NodeUID != caller.NodeUID ||
+		grant.WriterEpoch != body.WriterEpoch || grant.BindingVersion != body.BindingVersion {
+		http.Error(writer, "publish request does not match writer grant", http.StatusConflict)
+		return
+	}
+	binding, err := hex.DecodeString(strings.TrimSpace(body.BindingDigest))
+	if err != nil || !bytes.Equal(grant.BindingDigest, binding) {
+		http.Error(writer, "publish binding does not match writer grant", http.StatusConflict)
+		return
+	}
+	if grant.State == sandboxstore.RootFSWriterGrantStateRetired {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	oldGenerationID := grant.InitialGenerationID
+	filesystemID := grant.FilesystemID
+	generation := body.Generation
+	generation.FilesystemID = filesystemID
+	generation.ParentGenerationID = oldGenerationID
+	generation.WriterEpoch = grant.WriterEpoch
+	if generation.ID == "" || generation.Descriptor == nil || generation.CurrentBlockHead == "" {
+		http.Error(writer, "sealed generation is incomplete", http.StatusBadRequest)
+		return
+	}
+	if _, err := store.BeginRootFSWriterRetire(request.Context(), &sandboxstore.BeginRootFSWriterRetireRequest{
+		GrantID: grantID, WriterEpoch: grant.WriterEpoch, OperationID: body.OperationID,
+		BindingVersion: grant.BindingVersion, BindingDigest: grant.BindingDigest,
+		ExpectedOldHeadLayerID: oldGenerationID,
+	}); err != nil {
+		http.Error(writer, "begin regional retire: "+err.Error(), http.StatusConflict)
+		return
+	}
+	runtimeGeneration, err := strconv.ParseInt(grant.RuntimeGeneration, 10, 64)
+	if err != nil {
+		runtimeGeneration = 1
+	}
+	err = store.WithSandboxLock(request.Context(), grant.SandboxID, func(ctx context.Context, tx sandboxstore.SandboxStoreTx, _ *sandboxstore.SandboxRecord) error {
+		if err := tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
+			ID: body.OperationID, SandboxID: grant.SandboxID, Kind: sandboxstore.SandboxLifecycleKindPause,
+			Phase: sandboxstore.SandboxLifecyclePhasePublishing, ExpectedHeadLayerID: oldGenerationID,
+		}); err != nil {
+			return err
+		}
+		writerTx, ok := tx.(sandboxstore.RootFSWriterGrantTx)
+		if !ok {
+			return fmt.Errorf("sandbox transaction cannot publish rootfs generations")
+		}
+		if _, err := writerTx.CompleteRootFSWriterRetireAndPublishGeneration(ctx, &sandboxstore.CompleteRootFSWriterRetireAndPublishGenerationRequest{
+			LifecycleTxnID: body.OperationID, GrantID: grantID, WriterEpoch: grant.WriterEpoch,
+			OperationID: body.OperationID, BindingVersion: grant.BindingVersion, BindingDigest: grant.BindingDigest,
+			ProofDigest: proof, ExpectedOldGenerationID: oldGenerationID, Generation: &generation,
+		}); err != nil {
+			return err
+		}
+		return tx.MarkRuntimePaused(ctx, grant.SandboxID, runtimeGeneration, time.Now().UTC())
+	})
+	if err != nil {
+		http.Error(writer, "publish regional retire: "+err.Error(), http.StatusConflict)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
 type issueOptions struct {
 	sandboxID         string
 	teamID            string
@@ -243,6 +378,7 @@ type issueOptions struct {
 	podUID            string
 	runtimeGeneration string
 	gateParent        string
+	stage             *rootfshandoff.StageRequest
 }
 
 func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issueOptions) error {
@@ -257,6 +393,33 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 	}); err != nil {
 		return fmt.Errorf("seed sandbox: %w", err)
 	}
+	var expectedFilesystemID, initialGenerationID string
+	if options.stage != nil {
+		if options.stage.Generation == nil {
+			return fmt.Errorf("stage generation is required")
+		}
+		if err := options.stage.Generation.Validate(); err != nil {
+			return fmt.Errorf("validate stage generation: %w", err)
+		}
+		sourceRef := "nomad-poc/alpine"
+		generation := options.stage.Generation
+		if _, err := store.PutReadyRootFSBaseArtifact(ctx, &sandboxstore.PutReadyRootFSBaseArtifactRequest{
+			ArtifactDigest: generation.BaseArtifactDigest, SourceOCIRef: sourceRef,
+			SourceOCIDigest: generation.SourceOCIDigest, BaseBlockRoot: generation.BaseBlockRoot,
+			FormatGeneration: generation.FormatGeneration, Descriptor: generation.Descriptor,
+		}); err != nil {
+			return fmt.Errorf("seed base artifact: %w", err)
+		}
+		filesystem, initial, err := store.EnsureInitialRootFSGeneration(ctx, &sandboxstore.EnsureInitialRootFSGenerationRequest{
+			SandboxID: options.sandboxID, TeamID: options.teamID, SourceOCIRef: sourceRef,
+			SourceOCIDigest: generation.SourceOCIDigest, BaseArtifactDigest: generation.BaseArtifactDigest,
+		})
+		if err != nil {
+			return fmt.Errorf("seed initial block generation: %w", err)
+		}
+		expectedFilesystemID = filesystem.ID
+		initialGenerationID = initial.ID
+	}
 	issued, err := store.IssueRootFSWriterGrant(ctx, &sandboxstore.IssueRootFSWriterGrantRequest{
 		GrantID: options.grantID, SandboxID: options.sandboxID, ClaimID: options.claimID,
 		SlotID: options.slotID, OperationID: options.operationID, RawToken: options.rawToken,
@@ -264,7 +427,8 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 		NodeUID: options.nodeUID, NodeBootID: options.nodeBootID, PodNamespace: "sandbox0-system",
 		PodName: options.nodeUID + "-writer", PodUID: options.podUID, NodeName: options.nodeUID,
 		GateParent: options.gateParent, RuntimeGeneration: options.runtimeGeneration,
-		ConsumeExpiresAt: time.Now().Add(2 * time.Minute),
+		ConsumeExpiresAt:     time.Now().Add(2 * time.Minute),
+		ExpectedFilesystemID: expectedFilesystemID, InitialGenerationID: initialGenerationID,
 	})
 	if err != nil {
 		return err

@@ -290,7 +290,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if err := h.rootfs.Retire(ctx, *durableStage, newRetireOperationID()); err != nil {
+		if _, err := h.rootfs.Retire(ctx, *durableStage, newRetireOperationID()); err != nil {
 			h.logger.Error("failed RootFS abort after claim failure", "error", err)
 		}
 	}()
@@ -568,7 +568,7 @@ func (h *taskHandle) Close(force bool) error {
 	}
 	if stage != nil && rootMounted && h.rootfs != nil {
 		retireCtx, retireCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		if err := h.rootfs.Retire(retireCtx, *stage, newRetireOperationID()); err != nil {
+		if _, err := h.rootfs.Retire(retireCtx, *stage, newRetireOperationID()); err != nil {
 			retireCancel()
 			h.mu.Lock()
 			h.closed = false

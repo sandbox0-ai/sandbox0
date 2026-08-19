@@ -16,16 +16,21 @@ package driver
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	managerauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
 
 // rootfsRuntime owns the node-local NBD/XFS/Overlay session for this PoC.
@@ -34,15 +39,22 @@ import (
 type rootfsRuntime struct {
 	sessions  *rootfssession.Manager
 	authority *managerauthority.ManagerClient
+	logger    hclog.Logger
+	renewalMu sync.Mutex
+	renewals  map[string]*rootfsRenewal
 }
 
 // RootFSRuntime is the driver-facing RootFS attachment and retire boundary.
 type RootFSRuntime interface {
 	Ensure(context.Context, rootfshandoff.StageRequest) (rootfssession.Mount, error)
-	Retire(context.Context, rootfshandoff.StageRequest, string) error
+	Retire(context.Context, rootfshandoff.StageRequest, string) (rootfssession.RetireResult, error)
 }
 
-func newRootFSRuntime(config *PluginConfig) (*rootfsRuntime, error) {
+type rootfsRenewal struct {
+	cancel context.CancelFunc
+}
+
+func newRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootfsRuntime, error) {
 	if config == nil || !config.RootFSEnabled {
 		return nil, nil
 	}
@@ -88,7 +100,10 @@ func newRootFSRuntime(config *PluginConfig) (*rootfsRuntime, error) {
 			return nil, fmt.Errorf("create RootFS writer authority client: %w", err)
 		}
 	}
-	return &rootfsRuntime{sessions: sessions, authority: authority}, nil
+	return &rootfsRuntime{
+		sessions: sessions, authority: authority, logger: logger,
+		renewals: make(map[string]*rootfsRenewal),
+	}, nil
 }
 
 func (r *rootfsRuntime) Ensure(ctx context.Context, request rootfshandoff.StageRequest) (rootfssession.Mount, error) {
@@ -96,38 +111,132 @@ func (r *rootfsRuntime) Ensure(ctx context.Context, request rootfshandoff.StageR
 		return rootfssession.Mount{}, err
 	}
 	if r.authority != nil {
-		if _, err := r.authority.ConsumeWriterGrant(ctx, request); err != nil {
+		observation, err := r.authority.ConsumeWriterGrant(ctx, request)
+		if err != nil {
 			return rootfssession.Mount{}, fmt.Errorf("consume regional writer grant: %w", err)
 		}
+		r.startRenewal(request, observation)
 	}
 	return r.sessions.Ensure(ctx, request)
 }
 
-func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageRequest, operationID string) error {
+func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageRequest, operationID string) (rootfssession.RetireResult, error) {
 	if strings.TrimSpace(operationID) == "" {
-		return fmt.Errorf("retire operation ID is required")
+		return rootfssession.RetireResult{}, fmt.Errorf("retire operation ID is required")
 	}
+	r.stopRenewal(request.Parent)
 	if err := r.sessions.BeginRetire(request.Parent, request.Identity, operationID); err != nil {
-		return err
+		return rootfssession.RetireResult{}, err
 	}
 	if err := r.sessions.Release(ctx, request.Identity); err != nil {
-		return err
+		return rootfssession.RetireResult{}, err
 	}
 	result, err := r.sessions.RetireResult(request.Parent, request.Identity, operationID)
 	if err != nil {
-		return err
+		return rootfssession.RetireResult{}, err
 	}
 	if result.DurabilityState == "" || result.Descriptor == nil {
-		return fmt.Errorf("RootFS retire result is not durable")
+		return rootfssession.RetireResult{}, fmt.Errorf("RootFS retire result is not durable")
 	}
-	return nil
+	if r.authority != nil {
+		sealedID := "generation-" + strings.TrimPrefix(result.CurrentBlockHead, "sha256:")
+		generation := sandboxstore.RootFSGeneration{
+			ID: sealedID, FilesystemID: request.Identity.RootFSID,
+			ParentGenerationID: request.InitialGeneration,
+			SourceOCIDigest:    request.Generation.SourceOCIDigest,
+			BaseArtifactDigest: request.Generation.BaseArtifactDigest,
+			BaseBlockRoot:      request.Generation.BaseBlockRoot,
+			CurrentBlockHead:   result.CurrentBlockHead,
+			WriterEpoch:        request.Identity.WriterEpoch,
+			FormatGeneration:   request.Generation.FormatGeneration,
+			DurabilityState:    result.DurabilityState,
+			LocatorVersion:     request.Generation.LocatorVersion + 1,
+			Descriptor:         result.Descriptor,
+		}
+		if err := r.authority.PublishWriterGrant(ctx, request, managerauthority.PublishGenerationRequest{
+			OperationID: operationID, ProofDigest: hex.EncodeToString(result.DetachProof),
+			ExpectedOldGenerationID: request.InitialGeneration, Generation: generation,
+		}); err != nil {
+			return result, fmt.Errorf("publish regional writer retirement: %w", err)
+		}
+	}
+	return result, nil
 }
 
 func (r *rootfsRuntime) Close() error {
 	if r == nil || r.sessions == nil {
 		return nil
 	}
+	r.stopAllRenewals()
 	return r.sessions.Close()
+}
+
+func (r *rootfsRuntime) startRenewal(request rootfshandoff.StageRequest, observation protocol.LeaseObservation) {
+	ctx, cancel := context.WithCancel(context.Background())
+	r.renewalMu.Lock()
+	if old := r.renewals[request.Parent]; old != nil {
+		old.cancel()
+	}
+	renewal := &rootfsRenewal{cancel: cancel}
+	r.renewals[request.Parent] = renewal
+	r.renewalMu.Unlock()
+	go func() {
+		defer func() {
+			r.renewalMu.Lock()
+			if r.renewals[request.Parent] == renewal {
+				delete(r.renewals, request.Parent)
+			}
+			r.renewalMu.Unlock()
+		}()
+		for {
+			delay := time.Until(observation.RenewAfter)
+			if delay < time.Second {
+				delay = time.Second
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			next, err := r.authority.RenewWriterGrant(ctx, request)
+			if err != nil {
+				if r.logger != nil {
+					r.logger.Error("RootFS writer lease renewal failed", "parent", request.Parent, "error", err)
+				}
+				if ctx.Err() != nil {
+					return
+				}
+				time.Sleep(time.Second)
+				continue
+			}
+			observation = next
+		}
+	}()
+}
+
+func (r *rootfsRuntime) stopRenewal(parent string) {
+	r.renewalMu.Lock()
+	renewal := r.renewals[parent]
+	delete(r.renewals, parent)
+	r.renewalMu.Unlock()
+	if renewal != nil {
+		renewal.cancel()
+	}
+}
+
+func (r *rootfsRuntime) stopAllRenewals() {
+	r.renewalMu.Lock()
+	renewals := make([]*rootfsRenewal, 0, len(r.renewals))
+	for parent, renewal := range r.renewals {
+		renewals = append(renewals, renewal)
+		delete(r.renewals, parent)
+	}
+	r.renewalMu.Unlock()
+	for _, renewal := range renewals {
+		renewal.cancel()
+	}
 }
 
 func validateRootFSConfig(config *PluginConfig) error {

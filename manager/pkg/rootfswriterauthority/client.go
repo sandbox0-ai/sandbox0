@@ -17,11 +17,24 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
 
 const maxResponseBytes = 64 << 10
+
+// PublishGenerationRequest submits a node's local detach proof and sealed
+// block generation to the regional writer authority.
+type PublishGenerationRequest struct {
+	WriterEpoch             int64                         `json:"writer_epoch"`
+	BindingVersion          int                           `json:"binding_version"`
+	BindingDigest           string                        `json:"binding_digest"`
+	OperationID             string                        `json:"operation_id"`
+	ProofDigest             string                        `json:"proof_digest"`
+	ExpectedOldGenerationID string                        `json:"expected_old_generation_id"`
+	Generation              sandboxstore.RootFSGeneration `json:"generation"`
+}
 
 type ManagerClientConfig struct {
 	BaseURL        string
@@ -88,6 +101,22 @@ func (c *ManagerClient) ConsumeWriterGrant(ctx context.Context, stage rootfshand
 		return protocol.LeaseObservation{}, err
 	}
 	return observation, nil
+}
+
+// PublishWriterGrant terminally publishes one locally sealed generation.
+func (c *ManagerClient) PublishWriterGrant(ctx context.Context, stage rootfshandoff.StageRequest, request PublishGenerationRequest) error {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return err
+	}
+	request.WriterEpoch = binding.WriterEpoch
+	request.BindingVersion = binding.BindingVersion
+	request.BindingDigest = binding.BindingDigest
+	if strings.TrimSpace(request.OperationID) == "" || strings.TrimSpace(request.ProofDigest) == "" ||
+		strings.TrimSpace(request.ExpectedOldGenerationID) == "" || request.Generation.Descriptor == nil {
+		return fmt.Errorf("invalid terminal writer publication: %w", errdefs.ErrInvalidArgument)
+	}
+	return c.putWriterGrant(ctx, "publish", protocol.TerminalPath(stage.Identity.WriterGrantID)+"/publish", request, nil)
 }
 
 // RenewWriterGrant extends the lease for the exact consumed Stage binding.

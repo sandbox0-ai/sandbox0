@@ -287,7 +287,7 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 func (p *Plugin) rootfsRuntime() (RootFSRuntime, error) {
 	p.rootfsOnce.Do(func() {
 		if p.config.RootFSEnabled {
-			p.rootfs, p.rootfsErr = newRootFSRuntime(p.config)
+			p.rootfs, p.rootfsErr = newRootFSRuntime(p.config, p.logger.Named("rootfs"))
 		}
 	})
 	if p.rootfsErr != nil {

@@ -79,6 +79,47 @@ func TestNBDTransmissionReadWriteFlushTrimAndFUA(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestNBDTransmissionPreservesBackendPartialWriteAndFUAErrorSemantics(t *testing.T) {
+	t.Run("partial write", func(t *testing.T) {
+		backend := &partialWriteBlockBackend{
+			memoryBlockBackend: memoryBlockBackend{payload: bytes.Repeat([]byte{0x11}, 3*LogicalBlockSize)},
+			err:                syscall.ENOSPC,
+		}
+		client, server := net.Pipe()
+		done := make(chan error, 1)
+		go func() { done <- (NBDTransmissionServer{Backend: backend}).Serve(t.Context(), server) }()
+
+		payload := bytes.Repeat([]byte{0x22}, 2*LogicalBlockSize)
+		handle := [8]byte{11}
+		writeNBDRequest(t, client, nbdCommandWrite, handle, 0, payload)
+		require.Equal(t, uint32(syscall.ENOSPC), readNBDReply(t, client, handle, 0))
+		require.Equal(t, payload[:LogicalBlockSize], backend.payload[:LogicalBlockSize])
+		require.Equal(t, bytes.Repeat([]byte{0x11}, LogicalBlockSize), backend.payload[LogicalBlockSize:2*LogicalBlockSize])
+
+		writeNBDRequest(t, client, nbdCommandDisconnect, [8]byte{12}, 0, nil)
+		require.NoError(t, <-done)
+	})
+
+	t.Run("FUA flush failure", func(t *testing.T) {
+		backend := &memoryBlockBackend{
+			payload:  bytes.Repeat([]byte{0x11}, 2*LogicalBlockSize),
+			flushErr: syscall.EIO,
+		}
+		client, server := net.Pipe()
+		done := make(chan error, 1)
+		go func() { done <- (NBDTransmissionServer{Backend: backend}).Serve(t.Context(), server) }()
+
+		payload := bytes.Repeat([]byte{0x33}, LogicalBlockSize)
+		handle := [8]byte{13}
+		writeNBDRequest(t, client, nbdCommandWrite|nbdCommandFlagFUA, handle, 0, payload)
+		require.Equal(t, uint32(syscall.EIO), readNBDReply(t, client, handle, 0))
+		require.Equal(t, payload, backend.payload[:LogicalBlockSize])
+
+		writeNBDRequest(t, client, nbdCommandDisconnect, [8]byte{14}, 0, nil)
+		require.NoError(t, <-done)
+	})
+}
+
 func TestNBDTransmissionRejectsBadMagicAndOversizedWrite(t *testing.T) {
 	backend := &memoryBlockBackend{payload: make([]byte, 4*LogicalBlockSize)}
 	for name, request := range map[string][]byte{
@@ -119,9 +160,23 @@ func TestNBDTransmissionContextCancellationClosesConnection(t *testing.T) {
 }
 
 type memoryBlockBackend struct {
-	mu      sync.Mutex
-	payload []byte
-	flushes int
+	mu       sync.Mutex
+	payload  []byte
+	flushes  int
+	flushErr error
+}
+
+type partialWriteBlockBackend struct {
+	memoryBlockBackend
+	err error
+}
+
+func (b *partialWriteBlockBackend) WriteAt(payload []byte, offset int64) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	written := min(len(payload), LogicalBlockSize)
+	copy(b.payload[offset:], payload[:written])
+	return written, b.err
 }
 
 type failingReadBlockBackend struct{ err error }
@@ -152,7 +207,7 @@ func (b *memoryBlockBackend) Flush() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.flushes++
-	return nil
+	return b.flushErr
 }
 
 func (b *memoryBlockBackend) WriteZeroes(offset, length int64) error {

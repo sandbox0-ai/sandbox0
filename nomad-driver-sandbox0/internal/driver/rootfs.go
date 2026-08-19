@@ -154,7 +154,11 @@ func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageR
 	if strings.TrimSpace(operationID) == "" {
 		return rootfssession.RetireResult{}, fmt.Errorf("retire operation ID is required")
 	}
-	r.stopRenewal(request.Parent)
+	// Sealing a metadata-heavy branch and publishing its immutable objects can
+	// take longer than one lease TTL. Keep the exact writer lease alive until
+	// the regional terminal CAS has completed; the physical session is revoked
+	// before PublishWriterGrant, so renewal does not extend user write access.
+	defer r.stopRenewal(request.Parent)
 	if err := r.sessions.BeginRetire(request.Parent, request.Identity, operationID); err != nil {
 		return rootfssession.RetireResult{}, err
 	}

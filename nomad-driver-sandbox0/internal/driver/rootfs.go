@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	managerauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -31,7 +32,8 @@ import (
 // A production deployment moves this ownership to ctld and gives the task
 // driver only an already-authorized mount.
 type rootfsRuntime struct {
-	sessions *rootfssession.Manager
+	sessions  *rootfssession.Manager
+	authority *managerauthority.ManagerClient
 }
 
 // RootFSRuntime is the driver-facing RootFS attachment and retire boundary.
@@ -73,12 +75,30 @@ func newRootFSRuntime(config *PluginConfig) (*rootfsRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS session manager: %w", err)
 	}
-	return &rootfsRuntime{sessions: sessions}, nil
+	var authority *managerauthority.ManagerClient
+	if config.RootFSAuthorityURL != "" {
+		authority, err = managerauthority.NewManagerClient(managerauthority.ManagerClientConfig{
+			BaseURL: config.RootFSAuthorityURL, CAFile: config.RootFSAuthorityCAFile,
+			ClientCertFile: config.RootFSAuthorityClientCertFile,
+			ClientKeyFile:  config.RootFSAuthorityClientKeyFile,
+			TokenFile:      config.RootFSAuthorityTokenFile, Timeout: 2 * time.Second,
+		})
+		if err != nil {
+			_ = sessions.Close()
+			return nil, fmt.Errorf("create RootFS writer authority client: %w", err)
+		}
+	}
+	return &rootfsRuntime{sessions: sessions, authority: authority}, nil
 }
 
 func (r *rootfsRuntime) Ensure(ctx context.Context, request rootfshandoff.StageRequest) (rootfssession.Mount, error) {
 	if err := request.Validate(); err != nil {
 		return rootfssession.Mount{}, err
+	}
+	if r.authority != nil {
+		if _, err := r.authority.ConsumeWriterGrant(ctx, request); err != nil {
+			return rootfssession.Mount{}, fmt.Errorf("consume regional writer grant: %w", err)
+		}
 	}
 	return r.sessions.Ensure(ctx, request)
 }
@@ -131,6 +151,18 @@ func validateRootFSConfig(config *PluginConfig) error {
 	}
 	if len(config.RootFSNBDDevices) == 0 {
 		return fmt.Errorf("at least one rootfs_nbd_device is required")
+	}
+	if config.RootFSAuthorityURL != "" {
+		for name, value := range map[string]string{
+			"rootfs_authority_ca_file":          config.RootFSAuthorityCAFile,
+			"rootfs_authority_client_cert_file": config.RootFSAuthorityClientCertFile,
+			"rootfs_authority_client_key_file":  config.RootFSAuthorityClientKeyFile,
+			"rootfs_authority_token_file":       config.RootFSAuthorityTokenFile,
+		} {
+			if value == "" || !filepath.IsAbs(value) {
+				return fmt.Errorf("%s must be an absolute path when rootfs_authority_url is set", name)
+			}
+		}
 	}
 	return nil
 }

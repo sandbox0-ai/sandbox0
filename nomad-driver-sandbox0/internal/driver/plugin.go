@@ -100,9 +100,14 @@ var (
 			hclspec.NewAttr("rootfs_object_region", "string", false),
 			hclspec.NewLiteral(`"us-east-1"`),
 		),
-		"rootfs_object_endpoint":   hclspec.NewAttr("rootfs_object_endpoint", "string", false),
-		"rootfs_object_access_key": hclspec.NewAttr("rootfs_object_access_key", "string", false),
-		"rootfs_object_secret_key": hclspec.NewAttr("rootfs_object_secret_key", "string", false),
+		"rootfs_object_endpoint":            hclspec.NewAttr("rootfs_object_endpoint", "string", false),
+		"rootfs_object_access_key":          hclspec.NewAttr("rootfs_object_access_key", "string", false),
+		"rootfs_object_secret_key":          hclspec.NewAttr("rootfs_object_secret_key", "string", false),
+		"rootfs_authority_url":              hclspec.NewAttr("rootfs_authority_url", "string", false),
+		"rootfs_authority_ca_file":          hclspec.NewAttr("rootfs_authority_ca_file", "string", false),
+		"rootfs_authority_client_cert_file": hclspec.NewAttr("rootfs_authority_client_cert_file", "string", false),
+		"rootfs_authority_client_key_file":  hclspec.NewAttr("rootfs_authority_client_key_file", "string", false),
+		"rootfs_authority_token_file":       hclspec.NewAttr("rootfs_authority_token_file", "string", false),
 	})
 
 	taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -139,17 +144,22 @@ type PluginConfig struct {
 	DirectFS         bool   `codec:"directfs"`
 	DevSmokeEnabled  bool   `codec:"dev_smoke_enabled"`
 
-	RootFSEnabled         bool     `codec:"rootfs_enabled"`
-	RootFSStatePath       string   `codec:"rootfs_state_path"`
-	RootFSBranchRoot      string   `codec:"rootfs_branch_root"`
-	RootFSMountRoot       string   `codec:"rootfs_mount_root"`
-	RootFSNBDDevices      []string `codec:"rootfs_nbd_devices"`
-	RootFSObjectType      string   `codec:"rootfs_object_type"`
-	RootFSObjectBucket    string   `codec:"rootfs_object_bucket"`
-	RootFSObjectRegion    string   `codec:"rootfs_object_region"`
-	RootFSObjectEndpoint  string   `codec:"rootfs_object_endpoint"`
-	RootFSObjectAccessKey string   `codec:"rootfs_object_access_key"`
-	RootFSObjectSecretKey string   `codec:"rootfs_object_secret_key"`
+	RootFSEnabled                 bool     `codec:"rootfs_enabled"`
+	RootFSStatePath               string   `codec:"rootfs_state_path"`
+	RootFSBranchRoot              string   `codec:"rootfs_branch_root"`
+	RootFSMountRoot               string   `codec:"rootfs_mount_root"`
+	RootFSNBDDevices              []string `codec:"rootfs_nbd_devices"`
+	RootFSObjectType              string   `codec:"rootfs_object_type"`
+	RootFSObjectBucket            string   `codec:"rootfs_object_bucket"`
+	RootFSObjectRegion            string   `codec:"rootfs_object_region"`
+	RootFSObjectEndpoint          string   `codec:"rootfs_object_endpoint"`
+	RootFSObjectAccessKey         string   `codec:"rootfs_object_access_key"`
+	RootFSObjectSecretKey         string   `codec:"rootfs_object_secret_key"`
+	RootFSAuthorityURL            string   `codec:"rootfs_authority_url"`
+	RootFSAuthorityCAFile         string   `codec:"rootfs_authority_ca_file"`
+	RootFSAuthorityClientCertFile string   `codec:"rootfs_authority_client_cert_file"`
+	RootFSAuthorityClientKeyFile  string   `codec:"rootfs_authority_client_key_file"`
+	RootFSAuthorityTokenFile      string   `codec:"rootfs_authority_token_file"`
 }
 
 // TaskConfig is the per-allocation driver configuration.
@@ -256,6 +266,11 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	decoded.RootFSObjectEndpoint = strings.TrimSpace(decoded.RootFSObjectEndpoint)
 	decoded.RootFSObjectAccessKey = strings.TrimSpace(decoded.RootFSObjectAccessKey)
 	decoded.RootFSObjectSecretKey = strings.TrimSpace(decoded.RootFSObjectSecretKey)
+	decoded.RootFSAuthorityURL = strings.TrimSpace(decoded.RootFSAuthorityURL)
+	decoded.RootFSAuthorityCAFile = strings.TrimSpace(decoded.RootFSAuthorityCAFile)
+	decoded.RootFSAuthorityClientCertFile = strings.TrimSpace(decoded.RootFSAuthorityClientCertFile)
+	decoded.RootFSAuthorityClientKeyFile = strings.TrimSpace(decoded.RootFSAuthorityClientKeyFile)
+	decoded.RootFSAuthorityTokenFile = strings.TrimSpace(decoded.RootFSAuthorityTokenFile)
 	if decoded.RootFSObjectType == "" {
 		decoded.RootFSObjectType = "s3"
 	}

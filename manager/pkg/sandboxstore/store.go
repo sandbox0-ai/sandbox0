@@ -582,15 +582,59 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID, SandboxLifecyclePhaseAborted, "sandbox deleted"); err != nil {
 		return fmt.Errorf("abort sandbox lifecycle txns for deleted sandbox: %w", err)
 	}
+	filesystemRows, err := tx.Query(ctx, `
+		SELECT binding.filesystem_id
+		FROM manager.sandbox_rootfs_bindings AS binding
+		WHERE binding.sandbox_id = $1
+			AND NOT EXISTS (
+				SELECT 1
+				FROM manager.rootfs_writer_grants AS writer_grant
+				WHERE writer_grant.filesystem_id = binding.filesystem_id
+					AND writer_grant.state IN ($2, $3, $4)
+			)
+		UNION
+		SELECT writer_grant.filesystem_id
+		FROM manager.rootfs_writer_grants AS writer_grant
+		WHERE writer_grant.sandbox_id = $1 AND writer_grant.state IN ($5, $6)
+	`, sandboxID, RootFSWriterGrantStateIssued, RootFSWriterGrantStateConsumed,
+		RootFSWriterGrantStateRetiring, RootFSWriterGrantStateRetired,
+		RootFSWriterGrantStateCanceled)
+	if err != nil {
+		return fmt.Errorf("list deleted sandbox rootfs candidates: %w", err)
+	}
+	filesystemIDs := make([]string, 0, 1)
+	for filesystemRows.Next() {
+		var filesystemID string
+		if err := filesystemRows.Scan(&filesystemID); err != nil {
+			filesystemRows.Close()
+			return fmt.Errorf("scan deleted sandbox rootfs candidate: %w", err)
+		}
+		filesystemIDs = append(filesystemIDs, filesystemID)
+	}
+	if err := filesystemRows.Err(); err != nil {
+		filesystemRows.Close()
+		return fmt.Errorf("iterate deleted sandbox rootfs candidates: %w", err)
+	}
+	filesystemRows.Close()
 	if _, err := tx.Exec(ctx, `
-		WITH removed AS (
-			DELETE FROM manager.sandbox_rootfs_bindings
-			WHERE sandbox_id = $1
-			RETURNING filesystem_id
-		)
-		DELETE FROM manager.rootfs_filesystems f
-		USING removed r
-		WHERE f.filesystem_id = r.filesystem_id
+		DELETE FROM manager.sandbox_rootfs_bindings AS binding
+		WHERE binding.sandbox_id = $1
+			AND NOT EXISTS (
+				SELECT 1
+				FROM manager.rootfs_writer_grants AS writer_grant
+				WHERE writer_grant.filesystem_id = binding.filesystem_id
+					AND writer_grant.state IN ($2, $3, $4)
+			)
+	`, sandboxID, RootFSWriterGrantStateIssued, RootFSWriterGrantStateConsumed,
+		RootFSWriterGrantStateRetiring); err != nil {
+		return fmt.Errorf("delete sandbox rootfs binding: %w", err)
+	}
+	if len(filesystemIDs) > 0 {
+		deletableRows, err := tx.Query(ctx, `
+			SELECT f.filesystem_id
+			FROM manager.rootfs_filesystems AS f
+			WHERE f.filesystem_id = ANY($1::text[])
+				AND f.storage_format = $2
 			AND NOT EXISTS (
 				SELECT 1
 				FROM manager.sandbox_rootfs_bindings b
@@ -606,8 +650,51 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 				FROM manager.rootfs_filesystems child
 				WHERE child.source_filesystem_id = f.filesystem_id
 			)
-	`, sandboxID); err != nil {
-		return fmt.Errorf("delete sandbox rootfs binding: %w", err)
+			FOR UPDATE OF f
+		`, filesystemIDs, RootFSStorageFormatBlockCOWV1)
+		if err != nil {
+			return fmt.Errorf("list unreferenced sandbox rootfs filesystems: %w", err)
+		}
+		deletableFilesystemIDs := make([]string, 0, len(filesystemIDs))
+		for deletableRows.Next() {
+			var filesystemID string
+			if err := deletableRows.Scan(&filesystemID); err != nil {
+				deletableRows.Close()
+				return fmt.Errorf("scan unreferenced sandbox rootfs filesystem: %w", err)
+			}
+			deletableFilesystemIDs = append(deletableFilesystemIDs, filesystemID)
+		}
+		if err := deletableRows.Err(); err != nil {
+			deletableRows.Close()
+			return fmt.Errorf("iterate unreferenced sandbox rootfs filesystems: %w", err)
+		}
+		deletableRows.Close()
+		if len(deletableFilesystemIDs) == 0 {
+			// Snapshots, forks, or another sandbox binding still retain every
+			// candidate filesystem.
+			deletableFilesystemIDs = nil
+		}
+		if len(deletableFilesystemIDs) > 0 {
+			if _, err := tx.Exec(ctx, `
+				UPDATE manager.rootfs_filesystems
+				SET head_generation_id = NULL, updated_at = NOW()
+				WHERE filesystem_id = ANY($1::text[])
+			`, deletableFilesystemIDs); err != nil {
+				return fmt.Errorf("clear deleted sandbox rootfs generation heads: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `
+				DELETE FROM manager.rootfs_generations
+				WHERE filesystem_id = ANY($1::text[])
+			`, deletableFilesystemIDs); err != nil {
+				return fmt.Errorf("delete sandbox rootfs generations: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `
+				DELETE FROM manager.rootfs_filesystems
+				WHERE filesystem_id = ANY($1::text[])
+			`, deletableFilesystemIDs); err != nil {
+				return fmt.Errorf("delete unreferenced sandbox rootfs filesystem: %w", err)
+			}
+		}
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM manager.sandbox_rootfs_states WHERE sandbox_id = $1`, sandboxID); err != nil {
 		return fmt.Errorf("delete sandbox rootfs states: %w", err)
@@ -1229,6 +1316,7 @@ func advanceRootFSFilesystemHead(ctx context.Context, exec rootFSStateExecutor, 
 				base_image_digest = EXCLUDED.base_image_digest,
 				updated_at = NOW()
 			WHERE manager.rootfs_filesystems.head_layer_id IS NOT DISTINCT FROM $4
+				AND manager.rootfs_filesystems.writer_epoch = 0
 			RETURNING filesystem_id
 		),
 		ensured_binding AS (
@@ -1334,11 +1422,19 @@ func rootFSLayerChainByHeadSQL() string {
 		ORDER BY depth DESC`
 }
 
+type rootFSLayerScanner interface {
+	Scan(...any) error
+}
+
 func scanRootFSLayerRows(rows pgx.Rows) (*SandboxRootFSLayer, error) {
+	return scanRootFSLayer(rows)
+}
+
+func scanRootFSLayer(row rootFSLayerScanner) (*SandboxRootFSLayer, error) {
 	var layer SandboxRootFSLayer
 	var parentLayerID *string
 	var parentChainJSON []byte
-	if err := rows.Scan(
+	if err := row.Scan(
 		&layer.ID, &parentLayerID, &layer.SourceSandboxID, &layer.TeamID, &layer.RuntimeGeneration,
 		&layer.Runtime, &layer.RuntimeHandler, &layer.BaseImageRef, &layer.BaseImageDigest, &layer.Snapshotter,
 		&layer.SnapshotParent, &parentChainJSON, &layer.DiffDigest, &layer.DiffID, &layer.DiffMediaType,

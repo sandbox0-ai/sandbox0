@@ -33,6 +33,7 @@ func TestSaveRootFSStateWritesLayerAndFilesystemHeadOnly(t *testing.T) {
 	assert.Contains(t, exec.sqls[1], "DELETE FROM manager.rootfs_object_deletions")
 	assert.Contains(t, exec.sqls[2], "INSERT INTO manager.rootfs_layers")
 	assert.Contains(t, exec.sqls[3], "INSERT INTO manager.rootfs_filesystems")
+	assert.Contains(t, exec.sqls[3], "manager.rootfs_filesystems.writer_epoch = 0")
 	for _, sql := range exec.sqls {
 		assert.NotContains(t, sql, "INSERT INTO manager.sandbox_rootfs_states")
 		assert.NotContains(t, sql, "INSERT INTO manager.sandbox_rootfs_heads")

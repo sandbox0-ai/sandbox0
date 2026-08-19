@@ -27,6 +27,11 @@ type RootFSFilesystem struct {
 	TeamID             string
 	SourceFilesystemID string
 	HeadLayerID        string
+	HeadGenerationID   string
+	WriterEpoch        int64
+	StorageFormat      string
+	BaseArtifactDigest string
+	FormatGeneration   int
 	BaseImageRef       string
 	BaseImageDigest    string
 	CreatedAt          time.Time
@@ -167,7 +172,9 @@ func (s *PGSandboxStore) GetRootFSFilesystem(ctx context.Context, sandboxID stri
 	}
 	filesystem, err := scanRootFSFilesystem(s.pool.QueryRow(ctx, `
 		SELECT f.filesystem_id, f.team_id, f.source_filesystem_id, f.head_layer_id,
-			f.base_image_ref, f.base_image_digest, f.created_at, f.updated_at
+			f.writer_epoch, f.base_image_ref, f.base_image_digest, f.storage_format,
+			f.base_artifact_digest, f.format_generation, f.head_generation_id,
+			f.created_at, f.updated_at
 		FROM manager.sandbox_rootfs_bindings b
 		JOIN manager.rootfs_filesystems f ON f.filesystem_id = b.filesystem_id
 		WHERE b.sandbox_id = $1
@@ -365,7 +372,8 @@ func forkRootFSFilesystem(ctx context.Context, db rootFSStoreDB, req *ForkRootFS
 			CROSS JOIN target_sandbox
 			ON CONFLICT (filesystem_id) DO NOTHING
 			RETURNING filesystem_id, team_id, source_filesystem_id, head_layer_id,
-				base_image_ref, base_image_digest, created_at, updated_at
+				writer_epoch, base_image_ref, base_image_digest, storage_format,
+				base_artifact_digest, format_generation, head_generation_id, created_at, updated_at
 		),
 		bound AS (
 			INSERT INTO manager.sandbox_rootfs_bindings (
@@ -377,8 +385,9 @@ func forkRootFSFilesystem(ctx context.Context, db rootFSStoreDB, req *ForkRootFS
 			RETURNING filesystem_id
 		)
 		SELECT created.filesystem_id, created.team_id, created.source_filesystem_id,
-			created.head_layer_id, created.base_image_ref, created.base_image_digest,
-			created.created_at, created.updated_at
+			created.head_layer_id, created.writer_epoch, created.base_image_ref, created.base_image_digest,
+			created.storage_format, created.base_artifact_digest, created.format_generation,
+			created.head_generation_id, created.created_at, created.updated_at
 		FROM created
 		JOIN bound ON bound.filesystem_id = created.filesystem_id
 	`, req.SourceSandboxID, req.TargetSandboxID, strings.TrimSpace(req.TargetTeamID)))
@@ -475,8 +484,10 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 				base_image_ref = EXCLUDED.base_image_ref,
 				base_image_digest = EXCLUDED.base_image_digest,
 				updated_at = NOW()
+			WHERE manager.rootfs_filesystems.writer_epoch = 0
 			RETURNING filesystem_id, team_id, source_filesystem_id, head_layer_id,
-				base_image_ref, base_image_digest, created_at, updated_at
+				writer_epoch, base_image_ref, base_image_digest, storage_format,
+				base_artifact_digest, format_generation, head_generation_id, created_at, updated_at
 		),
 		bound AS (
 			INSERT INTO manager.sandbox_rootfs_bindings (
@@ -489,8 +500,9 @@ func restoreRootFSFromSnapshot(ctx context.Context, db rootFSStoreDB, req *Resto
 			RETURNING filesystem_id
 		)
 		SELECT restored.filesystem_id, restored.team_id, restored.source_filesystem_id,
-			restored.head_layer_id, restored.base_image_ref, restored.base_image_digest,
-			restored.created_at, restored.updated_at
+			restored.head_layer_id, restored.writer_epoch, restored.base_image_ref, restored.base_image_digest,
+			restored.storage_format, restored.base_artifact_digest, restored.format_generation,
+			restored.head_generation_id, restored.created_at, restored.updated_at
 		FROM restored
 		JOIN bound ON bound.filesystem_id = restored.filesystem_id
 	`, req.SandboxID, req.SnapshotID, strings.TrimSpace(req.TeamID)))
@@ -1427,10 +1439,12 @@ func (s *PGSandboxStore) rootFSSnapshotExists(ctx context.Context, snapshotID, t
 
 func scanRootFSFilesystem(row sandboxRecordScanner) (*RootFSFilesystem, error) {
 	var filesystem RootFSFilesystem
-	var sourceFilesystemID, headLayerID *string
+	var sourceFilesystemID, headLayerID, baseArtifactDigest, headGenerationID *string
+	var formatGeneration *int
 	if err := row.Scan(
 		&filesystem.ID, &filesystem.TeamID, &sourceFilesystemID, &headLayerID,
-		&filesystem.BaseImageRef, &filesystem.BaseImageDigest,
+		&filesystem.WriterEpoch, &filesystem.BaseImageRef, &filesystem.BaseImageDigest,
+		&filesystem.StorageFormat, &baseArtifactDigest, &formatGeneration, &headGenerationID,
 		&filesystem.CreatedAt, &filesystem.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -1440,6 +1454,15 @@ func scanRootFSFilesystem(row sandboxRecordScanner) (*RootFSFilesystem, error) {
 	}
 	if headLayerID != nil {
 		filesystem.HeadLayerID = *headLayerID
+	}
+	if baseArtifactDigest != nil {
+		filesystem.BaseArtifactDigest = *baseArtifactDigest
+	}
+	if formatGeneration != nil {
+		filesystem.FormatGeneration = *formatGeneration
+	}
+	if headGenerationID != nil {
+		filesystem.HeadGenerationID = *headGenerationID
 	}
 	return &filesystem, nil
 }

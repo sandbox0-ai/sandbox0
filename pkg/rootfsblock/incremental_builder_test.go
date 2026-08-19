@@ -55,6 +55,52 @@ func TestBuildIncrementalGenerationRejectsDuplicateUpdates(t *testing.T) {
 	require.ErrorContains(t, err, "duplicates")
 }
 
+func TestBuildIncrementalGenerationStreamsBlockReaderOnce(t *testing.T) {
+	basePayload := bytes.Repeat([]byte{0x11}, 4*LogicalBlockSize)
+	objects := newMemoryObjects()
+	base, err := BuildMaterializedGeneration(t.Context(), bytes.NewReader(basePayload), int64(len(basePayload)), objects, BuildOptions{})
+	require.NoError(t, err)
+	updates := &countingBlockUpdateReader{
+		blocks: []uint64{3, 0, 2},
+		values: map[uint64][]byte{
+			0: bytes.Repeat([]byte{0x20}, LogicalBlockSize),
+			2: make([]byte, LogicalBlockSize),
+			3: bytes.Repeat([]byte{0x23}, LogicalBlockSize),
+		},
+		reads: make(map[uint64]int),
+	}
+
+	next, err := BuildIncrementalGenerationFromBlockReader(
+		t.Context(), objects, base.Descriptor, updates, objects,
+		BuildOptions{DataRangeBytes: 2 * LogicalBlockSize, PackBytes: 4 * LogicalBlockSize},
+	)
+	require.NoError(t, err)
+	require.Equal(t, map[uint64]int{0: 1, 2: 1, 3: 1}, updates.reads)
+	reader, err := NewReader(objects, next.Descriptor, DefaultReadCacheBytes)
+	require.NoError(t, err)
+	actual := make([]byte, len(basePayload))
+	_, err = reader.ReadAt(actual, 0)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x20), actual[0])
+	require.Equal(t, byte(0x11), actual[LogicalBlockSize])
+	require.Equal(t, byte(0), actual[2*LogicalBlockSize])
+	require.Equal(t, byte(0x23), actual[3*LogicalBlockSize])
+}
+
+func TestBuildIncrementalGenerationValidatesBlockReaderBeforePublishing(t *testing.T) {
+	objects := newMemoryObjects()
+	base, err := BuildMaterializedGeneration(t.Context(), bytes.NewReader(make([]byte, 2*LogicalBlockSize)), 2*LogicalBlockSize, objects, BuildOptions{})
+	require.NoError(t, err)
+	objects.resetPublished()
+	updates := &countingBlockUpdateReader{
+		blocks: []uint64{1, 1}, values: map[uint64][]byte{1: make([]byte, LogicalBlockSize)}, reads: make(map[uint64]int),
+	}
+	_, err = BuildIncrementalGenerationFromBlockReader(t.Context(), objects, base.Descriptor, updates, objects, BuildOptions{})
+	require.ErrorContains(t, err, "duplicated")
+	require.Zero(t, objects.publishedBytes)
+	require.Empty(t, updates.reads)
+}
+
 func TestReaderRejectsMismatchedLogicalRootDigest(t *testing.T) {
 	objects := newMemoryObjects()
 	base, err := BuildMaterializedGeneration(t.Context(), bytes.NewReader(make([]byte, LogicalBlockSize)), LogicalBlockSize, objects, BuildOptions{})
@@ -95,3 +141,22 @@ func (m *memoryObjects) Get(key string, offset, length int64) (io.ReadCloser, er
 }
 
 func (m *memoryObjects) resetPublished() { m.publishedBytes = 0 }
+
+type countingBlockUpdateReader struct {
+	blocks []uint64
+	values map[uint64][]byte
+	reads  map[uint64]int
+}
+
+func (r *countingBlockUpdateReader) Blocks() ([]uint64, error) {
+	return append([]uint64(nil), r.blocks...), nil
+}
+
+func (r *countingBlockUpdateReader) ReadBlock(block uint64, target []byte) (int, error) {
+	payload, ok := r.values[block]
+	if !ok {
+		return 0, os.ErrNotExist
+	}
+	r.reads[block]++
+	return copy(target, payload), nil
+}

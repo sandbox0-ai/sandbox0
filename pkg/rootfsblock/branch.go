@@ -58,6 +58,58 @@ type branchRecord struct {
 	offset   int64
 }
 
+const branchRecordChunkCapacity = 4096
+
+// branchRecordLog keeps the append index in immutable chunks. Checkpoint can
+// rotate the current chunk while holding the branch lock and retain the old
+// chunks without copying every record during a guest filesystem freeze.
+type branchRecordLog struct {
+	chunks []*branchRecordChunk
+	count  int
+}
+
+type branchRecordChunk struct {
+	records []branchRecord
+}
+
+func (l *branchRecordLog) append(record branchRecord) {
+	if len(l.chunks) == 0 || len(l.chunks[len(l.chunks)-1].records) == branchRecordChunkCapacity {
+		l.chunks = append(l.chunks, &branchRecordChunk{records: make([]branchRecord, 0, branchRecordChunkCapacity)})
+	}
+	last := l.chunks[len(l.chunks)-1]
+	last.records = append(last.records, record)
+	l.count++
+}
+
+func (l *branchRecordLog) snapshot() []*branchRecordChunk {
+	if l.count == 0 {
+		return nil
+	}
+	result := make([]*branchRecordChunk, 0, len(l.chunks))
+	for _, chunk := range l.chunks {
+		if len(chunk.records) > 0 {
+			result = append(result, chunk)
+		}
+	}
+	last := l.chunks[len(l.chunks)-1]
+	if len(last.records) > 0 && len(last.records) < branchRecordChunkCapacity {
+		// Future appends must not mutate a chunk retained by the checkpoint.
+		l.chunks = append(l.chunks, &branchRecordChunk{records: make([]branchRecord, 0, branchRecordChunkCapacity)})
+	}
+	return result
+}
+
+func (l *branchRecordLog) forEach(visit func(branchRecord) error) error {
+	for _, chunk := range l.chunks {
+		for _, record := range chunk.records {
+			if err := visit(record); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // BlockUpdate is one final block value in a flushed local branch.
 type BlockUpdate struct {
 	Sequence uint64
@@ -113,7 +165,7 @@ type Branch struct {
 	sequence uint64
 	durable  uint64
 	blocks   map[uint64]branchRecord
-	records  []branchRecord
+	records  branchRecordLog
 	maxDirty int64
 	closed   bool
 }
@@ -256,7 +308,7 @@ func (b *Branch) WriteZeroes(offset, length int64) error {
 func (b *Branch) DirtyTailUsage() DirtyTailUsage {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	records := int64(len(b.records))
+	records := int64(b.records.count)
 	return DirtyTailUsage{
 		DirtyBytes: records * LogicalBlockSize, JournalBytes: records * branchRecordBytes,
 		MaxBytes: b.maxDirty,
@@ -269,6 +321,10 @@ func (b *Branch) Flush() error {
 	if b.closed {
 		return os.ErrClosed
 	}
+	return b.flushLocked()
+}
+
+func (b *Branch) flushLocked() error {
 	if b.durable == b.sequence {
 		return nil
 	}
@@ -335,17 +391,25 @@ func (b *Branch) DurableRecords() ([]BlockUpdate, error) {
 	if b.durable != b.sequence {
 		return nil, fmt.Errorf("branch has unflushed writes")
 	}
-	updates := make([]BlockUpdate, 0, len(b.records))
-	for _, record := range b.records {
+	required := compositeTailHeaderBytes + b.records.count*compositeTailRecordBytes
+	if required > MaxCompositeTailBytes {
+		return nil, &CompositeTailTooLargeError{Required: required, Limit: MaxCompositeTailBytes}
+	}
+	updates := make([]BlockUpdate, 0, b.records.count)
+	err := b.records.forEach(func(record branchRecord) error {
 		payload := make([]byte, LogicalBlockSize)
 		n, err := b.file.ReadAt(payload, record.offset)
 		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("read durable record %d: %w", record.sequence, err)
+			return fmt.Errorf("read durable record %d: %w", record.sequence, err)
 		}
 		if n != len(payload) {
-			return nil, fmt.Errorf("read durable record %d: %w", record.sequence, io.ErrUnexpectedEOF)
+			return fmt.Errorf("read durable record %d: %w", record.sequence, io.ErrUnexpectedEOF)
 		}
 		updates = append(updates, BlockUpdate{Sequence: record.sequence, Block: record.block, Data: payload})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return updates, nil
 }
@@ -467,7 +531,7 @@ func (b *Branch) scanRecords(size int64) error {
 			return fmt.Errorf("branch record at %d has invalid sequence or block", offset)
 		}
 		b.blocks[block] = branchRecord{sequence: sequence, block: block, offset: offset + 64}
-		b.records = append(b.records, branchRecord{sequence: sequence, block: block, offset: offset + 64})
+		b.records.append(branchRecord{sequence: sequence, block: block, offset: offset + 64})
 		previous = sequence
 		offset += branchRecordBytes
 	}
@@ -500,7 +564,7 @@ func (b *Branch) appendBlockLocked(block uint64, payload []byte) error {
 		return fmt.Errorf("append branch block: %w", err)
 	}
 	b.blocks[block] = branchRecord{sequence: b.sequence, block: block, offset: b.end + 64}
-	b.records = append(b.records, branchRecord{sequence: b.sequence, block: block, offset: b.end + 64})
+	b.records.append(branchRecord{sequence: b.sequence, block: block, offset: b.end + 64})
 	b.end += int64(len(record))
 	return nil
 }
@@ -509,7 +573,7 @@ func (b *Branch) admitRecordsLocked(records int64) error {
 	if records <= 0 || b.maxDirty == 0 {
 		return nil
 	}
-	used := int64(len(b.records)) * LogicalBlockSize
+	used := int64(b.records.count) * LogicalBlockSize
 	requested := records * LogicalBlockSize
 	if used > b.maxDirty || requested > b.maxDirty-used {
 		return &DirtyTailCapacityError{

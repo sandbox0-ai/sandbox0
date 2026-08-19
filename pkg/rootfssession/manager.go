@@ -1155,6 +1155,7 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 	var sealedBlockHead, sealedDurability string
 	if releaseErr == nil && plannedRetire {
 		branch := (*rootfsblock.Branch)(nil)
+		checkpoint := (*rootfsblock.BranchCheckpoint)(nil)
 		closeBranch := false
 		if live != nil {
 			branch = live.branch
@@ -1163,14 +1164,20 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 			closeBranch = branch != nil
 		}
 		if releaseErr == nil {
-			if err := branch.Flush(); err != nil {
-				releaseErr = errors.Join(releaseErr, fmt.Errorf("flush retiring branch: %w", err))
+			checkpoint, releaseErr = branch.Checkpoint()
+			if releaseErr != nil {
+				releaseErr = fmt.Errorf("checkpoint retiring branch: %w", releaseErr)
 			}
 		}
 		var records []rootfsblock.BlockUpdate
+		materialize := false
 		if releaseErr == nil {
-			records, releaseErr = branch.DurableRecords()
-			if releaseErr != nil {
+			records, releaseErr = checkpoint.DurableRecords()
+			var tooLarge *rootfsblock.CompositeTailTooLargeError
+			if errors.As(releaseErr, &tooLarge) {
+				releaseErr = nil
+				materialize = true
+			} else if releaseErr != nil {
 				releaseErr = fmt.Errorf("read retiring branch: %w", releaseErr)
 			}
 		}
@@ -1179,20 +1186,25 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 			if decodeErr != nil {
 				releaseErr = fmt.Errorf("decode retiring base generation: %w", decodeErr)
 			} else {
-				sealed, payload, buildErr := rootfsblock.BuildCompositeGeneration(base, records)
-				var tooLarge *rootfsblock.CompositeTailTooLargeError
-				if errors.As(buildErr, &tooLarge) {
-					var updates []rootfsblock.BlockUpdate
-					updates, buildErr = branch.DurableUpdates()
+				var sealed rootfsblock.Descriptor
+				var payload []byte
+				var buildErr error
+				if !materialize {
+					sealed, payload, buildErr = rootfsblock.BuildCompositeGeneration(base, records)
+					var tooLarge *rootfsblock.CompositeTailTooLargeError
+					if errors.As(buildErr, &tooLarge) {
+						buildErr = nil
+						materialize = true
+					}
+				}
+				if materialize {
+					var built rootfsblock.BuildResult
+					built, buildErr = rootfsblock.BuildIncrementalGenerationFromBlockReader(
+						ctx, m.source, base, checkpoint, m.publisher, rootfsblock.BuildOptions{},
+					)
 					if buildErr == nil {
-						var materialized rootfsblock.BuildResult
-						materialized, buildErr = rootfsblock.BuildIncrementalGeneration(
-							ctx, m.source, base, updates, m.publisher, rootfsblock.BuildOptions{},
-						)
-						if buildErr == nil {
-							sealed = materialized.Descriptor
-							payload = materialized.Payload
-						}
+						sealed = built.Descriptor
+						payload = built.Payload
 					}
 				}
 				if buildErr != nil {
@@ -1206,6 +1218,9 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 					}
 				}
 			}
+		}
+		if checkpoint != nil {
+			releaseErr = errors.Join(releaseErr, checkpoint.Close())
 		}
 		if closeBranch {
 			releaseErr = errors.Join(releaseErr, branch.Close())

@@ -298,6 +298,71 @@ func TestBranchDirtyTailOptionsAllowRetirementAfterLimitReduction(t *testing.T) 
 	require.False(t, errors.As(err, &exhausted))
 }
 
+func TestBranchCheckpointRemainsImmutableWhileWriterContinues(t *testing.T) {
+	base := bytes.Repeat([]byte{0x11}, 3*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	branch, err := OpenBranch(path, testBranchIdentity(int64(len(base))), bytes.NewReader(base))
+	require.NoError(t, err)
+
+	first := bytes.Repeat([]byte{0x21}, LogicalBlockSize)
+	second := bytes.Repeat([]byte{0x22}, LogicalBlockSize)
+	_, err = branch.WriteAt(first, 0)
+	require.NoError(t, err)
+	_, err = branch.WriteAt(second, LogicalBlockSize)
+	require.NoError(t, err)
+
+	checkpoint, err := branch.Checkpoint()
+	require.NoError(t, err, "checkpoint must flush the captured boundary")
+	require.Equal(t, uint64(2), checkpoint.Sequence())
+	require.Equal(t, 2, checkpoint.RecordCount())
+	require.Len(t, branch.records.chunks, 2, "checkpoint must rotate a partially filled append-index chunk")
+
+	third := bytes.Repeat([]byte{0x33}, LogicalBlockSize)
+	_, err = branch.WriteAt(third, 0)
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x34}, LogicalBlockSize), 2*LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, branch.Close())
+	require.NoError(t, os.Remove(path), "the checkpoint must own the exact inode rather than reopen its path")
+
+	blocks, err := checkpoint.Blocks()
+	require.NoError(t, err)
+	require.Equal(t, []uint64{0, 1}, blocks)
+	actual := make([]byte, LogicalBlockSize)
+	n, err := checkpoint.ReadBlock(0, actual)
+	require.NoError(t, err)
+	require.Equal(t, LogicalBlockSize, n)
+	require.Equal(t, first, actual, "a later overwrite must not change the checkpoint")
+	records, err := checkpoint.DurableRecords()
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	require.Equal(t, second, records[1].Data)
+	require.NoError(t, checkpoint.Close())
+	_, err = checkpoint.Blocks()
+	require.ErrorIs(t, err, os.ErrClosed)
+}
+
+func TestBranchCheckpointRejectsOversizedCompositeBeforeReadingPayload(t *testing.T) {
+	base := make([]byte, 12*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.log")
+	branch, err := OpenBranch(path, testBranchIdentity(int64(len(base))), bytes.NewReader(base))
+	require.NoError(t, err)
+	for block := range 12 {
+		_, err = branch.WriteAt(bytes.Repeat([]byte{byte(block + 1)}, LogicalBlockSize), int64(block*LogicalBlockSize))
+		require.NoError(t, err)
+	}
+	checkpoint, err := branch.Checkpoint()
+	require.NoError(t, err)
+	require.NoError(t, branch.Close())
+	require.NoError(t, os.Truncate(path, 0), "capacity must be rejected before checkpoint payload reads")
+
+	_, err = checkpoint.DurableRecords()
+	var tooLarge *CompositeTailTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	require.Greater(t, tooLarge.Required, tooLarge.Limit)
+	require.NoError(t, checkpoint.Close())
+}
+
 func testBranchIdentity(logicalSize int64) BranchIdentity {
 	return BranchIdentity{
 		Version: BranchFormatVersion, RootFSID: "rootfs-a", GenerationID: "generation-a", WriterEpoch: 1,

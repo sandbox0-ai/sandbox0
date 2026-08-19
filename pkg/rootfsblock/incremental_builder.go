@@ -3,6 +3,7 @@ package rootfsblock
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 
 	"github.com/opencontainers/go-digest"
@@ -21,6 +22,58 @@ func BuildIncrementalGeneration(
 	publisher ImmutableObjectPublisher,
 	options BuildOptions,
 ) (BuildResult, error) {
+	if err := base.Validate(); err != nil {
+		return BuildResult{}, err
+	}
+	totalBlocks := uint64(base.LogicalSizeBytes / LogicalBlockSize)
+	normalized, err := normalizeBlockUpdates(updates, totalBlocks)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	blocks := make([]uint64, len(normalized))
+	for index, update := range normalized {
+		blocks[index] = update.Block
+	}
+	return buildIncrementalGeneration(ctx, source, base, &sliceBlockUpdateReader{updates: normalized}, blocks, publisher, options)
+}
+
+// BuildIncrementalGenerationFromBlockReader is the streaming form used by a
+// live branch checkpoint. It buffers bounded data packs instead of copying
+// every dirty 4 KiB payload before immutable publication.
+func BuildIncrementalGenerationFromBlockReader(
+	ctx context.Context,
+	source RangeSource,
+	base Descriptor,
+	updates BlockUpdateReader,
+	publisher ImmutableObjectPublisher,
+	options BuildOptions,
+) (BuildResult, error) {
+	if updates == nil {
+		return BuildResult{}, fmt.Errorf("block update reader is required")
+	}
+	if err := base.Validate(); err != nil {
+		return BuildResult{}, err
+	}
+	blocks, err := updates.Blocks()
+	if err != nil {
+		return BuildResult{}, fmt.Errorf("list dirty blocks: %w", err)
+	}
+	blocks, err = normalizeDirtyBlocks(blocks, uint64(base.LogicalSizeBytes/LogicalBlockSize))
+	if err != nil {
+		return BuildResult{}, err
+	}
+	return buildIncrementalGeneration(ctx, source, base, updates, blocks, publisher, options)
+}
+
+func buildIncrementalGeneration(
+	ctx context.Context,
+	source RangeSource,
+	base Descriptor,
+	updates BlockUpdateReader,
+	blocks []uint64,
+	publisher ImmutableObjectPublisher,
+	options BuildOptions,
+) (BuildResult, error) {
 	if source == nil || publisher == nil {
 		return BuildResult{}, fmt.Errorf("range source and publisher are required")
 	}
@@ -35,27 +88,31 @@ func BuildIncrementalGeneration(
 		return BuildResult{}, err
 	}
 	totalBlocks := uint64(base.LogicalSizeBytes / LogicalBlockSize)
-	normalized, err := normalizeBlockUpdates(updates, totalBlocks)
-	if err != nil {
-		return BuildResult{}, err
-	}
 	if base.CompositeTail != nil {
 		tail, _, err := DecodeCompositeTail(*base.CompositeTail, totalBlocks)
 		if err != nil {
 			return BuildResult{}, err
 		}
-		normalized = mergeFinalBlockUpdates(tail, normalized)
+		baseUpdates := mergeFinalBlockUpdates(tail, nil)
+		baseBlocks := make([]uint64, len(baseUpdates))
+		for index, update := range baseUpdates {
+			baseBlocks[index] = update.Block
+		}
+		updates = &overlayBlockUpdateReader{
+			base: &sliceBlockUpdateReader{updates: baseUpdates}, next: updates, nextBlocks: blocks,
+		}
+		blocks = mergeDirtyBlocks(baseBlocks, blocks)
 	}
 	baseEntries, err := reader.dataEntries(ctx)
 	if err != nil {
 		return BuildResult{}, err
 	}
 	state := generationBuilder{ctx: ctx, publisher: publisher, options: options}
-	unchanged, err := splitUnchangedEntries(reader, baseEntries, normalized)
+	unchanged, err := splitUnchangedEntries(reader, baseEntries, blocks)
 	if err != nil {
 		return BuildResult{}, err
 	}
-	dirty, err := state.publishBlockUpdates(normalized)
+	dirty, err := state.publishBlockUpdates(updates, blocks)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -79,6 +136,51 @@ func BuildIncrementalGeneration(
 		return BuildResult{}, err
 	}
 	return BuildResult{Descriptor: descriptor, Payload: payload, Objects: state.objects, Bytes: state.bytes}, nil
+}
+
+type sliceBlockUpdateReader struct {
+	updates []BlockUpdate
+}
+
+func (r *sliceBlockUpdateReader) Blocks() ([]uint64, error) {
+	blocks := make([]uint64, len(r.updates))
+	for index, update := range r.updates {
+		blocks[index] = update.Block
+	}
+	return blocks, nil
+}
+
+func (r *sliceBlockUpdateReader) ReadBlock(block uint64, target []byte) (int, error) {
+	index := sort.Search(len(r.updates), func(index int) bool { return r.updates[index].Block >= block })
+	if index == len(r.updates) || r.updates[index].Block != block {
+		return 0, fmt.Errorf("logical block %d is not present", block)
+	}
+	if len(target) != LogicalBlockSize {
+		return 0, fmt.Errorf("block target must contain exactly %d bytes", LogicalBlockSize)
+	}
+	return copy(target, r.updates[index].Data), nil
+}
+
+type overlayBlockUpdateReader struct {
+	base       BlockUpdateReader
+	next       BlockUpdateReader
+	nextBlocks []uint64
+}
+
+func (r *overlayBlockUpdateReader) Blocks() ([]uint64, error) {
+	base, err := r.base.Blocks()
+	if err != nil {
+		return nil, err
+	}
+	return mergeDirtyBlocks(base, r.nextBlocks), nil
+}
+
+func (r *overlayBlockUpdateReader) ReadBlock(block uint64, target []byte) (int, error) {
+	index := sort.Search(len(r.nextBlocks), func(index int) bool { return r.nextBlocks[index] >= block })
+	if index < len(r.nextBlocks) && r.nextBlocks[index] == block {
+		return r.next.ReadBlock(block, target)
+	}
+	return r.base.ReadBlock(block, target)
 }
 
 func mergeFinalBlockUpdates(first, second []BlockUpdate) []BlockUpdate {
@@ -112,6 +214,46 @@ func normalizeBlockUpdates(updates []BlockUpdate, totalBlocks uint64) ([]BlockUp
 		}
 	}
 	return normalized, nil
+}
+
+func normalizeDirtyBlocks(blocks []uint64, totalBlocks uint64) ([]uint64, error) {
+	normalized := append([]uint64(nil), blocks...)
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i] < normalized[j] })
+	for index, block := range normalized {
+		if block >= totalBlocks {
+			return nil, fmt.Errorf("dirty block %d is outside the device", block)
+		}
+		if index > 0 && normalized[index-1] == block {
+			return nil, fmt.Errorf("dirty block %d is duplicated", block)
+		}
+	}
+	return normalized, nil
+}
+
+func mergeDirtyBlocks(first, second []uint64) []uint64 {
+	result := make([]uint64, 0, len(first)+len(second))
+	left, right := 0, 0
+	for left < len(first) || right < len(second) {
+		switch {
+		case left == len(first):
+			result = append(result, second[right:]...)
+			return result
+		case right == len(second):
+			result = append(result, first[left:]...)
+			return result
+		case first[left] < second[right]:
+			result = append(result, first[left])
+			left++
+		case second[right] < first[left]:
+			result = append(result, second[right])
+			right++
+		default:
+			result = append(result, second[right])
+			left++
+			right++
+		}
+	}
+	return result
 }
 
 func (r *Reader) dataEntries(ctx context.Context) ([]MappingEntry, error) {
@@ -160,16 +302,16 @@ func (r *Reader) dataEntries(ctx context.Context) ([]MappingEntry, error) {
 	return entries, nil
 }
 
-func splitUnchangedEntries(reader *Reader, entries []MappingEntry, updates []BlockUpdate) ([]MappingEntry, error) {
+func splitUnchangedEntries(reader *Reader, entries []MappingEntry, dirtyBlocks []uint64) ([]MappingEntry, error) {
 	result := make([]MappingEntry, 0, len(entries))
 	dirtyIndex := 0
 	for _, entry := range entries {
 		end := entry.LogicalStart + uint64(entry.BlockCount)
-		for dirtyIndex < len(updates) && updates[dirtyIndex].Block < entry.LogicalStart {
+		for dirtyIndex < len(dirtyBlocks) && dirtyBlocks[dirtyIndex] < entry.LogicalStart {
 			dirtyIndex++
 		}
 		entryDirtyStart := dirtyIndex
-		for dirtyIndex < len(updates) && updates[dirtyIndex].Block < end {
+		for dirtyIndex < len(dirtyBlocks) && dirtyBlocks[dirtyIndex] < end {
 			dirtyIndex++
 		}
 		if entryDirtyStart == dirtyIndex {
@@ -181,8 +323,7 @@ func splitUnchangedEntries(reader *Reader, entries []MappingEntry, updates []Blo
 			return nil, fmt.Errorf("read data range split by dirty blocks: %w", err)
 		}
 		cursor := entry.LogicalStart
-		for _, update := range updates[entryDirtyStart:dirtyIndex] {
-			block := update.Block
+		for _, block := range dirtyBlocks[entryDirtyStart:dirtyIndex] {
 			if cursor < block {
 				result = append(result, splitDataEntry(entry, cursor, block, payload))
 			}
@@ -208,10 +349,10 @@ func splitDataEntry(entry MappingEntry, start, end uint64, payload []byte) Mappi
 	}
 }
 
-func (b *generationBuilder) publishBlockUpdates(updates []BlockUpdate) ([]MappingEntry, error) {
+func (b *generationBuilder) publishBlockUpdates(updates BlockUpdateReader, blocks []uint64) ([]MappingEntry, error) {
 	pending := make([]pendingDataEntry, 0, max(1, b.options.PackBytes/b.options.DataRangeBytes))
 	pendingBytes := 0
-	result := make([]MappingEntry, 0, len(updates))
+	result := make([]MappingEntry, 0, len(blocks))
 	flushPack := func() error {
 		if len(pending) == 0 {
 			return nil
@@ -225,19 +366,44 @@ func (b *generationBuilder) publishBlockUpdates(updates []BlockUpdate) ([]Mappin
 		pendingBytes = 0
 		return nil
 	}
-	for index := 0; index < len(updates); {
-		if allZero(updates[index].Data) {
+	readBlock := func(block uint64) ([]byte, error) {
+		if err := b.ctx.Err(); err != nil {
+			return nil, err
+		}
+		payload := make([]byte, LogicalBlockSize)
+		n, err := updates.ReadBlock(block, payload)
+		if err != nil {
+			return nil, fmt.Errorf("read dirty block %d: %w", block, err)
+		}
+		if n != len(payload) {
+			return nil, fmt.Errorf("read dirty block %d: %w", block, io.ErrUnexpectedEOF)
+		}
+		return payload, nil
+	}
+	for index := 0; index < len(blocks); {
+		data, err := readBlock(blocks[index])
+		if err != nil {
+			return nil, err
+		}
+		if allZero(data) {
 			index++
 			continue
 		}
-		start := updates[index].Block
+		start := blocks[index]
 		payload := make([]byte, 0, b.options.DataRangeBytes)
-		payload = append(payload, updates[index].Data...)
+		payload = append(payload, data...)
 		index++
-		for index < len(updates) && !allZero(updates[index].Data) && updates[index].Block == start+uint64(len(payload)/LogicalBlockSize) &&
+		for index < len(blocks) && blocks[index] == start+uint64(len(payload)/LogicalBlockSize) &&
 			len(payload)+LogicalBlockSize <= b.options.DataRangeBytes {
-			payload = append(payload, updates[index].Data...)
+			data, err = readBlock(blocks[index])
+			if err != nil {
+				return nil, err
+			}
 			index++
+			if allZero(data) {
+				break
+			}
+			payload = append(payload, data...)
 		}
 		if pendingBytes+len(payload) > b.options.PackBytes {
 			if err := flushPack(); err != nil {

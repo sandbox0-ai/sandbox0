@@ -78,6 +78,10 @@ func main() {
 	podUID := flag.String("pod-uid", "", "issue: node pod UID")
 	runtimeGeneration := flag.String("runtime-generation", "1", "issue: runtime generation")
 	gateParent := flag.String("gate-parent", "", "issue: gate parent")
+	resume := flag.Bool("resume", false, "issue the next epoch on an existing block-cow filesystem")
+	filesystemID := flag.String("filesystem-id", "", "resume: existing filesystem ID")
+	initialGenerationID := flag.String("initial-generation-id", "", "resume: existing head generation ID")
+	expectedWriterEpoch := flag.Int64("expected-writer-epoch", 0, "resume: previous writer epoch")
 	flag.Parse()
 
 	if *mode == "stage-digest" {
@@ -117,7 +121,9 @@ func main() {
 			slotID: *slotID, operationID: *operationID, rawToken: *rawToken,
 			bindingHex: *bindingHex, nodeUID: *nodeUID, nodeBootID: *nodeBootID,
 			podUID: *podUID, runtimeGeneration: *runtimeGeneration, gateParent: *gateParent,
-			stage: readStageOption(*stageFile),
+			stage:  readStageOption(*stageFile),
+			resume: *resume, filesystemID: *filesystemID,
+			initialGenerationID: *initialGenerationID, expectedWriterEpoch: *expectedWriterEpoch,
 		}); err != nil {
 			fatal("issue: %v", err)
 		}
@@ -365,20 +371,24 @@ func servePublish(
 }
 
 type issueOptions struct {
-	sandboxID         string
-	teamID            string
-	grantID           string
-	claimID           string
-	slotID            string
-	operationID       string
-	rawToken          string
-	bindingHex        string
-	nodeUID           string
-	nodeBootID        string
-	podUID            string
-	runtimeGeneration string
-	gateParent        string
-	stage             *rootfshandoff.StageRequest
+	sandboxID           string
+	teamID              string
+	grantID             string
+	claimID             string
+	slotID              string
+	operationID         string
+	rawToken            string
+	bindingHex          string
+	nodeUID             string
+	nodeBootID          string
+	podUID              string
+	runtimeGeneration   string
+	gateParent          string
+	stage               *rootfshandoff.StageRequest
+	resume              bool
+	filesystemID        string
+	initialGenerationID string
+	expectedWriterEpoch int64
 }
 
 func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issueOptions) error {
@@ -394,7 +404,14 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 		return fmt.Errorf("seed sandbox: %w", err)
 	}
 	var expectedFilesystemID, initialGenerationID string
-	if options.stage != nil {
+	if options.resume {
+		if options.stage == nil || strings.TrimSpace(options.filesystemID) == "" ||
+			strings.TrimSpace(options.initialGenerationID) == "" || options.expectedWriterEpoch <= 0 {
+			return fmt.Errorf("resume issue requires stage-file, filesystem-id, initial-generation-id, and expected-writer-epoch")
+		}
+		expectedFilesystemID = strings.TrimSpace(options.filesystemID)
+		initialGenerationID = strings.TrimSpace(options.initialGenerationID)
+	} else if options.stage != nil {
 		if options.stage.Generation == nil {
 			return fmt.Errorf("stage generation is required")
 		}
@@ -429,6 +446,7 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 		GateParent: options.gateParent, RuntimeGeneration: options.runtimeGeneration,
 		ConsumeExpiresAt:     time.Now().Add(2 * time.Minute),
 		ExpectedFilesystemID: expectedFilesystemID, InitialGenerationID: initialGenerationID,
+		ExpectedWriterEpoch: options.expectedWriterEpoch,
 	})
 	if err != nil {
 		return err

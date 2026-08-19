@@ -5,12 +5,14 @@ go 1.25.5
 replace github.com/sandbox0-ai/sandbox0 => ../
 
 require (
+	github.com/containerd/errdefs v1.0.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/nomad v1.11.1
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/sandbox0-ai/sandbox0 v0.0.0
+	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.40.0
 )
 
@@ -49,7 +51,6 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/container-storage-interface/spec v1.12.0 // indirect
-	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect

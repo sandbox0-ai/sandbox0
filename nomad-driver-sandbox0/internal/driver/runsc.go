@@ -18,11 +18,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/containerd/errdefs"
 )
 
 // Runsc is the subset of the stock gVisor CLI used by the driver.
@@ -159,7 +162,7 @@ func (r *CommandRunsc) run(ctx context.Context, args ...string) error {
 	stderr, readErr := io.ReadAll(temp)
 	_ = temp.Close()
 	if err != nil {
-		return fmt.Errorf("runsc %s: %w: %s", args[0], err, strings.TrimSpace(string(stderr)))
+		return classifyRunscError(args[0], err, string(stderr))
 	}
 	if readErr != nil {
 		return readErr
@@ -173,7 +176,18 @@ func (r *CommandRunsc) output(ctx context.Context, args ...string) ([]byte, erro
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("runsc %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+		return nil, classifyRunscError(args[0], err, stderr.String())
 	}
 	return output, nil
+}
+
+func classifyRunscError(operation string, commandErr error, stderr string) error {
+	message := strings.TrimSpace(stderr)
+	result := fmt.Errorf("runsc %s: %w: %s", operation, commandErr, message)
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") ||
+		strings.Contains(lower, "no such container") {
+		return errors.Join(result, errdefs.ErrNotFound)
+	}
+	return result
 }

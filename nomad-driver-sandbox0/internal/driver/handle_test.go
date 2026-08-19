@@ -216,6 +216,27 @@ func (r *fakeRootFSRuntime) Ensure(
 	return rootfssession.Mount{Source: r.source, Type: "bind"}, nil
 }
 
+func (r *fakeRootFSRuntime) RegisterConsumer(
+	_ context.Context,
+	_ rootfshandoff.StageRequest,
+	_ RootFSConsumerRequest,
+) (RootFSConsumerLease, error) {
+	return RootFSConsumerLease{LeaseID: "fake-consumer", ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (r *fakeRootFSRuntime) RenewConsumer(
+	_ context.Context,
+	_ rootfshandoff.StageRequest,
+	lease RootFSConsumerLease,
+) (RootFSConsumerLease, error) {
+	lease.ExpiresAt = time.Now().Add(time.Hour)
+	return lease, nil
+}
+
+func (r *fakeRootFSRuntime) RecoverySessions() ([]rootfssession.RecoverySession, error) {
+	return nil, nil
+}
+
 func (r *fakeRootFSRuntime) Retire(_ context.Context, request rootfshandoff.StageRequest, operationID string) (rootfssession.RetireResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

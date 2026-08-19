@@ -99,6 +99,9 @@ func NewManagerClient(config ManagerClientConfig) (*ManagerClient, error) {
 		config.Timeout = 2 * time.Second
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Regional authority credentials must never be forwarded through ambient
+	// HTTP(S)_PROXY configuration on a compute node.
+	transport.Proxy = nil
 	transport.TLSClientConfig = &tls.Config{
 		MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: clientCertificates,
 	}

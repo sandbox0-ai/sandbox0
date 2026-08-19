@@ -91,10 +91,12 @@ var (
 			hclspec.NewAttr("rootfs_enabled", "bool", false),
 			hclspec.NewLiteral(`false`),
 		),
-		"rootfs_state_path":  hclspec.NewAttr("rootfs_state_path", "string", false),
-		"rootfs_branch_root": hclspec.NewAttr("rootfs_branch_root", "string", false),
-		"rootfs_mount_root":  hclspec.NewAttr("rootfs_mount_root", "string", false),
-		"rootfs_nbd_devices": hclspec.NewAttr("rootfs_nbd_devices", "list(string)", false),
+		"rootfs_sessiond_socket":     hclspec.NewAttr("rootfs_sessiond_socket", "string", false),
+		"rootfs_consumer_mount_root": hclspec.NewAttr("rootfs_consumer_mount_root", "string", false),
+		"rootfs_state_path":          hclspec.NewAttr("rootfs_state_path", "string", false),
+		"rootfs_branch_root":         hclspec.NewAttr("rootfs_branch_root", "string", false),
+		"rootfs_mount_root":          hclspec.NewAttr("rootfs_mount_root", "string", false),
+		"rootfs_nbd_devices":         hclspec.NewAttr("rootfs_nbd_devices", "list(string)", false),
 		"rootfs_object_type": hclspec.NewDefault(
 			hclspec.NewAttr("rootfs_object_type", "string", false),
 			hclspec.NewLiteral(`"s3"`),
@@ -150,6 +152,8 @@ type PluginConfig struct {
 	NetworkPolicyEnabled bool   `codec:"network_policy_enabled"`
 
 	RootFSEnabled                 bool     `codec:"rootfs_enabled"`
+	RootFSSessiondSocket          string   `codec:"rootfs_sessiond_socket"`
+	RootFSConsumerMountRoot       string   `codec:"rootfs_consumer_mount_root"`
 	RootFSStatePath               string   `codec:"rootfs_state_path"`
 	RootFSBranchRoot              string   `codec:"rootfs_branch_root"`
 	RootFSMountRoot               string   `codec:"rootfs_mount_root"`
@@ -182,7 +186,7 @@ type Plugin struct {
 	tasks   *taskStore
 
 	newRunner  func(config PluginConfig) Runsc
-	rootfs     *rootfsRuntime
+	rootfs     RootFSRuntime
 	rootfsOnce sync.Once
 	rootfsErr  error
 
@@ -267,6 +271,8 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 		return errors.New("sandbox0 gVisor driver requires overlay2=none for persistent upper writes")
 	}
 	decoded.RootFSObjectType = strings.TrimSpace(decoded.RootFSObjectType)
+	decoded.RootFSSessiondSocket = strings.TrimSpace(decoded.RootFSSessiondSocket)
+	decoded.RootFSConsumerMountRoot = strings.TrimSpace(decoded.RootFSConsumerMountRoot)
 	decoded.RootFSObjectBucket = strings.TrimSpace(decoded.RootFSObjectBucket)
 	decoded.RootFSObjectEndpoint = strings.TrimSpace(decoded.RootFSObjectEndpoint)
 	decoded.RootFSObjectAccessKey = strings.TrimSpace(decoded.RootFSObjectAccessKey)
@@ -344,14 +350,30 @@ func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
 			HealthDescription: fmt.Sprintf("runsc not available at %s: %v", p.config.RunscPath, err),
 		}
 	}
+	if p.config.RootFSEnabled && p.config.RootFSSessiondSocket != "" {
+		client, err := newRootFSSessionClient(p.config.RootFSSessiondSocket)
+		if err != nil {
+			return &drivers.Fingerprint{Health: drivers.HealthStateUndetected, HealthDescription: err.Error()}
+		}
+		healthCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err = client.Ping(healthCtx)
+		cancel()
+		if err != nil {
+			return &drivers.Fingerprint{
+				Health:            drivers.HealthStateUndetected,
+				HealthDescription: fmt.Sprintf("RootFS session daemon unavailable at %s: %v", p.config.RootFSSessiondSocket, err),
+			}
+		}
+	}
 	return &drivers.Fingerprint{
 		Health:            drivers.HealthStateHealthy,
 		HealthDescription: drivers.DriverHealthy,
 		Attributes: map[string]*structs.Attribute{
-			"driver.sandbox0_gvisor":          structs.NewBoolAttribute(true),
-			"driver.sandbox0_gvisor.version":  structs.NewStringAttribute(version),
-			"driver.sandbox0_gvisor.platform": structs.NewStringAttribute(p.config.Platform),
-			"driver.sandbox0_gvisor.overlay2": structs.NewStringAttribute(p.config.Overlay2),
+			"driver.sandbox0_gvisor":                 structs.NewBoolAttribute(true),
+			"driver.sandbox0_gvisor.version":         structs.NewStringAttribute(version),
+			"driver.sandbox0_gvisor.platform":        structs.NewStringAttribute(p.config.Platform),
+			"driver.sandbox0_gvisor.overlay2":        structs.NewStringAttribute(p.config.Overlay2),
+			"driver.sandbox0_gvisor.rootfs_sessiond": structs.NewBoolAttribute(p.config.RootFSSessiondSocket != ""),
 		},
 	}
 }

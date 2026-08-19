@@ -123,6 +123,7 @@ type taskHandle struct {
 	controlOnce    sync.Once
 	controlServer  *http.Server
 	leaseFenceOnce sync.Once
+	consumerCancel context.CancelFunc
 }
 
 func (h *taskHandle) statePath() string {
@@ -407,7 +408,9 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	}
 
 	if durableStage != nil {
-		mount, err := h.rootfs.Ensure(context.Background(), *request.Stage, h.handleWriterLeaseLoss)
+		attachCtx, attachCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		mount, err := h.rootfs.Ensure(attachCtx, *request.Stage, h.handleWriterLeaseLoss)
+		attachCancel()
 		if err != nil {
 			attachErr := fmt.Errorf("attach RootFS session: %w", err)
 			var consumedErr *consumedRootFSAttachError
@@ -430,6 +433,24 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	if err != nil {
 		_ = h.rollbackClaim()
 		return err
+	}
+	if durableStage != nil {
+		hostMountNamespace, err := os.Readlink("/proc/self/ns/mnt")
+		if err != nil {
+			_ = h.rollbackClaim()
+			return fmt.Errorf("read host mount namespace: %w", err)
+		}
+		registerCtx, registerCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		lease, err := h.rootfs.RegisterConsumer(registerCtx, *durableStage, RootFSConsumerRequest{
+			ActiveKey: h.taskConfig.ID, ContainerID: h.containerID,
+			StableMount: h.rootMount, HostMountNamespace: hostMountNamespace,
+		})
+		registerCancel()
+		if err != nil {
+			_ = h.rollbackClaim()
+			return fmt.Errorf("register RootFS runtime consumer: %w", err)
+		}
+		h.startConsumerRenewal(*durableStage, lease)
 	}
 
 	if err := h.mounter.Bind(resolvedRootfs, h.rootMount); err != nil {
@@ -531,6 +552,7 @@ func (h *taskHandle) retryWriterLeaseFence() {
 }
 
 func (h *taskHandle) rollbackClaim() error {
+	h.stopConsumerRenewal()
 	_ = h.mounter.Unmount(h.rootMount)
 	h.mu.Lock()
 	h.rootMounted = false
@@ -691,6 +713,7 @@ func (h *taskHandle) Close(force bool) error {
 	h.mu.Unlock()
 
 	h.stopControl()
+	h.stopConsumerRenewal()
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if force {
@@ -746,6 +769,53 @@ func (h *taskHandle) Close(force bool) error {
 	}
 	h.mu.Unlock()
 	return firstErr
+}
+
+func (h *taskHandle) startConsumerRenewal(stage rootfshandoff.StageRequest, lease RootFSConsumerLease) {
+	h.stopConsumerRenewal()
+	ctx, cancel := context.WithCancel(context.Background())
+	h.mu.Lock()
+	h.consumerCancel = cancel
+	h.mu.Unlock()
+	go func() {
+		current := lease
+		for {
+			remaining := time.Until(current.ExpiresAt)
+			if remaining <= 0 {
+				h.handleWriterLeaseLoss(errors.New("RootFS consumer lease expired"))
+				return
+			}
+			delay := remaining / 3
+			if delay < time.Second {
+				delay = time.Second
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			renewCtx, renewCancel := context.WithTimeout(ctx, 5*time.Second)
+			next, err := h.rootfs.RenewConsumer(renewCtx, stage, current)
+			renewCancel()
+			if err != nil {
+				h.handleWriterLeaseLoss(fmt.Errorf("renew RootFS consumer lease: %w", err))
+				return
+			}
+			current = next
+		}
+	}()
+}
+
+func (h *taskHandle) stopConsumerRenewal() {
+	h.mu.Lock()
+	cancel := h.consumerCancel
+	h.consumerCancel = nil
+	h.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // IsRunning reports whether Nomad still owns a warm or active allocation.

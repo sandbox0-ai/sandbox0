@@ -21,12 +21,17 @@ Implemented:
 - warm default-deny and claim-time L3/L4 network policy in the Nomad netns
 - block-map RootFS attach through NBD, XFS, and host OverlayFS
 - PostgreSQL writer consume, renewal, planned seal, and terminal publication
+- node-scoped `nomad-rootfs-sessiond` ownership of writer renewals, NBD, XFS,
+  OverlayFS, and terminal reconciliation over a root-only Unix socket
+- tokenless durable Stage and exact runsc/stable-mount consumer journal
+- independent Nomad node-allocation catalog reconciliation, including purged
+  allocation fencing when the task-driver misses `DestroyTask`
 - policy-digest verification against the immutable RootFS handoff
 - RootFS bind, start, stop, delete, signal, and cleanup paths
 - one-shot claim and basic recovery semantics
 - on-disk task state for driver crash recovery
-- fail-closed plugin-crash cleanup, regional crash abandonment, and fallback to
-  the last durable generation
+- fail-closed plugin/session-daemon crash cleanup, regional crash abandonment,
+  and fallback to the last durable generation
 - unit tests with a fake runsc runtime
 
 Not implemented:
@@ -75,6 +80,10 @@ plugin "sandbox0-gvisor" {
     overlay2           = "none"
     file_access        = "shared"
     directfs           = true
+    rootfs_enabled             = true
+    rootfs_sessiond_socket     = "/run/sandbox0/rootfs-sessiond.sock"
+    rootfs_mount_root          = "/run/sandbox0/rootfs"
+    rootfs_consumer_mount_root = "/opt/nomad"
   }
 }
 ```
@@ -106,3 +115,12 @@ the object store, and the mTLS writer authority must also be reachable before a
 RootFS claim is issued. A failed attach after grant consumption is
 crash-abandoned; it is never returned to the warm pool or published as a
 successful pause.
+
+Production RootFS mode runs `nomad-rootfs-sessiond` as a separate root system
+service before Nomad. Pass the full Nomad node UUID through `--nomad-node-id`
+and a token with `node:read,namespace:read-job` through
+`--nomad-token-file`. The daemon reads object credentials from
+`SANDBOX0_ROOTFS_OBJECT_ACCESS_KEY` and
+`SANDBOX0_ROOTFS_OBJECT_SECRET_KEY`; do not place them in Nomad plugin HCL.
+The driver fingerprint remains unhealthy until the daemon socket, durable
+journal, and Nomad allocation catalog are all readable.

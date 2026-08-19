@@ -16,9 +16,11 @@ package driver
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -35,23 +37,54 @@ import (
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
 
-// rootfsRuntime owns the node-local NBD/XFS/Overlay session for this PoC.
-// A production deployment moves this ownership to ctld and gives the task
-// driver only an already-authorized mount.
+// rootfsRuntime owns the node-local NBD/XFS/Overlay session inside the
+// node-scoped session daemon. The task driver uses RootFSRuntime over Unix RPC.
 type rootfsRuntime struct {
-	sessions  *rootfssession.Manager
-	authority *managerauthority.ManagerClient
-	logger    hclog.Logger
-	renewalMu sync.Mutex
-	renewals  map[string]*rootfsRenewal
+	sessions          *rootfssession.Manager
+	authority         rootFSWriterAuthority
+	logger            hclog.Logger
+	consumerMountRoot string
+	renewalMu         sync.Mutex
+	renewals          map[string]*rootfsRenewal
+}
+
+type rootFSWriterAuthority interface {
+	ConsumeWriterGrant(context.Context, rootfshandoff.StageRequest) (protocol.LeaseObservation, error)
+	RenewWriterGrant(context.Context, rootfshandoff.StageRequest) (protocol.LeaseObservation, error)
+	PublishWriterGrant(context.Context, rootfshandoff.StageRequest, managerauthority.PublishGenerationRequest) error
+	BeginCrashAbandonWriterGrant(context.Context, rootfshandoff.StageRequest, string) error
+	CompleteCrashAbandonWriterGrant(context.Context, rootfshandoff.StageRequest, string, rootfshandoff.CrashFenceProof) error
+	CancelUnconsumedWriterGrant(context.Context, rootfshandoff.StageRequest) error
+	VerifyTerminalWriterGrant(context.Context, rootfshandoff.StageRequest) error
 }
 
 // RootFSRuntime is the driver-facing RootFS attachment and retire boundary.
 type RootFSRuntime interface {
 	Ensure(context.Context, rootfshandoff.StageRequest, func(error)) (rootfssession.Mount, error)
+	RegisterConsumer(context.Context, rootfshandoff.StageRequest, RootFSConsumerRequest) (RootFSConsumerLease, error)
+	RenewConsumer(context.Context, rootfshandoff.StageRequest, RootFSConsumerLease) (RootFSConsumerLease, error)
 	Retire(context.Context, rootfshandoff.StageRequest, string) (rootfssession.RetireResult, error)
 	CrashFence(context.Context, rootfshandoff.StageRequest, string, crashTaskObservation) (rootfshandoff.CrashFenceProof, error)
 }
+
+// RootFSConsumerRequest binds the durable block writer to the exact host
+// runtime artifacts that must be absent before crash abandonment.
+type RootFSConsumerRequest struct {
+	ActiveKey          string `json:"active_key"`
+	ContainerID        string `json:"container_id"`
+	StableMount        string `json:"stable_mount"`
+	HostMountNamespace string `json:"host_mount_namespace"`
+}
+
+// RootFSConsumerLease is issued by the node session owner. A restarted plugin
+// re-registers and rotates LeaseID so stale instances cannot keep an orphan
+// writer alive.
+type RootFSConsumerLease struct {
+	LeaseID   string    `json:"lease_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+const rootFSConsumerLeaseTTL = 30 * time.Second
 
 type crashTaskObservation struct {
 	ActiveKey              string
@@ -74,7 +107,14 @@ type consumedRootFSAttachError struct {
 func (e *consumedRootFSAttachError) Error() string { return e.err.Error() }
 func (e *consumedRootFSAttachError) Unwrap() error { return e.err }
 
-func newRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootfsRuntime, error) {
+func newRootFSRuntime(config *PluginConfig, logger hclog.Logger) (RootFSRuntime, error) {
+	if config != nil && strings.TrimSpace(config.RootFSSessiondSocket) != "" {
+		return newRootFSSessionClient(config.RootFSSessiondSocket)
+	}
+	return newEmbeddedRootFSRuntime(config, logger)
+}
+
+func newEmbeddedRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootfsRuntime, error) {
 	if config == nil || !config.RootFSEnabled {
 		return nil, nil
 	}
@@ -114,22 +154,24 @@ func newRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootfsRuntime
 		_ = sessions.Close()
 		return nil, fmt.Errorf("reconcile RootFS session journal: %w", err)
 	}
-	var authority *managerauthority.ManagerClient
+	var authority rootFSWriterAuthority
 	if config.RootFSAuthorityURL != "" {
-		authority, err = managerauthority.NewManagerClient(managerauthority.ManagerClientConfig{
+		client, clientErr := managerauthority.NewManagerClient(managerauthority.ManagerClientConfig{
 			BaseURL: config.RootFSAuthorityURL, CAFile: config.RootFSAuthorityCAFile,
 			ClientCertFile: config.RootFSAuthorityClientCertFile,
 			ClientKeyFile:  config.RootFSAuthorityClientKeyFile,
 			TokenFile:      config.RootFSAuthorityTokenFile, Timeout: 2 * time.Second,
 		})
-		if err != nil {
+		if clientErr != nil {
 			_ = sessions.Close()
-			return nil, fmt.Errorf("create RootFS writer authority client: %w", err)
+			return nil, fmt.Errorf("create RootFS writer authority client: %w", clientErr)
 		}
+		authority = client
 	}
 	return &rootfsRuntime{
 		sessions: sessions, authority: authority, logger: logger,
-		renewals: make(map[string]*rootfsRenewal),
+		consumerMountRoot: strings.TrimSpace(config.RootFSConsumerMountRoot),
+		renewals:          make(map[string]*rootfsRenewal),
 	}, nil
 }
 
@@ -140,6 +182,9 @@ func (r *rootfsRuntime) Ensure(
 ) (rootfssession.Mount, error) {
 	if err := request.Validate(); err != nil {
 		return rootfssession.Mount{}, err
+	}
+	if err := r.sessions.Reserve(request); err != nil {
+		return rootfssession.Mount{}, fmt.Errorf("reserve durable RootFS session: %w", err)
 	}
 	if r.authority != nil {
 		if onLeaseLost == nil {
@@ -156,6 +201,59 @@ func (r *rootfsRuntime) Ensure(
 		return rootfssession.Mount{}, &consumedRootFSAttachError{err: err}
 	}
 	return mount, err
+}
+
+func (r *rootfsRuntime) RegisterConsumer(
+	_ context.Context,
+	request rootfshandoff.StageRequest,
+	consumer RootFSConsumerRequest,
+) (RootFSConsumerLease, error) {
+	hostMountNamespace, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		return RootFSConsumerLease{}, fmt.Errorf("read RootFS owner mount namespace: %w", err)
+	}
+	if strings.TrimSpace(consumer.HostMountNamespace) != hostMountNamespace {
+		return RootFSConsumerLease{}, fmt.Errorf("RootFS consumer is outside the session owner mount namespace: %w", errdefs.ErrFailedPrecondition)
+	}
+	if r.consumerMountRoot != "" {
+		resolvedMount, err := validateRootfsPath(consumer.StableMount, r.consumerMountRoot)
+		if err != nil {
+			return RootFSConsumerLease{}, fmt.Errorf("validate RootFS consumer mount: %w", err)
+		}
+		consumer.StableMount = resolvedMount
+	}
+	leaseIDBytes := make([]byte, 32)
+	if _, err := rand.Read(leaseIDBytes); err != nil {
+		return RootFSConsumerLease{}, fmt.Errorf("generate RootFS consumer lease: %w", err)
+	}
+	lease := RootFSConsumerLease{
+		LeaseID: hex.EncodeToString(leaseIDBytes), ExpiresAt: time.Now().Add(rootFSConsumerLeaseTTL).UTC(),
+	}
+	err = r.sessions.RegisterConsumer(request.Parent, request.Identity, rootfssession.ConsumerRegistration{
+		LeaseID: lease.LeaseID, ActiveKey: consumer.ActiveKey, ContainerID: consumer.ContainerID,
+		StableMount: consumer.StableMount, HostMountNamespace: consumer.HostMountNamespace,
+		LeaseExpiresAt: lease.ExpiresAt.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return RootFSConsumerLease{}, err
+	}
+	return lease, nil
+}
+
+func (r *rootfsRuntime) RenewConsumer(
+	_ context.Context,
+	request rootfshandoff.StageRequest,
+	lease RootFSConsumerLease,
+) (RootFSConsumerLease, error) {
+	lease.ExpiresAt = time.Now().Add(rootFSConsumerLeaseTTL).UTC()
+	if err := r.sessions.RenewConsumer(request.Parent, request.Identity, lease.LeaseID, lease.ExpiresAt); err != nil {
+		return RootFSConsumerLease{}, err
+	}
+	return lease, nil
+}
+
+func (r *rootfsRuntime) RecoverySessions() ([]rootfssession.RecoverySession, error) {
+	return r.sessions.RecoverySessions()
 }
 
 func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageRequest, operationID string) (rootfssession.RetireResult, error) {
@@ -273,6 +371,26 @@ func (r *rootfsRuntime) CrashFence(
 		return rootfshandoff.CrashFenceProof{}, nil
 	} else if !errdefs.IsFailedPrecondition(err) {
 		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("verify previous regional crash retirement: %w", err)
+	}
+	if err := r.authority.CancelUnconsumedWriterGrant(ctx, request); err == nil {
+		if err := r.sessions.Release(ctx, request.Identity); err != nil {
+			return rootfshandoff.CrashFenceProof{}, fmt.Errorf("release canceled preconsume RootFS session: %w", err)
+		}
+		if _, err := r.sessions.CrashFence(request, operationID); err != nil {
+			return rootfshandoff.CrashFenceProof{}, fmt.Errorf("attest canceled preconsume RootFS session: %w", err)
+		}
+		if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil {
+			return rootfshandoff.CrashFenceProof{}, fmt.Errorf("reclaim canceled preconsume RootFS artifacts: %w", err)
+		}
+		if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err != nil {
+			return rootfshandoff.CrashFenceProof{}, fmt.Errorf("verify canceled preconsume writer grant: %w", err)
+		}
+		if err := r.sessions.ForgetVerifiedTerminal(request.Parent, request.Identity); err != nil {
+			return rootfshandoff.CrashFenceProof{}, fmt.Errorf("forget canceled preconsume RootFS session: %w", err)
+		}
+		return rootfshandoff.CrashFenceProof{}, nil
+	} else if !errdefs.IsFailedPrecondition(err) {
+		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("cancel unconsumed regional writer grant: %w", err)
 	}
 	if err := r.awaitRegionalCrashFence(ctx, request, operationID); err != nil {
 		return rootfshandoff.CrashFenceProof{}, err
@@ -501,6 +619,18 @@ func (r *rootfsRuntime) stopAllRenewals() {
 
 func validateRootFSConfig(config *PluginConfig) error {
 	if config == nil || !config.RootFSEnabled {
+		return nil
+	}
+	if config.RootFSSessiondSocket != "" {
+		if !filepath.IsAbs(config.RootFSSessiondSocket) || filepath.Clean(config.RootFSSessiondSocket) == "/" {
+			return fmt.Errorf("rootfs_sessiond_socket must be a non-root absolute path")
+		}
+		if !filepath.IsAbs(config.RootFSMountRoot) || filepath.Clean(config.RootFSMountRoot) == "/" {
+			return fmt.Errorf("rootfs_mount_root must be a non-root absolute path")
+		}
+		if !filepath.IsAbs(config.RootFSConsumerMountRoot) || filepath.Clean(config.RootFSConsumerMountRoot) == "/" {
+			return fmt.Errorf("rootfs_consumer_mount_root must be a non-root absolute path")
+		}
 		return nil
 	}
 	for name, value := range map[string]string{

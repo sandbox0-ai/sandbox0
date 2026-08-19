@@ -82,6 +82,8 @@ func main() {
 	filesystemID := flag.String("filesystem-id", "", "resume: existing filesystem ID")
 	initialGenerationID := flag.String("initial-generation-id", "", "resume: existing head generation ID")
 	expectedWriterEpoch := flag.Int64("expected-writer-epoch", 0, "resume: previous writer epoch")
+	sourceSandboxID := flag.String("source-sandbox-id", "", "fork: source sandbox")
+	targetSandboxID := flag.String("target-sandbox-id", "", "fork: target sandbox")
 	flag.Parse()
 
 	if *mode == "stage-digest" {
@@ -126,6 +128,37 @@ func main() {
 			initialGenerationID: *initialGenerationID, expectedWriterEpoch: *expectedWriterEpoch,
 		}); err != nil {
 			fatal("issue: %v", err)
+		}
+	case "fork":
+		target := &sandboxstore.SandboxRecord{
+			ID: *targetSandboxID, TeamID: *teamID, UserID: "user-1",
+			TemplateID: "nomad-poc", TemplateName: "nomad-poc", TemplateNamespace: "default",
+			DesiredState: sandboxstore.SandboxDesiredStatePaused, CreatedAt: time.Now().UTC(),
+		}
+		if err := store.UpsertSandbox(ctx, target); err != nil {
+			fatal("fork: seed target: %v", err)
+		}
+		filesystem, err := store.ForkRootFSFilesystem(ctx, &sandboxstore.ForkRootFSFilesystemRequest{
+			SourceSandboxID: *sourceSandboxID, TargetSandboxID: *targetSandboxID, TargetTeamID: *teamID,
+		})
+		if err != nil {
+			fatal("fork: %v", err)
+		}
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(filesystem); err != nil {
+			fatal("fork: encode: %v", err)
+		}
+	case "cancel":
+		digest, err := hex.DecodeString(strings.TrimSpace(*bindingHex))
+		if err != nil || len(digest) != 32 {
+			fatal("cancel: binding-digest must be canonical")
+		}
+		if _, err := store.CancelRootFSWriterGrant(ctx, &sandboxstore.CancelRootFSWriterGrantRequest{
+			GrantID: *grantID, WriterEpoch: int64(*expectedWriterEpoch), OperationID: *operationID,
+			BindingVersion: sandboxstore.RootFSWriterBindingVersion, BindingDigest: digest,
+		}); err != nil {
+			fatal("cancel: %v", err)
 		}
 	case "stage-digest":
 		digest, err := stageDigest(*stageFile)
@@ -406,7 +439,7 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 	var expectedFilesystemID, initialGenerationID string
 	if options.resume {
 		if options.stage == nil || strings.TrimSpace(options.filesystemID) == "" ||
-			strings.TrimSpace(options.initialGenerationID) == "" || options.expectedWriterEpoch <= 0 {
+			strings.TrimSpace(options.initialGenerationID) == "" || options.expectedWriterEpoch < 0 {
 			return fmt.Errorf("resume issue requires stage-file, filesystem-id, initial-generation-id, and expected-writer-epoch")
 		}
 		expectedFilesystemID = strings.TrimSpace(options.filesystemID)

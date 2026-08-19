@@ -242,7 +242,7 @@ func TestCompleteRootFSWriterRetirePublishesGenerationAndPauseAtomically(t *test
 	require.Equal(t, next.CurrentBlockHead, loaded.CurrentBlockHead)
 }
 
-func TestForkRootFSFilesystemSharesBlockGenerationAndIssuesChildWriter(t *testing.T) {
+func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)
 	store := NewPGSandboxStore(pool)
@@ -282,6 +282,75 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndIssuesChildWriter(t *testin
 	require.NoError(t, err)
 	require.Equal(t, initial.ID, issued.Grant.InitialGenerationID)
 	require.Equal(t, int64(1), issued.Grant.WriterEpoch)
+
+	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
+		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: issue.BindingDigest,
+		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	_, err = store.BeginRootFSWriterRetire(ctx, &BeginRootFSWriterRetireRequest{
+		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, OperationID: "pause-fork-child",
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: issue.BindingDigest,
+		ExpectedOldHeadLayerID: initial.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.WithSandboxLock(ctx, "sandbox-fork-target", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+			ID: "pause-fork-child", SandboxID: "sandbox-fork-target", Kind: SandboxLifecycleKindPause,
+			Phase: SandboxLifecyclePhasePublishing, ExpectedHeadLayerID: initial.ID,
+		})
+	}))
+
+	childBlockHead := digest.FromString("fork-child-block-head").String()
+	childDescriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: 1 << 30,
+		BlockSizeBytes: rootfsblock.LogicalBlockSize,
+		MappingRoot: rootfsblock.MappingRootLocator{
+			Version: rootfsblock.MappingPageVersion, RootDigest: childBlockHead,
+			Object: rootfsblock.ObjectRange{
+				Key: "rootfs/fork-child/map.page", Length: 4096,
+				Checksum: digest.FromString("fork-child-map-page").String(),
+			},
+		},
+	})
+	require.NoError(t, err)
+	child := &RootFSGeneration{
+		ID: "generation-fork-child", FilesystemID: target.ID, ParentGenerationID: initial.ID,
+		SourceOCIDigest: initial.SourceOCIDigest, BaseArtifactDigest: initial.BaseArtifactDigest,
+		BaseBlockRoot: initial.BaseBlockRoot, CurrentBlockHead: childBlockHead,
+		WriterEpoch: issued.Grant.WriterEpoch, FormatGeneration: initial.FormatGeneration,
+		DurabilityState: RootFSGenerationStateS3Materialized, LocatorVersion: initial.LocatorVersion + 1,
+		Descriptor: childDescriptor,
+	}
+	proof := sha256.Sum256([]byte("fork-child-detach-seal-proof"))
+	require.NoError(t, store.WithSandboxLock(ctx, "sandbox-fork-target", func(lockCtx context.Context, tx SandboxStoreTx, _ *SandboxRecord) error {
+		writerTx, ok := tx.(RootFSWriterGrantTx)
+		require.True(t, ok)
+		if _, publishErr := writerTx.CompleteRootFSWriterRetireAndPublishGeneration(lockCtx, &CompleteRootFSWriterRetireAndPublishGenerationRequest{
+			LifecycleTxnID: "pause-fork-child", GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
+			OperationID: "pause-fork-child", BindingVersion: RootFSWriterBindingVersion,
+			BindingDigest: issue.BindingDigest, ProofDigest: proof[:], ExpectedOldGenerationID: initial.ID,
+			Generation: child,
+		}); publishErr != nil {
+			return publishErr
+		}
+		return tx.MarkRuntimePaused(lockCtx, "sandbox-fork-target", 1, time.Now().UTC())
+	}))
+
+	loadedSource, err := store.GetRootFSFilesystem(ctx, "sandbox-fork-source")
+	require.NoError(t, err)
+	require.Equal(t, initial.ID, loadedSource.HeadGenerationID)
+	loadedTarget, err := store.GetRootFSFilesystem(ctx, "sandbox-fork-target")
+	require.NoError(t, err)
+	require.Equal(t, child.ID, loadedTarget.HeadGenerationID)
+	loadedChild, err := store.GetRootFSGeneration(ctx, child.ID)
+	require.NoError(t, err)
+	require.Equal(t, target.ID, loadedChild.FilesystemID)
+	require.Equal(t, initial.ID, loadedChild.ParentGenerationID)
+	retired, err := store.GetRootFSWriterGrant(ctx, issue.GrantID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetired, retired.State)
 }
 
 func assertBlockGenerationPublishState(

@@ -1451,9 +1451,9 @@ func completeRootFSWriterRetireAndPublishGeneration(
 	if err := db.QueryRow(ctx, `
 		SELECT source_oci_digest, base_artifact_digest, base_block_root
 		FROM manager.rootfs_generations
-		WHERE generation_id = $1 AND filesystem_id = $2
+		WHERE generation_id = $1
 		FOR SHARE
-	`, normalized.ExpectedOldGenerationID, record.FilesystemID).Scan(
+	`, normalized.ExpectedOldGenerationID).Scan(
 		&oldSourceDigest, &oldBaseArtifact, &oldBaseRoot,
 	); err != nil {
 		return nil, fmt.Errorf("lock previous rootfs generation: %w", err)

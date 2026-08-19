@@ -21,17 +21,18 @@ import (
 )
 
 const (
-	legacySessionSchemaVersion = 2
-	sessionSchemaVersion       = 3
-	stateReserved              = "reserved"
-	stateDeviceReserved        = "device_reserved"
-	stateDeviceReady           = "device_ready"
-	stateXFSMounted            = "xfs_mounted"
-	stateReady                 = "ready"
-	stateRetireRequested       = "retire_requested"
-	stateReleasing             = "releasing"
-	stateTombstoned            = "tombstoned"
-	stateFailed                = "failed"
+	legacySessionSchemaVersion     = 2
+	allocationSessionSchemaVersion = 3
+	sessionSchemaVersion           = 4
+	stateReserved                  = "reserved"
+	stateDeviceReserved            = "device_reserved"
+	stateDeviceReady               = "device_ready"
+	stateXFSMounted                = "xfs_mounted"
+	stateReady                     = "ready"
+	stateRetireRequested           = "retire_requested"
+	stateReleasing                 = "releasing"
+	stateTombstoned                = "tombstoned"
+	stateFailed                    = "failed"
 )
 
 var (
@@ -112,30 +113,32 @@ type Mount struct {
 }
 
 type record struct {
-	Version                   int               `json:"version"`
-	Parent                    string            `json:"parent"`
-	BindingDigest             string            `json:"binding_digest"`
-	RootFSID                  string            `json:"rootfs_id"`
-	WriterEpoch               int64             `json:"writer_epoch"`
-	GenerationID              string            `json:"generation_id"`
-	BaseDescriptor            []byte            `json:"base_descriptor,omitempty"`
-	BranchPath                string            `json:"branch_path"`
-	DevicePath                string            `json:"device_path,omitempty"`
-	DeviceAllocationID        string            `json:"device_allocation_id,omitempty"`
-	DeviceReservationReleased bool              `json:"device_reservation_released,omitempty"`
-	XFSRoot                   string            `json:"xfs_root"`
-	MergedRoot                string            `json:"merged_root"`
-	State                     string            `json:"state"`
-	RetireOperationID         string            `json:"retire_operation_id,omitempty"`
-	SealedDescriptor          []byte            `json:"sealed_descriptor,omitempty"`
-	SealedBlockHead           string            `json:"sealed_block_head,omitempty"`
-	SealedDurability          string            `json:"sealed_durability,omitempty"`
-	DetachProof               string            `json:"detach_proof,omitempty"`
-	CrashFence                *crashFenceRecord `json:"crash_fence,omitempty"`
-	BranchRemoved             bool              `json:"branch_removed,omitempty"`
-	Failure                   string            `json:"failure,omitempty"`
-	CreatedAt                 string            `json:"created_at"`
-	UpdatedAt                 string            `json:"updated_at"`
+	Version                   int                         `json:"version"`
+	Parent                    string                      `json:"parent"`
+	BindingDigest             string                      `json:"binding_digest"`
+	RootFSID                  string                      `json:"rootfs_id"`
+	WriterEpoch               int64                       `json:"writer_epoch"`
+	GenerationID              string                      `json:"generation_id"`
+	BaseDescriptor            []byte                      `json:"base_descriptor,omitempty"`
+	BranchPath                string                      `json:"branch_path"`
+	DevicePath                string                      `json:"device_path,omitempty"`
+	DeviceAllocationID        string                      `json:"device_allocation_id,omitempty"`
+	DeviceReservationReleased bool                        `json:"device_reservation_released,omitempty"`
+	XFSRoot                   string                      `json:"xfs_root"`
+	MergedRoot                string                      `json:"merged_root"`
+	State                     string                      `json:"state"`
+	RetireOperationID         string                      `json:"retire_operation_id,omitempty"`
+	SealedDescriptor          []byte                      `json:"sealed_descriptor,omitempty"`
+	SealedBlockHead           string                      `json:"sealed_block_head,omitempty"`
+	SealedDurability          string                      `json:"sealed_durability,omitempty"`
+	DetachProof               string                      `json:"detach_proof,omitempty"`
+	CrashFence                *crashFenceRecord           `json:"crash_fence,omitempty"`
+	BranchRemoved             bool                        `json:"branch_removed,omitempty"`
+	Failure                   string                      `json:"failure,omitempty"`
+	CreatedAt                 string                      `json:"created_at"`
+	UpdatedAt                 string                      `json:"updated_at"`
+	Stage                     *rootfshandoff.StageRequest `json:"stage,omitempty"`
+	Consumer                  *ConsumerRegistration       `json:"consumer,omitempty"`
 }
 
 type crashFenceRecord struct {
@@ -162,9 +165,46 @@ type RetireResult struct {
 	DetachProof      []byte
 }
 
-// Manager is the single physical owner of a D generation on a node. The
-// regional Stage request remains in the Snapshotter journal; this database
-// records only device and mount side effects needed for crash-safe cleanup.
+// RecoveryKind describes the only safe terminal action for a durable
+// session after its userspace owner process has disappeared.
+type RecoveryKind string
+
+const (
+	RecoveryUnavailable   RecoveryKind = "unavailable"
+	RecoveryCrashAbandon  RecoveryKind = "crash_abandon"
+	RecoveryPlannedRetire RecoveryKind = "planned_retire"
+)
+
+// RecoverySession is the tokenless durable input required by a node daemon to
+// finish writer retirement without Nomad allocation or plugin state. Live is
+// process-local and is true only while this Manager owns the NBD endpoint.
+type RecoverySession struct {
+	Stage             rootfshandoff.StageRequest
+	Kind              RecoveryKind
+	State             string
+	RetireOperationID string
+	CrashOperationID  string
+	BranchRemoved     bool
+	Live              bool
+	Consumer          *ConsumerRegistration
+	CreatedAt         time.Time
+}
+
+// ConsumerRegistration is the durable host runtime identity that a node
+// daemon must fence before crash-abandoning a writer. LeaseID changes whenever
+// a restarted plugin re-adopts the same immutable runtime paths.
+type ConsumerRegistration struct {
+	LeaseID            string `json:"lease_id"`
+	ActiveKey          string `json:"active_key"`
+	ContainerID        string `json:"container_id"`
+	StableMount        string `json:"stable_mount"`
+	HostMountNamespace string `json:"host_mount_namespace"`
+	LeaseExpiresAt     string `json:"lease_expires_at"`
+}
+
+// Manager is the single physical owner of a D generation on a node. Its
+// journal stores the tokenless regional Stage binding together with device and
+// mount side effects so a process-independent reconciler can finish cleanup.
 type Manager struct {
 	db         *bolt.DB
 	branchRoot string
@@ -270,6 +310,164 @@ func (m *Manager) ReconcileReleases(ctx context.Context) error {
 	return result
 }
 
+// RecoverySessions enumerates every durable session needed by an independent
+// node reconciler. Older records remain visible as RecoveryUnavailable and
+// must be fenced by their legacy owner; they are never guessed from partial
+// identities.
+func (m *Manager) RecoverySessions() ([]RecoverySession, error) {
+	m.mu.Lock()
+	live := make(map[string]bool, len(m.live))
+	for parent := range m.live {
+		live[parent] = true
+	}
+	m.mu.Unlock()
+
+	result := make([]RecoverySession, 0)
+	err := m.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(sessionBucket).ForEach(func(key, payload []byte) error {
+			if payload == nil {
+				return nil
+			}
+			var current record
+			if err := json.Unmarshal(payload, &current); err != nil {
+				return fmt.Errorf("decode RootFS session %q: %w", key, err)
+			}
+			if current.Parent != string(key) || !supportedSessionVersion(current.Version) {
+				return fmt.Errorf("invalid RootFS recovery record %q version %d", key, current.Version)
+			}
+			if current.Version == sessionSchemaVersion && current.Stage == nil {
+				return fmt.Errorf("RootFS recovery record %q lacks its durable Stage binding", key)
+			}
+			recovery := RecoverySession{
+				Kind: RecoveryUnavailable, State: current.State,
+				RetireOperationID: current.RetireOperationID, BranchRemoved: current.BranchRemoved,
+				Live: live[current.Parent],
+			}
+			createdAt, err := time.Parse(time.RFC3339Nano, current.CreatedAt)
+			if err != nil {
+				return fmt.Errorf("parse RootFS recovery creation time %q: %w", key, err)
+			}
+			recovery.CreatedAt = createdAt
+			if current.CrashFence != nil {
+				recovery.CrashOperationID = current.CrashFence.OperationID
+			}
+			if current.Consumer != nil {
+				consumer := *current.Consumer
+				if _, err := consumer.Validate(); err != nil {
+					return fmt.Errorf("validate RootFS consumer %q: %w", key, err)
+				}
+				recovery.Consumer = &consumer
+			}
+			if current.Stage != nil {
+				stage := cloneDurableStage(*current.Stage)
+				if stage.Identity.WriterGrantToken != "" {
+					return fmt.Errorf("RootFS recovery record %q contains a raw writer token", key)
+				}
+				if err := stage.ValidateDurableBinding(); err != nil || stage.Generation == nil {
+					return fmt.Errorf("validate RootFS recovery binding %q: %v", key, err)
+				}
+				binding, err := stage.BindingDigest()
+				if err != nil || !sameBinding(current, stage, hex.EncodeToString(binding[:])) {
+					return fmt.Errorf("RootFS recovery binding %q does not match its physical session", key)
+				}
+				recovery.Stage = stage
+				if current.RetireOperationID != "" {
+					recovery.Kind = RecoveryPlannedRetire
+				} else {
+					recovery.Kind = RecoveryCrashAbandon
+				}
+			}
+			result = append(result, recovery)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// Validate checks a durable consumer record and returns its wall-clock lease
+// deadline. The daemon, not the task plugin, chooses and enforces this value.
+func (c ConsumerRegistration) Validate() (time.Time, error) {
+	for name, value := range map[string]string{
+		"lease_id": c.LeaseID, "active_key": c.ActiveKey, "container_id": c.ContainerID,
+		"stable_mount": c.StableMount, "host_mount_namespace": c.HostMountNamespace,
+		"lease_expires_at": c.LeaseExpiresAt,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return time.Time{}, fmt.Errorf("%s is required", name)
+		}
+	}
+	if !filepath.IsAbs(c.StableMount) || filepath.Clean(c.StableMount) == string(filepath.Separator) {
+		return time.Time{}, fmt.Errorf("stable_mount must be a non-root absolute path")
+	}
+	deadline, err := time.Parse(time.RFC3339Nano, c.LeaseExpiresAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse lease_expires_at: %w", err)
+	}
+	return deadline, nil
+}
+
+// RegisterConsumer durably binds one host runtime and plugin liveness lease to
+// a ready physical session. Re-registration may rotate only LeaseID and its
+// deadline; immutable runtime paths cannot be replaced under the same writer.
+func (m *Manager) RegisterConsumer(parent string, identity rootfshandoff.Identity, consumer ConsumerRegistration) error {
+	consumer.LeaseID = strings.TrimSpace(consumer.LeaseID)
+	consumer.ActiveKey = strings.TrimSpace(consumer.ActiveKey)
+	consumer.ContainerID = strings.TrimSpace(consumer.ContainerID)
+	consumer.StableMount = filepath.Clean(strings.TrimSpace(consumer.StableMount))
+	consumer.HostMountNamespace = strings.TrimSpace(consumer.HostMountNamespace)
+	consumer.LeaseExpiresAt = strings.TrimSpace(consumer.LeaseExpiresAt)
+	deadline, err := consumer.Validate()
+	if err != nil || !deadline.After(time.Now()) {
+		return fmt.Errorf("invalid RootFS consumer registration: %v: %w", err, errdefs.ErrInvalidArgument)
+	}
+	unlock := m.lock(parent)
+	defer unlock()
+	current, err := m.load(parent)
+	if err != nil {
+		return err
+	}
+	if current.RootFSID != identity.RootFSID || current.WriterEpoch != identity.WriterEpoch || current.State != stateReady {
+		return fmt.Errorf("RootFS consumer does not match a ready writer: %w", errdefs.ErrFailedPrecondition)
+	}
+	m.mu.Lock()
+	_, live := m.live[parent]
+	m.mu.Unlock()
+	if !live {
+		return fmt.Errorf("RootFS session has no live userspace device owner: %w", errdefs.ErrUnavailable)
+	}
+	if current.Consumer != nil && (current.Consumer.ActiveKey != consumer.ActiveKey ||
+		current.Consumer.ContainerID != consumer.ContainerID || current.Consumer.StableMount != consumer.StableMount ||
+		current.Consumer.HostMountNamespace != consumer.HostMountNamespace) {
+		return fmt.Errorf("RootFS session is bound to another host runtime consumer: %w", errdefs.ErrAlreadyExists)
+	}
+	current.Consumer = &consumer
+	return m.save(current)
+}
+
+// RenewConsumer extends one exact daemon-issued liveness lease. A stale plugin
+// instance cannot renew after re-registration rotates LeaseID.
+func (m *Manager) RenewConsumer(parent string, identity rootfshandoff.Identity, leaseID string, expiresAt time.Time) error {
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" || !expiresAt.After(time.Now()) {
+		return fmt.Errorf("consumer lease and future expiry are required: %w", errdefs.ErrInvalidArgument)
+	}
+	unlock := m.lock(parent)
+	defer unlock()
+	current, err := m.load(parent)
+	if err != nil {
+		return err
+	}
+	if current.RootFSID != identity.RootFSID || current.WriterEpoch != identity.WriterEpoch || current.Consumer == nil ||
+		current.Consumer.LeaseID != leaseID || current.State != stateReady {
+		return fmt.Errorf("RootFS consumer lease does not match the ready writer: %w", errdefs.ErrFailedPrecondition)
+	}
+	current.Consumer.LeaseExpiresAt = expiresAt.UTC().Format(time.RFC3339Nano)
+	return m.save(current)
+}
+
 func (m *Manager) reconcileDeviceReservations() error {
 	type reservation struct {
 		parent       string
@@ -312,7 +510,7 @@ func (m *Manager) reconcileDeviceReservations() error {
 				return fmt.Errorf("validate device terminal proof for parent %q: %w", current.Parent, terminalErr)
 			}
 			if terminal {
-				if current.Version == sessionSchemaVersion && current.DeviceAllocationID != "" && !current.DeviceReservationReleased {
+				if current.Version >= allocationSessionSchemaVersion && current.DeviceAllocationID != "" && !current.DeviceReservationReleased {
 					current.DeviceReservationReleased = true
 					changed = true
 				}
@@ -322,7 +520,7 @@ func (m *Manager) reconcileDeviceReservations() error {
 						return fmt.Errorf("current RootFS session %q lacks a device allocation identity", current.Parent)
 					}
 					current.DeviceAllocationID = legacyDeviceAllocationID(current.Parent, current.DevicePath)
-					current.Version = sessionSchemaVersion
+					current.Version = allocationSessionSchemaVersion
 					changed = true
 				}
 				if current.DeviceReservationReleased {
@@ -364,6 +562,38 @@ func (m *Manager) reconcileDeviceReservations() error {
 	return nil
 }
 
+// Reserve durably records the tokenless writer binding before the regional
+// grant is consumed. A node daemon can therefore reconcile an attach whose
+// caller disappears between grant consumption and physical device setup.
+func (m *Manager) Reserve(request rootfshandoff.StageRequest) error {
+	durable := request.WithoutWriterGrantToken()
+	if err := durable.ValidateDurableBinding(); err != nil || durable.Generation == nil {
+		return fmt.Errorf("invalid durable generation binding: %v: %w", err, errdefs.ErrInvalidArgument)
+	}
+	unlock := m.lock(durable.Parent)
+	defer unlock()
+	binding, err := durable.BindingDigest()
+	if err != nil {
+		return err
+	}
+	bindingText := hex.EncodeToString(binding[:])
+	current, err := m.load(durable.Parent)
+	if err == nil {
+		if !sameBinding(current, durable, bindingText) {
+			return fmt.Errorf("RootFS session parent is bound to another generation: %w", errdefs.ErrAlreadyExists)
+		}
+		return nil
+	}
+	if !errdefs.IsNotFound(err) {
+		return err
+	}
+	current, err = m.newReservedRecord(durable, bindingText)
+	if err != nil {
+		return err
+	}
+	return m.saveNew(current)
+}
+
 // Ensure creates the exact branch/device/XFS/Overlay session once. It returns
 // only after the merged root is mounted and all physical states are journaled.
 func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest) (Mount, error) {
@@ -395,27 +625,29 @@ func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest
 		if current.State == stateFailed || current.State == stateReleasing || current.State == stateTombstoned {
 			return Mount{}, fmt.Errorf("RootFS session is %s: %s: %w", current.State, current.Failure, errdefs.ErrFailedPrecondition)
 		}
-		return Mount{}, fmt.Errorf("incomplete RootFS session requires startup reconciliation: %w", errdefs.ErrUnavailable)
+		if current.State != stateReserved || current.DevicePath != "" {
+			return Mount{}, fmt.Errorf("incomplete RootFS session requires startup reconciliation: %w", errdefs.ErrUnavailable)
+		}
+		if current.Stage == nil {
+			stage := cloneDurableStage(durable)
+			current.Stage = &stage
+			current.Version = sessionSchemaVersion
+			if err := m.save(current); err != nil {
+				return Mount{}, err
+			}
+		}
 	}
-	if !errdefs.IsNotFound(err) {
+	if err != nil && !errdefs.IsNotFound(err) {
 		return Mount{}, err
 	}
-
-	paths := sessionPaths(m.branchRoot, m.mountRoot, durable.Parent)
-	allocationID, err := newDeviceAllocationID()
-	if err != nil {
-		return Mount{}, fmt.Errorf("generate NBD allocation identity: %w", err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	current = record{
-		Version: sessionSchemaVersion, Parent: durable.Parent, BindingDigest: bindingText,
-		RootFSID: durable.Identity.RootFSID, WriterEpoch: durable.Identity.WriterEpoch,
-		GenerationID: durable.InitialGeneration, BaseDescriptor: append([]byte(nil), durable.Generation.Descriptor...), BranchPath: paths.branch,
-		DeviceAllocationID: allocationID, XFSRoot: paths.xfs, MergedRoot: paths.merged, State: stateReserved,
-		CreatedAt: now, UpdatedAt: now,
-	}
-	if err := m.saveNew(current); err != nil {
-		return Mount{}, err
+	if errdefs.IsNotFound(err) {
+		current, err = m.newReservedRecord(durable, bindingText)
+		if err != nil {
+			return Mount{}, err
+		}
+		if err := m.saveNew(current); err != nil {
+			return Mount{}, err
+		}
 	}
 
 	descriptor, err := rootfsblock.DecodeDescriptor(durable.Generation.Descriptor)
@@ -747,7 +979,7 @@ func (m *Manager) CrashFence(
 			return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("host runtime cannot attest crash fencing: %w", errdefs.ErrUnavailable)
 		}
 		host, err = inspector.InspectCrashFence(current.DevicePath, current.XFSRoot, current.MergedRoot)
-	} else if current.Version == sessionSchemaVersion && strings.TrimSpace(current.DeviceAllocationID) != "" {
+	} else if current.Version >= allocationSessionSchemaVersion && strings.TrimSpace(current.DeviceAllocationID) != "" {
 		inspector, ok := m.runtime.(CrashFencePreAttachmentHostInspector)
 		if !ok {
 			return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("host runtime cannot attest a pre-attachment session: %w", errdefs.ErrUnavailable)
@@ -845,7 +1077,7 @@ func (m *Manager) ReleaseParent(ctx context.Context, parent string, identity roo
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		return m.saveNew(record{
-			Version: sessionSchemaVersion, Parent: parent, RootFSID: identity.RootFSID,
+			Version: allocationSessionSchemaVersion, Parent: parent, RootFSID: identity.RootFSID,
 			WriterEpoch: identity.WriterEpoch, State: stateTombstoned,
 			CreatedAt: now, UpdatedAt: now,
 		})
@@ -1086,6 +1318,41 @@ func sessionPaths(branchRoot, mountRoot, parent string) paths {
 	}
 }
 
+func (m *Manager) newReservedRecord(durable rootfshandoff.StageRequest, bindingText string) (record, error) {
+	paths := sessionPaths(m.branchRoot, m.mountRoot, durable.Parent)
+	allocationID, err := newDeviceAllocationID()
+	if err != nil {
+		return record{}, fmt.Errorf("generate NBD allocation identity: %w", err)
+	}
+	stage := cloneDurableStage(durable)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return record{
+		Version: sessionSchemaVersion, Parent: durable.Parent, BindingDigest: bindingText,
+		RootFSID: durable.Identity.RootFSID, WriterEpoch: durable.Identity.WriterEpoch,
+		GenerationID:   durable.InitialGeneration,
+		BaseDescriptor: append([]byte(nil), durable.Generation.Descriptor...), BranchPath: paths.branch,
+		DeviceAllocationID: allocationID, XFSRoot: paths.xfs, MergedRoot: paths.merged,
+		State: stateReserved, CreatedAt: now, UpdatedAt: now, Stage: &stage,
+	}, nil
+}
+
+func cloneDurableStage(stage rootfshandoff.StageRequest) rootfshandoff.StageRequest {
+	stage.Identity.WriterGrantToken = ""
+	if stage.Generation != nil {
+		generation := *stage.Generation
+		generation.Descriptor = append([]byte(nil), stage.Generation.Descriptor...)
+		stage.Generation = &generation
+	}
+	if stage.Labels != nil {
+		labels := make(map[string]string, len(stage.Labels))
+		for key, value := range stage.Labels {
+			labels[key] = value
+		}
+		stage.Labels = labels
+	}
+	return stage
+}
+
 func mountFromRecord(value record) Mount {
 	return Mount{Source: value.MergedRoot, Type: "bind", Options: []string{"rbind", "rw", "nosuid", "nodev"}}
 }
@@ -1097,7 +1364,7 @@ func sameBinding(value record, request rootfshandoff.StageRequest, digest string
 }
 
 func supportedSessionVersion(version int) bool {
-	return version == legacySessionSchemaVersion || version == sessionSchemaVersion
+	return version >= legacySessionSchemaVersion && version <= sessionSchemaVersion
 }
 
 func newDeviceAllocationID() (string, error) {

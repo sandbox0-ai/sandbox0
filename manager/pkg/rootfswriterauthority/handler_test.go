@@ -40,6 +40,8 @@ type fakeGrantStore struct {
 	grant         *sandboxstore.RootFSWriterGrant
 	getErr        error
 	getGrantIDs   []string
+	cancelRequest *sandboxstore.CancelRootFSWriterGrantRequest
+	cancelErr     error
 }
 
 func (f *fakeGrantStore) RenewRootFSWriterGrants(
@@ -64,6 +66,14 @@ func (f *fakeGrantStore) RenewRootFSWriterGrants(
 func (f *fakeGrantStore) ConsumeRootFSWriterGrant(_ context.Context, request *sandboxstore.ConsumeRootFSWriterGrantRequest) (*sandboxstore.RootFSWriterGrant, error) {
 	f.request = request
 	return testLeasedGrant(request.GrantID), nil
+}
+
+func (f *fakeGrantStore) CancelRootFSWriterGrant(
+	_ context.Context,
+	request *sandboxstore.CancelRootFSWriterGrantRequest,
+) (*sandboxstore.RootFSWriterGrant, error) {
+	f.cancelRequest = request
+	return f.grant, f.cancelErr
 }
 
 func (f *fakeGrantStore) RenewRootFSWriterGrant(
@@ -276,7 +286,10 @@ func TestRenewHandlerPreservesRetryableErrorClassification(t *testing.T) {
 }
 
 func TestTerminalHandlerAcceptsExactTerminalRetryWithEncodedGrantID(t *testing.T) {
-	for _, state := range []string{sandboxstore.RootFSWriterGrantStateRetired} {
+	for _, state := range []string{
+		sandboxstore.RootFSWriterGrantStateRetired,
+		sandboxstore.RootFSWriterGrantStateCanceled,
+	} {
 		t.Run(state, func(t *testing.T) {
 			grantID := "grant id+percent%"
 			verifier := &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "issued-node", PodUID: "ctld-pod"}}
@@ -301,19 +314,41 @@ func TestTerminalHandlerAcceptsExactTerminalRetryWithEncodedGrantID(t *testing.T
 	}
 }
 
-func TestTerminalHandlerRejectsCanceledGrant(t *testing.T) {
-	store := &fakeGrantStore{grant: terminalTestGrant("grant-1", sandboxstore.RootFSWriterGrantStateCanceled)}
+func TestPreconsumeAbortCancelsOnlyAnExactIssuedGrant(t *testing.T) {
+	grant := terminalTestGrant("grant id", sandboxstore.RootFSWriterGrantStateIssued)
+	grant.IssueOperationID = "issue-operation"
+	store := &fakeGrantStore{grant: grant}
 	handler, err := NewHandler(HandlerConfig{
 		Store: store, Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "issued-node"}},
 		LeaseTTL: time.Minute,
 	})
 	require.NoError(t, err)
-	request := httptest.NewRequest(http.MethodPut, protocol.TerminalPath("grant-1"),
+	request := httptest.NewRequest(http.MethodPut, protocol.PreconsumeAbortPath(grant.ID),
+		strings.NewReader(terminalTestRequestBody(strings.Repeat("ab", 32), 7)))
+	request.Header.Set("Authorization", "Bearer token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	require.Equal(t, http.StatusNoContent, response.Code)
+	require.NotNil(t, store.cancelRequest)
+	require.Equal(t, grant.ID, store.cancelRequest.GrantID)
+	require.Equal(t, grant.IssueOperationID, store.cancelRequest.OperationID)
+	require.Equal(t, grant.BindingDigest, store.cancelRequest.BindingDigest)
+}
+
+func TestPreconsumeAbortRejectsAConsumedGrant(t *testing.T) {
+	store := &fakeGrantStore{grant: terminalTestGrant("grant-1", sandboxstore.RootFSWriterGrantStateConsumed)}
+	handler, err := NewHandler(HandlerConfig{
+		Store: store, Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: "issued-node"}},
+		LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodPut, protocol.PreconsumeAbortPath("grant-1"),
 		strings.NewReader(terminalTestRequestBody(strings.Repeat("ab", 32), 7)))
 	request.Header.Set("Authorization", "Bearer token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	require.Equal(t, http.StatusPreconditionFailed, response.Code)
+	require.Nil(t, store.cancelRequest)
 }
 
 func TestTerminalHandlerRejectsWrongOwnerBindingAndState(t *testing.T) {

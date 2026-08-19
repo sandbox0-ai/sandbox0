@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -45,6 +46,78 @@ func TestManagerEnsureResolveAndReleaseExactlyOnce(t *testing.T) {
 	stored, err := manager.load(request.Parent)
 	require.NoError(t, err)
 	require.Equal(t, stateTombstoned, stored.State)
+}
+
+func TestManagerReservePersistsTokenlessIndependentRecoveryBinding(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "durable-recovery")
+	require.NoError(t, manager.Reserve(request))
+	require.Empty(t, runtime.callsSnapshot())
+
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, sessionSchemaVersion, stored.Version)
+	require.NotNil(t, stored.Stage)
+	require.Empty(t, stored.Stage.Identity.WriterGrantToken)
+	payload, err := json.Marshal(stored)
+	require.NoError(t, err)
+	require.NotContains(t, string(payload), request.Identity.WriterGrantToken)
+
+	recovery, err := manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1)
+	require.Equal(t, RecoveryCrashAbandon, recovery[0].Kind)
+	require.Equal(t, stateReserved, recovery[0].State)
+	require.False(t, recovery[0].Live)
+	require.Equal(t, request.WithoutWriterGrantToken(), recovery[0].Stage)
+
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	consumer := ConsumerRegistration{
+		LeaseID: "consumer-lease-a", ActiveKey: "nomad-task-a", ContainerID: "runsc-a",
+		StableMount: "/var/lib/nomad/tasks/a/rootfs", HostMountNamespace: "mnt:[4026531841]",
+		LeaseExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+	}
+	require.NoError(t, manager.RegisterConsumer(request.Parent, request.Identity, consumer))
+	recovery, err = manager.RecoverySessions()
+	require.NoError(t, err)
+	require.True(t, recovery[0].Live)
+	require.Equal(t, stateReady, recovery[0].State)
+	require.Equal(t, &consumer, recovery[0].Consumer)
+
+	replacement := consumer
+	replacement.LeaseID = "consumer-lease-b"
+	replacement.LeaseExpiresAt = time.Now().Add(2 * time.Minute).UTC().Format(time.RFC3339Nano)
+	require.NoError(t, manager.RegisterConsumer(request.Parent, request.Identity, replacement))
+	err = manager.RenewConsumer(request.Parent, request.Identity, consumer.LeaseID, time.Now().Add(time.Minute))
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.RenewConsumer(
+		request.Parent, request.Identity, replacement.LeaseID, time.Now().Add(3*time.Minute),
+	))
+	conflict := replacement
+	conflict.ContainerID = "runsc-b"
+	err = manager.RegisterConsumer(request.Parent, request.Identity, conflict)
+	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "retire-recovery"))
+	recovery, err = manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Equal(t, RecoveryPlannedRetire, recovery[0].Kind)
+	require.Equal(t, "retire-recovery", recovery[0].RetireOperationID)
+}
+
+func TestManagerPreconsumeReservationCanBeFencedAndForgotten(t *testing.T) {
+	manager, runtime, request := newTestManager(t, "preconsume-cancel")
+	require.NoError(t, manager.Reserve(request))
+	require.NoError(t, manager.Release(t.Context(), request.Identity))
+	observation, err := manager.CrashFence(request.WithoutWriterGrantToken(), "preconsume-abort")
+	require.NoError(t, err)
+	require.NoError(t, observation.Validate())
+	require.True(t, observation.NBDPoolAbsent)
+	require.Equal(t, 1, runtime.preAttachmentFenceInspections)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	require.NoError(t, manager.ForgetVerifiedTerminal(request.Parent, request.Identity))
+	_, err = manager.load(request.Parent)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
 }
 
 func TestManagerCrashFenceIsDurableAndOperationBound(t *testing.T) {
@@ -407,7 +480,7 @@ func TestManagerLegacyReconcileDoesNotReclaimReusedPathForHistoricalTombstone(t 
 	require.NoError(t, manager.ReconcileReleases(t.Context()))
 	ready, err := manager.load(readyRequest.Parent)
 	require.NoError(t, err)
-	require.Equal(t, sessionSchemaVersion, ready.Version)
+	require.Equal(t, allocationSessionSchemaVersion, ready.Version)
 	require.NotEmpty(t, ready.DeviceAllocationID)
 	require.Equal(t, ready.DeviceAllocationID, runtime.reservationOwner("/dev/fake0"))
 	tombstone, err := manager.load(tombstoneRequest.Parent)

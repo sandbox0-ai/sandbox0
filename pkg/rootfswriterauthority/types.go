@@ -16,8 +16,9 @@ const ConsumePathPrefix = "/internal/v1/rootfs-writer-grants/"
 const BatchRenewPath = "/internal/v1/rootfs-writer-grants:renew"
 
 const (
-	renewPathSuffix    = "/renew"
-	terminalPathSuffix = "/terminal"
+	renewPathSuffix           = "/renew"
+	terminalPathSuffix        = "/terminal"
+	preconsumeAbortPathSuffix = "/terminal/preconsume-abort"
 )
 
 // ConsumeRequest deliberately excludes caller identity and lease policy.
@@ -221,4 +222,10 @@ func (r TerminalRequest) DecodedBindingDigest() ([]byte, error) {
 // TerminalPath returns the canonical authenticated terminal-proof endpoint.
 func TerminalPath(grantID string) string {
 	return ConsumePath(grantID) + terminalPathSuffix
+}
+
+// PreconsumeAbortPath cancels an exact grant that is still issued. It closes
+// the crash window between durable node admission and Consume response.
+func PreconsumeAbortPath(grantID string) string {
+	return ConsumePath(grantID) + preconsumeAbortPathSuffix
 }

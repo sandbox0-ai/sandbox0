@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	maxRequestBytes    = 64 << 10
-	renewPathSuffix    = "/renew"
-	terminalPathSuffix = "/terminal"
+	maxRequestBytes           = 64 << 10
+	renewPathSuffix           = "/renew"
+	terminalPathSuffix        = "/terminal"
+	preconsumeAbortPathSuffix = "/terminal/preconsume-abort"
 )
 
 type CallerIdentity struct {
@@ -34,6 +35,7 @@ type CallerVerifier interface {
 
 type GrantStore interface {
 	ConsumeRootFSWriterGrant(context.Context, *sandboxstore.ConsumeRootFSWriterGrantRequest) (*sandboxstore.RootFSWriterGrant, error)
+	CancelRootFSWriterGrant(context.Context, *sandboxstore.CancelRootFSWriterGrantRequest) (*sandboxstore.RootFSWriterGrant, error)
 	RenewRootFSWriterGrant(context.Context, *sandboxstore.RenewRootFSWriterGrantRequest, sandboxstore.RootFSWriterLeaseRenewalPolicy) (*sandboxstore.RootFSWriterGrant, error)
 	GetRootFSWriterGrant(context.Context, string) (*sandboxstore.RootFSWriterGrant, error)
 }
@@ -70,6 +72,10 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 			serveBatchRenew(config, writer, request)
 			return
 		}
+		if isPreconsumeAbortPath(request.URL.EscapedPath()) {
+			servePreconsumeAbort(config, writer, request)
+			return
+		}
 		if isTerminalPath(request.URL.EscapedPath()) {
 			serveTerminal(config, writer, request)
 			return
@@ -80,6 +86,64 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 		}
 		serveConsume(config, writer, request)
 	}), nil
+}
+
+func servePreconsumeAbort(config HandlerConfig, writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPut {
+		writer.Header().Set("Allow", http.MethodPut)
+		writeError(writer, http.StatusMethodNotAllowed, "method is not supported")
+		return
+	}
+	grantID, err := parsePreconsumeAbortGrantID(request.URL.EscapedPath())
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	bearer, err := bearerToken(request.Header.Get("Authorization"))
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err.Error())
+		return
+	}
+	caller, err := config.Verifier.Verify(request.Context(), bearer)
+	if err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	var body protocol.TerminalRequest
+	if err := decodeRequest(writer, request, &body); err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := body.Validate(); err != nil || body.BindingVersion != sandboxstore.RootFSWriterBindingVersion {
+		writeError(writer, http.StatusBadRequest, "invalid preconsume abort binding")
+		return
+	}
+	grant, err := config.Store.GetRootFSWriterGrant(request.Context(), grantID)
+	if err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	if err := verifyWriterGrantBinding(grant, grantID, body, caller); err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	if grant.State == sandboxstore.RootFSWriterGrantStateCanceled || grant.State == sandboxstore.RootFSWriterGrantStateRetired {
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if grant.State != sandboxstore.RootFSWriterGrantStateIssued {
+		writeClassifiedError(writer, fmt.Errorf("writer grant was already consumed: %w", sandboxstore.ErrRootFSWriterGrantInvalidState))
+		return
+	}
+	digest, _ := body.DecodedBindingDigest()
+	if _, err := config.Store.CancelRootFSWriterGrant(request.Context(), &sandboxstore.CancelRootFSWriterGrantRequest{
+		GrantID: grant.ID, WriterEpoch: grant.WriterEpoch, OperationID: grant.IssueOperationID,
+		BindingVersion: body.BindingVersion, BindingDigest: digest,
+	}); err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func serveConsume(config HandlerConfig, writer http.ResponseWriter, request *http.Request) {
@@ -187,6 +251,21 @@ func verifyTerminalGrant(
 	request protocol.TerminalRequest,
 	caller CallerIdentity,
 ) error {
+	if err := verifyWriterGrantBinding(grant, grantID, request, caller); err != nil {
+		return err
+	}
+	if grant.State != sandboxstore.RootFSWriterGrantStateRetired && grant.State != sandboxstore.RootFSWriterGrantStateCanceled {
+		return fmt.Errorf("writer grant is not terminal: %w", sandboxstore.ErrRootFSWriterGrantInvalidState)
+	}
+	return nil
+}
+
+func verifyWriterGrantBinding(
+	grant *sandboxstore.RootFSWriterGrant,
+	grantID string,
+	request protocol.TerminalRequest,
+	caller CallerIdentity,
+) error {
 	if grant == nil {
 		return fmt.Errorf("terminal writer grant lookup returned no record: %w", errdefs.ErrUnavailable)
 	}
@@ -199,9 +278,6 @@ func verifyTerminalGrant(
 	digest, _ := request.DecodedBindingDigest()
 	if grant.BindingVersion != request.BindingVersion || !bytes.Equal(grant.BindingDigest, digest) {
 		return fmt.Errorf("terminal proof does not match the immutable writer binding: %w", sandboxstore.ErrRootFSWriterGrantConflict)
-	}
-	if grant.State != sandboxstore.RootFSWriterGrantStateRetired {
-		return fmt.Errorf("writer grant is not retired: %w", sandboxstore.ErrRootFSWriterGrantInvalidState)
 	}
 	return nil
 }
@@ -420,12 +496,23 @@ func parseTerminalGrantID(path string) (string, error) {
 	return parseGrantID(strings.TrimSuffix(path, terminalPathSuffix))
 }
 
+func parsePreconsumeAbortGrantID(path string) (string, error) {
+	if !strings.HasSuffix(path, preconsumeAbortPathSuffix) {
+		return "", fmt.Errorf("invalid writer grant preconsume abort path")
+	}
+	return parseGrantID(strings.TrimSuffix(path, preconsumeAbortPathSuffix))
+}
+
 func isRenewPath(path string) bool {
 	return isGrantActionPath(path, renewPathSuffix)
 }
 
 func isTerminalPath(path string) bool {
 	return isGrantActionPath(path, terminalPathSuffix)
+}
+
+func isPreconsumeAbortPath(path string) bool {
+	return isGrantActionPath(path, preconsumeAbortPathSuffix)
 }
 
 func isGrantActionPath(path, suffix string) bool {

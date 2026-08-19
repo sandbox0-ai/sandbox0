@@ -271,6 +271,19 @@ func (c *ManagerClient) VerifyTerminalWriterGrant(ctx context.Context, stage roo
 	return c.putWriterGrant(ctx, "verify terminal", protocol.TerminalPath(stage.Identity.WriterGrantID), request, nil)
 }
 
+// CancelUnconsumedWriterGrant terminally cancels an issued grant whose exact
+// durable Stage was journaled before Consume. A consumed grant returns failed
+// precondition and must follow the lease-fenced crash-abandon path instead.
+func (c *ManagerClient) CancelUnconsumedWriterGrant(ctx context.Context, stage rootfshandoff.StageRequest) error {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return err
+	}
+	request := protocol.TerminalRequest(binding)
+	path := protocol.PreconsumeAbortPath(stage.Identity.WriterGrantID)
+	return c.putWriterGrant(ctx, "cancel unconsumed", path, request, nil)
+}
+
 func writerGrantBinding(stage rootfshandoff.StageRequest) (protocol.ConsumeRequest, error) {
 	if err := stage.Validate(); err != nil {
 		return protocol.ConsumeRequest{}, fmt.Errorf("validate writer binding: %w: %w", err, errdefs.ErrInvalidArgument)

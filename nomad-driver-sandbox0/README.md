@@ -18,6 +18,7 @@ Implemented:
 - generic writable OCI bundle generation
 - generic warm allocation with no image-specific runtime state
 - local Unix control socket with `/status` and `/claim`
+- warm default-deny and claim-time L3/L4 network policy in the Nomad netns
 - RootFS bind, start, stop, delete, signal, and cleanup paths
 - one-shot claim and basic recovery semantics
 - on-disk task state for driver crash recovery
@@ -40,6 +41,9 @@ used by this experiment. It can issue an initial block-COW grant from a Stage
 JSON file, consume/renew grants over mTLS, and publish a locally sealed
 generation as the next PostgreSQL head. Run it with `--help` for the current
 flags.
+
+The network policy implementation is intentionally minimal: production ctld
+owns policy compilation, TPROXY, applied-token persistence, and L7 handling.
 
 ## Build and test
 

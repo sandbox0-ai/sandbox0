@@ -17,6 +17,7 @@ const BatchRenewPath = "/internal/v1/rootfs-writer-grants:renew"
 
 const (
 	renewPathSuffix           = "/renew"
+	runningForkPathSuffix     = "/fork-running"
 	terminalPathSuffix        = "/terminal"
 	preconsumeAbortPathSuffix = "/terminal/preconsume-abort"
 )
@@ -192,6 +193,12 @@ func (r RenewRequest) DecodedBindingDigest() ([]byte, error) {
 
 func RenewPath(grantID string) string {
 	return ConsumePath(grantID) + renewPathSuffix
+}
+
+// RunningForkPath publishes a consistent checkpoint without retiring the
+// source writer grant.
+func RunningForkPath(grantID string) string {
+	return ConsumePath(grantID) + runningForkPathSuffix
 }
 
 // TerminalRequest identifies the exact immutable writer binding whose

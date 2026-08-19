@@ -144,3 +144,16 @@ func TestRunningForkCheckpointProofBindsSequenceAndDescriptor(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, second, third)
 }
+
+func TestRunningForkCheckpointRequestRequiresCanonicalStableIDs(t *testing.T) {
+	request := RunningForkCheckpointRequest{
+		OperationID: "operation", SourceSandboxID: "source",
+		TargetSandboxID: "target", TargetGenerationID: "generation",
+	}
+	require.NoError(t, request.Validate())
+	request.OperationID = " operation"
+	require.ErrorContains(t, request.Validate(), "canonical")
+	request.OperationID = "operation"
+	request.TargetSandboxID = request.SourceSandboxID
+	require.ErrorContains(t, request.Validate(), "must differ")
+}

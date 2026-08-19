@@ -3,6 +3,7 @@ package rootfswriterauthority
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,14 +15,17 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
 
 const (
-	maxRequestBytes           = 64 << 10
-	renewPathSuffix           = "/renew"
-	terminalPathSuffix        = "/terminal"
-	preconsumeAbortPathSuffix = "/terminal/preconsume-abort"
+	maxRequestBytes            = 64 << 10
+	maxRunningForkRequestBytes = 128 << 10
+	renewPathSuffix            = "/renew"
+	runningForkPathSuffix      = "/fork-running"
+	terminalPathSuffix         = "/terminal"
+	preconsumeAbortPathSuffix  = "/terminal/preconsume-abort"
 )
 
 type CallerIdentity struct {
@@ -42,6 +46,10 @@ type GrantStore interface {
 
 type batchGrantStore interface {
 	RenewRootFSWriterGrants(context.Context, []*sandboxstore.RenewRootFSWriterGrantRequest, sandboxstore.RootFSWriterLeaseRenewalPolicy) ([]sandboxstore.RenewRootFSWriterGrantResult, error)
+}
+
+type runningForkGrantStore interface {
+	ForkRunningRootFSFilesystem(context.Context, *sandboxstore.ForkRunningRootFSFilesystemRequest) (*sandboxstore.RootFSFilesystem, error)
 }
 
 type HandlerConfig struct {
@@ -76,6 +84,10 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 			servePreconsumeAbort(config, writer, request)
 			return
 		}
+		if isRunningForkPath(request.URL.EscapedPath()) {
+			serveRunningFork(config, writer, request)
+			return
+		}
 		if isTerminalPath(request.URL.EscapedPath()) {
 			serveTerminal(config, writer, request)
 			return
@@ -86,6 +98,112 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 		}
 		serveConsume(config, writer, request)
 	}), nil
+}
+
+func serveRunningFork(config HandlerConfig, writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPut {
+		writer.Header().Set("Allow", http.MethodPut)
+		writeError(writer, http.StatusMethodNotAllowed, "method is not supported")
+		return
+	}
+	grantID, err := parseRunningForkGrantID(request.URL.EscapedPath())
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	bearer, err := bearerToken(request.Header.Get("Authorization"))
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err.Error())
+		return
+	}
+	caller, err := config.Verifier.Verify(request.Context(), bearer)
+	if err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	var body PublishRunningForkRequest
+	if err := decodeRequestLimit(writer, request, &body, maxRunningForkRequestBytes); err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.WriterEpoch <= 0 || body.BindingVersion != sandboxstore.RootFSWriterBindingVersion {
+		writeError(writer, http.StatusBadRequest, "invalid running fork writer binding")
+		return
+	}
+	binding, err := protocol.TerminalRequest{
+		WriterEpoch: body.WriterEpoch, BindingVersion: body.BindingVersion, BindingDigest: body.BindingDigest,
+	}.DecodedBindingDigest()
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := body.Checkpoint.Validate(); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid running fork checkpoint: "+err.Error())
+		return
+	}
+	grant, err := config.Store.GetRootFSWriterGrant(request.Context(), grantID)
+	if err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	if err := verifyWriterGrantBinding(grant, grantID, protocol.TerminalRequest{
+		WriterEpoch: body.WriterEpoch, BindingVersion: body.BindingVersion, BindingDigest: body.BindingDigest,
+	}, caller); err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	proof := body.Checkpoint.Proof
+	if proof.SourceWriterGrantID != grantID || proof.SourceSandboxID != grant.SandboxID ||
+		proof.SourceFilesystemID != grant.FilesystemID || proof.SourceWriterEpoch != grant.WriterEpoch ||
+		proof.BindingVersion != grant.BindingVersion || proof.BindingDigest != body.BindingDigest ||
+		proof.ExpectedSourceGenerationID != grant.InitialGenerationID {
+		writeClassifiedError(writer, fmt.Errorf("running fork proof does not match the source grant: %w", sandboxstore.ErrRootFSWriterGrantConflict))
+		return
+	}
+	store, ok := config.Store.(runningForkGrantStore)
+	if !ok {
+		writeClassifiedError(writer, fmt.Errorf("running fork store is unavailable: %w", errdefs.ErrUnavailable))
+		return
+	}
+	generation := runningForkGeneration(body.Checkpoint.Generation, proof.ExpectedSourceGenerationID)
+	proofDigest, _ := hex.DecodeString(body.Checkpoint.ProofDigest)
+	_, err = store.ForkRunningRootFSFilesystem(request.Context(), &sandboxstore.ForkRunningRootFSFilesystemRequest{
+		OperationID: proof.OperationID, SourceSandboxID: proof.SourceSandboxID,
+		TargetSandboxID: proof.TargetSandboxID, SourceGrantID: grantID,
+		SourceWriterEpoch: grant.WriterEpoch, BindingVersion: grant.BindingVersion, BindingDigest: binding,
+		CheckpointProof: proof, CheckpointProofDigest: proofDigest,
+		ExpectedSourceGenerationID: grant.InitialGenerationID, Generation: &generation,
+	})
+	if err != nil {
+		if errors.Is(err, sandboxstore.ErrRootFSCompositeBacklogExhausted) {
+			writer.Header().Set("Retry-After", "1")
+			writeError(writer, http.StatusInsufficientStorage, err.Error())
+			return
+		}
+		if errors.Is(err, sandboxstore.ErrRootFSFilesystemNotFound) {
+			writeError(writer, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, sandboxstore.ErrRootFSFilesystemConflict) ||
+			errors.Is(err, sandboxstore.ErrRootFSGenerationConflict) {
+			writeError(writer, http.StatusPreconditionFailed, err.Error())
+			return
+		}
+		writeClassifiedError(writer, err)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func runningForkGeneration(descriptor rootfshandoff.GenerationDescriptor, parent string) sandboxstore.RootFSGeneration {
+	return sandboxstore.RootFSGeneration{
+		ID: descriptor.GenerationID, FilesystemID: descriptor.FilesystemID,
+		ParentGenerationID: parent, SourceOCIDigest: descriptor.SourceOCIDigest,
+		BaseArtifactDigest: descriptor.BaseArtifactDigest, BaseBlockRoot: descriptor.BaseBlockRoot,
+		CurrentBlockHead: descriptor.CurrentBlockHead, WriterEpoch: descriptor.WriterEpoch,
+		FormatGeneration: descriptor.FormatGeneration, DurabilityState: descriptor.DurabilityState,
+		LocatorVersion: descriptor.LocatorVersion, Descriptor: append([]byte(nil), descriptor.Descriptor...),
+	}
 }
 
 func servePreconsumeAbort(config HandlerConfig, writer http.ResponseWriter, request *http.Request) {
@@ -459,7 +577,11 @@ func renewErrorCode(err error) string {
 }
 
 func decodeRequest(writer http.ResponseWriter, request *http.Request, target any) error {
-	request.Body = http.MaxBytesReader(writer, request.Body, maxRequestBytes)
+	return decodeRequestLimit(writer, request, target, maxRequestBytes)
+}
+
+func decodeRequestLimit(writer http.ResponseWriter, request *http.Request, target any, limit int64) error {
+	request.Body = http.MaxBytesReader(writer, request.Body, limit)
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -489,6 +611,13 @@ func parseRenewGrantID(path string) (string, error) {
 	return parseGrantID(strings.TrimSuffix(path, renewPathSuffix))
 }
 
+func parseRunningForkGrantID(path string) (string, error) {
+	if !strings.HasSuffix(path, runningForkPathSuffix) {
+		return "", fmt.Errorf("invalid writer grant running fork path")
+	}
+	return parseGrantID(strings.TrimSuffix(path, runningForkPathSuffix))
+}
+
 func parseTerminalGrantID(path string) (string, error) {
 	if !strings.HasSuffix(path, terminalPathSuffix) {
 		return "", fmt.Errorf("invalid writer grant terminal path")
@@ -505,6 +634,10 @@ func parsePreconsumeAbortGrantID(path string) (string, error) {
 
 func isRenewPath(path string) bool {
 	return isGrantActionPath(path, renewPathSuffix)
+}
+
+func isRunningForkPath(path string) bool {
+	return isGrantActionPath(path, runningForkPathSuffix)
 }
 
 func isTerminalPath(path string) bool {

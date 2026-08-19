@@ -28,6 +28,10 @@ Implemented:
   allocation fencing when the task-driver misses `DestroyTask`
 - per-session unpublished dirty-tail capacity with request-atomic `ENOSPC`
   backpressure that survives daemon restart
+- crash-safe running forks: durable XFS freeze intent, immutable branch
+  checkpoint, thaw-before-S3 publication, exact node retry cache, and an
+  atomic PostgreSQL target-filesystem transaction that keeps the source writer
+  active
 - policy-digest verification against the immutable RootFS handoff
 - RootFS bind, start, stop, delete, signal, and cleanup paths
 - one-shot claim and basic recovery semantics
@@ -45,6 +49,8 @@ Not implemented:
 - guest stdout/stderr console forwarding
 - full cgroup and Nomad stats integration
 - production Nomad deployment and upgrade automation
+- production manager-to-node running-fork orchestration and privileged
+  multi-node XFS/NBD/runsc validation
 
 ## Writer authority PoC
 
@@ -54,6 +60,12 @@ JSON file, consume/renew grants over mTLS, and publish a locally sealed
 generation as the next PostgreSQL head. It also exposes the two-phase regional
 fence used to crash-abandon an unsealed writer without advancing the durable
 head. Run it with `--help` for the current flags.
+
+The authority also accepts an authenticated `fork-running` checkpoint from the
+exact consumed source grant. The target sandbox must already exist, be paused,
+belong to the source team, and have no RootFS binding. PostgreSQL creates the
+target filesystem, checkpoint generation, binding, and idempotency record in
+one transaction without changing the source head or lease.
 
 Serve mode also owns the regional composite-tail backlog policy and S3
 materializer. `--composite-backlog-bytes` is a shared PostgreSQL descriptor
@@ -75,6 +87,8 @@ owns policy compilation, TPROXY, applied-token persistence, and L7 handling.
 go test ./...
 go vet ./...
 go build -o nomad-driver-sandbox0 .
+go build -o nomad-rootfs-sessiond ./cmd/nomad-rootfs-sessiond
+go build -o nomad-rootfs-sessionctl ./cmd/nomad-rootfs-sessionctl
 ```
 
 The module is intentionally separate from the repository root so the Nomad
@@ -146,3 +160,26 @@ and flushable, and planned retirement can still publish them. The default is
 10 GiB. Size the branch volume for node concurrency and set the explicit value
 in `rootfs-sessiond.env`; this node-local bound does not replace the separate
 regional PostgreSQL composite-tail backlog quota.
+
+## Running fork control
+
+The root-owned node control utility exercises the complete
+freeze/checkpoint/thaw/object-publication/regional-transaction path:
+
+```sh
+nomad-rootfs-sessionctl \
+  --socket /run/sandbox0/rootfs-sessiond.sock \
+  --stage-file /run/sandbox0/handoffs/source.json \
+  --operation-id fork-operation-1 \
+  --source-sandbox-id source-sandbox \
+  --target-sandbox-id paused-target-sandbox \
+  --target-generation-id target-generation-1
+```
+
+The Stage file may contain either a `StageRequest` or a `{"stage": ...}`
+envelope. The raw one-time writer token is stripped before RPC. The daemon
+keeps at most one unresolved running-fork checkpoint per source session; an
+exact retry reuses the same proof, including after regional response loss,
+while a different operation fails closed until the current operation succeeds
+or the source session terminates. This utility is an administrative PoC
+entrypoint, not the final manager/ctld control-plane API.

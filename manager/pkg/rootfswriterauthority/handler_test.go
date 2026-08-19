@@ -13,6 +13,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 	"github.com/stretchr/testify/require"
 )
@@ -42,6 +43,8 @@ type fakeGrantStore struct {
 	getGrantIDs   []string
 	cancelRequest *sandboxstore.CancelRootFSWriterGrantRequest
 	cancelErr     error
+	forkRequest   *sandboxstore.ForkRunningRootFSFilesystemRequest
+	forkErr       error
 }
 
 func (f *fakeGrantStore) RenewRootFSWriterGrants(
@@ -121,6 +124,55 @@ func (f *fakeGrantStore) GetRootFSWriterGrant(_ context.Context, grantID string)
 		return nil, f.getErr
 	}
 	return f.grant, nil
+}
+
+func (f *fakeGrantStore) ForkRunningRootFSFilesystem(
+	_ context.Context,
+	request *sandboxstore.ForkRunningRootFSFilesystemRequest,
+) (*sandboxstore.RootFSFilesystem, error) {
+	f.forkRequest = request
+	if f.forkErr != nil {
+		return nil, f.forkErr
+	}
+	return &sandboxstore.RootFSFilesystem{ID: request.TargetSandboxID}, nil
+}
+
+func TestRunningForkAuthenticatesLiveWriterAndPublishesExactCheckpoint(t *testing.T) {
+	stage := crashAbandonClientTestStage()
+	fork := rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "running-fork", SourceSandboxID: "source-sandbox",
+		TargetSandboxID: "target-sandbox", TargetGenerationID: "target-generation",
+	}
+	checkpoint := runningForkClientTestCheckpoint(t, stage, fork)
+	binding, err := stage.BindingDigest()
+	require.NoError(t, err)
+	store := &fakeGrantStore{grant: &sandboxstore.RootFSWriterGrant{
+		ID: stage.Identity.WriterGrantID, SandboxID: fork.SourceSandboxID, FilesystemID: stage.Identity.RootFSID,
+		InitialGenerationID: stage.InitialGeneration, WriterEpoch: stage.Identity.WriterEpoch,
+		BindingVersion: stage.BindingVersion, BindingDigest: binding[:], NodeUID: stage.Identity.NodeUID,
+		State: sandboxstore.RootFSWriterGrantStateConsumed,
+	}}
+	handler, err := NewHandler(HandlerConfig{
+		Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: stage.Identity.NodeUID}},
+		Store:    store, LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	body, err := json.Marshal(PublishRunningForkRequest{
+		WriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
+		BindingDigest: checkpoint.Proof.BindingDigest, Checkpoint: checkpoint,
+	})
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodPut, protocol.RunningForkPath(stage.Identity.WriterGrantID), bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer projected-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	require.Equal(t, http.StatusNoContent, response.Code, response.Body.String())
+	require.NotNil(t, store.forkRequest)
+	require.Equal(t, fork.OperationID, store.forkRequest.OperationID)
+	require.Equal(t, fork.TargetSandboxID, store.forkRequest.Generation.FilesystemID)
+	require.Equal(t, stage.InitialGeneration, store.forkRequest.Generation.ParentGenerationID)
+	require.Equal(t, checkpoint.Proof, store.forkRequest.CheckpointProof)
+	require.Equal(t, binding[:], store.forkRequest.BindingDigest)
 }
 
 func TestHandlerDerivesConsumerAndLeasePolicy(t *testing.T) {

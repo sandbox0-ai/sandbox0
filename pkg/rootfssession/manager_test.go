@@ -820,12 +820,13 @@ func TestManagerRunningForkThawsBeforeStreamingPublication(t *testing.T) {
 		value rootfshandoff.RunningForkCheckpointResult
 		err   error
 	}
+	forkRequest := rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "fork-running", SourceSandboxID: request.Identity.PodUID,
+		TargetSandboxID: "running-fork-target", TargetGenerationID: "running-fork-generation",
+	}
 	done := make(chan captureResult, 1)
 	go func() {
-		value, captureErr := manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), rootfshandoff.RunningForkCheckpointRequest{
-			OperationID: "fork-running", SourceSandboxID: request.Identity.PodUID,
-			TargetSandboxID: "running-fork-target", TargetGenerationID: "running-fork-generation",
-		})
+		value, captureErr := manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), forkRequest)
 		done <- captureResult{value: value, err: captureErr}
 	}()
 	select {
@@ -845,6 +846,10 @@ func TestManagerRunningForkThawsBeforeStreamingPublication(t *testing.T) {
 	}
 	require.Greater(t, freezeIndex, -1)
 	require.Greater(t, thawIndex, freezeIndex, "XFS must be thawed before object publication can block")
+	require.NoError(t, manager.ReconcileRunningForkCaptures(t.Context()))
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), forkRequest)
+	require.ErrorIs(t, err, errdefs.ErrUnavailable, "a concurrent exact retry must not capture a second boundary")
+	require.Equal(t, 1, runtime.count("freeze-xfs"))
 	later := bytes.Repeat([]byte{0xf0}, rootfsblock.LogicalBlockSize)
 	_, err = branch.WriteAt(later, 0)
 	require.NoError(t, err, "source writes must continue while the checkpoint publishes")
@@ -870,6 +875,26 @@ func TestManagerRunningForkThawsBeforeStreamingPublication(t *testing.T) {
 	stored, err := manager.load(request.Parent)
 	require.NoError(t, err)
 	require.Empty(t, stored.FreezeOperationID)
+	require.NotNil(t, stored.RunningForkResult)
+	require.NoError(t, manager.ReconcileRunningForkCaptures(t.Context()))
+
+	retry, err := manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), forkRequest)
+	require.NoError(t, err)
+	require.Equal(t, result.value, retry)
+	require.Equal(t, 1, runtime.count("freeze-xfs"), "an exact operation retry must reuse its durable checkpoint")
+	changed := forkRequest
+	changed.TargetSandboxID = "different-target"
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), changed)
+	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+	err = manager.AcknowledgeRunningFork(request.WithoutWriterGrantToken(), forkRequest.OperationID, strings.Repeat("0", 64))
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.AcknowledgeRunningFork(
+		request.WithoutWriterGrantToken(), forkRequest.OperationID, result.value.ProofDigest,
+	))
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Nil(t, stored.RunningForkRequest)
+	require.Nil(t, stored.RunningForkResult)
 }
 
 func TestManagerReconcileFreezesKeepsIntentUntilThawSucceeds(t *testing.T) {
@@ -912,6 +937,7 @@ func TestManagerRunningForkFreezeFailureClearsDurableIntent(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, stored.FreezeOperationID)
 	require.Equal(t, sessionSchemaVersion, stored.Version)
+	require.Nil(t, stored.RunningForkRequest)
 }
 
 func TestManagerRunningForkThawFailureRetainsIntentWithoutPublication(t *testing.T) {
@@ -950,12 +976,56 @@ func TestManagerRunningForkThawFailureRetainsIntentWithoutPublication(t *testing
 	stored, err := manager.load(request.Parent)
 	require.NoError(t, err)
 	require.Equal(t, "failed-thaw", stored.FreezeOperationID)
+	require.NotNil(t, stored.RunningForkRequest)
+	require.Nil(t, stored.RunningForkResult)
 
 	runtime.failAt = ""
 	require.NoError(t, manager.ReconcileFreezes(t.Context()))
 	stored, err = manager.load(request.Parent)
 	require.NoError(t, err)
 	require.Empty(t, stored.FreezeOperationID)
+	require.NoError(t, manager.ReconcileRunningForkCaptures(t.Context()))
+	stored, err = manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Nil(t, stored.RunningForkRequest)
+}
+
+func TestManagerRunningForkPublicationFailureReleasesPendingSlot(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "fork-publication-retry", 16)
+	publisher := &failOncePublisher{next: objects}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), Source: objects, Publisher: publisher, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(bytes.Repeat([]byte{byte(block + 1)}, rootfsblock.LogicalBlockSize), int64(block*rootfsblock.LogicalBlockSize))
+		require.NoError(t, err)
+	}
+	fork := rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "publication-retry", SourceSandboxID: "source",
+		TargetSandboxID: "target", TargetGenerationID: "target-generation",
+	}
+	_, err = manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), fork)
+	require.ErrorContains(t, err, "injected immutable publication failure")
+	stored, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Nil(t, stored.RunningForkRequest)
+	require.Nil(t, stored.RunningForkResult)
+
+	result, err := manager.CaptureRunningFork(t.Context(), request.WithoutWriterGrantToken(), fork)
+	require.NoError(t, err)
+	require.NoError(t, result.Validate())
+	require.Equal(t, 2, runtime.count("freeze-xfs"))
 }
 
 func TestManagerPlannedRetireRecoversBranchAfterProcessRestart(t *testing.T) {

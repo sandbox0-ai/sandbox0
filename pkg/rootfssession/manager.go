@@ -30,7 +30,7 @@ const (
 	legacySessionSchemaVersion     = 2
 	allocationSessionSchemaVersion = 3
 	durableBindingSchemaVersion    = 4
-	sessionSchemaVersion           = 5
+	sessionSchemaVersion           = 6
 	stateReserved                  = "reserved"
 	stateDeviceReserved            = "device_reserved"
 	stateDeviceReady               = "device_ready"
@@ -123,33 +123,35 @@ type Mount struct {
 }
 
 type record struct {
-	Version                   int                         `json:"version"`
-	Parent                    string                      `json:"parent"`
-	BindingDigest             string                      `json:"binding_digest"`
-	RootFSID                  string                      `json:"rootfs_id"`
-	WriterEpoch               int64                       `json:"writer_epoch"`
-	GenerationID              string                      `json:"generation_id"`
-	BaseDescriptor            []byte                      `json:"base_descriptor,omitempty"`
-	BranchPath                string                      `json:"branch_path"`
-	DevicePath                string                      `json:"device_path,omitempty"`
-	DeviceAllocationID        string                      `json:"device_allocation_id,omitempty"`
-	DeviceReservationReleased bool                        `json:"device_reservation_released,omitempty"`
-	XFSRoot                   string                      `json:"xfs_root"`
-	MergedRoot                string                      `json:"merged_root"`
-	State                     string                      `json:"state"`
-	FreezeOperationID         string                      `json:"freeze_operation_id,omitempty"`
-	RetireOperationID         string                      `json:"retire_operation_id,omitempty"`
-	SealedDescriptor          []byte                      `json:"sealed_descriptor,omitempty"`
-	SealedBlockHead           string                      `json:"sealed_block_head,omitempty"`
-	SealedDurability          string                      `json:"sealed_durability,omitempty"`
-	DetachProof               string                      `json:"detach_proof,omitempty"`
-	CrashFence                *crashFenceRecord           `json:"crash_fence,omitempty"`
-	BranchRemoved             bool                        `json:"branch_removed,omitempty"`
-	Failure                   string                      `json:"failure,omitempty"`
-	CreatedAt                 string                      `json:"created_at"`
-	UpdatedAt                 string                      `json:"updated_at"`
-	Stage                     *rootfshandoff.StageRequest `json:"stage,omitempty"`
-	Consumer                  *ConsumerRegistration       `json:"consumer,omitempty"`
+	Version                   int                                         `json:"version"`
+	Parent                    string                                      `json:"parent"`
+	BindingDigest             string                                      `json:"binding_digest"`
+	RootFSID                  string                                      `json:"rootfs_id"`
+	WriterEpoch               int64                                       `json:"writer_epoch"`
+	GenerationID              string                                      `json:"generation_id"`
+	BaseDescriptor            []byte                                      `json:"base_descriptor,omitempty"`
+	BranchPath                string                                      `json:"branch_path"`
+	DevicePath                string                                      `json:"device_path,omitempty"`
+	DeviceAllocationID        string                                      `json:"device_allocation_id,omitempty"`
+	DeviceReservationReleased bool                                        `json:"device_reservation_released,omitempty"`
+	XFSRoot                   string                                      `json:"xfs_root"`
+	MergedRoot                string                                      `json:"merged_root"`
+	State                     string                                      `json:"state"`
+	FreezeOperationID         string                                      `json:"freeze_operation_id,omitempty"`
+	RunningForkRequest        *rootfshandoff.RunningForkCheckpointRequest `json:"running_fork_request,omitempty"`
+	RunningForkResult         *rootfshandoff.RunningForkCheckpointResult  `json:"running_fork_result,omitempty"`
+	RetireOperationID         string                                      `json:"retire_operation_id,omitempty"`
+	SealedDescriptor          []byte                                      `json:"sealed_descriptor,omitempty"`
+	SealedBlockHead           string                                      `json:"sealed_block_head,omitempty"`
+	SealedDurability          string                                      `json:"sealed_durability,omitempty"`
+	DetachProof               string                                      `json:"detach_proof,omitempty"`
+	CrashFence                *crashFenceRecord                           `json:"crash_fence,omitempty"`
+	BranchRemoved             bool                                        `json:"branch_removed,omitempty"`
+	Failure                   string                                      `json:"failure,omitempty"`
+	CreatedAt                 string                                      `json:"created_at"`
+	UpdatedAt                 string                                      `json:"updated_at"`
+	Stage                     *rootfshandoff.StageRequest                 `json:"stage,omitempty"`
+	Consumer                  *ConsumerRegistration                       `json:"consumer,omitempty"`
 }
 
 type crashFenceRecord struct {
@@ -227,6 +229,7 @@ type Manager struct {
 	maxDirty   int64
 	mu         sync.Mutex
 	live       map[string]*liveSession
+	captures   map[string]bool
 	locks      sync.Map
 	lifetime   context.Context
 	cancel     context.CancelFunc
@@ -277,7 +280,8 @@ func New(config Config) (*Manager, error) {
 	return &Manager{
 		db: db, branchRoot: branchRoot, mountRoot: mountRoot,
 		source: config.Source, publisher: config.Publisher, readCache: readCache,
-		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes, live: make(map[string]*liveSession),
+		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes,
+		live: make(map[string]*liveSession), captures: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
 	}, nil
 }
@@ -375,6 +379,112 @@ func (m *Manager) ReconcileFreezes(ctx context.Context) error {
 	return result
 }
 
+// ReconcileRunningForkCaptures drops operations that had not produced a
+// durable checkpoint result before the previous owner exited. Immutable
+// objects from a partial build are content addressed and may be reclaimed by
+// regional object GC; no regional transaction could have started yet.
+func (m *Manager) ReconcileRunningForkCaptures(ctx context.Context) error {
+	var parents []string
+	if err := m.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(sessionBucket).ForEach(func(key, payload []byte) error {
+			if payload == nil {
+				return nil
+			}
+			var current record
+			if err := json.Unmarshal(payload, &current); err != nil {
+				return fmt.Errorf("decode RootFS session %q: %w", key, err)
+			}
+			if current.Parent != string(key) || !supportedSessionVersion(current.Version) {
+				return fmt.Errorf("invalid RootFS recovery record %q version %d", key, current.Version)
+			}
+			if current.RunningForkRequest != nil && current.RunningForkResult == nil {
+				parents = append(parents, current.Parent)
+			}
+			return nil
+		})
+	}); err != nil {
+		return fmt.Errorf("list interrupted running RootFS forks: %w", err)
+	}
+	var result error
+	for _, parent := range parents {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(result, err)
+		}
+		unlock := m.lock(parent)
+		current, err := m.load(parent)
+		if err == nil && current.RunningForkRequest != nil && current.RunningForkResult == nil {
+			m.mu.Lock()
+			active := m.captures[parent]
+			m.mu.Unlock()
+			if active {
+				// This owner is still building the durable checkpoint. Only a
+				// subsequent pass after it exits may classify the intent as stale.
+			} else if current.FreezeOperationID != "" {
+				err = fmt.Errorf("running fork remains frozen: %w", errdefs.ErrFailedPrecondition)
+			} else {
+				current.RunningForkRequest = nil
+				err = m.save(current)
+			}
+		}
+		unlock()
+		if err != nil {
+			result = errors.Join(result, fmt.Errorf("recover running RootFS fork %q: %w", parent, err))
+		}
+	}
+	return result
+}
+
+// AcknowledgeRunningFork removes the one bounded node retry checkpoint only
+// after the regional transaction returned success. A response-loss retry
+// therefore resubmits byte-identical proof instead of freezing a later source
+// boundary under the same operation ID.
+func (m *Manager) AcknowledgeRunningFork(
+	stage rootfshandoff.StageRequest,
+	operationID string,
+	proofDigest string,
+) error {
+	if err := stage.ValidateDurableBinding(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(operationID) == "" || strings.TrimSpace(operationID) != operationID ||
+		strings.TrimSpace(proofDigest) == "" || strings.TrimSpace(proofDigest) != proofDigest {
+		return fmt.Errorf("running fork operation and proof digest must be canonical: %w", errdefs.ErrInvalidArgument)
+	}
+	parent, _, err := m.findIdentity(stage.Identity.RootFSID, stage.Identity.WriterEpoch)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		return err
+	}
+	unlock := m.lock(parent)
+	defer unlock()
+	current, err := m.load(parent)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !sameBinding(current, stage, hex.EncodeToString(binding[:])) {
+		return fmt.Errorf("running fork acknowledgement does not match the writer: %w", errdefs.ErrFailedPrecondition)
+	}
+	if current.RunningForkRequest == nil && current.RunningForkResult == nil {
+		return nil
+	}
+	if current.RunningForkRequest == nil || current.RunningForkResult == nil ||
+		current.RunningForkRequest.OperationID != operationID || current.RunningForkResult.ProofDigest != proofDigest {
+		return fmt.Errorf("running fork acknowledgement changed operation or proof: %w", errdefs.ErrFailedPrecondition)
+	}
+	current.RunningForkRequest = nil
+	current.RunningForkResult = nil
+	return m.save(current)
+}
+
 // CaptureRunningFork briefly freezes XFS, captures an immutable branch
 // boundary, thaws the source, and only then performs potentially slow object
 // publication. The source branch remains writable throughout publication.
@@ -396,6 +506,7 @@ func (m *Manager) CaptureRunningFork(
 	if err != nil {
 		return rootfshandoff.RunningForkCheckpointResult{}, err
 	}
+	bindingText := hex.EncodeToString(binding[:])
 	parent, _, err := m.findIdentity(stage.Identity.RootFSID, stage.Identity.WriterEpoch)
 	if err != nil {
 		return rootfshandoff.RunningForkCheckpointResult{}, err
@@ -407,9 +518,30 @@ func (m *Manager) CaptureRunningFork(
 		unlock()
 		return rootfshandoff.RunningForkCheckpointResult{}, err
 	}
-	if !sameBinding(current, stage, hex.EncodeToString(binding[:])) || current.State != stateReady || current.Stage == nil {
+	if !sameBinding(current, stage, bindingText) || current.State != stateReady || current.Stage == nil {
 		unlock()
 		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("RootFS session is not a live matching writer: %w", errdefs.ErrFailedPrecondition)
+	}
+	if current.RunningForkRequest != nil {
+		if *current.RunningForkRequest != request {
+			unlock()
+			return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf(
+				"RootFS session has another pending running fork %q: %w",
+				current.RunningForkRequest.OperationID, errdefs.ErrAlreadyExists,
+			)
+		}
+		if current.RunningForkResult == nil {
+			unlock()
+			return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf(
+				"running fork %q is still being captured: %w", request.OperationID, errdefs.ErrUnavailable,
+			)
+		}
+		result := *current.RunningForkResult
+		unlock()
+		if err := result.Validate(); err != nil {
+			return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("validate cached running fork checkpoint: %w", err)
+		}
+		return result, nil
 	}
 	m.mu.Lock()
 	live := m.live[parent]
@@ -418,6 +550,14 @@ func (m *Manager) CaptureRunningFork(
 		unlock()
 		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("RootFS session has no live branch owner: %w", errdefs.ErrUnavailable)
 	}
+	m.mu.Lock()
+	m.captures[parent] = true
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.captures, parent)
+		m.mu.Unlock()
+	}()
 	if current.FreezeOperationID != "" {
 		if err := m.runtime.ThawXFS(current.XFSRoot); err != nil {
 			unlock()
@@ -429,6 +569,8 @@ func (m *Manager) CaptureRunningFork(
 			return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("clear prior RootFS freeze intent: %w", err)
 		}
 	}
+	current.RunningForkRequest = &request
+	current.RunningForkResult = nil
 	current.FreezeOperationID = request.OperationID
 	current.Version = sessionSchemaVersion
 	if err := m.save(current); err != nil {
@@ -439,6 +581,7 @@ func (m *Manager) CaptureRunningFork(
 		thawErr := m.runtime.ThawXFS(current.XFSRoot)
 		if thawErr == nil {
 			current.FreezeOperationID = ""
+			current.RunningForkRequest = nil
 			thawErr = m.save(current)
 		}
 		unlock()
@@ -452,6 +595,9 @@ func (m *Manager) CaptureRunningFork(
 	var clearErr error
 	if thawErr == nil {
 		current.FreezeOperationID = ""
+		if checkpointErr != nil {
+			current.RunningForkRequest = nil
+		}
 		clearErr = m.save(current)
 	}
 	unlock()
@@ -469,13 +615,19 @@ func (m *Manager) CaptureRunningFork(
 	base, err := rootfsblock.DecodeDescriptor(current.BaseDescriptor)
 	if err != nil {
 		_ = checkpoint.Close()
-		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("decode running fork base generation: %w", err)
+		clearErr := m.clearRunningForkCapture(parent, request)
+		return rootfshandoff.RunningForkCheckpointResult{}, errors.Join(
+			fmt.Errorf("decode running fork base generation: %w", err), clearErr,
+		)
 	}
 	sealed, payload, durability, err := buildBranchCheckpoint(ctx, checkpoint, base, m.source, m.publisher)
 	checkpointSequence := checkpoint.Sequence()
 	err = errors.Join(err, checkpoint.Close())
 	if err != nil {
-		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("publish running fork checkpoint: %w", err)
+		clearErr := m.clearRunningForkCapture(parent, request)
+		return rootfshandoff.RunningForkCheckpointResult{}, errors.Join(
+			fmt.Errorf("publish running fork checkpoint: %w", err), clearErr,
+		)
 	}
 	generation := rootfshandoff.GenerationDescriptor{
 		Version: rootfshandoff.GenerationDescriptorVersion, GenerationID: request.TargetGenerationID,
@@ -490,21 +642,68 @@ func (m *Manager) CaptureRunningFork(
 		SourceSandboxID: request.SourceSandboxID, SourceFilesystemID: stage.Identity.RootFSID,
 		TargetSandboxID: request.TargetSandboxID, SourceWriterGrantID: stage.Identity.WriterGrantID,
 		SourceWriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
-		BindingDigest: hex.EncodeToString(binding[:]), ExpectedSourceGenerationID: stage.InitialGeneration,
+		BindingDigest: bindingText, ExpectedSourceGenerationID: stage.InitialGeneration,
 		CheckpointGenerationID: request.TargetGenerationID, CheckpointSequence: checkpointSequence,
 		CheckpointDescriptorDigest: digest.FromBytes(payload).String(),
 	}
 	proofDigest, err := proof.Digest()
 	if err != nil {
-		return rootfshandoff.RunningForkCheckpointResult{}, err
+		clearErr := m.clearRunningForkCapture(parent, request)
+		return rootfshandoff.RunningForkCheckpointResult{}, errors.Join(err, clearErr)
 	}
 	result := rootfshandoff.RunningForkCheckpointResult{
 		Generation: generation, Proof: proof, ProofDigest: hex.EncodeToString(proofDigest[:]),
 	}
 	if err := result.Validate(); err != nil {
+		clearErr := m.clearRunningForkCapture(parent, request)
+		return rootfshandoff.RunningForkCheckpointResult{}, errors.Join(err, clearErr)
+	}
+	if err := m.storeRunningForkResult(parent, stage, bindingText, request, result); err != nil {
 		return rootfshandoff.RunningForkCheckpointResult{}, err
 	}
 	return result, nil
+}
+
+func (m *Manager) storeRunningForkResult(
+	parent string,
+	stage rootfshandoff.StageRequest,
+	binding string,
+	request rootfshandoff.RunningForkCheckpointRequest,
+	result rootfshandoff.RunningForkCheckpointResult,
+) error {
+	unlock := m.lock(parent)
+	defer unlock()
+	current, err := m.load(parent)
+	if err != nil {
+		return err
+	}
+	if current.RunningForkRequest == nil || *current.RunningForkRequest != request ||
+		!sameBinding(current, stage, binding) || current.State != stateReady {
+		if current.RunningForkRequest != nil && *current.RunningForkRequest == request && current.RunningForkResult == nil {
+			current.RunningForkRequest = nil
+			_ = m.save(current)
+		}
+		return fmt.Errorf("RootFS writer changed while its running fork published: %w", errdefs.ErrFailedPrecondition)
+	}
+	current.RunningForkResult = &result
+	return m.save(current)
+}
+
+func (m *Manager) clearRunningForkCapture(parent string, request rootfshandoff.RunningForkCheckpointRequest) error {
+	unlock := m.lock(parent)
+	defer unlock()
+	current, err := m.load(parent)
+	if err != nil {
+		return err
+	}
+	if current.RunningForkRequest == nil {
+		return nil
+	}
+	if *current.RunningForkRequest != request || current.RunningForkResult != nil {
+		return fmt.Errorf("running fork capture ownership changed: %w", errdefs.ErrFailedPrecondition)
+	}
+	current.RunningForkRequest = nil
+	return m.save(current)
 }
 
 func wrapIfError(operation string, err error) error {

@@ -36,6 +36,16 @@ type PublishGenerationRequest struct {
 	Generation              sandboxstore.RootFSGeneration `json:"generation"`
 }
 
+// PublishRunningForkRequest submits a durable node checkpoint while leaving
+// the exact source writer active. Regional identity is repeated outside the
+// proof so handlers can reject a mismatched binding before entering storage.
+type PublishRunningForkRequest struct {
+	WriterEpoch    int64                                     `json:"writer_epoch"`
+	BindingVersion int                                       `json:"binding_version"`
+	BindingDigest  string                                    `json:"binding_digest"`
+	Checkpoint     rootfshandoff.RunningForkCheckpointResult `json:"checkpoint"`
+}
+
 // CrashAbandonBeginRequest asks the regional authority to fence one expired
 // writer before the node discards its unsealed physical branch.
 type CrashAbandonBeginRequest struct {
@@ -137,6 +147,51 @@ func (c *ManagerClient) PublishWriterGrant(ctx context.Context, stage rootfshand
 		return fmt.Errorf("invalid terminal writer publication: %w", errdefs.ErrInvalidArgument)
 	}
 	return c.putWriterGrant(ctx, "publish", protocol.TerminalPath(stage.Identity.WriterGrantID)+"/publish", request, nil)
+}
+
+// PublishRunningFork atomically installs a live checkpoint on its paused
+// target without advancing or retiring the source writer.
+func (c *ManagerClient) PublishRunningFork(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	fork rootfshandoff.RunningForkCheckpointRequest,
+	checkpoint rootfshandoff.RunningForkCheckpointResult,
+) error {
+	request, err := publishRunningForkRequest(stage, fork, checkpoint)
+	if err != nil {
+		return err
+	}
+	return c.putWriterGrant(ctx, "publish running fork", protocol.RunningForkPath(stage.Identity.WriterGrantID), request, nil)
+}
+
+func publishRunningForkRequest(
+	stage rootfshandoff.StageRequest,
+	fork rootfshandoff.RunningForkCheckpointRequest,
+	checkpoint rootfshandoff.RunningForkCheckpointResult,
+) (PublishRunningForkRequest, error) {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return PublishRunningForkRequest{}, err
+	}
+	if err := fork.Validate(); err != nil {
+		return PublishRunningForkRequest{}, fmt.Errorf("validate running fork request: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if err := checkpoint.Validate(); err != nil {
+		return PublishRunningForkRequest{}, fmt.Errorf("validate running fork checkpoint: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	proof := checkpoint.Proof
+	if proof.OperationID != fork.OperationID || proof.SourceSandboxID != fork.SourceSandboxID ||
+		proof.TargetSandboxID != fork.TargetSandboxID || proof.CheckpointGenerationID != fork.TargetGenerationID ||
+		proof.SourceFilesystemID != stage.Identity.RootFSID ||
+		proof.SourceWriterGrantID != stage.Identity.WriterGrantID || proof.SourceWriterEpoch != binding.WriterEpoch ||
+		proof.BindingVersion != binding.BindingVersion || proof.BindingDigest != binding.BindingDigest ||
+		proof.ExpectedSourceGenerationID != stage.InitialGeneration {
+		return PublishRunningForkRequest{}, fmt.Errorf("running fork checkpoint does not match the writer binding: %w", errdefs.ErrInvalidArgument)
+	}
+	return PublishRunningForkRequest{
+		WriterEpoch: binding.WriterEpoch, BindingVersion: binding.BindingVersion,
+		BindingDigest: binding.BindingDigest, Checkpoint: checkpoint,
+	}, nil
 }
 
 // BeginCrashAbandonWriterGrant establishes the regional lease fence before

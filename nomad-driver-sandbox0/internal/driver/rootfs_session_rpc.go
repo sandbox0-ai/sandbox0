@@ -76,6 +76,30 @@ func newRootFSSessionClient(socketPath string) (*rootFSSessionClient, error) {
 	return &rootFSSessionClient{http: &http.Client{Transport: transport}}, nil
 }
 
+// RequestRunningRootFSFork asks the root-owned node daemon to capture and
+// regionally publish one exact live checkpoint. It is the narrow control
+// entrypoint used by node administration tooling; the socket remains the
+// authorization boundary.
+func RequestRunningRootFSFork(
+	ctx context.Context,
+	socketPath string,
+	stage rootfshandoff.StageRequest,
+	fork rootfshandoff.RunningForkCheckpointRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	client, err := newRootFSSessionClient(socketPath)
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	result, err := client.CaptureRunningFork(ctx, stage.WithoutWriterGrantToken(), fork)
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	if err := result.Validate(); err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("validate session daemon running fork result: %w: %w", err, errdefs.ErrUnavailable)
+	}
+	return result, nil
+}
+
 func (c *rootFSSessionClient) Ensure(
 	ctx context.Context,
 	stage rootfshandoff.StageRequest,

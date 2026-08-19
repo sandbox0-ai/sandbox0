@@ -52,6 +52,7 @@ type rootFSWriterAuthority interface {
 	ConsumeWriterGrant(context.Context, rootfshandoff.StageRequest) (protocol.LeaseObservation, error)
 	RenewWriterGrant(context.Context, rootfshandoff.StageRequest) (protocol.LeaseObservation, error)
 	PublishWriterGrant(context.Context, rootfshandoff.StageRequest, managerauthority.PublishGenerationRequest) error
+	PublishRunningFork(context.Context, rootfshandoff.StageRequest, rootfshandoff.RunningForkCheckpointRequest, rootfshandoff.RunningForkCheckpointResult) error
 	BeginCrashAbandonWriterGrant(context.Context, rootfshandoff.StageRequest, string) error
 	CompleteCrashAbandonWriterGrant(context.Context, rootfshandoff.StageRequest, string, rootfshandoff.CrashFenceProof) error
 	CancelUnconsumedWriterGrant(context.Context, rootfshandoff.StageRequest) error
@@ -73,7 +74,21 @@ func (r *rootfsRuntime) CaptureRunningFork(
 	request rootfshandoff.StageRequest,
 	fork rootfshandoff.RunningForkCheckpointRequest,
 ) (rootfshandoff.RunningForkCheckpointResult, error) {
-	return r.sessions.CaptureRunningFork(ctx, request.WithoutWriterGrantToken(), fork)
+	if r.authority == nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("RootFS writer authority is not configured: %w", errdefs.ErrUnavailable)
+	}
+	durable := request.WithoutWriterGrantToken()
+	checkpoint, err := r.sessions.CaptureRunningFork(ctx, durable, fork)
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	if err := r.authority.PublishRunningFork(ctx, durable, fork, checkpoint); err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	if err := r.sessions.AcknowledgeRunningFork(durable, fork.OperationID, checkpoint.ProofDigest); err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("acknowledge regional running fork: %w", err)
+	}
+	return checkpoint, nil
 }
 
 // RootFSConsumerRequest binds the durable block writer to the exact host
@@ -159,6 +174,9 @@ func newEmbeddedRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootf
 	}
 	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	err = sessions.ReconcileFreezes(reconcileCtx)
+	if err == nil {
+		err = sessions.ReconcileRunningForkCaptures(reconcileCtx)
+	}
 	if err == nil {
 		err = sessions.ReconcileReleases(reconcileCtx)
 	}

@@ -47,6 +47,7 @@ func TestRenewRequestUsesIdentityOnlyWireContract(t *testing.T) {
 	require.NotContains(t, string(payload), "lease")
 	require.NotContains(t, string(payload), "token")
 	require.Equal(t, "/internal/v1/rootfs-writer-grants/grant-1/renew", RenewPath("grant-1"))
+	require.Equal(t, "/internal/v1/rootfs-writer-grants/grant-1/fork-running", RunningForkPath("grant-1"))
 }
 
 func TestRenewRequestRejectsInvalidBinding(t *testing.T) {

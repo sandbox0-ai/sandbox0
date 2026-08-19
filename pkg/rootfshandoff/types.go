@@ -422,6 +422,9 @@ func (r RunningForkCheckpointRequest) Validate() error {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
 		}
+		if strings.TrimSpace(value) != value {
+			return fmt.Errorf("%s must use canonical whitespace-free encoding", name)
+		}
 	}
 	if r.SourceSandboxID == r.TargetSandboxID {
 		return fmt.Errorf("source and target sandboxes must differ")

@@ -710,6 +710,9 @@ func loadPublishedRootFSRebaseRetry(
 }
 
 func insertPreparedRootFSRebaseGeneration(ctx context.Context, tx pgx.Tx, generation *RootFSGeneration) error {
+	if err := ensureRootFSCompositeBacklogCapacity(ctx, tx, generation); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO manager.rootfs_generations (
 			generation_id, filesystem_id, parent_generation_id, source_oci_digest,

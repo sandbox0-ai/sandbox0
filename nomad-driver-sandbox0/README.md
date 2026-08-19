@@ -55,6 +55,17 @@ generation as the next PostgreSQL head. It also exposes the two-phase regional
 fence used to crash-abandon an unsealed writer without advancing the durable
 head. Run it with `--help` for the current flags.
 
+Serve mode also owns the regional composite-tail backlog policy and S3
+materializer. `--composite-backlog-bytes` is a shared PostgreSQL descriptor
+budget (1 GiB by default), while `--object-bucket` and the object credential
+environment variables are required. Concurrent publishers serialize on the
+singleton policy row. Once the budget is full, publication returns HTTP 507
+with `Retry-After` and keeps the exact local retire intent retryable; writer
+lease renewal continues. The materializer scans oldest-first, writes immutable
+content-addressed objects, and releases PostgreSQL backlog only after an exact
+locator-version CAS. An S3 outage therefore cannot grow region tail data past
+the configured bound.
+
 The network policy implementation is intentionally minimal: production ctld
 owns policy compilation, TPROXY, applied-token persistence, and L7 handling.
 

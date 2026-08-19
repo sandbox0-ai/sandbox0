@@ -1493,6 +1493,9 @@ func completeRootFSWriterRetireAndPublishGeneration(
 		return nil, fmt.Errorf("%w: retiring grant %s already has a proof",
 			ErrRootFSWriterGrantConflict, normalized.GrantID)
 	}
+	if err := ensureRootFSCompositeBacklogCapacity(ctx, db, generation); err != nil {
+		return nil, err
+	}
 
 	if _, err := db.Exec(ctx, `
 		INSERT INTO manager.rootfs_generations (

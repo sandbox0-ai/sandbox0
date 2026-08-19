@@ -21,6 +21,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -34,9 +35,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	managerauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/nomad-driver-sandbox0/internal/writerauthority"
+	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
@@ -64,6 +68,13 @@ func main() {
 	renewalGrace := flag.Duration("renewal-grace", 0, "writer renewal grace; default lease-ttl/2 capped at 5s")
 	allowedClients := flag.String("allowed-clients", "", "comma-separated cn:nodeUID:podUID")
 	skipMigrations := flag.Bool("skip-migrations", false, "skip sandbox store migrations")
+	compositeBacklogBytes := flag.Int64("composite-backlog-bytes", sandboxstore.DefaultRootFSCompositeBacklogBytes, "regional PostgreSQL composite descriptor budget")
+	materializerInterval := flag.Duration("materializer-interval", rootfsmaterializer.DefaultInterval, "S3 materializer scan interval")
+	materializerScanLimit := flag.Int("materializer-scan-limit", rootfsmaterializer.DefaultScanLimit, "maximum composite generations scanned per pass")
+	objectType := flag.String("object-type", "s3", "RootFS object-store type")
+	objectBucket := flag.String("object-bucket", "", "RootFS object-store bucket (required in serve mode)")
+	objectRegion := flag.String("object-region", "us-east-1", "RootFS object-store region")
+	objectEndpoint := flag.String("object-endpoint", "", "RootFS object-store endpoint")
 
 	sandboxID := flag.String("sandbox-id", "", "issue: sandbox ID")
 	teamID := flag.String("team-id", "team-1", "issue: team ID")
@@ -119,7 +130,17 @@ func main() {
 
 	switch *mode {
 	case "serve":
-		if err := serve(ctx, store, *address, *certFile, *keyFile, *clientCAFile, *leaseTTL, *renewalGrace, *allowedClients); err != nil {
+		if err := store.SetRootFSCompositeBacklogLimit(ctx, *compositeBacklogBytes); err != nil {
+			fatal("serve: configure composite backlog: %v", err)
+		}
+		materializer, err := newMaterializer(store, materializerConfig{
+			objectType: *objectType, bucket: *objectBucket, region: *objectRegion,
+			endpoint: *objectEndpoint, interval: *materializerInterval, scanLimit: *materializerScanLimit,
+		})
+		if err != nil {
+			fatal("serve: create materializer: %v", err)
+		}
+		if err := serve(ctx, store, materializer, *address, *certFile, *keyFile, *clientCAFile, *leaseTTL, *renewalGrace, *allowedClients); err != nil {
 			fatal("serve: %v", err)
 		}
 	case "issue":
@@ -283,11 +304,15 @@ func readStageOption(path string) *rootfshandoff.StageRequest {
 func serve(
 	ctx context.Context,
 	store *sandboxstore.PGSandboxStore,
+	materializer *rootfsmaterializer.Worker,
 	address, certFile, keyFile, clientCAFile string,
 	leaseTTL time.Duration,
 	renewalGrace time.Duration,
 	allowedClients string,
 ) error {
+	if materializer == nil {
+		return fmt.Errorf("rootfs materializer is required")
+	}
 	if strings.TrimSpace(address) == "" || strings.TrimSpace(certFile) == "" ||
 		strings.TrimSpace(keyFile) == "" || strings.TrimSpace(clientCAFile) == "" {
 		return fmt.Errorf("address, certificate, key, and client CA are required")
@@ -314,7 +339,15 @@ func serve(
 	mux := http.NewServeMux()
 	mux.Handle("/internal/v1/rootfs-writer-grants", http.NotFoundHandler())
 	mux.Handle("/internal/v1/rootfs-writer-grants/", newPublishHandler(verifier, store, handler))
-	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, request *http.Request) {
+		usage, err := store.GetRootFSCompositeBacklogUsage(request.Context())
+		if err != nil {
+			http.Error(writer, "composite backlog unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writer.Header().Set("X-Sandbox0-RootFS-Composite-Bytes", strconv.FormatInt(usage.UsedDescriptorBytes, 10))
+		writer.Header().Set("X-Sandbox0-RootFS-Composite-Limit", strconv.FormatInt(usage.MaxDescriptorBytes, 10))
+		writer.Header().Set("X-Sandbox0-RootFS-Composite-Generations", strconv.FormatInt(usage.GenerationCount, 10))
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("ok\n"))
 	})
@@ -342,6 +375,14 @@ func serve(
 			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientRoots,
 		},
 	}
+	go materializer.Run(ctx, func(result rootfsmaterializer.Result, err error) {
+		if err != nil {
+			log.Printf("RootFS materializer: scanned=%d materialized=%d failed=%d error=%v",
+				result.Scanned, result.Materialized, result.Failed, err)
+		} else if result.Materialized > 0 {
+			log.Printf("RootFS materializer: scanned=%d materialized=%d", result.Scanned, result.Materialized)
+		}
+	})
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.ListenAndServeTLS("", "") }()
 	log.Printf("Nomad RootFS writer authority listening on %s", address)
@@ -712,10 +753,53 @@ func servePublish(
 		return tx.MarkRuntimePaused(ctx, grant.SandboxID, runtimeGeneration, time.Now().UTC())
 	})
 	if err != nil {
-		http.Error(writer, "publish regional retire: "+err.Error(), http.StatusConflict)
+		status := http.StatusConflict
+		if errors.Is(err, sandboxstore.ErrRootFSCompositeBacklogExhausted) {
+			status = http.StatusInsufficientStorage
+			writer.Header().Set("Retry-After", "1")
+		}
+		http.Error(writer, "publish regional retire: "+err.Error(), status)
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+type materializerConfig struct {
+	objectType string
+	bucket     string
+	region     string
+	endpoint   string
+	interval   time.Duration
+	scanLimit  int
+}
+
+func newMaterializer(
+	store *sandboxstore.PGSandboxStore,
+	config materializerConfig,
+) (*rootfsmaterializer.Worker, error) {
+	if strings.TrimSpace(config.bucket) == "" {
+		return nil, fmt.Errorf("object-bucket is required")
+	}
+	objects, err := objectstore.Create(objectstore.Config{
+		Type: config.objectType, Bucket: config.bucket, Region: config.region, Endpoint: config.endpoint,
+		AccessKey: os.Getenv("SANDBOX0_ROOTFS_OBJECT_ACCESS_KEY"),
+		SecretKey: os.Getenv("SANDBOX0_ROOTFS_OBJECT_SECRET_KEY"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create RootFS object store: %w", err)
+	}
+	conditional, ok := objects.(objectstore.ConditionalStore)
+	if !ok {
+		return nil, fmt.Errorf("RootFS object store %s does not support conditional create", objects)
+	}
+	if err := objects.Create(); err != nil && !strings.Contains(strings.ToLower(err.Error()), "alreadyownedbyyou") {
+		return nil, fmt.Errorf("create RootFS bucket: %w", err)
+	}
+	return rootfsmaterializer.New(rootfsmaterializer.Config{
+		Store: store, Source: conditional,
+		Publisher: rootfsblock.ObjectStorePublisher{Store: conditional},
+		ScanLimit: config.scanLimit, Interval: config.interval,
+	})
 }
 
 type issueOptions struct {

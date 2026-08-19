@@ -132,6 +132,7 @@ type record struct {
 	SealedDurability          string            `json:"sealed_durability,omitempty"`
 	DetachProof               string            `json:"detach_proof,omitempty"`
 	CrashFence                *crashFenceRecord `json:"crash_fence,omitempty"`
+	BranchRemoved             bool              `json:"branch_removed,omitempty"`
 	Failure                   string            `json:"failure,omitempty"`
 	CreatedAt                 string            `json:"created_at"`
 	UpdatedAt                 string            `json:"updated_at"`
@@ -553,6 +554,46 @@ func (m *Manager) RetireResult(parent string, identity rootfshandoff.Identity, o
 		DurabilityState: current.SealedDurability, Descriptor: append([]byte(nil), current.SealedDescriptor...),
 		DetachProof: proof,
 	}, nil
+}
+
+// RemoveTerminalBranch deletes the node-local COW journal only after the
+// caller has made the corresponding planned publication or crash abandonment
+// terminal at the regional authority. The durable session record and terminal
+// proof remain available for idempotent retries and audit.
+func (m *Manager) RemoveTerminalBranch(parent string, identity rootfshandoff.Identity) error {
+	if strings.TrimSpace(parent) == "" || strings.TrimSpace(identity.RootFSID) == "" || identity.WriterEpoch <= 0 {
+		return fmt.Errorf("parent and writer identity are required: %w", errdefs.ErrInvalidArgument)
+	}
+	unlock := m.lock(parent)
+	defer unlock()
+	current, err := m.load(parent)
+	if err != nil {
+		return err
+	}
+	if current.RootFSID != identity.RootFSID || current.WriterEpoch != identity.WriterEpoch {
+		return fmt.Errorf("RootFS session belongs to another writer identity: %w", errdefs.ErrFailedPrecondition)
+	}
+	terminal, err := terminalDeviceProof(current)
+	if err != nil {
+		return err
+	}
+	if current.State != stateTombstoned || !terminal {
+		return fmt.Errorf("RootFS session has no terminal detach proof: %w", errdefs.ErrFailedPrecondition)
+	}
+	expected := sessionPaths(m.branchRoot, m.mountRoot, parent).branch
+	if current.BranchPath != expected {
+		return fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
+	}
+	if !current.BranchRemoved {
+		if err := os.Remove(expected); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove terminal RootFS branch: %w", err)
+		}
+		current.BranchRemoved = true
+		if err := m.save(current); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CrashFence durably proves that a non-cooperatively stopped session has no

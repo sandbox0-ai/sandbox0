@@ -81,15 +81,28 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, RootFSWriterGrantStateConsumed, consumed.State)
+	wrongNodeStart := &StartRuntimeSlotRequest{
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: "other-node", NodeBootID: registration.NodeBootID,
+		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
+		LaunchAttempt: "launch-a", RunscContainerID: "runsc-a",
+		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0x55}, 32),
+	}
+	_, err = store.StartRuntimeSlot(ctx, wrongNodeStart)
+	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
 	started, err := store.StartRuntimeSlot(ctx, &StartRuntimeSlotRequest{
-		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
 		LaunchAttempt: "launch-a", RunscContainerID: "runsc-a",
 		RootFSBindingDigest: binding, ClaimNetworkDigest: bytes.Repeat([]byte{0x55}, 32),
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateStarting, started.State)
 	active, err := store.MarkRuntimeSlotCommandReady(ctx, &MarkRuntimeSlotCommandReadyRequest{
-		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
 		ProcdInstanceID: "procd-a", CommandReadyDigest: bytes.Repeat([]byte{0x66}, 32),
 	})
 	require.NoError(t, err)

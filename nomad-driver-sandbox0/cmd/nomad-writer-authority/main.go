@@ -37,11 +37,13 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	managerauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/nomad-driver-sandbox0/internal/writerauthority"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	runtimeslotprotocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 type migrateLogger struct {
@@ -65,6 +67,7 @@ func main() {
 	keyFile := flag.String("key-file", "", "server private key")
 	clientCAFile := flag.String("client-ca-file", "", "client CA bundle")
 	leaseTTL := flag.Duration("lease-ttl", 30*time.Second, "writer lease TTL")
+	runtimeSlotHeartbeatTTL := flag.Duration("runtime-slot-heartbeat-ttl", 30*time.Second, "runtime slot heartbeat TTL")
 	renewalGrace := flag.Duration("renewal-grace", 0, "writer renewal grace; default lease-ttl/2 capped at 5s")
 	allowedClients := flag.String("allowed-clients", "", "comma-separated cn:nodeUID:podUID")
 	skipMigrations := flag.Bool("skip-migrations", false, "skip sandbox store migrations")
@@ -140,7 +143,8 @@ func main() {
 		if err != nil {
 			fatal("serve: create materializer: %v", err)
 		}
-		if err := serve(ctx, store, materializer, *address, *certFile, *keyFile, *clientCAFile, *leaseTTL, *renewalGrace, *allowedClients); err != nil {
+		if err := serve(ctx, store, materializer, *address, *certFile, *keyFile, *clientCAFile,
+			*leaseTTL, *renewalGrace, *runtimeSlotHeartbeatTTL, *allowedClients); err != nil {
 			fatal("serve: %v", err)
 		}
 	case "issue":
@@ -308,6 +312,7 @@ func serve(
 	address, certFile, keyFile, clientCAFile string,
 	leaseTTL time.Duration,
 	renewalGrace time.Duration,
+	runtimeSlotHeartbeatTTL time.Duration,
 	allowedClients string,
 ) error {
 	if materializer == nil {
@@ -325,8 +330,9 @@ func serve(
 		renewalGrace = leaseTTL / 2
 	}
 	renewalGrace = min(renewalGrace, 5*time.Second)
+	verifier := writerauthority.NewCertVerifier(identities)
 	handler, err := managerauthority.NewHandler(managerauthority.HandlerConfig{
-		Verifier: writerauthority.NewCertVerifier(identities),
+		Verifier: verifier,
 		Store:    store, LeaseTTL: leaseTTL,
 		RenewalPolicy: sandboxstore.RootFSWriterLeaseRenewalPolicy{
 			LeaseTTL: leaseTTL, GracePeriod: renewalGrace,
@@ -335,10 +341,17 @@ func serve(
 	if err != nil {
 		return fmt.Errorf("create writer handler: %w", err)
 	}
-	verifier := writerauthority.NewCertVerifier(identities)
+	runtimeSlotHandler, err := runtimeslotauthority.NewHandler(runtimeslotauthority.HandlerConfig{
+		Verifier: verifier, Store: store, HeartbeatTTL: runtimeSlotHeartbeatTTL,
+	})
+	if err != nil {
+		return fmt.Errorf("create runtime slot handler: %w", err)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/internal/v1/rootfs-writer-grants", http.NotFoundHandler())
 	mux.Handle("/internal/v1/rootfs-writer-grants/", newPublishHandler(verifier, store, handler))
+	mux.Handle(strings.TrimSuffix(runtimeslotprotocol.PathPrefix, "/"), http.NotFoundHandler())
+	mux.Handle(runtimeslotprotocol.PathPrefix, runtimeSlotHandler)
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, request *http.Request) {
 		usage, err := store.GetRootFSCompositeBacklogUsage(request.Context())
 		if err != nil {

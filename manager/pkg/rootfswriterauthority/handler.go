@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
@@ -28,14 +29,8 @@ const (
 	preconsumeAbortPathSuffix  = "/terminal/preconsume-abort"
 )
 
-type CallerIdentity struct {
-	NodeUID string
-	PodUID  string
-}
-
-type CallerVerifier interface {
-	Verify(context.Context, string) (CallerIdentity, error)
-}
+type CallerIdentity = nodeauth.Identity
+type CallerVerifier = nodeauth.Verifier
 
 type GrantStore interface {
 	ConsumeRootFSWriterGrant(context.Context, *sandboxstore.ConsumeRootFSWriterGrantRequest) (*sandboxstore.RootFSWriterGrant, error)

@@ -39,10 +39,12 @@ Implemented:
 - fail-closed plugin/session-daemon crash cleanup, regional crash abandonment,
   and fallback to the last durable generation
 - unit tests with a fake runsc runtime
+- PostgreSQL-backed regional warm-slot authority and authenticated v1 node API
+  for register, readiness, heartbeat, runsc starting, and command readiness
 
 Not implemented:
 
-- manager/ctld integration and slot registry
+- manager/ctld/driver lifecycle integration with the regional slot registry
 - production remote-block service and cross-node device ownership
 - full network-policy incarnation-token persistence
 - procd first-command-ready accounting
@@ -77,6 +79,14 @@ lease renewal continues. The materializer scans oldest-first, writes immutable
 content-addressed objects, and releases PostgreSQL backlog only after an exact
 locator-version CAS. An S3 outage therefore cannot grow region tail data past
 the configured bound.
+
+The same mTLS listener exposes `/internal/v1/runtime-slots/{slot_id}` and its
+`ready`, `heartbeat`, `starting`, and `command-ready` PUT transitions.
+`--runtime-slot-heartbeat-ttl` is server policy; node requests cannot choose
+their own liveness duration or node UID. The PostgreSQL registry remains
+authoritative after a Nomad allocation is purged. The protocol and client are
+implemented, but the task driver does not register or heartbeat allocations
+yet, and no production manager claim controller consumes the registry.
 
 The network policy implementation is intentionally minimal: production ctld
 owns policy compilation, TPROXY, applied-token persistence, and L7 handling.

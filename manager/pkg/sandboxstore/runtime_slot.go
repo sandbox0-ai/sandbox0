@@ -13,17 +13,18 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/opencontainers/go-digest"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 const (
-	RuntimeSlotStateRegistered    = "registered"
-	RuntimeSlotStateFastpathReady = "fastpath_ready"
-	RuntimeSlotStateClaiming      = "claiming"
-	RuntimeSlotStateStarting      = "starting"
-	RuntimeSlotStateActive        = "active"
-	RuntimeSlotStateQuiescing     = "quiescing"
-	RuntimeSlotStateOrphaned      = "orphaned"
-	RuntimeSlotStateTerminal      = "terminal"
+	RuntimeSlotStateRegistered    = string(protocol.StateRegistered)
+	RuntimeSlotStateFastpathReady = string(protocol.StateFastpathReady)
+	RuntimeSlotStateClaiming      = string(protocol.StateClaiming)
+	RuntimeSlotStateStarting      = string(protocol.StateStarting)
+	RuntimeSlotStateActive        = string(protocol.StateActive)
+	RuntimeSlotStateQuiescing     = string(protocol.StateQuiescing)
+	RuntimeSlotStateOrphaned      = string(protocol.StateOrphaned)
+	RuntimeSlotStateTerminal      = string(protocol.StateTerminal)
 
 	DefaultRuntimeSlotHeartbeatTTL = 30 * time.Second
 	DefaultRuntimeSlotClaimTTL     = 15 * time.Second
@@ -138,6 +139,9 @@ type BindRuntimeSlotWriterGrantRequest struct {
 
 type StartRuntimeSlotRequest struct {
 	SlotID              string
+	AllocationID        string
+	NodeUID             string
+	NodeBootID          string
 	OperationID         string
 	ClaimID             string
 	LaunchAttempt       string
@@ -148,6 +152,9 @@ type StartRuntimeSlotRequest struct {
 
 type MarkRuntimeSlotCommandReadyRequest struct {
 	SlotID             string
+	AllocationID       string
+	NodeUID            string
+	NodeBootID         string
 	OperationID        string
 	ClaimID            string
 	ProcdInstanceID    string
@@ -440,6 +447,9 @@ func (s *PGSandboxStore) StartRuntimeSlot(ctx context.Context, request *StartRun
 		return nil, err
 	}
 	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
+		if !runtimeSlotCallerMatches(slot, normalized.AllocationID, normalized.NodeUID, normalized.NodeBootID) {
+			return nil, fmt.Errorf("%w: start caller does not match slot incarnation", ErrRuntimeSlotConflict)
+		}
 		if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
 			return nil, fmt.Errorf("%w: start caller does not match slot claim", ErrRuntimeSlotConflict)
 		}
@@ -490,6 +500,9 @@ func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, reques
 		return nil, err
 	}
 	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
+		if !runtimeSlotCallerMatches(slot, normalized.AllocationID, normalized.NodeUID, normalized.NodeBootID) {
+			return nil, fmt.Errorf("%w: command-ready caller does not match slot incarnation", ErrRuntimeSlotConflict)
+		}
 		if !runtimeSlotClaimIdentityMatches(slot, normalized.OperationID, normalized.ClaimID) {
 			return nil, fmt.Errorf("%w: command-ready caller does not match slot claim", ErrRuntimeSlotConflict)
 		}
@@ -840,7 +853,10 @@ func normalizeStartRuntimeSlotRequest(request *StartRuntimeSlotRequest) (*StartR
 		return nil, fmt.Errorf("start runtime slot request is required")
 	}
 	normalized := *request
-	if err := normalizeRuntimeSlotClaimIDs(&normalized.SlotID, &normalized.OperationID, &normalized.ClaimID); err != nil {
+	if err := normalizeRuntimeSlotNodeClaim(
+		&normalized.SlotID, &normalized.AllocationID, &normalized.NodeUID, &normalized.NodeBootID,
+		&normalized.OperationID, &normalized.ClaimID,
+	); err != nil {
 		return nil, err
 	}
 	normalized.LaunchAttempt = strings.TrimSpace(normalized.LaunchAttempt)
@@ -866,7 +882,10 @@ func normalizeMarkRuntimeSlotCommandReadyRequest(request *MarkRuntimeSlotCommand
 		return nil, fmt.Errorf("mark runtime slot command ready request is required")
 	}
 	normalized := *request
-	if err := normalizeRuntimeSlotClaimIDs(&normalized.SlotID, &normalized.OperationID, &normalized.ClaimID); err != nil {
+	if err := normalizeRuntimeSlotNodeClaim(
+		&normalized.SlotID, &normalized.AllocationID, &normalized.NodeUID, &normalized.NodeBootID,
+		&normalized.OperationID, &normalized.ClaimID,
+	); err != nil {
 		return nil, err
 	}
 	normalized.ProcdInstanceID = strings.TrimSpace(normalized.ProcdInstanceID)
@@ -935,6 +954,20 @@ func normalizeRuntimeSlotClaimIDs(slotID, operationID, claimID *string) error {
 	fields := map[string]*string{
 		"slot_id": slotID, "operation_id": operationID, "claim_id": claimID,
 	}
+	for name, value := range fields {
+		*value = strings.TrimSpace(*value)
+		if *value == "" || len(*value) > 512 {
+			return fmt.Errorf("%s is required and must not exceed 512 bytes", name)
+		}
+	}
+	return nil
+}
+
+func normalizeRuntimeSlotNodeClaim(slotID, allocationID, nodeUID, nodeBootID, operationID, claimID *string) error {
+	if err := normalizeRuntimeSlotCaller(slotID, allocationID, nodeUID, nodeBootID); err != nil {
+		return err
+	}
+	fields := map[string]*string{"operation_id": operationID, "claim_id": claimID}
 	for name, value := range fields {
 		*value = strings.TrimSpace(*value)
 		if *value == "" || len(*value) > 512 {

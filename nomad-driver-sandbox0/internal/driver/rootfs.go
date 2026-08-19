@@ -168,6 +168,16 @@ func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageR
 	// retryable with the same operation, so it must keep renewing until either a
 	// retry publishes the head or crash recovery fences the writer.
 	if err := r.sessions.BeginRetire(request.Parent, request.Identity, operationID); err != nil {
+		if errdefs.IsNotFound(err) && r.authority != nil {
+			if verifyErr := r.authority.VerifyTerminalWriterGrant(ctx, request); verifyErr == nil {
+				r.stopRenewal(request.Parent)
+				return rootfssession.RetireResult{}, nil
+			} else {
+				return rootfssession.RetireResult{}, errors.Join(
+					err, fmt.Errorf("verify forgotten regional writer retirement: %w", verifyErr),
+				)
+			}
+		}
 		return rootfssession.RetireResult{}, err
 	}
 	if err := r.releaseRetiringSession(ctx, request); err != nil {
@@ -203,7 +213,13 @@ func (r *rootfsRuntime) Retire(ctx context.Context, request rootfshandoff.StageR
 		}
 		r.stopRenewal(request.Parent)
 		if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil {
-			return result, fmt.Errorf("remove published RootFS branch: %w", err)
+			return result, fmt.Errorf("reclaim published RootFS artifacts: %w", err)
+		}
+		if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err != nil {
+			return result, fmt.Errorf("verify published regional writer retirement: %w", err)
+		}
+		if err := r.sessions.ForgetVerifiedTerminal(request.Parent, request.Identity); err != nil {
+			return result, fmt.Errorf("forget published RootFS session: %w", err)
 		}
 		return result, nil
 	}
@@ -253,6 +269,11 @@ func (r *rootfsRuntime) CrashFence(
 		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("regional writer authority is required for crash fencing")
 	}
 	r.stopRenewal(request.Parent)
+	if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err == nil {
+		return rootfshandoff.CrashFenceProof{}, nil
+	} else if !errdefs.IsFailedPrecondition(err) {
+		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("verify previous regional crash retirement: %w", err)
+	}
 	if err := r.awaitRegionalCrashFence(ctx, request, operationID); err != nil {
 		return rootfshandoff.CrashFenceProof{}, err
 	}
@@ -293,7 +314,13 @@ func (r *rootfsRuntime) CrashFence(
 		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("complete regional writer crash abandon: %w", err)
 	}
 	if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil {
-		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("remove crash-abandoned RootFS branch: %w", err)
+		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("reclaim crash-abandoned RootFS artifacts: %w", err)
+	}
+	if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err != nil {
+		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("verify crash-abandoned regional writer retirement: %w", err)
+	}
+	if err := r.sessions.ForgetVerifiedTerminal(request.Parent, request.Identity); err != nil {
+		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("forget crash-abandoned RootFS session: %w", err)
 	}
 	return proof, nil
 }

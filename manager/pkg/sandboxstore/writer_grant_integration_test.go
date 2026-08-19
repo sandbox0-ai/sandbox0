@@ -119,6 +119,36 @@ func TestRootFSWriterGrantCancelAndCAS(t *testing.T) {
 	assert.Equal(t, int64(2), next.Grant.WriterEpoch)
 }
 
+func TestRootFSWriterGrantGateParentIsGloballyOneShot(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	require.NoError(t, store.UpsertSandbox(ctx, rootFSTestSandboxRecord("sandbox-a", "team-a")))
+
+	bindingA := sha256.Sum256([]byte("binding-a"))
+	first := rootFSWriterGrantTestIssueRequest("sandbox-a", "grant-a", "claim-a", "slot-a", bindingA[:])
+	issued, err := store.IssueRootFSWriterGrant(ctx, first)
+	require.NoError(t, err)
+	_, err = store.CancelRootFSWriterGrant(ctx, &CancelRootFSWriterGrantRequest{
+		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch,
+		OperationID: first.OperationID, BindingVersion: RootFSWriterBindingVersion,
+		BindingDigest: bindingA[:],
+	})
+	require.NoError(t, err)
+
+	bindingB := sha256.Sum256([]byte("binding-b"))
+	second := rootFSWriterGrantTestIssueRequest("sandbox-a", "grant-b", "claim-b", "slot-b", bindingB[:])
+	second.ExpectedWriterEpoch = issued.Grant.WriterEpoch
+	second.GateParent = first.GateParent
+	_, err = store.IssueRootFSWriterGrant(ctx, second)
+	require.ErrorIs(t, err, ErrRootFSWriterGrantConflict)
+
+	filesystem, err := store.GetRootFSFilesystem(ctx, "sandbox-a")
+	require.NoError(t, err)
+	require.Equal(t, issued.Grant.WriterEpoch, filesystem.WriterEpoch,
+		"failed one-shot parent reuse must roll back the epoch CAS")
+}
+
 func TestRootFSWriterGrantRejectsBindingMismatchWithoutConsuming(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)

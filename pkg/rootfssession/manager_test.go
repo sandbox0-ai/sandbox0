@@ -3,10 +3,12 @@ package session
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -72,6 +74,69 @@ func TestManagerCrashFenceIsDurableAndOperationBound(t *testing.T) {
 	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "different-operation")
 	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
 	require.Equal(t, 1, runtime.fenceInspections)
+}
+
+func TestManagerForgetsRegionallyVerifiedPlannedTerminal(t *testing.T) {
+	manager, _, request := newTestManager(t, "forget-planned")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "retire-forget"))
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+
+	err = manager.ForgetVerifiedTerminal(request.Parent, request.Identity)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	require.NoError(t, manager.ForgetVerifiedTerminal(request.Parent, request.Identity))
+	_, err = manager.load(request.Parent)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	_, _, err = manager.findIdentity(request.Identity.RootFSID, request.Identity.WriterEpoch)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	require.NoError(t, manager.ForgetVerifiedTerminal(request.Parent, request.Identity))
+}
+
+func TestManagerForgetsRegionallyVerifiedCrashTerminal(t *testing.T) {
+	manager, _, request := newTestManager(t, "forget-crash")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "crash-forget")
+	require.NoError(t, err)
+	require.NoError(t, manager.ReclaimTerminalArtifacts(request.Parent, request.Identity))
+	require.NoError(t, manager.ForgetVerifiedTerminal(request.Parent, request.Identity))
+	_, err = manager.load(request.Parent)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+}
+
+func TestManagerTerminalForgetReusesBoltPagesAcrossChurn(t *testing.T) {
+	manager, _, _ := newTestManager(t, "forget-churn")
+	forget := func(index int) {
+		parent := digest.FromString(fmt.Sprintf("forget-parent-%d", index)).String()
+		identity := rootfshandoff.Identity{RootFSID: fmt.Sprintf("forget-rootfs-%d", index), WriterEpoch: 1}
+		paths := sessionPaths(manager.branchRoot, manager.mountRoot, parent)
+		require.NoError(t, manager.saveNew(record{
+			Version: sessionSchemaVersion, Parent: parent, RootFSID: identity.RootFSID,
+			WriterEpoch: identity.WriterEpoch, BranchPath: paths.branch, XFSRoot: paths.xfs,
+			MergedRoot: paths.merged, State: stateTombstoned, RetireOperationID: "retire-forget",
+			SealedDescriptor: []byte("descriptor"), SealedBlockHead: digest.FromString("head").String(),
+			DetachProof: strings.Repeat("01", sha256.Size), BranchRemoved: true,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}))
+		require.NoError(t, manager.ForgetVerifiedTerminal(parent, identity))
+	}
+	for index := range 100 {
+		forget(index)
+	}
+	require.NoError(t, manager.db.Sync())
+	warm, err := os.Stat(manager.db.Path())
+	require.NoError(t, err)
+	for index := 100; index < 10_000; index++ {
+		forget(index)
+	}
+	require.NoError(t, manager.db.Sync())
+	final, err := os.Stat(manager.db.Path())
+	require.NoError(t, err)
+	require.LessOrEqual(t, final.Size(), warm.Size(), "terminal churn must reuse freed Bolt pages")
 }
 
 func TestManagerCrashFenceFailsClosedUntilNBDIsDetached(t *testing.T) {

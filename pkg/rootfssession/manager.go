@@ -604,6 +604,78 @@ func (m *Manager) ReclaimTerminalArtifacts(parent string, identity rootfshandoff
 	return nil
 }
 
+// ForgetVerifiedTerminal removes one terminal session record after the caller
+// has verified the exact writer binding as retired at the regional authority.
+// Physical artifacts and the in-memory device owner must already be absent.
+// Forgetting only after regional verification keeps retry safety in the
+// durable authority while allowing the node journal to remain bounded by
+// active and unreconciled sessions instead of lifetime churn.
+func (m *Manager) ForgetVerifiedTerminal(parent string, identity rootfshandoff.Identity) error {
+	if strings.TrimSpace(parent) == "" || strings.TrimSpace(identity.RootFSID) == "" || identity.WriterEpoch <= 0 {
+		return fmt.Errorf("parent and writer identity are required: %w", errdefs.ErrInvalidArgument)
+	}
+	unlock := m.lock(parent)
+	defer unlock()
+	m.mu.Lock()
+	_, live := m.live[parent]
+	m.mu.Unlock()
+	if live {
+		return fmt.Errorf("RootFS session still has a live userspace owner: %w", errdefs.ErrFailedPrecondition)
+	}
+	current, err := m.load(parent)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if current.RootFSID != identity.RootFSID || current.WriterEpoch != identity.WriterEpoch {
+		return fmt.Errorf("RootFS session belongs to another writer identity: %w", errdefs.ErrFailedPrecondition)
+	}
+	terminal, err := terminalDeviceProof(current)
+	if err != nil {
+		return err
+	}
+	if current.State != stateTombstoned || !terminal || !current.BranchRemoved {
+		return fmt.Errorf("RootFS session has not reclaimed verified terminal artifacts: %w", errdefs.ErrFailedPrecondition)
+	}
+	paths := sessionPaths(m.branchRoot, m.mountRoot, parent)
+	if current.BranchPath != paths.branch {
+		return fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
+	}
+	for _, path := range []string{paths.branch, filepath.Dir(paths.xfs)} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("terminal RootFS artifact %q still exists: %w", path, errdefs.ErrFailedPrecondition)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect terminal RootFS artifact %q: %w", path, err)
+		}
+	}
+	return m.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(sessionBucket)
+		identityBucket := tx.Bucket(sessionIdentityBucket)
+		payload := bucket.Get([]byte(parent))
+		if payload == nil {
+			return nil
+		}
+		var stored record
+		if err := json.Unmarshal(payload, &stored); err != nil {
+			return fmt.Errorf("decode RootFS session %q: %w", parent, err)
+		}
+		if stored.RootFSID != identity.RootFSID || stored.WriterEpoch != identity.WriterEpoch ||
+			stored.State != stateTombstoned || !stored.BranchRemoved {
+			return fmt.Errorf("RootFS session changed before terminal forget: %w", errdefs.ErrFailedPrecondition)
+		}
+		identityKey := writerIdentityKey(identity.RootFSID, identity.WriterEpoch)
+		if indexed := identityBucket.Get(identityKey); string(indexed) != parent {
+			return fmt.Errorf("RootFS writer identity index does not match terminal session: %w", errdefs.ErrFailedPrecondition)
+		}
+		if err := identityBucket.Delete(identityKey); err != nil {
+			return err
+		}
+		return bucket.Delete([]byte(parent))
+	})
+}
+
 // CrashFence durably proves that a non-cooperatively stopped session has no
 // remaining userspace owner, mount, or NBD endpoint. It never seals or
 // publishes the branch. The same operation is idempotent; a competing

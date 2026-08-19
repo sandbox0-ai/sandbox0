@@ -130,7 +130,20 @@ func (commandNetworkRuntime) Cleanup(ctx context.Context, netnsPath, chain strin
 	}
 	_ = nsenter(ctx, netnsPath, "iptables", "-w", "-D", "OUTPUT", "-j", chain)
 	_ = nsenter(ctx, netnsPath, "iptables", "-w", "-F", chain)
-	return nsenter(ctx, netnsPath, "iptables", "-w", "-X", chain)
+	err := nsenter(ctx, netnsPath, "iptables", "-w", "-X", chain)
+	if err != nil && !networkCleanupAlreadyComplete(err) {
+		return err
+	}
+	return nil
+}
+
+func networkCleanupAlreadyComplete(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no chain/target/match by that name") ||
+		(strings.Contains(message, "nsenter: cannot open ") && strings.Contains(message, "no such file or directory"))
 }
 
 func (commandNetworkRuntime) reset(ctx context.Context, netnsPath, chain string) error {

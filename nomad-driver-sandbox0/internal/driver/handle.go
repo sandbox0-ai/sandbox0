@@ -120,8 +120,9 @@ type taskHandle struct {
 
 	done chan struct{}
 
-	controlOnce   sync.Once
-	controlServer *http.Server
+	controlOnce    sync.Once
+	controlServer  *http.Server
+	leaseFenceOnce sync.Once
 }
 
 func (h *taskHandle) statePath() string {
@@ -406,7 +407,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	}
 
 	if durableStage != nil {
-		mount, err := h.rootfs.Ensure(context.Background(), *request.Stage)
+		mount, err := h.rootfs.Ensure(context.Background(), *request.Stage, h.handleWriterLeaseLoss)
 		if err != nil {
 			attachErr := fmt.Errorf("attach RootFS session: %w", err)
 			var consumedErr *consumedRootFSAttachError
@@ -479,6 +480,54 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	claimSucceeded = true
 	go h.waitForExit()
 	return nil
+}
+
+// handleWriterLeaseLoss poisons the one-shot slot before exposing its exit and
+// asynchronously runs the same exact-owner crash fence used after a plugin
+// restart. Marking the phase first prevents a concurrent Nomad DestroyTask
+// from attempting planned publication with an expired writer lease.
+func (h *taskHandle) handleWriterLeaseLoss(cause error) {
+	if cause == nil {
+		return
+	}
+	h.leaseFenceOnce.Do(func() {
+		leaseErr := fmt.Errorf("RootFS writer lease lost: %w", cause)
+		h.mu.Lock()
+		if h.closed || h.phase == phaseExited || h.phase == phasePoisoned {
+			h.mu.Unlock()
+			return
+		}
+		h.phase = phasePoisoned
+		h.exitResult = &drivers.ExitResult{Err: leaseErr}
+		if h.completedAt.IsZero() {
+			h.completedAt = time.Now()
+		}
+		closeDoneLocked(h.done)
+		h.mu.Unlock()
+		if err := h.persist(); err != nil {
+			h.logger.Error("persist writer lease loss", "error", err)
+		}
+		h.logger.Error("fencing expired RootFS writer", "error", leaseErr)
+		go h.retryWriterLeaseFence()
+	})
+}
+
+func (h *taskHandle) retryWriterLeaseFence() {
+	delay := 100 * time.Millisecond
+	for {
+		if err := h.Close(true); err == nil {
+			return
+		} else {
+			h.logger.Error("fence expired RootFS writer", "error", err)
+		}
+		time.Sleep(delay)
+		if delay < 5*time.Second {
+			delay *= 2
+			if delay > 5*time.Second {
+				delay = 5 * time.Second
+			}
+		}
+	}
 }
 
 func (h *taskHandle) rollbackClaim() error {

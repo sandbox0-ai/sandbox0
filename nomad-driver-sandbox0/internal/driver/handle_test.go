@@ -167,6 +167,7 @@ type fakeRootFSRuntime struct {
 	crashCalls    int
 	lastParent    string
 	lastOperation string
+	leaseLoss     func(error)
 }
 
 type fakeNetworkRuntime struct {
@@ -199,11 +200,16 @@ type noOpCommandRunner struct{}
 
 func (noOpCommandRunner) Run(context.Context, string, ...string) error { return nil }
 
-func (r *fakeRootFSRuntime) Ensure(_ context.Context, request rootfshandoff.StageRequest) (rootfssession.Mount, error) {
+func (r *fakeRootFSRuntime) Ensure(
+	_ context.Context,
+	request rootfshandoff.StageRequest,
+	leaseLoss func(error),
+) (rootfssession.Mount, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.ensureCalls++
 	r.lastParent = request.Parent
+	r.leaseLoss = leaseLoss
 	if r.ensureErr != nil {
 		return rootfssession.Mount{}, r.ensureErr
 	}
@@ -475,6 +481,57 @@ func TestClaimUsesAuthorizedRootFSSessionAndRetiresOnClose(t *testing.T) {
 	ensureCalls, retireCalls, parent, operation := runtime.snapshot()
 	if ensureCalls != 1 || retireCalls != 1 || parent != stage.Parent || operation == "" {
 		t.Fatalf("runtime calls=(%d,%d,%q,%q), want one ensure and one retire", ensureCalls, retireCalls, parent, operation)
+	}
+}
+
+func TestWriterLeaseLossKillsTaskAndCrashAbandonsRootFS(t *testing.T) {
+	fixture := newTestFixture(t)
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stage, token, networkPolicy := newAuthorizedRootFSStage(t, source)
+	runtime := &fakeRootFSRuntime{source: source}
+	fixture.handle.rootfs = runtime
+	fixture.handle.rootfsAllowedRoot = filepath.Dir(source)
+	if err := fixture.handle.Prepare(TaskConfig{Command: "/bin/sh", WaitForClaim: true}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if err := fixture.handle.Claim(ClaimRequest{
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+	}); err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	runtime.mu.Lock()
+	leaseLoss := runtime.leaseLoss
+	runtime.mu.Unlock()
+	if leaseLoss == nil {
+		t.Fatal("RootFS runtime did not receive a lease-loss handler")
+	}
+	leaseLoss(errors.New("regional writer lease expired"))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.mu.Lock()
+		crashCalls := runtime.crashCalls
+		retireCalls := runtime.retireCalls
+		runtime.mu.Unlock()
+		status := fixture.handle.TaskStatus()
+		if crashCalls == 1 && retireCalls == 0 &&
+			status.DriverAttributes["phase"] == string(phasePoisoned) &&
+			status.DriverAttributes["root_mounted"] == "false" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	runtime.mu.Lock()
+	crashCalls, retireCalls, operation := runtime.crashCalls, runtime.retireCalls, runtime.lastOperation
+	runtime.mu.Unlock()
+	if crashCalls != 1 || retireCalls != 0 || operation != crashOperationID(stage) {
+		t.Fatalf("runtime crash=%d retire=%d operation=%q", crashCalls, retireCalls, operation)
+	}
+	if calls := fixture.runner.callsSnapshot(); !contains(calls, "kill:KILL") || !contains(calls, "delete:force") {
+		t.Fatalf("runner calls = %v, want forced writer removal", calls)
 	}
 }
 

@@ -259,6 +259,12 @@ func (r *LinuxRuntime) inspectCrashFenceDevice(devicePath string) (CrashFenceHos
 		return CrashFenceHostObservation{}, fmt.Errorf("recorded NBD device path %q is invalid", devicePath)
 	}
 	deviceName := filepath.Base(devicePath)
+	deviceRoot := filepath.Join(r.sysBlockRoot, deviceName)
+	if _, err := os.Stat(deviceRoot); errors.Is(err, os.ErrNotExist) {
+		return CrashFenceHostObservation{}, nil
+	} else if err != nil {
+		return CrashFenceHostObservation{}, fmt.Errorf("inspect NBD endpoint %s: %w", deviceRoot, err)
+	}
 	pidPath := filepath.Join(r.sysBlockRoot, deviceName, "pid")
 	pid := 0
 	payload, err := os.ReadFile(pidPath)

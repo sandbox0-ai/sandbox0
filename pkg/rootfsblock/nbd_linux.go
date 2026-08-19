@@ -254,6 +254,22 @@ func RecoverOrphanKernelNBD(ctx context.Context, devicePath, sysBlockRoot string
 	if !filepath.IsAbs(sysBlockRoot) || filepath.Clean(sysBlockRoot) == "/" {
 		return fmt.Errorf("sys block root must be a non-root absolute path")
 	}
+	pidPath := filepath.Join(filepath.Clean(sysBlockRoot), deviceName, "pid")
+	sizePath := filepath.Join(filepath.Clean(sysBlockRoot), deviceName, "size")
+	if _, statErr := os.Stat(filepath.Dir(pidPath)); errors.Is(statErr, os.ErrNotExist) {
+		// If the kernel endpoint itself is absent, no stale userspace process,
+		// mount, or open block node can keep this NBD allocation attached.
+		return nil
+	} else if statErr != nil {
+		return fmt.Errorf("inspect orphan NBD endpoint %s: %w", devicePath, statErr)
+	}
+	unused, observeErr := orphanNBDIsUnused(pidPath, sizePath)
+	if observeErr != nil {
+		return fmt.Errorf("observe orphan NBD device %s: %w", devicePath, observeErr)
+	}
+	if unused {
+		return nil
+	}
 	file, err := os.OpenFile(devicePath, os.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return fmt.Errorf("open orphan NBD device %s: %w", devicePath, err)
@@ -279,8 +295,6 @@ func RecoverOrphanKernelNBD(ctx context.Context, devicePath, sysBlockRoot string
 	defer cancel()
 	poll := time.NewTicker(time.Millisecond)
 	defer poll.Stop()
-	pidPath := filepath.Join(filepath.Clean(sysBlockRoot), deviceName, "pid")
-	sizePath := filepath.Join(filepath.Clean(sysBlockRoot), deviceName, "size")
 	for {
 		unused, observeErr := orphanNBDIsUnused(pidPath, sizePath)
 		if observeErr != nil {

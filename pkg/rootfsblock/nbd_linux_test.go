@@ -63,6 +63,10 @@ func TestOrphanNBDIsUnusedRequiresZeroPIDAndSize(t *testing.T) {
 	require.True(t, unused)
 }
 
+func TestRecoverOrphanKernelNBDAcceptsMissingKernelEndpoint(t *testing.T) {
+	require.NoError(t, RecoverOrphanKernelNBD(t.Context(), "/dev/nbd999", t.TempDir()))
+}
+
 func TestRequireUnusedNBD(t *testing.T) {
 	pidPath := filepath.Join(t.TempDir(), "pid")
 	require.NoError(t, requireUnusedNBD(pidPath))

@@ -134,6 +134,25 @@ func TestLinuxRuntimeReservationIsAllocationBoundAndIdempotent(t *testing.T) {
 	require.Equal(t, first, reused)
 }
 
+func TestLinuxRuntimeCrashFenceAcceptsMissingKernelEndpoint(t *testing.T) {
+	root := t.TempDir()
+	runtime, err := NewLinuxRuntime(LinuxRuntimeConfig{
+		DevicePaths:  []string{"/dev/nbd999"},
+		SysBlockRoot: filepath.Join(root, "sys", "block"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "sys", "block"), 0o755))
+
+	observation, err := runtime.InspectCrashFence(
+		"/dev/nbd999", filepath.Join(root, "xfs"), filepath.Join(root, "merged"),
+	)
+	require.NoError(t, err)
+	require.Zero(t, observation.NBDPID)
+	require.Empty(t, observation.NBDHolders)
+	require.True(t, observation.MergedMountAbsent)
+	require.True(t, observation.XFSMountAbsent)
+}
+
 func stringPointer(value string) *string {
 	return &value
 }

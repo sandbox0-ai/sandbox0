@@ -587,11 +587,13 @@ func (p *Plugin) RecoverTask(handle *drivers.TaskHandle) error {
 		return err
 	}
 	if err := p.startTaskControl(recovered); err != nil {
+		recovered.stopExitWatch()
 		return err
 	}
 	lifecycle, observation, err := p.activateRuntimeSlot(recovered, rootfs, false)
 	if err != nil {
 		p.stopTaskControl(recovered)
+		recovered.stopExitWatch()
 		return err
 	}
 	p.tasks.Set(state.TaskConfig.ID, recovered)

@@ -2,11 +2,13 @@ package runtimeslot
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/stretchr/testify/require"
 )
 
@@ -106,12 +108,57 @@ func TestCommandReadyProofBindsCanonicalProcdCommand(t *testing.T) {
 	require.ErrorContains(t, changed.Validate(), "canonical procd probe")
 }
 
+func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
+	request := testNodeClaimControlRequest()
+	require.NoError(t, request.ValidateRegional())
+
+	changed := request
+	changed.RootfsPath = "/host/development-root"
+	require.ErrorContains(t, changed.ValidateRegional(), "forbidden")
+	changed = request
+	changed.OperationID = ""
+	require.ErrorContains(t, changed.ValidateRegional(), "operation_id")
+	changed = request
+	changed.PolicyToken = "another-token"
+	require.ErrorContains(t, changed.ValidateRegional(), "writer grant")
+	changed = request
+	changed.NetworkPolicy = `{"mode":"allow-all"}`
+	require.ErrorContains(t, changed.ValidateRegional(), "network_policy")
+}
+
 func testRegistrationRequest() RegistrationRequest {
 	return RegistrationRequest{
 		ClusterID: "cluster", AllocationID: "allocation", AllocationNamespace: "default",
 		NodeID: "node", NodeBootID: "boot", NetNSIdentity: "netns",
 		ControlEndpoint:      "unix:///run/sandbox0/slot.sock",
 		RuntimeCompatibility: digest.FromString("amd64/runsc/directfs").String(),
+	}
+}
+
+func testNodeClaimControlRequest() NodeClaimControlRequest {
+	networkPolicy := `{"mode":"block-all"}`
+	token := strings.Repeat("writer-token-", 4)
+	stage := &rootfshandoff.StageRequest{
+		BindingVersion: rootfshandoff.WriterBindingVersion,
+		Parent:         "sha256:" + strings.Repeat("a", 64), InitialGeneration: "generation-1",
+		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{
+			PodUID: "allocation-1", PodSandboxID: "allocation-network-1", ClaimID: "claim-1",
+			NetworkEpoch: 4, PolicyDigest: NetworkPolicyDigest(networkPolicy), PodIP: "192.0.2.2",
+			CtldGeneration: "ctld-1", NetNSIdentity: "1:2",
+		},
+		Identity: rootfshandoff.Identity{
+			NodeUID: "node-uid-1", BootID: "boot-1", RuntimeGeneration: "runtime-1",
+			PodUID: "allocation-1", PodSandboxID: "allocation-network-1", ContainerName: "slot",
+			Image: "procd-image-1", Snapshotter: "nomad-driver", RuntimeName: "sandbox0-gvisor",
+			SlotNonce: "slot-1", ClaimID: "claim-1", LaunchAttempt: "attempt-1",
+			RootFSID: "filesystem-1", WriterEpoch: 4, WriterGrantID: "grant-1",
+			WriterGrantToken: token, WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest(token),
+		},
+	}
+	return NodeClaimControlRequest{
+		OperationID: "operation-1", ClaimID: stage.Identity.ClaimID,
+		PolicyToken: token, WriterEpoch: strconv.FormatInt(stage.Identity.WriterEpoch, 10),
+		Stage: stage, NetworkPolicy: networkPolicy,
 	}
 }
 

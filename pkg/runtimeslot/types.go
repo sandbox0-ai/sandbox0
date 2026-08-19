@@ -8,15 +8,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
 const (
 	PathPrefix                  = "/internal/v1/runtime-slots/"
 	ProcdCommandReadyProbePath  = "/api/v1/runtime/command-ready-probe"
+	NodeClaimControlPath        = "/claim"
 	NodeCommandReadyControlPath = "/command-ready"
 	CommandReadyProofVersion    = 1
 
@@ -25,6 +28,72 @@ const (
 	startingPathSuffix     = "/starting"
 	commandReadyPathSuffix = "/command-ready"
 )
+
+// NodeClaimControlRequest is the one-shot region-to-driver claim contract.
+// The raw writer token is present only in this online request and must never
+// be persisted by an intermediate node proxy.
+type NodeClaimControlRequest struct {
+	OperationID   string                      `json:"operation_id,omitempty"`
+	ClaimID       string                      `json:"claim_id,omitempty"`
+	RootfsPath    string                      `json:"rootfs_path"`
+	PolicyToken   string                      `json:"policy_token"`
+	WriterEpoch   string                      `json:"writer_epoch"`
+	Stage         *rootfshandoff.StageRequest `json:"stage,omitempty"`
+	NetworkPolicy string                      `json:"network_policy,omitempty"`
+}
+
+// ValidateRegional rejects development-only claims before they reach the
+// root-owned node control socket.
+func (r NodeClaimControlRequest) ValidateRegional() error {
+	if err := validateRequiredID("operation_id", r.OperationID); err != nil {
+		return err
+	}
+	if err := validateRequiredID("claim_id", r.ClaimID); err != nil {
+		return err
+	}
+	if r.RootfsPath != "" {
+		return fmt.Errorf("rootfs_path is forbidden for regional claims")
+	}
+	if r.Stage == nil {
+		return fmt.Errorf("stage is required for regional claims")
+	}
+	if err := r.Stage.Validate(); err != nil {
+		return fmt.Errorf("stage: %w", err)
+	}
+	if r.ClaimID != r.Stage.Identity.ClaimID {
+		return fmt.Errorf("claim_id does not match stage")
+	}
+	if r.PolicyToken != r.Stage.Identity.WriterGrantToken {
+		return fmt.Errorf("policy_token does not match stage writer grant")
+	}
+	if r.WriterEpoch != strconv.FormatInt(r.Stage.Identity.WriterEpoch, 10) {
+		return fmt.Errorf("writer_epoch does not match stage")
+	}
+	if NetworkPolicyDigest(r.NetworkPolicy) != r.Stage.ExpectedPolicyToken.PolicyDigest {
+		return fmt.Errorf("network_policy does not match stage policy token")
+	}
+	return nil
+}
+
+// NetworkPolicyDigest is the canonical digest bound into a RootFS network
+// incarnation token and independently recomputed by the task driver.
+func NetworkPolicyDigest(raw string) string {
+	digest := sha256.Sum256([]byte(raw))
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+// NodeControlResponse is returned only after the driver has durably reached
+// the requested local phase.
+type NodeControlResponse struct {
+	Phase string `json:"phase"`
+}
+
+func (r NodeControlResponse) Validate() error {
+	if r.Phase != string(StateActive) {
+		return fmt.Errorf("node control phase must be active")
+	}
+	return nil
+}
 
 // CommandReadyProof is the canonical evidence produced after a manager has
 // completed an authenticated, runtime-gated command against one procd process.

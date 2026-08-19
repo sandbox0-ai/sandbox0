@@ -74,7 +74,7 @@ func (h *taskHandle) ServeControl(ctx context.Context) {
 			}
 			writeControlJSON(w, http.StatusOK, h.statusSnapshot())
 		})
-		mux.HandleFunc("/claim", func(w http.ResponseWriter, request *http.Request) {
+		mux.HandleFunc(protocol.NodeClaimControlPath, func(w http.ResponseWriter, request *http.Request) {
 			if request.Method != http.MethodPut {
 				writeControlError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return

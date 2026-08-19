@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
 
@@ -46,16 +47,8 @@ const (
 	phasePoisoned slotPhase = "poisoned"
 )
 
-// ClaimRequest is the one-shot authorization sent by manager after RootFS and network handoff.
-type ClaimRequest struct {
-	OperationID   string                      `json:"operation_id,omitempty"`
-	ClaimID       string                      `json:"claim_id,omitempty"`
-	RootfsPath    string                      `json:"rootfs_path"`
-	PolicyToken   string                      `json:"policy_token"`
-	WriterEpoch   string                      `json:"writer_epoch"`
-	Stage         *rootfshandoff.StageRequest `json:"stage,omitempty"`
-	NetworkPolicy string                      `json:"network_policy,omitempty"`
-}
+// ClaimRequest is the shared one-shot region-to-driver claim contract.
+type ClaimRequest = protocol.NodeClaimControlRequest
 
 // CommandReadyRequest is the shared manager-to-driver command-ready contract.
 type CommandReadyRequest = protocol.CommandReadyControlRequest
@@ -142,6 +135,7 @@ type taskHandle struct {
 	controlReadyOnce sync.Once
 	leaseFenceOnce   sync.Once
 	consumerCancel   context.CancelFunc
+	waitCancel       context.CancelFunc
 	runtimeSlot      *runtimeSlotLifecycle
 }
 
@@ -360,6 +354,17 @@ func (h *taskHandle) writeClaimBundle() error {
 func (h *taskHandle) Claim(request ClaimRequest) error {
 	h.mu.Lock()
 	if h.phase != phaseWarm {
+		if h.phase == phaseActive {
+			matches, err := h.activeRegionalClaimRetryMatchesLocked(request)
+			if err != nil {
+				h.mu.Unlock()
+				return err
+			}
+			if matches {
+				h.mu.Unlock()
+				return nil
+			}
+		}
 		err := fmt.Errorf("claim is only valid in warm phase, current phase %s", h.phase)
 		h.mu.Unlock()
 		return err
@@ -492,14 +497,12 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 	}
 	resolvedRootfs, err := validateRootfsPath(rootfsSource, allowedRoot)
 	if err != nil {
-		_ = h.rollbackClaim()
-		return err
+		return h.failClaimBeforeLaunch(err, durableStage != nil)
 	}
 	if durableStage != nil {
 		hostMountNamespace, err := os.Readlink("/proc/self/ns/mnt")
 		if err != nil {
-			_ = h.rollbackClaim()
-			return fmt.Errorf("read host mount namespace: %w", err)
+			return h.poisonClaimLaunch(fmt.Errorf("read host mount namespace: %w", err), false)
 		}
 		registerCtx, registerCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		lease, err := h.rootfs.RegisterConsumer(registerCtx, *durableStage, RootFSConsumerRequest{
@@ -508,15 +511,13 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		})
 		registerCancel()
 		if err != nil {
-			_ = h.rollbackClaim()
-			return fmt.Errorf("register RootFS runtime consumer: %w", err)
+			return h.poisonClaimLaunch(fmt.Errorf("register RootFS runtime consumer: %w", err), false)
 		}
 		h.startConsumerRenewal(*durableStage, lease)
 	}
 
 	if err := h.mounter.Bind(resolvedRootfs, h.rootMount); err != nil {
-		_ = h.rollbackClaim()
-		return err
+		return h.failClaimBeforeLaunch(err, durableStage != nil)
 	}
 	if startingRequest != nil {
 		startingCtx, startingCancel := context.WithTimeout(context.Background(), runtimeSlotStartingTimeout)
@@ -564,8 +565,34 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		return fmt.Errorf("persist active state: %w", err)
 	}
 	claimSucceeded = true
-	go h.waitForExit()
+	h.startExitWatch()
 	return nil
+}
+
+// activeRegionalClaimRetryMatchesLocked accepts only the byte-stable logical
+// claim after runsc has started. This closes the response-loss window without
+// making a one-shot slot reusable for another grant or policy.
+func (h *taskHandle) activeRegionalClaimRetryMatchesLocked(request ClaimRequest) (bool, error) {
+	if !h.runtimeSlotNeeded || h.claim == nil || h.claim.Stage == nil || request.Stage == nil {
+		return false, nil
+	}
+	if err := request.ValidateRegional(); err != nil {
+		return false, fmt.Errorf("validate active regional claim retry: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if request.OperationID != h.claim.OperationID || request.ClaimID != h.claim.ClaimID ||
+		request.WriterEpoch != h.claim.WriterEpoch {
+		return false, nil
+	}
+	requestDigest, err := request.Stage.BindingDigest()
+	if err != nil {
+		return false, fmt.Errorf("derive active claim retry binding: %w", err)
+	}
+	storedDigest, err := h.claim.Stage.BindingDigest()
+	if err != nil {
+		return false, fmt.Errorf("derive persisted active claim binding: %w", err)
+	}
+	requestDigestHex := hex.EncodeToString(requestDigest[:])
+	return requestDigest == storedDigest && requestDigestHex == h.claim.RootFSBindingDigest, nil
 }
 
 // handleWriterLeaseLoss poisons the one-shot slot before exposing its exit and
@@ -629,6 +656,16 @@ func (h *taskHandle) rollbackClaim() error {
 	return h.persist()
 }
 
+func (h *taskHandle) failClaimBeforeLaunch(cause error, writerConsumed bool) error {
+	if writerConsumed {
+		return h.poisonClaimLaunch(cause, false)
+	}
+	if err := h.rollbackClaim(); err != nil {
+		return errors.Join(cause, fmt.Errorf("rollback unconsumed claim: %w", err))
+	}
+	return cause
+}
+
 // poisonClaimLaunch prevents reuse after the writer was consumed or regional
 // starting may have committed, and leaves failed detach state recoverable.
 func (h *taskHandle) poisonClaimLaunch(cause error, deleteContainer bool) error {
@@ -654,8 +691,33 @@ func (h *taskHandle) poisonClaimLaunch(cause error, deleteContainer bool) error 
 	return errors.Join(result, h.persist())
 }
 
-func (h *taskHandle) waitForExit() {
-	result, err := h.runner.Wait(context.Background(), h.containerID)
+func (h *taskHandle) startExitWatch() {
+	ctx, cancel := context.WithCancel(context.Background())
+	h.mu.Lock()
+	previous := h.waitCancel
+	h.waitCancel = cancel
+	h.mu.Unlock()
+	if previous != nil {
+		previous()
+	}
+	go h.waitForExit(ctx)
+}
+
+func (h *taskHandle) stopExitWatch() {
+	h.mu.Lock()
+	cancel := h.waitCancel
+	h.waitCancel = nil
+	h.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (h *taskHandle) waitForExit(ctx context.Context) {
+	result, err := h.runner.Wait(ctx, h.containerID)
+	if errors.Is(err, context.Canceled) {
+		return
+	}
 	h.mu.Lock()
 	if h.closed || h.phase == phaseExited || h.phase == phasePoisoned {
 		h.mu.Unlock()
@@ -790,6 +852,7 @@ func (h *taskHandle) Close(force bool) error {
 	h.mu.Unlock()
 
 	h.stopControl()
+	h.stopExitWatch()
 	h.stopConsumerRenewal()
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -990,7 +1053,7 @@ func (h *taskHandle) Recover(state PersistedState) error {
 		h.setPhase(phaseWarm)
 	case status == "running":
 		h.setPhase(phaseActive)
-		go h.waitForExit()
+		h.startExitWatch()
 	case status == "created" && !state.RootMounted:
 		h.setPhase(phaseWarm)
 	case status == "created" && state.RootMounted:

@@ -92,7 +92,7 @@ func (r *fakeRunsc) Start(context.Context, string) error {
 	return nil
 }
 
-func (r *fakeRunsc) Wait(context.Context, string) (WaitResult, error) {
+func (r *fakeRunsc) Wait(ctx context.Context, _ string) (WaitResult, error) {
 	r.record("wait")
 	r.mu.Lock()
 	result := r.waitResult
@@ -102,8 +102,12 @@ func (r *fakeRunsc) Wait(context.Context, string) (WaitResult, error) {
 	if err != nil {
 		return result, err
 	}
-	<-released
-	return result, nil
+	select {
+	case <-ctx.Done():
+		return result, ctx.Err()
+	case <-released:
+		return result, nil
+	}
 }
 
 func (r *fakeRunsc) Kill(_ context.Context, _, signal string) error {
@@ -161,6 +165,7 @@ type fakeRootFSRuntime struct {
 	source        string
 	pingErr       error
 	ensureErr     error
+	consumerErr   error
 	crashErr      error
 	retireErr     error
 	ensureCalls   int
@@ -228,6 +233,9 @@ func (r *fakeRootFSRuntime) RegisterConsumer(
 	_ rootfshandoff.StageRequest,
 	_ RootFSConsumerRequest,
 ) (RootFSConsumerLease, error) {
+	if r.consumerErr != nil {
+		return RootFSConsumerLease{}, r.consumerErr
+	}
 	return RootFSConsumerLease{LeaseID: "fake-consumer", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
@@ -682,6 +690,76 @@ func TestClaimReturnsWarmWhenWriterGrantWasNotConsumed(t *testing.T) {
 	runtime.mu.Unlock()
 	if crashCalls != 0 {
 		t.Fatalf("crash calls = %d, writer was never consumed", crashCalls)
+	}
+}
+
+func TestClaimPoisonsSlotAfterWriterGrantConsumption(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*testFixture, *fakeRootFSRuntime, string)
+		wantError string
+	}{
+		{
+			name: "invalid attached source",
+			configure: func(fixture *testFixture, _ *fakeRootFSRuntime, _ string) {
+				fixture.handle.rootfsAllowedRoot = filepath.Join(fixture.tempDir, "another-root")
+				if err := os.MkdirAll(fixture.handle.rootfsAllowedRoot, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "outside allowed root",
+		},
+		{
+			name: "consumer registration",
+			configure: func(fixture *testFixture, runtime *fakeRootFSRuntime, source string) {
+				fixture.handle.rootfsAllowedRoot = filepath.Dir(source)
+				runtime.consumerErr = errors.New("consumer registry unavailable")
+			},
+			wantError: "consumer registry unavailable",
+		},
+		{
+			name: "root bind",
+			configure: func(fixture *testFixture, _ *fakeRootFSRuntime, source string) {
+				fixture.handle.rootfsAllowedRoot = filepath.Dir(source)
+				fixture.mounter.bindErr = errors.New("bind mount rejected")
+			},
+			wantError: "bind mount rejected",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newTestFixture(t)
+			source := filepath.Join(fixture.tempDir, "session-mount", "root")
+			if err := os.MkdirAll(filepath.Join(source, "bin"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			stage, token, networkPolicy := newAuthorizedRootFSStage(t, source)
+			runtime := &fakeRootFSRuntime{source: source}
+			fixture.handle.rootfs = runtime
+			test.configure(fixture, runtime, source)
+			if err := fixture.handle.Prepare(TaskConfig{Command: "/procd", WaitForClaim: true}); err != nil {
+				t.Fatalf("Prepare() error = %v", err)
+			}
+
+			err := fixture.handle.Claim(ClaimRequest{
+				PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+			})
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("Claim() error = %v, want %q", err, test.wantError)
+			}
+			status := fixture.handle.TaskStatus()
+			if status.DriverAttributes["phase"] != string(phasePoisoned) ||
+				status.DriverAttributes["root_mounted"] != "false" {
+				t.Fatalf("status = %+v, consumed writer made the slot reusable", status.DriverAttributes)
+			}
+			ensureCalls, retireCalls, _, operation := runtime.snapshot()
+			if ensureCalls != 1 || retireCalls != 1 || operation != retireOperationID(stage) {
+				t.Fatalf("RootFS calls = ensure %d retire %d operation %q", ensureCalls, retireCalls, operation)
+			}
+			if calls := fixture.runner.callsSnapshot(); contains(calls, "create") || contains(calls, "start") {
+				t.Fatalf("runsc calls = %v, prelaunch failure started a container", calls)
+			}
+		})
 	}
 }
 

@@ -560,6 +560,45 @@ func TestRuntimeSlotClaimStartingRejectionPoisonsWithoutRunsc(t *testing.T) {
 	}
 }
 
+func TestRuntimeSlotClaimAcceptsExactRetryAfterResponseLoss(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)
+	request := ClaimRequest{
+		OperationID: "operation-1", ClaimID: "claim-1",
+		PolicyToken: token, WriterEpoch: "1", Stage: &stage, NetworkPolicy: networkPolicy,
+	}
+	if err := handle.Claim(request); err != nil {
+		t.Fatalf("first Claim() error = %v", err)
+	}
+	if err := handle.Claim(request); err != nil {
+		t.Fatalf("exact Claim() retry error = %v", err)
+	}
+	ensureCalls, _, _, _ := fixture.rootfs.snapshot()
+	if ensureCalls != 1 {
+		t.Fatalf("RootFS Ensure calls = %d, exact retry consumed the writer twice", ensureCalls)
+	}
+	if starting := fixture.authority.startingSnapshot(); len(starting) != 1 {
+		t.Fatalf("regional starting calls = %d, exact local retry reported another launch", len(starting))
+	}
+
+	changedStage := stage
+	changedPolicy := `{"mode":"block-all"}`
+	changedStage.ExpectedPolicyToken.PolicyDigest = digestString(changedPolicy)
+	changed := request
+	changed.Stage = &changedStage
+	changed.NetworkPolicy = changedPolicy
+	if err := handle.Claim(changed); err == nil {
+		t.Fatal("changed active claim retry was accepted")
+	}
+	ensureCalls, _, _, _ = fixture.rootfs.snapshot()
+	if ensureCalls != 1 {
+		t.Fatalf("RootFS Ensure calls = %d after changed retry", ensureCalls)
+	}
+	if err := fixture.plugin.DestroyTask(fixture.task.ID, true); err != nil {
+		t.Fatalf("DestroyTask() error = %v", err)
+	}
+}
+
 func TestRuntimeSlotClaimRequiresRegionalIdentityBeforeConsumingWriter(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
 	handle, stage, token, networkPolicy, _ := prepareRuntimeSlotClaim(t, fixture)

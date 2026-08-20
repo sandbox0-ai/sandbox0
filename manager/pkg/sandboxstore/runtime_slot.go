@@ -306,7 +306,9 @@ func (s *PGSandboxStore) HeartbeatRuntimeSlot(ctx context.Context, request *Hear
 // FenceRuntimeSlotForReconcile atomically rechecks regional expiry before a
 // plugin-independent controller takes ownership of a claimed runtime. The
 // expired heartbeat is retained so a reconciler crash remains immediately
-// discoverable, and later node heartbeats cannot revive the fenced slot.
+// discoverable, and later node heartbeats cannot revive the fenced slot. A
+// consumed writer is locked and must also be past its renewal grace so a
+// queued renewal cannot revive it after this transaction commits.
 func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 	ctx context.Context,
 	request *FenceRuntimeSlotForReconcileRequest,
@@ -332,6 +334,33 @@ func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
 		}
 		if !due {
 			return nil, ErrRuntimeSlotNotDue
+		}
+		if slot.WriterGrantID != "" {
+			var grantState string
+			var leaseExpiresAt *time.Time
+			var authorityObservedAt time.Time
+			err := tx.QueryRow(ctx, `
+				SELECT state, lease_expires_at, NOW()
+				FROM manager.rootfs_writer_grants
+				WHERE grant_id = $1 AND slot_id = $2
+				FOR UPDATE
+			`, slot.WriterGrantID, slot.ID).Scan(&grantState, &leaseExpiresAt, &authorityObservedAt)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("%w: runtime slot writer grant binding changed", ErrRuntimeSlotConflict)
+			}
+			if err != nil {
+				return nil, err
+			}
+			switch grantState {
+			case RootFSWriterGrantStateIssued, RootFSWriterGrantStateRetiring,
+				RootFSWriterGrantStateRetired, RootFSWriterGrantStateCanceled:
+			case RootFSWriterGrantStateConsumed:
+				if leaseExpiresAt == nil || leaseExpiresAt.Add(RootFSWriterCrashAbandonGrace).After(authorityObservedAt) {
+					return nil, ErrRuntimeSlotNotDue
+				}
+			default:
+				return nil, fmt.Errorf("%w: runtime slot writer grant is in invalid state %s", ErrRuntimeSlotInvalid, grantState)
+			}
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE manager.runtime_slots

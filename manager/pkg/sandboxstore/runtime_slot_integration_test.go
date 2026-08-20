@@ -333,6 +333,76 @@ func TestRuntimeSlotReconcileFenceRechecksExpiryIntegration(t *testing.T) {
 	require.Equal(t, fenced.ID, candidates[0].ID)
 }
 
+func TestRuntimeSlotReconcileFenceWaitsForConsumedWriterMaturityIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-reconcile-writer")
+	registration := runtimeSlotTestRegistration("slot-reconcile-writer", "allocation-reconcile-writer")
+	_, err := store.RegisterRuntimeSlot(ctx, registration)
+	require.NoError(t, err)
+	proof := bytes.Repeat([]byte{0x7c}, 32)
+	_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
+		SlotID: registration.SlotID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		RuntimeReadyDigest: proof, NetworkReadyDigest: proof, StorageReadyDigest: proof,
+		HeartbeatTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	acquire := &AcquireRuntimeSlotRequest{
+		OperationID: "operation-reconcile-writer", ClaimID: "claim-reconcile-writer",
+		SandboxID: "sandbox-reconcile-writer", FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
+		CompatibilityDigest: registration.CompatibilityDigest, RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+		NetworkPolicyDigest: "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+	}
+	claimed, err := store.AcquireRuntimeSlot(ctx, acquire)
+	require.NoError(t, err)
+	binding := bytes.Repeat([]byte{0x7d}, 32)
+	issue := rootFSWriterGrantTestIssueRequest(
+		"sandbox-reconcile-writer", "grant-reconcile-writer", acquire.ClaimID, claimed.ID, binding,
+	)
+	issue.ExpectedFilesystemID = filesystem.ID
+	issue.InitialGenerationID = generation.ID
+	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
+	require.NoError(t, err)
+	_, err = store.BindRuntimeSlotWriterGrant(ctx, &BindRuntimeSlotWriterGrantRequest{
+		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: acquire.ClaimID, GrantID: issued.Grant.ID,
+	})
+	require.NoError(t, err)
+	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
+		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
+		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding,
+		ConsumerNodeUID: registration.NodeUID, ConsumerCtldPodUID: "ctld-reconcile-writer", LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET claim_lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE slot_id = $1
+	`, claimed.ID)
+	require.NoError(t, err)
+
+	current, err := store.GetRuntimeSlot(ctx, claimed.ID)
+	require.NoError(t, err)
+	request := &FenceRuntimeSlotForReconcileRequest{SlotID: claimed.ID, ExpectedRevision: current.Revision}
+	_, err = store.FenceRuntimeSlotForReconcile(ctx, request)
+	require.ErrorIs(t, err, ErrRuntimeSlotNotDue)
+	stillClaimed, err := store.GetRuntimeSlot(ctx, claimed.ID)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateClaiming, stillClaimed.State)
+	require.Equal(t, current.Revision, stillClaimed.Revision)
+
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.rootfs_writer_grants
+		SET lease_expires_at = NOW() - ($2::bigint * INTERVAL '1 millisecond')
+		WHERE grant_id = $1
+	`, issued.Grant.ID, RootFSWriterCrashAbandonGrace.Milliseconds()+1000)
+	require.NoError(t, err)
+	fenced, err := store.FenceRuntimeSlotForReconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateQuiescing, fenced.State)
+}
+
 func TestRuntimeSlotPrelaunchAbortRetainsClaimBindingIntegration(t *testing.T) {
 	ctx := context.Background()
 	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))

@@ -44,8 +44,9 @@ func New(store Store) (*Controller, error) {
 }
 
 // Fence disables renewal before node-local teardown. Issued grants are
-// canceled; consumed grants enter the crash-abandon transaction only after
-// their server-time lease fence has matured.
+// canceled. Consumed grants wait for server-time lease maturity after an
+// unexpected loss, while durable explicit termination revokes renewal
+// immediately for the exact still-bound runtime.
 func (c *Controller) Fence(
 	ctx context.Context,
 	request runtimeslotreconciler.WriterFenceRequest,
@@ -233,7 +234,9 @@ func (c *Controller) ensureCrashLifecycle(
 			}
 			return fmt.Errorf("another sandbox lifecycle transaction %s is active", active.ID)
 		}
-		if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive ||
+		if record == nil ||
+			(record.DesiredState != sandboxstore.SandboxDesiredStateActive &&
+				record.DesiredState != sandboxstore.SandboxDesiredStateTerminating) ||
 			!record.DeletedAt.IsZero() || record.RuntimeGeneration != runtimeGeneration ||
 			record.CurrentPodNamespace != grant.PodNamespace || record.CurrentPodName != grant.PodUID {
 			return errors.New("sandbox runtime does not match the runtime slot writer")

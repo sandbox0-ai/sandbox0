@@ -124,9 +124,11 @@ func (f fakeTx) CompleteRootFSWriterCrashAbandon(
 		grant.State = sandboxstore.RootFSWriterGrantStateRetired
 		grant.RetireProofDigest = append([]byte(nil), request.ProofDigest...)
 		f.store.lifecycle.Phase = sandboxstore.SandboxLifecyclePhaseAborted
-		f.store.record.DesiredState = sandboxstore.SandboxDesiredStatePaused
-		f.store.record.CurrentPodNamespace = ""
-		f.store.record.CurrentPodName = ""
+		if f.store.record.DesiredState == sandboxstore.SandboxDesiredStateActive {
+			f.store.record.DesiredState = sandboxstore.SandboxDesiredStatePaused
+			f.store.record.CurrentPodNamespace = ""
+			f.store.record.CurrentPodName = ""
+		}
 	}
 	if grant.State != sandboxstore.RootFSWriterGrantStateRetired ||
 		!bytes.Equal(grant.RetireProofDigest, request.ProofDigest) {
@@ -216,6 +218,32 @@ func TestControllerCancelsIssuedWriterBeforeNodeCleanup(t *testing.T) {
 	})
 	if err != nil || final.State != sandboxstore.RootFSWriterGrantStateCanceled || store.completeCalls != 0 {
 		t.Fatalf("Complete() = %+v, %v; complete calls %d", final, err, store.completeCalls)
+	}
+}
+
+func TestControllerFencesConsumedWriterDuringExplicitTermination(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
+	fence, err := controller.Fence(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.lifecycle == nil || store.lifecycle.SandboxID != store.record.ID ||
+		store.lifecycle.FromPodName != store.record.CurrentPodName ||
+		store.lifecycle.FromPodNamespace != store.record.CurrentPodNamespace {
+		t.Fatalf("termination lifecycle = %+v", store.lifecycle)
+	}
+	_, err = controller.Complete(context.Background(), runtimeslotreconciler.WriterCompleteRequest{
+		OperationID: request.OperationID, GrantID: request.GrantID, SlotID: request.SlotID,
+		WriterEpoch: request.WriterEpoch, WriterFenceDigest: fence.ProofDigest,
+		NodeCleanupDigest: bytes.Repeat([]byte{0x76}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.record.DesiredState != sandboxstore.SandboxDesiredStateTerminating ||
+		store.record.CurrentPodNamespace != "default" || store.record.CurrentPodName != "allocation-1" {
+		t.Fatalf("terminating record changed during writer retirement: %+v", store.record)
 	}
 }
 

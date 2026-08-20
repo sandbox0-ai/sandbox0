@@ -171,9 +171,9 @@ type BeginRootFSWriterRetireRequest struct {
 }
 
 // BeginRootFSWriterCrashAbandonRequest establishes the regional fencing point
-// before the node produces a crash terminal proof. The transition is allowed
-// only after the exact consumed lease can no longer renew and the durable head
-// is still the generation at which the writer was issued.
+// before the node produces a terminal proof. An unexpected loss must wait for
+// lease maturity; durable explicit termination may revoke renewal immediately.
+// In both cases the exact runtime and durable generation are locked first.
 type BeginRootFSWriterCrashAbandonRequest struct {
 	GrantID                 string
 	WriterEpoch             int64
@@ -201,13 +201,14 @@ type CompleteRootFSWriterPrelaunchAbortRequest struct {
 }
 
 // CompleteRootFSWriterCrashAbandonRequest terminally abandons an unsealed
-// writer after its lease is no longer renewable and an authenticated node has
-// durably proved that every physical writer is gone. ProofDigest is evidence
-// already validated by the caller; lease expiry by itself is never evidence.
+// writer after renewal is disabled and an authenticated node has durably
+// proved that every physical writer is gone. ProofDigest is evidence already
+// validated by the caller; lease expiry by itself is never evidence.
 //
 // The transaction preserves ExpectedOldGenerationID as the durable head,
-// pauses the exact crashed runtime, and aborts its lifecycle transaction with
-// RootFSWriterCrashAbandonReason. It never reports a successful planned pause.
+// pauses an exact crashed active runtime, preserves explicit termination, and
+// aborts its lifecycle transaction with RootFSWriterCrashAbandonReason. It
+// never reports a successful planned pause.
 type CompleteRootFSWriterCrashAbandonRequest struct {
 	LifecycleTxnID          string
 	GrantID                 string
@@ -1135,9 +1136,6 @@ func beginRootFSWriterCrashAbandon(
 		return nil, fmt.Errorf("%w: consumed grant %s already has retirement state",
 			ErrRootFSWriterGrantConflict, normalized.GrantID)
 	}
-	if record.LeaseExpiresAt.IsZero() || record.LeaseExpiresAt.Add(RootFSWriterCrashAbandonGrace).After(record.databaseNow) {
-		return nil, fmt.Errorf("%w: grant %s remains renewable", ErrRootFSWriterFenceNotMature, normalized.GrantID)
-	}
 	if lifecycle.CancelRequested ||
 		lifecycle.Phase != SandboxLifecyclePhasePublishing && lifecycle.Phase != SandboxLifecyclePhaseCommitting ||
 		lifecycle.FromGeneration <= 0 || strings.TrimSpace(lifecycle.FromPodNamespace) == "" ||
@@ -1150,6 +1148,11 @@ func beginRootFSWriterCrashAbandon(
 	runtimeMatch, err := lockRootFSWriterCrashRuntime(ctx, db, record, lifecycle, normalized.OperationID)
 	if err != nil {
 		return nil, err
+	}
+	leaseMature := !record.LeaseExpiresAt.IsZero() &&
+		!record.LeaseExpiresAt.Add(RootFSWriterCrashAbandonGrace).After(record.databaseNow)
+	if !leaseMature && !runtimeMatch.terminating {
+		return nil, fmt.Errorf("%w: grant %s remains renewable", ErrRootFSWriterFenceNotMature, normalized.GrantID)
 	}
 	if err := lockRootFSWriterCrashFallbackGeneration(
 		ctx, db, record, normalized.ExpectedOldGenerationID, runtimeMatch.failedClaimDeletion,
@@ -1174,11 +1177,11 @@ func beginRootFSWriterCrashAbandon(
 			AND retire_operation_id = ''
 			AND retire_kind = ''
 			AND retire_proof_digest IS NULL
-			AND lease_expires_at + ($11::bigint * INTERVAL '1 millisecond') <= NOW()
+			AND ($12 OR lease_expires_at + ($11::bigint * INTERVAL '1 millisecond') <= NOW())
 	`, normalized.GrantID, RootFSWriterGrantStateRetiring, normalized.OperationID,
 		RootFSWriterRetireKindCrashAbandon, RootFSWriterGrantStateConsumed,
 		normalized.WriterEpoch, normalized.BindingVersion, normalized.BindingDigest,
-		normalized.NodeUID, normalized.NodeBootID, RootFSWriterCrashAbandonGrace.Milliseconds())
+		normalized.NodeUID, normalized.NodeBootID, RootFSWriterCrashAbandonGrace.Milliseconds(), runtimeMatch.terminating)
 	if err != nil {
 		return nil, mapRootFSWriterGrantConflict("begin rootfs writer crash abandon", err)
 	}
@@ -1805,6 +1808,7 @@ func completeRootFSWriterCrashAbandon(
 
 type rootFSWriterCrashRuntimeMatch struct {
 	active              bool
+	terminating         bool
 	failedClaimDeletion bool
 }
 
@@ -1833,12 +1837,15 @@ func lockRootFSWriterCrashRuntime(
 	match.active = !deletedAt.Valid && desiredState == SandboxDesiredStateActive &&
 		runtimeGeneration == lifecycle.FromGeneration &&
 		currentPodNamespace == lifecycle.FromPodNamespace && currentPodName == lifecycle.FromPodName
+	match.terminating = !deletedAt.Valid && desiredState == SandboxDesiredStateTerminating &&
+		runtimeGeneration == lifecycle.FromGeneration &&
+		currentPodNamespace == lifecycle.FromPodNamespace && currentPodName == lifecycle.FromPodName
 	precommitResume := !deletedAt.Valid && desiredState == SandboxDesiredStatePaused &&
 		currentPodNamespace == "" && currentPodName == "" && runtimeGeneration >= 0 &&
 		runtimeGeneration+1 == lifecycle.FromGeneration
 	match.failedClaimDeletion = desiredState == SandboxDesiredStateDeleted && deletedAt.Valid &&
 		currentPodNamespace == "" && currentPodName == "" && runtimeGeneration == lifecycle.FromGeneration
-	if !match.active && !precommitResume && !match.failedClaimDeletion {
+	if !match.active && !match.terminating && !precommitResume && !match.failedClaimDeletion {
 		return match, fmt.Errorf("%w: sandbox runtime no longer matches crash lifecycle txn %s",
 			ErrRootFSWriterGrantConflict, lifecycleTxnID)
 	}

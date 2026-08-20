@@ -385,6 +385,12 @@ func (s *PGSandboxStore) RequestSandboxRuntimeClaimCleanup(
 		}
 		return nil, nil
 	}
+	firstCleanupRequest := claim.Phase != SandboxRuntimeClaimPhaseCleanupPending
+	if firstCleanupRequest {
+		if err := abortConflictingSandboxLifecycleForClaimCleanup(ctx, tx, record); err != nil {
+			return nil, err
+		}
+	}
 	if record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
 		if claim.Phase != SandboxRuntimeClaimPhaseCleanupPending ||
 			record.DesiredState != SandboxDesiredStateDeleted || record.DeletedAt.IsZero() {
@@ -410,7 +416,7 @@ func (s *PGSandboxStore) RequestSandboxRuntimeClaimCleanup(
 		}
 		record.DesiredState = SandboxDesiredStateTerminating
 	}
-	if claim.Phase != SandboxRuntimeClaimPhaseCleanupPending {
+	if firstCleanupRequest {
 		if _, err := tx.Exec(ctx, `
 			UPDATE manager.sandbox_runtime_claims
 			SET phase = $2, lease_expires_at = NULL,
@@ -491,6 +497,48 @@ func (s *PGSandboxStore) FenceSandboxRuntimeClaimForCleanup(
 		return nil, fmt.Errorf("commit sandbox claim cleanup fence: %w", err)
 	}
 	return candidate, nil
+}
+
+func abortConflictingSandboxLifecycleForClaimCleanup(
+	ctx context.Context,
+	tx pgx.Tx,
+	record *SandboxRecord,
+) error {
+	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE sandbox_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+		ORDER BY updated_at DESC
+		LIMIT 1
+		FOR UPDATE
+	`, record.ID))
+	if err != nil {
+		return fmt.Errorf("lock sandbox lifecycle before claim cleanup: %w", err)
+	}
+	if lifecycle == nil {
+		return nil
+	}
+	preserveTerminalWriter := lifecycle.Kind == SandboxLifecycleKindPause &&
+		(lifecycle.Source == SandboxLifecycleSourceCrash ||
+			lifecycle.Source == SandboxLifecycleSourceHealth ||
+			lifecycle.Source == SandboxLifecycleSourceLost) &&
+		!lifecycle.Cancelable && lifecycle.CancelRequestedAt.IsZero() &&
+		(lifecycle.Phase == SandboxLifecyclePhasePublishing || lifecycle.Phase == SandboxLifecyclePhaseCommitting) &&
+		lifecycle.PreparedHeadLayerID == "" &&
+		lifecycle.FromGeneration == record.RuntimeGeneration &&
+		lifecycle.FromPodNamespace == record.CurrentPodNamespace &&
+		lifecycle.FromPodName == record.CurrentPodName
+	if preserveTerminalWriter {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = $2, error = $3, aborted_at = NOW(), updated_at = NOW()
+		WHERE txn_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+	`, lifecycle.ID, SandboxLifecyclePhaseAborted, "sandbox termination requested"); err != nil {
+		return fmt.Errorf("abort conflicting sandbox lifecycle for claim cleanup: %w", err)
+	}
+	return nil
 }
 
 func fenceSandboxClaimRuntimeSlotForCleanup(

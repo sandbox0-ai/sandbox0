@@ -197,6 +197,19 @@ func TestRequestSandboxRuntimeClaimCleanupFencesReadyAllocationAtomically(t *tes
 		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
 	})
 	require.NoError(t, err)
+	require.NoError(t, store.WithSandboxLock(ctx, record.ID, func(
+		lockCtx context.Context,
+		tx SandboxStoreTx,
+		locked *SandboxRecord,
+	) error {
+		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+			ID: "manual-pause-delete-ready", SandboxID: record.ID,
+			Kind: SandboxLifecycleKindPause, Phase: SandboxLifecyclePhasePublishing,
+			Source: SandboxLifecycleSourceManual, Cancelable: true,
+			FromGeneration:   locked.RuntimeGeneration,
+			FromPodNamespace: locked.CurrentPodNamespace, FromPodName: locked.CurrentPodName,
+		})
+	}))
 
 	candidate, err := store.RequestSandboxRuntimeClaimCleanup(ctx, record.ID, "sandbox deletion requested")
 	require.NoError(t, err)
@@ -215,6 +228,12 @@ func TestRequestSandboxRuntimeClaimCleanupFencesReadyAllocationAtomically(t *tes
 	`, record.ID).Scan(&phase, &leaseIsNull))
 	require.Equal(t, SandboxRuntimeClaimPhaseCleanupPending, phase)
 	require.True(t, leaseIsNull)
+	var lifecyclePhase, lifecycleError string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT phase, error FROM manager.sandbox_lifecycle_txns WHERE txn_id = $1
+	`, "manual-pause-delete-ready").Scan(&lifecyclePhase, &lifecycleError))
+	require.Equal(t, SandboxLifecyclePhaseAborted, lifecyclePhase)
+	require.Equal(t, "sandbox termination requested", lifecycleError)
 	fenced, err := store.GetRuntimeSlot(ctx, claimed.ID)
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateQuiescing, fenced.State)
@@ -256,6 +275,41 @@ func TestRequestSandboxRuntimeClaimCleanupWinsBeforeFreshClaimLeaseExpires(t *te
 	`, record.ID).Scan(&phase, &desiredState))
 	require.Equal(t, SandboxRuntimeClaimPhaseCleanupPending, phase)
 	require.Equal(t, SandboxDesiredStateTerminating, desiredState)
+}
+
+func TestRequestSandboxRuntimeClaimCleanupPreservesMatchingCrashLifecycle(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	record, claimed := sandboxRuntimeClaimSlotFixture(t, store, "delete-crash-lifecycle")
+	_, err := pool.Exec(ctx, `UPDATE manager.runtime_slots SET state = $2 WHERE slot_id = $1`, claimed.ID, RuntimeSlotStateActive)
+	require.NoError(t, err)
+	_, err = store.CompleteSandboxClaim(ctx, &CompleteSandboxClaimRequest{
+		SandboxID: record.ID, OperationID: "operation-delete-crash-lifecycle", SlotID: claimed.ID,
+		AllocationID: claimed.AllocationID, AllocationNamespace: claimed.AllocationNamespace,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.WithSandboxLock(ctx, record.ID, func(
+		lockCtx context.Context,
+		tx SandboxStoreTx,
+		locked *SandboxRecord,
+	) error {
+		return tx.BeginLifecycleTxn(lockCtx, &SandboxLifecycleTxn{
+			ID: "crash-delete-ready", SandboxID: record.ID,
+			Kind: SandboxLifecycleKindPause, Phase: SandboxLifecyclePhasePublishing,
+			Source: SandboxLifecycleSourceCrash, Cancelable: false,
+			FromGeneration:   locked.RuntimeGeneration,
+			FromPodNamespace: locked.CurrentPodNamespace, FromPodName: locked.CurrentPodName,
+		})
+	}))
+
+	_, err = store.RequestSandboxRuntimeClaimCleanup(ctx, record.ID, "sandbox deletion requested")
+	require.NoError(t, err)
+	var phase string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT phase FROM manager.sandbox_lifecycle_txns WHERE txn_id = $1
+	`, "crash-delete-ready").Scan(&phase))
+	require.Equal(t, SandboxLifecyclePhasePublishing, phase)
 }
 
 func TestRequestSandboxRuntimeClaimCleanupSerializesWithClaimCompletion(t *testing.T) {

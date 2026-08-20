@@ -1115,6 +1115,32 @@ func TestRootFSWriterCrashAbandonCompletesAcceptedPrecommitResumePod(t *testing.
 	require.Equal(t, RootFSWriterRetireKindCrashAbandon, grant.RetireKind)
 }
 
+func TestRootFSWriterCrashAbandonRevokesRenewableTerminatingRuntime(t *testing.T) {
+	fixture := newRootFSWriterCrashAbandonFixture(t, SandboxLifecycleSourceCrash, false)
+	ctx := context.Background()
+	_, err := fixture.pool.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET desired_state = $2
+		WHERE sandbox_id = $1
+	`, fixture.sandboxID, SandboxDesiredStateTerminating)
+	require.NoError(t, err)
+
+	begun, err := fixture.store.BeginRootFSWriterCrashAbandon(ctx, fixture.beginRequest)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetiring, begun.State)
+	require.Equal(t, RootFSWriterRetireKindCrashAbandon, begun.RetireKind)
+	require.NoError(t, fixture.complete(t))
+
+	grant, err := fixture.store.GetRootFSWriterGrant(ctx, fixture.issued.Grant.ID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateRetired, grant.State)
+	record, err := fixture.store.GetSandbox(ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStateTerminating, record.DesiredState)
+	require.Equal(t, "sandbox0", record.CurrentPodNamespace)
+	require.Equal(t, "sandbox-crash-abandon-pod", record.CurrentPodName)
+}
+
 func TestRootFSWriterCrashAbandonCompletesAcceptedFailedInitialClaim(t *testing.T) {
 	fixture := newRootFSWriterCrashAbandonFixture(t, SandboxLifecycleSourceLost, true)
 	ctx := context.Background()

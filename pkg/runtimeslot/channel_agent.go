@@ -29,13 +29,14 @@ import (
 )
 
 const (
-	defaultNodeChannelOperationTimeout = 30 * time.Second
-	defaultNodeChannelReconnectMin     = 100 * time.Millisecond
-	defaultNodeChannelReconnectMax     = 10 * time.Second
-	defaultNodeChannelHandshakeTimeout = 5 * time.Second
-	defaultNodeChannelConnectionMaxAge = 5 * time.Minute
-	defaultNodeChannelMaxConcurrent    = 64
-	maxNodeChannelCredentialBytes      = 64 << 10
+	defaultNodeChannelOperationTimeout   = 30 * time.Second
+	defaultNodeChannelRunningForkTimeout = 5 * time.Minute
+	defaultNodeChannelReconnectMin       = 100 * time.Millisecond
+	defaultNodeChannelReconnectMax       = 10 * time.Second
+	defaultNodeChannelHandshakeTimeout   = 5 * time.Second
+	defaultNodeChannelConnectionMaxAge   = 5 * time.Minute
+	defaultNodeChannelMaxConcurrent      = 64
+	maxNodeChannelCredentialBytes        = 64 << 10
 )
 
 // NodeChannelExecutor owns node-local privilege. Claim and CommandReady must
@@ -45,6 +46,12 @@ type NodeChannelExecutor interface {
 	Claim(context.Context, NodeChannelTarget, NodeClaimControlRequest) (NodeControlResponse, error)
 	CommandReady(context.Context, NodeChannelTarget, CommandReadyControlRequest) (NodeControlResponse, error)
 	Cleanup(context.Context, NodeChannelTarget, NodeCleanupControlRequest) (NodeCleanupControlProof, error)
+}
+
+// NodeChannelRunningForkExecutor owns the live XFS freeze/checkpoint path. It
+// is optional during rolling upgrades and advertised independently.
+type NodeChannelRunningForkExecutor interface {
+	RunningFork(context.Context, NodeChannelTarget, NodeRunningForkControlRequest) (rootfshandoff.RunningForkCheckpointResult, error)
 }
 
 // NodeChannelNetworkExecutor owns ctld-backed policy application. It is
@@ -57,25 +64,27 @@ type NodeChannelNetworkExecutor interface {
 // NodeChannelAgentConfig configures one node-initiated mTLS command stream.
 // Certificates, CA, boot ID, and bearer token are reloaded on reconnect.
 type NodeChannelAgentConfig struct {
-	BaseURL         string
-	CAFile          string
-	ClientCertFile  string
-	ClientKeyFile   string
-	TokenFile       string
-	PeerURISAN      string
-	ClusterID       string
-	NodeID          string
-	NodeUID         string
-	NodeBootIDFile  string
-	Executor        NodeChannelExecutor
-	NetworkExecutor NodeChannelNetworkExecutor
+	BaseURL             string
+	CAFile              string
+	ClientCertFile      string
+	ClientKeyFile       string
+	TokenFile           string
+	PeerURISAN          string
+	ClusterID           string
+	NodeID              string
+	NodeUID             string
+	NodeBootIDFile      string
+	Executor            NodeChannelExecutor
+	RunningForkExecutor NodeChannelRunningForkExecutor
+	NetworkExecutor     NodeChannelNetworkExecutor
 
-	OperationTimeout time.Duration
-	ReconnectMin     time.Duration
-	ReconnectMax     time.Duration
-	ConnectionMaxAge time.Duration
-	MaxConcurrent    int
-	AgentInstanceID  string
+	OperationTimeout   time.Duration
+	RunningForkTimeout time.Duration
+	ReconnectMin       time.Duration
+	ReconnectMax       time.Duration
+	ConnectionMaxAge   time.Duration
+	MaxConcurrent      int
+	AgentInstanceID    string
 }
 
 // NodeChannelAgent maintains an outbound stream and executes a bounded number
@@ -138,6 +147,12 @@ func newNodeChannelAgent(config NodeChannelAgentConfig, dialAddress string) (*No
 	}
 	if config.OperationTimeout < time.Second || config.OperationTimeout > 5*time.Minute {
 		return nil, fmt.Errorf("node channel operation timeout must be between one second and five minutes: %w", errdefs.ErrInvalidArgument)
+	}
+	if config.RunningForkTimeout == 0 {
+		config.RunningForkTimeout = defaultNodeChannelRunningForkTimeout
+	}
+	if config.RunningForkTimeout < time.Second || config.RunningForkTimeout > 30*time.Minute {
+		return nil, fmt.Errorf("node channel running-fork timeout must be between one second and 30 minutes: %w", errdefs.ErrInvalidArgument)
 	}
 	if config.ReconnectMin == 0 {
 		config.ReconnectMin = defaultNodeChannelReconnectMin
@@ -259,6 +274,12 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 			NodeChannelCommandClaim, NodeChannelCommandCommandReady, NodeChannelCommandCleanup,
 		},
 	}
+	if a.config.RunningForkExecutor != nil {
+		hello.Capabilities = []NodeChannelCommandKind{
+			NodeChannelCommandClaim, NodeChannelCommandCommandReady,
+			NodeChannelCommandRunningFork, NodeChannelCommandCleanup,
+		}
+	}
 	if a.config.NetworkExecutor != nil {
 		hello.Capabilities = append([]NodeChannelCommandKind{NodeChannelCommandNetworkPrepare}, hello.Capabilities...)
 	}
@@ -333,7 +354,11 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 
 func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelCommand) NodeChannelResult {
 	result := NodeChannelResult{Version: NodeChannelVersion, RequestID: command.RequestID, Kind: command.Kind}
-	operationCtx, cancel := context.WithTimeout(ctx, a.config.OperationTimeout)
+	timeout := a.config.OperationTimeout
+	if command.Kind == NodeChannelCommandRunningFork {
+		timeout = a.config.RunningForkTimeout
+	}
+	operationCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var err error
 	switch command.Kind {
@@ -359,6 +384,16 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 		if err == nil {
 			result.ControlResponse = &response
 		}
+	case NodeChannelCommandRunningFork:
+		if a.config.RunningForkExecutor == nil {
+			err = fmt.Errorf("node running-fork executor is unavailable: %w", errdefs.ErrFailedPrecondition)
+			break
+		}
+		var checkpoint rootfshandoff.RunningForkCheckpointResult
+		checkpoint, err = a.config.RunningForkExecutor.RunningFork(operationCtx, command.Target, *command.RunningFork)
+		if err == nil {
+			result.RunningFork = &checkpoint
+		}
 	case NodeChannelCommandCleanup:
 		var proof NodeCleanupControlProof
 		proof, err = a.config.Executor.Cleanup(operationCtx, command.Target, *command.Cleanup)
@@ -375,6 +410,7 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 			err = fmt.Errorf("node executor returned an invalid result: %w: %w", validationErr, errdefs.ErrUnavailable)
 			result.NetworkPolicyToken = nil
 			result.ControlResponse = nil
+			result.RunningFork = nil
 			result.CleanupProof = nil
 		}
 	}

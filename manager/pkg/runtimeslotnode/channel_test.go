@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -22,8 +23,10 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -43,14 +46,16 @@ func (channelTestVerifier) Verify(_ context.Context, bearer string) (nodeauth.Id
 }
 
 type channelTestExecutor struct {
-	mu         sync.Mutex
-	cleanupErr error
-	calls      []protocol.NodeCleanupControlRequest
-	networks   []protocol.NodeNetworkPrepareControlRequest
-	claims     []protocol.NodeClaimControlRequest
-	commands   []protocol.CommandReadyControlRequest
-	entered    chan<- struct{}
-	release    <-chan struct{}
+	mu          sync.Mutex
+	cleanupErr  error
+	calls       []protocol.NodeCleanupControlRequest
+	networks    []protocol.NodeNetworkPrepareControlRequest
+	claims      []protocol.NodeClaimControlRequest
+	commands    []protocol.CommandReadyControlRequest
+	forks       []protocol.NodeRunningForkControlRequest
+	runningFork rootfshandoff.RunningForkCheckpointResult
+	entered     chan<- struct{}
+	release     <-chan struct{}
 }
 
 func (e *channelTestExecutor) PrepareNetwork(
@@ -111,6 +116,18 @@ func (e *channelTestExecutor) CommandReady(
 	return protocol.NodeControlResponse{Phase: string(protocol.StateActive)}, nil
 }
 
+func (e *channelTestExecutor) RunningFork(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodeRunningForkControlRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	e.mu.Lock()
+	e.forks = append(e.forks, request)
+	checkpoint := e.runningFork
+	e.mu.Unlock()
+	return checkpoint, nil
+}
+
 func (e *channelTestExecutor) Cleanup(
 	_ context.Context,
 	_ protocol.NodeChannelTarget,
@@ -155,13 +172,14 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	defer hub.Close()
 	server, files := newNodeChannelTLSServer(t, hub)
 	defer server.Close()
-	executor := &channelTestExecutor{}
+	forkRequest, forkCheckpoint := testChannelRunningFork(t)
+	executor := &channelTestExecutor{runningFork: forkCheckpoint}
 	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
 		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1",
-		Executor: executor, NetworkExecutor: executor,
+		Executor: executor, RunningForkExecutor: executor, NetworkExecutor: executor,
 		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-1",
 	})
@@ -215,6 +233,13 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	if err != nil || commandResponse.Phase != string(protocol.StateActive) {
 		t.Fatalf("node command-ready response = %+v, %v", commandResponse, err)
 	}
+	forkResult, err := hub.RunningFork(t.Context(), protocol.NodeChannelTarget{
+		SlotID: nodeTarget.SlotID, ClusterID: nodeTarget.ClusterID, AllocationID: nodeTarget.AllocationID,
+		NodeID: nodeTarget.NodeID, NodeUID: nodeTarget.NodeUID, NodeBootID: nodeTarget.NodeBootID,
+	}, forkRequest)
+	if err != nil || forkResult.ProofDigest != forkCheckpoint.ProofDigest {
+		t.Fatalf("node running-fork result = %+v, %v", forkResult, err)
+	}
 	executor.mu.Lock()
 	if len(executor.networks) != 1 || executor.networks[0] != (protocol.NodeNetworkPrepareControlRequest{
 		OperationID: networkRequest.OperationID, ClaimID: networkRequest.ClaimID,
@@ -224,8 +249,9 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		NetNSIdentity: networkRequest.NetNSIdentity, NetworkPolicy: networkRequest.NetworkPolicy,
 		PolicyDigest: networkRequest.PolicyDigest,
 	}) || len(executor.claims) != 1 || executor.claims[0].PolicyToken != claimRequest.PolicyToken ||
-		len(executor.commands) != 1 || executor.commands[0] != commandRequest {
-		t.Fatalf("node control calls = claims %d, commands %d", len(executor.claims), len(executor.commands))
+		len(executor.commands) != 1 || executor.commands[0] != commandRequest ||
+		len(executor.forks) != 1 || executor.forks[0] != forkRequest {
+		t.Fatalf("node control calls = claims %d, commands %d, forks %d", len(executor.claims), len(executor.commands), len(executor.forks))
 	}
 	executor.mu.Unlock()
 
@@ -418,6 +444,69 @@ func testChannelClaimRequest() protocol.NodeClaimControlRequest {
 		WriterEpoch: strconv.FormatInt(stage.Identity.WriterEpoch, 10), Stage: stage,
 		NetworkPolicy: networkPolicy, Runtime: assignment,
 	}
+}
+
+func testChannelRunningFork(t *testing.T) (
+	protocol.NodeRunningForkControlRequest,
+	rootfshandoff.RunningForkCheckpointResult,
+) {
+	t.Helper()
+	stage := testChannelClaimRequest().Stage
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fork := rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "fork-operation-1", SourceSandboxID: "sandbox-1",
+		TargetSandboxID: "sandbox-fork-1", TargetGenerationID: "generation-fork-1",
+	}
+	request := protocol.NodeRunningForkControlRequest{
+		Fork: fork, SourceFilesystemID: stage.Identity.RootFSID,
+		SourceWriterGrantID: stage.Identity.WriterGrantID, SourceWriterEpoch: stage.Identity.WriterEpoch,
+		BindingVersion: stage.BindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+		ExpectedSourceGenerationID: stage.InitialGeneration,
+	}
+	root := digest.FromString("running-fork-map").String()
+	descriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: rootfsblock.LogicalBlockSize,
+		BlockSizeBytes: rootfsblock.LogicalBlockSize,
+		MappingRoot: rootfsblock.MappingRootLocator{
+			Version: rootfsblock.MappingPageVersion, RootDigest: root,
+			Object: rootfsblock.ObjectRange{
+				Key: "maps/running-fork", Length: 1, Checksum: digest.FromString("running-fork-page").String(),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := rootfshandoff.RunningForkCheckpointProof{
+		Version: rootfshandoff.RunningForkCheckpointVersion, OperationID: fork.OperationID,
+		SourceSandboxID: fork.SourceSandboxID, SourceFilesystemID: request.SourceFilesystemID,
+		TargetSandboxID: fork.TargetSandboxID, SourceWriterGrantID: request.SourceWriterGrantID,
+		SourceWriterEpoch: request.SourceWriterEpoch, BindingVersion: request.BindingVersion,
+		BindingDigest: request.BindingDigest, ExpectedSourceGenerationID: request.ExpectedSourceGenerationID,
+		CheckpointGenerationID: fork.TargetGenerationID, CheckpointSequence: 1,
+		CheckpointDescriptorDigest: digest.FromBytes(descriptor).String(),
+	}
+	proofDigest, err := proof.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := rootfshandoff.RunningForkCheckpointResult{
+		Generation: rootfshandoff.GenerationDescriptor{
+			Version: rootfshandoff.GenerationDescriptorVersion, GenerationID: fork.TargetGenerationID,
+			FilesystemID: fork.TargetSandboxID, SourceOCIDigest: digest.FromString("source-image").String(),
+			BaseArtifactDigest: digest.FromString("base-artifact").String(), BaseBlockRoot: root,
+			CurrentBlockHead: root, WriterEpoch: request.SourceWriterEpoch, FormatGeneration: 1,
+			DurabilityState: rootfsblock.DurabilityS3, LocatorVersion: 2, Descriptor: descriptor,
+		},
+		Proof: proof, ProofDigest: hex.EncodeToString(proofDigest[:]),
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return request, result
 }
 
 func testChannelCommandReadyProof() protocol.CommandReadyProof {

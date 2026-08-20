@@ -1,9 +1,12 @@
 package runtimeslot
 
 import (
+	"encoding/hex"
 	"strings"
 	"testing"
 
+	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
@@ -149,6 +152,40 @@ func TestNodeChannelCleanupResultRequiresCanonicalProof(t *testing.T) {
 	}
 }
 
+func TestNodeChannelRunningForkBindsExactWriterAndCheckpoint(t *testing.T) {
+	stage := testNodeChannelClaim().Stage
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fork := rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "fork-operation-1", SourceSandboxID: "sandbox-source",
+		TargetSandboxID: "sandbox-target", TargetGenerationID: "generation-target",
+	}
+	request := NodeRunningForkControlRequest{
+		Fork: fork, SourceFilesystemID: stage.Identity.RootFSID,
+		SourceWriterGrantID: stage.Identity.WriterGrantID, SourceWriterEpoch: stage.Identity.WriterEpoch,
+		BindingVersion: stage.BindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+		ExpectedSourceGenerationID: stage.InitialGeneration,
+	}
+	command, err := NewNodeChannelRunningForkCommand(testNodeChannelTarget(false), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := testNodeChannelRunningForkCheckpoint(t, *stage, fork)
+	result := NodeChannelResult{
+		Version: NodeChannelVersion, RequestID: command.RequestID,
+		Kind: command.Kind, RunningFork: &checkpoint,
+	}
+	if err := result.ValidateFor(command); err != nil {
+		t.Fatal(err)
+	}
+	result.RunningFork.Proof.SourceWriterGrantID = "another-grant"
+	if err := result.ValidateFor(command); err == nil {
+		t.Fatal("running-fork checkpoint for another writer was accepted")
+	}
+}
+
 func TestNodeChannelHelloRequiresCanonicalCapabilities(t *testing.T) {
 	hello := testNodeChannelHello()
 	if err := hello.Validate(); err != nil {
@@ -173,6 +210,67 @@ func TestNodeChannelHelloRequiresCanonicalCapabilities(t *testing.T) {
 	if err := hello.Validate(); err == nil {
 		t.Fatal("misordered network capability was accepted")
 	}
+	hello = testNodeChannelHello()
+	hello.Capabilities = []NodeChannelCommandKind{
+		NodeChannelCommandClaim, NodeChannelCommandCommandReady,
+		NodeChannelCommandRunningFork, NodeChannelCommandCleanup,
+	}
+	if err := hello.Validate(); err != nil || !hello.Supports(NodeChannelCommandRunningFork) {
+		t.Fatalf("running-fork-capable hello error = %v", err)
+	}
+}
+
+func testNodeChannelRunningForkCheckpoint(
+	t *testing.T,
+	stage rootfshandoff.StageRequest,
+	fork rootfshandoff.RunningForkCheckpointRequest,
+) rootfshandoff.RunningForkCheckpointResult {
+	t.Helper()
+	root := digest.FromString("running-fork-map").String()
+	descriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: rootfsblock.LogicalBlockSize,
+		BlockSizeBytes: rootfsblock.LogicalBlockSize,
+		MappingRoot: rootfsblock.MappingRootLocator{
+			Version: rootfsblock.MappingPageVersion, RootDigest: root,
+			Object: rootfsblock.ObjectRange{
+				Key: "maps/running-fork", Length: 1, Checksum: digest.FromString("running-fork-page").String(),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := rootfshandoff.RunningForkCheckpointProof{
+		Version: rootfshandoff.RunningForkCheckpointVersion, OperationID: fork.OperationID,
+		SourceSandboxID: fork.SourceSandboxID, SourceFilesystemID: stage.Identity.RootFSID,
+		TargetSandboxID: fork.TargetSandboxID, SourceWriterGrantID: stage.Identity.WriterGrantID,
+		SourceWriterEpoch: stage.Identity.WriterEpoch, BindingVersion: stage.BindingVersion,
+		BindingDigest: hex.EncodeToString(binding[:]), ExpectedSourceGenerationID: stage.InitialGeneration,
+		CheckpointGenerationID: fork.TargetGenerationID, CheckpointSequence: 1,
+		CheckpointDescriptorDigest: digest.FromBytes(descriptor).String(),
+	}
+	proofDigest, err := proof.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := rootfshandoff.RunningForkCheckpointResult{
+		Generation: rootfshandoff.GenerationDescriptor{
+			Version: rootfshandoff.GenerationDescriptorVersion, GenerationID: fork.TargetGenerationID,
+			FilesystemID: fork.TargetSandboxID, SourceOCIDigest: digest.FromString("source-image").String(),
+			BaseArtifactDigest: digest.FromString("base-artifact").String(), BaseBlockRoot: root,
+			CurrentBlockHead: root, WriterEpoch: stage.Identity.WriterEpoch, FormatGeneration: 1,
+			DurabilityState: rootfsblock.DurabilityS3, LocatorVersion: 2, Descriptor: descriptor,
+		},
+		Proof: proof, ProofDigest: hex.EncodeToString(proofDigest[:]),
+	}
+	if err := checkpoint.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return checkpoint
 }
 
 func testNodeChannelNetworkPrepare() NodeNetworkPrepareControlRequest {

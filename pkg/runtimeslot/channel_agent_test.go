@@ -2,20 +2,25 @@ package runtimeslot
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"net"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
 type testNodeChannelExecutor struct {
-	claimErr   error
-	commandErr error
-	cleanupErr error
+	claimErr         error
+	commandErr       error
+	cleanupErr       error
+	runningFork      rootfshandoff.RunningForkCheckpointResult
+	runningForkErr   error
+	runningForkBlock bool
 }
 
 type staticNodeChannelResolver struct {
@@ -55,6 +60,18 @@ func (e *testNodeChannelExecutor) CommandReady(
 	CommandReadyControlRequest,
 ) (NodeControlResponse, error) {
 	return NodeControlResponse{Phase: string(StateActive)}, e.commandErr
+}
+
+func (e *testNodeChannelExecutor) RunningFork(
+	ctx context.Context,
+	_ NodeChannelTarget,
+	_ NodeRunningForkControlRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	if e.runningForkBlock {
+		<-ctx.Done()
+		return rootfshandoff.RunningForkCheckpointResult{}, ctx.Err()
+	}
+	return e.runningFork, e.runningForkErr
 }
 
 func (e *testNodeChannelExecutor) Cleanup(
@@ -138,6 +155,47 @@ func TestNodeChannelAgentRejectsInvalidExecutorResult(t *testing.T) {
 	}
 	if result.ErrorClass != NodeChannelErrorInternal || len(result.Error) > NodeChannelMaxError {
 		t.Fatalf("bounded result = class %q, bytes %d", result.ErrorClass, len(result.Error))
+	}
+}
+
+func TestNodeChannelAgentExecutesRunningForkWithDedicatedTimeout(t *testing.T) {
+	stage := testNodeChannelClaim().Stage
+	binding, err := stage.BindingDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fork := rootfshandoff.RunningForkCheckpointRequest{
+		OperationID: "fork-operation-1", SourceSandboxID: "sandbox-source",
+		TargetSandboxID: "sandbox-target", TargetGenerationID: "generation-target",
+	}
+	request := NodeRunningForkControlRequest{
+		Fork: fork, SourceFilesystemID: stage.Identity.RootFSID,
+		SourceWriterGrantID: stage.Identity.WriterGrantID, SourceWriterEpoch: stage.Identity.WriterEpoch,
+		BindingVersion: stage.BindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+		ExpectedSourceGenerationID: stage.InitialGeneration,
+	}
+	command, err := NewNodeChannelRunningForkCommand(testNodeChannelTarget(false), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &testNodeChannelExecutor{runningFork: testNodeChannelRunningForkCheckpoint(t, *stage, fork)}
+	agent := &NodeChannelAgent{config: NodeChannelAgentConfig{
+		Executor: executor, RunningForkExecutor: executor,
+		OperationTimeout: time.Second, RunningForkTimeout: time.Second,
+	}}
+	result := agent.execute(t.Context(), command)
+	if err := result.ValidateFor(command); err != nil || result.RunningFork == nil {
+		t.Fatalf("running-fork result = %+v, %v", result, err)
+	}
+
+	executor.runningForkBlock = true
+	agent.config.RunningForkTimeout = time.Millisecond
+	result = agent.execute(t.Context(), command)
+	if err := result.ValidateFor(command); err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorClass != NodeChannelErrorUnavailable || !strings.Contains(result.Error, context.DeadlineExceeded.Error()) {
+		t.Fatalf("timed-out running-fork result = %+v", result)
 	}
 }
 

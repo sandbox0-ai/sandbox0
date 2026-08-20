@@ -32,15 +32,25 @@ type rootFSSessionNodeChannelExecutor struct {
 	nodeUID       string
 	control       *protocol.NodeClient
 	cleaner       runtimeSlotCleaner
+	forker        runtimeSlotRunningForker
 	network       *protocol.RuntimeSlotNetworkClient
 	networkSource runtimeSlotNetworkPrepareSource
 }
 
 var _ protocol.NodeChannelExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
+var _ protocol.NodeChannelRunningForkExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
 var _ protocol.NodeChannelNetworkExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
 
 type runtimeSlotNetworkPrepareSource interface {
 	runtimeSlotNetworkPrepareRequest(protocol.NodeNetworkPrepareControlRequest) (protocol.RuntimeSlotNetworkPrepareRequest, error)
+}
+
+type runtimeSlotRunningForker interface {
+	CaptureRunningRootFSFork(
+		context.Context,
+		protocol.NodeChannelTarget,
+		protocol.NodeRunningForkControlRequest,
+	) (rootfshandoff.RunningForkCheckpointResult, error)
 }
 
 func newRootFSSessionNodeChannelAgent(
@@ -75,6 +85,9 @@ func newRootFSSessionNodeChannelAgent(
 		cleaner:   cleaner,
 		network:   network,
 	}
+	if forker, ok := cleaner.(runtimeSlotRunningForker); ok {
+		executor.forker = forker
+	}
 	if network != nil {
 		source, ok := cleaner.(runtimeSlotNetworkPrepareSource)
 		if !ok {
@@ -95,6 +108,9 @@ func newRootFSSessionNodeChannelAgent(
 		NodeID:         executor.nodeID,
 		NodeUID:        executor.nodeUID, NodeBootIDFile: config.RuntimeSlotNodeBootIDFile,
 		Executor: executor,
+	}
+	if executor.forker != nil {
+		agentConfig.RunningForkExecutor = executor
 	}
 	if network != nil {
 		agentConfig.NetworkExecutor = executor
@@ -150,6 +166,21 @@ func (e *rootFSSessionNodeChannelExecutor) CommandReady(
 		return protocol.NodeControlResponse{}, fmt.Errorf("runtime slot local control client is unavailable: %w", errdefs.ErrUnavailable)
 	}
 	return e.control.CommandReady(ctx, target.ControlEndpoint, request)
+}
+
+func (e *rootFSSessionNodeChannelExecutor) RunningFork(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodeRunningForkControlRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	if err := e.validateTarget(target); err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	if e.forker == nil {
+		return rootfshandoff.RunningForkCheckpointResult{},
+			fmt.Errorf("runtime slot running-fork controller is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	return e.forker.CaptureRunningRootFSFork(ctx, target, request)
 }
 
 func (e *rootFSSessionNodeChannelExecutor) Cleanup(

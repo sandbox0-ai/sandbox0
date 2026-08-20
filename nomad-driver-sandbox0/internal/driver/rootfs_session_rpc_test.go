@@ -754,6 +754,11 @@ type cleanupRootFSRuntime struct {
 	recovery     []rootfssession.RecoverySession
 	proof        rootfshandoff.CrashFenceProof
 	retireResult *rootfssession.RetireResult
+	forkResult   rootfshandoff.RunningForkCheckpointResult
+	forkErr      error
+	forkStage    rootfshandoff.StageRequest
+	forkRequest  rootfshandoff.RunningForkCheckpointRequest
+	forkCalls    int
 	localCalls   int
 	retireCalls  int
 	reclaimCalls int
@@ -761,6 +766,88 @@ type cleanupRootFSRuntime struct {
 
 func (r *cleanupRootFSRuntime) RecoverySessions() ([]rootfssession.RecoverySession, error) {
 	return append([]rootfssession.RecoverySession(nil), r.recovery...), nil
+}
+
+func (r *cleanupRootFSRuntime) CaptureRunningFork(
+	_ context.Context,
+	stage rootfshandoff.StageRequest,
+	request rootfshandoff.RunningForkCheckpointRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	r.forkCalls++
+	r.forkStage = stage
+	r.forkRequest = request
+	return r.forkResult, r.forkErr
+}
+
+func TestRootFSSessionDaemonCapturesOnlyTheExactLiveRunningForkWriter(t *testing.T) {
+	registration := testRuntimeSlotJournalRegistration(t, "slot-running-fork")
+	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, journal.Close()) })
+	require.NoError(t, journal.Register(registration))
+
+	stage := rootfshandoff.StageRequest{
+		BindingVersion:    rootfshandoff.WriterBindingVersion,
+		InitialGeneration: "generation-source-1",
+		Identity: rootfshandoff.Identity{
+			SlotNonce: registration.SlotID, PodUID: registration.AllocationID,
+			NodeUID: "node-uid-1", BootID: registration.NodeBootID,
+			RootFSID: "filesystem-1", WriterGrantID: "writer-grant-1", WriterEpoch: 7,
+		},
+	}
+	binding, err := stage.BindingDigest()
+	require.NoError(t, err)
+	request := protocol.NodeRunningForkControlRequest{
+		Fork: rootfshandoff.RunningForkCheckpointRequest{
+			OperationID: "running-fork-operation-1", SourceSandboxID: "sandbox-source-1",
+			TargetSandboxID: "sandbox-target-1", TargetGenerationID: "generation-target-1",
+		},
+		SourceFilesystemID:  stage.Identity.RootFSID,
+		SourceWriterGrantID: stage.Identity.WriterGrantID, SourceWriterEpoch: stage.Identity.WriterEpoch,
+		BindingVersion: stage.BindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+		ExpectedSourceGenerationID: stage.InitialGeneration,
+	}
+	target := protocol.NodeChannelTarget{
+		SlotID: registration.SlotID, ClusterID: registration.ClusterID,
+		AllocationID: registration.AllocationID, NodeID: registration.NodeID,
+		NodeUID: "node-uid-1", NodeBootID: registration.NodeBootID,
+	}
+	consumer := &rootfssession.ConsumerRegistration{ActiveKey: registration.SlotID}
+	runtime := &cleanupRootFSRuntime{
+		fakeRootFSRuntime: &fakeRootFSRuntime{},
+		recovery:          []rootfssession.RecoverySession{{Stage: stage, Live: true, Consumer: consumer}},
+		forkResult: rootfshandoff.RunningForkCheckpointResult{
+			Proof: rootfshandoff.RunningForkCheckpointProof{OperationID: request.Fork.OperationID},
+		},
+	}
+	daemon := &rootFSSessionDaemon{
+		runtime: runtime, journal: journal, clusterID: registration.ClusterID,
+		nodeID: registration.NodeID, nodeUID: target.NodeUID,
+	}
+	checkpoint, err := daemon.CaptureRunningRootFSFork(t.Context(), target, request)
+	require.NoError(t, err)
+	require.Equal(t, request.Fork.OperationID, checkpoint.Proof.OperationID)
+	require.Equal(t, 1, runtime.forkCalls)
+	require.Equal(t, stage, runtime.forkStage)
+	require.Equal(t, request.Fork, runtime.forkRequest)
+
+	runtime.recovery = append(runtime.recovery, runtime.recovery[0])
+	_, err = daemon.CaptureRunningRootFSFork(t.Context(), target, request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.Equal(t, 1, runtime.forkCalls)
+	runtime.recovery = runtime.recovery[:1]
+
+	staleRequest := request
+	staleRequest.SourceWriterGrantID = "stale-writer-grant"
+	_, err = daemon.CaptureRunningRootFSFork(t.Context(), target, staleRequest)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	require.Equal(t, 1, runtime.forkCalls)
+
+	staleTarget := target
+	staleTarget.NodeBootID = "stale-node-boot"
+	_, err = daemon.CaptureRunningRootFSFork(t.Context(), staleTarget, request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.Equal(t, 1, runtime.forkCalls)
 }
 
 func (r *cleanupRootFSRuntime) Retire(

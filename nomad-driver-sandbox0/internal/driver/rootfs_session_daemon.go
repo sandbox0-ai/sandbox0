@@ -357,6 +357,74 @@ func (d *rootFSSessionDaemon) runtimeSlotNetworkPrepareRequest(
 	return local, nil
 }
 
+// CaptureRunningRootFSFork resolves the exact live writer from durable node
+// state, then lets the RootFS runtime freeze, checkpoint, and regionally
+// publish it. No task-driver plugin process participates in this path.
+func (d *rootFSSessionDaemon) CaptureRunningRootFSFork(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodeRunningForkControlRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	if err := request.Validate(); err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{},
+			fmt.Errorf("validate running RootFS fork request: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if d == nil || d.runtime == nil || d.journal == nil {
+		return rootfshandoff.RunningForkCheckpointResult{},
+			fmt.Errorf("running RootFS fork dependencies are unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if target.ClusterID != d.clusterID || target.NodeID != d.nodeID || target.NodeUID != d.nodeUID {
+		return rootfshandoff.RunningForkCheckpointResult{},
+			fmt.Errorf("running RootFS fork target does not match this daemon: %w", errdefs.ErrPermissionDenied)
+	}
+	journalRecord, err := d.journal.Get(target.SlotID)
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("read running-fork slot journal: %w", err)
+	}
+	registration := journalRecord.Registration
+	if registration.ClusterID != target.ClusterID || registration.NodeID != target.NodeID ||
+		registration.NodeBootID != target.NodeBootID || registration.AllocationID != target.AllocationID {
+		return rootfshandoff.RunningForkCheckpointResult{},
+			fmt.Errorf("running RootFS fork slot incarnation changed: %w", errdefs.ErrFailedPrecondition)
+	}
+	sessions, err := d.runtime.RecoverySessions()
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("list running-fork RootFS sessions: %w", err)
+	}
+	var matched *rootfssession.RecoverySession
+	for index := range sessions {
+		stage := sessions[index].Stage
+		if stage.Identity.SlotNonce != target.SlotID || stage.Identity.PodUID != target.AllocationID ||
+			stage.Identity.NodeUID != target.NodeUID || stage.Identity.BootID != target.NodeBootID ||
+			stage.Identity.RootFSID != request.SourceFilesystemID ||
+			stage.Identity.WriterGrantID != request.SourceWriterGrantID ||
+			stage.Identity.WriterEpoch != request.SourceWriterEpoch ||
+			stage.BindingVersion != request.BindingVersion ||
+			stage.InitialGeneration != request.ExpectedSourceGenerationID {
+			continue
+		}
+		binding, bindingErr := stage.BindingDigest()
+		if bindingErr != nil || hex.EncodeToString(binding[:]) != request.BindingDigest {
+			continue
+		}
+		if matched != nil {
+			return rootfshandoff.RunningForkCheckpointResult{},
+				fmt.Errorf("multiple RootFS sessions match the running fork: %w", errdefs.ErrFailedPrecondition)
+		}
+		copy := sessions[index]
+		matched = &copy
+	}
+	if matched == nil {
+		return rootfshandoff.RunningForkCheckpointResult{},
+			fmt.Errorf("exact live RootFS writer session is missing: %w", errdefs.ErrNotFound)
+	}
+	if !matched.Live || matched.Consumer == nil {
+		return rootfshandoff.RunningForkCheckpointResult{},
+			fmt.Errorf("exact RootFS writer is not live and attached: %w", errdefs.ErrFailedPrecondition)
+	}
+	return d.runtime.CaptureRunningFork(ctx, matched.Stage, request.Fork)
+}
+
 // CleanupRuntimeSlot removes one exact runtime without calling the Nomad task
 // driver or choosing a new regional writer outcome. It may replay the exact
 // already-authoritative planned operation. The proof is journaled before it is

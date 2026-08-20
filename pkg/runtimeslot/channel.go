@@ -29,6 +29,7 @@ const (
 	NodeChannelCommandNetworkPrepare NodeChannelCommandKind = "network_prepare"
 	NodeChannelCommandClaim          NodeChannelCommandKind = "claim"
 	NodeChannelCommandCommandReady   NodeChannelCommandKind = "command_ready"
+	NodeChannelCommandRunningFork    NodeChannelCommandKind = "running_fork"
 	NodeChannelCommandCleanup        NodeChannelCommandKind = "cleanup"
 )
 
@@ -76,24 +77,17 @@ func (h NodeChannelHello) Validate() error {
 			return err
 		}
 	}
-	want := []NodeChannelCommandKind{
-		NodeChannelCommandClaim,
-		NodeChannelCommandCommandReady,
-		NodeChannelCommandCleanup,
+	capabilities := h.Capabilities
+	if len(capabilities) > 0 && capabilities[0] == NodeChannelCommandNetworkPrepare {
+		capabilities = capabilities[1:]
 	}
-	if len(h.Capabilities) == len(want)+1 {
-		if h.Capabilities[0] != NodeChannelCommandNetworkPrepare {
-			return fmt.Errorf("node channel network_prepare must be the first capability")
-		}
-		h.Capabilities = h.Capabilities[1:]
-	}
-	if len(h.Capabilities) != len(want) {
+	if len(capabilities) != 3 && len(capabilities) != 4 {
 		return fmt.Errorf("node channel capabilities are incomplete")
 	}
-	for index := range want {
-		if h.Capabilities[index] != want[index] {
-			return fmt.Errorf("node channel capabilities must use the canonical order")
-		}
+	if capabilities[0] != NodeChannelCommandClaim || capabilities[1] != NodeChannelCommandCommandReady ||
+		capabilities[len(capabilities)-1] != NodeChannelCommandCleanup ||
+		(len(capabilities) == 4 && capabilities[2] != NodeChannelCommandRunningFork) {
+		return fmt.Errorf("node channel capabilities must use the canonical order")
 	}
 	return nil
 }
@@ -145,7 +139,7 @@ func (t NodeChannelTarget) validate(withControl bool) error {
 			return fmt.Errorf("node channel control endpoint must be a canonical local Unix URL")
 		}
 	} else if t.ControlEndpoint != "" {
-		return fmt.Errorf("cleanup target must not contain a control endpoint")
+		return fmt.Errorf("node channel target must not contain an unused control endpoint")
 	}
 	return nil
 }
@@ -161,7 +155,43 @@ type NodeChannelCommand struct {
 	NetworkPrepare *NodeNetworkPrepareControlRequest `json:"network_prepare,omitempty"`
 	Claim          *NodeClaimControlRequest          `json:"claim,omitempty"`
 	CommandReady   *CommandReadyControlRequest       `json:"command_ready,omitempty"`
+	RunningFork    *NodeRunningForkControlRequest    `json:"running_fork,omitempty"`
 	Cleanup        *NodeCleanupControlRequest        `json:"cleanup,omitempty"`
+}
+
+// NodeRunningForkControlRequest binds a manager-triggered live checkpoint to
+// the exact source writer and a pre-created paused target.
+type NodeRunningForkControlRequest struct {
+	Fork                       rootfshandoff.RunningForkCheckpointRequest `json:"fork"`
+	SourceFilesystemID         string                                     `json:"source_filesystem_id"`
+	SourceWriterGrantID        string                                     `json:"source_writer_grant_id"`
+	SourceWriterEpoch          int64                                      `json:"source_writer_epoch"`
+	BindingVersion             int                                        `json:"binding_version"`
+	BindingDigest              string                                     `json:"binding_digest"`
+	ExpectedSourceGenerationID string                                     `json:"expected_source_generation_id"`
+}
+
+// Validate rejects a fork detached from its durable source writer binding.
+func (r NodeRunningForkControlRequest) Validate() error {
+	if err := r.Fork.Validate(); err != nil {
+		return fmt.Errorf("fork: %w", err)
+	}
+	for name, value := range map[string]string{
+		"source_filesystem_id": r.SourceFilesystemID, "source_writer_grant_id": r.SourceWriterGrantID,
+		"expected_source_generation_id": r.ExpectedSourceGenerationID,
+	} {
+		if err := validateRequiredID(name, value); err != nil {
+			return err
+		}
+	}
+	if r.SourceWriterEpoch <= 0 || r.BindingVersion != rootfshandoff.WriterBindingVersion {
+		return fmt.Errorf("source writer epoch or binding version is invalid")
+	}
+	binding, err := hex.DecodeString(r.BindingDigest)
+	if err != nil || len(binding) != sha256.Size || hex.EncodeToString(binding) != r.BindingDigest {
+		return fmt.Errorf("binding_digest must be canonical 32-byte hexadecimal")
+	}
+	return nil
 }
 
 // NodeNetworkPrepareControlRequest binds one exact ctld-owned network policy
@@ -259,6 +289,19 @@ func NewNodeChannelCommandReadyCommand(target NodeChannelTarget, request Command
 	return sealNodeChannelCommand(command)
 }
 
+// NewNodeChannelRunningForkCommand builds an exact live RootFS checkpoint
+// command for an authenticated source node boot.
+func NewNodeChannelRunningForkCommand(
+	target NodeChannelTarget,
+	request NodeRunningForkControlRequest,
+) (NodeChannelCommand, error) {
+	command := NodeChannelCommand{
+		Version: NodeChannelVersion, Kind: NodeChannelCommandRunningFork,
+		Target: target, RunningFork: &request,
+	}
+	return sealNodeChannelCommand(command)
+}
+
 // NewNodeChannelCleanupCommand builds an exact plugin-independent cleanup.
 func NewNodeChannelCleanupCommand(target NodeChannelTarget, request NodeCleanupControlRequest) (NodeChannelCommand, error) {
 	command := NodeChannelCommand{
@@ -297,7 +340,7 @@ func (c NodeChannelCommand) Validate() error {
 	}
 	switch c.Kind {
 	case NodeChannelCommandNetworkPrepare:
-		if c.NetworkPrepare == nil || c.Claim != nil || c.CommandReady != nil || c.Cleanup != nil {
+		if c.NetworkPrepare == nil || c.Claim != nil || c.CommandReady != nil || c.RunningFork != nil || c.Cleanup != nil {
 			return fmt.Errorf("network-prepare command must contain only a network request")
 		}
 		if err := c.Target.validate(false); err != nil {
@@ -313,7 +356,7 @@ func (c NodeChannelCommand) Validate() error {
 			return fmt.Errorf("network-prepare request does not match the node channel target")
 		}
 	case NodeChannelCommandClaim:
-		if c.Claim == nil || c.NetworkPrepare != nil || c.CommandReady != nil || c.Cleanup != nil {
+		if c.Claim == nil || c.NetworkPrepare != nil || c.CommandReady != nil || c.RunningFork != nil || c.Cleanup != nil {
 			return fmt.Errorf("claim command must contain only a claim request")
 		}
 		if err := c.Target.validate(true); err != nil {
@@ -328,7 +371,7 @@ func (c NodeChannelCommand) Validate() error {
 			return fmt.Errorf("claim request does not match the node channel target")
 		}
 	case NodeChannelCommandCommandReady:
-		if c.CommandReady == nil || c.NetworkPrepare != nil || c.Claim != nil || c.Cleanup != nil {
+		if c.CommandReady == nil || c.NetworkPrepare != nil || c.Claim != nil || c.RunningFork != nil || c.Cleanup != nil {
 			return fmt.Errorf("command-ready command must contain only a command-ready request")
 		}
 		if err := c.Target.validate(true); err != nil {
@@ -340,8 +383,18 @@ func (c NodeChannelCommand) Validate() error {
 		if c.CommandReady.Proof.SlotID != c.Target.SlotID {
 			return fmt.Errorf("command-ready request does not match the node channel target")
 		}
+	case NodeChannelCommandRunningFork:
+		if c.RunningFork == nil || c.NetworkPrepare != nil || c.Claim != nil || c.CommandReady != nil || c.Cleanup != nil {
+			return fmt.Errorf("running-fork command must contain only a running-fork request")
+		}
+		if err := c.Target.validate(false); err != nil {
+			return err
+		}
+		if err := c.RunningFork.Validate(); err != nil {
+			return fmt.Errorf("running-fork request: %w", err)
+		}
 	case NodeChannelCommandCleanup:
-		if c.Cleanup == nil || c.NetworkPrepare != nil || c.Claim != nil || c.CommandReady != nil {
+		if c.Cleanup == nil || c.NetworkPrepare != nil || c.Claim != nil || c.CommandReady != nil || c.RunningFork != nil {
 			return fmt.Errorf("cleanup command must contain only a cleanup request")
 		}
 		if err := c.Target.validate(false); err != nil {
@@ -375,14 +428,15 @@ func (c NodeChannelCommand) digest() (string, error) {
 // NodeChannelResult contains either one exact success payload or one bounded
 // classified error for the matching command.
 type NodeChannelResult struct {
-	Version            int                               `json:"version"`
-	RequestID          string                            `json:"request_id"`
-	Kind               NodeChannelCommandKind            `json:"kind"`
-	NetworkPolicyToken *rootfshandoff.NetworkPolicyToken `json:"network_policy_token,omitempty"`
-	ControlResponse    *NodeControlResponse              `json:"control_response,omitempty"`
-	CleanupProof       *NodeCleanupControlProof          `json:"cleanup_proof,omitempty"`
-	Error              string                            `json:"error,omitempty"`
-	ErrorClass         NodeChannelErrorClass             `json:"error_class,omitempty"`
+	Version            int                                        `json:"version"`
+	RequestID          string                                     `json:"request_id"`
+	Kind               NodeChannelCommandKind                     `json:"kind"`
+	NetworkPolicyToken *rootfshandoff.NetworkPolicyToken          `json:"network_policy_token,omitempty"`
+	ControlResponse    *NodeControlResponse                       `json:"control_response,omitempty"`
+	RunningFork        *rootfshandoff.RunningForkCheckpointResult `json:"running_fork,omitempty"`
+	CleanupProof       *NodeCleanupControlProof                   `json:"cleanup_proof,omitempty"`
+	Error              string                                     `json:"error,omitempty"`
+	ErrorClass         NodeChannelErrorClass                      `json:"error_class,omitempty"`
 }
 
 // ValidateFor rejects a response for any command other than the exact request.
@@ -395,14 +449,14 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 	}
 	if r.Error != "" || r.ErrorClass != "" {
 		if strings.TrimSpace(r.Error) != r.Error || r.Error == "" || len(r.Error) > NodeChannelMaxError ||
-			!r.ErrorClass.valid() || r.NetworkPolicyToken != nil || r.ControlResponse != nil || r.CleanupProof != nil {
+			!r.ErrorClass.valid() || r.NetworkPolicyToken != nil || r.ControlResponse != nil || r.RunningFork != nil || r.CleanupProof != nil {
 			return fmt.Errorf("node channel error result is invalid")
 		}
 		return nil
 	}
 	switch command.Kind {
 	case NodeChannelCommandNetworkPrepare:
-		if r.NetworkPolicyToken == nil || r.ControlResponse != nil || r.CleanupProof != nil {
+		if r.NetworkPolicyToken == nil || r.ControlResponse != nil || r.RunningFork != nil || r.CleanupProof != nil {
 			return fmt.Errorf("node channel network policy result is incomplete")
 		}
 		if err := r.NetworkPolicyToken.Validate(); err != nil {
@@ -418,12 +472,32 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 		}
 		return nil
 	case NodeChannelCommandClaim, NodeChannelCommandCommandReady:
-		if r.ControlResponse == nil || r.NetworkPolicyToken != nil || r.CleanupProof != nil {
+		if r.ControlResponse == nil || r.NetworkPolicyToken != nil || r.RunningFork != nil || r.CleanupProof != nil {
 			return fmt.Errorf("node channel control result is incomplete")
 		}
 		return r.ControlResponse.Validate()
+	case NodeChannelCommandRunningFork:
+		if r.RunningFork == nil || r.NetworkPolicyToken != nil || r.ControlResponse != nil || r.CleanupProof != nil {
+			return fmt.Errorf("node channel running-fork result is incomplete")
+		}
+		if err := r.RunningFork.Validate(); err != nil {
+			return err
+		}
+		request := command.RunningFork
+		proof := r.RunningFork.Proof
+		if proof.OperationID != request.Fork.OperationID || proof.SourceSandboxID != request.Fork.SourceSandboxID ||
+			proof.TargetSandboxID != request.Fork.TargetSandboxID ||
+			proof.CheckpointGenerationID != request.Fork.TargetGenerationID ||
+			proof.SourceFilesystemID != request.SourceFilesystemID ||
+			proof.SourceWriterGrantID != request.SourceWriterGrantID ||
+			proof.SourceWriterEpoch != request.SourceWriterEpoch || proof.BindingVersion != request.BindingVersion ||
+			proof.BindingDigest != request.BindingDigest ||
+			proof.ExpectedSourceGenerationID != request.ExpectedSourceGenerationID {
+			return fmt.Errorf("node channel running-fork result belongs to another writer or target")
+		}
+		return nil
 	case NodeChannelCommandCleanup:
-		if r.CleanupProof == nil || r.NetworkPolicyToken != nil || r.ControlResponse != nil {
+		if r.CleanupProof == nil || r.NetworkPolicyToken != nil || r.ControlResponse != nil || r.RunningFork != nil {
 			return fmt.Errorf("node channel cleanup result is incomplete")
 		}
 		if err := r.CleanupProof.Validate(); err != nil {

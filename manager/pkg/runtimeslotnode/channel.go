@@ -341,6 +341,25 @@ func (h *ChannelHub) CommandReady(
 	return *result.ControlResponse, nil
 }
 
+// RunningFork dispatches an exact live RootFS checkpoint to the source node.
+// The node publishes the checkpoint through writer authority before replying.
+func (h *ChannelHub) RunningFork(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodeRunningForkControlRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	command, err := protocol.NewNodeChannelRunningForkCommand(target, request)
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{},
+			fmt.Errorf("build node running-fork command: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, err
+	}
+	return *result.RunningFork, nil
+}
+
 // CleanupRuntimeSlot implements the terminal controller's authenticated node
 // transport without dialing a task-driver Unix socket from the region.
 func (h *ChannelHub) CleanupRuntimeSlot(

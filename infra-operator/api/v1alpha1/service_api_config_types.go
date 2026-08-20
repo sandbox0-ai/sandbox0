@@ -922,6 +922,12 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default="0s"
 	DefaultSandboxTTL metav1.Duration `json:"defaultSandboxTtl,omitempty"`
+	// SandboxRuntimeBackend selects the runtime implementation used by the
+	// logical sandbox claim endpoint.
+	// +optional
+	// +kubebuilder:default=kubernetes
+	// +kubebuilder:validation:Enum=kubernetes;nomad
+	SandboxRuntimeBackend string `json:"sandboxRuntimeBackend,omitempty"`
 	// +optional
 	// +kubebuilder:default="4Gi"
 	TeamTemplateMemoryPerCPU string `json:"teamTemplateMemoryPerCpu,omitempty"`
@@ -1020,7 +1026,24 @@ type NodeAuthorityConfig struct {
 	// +kubebuilder:default="30s"
 	RuntimeSlotHeartbeatTTL metav1.Duration `json:"runtimeSlotHeartbeatTtl,omitempty"`
 	// +optional
+	Claim RuntimeSlotClaimConfig `json:"claim,omitempty"`
+	// +optional
 	Terminal RuntimeSlotTerminalConfig `json:"terminal,omitempty"`
+}
+
+// RuntimeSlotClaimConfig configures logical Nomad warm-slot claims.
+type RuntimeSlotClaimConfig struct {
+	// SecretName contains runtime-profiles.json and an exact 32-byte
+	// writer-token.key. The key must remain stable across retries and rollouts.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+	// +optional
+	// +kubebuilder:default="15s"
+	ClaimTTL metav1.Duration `json:"claimTtl,omitempty"`
+	// SLO is the regional ingress-to-authenticated-procd command target.
+	// +optional
+	// +kubebuilder:default="1s"
+	SLO metav1.Duration `json:"slo,omitempty"`
 }
 
 // NodeAuthorityIdentityConfig binds one certificate common name to one node.

@@ -37,6 +37,7 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 	cfg.WebhookCertPath = spec.WebhookCertPath
 	cfg.WebhookKeyPath = spec.WebhookKeyPath
 	cfg.DefaultSandboxTTL = spec.DefaultSandboxTTL
+	cfg.SandboxRuntimeBackend = spec.SandboxRuntimeBackend
 	cfg.TeamTemplateMemoryPerCPU = spec.TeamTemplateMemoryPerCPU
 	cfg.SandboxMaxMemory = spec.SandboxMaxMemory
 	cfg.SandboxRuntimeClassName = spec.SandboxRuntimeClassName
@@ -77,6 +78,11 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		WriterRenewalGrace:      spec.NodeAuthority.WriterRenewalGrace,
 		RuntimeSlotHeartbeatTTL: spec.NodeAuthority.RuntimeSlotHeartbeatTTL,
 		Identities:              cloneNodeAuthorityIdentities(spec.NodeAuthority.Identities),
+		Claim: apiconfig.RuntimeSlotClaimConfig{
+			SecretName: spec.NodeAuthority.Claim.SecretName,
+			ClaimTTL:   spec.NodeAuthority.Claim.ClaimTTL,
+			SLO:        spec.NodeAuthority.Claim.SLO,
+		},
 		Terminal: apiconfig.RuntimeSlotTerminalConfig{
 			Enabled:           spec.NodeAuthority.Terminal.Enabled,
 			ControlSecretName: spec.NodeAuthority.Terminal.ControlSecretName,

@@ -417,13 +417,14 @@ func TestReconcileUsesManagerBudgetAndRootFSObjectStorage(t *testing.T) {
 						},
 					},
 					Config: &infrav1alpha1.ManagerConfig{
-						HTTPPort: 8080, MetricsPort: 9090,
+						HTTPPort: 8080, MetricsPort: 9090, SandboxRuntimeBackend: "nomad",
 						NodeAuthority: infrav1alpha1.NodeAuthorityConfig{
 							Enabled: true, Port: 8421, TLSSecretName: "manager-node-tls",
 							Identities: []infrav1alpha1.NodeAuthorityIdentityConfig{{
 								CommonName: "node-agent", ClusterID: "cluster-1", NodeID: "node-1",
 								NodeUID: "node-uid-1", PodUID: "agent-1",
 							}},
+							Claim: infrav1alpha1.RuntimeSlotClaimConfig{SecretName: "manager-nomad-claim"},
 							Terminal: infrav1alpha1.RuntimeSlotTerminalConfig{
 								Enabled: true, ControlSecretName: "manager-nomad-control",
 							},
@@ -520,6 +521,7 @@ func assertManagerNodeAuthorityDeployment(t *testing.T, deployment *appsv1.Deplo
 	foundPort := false
 	foundTLSMount := false
 	foundControlMount := false
+	foundClaimMount := false
 	for _, port := range container.Ports {
 		foundPort = foundPort || (port.Name == "node-authority" && port.ContainerPort == 8421)
 	}
@@ -528,20 +530,94 @@ func assertManagerNodeAuthorityDeployment(t *testing.T, deployment *appsv1.Deplo
 			mount.MountPath == "/etc/sandbox0/node-authority/tls" && mount.ReadOnly)
 		foundControlMount = foundControlMount || (mount.Name == nodeAuthorityControlVolumeName &&
 			mount.MountPath == "/etc/sandbox0/node-authority/control" && mount.ReadOnly)
+		foundClaimMount = foundClaimMount || (mount.Name == nodeAuthorityClaimVolumeName &&
+			mount.MountPath == "/etc/sandbox0/node-authority/claim" && mount.ReadOnly)
 	}
-	if !foundPort || !foundTLSMount || !foundControlMount {
+	if !foundPort || !foundTLSMount || !foundControlMount || !foundClaimMount {
 		t.Fatalf("manager node authority container wiring is incomplete: ports=%#v mounts=%#v", container.Ports, container.VolumeMounts)
 	}
 	foundTLSVolume := false
 	foundControlVolume := false
+	foundClaimVolume := false
 	for _, volume := range deployment.Spec.Template.Spec.Volumes {
 		foundTLSVolume = foundTLSVolume || (volume.Name == nodeAuthorityTLSVolumeName &&
 			volume.Secret != nil && volume.Secret.SecretName == "manager-node-tls")
 		foundControlVolume = foundControlVolume || (volume.Name == nodeAuthorityControlVolumeName &&
 			volume.Secret != nil && volume.Secret.SecretName == "manager-nomad-control")
+		foundClaimVolume = foundClaimVolume || (volume.Name == nodeAuthorityClaimVolumeName &&
+			volume.Secret != nil && volume.Secret.SecretName == "manager-nomad-claim" &&
+			len(volume.Secret.Items) == 2)
 	}
-	if !foundTLSVolume || !foundControlVolume {
+	if !foundTLSVolume || !foundControlVolume || !foundClaimVolume {
 		t.Fatalf("manager node authority volumes are incomplete: %#v", deployment.Spec.Template.Spec.Volumes)
+	}
+}
+
+func TestApplyManagerRuntimeDeploymentConfigFailsClosed(t *testing.T) {
+	base := func() *config.ManagerConfig {
+		return &config.ManagerConfig{
+			SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad,
+			NodeAuthority: config.NodeAuthorityConfig{
+				Enabled: true, TLSSecretName: "manager-node-tls",
+				Identities: []config.NodeAuthorityIdentityConfig{{CommonName: "node", NodeUID: "uid", PodUID: "agent"}},
+				Claim:      config.RuntimeSlotClaimConfig{SecretName: "nomad-claim"},
+				Terminal:   config.RuntimeSlotTerminalConfig{Enabled: true, ControlSecretName: "nomad-control"},
+			},
+		}
+	}
+	tests := []struct {
+		name     string
+		replicas int32
+		mutate   func(*config.ManagerConfig)
+	}{
+		{name: "multiple replicas", replicas: 2},
+		{name: "missing authority", replicas: 1, mutate: func(cfg *config.ManagerConfig) { cfg.NodeAuthority.Enabled = false }},
+		{name: "missing terminal", replicas: 1, mutate: func(cfg *config.ManagerConfig) { cfg.NodeAuthority.Terminal = config.RuntimeSlotTerminalConfig{} }},
+		{name: "missing claim secret", replicas: 1, mutate: func(cfg *config.ManagerConfig) { cfg.NodeAuthority.Claim.SecretName = "" }},
+		{name: "short claim ttl", replicas: 1, mutate: func(cfg *config.ManagerConfig) {
+			cfg.NodeAuthority.Claim.ClaimTTL = metav1.Duration{Duration: 500 * time.Millisecond}
+		}},
+		{name: "nonpositive slo", replicas: 1, mutate: func(cfg *config.ManagerConfig) {
+			cfg.NodeAuthority.Claim.SLO = metav1.Duration{Duration: -time.Second}
+		}},
+		{name: "unknown backend", replicas: 1, mutate: func(cfg *config.ManagerConfig) { cfg.SandboxRuntimeBackend = "containerd" }},
+		{name: "claim config on kubernetes", replicas: 1, mutate: func(cfg *config.ManagerConfig) {
+			cfg.SandboxRuntimeBackend = config.SandboxRuntimeBackendKubernetes
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := base()
+			if test.mutate != nil {
+				test.mutate(cfg)
+			}
+			if err := applyManagerRuntimeDeploymentConfig(cfg, test.replicas); err == nil {
+				t.Fatalf("invalid config was accepted: %#v", cfg)
+			}
+		})
+	}
+}
+
+func TestApplyManagerRuntimeDeploymentConfigPinsNomadClaimAssets(t *testing.T) {
+	cfg := &config.ManagerConfig{
+		SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad,
+		NodeAuthority: config.NodeAuthorityConfig{
+			Enabled: true, TLSSecretName: "manager-node-tls",
+			Identities: []config.NodeAuthorityIdentityConfig{{CommonName: "node", NodeUID: "uid", PodUID: "agent"}},
+			Claim: config.RuntimeSlotClaimConfig{
+				SecretName: "nomad-claim", ProfileCatalogFile: "/ignored/profiles.json", WriterTokenKeyFile: "/ignored/key",
+			},
+			Terminal: config.RuntimeSlotTerminalConfig{Enabled: true, ControlSecretName: "nomad-control"},
+		},
+	}
+	if err := applyManagerRuntimeDeploymentConfig(cfg, 1); err != nil {
+		t.Fatal(err)
+	}
+	claim := cfg.NodeAuthority.Claim
+	if claim.ProfileCatalogFile != config.NodeAuthorityRuntimeProfilesPath ||
+		claim.WriterTokenKeyFile != config.NodeAuthorityWriterTokenKeyPath ||
+		claim.ClaimTTL.Duration != 15*time.Second || claim.SLO.Duration != time.Second {
+		t.Fatalf("Nomad claim deployment config = %#v", claim)
 	}
 }
 

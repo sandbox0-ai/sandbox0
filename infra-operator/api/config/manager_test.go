@@ -156,6 +156,9 @@ func TestLoadManagerConfigDefaultsLeaderElectionOn(t *testing.T) {
 	if !cfg.LeaderElection {
 		t.Fatal("leader election default = false, want true")
 	}
+	if cfg.SandboxRuntimeBackend != SandboxRuntimeBackendKubernetes {
+		t.Fatalf("sandbox runtime backend = %q, want kubernetes", cfg.SandboxRuntimeBackend)
+	}
 }
 
 func TestLoadManagerConfigAllowsLeaderElectionOff(t *testing.T) {
@@ -175,6 +178,7 @@ func TestLoadManagerConfigAllowsLeaderElectionOff(t *testing.T) {
 
 func TestLoadManagerConfigPreservesNodeAuthority(t *testing.T) {
 	path := writeManagerConfigFile(t, `
+sandbox_runtime_backend: nomad
 node_authority:
   enabled: true
   listen_host: 172.16.100.2
@@ -195,6 +199,14 @@ node_authority:
       node_id: node-1
       node_uid: node-uid-1
       pod_uid: agent-1
+  claim:
+    secret_name: manager-nomad-claim
+    profile_catalog_file: /claim/profiles.json
+    writer_token_key_file: /claim/writer.key
+    claim_ttl:
+      duration: 12s
+    slo:
+      duration: 750ms
   terminal:
     enabled: true
     control_secret_name: manager-nomad-control
@@ -210,7 +222,7 @@ node_authority:
 		t.Fatalf("loadManagerConfig: %v", err)
 	}
 	node := cfg.NodeAuthority
-	if !node.Enabled || node.ListenHost != "172.16.100.2" || node.Port != 9444 ||
+	if cfg.SandboxRuntimeBackend != SandboxRuntimeBackendNomad || !node.Enabled || node.ListenHost != "172.16.100.2" || node.Port != 9444 ||
 		node.TLSSecretName != "manager-node-tls" || node.CertFile != "/tls/server.crt" ||
 		node.WriterLeaseTTL.Duration != 20*time.Second || node.WriterRenewalGrace.Duration != 3*time.Second ||
 		node.RuntimeSlotHeartbeatTTL.Duration != 25*time.Second || len(node.Identities) != 1 {
@@ -220,6 +232,22 @@ node_authority:
 		node.Terminal.NomadEndpointsFile != "/control/nomad.json" || node.Terminal.Interval.Duration != 2*time.Second ||
 		node.Terminal.PassTimeout.Duration != time.Minute || node.Terminal.ScanLimit != 64 {
 		t.Fatalf("node authority nested config = %#v", node)
+	}
+	if node.Claim.SecretName != "manager-nomad-claim" || node.Claim.ProfileCatalogFile != "/claim/profiles.json" ||
+		node.Claim.WriterTokenKeyFile != "/claim/writer.key" || node.Claim.ClaimTTL.Duration != 12*time.Second ||
+		node.Claim.SLO.Duration != 750*time.Millisecond {
+		t.Fatalf("node authority claim config = %#v", node.Claim)
+	}
+}
+
+func TestSandboxRuntimeDefaultsNomadClaimPolicy(t *testing.T) {
+	cfg := &ManagerConfig{SandboxRuntimeBackend: SandboxRuntimeBackendNomad}
+	applySandboxRuntimeDefaults(cfg)
+	if cfg.NodeAuthority.Claim.ProfileCatalogFile != NodeAuthorityRuntimeProfilesPath ||
+		cfg.NodeAuthority.Claim.WriterTokenKeyFile != NodeAuthorityWriterTokenKeyPath ||
+		cfg.NodeAuthority.Claim.ClaimTTL.Duration != 15*time.Second ||
+		cfg.NodeAuthority.Claim.SLO.Duration != time.Second {
+		t.Fatalf("Nomad claim defaults = %#v", cfg.NodeAuthority.Claim)
 	}
 }
 

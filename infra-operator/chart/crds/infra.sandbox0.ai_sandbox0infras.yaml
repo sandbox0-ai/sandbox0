@@ -3780,6 +3780,24 @@ spec:
                               NodeAuthority configures the dedicated verified-mTLS listener used by
                               trusted Nomad node agents.
                             properties:
+                              claim:
+                                description: RuntimeSlotClaimConfig configures logical
+                                  Nomad warm-slot claims.
+                                properties:
+                                  claimTtl:
+                                    default: 15s
+                                    type: string
+                                  secretName:
+                                    description: |-
+                                      SecretName contains runtime-profiles.json and an exact 32-byte
+                                      writer-token.key. The key must remain stable across retries and rollouts.
+                                    type: string
+                                  slo:
+                                    default: 1s
+                                    description: SLO is the regional ingress-to-authenticated-procd
+                                      command target.
+                                    type: string
+                                type: object
                               enabled:
                                 type: boolean
                               identities:
@@ -3944,6 +3962,15 @@ spec:
                             default: 16Gi
                             description: SandboxMaxMemory is the maximum memory limit
                               accepted for a single sandbox.
+                            type: string
+                          sandboxRuntimeBackend:
+                            default: kubernetes
+                            description: |-
+                              SandboxRuntimeBackend selects the runtime implementation used by the
+                              logical sandbox claim endpoint.
+                            enum:
+                            - kubernetes
+                            - nomad
                             type: string
                           sandboxRuntimeClassName:
                             type: string

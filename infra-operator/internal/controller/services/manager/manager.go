@@ -49,6 +49,7 @@ const (
 	managerConfigHashAnnotation    = "infra.sandbox0.ai/manager-config-hash"
 	nodeAuthorityTLSVolumeName     = "node-authority-tls"
 	nodeAuthorityControlVolumeName = "node-authority-control"
+	nodeAuthorityClaimVolumeName   = "node-authority-claim"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -181,6 +182,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 				Name: nodeAuthorityControlVolumeName,
 				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 					SecretName: config.NodeAuthority.Terminal.ControlSecretName,
+				}},
+			})
+		}
+		if config.SandboxRuntimeBackend == apiconfig.SandboxRuntimeBackendNomad {
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name: nodeAuthorityClaimVolumeName, MountPath: apiconfig.NodeAuthorityClaimMountDir, ReadOnly: true,
+			})
+			volumes = append(volumes, corev1.Volume{
+				Name: nodeAuthorityClaimVolumeName,
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: config.NodeAuthority.Claim.SecretName,
+					Items: []corev1.KeyToPath{
+						{Key: "runtime-profiles.json", Path: "runtime-profiles.json"},
+						{Key: "writer-token.key", Path: "writer-token.key"},
+					},
 				}},
 			})
 		}
@@ -404,11 +420,68 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 	if cfg.ProcdBinImageRef == "" {
 		cfg.ProcdBinImageRef = fmt.Sprintf("%s:%s-procd-bin", imageRepo, imageTag)
 	}
-	if err := applyNodeAuthorityDeploymentConfig(cfg); err != nil {
+	if err := applyManagerRuntimeDeploymentConfig(cfg, compiledPlan.Manager.Replicas); err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
+}
+
+func applyManagerRuntimeDeploymentConfig(cfg *apiconfig.ManagerConfig, replicas int32) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.SandboxRuntimeBackend == "" {
+		cfg.SandboxRuntimeBackend = apiconfig.SandboxRuntimeBackendKubernetes
+	}
+	if cfg.SandboxRuntimeBackend != strings.TrimSpace(cfg.SandboxRuntimeBackend) {
+		return fmt.Errorf("manager sandbox runtime backend must be canonical")
+	}
+	if err := applyNodeAuthorityDeploymentConfig(cfg); err != nil {
+		return err
+	}
+	switch cfg.SandboxRuntimeBackend {
+	case apiconfig.SandboxRuntimeBackendKubernetes:
+		if !runtimeSlotClaimConfigEmpty(cfg.NodeAuthority.Claim) {
+			return fmt.Errorf("Nomad runtime slot claim config requires the nomad sandbox runtime backend")
+		}
+		return nil
+	case apiconfig.SandboxRuntimeBackendNomad:
+		if replicas != 1 {
+			return fmt.Errorf("nomad sandbox runtime backend currently requires exactly one manager replica until node channels are replica-aware")
+		}
+		if !cfg.NodeAuthority.Enabled {
+			return fmt.Errorf("nomad sandbox runtime backend requires manager node authority")
+		}
+		if !cfg.NodeAuthority.Terminal.Enabled {
+			return fmt.Errorf("nomad sandbox runtime backend requires terminal reconciliation")
+		}
+		if err := validateNodeAuthoritySecretName("claim", cfg.NodeAuthority.Claim.SecretName); err != nil {
+			return err
+		}
+		cfg.NodeAuthority.Claim.ProfileCatalogFile = apiconfig.NodeAuthorityRuntimeProfilesPath
+		cfg.NodeAuthority.Claim.WriterTokenKeyFile = apiconfig.NodeAuthorityWriterTokenKeyPath
+		if cfg.NodeAuthority.Claim.ClaimTTL.Duration == 0 {
+			cfg.NodeAuthority.Claim.ClaimTTL = metav1.Duration{Duration: 15 * time.Second}
+		}
+		if claimTTL := cfg.NodeAuthority.Claim.ClaimTTL.Duration; claimTTL < time.Second || claimTTL > time.Minute {
+			return fmt.Errorf("manager runtime slot claim TTL must be between one second and one minute")
+		}
+		if cfg.NodeAuthority.Claim.SLO.Duration == 0 {
+			cfg.NodeAuthority.Claim.SLO = metav1.Duration{Duration: time.Second}
+		}
+		if cfg.NodeAuthority.Claim.SLO.Duration <= 0 {
+			return fmt.Errorf("manager runtime slot claim SLO must be positive")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported manager sandbox runtime backend %q", cfg.SandboxRuntimeBackend)
+	}
+}
+
+func runtimeSlotClaimConfigEmpty(cfg apiconfig.RuntimeSlotClaimConfig) bool {
+	return strings.TrimSpace(cfg.SecretName) == "" && strings.TrimSpace(cfg.ProfileCatalogFile) == "" &&
+		strings.TrimSpace(cfg.WriterTokenKeyFile) == "" && cfg.ClaimTTL.Duration == 0 && cfg.SLO.Duration == 0
 }
 
 func applyNodeAuthorityDeploymentConfig(cfg *apiconfig.ManagerConfig) error {
@@ -418,7 +491,7 @@ func applyNodeAuthorityDeploymentConfig(cfg *apiconfig.ManagerConfig) error {
 	node := &cfg.NodeAuthority
 	if !node.Enabled {
 		if node.Terminal.Enabled || strings.TrimSpace(node.Terminal.ControlSecretName) != "" ||
-			strings.TrimSpace(node.Terminal.NomadEndpointsFile) != "" {
+			strings.TrimSpace(node.Terminal.NomadEndpointsFile) != "" || !runtimeSlotClaimConfigEmpty(node.Claim) {
 			return fmt.Errorf("manager node authority must be enabled when terminal reconciliation is configured")
 		}
 		return nil

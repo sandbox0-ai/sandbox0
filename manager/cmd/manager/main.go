@@ -28,6 +28,7 @@ import (
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaintenance"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templatebuild"
@@ -44,6 +45,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
+	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	registryprovider "github.com/sandbox0-ai/sandbox0/pkg/registry"
 	s0template "github.com/sandbox0-ai/sandbox0/pkg/template"
@@ -279,6 +281,7 @@ func main() {
 	}
 
 	// Create services
+	procdHTTPClient := obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration})
 	cfgForSandbox := service.SandboxServiceConfig{
 		ClusterID:                           naming.ClusterIDOrDefault(&cfg.DefaultClusterId),
 		DefaultTTL:                          cfg.DefaultSandboxTTL.Duration,
@@ -294,7 +297,7 @@ func main() {
 		CtldHTTPClient:                      obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.CtldClientTimeout.Duration}),
 		ProcdPort:                           cfg.ProcdConfig.HTTPPort,
 		ProcdClientTimeout:                  cfg.ProcdClientTimeout.Duration,
-		ProcdHTTPClient:                     obsProvider.HTTP.NewClient(httpobs.Config{Timeout: cfg.ProcdClientTimeout.Duration}),
+		ProcdHTTPClient:                     procdHTTPClient,
 		RuntimeReadyTimeout:                 cfg.RuntimeReadyTimeout.Duration,
 		AllowColdStartWithoutReadyDataPlane: cfg.AllowColdStartWithoutReadyDataPlane,
 		PreferredNodeSelector:               cfg.SandboxPodPlacement.PreferredNodeSelector,
@@ -305,6 +308,7 @@ func main() {
 		PublicRegionID:                      cfg.PublicRegionID,
 		AutoscalerSafeToEvictAnnotationKeys: autoscalerAnnotationKeys,
 	}
+	procdClient := procdapi.NewProcdClientWithHTTPClient(procdHTTPClient)
 
 	var quotaUsageStore quota.UsageStore
 	if meteringSink != nil {
@@ -339,6 +343,7 @@ func main() {
 		Config:                      cfgForSandbox,
 		Logger:                      logger,
 		Metrics:                     managerMetrics,
+		ProcdClient:                 procdClient,
 		HotClaimReservationEnqueuer: hotClaimReservationController,
 		CredentialStore:             credentialStore,
 		QuotaStore:                  quotaRepo,
@@ -401,6 +406,18 @@ func main() {
 	}
 	registryService := registryservice.NewRegistryService(registryProvider, logger)
 	templateStore := templstorepg.NewStore(pool)
+	templateResourcePolicy := s0template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory)
+	sandboxClaimer, err := buildSandboxClaimer(cfg, sandboxClaimerDependencies{
+		kubernetes: sandboxService, nodeAuthority: managerNodeAuthority,
+		store: sandboxStore, templates: templateStore, networkPolicies: networkPolicyService,
+		resourcePolicy: templateResourcePolicy, prober: procdClient,
+		tokenGenerator: internalTokenGenerator,
+		observer:       runtimeslotclaim.NewPrometheusObserver(obsProvider.MetricsRegistryOrNil()),
+		defaultTTL:     cfg.DefaultSandboxTTL.Duration, now: clk.Now, logger: logger,
+	})
+	if err != nil {
+		logger.Fatal("Failed to configure sandbox claim backend", zap.Error(err))
+	}
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
 		templateApplier := templateservice.NewTemplateApplier(templateService)
@@ -501,7 +518,7 @@ func main() {
 	// Create HTTP server
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
 		SandboxService:          sandboxService,
-		SandboxClaimer:          sandboxService,
+		SandboxClaimer:          sandboxClaimer,
 		EgressAuthService:       egressAuthService,
 		CredentialSourceService: credentialSourceService,
 		TemplateService:         templateService,
@@ -509,7 +526,7 @@ func main() {
 		TemplateStore:           templateStore,
 		TemplateReconciler:      templateReconciler,
 		TemplateStoreEnabled:    cfg.TemplateStoreEnabled,
-		TemplateResourcePolicy:  s0template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory),
+		TemplateResourcePolicy:  templateResourcePolicy,
 		ClusterService:          clusterService,
 		QuotaRepository:         quotaRepo,
 		AuthValidator:           authValidator,

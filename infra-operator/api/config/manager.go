@@ -18,14 +18,20 @@ const (
 	DefaultRuntimeReadyTimeout = 5 * time.Minute
 	// IdlePodRepairGraceBuffer prevents the warm-pool repair loop from racing a
 	// claim that is still inside its runtime readiness window.
-	IdlePodRepairGraceBuffer        = 30 * time.Second
-	DefaultNodeAuthorityPort        = 8421
-	NodeAuthorityTLSMountDir        = "/etc/sandbox0/node-authority/tls"
-	NodeAuthorityControlMountDir    = "/etc/sandbox0/node-authority/control"
-	NodeAuthorityServerCertPath     = NodeAuthorityTLSMountDir + "/tls.crt"
-	NodeAuthorityServerKeyPath      = NodeAuthorityTLSMountDir + "/tls.key"
-	NodeAuthorityClientCAPath       = NodeAuthorityTLSMountDir + "/client-ca.crt"
-	NodeAuthorityNomadEndpointsPath = NodeAuthorityControlMountDir + "/nomad-endpoints.json"
+	IdlePodRepairGraceBuffer         = 30 * time.Second
+	DefaultNodeAuthorityPort         = 8421
+	NodeAuthorityTLSMountDir         = "/etc/sandbox0/node-authority/tls"
+	NodeAuthorityControlMountDir     = "/etc/sandbox0/node-authority/control"
+	NodeAuthorityClaimMountDir       = "/etc/sandbox0/node-authority/claim"
+	NodeAuthorityServerCertPath      = NodeAuthorityTLSMountDir + "/tls.crt"
+	NodeAuthorityServerKeyPath       = NodeAuthorityTLSMountDir + "/tls.key"
+	NodeAuthorityClientCAPath        = NodeAuthorityTLSMountDir + "/client-ca.crt"
+	NodeAuthorityNomadEndpointsPath  = NodeAuthorityControlMountDir + "/nomad-endpoints.json"
+	NodeAuthorityRuntimeProfilesPath = NodeAuthorityClaimMountDir + "/runtime-profiles.json"
+	NodeAuthorityWriterTokenKeyPath  = NodeAuthorityClaimMountDir + "/writer-token.key"
+
+	SandboxRuntimeBackendKubernetes = "kubernetes"
+	SandboxRuntimeBackendNomad      = "nomad"
 )
 
 // ManagerLeaderElectionNameEnv identifies the Lease name shared by manager replicas.
@@ -43,8 +49,9 @@ type ManagerConfig struct {
 	// ProcdBinImageRef is an OCI image mounted read-only at /procd-image inside sandbox pods.
 	ProcdBinImageRef string `yaml:"procd_bin_image_ref" json:"-"`
 
-	DefaultClusterId string `yaml:"default_cluster_id" json:"-"`
-	RegionID         string `yaml:"region_id" json:"-"`
+	DefaultClusterId      string `yaml:"default_cluster_id" json:"-"`
+	RegionID              string `yaml:"region_id" json:"-"`
+	SandboxRuntimeBackend string `yaml:"sandbox_runtime_backend" json:"-"`
 	// +optional
 	// +kubebuilder:default=true
 	TemplateStoreEnabled bool `yaml:"template_store_enabled" json:"-"`
@@ -336,7 +343,18 @@ type NodeAuthorityConfig struct {
 	WriterLeaseTTL          metav1.Duration           `yaml:"writer_lease_ttl" json:"-"`
 	WriterRenewalGrace      metav1.Duration           `yaml:"writer_renewal_grace" json:"-"`
 	RuntimeSlotHeartbeatTTL metav1.Duration           `yaml:"runtime_slot_heartbeat_ttl" json:"-"`
+	Claim                   RuntimeSlotClaimConfig    `yaml:"claim" json:"-"`
 	Terminal                RuntimeSlotTerminalConfig `yaml:"terminal" json:"-"`
+}
+
+// RuntimeSlotClaimConfig controls the manager request path that binds logical
+// sandboxes to exact Nomad warm-slot compatibility profiles.
+type RuntimeSlotClaimConfig struct {
+	SecretName         string          `yaml:"secret_name" json:"-"`
+	ProfileCatalogFile string          `yaml:"profile_catalog_file" json:"-"`
+	WriterTokenKeyFile string          `yaml:"writer_token_key_file" json:"-"`
+	ClaimTTL           metav1.Duration `yaml:"claim_ttl" json:"-"`
+	SLO                metav1.Duration `yaml:"slo" json:"-"`
 }
 
 // NodeAuthorityIdentityConfig binds one verified certificate common name to
@@ -637,6 +655,7 @@ func LoadManagerConfig() *ManagerConfig {
 		cfg.RedisTimeout = metav1.Duration{Duration: 100 * time.Millisecond}
 	}
 	applyRootFSMaintenanceDefaults(cfg)
+	applySandboxRuntimeDefaults(cfg)
 	applyNodeAuthorityDefaults(cfg)
 	applySandboxObservabilityProducerDefaults(cfg)
 	applyPodTeardownDefaults(cfg)
@@ -754,6 +773,30 @@ func applyNodeAuthorityDefaults(cfg *ManagerConfig) {
 	}
 }
 
+func applySandboxRuntimeDefaults(cfg *ManagerConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.SandboxRuntimeBackend == "" {
+		cfg.SandboxRuntimeBackend = SandboxRuntimeBackendKubernetes
+	}
+	if cfg.SandboxRuntimeBackend != SandboxRuntimeBackendNomad {
+		return
+	}
+	if cfg.NodeAuthority.Claim.ProfileCatalogFile == "" {
+		cfg.NodeAuthority.Claim.ProfileCatalogFile = NodeAuthorityRuntimeProfilesPath
+	}
+	if cfg.NodeAuthority.Claim.WriterTokenKeyFile == "" {
+		cfg.NodeAuthority.Claim.WriterTokenKeyFile = NodeAuthorityWriterTokenKeyPath
+	}
+	if cfg.NodeAuthority.Claim.ClaimTTL.Duration == 0 {
+		cfg.NodeAuthority.Claim.ClaimTTL = metav1.Duration{Duration: 15 * time.Second}
+	}
+	if cfg.NodeAuthority.Claim.SLO.Duration == 0 {
+		cfg.NodeAuthority.Claim.SLO = metav1.Duration{Duration: time.Second}
+	}
+}
+
 func loadManagerConfig(path string) (*ManagerConfig, error) {
 	cfg := defaultManagerConfig()
 	if path == "" {
@@ -776,5 +819,8 @@ func loadManagerConfig(path string) (*ManagerConfig, error) {
 }
 
 func defaultManagerConfig() *ManagerConfig {
-	return &ManagerConfig{LeaderElection: true}
+	return &ManagerConfig{
+		LeaderElection:        true,
+		SandboxRuntimeBackend: SandboxRuntimeBackendKubernetes,
+	}
 }

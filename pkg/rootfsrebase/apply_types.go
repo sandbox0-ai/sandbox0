@@ -43,6 +43,28 @@ type ApplyResult struct {
 	IO                   ApplyIOStats `json:"io"`
 }
 
+// Validate verifies the bounded health record before it crosses a durable
+// node or regional publication boundary.
+func (r ApplyResult) Validate() error {
+	if r.Version != ApplyResultVersion {
+		return fmt.Errorf("unsupported RootFS apply result version %d", r.Version)
+	}
+	if r.AppliedChanges < 0 || r.ConvergedChanges < 0 || r.TargetNodeCount <= 0 {
+		return fmt.Errorf("RootFS apply result counts are invalid")
+	}
+	for name, value := range map[string]string{
+		"old manifest": r.OldManifestDigest, "source manifest": r.SourceManifestDigest,
+		"diff": r.DiffDigest, "target manifest": r.TargetManifestDigest,
+		"health proof": r.HealthProof,
+	} {
+		decoded, err := hex.DecodeString(value)
+		if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != value {
+			return fmt.Errorf("%s digest must be canonical 32-byte hexadecimal", name)
+		}
+	}
+	return nil
+}
+
 // HealthProofBytes returns the exact 32-byte value accepted by the regional
 // paused-rebase publication transaction.
 func (r ApplyResult) HealthProofBytes() ([]byte, error) {

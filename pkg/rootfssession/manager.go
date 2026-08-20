@@ -19,6 +19,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -45,6 +46,7 @@ const (
 var (
 	sessionBucket         = []byte("rootfs-sessions-v1")
 	sessionIdentityBucket = []byte("rootfs-session-identities-v1")
+	rebaseBucket          = []byte("rootfs-rebases-v1")
 )
 
 // Device is one live kernel block-device attachment. Close must not return
@@ -112,6 +114,13 @@ type Config struct {
 	Source            rootfsblock.RangeSource
 	Publisher         rootfsblock.ImmutableObjectPublisher
 	Runtime           HostRuntime
+	RebaseEngine      RebaseEngine
+}
+
+// RebaseEngine performs the semantic three-way merge while Manager owns all
+// NBD, XFS, OverlayFS, branch, and journal side effects.
+type RebaseEngine interface {
+	Apply(context.Context, rootfsrebase.WorkerRequest, string, string, string, []uint64) (*rootfsrebase.ApplyResult, error)
 }
 
 // Mount is the storage-owned merged root exported to the Snapshotter's stable
@@ -225,20 +234,24 @@ type ConsumerRegistration struct {
 // journal stores the tokenless regional Stage binding together with device and
 // mount side effects so a process-independent reconciler can finish cleanup.
 type Manager struct {
-	db         *bolt.DB
-	branchRoot string
-	mountRoot  string
-	source     rootfsblock.RangeSource
-	publisher  rootfsblock.ImmutableObjectPublisher
-	readCache  *rootfsblock.ReadCache
-	runtime    HostRuntime
-	maxDirty   int64
-	mu         sync.Mutex
-	live       map[string]*liveSession
-	captures   map[string]bool
-	locks      sync.Map
-	lifetime   context.Context
-	cancel     context.CancelFunc
+	db              *bolt.DB
+	branchRoot      string
+	mountRoot       string
+	source          rootfsblock.RangeSource
+	publisher       rootfsblock.ImmutableObjectPublisher
+	readCache       *rootfsblock.ReadCache
+	runtime         HostRuntime
+	maxDirty        int64
+	mu              sync.Mutex
+	live            map[string]*liveSession
+	captures        map[string]bool
+	locks           sync.Map
+	lifetime        context.Context
+	cancel          context.CancelFunc
+	rebaseEngine    RebaseEngine
+	rebaseAdmission chan struct{}
+	rebaseWG        sync.WaitGroup
+	closing         bool
 }
 
 func New(config Config) (*Manager, error) {
@@ -271,7 +284,10 @@ func New(config Config) (*Manager, error) {
 		if _, err := tx.CreateBucketIfNotExists(sessionBucket); err != nil {
 			return err
 		}
-		_, err := tx.CreateBucketIfNotExists(sessionIdentityBucket)
+		if _, err := tx.CreateBucketIfNotExists(sessionIdentityBucket); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(rebaseBucket)
 		return err
 	}); err != nil {
 		db.Close()
@@ -283,12 +299,17 @@ func New(config Config) (*Manager, error) {
 		return nil, fmt.Errorf("initialize RootFS read cache: %w", err)
 	}
 	lifetime, cancel := context.WithCancel(context.Background())
+	rebaseEngine := config.RebaseEngine
+	if rebaseEngine == nil {
+		rebaseEngine = filesystemRebaseEngine{}
+	}
 	return &Manager{
 		db: db, branchRoot: branchRoot, mountRoot: mountRoot,
 		source: config.Source, publisher: config.Publisher, readCache: readCache,
 		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes,
 		live: make(map[string]*liveSession), captures: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
+		rebaseEngine: rebaseEngine, rebaseAdmission: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -950,7 +971,7 @@ func (m *Manager) RenewConsumer(parent string, identity rootfshandoff.Identity, 
 
 func (m *Manager) reconcileDeviceReservations() error {
 	type reservation struct {
-		parent       string
+		owner        string
 		devicePath   string
 		allocationID string
 	}
@@ -1011,7 +1032,7 @@ func (m *Manager) reconcileDeviceReservations() error {
 				}
 				owners[current.DevicePath] = current.Parent
 				reservations = append(reservations, reservation{
-					parent: current.Parent, devicePath: current.DevicePath, allocationID: current.DeviceAllocationID,
+					owner: current.Parent, devicePath: current.DevicePath, allocationID: current.DeviceAllocationID,
 				})
 			}
 			if changed {
@@ -1029,6 +1050,38 @@ func (m *Manager) reconcileDeviceReservations() error {
 				return err
 			}
 		}
+		rebases := tx.Bucket(rebaseBucket)
+		if err := rebases.ForEach(func(key, payload []byte) error {
+			if payload == nil {
+				return nil
+			}
+			var current rebaseRecord
+			if err := json.Unmarshal(payload, &current); err != nil {
+				return fmt.Errorf("decode RootFS rebase %q: %w", key, err)
+			}
+			if err := m.validateRebaseRecord(current, string(key)); err != nil {
+				return err
+			}
+			for _, resource := range current.Resources {
+				if resource.DevicePath == "" || resource.DeviceReservationReleased {
+					continue
+				}
+				owner := "rebase:" + current.OperationID + ":" + resource.Role
+				if previous := owners[resource.DevicePath]; previous != "" && previous != owner {
+					return fmt.Errorf(
+						"NBD device %s is reserved by both %q and %q",
+						resource.DevicePath, previous, owner,
+					)
+				}
+				owners[resource.DevicePath] = owner
+				reservations = append(reservations, reservation{
+					owner: owner, devicePath: resource.DevicePath, allocationID: resource.DeviceAllocationID,
+				})
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -1036,7 +1089,7 @@ func (m *Manager) reconcileDeviceReservations() error {
 	}
 	for _, reservation := range reservations {
 		if err := m.runtime.AdoptDeviceReservation(reservation.devicePath, reservation.allocationID); err != nil {
-			return fmt.Errorf("adopt device reservation for parent %q: %w", reservation.parent, err)
+			return fmt.Errorf("adopt device reservation for %q: %w", reservation.owner, err)
 		}
 	}
 	return nil
@@ -1781,7 +1834,15 @@ func containsSessionState(state string, allowed ...string) bool {
 }
 
 func (m *Manager) Close() error {
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closing = true
+	m.mu.Unlock()
 	m.cancel()
+	m.rebaseWG.Wait()
 	m.mu.Lock()
 	live := make([]*liveSession, 0, len(m.live))
 	for _, session := range m.live {

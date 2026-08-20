@@ -202,6 +202,9 @@ func newEmbeddedRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootf
 		err = sessions.ReconcileRunningForkCaptures(reconcileCtx)
 	}
 	if err == nil {
+		err = sessions.ReconcileRebases(reconcileCtx)
+	}
+	if err == nil {
 		err = sessions.ReconcileReleases(reconcileCtx)
 	}
 	reconcileCancel()

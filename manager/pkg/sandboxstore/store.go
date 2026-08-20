@@ -153,6 +153,9 @@ type SandboxLifecycleTxn struct {
 	FromPodName         string
 	ToPodNamespace      string
 	ToPodName           string
+	TargetSandboxID     string
+	TargetGenerationID  string
+	TargetRecordDigest  []byte
 	ExpectedHeadLayerID string
 	PreparedHeadLayerID string
 	Error               string
@@ -174,6 +177,7 @@ type SandboxRuntimeMetadata struct {
 // authoritative for whether the referenced runtime currently exists.
 type SandboxRuntimeReconcileCandidate struct {
 	SandboxID         string
+	RuntimeBackend    string
 	DesiredState      string
 	PodNamespace      string
 	PodName           string
@@ -476,7 +480,8 @@ func (s *PGSandboxStore) ListRuntimeReconcileCandidates(ctx context.Context, clu
 		limit = 500
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT sandbox_id, desired_state, current_pod_namespace, current_pod_name, runtime_generation
+		SELECT sandbox_id, runtime_backend, desired_state,
+			current_pod_namespace, current_pod_name, runtime_generation
 		FROM manager.sandboxes
 		WHERE deleted_at IS NULL
 			AND (
@@ -503,6 +508,7 @@ func (s *PGSandboxStore) ListRuntimeReconcileCandidates(ctx context.Context, clu
 		var candidate SandboxRuntimeReconcileCandidate
 		if err := rows.Scan(
 			&candidate.SandboxID,
+			&candidate.RuntimeBackend,
 			&candidate.DesiredState,
 			&candidate.PodNamespace,
 			&candidate.PodName,
@@ -980,14 +986,17 @@ func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifec
 			from_generation, to_generation,
 			from_pod_namespace, from_pod_name,
 			to_pod_namespace, to_pod_name,
+			target_sandbox_id, target_generation_id, target_record_digest,
 			expected_head_layer_id, prepared_head_layer_id,
 			created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+			COALESCE($16, ''::bytea), $17, $18, NOW(), NOW())
 	`, txn.ID, txn.SandboxID, txn.Kind, phase, source, txn.Cancelable, txn.Epoch,
 		txn.FromGeneration, txn.ToGeneration,
 		txn.FromPodNamespace, txn.FromPodName,
 		txn.ToPodNamespace, txn.ToPodName,
+		txn.TargetSandboxID, txn.TargetGenerationID, txn.TargetRecordDigest,
 		txn.ExpectedHeadLayerID, txn.PreparedHeadLayerID)
 	if err != nil {
 		return fmt.Errorf("begin lifecycle txn: %w", err)
@@ -1157,6 +1166,7 @@ func lifecycleTxnSelectSQL() string {
 			from_generation, to_generation,
 			from_pod_namespace, from_pod_name,
 			to_pod_namespace, to_pod_name,
+			target_sandbox_id, target_generation_id, target_record_digest,
 			expected_head_layer_id, prepared_head_layer_id,
 			error, cancel_reason, created_at, updated_at,
 			cancel_requested_at, committed_at, aborted_at
@@ -1588,6 +1598,7 @@ func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, e
 		&txn.FromGeneration, &txn.ToGeneration,
 		&txn.FromPodNamespace, &txn.FromPodName,
 		&txn.ToPodNamespace, &txn.ToPodName,
+		&txn.TargetSandboxID, &txn.TargetGenerationID, &txn.TargetRecordDigest,
 		&txn.ExpectedHeadLayerID, &txn.PreparedHeadLayerID,
 		&txn.Error, &txn.CancelReason, &txn.CreatedAt, &txn.UpdatedAt,
 		&cancelRequestedAt, &committedAt, &abortedAt,
@@ -1606,6 +1617,7 @@ func CloneSandboxLifecycleTxn(txn *SandboxLifecycleTxn) *SandboxLifecycleTxn {
 		return nil
 	}
 	clone := *txn
+	clone.TargetRecordDigest = append([]byte(nil), txn.TargetRecordDigest...)
 	return &clone
 }
 

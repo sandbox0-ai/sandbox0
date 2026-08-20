@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
@@ -61,14 +62,113 @@ type fakeClaimStore struct {
 	resumeRequests      []*sandboxstore.RequestNomadSandboxResumeRequest
 	resumeCompleteErr   error
 	resumeCompleteCalls []*sandboxstore.CompleteNomadSandboxResumeRequest
+	forkCandidate       *sandboxstore.NomadSandboxRunningForkCandidate
+	forkErr             error
+	forkRequests        []*sandboxstore.NomadSandboxForkRequest
+	pausedForkErr       error
+	pausedForkRequests  []*sandboxstore.NomadSandboxForkRequest
+	pausedForkCompleted map[string]*sandboxstore.SandboxRecord
+	activeLifecycles    map[string]*sandboxstore.SandboxLifecycleTxn
+	forkAbortCalls      [][4]string
+	forkAbortErr        error
 	activeSlot          *sandboxstore.RuntimeSlot
+	runtimeSlotErr      error
 	quiesceCalls        []*sandboxstore.BeginRuntimeSlotQuiesceRequest
 	snapshot            *sandboxstore.RootFSSnapshot
 	writeCount          int
 }
 
+func (f *fakeClaimStore) RequestNomadSandboxRunningFork(
+	_ context.Context,
+	request *sandboxstore.NomadSandboxForkRequest,
+) (*sandboxstore.NomadSandboxRunningForkCandidate, error) {
+	copyRequest := *request
+	copyRequest.Target = cloneClaimRecord(request.Target)
+	f.forkRequests = append(f.forkRequests, &copyRequest)
+	if f.forkErr != nil {
+		return nil, f.forkErr
+	}
+	if f.forkCandidate == nil {
+		return nil, sandboxstore.ErrNomadSandboxForkNotReady
+	}
+	if f.forkCandidate.Source == nil {
+		f.forkCandidate.Source = cloneClaimRecord(f.records[request.SourceSandboxID])
+	}
+	if f.forkCandidate.Target == nil {
+		f.forkCandidate.Target = cloneClaimRecord(request.Target)
+	}
+	candidate := *f.forkCandidate
+	candidate.Source = cloneClaimRecord(f.forkCandidate.Source)
+	candidate.Target = cloneClaimRecord(f.forkCandidate.Target)
+	if f.forkCandidate.Slot != nil {
+		slot := *f.forkCandidate.Slot
+		candidate.Slot = &slot
+	}
+	candidate.BindingDigest = append([]byte(nil), f.forkCandidate.BindingDigest...)
+	if f.records == nil {
+		f.records = make(map[string]*sandboxstore.SandboxRecord)
+	}
+	if f.records[request.Target.ID] == nil {
+		f.records[request.Target.ID] = cloneClaimRecord(request.Target)
+	}
+	return &candidate, nil
+}
+
+func (f *fakeClaimStore) ForkNomadPausedSandbox(
+	_ context.Context,
+	request *sandboxstore.NomadSandboxForkRequest,
+) (*sandboxstore.SandboxRecord, error) {
+	copyRequest := *request
+	copyRequest.Target = cloneClaimRecord(request.Target)
+	f.pausedForkRequests = append(f.pausedForkRequests, &copyRequest)
+	if f.pausedForkErr != nil {
+		return nil, f.pausedForkErr
+	}
+	if f.forkCandidate != nil && f.forkCandidate.OperationID == request.OperationID {
+		return nil, sandboxstore.ErrNomadSandboxRunningForkRequired
+	}
+	if completed := f.pausedForkCompleted[request.OperationID]; completed != nil {
+		return cloneClaimRecord(completed), nil
+	}
+	source := f.records[request.SourceSandboxID]
+	if source == nil {
+		return nil, sandboxstore.ErrSandboxRecordNotFound
+	}
+	if source.DesiredState != sandboxstore.SandboxDesiredStatePaused {
+		return nil, sandboxstore.ErrNomadSandboxRunningForkRequired
+	}
+	if f.records == nil {
+		f.records = make(map[string]*sandboxstore.SandboxRecord)
+	}
+	if f.pausedForkCompleted == nil {
+		f.pausedForkCompleted = make(map[string]*sandboxstore.SandboxRecord)
+	}
+	f.records[request.Target.ID] = cloneClaimRecord(request.Target)
+	f.pausedForkCompleted[request.OperationID] = cloneClaimRecord(request.Target)
+	return cloneClaimRecord(request.Target), nil
+}
+
 func (f *fakeClaimStore) GetSandbox(_ context.Context, sandboxID string) (*sandboxstore.SandboxRecord, error) {
 	return cloneClaimRecord(f.records[sandboxID]), nil
+}
+
+func (f *fakeClaimStore) GetActiveLifecycleTxn(
+	_ context.Context,
+	sandboxID string,
+) (*sandboxstore.SandboxLifecycleTxn, error) {
+	return sandboxstore.CloneSandboxLifecycleTxn(f.activeLifecycles[sandboxID]), nil
+}
+
+func (f *fakeClaimStore) AbortNomadSandboxRunningFork(
+	_ context.Context,
+	operationID, sourceSandboxID, targetSandboxID, reason string,
+) (bool, error) {
+	f.forkAbortCalls = append(f.forkAbortCalls, [4]string{operationID, sourceSandboxID, targetSandboxID, reason})
+	if f.forkAbortErr != nil {
+		return false, f.forkAbortErr
+	}
+	delete(f.activeLifecycles, sourceSandboxID)
+	return true, nil
 }
 
 func (f *fakeClaimStore) RetryNomadSandboxResume(
@@ -167,6 +267,9 @@ func (f *fakeClaimStore) GetRuntimeSlotBySandboxID(
 	_ context.Context,
 	sandboxID string,
 ) (*sandboxstore.RuntimeSlot, error) {
+	if f.runtimeSlotErr != nil {
+		return nil, f.runtimeSlotErr
+	}
 	if f.activeSlot == nil || f.activeSlot.SandboxID != sandboxID {
 		return nil, sandboxstore.ErrRuntimeSlotNotFound
 	}
@@ -901,6 +1004,350 @@ func TestServiceFailsClosedWhenQuotaPolicyCannotBeLoaded(t *testing.T) {
 	}
 }
 
+func TestServiceRunningForkRecoversPublicationAfterNodeResponseLoss(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	claimed, err := fixture.service.ClaimSandbox(t.Context(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-fork-source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fixture.store.records[claimed.SandboxID]
+	if source == nil {
+		t.Fatalf("claimed source %s was not persisted", claimed.SandboxID)
+	}
+	operationID := "operation-running-fork-1"
+	targetID, err := naming.SandboxNameForOperation(source.ClusterID, source.TemplateID, operationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store.forkCandidate = &sandboxstore.NomadSandboxRunningForkCandidate{
+		OperationID:        operationID,
+		TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
+		Slot: &sandboxstore.RuntimeSlot{
+			ID: "slot-fork-source", SandboxID: source.ID, ClusterID: source.ClusterID,
+			AllocationID: source.CurrentPodName, AllocationNamespace: source.CurrentPodNamespace,
+			NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		},
+		SourceFilesystemID: "filesystem-source", SourceGenerationID: "generation-source",
+		SourceWriterGrantID: "writer-source", SourceWriterEpoch: 7,
+		BindingVersion: rootfshandoff.WriterBindingVersion, BindingDigest: make([]byte, sha256.Size),
+	}
+	fixture.runningFork.err = errdefs.ErrUnavailable
+	fixture.runningFork.onCall = func() { fixture.store.forkCandidate.Completed = true }
+	ttl, hardTTL := int32(30), int32(120)
+	response, err := fixture.service.ForkSandbox(t.Context(), source.ID, source.TeamID, "user-2", &service.ForkSandboxRequest{
+		OperationID: operationID, StartedAt: fixture.now,
+		Config: &service.ForkSandboxConfig{TTL: &ttl, HardTTL: &hardTTL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response == nil || response.Sandbox == nil || response.SourceSandboxID != source.ID ||
+		response.Sandbox.ID != targetID || response.Sandbox.Status != managerapi.SandboxStatusPaused ||
+		!response.Sandbox.Paused || response.Sandbox.RuntimeGeneration != 0 {
+		t.Fatalf("fork response = %+v", response)
+	}
+	if len(fixture.store.forkRequests) != 2 || len(fixture.runningFork.requests) != 1 ||
+		len(fixture.runningFork.targets) != 1 {
+		t.Fatalf("fork calls = store %d, node %d", len(fixture.store.forkRequests), len(fixture.runningFork.requests))
+	}
+	storedTarget := fixture.store.forkRequests[0].Target
+	if storedTarget == nil || storedTarget.ID != targetID || storedTarget.UserID != "user-2" ||
+		storedTarget.Config.TTL == nil || *storedTarget.Config.TTL != ttl ||
+		storedTarget.Config.HardTTL == nil || *storedTarget.Config.HardTTL != hardTTL ||
+		!storedTarget.ExpiresAt.Equal(fixture.now.Add(30*time.Second)) ||
+		!storedTarget.HardExpiresAt.Equal(fixture.now.Add(120*time.Second)) {
+		t.Fatalf("fork target = %+v", storedTarget)
+	}
+	nodeRequest := fixture.runningFork.requests[0]
+	if nodeRequest.Fork.OperationID != operationID || nodeRequest.Fork.SourceSandboxID != source.ID ||
+		nodeRequest.Fork.TargetSandboxID != targetID ||
+		nodeRequest.Fork.TargetGenerationID != fixture.store.forkCandidate.TargetGenerationID ||
+		nodeRequest.SourceWriterGrantID != fixture.store.forkCandidate.SourceWriterGrantID ||
+		fixture.runningFork.targets[0].SlotID != fixture.store.forkCandidate.Slot.ID {
+		t.Fatalf("node running-fork request = %+v target=%+v", nodeRequest, fixture.runningFork.targets[0])
+	}
+
+	// The same signed operation recovers the committed target directly and
+	// never freezes the source a second time, even if source termination was
+	// requested independently since checkpoint publication.
+	source.DesiredState = sandboxstore.SandboxDesiredStateTerminating
+	_, err = fixture.service.ForkSandbox(t.Context(), source.ID, source.TeamID, "user-2", &service.ForkSandboxRequest{
+		OperationID: operationID, StartedAt: fixture.now,
+		Config: &service.ForkSandboxConfig{TTL: &ttl, HardTTL: &hardTTL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.runningFork.requests) != 1 || len(fixture.store.forkRequests) != 3 {
+		t.Fatalf("completed retry dispatched node=%d store=%d",
+			len(fixture.runningFork.requests), len(fixture.store.forkRequests))
+	}
+}
+
+func TestServicePausedForkCommitsWithoutNodeDispatchAndRetriesAfterSourceResume(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	claimed, err := fixture.service.ClaimSandbox(t.Context(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-paused-fork-source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fixture.store.records[claimed.SandboxID]
+	source.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	source.CurrentPodName = ""
+	source.CurrentPodNamespace = ""
+	operationID := "operation-paused-fork-1"
+	ttl := int32(45)
+	request := &service.ForkSandboxRequest{
+		OperationID: operationID, StartedAt: fixture.now,
+		Config: &service.ForkSandboxConfig{TTL: &ttl},
+	}
+	response, err := fixture.service.ForkSandbox(
+		t.Context(), source.ID, source.TeamID, "user-paused-fork", request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := naming.SandboxNameForOperation(source.ClusterID, source.TemplateID, operationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response == nil || response.Sandbox == nil || response.Sandbox.ID != targetID ||
+		response.Sandbox.Status != managerapi.SandboxStatusPaused || response.Sandbox.RuntimeGeneration != 0 {
+		t.Fatalf("paused fork response = %+v", response)
+	}
+	if len(fixture.store.pausedForkRequests) != 1 || len(fixture.store.forkRequests) != 0 ||
+		len(fixture.runningFork.requests) != 0 {
+		t.Fatalf("paused fork calls = paused %d running-store %d node %d",
+			len(fixture.store.pausedForkRequests), len(fixture.store.forkRequests), len(fixture.runningFork.requests))
+	}
+	storedTarget := fixture.store.pausedForkRequests[0].Target
+	if storedTarget == nil || storedTarget.ID != targetID || storedTarget.RuntimeGeneration != 0 ||
+		storedTarget.Config.TTL == nil || *storedTarget.Config.TTL != ttl ||
+		!storedTarget.ExpiresAt.Equal(fixture.now.Add(45*time.Second)) {
+		t.Fatalf("paused fork target = %+v", storedTarget)
+	}
+
+	// The durable committed operation remains retryable even after the source
+	// has independently resumed into another physical runtime generation.
+	source.DesiredState = sandboxstore.SandboxDesiredStateActive
+	source.CurrentPodName = "allocation-after-paused-fork"
+	source.CurrentPodNamespace = "default"
+	source.RuntimeGeneration++
+	retry, err := fixture.service.ForkSandbox(
+		t.Context(), source.ID, source.TeamID, "user-paused-fork", request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Sandbox.ID != targetID || len(fixture.store.pausedForkRequests) != 2 ||
+		len(fixture.store.forkRequests) != 0 || len(fixture.runningFork.requests) != 0 {
+		t.Fatalf("paused fork retry = %+v calls paused=%d running=%d node=%d",
+			retry, len(fixture.store.pausedForkRequests), len(fixture.store.forkRequests), len(fixture.runningFork.requests))
+	}
+}
+
+func TestServiceForkRecoveryReplaysDurableNodeDispatch(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	claimed, err := fixture.service.ClaimSandbox(t.Context(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-fork-recovery-source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fixture.store.records[claimed.SandboxID]
+	operationID := "operation-fork-recovery"
+	targetID, err := naming.SandboxNameForOperation(source.ClusterID, source.TemplateID, operationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := cloneClaimRecord(source)
+	target.ID = targetID
+	target.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	target.CurrentPodName = ""
+	target.CurrentPodNamespace = ""
+	target.RuntimeGeneration = 0
+	fixture.store.records[targetID] = target
+	fixture.store.activeLifecycles = map[string]*sandboxstore.SandboxLifecycleTxn{
+		source.ID: {
+			ID: operationID, SandboxID: source.ID, Kind: sandboxstore.SandboxLifecycleKindFork,
+			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceManual,
+			FromPodNamespace: source.CurrentPodNamespace, FromPodName: source.CurrentPodName,
+			TargetSandboxID:    targetID,
+			TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
+			UpdatedAt:          fixture.now,
+		},
+	}
+	fixture.store.forkCandidate = &sandboxstore.NomadSandboxRunningForkCandidate{
+		OperationID:        operationID,
+		TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
+		Slot: &sandboxstore.RuntimeSlot{
+			ID: "slot-fork-recovery", SandboxID: source.ID, ClusterID: source.ClusterID,
+			AllocationID: source.CurrentPodName, AllocationNamespace: source.CurrentPodNamespace,
+			NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		},
+		SourceFilesystemID: "filesystem-source", SourceGenerationID: "generation-source",
+		SourceWriterGrantID: "writer-source", SourceWriterEpoch: 7,
+		BindingVersion: rootfshandoff.WriterBindingVersion, BindingDigest: make([]byte, sha256.Size),
+	}
+	fixture.runningFork.onCall = func() { fixture.store.forkCandidate.Completed = true }
+
+	if err := fixture.service.CompleteSandboxFork(t.Context(), source.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.runningFork.requests) != 1 || len(fixture.store.forkRequests) != 2 ||
+		len(fixture.store.forkAbortCalls) != 0 {
+		t.Fatalf("recovery calls = node %d store %d abort %d",
+			len(fixture.runningFork.requests), len(fixture.store.forkRequests), len(fixture.store.forkAbortCalls))
+	}
+}
+
+func TestServiceForkRecoveryKeepsStaleExactLiveWriterRetryable(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	claimed, err := fixture.service.ClaimSandbox(t.Context(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-live-fork-source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fixture.store.records[claimed.SandboxID]
+	operationID := "operation-stale-live-running-fork"
+	targetID, err := naming.SandboxNameForOperation(source.ClusterID, source.TemplateID, operationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := cloneClaimRecord(source)
+	target.ID = targetID
+	target.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	target.CurrentPodName = ""
+	target.CurrentPodNamespace = ""
+	target.RuntimeGeneration = 0
+	targetDigest, err := sandboxstore.NomadSandboxForkTargetRecordDigest(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.store.records[targetID] = target
+	fixture.store.activeLifecycles = map[string]*sandboxstore.SandboxLifecycleTxn{
+		source.ID: {
+			ID: operationID, SandboxID: source.ID, Kind: sandboxstore.SandboxLifecycleKindFork,
+			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceManual,
+			FromGeneration: source.RuntimeGeneration, ToGeneration: source.RuntimeGeneration,
+			FromPodNamespace: source.CurrentPodNamespace, FromPodName: source.CurrentPodName,
+			TargetSandboxID:    targetID,
+			TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
+			TargetRecordDigest: targetDigest, ExpectedHeadLayerID: "generation-source",
+			UpdatedAt: fixture.now.Add(-defaultNomadRunningForkRecoveryTimeout - time.Second),
+		},
+	}
+	fixture.store.activeSlot = &sandboxstore.RuntimeSlot{
+		ID: "slot-stale-live-fork", ClusterID: source.ClusterID, SandboxID: source.ID,
+		AllocationID: source.CurrentPodName, AllocationNamespace: source.CurrentPodNamespace,
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		State: sandboxstore.RuntimeSlotStateActive, FilesystemID: "filesystem-source",
+		SourceGenerationID: "generation-source", WriterGrantID: "writer-source",
+		ProcdInstanceID: "procd-live", CommandReadyDigest: make([]byte, sha256.Size),
+		CommandReadyAt: fixture.now, AuthorityObservedAt: fixture.now,
+		HeartbeatExpiresAt: fixture.now.Add(time.Minute),
+	}
+	fixture.store.forkErr = errdefs.ErrUnavailable
+
+	err = fixture.service.CompleteSandboxFork(t.Context(), source.ID)
+	if !errors.Is(err, errdefs.ErrUnavailable) {
+		t.Fatalf("stale exact fork recovery error = %v, want unavailable", err)
+	}
+	if len(fixture.store.forkAbortCalls) != 0 || len(fixture.runningFork.requests) != 0 {
+		t.Fatalf("stale exact fork aborts=%+v node=%d",
+			fixture.store.forkAbortCalls, len(fixture.runningFork.requests))
+	}
+}
+
+func TestServiceForkRecoveryDoesNotAbortOnRuntimeSlotReadFailure(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	claimed, err := fixture.service.ClaimSandbox(t.Context(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-slot-read-source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fixture.store.records[claimed.SandboxID]
+	operationID := "operation-stale-slot-read-fork"
+	targetID, err := naming.SandboxNameForOperation(source.ClusterID, source.TemplateID, operationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := cloneClaimRecord(source)
+	target.ID = targetID
+	target.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	target.CurrentPodName = ""
+	target.CurrentPodNamespace = ""
+	target.RuntimeGeneration = 0
+	fixture.store.records[targetID] = target
+	fixture.store.activeLifecycles = map[string]*sandboxstore.SandboxLifecycleTxn{
+		source.ID: {
+			ID: operationID, SandboxID: source.ID, Kind: sandboxstore.SandboxLifecycleKindFork,
+			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceManual,
+			FromPodNamespace: source.CurrentPodNamespace, FromPodName: source.CurrentPodName,
+			TargetSandboxID:    targetID,
+			TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
+			UpdatedAt:          fixture.now.Add(-defaultNomadRunningForkRecoveryTimeout - time.Second),
+		},
+	}
+	fixture.store.runtimeSlotErr = errors.New("database unavailable")
+
+	err = fixture.service.CompleteSandboxFork(t.Context(), source.ID)
+	if err == nil || !strings.Contains(err.Error(), "source slot for recovery") {
+		t.Fatalf("slot read recovery error = %v", err)
+	}
+	if len(fixture.store.forkAbortCalls) != 0 {
+		t.Fatalf("slot read failure aborts = %+v", fixture.store.forkAbortCalls)
+	}
+}
+
+func TestServiceForkRecoveryAbortsStaleNeverPublishedTarget(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	claimed, err := fixture.service.ClaimSandbox(t.Context(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-stale-fork-source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fixture.store.records[claimed.SandboxID]
+	operationID := "operation-stale-running-fork"
+	targetID, err := naming.SandboxNameForOperation(source.ClusterID, source.TemplateID, operationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := cloneClaimRecord(source)
+	target.ID = targetID
+	target.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	target.CurrentPodName = ""
+	target.CurrentPodNamespace = ""
+	target.RuntimeGeneration = 0
+	fixture.store.records[targetID] = target
+	fixture.store.activeLifecycles = map[string]*sandboxstore.SandboxLifecycleTxn{
+		source.ID: {
+			ID: operationID, SandboxID: source.ID, Kind: sandboxstore.SandboxLifecycleKindFork,
+			Phase: sandboxstore.SandboxLifecyclePhasePublishing, Source: sandboxstore.SandboxLifecycleSourceManual,
+			FromPodNamespace: source.CurrentPodNamespace, FromPodName: source.CurrentPodName,
+			TargetSandboxID:    targetID,
+			TargetGenerationID: sandboxstore.NomadSandboxRunningForkGenerationID(operationID, targetID),
+			UpdatedAt:          fixture.now.Add(-defaultNomadRunningForkRecoveryTimeout - time.Second),
+		},
+	}
+
+	if err := fixture.service.CompleteSandboxFork(t.Context(), source.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.store.forkAbortCalls) != 1 || fixture.store.forkAbortCalls[0][0] != operationID ||
+		fixture.store.forkAbortCalls[0][1] != source.ID || fixture.store.forkAbortCalls[0][2] != targetID ||
+		len(fixture.runningFork.requests) != 0 {
+		t.Fatalf("stale fork recovery aborts=%+v node=%d",
+			fixture.store.forkAbortCalls, len(fixture.runningFork.requests))
+	}
+}
+
 func preparePausedNomadResume(t *testing.T, fixture claimServiceFixture) string {
 	t.Helper()
 	claimed, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
@@ -938,9 +1385,31 @@ type claimServiceFixture struct {
 	store       *fakeClaimStore
 	planner     *fakePlanner
 	allocation  *fakeAllocationStopper
+	runningFork *fakeRunningForkController
 	quotaLimits *fakeQuotaLimitStore
 	profile     Profile
 	now         time.Time
+}
+
+type fakeRunningForkController struct {
+	result   rootfshandoff.RunningForkCheckpointResult
+	err      error
+	onCall   func()
+	targets  []protocol.NodeChannelTarget
+	requests []protocol.NodeRunningForkControlRequest
+}
+
+func (f *fakeRunningForkController) RunningFork(
+	_ context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodeRunningForkControlRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	f.targets = append(f.targets, target)
+	f.requests = append(f.requests, request)
+	if f.onCall != nil {
+		f.onCall()
+	}
+	return f.result, f.err
 }
 
 func newClaimServiceFixture(t *testing.T) claimServiceFixture {
@@ -990,11 +1459,13 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	}
 	planner := &fakePlanner{}
 	allocation := &fakeAllocationStopper{}
+	runningFork := &fakeRunningForkController{}
 	quotaLimits := &fakeQuotaLimitStore{}
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	claimService, err := New(Config{
 		Store: store, Templates: &fakeTemplateStore{template: template},
 		Profiles: &ProfileCatalog{profiles: []Profile{profile}}, Planner: planner, Allocation: allocation,
+		RunningFork:     runningFork,
 		QuotaLimits:     quotaLimits,
 		NetworkPolicies: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		ResourcePolicy:  templatepkg.NewResourcePolicy("1Gi", "8Gi"),
@@ -1005,8 +1476,8 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		t.Fatal(err)
 	}
 	return claimServiceFixture{
-		service: claimService, store: store, planner: planner, allocation: allocation, quotaLimits: quotaLimits,
-		profile: profile, now: now,
+		service: claimService, store: store, planner: planner, allocation: allocation, runningFork: runningFork,
+		quotaLimits: quotaLimits, profile: profile, now: now,
 	}
 }
 

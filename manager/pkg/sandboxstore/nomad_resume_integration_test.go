@@ -158,6 +158,14 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, alreadyActiveRetry.AlreadyActive)
+	cleanup, err := fixture.store.RequestSandboxRuntimeClaimCleanup(
+		fixture.ctx, fixture.sandboxID, "delete resumed sandbox",
+	)
+	require.NoError(t, err)
+	require.True(t, cleanup.PhysicalStateRequired)
+	require.Equal(t, registration.SlotID, cleanup.SlotID,
+		"cleanup must follow the current resumed slot rather than the initial claim operation")
+	require.Equal(t, RuntimeSlotStateQuiescing, cleanup.SlotState)
 }
 
 func TestNomadSandboxResumeWaitsForTerminalRuntimeAndReservesQuotaIntegration(t *testing.T) {

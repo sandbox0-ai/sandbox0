@@ -124,7 +124,7 @@ func (s *PGSandboxStore) RetryNomadSandboxResume(
 		return nil, false, fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, record.ID)
 	}
 	if record.DesiredState != SandboxDesiredStatePaused || record.CurrentPodName != "" ||
-		record.CurrentPodNamespace != "" || record.RuntimeGeneration <= 0 || record.RuntimeGeneration == math.MaxInt64 {
+		record.CurrentPodNamespace != "" || record.RuntimeGeneration < 0 || record.RuntimeGeneration == math.MaxInt64 {
 		return nil, false, fmt.Errorf("%w: sandbox is not a canonical paused runtime", ErrNomadSandboxResumeConflict)
 	}
 	if activeLifecycle == nil {
@@ -216,7 +216,7 @@ func (s *PGSandboxStore) RequestNomadSandboxResume(
 		return nil, fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, record.ID)
 	}
 	if record.DesiredState != SandboxDesiredStatePaused || record.CurrentPodName != "" || record.CurrentPodNamespace != "" ||
-		record.RuntimeGeneration <= 0 || record.RuntimeGeneration == math.MaxInt64 {
+		record.RuntimeGeneration < 0 || record.RuntimeGeneration == math.MaxInt64 {
 		return nil, fmt.Errorf("%w: sandbox is not a canonical paused runtime", ErrNomadSandboxResumeConflict)
 	}
 	var authorityNow time.Time

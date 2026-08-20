@@ -100,6 +100,33 @@ func TestWriterLeaseRenewalImmediatelyRejectsStaleWriter(t *testing.T) {
 	}
 }
 
+func TestReleaseRejectedRunningForkClearsOnlyPermanentAuthorityRejection(t *testing.T) {
+	acknowledged := 0
+	permanent := errors.Join(errors.New("target was deleted"), errdefs.ErrFailedPrecondition)
+	err := releaseRejectedRunningFork(permanent, func() error {
+		acknowledged++
+		return nil
+	})
+	if !errors.Is(err, errdefs.ErrFailedPrecondition) || acknowledged != 1 {
+		t.Fatalf("permanent rejection = %v, acknowledgements = %d", err, acknowledged)
+	}
+
+	transient := errors.Join(errors.New("manager unavailable"), errdefs.ErrUnavailable)
+	err = releaseRejectedRunningFork(transient, func() error {
+		acknowledged++
+		return nil
+	})
+	if !errors.Is(err, errdefs.ErrUnavailable) || acknowledged != 1 {
+		t.Fatalf("transient rejection = %v, acknowledgements = %d", err, acknowledged)
+	}
+
+	ackErr := errors.New("session journal unavailable")
+	err = releaseRejectedRunningFork(permanent, func() error { return ackErr })
+	if !errors.Is(err, errdefs.ErrFailedPrecondition) || !errors.Is(err, ackErr) {
+		t.Fatalf("joined release error = %v", err)
+	}
+}
+
 func containsText(value, fragment string) bool {
 	return strings.Contains(value, fragment)
 }

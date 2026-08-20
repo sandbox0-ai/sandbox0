@@ -117,7 +117,17 @@ func (s *Server) forkSandbox(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
-	resp, err := s.sandboxService.ForkSandbox(c.Request.Context(), sandboxID, claims.TeamID, claims.UserID, &req)
+	req.OperationID = sandboxClaimOperationID(claims)
+	req.StartedAt = sandboxClaimIngressStartedAt(claims)
+	forker := s.sandboxForker
+	if forker == nil {
+		forker = s.sandboxService
+	}
+	if forker == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox fork backend is not configured")
+		return
+	}
+	resp, err := forker.ForkSandbox(c.Request.Context(), sandboxID, claims.TeamID, claims.UserID, &req)
 	if err != nil {
 		s.writeSandboxRootFSError(c, "fork sandbox", sandboxID, err)
 		return
@@ -162,6 +172,8 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 	case errors.Is(err, service.ErrSandboxCheckpointRequiresCtld):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox checkpoint requires ctld")
+	case errors.Is(err, service.ErrSandboxLifecycleUnavailable):
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 	case errors.Is(err, service.ErrSandboxRootFSStoreUnavailable):
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox rootfs store is unavailable")
 	default:

@@ -167,6 +167,9 @@ func (c *SandboxRuntimeReconciler) enqueueDriftCandidates(ctx context.Context) {
 }
 
 func (c *SandboxRuntimeReconciler) candidateNeedsReconcile(candidate sandboxstore.SandboxRuntimeReconcileCandidate) bool {
+	if candidate.RuntimeBackend == sandboxstore.SandboxRuntimeBackendNomad {
+		return false
+	}
 	if candidate.DesiredState == sandboxstore.SandboxDesiredStateTerminating {
 		return true
 	}

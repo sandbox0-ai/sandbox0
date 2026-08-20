@@ -72,3 +72,52 @@ func TestSandboxClaimOperationIDUsesSignedClaimsOnly(t *testing.T) {
 		t.Fatalf("nil operation ID = %q, want empty", got)
 	}
 }
+
+type recordingSandboxForker struct {
+	sourceID string
+	teamID   string
+	userID   string
+	request  *service.ForkSandboxRequest
+}
+
+func (r *recordingSandboxForker) ForkSandbox(
+	_ context.Context,
+	sourceID, teamID, userID string,
+	request *service.ForkSandboxRequest,
+) (*service.ForkSandboxResponse, error) {
+	r.sourceID, r.teamID, r.userID = sourceID, teamID, userID
+	copy := *request
+	r.request = &copy
+	return &service.ForkSandboxResponse{SourceSandboxID: sourceID}, nil
+}
+
+func TestForkSandboxUsesRuntimeBackendAndSignedOperation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	startedAt := time.Date(2026, 8, 20, 5, 6, 7, 0, time.FixedZone("offset", 8*60*60))
+	forker := &recordingSandboxForker{}
+	server := &Server{sandboxForker: forker, logger: zap.NewNop()}
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Params = gin.Params{{Key: "id", Value: "sandbox-source"}}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-source/fork?operation_id=spoofed",
+		strings.NewReader(`{"operation_id":"spoofed","config":{"ttl":30}}`))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{
+		TeamID: "team-1", UserID: "user-1",
+		Audit: &internalauth.AuditContext{OperationID: "operation-signed", IngressStartedAt: &startedAt},
+	}))
+	ginContext.Request = request
+
+	server.forkSandbox(ginContext)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	if forker.sourceID != "sandbox-source" || forker.teamID != "team-1" || forker.userID != "user-1" ||
+		forker.request == nil || forker.request.OperationID != "operation-signed" ||
+		!forker.request.StartedAt.Equal(startedAt.UTC()) || forker.request.Config == nil ||
+		forker.request.Config.TTL == nil || *forker.request.Config.TTL != 30 {
+		t.Fatalf("fork backend request = source=%q team=%q user=%q request=%+v",
+			forker.sourceID, forker.teamID, forker.userID, forker.request)
+	}
+}

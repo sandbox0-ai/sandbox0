@@ -39,6 +39,7 @@ type managerControllerSet struct {
 	sandboxRuntimeReconciler       *service.SandboxRuntimeReconciler
 	hotClaimReservationController  *service.HotClaimReservationController
 	sandboxPauseController         *service.SandboxPauseController
+	sandboxForkController          *service.SandboxForkController
 	templateReconciler             templateReconcilerRunner
 	templateBuildWorker            *templatebuild.TemplateBuildWorker
 	sandboxLogWorker               *managerobs.LogWorker
@@ -94,6 +95,11 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 	go logControllerErrorExact(ctx, s.logger, "Sandbox pause controller failed", func() error {
 		return s.sandboxPauseController.Run(ctx, 2)
 	})
+	if s.sandboxForkController != nil {
+		go logControllerErrorExact(ctx, s.logger, "Sandbox fork controller failed", func() error {
+			return s.sandboxForkController.Run(ctx, 2)
+		})
+	}
 
 	s.startRootFSMaintenance(ctx)
 }

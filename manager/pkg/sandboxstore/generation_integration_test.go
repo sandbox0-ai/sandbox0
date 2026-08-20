@@ -371,87 +371,73 @@ func TestForkRootFSFilesystemSharesBlockGenerationAndPublishesChildWriter(t *tes
 }
 
 func TestForkRunningRootFSFilesystemKeepsSourceWriterLiveIntegration(t *testing.T) {
-	ctx := context.Background()
-	pool := newSandboxStoreIntegrationPool(t)
-	store := NewPGSandboxStore(pool)
-	sourceRecord := rootFSTestSandboxRecord("sandbox-running-fork-source", "team-1")
-	targetRecord := rootFSTestSandboxRecord("sandbox-running-fork-target", "team-1")
-	targetRecord.DesiredState = SandboxDesiredStatePaused
-	require.NoError(t, store.UpsertSandbox(ctx, sourceRecord))
-	require.NoError(t, store.UpsertSandbox(ctx, targetRecord))
+	fixture := newNomadPauseStoreFixture(t, "running-fork")
+	ctx := fixture.ctx
+	store := fixture.store
+	sourceRecord, err := store.GetSandbox(ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	targetRecord := nomadRunningForkTargetRecord(sourceRecord, "sandbox-nomad-running-fork-target")
+	operationID := "nomad-running-fork-operation"
+	request := &NomadSandboxForkRequest{
+		OperationID: operationID, SourceSandboxID: sourceRecord.ID,
+		ExpectedTeamID: sourceRecord.TeamID, Target: targetRecord,
+	}
+	candidate, err := store.RequestNomadSandboxRunningFork(ctx, request)
+	require.NoError(t, err)
+	require.False(t, candidate.Completed)
+	require.Equal(t, fixture.slotID, candidate.Slot.ID)
+	require.Equal(t, fixture.issue.GrantID, candidate.SourceWriterGrantID)
+	require.Equal(t, fixture.initial.ID, candidate.SourceGenerationID)
+	require.Equal(t, NomadSandboxRunningForkGenerationID(operationID, targetRecord.ID), candidate.TargetGenerationID)
+	activeFork, err := store.GetActiveLifecycleTxn(ctx, sourceRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, targetRecord.ID, activeFork.TargetSandboxID)
+	require.Equal(t, candidate.TargetGenerationID, activeFork.TargetGenerationID)
+	require.Len(t, activeFork.TargetRecordDigest, sha256.Size)
+	require.Empty(t, activeFork.ToPodNamespace)
+	require.Empty(t, activeFork.ToPodName,
+		"Nomad target identity must not depend on legacy Kubernetes Pod fields")
+	unpublishedTarget, err := store.GetRootFSFilesystem(ctx, targetRecord.ID)
+	require.NoError(t, err)
+	require.Nil(t, unpublishedTarget,
+		"durable pre-operation must not expose a target RootFS before publication")
 
-	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
+	preoperationRetry, err := store.RequestNomadSandboxRunningFork(ctx, request)
 	require.NoError(t, err)
-	source, initial, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
-		SandboxID: sourceRecord.ID, TeamID: sourceRecord.TeamID,
-		SourceOCIRef: artifact.SourceOCIRef, SourceOCIDigest: artifact.SourceOCIDigest,
-		BaseArtifactDigest: artifact.ArtifactDigest,
-	})
-	require.NoError(t, err)
-	binding := sha256.Sum256([]byte("running-fork-binding"))
-	issue := rootFSWriterGrantTestIssueRequest(
-		sourceRecord.ID, "grant-running-fork", "claim-running-fork", "slot-running-fork", binding[:],
-	)
-	issue.ExpectedFilesystemID = source.ID
-	issue.InitialGenerationID = initial.ID
-	issued, err := store.IssueRootFSWriterGrant(ctx, issue)
-	require.NoError(t, err)
-	_, err = store.ConsumeRootFSWriterGrant(ctx, &ConsumeRootFSWriterGrantRequest{
-		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch, RawToken: issue.RawToken,
-		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		ConsumerNodeUID: "node-a", ConsumerCtldPodUID: "ctld-a", LeaseTTL: time.Minute,
-	})
-	require.NoError(t, err)
+	require.False(t, preoperationRetry.Completed)
+	require.Equal(t, candidate.SourceWriterGrantID, preoperationRetry.SourceWriterGrantID)
+	require.Equal(t, candidate.TargetGenerationID, preoperationRetry.TargetGenerationID)
 
-	baseDescriptor, err := rootfsblock.DecodeDescriptor(initial.Descriptor)
-	require.NoError(t, err)
-	checkpointDescriptor, checkpointPayload, err := rootfsblock.BuildCompositeGeneration(
-		baseDescriptor,
-		[]rootfsblock.BlockUpdate{{Block: 3, Data: bytes.Repeat([]byte{0x73}, rootfsblock.LogicalBlockSize)}},
+	forkRequest, checkpointDescriptor := nomadRunningForkCheckpointRequest(
+		t, fixture, sourceRecord, targetRecord, candidate, operationID,
 	)
+	checkpoint := forkRequest.Generation
+	target, err := store.ForkRunningRootFSFilesystem(ctx, forkRequest)
 	require.NoError(t, err)
-	checkpoint := &RootFSGeneration{
-		ID: "generation-running-fork-checkpoint", FilesystemID: targetRecord.ID,
-		ParentGenerationID: initial.ID, SourceOCIDigest: initial.SourceOCIDigest,
-		BaseArtifactDigest: initial.BaseArtifactDigest, BaseBlockRoot: initial.BaseBlockRoot,
-		CurrentBlockHead: checkpointDescriptor.MappingRoot.RootDigest,
-		WriterEpoch:      issued.Grant.WriterEpoch, FormatGeneration: initial.FormatGeneration,
-		DurabilityState: RootFSGenerationStateCompositeDurable,
-		LocatorVersion:  initial.LocatorVersion + 1, Descriptor: checkpointPayload,
-	}
-	checkpointProof := rootfshandoff.RunningForkCheckpointProof{
-		Version:     rootfshandoff.RunningForkCheckpointVersion,
-		OperationID: "running-fork-operation", SourceSandboxID: sourceRecord.ID,
-		SourceFilesystemID: source.ID, TargetSandboxID: targetRecord.ID,
-		SourceWriterGrantID: issue.GrantID, SourceWriterEpoch: issued.Grant.WriterEpoch,
-		BindingVersion: RootFSWriterBindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
-		ExpectedSourceGenerationID: initial.ID, CheckpointGenerationID: checkpoint.ID,
-		CheckpointSequence: 1, CheckpointDescriptorDigest: digest.FromBytes(checkpointPayload).String(),
-	}
-	proofDigest, err := checkpointProof.Digest()
-	require.NoError(t, err)
-	req := &ForkRunningRootFSFilesystemRequest{
-		OperationID: "running-fork-operation", SourceSandboxID: sourceRecord.ID,
-		TargetSandboxID: targetRecord.ID, TargetTeamID: targetRecord.TeamID,
-		SourceGrantID: issue.GrantID, SourceWriterEpoch: issued.Grant.WriterEpoch,
-		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:],
-		CheckpointProof: checkpointProof, CheckpointProofDigest: proofDigest[:],
-		ExpectedSourceGenerationID: initial.ID,
-		Generation:                 checkpoint,
-	}
-	target, err := store.ForkRunningRootFSFilesystem(ctx, req)
-	require.NoError(t, err)
-	require.Equal(t, source.ID, target.SourceFilesystemID)
+	require.Equal(t, fixture.filesystem.ID, target.SourceFilesystemID)
 	require.Equal(t, checkpoint.ID, target.HeadGenerationID)
-	require.Equal(t, issued.Grant.WriterEpoch, target.WriterEpoch)
+	require.Equal(t, candidate.SourceWriterEpoch, target.WriterEpoch)
 
 	loadedSource, err := store.GetRootFSFilesystem(ctx, sourceRecord.ID)
 	require.NoError(t, err)
-	require.Equal(t, initial.ID, loadedSource.HeadGenerationID, "running fork must not advance the source head")
-	require.Equal(t, issued.Grant.WriterEpoch, loadedSource.WriterEpoch)
-	grant, err := store.GetRootFSWriterGrant(ctx, issue.GrantID)
+	require.Equal(t, fixture.initial.ID, loadedSource.HeadGenerationID, "running fork must not advance the source head")
+	require.Equal(t, candidate.SourceWriterEpoch, loadedSource.WriterEpoch)
+	grant, err := store.GetRootFSWriterGrant(ctx, candidate.SourceWriterGrantID)
 	require.NoError(t, err)
 	require.Equal(t, RootFSWriterGrantStateConsumed, grant.State)
+	lifecycle, err := store.GetActiveLifecycleTxn(ctx, sourceRecord.ID)
+	require.NoError(t, err)
+	require.Nil(t, lifecycle)
+	completedCandidate, err := store.RequestNomadSandboxRunningFork(ctx, request)
+	require.NoError(t, err)
+	require.True(t, completedCandidate.Completed)
+	require.Equal(t, targetRecord.ID, completedCandidate.Target.ID)
+	aborted, err := store.AbortNomadSandboxRunningFork(
+		ctx, operationID, sourceRecord.ID, targetRecord.ID, "late recovery deadline",
+	)
+	require.NoError(t, err)
+	require.False(t, aborted, "published checkpoint must win a concurrent abort")
+
 	materializedDescriptor := checkpointDescriptor
 	materializedDescriptor.CompositeTail = nil
 	materializedPayload, err := rootfsblock.EncodeDescriptor(materializedDescriptor)
@@ -461,8 +447,9 @@ func TestForkRunningRootFSFilesystemKeepsSourceWriterLiveIntegration(t *testing.
 		ExpectedDescriptor: checkpoint.Descriptor, MaterializedDescriptor: materializedPayload,
 	}))
 	renewed, err := store.RenewRootFSWriterGrant(ctx, &RenewRootFSWriterGrantRequest{
-		GrantID: issue.GrantID, WriterEpoch: issued.Grant.WriterEpoch,
-		BindingVersion: RootFSWriterBindingVersion, BindingDigest: binding[:], ConsumerNodeUID: "node-a",
+		GrantID: candidate.SourceWriterGrantID, WriterEpoch: candidate.SourceWriterEpoch,
+		BindingVersion: candidate.BindingVersion, BindingDigest: candidate.BindingDigest,
+		ConsumerNodeUID: candidate.Slot.NodeUID,
 	}, RootFSWriterLeaseRenewalPolicy{LeaseTTL: time.Minute, GracePeriod: time.Second})
 	require.NoError(t, err)
 	require.Equal(t, RootFSWriterGrantStateConsumed, renewed.State)
@@ -475,23 +462,349 @@ func TestForkRunningRootFSFilesystemKeepsSourceWriterLiveIntegration(t *testing.
 	childIssue.ExpectedWriterEpoch = target.WriterEpoch
 	child, err := store.IssueRootFSWriterGrant(ctx, childIssue)
 	require.NoError(t, err)
-	require.Equal(t, issued.Grant.WriterEpoch+1, child.Grant.WriterEpoch)
+	require.Equal(t, candidate.SourceWriterEpoch+1, child.Grant.WriterEpoch)
 	loadedSource, err = store.GetRootFSFilesystem(ctx, sourceRecord.ID)
 	require.NoError(t, err)
-	require.Equal(t, issued.Grant.WriterEpoch, loadedSource.WriterEpoch, "child authority must not fence the source writer")
+	require.Equal(t, candidate.SourceWriterEpoch, loadedSource.WriterEpoch, "child authority must not fence the source writer")
 
-	retried, err := store.ForkRunningRootFSFilesystem(ctx, req)
+	retried, err := store.ForkRunningRootFSFilesystem(ctx, forkRequest)
 	require.NoError(t, err)
 	require.Equal(t, target.ID, retried.ID)
 	require.Equal(t, target.HeadGenerationID, retried.HeadGenerationID)
 
-	changed := *req
+	changed := *forkRequest
 	changed.CheckpointProof.CheckpointSequence++
 	changedDigest, digestErr := changed.CheckpointProof.Digest()
 	require.NoError(t, digestErr)
 	changed.CheckpointProofDigest = changedDigest[:]
 	_, err = store.ForkRunningRootFSFilesystem(ctx, &changed)
 	require.ErrorIs(t, err, ErrRootFSFilesystemConflict)
+	_, err = store.CancelRootFSWriterGrant(ctx, &CancelRootFSWriterGrantRequest{
+		GrantID: childIssue.GrantID, WriterEpoch: child.Grant.WriterEpoch,
+		OperationID: childIssue.OperationID, BindingVersion: RootFSWriterBindingVersion,
+		BindingDigest: childBinding[:],
+	})
+	require.NoError(t, err)
+	limit := int64(10)
+	resume, err := store.RequestNomadSandboxResume(ctx, &RequestNomadSandboxResumeRequest{
+		SandboxID: targetRecord.ID, ExpectedTeamID: targetRecord.TeamID, ActiveSandboxLimit: &limit,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), resume.RuntimeGeneration,
+		"a never-run paused fork target must resume into runtime generation one")
+	require.Equal(t, checkpoint.ID, resume.SourceGenerationID)
+}
+
+func TestRequestSandboxRuntimeClaimCleanupAbortsInboundNomadRunningForkIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "running-fork-target-cleanup")
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	target := nomadRunningForkTargetRecord(source, "sandbox-nomad-running-fork-cleanup-target")
+	operationID := "nomad-running-fork-target-cleanup-operation"
+	request := &NomadSandboxForkRequest{
+		OperationID: operationID, SourceSandboxID: source.ID,
+		ExpectedTeamID: source.TeamID, Target: target,
+	}
+	candidate, err := fixture.store.RequestNomadSandboxRunningFork(fixture.ctx, request)
+	require.NoError(t, err)
+
+	cleanup, err := fixture.store.RequestSandboxRuntimeClaimCleanup(
+		fixture.ctx, target.ID, "fork target deletion requested",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, cleanup)
+	require.False(t, cleanup.PhysicalStateRequired)
+	require.Empty(t, cleanup.SlotID)
+	var lifecyclePhase, lifecycleError string
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
+		SELECT phase, error FROM manager.sandbox_lifecycle_txns WHERE txn_id = $1
+	`, operationID).Scan(&lifecyclePhase, &lifecycleError))
+	require.Equal(t, SandboxLifecyclePhaseAborted, lifecyclePhase)
+	require.Equal(t, "fork target termination requested", lifecycleError)
+	active, err := fixture.store.GetActiveLifecycleTxn(fixture.ctx, source.ID)
+	require.NoError(t, err)
+	require.Nil(t, active)
+
+	forkRequest, _ := nomadRunningForkCheckpointRequest(
+		t, fixture, source, target, candidate, operationID,
+	)
+	_, err = fixture.store.ForkRunningRootFSFilesystem(fixture.ctx, forkRequest)
+	require.ErrorIs(t, err, ErrRootFSFilesystemConflict)
+	grant, err := fixture.store.GetRootFSWriterGrant(fixture.ctx, candidate.SourceWriterGrantID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateConsumed, grant.State,
+		"deleting an unpublished target must not fence the source writer")
+}
+
+func TestRequestSandboxRuntimeClaimCleanupAbortsOutgoingNomadForkAndTargetIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "running-fork-source-cleanup")
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	target := nomadRunningForkTargetRecord(source, "sandbox-nomad-running-fork-source-cleanup-target")
+	operationID := "nomad-running-fork-source-cleanup-operation"
+	_, err = fixture.store.RequestNomadSandboxRunningFork(fixture.ctx, &NomadSandboxForkRequest{
+		OperationID: operationID, SourceSandboxID: source.ID,
+		ExpectedTeamID: source.TeamID, Target: target,
+	})
+	require.NoError(t, err)
+
+	cleanup, err := fixture.store.RequestSandboxRuntimeClaimCleanup(
+		fixture.ctx, source.ID, "fork source deletion requested",
+	)
+	require.NoError(t, err)
+	require.True(t, cleanup.PhysicalStateRequired)
+	require.Equal(t, fixture.slotID, cleanup.SlotID)
+	var lifecyclePhase, targetDesiredState, targetClaimPhase string
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
+		SELECT lifecycle.phase, target.desired_state, claim.phase
+		FROM manager.sandbox_lifecycle_txns AS lifecycle
+		JOIN manager.sandboxes AS target ON target.sandbox_id = lifecycle.target_sandbox_id
+		JOIN manager.sandbox_runtime_claims AS claim ON claim.sandbox_id = target.sandbox_id
+		WHERE lifecycle.txn_id = $1
+	`, operationID).Scan(&lifecyclePhase, &targetDesiredState, &targetClaimPhase))
+	require.Equal(t, SandboxLifecyclePhaseAborted, lifecyclePhase)
+	require.Equal(t, SandboxDesiredStateTerminating, targetDesiredState)
+	require.Equal(t, SandboxRuntimeClaimPhaseCleanupPending, targetClaimPhase)
+	targetFilesystem, err := fixture.store.GetRootFSFilesystem(fixture.ctx, target.ID)
+	require.NoError(t, err)
+	require.Nil(t, targetFilesystem)
+}
+
+func TestRequestNomadSandboxRunningForkRejectsMutatedDurableTargetIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "running-fork-target-mutation")
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	target := nomadRunningForkTargetRecord(source, "sandbox-nomad-running-fork-mutated-target")
+	operationID := "nomad-running-fork-target-mutation-operation"
+	request := &NomadSandboxForkRequest{
+		OperationID: operationID, SourceSandboxID: source.ID,
+		ExpectedTeamID: source.TeamID, Target: target,
+	}
+	_, err = fixture.store.RequestNomadSandboxRunningFork(fixture.ctx, request)
+	require.NoError(t, err)
+	mutated, err := fixture.store.GetSandbox(fixture.ctx, target.ID)
+	require.NoError(t, err)
+	autoResume := false
+	mutated.Config.AutoResume = &autoResume
+	require.NoError(t, fixture.store.UpsertSandbox(fixture.ctx, mutated))
+
+	_, err = fixture.store.RequestNomadSandboxRunningFork(fixture.ctx, &NomadSandboxForkRequest{
+		OperationID: operationID, SourceSandboxID: source.ID,
+		ExpectedTeamID: source.TeamID, Target: mutated,
+	})
+	require.ErrorIs(t, err, ErrNomadSandboxForkConflict)
+	_, err = fixture.store.RequestSandboxRuntimeClaimCleanup(
+		fixture.ctx, target.ID, "clean up mutated fork target",
+	)
+	require.NoError(t, err)
+}
+
+func TestNomadRunningForkPublicationAndTargetCleanupShareLockOrderIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "running-fork-cleanup-race")
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	target := nomadRunningForkTargetRecord(source, "sandbox-nomad-running-fork-cleanup-race-target")
+	operationID := "nomad-running-fork-cleanup-race-operation"
+	candidate, err := fixture.store.RequestNomadSandboxRunningFork(fixture.ctx, &NomadSandboxForkRequest{
+		OperationID: operationID, SourceSandboxID: source.ID,
+		ExpectedTeamID: source.TeamID, Target: target,
+	})
+	require.NoError(t, err)
+	forkRequest, _ := nomadRunningForkCheckpointRequest(
+		t, fixture, source, target, candidate, operationID,
+	)
+	start := make(chan struct{})
+	forkDone := make(chan error, 1)
+	cleanupDone := make(chan error, 1)
+	go func() {
+		<-start
+		_, forkErr := fixture.store.ForkRunningRootFSFilesystem(fixture.ctx, forkRequest)
+		forkDone <- forkErr
+	}()
+	go func() {
+		<-start
+		_, cleanupErr := fixture.store.RequestSandboxRuntimeClaimCleanup(
+			fixture.ctx, target.ID, "concurrent fork target deletion",
+		)
+		cleanupDone <- cleanupErr
+	}()
+	close(start)
+	require.NoError(t, <-cleanupDone)
+	forkErr := <-forkDone
+	if forkErr != nil {
+		require.ErrorIs(t, forkErr, ErrRootFSFilesystemConflict)
+	}
+	active, err := fixture.store.GetActiveLifecycleTxn(fixture.ctx, source.ID)
+	require.NoError(t, err)
+	require.Nil(t, active)
+	var targetDesiredState, targetClaimPhase string
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
+		SELECT sandbox.desired_state, claim.phase
+		FROM manager.sandboxes AS sandbox
+		JOIN manager.sandbox_runtime_claims AS claim USING (sandbox_id)
+		WHERE sandbox.sandbox_id = $1
+	`, target.ID).Scan(&targetDesiredState, &targetClaimPhase))
+	require.Equal(t, SandboxDesiredStateTerminating, targetDesiredState)
+	require.Equal(t, SandboxRuntimeClaimPhaseCleanupPending, targetClaimPhase)
+}
+
+func TestAbortNomadSandboxRunningForkQueuesNeverRunTargetCleanupIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "running-fork-stale-abort")
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	target := nomadRunningForkTargetRecord(source, "sandbox-nomad-running-fork-stale-target")
+	operationID := "nomad-running-fork-stale-operation"
+	request := &NomadSandboxForkRequest{
+		OperationID: operationID, SourceSandboxID: source.ID,
+		ExpectedTeamID: source.TeamID, Target: target,
+	}
+	candidate, err := fixture.store.RequestNomadSandboxRunningFork(fixture.ctx, request)
+	require.NoError(t, err)
+
+	aborted, err := fixture.store.AbortNomadSandboxRunningFork(
+		fixture.ctx, operationID, source.ID, target.ID, "running fork recovery deadline exceeded",
+	)
+	require.NoError(t, err)
+	require.True(t, aborted)
+	var lifecyclePhase, desiredState, claimPhase string
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
+		SELECT lifecycle.phase, target.desired_state, claim.phase
+		FROM manager.sandbox_lifecycle_txns AS lifecycle
+		JOIN manager.sandboxes AS target ON target.sandbox_id = lifecycle.target_sandbox_id
+		JOIN manager.sandbox_runtime_claims AS claim ON claim.sandbox_id = target.sandbox_id
+		WHERE lifecycle.txn_id = $1
+	`, operationID).Scan(&lifecyclePhase, &desiredState, &claimPhase))
+	require.Equal(t, SandboxLifecyclePhaseAborted, lifecyclePhase)
+	require.Equal(t, SandboxDesiredStateTerminating, desiredState)
+	require.Equal(t, SandboxRuntimeClaimPhaseCleanupPending, claimPhase)
+	aborted, err = fixture.store.AbortNomadSandboxRunningFork(
+		fixture.ctx, operationID, source.ID, target.ID, "running fork recovery deadline exceeded",
+	)
+	require.NoError(t, err)
+	require.False(t, aborted)
+	grant, err := fixture.store.GetRootFSWriterGrant(fixture.ctx, candidate.SourceWriterGrantID)
+	require.NoError(t, err)
+	require.Equal(t, RootFSWriterGrantStateConsumed, grant.State)
+}
+
+func TestForkNomadPausedSandboxCommitsLogicalTargetAndRootFSAtomicallyIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "paused-fork")
+	pause, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	fixture.publishPlannedPause(t, pause.OperationID)
+	source, err := fixture.store.GetSandbox(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxDesiredStatePaused, source.DesiredState)
+	target := nomadRunningForkTargetRecord(source, "sandbox-nomad-paused-fork-target")
+	request := &NomadSandboxForkRequest{
+		OperationID: "nomad-paused-fork-operation", SourceSandboxID: source.ID,
+		ExpectedTeamID: source.TeamID, Target: target,
+	}
+
+	created, err := fixture.store.ForkNomadPausedSandbox(fixture.ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, target.ID, created.ID)
+	sourceFilesystem, err := fixture.store.GetRootFSFilesystem(fixture.ctx, source.ID)
+	require.NoError(t, err)
+	targetFilesystem, err := fixture.store.GetRootFSFilesystem(fixture.ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, sourceFilesystem.ID, targetFilesystem.SourceFilesystemID)
+	require.Equal(t, sourceFilesystem.HeadGenerationID, targetFilesystem.HeadGenerationID)
+	require.Equal(t, sourceFilesystem.WriterEpoch, targetFilesystem.WriterEpoch)
+	var claimOperationID, claimPhase, lifecyclePhase, expectedHead, preparedHead string
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
+		SELECT claim.operation_id, claim.phase, lifecycle.phase,
+			lifecycle.expected_head_layer_id, lifecycle.prepared_head_layer_id
+		FROM manager.sandbox_runtime_claims AS claim
+		JOIN manager.sandbox_lifecycle_txns AS lifecycle
+			ON lifecycle.target_sandbox_id = claim.sandbox_id
+		WHERE claim.sandbox_id = $1 AND lifecycle.txn_id = $2
+	`, target.ID, request.OperationID).Scan(
+		&claimOperationID, &claimPhase, &lifecyclePhase, &expectedHead, &preparedHead,
+	))
+	require.Equal(t, NomadSandboxForkClaimOperationID(request.OperationID, target.ID), claimOperationID)
+	require.Equal(t, SandboxRuntimeClaimPhaseReady, claimPhase)
+	require.Equal(t, SandboxLifecyclePhaseCommitted, lifecyclePhase)
+	require.Equal(t, sourceFilesystem.HeadGenerationID, expectedHead)
+	require.Equal(t, expectedHead, preparedHead)
+
+	changedSource := *source
+	autoResume := false
+	changedSource.Config.AutoResume = &autoResume
+	require.NoError(t, fixture.store.UpsertSandbox(fixture.ctx, &changedSource))
+	retried, err := fixture.store.ForkNomadPausedSandbox(fixture.ctx, request)
+	require.NoError(t, err,
+		"completed retry must not depend on mutable source configuration")
+	require.Equal(t, target.ID, retried.ID)
+
+	changedRequest := *request
+	changedTarget := *target
+	changedTarget.ExpiresAt = changedTarget.ExpiresAt.Add(time.Minute)
+	changedRequest.Target = &changedTarget
+	_, err = fixture.store.ForkNomadPausedSandbox(fixture.ctx, &changedRequest)
+	require.ErrorIs(t, err, ErrNomadSandboxForkConflict)
+}
+
+func nomadRunningForkTargetRecord(source *SandboxRecord, targetID string) *SandboxRecord {
+	target := *source
+	target.ID = targetID
+	target.DesiredState = SandboxDesiredStatePaused
+	target.CurrentPodName = ""
+	target.CurrentPodNamespace = ""
+	target.RuntimeGeneration = 0
+	target.LifecycleEpoch = 0
+	target.HotClaimCompletedAt = time.Time{}
+	target.CreatedAt = time.Now().UTC()
+	target.UpdatedAt = target.CreatedAt
+	return &target
+}
+
+func nomadRunningForkCheckpointRequest(
+	t *testing.T,
+	fixture *nomadPauseStoreFixture,
+	source, target *SandboxRecord,
+	candidate *NomadSandboxRunningForkCandidate,
+	operationID string,
+) (*ForkRunningRootFSFilesystemRequest, rootfsblock.Descriptor) {
+	t.Helper()
+	baseDescriptor, err := rootfsblock.DecodeDescriptor(fixture.initial.Descriptor)
+	require.NoError(t, err)
+	checkpointDescriptor, checkpointPayload, err := rootfsblock.BuildCompositeGeneration(
+		baseDescriptor,
+		[]rootfsblock.BlockUpdate{{Block: 3, Data: bytes.Repeat([]byte{0x73}, rootfsblock.LogicalBlockSize)}},
+	)
+	require.NoError(t, err)
+	checkpoint := &RootFSGeneration{
+		ID: candidate.TargetGenerationID, FilesystemID: target.ID,
+		ParentGenerationID: fixture.initial.ID, SourceOCIDigest: fixture.initial.SourceOCIDigest,
+		BaseArtifactDigest: fixture.initial.BaseArtifactDigest, BaseBlockRoot: fixture.initial.BaseBlockRoot,
+		CurrentBlockHead: checkpointDescriptor.MappingRoot.RootDigest,
+		WriterEpoch:      candidate.SourceWriterEpoch, FormatGeneration: fixture.initial.FormatGeneration,
+		DurabilityState: RootFSGenerationStateCompositeDurable,
+		LocatorVersion:  fixture.initial.LocatorVersion + 1, Descriptor: checkpointPayload,
+	}
+	proof := rootfshandoff.RunningForkCheckpointProof{
+		Version:     rootfshandoff.RunningForkCheckpointVersion,
+		OperationID: operationID, SourceSandboxID: source.ID,
+		SourceFilesystemID: candidate.SourceFilesystemID, TargetSandboxID: target.ID,
+		SourceWriterGrantID: candidate.SourceWriterGrantID, SourceWriterEpoch: candidate.SourceWriterEpoch,
+		BindingVersion: candidate.BindingVersion, BindingDigest: hex.EncodeToString(candidate.BindingDigest),
+		ExpectedSourceGenerationID: candidate.SourceGenerationID, CheckpointGenerationID: checkpoint.ID,
+		CheckpointSequence: 1, CheckpointDescriptorDigest: digest.FromBytes(checkpointPayload).String(),
+	}
+	proofDigest, err := proof.Digest()
+	require.NoError(t, err)
+	return &ForkRunningRootFSFilesystemRequest{
+		OperationID: operationID, SourceSandboxID: source.ID,
+		TargetSandboxID: target.ID, TargetTeamID: target.TeamID,
+		SourceGrantID: candidate.SourceWriterGrantID, SourceWriterEpoch: candidate.SourceWriterEpoch,
+		BindingVersion: candidate.BindingVersion, BindingDigest: candidate.BindingDigest,
+		CheckpointProof: proof, CheckpointProofDigest: proofDigest[:],
+		ExpectedSourceGenerationID: candidate.SourceGenerationID,
+		Generation:                 checkpoint,
+	}, checkpointDescriptor
 }
 
 func TestForkRootFSFilesystemCrashAbandonPreservesSharedGeneration(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -184,6 +185,20 @@ func (c *Component) NomadAllocationController() *runtimeslotnomad.Controller {
 		return nil
 	}
 	return c.allocation
+}
+
+// RunningFork dispatches a live checkpoint over this replica's authenticated
+// node channel. PostgreSQL operation authority makes caller retries portable
+// across manager replicas.
+func (c *Component) RunningFork(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodeRunningForkControlRequest,
+) (rootfshandoff.RunningForkCheckpointResult, error) {
+	if c == nil || c.hub == nil {
+		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("node authority is not initialized")
+	}
+	return c.hub.RunningFork(ctx, target, request)
 }
 
 // RunTerminal waits for listener readiness, then runs the bounded terminal

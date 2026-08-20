@@ -84,12 +84,32 @@ func (r *rootfsRuntime) CaptureRunningFork(
 		return rootfshandoff.RunningForkCheckpointResult{}, err
 	}
 	if err := r.authority.PublishRunningFork(ctx, durable, fork, checkpoint); err != nil {
-		return rootfshandoff.RunningForkCheckpointResult{}, err
+		return rootfshandoff.RunningForkCheckpointResult{}, releaseRejectedRunningFork(
+			err,
+			func() error {
+				return r.sessions.AcknowledgeRunningFork(
+					durable, fork.OperationID, checkpoint.ProofDigest,
+				)
+			},
+		)
 	}
 	if err := r.sessions.AcknowledgeRunningFork(durable, fork.OperationID, checkpoint.ProofDigest); err != nil {
 		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("acknowledge regional running fork: %w", err)
 	}
 	return checkpoint, nil
+}
+
+func releaseRejectedRunningFork(publishErr error, acknowledge func() error) error {
+	if publishErr == nil || !errdefs.IsFailedPrecondition(publishErr) || acknowledge == nil {
+		return publishErr
+	}
+	if err := acknowledge(); err != nil {
+		return errors.Join(
+			publishErr,
+			fmt.Errorf("release permanently rejected running fork: %w", err),
+		)
+	}
+	return publishErr
 }
 
 // RootFSConsumerRequest binds the durable block writer to the exact host

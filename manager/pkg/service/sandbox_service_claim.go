@@ -267,6 +267,17 @@ type SandboxResumer interface {
 	ResumeSandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error)
 }
 
+// SandboxForker owns the runtime-specific live or paused RootFS fork path.
+type SandboxForker interface {
+	ForkSandbox(context.Context, string, string, string, *ForkSandboxRequest) (*ForkSandboxResponse, error)
+}
+
+// SandboxForkReconciler completes a durable fork after its initiating API
+// request disconnects or the manager restarts.
+type SandboxForkReconciler interface {
+	CompleteSandboxFork(context.Context, string) error
+}
+
 // SandboxAutoPauser accepts durable automatic pause requests from TTL cleanup.
 type SandboxAutoPauser interface {
 	PauseSandboxByID(context.Context, string) error
@@ -286,6 +297,7 @@ type SandboxRuntimeBackend interface {
 	SandboxTerminator
 	SandboxPauser
 	SandboxResumer
+	SandboxForker
 	SandboxAutoPauser
 	SandboxPauseReconciler
 	SetPauseEnqueuer(SandboxPauseEnqueuer)

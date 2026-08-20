@@ -136,6 +136,7 @@ func forkRunningRootFSFilesystem(
 		return retry, err
 	}
 	if sourceSandbox == nil || sourceSandbox.ID != req.SourceSandboxID || !sourceSandbox.DeletedAt.IsZero() ||
+		sourceSandbox.RuntimeBackend != SandboxRuntimeBackendNomad ||
 		sourceSandbox.DesiredState != SandboxDesiredStateActive {
 		return nil, fmt.Errorf("%w: source sandbox is not active", ErrRootFSFilesystemConflict)
 	}
@@ -152,22 +153,53 @@ func forkRunningRootFSFilesystem(
 		teamID = sourceSandbox.TeamID
 	}
 	if sourceSandbox.TeamID == "" || targetSandbox.TeamID != sourceSandbox.TeamID || targetSandbox.TeamID != teamID ||
-		targetSandbox.DesiredState != SandboxDesiredStatePaused || !targetSandbox.DeletedAt.IsZero() {
+		targetSandbox.RuntimeBackend != SandboxRuntimeBackendNomad ||
+		targetSandbox.DesiredState != SandboxDesiredStatePaused || targetSandbox.RuntimeGeneration != 0 ||
+		targetSandbox.CurrentPodName != "" || targetSandbox.CurrentPodNamespace != "" ||
+		!targetSandbox.DeletedAt.IsZero() {
 		return nil, fmt.Errorf("%w: target sandbox is not a paused team-owned destination", ErrRootFSFilesystemConflict)
 	}
-	for _, sandboxID := range []string{req.SourceSandboxID, req.TargetSandboxID} {
-		var active bool
-		if err := tx.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM manager.sandbox_lifecycle_txns
-				WHERE sandbox_id = $1 AND phase NOT IN ('committed', 'aborted')
-			)
-		`, sandboxID).Scan(&active); err != nil {
-			return nil, fmt.Errorf("check running fork lifecycle fence: %w", err)
-		}
-		if active {
-			return nil, fmt.Errorf("%w: sandbox %s has an active lifecycle operation", ErrRootFSFilesystemConflict, sandboxID)
-		}
+	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1 AND sandbox_id = $2 FOR UPDATE
+	`, req.OperationID, req.SourceSandboxID))
+	if err != nil {
+		return nil, fmt.Errorf("lock running-fork lifecycle: %w", err)
+	}
+	if lifecycle == nil || lifecycle.Kind != SandboxLifecycleKindFork ||
+		lifecycle.Phase != SandboxLifecyclePhasePublishing || lifecycle.Source != SandboxLifecycleSourceManual ||
+		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
+		lifecycle.FromGeneration != sourceSandbox.RuntimeGeneration ||
+		lifecycle.ToGeneration != sourceSandbox.RuntimeGeneration ||
+		lifecycle.FromPodNamespace != sourceSandbox.CurrentPodNamespace ||
+		lifecycle.FromPodName != sourceSandbox.CurrentPodName ||
+		lifecycle.ToPodNamespace != "" || lifecycle.ToPodName != "" ||
+		lifecycle.TargetSandboxID != req.TargetSandboxID ||
+		lifecycle.TargetGenerationID != req.Generation.ID ||
+		lifecycle.ExpectedHeadLayerID != req.ExpectedSourceGenerationID || lifecycle.PreparedHeadLayerID != "" {
+		return nil, fmt.Errorf("%w: source running-fork lifecycle changed", ErrRootFSFilesystemConflict)
+	}
+	targetRecordDigest, err := NomadSandboxForkTargetRecordDigest(targetSandbox)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(lifecycle.TargetRecordDigest, targetRecordDigest) {
+		return nil, fmt.Errorf("%w: running-fork target identity changed", ErrRootFSFilesystemConflict)
+	}
+	targetLifecycle, err := getActiveLifecycleTxn(ctx, tx, req.TargetSandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("lock running-fork target lifecycle: %w", err)
+	}
+	if targetLifecycle != nil {
+		return nil, fmt.Errorf("%w: target sandbox has an active lifecycle operation", ErrRootFSFilesystemConflict)
+	}
+	targetClaim, err := lockSandboxRuntimeClaim(ctx, tx, req.TargetSandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if targetClaim.OperationID != NomadSandboxForkClaimOperationID(req.OperationID, req.TargetSandboxID) ||
+		targetClaim.Phase != SandboxRuntimeClaimPhaseReady || !targetClaim.CompletedAt.IsZero() ||
+		!targetClaim.LeaseExpiresAt.IsZero() {
+		return nil, fmt.Errorf("%w: target logical claim changed", ErrRootFSFilesystemConflict)
 	}
 	var targetBound bool
 	if err := tx.QueryRow(ctx, `
@@ -281,6 +313,9 @@ func forkRunningRootFSFilesystem(
 	if err != nil {
 		return nil, fmt.Errorf("record running rootfs fork: %w", err)
 	}
+	if err := (sandboxStoreTx{tx: tx}).CommitLifecycleTxn(ctx, req.OperationID, checkpoint.ID); err != nil {
+		return nil, fmt.Errorf("commit running-fork lifecycle: %w", err)
+	}
 	return scanRootFSFilesystem(tx.QueryRow(ctx, `
 		SELECT filesystem_id, team_id, source_filesystem_id, head_layer_id,
 			writer_epoch, base_image_ref, base_image_digest, storage_format,
@@ -330,6 +365,49 @@ func loadRunningRootFSForkRetry(
 		checkpointDescriptorDigest != req.CheckpointProof.CheckpointDescriptorDigest ||
 		!bytes.Equal(bindingDigest, req.BindingDigest) || !bytes.Equal(checkpointProofDigest, req.CheckpointProofDigest) {
 		return nil, fmt.Errorf("%w: running fork operation fields changed", ErrRootFSFilesystemConflict)
+	}
+	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1 AND sandbox_id = $2 FOR SHARE
+	`, req.OperationID, req.SourceSandboxID))
+	if err != nil {
+		return nil, fmt.Errorf("load running-fork lifecycle retry: %w", err)
+	}
+	if lifecycle == nil || lifecycle.Kind != SandboxLifecycleKindFork ||
+		lifecycle.Phase != SandboxLifecyclePhaseCommitted || lifecycle.Source != SandboxLifecycleSourceManual ||
+		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
+		lifecycle.ExpectedHeadLayerID != req.ExpectedSourceGenerationID ||
+		lifecycle.PreparedHeadLayerID != checkpointGenerationID ||
+		lifecycle.ToPodNamespace != "" || lifecycle.ToPodName != "" ||
+		lifecycle.TargetSandboxID != req.TargetSandboxID ||
+		lifecycle.TargetGenerationID != checkpointGenerationID {
+		return nil, fmt.Errorf("%w: running fork lifecycle changed", ErrRootFSFilesystemConflict)
+	}
+	targetSandbox, err := scanSandboxRecord(tx.QueryRow(ctx, sandboxRecordSelectSQL()+`
+		WHERE sandbox_id = $1 FOR SHARE
+	`, req.TargetSandboxID))
+	if err != nil {
+		return nil, fmt.Errorf("load running-fork target retry: %w", err)
+	}
+	if targetSandbox == nil || targetSandbox.RuntimeBackend != SandboxRuntimeBackendNomad ||
+		targetSandbox.DesiredState != SandboxDesiredStatePaused || targetSandbox.RuntimeGeneration != 0 ||
+		targetSandbox.CurrentPodName != "" || targetSandbox.CurrentPodNamespace != "" ||
+		!targetSandbox.DeletedAt.IsZero() {
+		return nil, fmt.Errorf("%w: running fork target sandbox changed", ErrRootFSFilesystemConflict)
+	}
+	targetRecordDigest, err := NomadSandboxForkTargetRecordDigest(targetSandbox)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(lifecycle.TargetRecordDigest, targetRecordDigest) {
+		return nil, fmt.Errorf("%w: running fork target identity changed", ErrRootFSFilesystemConflict)
+	}
+	targetClaim, err := lockSandboxRuntimeClaim(ctx, tx, req.TargetSandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if targetClaim.OperationID != NomadSandboxForkClaimOperationID(req.OperationID, req.TargetSandboxID) ||
+		targetClaim.Phase != SandboxRuntimeClaimPhaseReady || !targetClaim.CompletedAt.IsZero() {
+		return nil, fmt.Errorf("%w: running fork target claim changed", ErrRootFSFilesystemConflict)
 	}
 	storedGeneration, err := scanRootFSGeneration(tx.QueryRow(ctx, rootFSGenerationSelectSQL()+`
 		WHERE generation_id = $1

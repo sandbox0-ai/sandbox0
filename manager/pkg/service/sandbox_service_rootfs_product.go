@@ -80,7 +80,9 @@ type RestoreSandboxRootFSResponse struct {
 }
 
 type ForkSandboxRequest struct {
-	Config *ForkSandboxConfig `json:"config,omitempty"`
+	Config      *ForkSandboxConfig `json:"config,omitempty"`
+	OperationID string             `json:"-"`
+	StartedAt   time.Time          `json:"-"`
 }
 
 type ForkSandboxConfig struct {

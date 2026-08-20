@@ -416,6 +416,8 @@ s0 sandbox resume sb_abc123`
 
 Fork creates a new paused sandbox from a running or paused source sandbox rootfs. A running source is briefly barriered and checkpointed during the operation, then remains running. The fork receives its own sandbox ID. Writes made after resuming the fork do not modify the source sandbox rootfs.
 
+On the Nomad/gVisor runtime, Sandbox0 persists the fork operation and paused target before contacting the source node. The authenticated node request is bound to the exact live allocation, node incarnation, rootfs writer grant, writer epoch, and source generation. If the API connection or manager restarts after checkpoint publication, background reconciliation recovers the committed target from PostgreSQL without freezing a newer source state again. A never-run fork target starts at runtime generation `0`; its first resume claims a fresh slot as generation `1`.
+
 <Endpoint method="POST">
 /api/v1/sandboxes/{'{id}'}/fork
 </Endpoint>

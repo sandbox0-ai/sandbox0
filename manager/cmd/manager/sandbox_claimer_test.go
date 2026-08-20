@@ -28,6 +28,16 @@ func (fakeSandboxClaimer) ResumeSandboxAndWait(context.Context, string) (*manage
 	return nil, nil
 }
 
+func (fakeSandboxClaimer) ForkSandbox(
+	context.Context,
+	string,
+	string,
+	string,
+	*service.ForkSandboxRequest,
+) (*service.ForkSandboxResponse, error) {
+	return nil, nil
+}
+
 func (fakeSandboxClaimer) PauseSandboxByID(context.Context, string) error { return nil }
 
 func (fakeSandboxClaimer) CompletePausingSandboxRuntime(context.Context, string) error { return nil }

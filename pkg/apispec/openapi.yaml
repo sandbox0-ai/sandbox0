@@ -2060,7 +2060,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
         "503":
-          description: Running-source fork requires ctld checkpoint support
+          description: Running-source checkpoint authority or its authenticated node channel is temporarily unavailable
           content:
             application/json:
               schema:

@@ -33,6 +33,16 @@ func (s *SandboxService) ReconcileSandboxRuntime(ctx context.Context, sandboxID 
 	if sandboxID == "" {
 		return nil
 	}
+	owner, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
+	if errors.Is(err, sandboxstore.ErrSandboxRecordNotFound) || owner == nil {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load sandbox runtime backend: %w", err)
+	}
+	if owner.RuntimeBackend == sandboxstore.SandboxRuntimeBackendNomad {
+		return nil
+	}
 	pods, err := s.listSandboxRuntimePodsStrong(ctx, sandboxID)
 	if err != nil {
 		return fmt.Errorf("confirm sandbox runtime state: %w", err)

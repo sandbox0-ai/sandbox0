@@ -388,6 +388,10 @@ func (s *PGSandboxStore) RequestSandboxRuntimeClaimCleanup(
 	if err := lockRuntimeSlotClaimOperation(ctx, tx, operationID); err != nil {
 		return nil, err
 	}
+	inboundFork, err := lockInboundNomadRunningForkForTargetCleanup(ctx, tx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
 	record, err := lockNomadSandboxClaimRecord(ctx, tx, sandboxID)
 	if err != nil {
 		return nil, err
@@ -411,7 +415,7 @@ func (s *PGSandboxStore) RequestSandboxRuntimeClaimCleanup(
 	}
 	firstCleanupRequest := claim.Phase != SandboxRuntimeClaimPhaseCleanupPending
 	if firstCleanupRequest {
-		if err := abortConflictingSandboxLifecycleForClaimCleanup(ctx, tx, record); err != nil {
+		if err := abortConflictingSandboxLifecycleForClaimCleanup(ctx, tx, record, inboundFork); err != nil {
 			return nil, err
 		}
 	}
@@ -527,6 +531,7 @@ func abortConflictingSandboxLifecycleForClaimCleanup(
 	ctx context.Context,
 	tx pgx.Tx,
 	record *SandboxRecord,
+	inboundFork *SandboxLifecycleTxn,
 ) error {
 	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
 		WHERE sandbox_id = $1
@@ -538,31 +543,113 @@ func abortConflictingSandboxLifecycleForClaimCleanup(
 	if err != nil {
 		return fmt.Errorf("lock sandbox lifecycle before claim cleanup: %w", err)
 	}
-	if lifecycle == nil {
-		return nil
+	if lifecycle != nil {
+		preserveTerminalWriter := lifecycle.Kind == SandboxLifecycleKindPause &&
+			(lifecycle.Source == SandboxLifecycleSourceCrash ||
+				lifecycle.Source == SandboxLifecycleSourceHealth ||
+				lifecycle.Source == SandboxLifecycleSourceLost) &&
+			!lifecycle.Cancelable && lifecycle.CancelRequestedAt.IsZero() &&
+			(lifecycle.Phase == SandboxLifecyclePhasePublishing || lifecycle.Phase == SandboxLifecyclePhaseCommitting) &&
+			lifecycle.PreparedHeadLayerID == "" &&
+			lifecycle.FromGeneration == record.RuntimeGeneration &&
+			lifecycle.FromPodNamespace == record.CurrentPodNamespace &&
+			lifecycle.FromPodName == record.CurrentPodName
+		if preserveTerminalWriter {
+			return nil
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE manager.sandbox_lifecycle_txns
+			SET phase = $2, error = $3, aborted_at = NOW(), updated_at = NOW()
+			WHERE txn_id = $1
+				AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+		`, lifecycle.ID, SandboxLifecyclePhaseAborted, "sandbox termination requested")
+		if err != nil {
+			return fmt.Errorf("abort conflicting sandbox lifecycle for claim cleanup: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: sandbox lifecycle changed during cleanup", ErrSandboxClaimReservationConflict)
+		}
+		if nomadRunningForkLifecycleOwnsNeverRunTarget(lifecycle, record) {
+			if err := queueNeverRunNomadForkTargetCleanup(
+				ctx, tx, lifecycle.ID, lifecycle.TargetSandboxID, "fork source termination requested",
+			); err != nil {
+				return err
+			}
+		}
 	}
-	preserveTerminalWriter := lifecycle.Kind == SandboxLifecycleKindPause &&
-		(lifecycle.Source == SandboxLifecycleSourceCrash ||
-			lifecycle.Source == SandboxLifecycleSourceHealth ||
-			lifecycle.Source == SandboxLifecycleSourceLost) &&
-		!lifecycle.Cancelable && lifecycle.CancelRequestedAt.IsZero() &&
-		(lifecycle.Phase == SandboxLifecyclePhasePublishing || lifecycle.Phase == SandboxLifecyclePhaseCommitting) &&
-		lifecycle.PreparedHeadLayerID == "" &&
-		lifecycle.FromGeneration == record.RuntimeGeneration &&
-		lifecycle.FromPodNamespace == record.CurrentPodNamespace &&
-		lifecycle.FromPodName == record.CurrentPodName
-	if preserveTerminalWriter {
-		return nil
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE manager.sandbox_lifecycle_txns
-		SET phase = $2, error = $3, aborted_at = NOW(), updated_at = NOW()
-		WHERE txn_id = $1
-			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
-	`, lifecycle.ID, SandboxLifecyclePhaseAborted, "sandbox termination requested"); err != nil {
-		return fmt.Errorf("abort conflicting sandbox lifecycle for claim cleanup: %w", err)
+	if inboundFork != nil {
+		tag, err := tx.Exec(ctx, `
+			UPDATE manager.sandbox_lifecycle_txns
+			SET phase = $2, error = $3, aborted_at = NOW(), updated_at = NOW()
+			WHERE txn_id = $1
+				AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+		`, inboundFork.ID, SandboxLifecyclePhaseAborted, "fork target termination requested")
+		if err != nil {
+			return fmt.Errorf("abort inbound Nomad fork lifecycle for claim cleanup: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: inbound Nomad fork changed during cleanup", ErrSandboxClaimReservationConflict)
+		}
 	}
 	return nil
+}
+
+// lockInboundNomadRunningForkForTargetCleanup establishes the same
+// source-before-target row order used by checkpoint publication. This avoids
+// a lifecycle/target deadlock when target deletion races node publication.
+func lockInboundNomadRunningForkForTargetCleanup(
+	ctx context.Context,
+	tx pgx.Tx,
+	targetSandboxID string,
+) (*SandboxLifecycleTxn, error) {
+	var operationID, sourceSandboxID string
+	err := tx.QueryRow(ctx, `
+		SELECT lifecycle.txn_id, lifecycle.sandbox_id
+		FROM manager.sandbox_lifecycle_txns AS lifecycle
+		JOIN manager.sandboxes AS source ON source.sandbox_id = lifecycle.sandbox_id
+		WHERE lifecycle.kind = $1
+			AND lifecycle.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+			AND lifecycle.target_sandbox_id = $2
+			AND source.runtime_backend = $3
+		ORDER BY lifecycle.updated_at DESC
+		LIMIT 1
+	`, SandboxLifecycleKindFork, targetSandboxID, SandboxRuntimeBackendNomad).Scan(
+		&operationID, &sourceSandboxID,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find inbound Nomad fork before target cleanup: %w", err)
+	}
+	var lockedSourceID string
+	if err := tx.QueryRow(ctx, `
+		SELECT sandbox_id FROM manager.sandboxes WHERE sandbox_id = $1 FOR UPDATE
+	`, sourceSandboxID).Scan(&lockedSourceID); err != nil {
+		return nil, fmt.Errorf("lock inbound Nomad fork source before target cleanup: %w", err)
+	}
+	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1 AND sandbox_id = $2 FOR UPDATE
+	`, operationID, sourceSandboxID))
+	if err != nil {
+		return nil, fmt.Errorf("lock inbound Nomad fork before target cleanup: %w", err)
+	}
+	if lifecycle == nil || lifecycle.Kind != SandboxLifecycleKindFork ||
+		lifecycle.TargetSandboxID != targetSandboxID ||
+		!isActiveSandboxLifecyclePhase(lifecycle.Phase) {
+		return nil, nil
+	}
+	return lifecycle, nil
+}
+
+func isActiveSandboxLifecyclePhase(phase string) bool {
+	switch phase {
+	case SandboxLifecyclePhasePreparing, SandboxLifecyclePhaseBarriered,
+		SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting:
+		return true
+	default:
+		return false
+	}
 }
 
 func fenceSandboxClaimRuntimeSlotForCleanup(
@@ -577,9 +664,11 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 			record.CurrentPodName != "" || record.CurrentPodNamespace != "",
 	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
-		WHERE claim_operation_id = $1
+		WHERE sandbox_id = $1
+		ORDER BY CASE WHEN state = $2 THEN 1 ELSE 0 END, updated_at DESC
+		LIMIT 1
 		FOR UPDATE
-	`, claim.OperationID))
+	`, record.ID, RuntimeSlotStateTerminal))
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("lock sandbox cleanup runtime slot: %w", err)
 	}
@@ -588,9 +677,11 @@ func fenceSandboxClaimRuntimeSlotForCleanup(
 			(record.ClusterID != "" && slot.ClusterID != record.ClusterID) {
 			return nil, fmt.Errorf("%w: cleanup slot is not bound to the sandbox record", ErrSandboxClaimReservationConflict)
 		}
-		if candidate.PhysicalStateRequired &&
-			(record.CurrentPodName == "" || record.CurrentPodNamespace == "" ||
-				slot.AllocationID != record.CurrentPodName ||
+		if (record.CurrentPodName == "") != (record.CurrentPodNamespace == "") {
+			return nil, fmt.Errorf("%w: sandbox runtime binding is incomplete", ErrSandboxClaimReservationConflict)
+		}
+		if record.CurrentPodName != "" &&
+			(slot.AllocationID != record.CurrentPodName ||
 				slot.AllocationNamespace != record.CurrentPodNamespace) {
 			return nil, fmt.Errorf("%w: cleanup allocation binding changed", ErrSandboxClaimReservationConflict)
 		}

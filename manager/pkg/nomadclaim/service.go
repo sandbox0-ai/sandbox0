@@ -24,6 +24,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
@@ -40,6 +41,7 @@ var errNomadSandboxPausePending = errors.New("nomad sandbox planned pause is pen
 // slot can receive writer authority.
 type Store interface {
 	GetSandbox(context.Context, string) (*sandboxstore.SandboxRecord, error)
+	GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error)
 	RetrySandboxClaim(context.Context, *sandboxstore.RetrySandboxClaimRequest) (*sandboxstore.SandboxRecord, bool, error)
 	ReserveSandboxClaim(context.Context, *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	CompleteSandboxClaim(context.Context, *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
@@ -48,6 +50,9 @@ type Store interface {
 	RetryNomadSandboxResume(context.Context, *sandboxstore.RetryNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, bool, error)
 	RequestNomadSandboxResume(context.Context, *sandboxstore.RequestNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, error)
 	CompleteNomadSandboxResume(context.Context, *sandboxstore.CompleteNomadSandboxResumeRequest) (*sandboxstore.SandboxRecord, error)
+	RequestNomadSandboxRunningFork(context.Context, *sandboxstore.NomadSandboxForkRequest) (*sandboxstore.NomadSandboxRunningForkCandidate, error)
+	AbortNomadSandboxRunningFork(context.Context, string, string, string, string) (bool, error)
+	ForkNomadPausedSandbox(context.Context, *sandboxstore.NomadSandboxForkRequest) (*sandboxstore.SandboxRecord, error)
 	BeginRuntimeSlotQuiesce(context.Context, *sandboxstore.BeginRuntimeSlotQuiesceRequest) (*sandboxstore.RuntimeSlot, error)
 	GetRuntimeSlotBySandboxID(context.Context, string) (*sandboxstore.RuntimeSlot, error)
 	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
@@ -70,6 +75,14 @@ type allocationStopper interface {
 	Stop(context.Context, runtimeslotreconciler.AllocationPurgeRequest) error
 }
 
+type runningForkController interface {
+	RunningFork(
+		context.Context,
+		protocol.NodeChannelTarget,
+		protocol.NodeRunningForkControlRequest,
+	) (rootfshandoff.RunningForkCheckpointResult, error)
+}
+
 // Config defines logical claim policy independently from the node listener.
 type Config struct {
 	Store           Store
@@ -77,6 +90,7 @@ type Config struct {
 	Profiles        *ProfileCatalog
 	Planner         planner
 	Allocation      allocationStopper
+	RunningFork     runningForkController
 	QuotaLimits     QuotaLimitStore
 	NetworkPolicies *networkpolicy.NetworkPolicyService
 	ResourcePolicy  templatepkg.ResourcePolicy
@@ -94,6 +108,7 @@ type Service struct {
 	profiles        *ProfileCatalog
 	planner         planner
 	allocation      allocationStopper
+	runningFork     runningForkController
 	quotaLimits     QuotaLimitStore
 	networkPolicies *networkpolicy.NetworkPolicyService
 	resourcePolicy  templatepkg.ResourcePolicy
@@ -107,8 +122,9 @@ type Service struct {
 // New validates all claim authorities. There is no partially configured mode.
 func New(config Config) (*Service, error) {
 	if config.Store == nil || config.Templates == nil || config.Profiles == nil ||
-		config.Planner == nil || config.Allocation == nil || config.QuotaLimits == nil || config.NetworkPolicies == nil {
-		return nil, fmt.Errorf("Nomad claim store, templates, profiles, planner, allocation controller, quota limits, and network policy service are required")
+		config.Planner == nil || config.Allocation == nil || config.RunningFork == nil ||
+		config.QuotaLimits == nil || config.NetworkPolicies == nil {
+		return nil, fmt.Errorf("Nomad claim store, templates, profiles, planner, allocation controller, running-fork controller, quota limits, and network policy service are required")
 	}
 	if config.DefaultTTL < 0 || config.DefaultTTL/time.Second > math.MaxInt32 {
 		return nil, fmt.Errorf("default TTL must fit a non-negative int32 second count")
@@ -124,7 +140,7 @@ func New(config Config) (*Service, error) {
 	}
 	return &Service{
 		store: config.Store, templates: config.Templates, profiles: config.Profiles,
-		planner: config.Planner, allocation: config.Allocation,
+		planner: config.Planner, allocation: config.Allocation, runningFork: config.RunningFork,
 		quotaLimits: config.QuotaLimits, networkPolicies: config.NetworkPolicies,
 		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
 		now: config.Now, logger: config.Logger,
@@ -347,7 +363,7 @@ func (s *Service) prepareNomadResumePlan(record *sandboxstore.SandboxRecord) (no
 	if record == nil {
 		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad sandbox is missing", service.ErrSandboxLifecycleUnavailable)
 	}
-	if record.TeamID == "" || record.ID == "" || record.ClusterID == "" || record.RuntimeGeneration <= 0 ||
+	if record.TeamID == "" || record.ID == "" || record.ClusterID == "" || record.RuntimeGeneration < 0 ||
 		record.RuntimeGeneration == math.MaxInt64 {
 		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad sandbox identity is invalid",
 			service.ErrSandboxLifecycleUnavailable)

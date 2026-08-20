@@ -65,6 +65,23 @@ func TestReconcileSandboxRuntimeDoesNotTreatKubernetesFailureAsAbsence(t *testin
 	assert.Equal(t, sandboxstore.SandboxDesiredStateActive, store.records["sandbox-1"].DesiredState)
 }
 
+func TestReconcileSandboxRuntimeNeverProjectsNomadStateFromKubernetes(t *testing.T) {
+	store := runtimeRecoveryStore("sandbox-nomad", "allocation-1", 3, sandboxstore.SandboxDesiredStateActive)
+	store.records["sandbox-nomad"].RuntimeBackend = sandboxstore.SandboxRuntimeBackendNomad
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		t.Fatal("Nomad runtime reconciliation must not query Kubernetes Pods")
+		return true, nil, nil
+	})
+	svc := &SandboxService{
+		k8sClient: client, sandboxStore: store,
+		config: SandboxServiceConfig{ClusterID: "cluster-a"}, logger: zap.NewNop(),
+	}
+
+	require.NoError(t, svc.ReconcileSandboxRuntime(t.Context(), "sandbox-nomad"))
+	assert.Nil(t, activeLifecycleTxnForTest(store, "sandbox-nomad"))
+}
+
 func TestReconcileSandboxRuntimeRepairsSameGenerationProjectionFromKubernetes(t *testing.T) {
 	pod := runtimeRecoveryPod("pod-new", "sandbox-1", 3)
 	store := runtimeRecoveryStore("sandbox-1", "pod-old", 3, sandboxstore.SandboxDesiredStateActive)
@@ -563,6 +580,14 @@ func TestSandboxRuntimeReconcilerScansPagesAndQueuesOnlyDrift(t *testing.T) {
 		reconciler.queue.Forget(item)
 	}
 	assert.Equal(t, map[string]bool{"sandbox-b": true, "sandbox-c": true}, got)
+}
+
+func TestSandboxRuntimeReconcilerExcludesNomadCandidates(t *testing.T) {
+	reconciler := NewSandboxRuntimeReconciler("cluster-a", nil, nil, nil, zap.NewNop())
+	require.False(t, reconciler.candidateNeedsReconcile(sandboxstore.SandboxRuntimeReconcileCandidate{
+		SandboxID: "sandbox-nomad", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+		DesiredState: sandboxstore.SandboxDesiredStateTerminating,
+	}))
 }
 
 type runtimeReconcileMemoryStore struct {

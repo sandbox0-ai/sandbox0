@@ -50,7 +50,8 @@ func TestLifecycleRequestsRequireCanonicalProofs(t *testing.T) {
 
 	command := CommandReadyRequest{
 		AllocationID: "allocation", NodeBootID: "boot", OperationID: "operation",
-		ClaimID: "claim", ProcdInstanceID: "procd", CommandReadyDigest: proof,
+		ClaimID: "claim", ProcdInstanceID: "procd", ProcdAddress: "http://192.0.2.2:49983",
+		CommandReadyDigest: proof,
 	}
 	require.NoError(t, command.Validate())
 }
@@ -124,7 +125,7 @@ func TestCommandReadyProofBindsCanonicalProcdCommand(t *testing.T) {
 	address, err := NomadProcdAddress("2001:db8::1")
 	require.NoError(t, err)
 	require.Equal(t, "http://[2001:db8::1]:49983", address)
-	require.Error(t, validateProcdAddress("http://[2001:0db8::1]:49983"))
+	require.Error(t, ValidateNomadProcdAddress("http://[2001:0db8::1]:49983"))
 	_, err = NomadProcdAddress(" 192.0.2.2")
 	require.Error(t, err)
 }

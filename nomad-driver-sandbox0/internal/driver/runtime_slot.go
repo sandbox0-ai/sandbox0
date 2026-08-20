@@ -505,7 +505,8 @@ func (h *taskHandle) CommandReady(request CommandReadyRequest) error {
 	authorityRequest := protocol.CommandReadyRequest{
 		AllocationID: lifecycle.heartbeat.AllocationID, NodeBootID: lifecycle.heartbeat.NodeBootID,
 		OperationID: proof.OperationID, ClaimID: proof.ClaimID,
-		ProcdInstanceID: proof.ProcdInstanceID, CommandReadyDigest: digest,
+		ProcdInstanceID: proof.ProcdInstanceID, ProcdAddress: proof.ProcdAddress,
+		CommandReadyDigest: digest,
 	}
 	if err := authorityRequest.Validate(); err != nil {
 		return fmt.Errorf("validate regional command-ready request: %w", err)

@@ -200,7 +200,8 @@ func serveCommandReady(config HandlerConfig, identity nodeauth.Identity, slotID 
 	slot, err := config.Store.MarkRuntimeSlotCommandReady(request.Context(), &sandboxstore.MarkRuntimeSlotCommandReadyRequest{
 		SlotID: slotID, AllocationID: body.AllocationID, NodeUID: identity.NodeUID,
 		NodeBootID: body.NodeBootID, OperationID: body.OperationID, ClaimID: body.ClaimID,
-		ProcdInstanceID: body.ProcdInstanceID, CommandReadyDigest: proof,
+		ProcdInstanceID: body.ProcdInstanceID, ProcdAddress: body.ProcdAddress,
+		CommandReadyDigest: proof,
 	})
 	writeStoreResult(writer, slot, err)
 }

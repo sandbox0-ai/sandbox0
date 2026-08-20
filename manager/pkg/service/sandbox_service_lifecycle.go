@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
+	"github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -137,7 +139,7 @@ func (s *SandboxService) requestPauseSandboxRuntime(ctx context.Context, sandbox
 			if activeTxn.Kind != sandboxstore.SandboxLifecycleKindPause {
 				return errSandboxLifecycleResuming
 			}
-			projected, err := s.projectSandboxRecordFromCache(lockCtx, record, activeTxn)
+			projected, err := s.projectSandboxRuntimeState(lockCtx, record, activeTxn)
 			if projected != nil {
 				status = projected.Status
 			}
@@ -810,7 +812,7 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*man
 			if txnErr != nil {
 				return nil, fmt.Errorf("get active sandbox lifecycle txn: %w", txnErr)
 			}
-			return s.projectSandboxRecordFromCache(ctx, record, activeTxn)
+			return s.projectSandboxRuntimeState(ctx, record, activeTxn)
 		}
 	}
 	// Find the pod by sandbox ID
@@ -828,9 +830,15 @@ func (s *SandboxService) GetSandbox(ctx context.Context, sandboxID string) (*man
 	return s.podToSandbox(pod, sandboxID), nil
 }
 
-func (s *SandboxService) projectSandboxRecordFromCache(ctx context.Context, record *sandboxstore.SandboxRecord, activeTxn *sandboxstore.SandboxLifecycleTxn) (*managerapi.Sandbox, error) {
+func (s *SandboxService) projectSandboxRuntimeState(ctx context.Context, record *sandboxstore.SandboxRecord, activeTxn *sandboxstore.SandboxLifecycleTxn) (*managerapi.Sandbox, error) {
 	projected := s.recordToSandbox(record)
-	if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive || s.podLister == nil {
+	if record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive {
+		return projected, nil
+	}
+	if record.RuntimeBackend == sandboxstore.SandboxRuntimeBackendNomad {
+		return s.projectNomadSandboxRecord(ctx, record, activeTxn, projected)
+	}
+	if s.podLister == nil {
 		return projected, nil
 	}
 	pod, err := s.getSandboxPod(ctx, record.ID)
@@ -844,6 +852,60 @@ func (s *SandboxService) projectSandboxRecordFromCache(ctx context.Context, reco
 	if sandboxLifecycleTxnHidesCommittedRuntime(activeTxn) {
 		// Lifecycle barriers fence runtime access even while the cached Pod still
 		// supplies the externally visible observed status.
+		projected.InternalAddr = ""
+	}
+	return projected, nil
+}
+
+type nomadRuntimeProjectionStore interface {
+	GetRuntimeSlotBySandboxID(context.Context, string) (*sandboxstore.RuntimeSlot, error)
+}
+
+func (s *SandboxService) projectNomadSandboxRecord(
+	ctx context.Context,
+	record *sandboxstore.SandboxRecord,
+	activeTxn *sandboxstore.SandboxLifecycleTxn,
+	projected *managerapi.Sandbox,
+) (*managerapi.Sandbox, error) {
+	store, ok := s.sandboxStore.(nomadRuntimeProjectionStore)
+	if !ok {
+		return projected, nil
+	}
+	slot, err := store.GetRuntimeSlotBySandboxID(ctx, record.ID)
+	if err != nil {
+		if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
+			if record.CurrentPodName != "" {
+				projected.Status = managerapi.SandboxStatusFailed
+			}
+			return projected, nil
+		}
+		return nil, fmt.Errorf("get Nomad runtime slot projection: %w", err)
+	}
+	if slot == nil || slot.SandboxID != record.ID {
+		return nil, fmt.Errorf("Nomad runtime slot projection does not match sandbox %s", record.ID)
+	}
+	projected.PodName = slot.AllocationID
+	switch slot.State {
+	case sandboxstore.RuntimeSlotStateActive:
+		if slot.ProcdInstanceID == "" || len(slot.CommandReadyDigest) != sha256.Size ||
+			slot.CommandReadyAt.IsZero() || !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
+			projected.Status = managerapi.SandboxStatusFailed
+			return projected, nil
+		}
+		if err := runtimeslot.ValidateNomadProcdAddress(slot.ProcdAddress); err != nil {
+			projected.Status = managerapi.SandboxStatusFailed
+			return projected, nil
+		}
+		projected.Status = managerapi.SandboxStatusRunning
+		projected.InternalAddr = slot.ProcdAddress
+	case sandboxstore.RuntimeSlotStateClaiming, sandboxstore.RuntimeSlotStateStarting:
+		projected.Status = managerapi.SandboxStatusStarting
+	case sandboxstore.RuntimeSlotStateQuiescing, sandboxstore.RuntimeSlotStateOrphaned:
+		projected.Status = managerapi.SandboxStatusFailed
+	default:
+		projected.Status = managerapi.SandboxStatusFailed
+	}
+	if sandboxLifecycleTxnHidesCommittedRuntime(activeTxn) {
 		projected.InternalAddr = ""
 	}
 	return projected, nil

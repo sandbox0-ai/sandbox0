@@ -309,7 +309,7 @@ func (p CommandReadyProof) Validate() error {
 	if p.RequestMethod != "PUT" || p.RequestPath != ProcdCommandReadyProbePath || p.ResponseStatus != 200 {
 		return fmt.Errorf("command-ready proof does not describe the canonical procd probe")
 	}
-	if err := validateProcdAddress(p.ProcdAddress); err != nil {
+	if err := ValidateNomadProcdAddress(p.ProcdAddress); err != nil {
 		return err
 	}
 	if _, err := DecodeProof("response_body_digest", p.ResponseBodyDigest); err != nil {
@@ -337,7 +337,9 @@ func NomadRunscContainerID(slotID string) string {
 	return "s0-" + hex.EncodeToString(digest[:16])
 }
 
-func validateProcdAddress(address string) error {
+// ValidateNomadProcdAddress requires the canonical allocation-local procd
+// origin persisted by the regional runtime-slot registry.
+func ValidateNomadProcdAddress(address string) error {
 	parsed, err := url.Parse(address)
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" ||
 		parsed.Fragment != "" || parsed.Path != "" {
@@ -495,6 +497,7 @@ type CommandReadyRequest struct {
 	OperationID        string `json:"operation_id"`
 	ClaimID            string `json:"claim_id"`
 	ProcdInstanceID    string `json:"procd_instance_id"`
+	ProcdAddress       string `json:"procd_address"`
 	CommandReadyDigest string `json:"command_ready_digest"`
 }
 
@@ -504,11 +507,14 @@ func (r CommandReadyRequest) Validate() error {
 	}
 	for name, value := range map[string]string{
 		"operation_id": r.OperationID, "claim_id": r.ClaimID,
-		"procd_instance_id": r.ProcdInstanceID,
+		"procd_instance_id": r.ProcdInstanceID, "procd_address": r.ProcdAddress,
 	} {
 		if err := validateRequiredID(name, value); err != nil {
 			return err
 		}
+	}
+	if err := ValidateNomadProcdAddress(r.ProcdAddress); err != nil {
+		return err
 	}
 	_, err := DecodeProof("command_ready_digest", r.CommandReadyDigest)
 	return err

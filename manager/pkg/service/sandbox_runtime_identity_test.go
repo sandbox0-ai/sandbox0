@@ -33,6 +33,7 @@ type memorySandboxStore struct {
 	rootFSStates      map[string]*sandboxstore.SandboxRootFSState
 	rootFSFilesystems map[string]*sandboxstore.RootFSFilesystem
 	rootFSSnapshots   map[string]*sandboxstore.RootFSSnapshot
+	runtimeSlots      map[string]*sandboxstore.RuntimeSlot
 	deletes           []string
 	saves             int
 	pauses            int
@@ -40,6 +41,21 @@ type memorySandboxStore struct {
 	activeTxnGets     int
 	lockStarted       chan struct{}
 	blockLock         chan struct{}
+}
+
+func (s *memorySandboxStore) GetRuntimeSlotBySandboxID(_ context.Context, sandboxID string) (*sandboxstore.RuntimeSlot, error) {
+	if s == nil {
+		return nil, sandboxstore.ErrRuntimeSlotNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	slot := s.runtimeSlots[sandboxID]
+	if slot == nil {
+		return nil, sandboxstore.ErrRuntimeSlotNotFound
+	}
+	clone := *slot
+	clone.CommandReadyDigest = append([]byte(nil), slot.CommandReadyDigest...)
+	return &clone, nil
 }
 
 type memorySandboxStoreTx struct {
@@ -575,6 +591,137 @@ func TestGetSandboxPodRejectsMultipleActiveRuntimePods(t *testing.T) {
 	_, err := svc.getSandboxPod(context.Background(), "sandbox-a")
 	if !k8serrors.IsConflict(err) {
 		t.Fatalf("getSandboxPod() error = %v, want conflict", err)
+	}
+}
+
+func TestGetSandboxProjectsActiveNomadRuntimeSlot(t *testing.T) {
+	now := time.Date(2026, time.August, 20, 10, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-a": {
+				ID: "sandbox-a", TeamID: "team-a", UserID: "user-a", TemplateID: "default",
+				RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+				DesiredState:   sandboxstore.SandboxDesiredStateActive,
+				CurrentPodName: "allocation-a", CurrentPodNamespace: "default",
+			},
+		},
+		runtimeSlots: map[string]*sandboxstore.RuntimeSlot{
+			"sandbox-a": {
+				ID: "slot-a", SandboxID: "sandbox-a", AllocationID: "allocation-a",
+				State:           sandboxstore.RuntimeSlotStateActive,
+				ProcdInstanceID: "procd-a", ProcdAddress: "http://192.0.2.2:49983",
+				CommandReadyDigest: make([]byte, 32), CommandReadyAt: now,
+				HeartbeatExpiresAt: now.Add(time.Minute), AuthorityObservedAt: now,
+			},
+		},
+	}
+	svc := &SandboxService{sandboxStore: store, logger: zap.NewNop()}
+
+	sandbox, err := svc.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if sandbox.Status != managerapi.SandboxStatusRunning || sandbox.InternalAddr != "http://192.0.2.2:49983" ||
+		sandbox.PodName != "allocation-a" {
+		t.Fatalf("Nomad sandbox projection = %+v", sandbox)
+	}
+	listed, err := svc.ListSandboxes(context.Background(), &sandboxstore.ListSandboxesRequest{TeamID: "team-a"})
+	if err != nil {
+		t.Fatalf("ListSandboxes() error = %v", err)
+	}
+	if len(listed.Sandboxes) != 1 || listed.Sandboxes[0].Status != managerapi.SandboxStatusRunning {
+		t.Fatalf("Nomad sandbox list projection = %+v", listed)
+	}
+	status, err := svc.GetSandboxStatus(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandboxStatus() error = %v", err)
+	}
+	if status["status"] != managerapi.SandboxStatusRunning {
+		t.Fatalf("Nomad sandbox status projection = %+v", status)
+	}
+}
+
+func TestGetSandboxFailsClosedForMissingCompletedNomadRuntimeSlot(t *testing.T) {
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
+		"sandbox-a": {
+			ID: "sandbox-a", TeamID: "team-a", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+			DesiredState: sandboxstore.SandboxDesiredStateActive, CurrentPodName: "allocation-a",
+		},
+	}}
+	svc := &SandboxService{sandboxStore: store, logger: zap.NewNop()}
+
+	sandbox, err := svc.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if sandbox.Status != managerapi.SandboxStatusFailed || sandbox.InternalAddr != "" {
+		t.Fatalf("missing Nomad slot projection = %+v", sandbox)
+	}
+}
+
+func TestGetSandboxFailsClosedForExpiredNomadRuntimeSlot(t *testing.T) {
+	now := time.Date(2026, time.August, 20, 10, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-a": {
+				ID: "sandbox-a", TeamID: "team-a", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+				DesiredState: sandboxstore.SandboxDesiredStateActive, CurrentPodName: "allocation-a",
+			},
+		},
+		runtimeSlots: map[string]*sandboxstore.RuntimeSlot{
+			"sandbox-a": {
+				ID: "slot-a", SandboxID: "sandbox-a", AllocationID: "allocation-a",
+				State: sandboxstore.RuntimeSlotStateActive, ProcdInstanceID: "procd-a",
+				ProcdAddress: "http://192.0.2.2:49983", CommandReadyDigest: make([]byte, 32),
+				CommandReadyAt: now.Add(-time.Minute), HeartbeatExpiresAt: now.Add(-time.Second),
+				AuthorityObservedAt: now,
+			},
+		},
+	}
+	svc := &SandboxService{sandboxStore: store, logger: zap.NewNop()}
+
+	sandbox, err := svc.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if sandbox.Status != managerapi.SandboxStatusFailed || sandbox.InternalAddr != "" {
+		t.Fatalf("expired Nomad slot projection = %+v", sandbox)
+	}
+}
+
+func TestGetSandboxHidesNomadAddressDuringLifecycleBarrier(t *testing.T) {
+	now := time.Date(2026, time.August, 20, 10, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-a": {
+				ID: "sandbox-a", TeamID: "team-a", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+				DesiredState: sandboxstore.SandboxDesiredStateActive,
+			},
+		},
+		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{
+			"pause-a": {
+				ID: "pause-a", SandboxID: "sandbox-a", Kind: sandboxstore.SandboxLifecycleKindPause,
+				Phase: sandboxstore.SandboxLifecyclePhasePreparing,
+			},
+		},
+		runtimeSlots: map[string]*sandboxstore.RuntimeSlot{
+			"sandbox-a": {
+				ID: "slot-a", SandboxID: "sandbox-a", AllocationID: "allocation-a",
+				State: sandboxstore.RuntimeSlotStateActive, ProcdInstanceID: "procd-a",
+				ProcdAddress:       "http://192.0.2.2:49983",
+				CommandReadyDigest: make([]byte, 32), CommandReadyAt: now,
+				HeartbeatExpiresAt: now.Add(time.Minute), AuthorityObservedAt: now,
+			},
+		},
+	}
+	svc := &SandboxService{sandboxStore: store, logger: zap.NewNop()}
+
+	sandbox, err := svc.GetSandbox(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetSandbox() error = %v", err)
+	}
+	if sandbox.Status != managerapi.SandboxStatusRunning || sandbox.InternalAddr != "" {
+		t.Fatalf("barriered Nomad sandbox projection = %+v", sandbox)
 	}
 }
 

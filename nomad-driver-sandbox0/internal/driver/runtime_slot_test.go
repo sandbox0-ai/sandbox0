@@ -819,7 +819,8 @@ func TestRuntimeSlotCommandReadyRetriesAcceptedResponseLoss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("derive expected command-ready digest: %v", err)
 	}
-	if requests[0].ProcdInstanceID != proof.ProcdInstanceID || requests[0].CommandReadyDigest != expectedDigest {
+	if requests[0].ProcdInstanceID != proof.ProcdInstanceID || requests[0].ProcdAddress != proof.ProcdAddress ||
+		requests[0].CommandReadyDigest != expectedDigest {
 		t.Fatalf("regional command-ready request = %+v", requests[0])
 	}
 	persisted := handle.PersistedState()

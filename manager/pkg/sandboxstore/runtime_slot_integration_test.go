@@ -110,14 +110,25 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateStarting, started.State)
-	active, err := store.MarkRuntimeSlotCommandReady(ctx, &MarkRuntimeSlotCommandReadyRequest{
+	commandReady := &MarkRuntimeSlotCommandReadyRequest{
 		SlotID: claimed.ID, AllocationID: registration.AllocationID,
 		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
 		OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
-		ProcdInstanceID: "procd-a", CommandReadyDigest: bytes.Repeat([]byte{0x66}, 32),
-	})
+		ProcdInstanceID: "procd-a", ProcdAddress: "http://192.0.2.2:49983",
+		CommandReadyDigest: bytes.Repeat([]byte{0x66}, 32),
+	}
+	active, err := store.MarkRuntimeSlotCommandReady(ctx, commandReady)
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateActive, active.State)
+	require.Equal(t, "http://192.0.2.2:49983", active.ProcdAddress)
+	projected, err := store.GetRuntimeSlotBySandboxID(ctx, acquire.SandboxID)
+	require.NoError(t, err)
+	require.Equal(t, active.ID, projected.ID)
+	require.Equal(t, active.ProcdAddress, projected.ProcdAddress)
+	changedAddress := *commandReady
+	changedAddress.ProcdAddress = "http://192.0.2.3:49983"
+	_, err = store.MarkRuntimeSlotCommandReady(ctx, &changedAddress)
+	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
 	quiescing, err := store.BeginRuntimeSlotQuiesce(ctx, &BeginRuntimeSlotQuiesceRequest{
 		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
 	})

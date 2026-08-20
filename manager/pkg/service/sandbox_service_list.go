@@ -159,7 +159,7 @@ func (s *SandboxService) listSandboxesFromStore(ctx context.Context, req *sandbo
 			// SandboxSummary does not expose runtime connectivity, so lifecycle
 			// transactions are irrelevant to list projection. Avoid one database
 			// lookup per active sandbox.
-			sandbox, err = s.projectSandboxRecordFromCache(ctx, record, nil)
+			sandbox, err = s.projectSandboxRuntimeState(ctx, record, nil)
 			if err != nil {
 				return nil, err
 			}

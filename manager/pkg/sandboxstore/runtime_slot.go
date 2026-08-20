@@ -78,6 +78,7 @@ type RuntimeSlot struct {
 	ClaimNetworkDigest             []byte
 	StartingAt                     time.Time
 	ProcdInstanceID                string
+	ProcdAddress                   string
 	CommandReadyDigest             []byte
 	CommandReadyAt                 time.Time
 	QuiescingAt                    time.Time
@@ -164,6 +165,7 @@ type MarkRuntimeSlotCommandReadyRequest struct {
 	OperationID        string
 	ClaimID            string
 	ProcdInstanceID    string
+	ProcdAddress       string
 	CommandReadyDigest []byte
 }
 
@@ -235,6 +237,22 @@ func (s *PGSandboxStore) GetRuntimeSlot(ctx context.Context, slotID string) (*Ru
 	slot, err := scanRuntimeSlot(s.pool.QueryRow(ctx, runtimeSlotSelectSQL()+` WHERE slot_id = $1`, slotID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrRuntimeSlotNotFound, slotID)
+	}
+	return slot, err
+}
+
+// GetRuntimeSlotBySandboxID returns the one non-terminal physical runtime
+// incarnation currently bound to a logical sandbox.
+func (s *PGSandboxStore) GetRuntimeSlotBySandboxID(ctx context.Context, sandboxID string) (*RuntimeSlot, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	slot, err := scanRuntimeSlot(s.pool.QueryRow(ctx, runtimeSlotSelectSQL()+`
+		WHERE sandbox_id = $1 AND state <> $2
+	`, sandboxID, RuntimeSlotStateTerminal))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: sandbox %s", ErrRuntimeSlotNotFound, sandboxID)
 	}
 	return slot, err
 }
@@ -666,6 +684,7 @@ func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, reques
 		}
 		if slot.State == RuntimeSlotStateActive {
 			if slot.ProcdInstanceID == normalized.ProcdInstanceID &&
+				slot.ProcdAddress == normalized.ProcdAddress &&
 				bytes.Equal(slot.CommandReadyDigest, normalized.CommandReadyDigest) {
 				return nil, nil
 			}
@@ -680,10 +699,11 @@ func (s *PGSandboxStore) MarkRuntimeSlotCommandReady(ctx context.Context, reques
 		_, err := tx.Exec(ctx, `
 			UPDATE manager.runtime_slots
 			SET state = $2, revision = revision + 1,
-				procd_instance_id = $3, command_ready_digest = $4,
+				procd_instance_id = $3, procd_address = $4, command_ready_digest = $5,
 				command_ready_at = NOW(), updated_at = NOW()
 			WHERE slot_id = $1
-		`, slot.ID, RuntimeSlotStateActive, normalized.ProcdInstanceID, normalized.CommandReadyDigest)
+		`, slot.ID, RuntimeSlotStateActive, normalized.ProcdInstanceID, normalized.ProcdAddress,
+			normalized.CommandReadyDigest)
 		return nil, err
 	})
 }
@@ -1075,6 +1095,9 @@ func normalizeMarkRuntimeSlotCommandReadyRequest(request *MarkRuntimeSlotCommand
 	if normalized.ProcdInstanceID == "" || len(normalized.ProcdInstanceID) > 512 {
 		return nil, fmt.Errorf("procd_instance_id is required and must not exceed 512 bytes")
 	}
+	if err := protocol.ValidateNomadProcdAddress(normalized.ProcdAddress); err != nil {
+		return nil, fmt.Errorf("procd_address: %w", err)
+	}
 	var err error
 	normalized.CommandReadyDigest, err = normalizeRuntimeSlotProof("command_ready_digest", normalized.CommandReadyDigest)
 	if err != nil {
@@ -1281,7 +1304,7 @@ func runtimeSlotSelectSQL() string {
 			claim_lease_expires_at, claimed_at,
 			launch_attempt, runsc_container_id,
 			rootfs_binding_digest, claim_network_digest, starting_at,
-			procd_instance_id, command_ready_digest, command_ready_at,
+			procd_instance_id, procd_address, command_ready_digest, command_ready_at,
 			quiescing_at, orphan_observation_digest,
 			terminal_reason, terminal_proof_digest, terminal_at,
 			created_at, updated_at, NOW()
@@ -1309,7 +1332,7 @@ func scanRuntimeSlot(row runtimeSlotScanner) (*RuntimeSlot, error) {
 		&claimLeaseExpiresAt, &claimedAt,
 		&slot.LaunchAttempt, &slot.RunscContainerID,
 		&slot.RootFSBindingDigest, &slot.ClaimNetworkDigest, &startingAt,
-		&slot.ProcdInstanceID, &slot.CommandReadyDigest, &commandReadyAt,
+		&slot.ProcdInstanceID, &slot.ProcdAddress, &slot.CommandReadyDigest, &commandReadyAt,
 		&quiescingAt, &slot.OrphanObservationDigest,
 		&slot.TerminalReason, &slot.TerminalProofDigest, &terminalAt,
 		&slot.CreatedAt, &slot.UpdatedAt, &slot.AuthorityObservedAt,

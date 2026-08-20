@@ -132,11 +132,13 @@ func TestObserveAndTransitionsAuthorizeExactNodeIncarnation(t *testing.T) {
 
 	command := protocol.CommandReadyRequest{
 		AllocationID: "allocation", NodeBootID: "boot", OperationID: "operation", ClaimID: "claim",
-		ProcdInstanceID: "procd", CommandReadyDigest: strings.Repeat("ef", 32),
+		ProcdInstanceID: "procd", ProcdAddress: "http://192.0.2.2:49983",
+		CommandReadyDigest: strings.Repeat("ef", 32),
 	}
 	response = doJSON(t, handler, http.MethodPut, protocol.CommandReadyPath("slot"), command, "token")
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Equal(t, bytes.Repeat([]byte{0xef}, 32), store.commandReady.CommandReadyDigest)
+	require.Equal(t, command.ProcdAddress, store.commandReady.ProcdAddress)
 }
 
 func TestTransitionRejectsWrongAuthenticatedNodeBeforeMutation(t *testing.T) {

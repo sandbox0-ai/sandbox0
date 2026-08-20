@@ -71,7 +71,8 @@ func int32Ptr(v int32) *int32 {
 	return &v
 }
 
-func cloneSandboxConfig(cfg *sandboxstore.SandboxConfig) *sandboxstore.SandboxConfig {
+// CloneSandboxConfig returns an independent claim configuration.
+func CloneSandboxConfig(cfg *sandboxstore.SandboxConfig) *sandboxstore.SandboxConfig {
 	if cfg == nil {
 		return nil
 	}
@@ -84,6 +85,10 @@ func cloneSandboxConfig(cfg *sandboxstore.SandboxConfig) *sandboxstore.SandboxCo
 		cloned.Network = sanitizedNetworkPolicyForPersistence(cloned.Network)
 	}
 	return &cloned
+}
+
+func cloneSandboxConfig(cfg *sandboxstore.SandboxConfig) *sandboxstore.SandboxConfig {
+	return CloneSandboxConfig(cfg)
 }
 
 func cloneInt32Ptr(v *int32) *int32 {
@@ -125,7 +130,9 @@ func (s *SandboxService) claimConfigForPersistence(cfg *sandboxstore.SandboxConf
 	return persisted
 }
 
-func normalizeSandboxConfigForPersistence(cfg *sandboxstore.SandboxConfig) error {
+// NormalizeSandboxConfigForPersistence validates and canonicalizes a public
+// claim configuration before any runtime backend persists it.
+func NormalizeSandboxConfigForPersistence(cfg *sandboxstore.SandboxConfig) error {
 	if cfg == nil {
 		return nil
 	}
@@ -143,6 +150,10 @@ func normalizeSandboxConfigForPersistence(cfg *sandboxstore.SandboxConfig) error
 		return fmt.Errorf("cannot set resume=true on public routes when sandbox auto_resume is disabled")
 	}
 	return nil
+}
+
+func normalizeSandboxConfigForPersistence(cfg *sandboxstore.SandboxConfig) error {
+	return NormalizeSandboxConfigForPersistence(cfg)
 }
 
 func validateSandboxConfigLifecycle(ttl, hardTTL *int32) error {

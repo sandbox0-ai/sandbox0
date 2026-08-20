@@ -88,7 +88,8 @@ func (s *Server) claimSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 			return
 		}
-		if apierrors.IsNotFound(err) || errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
+		if apierrors.IsNotFound(err) || errors.Is(err, service.ErrTemplateNotFound) ||
+			errors.Is(err, sandboxstore.ErrRootFSSnapshotNotFound) {
 			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, err.Error())
 			return
 		}

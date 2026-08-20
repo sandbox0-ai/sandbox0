@@ -49,6 +49,52 @@ func TestSandboxNameForLongTeamTemplateFitsExposureHostLabel(t *testing.T) {
 	}
 }
 
+func TestSandboxNameForOperationIsStableAndRouteable(t *testing.T) {
+	first, err := SandboxNameForOperation("aws-us-east-1", "basic-template", "operation-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := SandboxNameForOperation("aws-us-east-1", "basic-template", "operation-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := SandboxNameForOperation("aws-us-east-1", "basic-template", "operation-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != retried || first == other {
+		t.Fatalf("operation names = %q, %q, %q", first, retried, other)
+	}
+	parsed, err := ParseSandboxName(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.ClusterID != "aws-us-east-1" {
+		t.Fatalf("cluster ID = %q", parsed.ClusterID)
+	}
+	if _, err := BuildExposureHostLabel(first, 49983); err != nil {
+		t.Fatalf("build exposure host: %v", err)
+	}
+}
+
+func TestSandboxNameForOperationSupportsLongestClusterID(t *testing.T) {
+	clusterID := strings.Repeat("a", ClusterIDMaxLen)
+	name, err := SandboxNameForOperation(clusterID, strings.Repeat("template", 20), "operation-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(name) > sandboxNameMaxLen {
+		t.Fatalf("name length = %d, want <= %d", len(name), sandboxNameMaxLen)
+	}
+	parsed, err := ParseSandboxName(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.ClusterID != clusterID {
+		t.Fatalf("cluster ID = %q", parsed.ClusterID)
+	}
+}
+
 func TestReplicasetNameFitsSandboxExposureBudget(t *testing.T) {
 	workloadName, err := NewSandboxWorkloadName(DefaultClusterID, strings.Repeat("long-template-", 8))
 	if err != nil {

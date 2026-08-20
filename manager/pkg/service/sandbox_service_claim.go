@@ -40,7 +40,10 @@ type ClaimRequest struct {
 	// RuntimeGeneration identifies the current runtime pod incarnation.
 	RuntimeGeneration int64 `json:"-"`
 	// HardExpiresAt preserves the absolute hard deadline when recreating a paused sandbox.
-	HardExpiresAt                     time.Time `json:"-"`
+	HardExpiresAt time.Time `json:"-"`
+	// StartedAt is the trusted regional ingress time propagated through signed
+	// internal claims. Public JSON can never set it.
+	StartedAt                         time.Time `json:"-"`
 	mayHaveExistingCredentialBindings bool
 }
 

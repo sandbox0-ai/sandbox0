@@ -150,6 +150,10 @@ func cloneAuditContext(value *AuditContext) *AuditContext {
 		return nil
 	}
 	copyValue := *value
+	if value.IngressStartedAt != nil {
+		startedAt := value.IngressStartedAt.UTC()
+		copyValue.IngressStartedAt = &startedAt
+	}
 	return &copyValue
 }
 

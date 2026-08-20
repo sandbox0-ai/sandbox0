@@ -91,6 +91,9 @@ func (s *Server) generateManagerToken(authCtx *authn.AuthContext, claims *intern
 	opts := internalauth.GenerateOptions{
 		Permissions: permissions,
 	}
+	if claims != nil {
+		opts.Audit = claims.Audit
+	}
 	if claims != nil && claims.IsSystem {
 		return s.internalAuthGen.GenerateSystem("manager", opts)
 	}

@@ -296,6 +296,7 @@ func (s *Server) outboundHTTPClient() *http.Client {
 func (s *Server) setupRoutes() {
 	// Global middleware (order matters)
 	s.router.Use(httpobs.GinMiddleware(s.obsProvider.HTTPServerConfig(nil)))
+	s.router.Use(captureSandboxClaimIngress(time.Now))
 	s.router.Use(middleware.Recovery(s.logger))
 	s.router.Use(s.requestLogger.Logger())
 	s.router.Use(middleware.MarkLongLivedRequests())
@@ -513,7 +514,11 @@ func (s *Server) handleAPINoRoute(c *gin.Context) bool {
 			return true
 		}
 	}
-	token, err := s.generateInternalToken(authCtx, "cluster-gateway")
+	token, err := s.generateInternalTokenWithIngress(
+		authCtx,
+		"cluster-gateway",
+		sandboxClaimIngressStartedAt(c),
+	)
 	if err != nil {
 		s.logger.Error("Failed to generate internal token for cluster-gateway fallback", zap.Error(err))
 		spec.JSONError(c, http.StatusInternalServerError, spec.CodeInternal, "internal server error")
@@ -561,7 +566,7 @@ func (s *Server) injectInternalTokenForTarget(target string) gin.HandlerFunc {
 		}
 
 		// Generate internal token for the target service
-		token, err := s.generateInternalToken(authCtx, target)
+		token, err := s.generateInternalTokenWithIngress(authCtx, target, sandboxClaimIngressStartedAt(c))
 		if err != nil {
 			s.logger.Error("Failed to generate internal token",
 				zap.String("target", target),

@@ -147,6 +147,14 @@ func (s *Server) buildSchedulerClustersURL() (string, error) {
 }
 
 func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string) (string, error) {
+	return s.generateInternalTokenWithIngress(authCtx, target, time.Time{})
+}
+
+func (s *Server) generateInternalTokenWithIngress(
+	authCtx *authn.AuthContext,
+	target string,
+	ingressStartedAt time.Time,
+) (string, error) {
 	if s.internalAuthGen == nil {
 		return "", fmt.Errorf("internal auth generator not configured")
 	}
@@ -158,7 +166,7 @@ func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string
 			target,
 			internalauth.GenerateOptions{
 				Permissions: authCtx.Permissions,
-				Audit:       delegatedAuditContext(authCtx, "regional-gateway"),
+				Audit:       delegatedAuditContext(authCtx, "regional-gateway", ingressStartedAt),
 			},
 		)
 	}
@@ -168,12 +176,12 @@ func (s *Server) generateInternalToken(authCtx *authn.AuthContext, target string
 		authCtx.UserID,
 		internalauth.GenerateOptions{
 			Permissions: authCtx.Permissions,
-			Audit:       delegatedAuditContext(authCtx, "regional-gateway"),
+			Audit:       delegatedAuditContext(authCtx, "regional-gateway", ingressStartedAt),
 		},
 	)
 }
 
-func delegatedAuditContext(authCtx *authn.AuthContext, origin string) *internalauth.AuditContext {
+func delegatedAuditContext(authCtx *authn.AuthContext, origin string, ingressStartedAt time.Time) *internalauth.AuditContext {
 	if authCtx == nil {
 		return nil
 	}
@@ -184,7 +192,7 @@ func delegatedAuditContext(authCtx *authn.AuthContext, origin string) *internala
 		authCtx.RequestID = authCtx.OperationID
 	}
 	principal := authCtx.Principal()
-	return &internalauth.AuditContext{
+	audit := &internalauth.AuditContext{
 		Actor: internalauth.AuditActor{
 			Kind:       string(principal.Kind),
 			ID:         principal.ID,
@@ -196,6 +204,11 @@ func delegatedAuditContext(authCtx *authn.AuthContext, origin string) *internala
 		RequestID:   authCtx.RequestID,
 		Origin:      origin,
 	}
+	if !ingressStartedAt.IsZero() {
+		startedAt := ingressStartedAt.UTC()
+		audit.IngressStartedAt = &startedAt
+	}
+	return audit
 }
 
 func attachAuditCorrelation() gin.HandlerFunc {

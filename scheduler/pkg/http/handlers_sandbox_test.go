@@ -395,6 +395,11 @@ func TestCreateSandboxRoutesRequestByHeadroom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate ed25519 keypair: %v", err)
 	}
+	startedAt := time.Date(2026, time.August, 20, 8, 9, 10, 123456789, time.UTC)
+	clusterValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
+		Target: internalauth.ServiceClusterGateway, PublicKey: publicKey,
+		AllowedCallers: []string{internalauth.ServiceScheduler}, ClockSkewTolerance: 5 * time.Second,
+	})
 
 	receivedA := 0
 	clusterA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -414,8 +419,13 @@ func TestCreateSandboxRoutesRequestByHeadroom(t *testing.T) {
 		if got := r.Header.Get("X-Team-ID"); got != "team-a" {
 			t.Fatalf("cluster-b X-Team-ID = %q, want team-a", got)
 		}
-		if got := r.Header.Get("X-Internal-Token"); got == "" {
-			t.Fatal("expected internal token header")
+		claims, err := clusterValidator.Validate(r.Header.Get(internalauth.DefaultTokenHeader))
+		if err != nil {
+			t.Fatalf("validate scheduler token: %v", err)
+		}
+		if claims.Audit == nil || claims.Audit.IngressStartedAt == nil ||
+			!claims.Audit.IngressStartedAt.Equal(startedAt) {
+			t.Fatalf("forwarded audit = %#v, want ingress start %s", claims.Audit, startedAt)
 		}
 		_, _ = w.Write([]byte(`{"success":true,"data":{"sandbox_id":"sb-b"}}`))
 	}))
@@ -471,7 +481,25 @@ func TestCreateSandboxRoutesRequestByHeadroom(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", mustGenerateSchedulerTestToken(t, privateKey, "regional-gateway", "scheduler", "team-a", "user-a"))
+	regionalGenerator := internalauth.NewGenerator(internalauth.GeneratorConfig{
+		Caller: internalauth.ServiceRegionalGateway, PrivateKey: privateKey, TTL: time.Minute,
+	})
+	regionalToken, err := regionalGenerator.Generate(
+		internalauth.ServiceScheduler,
+		"team-a",
+		"user-a",
+		internalauth.GenerateOptions{
+			Permissions: []string{gatewayauthn.PermSandboxCreate},
+			Audit: &internalauth.AuditContext{
+				Actor:            internalauth.AuditActor{Kind: "human", UserID: "user-a"},
+				IngressStartedAt: &startedAt,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("generate regional token: %v", err)
+	}
+	req.Header.Set(internalauth.DefaultTokenHeader, regionalToken)
 	resp, err := httpServer.Client().Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)

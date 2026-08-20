@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -43,6 +44,7 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	}
 	req.TeamID = claims.TeamID
 	req.UserID = claims.UserID
+	req.StartedAt = sandboxClaimIngressStartedAt(claims)
 	if req.Template == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
 		return
@@ -102,6 +104,13 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	}
 
 	spec.JSONSuccess(c, http.StatusCreated, resp)
+}
+
+func sandboxClaimIngressStartedAt(claims *internalauth.Claims) time.Time {
+	if claims == nil || claims.Audit == nil || claims.Audit.IngressStartedAt == nil {
+		return time.Time{}
+	}
+	return claims.Audit.IngressStartedAt.UTC()
 }
 
 func writeManagerTemplateNotReady(c *gin.Context, tpl *template.Template) {

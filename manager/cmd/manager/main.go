@@ -438,7 +438,7 @@ func main() {
 		logger.Fatal("Failed to configure sandbox runtime backend", zap.Error(err))
 	}
 	sandboxPauseController := service.NewSandboxPauseController(sandboxStore, sandboxBackend, logger)
-	sandboxService.SetPauseEnqueuer(sandboxPauseController)
+	sandboxBackend.SetPauseEnqueuer(sandboxPauseController)
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
 		templateApplier := templateservice.NewTemplateApplier(templateService)

@@ -93,6 +93,23 @@ func (c *Controller) Purge(
 	ctx context.Context,
 	request runtimeslotreconciler.AllocationPurgeRequest,
 ) error {
+	if err := c.Stop(ctx, request); err != nil {
+		return err
+	}
+	if err := c.api.GarbageCollectAllocation(ctx, request.Target); err != nil {
+		return fmt.Errorf("garbage collect direct Nomad client allocation: %w", err)
+	}
+	return nil
+}
+
+// Stop durably removes Nomad server scheduling ownership without forcing
+// client GC. Planned pause uses this boundary so the task driver can publish
+// its sealed RootFS generation before terminal reconciliation purges the
+// allocation directory.
+func (c *Controller) Stop(
+	ctx context.Context,
+	request runtimeslotreconciler.AllocationPurgeRequest,
+) error {
 	if err := validateOperationID(request.OperationID); err != nil {
 		return err
 	}
@@ -112,9 +129,6 @@ func (c *Controller) Purge(
 				return fmt.Errorf("stop Nomad server allocation: %w", err)
 			}
 		}
-	}
-	if err := c.api.GarbageCollectAllocation(ctx, request.Target); err != nil {
-		return fmt.Errorf("garbage collect direct Nomad client allocation: %w", err)
 	}
 	return nil
 }

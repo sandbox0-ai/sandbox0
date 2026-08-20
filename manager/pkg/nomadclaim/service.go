@@ -17,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
@@ -27,7 +28,11 @@ import (
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+var errNomadSandboxPausePending = errors.New("nomad sandbox planned pause is pending")
 
 // Store is the durable sandbox and block-COW product boundary needed before a
 // slot can receive writer authority.
@@ -36,6 +41,8 @@ type Store interface {
 	ReserveSandboxClaim(context.Context, *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	CompleteSandboxClaim(context.Context, *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	RequestSandboxRuntimeClaimCleanup(context.Context, string, string) (*sandboxstore.SandboxClaimCleanupCandidate, error)
+	RequestNomadSandboxPause(context.Context, string, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
+	BeginRuntimeSlotQuiesce(context.Context, *sandboxstore.BeginRuntimeSlotQuiesceRequest) (*sandboxstore.RuntimeSlot, error)
 	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
 	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform) (*sandboxstore.RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *sandboxstore.EnsureInitialRootFSGenerationRequest) (*sandboxstore.RootFSFilesystem, *sandboxstore.RootFSGeneration, error)
@@ -52,12 +59,17 @@ type planner interface {
 	Claim(context.Context, runtimeslotclaim.Request) (*runtimeslotclaim.Result, error)
 }
 
+type allocationStopper interface {
+	Stop(context.Context, runtimeslotreconciler.AllocationPurgeRequest) error
+}
+
 // Config defines logical claim policy independently from the node listener.
 type Config struct {
 	Store           Store
 	Templates       templatestore.TemplateStore
 	Profiles        *ProfileCatalog
 	Planner         planner
+	Allocation      allocationStopper
 	QuotaLimits     QuotaLimitStore
 	NetworkPolicies *networkpolicy.NetworkPolicyService
 	ResourcePolicy  templatepkg.ResourcePolicy
@@ -74,6 +86,7 @@ type Service struct {
 	templates       templatestore.TemplateStore
 	profiles        *ProfileCatalog
 	planner         planner
+	allocation      allocationStopper
 	quotaLimits     QuotaLimitStore
 	networkPolicies *networkpolicy.NetworkPolicyService
 	resourcePolicy  templatepkg.ResourcePolicy
@@ -81,13 +94,14 @@ type Service struct {
 	defaultTTL      time.Duration
 	now             func() time.Time
 	logger          *zap.Logger
+	pauseEnqueuer   service.SandboxPauseEnqueuer
 }
 
 // New validates all claim authorities. There is no partially configured mode.
 func New(config Config) (*Service, error) {
 	if config.Store == nil || config.Templates == nil || config.Profiles == nil ||
-		config.Planner == nil || config.QuotaLimits == nil || config.NetworkPolicies == nil {
-		return nil, fmt.Errorf("Nomad claim store, templates, profiles, planner, quota limits, and network policy service are required")
+		config.Planner == nil || config.Allocation == nil || config.QuotaLimits == nil || config.NetworkPolicies == nil {
+		return nil, fmt.Errorf("Nomad claim store, templates, profiles, planner, allocation controller, quota limits, and network policy service are required")
 	}
 	if config.DefaultTTL < 0 || config.DefaultTTL/time.Second > math.MaxInt32 {
 		return nil, fmt.Errorf("default TTL must fit a non-negative int32 second count")
@@ -103,7 +117,8 @@ func New(config Config) (*Service, error) {
 	}
 	return &Service{
 		store: config.Store, templates: config.Templates, profiles: config.Profiles,
-		planner: config.Planner, quotaLimits: config.QuotaLimits, networkPolicies: config.NetworkPolicies,
+		planner: config.Planner, allocation: config.Allocation,
+		quotaLimits: config.QuotaLimits, networkPolicies: config.NetworkPolicies,
 		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
 		now: config.Now, logger: config.Logger,
 	}, nil
@@ -125,10 +140,25 @@ func (s *Service) TerminateSandbox(ctx context.Context, sandboxID string) error 
 	return nil
 }
 
-// PauseSandboxAndWait fails closed until planned Nomad writer retirement and
-// physical allocation teardown are connected to the selected backend.
-func (s *Service) PauseSandboxAndWait(context.Context, string) (*service.PauseSandboxResponse, error) {
-	return nil, fmt.Errorf("%w: Nomad pause is not connected", service.ErrSandboxLifecycleUnavailable)
+// PauseSandboxAndWait persists planned retirement before asking Nomad to stop
+// the exact allocation. Completion remains asynchronous.
+func (s *Service) PauseSandboxAndWait(ctx context.Context, sandboxID string) (*service.PauseSandboxResponse, error) {
+	candidate, err := s.requestNomadSandboxPause(ctx, sandboxID, sandboxstore.SandboxLifecycleSourceManual)
+	if err != nil {
+		return nil, err
+	}
+	if candidate.AlreadyPaused {
+		return &service.PauseSandboxResponse{
+			SandboxID: sandboxID, Paused: true, Status: managerapi.SandboxStatusPaused,
+		}, nil
+	}
+	s.enqueueNomadSandboxPause(sandboxID)
+	if err := s.CompletePausingSandboxRuntime(ctx, sandboxID); err != nil && !errors.Is(err, errNomadSandboxPausePending) {
+		return nil, err
+	}
+	return &service.PauseSandboxResponse{
+		SandboxID: sandboxID, Paused: false, Status: managerapi.SandboxStatusStarting,
+	}, nil
 }
 
 // ResumeSandboxAndWait fails closed until a paused Nomad filesystem can claim
@@ -138,20 +168,100 @@ func (s *Service) ResumeSandboxAndWait(context.Context, string) (*managerapi.Res
 }
 
 // PauseSandboxByID is the automatic TTL pause boundary.
-func (s *Service) PauseSandboxByID(context.Context, string) error {
-	return fmt.Errorf("%w: Nomad automatic pause is not connected", service.ErrSandboxLifecycleUnavailable)
+func (s *Service) PauseSandboxByID(ctx context.Context, sandboxID string) error {
+	candidate, err := s.requestNomadSandboxPause(ctx, sandboxID, sandboxstore.SandboxLifecycleSourceAuto)
+	if err != nil || candidate.AlreadyPaused {
+		return err
+	}
+	s.enqueueNomadSandboxPause(sandboxID)
+	if err := s.CompletePausingSandboxRuntime(ctx, sandboxID); errors.Is(err, errNomadSandboxPausePending) {
+		return nil
+	} else {
+		return err
+	}
 }
 
-// CompletePausingSandboxRuntime fails closed until the Nomad planned-retire
-// reconciler owns durable pause transactions.
-func (s *Service) CompletePausingSandboxRuntime(context.Context, string) error {
-	return fmt.Errorf("%w: Nomad pause reconciliation is not connected", service.ErrSandboxLifecycleUnavailable)
+// CompletePausingSandboxRuntime asks Nomad to cooperatively stop the exact
+// allocation, then makes the slot terminally reconcilable only after the node
+// has atomically published a planned RootFS generation.
+func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID string) error {
+	candidate, err := s.requestNomadSandboxPause(ctx, sandboxID, sandboxstore.SandboxLifecycleSourceManual)
+	if err != nil {
+		return err
+	}
+	if candidate.AlreadyPaused {
+		if candidate.SlotID == "" {
+			return nil
+		}
+		_, err := s.store.BeginRuntimeSlotQuiesce(ctx, &sandboxstore.BeginRuntimeSlotQuiesceRequest{
+			SlotID: candidate.SlotID, OperationID: candidate.ClaimOperationID, ClaimID: candidate.ClaimID,
+		})
+		if err != nil {
+			return fmt.Errorf("quiesce planned-paused Nomad runtime slot: %w", err)
+		}
+		return nil
+	}
+	if err := s.allocation.Stop(ctx, runtimeslotreconciler.AllocationPurgeRequest{
+		OperationID: candidate.OperationID,
+		Target: runtimeslotreconciler.AllocationTarget{
+			ClusterID: candidate.ClusterID, AllocationID: candidate.AllocationID,
+			AllocationNamespace: candidate.AllocationNamespace, NodeID: candidate.NodeID,
+		},
+	}); err != nil {
+		return fmt.Errorf("stop Nomad allocation for planned pause: %w", err)
+	}
+	refreshed, err := s.requestNomadSandboxPause(ctx, sandboxID, candidate.Source)
+	if err != nil {
+		return err
+	}
+	if refreshed.AlreadyPaused {
+		return s.CompletePausingSandboxRuntime(ctx, sandboxID)
+	}
+	return errNomadSandboxPausePending
 }
 
 // ResumePausedSandboxRuntime fails closed until durable resume can acquire a
 // new compatible slot from the current RootFS head.
 func (s *Service) ResumePausedSandboxRuntime(context.Context, string) (*managerapi.Sandbox, error) {
 	return nil, fmt.Errorf("%w: Nomad runtime recovery is not connected", service.ErrSandboxLifecycleUnavailable)
+}
+
+// SetPauseEnqueuer installs the runtime-neutral durable pause worker.
+func (s *Service) SetPauseEnqueuer(enqueuer service.SandboxPauseEnqueuer) {
+	s.pauseEnqueuer = enqueuer
+}
+
+func (s *Service) enqueueNomadSandboxPause(sandboxID string) {
+	if s != nil && s.pauseEnqueuer != nil {
+		s.pauseEnqueuer.EnqueueSandboxPause(sandboxID)
+	}
+}
+
+func (s *Service) requestNomadSandboxPause(
+	ctx context.Context,
+	sandboxID string,
+	source string,
+) (*sandboxstore.NomadSandboxPauseCandidate, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || len(sandboxID) > 512 {
+		return nil, fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
+	}
+	candidate, err := s.store.RequestNomadSandboxPause(ctx, sandboxID, source)
+	if err == nil {
+		return candidate, nil
+	}
+	switch {
+	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound):
+		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+	case errors.Is(err, sandboxstore.ErrNomadSandboxPauseConflict),
+		errors.Is(err, sandboxstore.ErrNomadSandboxPauseNotReady),
+		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
+		errors.Is(err, sandboxstore.ErrRuntimeSlotConflict),
+		errors.Is(err, sandboxstore.ErrRuntimeSlotInvalid):
+		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+	default:
+		return nil, fmt.Errorf("request Nomad sandbox pause: %w", err)
+	}
 }
 
 // ClaimSandbox prepares a durable block-COW filesystem and returns only after

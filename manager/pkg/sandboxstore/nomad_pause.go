@@ -66,12 +66,10 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 	if err != nil {
 		return nil, err
 	}
+	alreadyPaused := false
 	switch record.DesiredState {
 	case SandboxDesiredStatePaused:
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit already-paused Nomad sandbox: %w", err)
-		}
-		return &NomadSandboxPauseCandidate{SandboxID: sandboxID, AlreadyPaused: true}, nil
+		alreadyPaused = true
 	case SandboxDesiredStateTerminating:
 		return nil, fmt.Errorf("%w: sandbox termination is in progress", ErrNomadSandboxPauseConflict)
 	case SandboxDesiredStateDeleted:
@@ -92,14 +90,23 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 		FOR UPDATE
 	`, sandboxID, RuntimeSlotStateTerminal))
 	if errors.Is(err, pgx.ErrNoRows) {
+		if alreadyPaused {
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit already-paused Nomad sandbox: %w", err)
+			}
+			return &NomadSandboxPauseCandidate{SandboxID: sandboxID, AlreadyPaused: true}, nil
+		}
 		return nil, fmt.Errorf("%w: active runtime slot is missing", ErrNomadSandboxPauseNotReady)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock Nomad pause runtime slot: %w", err)
 	}
-	if slot.State != RuntimeSlotStateActive || slot.ClaimOperationID != claim.OperationID ||
-		slot.ClaimID == "" || slot.WriterGrantID == "" || slot.AllocationID != record.CurrentPodName ||
-		slot.AllocationNamespace != record.CurrentPodNamespace || slot.ClusterID != record.ClusterID {
+	validSlotState := slot.State == RuntimeSlotStateActive || alreadyPaused &&
+		(slot.State == RuntimeSlotStateQuiescing || slot.State == RuntimeSlotStateOrphaned)
+	activeBindingMatches := alreadyPaused ||
+		(slot.AllocationID == record.CurrentPodName && slot.AllocationNamespace == record.CurrentPodNamespace)
+	if !validSlotState || slot.ClaimOperationID != claim.OperationID ||
+		slot.ClaimID == "" || slot.WriterGrantID == "" || !activeBindingMatches || slot.ClusterID != record.ClusterID {
 		return nil, fmt.Errorf("%w: active runtime slot does not match the sandbox claim", ErrNomadSandboxPauseNotReady)
 	}
 	grantRecord, err := getRootFSWriterGrantForUpdate(ctx, tx, slot.WriterGrantID)
@@ -117,39 +124,54 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 		return nil, fmt.Errorf("%w: writer grant does not match the active runtime", ErrNomadSandboxPauseNotReady)
 	}
 	operationID := rootfshandoff.PlannedRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)
-	switch grant.State {
-	case RootFSWriterGrantStateConsumed:
-		if grant.RetireOperationID != "" || grant.RetireKind != "" || len(grant.RetireProofDigest) != 0 {
-			return nil, fmt.Errorf("%w: consumed writer already has retirement state", ErrNomadSandboxPauseConflict)
+	var lifecycle *SandboxLifecycleTxn
+	if alreadyPaused {
+		if grant.State != RootFSWriterGrantStateRetired || grant.RetireOperationID != operationID ||
+			grant.RetireKind != RootFSWriterRetireKindPlannedPublish || len(grant.RetireProofDigest) == 0 {
+			return nil, fmt.Errorf("%w: paused sandbox writer lacks planned retirement proof", ErrNomadSandboxPauseConflict)
 		}
-	case RootFSWriterGrantStateRetiring, RootFSWriterGrantStateRetired:
-		if grant.RetireOperationID != operationID || grant.RetireKind != RootFSWriterRetireKindPlannedPublish {
-			return nil, fmt.Errorf("%w: writer is owned by another retirement", ErrNomadSandboxPauseConflict)
+		lifecycle, err = scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+			WHERE txn_id = $1
+			FOR UPDATE
+		`, operationID))
+		if err != nil || !nomadCommittedPlannedPauseLifecycleMatches(lifecycle, record, slot, grant, operationID) {
+			return nil, fmt.Errorf("%w: paused sandbox lifecycle does not match planned retirement", ErrNomadSandboxPauseConflict)
 		}
-	default:
-		return nil, fmt.Errorf("%w: writer grant is %s", ErrNomadSandboxPauseNotReady, grant.State)
-	}
-
-	active, err := getActiveLifecycleTxn(ctx, tx, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("load active Nomad pause lifecycle: %w", err)
-	}
-	if active == nil {
-		active = &SandboxLifecycleTxn{
-			ID: operationID, SandboxID: sandboxID, Kind: SandboxLifecycleKindPause,
-			Phase: SandboxLifecyclePhasePreparing, Source: source, Cancelable: false,
-			FromGeneration: record.RuntimeGeneration, FromPodNamespace: record.CurrentPodNamespace,
-			FromPodName: record.CurrentPodName, ExpectedHeadLayerID: grant.InitialGenerationID,
+	} else {
+		switch grant.State {
+		case RootFSWriterGrantStateConsumed:
+			if grant.RetireOperationID != "" || grant.RetireKind != "" || len(grant.RetireProofDigest) != 0 {
+				return nil, fmt.Errorf("%w: consumed writer already has retirement state", ErrNomadSandboxPauseConflict)
+			}
+		case RootFSWriterGrantStateRetiring, RootFSWriterGrantStateRetired:
+			if grant.RetireOperationID != operationID || grant.RetireKind != RootFSWriterRetireKindPlannedPublish {
+				return nil, fmt.Errorf("%w: writer is owned by another retirement", ErrNomadSandboxPauseConflict)
+			}
+		default:
+			return nil, fmt.Errorf("%w: writer grant is %s", ErrNomadSandboxPauseNotReady, grant.State)
 		}
-		if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, active); err != nil {
-			return nil, fmt.Errorf("begin Nomad planned pause lifecycle: %w", err)
+		lifecycle, err = getActiveLifecycleTxn(ctx, tx, sandboxID)
+		if err != nil {
+			return nil, fmt.Errorf("load active Nomad pause lifecycle: %w", err)
 		}
-	} else if !nomadPlannedPauseLifecycleMatches(active, record, grant, operationID) {
-		return nil, fmt.Errorf("%w: lifecycle %s owns the sandbox", ErrNomadSandboxPauseConflict, active.ID)
+		if lifecycle == nil {
+			lifecycle = &SandboxLifecycleTxn{
+				ID: operationID, SandboxID: sandboxID, Kind: SandboxLifecycleKindPause,
+				Phase: SandboxLifecyclePhasePreparing, Source: source, Cancelable: false,
+				FromGeneration: record.RuntimeGeneration, FromPodNamespace: record.CurrentPodNamespace,
+				FromPodName: record.CurrentPodName, ExpectedHeadLayerID: grant.InitialGenerationID,
+			}
+			if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, lifecycle); err != nil {
+				return nil, fmt.Errorf("begin Nomad planned pause lifecycle: %w", err)
+			}
+		} else if !nomadPlannedPauseLifecycleMatches(lifecycle, record, grant, operationID) {
+			return nil, fmt.Errorf("%w: lifecycle %s owns the sandbox", ErrNomadSandboxPauseConflict, lifecycle.ID)
+		}
 	}
 	candidate := &NomadSandboxPauseCandidate{
-		SandboxID: sandboxID, OperationID: operationID, Source: active.Source,
-		LifecyclePhase: active.Phase, ClaimOperationID: claim.OperationID, ClaimID: slot.ClaimID,
+		SandboxID: sandboxID, OperationID: operationID, Source: lifecycle.Source,
+		LifecyclePhase: lifecycle.Phase, AlreadyPaused: alreadyPaused,
+		ClaimOperationID: claim.OperationID, ClaimID: slot.ClaimID,
 		SlotID: slot.ID, SlotState: slot.State, ClusterID: slot.ClusterID,
 		AllocationID: slot.AllocationID, AllocationNamespace: slot.AllocationNamespace,
 		NodeID: slot.NodeID, WriterGrantID: grant.ID, WriterGrantState: grant.State,
@@ -158,6 +180,25 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 		return nil, fmt.Errorf("commit Nomad sandbox pause request: %w", err)
 	}
 	return candidate, nil
+}
+
+func nomadCommittedPlannedPauseLifecycleMatches(
+	txn *SandboxLifecycleTxn,
+	record *SandboxRecord,
+	slot *RuntimeSlot,
+	grant *RootFSWriterGrant,
+	operationID string,
+) bool {
+	if txn == nil || record == nil || slot == nil || grant == nil {
+		return false
+	}
+	return txn.ID == operationID && txn.SandboxID == record.ID &&
+		txn.Kind == SandboxLifecycleKindPause &&
+		(txn.Source == SandboxLifecycleSourceManual || txn.Source == SandboxLifecycleSourceAuto) &&
+		!txn.Cancelable && txn.CancelRequestedAt.IsZero() && txn.Phase == SandboxLifecyclePhaseCommitted &&
+		txn.FromGeneration == record.RuntimeGeneration && txn.FromPodNamespace == slot.AllocationNamespace &&
+		txn.FromPodName == slot.AllocationID && txn.ExpectedHeadLayerID == grant.InitialGenerationID &&
+		txn.PreparedHeadLayerID != ""
 }
 
 func nomadPlannedPauseLifecycleMatches(

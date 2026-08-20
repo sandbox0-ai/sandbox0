@@ -11,8 +11,10 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -38,16 +40,57 @@ func (f *fakeTemplateStore) GetTemplateForTeam(_ context.Context, teamID, templa
 }
 
 type fakeClaimStore struct {
-	records      map[string]*sandboxstore.SandboxRecord
-	operations   map[string]string
-	claimPhases  map[string]string
-	artifact     *sandboxstore.RootFSBaseArtifact
-	ensureCalls  []*sandboxstore.EnsureInitialRootFSGenerationRequest
-	restoreCalls []*sandboxstore.RestoreRootFSFromSnapshotRequest
-	cleanupCalls []string
-	cleanupErr   error
-	snapshot     *sandboxstore.RootFSSnapshot
-	writeCount   int
+	records        map[string]*sandboxstore.SandboxRecord
+	operations     map[string]string
+	claimPhases    map[string]string
+	artifact       *sandboxstore.RootFSBaseArtifact
+	ensureCalls    []*sandboxstore.EnsureInitialRootFSGenerationRequest
+	restoreCalls   []*sandboxstore.RestoreRootFSFromSnapshotRequest
+	cleanupCalls   []string
+	cleanupErr     error
+	pauseCandidate *sandboxstore.NomadSandboxPauseCandidate
+	pauseErr       error
+	pauseSources   []string
+	quiesceCalls   []*sandboxstore.BeginRuntimeSlotQuiesceRequest
+	snapshot       *sandboxstore.RootFSSnapshot
+	writeCount     int
+}
+
+func (f *fakeClaimStore) RequestNomadSandboxPause(
+	_ context.Context,
+	sandboxID, source string,
+) (*sandboxstore.NomadSandboxPauseCandidate, error) {
+	f.pauseSources = append(f.pauseSources, sandboxID+":"+source)
+	if f.pauseErr != nil {
+		return nil, f.pauseErr
+	}
+	if f.pauseCandidate == nil {
+		return nil, sandboxstore.ErrNomadSandboxPauseNotReady
+	}
+	copy := *f.pauseCandidate
+	return &copy, nil
+}
+
+func (f *fakeClaimStore) BeginRuntimeSlotQuiesce(
+	_ context.Context,
+	request *sandboxstore.BeginRuntimeSlotQuiesceRequest,
+) (*sandboxstore.RuntimeSlot, error) {
+	copy := *request
+	f.quiesceCalls = append(f.quiesceCalls, &copy)
+	return &sandboxstore.RuntimeSlot{ID: request.SlotID, State: sandboxstore.RuntimeSlotStateQuiescing}, nil
+}
+
+type fakeAllocationStopper struct {
+	requests []runtimeslotreconciler.AllocationPurgeRequest
+	err      error
+}
+
+func (f *fakeAllocationStopper) Stop(
+	_ context.Context,
+	request runtimeslotreconciler.AllocationPurgeRequest,
+) error {
+	f.requests = append(f.requests, request)
+	return f.err
 }
 
 func (f *fakeClaimStore) ReserveSandboxClaim(_ context.Context, request *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error) {
@@ -326,25 +369,93 @@ func TestServiceTerminateSandboxUsesDurableClaimCleanup(t *testing.T) {
 	}
 }
 
-func TestServiceFailsClosedForUnconnectedPauseAndResume(t *testing.T) {
+type recordingPauseEnqueuer struct {
+	sandboxIDs []string
+}
+
+func (r *recordingPauseEnqueuer) EnqueueSandboxPause(sandboxID string) {
+	r.sandboxIDs = append(r.sandboxIDs, sandboxID)
+}
+
+func TestServiceRequestsPlannedPauseAndStopsExactAllocation(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
-	if _, err := fixture.service.PauseSandboxAndWait(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
-		t.Fatalf("pause error = %v", err)
+	fixture.store.pauseCandidate = &sandboxstore.NomadSandboxPauseCandidate{
+		SandboxID: "sandbox-1", OperationID: "retire-1", Source: sandboxstore.SandboxLifecycleSourceManual,
+		ClaimOperationID: "claim-operation-1", ClaimID: "claim-1", SlotID: "slot-1",
+		ClusterID: "cluster-1", AllocationID: "allocation-1", AllocationNamespace: "nomad", NodeID: "node-1",
 	}
+	enqueuer := &recordingPauseEnqueuer{}
+	fixture.service.SetPauseEnqueuer(enqueuer)
+
+	response, err := fixture.service.PauseSandboxAndWait(context.Background(), "sandbox-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Paused || response.Status != managerapi.SandboxStatusStarting {
+		t.Fatalf("pause response = %+v", response)
+	}
+	if len(enqueuer.sandboxIDs) != 1 || enqueuer.sandboxIDs[0] != "sandbox-1" {
+		t.Fatalf("pause enqueues = %v", enqueuer.sandboxIDs)
+	}
+	if len(fixture.allocation.requests) != 1 {
+		t.Fatalf("allocation stops = %+v", fixture.allocation.requests)
+	}
+	if len(fixture.store.quiesceCalls) != 0 {
+		t.Fatalf("slot quiesced before planned publication: %+v", fixture.store.quiesceCalls)
+	}
+	stop := fixture.allocation.requests[0]
+	if stop.OperationID != "retire-1" || stop.Target.AllocationID != "allocation-1" ||
+		stop.Target.AllocationNamespace != "nomad" || stop.Target.NodeID != "node-1" {
+		t.Fatalf("allocation stop = %+v", stop)
+	}
+}
+
+func TestServiceAutomaticPausePersistsAutoSourceBeforeStop(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.pauseCandidate = &sandboxstore.NomadSandboxPauseCandidate{
+		SandboxID: "sandbox-1", OperationID: "retire-auto-1", Source: sandboxstore.SandboxLifecycleSourceAuto,
+		ClaimOperationID: "claim-operation-1", ClaimID: "claim-1", SlotID: "slot-1",
+		ClusterID: "cluster-1", AllocationID: "allocation-1", AllocationNamespace: "nomad", NodeID: "node-1",
+	}
+	enqueuer := &recordingPauseEnqueuer{}
+	fixture.service.SetPauseEnqueuer(enqueuer)
+
+	if err := fixture.service.PauseSandboxByID(context.Background(), "sandbox-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.store.pauseSources) < 2 || fixture.store.pauseSources[0] != "sandbox-1:auto" {
+		t.Fatalf("pause sources = %v", fixture.store.pauseSources)
+	}
+	if len(enqueuer.sandboxIDs) != 1 || len(fixture.allocation.requests) != 1 {
+		t.Fatalf("enqueues=%v allocation stops=%+v", enqueuer.sandboxIDs, fixture.allocation.requests)
+	}
+}
+
+func TestServiceQuiescesSlotOnlyAfterPlannedPauseCommitted(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.pauseCandidate = &sandboxstore.NomadSandboxPauseCandidate{
+		SandboxID: "sandbox-1", AlreadyPaused: true,
+		ClaimOperationID: "claim-operation-1", ClaimID: "claim-1", SlotID: "slot-1",
+	}
+
+	if err := fixture.service.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.store.quiesceCalls) != 1 || fixture.store.quiesceCalls[0].SlotID != "slot-1" {
+		t.Fatalf("quiesce calls = %+v", fixture.store.quiesceCalls)
+	}
+	if len(fixture.allocation.requests) != 0 {
+		t.Fatalf("committed pause stopped allocation again: %+v", fixture.allocation.requests)
+	}
+}
+
+func TestServiceKeepsResumeUnavailableUntilNewSlotWorkflowExists(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
 	if _, err := fixture.service.ResumeSandboxAndWait(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
 		t.Fatalf("resume error = %v", err)
 	}
-	if err := fixture.service.PauseSandboxByID(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
-		t.Fatalf("automatic pause error = %v", err)
-	}
-	if err := fixture.service.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
-		t.Fatalf("pause reconciliation error = %v", err)
-	}
 	if _, err := fixture.service.ResumePausedSandboxRuntime(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
 		t.Fatalf("runtime recovery error = %v", err)
-	}
-	if len(fixture.store.cleanupCalls) != 0 {
-		t.Fatalf("unavailable lifecycle mutated cleanup state: %v", fixture.store.cleanupCalls)
 	}
 }
 
@@ -500,6 +611,7 @@ type claimServiceFixture struct {
 	service     *Service
 	store       *fakeClaimStore
 	planner     *fakePlanner
+	allocation  *fakeAllocationStopper
 	quotaLimits *fakeQuotaLimitStore
 	profile     Profile
 	now         time.Time
@@ -551,11 +663,12 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		},
 	}
 	planner := &fakePlanner{}
+	allocation := &fakeAllocationStopper{}
 	quotaLimits := &fakeQuotaLimitStore{}
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	claimService, err := New(Config{
 		Store: store, Templates: &fakeTemplateStore{template: template},
-		Profiles: &ProfileCatalog{profiles: []Profile{profile}}, Planner: planner,
+		Profiles: &ProfileCatalog{profiles: []Profile{profile}}, Planner: planner, Allocation: allocation,
 		QuotaLimits:     quotaLimits,
 		NetworkPolicies: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		ResourcePolicy:  templatepkg.NewResourcePolicy("1Gi", "8Gi"),
@@ -566,7 +679,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		t.Fatal(err)
 	}
 	return claimServiceFixture{
-		service: claimService, store: store, planner: planner, quotaLimits: quotaLimits,
+		service: claimService, store: store, planner: planner, allocation: allocation, quotaLimits: quotaLimits,
 		profile: profile, now: now,
 	}
 }

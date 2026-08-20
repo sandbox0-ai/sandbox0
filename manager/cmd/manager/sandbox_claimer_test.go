@@ -36,6 +36,8 @@ func (fakeSandboxClaimer) ResumePausedSandboxRuntime(context.Context, string) (*
 	return nil, nil
 }
 
+func (fakeSandboxClaimer) SetPauseEnqueuer(service.SandboxPauseEnqueuer) {}
+
 func TestBuildSandboxRuntimeBackendSelectsExplicitBackend(t *testing.T) {
 	fallback := fakeSandboxClaimer{}
 	claimer, err := buildSandboxRuntimeBackend(&config.ManagerConfig{

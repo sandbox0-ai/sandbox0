@@ -14,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnode"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnomad"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
@@ -68,10 +69,11 @@ type ClaimPlannerConfig struct {
 // run the terminal loop so the instance holding a node stream can make
 // progress; PostgreSQL fences and deterministic operations serialize effects.
 type Component struct {
-	store    Store
-	hub      *runtimeslotnode.ChannelHub
-	server   *rootfswriterauthority.Server
-	terminal *runtimeslotreconciler.Worker
+	store      Store
+	hub        *runtimeslotnode.ChannelHub
+	server     *rootfswriterauthority.Server
+	terminal   *runtimeslotreconciler.Worker
+	allocation *runtimeslotnomad.Controller
 }
 
 // New constructs all node-facing authorities over one verifier, store, and
@@ -119,7 +121,7 @@ func New(config Config) (*Component, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create runtime slot node channel: %w", err)
 	}
-	terminal, err := runtimeslotterminal.New(config.Store, hub, config.Terminal)
+	terminal, allocation, err := runtimeslotterminal.NewWithAllocation(config.Store, hub, config.Terminal)
 	if err != nil {
 		_ = hub.Close()
 		return nil, err
@@ -145,7 +147,10 @@ func New(config Config) (*Component, error) {
 		_ = hub.Close()
 		return nil, fmt.Errorf("create node authority server: %w", err)
 	}
-	return &Component{store: config.Store, hub: hub, server: server, terminal: terminal}, nil
+	return &Component{
+		store: config.Store, hub: hub, server: server,
+		terminal: terminal, allocation: allocation,
+	}, nil
 }
 
 // RunServer serves the dedicated mTLS endpoint until cancellation and closes
@@ -170,6 +175,15 @@ func (c *Component) Ready() <-chan struct{} {
 // worker configured.
 func (c *Component) TerminalEnabled() bool {
 	return c != nil && c.terminal != nil
+}
+
+// NomadAllocationController returns the endpoint-catalog-pinned controller
+// shared by planned lifecycle stop and terminal purge.
+func (c *Component) NomadAllocationController() *runtimeslotnomad.Controller {
+	if c == nil {
+		return nil
+	}
+	return c.allocation
 }
 
 // RunTerminal waits for listener readiness, then runs the bounded terminal

@@ -38,46 +38,58 @@ func New(
 	transport runtimeslotnode.Transport,
 	config Config,
 ) (*runtimeslotreconciler.Worker, error) {
+	worker, _, err := NewWithAllocation(store, transport, config)
+	return worker, err
+}
+
+// NewWithAllocation constructs the terminal worker and returns the exact same
+// Nomad controller for planned lifecycle operations. This prevents manager
+// pause and terminal purge from loading divergent endpoint catalogs.
+func NewWithAllocation(
+	store Store,
+	transport runtimeslotnode.Transport,
+	config Config,
+) (*runtimeslotreconciler.Worker, *runtimeslotnomad.Controller, error) {
 	if !config.Enabled {
 		if strings.TrimSpace(config.NomadEndpointsFile) != "" {
-			return nil, fmt.Errorf("runtime slot terminal reconciler must be enabled when a Nomad endpoint catalog is configured")
+			return nil, nil, fmt.Errorf("runtime slot terminal reconciler must be enabled when a Nomad endpoint catalog is configured")
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	if store == nil || transport == nil {
-		return nil, fmt.Errorf("runtime slot terminal store and node transport are required")
+		return nil, nil, fmt.Errorf("runtime slot terminal store and node transport are required")
 	}
 	resolver, err := runtimeslotnomad.LoadStaticEndpointResolver(config.NomadEndpointsFile)
 	if err != nil {
-		return nil, fmt.Errorf("load runtime slot Nomad endpoints: %w", err)
+		return nil, nil, fmt.Errorf("load runtime slot Nomad endpoints: %w", err)
 	}
 	nomadAPI, err := runtimeslotnomad.NewHTTPAPI(resolver)
 	if err != nil {
-		return nil, fmt.Errorf("create runtime slot Nomad API: %w", err)
+		return nil, nil, fmt.Errorf("create runtime slot Nomad API: %w", err)
 	}
 	allocation, err := runtimeslotnomad.New(nomadAPI)
 	if err != nil {
-		return nil, fmt.Errorf("create runtime slot Nomad controller: %w", err)
+		return nil, nil, fmt.Errorf("create runtime slot Nomad controller: %w", err)
 	}
 	node, err := runtimeslotnode.New(transport)
 	if err != nil {
-		return nil, fmt.Errorf("create runtime slot node controller: %w", err)
+		return nil, nil, fmt.Errorf("create runtime slot node controller: %w", err)
 	}
 	writer, err := runtimeslotwriter.New(store)
 	if err != nil {
-		return nil, fmt.Errorf("create runtime slot writer controller: %w", err)
+		return nil, nil, fmt.Errorf("create runtime slot writer controller: %w", err)
 	}
 	reconciler, err := runtimeslotreconciler.New(runtimeslotreconciler.Config{
 		Store: store, Allocation: allocation, Node: node, Writer: writer, Limit: config.ScanLimit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create runtime slot terminal reconciler: %w", err)
+		return nil, nil, fmt.Errorf("create runtime slot terminal reconciler: %w", err)
 	}
 	worker, err := runtimeslotreconciler.NewWorker(runtimeslotreconciler.WorkerConfig{
 		Runner: reconciler, Interval: config.Interval, PassTimeout: config.PassTimeout,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create runtime slot terminal worker: %w", err)
+		return nil, nil, fmt.Errorf("create runtime slot terminal worker: %w", err)
 	}
-	return worker, nil
+	return worker, allocation, nil
 }

@@ -3,11 +3,14 @@ package sandboxstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/stretchr/testify/require"
 )
@@ -68,6 +71,36 @@ func TestRequestNomadSandboxPauseRejectsMismatchedRuntimeIntegration(t *testing.
 	require.Nil(t, active)
 }
 
+func TestRequestNomadSandboxPauseReturnsExactSlotAfterCommittedPublishIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "committed")
+	candidate, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceAuto,
+	)
+	require.NoError(t, err)
+	fixture.publishPlannedPause(t, candidate.OperationID)
+
+	paused, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	require.True(t, paused.AlreadyPaused)
+	require.Equal(t, candidate.OperationID, paused.OperationID)
+	require.Equal(t, SandboxLifecycleSourceAuto, paused.Source)
+	require.Equal(t, fixture.slotID, paused.SlotID)
+	require.Equal(t, RootFSWriterGrantStateRetired, paused.WriterGrantState)
+
+	_, err = fixture.store.BeginRuntimeSlotQuiesce(fixture.ctx, &BeginRuntimeSlotQuiesceRequest{
+		SlotID: paused.SlotID, OperationID: paused.ClaimOperationID, ClaimID: paused.ClaimID,
+	})
+	require.NoError(t, err)
+	retry, err := fixture.store.RequestNomadSandboxPause(
+		fixture.ctx, fixture.sandboxID, SandboxLifecycleSourceManual,
+	)
+	require.NoError(t, err)
+	require.True(t, retry.AlreadyPaused)
+	require.Equal(t, RuntimeSlotStateQuiescing, retry.SlotState)
+}
+
 type nomadPauseStoreFixture struct {
 	ctx                 context.Context
 	pool                *pgxpool.Pool
@@ -79,6 +112,61 @@ type nomadPauseStoreFixture struct {
 	initialGenerationID string
 	writerEpoch         int64
 	issue               *IssueRootFSWriterGrantRequest
+	filesystem          *RootFSFilesystem
+	initial             *RootFSGeneration
+}
+
+func (f *nomadPauseStoreFixture) publishPlannedPause(t *testing.T, operationID string) {
+	t.Helper()
+	blockHead := digest.FromString("nomad-pause-head-" + f.sandboxID).String()
+	descriptor, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: 1 << 30,
+		BlockSizeBytes: rootfsblock.LogicalBlockSize,
+		MappingRoot: rootfsblock.MappingRootLocator{
+			Version: rootfsblock.MappingPageVersion, RootDigest: blockHead,
+			Object: rootfsblock.ObjectRange{
+				Key: "rootfs/nomad-pause/map.page", Length: 4096,
+				Checksum: digest.FromString("nomad-pause-map-page-" + f.sandboxID).String(),
+			},
+		},
+	})
+	require.NoError(t, err)
+	next := &RootFSGeneration{
+		ID: "generation-nomad-pause-" + f.sandboxID, FilesystemID: f.filesystem.ID,
+		ParentGenerationID: f.initial.ID, SourceOCIDigest: f.initial.SourceOCIDigest,
+		BaseArtifactDigest: f.initial.BaseArtifactDigest, BaseBlockRoot: f.initial.BaseBlockRoot,
+		CurrentBlockHead: blockHead, WriterEpoch: f.writerEpoch,
+		FormatGeneration: f.initial.FormatGeneration, DurabilityState: RootFSGenerationStateS3Materialized,
+		LocatorVersion: f.initial.LocatorVersion + 1, Descriptor: descriptor,
+	}
+	proof := sha256.Sum256([]byte("nomad-pause-proof-" + f.sandboxID))
+	require.NoError(t, f.store.WithSandboxLock(f.ctx, f.sandboxID, func(
+		lockCtx context.Context,
+		tx SandboxStoreTx,
+		_ *SandboxRecord,
+	) error {
+		if err := tx.UpdateLifecycleTxnPhase(lockCtx, operationID, SandboxLifecyclePhasePublishing); err != nil {
+			return err
+		}
+		writerTx := tx.(RootFSWriterGrantTx)
+		if _, err := writerTx.BeginRootFSWriterRetire(lockCtx, &BeginRootFSWriterRetireRequest{
+			GrantID: f.issue.GrantID, WriterEpoch: f.writerEpoch, OperationID: operationID,
+			BindingVersion: RootFSWriterBindingVersion, BindingDigest: f.issue.BindingDigest,
+			ExpectedOldHeadLayerID: f.initial.ID,
+		}); err != nil {
+			return err
+		}
+		if _, err := writerTx.CompleteRootFSWriterRetireAndPublishGeneration(lockCtx,
+			&CompleteRootFSWriterRetireAndPublishGenerationRequest{
+				LifecycleTxnID: operationID, GrantID: f.issue.GrantID, WriterEpoch: f.writerEpoch,
+				OperationID: operationID, BindingVersion: RootFSWriterBindingVersion,
+				BindingDigest: f.issue.BindingDigest, ProofDigest: proof[:],
+				ExpectedOldGenerationID: f.initial.ID, Generation: next,
+			}); err != nil {
+			return err
+		}
+		return tx.MarkRuntimePaused(lockCtx, f.sandboxID, 1, time.Now().UTC())
+	}))
 }
 
 func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixture {
@@ -173,5 +261,6 @@ func newNomadPauseStoreFixture(t *testing.T, suffix string) *nomadPauseStoreFixt
 		ctx: ctx, pool: pool, store: store, sandboxID: sandboxID, slotID: slotID,
 		allocationID: allocationID, allocationNamespace: allocationNamespace,
 		initialGenerationID: initial.ID, writerEpoch: issued.Grant.WriterEpoch, issue: issue,
+		filesystem: filesystem, initial: initial,
 	}
 }

@@ -135,6 +135,22 @@ func TestControllerPurgesServerThenExactClient(t *testing.T) {
 	}
 }
 
+func TestControllerStopsServerWithoutForcingClientGC(t *testing.T) {
+	target := testTarget()
+	api := &fakeAPI{allocation: testAllocation(), client: true}
+	controller, err := New(api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := runtimeslotreconciler.AllocationPurgeRequest{OperationID: "pause-operation", Target: target}
+	if err := controller.Stop(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(api.stopCalls, []string{request.OperationID}) || api.gcCalls != 0 || api.clientCalls != 0 {
+		t.Fatalf("stop = %v, gc = %d, client probes = %d", api.stopCalls, api.gcCalls, api.clientCalls)
+	}
+}
+
 func TestControllerRejectsMismatchedServerIdentityBeforeNodeAccess(t *testing.T) {
 	api := &fakeAPI{allocation: testAllocation()}
 	api.allocation.NodeID = "another-node"

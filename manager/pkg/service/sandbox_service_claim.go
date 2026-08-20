@@ -288,6 +288,7 @@ type SandboxRuntimeBackend interface {
 	SandboxResumer
 	SandboxAutoPauser
 	SandboxPauseReconciler
+	SetPauseEnqueuer(SandboxPauseEnqueuer)
 }
 
 var _ SandboxRuntimeBackend = (*SandboxService)(nil)

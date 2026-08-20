@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,7 +44,9 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 		OperationID: "claim-operation-a", ClaimID: "claim-a", SandboxID: "sandbox-slot",
 		FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
 		CompatibilityDigest: registration.CompatibilityDigest, ClusterID: registration.ClusterID,
-		ClaimTTL: time.Minute,
+		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32),
+		ClaimTTL:                  time.Minute,
 	}
 	claimed, err := store.AcquireRuntimeSlot(ctx, acquire)
 	require.NoError(t, err)
@@ -60,6 +63,14 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	changedClaimTTL := *acquire
 	changedClaimTTL.ClaimTTL = 30 * time.Second
 	_, err = store.AcquireRuntimeSlot(ctx, &changedClaimTTL)
+	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
+	changedRuntime := *acquire
+	changedRuntime.RuntimeAssignmentRevision = strings.Repeat("ef", 32)
+	_, err = store.AcquireRuntimeSlot(ctx, &changedRuntime)
+	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
+	changedPolicy := *acquire
+	changedPolicy.NetworkPolicyDigest = "sha256:" + strings.Repeat("12", 32)
+	_, err = store.AcquireRuntimeSlot(ctx, &changedPolicy)
 	require.ErrorIs(t, err, ErrRuntimeSlotConflict)
 
 	binding := bytes.Repeat([]byte{0x44}, 32)
@@ -178,7 +189,9 @@ func TestRuntimeSlotConcurrentAcquireUsesDistinctReadySlotsIntegration(t *testin
 				OperationID: fmt.Sprintf("operation-%d", index), ClaimID: fmt.Sprintf("claim-%d", index),
 				SandboxID: fixtures[index].sandboxID, FilesystemID: fixtures[index].filesystem.ID,
 				SourceGenerationID:  fixtures[index].generation.ID,
-				CompatibilityDigest: compatibility, ClusterID: "cluster-a", ClaimTTL: time.Minute,
+				CompatibilityDigest: compatibility, ClusterID: "cluster-a",
+				RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+				NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
 			})
 		}(index)
 	}
@@ -215,7 +228,9 @@ func TestRuntimeSlotConcurrentAcquireSameOperationIsIdempotentIntegration(t *tes
 		OperationID: "operation-idempotent", ClaimID: "claim-idempotent",
 		SandboxID: "sandbox-idempotent", FilesystemID: filesystem.ID,
 		SourceGenerationID:  generation.ID,
-		CompatibilityDigest: compatibility, ClusterID: "cluster-a", ClaimTTL: time.Minute,
+		CompatibilityDigest: compatibility, ClusterID: "cluster-a",
+		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
 	}
 
 	results := make([]*RuntimeSlot, 2)
@@ -283,7 +298,9 @@ func TestRuntimeSlotPrelaunchAbortRetainsClaimBindingIntegration(t *testing.T) {
 	acquire := &AcquireRuntimeSlotRequest{
 		OperationID: "operation-abort", ClaimID: "claim-abort", SandboxID: "sandbox-abort",
 		FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
-		CompatibilityDigest: registration.CompatibilityDigest, ClaimTTL: 20 * time.Second,
+		CompatibilityDigest:       registration.CompatibilityDigest,
+		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32), ClaimTTL: 20 * time.Second,
 	}
 	invalidSource := *acquire
 	invalidSource.OperationID = "operation-invalid-source"

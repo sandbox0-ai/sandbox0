@@ -3,6 +3,7 @@ package sandboxstore
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -41,49 +42,51 @@ var (
 // RuntimeSlot is the region-authoritative state of one generic warm runtime
 // allocation. Nomad's allocation catalog remains a physical placement view.
 type RuntimeSlot struct {
-	ID                      string
-	ClusterID               string
-	AllocationID            string
-	AllocationNamespace     string
-	NodeID                  string
-	NodeUID                 string
-	NodeBootID              string
-	NetNSIdentity           string
-	ControlEndpoint         string
-	CompatibilityDigest     string
-	State                   string
-	Revision                int64
-	RuntimeReadyDigest      []byte
-	NetworkReadyDigest      []byte
-	StorageReadyDigest      []byte
-	HeartbeatExpiresAt      time.Time
-	FastpathReadyAt         time.Time
-	ClaimOperationID        string
-	ClaimID                 string
-	ClaimClusterFilter      string
-	ClaimTTL                time.Duration
-	SandboxID               string
-	FilesystemID            string
-	SourceGenerationID      string
-	WriterGrantID           string
-	ClaimLeaseExpiresAt     time.Time
-	ClaimedAt               time.Time
-	LaunchAttempt           string
-	RunscContainerID        string
-	RootFSBindingDigest     []byte
-	ClaimNetworkDigest      []byte
-	StartingAt              time.Time
-	ProcdInstanceID         string
-	CommandReadyDigest      []byte
-	CommandReadyAt          time.Time
-	QuiescingAt             time.Time
-	OrphanObservationDigest []byte
-	TerminalReason          string
-	TerminalProofDigest     []byte
-	TerminalAt              time.Time
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
-	AuthorityObservedAt     time.Time
+	ID                             string
+	ClusterID                      string
+	AllocationID                   string
+	AllocationNamespace            string
+	NodeID                         string
+	NodeUID                        string
+	NodeBootID                     string
+	NetNSIdentity                  string
+	ControlEndpoint                string
+	CompatibilityDigest            string
+	State                          string
+	Revision                       int64
+	RuntimeReadyDigest             []byte
+	NetworkReadyDigest             []byte
+	StorageReadyDigest             []byte
+	HeartbeatExpiresAt             time.Time
+	FastpathReadyAt                time.Time
+	ClaimOperationID               string
+	ClaimID                        string
+	ClaimClusterFilter             string
+	ClaimTTL                       time.Duration
+	ClaimRuntimeAssignmentRevision string
+	ClaimNetworkPolicyDigest       string
+	SandboxID                      string
+	FilesystemID                   string
+	SourceGenerationID             string
+	WriterGrantID                  string
+	ClaimLeaseExpiresAt            time.Time
+	ClaimedAt                      time.Time
+	LaunchAttempt                  string
+	RunscContainerID               string
+	RootFSBindingDigest            []byte
+	ClaimNetworkDigest             []byte
+	StartingAt                     time.Time
+	ProcdInstanceID                string
+	CommandReadyDigest             []byte
+	CommandReadyAt                 time.Time
+	QuiescingAt                    time.Time
+	OrphanObservationDigest        []byte
+	TerminalReason                 string
+	TerminalProofDigest            []byte
+	TerminalAt                     time.Time
+	CreatedAt                      time.Time
+	UpdatedAt                      time.Time
+	AuthorityObservedAt            time.Time
 }
 
 type RegisterRuntimeSlotRequest struct {
@@ -120,14 +123,16 @@ type HeartbeatRuntimeSlotRequest struct {
 }
 
 type AcquireRuntimeSlotRequest struct {
-	OperationID         string
-	ClaimID             string
-	SandboxID           string
-	FilesystemID        string
-	SourceGenerationID  string
-	CompatibilityDigest string
-	ClusterID           string
-	ClaimTTL            time.Duration
+	OperationID               string
+	ClaimID                   string
+	SandboxID                 string
+	FilesystemID              string
+	SourceGenerationID        string
+	CompatibilityDigest       string
+	ClusterID                 string
+	RuntimeAssignmentRevision string
+	NetworkPolicyDigest       string
+	ClaimTTL                  time.Duration
 }
 
 type BindRuntimeSlotWriterGrantRequest struct {
@@ -372,12 +377,14 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 			claim_operation_id = $3, claim_id = $4, sandbox_id = $5,
 			filesystem_id = $6, source_generation_id = $7,
 			claim_cluster_filter = $8, claim_ttl_milliseconds = $9::bigint,
+			claim_runtime_assignment_revision = $10, claim_network_policy_digest = $11,
 			claim_lease_expires_at = NOW() + ($9::double precision * INTERVAL '1 millisecond'),
 			claimed_at = NOW(), updated_at = NOW()
-		WHERE slot_id = $1 AND state = $10
+		WHERE slot_id = $1 AND state = $12
 	`, slot.ID, RuntimeSlotStateClaiming, normalized.OperationID, normalized.ClaimID,
 		normalized.SandboxID, normalized.FilesystemID, normalized.SourceGenerationID,
-		normalized.ClusterID, normalized.ClaimTTL.Milliseconds(), RuntimeSlotStateFastpathReady)
+		normalized.ClusterID, normalized.ClaimTTL.Milliseconds(), normalized.RuntimeAssignmentRevision,
+		normalized.NetworkPolicyDigest, RuntimeSlotStateFastpathReady)
 	if err != nil {
 		return nil, mapRuntimeSlotConflict("acquire runtime slot", err)
 	}
@@ -824,6 +831,16 @@ func normalizeAcquireRuntimeSlotRequest(request *AcquireRuntimeSlotRequest) (*Ac
 		return nil, err
 	}
 	normalized.CompatibilityDigest = compatibility
+	normalized.RuntimeAssignmentRevision, err = normalizeRuntimeSlotRevision(
+		"runtime_assignment_revision", normalized.RuntimeAssignmentRevision,
+	)
+	if err != nil {
+		return nil, err
+	}
+	normalized.NetworkPolicyDigest, err = normalizeRuntimeSlotDigest("network_policy_digest", normalized.NetworkPolicyDigest)
+	if err != nil {
+		return nil, err
+	}
 	normalized.ClaimTTL, err = normalizeRuntimeSlotTTL(normalized.ClaimTTL, DefaultRuntimeSlotClaimTTL, time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("claim_ttl: %w", err)
@@ -993,6 +1010,15 @@ func normalizeRuntimeSlotDigest(name, value string) (string, error) {
 	return value, nil
 }
 
+func normalizeRuntimeSlotRevision(name, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	decoded, err := hex.DecodeString(trimmed)
+	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != trimmed {
+		return "", fmt.Errorf("%s must be a canonical 32-byte hexadecimal digest", name)
+	}
+	return trimmed, nil
+}
+
 func normalizeRuntimeSlotTTL(value, defaultValue, maximum time.Duration) (time.Duration, error) {
 	if value == 0 {
 		value = defaultValue
@@ -1054,6 +1080,8 @@ func runtimeSlotClaimMatches(slot *RuntimeSlot, request *AcquireRuntimeSlotReque
 		slot.SourceGenerationID == request.SourceGenerationID &&
 		slot.CompatibilityDigest == request.CompatibilityDigest &&
 		slot.ClaimClusterFilter == request.ClusterID &&
+		slot.ClaimRuntimeAssignmentRevision == request.RuntimeAssignmentRevision &&
+		slot.ClaimNetworkPolicyDigest == request.NetworkPolicyDigest &&
 		slot.ClaimTTL == request.ClaimTTL
 }
 
@@ -1081,6 +1109,7 @@ func runtimeSlotSelectSQL() string {
 			runtime_ready_digest, network_ready_digest, storage_ready_digest,
 			heartbeat_expires_at, fastpath_ready_at,
 			claim_operation_id, claim_id, claim_cluster_filter, claim_ttl_milliseconds,
+			claim_runtime_assignment_revision, claim_network_policy_digest,
 			COALESCE(sandbox_id, ''), COALESCE(filesystem_id, ''),
 			COALESCE(source_generation_id, ''), COALESCE(writer_grant_id, ''),
 			claim_lease_expires_at, claimed_at,
@@ -1109,6 +1138,7 @@ func scanRuntimeSlot(row runtimeSlotScanner) (*RuntimeSlot, error) {
 		&slot.RuntimeReadyDigest, &slot.NetworkReadyDigest, &slot.StorageReadyDigest,
 		&slot.HeartbeatExpiresAt, &fastpathReadyAt,
 		&slot.ClaimOperationID, &slot.ClaimID, &slot.ClaimClusterFilter, &claimTTLMilliseconds,
+		&slot.ClaimRuntimeAssignmentRevision, &slot.ClaimNetworkPolicyDigest,
 		&slot.SandboxID, &slot.FilesystemID, &slot.SourceGenerationID, &slot.WriterGrantID,
 		&claimLeaseExpiresAt, &claimedAt,
 		&slot.LaunchAttempt, &slot.RunscContainerID,

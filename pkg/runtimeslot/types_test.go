@@ -76,6 +76,12 @@ func TestPathsEscapeOpaqueSlotID(t *testing.T) {
 	require.Equal(t, "/internal/v1/runtime-slots/slot%2Fwith%20space/command-ready", CommandReadyPath("slot/with space"))
 }
 
+func TestNomadRunscContainerIDIsStableAndBounded(t *testing.T) {
+	require.Equal(t, NomadRunscContainerID("slot-1"), NomadRunscContainerID("slot-1"))
+	require.NotEqual(t, NomadRunscContainerID("slot-1"), NomadRunscContainerID("slot-2"))
+	require.Len(t, NomadRunscContainerID(strings.Repeat("slot", 1_000)), 35)
+}
+
 func TestRequestsDoNotCarryAuthenticatedNodeUID(t *testing.T) {
 	payload, err := json.Marshal(testRegistrationRequest())
 	require.NoError(t, err)
@@ -140,6 +146,9 @@ func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
 	changed.NetworkPolicy = `{"mode":"allow-all"}`
 	require.ErrorContains(t, changed.ValidateRegional(), "network_policy")
 	changed = request
+	changed.NetworkPolicy = strings.Repeat("x", MaxNetworkPolicyBytes+1)
+	require.ErrorContains(t, changed.ValidateRegional(), "network policy exceeds 64 KiB")
+	changed = request
 	changed.Runtime = nil
 	require.ErrorContains(t, changed.ValidateRegional(), "runtime assignment")
 	changed = request
@@ -148,6 +157,22 @@ func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
 		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "another-sandbox"},
 	}
 	require.ErrorContains(t, changed.ValidateRegional(), "sandbox environment")
+	changed = request
+	changedRuntime := *request.Runtime
+	changedRuntime.EnvVars = map[string]string{
+		runtimecontrol.EnvSandboxID: "sandbox-1",
+		"MODE":                      "changed",
+	}
+	changed.Runtime = &changedRuntime
+	require.ErrorContains(t, changed.ValidateRegional(), "runtime assignment revision")
+	changed = request
+	oversizedRuntime := *request.Runtime
+	oversizedRuntime.EnvVars = map[string]string{
+		runtimecontrol.EnvSandboxID: "sandbox-1",
+		"OVERSIZED":                 strings.Repeat("x", MaxRuntimeAssignmentBytes),
+	}
+	changed.Runtime = &oversizedRuntime
+	require.ErrorContains(t, changed.ValidateRegional(), "exceeds 64 KiB")
 }
 
 func testRegistrationRequest() RegistrationRequest {
@@ -179,14 +204,20 @@ func testNodeClaimControlRequest() NodeClaimControlRequest {
 			WriterGrantToken: token, WriterGrantTokenDigest: rootfshandoff.WriterGrantTokenDigest(token),
 		},
 	}
+	runtime := &runtimecontrol.Assignment{
+		SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1,
+		EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"},
+	}
+	revision, err := runtime.Revision()
+	if err != nil {
+		panic(err)
+	}
+	stage.Labels = map[string]string{RuntimeAssignmentRevisionLabel: revision}
 	return NodeClaimControlRequest{
 		OperationID: "operation-1", ClaimID: stage.Identity.ClaimID,
 		PolicyToken: token, WriterEpoch: strconv.FormatInt(stage.Identity.WriterEpoch, 10),
 		Stage: stage, NetworkPolicy: networkPolicy,
-		Runtime: &runtimecontrol.Assignment{
-			SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 1,
-			EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1"},
-		},
+		Runtime: runtime,
 	}
 }
 

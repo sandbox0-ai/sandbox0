@@ -688,8 +688,7 @@ func (p *Plugin) emit(taskID, message string) {
 }
 
 func safeContainerID(taskID string) string {
-	sum := sha256.Sum256([]byte(taskID))
-	return "s0-" + hex.EncodeToString(sum[:16])
+	return protocol.NomadRunscContainerID(taskID)
 }
 
 func controlSocketPath(controlDir, taskID string) string {

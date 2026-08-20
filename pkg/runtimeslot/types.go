@@ -19,14 +19,17 @@ import (
 )
 
 const (
-	PathPrefix                  = "/internal/v1/runtime-slots/"
-	ProcdCommandReadyProbePath  = "/api/v1/runtime/command-ready-probe"
-	NodeClaimControlPath        = "/claim"
-	NodeCommandReadyControlPath = "/command-ready"
-	CommandReadyProofVersion    = 1
-	NomadProcdPort              = 49983
-	NomadProcdPortLabel         = "procd"
-	NomadTaskName               = "slot"
+	PathPrefix                     = "/internal/v1/runtime-slots/"
+	ProcdCommandReadyProbePath     = "/api/v1/runtime/command-ready-probe"
+	NodeClaimControlPath           = "/claim"
+	NodeCommandReadyControlPath    = "/command-ready"
+	CommandReadyProofVersion       = 1
+	NomadProcdPort                 = 49983
+	NomadProcdPortLabel            = "procd"
+	NomadTaskName                  = "slot"
+	RuntimeAssignmentRevisionLabel = "sandbox0.ai/runtime-assignment-revision"
+	MaxRuntimeAssignmentBytes      = 64 << 10
+	MaxNetworkPolicyBytes          = 64 << 10
 
 	readyPathSuffix        = "/ready"
 	heartbeatPathSuffix    = "/heartbeat"
@@ -75,6 +78,9 @@ func (r NodeClaimControlRequest) ValidateRegional() error {
 	if r.WriterEpoch != strconv.FormatInt(r.Stage.Identity.WriterEpoch, 10) {
 		return fmt.Errorf("writer_epoch does not match stage")
 	}
+	if len(r.NetworkPolicy) > MaxNetworkPolicyBytes {
+		return fmt.Errorf("network policy exceeds 64 KiB")
+	}
 	if NetworkPolicyDigest(r.NetworkPolicy) != r.Stage.ExpectedPolicyToken.PolicyDigest {
 		return fmt.Errorf("network_policy does not match stage policy token")
 	}
@@ -91,8 +97,15 @@ func (r NodeClaimControlRequest) ValidateRegional() error {
 	if err != nil {
 		return fmt.Errorf("encode runtime assignment: %w", err)
 	}
-	if len(payload) > 64<<10 {
+	if len(payload) > MaxRuntimeAssignmentBytes {
 		return fmt.Errorf("runtime assignment exceeds 64 KiB")
+	}
+	revision, err := r.Runtime.Revision()
+	if err != nil {
+		return fmt.Errorf("runtime assignment revision: %w", err)
+	}
+	if r.Stage.Labels[RuntimeAssignmentRevisionLabel] != revision {
+		return fmt.Errorf("runtime assignment revision does not match stage")
 	}
 	return nil
 }
@@ -177,6 +190,13 @@ func NomadProcdAddress(ip string) (string, error) {
 		return "", fmt.Errorf("procd IP must be canonical")
 	}
 	return "http://" + net.JoinHostPort(parsed.String(), strconv.Itoa(NomadProcdPort)), nil
+}
+
+// NomadRunscContainerID derives the task driver's stable runsc identity from
+// the region-authoritative slot ID.
+func NomadRunscContainerID(slotID string) string {
+	digest := sha256.Sum256([]byte(slotID))
+	return "s0-" + hex.EncodeToString(digest[:16])
 }
 
 func validateProcdAddress(address string) error {

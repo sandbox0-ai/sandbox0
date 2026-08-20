@@ -493,6 +493,11 @@ func prepareRuntimeSlotClaim(
 	stage.Identity.ContainerName = fixture.task.Name
 	stage.Identity.SlotNonce = fixture.task.ID
 	stage.Identity.ClaimID = "claim-1"
+	runtimeRevision, err := runtimeSlotAssignment().Revision()
+	if err != nil {
+		t.Fatalf("derive runtime assignment revision: %v", err)
+	}
+	stage.Labels = map[string]string{protocol.RuntimeAssignmentRevisionLabel: runtimeRevision}
 	if err := stage.Validate(); err != nil {
 		t.Fatalf("validate regional runtime slot stage: %v", err)
 	}

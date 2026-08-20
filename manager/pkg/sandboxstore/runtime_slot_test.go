@@ -2,6 +2,7 @@ package sandboxstore
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,12 +61,60 @@ func TestNormalizeAcquireRuntimeSlotRequestUsesMillisecondTTLPrecision(t *testin
 	request := &AcquireRuntimeSlotRequest{
 		OperationID: "operation", ClaimID: "claim", SandboxID: "sandbox",
 		FilesystemID: "filesystem", SourceGenerationID: "generation",
-		CompatibilityDigest: runtimeSlotTestRegistration("unused", "unused").CompatibilityDigest,
-		ClaimTTL:            1500*time.Millisecond + 900*time.Microsecond,
+		CompatibilityDigest:       runtimeSlotTestRegistration("unused", "unused").CompatibilityDigest,
+		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32),
+		ClaimTTL:                  1500*time.Millisecond + 900*time.Microsecond,
 	}
 	normalized, err := normalizeAcquireRuntimeSlotRequest(request)
 	require.NoError(t, err)
 	require.Equal(t, 1500*time.Millisecond, normalized.ClaimTTL)
+}
+
+func TestNormalizeAcquireRuntimeSlotRequestRejectsNoncanonicalOperationBindings(t *testing.T) {
+	valid := &AcquireRuntimeSlotRequest{
+		OperationID: "operation", ClaimID: "claim", SandboxID: "sandbox",
+		FilesystemID: "filesystem", SourceGenerationID: "generation",
+		CompatibilityDigest:       runtimeSlotTestRegistration("unused", "unused").CompatibilityDigest,
+		RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+		NetworkPolicyDigest:       "sha256:" + strings.Repeat("cd", 32),
+		ClaimTTL:                  time.Second,
+	}
+	tests := []struct {
+		name   string
+		mutate func(*AcquireRuntimeSlotRequest)
+		error  string
+	}{
+		{
+			name: "short runtime revision",
+			mutate: func(request *AcquireRuntimeSlotRequest) {
+				request.RuntimeAssignmentRevision = "ab"
+			},
+			error: "canonical 32-byte hexadecimal digest",
+		},
+		{
+			name: "uppercase runtime revision",
+			mutate: func(request *AcquireRuntimeSlotRequest) {
+				request.RuntimeAssignmentRevision = strings.Repeat("AB", 32)
+			},
+			error: "canonical 32-byte hexadecimal digest",
+		},
+		{
+			name: "network digest without algorithm",
+			mutate: func(request *AcquireRuntimeSlotRequest) {
+				request.NetworkPolicyDigest = strings.Repeat("cd", 32)
+			},
+			error: "canonical sha256 digest",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := *valid
+			test.mutate(&request)
+			_, err := normalizeAcquireRuntimeSlotRequest(&request)
+			require.ErrorContains(t, err, test.error)
+		})
+	}
 }
 
 func runtimeSlotTestRegistration(slotID, allocationID string) *RegisterRuntimeSlotRequest {

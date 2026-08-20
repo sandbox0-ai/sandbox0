@@ -11,13 +11,14 @@ import (
 	"strings"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
-	profileCatalogVersion = 1
+	profileCatalogVersion = 2
 	maxProfileCatalogSize = 1 << 20
 	maxProfileCount       = 256
 )
@@ -28,11 +29,12 @@ type profileCatalogFile struct {
 }
 
 type profileCatalogRecord struct {
-	Name           string                        `json:"name"`
-	ClusterID      string                        `json:"cluster_id"`
-	TemplateCPU    string                        `json:"template_cpu"`
-	TemplateMemory string                        `json:"template_memory"`
-	Compatibility  protocol.RuntimeCompatibility `json:"compatibility"`
+	Name             string                              `json:"name"`
+	ClusterID        string                              `json:"cluster_id"`
+	TemplateCPU      string                              `json:"template_cpu"`
+	TemplateMemory   string                              `json:"template_memory"`
+	ArtifactPlatform sandboxstore.RootFSArtifactPlatform `json:"artifact_platform"`
+	Compatibility    protocol.RuntimeCompatibility       `json:"compatibility"`
 }
 
 // Profile binds one public resource shape to an exact registered Nomad slot
@@ -42,6 +44,7 @@ type Profile struct {
 	ClusterID           string
 	TemplateCPU         resource.Quantity
 	TemplateMemory      resource.Quantity
+	ArtifactPlatform    sandboxstore.RootFSArtifactPlatform
 	Compatibility       protocol.RuntimeCompatibility
 	CompatibilityDigest string
 }
@@ -136,10 +139,17 @@ func normalizeProfile(record profileCatalogRecord) (Profile, error) {
 	if err != nil {
 		return Profile{}, fmt.Errorf("compatibility: %w", err)
 	}
+	if err := record.ArtifactPlatform.Validate(); err != nil {
+		return Profile{}, fmt.Errorf("artifact_platform: %w", err)
+	}
+	if record.ArtifactPlatform.Architecture != record.Compatibility.Architecture {
+		return Profile{}, fmt.Errorf("artifact_platform architecture must match runtime compatibility: %w", errdefs.ErrInvalidArgument)
+	}
 	return Profile{
 		Name: record.Name, ClusterID: record.ClusterID,
 		TemplateCPU: cpu, TemplateMemory: memory,
-		Compatibility: record.Compatibility, CompatibilityDigest: compatibilityDigest,
+		ArtifactPlatform: record.ArtifactPlatform,
+		Compatibility:    record.Compatibility, CompatibilityDigest: compatibilityDigest,
 	}, nil
 }
 

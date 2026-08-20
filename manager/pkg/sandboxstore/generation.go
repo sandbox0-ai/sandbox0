@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,6 +28,8 @@ const (
 	RootFSGenerationStateS3Materialized   = "s3_materialized"
 	RootFSGenerationDescriptorMaxBytes    = 64 << 10
 )
+
+var rootFSPlatformPartPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 
 var (
 	ErrRootFSBaseArtifactNotFound = errors.New("rootfs base artifact not found")
@@ -57,10 +60,33 @@ type RootFSBaseArtifact struct {
 	SourceOCIDigest  string
 	BaseBlockRoot    string
 	FormatGeneration int
+	Platform         RootFSArtifactPlatform
 	State            string
 	Descriptor       []byte
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+// RootFSArtifactPlatform is the OCI platform selected while converting an
+// image into an immutable block artifact.
+type RootFSArtifactPlatform struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+	Variant      string `json:"variant,omitempty"`
+}
+
+// Validate rejects unattested or non-canonical Linux platform identities.
+func (p RootFSArtifactPlatform) Validate() error {
+	if p.OS != "linux" {
+		return fmt.Errorf("rootfs artifact operating system must be linux")
+	}
+	if !rootFSPlatformPartPattern.MatchString(p.Architecture) {
+		return fmt.Errorf("rootfs artifact architecture must be canonical")
+	}
+	if p.Variant != "" && !rootFSPlatformPartPattern.MatchString(p.Variant) {
+		return fmt.Errorf("rootfs artifact architecture variant must be canonical")
+	}
+	return nil
 }
 
 // RootFSGeneration is one immutable durable block-map generation. It is not a
@@ -87,6 +113,7 @@ type PutReadyRootFSBaseArtifactRequest struct {
 	SourceOCIDigest  string
 	BaseBlockRoot    string
 	FormatGeneration int
+	Platform         RootFSArtifactPlatform
 	Descriptor       []byte
 }
 
@@ -102,7 +129,8 @@ type EnsureInitialRootFSGenerationRequest struct {
 // diff-layer product remains available during the format migration.
 type RootFSGenerationStore interface {
 	PutReadyRootFSBaseArtifact(context.Context, *PutReadyRootFSBaseArtifactRequest) (*RootFSBaseArtifact, error)
-	GetReadyRootFSBaseArtifact(context.Context, string, int) (*RootFSBaseArtifact, error)
+	GetReadyRootFSBaseArtifact(context.Context, string, RootFSArtifactPlatform, int) (*RootFSBaseArtifact, error)
+	GetReadyRootFSBaseArtifactByDigest(context.Context, string, RootFSArtifactPlatform) (*RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *EnsureInitialRootFSGenerationRequest) (*RootFSFilesystem, *RootFSGeneration, error)
 	GetRootFSGeneration(context.Context, string) (*RootFSGeneration, error)
 	ForkRunningRootFSFilesystem(context.Context, *ForkRunningRootFSFilesystemRequest) (*RootFSFilesystem, error)
@@ -259,13 +287,15 @@ func (s *PGSandboxStore) PutReadyRootFSBaseArtifact(
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO manager.rootfs_base_artifacts (
 			artifact_digest, source_oci_ref, source_oci_digest, base_block_root,
-			format_generation, state, descriptor, created_at, updated_at
+			format_generation, oci_os, oci_architecture, oci_variant,
+			state, descriptor, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
 		ON CONFLICT (artifact_digest) DO NOTHING
 	`, normalized.ArtifactDigest, normalized.SourceOCIRef, normalized.SourceOCIDigest,
-		normalized.BaseBlockRoot, normalized.FormatGeneration, RootFSBaseArtifactStateReady,
-		normalized.Descriptor)
+		normalized.BaseBlockRoot, normalized.FormatGeneration, normalized.Platform.OS,
+		normalized.Platform.Architecture, normalized.Platform.Variant,
+		RootFSBaseArtifactStateReady, normalized.Descriptor)
 	if err != nil {
 		return nil, fmt.Errorf("put ready rootfs base artifact: %w", err)
 	}
@@ -285,6 +315,7 @@ func (s *PGSandboxStore) PutReadyRootFSBaseArtifact(
 func (s *PGSandboxStore) GetReadyRootFSBaseArtifact(
 	ctx context.Context,
 	sourceOCIDigest string,
+	platform RootFSArtifactPlatform,
 	formatGeneration int,
 ) (*RootFSBaseArtifact, error) {
 	if s == nil || s.pool == nil {
@@ -294,18 +325,58 @@ func (s *PGSandboxStore) GetReadyRootFSBaseArtifact(
 	if _, err := digest.Parse(sourceOCIDigest); err != nil {
 		return nil, fmt.Errorf("source_oci_digest: %w", err)
 	}
+	if err := platform.Validate(); err != nil {
+		return nil, err
+	}
 	artifact, err := scanRootFSBaseArtifact(s.pool.QueryRow(ctx, rootFSBaseArtifactSelectSQL()+`
 		WHERE source_oci_digest = $1
 			AND state = $2
-			AND ($3 = 0 OR format_generation = $3)
+			AND oci_os = $3
+			AND oci_architecture = $4
+			AND oci_variant = $5
+			AND ($6 = 0 OR format_generation = $6)
 		ORDER BY format_generation DESC, created_at DESC
 		LIMIT 1
-	`, sourceOCIDigest, RootFSBaseArtifactStateReady, formatGeneration))
+	`, sourceOCIDigest, RootFSBaseArtifactStateReady, platform.OS,
+		platform.Architecture, platform.Variant, formatGeneration))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%w: source %s", ErrRootFSBaseArtifactNotFound, sourceOCIDigest)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get ready rootfs base artifact: %w", err)
+	}
+	return artifact, nil
+}
+
+func (s *PGSandboxStore) GetReadyRootFSBaseArtifactByDigest(
+	ctx context.Context,
+	artifactDigest string,
+	platform RootFSArtifactPlatform,
+) (*RootFSBaseArtifact, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("rootfs generation store is not configured")
+	}
+	artifactDigest = strings.TrimSpace(artifactDigest)
+	if _, err := digest.Parse(artifactDigest); err != nil {
+		return nil, fmt.Errorf("artifact_digest: %w", err)
+	}
+	if err := platform.Validate(); err != nil {
+		return nil, err
+	}
+	artifact, err := scanRootFSBaseArtifact(s.pool.QueryRow(ctx, rootFSBaseArtifactSelectSQL()+`
+		WHERE artifact_digest = $1
+			AND state = $2
+			AND oci_os = $3
+			AND oci_architecture = $4
+			AND oci_variant = $5
+	`, artifactDigest, RootFSBaseArtifactStateReady, platform.OS,
+		platform.Architecture, platform.Variant))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: artifact %s for %s/%s/%s", ErrRootFSBaseArtifactNotFound,
+			artifactDigest, platform.OS, platform.Architecture, platform.Variant)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get ready rootfs base artifact by digest: %w", err)
 	}
 	return artifact, nil
 }
@@ -518,6 +589,9 @@ func validateReadyRootFSBaseArtifact(req *PutReadyRootFSBaseArtifactRequest) (*P
 	}
 	if normalized.FormatGeneration <= 0 {
 		return nil, fmt.Errorf("format_generation must be positive")
+	}
+	if err := normalized.Platform.Validate(); err != nil {
+		return nil, err
 	}
 	if len(normalized.Descriptor) == 0 || len(normalized.Descriptor) > RootFSGenerationDescriptorMaxBytes {
 		return nil, fmt.Errorf("descriptor must contain 1..%d bytes", RootFSGenerationDescriptorMaxBytes)
@@ -766,6 +840,7 @@ func rootFSBaseArtifactMatchesRequest(artifact *RootFSBaseArtifact, req *PutRead
 	return artifact != nil && req != nil && artifact.ArtifactDigest == req.ArtifactDigest &&
 		artifact.SourceOCIRef == req.SourceOCIRef && artifact.SourceOCIDigest == req.SourceOCIDigest &&
 		artifact.BaseBlockRoot == req.BaseBlockRoot && artifact.FormatGeneration == req.FormatGeneration &&
+		artifact.Platform == req.Platform &&
 		artifact.State == RootFSBaseArtifactStateReady && string(artifact.Descriptor) == string(req.Descriptor)
 }
 
@@ -793,7 +868,8 @@ func initialRootFSGenerationMatches(
 func rootFSBaseArtifactSelectSQL() string {
 	return `
 		SELECT artifact_digest, source_oci_ref, source_oci_digest, base_block_root,
-			format_generation, state, descriptor, created_at, updated_at
+			format_generation, COALESCE(oci_os, ''), COALESCE(oci_architecture, ''),
+			COALESCE(oci_variant, ''), state, descriptor, created_at, updated_at
 		FROM manager.rootfs_base_artifacts `
 }
 
@@ -808,7 +884,9 @@ func rootFSGenerationSelectSQL() string {
 func scanRootFSBaseArtifact(row sandboxRecordScanner) (*RootFSBaseArtifact, error) {
 	var artifact RootFSBaseArtifact
 	if err := row.Scan(&artifact.ArtifactDigest, &artifact.SourceOCIRef, &artifact.SourceOCIDigest,
-		&artifact.BaseBlockRoot, &artifact.FormatGeneration, &artifact.State, &artifact.Descriptor,
+		&artifact.BaseBlockRoot, &artifact.FormatGeneration, &artifact.Platform.OS,
+		&artifact.Platform.Architecture, &artifact.Platform.Variant,
+		&artifact.State, &artifact.Descriptor,
 		&artifact.CreatedAt, &artifact.UpdatedAt); err != nil {
 		return nil, err
 	}

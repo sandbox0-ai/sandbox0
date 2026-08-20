@@ -30,6 +30,16 @@ func TestInitialRootFSGenerationPersistenceIntegration(t *testing.T) {
 	artifact, err := store.PutReadyRootFSBaseArtifact(ctx, artifactRequest)
 	require.NoError(t, err)
 	require.Equal(t, RootFSBaseArtifactStateReady, artifact.State)
+	require.Equal(t, artifactRequest.Platform, artifact.Platform)
+	selected, err := store.GetReadyRootFSBaseArtifact(ctx, artifact.SourceOCIDigest, artifact.Platform, artifact.FormatGeneration)
+	require.NoError(t, err)
+	require.Equal(t, artifact.ArtifactDigest, selected.ArtifactDigest)
+	selected, err = store.GetReadyRootFSBaseArtifactByDigest(ctx, artifact.ArtifactDigest, artifact.Platform)
+	require.NoError(t, err)
+	require.Equal(t, artifact.ArtifactDigest, selected.ArtifactDigest)
+	_, err = store.GetReadyRootFSBaseArtifact(ctx, artifact.SourceOCIDigest,
+		RootFSArtifactPlatform{OS: "linux", Architecture: "arm64"}, artifact.FormatGeneration)
+	require.ErrorIs(t, err, ErrRootFSBaseArtifactNotFound)
 
 	ensureRequest := &EnsureInitialRootFSGenerationRequest{
 		SandboxID:          "sandbox-generation",

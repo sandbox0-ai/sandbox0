@@ -24,6 +24,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -510,7 +511,9 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 		if _, err := store.PutReadyRootFSBaseArtifact(ctx, &sandboxstore.PutReadyRootFSBaseArtifactRequest{
 			ArtifactDigest: generation.BaseArtifactDigest, SourceOCIRef: sourceRef,
 			SourceOCIDigest: generation.SourceOCIDigest, BaseBlockRoot: generation.BaseBlockRoot,
-			FormatGeneration: generation.FormatGeneration, Descriptor: generation.Descriptor,
+			FormatGeneration: generation.FormatGeneration,
+			Platform:         sandboxstore.RootFSArtifactPlatform{OS: runtime.GOOS, Architecture: runtime.GOARCH},
+			Descriptor:       generation.Descriptor,
 		}); err != nil {
 			return fmt.Errorf("seed base artifact: %w", err)
 		}

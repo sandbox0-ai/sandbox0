@@ -32,7 +32,8 @@ import (
 type Store interface {
 	GetSandbox(context.Context, string) (*sandboxstore.SandboxRecord, error)
 	UpsertSandbox(context.Context, *sandboxstore.SandboxRecord) error
-	GetReadyRootFSBaseArtifact(context.Context, string, int) (*sandboxstore.RootFSBaseArtifact, error)
+	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
+	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform) (*sandboxstore.RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *sandboxstore.EnsureInitialRootFSGenerationRequest) (*sandboxstore.RootFSFilesystem, *sandboxstore.RootFSGeneration, error)
 	GetRootFSSnapshot(context.Context, string, string) (*sandboxstore.RootFSSnapshot, error)
 	RestoreRootFSFromSnapshot(context.Context, *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error)
@@ -167,7 +168,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if err := assignment.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: runtime assignment: %v", service.ErrInvalidClaimRequest, err)
 	}
-	rootFS, err := s.prepareRootFS(ctx, tpl, &req)
+	rootFS, err := s.prepareRootFS(ctx, tpl, &req, profile.ArtifactPlatform)
 	if err != nil {
 		if errors.Is(err, sandboxstore.ErrRootFSBaseArtifactNotFound) {
 			return nil, fmt.Errorf("%w: %v", service.ErrDataPlaneNotReady, err)
@@ -261,7 +262,12 @@ type rootFSPlan struct {
 	baseArtifactDigest string
 }
 
-func (s *Service) prepareRootFS(ctx context.Context, tpl *templatepkg.Template, req *service.ClaimRequest) (rootFSPlan, error) {
+func (s *Service) prepareRootFS(
+	ctx context.Context,
+	tpl *templatepkg.Template,
+	req *service.ClaimRequest,
+	platform sandboxstore.RootFSArtifactPlatform,
+) (rootFSPlan, error) {
 	if req.SnapshotID != "" {
 		snapshotID := strings.TrimSpace(req.SnapshotID)
 		if snapshotID != req.SnapshotID || templatepkg.IsBuildSnapshotID(snapshotID) {
@@ -274,6 +280,13 @@ func (s *Service) prepareRootFS(ctx context.Context, tpl *templatepkg.Template, 
 		if snapshot == nil || snapshot.StorageFormat != sandboxstore.RootFSStorageFormatBlockCOWV1 {
 			return rootFSPlan{}, sandboxstore.ErrRootFSSnapshotNotFound
 		}
+		artifact, err := s.store.GetReadyRootFSBaseArtifactByDigest(ctx, snapshot.BaseArtifactDigest, platform)
+		if err != nil {
+			return rootFSPlan{}, err
+		}
+		if artifact.SourceOCIDigest != snapshot.SourceOCIDigest || artifact.FormatGeneration != snapshot.FormatGeneration {
+			return rootFSPlan{}, fmt.Errorf("%w: snapshot Base artifact attestation changed", sandboxstore.ErrRootFSBaseArtifactConflict)
+		}
 		return rootFSPlan{snapshotID: snapshotID}, nil
 	}
 	sourceRef := strings.TrimSpace(tpl.Spec.MainContainer.Image)
@@ -281,7 +294,7 @@ func (s *Service) prepareRootFS(ctx context.Context, tpl *templatepkg.Template, 
 	if err != nil {
 		return rootFSPlan{}, fmt.Errorf("%w: template image: %v", service.ErrInvalidClaimRequest, err)
 	}
-	artifact, err := s.store.GetReadyRootFSBaseArtifact(ctx, sourceDigest, 0)
+	artifact, err := s.store.GetReadyRootFSBaseArtifact(ctx, sourceDigest, platform, 0)
 	if err != nil {
 		return rootFSPlan{}, err
 	}

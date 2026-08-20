@@ -534,7 +534,7 @@ spec:
                         controlSecretName: manager-nomad-control
 ```
 
-The claim Secret must contain `runtime-profiles.json` and an exact 32-byte binary `writer-token.key`. The profile catalog strictly maps a public CPU/memory shape to one cluster and one complete runtime compatibility digest; unknown fields, ambiguous resource shapes, mutable image references, and unavailable block-COW base artifacts fail closed. Keep the writer key stable across retries and rollouts.
+The claim Secret must contain `runtime-profiles.json` and an exact 32-byte binary `writer-token.key`. Catalog version `2` strictly maps a public CPU/memory shape to one cluster, one complete runtime compatibility digest, and an exact `artifact_platform` (`os`, `architecture`, and optional `variant`). Unknown fields, ambiguous resource shapes, mutable image references, unattested or cross-architecture block-COW base artifacts, and unavailable artifacts fail closed. Keep the writer key stable across retries and rollouts. A complete catalog is available at `nomad-driver-sandbox0/example/runtime-profiles.example.json` in the source tree.
 
 Nomad mode also requires configured RootFS object storage with atomic conditional-create support. Every manager replica runs the PostgreSQL-to-object-storage composite materializer; immutable object publication completes before the PostgreSQL locator advances, and an object-storage outage leaves the composite tail durable in PostgreSQL for bounded retry.
 

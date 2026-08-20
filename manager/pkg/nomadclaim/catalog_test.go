@@ -12,12 +12,13 @@ import (
 func TestLoadProfileCatalogResolvesExactResourceShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runtime-profiles.json")
 	payload := `{
-  "version": 1,
+  "version": 2,
   "profiles": [{
     "name": "amd64-1cpu-1g",
     "cluster_id": "cluster-1",
     "template_cpu": "1",
     "template_memory": "1Gi",
+    "artifact_platform": {"os": "linux", "architecture": "amd64"},
     "compatibility": {
       "version": 1,
       "architecture": "amd64",
@@ -49,6 +50,7 @@ func TestLoadProfileCatalogResolvesExactResourceShape(t *testing.T) {
 		t.Fatal("exact resource profile was not resolved")
 	}
 	if profile.Name != "amd64-1cpu-1g" || profile.ClusterID != "cluster-1" ||
+		profile.ArtifactPlatform.OS != "linux" || profile.ArtifactPlatform.Architecture != "amd64" ||
 		profile.Compatibility.Version != protocol.RuntimeCompatibilityVersion ||
 		profile.Compatibility.RuntimeMode != runtimecontrol.ControlModeStatic ||
 		profile.CompatibilityDigest == "" {
@@ -70,14 +72,18 @@ func TestLoadProfileCatalogRejectsAmbiguousOrLooseInput(t *testing.T) {
     }`
 	profile := func(name, cpu string) string {
 		return `{"name":"` + name + `","cluster_id":"cluster-1","template_cpu":"` + cpu +
-			`","template_memory":"1Gi","compatibility":` + compatibility + `}`
+			`","template_memory":"1Gi","artifact_platform":{"os":"linux","architecture":"amd64"},"compatibility":` + compatibility + `}`
 	}
 	tests := map[string]string{
-		"unknown field":    `{"version":1,"profiles":[` + profile("one", "1") + `],"extra":true}`,
-		"trailing value":   `{"version":1,"profiles":[` + profile("one", "1") + `]} {}`,
-		"duplicate name":   `{"version":1,"profiles":[` + profile("one", "1") + "," + profile("one", "2") + `]}`,
-		"ambiguous shape":  `{"version":1,"profiles":[` + profile("one", "1") + "," + profile("two", "1") + `]}`,
-		"noncanonical cpu": `{"version":1,"profiles":[` + profile("one", "1000m") + `]}`,
+		"legacy version":   `{"version":1,"profiles":[` + profile("one", "1") + `]}`,
+		"unknown field":    `{"version":2,"profiles":[` + profile("one", "1") + `],"extra":true}`,
+		"trailing value":   `{"version":2,"profiles":[` + profile("one", "1") + `]} {}`,
+		"duplicate name":   `{"version":2,"profiles":[` + profile("one", "1") + "," + profile("one", "2") + `]}`,
+		"ambiguous shape":  `{"version":2,"profiles":[` + profile("one", "1") + "," + profile("two", "1") + `]}`,
+		"noncanonical cpu": `{"version":2,"profiles":[` + profile("one", "1000m") + `]}`,
+		"platform mismatch": `{"version":2,"profiles":[{"name":"one","cluster_id":"cluster-1",` +
+			`"template_cpu":"1","template_memory":"1Gi","artifact_platform":{"os":"linux","architecture":"arm64"},` +
+			`"compatibility":` + compatibility + `}]}`,
 	}
 	for name, payload := range tests {
 		t.Run(name, func(t *testing.T) {

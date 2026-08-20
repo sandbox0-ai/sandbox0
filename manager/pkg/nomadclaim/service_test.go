@@ -57,8 +57,25 @@ func (f *fakeClaimStore) UpsertSandbox(_ context.Context, record *sandboxstore.S
 	return nil
 }
 
-func (f *fakeClaimStore) GetReadyRootFSBaseArtifact(_ context.Context, source string, format int) (*sandboxstore.RootFSBaseArtifact, error) {
-	if f.artifact == nil || f.artifact.SourceOCIDigest != source || format != 0 {
+func (f *fakeClaimStore) GetReadyRootFSBaseArtifact(
+	_ context.Context,
+	source string,
+	platform sandboxstore.RootFSArtifactPlatform,
+	format int,
+) (*sandboxstore.RootFSBaseArtifact, error) {
+	if f.artifact == nil || f.artifact.SourceOCIDigest != source || f.artifact.Platform != platform || format != 0 {
+		return nil, sandboxstore.ErrRootFSBaseArtifactNotFound
+	}
+	copy := *f.artifact
+	return &copy, nil
+}
+
+func (f *fakeClaimStore) GetReadyRootFSBaseArtifactByDigest(
+	_ context.Context,
+	digest string,
+	platform sandboxstore.RootFSArtifactPlatform,
+) (*sandboxstore.RootFSBaseArtifact, error) {
+	if f.artifact == nil || f.artifact.ArtifactDigest != digest || f.artifact.Platform != platform {
 		return nil, sandboxstore.ErrRootFSBaseArtifactNotFound
 	}
 	copy := *f.artifact
@@ -203,10 +220,27 @@ func TestServiceFailsBeforePersistenceWithoutReadyBaseArtifact(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsBaseArtifactFromDifferentPlatform(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.artifact.Platform.Architecture = "arm64"
+	_, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-1",
+	})
+	if !errors.Is(err, service.ErrDataPlaneNotReady) {
+		t.Fatalf("claim error = %v, want data plane not ready", err)
+	}
+	if fixture.store.upsertCount != 0 || len(fixture.planner.requests) != 0 {
+		t.Fatalf("side effects: upserts=%d planner=%d", fixture.store.upsertCount, len(fixture.planner.requests))
+	}
+}
+
 func TestServiceRestoresBlockSnapshotBeforeClaim(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	fixture.store.snapshot = &sandboxstore.RootFSSnapshot{
 		ID: "snapshot-1", TeamID: "team-1", StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+		BaseArtifactDigest: fixture.store.artifact.ArtifactDigest,
+		SourceOCIDigest:    fixture.store.artifact.SourceOCIDigest,
+		FormatGeneration:   fixture.store.artifact.FormatGeneration,
 	}
 	response, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
 		TeamID: "team-1", UserID: "user-1", Template: "default",
@@ -275,13 +309,15 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	profile := Profile{
 		Name: "one", ClusterID: "cluster-1",
 		TemplateCPU: resource.MustParse("1"), TemplateMemory: resource.MustParse("1Gi"),
-		Compatibility: compatibility, CompatibilityDigest: compatibilityDigest,
+		ArtifactPlatform: sandboxstore.RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
+		Compatibility:    compatibility, CompatibilityDigest: compatibilityDigest,
 	}
 	store := &fakeClaimStore{
 		records: make(map[string]*sandboxstore.SandboxRecord),
 		artifact: &sandboxstore.RootFSBaseArtifact{
 			ArtifactDigest: artifactDigest, SourceOCIRef: template.Spec.MainContainer.Image,
-			SourceOCIDigest: imageDigest,
+			SourceOCIDigest: imageDigest, FormatGeneration: 1,
+			Platform: sandboxstore.RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
 		},
 	}
 	planner := &fakePlanner{}

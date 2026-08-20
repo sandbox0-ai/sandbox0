@@ -20,6 +20,11 @@ func TestValidateReadyRootFSBaseArtifactRequiresImmutableDigests(t *testing.T) {
 	req.SourceOCIDigest = "ubuntu:latest"
 	_, err = validateReadyRootFSBaseArtifact(req)
 	require.ErrorContains(t, err, "source_oci_digest")
+
+	req = readyRootFSBaseArtifactTestRequest()
+	req.Platform.Architecture = "AMD64"
+	_, err = validateReadyRootFSBaseArtifact(req)
+	require.ErrorContains(t, err, "architecture")
 }
 
 func TestInitialRootFSGenerationIDSeparatesFilesystems(t *testing.T) {
@@ -52,6 +57,7 @@ func readyRootFSBaseArtifactTestRequest() *PutReadyRootFSBaseArtifactRequest {
 		SourceOCIDigest:  "sha256:" + strings.Repeat("b", 64),
 		BaseBlockRoot:    rootDigest,
 		FormatGeneration: 1,
+		Platform:         RootFSArtifactPlatform{OS: "linux", Architecture: "amd64"},
 		Descriptor:       descriptor,
 	}
 }

@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "profiles": [
+    {
+      "name": "amd64-1cpu-1g",
+      "cluster_id": "cluster-1",
+      "template_cpu": "1",
+      "template_memory": "1Gi",
+      "artifact_platform": {
+        "os": "linux",
+        "architecture": "amd64"
+      },
+      "compatibility": {
+        "version": 1,
+        "architecture": "amd64",
+        "driver_version": "0.1.0",
+        "runsc_version": "runsc release-20260820.0",
+        "platform": "systrap",
+        "overlay2": "none",
+        "file_access": "shared",
+        "directfs": true,
+        "command": "/procd",
+        "procd_port": 49983,
+        "runtime_mode": "static",
+        "cpu_period": 100000,
+        "cpu_quota": 100000,
+        "cpu_shares": 1024,
+        "memory_limit_bytes": 1073741824
+      }
+    }
+  ]
+}

@@ -1,18 +1,6 @@
-// Copyright 2026 Sandbox0 Authors.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-package main
+// Package runtimeslotterminal assembles the plugin-independent regional
+// runtime slot terminal worker.
+package runtimeslotterminal
 
 import (
 	"fmt"
@@ -23,10 +11,18 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnomad"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotwriter"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 )
 
-type runtimeSlotTerminalConfig struct {
+// Store combines the regional slot registry and RootFS writer transaction
+// boundaries used by terminal reconciliation.
+type Store interface {
+	runtimeslotreconciler.Store
+	runtimeslotwriter.Store
+}
+
+// Config controls the bounded terminal worker and its strict Nomad endpoint
+// catalog. Destructive reconciliation is disabled unless Enabled is true.
+type Config struct {
 	Enabled            bool
 	NomadEndpointsFile string
 	Interval           time.Duration
@@ -34,10 +30,13 @@ type runtimeSlotTerminalConfig struct {
 	ScanLimit          int
 }
 
-func newRuntimeSlotTerminalWorker(
-	store *sandboxstore.PGSandboxStore,
-	hub *runtimeslotnode.ChannelHub,
-	config runtimeSlotTerminalConfig,
+// New constructs the complete plugin-independent terminal path. A disabled
+// worker returns nil, but rejects configuration that would otherwise be
+// silently ignored.
+func New(
+	store Store,
+	transport runtimeslotnode.Transport,
+	config Config,
 ) (*runtimeslotreconciler.Worker, error) {
 	if !config.Enabled {
 		if strings.TrimSpace(config.NomadEndpointsFile) != "" {
@@ -45,8 +44,8 @@ func newRuntimeSlotTerminalWorker(
 		}
 		return nil, nil
 	}
-	if store == nil || hub == nil {
-		return nil, fmt.Errorf("runtime slot terminal store and node channel are required")
+	if store == nil || transport == nil {
+		return nil, fmt.Errorf("runtime slot terminal store and node transport are required")
 	}
 	resolver, err := runtimeslotnomad.LoadStaticEndpointResolver(config.NomadEndpointsFile)
 	if err != nil {
@@ -60,7 +59,7 @@ func newRuntimeSlotTerminalWorker(
 	if err != nil {
 		return nil, fmt.Errorf("create runtime slot Nomad controller: %w", err)
 	}
-	node, err := runtimeslotnode.New(hub)
+	node, err := runtimeslotnode.New(transport)
 	if err != nil {
 		return nil, fmt.Errorf("create runtime slot node controller: %w", err)
 	}

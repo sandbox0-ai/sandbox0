@@ -37,6 +37,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnode"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
@@ -148,7 +149,7 @@ func main() {
 		}
 		if err := serve(ctx, store, materializer, *address, *certFile, *keyFile, *clientCAFile,
 			*leaseTTL, *renewalGrace, *runtimeSlotHeartbeatTTL, *allowedClients,
-			runtimeSlotTerminalConfig{
+			runtimeslotterminal.Config{
 				Enabled: *runtimeSlotTerminal, NomadEndpointsFile: *nomadEndpointsFile,
 				Interval: *runtimeSlotReconcileInterval, PassTimeout: *runtimeSlotReconcileTimeout,
 				ScanLimit: *runtimeSlotReconcileLimit,
@@ -322,7 +323,7 @@ func serve(
 	renewalGrace time.Duration,
 	runtimeSlotHeartbeatTTL time.Duration,
 	allowedClients string,
-	terminalConfig runtimeSlotTerminalConfig,
+	terminalConfig runtimeslotterminal.Config,
 ) error {
 	if materializer == nil {
 		return fmt.Errorf("rootfs materializer is required")
@@ -364,7 +365,7 @@ func serve(
 		return fmt.Errorf("create runtime slot node channel: %w", err)
 	}
 	defer nodeChannelHub.Close()
-	terminalWorker, err := newRuntimeSlotTerminalWorker(store, nodeChannelHub, terminalConfig)
+	terminalWorker, err := runtimeslotterminal.New(store, nodeChannelHub, terminalConfig)
 	if err != nil {
 		return err
 	}

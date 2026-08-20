@@ -110,7 +110,15 @@ func main() {
 		logger.Fatal("DATABASE_URL is required for template store")
 	}
 
-	pool, err := initDatabase(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConns, cfg.DatabaseMinConns, logger, obsProvider)
+	pool, err := initDatabase(
+		ctx,
+		cfg.DatabaseURL,
+		cfg.DatabaseMaxConns,
+		cfg.DatabaseMinConns,
+		cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad,
+		logger,
+		obsProvider,
+	)
 	if err != nil {
 		logger.Fatal("Failed to connect to database", zap.Error(err))
 	}
@@ -571,6 +579,7 @@ func main() {
 		ObservabilityProvider:   obsProvider,
 		PublicRootDomain:        cfg.PublicRootDomain,
 		PublicRegionID:          cfg.PublicRegionID,
+		ReadinessProbe:          pool.Ping,
 	})
 
 	controllers := &managerControllerSet{
@@ -1034,14 +1043,10 @@ func runSandboxStoreMigrations(ctx context.Context, pool *pgxpool.Pool, logger *
 }
 
 // initDatabase initializes the database connection pool
-func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
-	pool, err := dbpool.New(ctx, dbpool.Options{
-		DatabaseURL:    databaseURL,
-		MaxConns:       maxConns,
-		MinConns:       minConns,
-		Schema:         "scheduler",
-		ConfigModifier: obsProvider.Pgx.ConfigModifier(),
-	})
+func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns int32, requirePrimary bool, logger *zap.Logger, obsProvider *observability.Provider) (*pgxpool.Pool, error) {
+	options := managerDatabaseOptions(databaseURL, maxConns, minConns, requirePrimary)
+	options.ConfigModifier = obsProvider.Pgx.ConfigModifier()
+	pool, err := dbpool.New(ctx, options)
 	if err != nil {
 		return nil, err
 	}
@@ -1049,7 +1054,18 @@ func initDatabase(ctx context.Context, databaseURL string, maxConns, minConns in
 	logger.Info("Database connection established",
 		zap.Int32("max_conns", pool.Config().MaxConns),
 		zap.Int32("min_conns", pool.Config().MinConns),
+		zap.Bool("require_primary", requirePrimary),
 	)
 
 	return pool, nil
+}
+
+func managerDatabaseOptions(databaseURL string, maxConns, minConns int32, requirePrimary bool) dbpool.Options {
+	return dbpool.Options{
+		DatabaseURL:    databaseURL,
+		MaxConns:       maxConns,
+		MinConns:       minConns,
+		Schema:         "scheduler",
+		RequirePrimary: requirePrimary,
+	}
 }

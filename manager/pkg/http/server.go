@@ -56,6 +56,7 @@ type Server struct {
 	// Public exposure config
 	publicRootDomain string
 	publicRegionID   string
+	readinessProbe   func(context.Context) error
 }
 
 type claimSandboxCapabilityRequest struct {
@@ -104,6 +105,7 @@ type ServerDependencies struct {
 	ObservabilityProvider   *observability.Provider
 	PublicRootDomain        string
 	PublicRegionID          string
+	ReadinessProbe          func(context.Context) error
 }
 
 // NewServerWithDependencies creates a manager HTTP server from named
@@ -159,6 +161,7 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 		obsProvider:             deps.ObservabilityProvider,
 		publicRootDomain:        deps.PublicRootDomain,
 		publicRegionID:          deps.PublicRegionID,
+		readinessProbe:          deps.ReadinessProbe,
 	}
 	if deps.TemplateStoreEnabled {
 		registryHosts := []string(nil)
@@ -334,6 +337,14 @@ func (s *Server) healthCheck(c *gin.Context) {
 }
 
 func (s *Server) readinessCheck(c *gin.Context) {
+	if s.readinessProbe != nil {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), time.Second)
+		defer cancel()
+		if err := s.readinessProbe(ctx); err != nil {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "manager dependencies are unavailable")
+			return
+		}
+	}
 	spec.JSONSuccess(c, http.StatusOK, gin.H{
 		"status": "ready",
 	})

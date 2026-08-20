@@ -42,6 +42,9 @@ Implemented:
 - unit tests with a fake runsc runtime
 - PostgreSQL-backed regional warm-slot authority and authenticated v1 node API
   for register, readiness, heartbeat, runsc starting, and command readiness
+- manager PostgreSQL primary fencing: new connections select only a read-write
+  server, pooled connections are periodically revalidated after a role change,
+  and `/readyz` fails closed while no writer is reachable
 - synchronous task-driver registration only after the control socket, ctld
   warm-policy acknowledgement, root mount, runsc compatibility, and RootFS
   session-daemon health proofs are ready
@@ -180,6 +183,35 @@ go build -o nomad-rootfs-sessionctl ./cmd/nomad-rootfs-sessionctl
 
 The module is intentionally separate from the repository root so the Nomad
 dependency is not imposed on every Sandbox0 service.
+
+## PostgreSQL high availability
+
+Nomad-backed manager instances enable the shared database pool's primary-only
+policy. Configure `database_url` with either a managed writer endpoint or an
+ordered multi-host PostgreSQL URL, for example:
+
+```text
+postgres://manager@pg-a:5432,pg-b:5432/sandbox0?sslmode=verify-full
+```
+
+Every new connection must report `transaction_read_only=off`. Existing pooled
+connections are revalidated before checkout at most one second after their
+last successful role check, so a demoted primary is discarded and connection
+fallback can reach the promoted server. Connection attempts are capped at
+three seconds per host unless the DSN specifies a shorter timeout. Readiness
+also acquires and pings through this policy and returns 503 while no primary is
+available.
+
+The pool deliberately does not replay arbitrary SQL transactions. Lifecycle
+controllers retry their durable operation IDs, and database uniqueness/CAS
+rules decide whether an ambiguous commit already happened. The opt-in local
+promotion test creates a streaming primary/standby pair, kills the primary,
+promotes the standby, replays one exact operation, and verifies a single row:
+
+```sh
+SANDBOX0_RUN_PG_HA_TESTS=1 go test ./pkg/dbpool \
+  -run TestPostgresPrimaryPromotionPreservesExactOperationReplay -count=1 -v
+```
 
 ## Example client configuration
 

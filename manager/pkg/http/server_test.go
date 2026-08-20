@@ -35,6 +35,45 @@ func TestSetupRoutesMountsTemplateFromSandboxEndpoints(t *testing.T) {
 	}
 }
 
+func TestReadinessCheckFailsClosedWhenDependencyIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{
+		readinessProbe: func(context.Context) error {
+			return context.DeadlineExceeded
+		},
+	}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+
+	server.readinessCheck(ctx)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if strings.Contains(recorder.Body.String(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("readiness response exposed dependency error: %s", recorder.Body.String())
+	}
+}
+
+func TestReadinessCheckSucceedsWhenDependencyIsReady(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{
+		readinessProbe: func(context.Context) error { return nil },
+	}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+
+	server.readinessCheck(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+}
+
 func managerHasRoute(router *gin.Engine, method, path string) bool {
 	for _, route := range router.Routes() {
 		if route.Method == method && route.Path == path {

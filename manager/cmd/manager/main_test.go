@@ -27,6 +27,18 @@ type recordingTemplateReconcilerQuiescer struct {
 	release chan struct{}
 }
 
+func TestManagerDatabaseOptionsRequirePrimaryForNomad(t *testing.T) {
+	t.Parallel()
+
+	options := managerDatabaseOptions("postgres://manager/database", 20, 4, true)
+	if !options.RequirePrimary {
+		t.Fatal("Nomad manager database options did not require a primary")
+	}
+	if options.Schema != "scheduler" || options.MaxConns != 20 || options.MinConns != 4 {
+		t.Fatalf("unexpected manager database options: %+v", options)
+	}
+}
+
 func (q *recordingTemplateReconcilerQuiescer) Quiesce(context.Context) error {
 	close(q.called)
 	<-q.release

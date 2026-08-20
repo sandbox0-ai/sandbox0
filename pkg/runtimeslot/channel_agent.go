@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -84,10 +86,15 @@ type NodeChannelAgent struct {
 	config          NodeChannelAgentConfig
 	baseURL         *url.URL
 	agentInstanceID string
+	dialAddress     string
 }
 
 // NewNodeChannelAgent validates immutable channel policy.
 func NewNodeChannelAgent(config NodeChannelAgentConfig) (*NodeChannelAgent, error) {
+	return newNodeChannelAgent(config, "")
+}
+
+func newNodeChannelAgent(config NodeChannelAgentConfig, dialAddress string) (*NodeChannelAgent, error) {
 	baseURL, err := url.Parse(strings.TrimSpace(config.BaseURL))
 	if err != nil || baseURL.Scheme != "https" || baseURL.Host == "" || baseURL.User != nil ||
 		baseURL.Path != "" || baseURL.RawPath != "" || baseURL.RawQuery != "" || baseURL.Fragment != "" ||
@@ -167,7 +174,36 @@ func NewNodeChannelAgent(config NodeChannelAgentConfig) (*NodeChannelAgent, erro
 	if err := validateRequiredID("agent_instance_id", agentInstanceID); err != nil {
 		return nil, fmt.Errorf("node channel: %v: %w", err, errdefs.ErrInvalidArgument)
 	}
-	return &NodeChannelAgent{config: config, baseURL: baseURL, agentInstanceID: agentInstanceID}, nil
+	if dialAddress != "" {
+		dialAddress, err = validateNodeChannelDialAddress(dialAddress, baseURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &NodeChannelAgent{
+		config: config, baseURL: baseURL, agentInstanceID: agentInstanceID, dialAddress: dialAddress,
+	}, nil
+}
+
+func validateNodeChannelDialAddress(address string, authority *url.URL) (string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", fmt.Errorf("node channel exact dial address must contain an IP and port: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil || ip.Zone() != "" || ip.IsUnspecified() || ip.IsMulticast() {
+		return "", fmt.Errorf("node channel exact dial address must use a unicast IP: %w", errdefs.ErrInvalidArgument)
+	}
+	ip = ip.Unmap()
+	wantPort := authority.Port()
+	if wantPort == "" {
+		wantPort = "443"
+	}
+	canonical := net.JoinHostPort(ip.String(), port)
+	if port != wantPort || canonical != address {
+		return "", fmt.Errorf("node channel exact dial address must be canonical and preserve authority port %s: %w", wantPort, errdefs.ErrInvalidArgument)
+	}
+	return canonical, nil
 }
 
 // Run reconnects transient failures with bounded jitter. Authentication and
@@ -388,6 +424,13 @@ func (a *NodeChannelAgent) dial(ctx context.Context) (*websocket.Conn, error) {
 		Proxy:            nil,
 		TLSClientConfig:  tlsConfig,
 		Subprotocols:     []string{NodeChannelSubprotocol},
+	}
+	if a.dialAddress != "" {
+		exactAddress := a.dialAddress
+		networkDialer := &net.Dialer{}
+		dialer.NetDialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return networkDialer.DialContext(ctx, "tcp", exactAddress)
+		}
 	}
 	header := http.Header{"Authorization": []string{"Bearer " + token}}
 	connection, response, err := dialer.DialContext(ctx, target.String(), header)

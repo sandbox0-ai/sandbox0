@@ -24,6 +24,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -47,6 +48,7 @@ type Reconciler struct {
 const (
 	registryCredentialsPath        = "/etc/sandbox0/registry/.dockerconfigjson"
 	managerConfigHashAnnotation    = "infra.sandbox0.ai/manager-config-hash"
+	managerNodeAuthoritySuffix     = "-nodes"
 	nodeAuthorityTLSVolumeName     = "node-authority-tls"
 	nodeAuthorityControlVolumeName = "node-authority-control"
 	nodeAuthorityClaimVolumeName   = "node-authority-claim"
@@ -308,17 +310,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		common.BuildServicePort("metrics", metricsPort, metricsPort, serviceType),
 		common.BuildServicePort("webhook", webhookPort, webhookPort, serviceType),
 	}
-	if config.NodeAuthority.Enabled {
-		nodeAuthorityPort := int32(config.NodeAuthority.Port)
-		servicePorts = append(servicePorts, common.BuildServicePort(
-			"node-authority", nodeAuthorityPort, nodeAuthorityPort, serviceType,
-		))
-	}
 	if err := validateManagerServicePorts(servicePorts); err != nil {
 		return err
 	}
 	if err := r.Resources.ReconcileServicePortsWithScope(ctx, scope, deploymentName, labels, serviceType, serviceAnnotations, servicePorts); err != nil {
 		return err
+	}
+	nodeAuthorityServiceName := deploymentName + managerNodeAuthoritySuffix
+	if config.NodeAuthority.Enabled {
+		nodeAuthorityPort := int32(config.NodeAuthority.Port)
+		if err := r.Resources.ReconcileServicePortsWithScopeAndSpecMutator(
+			ctx, scope, nodeAuthorityServiceName, labels, corev1.ServiceTypeClusterIP, nil,
+			[]corev1.ServicePort{common.BuildServicePort(
+				"node-authority", nodeAuthorityPort, nodeAuthorityPort, corev1.ServiceTypeClusterIP,
+			)},
+			func(spec *corev1.ServiceSpec) {
+				spec.ClusterIP = corev1.ClusterIPNone
+				spec.PublishNotReadyAddresses = true
+			},
+		); err != nil {
+			return err
+		}
+	} else {
+		stale := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: nodeAuthorityServiceName, Namespace: scope.Namespace}}
+		if err := r.Resources.Client.Delete(ctx, stale); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete disabled manager node authority Service: %w", err)
+		}
 	}
 
 	if err := r.Resources.EnsureDeploymentReadyWithScope(ctx, scope, deploymentName, replicas); err != nil {
@@ -420,14 +437,14 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 	if cfg.ProcdBinImageRef == "" {
 		cfg.ProcdBinImageRef = fmt.Sprintf("%s:%s-procd-bin", imageRepo, imageTag)
 	}
-	if err := applyManagerRuntimeDeploymentConfig(cfg, compiledPlan.Manager.Replicas); err != nil {
+	if err := applyManagerRuntimeDeploymentConfig(cfg); err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
 }
 
-func applyManagerRuntimeDeploymentConfig(cfg *apiconfig.ManagerConfig, replicas int32) error {
+func applyManagerRuntimeDeploymentConfig(cfg *apiconfig.ManagerConfig) error {
 	if cfg == nil {
 		return nil
 	}
@@ -447,9 +464,6 @@ func applyManagerRuntimeDeploymentConfig(cfg *apiconfig.ManagerConfig, replicas 
 		}
 		return nil
 	case apiconfig.SandboxRuntimeBackendNomad:
-		if replicas != 1 {
-			return fmt.Errorf("nomad sandbox runtime backend currently requires exactly one manager replica until node channels are replica-aware")
-		}
 		if !cfg.NodeAuthority.Enabled {
 			return fmt.Errorf("nomad sandbox runtime backend requires manager node authority")
 		}

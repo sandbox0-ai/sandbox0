@@ -526,6 +526,7 @@ func (r *ResourceManager) reconcileServicePorts(ctx context.Context, scope Objec
 			svc.Spec.Selector = desiredSvc.Spec.Selector
 			svc.Spec.Ports = desiredSvc.Spec.Ports
 			svc.Spec.ExternalTrafficPolicy = desiredSvc.Spec.ExternalTrafficPolicy
+			svc.Spec.PublishNotReadyAddresses = desiredSvc.Spec.PublishNotReadyAddresses
 		})
 	})
 }

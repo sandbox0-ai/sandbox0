@@ -506,13 +506,13 @@ Examples:
 
 The manager CRD includes an experimental `nodeAuthority` listener and an explicit `sandboxRuntimeBackend` selector for the in-progress Nomad + gVisor runtime. The backend defaults to `kubernetes`; the `nomad` value is not a production-ready alternative yet.
 
-The listener is separate from normal manager HTTP, requires verified mTLS, and exposes port `8421` by default. `tlsSecretName` must name a Secret containing `tls.crt`, `tls.key`, and `client-ca.crt`. Each configured identity binds a client-certificate common name to one exact cluster and Nomad node route.
+The listener is separate from normal manager HTTP, requires verified mTLS, and exposes port `8421` by default. The operator publishes it only through the headless `<infra-name>-manager-nodes` Service with `publishNotReadyAddresses: true`; it is deliberately absent from the load-balanced manager Service. `tlsSecretName` must name a Secret containing `tls.crt`, `tls.key`, and `client-ca.crt`. The server certificate DNS SAN must include the exact headless-Service hostname used by node agents. Each configured identity binds a client-certificate common name to one exact cluster and Nomad node route.
 
 ```yaml
 spec:
     services:
         manager:
-            replicas: 1
+            replicas: 3
             config:
                 sandboxRuntimeBackend: nomad
                 nodeAuthority:
@@ -544,7 +544,9 @@ Each admitted Nomad identity also has a PostgreSQL claim workflow and retry leas
 
 Terminal reconciliation requires `terminal.controlSecretName`. That Secret must contain `nomad-endpoints.json` and every CA, client certificate, client key, and ACL-token file referenced by the catalog, using absolute paths below `/etc/sandbox0/node-authority/control`. PostgreSQL fences and deterministic operation IDs remain authoritative.
 
-The operator currently rejects `nomad` when manager replicas are not exactly one because node channels are listener-local and cross-replica dispatch is not implemented. This is a transitional correctness guard, not a high-availability production configuration. Do not enable this route without separately provisioning short-lived node credentials, strict Nomad ACLs, the node agent, ready base artifacts, and the remaining credential/app-service projections. Cross-replica channels, complete lifecycle routing, privileged multi-node validation, and long-running load gates are still required before production cutover.
+Runtime-slot sessiond resolves the authority hostname every second and maintains one authenticated stream to every exact manager address. It preserves the configured hostname for HTTP authority and TLS verification while pinning each TCP connection to one resolved address. Duplicate and reordered answers are deduplicated, successful membership changes add and remove exact streams, transient DNS failures retain the last known set, and a successful empty answer closes all streams. There is no fallback to a ClusterIP or random load-balancer connection. Nomad nodes must be able to resolve the complete headless/private-DNS membership and route to every returned manager address; deployments outside the Kubernetes DNS/network domain must provide an equivalent private multi-address DNS record rather than pointing at a load balancer.
+
+Manager replicas may now be greater than one: claim, network preparation, command-ready, and terminal cleanup can execute through the listener-local hub on any replica because every node establishes a stream to every published manager Pod. The headless Service publishes not-ready Pod addresses so the channels can converge during the normal five-second readiness delay before a new replica enters the load-balanced manager API Service. This removes the former single-replica correctness guard, but it is not the final production gate. Do not enable this route without separately provisioning short-lived node credentials, strict Nomad ACLs, the node agent, ready base artifacts, and the remaining credential/app-service projections. Complete lifecycle routing, privileged multi-node and DNS failure validation, regional-gateway-to-procd latency evidence, and long-running load gates are still required before production cutover.
 
 For autoscaled sandbox node pools, configure the annotation contract and teardown budgets together:
 

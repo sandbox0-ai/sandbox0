@@ -284,8 +284,14 @@ acknowledgement protocol; unresolved active registrations are not yet compacted
 automatically.
 
 The Unix API remains a node execution primitive and is never dialed directly
-by the region. With `--runtime-slot-node-channel`, sessiond establishes an
-outbound WebSocket over mTLS to the regional authority. The regional hub
+by the region. With `--runtime-slot-node-channel`, sessiond resolves the
+authority hostname and establishes one outbound WebSocket over mTLS to every
+exact address in the current manager membership set. The original HTTPS host
+is retained for the HTTP authority and TLS DNS verification; resolved Pod IPs
+are used only as pinned TCP destinations. Duplicate or reordered DNS answers
+are canonicalized, membership additions and removals are reconciled every
+second, resolution failures retain the last known exact set, and an empty set
+never falls back to a load-balanced virtual IP. The regional hub
 derives cluster, Nomad node, and node UID from authentication, checks the
 advertised boot ID, and routes only commands whose cluster, node, allocation,
 slot, UID, boot, and local control endpoint match the canonical request. The
@@ -306,6 +312,12 @@ It requires `--runtime-slot-node-uid`, an exact
 `--runtime-slot-control-root`; ambient proxies are disabled and certificates,
 boot ID, and projected bearer token are reloaded on reconnect, with a bounded
 five-minute connection age so rotated credentials are eventually enforced.
+`--authority-url` must therefore use a resolvable headless-Service or private
+DNS hostname whose complete answer is the reachable manager replica set, and
+the server certificate must contain that hostname as a DNS SAN. An IP literal
+is rejected. A ClusterIP or load-balancer DNS name violates the exact-membership
+contract; the operator deliberately does not publish node authority on that
+Service.
 The authority's `--allowed-clients` entry for a channel identity must use
 `commonName:nodeUID:podUID:clusterID:nodeID`; legacy three-field entries remain
 valid for writer and slot APIs but cannot establish a node channel.

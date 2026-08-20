@@ -476,6 +476,7 @@ type nodeChannelCertificateRequest struct {
 	server     bool
 	client     bool
 	uris       []string
+	dnsNames   []string
 }
 
 func newNodeChannelTestCA(t *testing.T) (*x509.Certificate, ed25519.PrivateKey, []byte) {
@@ -537,7 +538,10 @@ func newNodeChannelTestCertificatePEM(
 	}
 	if request.server {
 		template.ExtKeyUsage = append(template.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
-		template.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
+		if address := net.ParseIP(request.commonName); address != nil {
+			template.IPAddresses = []net.IP{address}
+		}
+		template.DNSNames = append(template.DNSNames, request.dnsNames...)
 	}
 	if request.client {
 		template.ExtKeyUsage = append(template.ExtKeyUsage, x509.ExtKeyUsageClientAuth)

@@ -14,6 +14,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -404,7 +405,7 @@ func TestReconcileUsesManagerBudgetAndRootFSObjectStorage(t *testing.T) {
 				Manager: &infrav1alpha1.ManagerServiceConfig{
 					WorkloadServiceConfig: infrav1alpha1.WorkloadServiceConfig{
 						EnabledServiceConfig: infrav1alpha1.EnabledServiceConfig{Enabled: true},
-						Replicas:             1,
+						Replicas:             2,
 						Resources: &corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
 								corev1.ResourceCPU:    resource.MustParse("75m"),
@@ -454,8 +455,8 @@ func TestReconcileUsesManagerBudgetAndRootFSObjectStorage(t *testing.T) {
 	if err := reconciler.Resources.Client.Get(ctx, types.NamespacedName{Name: "demo-manager", Namespace: infra.Namespace}, deployment); err != nil {
 		t.Fatal(err)
 	}
-	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
-		t.Fatalf("manager replicas = %v, want 1", deployment.Spec.Replicas)
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 2 {
+		t.Fatalf("manager replicas = %v, want 2", deployment.Spec.Replicas)
 	}
 	leaderElectionName := ""
 	for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
@@ -504,14 +505,36 @@ func TestReconcileUsesManagerBudgetAndRootFSObjectStorage(t *testing.T) {
 			t.Fatalf("retired storage-http port is still exposed: %#v", service.Spec.Ports)
 		}
 	}
-	foundNodeAuthority := false
 	for _, port := range service.Spec.Ports {
-		if port.Name == "node-authority" && port.Port == 8421 && port.TargetPort.IntVal == 8421 {
-			foundNodeAuthority = true
+		if port.Name == "node-authority" {
+			t.Fatalf("load-balanced manager Service exposes node authority: %#v", service.Spec.Ports)
 		}
 	}
-	if !foundNodeAuthority {
-		t.Fatalf("manager node authority Service port is missing: %#v", service.Spec.Ports)
+	nodeAuthorityService := &corev1.Service{}
+	if err := reconciler.Resources.Client.Get(ctx, types.NamespacedName{
+		Name: "demo-manager-nodes", Namespace: infra.Namespace,
+	}, nodeAuthorityService); err != nil {
+		t.Fatal(err)
+	}
+	if nodeAuthorityService.Spec.ClusterIP != corev1.ClusterIPNone ||
+		!nodeAuthorityService.Spec.PublishNotReadyAddresses ||
+		len(nodeAuthorityService.Spec.Ports) != 1 ||
+		nodeAuthorityService.Spec.Ports[0].Name != "node-authority" ||
+		nodeAuthorityService.Spec.Ports[0].Port != 8421 ||
+		nodeAuthorityService.Spec.Ports[0].TargetPort.IntVal != 8421 {
+		t.Fatalf("manager headless node authority Service = %#v", nodeAuthorityService.Spec)
+	}
+
+	infra.Spec.Services.Manager.Config.SandboxRuntimeBackend = config.SandboxRuntimeBackendKubernetes
+	infra.Spec.Services.Manager.Config.NodeAuthority = infrav1alpha1.NodeAuthorityConfig{}
+	if err := reconciler.Reconcile(ctx, "sandbox0ai/infra", "test", infraplan.Compile(infra)); err == nil ||
+		!strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("disabled authority Reconcile() error = %v, want rollout not ready", err)
+	}
+	if err := reconciler.Resources.Client.Get(ctx, types.NamespacedName{
+		Name: "demo-manager-nodes", Namespace: infra.Namespace,
+	}, &corev1.Service{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("disabled manager node authority Service still exists: %v", err)
 	}
 }
 
@@ -566,22 +589,20 @@ func TestApplyManagerRuntimeDeploymentConfigFailsClosed(t *testing.T) {
 		}
 	}
 	tests := []struct {
-		name     string
-		replicas int32
-		mutate   func(*config.ManagerConfig)
+		name   string
+		mutate func(*config.ManagerConfig)
 	}{
-		{name: "multiple replicas", replicas: 2},
-		{name: "missing authority", replicas: 1, mutate: func(cfg *config.ManagerConfig) { cfg.NodeAuthority.Enabled = false }},
-		{name: "missing terminal", replicas: 1, mutate: func(cfg *config.ManagerConfig) { cfg.NodeAuthority.Terminal = config.RuntimeSlotTerminalConfig{} }},
-		{name: "missing claim secret", replicas: 1, mutate: func(cfg *config.ManagerConfig) { cfg.NodeAuthority.Claim.SecretName = "" }},
-		{name: "short claim ttl", replicas: 1, mutate: func(cfg *config.ManagerConfig) {
+		{name: "missing authority", mutate: func(cfg *config.ManagerConfig) { cfg.NodeAuthority.Enabled = false }},
+		{name: "missing terminal", mutate: func(cfg *config.ManagerConfig) { cfg.NodeAuthority.Terminal = config.RuntimeSlotTerminalConfig{} }},
+		{name: "missing claim secret", mutate: func(cfg *config.ManagerConfig) { cfg.NodeAuthority.Claim.SecretName = "" }},
+		{name: "short claim ttl", mutate: func(cfg *config.ManagerConfig) {
 			cfg.NodeAuthority.Claim.ClaimTTL = metav1.Duration{Duration: 500 * time.Millisecond}
 		}},
-		{name: "nonpositive slo", replicas: 1, mutate: func(cfg *config.ManagerConfig) {
+		{name: "nonpositive slo", mutate: func(cfg *config.ManagerConfig) {
 			cfg.NodeAuthority.Claim.SLO = metav1.Duration{Duration: -time.Second}
 		}},
-		{name: "unknown backend", replicas: 1, mutate: func(cfg *config.ManagerConfig) { cfg.SandboxRuntimeBackend = "containerd" }},
-		{name: "claim config on kubernetes", replicas: 1, mutate: func(cfg *config.ManagerConfig) {
+		{name: "unknown backend", mutate: func(cfg *config.ManagerConfig) { cfg.SandboxRuntimeBackend = "containerd" }},
+		{name: "claim config on kubernetes", mutate: func(cfg *config.ManagerConfig) {
 			cfg.SandboxRuntimeBackend = config.SandboxRuntimeBackendKubernetes
 		}},
 	}
@@ -591,7 +612,7 @@ func TestApplyManagerRuntimeDeploymentConfigFailsClosed(t *testing.T) {
 			if test.mutate != nil {
 				test.mutate(cfg)
 			}
-			if err := applyManagerRuntimeDeploymentConfig(cfg, test.replicas); err == nil {
+			if err := applyManagerRuntimeDeploymentConfig(cfg); err == nil {
 				t.Fatalf("invalid config was accepted: %#v", cfg)
 			}
 		})
@@ -610,7 +631,7 @@ func TestApplyManagerRuntimeDeploymentConfigPinsNomadClaimAssets(t *testing.T) {
 			Terminal: config.RuntimeSlotTerminalConfig{Enabled: true, ControlSecretName: "nomad-control"},
 		},
 	}
-	if err := applyManagerRuntimeDeploymentConfig(cfg, 1); err != nil {
+	if err := applyManagerRuntimeDeploymentConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
 	claim := cfg.NodeAuthority.Claim

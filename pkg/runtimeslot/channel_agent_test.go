@@ -3,6 +3,7 @@ package runtimeslot
 import (
 	"context"
 	"errors"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +16,17 @@ type testNodeChannelExecutor struct {
 	claimErr   error
 	commandErr error
 	cleanupErr error
+}
+
+type staticNodeChannelResolver struct {
+	addresses []net.IPAddr
+	err       error
+	host      string
+}
+
+func (r *staticNodeChannelResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	r.host = host
+	return r.addresses, r.err
 }
 
 func (e *testNodeChannelExecutor) PrepareNetwork(
@@ -149,5 +161,64 @@ func TestNewNodeChannelAgentRejectsAmbientOrIncompleteIdentity(t *testing.T) {
 	config.PeerURISAN = "https://region.internal"
 	if _, err := NewNodeChannelAgent(config); !errdefs.IsInvalidArgument(err) {
 		t.Fatalf("non-SPIFFE peer error = %v", err)
+	}
+}
+
+func TestNodeChannelAgentSetResolvesCanonicalExactEndpoints(t *testing.T) {
+	directory := t.TempDir()
+	resolver := &staticNodeChannelResolver{addresses: []net.IPAddr{
+		{IP: net.ParseIP("2001:db8::2")},
+		{IP: net.ParseIP("192.0.2.2")},
+		{IP: net.ParseIP("192.0.2.2")},
+	}}
+	set, err := NewNodeChannelAgentSet(NodeChannelAgentSetConfig{
+		Agent: NodeChannelAgentConfig{
+			BaseURL: "https://manager-nodes.sandbox0-system.svc:8421",
+			CAFile:  filepath.Join(directory, "ca.pem"), ClientCertFile: filepath.Join(directory, "client.pem"),
+			ClientKeyFile: filepath.Join(directory, "client-key.pem"), TokenFile: filepath.Join(directory, "token"),
+			PeerURISAN: "spiffe://sandbox0.test/region/runtime-slot-channel",
+			ClusterID:  "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1",
+			NodeBootIDFile: filepath.Join(directory, "boot-id"), Executor: &testNodeChannelExecutor{},
+		},
+		Resolver: resolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addresses, err := set.resolve(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"192.0.2.2:8421", "[2001:db8::2]:8421"}
+	if strings.Join(addresses, ",") != strings.Join(want, ",") ||
+		resolver.host != "manager-nodes.sandbox0-system.svc" {
+		t.Fatalf("resolved endpoints = %#v via %q, want %#v", addresses, resolver.host, want)
+	}
+}
+
+func TestNodeChannelAgentSetRejectsVirtualOrUnboundedDiscovery(t *testing.T) {
+	directory := t.TempDir()
+	base := NodeChannelAgentSetConfig{Agent: NodeChannelAgentConfig{
+		BaseURL: "https://manager-nodes.sandbox0-system.svc:8421",
+		CAFile:  filepath.Join(directory, "ca.pem"), ClientCertFile: filepath.Join(directory, "client.pem"),
+		ClientKeyFile: filepath.Join(directory, "client-key.pem"), TokenFile: filepath.Join(directory, "token"),
+		PeerURISAN: "spiffe://sandbox0.test/region/runtime-slot-channel",
+		ClusterID:  "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1",
+		NodeBootIDFile: filepath.Join(directory, "boot-id"), Executor: &testNodeChannelExecutor{},
+	}, MaxEndpoints: 1}
+	base.Agent.BaseURL = "https://192.0.2.10:8421"
+	if _, err := NewNodeChannelAgentSet(base); !errdefs.IsInvalidArgument(err) {
+		t.Fatalf("IP authority error = %v", err)
+	}
+	base.Agent.BaseURL = "https://manager-nodes.sandbox0-system.svc:8421"
+	base.Resolver = &staticNodeChannelResolver{addresses: []net.IPAddr{
+		{IP: net.ParseIP("192.0.2.2")}, {IP: net.ParseIP("192.0.2.3")},
+	}}
+	set, err := NewNodeChannelAgentSet(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := set.resolve(t.Context()); !errdefs.IsInvalidArgument(err) {
+		t.Fatalf("endpoint limit error = %v", err)
 	}
 }

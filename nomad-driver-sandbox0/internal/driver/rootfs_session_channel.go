@@ -48,7 +48,7 @@ func newRootFSSessionNodeChannelAgent(
 	nomadConfig NomadAllocationConfig,
 	cleaner runtimeSlotCleaner,
 	network *protocol.RuntimeSlotNetworkClient,
-) (*protocol.NodeChannelAgent, error) {
+) (*protocol.NodeChannelAgentSet, error) {
 	if !nomadConfig.RuntimeSlotChannelEnabled {
 		return nil, nil
 	}
@@ -99,9 +99,9 @@ func newRootFSSessionNodeChannelAgent(
 	if network != nil {
 		agentConfig.NetworkExecutor = executor
 	}
-	agent, err := protocol.NewNodeChannelAgent(agentConfig)
+	agent, err := protocol.NewNodeChannelAgentSet(protocol.NodeChannelAgentSetConfig{Agent: agentConfig})
 	if err != nil {
-		return nil, fmt.Errorf("create runtime slot node channel agent: %w", err)
+		return nil, fmt.Errorf("create runtime slot node channel agent set: %w", err)
 	}
 	return agent, nil
 }

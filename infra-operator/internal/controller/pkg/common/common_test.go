@@ -353,6 +353,45 @@ func TestReconcileHashedServiceConfigMapCreatesImmutableContentAddressedConfigMa
 	}
 }
 
+func TestReconcileServiceSpecMutatorUpdatesPublishNotReadyAddresses(t *testing.T) {
+	infra := &infrav1alpha1.Sandbox0Infra{ObjectMeta: metav1.ObjectMeta{
+		Name: "demo", Namespace: "sandbox0-system", UID: types.UID("demo-uid"),
+	}}
+	manager, client := newCommonTestResourceManager(t, interceptor.Funcs{}, infra.DeepCopy())
+	labels := GetServiceLabels(infra.Name, "manager")
+	reconcile := func(publish bool) {
+		t.Helper()
+		err := manager.ReconcileServicePortsWithScopeAndSpecMutator(
+			t.Context(), NewObjectScope(infra), "demo-manager-nodes", labels,
+			corev1.ServiceTypeClusterIP, nil,
+			[]corev1.ServicePort{BuildServicePort("node-authority", 8421, 8421, corev1.ServiceTypeClusterIP)},
+			func(spec *corev1.ServiceSpec) {
+				spec.ClusterIP = corev1.ClusterIPNone
+				spec.PublishNotReadyAddresses = publish
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	reconcile(true)
+	service := &corev1.Service{}
+	key := types.NamespacedName{Name: "demo-manager-nodes", Namespace: infra.Namespace}
+	if err := client.Get(t.Context(), key, service); err != nil {
+		t.Fatal(err)
+	}
+	if service.Spec.ClusterIP != corev1.ClusterIPNone || !service.Spec.PublishNotReadyAddresses {
+		t.Fatalf("created headless Service spec = %#v", service.Spec)
+	}
+	reconcile(false)
+	if err := client.Get(t.Context(), key, service); err != nil {
+		t.Fatal(err)
+	}
+	if service.Spec.ClusterIP != corev1.ClusterIPNone || service.Spec.PublishNotReadyAddresses {
+		t.Fatalf("updated headless Service spec = %#v", service.Spec)
+	}
+}
+
 func TestReconcileHashedServiceConfigMapRetainsLivePodConfigAndCleansUnusedConfig(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {

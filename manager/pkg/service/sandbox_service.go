@@ -42,6 +42,7 @@ var ErrTemplateNotFound = errors.New("template not found")
 var ErrInvalidNetworkPolicy = errors.New("invalid network policy")
 var ErrSandboxCheckpointRequiresCtld = errors.New("sandbox checkpoint requires ctld")
 var ErrSandboxRuntimeUpdateUnavailable = errors.New("sandbox runtime update is unavailable")
+var ErrSandboxLifecycleUnavailable = errors.New("sandbox lifecycle operation is unavailable")
 
 const defaultSandboxRestoreTimeout = 5 * time.Minute
 

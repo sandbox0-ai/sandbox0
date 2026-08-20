@@ -427,7 +427,7 @@ func main() {
 	registryService := registryservice.NewRegistryService(registryProvider, logger)
 	templateStore := templstorepg.NewStore(pool)
 	templateResourcePolicy := s0template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory)
-	sandboxClaimer, err := buildSandboxClaimer(cfg, sandboxClaimerDependencies{
+	sandboxBackend, err := buildSandboxRuntimeBackend(cfg, sandboxRuntimeBackendDependencies{
 		kubernetes: sandboxService, nodeAuthority: managerNodeAuthority,
 		store: sandboxStore, quotaLimits: quotaRepo,
 		templates: templateStore, networkPolicies: networkPolicyService,
@@ -437,7 +437,7 @@ func main() {
 		defaultTTL:     cfg.DefaultSandboxTTL.Duration, now: clk.Now, logger: logger,
 	})
 	if err != nil {
-		logger.Fatal("Failed to configure sandbox claim backend", zap.Error(err))
+		logger.Fatal("Failed to configure sandbox runtime backend", zap.Error(err))
 	}
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
@@ -511,8 +511,8 @@ func main() {
 		operator.GetTemplateLister(),
 		recorder,
 		clk,
-		sandboxService,
-		sandboxClaimer,
+		sandboxBackend,
+		sandboxBackend,
 		logger,
 		cfg.CleanupInterval.Duration,
 	)
@@ -540,8 +540,10 @@ func main() {
 	// Create HTTP server
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
 		SandboxService:          sandboxService,
-		SandboxClaimer:          sandboxClaimer,
-		SandboxTerminator:       sandboxClaimer,
+		SandboxClaimer:          sandboxBackend,
+		SandboxTerminator:       sandboxBackend,
+		SandboxPauser:           sandboxBackend,
+		SandboxResumer:          sandboxBackend,
 		EgressAuthService:       egressAuthService,
 		CredentialSourceService: credentialSourceService,
 		TemplateService:         templateService,

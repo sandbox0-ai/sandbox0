@@ -17,8 +17,8 @@ import (
 	"go.uber.org/zap"
 )
 
-type sandboxClaimerDependencies struct {
-	kubernetes      service.SandboxClaimBackend
+type sandboxRuntimeBackendDependencies struct {
+	kubernetes      service.SandboxRuntimeBackend
 	nodeAuthority   *nodeauthority.Component
 	store           nomadclaim.Store
 	quotaLimits     nomadclaim.QuotaLimitStore
@@ -33,7 +33,7 @@ type sandboxClaimerDependencies struct {
 	logger          *zap.Logger
 }
 
-func buildSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDependencies) (service.SandboxClaimBackend, error) {
+func buildSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDependencies) (service.SandboxRuntimeBackend, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("manager config is required")
 	}
@@ -48,13 +48,13 @@ func buildSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDependenc
 		}
 		return deps.kubernetes, nil
 	case config.SandboxRuntimeBackendNomad:
-		return buildNomadSandboxClaimer(cfg, deps)
+		return buildNomadSandboxRuntimeBackend(cfg, deps)
 	default:
 		return nil, fmt.Errorf("unsupported sandbox runtime backend %q", backend)
 	}
 }
 
-func buildNomadSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDependencies) (service.SandboxClaimBackend, error) {
+func buildNomadSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRuntimeBackendDependencies) (service.SandboxRuntimeBackend, error) {
 	if !cfg.NodeAuthority.Enabled {
 		return nil, fmt.Errorf("Nomad sandbox claims require manager node authority")
 	}

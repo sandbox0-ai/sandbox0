@@ -257,14 +257,32 @@ type SandboxTerminator interface {
 	TerminateSandbox(context.Context, string) error
 }
 
-// SandboxClaimBackend owns the claim and delete paths for one selected
-// physical runtime backend.
-type SandboxClaimBackend interface {
-	SandboxClaimer
-	SandboxTerminator
+// SandboxPauser owns the public checkpoint-and-pause path for one runtime.
+type SandboxPauser interface {
+	PauseSandboxAndWait(context.Context, string) (*PauseSandboxResponse, error)
 }
 
-var _ SandboxClaimBackend = (*SandboxService)(nil)
+// SandboxResumer owns the public restore-and-resume path for one runtime.
+type SandboxResumer interface {
+	ResumeSandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error)
+}
+
+// SandboxAutoPauser accepts durable automatic pause requests from TTL cleanup.
+type SandboxAutoPauser interface {
+	PauseSandboxByID(context.Context, string) error
+}
+
+// SandboxRuntimeBackend owns public and automatic lifecycle paths for one
+// selected physical runtime backend.
+type SandboxRuntimeBackend interface {
+	SandboxClaimer
+	SandboxTerminator
+	SandboxPauser
+	SandboxResumer
+	SandboxAutoPauser
+}
+
+var _ SandboxRuntimeBackend = (*SandboxService)(nil)
 
 // ClaimSandbox claims a sandbox from the idle pool or creates a new one
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {

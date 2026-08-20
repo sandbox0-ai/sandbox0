@@ -499,7 +499,11 @@ func (s *Server) pauseSandbox(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.sandboxService.PauseSandboxAndWait(c.Request.Context(), sandboxID)
+	if s.sandboxPauser == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox pause is unavailable")
+		return
+	}
+	resp, err := s.sandboxPauser.PauseSandboxAndWait(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.writeSandboxLifecycleTransitionError(c, "pause", sandboxID, err)
 		return
@@ -522,7 +526,11 @@ func (s *Server) resumeSandbox(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.sandboxService.ResumeSandboxAndWait(c.Request.Context(), sandboxID)
+	if s.sandboxResumer == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox resume is unavailable")
+		return
+	}
+	resp, err := s.sandboxResumer.ResumeSandboxAndWait(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.writeSandboxLifecycleTransitionError(c, "resume", sandboxID, err)
 		return
@@ -538,6 +546,8 @@ func (s *Server) writeSandboxLifecycleTransitionError(c *gin.Context, action, sa
 		zap.Error(err),
 	)
 	switch {
+	case errors.Is(err, service.ErrSandboxLifecycleUnavailable):
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
 	case apierrors.IsConflict(err):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, fmt.Sprintf("sandbox %s conflicts with another lifecycle operation", action))
 	case apierrors.IsNotFound(err):

@@ -19,6 +19,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
@@ -122,6 +123,23 @@ func (s *Service) TerminateSandbox(ctx context.Context, sandboxID string) error 
 	}
 	s.logger.Info("Nomad sandbox termination requested", zap.String("sandboxID", sandboxID))
 	return nil
+}
+
+// PauseSandboxAndWait fails closed until planned Nomad writer retirement and
+// physical allocation teardown are connected to the selected backend.
+func (s *Service) PauseSandboxAndWait(context.Context, string) (*service.PauseSandboxResponse, error) {
+	return nil, fmt.Errorf("%w: Nomad pause is not connected", service.ErrSandboxLifecycleUnavailable)
+}
+
+// ResumeSandboxAndWait fails closed until a paused Nomad filesystem can claim
+// a new compatible warm slot through a durable resume workflow.
+func (s *Service) ResumeSandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error) {
+	return nil, fmt.Errorf("%w: Nomad resume is not connected", service.ErrSandboxLifecycleUnavailable)
+}
+
+// PauseSandboxByID is the automatic TTL pause boundary.
+func (s *Service) PauseSandboxByID(context.Context, string) error {
+	return fmt.Errorf("%w: Nomad automatic pause is not connected", service.ErrSandboxLifecycleUnavailable)
 }
 
 // ClaimSandbox prepares a durable block-COW filesystem and returns only after
@@ -532,4 +550,4 @@ func appendWebhookPolicy(policy *v1alpha1.SandboxNetworkPolicy, rawURL string) *
 	return policy
 }
 
-var _ service.SandboxClaimBackend = (*Service)(nil)
+var _ service.SandboxRuntimeBackend = (*Service)(nil)

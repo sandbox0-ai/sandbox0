@@ -326,6 +326,22 @@ func TestServiceTerminateSandboxUsesDurableClaimCleanup(t *testing.T) {
 	}
 }
 
+func TestServiceFailsClosedForUnconnectedPauseAndResume(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	if _, err := fixture.service.PauseSandboxAndWait(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+		t.Fatalf("pause error = %v", err)
+	}
+	if _, err := fixture.service.ResumeSandboxAndWait(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+		t.Fatalf("resume error = %v", err)
+	}
+	if err := fixture.service.PauseSandboxByID(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+		t.Fatalf("automatic pause error = %v", err)
+	}
+	if len(fixture.store.cleanupCalls) != 0 {
+		t.Fatalf("unavailable lifecycle mutated cleanup state: %v", fixture.store.cleanupCalls)
+	}
+}
+
 func TestServiceFailsBeforePersistenceWithoutReadyBaseArtifact(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	fixture.store.artifact = nil

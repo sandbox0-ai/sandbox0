@@ -9,6 +9,7 @@ import (
 
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 )
 
 type fakeSandboxClaimer struct{}
@@ -19,11 +20,21 @@ func (fakeSandboxClaimer) ClaimSandbox(context.Context, *service.ClaimRequest) (
 
 func (fakeSandboxClaimer) TerminateSandbox(context.Context, string) error { return nil }
 
-func TestBuildSandboxClaimerSelectsExplicitBackend(t *testing.T) {
+func (fakeSandboxClaimer) PauseSandboxAndWait(context.Context, string) (*service.PauseSandboxResponse, error) {
+	return nil, nil
+}
+
+func (fakeSandboxClaimer) ResumeSandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error) {
+	return nil, nil
+}
+
+func (fakeSandboxClaimer) PauseSandboxByID(context.Context, string) error { return nil }
+
+func TestBuildSandboxRuntimeBackendSelectsExplicitBackend(t *testing.T) {
 	fallback := fakeSandboxClaimer{}
-	claimer, err := buildSandboxClaimer(&config.ManagerConfig{
+	claimer, err := buildSandboxRuntimeBackend(&config.ManagerConfig{
 		SandboxRuntimeBackend: config.SandboxRuntimeBackendKubernetes,
-	}, sandboxClaimerDependencies{kubernetes: fallback})
+	}, sandboxRuntimeBackendDependencies{kubernetes: fallback})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,26 +42,26 @@ func TestBuildSandboxClaimerSelectsExplicitBackend(t *testing.T) {
 		t.Fatalf("Kubernetes claimer type = %T", claimer)
 	}
 
-	_, err = buildSandboxClaimer(&config.ManagerConfig{SandboxRuntimeBackend: "containerd"}, sandboxClaimerDependencies{})
+	_, err = buildSandboxRuntimeBackend(&config.ManagerConfig{SandboxRuntimeBackend: "containerd"}, sandboxRuntimeBackendDependencies{})
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unknown backend error = %v", err)
 	}
 }
 
-func TestBuildNomadSandboxClaimerFailsClosedBeforeLoadingAssets(t *testing.T) {
+func TestBuildNomadSandboxRuntimeBackendFailsClosedBeforeLoadingAssets(t *testing.T) {
 	cfg := &config.ManagerConfig{SandboxRuntimeBackend: config.SandboxRuntimeBackendNomad}
-	if _, err := buildSandboxClaimer(cfg, sandboxClaimerDependencies{}); err == nil || !strings.Contains(err.Error(), "node authority") {
+	if _, err := buildSandboxRuntimeBackend(cfg, sandboxRuntimeBackendDependencies{}); err == nil || !strings.Contains(err.Error(), "node authority") {
 		t.Fatalf("disabled authority error = %v", err)
 	}
 	cfg.NodeAuthority.Enabled = true
-	if _, err := buildSandboxClaimer(cfg, sandboxClaimerDependencies{}); err == nil || !strings.Contains(err.Error(), "terminal") {
+	if _, err := buildSandboxRuntimeBackend(cfg, sandboxRuntimeBackendDependencies{}); err == nil || !strings.Contains(err.Error(), "terminal") {
 		t.Fatalf("disabled terminal error = %v", err)
 	}
 	cfg.NodeAuthority.Terminal.Enabled = true
 	cfg.NodeAuthority.Claim.SecretName = "nomad-claim"
 	cfg.NodeAuthority.Claim.ProfileCatalogFile = "/tmp/profiles.json"
 	cfg.NodeAuthority.Claim.WriterTokenKeyFile = "/tmp/key"
-	if _, err := buildSandboxClaimer(cfg, sandboxClaimerDependencies{}); err == nil || !strings.Contains(err.Error(), "operator-pinned") {
+	if _, err := buildSandboxRuntimeBackend(cfg, sandboxRuntimeBackendDependencies{}); err == nil || !strings.Contains(err.Error(), "operator-pinned") {
 		t.Fatalf("unpinned asset path error = %v", err)
 	}
 }
@@ -93,4 +104,4 @@ func TestLoadWriterTokenKeyRejectsDirectories(t *testing.T) {
 	}
 }
 
-var _ service.SandboxClaimBackend = fakeSandboxClaimer{}
+var _ service.SandboxRuntimeBackend = fakeSandboxClaimer{}

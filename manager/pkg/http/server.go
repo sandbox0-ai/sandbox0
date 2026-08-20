@@ -35,6 +35,8 @@ type Server struct {
 	sandboxService          *service.SandboxService
 	sandboxClaimer          service.SandboxClaimer
 	sandboxTerminator       service.SandboxTerminator
+	sandboxPauser           service.SandboxPauser
+	sandboxResumer          service.SandboxResumer
 	egressAuthService       *egressauthservice.EgressAuthService
 	credentialSourceService *credentialsource.CredentialSourceService
 	templateService         *templateservice.TemplateService
@@ -80,6 +82,8 @@ type ServerDependencies struct {
 	SandboxService          *service.SandboxService
 	SandboxClaimer          service.SandboxClaimer
 	SandboxTerminator       service.SandboxTerminator
+	SandboxPauser           service.SandboxPauser
+	SandboxResumer          service.SandboxResumer
 	EgressAuthService       *egressauthservice.EgressAuthService
 	CredentialSourceService *credentialsource.CredentialSourceService
 	TemplateService         *templateservice.TemplateService
@@ -113,13 +117,21 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 		deps.SandboxClaimer = deps.SandboxService
 	}
 	if deps.SandboxTerminator == nil {
-		deps.SandboxTerminator = deps.SandboxService
+		deps.SandboxTerminator, _ = deps.SandboxClaimer.(service.SandboxTerminator)
+	}
+	if deps.SandboxPauser == nil {
+		deps.SandboxPauser, _ = deps.SandboxClaimer.(service.SandboxPauser)
+	}
+	if deps.SandboxResumer == nil {
+		deps.SandboxResumer, _ = deps.SandboxClaimer.(service.SandboxResumer)
 	}
 	server := &Server{
 		router:                  router,
 		sandboxService:          deps.SandboxService,
 		sandboxClaimer:          deps.SandboxClaimer,
 		sandboxTerminator:       deps.SandboxTerminator,
+		sandboxPauser:           deps.SandboxPauser,
+		sandboxResumer:          deps.SandboxResumer,
 		egressAuthService:       deps.EgressAuthService,
 		credentialSourceService: deps.CredentialSourceService,
 		templateService:         deps.TemplateService,

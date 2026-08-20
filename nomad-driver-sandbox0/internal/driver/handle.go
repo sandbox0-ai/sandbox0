@@ -1184,9 +1184,11 @@ func crashOperationID(stage rootfshandoff.StageRequest) string {
 }
 
 func retireOperationID(stage rootfshandoff.StageRequest) string {
-	payload := fmt.Sprintf("%s\x00%s\x00%d", stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch)
-	sum := sha256.Sum256([]byte(payload))
-	return "nomad-retire-" + hex.EncodeToString(sum[:16])
+	return rootfshandoff.PlannedRetireOperationID(
+		stage.Parent,
+		stage.Identity.WriterGrantID,
+		stage.Identity.WriterEpoch,
+	)
 }
 
 func (h *taskHandle) setPhase(phase slotPhase) {

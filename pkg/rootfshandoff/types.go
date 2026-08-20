@@ -195,6 +195,15 @@ type RetireRequest struct {
 	OperationID string `json:"operation_id"`
 }
 
+// PlannedRetireOperationID returns the stable regional lifecycle identity for
+// one exact writer incarnation. Both the control plane and node runtime use
+// this value so a pause intent can exist before Nomad asks the driver to stop.
+func PlannedRetireOperationID(parent, writerGrantID string, writerEpoch int64) string {
+	payload := fmt.Sprintf("%s\x00%s\x00%d", parent, writerGrantID, writerEpoch)
+	sum := sha256.Sum256([]byte(payload))
+	return "nomad-retire-" + hex.EncodeToString(sum[:16])
+}
+
 func (r RetireRequest) Validate() error {
 	if strings.TrimSpace(r.Parent) == "" || strings.TrimSpace(r.OperationID) == "" {
 		return fmt.Errorf("parent and operation_id are required")

@@ -27,7 +27,6 @@ const (
 // abandon a node-local RootFS writer branch.
 type LifecycleStore interface {
 	GetRootFSWriterGrant(context.Context, string) (*sandboxstore.RootFSWriterGrant, error)
-	BeginRootFSWriterRetire(context.Context, *sandboxstore.BeginRootFSWriterRetireRequest) (*sandboxstore.RootFSWriterGrant, error)
 	BeginRootFSWriterCrashAbandon(context.Context, *sandboxstore.BeginRootFSWriterCrashAbandonRequest) (*sandboxstore.RootFSWriterGrant, error)
 	GetRootFSGeneration(context.Context, string) (*sandboxstore.RootFSGeneration, error)
 	GetSandbox(context.Context, string) (*sandboxstore.SandboxRecord, error)
@@ -360,28 +359,24 @@ func servePublish(
 		http.Error(writer, "sealed generation is incomplete", http.StatusBadRequest)
 		return
 	}
-	if _, err := store.BeginRootFSWriterRetire(request.Context(), &sandboxstore.BeginRootFSWriterRetireRequest{
-		GrantID: grantID, WriterEpoch: grant.WriterEpoch, OperationID: body.OperationID,
-		BindingVersion: grant.BindingVersion, BindingDigest: grant.BindingDigest,
-		ExpectedOldHeadLayerID: oldGenerationID,
-	}); err != nil {
-		http.Error(writer, "begin regional retire: "+err.Error(), http.StatusConflict)
-		return
-	}
 	runtimeGeneration, err := strconv.ParseInt(grant.RuntimeGeneration, 10, 64)
 	if err != nil {
 		runtimeGeneration = 1
 	}
-	err = store.WithSandboxLock(request.Context(), grant.SandboxID, func(ctx context.Context, tx sandboxstore.SandboxStoreTx, _ *sandboxstore.SandboxRecord) error {
-		if err := tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
-			ID: body.OperationID, SandboxID: grant.SandboxID, Kind: sandboxstore.SandboxLifecycleKindPause,
-			Phase: sandboxstore.SandboxLifecyclePhasePublishing, ExpectedHeadLayerID: oldGenerationID,
-		}); err != nil {
+	err = store.WithSandboxLock(request.Context(), grant.SandboxID, func(ctx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
+		if err := preparePlannedPublishLifecycle(ctx, tx, record, grant, body.OperationID, oldGenerationID, runtimeGeneration); err != nil {
 			return err
 		}
 		writerTx, ok := tx.(sandboxstore.RootFSWriterGrantTx)
 		if !ok {
 			return fmt.Errorf("sandbox transaction cannot publish rootfs generations")
+		}
+		if _, err := writerTx.BeginRootFSWriterRetire(ctx, &sandboxstore.BeginRootFSWriterRetireRequest{
+			GrantID: grantID, WriterEpoch: grant.WriterEpoch, OperationID: body.OperationID,
+			BindingVersion: grant.BindingVersion, BindingDigest: grant.BindingDigest,
+			ExpectedOldHeadLayerID: oldGenerationID,
+		}); err != nil {
+			return err
 		}
 		if _, err := writerTx.CompleteRootFSWriterRetireAndPublishGeneration(ctx, &sandboxstore.CompleteRootFSWriterRetireAndPublishGenerationRequest{
 			LifecycleTxnID: body.OperationID, GrantID: grantID, WriterEpoch: grant.WriterEpoch,
@@ -402,6 +397,43 @@ func servePublish(
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+func preparePlannedPublishLifecycle(
+	ctx context.Context,
+	tx sandboxstore.SandboxStoreTx,
+	record *sandboxstore.SandboxRecord,
+	grant *sandboxstore.RootFSWriterGrant,
+	operationID string,
+	expectedHead string,
+	runtimeGeneration int64,
+) error {
+	active, err := tx.GetActiveLifecycleTxn(ctx, grant.SandboxID)
+	if err != nil {
+		return err
+	}
+	if active == nil {
+		return tx.BeginLifecycleTxn(ctx, &sandboxstore.SandboxLifecycleTxn{
+			ID: operationID, SandboxID: grant.SandboxID, Kind: sandboxstore.SandboxLifecycleKindPause,
+			Phase: sandboxstore.SandboxLifecyclePhasePublishing, ExpectedHeadLayerID: expectedHead,
+		})
+	}
+	if record == nil || active.ID != operationID || active.SandboxID != grant.SandboxID ||
+		active.Kind != sandboxstore.SandboxLifecycleKindPause ||
+		(active.Source != sandboxstore.SandboxLifecycleSourceManual && active.Source != sandboxstore.SandboxLifecycleSourceAuto) ||
+		active.Cancelable || !active.CancelRequestedAt.IsZero() || active.FromGeneration != runtimeGeneration ||
+		active.FromPodNamespace != record.CurrentPodNamespace || active.FromPodName != record.CurrentPodName ||
+		active.ExpectedHeadLayerID != expectedHead || active.PreparedHeadLayerID != "" {
+		return fmt.Errorf("pre-existing planned pause lifecycle does not match writer grant")
+	}
+	switch active.Phase {
+	case sandboxstore.SandboxLifecyclePhasePreparing, sandboxstore.SandboxLifecyclePhaseBarriered:
+		return tx.UpdateLifecycleTxnPhase(ctx, operationID, sandboxstore.SandboxLifecyclePhasePublishing)
+	case sandboxstore.SandboxLifecyclePhasePublishing, sandboxstore.SandboxLifecyclePhaseCommitting:
+		return nil
+	default:
+		return fmt.Errorf("pre-existing planned pause lifecycle is %s", active.Phase)
+	}
 }
 
 func isLifecyclePath(path, suffix string) bool {

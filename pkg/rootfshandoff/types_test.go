@@ -123,6 +123,15 @@ func TestWriterBindingDigestBindsCompleteRequestWithoutPersistingToken(t *testin
 	require.NotEqual(t, first, third)
 }
 
+func TestPlannedRetireOperationIDIsStableAndIncarnationBound(t *testing.T) {
+	first := PlannedRetireOperationID("gate-1", "grant-1", 7)
+	require.Equal(t, "nomad-retire-773cffa77ad442a7369d214c52e200bb", first)
+	require.Equal(t, first, PlannedRetireOperationID("gate-1", "grant-1", 7))
+	require.NotEqual(t, first, PlannedRetireOperationID("gate-2", "grant-1", 7))
+	require.NotEqual(t, first, PlannedRetireOperationID("gate-1", "grant-2", 7))
+	require.NotEqual(t, first, PlannedRetireOperationID("gate-1", "grant-1", 8))
+}
+
 func TestRunningForkCheckpointProofBindsSequenceAndDescriptor(t *testing.T) {
 	binding := sha256.Sum256([]byte("running-fork-binding"))
 	proof := RunningForkCheckpointProof{

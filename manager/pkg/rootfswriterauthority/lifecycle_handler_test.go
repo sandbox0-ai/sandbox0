@@ -1,15 +1,38 @@
 package rootfswriterauthority
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 	"github.com/stretchr/testify/require"
 )
+
+type plannedPublishLifecycleTx struct {
+	sandboxstore.SandboxStoreTx
+	active       *sandboxstore.SandboxLifecycleTxn
+	begin        *sandboxstore.SandboxLifecycleTxn
+	updatedPhase string
+}
+
+func (t *plannedPublishLifecycleTx) GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error) {
+	return t.active, nil
+}
+
+func (t *plannedPublishLifecycleTx) BeginLifecycleTxn(_ context.Context, txn *sandboxstore.SandboxLifecycleTxn) error {
+	t.begin = txn
+	return nil
+}
+
+func (t *plannedPublishLifecycleTx) UpdateLifecycleTxnPhase(_ context.Context, _ string, phase string) error {
+	t.updatedPhase = phase
+	return nil
+}
 
 type fakeLifecycleStore struct {
 	LifecycleStore
@@ -112,4 +135,44 @@ func TestLifecycleHandlerRejectsUnknownRequestFields(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, response.Code)
 	require.Equal(t, 1, verifier.calls)
+}
+
+func TestPreparePlannedPublishLifecycleAdvancesPrecreatedIntent(t *testing.T) {
+	record := &sandboxstore.SandboxRecord{
+		ID: "sandbox-1", CurrentPodNamespace: "nomad", CurrentPodName: "allocation-1",
+	}
+	grant := &sandboxstore.RootFSWriterGrant{ID: "grant-1", SandboxID: record.ID}
+	tx := &plannedPublishLifecycleTx{active: &sandboxstore.SandboxLifecycleTxn{
+		ID: "retire-1", SandboxID: record.ID, Kind: sandboxstore.SandboxLifecycleKindPause,
+		Phase: sandboxstore.SandboxLifecyclePhasePreparing, Source: sandboxstore.SandboxLifecycleSourceAuto,
+		FromGeneration: 7, FromPodNamespace: record.CurrentPodNamespace,
+		FromPodName: record.CurrentPodName, ExpectedHeadLayerID: "generation-1",
+	}}
+
+	err := preparePlannedPublishLifecycle(
+		t.Context(), tx, record, grant, "retire-1", "generation-1", 7,
+	)
+	require.NoError(t, err)
+	require.Equal(t, sandboxstore.SandboxLifecyclePhasePublishing, tx.updatedPhase)
+	require.Nil(t, tx.begin)
+}
+
+func TestPreparePlannedPublishLifecycleRejectsAnotherRuntime(t *testing.T) {
+	record := &sandboxstore.SandboxRecord{
+		ID: "sandbox-1", CurrentPodNamespace: "nomad", CurrentPodName: "allocation-1",
+	}
+	grant := &sandboxstore.RootFSWriterGrant{ID: "grant-1", SandboxID: record.ID}
+	tx := &plannedPublishLifecycleTx{active: &sandboxstore.SandboxLifecycleTxn{
+		ID: "retire-1", SandboxID: record.ID, Kind: sandboxstore.SandboxLifecycleKindPause,
+		Phase: sandboxstore.SandboxLifecyclePhasePreparing, Source: sandboxstore.SandboxLifecycleSourceManual,
+		FromGeneration: 7, FromPodNamespace: record.CurrentPodNamespace,
+		FromPodName: "another-allocation", ExpectedHeadLayerID: "generation-1",
+	}}
+
+	err := preparePlannedPublishLifecycle(
+		t.Context(), tx, record, grant, "retire-1", "generation-1", 7,
+	)
+	require.Error(t, err)
+	require.Empty(t, tx.updatedPhase)
+	require.Nil(t, tx.begin)
 }

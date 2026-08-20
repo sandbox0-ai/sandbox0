@@ -3,10 +3,12 @@ package rootfswriterauthority
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -15,7 +17,10 @@ type ServerConfig struct {
 	Address  string
 	CertFile string
 	KeyFile  string
-	Handler  http.Handler
+	// ClientCAFile is the trust root for node client certificates. The server
+	// never supports optional client authentication.
+	ClientCAFile string
+	Handler      http.Handler
 }
 
 type Server struct {
@@ -26,16 +31,27 @@ type Server struct {
 
 func NewServer(config ServerConfig) (*Server, error) {
 	if strings.TrimSpace(config.Address) == "" || strings.TrimSpace(config.CertFile) == "" ||
-		strings.TrimSpace(config.KeyFile) == "" || config.Handler == nil {
-		return nil, fmt.Errorf("writer authority address, TLS certificate, key, and handler are required")
+		strings.TrimSpace(config.KeyFile) == "" || strings.TrimSpace(config.ClientCAFile) == "" || config.Handler == nil {
+		return nil, fmt.Errorf("writer authority address, TLS certificate, key, client CA, and handler are required")
 	}
 	certificate, err := tls.LoadX509KeyPair(config.CertFile, config.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load writer authority TLS identity: %w", err)
 	}
+	clientCAPEM, err := os.ReadFile(strings.TrimSpace(config.ClientCAFile))
+	if err != nil {
+		return nil, fmt.Errorf("read writer authority client CA: %w", err)
+	}
+	clientRoots := x509.NewCertPool()
+	if !clientRoots.AppendCertsFromPEM(clientCAPEM) {
+		return nil, fmt.Errorf("writer authority client CA contains no certificates")
+	}
 	return &Server{
 		address: strings.TrimSpace(config.Address),
-		config:  &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}},
+		config: &tls.Config{
+			MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate},
+			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientRoots,
+		},
 		http: &http.Server{
 			Handler: config.Handler, ReadHeaderTimeout: 2 * time.Second,
 			ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second,

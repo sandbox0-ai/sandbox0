@@ -17,15 +17,12 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,13 +33,13 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	managerauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnode"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
-	"github.com/sandbox0-ai/sandbox0/nomad-driver-sandbox0/internal/writerauthority"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -344,7 +341,10 @@ func serve(
 		renewalGrace = leaseTTL / 2
 	}
 	renewalGrace = min(renewalGrace, 5*time.Second)
-	verifier := writerauthority.NewCertVerifier(identities)
+	verifier, err := nodeauth.NewCertificateVerifier(identities)
+	if err != nil {
+		return err
+	}
 	handler, err := managerauthority.NewHandler(managerauthority.HandlerConfig{
 		Verifier: verifier,
 		Store:    store, LeaseTTL: leaseTTL,
@@ -388,36 +388,17 @@ func serve(
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("ok\n"))
 	})
-	authorized, err := writerauthority.NewCertMiddleware(identities, mux)
+	authorized, err := nodeauth.NewCertificateMiddleware(identities, mux)
 	if err != nil {
 		return err
 	}
-	serverCertificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	authorityServer, err := managerauthority.NewServer(managerauthority.ServerConfig{
+		Address: address, CertFile: certFile, KeyFile: keyFile,
+		ClientCAFile: clientCAFile, Handler: authorized,
+	})
 	if err != nil {
-		return fmt.Errorf("load server identity: %w", err)
+		return fmt.Errorf("create writer authority server: %w", err)
 	}
-	caPEM, err := os.ReadFile(clientCAFile)
-	if err != nil {
-		return fmt.Errorf("read client CA: %w", err)
-	}
-	clientRoots := x509.NewCertPool()
-	if !clientRoots.AppendCertsFromPEM(caPEM) {
-		return fmt.Errorf("client CA contains no certificates")
-	}
-	server := &http.Server{
-		Addr: address, Handler: authorized, ReadHeaderTimeout: 2 * time.Second,
-		ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second,
-		TLSConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{serverCertificate},
-			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientRoots,
-		},
-	}
-	defer server.Close()
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return fmt.Errorf("listen for writer authority: %w", err)
-	}
-	defer listener.Close()
 	serviceCtx, cancelService := context.WithCancel(ctx)
 	defer cancelService()
 	go materializer.Run(serviceCtx, func(result rootfsmaterializer.Result, err error) {
@@ -453,15 +434,11 @@ func serve(
 		}
 	}()
 	errCh := make(chan error, 1)
-	go func() { errCh <- server.ServeTLS(listener, "", "") }()
+	go func() { errCh <- authorityServer.Start(serviceCtx) }()
 	log.Printf("Nomad RootFS writer authority listening on %s", address)
 	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx)
 	case err := <-errCh:
-		if err == http.ErrServerClosed {
+		if err == nil || errors.Is(err, context.Canceled) {
 			return nil
 		}
 		return err
@@ -985,19 +962,19 @@ func issue(ctx context.Context, store *sandboxstore.PGSandboxStore, options issu
 	return encoder.Encode(issued)
 }
 
-func parseAllowedClients(raw string) ([]writerauthority.CertIdentity, error) {
+func parseAllowedClients(raw string) ([]nodeauth.CertificateIdentity, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, fmt.Errorf("at least one allowed client is required")
 	}
-	var identities []writerauthority.CertIdentity
+	var identities []nodeauth.CertificateIdentity
 	for index, item := range strings.Split(raw, ",") {
 		parts := strings.Split(strings.TrimSpace(item), ":")
 		if (len(parts) != 3 && len(parts) != 5) || strings.TrimSpace(parts[0]) == "" ||
 			strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
 			return nil, fmt.Errorf("allowed client %d must be commonName:nodeUID:podUID or commonName:nodeUID:podUID:clusterID:nodeID", index)
 		}
-		identity := writerauthority.CertIdentity{
+		identity := nodeauth.CertificateIdentity{
 			CommonName: strings.TrimSpace(parts[0]), NodeUID: strings.TrimSpace(parts[1]), PodUID: strings.TrimSpace(parts[2]),
 		}
 		if len(parts) == 5 {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -80,6 +81,12 @@ func TestRootFSSessionRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 type fakeRuntimeSlotCleaner struct {
 	request      protocol.NodeCleanupControlRequest
 	registration runtimeSlotJournalRegistration
+}
+
+func (c *fakeRuntimeSlotCleaner) runtimeSlotNetworkPrepareRequest(
+	request protocol.NodeNetworkPrepareControlRequest,
+) (protocol.RuntimeSlotNetworkPrepareRequest, error) {
+	return protocol.RuntimeSlotNetworkPrepareRequest{Request: request, NetNSRelativePath: "allocation-1"}, nil
 }
 
 func (c *fakeRuntimeSlotCleaner) RegisterRuntimeSlot(
@@ -366,6 +373,112 @@ func TestRootFSSessionDaemonCleansAndReplaysGrantlessJournaledSlot(t *testing.T)
 	changed.NodeBootID = "another-boot"
 	_, err = daemon.CleanupRuntimeSlot(t.Context(), changed)
 	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+}
+
+func TestRootFSSessionDaemonBuildsCtldPrepareFromDurableJournal(t *testing.T) {
+	root := t.TempDir()
+	netnsRoot := filepath.Join(root, "netns")
+	stableMount := filepath.Join(root, "alloc", "rootfs")
+	netnsPath := filepath.Join(netnsRoot, "allocation.ns")
+	require.NoError(t, os.MkdirAll(stableMount, 0o755))
+	require.NoError(t, os.MkdirAll(netnsRoot, 0o755))
+	require.NoError(t, os.WriteFile(netnsPath, []byte("netns"), 0o600))
+	netnsIdentity, err := networkNamespaceIdentity(netnsPath)
+	require.NoError(t, err)
+	stableMountID, err := stableMountIdentity(stableMount)
+	require.NoError(t, err)
+	mountNamespaceID, err := os.Readlink("/proc/self/ns/mnt")
+	require.NoError(t, err)
+	journal, err := newRuntimeSlotJournal(filepath.Join(root, "runtime-slots.db"), time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, journal.Close()) })
+	socket := filepath.Join(root, "ctld-network.sock")
+	listener, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(socket, 0o600))
+	registrations := make(chan protocol.RuntimeSlotNetworkRegistrationRequest, 1)
+	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != protocol.RuntimeSlotNetworkRegisterPath {
+			http.NotFound(writer, request)
+			return
+		}
+		var registration protocol.RuntimeSlotNetworkRegistrationRequest
+		if err := json.NewDecoder(request.Body).Decode(&registration); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+		registrations <- registration
+		_ = json.NewEncoder(writer).Encode(protocol.RuntimeSlotNetworkRegistrationResponse{NetworkPolicyApplied: true})
+	})}
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+	go func() { _ = server.Serve(listener) }()
+	client, err := protocol.NewRuntimeSlotNetworkClient(socket, time.Second)
+	require.NoError(t, err)
+	containerID := protocol.NomadRunscContainerID("slot-1")
+	registration := runtimeSlotJournalRegistration{
+		Version: runtimeSlotJournalVersion, SlotID: "slot-1", ClusterID: "cluster-1",
+		AllocationID: "allocation-1", NodeID: "node-1", NodeBootID: "boot-1",
+		NetNSPath: netnsPath, NetNSIdentity: netnsIdentity, NetworkChain: networkChainName(containerID),
+		RunscContainerID: containerID, StableMount: stableMount, StableMountID: stableMountID,
+		MountNamespaceID: mountNamespaceID,
+	}
+	daemon := &rootFSSessionDaemon{
+		journal: journal, runtimeSlotNetwork: client,
+		config: PluginConfig{
+			RootFSConsumerMountRoot: root, RootFSConsumerNetNSRoot: netnsRoot,
+		},
+		clusterID: registration.ClusterID, nodeID: registration.NodeID, nodeUID: "node-uid-1",
+	}
+	require.NoError(t, daemon.RegisterRuntimeSlot(t.Context(), registration))
+	ctldRegistration := <-registrations
+	require.Equal(t, registration.SlotID, ctldRegistration.SlotID)
+	require.Equal(t, registration.NetNSIdentity, ctldRegistration.NetNSIdentity)
+	require.Equal(t, "allocation.ns", ctldRegistration.NetNSRelativePath)
+	policy := `{"version":"v1","sandboxId":"sandbox-1","teamId":"team-1","mode":"block-all"}`
+	request := protocol.NodeNetworkPrepareControlRequest{
+		OperationID: "operation-1", ClaimID: "claim-1", SlotID: registration.SlotID,
+		ClusterID: registration.ClusterID, AllocationID: registration.AllocationID,
+		NodeID: registration.NodeID, NodeUID: "node-uid-1", NodeBootID: registration.NodeBootID,
+		NetNSIdentity: registration.NetNSIdentity, NetworkPolicy: policy,
+		PolicyDigest: protocol.NetworkPolicyDigest(policy),
+	}
+	local, err := daemon.runtimeSlotNetworkPrepareRequest(request)
+	require.NoError(t, err)
+	require.Equal(t, request, local.Request)
+	require.Equal(t, "allocation.ns", local.NetNSRelativePath)
+	changed := request
+	changed.AllocationID = "another-allocation"
+	_, err = daemon.runtimeSlotNetworkPrepareRequest(changed)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+}
+
+func TestRootFSSessionDaemonDelegatesPolicyAbsenceToCtld(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root-owned Unix socket test requires root")
+	}
+	directory := t.TempDir()
+	socket := filepath.Join(directory, "ctld-network.sock")
+	listener, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(socket, 0o600))
+	request := testNodeCleanupRequest()
+	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, httpRequest *http.Request) {
+		var received protocol.NodeCleanupControlRequest
+		if err := json.NewDecoder(httpRequest.Body).Decode(&received); err != nil || received != request {
+			http.Error(writer, "unexpected cleanup", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(protocol.RuntimeSlotNetworkCleanupResponse{NetworkPolicyAbsent: true})
+	})}
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+	go func() { _ = server.Serve(listener) }()
+	client, err := protocol.NewRuntimeSlotNetworkClient(socket, time.Second)
+	require.NoError(t, err)
+	legacy := &fakeNetworkRuntime{}
+	daemon := &rootFSSessionDaemon{runtimeSlotNetwork: client, network: legacy}
+	require.NoError(t, daemon.cleanupRuntimeSlotNetwork(t.Context(), request, nil, request.NetNSIdentity, ""))
+	_, cleanups := legacy.snapshot()
+	require.Zero(t, cleanups)
 }
 
 type cleanupRootFSRuntime struct {

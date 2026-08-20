@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/procdapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
@@ -462,6 +463,15 @@ func (p *Planner) validateRequest(request Request, now time.Time) (normalizedReq
 	if len(request.NetworkPolicy) > protocol.MaxNetworkPolicyBytes {
 		return normalizedRequest{}, errors.New("network policy exceeds 64 KiB")
 	}
+	policySpec, err := v1alpha1.ParseNetworkPolicyFromAnnotationStrict(request.NetworkPolicy)
+	if err != nil {
+		return normalizedRequest{}, fmt.Errorf("network policy: %w", err)
+	}
+	if policySpec == nil || policySpec.Version != "v1" ||
+		policySpec.SandboxID != request.SandboxID || policySpec.TeamID != request.TeamID ||
+		(policySpec.Mode != v1alpha1.NetworkModeAllowAll && policySpec.Mode != v1alpha1.NetworkModeBlockAll) {
+		return normalizedRequest{}, errors.New("network policy must be v1 and match the requested sandbox, team, and supported mode")
+	}
 	compatibility, err := digest.Parse(request.CompatibilityDigest)
 	if err != nil || compatibility.Algorithm() != digest.SHA256 || compatibility.String() != request.CompatibilityDigest {
 		return normalizedRequest{}, errors.New("compatibility_digest must be a canonical sha256 digest")
@@ -576,7 +586,12 @@ func validatePolicyToken(token rootfshandoff.NetworkPolicyToken, slot *sandboxst
 		return fmt.Errorf("applied network policy token: %w", err)
 	}
 	if token.PodUID != slot.AllocationID || token.ClaimID != claimID ||
-		token.NetNSIdentity != slot.NetNSIdentity || token.PolicyDigest != policyDigest {
+		token.NetNSIdentity != slot.NetNSIdentity || token.PolicyDigest != policyDigest ||
+		token.PodSandboxID != protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
+			SlotID: slot.ID, ClusterID: slot.ClusterID, AllocationID: slot.AllocationID,
+			NodeID: slot.NodeID, NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID,
+			NetNSIdentity: slot.NetNSIdentity,
+		}) {
 		return errors.New("applied network policy token does not match runtime slot claim")
 	}
 	if _, err := protocol.NomadProcdAddress(token.PodIP); err != nil {

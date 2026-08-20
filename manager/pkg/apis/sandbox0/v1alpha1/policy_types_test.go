@@ -36,3 +36,19 @@ func TestNetworkPolicyRequiresSynchronousApply(t *testing.T) {
 		})
 	}
 }
+
+func TestParseNetworkPolicyFromAnnotationStrict(t *testing.T) {
+	raw := `{"version":"v1","sandboxId":"sandbox-1","teamId":"team-1","mode":"block-all"}`
+	spec, err := ParseNetworkPolicyFromAnnotationStrict(raw)
+	if err != nil || spec == nil || spec.SandboxID != "sandbox-1" {
+		t.Fatalf("strict policy = %+v, %v", spec, err)
+	}
+	for _, invalid := range []string{
+		`{"version":"v1","sandboxId":"sandbox-1","teamId":"team-1","mode":"block-all","unknown":true}`,
+		raw + ` {}`,
+	} {
+		if _, err := ParseNetworkPolicyFromAnnotationStrict(invalid); err == nil {
+			t.Fatalf("invalid strict policy %q was accepted", invalid)
+		}
+	}
+}

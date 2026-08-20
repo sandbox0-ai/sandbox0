@@ -460,6 +460,8 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-cri-endpoint=/host-run/containerd/containerd.sock")
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-containerd-data-root=/host-var-lib/containerd")
 	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-state-root=/var/lib/sandbox0/ctld")
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-runtime-slot-network-socket=/host-run/sandbox0/ctld-runtime-slot-network.sock")
+	assertContainsArg(t, ds.Spec.Template.Spec.Containers[0].Args, "-runtime-slot-netns-root=/host-run/netns")
 	assertNotContainsArgPrefix(t, ds.Spec.Template.Spec.Containers[0].Args, "-kubelet-")
 	assertNotContainsArgPrefix(t, ds.Spec.Template.Spec.Containers[0].Args, "-csi-")
 	if ds.Spec.Template.Spec.Containers[0].SecurityContext == nil || ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged == nil || !*ds.Spec.Template.Spec.Containers[0].SecurityContext.Privileged {
@@ -494,6 +496,12 @@ func reconcileCtldResources(t *testing.T, infra *infrav1alpha1.Sandbox0Infra, ex
 		t.Fatalf("expected ctld config, state, containerd socket, containerd data, and network runtime mounts, got %#v", ds.Spec.Template.Spec.Containers[0].VolumeMounts)
 	}
 	assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "containerd-data", "/host-var-lib/containerd")
+	if infraplan.Compile(infra).Network.Enabled {
+		assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "runtime-slot-control", runtimeSlotControlMountRoot)
+		assertContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "runtime-slot-netns", runtimeSlotNetNSMountRoot)
+		assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "runtime-slot-control", runtimeSlotControlHostRoot)
+		assertHostPathVolume(t, ds.Spec.Template.Spec.Volumes, "runtime-slot-netns", runtimeSlotNetNSHostRoot)
+	}
 	assertNoContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "csi-plugin")
 	assertNoContainerVolumeMount(t, ds.Spec.Template.Spec.Containers[0].VolumeMounts, "kubelet")
 	assertNoPodVolume(t, ds.Spec.Template.Spec.Volumes, "plugin-registration")

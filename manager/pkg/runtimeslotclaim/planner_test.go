@@ -141,7 +141,13 @@ func (f *fakeNetwork) Prepare(_ context.Context, request NetworkPrepareRequest) 
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, request)
 	token := rootfshandoff.NetworkPolicyToken{
-		PodUID: request.AllocationID, PodSandboxID: "nomad-net-1", ClaimID: request.ClaimID,
+		PodUID: request.AllocationID,
+		PodSandboxID: protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
+			SlotID: request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+			NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+			NetNSIdentity: request.NetNSIdentity,
+		}),
+		ClaimID:      request.ClaimID,
 		NetworkEpoch: 1, PolicyDigest: request.PolicyDigest, PodIP: "192.0.2.8",
 		CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
 	}
@@ -302,7 +308,7 @@ func newPlannerFixture(t *testing.T) *plannerFixture {
 	request := Request{
 		OperationID: "operation-1", SandboxID: "sandbox-1", TeamID: "team-1", UserID: "user-1",
 		CompatibilityDigest: store.slot.CompatibilityDigest, ClusterID: store.slot.ClusterID,
-		NetworkPolicy: `{"mode":"allow-all"}`,
+		NetworkPolicy: `{"version":"v1","sandboxId":"sandbox-1","teamId":"team-1","mode":"allow-all"}`,
 		Runtime: runtimecontrol.Assignment{
 			SandboxID: "sandbox-1", TeamID: "team-1", RuntimeGeneration: 19,
 			EnvVars: map[string]string{runtimecontrol.EnvSandboxID: "sandbox-1", "MODE": "test"},
@@ -479,6 +485,18 @@ func TestPlannerValidatesLogicalInputsBeforeAuthorityMutation(t *testing.T) {
 			name: "oversized network policy",
 			mutate: func(request *Request) {
 				request.NetworkPolicy = strings.Repeat("x", protocol.MaxNetworkPolicyBytes+1)
+			},
+		},
+		{
+			name: "mismatched network policy identity",
+			mutate: func(request *Request) {
+				request.NetworkPolicy = `{"version":"v1","sandboxId":"another-sandbox","teamId":"team-1","mode":"allow-all"}`
+			},
+		},
+		{
+			name: "unknown network policy field",
+			mutate: func(request *Request) {
+				request.NetworkPolicy = `{"version":"v1","sandboxId":"sandbox-1","teamId":"team-1","mode":"allow-all","unknown":true}`
 			},
 		},
 	}

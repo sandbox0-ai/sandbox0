@@ -52,6 +52,10 @@ const (
 	networkMetricsServiceSuffix    = "-ctld-network-metrics"
 	ctldHAMetricsPortA             = int32(9192)
 	ctldHAMetricsPortB             = int32(9193)
+	runtimeSlotControlHostRoot     = "/run/sandbox0"
+	runtimeSlotControlMountRoot    = "/host-run/sandbox0"
+	runtimeSlotNetNSHostRoot       = "/var/run/netns"
+	runtimeSlotNetNSMountRoot      = "/host-run/netns"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -194,6 +198,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, infra *infrav1alpha1.Sandbox
 	if networkingAssets != nil {
 		volumeMounts = appendUniqueVolumeMounts(volumeMounts, networkingAssets.VolumeMounts...)
 		volumes = appendUniqueVolumes(volumes, networkingAssets.Volumes...)
+		volumeMounts = appendUniqueVolumeMounts(volumeMounts,
+			corev1.VolumeMount{Name: "runtime-slot-control", MountPath: runtimeSlotControlMountRoot},
+			corev1.VolumeMount{Name: "runtime-slot-netns", MountPath: runtimeSlotNetNSMountRoot, ReadOnly: true},
+		)
+		volumes = appendUniqueVolumes(volumes,
+			corev1.Volume{Name: "runtime-slot-control", VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: runtimeSlotControlHostRoot, Type: &hostPathDirectoryOrCreate},
+			}},
+			corev1.Volume{Name: "runtime-slot-netns", VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: runtimeSlotNetNSHostRoot, Type: &hostPathDirectoryOrCreate},
+			}},
+		)
 	}
 	desiredBySlot := make(map[string]*appsv1.DaemonSet, 2)
 	for _, slot := range []string{dataplane.CtldHASlotA, dataplane.CtldHASlotB} {
@@ -702,6 +718,8 @@ func ctldArgs(infra *infrav1alpha1.Sandbox0Infra, containerdHostDataRoot string)
 		"-containerd-data-root=" + containerdDataMountPath,
 		"-containerd-host-data-root=" + containerdHostDataRoot,
 		"-state-root=/var/lib/sandbox0/ctld",
+		"-runtime-slot-network-socket=" + runtimeSlotControlMountRoot + "/ctld-runtime-slot-network.sock",
+		"-runtime-slot-netns-root=" + runtimeSlotNetNSMountRoot,
 	}
 	if infra != nil && infra.Spec.Services != nil && infra.Spec.Services.Ctld != nil {
 		cfg := infra.Spec.Services.Ctld

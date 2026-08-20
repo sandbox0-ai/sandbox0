@@ -201,6 +201,33 @@ func (r NodeNetworkPrepareControlRequest) Validate() error {
 	return nil
 }
 
+// RuntimeSlotNetworkIncarnationID derives the byte-stable physical network
+// identity independently checked by the region, node channel, and ctld.
+func RuntimeSlotNetworkIncarnationID(request NodeNetworkPrepareControlRequest) string {
+	return runtimeSlotNetworkIncarnationID(
+		request.ClusterID,
+		request.SlotID,
+		request.AllocationID,
+		request.NodeID,
+		request.NodeUID,
+		request.NodeBootID,
+		request.NetNSIdentity,
+	)
+}
+
+func runtimeSlotNetworkIncarnationID(clusterID, slotID, allocationID, nodeID, nodeUID, nodeBootID, netnsIdentity string) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		clusterID,
+		slotID,
+		allocationID,
+		nodeID,
+		nodeUID,
+		nodeBootID,
+		netnsIdentity,
+	}, "\x00")))
+	return "nomad-net-v1:" + hex.EncodeToString(digest[:])
+}
+
 // NewNodeChannelNetworkPrepareCommand builds an exact ctld-owned network
 // policy application command.
 func NewNodeChannelNetworkPrepareCommand(
@@ -385,7 +412,8 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 		if r.NetworkPolicyToken.PodUID != request.AllocationID ||
 			r.NetworkPolicyToken.ClaimID != request.ClaimID ||
 			r.NetworkPolicyToken.PolicyDigest != request.PolicyDigest ||
-			r.NetworkPolicyToken.NetNSIdentity != request.NetNSIdentity {
+			r.NetworkPolicyToken.NetNSIdentity != request.NetNSIdentity ||
+			r.NetworkPolicyToken.PodSandboxID != RuntimeSlotNetworkIncarnationID(*request) {
 			return fmt.Errorf("node channel network policy token belongs to another request")
 		}
 		return nil

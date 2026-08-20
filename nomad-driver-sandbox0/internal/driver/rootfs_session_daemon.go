@@ -53,15 +53,18 @@ type rootFSSessionDaemon struct {
 	config  PluginConfig
 	logger  hclog.Logger
 
-	mu          sync.Mutex
-	wg          sync.WaitGroup
-	inflight    map[string]bool
-	trigger     chan string
-	allocations nomadAllocationSource
-	network     NetworkRuntime
-	journal     *runtimeSlotJournal
-	clusterID   string
-	nodeID      string
+	mu                 sync.Mutex
+	wg                 sync.WaitGroup
+	inflight           map[string]bool
+	trigger            chan string
+	allocations        nomadAllocationSource
+	network            NetworkRuntime
+	runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
+	journal            *runtimeSlotJournal
+	clusterID          string
+	nodeID             string
+	nodeUID            string
+	requireCtldNetwork bool
 }
 
 type rootFSSessionDaemonRuntime interface {
@@ -89,6 +92,7 @@ type NomadAllocationConfig struct {
 	RuntimeSlotNodeUID           string
 	RuntimeSlotChannelPeerURISAN string
 	RuntimeSlotControlRoot       string
+	RuntimeSlotCtldNetworkSocket string
 }
 
 // RunRootFSSessionDaemon runs the node-scoped owner for writer leases,
@@ -113,6 +117,12 @@ func RunRootFSSessionDaemon(
 	}
 	if strings.TrimSpace(nomadConfig.ClusterID) == "" {
 		return fmt.Errorf("cluster_id is required for the session daemon")
+	}
+	if strings.TrimSpace(nomadConfig.RuntimeSlotCtldNetworkSocket) == "" {
+		return fmt.Errorf("runtime_slot_ctld_network_socket is required for warm-slot default deny")
+	}
+	if strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID) == "" {
+		return fmt.Errorf("runtime_slot_node_uid is required for ctld network identity")
 	}
 	if !filepath.IsAbs(strings.TrimSpace(config.RuntimeSlotJournalPath)) || filepath.Clean(config.RuntimeSlotJournalPath) == "/" {
 		return fmt.Errorf("runtime_slot_journal_path must be a non-root absolute path")
@@ -162,15 +172,23 @@ func RunRootFSSessionDaemon(
 		return err
 	}
 	defer runtime.Close()
+	var runtimeSlotNetwork *protocol.RuntimeSlotNetworkClient
+	if controlSocket := strings.TrimSpace(nomadConfig.RuntimeSlotCtldNetworkSocket); controlSocket != "" {
+		runtimeSlotNetwork, err = protocol.NewRuntimeSlotNetworkClient(controlSocket, protocol.DefaultNodeControlTimeout)
+		if err != nil {
+			return fmt.Errorf("create ctld runtime slot network client: %w", err)
+		}
+	}
 	daemon := &rootFSSessionDaemon{
 		runtime: runtime, runner: NewCommandRunsc(config), mounter: systemMounter{},
 		config: config, logger: logger, inflight: make(map[string]bool), trigger: make(chan string, 128),
-		allocations: allocations, network: commandNetworkRuntime{}, journal: journal,
+		allocations: allocations, network: commandNetworkRuntime{}, runtimeSlotNetwork: runtimeSlotNetwork, journal: journal,
 		clusterID: strings.TrimSpace(nomadConfig.ClusterID), nodeID: strings.TrimSpace(nomadConfig.NodeID),
+		nodeUID: strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID), requireCtldNetwork: true,
 	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
 	defer cancelDaemon()
-	nodeChannelAgent, err := newRootFSSessionNodeChannelAgent(config, nomadConfig, daemon)
+	nodeChannelAgent, err := newRootFSSessionNodeChannelAgent(config, nomadConfig, daemon, runtimeSlotNetwork)
 	if err != nil {
 		return err
 	}
@@ -206,7 +224,7 @@ func RunRootFSSessionDaemon(
 // RegisterRuntimeSlot records all physical warm-slot identities before the
 // regional authority is allowed to expose that slot as fast-path ready.
 func (d *rootFSSessionDaemon) RegisterRuntimeSlot(
-	_ context.Context,
+	ctx context.Context,
 	registration runtimeSlotJournalRegistration,
 ) error {
 	if err := registration.Validate(); err != nil {
@@ -249,7 +267,92 @@ func (d *rootFSSessionDaemon) RegisterRuntimeSlot(
 	}
 	registration.StableMount = stableMount
 	registration.NetNSPath = netnsPath
-	return d.journal.Register(registration)
+	if err := d.journal.Register(registration); err != nil {
+		return err
+	}
+	if d.runtimeSlotNetwork == nil {
+		if d.requireCtldNetwork {
+			return fmt.Errorf("ctld runtime slot network control is unavailable: %w", errdefs.ErrUnavailable)
+		}
+		return nil
+	}
+	local, err := d.runtimeSlotNetworkRegistrationRequest(registration)
+	if err != nil {
+		return err
+	}
+	if err := d.runtimeSlotNetwork.Register(ctx, local); err != nil {
+		return fmt.Errorf("apply ctld warm-slot default-deny policy: %w", err)
+	}
+	return nil
+}
+
+func (d *rootFSSessionDaemon) runtimeSlotNetworkRegistrationRequest(
+	registration runtimeSlotJournalRegistration,
+) (protocol.RuntimeSlotNetworkRegistrationRequest, error) {
+	if d == nil || d.clusterID == "" || d.nodeID == "" || d.nodeUID == "" {
+		return protocol.RuntimeSlotNetworkRegistrationRequest{}, fmt.Errorf("runtime slot network daemon identity is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if registration.ClusterID != d.clusterID || registration.NodeID != d.nodeID {
+		return protocol.RuntimeSlotNetworkRegistrationRequest{}, fmt.Errorf("runtime slot network registration does not match this daemon: %w", errdefs.ErrPermissionDenied)
+	}
+	consumer := &rootfssession.ConsumerRegistration{
+		NetNSPath: registration.NetNSPath, NetNSIdentity: registration.NetNSIdentity,
+		NetworkChain: registration.NetworkChain,
+	}
+	resolved, err := d.runtimeSlotNetworkPath(consumer, registration.NetNSIdentity)
+	if err != nil {
+		return protocol.RuntimeSlotNetworkRegistrationRequest{}, err
+	}
+	if resolved == "" {
+		return protocol.RuntimeSlotNetworkRegistrationRequest{}, fmt.Errorf("runtime slot network namespace is absent: %w", errdefs.ErrFailedPrecondition)
+	}
+	relative, err := filepath.Rel(d.config.RootFSConsumerNetNSRoot, resolved)
+	if err != nil {
+		return protocol.RuntimeSlotNetworkRegistrationRequest{}, fmt.Errorf("derive ctld network namespace relative path: %w", err)
+	}
+	request := protocol.RuntimeSlotNetworkRegistrationRequest{
+		SlotID: registration.SlotID, ClusterID: registration.ClusterID,
+		AllocationID: registration.AllocationID, NodeID: registration.NodeID,
+		NodeUID: d.nodeUID, NodeBootID: registration.NodeBootID,
+		NetNSIdentity: registration.NetNSIdentity, NetNSRelativePath: relative,
+	}
+	if err := request.Validate(); err != nil {
+		return protocol.RuntimeSlotNetworkRegistrationRequest{}, fmt.Errorf("validate ctld network registration request: %w: %w", err, errdefs.ErrFailedPrecondition)
+	}
+	return request, nil
+}
+
+func (d *rootFSSessionDaemon) runtimeSlotNetworkPrepareRequest(
+	request protocol.NodeNetworkPrepareControlRequest,
+) (protocol.RuntimeSlotNetworkPrepareRequest, error) {
+	if err := request.Validate(); err != nil {
+		return protocol.RuntimeSlotNetworkPrepareRequest{}, fmt.Errorf("validate runtime slot network prepare request: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if d == nil || d.journal == nil || d.runtimeSlotNetwork == nil {
+		return protocol.RuntimeSlotNetworkPrepareRequest{}, fmt.Errorf("ctld runtime slot network control is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if request.ClusterID != d.clusterID || request.NodeID != d.nodeID {
+		return protocol.RuntimeSlotNetworkPrepareRequest{}, fmt.Errorf("runtime slot network request does not match this daemon: %w", errdefs.ErrPermissionDenied)
+	}
+	record, err := d.journal.Get(request.SlotID)
+	if err != nil {
+		return protocol.RuntimeSlotNetworkPrepareRequest{}, fmt.Errorf("read runtime slot network registration: %w", err)
+	}
+	registration := record.Registration
+	localRegistration, err := d.runtimeSlotNetworkRegistrationRequest(registration)
+	if err != nil {
+		return protocol.RuntimeSlotNetworkPrepareRequest{}, err
+	}
+	if !localRegistration.MatchesPrepare(request) {
+		return protocol.RuntimeSlotNetworkPrepareRequest{}, fmt.Errorf("runtime slot network registration belongs to another incarnation: %w", errdefs.ErrFailedPrecondition)
+	}
+	local := protocol.RuntimeSlotNetworkPrepareRequest{
+		Request: request, NetNSRelativePath: localRegistration.NetNSRelativePath,
+	}
+	if err := local.Validate(); err != nil {
+		return protocol.RuntimeSlotNetworkPrepareRequest{}, fmt.Errorf("validate ctld network prepare request: %w: %w", err, errdefs.ErrFailedPrecondition)
+	}
+	return local, nil
 }
 
 // CleanupRuntimeSlot removes one exact runtime without calling the Nomad task
@@ -279,7 +382,7 @@ func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
 	} else if request.WriterGrantID == "" {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("grantless runtime cleanup requires the node slot journal: %w", errdefs.ErrFailedPrecondition)
 	}
-	if d.runner == nil || d.mounter == nil || d.network == nil {
+	if d.runner == nil || d.mounter == nil || (d.runtimeSlotNetwork == nil && d.network == nil) {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("node runtime cleanup dependencies are unavailable: %w", errdefs.ErrUnavailable)
 	}
 	if request.WriterGrantID != "" && d.runtime == nil {
@@ -341,7 +444,7 @@ func (d *rootFSSessionDaemon) cleanupWriterRuntimeSlot(
 	if err != nil {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("digest local RootFS crash proof: %w", err)
 	}
-	if err := d.cleanupRuntimeSlotNetwork(ctx, matched.Consumer, request.NetNSIdentity, netnsPath); err != nil {
+	if err := d.cleanupRuntimeSlotNetwork(ctx, request, matched.Consumer, request.NetNSIdentity, netnsPath); err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
 	proof := protocol.NodeCleanupControlProof{
@@ -403,7 +506,7 @@ func (d *rootFSSessionDaemon) cleanupGrantlessRuntimeSlot(
 			return protocol.NodeCleanupControlProof{}, fmt.Errorf("stable task root %s remains mounted: %w", stableMount, errdefs.ErrFailedPrecondition)
 		}
 	}
-	if err := d.cleanupRuntimeSlotNetwork(ctx, consumer, request.NetNSIdentity, netnsPath); err != nil {
+	if err := d.cleanupRuntimeSlotNetwork(ctx, request, consumer, request.NetNSIdentity, netnsPath); err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
 	proof := protocol.NodeCleanupControlProof{
@@ -492,10 +595,17 @@ func validateRuntimeSlotCleanupSession(
 
 func (d *rootFSSessionDaemon) cleanupRuntimeSlotNetwork(
 	ctx context.Context,
+	request protocol.NodeCleanupControlRequest,
 	consumer *rootfssession.ConsumerRegistration,
 	expectedIdentity string,
 	validatedPath string,
 ) error {
+	if d.runtimeSlotNetwork != nil {
+		if err := d.runtimeSlotNetwork.Cleanup(ctx, request); err != nil {
+			return fmt.Errorf("remove ctld runtime slot network policy: %w", err)
+		}
+		return nil
+	}
 	if consumer == nil || consumer.NetNSPath == "" || consumer.NetNSIdentity != expectedIdentity || d.network == nil {
 		return fmt.Errorf("runtime slot network cleanup identity is unavailable: %w", errdefs.ErrFailedPrecondition)
 	}
@@ -559,6 +669,11 @@ func (d *rootFSSessionDaemon) health(ctx context.Context) error {
 	}
 	if err := d.journal.Ping(); err != nil {
 		return err
+	}
+	if d.runtimeSlotNetwork != nil {
+		if err := d.runtimeSlotNetwork.Ping(ctx); err != nil {
+			return fmt.Errorf("check ctld runtime slot network control: %w", err)
+		}
 	}
 	return nil
 }

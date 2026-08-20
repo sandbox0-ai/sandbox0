@@ -328,7 +328,7 @@ func newRuntimeSlotLifecycle(
 	}
 	networkProof, err := proofDigest(networkReadyProof{
 		Version: runtimeSlotProofVersion, SlotID: task.ID, NetNSIdentity: netnsIdentity,
-		NetworkChain: handle.networkChain, DefaultPolicy: digestString(""),
+		NetworkChain: handle.networkChain, DefaultPolicy: protocol.NetworkPolicyDigest(protocol.RuntimeSlotWarmNetworkPolicy),
 		AllocationIP: allocationIP, ProcdPort: protocol.NomadProcdPort,
 	})
 	if err != nil {

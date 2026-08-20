@@ -428,8 +428,8 @@ func TestStartTaskRegistrationFailureCleansLocalSlot(t *testing.T) {
 		t.Fatalf("bundle still exists after failed registration: %v", statErr)
 	}
 	_, cleanups := fixture.network.snapshot()
-	if cleanups != 1 {
-		t.Fatalf("network cleanups = %d, want 1", cleanups)
+	if cleanups != 0 {
+		t.Fatalf("legacy network cleanups = %d, want 0 for a ctld-owned runtime slot", cleanups)
 	}
 }
 

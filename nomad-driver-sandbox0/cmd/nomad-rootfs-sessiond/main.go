@@ -66,6 +66,7 @@ func main() {
 	flag.StringVar(&nomadConfig.RuntimeSlotNodeUID, "runtime-slot-node-uid", "", "authenticated regional node UID")
 	flag.StringVar(&nomadConfig.RuntimeSlotChannelPeerURISAN, "runtime-slot-channel-peer-uri-san", "", "exact regional node-channel SPIFFE URI SAN")
 	flag.StringVar(&nomadConfig.RuntimeSlotControlRoot, "runtime-slot-control-root", "/var/run/sandbox0/nomad-slots", "allowed root-owned task control socket directory")
+	flag.StringVar(&nomadConfig.RuntimeSlotCtldNetworkSocket, "runtime-slot-ctld-network-socket", "/run/sandbox0/ctld-runtime-slot-network.sock", "root-owned ctld runtime-slot network control socket")
 	flag.Parse()
 
 	config.RootFSEnabled = true

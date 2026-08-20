@@ -59,6 +59,8 @@ var (
 	haProbeSocket                  = "/run/sandbox0/ctld-ha.sock"
 	haMetricsAddr                  string
 	networkRuntimeConfigPath       = strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH"))
+	runtimeSlotNetworkSocket       = "/host-run/sandbox0/ctld-runtime-slot-network.sock"
+	runtimeSlotNetNSRoot           = "/host-run/netns"
 )
 
 const (
@@ -95,6 +97,8 @@ func main() {
 	flag.StringVar(&haProbeSocket, "ha-probe-socket", "/run/sandbox0/ctld-ha.sock", "container-local ctld HA probe socket")
 	flag.StringVar(&haMetricsAddr, "ha-metrics-addr", "", "dedicated pre-election HTTP listen address for ctld HA metrics; empty disables it")
 	flag.StringVar(&networkRuntimeConfigPath, "ctld-networking-config-path", strings.TrimSpace(os.Getenv("CTLD_NETWORK_CONFIG_PATH")), "explicit ctld network runtime config path; empty disables network policy enforcement")
+	flag.StringVar(&runtimeSlotNetworkSocket, "runtime-slot-network-socket", "/host-run/sandbox0/ctld-runtime-slot-network.sock", "host-visible root-only Unix socket for Nomad runtime-slot network policy control")
+	flag.StringVar(&runtimeSlotNetNSRoot, "runtime-slot-netns-root", "/host-run/netns", "ctld mount of the host Nomad network namespace root")
 	flag.Parse()
 
 	log.Println("Starting ctld")

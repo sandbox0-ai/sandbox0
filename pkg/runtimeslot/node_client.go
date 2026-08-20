@@ -97,7 +97,7 @@ func (c *NodeClient) exchange(ctx context.Context, endpoint, path string, body a
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(dialCtx, "unix", socketPath)
+			return dialSecureNodeSocket(dialCtx, socketPath, c.expectedSocketUID)
 		},
 		DisableKeepAlives: true,
 	}

@@ -75,6 +75,24 @@ func TestNodeClientRejectsSocketOutsideAllowedRootAndInsecureMode(t *testing.T) 
 	require.True(t, errdefs.IsPermissionDenied(err), err)
 }
 
+func TestNodeClientRejectsPathOwnerThatDoesNotMatchConnectedPeer(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("peer/path owner mismatch requires root chown")
+	}
+	root := t.TempDir()
+	socket := filepath.Join(root, "spoofed.sock")
+	listener, err := net.Listen("unix", socket)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	require.NoError(t, os.Chown(socket, 1, -1))
+	require.NoError(t, os.Chmod(socket, 0o600))
+	client, err := newNodeClient(NodeClientConfig{AllowedSocketRoot: root, Timeout: time.Second}, 1)
+	require.NoError(t, err)
+	_, err = client.Claim(t.Context(), "unix://"+socket, testNodeClaimControlRequest())
+	require.Error(t, err)
+	require.True(t, errdefs.IsPermissionDenied(err), err)
+}
+
 func TestNodeClientMapsStableOperationErrors(t *testing.T) {
 	var mu sync.Mutex
 	status := http.StatusBadRequest

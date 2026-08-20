@@ -140,6 +140,23 @@ func TestConfiguredNetworkRuntimeFactoryValidatesBeforePrimaryElection(t *testin
 	}
 }
 
+func TestValidateRuntimeSlotNetworkPathsRejectsAmbientOrRootPaths(t *testing.T) {
+	if err := validateRuntimeSlotNetworkPaths(
+		"/var/lib/sandbox0/ctld", "/host-run/sandbox0/network.sock", "/host-run/netns",
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, values := range [][3]string{
+		{"relative", "/host-run/sandbox0/network.sock", "/host-run/netns"},
+		{"/var/lib/sandbox0/ctld", "/", "/host-run/netns"},
+		{"/var/lib/sandbox0/ctld", "/host-run/sandbox0/network.sock", "/host-run/netns/../netns"},
+	} {
+		if err := validateRuntimeSlotNetworkPaths(values[0], values[1], values[2]); err == nil {
+			t.Fatalf("paths %q were accepted", values)
+		}
+	}
+}
+
 func TestRunHAPrimaryReleasesLeaseAfterNetworkRuntimeFailure(t *testing.T) {
 	root := t.TempDir()
 	primaryCoordinator, err := ctldha.NewCoordinator(ctldha.Config{RootDir: root, Slot: "a"})

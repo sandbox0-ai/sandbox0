@@ -280,7 +280,7 @@ func digestString(raw string) string {
 }
 
 func (h *taskHandle) resetNetworkPolicy() {
-	if h.network == nil || h.networkChain == "" || h.netnsPath() == "" {
+	if h.runtimeSlotNeeded || h.network == nil || h.networkChain == "" || h.netnsPath() == "" {
 		return
 	}
 	_ = h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, NetworkPolicy{Mode: networkPolicyBlockAll})
@@ -306,7 +306,7 @@ func (h *taskHandle) Prepare(config TaskConfig) error {
 	if err := os.MkdirAll(h.rootMount, 0o755); err != nil {
 		return fmt.Errorf("create OCI rootfs mountpoint: %w", err)
 	}
-	if h.network != nil && h.netnsPath() != "" {
+	if !h.runtimeSlotNeeded && h.network != nil && h.netnsPath() != "" {
 		if err := h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, NetworkPolicy{Mode: networkPolicyBlockAll}); err != nil {
 			_ = h.Close(false)
 			return fmt.Errorf("apply warm default-deny policy: %w", err)
@@ -399,14 +399,19 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		h.setPhase(phaseWarm)
 		return errors.New("policy token and writer epoch are required")
 	}
-	networkPolicy, networkDigest, err := decodeNetworkPolicy(request.NetworkPolicy)
-	if err != nil {
-		h.setPhase(phaseWarm)
-		return err
-	}
 	h.mu.Lock()
 	runtimeSlotNeeded := h.runtimeSlotNeeded
 	h.mu.Unlock()
+	var err error
+	networkPolicy := NetworkPolicy{}
+	networkDigest := digestString(request.NetworkPolicy)
+	if !runtimeSlotNeeded {
+		networkPolicy, networkDigest, err = decodeNetworkPolicy(request.NetworkPolicy)
+		if err != nil {
+			h.setPhase(phaseWarm)
+			return err
+		}
+	}
 	runtimeRevision := ""
 	if runtimeSlotNeeded && request.Stage == nil {
 		h.setPhase(phaseWarm)
@@ -483,7 +488,7 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 		h.setPhase(phaseWarm)
 		return err
 	}
-	if h.network != nil && h.netnsPath() != "" {
+	if !runtimeSlotNeeded && h.network != nil && h.netnsPath() != "" {
 		if err := h.network.Apply(context.Background(), h.netnsPath(), h.networkChain, networkPolicy); err != nil {
 			h.setPhase(phaseWarm)
 			return fmt.Errorf("apply claim network policy: %w", err)
@@ -930,7 +935,7 @@ func (h *taskHandle) Close(force bool) error {
 		}
 		retireCancel()
 	}
-	if h.network != nil && h.networkChain != "" && h.netnsPath() != "" {
+	if !h.runtimeSlotNeeded && h.network != nil && h.networkChain != "" && h.netnsPath() != "" {
 		if err := h.network.Cleanup(context.Background(), h.netnsPath(), h.networkChain); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -1155,7 +1160,7 @@ func (h *taskHandle) crashAbandonPersistedRootFS(exitErr error) error {
 	if err != nil {
 		return fmt.Errorf("crash-fence recovered RootFS task: %w", err)
 	}
-	if h.network != nil && h.networkChain != "" && h.netnsPath() != "" {
+	if !h.runtimeSlotNeeded && h.network != nil && h.networkChain != "" && h.netnsPath() != "" {
 		if err := h.network.Cleanup(context.Background(), h.netnsPath(), h.networkChain); err != nil {
 			return fmt.Errorf("cleanup crashed task network policy: %w", err)
 		}

@@ -87,6 +87,39 @@ func TestNewCopiesRuntimeWatchTCPPorts(t *testing.T) {
 	}
 }
 
+func TestNewCopiesRuntimeSlotNetworkPaths(t *testing.T) {
+	d := New(&apiconfig.NetworkRuntimeConfig{}, zap.NewNop(), nil, Options{
+		RuntimeSlotStatePath:     "/var/lib/sandbox0/ctld/runtime-slot-network.db",
+		RuntimeSlotControlSocket: "/host-run/sandbox0/ctld-runtime-slot-network.sock",
+		RuntimeSlotNetNSRoot:     "/host-run/netns",
+	})
+	if d.runtimeSlotStatePath != "/var/lib/sandbox0/ctld/runtime-slot-network.db" ||
+		d.runtimeSlotControlSocket != "/host-run/sandbox0/ctld-runtime-slot-network.sock" ||
+		d.runtimeSlotNetNSRoot != "/host-run/netns" {
+		t.Fatalf("runtime slot network paths = %q, %q, %q", d.runtimeSlotStatePath, d.runtimeSlotControlSocket, d.runtimeSlotNetNSRoot)
+	}
+}
+
+func TestMergeSandboxInputsRejectsKeyAndIPCollisions(t *testing.T) {
+	base := []*watcher.SandboxInfo{{Namespace: "default", Name: "sandbox-a", PodIP: "10.0.0.2"}}
+	runtimeSlot := &watcher.SandboxInfo{Namespace: "nomad", Name: "slot-a", PodIP: "10.0.0.3"}
+	merged, err := mergeSandboxInputs(base, []*watcher.SandboxInfo{runtimeSlot})
+	if err != nil || len(merged) != 2 {
+		t.Fatalf("merge = %+v, %v", merged, err)
+	}
+	changed := *runtimeSlot
+	changed.PodIP = "10.0.0.2"
+	if _, err := mergeSandboxInputs(base, []*watcher.SandboxInfo{&changed}); err == nil {
+		t.Fatal("shared source IP was accepted")
+	}
+	changed = *runtimeSlot
+	changed.Namespace = "default"
+	changed.Name = "sandbox-a"
+	if _, err := mergeSandboxInputs(base, []*watcher.SandboxInfo{&changed}); err == nil {
+		t.Fatal("duplicate sandbox key was accepted")
+	}
+}
+
 func TestRedirectBypassCIDRsIncludesClusterDNSCIDRs(t *testing.T) {
 	got := redirectBypassCIDRs(
 		[]string{"10.96.0.10", "10.244.0.53"},

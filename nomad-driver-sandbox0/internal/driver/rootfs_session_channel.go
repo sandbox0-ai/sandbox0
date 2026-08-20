@@ -22,26 +22,38 @@ import (
 	"strings"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 type rootFSSessionNodeChannelExecutor struct {
-	clusterID string
-	nodeID    string
-	nodeUID   string
-	control   *protocol.NodeClient
-	cleaner   runtimeSlotCleaner
+	clusterID     string
+	nodeID        string
+	nodeUID       string
+	control       *protocol.NodeClient
+	cleaner       runtimeSlotCleaner
+	network       *protocol.RuntimeSlotNetworkClient
+	networkSource runtimeSlotNetworkPrepareSource
 }
 
 var _ protocol.NodeChannelExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
+var _ protocol.NodeChannelNetworkExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
+
+type runtimeSlotNetworkPrepareSource interface {
+	runtimeSlotNetworkPrepareRequest(protocol.NodeNetworkPrepareControlRequest) (protocol.RuntimeSlotNetworkPrepareRequest, error)
+}
 
 func newRootFSSessionNodeChannelAgent(
 	config PluginConfig,
 	nomadConfig NomadAllocationConfig,
 	cleaner runtimeSlotCleaner,
+	network *protocol.RuntimeSlotNetworkClient,
 ) (*protocol.NodeChannelAgent, error) {
 	if !nomadConfig.RuntimeSlotChannelEnabled {
 		return nil, nil
+	}
+	if network == nil {
+		return nil, fmt.Errorf("ctld runtime slot network control is required for the node channel: %w", errdefs.ErrFailedPrecondition)
 	}
 	rawControlRoot := nomadConfig.RuntimeSlotControlRoot
 	controlRoot := filepath.Clean(strings.TrimSpace(rawControlRoot))
@@ -61,11 +73,19 @@ func newRootFSSessionNodeChannelAgent(
 		nodeUID:   strings.TrimSpace(nomadConfig.RuntimeSlotNodeUID),
 		control:   control,
 		cleaner:   cleaner,
+		network:   network,
+	}
+	if network != nil {
+		source, ok := cleaner.(runtimeSlotNetworkPrepareSource)
+		if !ok {
+			return nil, fmt.Errorf("runtime slot cleaner cannot resolve ctld network namespaces: %w", errdefs.ErrFailedPrecondition)
+		}
+		executor.networkSource = source
 	}
 	if executor.clusterID == "" || executor.nodeID == "" {
 		return nil, fmt.Errorf("runtime slot cluster and Nomad node IDs are required: %w", errdefs.ErrInvalidArgument)
 	}
-	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
+	agentConfig := protocol.NodeChannelAgentConfig{
 		BaseURL: config.RootFSAuthorityURL, CAFile: config.RootFSAuthorityCAFile,
 		ClientCertFile: config.RootFSAuthorityClientCertFile,
 		ClientKeyFile:  config.RootFSAuthorityClientKeyFile,
@@ -75,11 +95,33 @@ func newRootFSSessionNodeChannelAgent(
 		NodeID:         executor.nodeID,
 		NodeUID:        executor.nodeUID, NodeBootIDFile: config.RuntimeSlotNodeBootIDFile,
 		Executor: executor,
-	})
+	}
+	if network != nil {
+		agentConfig.NetworkExecutor = executor
+	}
+	agent, err := protocol.NewNodeChannelAgent(agentConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create runtime slot node channel agent: %w", err)
 	}
 	return agent, nil
+}
+
+func (e *rootFSSessionNodeChannelExecutor) PrepareNetwork(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodeNetworkPrepareControlRequest,
+) (rootfshandoff.NetworkPolicyToken, error) {
+	if err := e.validateTarget(target); err != nil {
+		return rootfshandoff.NetworkPolicyToken{}, err
+	}
+	if e.network == nil || e.networkSource == nil {
+		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("ctld runtime slot network control is unavailable: %w", errdefs.ErrFailedPrecondition)
+	}
+	local, err := e.networkSource.runtimeSlotNetworkPrepareRequest(request)
+	if err != nil {
+		return rootfshandoff.NetworkPolicyToken{}, err
+	}
+	return e.network.Prepare(ctx, local)
 }
 
 func (e *rootFSSessionNodeChannelExecutor) Claim(

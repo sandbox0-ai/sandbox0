@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -111,6 +112,9 @@ func configuredNetworkRuntimeFactory(path, ctldHTTPAddr, runtimeWatchHTTPAddr st
 	if path == "" {
 		return nil, nil
 	}
+	if err := validateRuntimeSlotNetworkPaths(stateRoot, runtimeSlotNetworkSocket, runtimeSlotNetNSRoot); err != nil {
+		return nil, err
+	}
 	cfg, err := loadNetworkRuntimeConfig(path)
 	if err != nil {
 		return nil, err
@@ -124,6 +128,19 @@ func configuredNetworkRuntimeFactory(path, ctldHTTPAddr, runtimeWatchHTTPAddr st
 	return func() (primaryService, error) {
 		return newNetworkRuntimeService(cfg.DeepCopy(), runtimeWatchPort)
 	}, nil
+}
+
+func validateRuntimeSlotNetworkPaths(state, socket, netnsRoot string) error {
+	for name, value := range map[string]string{
+		"ctld state root": state, "runtime slot network socket": socket,
+		"runtime slot netns root": netnsRoot,
+	} {
+		trimmed := strings.TrimSpace(value)
+		if !filepath.IsAbs(trimmed) || filepath.Clean(trimmed) != trimmed || trimmed == string(filepath.Separator) {
+			return fmt.Errorf("%s must be a canonical non-root absolute path", name)
+		}
+	}
+	return nil
 }
 
 func listenerPort(address, label string) (int, error) {
@@ -184,7 +201,10 @@ func newNetworkRuntimeService(cfg *apiconfig.NetworkRuntimeConfig, runtimeWatchP
 	)
 	return &networkRuntimeService{
 		daemon: ctldnetworking.New(cfg, logger, provider, ctldnetworking.Options{
-			RuntimeWatchTCPPorts: []int{runtimeWatchPort},
+			RuntimeWatchTCPPorts:     []int{runtimeWatchPort},
+			RuntimeSlotStatePath:     filepath.Join(stateRoot, "runtime-slot-network.db"),
+			RuntimeSlotControlSocket: runtimeSlotNetworkSocket,
+			RuntimeSlotNetNSRoot:     runtimeSlotNetNSRoot,
 		}),
 		logger:        logger,
 		observability: provider,

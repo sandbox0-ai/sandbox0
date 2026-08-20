@@ -18,7 +18,8 @@ Implemented:
 - generic writable OCI bundle generation
 - generic warm allocation with no image-specific runtime state
 - local Unix control socket with `GET /status` and `PUT /claim`
-- warm default-deny and claim-time L3/L4 network policy in the Nomad netns
+- ctld-journaled warm default-deny and claim-time production network policy,
+  compiled and redirected through the normal node TPROXY/ipset path
 - block-map RootFS attach through NBD, XFS, and host OverlayFS
 - PostgreSQL writer consume, renewal, planned seal, and terminal publication
 - node-scoped `nomad-rootfs-sessiond` ownership of writer renewals, NBD, XFS,
@@ -41,9 +42,9 @@ Implemented:
 - unit tests with a fake runsc runtime
 - PostgreSQL-backed regional warm-slot authority and authenticated v1 node API
   for register, readiness, heartbeat, runsc starting, and command readiness
-- synchronous task-driver registration after the control socket, default-deny
-  netns policy, root mount, runsc compatibility, and RootFS session-daemon
-  health proofs are ready
+- synchronous task-driver registration only after the control socket, ctld
+  warm-policy acknowledgement, root mount, runsc compatibility, and RootFS
+  session-daemon health proofs are ready
 - exact allocation/node-boot re-registration and bounded regional heartbeats
   after a task-driver restart; a warm slot is poisoned if its authority lease is
   lost, while an already claimed writer remains fenced by the independent
@@ -83,8 +84,9 @@ Implemented:
   cluster, Nomad node, and node UID plus the reported boot ID, replaces
   same-agent stale streams without overlapping commands, keeps a different
   standby agent from preempting a live owner,
-  and carries exact claim, command-ready, and plugin-independent cleanup to
-  root-owned local executors; request digests bind every target and payload,
+  and carries exact network prepare, claim, command-ready, and
+  plugin-independent cleanup to root-owned local executors; request digests
+  bind every target and payload,
   responses are strictly correlated, up to 64 independent slot operations run
   concurrently per node without serializing the warm path, and no raw writer
   token is persisted by the regional hub
@@ -102,7 +104,6 @@ Not implemented:
   reconciliation of active node journal registrations whose regional register
   response was ambiguous; current compaction uses a bounded local TTL
 - production remote-block service and cross-node device ownership
-- full network-policy incarnation-token persistence
 - procd first-command-ready accounting
 - guest stdout/stderr console forwarding
 - full cgroup and Nomad stats integration
@@ -157,11 +158,15 @@ Procd exposes `PUT /api/v1/runtime/command-ready-probe` behind its normal
 authentication, runtime-ready, and lifecycle-barrier middleware. A trusted
 caller submits the exact response and process identity to the driver's
 root-only `PUT /command-ready`; the driver then reports regional active with a
-canonical digest. Production manager/ctld orchestration of those calls remains
-to be implemented.
+canonical digest. Production manager orchestration of the claim and
+command-ready calls, plus migration of the remaining node executor into ctld,
+remains to be implemented.
 
-The network policy implementation is intentionally minimal: production ctld
-owns policy compilation, TPROXY, applied-token persistence, and L7 handling.
+Ctld now owns runtime-slot warm default-deny, strict v1 policy validation,
+production L4/L7 compilation, TPROXY/ipset application, durable physical
+incarnation/epoch state, exact claim-token replay, and synchronized terminal
+absence. The remaining network gates are privileged multi-node validation and
+the final deletion of the non-runtime compatibility implementation.
 
 ## Build and test
 
@@ -256,15 +261,23 @@ journal, and Nomad allocation catalog are all readable.
 Set `--consumer-netns-root` to Nomad's root-owned persistent namespace
 directory (`/var/run/netns` by default). Consumer registration resolves both
 the configured root and namespace path, persists only the canonical path, and
-binds its device/inode identity. Cleanup rejects a symlink escape or replaced
-namespace before invoking `nsenter`.
+binds its device/inode identity. Configure
+`--runtime-slot-ctld-network-socket` with the host-visible mode-`0600`,
+root-owned socket served by the elected ctld HA primary. Sessiond passes only
+the validated path relative to `--consumer-netns-root`; ctld resolves it below
+its read-only host-netns mount, rechecks the device/inode incarnation, and
+derives the allocation IPv4 address from that namespace.
 
 The daemon exposes private runtime-slot registration and
 `PUT /v1/runtime-slots/cleanup` only through its mode-`0600` Unix socket.
 Before regional readiness, the task driver registers the deterministic
-physical identities so sessiond can later clean a warm slot without the plugin
-or a RootFS writer session. Cleanup persists the exact request before touching
-runsc, mounts, or network state and persists its absence proof before replying.
+physical identities. Sessiond durably journals them, asks ctld to inspect the
+same namespace through its read-only host mount, and waits until the warm
+default-deny policy is present in the normal node redirect set. Regional
+readiness is not reported before that acknowledgement. Sessiond can therefore
+later clean a warm slot without the plugin or a RootFS writer session. Cleanup
+persists the exact request before touching runsc, mounts, or network state and
+persists its absence proof before replying.
 Completed proofs expire after 24 hours and compact external RootFS fences after
 48 hours. These TTLs bound local state but are not a PostgreSQL terminal
 acknowledgement protocol; unresolved active registrations are not yet compacted
@@ -277,7 +290,17 @@ derives cluster, Nomad node, and node UID from authentication, checks the
 advertised boot ID, and routes only commands whose cluster, node, allocation,
 slot, UID, boot, and local control endpoint match the canonical request. The
 agent then invokes the mode-`0600`, root-owned task socket or the
-plugin-independent cleaner locally.
+plugin-independent cleaner locally. Network preparation is advertised only
+when the ctld client is configured. Ctld requires the pre-existing exact warm
+registration, then durably transitions it to the region-authenticated claim
+operation and strict v1 policy. The journal binds namespace incarnation,
+allocation IP, monotonic network epoch, logical sandbox/team identity, and the
+deterministic physical token before merging the slot into the same policy
+compiler and node-level TPROXY/ipset reconciliation used by Kubernetes
+sandboxes. It replies only after a successful redirect sync; cleanup similarly
+waits for synchronized absence. The shared host journal lets the standby ctld
+replay the same token and desired set after promotion, and retained terminal
+records are pruned periodically rather than only at process startup.
 It requires `--runtime-slot-node-uid`, an exact
 `--runtime-slot-channel-peer-uri-san`, and an allow-root supplied by
 `--runtime-slot-control-root`; ambient proxies are disabled and certificates,
@@ -287,8 +310,13 @@ The authority's `--allowed-clients` entry for a channel identity must use
 `commonName:nodeUID:podUID:clusterID:nodeID`; legacy three-field entries remain
 valid for writer and slot APIs but cannot establish a node channel.
 The regional hub is transient by design: PostgreSQL owns retries and the node
-journal owns cleanup proof. The current local executor lives in sessiond and
-must move into the final ctld-owned runtime before legacy removal. The
+journal owns cleanup proof. Runtime-slot policy compilation and application
+are now ctld-owned; the outbound node agent and remaining runsc/mount cleanup
+executor still live in sessiond and must move into the final ctld-owned
+runtime before legacy removal. The task driver no longer installs its PoC
+namespace-local iptables policy for regional runtime slots. That legacy path
+remains only for non-runtime-slot compatibility and must be deleted at final
+cutover. The
 10,000-slot Bolt test proves local page reuse only; it does not constitute the
 required privileged, multi-node, end-to-end 24-hour soak.
 

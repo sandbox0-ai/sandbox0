@@ -23,7 +23,7 @@ func (e *testNodeChannelExecutor) PrepareNetwork(
 	request NodeNetworkPrepareControlRequest,
 ) (rootfshandoff.NetworkPolicyToken, error) {
 	return rootfshandoff.NetworkPolicyToken{
-		PodUID: request.AllocationID, PodSandboxID: "allocation-network-1",
+		PodUID: request.AllocationID, PodSandboxID: RuntimeSlotNetworkIncarnationID(request),
 		ClaimID: request.ClaimID, NetworkEpoch: 1, PolicyDigest: request.PolicyDigest,
 		PodIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
 	}, nil

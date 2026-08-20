@@ -62,7 +62,7 @@ func (e *channelTestExecutor) PrepareNetwork(
 	e.networks = append(e.networks, request)
 	e.mu.Unlock()
 	return rootfshandoff.NetworkPolicyToken{
-		PodUID: request.AllocationID, PodSandboxID: "allocation-network-1",
+		PodUID: request.AllocationID, PodSandboxID: protocol.RuntimeSlotNetworkIncarnationID(request),
 		ClaimID: request.ClaimID, NetworkEpoch: 1, PolicyDigest: request.PolicyDigest,
 		PodIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
 	}, nil

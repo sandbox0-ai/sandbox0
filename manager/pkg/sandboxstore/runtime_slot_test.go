@@ -117,6 +117,17 @@ func TestNormalizeAcquireRuntimeSlotRequestRejectsNoncanonicalOperationBindings(
 	}
 }
 
+func TestNormalizeFenceRuntimeSlotForReconcileRequest(t *testing.T) {
+	normalized, err := normalizeFenceRuntimeSlotForReconcileRequest(&FenceRuntimeSlotForReconcileRequest{
+		SlotID: " slot-1 ", ExpectedRevision: 3,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "slot-1", normalized.SlotID)
+
+	_, err = normalizeFenceRuntimeSlotForReconcileRequest(&FenceRuntimeSlotForReconcileRequest{SlotID: "slot-1"})
+	require.ErrorContains(t, err, "expected_revision")
+}
+
 func runtimeSlotTestRegistration(slotID, allocationID string) *RegisterRuntimeSlotRequest {
 	return &RegisterRuntimeSlotRequest{
 		SlotID: slotID, ClusterID: "cluster-a", AllocationID: allocationID,

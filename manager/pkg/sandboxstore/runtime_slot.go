@@ -36,6 +36,7 @@ var (
 	ErrRuntimeSlotNotFound    = errors.New("runtime slot not found")
 	ErrRuntimeSlotConflict    = errors.New("runtime slot conflict")
 	ErrRuntimeSlotInvalid     = errors.New("runtime slot state is invalid")
+	ErrRuntimeSlotNotDue      = errors.New("runtime slot is not due for reconciliation")
 	ErrRuntimeSlotUnavailable = errors.New("no fast-path runtime slot is available")
 )
 
@@ -172,6 +173,11 @@ type BeginRuntimeSlotQuiesceRequest struct {
 	ClaimID     string
 }
 
+type FenceRuntimeSlotForReconcileRequest struct {
+	SlotID           string
+	ExpectedRevision int64
+}
+
 type MarkRuntimeSlotAllocationMissingRequest struct {
 	SlotID            string
 	AllocationID      string
@@ -284,14 +290,56 @@ func (s *PGSandboxStore) HeartbeatRuntimeSlot(ctx context.Context, request *Hear
 		if !runtimeSlotCallerMatches(slot, normalized.AllocationID, normalized.NodeUID, normalized.NodeBootID) {
 			return nil, fmt.Errorf("%w: heartbeat caller does not match slot incarnation", ErrRuntimeSlotConflict)
 		}
-		if slot.State == RuntimeSlotStateTerminal {
-			return nil, fmt.Errorf("%w: terminal slot cannot heartbeat", ErrRuntimeSlotInvalid)
+		if slot.State == RuntimeSlotStateQuiescing || slot.State == RuntimeSlotStateOrphaned ||
+			slot.State == RuntimeSlotStateTerminal {
+			return nil, fmt.Errorf("%w: slot in %s cannot heartbeat", ErrRuntimeSlotInvalid, slot.State)
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE manager.runtime_slots
 			SET heartbeat_expires_at = NOW() + ($2 * INTERVAL '1 millisecond'), updated_at = NOW()
 			WHERE slot_id = $1
 		`, slot.ID, normalized.TTL.Milliseconds())
+		return nil, err
+	})
+}
+
+// FenceRuntimeSlotForReconcile atomically rechecks regional expiry before a
+// plugin-independent controller takes ownership of a claimed runtime. The
+// expired heartbeat is retained so a reconciler crash remains immediately
+// discoverable, and later node heartbeats cannot revive the fenced slot.
+func (s *PGSandboxStore) FenceRuntimeSlotForReconcile(
+	ctx context.Context,
+	request *FenceRuntimeSlotForReconcileRequest,
+) (*RuntimeSlot, error) {
+	normalized, err := normalizeFenceRuntimeSlotForReconcileRequest(request)
+	if err != nil {
+		return nil, err
+	}
+	return s.withLockedRuntimeSlot(ctx, normalized.SlotID, func(tx pgx.Tx, slot *RuntimeSlot) (*RuntimeSlot, error) {
+		if slot.State == RuntimeSlotStateQuiescing || slot.State == RuntimeSlotStateOrphaned {
+			return nil, nil
+		}
+		if slot.ClaimID == "" ||
+			(slot.State != RuntimeSlotStateClaiming && slot.State != RuntimeSlotStateStarting && slot.State != RuntimeSlotStateActive) {
+			return nil, fmt.Errorf("%w: only a live claimed slot can be reconcile-fenced", ErrRuntimeSlotInvalid)
+		}
+		if slot.Revision != normalized.ExpectedRevision {
+			return nil, fmt.Errorf("%w: runtime slot revision changed", ErrRuntimeSlotConflict)
+		}
+		due := !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt)
+		if slot.State == RuntimeSlotStateClaiming {
+			due = due || !slot.ClaimLeaseExpiresAt.After(slot.AuthorityObservedAt)
+		}
+		if !due {
+			return nil, ErrRuntimeSlotNotDue
+		}
+		_, err := tx.Exec(ctx, `
+			UPDATE manager.runtime_slots
+			SET state = $2, revision = revision + 1,
+				heartbeat_expires_at = LEAST(heartbeat_expires_at, NOW()),
+				quiescing_at = NOW(), updated_at = NOW()
+			WHERE slot_id = $1
+		`, slot.ID, RuntimeSlotStateQuiescing)
 		return nil, err
 	})
 }
@@ -861,6 +909,21 @@ func normalizeBindRuntimeSlotWriterGrantRequest(request *BindRuntimeSlotWriterGr
 	normalized.GrantID = strings.TrimSpace(normalized.GrantID)
 	if normalized.GrantID == "" || len(normalized.GrantID) > 512 {
 		return nil, fmt.Errorf("grant_id is required and must not exceed 512 bytes")
+	}
+	return &normalized, nil
+}
+
+func normalizeFenceRuntimeSlotForReconcileRequest(request *FenceRuntimeSlotForReconcileRequest) (*FenceRuntimeSlotForReconcileRequest, error) {
+	if request == nil {
+		return nil, fmt.Errorf("runtime slot reconcile fence request is required")
+	}
+	normalized := *request
+	normalized.SlotID = strings.TrimSpace(normalized.SlotID)
+	if normalized.SlotID == "" || len(normalized.SlotID) > 512 {
+		return nil, fmt.Errorf("slot_id is required and must not exceed 512 bytes")
+	}
+	if normalized.ExpectedRevision <= 0 {
+		return nil, fmt.Errorf("expected_revision must be positive")
 	}
 	return &normalized, nil
 }

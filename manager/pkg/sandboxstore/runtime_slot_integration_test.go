@@ -278,6 +278,61 @@ func TestRuntimeSlotUnclaimedPurgeBecomesTerminalIntegration(t *testing.T) {
 	require.Equal(t, proof, terminal.TerminalProofDigest)
 }
 
+func TestRuntimeSlotReconcileFenceRechecksExpiryIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	filesystem, generation := runtimeSlotTestGeneration(t, store, "sandbox-reconcile-fence")
+	registration := runtimeSlotTestRegistration("slot-reconcile-fence", "allocation-reconcile-fence")
+	_, err := store.RegisterRuntimeSlot(ctx, registration)
+	require.NoError(t, err)
+	proof := bytes.Repeat([]byte{0x7b}, 32)
+	_, err = store.ReportRuntimeSlotReady(ctx, &ReportRuntimeSlotReadyRequest{
+		SlotID: registration.SlotID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID,
+		RuntimeReadyDigest: proof, NetworkReadyDigest: proof, StorageReadyDigest: proof,
+		HeartbeatTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	claimed, err := store.AcquireRuntimeSlot(ctx, &AcquireRuntimeSlotRequest{
+		OperationID: "operation-reconcile-fence", ClaimID: "claim-reconcile-fence",
+		SandboxID: "sandbox-reconcile-fence", FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
+		CompatibilityDigest: registration.CompatibilityDigest, RuntimeAssignmentRevision: strings.Repeat("ab", 32),
+		NetworkPolicyDigest: "sha256:" + strings.Repeat("cd", 32), ClaimTTL: time.Minute,
+	})
+	require.NoError(t, err)
+
+	request := &FenceRuntimeSlotForReconcileRequest{SlotID: claimed.ID, ExpectedRevision: claimed.Revision}
+	_, err = store.FenceRuntimeSlotForReconcile(ctx, request)
+	require.ErrorIs(t, err, ErrRuntimeSlotNotDue)
+
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET claim_lease_expires_at = NOW() - INTERVAL '1 second'
+		WHERE slot_id = $1
+	`, claimed.ID)
+	require.NoError(t, err)
+	fenced, err := store.FenceRuntimeSlotForReconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateQuiescing, fenced.State)
+	require.Equal(t, claimed.Revision+1, fenced.Revision)
+	require.False(t, fenced.HeartbeatExpiresAt.After(fenced.AuthorityObservedAt))
+
+	_, err = store.HeartbeatRuntimeSlot(ctx, &HeartbeatRuntimeSlotRequest{
+		SlotID: claimed.ID, AllocationID: registration.AllocationID,
+		NodeUID: registration.NodeUID, NodeBootID: registration.NodeBootID, TTL: time.Minute,
+	})
+	require.ErrorIs(t, err, ErrRuntimeSlotInvalid)
+	retried, err := store.FenceRuntimeSlotForReconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, fenced.Revision, retried.Revision)
+
+	candidates, err := store.ListRuntimeSlotsForReconcile(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.Equal(t, fenced.ID, candidates[0].ID)
+}
+
 func TestRuntimeSlotPrelaunchAbortRetainsClaimBindingIntegration(t *testing.T) {
 	ctx := context.Background()
 	store := NewPGSandboxStore(newSandboxStoreIntegrationPool(t))

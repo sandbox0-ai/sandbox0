@@ -103,7 +103,29 @@ type Observation struct {
 	Duration    time.Duration
 	Succeeded   bool
 	WithinSLO   bool
+	Phases      []PhaseObservation
 }
+
+// PhaseObservation is one bounded internal segment of the same end-to-end
+// claim sample. Phase names are constants so metrics never acquire operation,
+// sandbox, slot, or dependency-specific cardinality.
+type PhaseObservation struct {
+	Phase     string
+	Duration  time.Duration
+	Succeeded bool
+}
+
+const (
+	PhaseRequestValidation  = "request_validation"
+	PhaseIngressToPlanner   = "ingress_to_planner"
+	PhaseRootFSMetadata     = "rootfs_metadata"
+	PhaseSlotAcquire        = "slot_acquire"
+	PhaseNetworkPrepare     = "network_prepare"
+	PhaseWriterIssueBind    = "writer_issue_bind"
+	PhaseNodeClaim          = "node_claim"
+	PhaseProcdProbe         = "procd_probe"
+	PhaseCommandReadyCommit = "command_ready_commit"
+)
 
 // Observer receives one terminal sample for every Planner.Claim call.
 type Observer interface {
@@ -154,6 +176,7 @@ type Result struct {
 	CommandProof    protocol.CommandReadyProof
 	Duration        time.Duration
 	WithinSLO       bool
+	Phases          []PhaseObservation
 }
 
 // Planner executes one region-authoritative Nomad warm-slot claim.
@@ -216,6 +239,14 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		startedAt = callStarted
 	}
 	observedSlotID := ""
+	phases := make([]PhaseObservation, 0, 9)
+	recordPhase := func(phase string, started time.Time, succeeded bool) {
+		duration := time.Since(started)
+		if duration < 0 {
+			duration = 0
+		}
+		phases = append(phases, PhaseObservation{Phase: phase, Duration: duration, Succeeded: succeeded})
+	}
 	defer func() {
 		completedAt := p.now().UTC()
 		duration := completedAt.Sub(startedAt)
@@ -226,46 +257,62 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		if result != nil {
 			result.Duration = duration
 			result.WithinSLO = withinSLO
+			result.Phases = append([]PhaseObservation(nil), phases...)
 		}
 		if p.observer != nil {
 			p.observer.ObserveRuntimeSlotClaim(Observation{
 				OperationID: request.OperationID, SandboxID: request.SandboxID, SlotID: observedSlotID,
 				StartedAt: startedAt, CompletedAt: completedAt, Duration: duration,
 				Succeeded: resultErr == nil, WithinSLO: withinSLO,
+				Phases: append([]PhaseObservation(nil), phases...),
 			})
 		}
 	}()
 
+	phaseStarted := time.Now()
 	normalized, err := p.validateRequest(request, callStarted)
+	recordPhase(PhaseRequestValidation, phaseStarted, err == nil)
 	if err != nil {
 		return nil, err
 	}
+	ingressToPlanner := callStarted.Sub(startedAt)
+	if ingressToPlanner < 0 {
+		ingressToPlanner = 0
+	}
+	phases = append(phases, PhaseObservation{Phase: PhaseIngressToPlanner, Duration: ingressToPlanner, Succeeded: true})
 	ids := p.identities(normalized.OperationID)
 	runtimeRevision := normalized.RuntimeAssignmentRevision
 	policyDigest := normalized.NetworkPolicyDigest
 
+	phaseStarted = time.Now()
 	filesystem, err := p.store.GetRootFSFilesystem(ctx, normalized.SandboxID)
 	if err != nil {
+		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 		return nil, fmt.Errorf("load RootFS filesystem: %w", err)
 	}
 	if filesystem == nil {
+		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 		return nil, errors.New("sandbox has no RootFS filesystem")
 	}
 	if filesystem.TeamID != normalized.TeamID || filesystem.StorageFormat != sandboxstore.RootFSStorageFormatBlockCOWV1 ||
 		filesystem.HeadGenerationID == "" {
+		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 		return nil, errors.New("sandbox RootFS is not a team-owned block-COW generation")
 	}
 	generation, err := p.store.GetRootFSGeneration(ctx, filesystem.HeadGenerationID)
 	if err != nil {
+		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 		return nil, fmt.Errorf("load RootFS generation: %w", err)
 	}
 	descriptor, err := generationDescriptor(filesystem, generation)
 	if err != nil {
+		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 		return nil, err
 	}
 
 	existingGrant, err := p.store.GetRootFSWriterGrant(ctx, ids.grantID)
 	if err != nil && !errors.Is(err, sandboxstore.ErrRootFSWriterGrantNotFound) {
+		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 		return nil, fmt.Errorf("load deterministic writer grant: %w", err)
 	}
 	if errors.Is(err, sandboxstore.ErrRootFSWriterGrantNotFound) {
@@ -277,12 +324,16 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		expectedWriterEpoch = existingGrant.WriterEpoch - 1
 		writerEpoch = existingGrant.WriterEpoch
 		if err := validateExistingGrantBeforeAcquire(existingGrant, normalized, ids, filesystem, generation); err != nil {
+			recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 			return nil, err
 		}
 	} else if generation.WriterEpoch != filesystem.WriterEpoch {
+		recordPhase(PhaseRootFSMetadata, phaseStarted, false)
 		return nil, errors.New("RootFS generation and writer epoch are inconsistent")
 	}
+	recordPhase(PhaseRootFSMetadata, phaseStarted, true)
 
+	phaseStarted = time.Now()
 	slot, err := p.store.AcquireRuntimeSlot(ctx, &sandboxstore.AcquireRuntimeSlotRequest{
 		OperationID: normalized.OperationID, ClaimID: ids.claimID, SandboxID: normalized.SandboxID,
 		FilesystemID: filesystem.ID, SourceGenerationID: generation.ID,
@@ -291,20 +342,26 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		ClaimTTL: p.claimTTL,
 	})
 	if err != nil {
+		recordPhase(PhaseSlotAcquire, phaseStarted, false)
 		return nil, fmt.Errorf("acquire runtime slot: %w", err)
 	}
 	observedSlotID = slot.ID
 	if err := validateClaimedSlot(slot, normalized, ids, filesystem, generation, p.claimTTL); err != nil {
+		recordPhase(PhaseSlotAcquire, phaseStarted, false)
 		return nil, err
 	}
 	if existingGrant != nil && existingGrant.SlotID != slot.ID {
+		recordPhase(PhaseSlotAcquire, phaseStarted, false)
 		return nil, errors.New("deterministic writer grant is bound to another runtime slot")
 	}
 	if existingGrant == nil && slot.WriterGrantID != "" {
+		recordPhase(PhaseSlotAcquire, phaseStarted, false)
 		return nil, errors.New("runtime slot claim is bound to an unknown writer grant")
 	}
+	recordPhase(PhaseSlotAcquire, phaseStarted, true)
 
 	target := nodeTarget(slot)
+	phaseStarted = time.Now()
 	policyToken, err := p.network.Prepare(ctx, NetworkPrepareRequest{
 		OperationID: normalized.OperationID, ClaimID: ids.claimID, SlotID: slot.ID,
 		ClusterID: slot.ClusterID, AllocationID: slot.AllocationID,
@@ -313,16 +370,21 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		NetworkPolicy: normalized.NetworkPolicy, PolicyDigest: policyDigest,
 	})
 	if err != nil {
+		recordPhase(PhaseNetworkPrepare, phaseStarted, false)
 		return nil, fmt.Errorf("prepare runtime slot network incarnation: %w", err)
 	}
 	if err := validatePolicyToken(policyToken, slot, ids.claimID, policyDigest); err != nil {
+		recordPhase(PhaseNetworkPrepare, phaseStarted, false)
 		return nil, err
 	}
 	procdAddress, err := protocol.NomadProcdAddress(policyToken.PodIP)
 	if err != nil {
+		recordPhase(PhaseNetworkPrepare, phaseStarted, false)
 		return nil, fmt.Errorf("derive procd address from applied network token: %w", err)
 	}
+	recordPhase(PhaseNetworkPrepare, phaseStarted, true)
 
+	phaseStarted = time.Now()
 	stage := rootfshandoff.StageRequest{
 		BindingVersion: rootfshandoff.WriterBindingVersion,
 		Parent:         ids.parent, InitialGeneration: generation.ID, Generation: descriptor,
@@ -341,16 +403,20 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		},
 	}
 	if err := stage.Validate(); err != nil {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, fmt.Errorf("build RootFS stage: %w", err)
 	}
 	bindingDigest, err := stage.BindingDigest()
 	if err != nil {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, fmt.Errorf("derive RootFS stage binding: %w", err)
 	}
 	if existingGrant != nil && !grantMatchesStage(existingGrant, stage, slot, ids, normalized, bindingDigest[:]) {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, errors.New("deterministic writer grant does not match rebuilt RootFS stage")
 	}
 	if existingGrant == nil && !slot.ClaimLeaseExpiresAt.After(p.now()) {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, errors.New("runtime slot claim lease expired before writer issue")
 	}
 
@@ -367,25 +433,32 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		ConsumeExpiresAt: slot.ClaimLeaseExpiresAt,
 	})
 	if err != nil {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, fmt.Errorf("issue RootFS writer grant: %w", err)
 	}
 	if issued == nil || issued.Grant == nil || issued.RawToken != ids.rawToken ||
 		!grantMatchesStage(issued.Grant, stage, slot, ids, normalized, bindingDigest[:]) {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, errors.New("writer authority returned another grant binding")
 	}
 	bound, err := p.store.BindRuntimeSlotWriterGrant(ctx, &sandboxstore.BindRuntimeSlotWriterGrantRequest{
 		SlotID: slot.ID, OperationID: normalized.OperationID, ClaimID: ids.claimID, GrantID: ids.grantID,
 	})
 	if err != nil {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, fmt.Errorf("bind runtime slot writer grant: %w", err)
 	}
 	if err := validateClaimedSlot(bound, normalized, ids, filesystem, generation, p.claimTTL); err != nil {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, err
 	}
 	if bound.ID != slot.ID || bound.WriterGrantID != ids.grantID {
+		recordPhase(PhaseWriterIssueBind, phaseStarted, false)
 		return nil, errors.New("runtime slot authority returned another grant binding")
 	}
+	recordPhase(PhaseWriterIssueBind, phaseStarted, true)
 
+	phaseStarted = time.Now()
 	runtimeAssignment := cloneAssignment(normalized.Runtime)
 	nodeClaim := protocol.NodeClaimControlRequest{
 		OperationID: normalized.OperationID, ClaimID: ids.claimID,
@@ -393,28 +466,37 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		Stage: &stage, NetworkPolicy: normalized.NetworkPolicy, Runtime: &runtimeAssignment,
 	}
 	if err := nodeClaim.ValidateRegional(); err != nil {
+		recordPhase(PhaseNodeClaim, phaseStarted, false)
 		return nil, fmt.Errorf("validate node claim: %w", err)
 	}
 	nodeClaimResponse, err := p.node.Claim(ctx, target, nodeClaim)
 	if err != nil {
+		recordPhase(PhaseNodeClaim, phaseStarted, false)
 		return nil, fmt.Errorf("deliver runtime slot claim: %w", err)
 	}
 	if err := nodeClaimResponse.Validate(); err != nil {
+		recordPhase(PhaseNodeClaim, phaseStarted, false)
 		return nil, fmt.Errorf("validate runtime slot claim response: %w", err)
 	}
+	recordPhase(PhaseNodeClaim, phaseStarted, true)
 
+	phaseStarted = time.Now()
 	internalToken, err := p.tokenGenerator.GenerateToken(normalized.TeamID, normalized.UserID, normalized.SandboxID)
 	if err != nil {
+		recordPhase(PhaseProcdProbe, phaseStarted, false)
 		return nil, fmt.Errorf("generate procd internal token: %w", err)
 	}
 	if internalToken == "" {
+		recordPhase(PhaseProcdProbe, phaseStarted, false)
 		return nil, errors.New("procd internal token generator returned an empty token")
 	}
 	probe, err := p.prober.ProbeCommandReady(ctx, procdAddress, internalToken)
 	if err != nil {
+		recordPhase(PhaseProcdProbe, phaseStarted, false)
 		return nil, fmt.Errorf("probe procd command readiness: %w", err)
 	}
 	if probe == nil || probe.Status != "ready" || probe.InstanceID == "" {
+		recordPhase(PhaseProcdProbe, phaseStarted, false)
 		return nil, errors.New("procd command probe returned an invalid result")
 	}
 	proof := protocol.CommandReadyProof{
@@ -426,15 +508,21 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		ResponseStatus: 200, ResponseBodyDigest: probe.ResponseBodyDigest,
 	}
 	if err := proof.Validate(); err != nil {
+		recordPhase(PhaseProcdProbe, phaseStarted, false)
 		return nil, fmt.Errorf("validate procd command proof: %w", err)
 	}
+	recordPhase(PhaseProcdProbe, phaseStarted, true)
+	phaseStarted = time.Now()
 	nodeCommandResponse, err := p.node.CommandReady(ctx, target, protocol.CommandReadyControlRequest{Proof: proof})
 	if err != nil {
+		recordPhase(PhaseCommandReadyCommit, phaseStarted, false)
 		return nil, fmt.Errorf("commit runtime slot command readiness: %w", err)
 	}
 	if err := nodeCommandResponse.Validate(); err != nil {
+		recordPhase(PhaseCommandReadyCommit, phaseStarted, false)
 		return nil, fmt.Errorf("validate runtime slot command readiness response: %w", err)
 	}
+	recordPhase(PhaseCommandReadyCommit, phaseStarted, true)
 	return &Result{
 		Slot: bound, Grant: issued.Grant, Stage: stage, ProcdAddress: procdAddress,
 		ProcdInstanceID: probe.InstanceID, CommandProof: proof,

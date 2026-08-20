@@ -369,6 +369,19 @@ func TestPlannerExecutesCompleteRegionToProcdClaim(t *testing.T) {
 		!fixture.observer.observations[0].WithinSLO || fixture.observer.observations[0].SlotID != "slot-1" {
 		t.Fatalf("observation = %+v", fixture.observer.observations)
 	}
+	wantPhases := []string{
+		PhaseRequestValidation, PhaseIngressToPlanner, PhaseRootFSMetadata, PhaseSlotAcquire,
+		PhaseNetworkPrepare, PhaseWriterIssueBind, PhaseNodeClaim, PhaseProcdProbe,
+		PhaseCommandReadyCommit,
+	}
+	if len(result.Phases) != len(wantPhases) || len(fixture.observer.observations[0].Phases) != len(wantPhases) {
+		t.Fatalf("result phases = %+v observation phases = %+v", result.Phases, fixture.observer.observations[0].Phases)
+	}
+	for index, phase := range result.Phases {
+		if phase.Phase != wantPhases[index] || !phase.Succeeded || phase.Duration < 0 {
+			t.Fatalf("phase %d = %+v, want successful %s", index, phase, wantPhases[index])
+		}
+	}
 }
 
 func TestPlannerRecoversWriterIssueResponseLossWithExactBinding(t *testing.T) {

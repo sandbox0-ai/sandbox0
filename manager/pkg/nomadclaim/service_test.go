@@ -696,7 +696,8 @@ func TestServiceClaimsRetryStableNomadSlotEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.SandboxID != expectedID || response.ProcdAddress != "http://10.0.0.8:49983" ||
-		response.PodName != "allocation-1" || response.ClusterId == nil || *response.ClusterId != "cluster-1" {
+		response.PodName != "allocation-1" || response.ClusterId == nil || *response.ClusterId != "cluster-1" ||
+		response.CommandReadyDuration != 420*time.Millisecond || !response.CommandReadyWithinSLO {
 		t.Fatalf("response = %+v", response)
 	}
 	if len(fixture.planner.requests) != 1 {

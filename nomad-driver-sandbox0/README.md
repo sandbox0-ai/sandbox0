@@ -106,22 +106,18 @@ Implemented:
 
 Not implemented:
 
-- service wiring of the manager claim planner package
-- manager/ctld orchestration of the procd probe and driver `command-ready` call
 - PostgreSQL-terminal acknowledgement-driven cleanup-proof compaction and
   reconciliation of active node journal registrations whose regional register
   response was ambiguous; current compaction uses a bounded local TTL
 - production remote-block service and cross-node device ownership
-- procd first-command-ready accounting
 - guest stdout/stderr console forwarding
 - full cgroup and Nomad stats integration
 - production Nomad deployment and upgrade automation
-- production manager-to-node running-fork orchestration and privileged
-  multi-node XFS/NBD/runsc validation
+- privileged multi-node XFS/NBD/runsc validation
 - deployment wiring and privileged race validation for the direct Nomad
   allocation controller, including Nomad server-GC concurrent with client GC
-- manager claim-loop wiring for the node channel and migration of its current
-  sessiond local executor into the final ctld-owned runtime
+- migration of the node channel's current sessiond local executor into the
+  final ctld-owned runtime
 
 ## Writer authority PoC
 
@@ -157,18 +153,17 @@ authoritative after a Nomad allocation is purged. With `runtime_slot_enabled`,
 the task driver synchronously registers an exact physical allocation, reports
 its three readiness proofs, and starts heartbeats before returning the slot to
 Nomad. Recovery must reproduce the same allocation, node boot, netns inode,
-control endpoint, and compatibility digest. Manager-side claim planning and
-terminal reconciliation packages now consume the registry, but they are not
-yet wired into the deployed manager service. When a trusted caller supplies the
-exact regional operation and claim IDs in `PUT /claim`, the driver reports `starting`
-before invoking runsc and retries an ambiguous response with the same proof.
-Procd exposes `PUT /api/v1/runtime/command-ready-probe` behind its normal
-authentication, runtime-ready, and lifecycle-barrier middleware. A trusted
-caller submits the exact response and process identity to the driver's
-root-only `PUT /command-ready`; the driver then reports regional active with a
-canonical digest. Production manager orchestration of the claim and
-command-ready calls, plus migration of the remaining node executor into ctld,
-remains to be implemented.
+control endpoint, and compatibility digest. When the Nomad backend is enabled,
+the deployed manager wires claim planning and terminal reconciliation to this
+registry and routes node operations over the authenticated node channel. The
+driver reports `starting` before invoking runsc and retries an ambiguous
+response with the same proof. Procd exposes
+`PUT /api/v1/runtime/command-ready-probe` behind its normal authentication,
+runtime-ready, and lifecycle-barrier middleware. Manager executes that command,
+submits the exact response and process identity over the node channel, and the
+driver reports regional active with a canonical digest. Migration of the
+remaining sessiond node executor into ctld is still required for final
+production deployment.
 
 Ctld now owns runtime-slot warm default-deny, strict v1 policy validation,
 production L4/L7 compilation, TPROXY/ipset application, durable physical
@@ -242,6 +237,54 @@ S3 objects, reclaims node A's acknowledged branch, and verifies that an
 independent node B with writer epoch 2 reads the exact filesystem bytes from
 the published head. This validates cross-node storage/control semantics; a
 privileged multi-host NBD/XFS/runsc deployment test remains a production gate.
+
+### Regional ingress-to-procd SLO acceptance
+
+The Nomad manager emits one trusted timer from the signed regional-gateway
+ingress timestamp through authenticated procd command readiness. The public
+claim response carries that exact value as
+`Server-Timing: sandbox0-command-ready;dur=<milliseconds>` and reports `met` or
+`missed` in `Sandbox0-Command-Ready-SLO`; these fields are response metadata and
+are not part of the OpenAPI payload. Prometheus exports the terminal sample as
+`manager_runtime_slot_claim_end_to_end_duration_seconds`. A separate bounded
+`manager_runtime_slot_claim_phase_duration_seconds` histogram attributes
+request validation, regional ingress-to-planner work, RootFS metadata, slot
+acquire, network prepare, writer issue/bind, node claim, procd probe, and
+command-ready commit without operation, sandbox, or slot labels.
+
+Run the serial gate against the public regional URL with a prewarmed compatible
+pool and hot RootFS working set:
+
+```sh
+SANDBOX0_API_TOKEN=... go run ./tools/runtime-slot-slo \
+  --url https://region.example.com/api/v1/sandboxes \
+  --template default \
+  --batches 1000 \
+  --concurrency 1 \
+  --p50-target 500ms \
+  --hard-limit 1s \
+  --output serial-1000.json
+```
+
+The concurrency-8 gate uses at least 100 synchronized batches:
+
+```sh
+SANDBOX0_API_TOKEN=... go run ./tools/runtime-slot-slo \
+  --url https://region.example.com/api/v1/sandboxes \
+  --template default \
+  --batches 100 \
+  --concurrency 8 \
+  --batch-settle 5s \
+  --output concurrency-8.json
+```
+
+The harness performs no hidden claim retries, requires the trusted timing and
+SLO headers on every `201`, deletes successful Sandboxes outside the measured
+interval, disables ambient HTTP proxies, and fails on any request, cleanup, or
+successful command-ready sample above one second. It also requires p50 at or
+below 500 ms and p99 at or below one second. Cold S3, unclean replay, Nomad
+refill, full-cold-node, and 1/8/32 concurrency results must be recorded as
+separate labeled reports rather than mixed into the hot distribution.
 
 ## PostgreSQL high availability
 

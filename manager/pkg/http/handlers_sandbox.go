@@ -115,6 +115,16 @@ func (s *Server) claimSandbox(c *gin.Context) {
 		return
 	}
 
+	if resp.CommandReadyDuration > 0 {
+		c.Header("Server-Timing", fmt.Sprintf(
+			"sandbox0-command-ready;dur=%.3f", float64(resp.CommandReadyDuration)/float64(time.Millisecond),
+		))
+		slo := "missed"
+		if resp.CommandReadyWithinSLO {
+			slo = "met"
+		}
+		c.Header("Sandbox0-Command-Ready-SLO", slo)
+	}
 	spec.JSONSuccess(c, http.StatusCreated, resp)
 }
 

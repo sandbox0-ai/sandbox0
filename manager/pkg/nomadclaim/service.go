@@ -786,6 +786,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	return &service.ClaimResponse{
 		SandboxID: sandboxID, Status: "running", ProcdAddress: result.ProcdAddress,
 		PodName: result.Slot.AllocationID, Template: req.Template, ClusterId: &clusterID,
+		CommandReadyDuration: result.Duration, CommandReadyWithinSLO: result.WithinSLO,
 	}, nil
 }
 

@@ -32,7 +32,9 @@ type recordingSandboxClaimer struct {
 
 func (r *recordingSandboxClaimer) ClaimSandbox(_ context.Context, request *service.ClaimRequest) (*service.ClaimResponse, error) {
 	r.request = request
-	return &service.ClaimResponse{SandboxID: "sandbox-1"}, nil
+	return &service.ClaimResponse{
+		SandboxID: "sandbox-1", CommandReadyDuration: 375 * time.Millisecond, CommandReadyWithinSLO: true,
+	}, nil
 }
 
 func TestClaimSandboxPropagatesSignedOperationIdentityOnly(t *testing.T) {
@@ -60,6 +62,12 @@ func TestClaimSandboxPropagatesSignedOperationIdentityOnly(t *testing.T) {
 	if claimer.request == nil || claimer.request.OperationID != "operation-signed" ||
 		!claimer.request.StartedAt.Equal(startedAt.UTC()) {
 		t.Fatalf("claim request = %#v, want signed operation and ingress time", claimer.request)
+	}
+	if got := recorder.Header().Get("Server-Timing"); got != "sandbox0-command-ready;dur=375.000" {
+		t.Fatalf("Server-Timing = %q", got)
+	}
+	if got := recorder.Header().Get("Sandbox0-Command-Ready-SLO"); got != "met" {
+		t.Fatalf("SLO header = %q", got)
 	}
 }
 

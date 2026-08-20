@@ -238,12 +238,14 @@ func applyClaimMetadata(pod *corev1.Pod, metadata *ClaimMetadata) {
 
 // ClaimResponse represents a sandbox claim response
 type ClaimResponse struct {
-	SandboxID    string  `json:"sandbox_id"`
-	Status       string  `json:"status"`
-	ProcdAddress string  `json:"procd_address"`
-	PodName      string  `json:"pod_name"`
-	Template     string  `json:"template"`
-	ClusterId    *string `json:"cluster_id,omitempty"`
+	SandboxID             string        `json:"sandbox_id"`
+	Status                string        `json:"status"`
+	ProcdAddress          string        `json:"procd_address"`
+	PodName               string        `json:"pod_name"`
+	Template              string        `json:"template"`
+	ClusterId             *string       `json:"cluster_id,omitempty"`
+	CommandReadyDuration  time.Duration `json:"-"`
+	CommandReadyWithinSLO bool          `json:"-"`
 }
 
 // SandboxClaimer is the runtime-neutral public claim boundary.

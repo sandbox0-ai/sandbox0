@@ -69,24 +69,6 @@ type runtimeSlotLifecycle struct {
 	logger       hclog.Logger
 }
 
-type runtimeCompatibilityProof struct {
-	Version          int    `json:"version"`
-	Architecture     string `json:"architecture"`
-	DriverVersion    string `json:"driver_version"`
-	RunscVersion     string `json:"runsc_version"`
-	Platform         string `json:"platform"`
-	Overlay2         string `json:"overlay2"`
-	FileAccess       string `json:"file_access"`
-	DirectFS         bool   `json:"directfs"`
-	Command          string `json:"command"`
-	ProcdPort        int    `json:"procd_port"`
-	RuntimeMode      string `json:"runtime_mode"`
-	CPUPeriod        int64  `json:"cpu_period"`
-	CPUQuota         int64  `json:"cpu_quota"`
-	CPUShares        int64  `json:"cpu_shares"`
-	MemoryLimitBytes int64  `json:"memory_limit_bytes"`
-}
-
 type runtimeReadyProof struct {
 	Version             int    `json:"version"`
 	SlotID              string `json:"slot_id"`
@@ -742,19 +724,14 @@ func runtimeCompatibilityDigest(config *PluginConfig, task *drivers.TaskConfig, 
 	if task.Resources != nil && task.Resources.LinuxResources != nil {
 		linux = *task.Resources.LinuxResources
 	}
-	payload, err := json.Marshal(runtimeCompatibilityProof{
-		Version: runtimeSlotProofVersion, Architecture: runtime.GOARCH,
+	return (protocol.RuntimeCompatibility{
+		Version: protocol.RuntimeCompatibilityVersion, Architecture: runtime.GOARCH,
 		DriverVersion: PluginVersion, RunscVersion: strings.TrimSpace(runscVersion),
 		Platform: config.Platform, Overlay2: config.Overlay2, FileAccess: config.FileAccess,
 		DirectFS: config.DirectFS, Command: "/procd", ProcdPort: protocol.NomadProcdPort,
 		RuntimeMode: runtimecontrol.ControlModeStatic, CPUPeriod: linux.CPUPeriod,
 		CPUQuota: linux.CPUQuota, CPUShares: linux.CPUShares, MemoryLimitBytes: linux.MemoryLimitBytes,
-	})
-	if err != nil {
-		return "", fmt.Errorf("encode runtime compatibility: %w", err)
-	}
-	sum := sha256.Sum256(payload)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	}).Digest()
 }
 
 func nomadProcdEndpoint(task *drivers.TaskConfig) (string, string, error) {

@@ -79,6 +79,15 @@ Implemented:
   client, and derives absence from that client's allocation directory rather
   than from eventual server-record deletion; server and client endpoints use
   mTLS, exact SPIFFE URI SANs, rotating ACL tokens, and a trusted endpoint map
+- a node-initiated runtime-slot command channel that binds mTLS-authenticated
+  cluster, Nomad node, and node UID plus the reported boot ID, replaces
+  same-agent stale streams without overlapping commands, keeps a different
+  standby agent from preempting a live owner,
+  and carries exact claim, command-ready, and plugin-independent cleanup to
+  root-owned local executors; request digests bind every target and payload,
+  responses are strictly correlated, up to 64 independent slot operations run
+  concurrently per node without serializing the warm path, and no raw writer
+  token is persisted by the regional hub
 
 Not implemented:
 
@@ -99,6 +108,8 @@ Not implemented:
   multi-node XFS/NBD/runsc validation
 - deployment wiring and privileged race validation for the direct Nomad
   allocation controller, including Nomad server-GC concurrent with client GC
+- manager controller-loop wiring for the node channel and migration of its
+  current sessiond local executor into the final ctld-owned runtime
 
 ## Writer authority PoC
 
@@ -256,11 +267,27 @@ Completed proofs expire after 24 hours and compact external RootFS fences after
 acknowledgement protocol; unresolved active registrations are not yet compacted
 automatically.
 
-The Unix API is a node execution primitive, not a region-reachable transport.
-A production deployment still needs an authenticated node agent or outbound
-stream that routes the manager adapter to the trusted cluster, node, node UID,
-and boot ID. The 10,000-slot Bolt test proves local page reuse only; it does not
-constitute the required privileged, multi-node, end-to-end 24-hour soak.
+The Unix API remains a node execution primitive and is never dialed directly
+by the region. With `--runtime-slot-node-channel`, sessiond establishes an
+outbound WebSocket over mTLS to the regional authority. The regional hub
+derives cluster, Nomad node, and node UID from authentication, checks the
+advertised boot ID, and routes only commands whose cluster, node, allocation,
+slot, UID, boot, and local control endpoint match the canonical request. The
+agent then invokes the mode-`0600`, root-owned task socket or the
+plugin-independent cleaner locally.
+It requires `--runtime-slot-node-uid`, an exact
+`--runtime-slot-channel-peer-uri-san`, and an allow-root supplied by
+`--runtime-slot-control-root`; ambient proxies are disabled and certificates,
+boot ID, and projected bearer token are reloaded on reconnect, with a bounded
+five-minute connection age so rotated credentials are eventually enforced.
+The authority's `--allowed-clients` entry for a channel identity must use
+`commonName:nodeUID:podUID:clusterID:nodeID`; legacy three-field entries remain
+valid for writer and slot APIs but cannot establish a node channel.
+The regional hub is transient by design: PostgreSQL owns retries and the node
+journal owns cleanup proof. The current local executor lives in sessiond and
+must move into the final ctld-owned runtime before legacy removal. The
+10,000-slot Bolt test proves local page reuse only; it does not constitute the
+required privileged, multi-node, end-to-end 24-hour soak.
 
 The regional terminal controller also needs trusted HTTPS endpoints for each
 Nomad server cluster and exact client node. Its ACL policy must permit

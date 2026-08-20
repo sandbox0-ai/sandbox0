@@ -78,13 +78,17 @@ type nomadAllocationSource interface {
 // NomadAllocationConfig identifies the server-side allocation catalog used as
 // a reconciliation trigger when the local task-driver process misses Destroy.
 type NomadAllocationConfig struct {
-	ClusterID string
-	Address   string
-	NodeID    string
-	TokenFile string
-	CAFile    string
-	CertFile  string
-	KeyFile   string
+	ClusterID                    string
+	Address                      string
+	NodeID                       string
+	TokenFile                    string
+	CAFile                       string
+	CertFile                     string
+	KeyFile                      string
+	RuntimeSlotChannelEnabled    bool
+	RuntimeSlotNodeUID           string
+	RuntimeSlotChannelPeerURISAN string
+	RuntimeSlotControlRoot       string
 }
 
 // RunRootFSSessionDaemon runs the node-scoped owner for writer leases,
@@ -166,13 +170,35 @@ func RunRootFSSessionDaemon(
 	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
 	defer cancelDaemon()
+	nodeChannelAgent, err := newRootFSSessionNodeChannelAgent(config, nomadConfig, daemon)
+	if err != nil {
+		return err
+	}
 	daemon.wg.Add(1)
 	go func() {
 		defer daemon.wg.Done()
 		daemon.reconcileLoop(daemonCtx)
 	}()
+	var nodeChannelErr <-chan error
+	if nodeChannelAgent != nil {
+		errorsCh := make(chan error, 1)
+		nodeChannelErr = errorsCh
+		go func() {
+			agentErr := nodeChannelAgent.Run(daemonCtx)
+			errorsCh <- agentErr
+			if agentErr != nil && daemonCtx.Err() == nil {
+				cancelDaemon()
+			}
+		}()
+	}
 	err = serveRootFSSessionRuntime(daemonCtx, socketPath, runtime, daemon.writerLeaseLost, daemon.health, daemon)
 	cancelDaemon()
+	if nodeChannelErr != nil {
+		agentErr := <-nodeChannelErr
+		if err == nil && ctx.Err() == nil && !errors.Is(agentErr, context.Canceled) {
+			err = fmt.Errorf("runtime slot node channel stopped: %w", agentErr)
+		}
+	}
 	daemon.wg.Wait()
 	return err
 }

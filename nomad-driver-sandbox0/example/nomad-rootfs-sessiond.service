@@ -15,6 +15,10 @@ ExecStart=/usr/local/bin/nomad-rootfs-sessiond \
   --runsc-root=/run/sandbox0/runsc \
   --state=/var/lib/sandbox0/rootfs-sessions.db \
   --runtime-slot-journal=/var/lib/sandbox0/runtime-slots.db \
+  --runtime-slot-node-channel \
+  --runtime-slot-node-uid=${SANDBOX0_NODE_UID} \
+  --runtime-slot-channel-peer-uri-san=${SANDBOX0_RUNTIME_SLOT_CHANNEL_PEER_URI_SAN} \
+  --runtime-slot-control-root=/var/run/sandbox0/nomad-slots \
   --branch-root=/var/lib/sandbox0/rootfs-branches \
   --max-dirty-tail-bytes=${SANDBOX0_ROOTFS_MAX_DIRTY_TAIL_BYTES} \
   --mount-root=/run/sandbox0/rootfs \

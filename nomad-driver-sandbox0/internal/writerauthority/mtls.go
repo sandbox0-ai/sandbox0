@@ -27,6 +27,8 @@ import (
 // CertIdentity maps a verified client certificate CN to a Nomad node identity.
 type CertIdentity struct {
 	CommonName string
+	ClusterID  string
+	NodeID     string
 	NodeUID    string
 	PodUID     string
 }
@@ -46,7 +48,10 @@ func (v certVerifier) Verify(_ context.Context, bearer string) (managerauthority
 	if !ok || name == "" {
 		return managerauthority.CallerIdentity{}, fmt.Errorf("unknown writer authority client %q", name)
 	}
-	return managerauthority.CallerIdentity{NodeUID: identity.NodeUID, PodUID: identity.PodUID}, nil
+	return managerauthority.CallerIdentity{
+		ClusterID: identity.ClusterID, NodeID: identity.NodeID,
+		NodeUID: identity.NodeUID, PodUID: identity.PodUID,
+	}, nil
 }
 
 // NewCertMiddleware converts the verified client certificate CN into the bearer

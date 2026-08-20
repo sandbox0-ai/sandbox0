@@ -7,8 +7,10 @@ import "context"
 // Identity is derived from a verified workload credential, never from an API
 // request body.
 type Identity struct {
-	NodeUID string
-	PodUID  string
+	ClusterID string
+	NodeID    string
+	NodeUID   string
+	PodUID    string
 }
 
 // Verifier resolves a bearer credential to its durable node incarnation.

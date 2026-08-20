@@ -15,6 +15,7 @@
 package writerauthority
 
 import (
+	"context"
 	"crypto/x509/pkix"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,21 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 )
+
+func TestCertVerifierReturnsAuthenticatedRoute(t *testing.T) {
+	verifier := NewCertVerifier([]CertIdentity{{
+		CommonName: "nomad-node-a", ClusterID: "cluster-a", NodeID: "node-a",
+		NodeUID: "node-uid-a", PodUID: "agent-a",
+	}})
+	identity, err := verifier.Verify(context.Background(), "Bearer nomad-node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.ClusterID != "cluster-a" || identity.NodeID != "node-a" ||
+		identity.NodeUID != "node-uid-a" || identity.PodUID != "agent-a" {
+		t.Fatalf("identity = %+v", identity)
+	}
+}
 
 func TestCertMiddlewareMapsAllowedCertificate(t *testing.T) {
 	var gotAuthorization string

@@ -38,6 +38,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	managerauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnode"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/nomad-driver-sandbox0/internal/writerauthority"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
@@ -69,7 +70,7 @@ func main() {
 	leaseTTL := flag.Duration("lease-ttl", 30*time.Second, "writer lease TTL")
 	runtimeSlotHeartbeatTTL := flag.Duration("runtime-slot-heartbeat-ttl", 30*time.Second, "runtime slot heartbeat TTL")
 	renewalGrace := flag.Duration("renewal-grace", 0, "writer renewal grace; default lease-ttl/2 capped at 5s")
-	allowedClients := flag.String("allowed-clients", "", "comma-separated cn:nodeUID:podUID")
+	allowedClients := flag.String("allowed-clients", "", "comma-separated cn:nodeUID:podUID or cn:nodeUID:podUID:clusterID:nodeID")
 	skipMigrations := flag.Bool("skip-migrations", false, "skip sandbox store migrations")
 	compositeBacklogBytes := flag.Int64("composite-backlog-bytes", sandboxstore.DefaultRootFSCompositeBacklogBytes, "regional PostgreSQL composite descriptor budget")
 	materializerInterval := flag.Duration("materializer-interval", rootfsmaterializer.DefaultInterval, "S3 materializer scan interval")
@@ -347,11 +348,17 @@ func serve(
 	if err != nil {
 		return fmt.Errorf("create runtime slot handler: %w", err)
 	}
+	nodeChannelHub, err := runtimeslotnode.NewChannelHub(verifier)
+	if err != nil {
+		return fmt.Errorf("create runtime slot node channel: %w", err)
+	}
+	defer nodeChannelHub.Close()
 	mux := http.NewServeMux()
 	mux.Handle("/internal/v1/rootfs-writer-grants", http.NotFoundHandler())
 	mux.Handle("/internal/v1/rootfs-writer-grants/", newPublishHandler(verifier, store, handler))
 	mux.Handle(strings.TrimSuffix(runtimeslotprotocol.PathPrefix, "/"), http.NotFoundHandler())
 	mux.Handle(runtimeslotprotocol.PathPrefix, runtimeSlotHandler)
+	mux.Handle(runtimeslotprotocol.NodeChannelPath, nodeChannelHub)
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, request *http.Request) {
 		usage, err := store.GetRootFSCompositeBacklogUsage(request.Context())
 		if err != nil {
@@ -918,13 +925,21 @@ func parseAllowedClients(raw string) ([]writerauthority.CertIdentity, error) {
 	var identities []writerauthority.CertIdentity
 	for index, item := range strings.Split(raw, ",") {
 		parts := strings.Split(strings.TrimSpace(item), ":")
-		if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" ||
+		if (len(parts) != 3 && len(parts) != 5) || strings.TrimSpace(parts[0]) == "" ||
 			strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
-			return nil, fmt.Errorf("allowed client %d must be commonName:nodeUID:podUID", index)
+			return nil, fmt.Errorf("allowed client %d must be commonName:nodeUID:podUID or commonName:nodeUID:podUID:clusterID:nodeID", index)
 		}
-		identities = append(identities, writerauthority.CertIdentity{
+		identity := writerauthority.CertIdentity{
 			CommonName: strings.TrimSpace(parts[0]), NodeUID: strings.TrimSpace(parts[1]), PodUID: strings.TrimSpace(parts[2]),
-		})
+		}
+		if len(parts) == 5 {
+			identity.ClusterID = strings.TrimSpace(parts[3])
+			identity.NodeID = strings.TrimSpace(parts[4])
+			if identity.ClusterID == "" || identity.NodeID == "" {
+				return nil, fmt.Errorf("allowed client %d clusterID and nodeID must be non-empty", index)
+			}
+		}
+		identities = append(identities, identity)
 	}
 	return identities, nil
 }

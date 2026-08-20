@@ -62,6 +62,10 @@ func main() {
 	flag.StringVar(&nomadConfig.CertFile, "nomad-cert", "", "Nomad HTTPS client certificate")
 	flag.StringVar(&nomadConfig.KeyFile, "nomad-key", "", "Nomad HTTPS client key")
 	flag.StringVar(&config.RuntimeSlotJournalPath, "runtime-slot-journal", "/var/lib/sandbox0/runtime-slots.db", "durable runtime slot cleanup journal")
+	flag.BoolVar(&nomadConfig.RuntimeSlotChannelEnabled, "runtime-slot-node-channel", false, "enable the authenticated outbound regional node channel")
+	flag.StringVar(&nomadConfig.RuntimeSlotNodeUID, "runtime-slot-node-uid", "", "authenticated regional node UID")
+	flag.StringVar(&nomadConfig.RuntimeSlotChannelPeerURISAN, "runtime-slot-channel-peer-uri-san", "", "exact regional node-channel SPIFFE URI SAN")
+	flag.StringVar(&nomadConfig.RuntimeSlotControlRoot, "runtime-slot-control-root", "/var/run/sandbox0/nomad-slots", "allowed root-owned task control socket directory")
 	flag.Parse()
 
 	config.RootFSEnabled = true

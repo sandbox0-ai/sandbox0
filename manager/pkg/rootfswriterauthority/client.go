@@ -18,6 +18,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
@@ -273,6 +274,37 @@ func (c *ManagerClient) RenewWriterGrant(ctx context.Context, stage rootfshandof
 		return protocol.LeaseObservation{}, err
 	}
 	return observation, nil
+}
+
+// RequestWriterPressurePause asks Manager to persist an automatic planned
+// pause for the exact writer before local admission is allowed to enter its
+// protected retirement reserve.
+func (c *ManagerClient) RequestWriterPressurePause(
+	ctx context.Context,
+	stage rootfshandoff.StageRequest,
+	pressure rootfsblock.DirtyTailPressure,
+) (string, error) {
+	binding, err := durableWriterGrantBinding(stage)
+	if err != nil {
+		return "", err
+	}
+	request := protocol.DirtyTailPressureRequest{
+		TerminalRequest: binding, Scope: pressure.Scope, UsedBytes: pressure.UsedBytes,
+		RequestedBytes: pressure.RequestedBytes, LimitBytes: pressure.LimitBytes,
+	}
+	if err := request.Validate(); err != nil {
+		return "", fmt.Errorf("validate writer pressure pause: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	var response protocol.DirtyTailPressureResponse
+	if err := c.putWriterGrant(
+		ctx, "request pressure pause", protocol.DirtyTailPressurePath(stage.Identity.WriterGrantID), request, &response,
+	); err != nil {
+		return "", err
+	}
+	if err := response.Validate(); err != nil {
+		return "", fmt.Errorf("validate writer pressure response: %w: %w", err, errdefs.ErrUnavailable)
+	}
+	return response.OperationID, nil
 }
 
 // RenewWriterGrants authenticates one node request and renews multiple exact

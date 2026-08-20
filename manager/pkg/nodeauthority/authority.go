@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
@@ -76,6 +78,31 @@ type Component struct {
 	server     *rootfswriterauthority.Server
 	terminal   *runtimeslotreconciler.Worker
 	allocation *runtimeslotnomad.Controller
+	pressure   *writerPressureCoordinator
+}
+
+type writerPressureCoordinator struct {
+	mu     sync.RWMutex
+	pauser rootfswriterauthority.PressurePauser
+}
+
+func (c *writerPressureCoordinator) RequestRootFSWriterPressurePause(
+	ctx context.Context,
+	request *sandboxstore.RootFSWriterPressurePauseRequest,
+) (string, error) {
+	c.mu.RLock()
+	pauser := c.pauser
+	c.mu.RUnlock()
+	if pauser == nil {
+		return "", fmt.Errorf("writer pressure pauser is not configured: %w", errdefs.ErrUnavailable)
+	}
+	return pauser.RequestRootFSWriterPressurePause(ctx, request)
+}
+
+func (c *writerPressureCoordinator) set(pauser rootfswriterauthority.PressurePauser) {
+	c.mu.Lock()
+	c.pauser = pauser
+	c.mu.Unlock()
 }
 
 // New constructs all node-facing authorities over one verifier, store, and
@@ -98,10 +125,12 @@ func New(config Config) (*Component, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create node authority verifier: %w", err)
 	}
+	pressure := &writerPressureCoordinator{}
 	writerHandler, err := rootfswriterauthority.NewHandler(rootfswriterauthority.HandlerConfig{
-		Verifier: verifier,
-		Store:    config.Store,
-		LeaseTTL: config.WriterLeaseTTL,
+		Verifier:       verifier,
+		Store:          config.Store,
+		LeaseTTL:       config.WriterLeaseTTL,
+		PressurePauser: pressure,
 		RenewalPolicy: sandboxstore.RootFSWriterLeaseRenewalPolicy{
 			LeaseTTL: config.WriterLeaseTTL, GracePeriod: config.WriterRenewalGrace,
 		},
@@ -151,8 +180,18 @@ func New(config Config) (*Component, error) {
 	}
 	return &Component{
 		store: config.Store, hub: hub, server: server,
-		terminal: terminal, allocation: allocation,
+		terminal: terminal, allocation: allocation, pressure: pressure,
 	}, nil
+}
+
+// SetWriterPressurePauser installs the fully assembled runtime backend before
+// the node listener starts. A coordinator indirection keeps construction free
+// of package cycles while requests remain race-safe.
+func (c *Component) SetWriterPressurePauser(pauser rootfswriterauthority.PressurePauser) {
+	if c == nil || c.pressure == nil {
+		return
+	}
+	c.pressure.set(pauser)
 }
 
 // RunServer serves the dedicated mTLS endpoint until cancellation and closes

@@ -246,7 +246,7 @@ func (m *Manager) ExecuteRebase(
 			GenerationID:     generationID,
 			WriterEpoch:      request.TargetWriterEpoch,
 			LogicalSizeBytes: reader.Size(), BaseRootDigest: descriptors[resource.Role].MappingRoot.RootDigest,
-		}, reader, m.branchOptions())
+		}, reader, m.rebaseBranchOptions(request.OperationID))
 		if err != nil {
 			return result, fmt.Errorf("open %s rebase branch: %w", resource.Role, err)
 		}

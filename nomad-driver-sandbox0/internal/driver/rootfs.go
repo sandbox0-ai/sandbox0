@@ -53,12 +53,57 @@ type rootfsRuntime struct {
 type rootFSWriterAuthority interface {
 	ConsumeWriterGrant(context.Context, rootfshandoff.StageRequest) (protocol.LeaseObservation, error)
 	RenewWriterGrant(context.Context, rootfshandoff.StageRequest) (protocol.LeaseObservation, error)
+	RequestWriterPressurePause(context.Context, rootfshandoff.StageRequest, rootfsblock.DirtyTailPressure) (string, error)
 	PublishWriterGrant(context.Context, rootfshandoff.StageRequest, managerauthority.PublishGenerationRequest) error
 	PublishRunningFork(context.Context, rootfshandoff.StageRequest, rootfshandoff.RunningForkCheckpointRequest, rootfshandoff.RunningForkCheckpointResult) error
 	BeginCrashAbandonWriterGrant(context.Context, rootfshandoff.StageRequest, string) error
 	CompleteCrashAbandonWriterGrant(context.Context, rootfshandoff.StageRequest, string, rootfshandoff.CrashFenceProof) error
 	CancelUnconsumedWriterGrant(context.Context, rootfshandoff.StageRequest) error
 	VerifyTerminalWriterGrant(context.Context, rootfshandoff.StageRequest) error
+}
+
+// DirtyTailPressureSignal wakes the node daemon as soon as a normal write is
+// blocked before protected retirement capacity.
+func (r *rootfsRuntime) DirtyTailPressureSignal() <-chan struct{} {
+	if r == nil || r.sessions == nil {
+		return nil
+	}
+	return r.sessions.DirtyTailPressureSignal()
+}
+
+func (r *rootfsRuntime) DirtyTailPressureSessions() ([]rootfssession.DirtyTailPressureSession, error) {
+	if r == nil || r.sessions == nil {
+		return nil, fmt.Errorf("RootFS session manager is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	return r.sessions.DirtyTailPressureSessions()
+}
+
+// PlanDirtyTailPressure obtains the regional operation before promoting the
+// pressure marker already persisted by DirtyTailPressureSessions to the same
+// exact local retirement operation. A lost response is safe because both
+// sides derive and retry one deterministic operation.
+func (r *rootfsRuntime) PlanDirtyTailPressure(
+	ctx context.Context,
+	pressure rootfssession.DirtyTailPressureSession,
+) (string, error) {
+	if r == nil || r.sessions == nil || r.authority == nil {
+		return "", fmt.Errorf("RootFS pressure planning authority is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	stage := pressure.Stage.WithoutWriterGrantToken()
+	operationID, err := r.authority.RequestWriterPressurePause(ctx, stage, pressure.Pressure)
+	if err != nil {
+		return "", err
+	}
+	expected := rootfshandoff.PlannedRetireOperationID(
+		stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+	)
+	if operationID != expected {
+		return "", fmt.Errorf("regional pressure operation does not match writer binding: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := r.sessions.BeginRetire(stage.Parent, stage.Identity, operationID); err != nil {
+		return "", fmt.Errorf("persist local pressure retirement: %w", err)
+	}
+	return operationID, nil
 }
 
 // RootFSRuntime is the driver-facing RootFS attachment and retire boundary.

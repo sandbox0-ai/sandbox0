@@ -36,7 +36,7 @@ const (
 	legacySessionSchemaVersion             = 2
 	allocationSessionSchemaVersion         = 3
 	durableBindingSchemaVersion            = 4
-	sessionSchemaVersion                   = 6
+	sessionSchemaVersion                   = 7
 	stateReserved                          = "reserved"
 	stateDeviceReserved                    = "device_reserved"
 	stateDeviceReady                       = "device_ready"
@@ -158,6 +158,7 @@ type record struct {
 	RunningForkRequest        *rootfshandoff.RunningForkCheckpointRequest `json:"running_fork_request,omitempty"`
 	RunningForkResult         *rootfshandoff.RunningForkCheckpointResult  `json:"running_fork_result,omitempty"`
 	RetireOperationID         string                                      `json:"retire_operation_id,omitempty"`
+	DirtyTailPressure         *dirtyTailPressureRecord                    `json:"dirty_tail_pressure,omitempty"`
 	SealedDescriptor          []byte                                      `json:"sealed_descriptor,omitempty"`
 	SealedBlockHead           string                                      `json:"sealed_block_head,omitempty"`
 	SealedDurability          string                                      `json:"sealed_durability,omitempty"`
@@ -169,6 +170,14 @@ type record struct {
 	UpdatedAt                 string                                      `json:"updated_at"`
 	Stage                     *rootfshandoff.StageRequest                 `json:"stage,omitempty"`
 	Consumer                  *ConsumerRegistration                       `json:"consumer,omitempty"`
+}
+
+type dirtyTailPressureRecord struct {
+	OperationID    string `json:"operation_id"`
+	Scope          string `json:"scope"`
+	UsedBytes      int64  `json:"used_bytes"`
+	RequestedBytes int64  `json:"requested_bytes"`
+	LimitBytes     int64  `json:"limit_bytes"`
 }
 
 type crashFenceRecord struct {
@@ -210,17 +219,26 @@ const (
 // finish writer retirement without Nomad allocation or plugin state. Live is
 // process-local and is true only while this Manager owns the NBD endpoint.
 type RecoverySession struct {
-	Stage             rootfshandoff.StageRequest
-	Kind              RecoveryKind
-	State             string
-	RetireOperationID string
-	CrashOperationID  string
-	CrashRequestedAt  time.Time
-	ExternalCrash     bool
-	BranchRemoved     bool
-	Live              bool
-	Consumer          *ConsumerRegistration
-	CreatedAt         time.Time
+	Stage               rootfshandoff.StageRequest
+	Kind                RecoveryKind
+	State               string
+	RetireOperationID   string
+	PressureOperationID string
+	CrashOperationID    string
+	CrashRequestedAt    time.Time
+	ExternalCrash       bool
+	BranchRemoved       bool
+	Live                bool
+	Consumer            *ConsumerRegistration
+	CreatedAt           time.Time
+}
+
+// DirtyTailPressureSession binds a blocked local writer admission to the exact
+// durable regional writer identity that must be planned-retired before the
+// request can continue.
+type DirtyTailPressureSession struct {
+	Stage    rootfshandoff.StageRequest
+	Pressure rootfsblock.DirtyTailPressure
 }
 
 // ConsumerRegistration is the durable host runtime identity that a node
@@ -261,6 +279,7 @@ type Manager struct {
 	rebaseEngine      RebaseEngine
 	rebaseAdmission   chan struct{}
 	rebaseWG          sync.WaitGroup
+	pressureSignal    chan struct{}
 	closing           bool
 }
 
@@ -346,6 +365,7 @@ func New(config Config) (*Manager, error) {
 		live: make(map[string]*liveSession), captures: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
 		rebaseEngine: rebaseEngine, rebaseAdmission: make(chan struct{}, 1),
+		pressureSignal: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -855,6 +875,21 @@ func (m *Manager) RecoverySessions() ([]RecoverySession, error) {
 				RetireOperationID: current.RetireOperationID, BranchRemoved: current.BranchRemoved,
 				Live: live[current.Parent],
 			}
+			if current.DirtyTailPressure != nil {
+				pressure := rootfsblock.DirtyTailPressure{
+					Scope: current.DirtyTailPressure.Scope, UsedBytes: current.DirtyTailPressure.UsedBytes,
+					RequestedBytes: current.DirtyTailPressure.RequestedBytes,
+					LimitBytes:     current.DirtyTailPressure.LimitBytes,
+				}
+				expected := rootfshandoff.PlannedRetireOperationID(
+					current.Parent, current.Stage.Identity.WriterGrantID, current.Stage.Identity.WriterEpoch,
+				)
+				if current.State != stateReady || current.RetireOperationID != "" ||
+					current.DirtyTailPressure.OperationID != expected || !validDirtyTailPressure(pressure) {
+					return fmt.Errorf("RootFS recovery record %q has an invalid dirty-tail pressure intent", key)
+				}
+				recovery.PressureOperationID = current.DirtyTailPressure.OperationID
+			}
 			createdAt, err := time.Parse(time.RFC3339Nano, current.CreatedAt)
 			if err != nil {
 				return fmt.Errorf("parse RootFS recovery creation time %q: %w", key, err)
@@ -1231,7 +1266,7 @@ func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest
 		Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 		GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 		LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: durable.Generation.CurrentBlockHead,
-	}, reader, m.branchOptions())
+	}, reader, m.sessionBranchOptions(current.Parent))
 	if err != nil {
 		return Mount{}, m.fail(current, fmt.Errorf("open writable branch: %w", err))
 	}
@@ -1301,8 +1336,8 @@ func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest
 }
 
 // BeginRetire makes sealing mandatory for the exact live writer before the
-// caller asks Kubernetes to delete its Pod. The operation is durable and
-// idempotent; a different operation can never take over the same session.
+// caller fences its workload. The operation is durable and idempotent; a
+// different operation can never take over the same session.
 func (m *Manager) BeginRetire(parent string, identity rootfshandoff.Identity, operationID string) error {
 	operationID = strings.TrimSpace(operationID)
 	if strings.TrimSpace(parent) == "" || operationID == "" {
@@ -1326,7 +1361,11 @@ func (m *Manager) BeginRetire(parent string, identity rootfshandoff.Identity, op
 	if current.State != stateReady {
 		return fmt.Errorf("RootFS session cannot retire from state %q: %w", current.State, errdefs.ErrFailedPrecondition)
 	}
+	if current.DirtyTailPressure != nil && current.DirtyTailPressure.OperationID != operationID {
+		return fmt.Errorf("RootFS session pressure belongs to operation %q: %w", current.DirtyTailPressure.OperationID, errdefs.ErrAlreadyExists)
+	}
 	current.RetireOperationID = operationID
+	current.DirtyTailPressure = nil
 	current.State = stateRetireRequested
 	return m.save(current)
 }
@@ -1528,6 +1567,12 @@ func (m *Manager) crashFence(
 	if err != nil || current.BindingDigest != hex.EncodeToString(binding[:]) {
 		return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("RootFS session belongs to another writer binding: %w", errdefs.ErrFailedPrecondition)
 	}
+	if current.DirtyTailPressure != nil {
+		return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf(
+			"RootFS pressure operation %q must recover regional planned retirement before crash abandonment: %w",
+			current.DirtyTailPressure.OperationID, errdefs.ErrFailedPrecondition,
+		)
+	}
 	if current.State != stateTombstoned || current.RetireOperationID != "" {
 		return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("RootFS session is not an unplanned tombstone: %w", errdefs.ErrFailedPrecondition)
 	}
@@ -1719,6 +1764,12 @@ func (m *Manager) Release(ctx context.Context, identity rootfshandoff.Identity) 
 func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 	parent := current.Parent
 	plannedRetire := current.RetireOperationID != ""
+	if current.DirtyTailPressure != nil && !plannedRetire {
+		return fmt.Errorf(
+			"RootFS pressure operation %q is awaiting regional planned-retire authority: %w",
+			current.DirtyTailPressure.OperationID, errdefs.ErrFailedPrecondition,
+		)
+	}
 	if current.FreezeOperationID != "" {
 		if err := m.runtime.ThawXFS(current.XFSRoot); err != nil {
 			return fmt.Errorf("thaw RootFS before release: %w", err)
@@ -1849,7 +1900,7 @@ func (m *Manager) reopenBranch(current record) (*rootfsblock.Branch, error) {
 		Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 		GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 		LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: descriptor.MappingRoot.RootDigest,
-	}, reader, m.branchOptions())
+	}, reader, m.sessionBranchOptions(current.Parent))
 	if err != nil {
 		return nil, fmt.Errorf("reopen session branch: %w", err)
 	}
@@ -1911,12 +1962,138 @@ func (m *Manager) NodeDirtyTailUsage() rootfsblock.NodeDirtyTailUsage {
 	return m.nodeDirty.Usage()
 }
 
+// DirtyTailPressureSignal coalesces new pressure observations so the node
+// daemon does not have to wait for its periodic recovery scan.
+func (m *Manager) DirtyTailPressureSignal() <-chan struct{} {
+	return m.pressureSignal
+}
+
+// DirtyTailPressureSessions returns every live or recovered normal writer
+// blocked before a dirty-tail limit. A first live observation is persisted in
+// Bolt before it is returned. Retire-requested sessions are handled by the
+// normal terminal reconciler and are intentionally omitted.
+func (m *Manager) DirtyTailPressureSessions() ([]DirtyTailPressureSession, error) {
+	m.mu.Lock()
+	live := make(map[string]*rootfsblock.Branch, len(m.live))
+	for parent, session := range m.live {
+		if session != nil && session.branch != nil {
+			live[parent] = session.branch
+		}
+	}
+	m.mu.Unlock()
+
+	pressures := make([]DirtyTailPressureSession, 0)
+	err := m.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(sessionBucket)
+		type pressureUpdate struct {
+			key     []byte
+			payload []byte
+		}
+		updates := make([]pressureUpdate, 0)
+		if err := bucket.ForEach(func(key, payload []byte) error {
+			if payload == nil {
+				return nil
+			}
+			var current record
+			if err := json.Unmarshal(payload, &current); err != nil {
+				return fmt.Errorf("decode pressured RootFS session %q: %w", key, err)
+			}
+			if current.Parent != string(key) || current.State != stateReady ||
+				current.RetireOperationID != "" || current.Stage == nil {
+				return nil
+			}
+			stage := cloneDurableStage(*current.Stage)
+			if err := stage.ValidateDurableBinding(); err != nil || stage.Generation == nil {
+				return fmt.Errorf("validate pressured RootFS binding %q: %v", key, err)
+			}
+			var pressure rootfsblock.DirtyTailPressure
+			if current.DirtyTailPressure != nil {
+				stored := current.DirtyTailPressure
+				pressure = rootfsblock.DirtyTailPressure{
+					Scope: stored.Scope, UsedBytes: stored.UsedBytes,
+					RequestedBytes: stored.RequestedBytes, LimitBytes: stored.LimitBytes,
+				}
+				expected := rootfshandoff.PlannedRetireOperationID(
+					stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+				)
+				if stored.OperationID != expected || !validDirtyTailPressure(pressure) {
+					return fmt.Errorf("validate persisted RootFS pressure %q", key)
+				}
+			} else {
+				branch := live[string(key)]
+				if branch == nil {
+					return nil
+				}
+				observed := branch.DirtyTailPressure()
+				if observed == nil {
+					return nil
+				}
+				pressure = *observed
+				if !validDirtyTailPressure(pressure) {
+					return fmt.Errorf("validate observed RootFS pressure %q", key)
+				}
+				current.Version = sessionSchemaVersion
+				current.DirtyTailPressure = &dirtyTailPressureRecord{
+					OperationID: rootfshandoff.PlannedRetireOperationID(
+						stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+					),
+					Scope: pressure.Scope, UsedBytes: pressure.UsedBytes,
+					RequestedBytes: pressure.RequestedBytes, LimitBytes: pressure.LimitBytes,
+				}
+				current.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				encoded, err := json.Marshal(current)
+				if err != nil {
+					return err
+				}
+				updates = append(updates, pressureUpdate{
+					key: append([]byte(nil), key...), payload: encoded,
+				})
+			}
+			pressures = append(pressures, DirtyTailPressureSession{Stage: stage, Pressure: pressure})
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, update := range updates {
+			if err := bucket.Put(update.key, update.payload); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return pressures, err
+}
+
+func validDirtyTailPressure(pressure rootfsblock.DirtyTailPressure) bool {
+	return (pressure.Scope == "session" || pressure.Scope == "node") &&
+		pressure.UsedBytes >= 0 && pressure.RequestedBytes > 0 && pressure.LimitBytes > 0 &&
+		(pressure.UsedBytes > pressure.LimitBytes || pressure.RequestedBytes > pressure.LimitBytes-pressure.UsedBytes)
+}
+
 func (m *Manager) branchOptions() rootfsblock.BranchOptions {
 	return rootfsblock.BranchOptions{
 		MaxDirtyTailBytes:      m.maxDirty,
 		RetirementReserveBytes: m.retirementReserve,
 		NodeDirtyBudget:        m.nodeDirty,
 	}
+}
+
+func (m *Manager) rebaseBranchOptions(operationID string) rootfsblock.BranchOptions {
+	options := m.branchOptions()
+	options.RetirementGroup = "rebase:" + strings.TrimSpace(operationID)
+	return options
+}
+
+func (m *Manager) sessionBranchOptions(parent string) rootfsblock.BranchOptions {
+	options := m.branchOptions()
+	options.RetirementGroup = parent
+	options.PressureObserver = func(rootfsblock.DirtyTailPressure) {
+		select {
+		case m.pressureSignal <- struct{}{}:
+		default:
+		}
+	}
+	return options
 }
 
 func preloadNodeDirtyTail(branchRoot string, budget *rootfsblock.DirtyTailBudget) error {

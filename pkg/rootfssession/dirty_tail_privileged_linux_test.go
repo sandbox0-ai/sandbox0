@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -73,10 +72,14 @@ func TestPrivilegedNodeDirtyTailHeadroomAllowsCleanXFSRetirement(t *testing.T) {
 	budget, err := rootfsblock.NewDirtyTailBudgetWithReserve(nodeLimit, retirementReserve)
 	require.NoError(t, err)
 	require.NoError(t, budget.Preload(branchPath, formatUsage))
+	pressureObserved := make(chan rootfsblock.DirtyTailPressure, 1)
 	branch, err := rootfsblock.OpenBranchWithOptions(branchPath, identity, base, rootfsblock.BranchOptions{
 		MaxDirtyTailBytes:      nodeLimit,
 		RetirementReserveBytes: retirementReserve,
 		NodeDirtyBudget:        budget,
+		PressureObserver: func(pressure rootfsblock.DirtyTailPressure) {
+			pressureObserved <- pressure
+		},
 	})
 	require.NoError(t, err)
 	device, err := rootfsblock.StartKernelNBD(ctx, ctx, branch, rootfsblock.KernelNBDOptions{
@@ -130,13 +133,47 @@ func TestPrivilegedNodeDirtyTailHeadroomAllowsCleanXFSRetirement(t *testing.T) {
 	usageBeforeRetire := budget.Usage()
 	require.Equal(t, retirementReserve, usageBeforeRetire.ReservedBytes)
 	require.LessOrEqual(t, usageBeforeRetire.UsedBytes+usageBeforeRetire.ReservedBytes, nodeLimit)
-	remaining := normalLimit - usageBeforeRetire.UsedBytes
-	require.GreaterOrEqual(t, remaining, int64(0))
-	_, err = branch.WriteAt(make([]byte, remaining+rootfsblock.LogicalBlockSize), 0)
-	require.ErrorIs(t, err, syscall.ENOSPC,
-		"normal admission must reject before consuming retirement headroom")
+	writeDone := make(chan error, 1)
+	go func() {
+		pressured, openErr := os.OpenFile(filepath.Join(mergedRoot, "pressure"), os.O_CREATE|os.O_WRONLY, 0o600)
+		if openErr != nil {
+			writeDone <- openErr
+			return
+		}
+		payload := make([]byte, 1<<20)
+		for index := range payload {
+			payload[index] = 0x5a
+		}
+		var writeErr error
+		for range 9 {
+			if _, writeErr = pressured.Write(payload); writeErr != nil {
+				break
+			}
+		}
+		if writeErr == nil {
+			writeErr = pressured.Sync()
+		}
+		writeDone <- errors.Join(writeErr, pressured.Close())
+	}()
+	select {
+	case pressure := <-pressureObserved:
+		require.Equal(t, "node", pressure.Scope)
+	case <-time.After(time.Second):
+		t.Fatal("normal admission did not trigger node pressure")
+	}
+	select {
+	case err := <-writeDone:
+		t.Fatalf("pressured write returned through NBD error boundary: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
 
 	require.NoError(t, branch.BeginRetirement())
+	select {
+	case err := <-writeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("pressured write did not resume as retirement I/O")
+	}
 	require.NoError(t, runtime.UnmountOverlay(mergedRoot, true),
 		"protected capacity must let OverlayFS synchronize and unmount")
 	mountedOverlay = false

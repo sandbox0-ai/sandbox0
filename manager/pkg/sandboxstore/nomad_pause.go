@@ -1,6 +1,7 @@
 package sandboxstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -36,6 +37,18 @@ type NomadSandboxPauseCandidate struct {
 	WriterGrantState    string
 }
 
+// RootFSWriterPressurePauseRequest fences automatic pressure handling to one
+// exact authenticated writer incarnation. The regional store must reject a
+// sandbox that has already resumed onto a different slot or writer.
+type RootFSWriterPressurePauseRequest struct {
+	SandboxID      string
+	GrantID        string
+	WriterEpoch    int64
+	BindingVersion int
+	BindingDigest  []byte
+	NodeUID        string
+}
+
 // RequestNomadSandboxPause persists a deterministic planned-retire intent
 // before any external Nomad stop request. Retries recover the same lifecycle
 // and exact slot/writer binding.
@@ -43,6 +56,32 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 	ctx context.Context,
 	sandboxID string,
 	source string,
+) (*NomadSandboxPauseCandidate, error) {
+	return s.requestNomadSandboxPause(ctx, sandboxID, source, nil)
+}
+
+// RequestNomadSandboxPressurePause persists the same planned pause while
+// atomically proving that the reporting writer is still the active runtime.
+func (s *PGSandboxStore) RequestNomadSandboxPressurePause(
+	ctx context.Context,
+	request *RootFSWriterPressurePauseRequest,
+) (*NomadSandboxPauseCandidate, error) {
+	if request == nil || strings.TrimSpace(request.SandboxID) == "" ||
+		strings.TrimSpace(request.GrantID) == "" || request.WriterEpoch <= 0 ||
+		request.BindingVersion != RootFSWriterBindingVersion || len(request.BindingDigest) != 32 ||
+		strings.TrimSpace(request.NodeUID) == "" {
+		return nil, fmt.Errorf("exact RootFS writer pressure binding is required")
+	}
+	copy := *request
+	copy.BindingDigest = append([]byte(nil), request.BindingDigest...)
+	return s.requestNomadSandboxPause(ctx, copy.SandboxID, SandboxLifecycleSourceAuto, &copy)
+}
+
+func (s *PGSandboxStore) requestNomadSandboxPause(
+	ctx context.Context,
+	sandboxID string,
+	source string,
+	pressure *RootFSWriterPressurePauseRequest,
 ) (*NomadSandboxPauseCandidate, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
@@ -91,6 +130,25 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 	`, sandboxID, RuntimeSlotStateTerminal))
 	if errors.Is(err, pgx.ErrNoRows) {
 		if alreadyPaused {
+			if pressure != nil {
+				grantRecord, grantErr := getRootFSWriterGrantForUpdate(ctx, tx, pressure.GrantID)
+				if grantErr != nil || !rootFSWriterPressureMatches(&grantRecord.RootFSWriterGrant, pressure) {
+					return nil, fmt.Errorf("%w: pressured writer is not the paused runtime", ErrNomadSandboxPauseConflict)
+				}
+				grant := &grantRecord.RootFSWriterGrant
+				operationID := rootfshandoff.PlannedRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)
+				if grant.State != RootFSWriterGrantStateRetired || grant.RetireOperationID != operationID ||
+					grant.RetireKind != RootFSWriterRetireKindPlannedPublish {
+					return nil, fmt.Errorf("%w: pressured writer lacks planned retirement", ErrNomadSandboxPauseConflict)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return nil, fmt.Errorf("commit already-paused pressured Nomad sandbox: %w", err)
+				}
+				return &NomadSandboxPauseCandidate{
+					SandboxID: sandboxID, OperationID: operationID, AlreadyPaused: true,
+					WriterGrantID: grant.ID, WriterGrantState: grant.State,
+				}, nil
+			}
 			if err := tx.Commit(ctx); err != nil {
 				return nil, fmt.Errorf("commit already-paused Nomad sandbox: %w", err)
 			}
@@ -114,6 +172,9 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 		return nil, fmt.Errorf("lock Nomad pause writer grant: %w", err)
 	}
 	grant := &grantRecord.RootFSWriterGrant
+	if pressure != nil && !rootFSWriterPressureMatches(grant, pressure) {
+		return nil, fmt.Errorf("%w: pressured writer is no longer the active runtime", ErrNomadSandboxPauseConflict)
+	}
 	runtimeGeneration, parseErr := strconv.ParseInt(grant.RuntimeGeneration, 10, 64)
 	if parseErr != nil || runtimeGeneration <= 0 || runtimeGeneration != record.RuntimeGeneration ||
 		grant.SandboxID != sandboxID || grant.ClaimID != slot.ClaimID || grant.SlotID != slot.ID ||
@@ -180,6 +241,12 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 		return nil, fmt.Errorf("commit Nomad sandbox pause request: %w", err)
 	}
 	return candidate, nil
+}
+
+func rootFSWriterPressureMatches(grant *RootFSWriterGrant, request *RootFSWriterPressurePauseRequest) bool {
+	return grant != nil && request != nil && grant.SandboxID == request.SandboxID && grant.ID == request.GrantID &&
+		grant.WriterEpoch == request.WriterEpoch && grant.BindingVersion == request.BindingVersion &&
+		bytes.Equal(grant.BindingDigest, request.BindingDigest) && grant.NodeUID == request.NodeUID
 }
 
 func nomadCommittedPlannedPauseLifecycleMatches(

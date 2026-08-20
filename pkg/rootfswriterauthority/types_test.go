@@ -47,7 +47,28 @@ func TestRenewRequestUsesIdentityOnlyWireContract(t *testing.T) {
 	require.NotContains(t, string(payload), "lease")
 	require.NotContains(t, string(payload), "token")
 	require.Equal(t, "/internal/v1/rootfs-writer-grants/grant-1/renew", RenewPath("grant-1"))
+	require.Equal(t, "/internal/v1/rootfs-writer-grants/grant-1/pressure", DirtyTailPressurePath("grant-1"))
 	require.Equal(t, "/internal/v1/rootfs-writer-grants/grant-1/fork-running", RunningForkPath("grant-1"))
+}
+
+func TestDirtyTailPressureRequiresLimitCrossingAndExactBinding(t *testing.T) {
+	request := DirtyTailPressureRequest{
+		TerminalRequest: TerminalRequest{
+			WriterEpoch: 7, BindingVersion: 1, BindingDigest: strings.Repeat("ab", 32),
+		},
+		Scope: DirtyTailPressureScopeNode, UsedBytes: 4096,
+		RequestedBytes: 4096, LimitBytes: 4096,
+	}
+	require.NoError(t, request.Validate())
+	request.RequestedBytes = 1
+	request.LimitBytes = 8192
+	require.ErrorContains(t, request.Validate(), "crosses")
+	request.RequestedBytes = 4096
+	request.LimitBytes = 4096
+	request.Scope = "cluster"
+	require.ErrorContains(t, request.Validate(), "scope")
+	require.NoError(t, (DirtyTailPressureResponse{OperationID: "retire-1"}).Validate())
+	require.Error(t, (DirtyTailPressureResponse{}).Validate())
 }
 
 func TestRenewRequestRejectsInvalidBinding(t *testing.T) {

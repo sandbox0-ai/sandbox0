@@ -395,18 +395,30 @@ server-GC/client-destroy race validation or move the local executor into ctld.
 
 `--max-dirty-tail-bytes` bounds the logical 4 KiB payload represented by one
 session's local branch WAL. Repeated overwrites count because they consume WAL
-until publication. Once exhausted, the daemon rejects an entire backend write
-or write-zeroes request before appending any record. The NBD reply contains
-`ENOSPC`, but Linux's NBD client maps every nonzero remote errno to block-layer
-`EIO`; reaching this hard boundary can therefore shut down XFS. It is an
-emergency fail-stop guard, not a guest-visible quota mechanism. The default is
-10 GiB.
+until publication. A production session daemon does not send a normal-limit
+failure through NBD: the first request that would cross the limit is left
+pending, and subsequent writes wait behind it. The daemon persists a
+deterministic pressure-pending marker in Bolt, asks the authenticated regional
+writer authority to create an exact automatic planned pause, and only then
+promotes the local marker to planned retirement. The node reconciler fences
+the allocation without depending on the task-driver process and unblocks the
+pending request as retirement I/O. A sessiond restart recovers the pending
+marker and retries the same regional operation instead of crash-abandoning the
+dirty branch.
+
+The lower-level branch API still returns `ENOSPC` when no pressure observer is
+installed, and retirement can still reach the absolute reserve boundary.
+Linux's NBD client maps every nonzero remote errno to block-layer `EIO`, so
+that boundary can shut down XFS. It remains an emergency fail-stop guard, not
+a guest-visible quota mechanism. The default per-session limit is 10 GiB.
 
 `--max-node-dirty-tail-bytes` independently bounds the aggregate logical
 payload across active sessions, terminal journals awaiting regional
 acknowledgement, interrupted work, and all three offline-rebase branches. The
 default is 40 GiB. Admission is atomic across concurrent NBD requests on
-different sessions. Startup scans every durable `.wal` below `--branch-root`
+different sessions. A node-limit crossing uses the same blocked-write and
+exact planned-pause path as a per-session crossing. Startup scans every durable
+`.wal` below `--branch-root`
 before serving requests; a limit lowered below recovered usage does not block
 retirement, but normal writes remain blocked until acknowledged artifacts are
 deleted. Closing a branch does not release capacity—only deletion after the
@@ -423,9 +435,12 @@ session manager switches its branch to retirement mode before XFS sync/unmount,
 allowing shutdown I/O to use the shared node headroom and expanding that
 branch's per-session limit by the same amount. A privileged NBD/XFS/OverlayFS
 test verifies clean retirement when fencing begins before the hard boundary.
-The reserve cannot repair an XFS instance after Linux NBD has already surfaced
-a hard-cap response as `EIO`; production pressure detection must initiate
-retirement before that boundary.
+Unrelated retirements are serialized until regional acknowledgement reclaims
+the active group's local journals. The three branches of one offline rebase
+share one group and may retire together.
+The pressure path retains the writer lease while local sealing, S3 publication,
+and regional acknowledgement retry. The reserve cannot repair an XFS instance
+after Linux NBD has already surfaced a hard-cap response as `EIO`.
 
 ## Running fork control
 

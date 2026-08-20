@@ -10,6 +10,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
@@ -468,6 +469,56 @@ func TestBranchRetirementReserveIsUnavailableToGuestWrites(t *testing.T) {
 	}, budget.Usage())
 }
 
+func TestBranchPressureBlocksBeforeNBDCapacityErrorUntilPlannedRetirement(t *testing.T) {
+	base := bytes.Repeat([]byte{0x61}, 2*LogicalBlockSize)
+	pressureObserved := make(chan DirtyTailPressure, 1)
+	branch, err := OpenBranchWithOptions(
+		filepath.Join(t.TempDir(), "pressure.wal"),
+		testBranchIdentity(int64(len(base))),
+		bytes.NewReader(base),
+		BranchOptions{
+			MaxDirtyTailBytes: LogicalBlockSize, RetirementReserveBytes: LogicalBlockSize,
+			PressureObserver: func(pressure DirtyTailPressure) { pressureObserved <- pressure },
+		},
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x62}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := branch.WriteAt([]byte{0x63}, LogicalBlockSize)
+		writeDone <- writeErr
+	}()
+	var pressure DirtyTailPressure
+	select {
+	case pressure = <-pressureObserved:
+	case <-time.After(time.Second):
+		t.Fatal("dirty-tail pressure was not observed")
+	}
+	require.Equal(t, DirtyTailPressure{
+		Scope: "session", UsedBytes: LogicalBlockSize,
+		RequestedBytes: LogicalBlockSize, LimitBytes: LogicalBlockSize,
+	}, pressure)
+	require.Equal(t, &pressure, branch.DirtyTailPressure())
+	select {
+	case err := <-writeDone:
+		t.Fatalf("pressured write returned before planned retirement: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	require.NoError(t, branch.BeginRetirement())
+	select {
+	case err := <-writeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("pressured write did not resume for retirement")
+	}
+	require.Nil(t, branch.DirtyTailPressure())
+	require.Equal(t, int64(2*LogicalBlockSize), branch.DirtyTailUsage().DirtyBytes)
+}
+
 func TestNodeDirtyTailRetirementReserveDoesNotScaleWithOwnerCount(t *testing.T) {
 	const owners = 10_000
 	budget, err := NewDirtyTailBudgetWithReserve(2*LogicalBlockSize, LogicalBlockSize)
@@ -481,6 +532,35 @@ func TestNodeDirtyTailRetirementReserveDoesNotScaleWithOwnerCount(t *testing.T) 
 	for index := range owners {
 		require.NoError(t, budget.detach(fmt.Sprintf("owner-%05d", index)))
 	}
+}
+
+func TestNodeDirtyTailSerializesUnrelatedRetirementsUntilArtifactReclaim(t *testing.T) {
+	base := bytes.Repeat([]byte{0x71}, LogicalBlockSize)
+	budget, err := NewDirtyTailBudgetWithReserve(4*LogicalBlockSize, LogicalBlockSize)
+	require.NoError(t, err)
+	open := func(name, group string) *Branch {
+		path := filepath.Join(t.TempDir(), name+".wal")
+		branch, openErr := OpenBranchWithOptions(
+			path, testBranchIdentity(int64(len(base))), bytes.NewReader(base),
+			BranchOptions{NodeDirtyBudget: budget, RetirementGroup: group},
+		)
+		require.NoError(t, openErr)
+		return branch
+	}
+	first := open("first", "retire-first")
+	second := open("second", "retire-second")
+	defer second.Close()
+	require.NoError(t, first.BeginRetirement())
+	var busy *DirtyTailRetirementBusyError
+	require.ErrorAs(t, second.BeginRetirement(), &busy)
+	require.Equal(t, "retire-first", busy.ActiveGroup)
+	firstPath := first.dirtyOwner
+	require.NoError(t, first.Close())
+	require.ErrorIs(t, second.BeginRetirement(), syscall.EBUSY,
+		"closing a branch must not release charged retirement headroom")
+	require.NoError(t, os.Remove(firstPath))
+	require.NoError(t, budget.ReleaseOwner(firstPath))
+	require.NoError(t, second.BeginRetirement())
 }
 
 func TestNodeDirtyTailRecoveryHeadroomShrinksAfterRecoveredOwnerReclaim(t *testing.T) {

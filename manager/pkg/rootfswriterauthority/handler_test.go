@@ -47,6 +47,22 @@ type fakeGrantStore struct {
 	forkErr       error
 }
 
+type fakePressurePauser struct {
+	request     *sandboxstore.RootFSWriterPressurePauseRequest
+	operationID string
+	err         error
+}
+
+func (f *fakePressurePauser) RequestRootFSWriterPressurePause(
+	_ context.Context,
+	request *sandboxstore.RootFSWriterPressurePauseRequest,
+) (string, error) {
+	copy := *request
+	copy.BindingDigest = append([]byte(nil), request.BindingDigest...)
+	f.request = &copy
+	return f.operationID, f.err
+}
+
 func (f *fakeGrantStore) RenewRootFSWriterGrants(
 	_ context.Context,
 	requests []*sandboxstore.RenewRootFSWriterGrantRequest,
@@ -198,6 +214,41 @@ func TestHandlerDerivesConsumerAndLeasePolicy(t *testing.T) {
 	require.Equal(t, "ctld-pod-uid", store.request.ConsumerCtldPodUID)
 	require.Equal(t, 5*time.Minute, store.request.LeaseTTL)
 	require.Equal(t, 1, store.request.BindingVersion)
+}
+
+func TestPressureHandlerPlansExactAuthenticatedWriterBeforeReturningOperation(t *testing.T) {
+	grant := terminalTestGrant("grant-1", sandboxstore.RootFSWriterGrantStateConsumed)
+	grant.SandboxID = "sandbox-1"
+	grant.GateParent = "parent-1"
+	expected := rootfshandoff.PlannedRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)
+	pauser := &fakePressurePauser{operationID: expected}
+	handler, err := NewHandler(HandlerConfig{
+		Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: grant.NodeUID}},
+		Store:    &fakeGrantStore{grant: grant}, LeaseTTL: time.Minute, PressurePauser: pauser,
+	})
+	require.NoError(t, err)
+	body, err := json.Marshal(protocol.DirtyTailPressureRequest{
+		TerminalRequest: protocol.TerminalRequest{
+			WriterEpoch: grant.WriterEpoch, BindingVersion: grant.BindingVersion,
+			BindingDigest: strings.Repeat("ab", 32),
+		},
+		Scope:     protocol.DirtyTailPressureScopeNode,
+		UsedBytes: 4096, RequestedBytes: 4096, LimitBytes: 4096,
+	})
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodPut, protocol.DirtyTailPressurePath(grant.ID), bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer projected-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code)
+	var result protocol.DirtyTailPressureResponse
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+	require.Equal(t, expected, result.OperationID)
+	require.NotNil(t, pauser.request)
+	require.Equal(t, grant.SandboxID, pauser.request.SandboxID)
+	require.Equal(t, grant.ID, pauser.request.GrantID)
+	require.Equal(t, grant.NodeUID, pauser.request.NodeUID)
+	require.Equal(t, grant.BindingDigest, pauser.request.BindingDigest)
 }
 
 func TestHandlerRejectsMissingBearerBeforeConsuming(t *testing.T) {

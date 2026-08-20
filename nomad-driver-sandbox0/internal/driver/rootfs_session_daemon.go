@@ -83,6 +83,12 @@ type pausedRebaseRootFSRuntime interface {
 	AcknowledgePausedRebase(rootfsrebase.WorkerRequest, string) error
 }
 
+type dirtyTailPressureRootFSRuntime interface {
+	DirtyTailPressureSignal() <-chan struct{}
+	DirtyTailPressureSessions() ([]rootfssession.DirtyTailPressureSession, error)
+	PlanDirtyTailPressure(context.Context, rootfssession.DirtyTailPressureSession) (string, error)
+}
+
 // RejectPausedRootFSRebase serializes termination with exact node execution.
 func (d *rootFSSessionDaemon) RejectPausedRootFSRebase(
 	ctx context.Context,
@@ -1051,16 +1057,64 @@ func (d *rootFSSessionDaemon) writerLeaseLost(stage rootfshandoff.StageRequest, 
 func (d *rootFSSessionDaemon) reconcileLoop(ctx context.Context) {
 	ticker := time.NewTicker(rootFSSessionReconcileInterval)
 	defer ticker.Stop()
+	var pressureSignal <-chan struct{}
+	if runtime, ok := d.runtime.(dirtyTailPressureRootFSRuntime); ok {
+		pressureSignal = runtime.DirtyTailPressureSignal()
+	}
+	d.scanDirtyTailPressures(ctx)
 	d.scan(ctx, "")
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-pressureSignal:
+			d.scanDirtyTailPressures(ctx)
 		case parent := <-d.trigger:
 			d.scan(ctx, parent)
 		case <-ticker.C:
+			d.scanDirtyTailPressures(ctx)
 			d.scan(ctx, "")
 		}
+	}
+}
+
+func (d *rootFSSessionDaemon) scanDirtyTailPressures(ctx context.Context) {
+	runtime, ok := d.runtime.(dirtyTailPressureRootFSRuntime)
+	if !ok {
+		return
+	}
+	pressures, err := runtime.DirtyTailPressureSessions()
+	if err != nil {
+		d.logger.Error("list blocked RootFS dirty-tail writers", "error", err)
+		return
+	}
+	for _, pressure := range pressures {
+		parent := pressure.Stage.Parent
+		inflightKey := "pressure:" + parent
+		if !d.beginReconciliation(inflightKey) {
+			continue
+		}
+		d.mu.Lock()
+		d.wg.Add(1)
+		d.mu.Unlock()
+		go func(pressure rootfssession.DirtyTailPressureSession, inflightKey string) {
+			pressureCtx, cancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
+			_, planErr := runtime.PlanDirtyTailPressure(pressureCtx, pressure)
+			cancel()
+			d.endReconciliation(inflightKey)
+			d.wg.Done()
+			if planErr != nil {
+				if !errors.Is(planErr, context.Canceled) {
+					d.logger.Error("plan pressured RootFS writer retirement", "parent", pressure.Stage.Parent, "error", planErr)
+				}
+				return
+			}
+			select {
+			case d.trigger <- pressure.Stage.Parent:
+			default:
+				d.logger.Error("RootFS pressure retirement trigger queue is full", "parent", pressure.Stage.Parent)
+			}
+		}(pressure, inflightKey)
 	}
 }
 
@@ -1090,6 +1144,15 @@ func (d *rootFSSessionDaemon) scan(ctx context.Context, onlyParent string) {
 		}
 		if session.Kind == rootfssession.RecoveryUnavailable {
 			d.logger.Error("legacy RootFS session lacks an independent recovery binding", "state", session.State)
+			continue
+		}
+		if session.PressureOperationID != "" {
+			// A durable local pressure marker is not retirement authority. Its
+			// exact regional request must be recovered before any crash path is
+			// allowed to discard the dirty branch.
+			continue
+		}
+		if d.reconciliationInFlight("pressure:" + session.Stage.Parent) {
 			continue
 		}
 		allocationPurged := activeAllocations != nil && !activeAllocations[session.Stage.Identity.PodUID] &&
@@ -1138,6 +1201,12 @@ func (d *rootFSSessionDaemon) endReconciliation(parent string) {
 	d.mu.Lock()
 	delete(d.inflight, parent)
 	d.mu.Unlock()
+}
+
+func (d *rootFSSessionDaemon) reconciliationInFlight(key string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.inflight[key]
 }
 
 type httpNomadAllocationSource struct {

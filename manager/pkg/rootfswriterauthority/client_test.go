@@ -29,6 +29,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
 
 func TestCrashAbandonBeginRequestUsesDurableStageBinding(t *testing.T) {
@@ -133,6 +134,46 @@ func TestManagerClientPublishesRunningForkOnCanonicalGrantPath(t *testing.T) {
 	}
 	if received.Checkpoint.ProofDigest != checkpoint.ProofDigest || received.BindingDigest != checkpoint.Proof.BindingDigest {
 		t.Fatalf("received = %+v, want exact checkpoint", received)
+	}
+}
+
+func TestManagerClientRequestsPressurePauseWithDurableBinding(t *testing.T) {
+	stage := crashAbandonClientTestStage().WithoutWriterGrantToken()
+	expected := rootfshandoff.PlannedRetireOperationID(
+		stage.Parent, stage.Identity.WriterGrantID, stage.Identity.WriterEpoch,
+	)
+	var received protocol.DirtyTailPressureRequest
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.URL.EscapedPath() != protocol.DirtyTailPressurePath("grant-1") {
+			t.Errorf("request = %s %s", request.Method, request.URL.EscapedPath())
+		}
+		if err := json.NewDecoder(request.Body).Decode(&received); err != nil {
+			t.Error(err)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(protocol.DirtyTailPressureResponse{OperationID: expected})
+	}))
+	defer server.Close()
+	baseURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("projected-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &ManagerClient{baseURL: baseURL, tokenFile: tokenFile, http: server.Client()}
+	operationID, err := client.RequestWriterPressurePause(context.Background(), stage, rootfsblock.DirtyTailPressure{
+		Scope:     protocol.DirtyTailPressureScopeSession,
+		UsedBytes: rootfsblock.LogicalBlockSize, RequestedBytes: rootfsblock.LogicalBlockSize,
+		LimitBytes: rootfsblock.LogicalBlockSize,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operationID != expected || received.WriterEpoch != stage.Identity.WriterEpoch ||
+		received.BindingVersion != stage.BindingVersion || received.Scope != protocol.DirtyTailPressureScopeSession {
+		t.Fatalf("operation=%q request=%+v", operationID, received)
 	}
 }
 

@@ -24,6 +24,7 @@ const (
 	maxRequestBytes            = 64 << 10
 	maxRunningForkRequestBytes = 128 << 10
 	renewPathSuffix            = "/renew"
+	pressurePathSuffix         = "/pressure"
 	runningForkPathSuffix      = "/fork-running"
 	terminalPathSuffix         = "/terminal"
 	preconsumeAbortPathSuffix  = "/terminal/preconsume-abort"
@@ -47,11 +48,22 @@ type runningForkGrantStore interface {
 	ForkRunningRootFSFilesystem(context.Context, *sandboxstore.ForkRunningRootFSFilesystemRequest) (*sandboxstore.RootFSFilesystem, error)
 }
 
+// PressurePauser persists a planned pause for one exact writer and returns
+// before external Nomad stop side effects. This ordering lets the node journal
+// the same operation before its plugin-independent reconciler fences runtime.
+type PressurePauser interface {
+	RequestRootFSWriterPressurePause(
+		context.Context,
+		*sandboxstore.RootFSWriterPressurePauseRequest,
+	) (string, error)
+}
+
 type HandlerConfig struct {
-	Verifier      CallerVerifier
-	Store         GrantStore
-	LeaseTTL      time.Duration
-	RenewalPolicy sandboxstore.RootFSWriterLeaseRenewalPolicy
+	Verifier       CallerVerifier
+	Store          GrantStore
+	LeaseTTL       time.Duration
+	RenewalPolicy  sandboxstore.RootFSWriterLeaseRenewalPolicy
+	PressurePauser PressurePauser
 }
 
 func NewHandler(config HandlerConfig) (http.Handler, error) {
@@ -79,6 +91,10 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 			servePreconsumeAbort(config, writer, request)
 			return
 		}
+		if isPressurePath(request.URL.EscapedPath()) {
+			servePressure(config, writer, request)
+			return
+		}
 		if isRunningForkPath(request.URL.EscapedPath()) {
 			serveRunningFork(config, writer, request)
 			return
@@ -93,6 +109,88 @@ func NewHandler(config HandlerConfig) (http.Handler, error) {
 		}
 		serveConsume(config, writer, request)
 	}), nil
+}
+
+func servePressure(config HandlerConfig, writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPut {
+		writer.Header().Set("Allow", http.MethodPut)
+		writeError(writer, http.StatusMethodNotAllowed, "method is not supported")
+		return
+	}
+	grantID, err := parsePressureGrantID(request.URL.EscapedPath())
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	bearer, err := bearerToken(request.Header.Get("Authorization"))
+	if err != nil {
+		writeError(writer, http.StatusUnauthorized, err.Error())
+		return
+	}
+	caller, err := config.Verifier.Verify(request.Context(), bearer)
+	if err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	var body protocol.DirtyTailPressureRequest
+	if err := decodeRequest(writer, request, &body); err != nil {
+		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := body.Validate(); err != nil || body.BindingVersion != sandboxstore.RootFSWriterBindingVersion {
+		writeError(writer, http.StatusBadRequest, "invalid dirty-tail pressure binding")
+		return
+	}
+	grant, err := config.Store.GetRootFSWriterGrant(request.Context(), grantID)
+	if err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	if err := verifyWriterGrantBinding(grant, grantID, body.TerminalRequest, caller); err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	expectedOperationID := rootfshandoff.PlannedRetireOperationID(grant.GateParent, grant.ID, grant.WriterEpoch)
+	if grant.State == sandboxstore.RootFSWriterGrantStateRetiring || grant.State == sandboxstore.RootFSWriterGrantStateRetired {
+		if grant.RetireKind != sandboxstore.RootFSWriterRetireKindPlannedPublish ||
+			grant.RetireOperationID != expectedOperationID {
+			writeClassifiedError(writer, fmt.Errorf("writer is owned by another retirement: %w", sandboxstore.ErrRootFSWriterGrantInvalidState))
+			return
+		}
+		writePressureResponse(writer, expectedOperationID)
+		return
+	}
+	if grant.State != sandboxstore.RootFSWriterGrantStateConsumed {
+		writeClassifiedError(writer, fmt.Errorf("writer is not active: %w", sandboxstore.ErrRootFSWriterGrantInvalidState))
+		return
+	}
+	if config.PressurePauser == nil {
+		writeClassifiedError(writer, fmt.Errorf("writer pressure pauser is unavailable: %w", errdefs.ErrUnavailable))
+		return
+	}
+	binding, _ := body.DecodedBindingDigest()
+	operationID, err := config.PressurePauser.RequestRootFSWriterPressurePause(
+		request.Context(),
+		&sandboxstore.RootFSWriterPressurePauseRequest{
+			SandboxID: grant.SandboxID, GrantID: grant.ID, WriterEpoch: grant.WriterEpoch,
+			BindingVersion: grant.BindingVersion, BindingDigest: binding, NodeUID: caller.NodeUID,
+		},
+	)
+	if err != nil {
+		writeClassifiedError(writer, err)
+		return
+	}
+	if operationID != expectedOperationID {
+		writeClassifiedError(writer, fmt.Errorf("writer pressure operation does not match the durable binding: %w", errdefs.ErrUnavailable))
+		return
+	}
+	writePressureResponse(writer, operationID)
+}
+
+func writePressureResponse(writer http.ResponseWriter, operationID string) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(writer).Encode(protocol.DirtyTailPressureResponse{OperationID: operationID})
 }
 
 func serveRunningFork(config HandlerConfig, writer http.ResponseWriter, request *http.Request) {
@@ -606,6 +704,13 @@ func parseRenewGrantID(path string) (string, error) {
 	return parseGrantID(strings.TrimSuffix(path, renewPathSuffix))
 }
 
+func parsePressureGrantID(path string) (string, error) {
+	if !strings.HasSuffix(path, pressurePathSuffix) {
+		return "", fmt.Errorf("invalid writer grant pressure path")
+	}
+	return parseGrantID(strings.TrimSuffix(path, pressurePathSuffix))
+}
+
 func parseRunningForkGrantID(path string) (string, error) {
 	if !strings.HasSuffix(path, runningForkPathSuffix) {
 		return "", fmt.Errorf("invalid writer grant running fork path")
@@ -629,6 +734,10 @@ func parsePreconsumeAbortGrantID(path string) (string, error) {
 
 func isRenewPath(path string) bool {
 	return isGrantActionPath(path, renewPathSuffix)
+}
+
+func isPressurePath(path string) bool {
+	return isGrantActionPath(path, pressurePathSuffix)
 }
 
 func isRunningForkPath(path string) bool {

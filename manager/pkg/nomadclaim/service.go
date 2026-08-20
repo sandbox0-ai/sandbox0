@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/errdefs"
 	distref "github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
@@ -80,6 +81,13 @@ type planner interface {
 
 type allocationStopper interface {
 	Stop(context.Context, runtimeslotreconciler.AllocationPurgeRequest) error
+}
+
+type writerPressurePauseStore interface {
+	RequestNomadSandboxPressurePause(
+		context.Context,
+		*sandboxstore.RootFSWriterPressurePauseRequest,
+	) (*sandboxstore.NomadSandboxPauseCandidate, error)
 }
 
 type runningForkController interface {
@@ -225,6 +233,43 @@ func (s *Service) PauseSandboxByID(ctx context.Context, sandboxID string) error 
 	} else {
 		return err
 	}
+}
+
+// RequestRootFSWriterPressurePause persists and enqueues a planned pause for
+// one exact writer without waiting for Nomad Stop. The reporting node must
+// first receive the deterministic operation and persist it locally; its
+// plugin-independent reconciler then fences the runtime while the regional
+// pause controller catches up asynchronously.
+func (s *Service) RequestRootFSWriterPressurePause(
+	ctx context.Context,
+	request *sandboxstore.RootFSWriterPressurePauseRequest,
+) (string, error) {
+	if request == nil {
+		return "", fmt.Errorf("exact writer pressure pause request is required: %w", errdefs.ErrInvalidArgument)
+	}
+	store, ok := s.store.(writerPressurePauseStore)
+	if !ok {
+		return "", fmt.Errorf("exact writer pressure pause store is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	candidate, err := store.RequestNomadSandboxPressurePause(ctx, request)
+	if err != nil {
+		switch {
+		case errors.Is(err, sandboxstore.ErrNomadSandboxPauseConflict),
+			errors.Is(err, sandboxstore.ErrNomadSandboxPauseNotReady),
+			errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
+			errors.Is(err, sandboxstore.ErrRuntimeSlotConflict),
+			errors.Is(err, sandboxstore.ErrRuntimeSlotInvalid):
+			return "", fmt.Errorf("request exact writer pressure pause: %v: %w", err, errdefs.ErrFailedPrecondition)
+		default:
+			return "", fmt.Errorf("request exact writer pressure pause: %v: %w", err, errdefs.ErrUnavailable)
+		}
+	}
+	if candidate == nil || candidate.SandboxID != request.SandboxID ||
+		candidate.WriterGrantID != request.GrantID || strings.TrimSpace(candidate.OperationID) == "" {
+		return "", fmt.Errorf("writer pressure pause returned a mismatched candidate: %w", errdefs.ErrUnavailable)
+	}
+	s.enqueueNomadSandboxPause(candidate.SandboxID)
+	return candidate.OperationID, nil
 }
 
 // CompletePausingSandboxRuntime asks Nomad to cooperatively stop the exact

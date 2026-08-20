@@ -177,6 +177,11 @@ type fakeRootFSRuntime struct {
 	lastParent       string
 	lastOperation    string
 	leaseLoss        func(error)
+	pressureSignal   chan struct{}
+	pressures        []rootfssession.DirtyTailPressureSession
+	pressurePlans    []rootfssession.DirtyTailPressureSession
+	pressurePlanErr  error
+	recoverySessions []rootfssession.RecoverySession
 }
 
 func (r *fakeRootFSRuntime) Ping(context.Context) error {
@@ -262,7 +267,34 @@ func (r *fakeRootFSRuntime) CaptureRunningFork(
 }
 
 func (r *fakeRootFSRuntime) RecoverySessions() ([]rootfssession.RecoverySession, error) {
-	return nil, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]rootfssession.RecoverySession(nil), r.recoverySessions...), nil
+}
+
+func (r *fakeRootFSRuntime) DirtyTailPressureSignal() <-chan struct{} {
+	return r.pressureSignal
+}
+
+func (r *fakeRootFSRuntime) DirtyTailPressureSessions() ([]rootfssession.DirtyTailPressureSession, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]rootfssession.DirtyTailPressureSession(nil), r.pressures...), nil
+}
+
+func (r *fakeRootFSRuntime) PlanDirtyTailPressure(
+	_ context.Context,
+	pressure rootfssession.DirtyTailPressureSession,
+) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pressurePlans = append(r.pressurePlans, pressure)
+	if r.pressurePlanErr != nil {
+		return "", r.pressurePlanErr
+	}
+	return rootfshandoff.PlannedRetireOperationID(
+		pressure.Stage.Parent, pressure.Stage.Identity.WriterGrantID, pressure.Stage.Identity.WriterEpoch,
+	), nil
 }
 
 func (r *fakeRootFSRuntime) Retire(_ context.Context, request rootfshandoff.StageRequest, operationID string) (rootfssession.RetireResult, error) {

@@ -17,6 +17,7 @@ const BatchRenewPath = "/internal/v1/rootfs-writer-grants:renew"
 
 const (
 	renewPathSuffix           = "/renew"
+	pressurePathSuffix        = "/pressure"
 	runningForkPathSuffix     = "/fork-running"
 	terminalPathSuffix        = "/terminal"
 	preconsumeAbortPathSuffix = "/terminal/preconsume-abort"
@@ -193,6 +194,53 @@ func (r RenewRequest) DecodedBindingDigest() ([]byte, error) {
 
 func RenewPath(grantID string) string {
 	return ConsumePath(grantID) + renewPathSuffix
+}
+
+const (
+	DirtyTailPressureScopeSession = "session"
+	DirtyTailPressureScopeNode    = "node"
+)
+
+// DirtyTailPressureRequest identifies one normal write blocked before it
+// consumes protected retirement capacity. Manager derives the sandbox from
+// the authenticated writer grant rather than trusting a node-supplied ID.
+type DirtyTailPressureRequest struct {
+	TerminalRequest
+	Scope          string `json:"scope"`
+	UsedBytes      int64  `json:"used_bytes"`
+	RequestedBytes int64  `json:"requested_bytes"`
+	LimitBytes     int64  `json:"limit_bytes"`
+}
+
+func (r DirtyTailPressureRequest) Validate() error {
+	if err := r.TerminalRequest.Validate(); err != nil {
+		return err
+	}
+	if r.Scope != DirtyTailPressureScopeSession && r.Scope != DirtyTailPressureScopeNode {
+		return fmt.Errorf("scope must be session or node")
+	}
+	if r.UsedBytes < 0 || r.RequestedBytes <= 0 || r.LimitBytes <= 0 ||
+		r.UsedBytes <= r.LimitBytes && r.RequestedBytes <= r.LimitBytes-r.UsedBytes {
+		return fmt.Errorf("usage must describe a positive request that crosses the normal limit")
+	}
+	return nil
+}
+
+// DirtyTailPressureResponse returns the deterministic regional operation that
+// the node must persist locally before unblocking retirement I/O.
+type DirtyTailPressureResponse struct {
+	OperationID string `json:"operation_id"`
+}
+
+func (r DirtyTailPressureResponse) Validate() error {
+	if strings.TrimSpace(r.OperationID) == "" || r.OperationID != strings.TrimSpace(r.OperationID) {
+		return fmt.Errorf("operation_id must be canonical and non-empty")
+	}
+	return nil
+}
+
+func DirtyTailPressurePath(grantID string) string {
+	return ConsumePath(grantID) + pressurePathSuffix
 }
 
 // RunningForkPath publishes a consistent checkpoint without retiring the

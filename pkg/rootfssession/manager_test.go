@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -70,12 +69,44 @@ func TestManagerEnforcesDirtyTailCapacityWithoutBlockingRetirement(t *testing.T)
 	manager.mu.Unlock()
 	_, err = branch.WriteAt(bytes.Repeat([]byte{0x41}, rootfsblock.LogicalBlockSize), 0)
 	require.NoError(t, err)
-	_, err = branch.WriteAt([]byte{0x42}, rootfsblock.LogicalBlockSize)
-	require.ErrorIs(t, err, syscall.ENOSPC)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := branch.WriteAt([]byte{0x42}, rootfsblock.LogicalBlockSize)
+		writeDone <- writeErr
+	}()
+	select {
+	case <-manager.DirtyTailPressureSignal():
+	case <-time.After(time.Second):
+		t.Fatal("session pressure did not wake the owner")
+	}
+	pressures, err := manager.DirtyTailPressureSessions()
+	require.NoError(t, err)
+	require.Len(t, pressures, 1)
+	require.Equal(t, request.WithoutWriterGrantToken(), pressures[0].Stage)
+	require.Equal(t, "session", pressures[0].Pressure.Scope)
+	expectedOperation := rootfshandoff.PlannedRetireOperationID(
+		request.Parent, request.Identity.WriterGrantID, request.Identity.WriterEpoch,
+	)
+	pressuredRecord, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.NotNil(t, pressuredRecord.DirtyTailPressure)
+	require.Equal(t, expectedOperation, pressuredRecord.DirtyTailPressure.OperationID)
+	recovery, err := manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1)
+	require.Equal(t, expectedOperation, recovery[0].PressureOperationID,
+		"restart recovery must not crash-abandon a regionally pending pressure pause")
+	require.ErrorIs(t, manager.Release(t.Context(), request.Identity), errdefs.ErrFailedPrecondition,
+		"pressure pending is not regional retirement authority")
+	stillReady, err := manager.load(request.Parent)
+	require.NoError(t, err)
+	require.Equal(t, stateReady, stillReady.State)
 
-	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, "retire-cap"))
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, expectedOperation))
+	require.NoError(t, branch.BeginRetirement())
+	require.NoError(t, <-writeDone)
 	require.NoError(t, manager.Release(t.Context(), request.Identity))
-	result, err := manager.RetireResult(request.Parent, request.Identity, "retire-cap")
+	result, err := manager.RetireResult(request.Parent, request.Identity, expectedOperation)
 	require.NoError(t, err)
 	require.Equal(t, rootfsblock.DurabilityComposite, result.DurabilityState)
 	sealed, err := rootfsblock.DecodeDescriptor(result.Descriptor)
@@ -87,7 +118,7 @@ func TestManagerEnforcesDirtyTailCapacityWithoutBlockingRetirement(t *testing.T)
 	_, err = New(Config{MaxNodeDirtyTailBytes: -1, Source: objects, Publisher: objects, Runtime: runtime})
 	require.ErrorContains(t, err, "node dirty tail")
 	_, err = New(Config{
-		StatePath: filepath.Join(base, "invalid", "sessions.db"),
+		StatePath:  filepath.Join(base, "invalid", "sessions.db"),
 		BranchRoot: filepath.Join(base, "invalid-branches"), MountRoot: filepath.Join(base, "invalid-mounts"),
 		MaxNodeDirtyTailBytes:           rootfsblock.LogicalBlockSize,
 		DirtyTailRetirementReserveBytes: 2 * rootfsblock.LogicalBlockSize,
@@ -129,10 +160,20 @@ func TestManagerEnforcesAggregateNodeDirtyTailUntilRegionalArtifactReclaim(t *te
 	require.NoError(t, err)
 	_, err = secondBranch.WriteAt([]byte{0x53}, rootfsblock.LogicalBlockSize)
 	require.NoError(t, err)
-	_, err = firstBranch.WriteAt([]byte{0x54}, rootfsblock.LogicalBlockSize)
-	var exhausted *rootfsblock.DirtyTailCapacityError
-	require.ErrorAs(t, err, &exhausted)
-	require.Equal(t, "node", exhausted.Scope)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := firstBranch.WriteAt([]byte{0x54}, rootfsblock.LogicalBlockSize)
+		writeDone <- writeErr
+	}()
+	select {
+	case <-manager.DirtyTailPressureSignal():
+	case <-time.After(time.Second):
+		t.Fatal("node pressure did not wake the owner")
+	}
+	pressures, err := manager.DirtyTailPressureSessions()
+	require.NoError(t, err)
+	require.Len(t, pressures, 1)
+	require.Equal(t, "node", pressures[0].Pressure.Scope)
 	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
 		UsedBytes:     3 * rootfsblock.LogicalBlockSize,
 		ReservedBytes: rootfsblock.LogicalBlockSize,
@@ -140,13 +181,15 @@ func TestManagerEnforcesAggregateNodeDirtyTailUntilRegionalArtifactReclaim(t *te
 		Owners:        2,
 	}, manager.NodeDirtyTailUsage())
 
-	require.NoError(t, manager.BeginRetire(first.Parent, first.Identity, "retire-node-dirty-first"))
-	require.NoError(t, manager.Release(t.Context(), first.Identity))
-	_, err = secondBranch.WriteAt(
-		bytes.Repeat([]byte{0x55}, rootfsblock.LogicalBlockSize),
-		rootfsblock.LogicalBlockSize,
+	firstRetireOperation := rootfshandoff.PlannedRetireOperationID(
+		first.Parent, first.Identity.WriterGrantID, first.Identity.WriterEpoch,
 	)
-	require.ErrorIs(t, err, syscall.ENOSPC, "local tail remains charged until regional terminal acknowledgement")
+	require.NoError(t, manager.BeginRetire(first.Parent, first.Identity, firstRetireOperation))
+	require.NoError(t, firstBranch.BeginRetirement())
+	require.NoError(t, <-writeDone)
+	require.NoError(t, manager.Release(t.Context(), first.Identity))
+	require.Equal(t, int64(4*rootfsblock.LogicalBlockSize), manager.NodeDirtyTailUsage().UsedBytes,
+		"local tail remains charged until regional terminal acknowledgement")
 	require.NoError(t, manager.ReclaimTerminalArtifacts(first.Parent, first.Identity))
 	_, err = secondBranch.WriteAt(
 		bytes.Repeat([]byte{0x56}, rootfsblock.LogicalBlockSize),
@@ -919,6 +962,64 @@ func TestManagerPlannedRetireRetriesMaterializationAfterRestart(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, second.Close()) })
 	require.NoError(t, second.ReconcileReleases(t.Context()))
 	result, err := second.RetireResult(request.Parent, request.Identity, "retire-restart-materialized")
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.DurabilityS3, result.DurabilityState)
+}
+
+func TestManagerPressureRetirementSurvivesObjectStoreOutage(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	request := testStageRequestWithBlocks(t, objects, "pressure-s3-outage", 16)
+	publisher := &failOncePublisher{next: objects}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: 12 * rootfsblock.LogicalBlockSize,
+		Source: objects, Publisher: publisher, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	for block := range 12 {
+		_, err = branch.WriteAt(
+			bytes.Repeat([]byte{byte(block + 1)}, rootfsblock.LogicalBlockSize),
+			int64(block*rootfsblock.LogicalBlockSize),
+		)
+		require.NoError(t, err)
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := branch.WriteAt([]byte{0xee}, 12*rootfsblock.LogicalBlockSize)
+		writeDone <- writeErr
+	}()
+	select {
+	case <-manager.DirtyTailPressureSignal():
+	case <-time.After(time.Second):
+		t.Fatal("pressure retirement did not wake the owner")
+	}
+	pressures, err := manager.DirtyTailPressureSessions()
+	require.NoError(t, err)
+	require.Len(t, pressures, 1)
+	operationID := rootfshandoff.PlannedRetireOperationID(
+		request.Parent, request.Identity.WriterGrantID, request.Identity.WriterEpoch,
+	)
+	require.NoError(t, manager.BeginRetire(request.Parent, request.Identity, operationID))
+	require.NoError(t, branch.BeginRetirement())
+	require.NoError(t, <-writeDone)
+
+	err = manager.Release(t.Context(), request.Identity)
+	require.ErrorContains(t, err, "injected immutable publication failure")
+	interrupted, loadErr := manager.load(request.Parent)
+	require.NoError(t, loadErr)
+	require.Equal(t, stateReleasing, interrupted.State)
+	require.Nil(t, interrupted.DirtyTailPressure)
+	require.Equal(t, operationID, interrupted.RetireOperationID)
+	require.NoError(t, manager.ReconcileReleases(t.Context()))
+	result, err := manager.RetireResult(request.Parent, request.Identity, operationID)
 	require.NoError(t, err)
 	require.Equal(t, rootfsblock.DurabilityS3, result.DurabilityState)
 }

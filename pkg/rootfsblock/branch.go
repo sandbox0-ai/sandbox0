@@ -127,6 +127,13 @@ type BranchOptions struct {
 	MaxDirtyTailBytes      int64
 	RetirementReserveBytes int64
 	NodeDirtyBudget        *DirtyTailBudget
+	// RetirementGroup lets one coordinated operation retire multiple branches
+	// while excluding unrelated users of the shared node reserve.
+	RetirementGroup string
+	// PressureObserver must return immediately. When configured, normal
+	// writes that would cross a session or node limit wait for a planned
+	// retirement instead of exposing Linux NBD's lossy remote-error mapping.
+	PressureObserver func(DirtyTailPressure)
 }
 
 // DirtyTailUsage describes the exact local unpublished branch occupancy.
@@ -136,6 +143,17 @@ type DirtyTailUsage struct {
 	DirtyBytes   int64
 	JournalBytes int64
 	MaxBytes     int64
+}
+
+// DirtyTailPressure records the first normal write that could not be admitted
+// without consuming protected retirement capacity. The blocked request is
+// retried after BeginRetirement makes its regional planned-retire intent
+// durable; it is never failed to the guest as a synthetic ENOSPC.
+type DirtyTailPressure struct {
+	Scope          string
+	UsedBytes      int64
+	RequestedBytes int64
+	LimitBytes     int64
 }
 
 // DirtyTailCapacityError rejects a complete block request before appending any
@@ -163,6 +181,20 @@ func (e *DirtyTailCapacityError) Error() string {
 
 func (*DirtyTailCapacityError) Unwrap() error { return syscall.ENOSPC }
 
+// DirtyTailRetirementBusyError serializes unrelated retirement operations on
+// one shared node reserve until the active group's regional acknowledgement
+// deletes every charged branch journal.
+type DirtyTailRetirementBusyError struct {
+	ActiveGroup    string
+	RequestedGroup string
+}
+
+func (e *DirtyTailRetirementBusyError) Error() string {
+	return fmt.Sprintf("rootfs node retirement reserve is owned by %q; %q must retry", e.ActiveGroup, e.RequestedGroup)
+}
+
+func (*DirtyTailRetirementBusyError) Unwrap() error { return syscall.EBUSY }
+
 // Branch is a local append-only writable COW layer over one immutable
 // generation. A successful Flush makes every preceding block record durable
 // on the current node. It does not claim region durability.
@@ -180,8 +212,12 @@ type Branch struct {
 	maxDirty          int64
 	retirementReserve int64
 	retiring          bool
+	pressure          *DirtyTailPressure
+	pressureObserver  func(DirtyTailPressure)
+	pressureChanged   *sync.Cond
 	nodeDirty         *DirtyTailBudget
 	dirtyOwner        string
+	retirementGroup   string
 	closed            bool
 }
 
@@ -225,8 +261,11 @@ func OpenBranchWithOptions(path string, identity BranchIdentity, base io.ReaderA
 	branch := &Branch{
 		file: file, base: base, identity: identity, blocks: make(map[uint64]branchRecord),
 		maxDirty: options.MaxDirtyTailBytes, retirementReserve: options.RetirementReserveBytes,
-		nodeDirty: options.NodeDirtyBudget, dirtyOwner: path,
+		pressureObserver: options.PressureObserver,
+		nodeDirty:        options.NodeDirtyBudget, dirtyOwner: path,
+		retirementGroup: strings.TrimSpace(options.RetirementGroup),
 	}
+	branch.pressureChanged = sync.NewCond(&branch.mu)
 	if err := branch.open(); err != nil {
 		file.Close()
 		return nil, err
@@ -235,6 +274,7 @@ func OpenBranchWithOptions(path string, identity BranchIdentity, base io.ReaderA
 		if err := branch.nodeDirty.attach(
 			branch.dirtyOwner,
 			int64(branch.records.count)*LogicalBlockSize,
+			branch.retirementGroup,
 		); err != nil {
 			file.Close()
 			return nil, fmt.Errorf("attach branch to node dirty tail budget: %w", err)
@@ -363,6 +403,19 @@ func (b *Branch) DirtyTailUsage() DirtyTailUsage {
 	}
 }
 
+// DirtyTailPressure returns the sticky in-memory pressure condition currently
+// blocking normal writes. Session owners persist this observation before they
+// establish the matching regional planned-retire operation.
+func (b *Branch) DirtyTailPressure() *DirtyTailPressure {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.pressure == nil || b.retiring || b.closed {
+		return nil
+	}
+	pressure := *b.pressure
+	return &pressure
+}
+
 func (b *Branch) Flush() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -390,6 +443,7 @@ func (b *Branch) BeginRetirement() error {
 		}
 	}
 	b.retiring = true
+	b.pressureChanged.Broadcast()
 	return nil
 }
 
@@ -490,6 +544,7 @@ func (b *Branch) Close() error {
 		return nil
 	}
 	b.closed = true
+	b.pressureChanged.Broadcast()
 	closeErr := b.file.Close()
 	if b.nodeDirty != nil {
 		closeErr = errors.Join(closeErr, b.nodeDirty.detach(b.dirtyOwner))
@@ -646,21 +701,54 @@ func (b *Branch) admitRecordsLocked(records int64) error {
 	if records <= 0 {
 		return nil
 	}
-	used := int64(b.records.count) * LogicalBlockSize
-	requested := records * LogicalBlockSize
-	limit := b.maxDirty
-	if b.retiring {
-		limit += b.retirementReserve
-	}
-	if limit > 0 && (used > limit || requested > limit-used) {
-		return &DirtyTailCapacityError{
-			Scope: "session", UsedBytes: used, RequestedBytes: requested, LimitBytes: limit,
+	for {
+		for b.pressure != nil && !b.retiring && !b.closed {
+			b.pressureChanged.Wait()
 		}
+		if b.closed {
+			return os.ErrClosed
+		}
+		used := int64(b.records.count) * LogicalBlockSize
+		requested := records * LogicalBlockSize
+		limit := b.maxDirty
+		if b.retiring {
+			limit += b.retirementReserve
+		}
+		if limit > 0 && (used > limit || requested > limit-used) {
+			capacity := &DirtyTailCapacityError{
+				Scope: "session", UsedBytes: used, RequestedBytes: requested, LimitBytes: limit,
+			}
+			if !b.retiring && b.pressureObserver != nil {
+				b.beginPressureLocked(DirtyTailPressure{
+					Scope: capacity.Scope, UsedBytes: capacity.UsedBytes,
+					RequestedBytes: capacity.RequestedBytes, LimitBytes: capacity.LimitBytes,
+				})
+				continue
+			}
+			return capacity
+		}
+		if b.nodeDirty != nil {
+			err := b.nodeDirty.reserve(b.dirtyOwner, requested)
+			var capacity *DirtyTailCapacityError
+			if errors.As(err, &capacity) && !b.retiring && b.pressureObserver != nil {
+				b.beginPressureLocked(DirtyTailPressure{
+					Scope: capacity.Scope, UsedBytes: capacity.UsedBytes,
+					RequestedBytes: capacity.RequestedBytes, LimitBytes: capacity.LimitBytes,
+				})
+				continue
+			}
+			return err
+		}
+		return nil
 	}
-	if b.nodeDirty != nil {
-		return b.nodeDirty.reserve(b.dirtyOwner, requested)
+}
+
+func (b *Branch) beginPressureLocked(pressure DirtyTailPressure) {
+	if b.pressure != nil {
+		return
 	}
-	return nil
+	b.pressure = &pressure
+	b.pressureObserver(pressure)
 }
 
 func (b *Branch) finishAdmissionLocked(reservedRecords, appendedRecords int64) error {

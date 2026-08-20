@@ -57,6 +57,9 @@ type fakeClaimStore struct {
 	pauseCandidate      *sandboxstore.NomadSandboxPauseCandidate
 	pauseErr            error
 	pauseSources        []string
+	pressurePause       *sandboxstore.NomadSandboxPauseCandidate
+	pressurePauseErr    error
+	pressureRequests    []*sandboxstore.RootFSWriterPressurePauseRequest
 	resumeCandidate     *sandboxstore.NomadSandboxResumeCandidate
 	resumeErr           error
 	resumeRequested     bool
@@ -459,6 +462,23 @@ func (f *fakeClaimStore) RequestNomadSandboxPause(
 	return &copy, nil
 }
 
+func (f *fakeClaimStore) RequestNomadSandboxPressurePause(
+	_ context.Context,
+	request *sandboxstore.RootFSWriterPressurePauseRequest,
+) (*sandboxstore.NomadSandboxPauseCandidate, error) {
+	copyRequest := *request
+	copyRequest.BindingDigest = append([]byte(nil), request.BindingDigest...)
+	f.pressureRequests = append(f.pressureRequests, &copyRequest)
+	if f.pressurePauseErr != nil {
+		return nil, f.pressurePauseErr
+	}
+	if f.pressurePause == nil {
+		return nil, sandboxstore.ErrNomadSandboxPauseNotReady
+	}
+	candidate := *f.pressurePause
+	return &candidate, nil
+}
+
 func (f *fakeClaimStore) BeginRuntimeSlotQuiesce(
 	_ context.Context,
 	request *sandboxstore.BeginRuntimeSlotQuiesceRequest,
@@ -824,6 +844,36 @@ func TestServiceAutomaticPausePersistsAutoSourceBeforeStop(t *testing.T) {
 	}
 	if len(enqueuer.sandboxIDs) != 1 || len(fixture.allocation.requests) != 1 {
 		t.Fatalf("enqueues=%v allocation stops=%+v", enqueuer.sandboxIDs, fixture.allocation.requests)
+	}
+}
+
+func TestServicePressurePauseReturnsDurableOperationBeforeNomadStop(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.pressurePause = &sandboxstore.NomadSandboxPauseCandidate{
+		SandboxID: "sandbox-1", OperationID: "retire-pressure-1",
+		WriterGrantID: "grant-1", WriterGrantState: sandboxstore.RootFSWriterGrantStateConsumed,
+	}
+	enqueuer := &recordingPauseEnqueuer{}
+	fixture.service.SetPauseEnqueuer(enqueuer)
+	request := &sandboxstore.RootFSWriterPressurePauseRequest{
+		SandboxID: "sandbox-1", GrantID: "grant-1", WriterEpoch: 7,
+		BindingVersion: sandboxstore.RootFSWriterBindingVersion,
+		BindingDigest:  make([]byte, 32), NodeUID: "node-uid",
+	}
+	operationID, err := fixture.service.RequestRootFSWriterPressurePause(context.Background(), request)
+	if err != nil || operationID != "retire-pressure-1" {
+		t.Fatalf("operation=%q error=%v", operationID, err)
+	}
+	if len(enqueuer.sandboxIDs) != 1 || enqueuer.sandboxIDs[0] != "sandbox-1" {
+		t.Fatalf("pause enqueues = %v", enqueuer.sandboxIDs)
+	}
+	if len(fixture.allocation.requests) != 0 {
+		t.Fatalf("regional response did not precede external Nomad stop: %+v", fixture.allocation.requests)
+	}
+	if len(fixture.store.pressureRequests) != 1 ||
+		fixture.store.pressureRequests[0].GrantID != request.GrantID ||
+		fixture.store.pressureRequests[0].WriterEpoch != request.WriterEpoch {
+		t.Fatalf("pressure requests = %+v", fixture.store.pressureRequests)
 	}
 }
 

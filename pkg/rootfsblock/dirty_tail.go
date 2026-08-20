@@ -18,23 +18,27 @@ type NodeDirtyTailUsage struct {
 }
 
 type dirtyTailOwner struct {
-	usedBytes      int64
-	recoveredBytes int64
-	attached       bool
-	retiring       bool
+	usedBytes       int64
+	recoveredBytes  int64
+	retirementGroup string
+	attached        bool
+	retiring        bool
 }
 
 // DirtyTailBudget atomically limits unpublished branch payload across every
 // session sharing one durable node volume. Recovered usage may exceed a newly
 // lowered normal limit so existing writers can still be opened and use one
 // bounded recovery headroom pool during retirement. Normal positive admission
-// remains blocked until usage falls below the configured threshold.
+// remains blocked until usage falls below the configured threshold. Unrelated
+// retirement groups are serialized until regional acknowledgement reclaims
+// every journal charged to the active group.
 type DirtyTailBudget struct {
 	mu                sync.Mutex
 	maxBytes          int64
 	retirementReserve int64
 	recovered         int64
 	used              int64
+	retirementGroup   string
 	owners            map[string]dirtyTailOwner
 }
 
@@ -103,6 +107,9 @@ func (b *DirtyTailBudget) ReleaseOwner(owner string) error {
 	b.used -= current.usedBytes
 	b.recovered -= current.recoveredBytes
 	delete(b.owners, owner)
+	if current.retiring && current.retirementGroup == b.retirementGroup && !b.hasRetirementGroupLocked(current.retirementGroup) {
+		b.retirementGroup = ""
+	}
 	return nil
 }
 
@@ -131,12 +138,16 @@ func (b *DirtyTailBudget) Usage() NodeDirtyTailUsage {
 	}
 }
 
-func (b *DirtyTailBudget) attach(owner string, recoveredBytes int64) error {
+func (b *DirtyTailBudget) attach(owner string, recoveredBytes int64, retirementGroups ...string) error {
 	if owner == "" || recoveredBytes < 0 || recoveredBytes%LogicalBlockSize != 0 {
 		return fmt.Errorf("dirty tail owner and block-aligned recovered usage are required")
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	retirementGroup := owner
+	if len(retirementGroups) > 0 && strings.TrimSpace(retirementGroups[0]) != "" {
+		retirementGroup = strings.TrimSpace(retirementGroups[0])
+	}
 	current, preloaded := b.owners[owner]
 	if current.attached {
 		return fmt.Errorf("dirty tail owner %q already has an open branch", owner)
@@ -158,6 +169,7 @@ func (b *DirtyTailBudget) attach(owner string, recoveredBytes int64) error {
 	current = b.owners[owner]
 	current.attached = true
 	current.retiring = false
+	current.retirementGroup = retirementGroup
 	b.owners[owner] = current
 	return nil
 }
@@ -170,7 +182,6 @@ func (b *DirtyTailBudget) detach(owner string) error {
 		return fmt.Errorf("dirty tail owner %q is not attached", owner)
 	}
 	current.attached = false
-	current.retiring = false
 	b.owners[owner] = current
 	return nil
 }
@@ -185,9 +196,29 @@ func (b *DirtyTailBudget) beginRetirement(owner string) error {
 	if current.retiring {
 		return nil
 	}
+	group := current.retirementGroup
+	if group == "" {
+		group = owner
+	}
+	if b.retirementGroup != "" && b.retirementGroup != group {
+		return &DirtyTailRetirementBusyError{ActiveGroup: b.retirementGroup, RequestedGroup: group}
+	}
+	b.retirementGroup = group
 	current.retiring = true
 	b.owners[owner] = current
 	return nil
+}
+
+func (b *DirtyTailBudget) hasRetirementGroupLocked(group string) bool {
+	if group == "" {
+		return false
+	}
+	for _, owner := range b.owners {
+		if owner.retiring && owner.retirementGroup == group {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *DirtyTailBudget) reserve(owner string, requestedBytes int64) error {

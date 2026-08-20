@@ -29,6 +29,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaintenance"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -444,6 +445,15 @@ func main() {
 	})
 	if err != nil {
 		logger.Fatal("Failed to configure sandbox runtime backend", zap.Error(err))
+	}
+	if managerNodeAuthority != nil {
+		pressurePauser, ok := sandboxBackend.(rootfswriterauthority.PressurePauser)
+		if cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad && !ok {
+			logger.Fatal("Nomad sandbox runtime backend lacks exact RootFS pressure pause authority")
+		}
+		if ok {
+			managerNodeAuthority.SetWriterPressurePauser(pressurePauser)
+		}
 	}
 	sandboxPauseController := service.NewSandboxPauseController(sandboxStore, sandboxBackend, logger)
 	sandboxBackend.SetPauseEnqueuer(sandboxPauseController)

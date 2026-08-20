@@ -71,6 +71,30 @@ func TestRequestNomadSandboxPauseRejectsMismatchedRuntimeIntegration(t *testing.
 	require.Nil(t, active)
 }
 
+func TestRequestNomadSandboxPressurePauseFencesExactWriterIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "pressure-binding")
+	request := &RootFSWriterPressurePauseRequest{
+		SandboxID: fixture.sandboxID, GrantID: fixture.issue.GrantID,
+		WriterEpoch: fixture.writerEpoch, BindingVersion: RootFSWriterBindingVersion,
+		BindingDigest: fixture.issue.BindingDigest, NodeUID: fixture.issue.NodeUID,
+	}
+	wrong := *request
+	wrong.WriterEpoch++
+	_, err := fixture.store.RequestNomadSandboxPressurePause(fixture.ctx, &wrong)
+	require.ErrorIs(t, err, ErrNomadSandboxPauseConflict)
+	active, getErr := fixture.store.GetActiveLifecycleTxn(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, getErr)
+	require.Nil(t, active)
+
+	candidate, err := fixture.store.RequestNomadSandboxPressurePause(fixture.ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, fixture.issue.GrantID, candidate.WriterGrantID)
+	require.Equal(t, SandboxLifecycleSourceAuto, candidate.Source)
+	require.Equal(t, rootfshandoff.PlannedRetireOperationID(
+		fixture.issue.GateParent, fixture.issue.GrantID, fixture.writerEpoch,
+	), candidate.OperationID)
+}
+
 func TestRequestNomadSandboxPauseReturnsExactSlotAfterCommittedPublishIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "committed")
 	candidate, err := fixture.store.RequestNomadSandboxPause(

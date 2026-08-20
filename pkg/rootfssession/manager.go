@@ -157,6 +157,7 @@ type record struct {
 type crashFenceRecord struct {
 	OperationID string                                      `json:"operation_id"`
 	RequestedAt string                                      `json:"requested_at"`
+	External    bool                                        `json:"external,omitempty"`
 	Result      *rootfshandoff.CrashFenceSessionObservation `json:"result,omitempty"`
 }
 
@@ -197,6 +198,7 @@ type RecoverySession struct {
 	State             string
 	RetireOperationID string
 	CrashOperationID  string
+	ExternalCrash     bool
 	BranchRemoved     bool
 	Live              bool
 	Consumer          *ConsumerRegistration
@@ -212,6 +214,9 @@ type ConsumerRegistration struct {
 	ContainerID        string `json:"container_id"`
 	StableMount        string `json:"stable_mount"`
 	HostMountNamespace string `json:"host_mount_namespace"`
+	NetNSPath          string `json:"netns_path,omitempty"`
+	NetNSIdentity      string `json:"netns_identity,omitempty"`
+	NetworkChain       string `json:"network_chain,omitempty"`
 	LeaseExpiresAt     string `json:"lease_expires_at"`
 }
 
@@ -799,6 +804,7 @@ func (m *Manager) RecoverySessions() ([]RecoverySession, error) {
 			recovery.CreatedAt = createdAt
 			if current.CrashFence != nil {
 				recovery.CrashOperationID = current.CrashFence.OperationID
+				recovery.ExternalCrash = current.CrashFence.External
 			}
 			if current.Consumer != nil {
 				consumer := *current.Consumer
@@ -851,6 +857,18 @@ func (c ConsumerRegistration) Validate() (time.Time, error) {
 	if !filepath.IsAbs(c.StableMount) || filepath.Clean(c.StableMount) == string(filepath.Separator) {
 		return time.Time{}, fmt.Errorf("stable_mount must be a non-root absolute path")
 	}
+	networkFields := 0
+	for _, value := range []string{c.NetNSPath, c.NetNSIdentity, c.NetworkChain} {
+		if strings.TrimSpace(value) != "" {
+			networkFields++
+		}
+	}
+	if networkFields != 0 && networkFields != 3 {
+		return time.Time{}, fmt.Errorf("network namespace path, identity, and chain must be configured together")
+	}
+	if networkFields == 3 && (!filepath.IsAbs(c.NetNSPath) || filepath.Clean(c.NetNSPath) == string(filepath.Separator)) {
+		return time.Time{}, fmt.Errorf("netns_path must be a non-root absolute path")
+	}
 	deadline, err := time.Parse(time.RFC3339Nano, c.LeaseExpiresAt)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse lease_expires_at: %w", err)
@@ -867,6 +885,11 @@ func (m *Manager) RegisterConsumer(parent string, identity rootfshandoff.Identit
 	consumer.ContainerID = strings.TrimSpace(consumer.ContainerID)
 	consumer.StableMount = filepath.Clean(strings.TrimSpace(consumer.StableMount))
 	consumer.HostMountNamespace = strings.TrimSpace(consumer.HostMountNamespace)
+	if strings.TrimSpace(consumer.NetNSPath) != "" {
+		consumer.NetNSPath = filepath.Clean(strings.TrimSpace(consumer.NetNSPath))
+	}
+	consumer.NetNSIdentity = strings.TrimSpace(consumer.NetNSIdentity)
+	consumer.NetworkChain = strings.TrimSpace(consumer.NetworkChain)
 	consumer.LeaseExpiresAt = strings.TrimSpace(consumer.LeaseExpiresAt)
 	deadline, err := consumer.Validate()
 	if err != nil || !deadline.After(time.Now()) {
@@ -889,7 +912,9 @@ func (m *Manager) RegisterConsumer(parent string, identity rootfshandoff.Identit
 	}
 	if current.Consumer != nil && (current.Consumer.ActiveKey != consumer.ActiveKey ||
 		current.Consumer.ContainerID != consumer.ContainerID || current.Consumer.StableMount != consumer.StableMount ||
-		current.Consumer.HostMountNamespace != consumer.HostMountNamespace) {
+		current.Consumer.HostMountNamespace != consumer.HostMountNamespace ||
+		current.Consumer.NetNSPath != consumer.NetNSPath || current.Consumer.NetNSIdentity != consumer.NetNSIdentity ||
+		current.Consumer.NetworkChain != consumer.NetworkChain) {
 		return fmt.Errorf("RootFS session is bound to another host runtime consumer: %w", errdefs.ErrAlreadyExists)
 	}
 	current.Consumer = &consumer
@@ -1365,6 +1390,24 @@ func (m *Manager) CrashFence(
 	request rootfshandoff.StageRequest,
 	operationID string,
 ) (rootfshandoff.CrashFenceSessionObservation, error) {
+	return m.crashFence(request, operationID, false)
+}
+
+// CrashFenceExternal records a physical terminal proof owned by a separate
+// regional controller. The node daemon must not complete regional retirement
+// for this intent because that controller binds a broader runtime-slot proof.
+func (m *Manager) CrashFenceExternal(
+	request rootfshandoff.StageRequest,
+	operationID string,
+) (rootfshandoff.CrashFenceSessionObservation, error) {
+	return m.crashFence(request, operationID, true)
+}
+
+func (m *Manager) crashFence(
+	request rootfshandoff.StageRequest,
+	operationID string,
+	external bool,
+) (rootfshandoff.CrashFenceSessionObservation, error) {
 	parent := request.Parent
 	identity := request.Identity
 	operationID = strings.TrimSpace(operationID)
@@ -1394,6 +1437,9 @@ func (m *Manager) CrashFence(
 		if current.CrashFence.OperationID != operationID {
 			return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("RootFS session is bound to crash fence operation %q: %w", current.CrashFence.OperationID, errdefs.ErrAlreadyExists)
 		}
+		if current.CrashFence.External != external {
+			return rootfshandoff.CrashFenceSessionObservation{}, fmt.Errorf("RootFS crash fence authority owner changed: %w", errdefs.ErrFailedPrecondition)
+		}
 		if current.CrashFence.Result != nil {
 			result := *current.CrashFence.Result
 			if err := result.Validate(); err != nil {
@@ -1408,6 +1454,7 @@ func (m *Manager) CrashFence(
 		current.CrashFence = &crashFenceRecord{
 			OperationID: operationID,
 			RequestedAt: time.Now().UTC().Format(time.RFC3339Nano),
+			External:    external,
 		}
 		if err := m.save(current); err != nil {
 			return rootfshandoff.CrashFenceSessionObservation{}, err

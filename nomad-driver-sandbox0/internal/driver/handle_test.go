@@ -161,19 +161,20 @@ type fakeMounter struct {
 }
 
 type fakeRootFSRuntime struct {
-	mu            sync.Mutex
-	source        string
-	pingErr       error
-	ensureErr     error
-	consumerErr   error
-	crashErr      error
-	retireErr     error
-	ensureCalls   int
-	retireCalls   int
-	crashCalls    int
-	lastParent    string
-	lastOperation string
-	leaseLoss     func(error)
+	mu               sync.Mutex
+	source           string
+	pingErr          error
+	ensureErr        error
+	consumerErr      error
+	crashErr         error
+	retireErr        error
+	ensureCalls      int
+	retireCalls      int
+	crashCalls       int
+	externalReclaims int
+	lastParent       string
+	lastOperation    string
+	leaseLoss        func(error)
 }
 
 func (r *fakeRootFSRuntime) Ping(context.Context) error {
@@ -289,6 +290,25 @@ func (r *fakeRootFSRuntime) CrashFence(
 		return rootfshandoff.CrashFenceProof{}, r.crashErr
 	}
 	return rootfshandoff.CrashFenceProof{OperationID: operationID}, nil
+}
+
+func (r *fakeRootFSRuntime) FenceLocalRootFSWriter(
+	ctx context.Context,
+	request rootfshandoff.StageRequest,
+	operationID string,
+	observation crashTaskObservation,
+) (rootfshandoff.CrashFenceProof, error) {
+	return r.CrashFence(ctx, request, operationID, observation)
+}
+
+func (r *fakeRootFSRuntime) ReclaimExternallyRetired(
+	context.Context,
+	rootfshandoff.StageRequest,
+) (bool, error) {
+	r.mu.Lock()
+	r.externalReclaims++
+	r.mu.Unlock()
+	return true, nil
 }
 
 func (r *fakeRootFSRuntime) snapshot() (ensureCalls, retireCalls int, parent, operation string) {

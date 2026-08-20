@@ -95,9 +95,13 @@ var (
 		),
 		"rootfs_sessiond_socket":     hclspec.NewAttr("rootfs_sessiond_socket", "string", false),
 		"rootfs_consumer_mount_root": hclspec.NewAttr("rootfs_consumer_mount_root", "string", false),
-		"rootfs_state_path":          hclspec.NewAttr("rootfs_state_path", "string", false),
-		"rootfs_branch_root":         hclspec.NewAttr("rootfs_branch_root", "string", false),
-		"rootfs_mount_root":          hclspec.NewAttr("rootfs_mount_root", "string", false),
+		"rootfs_consumer_netns_root": hclspec.NewDefault(
+			hclspec.NewAttr("rootfs_consumer_netns_root", "string", false),
+			hclspec.NewLiteral(`"/var/run/netns"`),
+		),
+		"rootfs_state_path":  hclspec.NewAttr("rootfs_state_path", "string", false),
+		"rootfs_branch_root": hclspec.NewAttr("rootfs_branch_root", "string", false),
+		"rootfs_mount_root":  hclspec.NewAttr("rootfs_mount_root", "string", false),
 		"rootfs_max_dirty_tail_bytes": hclspec.NewDefault(
 			hclspec.NewAttr("rootfs_max_dirty_tail_bytes", "number", false),
 			hclspec.NewLiteral(`10737418240`),
@@ -169,6 +173,7 @@ type PluginConfig struct {
 	RootFSEnabled                 bool     `codec:"rootfs_enabled"`
 	RootFSSessiondSocket          string   `codec:"rootfs_sessiond_socket"`
 	RootFSConsumerMountRoot       string   `codec:"rootfs_consumer_mount_root"`
+	RootFSConsumerNetNSRoot       string   `codec:"rootfs_consumer_netns_root"`
 	RootFSStatePath               string   `codec:"rootfs_state_path"`
 	RootFSBranchRoot              string   `codec:"rootfs_branch_root"`
 	RootFSMountRoot               string   `codec:"rootfs_mount_root"`
@@ -255,6 +260,7 @@ func defaultPluginConfig() *PluginConfig {
 		DirectFS:                  true,
 		DevSmokeEnabled:           false,
 		RootFSMaxDirtyTailBytes:   rootfssession.DefaultMaxDirtyTailBytes,
+		RootFSConsumerNetNSRoot:   "/var/run/netns",
 		RuntimeSlotNodeBootIDFile: "/proc/sys/kernel/random/boot_id",
 	}
 }
@@ -302,6 +308,7 @@ func (p *Plugin) SetConfig(config *base.Config) error {
 	decoded.RootFSObjectType = strings.TrimSpace(decoded.RootFSObjectType)
 	decoded.RootFSSessiondSocket = strings.TrimSpace(decoded.RootFSSessiondSocket)
 	decoded.RootFSConsumerMountRoot = strings.TrimSpace(decoded.RootFSConsumerMountRoot)
+	decoded.RootFSConsumerNetNSRoot = strings.TrimSpace(decoded.RootFSConsumerNetNSRoot)
 	decoded.RootFSObjectBucket = strings.TrimSpace(decoded.RootFSObjectBucket)
 	decoded.RootFSObjectEndpoint = strings.TrimSpace(decoded.RootFSObjectEndpoint)
 	decoded.RootFSObjectAccessKey = strings.TrimSpace(decoded.RootFSObjectAccessKey)

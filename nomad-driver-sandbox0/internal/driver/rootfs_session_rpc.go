@@ -31,6 +31,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 const rootFSSessionRPCMaxBytes = 2 << 20
@@ -42,20 +43,26 @@ type rootFSSessionRPCRequest struct {
 	Fork        rootfshandoff.RunningForkCheckpointRequest `json:"fork,omitempty"`
 	OperationID string                                     `json:"operation_id,omitempty"`
 	Observation crashTaskObservation                       `json:"observation,omitempty"`
+	SlotCleanup protocol.NodeCleanupControlRequest         `json:"slot_cleanup,omitempty"`
 }
 
 type rootFSSessionRPCResponse struct {
-	Mount      rootfssession.Mount                       `json:"mount,omitempty"`
-	Lease      RootFSConsumerLease                       `json:"lease,omitempty"`
-	Retire     rootfssession.RetireResult                `json:"retire,omitempty"`
-	Crash      rootfshandoff.CrashFenceProof             `json:"crash,omitempty"`
-	Checkpoint rootfshandoff.RunningForkCheckpointResult `json:"checkpoint,omitempty"`
-	Error      string                                    `json:"error,omitempty"`
-	ErrorClass string                                    `json:"error_class,omitempty"`
+	Mount       rootfssession.Mount                       `json:"mount,omitempty"`
+	Lease       RootFSConsumerLease                       `json:"lease,omitempty"`
+	Retire      rootfssession.RetireResult                `json:"retire,omitempty"`
+	Crash       rootfshandoff.CrashFenceProof             `json:"crash,omitempty"`
+	Checkpoint  rootfshandoff.RunningForkCheckpointResult `json:"checkpoint,omitempty"`
+	SlotCleanup protocol.NodeCleanupControlProof          `json:"slot_cleanup,omitempty"`
+	Error       string                                    `json:"error,omitempty"`
+	ErrorClass  string                                    `json:"error_class,omitempty"`
 }
 
 type rootFSSessionClient struct {
 	http *http.Client
+}
+
+type runtimeSlotCleaner interface {
+	CleanupRuntimeSlot(context.Context, protocol.NodeCleanupControlRequest) (protocol.NodeCleanupControlProof, error)
 }
 
 func (c *rootFSSessionClient) Ping(ctx context.Context) error {
@@ -171,6 +178,23 @@ func (c *rootFSSessionClient) CrashFence(
 	return response.Crash, err
 }
 
+func (c *rootFSSessionClient) CleanupRuntimeSlot(
+	ctx context.Context,
+	request protocol.NodeCleanupControlRequest,
+) (protocol.NodeCleanupControlProof, error) {
+	var response rootFSSessionRPCResponse
+	err := c.call(ctx, protocol.NodeCleanupControlPath, rootFSSessionRPCRequest{SlotCleanup: request}, &response)
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	if err := response.SlotCleanup.Validate(); err != nil || response.SlotCleanup.Request() != request {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf(
+			"session daemon returned another runtime slot cleanup proof: %v: %w", err, errdefs.ErrUnavailable,
+		)
+	}
+	return response.SlotCleanup, nil
+}
+
 func (c *rootFSSessionClient) call(
 	ctx context.Context,
 	path string,
@@ -207,6 +231,7 @@ func serveRootFSSessionRuntime(
 	runtime RootFSRuntime,
 	onWriterLeaseLost func(rootfshandoff.StageRequest, error),
 	health func(context.Context) error,
+	cleaner runtimeSlotCleaner,
 ) error {
 	if runtime == nil {
 		return fmt.Errorf("RootFS session runtime is required")
@@ -238,7 +263,7 @@ func serveRootFSSessionRuntime(
 		return fmt.Errorf("secure RootFS session socket: %w", err)
 	}
 	server := &http.Server{
-		Handler:           rootFSSessionRPCHandler(runtime, onWriterLeaseLost, health),
+		Handler:           rootFSSessionRPCHandler(runtime, onWriterLeaseLost, health, cleaner),
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		IdleTimeout:       30 * time.Second,
@@ -262,6 +287,7 @@ func rootFSSessionRPCHandler(
 	runtime RootFSRuntime,
 	onWriterLeaseLost func(rootfshandoff.StageRequest, error),
 	health func(context.Context) error,
+	cleaner runtimeSlotCleaner,
 ) http.Handler {
 	mux := http.NewServeMux()
 	handle := func(path string, operation func(context.Context, rootFSSessionRPCRequest) (rootFSSessionRPCResponse, error)) {
@@ -320,6 +346,13 @@ func rootFSSessionRPCHandler(
 	handle("/v1/sessions/crash-fence", func(ctx context.Context, request rootFSSessionRPCRequest) (rootFSSessionRPCResponse, error) {
 		proof, err := runtime.CrashFence(ctx, request.Stage, request.OperationID, request.Observation)
 		return rootFSSessionRPCResponse{Crash: proof}, err
+	})
+	handle(protocol.NodeCleanupControlPath, func(ctx context.Context, request rootFSSessionRPCRequest) (rootFSSessionRPCResponse, error) {
+		if cleaner == nil {
+			return rootFSSessionRPCResponse{}, fmt.Errorf("runtime slot cleaner is unavailable: %w", errdefs.ErrUnavailable)
+		}
+		proof, err := cleaner.CleanupRuntimeSlot(ctx, request.SlotCleanup)
+		return rootFSSessionRPCResponse{SlotCleanup: proof}, err
 	})
 	return mux
 }

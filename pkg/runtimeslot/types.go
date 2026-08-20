@@ -23,7 +23,9 @@ const (
 	ProcdCommandReadyProbePath     = "/api/v1/runtime/command-ready-probe"
 	NodeClaimControlPath           = "/claim"
 	NodeCommandReadyControlPath    = "/command-ready"
+	NodeCleanupControlPath         = "/v1/runtime-slots/cleanup"
 	CommandReadyProofVersion       = 1
+	NodeCleanupProofVersion        = 1
 	NomadProcdPort                 = 49983
 	NomadProcdPortLabel            = "procd"
 	NomadTaskName                  = "slot"
@@ -36,6 +38,142 @@ const (
 	startingPathSuffix     = "/starting"
 	commandReadyPathSuffix = "/command-ready"
 )
+
+// NodeCleanupControlRequest identifies one plugin-independent terminal cleanup
+// against the root-owned node session daemon. WriterFenceDigest is evidence
+// from the regional authority; it is never accepted as a liveness assertion.
+type NodeCleanupControlRequest struct {
+	OperationID       string `json:"operation_id"`
+	WriterOperationID string `json:"writer_operation_id,omitempty"`
+	SlotID            string `json:"slot_id"`
+	ClusterID         string `json:"cluster_id"`
+	AllocationID      string `json:"allocation_id"`
+	NodeID            string `json:"node_id"`
+	NodeUID           string `json:"node_uid"`
+	NodeBootID        string `json:"node_boot_id"`
+	NetNSIdentity     string `json:"netns_identity"`
+	RunscContainerID  string `json:"runsc_container_id,omitempty"`
+	WriterGrantID     string `json:"writer_grant_id,omitempty"`
+	WriterFenceDigest string `json:"writer_fence_digest,omitempty"`
+}
+
+// Validate rejects incomplete or non-canonical node cleanup identities.
+func (r NodeCleanupControlRequest) Validate() error {
+	for name, value := range map[string]string{
+		"operation_id": r.OperationID, "slot_id": r.SlotID, "cluster_id": r.ClusterID,
+		"allocation_id": r.AllocationID, "node_id": r.NodeID, "node_uid": r.NodeUID,
+		"node_boot_id": r.NodeBootID, "netns_identity": r.NetNSIdentity,
+	} {
+		if err := validateRequiredID(name, value); err != nil {
+			return err
+		}
+	}
+	for name, value := range map[string]string{
+		"runsc_container_id": r.RunscContainerID, "writer_grant_id": r.WriterGrantID,
+		"writer_operation_id": r.WriterOperationID,
+	} {
+		if value != "" {
+			if err := validateRequiredID(name, value); err != nil {
+				return err
+			}
+		}
+	}
+	if r.WriterGrantID == "" {
+		if r.WriterOperationID != "" || r.WriterFenceDigest != "" {
+			return fmt.Errorf("writer operation and fence require a writer grant")
+		}
+		return nil
+	}
+	if r.WriterOperationID == "" {
+		return fmt.Errorf("writer_operation_id is required for a writer grant")
+	}
+	_, err := DecodeProof("writer_fence_digest", r.WriterFenceDigest)
+	return err
+}
+
+// NodeCleanupControlProof is stable evidence that the exact node incarnation
+// no longer owns runsc, RootFS, or network state.
+type NodeCleanupControlProof struct {
+	Version                int    `json:"version"`
+	OperationID            string `json:"operation_id"`
+	WriterOperationID      string `json:"writer_operation_id,omitempty"`
+	SlotID                 string `json:"slot_id"`
+	ClusterID              string `json:"cluster_id"`
+	AllocationID           string `json:"allocation_id"`
+	NodeID                 string `json:"node_id"`
+	NodeUID                string `json:"node_uid"`
+	NodeBootID             string `json:"node_boot_id"`
+	NetNSIdentity          string `json:"netns_identity"`
+	RunscContainerID       string `json:"runsc_container_id,omitempty"`
+	WriterGrantID          string `json:"writer_grant_id,omitempty"`
+	WriterFenceDigest      string `json:"writer_fence_digest,omitempty"`
+	RootFSCrashOperationID string `json:"rootfs_crash_operation_id,omitempty"`
+	RootFSCrashProofDigest string `json:"rootfs_crash_proof_digest,omitempty"`
+	RunscAbsent            bool   `json:"runsc_absent"`
+	StableMountAbsent      bool   `json:"stable_mount_absent"`
+	RootFSWriterAbsent     bool   `json:"rootfs_writer_absent"`
+	NetworkPolicyAbsent    bool   `json:"network_policy_absent"`
+	ProofDigest            string `json:"proof_digest"`
+}
+
+// Validate checks every terminal fact and the canonical proof digest.
+func (p NodeCleanupControlProof) Validate() error {
+	request := p.Request()
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	if p.Version != NodeCleanupProofVersion {
+		return fmt.Errorf("unsupported node cleanup proof version %d", p.Version)
+	}
+	if !p.RunscAbsent || !p.StableMountAbsent || !p.RootFSWriterAbsent || !p.NetworkPolicyAbsent {
+		return fmt.Errorf("node cleanup proof does not establish physical absence")
+	}
+	if p.WriterGrantID == "" {
+		if p.RootFSCrashOperationID != "" || p.RootFSCrashProofDigest != "" {
+			return fmt.Errorf("RootFS crash proof requires a writer grant")
+		}
+	} else {
+		if err := validateRequiredID("rootfs_crash_operation_id", p.RootFSCrashOperationID); err != nil {
+			return err
+		}
+		if p.RootFSCrashOperationID != p.WriterOperationID {
+			return fmt.Errorf("RootFS crash proof does not match the writer operation")
+		}
+		if _, err := DecodeProof("rootfs_crash_proof_digest", p.RootFSCrashProofDigest); err != nil {
+			return err
+		}
+	}
+	digest, err := p.Digest()
+	if err != nil {
+		return err
+	}
+	if p.ProofDigest != digest {
+		return fmt.Errorf("node cleanup proof digest does not match its facts")
+	}
+	return nil
+}
+
+// Request reconstructs the immutable cleanup request bound by this proof.
+func (p NodeCleanupControlProof) Request() NodeCleanupControlRequest {
+	return NodeCleanupControlRequest{
+		OperationID: p.OperationID, WriterOperationID: p.WriterOperationID,
+		SlotID: p.SlotID, ClusterID: p.ClusterID, AllocationID: p.AllocationID,
+		NodeID: p.NodeID, NodeUID: p.NodeUID, NodeBootID: p.NodeBootID,
+		NetNSIdentity: p.NetNSIdentity, RunscContainerID: p.RunscContainerID,
+		WriterGrantID: p.WriterGrantID, WriterFenceDigest: p.WriterFenceDigest,
+	}
+}
+
+// Digest hashes the cleanup facts without the self-referential ProofDigest.
+func (p NodeCleanupControlProof) Digest() (string, error) {
+	p.ProofDigest = ""
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return "", fmt.Errorf("encode node cleanup proof: %w", err)
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 // NodeClaimControlRequest is the one-shot region-to-driver claim contract.
 // The raw writer token is present only in this online request and must never

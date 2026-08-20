@@ -56,11 +56,26 @@ Implemented:
   per-process instance ID, plus root-only `PUT /command-ready` forwarding that
   validates and hashes the complete probe proof before the idempotent regional
   `starting -> active` transition
+- a canonical claimed-slot cleanup request/proof contract, a manager-side
+  transport adapter, and root-owned session-daemon cleanup of the exact runsc
+  container, stable mount, RootFS writer, and network chain without invoking
+  the task-driver plugin
+- durable separation between local crash fences completed by the session
+  daemon and externally managed fences completed by the regional reconciler;
+  external retries retain their compact proof record while large branch and
+  mount artifacts are reclaimed after regional retirement
+- symlink-resolved allow-listing of the persisted Nomad network namespace path
+  and inode-incarnation verification before node cleanup enters that namespace
 
 Not implemented:
 
-- manager/ctld claim integration with the regional slot registry
+- service wiring of the manager claim and terminal-reconciler packages
 - manager/ctld orchestration of the procd probe and driver `command-ready` call
+- an authenticated region-to-node mTLS or outbound-stream transport for the
+  manager cleanup adapter (the session-daemon Unix endpoint is node-local only)
+- a node runtime-slot journal for grantless warm/prelaunch cleanup and terminal
+  proof acknowledgement/compaction; current cleanup requires a claimed RootFS
+  writer and retains its compact external-fence record for retry safety
 - production remote-block service and cross-node device ownership
 - full network-policy incarnation-token persistence
 - procd first-command-ready accounting
@@ -104,9 +119,10 @@ authoritative after a Nomad allocation is purged. With `runtime_slot_enabled`,
 the task driver synchronously registers an exact physical allocation, reports
 its three readiness proofs, and starts heartbeats before returning the slot to
 Nomad. Recovery must reproduce the same allocation, node boot, netns inode,
-control endpoint, and compatibility digest. No production manager claim
-controller consumes the registry yet. When a trusted caller supplies the exact
-regional operation and claim IDs in `PUT /claim`, the driver reports `starting`
+control endpoint, and compatibility digest. Manager-side claim planning and
+terminal reconciliation packages now consume the registry, but they are not
+yet wired into the deployed manager service. When a trusted caller supplies the
+exact regional operation and claim IDs in `PUT /claim`, the driver reports `starting`
 before invoking runsc and retries an ambiguous response with the same proof.
 Procd exposes `PUT /api/v1/runtime/command-ready-probe` behind its normal
 authentication, runtime-ready, and lifecycle-barrier middleware. A trusted
@@ -149,6 +165,7 @@ plugin "sandbox0-gvisor" {
     rootfs_sessiond_socket     = "/run/sandbox0/rootfs-sessiond.sock"
     rootfs_mount_root          = "/run/sandbox0/rootfs"
     rootfs_consumer_mount_root = "/opt/nomad"
+    rootfs_consumer_netns_root = "/var/run/netns"
     rootfs_authority_url              = "https://regional-authority.internal:9443"
     rootfs_authority_ca_file          = "/etc/sandbox0/pki/ca.pem"
     rootfs_authority_client_cert_file = "/etc/sandbox0/pki/node.pem"
@@ -196,13 +213,28 @@ crash-abandoned; it is never returned to the warm pool or published as a
 successful pause.
 
 Production RootFS mode runs `nomad-rootfs-sessiond` as a separate root system
-service before Nomad. Pass the full Nomad node UUID through `--nomad-node-id`
-and a token with `node:read,namespace:read-job` through
+service before Nomad. Pass the regional data-plane cluster ID through
+`--cluster-id`, the full Nomad node UUID through `--nomad-node-id`, and a token
+with `node:read,namespace:read-job` through
 `--nomad-token-file`. The daemon reads object credentials from
 `SANDBOX0_ROOTFS_OBJECT_ACCESS_KEY` and
 `SANDBOX0_ROOTFS_OBJECT_SECRET_KEY`; do not place them in Nomad plugin HCL.
 The driver fingerprint remains unhealthy until the daemon socket, durable
 journal, and Nomad allocation catalog are all readable.
+
+Set `--consumer-netns-root` to Nomad's root-owned persistent namespace
+directory (`/var/run/netns` by default). Consumer registration resolves both
+the configured root and namespace path, persists only the canonical path, and
+binds its device/inode identity. Cleanup rejects a symlink escape or replaced
+namespace before invoking `nsenter`.
+
+The daemon exposes `PUT /v1/runtime-slots/cleanup` only through its mode-`0600`
+Unix socket. It is a node execution primitive, not a region-reachable
+transport. A production deployment still needs an authenticated node agent or
+outbound stream that routes the manager adapter to the trusted cluster, node,
+node UID, and boot ID. The current primitive handles claimed writer-backed
+slots only; warm and grantless prelaunch cleanup must wait for the durable node
+slot journal rather than guessing from a missing RootFS session.
 
 `--max-dirty-tail-bytes` bounds the logical 4 KiB payload represented by one
 session's local branch WAL. Repeated overwrites count because they consume WAL

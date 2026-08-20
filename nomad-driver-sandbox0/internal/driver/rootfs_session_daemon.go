@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 const (
@@ -56,20 +58,26 @@ type rootFSSessionDaemon struct {
 	inflight    map[string]bool
 	trigger     chan string
 	allocations nomadAllocationSource
+	network     NetworkRuntime
+	clusterID   string
+	nodeID      string
 }
 
 type rootFSSessionDaemonRuntime interface {
 	RootFSRuntime
 	RecoverySessions() ([]rootfssession.RecoverySession, error)
+	FenceLocalRootFSWriter(context.Context, rootfshandoff.StageRequest, string, crashTaskObservation) (rootfshandoff.CrashFenceProof, error)
+	ReclaimExternallyRetired(context.Context, rootfshandoff.StageRequest) (bool, error)
 }
 
 type nomadAllocationSource interface {
 	ActiveAllocations(context.Context) (map[string]bool, error)
 }
 
-// NomadAllocationConfig identifies the server-side allocation catalog used to
-// detect `stop -purge` even when the local task-driver process misses Destroy.
+// NomadAllocationConfig identifies the server-side allocation catalog used as
+// a reconciliation trigger when the local task-driver process misses Destroy.
 type NomadAllocationConfig struct {
+	ClusterID string
 	Address   string
 	NodeID    string
 	TokenFile string
@@ -92,12 +100,19 @@ func RunRootFSSessionDaemon(
 	if strings.TrimSpace(config.RootFSConsumerMountRoot) == "" {
 		return fmt.Errorf("rootfs_consumer_mount_root is required for the session daemon")
 	}
+	if strings.TrimSpace(config.RootFSConsumerNetNSRoot) == "" {
+		return fmt.Errorf("rootfs_consumer_netns_root is required for the session daemon")
+	}
 	if strings.TrimSpace(config.RootFSAuthorityURL) == "" {
 		return fmt.Errorf("rootfs_authority_url is required for the session daemon")
+	}
+	if strings.TrimSpace(nomadConfig.ClusterID) == "" {
+		return fmt.Errorf("cluster_id is required for the session daemon")
 	}
 	for name, value := range map[string]string{
 		"runsc": config.RunscPath, "runsc_root": config.RunscRoot,
 		"rootfs_consumer_mount_root": config.RootFSConsumerMountRoot,
+		"rootfs_consumer_netns_root": config.RootFSConsumerNetNSRoot,
 	} {
 		if !filepath.IsAbs(value) || filepath.Clean(value) == "/" {
 			return fmt.Errorf("%s must be a non-root absolute path", name)
@@ -108,6 +123,14 @@ func RunRootFSSessionDaemon(
 		return fmt.Errorf("resolve rootfs_consumer_mount_root: %w", err)
 	}
 	config.RootFSConsumerMountRoot = consumerMountRoot
+	if err := os.MkdirAll(config.RootFSConsumerNetNSRoot, 0o755); err != nil {
+		return fmt.Errorf("create rootfs_consumer_netns_root: %w", err)
+	}
+	consumerNetNSRoot, err := filepath.EvalSymlinks(config.RootFSConsumerNetNSRoot)
+	if err != nil {
+		return fmt.Errorf("resolve rootfs_consumer_netns_root: %w", err)
+	}
+	config.RootFSConsumerNetNSRoot = consumerNetNSRoot
 	if err := validateRootFSConfig(&config); err != nil {
 		return err
 	}
@@ -126,7 +149,8 @@ func RunRootFSSessionDaemon(
 	daemon := &rootFSSessionDaemon{
 		runtime: runtime, runner: NewCommandRunsc(config), mounter: systemMounter{},
 		config: config, logger: logger, inflight: make(map[string]bool), trigger: make(chan string, 128),
-		allocations: allocations,
+		allocations: allocations, network: commandNetworkRuntime{},
+		clusterID: strings.TrimSpace(nomadConfig.ClusterID), nodeID: strings.TrimSpace(nomadConfig.NodeID),
 	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
 	defer cancelDaemon()
@@ -135,10 +159,169 @@ func RunRootFSSessionDaemon(
 		defer daemon.wg.Done()
 		daemon.reconcileLoop(daemonCtx)
 	}()
-	err = serveRootFSSessionRuntime(daemonCtx, socketPath, runtime, daemon.writerLeaseLost, daemon.health)
+	err = serveRootFSSessionRuntime(daemonCtx, socketPath, runtime, daemon.writerLeaseLost, daemon.health, daemon)
 	cancelDaemon()
 	daemon.wg.Wait()
 	return err
+}
+
+// CleanupRuntimeSlot removes one exact claimed runtime without calling the
+// Nomad task driver or completing regional writer authority. The local RootFS
+// crash proof remains durable, making a lost response byte-stable on retry.
+func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
+	ctx context.Context,
+	request protocol.NodeCleanupControlRequest,
+) (protocol.NodeCleanupControlProof, error) {
+	if err := request.Validate(); err != nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("validate node cleanup request: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if d.clusterID == "" || d.nodeID == "" || request.ClusterID != d.clusterID || request.NodeID != d.nodeID {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("node cleanup target does not match this daemon: %w", errdefs.ErrPermissionDenied)
+	}
+	if request.WriterGrantID == "" {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("grantless runtime cleanup requires the node slot journal: %w", errdefs.ErrFailedPrecondition)
+	}
+	sessions, err := d.runtime.RecoverySessions()
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("list durable RootFS sessions: %w", err)
+	}
+	var matched *rootfssession.RecoverySession
+	for index := range sessions {
+		if sessions[index].Stage.Identity.WriterGrantID != request.WriterGrantID {
+			continue
+		}
+		if matched != nil {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("writer grant has multiple local sessions: %w", errdefs.ErrFailedPrecondition)
+		}
+		candidate := sessions[index]
+		matched = &candidate
+	}
+	if matched == nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS writer session is absent: %w", errdefs.ErrNotFound)
+	}
+	if !d.beginReconciliation(matched.Stage.Parent) {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS session cleanup is already in progress: %w", errdefs.ErrUnavailable)
+	}
+	defer d.endReconciliation(matched.Stage.Parent)
+	if err := validateRuntimeSlotCleanupSession(*matched, request); err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	if matched.CrashOperationID != "" &&
+		(!matched.ExternalCrash || matched.CrashOperationID != request.WriterOperationID) {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS crash fence belongs to another authority operation: %w", errdefs.ErrFailedPrecondition)
+	}
+	netnsPath, err := d.runtimeSlotNetworkPath(matched.Consumer, request.NetNSIdentity)
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	observation, err := d.fenceHostRuntime(ctx, *matched)
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	crashProof, err := d.runtime.FenceLocalRootFSWriter(ctx, matched.Stage, request.WriterOperationID, observation)
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	crashDigest, err := crashProof.Digest()
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("digest local RootFS crash proof: %w", err)
+	}
+	if err := d.cleanupRuntimeSlotNetwork(ctx, matched.Consumer, request.NetNSIdentity, netnsPath); err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	proof := protocol.NodeCleanupControlProof{
+		Version: protocol.NodeCleanupProofVersion, OperationID: request.OperationID,
+		WriterOperationID: request.WriterOperationID, SlotID: request.SlotID,
+		ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
+		WriterGrantID: request.WriterGrantID, WriterFenceDigest: request.WriterFenceDigest,
+		RootFSCrashOperationID: crashProof.OperationID,
+		RootFSCrashProofDigest: hex.EncodeToString(crashDigest[:]),
+		RunscAbsent:            true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+	}
+	proof.ProofDigest, err = proof.Digest()
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	if err := proof.Validate(); err != nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("validate node cleanup proof: %w", err)
+	}
+	return proof, nil
+}
+
+func validateRuntimeSlotCleanupSession(
+	session rootfssession.RecoverySession,
+	request protocol.NodeCleanupControlRequest,
+) error {
+	stage := session.Stage
+	consumer := session.Consumer
+	if session.Kind == rootfssession.RecoveryUnavailable || consumer == nil ||
+		stage.Identity.SlotNonce != request.SlotID || stage.Identity.PodUID != request.AllocationID ||
+		stage.Identity.NodeUID != request.NodeUID || stage.Identity.BootID != request.NodeBootID ||
+		stage.Identity.WriterGrantID != request.WriterGrantID || stage.Identity.ContainerName != protocol.NomadTaskName ||
+		stage.ExpectedPolicyToken.NetNSIdentity != request.NetNSIdentity ||
+		consumer.ActiveKey != request.SlotID || consumer.ContainerID != request.RunscContainerID ||
+		consumer.NetNSIdentity != request.NetNSIdentity || consumer.NetworkChain != networkChainName(consumer.ContainerID) ||
+		consumer.NetNSPath == "" {
+		return fmt.Errorf("RootFS session does not match the runtime slot incarnation: %w", errdefs.ErrFailedPrecondition)
+	}
+	return nil
+}
+
+func (d *rootFSSessionDaemon) cleanupRuntimeSlotNetwork(
+	ctx context.Context,
+	consumer *rootfssession.ConsumerRegistration,
+	expectedIdentity string,
+	validatedPath string,
+) error {
+	if consumer == nil || consumer.NetNSPath == "" || consumer.NetNSIdentity != expectedIdentity || d.network == nil {
+		return fmt.Errorf("runtime slot network cleanup identity is unavailable: %w", errdefs.ErrFailedPrecondition)
+	}
+	currentPath, err := d.runtimeSlotNetworkPath(consumer, expectedIdentity)
+	if err != nil {
+		return err
+	}
+	if currentPath == "" {
+		return nil
+	}
+	if currentPath != validatedPath {
+		return fmt.Errorf("runtime slot network namespace path changed: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := d.network.Cleanup(ctx, currentPath, consumer.NetworkChain); err != nil {
+		return fmt.Errorf("cleanup runtime slot network policy: %w", err)
+	}
+	return nil
+}
+
+func (d *rootFSSessionDaemon) runtimeSlotNetworkPath(
+	consumer *rootfssession.ConsumerRegistration,
+	expectedIdentity string,
+) (string, error) {
+	if consumer == nil || consumer.NetNSPath == "" || consumer.NetNSIdentity != expectedIdentity ||
+		strings.TrimSpace(d.config.RootFSConsumerNetNSRoot) == "" {
+		return "", fmt.Errorf("runtime slot network cleanup identity is unavailable: %w", errdefs.ErrFailedPrecondition)
+	}
+	if _, err := os.Lstat(consumer.NetNSPath); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", fmt.Errorf("inspect runtime slot network namespace: %w", err)
+	}
+	resolvedPath, err := validateExistingPath(consumer.NetNSPath, d.config.RootFSConsumerNetNSRoot)
+	if err != nil {
+		return "", fmt.Errorf("validate runtime slot network namespace: %w: %w", err, errdefs.ErrFailedPrecondition)
+	}
+	if resolvedPath != consumer.NetNSPath {
+		return "", fmt.Errorf("runtime slot network namespace is not a canonical resolved path: %w", errdefs.ErrFailedPrecondition)
+	}
+	identity, err := networkNamespaceIdentity(resolvedPath)
+	if err != nil {
+		return "", err
+	}
+	if identity != expectedIdentity {
+		return "", fmt.Errorf("runtime slot network namespace incarnation changed: %w", errdefs.ErrFailedPrecondition)
+	}
+	return resolvedPath, nil
 }
 
 func (d *rootFSSessionDaemon) health(ctx context.Context) error {
@@ -207,19 +390,15 @@ func (d *rootFSSessionDaemon) scan(ctx context.Context, onlyParent string) {
 			continue
 		}
 		parent := session.Stage.Parent
-		d.mu.Lock()
-		if d.inflight[parent] {
-			d.mu.Unlock()
+		if !d.beginReconciliation(parent) {
 			continue
 		}
-		d.inflight[parent] = true
+		d.mu.Lock()
 		d.wg.Add(1)
 		d.mu.Unlock()
 		go func(session rootfssession.RecoverySession) {
 			defer func() {
-				d.mu.Lock()
-				delete(d.inflight, session.Stage.Parent)
-				d.mu.Unlock()
+				d.endReconciliation(session.Stage.Parent)
 				d.wg.Done()
 			}()
 			reconcileCtx, cancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
@@ -229,6 +408,25 @@ func (d *rootFSSessionDaemon) scan(ctx context.Context, onlyParent string) {
 			}
 		}(session)
 	}
+}
+
+func (d *rootFSSessionDaemon) beginReconciliation(parent string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.inflight == nil {
+		d.inflight = make(map[string]bool)
+	}
+	if d.inflight[parent] {
+		return false
+	}
+	d.inflight[parent] = true
+	return true
+}
+
+func (d *rootFSSessionDaemon) endReconciliation(parent string) {
+	d.mu.Lock()
+	delete(d.inflight, parent)
+	d.mu.Unlock()
 }
 
 type httpNomadAllocationSource struct {
@@ -337,6 +535,10 @@ func rootFSSessionNeedsReconciliation(session rootfssession.RecoverySession, now
 }
 
 func (d *rootFSSessionDaemon) reconcile(ctx context.Context, session rootfssession.RecoverySession) error {
+	if session.ExternalCrash {
+		_, err := d.runtime.ReclaimExternallyRetired(ctx, session.Stage)
+		return err
+	}
 	observation, err := d.fenceHostRuntime(ctx, session)
 	if err != nil {
 		return err

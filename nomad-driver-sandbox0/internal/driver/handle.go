@@ -542,10 +542,16 @@ func (h *taskHandle) Claim(request ClaimRequest) error {
 			return h.poisonClaimLaunch(fmt.Errorf("read host mount namespace: %w", err), false)
 		}
 		registerCtx, registerCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		lease, err := h.rootfs.RegisterConsumer(registerCtx, *durableStage, RootFSConsumerRequest{
+		consumer := RootFSConsumerRequest{
 			ActiveKey: h.taskConfig.ID, ContainerID: h.containerID,
 			StableMount: h.rootMount, HostMountNamespace: hostMountNamespace,
-		})
+		}
+		if h.netnsPath() != "" && durableStage.ExpectedPolicyToken.NetNSIdentity != "" {
+			consumer.NetNSPath = h.netnsPath()
+			consumer.NetNSIdentity = durableStage.ExpectedPolicyToken.NetNSIdentity
+			consumer.NetworkChain = h.networkChain
+		}
+		lease, err := h.rootfs.RegisterConsumer(registerCtx, *durableStage, consumer)
 		registerCancel()
 		if err != nil {
 			return h.poisonClaimLaunch(fmt.Errorf("register RootFS runtime consumer: %w", err), false)

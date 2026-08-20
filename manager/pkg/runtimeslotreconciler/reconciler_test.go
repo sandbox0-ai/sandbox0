@@ -298,6 +298,7 @@ func TestReconcilerFencesCleansRetiresPurgesAndFinalizesClaim(t *testing.T) {
 			len(fixture.writer.fences), len(fixture.writer.completes), len(fixture.allocation.purges))
 	}
 	if !bytes.Equal(fixture.node.requests[0].WriterFenceDigest, bytes.Repeat([]byte{0x50}, 32)) ||
+		fixture.node.requests[0].WriterOperationID != fixture.writer.fences[0].OperationID ||
 		!bytes.Equal(fixture.writer.completes[0].NodeCleanupDigest, bytes.Repeat([]byte{0x41}, 32)) {
 		t.Fatalf("fence/cleanup binding = node %x writer %x", fixture.node.requests[0].WriterFenceDigest,
 			fixture.writer.completes[0].NodeCleanupDigest)
@@ -432,6 +433,9 @@ func TestReconcilerFinalizesGrantlessClaimOnlyAfterPurge(t *testing.T) {
 	}
 	if len(fixture.writer.fences) != 0 || len(fixture.writer.completes) != 0 {
 		t.Fatalf("grantless claim called writer controller: %+v %+v", fixture.writer.fences, fixture.writer.completes)
+	}
+	if len(fixture.node.requests) != 1 || fixture.node.requests[0].WriterOperationID != "" {
+		t.Fatalf("grantless cleanup writer operation = %+v", fixture.node.requests)
 	}
 	purgeIndex := indexOf(*fixture.order, "purge-allocation")
 	missingIndex := indexOf(*fixture.order, "mark-missing")

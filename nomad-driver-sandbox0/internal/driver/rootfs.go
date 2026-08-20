@@ -44,6 +44,7 @@ type rootfsRuntime struct {
 	authority         rootFSWriterAuthority
 	logger            hclog.Logger
 	consumerMountRoot string
+	consumerNetNSRoot string
 	renewalMu         sync.Mutex
 	renewals          map[string]*rootfsRenewal
 }
@@ -98,6 +99,9 @@ type RootFSConsumerRequest struct {
 	ContainerID        string `json:"container_id"`
 	StableMount        string `json:"stable_mount"`
 	HostMountNamespace string `json:"host_mount_namespace"`
+	NetNSPath          string `json:"netns_path,omitempty"`
+	NetNSIdentity      string `json:"netns_identity,omitempty"`
+	NetworkChain       string `json:"network_chain,omitempty"`
 }
 
 // RootFSConsumerLease is issued by the node session owner. A restarted plugin
@@ -202,6 +206,7 @@ func newEmbeddedRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootf
 	return &rootfsRuntime{
 		sessions: sessions, authority: authority, logger: logger,
 		consumerMountRoot: strings.TrimSpace(config.RootFSConsumerMountRoot),
+		consumerNetNSRoot: strings.TrimSpace(config.RootFSConsumerNetNSRoot),
 		renewals:          make(map[string]*rootfsRenewal),
 	}, nil
 }
@@ -253,6 +258,29 @@ func (r *rootfsRuntime) RegisterConsumer(
 		}
 		consumer.StableMount = resolvedMount
 	}
+	if consumer.NetNSPath != "" || consumer.NetNSIdentity != "" || consumer.NetworkChain != "" {
+		if !filepath.IsAbs(consumer.NetNSPath) || filepath.Clean(consumer.NetNSPath) == string(filepath.Separator) ||
+			strings.TrimSpace(consumer.NetNSIdentity) == "" || strings.TrimSpace(consumer.NetworkChain) == "" {
+			return RootFSConsumerLease{}, fmt.Errorf("RootFS consumer network identity is incomplete: %w", errdefs.ErrInvalidArgument)
+		}
+		if r.consumerNetNSRoot == "" {
+			return RootFSConsumerLease{}, fmt.Errorf("RootFS consumer network namespace root is not configured: %w", errdefs.ErrFailedPrecondition)
+		}
+		resolvedNetNS, err := validateExistingPath(consumer.NetNSPath, r.consumerNetNSRoot)
+		if err != nil {
+			return RootFSConsumerLease{}, fmt.Errorf("validate RootFS consumer network namespace: %w: %w", err, errdefs.ErrFailedPrecondition)
+		}
+		consumer.NetNSPath = resolvedNetNS
+		observedIdentity, err := networkNamespaceIdentity(consumer.NetNSPath)
+		if err != nil {
+			return RootFSConsumerLease{}, err
+		}
+		if observedIdentity != consumer.NetNSIdentity ||
+			request.ExpectedPolicyToken.NetNSIdentity != consumer.NetNSIdentity ||
+			networkChainName(consumer.ContainerID) != consumer.NetworkChain {
+			return RootFSConsumerLease{}, fmt.Errorf("RootFS consumer network identity changed: %w", errdefs.ErrFailedPrecondition)
+		}
+	}
 	leaseIDBytes := make([]byte, 32)
 	if _, err := rand.Read(leaseIDBytes); err != nil {
 		return RootFSConsumerLease{}, fmt.Errorf("generate RootFS consumer lease: %w", err)
@@ -263,6 +291,7 @@ func (r *rootfsRuntime) RegisterConsumer(
 	err = r.sessions.RegisterConsumer(request.Parent, request.Identity, rootfssession.ConsumerRegistration{
 		LeaseID: lease.LeaseID, ActiveKey: consumer.ActiveKey, ContainerID: consumer.ContainerID,
 		StableMount: consumer.StableMount, HostMountNamespace: consumer.HostMountNamespace,
+		NetNSPath: consumer.NetNSPath, NetNSIdentity: consumer.NetNSIdentity, NetworkChain: consumer.NetworkChain,
 		LeaseExpiresAt: lease.ExpiresAt.Format(time.RFC3339Nano),
 	})
 	if err != nil {
@@ -379,6 +408,76 @@ func (r *rootfsRuntime) releaseRetiringSession(ctx context.Context, request root
 	}
 }
 
+// FenceLocalRootFSWriter detaches and attests one exact node-local writer after
+// a separate regional controller has already fenced renewal authority. It
+// deliberately does not call or complete the regional writer authority.
+func (r *rootfsRuntime) FenceLocalRootFSWriter(
+	ctx context.Context,
+	request rootfshandoff.StageRequest,
+	operationID string,
+	task crashTaskObservation,
+) (rootfshandoff.CrashFenceProof, error) {
+	return r.fenceLocalRootFSWriter(ctx, request, operationID, task, true)
+}
+
+func (r *rootfsRuntime) fenceLocalRootFSWriter(
+	ctx context.Context,
+	request rootfshandoff.StageRequest,
+	operationID string,
+	task crashTaskObservation,
+	external bool,
+) (rootfshandoff.CrashFenceProof, error) {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" || request.Generation == nil {
+		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("local crash operation and generation are required")
+	}
+	if err := request.ValidateDurableBinding(); err != nil {
+		return rootfshandoff.CrashFenceProof{}, err
+	}
+	r.stopRenewal(request.Parent)
+	if err := r.sessions.Release(ctx, request.Identity); err != nil {
+		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("release crashed RootFS session: %w", err)
+	}
+	var (
+		session rootfshandoff.CrashFenceSessionObservation
+		err     error
+	)
+	if external {
+		session, err = r.sessions.CrashFenceExternal(request, operationID)
+	} else {
+		session, err = r.sessions.CrashFence(request, operationID)
+	}
+	if err != nil {
+		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("attest crashed RootFS session: %w", err)
+	}
+	binding, err := request.BindingDigest()
+	if err != nil {
+		return rootfshandoff.CrashFenceProof{}, err
+	}
+	proof := rootfshandoff.CrashFenceProof{
+		Version: rootfshandoff.CrashFenceProofVersion, OperationID: operationID,
+		Parent: request.Parent, ClaimID: request.Identity.ClaimID,
+		WriterGrantID: request.Identity.WriterGrantID, WriterEpoch: request.Identity.WriterEpoch,
+		BindingVersion: request.BindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
+		RootFSID: request.Identity.RootFSID, InitialGeneration: request.InitialGeneration,
+		InitialBlockHead: request.Generation.CurrentBlockHead,
+		HeadAction:       rootfshandoff.CrashFenceHeadKeepInitial,
+		NodeUID:          request.Identity.NodeUID, BootID: request.Identity.BootID,
+		RuntimeGeneration:    request.Identity.RuntimeGeneration,
+		HostMountNamespaceID: task.HostMountNamespaceID,
+		PodUID:               request.Identity.PodUID, PodSandboxID: request.Identity.PodSandboxID,
+		ContainerName: request.Identity.ContainerName, SlotNonce: request.Identity.SlotNonce,
+		ActiveKey: task.ActiveKey, ConsumerBound: task.ContainerID != "", ContainerID: task.ContainerID,
+		ContainerAbsent: task.ContainerAbsent, TaskAbsent: task.TaskAbsent,
+		FrontendSnapshotAbsent: task.FrontendSnapshotAbsent, StableMountAbsent: task.StableMountAbsent,
+		SnapshotterState: rootfshandoff.StateTombstoned, Session: session, ObservedAt: session.ObservedAt,
+	}
+	if err := proof.Validate(); err != nil {
+		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("validate Nomad crash fence proof: %w", err)
+	}
+	return proof, nil
+}
+
 // CrashFence abandons an unsealed writer only after the regional lease fence
 // is authoritative and the node has proved every local runtime owner absent.
 func (r *rootfsRuntime) CrashFence(
@@ -399,6 +498,9 @@ func (r *rootfsRuntime) CrashFence(
 	}
 	r.stopRenewal(request.Parent)
 	if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err == nil {
+		if err := r.finalizeVerifiedTerminal(request); err != nil {
+			return rootfshandoff.CrashFenceProof{}, fmt.Errorf("finalize verified terminal RootFS session: %w", err)
+		}
 		return rootfshandoff.CrashFenceProof{}, nil
 	} else if !errdefs.IsFailedPrecondition(err) {
 		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("verify previous regional crash retirement: %w", err)
@@ -426,38 +528,9 @@ func (r *rootfsRuntime) CrashFence(
 	if err := r.awaitRegionalCrashFence(ctx, request, operationID); err != nil {
 		return rootfshandoff.CrashFenceProof{}, err
 	}
-	if err := r.sessions.Release(ctx, request.Identity); err != nil {
-		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("release crashed RootFS session: %w", err)
-	}
-	session, err := r.sessions.CrashFence(request, operationID)
-	if err != nil {
-		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("attest crashed RootFS session: %w", err)
-	}
-	binding, err := request.BindingDigest()
+	proof, err := r.fenceLocalRootFSWriter(ctx, request, operationID, task, false)
 	if err != nil {
 		return rootfshandoff.CrashFenceProof{}, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	proof := rootfshandoff.CrashFenceProof{
-		Version: rootfshandoff.CrashFenceProofVersion, OperationID: operationID,
-		Parent: request.Parent, ClaimID: request.Identity.ClaimID,
-		WriterGrantID: request.Identity.WriterGrantID, WriterEpoch: request.Identity.WriterEpoch,
-		BindingVersion: request.BindingVersion, BindingDigest: hex.EncodeToString(binding[:]),
-		RootFSID: request.Identity.RootFSID, InitialGeneration: request.InitialGeneration,
-		InitialBlockHead: request.Generation.CurrentBlockHead,
-		HeadAction:       rootfshandoff.CrashFenceHeadKeepInitial,
-		NodeUID:          request.Identity.NodeUID, BootID: request.Identity.BootID,
-		RuntimeGeneration:    request.Identity.RuntimeGeneration,
-		HostMountNamespaceID: task.HostMountNamespaceID,
-		PodUID:               request.Identity.PodUID, PodSandboxID: request.Identity.PodSandboxID,
-		ContainerName: request.Identity.ContainerName, SlotNonce: request.Identity.SlotNonce,
-		ActiveKey: task.ActiveKey, ConsumerBound: task.ContainerID != "", ContainerID: task.ContainerID,
-		ContainerAbsent: task.ContainerAbsent, TaskAbsent: task.TaskAbsent,
-		FrontendSnapshotAbsent: task.FrontendSnapshotAbsent, StableMountAbsent: task.StableMountAbsent,
-		SnapshotterState: rootfshandoff.StateTombstoned, Session: session, ObservedAt: now,
-	}
-	if err := proof.Validate(); err != nil {
-		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("validate Nomad crash fence proof: %w", err)
 	}
 	if err := r.authority.CompleteCrashAbandonWriterGrant(ctx, request, operationID, proof); err != nil {
 		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("complete regional writer crash abandon: %w", err)
@@ -472,6 +545,57 @@ func (r *rootfsRuntime) CrashFence(
 		return rootfshandoff.CrashFenceProof{}, fmt.Errorf("forget crash-abandoned RootFS session: %w", err)
 	}
 	return proof, nil
+}
+
+func (r *rootfsRuntime) finalizeVerifiedTerminal(request rootfshandoff.StageRequest) error {
+	sessions, err := r.sessions.RecoverySessions()
+	if err != nil {
+		return fmt.Errorf("inspect terminal RootFS session ownership: %w", err)
+	}
+	keepProof := false
+	for _, session := range sessions {
+		if session.Stage.Parent != request.Parent {
+			continue
+		}
+		if session.Stage.Identity.RootFSID != request.Identity.RootFSID ||
+			session.Stage.Identity.WriterEpoch != request.Identity.WriterEpoch {
+			return fmt.Errorf("terminal RootFS session belongs to another writer: %w", errdefs.ErrFailedPrecondition)
+		}
+		keepProof = session.ExternalCrash
+		break
+	}
+	if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if keepProof {
+		return nil
+	}
+	return r.sessions.ForgetVerifiedTerminal(request.Parent, request.Identity)
+}
+
+// ReclaimExternallyRetired removes large node-local artifacts once the
+// regional controller has made an external crash fence terminal. The compact
+// journal record remains so an ambiguous node-cleanup response is retryable.
+func (r *rootfsRuntime) ReclaimExternallyRetired(
+	ctx context.Context,
+	request rootfshandoff.StageRequest,
+) (bool, error) {
+	if r.authority == nil {
+		return false, fmt.Errorf("regional writer authority is required for external retirement")
+	}
+	if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err != nil {
+		if errdefs.IsFailedPrecondition(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("verify externally retired writer grant: %w", err)
+	}
+	if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil && !errdefs.IsNotFound(err) {
+		return false, fmt.Errorf("reclaim externally retired RootFS artifacts: %w", err)
+	}
+	return true, nil
 }
 
 func (r *rootfsRuntime) awaitRegionalCrashFence(
@@ -654,6 +778,10 @@ func validateRootFSConfig(config *PluginConfig) error {
 	}
 	if config.RootFSMaxDirtyTailBytes < 0 {
 		return fmt.Errorf("rootfs_max_dirty_tail_bytes must be non-negative")
+	}
+	if config.RootFSConsumerNetNSRoot != "" &&
+		(!filepath.IsAbs(config.RootFSConsumerNetNSRoot) || filepath.Clean(config.RootFSConsumerNetNSRoot) == "/") {
+		return fmt.Errorf("rootfs_consumer_netns_root must be a non-root absolute path")
 	}
 	if config.RootFSSessiondSocket != "" {
 		if !filepath.IsAbs(config.RootFSSessiondSocket) || filepath.Clean(config.RootFSSessiondSocket) == "/" {

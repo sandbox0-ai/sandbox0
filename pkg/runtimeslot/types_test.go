@@ -175,6 +175,45 @@ func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
 	require.ErrorContains(t, changed.ValidateRegional(), "exceeds 64 KiB")
 }
 
+func TestNodeCleanupProofBindsExactRequestAndAbsenceFacts(t *testing.T) {
+	request := NodeCleanupControlRequest{
+		OperationID: "cleanup-1", WriterOperationID: "writer-1", SlotID: "slot-1",
+		ClusterID: "cluster-1", AllocationID: "allocation-1", NodeID: "node-1",
+		NodeUID: "node-uid-1", NodeBootID: "boot-1", NetNSIdentity: "netns-v1:1:2",
+		RunscContainerID: "runsc-1", WriterGrantID: "grant-1",
+		WriterFenceDigest: strings.Repeat("ab", 32),
+	}
+	require.NoError(t, request.Validate())
+	proof := NodeCleanupControlProof{
+		Version: NodeCleanupProofVersion, OperationID: request.OperationID,
+		WriterOperationID: request.WriterOperationID, SlotID: request.SlotID,
+		ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
+		WriterGrantID: request.WriterGrantID, WriterFenceDigest: request.WriterFenceDigest,
+		RootFSCrashOperationID: request.WriterOperationID, RootFSCrashProofDigest: strings.Repeat("cd", 32),
+		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+	}
+	digest, err := proof.Digest()
+	require.NoError(t, err)
+	proof.ProofDigest = digest
+	require.NoError(t, proof.Validate())
+	require.Equal(t, request, proof.Request())
+
+	changed := proof
+	changed.NetNSIdentity = "netns-v1:3:4"
+	require.ErrorContains(t, changed.Validate(), "digest")
+	changed = proof
+	changed.NetworkPolicyAbsent = false
+	require.ErrorContains(t, changed.Validate(), "physical absence")
+	changed = proof
+	changed.WriterFenceDigest = strings.Repeat("AB", 32)
+	require.ErrorContains(t, changed.Validate(), "canonical")
+	changed = proof
+	changed.RootFSCrashOperationID = "another-writer-operation"
+	require.ErrorContains(t, changed.Validate(), "writer operation")
+}
+
 func testRegistrationRequest() RegistrationRequest {
 	return RegistrationRequest{
 		ClusterID: "cluster", AllocationID: "allocation", AllocationNamespace: "default",

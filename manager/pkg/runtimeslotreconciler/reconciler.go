@@ -66,6 +66,7 @@ type AllocationPurgeRequest struct {
 // kill runsc and remove RootFS/network state without using the driver plugin.
 type NodeCleanupRequest struct {
 	OperationID       string
+	WriterOperationID string
 	SlotID            string
 	ClusterID         string
 	AllocationID      string
@@ -293,8 +294,13 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		}
 	}
 
+	writerOperationID := ""
+	if grant != nil {
+		writerOperationID = ids.writer
+	}
 	cleanupProof, err := r.node.Cleanup(ctx, NodeCleanupRequest{
-		OperationID: ids.cleanup, SlotID: slot.ID, ClusterID: slot.ClusterID,
+		OperationID: ids.cleanup, WriterOperationID: writerOperationID,
+		SlotID: slot.ID, ClusterID: slot.ClusterID,
 		AllocationID: slot.AllocationID, NodeID: slot.NodeID, NodeUID: slot.NodeUID,
 		NodeBootID: slot.NodeBootID, NetNSIdentity: slot.NetNSIdentity,
 		RunscContainerID: slot.RunscContainerID, WriterGrantID: slot.WriterGrantID,

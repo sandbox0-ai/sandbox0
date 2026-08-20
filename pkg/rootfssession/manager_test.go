@@ -186,6 +186,28 @@ func TestManagerCrashFenceIsDurableAndOperationBound(t *testing.T) {
 	require.Equal(t, 1, runtime.fenceInspections)
 }
 
+func TestManagerExternalCrashFenceCannotBeAdoptedByLocalAuthority(t *testing.T) {
+	manager, _, request := newTestManager(t, "external-crash-fence")
+	_, err := manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, manager.ReleaseParent(t.Context(), request.Parent, request.Identity))
+
+	result, err := manager.CrashFenceExternal(request.WithoutWriterGrantToken(), "regional-writer-operation")
+	require.NoError(t, err)
+	require.NoError(t, result.Validate())
+	recovery, err := manager.RecoverySessions()
+	require.NoError(t, err)
+	require.Len(t, recovery, 1)
+	require.True(t, recovery[0].ExternalCrash)
+	require.Equal(t, "regional-writer-operation", recovery[0].CrashOperationID)
+
+	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "regional-writer-operation")
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	retry, err := manager.CrashFenceExternal(request.WithoutWriterGrantToken(), "regional-writer-operation")
+	require.NoError(t, err)
+	require.Equal(t, result, retry)
+}
+
 func TestManagerForgetsRegionallyVerifiedPlannedTerminal(t *testing.T) {
 	manager, _, request := newTestManager(t, "forget-planned")
 	_, err := manager.Ensure(t.Context(), request)

@@ -61,11 +61,28 @@ func normalizeUnmountError(_ string, err error) error {
 }
 
 func validateRootfsPath(source, allowedRoot string) (string, error) {
+	resolvedSource, err := validateExistingPath(source, allowedRoot)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolvedSource)
+	if err != nil {
+		return "", fmt.Errorf("stat rootfs source: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("rootfs source %s is not a directory", source)
+	}
+	return resolvedSource, nil
+}
+
+// validateExistingPath resolves both sides before checking containment so a
+// root-owned daemon never persists a caller-controlled symlink escape.
+func validateExistingPath(source, allowedRoot string) (string, error) {
 	if source == "" || allowedRoot == "" {
-		return "", fmt.Errorf("rootfs source and allowed root must be non-empty")
+		return "", fmt.Errorf("source and allowed root must be non-empty")
 	}
 	if !filepath.IsAbs(source) || !filepath.IsAbs(allowedRoot) {
-		return "", fmt.Errorf("rootfs source and allowed root must be absolute")
+		return "", fmt.Errorf("source and allowed root must be absolute")
 	}
 	cleanAllowed := filepath.Clean(allowedRoot)
 	cleanSource := filepath.Clean(source)
@@ -78,18 +95,11 @@ func validateRootfsPath(source, allowedRoot string) (string, error) {
 	}
 	resolvedSource, err := filepath.EvalSymlinks(cleanSource)
 	if err != nil {
-		return "", fmt.Errorf("resolve rootfs source: %w", err)
+		return "", fmt.Errorf("resolve source: %w", err)
 	}
 	relative, err := filepath.Rel(resolvedAllowed, resolvedSource)
 	if err != nil || relative == "." || relative == ".." || filepath.IsAbs(relative) || startsWithDotDot(relative) {
-		return "", fmt.Errorf("rootfs source %s is outside allowed root %s", source, allowedRoot)
-	}
-	info, err := os.Stat(resolvedSource)
-	if err != nil {
-		return "", fmt.Errorf("stat rootfs source: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("rootfs source %s is not a directory", source)
+		return "", fmt.Errorf("source %s is outside allowed root %s", source, allowedRoot)
 	}
 	return resolvedSource, nil
 }

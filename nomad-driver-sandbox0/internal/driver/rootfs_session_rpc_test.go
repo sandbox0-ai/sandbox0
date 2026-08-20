@@ -3,12 +3,15 @@ package driver
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/drivers"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,7 +29,8 @@ func TestRootFSSessionRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	runtime := &fakeRootFSRuntime{source: t.TempDir()}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- serveRootFSSessionRuntime(ctx, socket, runtime, nil, nil) }()
+	cleaner := &fakeRuntimeSlotCleaner{}
+	go func() { done <- serveRootFSSessionRuntime(ctx, socket, runtime, nil, nil, cleaner) }()
 	require.Eventually(t, func() bool {
 		info, err := os.Stat(socket)
 		return err == nil && info.Mode().Perm() == 0o600
@@ -59,9 +64,37 @@ func TestRootFSSessionRPCDelegatesLifecycleOverPrivateUnixSocket(t *testing.T) {
 	crashed, err := clientRuntime.CrashFence(t.Context(), stage, "crash", crashTaskObservation{})
 	require.NoError(t, err)
 	require.Equal(t, "crash", crashed.OperationID)
+	cleanupRequest := testNodeCleanupRequest()
+	cleanupProof, err := clientRuntime.CleanupRuntimeSlot(t.Context(), cleanupRequest)
+	require.NoError(t, err)
+	require.Equal(t, cleanupRequest.OperationID, cleanupProof.OperationID)
+	require.Equal(t, cleanupRequest, cleaner.request)
 
 	cancel()
 	require.NoError(t, <-done)
+}
+
+type fakeRuntimeSlotCleaner struct {
+	request protocol.NodeCleanupControlRequest
+}
+
+func (c *fakeRuntimeSlotCleaner) CleanupRuntimeSlot(
+	_ context.Context,
+	request protocol.NodeCleanupControlRequest,
+) (protocol.NodeCleanupControlProof, error) {
+	c.request = request
+	proof := protocol.NodeCleanupControlProof{
+		Version: protocol.NodeCleanupProofVersion, OperationID: request.OperationID,
+		WriterOperationID: request.WriterOperationID, SlotID: request.SlotID,
+		ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
+		WriterGrantID: request.WriterGrantID, WriterFenceDigest: request.WriterFenceDigest,
+		RootFSCrashOperationID: request.WriterOperationID, RootFSCrashProofDigest: strings.Repeat("cd", sha256.Size),
+		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+	}
+	proof.ProofDigest, _ = proof.Digest()
+	return proof, nil
 }
 
 func TestRootFSSessionDaemonClientModeNeedsNoStorageCredentialsInPlugin(t *testing.T) {
@@ -73,6 +106,9 @@ func TestRootFSSessionDaemonClientModeNeedsNoStorageCredentialsInPlugin(t *testi
 	config.RootFSMaxDirtyTailBytes = -1
 	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_max_dirty_tail_bytes")
 	config.RootFSMaxDirtyTailBytes = 0
+	config.RootFSConsumerNetNSRoot = "/"
+	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_consumer_netns_root")
+	config.RootFSConsumerNetNSRoot = "/var/run/netns"
 	config.RootFSConsumerMountRoot = ""
 	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_consumer_mount_root")
 }
@@ -82,7 +118,7 @@ func TestPluginFingerprintRequiresHealthyRootFSSessionDaemon(t *testing.T) {
 	runtime := &fakeRootFSRuntime{source: t.TempDir()}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- serveRootFSSessionRuntime(ctx, socket, runtime, nil, nil) }()
+	go func() { done <- serveRootFSSessionRuntime(ctx, socket, runtime, nil, nil, nil) }()
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(socket)
 		return err == nil
@@ -104,7 +140,7 @@ func TestRootFSSessionRPCPreservesErrorClass(t *testing.T) {
 	runtime := &fakeRootFSRuntime{
 		source: t.TempDir(), ensureErr: errors.Join(errors.New("binding mismatch"), errdefs.ErrFailedPrecondition),
 	}
-	server := rootFSSessionRPCHandler(runtime, nil, nil)
+	server := rootFSSessionRPCHandler(runtime, nil, nil, nil)
 	request := rootFSSessionRPCRequest{Stage: rootfshandoff.StageRequest{Parent: "parent"}}
 	payload, err := json.Marshal(request)
 	require.NoError(t, err)
@@ -167,6 +203,187 @@ func TestRootFSSessionDaemonFencesRegisteredRunscAndStableMount(t *testing.T) {
 	require.Equal(t, []string{stableMount}, mounter.unmounts)
 }
 
+func TestRootFSSessionDaemonCleansExactRuntimeSlotWithoutCompletingWriter(t *testing.T) {
+	consumerRoot := t.TempDir()
+	stableMount := filepath.Join(consumerRoot, "alloc", "rootfs")
+	netnsPath := filepath.Join(consumerRoot, "alloc", "network.ns")
+	require.NoError(t, os.MkdirAll(stableMount, 0o755))
+	require.NoError(t, os.WriteFile(netnsPath, []byte("netns"), 0o600))
+	netnsIdentity, err := networkNamespaceIdentity(netnsPath)
+	require.NoError(t, err)
+	hostMountNamespace, err := os.Readlink("/proc/self/ns/mnt")
+	require.NoError(t, err)
+	request := testNodeCleanupRequest()
+	request.NetNSIdentity = netnsIdentity
+	stage := rootfshandoff.StageRequest{
+		BindingVersion: rootfshandoff.WriterBindingVersion, Parent: "parent-1",
+		InitialGeneration:   "generation-1",
+		Generation:          &rootfshandoff.GenerationDescriptor{CurrentBlockHead: "sha256:" + strings.Repeat("a", 64)},
+		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{NetNSIdentity: netnsIdentity},
+		Identity: rootfshandoff.Identity{
+			NodeUID: request.NodeUID, BootID: request.NodeBootID, RuntimeGeneration: "7",
+			PodUID: request.AllocationID, PodSandboxID: "allocation-network-1", ContainerName: protocol.NomadTaskName,
+			SlotNonce: request.SlotID, ClaimID: "claim-1", RootFSID: "filesystem-1",
+			WriterEpoch: 9, WriterGrantID: request.WriterGrantID,
+		},
+	}
+	consumer := &rootfssession.ConsumerRegistration{
+		LeaseID: "lease-1", ActiveKey: request.SlotID, ContainerID: request.RunscContainerID,
+		StableMount: stableMount, HostMountNamespace: hostMountNamespace,
+		NetNSPath: netnsPath, NetNSIdentity: netnsIdentity,
+		NetworkChain:   networkChainName(request.RunscContainerID),
+		LeaseExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+	}
+	localProof := testLocalCrashProof(stage, *consumer, request.OperationID, hostMountNamespace)
+	runtime := &cleanupRootFSRuntime{
+		fakeRootFSRuntime: &fakeRootFSRuntime{},
+		recovery: []rootfssession.RecoverySession{{
+			Stage: stage, Kind: rootfssession.RecoveryCrashAbandon, Consumer: consumer,
+		}},
+		proof: localProof,
+	}
+	runner := newFakeRunsc()
+	runner.stateErr = errdefs.ErrNotFound
+	network := &fakeNetworkRuntime{}
+	daemon := &rootFSSessionDaemon{
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, network: network,
+		config: PluginConfig{
+			RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: consumerRoot,
+		},
+		clusterID: request.ClusterID, nodeID: request.NodeID,
+	}
+
+	first, err := daemon.CleanupRuntimeSlot(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, first.Validate())
+	require.Equal(t, request.WriterOperationID, first.RootFSCrashOperationID)
+	second, err := daemon.CleanupRuntimeSlot(t.Context(), request)
+	require.NoError(t, err)
+	require.True(t, reflect.DeepEqual(first, second), "retry changed proof: %#v != %#v", first, second)
+	require.Equal(t, 2, runtime.localCalls)
+	_, cleanups := network.snapshot()
+	require.Equal(t, 2, cleanups)
+
+	changed := request
+	changed.NodeBootID = "another-boot"
+	_, err = daemon.CleanupRuntimeSlot(t.Context(), changed)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+}
+
+type cleanupRootFSRuntime struct {
+	*fakeRootFSRuntime
+	recovery   []rootfssession.RecoverySession
+	proof      rootfshandoff.CrashFenceProof
+	localCalls int
+}
+
+func (r *cleanupRootFSRuntime) RecoverySessions() ([]rootfssession.RecoverySession, error) {
+	return append([]rootfssession.RecoverySession(nil), r.recovery...), nil
+}
+
+func (r *cleanupRootFSRuntime) FenceLocalRootFSWriter(
+	_ context.Context,
+	_ rootfshandoff.StageRequest,
+	operationID string,
+	_ crashTaskObservation,
+) (rootfshandoff.CrashFenceProof, error) {
+	r.localCalls++
+	for index := range r.recovery {
+		if r.recovery[index].Stage.Parent == r.proof.Parent {
+			r.recovery[index].CrashOperationID = operationID
+			r.recovery[index].ExternalCrash = true
+		}
+	}
+	proof := r.proof
+	proof.OperationID = operationID
+	proof.Session.OperationID = operationID
+	return proof, nil
+}
+
+func TestRootFSSessionDaemonRejectsNetworkNamespaceSymlinkEscapeBeforeCleanup(t *testing.T) {
+	consumerRoot := t.TempDir()
+	netnsRoot := filepath.Join(consumerRoot, "netns")
+	outsideRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(netnsRoot, 0o755))
+	outsidePath := filepath.Join(outsideRoot, "outside.ns")
+	require.NoError(t, os.WriteFile(outsidePath, []byte("outside"), 0o600))
+	symlinkPath := filepath.Join(netnsRoot, "slot.ns")
+	require.NoError(t, os.Symlink(outsidePath, symlinkPath))
+	identity, err := networkNamespaceIdentity(symlinkPath)
+	require.NoError(t, err)
+	request := testNodeCleanupRequest()
+	request.NetNSIdentity = identity
+	stage := rootfshandoff.StageRequest{
+		ExpectedPolicyToken: rootfshandoff.NetworkPolicyToken{NetNSIdentity: identity},
+		Identity: rootfshandoff.Identity{
+			SlotNonce: request.SlotID, PodUID: request.AllocationID, NodeUID: request.NodeUID,
+			BootID: request.NodeBootID, WriterGrantID: request.WriterGrantID,
+			ContainerName: protocol.NomadTaskName,
+		},
+	}
+	consumer := &rootfssession.ConsumerRegistration{
+		ActiveKey: request.SlotID, ContainerID: request.RunscContainerID,
+		NetNSPath: symlinkPath, NetNSIdentity: identity, NetworkChain: networkChainName(request.RunscContainerID),
+	}
+	runtime := &cleanupRootFSRuntime{
+		fakeRootFSRuntime: &fakeRootFSRuntime{},
+		recovery: []rootfssession.RecoverySession{{
+			Stage: stage, Kind: rootfssession.RecoveryCrashAbandon, Consumer: consumer,
+		}},
+	}
+	runner := newFakeRunsc()
+	daemon := &rootFSSessionDaemon{
+		runtime: runtime, runner: runner, mounter: &fakeMounter{}, network: &fakeNetworkRuntime{},
+		config:    PluginConfig{RootFSConsumerMountRoot: consumerRoot, RootFSConsumerNetNSRoot: netnsRoot},
+		clusterID: request.ClusterID, nodeID: request.NodeID,
+	}
+
+	_, err = daemon.CleanupRuntimeSlot(t.Context(), request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.Empty(t, runner.callsSnapshot())
+	require.Zero(t, runtime.localCalls)
+}
+
+func testNodeCleanupRequest() protocol.NodeCleanupControlRequest {
+	return protocol.NodeCleanupControlRequest{
+		OperationID: "cleanup-1", WriterOperationID: "writer-1", SlotID: "slot-1",
+		ClusterID: "cluster-1", AllocationID: "allocation-1", NodeID: "node-1",
+		NodeUID: "node-uid-1", NodeBootID: "boot-1", NetNSIdentity: "netns-v1:1:2",
+		RunscContainerID: "runsc-1", WriterGrantID: "grant-1",
+		WriterFenceDigest: strings.Repeat("ab", sha256.Size),
+	}
+}
+
+func testLocalCrashProof(
+	stage rootfshandoff.StageRequest,
+	consumer rootfssession.ConsumerRegistration,
+	operationID, hostMountNamespace string,
+) rootfshandoff.CrashFenceProof {
+	binding := strings.Repeat("cd", sha256.Size)
+	observedAt := time.Unix(1_700_000_000, 0).UTC().Format(time.RFC3339Nano)
+	session := rootfshandoff.CrashFenceSessionObservation{
+		Parent: stage.Parent, RootFSID: stage.Identity.RootFSID, WriterEpoch: stage.Identity.WriterEpoch,
+		OperationID: operationID, BindingDigest: binding, SessionState: rootfshandoff.StateTombstoned,
+		BranchPath: "/var/lib/sandbox0/branch-1", NBDPoolAbsent: true,
+		LiveSessionAbsent: true, MergedMountAbsent: true, XFSMountAbsent: true, ObservedAt: observedAt,
+	}
+	return rootfshandoff.CrashFenceProof{
+		Version: rootfshandoff.CrashFenceProofVersion, OperationID: operationID,
+		Parent: stage.Parent, ClaimID: stage.Identity.ClaimID, WriterGrantID: stage.Identity.WriterGrantID,
+		WriterEpoch: stage.Identity.WriterEpoch, BindingVersion: rootfshandoff.WriterBindingVersion,
+		BindingDigest: binding, RootFSID: stage.Identity.RootFSID,
+		InitialGeneration: stage.InitialGeneration, InitialBlockHead: stage.Generation.CurrentBlockHead,
+		HeadAction: rootfshandoff.CrashFenceHeadKeepInitial, NodeUID: stage.Identity.NodeUID,
+		BootID: stage.Identity.BootID, RuntimeGeneration: stage.Identity.RuntimeGeneration,
+		HostMountNamespaceID: hostMountNamespace, PodUID: stage.Identity.PodUID,
+		PodSandboxID: stage.Identity.PodSandboxID, ContainerName: stage.Identity.ContainerName,
+		SlotNonce: stage.Identity.SlotNonce, ActiveKey: consumer.ActiveKey,
+		ConsumerBound: true, ContainerID: consumer.ContainerID,
+		ContainerAbsent: true, TaskAbsent: true, FrontendSnapshotAbsent: true, StableMountAbsent: true,
+		SnapshotterState: rootfshandoff.StateTombstoned, Session: session, ObservedAt: observedAt,
+	}
+}
+
 func TestRootFSSessionDaemonConvergesDurablePlannedAndCrashIntents(t *testing.T) {
 	runtime := &fakeRootFSRuntime{}
 	daemon := &rootFSSessionDaemon{runtime: runtime}
@@ -190,6 +407,15 @@ func TestRootFSSessionDaemonConvergesDurablePlannedAndCrashIntents(t *testing.T)
 	runtime.mu.Lock()
 	require.Equal(t, 1, runtime.crashCalls)
 	require.Equal(t, crashOperationID(stage), runtime.lastOperation)
+	runtime.mu.Unlock()
+
+	require.NoError(t, daemon.reconcile(t.Context(), rootfssession.RecoverySession{
+		Stage: stage, Kind: rootfssession.RecoveryCrashAbandon, CrashOperationID: "regional-operation",
+		ExternalCrash: true,
+	}))
+	runtime.mu.Lock()
+	require.Equal(t, 1, runtime.crashCalls)
+	require.Equal(t, 1, runtime.externalReclaims)
 	runtime.mu.Unlock()
 }
 

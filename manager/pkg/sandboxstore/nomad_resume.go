@@ -27,6 +27,13 @@ type RequestNomadSandboxResumeRequest struct {
 	ActiveSandboxLimit *int64
 }
 
+// RetryNomadSandboxResumeRequest identifies a resume that may already be
+// durable. It cannot create a lifecycle or reserve quota.
+type RetryNomadSandboxResumeRequest struct {
+	SandboxID      string
+	ExpectedTeamID string
+}
+
 // NomadSandboxResumeCandidate is the immutable logical input for one exact
 // paused-head to fresh-runtime transition.
 type NomadSandboxResumeCandidate struct {
@@ -56,6 +63,95 @@ func NomadSandboxResumeOperationID(sandboxID string, fromGeneration int64, sourc
 	payload := fmt.Sprintf("%s\x00%d\x00%s", sandboxID, fromGeneration, sourceGenerationID)
 	digest := sha256.Sum256([]byte(payload))
 	return "nomad-resume-" + hex.EncodeToString(digest[:16])
+}
+
+// RetryNomadSandboxResume returns an already-active runtime or an existing
+// exact resume lifecycle without consulting mutable quota policy. A false
+// result means the caller must load quota and use RequestNomadSandboxResume.
+func (s *PGSandboxStore) RetryNomadSandboxResume(
+	ctx context.Context,
+	request *RetryNomadSandboxResumeRequest,
+) (*NomadSandboxResumeCandidate, bool, error) {
+	normalized, err := normalizeRetryNomadSandboxResumeRequest(request)
+	if err != nil {
+		return nil, false, err
+	}
+	if s == nil || s.pool == nil {
+		return nil, false, fmt.Errorf("sandbox store is not configured")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, false, fmt.Errorf("begin retry Nomad sandbox resume tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	record, err := lockNomadSandboxClaimRecord(ctx, tx, normalized.SandboxID)
+	if err != nil {
+		return nil, false, err
+	}
+	if record.TeamID != normalized.ExpectedTeamID {
+		return nil, false, fmt.Errorf("%w: sandbox team identity changed", ErrNomadSandboxResumeConflict)
+	}
+	claim, err := lockSandboxRuntimeClaim(ctx, tx, record.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	if claim.Phase != SandboxRuntimeClaimPhaseReady || claim.OperationID == "" {
+		return nil, false, fmt.Errorf("%w: sandbox runtime claim is %s", ErrNomadSandboxResumeNotReady, claim.Phase)
+	}
+	activeLifecycle, err := getActiveLifecycleTxn(ctx, tx, record.ID)
+	if err != nil {
+		return nil, false, fmt.Errorf("load active Nomad resume lifecycle: %w", err)
+	}
+	if record.DesiredState == SandboxDesiredStateActive {
+		if activeLifecycle != nil {
+			return nil, false, fmt.Errorf("%w: lifecycle %s owns the active sandbox", ErrNomadSandboxResumeConflict, activeLifecycle.ID)
+		}
+		if err := validateAlreadyActiveNomadSandbox(ctx, tx, record); err != nil {
+			return nil, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, fmt.Errorf("commit already-active Nomad sandbox resume retry: %w", err)
+		}
+		return &NomadSandboxResumeCandidate{
+			SandboxID: record.ID, AlreadyActive: true,
+			RuntimeGeneration: record.RuntimeGeneration, Record: record,
+		}, true, nil
+	}
+	if record.DesiredState == SandboxDesiredStateTerminating {
+		return nil, false, fmt.Errorf("%w: sandbox termination is in progress", ErrNomadSandboxResumeConflict)
+	}
+	if record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+		return nil, false, fmt.Errorf("%w: %s", ErrSandboxRecordNotFound, record.ID)
+	}
+	if record.DesiredState != SandboxDesiredStatePaused || record.CurrentPodName != "" ||
+		record.CurrentPodNamespace != "" || record.RuntimeGeneration <= 0 || record.RuntimeGeneration == math.MaxInt64 {
+		return nil, false, fmt.Errorf("%w: sandbox is not a canonical paused runtime", ErrNomadSandboxResumeConflict)
+	}
+	if activeLifecycle == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, fmt.Errorf("commit absent Nomad sandbox resume retry: %w", err)
+		}
+		return nil, false, nil
+	}
+	var authorityNow time.Time
+	if err := tx.QueryRow(ctx, `SELECT NOW()`).Scan(&authorityNow); err != nil {
+		return nil, false, fmt.Errorf("read Nomad resume retry authority time: %w", err)
+	}
+	if !record.HardExpiresAt.IsZero() && !record.HardExpiresAt.After(authorityNow) {
+		return nil, false, fmt.Errorf("%w: sandbox hard TTL has expired", ErrNomadSandboxResumeConflict)
+	}
+	filesystemID, sourceGenerationID, err := lockNomadSandboxResumeHead(ctx, tx, record.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	operationID := NomadSandboxResumeOperationID(record.ID, record.RuntimeGeneration, sourceGenerationID)
+	if !nomadResumeLifecycleMatches(activeLifecycle, record, operationID, sourceGenerationID, false) {
+		return nil, false, fmt.Errorf("%w: lifecycle %s owns the paused sandbox", ErrNomadSandboxResumeConflict, activeLifecycle.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, false, fmt.Errorf("commit Nomad sandbox resume retry: %w", err)
+	}
+	return nomadSandboxResumeCandidate(record, activeLifecycle, filesystemID, sourceGenerationID), true, nil
 }
 
 // RequestNomadSandboxResume reserves active-sandbox quota and creates the
@@ -300,6 +396,20 @@ func normalizeNomadSandboxResumeRequest(request *RequestNomadSandboxResumeReques
 		}
 		limit := *request.ActiveSandboxLimit
 		normalized.ActiveSandboxLimit = &limit
+	}
+	return &normalized, nil
+}
+
+func normalizeRetryNomadSandboxResumeRequest(request *RetryNomadSandboxResumeRequest) (*RetryNomadSandboxResumeRequest, error) {
+	if request == nil {
+		return nil, fmt.Errorf("retry Nomad sandbox resume request is required")
+	}
+	normalized := *request
+	normalized.SandboxID = strings.TrimSpace(request.SandboxID)
+	normalized.ExpectedTeamID = strings.TrimSpace(request.ExpectedTeamID)
+	if normalized.SandboxID == "" || normalized.SandboxID != request.SandboxID || len(normalized.SandboxID) > 512 ||
+		normalized.ExpectedTeamID == "" || normalized.ExpectedTeamID != request.ExpectedTeamID || len(normalized.ExpectedTeamID) > 512 {
+		return nil, fmt.Errorf("sandbox_id and expected_team_id must be canonical and at most 512 bytes")
 	}
 	return &normalized, nil
 }

@@ -20,6 +20,12 @@ func TestNomadSandboxResumeOperationIDIsDeterministic(t *testing.T) {
 func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "resume")
 	pause := terminalizeNomadPauseFixture(t, fixture)
+	missingRetry, found, err := fixture.store.RetryNomadSandboxResume(fixture.ctx, &RetryNomadSandboxResumeRequest{
+		SandboxID: fixture.sandboxID, ExpectedTeamID: "team-slot",
+	})
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Nil(t, missingRetry)
 
 	limit := int64(10)
 	requested, err := fixture.store.RequestNomadSandboxResume(fixture.ctx, &RequestNomadSandboxResumeRequest{
@@ -49,6 +55,13 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	require.NoError(t, err)
 	require.Equal(t, requested.OperationID, retry.OperationID)
 	require.Equal(t, requested.SourceGenerationID, retry.SourceGenerationID)
+	durableRetry, found, err := fixture.store.RetryNomadSandboxResume(fixture.ctx, &RetryNomadSandboxResumeRequest{
+		SandboxID: fixture.sandboxID, ExpectedTeamID: "team-slot",
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, requested.OperationID, durableRetry.OperationID)
+	require.Equal(t, requested.SourceGenerationID, durableRetry.SourceGenerationID)
 
 	registration := runtimeSlotTestRegistration("slot-nomad-resume-new", "allocation-nomad-resume-new")
 	registration.AllocationNamespace = "nomad"
@@ -139,6 +152,12 @@ func TestNomadSandboxResumePersistsClaimsAndCommitsExactRuntimeIntegration(t *te
 	})
 	require.NoError(t, err)
 	require.True(t, alreadyActive.AlreadyActive)
+	alreadyActiveRetry, found, err := fixture.store.RetryNomadSandboxResume(fixture.ctx, &RetryNomadSandboxResumeRequest{
+		SandboxID: fixture.sandboxID, ExpectedTeamID: "team-slot",
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	require.True(t, alreadyActiveRetry.AlreadyActive)
 }
 
 func TestNomadSandboxResumeWaitsForTerminalRuntimeAndReservesQuotaIntegration(t *testing.T) {

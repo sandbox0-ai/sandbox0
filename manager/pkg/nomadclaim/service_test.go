@@ -2,6 +2,7 @@ package nomadclaim
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"strings"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -40,20 +42,137 @@ func (f *fakeTemplateStore) GetTemplateForTeam(_ context.Context, teamID, templa
 }
 
 type fakeClaimStore struct {
-	records        map[string]*sandboxstore.SandboxRecord
-	operations     map[string]string
-	claimPhases    map[string]string
-	artifact       *sandboxstore.RootFSBaseArtifact
-	ensureCalls    []*sandboxstore.EnsureInitialRootFSGenerationRequest
-	restoreCalls   []*sandboxstore.RestoreRootFSFromSnapshotRequest
-	cleanupCalls   []string
-	cleanupErr     error
-	pauseCandidate *sandboxstore.NomadSandboxPauseCandidate
-	pauseErr       error
-	pauseSources   []string
-	quiesceCalls   []*sandboxstore.BeginRuntimeSlotQuiesceRequest
-	snapshot       *sandboxstore.RootFSSnapshot
-	writeCount     int
+	records             map[string]*sandboxstore.SandboxRecord
+	operations          map[string]string
+	claimPhases         map[string]string
+	artifact            *sandboxstore.RootFSBaseArtifact
+	ensureCalls         []*sandboxstore.EnsureInitialRootFSGenerationRequest
+	restoreCalls        []*sandboxstore.RestoreRootFSFromSnapshotRequest
+	cleanupCalls        []string
+	cleanupErr          error
+	pauseCandidate      *sandboxstore.NomadSandboxPauseCandidate
+	pauseErr            error
+	pauseSources        []string
+	resumeCandidate     *sandboxstore.NomadSandboxResumeCandidate
+	resumeErr           error
+	resumeRequested     bool
+	resumeRetryErr      error
+	resumeRetryRequests []*sandboxstore.RetryNomadSandboxResumeRequest
+	resumeRequests      []*sandboxstore.RequestNomadSandboxResumeRequest
+	resumeCompleteErr   error
+	resumeCompleteCalls []*sandboxstore.CompleteNomadSandboxResumeRequest
+	activeSlot          *sandboxstore.RuntimeSlot
+	quiesceCalls        []*sandboxstore.BeginRuntimeSlotQuiesceRequest
+	snapshot            *sandboxstore.RootFSSnapshot
+	writeCount          int
+}
+
+func (f *fakeClaimStore) GetSandbox(_ context.Context, sandboxID string) (*sandboxstore.SandboxRecord, error) {
+	return cloneClaimRecord(f.records[sandboxID]), nil
+}
+
+func (f *fakeClaimStore) RetryNomadSandboxResume(
+	_ context.Context,
+	request *sandboxstore.RetryNomadSandboxResumeRequest,
+) (*sandboxstore.NomadSandboxResumeCandidate, bool, error) {
+	copyRequest := *request
+	f.resumeRetryRequests = append(f.resumeRetryRequests, &copyRequest)
+	if f.resumeRetryErr != nil {
+		return nil, false, f.resumeRetryErr
+	}
+	record := f.records[request.SandboxID]
+	if record == nil {
+		return nil, false, sandboxstore.ErrSandboxRecordNotFound
+	}
+	if record.DesiredState == sandboxstore.SandboxDesiredStateActive &&
+		record.CurrentPodName != "" && record.CurrentPodNamespace != "" {
+		return &sandboxstore.NomadSandboxResumeCandidate{
+			SandboxID: record.ID, AlreadyActive: true,
+			RuntimeGeneration: record.RuntimeGeneration, Record: cloneClaimRecord(record),
+		}, true, nil
+	}
+	if f.resumeRequested && f.resumeCandidate != nil {
+		candidate := *f.resumeCandidate
+		candidate.Record = cloneClaimRecord(record)
+		return &candidate, true, nil
+	}
+	return nil, false, nil
+}
+
+func (f *fakeClaimStore) RequestNomadSandboxResume(
+	_ context.Context,
+	request *sandboxstore.RequestNomadSandboxResumeRequest,
+) (*sandboxstore.NomadSandboxResumeCandidate, error) {
+	copyRequest := *request
+	if request.ActiveSandboxLimit != nil {
+		limit := *request.ActiveSandboxLimit
+		copyRequest.ActiveSandboxLimit = &limit
+	}
+	f.resumeRequests = append(f.resumeRequests, &copyRequest)
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
+	}
+	record := f.records[request.SandboxID]
+	if record == nil {
+		return nil, sandboxstore.ErrSandboxRecordNotFound
+	}
+	if record.DesiredState == sandboxstore.SandboxDesiredStateActive &&
+		record.CurrentPodName != "" && record.CurrentPodNamespace != "" {
+		return &sandboxstore.NomadSandboxResumeCandidate{
+			SandboxID: record.ID, AlreadyActive: true,
+			RuntimeGeneration: record.RuntimeGeneration, Record: cloneClaimRecord(record),
+		}, nil
+	}
+	if f.resumeCandidate == nil {
+		return nil, sandboxstore.ErrNomadSandboxResumeNotReady
+	}
+	f.resumeRequested = true
+	candidate := *f.resumeCandidate
+	candidate.Record = cloneClaimRecord(record)
+	return &candidate, nil
+}
+
+func (f *fakeClaimStore) CompleteNomadSandboxResume(
+	_ context.Context,
+	request *sandboxstore.CompleteNomadSandboxResumeRequest,
+) (*sandboxstore.SandboxRecord, error) {
+	copyRequest := *request
+	f.resumeCompleteCalls = append(f.resumeCompleteCalls, &copyRequest)
+	if f.resumeCompleteErr != nil {
+		return nil, f.resumeCompleteErr
+	}
+	if f.resumeCandidate == nil || request.OperationID != f.resumeCandidate.OperationID {
+		return nil, sandboxstore.ErrNomadSandboxResumeConflict
+	}
+	record := cloneClaimRecord(f.records[request.SandboxID])
+	if record == nil {
+		return nil, sandboxstore.ErrSandboxRecordNotFound
+	}
+	record.DesiredState = sandboxstore.SandboxDesiredStateActive
+	record.CurrentPodName = request.AllocationID
+	record.CurrentPodNamespace = request.AllocationNamespace
+	record.RuntimeGeneration = f.resumeCandidate.RuntimeGeneration
+	f.records[request.SandboxID] = cloneClaimRecord(record)
+	f.activeSlot = &sandboxstore.RuntimeSlot{
+		ID: request.SlotID, SandboxID: request.SandboxID,
+		AllocationID: request.AllocationID, AllocationNamespace: request.AllocationNamespace,
+		State: sandboxstore.RuntimeSlotStateActive, ProcdInstanceID: "procd-resumed",
+		ProcdAddress: "http://10.0.0.8:49983", CommandReadyDigest: make([]byte, sha256.Size),
+		CommandReadyAt: time.Now(), AuthorityObservedAt: time.Now(), HeartbeatExpiresAt: time.Now().Add(time.Minute),
+	}
+	return cloneClaimRecord(record), nil
+}
+
+func (f *fakeClaimStore) GetRuntimeSlotBySandboxID(
+	_ context.Context,
+	sandboxID string,
+) (*sandboxstore.RuntimeSlot, error) {
+	if f.activeSlot == nil || f.activeSlot.SandboxID != sandboxID {
+		return nil, sandboxstore.ErrRuntimeSlotNotFound
+	}
+	copy := *f.activeSlot
+	copy.CommandReadyDigest = append([]byte(nil), f.activeSlot.CommandReadyDigest...)
+	return &copy, nil
 }
 
 func (f *fakeClaimStore) RequestNomadSandboxPause(
@@ -188,9 +307,17 @@ func (f *fakeClaimStore) RequestSandboxRuntimeClaimCleanup(
 type fakeQuotaLimitStore struct {
 	limit *quota.Limit
 	err   error
+	calls []struct {
+		teamID    string
+		dimension quota.Dimension
+	}
 }
 
-func (f *fakeQuotaLimitStore) GetLimit(_ context.Context, _ string, _ quota.Dimension) (*quota.Limit, error) {
+func (f *fakeQuotaLimitStore) GetLimit(_ context.Context, teamID string, dimension quota.Dimension) (*quota.Limit, error) {
+	f.calls = append(f.calls, struct {
+		teamID    string
+		dimension quota.Dimension
+	}{teamID: teamID, dimension: dimension})
 	return f.limit, f.err
 }
 
@@ -449,13 +576,180 @@ func TestServiceQuiescesSlotOnlyAfterPlannedPauseCommitted(t *testing.T) {
 	}
 }
 
-func TestServiceKeepsResumeUnavailableUntilNewSlotWorkflowExists(t *testing.T) {
+func TestServiceResumesPausedNomadSandboxThroughDurableSlotClaim(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
-	if _, err := fixture.service.ResumeSandboxAndWait(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+	sandboxID := preparePausedNomadResume(t, fixture)
+	fixture.quotaLimits.limit = &quota.Limit{
+		TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 7,
+	}
+
+	response, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.SandboxID != sandboxID || !response.Resumed {
+		t.Fatalf("resume response = %+v", response)
+	}
+	if len(fixture.store.resumeRequests) != 1 || fixture.store.resumeRequests[0].SandboxID != sandboxID ||
+		fixture.store.resumeRequests[0].ExpectedTeamID != "team-1" ||
+		fixture.store.resumeRequests[0].ActiveSandboxLimit == nil ||
+		*fixture.store.resumeRequests[0].ActiveSandboxLimit != 7 {
+		t.Fatalf("resume requests = %+v", fixture.store.resumeRequests)
+	}
+	if len(fixture.planner.requests) != 1 {
+		t.Fatalf("planner requests = %+v", fixture.planner.requests)
+	}
+	planned := fixture.planner.requests[0]
+	if planned.OperationID != fixture.store.resumeCandidate.OperationID || planned.SandboxID != sandboxID ||
+		planned.TeamID != "team-1" || planned.UserID != "user-1" ||
+		planned.ClusterID != fixture.profile.ClusterID ||
+		planned.CompatibilityDigest != fixture.profile.CompatibilityDigest ||
+		planned.Runtime.RuntimeGeneration != 2 || !planned.StartedAt.Equal(fixture.now) {
+		t.Fatalf("resume planner request = %+v", planned)
+	}
+	if planned.Runtime.EnvVars["TEMPLATE"] != "yes" || planned.Runtime.EnvVars["MAIN"] != "yes" ||
+		planned.Runtime.EnvVars[runtimecontrol.EnvSandboxID] != sandboxID {
+		t.Fatalf("resume runtime assignment = %+v", planned.Runtime)
+	}
+	policy, err := v1alpha1.ParseNetworkPolicyFromAnnotationStrict(planned.NetworkPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.SandboxID != sandboxID || policy.TeamID != "team-1" || policy.Mode != v1alpha1.NetworkModeAllowAll {
+		t.Fatalf("resume network policy = %+v", policy)
+	}
+	if len(fixture.store.resumeCompleteCalls) != 1 ||
+		fixture.store.resumeCompleteCalls[0].OperationID != fixture.store.resumeCandidate.OperationID ||
+		fixture.store.resumeCompleteCalls[0].SlotID != "slot-1" {
+		t.Fatalf("resume completions = %+v", fixture.store.resumeCompleteCalls)
+	}
+	record := fixture.store.records[sandboxID]
+	if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.RuntimeGeneration != 2 ||
+		record.CurrentPodName != "allocation-1" || record.CurrentPodNamespace != "default" {
+		t.Fatalf("resumed record = %+v", record)
+	}
+}
+
+func TestServiceProjectsResumedAndAlreadyActiveNomadRuntime(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := preparePausedNomadResume(t, fixture)
+
+	resumed, err := fixture.service.ResumePausedSandboxRuntime(context.Background(), sandboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.ID != sandboxID || resumed.Status != managerapi.SandboxStatusRunning || resumed.Paused ||
+		resumed.InternalAddr != "http://10.0.0.8:49983" || resumed.PodName != "allocation-1" ||
+		resumed.RuntimeGeneration != 2 {
+		t.Fatalf("resumed projection = %+v", resumed)
+	}
+
+	alreadyActive, err := fixture.service.ResumePausedSandboxRuntime(context.Background(), sandboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alreadyActive.InternalAddr != resumed.InternalAddr || alreadyActive.RuntimeGeneration != 2 ||
+		len(fixture.planner.requests) != 1 || len(fixture.store.resumeCompleteCalls) != 1 ||
+		len(fixture.store.resumeRequests) != 1 || len(fixture.store.resumeRetryRequests) != 2 {
+		t.Fatalf("already-active projection=%+v planner=%d complete=%d request=%d retry=%d",
+			alreadyActive, len(fixture.planner.requests), len(fixture.store.resumeCompleteCalls),
+			len(fixture.store.resumeRequests), len(fixture.store.resumeRetryRequests))
+	}
+}
+
+func TestServiceRetriesDurableNomadResumeWhenQuotaPolicyIsUnavailable(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := preparePausedNomadResume(t, fixture)
+	fixture.quotaLimits.limit = &quota.Limit{
+		TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 1,
+	}
+	fixture.planner.err = errors.New("node channel unavailable")
+	if _, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID); err == nil {
+		t.Fatal("initial resume unexpectedly succeeded")
+	}
+	fixture.planner.err = nil
+	fixture.quotaLimits.err = errors.New("quota database unavailable")
+
+	response, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.SandboxID != sandboxID || len(fixture.store.resumeRequests) != 1 ||
+		len(fixture.store.resumeRetryRequests) != 2 || len(fixture.quotaLimits.calls) != 1 ||
+		len(fixture.planner.requests) != 2 || len(fixture.store.resumeCompleteCalls) != 1 {
+		t.Fatalf("response=%+v requests=%d retries=%d quota=%d planner=%d complete=%d",
+			response, len(fixture.store.resumeRequests), len(fixture.store.resumeRetryRequests),
+			len(fixture.quotaLimits.calls), len(fixture.planner.requests), len(fixture.store.resumeCompleteCalls))
+	}
+}
+
+func TestServiceMapsNomadResumeUnavailableConflictAndQuotaErrors(t *testing.T) {
+	t.Run("warm slot unavailable", func(t *testing.T) {
+		fixture := newClaimServiceFixture(t)
+		sandboxID := preparePausedNomadResume(t, fixture)
+		fixture.planner.err = sandboxstore.ErrRuntimeSlotUnavailable
+		_, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+		if !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+			t.Fatalf("resume error = %v", err)
+		}
+		if len(fixture.store.resumeCompleteCalls) != 0 {
+			t.Fatalf("resume completed without a slot: %+v", fixture.store.resumeCompleteCalls)
+		}
+	})
+
+	t.Run("durable conflict", func(t *testing.T) {
+		fixture := newClaimServiceFixture(t)
+		sandboxID := preparePausedNomadResume(t, fixture)
+		fixture.store.resumeErr = sandboxstore.ErrNomadSandboxResumeConflict
+		_, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+		if !k8serrors.IsConflict(err) {
+			t.Fatalf("resume error = %v, want conflict", err)
+		}
+		if len(fixture.planner.requests) != 0 {
+			t.Fatalf("planner requests = %+v", fixture.planner.requests)
+		}
+	})
+
+	t.Run("quota exceeded", func(t *testing.T) {
+		fixture := newClaimServiceFixture(t)
+		sandboxID := preparePausedNomadResume(t, fixture)
+		fixture.store.resumeErr = &sandboxstore.ActiveSandboxQuotaExceededError{
+			TeamID: "team-1", Current: 1, Limit: 1,
+		}
+		_, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+		if !errors.Is(err, service.ErrQuotaExceeded) {
+			t.Fatalf("resume error = %v, want quota exceeded", err)
+		}
+	})
+}
+
+func TestServiceValidatesStoredNomadResumeBeforeDurableReservation(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := preparePausedNomadResume(t, fixture)
+	fixture.store.records[sandboxID].Config.Services = []managerapi.SandboxAppService{{ID: "unsupported"}}
+
+	_, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+	if !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+		t.Fatalf("resume error = %v, want lifecycle unavailable", err)
+	}
+	if len(fixture.store.resumeRequests) != 0 || len(fixture.planner.requests) != 0 {
+		t.Fatalf("resume reservation=%+v planner=%+v", fixture.store.resumeRequests, fixture.planner.requests)
+	}
+}
+
+func TestServiceRejectsMismatchedResumeQuotaIdentityBeforeReservation(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	sandboxID := preparePausedNomadResume(t, fixture)
+	fixture.quotaLimits.limit = &quota.Limit{
+		TeamID: "team-other", Dimension: quota.DimensionActiveSandboxes, LimitValue: 7,
+	}
+
+	_, err := fixture.service.ResumeSandboxAndWait(context.Background(), sandboxID)
+	if err == nil || !strings.Contains(err.Error(), "quota identity") {
 		t.Fatalf("resume error = %v", err)
 	}
-	if _, err := fixture.service.ResumePausedSandboxRuntime(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
-		t.Fatalf("runtime recovery error = %v", err)
+	if len(fixture.store.resumeRequests) != 0 {
+		t.Fatalf("resume requests = %+v", fixture.store.resumeRequests)
 	}
 }
 
@@ -605,6 +899,38 @@ func TestServiceFailsClosedWhenQuotaPolicyCannotBeLoaded(t *testing.T) {
 		t.Fatalf("side effects: reservations=%d rootfs=%d planner=%d",
 			fixture.store.writeCount, len(fixture.store.ensureCalls), len(fixture.planner.requests))
 	}
+}
+
+func preparePausedNomadResume(t *testing.T, fixture claimServiceFixture) string {
+	t.Helper()
+	claimed, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-resume-source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.store.records[claimed.SandboxID]
+	if record == nil {
+		t.Fatalf("claimed sandbox %s was not persisted", claimed.SandboxID)
+	}
+	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	record.CurrentPodName = ""
+	record.CurrentPodNamespace = ""
+	fixture.store.resumeCandidate = &sandboxstore.NomadSandboxResumeCandidate{
+		SandboxID: claimed.SandboxID, OperationID: "nomad-resume-operation-1",
+		LifecyclePhase:    sandboxstore.SandboxLifecyclePhasePreparing,
+		RuntimeGeneration: record.RuntimeGeneration + 1,
+		FilesystemID:      "filesystem-1", SourceGenerationID: "generation-paused-1",
+		Record: cloneClaimRecord(record),
+	}
+	fixture.store.activeSlot = nil
+	fixture.store.resumeRequests = nil
+	fixture.store.resumeRetryRequests = nil
+	fixture.store.resumeRequested = false
+	fixture.store.resumeCompleteCalls = nil
+	fixture.planner.requests = nil
+	fixture.quotaLimits.calls = nil
+	return claimed.SandboxID
 }
 
 type claimServiceFixture struct {

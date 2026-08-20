@@ -4,6 +4,7 @@ package nomadclaim
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -24,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
@@ -37,12 +39,17 @@ var errNomadSandboxPausePending = errors.New("nomad sandbox planned pause is pen
 // Store is the durable sandbox and block-COW product boundary needed before a
 // slot can receive writer authority.
 type Store interface {
+	GetSandbox(context.Context, string) (*sandboxstore.SandboxRecord, error)
 	RetrySandboxClaim(context.Context, *sandboxstore.RetrySandboxClaimRequest) (*sandboxstore.SandboxRecord, bool, error)
 	ReserveSandboxClaim(context.Context, *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	CompleteSandboxClaim(context.Context, *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	RequestSandboxRuntimeClaimCleanup(context.Context, string, string) (*sandboxstore.SandboxClaimCleanupCandidate, error)
 	RequestNomadSandboxPause(context.Context, string, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
+	RetryNomadSandboxResume(context.Context, *sandboxstore.RetryNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, bool, error)
+	RequestNomadSandboxResume(context.Context, *sandboxstore.RequestNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, error)
+	CompleteNomadSandboxResume(context.Context, *sandboxstore.CompleteNomadSandboxResumeRequest) (*sandboxstore.SandboxRecord, error)
 	BeginRuntimeSlotQuiesce(context.Context, *sandboxstore.BeginRuntimeSlotQuiesceRequest) (*sandboxstore.RuntimeSlot, error)
+	GetRuntimeSlotBySandboxID(context.Context, string) (*sandboxstore.RuntimeSlot, error)
 	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
 	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform) (*sandboxstore.RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *sandboxstore.EnsureInitialRootFSGenerationRequest) (*sandboxstore.RootFSFilesystem, *sandboxstore.RootFSGeneration, error)
@@ -161,10 +168,14 @@ func (s *Service) PauseSandboxAndWait(ctx context.Context, sandboxID string) (*s
 	}, nil
 }
 
-// ResumeSandboxAndWait fails closed until a paused Nomad filesystem can claim
-// a new compatible warm slot through a durable resume workflow.
-func (s *Service) ResumeSandboxAndWait(context.Context, string) (*managerapi.ResumeSandboxResponse, error) {
-	return nil, fmt.Errorf("%w: Nomad resume is not connected", service.ErrSandboxLifecycleUnavailable)
+// ResumeSandboxAndWait claims a fresh compatible slot from the paused RootFS
+// head and returns only after its command-ready binding is committed.
+func (s *Service) ResumeSandboxAndWait(ctx context.Context, sandboxID string) (*managerapi.ResumeSandboxResponse, error) {
+	record, _, err := s.resumeNomadSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return &managerapi.ResumeSandboxResponse{SandboxID: record.ID, Resumed: true}, nil
 }
 
 // PauseSandboxByID is the automatic TTL pause boundary.
@@ -220,10 +231,315 @@ func (s *Service) CompletePausingSandboxRuntime(ctx context.Context, sandboxID s
 	return errNomadSandboxPausePending
 }
 
-// ResumePausedSandboxRuntime fails closed until durable resume can acquire a
-// new compatible slot from the current RootFS head.
-func (s *Service) ResumePausedSandboxRuntime(context.Context, string) (*managerapi.Sandbox, error) {
-	return nil, fmt.Errorf("%w: Nomad runtime recovery is not connected", service.ErrSandboxLifecycleUnavailable)
+// ResumePausedSandboxRuntime is the controller boundary for the same durable
+// resume transaction used by the public lifecycle API.
+func (s *Service) ResumePausedSandboxRuntime(ctx context.Context, sandboxID string) (*managerapi.Sandbox, error) {
+	record, result, err := s.resumeNomadSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return s.projectResumedNomadSandbox(ctx, record, result)
+}
+
+type nomadResumePlan struct {
+	profile    Profile
+	request    service.ClaimRequest
+	policy     string
+	assignment runtimecontrol.Assignment
+}
+
+func (s *Service) resumeNomadSandbox(
+	ctx context.Context,
+	sandboxID string,
+) (*sandboxstore.SandboxRecord, *runtimeslotclaim.Result, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || len(sandboxID) > 512 {
+		return nil, nil, fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
+	}
+	startedAt := s.now().UTC()
+	record, err := s.store.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load Nomad sandbox for resume: %w", err)
+	}
+	if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+		return nil, nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+	}
+	if record.ID != sandboxID || record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
+		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+			fmt.Errorf("sandbox is not owned by the Nomad runtime backend"))
+	}
+	plan, err := s.prepareNomadResumePlan(record)
+	if err != nil {
+		return nil, nil, err
+	}
+	candidate, found, err := s.store.RetryNomadSandboxResume(ctx, &sandboxstore.RetryNomadSandboxResumeRequest{
+		SandboxID: sandboxID, ExpectedTeamID: record.TeamID,
+	})
+	if err != nil {
+		return nil, nil, mapNomadResumeError("retry Nomad sandbox resume", sandboxID, err)
+	}
+	if !found {
+		limit, limitErr := s.activeSandboxLimit(ctx, record.TeamID)
+		if limitErr != nil {
+			return nil, nil, limitErr
+		}
+		candidate, err = s.store.RequestNomadSandboxResume(ctx, &sandboxstore.RequestNomadSandboxResumeRequest{
+			SandboxID: sandboxID, ExpectedTeamID: record.TeamID, ActiveSandboxLimit: limit,
+		})
+		if err != nil {
+			return nil, nil, mapNomadResumeError("request Nomad sandbox resume", sandboxID, err)
+		}
+	}
+	if err := validateNomadResumeCandidate(candidate, record, plan); err != nil {
+		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+	}
+	if candidate.AlreadyActive {
+		return candidate.Record, nil, nil
+	}
+
+	plan.request.RuntimeGeneration = candidate.RuntimeGeneration
+	plan.assignment = runtimeAssignment(candidate.Record.TemplateSpec, &plan.request)
+	if err := plan.assignment.Validate(); err != nil {
+		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+			fmt.Errorf("stored runtime assignment changed during resume: %w", err))
+	}
+	result, err := s.planner.Claim(ctx, runtimeslotclaim.Request{
+		OperationID: candidate.OperationID, SandboxID: candidate.SandboxID,
+		TeamID: candidate.Record.TeamID, UserID: candidate.Record.UserID,
+		CompatibilityDigest: plan.profile.CompatibilityDigest, ClusterID: plan.profile.ClusterID,
+		NetworkPolicy: plan.policy, Runtime: plan.assignment, StartedAt: startedAt,
+	})
+	if err != nil {
+		if errors.Is(err, sandboxstore.ErrRuntimeSlotUnavailable) {
+			return nil, nil, fmt.Errorf("%w: %v", service.ErrSandboxLifecycleUnavailable, err)
+		}
+		return nil, nil, mapNomadResumeError("claim Nomad resume runtime slot", sandboxID, err)
+	}
+	if result == nil || result.Slot == nil || result.Slot.ID == "" ||
+		result.Slot.AllocationID == "" || result.Slot.AllocationNamespace == "" {
+		return nil, nil, fmt.Errorf("%w: Nomad resume planner returned no exact runtime binding",
+			service.ErrSandboxLifecycleUnavailable)
+	}
+	completed, err := s.store.CompleteNomadSandboxResume(ctx, &sandboxstore.CompleteNomadSandboxResumeRequest{
+		SandboxID: sandboxID, OperationID: candidate.OperationID, SlotID: result.Slot.ID,
+		AllocationID: result.Slot.AllocationID, AllocationNamespace: result.Slot.AllocationNamespace,
+	})
+	if err != nil {
+		return nil, nil, mapNomadResumeError("complete Nomad sandbox resume", sandboxID, err)
+	}
+	if completed == nil || completed.ID != sandboxID ||
+		completed.DesiredState != sandboxstore.SandboxDesiredStateActive ||
+		completed.RuntimeGeneration != candidate.RuntimeGeneration ||
+		completed.CurrentPodName != result.Slot.AllocationID ||
+		completed.CurrentPodNamespace != result.Slot.AllocationNamespace {
+		return nil, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID,
+			fmt.Errorf("committed Nomad resume binding does not match the command-ready slot"))
+	}
+	s.logger.Info("Resumed Nomad sandbox",
+		zap.String("sandboxID", sandboxID), zap.String("operationID", candidate.OperationID),
+		zap.String("slotID", result.Slot.ID), zap.Int64("runtimeGeneration", candidate.RuntimeGeneration),
+		zap.Duration("endToEndDuration", result.Duration),
+	)
+	return completed, result, nil
+}
+
+func (s *Service) prepareNomadResumePlan(record *sandboxstore.SandboxRecord) (nomadResumePlan, error) {
+	if record == nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad sandbox is missing", service.ErrSandboxLifecycleUnavailable)
+	}
+	if record.TeamID == "" || record.ID == "" || record.ClusterID == "" || record.RuntimeGeneration <= 0 ||
+		record.RuntimeGeneration == math.MaxInt64 {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad sandbox identity is invalid",
+			service.ErrSandboxLifecycleUnavailable)
+	}
+	config := service.CloneSandboxConfig(&record.Config)
+	if config != nil && len(config.Services) > 0 {
+		return nomadResumePlan{}, fmt.Errorf("%w: Nomad app-service projection is not configured",
+			service.ErrSandboxLifecycleUnavailable)
+	}
+	resources, err := s.effectiveResources(record.TemplateSpec, config)
+	if err != nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored Nomad resources are invalid: %v",
+			service.ErrSandboxLifecycleUnavailable, err)
+	}
+	profile, ok := s.profiles.Resolve(resources.CPU, resources.Memory)
+	if !ok || profile.ClusterID != record.ClusterID {
+		return nomadResumePlan{}, fmt.Errorf("%w: no compatible Nomad warm-slot profile for the stored sandbox",
+			service.ErrSandboxLifecycleUnavailable)
+	}
+	if configuredCluster := record.TemplateSpec.ClusterId; configuredCluster != nil &&
+		strings.TrimSpace(*configuredCluster) != "" && strings.TrimSpace(*configuredCluster) != profile.ClusterID {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored template cluster has no compatible Nomad warm-slot profile",
+			service.ErrSandboxLifecycleUnavailable)
+	}
+	req := service.ClaimRequest{
+		SandboxID: record.ID, TeamID: record.TeamID, UserID: record.UserID,
+		Template: record.TemplateID, Config: config, RuntimeGeneration: record.RuntimeGeneration + 1,
+	}
+	policy, credentials, err := s.networkPolicy(record.TemplateSpec, &req)
+	if err != nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: rebuild stored Nomad network policy: %v",
+			service.ErrSandboxLifecycleUnavailable, err)
+	}
+	if len(credentials) > 0 {
+		return nomadResumePlan{}, fmt.Errorf("%w: Nomad credential binding projection is not configured",
+			service.ErrSandboxLifecycleUnavailable)
+	}
+	assignment := runtimeAssignment(record.TemplateSpec, &req)
+	if err := assignment.Validate(); err != nil {
+		return nomadResumePlan{}, fmt.Errorf("%w: stored runtime assignment is invalid: %v",
+			service.ErrSandboxLifecycleUnavailable, err)
+	}
+	return nomadResumePlan{profile: profile, request: req, policy: policy, assignment: assignment}, nil
+}
+
+func validateNomadResumeCandidate(
+	candidate *sandboxstore.NomadSandboxResumeCandidate,
+	expected *sandboxstore.SandboxRecord,
+	plan nomadResumePlan,
+) error {
+	if candidate == nil || candidate.Record == nil || expected == nil {
+		return fmt.Errorf("Nomad resume authority returned no sandbox candidate")
+	}
+	record := candidate.Record
+	if candidate.SandboxID != expected.ID || record.ID != expected.ID || record.TeamID != expected.TeamID ||
+		record.UserID != expected.UserID || record.ClusterID != plan.profile.ClusterID ||
+		record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad ||
+		!apiequality.Semantic.DeepEqual(record.TemplateSpec, expected.TemplateSpec) ||
+		!nomadRuntimeConfigEqual(record.Config, expected.Config) {
+		return fmt.Errorf("Nomad resume sandbox identity changed before lifecycle reservation")
+	}
+	if candidate.AlreadyActive {
+		if record.DesiredState != sandboxstore.SandboxDesiredStateActive || record.CurrentPodName == "" ||
+			record.CurrentPodNamespace == "" || candidate.RuntimeGeneration != record.RuntimeGeneration {
+			return fmt.Errorf("already-active Nomad resume candidate has no canonical runtime")
+		}
+		return nil
+	}
+	if strings.TrimSpace(candidate.OperationID) != candidate.OperationID || candidate.OperationID == "" ||
+		len(candidate.OperationID) > 512 || candidate.FilesystemID == "" || candidate.SourceGenerationID == "" ||
+		!activeNomadResumePhase(candidate.LifecyclePhase) ||
+		record.DesiredState != sandboxstore.SandboxDesiredStatePaused || record.CurrentPodName != "" ||
+		record.CurrentPodNamespace != "" || candidate.RuntimeGeneration != record.RuntimeGeneration+1 ||
+		candidate.RuntimeGeneration != plan.request.RuntimeGeneration {
+		return fmt.Errorf("Nomad resume candidate does not bind the exact paused generation")
+	}
+	return nil
+}
+
+func activeNomadResumePhase(phase string) bool {
+	switch phase {
+	case sandboxstore.SandboxLifecyclePhasePreparing,
+		sandboxstore.SandboxLifecyclePhaseBarriered,
+		sandboxstore.SandboxLifecyclePhasePublishing,
+		sandboxstore.SandboxLifecyclePhaseCommitting:
+		return true
+	default:
+		return false
+	}
+}
+
+func nomadRuntimeConfigEqual(actual, expected sandboxstore.SandboxConfig) bool {
+	actual.TTL, expected.TTL = nil, nil
+	actual.HardTTL, expected.HardTTL = nil, nil
+	actual.AutoResume, expected.AutoResume = nil, nil
+	return apiequality.Semantic.DeepEqual(actual, expected)
+}
+
+func (s *Service) activeSandboxLimit(ctx context.Context, teamID string) (*int64, error) {
+	limit, err := s.quotaLimits.GetLimit(ctx, teamID, quota.DimensionActiveSandboxes)
+	if err != nil {
+		return nil, fmt.Errorf("load active sandbox quota for resume: %w", err)
+	}
+	if limit == nil {
+		return nil, nil
+	}
+	if limit.TeamID != teamID || limit.Dimension != quota.DimensionActiveSandboxes {
+		return nil, fmt.Errorf("active sandbox quota identity does not match resume")
+	}
+	value := limit.LimitValue
+	return &value, nil
+}
+
+func mapNomadResumeError(operation, sandboxID string, err error) error {
+	switch {
+	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound):
+		return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+	case errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded):
+		return fmt.Errorf("%w: %v", service.ErrQuotaExceeded, err)
+	case errors.Is(err, sandboxstore.ErrNomadSandboxResumeConflict),
+		errors.Is(err, sandboxstore.ErrNomadSandboxResumeNotReady),
+		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
+		errors.Is(err, sandboxstore.ErrRuntimeSlotConflict),
+		errors.Is(err, sandboxstore.ErrRuntimeSlotInvalid):
+		return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+	default:
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+}
+
+func (s *Service) projectResumedNomadSandbox(
+	ctx context.Context,
+	record *sandboxstore.SandboxRecord,
+	result *runtimeslotclaim.Result,
+) (*managerapi.Sandbox, error) {
+	if record == nil {
+		return nil, fmt.Errorf("%w: resumed Nomad sandbox record is missing", service.ErrSandboxLifecycleUnavailable)
+	}
+	procdAddress := ""
+	if result != nil && result.Slot != nil {
+		if result.Slot.AllocationID != record.CurrentPodName ||
+			result.Slot.AllocationNamespace != record.CurrentPodNamespace {
+			return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, record.ID,
+				fmt.Errorf("resumed runtime projection changed after commit"))
+		}
+		procdAddress = result.ProcdAddress
+	} else {
+		slot, err := s.store.GetRuntimeSlotBySandboxID(ctx, record.ID)
+		if err != nil {
+			if errors.Is(err, sandboxstore.ErrRuntimeSlotNotFound) {
+				return nil, fmt.Errorf("%w: active Nomad runtime slot disappeared", service.ErrSandboxLifecycleUnavailable)
+			}
+			return nil, fmt.Errorf("project active Nomad runtime slot: %w", err)
+		}
+		if slot == nil || slot.SandboxID != record.ID || slot.AllocationID != record.CurrentPodName ||
+			slot.AllocationNamespace != record.CurrentPodNamespace || slot.State != sandboxstore.RuntimeSlotStateActive ||
+			slot.ProcdInstanceID == "" || len(slot.CommandReadyDigest) != sha256.Size ||
+			slot.CommandReadyAt.IsZero() || !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
+			return nil, fmt.Errorf("%w: active Nomad runtime slot is not command-ready",
+				service.ErrSandboxLifecycleUnavailable)
+		}
+		procdAddress = slot.ProcdAddress
+	}
+	if err := protocol.ValidateNomadProcdAddress(procdAddress); err != nil {
+		return nil, fmt.Errorf("%w: active Nomad procd address: %v", service.ErrSandboxLifecycleUnavailable, err)
+	}
+	autoResume := true
+	if record.Config.AutoResume != nil {
+		autoResume = *record.Config.AutoResume
+	}
+	var resources *managerapi.SandboxResourceConfig
+	if record.Config.Resources != nil {
+		copy := *record.Config.Resources
+		resources = &copy
+	}
+	services := append([]managerapi.SandboxAppService(nil), record.Config.Services...)
+	return &managerapi.Sandbox{
+		ID: record.ID, TemplateID: record.TemplateID, TeamID: record.TeamID, UserID: record.UserID,
+		InternalAddr: procdAddress, Status: managerapi.SandboxStatusRunning, Paused: false,
+		AutoResume: autoResume, Resources: resources, Services: services,
+		PodName: record.CurrentPodName, RuntimeGeneration: record.RuntimeGeneration,
+		ExpiresAt: optionalNomadTime(record.ExpiresAt), HardExpiresAt: optionalNomadTime(record.HardExpiresAt),
+		ClaimedAt: record.ClaimedAt, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt,
+	}, nil
+}
+
+func optionalNomadTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	copy := value
+	return &copy
 }
 
 // SetPauseEnqueuer installs the runtime-neutral durable pause worker.

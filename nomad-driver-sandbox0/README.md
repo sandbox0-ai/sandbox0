@@ -45,6 +45,11 @@ Implemented:
 - manager PostgreSQL primary fencing: new connections select only a read-write
   server, pooled connections are periodically revalidated after a role change,
   and `/readyz` fails closed while no writer is reachable
+- an opt-in OCI golden corpus that runs identical filesystem and isolation
+  semantics through stock runsc DirectFS, stock runsc Gofer, and runc
+- real RustFS request-cost, outage recovery, and independent-node RootFS-head
+  migration tests; the receiving node uses a new writer epoch and only the
+  published immutable generation, never the retiring node's local journal
 - synchronous task-driver registration only after the control socket, ctld
   warm-policy acknowledgement, root mount, runsc compatibility, and RootFS
   session-daemon health proofs are ready
@@ -183,6 +188,60 @@ go build -o nomad-rootfs-sessionctl ./cmd/nomad-rootfs-sessionctl
 
 The module is intentionally separate from the repository root so the Nomad
 dependency is not imposed on every Sandbox0 service.
+
+### Runtime compatibility and isolation corpus
+
+The privileged corpus executes the same statically linked Go payload through
+stock runsc DirectFS, stock runsc Gofer, and runc. Supply an extracted OCI
+rootfs containing `/bin/sh`, `/proc`, `/dev`, `/sys`, and `/tmp`:
+
+```sh
+cd nomad-driver-sandbox0
+CGO_ENABLED=0 \
+SANDBOX0_RUN_PRIVILEGED_RUNTIME_CORPUS=1 \
+SANDBOX0_RUNTIME_CORPUS_ROOTFS=/tmp/s0-runtime-corpus-rootfs \
+go test ./internal/driver \
+  -run TestPrivilegedRuntimeGoldenCorpus -count=1 -v -timeout=3m
+```
+
+The required common result covers open/read/write/stat/readdir/fsync,
+mmap/msync, xattrs, hardlinks, symlinks, rename with a retained directory file
+descriptor, sparse files, truncate, inotify, arbitrary chown, SCM_RIGHTS, and
+OverlayFS whiteouts. The isolation checks deny host-root traversal through
+`/proc`, host Unix-socket and FIFO access, mount and device creation without
+the corresponding capabilities, non-loopback networking, and host-path
+leakage through mountinfo. The static payload requirement avoids silently
+testing a host dynamic loader that is absent from the guest image.
+
+This corpus requires sparse-file behavior and verifies physical sparsity in
+the host upperdir. It does not claim `FALLOC_FL_PUNCH_HOLE` parity: stock runsc
+may return `EOPNOTSUPP` for that operation even when ordinary sparse-file
+semantics pass.
+
+### RustFS migration and request-cost matrix
+
+With an isolated RustFS test bucket endpoint, run the real S3 client tests from
+the repository root:
+
+```sh
+SANDBOX0_RUSTFS_ENDPOINT=http://127.0.0.1:19000 \
+SANDBOX0_RUSTFS_ACCESS_KEY=sandbox0test \
+SANDBOX0_RUSTFS_SECRET_KEY=sandbox0testsecret \
+go test ./pkg/rootfssession \
+  -run 'TestRustFS(DirtyTailPressureRetiresAfterObjectStoreRecovery|RootFSMigratesBetweenIndependentNodes)' \
+  -count=1 -v -timeout=5m
+```
+
+The cost test excludes one-time fixture upload, then enforces at most two GETs
+for cold attach, zero requests for a hot re-attach, at most two GETs and zero
+PUT/metadata requests for online writes, at most four HTTP 503 attempts for one
+bounded outage operation, at most four GETs and four PUTs for recovery, and at
+most three GETs for a final uncached read. HEAD and LIST are forbidden from the
+RootFS data path. The migration test forces node A's dirty head into immutable
+S3 objects, reclaims node A's acknowledged branch, and verifies that an
+independent node B with writer epoch 2 reads the exact filesystem bytes from
+the published head. This validates cross-node storage/control semantics; a
+privileged multi-host NBD/XFS/runsc deployment test remains a production gate.
 
 ## PostgreSQL high availability
 

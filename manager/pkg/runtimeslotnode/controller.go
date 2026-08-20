@@ -51,13 +51,14 @@ func (c *Controller) Cleanup(
 ) (runtimeslotreconciler.NodeCleanupProof, error) {
 	controlRequest := protocol.NodeCleanupControlRequest{
 		OperationID: request.OperationID, WriterOperationID: request.WriterOperationID,
-		SlotID: request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+		WriterRetireKind: request.WriterRetireKind,
+		SlotID:           request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
 		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
 		WriterGrantID: request.WriterGrantID,
 	}
-	if len(request.WriterFenceDigest) != 0 {
-		controlRequest.WriterFenceDigest = hex.EncodeToString(request.WriterFenceDigest)
+	if len(request.WriterAuthorityDigest) != 0 {
+		controlRequest.WriterAuthorityDigest = hex.EncodeToString(request.WriterAuthorityDigest)
 	}
 	if err := controlRequest.Validate(); err != nil {
 		return runtimeslotreconciler.NodeCleanupProof{}, fmt.Errorf("validate runtime slot node cleanup: %w", err)

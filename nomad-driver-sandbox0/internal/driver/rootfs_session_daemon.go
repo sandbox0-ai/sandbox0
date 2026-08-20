@@ -17,6 +17,7 @@ package driver
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -71,6 +72,7 @@ type rootFSSessionDaemonRuntime interface {
 	RootFSRuntime
 	RecoverySessions() ([]rootfssession.RecoverySession, error)
 	FenceLocalRootFSWriter(context.Context, rootfshandoff.StageRequest, string, crashTaskObservation) (rootfshandoff.CrashFenceProof, error)
+	ReclaimVerifiedTerminal(context.Context, rootfshandoff.StageRequest) error
 	ReclaimExternallyRetired(context.Context, rootfshandoff.StageRequest) (bool, error)
 }
 
@@ -356,8 +358,9 @@ func (d *rootFSSessionDaemon) runtimeSlotNetworkPrepareRequest(
 }
 
 // CleanupRuntimeSlot removes one exact runtime without calling the Nomad task
-// driver or completing regional writer authority. The proof is journaled
-// before it is returned, making a lost response byte-stable on retry.
+// driver or choosing a new regional writer outcome. It may replay the exact
+// already-authoritative planned operation. The proof is journaled before it is
+// returned, making a lost response byte-stable on retry.
 func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
 	ctx context.Context,
 	request protocol.NodeCleanupControlRequest,
@@ -407,57 +410,103 @@ func (d *rootFSSessionDaemon) cleanupWriterRuntimeSlot(
 	if err != nil {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("list durable RootFS sessions: %w", err)
 	}
-	var matched *rootfssession.RecoverySession
-	for index := range sessions {
-		if sessions[index].Stage.Identity.WriterGrantID != request.WriterGrantID {
-			continue
-		}
-		if matched != nil {
-			return protocol.NodeCleanupControlProof{}, fmt.Errorf("writer grant has multiple local sessions: %w", errdefs.ErrFailedPrecondition)
-		}
-		candidate := sessions[index]
-		matched = &candidate
+	matched, err := matchRuntimeSlotCleanupSession(sessions, request)
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
 	}
 	if matched == nil {
-		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS writer session is absent: %w", errdefs.ErrNotFound)
+		if journalRecord == nil {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS writer session and runtime slot journal are absent: %w", errdefs.ErrNotFound)
+		}
+		return d.cleanupJournaledWriterRuntimeSlot(ctx, request, *journalRecord)
 	}
 	if err := validateRuntimeSlotCleanupSession(*matched, request); err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
-	if matched.CrashOperationID != "" &&
-		(!matched.ExternalCrash || matched.CrashOperationID != request.WriterOperationID) {
+	if request.WriterRetireKind == protocol.WriterRetireKindPrelaunchAbort {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("prelaunch-aborted writer still has a local RootFS session: %w", errdefs.ErrFailedPrecondition)
+	}
+	if matched.CrashOperationID != "" && matched.CrashOperationID != request.WriterOperationID {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS crash fence belongs to another authority operation: %w", errdefs.ErrFailedPrecondition)
 	}
-	netnsPath, err := d.runtimeSlotNetworkPath(matched.Consumer, request.NetNSIdentity)
-	if err != nil {
-		return protocol.NodeCleanupControlProof{}, err
+	netnsPath := ""
+	if matched.Consumer != nil {
+		netnsPath, err = d.runtimeSlotNetworkPath(matched.Consumer, request.NetNSIdentity)
+		if err != nil {
+			return protocol.NodeCleanupControlProof{}, err
+		}
 	}
 	observation, err := d.fenceHostRuntime(ctx, *matched)
 	if err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
-	crashProof, err := d.runtime.FenceLocalRootFSWriter(ctx, matched.Stage, request.WriterOperationID, observation)
-	if err != nil {
-		return protocol.NodeCleanupControlProof{}, err
+	rootFSProofDigest := ""
+	switch request.WriterRetireKind {
+	case protocol.WriterRetireKindPlannedPublish:
+		if matched.Kind != rootfssession.RecoveryPlannedRetire || matched.RetireOperationID != request.WriterOperationID {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("planned RootFS session belongs to another retirement: %w", errdefs.ErrFailedPrecondition)
+		}
+		retired, retireErr := d.runtime.Retire(ctx, matched.Stage, request.WriterOperationID)
+		if retireErr != nil {
+			return protocol.NodeCleanupControlProof{}, retireErr
+		}
+		if len(retired.DetachProof) == 0 {
+			remaining, listErr := d.runtime.RecoverySessions()
+			if listErr != nil {
+				return protocol.NodeCleanupControlProof{}, fmt.Errorf("verify forgotten planned RootFS session: %w", listErr)
+			}
+			stillPresent, matchErr := matchRuntimeSlotCleanupSession(remaining, request)
+			if matchErr != nil {
+				return protocol.NodeCleanupControlProof{}, matchErr
+			}
+			if stillPresent != nil {
+				return protocol.NodeCleanupControlProof{}, fmt.Errorf("planned RootFS session remains after retirement: %w", errdefs.ErrFailedPrecondition)
+			}
+		} else {
+			if err := validatePlannedCleanupResult(retired, matched.Stage, request); err != nil {
+				return protocol.NodeCleanupControlProof{}, err
+			}
+			if len(retired.DetachProof) != sha256.Size || hex.EncodeToString(retired.DetachProof) != request.WriterAuthorityDigest {
+				return protocol.NodeCleanupControlProof{}, fmt.Errorf("planned RootFS detach proof does not match regional authority: %w", errdefs.ErrFailedPrecondition)
+			}
+		}
+		rootFSProofDigest = request.WriterAuthorityDigest
+	case protocol.WriterRetireKindCrashAbandon, protocol.WriterRetireKindCanceled:
+		if matched.CrashOperationID != "" && !matched.ExternalCrash {
+			if request.WriterRetireKind != protocol.WriterRetireKindCrashAbandon {
+				return protocol.NodeCleanupControlProof{}, fmt.Errorf("terminal RootFS crash proof cannot satisfy %s retirement: %w", request.WriterRetireKind, errdefs.ErrFailedPrecondition)
+			}
+			if reclaimErr := d.runtime.ReclaimVerifiedTerminal(ctx, matched.Stage); reclaimErr != nil {
+				return protocol.NodeCleanupControlProof{}, fmt.Errorf("reclaim verified terminal RootFS session: %w", reclaimErr)
+			}
+			rootFSProofDigest = request.WriterAuthorityDigest
+		} else {
+			crashProof, fenceErr := d.runtime.FenceLocalRootFSWriter(ctx, matched.Stage, request.WriterOperationID, observation)
+			if fenceErr != nil {
+				return protocol.NodeCleanupControlProof{}, fenceErr
+			}
+			if proofErr := validateCrashCleanupProof(crashProof, matched.Stage, observation, request); proofErr != nil {
+				return protocol.NodeCleanupControlProof{}, proofErr
+			}
+			crashDigest, digestErr := crashProof.Digest()
+			if digestErr != nil {
+				return protocol.NodeCleanupControlProof{}, fmt.Errorf("digest local RootFS crash proof: %w", digestErr)
+			}
+			rootFSProofDigest = hex.EncodeToString(crashDigest[:])
+		}
+	default:
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("unsupported writer retirement kind %q: %w", request.WriterRetireKind, errdefs.ErrInvalidArgument)
 	}
-	crashDigest, err := crashProof.Digest()
-	if err != nil {
-		return protocol.NodeCleanupControlProof{}, fmt.Errorf("digest local RootFS crash proof: %w", err)
+	if matched.Consumer == nil {
+		if journalRecord == nil {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("unbound RootFS cleanup requires the runtime slot journal: %w", errdefs.ErrFailedPrecondition)
+		}
+		return d.cleanupJournaledRuntimeSlot(ctx, request, *journalRecord, rootFSProofDigest)
 	}
 	if err := d.cleanupRuntimeSlotNetwork(ctx, request, matched.Consumer, request.NetNSIdentity, netnsPath); err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
-	proof := protocol.NodeCleanupControlProof{
-		Version: protocol.NodeCleanupProofVersion, OperationID: request.OperationID,
-		WriterOperationID: request.WriterOperationID, SlotID: request.SlotID,
-		ClusterID: request.ClusterID, AllocationID: request.AllocationID,
-		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
-		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
-		WriterGrantID: request.WriterGrantID, WriterFenceDigest: request.WriterFenceDigest,
-		RootFSCrashOperationID: crashProof.OperationID,
-		RootFSCrashProofDigest: hex.EncodeToString(crashDigest[:]),
-		RunscAbsent:            true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
-	}
+	proof := completedNodeCleanupProof(request, rootFSProofDigest)
 	proof.ProofDigest, err = proof.Digest()
 	if err != nil {
 		return protocol.NodeCleanupControlProof{}, err
@@ -473,10 +522,169 @@ func (d *rootFSSessionDaemon) cleanupWriterRuntimeSlot(
 	return proof, nil
 }
 
+// validatePlannedCleanupResult prevents an adapter from satisfying one
+// regional retirement with the detach result of another local writer.
+func validatePlannedCleanupResult(
+	result rootfssession.RetireResult,
+	stage rootfshandoff.StageRequest,
+	request protocol.NodeCleanupControlRequest,
+) error {
+	if result.Parent != stage.Parent || result.RootFSID != stage.Identity.RootFSID ||
+		result.WriterEpoch != stage.Identity.WriterEpoch || result.OperationID != request.WriterOperationID {
+		return fmt.Errorf("planned RootFS result belongs to another writer operation: %w", errdefs.ErrFailedPrecondition)
+	}
+	return nil
+}
+
+// validateCrashCleanupProof binds every caller-relevant fact in the local
+// crash proof to the durable session and exact regional cleanup request.
+func validateCrashCleanupProof(
+	proof rootfshandoff.CrashFenceProof,
+	stage rootfshandoff.StageRequest,
+	observation crashTaskObservation,
+	request protocol.NodeCleanupControlRequest,
+) error {
+	if err := proof.Validate(); err != nil {
+		return fmt.Errorf("validate local RootFS crash proof: %w", err)
+	}
+	if stage.Generation == nil {
+		return fmt.Errorf("local RootFS crash proof lacks its durable binding: %w", errdefs.ErrFailedPrecondition)
+	}
+	bindingDigest, err := stage.BindingDigest()
+	if err != nil {
+		return fmt.Errorf("digest local RootFS writer binding: %w", err)
+	}
+	if proof.OperationID != request.WriterOperationID ||
+		proof.Parent != stage.Parent || proof.ClaimID != stage.Identity.ClaimID ||
+		proof.WriterGrantID != request.WriterGrantID || proof.WriterEpoch != stage.Identity.WriterEpoch ||
+		proof.BindingVersion != stage.BindingVersion || proof.BindingDigest != hex.EncodeToString(bindingDigest[:]) ||
+		proof.RootFSID != stage.Identity.RootFSID || proof.InitialGeneration != stage.InitialGeneration ||
+		proof.InitialBlockHead != stage.Generation.CurrentBlockHead ||
+		proof.NodeUID != request.NodeUID || proof.BootID != request.NodeBootID ||
+		proof.RuntimeGeneration != stage.Identity.RuntimeGeneration || proof.PodUID != request.AllocationID ||
+		proof.PodSandboxID != stage.Identity.PodSandboxID || proof.ContainerName != protocol.NomadTaskName ||
+		proof.SlotNonce != request.SlotID || proof.ActiveKey != observation.ActiveKey ||
+		proof.ConsumerBound != (observation.ContainerID != "") || proof.ContainerID != observation.ContainerID ||
+		proof.HostMountNamespaceID != observation.HostMountNamespaceID ||
+		proof.ContainerAbsent != observation.ContainerAbsent || proof.TaskAbsent != observation.TaskAbsent ||
+		proof.FrontendSnapshotAbsent != observation.FrontendSnapshotAbsent ||
+		proof.StableMountAbsent != observation.StableMountAbsent {
+		return fmt.Errorf("local RootFS crash proof belongs to another runtime slot: %w", errdefs.ErrFailedPrecondition)
+	}
+	if proof.ConsumerBound {
+		if proof.ActiveKey != request.SlotID || proof.ContainerID != request.RunscContainerID {
+			return fmt.Errorf("local RootFS crash proof belongs to another bound consumer: %w", errdefs.ErrFailedPrecondition)
+		}
+	} else if proof.ActiveKey != stage.Identity.ClaimID || proof.ContainerID != "" {
+		return fmt.Errorf("local RootFS crash proof belongs to another unbound claim: %w", errdefs.ErrFailedPrecondition)
+	}
+	return nil
+}
+
+// matchRuntimeSlotCleanupSession rejects ambiguous ownership before any
+// destructive host operation and returns the only exact writer session.
+func matchRuntimeSlotCleanupSession(
+	sessions []rootfssession.RecoverySession,
+	request protocol.NodeCleanupControlRequest,
+) (*rootfssession.RecoverySession, error) {
+	var matched *rootfssession.RecoverySession
+	for index := range sessions {
+		session := sessions[index]
+		stage := session.Stage
+		consumer := session.Consumer
+		sameIncarnation := stage.Identity.SlotNonce == request.SlotID ||
+			stage.Identity.PodUID == request.AllocationID ||
+			consumer != nil && (consumer.ActiveKey == request.SlotID || consumer.ContainerID == request.RunscContainerID)
+		if stage.Identity.WriterGrantID != request.WriterGrantID {
+			if sameIncarnation {
+				return nil, fmt.Errorf("runtime slot incarnation is owned by another RootFS writer: %w", errdefs.ErrFailedPrecondition)
+			}
+			continue
+		}
+		if matched != nil {
+			return nil, fmt.Errorf("writer grant has multiple local sessions: %w", errdefs.ErrFailedPrecondition)
+		}
+		candidate := session
+		matched = &candidate
+	}
+	return matched, nil
+}
+
+func (d *rootFSSessionDaemon) cleanupJournaledWriterRuntimeSlot(
+	ctx context.Context,
+	request protocol.NodeCleanupControlRequest,
+	record runtimeSlotJournalRecord,
+) (protocol.NodeCleanupControlProof, error) {
+	rootFSProofDigest, err := journaledRootFSAbsenceDigest(request, record.Registration)
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	return d.cleanupJournaledRuntimeSlot(ctx, request, record, rootFSProofDigest)
+}
+
+// journaledRootFSAbsenceDigest binds a forgotten writer's absence to the
+// immutable physical slot registration and terminal regional authority.
+func journaledRootFSAbsenceDigest(
+	request protocol.NodeCleanupControlRequest,
+	registration runtimeSlotJournalRegistration,
+) (string, error) {
+	payload, err := json.Marshal(struct {
+		Version               int    `json:"version"`
+		OperationID           string `json:"operation_id"`
+		WriterOperationID     string `json:"writer_operation_id"`
+		WriterRetireKind      string `json:"writer_retire_kind"`
+		WriterGrantID         string `json:"writer_grant_id"`
+		WriterAuthorityDigest string `json:"writer_authority_digest"`
+		SlotID                string `json:"slot_id"`
+		AllocationID          string `json:"allocation_id"`
+		NodeBootID            string `json:"node_boot_id"`
+		RunscContainerID      string `json:"runsc_container_id"`
+		StableMountID         string `json:"stable_mount_id"`
+		MountNamespaceID      string `json:"mount_namespace_id"`
+	}{
+		Version: protocol.NodeCleanupProofVersion, OperationID: request.OperationID,
+		WriterOperationID: request.WriterOperationID, WriterRetireKind: request.WriterRetireKind,
+		WriterGrantID: request.WriterGrantID, WriterAuthorityDigest: request.WriterAuthorityDigest,
+		SlotID: request.SlotID, AllocationID: request.AllocationID, NodeBootID: request.NodeBootID,
+		RunscContainerID: request.RunscContainerID, StableMountID: registration.StableMountID,
+		MountNamespaceID: registration.MountNamespaceID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode journaled RootFS absence proof: %w", err)
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func completedNodeCleanupProof(
+	request protocol.NodeCleanupControlRequest,
+	rootFSProofDigest string,
+) protocol.NodeCleanupControlProof {
+	return protocol.NodeCleanupControlProof{
+		Version: protocol.NodeCleanupProofVersion, OperationID: request.OperationID,
+		WriterOperationID: request.WriterOperationID, WriterRetireKind: request.WriterRetireKind,
+		SlotID: request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
+		WriterGrantID: request.WriterGrantID, WriterAuthorityDigest: request.WriterAuthorityDigest,
+		RootFSOperationID: request.WriterOperationID, RootFSProofDigest: rootFSProofDigest,
+		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+	}
+}
+
 func (d *rootFSSessionDaemon) cleanupGrantlessRuntimeSlot(
 	ctx context.Context,
 	request protocol.NodeCleanupControlRequest,
 	record runtimeSlotJournalRecord,
+) (protocol.NodeCleanupControlProof, error) {
+	return d.cleanupJournaledRuntimeSlot(ctx, request, record, "")
+}
+
+func (d *rootFSSessionDaemon) cleanupJournaledRuntimeSlot(
+	ctx context.Context,
+	request protocol.NodeCleanupControlRequest,
+	record runtimeSlotJournalRecord,
+	rootFSProofDigest string,
 ) (protocol.NodeCleanupControlProof, error) {
 	registration := record.Registration
 	stableMount, err := d.runtimeSlotStableMountPath(registration)
@@ -509,22 +717,16 @@ func (d *rootFSSessionDaemon) cleanupGrantlessRuntimeSlot(
 	if err := d.cleanupRuntimeSlotNetwork(ctx, request, consumer, request.NetNSIdentity, netnsPath); err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
-	proof := protocol.NodeCleanupControlProof{
-		Version: protocol.NodeCleanupProofVersion, OperationID: request.OperationID,
-		SlotID: request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
-		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
-		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
-		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
-	}
+	proof := completedNodeCleanupProof(request, rootFSProofDigest)
 	proof.ProofDigest, err = proof.Digest()
 	if err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
 	if err := proof.Validate(); err != nil {
-		return protocol.NodeCleanupControlProof{}, fmt.Errorf("validate grantless node cleanup proof: %w", err)
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("validate journaled node cleanup proof: %w", err)
 	}
 	if err := d.journal.CompleteCleanup(request, proof); err != nil {
-		return protocol.NodeCleanupControlProof{}, fmt.Errorf("persist grantless runtime slot cleanup proof: %w", err)
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("persist journaled runtime slot cleanup proof: %w", err)
 	}
 	return proof, nil
 }
@@ -580,12 +782,23 @@ func validateRuntimeSlotCleanupSession(
 ) error {
 	stage := session.Stage
 	consumer := session.Consumer
-	if session.Kind == rootfssession.RecoveryUnavailable || consumer == nil ||
+	if session.Kind == rootfssession.RecoveryUnavailable ||
 		stage.Identity.SlotNonce != request.SlotID || stage.Identity.PodUID != request.AllocationID ||
 		stage.Identity.NodeUID != request.NodeUID || stage.Identity.BootID != request.NodeBootID ||
 		stage.Identity.WriterGrantID != request.WriterGrantID || stage.Identity.ContainerName != protocol.NomadTaskName ||
-		stage.ExpectedPolicyToken.NetNSIdentity != request.NetNSIdentity ||
-		consumer.ActiveKey != request.SlotID || consumer.ContainerID != request.RunscContainerID ||
+		stage.ExpectedPolicyToken.NetNSIdentity != request.NetNSIdentity {
+		return fmt.Errorf("RootFS session does not match the runtime slot incarnation: %w", errdefs.ErrFailedPrecondition)
+	}
+	if request.WriterRetireKind == protocol.WriterRetireKindCanceled {
+		if consumer != nil || session.Kind != rootfssession.RecoveryCrashAbandon {
+			return fmt.Errorf("canceled writer has a consumed RootFS session: %w", errdefs.ErrFailedPrecondition)
+		}
+		return nil
+	}
+	if consumer == nil {
+		return fmt.Errorf("non-canceled writer lacks its RootFS consumer: %w", errdefs.ErrFailedPrecondition)
+	}
+	if consumer.ActiveKey != request.SlotID || consumer.ContainerID != request.RunscContainerID ||
 		consumer.NetNSIdentity != request.NetNSIdentity || consumer.NetworkChain != networkChainName(consumer.ContainerID) ||
 		consumer.NetNSPath == "" {
 		return fmt.Errorf("RootFS session does not match the runtime slot incarnation: %w", errdefs.ErrFailedPrecondition)

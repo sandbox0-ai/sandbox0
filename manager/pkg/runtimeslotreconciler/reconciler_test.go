@@ -206,6 +206,9 @@ func (f *fakeWriter) Complete(_ context.Context, request WriterCompleteRequest) 
 	clone.NodeCleanupDigest = append([]byte(nil), request.NodeCleanupDigest...)
 	f.completes = append(f.completes, clone)
 	f.store.grant.State = sandboxstore.RootFSWriterGrantStateRetired
+	f.store.grant.RetireOperationID = request.OperationID
+	f.store.grant.RetireKind = sandboxstore.RootFSWriterRetireKindCrashAbandon
+	f.store.grant.RetireProofDigest = append([]byte(nil), request.NodeCleanupDigest...)
 	if f.completeLost {
 		f.completeLost = false
 		return WriterFinalizeProof{}, errors.New("writer completion response lost")
@@ -298,11 +301,46 @@ func TestReconcilerFencesCleansRetiresPurgesAndFinalizesClaim(t *testing.T) {
 		t.Fatalf("calls = cleanup %d fence %d complete %d purge %d", len(fixture.node.requests),
 			len(fixture.writer.fences), len(fixture.writer.completes), len(fixture.allocation.purges))
 	}
-	if !bytes.Equal(fixture.node.requests[0].WriterFenceDigest, bytes.Repeat([]byte{0x50}, 32)) ||
+	if !bytes.Equal(fixture.node.requests[0].WriterAuthorityDigest, bytes.Repeat([]byte{0x50}, 32)) ||
 		fixture.node.requests[0].WriterOperationID != fixture.writer.fences[0].OperationID ||
+		fixture.node.requests[0].WriterRetireKind != protocol.WriterRetireKindCrashAbandon ||
 		!bytes.Equal(fixture.writer.completes[0].NodeCleanupDigest, bytes.Repeat([]byte{0x41}, 32)) {
-		t.Fatalf("fence/cleanup binding = node %x writer %x", fixture.node.requests[0].WriterFenceDigest,
+		t.Fatalf("fence/cleanup binding = node %x writer %x", fixture.node.requests[0].WriterAuthorityDigest,
 			fixture.writer.completes[0].NodeCleanupDigest)
+	}
+}
+
+func TestReconcilerCleansPlannedRetiredWriterWithoutReplacingItsAuthority(t *testing.T) {
+	fixture := newReconcileFixture(t, true)
+	fixture.store.slot.State = sandboxstore.RuntimeSlotStateQuiescing
+	fixture.store.slot.HeartbeatExpiresAt = fixture.store.slot.AuthorityObservedAt.Add(time.Minute)
+	fixture.store.grant.State = sandboxstore.RootFSWriterGrantStateRetired
+	fixture.store.grant.RetireOperationID = "planned-retire-1"
+	fixture.store.grant.RetireKind = sandboxstore.RootFSWriterRetireKindPlannedPublish
+	fixture.store.grant.RetireProofDigest = bytes.Repeat([]byte{0x71}, 32)
+
+	result, err := fixture.reconciler.RunOnce(t.Context())
+	if err != nil || result.Completed != 1 {
+		t.Fatalf("RunOnce() = %+v, %v", result, err)
+	}
+	if len(fixture.writer.fences) != 0 || len(fixture.writer.completes) != 0 {
+		t.Fatalf("planned retirement was replaced: fences=%+v completes=%+v", fixture.writer.fences, fixture.writer.completes)
+	}
+	if len(fixture.node.requests) != 1 {
+		t.Fatalf("node cleanup calls = %+v", fixture.node.requests)
+	}
+	request := fixture.node.requests[0]
+	if request.WriterOperationID != fixture.store.grant.RetireOperationID ||
+		request.WriterRetireKind != protocol.WriterRetireKindPlannedPublish ||
+		!bytes.Equal(request.WriterAuthorityDigest, fixture.store.grant.RetireProofDigest) {
+		t.Fatalf("planned node cleanup = %+v", request)
+	}
+	wantOrder := []string{
+		"list", "get-slot", "observe-allocation", "get-grant", "cleanup-node", "get-grant",
+		"purge-allocation", "observe-allocation", "mark-missing", "finalize-slot",
+	}
+	if !reflect.DeepEqual(*fixture.order, wantOrder) {
+		t.Fatalf("operation order = %v, want %v", *fixture.order, wantOrder)
 	}
 }
 
@@ -482,19 +520,6 @@ func TestReconcilerSkipsCandidateWhoseLivenessRecovered(t *testing.T) {
 	}
 	if fixture.store.fenceCalls != 0 || len(fixture.node.requests) != 0 {
 		t.Fatalf("recovered slot was fenced or cleaned")
-	}
-}
-
-func TestReconcilerSkipsStaleCandidateThatBecamePlannedQuiescing(t *testing.T) {
-	fixture := newReconcileFixture(t, true)
-	fixture.store.slot.State = sandboxstore.RuntimeSlotStateQuiescing
-	fixture.store.slot.HeartbeatExpiresAt = fixture.store.slot.AuthorityObservedAt.Add(time.Minute)
-	result, err := fixture.reconciler.RunOnce(context.Background())
-	if err != nil || result.Skipped != 1 {
-		t.Fatalf("RunOnce() = %+v, %v", result, err)
-	}
-	if fixture.store.fenceCalls != 0 || len(fixture.writer.fences) != 0 || len(fixture.node.requests) != 0 {
-		t.Fatalf("planned quiesce was treated as an expired runtime")
 	}
 }
 

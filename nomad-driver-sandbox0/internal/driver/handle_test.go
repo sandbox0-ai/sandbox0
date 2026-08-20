@@ -313,6 +313,13 @@ func (r *fakeRootFSRuntime) ReclaimExternallyRetired(
 	return true, nil
 }
 
+func (r *fakeRootFSRuntime) ReclaimVerifiedTerminal(
+	context.Context,
+	rootfshandoff.StageRequest,
+) error {
+	return nil
+}
+
 func (r *fakeRootFSRuntime) RegisterRuntimeSlot(
 	_ context.Context,
 	registration runtimeSlotJournalRegistration,

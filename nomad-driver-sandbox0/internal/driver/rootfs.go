@@ -576,6 +576,23 @@ func (r *rootfsRuntime) finalizeVerifiedTerminal(request rootfshandoff.StageRequ
 	return r.sessions.ForgetVerifiedTerminal(request.Parent, request.Identity)
 }
 
+// ReclaimVerifiedTerminal removes a compact internal crash session only after
+// the regional authority proves that its exact durable writer binding is
+// terminal. This lets plugin-independent slot cleanup finish a response-loss
+// window without replacing the original crash operation.
+func (r *rootfsRuntime) ReclaimVerifiedTerminal(
+	ctx context.Context,
+	request rootfshandoff.StageRequest,
+) error {
+	if r.authority == nil {
+		return fmt.Errorf("regional writer authority is required for terminal reclaim")
+	}
+	if err := r.authority.VerifyTerminalWriterGrant(ctx, request); err != nil {
+		return fmt.Errorf("verify terminal writer grant: %w", err)
+	}
+	return r.finalizeVerifiedTerminal(request)
+}
+
 // ReclaimExternallyRetired removes large node-local artifacts once the
 // regional controller has made an external crash fence terminal. The compact
 // journal record remains for a bounded retry window after those artifacts are

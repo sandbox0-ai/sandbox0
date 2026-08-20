@@ -66,18 +66,19 @@ type AllocationPurgeRequest struct {
 // NodeCleanupRequest asks ctld or an equivalent root-owned node controller to
 // kill runsc and remove RootFS/network state without using the driver plugin.
 type NodeCleanupRequest struct {
-	OperationID       string
-	WriterOperationID string
-	SlotID            string
-	ClusterID         string
-	AllocationID      string
-	NodeID            string
-	NodeUID           string
-	NodeBootID        string
-	NetNSIdentity     string
-	RunscContainerID  string
-	WriterGrantID     string
-	WriterFenceDigest []byte
+	OperationID           string
+	WriterOperationID     string
+	WriterRetireKind      string
+	SlotID                string
+	ClusterID             string
+	AllocationID          string
+	NodeID                string
+	NodeUID               string
+	NodeBootID            string
+	NetNSIdentity         string
+	RunscContainerID      string
+	WriterGrantID         string
+	WriterAuthorityDigest []byte
 }
 
 // NodeCleanupProof is stable evidence that no node-local runtime, mount, or
@@ -260,6 +261,9 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	ids := operationIDs(slot)
 	var grant *sandboxstore.RootFSWriterGrant
 	var writerFence WriterFenceProof
+	var writerProof WriterFinalizeProof
+	writerRetireKind := ""
+	writerAlreadyTerminal := false
 	if slot.WriterGrantID != "" {
 		grant, err = r.store.GetRootFSWriterGrant(ctx, slot.WriterGrantID)
 		if err != nil {
@@ -268,36 +272,54 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		if err := validateWriterGrant(grant, slot); err != nil {
 			return false, err
 		}
-		writerFence, err = r.writer.Fence(ctx, WriterFenceRequest{
-			OperationID: ids.writer, IssueOperationID: grant.IssueOperationID,
-			SlotID: slot.ID, SandboxID: slot.SandboxID,
-			ClaimID: slot.ClaimID, GrantID: grant.ID, WriterEpoch: grant.WriterEpoch,
-			BindingVersion: grant.BindingVersion, BindingDigest: append([]byte(nil), grant.BindingDigest...),
-			NodeUID: grant.NodeUID, NodeBootID: grant.NodeBootID,
-			InitialGenerationID: grant.InitialGenerationID,
-		})
-		if err != nil {
-			return false, fmt.Errorf("fence writer grant: %w", err)
-		}
-		if err := validateWriterFenceProof(writerFence, grant, ids.writer); err != nil {
-			return false, err
-		}
-		storedGrant, err := r.store.GetRootFSWriterGrant(ctx, slot.WriterGrantID)
-		if err != nil {
-			return false, fmt.Errorf("reload fenced writer grant: %w", err)
-		}
-		if err := validateWriterGrant(storedGrant, slot); err != nil || !writerGrantIdentityEqual(storedGrant, grant) {
-			return false, errors.New("fenced writer grant identity changed")
-		}
-		if storedGrant.State == sandboxstore.RootFSWriterGrantStateIssued ||
-			storedGrant.State == sandboxstore.RootFSWriterGrantStateConsumed {
-			return false, errors.New("writer controller did not persist a renewal fence")
+		if terminalWriterNeedsDirectCleanup(grant, ids.writer) {
+			writerFence, writerProof, writerRetireKind, err = terminalWriterProofs(grant)
+			if err != nil {
+				return false, err
+			}
+			writerAlreadyTerminal = true
+		} else {
+			writerFence, err = r.writer.Fence(ctx, WriterFenceRequest{
+				OperationID: ids.writer, IssueOperationID: grant.IssueOperationID,
+				SlotID: slot.ID, SandboxID: slot.SandboxID,
+				ClaimID: slot.ClaimID, GrantID: grant.ID, WriterEpoch: grant.WriterEpoch,
+				BindingVersion: grant.BindingVersion, BindingDigest: append([]byte(nil), grant.BindingDigest...),
+				NodeUID: grant.NodeUID, NodeBootID: grant.NodeBootID,
+				InitialGenerationID: grant.InitialGenerationID,
+			})
+			if err != nil {
+				return false, fmt.Errorf("fence writer grant: %w", err)
+			}
+			if err := validateWriterFenceProof(writerFence, grant, ids.writer); err != nil {
+				return false, err
+			}
+			storedGrant, err := r.store.GetRootFSWriterGrant(ctx, slot.WriterGrantID)
+			if err != nil {
+				return false, fmt.Errorf("reload fenced writer grant: %w", err)
+			}
+			if err := validateWriterGrant(storedGrant, slot); err != nil || !writerGrantIdentityEqual(storedGrant, grant) {
+				return false, errors.New("fenced writer grant identity changed")
+			}
+			switch storedGrant.State {
+			case sandboxstore.RootFSWriterGrantStateCanceled:
+				writerRetireKind = protocol.WriterRetireKindCanceled
+			case sandboxstore.RootFSWriterGrantStateRetiring:
+				writerRetireKind = protocol.WriterRetireKindCrashAbandon
+			case sandboxstore.RootFSWriterGrantStateRetired:
+				if storedGrant.RetireKind != sandboxstore.RootFSWriterRetireKindCrashAbandon ||
+					storedGrant.RetireOperationID != ids.writer || len(storedGrant.RetireProofDigest) != sha256.Size {
+					return false, errors.New("writer controller returned another terminal retirement")
+				}
+				writerRetireKind = protocol.WriterRetireKindCrashAbandon
+			default:
+				return false, errors.New("writer controller did not persist a renewal fence")
+			}
 		}
 	}
 
 	writerOperationID := ""
 	if grant != nil {
-		writerOperationID = ids.writer
+		writerOperationID = writerFence.OperationID
 	}
 	runscContainerID := slot.RunscContainerID
 	if runscContainerID == "" {
@@ -305,11 +327,12 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	}
 	cleanupProof, err := r.node.Cleanup(ctx, NodeCleanupRequest{
 		OperationID: ids.cleanup, WriterOperationID: writerOperationID,
-		SlotID: slot.ID, ClusterID: slot.ClusterID,
+		WriterRetireKind: writerRetireKind,
+		SlotID:           slot.ID, ClusterID: slot.ClusterID,
 		AllocationID: slot.AllocationID, NodeID: slot.NodeID, NodeUID: slot.NodeUID,
 		NodeBootID: slot.NodeBootID, NetNSIdentity: slot.NetNSIdentity,
 		RunscContainerID: runscContainerID, WriterGrantID: slot.WriterGrantID,
-		WriterFenceDigest: append([]byte(nil), writerFence.ProofDigest...),
+		WriterAuthorityDigest: append([]byte(nil), writerFence.ProofDigest...),
 	})
 	if err != nil {
 		return false, fmt.Errorf("clean node runtime: %w", err)
@@ -318,8 +341,7 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		return false, err
 	}
 
-	var writerProof WriterFinalizeProof
-	if slot.WriterGrantID != "" {
+	if slot.WriterGrantID != "" && !writerAlreadyTerminal {
 		writerProof, err = r.writer.Complete(ctx, WriterCompleteRequest{
 			OperationID: ids.writer, GrantID: grant.ID, SlotID: slot.ID,
 			WriterEpoch: grant.WriterEpoch, WriterFenceDigest: append([]byte(nil), writerFence.ProofDigest...),
@@ -341,6 +363,18 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 		if storedGrant.State != writerProof.State ||
 			(storedGrant.State != sandboxstore.RootFSWriterGrantStateRetired && storedGrant.State != sandboxstore.RootFSWriterGrantStateCanceled) {
 			return false, errors.New("writer finalizer did not persist a terminal grant")
+		}
+	} else if writerAlreadyTerminal {
+		storedGrant, err := r.store.GetRootFSWriterGrant(ctx, slot.WriterGrantID)
+		if err != nil {
+			return false, fmt.Errorf("reload already-terminal writer grant: %w", err)
+		}
+		storedFence, storedProof, storedKind, proofErr := terminalWriterProofs(storedGrant)
+		if proofErr != nil || !writerGrantIdentityEqual(storedGrant, grant) ||
+			storedKind != writerRetireKind || storedFence.OperationID != writerFence.OperationID ||
+			storedProof.State != writerProof.State || !bytes.Equal(storedFence.ProofDigest, writerFence.ProofDigest) ||
+			!bytes.Equal(storedProof.ProofDigest, writerProof.ProofDigest) {
+			return false, errors.New("already-terminal writer authority changed during node cleanup")
 		}
 	}
 
@@ -405,6 +439,9 @@ func runtimeSlotDue(slot *sandboxstore.RuntimeSlot) bool {
 		return false
 	}
 	if slot.State == sandboxstore.RuntimeSlotStateOrphaned {
+		return true
+	}
+	if slot.State == sandboxstore.RuntimeSlotStateQuiescing {
 		return true
 	}
 	if !slot.HeartbeatExpiresAt.After(slot.AuthorityObservedAt) {
@@ -493,6 +530,42 @@ func validateWriterFenceProof(proof WriterFenceProof, grant *sandboxstore.RootFS
 		return errors.New("writer fence proof does not match runtime slot grant")
 	}
 	return validateProof("writer fence", proof.ProofDigest)
+}
+
+func terminalWriterProofs(
+	grant *sandboxstore.RootFSWriterGrant,
+) (WriterFenceProof, WriterFinalizeProof, string, error) {
+	if grant == nil || grant.State != sandboxstore.RootFSWriterGrantStateRetired ||
+		grant.RetireOperationID == "" || strings.TrimSpace(grant.RetireOperationID) != grant.RetireOperationID ||
+		len(grant.RetireOperationID) > 512 || len(grant.RetireProofDigest) != sha256.Size {
+		return WriterFenceProof{}, WriterFinalizeProof{}, "", errors.New("retired writer grant lacks canonical terminal authority proof")
+	}
+	var kind string
+	switch grant.RetireKind {
+	case sandboxstore.RootFSWriterRetireKindCrashAbandon:
+		kind = protocol.WriterRetireKindCrashAbandon
+	case sandboxstore.RootFSWriterRetireKindPlannedPublish:
+		kind = protocol.WriterRetireKindPlannedPublish
+	case sandboxstore.RootFSWriterRetireKindPrelaunchAbort:
+		kind = protocol.WriterRetireKindPrelaunchAbort
+	default:
+		return WriterFenceProof{}, WriterFinalizeProof{}, "", errors.New("retired writer grant has an unsupported retirement kind")
+	}
+	fence := WriterFenceProof{
+		OperationID: grant.RetireOperationID, GrantID: grant.ID,
+		ProofDigest: append([]byte(nil), grant.RetireProofDigest...),
+	}
+	final := WriterFinalizeProof{
+		OperationID: grant.RetireOperationID, GrantID: grant.ID,
+		State: grant.State, ProofDigest: append([]byte(nil), grant.RetireProofDigest...),
+	}
+	return fence, final, kind, nil
+}
+
+func terminalWriterNeedsDirectCleanup(grant *sandboxstore.RootFSWriterGrant, reconcileOperationID string) bool {
+	return grant != nil && grant.State == sandboxstore.RootFSWriterGrantStateRetired &&
+		(grant.RetireKind != sandboxstore.RootFSWriterRetireKindCrashAbandon ||
+			grant.RetireOperationID != reconcileOperationID)
 }
 
 func validateProof(name string, proof []byte) error {

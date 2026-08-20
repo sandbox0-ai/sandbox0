@@ -134,6 +134,10 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, RuntimeSlotStateQuiescing, quiescing.State)
+	candidates, err := store.ListRuntimeSlotsForReconcile(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, candidates, 1)
+	require.Equal(t, claimed.ID, candidates[0].ID, "planned quiesce must be terminally reconcilable before heartbeat expiry")
 
 	observation := bytes.Repeat([]byte{0x77}, 32)
 	orphaned, err := store.MarkRuntimeSlotAllocationMissing(ctx, &MarkRuntimeSlotAllocationMissingRequest{
@@ -147,7 +151,7 @@ func TestRuntimeSlotClaimSurvivesAllocationPurgeIntegration(t *testing.T) {
 	require.Equal(t, "runsc-a", orphaned.RunscContainerID)
 	require.Equal(t, observation, orphaned.OrphanObservationDigest)
 
-	candidates, err := store.ListRuntimeSlotsForReconcile(ctx, 10)
+	candidates, err = store.ListRuntimeSlotsForReconcile(ctx, 10)
 	require.NoError(t, err)
 	require.Len(t, candidates, 1)
 	require.Equal(t, claimed.ID, candidates[0].ID)

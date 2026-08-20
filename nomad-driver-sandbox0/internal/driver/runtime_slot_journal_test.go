@@ -201,16 +201,17 @@ func testRuntimeSlotJournalProof(t *testing.T, request protocol.NodeCleanupContr
 	t.Helper()
 	proof := protocol.NodeCleanupControlProof{
 		Version: protocol.NodeCleanupProofVersion, OperationID: request.OperationID,
-		WriterOperationID: request.WriterOperationID, SlotID: request.SlotID,
+		WriterOperationID: request.WriterOperationID, WriterRetireKind: request.WriterRetireKind,
+		SlotID:    request.SlotID,
 		ClusterID: request.ClusterID, AllocationID: request.AllocationID,
 		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
-		WriterGrantID: request.WriterGrantID, WriterFenceDigest: request.WriterFenceDigest,
+		WriterGrantID: request.WriterGrantID, WriterAuthorityDigest: request.WriterAuthorityDigest,
 		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
 	}
 	if request.WriterGrantID != "" {
-		proof.RootFSCrashOperationID = request.WriterOperationID
-		proof.RootFSCrashProofDigest = strings.Repeat("cd", sha256.Size)
+		proof.RootFSOperationID = request.WriterOperationID
+		proof.RootFSProofDigest = strings.Repeat("cd", sha256.Size)
 	}
 	var err error
 	proof.ProofDigest, err = proof.Digest()

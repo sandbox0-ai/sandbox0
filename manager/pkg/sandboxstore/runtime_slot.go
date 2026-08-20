@@ -834,21 +834,23 @@ func (s *PGSandboxStore) FinalizeRuntimeSlot(ctx context.Context, request *Final
 	})
 }
 
-// ListRuntimeSlotsForReconcile returns claimed or expired physical
-// incarnations without deleting their durable claim and writer identities.
+// ListRuntimeSlotsForReconcile prioritizes orphaned and explicitly quiescing
+// physical incarnations before lease-expired candidates without deleting their
+// durable claim and writer identities.
 func (s *PGSandboxStore) ListRuntimeSlotsForReconcile(ctx context.Context, limit int) ([]RuntimeSlot, error) {
 	if limit <= 0 || limit > MaxRuntimeSlotReconcileLimit {
 		return nil, fmt.Errorf("runtime slot reconcile limit must be between 1 and %d", MaxRuntimeSlotReconcileLimit)
 	}
 	rows, err := s.pool.Query(ctx, runtimeSlotSelectSQL()+`
-		WHERE state = $1
-			OR (state <> $2 AND heartbeat_expires_at <= NOW())
-			OR (state = $3 AND claim_lease_expires_at <= NOW())
+		WHERE state IN ($1, $2)
+			OR (state <> $3 AND heartbeat_expires_at <= NOW())
+			OR (state = $4 AND claim_lease_expires_at <= NOW())
 		ORDER BY
-			CASE WHEN state = $1 THEN 0 ELSE 1 END,
+			CASE WHEN state = $1 THEN 0 WHEN state = $2 THEN 1 ELSE 2 END,
 			heartbeat_expires_at, slot_id
-		LIMIT $4
-	`, RuntimeSlotStateOrphaned, RuntimeSlotStateTerminal, RuntimeSlotStateClaiming, limit)
+		LIMIT $5
+	`, RuntimeSlotStateOrphaned, RuntimeSlotStateQuiescing, RuntimeSlotStateTerminal,
+		RuntimeSlotStateClaiming, limit)
 	if err != nil {
 		return nil, err
 	}

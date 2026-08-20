@@ -26,12 +26,13 @@ func (f *fakeTransport) CleanupRuntimeSlot(
 	f.request = request
 	proof := protocol.NodeCleanupControlProof{
 		Version: protocol.NodeCleanupProofVersion, OperationID: request.OperationID,
-		WriterOperationID: request.WriterOperationID, SlotID: request.SlotID,
+		WriterOperationID: request.WriterOperationID, WriterRetireKind: request.WriterRetireKind,
+		SlotID:    request.SlotID,
 		ClusterID: request.ClusterID, AllocationID: request.AllocationID,
 		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
-		WriterGrantID: request.WriterGrantID, WriterFenceDigest: request.WriterFenceDigest,
-		RootFSCrashOperationID: request.WriterOperationID, RootFSCrashProofDigest: strings.Repeat("cd", 32),
+		WriterGrantID: request.WriterGrantID, WriterAuthorityDigest: request.WriterAuthorityDigest,
+		RootFSOperationID: request.WriterOperationID, RootFSProofDigest: strings.Repeat("cd", 32),
 		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
 	}
 	proof.ProofDigest, _ = proof.Digest()
@@ -59,7 +60,7 @@ func TestControllerDispatchesAndValidatesExactNodeProof(t *testing.T) {
 	if len(first.ProofDigest) != 32 || transport.target != (Target{
 		ClusterID: request.ClusterID, NodeID: request.NodeID,
 		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
-	}) || transport.request.WriterFenceDigest != strings.Repeat("ab", 32) {
+	}) || transport.request.WriterAuthorityDigest != strings.Repeat("ab", 32) {
 		t.Fatalf("proof = %+v target = %+v request = %+v", first, transport.target, transport.request)
 	}
 }
@@ -97,10 +98,11 @@ func TestControllerRejectsWriterProofOnGrantlessCleanup(t *testing.T) {
 
 func testCleanupRequest() runtimeslotreconciler.NodeCleanupRequest {
 	return runtimeslotreconciler.NodeCleanupRequest{
-		OperationID: "cleanup-1", WriterOperationID: "writer-1", SlotID: "slot-1",
+		OperationID: "cleanup-1", WriterOperationID: "writer-1",
+		WriterRetireKind: protocol.WriterRetireKindCrashAbandon, SlotID: "slot-1",
 		ClusterID: "cluster-1", AllocationID: "allocation-1", NodeID: "node-1",
 		NodeUID: "node-uid-1", NodeBootID: "boot-1", NetNSIdentity: "netns-v1:1:2",
 		RunscContainerID: "runsc-1", WriterGrantID: "grant-1",
-		WriterFenceDigest: bytes.Repeat([]byte{0xab}, 32),
+		WriterAuthorityDigest: bytes.Repeat([]byte{0xab}, 32),
 	}
 }

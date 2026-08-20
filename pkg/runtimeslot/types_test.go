@@ -178,21 +178,23 @@ func TestNodeClaimControlRequestValidatesRegionalBinding(t *testing.T) {
 
 func TestNodeCleanupProofBindsExactRequestAndAbsenceFacts(t *testing.T) {
 	request := NodeCleanupControlRequest{
-		OperationID: "cleanup-1", WriterOperationID: "writer-1", SlotID: "slot-1",
+		OperationID: "cleanup-1", WriterOperationID: "writer-1",
+		WriterRetireKind: WriterRetireKindCrashAbandon, SlotID: "slot-1",
 		ClusterID: "cluster-1", AllocationID: "allocation-1", NodeID: "node-1",
 		NodeUID: "node-uid-1", NodeBootID: "boot-1", NetNSIdentity: "netns-v1:1:2",
 		RunscContainerID: "runsc-1", WriterGrantID: "grant-1",
-		WriterFenceDigest: strings.Repeat("ab", 32),
+		WriterAuthorityDigest: strings.Repeat("ab", 32),
 	}
 	require.NoError(t, request.Validate())
 	proof := NodeCleanupControlProof{
 		Version: NodeCleanupProofVersion, OperationID: request.OperationID,
-		WriterOperationID: request.WriterOperationID, SlotID: request.SlotID,
+		WriterOperationID: request.WriterOperationID, WriterRetireKind: request.WriterRetireKind,
+		SlotID:    request.SlotID,
 		ClusterID: request.ClusterID, AllocationID: request.AllocationID,
 		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
-		WriterGrantID: request.WriterGrantID, WriterFenceDigest: request.WriterFenceDigest,
-		RootFSCrashOperationID: request.WriterOperationID, RootFSCrashProofDigest: strings.Repeat("cd", 32),
+		WriterGrantID: request.WriterGrantID, WriterAuthorityDigest: request.WriterAuthorityDigest,
+		RootFSOperationID: request.WriterOperationID, RootFSProofDigest: strings.Repeat("cd", 32),
 		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
 	}
 	digest, err := proof.Digest()
@@ -208,11 +210,33 @@ func TestNodeCleanupProofBindsExactRequestAndAbsenceFacts(t *testing.T) {
 	changed.NetworkPolicyAbsent = false
 	require.ErrorContains(t, changed.Validate(), "physical absence")
 	changed = proof
-	changed.WriterFenceDigest = strings.Repeat("AB", 32)
+	changed.WriterAuthorityDigest = strings.Repeat("AB", 32)
 	require.ErrorContains(t, changed.Validate(), "canonical")
 	changed = proof
-	changed.RootFSCrashOperationID = "another-writer-operation"
+	changed.RootFSOperationID = "another-writer-operation"
 	require.ErrorContains(t, changed.Validate(), "writer operation")
+}
+
+func TestNodeCleanupRequestAcceptsOnlyExplicitWriterRetirementKinds(t *testing.T) {
+	request := NodeCleanupControlRequest{
+		OperationID: "cleanup-1", WriterOperationID: "writer-1",
+		SlotID: "slot-1", ClusterID: "cluster-1", AllocationID: "allocation-1",
+		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+		NetNSIdentity: "netns-v1:1:2", WriterGrantID: "grant-1",
+		WriterAuthorityDigest: strings.Repeat("ab", 32),
+	}
+	for _, kind := range []string{
+		WriterRetireKindCanceled,
+		WriterRetireKindCrashAbandon,
+		WriterRetireKindPlannedPublish,
+		WriterRetireKindPrelaunchAbort,
+	} {
+		candidate := request
+		candidate.WriterRetireKind = kind
+		require.NoError(t, candidate.Validate(), kind)
+	}
+	request.WriterRetireKind = "unknown"
+	require.ErrorContains(t, request.Validate(), "writer_retire_kind")
 }
 
 func testRegistrationRequest() RegistrationRequest {

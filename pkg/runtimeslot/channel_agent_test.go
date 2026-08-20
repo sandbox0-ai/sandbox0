@@ -68,15 +68,16 @@ func (e *testNodeChannelExecutor) Cleanup(
 	proof := NodeCleanupControlProof{
 		Version:     NodeCleanupProofVersion,
 		OperationID: request.OperationID, WriterOperationID: request.WriterOperationID,
-		SlotID: request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+		WriterRetireKind: request.WriterRetireKind,
+		SlotID:           request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
 		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
 		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
-		WriterGrantID: request.WriterGrantID, WriterFenceDigest: request.WriterFenceDigest,
+		WriterGrantID: request.WriterGrantID, WriterAuthorityDigest: request.WriterAuthorityDigest,
 		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
 	}
 	if request.WriterGrantID != "" {
-		proof.RootFSCrashOperationID = request.WriterOperationID
-		proof.RootFSCrashProofDigest = strings.Repeat("5", 64)
+		proof.RootFSOperationID = request.WriterOperationID
+		proof.RootFSProofDigest = strings.Repeat("5", 64)
 	}
 	digest, err := proof.Digest()
 	if err != nil {

@@ -25,7 +25,7 @@ const (
 	NodeCommandReadyControlPath    = "/command-ready"
 	NodeCleanupControlPath         = "/v1/runtime-slots/cleanup"
 	CommandReadyProofVersion       = 1
-	NodeCleanupProofVersion        = 1
+	NodeCleanupProofVersion        = 2
 	NomadProcdPort                 = 49983
 	NomadProcdPortLabel            = "procd"
 	NomadTaskName                  = "slot"
@@ -39,22 +39,31 @@ const (
 	commandReadyPathSuffix = "/command-ready"
 )
 
+const (
+	WriterRetireKindCanceled       = "canceled"
+	WriterRetireKindCrashAbandon   = "crash_abandon"
+	WriterRetireKindPlannedPublish = "planned_publish"
+	WriterRetireKindPrelaunchAbort = "prelaunch_abort"
+)
+
 // NodeCleanupControlRequest identifies one plugin-independent terminal cleanup
-// against the root-owned node session daemon. WriterFenceDigest is evidence
-// from the regional authority; it is never accepted as a liveness assertion.
+// against the root-owned node session daemon. WriterAuthorityDigest is exact
+// evidence from the regional authority; it is never accepted as a liveness
+// assertion without node-local absence checks.
 type NodeCleanupControlRequest struct {
-	OperationID       string `json:"operation_id"`
-	WriterOperationID string `json:"writer_operation_id,omitempty"`
-	SlotID            string `json:"slot_id"`
-	ClusterID         string `json:"cluster_id"`
-	AllocationID      string `json:"allocation_id"`
-	NodeID            string `json:"node_id"`
-	NodeUID           string `json:"node_uid"`
-	NodeBootID        string `json:"node_boot_id"`
-	NetNSIdentity     string `json:"netns_identity"`
-	RunscContainerID  string `json:"runsc_container_id,omitempty"`
-	WriterGrantID     string `json:"writer_grant_id,omitempty"`
-	WriterFenceDigest string `json:"writer_fence_digest,omitempty"`
+	OperationID           string `json:"operation_id"`
+	WriterOperationID     string `json:"writer_operation_id,omitempty"`
+	WriterRetireKind      string `json:"writer_retire_kind,omitempty"`
+	SlotID                string `json:"slot_id"`
+	ClusterID             string `json:"cluster_id"`
+	AllocationID          string `json:"allocation_id"`
+	NodeID                string `json:"node_id"`
+	NodeUID               string `json:"node_uid"`
+	NodeBootID            string `json:"node_boot_id"`
+	NetNSIdentity         string `json:"netns_identity"`
+	RunscContainerID      string `json:"runsc_container_id,omitempty"`
+	WriterGrantID         string `json:"writer_grant_id,omitempty"`
+	WriterAuthorityDigest string `json:"writer_authority_digest,omitempty"`
 }
 
 // Validate rejects incomplete or non-canonical node cleanup identities.
@@ -70,7 +79,7 @@ func (r NodeCleanupControlRequest) Validate() error {
 	}
 	for name, value := range map[string]string{
 		"runsc_container_id": r.RunscContainerID, "writer_grant_id": r.WriterGrantID,
-		"writer_operation_id": r.WriterOperationID,
+		"writer_operation_id": r.WriterOperationID, "writer_retire_kind": r.WriterRetireKind,
 	} {
 		if value != "" {
 			if err := validateRequiredID(name, value); err != nil {
@@ -79,41 +88,45 @@ func (r NodeCleanupControlRequest) Validate() error {
 		}
 	}
 	if r.WriterGrantID == "" {
-		if r.WriterOperationID != "" || r.WriterFenceDigest != "" {
-			return fmt.Errorf("writer operation and fence require a writer grant")
+		if r.WriterOperationID != "" || r.WriterRetireKind != "" || r.WriterAuthorityDigest != "" {
+			return fmt.Errorf("writer operation, retirement kind, and authority proof require a writer grant")
 		}
 		return nil
 	}
 	if r.WriterOperationID == "" {
 		return fmt.Errorf("writer_operation_id is required for a writer grant")
 	}
-	_, err := DecodeProof("writer_fence_digest", r.WriterFenceDigest)
+	if !validWriterRetireKind(r.WriterRetireKind) {
+		return fmt.Errorf("writer_retire_kind is invalid")
+	}
+	_, err := DecodeProof("writer_authority_digest", r.WriterAuthorityDigest)
 	return err
 }
 
 // NodeCleanupControlProof is stable evidence that the exact node incarnation
 // no longer owns runsc, RootFS, or network state.
 type NodeCleanupControlProof struct {
-	Version                int    `json:"version"`
-	OperationID            string `json:"operation_id"`
-	WriterOperationID      string `json:"writer_operation_id,omitempty"`
-	SlotID                 string `json:"slot_id"`
-	ClusterID              string `json:"cluster_id"`
-	AllocationID           string `json:"allocation_id"`
-	NodeID                 string `json:"node_id"`
-	NodeUID                string `json:"node_uid"`
-	NodeBootID             string `json:"node_boot_id"`
-	NetNSIdentity          string `json:"netns_identity"`
-	RunscContainerID       string `json:"runsc_container_id,omitempty"`
-	WriterGrantID          string `json:"writer_grant_id,omitempty"`
-	WriterFenceDigest      string `json:"writer_fence_digest,omitempty"`
-	RootFSCrashOperationID string `json:"rootfs_crash_operation_id,omitempty"`
-	RootFSCrashProofDigest string `json:"rootfs_crash_proof_digest,omitempty"`
-	RunscAbsent            bool   `json:"runsc_absent"`
-	StableMountAbsent      bool   `json:"stable_mount_absent"`
-	RootFSWriterAbsent     bool   `json:"rootfs_writer_absent"`
-	NetworkPolicyAbsent    bool   `json:"network_policy_absent"`
-	ProofDigest            string `json:"proof_digest"`
+	Version               int    `json:"version"`
+	OperationID           string `json:"operation_id"`
+	WriterOperationID     string `json:"writer_operation_id,omitempty"`
+	SlotID                string `json:"slot_id"`
+	ClusterID             string `json:"cluster_id"`
+	AllocationID          string `json:"allocation_id"`
+	NodeID                string `json:"node_id"`
+	NodeUID               string `json:"node_uid"`
+	NodeBootID            string `json:"node_boot_id"`
+	NetNSIdentity         string `json:"netns_identity"`
+	RunscContainerID      string `json:"runsc_container_id,omitempty"`
+	WriterGrantID         string `json:"writer_grant_id,omitempty"`
+	WriterRetireKind      string `json:"writer_retire_kind,omitempty"`
+	WriterAuthorityDigest string `json:"writer_authority_digest,omitempty"`
+	RootFSOperationID     string `json:"rootfs_operation_id,omitempty"`
+	RootFSProofDigest     string `json:"rootfs_proof_digest,omitempty"`
+	RunscAbsent           bool   `json:"runsc_absent"`
+	StableMountAbsent     bool   `json:"stable_mount_absent"`
+	RootFSWriterAbsent    bool   `json:"rootfs_writer_absent"`
+	NetworkPolicyAbsent   bool   `json:"network_policy_absent"`
+	ProofDigest           string `json:"proof_digest"`
 }
 
 // Validate checks every terminal fact and the canonical proof digest.
@@ -129,17 +142,17 @@ func (p NodeCleanupControlProof) Validate() error {
 		return fmt.Errorf("node cleanup proof does not establish physical absence")
 	}
 	if p.WriterGrantID == "" {
-		if p.RootFSCrashOperationID != "" || p.RootFSCrashProofDigest != "" {
-			return fmt.Errorf("RootFS crash proof requires a writer grant")
+		if p.RootFSOperationID != "" || p.RootFSProofDigest != "" {
+			return fmt.Errorf("RootFS absence proof requires a writer grant")
 		}
 	} else {
-		if err := validateRequiredID("rootfs_crash_operation_id", p.RootFSCrashOperationID); err != nil {
+		if err := validateRequiredID("rootfs_operation_id", p.RootFSOperationID); err != nil {
 			return err
 		}
-		if p.RootFSCrashOperationID != p.WriterOperationID {
-			return fmt.Errorf("RootFS crash proof does not match the writer operation")
+		if p.RootFSOperationID != p.WriterOperationID {
+			return fmt.Errorf("RootFS absence proof does not match the writer operation")
 		}
-		if _, err := DecodeProof("rootfs_crash_proof_digest", p.RootFSCrashProofDigest); err != nil {
+		if _, err := DecodeProof("rootfs_proof_digest", p.RootFSProofDigest); err != nil {
 			return err
 		}
 	}
@@ -157,10 +170,21 @@ func (p NodeCleanupControlProof) Validate() error {
 func (p NodeCleanupControlProof) Request() NodeCleanupControlRequest {
 	return NodeCleanupControlRequest{
 		OperationID: p.OperationID, WriterOperationID: p.WriterOperationID,
-		SlotID: p.SlotID, ClusterID: p.ClusterID, AllocationID: p.AllocationID,
+		WriterRetireKind: p.WriterRetireKind,
+		SlotID:           p.SlotID, ClusterID: p.ClusterID, AllocationID: p.AllocationID,
 		NodeID: p.NodeID, NodeUID: p.NodeUID, NodeBootID: p.NodeBootID,
 		NetNSIdentity: p.NetNSIdentity, RunscContainerID: p.RunscContainerID,
-		WriterGrantID: p.WriterGrantID, WriterFenceDigest: p.WriterFenceDigest,
+		WriterGrantID: p.WriterGrantID, WriterAuthorityDigest: p.WriterAuthorityDigest,
+	}
+}
+
+func validWriterRetireKind(kind string) bool {
+	switch kind {
+	case WriterRetireKindCanceled, WriterRetireKindCrashAbandon,
+		WriterRetireKindPlannedPublish, WriterRetireKindPrelaunchAbort:
+		return true
+	default:
+		return false
 	}
 }
 

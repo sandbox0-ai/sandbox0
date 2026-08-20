@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "endpoints": [
+    {
+      "cluster_id": "cluster-uuid",
+      "base_url": "https://nomad-server.example:4646",
+      "ca_file": "/etc/sandbox0/nomad-ca.pem",
+      "client_cert_file": "/etc/sandbox0/nomad-regional-client.pem",
+      "client_key_file": "/etc/sandbox0/nomad-regional-client-key.pem",
+      "token_file": "/run/secrets/sandbox0/nomad-regional.token",
+      "peer_uri_san": "spiffe://sandbox0.example/nomad/server",
+      "timeout": "5s"
+    },
+    {
+      "cluster_id": "cluster-uuid",
+      "node_id": "00000000-0000-0000-0000-000000000000",
+      "base_url": "https://nomad-client.example:4646",
+      "ca_file": "/etc/sandbox0/nomad-ca.pem",
+      "client_cert_file": "/etc/sandbox0/nomad-regional-client.pem",
+      "client_key_file": "/etc/sandbox0/nomad-regional-client-key.pem",
+      "token_file": "/run/secrets/sandbox0/nomad-regional.token",
+      "peer_uri_san": "spiffe://sandbox0.example/nomad/client/00000000-0000-0000-0000-000000000000",
+      "timeout": "5s"
+    }
+  ]
+}

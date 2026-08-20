@@ -248,8 +248,8 @@ func (e Endpoint) validate() error {
 		peerURI.RawQuery != "" || peerURI.Fragment != "" || peerURI.String() != e.PeerURISAN || len(e.PeerURISAN) > 2048 {
 		return fmt.Errorf("Nomad endpoint peer URI SAN must be canonical SPIFFE: %w", errdefs.ErrInvalidArgument)
 	}
-	if e.Timeout < 0 {
-		return fmt.Errorf("Nomad endpoint timeout cannot be negative: %w", errdefs.ErrInvalidArgument)
+	if e.Timeout < 0 || e.Timeout > maxNomadEndpointTimeout {
+		return fmt.Errorf("Nomad endpoint timeout must be non-negative and at most %s: %w", maxNomadEndpointTimeout, errdefs.ErrInvalidArgument)
 	}
 	return nil
 }

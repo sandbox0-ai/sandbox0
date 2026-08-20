@@ -25,6 +25,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,6 +40,7 @@ import (
 	managerauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnode"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/nomad-driver-sandbox0/internal/writerauthority"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
@@ -71,6 +73,11 @@ func main() {
 	runtimeSlotHeartbeatTTL := flag.Duration("runtime-slot-heartbeat-ttl", 30*time.Second, "runtime slot heartbeat TTL")
 	renewalGrace := flag.Duration("renewal-grace", 0, "writer renewal grace; default lease-ttl/2 capped at 5s")
 	allowedClients := flag.String("allowed-clients", "", "comma-separated cn:nodeUID:podUID or cn:nodeUID:podUID:clusterID:nodeID")
+	runtimeSlotTerminal := flag.Bool("runtime-slot-terminal-reconciler", false, "enable plugin-independent runtime slot terminal reconciliation")
+	nomadEndpointsFile := flag.String("runtime-slot-nomad-endpoints-file", "", "strict regional Nomad endpoint catalog JSON path")
+	runtimeSlotReconcileInterval := flag.Duration("runtime-slot-reconcile-interval", runtimeslotreconciler.DefaultWorkerInterval, "delay between terminal reconciliation passes")
+	runtimeSlotReconcileTimeout := flag.Duration("runtime-slot-reconcile-timeout", runtimeslotreconciler.DefaultWorkerPassTimeout, "timeout for one terminal reconciliation pass")
+	runtimeSlotReconcileLimit := flag.Int("runtime-slot-reconcile-limit", 100, "maximum terminal candidates scanned per pass")
 	skipMigrations := flag.Bool("skip-migrations", false, "skip sandbox store migrations")
 	compositeBacklogBytes := flag.Int64("composite-backlog-bytes", sandboxstore.DefaultRootFSCompositeBacklogBytes, "regional PostgreSQL composite descriptor budget")
 	materializerInterval := flag.Duration("materializer-interval", rootfsmaterializer.DefaultInterval, "S3 materializer scan interval")
@@ -145,7 +152,12 @@ func main() {
 			fatal("serve: create materializer: %v", err)
 		}
 		if err := serve(ctx, store, materializer, *address, *certFile, *keyFile, *clientCAFile,
-			*leaseTTL, *renewalGrace, *runtimeSlotHeartbeatTTL, *allowedClients); err != nil {
+			*leaseTTL, *renewalGrace, *runtimeSlotHeartbeatTTL, *allowedClients,
+			runtimeSlotTerminalConfig{
+				Enabled: *runtimeSlotTerminal, NomadEndpointsFile: *nomadEndpointsFile,
+				Interval: *runtimeSlotReconcileInterval, PassTimeout: *runtimeSlotReconcileTimeout,
+				ScanLimit: *runtimeSlotReconcileLimit,
+			}); err != nil {
 			fatal("serve: %v", err)
 		}
 	case "issue":
@@ -315,6 +327,7 @@ func serve(
 	renewalGrace time.Duration,
 	runtimeSlotHeartbeatTTL time.Duration,
 	allowedClients string,
+	terminalConfig runtimeSlotTerminalConfig,
 ) error {
 	if materializer == nil {
 		return fmt.Errorf("rootfs materializer is required")
@@ -353,6 +366,10 @@ func serve(
 		return fmt.Errorf("create runtime slot node channel: %w", err)
 	}
 	defer nodeChannelHub.Close()
+	terminalWorker, err := newRuntimeSlotTerminalWorker(store, nodeChannelHub, terminalConfig)
+	if err != nil {
+		return err
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/internal/v1/rootfs-writer-grants", http.NotFoundHandler())
 	mux.Handle("/internal/v1/rootfs-writer-grants/", newPublishHandler(verifier, store, handler))
@@ -395,7 +412,15 @@ func serve(
 			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientRoots,
 		},
 	}
-	go materializer.Run(ctx, func(result rootfsmaterializer.Result, err error) {
+	defer server.Close()
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("listen for writer authority: %w", err)
+	}
+	defer listener.Close()
+	serviceCtx, cancelService := context.WithCancel(ctx)
+	defer cancelService()
+	go materializer.Run(serviceCtx, func(result rootfsmaterializer.Result, err error) {
 		if err != nil {
 			log.Printf("RootFS materializer: scanned=%d materialized=%d failed=%d error=%v",
 				result.Scanned, result.Materialized, result.Failed, err)
@@ -403,8 +428,32 @@ func serve(
 			log.Printf("RootFS materializer: scanned=%d materialized=%d", result.Scanned, result.Materialized)
 		}
 	})
+	var terminalErr <-chan error
+	var terminalDone <-chan struct{}
+	if terminalWorker != nil {
+		errorsCh := make(chan error, 1)
+		doneCh := make(chan struct{})
+		terminalErr = errorsCh
+		terminalDone = doneCh
+		go func() {
+			defer close(doneCh)
+			errorsCh <- terminalWorker.Run(serviceCtx, logRuntimeSlotTerminalPass)
+		}()
+		log.Printf("Runtime slot terminal reconciler enabled: interval=%s timeout=%s limit=%d",
+			terminalConfig.Interval, terminalConfig.PassTimeout, terminalConfig.ScanLimit)
+	}
+	defer func() {
+		cancelService()
+		if terminalDone != nil {
+			select {
+			case <-terminalDone:
+			case <-time.After(5 * time.Second):
+				log.Printf("Runtime slot terminal worker did not stop within 5s")
+			}
+		}
+	}()
 	errCh := make(chan error, 1)
-	go func() { errCh <- server.ListenAndServeTLS("", "") }()
+	go func() { errCh <- server.ServeTLS(listener, "", "") }()
 	log.Printf("Nomad RootFS writer authority listening on %s", address)
 	select {
 	case <-ctx.Done():
@@ -416,6 +465,25 @@ func serve(
 			return nil
 		}
 		return err
+	case err := <-terminalErr:
+		if serviceCtx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("runtime slot terminal worker stopped: %w", err)
+	}
+}
+
+func logRuntimeSlotTerminalPass(report runtimeslotreconciler.WorkerReport) {
+	if report.Error != nil {
+		log.Printf("Runtime slot terminal reconcile: candidates=%d completed=%d skipped=%d failed=%d duration=%s error=%v",
+			report.Result.Candidates, report.Result.Completed, report.Result.Skipped, report.Result.Failed,
+			report.Duration.Round(time.Millisecond), report.Error)
+		return
+	}
+	if report.Result.Completed > 0 || report.Result.Skipped > 0 {
+		log.Printf("Runtime slot terminal reconcile: candidates=%d completed=%d skipped=%d failed=%d duration=%s",
+			report.Result.Candidates, report.Result.Completed, report.Result.Skipped, report.Result.Failed,
+			report.Duration.Round(time.Millisecond))
 	}
 }
 

@@ -45,3 +45,20 @@ func TestParseAllowedClientsRejectsPartialNodeChannelRoute(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeSlotTerminalWorkerRequiresExplicitEnablement(t *testing.T) {
+	worker, err := newRuntimeSlotTerminalWorker(nil, nil, runtimeSlotTerminalConfig{})
+	if err != nil || worker != nil {
+		t.Fatalf("disabled worker = %v, %v", worker, err)
+	}
+	_, err = newRuntimeSlotTerminalWorker(nil, nil, runtimeSlotTerminalConfig{
+		NomadEndpointsFile: "/etc/sandbox0/nomad-endpoints.json",
+	})
+	if err == nil {
+		t.Fatal("disabled worker accepted a silently ignored endpoint catalog")
+	}
+	_, err = newRuntimeSlotTerminalWorker(nil, nil, runtimeSlotTerminalConfig{Enabled: true})
+	if err == nil {
+		t.Fatal("enabled worker accepted missing dependencies")
+	}
+}

@@ -88,13 +88,16 @@ Implemented:
   responses are strictly correlated, up to 64 independent slot operations run
   concurrently per node without serializing the warm path, and no raw writer
   token is persisted by the regional hub
+- an explicitly enabled, non-overlapping regional terminal worker that scans
+  bounded PostgreSQL batches and assembles the writer fence, outbound node
+  cleanup, direct Nomad stop/client GC, physical-absence observation, and
+  terminal transaction; each pass and delay are bounded and per-slot failures
+  are reported without stopping later passes
 
 Not implemented:
 
-- service wiring of the manager claim and terminal-reconciler packages
+- service wiring of the manager claim planner package
 - manager/ctld orchestration of the procd probe and driver `command-ready` call
-- an authenticated region-to-node mTLS or outbound-stream transport for the
-  manager cleanup adapter (the session-daemon Unix endpoint is node-local only)
 - PostgreSQL-terminal acknowledgement-driven cleanup-proof compaction and
   reconciliation of active node journal registrations whose regional register
   response was ambiguous; current compaction uses a bounded local TTL
@@ -108,8 +111,8 @@ Not implemented:
   multi-node XFS/NBD/runsc validation
 - deployment wiring and privileged race validation for the direct Nomad
   allocation controller, including Nomad server-GC concurrent with client GC
-- manager controller-loop wiring for the node channel and migration of its
-  current sessiond local executor into the final ctld-owned runtime
+- manager claim-loop wiring for the node channel and migration of its current
+  sessiond local executor into the final ctld-owned runtime
 
 ## Writer authority PoC
 
@@ -296,6 +299,27 @@ before stop, while direct client `fs/stat` and allocation GC distinguish
 physical client state from an eventually deleted server record. Both endpoint
 classes require mTLS, a target-bound SPIFFE URI SAN, and a rotating token file;
 ambient proxies and redirects are rejected.
+
+In addition to the authority's normal required flags, `serve` runs this
+terminal path only when explicitly enabled:
+
+```sh
+nomad-writer-authority \
+  --mode=serve \
+  --runtime-slot-terminal-reconciler \
+  --runtime-slot-nomad-endpoints-file=/etc/sandbox0/nomad-endpoints.json \
+  --runtime-slot-reconcile-interval=1s \
+  --runtime-slot-reconcile-timeout=2m \
+  --runtime-slot-reconcile-limit=100
+```
+
+The strict versioned catalog format is shown in
+`example/nomad-endpoints.example.json`. It has one server endpoint per cluster
+and one exact client endpoint per node. Catalog size, endpoint count, request
+timeout, JSON fields, duplicates, and orphan client entries are bounded or
+rejected at startup. Credential contents remain reloadable per request. This
+wiring is still deployment foundation: it does not replace privileged
+server-GC/client-destroy race validation or move the local executor into ctld.
 
 `--max-dirty-tail-bytes` bounds the logical 4 KiB payload represented by one
 session's local branch WAL. Repeated overwrites count because they consume WAL

@@ -18,7 +18,14 @@ const (
 	DefaultRuntimeReadyTimeout = 5 * time.Minute
 	// IdlePodRepairGraceBuffer prevents the warm-pool repair loop from racing a
 	// claim that is still inside its runtime readiness window.
-	IdlePodRepairGraceBuffer = 30 * time.Second
+	IdlePodRepairGraceBuffer        = 30 * time.Second
+	DefaultNodeAuthorityPort        = 8421
+	NodeAuthorityTLSMountDir        = "/etc/sandbox0/node-authority/tls"
+	NodeAuthorityControlMountDir    = "/etc/sandbox0/node-authority/control"
+	NodeAuthorityServerCertPath     = NodeAuthorityTLSMountDir + "/tls.crt"
+	NodeAuthorityServerKeyPath      = NodeAuthorityTLSMountDir + "/tls.key"
+	NodeAuthorityClientCAPath       = NodeAuthorityTLSMountDir + "/client-ca.crt"
+	NodeAuthorityNomadEndpointsPath = NodeAuthorityControlMountDir + "/nomad-endpoints.json"
 )
 
 // ManagerLeaderElectionNameEnv identifies the Lease name shared by manager replicas.
@@ -202,6 +209,7 @@ type ManagerConfig struct {
 	ProcdConfig         ProcdConfig               `yaml:"procd_config" json:"procdConfig"`
 	RootFSMaintenance   RootFSMaintenanceConfig   `yaml:"rootfs_maintenance" json:"-"`
 	RootFSObjectStorage RootFSObjectStorageConfig `yaml:"rootfs_object_storage" json:"-"`
+	NodeAuthority       NodeAuthorityConfig       `yaml:"node_authority" json:"-"`
 
 	// SandboxObservabilityLogsIngestURL is the cluster-gateway internal logs ingest endpoint.
 	// It is injected by infra-operator from spec.sandboxObservability.
@@ -310,6 +318,45 @@ type RootFSObjectStorageConfig struct {
 	ObjectEncryptionKeyPath    string `yaml:"object_encryption_key_path" json:"-"`
 	ObjectEncryptionPassphrase string `yaml:"object_encryption_passphrase" json:"-"`
 	ObjectEncryptionAlgo       string `yaml:"object_encryption_algo" json:"-"`
+}
+
+// NodeAuthorityConfig configures manager's dedicated mTLS listener for
+// trusted node agents. The normal manager HTTP listener never serves these
+// endpoints.
+type NodeAuthorityConfig struct {
+	Enabled       bool                          `yaml:"enabled" json:"-"`
+	ListenHost    string                        `yaml:"listen_host" json:"-"`
+	Port          int                           `yaml:"port" json:"-"`
+	TLSSecretName string                        `yaml:"tls_secret_name" json:"-"`
+	CertFile      string                        `yaml:"cert_file" json:"-"`
+	KeyFile       string                        `yaml:"key_file" json:"-"`
+	ClientCAFile  string                        `yaml:"client_ca_file" json:"-"`
+	Identities    []NodeAuthorityIdentityConfig `yaml:"identities" json:"-"`
+
+	WriterLeaseTTL          metav1.Duration           `yaml:"writer_lease_ttl" json:"-"`
+	WriterRenewalGrace      metav1.Duration           `yaml:"writer_renewal_grace" json:"-"`
+	RuntimeSlotHeartbeatTTL metav1.Duration           `yaml:"runtime_slot_heartbeat_ttl" json:"-"`
+	Terminal                RuntimeSlotTerminalConfig `yaml:"terminal" json:"-"`
+}
+
+// NodeAuthorityIdentityConfig binds one verified certificate common name to
+// an exact node route.
+type NodeAuthorityIdentityConfig struct {
+	CommonName string `yaml:"common_name" json:"-"`
+	ClusterID  string `yaml:"cluster_id" json:"-"`
+	NodeID     string `yaml:"node_id" json:"-"`
+	NodeUID    string `yaml:"node_uid" json:"-"`
+	PodUID     string `yaml:"pod_uid" json:"-"`
+}
+
+// RuntimeSlotTerminalConfig controls active-active terminal reconciliation.
+type RuntimeSlotTerminalConfig struct {
+	Enabled            bool            `yaml:"enabled" json:"-"`
+	ControlSecretName  string          `yaml:"control_secret_name" json:"-"`
+	NomadEndpointsFile string          `yaml:"nomad_endpoints_file" json:"-"`
+	Interval           metav1.Duration `yaml:"interval" json:"-"`
+	PassTimeout        metav1.Duration `yaml:"pass_timeout" json:"-"`
+	ScanLimit          int             `yaml:"scan_limit" json:"-"`
 }
 
 type CredentialEncryptedPGConfig struct {
@@ -590,6 +637,7 @@ func LoadManagerConfig() *ManagerConfig {
 		cfg.RedisTimeout = metav1.Duration{Duration: 100 * time.Millisecond}
 	}
 	applyRootFSMaintenanceDefaults(cfg)
+	applyNodeAuthorityDefaults(cfg)
 	applySandboxObservabilityProducerDefaults(cfg)
 	applyPodTeardownDefaults(cfg)
 	return cfg
@@ -685,6 +733,24 @@ func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.RootFSMaintenance.SquashMaxChainBytes <= 0 {
 		cfg.RootFSMaintenance.SquashMaxChainBytes = 512 * 1024 * 1024
+	}
+}
+
+func applyNodeAuthorityDefaults(cfg *ManagerConfig) {
+	if cfg == nil || !cfg.NodeAuthority.Enabled {
+		return
+	}
+	if cfg.NodeAuthority.Port == 0 {
+		cfg.NodeAuthority.Port = DefaultNodeAuthorityPort
+	}
+	if cfg.NodeAuthority.WriterLeaseTTL.Duration == 0 {
+		cfg.NodeAuthority.WriterLeaseTTL = metav1.Duration{Duration: 30 * time.Second}
+	}
+	if cfg.NodeAuthority.WriterRenewalGrace.Duration == 0 {
+		cfg.NodeAuthority.WriterRenewalGrace = metav1.Duration{Duration: 5 * time.Second}
+	}
+	if cfg.NodeAuthority.RuntimeSlotHeartbeatTTL.Duration == 0 {
+		cfg.NodeAuthority.RuntimeSlotHeartbeatTTL = metav1.Duration{Duration: 30 * time.Second}
 	}
 }
 

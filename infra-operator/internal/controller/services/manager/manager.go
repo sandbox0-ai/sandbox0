@@ -19,11 +19,14 @@ package manager
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiconfig "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
@@ -42,8 +45,10 @@ type Reconciler struct {
 }
 
 const (
-	registryCredentialsPath     = "/etc/sandbox0/registry/.dockerconfigjson"
-	managerConfigHashAnnotation = "infra.sandbox0.ai/manager-config-hash"
+	registryCredentialsPath        = "/etc/sandbox0/registry/.dockerconfigjson"
+	managerConfigHashAnnotation    = "infra.sandbox0.ai/manager-config-hash"
+	nodeAuthorityTLSVolumeName     = "node-authority-tls"
+	nodeAuthorityControlVolumeName = "node-authority-control"
 )
 
 func NewReconciler(resources *common.ResourceManager) *Reconciler {
@@ -158,6 +163,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 			}},
 		})
 	}
+	if config.NodeAuthority.Enabled {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name: nodeAuthorityTLSVolumeName, MountPath: apiconfig.NodeAuthorityTLSMountDir, ReadOnly: true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: nodeAuthorityTLSVolumeName,
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: config.NodeAuthority.TLSSecretName,
+			}},
+		})
+		if config.NodeAuthority.Terminal.Enabled {
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name: nodeAuthorityControlVolumeName, MountPath: apiconfig.NodeAuthorityControlMountDir, ReadOnly: true,
+			})
+			volumes = append(volumes, corev1.Volume{
+				Name: nodeAuthorityControlVolumeName,
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: config.NodeAuthority.Terminal.ControlSecretName,
+				}},
+			})
+		}
+	}
 
 	registrySecretName, registrySecretKey := compiledPlan.ManagerRegistryCredentialsSource()
 	if registrySecretName != "" && registrySecretKey != "" {
@@ -191,6 +218,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		{Name: "http", ContainerPort: httpPort},
 		{Name: "metrics", ContainerPort: metricsPort},
 		{Name: "webhook", ContainerPort: webhookPort},
+	}
+	if config.NodeAuthority.Enabled {
+		containerPorts = append(containerPorts, corev1.ContainerPort{
+			Name: "node-authority", ContainerPort: int32(config.NodeAuthority.Port),
+		})
 	}
 	envVars := []corev1.EnvVar{
 		{Name: "SERVICE", Value: "manager"},
@@ -259,6 +291,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, imageRepo, imageTag string, 
 		common.BuildServicePort("http", servicePort, httpPort, serviceType),
 		common.BuildServicePort("metrics", metricsPort, metricsPort, serviceType),
 		common.BuildServicePort("webhook", webhookPort, webhookPort, serviceType),
+	}
+	if config.NodeAuthority.Enabled {
+		nodeAuthorityPort := int32(config.NodeAuthority.Port)
+		servicePorts = append(servicePorts, common.BuildServicePort(
+			"node-authority", nodeAuthorityPort, nodeAuthorityPort, serviceType,
+		))
 	}
 	if err := validateManagerServicePorts(servicePorts); err != nil {
 		return err
@@ -366,6 +404,78 @@ func (r *Reconciler) buildConfig(ctx context.Context, imageRepo, imageTag string
 	if cfg.ProcdBinImageRef == "" {
 		cfg.ProcdBinImageRef = fmt.Sprintf("%s:%s-procd-bin", imageRepo, imageTag)
 	}
+	if err := applyNodeAuthorityDeploymentConfig(cfg); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
+}
+
+func applyNodeAuthorityDeploymentConfig(cfg *apiconfig.ManagerConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	node := &cfg.NodeAuthority
+	if !node.Enabled {
+		if node.Terminal.Enabled || strings.TrimSpace(node.Terminal.ControlSecretName) != "" ||
+			strings.TrimSpace(node.Terminal.NomadEndpointsFile) != "" {
+			return fmt.Errorf("manager node authority must be enabled when terminal reconciliation is configured")
+		}
+		return nil
+	}
+	if node.Port == 0 {
+		node.Port = apiconfig.DefaultNodeAuthorityPort
+	}
+	if node.Port < 1 || node.Port > 65535 {
+		return fmt.Errorf("manager node authority port must be between 1 and 65535")
+	}
+	if err := validateNodeAuthoritySecretName("TLS", node.TLSSecretName); err != nil {
+		return err
+	}
+	if len(node.Identities) == 0 {
+		return fmt.Errorf("manager node authority requires at least one client identity")
+	}
+	node.CertFile = apiconfig.NodeAuthorityServerCertPath
+	node.KeyFile = apiconfig.NodeAuthorityServerKeyPath
+	node.ClientCAFile = apiconfig.NodeAuthorityClientCAPath
+	if node.WriterLeaseTTL.Duration == 0 {
+		node.WriterLeaseTTL = metav1.Duration{Duration: 30 * time.Second}
+	}
+	if node.WriterRenewalGrace.Duration == 0 {
+		node.WriterRenewalGrace = metav1.Duration{Duration: 5 * time.Second}
+	}
+	if node.RuntimeSlotHeartbeatTTL.Duration == 0 {
+		node.RuntimeSlotHeartbeatTTL = metav1.Duration{Duration: 30 * time.Second}
+	}
+	if !node.Terminal.Enabled {
+		if strings.TrimSpace(node.Terminal.ControlSecretName) != "" ||
+			strings.TrimSpace(node.Terminal.NomadEndpointsFile) != "" {
+			return fmt.Errorf("runtime slot terminal reconciliation must be enabled when control credentials are configured")
+		}
+		return nil
+	}
+	if err := validateNodeAuthoritySecretName("terminal control", node.Terminal.ControlSecretName); err != nil {
+		return err
+	}
+	node.Terminal.NomadEndpointsFile = apiconfig.NodeAuthorityNomadEndpointsPath
+	if node.Terminal.Interval.Duration == 0 {
+		node.Terminal.Interval = metav1.Duration{Duration: time.Second}
+	}
+	if node.Terminal.PassTimeout.Duration == 0 {
+		node.Terminal.PassTimeout = metav1.Duration{Duration: 2 * time.Minute}
+	}
+	if node.Terminal.ScanLimit == 0 {
+		node.Terminal.ScanLimit = 100
+	}
+	return nil
+}
+
+func validateNodeAuthoritySecretName(kind, value string) error {
+	if value == "" {
+		return fmt.Errorf("manager node authority %s secret name is required", kind)
+	}
+	if value != strings.TrimSpace(value) || len(validation.IsDNS1123Subdomain(value)) != 0 {
+		return fmt.Errorf("manager node authority %s secret name must be a canonical DNS subdomain", kind)
+	}
+	return nil
 }

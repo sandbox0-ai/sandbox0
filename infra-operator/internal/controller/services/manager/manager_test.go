@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	config "github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	infrav1alpha1 "github.com/sandbox0-ai/sandbox0/infra-operator/api/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/infra-operator/internal/controller/pkg/common"
 	infraplan "github.com/sandbox0-ai/sandbox0/infra-operator/internal/plan"
@@ -415,7 +416,19 @@ func TestReconcileUsesManagerBudgetAndRootFSObjectStorage(t *testing.T) {
 							},
 						},
 					},
-					Config: &infrav1alpha1.ManagerConfig{HTTPPort: 8080, MetricsPort: 9090},
+					Config: &infrav1alpha1.ManagerConfig{
+						HTTPPort: 8080, MetricsPort: 9090,
+						NodeAuthority: infrav1alpha1.NodeAuthorityConfig{
+							Enabled: true, Port: 8421, TLSSecretName: "manager-node-tls",
+							Identities: []infrav1alpha1.NodeAuthorityIdentityConfig{{
+								CommonName: "node-agent", ClusterID: "cluster-1", NodeID: "node-1",
+								NodeUID: "node-uid-1", PodUID: "agent-1",
+							}},
+							Terminal: infrav1alpha1.RuntimeSlotTerminalConfig{
+								Enabled: true, ControlSecretName: "manager-nomad-control",
+							},
+						},
+					},
 				},
 			},
 		},
@@ -479,6 +492,7 @@ func TestReconcileUsesManagerBudgetAndRootFSObjectStorage(t *testing.T) {
 		t.Fatalf("manager memory limit = %q, want 1Gi", got)
 	}
 	assertManagerObjectEncryptionMount(t, deployment, infra.Name)
+	assertManagerNodeAuthorityDeployment(t, deployment)
 
 	service := &corev1.Service{}
 	if err := reconciler.Resources.Client.Get(ctx, types.NamespacedName{Name: "demo-manager", Namespace: infra.Namespace}, service); err != nil {
@@ -488,6 +502,96 @@ func TestReconcileUsesManagerBudgetAndRootFSObjectStorage(t *testing.T) {
 		if port.Name == "storage-http" {
 			t.Fatalf("retired storage-http port is still exposed: %#v", service.Spec.Ports)
 		}
+	}
+	foundNodeAuthority := false
+	for _, port := range service.Spec.Ports {
+		if port.Name == "node-authority" && port.Port == 8421 && port.TargetPort.IntVal == 8421 {
+			foundNodeAuthority = true
+		}
+	}
+	if !foundNodeAuthority {
+		t.Fatalf("manager node authority Service port is missing: %#v", service.Spec.Ports)
+	}
+}
+
+func assertManagerNodeAuthorityDeployment(t *testing.T, deployment *appsv1.Deployment) {
+	t.Helper()
+	container := deployment.Spec.Template.Spec.Containers[0]
+	foundPort := false
+	foundTLSMount := false
+	foundControlMount := false
+	for _, port := range container.Ports {
+		foundPort = foundPort || (port.Name == "node-authority" && port.ContainerPort == 8421)
+	}
+	for _, mount := range container.VolumeMounts {
+		foundTLSMount = foundTLSMount || (mount.Name == nodeAuthorityTLSVolumeName &&
+			mount.MountPath == "/etc/sandbox0/node-authority/tls" && mount.ReadOnly)
+		foundControlMount = foundControlMount || (mount.Name == nodeAuthorityControlVolumeName &&
+			mount.MountPath == "/etc/sandbox0/node-authority/control" && mount.ReadOnly)
+	}
+	if !foundPort || !foundTLSMount || !foundControlMount {
+		t.Fatalf("manager node authority container wiring is incomplete: ports=%#v mounts=%#v", container.Ports, container.VolumeMounts)
+	}
+	foundTLSVolume := false
+	foundControlVolume := false
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		foundTLSVolume = foundTLSVolume || (volume.Name == nodeAuthorityTLSVolumeName &&
+			volume.Secret != nil && volume.Secret.SecretName == "manager-node-tls")
+		foundControlVolume = foundControlVolume || (volume.Name == nodeAuthorityControlVolumeName &&
+			volume.Secret != nil && volume.Secret.SecretName == "manager-nomad-control")
+	}
+	if !foundTLSVolume || !foundControlVolume {
+		t.Fatalf("manager node authority volumes are incomplete: %#v", deployment.Spec.Template.Spec.Volumes)
+	}
+}
+
+func TestApplyNodeAuthorityDeploymentConfigFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  config.NodeAuthorityConfig
+	}{
+		{name: "terminal without authority", cfg: config.NodeAuthorityConfig{
+			Terminal: config.RuntimeSlotTerminalConfig{Enabled: true},
+		}},
+		{name: "missing TLS secret", cfg: config.NodeAuthorityConfig{Enabled: true}},
+		{name: "missing identity", cfg: config.NodeAuthorityConfig{
+			Enabled: true, TLSSecretName: "manager-node-tls",
+		}},
+		{name: "noncanonical TLS secret", cfg: config.NodeAuthorityConfig{
+			Enabled: true, TLSSecretName: " Manager TLS ",
+		}},
+		{name: "missing terminal control secret", cfg: config.NodeAuthorityConfig{
+			Enabled: true, TLSSecretName: "manager-node-tls",
+			Identities: []config.NodeAuthorityIdentityConfig{{CommonName: "node", NodeUID: "uid", PodUID: "agent"}},
+			Terminal:   config.RuntimeSlotTerminalConfig{Enabled: true},
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.ManagerConfig{NodeAuthority: test.cfg}
+			if err := applyNodeAuthorityDeploymentConfig(cfg); err == nil {
+				t.Fatalf("invalid config was accepted: %#v", cfg.NodeAuthority)
+			}
+		})
+	}
+}
+
+func TestApplyNodeAuthorityDeploymentConfigPinsMountedPaths(t *testing.T) {
+	cfg := &config.ManagerConfig{NodeAuthority: config.NodeAuthorityConfig{
+		Enabled: true, TLSSecretName: "manager-node-tls",
+		Identities: []config.NodeAuthorityIdentityConfig{{CommonName: "node", NodeUID: "uid", PodUID: "agent"}},
+		Terminal:   config.RuntimeSlotTerminalConfig{Enabled: true, ControlSecretName: "nomad-control"},
+	}}
+	if err := applyNodeAuthorityDeploymentConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	node := cfg.NodeAuthority
+	if node.Port != config.DefaultNodeAuthorityPort || node.CertFile != config.NodeAuthorityServerCertPath ||
+		node.KeyFile != config.NodeAuthorityServerKeyPath || node.ClientCAFile != config.NodeAuthorityClientCAPath ||
+		node.Terminal.NomadEndpointsFile != config.NodeAuthorityNomadEndpointsPath ||
+		node.Terminal.Interval.Duration != time.Second || node.Terminal.PassTimeout.Duration != 2*time.Minute ||
+		node.Terminal.ScanLimit != 100 {
+		t.Fatalf("node authority deployment config = %#v", node)
 	}
 }
 

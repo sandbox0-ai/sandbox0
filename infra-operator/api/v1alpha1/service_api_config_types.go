@@ -984,9 +984,73 @@ type ManagerConfig struct {
 	// +optional
 	// +kubebuilder:default={}
 	ProcdConfig ProcdConfig `json:"procdConfig,omitempty"`
+	// NodeAuthority configures the dedicated verified-mTLS listener used by
+	// trusted Nomad node agents.
+	// +optional
+	NodeAuthority NodeAuthorityConfig `json:"nodeAuthority,omitempty"`
 	// +optional
 	// +kubebuilder:default={}
 	Autoscaler AutoscalerConfig `json:"autoscaler,omitempty"`
+}
+
+// NodeAuthorityConfig configures node-to-manager authority traffic.
+type NodeAuthorityConfig struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// +optional
+	ListenHost string `json:"listenHost,omitempty"`
+	// +optional
+	// +kubebuilder:default=8421
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int `json:"port,omitempty"`
+	// TLSSecretName contains tls.crt, tls.key, and client-ca.crt.
+	// +optional
+	TLSSecretName string `json:"tlsSecretName,omitempty"`
+	// +optional
+	// +kubebuilder:validation:MaxItems=4096
+	Identities []NodeAuthorityIdentityConfig `json:"identities,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	WriterLeaseTTL metav1.Duration `json:"writerLeaseTtl,omitempty"`
+	// +optional
+	// +kubebuilder:default="5s"
+	WriterRenewalGrace metav1.Duration `json:"writerRenewalGrace,omitempty"`
+	// +optional
+	// +kubebuilder:default="30s"
+	RuntimeSlotHeartbeatTTL metav1.Duration `json:"runtimeSlotHeartbeatTtl,omitempty"`
+	// +optional
+	Terminal RuntimeSlotTerminalConfig `json:"terminal,omitempty"`
+}
+
+// NodeAuthorityIdentityConfig binds one certificate common name to one node.
+type NodeAuthorityIdentityConfig struct {
+	CommonName string `json:"commonName"`
+	ClusterID  string `json:"clusterId"`
+	NodeID     string `json:"nodeId"`
+	NodeUID    string `json:"nodeUid"`
+	PodUID     string `json:"podUid"`
+}
+
+// RuntimeSlotTerminalConfig configures direct Nomad terminal reconciliation.
+type RuntimeSlotTerminalConfig struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// ControlSecretName contains nomad-endpoints.json and every credential file
+	// referenced by that strict endpoint catalog.
+	// +optional
+	ControlSecretName string `json:"controlSecretName,omitempty"`
+	// +optional
+	// +kubebuilder:default="1s"
+	Interval metav1.Duration `json:"interval,omitempty"`
+	// +optional
+	// +kubebuilder:default="2m"
+	PassTimeout metav1.Duration `json:"passTimeout,omitempty"`
+	// +optional
+	// +kubebuilder:default=100
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	ScanLimit int `json:"scanLimit,omitempty"`
 }
 
 // TeamQuotaLimitConfig configures a region default for teams without an

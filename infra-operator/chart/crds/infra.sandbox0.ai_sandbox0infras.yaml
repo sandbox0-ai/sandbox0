@@ -3775,6 +3775,81 @@ spec:
                           networkPolicyApplyTimeout:
                             default: 30s
                             type: string
+                          nodeAuthority:
+                            description: |-
+                              NodeAuthority configures the dedicated verified-mTLS listener used by
+                              trusted Nomad node agents.
+                            properties:
+                              enabled:
+                                type: boolean
+                              identities:
+                                items:
+                                  description: NodeAuthorityIdentityConfig binds one
+                                    certificate common name to one node.
+                                  properties:
+                                    clusterId:
+                                      type: string
+                                    commonName:
+                                      type: string
+                                    nodeId:
+                                      type: string
+                                    nodeUid:
+                                      type: string
+                                    podUid:
+                                      type: string
+                                  required:
+                                  - clusterId
+                                  - commonName
+                                  - nodeId
+                                  - nodeUid
+                                  - podUid
+                                  type: object
+                                maxItems: 4096
+                                type: array
+                              listenHost:
+                                type: string
+                              port:
+                                default: 8421
+                                maximum: 65535
+                                minimum: 1
+                                type: integer
+                              runtimeSlotHeartbeatTtl:
+                                default: 30s
+                                type: string
+                              terminal:
+                                description: RuntimeSlotTerminalConfig configures
+                                  direct Nomad terminal reconciliation.
+                                properties:
+                                  controlSecretName:
+                                    description: |-
+                                      ControlSecretName contains nomad-endpoints.json and every credential file
+                                      referenced by that strict endpoint catalog.
+                                    type: string
+                                  enabled:
+                                    type: boolean
+                                  interval:
+                                    default: 1s
+                                    type: string
+                                  passTimeout:
+                                    default: 2m
+                                    type: string
+                                  scanLimit:
+                                    default: 100
+                                    maximum: 1000
+                                    minimum: 1
+                                    type: integer
+                                type: object
+                              tlsSecretName:
+                                description: TLSSecretName contains tls.crt, tls.key,
+                                  and client-ca.crt.
+                                type: string
+                              writerLeaseTtl:
+                                default: 30s
+                                type: string
+                              writerRenewalGrace:
+                                default: 5s
+                                type: string
+                            type: object
                           pauseMemoryBufferRatio:
                             default: "1.1"
                             type: string

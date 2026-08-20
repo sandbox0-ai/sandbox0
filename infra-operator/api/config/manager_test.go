@@ -173,6 +173,72 @@ func TestLoadManagerConfigAllowsLeaderElectionOff(t *testing.T) {
 	}
 }
 
+func TestLoadManagerConfigPreservesNodeAuthority(t *testing.T) {
+	path := writeManagerConfigFile(t, `
+node_authority:
+  enabled: true
+  listen_host: 172.16.100.2
+  port: 9444
+  tls_secret_name: manager-node-tls
+  cert_file: /tls/server.crt
+  key_file: /tls/server.key
+  client_ca_file: /tls/client-ca.crt
+  writer_lease_ttl:
+    duration: 20s
+  writer_renewal_grace:
+    duration: 3s
+  runtime_slot_heartbeat_ttl:
+    duration: 25s
+  identities:
+    - common_name: node-agent-1
+      cluster_id: cluster-1
+      node_id: node-1
+      node_uid: node-uid-1
+      pod_uid: agent-1
+  terminal:
+    enabled: true
+    control_secret_name: manager-nomad-control
+    nomad_endpoints_file: /control/nomad.json
+    interval:
+      duration: 2s
+    pass_timeout:
+      duration: 1m
+    scan_limit: 64
+`)
+	cfg, err := loadManagerConfig(path)
+	if err != nil {
+		t.Fatalf("loadManagerConfig: %v", err)
+	}
+	node := cfg.NodeAuthority
+	if !node.Enabled || node.ListenHost != "172.16.100.2" || node.Port != 9444 ||
+		node.TLSSecretName != "manager-node-tls" || node.CertFile != "/tls/server.crt" ||
+		node.WriterLeaseTTL.Duration != 20*time.Second || node.WriterRenewalGrace.Duration != 3*time.Second ||
+		node.RuntimeSlotHeartbeatTTL.Duration != 25*time.Second || len(node.Identities) != 1 {
+		t.Fatalf("node authority config = %#v", node)
+	}
+	if node.Identities[0].NodeUID != "node-uid-1" || node.Terminal.ControlSecretName != "manager-nomad-control" ||
+		node.Terminal.NomadEndpointsFile != "/control/nomad.json" || node.Terminal.Interval.Duration != 2*time.Second ||
+		node.Terminal.PassTimeout.Duration != time.Minute || node.Terminal.ScanLimit != 64 {
+		t.Fatalf("node authority nested config = %#v", node)
+	}
+}
+
+func TestNodeAuthorityDefaultsApplyOnlyWhenEnabled(t *testing.T) {
+	disabled := &ManagerConfig{}
+	applyNodeAuthorityDefaults(disabled)
+	if disabled.NodeAuthority.Port != 0 || disabled.NodeAuthority.WriterLeaseTTL.Duration != 0 {
+		t.Fatalf("disabled node authority acquired defaults: %#v", disabled.NodeAuthority)
+	}
+
+	enabled := &ManagerConfig{NodeAuthority: NodeAuthorityConfig{Enabled: true}}
+	applyNodeAuthorityDefaults(enabled)
+	if enabled.NodeAuthority.Port != 8421 || enabled.NodeAuthority.WriterLeaseTTL.Duration != 30*time.Second ||
+		enabled.NodeAuthority.WriterRenewalGrace.Duration != 5*time.Second ||
+		enabled.NodeAuthority.RuntimeSlotHeartbeatTTL.Duration != 30*time.Second {
+		t.Fatalf("node authority defaults = %#v", enabled.NodeAuthority)
+	}
+}
+
 func writeManagerConfigFile(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "manager.yaml")

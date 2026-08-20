@@ -502,6 +502,33 @@ Examples:
 - `services.manager.config.defaultTeamQuotas` configures region-wide capacity, API request, and network bandwidth defaults; see [Team Quotas](/docs/sandbox/self-hosted/quotas)
 - `network.config.*` also controls proxy ports, policy enforcement, and node-level networking behavior
 
+### Experimental Nomad Node Authority
+
+The manager CRD includes an experimental `nodeAuthority` listener for the in-progress Nomad + gVisor runtime. It is disabled by default and is not a production-ready alternative to the Kubernetes data plane yet. Enabling the listener does not enable Nomad sandbox claims by itself.
+
+The listener is separate from normal manager HTTP, requires verified mTLS, and exposes port `8421` by default. `tlsSecretName` must name a Secret containing `tls.crt`, `tls.key`, and `client-ca.crt`. Each configured identity binds a client-certificate common name to one exact cluster and Nomad node route.
+
+```yaml
+spec:
+    services:
+        manager:
+            config:
+                nodeAuthority:
+                    enabled: true
+                    port: 8421
+                    tlsSecretName: manager-node-authority-tls
+                    identities:
+                        - commonName: node-agent-1
+                          clusterId: cluster-1
+                          nodeId: node-1
+                          nodeUid: node-uid-1
+                          podUid: agent-1
+```
+
+Optional terminal reconciliation additionally requires `terminal.controlSecretName`. That Secret must contain `nomad-endpoints.json` and every CA, client certificate, client key, and ACL-token file referenced by the catalog, using absolute paths below `/etc/sandbox0/node-authority/control`. Every manager replica runs the idempotent terminal scan so the replica holding a node's outbound stream can make progress; PostgreSQL fences and deterministic operation IDs remain authoritative.
+
+Do not enable this route without separately provisioning short-lived node credentials, strict Nomad ACLs, and the node agent. The current static certificate identity catalog is transitional, and the complete regional claim route, cross-replica claim dispatch, privileged multi-node validation, and long-running load gates are still required before production cutover.
+
 For autoscaled sandbox node pools, configure the annotation contract and teardown budgets together:
 
 ```yaml

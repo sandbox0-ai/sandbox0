@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"go.uber.org/zap"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -22,6 +25,7 @@ type managerApp struct {
 	logger                *zap.Logger
 	k8sClient             kubernetes.Interface
 	httpServer            *httpserver.Server
+	nodeAuthority         *nodeauthority.Component
 	informerFactory       informers.SharedInformerFactory
 	crdInformerFactory    externalversions.SharedInformerFactory
 	cacheSyncs            []cache.InformerSynced
@@ -32,6 +36,9 @@ type managerApp struct {
 
 func (a *managerApp) Run() {
 	go startMetricsServer(a.metricsPort, a.logger)
+	if !a.startNodeAuthority() {
+		return
+	}
 
 	a.logger.Info("Starting informers")
 	a.informerFactory.Start(a.ctx.Done())
@@ -73,4 +80,43 @@ func (a *managerApp) Run() {
 	// Give components time to finish their context-driven shutdown paths.
 	time.Sleep(2 * time.Second)
 	a.logger.Info("Manager stopped")
+}
+
+func (a *managerApp) startNodeAuthority() bool {
+	if a.nodeAuthority == nil {
+		return true
+	}
+	errorsCh := make(chan error, 1)
+	go func() { errorsCh <- a.nodeAuthority.RunServer(a.ctx) }()
+	select {
+	case <-a.ctx.Done():
+		return false
+	case err := <-errorsCh:
+		if err != nil {
+			a.logger.Error("Manager node authority failed before becoming ready", zap.Error(err))
+		}
+		a.cancel()
+		return false
+	case <-a.nodeAuthority.Ready():
+		a.logger.Info("Manager node authority listener is ready")
+	}
+	go func() {
+		if err := <-errorsCh; err != nil && !errors.Is(err, context.Canceled) {
+			a.logger.Error("Manager node authority stopped", zap.Error(err))
+			a.cancel()
+		}
+	}()
+	if a.nodeAuthority.TerminalEnabled() {
+		go func() {
+			err := a.nodeAuthority.RunTerminal(a.ctx, func(report runtimeslotreconciler.WorkerReport) {
+				logManagerRuntimeSlotTerminalPass(a.logger, report)
+			})
+			if err != nil && !errors.Is(err, context.Canceled) {
+				a.logger.Error("Runtime slot terminal worker stopped", zap.Error(err))
+				a.cancel()
+			}
+		}()
+		a.logger.Info("Active-active runtime slot terminal reconciler started")
+	}
+	return true
 }

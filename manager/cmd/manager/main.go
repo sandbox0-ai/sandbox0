@@ -184,6 +184,10 @@ func main() {
 		defer meteringDB.Close()
 	}
 	sandboxStore := sandboxstore.NewPGSandboxStore(pool)
+	managerNodeAuthority, err := buildManagerNodeAuthority(cfg, sandboxStore)
+	if err != nil {
+		logger.Fatal("Failed to configure manager node authority", zap.Error(err))
+	}
 	sandboxDeletionWebhookDispatcher := deletionwebhook.NewSandboxDeletionWebhookDispatcher(
 		deletionwebhook.NewSandboxDeletionWebhookOutbox(pool),
 		obsProvider.HTTP.NewClient(httpobs.Config{Timeout: 5 * time.Second}),
@@ -546,6 +550,7 @@ func main() {
 		logger:                logger,
 		k8sClient:             k8sClient,
 		httpServer:            httpServer,
+		nodeAuthority:         managerNodeAuthority,
 		informerFactory:       informerFactory,
 		crdInformerFactory:    crdInformerFactory,
 		metricsPort:           cfg.MetricsPort,

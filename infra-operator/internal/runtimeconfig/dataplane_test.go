@@ -48,6 +48,31 @@ func TestToManagerPreservesProcdBinImageRef(t *testing.T) {
 	}
 }
 
+func TestToManagerPreservesNodeAuthority(t *testing.T) {
+	cfg := ToManager(&infrav1alpha1.ManagerConfig{
+		NodeAuthority: infrav1alpha1.NodeAuthorityConfig{
+			Enabled: true, ListenHost: "172.16.100.2", Port: 8421,
+			TLSSecretName: "manager-node-tls",
+			Identities: []infrav1alpha1.NodeAuthorityIdentityConfig{{
+				CommonName: "node-agent", ClusterID: "cluster-1", NodeID: "node-1",
+				NodeUID: "node-uid-1", PodUID: "agent-1",
+			}},
+			WriterLeaseTTL: metav1.Duration{Duration: 20 * time.Second},
+			Terminal: infrav1alpha1.RuntimeSlotTerminalConfig{
+				Enabled: true, ControlSecretName: "nomad-control", ScanLimit: 64,
+			},
+		},
+	})
+	if !cfg.NodeAuthority.Enabled || cfg.NodeAuthority.ListenHost != "172.16.100.2" ||
+		cfg.NodeAuthority.TLSSecretName != "manager-node-tls" ||
+		cfg.NodeAuthority.WriterLeaseTTL.Duration != 20*time.Second || len(cfg.NodeAuthority.Identities) != 1 ||
+		cfg.NodeAuthority.Identities[0].NodeUID != "node-uid-1" ||
+		!cfg.NodeAuthority.Terminal.Enabled || cfg.NodeAuthority.Terminal.ControlSecretName != "nomad-control" ||
+		cfg.NodeAuthority.Terminal.ScanLimit != 64 {
+		t.Fatalf("node authority config was not preserved: %#v", cfg.NodeAuthority)
+	}
+}
+
 func TestToManagerPreservesExplicitEmptyProcdWebhookOutboxDir(t *testing.T) {
 	outboxDir := ""
 	cfg := ToManager(&infrav1alpha1.ManagerConfig{

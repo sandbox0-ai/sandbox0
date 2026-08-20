@@ -64,8 +64,9 @@ type ClaimPlannerConfig struct {
 	Now            func() time.Time
 }
 
-// Component owns one listener-local node channel registry. The terminal loop
-// can be run under manager leader election while every replica serves mTLS.
+// Component owns one listener-local node channel registry. Every replica may
+// run the terminal loop so the instance holding a node stream can make
+// progress; PostgreSQL fences and deterministic operations serialize effects.
 type Component struct {
 	store    Store
 	hub      *runtimeslotnode.ChannelHub
@@ -172,7 +173,7 @@ func (c *Component) TerminalEnabled() bool {
 }
 
 // RunTerminal waits for listener readiness, then runs the bounded terminal
-// loop. Callers should invoke it only under manager controller leader scope.
+// loop. It is safe to invoke on every manager replica.
 func (c *Component) RunTerminal(
 	ctx context.Context,
 	report func(runtimeslotreconciler.WorkerReport),

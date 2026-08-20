@@ -70,6 +70,21 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 			SessionStateDir:        apiconfig.DefaultSessionStateDir,
 		},
 	}
+	cfg.NodeAuthority = apiconfig.NodeAuthorityConfig{
+		Enabled: spec.NodeAuthority.Enabled, ListenHost: spec.NodeAuthority.ListenHost,
+		Port: spec.NodeAuthority.Port, TLSSecretName: spec.NodeAuthority.TLSSecretName,
+		WriterLeaseTTL:          spec.NodeAuthority.WriterLeaseTTL,
+		WriterRenewalGrace:      spec.NodeAuthority.WriterRenewalGrace,
+		RuntimeSlotHeartbeatTTL: spec.NodeAuthority.RuntimeSlotHeartbeatTTL,
+		Identities:              cloneNodeAuthorityIdentities(spec.NodeAuthority.Identities),
+		Terminal: apiconfig.RuntimeSlotTerminalConfig{
+			Enabled:           spec.NodeAuthority.Terminal.Enabled,
+			ControlSecretName: spec.NodeAuthority.Terminal.ControlSecretName,
+			Interval:          spec.NodeAuthority.Terminal.Interval,
+			PassTimeout:       spec.NodeAuthority.Terminal.PassTimeout,
+			ScanLimit:         spec.NodeAuthority.Terminal.ScanLimit,
+		},
+	}
 	cfg.Autoscaler = apiconfig.AutoscalerConfig{
 		MinScaleInterval:        spec.Autoscaler.MinScaleInterval,
 		ScaleUpFactor:           spec.Autoscaler.ScaleUpFactor,
@@ -80,6 +95,20 @@ func ToManager(spec *infrav1alpha1.ManagerConfig) *apiconfig.ManagerConfig {
 		ScaleDownPercent:        spec.Autoscaler.ScaleDownPercent,
 	}
 	return cfg
+}
+
+func cloneNodeAuthorityIdentities(in []infrav1alpha1.NodeAuthorityIdentityConfig) []apiconfig.NodeAuthorityIdentityConfig {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]apiconfig.NodeAuthorityIdentityConfig, 0, len(in))
+	for _, identity := range in {
+		out = append(out, apiconfig.NodeAuthorityIdentityConfig{
+			CommonName: identity.CommonName, ClusterID: identity.ClusterID,
+			NodeID: identity.NodeID, NodeUID: identity.NodeUID, PodUID: identity.PodUID,
+		})
+	}
+	return out
 }
 
 func cloneTeamQuotaLimitConfigs(in []infrav1alpha1.TeamQuotaLimitConfig) []apiconfig.TeamQuotaLimitConfig {

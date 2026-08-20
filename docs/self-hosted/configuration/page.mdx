@@ -536,6 +536,8 @@ spec:
 
 The claim Secret must contain `runtime-profiles.json` and an exact 32-byte binary `writer-token.key`. The profile catalog strictly maps a public CPU/memory shape to one cluster and one complete runtime compatibility digest; unknown fields, ambiguous resource shapes, mutable image references, and unavailable block-COW base artifacts fail closed. Keep the writer key stable across retries and rollouts.
 
+Nomad mode also requires configured RootFS object storage with atomic conditional-create support. Every manager replica runs the PostgreSQL-to-object-storage composite materializer; immutable object publication completes before the PostgreSQL locator advances, and an object-storage outage leaves the composite tail durable in PostgreSQL for bounded retry.
+
 Terminal reconciliation requires `terminal.controlSecretName`. That Secret must contain `nomad-endpoints.json` and every CA, client certificate, client key, and ACL-token file referenced by the catalog, using absolute paths below `/etc/sandbox0/node-authority/control`. PostgreSQL fences and deterministic operation IDs remain authoritative.
 
 The operator currently rejects `nomad` when manager replicas are not exactly one because node channels are listener-local and cross-replica dispatch is not implemented. This is a transitional correctness guard, not a high-availability production configuration. Do not enable this route without separately provisioning short-lived node credentials, strict Nomad ACLs, the node agent, ready base artifacts, and the remaining credential/app-service projections. Cross-replica channels, complete lifecycle routing, privileged multi-node validation, and long-running load gates are still required before production cutover.

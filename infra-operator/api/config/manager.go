@@ -311,6 +311,9 @@ type RootFSMaintenanceConfig struct {
 	SquashDisabled          bool            `yaml:"squash_disabled" json:"-"`
 	SquashMaxChainDepth     int             `yaml:"squash_max_chain_depth" json:"-"`
 	SquashMaxChainBytes     int64           `yaml:"squash_max_chain_bytes" json:"-"`
+	MaterializerDisabled    bool            `yaml:"materializer_disabled" json:"-"`
+	MaterializerInterval    metav1.Duration `yaml:"materializer_interval" json:"-"`
+	MaterializerScanLimit   int             `yaml:"materializer_scan_limit" json:"-"`
 }
 
 type RootFSObjectStorageConfig struct {
@@ -752,6 +755,12 @@ func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.RootFSMaintenance.SquashMaxChainBytes <= 0 {
 		cfg.RootFSMaintenance.SquashMaxChainBytes = 512 * 1024 * 1024
+	}
+	if cfg.RootFSMaintenance.MaterializerInterval.Duration == 0 {
+		cfg.RootFSMaintenance.MaterializerInterval = metav1.Duration{Duration: time.Second}
+	}
+	if cfg.RootFSMaintenance.MaterializerScanLimit <= 0 {
+		cfg.RootFSMaintenance.MaterializerScanLimit = 1000
 	}
 }
 

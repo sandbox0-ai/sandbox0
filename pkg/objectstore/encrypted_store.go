@@ -113,6 +113,10 @@ func (s *encryptedStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
 	return s.put(key, in, true)
 }
 
+func (s *encryptedStore) supportsConditionalCreate() bool {
+	return s != nil && SupportsConditionalCreate(s.store)
+}
+
 func (s *encryptedStore) put(key string, in io.Reader, conditional bool) (bool, error) {
 	if in == nil {
 		in = bytes.NewReader(nil)

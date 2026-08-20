@@ -9,6 +9,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/generated/informers/externalversions"
 	httpserver "github.com/sandbox0-ai/sandbox0/manager/pkg/http"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"go.uber.org/zap"
 	"k8s.io/client-go/informers"
@@ -26,6 +27,7 @@ type managerApp struct {
 	k8sClient             kubernetes.Interface
 	httpServer            *httpserver.Server
 	nodeAuthority         *nodeauthority.Component
+	rootFSMaterializer    *rootfsmaterializer.Worker
 	informerFactory       informers.SharedInformerFactory
 	crdInformerFactory    externalversions.SharedInformerFactory
 	cacheSyncs            []cache.InformerSynced
@@ -38,6 +40,12 @@ func (a *managerApp) Run() {
 	go startMetricsServer(a.metricsPort, a.logger)
 	if !a.startNodeAuthority() {
 		return
+	}
+	if a.rootFSMaterializer != nil {
+		go a.rootFSMaterializer.Run(a.ctx, func(result rootfsmaterializer.Result, err error) {
+			logRootFSCompositeMaterializerPass(a.logger, result, err)
+		})
+		a.logger.Info("Active-active Rootfs composite materializer started")
 	}
 
 	a.logger.Info("Starting informers")

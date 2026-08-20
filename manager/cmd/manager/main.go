@@ -28,6 +28,7 @@ import (
 	obsmetrics "github.com/sandbox0-ai/sandbox0/manager/pkg/metrics"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaintenance"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
@@ -328,6 +329,21 @@ func main() {
 	if rootFSObjectStoreErr != nil {
 		logger.Warn("Rootfs object cleanup disabled; object store is not configured", zap.Error(rootFSObjectStoreErr))
 	}
+	var rootFSCompositeMaterializerErr error
+	var rootFSCompositeMaterializer *rootfsmaterializer.Worker
+	if rootFSObjectStoreErr == nil {
+		rootFSCompositeMaterializer, rootFSCompositeMaterializerErr = configureRootFSCompositeMaterializer(
+			cfg, sandboxStore, rootFSObjectStore,
+		)
+	} else {
+		rootFSCompositeMaterializerErr = rootFSObjectStoreErr
+	}
+	if rootFSCompositeMaterializerErr != nil {
+		if cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad {
+			logger.Fatal("Nomad RootFS composite materializer is unavailable", zap.Error(rootFSCompositeMaterializerErr))
+		}
+		logger.Warn("Rootfs composite materializer disabled", zap.Error(rootFSCompositeMaterializerErr))
+	}
 	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
 		K8sClient:                   k8sClient,
 		HotClaimK8sClient:           hotClaimK8sClient,
@@ -569,6 +585,7 @@ func main() {
 		k8sClient:             k8sClient,
 		httpServer:            httpServer,
 		nodeAuthority:         managerNodeAuthority,
+		rootFSMaterializer:    rootFSCompositeMaterializer,
 		informerFactory:       informerFactory,
 		crdInformerFactory:    crdInformerFactory,
 		metricsPort:           cfg.MetricsPort,

@@ -119,6 +119,25 @@ func TestEncryptedStoreConditionalCreateDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+func TestSupportsConditionalCreateFollowsStoreWrappers(t *testing.T) {
+	base := NewMemoryStore(t.Name())
+	if !SupportsConditionalCreate(base) || !SupportsConditionalCreate(Prefix(base, "rootfs")) {
+		t.Fatal("conditional memory store capability was lost through prefix wrapper")
+	}
+	nonConditional := objectStoreWithoutConditionalCreate{Store: base}
+	if SupportsConditionalCreate(nonConditional) || SupportsConditionalCreate(Prefix(nonConditional, "rootfs")) {
+		t.Fatal("prefix wrapper invented conditional create capability")
+	}
+	encrypted := Encrypting(nonConditional, EncryptionConfig{
+		Enabled: true, KeyEncryptor: reversibleTestEncryptor{},
+	})
+	if SupportsConditionalCreate(encrypted) {
+		t.Fatal("encryption wrapper invented conditional create capability")
+	}
+}
+
+type objectStoreWithoutConditionalCreate struct{ Store }
+
 type reversibleTestEncryptor struct{}
 
 func (reversibleTestEncryptor) Encrypt(in []byte) ([]byte, error) {

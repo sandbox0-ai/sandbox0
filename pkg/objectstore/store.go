@@ -70,6 +70,24 @@ type ConditionalStore interface {
 	PutIfAbsent(key string, in io.Reader) (created bool, err error)
 }
 
+type conditionalCreateCapability interface {
+	supportsConditionalCreate() bool
+}
+
+// SupportsConditionalCreate follows wrappers instead of relying only on their
+// method set. Wrappers expose PutIfAbsent so callers can use one interface, but
+// they cannot add atomic create semantics to an unsupported provider.
+func SupportsConditionalCreate(store Store) bool {
+	if store == nil {
+		return false
+	}
+	if capability, ok := store.(conditionalCreateCapability); ok {
+		return capability.supportsConditionalCreate()
+	}
+	_, ok := store.(ConditionalStore)
+	return ok
+}
+
 func NormalizeType(raw string) string {
 	value := strings.TrimSpace(strings.ToLower(raw))
 	switch value {
@@ -717,6 +735,10 @@ func (s *prefixedStore) PutIfAbsent(key string, in io.Reader) (bool, error) {
 		return false, fmt.Errorf("underlying object store does not support conditional create")
 	}
 	return conditional.PutIfAbsent(s.prefixed(key), in)
+}
+
+func (s *prefixedStore) supportsConditionalCreate() bool {
+	return s != nil && SupportsConditionalCreate(s.store)
 }
 
 func (s *prefixedStore) Delete(key string) error {

@@ -267,6 +267,15 @@ func TestNodeAuthorityDefaultsApplyOnlyWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestRootFSMaintenanceDefaultsIncludeCompositeMaterializer(t *testing.T) {
+	cfg := &ManagerConfig{}
+	applyRootFSMaintenanceDefaults(cfg)
+	if cfg.RootFSMaintenance.MaterializerInterval.Duration != time.Second ||
+		cfg.RootFSMaintenance.MaterializerScanLimit != 1000 {
+		t.Fatalf("rootfs materializer defaults = %#v", cfg.RootFSMaintenance)
+	}
+}
+
 func writeManagerConfigFile(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "manager.yaml")

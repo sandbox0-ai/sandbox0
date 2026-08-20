@@ -59,6 +59,7 @@ type rootFSSessionDaemon struct {
 	trigger     chan string
 	allocations nomadAllocationSource
 	network     NetworkRuntime
+	journal     *runtimeSlotJournal
 	clusterID   string
 	nodeID      string
 }
@@ -109,6 +110,9 @@ func RunRootFSSessionDaemon(
 	if strings.TrimSpace(nomadConfig.ClusterID) == "" {
 		return fmt.Errorf("cluster_id is required for the session daemon")
 	}
+	if !filepath.IsAbs(strings.TrimSpace(config.RuntimeSlotJournalPath)) || filepath.Clean(config.RuntimeSlotJournalPath) == "/" {
+		return fmt.Errorf("runtime_slot_journal_path must be a non-root absolute path")
+	}
 	for name, value := range map[string]string{
 		"runsc": config.RunscPath, "runsc_root": config.RunscRoot,
 		"rootfs_consumer_mount_root": config.RootFSConsumerMountRoot,
@@ -141,6 +145,14 @@ func RunRootFSSessionDaemon(
 	if allocations == nil {
 		return fmt.Errorf("Nomad allocation authority is required for the session daemon")
 	}
+	journal, err := newRuntimeSlotJournal(config.RuntimeSlotJournalPath, runtimeSlotProofRetention)
+	if err != nil {
+		return err
+	}
+	defer journal.Close()
+	if _, err := journal.Prune(time.Now()); err != nil {
+		return fmt.Errorf("prune runtime slot journal: %w", err)
+	}
 	runtime, err := newEmbeddedRootFSRuntime(&config, logger.Named("runtime"))
 	if err != nil {
 		return err
@@ -149,7 +161,7 @@ func RunRootFSSessionDaemon(
 	daemon := &rootFSSessionDaemon{
 		runtime: runtime, runner: NewCommandRunsc(config), mounter: systemMounter{},
 		config: config, logger: logger, inflight: make(map[string]bool), trigger: make(chan string, 128),
-		allocations: allocations, network: commandNetworkRuntime{},
+		allocations: allocations, network: commandNetworkRuntime{}, journal: journal,
 		clusterID: strings.TrimSpace(nomadConfig.ClusterID), nodeID: strings.TrimSpace(nomadConfig.NodeID),
 	}
 	daemonCtx, cancelDaemon := context.WithCancel(ctx)
@@ -165,9 +177,58 @@ func RunRootFSSessionDaemon(
 	return err
 }
 
-// CleanupRuntimeSlot removes one exact claimed runtime without calling the
-// Nomad task driver or completing regional writer authority. The local RootFS
-// crash proof remains durable, making a lost response byte-stable on retry.
+// RegisterRuntimeSlot records all physical warm-slot identities before the
+// regional authority is allowed to expose that slot as fast-path ready.
+func (d *rootFSSessionDaemon) RegisterRuntimeSlot(
+	_ context.Context,
+	registration runtimeSlotJournalRegistration,
+) error {
+	if err := registration.Validate(); err != nil {
+		return fmt.Errorf("validate runtime slot journal registration: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if d.journal == nil {
+		return fmt.Errorf("runtime slot journal is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if registration.ClusterID != d.clusterID || registration.NodeID != d.nodeID {
+		return fmt.Errorf("runtime slot registration target does not match this daemon: %w", errdefs.ErrPermissionDenied)
+	}
+	stableMount, err := validateRootfsPath(registration.StableMount, d.config.RootFSConsumerMountRoot)
+	if err != nil {
+		return fmt.Errorf("validate runtime slot stable mount: %w: %w", err, errdefs.ErrFailedPrecondition)
+	}
+	stableMountID, err := stableMountIdentity(stableMount)
+	if err != nil {
+		return err
+	}
+	if stableMountID != registration.StableMountID {
+		return fmt.Errorf("runtime slot stable mount incarnation changed: %w", errdefs.ErrFailedPrecondition)
+	}
+	mountNamespaceID, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		return fmt.Errorf("read session daemon mount namespace: %w", err)
+	}
+	if mountNamespaceID != registration.MountNamespaceID {
+		return fmt.Errorf("runtime slot mount namespace differs from sessiond: %w", errdefs.ErrFailedPrecondition)
+	}
+	netnsPath, err := validateExistingPath(registration.NetNSPath, d.config.RootFSConsumerNetNSRoot)
+	if err != nil {
+		return fmt.Errorf("validate runtime slot network namespace: %w: %w", err, errdefs.ErrFailedPrecondition)
+	}
+	netnsIdentity, err := networkNamespaceIdentity(netnsPath)
+	if err != nil {
+		return err
+	}
+	if netnsIdentity != registration.NetNSIdentity {
+		return fmt.Errorf("runtime slot network namespace incarnation changed: %w", errdefs.ErrFailedPrecondition)
+	}
+	registration.StableMount = stableMount
+	registration.NetNSPath = netnsPath
+	return d.journal.Register(registration)
+}
+
+// CleanupRuntimeSlot removes one exact runtime without calling the Nomad task
+// driver or completing regional writer authority. The proof is journaled
+// before it is returned, making a lost response byte-stable on retry.
 func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
 	ctx context.Context,
 	request protocol.NodeCleanupControlRequest,
@@ -178,9 +239,41 @@ func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
 	if d.clusterID == "" || d.nodeID == "" || request.ClusterID != d.clusterID || request.NodeID != d.nodeID {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("node cleanup target does not match this daemon: %w", errdefs.ErrPermissionDenied)
 	}
-	if request.WriterGrantID == "" {
+	var journalRecord *runtimeSlotJournalRecord
+	if d.journal != nil {
+		record, err := d.journal.BeginCleanup(request)
+		if err == nil {
+			journalRecord = &record
+			if record.Proof != nil {
+				return *record.Proof, nil
+			}
+		} else if request.WriterGrantID == "" || !errdefs.IsNotFound(err) {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("begin runtime slot cleanup journal: %w", err)
+		}
+	} else if request.WriterGrantID == "" {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("grantless runtime cleanup requires the node slot journal: %w", errdefs.ErrFailedPrecondition)
 	}
+	if d.runner == nil || d.mounter == nil || d.network == nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("node runtime cleanup dependencies are unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if request.WriterGrantID != "" && d.runtime == nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS runtime cleanup dependency is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if !d.beginReconciliation(request.SlotID) {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("runtime slot cleanup is already in progress: %w", errdefs.ErrUnavailable)
+	}
+	defer d.endReconciliation(request.SlotID)
+	if request.WriterGrantID == "" {
+		return d.cleanupGrantlessRuntimeSlot(ctx, request, *journalRecord)
+	}
+	return d.cleanupWriterRuntimeSlot(ctx, request, journalRecord)
+}
+
+func (d *rootFSSessionDaemon) cleanupWriterRuntimeSlot(
+	ctx context.Context,
+	request protocol.NodeCleanupControlRequest,
+	journalRecord *runtimeSlotJournalRecord,
+) (protocol.NodeCleanupControlProof, error) {
 	sessions, err := d.runtime.RecoverySessions()
 	if err != nil {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("list durable RootFS sessions: %w", err)
@@ -199,10 +292,6 @@ func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
 	if matched == nil {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS writer session is absent: %w", errdefs.ErrNotFound)
 	}
-	if !d.beginReconciliation(matched.Stage.Parent) {
-		return protocol.NodeCleanupControlProof{}, fmt.Errorf("RootFS session cleanup is already in progress: %w", errdefs.ErrUnavailable)
-	}
-	defer d.endReconciliation(matched.Stage.Parent)
 	if err := validateRuntimeSlotCleanupSession(*matched, request); err != nil {
 		return protocol.NodeCleanupControlProof{}, err
 	}
@@ -247,7 +336,113 @@ func (d *rootFSSessionDaemon) CleanupRuntimeSlot(
 	if err := proof.Validate(); err != nil {
 		return protocol.NodeCleanupControlProof{}, fmt.Errorf("validate node cleanup proof: %w", err)
 	}
+	if journalRecord != nil {
+		if err := d.journal.CompleteCleanup(request, proof); err != nil {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("persist runtime slot cleanup proof: %w", err)
+		}
+	}
 	return proof, nil
+}
+
+func (d *rootFSSessionDaemon) cleanupGrantlessRuntimeSlot(
+	ctx context.Context,
+	request protocol.NodeCleanupControlRequest,
+	record runtimeSlotJournalRecord,
+) (protocol.NodeCleanupControlProof, error) {
+	registration := record.Registration
+	stableMount, err := d.runtimeSlotStableMountPath(registration)
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	consumer := &rootfssession.ConsumerRegistration{
+		ContainerID: registration.RunscContainerID, NetNSPath: registration.NetNSPath,
+		NetNSIdentity: registration.NetNSIdentity, NetworkChain: registration.NetworkChain,
+	}
+	netnsPath, err := d.runtimeSlotNetworkPath(consumer, request.NetNSIdentity)
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	if err := d.fenceJournalRunsc(ctx, registration.RunscContainerID); err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	if stableMount != "" {
+		if err := d.mounter.Unmount(stableMount); err != nil {
+			return protocol.NodeCleanupControlProof{}, err
+		}
+		attached, err := hostMountAttached(stableMount)
+		if err != nil {
+			return protocol.NodeCleanupControlProof{}, err
+		}
+		if attached {
+			return protocol.NodeCleanupControlProof{}, fmt.Errorf("stable task root %s remains mounted: %w", stableMount, errdefs.ErrFailedPrecondition)
+		}
+	}
+	if err := d.cleanupRuntimeSlotNetwork(ctx, consumer, request.NetNSIdentity, netnsPath); err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	proof := protocol.NodeCleanupControlProof{
+		Version: protocol.NodeCleanupProofVersion, OperationID: request.OperationID,
+		SlotID: request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+		NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+		NetNSIdentity: request.NetNSIdentity, RunscContainerID: request.RunscContainerID,
+		RunscAbsent: true, StableMountAbsent: true, RootFSWriterAbsent: true, NetworkPolicyAbsent: true,
+	}
+	proof.ProofDigest, err = proof.Digest()
+	if err != nil {
+		return protocol.NodeCleanupControlProof{}, err
+	}
+	if err := proof.Validate(); err != nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("validate grantless node cleanup proof: %w", err)
+	}
+	if err := d.journal.CompleteCleanup(request, proof); err != nil {
+		return protocol.NodeCleanupControlProof{}, fmt.Errorf("persist grantless runtime slot cleanup proof: %w", err)
+	}
+	return proof, nil
+}
+
+func (d *rootFSSessionDaemon) runtimeSlotStableMountPath(
+	registration runtimeSlotJournalRegistration,
+) (string, error) {
+	if _, err := os.Lstat(registration.StableMount); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", fmt.Errorf("inspect runtime slot stable mount: %w", err)
+	}
+	resolved, err := validateExistingPath(registration.StableMount, d.config.RootFSConsumerMountRoot)
+	if err != nil {
+		return "", fmt.Errorf("validate runtime slot stable mount: %w: %w", err, errdefs.ErrFailedPrecondition)
+	}
+	if resolved != registration.StableMount {
+		return "", fmt.Errorf("runtime slot stable mount is not a canonical resolved path: %w", errdefs.ErrFailedPrecondition)
+	}
+	attached, err := hostMountAttached(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !attached {
+		return "", nil
+	}
+	stableMountID, err := stableMountIdentity(resolved)
+	if err != nil {
+		return "", err
+	}
+	if stableMountID != registration.StableMountID {
+		return "", fmt.Errorf("runtime slot stable mount incarnation changed: %w", errdefs.ErrFailedPrecondition)
+	}
+	return resolved, nil
+}
+
+func (d *rootFSSessionDaemon) fenceJournalRunsc(ctx context.Context, containerID string) error {
+	_ = d.runner.Kill(ctx, containerID, "KILL")
+	if err := d.runner.Delete(ctx, containerID, true); err != nil && !errdefs.IsNotFound(err) {
+		return fmt.Errorf("delete journaled gVisor container: %w", err)
+	}
+	if _, err := d.runner.State(ctx, containerID); err == nil {
+		return fmt.Errorf("gVisor container %s remains present: %w", containerID, errdefs.ErrFailedPrecondition)
+	} else if !errdefs.IsNotFound(err) {
+		return fmt.Errorf("attest journaled gVisor container absence: %w", err)
+	}
+	return nil
 }
 
 func validateRuntimeSlotCleanupSession(
@@ -333,6 +528,12 @@ func (d *rootFSSessionDaemon) health(ctx context.Context) error {
 			return fmt.Errorf("read Nomad allocation authority: %w: %w", err, errdefs.ErrUnavailable)
 		}
 	}
+	if d.journal == nil {
+		return fmt.Errorf("runtime slot journal is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if err := d.journal.Ping(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -362,6 +563,11 @@ func (d *rootFSSessionDaemon) reconcileLoop(ctx context.Context) {
 }
 
 func (d *rootFSSessionDaemon) scan(ctx context.Context, onlyParent string) {
+	if d.journal != nil {
+		if _, err := d.journal.Prune(time.Now()); err != nil {
+			d.logger.Error("prune runtime slot cleanup proofs", "error", err)
+		}
+	}
 	sessions, err := d.runtime.RecoverySessions()
 	if err != nil {
 		d.logger.Error("list durable RootFS recovery sessions", "error", err)
@@ -389,16 +595,19 @@ func (d *rootFSSessionDaemon) scan(ctx context.Context, onlyParent string) {
 		if !rootFSSessionNeedsReconciliation(session, now, onlyParent != "" || allocationPurged) {
 			continue
 		}
-		parent := session.Stage.Parent
-		if !d.beginReconciliation(parent) {
+		inflightKey := session.Stage.Identity.SlotNonce
+		if inflightKey == "" {
+			inflightKey = session.Stage.Parent
+		}
+		if !d.beginReconciliation(inflightKey) {
 			continue
 		}
 		d.mu.Lock()
 		d.wg.Add(1)
 		d.mu.Unlock()
-		go func(session rootfssession.RecoverySession) {
+		go func(session rootfssession.RecoverySession, inflightKey string) {
 			defer func() {
-				d.endReconciliation(session.Stage.Parent)
+				d.endReconciliation(inflightKey)
 				d.wg.Done()
 			}()
 			reconcileCtx, cancel := context.WithTimeout(ctx, rootFSSessionReconcileTimeout)
@@ -406,7 +615,7 @@ func (d *rootFSSessionDaemon) scan(ctx context.Context, onlyParent string) {
 			if err := d.reconcile(reconcileCtx, session); err != nil && !errors.Is(err, context.Canceled) {
 				d.logger.Error("reconcile orphan RootFS writer", "parent", session.Stage.Parent, "error", err)
 			}
-		}(session)
+		}(session, inflightKey)
 	}
 }
 

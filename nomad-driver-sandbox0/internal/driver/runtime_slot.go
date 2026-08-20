@@ -59,7 +59,9 @@ type runtimeSlotAuthority interface {
 
 type runtimeSlotLifecycle struct {
 	authority    runtimeSlotAuthority
+	journal      runtimeSlotNodeJournal
 	slotID       string
+	nodeRecord   runtimeSlotJournalRegistration
 	registration protocol.RegistrationRequest
 	readiness    protocol.ReadinessRequest
 	heartbeat    protocol.HeartbeatRequest
@@ -125,6 +127,10 @@ type runtimeSlotClaimNetworkProof struct {
 
 type runtimeSlotStorageHealth interface {
 	Ping(context.Context) error
+}
+
+type runtimeSlotNodeJournal interface {
+	RegisterRuntimeSlot(context.Context, runtimeSlotJournalRegistration) error
 }
 
 func newRuntimeSlotAuthority(config *PluginConfig) (runtimeSlotAuthority, error) {
@@ -296,8 +302,17 @@ func newRuntimeSlotLifecycle(
 	if err != nil {
 		return nil, fmt.Errorf("prove RootFS session-daemon health: %w", err)
 	}
-	if _, err := os.Stat(handle.rootMount); err != nil {
-		return nil, fmt.Errorf("stat runtime slot root mount: %w", err)
+	journal, ok := rootfs.(runtimeSlotNodeJournal)
+	if !ok {
+		return nil, fmt.Errorf("RootFS runtime cannot register the node runtime slot journal")
+	}
+	stableMountID, err := stableMountIdentity(handle.rootMount)
+	if err != nil {
+		return nil, err
+	}
+	mountNamespaceID, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		return nil, fmt.Errorf("read runtime slot mount namespace: %w", err)
 	}
 	compatibility, err := runtimeCompatibilityDigest(config, task, runscVersion)
 	if err != nil {
@@ -344,8 +359,19 @@ func newRuntimeSlotLifecycle(
 	if err := readiness.Validate(); err != nil {
 		return nil, fmt.Errorf("validate runtime slot readiness: %w", err)
 	}
+	nodeRecord := runtimeSlotJournalRegistration{
+		Version: runtimeSlotJournalVersion, SlotID: task.ID, ClusterID: config.RuntimeSlotClusterID,
+		AllocationID: task.AllocID, NodeID: task.NodeID, NodeBootID: bootID,
+		NetNSPath: task.NetworkIsolation.Path, NetNSIdentity: netnsIdentity,
+		NetworkChain: handle.networkChain, RunscContainerID: handle.containerID,
+		StableMount: handle.rootMount, StableMountID: stableMountID, MountNamespaceID: mountNamespaceID,
+	}
+	if err := nodeRecord.Validate(); err != nil {
+		return nil, fmt.Errorf("validate node runtime slot journal registration: %w", err)
+	}
 	return &runtimeSlotLifecycle{
-		authority: authority, slotID: task.ID, registration: registration, readiness: readiness,
+		authority: authority, journal: journal, slotID: task.ID, nodeRecord: nodeRecord,
+		registration: registration, readiness: readiness,
 		heartbeat:    protocol.HeartbeatRequest{AllocationID: task.AllocID, NodeBootID: bootID},
 		procdAddress: procdAddress, logger: handle.logger.Named("runtime-slot"),
 	}, nil
@@ -576,6 +602,9 @@ func (l *runtimeSlotLifecycle) activate(
 	phase slotPhase,
 	newAllocation bool,
 ) (protocol.Observation, error) {
+	if err := l.journal.RegisterRuntimeSlot(ctx, l.nodeRecord); err != nil {
+		return protocol.Observation{}, fmt.Errorf("register node runtime slot journal: %w", err)
+	}
 	observation, err := l.authority.Register(ctx, l.slotID, l.registration)
 	if err != nil {
 		return protocol.Observation{}, fmt.Errorf("register regional runtime slot: %w", err)
@@ -765,15 +794,23 @@ func proofDigest(value any) (string, error) {
 }
 
 func networkNamespaceIdentity(path string) (string, error) {
+	return runtimePathIdentity(path, "netns-v1", "Nomad network namespace")
+}
+
+func stableMountIdentity(path string) (string, error) {
+	return runtimePathIdentity(path, "mount-v1", "runtime slot stable mount")
+}
+
+func runtimePathIdentity(path, version, description string) (string, error) {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) || path == "/" {
-		return "", fmt.Errorf("Nomad network namespace path must be a non-root absolute path")
+		return "", fmt.Errorf("%s path must be a non-root absolute path", description)
 	}
 	var stat unix.Stat_t
 	if err := unix.Stat(path, &stat); err != nil {
-		return "", fmt.Errorf("stat Nomad network namespace: %w", err)
+		return "", fmt.Errorf("stat %s: %w", description, err)
 	}
-	return fmt.Sprintf("netns-v1:%x:%x", uint64(stat.Dev), stat.Ino), nil
+	return fmt.Sprintf("%s:%x:%x", version, uint64(stat.Dev), stat.Ino), nil
 }
 
 func (h *taskHandle) runtimeSlotHeartbeatLost(err error) {

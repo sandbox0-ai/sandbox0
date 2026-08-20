@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 type fakeStore struct {
@@ -434,7 +435,8 @@ func TestReconcilerFinalizesGrantlessClaimOnlyAfterPurge(t *testing.T) {
 	if len(fixture.writer.fences) != 0 || len(fixture.writer.completes) != 0 {
 		t.Fatalf("grantless claim called writer controller: %+v %+v", fixture.writer.fences, fixture.writer.completes)
 	}
-	if len(fixture.node.requests) != 1 || fixture.node.requests[0].WriterOperationID != "" {
+	if len(fixture.node.requests) != 1 || fixture.node.requests[0].WriterOperationID != "" ||
+		fixture.node.requests[0].RunscContainerID != protocol.NomadRunscContainerID(fixture.store.slot.ID) {
 		t.Fatalf("grantless cleanup writer operation = %+v", fixture.node.requests)
 	}
 	purgeIndex := indexOf(*fixture.order, "purge-allocation")

@@ -57,6 +57,7 @@ type fakeRuntimeSlotAuthority struct {
 	heartbeatNotify chan struct{}
 	startingHook    func(protocol.StartingRequest)
 	commandHook     func(protocol.CommandReadyRequest)
+	readyHook       func()
 	claimOperation  string
 	claimID         string
 }
@@ -124,6 +125,9 @@ func (a *fakeRuntimeSlotAuthority) Ready(
 	defer a.mu.Unlock()
 	a.calls = append(a.calls, "ready")
 	a.readiness = append(a.readiness, request)
+	if a.readyHook != nil {
+		a.readyHook()
+	}
 	if a.readyErr != nil {
 		return protocol.Observation{}, a.readyErr
 	}
@@ -330,6 +334,12 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 func TestStartTaskRegistersReadyRuntimeSlotBeforeReturning(t *testing.T) {
 	fixture := newRuntimeSlotPluginFixture(t)
 	fixture.authority.heartbeatTTL = 300 * time.Millisecond
+	journalReady := false
+	fixture.authority.readyHook = func() {
+		fixture.rootfs.mu.Lock()
+		journalReady = len(fixture.rootfs.journalRecords) == 1
+		fixture.rootfs.mu.Unlock()
+	}
 
 	handle, _, err := fixture.plugin.StartTask(fixture.task)
 	if err != nil {
@@ -341,6 +351,17 @@ func TestStartTaskRegistersReadyRuntimeSlotBeforeReturning(t *testing.T) {
 	}
 	if len(registrations) != 1 || len(readiness) != 1 {
 		t.Fatalf("registrations = %d, readiness = %d, want one each", len(registrations), len(readiness))
+	}
+	if !journalReady {
+		t.Fatal("regional readiness preceded durable node runtime-slot registration")
+	}
+	fixture.rootfs.mu.Lock()
+	nodeRecords := append([]runtimeSlotJournalRegistration(nil), fixture.rootfs.journalRecords...)
+	fixture.rootfs.mu.Unlock()
+	if len(nodeRecords) != 1 || nodeRecords[0].SlotID != fixture.task.ID ||
+		nodeRecords[0].RunscContainerID != protocol.NomadRunscContainerID(fixture.task.ID) ||
+		nodeRecords[0].StableMountID == "" || nodeRecords[0].MountNamespaceID == "" {
+		t.Fatalf("node runtime-slot registrations = %+v", nodeRecords)
 	}
 	registration := registrations[0]
 	if registration.ClusterID != "cluster-1" || registration.AllocationID != fixture.task.AllocID ||
@@ -457,6 +478,18 @@ func TestStartTaskRejectsUnaddressableNomadProcdBeforeRegistration(t *testing.T)
 				t.Fatalf("authority calls = %v, invalid task was registered", calls)
 			}
 		})
+	}
+}
+
+func TestStartTaskDoesNotExposeSlotWhenNodeJournalFails(t *testing.T) {
+	fixture := newRuntimeSlotPluginFixture(t)
+	fixture.rootfs.journalErr = fmtErrorUnavailable("journal unavailable")
+	if _, _, err := fixture.plugin.StartTask(fixture.task); err == nil {
+		t.Fatal("StartTask() accepted an unjournaled runtime slot")
+	}
+	calls, _, _, _ := fixture.authority.snapshot()
+	if len(calls) != 0 {
+		t.Fatalf("authority calls = %v, unjournaled slot reached region", calls)
 	}
 }
 

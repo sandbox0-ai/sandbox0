@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 const defaultLimit = 100
@@ -298,12 +299,16 @@ func (r *Reconciler) reconcile(ctx context.Context, slotID string) (bool, error)
 	if grant != nil {
 		writerOperationID = ids.writer
 	}
+	runscContainerID := slot.RunscContainerID
+	if runscContainerID == "" {
+		runscContainerID = protocol.NomadRunscContainerID(slot.ID)
+	}
 	cleanupProof, err := r.node.Cleanup(ctx, NodeCleanupRequest{
 		OperationID: ids.cleanup, WriterOperationID: writerOperationID,
 		SlotID: slot.ID, ClusterID: slot.ClusterID,
 		AllocationID: slot.AllocationID, NodeID: slot.NodeID, NodeUID: slot.NodeUID,
 		NodeBootID: slot.NodeBootID, NetNSIdentity: slot.NetNSIdentity,
-		RunscContainerID: slot.RunscContainerID, WriterGrantID: slot.WriterGrantID,
+		RunscContainerID: runscContainerID, WriterGrantID: slot.WriterGrantID,
 		WriterFenceDigest: append([]byte(nil), writerFence.ProofDigest...),
 	})
 	if err != nil {

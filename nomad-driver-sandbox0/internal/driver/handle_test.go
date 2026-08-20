@@ -172,6 +172,8 @@ type fakeRootFSRuntime struct {
 	retireCalls      int
 	crashCalls       int
 	externalReclaims int
+	journalRecords   []runtimeSlotJournalRegistration
+	journalErr       error
 	lastParent       string
 	lastOperation    string
 	leaseLoss        func(error)
@@ -309,6 +311,16 @@ func (r *fakeRootFSRuntime) ReclaimExternallyRetired(
 	r.externalReclaims++
 	r.mu.Unlock()
 	return true, nil
+}
+
+func (r *fakeRootFSRuntime) RegisterRuntimeSlot(
+	_ context.Context,
+	registration runtimeSlotJournalRegistration,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.journalRecords = append(r.journalRecords, registration)
+	return r.journalErr
 }
 
 func (r *fakeRootFSRuntime) snapshot() (ensureCalls, retireCalls int, parent, operation string) {

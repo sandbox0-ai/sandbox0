@@ -34,16 +34,20 @@ import (
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
-const rootFSSessionRPCMaxBytes = 2 << 20
+const (
+	rootFSSessionRPCMaxBytes       = 2 << 20
+	runtimeSlotJournalRegisterPath = "/v1/runtime-slots/register"
+)
 
 type rootFSSessionRPCRequest struct {
-	Stage       rootfshandoff.StageRequest                 `json:"stage"`
-	Consumer    RootFSConsumerRequest                      `json:"consumer,omitempty"`
-	Lease       RootFSConsumerLease                        `json:"lease,omitempty"`
-	Fork        rootfshandoff.RunningForkCheckpointRequest `json:"fork,omitempty"`
-	OperationID string                                     `json:"operation_id,omitempty"`
-	Observation crashTaskObservation                       `json:"observation,omitempty"`
-	SlotCleanup protocol.NodeCleanupControlRequest         `json:"slot_cleanup,omitempty"`
+	Stage        rootfshandoff.StageRequest                 `json:"stage"`
+	Consumer     RootFSConsumerRequest                      `json:"consumer,omitempty"`
+	Lease        RootFSConsumerLease                        `json:"lease,omitempty"`
+	Fork         rootfshandoff.RunningForkCheckpointRequest `json:"fork,omitempty"`
+	OperationID  string                                     `json:"operation_id,omitempty"`
+	Observation  crashTaskObservation                       `json:"observation,omitempty"`
+	SlotRegister runtimeSlotJournalRegistration             `json:"slot_register,omitempty"`
+	SlotCleanup  protocol.NodeCleanupControlRequest         `json:"slot_cleanup,omitempty"`
 }
 
 type rootFSSessionRPCResponse struct {
@@ -62,6 +66,7 @@ type rootFSSessionClient struct {
 }
 
 type runtimeSlotCleaner interface {
+	RegisterRuntimeSlot(context.Context, runtimeSlotJournalRegistration) error
 	CleanupRuntimeSlot(context.Context, protocol.NodeCleanupControlRequest) (protocol.NodeCleanupControlProof, error)
 }
 
@@ -193,6 +198,14 @@ func (c *rootFSSessionClient) CleanupRuntimeSlot(
 		)
 	}
 	return response.SlotCleanup, nil
+}
+
+func (c *rootFSSessionClient) RegisterRuntimeSlot(
+	ctx context.Context,
+	registration runtimeSlotJournalRegistration,
+) error {
+	var response rootFSSessionRPCResponse
+	return c.call(ctx, runtimeSlotJournalRegisterPath, rootFSSessionRPCRequest{SlotRegister: registration}, &response)
 }
 
 func (c *rootFSSessionClient) call(
@@ -353,6 +366,12 @@ func rootFSSessionRPCHandler(
 		}
 		proof, err := cleaner.CleanupRuntimeSlot(ctx, request.SlotCleanup)
 		return rootFSSessionRPCResponse{SlotCleanup: proof}, err
+	})
+	handle(runtimeSlotJournalRegisterPath, func(ctx context.Context, request rootFSSessionRPCRequest) (rootFSSessionRPCResponse, error) {
+		if cleaner == nil {
+			return rootFSSessionRPCResponse{}, fmt.Errorf("runtime slot journal is unavailable: %w", errdefs.ErrUnavailable)
+		}
+		return rootFSSessionRPCResponse{}, cleaner.RegisterRuntimeSlot(ctx, request.SlotRegister)
 	})
 	return mux
 }

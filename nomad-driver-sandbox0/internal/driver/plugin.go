@@ -194,6 +194,7 @@ type PluginConfig struct {
 	RuntimeSlotEnabled        bool   `codec:"runtime_slot_enabled"`
 	RuntimeSlotClusterID      string `codec:"runtime_slot_cluster_id"`
 	RuntimeSlotNodeBootIDFile string `codec:"runtime_slot_node_boot_id_file"`
+	RuntimeSlotJournalPath    string `codec:"runtime_slot_journal_path"`
 }
 
 // TaskConfig is the per-allocation driver configuration.

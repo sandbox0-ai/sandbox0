@@ -200,6 +200,7 @@ func TestManagerExternalCrashFenceCannotBeAdoptedByLocalAuthority(t *testing.T) 
 	require.Len(t, recovery, 1)
 	require.True(t, recovery[0].ExternalCrash)
 	require.Equal(t, "regional-writer-operation", recovery[0].CrashOperationID)
+	require.False(t, recovery[0].CrashRequestedAt.IsZero())
 
 	_, err = manager.CrashFence(request.WithoutWriterGrantToken(), "regional-writer-operation")
 	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)

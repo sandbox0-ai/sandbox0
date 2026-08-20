@@ -66,6 +66,14 @@ Implemented:
   mount artifacts are reclaimed after regional retirement
 - symlink-resolved allow-listing of the persisted Nomad network namespace path
   and inode-incarnation verification before node cleanup enters that namespace
+- durable node-local registration of the deterministic runsc ID, stable mount,
+  network namespace incarnation, and network chain before regional readiness
+- plugin-independent cleanup of warm/grantless slots, with the exact cleanup
+  request and absence proof persisted before destructive work and response
+  respectively; byte-stable proof replay survives a session-daemon restart
+- bounded node cleanup-proof retention (24 hours) and delayed compact external
+  RootFS-fence retention (48 hours); Bolt page-reuse tests cover two 10,000-slot
+  proof churn cycles without proportional second-cycle file growth
 
 Not implemented:
 
@@ -73,9 +81,9 @@ Not implemented:
 - manager/ctld orchestration of the procd probe and driver `command-ready` call
 - an authenticated region-to-node mTLS or outbound-stream transport for the
   manager cleanup adapter (the session-daemon Unix endpoint is node-local only)
-- a node runtime-slot journal for grantless warm/prelaunch cleanup and terminal
-  proof acknowledgement/compaction; current cleanup requires a claimed RootFS
-  writer and retains its compact external-fence record for retry safety
+- PostgreSQL-terminal acknowledgement-driven cleanup-proof compaction and
+  reconciliation of active node journal registrations whose regional register
+  response was ambiguous; current compaction uses a bounded local TTL
 - production remote-block service and cross-node device ownership
 - full network-policy incarnation-token persistence
 - procd first-command-ready accounting
@@ -216,7 +224,9 @@ Production RootFS mode runs `nomad-rootfs-sessiond` as a separate root system
 service before Nomad. Pass the regional data-plane cluster ID through
 `--cluster-id`, the full Nomad node UUID through `--nomad-node-id`, and a token
 with `node:read,namespace:read-job` through
-`--nomad-token-file`. The daemon reads object credentials from
+`--nomad-token-file`. Keep `--runtime-slot-journal` on node-local durable
+storage (the default is `/var/lib/sandbox0/runtime-slots.db`). The daemon reads
+object credentials from
 `SANDBOX0_ROOTFS_OBJECT_ACCESS_KEY` and
 `SANDBOX0_ROOTFS_OBJECT_SECRET_KEY`; do not place them in Nomad plugin HCL.
 The driver fingerprint remains unhealthy until the daemon socket, durable
@@ -228,13 +238,22 @@ the configured root and namespace path, persists only the canonical path, and
 binds its device/inode identity. Cleanup rejects a symlink escape or replaced
 namespace before invoking `nsenter`.
 
-The daemon exposes `PUT /v1/runtime-slots/cleanup` only through its mode-`0600`
-Unix socket. It is a node execution primitive, not a region-reachable
-transport. A production deployment still needs an authenticated node agent or
-outbound stream that routes the manager adapter to the trusted cluster, node,
-node UID, and boot ID. The current primitive handles claimed writer-backed
-slots only; warm and grantless prelaunch cleanup must wait for the durable node
-slot journal rather than guessing from a missing RootFS session.
+The daemon exposes private runtime-slot registration and
+`PUT /v1/runtime-slots/cleanup` only through its mode-`0600` Unix socket.
+Before regional readiness, the task driver registers the deterministic
+physical identities so sessiond can later clean a warm slot without the plugin
+or a RootFS writer session. Cleanup persists the exact request before touching
+runsc, mounts, or network state and persists its absence proof before replying.
+Completed proofs expire after 24 hours and compact external RootFS fences after
+48 hours. These TTLs bound local state but are not a PostgreSQL terminal
+acknowledgement protocol; unresolved active registrations are not yet compacted
+automatically.
+
+The Unix API is a node execution primitive, not a region-reachable transport.
+A production deployment still needs an authenticated node agent or outbound
+stream that routes the manager adapter to the trusted cluster, node, node UID,
+and boot ID. The 10,000-slot Bolt test proves local page reuse only; it does not
+constitute the required privileged, multi-node, end-to-end 24-hour soak.
 
 `--max-dirty-tail-bytes` bounds the logical 4 KiB payload represented by one
 session's local branch WAL. Repeated overwrites count because they consume WAL

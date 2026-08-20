@@ -578,7 +578,8 @@ func (r *rootfsRuntime) finalizeVerifiedTerminal(request rootfshandoff.StageRequ
 
 // ReclaimExternallyRetired removes large node-local artifacts once the
 // regional controller has made an external crash fence terminal. The compact
-// journal record remains so an ambiguous node-cleanup response is retryable.
+// journal record remains for a bounded retry window after those artifacts are
+// gone.
 func (r *rootfsRuntime) ReclaimExternallyRetired(
 	ctx context.Context,
 	request rootfshandoff.StageRequest,
@@ -592,8 +593,30 @@ func (r *rootfsRuntime) ReclaimExternallyRetired(
 		}
 		return false, fmt.Errorf("verify externally retired writer grant: %w", err)
 	}
+	sessions, err := r.sessions.RecoverySessions()
+	if err != nil {
+		return false, fmt.Errorf("inspect external RootFS crash fence: %w", err)
+	}
+	var matched *rootfssession.RecoverySession
+	for index := range sessions {
+		if sessions[index].Stage.Parent == request.Parent {
+			candidate := sessions[index]
+			matched = &candidate
+			break
+		}
+	}
+	if matched != nil && (!matched.ExternalCrash || matched.Stage.Identity.RootFSID != request.Identity.RootFSID ||
+		matched.Stage.Identity.WriterEpoch != request.Identity.WriterEpoch) {
+		return false, fmt.Errorf("external RootFS crash fence belongs to another writer: %w", errdefs.ErrFailedPrecondition)
+	}
 	if err := r.sessions.ReclaimTerminalArtifacts(request.Parent, request.Identity); err != nil && !errdefs.IsNotFound(err) {
 		return false, fmt.Errorf("reclaim externally retired RootFS artifacts: %w", err)
+	}
+	if matched != nil && !matched.CrashRequestedAt.IsZero() &&
+		!time.Now().Before(matched.CrashRequestedAt.Add(2*runtimeSlotProofRetention)) {
+		if err := r.sessions.ForgetVerifiedTerminal(request.Parent, request.Identity); err != nil {
+			return false, fmt.Errorf("forget expired external RootFS proof: %w", err)
+		}
 	}
 	return true, nil
 }

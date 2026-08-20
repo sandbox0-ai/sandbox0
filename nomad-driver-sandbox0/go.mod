@@ -13,6 +13,7 @@ require (
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/sandbox0-ai/sandbox0 v0.0.0
 	github.com/stretchr/testify v1.11.1
+	go.etcd.io/bbolt v1.4.3
 	golang.org/x/sys v0.40.0
 )
 
@@ -161,7 +162,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zclconf/go-cty v1.17.0 // indirect
-	go.etcd.io/bbolt v1.4.3 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.39.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect

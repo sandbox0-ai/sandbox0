@@ -61,6 +61,7 @@ func main() {
 	flag.StringVar(&nomadConfig.CAFile, "nomad-ca", "", "Nomad HTTPS CA file")
 	flag.StringVar(&nomadConfig.CertFile, "nomad-cert", "", "Nomad HTTPS client certificate")
 	flag.StringVar(&nomadConfig.KeyFile, "nomad-key", "", "Nomad HTTPS client key")
+	flag.StringVar(&config.RuntimeSlotJournalPath, "runtime-slot-journal", "/var/lib/sandbox0/runtime-slots.db", "durable runtime slot cleanup journal")
 	flag.Parse()
 
 	config.RootFSEnabled = true

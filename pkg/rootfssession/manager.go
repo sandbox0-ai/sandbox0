@@ -198,6 +198,7 @@ type RecoverySession struct {
 	State             string
 	RetireOperationID string
 	CrashOperationID  string
+	CrashRequestedAt  time.Time
 	ExternalCrash     bool
 	BranchRemoved     bool
 	Live              bool
@@ -805,6 +806,11 @@ func (m *Manager) RecoverySessions() ([]RecoverySession, error) {
 			if current.CrashFence != nil {
 				recovery.CrashOperationID = current.CrashFence.OperationID
 				recovery.ExternalCrash = current.CrashFence.External
+				requestedAt, err := time.Parse(time.RFC3339Nano, current.CrashFence.RequestedAt)
+				if err != nil {
+					return fmt.Errorf("parse RootFS crash request time %q: %w", key, err)
+				}
+				recovery.CrashRequestedAt = requestedAt
 			}
 			if current.Consumer != nil {
 				consumer := *current.Consumer

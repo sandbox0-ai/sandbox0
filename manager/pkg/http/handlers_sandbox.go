@@ -45,6 +45,7 @@ func (s *Server) claimSandbox(c *gin.Context) {
 	req.TeamID = claims.TeamID
 	req.UserID = claims.UserID
 	req.StartedAt = sandboxClaimIngressStartedAt(claims)
+	req.OperationID = sandboxClaimOperationID(claims)
 	if req.Template == "" {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "template is required")
 		return
@@ -71,7 +72,17 @@ func (s *Server) claimSandbox(c *gin.Context) {
 		}
 	}
 
-	resp, err := s.sandboxService.ClaimSandbox(c.Request.Context(), &req)
+	claimer := s.sandboxClaimer
+	if claimer == nil {
+		// Direct Server literals remain common in focused handler tests. Formal
+		// composition always sets the runtime-neutral claimer explicitly.
+		claimer = s.sandboxService
+	}
+	if claimer == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox claim backend is not configured")
+		return
+	}
+	resp, err := claimer.ClaimSandbox(c.Request.Context(), &req)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidClaimRequest) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
@@ -111,6 +122,13 @@ func sandboxClaimIngressStartedAt(claims *internalauth.Claims) time.Time {
 		return time.Time{}
 	}
 	return claims.Audit.IngressStartedAt.UTC()
+}
+
+func sandboxClaimOperationID(claims *internalauth.Claims) string {
+	if claims == nil || claims.Audit == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.Audit.OperationID)
 }
 
 func writeManagerTemplateNotReady(c *gin.Context, tpl *template.Template) {

@@ -43,7 +43,10 @@ type ClaimRequest struct {
 	HardExpiresAt time.Time `json:"-"`
 	// StartedAt is the trusted regional ingress time propagated through signed
 	// internal claims. Public JSON can never set it.
-	StartedAt                         time.Time `json:"-"`
+	StartedAt time.Time `json:"-"`
+	// OperationID is the signed regional operation identity. Runtime backends
+	// use it as the retry key for every durable claim side effect.
+	OperationID                       string `json:"-"`
 	mayHaveExistingCredentialBindings bool
 }
 
@@ -222,6 +225,14 @@ type ClaimResponse struct {
 	Template     string  `json:"template"`
 	ClusterId    *string `json:"cluster_id,omitempty"`
 }
+
+// SandboxClaimer is the runtime-neutral public claim boundary. Lifecycle
+// services can continue to expose backend-specific operations independently.
+type SandboxClaimer interface {
+	ClaimSandbox(context.Context, *ClaimRequest) (*ClaimResponse, error)
+}
+
+var _ SandboxClaimer = (*SandboxService)(nil)
 
 // ClaimSandbox claims a sandbox from the idle pool or creates a new one
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {

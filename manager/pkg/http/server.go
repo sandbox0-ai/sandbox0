@@ -33,6 +33,7 @@ import (
 type Server struct {
 	router                  *gin.Engine
 	sandboxService          *service.SandboxService
+	sandboxClaimer          service.SandboxClaimer
 	egressAuthService       *egressauthservice.EgressAuthService
 	credentialSourceService *credentialsource.CredentialSourceService
 	templateService         *templateservice.TemplateService
@@ -76,6 +77,7 @@ type TemplateReconciler interface {
 // constructor calls as features are added or removed.
 type ServerDependencies struct {
 	SandboxService          *service.SandboxService
+	SandboxClaimer          service.SandboxClaimer
 	EgressAuthService       *egressauthservice.EgressAuthService
 	CredentialSourceService *credentialsource.CredentialSourceService
 	TemplateService         *templateservice.TemplateService
@@ -105,9 +107,13 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 	router.Use(gin.Recovery())
 	router.Use(requestLogger(deps.Logger))
 
+	if deps.SandboxClaimer == nil {
+		deps.SandboxClaimer = deps.SandboxService
+	}
 	server := &Server{
 		router:                  router,
 		sandboxService:          deps.SandboxService,
+		sandboxClaimer:          deps.SandboxClaimer,
 		egressAuthService:       deps.EgressAuthService,
 		credentialSourceService: deps.CredentialSourceService,
 		templateService:         deps.TemplateService,

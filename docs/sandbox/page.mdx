@@ -528,6 +528,8 @@ Terminate and delete a sandbox. This action is irreversible.
 /api/v1/sandboxes/{'{id}'}
 </Endpoint>
 
+A successful response means the deletion intent is durable. Runtime teardown and persistent RootFS cleanup finish asynchronously. For Nomad-backed Sandboxes, the manager fences the exact allocation and its writer authority before deleting the logical record; it does not depend on the Nomad task-driver process remaining available.
+
 <Tabs
   tabs={[
     {

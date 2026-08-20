@@ -540,6 +540,7 @@ func main() {
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
 		SandboxService:          sandboxService,
 		SandboxClaimer:          sandboxClaimer,
+		SandboxTerminator:       sandboxClaimer,
 		EgressAuthService:       egressAuthService,
 		CredentialSourceService: credentialSourceService,
 		TemplateService:         templateService,

@@ -44,6 +44,8 @@ type fakeClaimStore struct {
 	artifact     *sandboxstore.RootFSBaseArtifact
 	ensureCalls  []*sandboxstore.EnsureInitialRootFSGenerationRequest
 	restoreCalls []*sandboxstore.RestoreRootFSFromSnapshotRequest
+	cleanupCalls []string
+	cleanupErr   error
 	snapshot     *sandboxstore.RootFSSnapshot
 	writeCount   int
 }
@@ -118,6 +120,26 @@ func (f *fakeClaimStore) CompleteSandboxClaim(_ context.Context, request *sandbo
 	f.claimPhases[request.SandboxID] = sandboxstore.SandboxRuntimeClaimPhaseReady
 	f.writeCount++
 	return record, nil
+}
+
+func (f *fakeClaimStore) RequestSandboxRuntimeClaimCleanup(
+	_ context.Context,
+	sandboxID, reason string,
+) (*sandboxstore.SandboxClaimCleanupCandidate, error) {
+	f.cleanupCalls = append(f.cleanupCalls, sandboxID+":"+reason)
+	if f.cleanupErr != nil {
+		return nil, f.cleanupErr
+	}
+	record := f.records[sandboxID]
+	if record == nil {
+		return nil, sandboxstore.ErrSandboxRecordNotFound
+	}
+	record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
+	f.claimPhases[sandboxID] = sandboxstore.SandboxRuntimeClaimPhaseCleanupPending
+	return &sandboxstore.SandboxClaimCleanupCandidate{
+		SandboxID: sandboxID, OperationID: f.operations[sandboxID],
+		PhysicalStateRequired: record.CurrentPodName != "",
+	}, nil
 }
 
 type fakeQuotaLimitStore struct {
@@ -275,6 +297,32 @@ func TestServiceRejectsChangedRetryBinding(t *testing.T) {
 	}
 	if len(fixture.planner.requests) != 1 {
 		t.Fatalf("planner calls = %d, want 1", len(fixture.planner.requests))
+	}
+}
+
+func TestServiceTerminateSandboxUsesDurableClaimCleanup(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	response, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-delete",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.TerminateSandbox(context.Background(), response.SandboxID); err != nil {
+		t.Fatal(err)
+	}
+	if got := fixture.store.cleanupCalls; len(got) != 1 || got[0] != response.SandboxID+":sandbox deletion requested" {
+		t.Fatalf("cleanup calls = %v", got)
+	}
+	if record := fixture.store.records[response.SandboxID]; record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateTerminating ||
+		fixture.store.claimPhases[response.SandboxID] != sandboxstore.SandboxRuntimeClaimPhaseCleanupPending {
+		t.Fatalf("record=%+v phase=%q", record, fixture.store.claimPhases[response.SandboxID])
+	}
+
+	fixture.store.cleanupErr = errors.New("database unavailable")
+	if err := fixture.service.TerminateSandbox(context.Background(), response.SandboxID); err == nil ||
+		!strings.Contains(err.Error(), "request Nomad sandbox cleanup") {
+		t.Fatalf("termination error = %v", err)
 	}
 }
 

@@ -237,13 +237,25 @@ type ClaimResponse struct {
 	ClusterId    *string `json:"cluster_id,omitempty"`
 }
 
-// SandboxClaimer is the runtime-neutral public claim boundary. Lifecycle
-// services can continue to expose backend-specific operations independently.
+// SandboxClaimer is the runtime-neutral public claim boundary.
 type SandboxClaimer interface {
 	ClaimSandbox(context.Context, *ClaimRequest) (*ClaimResponse, error)
 }
 
-var _ SandboxClaimer = (*SandboxService)(nil)
+// SandboxTerminator persists a sandbox deletion request without requiring the
+// public HTTP layer to understand the physical runtime backend.
+type SandboxTerminator interface {
+	TerminateSandbox(context.Context, string) error
+}
+
+// SandboxClaimBackend owns the claim and delete paths for one selected
+// physical runtime backend.
+type SandboxClaimBackend interface {
+	SandboxClaimer
+	SandboxTerminator
+}
+
+var _ SandboxClaimBackend = (*SandboxService)(nil)
 
 // ClaimSandbox claims a sandbox from the idle pool or creates a new one
 func (s *SandboxService) ClaimSandbox(ctx context.Context, req *ClaimRequest) (*ClaimResponse, error) {

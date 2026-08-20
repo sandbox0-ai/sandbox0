@@ -45,12 +45,16 @@ func TestWorkerCleansOnlyClaimsWithoutLivePhysicalState(t *testing.T) {
 			{SandboxID: "terminal", OperationID: "operation-b"},
 			{SandboxID: "quiescing", OperationID: "operation-c"},
 			{SandboxID: "renewed", OperationID: "operation-d"},
+			{SandboxID: "missing-required", OperationID: "operation-e"},
 		},
 		candidates: map[string]*sandboxstore.SandboxClaimCleanupCandidate{
 			"no-slot":   {SandboxID: "no-slot", OperationID: "operation-a"},
 			"terminal":  {SandboxID: "terminal", OperationID: "operation-b", SlotID: "slot-b", SlotState: sandboxstore.RuntimeSlotStateTerminal},
 			"quiescing": {SandboxID: "quiescing", OperationID: "operation-c", SlotID: "slot-c", SlotState: sandboxstore.RuntimeSlotStateQuiescing},
 			"renewed":   nil,
+			"missing-required": {
+				SandboxID: "missing-required", OperationID: "operation-e", PhysicalStateRequired: true,
+			},
 		},
 		fenceErr: make(map[string]error),
 	}
@@ -63,7 +67,7 @@ func TestWorkerCleansOnlyClaimsWithoutLivePhysicalState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Result{Scanned: 4, Fenced: 3, Pending: 1, Cleaned: 2, Skipped: 1}
+	want := Result{Scanned: 5, Fenced: 4, Pending: 2, Cleaned: 2, Skipped: 1}
 	if result != want {
 		t.Fatalf("result = %+v, want %+v", result, want)
 	}

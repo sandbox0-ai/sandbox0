@@ -17,6 +17,8 @@ func (fakeSandboxClaimer) ClaimSandbox(context.Context, *service.ClaimRequest) (
 	return nil, nil
 }
 
+func (fakeSandboxClaimer) TerminateSandbox(context.Context, string) error { return nil }
+
 func TestBuildSandboxClaimerSelectsExplicitBackend(t *testing.T) {
 	fallback := fakeSandboxClaimer{}
 	claimer, err := buildSandboxClaimer(&config.ManagerConfig{
@@ -91,4 +93,4 @@ func TestLoadWriterTokenKeyRejectsDirectories(t *testing.T) {
 	}
 }
 
-var _ service.SandboxClaimer = fakeSandboxClaimer{}
+var _ service.SandboxClaimBackend = fakeSandboxClaimer{}

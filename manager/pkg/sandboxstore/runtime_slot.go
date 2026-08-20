@@ -388,9 +388,11 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 	// A unique index detects conflicting operation IDs, but it cannot make two
 	// simultaneous identical retries choose the same SKIP LOCKED row. Serialize
 	// only that operation key before consulting its durable binding.
-	if _, err := tx.Exec(ctx, `
-		SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
-	`, normalized.OperationID); err != nil {
+	if err := lockRuntimeSlotClaimOperation(ctx, tx, normalized.OperationID); err != nil {
+		return nil, err
+	}
+	allowNewSlot, err := lockRuntimeSlotClaimAdmission(ctx, tx, normalized)
+	if err != nil {
 		return nil, err
 	}
 
@@ -410,6 +412,9 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
+	if !allowNewSlot {
+		return nil, fmt.Errorf("%w: ready sandbox claim has no runtime slot", ErrRuntimeSlotConflict)
+	}
 	var sourceMarker int
 	if err := tx.QueryRow(ctx, `
 		SELECT 1
@@ -423,10 +428,11 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 			AND generation.filesystem_id = filesystem.filesystem_id
 		WHERE sandbox.sandbox_id = $1
 			AND sandbox.deleted_at IS NULL
+			AND sandbox.desired_state = $4
 			AND filesystem.filesystem_id = $2
 			AND generation.generation_id = $3
 		FOR SHARE OF sandbox, binding, filesystem, generation
-	`, normalized.SandboxID, normalized.FilesystemID, normalized.SourceGenerationID).Scan(&sourceMarker); err != nil {
+	`, normalized.SandboxID, normalized.FilesystemID, normalized.SourceGenerationID, SandboxDesiredStateActive).Scan(&sourceMarker); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("%w: claim source is not the sandbox's current RootFS generation", ErrRuntimeSlotConflict)
 		}
@@ -473,6 +479,74 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 		return nil, mapRuntimeSlotConflict("commit runtime slot claim", err)
 	}
 	return result, nil
+}
+
+func lockRuntimeSlotClaimOperation(ctx context.Context, tx pgx.Tx, operationID string) error {
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
+	`, operationID); err != nil {
+		return fmt.Errorf("lock runtime slot claim operation: %w", err)
+	}
+	return nil
+}
+
+// lockRuntimeSlotClaimAdmission uses the same sandbox-then-claim lock order as
+// completion and cleanup. A ready Nomad claim may only recover its existing
+// slot; a cleanup-fenced or expired claim cannot acquire a late allocation.
+func lockRuntimeSlotClaimAdmission(
+	ctx context.Context,
+	tx pgx.Tx,
+	request *AcquireRuntimeSlotRequest,
+) (bool, error) {
+	var runtimeBackend, desiredState string
+	var live bool
+	if err := tx.QueryRow(ctx, `
+		SELECT runtime_backend, desired_state, deleted_at IS NULL
+		FROM manager.sandboxes
+		WHERE sandbox_id = $1
+		FOR SHARE
+	`, request.SandboxID).Scan(&runtimeBackend, &desiredState, &live); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("%w: sandbox record is missing", ErrRuntimeSlotConflict)
+		}
+		return false, fmt.Errorf("lock runtime slot claim sandbox: %w", err)
+	}
+	if !live || desiredState != SandboxDesiredStateActive {
+		return false, fmt.Errorf("%w: sandbox does not accept a runtime claim", ErrRuntimeSlotConflict)
+	}
+	if runtimeBackend != SandboxRuntimeBackendNomad {
+		return true, nil
+	}
+
+	var operationID, phase string
+	var leaseLive bool
+	if err := tx.QueryRow(ctx, `
+		SELECT operation_id, phase, COALESCE(lease_expires_at > NOW(), FALSE)
+		FROM manager.sandbox_runtime_claims
+		WHERE sandbox_id = $1
+		FOR SHARE
+	`, request.SandboxID).Scan(&operationID, &phase, &leaseLive); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("%w: Nomad sandbox claim is missing", ErrRuntimeSlotConflict)
+		}
+		return false, fmt.Errorf("lock Nomad sandbox claim admission: %w", err)
+	}
+	if operationID != request.OperationID {
+		return false, fmt.Errorf("%w: Nomad sandbox operation identity changed", ErrRuntimeSlotConflict)
+	}
+	switch phase {
+	case SandboxRuntimeClaimPhaseClaiming:
+		if !leaseLive {
+			return false, fmt.Errorf("%w: Nomad sandbox claim lease expired", ErrRuntimeSlotConflict)
+		}
+		return true, nil
+	case SandboxRuntimeClaimPhaseReady:
+		return false, nil
+	case SandboxRuntimeClaimPhaseCleanupPending, SandboxRuntimeClaimPhaseCleaned:
+		return false, fmt.Errorf("%w: Nomad sandbox claim cleanup is pending", ErrRuntimeSlotConflict)
+	default:
+		return false, fmt.Errorf("%w: Nomad sandbox claim phase is %s", ErrRuntimeSlotConflict, phase)
+	}
 }
 
 // BindRuntimeSlotWriterGrant joins the slot reservation to the independently

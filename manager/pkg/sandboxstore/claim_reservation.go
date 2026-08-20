@@ -90,13 +90,14 @@ type CompleteSandboxClaimRequest struct {
 	AllocationNamespace string
 }
 
-// SandboxClaimCleanupCandidate joins one abandoned logical claim to its
+// SandboxClaimCleanupCandidate joins one due logical cleanup workflow to its
 // optional physical runtime-slot incarnation.
 type SandboxClaimCleanupCandidate struct {
-	SandboxID   string
-	OperationID string
-	SlotID      string
-	SlotState   string
+	SandboxID             string
+	OperationID           string
+	SlotID                string
+	SlotState             string
+	PhysicalStateRequired bool
 }
 
 // RetrySandboxClaim locks and renews an exact claim if its deterministic
@@ -324,8 +325,114 @@ func (s *PGSandboxStore) ListSandboxRuntimeClaimsForCleanup(ctx context.Context,
 	return claims, rows.Err()
 }
 
-// FenceSandboxRuntimeClaimForCleanup makes an expired claim non-retryable and
-// forces any exact physical slot into the terminal reconciler's due set.
+// RequestSandboxRuntimeClaimCleanup atomically makes an explicit delete win
+// over a concurrent claim completion and makes the exact physical slot due for
+// plugin-independent terminal reconciliation.
+func (s *PGSandboxStore) RequestSandboxRuntimeClaimCleanup(
+	ctx context.Context,
+	sandboxID, reason string,
+) (*SandboxClaimCleanupCandidate, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("sandbox store is not configured")
+	}
+	originalSandboxID := sandboxID
+	sandboxID = strings.TrimSpace(sandboxID)
+	reason = strings.TrimSpace(reason)
+	if sandboxID == "" || sandboxID != originalSandboxID || len(sandboxID) > 512 {
+		return nil, fmt.Errorf("sandbox ID is required, canonical, and at most 512 bytes")
+	}
+	if len(reason) > 2_048 {
+		return nil, fmt.Errorf("sandbox claim cleanup reason exceeds 2048 bytes")
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin sandbox claim cleanup request tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var operationID string
+	if err := tx.QueryRow(ctx, `
+		SELECT operation_id
+		FROM manager.sandbox_runtime_claims
+		WHERE sandbox_id = $1
+	`, sandboxID).Scan(&operationID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: sandbox runtime claim is missing", ErrSandboxClaimReservationConflict)
+		}
+		return nil, fmt.Errorf("load sandbox cleanup operation identity: %w", err)
+	}
+	if err := lockRuntimeSlotClaimOperation(ctx, tx, operationID); err != nil {
+		return nil, err
+	}
+	record, err := lockNomadSandboxClaimRecord(ctx, tx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	claim, err := lockSandboxRuntimeClaim(ctx, tx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if claim.OperationID != operationID {
+		return nil, fmt.Errorf("%w: cleanup operation identity changed", ErrSandboxClaimReservationConflict)
+	}
+
+	if claim.Phase == SandboxRuntimeClaimPhaseCleaned {
+		if record.DesiredState != SandboxDesiredStateDeleted || record.DeletedAt.IsZero() {
+			return nil, fmt.Errorf("%w: cleaned claim has a live sandbox record", ErrSandboxClaimReservationConflict)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit cleaned sandbox deletion retry: %w", err)
+		}
+		return nil, nil
+	}
+	if record.DesiredState == SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+		if claim.Phase != SandboxRuntimeClaimPhaseCleanupPending ||
+			record.DesiredState != SandboxDesiredStateDeleted || record.DeletedAt.IsZero() {
+			return nil, fmt.Errorf("%w: deleted sandbox has an incomplete claim state", ErrSandboxClaimReservationConflict)
+		}
+	} else {
+		switch record.DesiredState {
+		case SandboxDesiredStateActive, SandboxDesiredStatePaused, SandboxDesiredStateTerminating:
+		default:
+			return nil, fmt.Errorf("%w: sandbox desired state is %s", ErrSandboxClaimReservationConflict, record.DesiredState)
+		}
+		switch claim.Phase {
+		case SandboxRuntimeClaimPhaseClaiming, SandboxRuntimeClaimPhaseReady, SandboxRuntimeClaimPhaseCleanupPending:
+		default:
+			return nil, fmt.Errorf("%w: claim is %s", ErrSandboxClaimReservationConflict, claim.Phase)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE manager.sandboxes
+			SET desired_state = $2, updated_at = NOW()
+			WHERE sandbox_id = $1 AND deleted_at IS NULL
+		`, record.ID, SandboxDesiredStateTerminating); err != nil {
+			return nil, fmt.Errorf("persist Nomad sandbox deletion intent: %w", err)
+		}
+		record.DesiredState = SandboxDesiredStateTerminating
+	}
+	if claim.Phase != SandboxRuntimeClaimPhaseCleanupPending {
+		if _, err := tx.Exec(ctx, `
+			UPDATE manager.sandbox_runtime_claims
+			SET phase = $2, lease_expires_at = NULL,
+				cleanup_started_at = COALESCE(cleanup_started_at, NOW()), last_error = $3
+			WHERE sandbox_id = $1
+		`, record.ID, SandboxRuntimeClaimPhaseCleanupPending, reason); err != nil {
+			return nil, fmt.Errorf("request Nomad sandbox claim cleanup: %w", err)
+		}
+		claim.Phase = SandboxRuntimeClaimPhaseCleanupPending
+	}
+	candidate, err := fenceSandboxClaimRuntimeSlotForCleanup(ctx, tx, record, claim)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit sandbox claim cleanup request: %w", err)
+	}
+	return candidate, nil
+}
+
+// FenceSandboxRuntimeClaimForCleanup makes a due cleanup claim non-retryable
+// and forces any exact physical slot into the terminal reconciler's due set.
 func (s *PGSandboxStore) FenceSandboxRuntimeClaimForCleanup(
 	ctx context.Context,
 	sandboxID, operationID, reason string,
@@ -347,6 +454,9 @@ func (s *PGSandboxStore) FenceSandboxRuntimeClaimForCleanup(
 		return nil, fmt.Errorf("begin fence sandbox claim cleanup tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockRuntimeSlotClaimOperation(ctx, tx, operationID); err != nil {
+		return nil, err
+	}
 	record, err := lockNomadSandboxClaimRecord(ctx, tx, sandboxID)
 	if err != nil {
 		return nil, err
@@ -373,15 +483,45 @@ func (s *PGSandboxStore) FenceSandboxRuntimeClaimForCleanup(
 			return nil, fmt.Errorf("fence abandoned sandbox claim: %w", err)
 		}
 	}
-	candidate := &SandboxClaimCleanupCandidate{SandboxID: record.ID, OperationID: operationID}
+	candidate, err := fenceSandboxClaimRuntimeSlotForCleanup(ctx, tx, record, claim)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit sandbox claim cleanup fence: %w", err)
+	}
+	return candidate, nil
+}
+
+func fenceSandboxClaimRuntimeSlotForCleanup(
+	ctx context.Context,
+	tx pgx.Tx,
+	record *SandboxRecord,
+	claim *SandboxRuntimeClaim,
+) (*SandboxClaimCleanupCandidate, error) {
+	candidate := &SandboxClaimCleanupCandidate{
+		SandboxID: record.ID, OperationID: claim.OperationID,
+		PhysicalStateRequired: !claim.CompletedAt.IsZero() ||
+			record.CurrentPodName != "" || record.CurrentPodNamespace != "",
+	}
 	slot, err := scanRuntimeSlot(tx.QueryRow(ctx, runtimeSlotSelectSQL()+`
 		WHERE claim_operation_id = $1
 		FOR UPDATE
-	`, operationID))
+	`, claim.OperationID))
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("lock abandoned runtime slot: %w", err)
+		return nil, fmt.Errorf("lock sandbox cleanup runtime slot: %w", err)
 	}
 	if err == nil {
+		if slot.SandboxID != record.ID ||
+			(record.ClusterID != "" && slot.ClusterID != record.ClusterID) {
+			return nil, fmt.Errorf("%w: cleanup slot is not bound to the sandbox record", ErrSandboxClaimReservationConflict)
+		}
+		if candidate.PhysicalStateRequired &&
+			(record.CurrentPodName == "" || record.CurrentPodNamespace == "" ||
+				slot.AllocationID != record.CurrentPodName ||
+				slot.AllocationNamespace != record.CurrentPodNamespace) {
+			return nil, fmt.Errorf("%w: cleanup allocation binding changed", ErrSandboxClaimReservationConflict)
+		}
 		candidate.SlotID = slot.ID
 		candidate.SlotState = slot.State
 		switch slot.State {
@@ -393,16 +533,13 @@ func (s *PGSandboxStore) FenceSandboxRuntimeClaimForCleanup(
 					quiescing_at = COALESCE(quiescing_at, NOW()), updated_at = NOW()
 				WHERE slot_id = $1
 			`, slot.ID, RuntimeSlotStateQuiescing); err != nil {
-				return nil, fmt.Errorf("fence abandoned runtime slot: %w", err)
+				return nil, fmt.Errorf("fence sandbox cleanup runtime slot: %w", err)
 			}
 			candidate.SlotState = RuntimeSlotStateQuiescing
 		case RuntimeSlotStateQuiescing, RuntimeSlotStateOrphaned, RuntimeSlotStateTerminal:
 		default:
-			return nil, fmt.Errorf("%w: abandoned claim slot is %s", ErrRuntimeSlotInvalid, slot.State)
+			return nil, fmt.Errorf("%w: sandbox cleanup slot is %s", ErrRuntimeSlotInvalid, slot.State)
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit sandbox claim cleanup fence: %w", err)
 	}
 	return candidate, nil
 }

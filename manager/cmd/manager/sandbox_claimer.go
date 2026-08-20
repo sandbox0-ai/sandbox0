@@ -18,7 +18,7 @@ import (
 )
 
 type sandboxClaimerDependencies struct {
-	kubernetes      service.SandboxClaimer
+	kubernetes      service.SandboxClaimBackend
 	nodeAuthority   *nodeauthority.Component
 	store           nomadclaim.Store
 	quotaLimits     nomadclaim.QuotaLimitStore
@@ -33,7 +33,7 @@ type sandboxClaimerDependencies struct {
 	logger          *zap.Logger
 }
 
-func buildSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDependencies) (service.SandboxClaimer, error) {
+func buildSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDependencies) (service.SandboxClaimBackend, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("manager config is required")
 	}
@@ -54,7 +54,7 @@ func buildSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDependenc
 	}
 }
 
-func buildNomadSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDependencies) (service.SandboxClaimer, error) {
+func buildNomadSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDependencies) (service.SandboxClaimBackend, error) {
 	if !cfg.NodeAuthority.Enabled {
 		return nil, fmt.Errorf("Nomad sandbox claims require manager node authority")
 	}

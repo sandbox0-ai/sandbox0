@@ -34,6 +34,7 @@ type Store interface {
 	RetrySandboxClaim(context.Context, *sandboxstore.RetrySandboxClaimRequest) (*sandboxstore.SandboxRecord, bool, error)
 	ReserveSandboxClaim(context.Context, *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	CompleteSandboxClaim(context.Context, *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
+	RequestSandboxRuntimeClaimCleanup(context.Context, string, string) (*sandboxstore.SandboxClaimCleanupCandidate, error)
 	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
 	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform) (*sandboxstore.RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *sandboxstore.EnsureInitialRootFSGenerationRequest) (*sandboxstore.RootFSFilesystem, *sandboxstore.RootFSGeneration, error)
@@ -105,6 +106,22 @@ func New(config Config) (*Service, error) {
 		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
 		now: config.Now, logger: config.Logger,
 	}, nil
+}
+
+// TerminateSandbox commits deletion intent before the runtime-slot terminal
+// reconciler fences writer authority and purges the exact Nomad allocation.
+func (s *Service) TerminateSandbox(ctx context.Context, sandboxID string) error {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || len(sandboxID) > 512 {
+		return fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
+	}
+	if _, err := s.store.RequestSandboxRuntimeClaimCleanup(
+		ctx, sandboxID, "sandbox deletion requested",
+	); err != nil {
+		return fmt.Errorf("request Nomad sandbox cleanup: %w", err)
+	}
+	s.logger.Info("Nomad sandbox termination requested", zap.String("sandboxID", sandboxID))
+	return nil
 }
 
 // ClaimSandbox prepares a durable block-COW filesystem and returns only after
@@ -515,4 +532,4 @@ func appendWebhookPolicy(policy *v1alpha1.SandboxNetworkPolicy, rawURL string) *
 	return policy
 }
 
-var _ service.SandboxClaimer = (*Service)(nil)
+var _ service.SandboxClaimBackend = (*Service)(nil)

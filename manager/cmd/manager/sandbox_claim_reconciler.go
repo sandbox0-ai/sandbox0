@@ -21,7 +21,7 @@ func configureSandboxClaimReconciler(
 	}
 	worker, err := sandboxclaimreconciler.New(sandboxclaimreconciler.Config{Store: store})
 	if err != nil {
-		return nil, fmt.Errorf("configure abandoned sandbox claim reconciler: %w", err)
+		return nil, fmt.Errorf("configure sandbox claim cleanup reconciler: %w", err)
 	}
 	return worker, nil
 }

@@ -1,5 +1,5 @@
-// Package sandboxclaimreconciler cleans logical Nomad claims that never
-// reached a committed command-ready runtime binding.
+// Package sandboxclaimreconciler completes durable Nomad claim cleanup after
+// explicit deletion or abandoned admission.
 package sandboxclaimreconciler
 
 import (
@@ -84,8 +84,12 @@ func (w *Worker) RunOnce(ctx context.Context) (Result, error) {
 	var resultErr error
 	for index := range claims {
 		claim := claims[index]
+		reason := "claim cleanup reconciliation"
+		if claim.Phase == sandboxstore.SandboxRuntimeClaimPhaseClaiming {
+			reason = "claim lease expired before commit"
+		}
 		candidate, err := w.store.FenceSandboxRuntimeClaimForCleanup(
-			ctx, claim.SandboxID, claim.OperationID, "claim lease expired before commit",
+			ctx, claim.SandboxID, claim.OperationID, reason,
 		)
 		if err != nil {
 			result.Failed++
@@ -97,6 +101,10 @@ func (w *Worker) RunOnce(ctx context.Context) (Result, error) {
 			continue
 		}
 		result.Fenced++
+		if candidate.PhysicalStateRequired && candidate.SlotID == "" {
+			result.Pending++
+			continue
+		}
 		if candidate.SlotID != "" && candidate.SlotState != sandboxstore.RuntimeSlotStateTerminal {
 			result.Pending++
 			continue

@@ -454,7 +454,11 @@ func (s *Server) terminateSandbox(c *gin.Context) {
 		return
 	}
 
-	err := s.sandboxService.TerminateSandbox(c.Request.Context(), sandboxID)
+	if s.sandboxTerminator == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox termination is unavailable")
+		return
+	}
+	err := s.sandboxTerminator.TerminateSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to terminate sandbox",
 			zap.String("sandboxID", sandboxID),

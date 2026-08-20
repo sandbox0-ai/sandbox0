@@ -34,6 +34,7 @@ type Server struct {
 	router                  *gin.Engine
 	sandboxService          *service.SandboxService
 	sandboxClaimer          service.SandboxClaimer
+	sandboxTerminator       service.SandboxTerminator
 	egressAuthService       *egressauthservice.EgressAuthService
 	credentialSourceService *credentialsource.CredentialSourceService
 	templateService         *templateservice.TemplateService
@@ -78,6 +79,7 @@ type TemplateReconciler interface {
 type ServerDependencies struct {
 	SandboxService          *service.SandboxService
 	SandboxClaimer          service.SandboxClaimer
+	SandboxTerminator       service.SandboxTerminator
 	EgressAuthService       *egressauthservice.EgressAuthService
 	CredentialSourceService *credentialsource.CredentialSourceService
 	TemplateService         *templateservice.TemplateService
@@ -110,10 +112,14 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 	if deps.SandboxClaimer == nil {
 		deps.SandboxClaimer = deps.SandboxService
 	}
+	if deps.SandboxTerminator == nil {
+		deps.SandboxTerminator = deps.SandboxService
+	}
 	server := &Server{
 		router:                  router,
 		sandboxService:          deps.SandboxService,
 		sandboxClaimer:          deps.SandboxClaimer,
+		sandboxTerminator:       deps.SandboxTerminator,
 		egressAuthService:       deps.EgressAuthService,
 		credentialSourceService: deps.CredentialSourceService,
 		templateService:         deps.TemplateService,

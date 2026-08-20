@@ -446,11 +446,12 @@ func (s *PGSandboxStore) AcquireRuntimeSlot(ctx context.Context, request *Acquir
 			AND generation.filesystem_id = filesystem.filesystem_id
 		WHERE sandbox.sandbox_id = $1
 			AND sandbox.deleted_at IS NULL
-			AND sandbox.desired_state = $4
+			AND sandbox.desired_state IN ($4, $5)
 			AND filesystem.filesystem_id = $2
 			AND generation.generation_id = $3
 		FOR SHARE OF sandbox, binding, filesystem, generation
-	`, normalized.SandboxID, normalized.FilesystemID, normalized.SourceGenerationID, SandboxDesiredStateActive).Scan(&sourceMarker); err != nil {
+	`, normalized.SandboxID, normalized.FilesystemID, normalized.SourceGenerationID,
+		SandboxDesiredStateActive, SandboxDesiredStatePaused).Scan(&sourceMarker); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("%w: claim source is not the sandbox's current RootFS generation", ErrRuntimeSlotConflict)
 		}
@@ -516,23 +517,30 @@ func lockRuntimeSlotClaimAdmission(
 	tx pgx.Tx,
 	request *AcquireRuntimeSlotRequest,
 ) (bool, error) {
-	var runtimeBackend, desiredState string
+	var runtimeBackend, desiredState, currentPodName, currentPodNamespace string
+	var runtimeGeneration int64
 	var live bool
 	if err := tx.QueryRow(ctx, `
-		SELECT runtime_backend, desired_state, deleted_at IS NULL
+		SELECT runtime_backend, desired_state, deleted_at IS NULL,
+			runtime_generation, current_pod_name, current_pod_namespace
 		FROM manager.sandboxes
 		WHERE sandbox_id = $1
 		FOR SHARE
-	`, request.SandboxID).Scan(&runtimeBackend, &desiredState, &live); err != nil {
+	`, request.SandboxID).Scan(
+		&runtimeBackend, &desiredState, &live, &runtimeGeneration, &currentPodName, &currentPodNamespace,
+	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, fmt.Errorf("%w: sandbox record is missing", ErrRuntimeSlotConflict)
 		}
 		return false, fmt.Errorf("lock runtime slot claim sandbox: %w", err)
 	}
-	if !live || desiredState != SandboxDesiredStateActive {
+	if !live {
 		return false, fmt.Errorf("%w: sandbox does not accept a runtime claim", ErrRuntimeSlotConflict)
 	}
 	if runtimeBackend != SandboxRuntimeBackendNomad {
+		if desiredState != SandboxDesiredStateActive {
+			return false, fmt.Errorf("%w: sandbox does not accept a runtime claim", ErrRuntimeSlotConflict)
+		}
 		return true, nil
 	}
 
@@ -549,21 +557,58 @@ func lockRuntimeSlotClaimAdmission(
 		}
 		return false, fmt.Errorf("lock Nomad sandbox claim admission: %w", err)
 	}
-	if operationID != request.OperationID {
+	if operationID == request.OperationID {
+		if desiredState != SandboxDesiredStateActive {
+			return false, fmt.Errorf("%w: initial Nomad claim requires an active sandbox", ErrRuntimeSlotConflict)
+		}
+		switch phase {
+		case SandboxRuntimeClaimPhaseClaiming:
+			if !leaseLive {
+				return false, fmt.Errorf("%w: Nomad sandbox claim lease expired", ErrRuntimeSlotConflict)
+			}
+			return true, nil
+		case SandboxRuntimeClaimPhaseReady:
+			return false, nil
+		case SandboxRuntimeClaimPhaseCleanupPending, SandboxRuntimeClaimPhaseCleaned:
+			return false, fmt.Errorf("%w: Nomad sandbox claim cleanup is pending", ErrRuntimeSlotConflict)
+		default:
+			return false, fmt.Errorf("%w: Nomad sandbox claim phase is %s", ErrRuntimeSlotConflict, phase)
+		}
+	}
+
+	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1 AND sandbox_id = $2
+		FOR SHARE
+	`, request.OperationID, request.SandboxID))
+	if errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("%w: Nomad sandbox operation identity changed", ErrRuntimeSlotConflict)
 	}
-	switch phase {
-	case SandboxRuntimeClaimPhaseClaiming:
-		if !leaseLive {
-			return false, fmt.Errorf("%w: Nomad sandbox claim lease expired", ErrRuntimeSlotConflict)
+	if err != nil {
+		return false, fmt.Errorf("lock Nomad resume slot admission: %w", err)
+	}
+	if lifecycle.Kind != SandboxLifecycleKindResume || lifecycle.Source != SandboxLifecycleSourceManual ||
+		lifecycle.Cancelable || !lifecycle.CancelRequestedAt.IsZero() ||
+		lifecycle.ExpectedHeadLayerID != request.SourceGenerationID ||
+		lifecycle.ToGeneration != lifecycle.FromGeneration+1 {
+		return false, fmt.Errorf("%w: Nomad resume lifecycle identity changed", ErrRuntimeSlotConflict)
+	}
+	switch lifecycle.Phase {
+	case SandboxLifecyclePhasePreparing, SandboxLifecyclePhaseBarriered,
+		SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting:
+		if desiredState != SandboxDesiredStatePaused || runtimeGeneration != lifecycle.FromGeneration ||
+			currentPodName != "" || currentPodNamespace != "" {
+			return false, fmt.Errorf("%w: paused Nomad resume admission changed", ErrRuntimeSlotConflict)
 		}
 		return true, nil
-	case SandboxRuntimeClaimPhaseReady:
+	case SandboxLifecyclePhaseCommitted:
+		if desiredState != SandboxDesiredStateActive || runtimeGeneration != lifecycle.ToGeneration ||
+			currentPodName != lifecycle.ToPodName || currentPodNamespace != lifecycle.ToPodNamespace ||
+			currentPodName == "" || currentPodNamespace == "" {
+			return false, fmt.Errorf("%w: committed Nomad resume binding changed", ErrRuntimeSlotConflict)
+		}
 		return false, nil
-	case SandboxRuntimeClaimPhaseCleanupPending, SandboxRuntimeClaimPhaseCleaned:
-		return false, fmt.Errorf("%w: Nomad sandbox claim cleanup is pending", ErrRuntimeSlotConflict)
 	default:
-		return false, fmt.Errorf("%w: Nomad sandbox claim phase is %s", ErrRuntimeSlotConflict, phase)
+		return false, fmt.Errorf("%w: Nomad resume lifecycle is %s", ErrRuntimeSlotConflict, lifecycle.Phase)
 	}
 }
 

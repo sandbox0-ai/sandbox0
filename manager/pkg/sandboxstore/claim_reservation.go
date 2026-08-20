@@ -153,10 +153,7 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 		return nil, fmt.Errorf("begin sandbox claim reservation tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// Hash collisions only serialize unrelated teams and cannot weaken safety.
-	if _, err := tx.Exec(ctx, `
-		SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
-	`, "sandbox-claim/team/"+record.TeamID); err != nil {
+	if err := lockActiveSandboxQuotaTeam(ctx, tx, record.TeamID); err != nil {
 		return nil, fmt.Errorf("lock team sandbox claims: %w", err)
 	}
 	if existing, found, err := retrySandboxClaimTx(ctx, tx, record, operationID, leaseTTL); err != nil {
@@ -169,14 +166,8 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 	}
 
 	if request.ActiveSandboxLimit != nil {
-		var current int64
-		if err := tx.QueryRow(ctx, `
-			SELECT COUNT(*)
-			FROM manager.sandboxes
-			WHERE team_id = $1
-				AND deleted_at IS NULL
-				AND desired_state = $2
-		`, record.TeamID, SandboxDesiredStateActive).Scan(&current); err != nil {
+		current, err := countActiveSandboxQuotaReservations(ctx, tx, record.TeamID)
+		if err != nil {
 			return nil, fmt.Errorf("count active sandboxes for claim reservation: %w", err)
 		}
 		if current >= *request.ActiveSandboxLimit {
@@ -214,6 +205,39 @@ func (s *PGSandboxStore) ReserveSandboxClaim(ctx context.Context, request *Reser
 		return nil, fmt.Errorf("commit sandbox claim reservation: %w", err)
 	}
 	return reserved, nil
+}
+
+// lockActiveSandboxQuotaTeam establishes one lock order for initial claims and
+// paused resumes. Hash collisions only serialize unrelated teams.
+func lockActiveSandboxQuotaTeam(ctx context.Context, tx pgx.Tx, teamID string) error {
+	_, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
+	`, "sandbox-claim/team/"+teamID)
+	return err
+}
+
+// countActiveSandboxQuotaReservations treats an in-progress durable resume as
+// active capacity before its command-ready slot is committed.
+func countActiveSandboxQuotaReservations(ctx context.Context, tx pgx.Tx, teamID string) (int64, error) {
+	var current int64
+	err := tx.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM manager.sandboxes AS sandbox
+		WHERE sandbox.team_id = $1
+			AND sandbox.deleted_at IS NULL
+			AND (
+				sandbox.desired_state = $2
+				OR EXISTS (
+					SELECT 1 FROM manager.sandbox_lifecycle_txns AS lifecycle
+					WHERE lifecycle.sandbox_id = sandbox.sandbox_id
+						AND lifecycle.kind = $3
+						AND lifecycle.phase IN ($4, $5, $6, $7)
+				)
+			)
+	`, teamID, SandboxDesiredStateActive, SandboxLifecycleKindResume,
+		SandboxLifecyclePhasePreparing, SandboxLifecyclePhaseBarriered,
+		SandboxLifecyclePhasePublishing, SandboxLifecyclePhaseCommitting).Scan(&current)
+	return current, err
 }
 
 // CompleteSandboxClaim atomically binds the exact active slot to the logical

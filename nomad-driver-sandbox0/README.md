@@ -74,6 +74,11 @@ Implemented:
 - bounded node cleanup-proof retention (24 hours) and delayed compact external
   RootFS-fence retention (48 hours); Bolt page-reuse tests cover two 10,000-slot
   proof churn cycles without proportional second-cycle file growth
+- a manager-side Nomad allocation controller that validates immutable server
+  catalog identity, sends idempotent stop, invokes synchronous GC on the exact
+  client, and derives absence from that client's allocation directory rather
+  than from eventual server-record deletion; server and client endpoints use
+  mTLS, exact SPIFFE URI SANs, rotating ACL tokens, and a trusted endpoint map
 
 Not implemented:
 
@@ -92,6 +97,8 @@ Not implemented:
 - production Nomad deployment and upgrade automation
 - production manager-to-node running-fork orchestration and privileged
   multi-node XFS/NBD/runsc validation
+- deployment wiring and privileged race validation for the direct Nomad
+  allocation controller, including Nomad server-GC concurrent with client GC
 
 ## Writer authority PoC
 
@@ -254,6 +261,14 @@ A production deployment still needs an authenticated node agent or outbound
 stream that routes the manager adapter to the trusted cluster, node, node UID,
 and boot ID. The 10,000-slot Bolt test proves local page reuse only; it does not
 constitute the required privileged, multi-node, end-to-end 24-hour soak.
+
+The regional terminal controller also needs trusted HTTPS endpoints for each
+Nomad server cluster and exact client node. Its ACL policy must permit
+namespace `read-job`, `submit-job`, and `read-fs`: server identity is checked
+before stop, while direct client `fs/stat` and allocation GC distinguish
+physical client state from an eventually deleted server record. Both endpoint
+classes require mTLS, a target-bound SPIFFE URI SAN, and a rotating token file;
+ambient proxies and redirects are rejected.
 
 `--max-dirty-tail-bytes` bounds the logical 4 KiB payload represented by one
 session's local branch WAL. Repeated overwrites count because they consume WAL

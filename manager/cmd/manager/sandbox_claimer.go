@@ -89,7 +89,8 @@ func buildNomadSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDepe
 		Store: deps.store, Templates: deps.templates, Profiles: profiles, Planner: planner,
 		QuotaLimits:     deps.quotaLimits,
 		NetworkPolicies: deps.networkPolicies, ResourcePolicy: deps.resourcePolicy,
-		DefaultTTL: deps.defaultTTL, Now: deps.now, Logger: deps.logger,
+		ClaimTTL: claim.ClaimTTL.Duration, DefaultTTL: deps.defaultTTL,
+		Now: deps.now, Logger: deps.logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create Nomad sandbox claimer: %w", err)

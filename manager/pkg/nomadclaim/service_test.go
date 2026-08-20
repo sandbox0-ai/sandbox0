@@ -39,24 +39,13 @@ func (f *fakeTemplateStore) GetTemplateForTeam(_ context.Context, teamID, templa
 
 type fakeClaimStore struct {
 	records      map[string]*sandboxstore.SandboxRecord
+	operations   map[string]string
+	claimPhases  map[string]string
 	artifact     *sandboxstore.RootFSBaseArtifact
 	ensureCalls  []*sandboxstore.EnsureInitialRootFSGenerationRequest
 	restoreCalls []*sandboxstore.RestoreRootFSFromSnapshotRequest
 	snapshot     *sandboxstore.RootFSSnapshot
-	upsertCount  int
-}
-
-func (f *fakeClaimStore) GetSandbox(_ context.Context, sandboxID string) (*sandboxstore.SandboxRecord, error) {
-	return cloneClaimRecord(f.records[sandboxID]), nil
-}
-
-func (f *fakeClaimStore) UpsertSandbox(_ context.Context, record *sandboxstore.SandboxRecord) error {
-	if f.records == nil {
-		f.records = make(map[string]*sandboxstore.SandboxRecord)
-	}
-	f.records[record.ID] = cloneClaimRecord(record)
-	f.upsertCount++
-	return nil
+	writeCount   int
 }
 
 func (f *fakeClaimStore) ReserveSandboxClaim(_ context.Context, request *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error) {
@@ -64,6 +53,9 @@ func (f *fakeClaimStore) ReserveSandboxClaim(_ context.Context, request *sandbox
 		return nil, errors.New("missing reservation record")
 	}
 	if existing := f.records[request.Record.ID]; existing != nil {
+		if !sameClaimRecord(existing, request.Record) || f.operations[request.Record.ID] != request.OperationID {
+			return nil, sandboxstore.ErrSandboxClaimReservationConflict
+		}
 		return cloneClaimRecord(existing), nil
 	}
 	if request.ActiveSandboxLimit != nil {
@@ -84,8 +76,48 @@ func (f *fakeClaimStore) ReserveSandboxClaim(_ context.Context, request *sandbox
 		f.records = make(map[string]*sandboxstore.SandboxRecord)
 	}
 	f.records[request.Record.ID] = cloneClaimRecord(request.Record)
-	f.upsertCount++
+	f.operations[request.Record.ID] = request.OperationID
+	f.claimPhases[request.Record.ID] = sandboxstore.SandboxRuntimeClaimPhaseClaiming
+	f.writeCount++
 	return cloneClaimRecord(request.Record), nil
+}
+
+func (f *fakeClaimStore) RetrySandboxClaim(_ context.Context, request *sandboxstore.RetrySandboxClaimRequest) (*sandboxstore.SandboxRecord, bool, error) {
+	if request == nil || request.Record == nil {
+		return nil, false, errors.New("missing retry record")
+	}
+	existing := f.records[request.Record.ID]
+	if existing == nil {
+		return nil, false, nil
+	}
+	if !sameClaimRecord(existing, request.Record) || f.operations[request.Record.ID] != request.OperationID {
+		return nil, true, sandboxstore.ErrSandboxClaimReservationConflict
+	}
+	phase := f.claimPhases[request.Record.ID]
+	if phase == sandboxstore.SandboxRuntimeClaimPhaseCleanupPending || phase == sandboxstore.SandboxRuntimeClaimPhaseCleaned {
+		return nil, true, sandboxstore.ErrSandboxClaimCleanupPending
+	}
+	return cloneClaimRecord(existing), true, nil
+}
+
+func (f *fakeClaimStore) CompleteSandboxClaim(_ context.Context, request *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error) {
+	if request == nil || f.operations[request.SandboxID] != request.OperationID {
+		return nil, sandboxstore.ErrSandboxClaimReservationConflict
+	}
+	if phase := f.claimPhases[request.SandboxID]; phase == sandboxstore.SandboxRuntimeClaimPhaseCleanupPending ||
+		phase == sandboxstore.SandboxRuntimeClaimPhaseCleaned {
+		return nil, sandboxstore.ErrSandboxClaimCleanupPending
+	}
+	record := cloneClaimRecord(f.records[request.SandboxID])
+	if record == nil {
+		return nil, sandboxstore.ErrSandboxClaimReservationConflict
+	}
+	record.CurrentPodName = request.AllocationID
+	record.CurrentPodNamespace = request.AllocationNamespace
+	f.records[request.SandboxID] = cloneClaimRecord(record)
+	f.claimPhases[request.SandboxID] = sandboxstore.SandboxRuntimeClaimPhaseReady
+	f.writeCount++
+	return record, nil
 }
 
 type fakeQuotaLimitStore struct {
@@ -255,8 +287,8 @@ func TestServiceFailsBeforePersistenceWithoutReadyBaseArtifact(t *testing.T) {
 	if !errors.Is(err, service.ErrDataPlaneNotReady) {
 		t.Fatalf("claim error = %v, want data plane not ready", err)
 	}
-	if fixture.store.upsertCount != 0 || len(fixture.planner.requests) != 0 {
-		t.Fatalf("side effects: upserts=%d planner=%d", fixture.store.upsertCount, len(fixture.planner.requests))
+	if fixture.store.writeCount != 0 || len(fixture.planner.requests) != 0 {
+		t.Fatalf("side effects: writes=%d planner=%d", fixture.store.writeCount, len(fixture.planner.requests))
 	}
 }
 
@@ -269,8 +301,8 @@ func TestServiceRejectsBaseArtifactFromDifferentPlatform(t *testing.T) {
 	if !errors.Is(err, service.ErrDataPlaneNotReady) {
 		t.Fatalf("claim error = %v, want data plane not ready", err)
 	}
-	if fixture.store.upsertCount != 0 || len(fixture.planner.requests) != 0 {
-		t.Fatalf("side effects: upserts=%d planner=%d", fixture.store.upsertCount, len(fixture.planner.requests))
+	if fixture.store.writeCount != 0 || len(fixture.planner.requests) != 0 {
+		t.Fatalf("side effects: writes=%d planner=%d", fixture.store.writeCount, len(fixture.planner.requests))
 	}
 }
 
@@ -308,6 +340,31 @@ func TestServiceMapsUnavailableWarmPoolToRetryableError(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsRetryAfterAbandonedClaimCleanupFence(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.planner.err = errors.New("node channel unavailable")
+	request := &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-1",
+	}
+	if _, err := fixture.service.ClaimSandbox(context.Background(), request); err == nil {
+		t.Fatal("initial failed claim returned no error")
+	}
+	if len(fixture.store.records) != 1 {
+		t.Fatalf("reserved records = %d", len(fixture.store.records))
+	}
+	for sandboxID := range fixture.store.records {
+		fixture.store.claimPhases[sandboxID] = sandboxstore.SandboxRuntimeClaimPhaseCleanupPending
+	}
+	fixture.planner.err = nil
+	_, err := fixture.service.ClaimSandbox(context.Background(), request)
+	if !errors.Is(err, service.ErrClaimConflict) {
+		t.Fatalf("cleanup-fenced retry error = %v, want claim conflict", err)
+	}
+	if len(fixture.planner.requests) != 1 {
+		t.Fatalf("planner calls = %d, want 1", len(fixture.planner.requests))
+	}
+}
+
 func TestServiceEnforcesActiveSandboxQuotaBeforeRootFSInitialization(t *testing.T) {
 	fixture := newClaimServiceFixture(t)
 	fixture.quotaLimits.limit = &quota.Limit{
@@ -319,9 +376,9 @@ func TestServiceEnforcesActiveSandboxQuotaBeforeRootFSInitialization(t *testing.
 	if !errors.Is(err, service.ErrQuotaExceeded) {
 		t.Fatalf("claim error = %v, want quota exceeded", err)
 	}
-	if fixture.store.upsertCount != 0 || len(fixture.store.ensureCalls) != 0 || len(fixture.planner.requests) != 0 {
+	if fixture.store.writeCount != 0 || len(fixture.store.ensureCalls) != 0 || len(fixture.planner.requests) != 0 {
 		t.Fatalf("side effects: reservations=%d rootfs=%d planner=%d",
-			fixture.store.upsertCount, len(fixture.store.ensureCalls), len(fixture.planner.requests))
+			fixture.store.writeCount, len(fixture.store.ensureCalls), len(fixture.planner.requests))
 	}
 }
 
@@ -347,10 +404,10 @@ func TestServiceAllowsExactRetryAfterQuotaBecomesFullOrUnavailable(t *testing.T)
 		t.Fatal(err)
 	}
 	if retry.SandboxID != first.SandboxID || retryDuringOutage.SandboxID != first.SandboxID ||
-		fixture.store.upsertCount != 4 {
-		// One initial reservation plus one runtime-binding upsert per successful planner call.
-		t.Fatalf("retries=%+v/%+v first=%+v upserts=%d",
-			retry, retryDuringOutage, first, fixture.store.upsertCount)
+		fixture.store.writeCount != 4 {
+		// One initial reservation plus one runtime-binding completion write per successful planner call.
+		t.Fatalf("retries=%+v/%+v first=%+v writes=%d",
+			retry, retryDuringOutage, first, fixture.store.writeCount)
 	}
 }
 
@@ -363,9 +420,9 @@ func TestServiceFailsClosedWhenQuotaPolicyCannotBeLoaded(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "load active sandbox quota") {
 		t.Fatalf("claim error = %v", err)
 	}
-	if fixture.store.upsertCount != 0 || len(fixture.store.ensureCalls) != 0 || len(fixture.planner.requests) != 0 {
+	if fixture.store.writeCount != 0 || len(fixture.store.ensureCalls) != 0 || len(fixture.planner.requests) != 0 {
 		t.Fatalf("side effects: reservations=%d rootfs=%d planner=%d",
-			fixture.store.upsertCount, len(fixture.store.ensureCalls), len(fixture.planner.requests))
+			fixture.store.writeCount, len(fixture.store.ensureCalls), len(fixture.planner.requests))
 	}
 }
 
@@ -415,7 +472,8 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		Compatibility:    compatibility, CompatibilityDigest: compatibilityDigest,
 	}
 	store := &fakeClaimStore{
-		records: make(map[string]*sandboxstore.SandboxRecord),
+		records: make(map[string]*sandboxstore.SandboxRecord), operations: make(map[string]string),
+		claimPhases: make(map[string]string),
 		artifact: &sandboxstore.RootFSBaseArtifact{
 			ArtifactDigest: artifactDigest, SourceOCIRef: template.Spec.MainContainer.Image,
 			SourceOCIDigest: imageDigest, FormatGeneration: 1,
@@ -431,6 +489,7 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		QuotaLimits:     quotaLimits,
 		NetworkPolicies: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		ResourcePolicy:  templatepkg.NewResourcePolicy("1Gi", "8Gi"),
+		ClaimTTL:        15 * time.Second,
 		DefaultTTL:      time.Hour, Now: func() time.Time { return now }, Logger: zap.NewNop(),
 	})
 	if err != nil {

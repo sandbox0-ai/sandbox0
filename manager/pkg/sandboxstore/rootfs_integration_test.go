@@ -49,13 +49,14 @@ func TestSandboxDesiredStateMigrationRepairsLegacyObservedStatuses(t *testing.T)
 	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
 
 	type migratedState struct {
-		desiredState string
-		completedAt  *time.Time
-		deletedAt    *time.Time
+		desiredState   string
+		runtimeBackend string
+		completedAt    *time.Time
+		deletedAt      *time.Time
 	}
 	migrated := make(map[string]migratedState, len(legacyRows))
 	rows, err := pool.Query(ctx, `
-		SELECT sandbox_id, desired_state, hot_claim_completed_at, deleted_at
+		SELECT sandbox_id, desired_state, runtime_backend, hot_claim_completed_at, deleted_at
 		FROM manager.sandboxes
 	`)
 	require.NoError(t, err)
@@ -63,13 +64,14 @@ func TestSandboxDesiredStateMigrationRepairsLegacyObservedStatuses(t *testing.T)
 	for rows.Next() {
 		var id string
 		var state migratedState
-		require.NoError(t, rows.Scan(&id, &state.desiredState, &state.completedAt, &state.deletedAt))
+		require.NoError(t, rows.Scan(&id, &state.desiredState, &state.runtimeBackend, &state.completedAt, &state.deletedAt))
 		migrated[id] = state
 	}
 	require.NoError(t, rows.Err())
 
 	for _, id := range []string{"starting", "running", "failed"} {
 		assert.Equal(t, SandboxDesiredStateActive, migrated[id].desiredState)
+		assert.Equal(t, SandboxRuntimeBackendKubernetes, migrated[id].runtimeBackend)
 		assert.Nil(t, migrated[id].completedAt)
 	}
 	assert.Equal(t, SandboxDesiredStatePaused, migrated["paused"].desiredState)

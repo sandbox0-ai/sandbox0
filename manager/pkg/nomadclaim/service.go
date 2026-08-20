@@ -9,7 +9,6 @@ import (
 	"math"
 	"net"
 	"net/url"
-	"reflect"
 	"strings"
 	"time"
 
@@ -26,14 +25,15 @@ import (
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
 	"go.uber.org/zap"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
 // Store is the durable sandbox and block-COW product boundary needed before a
 // slot can receive writer authority.
 type Store interface {
-	GetSandbox(context.Context, string) (*sandboxstore.SandboxRecord, error)
-	UpsertSandbox(context.Context, *sandboxstore.SandboxRecord) error
+	RetrySandboxClaim(context.Context, *sandboxstore.RetrySandboxClaimRequest) (*sandboxstore.SandboxRecord, bool, error)
 	ReserveSandboxClaim(context.Context, *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
+	CompleteSandboxClaim(context.Context, *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
 	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform) (*sandboxstore.RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *sandboxstore.EnsureInitialRootFSGenerationRequest) (*sandboxstore.RootFSFilesystem, *sandboxstore.RootFSGeneration, error)
@@ -59,6 +59,7 @@ type Config struct {
 	QuotaLimits     QuotaLimitStore
 	NetworkPolicies *networkpolicy.NetworkPolicyService
 	ResourcePolicy  templatepkg.ResourcePolicy
+	ClaimTTL        time.Duration
 	DefaultTTL      time.Duration
 	Now             func() time.Time
 	Logger          *zap.Logger
@@ -74,6 +75,7 @@ type Service struct {
 	quotaLimits     QuotaLimitStore
 	networkPolicies *networkpolicy.NetworkPolicyService
 	resourcePolicy  templatepkg.ResourcePolicy
+	claimTTL        time.Duration
 	defaultTTL      time.Duration
 	now             func() time.Time
 	logger          *zap.Logger
@@ -88,6 +90,9 @@ func New(config Config) (*Service, error) {
 	if config.DefaultTTL < 0 || config.DefaultTTL/time.Second > math.MaxInt32 {
 		return nil, fmt.Errorf("default TTL must fit a non-negative int32 second count")
 	}
+	if config.ClaimTTL < time.Second || config.ClaimTTL > time.Minute {
+		return nil, fmt.Errorf("Nomad claim TTL must be between 1s and 1m")
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -97,7 +102,7 @@ func New(config Config) (*Service, error) {
 	return &Service{
 		store: config.Store, templates: config.Templates, profiles: config.Profiles,
 		planner: config.Planner, quotaLimits: config.QuotaLimits, networkPolicies: config.NetworkPolicies,
-		resourcePolicy: config.ResourcePolicy, defaultTTL: config.DefaultTTL,
+		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
 		now: config.Now, logger: config.Logger,
 	}, nil
 }
@@ -187,7 +192,7 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 
 	now := s.now().UTC()
 	record := s.claimRecord(tpl, &req, profile.ClusterID, now)
-	if err := s.ensureClaimRecord(ctx, record); err != nil {
+	if err := s.ensureClaimRecord(ctx, record, req.OperationID); err != nil {
 		return nil, err
 	}
 	if err := s.initializeRootFS(ctx, &req, rootFS); err != nil {
@@ -209,10 +214,16 @@ func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimReques
 	if result == nil || result.Slot == nil {
 		return nil, fmt.Errorf("Nomad slot planner returned no runtime binding")
 	}
-	record.CurrentPodNamespace = result.Slot.AllocationNamespace
-	record.CurrentPodName = result.Slot.AllocationID
-	if err := s.store.UpsertSandbox(ctx, record); err != nil {
-		return nil, fmt.Errorf("persist Nomad runtime binding: %w", err)
+	record, err = s.store.CompleteSandboxClaim(ctx, &sandboxstore.CompleteSandboxClaimRequest{
+		SandboxID: sandboxID, OperationID: req.OperationID, SlotID: result.Slot.ID,
+		AllocationID: result.Slot.AllocationID, AllocationNamespace: result.Slot.AllocationNamespace,
+	})
+	if errors.Is(err, sandboxstore.ErrSandboxClaimCleanupPending) ||
+		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict) {
+		return nil, fmt.Errorf("%w: %v", service.ErrClaimConflict, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("complete Nomad sandbox claim: %w", err)
 	}
 	s.logger.Info("Claimed Nomad sandbox",
 		zap.String("sandboxID", sandboxID), zap.String("operationID", req.OperationID),
@@ -343,8 +354,9 @@ func (s *Service) claimRecord(tpl *templatepkg.Template, req *service.ClaimReque
 	record := &sandboxstore.SandboxRecord{
 		ID: req.SandboxID, TeamID: req.TeamID, UserID: req.UserID,
 		TemplateID: tpl.TemplateID, TemplateName: tpl.TemplateID, TemplateNamespace: tpl.Scope,
-		ClusterID: clusterID, DesiredState: sandboxstore.SandboxDesiredStateActive,
-		Config: *config, TemplateSpec: tpl.Spec, RuntimeGeneration: req.RuntimeGeneration,
+		ClusterID: clusterID, RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+		DesiredState: sandboxstore.SandboxDesiredStateActive,
+		Config:       *config, TemplateSpec: tpl.Spec, RuntimeGeneration: req.RuntimeGeneration,
 		ClaimedAt: now, CreatedAt: now,
 	}
 	if config.TTL != nil && *config.TTL > 0 {
@@ -358,12 +370,14 @@ func (s *Service) claimRecord(tpl *templatepkg.Template, req *service.ClaimReque
 	return record
 }
 
-func (s *Service) ensureClaimRecord(ctx context.Context, expected *sandboxstore.SandboxRecord) error {
-	existing, err := s.store.GetSandbox(ctx, expected.ID)
+func (s *Service) ensureClaimRecord(ctx context.Context, expected *sandboxstore.SandboxRecord, operationID string) error {
+	existing, found, err := s.store.RetrySandboxClaim(ctx, &sandboxstore.RetrySandboxClaimRequest{
+		Record: expected, OperationID: operationID, LeaseTTL: s.claimTTL,
+	})
 	if err != nil {
-		return fmt.Errorf("load retryable sandbox claim: %w", err)
+		return mapClaimReservationError("retry sandbox claim", err)
 	}
-	if existing != nil {
+	if found {
 		return validateClaimRecord(existing, expected)
 	}
 	limit, err := s.quotaLimits.GetLimit(ctx, expected.TeamID, quota.DimensionActiveSandboxes)
@@ -378,18 +392,25 @@ func (s *Service) ensureClaimRecord(ctx context.Context, expected *sandboxstore.
 		activeLimit = &limit.LimitValue
 	}
 	existing, err = s.store.ReserveSandboxClaim(ctx, &sandboxstore.ReserveSandboxClaimRequest{
-		Record: expected, ActiveSandboxLimit: activeLimit,
+		Record: expected, OperationID: operationID, LeaseTTL: s.claimTTL,
+		ActiveSandboxLimit: activeLimit,
 	})
-	if errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded) {
-		return fmt.Errorf("%w: %v", service.ErrQuotaExceeded, err)
-	}
-	if errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict) {
-		return fmt.Errorf("%w: %v", service.ErrClaimConflict, err)
-	}
 	if err != nil {
-		return fmt.Errorf("reserve sandbox claim: %w", err)
+		return mapClaimReservationError("reserve sandbox claim", err)
 	}
 	return validateClaimRecord(existing, expected)
+}
+
+func mapClaimReservationError(operation string, err error) error {
+	switch {
+	case errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded):
+		return fmt.Errorf("%w: %v", service.ErrQuotaExceeded, err)
+	case errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
+		errors.Is(err, sandboxstore.ErrSandboxClaimCleanupPending):
+		return fmt.Errorf("%w: %v", service.ErrClaimConflict, err)
+	default:
+		return fmt.Errorf("%s: %w", operation, err)
+	}
 }
 
 func validateClaimRecord(existing, expected *sandboxstore.SandboxRecord) error {
@@ -403,9 +424,11 @@ func sameClaimRecord(actual, expected *sandboxstore.SandboxRecord) bool {
 	return actual != nil && expected != nil && actual.DeletedAt.IsZero() &&
 		actual.ID == expected.ID && actual.TeamID == expected.TeamID && actual.UserID == expected.UserID &&
 		actual.TemplateID == expected.TemplateID && actual.ClusterID == expected.ClusterID &&
+		actual.RuntimeBackend == sandboxstore.SandboxRuntimeBackendNomad &&
 		actual.DesiredState == sandboxstore.SandboxDesiredStateActive &&
 		actual.RuntimeGeneration == expected.RuntimeGeneration &&
-		reflect.DeepEqual(actual.Config, expected.Config) && reflect.DeepEqual(actual.TemplateSpec, expected.TemplateSpec)
+		apiequality.Semantic.DeepEqual(actual.Config, expected.Config) &&
+		apiequality.Semantic.DeepEqual(actual.TemplateSpec, expected.TemplateSpec)
 }
 
 func runtimeAssignment(spec v1alpha1.SandboxTemplateSpec, req *service.ClaimRequest) runtimecontrol.Assignment {

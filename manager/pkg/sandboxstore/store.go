@@ -28,8 +28,14 @@ const (
 	SandboxDesiredStateDeleted     = "deleted"
 )
 
-// SandboxRecord is the durable sandbox identity, desired lifecycle state, and
-// configuration. Kubernetes owns observed runtime readiness and failure state.
+const (
+	SandboxRuntimeBackendKubernetes = "kubernetes"
+	SandboxRuntimeBackendNomad      = "nomad"
+)
+
+// SandboxRecord is the durable runtime-neutral sandbox identity, desired
+// lifecycle state, and configuration. Physical runtime registries own
+// observed readiness and failure state.
 type SandboxRecord struct {
 	ID                  string
 	TeamID              string
@@ -38,6 +44,7 @@ type SandboxRecord struct {
 	TemplateName        string
 	TemplateNamespace   string
 	ClusterID           string
+	RuntimeBackend      string
 	DesiredState        string
 	Config              SandboxConfig
 	TemplateSpec        v1alpha1.SandboxTemplateSpec
@@ -271,7 +278,7 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			deleted_at = EXCLUDED.deleted_at,
 			updated_at = NOW()
 		WHERE manager.sandboxes.deleted_at IS NULL
-			AND manager.sandboxes.desired_state NOT IN ($22, $23)
+			AND manager.sandboxes.desired_state NOT IN ($23, $24)
 	`, args...)
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
@@ -282,12 +289,12 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 const sandboxRecordInsertSQL = `
 	INSERT INTO manager.sandboxes (
 		sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-		cluster_id, desired_state, config, template_spec,
+		cluster_id, runtime_backend, desired_state, config, template_spec,
 		current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
 		owner_kind, hot_claim_completed_at,
 		claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
 	)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21, NOW()), NOW())`
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, COALESCE($22, NOW()), NOW())`
 
 func sandboxRecordInsertArgs(record *SandboxRecord) ([]any, error) {
 	if record == nil {
@@ -300,9 +307,16 @@ func sandboxRecordInsertArgs(record *SandboxRecord) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	runtimeBackend := strings.TrimSpace(record.RuntimeBackend)
+	if runtimeBackend == "" {
+		runtimeBackend = SandboxRuntimeBackendKubernetes
+	}
+	if runtimeBackend != SandboxRuntimeBackendKubernetes && runtimeBackend != SandboxRuntimeBackendNomad {
+		return nil, fmt.Errorf("unsupported sandbox runtime backend %q", runtimeBackend)
+	}
 	return []any{
 		record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
-		record.ClusterID, record.DesiredState, configJSON, specJSON,
+		record.ClusterID, runtimeBackend, record.DesiredState, configJSON, specJSON,
 		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
 		strings.TrimSpace(record.OwnerKind), nullableTime(record.HotClaimCompletedAt),
 		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt),
@@ -1130,7 +1144,7 @@ func (t sandboxStoreTx) UpsertSandbox(ctx context.Context, record *SandboxRecord
 func sandboxRecordSelectSQL() string {
 	return `
 		SELECT sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, desired_state, config, template_spec,
+			cluster_id, runtime_backend, desired_state, config, template_spec,
 			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
 			owner_kind, hot_claim_completed_at,
 			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
@@ -1530,7 +1544,7 @@ func scanSandboxRecordInto(scanner sandboxRecordScanner) (*SandboxRecord, error)
 	var hotClaimCompletedAt, claimedAt, expiresAt, hardExpiresAt, deletedAt *time.Time
 	if err := scanner.Scan(
 		&record.ID, &record.TeamID, &record.UserID, &record.TemplateID, &record.TemplateName, &record.TemplateNamespace,
-		&record.ClusterID, &record.DesiredState, &configJSON, &specJSON,
+		&record.ClusterID, &record.RuntimeBackend, &record.DesiredState, &configJSON, &specJSON,
 		&record.CurrentPodName, &record.CurrentPodNamespace, &record.RuntimeGeneration, &record.LifecycleEpoch,
 		&record.OwnerKind, &hotClaimCompletedAt,
 		&claimedAt, &expiresAt, &hardExpiresAt, &deletedAt, &record.CreatedAt, &record.UpdatedAt,

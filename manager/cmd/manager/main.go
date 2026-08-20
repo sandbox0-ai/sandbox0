@@ -344,6 +344,10 @@ func main() {
 		}
 		logger.Warn("Rootfs composite materializer disabled", zap.Error(rootFSCompositeMaterializerErr))
 	}
+	sandboxClaimReconciler, err := configureSandboxClaimReconciler(cfg, sandboxStore)
+	if err != nil {
+		logger.Fatal("Nomad abandoned sandbox claim reconciler is unavailable", zap.Error(err))
+	}
 	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
 		K8sClient:                   k8sClient,
 		HotClaimK8sClient:           hotClaimK8sClient,
@@ -580,19 +584,20 @@ func main() {
 	}
 
 	app := &managerApp{
-		ctx:                   ctx,
-		cancel:                cancel,
-		logger:                logger,
-		k8sClient:             k8sClient,
-		httpServer:            httpServer,
-		nodeAuthority:         managerNodeAuthority,
-		rootFSMaterializer:    rootFSCompositeMaterializer,
-		informerFactory:       informerFactory,
-		crdInformerFactory:    crdInformerFactory,
-		metricsPort:           cfg.MetricsPort,
-		leaderElectionEnabled: cfg.LeaderElection,
-		startControllers:      controllers.Start,
-		cacheSyncs:            informerRuntime.cacheSyncs(),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		logger:                 logger,
+		k8sClient:              k8sClient,
+		httpServer:             httpServer,
+		nodeAuthority:          managerNodeAuthority,
+		rootFSMaterializer:     rootFSCompositeMaterializer,
+		sandboxClaimReconciler: sandboxClaimReconciler,
+		informerFactory:        informerFactory,
+		crdInformerFactory:     crdInformerFactory,
+		metricsPort:            cfg.MetricsPort,
+		leaderElectionEnabled:  cfg.LeaderElection,
+		startControllers:       controllers.Start,
+		cacheSyncs:             informerRuntime.cacheSyncs(),
 	}
 	app.Run()
 }

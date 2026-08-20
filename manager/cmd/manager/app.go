@@ -11,6 +11,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxclaimreconciler"
 	"go.uber.org/zap"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -21,19 +22,20 @@ import (
 // construction stays outside this lifecycle object so dependencies are fully
 // assembled before any server or controller starts.
 type managerApp struct {
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	logger                *zap.Logger
-	k8sClient             kubernetes.Interface
-	httpServer            *httpserver.Server
-	nodeAuthority         *nodeauthority.Component
-	rootFSMaterializer    *rootfsmaterializer.Worker
-	informerFactory       informers.SharedInformerFactory
-	crdInformerFactory    externalversions.SharedInformerFactory
-	cacheSyncs            []cache.InformerSynced
-	metricsPort           int
-	leaderElectionEnabled bool
-	startControllers      func(context.Context)
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	logger                 *zap.Logger
+	k8sClient              kubernetes.Interface
+	httpServer             *httpserver.Server
+	nodeAuthority          *nodeauthority.Component
+	rootFSMaterializer     *rootfsmaterializer.Worker
+	sandboxClaimReconciler *sandboxclaimreconciler.Worker
+	informerFactory        informers.SharedInformerFactory
+	crdInformerFactory     externalversions.SharedInformerFactory
+	cacheSyncs             []cache.InformerSynced
+	metricsPort            int
+	leaderElectionEnabled  bool
+	startControllers       func(context.Context)
 }
 
 func (a *managerApp) Run() {
@@ -46,6 +48,12 @@ func (a *managerApp) Run() {
 			logRootFSCompositeMaterializerPass(a.logger, result, err)
 		})
 		a.logger.Info("Active-active Rootfs composite materializer started")
+	}
+	if a.sandboxClaimReconciler != nil {
+		go a.sandboxClaimReconciler.Run(a.ctx, func(result sandboxclaimreconciler.Result, err error) {
+			logSandboxClaimReconcilePass(a.logger, result, err)
+		})
+		a.logger.Info("Active-active abandoned sandbox claim reconciler started")
 	}
 
 	a.logger.Info("Starting informers")

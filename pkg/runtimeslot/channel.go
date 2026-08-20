@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
 const (
@@ -14,8 +16,8 @@ const (
 	// channel. The channel never persists claim messages because they contain a
 	// one-time raw writer grant.
 	NodeChannelPath        = "/internal/v1/runtime-slot-node-channel"
-	NodeChannelSubprotocol = "sandbox0.runtime-slot.node.v1"
-	NodeChannelVersion     = 1
+	NodeChannelSubprotocol = "sandbox0.runtime-slot.node.v2"
+	NodeChannelVersion     = 2
 	NodeChannelMaxBytes    = 2 << 20
 	NodeChannelMaxError    = 4 << 10
 )
@@ -24,9 +26,10 @@ const (
 type NodeChannelCommandKind string
 
 const (
-	NodeChannelCommandClaim        NodeChannelCommandKind = "claim"
-	NodeChannelCommandCommandReady NodeChannelCommandKind = "command_ready"
-	NodeChannelCommandCleanup      NodeChannelCommandKind = "cleanup"
+	NodeChannelCommandNetworkPrepare NodeChannelCommandKind = "network_prepare"
+	NodeChannelCommandClaim          NodeChannelCommandKind = "claim"
+	NodeChannelCommandCommandReady   NodeChannelCommandKind = "command_ready"
+	NodeChannelCommandCleanup        NodeChannelCommandKind = "cleanup"
 )
 
 // NodeChannelErrorClass is a bounded retry classification returned by a node.
@@ -77,6 +80,12 @@ func (h NodeChannelHello) Validate() error {
 		NodeChannelCommandClaim,
 		NodeChannelCommandCommandReady,
 		NodeChannelCommandCleanup,
+	}
+	if len(h.Capabilities) == len(want)+1 {
+		if h.Capabilities[0] != NodeChannelCommandNetworkPrepare {
+			return fmt.Errorf("node channel network_prepare must be the first capability")
+		}
+		h.Capabilities = h.Capabilities[1:]
 	}
 	if len(h.Capabilities) != len(want) {
 		return fmt.Errorf("node channel capabilities are incomplete")
@@ -145,13 +154,64 @@ func (t NodeChannelTarget) validate(withControl bool) error {
 // canonical digest of every target and request byte, so a delayed response
 // cannot satisfy another command.
 type NodeChannelCommand struct {
-	Version      int                         `json:"version"`
-	RequestID    string                      `json:"request_id"`
-	Kind         NodeChannelCommandKind      `json:"kind"`
-	Target       NodeChannelTarget           `json:"target"`
-	Claim        *NodeClaimControlRequest    `json:"claim,omitempty"`
-	CommandReady *CommandReadyControlRequest `json:"command_ready,omitempty"`
-	Cleanup      *NodeCleanupControlRequest  `json:"cleanup,omitempty"`
+	Version        int                               `json:"version"`
+	RequestID      string                            `json:"request_id"`
+	Kind           NodeChannelCommandKind            `json:"kind"`
+	Target         NodeChannelTarget                 `json:"target"`
+	NetworkPrepare *NodeNetworkPrepareControlRequest `json:"network_prepare,omitempty"`
+	Claim          *NodeClaimControlRequest          `json:"claim,omitempty"`
+	CommandReady   *CommandReadyControlRequest       `json:"command_ready,omitempty"`
+	Cleanup        *NodeCleanupControlRequest        `json:"cleanup,omitempty"`
+}
+
+// NodeNetworkPrepareControlRequest binds one exact ctld-owned network policy
+// application before a writer grant is issued.
+type NodeNetworkPrepareControlRequest struct {
+	OperationID   string `json:"operation_id"`
+	ClaimID       string `json:"claim_id"`
+	SlotID        string `json:"slot_id"`
+	ClusterID     string `json:"cluster_id"`
+	AllocationID  string `json:"allocation_id"`
+	NodeID        string `json:"node_id"`
+	NodeUID       string `json:"node_uid"`
+	NodeBootID    string `json:"node_boot_id"`
+	NetNSIdentity string `json:"netns_identity"`
+	NetworkPolicy string `json:"network_policy"`
+	PolicyDigest  string `json:"policy_digest"`
+}
+
+// Validate rejects network preparation detached from its physical slot or
+// raw policy bytes.
+func (r NodeNetworkPrepareControlRequest) Validate() error {
+	for name, value := range map[string]string{
+		"operation_id": r.OperationID, "claim_id": r.ClaimID, "slot_id": r.SlotID,
+		"cluster_id": r.ClusterID, "allocation_id": r.AllocationID, "node_id": r.NodeID,
+		"node_uid": r.NodeUID, "node_boot_id": r.NodeBootID, "netns_identity": r.NetNSIdentity,
+	} {
+		if err := validateRequiredID(name, value); err != nil {
+			return err
+		}
+	}
+	if len(r.NetworkPolicy) > MaxNetworkPolicyBytes {
+		return fmt.Errorf("network policy exceeds 64 KiB")
+	}
+	if r.PolicyDigest != NetworkPolicyDigest(r.NetworkPolicy) {
+		return fmt.Errorf("network policy digest does not match raw policy")
+	}
+	return nil
+}
+
+// NewNodeChannelNetworkPrepareCommand builds an exact ctld-owned network
+// policy application command.
+func NewNodeChannelNetworkPrepareCommand(
+	target NodeChannelTarget,
+	request NodeNetworkPrepareControlRequest,
+) (NodeChannelCommand, error) {
+	command := NodeChannelCommand{
+		Version: NodeChannelVersion, Kind: NodeChannelCommandNetworkPrepare,
+		Target: target, NetworkPrepare: &request,
+	}
+	return sealNodeChannelCommand(command)
 }
 
 // NewNodeChannelClaimCommand builds an exact node-local claim command.
@@ -209,8 +269,24 @@ func (c NodeChannelCommand) Validate() error {
 		return fmt.Errorf("node channel request_id does not match the command")
 	}
 	switch c.Kind {
+	case NodeChannelCommandNetworkPrepare:
+		if c.NetworkPrepare == nil || c.Claim != nil || c.CommandReady != nil || c.Cleanup != nil {
+			return fmt.Errorf("network-prepare command must contain only a network request")
+		}
+		if err := c.Target.validate(false); err != nil {
+			return err
+		}
+		if err := c.NetworkPrepare.Validate(); err != nil {
+			return fmt.Errorf("network-prepare request: %w", err)
+		}
+		request := c.NetworkPrepare
+		if request.SlotID != c.Target.SlotID || request.ClusterID != c.Target.ClusterID ||
+			request.AllocationID != c.Target.AllocationID || request.NodeID != c.Target.NodeID ||
+			request.NodeUID != c.Target.NodeUID || request.NodeBootID != c.Target.NodeBootID {
+			return fmt.Errorf("network-prepare request does not match the node channel target")
+		}
 	case NodeChannelCommandClaim:
-		if c.Claim == nil || c.CommandReady != nil || c.Cleanup != nil {
+		if c.Claim == nil || c.NetworkPrepare != nil || c.CommandReady != nil || c.Cleanup != nil {
 			return fmt.Errorf("claim command must contain only a claim request")
 		}
 		if err := c.Target.validate(true); err != nil {
@@ -225,7 +301,7 @@ func (c NodeChannelCommand) Validate() error {
 			return fmt.Errorf("claim request does not match the node channel target")
 		}
 	case NodeChannelCommandCommandReady:
-		if c.CommandReady == nil || c.Claim != nil || c.Cleanup != nil {
+		if c.CommandReady == nil || c.NetworkPrepare != nil || c.Claim != nil || c.Cleanup != nil {
 			return fmt.Errorf("command-ready command must contain only a command-ready request")
 		}
 		if err := c.Target.validate(true); err != nil {
@@ -238,7 +314,7 @@ func (c NodeChannelCommand) Validate() error {
 			return fmt.Errorf("command-ready request does not match the node channel target")
 		}
 	case NodeChannelCommandCleanup:
-		if c.Cleanup == nil || c.Claim != nil || c.CommandReady != nil {
+		if c.Cleanup == nil || c.NetworkPrepare != nil || c.Claim != nil || c.CommandReady != nil {
 			return fmt.Errorf("cleanup command must contain only a cleanup request")
 		}
 		if err := c.Target.validate(false); err != nil {
@@ -272,13 +348,14 @@ func (c NodeChannelCommand) digest() (string, error) {
 // NodeChannelResult contains either one exact success payload or one bounded
 // classified error for the matching command.
 type NodeChannelResult struct {
-	Version         int                      `json:"version"`
-	RequestID       string                   `json:"request_id"`
-	Kind            NodeChannelCommandKind   `json:"kind"`
-	ControlResponse *NodeControlResponse     `json:"control_response,omitempty"`
-	CleanupProof    *NodeCleanupControlProof `json:"cleanup_proof,omitempty"`
-	Error           string                   `json:"error,omitempty"`
-	ErrorClass      NodeChannelErrorClass    `json:"error_class,omitempty"`
+	Version            int                               `json:"version"`
+	RequestID          string                            `json:"request_id"`
+	Kind               NodeChannelCommandKind            `json:"kind"`
+	NetworkPolicyToken *rootfshandoff.NetworkPolicyToken `json:"network_policy_token,omitempty"`
+	ControlResponse    *NodeControlResponse              `json:"control_response,omitempty"`
+	CleanupProof       *NodeCleanupControlProof          `json:"cleanup_proof,omitempty"`
+	Error              string                            `json:"error,omitempty"`
+	ErrorClass         NodeChannelErrorClass             `json:"error_class,omitempty"`
 }
 
 // ValidateFor rejects a response for any command other than the exact request.
@@ -291,19 +368,34 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 	}
 	if r.Error != "" || r.ErrorClass != "" {
 		if strings.TrimSpace(r.Error) != r.Error || r.Error == "" || len(r.Error) > NodeChannelMaxError ||
-			!r.ErrorClass.valid() || r.ControlResponse != nil || r.CleanupProof != nil {
+			!r.ErrorClass.valid() || r.NetworkPolicyToken != nil || r.ControlResponse != nil || r.CleanupProof != nil {
 			return fmt.Errorf("node channel error result is invalid")
 		}
 		return nil
 	}
 	switch command.Kind {
+	case NodeChannelCommandNetworkPrepare:
+		if r.NetworkPolicyToken == nil || r.ControlResponse != nil || r.CleanupProof != nil {
+			return fmt.Errorf("node channel network policy result is incomplete")
+		}
+		if err := r.NetworkPolicyToken.Validate(); err != nil {
+			return err
+		}
+		request := command.NetworkPrepare
+		if r.NetworkPolicyToken.PodUID != request.AllocationID ||
+			r.NetworkPolicyToken.ClaimID != request.ClaimID ||
+			r.NetworkPolicyToken.PolicyDigest != request.PolicyDigest ||
+			r.NetworkPolicyToken.NetNSIdentity != request.NetNSIdentity {
+			return fmt.Errorf("node channel network policy token belongs to another request")
+		}
+		return nil
 	case NodeChannelCommandClaim, NodeChannelCommandCommandReady:
-		if r.ControlResponse == nil || r.CleanupProof != nil {
+		if r.ControlResponse == nil || r.NetworkPolicyToken != nil || r.CleanupProof != nil {
 			return fmt.Errorf("node channel control result is incomplete")
 		}
 		return r.ControlResponse.Validate()
 	case NodeChannelCommandCleanup:
-		if r.CleanupProof == nil || r.ControlResponse != nil {
+		if r.CleanupProof == nil || r.NetworkPolicyToken != nil || r.ControlResponse != nil {
 			return fmt.Errorf("node channel cleanup result is incomplete")
 		}
 		if err := r.CleanupProof.Validate(); err != nil {

@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -73,9 +74,10 @@ type nodeChannelOutcome struct {
 }
 
 var (
-	_ http.Handler                  = (*ChannelHub)(nil)
-	_ Transport                     = (*ChannelHub)(nil)
-	_ runtimeslotclaim.NodeExecutor = (*ChannelHub)(nil)
+	_ http.Handler                     = (*ChannelHub)(nil)
+	_ Transport                        = (*ChannelHub)(nil)
+	_ runtimeslotclaim.NodeExecutor    = (*ChannelHub)(nil)
+	_ runtimeslotclaim.NetworkPreparer = (*ChannelHub)(nil)
 )
 
 // NewChannelHub constructs an authenticated regional node channel registry.
@@ -84,6 +86,36 @@ func NewChannelHub(verifier nodeauth.Verifier) (*ChannelHub, error) {
 		return nil, errors.New("runtime slot node channel verifier is required")
 	}
 	return &ChannelHub{verifier: verifier, routes: make(map[nodeChannelKey]*nodeChannelRoute)}, nil
+}
+
+// Prepare applies one exact network policy through a node channel that
+// explicitly advertises a ctld-owned network executor.
+func (h *ChannelHub) Prepare(
+	ctx context.Context,
+	request runtimeslotclaim.NetworkPrepareRequest,
+) (rootfshandoff.NetworkPolicyToken, error) {
+	controlRequest := protocol.NodeNetworkPrepareControlRequest{
+		OperationID: request.OperationID, ClaimID: request.ClaimID,
+		SlotID: request.SlotID, ClusterID: request.ClusterID,
+		AllocationID: request.AllocationID, NodeID: request.NodeID,
+		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+		NetNSIdentity: request.NetNSIdentity, NetworkPolicy: request.NetworkPolicy,
+		PolicyDigest: request.PolicyDigest,
+	}
+	target := protocol.NodeChannelTarget{
+		SlotID: request.SlotID, ClusterID: request.ClusterID,
+		AllocationID: request.AllocationID, NodeID: request.NodeID,
+		NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+	}
+	command, err := protocol.NewNodeChannelNetworkPrepareCommand(target, controlRequest)
+	if err != nil {
+		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("build node network-prepare command: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return rootfshandoff.NetworkPolicyToken{}, err
+	}
+	return *result.NetworkPolicyToken, nil
 }
 
 // ServeHTTP upgrades one verified node request and registers its exact boot

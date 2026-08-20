@@ -65,6 +65,7 @@ type NetworkPrepareRequest struct {
 	OperationID   string
 	ClaimID       string
 	SlotID        string
+	ClusterID     string
 	AllocationID  string
 	NodeID        string
 	NodeUID       string
@@ -305,7 +306,8 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	target := nodeTarget(slot)
 	policyToken, err := p.network.Prepare(ctx, NetworkPrepareRequest{
 		OperationID: normalized.OperationID, ClaimID: ids.claimID, SlotID: slot.ID,
-		AllocationID: slot.AllocationID, NodeID: slot.NodeID, NodeUID: slot.NodeUID,
+		ClusterID: slot.ClusterID, AllocationID: slot.AllocationID,
+		NodeID: slot.NodeID, NodeUID: slot.NodeUID,
 		NodeBootID: slot.NodeBootID, NetNSIdentity: slot.NetNSIdentity,
 		NetworkPolicy: normalized.NetworkPolicy, PolicyDigest: policyDigest,
 	})

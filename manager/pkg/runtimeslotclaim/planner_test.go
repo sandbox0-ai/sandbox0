@@ -343,6 +343,12 @@ func TestPlannerExecutesCompleteRegionToProcdClaim(t *testing.T) {
 		issue.ConsumeExpiresAt != fixture.store.slot.ClaimLeaseExpiresAt {
 		t.Fatalf("writer issue request = %+v", issue)
 	}
+	fixture.network.mu.Lock()
+	networkRequests := append([]NetworkPrepareRequest(nil), fixture.network.requests...)
+	fixture.network.mu.Unlock()
+	if len(networkRequests) != 1 || networkRequests[0].ClusterID != "cluster-1" {
+		t.Fatalf("network prepare requests = %+v", networkRequests)
+	}
 	fixture.node.mu.Lock()
 	defer fixture.node.mu.Unlock()
 	if len(fixture.node.claims) != 1 || len(fixture.node.commands) != 1 ||

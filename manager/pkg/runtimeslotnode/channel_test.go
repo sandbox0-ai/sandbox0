@@ -46,10 +46,26 @@ type channelTestExecutor struct {
 	mu         sync.Mutex
 	cleanupErr error
 	calls      []protocol.NodeCleanupControlRequest
+	networks   []protocol.NodeNetworkPrepareControlRequest
 	claims     []protocol.NodeClaimControlRequest
 	commands   []protocol.CommandReadyControlRequest
 	entered    chan<- struct{}
 	release    <-chan struct{}
+}
+
+func (e *channelTestExecutor) PrepareNetwork(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodeNetworkPrepareControlRequest,
+) (rootfshandoff.NetworkPolicyToken, error) {
+	e.mu.Lock()
+	e.networks = append(e.networks, request)
+	e.mu.Unlock()
+	return rootfshandoff.NetworkPolicyToken{
+		PodUID: request.AllocationID, PodSandboxID: "allocation-network-1",
+		ClaimID: request.ClaimID, NetworkEpoch: 1, PolicyDigest: request.PolicyDigest,
+		PodIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
+	}, nil
 }
 
 func TestNodeChannelIdentityMustMatchAuthenticatedRoute(t *testing.T) {
@@ -145,7 +161,8 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1",
-		Executor: executor, ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		Executor: executor, NetworkExecutor: executor,
+		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-1",
 	})
 	if err != nil {
@@ -161,7 +178,8 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1",
-		Executor: standbyExecutor, ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
+		Executor: standbyExecutor, NetworkExecutor: standbyExecutor,
+		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-2",
 	})
 	if err != nil {
@@ -176,6 +194,17 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
 		ControlEndpoint: "unix:///var/run/sandbox0/nomad-slots/task.sock",
 	}
+	networkRequest := runtimeslotclaim.NetworkPrepareRequest{
+		OperationID: "operation-1", ClaimID: "claim-1", SlotID: "slot-1",
+		ClusterID: "cluster-1", AllocationID: "allocation-1", NodeID: "node-1",
+		NodeUID: "node-uid-1", NodeBootID: "boot-1", NetNSIdentity: "1:2",
+		NetworkPolicy: `{"mode":"block-all"}`,
+	}
+	networkRequest.PolicyDigest = protocol.NetworkPolicyDigest(networkRequest.NetworkPolicy)
+	policyToken, err := hub.Prepare(t.Context(), networkRequest)
+	if err != nil || policyToken.PolicyDigest != networkRequest.PolicyDigest || policyToken.PodIP != "192.0.2.2" {
+		t.Fatalf("network prepare token = %+v, %v", policyToken, err)
+	}
 	claimRequest := testChannelClaimRequest()
 	claimResponse, err := hub.Claim(t.Context(), nodeTarget, claimRequest)
 	if err != nil || claimResponse.Phase != string(protocol.StateActive) {
@@ -187,7 +216,14 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		t.Fatalf("node command-ready response = %+v, %v", commandResponse, err)
 	}
 	executor.mu.Lock()
-	if len(executor.claims) != 1 || executor.claims[0].PolicyToken != claimRequest.PolicyToken ||
+	if len(executor.networks) != 1 || executor.networks[0] != (protocol.NodeNetworkPrepareControlRequest{
+		OperationID: networkRequest.OperationID, ClaimID: networkRequest.ClaimID,
+		SlotID: networkRequest.SlotID, ClusterID: networkRequest.ClusterID,
+		AllocationID: networkRequest.AllocationID, NodeID: networkRequest.NodeID,
+		NodeUID: networkRequest.NodeUID, NodeBootID: networkRequest.NodeBootID,
+		NetNSIdentity: networkRequest.NetNSIdentity, NetworkPolicy: networkRequest.NetworkPolicy,
+		PolicyDigest: networkRequest.PolicyDigest,
+	}) || len(executor.claims) != 1 || executor.claims[0].PolicyToken != claimRequest.PolicyToken ||
 		len(executor.commands) != 1 || executor.commands[0] != commandRequest {
 		t.Fatalf("node control calls = claims %d, commands %d", len(executor.claims), len(executor.commands))
 	}

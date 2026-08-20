@@ -3,6 +3,8 @@ package runtimeslot
 import (
 	"strings"
 	"testing"
+
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
 func TestNodeChannelCommandBindsExactTargetAndRequest(t *testing.T) {
@@ -27,6 +29,13 @@ func TestNodeChannelCommandBindsExactTargetAndRequest(t *testing.T) {
 }
 
 func TestNodeChannelCommandRejectsCrossTargetPayloads(t *testing.T) {
+	networkTarget := testNodeChannelTarget(false)
+	network := testNodeChannelNetworkPrepare()
+	network.NodeBootID = "another-boot"
+	if _, err := NewNodeChannelNetworkPrepareCommand(networkTarget, network); err == nil {
+		t.Fatal("cross-boot network preparation was accepted")
+	}
+
 	target := testNodeChannelTarget(true)
 	claim := testNodeChannelClaim()
 	claim.Stage.Identity.NodeUID = "another-node"
@@ -45,6 +54,35 @@ func TestNodeChannelCommandRejectsCrossTargetPayloads(t *testing.T) {
 	cleanup.AllocationID = "another-allocation"
 	if _, err := NewNodeChannelCleanupCommand(cleanupTarget, cleanup); err == nil {
 		t.Fatal("cross-allocation cleanup was accepted")
+	}
+}
+
+func TestNodeChannelNetworkResultRequiresValidPolicyToken(t *testing.T) {
+	request := testNodeChannelNetworkPrepare()
+	command, err := NewNodeChannelNetworkPrepareCommand(testNodeChannelTarget(false), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := rootfshandoff.NetworkPolicyToken{
+		PodUID: request.AllocationID, PodSandboxID: "allocation-network-1",
+		ClaimID: request.ClaimID, NetworkEpoch: 1, PolicyDigest: request.PolicyDigest,
+		PodIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
+	}
+	result := NodeChannelResult{
+		Version: NodeChannelVersion, RequestID: command.RequestID,
+		Kind: command.Kind, NetworkPolicyToken: &token,
+	}
+	if err := result.ValidateFor(command); err != nil {
+		t.Fatal(err)
+	}
+	result.NetworkPolicyToken.ClaimID = "another-claim"
+	if err := result.ValidateFor(command); err == nil {
+		t.Fatal("network policy token for another request was accepted")
+	}
+	result.NetworkPolicyToken.ClaimID = request.ClaimID
+	result.NetworkPolicyToken.PolicyDigest = strings.Repeat("0", 64)
+	if err := result.ValidateFor(command); err == nil {
+		t.Fatal("network policy token for another policy was accepted")
 	}
 }
 
@@ -116,9 +154,34 @@ func TestNodeChannelHelloRequiresCanonicalCapabilities(t *testing.T) {
 	if err := hello.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	if hello.Supports(NodeChannelCommandNetworkPrepare) {
+		t.Fatal("legacy-capability hello advertised network preparation")
+	}
 	hello.Capabilities[0], hello.Capabilities[1] = hello.Capabilities[1], hello.Capabilities[0]
 	if err := hello.Validate(); err == nil {
 		t.Fatal("reordered capabilities were accepted")
+	}
+	hello = testNodeChannelHello()
+	hello.Capabilities = append([]NodeChannelCommandKind{NodeChannelCommandNetworkPrepare}, hello.Capabilities...)
+	if err := hello.Validate(); err != nil {
+		t.Fatalf("network-capable hello error = %v", err)
+	}
+	if !hello.Supports(NodeChannelCommandNetworkPrepare) {
+		t.Fatal("network-capable hello omitted network preparation")
+	}
+	hello.Capabilities[0], hello.Capabilities[1] = hello.Capabilities[1], hello.Capabilities[0]
+	if err := hello.Validate(); err == nil {
+		t.Fatal("misordered network capability was accepted")
+	}
+}
+
+func testNodeChannelNetworkPrepare() NodeNetworkPrepareControlRequest {
+	policy := `{"mode":"block-all"}`
+	return NodeNetworkPrepareControlRequest{
+		OperationID: "operation-1", ClaimID: "claim-1", SlotID: "slot-1",
+		ClusterID: "cluster-1", AllocationID: "allocation-1", NodeID: "node-1",
+		NodeUID: "node-uid-1", NodeBootID: "boot-1", NetNSIdentity: "netns-v1:1:2",
+		NetworkPolicy: policy, PolicyDigest: NetworkPolicyDigest(policy),
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/gorilla/websocket"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
 const (
@@ -44,20 +45,28 @@ type NodeChannelExecutor interface {
 	Cleanup(context.Context, NodeChannelTarget, NodeCleanupControlRequest) (NodeCleanupControlProof, error)
 }
 
+// NodeChannelNetworkExecutor owns ctld-backed policy application. It is
+// separate so a node agent cannot advertise network preparation until the
+// authoritative local runtime is configured.
+type NodeChannelNetworkExecutor interface {
+	PrepareNetwork(context.Context, NodeChannelTarget, NodeNetworkPrepareControlRequest) (rootfshandoff.NetworkPolicyToken, error)
+}
+
 // NodeChannelAgentConfig configures one node-initiated mTLS command stream.
 // Certificates, CA, boot ID, and bearer token are reloaded on reconnect.
 type NodeChannelAgentConfig struct {
-	BaseURL        string
-	CAFile         string
-	ClientCertFile string
-	ClientKeyFile  string
-	TokenFile      string
-	PeerURISAN     string
-	ClusterID      string
-	NodeID         string
-	NodeUID        string
-	NodeBootIDFile string
-	Executor       NodeChannelExecutor
+	BaseURL         string
+	CAFile          string
+	ClientCertFile  string
+	ClientKeyFile   string
+	TokenFile       string
+	PeerURISAN      string
+	ClusterID       string
+	NodeID          string
+	NodeUID         string
+	NodeBootIDFile  string
+	Executor        NodeChannelExecutor
+	NetworkExecutor NodeChannelNetworkExecutor
 
 	OperationTimeout time.Duration
 	ReconnectMin     time.Duration
@@ -214,6 +223,9 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 			NodeChannelCommandClaim, NodeChannelCommandCommandReady, NodeChannelCommandCleanup,
 		},
 	}
+	if a.config.NetworkExecutor != nil {
+		hello.Capabilities = append([]NodeChannelCommandKind{NodeChannelCommandNetworkPrepare}, hello.Capabilities...)
+	}
 	if err := hello.Validate(); err != nil {
 		return connectedAt, fmt.Errorf("validate node channel hello: %w: %w", err, errdefs.ErrInvalidArgument)
 	}
@@ -289,6 +301,16 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 	defer cancel()
 	var err error
 	switch command.Kind {
+	case NodeChannelCommandNetworkPrepare:
+		if a.config.NetworkExecutor == nil {
+			err = fmt.Errorf("node network policy executor is unavailable: %w", errdefs.ErrFailedPrecondition)
+			break
+		}
+		var token rootfshandoff.NetworkPolicyToken
+		token, err = a.config.NetworkExecutor.PrepareNetwork(operationCtx, command.Target, *command.NetworkPrepare)
+		if err == nil {
+			result.NetworkPolicyToken = &token
+		}
 	case NodeChannelCommandClaim:
 		var response NodeControlResponse
 		response, err = a.config.Executor.Claim(operationCtx, command.Target, *command.Claim)
@@ -315,6 +337,7 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 			return result
 		} else {
 			err = fmt.Errorf("node executor returned an invalid result: %w: %w", validationErr, errdefs.ErrUnavailable)
+			result.NetworkPolicyToken = nil
 			result.ControlResponse = nil
 			result.CleanupProof = nil
 		}

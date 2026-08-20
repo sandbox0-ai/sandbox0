@@ -8,12 +8,25 @@ import (
 	"testing"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
 type testNodeChannelExecutor struct {
 	claimErr   error
 	commandErr error
 	cleanupErr error
+}
+
+func (e *testNodeChannelExecutor) PrepareNetwork(
+	_ context.Context,
+	_ NodeChannelTarget,
+	request NodeNetworkPrepareControlRequest,
+) (rootfshandoff.NetworkPolicyToken, error) {
+	return rootfshandoff.NetworkPolicyToken{
+		PodUID: request.AllocationID, PodSandboxID: "allocation-network-1",
+		ClaimID: request.ClaimID, NetworkEpoch: 1, PolicyDigest: request.PolicyDigest,
+		PodIP: "192.0.2.2", CtldGeneration: "ctld-1", NetNSIdentity: request.NetNSIdentity,
+	}, nil
 }
 
 func (e *testNodeChannelExecutor) Claim(
@@ -64,13 +77,22 @@ func (e *testNodeChannelExecutor) Cleanup(
 func TestNodeChannelAgentExecutesExactCommandsAndClassifiesErrors(t *testing.T) {
 	executor := &testNodeChannelExecutor{}
 	agent := &NodeChannelAgent{config: NodeChannelAgentConfig{
-		Executor: executor, OperationTimeout: defaultNodeChannelOperationTimeout,
+		Executor: executor, NetworkExecutor: executor,
+		OperationTimeout: defaultNodeChannelOperationTimeout,
 	}}
+	network, err := NewNodeChannelNetworkPrepareCommand(testNodeChannelTarget(false), testNodeChannelNetworkPrepare())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := agent.execute(t.Context(), network)
+	if err := result.ValidateFor(network); err != nil || result.NetworkPolicyToken == nil {
+		t.Fatalf("network result = %+v, %v", result, err)
+	}
 	claim, err := NewNodeChannelClaimCommand(testNodeChannelTarget(true), testNodeClaimControlRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := agent.execute(t.Context(), claim)
+	result = agent.execute(t.Context(), claim)
 	if err := result.ValidateFor(claim); err != nil || result.ControlResponse == nil {
 		t.Fatalf("claim result = %+v, %v", result, err)
 	}

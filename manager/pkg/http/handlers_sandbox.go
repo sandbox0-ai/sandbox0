@@ -402,6 +402,18 @@ func (s *Server) updateSandbox(c *gin.Context) {
 			spec.JSONError(c, http.StatusTooManyRequests, "quota_exceeded", err.Error())
 			return
 		}
+		if errors.Is(err, service.ErrSandboxRuntimeUpdateUnavailable) {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			return
+		}
+		if apierrors.IsConflict(err) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox conflicts with another lifecycle operation")
+			return
+		}
+		if apierrors.IsNotFound(err) {
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
+			return
+		}
 		s.logger.Error("Failed to update sandbox",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),

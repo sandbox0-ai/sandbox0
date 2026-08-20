@@ -81,6 +81,7 @@ func CloneSandboxConfig(cfg *sandboxstore.SandboxConfig) *sandboxstore.SandboxCo
 	cloned.Resources = cloneSandboxResourceConfig(cfg.Resources)
 	cloned.TTL = cloneInt32Ptr(cfg.TTL)
 	cloned.HardTTL = cloneInt32Ptr(cfg.HardTTL)
+	cloned.AutoResume = cloneBoolPtr(cfg.AutoResume)
 	if cloned.Network != nil {
 		cloned.Network = sanitizedNetworkPolicyForPersistence(cloned.Network)
 	}
@@ -96,6 +97,14 @@ func cloneInt32Ptr(v *int32) *int32 {
 		return nil
 	}
 	return int32Ptr(*v)
+}
+
+func cloneBoolPtr(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
 }
 
 func cloneSandboxResourceConfig(resources *managerapi.SandboxResourceConfig) *managerapi.SandboxResourceConfig {

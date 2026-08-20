@@ -369,6 +369,74 @@ func TestRefreshNomadSandboxRejectsTerminatingRecord(t *testing.T) {
 	assert.Equal(t, now.Add(time.Minute), record.ExpiresAt)
 }
 
+func TestUpdateActiveNomadSandboxPersistsControlPlaneFieldsOnly(t *testing.T) {
+	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	ttl := int32(60)
+	hardTTL := int32(120)
+	autoResume := true
+	store := &memorySandboxStore{
+		records: map[string]*sandboxstore.SandboxRecord{
+			"sandbox-1": {
+				ID: "sandbox-1", TeamID: "team-1", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+				DesiredState: sandboxstore.SandboxDesiredStateActive, CurrentPodName: "allocation-1",
+				Config:    sandboxstore.SandboxConfig{TTL: &ttl, HardTTL: &hardTTL, AutoResume: &autoResume},
+				ExpiresAt: now.Add(time.Minute), HardExpiresAt: now.Add(2 * time.Minute),
+			},
+		},
+		runtimeSlots: map[string]*sandboxstore.RuntimeSlot{
+			"sandbox-1": {
+				ID: "slot-1", SandboxID: "sandbox-1", AllocationID: "allocation-1",
+				State: sandboxstore.RuntimeSlotStateActive, ProcdInstanceID: "procd-1",
+				ProcdAddress: "http://192.0.2.2:49983", CommandReadyDigest: make([]byte, 32),
+				CommandReadyAt: now, HeartbeatExpiresAt: now.Add(time.Minute), AuthorityObservedAt: now,
+			},
+		},
+	}
+	client := fake.NewSimpleClientset()
+	svc := &SandboxService{sandboxStore: store, k8sClient: client, clock: fixedClock{now: now}, logger: zap.NewNop()}
+	newTTL := int32(90)
+	newHardTTL := int32(180)
+	newAutoResume := false
+
+	updated, err := svc.UpdateSandbox(context.Background(), "sandbox-1", &SandboxUpdateConfig{
+		TTL: &newTTL, HardTTL: &newHardTTL, AutoResume: &newAutoResume,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, managerapi.SandboxStatusRunning, updated.Status)
+	assert.Equal(t, "http://192.0.2.2:49983", updated.InternalAddr)
+	record, err := store.GetSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	require.NotNil(t, record.Config.TTL)
+	require.NotNil(t, record.Config.HardTTL)
+	require.NotNil(t, record.Config.AutoResume)
+	assert.Equal(t, newTTL, *record.Config.TTL)
+	assert.Equal(t, newHardTTL, *record.Config.HardTTL)
+	assert.False(t, *record.Config.AutoResume)
+	assert.Equal(t, now.Add(90*time.Second), record.ExpiresAt)
+	assert.Equal(t, now.Add(180*time.Second), record.HardExpiresAt)
+	assert.Empty(t, client.Actions())
+}
+
+func TestUpdateActiveNomadSandboxRejectsUnorchestratedRuntimeMutation(t *testing.T) {
+	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
+		"sandbox-1": {
+			ID: "sandbox-1", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+			DesiredState: sandboxstore.SandboxDesiredStateActive,
+			Config:       sandboxstore.SandboxConfig{EnvVars: map[string]string{"OLD": "value"}},
+		},
+	}}
+	svc := &SandboxService{sandboxStore: store, clock: fixedClock{now: now}, logger: zap.NewNop()}
+
+	_, err := svc.UpdateSandbox(context.Background(), "sandbox-1", &SandboxUpdateConfig{
+		EnvVars: map[string]string{"NEW": "value"},
+	})
+	require.ErrorIs(t, err, ErrSandboxRuntimeUpdateUnavailable)
+	record, getErr := store.GetSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, getErr)
+	assert.Equal(t, map[string]string{"OLD": "value"}, record.Config.EnvVars)
+}
+
 func TestUpdateSandboxEnvVarsPublishesRuntimeAssignmentAndConfig(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Annotations[controller.AnnotationConfig] = `{"env_vars":{"OLD":"old"},"ttl":300}`

@@ -1,6 +1,7 @@
 package rootfswriterauthority
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
@@ -51,6 +52,29 @@ func TestAuthorityServerRejectsMissingOrInvalidClientCA(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("invalid client CA was accepted")
+	}
+}
+
+func TestAuthorityServerPublishesReadyAfterBinding(t *testing.T) {
+	certFile, keyFile, caFile := writeAuthorityServerTestIdentity(t)
+	server, err := NewServer(ServerConfig{
+		Address: "127.0.0.1:0", CertFile: certFile, KeyFile: keyFile,
+		ClientCAFile: caFile, Handler: http.NotFoundHandler(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- server.Start(ctx) }()
+	select {
+	case <-server.Ready():
+	case <-time.After(5 * time.Second):
+		t.Fatal("authority server did not publish readiness")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Start() error = %v", err)
 	}
 }
 

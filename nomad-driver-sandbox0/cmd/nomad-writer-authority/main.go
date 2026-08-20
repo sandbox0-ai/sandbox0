@@ -22,7 +22,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -32,17 +31,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauthority"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
-	managerauthority "github.com/sandbox0-ai/sandbox0/manager/pkg/rootfswriterauthority"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotauthority"
-	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotnode"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotreconciler"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
-	runtimeslotprotocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 type migrateLogger struct {
@@ -340,67 +336,14 @@ func serve(
 		renewalGrace = leaseTTL / 2
 	}
 	renewalGrace = min(renewalGrace, 5*time.Second)
-	verifier, err := nodeauth.NewCertificateVerifier(identities)
-	if err != nil {
-		return err
-	}
-	handler, err := managerauthority.NewHandler(managerauthority.HandlerConfig{
-		Verifier: verifier,
-		Store:    store, LeaseTTL: leaseTTL,
-		RenewalPolicy: sandboxstore.RootFSWriterLeaseRenewalPolicy{
-			LeaseTTL: leaseTTL, GracePeriod: renewalGrace,
-		},
+	authority, err := nodeauthority.New(nodeauthority.Config{
+		Store: store, Address: address, CertFile: certFile, KeyFile: keyFile,
+		ClientCAFile: clientCAFile, Identities: identities,
+		WriterLeaseTTL: leaseTTL, WriterRenewalGrace: renewalGrace,
+		RuntimeSlotHeartbeatTTL: runtimeSlotHeartbeatTTL, Terminal: terminalConfig,
 	})
 	if err != nil {
-		return fmt.Errorf("create writer handler: %w", err)
-	}
-	runtimeSlotHandler, err := runtimeslotauthority.NewHandler(runtimeslotauthority.HandlerConfig{
-		Verifier: verifier, Store: store, HeartbeatTTL: runtimeSlotHeartbeatTTL,
-	})
-	if err != nil {
-		return fmt.Errorf("create runtime slot handler: %w", err)
-	}
-	nodeChannelHub, err := runtimeslotnode.NewChannelHub(verifier)
-	if err != nil {
-		return fmt.Errorf("create runtime slot node channel: %w", err)
-	}
-	defer nodeChannelHub.Close()
-	terminalWorker, err := runtimeslotterminal.New(store, nodeChannelHub, terminalConfig)
-	if err != nil {
-		return err
-	}
-	mux := http.NewServeMux()
-	mux.Handle("/internal/v1/rootfs-writer-grants", http.NotFoundHandler())
-	lifecycleHandler, err := managerauthority.NewLifecycleHandler(verifier, store, handler)
-	if err != nil {
-		return fmt.Errorf("create writer lifecycle handler: %w", err)
-	}
-	mux.Handle("/internal/v1/rootfs-writer-grants/", lifecycleHandler)
-	mux.Handle(strings.TrimSuffix(runtimeslotprotocol.PathPrefix, "/"), http.NotFoundHandler())
-	mux.Handle(runtimeslotprotocol.PathPrefix, runtimeSlotHandler)
-	mux.Handle(runtimeslotprotocol.NodeChannelPath, nodeChannelHub)
-	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, request *http.Request) {
-		usage, err := store.GetRootFSCompositeBacklogUsage(request.Context())
-		if err != nil {
-			http.Error(writer, "composite backlog unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		writer.Header().Set("X-Sandbox0-RootFS-Composite-Bytes", strconv.FormatInt(usage.UsedDescriptorBytes, 10))
-		writer.Header().Set("X-Sandbox0-RootFS-Composite-Limit", strconv.FormatInt(usage.MaxDescriptorBytes, 10))
-		writer.Header().Set("X-Sandbox0-RootFS-Composite-Generations", strconv.FormatInt(usage.GenerationCount, 10))
-		writer.WriteHeader(http.StatusOK)
-		_, _ = writer.Write([]byte("ok\n"))
-	})
-	authorized, err := nodeauth.NewCertificateMiddleware(identities, mux)
-	if err != nil {
-		return err
-	}
-	authorityServer, err := managerauthority.NewServer(managerauthority.ServerConfig{
-		Address: address, CertFile: certFile, KeyFile: keyFile,
-		ClientCAFile: clientCAFile, Handler: authorized,
-	})
-	if err != nil {
-		return fmt.Errorf("create writer authority server: %w", err)
+		return fmt.Errorf("create node authority: %w", err)
 	}
 	serviceCtx, cancelService := context.WithCancel(ctx)
 	defer cancelService()
@@ -414,14 +357,14 @@ func serve(
 	})
 	var terminalErr <-chan error
 	var terminalDone <-chan struct{}
-	if terminalWorker != nil {
+	if authority.TerminalEnabled() {
 		errorsCh := make(chan error, 1)
 		doneCh := make(chan struct{})
 		terminalErr = errorsCh
 		terminalDone = doneCh
 		go func() {
 			defer close(doneCh)
-			errorsCh <- terminalWorker.Run(serviceCtx, logRuntimeSlotTerminalPass)
+			errorsCh <- authority.RunTerminal(serviceCtx, logRuntimeSlotTerminalPass)
 		}()
 		log.Printf("Runtime slot terminal reconciler enabled: interval=%s timeout=%s limit=%d",
 			terminalConfig.Interval, terminalConfig.PassTimeout, terminalConfig.ScanLimit)
@@ -437,7 +380,7 @@ func serve(
 		}
 	}()
 	errCh := make(chan error, 1)
-	go func() { errCh <- authorityServer.Start(serviceCtx) }()
+	go func() { errCh <- authority.RunServer(serviceCtx) }()
 	log.Printf("Nomad RootFS writer authority listening on %s", address)
 	select {
 	case err := <-errCh:

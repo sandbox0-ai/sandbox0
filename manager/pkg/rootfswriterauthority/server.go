@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,8 @@ type Server struct {
 	address string
 	config  *tls.Config
 	http    *http.Server
+	ready   chan struct{}
+	readyMu sync.Once
 }
 
 func NewServer(config ServerConfig) (*Server, error) {
@@ -57,7 +60,17 @@ func NewServer(config ServerConfig) (*Server, error) {
 			ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second,
 			IdleTimeout: 15 * time.Second, MaxHeaderBytes: 16 << 10,
 		},
+		ready: make(chan struct{}),
 	}, nil
+}
+
+// Ready closes after the TCP listener has bound successfully. Callers that
+// perform destructive reconciliation can wait for this barrier.
+func (s *Server) Ready() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.ready
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -65,6 +78,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen for writer authority: %w", err)
 	}
+	s.readyMu.Do(func() { close(s.ready) })
 	tlsListener := tls.NewListener(listener, s.config)
 	errorsCh := make(chan error, 1)
 	go func() { errorsCh <- s.http.Serve(tlsListener) }()

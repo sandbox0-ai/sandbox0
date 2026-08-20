@@ -566,8 +566,15 @@ func (s *Server) refreshSandbox(c *gin.Context) {
 
 	resp, err := s.sandboxService.RefreshSandbox(c.Request.Context(), sandboxID, &req)
 	if err != nil {
-		if errors.Is(err, service.ErrInvalidClaimRequest) {
+		switch {
+		case errors.Is(err, service.ErrInvalidClaimRequest):
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		case apierrors.IsConflict(err):
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox termination is in progress")
+			return
+		case apierrors.IsNotFound(err):
+			spec.JSONError(c, http.StatusNotFound, spec.CodeNotFound, "sandbox not found")
 			return
 		}
 		s.logger.Error("Failed to refresh sandbox",

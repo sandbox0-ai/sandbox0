@@ -319,6 +319,56 @@ func TestRefreshSandboxPersistsExpirationRecord(t *testing.T) {
 	assert.Equal(t, time.Date(2026, time.March, 7, 12, 2, 0, 0, time.UTC), record.HardExpiresAt)
 }
 
+func TestRefreshNomadSandboxPersistsExpirationWithoutKubernetesPod(t *testing.T) {
+	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	ttl := int32(60)
+	hardTTL := int32(120)
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
+		"sandbox-1": {
+			ID: "sandbox-1", TeamID: "team-1", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+			DesiredState: sandboxstore.SandboxDesiredStateActive,
+			Config:       sandboxstore.SandboxConfig{TTL: &ttl, HardTTL: &hardTTL},
+			ExpiresAt:    now.Add(time.Minute), HardExpiresAt: now.Add(2 * time.Minute),
+		},
+	}}
+	svc := &SandboxService{
+		sandboxStore: store, k8sClient: fake.NewSimpleClientset(),
+		clock: fixedClock{now: now}, logger: zap.NewNop(),
+	}
+
+	resp, err := svc.RefreshSandbox(context.Background(), "sandbox-1", &RefreshRequest{Duration: 90})
+	require.NoError(t, err)
+	require.NotNil(t, resp.ExpiresAt)
+	require.NotNil(t, resp.HardExpiresAt)
+	assert.Equal(t, now.Add(90*time.Second), *resp.ExpiresAt)
+	assert.Equal(t, now.Add(120*time.Second), *resp.HardExpiresAt)
+	record, err := store.GetSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, err)
+	assert.Equal(t, *resp.ExpiresAt, record.ExpiresAt)
+	assert.Equal(t, *resp.HardExpiresAt, record.HardExpiresAt)
+	assert.Empty(t, svc.k8sClient.(*fake.Clientset).Actions())
+}
+
+func TestRefreshNomadSandboxRejectsTerminatingRecord(t *testing.T) {
+	now := time.Date(2026, time.March, 7, 12, 0, 0, 0, time.UTC)
+	ttl := int32(60)
+	store := &memorySandboxStore{records: map[string]*sandboxstore.SandboxRecord{
+		"sandbox-1": {
+			ID: "sandbox-1", RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+			DesiredState: sandboxstore.SandboxDesiredStateTerminating,
+			Config:       sandboxstore.SandboxConfig{TTL: &ttl}, ExpiresAt: now.Add(time.Minute),
+		},
+	}}
+	svc := &SandboxService{sandboxStore: store, clock: fixedClock{now: now}, logger: zap.NewNop()}
+
+	_, err := svc.RefreshSandbox(context.Background(), "sandbox-1", &RefreshRequest{Duration: 30})
+	require.Error(t, err)
+	require.True(t, apierrors.IsConflict(err), "error = %v", err)
+	record, getErr := store.GetSandbox(context.Background(), "sandbox-1")
+	require.NoError(t, getErr)
+	assert.Equal(t, now.Add(time.Minute), record.ExpiresAt)
+}
+
 func TestUpdateSandboxEnvVarsPublishesRuntimeAssignmentAndConfig(t *testing.T) {
 	pod := testSandboxPod()
 	pod.Annotations[controller.AnnotationConfig] = `{"env_vars":{"OLD":"old"},"ttl":300}`

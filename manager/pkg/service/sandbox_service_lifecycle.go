@@ -1545,6 +1545,15 @@ type RefreshResponse struct {
 // RefreshSandbox refreshes the TTL and HardTTL of a sandbox
 func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, req *RefreshRequest) (*RefreshResponse, error) {
 	s.logger.Info("Refreshing sandbox TTL", zap.String("sandboxID", sandboxID))
+	if s.sandboxStore != nil {
+		record, err := s.sandboxStore.GetSandbox(ctx, sandboxID)
+		if err != nil {
+			return nil, fmt.Errorf("get sandbox record: %w", err)
+		}
+		if record != nil && record.RuntimeBackend == sandboxstore.SandboxRuntimeBackendNomad {
+			return s.refreshNomadSandbox(ctx, sandboxID, req)
+		}
+	}
 
 	// Find the pod by sandbox ID
 	pod, err := s.getSandboxPod(ctx, sandboxID)
@@ -1581,36 +1590,19 @@ func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, r
 		}
 		now := s.clock.Now()
 
-		// Determine the TTL to apply. Explicit duration enables TTL for that duration; otherwise use original config/default.
-		var ttlToApply *int32
-		if req != nil {
-			if req.Duration < 0 {
-				return fmt.Errorf("%w: duration must be >= 0", ErrInvalidClaimRequest)
-			}
-			if req.Duration > 0 {
-				ttlToApply = int32Ptr(req.Duration)
-			}
-		}
-		if ttlToApply == nil && originalConfig.TTL != nil {
-			ttlToApply = originalConfig.TTL
-		} else if ttlToApply == nil && s.config.DefaultTTL > 0 {
-			ttlToApply = int32Ptr(int32(s.config.DefaultTTL.Seconds()))
-		}
-		if ttlToApply != nil && *ttlToApply > 0 {
-			ttlDuration = time.Duration(*ttlToApply) * time.Second
-		}
-		if err := validateSandboxConfigLifecycle(ttlToApply, originalConfig.HardTTL); err != nil {
+		plan, err := buildSandboxRefreshPlan(originalConfig, s.config.DefaultTTL, now, req)
+		if err != nil {
 			return err
 		}
-		setExpirationAnnotation(podCopy.Annotations, now, ttlToApply)
-
-		newExpiresAt = parseRFC3339AnnotationTime(podCopy.Annotations, controller.AnnotationExpiresAt)
+		ttlDuration = plan.ttlDuration
+		setExpirationAnnotation(podCopy.Annotations, now, plan.ttl)
+		newExpiresAt = plan.expiresAt
 
 		// Also refresh HardTTL if configured.
 		newHardExpiresAt = time.Time{}
 		if originalConfig.HardTTL != nil && *originalConfig.HardTTL > 0 {
 			setHardExpirationAnnotation(podCopy.Annotations, now, originalConfig.HardTTL)
-			newHardExpiresAt = parseRFC3339AnnotationTime(podCopy.Annotations, controller.AnnotationHardExpiresAt)
+			newHardExpiresAt = plan.hardExpiresAt
 			s.logger.Info("Refreshing hard TTL",
 				zap.String("sandboxID", sandboxID),
 				zap.Time("newHardExpiresAt", newHardExpiresAt),
@@ -1641,5 +1633,85 @@ func (s *SandboxService) RefreshSandbox(ctx context.Context, sandboxID string, r
 		SandboxID:     sandboxID,
 		ExpiresAt:     optionalTime(newExpiresAt),
 		HardExpiresAt: optionalTime(newHardExpiresAt),
+	}, nil
+}
+
+type sandboxRefreshPlan struct {
+	ttl           *int32
+	ttlDuration   time.Duration
+	expiresAt     time.Time
+	hardExpiresAt time.Time
+}
+
+func buildSandboxRefreshPlan(
+	config sandboxstore.SandboxConfig,
+	defaultTTL time.Duration,
+	now time.Time,
+	request *RefreshRequest,
+) (sandboxRefreshPlan, error) {
+	var ttl *int32
+	if request != nil {
+		if request.Duration < 0 {
+			return sandboxRefreshPlan{}, fmt.Errorf("%w: duration must be >= 0", ErrInvalidClaimRequest)
+		}
+		if request.Duration > 0 {
+			ttl = int32Ptr(request.Duration)
+		}
+	}
+	if ttl == nil && config.TTL != nil {
+		ttl = int32Ptr(*config.TTL)
+	} else if ttl == nil && defaultTTL > 0 {
+		ttl = int32Ptr(int32(defaultTTL.Seconds()))
+	}
+	if err := validateSandboxConfigLifecycle(ttl, config.HardTTL); err != nil {
+		return sandboxRefreshPlan{}, err
+	}
+	plan := sandboxRefreshPlan{ttl: ttl}
+	if ttl != nil && *ttl > 0 {
+		plan.ttlDuration = time.Duration(*ttl) * time.Second
+		plan.expiresAt = refreshDeadline(now, *ttl)
+	}
+	if config.HardTTL != nil && *config.HardTTL > 0 {
+		plan.hardExpiresAt = refreshDeadline(now, *config.HardTTL)
+	}
+	return plan, nil
+}
+
+func refreshDeadline(now time.Time, seconds int32) time.Time {
+	return now.UTC().Truncate(time.Second).Add(time.Duration(seconds) * time.Second)
+}
+
+func (s *SandboxService) refreshNomadSandbox(ctx context.Context, sandboxID string, request *RefreshRequest) (*RefreshResponse, error) {
+	var plan sandboxRefreshPlan
+	err := s.sandboxStore.WithSandboxLock(ctx, sandboxID, func(lockCtx context.Context, tx sandboxstore.SandboxStoreTx, record *sandboxstore.SandboxRecord) error {
+		if record == nil || record.DesiredState == sandboxstore.SandboxDesiredStateDeleted || !record.DeletedAt.IsZero() {
+			return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		}
+		if record.RuntimeBackend != sandboxstore.SandboxRuntimeBackendNomad {
+			return fmt.Errorf("sandbox runtime backend changed during refresh")
+		}
+		if record.DesiredState == sandboxstore.SandboxDesiredStateTerminating {
+			return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, fmt.Errorf("sandbox termination is in progress"))
+		}
+		var err error
+		plan, err = buildSandboxRefreshPlan(record.Config, s.config.DefaultTTL, s.clock.Now(), request)
+		if err != nil {
+			return err
+		}
+		updated := cloneSandboxRecordForLifecycle(record)
+		updated.ExpiresAt = plan.expiresAt
+		updated.HardExpiresAt = plan.hardExpiresAt
+		return tx.SaveSandbox(lockCtx, updated)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("refresh Nomad sandbox expiration: %w", err)
+	}
+	s.logger.Info("Nomad sandbox TTL refreshed successfully",
+		zap.String("sandboxID", sandboxID), zap.Time("newExpiresAt", plan.expiresAt),
+		zap.Duration("ttlDuration", plan.ttlDuration),
+	)
+	return &RefreshResponse{
+		SandboxID: sandboxID, ExpiresAt: optionalTime(plan.expiresAt),
+		HardExpiresAt: optionalTime(plan.hardExpiresAt),
 	}, nil
 }

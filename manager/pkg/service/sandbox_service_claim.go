@@ -272,6 +272,13 @@ type SandboxAutoPauser interface {
 	PauseSandboxByID(context.Context, string) error
 }
 
+// SandboxPauseReconciler completes durable pause and recovery transactions
+// after the API request that accepted them has returned.
+type SandboxPauseReconciler interface {
+	CompletePausingSandboxRuntime(context.Context, string) error
+	ResumePausedSandboxRuntime(context.Context, string) (*managerapi.Sandbox, error)
+}
+
 // SandboxRuntimeBackend owns public and automatic lifecycle paths for one
 // selected physical runtime backend.
 type SandboxRuntimeBackend interface {
@@ -280,6 +287,7 @@ type SandboxRuntimeBackend interface {
 	SandboxPauser
 	SandboxResumer
 	SandboxAutoPauser
+	SandboxPauseReconciler
 }
 
 var _ SandboxRuntimeBackend = (*SandboxService)(nil)

@@ -30,6 +30,12 @@ func (fakeSandboxClaimer) ResumeSandboxAndWait(context.Context, string) (*manage
 
 func (fakeSandboxClaimer) PauseSandboxByID(context.Context, string) error { return nil }
 
+func (fakeSandboxClaimer) CompletePausingSandboxRuntime(context.Context, string) error { return nil }
+
+func (fakeSandboxClaimer) ResumePausedSandboxRuntime(context.Context, string) (*managerapi.Sandbox, error) {
+	return nil, nil
+}
+
 func TestBuildSandboxRuntimeBackendSelectsExplicitBackend(t *testing.T) {
 	fallback := fakeSandboxClaimer{}
 	claimer, err := buildSandboxRuntimeBackend(&config.ManagerConfig{

@@ -378,8 +378,6 @@ func main() {
 	podInformer.Informer().AddEventHandler(sandboxLifecycleController.ResourceEventHandler())
 	sandboxCrashLogCollector := service.NewSandboxCrashLogCollector(k8sClient, logger, managerMetrics)
 	podInformer.Informer().AddEventHandler(sandboxCrashLogCollector.ResourceEventHandler())
-	sandboxPauseController := service.NewSandboxPauseController(sandboxService, logger)
-	sandboxService.SetPauseEnqueuer(sandboxPauseController)
 	sandboxCrashRecoveryController := service.NewSandboxCrashRecoveryController(k8sClient, podLister, sandboxService, logger)
 	podInformer.Informer().AddEventHandler(sandboxCrashRecoveryController.ResourceEventHandler())
 	sandboxRuntimeReconciler := service.NewSandboxRuntimeReconciler(
@@ -439,6 +437,8 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to configure sandbox runtime backend", zap.Error(err))
 	}
+	sandboxPauseController := service.NewSandboxPauseController(sandboxStore, sandboxBackend, logger)
+	sandboxService.SetPauseEnqueuer(sandboxPauseController)
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
 		templateApplier := templateservice.NewTemplateApplier(templateService)

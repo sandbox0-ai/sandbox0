@@ -585,7 +585,8 @@ func TestSandboxPauseControllerReconstructsHealthRecoveryRegardlessOfAutoResume(
 			Config:       sandboxstore.SandboxConfig{AutoResume: &autoResume},
 		},
 	}}
-	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
+	backend := &SandboxService{sandboxStore: store}
+	controller := NewSandboxPauseController(store, backend, zap.NewNop())
 	t.Cleanup(controller.queue.ShutDown)
 	var calls []string
 	controller.complete = func(_ context.Context, sandboxID string) error {
@@ -615,7 +616,8 @@ func TestSandboxPauseControllerFindsCrashRecoveryAfterManagerRestart(t *testing.
 			Source:    sandboxstore.SandboxLifecycleSourceCrash,
 		},
 	}
-	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
+	backend := &SandboxService{sandboxStore: store}
+	controller := NewSandboxPauseController(store, backend, zap.NewNop())
 	t.Cleanup(controller.queue.ShutDown)
 
 	controller.enqueuePausingSandboxes(context.Background())
@@ -641,7 +643,8 @@ func TestSandboxPauseControllerFindsHealthRecoveryAfterManagerRestart(t *testing
 			Source:    sandboxstore.SandboxLifecycleSourceHealth,
 		},
 	}
-	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
+	backend := &SandboxService{sandboxStore: store}
+	controller := NewSandboxPauseController(store, backend, zap.NewNop())
 	t.Cleanup(controller.queue.ShutDown)
 
 	controller.enqueuePausingSandboxes(context.Background())
@@ -676,7 +679,8 @@ func TestSandboxPauseControllerResumesCommittedHealthRecoveryAfterManagerRestart
 			Epoch:     5,
 		},
 	}
-	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
+	backend := &SandboxService{sandboxStore: store}
+	controller := NewSandboxPauseController(store, backend, zap.NewNop())
 	t.Cleanup(controller.queue.ShutDown)
 
 	controller.enqueuePausingSandboxes(context.Background())
@@ -711,7 +715,8 @@ func TestSandboxPauseControllerResumesCommittedCrashRecoveryAfterManagerRestart(
 			Epoch:     5,
 		},
 	}
-	controller := NewSandboxPauseController(&SandboxService{sandboxStore: store}, zap.NewNop())
+	backend := &SandboxService{sandboxStore: store}
+	controller := NewSandboxPauseController(store, backend, zap.NewNop())
 	t.Cleanup(controller.queue.ShutDown)
 
 	controller.enqueuePausingSandboxes(context.Background())

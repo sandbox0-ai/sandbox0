@@ -337,6 +337,12 @@ func TestServiceFailsClosedForUnconnectedPauseAndResume(t *testing.T) {
 	if err := fixture.service.PauseSandboxByID(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
 		t.Fatalf("automatic pause error = %v", err)
 	}
+	if err := fixture.service.CompletePausingSandboxRuntime(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+		t.Fatalf("pause reconciliation error = %v", err)
+	}
+	if _, err := fixture.service.ResumePausedSandboxRuntime(context.Background(), "sandbox-1"); !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+		t.Fatalf("runtime recovery error = %v", err)
+	}
 	if len(fixture.store.cleanupCalls) != 0 {
 		t.Fatalf("unavailable lifecycle mutated cleanup state: %v", fixture.store.cleanupCalls)
 	}

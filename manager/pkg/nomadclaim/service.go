@@ -142,6 +142,18 @@ func (s *Service) PauseSandboxByID(context.Context, string) error {
 	return fmt.Errorf("%w: Nomad automatic pause is not connected", service.ErrSandboxLifecycleUnavailable)
 }
 
+// CompletePausingSandboxRuntime fails closed until the Nomad planned-retire
+// reconciler owns durable pause transactions.
+func (s *Service) CompletePausingSandboxRuntime(context.Context, string) error {
+	return fmt.Errorf("%w: Nomad pause reconciliation is not connected", service.ErrSandboxLifecycleUnavailable)
+}
+
+// ResumePausedSandboxRuntime fails closed until durable resume can acquire a
+// new compatible slot from the current RootFS head.
+func (s *Service) ResumePausedSandboxRuntime(context.Context, string) (*managerapi.Sandbox, error) {
+	return nil, fmt.Errorf("%w: Nomad runtime recovery is not connected", service.ErrSandboxLifecycleUnavailable)
+}
+
 // ClaimSandbox prepares a durable block-COW filesystem and returns only after
 // authenticated procd command readiness has been committed regionally.
 func (s *Service) ClaimSandbox(ctx context.Context, request *service.ClaimRequest) (*service.ClaimResponse, error) {

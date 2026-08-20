@@ -26,7 +26,7 @@ type SandboxRuntimePauser interface {
 
 // SandboxTerminator defines the interface for terminating sandboxes.
 type SandboxTerminator interface {
-	TerminateSandboxByID(ctx context.Context, sandboxID string) error
+	TerminateSandbox(ctx context.Context, sandboxID string) error
 }
 
 // HardExpiredSandboxLister lists durable sandboxes whose hard TTL has expired.
@@ -86,10 +86,6 @@ func NewCleanupController(
 		clock = systemTime{}
 	}
 
-	hardExpiredLister, _ := sandboxTerminator.(HardExpiredSandboxLister)
-	if hardExpiredLister == nil {
-		hardExpiredLister, _ = runtimePauser.(HardExpiredSandboxLister)
-	}
 	return &CleanupController{
 		k8sClient:         k8sClient,
 		podLister:         podLister,
@@ -98,11 +94,16 @@ func NewCleanupController(
 		clock:             clock,
 		runtimePauser:     runtimePauser,
 		sandboxTerminator: sandboxTerminator,
-		hardExpiredLister: hardExpiredLister,
 		logger:            logger,
 		interval:          interval,
 		teardown:          NewPodTeardownCoordinator(podLister, nil, config.PodTeardownConfig{}, 0, nil, logger),
 	}
+}
+
+// SetHardExpiredSandboxLister installs the durable sandbox expiry source.
+// Listing is independent from the selected physical runtime terminator.
+func (cc *CleanupController) SetHardExpiredSandboxLister(lister HardExpiredSandboxLister) {
+	cc.hardExpiredLister = lister
 }
 
 // SetPodTeardownCoordinator installs the manager-wide coordinator shared with
@@ -171,7 +172,7 @@ func (cc *CleanupController) cleanupHardExpiredDurableSandboxes(ctx context.Cont
 		if sandboxID == "" {
 			continue
 		}
-		if err := cc.sandboxTerminator.TerminateSandboxByID(ctx, sandboxID); err != nil {
+		if err := cc.sandboxTerminator.TerminateSandbox(ctx, sandboxID); err != nil {
 			cc.logger.Error("Failed to delete hard-expired durable sandbox",
 				zap.String("sandboxID", sandboxID),
 				zap.Error(err),
@@ -232,7 +233,7 @@ func (cc *CleanupController) cleanupExpired(ctx context.Context, template *v1alp
 				)
 				sandboxID := cleanupSandboxIDFromPod(pod)
 				if cc.sandboxTerminator != nil {
-					if err := cc.sandboxTerminator.TerminateSandboxByID(ctx, sandboxID); err != nil {
+					if err := cc.sandboxTerminator.TerminateSandbox(ctx, sandboxID); err != nil {
 						cc.logger.Error("Failed to delete hard-expired sandbox",
 							zap.String("pod", pod.Name),
 							zap.String("sandboxID", sandboxID),

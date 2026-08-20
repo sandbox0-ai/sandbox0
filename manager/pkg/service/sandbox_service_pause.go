@@ -79,12 +79,6 @@ func (s *SandboxService) ResumeSandboxAndWait(ctx context.Context, sandboxID str
 	return s.ResumeSandbox(ctx, sandboxID)
 }
 
-// TerminateSandboxByID implements the SandboxTerminator interface from controller package.
-// It wraps TerminateSandbox and returns only the error.
-func (s *SandboxService) TerminateSandboxByID(ctx context.Context, sandboxID string) error {
-	return s.TerminateSandbox(ctx, sandboxID)
-}
-
 // GetSandboxResourceUsage gets the resource usage of a sandbox.
 func (s *SandboxService) GetSandboxResourceUsage(ctx context.Context, sandboxID string) (*procdapi.SandboxResourceUsage, error) {
 	// Find the pod by sandbox ID

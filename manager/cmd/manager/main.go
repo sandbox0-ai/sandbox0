@@ -512,10 +512,11 @@ func main() {
 		recorder,
 		clk,
 		sandboxService,
-		sandboxService,
+		sandboxClaimer,
 		logger,
 		cfg.CleanupInterval.Duration,
 	)
+	cleanupController.SetHardExpiredSandboxLister(sandboxService)
 	cleanupController.SetPodTeardownCoordinator(teardownCoordinator)
 
 	// Initialize internal auth validator

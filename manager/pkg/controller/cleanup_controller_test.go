@@ -44,7 +44,7 @@ type recordingSandboxTerminator struct {
 	calls []string
 }
 
-func (r *recordingSandboxTerminator) TerminateSandboxByID(_ context.Context, sandboxID string) error {
+func (r *recordingSandboxTerminator) TerminateSandbox(_ context.Context, sandboxID string) error {
 	r.calls = append(r.calls, sandboxID)
 	return nil
 }
@@ -57,12 +57,6 @@ type recordingHardExpiredLister struct {
 func (r *recordingHardExpiredLister) ListHardExpiredSandboxIDs(_ context.Context, now time.Time, _ int) ([]string, error) {
 	r.calls = append(r.calls, now)
 	return append([]string(nil), r.ids...), nil
-}
-
-type recordingLifecycleService struct {
-	recordingRuntimePauser
-	recordingSandboxTerminator
-	recordingHardExpiredLister
 }
 
 func TestCleanupExpiredPausesRuntime(t *testing.T) {
@@ -223,25 +217,25 @@ func TestCleanupExpiredDeletesHardExpiredSandbox(t *testing.T) {
 
 func TestCleanupHardExpiredDurableSandboxesDeletesListedRecords(t *testing.T) {
 	now := time.Date(2026, time.April, 15, 19, 31, 0, 0, time.UTC)
-	service := &recordingLifecycleService{
-		recordingHardExpiredLister: recordingHardExpiredLister{ids: []string{"sandbox-paused"}},
-	}
+	lister := &recordingHardExpiredLister{ids: []string{"sandbox-paused"}}
+	terminator := &recordingSandboxTerminator{}
 	controller := NewCleanupController(
 		nil,
 		corelisters.NewPodLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})),
 		nil,
 		record.NewFakeRecorder(1),
 		staticCleanupClock{now: now},
-		service,
-		service,
+		nil,
+		terminator,
 		zap.NewNop(),
 		time.Minute,
 	)
+	controller.SetHardExpiredSandboxLister(lister)
 
 	require.NoError(t, controller.cleanupHardExpiredDurableSandboxes(context.Background()))
 
-	assert.Len(t, service.recordingHardExpiredLister.calls, 1)
-	assert.Equal(t, []string{"sandbox-paused"}, service.recordingSandboxTerminator.calls)
+	assert.Len(t, lister.calls, 1)
+	assert.Equal(t, []string{"sandbox-paused"}, terminator.calls)
 }
 
 func TestCleanupExpiredForceDeletesStaleDeletingPods(t *testing.T) {

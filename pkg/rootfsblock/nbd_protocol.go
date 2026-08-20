@@ -45,6 +45,7 @@ type WritableBlockDevice interface {
 	io.WriterAt
 	Size() int64
 	Flush() error
+	Trim(offset, length int64) error
 	WriteZeroes(offset, length int64) error
 }
 
@@ -115,11 +116,16 @@ func (s *nbdTransmission) serveOne() (bool, error) {
 	}
 	command := request.typeAndFlags & nbdCommandMask
 	flags := request.typeAndFlags &^ nbdCommandMask
-	if request.length > s.maximum {
+	if request.length > s.maximum && (command == nbdCommandRead || command == nbdCommandWrite) {
 		// A WRITE body follows the header on the same stream. Terminating is the
 		// only safe response to an impossible size because replying without
-		// consuming it would desynchronize every subsequent request.
-		return false, fmt.Errorf("NBD request length %d exceeds limit %d", request.length, s.maximum)
+		// consuming it would desynchronize every subsequent request. Commands
+		// without payloads may legally cover much larger ranges than the maximum
+		// payload size and are handled without allocating that range.
+		if command == nbdCommandWrite {
+			return false, fmt.Errorf("NBD request length %d exceeds limit %d", request.length, s.maximum)
+		}
+		return false, s.reply(request.handle, syscall.EINVAL, nil)
 	}
 	if request.offset > uint64(s.backend.Size()) || uint64(request.length) > uint64(s.backend.Size())-request.offset {
 		if command == nbdCommandWrite {
@@ -186,7 +192,12 @@ func (s *nbdTransmission) serveOne() (bool, error) {
 		if flags & ^allowedFlags != 0 || request.length == 0 {
 			return false, s.reply(request.handle, syscall.EINVAL, nil)
 		}
-		err := s.backend.WriteZeroes(int64(request.offset), int64(request.length))
+		var err error
+		if command == nbdCommandTrim {
+			err = s.backend.Trim(int64(request.offset), int64(request.length))
+		} else {
+			err = s.backend.WriteZeroes(int64(request.offset), int64(request.length))
+		}
 		if err == nil && flags&nbdCommandFlagFUA != 0 {
 			err = s.backend.Flush()
 		}

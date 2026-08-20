@@ -8,36 +8,55 @@ import (
 	"sync"
 )
 
-// NodeDirtyTailUsage is the aggregate unpublished payload reserved by all
-// branch journals on one node.
+// NodeDirtyTailUsage is the aggregate unpublished payload and currently
+// available protected retirement headroom across all journals on one node.
 type NodeDirtyTailUsage struct {
-	UsedBytes int64
-	MaxBytes  int64
-	Owners    int
+	UsedBytes     int64
+	ReservedBytes int64
+	MaxBytes      int64
+	Owners        int
 }
 
 type dirtyTailOwner struct {
-	usedBytes int64
-	attached  bool
+	usedBytes      int64
+	recoveredBytes int64
+	attached       bool
+	retiring       bool
 }
 
 // DirtyTailBudget atomically limits unpublished branch payload across every
 // session sharing one durable node volume. Recovered usage may exceed a newly
-// lowered limit so existing writers can still be opened and retired, but no
-// positive reservation is admitted until usage falls below the limit.
+// lowered normal limit so existing writers can still be opened and use one
+// bounded recovery headroom pool during retirement. Normal positive admission
+// remains blocked until usage falls below the configured threshold.
 type DirtyTailBudget struct {
-	mu       sync.Mutex
-	maxBytes int64
-	used     int64
-	owners   map[string]dirtyTailOwner
+	mu                sync.Mutex
+	maxBytes          int64
+	retirementReserve int64
+	recovered         int64
+	used              int64
+	owners            map[string]dirtyTailOwner
 }
 
 // NewDirtyTailBudget creates an aggregate block-aligned node budget.
 func NewDirtyTailBudget(maxBytes int64) (*DirtyTailBudget, error) {
+	return NewDirtyTailBudgetWithReserve(maxBytes, 0)
+}
+
+// NewDirtyTailBudgetWithReserve protects one shared node headroom pool from
+// normal writers. Retirement writers may consume it only after they are
+// fenced. The reserve is node-wide rather than multiplied by branch count.
+func NewDirtyTailBudgetWithReserve(maxBytes, retirementReserveBytes int64) (*DirtyTailBudget, error) {
 	if maxBytes <= 0 || maxBytes%LogicalBlockSize != 0 {
 		return nil, fmt.Errorf("node dirty tail limit must be a positive multiple of %d bytes", LogicalBlockSize)
 	}
-	return &DirtyTailBudget{maxBytes: maxBytes, owners: make(map[string]dirtyTailOwner)}, nil
+	if retirementReserveBytes < 0 || retirementReserveBytes%LogicalBlockSize != 0 || retirementReserveBytes > maxBytes {
+		return nil, fmt.Errorf("node dirty tail retirement reserve must be block-aligned and no larger than the limit")
+	}
+	return &DirtyTailBudget{
+		maxBytes: maxBytes, retirementReserve: retirementReserveBytes,
+		owners: make(map[string]dirtyTailOwner),
+	}, nil
 }
 
 // Preload records one journal found during startup before any branch handle is
@@ -54,13 +73,14 @@ func (b *DirtyTailBudget) Preload(owner string, usedBytes int64) error {
 		if current.attached {
 			return fmt.Errorf("dirty tail owner %q is already attached", owner)
 		}
-		return b.replaceUsageLocked(owner, current, usedBytes)
+		return b.replaceRecoveredUsageLocked(owner, current, usedBytes)
 	}
-	if usedBytes > math.MaxInt64-b.used {
+	if usedBytes > math.MaxInt64-b.used || usedBytes > math.MaxInt64-b.retirementReserve-b.recovered {
 		return fmt.Errorf("aggregate dirty tail usage overflows int64")
 	}
-	b.owners[owner] = dirtyTailOwner{usedBytes: usedBytes}
+	b.owners[owner] = dirtyTailOwner{usedBytes: usedBytes, recoveredBytes: usedBytes}
 	b.used += usedBytes
+	b.recovered += usedBytes
 	return nil
 }
 
@@ -81,6 +101,7 @@ func (b *DirtyTailBudget) ReleaseOwner(owner string) error {
 		return fmt.Errorf("dirty tail owner %q is still attached", owner)
 	}
 	b.used -= current.usedBytes
+	b.recovered -= current.recoveredBytes
 	delete(b.owners, owner)
 	return nil
 }
@@ -104,7 +125,10 @@ func (b *DirtyTailBudget) ValidateOwnerDetached(owner string) error {
 func (b *DirtyTailBudget) Usage() NodeDirtyTailUsage {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return NodeDirtyTailUsage{UsedBytes: b.used, MaxBytes: b.maxBytes, Owners: len(b.owners)}
+	reserved := min(b.retirementReserve, max(int64(0), b.hardLimitLocked()-b.used))
+	return NodeDirtyTailUsage{
+		UsedBytes: b.used, ReservedBytes: reserved, MaxBytes: b.maxBytes, Owners: len(b.owners),
+	}
 }
 
 func (b *DirtyTailBudget) attach(owner string, recoveredBytes int64) error {
@@ -113,15 +137,27 @@ func (b *DirtyTailBudget) attach(owner string, recoveredBytes int64) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	current := b.owners[owner]
+	current, preloaded := b.owners[owner]
 	if current.attached {
 		return fmt.Errorf("dirty tail owner %q already has an open branch", owner)
 	}
-	if err := b.replaceUsageLocked(owner, current, recoveredBytes); err != nil {
+	normalLimit := b.normalLimitLocked()
+	if !preloaded && (b.used > normalLimit || recoveredBytes > normalLimit-b.used) {
+		return &DirtyTailCapacityError{
+			Scope: "node", UsedBytes: b.used,
+			RequestedBytes: recoveredBytes, LimitBytes: normalLimit,
+		}
+	}
+	if preloaded {
+		if err := b.replaceRecoveredUsageLocked(owner, current, recoveredBytes); err != nil {
+			return err
+		}
+	} else if err := b.replaceUsageLocked(owner, current, recoveredBytes); err != nil {
 		return err
 	}
 	current = b.owners[owner]
 	current.attached = true
+	current.retiring = false
 	b.owners[owner] = current
 	return nil
 }
@@ -134,6 +170,22 @@ func (b *DirtyTailBudget) detach(owner string) error {
 		return fmt.Errorf("dirty tail owner %q is not attached", owner)
 	}
 	current.attached = false
+	current.retiring = false
+	b.owners[owner] = current
+	return nil
+}
+
+func (b *DirtyTailBudget) beginRetirement(owner string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	current, ok := b.owners[owner]
+	if !ok || !current.attached {
+		return fmt.Errorf("dirty tail owner %q is not attached", owner)
+	}
+	if current.retiring {
+		return nil
+	}
+	current.retiring = true
 	b.owners[owner] = current
 	return nil
 }
@@ -148,9 +200,15 @@ func (b *DirtyTailBudget) reserve(owner string, requestedBytes int64) error {
 	if !ok || !current.attached {
 		return fmt.Errorf("dirty tail owner %q is not attached", owner)
 	}
-	if b.used > b.maxBytes || requestedBytes > b.maxBytes-b.used {
+	limit := b.normalLimitLocked()
+	scope := "node"
+	if current.retiring {
+		limit = b.hardLimitLocked()
+		scope = "node retirement"
+	}
+	if b.used > limit || requestedBytes > limit-b.used {
 		return &DirtyTailCapacityError{
-			Scope: "node", UsedBytes: b.used, RequestedBytes: requestedBytes, LimitBytes: b.maxBytes,
+			Scope: scope, UsedBytes: b.used, RequestedBytes: requestedBytes, LimitBytes: limit,
 		}
 	}
 	b.used += requestedBytes
@@ -184,6 +242,36 @@ func (b *DirtyTailBudget) replaceUsageLocked(owner string, current dirtyTailOwne
 	b.owners[owner] = current
 	b.used = withoutCurrent + usedBytes
 	return nil
+}
+
+func (b *DirtyTailBudget) replaceRecoveredUsageLocked(
+	owner string,
+	current dirtyTailOwner,
+	usedBytes int64,
+) error {
+	withoutRecovered := b.recovered - current.recoveredBytes
+	if withoutRecovered < 0 || usedBytes > math.MaxInt64-b.retirementReserve-withoutRecovered {
+		return fmt.Errorf("aggregate dirty tail recovery headroom overflows int64")
+	}
+	if err := b.replaceUsageLocked(owner, current, usedBytes); err != nil {
+		return err
+	}
+	current = b.owners[owner]
+	current.recoveredBytes = usedBytes
+	b.owners[owner] = current
+	b.recovered = withoutRecovered + usedBytes
+	return nil
+}
+
+func (b *DirtyTailBudget) normalLimitLocked() int64 {
+	return b.maxBytes - b.retirementReserve
+}
+
+func (b *DirtyTailBudget) hardLimitLocked() int64 {
+	if b.recovered > b.maxBytes-b.retirementReserve {
+		return b.recovered + b.retirementReserve
+	}
+	return b.maxBytes
 }
 
 // BranchJournalDirtyBytes returns conservative logical payload occupancy for

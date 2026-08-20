@@ -69,6 +69,8 @@ func TestNBDTransmissionReadWriteFlushTrimAndFUA(t *testing.T) {
 	trimHandle := [8]byte{8}
 	writeNBDRequest(t, client, nbdCommandTrim|nbdCommandFlagFUA, trimHandle, 2*LogicalBlockSize, make([]byte, LogicalBlockSize))
 	require.Equal(t, uint32(0), readNBDReply(t, client, trimHandle, 0))
+	require.Equal(t, 1, backend.trims)
+	require.Equal(t, bytes.Repeat([]byte{0x11}, LogicalBlockSize), backend.payload[2*LogicalBlockSize:3*LogicalBlockSize])
 	require.Equal(t, 2, backend.flushes)
 
 	flushHandle := [8]byte{9}
@@ -77,6 +79,35 @@ func TestNBDTransmissionReadWriteFlushTrimAndFUA(t *testing.T) {
 	require.Equal(t, 3, backend.flushes)
 
 	writeNBDRequest(t, client, nbdCommandDisconnect, [8]byte{10}, 0, nil)
+	require.NoError(t, <-done)
+}
+
+func TestNBDTransmissionAcceptsTrimLargerThanPayloadLimit(t *testing.T) {
+	backend := &memoryBlockBackend{payload: bytes.Repeat([]byte{0x11}, 4*LogicalBlockSize)}
+	client, server := net.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- (NBDTransmissionServer{
+			Backend: backend, MaxRequestBytes: LogicalBlockSize,
+		}).Serve(t.Context(), server)
+	}()
+
+	trimHandle := [8]byte{31}
+	require.NoError(t, writeFull(client, makeNBDRequest(
+		nbdCommandTrim, trimHandle, 0, 4*LogicalBlockSize,
+	)))
+	require.Equal(t, uint32(0), readNBDReply(t, client, trimHandle, 0))
+	require.Equal(t, 1, backend.trims)
+
+	readHandle := [8]byte{32}
+	writeNBDRequest(t, client, nbdCommandRead, readHandle, 0, make([]byte, LogicalBlockSize))
+	require.Equal(t, uint32(0), readNBDReply(t, client, readHandle, LogicalBlockSize))
+	payload := make([]byte, LogicalBlockSize)
+	_, err := io.ReadFull(client, payload)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0x11}, LogicalBlockSize), payload)
+
+	writeNBDRequest(t, client, nbdCommandDisconnect, [8]byte{33}, 0, nil)
 	require.NoError(t, <-done)
 }
 
@@ -121,7 +152,7 @@ func TestNBDTransmissionPreservesBackendPartialWriteAndFUAErrorSemantics(t *test
 	})
 }
 
-func TestNBDTransmissionMapsDirtyTailCapacityToENOSPC(t *testing.T) {
+func TestNBDTransmissionEncodesDirtyTailCapacityAsENOSPCReply(t *testing.T) {
 	base := make([]byte, 2*LogicalBlockSize)
 	branch, err := OpenBranchWithOptions(
 		filepath.Join(t.TempDir(), "branch.log"), testBranchIdentity(int64(len(base))),
@@ -197,6 +228,7 @@ type memoryBlockBackend struct {
 	mu       sync.Mutex
 	payload  []byte
 	flushes  int
+	trims    int
 	flushErr error
 }
 
@@ -221,6 +253,7 @@ func (*failingReadBlockBackend) WriteAt(payload []byte, _ int64) (int, error) {
 	return len(payload), nil
 }
 func (*failingReadBlockBackend) Flush() error                   { return nil }
+func (*failingReadBlockBackend) Trim(int64, int64) error        { return nil }
 func (*failingReadBlockBackend) WriteZeroes(int64, int64) error { return nil }
 
 func (b *memoryBlockBackend) Size() int64 { return int64(len(b.payload)) }
@@ -242,6 +275,13 @@ func (b *memoryBlockBackend) Flush() error {
 	defer b.mu.Unlock()
 	b.flushes++
 	return b.flushErr
+}
+
+func (b *memoryBlockBackend) Trim(_, _ int64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.trims++
+	return nil
 }
 
 func (b *memoryBlockBackend) WriteZeroes(offset, length int64) error {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -123,8 +124,9 @@ type BlockUpdate struct {
 // leaves the branch unbounded and is intended only for compatibility tests;
 // production session owners must set an explicit positive limit.
 type BranchOptions struct {
-	MaxDirtyTailBytes int64
-	NodeDirtyBudget   *DirtyTailBudget
+	MaxDirtyTailBytes      int64
+	RetirementReserveBytes int64
+	NodeDirtyBudget        *DirtyTailBudget
 }
 
 // DirtyTailUsage describes the exact local unpublished branch occupancy.
@@ -137,8 +139,10 @@ type DirtyTailUsage struct {
 }
 
 // DirtyTailCapacityError rejects a complete block request before appending any
-// of its records. It unwraps to ENOSPC so the Linux NBD client and guest
-// filesystem receive a stable capacity error instead of a generic EIO.
+// of its records. It unwraps to ENOSPC and is encoded as that NBD protocol
+// errno. Linux's in-kernel NBD client currently reduces every nonzero remote
+// errno to block-layer EIO, so this is an emergency fail-stop boundary rather
+// than a guest filesystem quota signal.
 type DirtyTailCapacityError struct {
 	Scope          string
 	UsedBytes      int64
@@ -163,20 +167,22 @@ func (*DirtyTailCapacityError) Unwrap() error { return syscall.ENOSPC }
 // generation. A successful Flush makes every preceding block record durable
 // on the current node. It does not claim region durability.
 type Branch struct {
-	mu         sync.RWMutex
-	file       *os.File
-	base       io.ReaderAt
-	identity   BranchIdentity
-	header     int64
-	end        int64
-	sequence   uint64
-	durable    uint64
-	blocks     map[uint64]branchRecord
-	records    branchRecordLog
-	maxDirty   int64
-	nodeDirty  *DirtyTailBudget
-	dirtyOwner string
-	closed     bool
+	mu                sync.RWMutex
+	file              *os.File
+	base              io.ReaderAt
+	identity          BranchIdentity
+	header            int64
+	end               int64
+	sequence          uint64
+	durable           uint64
+	blocks            map[uint64]branchRecord
+	records           branchRecordLog
+	maxDirty          int64
+	retirementReserve int64
+	retiring          bool
+	nodeDirty         *DirtyTailBudget
+	dirtyOwner        string
+	closed            bool
 }
 
 func OpenBranch(path string, identity BranchIdentity, base io.ReaderAt) (*Branch, error) {
@@ -197,6 +203,10 @@ func OpenBranchWithOptions(path string, identity BranchIdentity, base io.ReaderA
 	if options.MaxDirtyTailBytes < 0 {
 		return nil, fmt.Errorf("maximum dirty tail bytes must be non-negative")
 	}
+	if options.RetirementReserveBytes < 0 || options.RetirementReserveBytes%LogicalBlockSize != 0 ||
+		options.MaxDirtyTailBytes > math.MaxInt64-options.RetirementReserveBytes {
+		return nil, fmt.Errorf("retirement dirty tail reserve must be block-aligned and must not overflow")
+	}
 	path = filepath.Clean(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) || path == "/" {
 		return nil, fmt.Errorf("branch path must be a non-root absolute path")
@@ -214,14 +224,18 @@ func OpenBranchWithOptions(path string, identity BranchIdentity, base io.ReaderA
 	}
 	branch := &Branch{
 		file: file, base: base, identity: identity, blocks: make(map[uint64]branchRecord),
-		maxDirty: options.MaxDirtyTailBytes, nodeDirty: options.NodeDirtyBudget, dirtyOwner: path,
+		maxDirty: options.MaxDirtyTailBytes, retirementReserve: options.RetirementReserveBytes,
+		nodeDirty: options.NodeDirtyBudget, dirtyOwner: path,
 	}
 	if err := branch.open(); err != nil {
 		file.Close()
 		return nil, err
 	}
 	if branch.nodeDirty != nil {
-		if err := branch.nodeDirty.attach(branch.dirtyOwner, int64(branch.records.count)*LogicalBlockSize); err != nil {
+		if err := branch.nodeDirty.attach(
+			branch.dirtyOwner,
+			int64(branch.records.count)*LogicalBlockSize,
+		); err != nil {
 			file.Close()
 			return nil, fmt.Errorf("attach branch to node dirty tail budget: %w", err)
 		}
@@ -290,6 +304,21 @@ func (b *Branch) writeAtLocked(payload []byte, offset int64) (int, error) {
 	return written, nil
 }
 
+// Trim accepts an advisory discard without materializing zero records. NBD
+// clients must not assume any content for a discarded range; preserving the
+// existing COW mapping avoids turning filesystem-wide fstrim into dirty data.
+func (b *Branch) Trim(offset, length int64) error {
+	if offset < 0 || length < 0 || offset > b.Size() || length > b.Size()-offset {
+		return fmt.Errorf("trim range must be within the logical device")
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed {
+		return os.ErrClosed
+	}
+	return nil
+}
+
 // WriteZeroes records explicit zero data and therefore masks any immutable
 // base blocks in the requested range.
 func (b *Branch) WriteZeroes(offset, length int64) error {
@@ -341,6 +370,27 @@ func (b *Branch) Flush() error {
 		return os.ErrClosed
 	}
 	return b.flushLocked()
+}
+
+// BeginRetirement grants this fenced branch access to the shared node
+// retirement reserve and expands its per-session limit by the same amount.
+// The reserve exists only for filesystem sync and unmount traffic.
+func (b *Branch) BeginRetirement() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return os.ErrClosed
+	}
+	if b.retiring {
+		return nil
+	}
+	if b.nodeDirty != nil {
+		if err := b.nodeDirty.beginRetirement(b.dirtyOwner); err != nil {
+			return err
+		}
+	}
+	b.retiring = true
+	return nil
 }
 
 func (b *Branch) flushLocked() error {
@@ -598,9 +648,13 @@ func (b *Branch) admitRecordsLocked(records int64) error {
 	}
 	used := int64(b.records.count) * LogicalBlockSize
 	requested := records * LogicalBlockSize
-	if b.maxDirty > 0 && (used > b.maxDirty || requested > b.maxDirty-used) {
+	limit := b.maxDirty
+	if b.retiring {
+		limit += b.retirementReserve
+	}
+	if limit > 0 && (used > limit || requested > limit-used) {
 		return &DirtyTailCapacityError{
-			Scope: "session", UsedBytes: used, RequestedBytes: requested, LimitBytes: b.maxDirty,
+			Scope: "session", UsedBytes: used, RequestedBytes: requested, LimitBytes: limit,
 		}
 	}
 	if b.nodeDirty != nil {

@@ -23,6 +23,7 @@ ExecStart=/usr/local/bin/nomad-rootfs-sessiond \
   --branch-root=/var/lib/sandbox0/rootfs-branches \
   --max-dirty-tail-bytes=${SANDBOX0_ROOTFS_MAX_DIRTY_TAIL_BYTES} \
   --max-node-dirty-tail-bytes=${SANDBOX0_ROOTFS_MAX_NODE_DIRTY_TAIL_BYTES} \
+  --dirty-tail-retirement-reserve-bytes=${SANDBOX0_ROOTFS_DIRTY_TAIL_RETIREMENT_RESERVE_BYTES} \
   --mount-root=/run/sandbox0/rootfs \
   --consumer-mount-root=/opt/nomad \
   --consumer-netns-root=${SANDBOX0_NOMAD_NETNS_ROOT} \

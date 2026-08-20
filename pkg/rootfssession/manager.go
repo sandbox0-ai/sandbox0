@@ -29,20 +29,23 @@ const (
 	DefaultMaxDirtyTailBytes = int64(10 << 30)
 	// DefaultMaxNodeDirtyTailBytes bounds aggregate unpublished payload across
 	// active, retiring, interrupted, and rebase branch journals on one node.
-	DefaultMaxNodeDirtyTailBytes   = int64(40 << 30)
-	legacySessionSchemaVersion     = 2
-	allocationSessionSchemaVersion = 3
-	durableBindingSchemaVersion    = 4
-	sessionSchemaVersion           = 6
-	stateReserved                  = "reserved"
-	stateDeviceReserved            = "device_reserved"
-	stateDeviceReady               = "device_ready"
-	stateXFSMounted                = "xfs_mounted"
-	stateReady                     = "ready"
-	stateRetireRequested           = "retire_requested"
-	stateReleasing                 = "releasing"
-	stateTombstoned                = "tombstoned"
-	stateFailed                    = "failed"
+	DefaultMaxNodeDirtyTailBytes = int64(40 << 30)
+	// DefaultDirtyTailRetirementReserveBytes protects enough node capacity for
+	// XFS journal sync and unmount after guest write admission is exhausted.
+	DefaultDirtyTailRetirementReserveBytes = int64(64 << 20)
+	legacySessionSchemaVersion             = 2
+	allocationSessionSchemaVersion         = 3
+	durableBindingSchemaVersion            = 4
+	sessionSchemaVersion                   = 6
+	stateReserved                          = "reserved"
+	stateDeviceReserved                    = "device_reserved"
+	stateDeviceReady                       = "device_ready"
+	stateXFSMounted                        = "xfs_mounted"
+	stateReady                             = "ready"
+	stateRetireRequested                   = "retire_requested"
+	stateReleasing                         = "releasing"
+	stateTombstoned                        = "tombstoned"
+	stateFailed                            = "failed"
 )
 
 var (
@@ -110,15 +113,16 @@ type CrashFencePreAttachmentHostInspector interface {
 // StatePath and BranchRoot must survive process restarts; MountRoot is boot
 // local and must be in the same mount namespace as containerd.
 type Config struct {
-	StatePath             string
-	BranchRoot            string
-	MountRoot             string
-	MaxDirtyTailBytes     int64
-	MaxNodeDirtyTailBytes int64
-	Source                rootfsblock.RangeSource
-	Publisher             rootfsblock.ImmutableObjectPublisher
-	Runtime               HostRuntime
-	RebaseEngine          RebaseEngine
+	StatePath                       string
+	BranchRoot                      string
+	MountRoot                       string
+	MaxDirtyTailBytes               int64
+	MaxNodeDirtyTailBytes           int64
+	DirtyTailRetirementReserveBytes int64
+	Source                          rootfsblock.RangeSource
+	Publisher                       rootfsblock.ImmutableObjectPublisher
+	Runtime                         HostRuntime
+	RebaseEngine                    RebaseEngine
 }
 
 // RebaseEngine performs the semantic three-way merge while Manager owns all
@@ -238,25 +242,26 @@ type ConsumerRegistration struct {
 // journal stores the tokenless regional Stage binding together with device and
 // mount side effects so a process-independent reconciler can finish cleanup.
 type Manager struct {
-	db              *bolt.DB
-	branchRoot      string
-	mountRoot       string
-	source          rootfsblock.RangeSource
-	publisher       rootfsblock.ImmutableObjectPublisher
-	readCache       *rootfsblock.ReadCache
-	runtime         HostRuntime
-	maxDirty        int64
-	nodeDirty       *rootfsblock.DirtyTailBudget
-	mu              sync.Mutex
-	live            map[string]*liveSession
-	captures        map[string]bool
-	locks           sync.Map
-	lifetime        context.Context
-	cancel          context.CancelFunc
-	rebaseEngine    RebaseEngine
-	rebaseAdmission chan struct{}
-	rebaseWG        sync.WaitGroup
-	closing         bool
+	db                *bolt.DB
+	branchRoot        string
+	mountRoot         string
+	source            rootfsblock.RangeSource
+	publisher         rootfsblock.ImmutableObjectPublisher
+	readCache         *rootfsblock.ReadCache
+	runtime           HostRuntime
+	maxDirty          int64
+	retirementReserve int64
+	nodeDirty         *rootfsblock.DirtyTailBudget
+	mu                sync.Mutex
+	live              map[string]*liveSession
+	captures          map[string]bool
+	locks             sync.Map
+	lifetime          context.Context
+	cancel            context.CancelFunc
+	rebaseEngine      RebaseEngine
+	rebaseAdmission   chan struct{}
+	rebaseWG          sync.WaitGroup
+	closing           bool
 }
 
 func New(config Config) (*Manager, error) {
@@ -275,6 +280,12 @@ func New(config Config) (*Manager, error) {
 	if config.MaxNodeDirtyTailBytes == 0 {
 		config.MaxNodeDirtyTailBytes = DefaultMaxNodeDirtyTailBytes
 	}
+	if config.DirtyTailRetirementReserveBytes < 0 {
+		return nil, fmt.Errorf("dirty tail retirement reserve bytes must be non-negative")
+	}
+	if config.DirtyTailRetirementReserveBytes == 0 {
+		config.DirtyTailRetirementReserveBytes = DefaultDirtyTailRetirementReserveBytes
+	}
 	statePath, err := privatePath(config.StatePath, false)
 	if err != nil {
 		return nil, fmt.Errorf("state path: %w", err)
@@ -287,7 +298,10 @@ func New(config Config) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mount root: %w", err)
 	}
-	nodeDirty, err := rootfsblock.NewDirtyTailBudget(config.MaxNodeDirtyTailBytes)
+	nodeDirty, err := rootfsblock.NewDirtyTailBudgetWithReserve(
+		config.MaxNodeDirtyTailBytes,
+		config.DirtyTailRetirementReserveBytes,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +341,8 @@ func New(config Config) (*Manager, error) {
 	return &Manager{
 		db: db, branchRoot: branchRoot, mountRoot: mountRoot,
 		source: config.Source, publisher: config.Publisher, readCache: readCache,
-		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes, nodeDirty: nodeDirty,
+		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes,
+		retirementReserve: config.DirtyTailRetirementReserveBytes, nodeDirty: nodeDirty,
 		live: make(map[string]*liveSession), captures: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
 		rebaseEngine: rebaseEngine, rebaseAdmission: make(chan struct{}, 1),
@@ -1714,6 +1729,16 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 	if err := m.save(current); err != nil {
 		return err
 	}
+	m.mu.Lock()
+	live := m.live[parent]
+	m.mu.Unlock()
+	if live != nil {
+		if err := live.branch.BeginRetirement(); err != nil {
+			current.Failure = err.Error()
+			_ = m.save(current)
+			return fmt.Errorf("open RootFS retirement dirty tail reserve: %w", err)
+		}
+	}
 	var releaseErr error
 	if err := m.runtime.UnmountOverlay(current.MergedRoot, plannedRetire); err != nil {
 		releaseErr = errors.Join(releaseErr, fmt.Errorf("unmount OverlayFS: %w", err))
@@ -1723,9 +1748,6 @@ func (m *Manager) releaseLocked(ctx context.Context, current record) error {
 			releaseErr = errors.Join(releaseErr, fmt.Errorf("unmount XFS: %w", err))
 		}
 	}
-	m.mu.Lock()
-	live := m.live[parent]
-	m.mu.Unlock()
 	var sealedDescriptor []byte
 	var sealedBlockHead, sealedDurability string
 	if releaseErr == nil && plannedRetire {
@@ -1891,8 +1913,9 @@ func (m *Manager) NodeDirtyTailUsage() rootfsblock.NodeDirtyTailUsage {
 
 func (m *Manager) branchOptions() rootfsblock.BranchOptions {
 	return rootfsblock.BranchOptions{
-		MaxDirtyTailBytes: m.maxDirty,
-		NodeDirtyBudget:   m.nodeDirty,
+		MaxDirtyTailBytes:      m.maxDirty,
+		RetirementReserveBytes: m.retirementReserve,
+		NodeDirtyBudget:        m.nodeDirty,
 	}
 }
 

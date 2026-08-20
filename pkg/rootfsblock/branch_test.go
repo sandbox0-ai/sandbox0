@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -74,6 +75,25 @@ func TestBranchWriteZeroesValidatesRange(t *testing.T) {
 	require.NoError(t, branch.WriteZeroes(LogicalBlockSize, 0))
 	require.ErrorContains(t, branch.WriteZeroes(-1, 1), "within")
 	require.ErrorContains(t, branch.WriteZeroes(LogicalBlockSize, 1), "within")
+}
+
+func TestBranchTrimIsAdvisoryAndDoesNotGrowDirtyTail(t *testing.T) {
+	base := bytes.Repeat([]byte{0x5a}, 2*LogicalBlockSize)
+	branch, err := OpenBranch(
+		filepath.Join(t.TempDir(), "branch.log"), testBranchIdentity(int64(len(base))), bytes.NewReader(base),
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+
+	require.NoError(t, branch.Trim(0, int64(len(base))))
+	require.Zero(t, branch.DirtyTailUsage().DirtyBytes)
+	actual := make([]byte, len(base))
+	_, err = branch.ReadAt(actual, 0)
+	require.NoError(t, err)
+	require.Equal(t, base, actual)
+	require.ErrorContains(t, branch.Trim(-1, 1), "within")
+	require.NoError(t, branch.Close())
+	require.ErrorIs(t, branch.Trim(0, LogicalBlockSize), os.ErrClosed)
 }
 
 func TestBranchRecoversIncompleteTailButRejectsCorruption(t *testing.T) {
@@ -412,6 +432,70 @@ func TestNodeDirtyTailBudgetRejectsConcurrentOvercommit(t *testing.T) {
 	require.Equal(t, 1, succeeded)
 	require.Equal(t, 1, exhausted)
 	require.Equal(t, int64(LogicalBlockSize), budget.Usage().UsedBytes)
+}
+
+func TestBranchRetirementReserveIsUnavailableToGuestWrites(t *testing.T) {
+	base := bytes.Repeat([]byte{0x51}, 2*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "retirement-reserve.wal")
+	budget, err := NewDirtyTailBudgetWithReserve(2*LogicalBlockSize, LogicalBlockSize)
+	require.NoError(t, err)
+	branch, err := OpenBranchWithOptions(
+		path,
+		testBranchIdentity(int64(len(base))),
+		bytes.NewReader(base),
+		BranchOptions{
+			MaxDirtyTailBytes:      LogicalBlockSize,
+			RetirementReserveBytes: LogicalBlockSize,
+			NodeDirtyBudget:        budget,
+		},
+	)
+	require.NoError(t, err)
+	defer branch.Close()
+	require.Equal(t, NodeDirtyTailUsage{
+		ReservedBytes: LogicalBlockSize, MaxBytes: 2 * LogicalBlockSize, Owners: 1,
+	}, budget.Usage())
+
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x52}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = branch.WriteAt([]byte{0x53}, LogicalBlockSize)
+	require.ErrorIs(t, err, syscall.ENOSPC)
+	require.NoError(t, branch.BeginRetirement())
+	require.Equal(t, int64(LogicalBlockSize), budget.Usage().ReservedBytes)
+	_, err = branch.WriteAt([]byte{0x54}, LogicalBlockSize)
+	require.NoError(t, err, "filesystem shutdown traffic may consume the protected reserve")
+	require.Equal(t, NodeDirtyTailUsage{
+		UsedBytes: 2 * LogicalBlockSize, MaxBytes: 2 * LogicalBlockSize, Owners: 1,
+	}, budget.Usage())
+}
+
+func TestNodeDirtyTailRetirementReserveDoesNotScaleWithOwnerCount(t *testing.T) {
+	const owners = 10_000
+	budget, err := NewDirtyTailBudgetWithReserve(2*LogicalBlockSize, LogicalBlockSize)
+	require.NoError(t, err)
+	for index := range owners {
+		require.NoError(t, budget.attach(fmt.Sprintf("owner-%05d", index), 0))
+	}
+	require.Equal(t, NodeDirtyTailUsage{
+		ReservedBytes: LogicalBlockSize, MaxBytes: 2 * LogicalBlockSize, Owners: owners,
+	}, budget.Usage())
+	for index := range owners {
+		require.NoError(t, budget.detach(fmt.Sprintf("owner-%05d", index)))
+	}
+}
+
+func TestNodeDirtyTailRecoveryHeadroomShrinksAfterRecoveredOwnerReclaim(t *testing.T) {
+	budget, err := NewDirtyTailBudgetWithReserve(2*LogicalBlockSize, LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, budget.Preload("recovered", 4*LogicalBlockSize))
+	require.Equal(t, NodeDirtyTailUsage{
+		UsedBytes: 4 * LogicalBlockSize, ReservedBytes: LogicalBlockSize,
+		MaxBytes: 2 * LogicalBlockSize, Owners: 1,
+	}, budget.Usage())
+	require.NoError(t, budget.ReleaseOwner("recovered"))
+	require.NoError(t, budget.attach("new", 0))
+	require.NoError(t, budget.beginRetirement("new"))
+	require.ErrorIs(t, budget.reserve("new", 3*LogicalBlockSize), syscall.ENOSPC,
+		"reclaimed startup overage must not permanently raise the retirement ceiling")
 }
 
 func TestBranchCheckpointRemainsImmutableWhileWriterContinues(t *testing.T) {

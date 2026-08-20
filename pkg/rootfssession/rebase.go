@@ -301,6 +301,15 @@ func (m *Manager) ExecuteRebase(
 	if applyResult == nil || applyResult.Validate() != nil {
 		return result, fmt.Errorf("RootFS rebase engine returned an invalid result")
 	}
+	for _, role := range rebaseRoles {
+		branch := live.branches[role]
+		if branch == nil {
+			return result, fmt.Errorf("RootFS rebase lacks live %s branch before retirement", role)
+		}
+		if err := branch.BeginRetirement(); err != nil {
+			return result, fmt.Errorf("open %s rebase retirement dirty tail reserve: %w", role, err)
+		}
+	}
 	if err := m.unmountRebaseMounts(&current, true); err != nil {
 		return result, err
 	}

@@ -27,8 +27,8 @@ Implemented:
 - tokenless durable Stage and exact runsc/stable-mount consumer journal
 - independent Nomad node-allocation catalog reconciliation, including purged
   allocation fencing when the task-driver misses `DestroyTask`
-- per-session and aggregate node unpublished dirty-tail capacity with
-  request-atomic `ENOSPC` backpressure that survives daemon restart
+- per-session and aggregate node unpublished dirty-tail fail-stop boundaries,
+  restart accounting, and shared retirement headroom
 - crash-safe running forks: durable XFS freeze intent, immutable branch
   checkpoint, thaw-before-S3 publication, exact node retry cache, and an
   atomic PostgreSQL target-filesystem transaction that keeps the source writer
@@ -395,9 +395,11 @@ server-GC/client-destroy race validation or move the local executor into ctld.
 
 `--max-dirty-tail-bytes` bounds the logical 4 KiB payload represented by one
 session's local branch WAL. Repeated overwrites count because they consume WAL
-until publication. Once exhausted, the daemon rejects an entire NBD write or
-write-zeroes request with `ENOSPC`; already completed writes remain readable
-and flushable, and planned retirement can still publish them. The default is
+until publication. Once exhausted, the daemon rejects an entire backend write
+or write-zeroes request before appending any record. The NBD reply contains
+`ENOSPC`, but Linux's NBD client maps every nonzero remote errno to block-layer
+`EIO`; reaching this hard boundary can therefore shut down XFS. It is an
+emergency fail-stop guard, not a guest-visible quota mechanism. The default is
 10 GiB.
 
 `--max-node-dirty-tail-bytes` independently bounds the aggregate logical
@@ -406,11 +408,24 @@ acknowledgement, interrupted work, and all three offline-rebase branches. The
 default is 40 GiB. Admission is atomic across concurrent NBD requests on
 different sessions. Startup scans every durable `.wal` below `--branch-root`
 before serving requests; a limit lowered below recovered usage does not block
-retirement, but all new writes remain `ENOSPC` until acknowledged artifacts are
+retirement, but normal writes remain blocked until acknowledged artifacts are
 deleted. Closing a branch does not release capacity—only deletion after the
-regional terminal proof does. Account for fixed record framing and filesystem
-headroom when sizing the branch volume. These node-local limits do not replace
-the separate regional PostgreSQL composite-tail backlog quota.
+regional terminal proof does. Account for fixed record framing, filesystem
+headroom, and the Linux NBD error behavior when sizing the branch volume. These
+node-local limits do not replace the separate regional PostgreSQL
+composite-tail backlog quota.
+
+`--dirty-tail-retirement-reserve-bytes` protects one shared 64 MiB headroom
+pool inside the node cap. It is not multiplied by the number of attached
+branches, so 10,000 idle owners do not consume 640 GiB of logical admission.
+Normal writes cannot consume the pool. After the runtime is fenced, the
+session manager switches its branch to retirement mode before XFS sync/unmount,
+allowing shutdown I/O to use the shared node headroom and expanding that
+branch's per-session limit by the same amount. A privileged NBD/XFS/OverlayFS
+test verifies clean retirement when fencing begins before the hard boundary.
+The reserve cannot repair an XFS instance after Linux NBD has already surfaced
+a hard-cap response as `EIO`; production pressure detection must initiate
+retirement before that boundary.
 
 ## Running fork control
 

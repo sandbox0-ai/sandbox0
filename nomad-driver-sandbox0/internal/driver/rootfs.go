@@ -227,9 +227,10 @@ func newEmbeddedRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootf
 	sessions, err := rootfssession.New(rootfssession.Config{
 		StatePath: config.RootFSStatePath, BranchRoot: config.RootFSBranchRoot,
 		MountRoot: config.RootFSMountRoot, MaxDirtyTailBytes: config.RootFSMaxDirtyTailBytes,
-		MaxNodeDirtyTailBytes: config.RootFSMaxNodeDirtyTailBytes,
-		Source:                conditional,
-		Publisher:             rootfsblock.ObjectStorePublisher{Store: conditional}, Runtime: hostRuntime,
+		MaxNodeDirtyTailBytes:           config.RootFSMaxNodeDirtyTailBytes,
+		DirtyTailRetirementReserveBytes: config.RootFSDirtyTailRetirementReserveBytes,
+		Source:                          conditional,
+		Publisher:                       rootfsblock.ObjectStorePublisher{Store: conditional}, Runtime: hostRuntime,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS session manager: %w", err)
@@ -253,6 +254,7 @@ func newEmbeddedRootFSRuntime(config *PluginConfig, logger hclog.Logger) (*rootf
 	dirtyTailUsage := sessions.NodeDirtyTailUsage()
 	logger.Info("RootFS node dirty tail budget initialized",
 		"used_bytes", dirtyTailUsage.UsedBytes,
+		"reserved_bytes", dirtyTailUsage.ReservedBytes,
 		"max_bytes", dirtyTailUsage.MaxBytes,
 		"journal_owners", dirtyTailUsage.Owners,
 	)
@@ -888,6 +890,13 @@ func validateRootFSConfig(config *PluginConfig) error {
 	}
 	if config.RootFSMaxNodeDirtyTailBytes < 0 {
 		return fmt.Errorf("rootfs_max_node_dirty_tail_bytes must be non-negative")
+	}
+	if config.RootFSDirtyTailRetirementReserveBytes < 0 {
+		return fmt.Errorf("rootfs_dirty_tail_retirement_reserve_bytes must be non-negative")
+	}
+	if config.RootFSMaxNodeDirtyTailBytes > 0 &&
+		config.RootFSDirtyTailRetirementReserveBytes > config.RootFSMaxNodeDirtyTailBytes {
+		return fmt.Errorf("rootfs_dirty_tail_retirement_reserve_bytes must not exceed rootfs_max_node_dirty_tail_bytes")
 	}
 	if config.RootFSConsumerNetNSRoot != "" &&
 		(!filepath.IsAbs(config.RootFSConsumerNetNSRoot) || filepath.Clean(config.RootFSConsumerNetNSRoot) == "/") {

@@ -110,6 +110,10 @@ var (
 			hclspec.NewAttr("rootfs_max_node_dirty_tail_bytes", "number", false),
 			hclspec.NewLiteral(`42949672960`),
 		),
+		"rootfs_dirty_tail_retirement_reserve_bytes": hclspec.NewDefault(
+			hclspec.NewAttr("rootfs_dirty_tail_retirement_reserve_bytes", "number", false),
+			hclspec.NewLiteral(`67108864`),
+		),
 		"rootfs_nbd_devices": hclspec.NewAttr("rootfs_nbd_devices", "list(string)", false),
 		"rootfs_object_type": hclspec.NewDefault(
 			hclspec.NewAttr("rootfs_object_type", "string", false),
@@ -174,27 +178,28 @@ type PluginConfig struct {
 	DevSmokeEnabled      bool   `codec:"dev_smoke_enabled"`
 	NetworkPolicyEnabled bool   `codec:"network_policy_enabled"`
 
-	RootFSEnabled                 bool     `codec:"rootfs_enabled"`
-	RootFSSessiondSocket          string   `codec:"rootfs_sessiond_socket"`
-	RootFSConsumerMountRoot       string   `codec:"rootfs_consumer_mount_root"`
-	RootFSConsumerNetNSRoot       string   `codec:"rootfs_consumer_netns_root"`
-	RootFSStatePath               string   `codec:"rootfs_state_path"`
-	RootFSBranchRoot              string   `codec:"rootfs_branch_root"`
-	RootFSMountRoot               string   `codec:"rootfs_mount_root"`
-	RootFSMaxDirtyTailBytes       int64    `codec:"rootfs_max_dirty_tail_bytes"`
-	RootFSMaxNodeDirtyTailBytes   int64    `codec:"rootfs_max_node_dirty_tail_bytes"`
-	RootFSNBDDevices              []string `codec:"rootfs_nbd_devices"`
-	RootFSObjectType              string   `codec:"rootfs_object_type"`
-	RootFSObjectBucket            string   `codec:"rootfs_object_bucket"`
-	RootFSObjectRegion            string   `codec:"rootfs_object_region"`
-	RootFSObjectEndpoint          string   `codec:"rootfs_object_endpoint"`
-	RootFSObjectAccessKey         string   `codec:"rootfs_object_access_key"`
-	RootFSObjectSecretKey         string   `codec:"rootfs_object_secret_key"`
-	RootFSAuthorityURL            string   `codec:"rootfs_authority_url"`
-	RootFSAuthorityCAFile         string   `codec:"rootfs_authority_ca_file"`
-	RootFSAuthorityClientCertFile string   `codec:"rootfs_authority_client_cert_file"`
-	RootFSAuthorityClientKeyFile  string   `codec:"rootfs_authority_client_key_file"`
-	RootFSAuthorityTokenFile      string   `codec:"rootfs_authority_token_file"`
+	RootFSEnabled                         bool     `codec:"rootfs_enabled"`
+	RootFSSessiondSocket                  string   `codec:"rootfs_sessiond_socket"`
+	RootFSConsumerMountRoot               string   `codec:"rootfs_consumer_mount_root"`
+	RootFSConsumerNetNSRoot               string   `codec:"rootfs_consumer_netns_root"`
+	RootFSStatePath                       string   `codec:"rootfs_state_path"`
+	RootFSBranchRoot                      string   `codec:"rootfs_branch_root"`
+	RootFSMountRoot                       string   `codec:"rootfs_mount_root"`
+	RootFSMaxDirtyTailBytes               int64    `codec:"rootfs_max_dirty_tail_bytes"`
+	RootFSMaxNodeDirtyTailBytes           int64    `codec:"rootfs_max_node_dirty_tail_bytes"`
+	RootFSDirtyTailRetirementReserveBytes int64    `codec:"rootfs_dirty_tail_retirement_reserve_bytes"`
+	RootFSNBDDevices                      []string `codec:"rootfs_nbd_devices"`
+	RootFSObjectType                      string   `codec:"rootfs_object_type"`
+	RootFSObjectBucket                    string   `codec:"rootfs_object_bucket"`
+	RootFSObjectRegion                    string   `codec:"rootfs_object_region"`
+	RootFSObjectEndpoint                  string   `codec:"rootfs_object_endpoint"`
+	RootFSObjectAccessKey                 string   `codec:"rootfs_object_access_key"`
+	RootFSObjectSecretKey                 string   `codec:"rootfs_object_secret_key"`
+	RootFSAuthorityURL                    string   `codec:"rootfs_authority_url"`
+	RootFSAuthorityCAFile                 string   `codec:"rootfs_authority_ca_file"`
+	RootFSAuthorityClientCertFile         string   `codec:"rootfs_authority_client_cert_file"`
+	RootFSAuthorityClientKeyFile          string   `codec:"rootfs_authority_client_key_file"`
+	RootFSAuthorityTokenFile              string   `codec:"rootfs_authority_token_file"`
 
 	RuntimeSlotEnabled        bool   `codec:"runtime_slot_enabled"`
 	RuntimeSlotClusterID      string `codec:"runtime_slot_cluster_id"`
@@ -256,19 +261,20 @@ func newPlugin(logger hclog.Logger, newRunner func(config PluginConfig) Runsc) d
 
 func defaultPluginConfig() *PluginConfig {
 	return &PluginConfig{
-		RunscPath:                   "/usr/local/bin/runsc",
-		RunscRoot:                   "/var/run/sandbox0/runsc",
-		ControlDir:                  "/var/run/sandbox0/nomad-slots",
-		AllowedRootfsDir:            "/var/lib/sandbox0/rootfs",
-		Platform:                    "systrap",
-		Overlay2:                    "none",
-		FileAccess:                  "shared",
-		DirectFS:                    true,
-		DevSmokeEnabled:             false,
-		RootFSMaxDirtyTailBytes:     rootfssession.DefaultMaxDirtyTailBytes,
-		RootFSMaxNodeDirtyTailBytes: rootfssession.DefaultMaxNodeDirtyTailBytes,
-		RootFSConsumerNetNSRoot:     "/var/run/netns",
-		RuntimeSlotNodeBootIDFile:   "/proc/sys/kernel/random/boot_id",
+		RunscPath:                             "/usr/local/bin/runsc",
+		RunscRoot:                             "/var/run/sandbox0/runsc",
+		ControlDir:                            "/var/run/sandbox0/nomad-slots",
+		AllowedRootfsDir:                      "/var/lib/sandbox0/rootfs",
+		Platform:                              "systrap",
+		Overlay2:                              "none",
+		FileAccess:                            "shared",
+		DirectFS:                              true,
+		DevSmokeEnabled:                       false,
+		RootFSMaxDirtyTailBytes:               rootfssession.DefaultMaxDirtyTailBytes,
+		RootFSMaxNodeDirtyTailBytes:           rootfssession.DefaultMaxNodeDirtyTailBytes,
+		RootFSDirtyTailRetirementReserveBytes: rootfssession.DefaultDirtyTailRetirementReserveBytes,
+		RootFSConsumerNetNSRoot:               "/var/run/netns",
+		RuntimeSlotNodeBootIDFile:             "/proc/sys/kernel/random/boot_id",
 	}
 }
 

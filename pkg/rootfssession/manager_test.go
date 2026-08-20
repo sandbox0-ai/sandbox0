@@ -86,6 +86,14 @@ func TestManagerEnforcesDirtyTailCapacityWithoutBlockingRetirement(t *testing.T)
 	require.ErrorContains(t, err, "non-negative")
 	_, err = New(Config{MaxNodeDirtyTailBytes: -1, Source: objects, Publisher: objects, Runtime: runtime})
 	require.ErrorContains(t, err, "node dirty tail")
+	_, err = New(Config{
+		StatePath: filepath.Join(base, "invalid", "sessions.db"),
+		BranchRoot: filepath.Join(base, "invalid-branches"), MountRoot: filepath.Join(base, "invalid-mounts"),
+		MaxNodeDirtyTailBytes:           rootfsblock.LogicalBlockSize,
+		DirtyTailRetirementReserveBytes: 2 * rootfsblock.LogicalBlockSize,
+		Source:                          objects, Publisher: objects, Runtime: runtime,
+	})
+	require.ErrorContains(t, err, "retirement reserve")
 }
 
 func TestManagerEnforcesAggregateNodeDirtyTailUntilRegionalArtifactReclaim(t *testing.T) {
@@ -96,8 +104,9 @@ func TestManagerEnforcesAggregateNodeDirtyTailUntilRegionalArtifactReclaim(t *te
 	manager, err := New(Config{
 		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
 		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: 4 * rootfsblock.LogicalBlockSize,
-		MaxNodeDirtyTailBytes: 2 * rootfsblock.LogicalBlockSize,
-		Source:                objects, Publisher: objects, Runtime: runtime,
+		MaxNodeDirtyTailBytes:           4 * rootfsblock.LogicalBlockSize,
+		DirtyTailRetirementReserveBytes: rootfsblock.LogicalBlockSize,
+		Source:                          objects, Publisher: objects, Runtime: runtime,
 	})
 	require.NoError(t, err)
 	defer manager.Close()
@@ -119,26 +128,36 @@ func TestManagerEnforcesAggregateNodeDirtyTailUntilRegionalArtifactReclaim(t *te
 	_, err = secondBranch.WriteAt(bytes.Repeat([]byte{0x52}, rootfsblock.LogicalBlockSize), 0)
 	require.NoError(t, err)
 	_, err = secondBranch.WriteAt([]byte{0x53}, rootfsblock.LogicalBlockSize)
+	require.NoError(t, err)
+	_, err = firstBranch.WriteAt([]byte{0x54}, rootfsblock.LogicalBlockSize)
 	var exhausted *rootfsblock.DirtyTailCapacityError
 	require.ErrorAs(t, err, &exhausted)
 	require.Equal(t, "node", exhausted.Scope)
 	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
-		UsedBytes: 2 * rootfsblock.LogicalBlockSize,
-		MaxBytes:  2 * rootfsblock.LogicalBlockSize,
-		Owners:    2,
+		UsedBytes:     3 * rootfsblock.LogicalBlockSize,
+		ReservedBytes: rootfsblock.LogicalBlockSize,
+		MaxBytes:      4 * rootfsblock.LogicalBlockSize,
+		Owners:        2,
 	}, manager.NodeDirtyTailUsage())
 
 	require.NoError(t, manager.BeginRetire(first.Parent, first.Identity, "retire-node-dirty-first"))
 	require.NoError(t, manager.Release(t.Context(), first.Identity))
-	_, err = secondBranch.WriteAt([]byte{0x54}, rootfsblock.LogicalBlockSize)
+	_, err = secondBranch.WriteAt(
+		bytes.Repeat([]byte{0x55}, rootfsblock.LogicalBlockSize),
+		rootfsblock.LogicalBlockSize,
+	)
 	require.ErrorIs(t, err, syscall.ENOSPC, "local tail remains charged until regional terminal acknowledgement")
 	require.NoError(t, manager.ReclaimTerminalArtifacts(first.Parent, first.Identity))
-	_, err = secondBranch.WriteAt([]byte{0x55}, rootfsblock.LogicalBlockSize)
+	_, err = secondBranch.WriteAt(
+		bytes.Repeat([]byte{0x56}, rootfsblock.LogicalBlockSize),
+		2*rootfsblock.LogicalBlockSize,
+	)
 	require.NoError(t, err)
 	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
-		UsedBytes: 2 * rootfsblock.LogicalBlockSize,
-		MaxBytes:  2 * rootfsblock.LogicalBlockSize,
-		Owners:    1,
+		UsedBytes:     3 * rootfsblock.LogicalBlockSize,
+		ReservedBytes: rootfsblock.LogicalBlockSize,
+		MaxBytes:      4 * rootfsblock.LogicalBlockSize,
+		Owners:        1,
 	}, manager.NodeDirtyTailUsage())
 }
 
@@ -149,8 +168,9 @@ func TestManagerPreloadsRecoveredNodeDirtyTailAboveLoweredLimit(t *testing.T) {
 	config := Config{
 		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
 		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: 4 * rootfsblock.LogicalBlockSize,
-		MaxNodeDirtyTailBytes: 4 * rootfsblock.LogicalBlockSize,
-		Source:                objects, Publisher: objects, Runtime: runtime,
+		MaxNodeDirtyTailBytes:           4 * rootfsblock.LogicalBlockSize,
+		DirtyTailRetirementReserveBytes: rootfsblock.LogicalBlockSize,
+		Source:                          objects, Publisher: objects, Runtime: runtime,
 	}
 	manager, err := New(config)
 	require.NoError(t, err)
@@ -169,9 +189,10 @@ func TestManagerPreloadsRecoveredNodeDirtyTailAboveLoweredLimit(t *testing.T) {
 	require.NoError(t, err, "lowering the cap must not prevent recovery and retirement")
 	defer restarted.Close()
 	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
-		UsedBytes: 2 * rootfsblock.LogicalBlockSize,
-		MaxBytes:  rootfsblock.LogicalBlockSize,
-		Owners:    1,
+		UsedBytes:     2 * rootfsblock.LogicalBlockSize,
+		ReservedBytes: rootfsblock.LogicalBlockSize,
+		MaxBytes:      rootfsblock.LogicalBlockSize,
+		Owners:        1,
 	}, restarted.NodeDirtyTailUsage())
 }
 

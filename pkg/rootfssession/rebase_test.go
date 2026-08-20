@@ -72,7 +72,8 @@ func TestManagerExecuteRebaseJournalsExactResultAndCleansResources(t *testing.T)
 	_, err = os.Stat(mountRoot)
 	require.ErrorIs(t, err, os.ErrNotExist)
 	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
-		MaxBytes: DefaultMaxNodeDirtyTailBytes,
+		ReservedBytes: DefaultDirtyTailRetirementReserveBytes,
+		MaxBytes:      DefaultMaxNodeDirtyTailBytes,
 	}, manager.NodeDirtyTailUsage())
 
 	calls := runtime.callsSnapshot()

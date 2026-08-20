@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -123,6 +124,7 @@ type BlockUpdate struct {
 // production session owners must set an explicit positive limit.
 type BranchOptions struct {
 	MaxDirtyTailBytes int64
+	NodeDirtyBudget   *DirtyTailBudget
 }
 
 // DirtyTailUsage describes the exact local unpublished branch occupancy.
@@ -138,15 +140,20 @@ type DirtyTailUsage struct {
 // of its records. It unwraps to ENOSPC so the Linux NBD client and guest
 // filesystem receive a stable capacity error instead of a generic EIO.
 type DirtyTailCapacityError struct {
+	Scope          string
 	UsedBytes      int64
 	RequestedBytes int64
 	LimitBytes     int64
 }
 
 func (e *DirtyTailCapacityError) Error() string {
+	scope := strings.TrimSpace(e.Scope)
+	if scope == "" {
+		scope = "session"
+	}
 	return fmt.Sprintf(
-		"rootfs dirty tail capacity exhausted: used %d bytes, request %d bytes, limit %d bytes",
-		e.UsedBytes, e.RequestedBytes, e.LimitBytes,
+		"rootfs %s dirty tail capacity exhausted: used %d bytes, request %d bytes, limit %d bytes",
+		scope, e.UsedBytes, e.RequestedBytes, e.LimitBytes,
 	)
 }
 
@@ -156,18 +163,20 @@ func (*DirtyTailCapacityError) Unwrap() error { return syscall.ENOSPC }
 // generation. A successful Flush makes every preceding block record durable
 // on the current node. It does not claim region durability.
 type Branch struct {
-	mu       sync.RWMutex
-	file     *os.File
-	base     io.ReaderAt
-	identity BranchIdentity
-	header   int64
-	end      int64
-	sequence uint64
-	durable  uint64
-	blocks   map[uint64]branchRecord
-	records  branchRecordLog
-	maxDirty int64
-	closed   bool
+	mu         sync.RWMutex
+	file       *os.File
+	base       io.ReaderAt
+	identity   BranchIdentity
+	header     int64
+	end        int64
+	sequence   uint64
+	durable    uint64
+	blocks     map[uint64]branchRecord
+	records    branchRecordLog
+	maxDirty   int64
+	nodeDirty  *DirtyTailBudget
+	dirtyOwner string
+	closed     bool
 }
 
 func OpenBranch(path string, identity BranchIdentity, base io.ReaderAt) (*Branch, error) {
@@ -205,11 +214,17 @@ func OpenBranchWithOptions(path string, identity BranchIdentity, base io.ReaderA
 	}
 	branch := &Branch{
 		file: file, base: base, identity: identity, blocks: make(map[uint64]branchRecord),
-		maxDirty: options.MaxDirtyTailBytes,
+		maxDirty: options.MaxDirtyTailBytes, nodeDirty: options.NodeDirtyBudget, dirtyOwner: path,
 	}
 	if err := branch.open(); err != nil {
 		file.Close()
 		return nil, err
+	}
+	if branch.nodeDirty != nil {
+		if err := branch.nodeDirty.attach(branch.dirtyOwner, int64(branch.records.count)*LogicalBlockSize); err != nil {
+			file.Close()
+			return nil, fmt.Errorf("attach branch to node dirty tail budget: %w", err)
+		}
 	}
 	return branch, nil
 }
@@ -248,7 +263,9 @@ func (b *Branch) WriteAt(payload []byte, offset int64) (int, error) {
 	if err := b.admitRecordsLocked(records); err != nil {
 		return 0, err
 	}
-	return b.writeAtLocked(payload, offset)
+	before := b.records.count
+	written, err := b.writeAtLocked(payload, offset)
+	return written, errors.Join(err, b.finishAdmissionLocked(records, int64(b.records.count-before)))
 }
 
 func (b *Branch) writeAtLocked(payload []byte, offset int64) (int, error) {
@@ -287,19 +304,21 @@ func (b *Branch) WriteZeroes(offset, length int64) error {
 	if b.closed {
 		return os.ErrClosed
 	}
-	if err := b.admitRecordsLocked(mappingBlocksForRange(offset, length)); err != nil {
+	records := mappingBlocksForRange(offset, length)
+	if err := b.admitRecordsLocked(records); err != nil {
 		return err
 	}
+	before := b.records.count
 	zero := make([]byte, LogicalBlockSize)
 	for current := int64(0); current < length; {
 		absolute := offset + current
 		chunk := min(length-current, int64(LogicalBlockSize)-absolute%LogicalBlockSize)
 		if _, err := b.writeAtLocked(zero[:chunk], absolute); err != nil {
-			return err
+			return errors.Join(err, b.finishAdmissionLocked(records, int64(b.records.count-before)))
 		}
 		current += chunk
 	}
-	return nil
+	return b.finishAdmissionLocked(records, int64(b.records.count-before))
 }
 
 // DirtyTailUsage returns a race-free snapshot suitable for metrics and
@@ -421,7 +440,11 @@ func (b *Branch) Close() error {
 		return nil
 	}
 	b.closed = true
-	return b.file.Close()
+	closeErr := b.file.Close()
+	if b.nodeDirty != nil {
+		closeErr = errors.Join(closeErr, b.nodeDirty.detach(b.dirtyOwner))
+	}
+	return closeErr
 }
 
 func (b *Branch) open() error {
@@ -570,17 +593,33 @@ func (b *Branch) appendBlockLocked(block uint64, payload []byte) error {
 }
 
 func (b *Branch) admitRecordsLocked(records int64) error {
-	if records <= 0 || b.maxDirty == 0 {
+	if records <= 0 {
 		return nil
 	}
 	used := int64(b.records.count) * LogicalBlockSize
 	requested := records * LogicalBlockSize
-	if used > b.maxDirty || requested > b.maxDirty-used {
+	if b.maxDirty > 0 && (used > b.maxDirty || requested > b.maxDirty-used) {
 		return &DirtyTailCapacityError{
-			UsedBytes: used, RequestedBytes: requested, LimitBytes: b.maxDirty,
+			Scope: "session", UsedBytes: used, RequestedBytes: requested, LimitBytes: b.maxDirty,
 		}
 	}
+	if b.nodeDirty != nil {
+		return b.nodeDirty.reserve(b.dirtyOwner, requested)
+	}
 	return nil
+}
+
+func (b *Branch) finishAdmissionLocked(reservedRecords, appendedRecords int64) error {
+	if b.nodeDirty == nil || reservedRecords <= appendedRecords {
+		if appendedRecords > reservedRecords {
+			return fmt.Errorf("branch appended more records than its dirty tail reservation")
+		}
+		return nil
+	}
+	return b.nodeDirty.releaseReservation(
+		b.dirtyOwner,
+		(reservedRecords-appendedRecords)*LogicalBlockSize,
+	)
 }
 
 func mappingBlocksForRange(offset, length int64) int64 {

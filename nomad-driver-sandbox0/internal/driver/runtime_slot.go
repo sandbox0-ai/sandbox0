@@ -89,11 +89,12 @@ type networkReadyProof struct {
 }
 
 type storageReadyProof struct {
-	Version           int    `json:"version"`
-	SlotID            string `json:"slot_id"`
-	SessiondSocket    string `json:"sessiond_socket"`
-	RootFSMountRoot   string `json:"rootfs_mount_root"`
-	MaxDirtyTailBytes int64  `json:"max_dirty_tail_bytes"`
+	Version               int    `json:"version"`
+	SlotID                string `json:"slot_id"`
+	SessiondSocket        string `json:"sessiond_socket"`
+	RootFSMountRoot       string `json:"rootfs_mount_root"`
+	MaxDirtyTailBytes     int64  `json:"max_dirty_tail_bytes"`
+	MaxNodeDirtyTailBytes int64  `json:"max_node_dirty_tail_bytes"`
 }
 
 type runtimeSlotClaimNetworkProof struct {
@@ -319,7 +320,7 @@ func newRuntimeSlotLifecycle(
 	storageProof, err := proofDigest(storageReadyProof{
 		Version: runtimeSlotProofVersion, SlotID: task.ID,
 		SessiondSocket: config.RootFSSessiondSocket, RootFSMountRoot: config.RootFSMountRoot,
-		MaxDirtyTailBytes: config.RootFSMaxDirtyTailBytes,
+		MaxDirtyTailBytes: config.RootFSMaxDirtyTailBytes, MaxNodeDirtyTailBytes: config.RootFSMaxNodeDirtyTailBytes,
 	})
 	if err != nil {
 		return nil, err

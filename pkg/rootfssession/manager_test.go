@@ -53,6 +53,7 @@ func TestManagerEnforcesDirtyTailCapacityWithoutBlockingRetirement(t *testing.T)
 	base := t.TempDir()
 	objects := newSessionObjectStore()
 	runtime := newFakeHostRuntime(objects)
+	runtime.devicePaths = []string{"/dev/fake0", "/dev/fake1"}
 	manager, err := New(Config{
 		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
 		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: rootfsblock.LogicalBlockSize,
@@ -83,6 +84,95 @@ func TestManagerEnforcesDirtyTailCapacityWithoutBlockingRetirement(t *testing.T)
 
 	_, err = New(Config{MaxDirtyTailBytes: -1, Source: objects, Publisher: objects, Runtime: runtime})
 	require.ErrorContains(t, err, "non-negative")
+	_, err = New(Config{MaxNodeDirtyTailBytes: -1, Source: objects, Publisher: objects, Runtime: runtime})
+	require.ErrorContains(t, err, "node dirty tail")
+}
+
+func TestManagerEnforcesAggregateNodeDirtyTailUntilRegionalArtifactReclaim(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	runtime.devicePaths = []string{"/dev/fake0", "/dev/fake1"}
+	manager, err := New(Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: 4 * rootfsblock.LogicalBlockSize,
+		MaxNodeDirtyTailBytes: 2 * rootfsblock.LogicalBlockSize,
+		Source:                objects, Publisher: objects, Runtime: runtime,
+	})
+	require.NoError(t, err)
+	defer manager.Close()
+	first := testStageRequestWithBlocks(t, objects, "node-dirty-first", 4)
+	second := testStageRequestWithBlocks(t, objects, "node-dirty-second", 4)
+	require.NoError(t, manager.Reserve(first))
+	require.NoError(t, manager.Reserve(second))
+	_, err = manager.Ensure(t.Context(), first)
+	require.NoError(t, err)
+	_, err = manager.Ensure(t.Context(), second)
+	require.NoError(t, err)
+
+	manager.mu.Lock()
+	firstBranch := manager.live[first.Parent].branch
+	secondBranch := manager.live[second.Parent].branch
+	manager.mu.Unlock()
+	_, err = firstBranch.WriteAt(bytes.Repeat([]byte{0x51}, rootfsblock.LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = secondBranch.WriteAt(bytes.Repeat([]byte{0x52}, rootfsblock.LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = secondBranch.WriteAt([]byte{0x53}, rootfsblock.LogicalBlockSize)
+	var exhausted *rootfsblock.DirtyTailCapacityError
+	require.ErrorAs(t, err, &exhausted)
+	require.Equal(t, "node", exhausted.Scope)
+	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
+		UsedBytes: 2 * rootfsblock.LogicalBlockSize,
+		MaxBytes:  2 * rootfsblock.LogicalBlockSize,
+		Owners:    2,
+	}, manager.NodeDirtyTailUsage())
+
+	require.NoError(t, manager.BeginRetire(first.Parent, first.Identity, "retire-node-dirty-first"))
+	require.NoError(t, manager.Release(t.Context(), first.Identity))
+	_, err = secondBranch.WriteAt([]byte{0x54}, rootfsblock.LogicalBlockSize)
+	require.ErrorIs(t, err, syscall.ENOSPC, "local tail remains charged until regional terminal acknowledgement")
+	require.NoError(t, manager.ReclaimTerminalArtifacts(first.Parent, first.Identity))
+	_, err = secondBranch.WriteAt([]byte{0x55}, rootfsblock.LogicalBlockSize)
+	require.NoError(t, err)
+	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
+		UsedBytes: 2 * rootfsblock.LogicalBlockSize,
+		MaxBytes:  2 * rootfsblock.LogicalBlockSize,
+		Owners:    1,
+	}, manager.NodeDirtyTailUsage())
+}
+
+func TestManagerPreloadsRecoveredNodeDirtyTailAboveLoweredLimit(t *testing.T) {
+	base := t.TempDir()
+	objects := newSessionObjectStore()
+	runtime := newFakeHostRuntime(objects)
+	config := Config{
+		StatePath: filepath.Join(base, "state", "sessions.db"), BranchRoot: filepath.Join(base, "branches"),
+		MountRoot: filepath.Join(base, "mounts"), MaxDirtyTailBytes: 4 * rootfsblock.LogicalBlockSize,
+		MaxNodeDirtyTailBytes: 4 * rootfsblock.LogicalBlockSize,
+		Source:                objects, Publisher: objects, Runtime: runtime,
+	}
+	manager, err := New(config)
+	require.NoError(t, err)
+	request := testStageRequestWithBlocks(t, objects, "node-dirty-restart", 4)
+	_, err = manager.Ensure(t.Context(), request)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	branch := manager.live[request.Parent].branch
+	manager.mu.Unlock()
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x61}, 2*rootfsblock.LogicalBlockSize), 0)
+	require.NoError(t, err)
+	require.NoError(t, manager.Close())
+
+	config.MaxNodeDirtyTailBytes = rootfsblock.LogicalBlockSize
+	restarted, err := New(config)
+	require.NoError(t, err, "lowering the cap must not prevent recovery and retirement")
+	defer restarted.Close()
+	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
+		UsedBytes: 2 * rootfsblock.LogicalBlockSize,
+		MaxBytes:  rootfsblock.LogicalBlockSize,
+		Owners:    1,
+	}, restarted.NodeDirtyTailUsage())
 }
 
 func TestManagerReservePersistsTokenlessIndependentRecoveryBinding(t *testing.T) {

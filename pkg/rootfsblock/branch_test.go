@@ -298,6 +298,122 @@ func TestBranchDirtyTailOptionsAllowRetirementAfterLimitReduction(t *testing.T) 
 	require.False(t, errors.As(err, &exhausted))
 }
 
+func TestNodeDirtyTailBudgetSerializesBranchesAndReleasesDeletedOwner(t *testing.T) {
+	base := bytes.Repeat([]byte{0x11}, 3*LogicalBlockSize)
+	root := t.TempDir()
+	budget, err := NewDirtyTailBudget(2 * LogicalBlockSize)
+	require.NoError(t, err)
+	options := BranchOptions{MaxDirtyTailBytes: 3 * LogicalBlockSize, NodeDirtyBudget: budget}
+	firstPath := filepath.Join(root, "first.wal")
+	secondPath := filepath.Join(root, "second.wal")
+	first, err := OpenBranchWithOptions(firstPath, testBranchIdentity(int64(len(base))), bytes.NewReader(base), options)
+	require.NoError(t, err)
+	secondIdentity := testBranchIdentity(int64(len(base)))
+	secondIdentity.RootFSID = "rootfs-second"
+	second, err := OpenBranchWithOptions(secondPath, secondIdentity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+
+	_, err = first.WriteAt(bytes.Repeat([]byte{0x21}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = second.WriteAt(bytes.Repeat([]byte{0x22}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	_, err = first.WriteAt([]byte{0x23}, LogicalBlockSize)
+	var exhausted *DirtyTailCapacityError
+	require.ErrorAs(t, err, &exhausted)
+	require.ErrorIs(t, err, syscall.ENOSPC)
+	require.Equal(t, "node", exhausted.Scope)
+	require.Equal(t, NodeDirtyTailUsage{
+		UsedBytes: 2 * LogicalBlockSize, MaxBytes: 2 * LogicalBlockSize, Owners: 2,
+	}, budget.Usage())
+
+	require.Error(t, budget.ReleaseOwner(firstPath), "an open branch must retain its reservation")
+	require.NoError(t, first.Close())
+	require.NoError(t, os.Remove(firstPath))
+	require.NoError(t, budget.ReleaseOwner(firstPath))
+	_, err = second.WriteAt([]byte{0x24}, LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, second.Close())
+}
+
+func TestNodeDirtyTailBudgetReconcilesConservativeStartupUsage(t *testing.T) {
+	base := bytes.Repeat([]byte{0x31}, 2*LogicalBlockSize)
+	path := filepath.Join(t.TempDir(), "branch.wal")
+	identity := testBranchIdentity(int64(len(base)))
+	branch, err := OpenBranch(path, identity, bytes.NewReader(base))
+	require.NoError(t, err)
+	_, err = branch.WriteAt(bytes.Repeat([]byte{0x32}, LogicalBlockSize), 0)
+	require.NoError(t, err)
+	require.NoError(t, branch.Close())
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	require.NoError(t, err)
+	_, err = file.Write(bytes.Repeat([]byte{0xff}, 10))
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	recovered, err := BranchJournalDirtyBytes(path)
+	require.NoError(t, err)
+	require.Equal(t, int64(2*LogicalBlockSize), recovered, "partial tail must be charged conservatively")
+
+	budget, err := NewDirtyTailBudget(4 * LogicalBlockSize)
+	require.NoError(t, err)
+	require.NoError(t, budget.Preload(path, recovered))
+	reopened, err := OpenBranchWithOptions(
+		path, identity, bytes.NewReader(base), BranchOptions{
+			MaxDirtyTailBytes: 4 * LogicalBlockSize, NodeDirtyBudget: budget,
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, NodeDirtyTailUsage{
+		UsedBytes: LogicalBlockSize, MaxBytes: 4 * LogicalBlockSize, Owners: 1,
+	}, budget.Usage(), "opening must truncate and reconcile an incomplete record")
+	require.NoError(t, reopened.Close())
+}
+
+func TestNodeDirtyTailBudgetRejectsConcurrentOvercommit(t *testing.T) {
+	base := bytes.Repeat([]byte{0x41}, LogicalBlockSize)
+	root := t.TempDir()
+	budget, err := NewDirtyTailBudget(LogicalBlockSize)
+	require.NoError(t, err)
+	options := BranchOptions{MaxDirtyTailBytes: LogicalBlockSize, NodeDirtyBudget: budget}
+	firstIdentity := testBranchIdentity(int64(len(base)))
+	secondIdentity := firstIdentity
+	secondIdentity.RootFSID = "rootfs-concurrent-second"
+	first, err := OpenBranchWithOptions(filepath.Join(root, "first.wal"), firstIdentity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+	defer first.Close()
+	second, err := OpenBranchWithOptions(filepath.Join(root, "second.wal"), secondIdentity, bytes.NewReader(base), options)
+	require.NoError(t, err)
+	defer second.Close()
+
+	start := make(chan struct{})
+	errorsByBranch := make(chan error, 2)
+	for _, branch := range []*Branch{first, second} {
+		branch := branch
+		go func() {
+			<-start
+			_, err := branch.WriteAt(bytes.Repeat([]byte{0x42}, LogicalBlockSize), 0)
+			errorsByBranch <- err
+		}()
+	}
+	close(start)
+	succeeded := 0
+	exhausted := 0
+	for range 2 {
+		err := <-errorsByBranch
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, syscall.ENOSPC):
+			exhausted++
+		default:
+			t.Fatalf("unexpected concurrent write error: %v", err)
+		}
+	}
+	require.Equal(t, 1, succeeded)
+	require.Equal(t, 1, exhausted)
+	require.Equal(t, int64(LogicalBlockSize), budget.Usage().UsedBytes)
+}
+
 func TestBranchCheckpointRemainsImmutableWhileWriterContinues(t *testing.T) {
 	base := bytes.Repeat([]byte{0x11}, 3*LogicalBlockSize)
 	path := filepath.Join(t.TempDir(), "branch.log")

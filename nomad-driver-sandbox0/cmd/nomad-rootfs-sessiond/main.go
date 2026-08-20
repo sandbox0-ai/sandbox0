@@ -41,6 +41,7 @@ func main() {
 	flag.StringVar(&config.RootFSStatePath, "state", "/var/lib/sandbox0/rootfs-sessions.db", "durable session journal")
 	flag.StringVar(&config.RootFSBranchRoot, "branch-root", "/var/lib/sandbox0/rootfs-branches", "durable branch journal root")
 	flag.Int64Var(&config.RootFSMaxDirtyTailBytes, "max-dirty-tail-bytes", 10<<30, "maximum unpublished local dirty-tail payload per session")
+	flag.Int64Var(&config.RootFSMaxNodeDirtyTailBytes, "max-node-dirty-tail-bytes", 40<<30, "maximum aggregate unpublished local dirty-tail payload on this node")
 	flag.StringVar(&config.RootFSMountRoot, "mount-root", "/run/sandbox0/rootfs", "boot-local storage mount root")
 	flag.StringVar(&config.RootFSConsumerMountRoot, "consumer-mount-root", "/opt/nomad", "allowed Nomad task mount root")
 	flag.StringVar(&config.RootFSConsumerNetNSRoot, "consumer-netns-root", "/var/run/netns", "allowed Nomad network namespace root")

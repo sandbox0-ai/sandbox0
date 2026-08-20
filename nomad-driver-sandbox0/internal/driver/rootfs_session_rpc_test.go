@@ -127,6 +127,9 @@ func TestRootFSSessionDaemonClientModeNeedsNoStorageCredentialsInPlugin(t *testi
 	config.RootFSMaxDirtyTailBytes = -1
 	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_max_dirty_tail_bytes")
 	config.RootFSMaxDirtyTailBytes = 0
+	config.RootFSMaxNodeDirtyTailBytes = -1
+	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_max_node_dirty_tail_bytes")
+	config.RootFSMaxNodeDirtyTailBytes = 0
 	config.RootFSConsumerNetNSRoot = "/"
 	require.ErrorContains(t, validateRootFSConfig(config), "rootfs_consumer_netns_root")
 	config.RootFSConsumerNetNSRoot = "/var/run/netns"

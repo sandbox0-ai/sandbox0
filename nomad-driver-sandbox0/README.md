@@ -27,8 +27,8 @@ Implemented:
 - tokenless durable Stage and exact runsc/stable-mount consumer journal
 - independent Nomad node-allocation catalog reconciliation, including purged
   allocation fencing when the task-driver misses `DestroyTask`
-- per-session unpublished dirty-tail capacity with request-atomic `ENOSPC`
-  backpressure that survives daemon restart
+- per-session and aggregate node unpublished dirty-tail capacity with
+  request-atomic `ENOSPC` backpressure that survives daemon restart
 - crash-safe running forks: durable XFS freeze intent, immutable branch
   checkpoint, thaw-before-S3 publication, exact node retry cache, and an
   atomic PostgreSQL target-filesystem transaction that keeps the source writer
@@ -398,9 +398,19 @@ session's local branch WAL. Repeated overwrites count because they consume WAL
 until publication. Once exhausted, the daemon rejects an entire NBD write or
 write-zeroes request with `ENOSPC`; already completed writes remain readable
 and flushable, and planned retirement can still publish them. The default is
-10 GiB. Size the branch volume for node concurrency and set the explicit value
-in `rootfs-sessiond.env`; this node-local bound does not replace the separate
-regional PostgreSQL composite-tail backlog quota.
+10 GiB.
+
+`--max-node-dirty-tail-bytes` independently bounds the aggregate logical
+payload across active sessions, terminal journals awaiting regional
+acknowledgement, interrupted work, and all three offline-rebase branches. The
+default is 40 GiB. Admission is atomic across concurrent NBD requests on
+different sessions. Startup scans every durable `.wal` below `--branch-root`
+before serving requests; a limit lowered below recovered usage does not block
+retirement, but all new writes remain `ENOSPC` until acknowledged artifacts are
+deleted. Closing a branch does not release capacity—only deletion after the
+regional terminal proof does. Account for fixed record framing and filesystem
+headroom when sizing the branch volume. These node-local limits do not replace
+the separate regional PostgreSQL composite-tail backlog quota.
 
 ## Running fork control
 

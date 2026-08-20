@@ -71,6 +71,9 @@ func TestManagerExecuteRebaseJournalsExactResultAndCleansResources(t *testing.T)
 	require.ErrorIs(t, err, os.ErrNotExist)
 	_, err = os.Stat(mountRoot)
 	require.ErrorIs(t, err, os.ErrNotExist)
+	require.Equal(t, rootfsblock.NodeDirtyTailUsage{
+		MaxBytes: DefaultMaxNodeDirtyTailBytes,
+	}, manager.NodeDirtyTailUsage())
 
 	calls := runtime.callsSnapshot()
 	retry, err := manager.ExecuteRebase(t.Context(), request)
@@ -243,6 +246,7 @@ func TestManagerRebaseAttachFailureCleansAndCanRetry(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 	_, err = os.Stat(mountRoot)
 	require.ErrorIs(t, err, os.ErrNotExist)
+	require.Zero(t, manager.NodeDirtyTailUsage().Owners)
 
 	runtime.failAt = ""
 	result, err := manager.ExecuteRebase(t.Context(), request)

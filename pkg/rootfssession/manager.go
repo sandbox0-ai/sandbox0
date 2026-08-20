@@ -25,9 +25,11 @@ import (
 
 const (
 	// DefaultMaxDirtyTailBytes bounds one active writer to 10 GiB of local,
-	// unpublished block-record payload. Operators must also size the node's
-	// branch volume for configured session concurrency.
-	DefaultMaxDirtyTailBytes       = int64(10 << 30)
+	// unpublished block-record payload.
+	DefaultMaxDirtyTailBytes = int64(10 << 30)
+	// DefaultMaxNodeDirtyTailBytes bounds aggregate unpublished payload across
+	// active, retiring, interrupted, and rebase branch journals on one node.
+	DefaultMaxNodeDirtyTailBytes   = int64(40 << 30)
 	legacySessionSchemaVersion     = 2
 	allocationSessionSchemaVersion = 3
 	durableBindingSchemaVersion    = 4
@@ -108,14 +110,15 @@ type CrashFencePreAttachmentHostInspector interface {
 // StatePath and BranchRoot must survive process restarts; MountRoot is boot
 // local and must be in the same mount namespace as containerd.
 type Config struct {
-	StatePath         string
-	BranchRoot        string
-	MountRoot         string
-	MaxDirtyTailBytes int64
-	Source            rootfsblock.RangeSource
-	Publisher         rootfsblock.ImmutableObjectPublisher
-	Runtime           HostRuntime
-	RebaseEngine      RebaseEngine
+	StatePath             string
+	BranchRoot            string
+	MountRoot             string
+	MaxDirtyTailBytes     int64
+	MaxNodeDirtyTailBytes int64
+	Source                rootfsblock.RangeSource
+	Publisher             rootfsblock.ImmutableObjectPublisher
+	Runtime               HostRuntime
+	RebaseEngine          RebaseEngine
 }
 
 // RebaseEngine performs the semantic three-way merge while Manager owns all
@@ -243,6 +246,7 @@ type Manager struct {
 	readCache       *rootfsblock.ReadCache
 	runtime         HostRuntime
 	maxDirty        int64
+	nodeDirty       *rootfsblock.DirtyTailBudget
 	mu              sync.Mutex
 	live            map[string]*liveSession
 	captures        map[string]bool
@@ -265,6 +269,12 @@ func New(config Config) (*Manager, error) {
 	if config.MaxDirtyTailBytes == 0 {
 		config.MaxDirtyTailBytes = DefaultMaxDirtyTailBytes
 	}
+	if config.MaxNodeDirtyTailBytes < 0 {
+		return nil, fmt.Errorf("maximum node dirty tail bytes must be non-negative")
+	}
+	if config.MaxNodeDirtyTailBytes == 0 {
+		config.MaxNodeDirtyTailBytes = DefaultMaxNodeDirtyTailBytes
+	}
 	statePath, err := privatePath(config.StatePath, false)
 	if err != nil {
 		return nil, fmt.Errorf("state path: %w", err)
@@ -276,6 +286,13 @@ func New(config Config) (*Manager, error) {
 	mountRoot, err := privatePath(config.MountRoot, true)
 	if err != nil {
 		return nil, fmt.Errorf("mount root: %w", err)
+	}
+	nodeDirty, err := rootfsblock.NewDirtyTailBudget(config.MaxNodeDirtyTailBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := preloadNodeDirtyTail(branchRoot, nodeDirty); err != nil {
+		return nil, fmt.Errorf("account existing RootFS branch journals: %w", err)
 	}
 	db, err := bolt.Open(statePath, 0o600, &bolt.Options{Timeout: time.Second, NoFreelistSync: false})
 	if err != nil {
@@ -310,7 +327,7 @@ func New(config Config) (*Manager, error) {
 	return &Manager{
 		db: db, branchRoot: branchRoot, mountRoot: mountRoot,
 		source: config.Source, publisher: config.Publisher, readCache: readCache,
-		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes,
+		runtime: config.Runtime, maxDirty: config.MaxDirtyTailBytes, nodeDirty: nodeDirty,
 		live: make(map[string]*liveSession), captures: make(map[string]bool),
 		lifetime: lifetime, cancel: cancel,
 		rebaseEngine: rebaseEngine, rebaseAdmission: make(chan struct{}, 1),
@@ -1199,7 +1216,7 @@ func (m *Manager) Ensure(ctx context.Context, request rootfshandoff.StageRequest
 		Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 		GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 		LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: durable.Generation.CurrentBlockHead,
-	}, reader, rootfsblock.BranchOptions{MaxDirtyTailBytes: m.maxDirty})
+	}, reader, m.branchOptions())
 	if err != nil {
 		return Mount{}, m.fail(current, fmt.Errorf("open writable branch: %w", err))
 	}
@@ -1355,8 +1372,14 @@ func (m *Manager) ReclaimTerminalArtifacts(parent string, identity rootfshandoff
 		return fmt.Errorf("RootFS branch path does not match its session identity: %w", errdefs.ErrFailedPrecondition)
 	}
 	if !current.BranchRemoved {
+		if err := m.nodeDirty.ValidateOwnerDetached(expected); err != nil {
+			return fmt.Errorf("validate terminal RootFS branch release: %w", err)
+		}
 		if err := os.Remove(expected); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove terminal RootFS branch: %w", err)
+		}
+		if err := m.nodeDirty.ReleaseOwner(expected); err != nil {
+			return fmt.Errorf("release terminal RootFS dirty tail: %w", err)
 		}
 		current.BranchRemoved = true
 		if err := m.save(current); err != nil {
@@ -1804,7 +1827,7 @@ func (m *Manager) reopenBranch(current record) (*rootfsblock.Branch, error) {
 		Version: rootfsblock.BranchFormatVersion, RootFSID: current.RootFSID,
 		GenerationID: current.GenerationID, WriterEpoch: current.WriterEpoch,
 		LogicalSizeBytes: int64(reader.Size()), BaseRootDigest: descriptor.MappingRoot.RootDigest,
-	}, reader, rootfsblock.BranchOptions{MaxDirtyTailBytes: m.maxDirty})
+	}, reader, m.branchOptions())
 	if err != nil {
 		return nil, fmt.Errorf("reopen session branch: %w", err)
 	}
@@ -1858,6 +1881,38 @@ func (m *Manager) Close() error {
 		result = errors.Join(result, session.device.Close(), session.branch.Close())
 	}
 	return errors.Join(result, m.db.Close())
+}
+
+// NodeDirtyTailUsage reports aggregate branch occupancy, including journals
+// recovered at startup but not currently opened by a live session.
+func (m *Manager) NodeDirtyTailUsage() rootfsblock.NodeDirtyTailUsage {
+	return m.nodeDirty.Usage()
+}
+
+func (m *Manager) branchOptions() rootfsblock.BranchOptions {
+	return rootfsblock.BranchOptions{
+		MaxDirtyTailBytes: m.maxDirty,
+		NodeDirtyBudget:   m.nodeDirty,
+	}
+}
+
+func preloadNodeDirtyTail(branchRoot string, budget *rootfsblock.DirtyTailBudget) error {
+	return filepath.WalkDir(branchRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".wal" {
+			return nil
+		}
+		usage, err := rootfsblock.BranchJournalDirtyBytes(path)
+		if err != nil {
+			return fmt.Errorf("inspect %q: %w", path, err)
+		}
+		if err := budget.Preload(filepath.Clean(path), usage); err != nil {
+			return fmt.Errorf("preload %q: %w", path, err)
+		}
+		return nil
+	})
 }
 
 type paths struct{ branch, xfs, merged string }

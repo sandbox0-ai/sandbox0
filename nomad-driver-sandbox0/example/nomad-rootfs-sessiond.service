@@ -22,6 +22,7 @@ ExecStart=/usr/local/bin/nomad-rootfs-sessiond \
   --runtime-slot-ctld-network-socket=${SANDBOX0_CTLD_RUNTIME_SLOT_NETWORK_SOCKET} \
   --branch-root=/var/lib/sandbox0/rootfs-branches \
   --max-dirty-tail-bytes=${SANDBOX0_ROOTFS_MAX_DIRTY_TAIL_BYTES} \
+  --max-node-dirty-tail-bytes=${SANDBOX0_ROOTFS_MAX_NODE_DIRTY_TAIL_BYTES} \
   --mount-root=/run/sandbox0/rootfs \
   --consumer-mount-root=/opt/nomad \
   --consumer-netns-root=${SANDBOX0_NOMAD_NETNS_ROOT} \

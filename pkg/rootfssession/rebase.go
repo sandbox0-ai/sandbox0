@@ -246,7 +246,7 @@ func (m *Manager) ExecuteRebase(
 			GenerationID:     generationID,
 			WriterEpoch:      request.TargetWriterEpoch,
 			LogicalSizeBytes: reader.Size(), BaseRootDigest: descriptors[resource.Role].MappingRoot.RootDigest,
-		}, reader, rootfsblock.BranchOptions{MaxDirtyTailBytes: m.maxDirty})
+		}, reader, m.branchOptions())
 		if err != nil {
 			return result, fmt.Errorf("open %s rebase branch: %w", resource.Role, err)
 		}
@@ -648,9 +648,17 @@ func (m *Manager) removeRebaseArtifacts(current *rebaseRecord) error {
 			filepath.Dir(filepath.Dir(resource.MergedRoot)) != mountRoot {
 			return fmt.Errorf("rebase artifact path does not match operation identity")
 		}
+		if err := m.nodeDirty.ValidateOwnerDetached(resource.BranchPath); err != nil {
+			return fmt.Errorf("validate %s rebase dirty tail release: %w", resource.Role, err)
+		}
 	}
 	if err := os.RemoveAll(branchRoot); err != nil {
 		return fmt.Errorf("remove RootFS rebase branches: %w", err)
+	}
+	for _, resource := range current.Resources {
+		if err := m.nodeDirty.ReleaseOwner(resource.BranchPath); err != nil {
+			return fmt.Errorf("release %s rebase dirty tail: %w", resource.Role, err)
+		}
 	}
 	if err := os.RemoveAll(mountRoot); err != nil {
 		return fmt.Errorf("remove RootFS rebase mounts: %w", err)

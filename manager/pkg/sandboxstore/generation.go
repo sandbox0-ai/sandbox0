@@ -134,6 +134,7 @@ type RootFSGenerationStore interface {
 	EnsureInitialRootFSGeneration(context.Context, *EnsureInitialRootFSGenerationRequest) (*RootFSFilesystem, *RootFSGeneration, error)
 	GetRootFSGeneration(context.Context, string) (*RootFSGeneration, error)
 	ForkRunningRootFSFilesystem(context.Context, *ForkRunningRootFSFilesystemRequest) (*RootFSFilesystem, error)
+	RequestNomadPausedRebase(context.Context, *NomadPausedRebaseRequest) (*NomadPausedRebaseCandidate, error)
 	PublishPausedRootFSRebase(context.Context, *PublishPausedRootFSRebaseRequest) (*RootFSFilesystem, error)
 }
 
@@ -158,26 +159,37 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 		if !ok {
 			return fmt.Errorf("paused rootfs rebase requires a PostgreSQL transaction")
 		}
-		if record == nil || record.TeamID != normalized.TeamID || record.DesiredState != SandboxDesiredStatePaused || !record.DeletedAt.IsZero() {
+		if record == nil || record.TeamID != normalized.TeamID || record.RuntimeBackend != SandboxRuntimeBackendNomad ||
+			record.DesiredState != SandboxDesiredStatePaused || !record.DeletedAt.IsZero() ||
+			record.CurrentPodNamespace != "" || record.CurrentPodName != "" {
 			return fmt.Errorf("%w: sandbox %s is not a paused team-owned source", ErrRootFSGenerationConflict, normalized.SandboxID)
 		}
-		activeLifecycle, lifecycleErr := locked.GetActiveLifecycleTxn(lockCtx, normalized.SandboxID)
+		lifecycle, lifecycleErr := scanLifecycleTxn(txStore.tx.QueryRow(lockCtx, lifecycleTxnSelectSQL()+`
+			WHERE txn_id = $1 AND sandbox_id = $2
+			FOR UPDATE
+		`, normalized.OperationID, normalized.SandboxID))
 		if lifecycleErr != nil {
-			return lifecycleErr
+			return fmt.Errorf("lock paused rootfs rebase lifecycle: %w", lifecycleErr)
 		}
-		if activeLifecycle != nil {
-			return fmt.Errorf("%w: lifecycle operation %s is active", ErrRootFSGenerationConflict, activeLifecycle.ID)
+		if lifecycle == nil || lifecycle.Kind != SandboxLifecycleKindRebase {
+			return fmt.Errorf("%w: exact rebase pre-operation is missing", ErrRootFSGenerationConflict)
 		}
 
 		filesystem, source, loadErr := getRootFSFilesystemAndGenerationForUpdate(lockCtx, txStore.tx, normalized.SandboxID)
 		if loadErr != nil {
 			return loadErr
 		}
-		if retry, retryErr := loadPublishedRootFSRebaseRetry(lockCtx, txStore.tx, filesystem, normalized); retryErr != nil {
-			return retryErr
-		} else if retry != nil {
-			published = retry
-			return nil
+		if lifecycle.Phase == SandboxLifecyclePhaseCommitted {
+			if !committedNomadPausedRebaseLifecycleMatchesRequest(lifecycle, record, normalized) {
+				return fmt.Errorf("%w: committed rebase lifecycle identity changed", ErrRootFSGenerationConflict)
+			}
+			if retry, retryErr := loadPublishedRootFSRebaseRetry(lockCtx, txStore.tx, filesystem, normalized); retryErr != nil {
+				return retryErr
+			} else if retry != nil {
+				published = retry
+				return nil
+			}
+			return fmt.Errorf("%w: committed rebase publication is missing", ErrRootFSGenerationConflict)
 		}
 		if filesystem.StorageFormat != RootFSStorageFormatBlockCOWV1 || filesystem.TeamID != normalized.TeamID ||
 			filesystem.HeadGenerationID != normalized.ExpectedSourceGenerationID ||
@@ -186,38 +198,57 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 			(source.DurabilityState != RootFSGenerationStateCompositeDurable && source.DurabilityState != RootFSGenerationStateS3Materialized) {
 			return fmt.Errorf("%w: paused source head or Base artifact changed", ErrRootFSGenerationConflict)
 		}
+		sourceArtifact, artifact, artifactErr := lockNomadPausedRebaseArtifacts(
+			lockCtx, txStore.tx, source.BaseArtifactDigest, normalized.Generation.BaseArtifactDigest,
+		)
+		if artifactErr != nil {
+			return artifactErr
+		}
+		if artifactErr := validateNomadPausedRebaseArtifacts(source, sourceArtifact, artifact); artifactErr != nil {
+			return artifactErr
+		}
+		if !nomadPausedRebaseLifecycleMatches(
+			lifecycle, record, source, sourceArtifact, artifact,
+			normalized.Generation.ID, normalized.RollbackExpiresAt, false,
+		) || lifecycle.ID != normalized.OperationID ||
+			normalized.ExpectedSourceGenerationID != lifecycle.ExpectedHeadLayerID ||
+			normalized.ExpectedBaseArtifactDigest != lifecycle.SourceBaseArtifactDigest {
+			return fmt.Errorf("%w: active rebase lifecycle identity changed", ErrRootFSGenerationConflict)
+		}
 		if normalized.Generation.FilesystemID != filesystem.ID ||
 			normalized.Generation.ParentGenerationID != source.ID ||
 			normalized.Generation.WriterEpoch != filesystem.WriterEpoch+1 ||
 			normalized.Generation.BaseArtifactDigest == source.BaseArtifactDigest {
 			return fmt.Errorf("%w: target generation does not describe the next rebase branch", ErrRootFSGenerationConflict)
 		}
-		artifact, artifactErr := scanRootFSBaseArtifact(txStore.tx.QueryRow(lockCtx, rootFSBaseArtifactSelectSQL()+`
-			WHERE artifact_digest = $1 AND state = $2
-			FOR UPDATE
-		`, normalized.Generation.BaseArtifactDigest, RootFSBaseArtifactStateReady))
-		if errors.Is(artifactErr, pgx.ErrNoRows) {
-			return fmt.Errorf("%w: target artifact %s", ErrRootFSBaseArtifactNotFound, normalized.Generation.BaseArtifactDigest)
-		}
-		if artifactErr != nil {
-			return fmt.Errorf("lock target rootfs base artifact: %w", artifactErr)
-		}
 		if artifact.SourceOCIDigest != normalized.Generation.SourceOCIDigest ||
 			artifact.BaseBlockRoot != normalized.Generation.BaseBlockRoot ||
 			artifact.FormatGeneration != normalized.Generation.FormatGeneration {
 			return fmt.Errorf("%w: target generation does not match its Base artifact", ErrRootFSBaseArtifactConflict)
 		}
-		var activeWriter bool
-		if queryErr := txStore.tx.QueryRow(lockCtx, `
-			SELECT EXISTS (
-				SELECT 1 FROM manager.rootfs_writer_grants
-				WHERE filesystem_id = $1 AND state IN ('issued', 'consumed', 'retiring')
-			)
-		`, filesystem.ID).Scan(&activeWriter); queryErr != nil {
-			return fmt.Errorf("check rootfs rebase writer fence: %w", queryErr)
+		if outputErr := validateNomadPausedRebaseOutput(normalized.Generation, artifact); outputErr != nil {
+			return outputErr
 		}
-		if activeWriter {
-			return fmt.Errorf("%w: an active writer grant exists", ErrRootFSGenerationConflict)
+		claim, claimErr := lockSandboxRuntimeClaim(lockCtx, txStore.tx, record.ID)
+		if claimErr != nil {
+			return claimErr
+		}
+		if claim.OperationID == "" || claim.Phase != SandboxRuntimeClaimPhaseReady ||
+			!claim.LeaseExpiresAt.IsZero() || !claim.CleanupStartedAt.IsZero() || !claim.CleanedAt.IsZero() {
+			return fmt.Errorf("%w: sandbox runtime claim changed", ErrRootFSGenerationConflict)
+		}
+		if terminalErr := ensureNomadPausedRebasePhysicalStateTerminal(
+			lockCtx, txStore.tx, record.ID, filesystem.ID,
+		); terminalErr != nil {
+			return fmt.Errorf("%w: %v", ErrRootFSGenerationConflict, terminalErr)
+		}
+		var authorityNow time.Time
+		if authorityErr := txStore.tx.QueryRow(lockCtx, `SELECT NOW()`).Scan(&authorityNow); authorityErr != nil {
+			return fmt.Errorf("read paused rootfs rebase authority time: %w", authorityErr)
+		}
+		if !normalized.RollbackExpiresAt.After(authorityNow) ||
+			(!record.HardExpiresAt.IsZero() && !record.HardExpiresAt.After(authorityNow)) {
+			return fmt.Errorf("%w: rebase rollback or sandbox hard deadline expired", ErrRootFSGenerationConflict)
 		}
 		if insertErr := insertPreparedRootFSGeneration(lockCtx, txStore.tx, normalized.Generation); insertErr != nil {
 			return insertErr
@@ -256,6 +287,11 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 			source.ID, normalized.Generation.ID, normalized.HealthCheckDigest,
 			nullableTime(normalized.RollbackExpiresAt)); pinErr != nil {
 			return fmt.Errorf("retain paused rootfs rebase rollback: %w", pinErr)
+		}
+		if lifecycleErr := locked.CommitLifecycleTxn(
+			lockCtx, lifecycle.ID, normalized.Generation.ID,
+		); lifecycleErr != nil {
+			return fmt.Errorf("commit paused rootfs rebase lifecycle: %w", lifecycleErr)
 		}
 		published, loadErr = scanRootFSFilesystem(txStore.tx.QueryRow(lockCtx, `
 			SELECT filesystem_id, team_id, source_filesystem_id, head_layer_id,
@@ -645,6 +681,10 @@ func validatePublishPausedRootFSRebaseRequest(req *PublishPausedRootFSRebaseRequ
 	normalized.ExpectedSourceGenerationID = strings.TrimSpace(req.ExpectedSourceGenerationID)
 	normalized.ExpectedBaseArtifactDigest = strings.TrimSpace(req.ExpectedBaseArtifactDigest)
 	normalized.HealthCheckDigest = append([]byte(nil), req.HealthCheckDigest...)
+	if req.RollbackExpiresAt.IsZero() {
+		return nil, fmt.Errorf("rollback_expires_at is required")
+	}
+	normalized.RollbackExpiresAt = req.RollbackExpiresAt.UTC().Truncate(time.Microsecond)
 	if normalized.SandboxID == "" || normalized.TeamID == "" || normalized.OperationID == "" ||
 		normalized.ExpectedSourceGenerationID == "" || normalized.ExpectedBaseArtifactDigest == "" {
 		return nil, fmt.Errorf("sandbox_id, team_id, operation_id, expected source generation, and expected Base artifact are required")
@@ -760,24 +800,28 @@ func loadPublishedRootFSRebaseRetry(
 	filesystem *RootFSFilesystem,
 	req *PublishPausedRootFSRebaseRequest,
 ) (*RootFSFilesystem, error) {
-	if filesystem == nil || req == nil || req.Generation == nil || filesystem.HeadGenerationID != req.Generation.ID {
+	if filesystem == nil || req == nil || req.Generation == nil {
 		return nil, nil
 	}
-	var exists bool
+	var expiresAt *time.Time
+	var state string
 	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM manager.rootfs_head_rollbacks
-			WHERE operation_id = $1 AND filesystem_id = $2 AND sandbox_id = $3
-				AND team_id = $4 AND operation_kind = 'rebase'
-				AND old_generation_id = $5 AND new_generation_id = $6
-				AND health_check_digest = $7
-		)
+		SELECT state, expires_at
+		FROM manager.rootfs_head_rollbacks
+		WHERE operation_id = $1 AND filesystem_id = $2 AND sandbox_id = $3
+			AND team_id = $4 AND operation_kind = 'rebase'
+			AND old_generation_id = $5 AND new_generation_id = $6
+			AND health_check_digest = $7
 	`, req.OperationID, filesystem.ID, req.SandboxID, req.TeamID,
-		req.ExpectedSourceGenerationID, req.Generation.ID, req.HealthCheckDigest).Scan(&exists); err != nil {
+		req.ExpectedSourceGenerationID, req.Generation.ID, req.HealthCheckDigest).Scan(&state, &expiresAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("check paused rootfs rebase retry: %w", err)
 	}
-	if !exists {
-		return nil, fmt.Errorf("%w: head already names target generation without matching operation", ErrRootFSGenerationConflict)
+	if expiresAt == nil || !expiresAt.Equal(req.RollbackExpiresAt) ||
+		(state != "available" && state != "rolled_back" && state != "expired") {
+		return nil, fmt.Errorf("%w: retried rollback identity changed", ErrRootFSGenerationConflict)
 	}
 	stored, err := scanRootFSGeneration(tx.QueryRow(ctx, rootFSGenerationSelectSQL()+`
 		WHERE generation_id = $1
@@ -790,6 +834,43 @@ func loadPublishedRootFSRebaseRetry(
 	}
 	clone := *filesystem
 	return &clone, nil
+}
+
+func committedNomadPausedRebaseLifecycleMatchesRequest(
+	lifecycle *SandboxLifecycleTxn,
+	record *SandboxRecord,
+	request *PublishPausedRootFSRebaseRequest,
+) bool {
+	return lifecycle != nil && record != nil && request != nil && request.Generation != nil &&
+		lifecycle.ID == request.OperationID && lifecycle.SandboxID == record.ID &&
+		lifecycle.Kind == SandboxLifecycleKindRebase && lifecycle.Phase == SandboxLifecyclePhaseCommitted &&
+		lifecycle.Source == SandboxLifecycleSourceManual && !lifecycle.Cancelable &&
+		lifecycle.CancelRequestedAt.IsZero() && lifecycle.FromGeneration == lifecycle.ToGeneration &&
+		lifecycle.FromGeneration == record.RuntimeGeneration && lifecycle.FromPodNamespace == "" &&
+		lifecycle.FromPodName == "" && lifecycle.ToPodNamespace == "" && lifecycle.ToPodName == "" &&
+		lifecycle.TargetSandboxID == "" && len(lifecycle.TargetRecordDigest) == 0 &&
+		lifecycle.TargetGenerationID == request.Generation.ID &&
+		lifecycle.PreparedHeadLayerID == request.Generation.ID &&
+		lifecycle.ExpectedHeadLayerID == request.ExpectedSourceGenerationID &&
+		lifecycle.SourceBaseArtifactDigest == request.ExpectedBaseArtifactDigest &&
+		lifecycle.TargetBaseArtifactDigest == request.Generation.BaseArtifactDigest &&
+		lifecycle.RollbackExpiresAt.Equal(request.RollbackExpiresAt)
+}
+
+func validateNomadPausedRebaseOutput(generation *RootFSGeneration, artifact *RootFSBaseArtifact) error {
+	if generation == nil || artifact == nil {
+		return fmt.Errorf("%w: target generation or Base artifact is missing", ErrRootFSGenerationConflict)
+	}
+	targetBase, baseErr := rootfsblock.DecodeDescriptor(artifact.Descriptor)
+	target, targetErr := rootfsblock.DecodeDescriptor(generation.Descriptor)
+	if baseErr != nil || targetErr != nil || targetBase.MappingRoot.RootDigest != artifact.BaseBlockRoot ||
+		target.MappingRoot.RootDigest != generation.CurrentBlockHead ||
+		target.LogicalSizeBytes != targetBase.LogicalSizeBytes ||
+		target.BlockSizeBytes != targetBase.BlockSizeBytes {
+		return fmt.Errorf("%w: target generation block geometry or descriptor is invalid",
+			ErrRootFSGenerationConflict)
+	}
+	return nil
 }
 
 func insertPreparedRootFSGeneration(ctx context.Context, tx pgx.Tx, generation *RootFSGeneration) error {

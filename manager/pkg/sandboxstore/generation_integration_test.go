@@ -1128,7 +1128,14 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 	store := NewPGSandboxStore(pool)
 	record := rootFSTestSandboxRecord("sandbox-rebase", "team-1")
 	record.DesiredState = SandboxDesiredStatePaused
+	record.RuntimeBackend = SandboxRuntimeBackendNomad
 	require.NoError(t, store.UpsertSandbox(ctx, record))
+	_, err := pool.Exec(ctx, `
+		INSERT INTO manager.sandbox_runtime_claims (
+			sandbox_id, operation_id, phase, lease_expires_at
+		) VALUES ($1, $2, $3, NULL)
+	`, record.ID, "claim-rebase", SandboxRuntimeClaimPhaseReady)
+	require.NoError(t, err)
 	oldArtifact, err := store.PutReadyRootFSBaseArtifact(ctx, readyRootFSBaseArtifactTestRequest())
 	require.NoError(t, err)
 	filesystem, source, err := store.EnsureInitialRootFSGeneration(ctx, &EnsureInitialRootFSGenerationRequest{
@@ -1149,12 +1156,31 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 	newArtifactRequest.Descriptor = encodeTestRootFSDescriptor(t, "rebase-base-v2", newArtifactRequest.BaseBlockRoot)
 	newArtifact, err := store.PutReadyRootFSBaseArtifact(ctx, newArtifactRequest)
 	require.NoError(t, err)
+	rollbackExpiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+	preoperation, err := store.RequestNomadPausedRebase(ctx, &NomadPausedRebaseRequest{
+		OperationID: "rebase-v2", SandboxID: record.ID, ExpectedTeamID: record.TeamID,
+		TargetBaseArtifactDigest: newArtifact.ArtifactDigest,
+		RollbackExpiresAt:        rollbackExpiresAt,
+	})
+	require.NoError(t, err)
+	require.False(t, preoperation.Completed)
+	require.Equal(t, source.ID, preoperation.SourceGeneration.ID)
+	require.Equal(t, oldArtifact.ArtifactDigest, preoperation.SourceBaseArtifact.ArtifactDigest)
+	require.Equal(t, newArtifact.ArtifactDigest, preoperation.TargetBaseArtifact.ArtifactDigest)
+	retryPreoperation, err := store.RequestNomadPausedRebase(ctx, &NomadPausedRebaseRequest{
+		OperationID: "rebase-v2", SandboxID: record.ID, ExpectedTeamID: record.TeamID,
+		TargetBaseArtifactDigest: newArtifact.ArtifactDigest,
+		RollbackExpiresAt:        rollbackExpiresAt,
+	})
+	require.NoError(t, err)
+	require.Equal(t, preoperation.TargetGenerationID, retryPreoperation.TargetGenerationID)
+	require.Equal(t, preoperation.TargetWriterEpoch, retryPreoperation.TargetWriterEpoch)
 	targetHead := digest.FromString("rebase-target-head").String()
 	target := &RootFSGeneration{
-		ID: "generation-rebase-v2", FilesystemID: filesystem.ID,
+		ID: preoperation.TargetGenerationID, FilesystemID: filesystem.ID,
 		ParentGenerationID: source.ID, SourceOCIDigest: newArtifact.SourceOCIDigest,
 		BaseArtifactDigest: newArtifact.ArtifactDigest, BaseBlockRoot: newArtifact.BaseBlockRoot,
-		CurrentBlockHead: targetHead, WriterEpoch: filesystem.WriterEpoch + 1,
+		CurrentBlockHead: targetHead, WriterEpoch: preoperation.TargetWriterEpoch,
 		FormatGeneration: newArtifact.FormatGeneration,
 		DurabilityState:  RootFSGenerationStateS3Materialized,
 		LocatorVersion:   source.LocatorVersion + 1,
@@ -1166,7 +1192,7 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 		ExpectedSourceGenerationID: source.ID,
 		ExpectedBaseArtifactDigest: oldArtifact.ArtifactDigest,
 		Generation:                 target, HealthCheckDigest: health[:],
-		RollbackExpiresAt: time.Now().Add(time.Hour),
+		RollbackExpiresAt: rollbackExpiresAt,
 	}
 	published, err := store.PublishPausedRootFSRebase(ctx, rebaseRequest)
 	require.NoError(t, err)
@@ -1183,6 +1209,14 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 	retried, err := store.PublishPausedRootFSRebase(ctx, rebaseRequest)
 	require.NoError(t, err)
 	require.Equal(t, published.HeadGenerationID, retried.HeadGenerationID)
+	completedPreoperation, err := store.RequestNomadPausedRebase(ctx, &NomadPausedRebaseRequest{
+		OperationID: "rebase-v2", SandboxID: record.ID, ExpectedTeamID: record.TeamID,
+		TargetBaseArtifactDigest: newArtifact.ArtifactDigest,
+		RollbackExpiresAt:        rollbackExpiresAt,
+	})
+	require.NoError(t, err)
+	require.True(t, completedPreoperation.Completed)
+	require.Equal(t, SandboxLifecyclePhaseCommitted, completedPreoperation.LifecyclePhase)
 
 	rolledBack, err := store.RollbackRootFSHead(ctx, &RollbackRootFSHeadRequest{
 		SandboxID: record.ID, TeamID: record.TeamID, OperationID: rebaseRequest.OperationID,
@@ -1203,18 +1237,12 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 	issue.ExpectedWriterEpoch = rolledBack.WriterEpoch
 	_, err = store.IssueRootFSWriterGrant(ctx, issue)
 	require.NoError(t, err)
-	activeTarget := *target
-	activeTarget.ID = "generation-rebase-active-writer"
-	activeTarget.WriterEpoch = rolledBack.WriterEpoch + 2
-	activeTarget.CurrentBlockHead = digest.FromString("rebase-active-writer-head").String()
-	activeTarget.Descriptor = encodeTestRootFSDescriptor(t, "rebase-active-writer", activeTarget.CurrentBlockHead)
-	_, err = store.PublishPausedRootFSRebase(ctx, &PublishPausedRootFSRebaseRequest{
-		SandboxID: record.ID, TeamID: record.TeamID, OperationID: "rebase-active-writer",
-		ExpectedSourceGenerationID: source.ID,
-		ExpectedBaseArtifactDigest: oldArtifact.ArtifactDigest,
-		Generation:                 &activeTarget, HealthCheckDigest: health[:],
+	_, err = store.RequestNomadPausedRebase(ctx, &NomadPausedRebaseRequest{
+		OperationID: "rebase-active-writer", SandboxID: record.ID, ExpectedTeamID: record.TeamID,
+		TargetBaseArtifactDigest: newArtifact.ArtifactDigest,
+		RollbackExpiresAt:        time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond),
 	})
-	require.ErrorIs(t, err, ErrRootFSGenerationConflict)
+	require.ErrorIs(t, err, ErrNomadSandboxRebaseNotReady)
 }
 
 func encodeTestRootFSDescriptor(t *testing.T, suffix, blockHead string) []byte {

@@ -122,6 +122,7 @@ const (
 	SandboxLifecycleKindResume   = "resume"
 	SandboxLifecycleKindFork     = "fork"
 	SandboxLifecycleKindSnapshot = "snapshot"
+	SandboxLifecycleKindRebase   = "rebase"
 
 	SandboxLifecycleSourceManual = "manual"
 	SandboxLifecycleSourceAuto   = "auto"
@@ -138,33 +139,36 @@ const (
 )
 
 // SandboxLifecycleTxn is the durable prepare/commit record for a sandbox
-// runtime generation transition.
+// runtime or RootFS topology transition.
 type SandboxLifecycleTxn struct {
-	ID                  string
-	SandboxID           string
-	Kind                string
-	Phase               string
-	Source              string
-	Cancelable          bool
-	Epoch               int64
-	FromGeneration      int64
-	ToGeneration        int64
-	FromPodNamespace    string
-	FromPodName         string
-	ToPodNamespace      string
-	ToPodName           string
-	TargetSandboxID     string
-	TargetGenerationID  string
-	TargetRecordDigest  []byte
-	ExpectedHeadLayerID string
-	PreparedHeadLayerID string
-	Error               string
-	CancelReason        string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	CancelRequestedAt   time.Time
-	CommittedAt         time.Time
-	AbortedAt           time.Time
+	ID                       string
+	SandboxID                string
+	Kind                     string
+	Phase                    string
+	Source                   string
+	Cancelable               bool
+	Epoch                    int64
+	FromGeneration           int64
+	ToGeneration             int64
+	FromPodNamespace         string
+	FromPodName              string
+	ToPodNamespace           string
+	ToPodName                string
+	TargetSandboxID          string
+	TargetGenerationID       string
+	TargetRecordDigest       []byte
+	SourceBaseArtifactDigest string
+	TargetBaseArtifactDigest string
+	ExpectedHeadLayerID      string
+	PreparedHeadLayerID      string
+	Error                    string
+	CancelReason             string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	CancelRequestedAt        time.Time
+	CommittedAt              time.Time
+	AbortedAt                time.Time
+	RollbackExpiresAt        time.Time
 }
 
 // SandboxRuntimeMetadata is durable metadata projected onto a runtime pod.
@@ -987,16 +991,18 @@ func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifec
 			from_pod_namespace, from_pod_name,
 			to_pod_namespace, to_pod_name,
 			target_sandbox_id, target_generation_id, target_record_digest,
+			source_base_artifact_digest, target_base_artifact_digest, rollback_expires_at,
 			expected_head_layer_id, prepared_head_layer_id,
 			created_at, updated_at
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-			COALESCE($16, ''::bytea), $17, $18, NOW(), NOW())
+			COALESCE($16, ''::bytea), $17, $18, $19, $20, $21, NOW(), NOW())
 	`, txn.ID, txn.SandboxID, txn.Kind, phase, source, txn.Cancelable, txn.Epoch,
 		txn.FromGeneration, txn.ToGeneration,
 		txn.FromPodNamespace, txn.FromPodName,
 		txn.ToPodNamespace, txn.ToPodName,
 		txn.TargetSandboxID, txn.TargetGenerationID, txn.TargetRecordDigest,
+		txn.SourceBaseArtifactDigest, txn.TargetBaseArtifactDigest, nullableTime(txn.RollbackExpiresAt),
 		txn.ExpectedHeadLayerID, txn.PreparedHeadLayerID)
 	if err != nil {
 		return fmt.Errorf("begin lifecycle txn: %w", err)
@@ -1167,6 +1173,7 @@ func lifecycleTxnSelectSQL() string {
 			from_pod_namespace, from_pod_name,
 			to_pod_namespace, to_pod_name,
 			target_sandbox_id, target_generation_id, target_record_digest,
+			source_base_artifact_digest, target_base_artifact_digest, rollback_expires_at,
 			expected_head_layer_id, prepared_head_layer_id,
 			error, cancel_reason, created_at, updated_at,
 			cancel_requested_at, committed_at, aborted_at
@@ -1592,13 +1599,14 @@ func scanLifecycleTxnRows(rows pgx.Rows) (*SandboxLifecycleTxn, error) {
 
 func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, error) {
 	var txn SandboxLifecycleTxn
-	var cancelRequestedAt, committedAt, abortedAt *time.Time
+	var cancelRequestedAt, committedAt, abortedAt, rollbackExpiresAt *time.Time
 	if err := scanner.Scan(
 		&txn.ID, &txn.SandboxID, &txn.Kind, &txn.Phase, &txn.Source, &txn.Cancelable, &txn.Epoch,
 		&txn.FromGeneration, &txn.ToGeneration,
 		&txn.FromPodNamespace, &txn.FromPodName,
 		&txn.ToPodNamespace, &txn.ToPodName,
 		&txn.TargetSandboxID, &txn.TargetGenerationID, &txn.TargetRecordDigest,
+		&txn.SourceBaseArtifactDigest, &txn.TargetBaseArtifactDigest, &rollbackExpiresAt,
 		&txn.ExpectedHeadLayerID, &txn.PreparedHeadLayerID,
 		&txn.Error, &txn.CancelReason, &txn.CreatedAt, &txn.UpdatedAt,
 		&cancelRequestedAt, &committedAt, &abortedAt,
@@ -1608,6 +1616,7 @@ func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, e
 	txn.CancelRequestedAt = derefTime(cancelRequestedAt)
 	txn.CommittedAt = derefTime(committedAt)
 	txn.AbortedAt = derefTime(abortedAt)
+	txn.RollbackExpiresAt = derefTime(rollbackExpiresAt)
 	return &txn, nil
 }
 

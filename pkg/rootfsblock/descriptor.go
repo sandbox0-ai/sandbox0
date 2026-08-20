@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"path"
 	"strings"
 
@@ -133,7 +134,7 @@ func (r ObjectRange) Validate(maxLength int64) error {
 		path.Clean(r.Key) != r.Key || r.Key == "." || strings.HasPrefix(r.Key, "../") {
 		return fmt.Errorf("object key is not a canonical relative key")
 	}
-	if r.Offset < 0 || r.Length <= 0 || r.Length > maxLength {
+	if r.Offset < 0 || r.Length <= 0 || r.Length > maxLength || r.Offset > math.MaxInt64-r.Length {
 		return fmt.Errorf("object range offset or length is invalid")
 	}
 	return validateDigest("object checksum", r.Checksum)

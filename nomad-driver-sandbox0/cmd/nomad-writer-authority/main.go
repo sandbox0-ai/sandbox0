@@ -55,7 +55,7 @@ func (l migrateLogger) Fatalf(format string, args ...any) {
 }
 
 func main() {
-	mode := flag.String("mode", "serve", "serve, issue, fork, snapshot, restore, rebase-publish, rollback, cancel, or stage-digest")
+	mode := flag.String("mode", "serve", "serve, issue, fork, snapshot, restore, rebase-request, rebase-publish, rollback, cancel, or stage-digest")
 	stageFile := flag.String("stage-file", "", "stage-digest: StageRequest JSON path")
 	dbURL := flag.String("db-url", "", "PostgreSQL URL")
 	address := flag.String("address", "172.16.100.2:8421", "mTLS listen address")
@@ -100,7 +100,9 @@ func main() {
 	sourceSandboxID := flag.String("source-sandbox-id", "", "fork: source sandbox")
 	targetSandboxID := flag.String("target-sandbox-id", "", "fork: target sandbox")
 	snapshotID := flag.String("snapshot-id", "", "snapshot/restore: immutable snapshot ID")
-	rollbackTTL := flag.Duration("rollback-ttl", 24*time.Hour, "restore: old-head rollback retention")
+	rollbackTTL := flag.Duration("rollback-ttl", 24*time.Hour, "restore/rebase-request: old-head rollback retention")
+	targetBaseArtifact := flag.String("target-base-artifact", "", "rebase-request: target Base artifact digest")
+	rollbackExpiresAt := flag.String("rollback-expires-at", "", "rebase-publish: exact RFC3339Nano deadline returned by rebase-request")
 	generationFile := flag.String("generation-file", "", "rebase-publish: prepared RootFSGeneration JSON path")
 	expectedBaseArtifact := flag.String("expected-base-artifact", "", "rebase-publish: source Base artifact digest")
 	healthCheckHex := flag.String("health-check-digest", "", "rebase-publish: 32-byte hexadecimal health proof")
@@ -202,6 +204,19 @@ func main() {
 			fatal("restore: %v", err)
 		}
 		encodeResult("restore", filesystem)
+	case "rebase-request":
+		if *rollbackTTL <= 0 {
+			fatal("rebase-request: rollback-ttl must be positive")
+		}
+		candidate, err := store.RequestNomadPausedRebase(ctx, &sandboxstore.NomadPausedRebaseRequest{
+			OperationID: *operationID, SandboxID: *sandboxID, ExpectedTeamID: *teamID,
+			TargetBaseArtifactDigest: *targetBaseArtifact,
+			RollbackExpiresAt:        time.Now().UTC().Add(*rollbackTTL),
+		})
+		if err != nil {
+			fatal("rebase-request: %v", err)
+		}
+		encodeResult("rebase-request", candidate)
 	case "rebase-publish":
 		payload, err := os.ReadFile(strings.TrimSpace(*generationFile))
 		if err != nil {
@@ -215,15 +230,17 @@ func main() {
 		if err != nil {
 			fatal("rebase-publish: decode health-check-digest: %v", err)
 		}
+		expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(*rollbackExpiresAt))
+		if err != nil {
+			fatal("rebase-publish: decode rollback-expires-at: %v", err)
+		}
 		rebaseRequest := &sandboxstore.PublishPausedRootFSRebaseRequest{
 			SandboxID: *sandboxID, TeamID: *teamID, OperationID: *operationID,
 			ExpectedSourceGenerationID: *initialGenerationID,
 			ExpectedBaseArtifactDigest: *expectedBaseArtifact,
 			Generation:                 &generation,
 			HealthCheckDigest:          healthDigest,
-		}
-		if *rollbackTTL > 0 {
-			rebaseRequest.RollbackExpiresAt = time.Now().UTC().Add(*rollbackTTL)
+			RollbackExpiresAt:          expiresAt,
 		}
 		filesystem, err := store.PublishPausedRootFSRebase(ctx, rebaseRequest)
 		if err != nil {

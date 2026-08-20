@@ -1,6 +1,7 @@
 package rootfsblock
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -29,6 +30,13 @@ func TestDescriptorRejectsUnsafeObjectKeyAndWrongRoot(t *testing.T) {
 	descriptor = validDescriptor()
 	descriptor.MappingRoot.RootDigest = "sha256:" + strings.Repeat("z", 64)
 	require.ErrorContains(t, descriptor.Validate(), "canonical sha256 digest")
+}
+
+func TestDescriptorRejectsObjectRangeOffsetOverflow(t *testing.T) {
+	descriptor := validDescriptor()
+	descriptor.MappingRoot.Object.Offset = math.MaxInt64
+	descriptor.MappingRoot.Object.Length = 2
+	require.ErrorContains(t, descriptor.Validate(), "offset or length")
 }
 
 func TestDescriptorRejectsUnknownFieldsAndTrailingValues(t *testing.T) {

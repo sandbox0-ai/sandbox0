@@ -21,6 +21,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
@@ -32,11 +33,17 @@ import (
 type Store interface {
 	GetSandbox(context.Context, string) (*sandboxstore.SandboxRecord, error)
 	UpsertSandbox(context.Context, *sandboxstore.SandboxRecord) error
+	ReserveSandboxClaim(context.Context, *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
 	GetReadyRootFSBaseArtifactByDigest(context.Context, string, sandboxstore.RootFSArtifactPlatform) (*sandboxstore.RootFSBaseArtifact, error)
 	EnsureInitialRootFSGeneration(context.Context, *sandboxstore.EnsureInitialRootFSGenerationRequest) (*sandboxstore.RootFSFilesystem, *sandboxstore.RootFSGeneration, error)
 	GetRootFSSnapshot(context.Context, string, string) (*sandboxstore.RootFSSnapshot, error)
 	RestoreRootFSFromSnapshot(context.Context, *sandboxstore.RestoreRootFSFromSnapshotRequest) (*sandboxstore.RootFSFilesystem, error)
+}
+
+// QuotaLimitStore resolves region-authoritative team capacity policy.
+type QuotaLimitStore interface {
+	GetLimit(context.Context, string, quota.Dimension) (*quota.Limit, error)
 }
 
 type planner interface {
@@ -49,6 +56,7 @@ type Config struct {
 	Templates       templatestore.TemplateStore
 	Profiles        *ProfileCatalog
 	Planner         planner
+	QuotaLimits     QuotaLimitStore
 	NetworkPolicies *networkpolicy.NetworkPolicyService
 	ResourcePolicy  templatepkg.ResourcePolicy
 	DefaultTTL      time.Duration
@@ -63,6 +71,7 @@ type Service struct {
 	templates       templatestore.TemplateStore
 	profiles        *ProfileCatalog
 	planner         planner
+	quotaLimits     QuotaLimitStore
 	networkPolicies *networkpolicy.NetworkPolicyService
 	resourcePolicy  templatepkg.ResourcePolicy
 	defaultTTL      time.Duration
@@ -73,8 +82,8 @@ type Service struct {
 // New validates all claim authorities. There is no partially configured mode.
 func New(config Config) (*Service, error) {
 	if config.Store == nil || config.Templates == nil || config.Profiles == nil ||
-		config.Planner == nil || config.NetworkPolicies == nil {
-		return nil, fmt.Errorf("Nomad claim store, templates, profiles, planner, and network policy service are required")
+		config.Planner == nil || config.QuotaLimits == nil || config.NetworkPolicies == nil {
+		return nil, fmt.Errorf("Nomad claim store, templates, profiles, planner, quota limits, and network policy service are required")
 	}
 	if config.DefaultTTL < 0 || config.DefaultTTL/time.Second > math.MaxInt32 {
 		return nil, fmt.Errorf("default TTL must fit a non-negative int32 second count")
@@ -87,7 +96,7 @@ func New(config Config) (*Service, error) {
 	}
 	return &Service{
 		store: config.Store, templates: config.Templates, profiles: config.Profiles,
-		planner: config.Planner, networkPolicies: config.NetworkPolicies,
+		planner: config.Planner, quotaLimits: config.QuotaLimits, networkPolicies: config.NetworkPolicies,
 		resourcePolicy: config.ResourcePolicy, defaultTTL: config.DefaultTTL,
 		now: config.Now, logger: config.Logger,
 	}, nil
@@ -354,15 +363,36 @@ func (s *Service) ensureClaimRecord(ctx context.Context, expected *sandboxstore.
 	if err != nil {
 		return fmt.Errorf("load retryable sandbox claim: %w", err)
 	}
-	if existing == nil {
-		if err := s.store.UpsertSandbox(ctx, expected); err != nil {
-			return fmt.Errorf("persist sandbox claim: %w", err)
-		}
-		existing, err = s.store.GetSandbox(ctx, expected.ID)
-		if err != nil {
-			return fmt.Errorf("verify persisted sandbox claim: %w", err)
-		}
+	if existing != nil {
+		return validateClaimRecord(existing, expected)
 	}
+	limit, err := s.quotaLimits.GetLimit(ctx, expected.TeamID, quota.DimensionActiveSandboxes)
+	if err != nil {
+		return fmt.Errorf("load active sandbox quota: %w", err)
+	}
+	var activeLimit *int64
+	if limit != nil {
+		if limit.TeamID != expected.TeamID || limit.Dimension != quota.DimensionActiveSandboxes {
+			return fmt.Errorf("active sandbox quota identity does not match claim")
+		}
+		activeLimit = &limit.LimitValue
+	}
+	existing, err = s.store.ReserveSandboxClaim(ctx, &sandboxstore.ReserveSandboxClaimRequest{
+		Record: expected, ActiveSandboxLimit: activeLimit,
+	})
+	if errors.Is(err, sandboxstore.ErrActiveSandboxQuotaExceeded) {
+		return fmt.Errorf("%w: %v", service.ErrQuotaExceeded, err)
+	}
+	if errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict) {
+		return fmt.Errorf("%w: %v", service.ErrClaimConflict, err)
+	}
+	if err != nil {
+		return fmt.Errorf("reserve sandbox claim: %w", err)
+	}
+	return validateClaimRecord(existing, expected)
+}
+
+func validateClaimRecord(existing, expected *sandboxstore.SandboxRecord) error {
 	if !sameClaimRecord(existing, expected) {
 		return fmt.Errorf("%w: operation sandbox identity is already bound to another claim", service.ErrClaimConflict)
 	}

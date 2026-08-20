@@ -425,7 +425,8 @@ func main() {
 	templateResourcePolicy := s0template.NewResourcePolicy(cfg.TeamTemplateMemoryPerCPU, cfg.SandboxMaxMemory)
 	sandboxClaimer, err := buildSandboxClaimer(cfg, sandboxClaimerDependencies{
 		kubernetes: sandboxService, nodeAuthority: managerNodeAuthority,
-		store: sandboxStore, templates: templateStore, networkPolicies: networkPolicyService,
+		store: sandboxStore, quotaLimits: quotaRepo,
+		templates: templateStore, networkPolicies: networkPolicyService,
 		resourcePolicy: templateResourcePolicy, prober: procdClient,
 		tokenGenerator: internalTokenGenerator,
 		observer:       runtimeslotclaim.NewPrometheusObserver(obsProvider.MetricsRegistryOrNil()),

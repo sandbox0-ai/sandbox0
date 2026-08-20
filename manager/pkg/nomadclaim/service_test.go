@@ -3,6 +3,7 @@ package nomadclaim
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
+	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
@@ -55,6 +57,44 @@ func (f *fakeClaimStore) UpsertSandbox(_ context.Context, record *sandboxstore.S
 	f.records[record.ID] = cloneClaimRecord(record)
 	f.upsertCount++
 	return nil
+}
+
+func (f *fakeClaimStore) ReserveSandboxClaim(_ context.Context, request *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error) {
+	if request == nil || request.Record == nil {
+		return nil, errors.New("missing reservation record")
+	}
+	if existing := f.records[request.Record.ID]; existing != nil {
+		return cloneClaimRecord(existing), nil
+	}
+	if request.ActiveSandboxLimit != nil {
+		var current int64
+		for _, record := range f.records {
+			if record.TeamID == request.Record.TeamID && record.DeletedAt.IsZero() &&
+				record.DesiredState == sandboxstore.SandboxDesiredStateActive {
+				current++
+			}
+		}
+		if current >= *request.ActiveSandboxLimit {
+			return nil, &sandboxstore.ActiveSandboxQuotaExceededError{
+				TeamID: request.Record.TeamID, Current: current, Limit: *request.ActiveSandboxLimit,
+			}
+		}
+	}
+	if f.records == nil {
+		f.records = make(map[string]*sandboxstore.SandboxRecord)
+	}
+	f.records[request.Record.ID] = cloneClaimRecord(request.Record)
+	f.upsertCount++
+	return cloneClaimRecord(request.Record), nil
+}
+
+type fakeQuotaLimitStore struct {
+	limit *quota.Limit
+	err   error
+}
+
+func (f *fakeQuotaLimitStore) GetLimit(_ context.Context, _ string, _ quota.Dimension) (*quota.Limit, error) {
+	return f.limit, f.err
 }
 
 func (f *fakeClaimStore) GetReadyRootFSBaseArtifact(
@@ -268,12 +308,74 @@ func TestServiceMapsUnavailableWarmPoolToRetryableError(t *testing.T) {
 	}
 }
 
+func TestServiceEnforcesActiveSandboxQuotaBeforeRootFSInitialization(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.quotaLimits.limit = &quota.Limit{
+		TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 0,
+	}
+	_, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-1",
+	})
+	if !errors.Is(err, service.ErrQuotaExceeded) {
+		t.Fatalf("claim error = %v, want quota exceeded", err)
+	}
+	if fixture.store.upsertCount != 0 || len(fixture.store.ensureCalls) != 0 || len(fixture.planner.requests) != 0 {
+		t.Fatalf("side effects: reservations=%d rootfs=%d planner=%d",
+			fixture.store.upsertCount, len(fixture.store.ensureCalls), len(fixture.planner.requests))
+	}
+}
+
+func TestServiceAllowsExactRetryAfterQuotaBecomesFullOrUnavailable(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.quotaLimits.limit = &quota.Limit{
+		TeamID: "team-1", Dimension: quota.DimensionActiveSandboxes, LimitValue: 1,
+	}
+	request := &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-1",
+	}
+	first, err := fixture.service.ClaimSandbox(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := fixture.service.ClaimSandbox(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.quotaLimits.err = errors.New("quota database unavailable")
+	retryDuringOutage, err := fixture.service.ClaimSandbox(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.SandboxID != first.SandboxID || retryDuringOutage.SandboxID != first.SandboxID ||
+		fixture.store.upsertCount != 4 {
+		// One initial reservation plus one runtime-binding upsert per successful planner call.
+		t.Fatalf("retries=%+v/%+v first=%+v upserts=%d",
+			retry, retryDuringOutage, first, fixture.store.upsertCount)
+	}
+}
+
+func TestServiceFailsClosedWhenQuotaPolicyCannotBeLoaded(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.quotaLimits.err = errors.New("quota database unavailable")
+	_, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default", OperationID: "operation-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "load active sandbox quota") {
+		t.Fatalf("claim error = %v", err)
+	}
+	if fixture.store.upsertCount != 0 || len(fixture.store.ensureCalls) != 0 || len(fixture.planner.requests) != 0 {
+		t.Fatalf("side effects: reservations=%d rootfs=%d planner=%d",
+			fixture.store.upsertCount, len(fixture.store.ensureCalls), len(fixture.planner.requests))
+	}
+}
+
 type claimServiceFixture struct {
-	service *Service
-	store   *fakeClaimStore
-	planner *fakePlanner
-	profile Profile
-	now     time.Time
+	service     *Service
+	store       *fakeClaimStore
+	planner     *fakePlanner
+	quotaLimits *fakeQuotaLimitStore
+	profile     Profile
+	now         time.Time
 }
 
 func newClaimServiceFixture(t *testing.T) claimServiceFixture {
@@ -321,10 +423,12 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 		},
 	}
 	planner := &fakePlanner{}
+	quotaLimits := &fakeQuotaLimitStore{}
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	claimService, err := New(Config{
 		Store: store, Templates: &fakeTemplateStore{template: template},
 		Profiles: &ProfileCatalog{profiles: []Profile{profile}}, Planner: planner,
+		QuotaLimits:     quotaLimits,
 		NetworkPolicies: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		ResourcePolicy:  templatepkg.NewResourcePolicy("1Gi", "8Gi"),
 		DefaultTTL:      time.Hour, Now: func() time.Time { return now }, Logger: zap.NewNop(),
@@ -332,7 +436,10 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return claimServiceFixture{service: claimService, store: store, planner: planner, profile: profile, now: now}
+	return claimServiceFixture{
+		service: claimService, store: store, planner: planner, quotaLimits: quotaLimits,
+		profile: profile, now: now,
+	}
 }
 
 func cloneClaimRecord(record *sandboxstore.SandboxRecord) *sandboxstore.SandboxRecord {

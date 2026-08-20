@@ -21,6 +21,7 @@ type sandboxClaimerDependencies struct {
 	kubernetes      service.SandboxClaimer
 	nodeAuthority   *nodeauthority.Component
 	store           nomadclaim.Store
+	quotaLimits     nomadclaim.QuotaLimitStore
 	templates       templatestore.TemplateStore
 	networkPolicies *networkpolicy.NetworkPolicyService
 	resourcePolicy  template.ResourcePolicy
@@ -86,6 +87,7 @@ func buildNomadSandboxClaimer(cfg *config.ManagerConfig, deps sandboxClaimerDepe
 	}
 	claimer, err := nomadclaim.New(nomadclaim.Config{
 		Store: deps.store, Templates: deps.templates, Profiles: profiles, Planner: planner,
+		QuotaLimits:     deps.quotaLimits,
 		NetworkPolicies: deps.networkPolicies, ResourcePolicy: deps.resourcePolicy,
 		DefaultTTL: deps.defaultTTL, Now: deps.now, Logger: deps.logger,
 	})

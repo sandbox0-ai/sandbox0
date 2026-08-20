@@ -243,22 +243,12 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 	if exec == nil || record == nil {
 		return nil
 	}
-	if strings.TrimSpace(record.ID) == "" {
-		return fmt.Errorf("sandbox_id is required")
-	}
-	configJSON, specJSON, err := marshalSandboxRecordJSON(record)
+	args, err := sandboxRecordInsertArgs(record)
 	if err != nil {
 		return err
 	}
-	_, err = exec.Exec(ctx, `
-		INSERT INTO manager.sandboxes (
-			sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
-			cluster_id, desired_state, config, template_spec,
-			current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
-			owner_kind, hot_claim_completed_at,
-			claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21, NOW()), NOW())
+	args = append(args, SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
+	_, err = exec.Exec(ctx, sandboxRecordInsertSQL+`
 		ON CONFLICT (sandbox_id) DO UPDATE SET
 			team_id = EXCLUDED.team_id,
 			user_id = EXCLUDED.user_id,
@@ -282,16 +272,42 @@ func upsertSandboxRecord(ctx context.Context, exec rootFSStateExecutor, record *
 			updated_at = NOW()
 		WHERE manager.sandboxes.deleted_at IS NULL
 			AND manager.sandboxes.desired_state NOT IN ($22, $23)
-	`, record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
-		record.ClusterID, record.DesiredState, configJSON, specJSON,
-		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
-		strings.TrimSpace(record.OwnerKind), nullableTime(record.HotClaimCompletedAt),
-		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt), nullableTime(record.DeletedAt), nullableTime(record.CreatedAt),
-		SandboxDesiredStateTerminating, SandboxDesiredStateDeleted)
+	`, args...)
 	if err != nil {
 		return fmt.Errorf("upsert sandbox: %w", err)
 	}
 	return nil
+}
+
+const sandboxRecordInsertSQL = `
+	INSERT INTO manager.sandboxes (
+		sandbox_id, team_id, user_id, template_id, template_name, template_namespace,
+		cluster_id, desired_state, config, template_spec,
+		current_pod_name, current_pod_namespace, runtime_generation, lifecycle_epoch,
+		owner_kind, hot_claim_completed_at,
+		claimed_at, expires_at, hard_expires_at, deleted_at, created_at, updated_at
+	)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, COALESCE($21, NOW()), NOW())`
+
+func sandboxRecordInsertArgs(record *SandboxRecord) ([]any, error) {
+	if record == nil {
+		return nil, fmt.Errorf("sandbox record is required")
+	}
+	if strings.TrimSpace(record.ID) == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	configJSON, specJSON, err := marshalSandboxRecordJSON(record)
+	if err != nil {
+		return nil, err
+	}
+	return []any{
+		record.ID, record.TeamID, record.UserID, record.TemplateID, record.TemplateName, record.TemplateNamespace,
+		record.ClusterID, record.DesiredState, configJSON, specJSON,
+		record.CurrentPodName, record.CurrentPodNamespace, record.RuntimeGeneration, record.LifecycleEpoch,
+		strings.TrimSpace(record.OwnerKind), nullableTime(record.HotClaimCompletedAt),
+		nullableTime(record.ClaimedAt), nullableTime(record.ExpiresAt), nullableTime(record.HardExpiresAt),
+		nullableTime(record.DeletedAt), nullableTime(record.CreatedAt),
+	}, nil
 }
 
 func (s *PGSandboxStore) GetSandbox(ctx context.Context, sandboxID string) (*SandboxRecord, error) {

@@ -2071,6 +2071,58 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
+  /api/v1/sandboxes/{id}/rootfs/rebase:
+    put:
+      tags: [sandbox-rootfs]
+      summary: Rebase a paused sandbox rootfs
+      description: |
+        Applies the paused sandbox's file-level changes to an already-attested
+        immutable Base artifact. The operation keeps the sandbox paused, publishes
+        one durable block-COW generation, and retains the previous generation for
+        the requested bounded rollback window.
+      security:
+        - bearerAuth: []
+      x-upstream-service: manager
+      x-upstream-path: /api/v1/sandboxes/{id}/rootfs/rebase
+      parameters:
+        - $ref: "#/components/parameters/SandboxID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RebaseSandboxRootFSRequest"
+      responses:
+        "200":
+          description: Paused sandbox rootfs rebased
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessRebaseSandboxRootFSResponse"
+        "400":
+          description: Invalid Base artifact digest or rollback window
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "404":
+          description: Sandbox or target Base artifact not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "409":
+          description: Sandbox is not paused, durable identity changed, or another lifecycle operation owns it
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "503":
+          description: Exact authenticated worker or durable publication authority is temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
   /api/v1/sandbox-rootfs-snapshots/{snapshot_id}:
     get:
       tags: [sandbox-rootfs]
@@ -5162,6 +5214,35 @@ components:
         sandbox:
           $ref: "#/components/schemas/Sandbox"
       required: [source_sandbox_id, sandbox]
+    RebaseSandboxRootFSRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        target_base_artifact_digest:
+          type: string
+          description: Canonical SHA-256 digest of an already-attested immutable RootFS Base artifact.
+        rollback_ttl:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 604800
+          description: Rollback retention in seconds. Defaults to 86400 seconds and cannot exceed seven days.
+      required: [target_base_artifact_digest]
+    RebaseSandboxRootFSResponse:
+      type: object
+      properties:
+        sandbox_id:
+          type: string
+        generation_id:
+          type: string
+        base_artifact_digest:
+          type: string
+        rollback_expires_at:
+          type: string
+          format: date-time
+        status:
+          $ref: "#/components/schemas/SandboxLifecycleStatus"
+      required: [sandbox_id, generation_id, base_artifact_digest, rollback_expires_at, status]
     SuccessSandboxRootFSSnapshotResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
@@ -5190,6 +5271,13 @@ components:
           properties:
             data:
               $ref: "#/components/schemas/ForkSandboxResponse"
+    SuccessRebaseSandboxRootFSResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/RebaseSandboxRootFSResponse"
     SuccessSandboxStatusResponse:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"

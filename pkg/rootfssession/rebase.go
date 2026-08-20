@@ -3,28 +3,35 @@ package session
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	bolt "go.etcd.io/bbolt"
 )
 
 const (
-	rebaseRecordVersion         = 1
-	rebaseStatePreparing        = "preparing"
-	rebaseStateApplying         = "applying"
-	rebaseStateBuilding         = "building"
-	rebaseStateResult           = "result"
-	defaultRebaseCleanupTimeout = 30 * time.Second
+	rebaseRecordVersion          = 1
+	rebaseStatePreparing         = "preparing"
+	rebaseStateApplying          = "applying"
+	rebaseStateBuilding          = "building"
+	rebaseStateResult            = "result"
+	defaultRebaseCleanupTimeout  = 30 * time.Second
+	rebaseAcknowledgementVersion = 1
+	rebaseAcknowledgementBytes   = 1 + 8 + sha256.Size + sha256.Size
+	maxRebaseAcknowledgements    = 4096
+	rebaseAcknowledgementTTL     = 24 * time.Hour
 )
 
 var rebaseRoles = [...]string{"old", "source", "target"}
@@ -54,6 +61,12 @@ type rebaseResource struct {
 	OverlayMountIntent        bool   `json:"overlay_mount_intent,omitempty"`
 	DeviceClosed              bool   `json:"device_closed,omitempty"`
 	DeviceReservationReleased bool   `json:"device_reservation_released,omitempty"`
+}
+
+type rebaseAcknowledgement struct {
+	AcknowledgedAt int64
+	RequestDigest  [sha256.Size]byte
+	ProofDigest    [sha256.Size]byte
 }
 
 type liveRebaseResources struct {
@@ -119,6 +132,7 @@ func (m *Manager) ExecuteRebase(
 	if err != nil {
 		return result, err
 	}
+	requestDigestBytes, _ := parseRebaseSHA256Digest(requestDigest)
 	m.mu.Lock()
 	if m.closing {
 		m.mu.Unlock()
@@ -169,6 +183,13 @@ func (m *Manager) ExecuteRebase(
 		}
 	} else if !errdefs.IsNotFound(err) {
 		return result, err
+	} else if acknowledged, ackErr := m.loadRebaseAcknowledgement(request.OperationID); ackErr == nil {
+		if acknowledged.RequestDigest != requestDigestBytes {
+			return result, fmt.Errorf("rebase operation is bound to another acknowledged request: %w", errdefs.ErrAlreadyExists)
+		}
+		return result, fmt.Errorf("rebase operation was already acknowledged: %w", errdefs.ErrFailedPrecondition)
+	} else if !errdefs.IsNotFound(ackErr) {
+		return result, ackErr
 	}
 	rollbackDeadline, _ := time.Parse(time.RFC3339Nano, request.RollbackExpiresAt)
 	now := time.Now()
@@ -348,6 +369,9 @@ func (m *Manager) ReconcileRebases(ctx context.Context) error {
 	if err := m.reconcileDeviceReservations(); err != nil {
 		return fmt.Errorf("reconcile RootFS device reservations before rebases: %w", err)
 	}
+	if err := m.pruneRebaseAcknowledgements(time.Now().UTC()); err != nil {
+		return fmt.Errorf("prune RootFS rebase acknowledgements: %w", err)
+	}
 	var operationIDs []string
 	if err := m.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket(rebaseBucket).ForEach(func(key, payload []byte) error {
@@ -380,27 +404,132 @@ func (m *Manager) ReconcileRebases(ctx context.Context) error {
 	return result
 }
 
+// RejectRebase serializes with execution and returns a durable exact proof.
+// If execution already produced an output, the output remains cached until
+// the regional authority persists the rejection and acknowledges its proof.
+func (m *Manager) RejectRebase(
+	ctx context.Context,
+	request rootfsrebase.WorkerRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	if err := request.Validate(); err != nil {
+		return rootfsrebase.WorkerRejection{},
+			fmt.Errorf("validate RootFS rebase rejection: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	requestDigest, err := request.Digest()
+	if err != nil {
+		return rootfsrebase.WorkerRejection{}, err
+	}
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return rootfsrebase.WorkerRejection{},
+			fmt.Errorf("RootFS session manager is closing: %w", errdefs.ErrUnavailable)
+	}
+	m.rebaseWG.Add(1)
+	m.mu.Unlock()
+	defer m.rebaseWG.Done()
+
+	unlock := m.lock("rebase:" + request.OperationID)
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return rootfsrebase.WorkerRejection{}, err
+	}
+	current, err := m.loadRebase(request.OperationID)
+	if err == nil {
+		if current.RequestDigest != requestDigest {
+			return rootfsrebase.WorkerRejection{},
+				fmt.Errorf("rebase operation is bound to another request: %w", errdefs.ErrAlreadyExists)
+		}
+		if !current.Clean {
+			if err := m.cleanupRebaseRecord(ctx, &current, nil); err != nil {
+				return rootfsrebase.WorkerRejection{}, err
+			}
+		}
+		if current.Result != nil {
+			return rootfsrebase.RejectWithResult(request, *current.Result)
+		}
+		rejection, err := rootfsrebase.RejectWithoutResult(request)
+		if err != nil {
+			return rootfsrebase.WorkerRejection{}, err
+		}
+		if err := m.commitRebaseRejection(current, rejection.ProofDigest, time.Now().UTC()); err != nil {
+			return rootfsrebase.WorkerRejection{}, err
+		}
+		return rejection, nil
+	}
+	if !errdefs.IsNotFound(err) {
+		return rootfsrebase.WorkerRejection{}, err
+	}
+	rejection, err := rootfsrebase.RejectWithoutResult(request)
+	if err != nil {
+		return rootfsrebase.WorkerRejection{}, err
+	}
+	acknowledged, ackErr := m.loadRebaseAcknowledgement(request.OperationID)
+	if ackErr == nil {
+		requestBytes, _ := parseRebaseSHA256Digest(requestDigest)
+		proofBytes, _ := parseRebaseSHA256Digest(rejection.ProofDigest)
+		if acknowledged.RequestDigest != requestBytes || acknowledged.ProofDigest != proofBytes {
+			return rootfsrebase.WorkerRejection{},
+				fmt.Errorf("rebase operation already has another permanent outcome: %w", errdefs.ErrFailedPrecondition)
+		}
+		return rejection, nil
+	}
+	if !errdefs.IsNotFound(ackErr) {
+		return rootfsrebase.WorkerRejection{}, ackErr
+	}
+	if err := m.commitAbsentRebaseRejection(request, rejection.ProofDigest, time.Now().UTC()); err != nil {
+		return rootfsrebase.WorkerRejection{}, err
+	}
+	return rejection, nil
+}
+
 // AcknowledgeRebase removes one clean cached result only after the regional
 // controller has either committed it or permanently rejected the operation.
-func (m *Manager) AcknowledgeRebase(operationID, proofDigest string) error {
-	operationID = strings.TrimSpace(operationID)
+func (m *Manager) AcknowledgeRebase(request rootfsrebase.WorkerRequest, proofDigest string) error {
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("validate rebase acknowledgement request: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	requestDigest, err := request.Digest()
+	if err != nil {
+		return err
+	}
+	operationID := request.OperationID
 	proofDigest = strings.TrimSpace(proofDigest)
-	if operationID == "" || proofDigest == "" {
+	if proofDigest == "" {
 		return fmt.Errorf("rebase operation and proof digest are required: %w", errdefs.ErrInvalidArgument)
+	}
+	requestDigestBytes, err := parseRebaseSHA256Digest(requestDigest)
+	if err != nil {
+		return err
+	}
+	proofDigestBytes, err := parseRebaseSHA256Digest(proofDigest)
+	if err != nil {
+		return fmt.Errorf("rebase proof digest is invalid: %w: %w", err, errdefs.ErrInvalidArgument)
 	}
 	unlock := m.lock("rebase:" + operationID)
 	defer unlock()
 	current, err := m.loadRebase(operationID)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
+			acknowledged, ackErr := m.loadRebaseAcknowledgement(operationID)
+			if ackErr != nil {
+				if errdefs.IsNotFound(ackErr) {
+					return nil
+				}
+				return ackErr
+			}
+			if acknowledged.RequestDigest != requestDigestBytes || acknowledged.ProofDigest != proofDigestBytes {
+				return fmt.Errorf("rebase acknowledgement does not match cached tombstone: %w", errdefs.ErrFailedPrecondition)
+			}
 			return nil
 		}
 		return err
 	}
-	if current.Result == nil || !current.Clean || current.Result.ProofDigest != proofDigest {
+	if current.RequestDigest != requestDigest || current.Result == nil || !current.Clean ||
+		current.Result.ProofDigest != proofDigest {
 		return fmt.Errorf("rebase result proof does not match cached output: %w", errdefs.ErrFailedPrecondition)
 	}
-	return m.deleteRebase(operationID, current.RequestDigest)
+	return m.commitRebaseAcknowledgement(current, proofDigest, time.Now().UTC())
 }
 
 func (m *Manager) cleanupRebaseRecord(
@@ -656,6 +785,261 @@ func (m *Manager) deleteRebase(operationID, requestDigest string) error {
 		}
 		return bucket.Delete([]byte(operationID))
 	})
+}
+
+func (m *Manager) loadRebaseAcknowledgement(operationID string) (rebaseAcknowledgement, error) {
+	var acknowledgement rebaseAcknowledgement
+	err := m.db.View(func(tx *bolt.Tx) error {
+		payload := tx.Bucket(rebaseAckBucket).Get(rebaseAcknowledgementKey(operationID))
+		if payload == nil {
+			return errdefs.ErrNotFound
+		}
+		decoded, err := decodeRebaseAcknowledgement(payload)
+		if err != nil {
+			return err
+		}
+		acknowledgement = decoded
+		return nil
+	})
+	return acknowledgement, err
+}
+
+func (m *Manager) commitRebaseAcknowledgement(
+	current rebaseRecord,
+	proofDigest string,
+	now time.Time,
+) error {
+	requestDigest, err := parseRebaseSHA256Digest(current.RequestDigest)
+	if err != nil {
+		return err
+	}
+	proof, err := parseRebaseSHA256Digest(proofDigest)
+	if err != nil {
+		return err
+	}
+	acknowledgement := rebaseAcknowledgement{
+		AcknowledgedAt: now.UTC().UnixNano(), RequestDigest: requestDigest, ProofDigest: proof,
+	}
+	return m.db.Update(func(tx *bolt.Tx) error {
+		rebases := tx.Bucket(rebaseBucket)
+		payload := rebases.Get([]byte(current.OperationID))
+		if payload == nil {
+			return errdefs.ErrNotFound
+		}
+		var stored rebaseRecord
+		if err := json.Unmarshal(payload, &stored); err != nil {
+			return err
+		}
+		if stored.RequestDigest != current.RequestDigest || stored.Result == nil || !stored.Clean ||
+			stored.Result.ProofDigest != proofDigest {
+			return fmt.Errorf("RootFS rebase changed before acknowledgement: %w", errdefs.ErrFailedPrecondition)
+		}
+		acks := tx.Bucket(rebaseAckBucket)
+		key := rebaseAcknowledgementKey(current.OperationID)
+		if previous := acks.Get(key); previous != nil {
+			decoded, err := decodeRebaseAcknowledgement(previous)
+			if err != nil {
+				return err
+			}
+			if decoded.RequestDigest != acknowledgement.RequestDigest || decoded.ProofDigest != acknowledgement.ProofDigest {
+				return fmt.Errorf("RootFS rebase acknowledgement identity changed: %w", errdefs.ErrFailedPrecondition)
+			}
+		} else if err := acks.Put(key, encodeRebaseAcknowledgement(acknowledgement)); err != nil {
+			return err
+		}
+		if err := rebases.Delete([]byte(current.OperationID)); err != nil {
+			return err
+		}
+		return pruneRebaseAcknowledgementBucket(acks, now.UTC())
+	})
+}
+
+func (m *Manager) commitRebaseRejection(
+	current rebaseRecord,
+	proofDigest string,
+	now time.Time,
+) error {
+	requestDigest, err := parseRebaseSHA256Digest(current.RequestDigest)
+	if err != nil {
+		return err
+	}
+	proof, err := parseRebaseSHA256Digest(proofDigest)
+	if err != nil {
+		return err
+	}
+	acknowledgement := rebaseAcknowledgement{
+		AcknowledgedAt: now.UTC().UnixNano(), RequestDigest: requestDigest, ProofDigest: proof,
+	}
+	return m.db.Update(func(tx *bolt.Tx) error {
+		rebases := tx.Bucket(rebaseBucket)
+		payload := rebases.Get([]byte(current.OperationID))
+		if payload == nil {
+			return errdefs.ErrNotFound
+		}
+		var stored rebaseRecord
+		if err := json.Unmarshal(payload, &stored); err != nil {
+			return err
+		}
+		if stored.RequestDigest != current.RequestDigest || stored.Result != nil || !stored.Clean {
+			return fmt.Errorf("RootFS rebase changed before rejection: %w", errdefs.ErrFailedPrecondition)
+		}
+		if err := putExactRebaseAcknowledgement(tx.Bucket(rebaseAckBucket), current.OperationID, acknowledgement); err != nil {
+			return err
+		}
+		if err := rebases.Delete([]byte(current.OperationID)); err != nil {
+			return err
+		}
+		return pruneRebaseAcknowledgementBucket(tx.Bucket(rebaseAckBucket), now.UTC())
+	})
+}
+
+func (m *Manager) commitAbsentRebaseRejection(
+	request rootfsrebase.WorkerRequest,
+	proofDigest string,
+	now time.Time,
+) error {
+	requestDigestValue, err := request.Digest()
+	if err != nil {
+		return err
+	}
+	requestDigest, err := parseRebaseSHA256Digest(requestDigestValue)
+	if err != nil {
+		return err
+	}
+	proof, err := parseRebaseSHA256Digest(proofDigest)
+	if err != nil {
+		return err
+	}
+	acknowledgement := rebaseAcknowledgement{
+		AcknowledgedAt: now.UTC().UnixNano(), RequestDigest: requestDigest, ProofDigest: proof,
+	}
+	return m.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(rebaseBucket).Get([]byte(request.OperationID)) != nil {
+			return fmt.Errorf("RootFS rebase appeared before rejection: %w", errdefs.ErrFailedPrecondition)
+		}
+		acks := tx.Bucket(rebaseAckBucket)
+		if err := putExactRebaseAcknowledgement(acks, request.OperationID, acknowledgement); err != nil {
+			return err
+		}
+		return pruneRebaseAcknowledgementBucket(acks, now.UTC())
+	})
+}
+
+func putExactRebaseAcknowledgement(
+	bucket *bolt.Bucket,
+	operationID string,
+	acknowledgement rebaseAcknowledgement,
+) error {
+	key := rebaseAcknowledgementKey(operationID)
+	if previous := bucket.Get(key); previous != nil {
+		decoded, err := decodeRebaseAcknowledgement(previous)
+		if err != nil {
+			return err
+		}
+		if decoded.RequestDigest != acknowledgement.RequestDigest || decoded.ProofDigest != acknowledgement.ProofDigest {
+			return fmt.Errorf("RootFS rebase acknowledgement identity changed: %w", errdefs.ErrFailedPrecondition)
+		}
+		return nil
+	}
+	return bucket.Put(key, encodeRebaseAcknowledgement(acknowledgement))
+}
+
+func (m *Manager) pruneRebaseAcknowledgements(now time.Time) error {
+	return m.db.Update(func(tx *bolt.Tx) error {
+		return pruneRebaseAcknowledgementBucket(tx.Bucket(rebaseAckBucket), now.UTC())
+	})
+}
+
+func pruneRebaseAcknowledgementBucket(bucket *bolt.Bucket, now time.Time) error {
+	type retainedAcknowledgement struct {
+		key            []byte
+		acknowledgedAt int64
+	}
+	cutoff := now.Add(-rebaseAcknowledgementTTL).UnixNano()
+	retained := make([]retainedAcknowledgement, 0, maxRebaseAcknowledgements+1)
+	var expired [][]byte
+	if err := bucket.ForEach(func(key, payload []byte) error {
+		if payload == nil {
+			return nil
+		}
+		acknowledgement, err := decodeRebaseAcknowledgement(payload)
+		if err != nil {
+			return err
+		}
+		copyKey := append([]byte(nil), key...)
+		if acknowledgement.AcknowledgedAt <= cutoff {
+			expired = append(expired, copyKey)
+			return nil
+		}
+		retained = append(retained, retainedAcknowledgement{
+			key: copyKey, acknowledgedAt: acknowledgement.AcknowledgedAt,
+		})
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, key := range expired {
+		if err := bucket.Delete(key); err != nil {
+			return err
+		}
+	}
+	if len(retained) <= maxRebaseAcknowledgements {
+		return nil
+	}
+	sort.Slice(retained, func(left, right int) bool {
+		if retained[left].acknowledgedAt != retained[right].acknowledgedAt {
+			return retained[left].acknowledgedAt < retained[right].acknowledgedAt
+		}
+		return string(retained[left].key) < string(retained[right].key)
+	})
+	for _, item := range retained[:len(retained)-maxRebaseAcknowledgements] {
+		if err := bucket.Delete(item.key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rebaseAcknowledgementKey(operationID string) []byte {
+	sum := sha256.Sum256([]byte(operationID))
+	return sum[:]
+}
+
+func encodeRebaseAcknowledgement(acknowledgement rebaseAcknowledgement) []byte {
+	payload := make([]byte, rebaseAcknowledgementBytes)
+	payload[0] = rebaseAcknowledgementVersion
+	binary.BigEndian.PutUint64(payload[1:9], uint64(acknowledgement.AcknowledgedAt))
+	copy(payload[9:9+sha256.Size], acknowledgement.RequestDigest[:])
+	copy(payload[9+sha256.Size:], acknowledgement.ProofDigest[:])
+	return payload
+}
+
+func decodeRebaseAcknowledgement(payload []byte) (rebaseAcknowledgement, error) {
+	var acknowledgement rebaseAcknowledgement
+	if len(payload) != rebaseAcknowledgementBytes || payload[0] != rebaseAcknowledgementVersion {
+		return acknowledgement, fmt.Errorf("RootFS rebase acknowledgement tombstone is invalid")
+	}
+	acknowledgement.AcknowledgedAt = int64(binary.BigEndian.Uint64(payload[1:9]))
+	copy(acknowledgement.RequestDigest[:], payload[9:9+sha256.Size])
+	copy(acknowledgement.ProofDigest[:], payload[9+sha256.Size:])
+	if acknowledgement.AcknowledgedAt <= 0 {
+		return rebaseAcknowledgement{}, fmt.Errorf("RootFS rebase acknowledgement timestamp is invalid")
+	}
+	return acknowledgement, nil
+}
+
+func parseRebaseSHA256Digest(value string) ([sha256.Size]byte, error) {
+	var result [sha256.Size]byte
+	parsed, err := digest.Parse(value)
+	if err != nil || parsed.Algorithm() != digest.SHA256 || parsed.String() != value {
+		return result, fmt.Errorf("digest must be canonical sha256")
+	}
+	decoded, err := hex.DecodeString(parsed.Encoded())
+	if err != nil || len(decoded) != sha256.Size {
+		return result, fmt.Errorf("sha256 digest payload must contain 32 bytes")
+	}
+	copy(result[:], decoded)
+	return result, nil
 }
 
 func validateRebaseRecord(current rebaseRecord, operationID string) error {

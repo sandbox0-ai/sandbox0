@@ -3,11 +3,14 @@ package runtimeslotnode
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +20,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/nodeauth"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -279,6 +283,79 @@ func (h *ChannelHub) Connected(clusterID, nodeID, nodeUID, nodeBootID string) bo
 	return route.conn != nil && !route.conn.isClosed()
 }
 
+// SelectPausedRebaseNode deterministically chooses one currently connected
+// rebase-capable node. The caller must persist NodeID and NodeUID in
+// PostgreSQL before dispatching any worker side effect.
+func (h *ChannelHub) SelectPausedRebaseNode(clusterID, operationID string) (protocol.NodeChannelTarget, error) {
+	clusterID = strings.TrimSpace(clusterID)
+	operationID = strings.TrimSpace(operationID)
+	if h == nil || clusterID == "" || operationID == "" {
+		return protocol.NodeChannelTarget{}, fmt.Errorf("rebase worker cluster and operation are required: %w", errdefs.ErrInvalidArgument)
+	}
+	candidates := h.pausedRebaseNodes(clusterID, "", "")
+	if len(candidates) == 0 {
+		return protocol.NodeChannelTarget{}, fmt.Errorf("cluster has no authenticated rebase worker: %w", errdefs.ErrUnavailable)
+	}
+	sum := sha256.Sum256([]byte(operationID))
+	index := binary.BigEndian.Uint64(sum[:8]) % uint64(len(candidates))
+	return candidates[index], nil
+}
+
+// ResolvePausedRebaseNode returns the connected boot for one PostgreSQL-bound
+// durable worker identity. It never fails over to another node.
+func (h *ChannelHub) ResolvePausedRebaseNode(
+	clusterID, nodeID, nodeUID string,
+) (protocol.NodeChannelTarget, error) {
+	clusterID = strings.TrimSpace(clusterID)
+	nodeID = strings.TrimSpace(nodeID)
+	nodeUID = strings.TrimSpace(nodeUID)
+	if h == nil || clusterID == "" || nodeID == "" || nodeUID == "" {
+		return protocol.NodeChannelTarget{}, fmt.Errorf("rebase worker identity is required: %w", errdefs.ErrInvalidArgument)
+	}
+	candidates := h.pausedRebaseNodes(clusterID, nodeID, nodeUID)
+	if len(candidates) == 0 {
+		return protocol.NodeChannelTarget{}, fmt.Errorf("exact rebase worker has no authenticated channel: %w", errdefs.ErrUnavailable)
+	}
+	return candidates[len(candidates)-1], nil
+}
+
+func (h *ChannelHub) pausedRebaseNodes(clusterID, nodeID, nodeUID string) []protocol.NodeChannelTarget {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return nil
+	}
+	result := make([]protocol.NodeChannelTarget, 0)
+	for key, route := range h.routes {
+		if key.clusterID != clusterID || (nodeID != "" && key.nodeID != nodeID) ||
+			(nodeUID != "" && key.nodeUID != nodeUID) {
+			continue
+		}
+		route.mu.Lock()
+		connection := route.conn
+		available := connection != nil && !connection.isClosed() &&
+			connection.hello.Supports(protocol.NodeChannelCommandPausedRebase)
+		route.mu.Unlock()
+		if available {
+			result = append(result, protocol.NodeChannelTarget{
+				ClusterID: key.clusterID, NodeID: key.nodeID,
+				NodeUID: key.nodeUID, NodeBootID: key.nodeBootID,
+			})
+		}
+	}
+	sort.Slice(result, func(left, right int) bool {
+		a, b := result[left], result[right]
+		if a.NodeID != b.NodeID {
+			return a.NodeID < b.NodeID
+		}
+		if a.NodeUID != b.NodeUID {
+			return a.NodeUID < b.NodeUID
+		}
+		return a.NodeBootID < b.NodeBootID
+	})
+	return result
+}
+
 // Close disconnects every node and rejects later registrations or dispatches.
 func (h *ChannelHub) Close() error {
 	if h == nil {
@@ -358,6 +435,73 @@ func (h *ChannelHub) RunningFork(
 		return rootfshandoff.RunningForkCheckpointResult{}, err
 	}
 	return *result.RunningFork, nil
+}
+
+// PausedRebase dispatches an exact three-device offline merge to one
+// authenticated node boot. PostgreSQL authority remains outside the hub.
+func (h *ChannelHub) PausedRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerResult, error) {
+	if request.Reject || request.AcknowledgeProofDigest != "" {
+		return rootfsrebase.WorkerResult{}, fmt.Errorf("paused-rebase execute request contains an acknowledgement: %w", errdefs.ErrInvalidArgument)
+	}
+	command, err := protocol.NewNodeChannelPausedRebaseCommand(target, request)
+	if err != nil {
+		return rootfsrebase.WorkerResult{},
+			fmt.Errorf("build node paused-rebase command: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return rootfsrebase.WorkerResult{}, err
+	}
+	return *result.PausedRebase, nil
+}
+
+// RejectPausedRebase permanently fences an exact worker operation and returns
+// either a no-output rejection proof or its already-produced output proof.
+func (h *ChannelHub) RejectPausedRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	if !request.Reject || request.AcknowledgeProofDigest != "" {
+		return rootfsrebase.WorkerRejection{},
+			fmt.Errorf("paused-rebase rejection mode is required: %w", errdefs.ErrInvalidArgument)
+	}
+	command, err := protocol.NewNodeChannelPausedRebaseCommand(target, request)
+	if err != nil {
+		return rootfsrebase.WorkerRejection{},
+			fmt.Errorf("build node paused-rebase rejection: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return rootfsrebase.WorkerRejection{}, err
+	}
+	return *result.PausedRebaseReject, nil
+}
+
+// AcknowledgePausedRebase tells the exact worker node to discard a cached
+// output after PostgreSQL has committed or permanently rejected it.
+func (h *ChannelHub) AcknowledgePausedRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerAcknowledgement, error) {
+	if request.Reject || request.AcknowledgeProofDigest == "" {
+		return rootfsrebase.WorkerAcknowledgement{}, fmt.Errorf("paused-rebase acknowledgement proof is required: %w", errdefs.ErrInvalidArgument)
+	}
+	command, err := protocol.NewNodeChannelPausedRebaseCommand(target, request)
+	if err != nil {
+		return rootfsrebase.WorkerAcknowledgement{},
+			fmt.Errorf("build node paused-rebase acknowledgement: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	result, err := h.dispatch(ctx, command)
+	if err != nil {
+		return rootfsrebase.WorkerAcknowledgement{}, err
+	}
+	return *result.PausedRebaseAck, nil
 }
 
 // CleanupRuntimeSlot implements the terminal controller's authenticated node

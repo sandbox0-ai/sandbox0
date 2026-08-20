@@ -12,15 +12,19 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 )
 
 type testNodeChannelExecutor struct {
-	claimErr         error
-	commandErr       error
-	cleanupErr       error
-	runningFork      rootfshandoff.RunningForkCheckpointResult
-	runningForkErr   error
-	runningForkBlock bool
+	claimErr          error
+	commandErr        error
+	cleanupErr        error
+	runningFork       rootfshandoff.RunningForkCheckpointResult
+	runningForkErr    error
+	runningForkBlock  bool
+	pausedRebase      rootfsrebase.WorkerResult
+	pausedRebaseErr   error
+	pausedRebaseBlock bool
 }
 
 type staticNodeChannelResolver struct {
@@ -72,6 +76,37 @@ func (e *testNodeChannelExecutor) RunningFork(
 		return rootfshandoff.RunningForkCheckpointResult{}, ctx.Err()
 	}
 	return e.runningFork, e.runningForkErr
+}
+
+func (e *testNodeChannelExecutor) PausedRebase(
+	ctx context.Context,
+	_ NodeChannelTarget,
+	_ NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerResult, error) {
+	if e.pausedRebaseBlock {
+		<-ctx.Done()
+		return rootfsrebase.WorkerResult{}, ctx.Err()
+	}
+	return e.pausedRebase, e.pausedRebaseErr
+}
+
+func (e *testNodeChannelExecutor) RejectPausedRebase(
+	_ context.Context,
+	_ NodeChannelTarget,
+	request NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	if e.pausedRebaseErr != nil {
+		return rootfsrebase.WorkerRejection{}, e.pausedRebaseErr
+	}
+	return rootfsrebase.RejectWithoutResult(request.Worker)
+}
+
+func (e *testNodeChannelExecutor) AcknowledgePausedRebase(
+	_ context.Context,
+	_ NodeChannelTarget,
+	_ NodePausedRebaseControlRequest,
+) error {
+	return e.pausedRebaseErr
 }
 
 func (e *testNodeChannelExecutor) Cleanup(
@@ -196,6 +231,56 @@ func TestNodeChannelAgentExecutesRunningForkWithDedicatedTimeout(t *testing.T) {
 	}
 	if result.ErrorClass != NodeChannelErrorUnavailable || !strings.Contains(result.Error, context.DeadlineExceeded.Error()) {
 		t.Fatalf("timed-out running-fork result = %+v", result)
+	}
+}
+
+func TestNodeChannelAgentExecutesPausedRebaseWithDedicatedTimeout(t *testing.T) {
+	request, workerResult := testNodeChannelPausedRebase(t)
+	command, err := NewNodeChannelPausedRebaseCommand(testNodeChannelRebaseTarget(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &testNodeChannelExecutor{pausedRebase: workerResult}
+	agent := &NodeChannelAgent{config: NodeChannelAgentConfig{
+		Executor: executor, PausedRebaseExecutor: executor,
+		OperationTimeout: time.Second, PausedRebaseTimeout: time.Second,
+	}}
+	result := agent.execute(t.Context(), command)
+	if err := result.ValidateFor(command); err != nil || result.PausedRebase == nil {
+		t.Fatalf("paused-rebase result = %+v, %v", result, err)
+	}
+	rejectRequest := request
+	rejectRequest.Reject = true
+	rejectCommand, err := NewNodeChannelPausedRebaseCommand(testNodeChannelRebaseTarget(), rejectRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result = agent.execute(t.Context(), rejectCommand)
+	if err := result.ValidateFor(rejectCommand); err != nil || result.PausedRebaseReject == nil {
+		t.Fatalf("paused-rebase rejection = %+v, %v", result, err)
+	}
+
+	executor.pausedRebaseBlock = true
+	agent.config.PausedRebaseTimeout = time.Millisecond
+	result = agent.execute(t.Context(), command)
+	if err := result.ValidateFor(command); err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorClass != NodeChannelErrorUnavailable || !strings.Contains(result.Error, context.DeadlineExceeded.Error()) {
+		t.Fatalf("timed-out paused-rebase result = %+v", result)
+	}
+
+	executor.pausedRebaseBlock = false
+	ackRequest := request
+	ackRequest.AcknowledgeProofDigest = workerResult.ProofDigest
+	ackCommand, err := NewNodeChannelPausedRebaseCommand(testNodeChannelRebaseTarget(), ackRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.config.PausedRebaseTimeout = time.Second
+	result = agent.execute(t.Context(), ackCommand)
+	if err := result.ValidateFor(ackCommand); err != nil || result.PausedRebaseAck == nil {
+		t.Fatalf("paused-rebase acknowledgement = %+v, %v", result, err)
 	}
 }
 

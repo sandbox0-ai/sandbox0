@@ -8,6 +8,7 @@ Use this page when you need to:
 - claim a new sandbox with a named rootfs snapshot
 - restore a paused sandbox rootfs from a snapshot
 - fork a running or paused sandbox into another paused sandbox
+- rebase a paused sandbox onto a newer attested Base artifact
 - understand how rootfs snapshots differ from pause/resume
 
 <Callout variant="warning">
@@ -23,6 +24,7 @@ Creating snapshots and forking accept a running or paused source sandbox. Runnin
 | Claim with `snapshot_id` | Create a running sandbox initialized from a named snapshot | Uses an existing snapshot | Yes | No target sandbox required |
 | Restore | Move a paused sandbox rootfs back to a snapshot | Uses an existing snapshot | No | Yes |
 | Fork | Create an isolated paused sandbox from a source sandbox rootfs | No | Yes | No; running sources are checkpointed first |
+| Rebase | Carry file-level changes onto another attested Base artifact | Retains the old head for a bounded rollback window | No | Yes |
 
 Pause/resume keeps the latest checkpoint for one sandbox identity. Rootfs snapshots are explicit records that you can list, fetch, claim from, restore, and delete. Fork creates a new sandbox with Copy-on-Write rootfs isolation from the source rootfs state.
 
@@ -34,6 +36,7 @@ Use sandbox rootfs snapshots when the default writable filesystem is the state y
 - `Claim with snapshot_id` creates a running sandbox and initializes its writable rootfs from the selected snapshot before process APIs are initialized.
 - `Restore` changes a paused target sandbox rootfs head to the selected snapshot and leaves the sandbox paused.
 - `Fork` creates a new paused sandbox with the source sandbox configuration and an isolated rootfs fork. If the source is running, Sandbox0 briefly barriers the sandbox, checkpoints its writable rootfs, and then releases the source back to running. The fork request can override lifecycle `ttl` and `hard_ttl`.
+- `Rebase` applies the paused sandbox's file-level changes to a different attested immutable Base artifact, publishes one new durable generation, and retains the old generation for a bounded rollback window.
 - `Resume` is required before reading or writing files through sandbox process and file APIs after restore or fork. A sandbox claimed with `snapshot_id` starts running.
 - Deleting a snapshot does not modify any sandbox already claimed or restored from it, and it does not affect forks created from the same rootfs state.
 
@@ -475,6 +478,50 @@ s0 sandbox resume sb_forked123`
     }
   ]}
 />
+
+## Rebase A Paused Sandbox
+
+Use rebase when a sandbox must move to a newer immutable Base artifact while
+preserving file-level changes from its current writable rootfs. The target Base
+artifact must already be attested and available in the same region. Rebase does
+not accept an image tag or build an image implicitly.
+
+<Endpoint method="PUT">
+/api/v1/sandboxes/{'{id}'}/rootfs/rebase
+</Endpoint>
+
+### Request Body
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `target_base_artifact_digest` | string | Required canonical SHA-256 digest of the target attested Base artifact |
+| `rollback_ttl` | integer | Optional rollback retention in seconds; defaults to 86400 and cannot exceed 604800 |
+
+    curl -X PUT "https://api.sandbox0.ai/api/v1/sandboxes/$SANDBOX_ID/rootfs/rebase" \
+        -H "Authorization: Bearer $SANDBOX0_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "target_base_artifact_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "rollback_ttl": 86400
+        }'
+
+The sandbox must already be paused, have no live runtime slot or writer grant,
+and use the block-COW storage format. An exact retry returns the same target
+generation. A changed target digest or rollback window for the same operation
+is rejected with `409 Conflict`.
+
+Rebase is file-aware rather than a raw block transplant: the worker mounts the
+old Base, current source, and target Base in isolated branches, computes the
+filesystem change set, applies it to the target, validates the result, and only
+then publishes immutable objects. PostgreSQL commits the target generation and
+rollback pin atomically. The API can therefore recover a committed result after
+a manager restart or response loss without executing the merge again.
+
+<Callout variant="warning">
+Keep the sandbox paused until rebase returns successfully. The previous head is
+retained only until `rollback_expires_at`; expiry permits normal RootFS garbage
+collection to reclaim it.
+</Callout>
 
 ## Delete A Snapshot
 

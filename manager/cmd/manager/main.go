@@ -439,9 +439,14 @@ func main() {
 	}
 	sandboxPauseController := service.NewSandboxPauseController(sandboxStore, sandboxBackend, logger)
 	sandboxBackend.SetPauseEnqueuer(sandboxPauseController)
-	var sandboxForkController *service.SandboxForkController
-	if forkReconciler, ok := sandboxBackend.(service.SandboxForkReconciler); ok {
-		sandboxForkController = service.NewSandboxForkController(sandboxStore, forkReconciler, logger)
+	forkReconciler, _ := sandboxBackend.(service.SandboxForkReconciler)
+	rebaseReconciler, _ := sandboxBackend.(service.SandboxRootFSRebaseReconciler)
+	rootFSRebaser, _ := sandboxBackend.(service.SandboxRootFSRebaser)
+	var sandboxRootFSController *service.SandboxRootFSController
+	if forkReconciler != nil || rebaseReconciler != nil {
+		sandboxRootFSController = service.NewSandboxRootFSController(
+			sandboxStore, forkReconciler, rebaseReconciler, logger,
+		)
 	}
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled {
@@ -549,6 +554,7 @@ func main() {
 		SandboxPauser:           sandboxBackend,
 		SandboxResumer:          sandboxBackend,
 		SandboxForker:           sandboxBackend,
+		SandboxRootFSRebaser:    rootFSRebaser,
 		EgressAuthService:       egressAuthService,
 		CredentialSourceService: credentialSourceService,
 		TemplateService:         templateService,
@@ -582,7 +588,7 @@ func main() {
 		sandboxRuntimeReconciler:       sandboxRuntimeReconciler,
 		hotClaimReservationController:  hotClaimReservationController,
 		sandboxPauseController:         sandboxPauseController,
-		sandboxForkController:          sandboxForkController,
+		sandboxRootFSController:        sandboxRootFSController,
 		templateReconciler:             templateReconciler,
 		templateBuildWorker:            templateBuildWorker,
 		sandboxLogWorker:               sandboxLogWorker,

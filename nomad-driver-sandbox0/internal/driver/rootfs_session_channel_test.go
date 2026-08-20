@@ -15,6 +15,7 @@
 package driver
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -25,11 +26,50 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
 type fakeRuntimeSlotNetworkSource struct {
 	request protocol.RuntimeSlotNetworkPrepareRequest
+}
+
+type fakeRuntimeSlotRebaser struct {
+	target  protocol.NodeChannelTarget
+	request protocol.NodePausedRebaseControlRequest
+	result  rootfsrebase.WorkerResult
+	acks    int
+}
+
+func (r *fakeRuntimeSlotRebaser) AcknowledgePausedRootFSRebase(
+	_ context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) error {
+	r.target = target
+	r.request = request
+	r.acks++
+	return nil
+}
+
+func (r *fakeRuntimeSlotRebaser) ExecutePausedRootFSRebase(
+	_ context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerResult, error) {
+	r.target = target
+	r.request = request
+	return r.result, nil
+}
+
+func (r *fakeRuntimeSlotRebaser) RejectPausedRootFSRebase(
+	_ context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	r.target = target
+	r.request = request
+	return rootfsrebase.RejectWithoutResult(request.Worker)
 }
 
 func (s *fakeRuntimeSlotNetworkSource) runtimeSlotNetworkPrepareRequest(
@@ -90,6 +130,33 @@ func TestRootFSSessionNodeChannelExecutorChecksLocalNodeBeforeCleanup(t *testing
 	target.NodeID = "another-node"
 	if _, err := executor.Cleanup(t.Context(), target, request); !errdefs.IsPermissionDenied(err) {
 		t.Fatalf("cross-node cleanup error = %v", err)
+	}
+}
+
+func TestRootFSSessionNodeChannelExecutorDelegatesPausedRebaseToDaemon(t *testing.T) {
+	rebaser := &fakeRuntimeSlotRebaser{result: rootfsrebase.WorkerResult{ProofDigest: "proof-1"}}
+	executor := &rootFSSessionNodeChannelExecutor{
+		clusterID: "cluster-1", nodeID: "node-1", nodeUID: "node-uid-1", rebaser: rebaser,
+	}
+	target := protocol.NodeChannelTarget{
+		ClusterID: "cluster-1", NodeID: "node-1", NodeUID: "node-uid-1", NodeBootID: "boot-1",
+	}
+	request := protocol.NodePausedRebaseControlRequest{
+		Worker: rootfsrebase.WorkerRequest{OperationID: "rebase-operation-1"},
+	}
+	result, err := executor.PausedRebase(t.Context(), target, request)
+	if err != nil || result.ProofDigest != rebaser.result.ProofDigest || rebaser.target != target ||
+		rebaser.request.Worker.OperationID != request.Worker.OperationID {
+		t.Fatalf("paused rebase = %+v, target = %+v, request = %+v, error = %v", result, rebaser.target, rebaser.request, err)
+	}
+	target.NodeUID = "another-node"
+	if _, err := executor.PausedRebase(t.Context(), target, request); !errdefs.IsPermissionDenied(err) {
+		t.Fatalf("cross-node paused rebase error = %v", err)
+	}
+	target.NodeUID = "node-uid-1"
+	request.AcknowledgeProofDigest = "sha256:7e328799c89b54f08678a25d8e4d60129366a5c67f09fcca18b8de9f76f5fca7"
+	if err := executor.AcknowledgePausedRebase(t.Context(), target, request); err != nil || rebaser.acks != 1 {
+		t.Fatalf("paused rebase acknowledgement calls = %d, error = %v", rebaser.acks, err)
 	}
 }
 

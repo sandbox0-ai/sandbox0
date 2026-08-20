@@ -23,6 +23,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -33,12 +34,14 @@ type rootFSSessionNodeChannelExecutor struct {
 	control       *protocol.NodeClient
 	cleaner       runtimeSlotCleaner
 	forker        runtimeSlotRunningForker
+	rebaser       runtimeSlotPausedRebaser
 	network       *protocol.RuntimeSlotNetworkClient
 	networkSource runtimeSlotNetworkPrepareSource
 }
 
 var _ protocol.NodeChannelExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
 var _ protocol.NodeChannelRunningForkExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
+var _ protocol.NodeChannelPausedRebaseExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
 var _ protocol.NodeChannelNetworkExecutor = (*rootFSSessionNodeChannelExecutor)(nil)
 
 type runtimeSlotNetworkPrepareSource interface {
@@ -51,6 +54,24 @@ type runtimeSlotRunningForker interface {
 		protocol.NodeChannelTarget,
 		protocol.NodeRunningForkControlRequest,
 	) (rootfshandoff.RunningForkCheckpointResult, error)
+}
+
+type runtimeSlotPausedRebaser interface {
+	ExecutePausedRootFSRebase(
+		context.Context,
+		protocol.NodeChannelTarget,
+		protocol.NodePausedRebaseControlRequest,
+	) (rootfsrebase.WorkerResult, error)
+	RejectPausedRootFSRebase(
+		context.Context,
+		protocol.NodeChannelTarget,
+		protocol.NodePausedRebaseControlRequest,
+	) (rootfsrebase.WorkerRejection, error)
+	AcknowledgePausedRootFSRebase(
+		context.Context,
+		protocol.NodeChannelTarget,
+		protocol.NodePausedRebaseControlRequest,
+	) error
 }
 
 func newRootFSSessionNodeChannelAgent(
@@ -88,6 +109,9 @@ func newRootFSSessionNodeChannelAgent(
 	if forker, ok := cleaner.(runtimeSlotRunningForker); ok {
 		executor.forker = forker
 	}
+	if rebaser, ok := cleaner.(runtimeSlotPausedRebaser); ok {
+		executor.rebaser = rebaser
+	}
 	if network != nil {
 		source, ok := cleaner.(runtimeSlotNetworkPrepareSource)
 		if !ok {
@@ -111,6 +135,9 @@ func newRootFSSessionNodeChannelAgent(
 	}
 	if executor.forker != nil {
 		agentConfig.RunningForkExecutor = executor
+	}
+	if executor.rebaser != nil {
+		agentConfig.PausedRebaseExecutor = executor
 	}
 	if network != nil {
 		agentConfig.NetworkExecutor = executor
@@ -181,6 +208,50 @@ func (e *rootFSSessionNodeChannelExecutor) RunningFork(
 			fmt.Errorf("runtime slot running-fork controller is unavailable: %w", errdefs.ErrUnavailable)
 	}
 	return e.forker.CaptureRunningRootFSFork(ctx, target, request)
+}
+
+func (e *rootFSSessionNodeChannelExecutor) PausedRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerResult, error) {
+	if err := e.validateTarget(target); err != nil {
+		return rootfsrebase.WorkerResult{}, err
+	}
+	if e.rebaser == nil {
+		return rootfsrebase.WorkerResult{},
+			fmt.Errorf("runtime slot paused-rebase controller is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	return e.rebaser.ExecutePausedRootFSRebase(ctx, target, request)
+}
+
+func (e *rootFSSessionNodeChannelExecutor) RejectPausedRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	if err := e.validateTarget(target); err != nil {
+		return rootfsrebase.WorkerRejection{}, err
+	}
+	if e.rebaser == nil {
+		return rootfsrebase.WorkerRejection{},
+			fmt.Errorf("runtime slot paused-rebase controller is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	return e.rebaser.RejectPausedRootFSRebase(ctx, target, request)
+}
+
+func (e *rootFSSessionNodeChannelExecutor) AcknowledgePausedRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) error {
+	if err := e.validateTarget(target); err != nil {
+		return err
+	}
+	if e.rebaser == nil {
+		return fmt.Errorf("runtime slot paused-rebase controller is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	return e.rebaser.AcknowledgePausedRootFSRebase(ctx, target, request)
 }
 
 func (e *rootFSSessionNodeChannelExecutor) Cleanup(

@@ -1,6 +1,7 @@
 package sandboxstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -31,22 +32,270 @@ type NomadPausedRebaseRequest struct {
 	ExpectedTeamID           string
 	TargetBaseArtifactDigest string
 	RollbackExpiresAt        time.Time
+	WorkerClusterID          string
+	WorkerNodeID             string
+	WorkerNodeUID            string
 }
 
 // NomadPausedRebaseCandidate is the complete immutable input to a privileged
 // file-aware rebase worker. TargetGenerationID and TargetWriterEpoch are
 // reserved by PostgreSQL but do not grant write authority to a sandbox.
 type NomadPausedRebaseCandidate struct {
-	Completed          bool
-	LifecyclePhase     string
-	Sandbox            *SandboxRecord
-	Filesystem         *RootFSFilesystem
-	SourceGeneration   *RootFSGeneration
-	SourceBaseArtifact *RootFSBaseArtifact
-	TargetBaseArtifact *RootFSBaseArtifact
-	TargetGenerationID string
-	TargetWriterEpoch  int64
-	RollbackExpiresAt  time.Time
+	Completed            bool
+	Rejected             bool
+	LifecyclePhase       string
+	Sandbox              *SandboxRecord
+	Filesystem           *RootFSFilesystem
+	SourceGeneration     *RootFSGeneration
+	SourceBaseArtifact   *RootFSBaseArtifact
+	TargetBaseArtifact   *RootFSBaseArtifact
+	TargetGenerationID   string
+	TargetWriterEpoch    int64
+	RollbackExpiresAt    time.Time
+	WorkerClusterID      string
+	WorkerNodeID         string
+	WorkerNodeUID        string
+	WorkerProofDigest    []byte
+	WorkerAcknowledgedAt time.Time
+}
+
+// ListPendingNomadPausedRebases returns unpublished work and terminal worker
+// outcomes whose exact node-journal acknowledgement is still pending.
+func (s *PGSandboxStore) ListPendingNomadPausedRebases(
+	ctx context.Context,
+	limit int,
+) ([]*SandboxLifecycleTxn, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, lifecycleTxnSelectSQL()+`
+		WHERE kind = $1
+			AND (
+				phase IN ('preparing', 'barriered', 'publishing', 'committing')
+				OR (phase IN ('committed', 'aborted') AND worker_acknowledged_at IS NULL
+					AND octet_length(worker_proof_digest) = $2)
+			)
+		ORDER BY updated_at ASC
+		LIMIT $3
+	`, SandboxLifecycleKindRebase, sha256.Size, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending Nomad paused rebases: %w", err)
+	}
+	defer rows.Close()
+	result := make([]*SandboxLifecycleTxn, 0, limit)
+	for rows.Next() {
+		txn, scanErr := scanLifecycleTxnRows(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan pending Nomad paused rebase: %w", scanErr)
+		}
+		result = append(result, txn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending Nomad paused rebases: %w", err)
+	}
+	return result, nil
+}
+
+// GetPendingNomadPausedRebase returns the single active operation owned by a
+// sandbox, or its latest terminal operation awaiting exact worker ack.
+func (s *PGSandboxStore) GetPendingNomadPausedRebase(
+	ctx context.Context,
+	sandboxID string,
+) (*SandboxLifecycleTxn, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || len(sandboxID) > 512 {
+		return nil, fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
+	}
+	return scanLifecycleTxn(s.pool.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE sandbox_id = $1 AND kind = $2
+			AND (
+				phase IN ('preparing', 'barriered', 'publishing', 'committing')
+				OR (phase IN ('committed', 'aborted') AND worker_acknowledged_at IS NULL
+					AND octet_length(worker_proof_digest) = $3)
+			)
+		ORDER BY epoch DESC
+		LIMIT 1
+	`, sandboxID, SandboxLifecycleKindRebase, sha256.Size))
+}
+
+// AcknowledgeNomadPausedRebaseWorker records that the exact durable worker
+// proof was released only after the node confirmed acknowledgement.
+func (s *PGSandboxStore) AcknowledgeNomadPausedRebaseWorker(
+	ctx context.Context,
+	operationID, sandboxID, workerClusterID, workerNodeID, workerNodeUID string,
+	proofDigest []byte,
+) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("sandbox store is not configured")
+	}
+	values := map[string]string{
+		"operation_id": operationID, "sandbox_id": sandboxID, "worker_cluster_id": workerClusterID,
+		"worker_node_id": workerNodeID, "worker_node_uid": workerNodeUID,
+	}
+	for name, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || value != values[name] || len(value) > 512 {
+			return fmt.Errorf("%s is required, canonical, and at most 512 bytes", name)
+		}
+	}
+	if len(proofDigest) != sha256.Size {
+		return fmt.Errorf("worker proof digest must be a 32-byte SHA-256 digest")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET worker_acknowledged_at = COALESCE(worker_acknowledged_at, NOW()),
+			updated_at = CASE WHEN worker_acknowledged_at IS NULL THEN NOW() ELSE updated_at END
+		WHERE txn_id = $1 AND sandbox_id = $2 AND kind = $3 AND phase IN ($4, $5)
+			AND worker_cluster_id = $6 AND worker_node_id = $7 AND worker_node_uid = $8
+			AND worker_proof_digest = $9
+	`, operationID, sandboxID, SandboxLifecycleKindRebase, SandboxLifecyclePhaseCommitted,
+		SandboxLifecyclePhaseAborted, workerClusterID, workerNodeID, workerNodeUID, proofDigest)
+	if err != nil {
+		return fmt.Errorf("acknowledge Nomad paused-rebase worker: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("%w: terminal worker proof identity changed", ErrNomadSandboxRebaseConflict)
+	}
+	return nil
+}
+
+// RejectNomadPausedRebaseWorker records an exact node proof instead of losing
+// a result when sandbox deletion races worker execution. Cleanup remains
+// fenced until the same proof is acknowledged on the same durable node.
+func (s *PGSandboxStore) RejectNomadPausedRebaseWorker(
+	ctx context.Context,
+	request *NomadPausedRebaseRequest,
+	proofDigest []byte,
+) error {
+	normalized, err := normalizeNomadPausedRebaseRequest(request)
+	if err != nil {
+		return err
+	}
+	if len(proofDigest) != sha256.Size {
+		return fmt.Errorf("worker rejection proof must be a 32-byte SHA-256 digest")
+	}
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("sandbox store is not configured")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin Nomad paused-rebase rejection tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	record, err := lockNomadSandboxClaimRecord(ctx, tx, normalized.SandboxID)
+	if err != nil {
+		return err
+	}
+	claim, err := lockSandboxRuntimeClaim(ctx, tx, record.ID)
+	if err != nil {
+		return err
+	}
+	if record.TeamID != normalized.ExpectedTeamID || record.ClusterID != normalized.WorkerClusterID ||
+		record.RuntimeBackend != SandboxRuntimeBackendNomad ||
+		record.DesiredState != SandboxDesiredStateTerminating || !record.DeletedAt.IsZero() ||
+		claim.Phase != SandboxRuntimeClaimPhaseCleanupPending || claim.CleanupStartedAt.IsZero() ||
+		!claim.CleanedAt.IsZero() {
+		return fmt.Errorf("%w: sandbox deletion does not own the worker rejection", ErrNomadSandboxRebaseConflict)
+	}
+	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1 AND sandbox_id = $2 FOR UPDATE
+	`, normalized.OperationID, normalized.SandboxID))
+	if err != nil {
+		return fmt.Errorf("lock Nomad paused-rebase rejection lifecycle: %w", err)
+	}
+	if !nomadPausedRebaseRejectionIdentityMatches(lifecycle, record, normalized) {
+		return fmt.Errorf("%w: worker rejection lifecycle identity changed", ErrNomadSandboxRebaseConflict)
+	}
+	filesystem, source, err := getRootFSFilesystemAndGenerationForUpdate(ctx, tx, record.ID)
+	if err != nil {
+		return fmt.Errorf("load Nomad paused-rebase rejection source: %w", err)
+	}
+	if err := validateNomadPausedRebaseSource(filesystem, source, record.TeamID); err != nil {
+		return err
+	}
+	sourceArtifact, targetArtifact, err := lockNomadPausedRebaseArtifacts(
+		ctx, tx, source.BaseArtifactDigest, normalized.TargetBaseArtifactDigest,
+	)
+	if err != nil {
+		return err
+	}
+	if err := validateNomadPausedRebaseArtifacts(source, sourceArtifact, targetArtifact); err != nil {
+		return err
+	}
+	targetGenerationID := NomadPausedRebaseGenerationID(
+		normalized.OperationID, record.ID, source.ID, targetArtifact.ArtifactDigest,
+	)
+	if lifecycle.ExpectedHeadLayerID != source.ID ||
+		lifecycle.SourceBaseArtifactDigest != sourceArtifact.ArtifactDigest ||
+		lifecycle.TargetGenerationID != targetGenerationID || lifecycle.PreparedHeadLayerID != "" {
+		return fmt.Errorf("%w: worker rejection source lineage changed", ErrNomadSandboxRebaseConflict)
+	}
+	if err := ensureNomadPausedRebaseTargetGenerationAbsent(ctx, tx, targetGenerationID); err != nil {
+		return err
+	}
+	if lifecycle.Phase == SandboxLifecyclePhaseAborted {
+		if !bytes.Equal(lifecycle.WorkerProofDigest, proofDigest) || lifecycle.Error != "sandbox termination requested" {
+			return fmt.Errorf("%w: worker rejection proof changed", ErrNomadSandboxRebaseConflict)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit Nomad paused-rebase rejection retry: %w", err)
+		}
+		return nil
+	}
+	if !isActiveSandboxLifecyclePhase(lifecycle.Phase) || len(lifecycle.WorkerProofDigest) != 0 {
+		return fmt.Errorf("%w: rebase lifecycle is not rejectable", ErrNomadSandboxRebaseConflict)
+	}
+	if !nomadPausedRebaseLifecycleMatches(
+		lifecycle, record, source, sourceArtifact, targetArtifact,
+		targetGenerationID, normalized.RollbackExpiresAt,
+		normalized.WorkerClusterID, normalized.WorkerNodeID, normalized.WorkerNodeUID, false,
+	) {
+		return fmt.Errorf("%w: worker rejection request changed", ErrNomadSandboxRebaseConflict)
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE manager.sandbox_lifecycle_txns
+		SET phase = $2, worker_proof_digest = $3,
+			error = $4, aborted_at = NOW(), updated_at = NOW()
+		WHERE txn_id = $1
+			AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+			AND octet_length(worker_proof_digest) = 0
+	`, lifecycle.ID, SandboxLifecyclePhaseAborted, proofDigest, "sandbox termination requested")
+	if err != nil {
+		return fmt.Errorf("persist Nomad paused-rebase worker rejection: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("%w: rebase lifecycle changed during rejection", ErrNomadSandboxRebaseConflict)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit Nomad paused-rebase worker rejection: %w", err)
+	}
+	return nil
+}
+
+func nomadPausedRebaseRejectionIdentityMatches(
+	lifecycle *SandboxLifecycleTxn,
+	record *SandboxRecord,
+	request *NomadPausedRebaseRequest,
+) bool {
+	return lifecycle != nil && record != nil && request != nil &&
+		lifecycle.SandboxID == record.ID && lifecycle.Kind == SandboxLifecycleKindRebase &&
+		lifecycle.Source == SandboxLifecycleSourceManual && !lifecycle.Cancelable &&
+		lifecycle.CancelRequestedAt.IsZero() && lifecycle.FromGeneration == lifecycle.ToGeneration &&
+		lifecycle.FromGeneration == record.RuntimeGeneration && lifecycle.FromPodNamespace == "" &&
+		lifecycle.FromPodName == "" && lifecycle.ToPodNamespace == "" && lifecycle.ToPodName == "" &&
+		lifecycle.TargetSandboxID == "" && len(lifecycle.TargetRecordDigest) == 0 &&
+		lifecycle.TargetGenerationID != "" && lifecycle.ExpectedHeadLayerID != "" &&
+		lifecycle.SourceBaseArtifactDigest != "" &&
+		lifecycle.TargetBaseArtifactDigest == request.TargetBaseArtifactDigest &&
+		lifecycle.WorkerClusterID == request.WorkerClusterID &&
+		lifecycle.WorkerNodeID == request.WorkerNodeID && lifecycle.WorkerNodeUID == request.WorkerNodeUID &&
+		lifecycle.RollbackExpiresAt.Equal(request.RollbackExpiresAt)
 }
 
 // NomadPausedRebaseGenerationID derives the immutable output identity from
@@ -87,6 +336,9 @@ func (s *PGSandboxStore) RequestNomadPausedRebase(
 	if record.TeamID != normalized.ExpectedTeamID {
 		return nil, fmt.Errorf("%w: sandbox team identity changed", ErrNomadSandboxRebaseConflict)
 	}
+	if record.ClusterID != normalized.WorkerClusterID {
+		return nil, fmt.Errorf("%w: worker cluster does not own the sandbox", ErrNomadSandboxRebaseConflict)
+	}
 	lifecycle, err := scanLifecycleTxn(tx.QueryRow(ctx, lifecycleTxnSelectSQL()+`
 		WHERE txn_id = $1 FOR UPDATE
 	`, normalized.OperationID))
@@ -103,16 +355,12 @@ func (s *PGSandboxStore) RequestNomadPausedRebase(
 		}
 		return candidate, nil
 	}
-	if err := validateNomadPausedRebaseSandbox(record); err != nil {
-		return nil, err
-	}
 	claim, err := lockSandboxRuntimeClaim(ctx, tx, record.ID)
 	if err != nil {
 		return nil, err
 	}
-	if claim.OperationID == "" || claim.Phase != SandboxRuntimeClaimPhaseReady ||
-		!claim.LeaseExpiresAt.IsZero() || !claim.CleanupStartedAt.IsZero() || !claim.CleanedAt.IsZero() {
-		return nil, fmt.Errorf("%w: sandbox runtime claim is not a canonical ready claim", ErrNomadSandboxRebaseNotReady)
+	if err := validateNomadPausedRebaseClaimState(record, claim, lifecycle); err != nil {
+		return nil, err
 	}
 	filesystem, source, err := getRootFSFilesystemAndGenerationForUpdate(ctx, tx, record.ID)
 	if err != nil {
@@ -130,6 +378,30 @@ func (s *PGSandboxStore) RequestNomadPausedRebase(
 	if err := validateNomadPausedRebaseArtifacts(source, sourceArtifact, targetArtifact); err != nil {
 		return nil, err
 	}
+	targetGenerationID := NomadPausedRebaseGenerationID(
+		normalized.OperationID, record.ID, source.ID, targetArtifact.ArtifactDigest,
+	)
+	if lifecycle != nil && lifecycle.Phase == SandboxLifecyclePhaseAborted {
+		if !nomadPausedRebaseRejectionIdentityMatches(lifecycle, record, normalized) ||
+			lifecycle.ExpectedHeadLayerID != source.ID || lifecycle.SourceBaseArtifactDigest != sourceArtifact.ArtifactDigest ||
+			lifecycle.TargetGenerationID != targetGenerationID || lifecycle.PreparedHeadLayerID != "" ||
+			len(lifecycle.WorkerProofDigest) != sha256.Size ||
+			lifecycle.Error != "sandbox termination requested" {
+			return nil, fmt.Errorf("%w: rejected lifecycle does not match the exact rebase request",
+				ErrNomadSandboxRebaseConflict)
+		}
+		if err := ensureNomadPausedRebaseTargetGenerationAbsent(ctx, tx, targetGenerationID); err != nil {
+			return nil, err
+		}
+		candidate := nomadPausedRebaseCandidate(
+			record, filesystem, source, sourceArtifact, targetArtifact, lifecycle, false,
+		)
+		candidate.Rejected = true
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit rejected Nomad paused-rebase retry: %w", err)
+		}
+		return candidate, nil
+	}
 	if err := ensureNomadPausedRebasePhysicalStateTerminal(ctx, tx, record.ID, filesystem.ID); err != nil {
 		return nil, err
 	}
@@ -137,24 +409,23 @@ func (s *PGSandboxStore) RequestNomadPausedRebase(
 	if err := tx.QueryRow(ctx, `SELECT NOW()`).Scan(&authorityNow); err != nil {
 		return nil, fmt.Errorf("read Nomad paused-rebase authority time: %w", err)
 	}
-	if !record.HardExpiresAt.IsZero() && !record.HardExpiresAt.After(authorityNow) {
+	terminating := record.DesiredState == SandboxDesiredStateTerminating
+	if !terminating && !record.HardExpiresAt.IsZero() && !record.HardExpiresAt.After(authorityNow) {
 		return nil, fmt.Errorf("%w: sandbox hard TTL has expired", ErrNomadSandboxRebaseNotReady)
 	}
-	if !normalized.RollbackExpiresAt.After(authorityNow) ||
-		normalized.RollbackExpiresAt.After(authorityNow.Add(MaxNomadPausedRebaseRollbackRetention)) {
+	if !terminating && (!normalized.RollbackExpiresAt.After(authorityNow) ||
+		normalized.RollbackExpiresAt.After(authorityNow.Add(MaxNomadPausedRebaseRollbackRetention))) {
 		return nil, fmt.Errorf("%w: rollback deadline must be within the next %s",
 			ErrNomadSandboxRebaseConflict, MaxNomadPausedRebaseRollbackRetention)
 	}
 	if filesystem.WriterEpoch == math.MaxInt64 {
 		return nil, fmt.Errorf("%w: RootFS writer epoch is exhausted", ErrNomadSandboxRebaseConflict)
 	}
-	targetGenerationID := NomadPausedRebaseGenerationID(
-		normalized.OperationID, record.ID, source.ID, targetArtifact.ArtifactDigest,
-	)
 	if lifecycle != nil {
 		if !nomadPausedRebaseLifecycleMatches(
 			lifecycle, record, source, sourceArtifact, targetArtifact,
-			targetGenerationID, normalized.RollbackExpiresAt, false,
+			targetGenerationID, normalized.RollbackExpiresAt,
+			normalized.WorkerClusterID, normalized.WorkerNodeID, normalized.WorkerNodeUID, false,
 		) {
 			return nil, fmt.Errorf("%w: lifecycle %s does not match the exact rebase request",
 				ErrNomadSandboxRebaseConflict, lifecycle.ID)
@@ -188,6 +459,9 @@ func (s *PGSandboxStore) RequestNomadPausedRebase(
 		SourceBaseArtifactDigest: sourceArtifact.ArtifactDigest,
 		TargetBaseArtifactDigest: targetArtifact.ArtifactDigest,
 		RollbackExpiresAt:        normalized.RollbackExpiresAt,
+		WorkerClusterID:          normalized.WorkerClusterID,
+		WorkerNodeID:             normalized.WorkerNodeID,
+		WorkerNodeUID:            normalized.WorkerNodeUID,
 	}
 	if err := (sandboxStoreTx{tx: tx}).BeginLifecycleTxn(ctx, lifecycle); err != nil {
 		return nil, fmt.Errorf("begin Nomad paused-rebase lifecycle: %w", err)
@@ -209,9 +483,14 @@ func normalizeNomadPausedRebaseRequest(request *NomadPausedRebaseRequest) (*Noma
 	normalized.SandboxID = strings.TrimSpace(request.SandboxID)
 	normalized.ExpectedTeamID = strings.TrimSpace(request.ExpectedTeamID)
 	normalized.TargetBaseArtifactDigest = strings.TrimSpace(request.TargetBaseArtifactDigest)
+	normalized.WorkerClusterID = strings.TrimSpace(request.WorkerClusterID)
+	normalized.WorkerNodeID = strings.TrimSpace(request.WorkerNodeID)
+	normalized.WorkerNodeUID = strings.TrimSpace(request.WorkerNodeUID)
 	for name, value := range map[string]string{
 		"operation_id": normalized.OperationID, "sandbox_id": normalized.SandboxID,
-		"expected_team_id": normalized.ExpectedTeamID,
+		"expected_team_id":  normalized.ExpectedTeamID,
+		"worker_cluster_id": normalized.WorkerClusterID, "worker_node_id": normalized.WorkerNodeID,
+		"worker_node_uid": normalized.WorkerNodeUID,
 	} {
 		if value == "" || value != strings.TrimSpace(value) || len(value) > 512 {
 			return nil, fmt.Errorf("%s is required, canonical, and at most 512 bytes", name)
@@ -228,13 +507,31 @@ func normalizeNomadPausedRebaseRequest(request *NomadPausedRebaseRequest) (*Noma
 	return &normalized, nil
 }
 
-func validateNomadPausedRebaseSandbox(record *SandboxRecord) error {
+func validateNomadPausedRebaseClaimState(
+	record *SandboxRecord,
+	claim *SandboxRuntimeClaim,
+	lifecycle *SandboxLifecycleTxn,
+) error {
 	if record == nil || record.RuntimeBackend != SandboxRuntimeBackendNomad ||
-		record.DesiredState != SandboxDesiredStatePaused || !record.DeletedAt.IsZero() ||
+		!record.DeletedAt.IsZero() ||
 		record.RuntimeGeneration < 0 || record.CurrentPodNamespace != "" || record.CurrentPodName != "" {
 		return fmt.Errorf("%w: sandbox is not a canonical paused Nomad runtime", ErrNomadSandboxRebaseNotReady)
 	}
-	return nil
+	if claim == nil || claim.OperationID == "" || !claim.LeaseExpiresAt.IsZero() || !claim.CleanedAt.IsZero() {
+		return fmt.Errorf("%w: sandbox runtime claim is not canonical", ErrNomadSandboxRebaseNotReady)
+	}
+	if record.DesiredState == SandboxDesiredStatePaused && claim.Phase == SandboxRuntimeClaimPhaseReady &&
+		claim.CleanupStartedAt.IsZero() {
+		return nil
+	}
+	if record.DesiredState == SandboxDesiredStateTerminating &&
+		claim.Phase == SandboxRuntimeClaimPhaseCleanupPending && !claim.CleanupStartedAt.IsZero() &&
+		lifecycle != nil && lifecycle.Kind == SandboxLifecycleKindRebase &&
+		(isActiveSandboxLifecyclePhase(lifecycle.Phase) || lifecycle.Phase == SandboxLifecyclePhaseAborted) {
+		return nil
+	}
+	return fmt.Errorf("%w: sandbox runtime claim is not a canonical paused or terminating rebase claim",
+		ErrNomadSandboxRebaseNotReady)
 }
 
 func validateNomadPausedRebaseSource(
@@ -374,6 +671,7 @@ func nomadPausedRebaseLifecycleMatches(
 	sourceArtifact, targetArtifact *RootFSBaseArtifact,
 	targetGenerationID string,
 	rollbackExpiresAt time.Time,
+	workerClusterID, workerNodeID, workerNodeUID string,
 	committed bool,
 ) bool {
 	if lifecycle == nil || record == nil || source == nil || sourceArtifact == nil || targetArtifact == nil ||
@@ -386,12 +684,16 @@ func nomadPausedRebaseLifecycleMatches(
 		lifecycle.TargetGenerationID != targetGenerationID || lifecycle.ExpectedHeadLayerID != source.ID ||
 		lifecycle.SourceBaseArtifactDigest != sourceArtifact.ArtifactDigest ||
 		lifecycle.TargetBaseArtifactDigest != targetArtifact.ArtifactDigest ||
+		lifecycle.WorkerClusterID != record.ClusterID || lifecycle.WorkerClusterID != workerClusterID ||
+		lifecycle.WorkerNodeID != workerNodeID ||
+		lifecycle.WorkerNodeUID != workerNodeUID ||
 		!lifecycle.RollbackExpiresAt.Equal(rollbackExpiresAt) {
 		return false
 	}
 	if committed {
 		return lifecycle.Phase == SandboxLifecyclePhaseCommitted &&
-			lifecycle.PreparedHeadLayerID == lifecycle.TargetGenerationID
+			lifecycle.PreparedHeadLayerID == lifecycle.TargetGenerationID &&
+			len(lifecycle.WorkerProofDigest) == sha256.Size
 	}
 	return lifecycle.PreparedHeadLayerID == "" &&
 		(lifecycle.Phase == SandboxLifecyclePhasePreparing ||
@@ -409,6 +711,8 @@ func loadCompletedNomadPausedRebase(
 ) (*NomadPausedRebaseCandidate, error) {
 	if lifecycle.SandboxID != request.SandboxID || lifecycle.Kind != SandboxLifecycleKindRebase ||
 		lifecycle.TargetBaseArtifactDigest != request.TargetBaseArtifactDigest ||
+		lifecycle.WorkerClusterID != request.WorkerClusterID || lifecycle.WorkerNodeID != request.WorkerNodeID ||
+		lifecycle.WorkerNodeUID != request.WorkerNodeUID ||
 		!lifecycle.RollbackExpiresAt.Equal(request.RollbackExpiresAt) {
 		return nil, fmt.Errorf("%w: committed lifecycle does not match the rebase request",
 			ErrNomadSandboxRebaseConflict)
@@ -437,7 +741,8 @@ func loadCompletedNomadPausedRebase(
 	}
 	if !nomadPausedRebaseLifecycleMatches(
 		lifecycle, record, source, sourceArtifact, targetArtifact,
-		lifecycle.TargetGenerationID, request.RollbackExpiresAt, true,
+		lifecycle.TargetGenerationID, request.RollbackExpiresAt,
+		request.WorkerClusterID, request.WorkerNodeID, request.WorkerNodeUID, true,
 	) || target.ID != lifecycle.TargetGenerationID || target.ParentGenerationID != source.ID ||
 		target.BaseArtifactDigest != targetArtifact.ArtifactDigest || target.FilesystemID != filesystem.ID {
 		return nil, fmt.Errorf("%w: committed rebase output identity changed", ErrNomadSandboxRebaseConflict)
@@ -477,12 +782,17 @@ func nomadPausedRebaseCandidate(
 	return &NomadPausedRebaseCandidate{
 		Completed: completed, LifecyclePhase: lifecycle.Phase,
 		Sandbox: cloneSandboxRecord(record), Filesystem: cloneRootFSFilesystem(filesystem),
-		SourceGeneration:   cloneRootFSGeneration(source),
-		SourceBaseArtifact: cloneRootFSBaseArtifact(sourceArtifact),
-		TargetBaseArtifact: cloneRootFSBaseArtifact(targetArtifact),
-		TargetGenerationID: lifecycle.TargetGenerationID,
-		TargetWriterEpoch:  filesystem.WriterEpoch + 1,
-		RollbackExpiresAt:  lifecycle.RollbackExpiresAt,
+		SourceGeneration:     cloneRootFSGeneration(source),
+		SourceBaseArtifact:   cloneRootFSBaseArtifact(sourceArtifact),
+		TargetBaseArtifact:   cloneRootFSBaseArtifact(targetArtifact),
+		TargetGenerationID:   lifecycle.TargetGenerationID,
+		TargetWriterEpoch:    filesystem.WriterEpoch + 1,
+		RollbackExpiresAt:    lifecycle.RollbackExpiresAt,
+		WorkerClusterID:      lifecycle.WorkerClusterID,
+		WorkerNodeID:         lifecycle.WorkerNodeID,
+		WorkerNodeUID:        lifecycle.WorkerNodeUID,
+		WorkerProofDigest:    append([]byte(nil), lifecycle.WorkerProofDigest...),
+		WorkerAcknowledgedAt: lifecycle.WorkerAcknowledgedAt,
 	}
 }
 

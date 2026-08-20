@@ -38,6 +38,7 @@ type Server struct {
 	sandboxPauser           service.SandboxPauser
 	sandboxResumer          service.SandboxResumer
 	sandboxForker           service.SandboxForker
+	sandboxRootFSRebaser    service.SandboxRootFSRebaser
 	egressAuthService       *egressauthservice.EgressAuthService
 	credentialSourceService *credentialsource.CredentialSourceService
 	templateService         *templateservice.TemplateService
@@ -86,6 +87,7 @@ type ServerDependencies struct {
 	SandboxPauser           service.SandboxPauser
 	SandboxResumer          service.SandboxResumer
 	SandboxForker           service.SandboxForker
+	SandboxRootFSRebaser    service.SandboxRootFSRebaser
 	EgressAuthService       *egressauthservice.EgressAuthService
 	CredentialSourceService *credentialsource.CredentialSourceService
 	TemplateService         *templateservice.TemplateService
@@ -130,6 +132,9 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 	if deps.SandboxForker == nil {
 		deps.SandboxForker, _ = deps.SandboxClaimer.(service.SandboxForker)
 	}
+	if deps.SandboxRootFSRebaser == nil {
+		deps.SandboxRootFSRebaser, _ = deps.SandboxClaimer.(service.SandboxRootFSRebaser)
+	}
 	server := &Server{
 		router:                  router,
 		sandboxService:          deps.SandboxService,
@@ -138,6 +143,7 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 		sandboxPauser:           deps.SandboxPauser,
 		sandboxResumer:          deps.SandboxResumer,
 		sandboxForker:           deps.SandboxForker,
+		sandboxRootFSRebaser:    deps.SandboxRootFSRebaser,
 		egressAuthService:       deps.EgressAuthService,
 		credentialSourceService: deps.CredentialSourceService,
 		templateService:         deps.TemplateService,
@@ -204,6 +210,7 @@ func (s *Server) setupRoutes() {
 			sandboxes.POST("/:id/snapshots", s.createSandboxRootFSSnapshot)
 			sandboxes.GET("/:id/snapshots", s.listSandboxRootFSSnapshots)
 			sandboxes.POST("/:id/rootfs/restore", s.restoreSandboxRootFS)
+			sandboxes.PUT("/:id/rootfs/rebase", s.rebaseSandboxRootFS)
 			sandboxes.POST("/:id/fork", s.forkSandbox)
 			sandboxes.POST("/:id/refresh", s.refreshSandbox)
 			sandboxes.DELETE("/:id", s.terminateSandbox)

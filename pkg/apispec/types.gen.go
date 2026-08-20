@@ -548,6 +548,11 @@ const (
 	SuccessPauseSandboxResponseSuccessTrue SuccessPauseSandboxResponseSuccess = true
 )
 
+// Defines values for SuccessRebaseSandboxRootFSResponseSuccess.
+const (
+	SuccessRebaseSandboxRootFSResponseSuccessTrue SuccessRebaseSandboxRootFSResponseSuccess = true
+)
+
 // Defines values for SuccessRefreshResponseSuccess.
 const (
 	SuccessRefreshResponseSuccessTrue SuccessRefreshResponseSuccess = true
@@ -705,7 +710,7 @@ const (
 
 // Defines values for SuccessWrittenResponseSuccess.
 const (
-	SuccessWrittenResponseSuccessTrue SuccessWrittenResponseSuccess = true
+	True SuccessWrittenResponseSuccess = true
 )
 
 // Defines values for TeamQuotaKind.
@@ -1792,6 +1797,24 @@ type REPLReadyConfig struct {
 
 // REPLReadyMode defines model for REPLReadyMode.
 type REPLReadyMode string
+
+// RebaseSandboxRootFSRequest defines model for RebaseSandboxRootFSRequest.
+type RebaseSandboxRootFSRequest struct {
+	// RollbackTtl Rollback retention in seconds. Defaults to 86400 seconds and cannot exceed seven days.
+	RollbackTtl *int32 `json:"rollback_ttl,omitempty"`
+
+	// TargetBaseArtifactDigest Canonical SHA-256 digest of an already-attested immutable RootFS Base artifact.
+	TargetBaseArtifactDigest string `json:"target_base_artifact_digest"`
+}
+
+// RebaseSandboxRootFSResponse defines model for RebaseSandboxRootFSResponse.
+type RebaseSandboxRootFSResponse struct {
+	BaseArtifactDigest string                 `json:"base_artifact_digest"`
+	GenerationId       string                 `json:"generation_id"`
+	RollbackExpiresAt  time.Time              `json:"rollback_expires_at"`
+	SandboxId          string                 `json:"sandbox_id"`
+	Status             SandboxLifecycleStatus `json:"status"`
+}
 
 // RefreshRequest defines model for RefreshRequest.
 type RefreshRequest struct {
@@ -2925,6 +2948,15 @@ type SuccessPauseSandboxResponse struct {
 // SuccessPauseSandboxResponseSuccess defines model for SuccessPauseSandboxResponse.Success.
 type SuccessPauseSandboxResponseSuccess bool
 
+// SuccessRebaseSandboxRootFSResponse defines model for SuccessRebaseSandboxRootFSResponse.
+type SuccessRebaseSandboxRootFSResponse struct {
+	Data    *RebaseSandboxRootFSResponse              `json:"data,omitempty"`
+	Success SuccessRebaseSandboxRootFSResponseSuccess `json:"success"`
+}
+
+// SuccessRebaseSandboxRootFSResponseSuccess defines model for SuccessRebaseSandboxRootFSResponse.Success.
+type SuccessRebaseSandboxRootFSResponseSuccess bool
+
 // SuccessRefreshResponse defines model for SuccessRefreshResponse.
 type SuccessRefreshResponse struct {
 	Data    *RefreshResponse              `json:"data,omitempty"`
@@ -3808,6 +3840,9 @@ type PutApiV1SandboxesIdPreviewsPreviewIdJSONRequestBody = SandboxPreviewRenewRe
 
 // PostApiV1SandboxesIdRefreshJSONRequestBody defines body for PostApiV1SandboxesIdRefresh for application/json ContentType.
 type PostApiV1SandboxesIdRefreshJSONRequestBody = SandboxRefreshRequest
+
+// PutApiV1SandboxesIdRootfsRebaseJSONRequestBody defines body for PutApiV1SandboxesIdRootfsRebase for application/json ContentType.
+type PutApiV1SandboxesIdRootfsRebaseJSONRequestBody = RebaseSandboxRootFSRequest
 
 // PostApiV1SandboxesIdRootfsRestoreJSONRequestBody defines body for PostApiV1SandboxesIdRootfsRestore for application/json ContentType.
 type PostApiV1SandboxesIdRootfsRestoreJSONRequestBody = RestoreSandboxRootFSRequest

@@ -1129,6 +1129,7 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 	record := rootFSTestSandboxRecord("sandbox-rebase", "team-1")
 	record.DesiredState = SandboxDesiredStatePaused
 	record.RuntimeBackend = SandboxRuntimeBackendNomad
+	record.ClusterID = "cluster-rebase"
 	require.NoError(t, store.UpsertSandbox(ctx, record))
 	_, err := pool.Exec(ctx, `
 		INSERT INTO manager.sandbox_runtime_claims (
@@ -1161,6 +1162,7 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 		OperationID: "rebase-v2", SandboxID: record.ID, ExpectedTeamID: record.TeamID,
 		TargetBaseArtifactDigest: newArtifact.ArtifactDigest,
 		RollbackExpiresAt:        rollbackExpiresAt,
+		WorkerClusterID:          record.ClusterID, WorkerNodeID: "rebase-node", WorkerNodeUID: "rebase-node-uid",
 	})
 	require.NoError(t, err)
 	require.False(t, preoperation.Completed)
@@ -1171,6 +1173,7 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 		OperationID: "rebase-v2", SandboxID: record.ID, ExpectedTeamID: record.TeamID,
 		TargetBaseArtifactDigest: newArtifact.ArtifactDigest,
 		RollbackExpiresAt:        rollbackExpiresAt,
+		WorkerClusterID:          record.ClusterID, WorkerNodeID: "rebase-node", WorkerNodeUID: "rebase-node-uid",
 	})
 	require.NoError(t, err)
 	require.Equal(t, preoperation.TargetGenerationID, retryPreoperation.TargetGenerationID)
@@ -1187,12 +1190,15 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 		Descriptor:       encodeTestRootFSDescriptor(t, "rebase-target-v2", targetHead),
 	}
 	health := sha256.Sum256([]byte("rebase-worker-health-proof"))
+	workerProof := sha256.Sum256([]byte("rebase-worker-output-proof"))
 	rebaseRequest := &PublishPausedRootFSRebaseRequest{
 		SandboxID: record.ID, TeamID: record.TeamID, OperationID: "rebase-v2",
 		ExpectedSourceGenerationID: source.ID,
 		ExpectedBaseArtifactDigest: oldArtifact.ArtifactDigest,
 		Generation:                 target, HealthCheckDigest: health[:],
 		RollbackExpiresAt: rollbackExpiresAt,
+		WorkerClusterID:   record.ClusterID, WorkerNodeID: "rebase-node", WorkerNodeUID: "rebase-node-uid",
+		WorkerProofDigest: workerProof[:],
 	}
 	published, err := store.PublishPausedRootFSRebase(ctx, rebaseRequest)
 	require.NoError(t, err)
@@ -1213,10 +1219,42 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 		OperationID: "rebase-v2", SandboxID: record.ID, ExpectedTeamID: record.TeamID,
 		TargetBaseArtifactDigest: newArtifact.ArtifactDigest,
 		RollbackExpiresAt:        rollbackExpiresAt,
+		WorkerClusterID:          record.ClusterID, WorkerNodeID: "rebase-node", WorkerNodeUID: "rebase-node-uid",
 	})
 	require.NoError(t, err)
 	require.True(t, completedPreoperation.Completed)
 	require.Equal(t, SandboxLifecyclePhaseCommitted, completedPreoperation.LifecyclePhase)
+	require.Equal(t, workerProof[:], completedPreoperation.WorkerProofDigest)
+	require.True(t, completedPreoperation.WorkerAcknowledgedAt.IsZero())
+	pending, err := store.ListPendingNomadPausedRebases(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, rebaseRequest.OperationID, pending[0].ID)
+	wrongProof := sha256.Sum256([]byte("wrong-rebase-worker-output-proof"))
+	err = store.AcknowledgeNomadPausedRebaseWorker(
+		ctx, rebaseRequest.OperationID, record.ID, record.ClusterID,
+		"rebase-node", "rebase-node-uid", wrongProof[:],
+	)
+	require.ErrorIs(t, err, ErrNomadSandboxRebaseConflict)
+	require.NoError(t, store.AcknowledgeNomadPausedRebaseWorker(
+		ctx, rebaseRequest.OperationID, record.ID, record.ClusterID,
+		"rebase-node", "rebase-node-uid", workerProof[:],
+	))
+	require.NoError(t, store.AcknowledgeNomadPausedRebaseWorker(
+		ctx, rebaseRequest.OperationID, record.ID, record.ClusterID,
+		"rebase-node", "rebase-node-uid", workerProof[:],
+	), "exact acknowledgement retries must remain idempotent")
+	pending, err = store.ListPendingNomadPausedRebases(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, pending)
+	acknowledged, err := store.RequestNomadPausedRebase(ctx, &NomadPausedRebaseRequest{
+		OperationID: "rebase-v2", SandboxID: record.ID, ExpectedTeamID: record.TeamID,
+		TargetBaseArtifactDigest: newArtifact.ArtifactDigest,
+		RollbackExpiresAt:        rollbackExpiresAt,
+		WorkerClusterID:          record.ClusterID, WorkerNodeID: "rebase-node", WorkerNodeUID: "rebase-node-uid",
+	})
+	require.NoError(t, err)
+	require.False(t, acknowledged.WorkerAcknowledgedAt.IsZero())
 
 	rolledBack, err := store.RollbackRootFSHead(ctx, &RollbackRootFSHeadRequest{
 		SandboxID: record.ID, TeamID: record.TeamID, OperationID: rebaseRequest.OperationID,
@@ -1241,6 +1279,7 @@ func TestPublishPausedRootFSRebaseIsCASedAndRollbackable(t *testing.T) {
 		OperationID: "rebase-active-writer", SandboxID: record.ID, ExpectedTeamID: record.TeamID,
 		TargetBaseArtifactDigest: newArtifact.ArtifactDigest,
 		RollbackExpiresAt:        time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond),
+		WorkerClusterID:          record.ClusterID, WorkerNodeID: "rebase-node", WorkerNodeUID: "rebase-node-uid",
 	})
 	require.ErrorIs(t, err, ErrNomadSandboxRebaseNotReady)
 }

@@ -278,6 +278,17 @@ type SandboxForkReconciler interface {
 	CompleteSandboxFork(context.Context, string) error
 }
 
+// SandboxRootFSRebaser owns the file-aware paused RootFS Base migration path.
+type SandboxRootFSRebaser interface {
+	RebaseSandboxRootFS(context.Context, string, string, *RebaseSandboxRootFSRequest) (*RebaseSandboxRootFSResponse, error)
+}
+
+// SandboxRootFSRebaseReconciler completes a durable paused rebase after the
+// initiating request disconnects or the manager restarts.
+type SandboxRootFSRebaseReconciler interface {
+	CompleteSandboxRootFSRebase(context.Context, string) error
+}
+
 // SandboxAutoPauser accepts durable automatic pause requests from TTL cleanup.
 type SandboxAutoPauser interface {
 	PauseSandboxByID(context.Context, string) error

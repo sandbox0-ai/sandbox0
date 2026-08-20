@@ -152,6 +152,97 @@ type WorkerResult struct {
 	ProofDigest        string      `json:"proof_digest"`
 }
 
+// WorkerAcknowledgement is the byte-stable success payload returned after
+// regional publication permits the node to discard its cached worker result.
+type WorkerAcknowledgement struct {
+	RequestDigest string `json:"request_digest"`
+	ProofDigest   string `json:"proof_digest"`
+}
+
+// WorkerRejection proves that the exact node operation can be permanently
+// rejected. Result is present when execution won the race and produced an
+// output that must remain cached until the regional rejection is durable.
+type WorkerRejection struct {
+	RequestDigest string        `json:"request_digest"`
+	ProofDigest   string        `json:"proof_digest"`
+	Result        *WorkerResult `json:"result,omitempty"`
+}
+
+// RejectWithoutResult returns the deterministic proof used when rejection
+// fences execution before the worker has produced an output.
+func RejectWithoutResult(request WorkerRequest) (WorkerRejection, error) {
+	requestDigest, err := request.Digest()
+	if err != nil {
+		return WorkerRejection{}, err
+	}
+	return WorkerRejection{
+		RequestDigest: requestDigest,
+		ProofDigest: digest.FromString(
+			"sandbox0-rootfs-rebase-rejected-v1\x00" + requestDigest,
+		).String(),
+	}, nil
+}
+
+// RejectWithResult retains the exact output proof until PostgreSQL records
+// the permanent rejection and acknowledges node-local disposal.
+func RejectWithResult(request WorkerRequest, result WorkerResult) (WorkerRejection, error) {
+	if err := result.ValidateFor(request); err != nil {
+		return WorkerRejection{}, err
+	}
+	requestDigest, err := request.Digest()
+	if err != nil {
+		return WorkerRejection{}, err
+	}
+	clone := result
+	clone.Descriptor = append([]byte(nil), result.Descriptor...)
+	clone.HealthCheckDigest = append([]byte(nil), result.HealthCheckDigest...)
+	return WorkerRejection{
+		RequestDigest: requestDigest,
+		ProofDigest:   result.ProofDigest,
+		Result:        &clone,
+	}, nil
+}
+
+// ValidateFor binds a rejection to the exact immutable worker request and,
+// when present, its already-produced output.
+func (r WorkerRejection) ValidateFor(request WorkerRequest) error {
+	requestDigest, err := request.Digest()
+	if err != nil {
+		return err
+	}
+	parsed, err := digest.Parse(r.ProofDigest)
+	if err != nil || parsed.Algorithm() != digest.SHA256 || parsed.String() != r.ProofDigest ||
+		r.RequestDigest != requestDigest {
+		return fmt.Errorf("rebase worker rejection does not match its request")
+	}
+	if r.Result != nil {
+		if err := r.Result.ValidateFor(request); err != nil || r.Result.ProofDigest != r.ProofDigest {
+			return fmt.Errorf("rebase worker rejection contains an invalid output")
+		}
+		return nil
+	}
+	expected, err := RejectWithoutResult(request)
+	if err != nil || expected.ProofDigest != r.ProofDigest {
+		return fmt.Errorf("rebase worker rejection proof is invalid")
+	}
+	return nil
+}
+
+// ValidateFor binds an acknowledgement to the exact worker authority and
+// output proof that the regional controller committed or rejected.
+func (a WorkerAcknowledgement) ValidateFor(request WorkerRequest, proofDigest string) error {
+	requestDigest, err := request.Digest()
+	if err != nil {
+		return err
+	}
+	parsed, err := digest.Parse(proofDigest)
+	if err != nil || parsed.Algorithm() != digest.SHA256 || parsed.String() != proofDigest ||
+		a.RequestDigest != requestDigest || a.ProofDigest != proofDigest {
+		return fmt.Errorf("rebase worker acknowledgement does not match its request and proof")
+	}
+	return nil
+}
+
 // SealProof binds the immutable output and apply proof to the exact request.
 func (r *WorkerResult) SealProof() error {
 	if r == nil {

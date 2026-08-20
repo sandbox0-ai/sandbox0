@@ -25,6 +25,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
@@ -42,6 +43,8 @@ var errNomadSandboxPausePending = errors.New("nomad sandbox planned pause is pen
 type Store interface {
 	GetSandbox(context.Context, string) (*sandboxstore.SandboxRecord, error)
 	GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error)
+	GetLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error)
+	GetPendingNomadPausedRebase(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error)
 	RetrySandboxClaim(context.Context, *sandboxstore.RetrySandboxClaimRequest) (*sandboxstore.SandboxRecord, bool, error)
 	ReserveSandboxClaim(context.Context, *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	CompleteSandboxClaim(context.Context, *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
@@ -53,6 +56,10 @@ type Store interface {
 	RequestNomadSandboxRunningFork(context.Context, *sandboxstore.NomadSandboxForkRequest) (*sandboxstore.NomadSandboxRunningForkCandidate, error)
 	AbortNomadSandboxRunningFork(context.Context, string, string, string, string) (bool, error)
 	ForkNomadPausedSandbox(context.Context, *sandboxstore.NomadSandboxForkRequest) (*sandboxstore.SandboxRecord, error)
+	RequestNomadPausedRebase(context.Context, *sandboxstore.NomadPausedRebaseRequest) (*sandboxstore.NomadPausedRebaseCandidate, error)
+	PublishPausedRootFSRebase(context.Context, *sandboxstore.PublishPausedRootFSRebaseRequest) (*sandboxstore.RootFSFilesystem, error)
+	RejectNomadPausedRebaseWorker(context.Context, *sandboxstore.NomadPausedRebaseRequest, []byte) error
+	AcknowledgeNomadPausedRebaseWorker(context.Context, string, string, string, string, string, []byte) error
 	BeginRuntimeSlotQuiesce(context.Context, *sandboxstore.BeginRuntimeSlotQuiesceRequest) (*sandboxstore.RuntimeSlot, error)
 	GetRuntimeSlotBySandboxID(context.Context, string) (*sandboxstore.RuntimeSlot, error)
 	GetReadyRootFSBaseArtifact(context.Context, string, sandboxstore.RootFSArtifactPlatform, int) (*sandboxstore.RootFSBaseArtifact, error)
@@ -83,6 +90,14 @@ type runningForkController interface {
 	) (rootfshandoff.RunningForkCheckpointResult, error)
 }
 
+type pausedRebaseController interface {
+	SelectPausedRebaseNode(context.Context, string, string) (protocol.NodeChannelTarget, error)
+	ResolvePausedRebaseNode(context.Context, string, string, string) (protocol.NodeChannelTarget, error)
+	PausedRebase(context.Context, protocol.NodeChannelTarget, protocol.NodePausedRebaseControlRequest) (rootfsrebase.WorkerResult, error)
+	RejectPausedRebase(context.Context, protocol.NodeChannelTarget, protocol.NodePausedRebaseControlRequest) (rootfsrebase.WorkerRejection, error)
+	AcknowledgePausedRebase(context.Context, protocol.NodeChannelTarget, protocol.NodePausedRebaseControlRequest) (rootfsrebase.WorkerAcknowledgement, error)
+}
+
 // Config defines logical claim policy independently from the node listener.
 type Config struct {
 	Store           Store
@@ -91,6 +106,7 @@ type Config struct {
 	Planner         planner
 	Allocation      allocationStopper
 	RunningFork     runningForkController
+	PausedRebase    pausedRebaseController
 	QuotaLimits     QuotaLimitStore
 	NetworkPolicies *networkpolicy.NetworkPolicyService
 	ResourcePolicy  templatepkg.ResourcePolicy
@@ -109,6 +125,7 @@ type Service struct {
 	planner         planner
 	allocation      allocationStopper
 	runningFork     runningForkController
+	pausedRebase    pausedRebaseController
 	quotaLimits     QuotaLimitStore
 	networkPolicies *networkpolicy.NetworkPolicyService
 	resourcePolicy  templatepkg.ResourcePolicy
@@ -123,8 +140,9 @@ type Service struct {
 func New(config Config) (*Service, error) {
 	if config.Store == nil || config.Templates == nil || config.Profiles == nil ||
 		config.Planner == nil || config.Allocation == nil || config.RunningFork == nil ||
+		config.PausedRebase == nil ||
 		config.QuotaLimits == nil || config.NetworkPolicies == nil {
-		return nil, fmt.Errorf("Nomad claim store, templates, profiles, planner, allocation controller, running-fork controller, quota limits, and network policy service are required")
+		return nil, fmt.Errorf("Nomad claim store, templates, profiles, planner, allocation controller, RootFS controllers, quota limits, and network policy service are required")
 	}
 	if config.DefaultTTL < 0 || config.DefaultTTL/time.Second > math.MaxInt32 {
 		return nil, fmt.Errorf("default TTL must fit a non-negative int32 second count")
@@ -141,7 +159,8 @@ func New(config Config) (*Service, error) {
 	return &Service{
 		store: config.Store, templates: config.Templates, profiles: config.Profiles,
 		planner: config.Planner, allocation: config.Allocation, runningFork: config.RunningFork,
-		quotaLimits: config.QuotaLimits, networkPolicies: config.NetworkPolicies,
+		pausedRebase: config.PausedRebase,
+		quotaLimits:  config.QuotaLimits, networkPolicies: config.NetworkPolicies,
 		resourcePolicy: config.ResourcePolicy, claimTTL: config.ClaimTTL, defaultTTL: config.DefaultTTL,
 		now: config.Now, logger: config.Logger,
 	}, nil

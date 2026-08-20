@@ -22,6 +22,41 @@ type nomadPausedRebaseStoreFixture struct {
 	targetArtifact *RootFSBaseArtifact
 }
 
+func TestRebaseWorkerIdentityMigrationAbortsLegacyActiveOperationIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPoolThrough(t, "00034")
+	store := NewPGSandboxStore(pool)
+	record := rootFSTestSandboxRecord("sandbox-rebase-worker-migration", "team-rebase")
+	record.RuntimeBackend = SandboxRuntimeBackendNomad
+	record.DesiredState = SandboxDesiredStatePaused
+	require.NoError(t, store.UpsertSandbox(ctx, record))
+	_, err := pool.Exec(ctx, `
+		INSERT INTO manager.sandbox_lifecycle_txns (
+			txn_id, sandbox_id, kind, phase, source, cancelable, epoch,
+			from_generation, to_generation, target_generation_id,
+			source_base_artifact_digest, target_base_artifact_digest,
+			expected_head_layer_id, rollback_expires_at
+		) VALUES ($1, $2, 'rebase', 'preparing', 'manual', FALSE, 1,
+			0, 0, $3, $4, $5, $6, NOW() + INTERVAL '1 hour')
+	`, "legacy-rebase-worker-operation", record.ID, "generation-target",
+		digest.FromString("legacy-source-base").String(), digest.FromString("legacy-target-base").String(),
+		"generation-source")
+	require.NoError(t, err)
+	require.NoError(t, RunSandboxStoreMigrations(ctx, pool, noopSandboxStoreMigrateLogger{}))
+
+	var phase, reason, workerNodeID string
+	var abortedAt *time.Time
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT phase, error, worker_node_id, aborted_at
+		FROM manager.sandbox_lifecycle_txns
+		WHERE txn_id = $1
+	`, "legacy-rebase-worker-operation").Scan(&phase, &reason, &workerNodeID, &abortedAt))
+	require.Equal(t, SandboxLifecyclePhaseAborted, phase)
+	require.Contains(t, reason, "pre-worker-identity")
+	require.Empty(t, workerNodeID)
+	require.NotNil(t, abortedAt)
+}
+
 func TestRequestNomadPausedRebaseRejectsChangedRetryIdentityIntegration(t *testing.T) {
 	fixture := newNomadPausedRebaseStoreFixture(t, "changed-retry")
 	deadline := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
@@ -45,6 +80,11 @@ func TestRequestNomadPausedRebaseRejectsChangedRetryIdentityIntegration(t *testi
 	changedTarget := *request
 	changedTarget.TargetBaseArtifactDigest = third.ArtifactDigest
 	_, err = fixture.store.RequestNomadPausedRebase(fixture.ctx, &changedTarget)
+	require.ErrorIs(t, err, ErrNomadSandboxRebaseConflict)
+
+	changedWorker := *request
+	changedWorker.WorkerNodeID = "different-rebase-node"
+	_, err = fixture.store.RequestNomadPausedRebase(fixture.ctx, &changedWorker)
 	require.ErrorIs(t, err, ErrNomadSandboxRebaseConflict)
 
 	retried, err := fixture.store.RequestNomadPausedRebase(fixture.ctx, request)
@@ -99,12 +139,15 @@ func TestPublishPausedRootFSRebaseRequiresPreoperationIntegration(t *testing.T) 
 		operationID, fixture.record.ID, fixture.source.ID, fixture.targetArtifact.ArtifactDigest,
 	), fixture.filesystem.WriterEpoch+1, "missing-preoperation")
 	health := sha256.Sum256([]byte("missing-preoperation-health"))
+	proof := sha256.Sum256([]byte("missing-preoperation-proof"))
 
 	_, err := fixture.store.PublishPausedRootFSRebase(fixture.ctx, &PublishPausedRootFSRebaseRequest{
 		SandboxID: fixture.record.ID, TeamID: fixture.record.TeamID, OperationID: operationID,
 		ExpectedSourceGenerationID: fixture.source.ID,
 		ExpectedBaseArtifactDigest: fixture.sourceArtifact.ArtifactDigest,
 		Generation:                 target, HealthCheckDigest: health[:], RollbackExpiresAt: deadline,
+		WorkerClusterID: fixture.record.ClusterID, WorkerNodeID: "rebase-node", WorkerNodeUID: "rebase-node-uid",
+		WorkerProofDigest: proof[:],
 	})
 	require.ErrorIs(t, err, ErrRootFSGenerationConflict)
 	stored, getErr := fixture.store.GetRootFSFilesystem(fixture.ctx, fixture.record.ID)
@@ -136,12 +179,15 @@ func TestPublishPausedRootFSRebaseRejectsMutatedTargetGenerationIntegration(t *t
 		mutated.LocatorVersion, mutated.Descriptor)
 	require.NoError(t, err)
 	health := sha256.Sum256([]byte("mutated-target-health"))
+	proof := sha256.Sum256([]byte("mutated-target-proof"))
 
 	_, err = fixture.store.PublishPausedRootFSRebase(fixture.ctx, &PublishPausedRootFSRebaseRequest{
 		SandboxID: fixture.record.ID, TeamID: fixture.record.TeamID, OperationID: request.OperationID,
 		ExpectedSourceGenerationID: fixture.source.ID,
 		ExpectedBaseArtifactDigest: fixture.sourceArtifact.ArtifactDigest,
 		Generation:                 target, HealthCheckDigest: health[:], RollbackExpiresAt: deadline,
+		WorkerClusterID: fixture.record.ClusterID, WorkerNodeID: "rebase-node", WorkerNodeUID: "rebase-node-uid",
+		WorkerProofDigest: proof[:],
 	})
 	require.ErrorIs(t, err, ErrRootFSGenerationConflict)
 	stored, getErr := fixture.store.GetRootFSFilesystem(fixture.ctx, fixture.record.ID)
@@ -150,7 +196,7 @@ func TestPublishPausedRootFSRebaseRejectsMutatedTargetGenerationIntegration(t *t
 	assertNomadPausedRebaseLifecycle(t, fixture, request.OperationID, SandboxLifecyclePhasePreparing)
 }
 
-func TestNomadPausedRebaseCleanupAbortsPreoperationIntegration(t *testing.T) {
+func TestNomadPausedRebaseCleanupRejectsAndAcknowledgesExactWorkerIntegration(t *testing.T) {
 	fixture := newNomadPausedRebaseStoreFixture(t, "cleanup")
 	request := fixture.request(
 		"rebase-cleanup", time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond),
@@ -162,10 +208,54 @@ func TestNomadPausedRebaseCleanupAbortsPreoperationIntegration(t *testing.T) {
 		fixture.ctx, fixture.record.ID, "delete while rebase is preparing",
 	)
 	require.NoError(t, err)
+	assertNomadPausedRebaseLifecycle(t, fixture, request.OperationID, SandboxLifecyclePhasePreparing)
+	var desiredState, claimPhase string
+	require.NoError(t, fixture.pool.QueryRow(fixture.ctx, `
+		SELECT sandbox.desired_state, claim.phase
+		FROM manager.sandboxes AS sandbox
+		JOIN manager.sandbox_runtime_claims AS claim USING (sandbox_id)
+		WHERE sandbox.sandbox_id = $1
+	`, fixture.record.ID).Scan(&desiredState, &claimPhase))
+	require.Equal(t, SandboxDesiredStateTerminating, desiredState)
+	require.Equal(t, SandboxRuntimeClaimPhaseCleanupPending, claimPhase)
+	blocked, err := fixture.store.FenceSandboxRuntimeClaimForCleanup(
+		fixture.ctx, fixture.record.ID, "claim-cleanup", "cleanup reconciliation",
+	)
+	require.NoError(t, err)
+	require.Nil(t, blocked)
+
+	proof := sha256.Sum256([]byte("cleanup worker rejection proof"))
+	require.NoError(t, fixture.store.RejectNomadPausedRebaseWorker(fixture.ctx, request, proof[:]))
 	assertNomadPausedRebaseLifecycle(t, fixture, request.OperationID, SandboxLifecyclePhaseAborted)
+	rejected, err := fixture.store.RequestNomadPausedRebase(fixture.ctx, request)
+	require.NoError(t, err)
+	require.True(t, rejected.Rejected)
+	require.Equal(t, proof[:], rejected.WorkerProofDigest)
+	blocked, err = fixture.store.FenceSandboxRuntimeClaimForCleanup(
+		fixture.ctx, fixture.record.ID, "claim-cleanup", "cleanup reconciliation",
+	)
+	require.NoError(t, err)
+	require.Nil(t, blocked)
+	err = fixture.store.MarkSandboxDeleted(fixture.ctx, fixture.record.ID, time.Now().UTC())
+	require.ErrorIs(t, err, ErrSandboxClaimCleanupPending)
+
+	require.NoError(t, fixture.store.AcknowledgeNomadPausedRebaseWorker(
+		fixture.ctx, request.OperationID, fixture.record.ID,
+		request.WorkerClusterID, request.WorkerNodeID, request.WorkerNodeUID, proof[:],
+	))
+	candidate, err := fixture.store.FenceSandboxRuntimeClaimForCleanup(
+		fixture.ctx, fixture.record.ID, "claim-cleanup", "cleanup reconciliation",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, candidate)
+	require.False(t, candidate.PhysicalStateRequired)
 	stored, getErr := fixture.store.GetRootFSFilesystem(fixture.ctx, fixture.record.ID)
 	require.NoError(t, getErr)
 	require.Equal(t, fixture.source.ID, stored.HeadGenerationID)
+	require.NoError(t, fixture.store.MarkSandboxDeleted(fixture.ctx, fixture.record.ID, time.Now().UTC()))
+	require.NoError(t, fixture.store.MarkSandboxRuntimeClaimCleaned(
+		fixture.ctx, fixture.record.ID, "claim-cleanup",
+	))
 }
 
 func newNomadPausedRebaseStoreFixture(t *testing.T, suffix string) *nomadPausedRebaseStoreFixture {
@@ -218,6 +308,7 @@ func (f *nomadPausedRebaseStoreFixture) request(
 		OperationID: operationID, SandboxID: f.record.ID, ExpectedTeamID: f.record.TeamID,
 		TargetBaseArtifactDigest: f.targetArtifact.ArtifactDigest,
 		RollbackExpiresAt:        rollbackExpiresAt,
+		WorkerClusterID:          f.record.ClusterID, WorkerNodeID: "rebase-node", WorkerNodeUID: "rebase-node-uid",
 	}
 }
 

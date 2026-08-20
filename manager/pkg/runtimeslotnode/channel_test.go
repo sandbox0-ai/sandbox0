@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -28,6 +29,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
@@ -46,16 +48,20 @@ func (channelTestVerifier) Verify(_ context.Context, bearer string) (nodeauth.Id
 }
 
 type channelTestExecutor struct {
-	mu          sync.Mutex
-	cleanupErr  error
-	calls       []protocol.NodeCleanupControlRequest
-	networks    []protocol.NodeNetworkPrepareControlRequest
-	claims      []protocol.NodeClaimControlRequest
-	commands    []protocol.CommandReadyControlRequest
-	forks       []protocol.NodeRunningForkControlRequest
-	runningFork rootfshandoff.RunningForkCheckpointResult
-	entered     chan<- struct{}
-	release     <-chan struct{}
+	mu            sync.Mutex
+	cleanupErr    error
+	calls         []protocol.NodeCleanupControlRequest
+	networks      []protocol.NodeNetworkPrepareControlRequest
+	claims        []protocol.NodeClaimControlRequest
+	commands      []protocol.CommandReadyControlRequest
+	forks         []protocol.NodeRunningForkControlRequest
+	runningFork   rootfshandoff.RunningForkCheckpointResult
+	rebases       []protocol.NodePausedRebaseControlRequest
+	rebaseRejects []protocol.NodePausedRebaseControlRequest
+	rebaseAcks    []protocol.NodePausedRebaseControlRequest
+	pausedRebase  rootfsrebase.WorkerResult
+	entered       chan<- struct{}
+	release       <-chan struct{}
 }
 
 func (e *channelTestExecutor) PrepareNetwork(
@@ -128,6 +134,40 @@ func (e *channelTestExecutor) RunningFork(
 	return checkpoint, nil
 }
 
+func (e *channelTestExecutor) PausedRebase(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerResult, error) {
+	e.mu.Lock()
+	e.rebases = append(e.rebases, request)
+	result := e.pausedRebase
+	e.mu.Unlock()
+	return result, nil
+}
+
+func (e *channelTestExecutor) RejectPausedRebase(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	e.mu.Lock()
+	e.rebaseRejects = append(e.rebaseRejects, request)
+	e.mu.Unlock()
+	return rootfsrebase.RejectWithoutResult(request.Worker)
+}
+
+func (e *channelTestExecutor) AcknowledgePausedRebase(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) error {
+	e.mu.Lock()
+	e.rebaseAcks = append(e.rebaseAcks, request)
+	e.mu.Unlock()
+	return nil
+}
+
 func (e *channelTestExecutor) Cleanup(
 	_ context.Context,
 	_ protocol.NodeChannelTarget,
@@ -173,13 +213,15 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	server, files := newNodeChannelTLSServer(t, hub)
 	defer server.Close()
 	forkRequest, forkCheckpoint := testChannelRunningFork(t)
-	executor := &channelTestExecutor{runningFork: forkCheckpoint}
+	rebaseRequest, rebaseResult := testChannelPausedRebase(t)
+	executor := &channelTestExecutor{runningFork: forkCheckpoint, pausedRebase: rebaseResult}
 	agent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
 		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
 		ClientKeyFile: files.clientKey, TokenFile: files.token,
 		PeerURISAN: testNodeChannelServerURI, NodeUID: "node-uid-1", NodeBootIDFile: files.boot,
 		ClusterID: "cluster-1", NodeID: "node-1",
-		Executor: executor, RunningForkExecutor: executor, NetworkExecutor: executor,
+		Executor: executor, RunningForkExecutor: executor,
+		PausedRebaseExecutor: executor, NetworkExecutor: executor,
 		ReconnectMin: time.Millisecond, ReconnectMax: 5 * time.Millisecond,
 		AgentInstanceID: "agent-1",
 	})
@@ -190,6 +232,14 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- agent.Run(ctx) }()
 	waitNodeChannelConnected(t, hub, "cluster-1", "node-1", "node-uid-1", "boot-1")
+	selected, err := hub.SelectPausedRebaseNode("cluster-1", "rebase-selection-operation")
+	if err != nil || selected.NodeID != "node-1" || selected.NodeUID != "node-uid-1" || selected.NodeBootID != "boot-1" {
+		t.Fatalf("selected paused-rebase worker = %+v, %v", selected, err)
+	}
+	resolved, err := hub.ResolvePausedRebaseNode("cluster-1", selected.NodeID, selected.NodeUID)
+	if err != nil || resolved != selected {
+		t.Fatalf("resolved paused-rebase worker = %+v, %v", resolved, err)
+	}
 	standbyExecutor := &channelTestExecutor{}
 	standbyAgent, err := protocol.NewNodeChannelAgent(protocol.NodeChannelAgentConfig{
 		BaseURL: server.URL, CAFile: files.ca, ClientCertFile: files.clientCert,
@@ -240,6 +290,31 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 	if err != nil || forkResult.ProofDigest != forkCheckpoint.ProofDigest {
 		t.Fatalf("node running-fork result = %+v, %v", forkResult, err)
 	}
+	pausedRebase, err := hub.PausedRebase(t.Context(), protocol.NodeChannelTarget{
+		ClusterID: nodeTarget.ClusterID, NodeID: nodeTarget.NodeID,
+		NodeUID: nodeTarget.NodeUID, NodeBootID: nodeTarget.NodeBootID,
+	}, rebaseRequest)
+	if err != nil || pausedRebase.ProofDigest != rebaseResult.ProofDigest {
+		t.Fatalf("node paused-rebase result = %+v, %v", pausedRebase, err)
+	}
+	rejectRequest := rebaseRequest
+	rejectRequest.Reject = true
+	rejected, err := hub.RejectPausedRebase(t.Context(), protocol.NodeChannelTarget{
+		ClusterID: nodeTarget.ClusterID, NodeID: nodeTarget.NodeID,
+		NodeUID: nodeTarget.NodeUID, NodeBootID: nodeTarget.NodeBootID,
+	}, rejectRequest)
+	if err != nil || rejected.ValidateFor(rebaseRequest.Worker) != nil || rejected.Result != nil {
+		t.Fatalf("node paused-rebase rejection = %+v, %v", rejected, err)
+	}
+	ackRequest := rebaseRequest
+	ackRequest.AcknowledgeProofDigest = rebaseResult.ProofDigest
+	acknowledged, err := hub.AcknowledgePausedRebase(t.Context(), protocol.NodeChannelTarget{
+		ClusterID: nodeTarget.ClusterID, NodeID: nodeTarget.NodeID,
+		NodeUID: nodeTarget.NodeUID, NodeBootID: nodeTarget.NodeBootID,
+	}, ackRequest)
+	if err != nil || acknowledged.ProofDigest != rebaseResult.ProofDigest {
+		t.Fatalf("node paused-rebase acknowledgement = %+v, %v", acknowledged, err)
+	}
 	executor.mu.Lock()
 	if len(executor.networks) != 1 || executor.networks[0] != (protocol.NodeNetworkPrepareControlRequest{
 		OperationID: networkRequest.OperationID, ClaimID: networkRequest.ClaimID,
@@ -250,8 +325,11 @@ func TestNodeChannelHubRoutesCleanupOverAuthenticatedOutboundStream(t *testing.T
 		PolicyDigest: networkRequest.PolicyDigest,
 	}) || len(executor.claims) != 1 || executor.claims[0].PolicyToken != claimRequest.PolicyToken ||
 		len(executor.commands) != 1 || executor.commands[0] != commandRequest ||
-		len(executor.forks) != 1 || executor.forks[0] != forkRequest {
-		t.Fatalf("node control calls = claims %d, commands %d, forks %d", len(executor.claims), len(executor.commands), len(executor.forks))
+		len(executor.forks) != 1 || executor.forks[0] != forkRequest ||
+		len(executor.rebases) != 1 || len(executor.rebaseRejects) != 1 || len(executor.rebaseAcks) != 1 {
+		t.Fatalf("node control calls = claims %d, commands %d, forks %d, rebases %d, rejects %d",
+			len(executor.claims), len(executor.commands), len(executor.forks),
+			len(executor.rebases), len(executor.rebaseRejects))
 	}
 	executor.mu.Unlock()
 
@@ -507,6 +585,78 @@ func testChannelRunningFork(t *testing.T) (
 		t.Fatal(err)
 	}
 	return request, result
+}
+
+func testChannelPausedRebase(t *testing.T) (
+	protocol.NodePausedRebaseControlRequest,
+	rootfsrebase.WorkerResult,
+) {
+	t.Helper()
+	sourceBaseRoot := digest.FromString("hub-rebase-source-base").String()
+	sourceHead := digest.FromString("hub-rebase-source-head").String()
+	targetBaseRoot := digest.FromString("hub-rebase-target-base").String()
+	descriptor := func(name, root string) []byte {
+		payload, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+			Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: 8 * rootfsblock.LogicalBlockSize,
+			BlockSizeBytes: rootfsblock.LogicalBlockSize,
+			MappingRoot: rootfsblock.MappingRootLocator{
+				Version: rootfsblock.MappingPageVersion, RootDigest: root,
+				Object: rootfsblock.ObjectRange{
+					Key: "rootfs/hub-rebase/" + name + "/map", Length: 4096,
+					Checksum: digest.FromString("hub-rebase-map-" + name).String(),
+				},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	worker := rootfsrebase.WorkerRequest{
+		Version: rootfsrebase.WorkerProtocolVersion, OperationID: "hub-rebase-operation",
+		SandboxID: "sandbox-rebase", TeamID: "team-rebase", FilesystemID: "filesystem-rebase",
+		SourceGenerationID: "generation-source", SourceOCIDigest: digest.FromString("source-oci").String(),
+		SourceBaseArtifactDigest: digest.FromString("source-artifact").String(),
+		SourceBaseBlockRoot:      sourceBaseRoot, SourceCurrentBlockHead: sourceHead,
+		SourceFormatGeneration: 1, SourceLocatorVersion: 2,
+		SourceBaseDescriptor:       descriptor("source-base", sourceBaseRoot),
+		SourceGenerationDescriptor: descriptor("source", sourceHead),
+		TargetGenerationID:         "generation-target", TargetSourceOCIDigest: digest.FromString("target-oci").String(),
+		TargetBaseArtifactDigest: digest.FromString("target-artifact").String(),
+		TargetBaseBlockRoot:      targetBaseRoot, TargetFormatGeneration: 1, TargetWriterEpoch: 3,
+		TargetBaseDescriptor: descriptor("target-base", targetBaseRoot),
+		RollbackExpiresAt:    time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano),
+		MaxChangedBlocks:     1024,
+	}
+	requestDigest, err := worker.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hexDigest := func(value string) string {
+		sum := sha256.Sum256([]byte(value))
+		return hex.EncodeToString(sum[:])
+	}
+	health := sha256.Sum256([]byte("hub-rebase-health"))
+	apply := rootfsrebase.ApplyResult{
+		Version: rootfsrebase.ApplyResultVersion, AppliedChanges: 1, TargetNodeCount: 1,
+		OldManifestDigest: hexDigest("old"), SourceManifestDigest: hexDigest("source"),
+		DiffDigest: hexDigest("diff"), TargetManifestDigest: hexDigest("target"),
+		HealthProof: hex.EncodeToString(health[:]),
+	}
+	result := rootfsrebase.WorkerResult{
+		Version: rootfsrebase.WorkerProtocolVersion, RequestDigest: requestDigest,
+		GenerationID: worker.TargetGenerationID, FilesystemID: worker.FilesystemID,
+		ParentGenerationID: worker.SourceGenerationID, SourceOCIDigest: worker.TargetSourceOCIDigest,
+		BaseArtifactDigest: worker.TargetBaseArtifactDigest, BaseBlockRoot: worker.TargetBaseBlockRoot,
+		CurrentBlockHead: worker.TargetBaseBlockRoot, WriterEpoch: worker.TargetWriterEpoch,
+		FormatGeneration: worker.TargetFormatGeneration, DurabilityState: rootfsblock.DurabilityS3,
+		LocatorVersion: worker.SourceLocatorVersion + 1, Descriptor: append([]byte(nil), worker.TargetBaseDescriptor...),
+		HealthCheckDigest: health[:], DirtyBlocks: 1, Apply: apply,
+	}
+	if err := result.SealProof(); err != nil {
+		t.Fatal(err)
+	}
+	return protocol.NodePausedRebaseControlRequest{Worker: worker}, result
 }
 
 func testChannelCommandReadyProof() protocol.CommandReadyProof {

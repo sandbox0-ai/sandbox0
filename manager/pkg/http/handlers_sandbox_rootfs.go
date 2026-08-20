@@ -135,6 +135,36 @@ func (s *Server) forkSandbox(c *gin.Context) {
 	spec.JSONSuccess(c, http.StatusCreated, resp)
 }
 
+func (s *Server) rebaseSandboxRootFS(c *gin.Context) {
+	sandboxID := c.Param("id")
+	claims := internalauth.ClaimsFromContext(c.Request.Context())
+	if claims == nil {
+		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
+		return
+	}
+	var req service.RebaseSandboxRootFSRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	req.OperationID = sandboxClaimOperationID(claims)
+	req.StartedAt = sandboxClaimIngressStartedAt(claims)
+	rebaser := s.sandboxRootFSRebaser
+	if rebaser == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable,
+			"sandbox RootFS rebase backend is not configured")
+		return
+	}
+	response, err := rebaser.RebaseSandboxRootFS(
+		c.Request.Context(), sandboxID, claims.TeamID, &req,
+	)
+	if err != nil {
+		s.writeSandboxRootFSError(c, "rebase sandbox rootfs", sandboxID, err)
+		return
+	}
+	spec.JSONSuccess(c, http.StatusOK, response)
+}
+
 func bindOptionalJSON(c *gin.Context, target any) error {
 	if c.Request.Body == nil || c.Request.Body == http.NoBody {
 		return nil
@@ -167,6 +197,8 @@ func (s *Server) writeSandboxRootFSError(c *gin.Context, action, sandboxID strin
 	case errors.Is(err, service.ErrSandboxRootFSSourceRequiresRunningOrPaused):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, "sandbox rootfs source operation requires a running or paused sandbox")
 	case errors.Is(err, service.ErrRootFSSnapshotExpired):
+		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+	case errors.Is(err, service.ErrInvalidRootFSRebaseRequest):
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
 	case errors.Is(err, sandboxstore.ErrRootFSFilesystemConflict), errors.Is(err, sandboxstore.ErrRootFSHeadConflict), errors.Is(err, sandboxstore.ErrRootFSFilesystemNotFound):
 		spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())

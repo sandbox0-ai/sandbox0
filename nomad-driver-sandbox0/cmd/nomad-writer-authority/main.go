@@ -106,6 +106,10 @@ func main() {
 	generationFile := flag.String("generation-file", "", "rebase-publish: prepared RootFSGeneration JSON path")
 	expectedBaseArtifact := flag.String("expected-base-artifact", "", "rebase-publish: source Base artifact digest")
 	healthCheckHex := flag.String("health-check-digest", "", "rebase-publish: 32-byte hexadecimal health proof")
+	workerClusterID := flag.String("worker-cluster-id", "", "rebase: selected worker cluster ID")
+	workerNodeID := flag.String("worker-node-id", "", "rebase: selected worker node ID")
+	workerNodeUID := flag.String("worker-node-uid", "", "rebase: selected worker node UID")
+	workerProofHex := flag.String("worker-proof-digest", "", "rebase-publish: 32-byte hexadecimal worker result proof")
 	flag.Parse()
 
 	if *mode == "stage-digest" {
@@ -212,6 +216,7 @@ func main() {
 			OperationID: *operationID, SandboxID: *sandboxID, ExpectedTeamID: *teamID,
 			TargetBaseArtifactDigest: *targetBaseArtifact,
 			RollbackExpiresAt:        time.Now().UTC().Add(*rollbackTTL),
+			WorkerClusterID:          *workerClusterID, WorkerNodeID: *workerNodeID, WorkerNodeUID: *workerNodeUID,
 		})
 		if err != nil {
 			fatal("rebase-request: %v", err)
@@ -230,6 +235,10 @@ func main() {
 		if err != nil {
 			fatal("rebase-publish: decode health-check-digest: %v", err)
 		}
+		workerProof, err := hex.DecodeString(strings.TrimSpace(*workerProofHex))
+		if err != nil {
+			fatal("rebase-publish: decode worker-proof-digest: %v", err)
+		}
 		expiresAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(*rollbackExpiresAt))
 		if err != nil {
 			fatal("rebase-publish: decode rollback-expires-at: %v", err)
@@ -241,6 +250,8 @@ func main() {
 			Generation:                 &generation,
 			HealthCheckDigest:          healthDigest,
 			RollbackExpiresAt:          expiresAt,
+			WorkerClusterID:            *workerClusterID, WorkerNodeID: *workerNodeID, WorkerNodeUID: *workerNodeUID,
+			WorkerProofDigest: workerProof,
 		}
 		filesystem, err := store.PublishPausedRootFSRebase(ctx, rebaseRequest)
 		if err != nil {

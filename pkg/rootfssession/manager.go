@@ -47,6 +47,7 @@ var (
 	sessionBucket         = []byte("rootfs-sessions-v1")
 	sessionIdentityBucket = []byte("rootfs-session-identities-v1")
 	rebaseBucket          = []byte("rootfs-rebases-v1")
+	rebaseAckBucket       = []byte("rootfs-rebase-acks-v1")
 )
 
 // Device is one live kernel block-device attachment. Close must not return
@@ -287,7 +288,10 @@ func New(config Config) (*Manager, error) {
 		if _, err := tx.CreateBucketIfNotExists(sessionIdentityBucket); err != nil {
 			return err
 		}
-		_, err := tx.CreateBucketIfNotExists(rebaseBucket)
+		if _, err := tx.CreateBucketIfNotExists(rebaseBucket); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(rebaseAckBucket)
 		return err
 	}); err != nil {
 		db.Close()

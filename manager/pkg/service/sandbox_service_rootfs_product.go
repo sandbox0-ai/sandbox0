@@ -23,6 +23,7 @@ var ErrSandboxRootFSStoreUnavailable = errors.New("sandbox rootfs store is unava
 var ErrSandboxRootFSRequiresPausedSandbox = errors.New("sandbox rootfs operation requires a paused sandbox")
 var ErrSandboxRootFSSourceRequiresRunningOrPaused = errors.New("sandbox rootfs source operation requires a running or paused sandbox")
 var ErrRootFSSnapshotExpired = errors.New("rootfs snapshot expires_at must be in the future")
+var ErrInvalidRootFSRebaseRequest = errors.New("invalid rootfs rebase request")
 
 type SandboxRootFSProductStore interface {
 	CreateRootFSSnapshot(ctx context.Context, req *sandboxstore.CreateRootFSSnapshotRequest) (*sandboxstore.RootFSSnapshot, error)
@@ -93,6 +94,26 @@ type ForkSandboxConfig struct {
 type ForkSandboxResponse struct {
 	SourceSandboxID string              `json:"source_sandbox_id"`
 	Sandbox         *managerapi.Sandbox `json:"sandbox"`
+}
+
+// RebaseSandboxRootFSRequest selects an already-attested immutable Base
+// artifact. OperationID and StartedAt are supplied only by signed ingress
+// claims and are never accepted from the request body.
+type RebaseSandboxRootFSRequest struct {
+	TargetBaseArtifactDigest string    `json:"target_base_artifact_digest"`
+	RollbackTTL              *int32    `json:"rollback_ttl,omitempty"`
+	OperationID              string    `json:"-"`
+	StartedAt                time.Time `json:"-"`
+}
+
+// RebaseSandboxRootFSResponse identifies the new paused durable head and its
+// bounded rollback window.
+type RebaseSandboxRootFSResponse struct {
+	SandboxID          string    `json:"sandbox_id"`
+	GenerationID       string    `json:"generation_id"`
+	BaseArtifactDigest string    `json:"base_artifact_digest"`
+	RollbackExpiresAt  time.Time `json:"rollback_expires_at"`
+	Status             string    `json:"status"`
 }
 
 func (s *SandboxService) CreateSandboxRootFSSnapshot(ctx context.Context, sandboxID, teamID string, req *CreateSandboxRootFSSnapshotRequest) (*SandboxRootFSSnapshot, error) {

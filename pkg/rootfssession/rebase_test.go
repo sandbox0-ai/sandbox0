@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	"github.com/stretchr/testify/require"
+	bolt "go.etcd.io/bbolt"
 )
 
 type fakeRebaseEngine struct {
@@ -81,10 +83,18 @@ func TestManagerExecuteRebaseJournalsExactResultAndCleansResources(t *testing.T)
 	changed.MaxChangedBlocks--
 	_, err = manager.ExecuteRebase(t.Context(), changed)
 	require.ErrorIs(t, err, errdefs.ErrAlreadyExists)
-	require.ErrorIs(t, manager.AcknowledgeRebase(request.OperationID, digest.FromString("wrong-proof").String()), errdefs.ErrFailedPrecondition)
-	require.NoError(t, manager.AcknowledgeRebase(request.OperationID, result.ProofDigest))
+	require.ErrorIs(t, manager.AcknowledgeRebase(request, digest.FromString("wrong-proof").String()), errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.AcknowledgeRebase(request, result.ProofDigest))
 	_, err = manager.loadRebase(request.OperationID)
 	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	require.NoError(t, manager.AcknowledgeRebase(request, result.ProofDigest),
+		"exact acknowledgement retries must use the compact tombstone")
+	require.ErrorIs(t, manager.AcknowledgeRebase(request, digest.FromString("changed-proof").String()),
+		errdefs.ErrFailedPrecondition)
+	require.ErrorIs(t, manager.AcknowledgeRebase(changed, result.ProofDigest), errdefs.ErrFailedPrecondition)
+	_, err = manager.ExecuteRebase(t.Context(), request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.EqualValues(t, 1, engine.calls.Load())
 }
 
 func TestManagerRebaseResultSurvivesRestartAndResponseLoss(t *testing.T) {
@@ -102,14 +112,112 @@ func TestManagerRebaseResultSurvivesRestartAndResponseLoss(t *testing.T) {
 	secondRuntime.devicePaths = []string{"/dev/fake0", "/dev/fake1", "/dev/fake2"}
 	secondEngine := &fakeRebaseEngine{result: testRebaseApplyResult("must-not-run")}
 	second := newRebaseTestManager(t, base, objects, secondRuntime, secondEngine)
-	defer second.Close()
 	require.NoError(t, second.ReconcileRebases(t.Context()))
 	retry, err := second.ExecuteRebase(t.Context(), request)
 	require.NoError(t, err)
 	require.Equal(t, result, retry)
 	require.Zero(t, secondEngine.calls.Load())
 	require.Empty(t, secondRuntime.callsSnapshot())
-	require.NoError(t, second.AcknowledgeRebase(request.OperationID, result.ProofDigest))
+	require.NoError(t, second.AcknowledgeRebase(request, result.ProofDigest))
+	require.NoError(t, second.Close())
+	third := newRebaseTestManager(t, base, objects, newFakeHostRuntime(objects), &fakeRebaseEngine{})
+	defer third.Close()
+	require.NoError(t, third.AcknowledgeRebase(request, result.ProofDigest))
+}
+
+func TestManagerRejectRebaseFencesExecutionWithoutCreatingFullJournal(t *testing.T) {
+	base := t.TempDir()
+	objects, request := testRebaseRequest(t, "reject-before-execute")
+	manager := newRebaseTestManager(t, base, objects, newFakeHostRuntime(objects), &fakeRebaseEngine{})
+	rejection, err := manager.RejectRebase(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, rejection.ValidateFor(request))
+	require.Nil(t, rejection.Result)
+	_, err = manager.loadRebase(request.OperationID)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+	_, err = manager.ExecuteRebase(t.Context(), request)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.Close())
+
+	restarted := newRebaseTestManager(t, base, objects, newFakeHostRuntime(objects), &fakeRebaseEngine{})
+	defer restarted.Close()
+	retry, err := restarted.RejectRebase(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, rejection, retry)
+	changed := request
+	changed.MaxChangedBlocks--
+	_, err = restarted.RejectRebase(t.Context(), changed)
+	require.ErrorIs(t, err, errdefs.ErrFailedPrecondition)
+	require.NoError(t, restarted.AcknowledgeRebase(request, rejection.ProofDigest))
+}
+
+func TestManagerRejectRebaseRetainsExecutedResultUntilExactAck(t *testing.T) {
+	base := t.TempDir()
+	objects, request := testRebaseRequest(t, "reject-after-execute")
+	runtime := newFakeHostRuntime(objects)
+	runtime.devicePaths = []string{"/dev/fake0", "/dev/fake1", "/dev/fake2"}
+	manager := newRebaseTestManager(t, base, objects, runtime,
+		&fakeRebaseEngine{result: testRebaseApplyResult("reject-after-execute")})
+	defer manager.Close()
+	result, err := manager.ExecuteRebase(t.Context(), request)
+	require.NoError(t, err)
+	rejection, err := manager.RejectRebase(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, rejection.ValidateFor(request))
+	require.NotNil(t, rejection.Result)
+	require.Equal(t, result, *rejection.Result)
+	_, err = manager.loadRebase(request.OperationID)
+	require.NoError(t, err)
+	require.ErrorIs(t, manager.AcknowledgeRebase(request, digest.FromString("wrong-rejection").String()),
+		errdefs.ErrFailedPrecondition)
+	require.NoError(t, manager.AcknowledgeRebase(request, rejection.ProofDigest))
+	_, err = manager.loadRebase(request.OperationID)
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+}
+
+func TestManagerPrunesCompactRebaseAcknowledgementsByAgeAndCardinality(t *testing.T) {
+	base := t.TempDir()
+	objects, _ := testRebaseRequest(t, "ack-prune")
+	manager := newRebaseTestManager(t, base, objects, newFakeHostRuntime(objects), &fakeRebaseEngine{})
+	defer manager.Close()
+	now := time.Now().UTC()
+	require.NoError(t, manager.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(rebaseAckBucket)
+		for index := 0; index < maxRebaseAcknowledgements+17; index++ {
+			requestDigest, err := parseRebaseSHA256Digest(digest.FromString(fmt.Sprintf("request-%d", index)).String())
+			if err != nil {
+				return err
+			}
+			proofDigest, err := parseRebaseSHA256Digest(digest.FromString(fmt.Sprintf("proof-%d", index)).String())
+			if err != nil {
+				return err
+			}
+			acknowledgedAt := now.Add(time.Duration(index) * time.Nanosecond).UnixNano()
+			if index == 0 {
+				acknowledgedAt = now.Add(-rebaseAcknowledgementTTL - time.Second).UnixNano()
+			}
+			if err := bucket.Put(rebaseAcknowledgementKey(fmt.Sprintf("operation-%d", index)),
+				encodeRebaseAcknowledgement(rebaseAcknowledgement{
+					AcknowledgedAt: acknowledgedAt, RequestDigest: requestDigest, ProofDigest: proofDigest,
+				})); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	require.NoError(t, manager.pruneRebaseAcknowledgements(now))
+	require.NoError(t, manager.db.View(func(tx *bolt.Tx) error {
+		count := 0
+		require.NoError(t, tx.Bucket(rebaseAckBucket).ForEach(func(_, payload []byte) error {
+			if payload != nil {
+				count++
+			}
+			return nil
+		}))
+		require.Equal(t, maxRebaseAcknowledgements, count)
+		require.Nil(t, tx.Bucket(rebaseAckBucket).Get(rebaseAcknowledgementKey("operation-0")))
+		return nil
+	}))
 }
 
 func TestManagerRebaseAttachFailureCleansAndCanRetry(t *testing.T) {

@@ -26,17 +26,19 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/gorilla/websocket"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 )
 
 const (
-	defaultNodeChannelOperationTimeout   = 30 * time.Second
-	defaultNodeChannelRunningForkTimeout = 5 * time.Minute
-	defaultNodeChannelReconnectMin       = 100 * time.Millisecond
-	defaultNodeChannelReconnectMax       = 10 * time.Second
-	defaultNodeChannelHandshakeTimeout   = 5 * time.Second
-	defaultNodeChannelConnectionMaxAge   = 5 * time.Minute
-	defaultNodeChannelMaxConcurrent      = 64
-	maxNodeChannelCredentialBytes        = 64 << 10
+	defaultNodeChannelOperationTimeout    = 30 * time.Second
+	defaultNodeChannelRunningForkTimeout  = 5 * time.Minute
+	defaultNodeChannelPausedRebaseTimeout = 30 * time.Minute
+	defaultNodeChannelReconnectMin        = 100 * time.Millisecond
+	defaultNodeChannelReconnectMax        = 10 * time.Second
+	defaultNodeChannelHandshakeTimeout    = 5 * time.Second
+	defaultNodeChannelConnectionMaxAge    = 5 * time.Minute
+	defaultNodeChannelMaxConcurrent       = 64
+	maxNodeChannelCredentialBytes         = 64 << 10
 )
 
 // NodeChannelExecutor owns node-local privilege. Claim and CommandReady must
@@ -54,6 +56,14 @@ type NodeChannelRunningForkExecutor interface {
 	RunningFork(context.Context, NodeChannelTarget, NodeRunningForkControlRequest) (rootfshandoff.RunningForkCheckpointResult, error)
 }
 
+// NodeChannelPausedRebaseExecutor owns the three-device offline merge and
+// immutable target publication. It is advertised independently.
+type NodeChannelPausedRebaseExecutor interface {
+	PausedRebase(context.Context, NodeChannelTarget, NodePausedRebaseControlRequest) (rootfsrebase.WorkerResult, error)
+	RejectPausedRebase(context.Context, NodeChannelTarget, NodePausedRebaseControlRequest) (rootfsrebase.WorkerRejection, error)
+	AcknowledgePausedRebase(context.Context, NodeChannelTarget, NodePausedRebaseControlRequest) error
+}
+
 // NodeChannelNetworkExecutor owns ctld-backed policy application. It is
 // separate so a node agent cannot advertise network preparation until the
 // authoritative local runtime is configured.
@@ -64,27 +74,29 @@ type NodeChannelNetworkExecutor interface {
 // NodeChannelAgentConfig configures one node-initiated mTLS command stream.
 // Certificates, CA, boot ID, and bearer token are reloaded on reconnect.
 type NodeChannelAgentConfig struct {
-	BaseURL             string
-	CAFile              string
-	ClientCertFile      string
-	ClientKeyFile       string
-	TokenFile           string
-	PeerURISAN          string
-	ClusterID           string
-	NodeID              string
-	NodeUID             string
-	NodeBootIDFile      string
-	Executor            NodeChannelExecutor
-	RunningForkExecutor NodeChannelRunningForkExecutor
-	NetworkExecutor     NodeChannelNetworkExecutor
+	BaseURL              string
+	CAFile               string
+	ClientCertFile       string
+	ClientKeyFile        string
+	TokenFile            string
+	PeerURISAN           string
+	ClusterID            string
+	NodeID               string
+	NodeUID              string
+	NodeBootIDFile       string
+	Executor             NodeChannelExecutor
+	RunningForkExecutor  NodeChannelRunningForkExecutor
+	PausedRebaseExecutor NodeChannelPausedRebaseExecutor
+	NetworkExecutor      NodeChannelNetworkExecutor
 
-	OperationTimeout   time.Duration
-	RunningForkTimeout time.Duration
-	ReconnectMin       time.Duration
-	ReconnectMax       time.Duration
-	ConnectionMaxAge   time.Duration
-	MaxConcurrent      int
-	AgentInstanceID    string
+	OperationTimeout    time.Duration
+	RunningForkTimeout  time.Duration
+	PausedRebaseTimeout time.Duration
+	ReconnectMin        time.Duration
+	ReconnectMax        time.Duration
+	ConnectionMaxAge    time.Duration
+	MaxConcurrent       int
+	AgentInstanceID     string
 }
 
 // NodeChannelAgent maintains an outbound stream and executes a bounded number
@@ -153,6 +165,12 @@ func newNodeChannelAgent(config NodeChannelAgentConfig, dialAddress string) (*No
 	}
 	if config.RunningForkTimeout < time.Second || config.RunningForkTimeout > 30*time.Minute {
 		return nil, fmt.Errorf("node channel running-fork timeout must be between one second and 30 minutes: %w", errdefs.ErrInvalidArgument)
+	}
+	if config.PausedRebaseTimeout == 0 {
+		config.PausedRebaseTimeout = defaultNodeChannelPausedRebaseTimeout
+	}
+	if config.PausedRebaseTimeout < time.Minute || config.PausedRebaseTimeout > 6*time.Hour {
+		return nil, fmt.Errorf("node channel paused-rebase timeout must be between one minute and six hours: %w", errdefs.ErrInvalidArgument)
 	}
 	if config.ReconnectMin == 0 {
 		config.ReconnectMin = defaultNodeChannelReconnectMin
@@ -266,19 +284,21 @@ func (a *NodeChannelAgent) runConnection(ctx context.Context) (time.Time, error)
 	connectedAt := time.Now()
 	defer connection.Close()
 	connection.SetReadLimit(NodeChannelMaxBytes)
+	capabilities := []NodeChannelCommandKind{
+		NodeChannelCommandClaim, NodeChannelCommandCommandReady,
+	}
+	if a.config.RunningForkExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandRunningFork)
+	}
+	if a.config.PausedRebaseExecutor != nil {
+		capabilities = append(capabilities, NodeChannelCommandPausedRebase)
+	}
+	capabilities = append(capabilities, NodeChannelCommandCleanup)
 	hello := NodeChannelHello{
 		Version: NodeChannelVersion, AgentInstanceID: a.agentInstanceID,
 		ClusterID: a.config.ClusterID, NodeID: a.config.NodeID,
 		NodeUID: a.config.NodeUID, NodeBootID: bootID,
-		Capabilities: []NodeChannelCommandKind{
-			NodeChannelCommandClaim, NodeChannelCommandCommandReady, NodeChannelCommandCleanup,
-		},
-	}
-	if a.config.RunningForkExecutor != nil {
-		hello.Capabilities = []NodeChannelCommandKind{
-			NodeChannelCommandClaim, NodeChannelCommandCommandReady,
-			NodeChannelCommandRunningFork, NodeChannelCommandCleanup,
-		}
+		Capabilities: capabilities,
 	}
 	if a.config.NetworkExecutor != nil {
 		hello.Capabilities = append([]NodeChannelCommandKind{NodeChannelCommandNetworkPrepare}, hello.Capabilities...)
@@ -357,6 +377,8 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 	timeout := a.config.OperationTimeout
 	if command.Kind == NodeChannelCommandRunningFork {
 		timeout = a.config.RunningForkTimeout
+	} else if command.Kind == NodeChannelCommandPausedRebase {
+		timeout = a.config.PausedRebaseTimeout
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -394,6 +416,41 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 		if err == nil {
 			result.RunningFork = &checkpoint
 		}
+	case NodeChannelCommandPausedRebase:
+		if a.config.PausedRebaseExecutor == nil {
+			err = fmt.Errorf("node paused-rebase executor is unavailable: %w", errdefs.ErrFailedPrecondition)
+			break
+		}
+		if command.PausedRebase.Reject {
+			var rejection rootfsrebase.WorkerRejection
+			rejection, err = a.config.PausedRebaseExecutor.RejectPausedRebase(
+				operationCtx, command.Target, *command.PausedRebase,
+			)
+			if err == nil {
+				result.PausedRebaseReject = &rejection
+			}
+		} else if command.PausedRebase.AcknowledgeProofDigest != "" {
+			err = a.config.PausedRebaseExecutor.AcknowledgePausedRebase(
+				operationCtx, command.Target, *command.PausedRebase,
+			)
+			if err == nil {
+				requestDigest, digestErr := command.PausedRebase.Worker.Digest()
+				if digestErr != nil {
+					err = digestErr
+				} else {
+					result.PausedRebaseAck = &rootfsrebase.WorkerAcknowledgement{
+						RequestDigest: requestDigest,
+						ProofDigest:   command.PausedRebase.AcknowledgeProofDigest,
+					}
+				}
+			}
+		} else {
+			var rebase rootfsrebase.WorkerResult
+			rebase, err = a.config.PausedRebaseExecutor.PausedRebase(operationCtx, command.Target, *command.PausedRebase)
+			if err == nil {
+				result.PausedRebase = &rebase
+			}
+		}
 	case NodeChannelCommandCleanup:
 		var proof NodeCleanupControlProof
 		proof, err = a.config.Executor.Cleanup(operationCtx, command.Target, *command.Cleanup)
@@ -411,6 +468,8 @@ func (a *NodeChannelAgent) execute(ctx context.Context, command NodeChannelComma
 			result.NetworkPolicyToken = nil
 			result.ControlResponse = nil
 			result.RunningFork = nil
+			result.PausedRebase = nil
+			result.PausedRebaseAck = nil
 			result.CleanupProof = nil
 		}
 	}

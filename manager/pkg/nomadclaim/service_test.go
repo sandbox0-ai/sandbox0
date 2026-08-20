@@ -3,6 +3,7 @@ package nomadclaim
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -19,7 +20,9 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/naming"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	"github.com/sandbox0-ai/sandbox0/pkg/runtimecontrol"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
@@ -69,12 +72,22 @@ type fakeClaimStore struct {
 	pausedForkRequests  []*sandboxstore.NomadSandboxForkRequest
 	pausedForkCompleted map[string]*sandboxstore.SandboxRecord
 	activeLifecycles    map[string]*sandboxstore.SandboxLifecycleTxn
+	lifecyclesByID      map[string]*sandboxstore.SandboxLifecycleTxn
 	forkAbortCalls      [][4]string
 	forkAbortErr        error
 	activeSlot          *sandboxstore.RuntimeSlot
 	runtimeSlotErr      error
 	quiesceCalls        []*sandboxstore.BeginRuntimeSlotQuiesceRequest
 	snapshot            *sandboxstore.RootFSSnapshot
+	rebaseCandidate     *sandboxstore.NomadPausedRebaseCandidate
+	rebaseErr           error
+	rebaseRequests      []*sandboxstore.NomadPausedRebaseRequest
+	rebasePublishErr    error
+	rebasePublishes     []*sandboxstore.PublishPausedRootFSRebaseRequest
+	rebaseRejectErr     error
+	rebaseRejects       [][]byte
+	rebaseAckErr        error
+	rebaseAcks          [][]byte
 	writeCount          int
 }
 
@@ -157,6 +170,159 @@ func (f *fakeClaimStore) GetActiveLifecycleTxn(
 	sandboxID string,
 ) (*sandboxstore.SandboxLifecycleTxn, error) {
 	return sandboxstore.CloneSandboxLifecycleTxn(f.activeLifecycles[sandboxID]), nil
+}
+
+func (f *fakeClaimStore) GetLifecycleTxn(
+	_ context.Context,
+	txnID string,
+) (*sandboxstore.SandboxLifecycleTxn, error) {
+	if txn := f.lifecyclesByID[txnID]; txn != nil {
+		return sandboxstore.CloneSandboxLifecycleTxn(txn), nil
+	}
+	for _, txn := range f.activeLifecycles {
+		if txn != nil && txn.ID == txnID {
+			return sandboxstore.CloneSandboxLifecycleTxn(txn), nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeClaimStore) GetPendingNomadPausedRebase(
+	_ context.Context,
+	sandboxID string,
+) (*sandboxstore.SandboxLifecycleTxn, error) {
+	if txn := f.activeLifecycles[sandboxID]; txn != nil && txn.Kind == sandboxstore.SandboxLifecycleKindRebase {
+		return sandboxstore.CloneSandboxLifecycleTxn(txn), nil
+	}
+	for _, txn := range f.lifecyclesByID {
+		if txn != nil && txn.SandboxID == sandboxID && txn.Kind == sandboxstore.SandboxLifecycleKindRebase &&
+			(txn.Phase == sandboxstore.SandboxLifecyclePhaseCommitted ||
+				txn.Phase == sandboxstore.SandboxLifecyclePhaseAborted) && txn.WorkerAcknowledgedAt.IsZero() {
+			return sandboxstore.CloneSandboxLifecycleTxn(txn), nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeClaimStore) RequestNomadPausedRebase(
+	_ context.Context,
+	request *sandboxstore.NomadPausedRebaseRequest,
+) (*sandboxstore.NomadPausedRebaseCandidate, error) {
+	copyRequest := *request
+	f.rebaseRequests = append(f.rebaseRequests, &copyRequest)
+	if f.rebaseErr != nil {
+		return nil, f.rebaseErr
+	}
+	if f.rebaseCandidate == nil {
+		return nil, sandboxstore.ErrNomadSandboxRebaseNotReady
+	}
+	if record := f.records[request.SandboxID]; record != nil {
+		f.rebaseCandidate.Sandbox = cloneClaimRecord(record)
+	}
+	if f.lifecyclesByID == nil {
+		f.lifecyclesByID = make(map[string]*sandboxstore.SandboxLifecycleTxn)
+	}
+	if f.activeLifecycles == nil {
+		f.activeLifecycles = make(map[string]*sandboxstore.SandboxLifecycleTxn)
+	}
+	if f.lifecyclesByID[request.OperationID] == nil {
+		txn := &sandboxstore.SandboxLifecycleTxn{
+			ID: request.OperationID, SandboxID: request.SandboxID,
+			Kind: sandboxstore.SandboxLifecycleKindRebase, Phase: sandboxstore.SandboxLifecyclePhasePreparing,
+			Source:                   sandboxstore.SandboxLifecycleSourceManual,
+			TargetGenerationID:       f.rebaseCandidate.TargetGenerationID,
+			ExpectedHeadLayerID:      f.rebaseCandidate.SourceGeneration.ID,
+			SourceBaseArtifactDigest: f.rebaseCandidate.SourceBaseArtifact.ArtifactDigest,
+			TargetBaseArtifactDigest: request.TargetBaseArtifactDigest,
+			RollbackExpiresAt:        request.RollbackExpiresAt,
+			WorkerClusterID:          request.WorkerClusterID, WorkerNodeID: request.WorkerNodeID,
+			WorkerNodeUID: request.WorkerNodeUID,
+		}
+		f.lifecyclesByID[request.OperationID] = txn
+		f.activeLifecycles[request.SandboxID] = txn
+	}
+	return cloneNomadPausedRebaseCandidate(f.rebaseCandidate), nil
+}
+
+func (f *fakeClaimStore) PublishPausedRootFSRebase(
+	_ context.Context,
+	request *sandboxstore.PublishPausedRootFSRebaseRequest,
+) (*sandboxstore.RootFSFilesystem, error) {
+	copyRequest := *request
+	if request.Generation != nil {
+		generation := *request.Generation
+		generation.Descriptor = append([]byte(nil), request.Generation.Descriptor...)
+		copyRequest.Generation = &generation
+	}
+	copyRequest.HealthCheckDigest = append([]byte(nil), request.HealthCheckDigest...)
+	copyRequest.WorkerProofDigest = append([]byte(nil), request.WorkerProofDigest...)
+	f.rebasePublishes = append(f.rebasePublishes, &copyRequest)
+	if f.rebasePublishErr != nil {
+		if errors.Is(f.rebasePublishErr, sandboxstore.ErrNomadPausedRebaseTerminating) {
+			if record := f.records[request.SandboxID]; record != nil {
+				record.DesiredState = sandboxstore.SandboxDesiredStateTerminating
+			}
+			f.claimPhases[request.SandboxID] = sandboxstore.SandboxRuntimeClaimPhaseCleanupPending
+		}
+		return nil, f.rebasePublishErr
+	}
+	if f.rebaseCandidate != nil {
+		f.rebaseCandidate.Completed = true
+		f.rebaseCandidate.WorkerProofDigest = append([]byte(nil), request.WorkerProofDigest...)
+		f.rebaseCandidate.TargetWriterEpoch = request.Generation.WriterEpoch
+		f.rebaseCandidate.LifecyclePhase = sandboxstore.SandboxLifecyclePhaseCommitted
+	}
+	if txn := f.lifecyclesByID[request.OperationID]; txn != nil {
+		txn.Phase = sandboxstore.SandboxLifecyclePhaseCommitted
+		txn.PreparedHeadLayerID = request.Generation.ID
+		txn.WorkerProofDigest = append([]byte(nil), request.WorkerProofDigest...)
+		delete(f.activeLifecycles, request.SandboxID)
+	}
+	return &sandboxstore.RootFSFilesystem{ID: request.Generation.FilesystemID}, nil
+}
+
+func (f *fakeClaimStore) RejectNomadPausedRebaseWorker(
+	_ context.Context,
+	request *sandboxstore.NomadPausedRebaseRequest,
+	proofDigest []byte,
+) error {
+	f.rebaseRejects = append(f.rebaseRejects, append([]byte(nil), proofDigest...))
+	if f.rebaseRejectErr != nil {
+		return f.rebaseRejectErr
+	}
+	if f.rebaseCandidate != nil {
+		f.rebaseCandidate.Completed = false
+		f.rebaseCandidate.Rejected = true
+		f.rebaseCandidate.WorkerProofDigest = append([]byte(nil), proofDigest...)
+		f.rebaseCandidate.LifecyclePhase = sandboxstore.SandboxLifecyclePhaseAborted
+	}
+	if txn := f.lifecyclesByID[request.OperationID]; txn != nil {
+		txn.Phase = sandboxstore.SandboxLifecyclePhaseAborted
+		txn.Error = "sandbox termination requested"
+		txn.WorkerProofDigest = append([]byte(nil), proofDigest...)
+		delete(f.activeLifecycles, request.SandboxID)
+	}
+	return nil
+}
+
+func (f *fakeClaimStore) AcknowledgeNomadPausedRebaseWorker(
+	_ context.Context,
+	_, _, _, _, _ string,
+	proofDigest []byte,
+) error {
+	f.rebaseAcks = append(f.rebaseAcks, append([]byte(nil), proofDigest...))
+	if f.rebaseAckErr != nil {
+		return f.rebaseAckErr
+	}
+	if f.rebaseCandidate != nil {
+		f.rebaseCandidate.WorkerAcknowledgedAt = time.Now().UTC()
+	}
+	for _, txn := range f.lifecyclesByID {
+		if txn != nil && string(txn.WorkerProofDigest) == string(proofDigest) {
+			txn.WorkerAcknowledgedAt = time.Now().UTC()
+		}
+	}
+	return nil
 }
 
 func (f *fakeClaimStore) AbortNomadSandboxRunningFork(
@@ -1348,6 +1514,320 @@ func TestServiceForkRecoveryAbortsStaleNeverPublishedTarget(t *testing.T) {
 	}
 }
 
+func TestServicePausedRootFSRebasePublishesAcknowledgesAndRetriesExactly(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	operationID := "operation-paused-rebase"
+	sandboxID, targetDigest := preparePausedNomadRebase(t, &fixture, operationID, time.Hour)
+	request := &service.RebaseSandboxRootFSRequest{
+		OperationID: operationID, StartedAt: fixture.now,
+		TargetBaseArtifactDigest: targetDigest, RollbackTTL: int32Pointer(3600),
+	}
+
+	response, err := fixture.service.RebaseSandboxRootFS(
+		t.Context(), sandboxID, "team-1", request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response == nil || response.SandboxID != sandboxID ||
+		response.GenerationID != fixture.store.rebaseCandidate.TargetGenerationID ||
+		response.BaseArtifactDigest != targetDigest || response.Status != managerapi.SandboxStatusPaused ||
+		!response.RollbackExpiresAt.Equal(fixture.now.Add(time.Hour)) {
+		t.Fatalf("rebase response = %+v", response)
+	}
+	if len(fixture.pausedRebase.selectCalls) != 1 || len(fixture.pausedRebase.resolveCalls) != 0 ||
+		len(fixture.pausedRebase.executeCalls) != 1 || len(fixture.store.rebasePublishes) != 1 ||
+		len(fixture.pausedRebase.ackCalls) != 1 || len(fixture.store.rebaseAcks) != 1 ||
+		len(fixture.store.rebaseRequests) != 2 {
+		t.Fatalf("rebase calls select=%d resolve=%d execute=%d publish=%d node-ack=%d pg-ack=%d request=%d",
+			len(fixture.pausedRebase.selectCalls), len(fixture.pausedRebase.resolveCalls),
+			len(fixture.pausedRebase.executeCalls), len(fixture.store.rebasePublishes),
+			len(fixture.pausedRebase.ackCalls), len(fixture.store.rebaseAcks), len(fixture.store.rebaseRequests))
+	}
+	worker := fixture.pausedRebase.executeCalls[0].Worker
+	if worker.OperationID != operationID || worker.SandboxID != sandboxID ||
+		worker.TargetBaseArtifactDigest != targetDigest || worker.MaxChangedBlocks != rootfsrebase.MaxWorkerChangedBlocks {
+		t.Fatalf("worker request = %+v", worker)
+	}
+
+	// A completed exact retry uses PostgreSQL and never re-executes or re-acks.
+	retry, err := fixture.service.RebaseSandboxRootFS(t.Context(), sandboxID, "team-1", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.GenerationID != response.GenerationID || len(fixture.pausedRebase.executeCalls) != 1 ||
+		len(fixture.store.rebasePublishes) != 1 || len(fixture.pausedRebase.ackCalls) != 1 {
+		t.Fatalf("exact retry = %+v execute=%d publish=%d ack=%d", retry,
+			len(fixture.pausedRebase.executeCalls), len(fixture.store.rebasePublishes), len(fixture.pausedRebase.ackCalls))
+	}
+}
+
+func TestServicePausedRootFSRebaseRecoversCommittedPendingAcknowledgement(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	operationID := "operation-paused-rebase-ack-loss"
+	sandboxID, targetDigest := preparePausedNomadRebase(t, &fixture, operationID, time.Hour)
+	fixture.pausedRebase.ackErr = errdefs.ErrUnavailable
+	response, err := fixture.service.RebaseSandboxRootFS(t.Context(), sandboxID, "team-1",
+		&service.RebaseSandboxRootFSRequest{
+			OperationID: operationID, StartedAt: fixture.now,
+			TargetBaseArtifactDigest: targetDigest, RollbackTTL: int32Pointer(3600),
+		})
+	if err != nil || response == nil {
+		t.Fatalf("committed response with pending ack = %+v, %v", response, err)
+	}
+	if len(fixture.store.rebaseAcks) != 0 || len(fixture.pausedRebase.ackCalls) != 1 {
+		t.Fatalf("failed ack calls node=%d pg=%d", len(fixture.pausedRebase.ackCalls), len(fixture.store.rebaseAcks))
+	}
+
+	fixture.pausedRebase.ackErr = nil
+	if err := fixture.service.CompleteSandboxRootFSRebase(t.Context(), sandboxID); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.pausedRebase.resolveCalls) != 1 || len(fixture.pausedRebase.executeCalls) != 1 ||
+		len(fixture.store.rebasePublishes) != 1 || len(fixture.pausedRebase.ackCalls) != 2 ||
+		len(fixture.store.rebaseAcks) != 1 {
+		t.Fatalf("ack recovery resolve=%d execute=%d publish=%d node-ack=%d pg-ack=%d",
+			len(fixture.pausedRebase.resolveCalls), len(fixture.pausedRebase.executeCalls),
+			len(fixture.store.rebasePublishes), len(fixture.pausedRebase.ackCalls), len(fixture.store.rebaseAcks))
+	}
+}
+
+func TestServicePausedRootFSRebaseRetriesNodeResultAfterResponseLoss(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	operationID := "operation-paused-rebase-response-loss"
+	sandboxID, targetDigest := preparePausedNomadRebase(t, &fixture, operationID, time.Hour)
+	request := &service.RebaseSandboxRootFSRequest{
+		OperationID: operationID, StartedAt: fixture.now,
+		TargetBaseArtifactDigest: targetDigest, RollbackTTL: int32Pointer(3600),
+	}
+	fixture.pausedRebase.executeErr = errdefs.ErrUnavailable
+	_, err := fixture.service.RebaseSandboxRootFS(t.Context(), sandboxID, "team-1", request)
+	if !errors.Is(err, service.ErrSandboxLifecycleUnavailable) || len(fixture.store.rebasePublishes) != 0 {
+		t.Fatalf("response-loss error = %v publishes=%d", err, len(fixture.store.rebasePublishes))
+	}
+
+	fixture.pausedRebase.executeErr = nil
+	response, err := fixture.service.RebaseSandboxRootFS(t.Context(), sandboxID, "team-1", request)
+	if err != nil || response == nil {
+		t.Fatalf("response-loss retry = %+v, %v", response, err)
+	}
+	if len(fixture.pausedRebase.selectCalls) != 1 || len(fixture.pausedRebase.resolveCalls) != 1 ||
+		len(fixture.pausedRebase.executeCalls) != 2 || len(fixture.store.rebasePublishes) != 1 {
+		t.Fatalf("response-loss calls select=%d resolve=%d execute=%d publish=%d",
+			len(fixture.pausedRebase.selectCalls), len(fixture.pausedRebase.resolveCalls),
+			len(fixture.pausedRebase.executeCalls), len(fixture.store.rebasePublishes))
+	}
+}
+
+func TestServicePausedRootFSRebaseRejectsWorkerBeforeClaimCleanup(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	operationID := "operation-paused-rebase-delete-race"
+	sandboxID, targetDigest := preparePausedNomadRebase(t, &fixture, operationID, time.Hour)
+	request := &service.RebaseSandboxRootFSRequest{
+		OperationID: operationID, StartedAt: fixture.now,
+		TargetBaseArtifactDigest: targetDigest, RollbackTTL: int32Pointer(3600),
+	}
+	fixture.pausedRebase.executeErr = errdefs.ErrUnavailable
+	_, err := fixture.service.RebaseSandboxRootFS(t.Context(), sandboxID, "team-1", request)
+	if !errors.Is(err, service.ErrSandboxLifecycleUnavailable) {
+		t.Fatalf("initial worker dispatch error = %v", err)
+	}
+	if err := fixture.service.TerminateSandbox(t.Context(), sandboxID); err != nil {
+		t.Fatal(err)
+	}
+	fixture.pausedRebase.executeErr = nil
+	if err := fixture.service.CompleteSandboxRootFSRebase(t.Context(), sandboxID); err != nil {
+		t.Fatal(err)
+	}
+	if !fixture.store.rebaseCandidate.Rejected || fixture.store.rebaseCandidate.Completed ||
+		len(fixture.pausedRebase.executeCalls) != 1 || len(fixture.pausedRebase.rejectCalls) != 1 ||
+		len(fixture.store.rebaseRejects) != 1 || len(fixture.pausedRebase.ackCalls) != 1 ||
+		len(fixture.store.rebaseAcks) != 1 {
+		t.Fatalf("delete-race state rejected=%t completed=%t execute=%d reject=%d pg-reject=%d node-ack=%d pg-ack=%d",
+			fixture.store.rebaseCandidate.Rejected, fixture.store.rebaseCandidate.Completed,
+			len(fixture.pausedRebase.executeCalls), len(fixture.pausedRebase.rejectCalls),
+			len(fixture.store.rebaseRejects), len(fixture.pausedRebase.ackCalls), len(fixture.store.rebaseAcks))
+	}
+}
+
+func TestServicePausedRootFSRebaseRejectsCachedResultWhenDeleteWinsPublication(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	operationID := "operation-paused-rebase-delete-after-output"
+	sandboxID, targetDigest := preparePausedNomadRebase(t, &fixture, operationID, time.Hour)
+	fixture.store.rebasePublishErr = sandboxstore.ErrNomadPausedRebaseTerminating
+	_, err := fixture.service.RebaseSandboxRootFS(t.Context(), sandboxID, "team-1",
+		&service.RebaseSandboxRootFSRequest{
+			OperationID: operationID, StartedAt: fixture.now,
+			TargetBaseArtifactDigest: targetDigest, RollbackTTL: int32Pointer(3600),
+		})
+	if !k8serrors.IsConflict(err) {
+		t.Fatalf("delete-won publication error = %v", err)
+	}
+	if len(fixture.pausedRebase.executeCalls) != 1 || len(fixture.store.rebasePublishes) != 1 ||
+		len(fixture.pausedRebase.rejectCalls) != 1 || len(fixture.store.rebaseRejects) != 1 ||
+		len(fixture.pausedRebase.ackCalls) != 1 || len(fixture.store.rebaseAcks) != 1 {
+		t.Fatalf("delete-won calls execute=%d publish=%d reject=%d pg-reject=%d node-ack=%d pg-ack=%d",
+			len(fixture.pausedRebase.executeCalls), len(fixture.store.rebasePublishes),
+			len(fixture.pausedRebase.rejectCalls), len(fixture.store.rebaseRejects),
+			len(fixture.pausedRebase.ackCalls), len(fixture.store.rebaseAcks))
+	}
+}
+
+func TestServicePausedRootFSRebaseRejectsChangedRetryAndMissingWorker(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	operationID := "operation-paused-rebase-conflict"
+	sandboxID, targetDigest := preparePausedNomadRebase(t, &fixture, operationID, time.Hour)
+	request := &service.RebaseSandboxRootFSRequest{
+		OperationID: operationID, StartedAt: fixture.now,
+		TargetBaseArtifactDigest: targetDigest, RollbackTTL: int32Pointer(3600),
+	}
+	fixture.pausedRebase.executeErr = errdefs.ErrUnavailable
+	_, _ = fixture.service.RebaseSandboxRootFS(t.Context(), sandboxID, "team-1", request)
+
+	changed := *request
+	changed.RollbackTTL = int32Pointer(7200)
+	_, err := fixture.service.RebaseSandboxRootFS(t.Context(), sandboxID, "team-1", &changed)
+	if !k8serrors.IsConflict(err) {
+		t.Fatalf("changed retry error = %v, want conflict", err)
+	}
+
+	missing := newClaimServiceFixture(t)
+	missingID, missingTarget := preparePausedNomadRebase(t, &missing, "operation-no-worker", time.Hour)
+	missing.pausedRebase.selectErr = errdefs.ErrUnavailable
+	_, err = missing.service.RebaseSandboxRootFS(t.Context(), missingID, "team-1",
+		&service.RebaseSandboxRootFSRequest{
+			OperationID: "operation-no-worker", StartedAt: missing.now,
+			TargetBaseArtifactDigest: missingTarget, RollbackTTL: int32Pointer(3600),
+		})
+	if !errors.Is(err, service.ErrSandboxLifecycleUnavailable) || len(missing.store.rebaseRequests) != 0 {
+		t.Fatalf("missing worker error = %v requests=%d", err, len(missing.store.rebaseRequests))
+	}
+}
+
+func preparePausedNomadRebase(
+	t *testing.T,
+	fixture *claimServiceFixture,
+	operationID string,
+	rollbackTTL time.Duration,
+) (string, string) {
+	t.Helper()
+	claimed, err := fixture.service.ClaimSandbox(t.Context(), &service.ClaimRequest{
+		TeamID: "team-1", UserID: "user-1", Template: "default",
+		OperationID: "claim-" + operationID, StartedAt: fixture.now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := fixture.store.records[claimed.SandboxID]
+	record.DesiredState = sandboxstore.SandboxDesiredStatePaused
+	record.CurrentPodName = ""
+	record.CurrentPodNamespace = ""
+	sourceBaseRoot := digest.FromString(operationID + "-source-base").String()
+	sourceHead := digest.FromString(operationID + "-source-head").String()
+	targetBaseRoot := digest.FromString(operationID + "-target-base").String()
+	sourceArtifactDigest := digest.FromString(operationID + "-source-artifact").String()
+	targetArtifactDigest := digest.FromString(operationID + "-target-artifact").String()
+	sourceDescriptor := testNomadRebaseDescriptor(t, operationID+"-source", sourceHead)
+	sourceBaseDescriptor := testNomadRebaseDescriptor(t, operationID+"-source-base", sourceBaseRoot)
+	targetBaseDescriptor := testNomadRebaseDescriptor(t, operationID+"-target-base", targetBaseRoot)
+	deadline := fixture.now.Add(rollbackTTL).UTC().Truncate(time.Microsecond)
+	fixture.store.rebaseCandidate = &sandboxstore.NomadPausedRebaseCandidate{
+		LifecyclePhase: sandboxstore.SandboxLifecyclePhasePreparing,
+		Sandbox:        cloneClaimRecord(record),
+		Filesystem: &sandboxstore.RootFSFilesystem{
+			ID: "filesystem-" + operationID, TeamID: record.TeamID,
+			HeadGenerationID: "generation-source-" + operationID,
+			WriterEpoch:      7, StorageFormat: sandboxstore.RootFSStorageFormatBlockCOWV1,
+			BaseArtifactDigest: sourceArtifactDigest, FormatGeneration: 1,
+		},
+		SourceGeneration: &sandboxstore.RootFSGeneration{
+			ID: "generation-source-" + operationID, FilesystemID: "filesystem-" + operationID,
+			SourceOCIDigest:    digest.FromString(operationID + "-source-oci").String(),
+			BaseArtifactDigest: sourceArtifactDigest, BaseBlockRoot: sourceBaseRoot,
+			CurrentBlockHead: sourceHead, WriterEpoch: 7, FormatGeneration: 1,
+			DurabilityState: sandboxstore.RootFSGenerationStateS3Materialized,
+			LocatorVersion:  4, Descriptor: sourceDescriptor,
+		},
+		SourceBaseArtifact: &sandboxstore.RootFSBaseArtifact{
+			ArtifactDigest:  sourceArtifactDigest,
+			SourceOCIDigest: digest.FromString(operationID + "-source-oci").String(),
+			BaseBlockRoot:   sourceBaseRoot, FormatGeneration: 1, Descriptor: sourceBaseDescriptor,
+		},
+		TargetBaseArtifact: &sandboxstore.RootFSBaseArtifact{
+			ArtifactDigest:  targetArtifactDigest,
+			SourceOCIDigest: digest.FromString(operationID + "-target-oci").String(),
+			BaseBlockRoot:   targetBaseRoot, FormatGeneration: 1, Descriptor: targetBaseDescriptor,
+		},
+		TargetGenerationID: sandboxstore.NomadPausedRebaseGenerationID(
+			operationID, record.ID, "generation-source-"+operationID, targetArtifactDigest,
+		),
+		TargetWriterEpoch: 8, RollbackExpiresAt: deadline,
+		WorkerClusterID: record.ClusterID, WorkerNodeID: fixture.pausedRebase.target.NodeID,
+		WorkerNodeUID: fixture.pausedRebase.target.NodeUID,
+	}
+	workerRequest, err := nomadPausedRebaseWorkerRequest(operationID, fixture.store.rebaseCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestDigest, err := workerRequest.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := sha256.Sum256([]byte(operationID + "-health"))
+	apply := rootfsrebase.ApplyResult{
+		Version: rootfsrebase.ApplyResultVersion, TargetNodeCount: 1,
+		OldManifestDigest:    testHexDigest(operationID + "-old"),
+		SourceManifestDigest: testHexDigest(operationID + "-source"),
+		DiffDigest:           testHexDigest(operationID + "-diff"),
+		TargetManifestDigest: testHexDigest(operationID + "-target"),
+		HealthProof:          hex.EncodeToString(health[:]),
+	}
+	fixture.pausedRebase.result = rootfsrebase.WorkerResult{
+		Version: rootfsrebase.WorkerProtocolVersion, RequestDigest: requestDigest,
+		GenerationID: workerRequest.TargetGenerationID, FilesystemID: workerRequest.FilesystemID,
+		ParentGenerationID: workerRequest.SourceGenerationID,
+		SourceOCIDigest:    workerRequest.TargetSourceOCIDigest,
+		BaseArtifactDigest: workerRequest.TargetBaseArtifactDigest,
+		BaseBlockRoot:      workerRequest.TargetBaseBlockRoot, CurrentBlockHead: workerRequest.TargetBaseBlockRoot,
+		WriterEpoch: workerRequest.TargetWriterEpoch, FormatGeneration: workerRequest.TargetFormatGeneration,
+		DurabilityState: rootfsblock.DurabilityS3, LocatorVersion: workerRequest.SourceLocatorVersion + 1,
+		Descriptor:        append([]byte(nil), workerRequest.TargetBaseDescriptor...),
+		HealthCheckDigest: health[:], Apply: apply,
+	}
+	if err := fixture.pausedRebase.result.SealProof(); err != nil {
+		t.Fatal(err)
+	}
+	return record.ID, targetArtifactDigest
+}
+
+func testNomadRebaseDescriptor(t *testing.T, suffix, root string) []byte {
+	t.Helper()
+	payload, err := rootfsblock.EncodeDescriptor(rootfsblock.Descriptor{
+		Version: rootfsblock.DescriptorVersion, LogicalSizeBytes: 8 * rootfsblock.LogicalBlockSize,
+		BlockSizeBytes: rootfsblock.LogicalBlockSize,
+		MappingRoot: rootfsblock.MappingRootLocator{
+			Version: rootfsblock.MappingPageVersion, RootDigest: root,
+			Object: rootfsblock.ObjectRange{
+				Key: "rootfs/rebase/" + suffix + "/map", Length: 4096,
+				Checksum: digest.FromString(suffix + "-map").String(),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func testHexDigest(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func int32Pointer(value int32) *int32 {
+	return &value
+}
+
 func preparePausedNomadResume(t *testing.T, fixture claimServiceFixture) string {
 	t.Helper()
 	claimed, err := fixture.service.ClaimSandbox(context.Background(), &service.ClaimRequest{
@@ -1381,14 +1861,15 @@ func preparePausedNomadResume(t *testing.T, fixture claimServiceFixture) string 
 }
 
 type claimServiceFixture struct {
-	service     *Service
-	store       *fakeClaimStore
-	planner     *fakePlanner
-	allocation  *fakeAllocationStopper
-	runningFork *fakeRunningForkController
-	quotaLimits *fakeQuotaLimitStore
-	profile     Profile
-	now         time.Time
+	service      *Service
+	store        *fakeClaimStore
+	planner      *fakePlanner
+	allocation   *fakeAllocationStopper
+	runningFork  *fakeRunningForkController
+	pausedRebase *fakePausedRebaseController
+	quotaLimits  *fakeQuotaLimitStore
+	profile      Profile
+	now          time.Time
 }
 
 type fakeRunningForkController struct {
@@ -1397,6 +1878,76 @@ type fakeRunningForkController struct {
 	onCall   func()
 	targets  []protocol.NodeChannelTarget
 	requests []protocol.NodeRunningForkControlRequest
+}
+
+type fakePausedRebaseController struct {
+	target       protocol.NodeChannelTarget
+	selectErr    error
+	resolveErr   error
+	result       rootfsrebase.WorkerResult
+	executeErr   error
+	rejectErr    error
+	ackErr       error
+	selectCalls  [][2]string
+	resolveCalls [][3]string
+	executeCalls []protocol.NodePausedRebaseControlRequest
+	rejectCalls  []protocol.NodePausedRebaseControlRequest
+	ackCalls     []protocol.NodePausedRebaseControlRequest
+}
+
+func (f *fakePausedRebaseController) SelectPausedRebaseNode(
+	_ context.Context,
+	clusterID, operationID string,
+) (protocol.NodeChannelTarget, error) {
+	f.selectCalls = append(f.selectCalls, [2]string{clusterID, operationID})
+	return f.target, f.selectErr
+}
+
+func (f *fakePausedRebaseController) ResolvePausedRebaseNode(
+	_ context.Context,
+	clusterID, nodeID, nodeUID string,
+) (protocol.NodeChannelTarget, error) {
+	f.resolveCalls = append(f.resolveCalls, [3]string{clusterID, nodeID, nodeUID})
+	return f.target, f.resolveErr
+}
+
+func (f *fakePausedRebaseController) PausedRebase(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerResult, error) {
+	f.executeCalls = append(f.executeCalls, request)
+	return f.result, f.executeErr
+}
+
+func (f *fakePausedRebaseController) RejectPausedRebase(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	f.rejectCalls = append(f.rejectCalls, request)
+	if f.rejectErr != nil {
+		return rootfsrebase.WorkerRejection{}, f.rejectErr
+	}
+	return rootfsrebase.RejectWithoutResult(request.Worker)
+}
+
+func (f *fakePausedRebaseController) AcknowledgePausedRebase(
+	_ context.Context,
+	_ protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerAcknowledgement, error) {
+	f.ackCalls = append(f.ackCalls, request)
+	if f.ackErr != nil {
+		return rootfsrebase.WorkerAcknowledgement{}, f.ackErr
+	}
+	requestDigest, err := request.Worker.Digest()
+	if err != nil {
+		return rootfsrebase.WorkerAcknowledgement{}, err
+	}
+	return rootfsrebase.WorkerAcknowledgement{
+		RequestDigest: requestDigest, ProofDigest: request.AcknowledgeProofDigest,
+	}, nil
 }
 
 func (f *fakeRunningForkController) RunningFork(
@@ -1460,12 +2011,16 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	planner := &fakePlanner{}
 	allocation := &fakeAllocationStopper{}
 	runningFork := &fakeRunningForkController{}
+	pausedRebase := &fakePausedRebaseController{target: protocol.NodeChannelTarget{
+		ClusterID: "cluster-1", NodeID: "node-rebase-1", NodeUID: "node-rebase-uid-1", NodeBootID: "boot-rebase-1",
+	}}
 	quotaLimits := &fakeQuotaLimitStore{}
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	claimService, err := New(Config{
 		Store: store, Templates: &fakeTemplateStore{template: template},
 		Profiles: &ProfileCatalog{profiles: []Profile{profile}}, Planner: planner, Allocation: allocation,
 		RunningFork:     runningFork,
+		PausedRebase:    pausedRebase,
 		QuotaLimits:     quotaLimits,
 		NetworkPolicies: networkpolicy.NewNetworkPolicyService(zap.NewNop()),
 		ResourcePolicy:  templatepkg.NewResourcePolicy("1Gi", "8Gi"),
@@ -1477,7 +2032,8 @@ func newClaimServiceFixture(t *testing.T) claimServiceFixture {
 	}
 	return claimServiceFixture{
 		service: claimService, store: store, planner: planner, allocation: allocation, runningFork: runningFork,
-		quotaLimits: quotaLimits, profile: profile, now: now,
+		pausedRebase: pausedRebase,
+		quotaLimits:  quotaLimits, profile: profile, now: now,
 	}
 }
 
@@ -1490,6 +2046,37 @@ func cloneClaimRecord(record *sandboxstore.SandboxRecord) *sandboxstore.SandboxR
 		copy.Config = *config
 	}
 	copy.TemplateSpec = *record.TemplateSpec.DeepCopy()
+	return &copy
+}
+
+func cloneNomadPausedRebaseCandidate(
+	candidate *sandboxstore.NomadPausedRebaseCandidate,
+) *sandboxstore.NomadPausedRebaseCandidate {
+	if candidate == nil {
+		return nil
+	}
+	copy := *candidate
+	copy.Sandbox = cloneClaimRecord(candidate.Sandbox)
+	if candidate.Filesystem != nil {
+		filesystem := *candidate.Filesystem
+		copy.Filesystem = &filesystem
+	}
+	if candidate.SourceGeneration != nil {
+		generation := *candidate.SourceGeneration
+		generation.Descriptor = append([]byte(nil), candidate.SourceGeneration.Descriptor...)
+		copy.SourceGeneration = &generation
+	}
+	if candidate.SourceBaseArtifact != nil {
+		artifact := *candidate.SourceBaseArtifact
+		artifact.Descriptor = append([]byte(nil), candidate.SourceBaseArtifact.Descriptor...)
+		copy.SourceBaseArtifact = &artifact
+	}
+	if candidate.TargetBaseArtifact != nil {
+		artifact := *candidate.TargetBaseArtifact
+		artifact.Descriptor = append([]byte(nil), candidate.TargetBaseArtifact.Descriptor...)
+		copy.TargetBaseArtifact = &artifact
+	}
+	copy.WorkerProofDigest = append([]byte(nil), candidate.WorkerProofDigest...)
 	return &copy
 }
 

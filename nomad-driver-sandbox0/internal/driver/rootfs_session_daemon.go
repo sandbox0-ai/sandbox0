@@ -36,6 +36,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/hashicorp/go-hclog"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
@@ -74,6 +75,85 @@ type rootFSSessionDaemonRuntime interface {
 	FenceLocalRootFSWriter(context.Context, rootfshandoff.StageRequest, string, crashTaskObservation) (rootfshandoff.CrashFenceProof, error)
 	ReclaimVerifiedTerminal(context.Context, rootfshandoff.StageRequest) error
 	ReclaimExternallyRetired(context.Context, rootfshandoff.StageRequest) (bool, error)
+}
+
+type pausedRebaseRootFSRuntime interface {
+	ExecutePausedRebase(context.Context, rootfsrebase.WorkerRequest) (rootfsrebase.WorkerResult, error)
+	RejectPausedRebase(context.Context, rootfsrebase.WorkerRequest) (rootfsrebase.WorkerRejection, error)
+	AcknowledgePausedRebase(rootfsrebase.WorkerRequest, string) error
+}
+
+// RejectPausedRootFSRebase serializes termination with exact node execution.
+func (d *rootFSSessionDaemon) RejectPausedRootFSRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	if err := request.Validate(); err != nil || !request.Reject || request.AcknowledgeProofDigest != "" {
+		return rootfsrebase.WorkerRejection{},
+			fmt.Errorf("validate paused RootFS rebase rejection: %v: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if d == nil || d.runtime == nil || target.ClusterID != d.clusterID || target.NodeID != d.nodeID ||
+		target.NodeUID != d.nodeUID || target.SlotID != "" || target.AllocationID != "" || target.ControlEndpoint != "" {
+		return rootfsrebase.WorkerRejection{},
+			fmt.Errorf("paused RootFS rebase rejection target is invalid: %w", errdefs.ErrPermissionDenied)
+	}
+	runtime, ok := d.runtime.(pausedRebaseRootFSRuntime)
+	if !ok {
+		return rootfsrebase.WorkerRejection{},
+			fmt.Errorf("paused RootFS rebase runtime is unavailable: %w", errdefs.ErrFailedPrecondition)
+	}
+	return runtime.RejectPausedRebase(ctx, request.Worker)
+}
+
+// AcknowledgePausedRootFSRebase releases one exact cached node result after a
+// permanent regional outcome.
+func (d *rootFSSessionDaemon) AcknowledgePausedRootFSRebase(
+	_ context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) error {
+	if err := request.Validate(); err != nil || request.AcknowledgeProofDigest == "" {
+		return fmt.Errorf("validate paused RootFS rebase acknowledgement: %v: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if d == nil || d.runtime == nil || target.ClusterID != d.clusterID || target.NodeID != d.nodeID ||
+		target.NodeUID != d.nodeUID || target.SlotID != "" || target.AllocationID != "" || target.ControlEndpoint != "" {
+		return fmt.Errorf("paused RootFS rebase acknowledgement target is invalid: %w", errdefs.ErrPermissionDenied)
+	}
+	runtime, ok := d.runtime.(pausedRebaseRootFSRuntime)
+	if !ok {
+		return fmt.Errorf("paused RootFS rebase runtime is unavailable: %w", errdefs.ErrFailedPrecondition)
+	}
+	return runtime.AcknowledgePausedRebase(request.Worker, request.AcknowledgeProofDigest)
+}
+
+// ExecutePausedRootFSRebase runs an offline worker without consulting a
+// runtime-slot journal. The command is already bound to this authenticated
+// node boot and carries a PostgreSQL-created immutable pre-operation.
+func (d *rootFSSessionDaemon) ExecutePausedRootFSRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerResult, error) {
+	if err := request.Validate(); err != nil || request.Reject || request.AcknowledgeProofDigest != "" {
+		return rootfsrebase.WorkerResult{},
+			fmt.Errorf("validate paused RootFS rebase request: %w: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if d == nil || d.runtime == nil {
+		return rootfsrebase.WorkerResult{},
+			fmt.Errorf("paused RootFS rebase runtime is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	if target.ClusterID != d.clusterID || target.NodeID != d.nodeID || target.NodeUID != d.nodeUID ||
+		target.SlotID != "" || target.AllocationID != "" || target.ControlEndpoint != "" {
+		return rootfsrebase.WorkerResult{},
+			fmt.Errorf("paused RootFS rebase target does not match this daemon: %w", errdefs.ErrPermissionDenied)
+	}
+	runtime, ok := d.runtime.(pausedRebaseRootFSRuntime)
+	if !ok {
+		return rootfsrebase.WorkerResult{},
+			fmt.Errorf("paused RootFS rebase runtime is unavailable: %w", errdefs.ErrFailedPrecondition)
+	}
+	return runtime.ExecutePausedRebase(ctx, request.Worker)
 }
 
 type nomadAllocationSource interface {

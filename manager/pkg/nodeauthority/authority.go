@@ -19,6 +19,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotterminal"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 )
 
@@ -199,6 +200,66 @@ func (c *Component) RunningFork(
 		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("node authority is not initialized")
 	}
 	return c.hub.RunningFork(ctx, target, request)
+}
+
+// SelectPausedRebaseNode chooses a live worker before PostgreSQL binds its
+// durable NodeID and NodeUID.
+func (c *Component) SelectPausedRebaseNode(
+	_ context.Context,
+	clusterID, operationID string,
+) (protocol.NodeChannelTarget, error) {
+	if c == nil || c.hub == nil {
+		return protocol.NodeChannelTarget{}, fmt.Errorf("node authority is not initialized")
+	}
+	return c.hub.SelectPausedRebaseNode(clusterID, operationID)
+}
+
+// ResolvePausedRebaseNode resolves a PostgreSQL-bound worker to its current
+// authenticated boot without failing over to another durable node.
+func (c *Component) ResolvePausedRebaseNode(
+	_ context.Context,
+	clusterID, nodeID, nodeUID string,
+) (protocol.NodeChannelTarget, error) {
+	if c == nil || c.hub == nil {
+		return protocol.NodeChannelTarget{}, fmt.Errorf("node authority is not initialized")
+	}
+	return c.hub.ResolvePausedRebaseNode(clusterID, nodeID, nodeUID)
+}
+
+// PausedRebase executes one exact offline worker command.
+func (c *Component) PausedRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerResult, error) {
+	if c == nil || c.hub == nil {
+		return rootfsrebase.WorkerResult{}, fmt.Errorf("node authority is not initialized")
+	}
+	return c.hub.PausedRebase(ctx, target, request)
+}
+
+// RejectPausedRebase fences an exact worker and returns its durable outcome.
+func (c *Component) RejectPausedRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	if c == nil || c.hub == nil {
+		return rootfsrebase.WorkerRejection{}, fmt.Errorf("node authority is not initialized")
+	}
+	return c.hub.RejectPausedRebase(ctx, target, request)
+}
+
+// AcknowledgePausedRebase releases one exact cached worker result.
+func (c *Component) AcknowledgePausedRebase(
+	ctx context.Context,
+	target protocol.NodeChannelTarget,
+	request protocol.NodePausedRebaseControlRequest,
+) (rootfsrebase.WorkerAcknowledgement, error) {
+	if c == nil || c.hub == nil {
+		return rootfsrebase.WorkerAcknowledgement{}, fmt.Errorf("node authority is not initialized")
+	}
+	return c.hub.AcknowledgePausedRebase(ctx, target, request)
 }
 
 // RunTerminal waits for listener readiness, then runs the bounded terminal

@@ -159,6 +159,11 @@ type SandboxLifecycleTxn struct {
 	TargetRecordDigest       []byte
 	SourceBaseArtifactDigest string
 	TargetBaseArtifactDigest string
+	WorkerClusterID          string
+	WorkerNodeID             string
+	WorkerNodeUID            string
+	WorkerProofDigest        []byte
+	WorkerAcknowledgedAt     time.Time
 	ExpectedHeadLayerID      string
 	PreparedHeadLayerID      string
 	Error                    string
@@ -535,6 +540,21 @@ func (s *PGSandboxStore) GetActiveLifecycleTxn(ctx context.Context, sandboxID st
 	return getActiveLifecycleTxn(ctx, s.pool, sandboxID)
 }
 
+// GetLifecycleTxn returns one exact lifecycle operation, including committed
+// identity needed to finish node-side acknowledgement after response loss.
+func (s *PGSandboxStore) GetLifecycleTxn(ctx context.Context, txnID string) (*SandboxLifecycleTxn, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	txnID = strings.TrimSpace(txnID)
+	if txnID == "" || len(txnID) > 512 {
+		return nil, fmt.Errorf("lifecycle txn ID is required and must not exceed 512 bytes")
+	}
+	return scanLifecycleTxn(s.pool.QueryRow(ctx, lifecycleTxnSelectSQL()+`
+		WHERE txn_id = $1
+	`, txnID))
+}
+
 func (s *PGSandboxStore) ListHardExpiredSandboxes(ctx context.Context, now time.Time, limit int) ([]*SandboxRecord, error) {
 	if s == nil || s.pool == nil {
 		return nil, nil
@@ -594,6 +614,15 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID).Scan(&currentDesiredState, &teamID, &webhookURL, &webhookSecret)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("lock sandbox before marking deleted: %w", err)
+	}
+	if err == nil {
+		blocked, blockErr := sandboxClaimCleanupBlockedByPausedRebase(ctx, tx, sandboxID)
+		if blockErr != nil {
+			return blockErr
+		}
+		if blocked {
+			return fmt.Errorf("%w: paused RootFS rebase worker outcome is pending", ErrSandboxClaimCleanupPending)
+		}
 	}
 	if err == nil && currentDesiredState == SandboxDesiredStateTerminating && strings.TrimSpace(webhookURL) != "" {
 		if err := deletionwebhook.Enqueue(ctx, tx, sandboxID, teamID, webhookURL, webhookSecret, deletedAt); err != nil {
@@ -992,17 +1021,20 @@ func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifec
 			to_pod_namespace, to_pod_name,
 			target_sandbox_id, target_generation_id, target_record_digest,
 			source_base_artifact_digest, target_base_artifact_digest, rollback_expires_at,
+			worker_cluster_id, worker_node_id, worker_node_uid, worker_proof_digest,
 			expected_head_layer_id, prepared_head_layer_id,
 			created_at, updated_at
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-			COALESCE($16, ''::bytea), $17, $18, $19, $20, $21, NOW(), NOW())
+			COALESCE($16, ''::bytea), $17, $18, $19, $20, $21, $22,
+			COALESCE($23, ''::bytea), $24, $25, NOW(), NOW())
 	`, txn.ID, txn.SandboxID, txn.Kind, phase, source, txn.Cancelable, txn.Epoch,
 		txn.FromGeneration, txn.ToGeneration,
 		txn.FromPodNamespace, txn.FromPodName,
 		txn.ToPodNamespace, txn.ToPodName,
 		txn.TargetSandboxID, txn.TargetGenerationID, txn.TargetRecordDigest,
 		txn.SourceBaseArtifactDigest, txn.TargetBaseArtifactDigest, nullableTime(txn.RollbackExpiresAt),
+		txn.WorkerClusterID, txn.WorkerNodeID, txn.WorkerNodeUID, txn.WorkerProofDigest,
 		txn.ExpectedHeadLayerID, txn.PreparedHeadLayerID)
 	if err != nil {
 		return fmt.Errorf("begin lifecycle txn: %w", err)
@@ -1174,6 +1206,7 @@ func lifecycleTxnSelectSQL() string {
 			to_pod_namespace, to_pod_name,
 			target_sandbox_id, target_generation_id, target_record_digest,
 			source_base_artifact_digest, target_base_artifact_digest, rollback_expires_at,
+			worker_cluster_id, worker_node_id, worker_node_uid, worker_proof_digest, worker_acknowledged_at,
 			expected_head_layer_id, prepared_head_layer_id,
 			error, cancel_reason, created_at, updated_at,
 			cancel_requested_at, committed_at, aborted_at
@@ -1599,7 +1632,7 @@ func scanLifecycleTxnRows(rows pgx.Rows) (*SandboxLifecycleTxn, error) {
 
 func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, error) {
 	var txn SandboxLifecycleTxn
-	var cancelRequestedAt, committedAt, abortedAt, rollbackExpiresAt *time.Time
+	var cancelRequestedAt, committedAt, abortedAt, rollbackExpiresAt, workerAcknowledgedAt *time.Time
 	if err := scanner.Scan(
 		&txn.ID, &txn.SandboxID, &txn.Kind, &txn.Phase, &txn.Source, &txn.Cancelable, &txn.Epoch,
 		&txn.FromGeneration, &txn.ToGeneration,
@@ -1607,6 +1640,7 @@ func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, e
 		&txn.ToPodNamespace, &txn.ToPodName,
 		&txn.TargetSandboxID, &txn.TargetGenerationID, &txn.TargetRecordDigest,
 		&txn.SourceBaseArtifactDigest, &txn.TargetBaseArtifactDigest, &rollbackExpiresAt,
+		&txn.WorkerClusterID, &txn.WorkerNodeID, &txn.WorkerNodeUID, &txn.WorkerProofDigest, &workerAcknowledgedAt,
 		&txn.ExpectedHeadLayerID, &txn.PreparedHeadLayerID,
 		&txn.Error, &txn.CancelReason, &txn.CreatedAt, &txn.UpdatedAt,
 		&cancelRequestedAt, &committedAt, &abortedAt,
@@ -1617,6 +1651,7 @@ func scanLifecycleTxnInto(scanner sandboxRecordScanner) (*SandboxLifecycleTxn, e
 	txn.CommittedAt = derefTime(committedAt)
 	txn.AbortedAt = derefTime(abortedAt)
 	txn.RollbackExpiresAt = derefTime(rollbackExpiresAt)
+	txn.WorkerAcknowledgedAt = derefTime(workerAcknowledgedAt)
 	return &txn, nil
 }
 
@@ -1627,6 +1662,7 @@ func CloneSandboxLifecycleTxn(txn *SandboxLifecycleTxn) *SandboxLifecycleTxn {
 	}
 	clone := *txn
 	clone.TargetRecordDigest = append([]byte(nil), txn.TargetRecordDigest...)
+	clone.WorkerProofDigest = append([]byte(nil), txn.WorkerProofDigest...)
 	return &clone
 }
 

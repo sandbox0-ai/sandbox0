@@ -33,6 +33,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 	rootfssession "github.com/sandbox0-ai/sandbox0/pkg/rootfssession"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/rootfswriterauthority"
 )
@@ -68,6 +69,42 @@ type RootFSRuntime interface {
 	CaptureRunningFork(context.Context, rootfshandoff.StageRequest, rootfshandoff.RunningForkCheckpointRequest) (rootfshandoff.RunningForkCheckpointResult, error)
 	Retire(context.Context, rootfshandoff.StageRequest, string) (rootfssession.RetireResult, error)
 	CrashFence(context.Context, rootfshandoff.StageRequest, string, crashTaskObservation) (rootfshandoff.CrashFenceProof, error)
+}
+
+// ExecutePausedRebase runs one exact offline worker operation. Regional
+// publication and result acknowledgement are orchestrated by the caller.
+func (r *rootfsRuntime) ExecutePausedRebase(
+	ctx context.Context,
+	request rootfsrebase.WorkerRequest,
+) (rootfsrebase.WorkerResult, error) {
+	if r == nil || r.sessions == nil {
+		return rootfsrebase.WorkerResult{}, fmt.Errorf("RootFS session manager is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	return r.sessions.ExecuteRebase(ctx, request)
+}
+
+// RejectPausedRebase fences execution or reports an already-produced output
+// until the regional authority records its permanent rejection.
+func (r *rootfsRuntime) RejectPausedRebase(
+	ctx context.Context,
+	request rootfsrebase.WorkerRequest,
+) (rootfsrebase.WorkerRejection, error) {
+	if r == nil || r.sessions == nil {
+		return rootfsrebase.WorkerRejection{}, fmt.Errorf("RootFS session manager is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	return r.sessions.RejectRebase(ctx, request)
+}
+
+// AcknowledgePausedRebase discards one exact cached worker output only after
+// the regional transaction has reached a permanent outcome.
+func (r *rootfsRuntime) AcknowledgePausedRebase(
+	request rootfsrebase.WorkerRequest,
+	proofDigest string,
+) error {
+	if r == nil || r.sessions == nil {
+		return fmt.Errorf("RootFS session manager is unavailable: %w", errdefs.ErrUnavailable)
+	}
+	return r.sessions.AcknowledgeRebase(request, proofDigest)
 }
 
 func (r *rootfsRuntime) CaptureRunningFork(

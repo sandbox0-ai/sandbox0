@@ -502,6 +502,16 @@ func (s *PGSandboxStore) FenceSandboxRuntimeClaimForCleanup(
 	if claim.OperationID != operationID {
 		return nil, fmt.Errorf("%w: cleanup operation identity changed", ErrSandboxClaimReservationConflict)
 	}
+	blocked, err := sandboxClaimCleanupBlockedByPausedRebase(ctx, tx, record.ID)
+	if err != nil {
+		return nil, err
+	}
+	if blocked {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit paused-rebase cleanup fence retry: %w", err)
+		}
+		return nil, nil
+	}
 	if claim.Phase == SandboxRuntimeClaimPhaseReady || claim.Phase == SandboxRuntimeClaimPhaseCleaned {
 		return nil, nil
 	}
@@ -554,7 +564,9 @@ func abortConflictingSandboxLifecycleForClaimCleanup(
 			lifecycle.FromGeneration == record.RuntimeGeneration &&
 			lifecycle.FromPodNamespace == record.CurrentPodNamespace &&
 			lifecycle.FromPodName == record.CurrentPodName
-		if preserveTerminalWriter {
+		preservePausedRebaseWorker := lifecycle.Kind == SandboxLifecycleKindRebase &&
+			lifecycle.WorkerClusterID != "" && lifecycle.WorkerNodeID != "" && lifecycle.WorkerNodeUID != ""
+		if preserveTerminalWriter || preservePausedRebaseWorker {
 			return nil
 		}
 		tag, err := tx.Exec(ctx, `
@@ -592,6 +604,30 @@ func abortConflictingSandboxLifecycleForClaimCleanup(
 		}
 	}
 	return nil
+}
+
+func sandboxClaimCleanupBlockedByPausedRebase(
+	ctx context.Context,
+	tx pgx.Tx,
+	sandboxID string,
+) (bool, error) {
+	var blocked bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM manager.sandbox_lifecycle_txns
+			WHERE sandbox_id = $1 AND kind = $2
+				AND (
+					phase IN ('preparing', 'barriered', 'publishing', 'committing')
+					OR (phase IN ('committed', 'aborted')
+						AND worker_acknowledged_at IS NULL
+						AND octet_length(worker_proof_digest) = $3)
+				)
+		)
+	`, sandboxID, SandboxLifecycleKindRebase, 32).Scan(&blocked); err != nil {
+		return false, fmt.Errorf("check paused-rebase cleanup fence: %w", err)
+	}
+	return blocked, nil
 }
 
 // lockInboundNomadRunningForkForTargetCleanup establishes the same

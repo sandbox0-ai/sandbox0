@@ -89,6 +89,7 @@ func buildNomadSandboxRuntimeBackend(cfg *config.ManagerConfig, deps sandboxRunt
 		Store: deps.store, Templates: deps.templates, Profiles: profiles, Planner: planner,
 		Allocation:      deps.nodeAuthority.NomadAllocationController(),
 		RunningFork:     deps.nodeAuthority,
+		PausedRebase:    deps.nodeAuthority,
 		QuotaLimits:     deps.quotaLimits,
 		NetworkPolicies: deps.networkPolicies, ResourcePolicy: deps.resourcePolicy,
 		ClaimTTL: claim.ClaimTTL.Duration, DefaultTTL: deps.defaultTTL,

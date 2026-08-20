@@ -32,9 +32,10 @@ const (
 var rootFSPlatformPartPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 
 var (
-	ErrRootFSBaseArtifactNotFound = errors.New("rootfs base artifact not found")
-	ErrRootFSBaseArtifactConflict = errors.New("rootfs base artifact conflict")
-	ErrRootFSGenerationConflict   = errors.New("rootfs generation conflict")
+	ErrRootFSBaseArtifactNotFound   = errors.New("rootfs base artifact not found")
+	ErrRootFSBaseArtifactConflict   = errors.New("rootfs base artifact conflict")
+	ErrRootFSGenerationConflict     = errors.New("rootfs generation conflict")
+	ErrNomadPausedRebaseTerminating = errors.New("nomad paused rebase sandbox is terminating")
 )
 
 // PublishPausedRootFSRebaseRequest publishes the output of a privileged,
@@ -49,6 +50,10 @@ type PublishPausedRootFSRebaseRequest struct {
 	Generation                 *RootFSGeneration
 	HealthCheckDigest          []byte
 	RollbackExpiresAt          time.Time
+	WorkerClusterID            string
+	WorkerNodeID               string
+	WorkerNodeUID              string
+	WorkerProofDigest          []byte
 }
 
 // RootFSBaseArtifact is an immutable, trusted OCI-to-block conversion shared
@@ -159,6 +164,11 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 		if !ok {
 			return fmt.Errorf("paused rootfs rebase requires a PostgreSQL transaction")
 		}
+		if record != nil && record.TeamID == normalized.TeamID &&
+			record.RuntimeBackend == SandboxRuntimeBackendNomad &&
+			record.DesiredState == SandboxDesiredStateTerminating && record.DeletedAt.IsZero() {
+			return ErrNomadPausedRebaseTerminating
+		}
 		if record == nil || record.TeamID != normalized.TeamID || record.RuntimeBackend != SandboxRuntimeBackendNomad ||
 			record.DesiredState != SandboxDesiredStatePaused || !record.DeletedAt.IsZero() ||
 			record.CurrentPodNamespace != "" || record.CurrentPodName != "" {
@@ -209,7 +219,8 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 		}
 		if !nomadPausedRebaseLifecycleMatches(
 			lifecycle, record, source, sourceArtifact, artifact,
-			normalized.Generation.ID, normalized.RollbackExpiresAt, false,
+			normalized.Generation.ID, normalized.RollbackExpiresAt,
+			normalized.WorkerClusterID, normalized.WorkerNodeID, normalized.WorkerNodeUID, false,
 		) || lifecycle.ID != normalized.OperationID ||
 			normalized.ExpectedSourceGenerationID != lifecycle.ExpectedHeadLayerID ||
 			normalized.ExpectedBaseArtifactDigest != lifecycle.SourceBaseArtifactDigest {
@@ -287,6 +298,20 @@ func (s *PGSandboxStore) PublishPausedRootFSRebase(
 			source.ID, normalized.Generation.ID, normalized.HealthCheckDigest,
 			nullableTime(normalized.RollbackExpiresAt)); pinErr != nil {
 			return fmt.Errorf("retain paused rootfs rebase rollback: %w", pinErr)
+		}
+		proofTag, proofErr := txStore.tx.Exec(lockCtx, `
+			UPDATE manager.sandbox_lifecycle_txns
+			SET worker_proof_digest = $2,
+				updated_at = NOW()
+			WHERE txn_id = $1
+				AND phase IN ('preparing', 'barriered', 'publishing', 'committing')
+				AND octet_length(worker_proof_digest) = 0
+		`, lifecycle.ID, normalized.WorkerProofDigest)
+		if proofErr != nil {
+			return fmt.Errorf("persist paused rootfs rebase worker proof: %w", proofErr)
+		}
+		if proofTag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: paused rebase worker proof changed", ErrRootFSGenerationConflict)
 		}
 		if lifecycleErr := locked.CommitLifecycleTxn(
 			lockCtx, lifecycle.ID, normalized.Generation.ID,
@@ -680,14 +705,19 @@ func validatePublishPausedRootFSRebaseRequest(req *PublishPausedRootFSRebaseRequ
 	normalized.OperationID = strings.TrimSpace(req.OperationID)
 	normalized.ExpectedSourceGenerationID = strings.TrimSpace(req.ExpectedSourceGenerationID)
 	normalized.ExpectedBaseArtifactDigest = strings.TrimSpace(req.ExpectedBaseArtifactDigest)
+	normalized.WorkerClusterID = strings.TrimSpace(req.WorkerClusterID)
+	normalized.WorkerNodeID = strings.TrimSpace(req.WorkerNodeID)
+	normalized.WorkerNodeUID = strings.TrimSpace(req.WorkerNodeUID)
 	normalized.HealthCheckDigest = append([]byte(nil), req.HealthCheckDigest...)
+	normalized.WorkerProofDigest = append([]byte(nil), req.WorkerProofDigest...)
 	if req.RollbackExpiresAt.IsZero() {
 		return nil, fmt.Errorf("rollback_expires_at is required")
 	}
 	normalized.RollbackExpiresAt = req.RollbackExpiresAt.UTC().Truncate(time.Microsecond)
 	if normalized.SandboxID == "" || normalized.TeamID == "" || normalized.OperationID == "" ||
-		normalized.ExpectedSourceGenerationID == "" || normalized.ExpectedBaseArtifactDigest == "" {
-		return nil, fmt.Errorf("sandbox_id, team_id, operation_id, expected source generation, and expected Base artifact are required")
+		normalized.ExpectedSourceGenerationID == "" || normalized.ExpectedBaseArtifactDigest == "" ||
+		normalized.WorkerClusterID == "" || normalized.WorkerNodeID == "" || normalized.WorkerNodeUID == "" {
+		return nil, fmt.Errorf("sandbox, team, operation, source, Base, and worker identities are required")
 	}
 	if parsed, err := digest.Parse(normalized.ExpectedBaseArtifactDigest); err != nil ||
 		parsed.Algorithm() != digest.SHA256 || parsed.String() != normalized.ExpectedBaseArtifactDigest {
@@ -695,6 +725,9 @@ func validatePublishPausedRootFSRebaseRequest(req *PublishPausedRootFSRebaseRequ
 	}
 	if len(normalized.HealthCheckDigest) != sha256.Size {
 		return nil, fmt.Errorf("health_check_digest must be a 32-byte SHA-256 digest")
+	}
+	if len(normalized.WorkerProofDigest) != sha256.Size {
+		return nil, fmt.Errorf("worker_proof_digest must be a 32-byte SHA-256 digest")
 	}
 	generation, err := normalizeDurableRootFSGeneration(req.Generation, normalized.ExpectedSourceGenerationID)
 	if err != nil {
@@ -854,6 +887,9 @@ func committedNomadPausedRebaseLifecycleMatchesRequest(
 		lifecycle.ExpectedHeadLayerID == request.ExpectedSourceGenerationID &&
 		lifecycle.SourceBaseArtifactDigest == request.ExpectedBaseArtifactDigest &&
 		lifecycle.TargetBaseArtifactDigest == request.Generation.BaseArtifactDigest &&
+		lifecycle.WorkerClusterID == request.WorkerClusterID &&
+		lifecycle.WorkerNodeID == request.WorkerNodeID && lifecycle.WorkerNodeUID == request.WorkerNodeUID &&
+		bytes.Equal(lifecycle.WorkerProofDigest, request.WorkerProofDigest) &&
 		lifecycle.RollbackExpiresAt.Equal(request.RollbackExpiresAt)
 }
 

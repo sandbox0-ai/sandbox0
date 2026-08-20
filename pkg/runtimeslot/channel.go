@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsrebase"
 )
 
 const (
@@ -30,6 +32,7 @@ const (
 	NodeChannelCommandClaim          NodeChannelCommandKind = "claim"
 	NodeChannelCommandCommandReady   NodeChannelCommandKind = "command_ready"
 	NodeChannelCommandRunningFork    NodeChannelCommandKind = "running_fork"
+	NodeChannelCommandPausedRebase   NodeChannelCommandKind = "paused_rebase"
 	NodeChannelCommandCleanup        NodeChannelCommandKind = "cleanup"
 )
 
@@ -77,16 +80,20 @@ func (h NodeChannelHello) Validate() error {
 			return err
 		}
 	}
-	capabilities := h.Capabilities
+	capabilities := append([]NodeChannelCommandKind(nil), h.Capabilities...)
 	if len(capabilities) > 0 && capabilities[0] == NodeChannelCommandNetworkPrepare {
 		capabilities = capabilities[1:]
 	}
-	if len(capabilities) != 3 && len(capabilities) != 4 {
+	if len(capabilities) < 3 || len(capabilities) > 5 ||
+		capabilities[0] != NodeChannelCommandClaim || capabilities[1] != NodeChannelCommandCommandReady ||
+		capabilities[len(capabilities)-1] != NodeChannelCommandCleanup {
 		return fmt.Errorf("node channel capabilities are incomplete")
 	}
-	if capabilities[0] != NodeChannelCommandClaim || capabilities[1] != NodeChannelCommandCommandReady ||
-		capabilities[len(capabilities)-1] != NodeChannelCommandCleanup ||
-		(len(capabilities) == 4 && capabilities[2] != NodeChannelCommandRunningFork) {
+	optional := capabilities[2 : len(capabilities)-1]
+	if len(optional) == 1 && optional[0] != NodeChannelCommandRunningFork && optional[0] != NodeChannelCommandPausedRebase {
+		return fmt.Errorf("node channel capabilities must use the canonical order")
+	}
+	if len(optional) == 2 && (optional[0] != NodeChannelCommandRunningFork || optional[1] != NodeChannelCommandPausedRebase) {
 		return fmt.Errorf("node channel capabilities must use the canonical order")
 	}
 	return nil
@@ -144,6 +151,21 @@ func (t NodeChannelTarget) validate(withControl bool) error {
 	return nil
 }
 
+func (t NodeChannelTarget) validateNodeOnly() error {
+	for name, value := range map[string]string{
+		"cluster_id": t.ClusterID, "node_id": t.NodeID,
+		"node_uid": t.NodeUID, "node_boot_id": t.NodeBootID,
+	} {
+		if err := validateRequiredID(name, value); err != nil {
+			return err
+		}
+	}
+	if t.SlotID != "" || t.AllocationID != "" || t.ControlEndpoint != "" {
+		return fmt.Errorf("node-only channel target must not contain runtime slot identity")
+	}
+	return nil
+}
+
 // NodeChannelCommand contains exactly one operation. RequestID is the
 // canonical digest of every target and request byte, so a delayed response
 // cannot satisfy another command.
@@ -156,7 +178,34 @@ type NodeChannelCommand struct {
 	Claim          *NodeClaimControlRequest          `json:"claim,omitempty"`
 	CommandReady   *CommandReadyControlRequest       `json:"command_ready,omitempty"`
 	RunningFork    *NodeRunningForkControlRequest    `json:"running_fork,omitempty"`
+	PausedRebase   *NodePausedRebaseControlRequest   `json:"paused_rebase,omitempty"`
 	Cleanup        *NodeCleanupControlRequest        `json:"cleanup,omitempty"`
+}
+
+// NodePausedRebaseControlRequest carries exact PostgreSQL pre-operation
+// authority to one root-owned offline worker. It has no runtime-slot binding.
+type NodePausedRebaseControlRequest struct {
+	Worker                 rootfsrebase.WorkerRequest `json:"worker"`
+	Reject                 bool                       `json:"reject,omitempty"`
+	AcknowledgeProofDigest string                     `json:"acknowledge_proof_digest,omitempty"`
+}
+
+// Validate rejects an incomplete offline worker command.
+func (r NodePausedRebaseControlRequest) Validate() error {
+	if err := r.Worker.Validate(); err != nil {
+		return err
+	}
+	if r.Reject && r.AcknowledgeProofDigest != "" {
+		return fmt.Errorf("paused-rebase rejection and acknowledgement are mutually exclusive")
+	}
+	if r.AcknowledgeProofDigest == "" {
+		return nil
+	}
+	parsed, err := digest.Parse(r.AcknowledgeProofDigest)
+	if err != nil || parsed.Algorithm() != digest.SHA256 || parsed.String() != r.AcknowledgeProofDigest {
+		return fmt.Errorf("acknowledge_proof_digest must be a canonical sha256 digest")
+	}
+	return nil
 }
 
 // NodeRunningForkControlRequest binds a manager-triggered live checkpoint to
@@ -302,6 +351,19 @@ func NewNodeChannelRunningForkCommand(
 	return sealNodeChannelCommand(command)
 }
 
+// NewNodeChannelPausedRebaseCommand builds an exact offline RootFS rebase
+// command for an authenticated node boot.
+func NewNodeChannelPausedRebaseCommand(
+	target NodeChannelTarget,
+	request NodePausedRebaseControlRequest,
+) (NodeChannelCommand, error) {
+	command := NodeChannelCommand{
+		Version: NodeChannelVersion, Kind: NodeChannelCommandPausedRebase,
+		Target: target, PausedRebase: &request,
+	}
+	return sealNodeChannelCommand(command)
+}
+
 // NewNodeChannelCleanupCommand builds an exact plugin-independent cleanup.
 func NewNodeChannelCleanupCommand(target NodeChannelTarget, request NodeCleanupControlRequest) (NodeChannelCommand, error) {
 	command := NodeChannelCommand{
@@ -340,7 +402,7 @@ func (c NodeChannelCommand) Validate() error {
 	}
 	switch c.Kind {
 	case NodeChannelCommandNetworkPrepare:
-		if c.NetworkPrepare == nil || c.Claim != nil || c.CommandReady != nil || c.RunningFork != nil || c.Cleanup != nil {
+		if c.NetworkPrepare == nil || c.payloadCount() != 1 {
 			return fmt.Errorf("network-prepare command must contain only a network request")
 		}
 		if err := c.Target.validate(false); err != nil {
@@ -356,7 +418,7 @@ func (c NodeChannelCommand) Validate() error {
 			return fmt.Errorf("network-prepare request does not match the node channel target")
 		}
 	case NodeChannelCommandClaim:
-		if c.Claim == nil || c.NetworkPrepare != nil || c.CommandReady != nil || c.RunningFork != nil || c.Cleanup != nil {
+		if c.Claim == nil || c.payloadCount() != 1 {
 			return fmt.Errorf("claim command must contain only a claim request")
 		}
 		if err := c.Target.validate(true); err != nil {
@@ -371,7 +433,7 @@ func (c NodeChannelCommand) Validate() error {
 			return fmt.Errorf("claim request does not match the node channel target")
 		}
 	case NodeChannelCommandCommandReady:
-		if c.CommandReady == nil || c.NetworkPrepare != nil || c.Claim != nil || c.RunningFork != nil || c.Cleanup != nil {
+		if c.CommandReady == nil || c.payloadCount() != 1 {
 			return fmt.Errorf("command-ready command must contain only a command-ready request")
 		}
 		if err := c.Target.validate(true); err != nil {
@@ -384,7 +446,7 @@ func (c NodeChannelCommand) Validate() error {
 			return fmt.Errorf("command-ready request does not match the node channel target")
 		}
 	case NodeChannelCommandRunningFork:
-		if c.RunningFork == nil || c.NetworkPrepare != nil || c.Claim != nil || c.CommandReady != nil || c.Cleanup != nil {
+		if c.RunningFork == nil || c.payloadCount() != 1 {
 			return fmt.Errorf("running-fork command must contain only a running-fork request")
 		}
 		if err := c.Target.validate(false); err != nil {
@@ -393,8 +455,18 @@ func (c NodeChannelCommand) Validate() error {
 		if err := c.RunningFork.Validate(); err != nil {
 			return fmt.Errorf("running-fork request: %w", err)
 		}
+	case NodeChannelCommandPausedRebase:
+		if c.PausedRebase == nil || c.payloadCount() != 1 {
+			return fmt.Errorf("paused-rebase command must contain only a rebase request")
+		}
+		if err := c.Target.validateNodeOnly(); err != nil {
+			return err
+		}
+		if err := c.PausedRebase.Validate(); err != nil {
+			return fmt.Errorf("paused-rebase request: %w", err)
+		}
 	case NodeChannelCommandCleanup:
-		if c.Cleanup == nil || c.NetworkPrepare != nil || c.Claim != nil || c.CommandReady != nil || c.RunningFork != nil {
+		if c.Cleanup == nil || c.payloadCount() != 1 {
 			return fmt.Errorf("cleanup command must contain only a cleanup request")
 		}
 		if err := c.Target.validate(false); err != nil {
@@ -413,6 +485,19 @@ func (c NodeChannelCommand) Validate() error {
 		return fmt.Errorf("unsupported node channel command kind %q", c.Kind)
 	}
 	return nil
+}
+
+func (c NodeChannelCommand) payloadCount() int {
+	count := 0
+	for _, present := range []bool{
+		c.NetworkPrepare != nil, c.Claim != nil, c.CommandReady != nil,
+		c.RunningFork != nil, c.PausedRebase != nil, c.Cleanup != nil,
+	} {
+		if present {
+			count++
+		}
+	}
+	return count
 }
 
 func (c NodeChannelCommand) digest() (string, error) {
@@ -434,6 +519,9 @@ type NodeChannelResult struct {
 	NetworkPolicyToken *rootfshandoff.NetworkPolicyToken          `json:"network_policy_token,omitempty"`
 	ControlResponse    *NodeControlResponse                       `json:"control_response,omitempty"`
 	RunningFork        *rootfshandoff.RunningForkCheckpointResult `json:"running_fork,omitempty"`
+	PausedRebase       *rootfsrebase.WorkerResult                 `json:"paused_rebase,omitempty"`
+	PausedRebaseReject *rootfsrebase.WorkerRejection              `json:"paused_rebase_rejection,omitempty"`
+	PausedRebaseAck    *rootfsrebase.WorkerAcknowledgement        `json:"paused_rebase_ack,omitempty"`
 	CleanupProof       *NodeCleanupControlProof                   `json:"cleanup_proof,omitempty"`
 	Error              string                                     `json:"error,omitempty"`
 	ErrorClass         NodeChannelErrorClass                      `json:"error_class,omitempty"`
@@ -449,14 +537,14 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 	}
 	if r.Error != "" || r.ErrorClass != "" {
 		if strings.TrimSpace(r.Error) != r.Error || r.Error == "" || len(r.Error) > NodeChannelMaxError ||
-			!r.ErrorClass.valid() || r.NetworkPolicyToken != nil || r.ControlResponse != nil || r.RunningFork != nil || r.CleanupProof != nil {
+			!r.ErrorClass.valid() || r.payloadCount() != 0 {
 			return fmt.Errorf("node channel error result is invalid")
 		}
 		return nil
 	}
 	switch command.Kind {
 	case NodeChannelCommandNetworkPrepare:
-		if r.NetworkPolicyToken == nil || r.ControlResponse != nil || r.RunningFork != nil || r.CleanupProof != nil {
+		if r.NetworkPolicyToken == nil || r.payloadCount() != 1 {
 			return fmt.Errorf("node channel network policy result is incomplete")
 		}
 		if err := r.NetworkPolicyToken.Validate(); err != nil {
@@ -472,12 +560,12 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 		}
 		return nil
 	case NodeChannelCommandClaim, NodeChannelCommandCommandReady:
-		if r.ControlResponse == nil || r.NetworkPolicyToken != nil || r.RunningFork != nil || r.CleanupProof != nil {
+		if r.ControlResponse == nil || r.payloadCount() != 1 {
 			return fmt.Errorf("node channel control result is incomplete")
 		}
 		return r.ControlResponse.Validate()
 	case NodeChannelCommandRunningFork:
-		if r.RunningFork == nil || r.NetworkPolicyToken != nil || r.ControlResponse != nil || r.CleanupProof != nil {
+		if r.RunningFork == nil || r.payloadCount() != 1 {
 			return fmt.Errorf("node channel running-fork result is incomplete")
 		}
 		if err := r.RunningFork.Validate(); err != nil {
@@ -496,8 +584,30 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 			return fmt.Errorf("node channel running-fork result belongs to another writer or target")
 		}
 		return nil
+	case NodeChannelCommandPausedRebase:
+		if command.PausedRebase.Reject {
+			if r.PausedRebaseReject == nil || r.payloadCount() != 1 {
+				return fmt.Errorf("node channel paused-rebase rejection is incomplete")
+			}
+			return r.PausedRebaseReject.ValidateFor(command.PausedRebase.Worker)
+		}
+		if command.PausedRebase.AcknowledgeProofDigest == "" {
+			if r.PausedRebase == nil || r.payloadCount() != 1 {
+				return fmt.Errorf("node channel paused-rebase result is incomplete")
+			}
+			if err := r.PausedRebase.ValidateFor(command.PausedRebase.Worker); err != nil {
+				return fmt.Errorf("node channel paused-rebase result is invalid: %w", err)
+			}
+			return nil
+		}
+		if r.PausedRebaseAck == nil || r.payloadCount() != 1 {
+			return fmt.Errorf("node channel paused-rebase acknowledgement is incomplete")
+		}
+		return r.PausedRebaseAck.ValidateFor(
+			command.PausedRebase.Worker, command.PausedRebase.AcknowledgeProofDigest,
+		)
 	case NodeChannelCommandCleanup:
-		if r.CleanupProof == nil || r.NetworkPolicyToken != nil || r.ControlResponse != nil || r.RunningFork != nil {
+		if r.CleanupProof == nil || r.payloadCount() != 1 {
 			return fmt.Errorf("node channel cleanup result is incomplete")
 		}
 		if err := r.CleanupProof.Validate(); err != nil {
@@ -510,6 +620,20 @@ func (r NodeChannelResult) ValidateFor(command NodeChannelCommand) error {
 	default:
 		return fmt.Errorf("unsupported node channel result kind %q", command.Kind)
 	}
+}
+
+func (r NodeChannelResult) payloadCount() int {
+	count := 0
+	for _, present := range []bool{
+		r.NetworkPolicyToken != nil, r.ControlResponse != nil, r.RunningFork != nil,
+		r.PausedRebase != nil, r.PausedRebaseReject != nil,
+		r.PausedRebaseAck != nil, r.CleanupProof != nil,
+	} {
+		if present {
+			count++
+		}
+	}
+	return count
 }
 
 func (c NodeChannelErrorClass) valid() bool {

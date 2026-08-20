@@ -121,3 +121,52 @@ func TestForkSandboxUsesRuntimeBackendAndSignedOperation(t *testing.T) {
 			forker.sourceID, forker.teamID, forker.userID, forker.request)
 	}
 }
+
+type recordingSandboxRootFSRebaser struct {
+	sandboxID string
+	teamID    string
+	request   *service.RebaseSandboxRootFSRequest
+}
+
+func (r *recordingSandboxRootFSRebaser) RebaseSandboxRootFS(
+	_ context.Context,
+	sandboxID, teamID string,
+	request *service.RebaseSandboxRootFSRequest,
+) (*service.RebaseSandboxRootFSResponse, error) {
+	r.sandboxID, r.teamID = sandboxID, teamID
+	copy := *request
+	r.request = &copy
+	return &service.RebaseSandboxRootFSResponse{SandboxID: sandboxID}, nil
+}
+
+func TestRebaseSandboxRootFSUsesSignedOperationAndPUTBackend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	startedAt := time.Date(2026, 8, 21, 5, 6, 7, 123456000, time.FixedZone("offset", 8*60*60))
+	rebaser := &recordingSandboxRootFSRebaser{}
+	server := &Server{sandboxRootFSRebaser: rebaser, logger: zap.NewNop()}
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Params = gin.Params{{Key: "id", Value: "sandbox-source"}}
+	request := httptest.NewRequest(http.MethodPut,
+		"/api/v1/sandboxes/sandbox-source/rootfs/rebase?operation_id=spoofed",
+		strings.NewReader(`{"target_base_artifact_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rollback_ttl":3600,"operation_id":"spoofed"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(internalauth.WithClaims(request.Context(), &internalauth.Claims{
+		TeamID: "team-1", UserID: "user-1",
+		Audit: &internalauth.AuditContext{OperationID: "operation-signed", IngressStartedAt: &startedAt},
+	}))
+	ginContext.Request = request
+
+	server.rebaseSandboxRootFS(ginContext)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if rebaser.sandboxID != "sandbox-source" || rebaser.teamID != "team-1" || rebaser.request == nil ||
+		rebaser.request.OperationID != "operation-signed" || !rebaser.request.StartedAt.Equal(startedAt.UTC()) ||
+		rebaser.request.RollbackTTL == nil || *rebaser.request.RollbackTTL != 3600 {
+		t.Fatalf("rebase backend request = sandbox=%q team=%q request=%+v",
+			rebaser.sandboxID, rebaser.teamID, rebaser.request)
+	}
+}

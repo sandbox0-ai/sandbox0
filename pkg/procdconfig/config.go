@@ -16,8 +16,16 @@ import (
 )
 
 const (
-	DefaultWebhookOutboxDir = "/var/lib/sandbox0/procd/webhook-outbox"
-	DefaultSessionStateDir  = "/var/lib/sandbox0/procd/sessions"
+	DefaultHTTPPort               = 49983
+	DefaultLogLevel               = "info"
+	DefaultRootPath               = "/workspace"
+	DefaultContextCleanupInterval = 30 * time.Second
+	DefaultWebhookQueueSize       = 256
+	DefaultWebhookRequestTimeout  = 5 * time.Second
+	DefaultWebhookMaxRetries      = 3
+	DefaultWebhookBaseBackoff     = 500 * time.Millisecond
+	DefaultWebhookOutboxDir       = "/var/lib/sandbox0/procd/webhook-outbox"
+	DefaultSessionStateDir        = "/var/lib/sandbox0/procd/sessions"
 )
 
 // Duration wraps time.Duration with string-based JSON and YAML encoding.
@@ -206,6 +214,33 @@ func Load() *Config {
 
 // ApplyDefaults fills optional configuration values.
 func (c *Config) ApplyDefaults() {
+	if c.HTTPPort <= 0 {
+		c.HTTPPort = DefaultHTTPPort
+	}
+	if strings.TrimSpace(c.LogLevel) == "" {
+		c.LogLevel = DefaultLogLevel
+	}
+	if strings.TrimSpace(c.RootPath) == "" {
+		c.RootPath = DefaultRootPath
+	}
+	if c.ContextCleanupInterval.Duration <= 0 {
+		c.ContextCleanupInterval = Duration{Duration: DefaultContextCleanupInterval}
+	}
+	if c.WebhookQueueSize <= 0 {
+		c.WebhookQueueSize = DefaultWebhookQueueSize
+	}
+	if c.WebhookRequestTimeout.Duration <= 0 {
+		c.WebhookRequestTimeout = Duration{Duration: DefaultWebhookRequestTimeout}
+	}
+	if c.WebhookMaxRetries <= 0 {
+		c.WebhookMaxRetries = DefaultWebhookMaxRetries
+	}
+	if c.WebhookBaseBackoff.Duration <= 0 {
+		c.WebhookBaseBackoff = Duration{Duration: DefaultWebhookBaseBackoff}
+	}
+	if strings.TrimSpace(c.WebhookOutboxDir) == "" {
+		c.WebhookOutboxDir = DefaultWebhookOutboxDir
+	}
 	if strings.TrimSpace(c.SessionStateDir) == "" {
 		c.SessionStateDir = DefaultSessionStateDir
 	}

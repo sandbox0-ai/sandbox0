@@ -3,7 +3,10 @@ job "sandbox0-warm-slots" {
   type        = "service"
 
   group "warm" {
-    count = 4
+    # Eight is the minimum pool width used by the production acceptance gate.
+    # Keep replacement capacity and the matching ctld NBD pool at least this
+    # wide when changing this value.
+    count = 8
 
     network {
       mode = "bridge"

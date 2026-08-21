@@ -1,5 +1,8 @@
 # Nomad ctld host deployment
 
+See `../README.md` for the complete manager, node, warm-pool, quota, and
+acceptance deployment contract.
+
 Nomad nodes run two `ctld` systemd instances directly in the host mount and
 network namespaces. They share the HA lock and durable state under
 `/var/lib/sandbox0/ctld`; only the elected primary opens NBD, Bolt, network,
@@ -34,6 +37,12 @@ in `/opt/nomad/plugins`. Installation fails instead of reloading an in-use NBD
 module when it was already loaded with fewer than 64 devices; drain and reboot
 that node to apply the installed module option. The driver still performs a
 synchronous ctld socket fingerprint before advertising a warm slot.
+
+The configured `nomad_runtime.nbd_devices` list, not only the kernel
+`nbds_max`, is the usable RootFS concurrency bound. Keep that list at least as
+wide as the largest synchronized claim batch plus operational replacement
+headroom. The supplied environment example configures 16 devices, while the
+production acceptance warm job reserves eight slots.
 
 For an existing node, replace the binaries and run `rollout-node.sh`. It
 restarts slot B and then A, waiting for each instance to become primary-ready

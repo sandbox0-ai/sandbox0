@@ -270,6 +270,24 @@ go build -buildvcs=false -trimpath -o /tmp/runtime-slot-slo ./tools/runtime-slot
 sha256sum /tmp/runtime-slot-slo
 ```
 
+Prepare a dedicated acceptance team before starting either report:
+
+- at least eight healthy, exact-profile warm allocations must be registered,
+  and the Nomad service job must replenish a claimed allocation within the
+  configured batch-settle interval;
+- every participating node must expose at least eight configured ctld NBD
+  devices, not merely a large kernel `nbds_max` value;
+- `active_sandboxes` must have at least eight remaining units; and
+- `sandbox_claims` and `api_requests` must be unlimited or have enough burst
+  and refill rate for the selected cadence. Cleanup DELETE/GET polling also
+  consumes public API request quota.
+
+Check the public `/api/v1/quotas/active_sandboxes`,
+`/api/v1/quotas/sandbox_claims`, and `/api/v1/quotas/api_requests` views with
+the same bearer token. Do not weaken production defaults globally just to run
+the gate; use an explicit acceptance-team override when a limit would
+otherwise throttle evidence collection.
+
 ```sh
 SANDBOX0_API_TOKEN=... /tmp/runtime-slot-slo \
   --url https://region.example.com/api/v1/sandboxes \
@@ -306,16 +324,20 @@ proxy or route-level fallback page cannot masquerade as cleanup. Acceptance
 therefore requires the asynchronous terminal worker and physical slot cleanup
 to converge within the configured timeout rather than merely accepting
 deletion intent. Report version 3 records the cleanup distribution separately
-and also hard-gates the harness's monotonic public round trip at
-one second. This is a stricter upper-bound corroboration of the signed
+and fails when terminal absence does not converge within `--cleanup-timeout`;
+cleanup is outside the one-second claim interval. The report also hard-gates
+the harness's monotonic public claim round trip at one second. This is a
+stricter upper-bound corroboration of the signed
 cross-service wall-clock timer: a host clock offset cannot make a slow public
 claim pass by under-reporting command readiness. Any claim,
-cleanup-convergence, successful command-ready sample, or public claim round
-trip above one second fails the gate. The command-ready p50 must be at or below
-500 ms and both command-ready and public round-trip p99 must be at or below one
-second. A signed regional ingress timestamp up to five seconds ahead of the
-manager clock is admitted so small host-clock offsets do not break sandbox
-creation, but that sample is forced to `missed`; a larger lead is rejected.
+successful command-ready sample, or public claim round trip above one second
+fails the gate. Any cleanup error or cleanup convergence beyond the configured
+two-minute acceptance timeout also fails. The command-ready p50 must be at or
+below 500 ms and both command-ready and public-round-trip p99 must be at or
+below one second. A signed regional ingress timestamp up to five seconds ahead
+of the manager clock is admitted so small host-clock offsets do not break
+sandbox creation, but that sample is forced to `missed`; a larger lead is
+rejected.
 Cold S3, unclean replay, Nomad refill,
 full-cold-node, and 1/8/32 concurrency results must be recorded as separate
 labeled reports rather than mixed into the hot distribution.
@@ -397,6 +419,9 @@ but only the flock-elected primary opens Bolt, NBD, RootFS, network, and Unix
 socket resources. Running ctld in a Kubernetes Pod or adding a systemd
 filesystem namespace is invalid because the RootFS bind mount must be visible
 in the exact mount namespace used by the Nomad task driver.
+
+The complete service, authority Secret, node, capacity, quota, and acceptance
+sequence is in `../deploy/nomad/README.md`.
 
 Use `deploy/nomad/ctld/install-node.sh` and its pinned examples. The installer
 loads the NBD, XFS, OverlayFS, bridge, and TPROXY modules; configures a bounded

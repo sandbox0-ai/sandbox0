@@ -2,6 +2,7 @@ package nomadruntime
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sandbox0-ai/sandbox0/internal/soakstate"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 	bolt "go.etcd.io/bbolt"
@@ -20,9 +22,31 @@ const (
 	defaultRuntimeSlotSoakDuration = 24 * time.Hour
 	defaultRuntimeSlotSoakProofs   = 10_000
 	defaultRuntimeSlotSoakBursts   = 20
+	runtimeSlotSoakStateVersion    = 1
 )
 
-// TestRuntimeSlotJournalTwentyFourHourSoak is the opt-in wall-clock Bolt
+var runtimeSlotSoakIdentityBucket = []byte("runtime-slot-soak-v1")
+
+type runtimeSlotSoakConfig struct {
+	Duration      string `json:"duration"`
+	Proofs        int    `json:"proofs"`
+	Bursts        int    `json:"bursts"`
+	TerminalTTL   string `json:"terminal_ttl"`
+	StateDir      string `json:"state_dir"`
+	JournalFormat int    `json:"journal_format"`
+}
+
+type runtimeSlotSoakCheckpoint struct {
+	Version         int    `json:"version"`
+	Phase           string `json:"phase"`
+	ActiveElapsedNS int64  `json:"active_elapsed_ns"`
+	Next            int    `json:"next"`
+	Deleted         int    `json:"deleted"`
+	Restarted       bool   `json:"restarted"`
+	WarmSize        int64  `json:"warm_size"`
+}
+
+// TestRuntimeSlotJournalTwentyFourHourSoak is the opt-in active-time Bolt
 // companion to the real PostgreSQL/RustFS materializer soak. It exercises the
 // exact production journal encoding, pruning, reopen, and freelist reuse path.
 func TestRuntimeSlotJournalTwentyFourHourSoak(t *testing.T) {
@@ -42,19 +66,33 @@ func TestRuntimeSlotJournalTwentyFourHourSoak(t *testing.T) {
 	require.LessOrEqual(t, bursts, proofs/2)
 	outputPath := strings.TrimSpace(os.Getenv("SANDBOX0_RUNTIME_SLOT_SOAK_OUTPUT"))
 	require.NotEmpty(t, outputPath)
-
-	evidence, err := newRuntimeSlotSoakEvidence(outputPath)
+	stateDir := runtimeSlotSoakStateDir(t, os.Getenv("SANDBOX0_RUNTIME_SLOT_SOAK_STATE_DIR"))
+	mode, err := soakstate.ParseMode(envOrRuntimeSlotSoak("SANDBOX0_RUNTIME_SLOT_SOAK_MODE", string(soakstate.ModeCreate)))
+	require.NoError(t, err)
+	config := runtimeSlotSoakConfig{
+		Duration: duration.String(), Proofs: proofs, Bursts: bursts,
+		TerminalTTL: time.Hour.String(), StateDir: stateDir,
+		JournalFormat: RuntimeSlotJournalVersion,
+	}
+	initial := runtimeSlotSoakCheckpoint{
+		Version: runtimeSlotSoakStateVersion, Phase: "active", WarmSize: -1,
+	}
+	evidence, err := soakstate.Open(soakstate.OpenOptions{
+		Path: outputPath, Mode: mode, Config: config, Initial: initial,
+	})
 	require.NoError(t, err)
 	defer func() { require.NoError(t, evidence.Close()) }()
-	startedAt := time.Now().UTC()
-	evidence.startedAt = startedAt
-	require.NoError(t, evidence.Write("configuration", map[string]any{
-		"duration": duration.String(), "proofs": proofs, "bursts": bursts,
-		"terminal_ttl": time.Hour.String(),
-	}))
+	state := initial
+	if evidence.ResumeInfo().Resumed {
+		require.NoError(t, evidence.DecodeCheckpoint(&state))
+	}
+	require.NoError(t, validateRuntimeSlotSoakCheckpoint(state, proofs, duration))
+	if state.Phase == "complete" {
+		t.Logf("runtime-slot journal soak %s is already complete", evidence.RunID())
+		return
+	}
 
-	root := t.TempDir()
-	path := filepath.Join(root, "runtime-slots.db")
+	path := filepath.Join(stateDir, "runtime-slots.db")
 	journal, err := newRuntimeSlotJournal(path, time.Hour)
 	require.NoError(t, err)
 	journalClosed := false
@@ -63,99 +101,230 @@ func TestRuntimeSlotJournalTwentyFourHourSoak(t *testing.T) {
 			require.NoError(t, journal.Close())
 		}
 	}()
+	allowIdentityInitialization := !evidence.ResumeInfo().Resumed ||
+		(state.Next == 0 && state.Deleted == 0 && state.ActiveElapsedNS == 0 &&
+			!state.Restarted && state.WarmSize == -1)
+	require.NoError(t, ensureRuntimeSlotSoakIdentity(
+		journal, evidence.RunID(), evidence.ConfigSHA256(), allowIdentityInitialization,
+	))
+	if evidence.ResumeInfo().Resumed {
+		pruned, pruneErr := journal.Prune(time.Now().UTC())
+		require.NoError(t, pruneErr)
+		require.NoError(t, journal.db.Sync())
+		require.NoError(t, evidence.Commit("resumed", time.Duration(state.ActiveElapsedNS), map[string]any{
+			"resume": evidence.ResumeInfo(), "reconciled_uncheckpointed_records": pruned,
+		}, state))
+	}
 
 	schedule := buildRuntimeSlotSoakSchedule(proofs, duration, bursts)
 	require.Len(t, schedule, proofs)
-	completedAt := startedAt.Add(-2 * time.Hour).Format(time.RFC3339Nano)
-	next := 0
-	deleted := 0
-	restarted := false
+	completedAt := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339Nano)
 	warmAt := min(max(proofs/10, 100), proofs)
-	var warmSize int64 = -1
-	nextSample := startedAt.Add(time.Minute)
-	deadline := startedAt.Add(duration)
+	nextSample := nextRuntimeSlotSoakBoundary(time.Duration(state.ActiveElapsedNS), time.Minute)
+	nextCheckpoint := nextRuntimeSlotSoakBoundary(time.Duration(state.ActiveElapsedNS), runtimeSlotSoakCheckpointInterval(duration))
+	segmentStarted := time.Now()
+	activeElapsed := func() time.Duration {
+		return time.Duration(state.ActiveElapsedNS) + time.Since(segmentStarted)
+	}
+	commit := func(eventType string, data any) {
+		now := time.Now()
+		state.ActiveElapsedNS += now.Sub(segmentStarted).Nanoseconds()
+		segmentStarted = now
+		require.NoError(t, evidence.Commit(eventType, time.Duration(state.ActiveElapsedNS), data, state))
+	}
 
 	for {
 		now := time.Now().UTC()
-		elapsed := now.Sub(startedAt)
-		if next < len(schedule) && schedule[next].offset <= elapsed {
-			end := next + 1
+		elapsed := activeElapsed()
+		if state.Next < len(schedule) && schedule[state.Next].offset <= elapsed {
+			end := state.Next + 1
 			for end < len(schedule) && schedule[end].offset <= elapsed {
 				end++
 			}
-			require.NoError(t, putRuntimeSlotSoakProofs(journal, schedule[next:end], completedAt))
+			require.NoError(t, putRuntimeSlotSoakProofs(journal, schedule[state.Next:end], completedAt))
 			pruned, pruneErr := journal.Prune(now)
 			require.NoError(t, pruneErr)
-			require.Equal(t, end-next, pruned)
-			deleted += pruned
-			next = end
+			require.Equal(t, end-state.Next, pruned)
+			state.Deleted += pruned
+			state.Next = end
 			require.NoError(t, journal.db.Sync())
-			if warmSize < 0 && next >= warmAt {
-				warmSize = runtimeSlotSoakFileSize(t, path)
-				require.NoError(t, evidence.Write("warm", runtimeSlotSoakSnapshot{
-					Inserted: next, Deleted: deleted, FileBytes: warmSize,
+			if state.WarmSize < 0 && state.Next >= warmAt {
+				state.WarmSize = runtimeSlotSoakFileSize(t, path)
+				commit("warm", runtimeSlotSoakSnapshot{
+					Inserted: state.Next, Deleted: state.Deleted, FileBytes: state.WarmSize,
 					Bolt: runtimeSlotSoakBoltStats(journal.db.Stats()),
-				}))
+				})
+			} else {
+				commit("progress", runtimeSlotSoakSnapshot{
+					Inserted: state.Next, Deleted: state.Deleted, FileBytes: runtimeSlotSoakFileSize(t, path),
+					Bolt: runtimeSlotSoakBoltStats(journal.db.Stats()),
+				})
 			}
 		}
 
-		if !restarted && elapsed >= duration/3 {
+		if !state.Restarted && elapsed >= duration/3 {
 			require.NoError(t, journal.Close())
 			journalClosed = true
 			journal, err = newRuntimeSlotJournal(path, time.Hour)
 			require.NoError(t, err)
 			journalClosed = false
 			require.NoError(t, journal.Ping())
-			restarted = true
-			require.NoError(t, evidence.Write("restarted", runtimeSlotSoakSnapshot{
-				Inserted: next, Deleted: deleted, FileBytes: runtimeSlotSoakFileSize(t, path),
+			require.NoError(t, ensureRuntimeSlotSoakIdentity(journal, evidence.RunID(), evidence.ConfigSHA256(), false))
+			state.Restarted = true
+			commit("restarted", runtimeSlotSoakSnapshot{
+				Inserted: state.Next, Deleted: state.Deleted, FileBytes: runtimeSlotSoakFileSize(t, path),
 				Bolt: runtimeSlotSoakBoltStats(journal.db.Stats()),
-			}))
+			})
 		}
 
-		if !now.Before(nextSample) {
-			require.NoError(t, evidence.Write("sample", runtimeSlotSoakSnapshot{
-				Inserted: next, Deleted: deleted, FileBytes: runtimeSlotSoakFileSize(t, path),
+		if elapsed >= nextSample {
+			commit("sample", runtimeSlotSoakSnapshot{
+				Inserted: state.Next, Deleted: state.Deleted, FileBytes: runtimeSlotSoakFileSize(t, path),
 				Bolt: runtimeSlotSoakBoltStats(journal.db.Stats()),
-			}))
-			for !nextSample.After(now) {
-				nextSample = nextSample.Add(time.Minute)
+			})
+			for elapsed >= nextSample {
+				nextSample += time.Minute
 			}
 		}
 
-		if !now.Before(deadline) {
+		if elapsed >= nextCheckpoint {
+			commit("checkpoint", runtimeSlotSoakSnapshot{
+				Inserted: state.Next, Deleted: state.Deleted, FileBytes: runtimeSlotSoakFileSize(t, path),
+				Bolt: runtimeSlotSoakBoltStats(journal.db.Stats()),
+			})
+			interval := runtimeSlotSoakCheckpointInterval(duration)
+			for elapsed >= nextCheckpoint {
+				nextCheckpoint += interval
+			}
+		}
+
+		if elapsed >= duration {
 			break
 		}
-		wake := time.Now().Add(250 * time.Millisecond)
-		for _, candidate := range []time.Time{nextSample, deadline} {
-			if candidate.Before(wake) {
-				wake = candidate
-			}
-		}
-		if next < len(schedule) {
-			candidate := startedAt.Add(schedule[next].offset)
-			if candidate.Before(wake) {
-				wake = candidate
-			}
-		}
-		time.Sleep(max(time.Until(wake), time.Millisecond))
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	require.Equal(t, proofs, next)
-	require.Equal(t, proofs, deleted)
-	require.True(t, restarted)
-	require.GreaterOrEqual(t, time.Since(startedAt), duration)
+	require.Equal(t, proofs, state.Next)
+	require.Equal(t, proofs, state.Deleted)
+	require.True(t, state.Restarted)
+	require.GreaterOrEqual(t, activeElapsed(), duration)
 	require.NoError(t, journal.db.Sync())
 	finalSize := runtimeSlotSoakFileSize(t, path)
-	require.Greater(t, warmSize, int64(0))
-	require.LessOrEqual(t, finalSize, warmSize+int64(os.Getpagesize()),
+	require.Greater(t, state.WarmSize, int64(0))
+	require.LessOrEqual(t, finalSize, state.WarmSize+int64(os.Getpagesize()),
 		"24-hour terminal churn must reuse Bolt freelist pages")
-	require.NoError(t, evidence.Write("final", map[string]any{
-		"passed": true, "inserted": next, "deleted": deleted,
-		"warm_file_bytes": warmSize, "final_file_bytes": finalSize,
-		"growth_bytes": finalSize - warmSize,
+	state.Phase = "complete"
+	commit("final", map[string]any{
+		"passed": true, "inserted": state.Next, "deleted": state.Deleted,
+		"warm_file_bytes": state.WarmSize, "final_file_bytes": finalSize,
+		"growth_bytes": finalSize - state.WarmSize,
 		"bolt":         runtimeSlotSoakBoltStats(journal.db.Stats()),
-	}))
+	})
+}
+
+type runtimeSlotSoakIdentity struct {
+	Version      int    `json:"version"`
+	RunID        string `json:"run_id"`
+	ConfigSHA256 string `json:"config_sha256"`
+}
+
+func ensureRuntimeSlotSoakIdentity(
+	journal *runtimeSlotJournal,
+	runID string,
+	configSHA256 string,
+	allowInitialize bool,
+) error {
+	return journal.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(runtimeSlotSoakIdentityBucket)
+		if bucket == nil {
+			if !allowInitialize {
+				return fmt.Errorf("runtime-slot soak identity is absent")
+			}
+			production := tx.Bucket(runtimeSlotJournalBucket)
+			if production == nil {
+				return fmt.Errorf("runtime-slot production journal bucket is absent")
+			}
+			cursor := production.Cursor()
+			if key, _ := cursor.First(); key != nil {
+				return fmt.Errorf("unbound runtime-slot journal is not empty")
+			}
+			var err error
+			bucket, err = tx.CreateBucket(runtimeSlotSoakIdentityBucket)
+			if err != nil {
+				return err
+			}
+			payload, err := json.Marshal(runtimeSlotSoakIdentity{
+				Version: runtimeSlotSoakStateVersion, RunID: runID, ConfigSHA256: configSHA256,
+			})
+			if err != nil {
+				return err
+			}
+			return bucket.Put([]byte("identity"), payload)
+		}
+		var identity runtimeSlotSoakIdentity
+		if err := json.Unmarshal(bucket.Get([]byte("identity")), &identity); err != nil {
+			return fmt.Errorf("decode runtime-slot soak identity: %w", err)
+		}
+		if identity != (runtimeSlotSoakIdentity{
+			Version: runtimeSlotSoakStateVersion, RunID: runID, ConfigSHA256: configSHA256,
+		}) {
+			return fmt.Errorf("runtime-slot soak identity changed")
+		}
+		return nil
+	})
+}
+
+func validateRuntimeSlotSoakCheckpoint(
+	state runtimeSlotSoakCheckpoint,
+	proofs int,
+	duration time.Duration,
+) error {
+	if state.Version != runtimeSlotSoakStateVersion ||
+		(state.Phase != "active" && state.Phase != "complete") {
+		return fmt.Errorf("runtime-slot soak checkpoint version or phase is invalid")
+	}
+	if state.ActiveElapsedNS < 0 || state.Next < 0 || state.Next > proofs ||
+		state.Deleted != state.Next || state.WarmSize < -1 {
+		return fmt.Errorf("runtime-slot soak checkpoint progress is invalid")
+	}
+	if state.Phase == "complete" && (state.Next != proofs || !state.Restarted ||
+		time.Duration(state.ActiveElapsedNS) < duration || state.WarmSize <= 0) {
+		return fmt.Errorf("completed runtime-slot soak checkpoint is incomplete")
+	}
+	return nil
+}
+
+func runtimeSlotSoakStateDir(t *testing.T, raw string) string {
+	t.Helper()
+	path := filepath.Clean(strings.TrimSpace(raw))
+	require.True(t, filepath.IsAbs(path))
+	require.NotEqual(t, string(filepath.Separator), path)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		require.NoError(t, os.MkdirAll(path, 0o700))
+		info, err = os.Lstat(path)
+	}
+	require.NoError(t, err)
+	require.Zero(t, info.Mode()&os.ModeSymlink)
+	require.True(t, info.IsDir())
+	require.NoError(t, os.Chmod(path, 0o700))
+	return path
+}
+
+func runtimeSlotSoakCheckpointInterval(duration time.Duration) time.Duration {
+	interval := min(5*time.Second, duration/20)
+	return max(interval, 100*time.Millisecond)
+}
+
+func nextRuntimeSlotSoakBoundary(elapsed, interval time.Duration) time.Duration {
+	return (elapsed/interval + 1) * interval
+}
+
+func envOrRuntimeSlotSoak(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 type runtimeSlotSoakItem struct {
@@ -306,38 +475,6 @@ func runtimeSlotSoakIntEnv(t *testing.T, key string, fallback int) int {
 	return parsed
 }
 
-type runtimeSlotSoakEvidence struct {
-	file      *os.File
-	encoder   *json.Encoder
-	startedAt time.Time
-}
-
-func newRuntimeSlotSoakEvidence(path string) (*runtimeSlotSoakEvidence, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	return &runtimeSlotSoakEvidence{file: file, encoder: json.NewEncoder(file)}, nil
-}
-
-func (w *runtimeSlotSoakEvidence) Write(eventType string, data any) error {
-	event := map[string]any{"type": eventType, "at": time.Now().UTC(), "data": data}
-	if !w.startedAt.IsZero() {
-		event["elapsed_seconds"] = time.Since(w.startedAt).Seconds()
-	}
-	if err := w.encoder.Encode(event); err != nil {
-		return err
-	}
-	return w.file.Sync()
-}
-
-func (w *runtimeSlotSoakEvidence) Close() error {
-	return w.file.Close()
-}
-
 func TestBuildRuntimeSlotSoakSchedule(t *testing.T) {
 	schedule := buildRuntimeSlotSoakSchedule(10_000, 24*time.Hour, 20)
 	require.Len(t, schedule, 10_000)
@@ -357,4 +494,30 @@ func TestBuildRuntimeSlotSoakSchedule(t *testing.T) {
 		seen[item.index] = struct{}{}
 	}
 	require.Greater(t, duplicates, 4_000)
+}
+
+func TestRuntimeSlotSoakIdentityBindsJournalToEvidence(t *testing.T) {
+	journal, err := newRuntimeSlotJournal(filepath.Join(t.TempDir(), "runtime-slots.db"), time.Hour)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, journal.Close()) })
+	require.NoError(t, ensureRuntimeSlotSoakIdentity(journal, "run-a", "config-a", true))
+	require.NoError(t, ensureRuntimeSlotSoakIdentity(journal, "run-a", "config-a", false))
+	require.ErrorContains(t, ensureRuntimeSlotSoakIdentity(journal, "run-b", "config-a", false), "changed")
+	require.ErrorContains(t, ensureRuntimeSlotSoakIdentity(journal, "run-a", "config-b", false), "changed")
+}
+
+func TestValidateRuntimeSlotSoakCheckpointRejectsIncompleteTerminalState(t *testing.T) {
+	state := runtimeSlotSoakCheckpoint{
+		Version: runtimeSlotSoakStateVersion, Phase: "active", WarmSize: -1,
+		Next: 10, Deleted: 10,
+	}
+	require.NoError(t, validateRuntimeSlotSoakCheckpoint(state, 100, 10*time.Second))
+	state.Phase = "complete"
+	require.ErrorContains(t, validateRuntimeSlotSoakCheckpoint(state, 100, 10*time.Second), "incomplete")
+	state.Next = 100
+	state.Deleted = 100
+	state.Restarted = true
+	state.WarmSize = 4096
+	state.ActiveElapsedNS = int64(10 * time.Second)
+	require.NoError(t, validateRuntimeSlotSoakCheckpoint(state, 100, 10*time.Second))
 }

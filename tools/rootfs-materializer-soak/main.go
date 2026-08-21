@@ -1,4 +1,4 @@
-// Command rootfs-materializer-soak runs the opt-in, wall-clock acceptance
+// Command rootfs-materializer-soak runs the opt-in, active-time acceptance
 // gate for PostgreSQL-backed RootFS materialization against a real RustFS.
 package main
 
@@ -26,11 +26,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/opencontainers/go-digest"
+	"github.com/sandbox0-ai/sandbox0/internal/soakstate"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/rootfsmaterializer"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/dbpool"
+	"github.com/sandbox0-ai/sandbox0/pkg/migrate"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
+	templatemigrations "github.com/sandbox0-ai/sandbox0/pkg/template/migrations"
 )
 
 const (
@@ -63,6 +67,7 @@ type options struct {
 	physicalByteLimit   int64
 	physicalFileLimit   int64
 	databaseGrowthLimit int64
+	mode                soakstate.Mode
 }
 
 type runtimeState struct {
@@ -79,6 +84,14 @@ type fixture struct {
 	filesystem *sandboxstore.RootFSFilesystem
 	initial    *sandboxstore.RootFSGeneration
 	base       rootfsblock.Descriptor
+}
+
+type fixtureCheckpoint struct {
+	RunID      string                        `json:"run_id"`
+	TeamID     string                        `json:"team_id"`
+	Filesystem sandboxstore.RootFSFilesystem `json:"filesystem"`
+	Initial    sandboxstore.RootFSGeneration `json:"initial"`
+	Base       rootfsblock.Descriptor        `json:"base"`
 }
 
 type counters struct {
@@ -120,17 +133,58 @@ type peakSnapshot struct {
 	Physical directorySnapshot `json:"physical"`
 }
 
-type reportEvent struct {
-	Type           string    `json:"type"`
-	At             time.Time `json:"at"`
-	ElapsedSeconds float64   `json:"elapsed_seconds"`
-	Data           any       `json:"data,omitempty"`
+const materializerSoakStateVersion = 1
+
+const (
+	materializerSoakPhasePreflight = "preflight"
+	materializerSoakPhaseSeeding   = "seeding"
+	materializerSoakPhaseActive    = "active"
+	materializerSoakPhasePassed    = "passed"
+	materializerSoakPhaseFailed    = "failed"
+)
+
+const (
+	materializerFaultPending       = "pending"
+	materializerFaultArmed         = "armed"
+	materializerFaultTripped       = "tripped"
+	materializerFaultRetryObserved = "retry_observed"
+	materializerFaultRecovered     = "recovered"
+)
+
+type soakConfiguration struct {
+	Duration            string `json:"duration"`
+	Generations         int    `json:"generations"`
+	BurstCount          int    `json:"burst_count"`
+	WorkerInterval      string `json:"worker_interval"`
+	SampleInterval      string `json:"sample_interval"`
+	MinPackBytes        int64  `json:"min_pack_bytes"`
+	MaxDelay            string `json:"max_delay"`
+	PhysicalByteLimit   int64  `json:"physical_byte_limit"`
+	PhysicalFileLimit   int64  `json:"physical_file_limit"`
+	DatabaseGrowthLimit int64  `json:"database_growth_limit"`
+	TerminalRetention   string `json:"terminal_retention"`
+	UploadingStale      string `json:"uploading_stale"`
+	GarbageInterval     string `json:"garbage_interval"`
+	RustFSEndpoint      string `json:"rustfs_endpoint"`
+	RustFSBucket        string `json:"rustfs_bucket"`
+	RustFSDataDir       string `json:"rustfs_data_dir,omitempty"`
+	ProxyListen         string `json:"proxy_listen"`
 }
 
-type eventWriter struct {
-	file    *os.File
-	encoder *json.Encoder
-	start   time.Time
+type soakCheckpoint struct {
+	Version              int                `json:"version"`
+	Phase                string             `json:"phase"`
+	ActiveElapsedNS      int64              `json:"active_elapsed_ns"`
+	Fixture              *fixtureCheckpoint `json:"fixture,omitempty"`
+	DatabaseBaseline     databaseSnapshot   `json:"database_baseline"`
+	PhysicalBaseline     directorySnapshot  `json:"physical_baseline"`
+	Peaks                peakSnapshot       `json:"peaks"`
+	NextGeneration       int                `json:"next_generation"`
+	FaultPhase           string             `json:"fault_phase"`
+	FaultObjects         objectSnapshot     `json:"fault_objects"`
+	FaultBatchID         string             `json:"fault_batch_id,omitempty"`
+	ExpectedWorkerErrors int                `json:"expected_worker_errors"`
+	FinalViolations      []string           `json:"final_violations,omitempty"`
 }
 
 type migrationLogger struct{}
@@ -152,24 +206,34 @@ func run() error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-
-	writer, err := newEventWriter(opts.outputPath)
+	configuration := materializerSoakConfiguration(opts)
+	initial := soakCheckpoint{
+		Version: materializerSoakStateVersion, Phase: materializerSoakPhasePreflight,
+		FaultPhase:       materializerFaultPending,
+		Peaks:            peakSnapshot{Physical: directorySnapshot{Files: -1, Bytes: -1}},
+		PhysicalBaseline: directorySnapshot{Files: -1, Bytes: -1},
+	}
+	writer, err := soakstate.Open(soakstate.OpenOptions{
+		Path: opts.outputPath, Mode: opts.mode, Config: configuration, Initial: initial,
+	})
 	if err != nil {
 		return err
 	}
 	defer writer.Close()
-	start := time.Now().UTC()
-	writer.start = start
-	if err := writer.Write("configuration", map[string]any{
-		"duration": opts.duration.String(), "generations": opts.generations,
-		"burst_count": opts.burstCount, "worker_interval": opts.workerInterval.String(),
-		"sample_interval": opts.sampleInterval.String(), "min_pack_bytes": opts.minPackBytes,
-		"max_delay": opts.maxDelay.String(), "terminal_retention": rootfsmaterializer.DefaultTerminalRetention.String(),
-		"uploading_stale":  rootfsmaterializer.DefaultUploadingStale.String(),
-		"garbage_interval": rootfsmaterializer.DefaultGarbageInterval.String(),
-		"proxy_listen":     opts.proxyListen,
-	}); err != nil {
+	state := initial
+	if writer.ResumeInfo().Resumed {
+		if err := writer.DecodeCheckpoint(&state); err != nil {
+			return err
+		}
+	}
+	if err := validateMaterializerSoakCheckpoint(state, opts); err != nil {
 		return err
+	}
+	if state.Phase == materializerSoakPhasePassed {
+		return nil
+	}
+	if state.Phase == materializerSoakPhaseFailed {
+		return fmt.Errorf("RootFS materializer soak previously failed: %s", strings.Join(state.FinalViolations, "; "))
 	}
 
 	proxy, err := startOutageProxy(opts.proxyListen, opts.rustFSEndpoint)
@@ -188,25 +252,75 @@ func run() error {
 			runtime.pool.Close()
 		}
 	}()
+	if err := migrate.Up(ctx, runtime.pool, ".",
+		migrate.WithBaseFS(templatemigrations.FS),
+		migrate.WithLogger(migrationLogger{}),
+		migrate.WithSchema("scheduler"),
+	); err != nil {
+		return fmt.Errorf("run scheduler template migrations: %w", err)
+	}
+	if err := egressauthstore.RunMigrations(ctx, runtime.pool, migrationLogger{}); err != nil {
+		return err
+	}
 	if err := sandboxstore.RunSandboxStoreMigrations(ctx, runtime.pool, migrationLogger{}); err != nil {
 		return err
 	}
-	if err := requireEmptyDatabase(ctx, runtime.pool); err != nil {
+	if state.Phase == materializerSoakPhasePreflight {
+		if err := requireEmptyDatabase(ctx, runtime.pool); err != nil {
+			return err
+		}
+		if err := ensureMaterializerDatabaseIdentity(
+			ctx, runtime.pool, writer.RunID(), writer.ConfigSHA256(), true,
+		); err != nil {
+			return err
+		}
+		if err := ensureMaterializerObjectIdentity(
+			ctx, runtime.objects, writer.RunID(), writer.ConfigSHA256(), writer.ExecutableSHA256(), true,
+		); err != nil {
+			return err
+		}
+		state.DatabaseBaseline, err = snapshotDatabase(ctx, runtime.pool)
+		if err != nil {
+			return err
+		}
+		state.PhysicalBaseline, err = snapshotDirectory(opts.rustFSDataDir)
+		if err != nil {
+			return err
+		}
+		state.Phase = materializerSoakPhaseSeeding
+		if err := writer.Commit("preflight_complete", 0, map[string]any{
+			"database_baseline": state.DatabaseBaseline,
+			"physical_baseline": state.PhysicalBaseline,
+		}, state); err != nil {
+			return err
+		}
+	}
+	if err := ensureMaterializerDatabaseIdentity(
+		ctx, runtime.pool, writer.RunID(), writer.ConfigSHA256(), false,
+	); err != nil {
 		return err
 	}
-	if err := createAndRequireEmptyBucket(runtime.objects); err != nil {
+	if err := ensureMaterializerObjectIdentity(
+		ctx, runtime.objects, writer.RunID(), writer.ConfigSHA256(), writer.ExecutableSHA256(),
+		false,
+	); err != nil {
 		return err
 	}
-	baselineDB, err := snapshotDatabase(ctx, runtime.pool)
-	if err != nil {
-		return err
+	if state.Phase == materializerSoakPhaseSeeding {
+		seeded, seedErr := seedFixture(ctx, runtime, writer.RunID(), time.Now().UTC())
+		if seedErr != nil {
+			return seedErr
+		}
+		state.Fixture = checkpointFixture(seeded)
+		state.Phase = materializerSoakPhaseActive
+		if err := writer.Commit("seeded", 0, map[string]any{
+			"run_id": seeded.runID, "team_id": seeded.teamID,
+			"filesystem_id": seeded.filesystem.ID, "initial_generation_id": seeded.initial.ID,
+		}, state); err != nil {
+			return err
+		}
 	}
-	baselinePhysical, err := snapshotDirectory(opts.rustFSDataDir)
-	if err != nil {
-		return err
-	}
-
-	seeded, err := seedFixture(ctx, runtime, start)
+	seeded, err := restoreAndVerifyFixture(ctx, runtime, writer.RunID(), state.Fixture)
 	if err != nil {
 		return err
 	}
@@ -214,115 +328,130 @@ func run() error {
 	if len(schedule) != opts.generations {
 		return fmt.Errorf("generation schedule has %d entries, want %d", len(schedule), opts.generations)
 	}
-	if err := writer.Write("seeded", map[string]any{
-		"run_id": seeded.runID, "team_id": seeded.teamID,
-		"filesystem_id": seeded.filesystem.ID, "initial_generation_id": seeded.initial.ID,
-		"database_baseline": baselineDB, "physical_baseline": baselinePhysical,
-	}); err != nil {
-		return err
-	}
 
-	state := counters{}
-	peaks := peakSnapshot{Physical: directorySnapshot{Files: -1, Bytes: -1}}
-	nextGeneration := 0
-	nextWorker := start.Add(opts.workerInterval)
-	nextSample := start.Add(opts.sampleInterval)
-	faultAt := start.Add(opts.duration / 3)
-	faultArmed := false
-	faultComplete := false
-	armObjects := objectSnapshot{}
-	deadline := start.Add(opts.duration)
-	drainDeadline := deadline.Add(opts.maxDelay + time.Minute)
+	segmentStarted := time.Now()
+	activeElapsed := func() time.Duration {
+		return time.Duration(state.ActiveElapsedNS) + time.Since(segmentStarted)
+	}
+	commit := func(eventType string, data any) error {
+		now := time.Now()
+		state.ActiveElapsedNS += now.Sub(segmentStarted).Nanoseconds()
+		segmentStarted = now
+		return writer.Commit(eventType, time.Duration(state.ActiveElapsedNS), data, state)
+	}
+	if writer.ResumeInfo().Resumed {
+		if err := commit("resumed", writer.ResumeInfo()); err != nil {
+			return err
+		}
+	}
+	nextWorker := nextSoakBoundary(activeElapsed(), opts.workerInterval)
+	nextSample := nextSoakBoundary(activeElapsed(), opts.sampleInterval)
+	checkpointInterval := materializerSoakCheckpointInterval(opts.duration)
+	nextCheckpoint := nextSoakBoundary(activeElapsed(), checkpointInterval)
 
 	for {
 		if err := ctx.Err(); err != nil {
-			_ = writer.Write("interrupted", map[string]any{"error": err.Error(), "counters": state})
+			_ = commit("interrupted", map[string]any{"error": err.Error()})
 			return err
 		}
 		now := time.Now().UTC()
-		elapsed := now.Sub(start)
+		elapsed := activeElapsed()
 
-		if nextGeneration < len(schedule) && schedule[nextGeneration].offset <= elapsed {
-			end := nextGeneration + 1
+		if state.NextGeneration < len(schedule) && schedule[state.NextGeneration].offset <= elapsed {
+			end := state.NextGeneration + 1
 			for end < len(schedule) && schedule[end].offset <= elapsed {
 				end++
 			}
-			if err := insertScheduledGenerations(ctx, runtime.pool, seeded, schedule[nextGeneration:end], now); err != nil {
+			if err := insertScheduledGenerations(ctx, runtime.pool, seeded, schedule[state.NextGeneration:end], now); err != nil {
 				return fmt.Errorf("insert scheduled generations: %w", err)
 			}
-			state.Generated += end - nextGeneration
-			nextGeneration = end
+			state.NextGeneration = end
+			if err := commit("generated", map[string]any{"next_generation": end}); err != nil {
+				return err
+			}
 		}
 
-		if !faultArmed && now.Before(deadline) && !now.Before(faultAt) {
-			armObjects, err = snapshotObjects(runtime.objects)
+		if state.FaultPhase == materializerFaultPending && elapsed < opts.duration && elapsed >= opts.duration/3 {
+			state.FaultObjects, err = snapshotObjects(runtime.objects)
 			if err != nil {
 				return err
 			}
-			proxy.ArmAfterNextPut()
-			faultArmed = true
-			if err := writer.Write("rustfs_outage_armed", map[string]any{"objects": armObjects}); err != nil {
+			state.FaultPhase = materializerFaultArmed
+			if err := commit("rustfs_outage_armed", map[string]any{"objects": state.FaultObjects}); err != nil {
 				return err
 			}
+			proxy.ArmAfterNextPut()
 		}
 
-		if !now.Before(nextWorker) {
+		handled, faultErr := progressMaterializerFault(
+			ctx, &runtime, opts, proxyEndpoint, proxy, &state, commit,
+		)
+		if faultErr != nil {
+			return faultErr
+		}
+		if handled {
+			continue
+		}
+
+		if elapsed >= nextWorker {
 			result, runErr := runtime.worker.RunOnce(ctx)
-			for !nextWorker.After(now) {
-				nextWorker = nextWorker.Add(opts.workerInterval)
+			for elapsed >= nextWorker {
+				nextWorker += opts.workerInterval
 			}
 			if runErr != nil {
-				if !faultArmed || faultComplete || !proxy.Tripped() {
+				if state.FaultPhase != materializerFaultArmed || !proxy.Tripped() {
 					return fmt.Errorf("unexpected materializer failure: %w", runErr)
 				}
-				// The failed pass durably created this exact uploading batch. Its
-				// recovery retries must not count it again, but physical object
-				// bounds must include it once.
-				state.Batches += result.Batches
-				state.ExpectedWorkerErrors++
-				if err := writer.Write("rustfs_outage_observed", map[string]any{
+				pending, pendingErr := runtime.store.GetOldestUploadingRootFSGenerationMaterializationBatch(ctx)
+				if pendingErr != nil || pending == nil {
+					return fmt.Errorf("read exact outage batch after failure: %w", pendingErr)
+				}
+				state.FaultBatchID = pending.BatchID
+				state.FaultPhase = materializerFaultTripped
+				state.ExpectedWorkerErrors = 1
+				if err := commit("rustfs_outage_observed", map[string]any{
 					"result": result, "error": runErr.Error(), "proxy": proxy.Snapshot(),
+					"batch_id": pending.BatchID, "members": len(pending.Members),
 				}); err != nil {
 					return err
 				}
-				var recoveryResult rootfsmaterializer.Result
-				runtime, recoveryResult, err = restartAndRecoverExactBatch(
-					ctx, opts, proxyEndpoint, runtime, proxy, armObjects, writer,
-				)
-				if err != nil {
+			} else {
+				if err := commit("worker", result); err != nil {
 					return err
 				}
-				state.ExpectedWorkerErrors++
-				state.Materialized += recoveryResult.Materialized
-				faultComplete = true
-				nextWorker = time.Now().UTC().Add(opts.workerInterval)
-			} else {
-				state.Materialized += result.Materialized
-				state.Batches += result.Batches
 			}
 		}
 
-		if !now.Before(nextSample) {
+		if elapsed >= nextSample {
 			db, objects, physical, sampleErr := collectSnapshots(ctx, runtime, opts.rustFSDataDir)
 			if sampleErr != nil {
 				return sampleErr
 			}
-			updatePeaks(&peaks, db, objects, physical)
-			if err := writer.Write("sample", map[string]any{
-				"counters": state, "database": db, "objects": objects,
+			updatePeaks(&state.Peaks, db, objects, physical)
+			if err := commit("sample", map[string]any{
+				"counters": materializerCounters(state, db), "database": db, "objects": objects,
 				"physical": physical, "proxy": proxy.Snapshot(),
 			}); err != nil {
 				return err
 			}
-			for !nextSample.After(now) {
-				nextSample = nextSample.Add(opts.sampleInterval)
+			for elapsed >= nextSample {
+				nextSample += opts.sampleInterval
 			}
 		}
 
-		if !now.Before(deadline) {
-			if nextGeneration != len(schedule) {
+		if elapsed >= nextCheckpoint {
+			if err := commit("checkpoint", map[string]any{"proxy": proxy.Snapshot()}); err != nil {
+				return err
+			}
+			for elapsed >= nextCheckpoint {
+				nextCheckpoint += checkpointInterval
+			}
+		}
+
+		if elapsed >= opts.duration {
+			if state.NextGeneration != len(schedule) {
 				return fmt.Errorf("wall-clock deadline reached with only %d of %d generations inserted",
-					nextGeneration, len(schedule))
+					state.NextGeneration, len(schedule))
 			}
 			db, snapshotErr := snapshotDatabase(ctx, runtime.pool)
 			if snapshotErr != nil {
@@ -331,24 +460,12 @@ func run() error {
 			if db.CompositeGenerations == 0 && db.UploadingBatches == 0 {
 				break
 			}
-			if now.After(drainDeadline) {
-				return fmt.Errorf("materializer did not drain before %s: %+v", drainDeadline, db)
+			if elapsed > opts.duration+opts.maxDelay+time.Minute {
+				return fmt.Errorf("materializer did not drain within the active deadline: %+v", db)
 			}
 		}
 
-		wake := time.Now().Add(250 * time.Millisecond)
-		for _, candidate := range []time.Time{nextWorker, nextSample, deadline} {
-			if candidate.Before(wake) {
-				wake = candidate
-			}
-		}
-		if nextGeneration < len(schedule) {
-			candidate := start.Add(schedule[nextGeneration].offset)
-			if candidate.Before(wake) {
-				wake = candidate
-			}
-		}
-		timer := time.NewTimer(maxDuration(time.Until(wake), time.Millisecond))
+		timer := time.NewTimer(100 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -360,21 +477,29 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	updatePeaks(&peaks, finalDB, finalObjects, finalPhysical)
+	updatePeaks(&state.Peaks, finalDB, finalObjects, finalPhysical)
 	if err := verifySampleGenerations(ctx, runtime, seeded, opts.generations); err != nil {
 		return err
 	}
-	violations := evaluateFinalBounds(opts, start, state, faultComplete, baselineDB,
-		baselinePhysical, finalDB, finalObjects, finalPhysical)
+	finalCounters := materializerCounters(state, finalDB)
+	violations := evaluateFinalBounds(opts, activeElapsed(), finalCounters,
+		state.FaultPhase == materializerFaultRecovered, state.DatabaseBaseline,
+		state.PhysicalBaseline, finalDB, finalObjects, finalPhysical)
 	final := map[string]any{
 		"passed": len(violations) == 0, "violations": violations,
-		"counters": state, "database": finalDB, "objects": finalObjects,
-		"physical": finalPhysical, "peaks": peaks, "proxy": proxy.Snapshot(),
-		"database_growth_bytes": finalDB.DatabaseBytes - baselineDB.DatabaseBytes,
-		"physical_growth_files": differenceIfKnown(finalPhysical.Files, baselinePhysical.Files),
-		"physical_growth_bytes": differenceIfKnown(finalPhysical.Bytes, baselinePhysical.Bytes),
+		"counters": finalCounters, "database": finalDB, "objects": finalObjects,
+		"physical": finalPhysical, "peaks": state.Peaks, "proxy": proxy.Snapshot(),
+		"database_growth_bytes": finalDB.DatabaseBytes - state.DatabaseBaseline.DatabaseBytes,
+		"physical_growth_files": differenceIfKnown(finalPhysical.Files, state.PhysicalBaseline.Files),
+		"physical_growth_bytes": differenceIfKnown(finalPhysical.Bytes, state.PhysicalBaseline.Bytes),
 	}
-	if err := writer.Write("final", final); err != nil {
+	state.FinalViolations = violations
+	if len(violations) == 0 {
+		state.Phase = materializerSoakPhasePassed
+	} else {
+		state.Phase = materializerSoakPhaseFailed
+	}
+	if err := commit("final", final); err != nil {
 		return err
 	}
 	if len(violations) > 0 {
@@ -385,14 +510,16 @@ func run() error {
 
 func parseOptions() (options, error) {
 	var opts options
+	var rawMode string
 	flag.StringVar(&opts.databaseURL, "database-url", os.Getenv("SANDBOX0_SOAK_DATABASE_URL"), "dedicated empty PostgreSQL database URL")
 	flag.StringVar(&opts.rustFSEndpoint, "rustfs-endpoint", os.Getenv("SANDBOX0_RUSTFS_ENDPOINT"), "real RustFS S3 endpoint")
 	flag.StringVar(&opts.rustFSBucket, "rustfs-bucket", envOr("SANDBOX0_RUSTFS_BUCKET", "sandbox0-materializer-soak"), "dedicated empty RustFS bucket")
 	flag.StringVar(&opts.accessKey, "rustfs-access-key", os.Getenv("SANDBOX0_RUSTFS_ACCESS_KEY"), "RustFS access key")
 	flag.StringVar(&opts.secretKey, "rustfs-secret-key", os.Getenv("SANDBOX0_RUSTFS_SECRET_KEY"), "RustFS secret key")
 	flag.StringVar(&opts.proxyListen, "proxy-listen", defaultProxyListen, "fault proxy listen address")
-	flag.StringVar(&opts.rustFSDataDir, "rustfs-data-dir", os.Getenv("SANDBOX0_RUSTFS_DATA_DIR"), "optional RustFS data directory for physical growth checks")
-	flag.StringVar(&opts.outputPath, "output", "", "exclusive JSONL evidence output path")
+	flag.StringVar(&opts.rustFSDataDir, "rustfs-data-dir", os.Getenv("SANDBOX0_RUSTFS_DATA_DIR"), "dedicated RustFS data directory for physical growth checks")
+	flag.StringVar(&opts.outputPath, "output", "", "durable JSONL evidence and checkpoint path")
+	flag.StringVar(&rawMode, "mode", envOr("SANDBOX0_SOAK_MODE", string(soakstate.ModeCreate)), "state mode: create, resume, or auto")
 	flag.DurationVar(&opts.duration, "duration", defaultSoakDuration, "actual wall-clock soak duration")
 	flag.IntVar(&opts.generations, "generations", defaultGenerationCount, "generation lifecycle count")
 	flag.IntVar(&opts.burstCount, "burst-count", defaultBurstCount, "number of deterministic write bursts")
@@ -408,11 +535,20 @@ func parseOptions() (options, error) {
 	opts.databaseURL = strings.TrimSpace(opts.databaseURL)
 	opts.rustFSEndpoint = strings.TrimRight(strings.TrimSpace(opts.rustFSEndpoint), "/")
 	opts.rustFSBucket = strings.TrimSpace(opts.rustFSBucket)
+	opts.accessKey = strings.TrimSpace(opts.accessKey)
+	opts.secretKey = strings.TrimSpace(opts.secretKey)
 	opts.proxyListen = strings.TrimSpace(opts.proxyListen)
+	rawRustFSDataDir := strings.TrimSpace(opts.rustFSDataDir)
+	opts.rustFSDataDir = filepath.Clean(rawRustFSDataDir)
 	opts.outputPath = strings.TrimSpace(opts.outputPath)
 	if opts.databaseURL == "" || opts.rustFSEndpoint == "" || opts.rustFSBucket == "" ||
-		opts.proxyListen == "" || opts.outputPath == "" {
-		return options{}, fmt.Errorf("database URL, RustFS endpoint/bucket, proxy listen address, and output are required")
+		opts.accessKey == "" || opts.secretKey == "" || opts.proxyListen == "" ||
+		opts.rustFSDataDir == "." || opts.outputPath == "" {
+		return options{}, fmt.Errorf("database URL, RustFS endpoint/bucket/credentials/data directory, proxy listen address, and output are required")
+	}
+	if !filepath.IsAbs(opts.rustFSDataDir) || opts.rustFSDataDir == string(filepath.Separator) ||
+		rawRustFSDataDir != opts.rustFSDataDir {
+		return options{}, fmt.Errorf("RustFS data directory must be a canonical non-root absolute path")
 	}
 	if opts.duration < 10*time.Second || opts.duration > 7*24*time.Hour {
 		return options{}, fmt.Errorf("duration must be between 10s and 7d")
@@ -438,6 +574,11 @@ func parseOptions() (options, error) {
 	if _, err := url.ParseRequestURI(opts.rustFSEndpoint); err != nil {
 		return options{}, fmt.Errorf("parse RustFS endpoint: %w", err)
 	}
+	mode, err := soakstate.ParseMode(rawMode)
+	if err != nil {
+		return options{}, err
+	}
+	opts.mode = mode
 	return opts, nil
 }
 
@@ -496,23 +637,13 @@ func requireEmptyDatabase(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-func createAndRequireEmptyBucket(store objectstore.Store) error {
-	if err := store.Create(); err != nil && !strings.Contains(strings.ToLower(err.Error()), "already") {
-		return fmt.Errorf("create dedicated RustFS bucket: %w", err)
-	}
-	snapshot, err := snapshotObjects(store)
-	if err != nil {
-		return err
-	}
-	if snapshot.Objects != 0 {
-		return fmt.Errorf("dedicated RustFS bucket is not empty (%d objects)", snapshot.Objects)
-	}
-	return nil
-}
-
-func seedFixture(ctx context.Context, runtime *runtimeState, startedAt time.Time) (*fixture, error) {
-	runDigest := digest.FromString(startedAt.Format(time.RFC3339Nano)).Encoded()[:16]
-	result := &fixture{runID: "soak-" + runDigest, teamID: "soak-team-" + runDigest}
+func seedFixture(
+	ctx context.Context,
+	runtime *runtimeState,
+	runID string,
+	startedAt time.Time,
+) (*fixture, error) {
+	result := &fixture{runID: runID, teamID: runID + "-team"}
 	publisher := rootfsblock.ObjectStorePublisher{Store: runtime.conditional}
 	base, err := rootfsblock.BuildMaterializedGeneration(
 		ctx, bytes.NewReader(make([]byte, rootfsblock.LogicalBlockSize)),
@@ -604,7 +735,11 @@ func insertScheduledGenerations(
 	scheduled []scheduledGeneration,
 	createdAt time.Time,
 ) error {
-	rows := make([][]any, 0, len(scheduled))
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	for _, item := range scheduled {
 		data := bytes.Repeat([]byte{byte(item.index%251 + 1)}, rootfsblock.LogicalBlockSize)
 		sealed, payload, err := rootfsblock.BuildCompositeGeneration(fixture.base,
@@ -612,89 +747,362 @@ func insertScheduledGenerations(
 		if err != nil {
 			return err
 		}
-		rows = append(rows, []any{
+		args := []any{
 			generationID(fixture.runID, item.index), fixture.filesystem.ID, fixture.initial.ID,
 			fixture.initial.SourceOCIDigest, fixture.initial.BaseArtifactDigest,
 			fixture.initial.BaseBlockRoot, sealed.MappingRoot.RootDigest, int64(item.index + 1),
 			fixture.initial.FormatGeneration, sandboxstore.RootFSGenerationStateCompositeDurable,
 			fixture.initial.LocatorVersion + 1, payload, createdAt,
-		})
+		}
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO manager.rootfs_generations (
+				generation_id, filesystem_id, parent_generation_id, source_oci_digest,
+				base_artifact_digest, base_block_root, current_block_head, writer_epoch,
+				format_generation, durability_state, locator_version, descriptor, created_at
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			ON CONFLICT (generation_id) DO NOTHING
+		`, args...)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 1 {
+			continue
+		}
+		var matches bool
+		if err := tx.QueryRow(ctx, `
+			SELECT filesystem_id = $2 AND parent_generation_id = $3
+				AND source_oci_digest = $4 AND base_artifact_digest = $5
+				AND base_block_root = $6 AND current_block_head = $7
+				AND writer_epoch = $8 AND format_generation = $9
+				AND durability_state IN ($10, 's3_materialized')
+				AND locator_version >= $11 AND descriptor = $12
+			FROM manager.rootfs_generations
+			WHERE generation_id = $1
+		`, args[:12]...).Scan(&matches); err != nil {
+			return err
+		}
+		if !matches {
+			return fmt.Errorf("scheduled generation %s changed across resume", args[0])
+		}
 	}
-	count, err := pool.CopyFrom(ctx, pgx.Identifier{"manager", "rootfs_generations"}, []string{
-		"generation_id", "filesystem_id", "parent_generation_id", "source_oci_digest",
-		"base_artifact_digest", "base_block_root", "current_block_head", "writer_epoch",
-		"format_generation", "durability_state", "locator_version", "descriptor", "created_at",
-	}, pgx.CopyFromRows(rows))
-	if err != nil {
-		return err
-	}
-	if count != int64(len(rows)) {
-		return fmt.Errorf("inserted %d generations, want %d", count, len(rows))
-	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func generationID(runID string, index int) string {
 	return fmt.Sprintf("%s-generation-%05d", runID, index)
 }
 
-func restartAndRecoverExactBatch(
+func materializerSoakConfiguration(opts options) soakConfiguration {
+	return soakConfiguration{
+		Duration: opts.duration.String(), Generations: opts.generations, BurstCount: opts.burstCount,
+		WorkerInterval: opts.workerInterval.String(), SampleInterval: opts.sampleInterval.String(),
+		MinPackBytes: opts.minPackBytes, MaxDelay: opts.maxDelay.String(),
+		PhysicalByteLimit: opts.physicalByteLimit, PhysicalFileLimit: opts.physicalFileLimit,
+		DatabaseGrowthLimit: opts.databaseGrowthLimit,
+		TerminalRetention:   rootfsmaterializer.DefaultTerminalRetention.String(),
+		UploadingStale:      rootfsmaterializer.DefaultUploadingStale.String(),
+		GarbageInterval:     rootfsmaterializer.DefaultGarbageInterval.String(),
+		RustFSEndpoint:      opts.rustFSEndpoint, RustFSBucket: opts.rustFSBucket,
+		RustFSDataDir: opts.rustFSDataDir, ProxyListen: opts.proxyListen,
+	}
+}
+
+func validateMaterializerSoakCheckpoint(state soakCheckpoint, opts options) error {
+	if state.Version != materializerSoakStateVersion || state.ActiveElapsedNS < 0 ||
+		state.NextGeneration < 0 || state.NextGeneration > opts.generations {
+		return fmt.Errorf("RootFS materializer soak checkpoint identity or progress is invalid")
+	}
+	validPhase := state.Phase == materializerSoakPhasePreflight ||
+		state.Phase == materializerSoakPhaseSeeding || state.Phase == materializerSoakPhaseActive ||
+		state.Phase == materializerSoakPhasePassed || state.Phase == materializerSoakPhaseFailed
+	if !validPhase {
+		return fmt.Errorf("RootFS materializer soak checkpoint phase is invalid")
+	}
+	validFault := map[string]int{
+		materializerFaultPending: 0, materializerFaultArmed: 0,
+		materializerFaultTripped: 1, materializerFaultRetryObserved: 2,
+		materializerFaultRecovered: 2,
+	}
+	wantErrors, found := validFault[state.FaultPhase]
+	if !found || state.ExpectedWorkerErrors != wantErrors {
+		return fmt.Errorf("RootFS materializer soak fault checkpoint is invalid")
+	}
+	if state.Phase != materializerSoakPhasePreflight && state.DatabaseBaseline.DatabaseBytes <= 0 {
+		return fmt.Errorf("RootFS materializer soak database baseline is absent")
+	}
+	if state.Phase != materializerSoakPhasePreflight &&
+		(state.PhysicalBaseline.Files < 0 || state.PhysicalBaseline.Bytes < 0) {
+		return fmt.Errorf("RootFS materializer soak physical baseline is absent")
+	}
+	if state.Phase != materializerSoakPhasePreflight && state.Phase != materializerSoakPhaseSeeding &&
+		state.Fixture == nil {
+		return fmt.Errorf("RootFS materializer soak fixture checkpoint is absent")
+	}
+	if state.FaultPhase == materializerFaultTripped || state.FaultPhase == materializerFaultRetryObserved ||
+		state.FaultPhase == materializerFaultRecovered {
+		if state.FaultBatchID == "" {
+			return fmt.Errorf("RootFS materializer soak fault batch identity is absent")
+		}
+	}
+	if state.Phase == materializerSoakPhasePassed &&
+		(state.NextGeneration != opts.generations || time.Duration(state.ActiveElapsedNS) < opts.duration ||
+			state.FaultPhase != materializerFaultRecovered || len(state.FinalViolations) != 0) {
+		return fmt.Errorf("passed RootFS materializer soak checkpoint is incomplete")
+	}
+	if state.Phase == materializerSoakPhaseFailed && len(state.FinalViolations) == 0 {
+		return fmt.Errorf("failed RootFS materializer soak checkpoint has no violations")
+	}
+	return nil
+}
+
+func checkpointFixture(value *fixture) *fixtureCheckpoint {
+	if value == nil || value.filesystem == nil || value.initial == nil {
+		return nil
+	}
+	return &fixtureCheckpoint{
+		RunID: value.runID, TeamID: value.teamID, Filesystem: *value.filesystem,
+		Initial: *value.initial, Base: value.base,
+	}
+}
+
+func restoreAndVerifyFixture(
 	ctx context.Context,
+	runtime *runtimeState,
+	runID string,
+	expected *fixtureCheckpoint,
+) (*fixture, error) {
+	if expected == nil || expected.RunID != runID || expected.Initial.CreatedAt.IsZero() {
+		return nil, fmt.Errorf("durable RootFS materializer fixture identity is invalid")
+	}
+	actual, err := seedFixture(ctx, runtime, runID, expected.Initial.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("verify durable RootFS materializer fixture: %w", err)
+	}
+	wantPayload, err := json.Marshal(expected)
+	if err != nil {
+		return nil, err
+	}
+	actualPayload, err := json.Marshal(checkpointFixture(actual))
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(actualPayload, wantPayload) {
+		return nil, fmt.Errorf("durable RootFS materializer fixture changed across resume")
+	}
+	return actual, nil
+}
+
+func ensureMaterializerDatabaseIdentity(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	runID string,
+	configSHA256 string,
+	allowInitialize bool,
+) error {
+	if _, err := pool.Exec(ctx, `
+		CREATE SCHEMA IF NOT EXISTS sandbox0_soak;
+		CREATE TABLE IF NOT EXISTS sandbox0_soak.rootfs_materializer_run (
+			singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+			version INTEGER NOT NULL,
+			run_id TEXT NOT NULL,
+			config_sha256 TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`); err != nil {
+		return fmt.Errorf("create RootFS materializer soak identity table: %w", err)
+	}
+	if allowInitialize {
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO sandbox0_soak.rootfs_materializer_run (
+				singleton, version, run_id, config_sha256
+			) VALUES (TRUE, $1, $2, $3)
+			ON CONFLICT (singleton) DO NOTHING
+		`, materializerSoakStateVersion, runID, configSHA256); err != nil {
+			return fmt.Errorf("initialize RootFS materializer soak identity: %w", err)
+		}
+	}
+	var version int
+	var storedRunID, storedConfigSHA256 string
+	if err := pool.QueryRow(ctx, `
+		SELECT version, run_id, config_sha256
+		FROM sandbox0_soak.rootfs_materializer_run
+		WHERE singleton = TRUE
+	`).Scan(&version, &storedRunID, &storedConfigSHA256); errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("RootFS materializer soak database identity is absent")
+	} else if err != nil {
+		return fmt.Errorf("read RootFS materializer soak database identity: %w", err)
+	}
+	if version != materializerSoakStateVersion || storedRunID != runID || storedConfigSHA256 != configSHA256 {
+		return fmt.Errorf("RootFS materializer soak database identity changed")
+	}
+	return nil
+}
+
+func ensureMaterializerObjectIdentity(
+	ctx context.Context,
+	store objectstore.Store,
+	runID string,
+	configSHA256 string,
+	executableSHA256 string,
+	requireOnlyIdentity bool,
+) error {
+	if err := store.Create(); err != nil && !strings.Contains(strings.ToLower(err.Error()), "already") {
+		return fmt.Errorf("create dedicated RustFS bucket: %w", err)
+	}
+	conditional, ok := store.(objectstore.ConditionalStore)
+	if !ok {
+		return fmt.Errorf("RustFS soak identity requires conditional create")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"version": materializerSoakStateVersion, "run_id": runID,
+		"config_sha256": configSHA256, "executable_sha256": executableSHA256,
+	})
+	if err != nil {
+		return err
+	}
+	key := "soak-control/" + runID + "/identity.json"
+	if err := (rootfsblock.ObjectStorePublisher{Store: conditional}).PutImmutable(ctx, key, payload); err != nil {
+		return fmt.Errorf("verify RootFS materializer RustFS identity: %w", err)
+	}
+	if requireOnlyIdentity {
+		snapshot, err := snapshotObjects(store)
+		if err != nil {
+			return err
+		}
+		if snapshot.Objects != 1 {
+			return fmt.Errorf("dedicated RustFS bucket contains %d objects before seeding, want identity only", snapshot.Objects)
+		}
+	}
+	return nil
+}
+
+func materializerCounters(state soakCheckpoint, database databaseSnapshot) counters {
+	materialized := max(int(database.MaterializedGenerations)-1, 0)
+	return counters{
+		Generated: state.NextGeneration, Materialized: materialized,
+		Batches:              int(database.UploadingBatches + database.PublishedBatches + database.AbandonedBatches),
+		ExpectedWorkerErrors: state.ExpectedWorkerErrors,
+	}
+}
+
+func materializerSoakCheckpointInterval(duration time.Duration) time.Duration {
+	return maxDuration(min(5*time.Second, duration/20), 100*time.Millisecond)
+}
+
+func nextSoakBoundary(elapsed, interval time.Duration) time.Duration {
+	return (elapsed/interval + 1) * interval
+}
+
+func progressMaterializerFault(
+	ctx context.Context,
+	runtime **runtimeState,
 	opts options,
 	proxyEndpoint string,
-	runtime *runtimeState,
 	proxy *outageProxy,
-	objectsAtArm objectSnapshot,
-	writer *eventWriter,
-) (*runtimeState, rootfsmaterializer.Result, error) {
-	pendingBefore, err := runtime.store.GetOldestUploadingRootFSGenerationMaterializationBatch(ctx)
-	if err != nil || pendingBefore == nil {
-		return runtime, rootfsmaterializer.Result{}, fmt.Errorf("read exact outage batch: %w", err)
+	state *soakCheckpoint,
+	commit func(string, any) error,
+) (bool, error) {
+	current := *runtime
+	switch state.FaultPhase {
+	case materializerFaultArmed:
+		pending, err := current.store.GetOldestUploadingRootFSGenerationMaterializationBatch(ctx)
+		if err != nil {
+			return false, err
+		}
+		if pending == nil {
+			if !proxy.Snapshot().Armed {
+				proxy.ArmAfterNextPut()
+			}
+			return false, nil
+		}
+		proxy.FailAll()
+		state.FaultBatchID = pending.BatchID
+		state.FaultPhase = materializerFaultTripped
+		state.ExpectedWorkerErrors = 1
+		return true, commit("rustfs_outage_reconciled", map[string]any{
+			"batch_id": pending.BatchID, "members": len(pending.Members),
+			"reason": "uploading batch survived before the tripped checkpoint",
+		})
+	case materializerFaultTripped:
+		proxy.FailAll()
+		pending, err := current.store.GetOldestUploadingRootFSGenerationMaterializationBatch(ctx)
+		if err != nil || pending == nil || pending.BatchID != state.FaultBatchID {
+			return false, fmt.Errorf("exact outage batch %s is not uploading before retry: %w", state.FaultBatchID, err)
+		}
+		current.pool.Close()
+		restarted, err := openRuntime(ctx, opts, proxyEndpoint)
+		if err != nil {
+			return false, fmt.Errorf("reopen materializer while RustFS remains unavailable: %w", err)
+		}
+		*runtime = restarted
+		current = restarted
+		result, retryErr := current.worker.RunOnce(ctx)
+		if retryErr == nil {
+			return false, fmt.Errorf("exact batch unexpectedly succeeded while RustFS remained unavailable")
+		}
+		pendingAfter, err := current.store.GetOldestUploadingRootFSGenerationMaterializationBatch(ctx)
+		if err != nil || pendingAfter == nil || pendingAfter.BatchID != state.FaultBatchID {
+			return false, fmt.Errorf("outage retry changed exact uploading batch %s: %w", state.FaultBatchID, err)
+		}
+		state.FaultPhase = materializerFaultRetryObserved
+		state.ExpectedWorkerErrors = 2
+		return true, commit("materializer_restarted_during_outage", map[string]any{
+			"batch_id": state.FaultBatchID, "members": len(pendingAfter.Members),
+			"retry_result": result, "retry_error": retryErr.Error(),
+		})
+	case materializerFaultRetryObserved:
+		pending, err := current.store.GetOldestUploadingRootFSGenerationMaterializationBatch(ctx)
+		if err != nil {
+			return false, err
+		}
+		var recoveryResult rootfsmaterializer.Result
+		if pending != nil {
+			if pending.BatchID != state.FaultBatchID {
+				return false, fmt.Errorf("another uploading batch replaced exact outage batch %s", state.FaultBatchID)
+			}
+			proxy.Recover()
+			recoveryResult, err = current.worker.RunOnce(ctx)
+			if err != nil {
+				return false, fmt.Errorf("resume exact batch after RustFS recovery: %w", err)
+			}
+		}
+		batchState, err := materializerBatchState(ctx, current.pool, state.FaultBatchID)
+		if err != nil || batchState != "published" {
+			return false, fmt.Errorf("exact outage batch %s is not published after recovery: %w", state.FaultBatchID, err)
+		}
+		pendingFinal, err := current.store.GetOldestUploadingRootFSGenerationMaterializationBatch(ctx)
+		if err != nil || pendingFinal != nil {
+			return false, fmt.Errorf("an uploading batch remained after exact recovery: %w", err)
+		}
+		objectsAfter, err := snapshotObjects(current.objects)
+		if err != nil {
+			return false, err
+		}
+		if growth := objectsAfter.Objects - state.FaultObjects.Objects; growth < 1 || growth > 2 {
+			return false, fmt.Errorf("exact outage batch created %d object keys, want 1..2", growth)
+		}
+		state.FaultPhase = materializerFaultRecovered
+		return true, commit("rustfs_outage_recovered", map[string]any{
+			"batch_id": state.FaultBatchID, "result": recoveryResult,
+			"objects_before": state.FaultObjects, "objects_after": objectsAfter,
+			"proxy": proxy.Snapshot(),
+		})
+	default:
+		return false, nil
 	}
-	runtime.pool.Close()
-	restarted, err := openRuntime(ctx, opts, proxyEndpoint)
-	if err != nil {
-		return runtime, rootfsmaterializer.Result{}, fmt.Errorf("reopen materializer after PostgreSQL connection interruption: %w", err)
+}
+
+func materializerBatchState(ctx context.Context, pool *pgxpool.Pool, batchID string) (string, error) {
+	var state string
+	if err := pool.QueryRow(ctx, `
+		SELECT state
+		FROM manager.rootfs_materialization_batches
+		WHERE batch_id = $1
+	`, batchID).Scan(&state); err != nil {
+		return "", err
 	}
-	runtime = restarted
-	retryResult, retryErr := runtime.worker.RunOnce(ctx)
-	if retryErr == nil {
-		return runtime, rootfsmaterializer.Result{}, fmt.Errorf("exact batch unexpectedly succeeded while RustFS remained unavailable")
-	}
-	pendingAfter, err := runtime.store.GetOldestUploadingRootFSGenerationMaterializationBatch(ctx)
-	if err != nil || pendingAfter == nil || pendingAfter.BatchID != pendingBefore.BatchID {
-		return runtime, rootfsmaterializer.Result{}, fmt.Errorf("restart changed exact uploading batch %s", pendingBefore.BatchID)
-	}
-	if err := writer.Write("materializer_restarted_during_outage", map[string]any{
-		"batch_id": pendingBefore.BatchID, "members": len(pendingBefore.Members),
-		"retry_result": retryResult, "retry_error": retryErr.Error(),
-	}); err != nil {
-		return runtime, rootfsmaterializer.Result{}, err
-	}
-	proxy.Recover()
-	recoveryResult, err := runtime.worker.RunOnce(ctx)
-	if err != nil {
-		return runtime, rootfsmaterializer.Result{}, fmt.Errorf("resume exact batch after RustFS recovery: %w", err)
-	}
-	pendingFinal, err := runtime.store.GetOldestUploadingRootFSGenerationMaterializationBatch(ctx)
-	if err != nil || pendingFinal != nil {
-		return runtime, rootfsmaterializer.Result{}, fmt.Errorf("exact batch remained uploading after recovery: %w", err)
-	}
-	objectsAfter, err := snapshotObjects(runtime.objects)
-	if err != nil {
-		return runtime, rootfsmaterializer.Result{}, err
-	}
-	if growth := objectsAfter.Objects - objectsAtArm.Objects; growth < 1 || growth > 2 {
-		return runtime, rootfsmaterializer.Result{}, fmt.Errorf("exact outage batch created %d object keys, want 1..2", growth)
-	}
-	if err := writer.Write("rustfs_outage_recovered", map[string]any{
-		"batch_id": pendingBefore.BatchID, "result": recoveryResult,
-		"objects_before": objectsAtArm, "objects_after": objectsAfter,
-		"proxy": proxy.Snapshot(),
-	}); err != nil {
-		return runtime, rootfsmaterializer.Result{}, err
-	}
-	return runtime, recoveryResult, nil
+	return state, nil
 }
 
 func snapshotDatabase(ctx context.Context, pool *pgxpool.Pool) (databaseSnapshot, error) {
@@ -859,7 +1267,7 @@ func verifySampleGenerations(
 
 func evaluateFinalBounds(
 	opts options,
-	startedAt time.Time,
+	activeElapsed time.Duration,
 	state counters,
 	faultComplete bool,
 	baselineDB databaseSnapshot,
@@ -869,8 +1277,8 @@ func evaluateFinalBounds(
 	finalPhysical directorySnapshot,
 ) []string {
 	var result []string
-	if time.Since(startedAt) < opts.duration {
-		result = append(result, "actual wall-clock duration was shorter than configured")
+	if activeElapsed < opts.duration {
+		result = append(result, "actual active duration was shorter than configured")
 	}
 	if state.Generated != opts.generations || state.Materialized != opts.generations {
 		result = append(result, fmt.Sprintf("generated/materialized=%d/%d, want %d/%d",
@@ -890,13 +1298,13 @@ func evaluateFinalBounds(
 	if finalDB.DeletionQueue != 0 {
 		result = append(result, fmt.Sprintf("unexpected object deletion queue rows=%d", finalDB.DeletionQueue))
 	}
-	if finalDB.CatalogObjects != finalObjects.Objects-1 {
-		result = append(result, fmt.Sprintf("catalog/RustFS objects=%d/%d do not differ by the one Base object",
+	if finalDB.CatalogObjects != finalObjects.Objects-2 {
+		result = append(result, fmt.Sprintf("catalog/RustFS objects=%d/%d do not differ by the Base and run identity objects",
 			finalDB.CatalogObjects, finalObjects.Objects))
 	}
-	if finalObjects.Objects > int64(1+2*state.Batches) {
+	if finalObjects.Objects > int64(2+2*state.Batches) {
 		result = append(result, fmt.Sprintf("RustFS object count=%d exceeds batch bound=%d",
-			finalObjects.Objects, 1+2*state.Batches))
+			finalObjects.Objects, 2+2*state.Batches))
 	}
 	batchBound := int(opts.duration/opts.maxDelay) + 3
 	if state.Batches > batchBound {
@@ -922,35 +1330,6 @@ func differenceIfKnown(value, baseline int64) int64 {
 		return -1
 	}
 	return value - baseline
-}
-
-func newEventWriter(path string) (*eventWriter, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("create exclusive soak evidence file: %w", err)
-	}
-	return &eventWriter{file: file, encoder: json.NewEncoder(file)}, nil
-}
-
-func (w *eventWriter) Write(eventType string, data any) error {
-	event := reportEvent{Type: eventType, At: time.Now().UTC(), Data: data}
-	if !w.start.IsZero() {
-		event.ElapsedSeconds = time.Since(w.start).Seconds()
-	}
-	if err := w.encoder.Encode(event); err != nil {
-		return err
-	}
-	return w.file.Sync()
-}
-
-func (w *eventWriter) Close() error {
-	if w == nil || w.file == nil {
-		return nil
-	}
-	return w.file.Close()
 }
 
 type proxySnapshot struct {
@@ -1026,6 +1405,13 @@ func (p *outageProxy) ArmAfterNextPut() {
 	p.mu.Lock()
 	p.armed = true
 	p.tripped = false
+	p.mu.Unlock()
+}
+
+func (p *outageProxy) FailAll() {
+	p.mu.Lock()
+	p.armed = true
+	p.tripped = true
 	p.mu.Unlock()
 }
 

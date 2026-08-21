@@ -299,21 +299,27 @@ type CredentialStoreConfig struct {
 }
 
 type RootFSMaintenanceConfig struct {
-	Disabled                bool            `yaml:"disabled" json:"-"`
-	Interval                metav1.Duration `yaml:"interval" json:"-"`
-	BatchSize               int             `yaml:"batch_size" json:"-"`
-	MaxBatchesPerRun        int             `yaml:"max_batches_per_run" json:"-"`
-	Workers                 int             `yaml:"workers" json:"-"`
-	ObjectDeleteClaimTTL    metav1.Duration `yaml:"object_delete_claim_ttl" json:"-"`
-	ObjectDeleteBackoffBase metav1.Duration `yaml:"object_delete_backoff_base" json:"-"`
-	ObjectDeleteBackoffMax  metav1.Duration `yaml:"object_delete_backoff_max" json:"-"`
-	ObjectDeleteMaxAttempts int             `yaml:"object_delete_max_attempts" json:"-"`
-	SquashDisabled          bool            `yaml:"squash_disabled" json:"-"`
-	SquashMaxChainDepth     int             `yaml:"squash_max_chain_depth" json:"-"`
-	SquashMaxChainBytes     int64           `yaml:"squash_max_chain_bytes" json:"-"`
-	MaterializerDisabled    bool            `yaml:"materializer_disabled" json:"-"`
-	MaterializerInterval    metav1.Duration `yaml:"materializer_interval" json:"-"`
-	MaterializerScanLimit   int             `yaml:"materializer_scan_limit" json:"-"`
+	Disabled                        bool            `yaml:"disabled" json:"-"`
+	Interval                        metav1.Duration `yaml:"interval" json:"-"`
+	BatchSize                       int             `yaml:"batch_size" json:"-"`
+	MaxBatchesPerRun                int             `yaml:"max_batches_per_run" json:"-"`
+	Workers                         int             `yaml:"workers" json:"-"`
+	ObjectDeleteClaimTTL            metav1.Duration `yaml:"object_delete_claim_ttl" json:"-"`
+	ObjectDeleteBackoffBase         metav1.Duration `yaml:"object_delete_backoff_base" json:"-"`
+	ObjectDeleteBackoffMax          metav1.Duration `yaml:"object_delete_backoff_max" json:"-"`
+	ObjectDeleteMaxAttempts         int             `yaml:"object_delete_max_attempts" json:"-"`
+	SquashDisabled                  bool            `yaml:"squash_disabled" json:"-"`
+	SquashMaxChainDepth             int             `yaml:"squash_max_chain_depth" json:"-"`
+	SquashMaxChainBytes             int64           `yaml:"squash_max_chain_bytes" json:"-"`
+	MaterializerDisabled            bool            `yaml:"materializer_disabled" json:"-"`
+	MaterializerInterval            metav1.Duration `yaml:"materializer_interval" json:"-"`
+	MaterializerScanLimit           int             `yaml:"materializer_scan_limit" json:"-"`
+	MaterializerMinPackBytes        int64           `yaml:"materializer_min_pack_bytes" json:"-"`
+	MaterializerMaxDelay            metav1.Duration `yaml:"materializer_max_delay" json:"-"`
+	MaterializerForcedFlushesPerRun int             `yaml:"materializer_forced_flushes_per_run" json:"-"`
+	MaterializerGarbageInterval     metav1.Duration `yaml:"materializer_garbage_interval" json:"-"`
+	MaterializerUploadingStale      metav1.Duration `yaml:"materializer_uploading_stale" json:"-"`
+	MaterializerTerminalRetention   metav1.Duration `yaml:"materializer_terminal_retention" json:"-"`
 }
 
 type RootFSObjectStorageConfig struct {
@@ -761,6 +767,24 @@ func applyRootFSMaintenanceDefaults(cfg *ManagerConfig) {
 	}
 	if cfg.RootFSMaintenance.MaterializerScanLimit <= 0 {
 		cfg.RootFSMaintenance.MaterializerScanLimit = 1000
+	}
+	if cfg.RootFSMaintenance.MaterializerMinPackBytes <= 0 {
+		cfg.RootFSMaintenance.MaterializerMinPackBytes = 32 << 20
+	}
+	if cfg.RootFSMaintenance.MaterializerMaxDelay.Duration == 0 {
+		cfg.RootFSMaintenance.MaterializerMaxDelay = metav1.Duration{Duration: 5 * time.Minute}
+	}
+	if cfg.RootFSMaintenance.MaterializerForcedFlushesPerRun <= 0 {
+		cfg.RootFSMaintenance.MaterializerForcedFlushesPerRun = 1
+	}
+	if cfg.RootFSMaintenance.MaterializerGarbageInterval.Duration == 0 {
+		cfg.RootFSMaintenance.MaterializerGarbageInterval = metav1.Duration{Duration: time.Minute}
+	}
+	if cfg.RootFSMaintenance.MaterializerUploadingStale.Duration == 0 {
+		cfg.RootFSMaintenance.MaterializerUploadingStale = metav1.Duration{Duration: time.Hour}
+	}
+	if cfg.RootFSMaintenance.MaterializerTerminalRetention.Duration == 0 {
+		cfg.RootFSMaintenance.MaterializerTerminalRetention = metav1.Duration{Duration: 24 * time.Hour}
 	}
 }
 

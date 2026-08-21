@@ -75,6 +75,12 @@ func main() {
 	compositeBacklogBytes := flag.Int64("composite-backlog-bytes", sandboxstore.DefaultRootFSCompositeBacklogBytes, "regional PostgreSQL composite descriptor budget")
 	materializerInterval := flag.Duration("materializer-interval", rootfsmaterializer.DefaultInterval, "S3 materializer scan interval")
 	materializerScanLimit := flag.Int("materializer-scan-limit", rootfsmaterializer.DefaultScanLimit, "maximum composite generations scanned per pass")
+	materializerMinPackBytes := flag.Int64("materializer-min-pack-bytes", rootfsmaterializer.DefaultMinPackBytes, "minimum tenant-lane payload before shared pack publication")
+	materializerMaxDelay := flag.Duration("materializer-max-delay", rootfsmaterializer.DefaultMaxDelay, "maximum age before a bounded small-pack flush")
+	materializerForcedFlushes := flag.Int("materializer-forced-flushes-per-run", rootfsmaterializer.DefaultForcedFlushes, "maximum age-forced tenant-lane flushes per pass")
+	materializerGarbageInterval := flag.Duration("materializer-garbage-interval", rootfsmaterializer.DefaultGarbageInterval, "interval between durable materialization garbage passes")
+	materializerUploadingStale := flag.Duration("materializer-uploading-stale", rootfsmaterializer.DefaultUploadingStale, "stale age before a changed-locator upload batch can be abandoned")
+	materializerTerminalRetention := flag.Duration("materializer-terminal-retention", rootfsmaterializer.DefaultTerminalRetention, "commit-response-loss retention for terminal materialization batches")
 	objectType := flag.String("object-type", "s3", "RootFS object-store type")
 	objectBucket := flag.String("object-bucket", "", "RootFS object-store bucket (required in serve mode)")
 	objectRegion := flag.String("object-region", "us-east-1", "RootFS object-store region")
@@ -146,6 +152,11 @@ func main() {
 		materializer, err := newMaterializer(store, materializerConfig{
 			objectType: *objectType, bucket: *objectBucket, region: *objectRegion,
 			endpoint: *objectEndpoint, interval: *materializerInterval, scanLimit: *materializerScanLimit,
+			minPackBytes: *materializerMinPackBytes, maxDelay: *materializerMaxDelay,
+			forcedFlushesPerRun: *materializerForcedFlushes,
+			garbageInterval:     *materializerGarbageInterval,
+			uploadingStale:      *materializerUploadingStale,
+			terminalRetention:   *materializerTerminalRetention,
 		})
 		if err != nil {
 			fatal("serve: create materializer: %v", err)
@@ -378,10 +389,13 @@ func serve(
 	defer cancelService()
 	go materializer.Run(serviceCtx, func(result rootfsmaterializer.Result, err error) {
 		if err != nil {
-			log.Printf("RootFS materializer: scanned=%d materialized=%d failed=%d error=%v",
-				result.Scanned, result.Materialized, result.Failed, err)
+			log.Printf("RootFS materializer: scanned=%d materialized=%d deferred=%d batches=%d failed=%d abandoned=%d purged=%d enqueued=%d error=%v",
+				result.Scanned, result.Materialized, result.Deferred, result.Batches, result.Failed,
+				result.Abandoned, result.Purged, result.Enqueued, err)
 		} else if result.Materialized > 0 {
-			log.Printf("RootFS materializer: scanned=%d materialized=%d", result.Scanned, result.Materialized)
+			log.Printf("RootFS materializer: scanned=%d materialized=%d deferred=%d batches=%d abandoned=%d purged=%d enqueued=%d",
+				result.Scanned, result.Materialized, result.Deferred, result.Batches,
+				result.Abandoned, result.Purged, result.Enqueued)
 		}
 	})
 	var terminalErr <-chan error
@@ -440,12 +454,18 @@ func logRuntimeSlotTerminalPass(report runtimeslotreconciler.WorkerReport) {
 }
 
 type materializerConfig struct {
-	objectType string
-	bucket     string
-	region     string
-	endpoint   string
-	interval   time.Duration
-	scanLimit  int
+	objectType          string
+	bucket              string
+	region              string
+	endpoint            string
+	interval            time.Duration
+	scanLimit           int
+	minPackBytes        int64
+	maxDelay            time.Duration
+	forcedFlushesPerRun int
+	garbageInterval     time.Duration
+	uploadingStale      time.Duration
+	terminalRetention   time.Duration
 }
 
 func newMaterializer(
@@ -474,6 +494,10 @@ func newMaterializer(
 		Store: store, Source: conditional,
 		Publisher: rootfsblock.ObjectStorePublisher{Store: conditional},
 		ScanLimit: config.scanLimit, Interval: config.interval,
+		MinPackBytes: config.minPackBytes, MaxDelay: config.maxDelay,
+		ForcedFlushesPerRun: config.forcedFlushesPerRun,
+		GarbageInterval:     config.garbageInterval, UploadingStale: config.uploadingStale,
+		TerminalRetention: config.terminalRetention,
 	})
 }
 

@@ -110,6 +110,11 @@ type RootFSGeneration struct {
 	LocatorVersion     int64
 	Descriptor         []byte
 	CreatedAt          time.Time
+	// MaterializationPackLane and MaterializationTeamID are populated only by
+	// regional materialization scans. They prevent shared physical packs from
+	// crossing a tenant or format boundary.
+	MaterializationPackLane string
+	MaterializationTeamID   string
 }
 
 type PutReadyRootFSBaseArtifactRequest struct {

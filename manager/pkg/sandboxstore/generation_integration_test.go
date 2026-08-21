@@ -442,10 +442,10 @@ func TestForkRunningRootFSFilesystemKeepsSourceWriterLiveIntegration(t *testing.
 	materializedDescriptor.CompositeTail = nil
 	materializedPayload, err := rootfsblock.EncodeDescriptor(materializedDescriptor)
 	require.NoError(t, err)
-	require.NoError(t, store.PublishRootFSGenerationMaterialization(ctx, &RootFSGenerationMaterialization{
-		GenerationID: checkpoint.ID, ExpectedLocatorVersion: checkpoint.LocatorVersion,
-		ExpectedDescriptor: checkpoint.Descriptor, MaterializedDescriptor: materializedPayload,
-	}))
+	materialization := beginRootFSMaterializationIntegrationBatch(
+		t, ctx, store, checkpoint, materializedPayload,
+	)
+	require.NoError(t, store.PublishRootFSGenerationMaterializationBatch(ctx, materialization))
 	renewed, err := store.RenewRootFSWriterGrant(ctx, &RenewRootFSWriterGrantRequest{
 		GrantID: candidate.SourceWriterGrantID, WriterEpoch: candidate.SourceWriterEpoch,
 		BindingVersion: candidate.BindingVersion, BindingDigest: candidate.BindingDigest,

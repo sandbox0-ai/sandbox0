@@ -9,6 +9,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/infra-operator/api/config"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/pkg/objectstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -18,11 +19,38 @@ func (rootFSCompositeMaterializerTestStore) ListCompositeRootFSGenerations(conte
 	return nil, nil
 }
 
-func (rootFSCompositeMaterializerTestStore) PublishRootFSGenerationMaterialization(
-	context.Context,
-	*sandboxstore.RootFSGenerationMaterialization,
+func (rootFSCompositeMaterializerTestStore) GetOldestUploadingRootFSGenerationMaterializationBatch(context.Context) (*sandboxstore.RootFSGenerationMaterializationBatch, error) {
+	return nil, nil
+}
+
+func (rootFSCompositeMaterializerTestStore) BeginRootFSGenerationMaterializationBatch(
+	context.Context, *sandboxstore.BeginRootFSGenerationMaterializationBatchRequest,
+) (*sandboxstore.RootFSGenerationMaterializationBatch, error) {
+	return nil, nil
+}
+
+func (rootFSCompositeMaterializerTestStore) RegisterRootFSGenerationMaterializationBatchObject(
+	context.Context, string, rootfsblock.ObjectReference,
 ) error {
 	return nil
+}
+
+func (rootFSCompositeMaterializerTestStore) MarkRootFSGenerationMaterializationBatchObjectUploaded(
+	context.Context, string, string,
+) error {
+	return nil
+}
+
+func (rootFSCompositeMaterializerTestStore) PublishRootFSGenerationMaterializationBatch(
+	context.Context, *sandboxstore.PublishRootFSGenerationMaterializationBatchRequest,
+) error {
+	return nil
+}
+
+func (rootFSCompositeMaterializerTestStore) ReconcileRootFSGenerationMaterializationGarbage(
+	context.Context, time.Duration, time.Duration, int,
+) (*sandboxstore.RootFSGenerationMaterializationGarbageResult, error) {
+	return &sandboxstore.RootFSGenerationMaterializationGarbageResult{}, nil
 }
 
 type objectStoreWithoutConditionalCreate struct{ objectstore.Store }

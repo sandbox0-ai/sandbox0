@@ -140,10 +140,19 @@ budget (1 GiB by default), while `--object-bucket` and the object credential
 environment variables are required. Concurrent publishers serialize on the
 singleton policy row. Once the budget is full, publication returns HTTP 507
 with `Retry-After` and keeps the exact local retire intent retryable; writer
-lease renewal continues. The materializer scans oldest-first, writes immutable
-content-addressed objects, and releases PostgreSQL backlog only after an exact
-locator-version CAS. An S3 outage therefore cannot grow region tail data past
-the configured bound.
+lease renewal continues. The materializer scans oldest-first and groups only
+the same tenant and RootFS format into shared 64 MiB data and mapping packs.
+It fixes exact ordered batch membership in PostgreSQL before the first PUT,
+journals every immutable object before upload, and publishes every locator in
+the batch atomically. A crash or another manager replica therefore resumes the
+same pack boundary instead of creating one data and mapping object per tiny
+sandbox lifecycle. `--materializer-min-pack-bytes` defaults to 32 MiB;
+`--materializer-max-delay` defaults to five minutes, with one age-forced lane
+flush per pass, so low traffic is bounded by time without defeating batching.
+Stale changed-locator uploads and terminal journals are reconciled through the
+durable object deletion queue; uploading batches fence Sandbox deletion until
+publication finishes. An S3 outage cannot grow region tail data past the
+configured PostgreSQL bound or turn a pre-PUT journal into an untracked orphan.
 
 The same mTLS listener exposes `/internal/v1/runtime-slots/{slot_id}` and its
 `ready`, `heartbeat`, `starting`, and `command-ready` PUT transitions.

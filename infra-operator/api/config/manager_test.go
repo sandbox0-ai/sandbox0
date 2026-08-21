@@ -271,7 +271,13 @@ func TestRootFSMaintenanceDefaultsIncludeCompositeMaterializer(t *testing.T) {
 	cfg := &ManagerConfig{}
 	applyRootFSMaintenanceDefaults(cfg)
 	if cfg.RootFSMaintenance.MaterializerInterval.Duration != time.Second ||
-		cfg.RootFSMaintenance.MaterializerScanLimit != 1000 {
+		cfg.RootFSMaintenance.MaterializerScanLimit != 1000 ||
+		cfg.RootFSMaintenance.MaterializerMinPackBytes != 32<<20 ||
+		cfg.RootFSMaintenance.MaterializerMaxDelay.Duration != 5*time.Minute ||
+		cfg.RootFSMaintenance.MaterializerForcedFlushesPerRun != 1 ||
+		cfg.RootFSMaintenance.MaterializerGarbageInterval.Duration != time.Minute ||
+		cfg.RootFSMaintenance.MaterializerUploadingStale.Duration != time.Hour ||
+		cfg.RootFSMaintenance.MaterializerTerminalRetention.Duration != 24*time.Hour {
 		t.Fatalf("rootfs materializer defaults = %#v", cfg.RootFSMaintenance)
 	}
 }

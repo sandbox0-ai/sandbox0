@@ -36,7 +36,25 @@ type BuildResult struct {
 	Payload    []byte
 	Objects    int
 	Bytes      int64
+	// References contains every object published by a batch build and
+	// reachable from this generation. Single-generation builders leave it
+	// empty until their publication path needs durable object inventory.
+	References []ObjectReference
 }
+
+// ObjectReference identifies one complete immutable object published while
+// building a generation. Checksum covers the complete object, not one range.
+type ObjectReference struct {
+	Key      string
+	Kind     string
+	Size     int64
+	Checksum string
+}
+
+const (
+	ObjectKindDataPack    = "data_pack"
+	ObjectKindMappingPage = "mapping_page"
+)
 
 type pendingDataEntry struct {
 	entry MappingEntry

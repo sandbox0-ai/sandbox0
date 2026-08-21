@@ -1,13 +1,11 @@
 package sandboxstore
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/sandbox0-ai/sandbox0/pkg/rootfsblock"
 )
 
 const DefaultRootFSCompositeBacklogBytes = int64(1 << 30)
@@ -21,16 +19,6 @@ type RootFSCompositeBacklogUsage struct {
 	UsedDescriptorBytes int64
 	MaxDescriptorBytes  int64
 	GenerationCount     int64
-}
-
-// RootFSGenerationMaterialization is one physical-locator CAS. It preserves
-// the immutable logical generation ID while replacing its PostgreSQL tail with
-// a complete S3 mapping root.
-type RootFSGenerationMaterialization struct {
-	GenerationID           string
-	ExpectedLocatorVersion int64
-	ExpectedDescriptor     []byte
-	MaterializedDescriptor []byte
 }
 
 // SetRootFSCompositeBacklogLimit updates the singleton regional policy used by
@@ -79,8 +67,8 @@ func (s *PGSandboxStore) GetRootFSCompositeBacklogUsage(ctx context.Context) (Ro
 	return usage, nil
 }
 
-// ListCompositeRootFSGenerations returns oldest-first materializer work. The
-// locator CAS, rather than this unlocked scan, owns concurrency correctness.
+// ListCompositeRootFSGenerations returns unbound oldest-first materializer
+// work. Durable batch creation owns concurrency between manager replicas.
 func (s *PGSandboxStore) ListCompositeRootFSGenerations(ctx context.Context, limit int) ([]RootFSGeneration, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("rootfs generation store is not configured")
@@ -88,9 +76,29 @@ func (s *PGSandboxStore) ListCompositeRootFSGenerations(ctx context.Context, lim
 	if limit <= 0 || limit > 10_000 {
 		return nil, fmt.Errorf("rootfs composite scan limit must be between 1 and 10000")
 	}
-	rows, err := s.pool.Query(ctx, rootFSGenerationSelectSQL()+`
-		WHERE durability_state = $1
-		ORDER BY created_at, generation_id
+	rows, err := s.pool.Query(ctx, `
+		SELECT generation.generation_id, generation.filesystem_id,
+			generation.parent_generation_id, generation.source_oci_digest,
+			generation.base_artifact_digest, generation.base_block_root,
+			generation.current_block_head, generation.writer_epoch,
+			generation.format_generation, generation.durability_state,
+			generation.locator_version, generation.descriptor, generation.created_at,
+			filesystem.team_id
+		FROM manager.rootfs_generations generation
+		JOIN manager.rootfs_filesystems filesystem
+			ON filesystem.filesystem_id = generation.filesystem_id
+		WHERE generation.durability_state = $1
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_materialization_members member
+				WHERE member.generation_id = generation.generation_id
+					AND member.state = 'uploading'
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM manager.rootfs_writer_grants writer
+				WHERE writer.initial_generation_id = generation.generation_id
+					AND writer.state IN ('issued', 'consumed', 'retiring')
+			)
+		ORDER BY generation.created_at, generation.generation_id
 		LIMIT $2
 	`, RootFSGenerationStateCompositeDurable, limit)
 	if err != nil {
@@ -99,11 +107,27 @@ func (s *PGSandboxStore) ListCompositeRootFSGenerations(ctx context.Context, lim
 	defer rows.Close()
 	result := make([]RootFSGeneration, 0, limit)
 	for rows.Next() {
-		generation, err := scanRootFSGeneration(rows)
-		if err != nil {
+		var generation RootFSGeneration
+		var parent *string
+		if err := rows.Scan(
+			&generation.ID, &generation.FilesystemID, &parent,
+			&generation.SourceOCIDigest, &generation.BaseArtifactDigest,
+			&generation.BaseBlockRoot, &generation.CurrentBlockHead,
+			&generation.WriterEpoch, &generation.FormatGeneration,
+			&generation.DurabilityState, &generation.LocatorVersion,
+			&generation.Descriptor, &generation.CreatedAt,
+			&generation.MaterializationTeamID,
+		); err != nil {
 			return nil, fmt.Errorf("scan composite rootfs generation: %w", err)
 		}
-		result = append(result, *generation)
+		if parent != nil {
+			generation.ParentGenerationID = *parent
+		}
+		generation.Descriptor = append([]byte(nil), generation.Descriptor...)
+		generation.MaterializationPackLane = RootFSMaterializationPackLane(
+			generation.MaterializationTeamID, generation.FormatGeneration,
+		)
+		result = append(result, generation)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate composite rootfs generations: %w", err)
@@ -111,85 +135,15 @@ func (s *PGSandboxStore) ListCompositeRootFSGenerations(ctx context.Context, lim
 	return result, nil
 }
 
-// PublishRootFSGenerationMaterialization atomically replaces one composite
-// physical locator. An exact completed retry succeeds; a changed locator fails
-// closed so concurrent workers cannot overwrite newer placement.
-func (s *PGSandboxStore) PublishRootFSGenerationMaterialization(
-	ctx context.Context,
-	req *RootFSGenerationMaterialization,
-) error {
-	if s == nil || s.pool == nil {
-		return fmt.Errorf("rootfs generation store is not configured")
+// RootFSMaterializationPackLane returns a path-safe tenant and format
+// isolation identity. Raw tenant IDs never become object keys.
+func RootFSMaterializationPackLane(teamID string, formatGeneration int) string {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" || formatGeneration <= 0 {
+		return ""
 	}
-	normalized, oldDescriptor, nextDescriptor, err := validateRootFSGenerationMaterialization(req)
-	if err != nil {
-		return err
-	}
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE manager.rootfs_generations
-		SET current_block_head = $1,
-			durability_state = $2,
-			locator_version = locator_version + 1,
-			descriptor = $3
-		WHERE generation_id = $4
-			AND durability_state = $5
-			AND locator_version = $6
-			AND descriptor = $7
-			AND current_block_head = $8
-	`, nextDescriptor.MappingRoot.RootDigest, RootFSGenerationStateS3Materialized,
-		normalized.MaterializedDescriptor, normalized.GenerationID,
-		RootFSGenerationStateCompositeDurable, normalized.ExpectedLocatorVersion,
-		normalized.ExpectedDescriptor, oldDescriptor.MappingRoot.RootDigest)
-	if err != nil {
-		return fmt.Errorf("publish rootfs generation materialization: %w", err)
-	}
-	if tag.RowsAffected() == 1 {
-		return nil
-	}
-	stored, err := s.GetRootFSGeneration(ctx, normalized.GenerationID)
-	if err == nil && stored.DurabilityState == RootFSGenerationStateS3Materialized &&
-		stored.LocatorVersion == normalized.ExpectedLocatorVersion+1 &&
-		bytes.Equal(stored.Descriptor, normalized.MaterializedDescriptor) {
-		return nil
-	}
-	if err != nil && !errors.Is(err, ErrRootFSFilesystemNotFound) {
-		return fmt.Errorf("read conflicting rootfs materialization: %w", err)
-	}
-	return fmt.Errorf("%w: generation %s locator changed", ErrRootFSGenerationConflict, normalized.GenerationID)
-}
-
-func validateRootFSGenerationMaterialization(
-	req *RootFSGenerationMaterialization,
-) (*RootFSGenerationMaterialization, rootfsblock.Descriptor, rootfsblock.Descriptor, error) {
-	if req == nil || req.GenerationID == "" || req.ExpectedLocatorVersion <= 0 ||
-		len(req.ExpectedDescriptor) == 0 || len(req.MaterializedDescriptor) == 0 {
-		return nil, rootfsblock.Descriptor{}, rootfsblock.Descriptor{},
-			fmt.Errorf("generation, locator version, and both descriptors are required")
-	}
-	normalized := *req
-	normalized.GenerationID = strings.TrimSpace(req.GenerationID)
-	if normalized.GenerationID == "" {
-		return nil, rootfsblock.Descriptor{}, rootfsblock.Descriptor{}, fmt.Errorf("generation is required")
-	}
-	normalized.ExpectedDescriptor = append([]byte(nil), req.ExpectedDescriptor...)
-	normalized.MaterializedDescriptor = append([]byte(nil), req.MaterializedDescriptor...)
-	oldDescriptor, err := rootfsblock.DecodeDescriptor(normalized.ExpectedDescriptor)
-	if err != nil || oldDescriptor.CompositeTail == nil {
-		return nil, rootfsblock.Descriptor{}, rootfsblock.Descriptor{},
-			fmt.Errorf("expected descriptor must be composite durable: %v", err)
-	}
-	nextDescriptor, err := rootfsblock.DecodeDescriptor(normalized.MaterializedDescriptor)
-	if err != nil || nextDescriptor.CompositeTail != nil {
-		return nil, rootfsblock.Descriptor{}, rootfsblock.Descriptor{},
-			fmt.Errorf("materialized descriptor must contain a complete S3 mapping: %v", err)
-	}
-	if oldDescriptor.Version != nextDescriptor.Version ||
-		oldDescriptor.LogicalSizeBytes != nextDescriptor.LogicalSizeBytes ||
-		oldDescriptor.BlockSizeBytes != nextDescriptor.BlockSizeBytes {
-		return nil, rootfsblock.Descriptor{}, rootfsblock.Descriptor{},
-			fmt.Errorf("materialized descriptor changes logical geometry")
-	}
-	return &normalized, oldDescriptor, nextDescriptor, nil
+	sum := sha256.Sum256([]byte(teamID))
+	return fmt.Sprintf("tenant-sha256:%x/format:%d", sum, formatGeneration)
 }
 
 func ensureRootFSCompositeBacklogCapacity(

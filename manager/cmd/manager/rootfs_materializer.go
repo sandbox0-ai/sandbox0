@@ -27,9 +27,15 @@ func buildRootFSCompositeMaterializer(
 	}
 	worker, err := rootfsmaterializer.New(rootfsmaterializer.Config{
 		Store: store, Source: conditional,
-		Publisher: rootfsblock.ObjectStorePublisher{Store: conditional},
-		ScanLimit: cfg.RootFSMaintenance.MaterializerScanLimit,
-		Interval:  cfg.RootFSMaintenance.MaterializerInterval.Duration,
+		Publisher:           rootfsblock.ObjectStorePublisher{Store: conditional},
+		ScanLimit:           cfg.RootFSMaintenance.MaterializerScanLimit,
+		Interval:            cfg.RootFSMaintenance.MaterializerInterval.Duration,
+		MinPackBytes:        cfg.RootFSMaintenance.MaterializerMinPackBytes,
+		MaxDelay:            cfg.RootFSMaintenance.MaterializerMaxDelay.Duration,
+		ForcedFlushesPerRun: cfg.RootFSMaintenance.MaterializerForcedFlushesPerRun,
+		GarbageInterval:     cfg.RootFSMaintenance.MaterializerGarbageInterval.Duration,
+		UploadingStale:      cfg.RootFSMaintenance.MaterializerUploadingStale.Duration,
+		TerminalRetention:   cfg.RootFSMaintenance.MaterializerTerminalRetention.Duration,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create RootFS composite materializer: %w", err)
@@ -57,7 +63,9 @@ func logRootFSCompositeMaterializerPass(logger *zap.Logger, result rootfsmateria
 		return
 	}
 	fields := []zap.Field{
-		zap.Int("scanned", result.Scanned), zap.Int("materialized", result.Materialized), zap.Int("failed", result.Failed),
+		zap.Int("scanned", result.Scanned), zap.Int("materialized", result.Materialized),
+		zap.Int("deferred", result.Deferred), zap.Int("batches", result.Batches), zap.Int("failed", result.Failed),
+		zap.Int("abandoned", result.Abandoned), zap.Int("purged", result.Purged), zap.Int("enqueued", result.Enqueued),
 	}
 	if err != nil {
 		logger.Warn("Rootfs composite materializer pass failed", append(fields, zap.Error(err))...)

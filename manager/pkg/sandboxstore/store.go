@@ -623,6 +623,33 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 		if blocked {
 			return fmt.Errorf("%w: paused RootFS rebase worker outcome is pending", ErrSandboxClaimCleanupPending)
 		}
+		var materializationPending bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM manager.rootfs_generations generation
+				JOIN manager.rootfs_materialization_members member
+					ON member.generation_id = generation.generation_id
+				WHERE member.state = 'uploading'
+					AND (
+						EXISTS (
+							SELECT 1 FROM manager.sandbox_rootfs_bindings binding
+							WHERE binding.sandbox_id = $1
+								AND binding.filesystem_id = generation.filesystem_id
+						)
+						OR EXISTS (
+							SELECT 1 FROM manager.rootfs_writer_grants writer
+							WHERE writer.sandbox_id = $1
+								AND writer.filesystem_id = generation.filesystem_id
+						)
+					)
+			)
+		`, sandboxID).Scan(&materializationPending); err != nil {
+			return fmt.Errorf("check sandbox RootFS materialization cleanup fence: %w", err)
+		}
+		if materializationPending {
+			return fmt.Errorf("%w: RootFS materialization batch is uploading", ErrSandboxClaimCleanupPending)
+		}
 	}
 	if err == nil && currentDesiredState == SandboxDesiredStateTerminating && strings.TrimSpace(webhookURL) != "" {
 		if err := deletionwebhook.Enqueue(ctx, tx, sandboxID, teamID, webhookURL, webhookSecret, deletedAt); err != nil {
@@ -744,6 +771,30 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 			deletableFilesystemIDs = nil
 		}
 		if len(deletableFilesystemIDs) > 0 {
+			objectRows, err := tx.Query(ctx, `
+				SELECT DISTINCT locator_object.object_key
+				FROM manager.rootfs_generation_materialization_objects locator_object
+				JOIN manager.rootfs_generations generation USING (generation_id)
+				WHERE generation.filesystem_id = ANY($1::text[])
+				ORDER BY locator_object.object_key
+			`, deletableFilesystemIDs)
+			if err != nil {
+				return fmt.Errorf("list deleted sandbox materialization objects: %w", err)
+			}
+			var materializationObjectKeys []string
+			for objectRows.Next() {
+				var objectKey string
+				if err := objectRows.Scan(&objectKey); err != nil {
+					objectRows.Close()
+					return fmt.Errorf("scan deleted sandbox materialization object: %w", err)
+				}
+				materializationObjectKeys = append(materializationObjectKeys, objectKey)
+			}
+			if err := objectRows.Err(); err != nil {
+				objectRows.Close()
+				return fmt.Errorf("iterate deleted sandbox materialization objects: %w", err)
+			}
+			objectRows.Close()
 			if _, err := tx.Exec(ctx, `
 				UPDATE manager.rootfs_filesystems
 				SET head_generation_id = NULL, updated_at = NOW()
@@ -756,6 +807,13 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 				WHERE filesystem_id = ANY($1::text[])
 			`, deletableFilesystemIDs); err != nil {
 				return fmt.Errorf("delete sandbox rootfs generations: %w", err)
+			}
+			for _, objectKey := range materializationObjectKeys {
+				if _, err := releaseUnreferencedRootFSMaterializationObject(
+					ctx, tx, objectKey, teamID,
+				); err != nil {
+					return err
+				}
 			}
 			if _, err := tx.Exec(ctx, `
 				DELETE FROM manager.rootfs_filesystems

@@ -74,11 +74,6 @@ func (s *Server) claimSandbox(c *gin.Context) {
 
 	claimer := s.sandboxClaimer
 	if claimer == nil {
-		// Direct Server literals remain common in focused handler tests. Formal
-		// composition always sets the runtime-neutral claimer explicitly.
-		claimer = s.sandboxService
-	}
-	if claimer == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox claim backend is not configured")
 		return
 	}
@@ -213,7 +208,11 @@ func (s *Server) listSandboxes(c *gin.Context) {
 		req.Offset = offset
 	}
 
-	resp, err := s.sandboxService.ListSandboxes(c.Request.Context(), req)
+	if s.sandboxReader == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox query service is not configured")
+		return
+	}
+	resp, err := s.sandboxReader.ListSandboxes(c.Request.Context(), req)
 	if err != nil {
 		s.logger.Error("Failed to list sandboxes",
 			zap.String("teamID", claims.TeamID),
@@ -258,7 +257,11 @@ func requireAuthenticatedClaims(c *gin.Context) (*internalauth.Claims, bool) {
 }
 
 func (s *Server) getOwnedSandbox(c *gin.Context, sandboxID string, claims *internalauth.Claims, failureLog string) (*managerapi.Sandbox, bool) {
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if s.sandboxReader == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox query service is not configured")
+		return nil, false
+	}
+	sandbox, err := s.sandboxReader.GetSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
 		if failureLog != "" {
 			s.logger.Error(failureLog,
@@ -302,7 +305,11 @@ func (s *Server) getSandboxInternal(c *gin.Context) {
 		return
 	}
 
-	sandbox, err := s.sandboxService.GetSandbox(c.Request.Context(), sandboxID)
+	if s.sandboxReader == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox query service is not configured")
+		return
+	}
+	sandbox, err := s.sandboxReader.GetSandbox(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to get sandbox (internal)",
 			zap.String("sandboxID", sandboxID),
@@ -333,7 +340,11 @@ func (s *Server) getSandboxTemplateSourceInternal(c *gin.Context) {
 		spec.JSONError(c, http.StatusForbidden, spec.CodeForbidden, "sandbox:read permission is required")
 		return
 	}
-	source, err := s.sandboxService.ResolveSandboxTemplateSource(c.Request.Context(), sandboxID, claims.TeamID)
+	if s.sandboxSourceResolver == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox template source resolver is not configured")
+		return
+	}
+	source, err := s.sandboxSourceResolver.ResolveSandboxTemplateSource(c.Request.Context(), sandboxID, claims.TeamID)
 	if err != nil {
 		switch {
 		case errors.Is(err, template.ErrTemplateSourceNotFound):
@@ -402,7 +413,11 @@ func (s *Server) updateSandbox(c *gin.Context) {
 		return
 	}
 
-	updated, err := s.sandboxService.UpdateSandbox(c.Request.Context(), sandboxID, req.Config)
+	if s.sandboxUpdater == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox update service is not configured")
+		return
+	}
+	updated, err := s.sandboxUpdater.UpdateSandbox(c.Request.Context(), sandboxID, req.Config)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidClaimRequest) {
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
@@ -449,7 +464,7 @@ func (s *Server) getSandboxStatus(c *gin.Context) {
 		return
 	}
 
-	status, err := s.sandboxService.GetSandboxStatus(c.Request.Context(), sandboxID)
+	status, err := s.sandboxReader.GetSandboxStatus(c.Request.Context(), sandboxID)
 	if err != nil {
 		s.logger.Error("Failed to get sandbox status",
 			zap.String("sandboxID", sandboxID),
@@ -596,7 +611,11 @@ func (s *Server) refreshSandbox(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.sandboxService.RefreshSandbox(c.Request.Context(), sandboxID, &req)
+	if s.sandboxUpdater == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox update service is not configured")
+		return
+	}
+	resp, err := s.sandboxUpdater.RefreshSandbox(c.Request.Context(), sandboxID, &req)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrInvalidClaimRequest):

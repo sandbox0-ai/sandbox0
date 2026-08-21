@@ -88,9 +88,10 @@ func newSandboxLifecycleHandlerFixture(
 	sandboxService := service.NewSandboxServiceWithDependencies(service.SandboxServiceDependencies{
 		PodLister: newHTTPTestPodLister(t, pod), Config: service.SandboxServiceConfig{}, Logger: zap.NewNop(),
 	})
-	server := &Server{
-		sandboxService: sandboxService, sandboxPauser: pauser, sandboxResumer: resumer, logger: zap.NewNop(),
-	}
+	server := newHTTPTestServerWithSandboxService(sandboxService)
+	server.sandboxPauser = pauser
+	server.sandboxResumer = resumer
+	server.logger = zap.NewNop()
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Params = gin.Params{{Key: "id", Value: "sandbox-1"}}

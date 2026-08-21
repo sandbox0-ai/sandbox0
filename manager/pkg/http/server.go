@@ -11,14 +11,17 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/clusterservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/credentialsource"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/egressauthservice"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/registryservice"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/templateservice"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"github.com/sandbox0-ai/sandbox0/pkg/internalauth"
+	"github.com/sandbox0-ai/sandbox0/pkg/managerapi"
 	"github.com/sandbox0-ai/sandbox0/pkg/observability"
 	httpobs "github.com/sandbox0-ai/sandbox0/pkg/observability/http"
 	"github.com/sandbox0-ai/sandbox0/pkg/quota"
@@ -32,7 +35,11 @@ import (
 // Server represents the HTTP server
 type Server struct {
 	router                  *gin.Engine
-	sandboxService          *service.SandboxService
+	sandboxReader           SandboxReader
+	sandboxUpdater          SandboxUpdater
+	sandboxNetworkPolicy    SandboxNetworkPolicyService
+	sandboxRootFS           SandboxRootFSService
+	sandboxSourceResolver   templatehttp.SandboxTemplateSourceResolver
 	sandboxClaimer          service.SandboxClaimer
 	sandboxTerminator       service.SandboxTerminator
 	sandboxPauser           service.SandboxPauser
@@ -73,6 +80,37 @@ type updateSandboxCapabilityRequest struct {
 
 type capabilityBodyInspector func(target any) bool
 
+// SandboxReader owns the durable public sandbox projections consumed by the
+// manager HTTP API. Implementations must not require a Kubernetes Pod cache.
+type SandboxReader interface {
+	ListSandboxes(context.Context, *sandboxstore.ListSandboxesRequest) (*service.ListSandboxesResponse, error)
+	GetSandbox(context.Context, string) (*managerapi.Sandbox, error)
+	GetSandboxStatus(context.Context, string) (map[string]any, error)
+}
+
+// SandboxUpdater owns public mutations that do not create a new runtime
+// identity. Runtime-specific orchestration remains behind this interface.
+type SandboxUpdater interface {
+	UpdateSandbox(context.Context, string, *service.SandboxUpdateConfig) (*managerapi.Sandbox, error)
+	RefreshSandbox(context.Context, string, *service.RefreshRequest) (*service.RefreshResponse, error)
+}
+
+// SandboxNetworkPolicyService owns the durable network-policy API.
+type SandboxNetworkPolicyService interface {
+	SupportsNetworkPolicy() bool
+	GetNetworkPolicy(context.Context, string) (*v1alpha1.SandboxNetworkPolicy, error)
+	UpdateNetworkPolicy(context.Context, string, *v1alpha1.SandboxNetworkPolicy) (*v1alpha1.SandboxNetworkPolicy, error)
+}
+
+// SandboxRootFSService owns public named snapshot and restore operations.
+type SandboxRootFSService interface {
+	CreateSandboxRootFSSnapshot(context.Context, string, string, *service.CreateSandboxRootFSSnapshotRequest) (*service.SandboxRootFSSnapshot, error)
+	ListSandboxRootFSSnapshots(context.Context, string, string) (*service.ListSandboxRootFSSnapshotsResponse, error)
+	GetSandboxRootFSSnapshot(context.Context, string, string) (*service.SandboxRootFSSnapshot, error)
+	DeleteSandboxRootFSSnapshot(context.Context, string, string) error
+	RestoreSandboxRootFS(context.Context, string, string, *service.RestoreSandboxRootFSRequest) (*service.RestoreSandboxRootFSResponse, error)
+}
+
 // TemplateReconciler exposes minimal reconcile controls for template syncing.
 type TemplateReconciler interface {
 	TriggerReconcile(ctx context.Context)
@@ -82,7 +120,11 @@ type TemplateReconciler interface {
 // this struct keeps composition changes local and avoids order-dependent
 // constructor calls as features are added or removed.
 type ServerDependencies struct {
-	SandboxService          *service.SandboxService
+	SandboxReader           SandboxReader
+	SandboxUpdater          SandboxUpdater
+	SandboxNetworkPolicy    SandboxNetworkPolicyService
+	SandboxRootFS           SandboxRootFSService
+	SandboxSourceResolver   templatehttp.SandboxTemplateSourceResolver
 	SandboxClaimer          service.SandboxClaimer
 	SandboxTerminator       service.SandboxTerminator
 	SandboxPauser           service.SandboxPauser
@@ -119,9 +161,6 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 	router.Use(gin.Recovery())
 	router.Use(requestLogger(deps.Logger))
 
-	if deps.SandboxClaimer == nil {
-		deps.SandboxClaimer = deps.SandboxService
-	}
 	if deps.SandboxTerminator == nil {
 		deps.SandboxTerminator, _ = deps.SandboxClaimer.(service.SandboxTerminator)
 	}
@@ -139,7 +178,11 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 	}
 	server := &Server{
 		router:                  router,
-		sandboxService:          deps.SandboxService,
+		sandboxReader:           deps.SandboxReader,
+		sandboxUpdater:          deps.SandboxUpdater,
+		sandboxNetworkPolicy:    deps.SandboxNetworkPolicy,
+		sandboxRootFS:           deps.SandboxRootFS,
+		sandboxSourceResolver:   deps.SandboxSourceResolver,
 		sandboxClaimer:          deps.SandboxClaimer,
 		sandboxTerminator:       deps.SandboxTerminator,
 		sandboxPauser:           deps.SandboxPauser,
@@ -172,7 +215,7 @@ func NewServerWithDependencies(deps ServerDependencies) *Server {
 		server.templateHandler = &templatehttp.Handler{
 			Store:                deps.TemplateStore,
 			BuildStore:           buildStore,
-			SourceResolver:       deps.SandboxService,
+			SourceResolver:       deps.SandboxSourceResolver,
 			Reconciler:           deps.TemplateReconciler,
 			StatsProvider:        &clusterTemplateStatsProvider{clusterService: deps.ClusterService},
 			ResourcePolicy:       deps.TemplateResourcePolicy,
@@ -446,7 +489,7 @@ func (s *Server) extractAuthToken(r *http.Request) string {
 
 func (s *Server) requireNetworkPolicyCapability() gin.HandlerFunc {
 	return s.requireCapability(func() bool {
-		return s.sandboxService != nil && s.sandboxService.SupportsNetworkPolicy()
+		return s.sandboxNetworkPolicy != nil && s.sandboxNetworkPolicy.SupportsNetworkPolicy()
 	}, "network policy is unavailable in this deployment")
 }
 
@@ -454,7 +497,7 @@ func (s *Server) requireNetworkPolicyInBody(newRequest func() any) gin.HandlerFu
 	return s.requireCapabilityInBody(
 		newRequest,
 		func(target any) bool { return requestContainsNetworkPolicy(target, nil) },
-		func() bool { return s.sandboxService != nil && s.sandboxService.SupportsNetworkPolicy() },
+		func() bool { return s.sandboxNetworkPolicy != nil && s.sandboxNetworkPolicy.SupportsNetworkPolicy() },
 		"network policy is unavailable in this deployment",
 	)
 }

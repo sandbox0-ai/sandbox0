@@ -56,7 +56,8 @@ func TestListSandboxesReturnsOK(t *testing.T) {
 		Logger:    zap.NewNop(),
 	})
 
-	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
+	server := newHTTPTestServerWithSandboxService(sandboxService)
+	server.logger = zap.NewNop()
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes", nil)
@@ -182,7 +183,8 @@ func TestClaimSandboxReturnsUnavailableWhenDataPlaneNotReady(t *testing.T) {
 		Logger:         zap.NewNop(),
 	})
 
-	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
+	server := newHTTPTestServerWithSandboxService(sandboxService)
+	server.logger = zap.NewNop()
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"template":"default"}`))
@@ -216,7 +218,8 @@ func TestClaimSandboxReturnsTooManyRequestsWhenActiveSandboxQuotaExceeded(t *tes
 		},
 	})
 
-	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
+	server := newHTTPTestServerWithSandboxService(sandboxService)
+	server.logger = zap.NewNop()
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"template":"default"}`))
@@ -262,7 +265,8 @@ func TestClaimSandboxReturnsNotFoundForMissingTemplate(t *testing.T) {
 		Logger:         zap.NewNop(),
 	})
 
-	server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
+	server := newHTTPTestServerWithSandboxService(sandboxService)
+	server.logger = zap.NewNop()
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"template":"missing"}`))
@@ -318,7 +322,8 @@ func TestRefreshSandboxRejectsMalformedJSON(t *testing.T) {
 				Logger:    zap.NewNop(),
 			})
 
-			server := &Server{sandboxService: sandboxService, logger: zap.NewNop()}
+			server := newHTTPTestServerWithSandboxService(sandboxService)
+			server.logger = zap.NewNop()
 			recorder := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(recorder)
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes/sandbox-1/refresh", strings.NewReader(tt.body))

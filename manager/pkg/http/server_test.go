@@ -262,7 +262,8 @@ func newTestServerForCapability(t *testing.T, provider network.Provider) *Server
 		Config:          service.SandboxServiceConfig{},
 		Logger:          zap.NewNop(),
 	})
-	return &Server{sandboxService: sandboxService}
+	server := newHTTPTestServerWithSandboxService(sandboxService)
+	return server
 }
 
 func testProvider(name string) network.Provider {

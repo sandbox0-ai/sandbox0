@@ -28,7 +28,11 @@ func (s *Server) createSandboxRootFSSnapshot(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
-	snapshot, err := s.sandboxService.CreateSandboxRootFSSnapshot(c.Request.Context(), sandboxID, claims.TeamID, &req)
+	rootFS, ok := s.requireSandboxRootFS(c)
+	if !ok {
+		return
+	}
+	snapshot, err := rootFS.CreateSandboxRootFSSnapshot(c.Request.Context(), sandboxID, claims.TeamID, &req)
 	if err != nil {
 		s.writeSandboxRootFSError(c, "create rootfs snapshot", sandboxID, err)
 		return
@@ -43,7 +47,11 @@ func (s *Server) listSandboxRootFSSnapshots(c *gin.Context) {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
 		return
 	}
-	resp, err := s.sandboxService.ListSandboxRootFSSnapshots(c.Request.Context(), sandboxID, claims.TeamID)
+	rootFS, ok := s.requireSandboxRootFS(c)
+	if !ok {
+		return
+	}
+	resp, err := rootFS.ListSandboxRootFSSnapshots(c.Request.Context(), sandboxID, claims.TeamID)
 	if err != nil {
 		s.writeSandboxRootFSError(c, "list rootfs snapshots", sandboxID, err)
 		return
@@ -58,7 +66,11 @@ func (s *Server) getSandboxRootFSSnapshot(c *gin.Context) {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
 		return
 	}
-	snapshot, err := s.sandboxService.GetSandboxRootFSSnapshot(c.Request.Context(), snapshotID, claims.TeamID)
+	rootFS, ok := s.requireSandboxRootFS(c)
+	if !ok {
+		return
+	}
+	snapshot, err := rootFS.GetSandboxRootFSSnapshot(c.Request.Context(), snapshotID, claims.TeamID)
 	if err != nil {
 		s.writeSandboxRootFSError(c, "get rootfs snapshot", "", err)
 		return
@@ -73,7 +85,11 @@ func (s *Server) deleteSandboxRootFSSnapshot(c *gin.Context) {
 		spec.JSONError(c, http.StatusUnauthorized, spec.CodeUnauthorized, "missing authentication")
 		return
 	}
-	if err := s.sandboxService.DeleteSandboxRootFSSnapshot(c.Request.Context(), snapshotID, claims.TeamID); err != nil {
+	rootFS, ok := s.requireSandboxRootFS(c)
+	if !ok {
+		return
+	}
+	if err := rootFS.DeleteSandboxRootFSSnapshot(c.Request.Context(), snapshotID, claims.TeamID); err != nil {
 		s.writeSandboxRootFSError(c, "delete rootfs snapshot", "", err)
 		return
 	}
@@ -97,7 +113,11 @@ func (s *Server) restoreSandboxRootFS(c *gin.Context) {
 		spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, "snapshot_id is required")
 		return
 	}
-	resp, err := s.sandboxService.RestoreSandboxRootFS(c.Request.Context(), sandboxID, claims.TeamID, &req)
+	rootFS, ok := s.requireSandboxRootFS(c)
+	if !ok {
+		return
+	}
+	resp, err := rootFS.RestoreSandboxRootFS(c.Request.Context(), sandboxID, claims.TeamID, &req)
 	if err != nil {
 		s.writeSandboxRootFSError(c, "restore rootfs", sandboxID, err)
 		return
@@ -121,9 +141,6 @@ func (s *Server) forkSandbox(c *gin.Context) {
 	req.StartedAt = sandboxClaimIngressStartedAt(claims)
 	forker := s.sandboxForker
 	if forker == nil {
-		forker = s.sandboxService
-	}
-	if forker == nil {
 		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox fork backend is not configured")
 		return
 	}
@@ -133,6 +150,14 @@ func (s *Server) forkSandbox(c *gin.Context) {
 		return
 	}
 	spec.JSONSuccess(c, http.StatusCreated, resp)
+}
+
+func (s *Server) requireSandboxRootFS(c *gin.Context) (SandboxRootFSService, bool) {
+	if s.sandboxRootFS == nil {
+		spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, "sandbox RootFS service is not configured")
+		return nil, false
+	}
+	return s.sandboxRootFS, true
 }
 
 func (s *Server) rebaseSandboxRootFS(c *gin.Context) {

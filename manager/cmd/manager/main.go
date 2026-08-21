@@ -566,7 +566,11 @@ func main() {
 
 	// Create HTTP server
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
-		SandboxService:          sandboxService,
+		SandboxReader:           sandboxService,
+		SandboxUpdater:          sandboxService,
+		SandboxNetworkPolicy:    sandboxService,
+		SandboxRootFS:           sandboxService,
+		SandboxSourceResolver:   sandboxService,
 		SandboxClaimer:          sandboxBackend,
 		SandboxTerminator:       sandboxBackend,
 		SandboxPauser:           sandboxBackend,

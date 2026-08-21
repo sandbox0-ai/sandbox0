@@ -67,6 +67,14 @@ type SandboxRuntimeClaim struct {
 	AuthorityNow            time.Time
 }
 
+// GetSandboxRuntimeClaim returns the claim workflow while the caller holds the
+// sandbox transaction. It is intentionally exposed only on the concrete
+// transaction so terminal writer cleanup can distinguish an abandoned initial
+// Nomad claim from a live runtime binding.
+func (t sandboxStoreTx) GetSandboxRuntimeClaim(ctx context.Context, sandboxID string) (*SandboxRuntimeClaim, error) {
+	return lockSandboxRuntimeClaim(ctx, t.tx, strings.TrimSpace(sandboxID))
+}
+
 // ReserveSandboxClaimRequest is the complete admission input for a new
 // logical sandbox. A nil limit means unlimited admission.
 type ReserveSandboxClaimRequest struct {

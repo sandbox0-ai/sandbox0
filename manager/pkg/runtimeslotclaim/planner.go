@@ -29,6 +29,8 @@ const (
 	defaultClaimTTL            = 15 * time.Second
 	defaultSLO                 = time.Second
 	maxTrustedIngressClockSkew = 5 * time.Second
+	commandProbeRetryInitial   = 5 * time.Millisecond
+	commandProbeRetryMaximum   = 25 * time.Millisecond
 )
 
 // Store is the PostgreSQL authority needed by one claim. Get by deterministic
@@ -234,6 +236,7 @@ func New(config Config) (*Planner, error) {
 // claim -> authenticated procd command -> node command-ready. Every durable
 // mutation and node call is exactly retryable from the same OperationID.
 func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, resultErr error) {
+	wallCallStarted := time.Now()
 	callStarted := p.now().UTC()
 	startedAt := request.StartedAt.UTC()
 	if request.StartedAt.IsZero() {
@@ -502,7 +505,18 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		recordPhase(PhaseProcdProbe, phaseStarted, false)
 		return nil, errors.New("procd internal token generator returned an empty token")
 	}
-	probe, err := p.prober.ProbeCommandReady(ctx, procdAddress, internalToken)
+	probeBudget := p.slo - callStarted.Sub(startedAt)
+	if ingressClockSkewed {
+		probeBudget = p.slo
+	}
+	if probeBudget < 0 {
+		probeBudget = 0
+	}
+	probeDeadline := wallCallStarted.Add(probeBudget)
+	if slot.ClaimLeaseExpiresAt.Before(probeDeadline) {
+		probeDeadline = slot.ClaimLeaseExpiresAt
+	}
+	probe, err := p.probeCommandReady(ctx, procdAddress, internalToken, probeDeadline)
 	if err != nil {
 		recordPhase(PhaseProcdProbe, phaseStarted, false)
 		return nil, fmt.Errorf("probe procd command readiness: %w", err)
@@ -539,6 +553,48 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 		Slot: bound, Grant: issued.Grant, Stage: stage, ProcdAddress: procdAddress,
 		ProcdInstanceID: probe.InstanceID, CommandProof: proof,
 	}, nil
+}
+
+// probeCommandReady closes the runsc-create/procd-listen race without hiding
+// an end-to-end SLO miss. The first attempt is immediate; transient failures
+// are retried only inside the trusted ingress budget and the durable slot
+// claim lease.
+func (p *Planner) probeCommandReady(
+	ctx context.Context,
+	procdAddress, internalToken string,
+	deadline time.Time,
+) (*procdapi.CommandReadyProbeResult, error) {
+	retryDelay := commandProbeRetryInitial
+	var lastErr error
+	for {
+		attemptCtx := ctx
+		cancel := func() {}
+		if !deadline.IsZero() {
+			attemptCtx, cancel = context.WithDeadline(ctx, deadline)
+		}
+		probe, err := p.prober.ProbeCommandReady(attemptCtx, procdAddress, internalToken)
+		cancel()
+		if err == nil {
+			return probe, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("command-ready probe canceled: %w", ctx.Err())
+		}
+		remaining := time.Until(deadline)
+		if deadline.IsZero() || remaining <= 0 {
+			return nil, fmt.Errorf("command-ready probe deadline exceeded: %w", lastErr)
+		}
+		wait := min(retryDelay, remaining)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("command-ready probe canceled: %w", ctx.Err())
+		case <-timer.C:
+		}
+		retryDelay = min(retryDelay*2, commandProbeRetryMaximum)
+	}
 }
 
 type normalizedRequest struct {

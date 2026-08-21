@@ -1809,6 +1809,7 @@ func completeRootFSWriterCrashAbandon(
 type rootFSWriterCrashRuntimeMatch struct {
 	active              bool
 	terminating         bool
+	failedClaimCleanup  bool
 	failedClaimDeletion bool
 }
 
@@ -1845,7 +1846,29 @@ func lockRootFSWriterCrashRuntime(
 		runtimeGeneration+1 == lifecycle.FromGeneration
 	match.failedClaimDeletion = desiredState == SandboxDesiredStateDeleted && deletedAt.Valid &&
 		currentPodNamespace == "" && currentPodName == "" && runtimeGeneration == lifecycle.FromGeneration
-	if !match.active && !match.terminating && !precommitResume && !match.failedClaimDeletion {
+	failedClaimCandidate := !deletedAt.Valid &&
+		(desiredState == SandboxDesiredStateActive || desiredState == SandboxDesiredStateTerminating) &&
+		currentPodNamespace == "" && currentPodName == "" && runtimeGeneration == lifecycle.FromGeneration &&
+		lifecycle.FromPodNamespace == record.PodNamespace && lifecycle.FromPodName == record.PodUID
+	if failedClaimCandidate {
+		if err := db.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM manager.sandbox_runtime_claims AS claim
+				JOIN manager.runtime_slots AS slot
+					ON slot.sandbox_id = claim.sandbox_id
+					AND slot.claim_operation_id = claim.operation_id
+				WHERE claim.sandbox_id = $1 AND claim.phase = $2
+					AND slot.slot_id = $3 AND slot.writer_grant_id = $4
+					AND slot.claim_id = $5
+			)
+		`, record.SandboxID, SandboxRuntimeClaimPhaseCleanupPending,
+			record.SlotID, record.ID, record.ClaimID).Scan(&match.failedClaimCleanup); err != nil {
+			return match, fmt.Errorf("verify failed Nomad claim cleanup: %w", err)
+		}
+	}
+	if !match.active && !match.terminating && !precommitResume &&
+		!match.failedClaimCleanup && !match.failedClaimDeletion {
 		return match, fmt.Errorf("%w: sandbox runtime no longer matches crash lifecycle txn %s",
 			ErrRootFSWriterGrantConflict, lifecycleTxnID)
 	}

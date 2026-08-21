@@ -15,6 +15,7 @@ import (
 type fakeStore struct {
 	grant         *sandboxstore.RootFSWriterGrant
 	record        *sandboxstore.SandboxRecord
+	claim         *sandboxstore.SandboxRuntimeClaim
 	lifecycle     *sandboxstore.SandboxLifecycleTxn
 	cancelCalls   int
 	beginCalls    int
@@ -90,6 +91,14 @@ func (f *fakeStore) WithSandboxLock(
 
 type fakeTx struct {
 	store *fakeStore
+}
+
+func (f fakeTx) GetSandboxRuntimeClaim(context.Context, string) (*sandboxstore.SandboxRuntimeClaim, error) {
+	if f.store.claim == nil {
+		return nil, errors.New("sandbox runtime claim not found")
+	}
+	clone := *f.store.claim
+	return &clone, nil
 }
 
 func (f fakeTx) GetActiveLifecycleTxn(context.Context, string) (*sandboxstore.SandboxLifecycleTxn, error) {
@@ -318,6 +327,39 @@ func TestControllerRequiresSandboxRuntimeToMatchAllocation(t *testing.T) {
 	_, err := controller.Fence(context.Background(), request)
 	if err == nil || store.beginCalls != 0 || store.lifecycle != nil {
 		t.Fatalf("Fence() = %v, begin calls %d, lifecycle %+v", err, store.beginCalls, store.lifecycle)
+	}
+}
+
+func TestControllerFencesConsumedWriterForAbandonedInitialClaim(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.CurrentPodNamespace = ""
+	store.record.CurrentPodName = ""
+	store.claim = &sandboxstore.SandboxRuntimeClaim{
+		SandboxID: store.record.ID, OperationID: "claim-operation-1",
+		Phase: sandboxstore.SandboxRuntimeClaimPhaseCleanupPending,
+	}
+	fence, err := controller.Fence(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Fence() error = %v", err)
+	}
+	if len(fence.ProofDigest) != 32 || store.lifecycle == nil ||
+		store.lifecycle.FromPodNamespace != store.grant.PodNamespace ||
+		store.lifecycle.FromPodName != store.grant.PodUID {
+		t.Fatalf("fence = %+v lifecycle = %+v", fence, store.lifecycle)
+	}
+}
+
+func TestControllerRejectsUnfencedInitialClaimWithoutRuntimeBinding(t *testing.T) {
+	store, controller, request := newFixture(t, sandboxstore.RootFSWriterGrantStateConsumed)
+	store.record.CurrentPodNamespace = ""
+	store.record.CurrentPodName = ""
+	store.claim = &sandboxstore.SandboxRuntimeClaim{
+		SandboxID: store.record.ID, OperationID: "claim-operation-1",
+		Phase: sandboxstore.SandboxRuntimeClaimPhaseClaiming,
+	}
+	_, err := controller.Fence(context.Background(), request)
+	if err == nil || store.lifecycle != nil || store.beginCalls != 0 {
+		t.Fatalf("Fence() = %v, lifecycle = %+v, begin calls = %d", err, store.lifecycle, store.beginCalls)
 	}
 }
 

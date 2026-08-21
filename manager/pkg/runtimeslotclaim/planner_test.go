@@ -211,6 +211,8 @@ type fakeProber struct {
 	mu        sync.Mutex
 	addresses []string
 	tokens    []string
+	errors    []error
+	error     error
 }
 
 func (f *fakeProber) ProbeCommandReady(_ context.Context, address, token string) (*procdapi.CommandReadyProbeResult, error) {
@@ -218,10 +220,60 @@ func (f *fakeProber) ProbeCommandReady(_ context.Context, address, token string)
 	defer f.mu.Unlock()
 	f.addresses = append(f.addresses, address)
 	f.tokens = append(f.tokens, token)
+	if len(f.errors) > 0 {
+		err := f.errors[0]
+		f.errors = f.errors[1:]
+		return nil, err
+	}
+	if f.error != nil {
+		return nil, f.error
+	}
 	return &procdapi.CommandReadyProbeResult{
 		CommandReadyProbeResponse: procdapi.CommandReadyProbeResponse{InstanceID: "procd-instance-1", Status: "ready"},
 		ResponseBodyDigest:        strings.Repeat("ab", 32),
 	}, nil
+}
+
+func TestPlannerRetriesProcdListenRaceInsideTrustedSLOBudget(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.prober.errors = []error{errors.New("connect: connection refused")}
+	result, err := fixture.planner.Claim(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	fixture.prober.mu.Lock()
+	defer fixture.prober.mu.Unlock()
+	if len(fixture.prober.addresses) != 2 || !result.WithinSLO {
+		t.Fatalf("probe attempts = %d, result = %+v", len(fixture.prober.addresses), result)
+	}
+}
+
+func TestPlannerBoundsPersistentProcdProbeFailureBySLOBudget(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.prober.error = errors.New("connect: connection refused")
+	planner, err := New(Config{
+		Store: fixture.store, Network: fixture.network, Node: fixture.node,
+		Prober: fixture.prober, TokenGenerator: fixture.tokens, Observer: fixture.observer,
+		WriterTokenKey: bytes.Repeat([]byte{0x42}, 32), ClaimTTL: 20 * time.Second,
+		SLO: 30 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = planner.Claim(context.Background(), fixture.request)
+	if err == nil || !strings.Contains(err.Error(), "command-ready probe deadline exceeded") {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("persistent probe failure took %s", elapsed)
+	}
+	fixture.prober.mu.Lock()
+	attempts := len(fixture.prober.addresses)
+	fixture.prober.mu.Unlock()
+	if attempts < 2 || len(fixture.observer.observations) != 1 || fixture.observer.observations[0].Succeeded {
+		t.Fatalf("attempts = %d, observations = %+v", attempts, fixture.observer.observations)
+	}
 }
 
 type fakeTokenGenerator struct {

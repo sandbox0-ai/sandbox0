@@ -27,6 +27,10 @@ type Store interface {
 	WithSandboxLock(context.Context, string, func(context.Context, sandboxstore.SandboxStoreTx, *sandboxstore.SandboxRecord) error) error
 }
 
+type sandboxRuntimeClaimReader interface {
+	GetSandboxRuntimeClaim(context.Context, string) (*sandboxstore.SandboxRuntimeClaim, error)
+}
+
 // Controller fences renewal and terminally abandons unsealed writers while
 // preserving the last durable RootFS generation.
 type Controller struct {
@@ -237,16 +241,35 @@ func (c *Controller) ensureCrashLifecycle(
 		if record == nil ||
 			(record.DesiredState != sandboxstore.SandboxDesiredStateActive &&
 				record.DesiredState != sandboxstore.SandboxDesiredStateTerminating) ||
-			!record.DeletedAt.IsZero() || record.RuntimeGeneration != runtimeGeneration ||
-			record.CurrentPodNamespace != grant.PodNamespace || record.CurrentPodName != grant.PodUID {
+			!record.DeletedAt.IsZero() || record.RuntimeGeneration != runtimeGeneration {
 			return errors.New("sandbox runtime does not match the runtime slot writer")
+		}
+		fromPodNamespace := record.CurrentPodNamespace
+		fromPodName := record.CurrentPodName
+		if fromPodNamespace != grant.PodNamespace || fromPodName != grant.PodUID {
+			if fromPodNamespace != "" || fromPodName != "" {
+				return errors.New("sandbox runtime does not match the runtime slot writer")
+			}
+			claimReader, ok := tx.(sandboxRuntimeClaimReader)
+			if !ok {
+				return errors.New("sandbox transaction cannot inspect Nomad claim cleanup")
+			}
+			claim, err := claimReader.GetSandboxRuntimeClaim(lockCtx, grant.SandboxID)
+			if err != nil {
+				return err
+			}
+			if claim == nil || claim.Phase != sandboxstore.SandboxRuntimeClaimPhaseCleanupPending {
+				return errors.New("sandbox runtime does not match the runtime slot writer")
+			}
+			fromPodNamespace = grant.PodNamespace
+			fromPodName = grant.PodUID
 		}
 		return tx.BeginLifecycleTxn(lockCtx, &sandboxstore.SandboxLifecycleTxn{
 			ID: request.OperationID, SandboxID: grant.SandboxID,
 			Kind: sandboxstore.SandboxLifecycleKindPause, Phase: sandboxstore.SandboxLifecyclePhasePublishing,
 			Source: sandboxstore.SandboxLifecycleSourceCrash, Cancelable: false,
-			FromGeneration: runtimeGeneration, FromPodNamespace: record.CurrentPodNamespace,
-			FromPodName: record.CurrentPodName, ExpectedHeadLayerID: grant.InitialGenerationID,
+			FromGeneration: runtimeGeneration, FromPodNamespace: fromPodNamespace,
+			FromPodName: fromPodName, ExpectedHeadLayerID: grant.InitialGenerationID,
 		})
 	})
 	if err != nil {

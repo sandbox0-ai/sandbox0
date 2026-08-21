@@ -450,7 +450,7 @@ func run() error {
 
 		if elapsed >= opts.duration {
 			if state.NextGeneration != len(schedule) {
-				return fmt.Errorf("wall-clock deadline reached with only %d of %d generations inserted",
+				return fmt.Errorf("active-time deadline reached with only %d of %d generations inserted",
 					state.NextGeneration, len(schedule))
 			}
 			db, snapshotErr := snapshotDatabase(ctx, runtime.pool)
@@ -520,7 +520,7 @@ func parseOptions() (options, error) {
 	flag.StringVar(&opts.rustFSDataDir, "rustfs-data-dir", os.Getenv("SANDBOX0_RUSTFS_DATA_DIR"), "dedicated RustFS data directory for physical growth checks")
 	flag.StringVar(&opts.outputPath, "output", "", "durable JSONL evidence and checkpoint path")
 	flag.StringVar(&rawMode, "mode", envOr("SANDBOX0_SOAK_MODE", string(soakstate.ModeCreate)), "state mode: create, resume, or auto")
-	flag.DurationVar(&opts.duration, "duration", defaultSoakDuration, "actual wall-clock soak duration")
+	flag.DurationVar(&opts.duration, "duration", defaultSoakDuration, "required active soak duration")
 	flag.IntVar(&opts.generations, "generations", defaultGenerationCount, "generation lifecycle count")
 	flag.IntVar(&opts.burstCount, "burst-count", defaultBurstCount, "number of deterministic write bursts")
 	flag.DurationVar(&opts.workerInterval, "worker-interval", rootfsmaterializer.DefaultInterval, "materializer interval")

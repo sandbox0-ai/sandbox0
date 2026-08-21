@@ -106,11 +106,14 @@ func newRuntimeSlotJournal(path string, retention time.Duration) (*runtimeSlotJo
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create runtime slot journal directory: %w", err)
 	}
+	created := false
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("runtime slot journal must be a regular file")
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	} else if errors.Is(err, os.ErrNotExist) {
+		created = true
+	} else {
 		return nil, fmt.Errorf("inspect runtime slot journal: %w", err)
 	}
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 2 * time.Second})
@@ -127,6 +130,19 @@ func newRuntimeSlotJournal(path string, retention time.Duration) (*runtimeSlotJo
 	}); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialize runtime slot journal: %w", err)
+	}
+	if created {
+		directory, err := os.Open(filepath.Dir(path))
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("open runtime slot journal directory for sync: %w", err)
+		}
+		syncErr := directory.Sync()
+		closeErr := directory.Close()
+		if err := errors.Join(syncErr, closeErr); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("sync runtime slot journal directory: %w", err)
+		}
 	}
 	return &runtimeSlotJournal{db: db, retention: retention}, nil
 }

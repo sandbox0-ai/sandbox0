@@ -182,6 +182,9 @@ func Open(options OpenOptions) (*Log, error) {
 		if err := log.commitRaw("configuration", 0, config, initial); err != nil {
 			return closeOnError(err)
 		}
+		if err := syncDirectory(filepath.Dir(path)); err != nil {
+			return closeOnError(fmt.Errorf("sync soak evidence directory: %w", err))
+		}
 		return log, nil
 	}
 	if err := log.load(); err != nil {
@@ -438,4 +441,13 @@ func regularFileExists(path string) (bool, error) {
 		return false, fmt.Errorf("soak evidence must be a regular file")
 	}
 	return true, nil
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }

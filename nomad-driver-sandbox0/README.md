@@ -109,8 +109,8 @@ Implemented:
 Remaining cutover gates:
 
 - the public regional-gateway-to-procd serial and concurrency SLO reports
-- normal completion of the real-clock 10,000/24-hour PostgreSQL/RustFS and
-  Bolt journal soaks
+- normal completion of the reboot-resumable, active-time 10,000/24-hour
+  PostgreSQL/RustFS and Bolt journal soaks
 - final deletion of the superseded Kubernetes runtime, schema compatibility,
   configuration, tests, documentation, and redundant dependencies
 
@@ -528,14 +528,20 @@ remains only for non-runtime-slot compatibility and must be deleted at final
 cutover. The 10,000-slot Bolt test proves local page reuse only; it does not
 constitute the required privileged, multi-node, end-to-end 24-hour soak. The
 opt-in `TestRuntimeSlotJournalTwentyFourHourSoak` companion distributes 10,000
-exact terminal cleanup proofs across a real 24-hour clock, prunes them through
-the production journal, reopens Bolt at one-third of the run, emits fsynced
-JSONL evidence outside the repository, and requires final size to stay within
-one host page of its warm size. It must pass together with the real
-PostgreSQL/RustFS `tools/rootfs-materializer-soak` gate; neither short smoke
-mode nor the accelerated 10,000-record unit test may be reported as 24-hour
-evidence. The full `go test` invocation must set `-timeout 25h` because Go's
-default test timeout is too short for this gate.
+exact terminal cleanup proofs across at least 24 hours of monotonic active
+process time, prunes them through the production journal, reopens Bolt at
+one-third of the run, and requires final size to stay within one host page of
+its warm size. Its fixed compiled test binary binds the durable Bolt file,
+complete configuration, run ID, boot incarnations, and every application
+checkpoint into an fsynced SHA-256-chained JSONL log. A hard stop can lose at
+most five seconds of active progress; host downtime never counts toward the
+24-hour threshold, and `auto` mode resumes only when the executable, config,
+evidence chain, and Bolt identity still match. It must pass together with the
+reboot-resumable PostgreSQL/RustFS `tools/rootfs-materializer-soak` gate;
+neither short smoke mode nor the accelerated 10,000-record unit test may be
+reported as 24-hour evidence. Use the durable state paths and fixed-binary
+invocations in that tool's README, including a per-process
+`-test.timeout 30h`.
 
 The regional terminal controller also needs trusted HTTPS endpoints for each
 Nomad server cluster and exact client node. Its ACL policy must permit

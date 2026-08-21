@@ -110,7 +110,8 @@ private and mutually authenticated.
    `tools/runtime-slot-slo` binary through the public regional URL exactly as
    documented in `nomad-driver-sandbox0/README.md`.
 
-Serial 1000, synchronized 8-by-100, both real 24-hour bounded-growth gates,
+Serial 1000, synchronized 8-by-100, both reboot-resumable active-time 24-hour
+bounded-growth gates,
 privileged multi-node validation, and all failure-injection gates must pass
 before cutover. The cutover is deletion-based: physically remove the
 superseded Kubernetes sandbox runtime code, configuration, tests, documents,

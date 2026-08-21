@@ -71,6 +71,46 @@ func TestRequestNomadSandboxPauseRejectsMismatchedRuntimeIntegration(t *testing.
 	require.Nil(t, active)
 }
 
+func TestRequestNomadSandboxTTLPauseRechecksDeadlinesUnderLockIntegration(t *testing.T) {
+	fixture := newNomadPauseStoreFixture(t, "ttl-recheck")
+	_, err := fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.sandboxes
+		SET expires_at = NOW() + INTERVAL '1 hour',
+			hard_expires_at = NOW() + INTERVAL '2 hours'
+		WHERE sandbox_id = $1
+	`, fixture.sandboxID)
+	require.NoError(t, err)
+
+	_, err = fixture.store.RequestNomadSandboxTTLPause(fixture.ctx, fixture.sandboxID)
+	require.ErrorIs(t, err, ErrNomadSandboxTTLNotExpired)
+	active, getErr := fixture.store.GetActiveLifecycleTxn(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, getErr)
+	require.Nil(t, active)
+
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.sandboxes
+		SET expires_at = NOW() - INTERVAL '1 second',
+			hard_expires_at = NOW() - INTERVAL '1 millisecond'
+		WHERE sandbox_id = $1
+	`, fixture.sandboxID)
+	require.NoError(t, err)
+	_, err = fixture.store.RequestNomadSandboxTTLPause(fixture.ctx, fixture.sandboxID)
+	require.ErrorIs(t, err, ErrNomadSandboxHardTTLExpired)
+	active, getErr = fixture.store.GetActiveLifecycleTxn(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, getErr)
+	require.Nil(t, active)
+
+	_, err = fixture.pool.Exec(fixture.ctx, `
+		UPDATE manager.sandboxes
+		SET hard_expires_at = NOW() + INTERVAL '1 hour'
+		WHERE sandbox_id = $1
+	`, fixture.sandboxID)
+	require.NoError(t, err)
+	candidate, err := fixture.store.RequestNomadSandboxTTLPause(fixture.ctx, fixture.sandboxID)
+	require.NoError(t, err)
+	require.Equal(t, SandboxLifecycleSourceAuto, candidate.Source)
+}
+
 func TestRequestNomadSandboxPressurePauseFencesExactWriterIntegration(t *testing.T) {
 	fixture := newNomadPauseStoreFixture(t, "pressure-binding")
 	request := &RootFSWriterPressurePauseRequest{

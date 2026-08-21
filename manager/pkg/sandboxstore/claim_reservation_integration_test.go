@@ -255,6 +255,40 @@ func TestRequestSandboxRuntimeClaimCleanupFencesReadyAllocationAtomically(t *tes
 	require.ErrorIs(t, err, ErrSandboxClaimCleanupPending)
 }
 
+func TestRequestHardExpiredSandboxRuntimeClaimCleanupRechecksDeadlineUnderLockIntegration(t *testing.T) {
+	ctx := context.Background()
+	pool := newSandboxStoreIntegrationPool(t)
+	store := NewPGSandboxStore(pool)
+	record, claimed := sandboxRuntimeClaimSlotFixture(t, store, "hard-expiry-recheck")
+	_, err := pool.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET hard_expires_at = NOW() + INTERVAL '1 hour'
+		WHERE sandbox_id = $1
+	`, record.ID)
+	require.NoError(t, err)
+
+	_, err = store.RequestHardExpiredSandboxRuntimeClaimCleanup(ctx, record.ID, "sandbox hard TTL expired")
+	require.ErrorIs(t, err, ErrNomadSandboxHardTTLNotExpired)
+	loaded, getErr := store.GetSandbox(ctx, record.ID)
+	require.NoError(t, getErr)
+	require.Equal(t, SandboxDesiredStateActive, loaded.DesiredState)
+
+	_, err = pool.Exec(ctx, `
+		UPDATE manager.sandboxes
+		SET hard_expires_at = NOW() - INTERVAL '1 millisecond'
+		WHERE sandbox_id = $1
+	`, record.ID)
+	require.NoError(t, err)
+	candidate, err := store.RequestHardExpiredSandboxRuntimeClaimCleanup(
+		ctx, record.ID, "sandbox hard TTL expired",
+	)
+	require.NoError(t, err)
+	require.Equal(t, claimed.ID, candidate.SlotID)
+	loaded, getErr = store.GetSandbox(ctx, record.ID)
+	require.NoError(t, getErr)
+	require.Equal(t, SandboxDesiredStateTerminating, loaded.DesiredState)
+}
+
 func TestRequestSandboxRuntimeClaimCleanupWinsBeforeFreshClaimLeaseExpires(t *testing.T) {
 	ctx := context.Background()
 	pool := newSandboxStoreIntegrationPool(t)

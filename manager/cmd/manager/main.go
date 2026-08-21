@@ -484,6 +484,27 @@ func main() {
 	}
 	sandboxPauseController := service.NewSandboxPauseController(sandboxStore, sandboxBackend, logger)
 	sandboxBackend.SetPauseEnqueuer(sandboxPauseController)
+	var sandboxTTLController *service.SandboxTTLController
+	if cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad {
+		hardExpiryTerminator, ok := sandboxBackend.(service.SandboxHardExpiryTerminator)
+		if !ok {
+			logger.Fatal("Nomad sandbox runtime backend lacks exact hard-expiry termination")
+		}
+		sandboxTTLController, err = service.NewSandboxTTLController(
+			sandboxStore,
+			sandboxBackend,
+			hardExpiryTerminator,
+			service.SandboxTTLControllerConfig{
+				RuntimeBackend: sandboxstore.SandboxRuntimeBackendNomad,
+				Interval:       cfg.CleanupInterval.Duration,
+			},
+			clk.Now,
+			logger,
+		)
+		if err != nil {
+			logger.Fatal("Failed to configure Nomad sandbox TTL controller", zap.Error(err))
+		}
+	}
 	forkReconciler, _ := sandboxBackend.(service.SandboxForkReconciler)
 	rebaseReconciler, _ := sandboxBackend.(service.SandboxRootFSRebaseReconciler)
 	rootFSRebaser, _ := sandboxBackend.(service.SandboxRootFSRebaser)
@@ -649,6 +670,7 @@ func main() {
 		sandboxRuntimeReconciler:       sandboxRuntimeReconciler,
 		hotClaimReservationController:  hotClaimReservationController,
 		sandboxPauseController:         sandboxPauseController,
+		sandboxTTLController:           sandboxTTLController,
 		sandboxRootFSController:        sandboxRootFSController,
 		templateReconciler:             templateReconciler,
 		templateBuildWorker:            templateBuildWorker,

@@ -39,6 +39,7 @@ type managerControllerSet struct {
 	sandboxRuntimeReconciler       *service.SandboxRuntimeReconciler
 	hotClaimReservationController  *service.HotClaimReservationController
 	sandboxPauseController         *service.SandboxPauseController
+	sandboxTTLController           *service.SandboxTTLController
 	sandboxRootFSController        *service.SandboxRootFSController
 	templateReconciler             templateReconcilerRunner
 	templateBuildWorker            *templatebuild.TemplateBuildWorker
@@ -58,16 +59,19 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 	if s.templateReconciler != nil {
 		go s.templateReconciler.Start(ctx)
 	}
-	startSandboxObservabilityLogProducer(ctx, s.cfg, s.k8sClient, s.podLister, s.sandboxLogWorker, s.logger, s.clock)
-	go logControllerError(ctx, s.logger, "Sandbox crash log collector failed", func() error {
-		return s.sandboxCrashLogCollector.Run(ctx, 2)
-	})
-	go logControllerError(ctx, s.logger, "Sandbox crash recovery controller failed", func() error {
-		return s.sandboxCrashRecoveryController.Run(ctx, 2)
-	})
-	go logControllerError(ctx, s.logger, "Sandbox runtime reconciler failed", func() error {
-		return s.sandboxRuntimeReconciler.Run(ctx, 2)
-	})
+	kubernetesRuntime := s.cfg == nil || s.cfg.SandboxRuntimeBackend != config.SandboxRuntimeBackendNomad
+	if kubernetesRuntime {
+		startSandboxObservabilityLogProducer(ctx, s.cfg, s.k8sClient, s.podLister, s.sandboxLogWorker, s.logger, s.clock)
+		go logControllerError(ctx, s.logger, "Sandbox crash log collector failed", func() error {
+			return s.sandboxCrashLogCollector.Run(ctx, 2)
+		})
+		go logControllerError(ctx, s.logger, "Sandbox crash recovery controller failed", func() error {
+			return s.sandboxCrashRecoveryController.Run(ctx, 2)
+		})
+		go logControllerError(ctx, s.logger, "Sandbox runtime reconciler failed", func() error {
+			return s.sandboxRuntimeReconciler.Run(ctx, 2)
+		})
+	}
 
 	if s.templateBuildWorker != nil {
 		go logControllerError(ctx, s.logger, "Template image build worker stopped", func() error {
@@ -78,20 +82,27 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 		)
 	}
 
-	go func() {
-		if err := s.operator.Run(ctx, 2); err != nil {
-			s.logger.Fatal("Operator failed", zap.Error(err))
-		}
-	}()
-	go logControllerErrorExact(ctx, s.logger, "Cleanup controller failed", func() error {
-		return s.cleanupController.Start(ctx)
-	})
-	go logControllerErrorExact(ctx, s.logger, "Sandbox lifecycle controller failed", func() error {
-		return s.sandboxLifecycleController.Run(ctx, 2)
-	})
-	go logControllerErrorExact(ctx, s.logger, "Hot claim reservation controller failed", func() error {
-		return s.hotClaimReservationController.Run(ctx, 1)
-	})
+	if kubernetesRuntime {
+		go func() {
+			if err := s.operator.Run(ctx, 2); err != nil {
+				s.logger.Fatal("Operator failed", zap.Error(err))
+			}
+		}()
+		go logControllerErrorExact(ctx, s.logger, "Cleanup controller failed", func() error {
+			return s.cleanupController.Start(ctx)
+		})
+		go logControllerErrorExact(ctx, s.logger, "Sandbox lifecycle controller failed", func() error {
+			return s.sandboxLifecycleController.Run(ctx, 2)
+		})
+		go logControllerErrorExact(ctx, s.logger, "Hot claim reservation controller failed", func() error {
+			return s.hotClaimReservationController.Run(ctx, 1)
+		})
+	}
+	if s.sandboxTTLController != nil {
+		go logControllerErrorExact(ctx, s.logger, "Sandbox TTL controller failed", func() error {
+			return s.sandboxTTLController.Run(ctx)
+		})
+	}
 	go logControllerErrorExact(ctx, s.logger, "Sandbox pause controller failed", func() error {
 		return s.sandboxPauseController.Run(ctx, 2)
 	})

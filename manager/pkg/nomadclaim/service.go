@@ -48,7 +48,9 @@ type Store interface {
 	ReserveSandboxClaim(context.Context, *sandboxstore.ReserveSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	CompleteSandboxClaim(context.Context, *sandboxstore.CompleteSandboxClaimRequest) (*sandboxstore.SandboxRecord, error)
 	RequestSandboxRuntimeClaimCleanup(context.Context, string, string) (*sandboxstore.SandboxClaimCleanupCandidate, error)
+	RequestHardExpiredSandboxRuntimeClaimCleanup(context.Context, string, string) (*sandboxstore.SandboxClaimCleanupCandidate, error)
 	RequestNomadSandboxPause(context.Context, string, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
+	RequestNomadSandboxTTLPause(context.Context, string) (*sandboxstore.NomadSandboxPauseCandidate, error)
 	RetryNomadSandboxResume(context.Context, *sandboxstore.RetryNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, bool, error)
 	RequestNomadSandboxResume(context.Context, *sandboxstore.RequestNomadSandboxResumeRequest) (*sandboxstore.NomadSandboxResumeCandidate, error)
 	CompleteNomadSandboxResume(context.Context, *sandboxstore.CompleteNomadSandboxResumeRequest) (*sandboxstore.SandboxRecord, error)
@@ -188,6 +190,24 @@ func (s *Service) TerminateSandbox(ctx context.Context, sandboxID string) error 
 	return nil
 }
 
+// TerminateHardExpiredSandbox commits deletion only after the store rechecks
+// the hard deadline under the sandbox row lock.
+func (s *Service) TerminateHardExpiredSandbox(ctx context.Context, sandboxID string) error {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || len(sandboxID) > 512 {
+		return fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
+	}
+	if _, err := s.store.RequestHardExpiredSandboxRuntimeClaimCleanup(
+		ctx, sandboxID, "sandbox hard TTL expired",
+	); errors.Is(err, sandboxstore.ErrNomadSandboxHardTTLNotExpired) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("request hard-expired Nomad sandbox cleanup: %w", err)
+	}
+	s.logger.Info("Hard-expired Nomad sandbox termination requested", zap.String("sandboxID", sandboxID))
+	return nil
+}
+
 // PauseSandboxAndWait persists planned retirement before asking Nomad to stop
 // the exact allocation. Completion remains asynchronous.
 func (s *Service) PauseSandboxAndWait(ctx context.Context, sandboxID string) (*service.PauseSandboxResponse, error) {
@@ -221,7 +241,10 @@ func (s *Service) ResumeSandboxAndWait(ctx context.Context, sandboxID string) (*
 
 // PauseSandboxByID is the automatic TTL pause boundary.
 func (s *Service) PauseSandboxByID(ctx context.Context, sandboxID string) error {
-	candidate, err := s.requestNomadSandboxPause(ctx, sandboxID, sandboxstore.SandboxLifecycleSourceAuto)
+	candidate, err := s.requestNomadSandboxTTLPause(ctx, sandboxID)
+	if errors.Is(err, sandboxstore.ErrNomadSandboxTTLNotExpired) {
+		return nil
+	}
 	if err != nil || candidate.AlreadyPaused {
 		return err
 	}
@@ -644,17 +667,36 @@ func (s *Service) requestNomadSandboxPause(
 	if err == nil {
 		return candidate, nil
 	}
+	return nil, mapNomadSandboxPauseError(sandboxID, err)
+}
+
+func (s *Service) requestNomadSandboxTTLPause(
+	ctx context.Context,
+	sandboxID string,
+) (*sandboxstore.NomadSandboxPauseCandidate, error) {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if sandboxID == "" || len(sandboxID) > 512 {
+		return nil, fmt.Errorf("sandbox ID is required and must not exceed 512 bytes")
+	}
+	candidate, err := s.store.RequestNomadSandboxTTLPause(ctx, sandboxID)
+	if err == nil {
+		return candidate, nil
+	}
+	return nil, mapNomadSandboxPauseError(sandboxID, err)
+}
+
+func mapNomadSandboxPauseError(sandboxID string, err error) error {
 	switch {
 	case errors.Is(err, sandboxstore.ErrSandboxRecordNotFound):
-		return nil, k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
+		return k8serrors.NewNotFound(schema.GroupResource{Resource: "sandbox"}, sandboxID)
 	case errors.Is(err, sandboxstore.ErrNomadSandboxPauseConflict),
 		errors.Is(err, sandboxstore.ErrNomadSandboxPauseNotReady),
 		errors.Is(err, sandboxstore.ErrSandboxClaimReservationConflict),
 		errors.Is(err, sandboxstore.ErrRuntimeSlotConflict),
 		errors.Is(err, sandboxstore.ErrRuntimeSlotInvalid):
-		return nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
+		return k8serrors.NewConflict(schema.GroupResource{Resource: "sandbox"}, sandboxID, err)
 	default:
-		return nil, fmt.Errorf("request Nomad sandbox pause: %w", err)
+		return fmt.Errorf("request Nomad sandbox pause: %w", err)
 	}
 }
 
@@ -1042,3 +1084,4 @@ func requestCredentialBindings(config *sandboxstore.SandboxConfig) []v1alpha1.Cr
 }
 
 var _ service.SandboxRuntimeBackend = (*Service)(nil)
+var _ service.SandboxHardExpiryTerminator = (*Service)(nil)

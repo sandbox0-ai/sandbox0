@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 )
 
 var (
-	ErrNomadSandboxPauseConflict = errors.New("nomad sandbox pause conflict")
-	ErrNomadSandboxPauseNotReady = errors.New("nomad sandbox pause is not ready")
+	ErrNomadSandboxPauseConflict  = errors.New("nomad sandbox pause conflict")
+	ErrNomadSandboxPauseNotReady  = errors.New("nomad sandbox pause is not ready")
+	ErrNomadSandboxTTLNotExpired  = errors.New("nomad sandbox TTL is not expired")
+	ErrNomadSandboxHardTTLExpired = errors.New("nomad sandbox hard TTL is expired")
 )
 
 // NomadSandboxPauseCandidate is the exact active allocation and writer
@@ -57,7 +60,17 @@ func (s *PGSandboxStore) RequestNomadSandboxPause(
 	sandboxID string,
 	source string,
 ) (*NomadSandboxPauseCandidate, error) {
-	return s.requestNomadSandboxPause(ctx, sandboxID, source, nil)
+	return s.requestNomadSandboxPause(ctx, sandboxID, source, nil, false)
+}
+
+// RequestNomadSandboxTTLPause starts an automatic pause only if the soft TTL
+// is still due while holding the sandbox row lock. This prevents a stale scan
+// from pausing a sandbox after a concurrent TTL refresh.
+func (s *PGSandboxStore) RequestNomadSandboxTTLPause(
+	ctx context.Context,
+	sandboxID string,
+) (*NomadSandboxPauseCandidate, error) {
+	return s.requestNomadSandboxPause(ctx, sandboxID, SandboxLifecycleSourceAuto, nil, true)
 }
 
 // RequestNomadSandboxPressurePause persists the same planned pause while
@@ -74,7 +87,7 @@ func (s *PGSandboxStore) RequestNomadSandboxPressurePause(
 	}
 	copy := *request
 	copy.BindingDigest = append([]byte(nil), request.BindingDigest...)
-	return s.requestNomadSandboxPause(ctx, copy.SandboxID, SandboxLifecycleSourceAuto, &copy)
+	return s.requestNomadSandboxPause(ctx, copy.SandboxID, SandboxLifecycleSourceAuto, &copy, false)
 }
 
 func (s *PGSandboxStore) requestNomadSandboxPause(
@@ -82,6 +95,7 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	sandboxID string,
 	source string,
 	pressure *RootFSWriterPressurePauseRequest,
+	requireExpiredTTL bool,
 ) (*NomadSandboxPauseCandidate, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
@@ -116,6 +130,18 @@ func (s *PGSandboxStore) requestNomadSandboxPause(
 	case SandboxDesiredStateActive:
 	default:
 		return nil, fmt.Errorf("%w: sandbox desired state is %s", ErrNomadSandboxPauseConflict, record.DesiredState)
+	}
+	if requireExpiredTTL && !alreadyPaused {
+		var authorityNow time.Time
+		if err := tx.QueryRow(ctx, `SELECT NOW()`).Scan(&authorityNow); err != nil {
+			return nil, fmt.Errorf("read authority time for Nomad sandbox TTL pause: %w", err)
+		}
+		if !record.HardExpiresAt.IsZero() && !record.HardExpiresAt.After(authorityNow) {
+			return nil, ErrNomadSandboxHardTTLExpired
+		}
+		if record.ExpiresAt.IsZero() || record.ExpiresAt.After(authorityNow) {
+			return nil, ErrNomadSandboxTTLNotExpired
+		}
 	}
 	claim, err := lockSandboxRuntimeClaim(ctx, tx, sandboxID)
 	if err != nil {

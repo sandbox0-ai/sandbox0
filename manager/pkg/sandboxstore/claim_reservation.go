@@ -25,6 +25,7 @@ const (
 var ErrActiveSandboxQuotaExceeded = errors.New("active sandbox quota exceeded")
 var ErrSandboxClaimReservationConflict = errors.New("sandbox claim reservation conflict")
 var ErrSandboxClaimCleanupPending = errors.New("sandbox claim cleanup is pending")
+var ErrNomadSandboxHardTTLNotExpired = errors.New("nomad sandbox hard TTL is not expired")
 
 // ActiveSandboxQuotaExceededError describes the serialized region-wide quota
 // decision made while reserving a new logical sandbox identity.
@@ -356,6 +357,24 @@ func (s *PGSandboxStore) RequestSandboxRuntimeClaimCleanup(
 	ctx context.Context,
 	sandboxID, reason string,
 ) (*SandboxClaimCleanupCandidate, error) {
+	return s.requestSandboxRuntimeClaimCleanup(ctx, sandboxID, reason, false)
+}
+
+// RequestHardExpiredSandboxRuntimeClaimCleanup commits deletion intent only
+// if the hard TTL is still due while holding the sandbox row lock. This keeps
+// a concurrent hard-TTL refresh from losing to a stale expiration scan.
+func (s *PGSandboxStore) RequestHardExpiredSandboxRuntimeClaimCleanup(
+	ctx context.Context,
+	sandboxID, reason string,
+) (*SandboxClaimCleanupCandidate, error) {
+	return s.requestSandboxRuntimeClaimCleanup(ctx, sandboxID, reason, true)
+}
+
+func (s *PGSandboxStore) requestSandboxRuntimeClaimCleanup(
+	ctx context.Context,
+	sandboxID, reason string,
+	requireHardExpired bool,
+) (*SandboxClaimCleanupCandidate, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("sandbox store is not configured")
 	}
@@ -395,6 +414,15 @@ func (s *PGSandboxStore) RequestSandboxRuntimeClaimCleanup(
 	record, err := lockNomadSandboxClaimRecord(ctx, tx, sandboxID)
 	if err != nil {
 		return nil, err
+	}
+	if requireHardExpired {
+		var authorityNow time.Time
+		if err := tx.QueryRow(ctx, `SELECT NOW()`).Scan(&authorityNow); err != nil {
+			return nil, fmt.Errorf("read authority time for hard-expired sandbox cleanup: %w", err)
+		}
+		if record.HardExpiresAt.IsZero() || record.HardExpiresAt.After(authorityNow) {
+			return nil, ErrNomadSandboxHardTTLNotExpired
+		}
 	}
 	claim, err := lockSandboxRuntimeClaim(ctx, tx, sandboxID)
 	if err != nil {

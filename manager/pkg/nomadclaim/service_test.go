@@ -27,6 +27,7 @@ import (
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	templatepkg "github.com/sandbox0-ai/sandbox0/pkg/template"
 	templatestore "github.com/sandbox0-ai/sandbox0/pkg/template/store"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -462,6 +463,13 @@ func (f *fakeClaimStore) RequestNomadSandboxPause(
 	return &copy, nil
 }
 
+func (f *fakeClaimStore) RequestNomadSandboxTTLPause(
+	ctx context.Context,
+	sandboxID string,
+) (*sandboxstore.NomadSandboxPauseCandidate, error) {
+	return f.RequestNomadSandboxPause(ctx, sandboxID, sandboxstore.SandboxLifecycleSourceAuto)
+}
+
 func (f *fakeClaimStore) RequestNomadSandboxPressurePause(
 	_ context.Context,
 	request *sandboxstore.RootFSWriterPressurePauseRequest,
@@ -591,6 +599,13 @@ func (f *fakeClaimStore) RequestSandboxRuntimeClaimCleanup(
 		SandboxID: sandboxID, OperationID: f.operations[sandboxID],
 		PhysicalStateRequired: record.CurrentPodName != "",
 	}, nil
+}
+
+func (f *fakeClaimStore) RequestHardExpiredSandboxRuntimeClaimCleanup(
+	ctx context.Context,
+	sandboxID, reason string,
+) (*sandboxstore.SandboxClaimCleanupCandidate, error) {
+	return f.RequestSandboxRuntimeClaimCleanup(ctx, sandboxID, reason)
 }
 
 type fakeQuotaLimitStore struct {
@@ -846,6 +861,41 @@ func TestServiceAutomaticPausePersistsAutoSourceBeforeStop(t *testing.T) {
 	if len(enqueuer.sandboxIDs) != 1 || len(fixture.allocation.requests) != 1 {
 		t.Fatalf("enqueues=%v allocation stops=%+v", enqueuer.sandboxIDs, fixture.allocation.requests)
 	}
+}
+
+func TestServiceAutomaticPauseTreatsRefreshedTTLAsNoOp(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.pauseErr = sandboxstore.ErrNomadSandboxTTLNotExpired
+	enqueuer := &recordingPauseEnqueuer{}
+	fixture.service.SetPauseEnqueuer(enqueuer)
+
+	require.NoError(t, fixture.service.PauseSandboxByID(t.Context(), "sandbox-1"))
+	require.Empty(t, enqueuer.sandboxIDs)
+	require.Empty(t, fixture.allocation.requests)
+}
+
+func TestServiceAutomaticPauseSurfacesHardTTLRace(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.pauseErr = sandboxstore.ErrNomadSandboxHardTTLExpired
+
+	err := fixture.service.PauseSandboxByID(t.Context(), "sandbox-1")
+	require.ErrorIs(t, err, sandboxstore.ErrNomadSandboxHardTTLExpired)
+}
+
+func TestServiceHardExpiryTerminationUsesExactStoreBoundary(t *testing.T) {
+	fixture := newClaimServiceFixture(t)
+	fixture.store.records["sandbox-1"] = &sandboxstore.SandboxRecord{
+		ID: "sandbox-1", DesiredState: sandboxstore.SandboxDesiredStateActive,
+	}
+	fixture.store.cleanupErr = sandboxstore.ErrNomadSandboxHardTTLNotExpired
+	require.NoError(t, fixture.service.TerminateHardExpiredSandbox(t.Context(), "sandbox-1"))
+
+	fixture.store.cleanupErr = nil
+	require.NoError(t, fixture.service.TerminateHardExpiredSandbox(t.Context(), "sandbox-1"))
+	require.Equal(t, []string{
+		"sandbox-1:sandbox hard TTL expired",
+		"sandbox-1:sandbox hard TTL expired",
+	}, fixture.store.cleanupCalls)
 }
 
 func TestServicePressurePauseReturnsDurableOperationBeforeNomadStop(t *testing.T) {

@@ -62,6 +62,16 @@ type SandboxRecord struct {
 	UpdatedAt           time.Time
 }
 
+// SandboxExpirationCandidate is the minimal durable state needed by the
+// runtime-neutral TTL controller. Hard expiry always takes precedence over a
+// soft TTL deadline for the same sandbox.
+type SandboxExpirationCandidate struct {
+	SandboxID     string
+	DesiredState  string
+	ExpiresAt     time.Time
+	HardExpiresAt time.Time
+}
+
 // SandboxRootFSState is manager-internal metadata for one persisted sandbox
 // writable rootfs diff.
 type SandboxRootFSState struct {
@@ -588,6 +598,91 @@ func (s *PGSandboxStore) ListHardExpiredSandboxes(ctx context.Context, now time.
 		return nil, fmt.Errorf("iterate hard-expired sandboxes: %w", err)
 	}
 	return records, nil
+}
+
+// ListSandboxExpirationCandidates returns selected-backend sandboxes that
+// need a durable hard-delete request or an automatic pause request. Active
+// lifecycle transactions suppress only soft expiry; hard expiry must be able
+// to preempt a pause, fork, or rebase in progress.
+func (s *PGSandboxStore) ListSandboxExpirationCandidates(
+	ctx context.Context,
+	now time.Time,
+	runtimeBackend string,
+	limit int,
+) ([]SandboxExpirationCandidate, error) {
+	if s == nil || s.pool == nil {
+		return nil, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	runtimeBackend = strings.TrimSpace(runtimeBackend)
+	if runtimeBackend != SandboxRuntimeBackendKubernetes && runtimeBackend != SandboxRuntimeBackendNomad {
+		return nil, fmt.Errorf("runtime backend must be kubernetes or nomad")
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH expiration_candidates AS (
+			SELECT sandbox_id, desired_state, expires_at, hard_expires_at,
+				0 AS priority, hard_expires_at AS deadline
+			FROM manager.sandboxes
+			WHERE deleted_at IS NULL
+				AND runtime_backend = $2
+				AND desired_state IN ($3, $4)
+				AND hard_expires_at IS NOT NULL
+				AND hard_expires_at <= $1
+			UNION ALL
+			SELECT sandbox_id, desired_state, expires_at, hard_expires_at,
+				1 AS priority, expires_at AS deadline
+			FROM manager.sandboxes AS sandbox
+			WHERE sandbox.deleted_at IS NULL
+				AND sandbox.runtime_backend = $2
+				AND sandbox.desired_state = $3
+				AND sandbox.expires_at IS NOT NULL
+				AND sandbox.expires_at <= $1
+				AND (sandbox.hard_expires_at IS NULL OR sandbox.hard_expires_at > $1)
+				AND NOT EXISTS (
+					SELECT 1
+					FROM manager.sandbox_lifecycle_txns AS lifecycle
+					WHERE lifecycle.sandbox_id = sandbox.sandbox_id
+						AND lifecycle.phase IN ('preparing', 'barriered', 'publishing', 'committing')
+				)
+		)
+		SELECT sandbox_id, desired_state, expires_at, hard_expires_at
+		FROM expiration_candidates
+		ORDER BY priority, deadline, sandbox_id
+		LIMIT $5
+	`, now.UTC(), runtimeBackend, SandboxDesiredStateActive, SandboxDesiredStatePaused, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list sandbox expiration candidates: %w", err)
+	}
+	defer rows.Close()
+	candidates := make([]SandboxExpirationCandidate, 0, limit)
+	for rows.Next() {
+		var candidate SandboxExpirationCandidate
+		var expiresAt, hardExpiresAt *time.Time
+		if err := rows.Scan(
+			&candidate.SandboxID,
+			&candidate.DesiredState,
+			&expiresAt,
+			&hardExpiresAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan sandbox expiration candidate: %w", err)
+		}
+		if expiresAt != nil {
+			candidate.ExpiresAt = expiresAt.UTC()
+		}
+		if hardExpiresAt != nil {
+			candidate.HardExpiresAt = hardExpiresAt.UTC()
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sandbox expiration candidates: %w", err)
+	}
+	return candidates, nil
 }
 
 func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID string, deletedAt time.Time) error {

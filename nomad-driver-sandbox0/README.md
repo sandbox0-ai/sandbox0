@@ -276,6 +276,9 @@ Prepare a dedicated acceptance team before starting either report:
 - at least eight healthy, exact-profile warm allocations must be registered,
   and the Nomad service job must replenish a claimed allocation within the
   configured batch-settle interval;
+- Nomad must advertise enough real schedulable CPU and memory for all eight
+  exact profiles plus host/ctld headroom; do not inflate client capacity or
+  oversubscribe the acceptance pool to make placement succeed;
 - every participating node must expose at least eight configured ctld NBD
   devices, not merely a large kernel `nbds_max` value;
 - `active_sandboxes` must have at least eight remaining units; and

@@ -96,7 +96,13 @@ private and mutually authenticated.
    enabling Nomad on the node.
 4. Submit `nomad-driver-sandbox0/example/warm-slot.nomad`. Its count of eight
    is the minimum production acceptance width. Configure at least that many
-   ctld NBD devices and enough replacement headroom.
+   ctld NBD devices and enough replacement headroom. The supplied 1 CPU/1 GiB
+   profile needs at least 8 CPUs and 8 GiB of genuinely schedulable aggregate
+   Nomad client capacity in addition to host, ctld, runsc, and replacement
+   overhead. Never falsify `cpu_total_compute` or oversubscribe memory for an
+   SLO report. A smaller dedicated acceptance profile is valid only when the
+   public template declares that exact resource shape and the report label
+   identifies it.
 5. Confirm PostgreSQL shows healthy exact-profile slots, every node channel is
    connected, warm default-deny is applied, and Nomad replacement allocations
    reach ready after one batch is deleted.

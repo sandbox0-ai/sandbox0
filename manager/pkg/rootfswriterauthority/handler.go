@@ -44,6 +44,10 @@ type batchGrantStore interface {
 	RenewRootFSWriterGrants(context.Context, []*sandboxstore.RenewRootFSWriterGrantRequest, sandboxstore.RootFSWriterLeaseRenewalPolicy) ([]sandboxstore.RenewRootFSWriterGrantResult, error)
 }
 
+type terminalGrantProofStore interface {
+	GetRootFSWriterTerminalProof(context.Context, string) (*sandboxstore.RootFSWriterTerminalProof, error)
+}
+
 type runningForkGrantStore interface {
 	ForkRunningRootFSFilesystem(context.Context, *sandboxstore.ForkRunningRootFSFilesystemRequest) (*sandboxstore.RootFSFilesystem, error)
 }
@@ -440,7 +444,7 @@ func serveTerminal(config HandlerConfig, writer http.ResponseWriter, request *ht
 		writeError(writer, http.StatusBadRequest, "unsupported binding_version")
 		return
 	}
-	grant, err := config.Store.GetRootFSWriterGrant(request.Context(), grantID)
+	grant, err := getTerminalWriterGrant(request.Context(), config.Store, grantID)
 	if err != nil {
 		if errors.Is(err, sandboxstore.ErrRootFSWriterGrantNotFound) {
 			writeClassifiedError(writer, fmt.Errorf("terminal proof does not match a writer grant: %w", sandboxstore.ErrRootFSWriterGrantConflict))
@@ -454,6 +458,30 @@ func serveTerminal(config HandlerConfig, writer http.ResponseWriter, request *ht
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
+}
+
+func getTerminalWriterGrant(ctx context.Context, store GrantStore, grantID string) (*sandboxstore.RootFSWriterGrant, error) {
+	grant, err := store.GetRootFSWriterGrant(ctx, grantID)
+	if err == nil || !errors.Is(err, sandboxstore.ErrRootFSWriterGrantNotFound) {
+		return grant, err
+	}
+	proofStore, ok := store.(terminalGrantProofStore)
+	if !ok {
+		return nil, err
+	}
+	proof, proofErr := proofStore.GetRootFSWriterTerminalProof(ctx, grantID)
+	if proofErr != nil {
+		return nil, proofErr
+	}
+	if proof == nil {
+		return nil, fmt.Errorf("terminal writer proof lookup returned no record: %w", errdefs.ErrUnavailable)
+	}
+	return &sandboxstore.RootFSWriterGrant{
+		ID: proof.GrantID, SandboxID: proof.SandboxID,
+		WriterEpoch: proof.WriterEpoch, BindingVersion: proof.BindingVersion,
+		BindingDigest: append([]byte(nil), proof.BindingDigest...),
+		NodeUID:       proof.NodeUID, State: proof.State,
+	}, nil
 }
 
 func verifyTerminalGrant(

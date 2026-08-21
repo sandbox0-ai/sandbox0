@@ -1547,6 +1547,16 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 		), identifier).Scan(&count))
 		require.Zero(t, count, "%s retained deleted sandbox storage", table)
 	}
+	terminalWriter, err := store.GetRootFSWriterTerminalProof(ctx, issued.Grant.ID)
+	require.NoError(t, err)
+	require.Equal(t, issued.Grant.ID, terminalWriter.GrantID)
+	require.Equal(t, record.ID, terminalWriter.SandboxID)
+	require.Equal(t, issued.Grant.WriterEpoch, terminalWriter.WriterEpoch)
+	require.Equal(t, issued.Grant.BindingVersion, terminalWriter.BindingVersion)
+	require.Equal(t, issued.Grant.BindingDigest, terminalWriter.BindingDigest)
+	require.Equal(t, issued.Grant.NodeUID, terminalWriter.NodeUID)
+	require.Equal(t, RootFSWriterGrantStateRetired, terminalWriter.State)
+	require.WithinDuration(t, time.Now().UTC().Add(RootFSWriterTerminalProofRetention), terminalWriter.ExpiresAt, time.Minute)
 	require.NoError(t, store.MarkSandboxRuntimeClaimCleaned(ctx, record.ID, acquire.OperationID))
 	require.NoError(t, pool.QueryRow(ctx, `
 		SELECT phase FROM manager.sandbox_runtime_claims WHERE sandbox_id = $1

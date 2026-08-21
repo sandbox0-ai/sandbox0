@@ -118,6 +118,10 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		c.observeRun(status, time.Since(started), totalLayers, totalObjects)
 		c.observeQueueStats(ctx)
 	}()
+	if _, err := c.store.PruneExpiredRootFSWriterTerminalProofs(ctx, sandboxstore.MaxRootFSWriterTerminalProofPrune); err != nil {
+		status = "error"
+		runErr = err
+	}
 
 	for batch := 0; batch < c.cfg.MaxBatchesPerRun; batch++ {
 		if err := ctx.Err(); err != nil {
@@ -134,7 +138,9 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		}
 		if err != nil {
 			status = "error"
-			runErr = err
+			if runErr == nil {
+				runErr = err
+			}
 			break
 		}
 		if result == nil || (len(result.Layers) == 0 && len(result.DeletedObjectKeys) == 0 && result.ExpiredSnapshots == 0 && result.DeletedFilesystems == 0) {

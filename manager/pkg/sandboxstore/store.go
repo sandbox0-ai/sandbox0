@@ -790,6 +790,24 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID, SandboxLifecyclePhaseAborted, "sandbox deleted"); err != nil {
 		return fmt.Errorf("abort sandbox lifecycle txns for deleted sandbox: %w", err)
 	}
+	// Node reconcilers retain an external crash proof for 48 hours. Preserve
+	// the minimum immutable regional identity before filesystem deletion
+	// cascades terminal writer grant history.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO manager.rootfs_writer_terminal_proofs (
+			grant_id, sandbox_id, writer_epoch, binding_version,
+			binding_digest, node_uid, state, expires_at
+		)
+		SELECT grant_id, sandbox_id, writer_epoch, binding_version,
+			binding_digest, node_uid, state,
+			NOW() + ($4 * INTERVAL '1 millisecond')
+		FROM manager.rootfs_writer_grants
+		WHERE sandbox_id = $1 AND state IN ($2, $3)
+		ON CONFLICT (grant_id) DO NOTHING
+	`, sandboxID, RootFSWriterGrantStateRetired, RootFSWriterGrantStateCanceled,
+		RootFSWriterTerminalProofRetention.Milliseconds()); err != nil {
+		return fmt.Errorf("preserve terminal rootfs writer proofs: %w", err)
+	}
 	// A terminal slot is durable allocation history, not storage authority. Keep
 	// its claim and allocation identity while releasing the references that
 	// would otherwise retain an unreferenced filesystem after sandbox deletion.

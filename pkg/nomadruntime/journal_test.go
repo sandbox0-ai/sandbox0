@@ -24,10 +24,15 @@ import (
 	"time"
 
 	"github.com/containerd/errdefs"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"github.com/stretchr/testify/require"
 	bolt "go.etcd.io/bbolt"
 )
+
+func TestRegionalTerminalProofOutlivesExternalCrashProofWindow(t *testing.T) {
+	require.Greater(t, sandboxstore.RootFSWriterTerminalProofRetention, 2*runtimeSlotProofRetention)
+}
 
 func TestRuntimeSlotJournalPersistsExactCleanupProof(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runtime-slots.db")

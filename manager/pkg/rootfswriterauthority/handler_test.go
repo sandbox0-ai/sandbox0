@@ -41,6 +41,9 @@ type fakeGrantStore struct {
 	grant         *sandboxstore.RootFSWriterGrant
 	getErr        error
 	getGrantIDs   []string
+	terminalProof *sandboxstore.RootFSWriterTerminalProof
+	proofErr      error
+	proofGrantIDs []string
 	cancelRequest *sandboxstore.CancelRootFSWriterGrantRequest
 	cancelErr     error
 	forkRequest   *sandboxstore.ForkRunningRootFSFilesystemRequest
@@ -140,6 +143,20 @@ func (f *fakeGrantStore) GetRootFSWriterGrant(_ context.Context, grantID string)
 		return nil, f.getErr
 	}
 	return f.grant, nil
+}
+
+func (f *fakeGrantStore) GetRootFSWriterTerminalProof(
+	_ context.Context,
+	grantID string,
+) (*sandboxstore.RootFSWriterTerminalProof, error) {
+	f.proofGrantIDs = append(f.proofGrantIDs, grantID)
+	if f.proofErr != nil {
+		return nil, f.proofErr
+	}
+	if f.terminalProof == nil {
+		return nil, sandboxstore.ErrRootFSWriterGrantNotFound
+	}
+	return f.terminalProof, nil
 }
 
 func (f *fakeGrantStore) ForkRunningRootFSFilesystem(
@@ -415,6 +432,31 @@ func TestTerminalHandlerAcceptsExactTerminalRetryWithEncodedGrantID(t *testing.T
 			require.Equal(t, "projected-token", verifier.token)
 		})
 	}
+}
+
+func TestTerminalHandlerAcceptsRetainedProofAfterGrantCollection(t *testing.T) {
+	grant := terminalTestGrant("grant-collected", sandboxstore.RootFSWriterGrantStateRetired)
+	store := &fakeGrantStore{
+		getErr: sandboxstore.ErrRootFSWriterGrantNotFound,
+		terminalProof: &sandboxstore.RootFSWriterTerminalProof{
+			GrantID: grant.ID, SandboxID: "sandbox-collected",
+			WriterEpoch: grant.WriterEpoch, BindingVersion: grant.BindingVersion,
+			BindingDigest: grant.BindingDigest, NodeUID: grant.NodeUID, State: grant.State,
+		},
+	}
+	handler, err := NewHandler(HandlerConfig{
+		Verifier: &fakeCallerVerifier{identity: CallerIdentity{NodeUID: grant.NodeUID}},
+		Store:    store, LeaseTTL: time.Minute,
+	})
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodPut, protocol.TerminalPath(grant.ID),
+		strings.NewReader(terminalTestRequestBody(strings.Repeat("ab", 32), grant.WriterEpoch)))
+	request.Header.Set("Authorization", "Bearer projected-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	require.Equal(t, http.StatusNoContent, response.Code, response.Body.String())
+	require.Equal(t, []string{grant.ID}, store.getGrantIDs)
+	require.Equal(t, []string{grant.ID}, store.proofGrantIDs)
 }
 
 func TestPreconsumeAbortCancelsOnlyAnExactIssuedGrant(t *testing.T) {

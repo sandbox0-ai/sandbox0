@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -301,6 +302,32 @@ func TestCommandReadyDurationRequiresExactMetric(t *testing.T) {
 	} {
 		if _, err := commandReadyDuration(value); err == nil {
 			t.Fatalf("invalid Server-Timing %q was accepted", value)
+		}
+	}
+}
+
+func TestClaimIdentityAndSLOHeaderRequireCanonicalWireValues(t *testing.T) {
+	for _, value := range []string{"sandbox-1", "rs-mrswmylvnr2a-default-abcde"} {
+		if !validClaimSandboxID(value) {
+			t.Fatalf("canonical sandbox ID %q was rejected", value)
+		}
+	}
+	for _, value := range []string{"", " sandbox-1", "sandbox/1", "sandbox%2f1", ".", "..", strings.Repeat("a", 513)} {
+		if validClaimSandboxID(value) {
+			t.Fatalf("unsafe sandbox ID %q was accepted", value)
+		}
+	}
+	within, err := commandReadyWithinSLO([]string{"met"})
+	if err != nil || !within {
+		t.Fatalf("met header = %v, %v", within, err)
+	}
+	within, err = commandReadyWithinSLO([]string{"missed"})
+	if err != nil || within {
+		t.Fatalf("missed header = %v, %v", within, err)
+	}
+	for _, values := range [][]string{nil, {"met", "missed"}, {"met, missed"}, {"unknown"}} {
+		if _, err := commandReadyWithinSLO(values); err == nil {
+			t.Fatalf("ambiguous SLO headers %#v were accepted", values)
 		}
 	}
 }

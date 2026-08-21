@@ -365,12 +365,8 @@ func claim(ctx context.Context, cfg config, index, batch, lane int) sample {
 		return result
 	}
 	decoded, apiErr, err := spec.DecodeResponse[claimResponse](bytes.NewReader(payload))
-	if err != nil || apiErr != nil || decoded == nil || strings.TrimSpace(decoded.SandboxID) == "" {
+	if err != nil || apiErr != nil || decoded == nil || !validClaimSandboxID(decoded.SandboxID) {
 		result.Error = fmt.Sprintf("invalid claim response: decode=%v api=%v", err, apiErr)
-		return result
-	}
-	if decoded.SandboxID != strings.TrimSpace(decoded.SandboxID) || len(decoded.SandboxID) > 512 {
-		result.Error = "claim response contains a noncanonical sandbox_id"
 		return result
 	}
 	result.SandboxID = decoded.SandboxID
@@ -380,15 +376,32 @@ func claim(ctx context.Context, cfg config, index, batch, lane int) sample {
 		return result
 	}
 	result.CommandDuration = duration
-	switch response.Header.Get("Sandbox0-Command-Ready-SLO") {
-	case "met":
-		result.WithinSLO = true
-	case "missed":
-		result.WithinSLO = false
-	default:
-		result.Error = "claim response lacks the canonical command-ready SLO header"
+	withinSLO, err := commandReadyWithinSLO(response.Header.Values("Sandbox0-Command-Ready-SLO"))
+	if err != nil {
+		result.Error = err.Error()
+		return result
 	}
+	result.WithinSLO = withinSLO
 	return result
+}
+
+func validClaimSandboxID(value string) bool {
+	return value != "" && value == strings.TrimSpace(value) && len(value) <= 512 &&
+		value != "." && value != ".." && url.PathEscape(value) == value
+}
+
+func commandReadyWithinSLO(values []string) (bool, error) {
+	if len(values) != 1 {
+		return false, errors.New("claim response must contain exactly one command-ready SLO header")
+	}
+	switch values[0] {
+	case "met":
+		return true, nil
+	case "missed":
+		return false, nil
+	default:
+		return false, errors.New("claim response lacks the canonical command-ready SLO header")
+	}
 }
 
 func cleanupSandbox(ctx context.Context, cfg config, sandboxID string) error {

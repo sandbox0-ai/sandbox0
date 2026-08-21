@@ -322,7 +322,9 @@ redirects instead of moving the bearer token or sample to another route. It
 has no mode that skips terminal cleanup: every successfully decoded claim is
 deleted and observed absent before the next batch can start. Sandbox IDs must
 be canonical and unique across the entire report, so a cached or replayed
-claim response cannot satisfy multiple samples.
+claim response cannot satisfy multiple samples. The command-ready SLO header
+must occur exactly once; duplicated or comma-combined values are ambiguous and
+fail even if one value says `met`.
 Outside each measured interval it sends public DELETE and polls public GET until `404`;
 the `404` must also contain the canonical public `not_found` envelope, so a
 proxy or route-level fallback page cannot masquerade as cleanup. Acceptance

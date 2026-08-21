@@ -751,6 +751,13 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 			return err
 		}
 	}
+	if err == nil {
+		if cancelErr := cancelPendingNomadSandboxNetworkMutationForSandbox(
+			ctx, tx, sandboxID, "sandbox deleted",
+		); cancelErr != nil {
+			return cancelErr
+		}
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET desired_state = $2,
@@ -1082,6 +1089,11 @@ func (t sandboxStoreTx) MarkHotClaimCompleted(ctx context.Context, sandboxID str
 }
 
 func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string, generation int64, pausedAt time.Time) error {
+	if err := cancelPendingNomadSandboxNetworkMutationForSandbox(
+		ctx, t.tx, sandboxID, "sandbox runtime paused",
+	); err != nil {
+		return err
+	}
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET desired_state = $2,
@@ -1104,6 +1116,11 @@ func (t sandboxStoreTx) MarkRuntimePaused(ctx context.Context, sandboxID string,
 }
 
 func (t sandboxStoreTx) MarkRuntimeTerminating(ctx context.Context, sandboxID string) error {
+	if err := cancelPendingNomadSandboxNetworkMutationForSandbox(
+		ctx, t.tx, sandboxID, "sandbox termination requested",
+	); err != nil {
+		return err
+	}
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes
 		SET desired_state = $2,
@@ -1140,6 +1157,11 @@ func (t sandboxStoreTx) BeginLifecycleTxn(ctx context.Context, txn *SandboxLifec
 	}
 	if strings.TrimSpace(txn.Kind) == "" {
 		return fmt.Errorf("lifecycle kind is required")
+	}
+	if err := cancelPendingNomadSandboxNetworkMutationForSandbox(
+		ctx, t.tx, txn.SandboxID, "sandbox lifecycle preempted network update",
+	); err != nil {
+		return err
 	}
 	tag, err := t.tx.Exec(ctx, `
 		UPDATE manager.sandboxes

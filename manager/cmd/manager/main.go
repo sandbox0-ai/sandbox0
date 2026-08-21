@@ -465,6 +465,7 @@ func main() {
 	var sandboxUpdater httpserver.SandboxUpdater
 	var sandboxRootFS httpserver.SandboxRootFSService
 	var sandboxNetworkPolicy httpserver.SandboxNetworkPolicyService
+	var nomadSandboxNetworkPolicy *service.NomadSandboxNetworkPolicyService
 	if kubernetesSandboxRuntime {
 		sandboxReader = sandboxService
 		sandboxUpdater = sandboxService
@@ -487,10 +488,13 @@ func main() {
 		if err != nil {
 			logger.Fatal("Failed to configure Nomad sandbox RootFS service", zap.Error(err))
 		}
-		sandboxNetworkPolicy, err = service.NewNomadSandboxNetworkPolicyService(sandboxStore, networkPolicyService)
+		nomadSandboxNetworkPolicy, err = service.NewNomadSandboxNetworkPolicyService(
+			sandboxStore, networkPolicyService, managerNodeAuthority,
+		)
 		if err != nil {
 			logger.Fatal("Failed to configure Nomad sandbox network policy service", zap.Error(err))
 		}
+		sandboxNetworkPolicy = nomadSandboxNetworkPolicy
 	} else {
 		logger.Fatal("Unsupported sandbox runtime backend", zap.String("backend", cfg.SandboxRuntimeBackend))
 	}
@@ -534,6 +538,13 @@ func main() {
 		sandboxRootFSController = service.NewSandboxRootFSController(
 			sandboxStore, forkReconciler, rebaseReconciler, logger,
 		)
+	}
+	var sandboxNetworkMutationController *service.SandboxNetworkMutationController
+	if nomadSandboxNetworkPolicy != nil {
+		sandboxNetworkMutationController = service.NewSandboxNetworkMutationController(
+			sandboxStore, nomadSandboxNetworkPolicy, logger,
+		)
+		nomadSandboxNetworkPolicy.SetMutationEnqueuer(sandboxNetworkMutationController)
 	}
 	var templateReconciler *templreconciler.SingleClusterReconciler
 	if cfg.TemplateStoreEnabled && kubernetesSandboxRuntime {
@@ -689,30 +700,31 @@ func main() {
 	})
 
 	controllers := &managerControllerSet{
-		cfg:                            cfg,
-		k8sClient:                      k8sClient,
-		podLister:                      podLister,
-		clock:                          clk,
-		logger:                         logger,
-		operator:                       operator,
-		cleanupController:              cleanupController,
-		sandboxService:                 sandboxService,
-		sandboxLifecycleController:     sandboxLifecycleController,
-		sandboxCrashLogCollector:       sandboxCrashLogCollector,
-		sandboxCrashRecoveryController: sandboxCrashRecoveryController,
-		sandboxRuntimeReconciler:       sandboxRuntimeReconciler,
-		hotClaimReservationController:  hotClaimReservationController,
-		sandboxPauseController:         sandboxPauseController,
-		sandboxTTLController:           sandboxTTLController,
-		sandboxRootFSController:        sandboxRootFSController,
-		templateReconciler:             templateReconciler,
-		templateBuildWorker:            templateBuildWorker,
-		sandboxLogWorker:               sandboxLogWorker,
-		sandboxStore:                   sandboxStore,
-		rootFSObjectStore:              rootFSObjectStore,
-		rootFSObjectStoreErr:           rootFSObjectStoreErr,
-		meteringRepo:                   meteringRepo,
-		managerMetrics:                 managerMetrics,
+		cfg:                              cfg,
+		k8sClient:                        k8sClient,
+		podLister:                        podLister,
+		clock:                            clk,
+		logger:                           logger,
+		operator:                         operator,
+		cleanupController:                cleanupController,
+		sandboxService:                   sandboxService,
+		sandboxLifecycleController:       sandboxLifecycleController,
+		sandboxCrashLogCollector:         sandboxCrashLogCollector,
+		sandboxCrashRecoveryController:   sandboxCrashRecoveryController,
+		sandboxRuntimeReconciler:         sandboxRuntimeReconciler,
+		hotClaimReservationController:    hotClaimReservationController,
+		sandboxPauseController:           sandboxPauseController,
+		sandboxTTLController:             sandboxTTLController,
+		sandboxRootFSController:          sandboxRootFSController,
+		sandboxNetworkMutationController: sandboxNetworkMutationController,
+		templateReconciler:               templateReconciler,
+		templateBuildWorker:              templateBuildWorker,
+		sandboxLogWorker:                 sandboxLogWorker,
+		sandboxStore:                     sandboxStore,
+		rootFSObjectStore:                rootFSObjectStore,
+		rootFSObjectStoreErr:             rootFSObjectStoreErr,
+		meteringRepo:                     meteringRepo,
+		managerMetrics:                   managerMetrics,
 	}
 
 	app := &managerApp{

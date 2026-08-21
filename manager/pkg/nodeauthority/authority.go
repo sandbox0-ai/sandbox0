@@ -81,6 +81,8 @@ type Component struct {
 	pressure   *writerPressureCoordinator
 }
 
+var _ runtimeslotclaim.NetworkPreparer = (*Component)(nil)
+
 type writerPressureCoordinator struct {
 	mu     sync.RWMutex
 	pauser rootfswriterauthority.PressurePauser
@@ -239,6 +241,19 @@ func (c *Component) RunningFork(
 		return rootfshandoff.RunningForkCheckpointResult{}, fmt.Errorf("node authority is not initialized")
 	}
 	return c.hub.RunningFork(ctx, target, request)
+}
+
+// Prepare applies one exact active or claiming runtime-slot network policy
+// through this replica's authenticated node channel. Durable retry authority
+// remains in PostgreSQL; the channel itself is deliberately transient.
+func (c *Component) Prepare(
+	ctx context.Context,
+	request runtimeslotclaim.NetworkPrepareRequest,
+) (rootfshandoff.NetworkPolicyToken, error) {
+	if c == nil || c.hub == nil {
+		return rootfshandoff.NetworkPolicyToken{}, fmt.Errorf("node authority is not initialized")
+	}
+	return c.hub.Prepare(ctx, request)
 }
 
 // SelectPausedRebaseNode chooses a live worker before PostgreSQL binds its

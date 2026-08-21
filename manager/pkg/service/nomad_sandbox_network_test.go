@@ -5,12 +5,15 @@ import (
 	"crypto/sha256"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/apis/sandbox0/v1alpha1"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/networkpolicy"
+	"github.com/sandbox0-ai/sandbox0/manager/pkg/runtimeslotclaim"
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/sandboxstore"
+	"github.com/sandbox0-ai/sandbox0/pkg/rootfshandoff"
 	protocol "github.com/sandbox0-ai/sandbox0/pkg/runtimeslot"
 	"go.uber.org/zap"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -136,6 +139,118 @@ func TestNomadSandboxNetworkPolicyServiceRejectsUnsafeUpdates(t *testing.T) {
 	}
 }
 
+func TestNomadSandboxNetworkPolicyServiceActiveUpdateSurvivesResponseLossAndRestart(t *testing.T) {
+	base := nomadNetworkPolicyTestStore(sandboxstore.SandboxDesiredStateActive)
+	store := &nomadNetworkMutationTestStore{memorySandboxStore: base}
+	failing := &nomadNetworkPreparerTest{err: errors.New("node channel disconnected")}
+	service, err := NewNomadSandboxNetworkPolicyService(
+		store, networkpolicy.NewNetworkPolicyService(zap.NewNop()), failing,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := base.records["sandbox-a"]
+	_, currentAnnotation, err := service.buildPolicy(record, record.Config.Network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.runtimeSlots["sandbox-a"] = activeNomadNetworkTestSlot(record, currentAnnotation)
+	enqueuer := &nomadNetworkEnqueuerTest{}
+	service.SetMutationEnqueuer(enqueuer)
+	desired := &v1alpha1.SandboxNetworkPolicy{
+		Mode: v1alpha1.NetworkModeAllowAll,
+		Egress: &v1alpha1.NetworkEgressPolicy{
+			DeniedDomains: []string{"blocked.example.com"},
+		},
+	}
+	_, err = service.UpdateNetworkPolicy(context.Background(), "sandbox-a", desired)
+	if !errors.Is(err, ErrSandboxRuntimeUpdateUnavailable) {
+		t.Fatalf("active update error = %v", err)
+	}
+	if store.mutation == nil || store.mutation.Phase != sandboxstore.NomadSandboxNetworkMutationPhasePending {
+		t.Fatalf("durable mutation = %+v", store.mutation)
+	}
+	if record := base.records["sandbox-a"]; record.Config.Network.Mode == v1alpha1.NetworkModeAllowAll {
+		t.Fatal("unacknowledged desired config was published")
+	}
+	oldPolicy, err := service.GetNetworkPolicy(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetNetworkPolicy() during pending error = %v", err)
+	}
+	if oldPolicy.Mode != v1alpha1.NetworkModeBlockAll {
+		t.Fatalf("policy during pending = %+v", oldPolicy)
+	}
+	if len(enqueuer.sandboxIDs) != 1 || enqueuer.sandboxIDs[0] != "sandbox-a" {
+		t.Fatalf("enqueued sandboxes = %v", enqueuer.sandboxIDs)
+	}
+
+	recoveredPreparer := &nomadNetworkPreparerTest{}
+	recovered, err := NewNomadSandboxNetworkPolicyService(
+		store, networkpolicy.NewNetworkPolicyService(zap.NewNop()), recoveredPreparer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recovered.CompleteNomadSandboxNetworkMutation(context.Background(), "sandbox-a"); err != nil {
+		t.Fatalf("CompleteNomadSandboxNetworkMutation() error = %v", err)
+	}
+	if store.mutation.Phase != sandboxstore.NomadSandboxNetworkMutationPhaseApplied ||
+		store.mutation.AppliedPolicyToken == nil {
+		t.Fatalf("applied mutation = %+v", store.mutation)
+	}
+	applied, err := recovered.GetNetworkPolicy(context.Background(), "sandbox-a")
+	if err != nil {
+		t.Fatalf("GetNetworkPolicy() after recovery error = %v", err)
+	}
+	if applied.Mode != v1alpha1.NetworkModeAllowAll || applied.Egress == nil ||
+		len(applied.Egress.DeniedDomains) != 1 {
+		t.Fatalf("applied policy = %+v", applied)
+	}
+	if len(recoveredPreparer.requests) != 1 ||
+		recoveredPreparer.requests[0].OperationID != store.mutation.OperationID {
+		t.Fatalf("recovered prepare requests = %+v", recoveredPreparer.requests)
+	}
+
+	if _, err := recovered.UpdateNetworkPolicy(context.Background(), "sandbox-a", desired); err != nil {
+		t.Fatalf("idempotent active UpdateNetworkPolicy() error = %v", err)
+	}
+	if len(recoveredPreparer.requests) != 1 {
+		t.Fatalf("idempotent update dispatched %d network prepares", len(recoveredPreparer.requests))
+	}
+}
+
+func TestNomadSandboxNetworkPolicyServiceRejectsMismatchedAppliedToken(t *testing.T) {
+	base := nomadNetworkPolicyTestStore(sandboxstore.SandboxDesiredStateActive)
+	store := &nomadNetworkMutationTestStore{memorySandboxStore: base}
+	preparer := &nomadNetworkPreparerTest{mutateToken: func(token *rootfshandoff.NetworkPolicyToken) {
+		token.NetNSIdentity = "another-netns"
+	}}
+	service, err := NewNomadSandboxNetworkPolicyService(
+		store, networkpolicy.NewNetworkPolicyService(zap.NewNop()), preparer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := base.records["sandbox-a"]
+	_, currentAnnotation, err := service.buildPolicy(record, record.Config.Network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.runtimeSlots["sandbox-a"] = activeNomadNetworkTestSlot(record, currentAnnotation)
+	_, err = service.UpdateNetworkPolicy(context.Background(), "sandbox-a", &v1alpha1.SandboxNetworkPolicy{
+		Mode: v1alpha1.NetworkModeAllowAll,
+	})
+	if !errors.Is(err, ErrSandboxRuntimeUpdateUnavailable) {
+		t.Fatalf("mismatched token update error = %v", err)
+	}
+	if store.mutation == nil || store.mutation.Phase != sandboxstore.NomadSandboxNetworkMutationPhasePending {
+		t.Fatalf("mismatched token mutation = %+v", store.mutation)
+	}
+	if base.records["sandbox-a"].Config.Network.Mode == v1alpha1.NetworkModeAllowAll {
+		t.Fatal("mismatched token published desired config")
+	}
+}
+
 func TestAppendWebhookNetworkPolicyDoesNotMutateInput(t *testing.T) {
 	original := &v1alpha1.SandboxNetworkPolicy{Mode: v1alpha1.NetworkModeBlockAll}
 	result := AppendWebhookNetworkPolicy(original, "https://hooks.example.com/path")
@@ -167,5 +282,179 @@ func nomadNetworkPolicyTestStore(desiredState string) *memorySandboxStore {
 		},
 		lifecycleTxns: map[string]*sandboxstore.SandboxLifecycleTxn{},
 		runtimeSlots:  map[string]*sandboxstore.RuntimeSlot{},
+	}
+}
+
+type nomadNetworkMutationTestStore struct {
+	*memorySandboxStore
+	mutation *sandboxstore.NomadSandboxNetworkMutation
+}
+
+func (s *nomadNetworkMutationTestStore) BeginNomadSandboxNetworkMutation(
+	_ context.Context,
+	request *sandboxstore.BeginNomadSandboxNetworkMutationRequest,
+) (*sandboxstore.NomadSandboxNetworkMutation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mutation != nil && s.mutation.Phase == sandboxstore.NomadSandboxNetworkMutationPhasePending {
+		if s.mutation.OperationID != request.OperationID {
+			return nil, sandboxstore.ErrNomadSandboxNetworkMutationConflict
+		}
+		return cloneNomadNetworkMutation(s.mutation), nil
+	}
+	record := s.records[request.SandboxID]
+	slot := s.runtimeSlots[request.SandboxID]
+	if record == nil || slot == nil || record.TeamID != request.ExpectedTeamID ||
+		slot.ClaimNetworkPolicyDigest != request.ExpectedCurrentPolicyDigest {
+		return nil, sandboxstore.ErrNomadSandboxNetworkMutationConflict
+	}
+	s.mutation = &sandboxstore.NomadSandboxNetworkMutation{
+		SandboxID: request.SandboxID, OperationID: request.OperationID,
+		SlotID: slot.ID, SlotRevision: slot.Revision, TeamID: record.TeamID,
+		ClusterID: slot.ClusterID, AllocationID: slot.AllocationID,
+		AllocationNamespace: slot.AllocationNamespace, NodeID: slot.NodeID,
+		NodeUID: slot.NodeUID, NodeBootID: slot.NodeBootID, NetNSIdentity: slot.NetNSIdentity,
+		ClaimID: slot.ClaimID, CurrentPolicyDigest: request.ExpectedCurrentPolicyDigest,
+		DesiredPolicy: request.DesiredPolicy, DesiredPolicyDigest: request.DesiredPolicyDigest,
+		RequestPolicy: sanitizedNetworkPolicyForPersistence(request.RequestPolicy),
+		Phase:         sandboxstore.NomadSandboxNetworkMutationPhasePending,
+	}
+	return cloneNomadNetworkMutation(s.mutation), nil
+}
+
+func (s *nomadNetworkMutationTestStore) PrepareNomadSandboxNetworkMutation(
+	_ context.Context,
+	sandboxID string,
+) (*sandboxstore.NomadSandboxNetworkMutation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mutation == nil || s.mutation.SandboxID != sandboxID {
+		return nil, nil
+	}
+	record := s.records[sandboxID]
+	slot := s.runtimeSlots[sandboxID]
+	if s.mutation.Phase == sandboxstore.NomadSandboxNetworkMutationPhasePending &&
+		(record == nil || record.DesiredState != sandboxstore.SandboxDesiredStateActive ||
+			slot == nil || slot.ID != s.mutation.SlotID || slot.Revision != s.mutation.SlotRevision ||
+			slot.ClaimNetworkPolicyDigest != s.mutation.CurrentPolicyDigest) {
+		s.mutation.Phase = sandboxstore.NomadSandboxNetworkMutationPhaseCanceled
+		s.mutation.CancellationReason = "runtime slot incarnation changed"
+	}
+	return cloneNomadNetworkMutation(s.mutation), nil
+}
+
+func (s *nomadNetworkMutationTestStore) CommitNomadSandboxNetworkMutation(
+	_ context.Context,
+	sandboxID, operationID string,
+	token rootfshandoff.NetworkPolicyToken,
+) (*sandboxstore.NomadSandboxNetworkMutation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mutation == nil || s.mutation.SandboxID != sandboxID || s.mutation.OperationID != operationID {
+		return nil, sandboxstore.ErrNomadSandboxNetworkMutationConflict
+	}
+	if s.mutation.Phase == sandboxstore.NomadSandboxNetworkMutationPhaseApplied {
+		return cloneNomadNetworkMutation(s.mutation), nil
+	}
+	if s.mutation.Phase != sandboxstore.NomadSandboxNetworkMutationPhasePending {
+		return nil, sandboxstore.ErrNomadSandboxNetworkMutationConflict
+	}
+	record := s.records[sandboxID]
+	slot := s.runtimeSlots[sandboxID]
+	if record == nil || slot == nil || slot.Revision != s.mutation.SlotRevision {
+		return nil, sandboxstore.ErrNomadSandboxNetworkMutationConflict
+	}
+	record.Config.Network = sanitizedNetworkPolicyForPersistence(s.mutation.RequestPolicy)
+	slot.ClaimNetworkPolicyDigest = s.mutation.DesiredPolicyDigest
+	slot.Revision++
+	tokenCopy := token
+	s.mutation.AppliedPolicyToken = &tokenCopy
+	s.mutation.Phase = sandboxstore.NomadSandboxNetworkMutationPhaseApplied
+	return cloneNomadNetworkMutation(s.mutation), nil
+}
+
+func (s *nomadNetworkMutationTestStore) ListPendingNomadSandboxNetworkMutations(
+	_ context.Context,
+	_ int,
+) ([]*sandboxstore.NomadSandboxNetworkMutation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mutation == nil || s.mutation.Phase != sandboxstore.NomadSandboxNetworkMutationPhasePending {
+		return nil, nil
+	}
+	return []*sandboxstore.NomadSandboxNetworkMutation{cloneNomadNetworkMutation(s.mutation)}, nil
+}
+
+func cloneNomadNetworkMutation(
+	mutation *sandboxstore.NomadSandboxNetworkMutation,
+) *sandboxstore.NomadSandboxNetworkMutation {
+	if mutation == nil {
+		return nil
+	}
+	clone := *mutation
+	clone.RequestPolicy = sanitizedNetworkPolicyForPersistence(mutation.RequestPolicy)
+	if mutation.AppliedPolicyToken != nil {
+		token := *mutation.AppliedPolicyToken
+		clone.AppliedPolicyToken = &token
+	}
+	clone.AppliedTokenDigest = append([]byte(nil), mutation.AppliedTokenDigest...)
+	return &clone
+}
+
+type nomadNetworkPreparerTest struct {
+	mu          sync.Mutex
+	err         error
+	mutateToken func(*rootfshandoff.NetworkPolicyToken)
+	requests    []runtimeslotclaim.NetworkPrepareRequest
+}
+
+func (p *nomadNetworkPreparerTest) Prepare(
+	_ context.Context,
+	request runtimeslotclaim.NetworkPrepareRequest,
+) (rootfshandoff.NetworkPolicyToken, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.requests = append(p.requests, request)
+	if p.err != nil {
+		return rootfshandoff.NetworkPolicyToken{}, p.err
+	}
+	token := rootfshandoff.NetworkPolicyToken{
+		PodUID: request.AllocationID,
+		PodSandboxID: protocol.RuntimeSlotNetworkIncarnationID(protocol.NodeNetworkPrepareControlRequest{
+			SlotID: request.SlotID, ClusterID: request.ClusterID, AllocationID: request.AllocationID,
+			NodeID: request.NodeID, NodeUID: request.NodeUID, NodeBootID: request.NodeBootID,
+			NetNSIdentity: request.NetNSIdentity,
+		}),
+		ClaimID: request.ClaimID, NetworkEpoch: 2, PolicyDigest: request.PolicyDigest,
+		PodIP: "192.0.2.2", CtldGeneration: "ctld-generation-2",
+		NetNSIdentity: request.NetNSIdentity,
+	}
+	if p.mutateToken != nil {
+		p.mutateToken(&token)
+	}
+	return token, nil
+}
+
+type nomadNetworkEnqueuerTest struct {
+	sandboxIDs []string
+}
+
+func (e *nomadNetworkEnqueuerTest) EnqueueSandboxNetworkMutation(sandboxID string) {
+	e.sandboxIDs = append(e.sandboxIDs, sandboxID)
+}
+
+func activeNomadNetworkTestSlot(
+	record *sandboxstore.SandboxRecord,
+	currentPolicy string,
+) *sandboxstore.RuntimeSlot {
+	return &sandboxstore.RuntimeSlot{
+		ID: "slot-a", SandboxID: record.ID, AllocationID: record.CurrentPodName,
+		AllocationNamespace: record.CurrentPodNamespace, State: sandboxstore.RuntimeSlotStateActive,
+		Revision: 7, ClusterID: "cluster-a", NodeID: "node-a", NodeUID: "node-uid-a",
+		NodeBootID: "node-boot-a", NetNSIdentity: "netns-a", ClaimID: "claim-a",
+		ClaimNetworkPolicyDigest: protocol.NetworkPolicyDigest(currentPolicy),
+		ProcdInstanceID:          "procd-a", ProcdAddress: "http://192.0.2.2:49983",
+		CommandReadyDigest: make([]byte, sha256.Size), CommandReadyAt: record.UpdatedAt,
+		AuthorityObservedAt: record.UpdatedAt, HeartbeatExpiresAt: record.UpdatedAt.Add(time.Minute),
 	}
 }

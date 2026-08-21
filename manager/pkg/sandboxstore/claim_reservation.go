@@ -431,6 +431,11 @@ func (s *PGSandboxStore) requestSandboxRuntimeClaimCleanup(
 	if claim.OperationID != operationID {
 		return nil, fmt.Errorf("%w: cleanup operation identity changed", ErrSandboxClaimReservationConflict)
 	}
+	if err := cancelPendingNomadSandboxNetworkMutationForSandbox(
+		ctx, tx, record.ID, "sandbox termination requested",
+	); err != nil {
+		return nil, err
+	}
 
 	if claim.Phase == SandboxRuntimeClaimPhaseCleaned {
 		if record.DesiredState != SandboxDesiredStateDeleted || record.DeletedAt.IsZero() {

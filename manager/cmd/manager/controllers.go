@@ -25,30 +25,31 @@ import (
 // distinct triggers and invariants remain separate; this type only owns their
 // common process lifecycle.
 type managerControllerSet struct {
-	cfg                            *config.ManagerConfig
-	k8sClient                      kubernetes.Interface
-	podLister                      corelisters.PodLister
-	clock                          *clock.Clock
-	logger                         *zap.Logger
-	operator                       *controller.Operator
-	cleanupController              *controller.CleanupController
-	sandboxService                 *service.SandboxService
-	sandboxLifecycleController     *service.SandboxLifecycleController
-	sandboxCrashLogCollector       *service.SandboxCrashLogCollector
-	sandboxCrashRecoveryController *service.SandboxCrashRecoveryController
-	sandboxRuntimeReconciler       *service.SandboxRuntimeReconciler
-	hotClaimReservationController  *service.HotClaimReservationController
-	sandboxPauseController         *service.SandboxPauseController
-	sandboxTTLController           *service.SandboxTTLController
-	sandboxRootFSController        *service.SandboxRootFSController
-	templateReconciler             templateReconcilerRunner
-	templateBuildWorker            *templatebuild.TemplateBuildWorker
-	sandboxLogWorker               *managerobs.LogWorker
-	sandboxStore                   *sandboxstore.PGSandboxStore
-	rootFSObjectStore              objectstore.Store
-	rootFSObjectStoreErr           error
-	meteringRepo                   *meteringoutbox.Repository
-	managerMetrics                 *obsmetrics.ManagerMetrics
+	cfg                              *config.ManagerConfig
+	k8sClient                        kubernetes.Interface
+	podLister                        corelisters.PodLister
+	clock                            *clock.Clock
+	logger                           *zap.Logger
+	operator                         *controller.Operator
+	cleanupController                *controller.CleanupController
+	sandboxService                   *service.SandboxService
+	sandboxLifecycleController       *service.SandboxLifecycleController
+	sandboxCrashLogCollector         *service.SandboxCrashLogCollector
+	sandboxCrashRecoveryController   *service.SandboxCrashRecoveryController
+	sandboxRuntimeReconciler         *service.SandboxRuntimeReconciler
+	hotClaimReservationController    *service.HotClaimReservationController
+	sandboxPauseController           *service.SandboxPauseController
+	sandboxTTLController             *service.SandboxTTLController
+	sandboxRootFSController          *service.SandboxRootFSController
+	sandboxNetworkMutationController *service.SandboxNetworkMutationController
+	templateReconciler               templateReconcilerRunner
+	templateBuildWorker              *templatebuild.TemplateBuildWorker
+	sandboxLogWorker                 *managerobs.LogWorker
+	sandboxStore                     *sandboxstore.PGSandboxStore
+	rootFSObjectStore                objectstore.Store
+	rootFSObjectStoreErr             error
+	meteringRepo                     *meteringoutbox.Repository
+	managerMetrics                   *obsmetrics.ManagerMetrics
 }
 
 type templateReconcilerRunner interface {
@@ -109,6 +110,11 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 	if s.sandboxRootFSController != nil {
 		go logControllerErrorExact(ctx, s.logger, "Sandbox RootFS operation controller failed", func() error {
 			return s.sandboxRootFSController.Run(ctx, 2)
+		})
+	}
+	if s.sandboxNetworkMutationController != nil {
+		go logControllerErrorExact(ctx, s.logger, "Sandbox network mutation controller failed", func() error {
+			return s.sandboxNetworkMutationController.Run(ctx, 2)
 		})
 	}
 

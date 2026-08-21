@@ -101,6 +101,10 @@ console.log(policy.mode);`
 /api/v1/sandboxes/{'{id}'}/network
 </Endpoint>
 
+For a running Nomad sandbox, manager records the desired policy against the exact active allocation and asks the node-local ctld runtime to apply it. The new policy becomes visible from `GET` only after PostgreSQL commits ctld's matching applied-policy token. If manager or the node channel disconnects after the request is recorded, `PUT` can return `503` while a background controller continues the same idempotent operation; retrying the same `PUT` is safe. Pause, deletion, hard expiry, or allocation replacement cancels an unacknowledged update instead of publishing policy for the wrong runtime.
+
+Nomad runtime updates that add `credentialBindings` still fail closed until the Nomad credential projection path is configured. Policies without credential bindings use the active desired/apply/ack path above.
+
 ### Allow Only GitHub HTTPS
 
 <Tabs

@@ -1507,6 +1507,51 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 		SELECT phase FROM manager.sandbox_lifecycle_txns WHERE txn_id = $1
 	`, lifecycleID).Scan(&lifecyclePhase))
 	require.Equal(t, SandboxLifecyclePhaseAborted, lifecyclePhase)
+
+	terminalProof := sha256.Sum256([]byte("failed-initial-claim-terminal-proof"))
+	terminal, err := store.FinalizeRuntimeSlot(ctx, &FinalizeRuntimeSlotRequest{
+		SlotID: claimed.ID, OperationID: acquire.OperationID, ClaimID: acquire.ClaimID,
+		Reason: "reconciled_orphan", ProofDigest: terminalProof[:],
+	})
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateTerminal, terminal.State)
+	require.Equal(t, filesystem.ID, terminal.FilesystemID)
+	require.Equal(t, generation.ID, terminal.SourceGenerationID)
+	require.Equal(t, issued.Grant.ID, terminal.WriterGrantID)
+
+	require.NoError(t, store.MarkSandboxDeleted(ctx, record.ID, time.Now().UTC()))
+	terminal, err = store.GetRuntimeSlot(ctx, claimed.ID)
+	require.NoError(t, err)
+	require.Equal(t, RuntimeSlotStateTerminal, terminal.State)
+	require.Equal(t, record.ID, terminal.SandboxID)
+	require.Equal(t, claimed.AllocationID, terminal.AllocationID)
+	require.Equal(t, acquire.OperationID, terminal.ClaimOperationID)
+	require.Equal(t, acquire.ClaimID, terminal.ClaimID)
+	require.Empty(t, terminal.FilesystemID)
+	require.Empty(t, terminal.SourceGenerationID)
+	require.Empty(t, terminal.WriterGrantID)
+	for table, identifier := range map[string]string{
+		"rootfs_filesystems":   filesystem.ID,
+		"rootfs_generations":   generation.ID,
+		"rootfs_writer_grants": issued.Grant.ID,
+	} {
+		var count int
+		require.NoError(t, pool.QueryRow(ctx, fmt.Sprintf(
+			"SELECT COUNT(*) FROM manager.%s WHERE %s = $1",
+			table,
+			map[string]string{
+				"rootfs_filesystems":   "filesystem_id",
+				"rootfs_generations":   "generation_id",
+				"rootfs_writer_grants": "grant_id",
+			}[table],
+		), identifier).Scan(&count))
+		require.Zero(t, count, "%s retained deleted sandbox storage", table)
+	}
+	require.NoError(t, store.MarkSandboxRuntimeClaimCleaned(ctx, record.ID, acquire.OperationID))
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT phase FROM manager.sandbox_runtime_claims WHERE sandbox_id = $1
+	`, record.ID).Scan(&claimPhase))
+	require.Equal(t, SandboxRuntimeClaimPhaseCleaned, claimPhase)
 }
 
 func newRootFSWriterCrashAbandonFixture(

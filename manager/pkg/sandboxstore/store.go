@@ -790,6 +790,19 @@ func (s *PGSandboxStore) MarkSandboxDeleted(ctx context.Context, sandboxID strin
 	`, sandboxID, SandboxLifecyclePhaseAborted, "sandbox deleted"); err != nil {
 		return fmt.Errorf("abort sandbox lifecycle txns for deleted sandbox: %w", err)
 	}
+	// A terminal slot is durable allocation history, not storage authority. Keep
+	// its claim and allocation identity while releasing the references that
+	// would otherwise retain an unreferenced filesystem after sandbox deletion.
+	if _, err := tx.Exec(ctx, `
+		UPDATE manager.runtime_slots
+		SET filesystem_id = NULL,
+			source_generation_id = NULL,
+			writer_grant_id = NULL,
+			updated_at = NOW()
+		WHERE sandbox_id = $1 AND state = $2
+	`, sandboxID, RuntimeSlotStateTerminal); err != nil {
+		return fmt.Errorf("detach terminal runtime slot storage: %w", err)
+	}
 	filesystemRows, err := tx.Query(ctx, `
 		SELECT binding.filesystem_id
 		FROM manager.sandbox_rootfs_bindings AS binding

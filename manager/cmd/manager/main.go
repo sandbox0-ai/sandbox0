@@ -449,6 +449,7 @@ func main() {
 	}
 	var sandboxReader httpserver.SandboxReader = sandboxService
 	var sandboxUpdater httpserver.SandboxUpdater = sandboxService
+	var sandboxRootFS httpserver.SandboxRootFSService = sandboxService
 	if cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad {
 		sandboxReader, err = service.NewNomadSandboxReader(sandboxStore)
 		if err != nil {
@@ -461,6 +462,10 @@ func main() {
 		)
 		if err != nil {
 			logger.Fatal("Failed to configure Nomad sandbox mutation service", zap.Error(err))
+		}
+		sandboxRootFS, err = service.NewNomadSandboxRootFSService(sandboxStore, clk.Now)
+		if err != nil {
+			logger.Fatal("Failed to configure Nomad sandbox RootFS service", zap.Error(err))
 		}
 	}
 	if managerNodeAuthority != nil {
@@ -597,7 +602,7 @@ func main() {
 		SandboxReader:           sandboxReader,
 		SandboxUpdater:          sandboxUpdater,
 		SandboxNetworkPolicy:    sandboxService,
-		SandboxRootFS:           sandboxService,
+		SandboxRootFS:           sandboxRootFS,
 		SandboxSourceResolver:   sandboxSourceResolver,
 		SandboxClaimer:          sandboxBackend,
 		SandboxTerminator:       sandboxBackend,

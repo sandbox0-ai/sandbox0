@@ -59,7 +59,7 @@ func (s *managerControllerSet) Start(ctx context.Context) {
 	if s.templateReconciler != nil {
 		go s.templateReconciler.Start(ctx)
 	}
-	kubernetesRuntime := s.cfg == nil || s.cfg.SandboxRuntimeBackend != config.SandboxRuntimeBackendNomad
+	kubernetesRuntime := managerUsesKubernetesSandboxRuntime(s.cfg)
 	if kubernetesRuntime {
 		startSandboxObservabilityLogProducer(ctx, s.cfg, s.k8sClient, s.podLister, s.sandboxLogWorker, s.logger, s.clock)
 		go logControllerError(ctx, s.logger, "Sandbox crash log collector failed", func() error {

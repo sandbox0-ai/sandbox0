@@ -66,6 +66,12 @@ type TemplateListerImpl struct {
 	indexer cache.Indexer
 }
 
+// NewTemplateLister returns a read-only informer-backed template view without
+// constructing the Kubernetes sandbox pool operator.
+func NewTemplateLister(indexer cache.Indexer) TemplateLister {
+	return &TemplateListerImpl{indexer: indexer}
+}
+
 // List lists all SandboxTemplates
 func (t *TemplateListerImpl) List() ([]*v1alpha1.SandboxTemplate, error) {
 	var templates []*v1alpha1.SandboxTemplate

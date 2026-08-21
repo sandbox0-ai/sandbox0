@@ -20,6 +20,13 @@ type managerNetworkComponents struct {
 	provider        network.Provider
 }
 
+func buildNomadManagerNetworkComponents(logger *zap.Logger) managerNetworkComponents {
+	return managerNetworkComponents{
+		policyService: networkpolicy.NewNetworkPolicyService(logger),
+		provider:      network.NewNoopProvider(),
+	}
+}
+
 func buildManagerNetworkComponents(
 	cfg *config.ManagerConfig,
 	k8sClient kubernetes.Interface,

@@ -32,6 +32,11 @@ type managerKubernetesClients struct {
 	crdClient      clientset.Interface
 }
 
+func managerUsesKubernetesSandboxRuntime(cfg *config.ManagerConfig) bool {
+	return cfg == nil || cfg.SandboxRuntimeBackend == "" ||
+		cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendKubernetes
+}
+
 func buildManagerKubernetesClients(
 	cfg *config.ManagerConfig,
 	obsProvider *observability.Provider,
@@ -54,15 +59,18 @@ func buildManagerKubernetesClients(
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
-	hotClaimConfig := isolatedK8sClientConfig(k8sConfig)
-	observeHotClaimK8sClientRateLimit(metrics, hotClaimConfig)
-	logger.Info("Hot claim Kubernetes client rate limit configured",
-		zap.Float32("qps", effectiveK8sClientQPS(hotClaimConfig)),
-		zap.Int("burst", effectiveK8sClientBurst(hotClaimConfig)),
-	)
-	hotClaimClient, err := kubernetes.NewForConfig(hotClaimConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create hot claim Kubernetes client: %w", err)
+	var hotClaimClient kubernetes.Interface
+	if managerUsesKubernetesSandboxRuntime(cfg) {
+		hotClaimConfig := isolatedK8sClientConfig(k8sConfig)
+		observeHotClaimK8sClientRateLimit(metrics, hotClaimConfig)
+		logger.Info("Hot claim Kubernetes client rate limit configured",
+			zap.Float32("qps", effectiveK8sClientQPS(hotClaimConfig)),
+			zap.Int("burst", effectiveK8sClientBurst(hotClaimConfig)),
+		)
+		hotClaimClient, err = kubernetes.NewForConfig(hotClaimConfig)
+		if err != nil {
+			return nil, fmt.Errorf("create hot claim Kubernetes client: %w", err)
+		}
 	}
 	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		return nil, fmt.Errorf("add SandboxTemplate to scheme: %w", err)
@@ -95,6 +103,7 @@ type managerInformerRuntime struct {
 	namespaceLister          corelisters.NamespaceLister
 	serviceAccountLister     corelisters.ServiceAccountLister
 	networkPolicyLister      networkinglisters.NetworkPolicyLister
+	templateLister           controller.TemplateLister
 	operator                 *controller.Operator
 	recorder                 record.EventRecorder
 	sandboxIndex             *sandboxindex.SandboxIndex
@@ -122,49 +131,58 @@ func buildManagerInformerRuntime(
 	crdFactory := externalversions.NewSharedInformerFactory(clients.crdClient, cfg.ResyncPeriod.Duration)
 	templateInformer := crdFactory.Sandbox0().V1alpha1().SandboxTemplates().Informer()
 
-	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{
-		Interface: clients.client.CoreV1().Events(""),
-	})
-	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "manager"})
-
 	podLister := factory.Core().V1().Pods().Lister()
 	nodeLister := factory.Core().V1().Nodes().Lister()
 	secretLister := factory.Core().V1().Secrets().Lister()
 	namespaceLister := factory.Core().V1().Namespaces().Lister()
 	serviceAccountLister := factory.Core().V1().ServiceAccounts().Lister()
 	networkPolicyLister := factory.Networking().V1().NetworkPolicies().Lister()
-	autoscalerKeys, err := controller.NormalizeAutoscalerSafeToEvictAnnotationKeys(cfg.AutoscalerSafeToEvictAnnotationKeys)
-	if err != nil {
-		return nil, fmt.Errorf("normalize autoscaler safe-to-evict annotation keys: %w", err)
+	templateLister := controller.NewTemplateLister(templateInformer.GetIndexer())
+	var recorder record.EventRecorder
+	var operator *controller.Operator
+	var teardownCoordinator *controller.PodTeardownCoordinator
+	var index *sandboxindex.SandboxIndex
+	var autoscalerKeys []string
+	if managerUsesKubernetesSandboxRuntime(cfg) {
+		eventBroadcaster := record.NewBroadcaster()
+		eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{
+			Interface: clients.client.CoreV1().Events(""),
+		})
+		recorder = eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "manager"})
+		var err error
+		autoscalerKeys, err = controller.NormalizeAutoscalerSafeToEvictAnnotationKeys(cfg.AutoscalerSafeToEvictAnnotationKeys)
+		if err != nil {
+			return nil, fmt.Errorf("normalize autoscaler safe-to-evict annotation keys: %w", err)
+		}
+		teardownCoordinator = controller.NewPodTeardownCoordinator(
+			podLister,
+			nodeLister,
+			cfg.PodTeardown,
+			cfg.RuntimeReadyTimeout.Duration,
+			metrics,
+			logger,
+		)
+		operator = controller.NewOperator(
+			clients.client,
+			clients.crdClient,
+			podInformer.Informer(),
+			replicaSetInformer,
+			secretInformer,
+			templateInformer,
+			recorder,
+			clk,
+			logger,
+			metrics,
+			teardownCoordinator,
+			autoscalerKeys,
+		)
+		templateLister = operator.GetTemplateLister()
+		if pool != nil {
+			operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
+		}
+		index = sandboxindex.NewSandboxIndex()
+		podInformer.Informer().AddEventHandler(index.ResourceEventHandler())
 	}
-	teardownCoordinator := controller.NewPodTeardownCoordinator(
-		podLister,
-		nodeLister,
-		cfg.PodTeardown,
-		cfg.RuntimeReadyTimeout.Duration,
-		metrics,
-		logger,
-	)
-	operator := controller.NewOperator(
-		clients.client,
-		clients.crdClient,
-		podInformer.Informer(),
-		replicaSetInformer,
-		secretInformer,
-		templateInformer,
-		recorder,
-		clk,
-		logger,
-		metrics,
-		teardownCoordinator,
-		autoscalerKeys,
-	)
-	if pool != nil {
-		operator.SetTemplateStatsPublisher(controller.NewPGTemplateStatsPublisher(pool, cfg.DefaultClusterId, clk, logger))
-	}
-	index := sandboxindex.NewSandboxIndex()
-	podInformer.Informer().AddEventHandler(index.ResourceEventHandler())
 
 	return &managerInformerRuntime{
 		factory:                  factory,
@@ -183,6 +201,7 @@ func buildManagerInformerRuntime(
 		namespaceLister:          namespaceLister,
 		serviceAccountLister:     serviceAccountLister,
 		networkPolicyLister:      networkPolicyLister,
+		templateLister:           templateLister,
 		operator:                 operator,
 		recorder:                 recorder,
 		sandboxIndex:             index,

@@ -33,6 +33,8 @@ const (
 	// DefaultDirtyTailRetirementReserveBytes protects enough node capacity for
 	// XFS journal sync and unmount after guest write admission is exhausted.
 	DefaultDirtyTailRetirementReserveBytes = int64(64 << 20)
+	sessionJournalMaxBatchSize             = 64
+	sessionJournalMaxBatchDelay            = time.Millisecond
 	legacySessionSchemaVersion             = 2
 	allocationSessionSchemaVersion         = 3
 	durableBindingSchemaVersion            = 4
@@ -331,6 +333,11 @@ func New(config Config) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open RootFS session journal: %w", err)
 	}
+	// One Ensure writes five ordered crash boundaries. The per-parent lock
+	// preserves that order, while Batch group-commits independent parents so
+	// concurrent claims do not queue one fdatasync per boundary globally.
+	db.MaxBatchSize = sessionJournalMaxBatchSize
+	db.MaxBatchDelay = sessionJournalMaxBatchDelay
 	if err := db.Update(func(tx *bolt.Tx) error {
 		if _, err := tx.CreateBucketIfNotExists(sessionBucket); err != nil {
 			return err
@@ -2236,7 +2243,7 @@ func (m *Manager) load(parent string) (record, error) {
 }
 
 func (m *Manager) saveNew(value record) error {
-	return m.db.Update(func(tx *bolt.Tx) error {
+	return m.db.Batch(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(sessionBucket)
 		if bucket.Get([]byte(value.Parent)) != nil {
 			return errdefs.ErrAlreadyExists
@@ -2255,7 +2262,7 @@ func (m *Manager) saveNew(value record) error {
 
 func (m *Manager) save(value record) error {
 	value.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	return m.db.Update(func(tx *bolt.Tx) error { return putRecord(tx.Bucket(sessionBucket), value) })
+	return m.db.Batch(func(tx *bolt.Tx) error { return putRecord(tx.Bucket(sessionBucket), value) })
 }
 
 func putRecord(bucket *bolt.Bucket, value record) error {

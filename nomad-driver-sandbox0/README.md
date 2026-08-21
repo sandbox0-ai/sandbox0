@@ -394,6 +394,13 @@ different mount namespace. Ctld passes only a validated path relative to the
 configured netns root to its network registry, which rechecks incarnation and
 derives the allocation IPv4 address from the namespace.
 
+The RootFS session journal keeps synchronous bbolt durability at every
+reserved, device-bound, mounted, and ready crash boundary. The per-session
+lock preserves their order, while independent sessions group-commit at most 64
+updates within a bounded 1 ms window. This avoids a node-wide fdatasync queue
+on concurrent claims without enabling `NoSync`, weakening restart recovery, or
+combining two states of the same session into one transaction.
+
 The ctld node socket exposes private runtime-slot registration and
 `PUT /v1/runtime-slots/cleanup` only through its mode-`0600` Unix socket.
 Before regional readiness, the task driver registers the deterministic

@@ -41,7 +41,6 @@ type config struct {
 	settle         time.Duration
 	hardLimit      time.Duration
 	p50Target      time.Duration
-	cleanup        bool
 	label          string
 	client         *http.Client
 }
@@ -108,7 +107,6 @@ func main() {
 		settle         = flag.Duration("batch-settle", 0, "delay after cleanup before the next batch")
 		hardLimit      = flag.Duration("hard-limit", time.Second, "maximum successful command-ready sample")
 		p50Target      = flag.Duration("p50-target", 500*time.Millisecond, "engineering p50 target")
-		cleanup        = flag.Bool("cleanup", true, "DELETE every successfully claimed sandbox outside the timed sample")
 		output         = flag.String("output", "", "optional JSON report path; stdout is always written")
 		label          = flag.String("label", "", "optional environment label included in the report")
 	)
@@ -126,7 +124,7 @@ func main() {
 		endpoint: *endpoint, token: token, body: body, batches: *batches, concurrency: *concurrent,
 		requestTimeout: *timeout, cleanupTimeout: *cleanupTimeout, cleanupPoll: *cleanupPoll,
 		settle: *settle, hardLimit: *hardLimit, p50Target: *p50Target,
-		cleanup: *cleanup, label: strings.TrimSpace(*label),
+		label: strings.TrimSpace(*label),
 	}
 	if err := cfg.validate(); err != nil {
 		fatal(err)
@@ -206,26 +204,24 @@ func run(ctx context.Context, cfg config) (report, error) {
 		}
 		close(start)
 		wait.Wait()
-		if cfg.cleanup {
-			for lane := range cfg.concurrency {
-				current := result.Samples[batch*cfg.concurrency+lane]
-				if current.SandboxID == "" {
-					continue
-				}
-				wait.Add(1)
-				index := batch*cfg.concurrency + lane
-				go func(sandboxID string, index int) {
-					defer wait.Done()
-					started := time.Now()
-					if err := cleanupSandbox(ctx, cfg, sandboxID); err != nil {
-						cleanupErrors.Add(1)
-						result.Samples[index].CleanupError = err.Error()
-					}
-					result.Samples[index].CleanupDuration = time.Since(started)
-				}(current.SandboxID, index)
+		for lane := range cfg.concurrency {
+			current := result.Samples[batch*cfg.concurrency+lane]
+			if current.SandboxID == "" {
+				continue
 			}
-			wait.Wait()
+			wait.Add(1)
+			index := batch*cfg.concurrency + lane
+			go func(sandboxID string, index int) {
+				defer wait.Done()
+				started := time.Now()
+				if err := cleanupSandbox(ctx, cfg, sandboxID); err != nil {
+					cleanupErrors.Add(1)
+					result.Samples[index].CleanupError = err.Error()
+				}
+				result.Samples[index].CleanupDuration = time.Since(started)
+			}(current.SandboxID, index)
 		}
+		wait.Wait()
 		if cfg.settle > 0 && batch+1 < cfg.batches {
 			select {
 			case <-ctx.Done():
@@ -240,7 +236,7 @@ func run(ctx context.Context, cfg config) (report, error) {
 	wallDurations := make([]time.Duration, 0, len(result.Samples))
 	cleanupDurations := make([]time.Duration, 0, len(result.Samples))
 	for _, current := range result.Samples {
-		if cfg.cleanup && current.CleanupError == "" && current.SandboxID != "" {
+		if current.CleanupError == "" && current.SandboxID != "" {
 			cleanupDurations = append(cleanupDurations, current.CleanupDuration)
 		}
 		if current.Error != "" {
@@ -263,7 +259,7 @@ func run(ctx context.Context, cfg config) (report, error) {
 		result.CommandReady.Count == len(result.Samples) && result.CommandReady.P50 <= cfg.p50Target &&
 		result.CommandReady.P99 <= cfg.hardLimit && result.CommandReady.Max <= cfg.hardLimit &&
 		result.Wall.Count == len(result.Samples) && result.Wall.P99 <= cfg.hardLimit && result.Wall.Max <= cfg.hardLimit &&
-		(!cfg.cleanup || result.Cleanup.Count == len(result.Samples))
+		result.Cleanup.Count == len(result.Samples)
 	if !result.Passed {
 		return result, fmt.Errorf(
 			"SLO acceptance failed: samples=%d errors=%d command_misses=%d wall_misses=%d cleanup_errors=%d command_p50=%s command_p99=%s command_max=%s wall_p99=%s wall_max=%s",

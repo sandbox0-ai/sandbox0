@@ -54,7 +54,7 @@ func TestRunAcceptsSynchronizedRegionalClaimDistribution(t *testing.T) {
 		endpoint: server.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
 		batches: 2, concurrency: 2, requestTimeout: time.Second, hardLimit: time.Second,
 		cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
-		p50Target: 500 * time.Millisecond, cleanup: true, client: server.Client(),
+		p50Target: 500 * time.Millisecond, client: server.Client(),
 	}
 	result, err := run(context.Background(), cfg)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestRunRejectsCleanupThatNeverConverges(t *testing.T) {
 		endpoint: server.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
 		batches: 1, concurrency: 1, requestTimeout: time.Second,
 		cleanupTimeout: 30 * time.Millisecond, cleanupPoll: 10 * time.Millisecond,
-		hardLimit: time.Second, p50Target: 500 * time.Millisecond, cleanup: true, client: server.Client(),
+		hardLimit: time.Second, p50Target: 500 * time.Millisecond, client: server.Client(),
 	}
 	result, err := run(context.Background(), cfg)
 	if err == nil || result.Passed || result.CleanupErrors != 1 || result.Cleanup.Count != 0 ||
@@ -119,7 +119,7 @@ func TestRunRejectsNoncanonicalCleanupAbsence(t *testing.T) {
 		endpoint: server.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
 		batches: 1, concurrency: 1, requestTimeout: time.Second,
 		cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
-		hardLimit: time.Second, p50Target: 500 * time.Millisecond, cleanup: true, client: server.Client(),
+		hardLimit: time.Second, p50Target: 500 * time.Millisecond, client: server.Client(),
 	}
 	result, err := run(context.Background(), cfg)
 	if err == nil || result.Passed || result.CleanupErrors != 1 ||
@@ -163,7 +163,7 @@ func TestRunDoesNotStartNextBatchBeforeCleanupConverges(t *testing.T) {
 		endpoint: server.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
 		batches: 2, concurrency: 1, requestTimeout: time.Second,
 		cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
-		hardLimit: time.Second, p50Target: 500 * time.Millisecond, cleanup: true, client: server.Client(),
+		hardLimit: time.Second, p50Target: 500 * time.Millisecond, client: server.Client(),
 	}
 	result, err := run(context.Background(), cfg)
 	if err != nil || !result.Passed || overlap.Load() || !firstAbsent.Load() || firstGets.Load() != 2 {
@@ -174,14 +174,24 @@ func TestRunDoesNotStartNextBatchBeforeCleanupConverges(t *testing.T) {
 
 func TestRunRejectsAnySuccessfulSampleBeyondHardLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=1000.001")
-		writer.Header().Set("Sandbox0-Command-Ready-SLO", "missed")
-		_ = spec.WriteSuccess(writer, http.StatusCreated, claimResponse{SandboxID: "sandbox-slow"})
+		switch request.Method {
+		case http.MethodPost:
+			writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=1000.001")
+			writer.Header().Set("Sandbox0-Command-Ready-SLO", "missed")
+			_ = spec.WriteSuccess(writer, http.StatusCreated, claimResponse{SandboxID: "sandbox-slow"})
+		case http.MethodDelete:
+			_ = spec.WriteSuccess(writer, http.StatusAccepted, struct{}{})
+		case http.MethodGet:
+			_ = spec.WriteError(writer, http.StatusNotFound, spec.CodeNotFound, "sandbox is absent")
+		default:
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+		}
 	}))
 	defer server.Close()
 	cfg := config{
 		endpoint: server.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
 		batches: 1, concurrency: 1, requestTimeout: time.Second, hardLimit: time.Second,
+		cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
 		p50Target: 500 * time.Millisecond, client: server.Client(),
 	}
 	result, err := run(context.Background(), cfg)
@@ -191,16 +201,26 @@ func TestRunRejectsAnySuccessfulSampleBeyondHardLimit(t *testing.T) {
 }
 
 func TestRunRejectsSlowPublicRoundTripDespiteFastReportedCommandReadiness(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		time.Sleep(100 * time.Millisecond)
-		writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=1")
-		writer.Header().Set("Sandbox0-Command-Ready-SLO", "met")
-		_ = spec.WriteSuccess(writer, http.StatusCreated, claimResponse{SandboxID: "sandbox-underreported"})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodPost:
+			time.Sleep(100 * time.Millisecond)
+			writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=1")
+			writer.Header().Set("Sandbox0-Command-Ready-SLO", "met")
+			_ = spec.WriteSuccess(writer, http.StatusCreated, claimResponse{SandboxID: "sandbox-underreported"})
+		case http.MethodDelete:
+			_ = spec.WriteSuccess(writer, http.StatusAccepted, struct{}{})
+		case http.MethodGet:
+			_ = spec.WriteError(writer, http.StatusNotFound, spec.CodeNotFound, "sandbox is absent")
+		default:
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+		}
 	}))
 	defer server.Close()
 	cfg := config{
 		endpoint: server.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
 		batches: 1, concurrency: 1, requestTimeout: time.Second, hardLimit: 50 * time.Millisecond,
+		cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
 		p50Target: 25 * time.Millisecond, client: server.Client(),
 	}
 	result, err := run(context.Background(), cfg)

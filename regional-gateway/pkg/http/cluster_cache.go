@@ -214,19 +214,24 @@ func delegatedAuditContext(authCtx *authn.AuthContext, origin string, ingressSta
 func attachAuditCorrelation() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authCtx := gatewaymiddleware.GetAuthContext(c)
-		if authCtx != nil {
-			if authCtx.OperationID == "" {
-				authCtx.OperationID = uuid.NewString()
-			}
-			requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
-			if len(requestID) > 128 {
-				requestID = requestID[:128]
-			}
-			if requestID == "" {
-				requestID = authCtx.OperationID
-			}
-			authCtx.RequestID = requestID
-		}
+		ensureAuditCorrelation(c, authCtx)
 		c.Next()
 	}
+}
+
+func ensureAuditCorrelation(c *gin.Context, authCtx *authn.AuthContext) {
+	if c == nil || authCtx == nil {
+		return
+	}
+	if authCtx.OperationID == "" {
+		authCtx.OperationID = uuid.NewString()
+	}
+	requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
+	if len(requestID) > 128 {
+		requestID = requestID[:128]
+	}
+	if requestID == "" {
+		requestID = authCtx.OperationID
+	}
+	authCtx.RequestID = requestID
 }

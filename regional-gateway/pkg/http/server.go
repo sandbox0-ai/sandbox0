@@ -500,6 +500,11 @@ func (s *Server) handleAPINoRoute(c *gin.Context) bool {
 	c.Set("auth_context", authCtx)
 	ctx := authn.WithAuthContext(c.Request.Context(), authCtx)
 	c.Request = c.Request.WithContext(ctx)
+	// NoRoute handlers do not execute the /api group middleware chain. Apply
+	// the same bounded request correlation before minting the delegated token
+	// so single-cluster fallback and scheduler-backed routes have identical
+	// audit identity.
+	ensureAuditCorrelation(c, authCtx)
 
 	s.rateLimiter.RateLimit()(c)
 	if c.IsAborted() {

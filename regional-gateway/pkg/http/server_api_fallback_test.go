@@ -135,6 +135,7 @@ func TestSetupRoutesSandboxClaimSignsTrustedIngressAndPreservesSLOHeaders(t *tes
 	req.Header.Set(internalauth.TeamIDHeader, "team-1")
 	req.Header.Set(internalauth.DefaultTokenHeader, "attacker-controlled-token")
 	req.Header.Set("X-Sandbox0-Claim-Ingress-Started-At", spoofedStartedAt)
+	req.Header.Set("X-Request-ID", "public-request-correlation")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -175,7 +176,7 @@ func TestSetupRoutesSandboxClaimSignsTrustedIngressAndPreservesSLOHeaders(t *tes
 		t.Fatalf("forwarded audit = %#v, want signed ingress timestamp", claims.Audit)
 	}
 	if claims.Audit.Origin != internalauth.ServiceRegionalGateway ||
-		claims.Audit.OperationID == "" || claims.Audit.RequestID == "" {
+		claims.Audit.OperationID == "" || claims.Audit.RequestID != "public-request-correlation" {
 		t.Fatalf("forwarded audit = %#v, want regional origin and correlation IDs", claims.Audit)
 	}
 	if claims.Audit.OperationID == "spoofed-operation" || claims.Audit.IngressStartedAt.Format(time.RFC3339) == spoofedStartedAt {

@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
-	"net/url"
 	"strings"
 	"time"
 
@@ -811,7 +809,7 @@ func (s *Service) networkPolicy(spec v1alpha1.SandboxTemplateSpec, req *service.
 	if req.Config != nil {
 		requestPolicy = req.Config.Network
 		if req.Config.Webhook != nil && strings.TrimSpace(req.Config.Webhook.URL) != "" {
-			requestPolicy = appendWebhookPolicy(requestPolicy, req.Config.Webhook.URL)
+			requestPolicy = service.AppendWebhookNetworkPolicy(requestPolicy, req.Config.Webhook.URL)
 		}
 	}
 	state := s.networkPolicies.BuildNetworkPolicyState(&networkpolicy.BuildNetworkPolicyRequest{
@@ -1041,32 +1039,6 @@ func requestCredentialBindings(config *sandboxstore.SandboxConfig) []v1alpha1.Cr
 		return nil
 	}
 	return credentialBindings(config.Network)
-}
-
-func appendWebhookPolicy(policy *v1alpha1.SandboxNetworkPolicy, rawURL string) *v1alpha1.SandboxNetworkPolicy {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || parsed.Hostname() == "" {
-		return policy
-	}
-	if policy == nil {
-		policy = &v1alpha1.SandboxNetworkPolicy{}
-	} else {
-		policy = policy.DeepCopy()
-	}
-	if policy.Egress == nil {
-		policy.Egress = &v1alpha1.NetworkEgressPolicy{}
-	}
-	host := parsed.Hostname()
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.To4() != nil {
-			policy.Egress.AllowedCIDRs = append(policy.Egress.AllowedCIDRs, ip.String()+"/32")
-		} else {
-			policy.Egress.AllowedCIDRs = append(policy.Egress.AllowedCIDRs, ip.String()+"/128")
-		}
-	} else {
-		policy.Egress.AllowedDomains = append(policy.Egress.AllowedDomains, host)
-	}
-	return policy
 }
 
 var _ service.SandboxRuntimeBackend = (*Service)(nil)

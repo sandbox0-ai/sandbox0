@@ -10,6 +10,7 @@ import (
 	"github.com/sandbox0-ai/sandbox0/manager/pkg/service"
 	"github.com/sandbox0-ai/sandbox0/pkg/gateway/spec"
 	"go.uber.org/zap"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // getNetworkPolicy gets the network policy for a sandbox.
@@ -32,6 +33,14 @@ func (s *Server) getNetworkPolicy(c *gin.Context) {
 	}
 	networkPolicy, err := s.sandboxNetworkPolicy.GetNetworkPolicy(c.Request.Context(), sandboxID)
 	if err != nil {
+		if errors.Is(err, service.ErrDataPlaneNotReady) {
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			return
+		}
+		if apierrors.IsConflict(err) {
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
+			return
+		}
 		s.logger.Error("Failed to get network policy",
 			zap.String("sandboxID", sandboxID),
 			zap.Error(err),
@@ -74,8 +83,15 @@ func (s *Server) updateNetworkPolicy(c *gin.Context) {
 	}
 	updated, err := s.sandboxNetworkPolicy.UpdateNetworkPolicy(c.Request.Context(), sandboxID, &req)
 	if err != nil {
-		if errors.Is(err, service.ErrInvalidNetworkPolicy) {
+		switch {
+		case errors.Is(err, service.ErrInvalidNetworkPolicy):
 			spec.JSONError(c, http.StatusBadRequest, spec.CodeBadRequest, err.Error())
+			return
+		case errors.Is(err, service.ErrSandboxRuntimeUpdateUnavailable), errors.Is(err, service.ErrDataPlaneNotReady):
+			spec.JSONError(c, http.StatusServiceUnavailable, spec.CodeUnavailable, err.Error())
+			return
+		case apierrors.IsConflict(err):
+			spec.JSONError(c, http.StatusConflict, spec.CodeConflict, err.Error())
 			return
 		}
 		s.logger.Error("Failed to update network policy",

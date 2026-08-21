@@ -450,6 +450,7 @@ func main() {
 	var sandboxReader httpserver.SandboxReader = sandboxService
 	var sandboxUpdater httpserver.SandboxUpdater = sandboxService
 	var sandboxRootFS httpserver.SandboxRootFSService = sandboxService
+	var sandboxNetworkPolicy httpserver.SandboxNetworkPolicyService = sandboxService
 	if cfg.SandboxRuntimeBackend == config.SandboxRuntimeBackendNomad {
 		sandboxReader, err = service.NewNomadSandboxReader(sandboxStore)
 		if err != nil {
@@ -466,6 +467,10 @@ func main() {
 		sandboxRootFS, err = service.NewNomadSandboxRootFSService(sandboxStore, clk.Now)
 		if err != nil {
 			logger.Fatal("Failed to configure Nomad sandbox RootFS service", zap.Error(err))
+		}
+		sandboxNetworkPolicy, err = service.NewNomadSandboxNetworkPolicyService(sandboxStore, networkPolicyService)
+		if err != nil {
+			logger.Fatal("Failed to configure Nomad sandbox network policy service", zap.Error(err))
 		}
 	}
 	if managerNodeAuthority != nil {
@@ -601,7 +606,7 @@ func main() {
 	httpServer := httpserver.NewServerWithDependencies(httpserver.ServerDependencies{
 		SandboxReader:           sandboxReader,
 		SandboxUpdater:          sandboxUpdater,
-		SandboxNetworkPolicy:    sandboxService,
+		SandboxNetworkPolicy:    sandboxNetworkPolicy,
 		SandboxRootFS:           sandboxRootFS,
 		SandboxSourceResolver:   sandboxSourceResolver,
 		SandboxClaimer:          sandboxBackend,

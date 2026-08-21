@@ -87,12 +87,29 @@ func (s *SandboxService) appendWebhookNetworkPolicy(
 		)
 		return requestNetwork
 	}
+	return AppendWebhookNetworkPolicy(requestNetwork, webhookURL)
+}
+
+// AppendWebhookNetworkPolicy returns an independent request policy that
+// permits the configured webhook destination. Invalid URLs leave the policy
+// unchanged so claim retries remain byte-stable.
+func AppendWebhookNetworkPolicy(
+	requestNetwork *v1alpha1.SandboxNetworkPolicy,
+	webhookURL string,
+) *v1alpha1.SandboxNetworkPolicy {
+	parsed, err := url.Parse(strings.TrimSpace(webhookURL))
+	if err != nil || parsed.Hostname() == "" {
+		return requestNetwork
+	}
 	if requestNetwork == nil {
 		requestNetwork = &v1alpha1.SandboxNetworkPolicy{}
+	} else {
+		requestNetwork = requestNetwork.DeepCopy()
 	}
 	if requestNetwork.Egress == nil {
 		requestNetwork.Egress = &v1alpha1.NetworkEgressPolicy{}
 	}
+	host := parsed.Hostname()
 	if ip := net.ParseIP(host); ip != nil {
 		requestNetwork.Egress.AllowedCIDRs = append(requestNetwork.Egress.AllowedCIDRs, formatCIDRForIP(ip))
 		return requestNetwork

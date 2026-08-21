@@ -335,8 +335,16 @@ func (h *taskHandle) writeClaimBundle(assignment *runtimecontrol.Assignment) err
 			CPUPeriod:        linux.CPUPeriod,
 			CPUQuota:         linux.CPUQuota,
 			CPUShares:        linux.CPUShares,
+			CPUSetCpus:       linux.CpusetCpus,
 			MemoryLimitBytes: linux.MemoryLimitBytes,
 		}
+	}
+	if h.runtimeSlotNeeded {
+		normalized, err := normalizedRuntimeSlotResources(h.taskConfig)
+		if err != nil {
+			return fmt.Errorf("normalize runtime slot resources: %w", err)
+		}
+		resources = &normalized
 	}
 	h.mu.Lock()
 	command := h.driverConfig.Command

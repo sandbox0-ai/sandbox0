@@ -26,7 +26,7 @@ job "sandbox0-warm-slots" {
       }
 
       resources {
-        cpu    = 1000
+        cores  = 1
         memory = 1024
       }
     }

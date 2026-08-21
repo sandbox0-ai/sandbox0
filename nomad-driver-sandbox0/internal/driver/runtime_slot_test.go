@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/plugins/drivers"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sandbox0-ai/sandbox0/pkg/nomadruntime"
@@ -307,7 +309,15 @@ func newRuntimeSlotPluginFixture(t *testing.T) *runtimeSlotPluginFixture {
 			"NOMAD_ALLOC_ADDR_" + protocol.NomadProcdPortLabel: "172.26.64.2:49983",
 			"UNTRUSTED_TASK_ENV":                               "must-not-enter-procd",
 		},
-		Resources: &drivers.Resources{},
+		Resources: &drivers.Resources{
+			NomadResources: &structs.AllocatedTaskResources{
+				Cpu:    structs.AllocatedCpuResources{CpuShares: 3900},
+				Memory: structs.AllocatedMemoryResources{MemoryMB: 1024},
+			},
+			LinuxResources: &drivers.LinuxResources{
+				CPUShares: 3900, CpusetCpus: "2", MemoryLimitBytes: 1024 * 1024 * 1024,
+			},
+		},
 		NetworkIsolation: &drivers.NetworkIsolationSpec{
 			Mode: drivers.NetIsolationModeGroup,
 			Path: netnsPath,
@@ -1195,6 +1205,111 @@ func TestValidateRuntimeSlotTaskConfigRequiresGenericProcdSlot(t *testing.T) {
 	}
 	if err := validateRuntimeSlotTaskConfig(config, TaskConfig{Command: "/procd", WaitForClaim: true}); err != nil {
 		t.Fatalf("valid regional runtime slot task was rejected: %v", err)
+	}
+}
+
+func TestNormalizedRuntimeSlotResourcesEnforceExactNomadShape(t *testing.T) {
+	task := &drivers.TaskConfig{Resources: &drivers.Resources{
+		NomadResources: &structs.AllocatedTaskResources{
+			Cpu:    structs.AllocatedCpuResources{CpuShares: 3900},
+			Memory: structs.AllocatedMemoryResources{MemoryMB: 1024},
+		},
+		LinuxResources: &drivers.LinuxResources{
+			CPUShares: 3900, CpusetCpus: "2", PercentTicks: 0.5, MemoryLimitBytes: 1024 * 1024 * 1024,
+		},
+	}}
+	resources, err := normalizedRuntimeSlotResources(task)
+	if err != nil {
+		t.Fatalf("normalizedRuntimeSlotResources() error = %v", err)
+	}
+	if resources.CPUPeriod != 100000 || resources.CPUQuota != 100000 ||
+		resources.CPUShares != 1024 || resources.CPUSetCpus != "2" || resources.MemoryLimitBytes != 1024*1024*1024 {
+		t.Fatalf("normalized resources = %+v", resources)
+	}
+	digest, err := runtimeCompatibilityDigest(defaultPluginConfig(), task, "runsc version test")
+	if err != nil {
+		t.Fatalf("runtimeCompatibilityDigest() error = %v", err)
+	}
+	wantDigest, err := (protocol.RuntimeCompatibility{
+		Version: protocol.RuntimeCompatibilityVersion, Architecture: runtime.GOARCH,
+		DriverVersion: PluginVersion, RunscVersion: "runsc version test",
+		Platform: "systrap", Overlay2: "none", FileAccess: "shared", DirectFS: true,
+		Command: "/procd", ProcdPort: protocol.NomadProcdPort,
+		RuntimeMode: runtimecontrol.ControlModeStatic,
+		CPUPeriod:   100000, CPUQuota: 100000, CPUShares: 1024, MemoryLimitBytes: 1024 * 1024 * 1024,
+	}).Digest()
+	if err != nil {
+		t.Fatalf("expected compatibility digest: %v", err)
+	}
+	if digest != wantDigest {
+		t.Fatalf("compatibility digest = %q, want %q", digest, wantDigest)
+	}
+}
+
+func TestNormalizedRuntimeSlotResourcesRejectAmbiguousNomadShape(t *testing.T) {
+	valid := func() *drivers.TaskConfig {
+		return &drivers.TaskConfig{Resources: &drivers.Resources{
+			NomadResources: &structs.AllocatedTaskResources{
+				Cpu:    structs.AllocatedCpuResources{CpuShares: 3900},
+				Memory: structs.AllocatedMemoryResources{MemoryMB: 1024},
+			},
+			LinuxResources: &drivers.LinuxResources{CpusetCpus: "2", MemoryLimitBytes: 1024 * 1024 * 1024},
+		}}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*drivers.TaskConfig)
+	}{
+		{name: "missing resources", mutate: func(task *drivers.TaskConfig) { task.Resources = nil }},
+		{name: "zero cpu", mutate: func(task *drivers.TaskConfig) { task.Resources.NomadResources.Cpu.CpuShares = 0 }},
+		{name: "missing dedicated cores", mutate: func(task *drivers.TaskConfig) {
+			task.Resources.LinuxResources.CpusetCpus = ""
+		}},
+		{name: "reserved core mismatch", mutate: func(task *drivers.TaskConfig) {
+			task.Resources.NomadResources.Cpu.ReservedCores = []uint16{1, 2}
+		}},
+		{name: "noncanonical cpuset", mutate: func(task *drivers.TaskConfig) { task.Resources.LinuxResources.CpusetCpus = "02" }},
+		{name: "memory mismatch", mutate: func(task *drivers.TaskConfig) {
+			task.Resources.LinuxResources.MemoryLimitBytes--
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			task := valid()
+			test.mutate(task)
+			if _, err := normalizedRuntimeSlotResources(task); err == nil {
+				t.Fatal("ambiguous runtime slot resources were accepted")
+			}
+		})
+	}
+}
+
+func TestCountCanonicalCPUSet(t *testing.T) {
+	tests := []struct {
+		value string
+		want  int
+		ok    bool
+	}{
+		{value: "0", want: 1, ok: true},
+		{value: "0-3,6,8-9", want: 7, ok: true},
+		{value: "", ok: false},
+		{value: "00", ok: false},
+		{value: "1-1", ok: false},
+		{value: "2-1", ok: false},
+		{value: "0,0", ok: false},
+		{value: "0-2,2-3", ok: false},
+		{value: "0, 1", ok: false},
+	}
+	for _, test := range tests {
+		t.Run(test.value, func(t *testing.T) {
+			got, err := countCanonicalCPUSet(test.value)
+			if test.ok && (err != nil || got != test.want) {
+				t.Fatalf("countCanonicalCPUSet(%q) = %d, %v; want %d", test.value, got, err, test.want)
+			}
+			if !test.ok && err == nil {
+				t.Fatalf("countCanonicalCPUSet(%q) = %d, nil; want error", test.value, got)
+			}
+		})
 	}
 }
 

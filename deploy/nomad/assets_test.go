@@ -37,6 +37,12 @@ func TestAcceptanceExamplesReserveEnoughWarmSlotsAndNBDDevices(t *testing.T) {
 	if err != nil || warmCount < minimumAcceptanceWidth {
 		t.Fatalf("warm-slot count = %q, want at least %d", countMatch[1], minimumAcceptanceWidth)
 	}
+	if !regexp.MustCompile(`(?m)^\s*cores\s*=\s*1\s*$`).MatchString(warmJob) {
+		t.Fatal("warm-slot example must reserve one dedicated CPU core")
+	}
+	if regexp.MustCompile(`(?m)^\s*cpu\s*=`).MatchString(warmJob) {
+		t.Fatal("warm-slot example must not use host-frequency-dependent Nomad CPU compute")
+	}
 
 	environment := readAsset(t, "ctld/ctld.env.example")
 	var devices []string

@@ -11,6 +11,14 @@ an authorized caller binds that generation to a private OCI root mount, writes
 the generic OCI spec, and invokes stock `runsc create` and `runsc start`. The
 claim is one-shot and is rejected after the first attempt.
 
+Production runtime slots require Nomad `resources.cores`, not the
+frequency-dependent `resources.cpu` compute field. The driver binds the exact
+allocated CPU set into the OCI spec and normalizes each dedicated core to a
+100000-period/100000-quota CFS limit with 1024 shares. This keeps the runtime
+profile identical across different host clock frequencies and prevents a
+nominal one-CPU slot from running uncapped when Nomad leaves external-driver
+period/quota fields at zero.
+
 ## Status
 
 Implemented:

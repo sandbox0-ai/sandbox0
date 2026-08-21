@@ -41,6 +41,9 @@ import (
 
 const (
 	runtimeSlotProofVersion      = 1
+	runtimeSlotCPUPeriod         = int64(100000)
+	runtimeSlotCPUSharesPerCPU   = int64(1024)
+	runtimeSlotMaxDedicatedCPUs  = 1024
 	runtimeSlotActivationTimeout = 10 * time.Second
 	runtimeSlotControlTimeout    = 5 * time.Second
 	runtimeSlotMaxHeartbeatTTL   = 5 * time.Minute
@@ -713,18 +716,103 @@ func runtimeSlotHeartbeatDelay(leaseWindow time.Duration) time.Duration {
 }
 
 func runtimeCompatibilityDigest(config *PluginConfig, task *drivers.TaskConfig, runscVersion string) (string, error) {
-	var linux drivers.LinuxResources
-	if task.Resources != nil && task.Resources.LinuxResources != nil {
-		linux = *task.Resources.LinuxResources
+	resources, err := normalizedRuntimeSlotResources(task)
+	if err != nil {
+		return "", err
 	}
 	return (protocol.RuntimeCompatibility{
 		Version: protocol.RuntimeCompatibilityVersion, Architecture: runtime.GOARCH,
 		DriverVersion: PluginVersion, RunscVersion: strings.TrimSpace(runscVersion),
 		Platform: config.Platform, Overlay2: config.Overlay2, FileAccess: config.FileAccess,
 		DirectFS: config.DirectFS, Command: "/procd", ProcdPort: protocol.NomadProcdPort,
-		RuntimeMode: runtimecontrol.ControlModeStatic, CPUPeriod: linux.CPUPeriod,
-		CPUQuota: linux.CPUQuota, CPUShares: linux.CPUShares, MemoryLimitBytes: linux.MemoryLimitBytes,
+		RuntimeMode: runtimecontrol.ControlModeStatic, CPUPeriod: resources.CPUPeriod,
+		CPUQuota: resources.CPUQuota, CPUShares: resources.CPUShares, MemoryLimitBytes: resources.MemoryLimitBytes,
 	}).Digest()
+}
+
+// normalizedRuntimeSlotResources converts an exact Nomad dedicated-core
+// allocation into host-independent OCI CFS limits. Nomad 1.11 does not
+// populate LinuxResources CPU period or quota for external task drivers;
+// hashing or applying those raw zero values would make the advertised 1 CPU
+// profile both incompatible with the shipped catalog and uncapped in runsc.
+func normalizedRuntimeSlotResources(task *drivers.TaskConfig) (driversResources, error) {
+	if task == nil || task.Resources == nil || task.Resources.NomadResources == nil || task.Resources.LinuxResources == nil {
+		return driversResources{}, fmt.Errorf("runtime slot requires Nomad and Linux resources: %w", errdefs.ErrInvalidArgument)
+	}
+	nomadResources := task.Resources.NomadResources
+	linuxResources := task.Resources.LinuxResources
+	compute := nomadResources.Cpu.CpuShares
+	if compute <= 0 {
+		return driversResources{}, fmt.Errorf("runtime slot CPU compute must be positive: %w", errdefs.ErrInvalidArgument)
+	}
+	cpuset := strings.TrimSpace(linuxResources.CpusetCpus)
+	if cpuset == "" || cpuset != linuxResources.CpusetCpus {
+		return driversResources{}, fmt.Errorf("runtime slot requires a canonical dedicated CPU set: %w", errdefs.ErrInvalidArgument)
+	}
+	coreCount, err := countCanonicalCPUSet(cpuset)
+	if err != nil {
+		return driversResources{}, err
+	}
+	if len(nomadResources.Cpu.ReservedCores) != 0 && len(nomadResources.Cpu.ReservedCores) != coreCount {
+		return driversResources{}, fmt.Errorf("runtime slot reserved core count does not match its CPU set: %w", errdefs.ErrInvalidArgument)
+	}
+	quota := int64(coreCount) * runtimeSlotCPUPeriod
+	shares := int64(coreCount) * runtimeSlotCPUSharesPerCPU
+	memoryMB := nomadResources.Memory.MemoryMB
+	if nomadResources.Memory.MemoryMaxMB > memoryMB {
+		memoryMB = nomadResources.Memory.MemoryMaxMB
+	}
+	if memoryMB <= 0 || memoryMB > (1<<63-1)/(1024*1024) {
+		return driversResources{}, fmt.Errorf("runtime slot memory must be positive and bounded: %w", errdefs.ErrInvalidArgument)
+	}
+	memoryBytes := memoryMB * 1024 * 1024
+	if linuxResources.MemoryLimitBytes != memoryBytes {
+		return driversResources{}, fmt.Errorf(
+			"runtime slot Linux memory limit %d does not match Nomad allocation %d: %w",
+			linuxResources.MemoryLimitBytes, memoryBytes, errdefs.ErrInvalidArgument,
+		)
+	}
+	return driversResources{
+		CPUPeriod: runtimeSlotCPUPeriod, CPUQuota: quota,
+		CPUShares: shares, CPUSetCpus: cpuset, MemoryLimitBytes: memoryBytes,
+	}, nil
+}
+
+func countCanonicalCPUSet(value string) (int, error) {
+	seen := make(map[int]struct{})
+	for _, part := range strings.Split(value, ",") {
+		if part == "" {
+			return 0, fmt.Errorf("runtime slot CPU set is invalid: %w", errdefs.ErrInvalidArgument)
+		}
+		bounds := strings.Split(part, "-")
+		if len(bounds) > 2 {
+			return 0, fmt.Errorf("runtime slot CPU set is invalid: %w", errdefs.ErrInvalidArgument)
+		}
+		first, err := strconv.Atoi(bounds[0])
+		if err != nil || first < 0 || strconv.Itoa(first) != bounds[0] {
+			return 0, fmt.Errorf("runtime slot CPU set is non-canonical: %w", errdefs.ErrInvalidArgument)
+		}
+		last := first
+		if len(bounds) == 2 {
+			last, err = strconv.Atoi(bounds[1])
+			if err != nil || last <= first || strconv.Itoa(last) != bounds[1] {
+				return 0, fmt.Errorf("runtime slot CPU set is non-canonical: %w", errdefs.ErrInvalidArgument)
+			}
+		}
+		if last-first+1 > runtimeSlotMaxDedicatedCPUs || len(seen)+last-first+1 > runtimeSlotMaxDedicatedCPUs {
+			return 0, fmt.Errorf("runtime slot CPU set exceeds %d cores: %w", runtimeSlotMaxDedicatedCPUs, errdefs.ErrInvalidArgument)
+		}
+		for cpu := first; cpu <= last; cpu++ {
+			if _, duplicate := seen[cpu]; duplicate {
+				return 0, fmt.Errorf("runtime slot CPU set overlaps: %w", errdefs.ErrInvalidArgument)
+			}
+			seen[cpu] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return 0, fmt.Errorf("runtime slot CPU set is empty: %w", errdefs.ErrInvalidArgument)
+	}
+	return len(seen), nil
 }
 
 func nomadProcdEndpoint(task *drivers.TaskConfig) (string, string, error) {

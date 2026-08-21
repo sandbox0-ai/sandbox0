@@ -38,6 +38,7 @@ type driversResources struct {
 	CPUPeriod        int64
 	CPUQuota         int64
 	CPUShares        int64
+	CPUSetCpus       string
 	MemoryLimitBytes int64
 }
 
@@ -76,7 +77,7 @@ func buildSpec(options specOptions) specs.Spec {
 			limit := options.Resources.MemoryLimitBytes
 			resources.Memory = &specs.LinuxMemory{Limit: &limit}
 		}
-		if options.Resources.CPUPeriod > 0 || options.Resources.CPUQuota > 0 || options.Resources.CPUShares > 0 {
+		if options.Resources.CPUPeriod > 0 || options.Resources.CPUQuota > 0 || options.Resources.CPUShares > 0 || options.Resources.CPUSetCpus != "" {
 			resources.CPU = &specs.LinuxCPU{}
 			if options.Resources.CPUPeriod > 0 {
 				period := uint64(options.Resources.CPUPeriod)
@@ -90,6 +91,7 @@ func buildSpec(options specOptions) specs.Spec {
 				shares := uint64(options.Resources.CPUShares)
 				resources.CPU.Shares = &shares
 			}
+			resources.CPU.Cpus = options.Resources.CPUSetCpus
 		}
 		linux.Resources = resources
 	}

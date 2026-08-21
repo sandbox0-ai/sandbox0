@@ -151,6 +151,48 @@ func TestBridgeSSHChannelDelaysExitStatusUntilUpstreamStreamsDrain(t *testing.T)
 	}
 }
 
+func TestBridgeSSHChannelWaitsForInFlightDownstreamRequestBeforeClose(t *testing.T) {
+	downstream := newOrderedFakeSSHChannel()
+	upstream := newOrderedFakeSSHChannel()
+	downstream.closeInput()
+
+	requestStarted := make(chan struct{})
+	requestRelease := make(chan struct{})
+	upstream.sendRequestStarted = requestStarted
+	upstream.sendRequestRelease = requestRelease
+	downstreamRequests := make(chan *ssh.Request, 1)
+	downstreamRequests <- &ssh.Request{Type: "exec"}
+	close(downstreamRequests)
+	upstreamRequests := make(chan *ssh.Request)
+	close(upstreamRequests)
+
+	done := make(chan struct{})
+	go func() {
+		bridgeSSHChannel(nil, downstream, downstreamRequests, upstream, upstreamRequests)
+		close(done)
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatalf("downstream request forwarding did not start; events=%v", upstream.eventsSnapshot())
+	}
+	upstream.closeInput()
+	if downstream.waitForEvent("close", 100*time.Millisecond) {
+		t.Fatalf("downstream closed before in-flight request completed; events=%v", downstream.eventsSnapshot())
+	}
+	close(requestRelease)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("bridge did not close after request completed; downstream events=%v upstream events=%v", downstream.eventsSnapshot(), upstream.eventsSnapshot())
+	}
+	if !downstream.hasEvent("close") {
+		t.Fatalf("downstream was not closed; events=%v", downstream.eventsSnapshot())
+	}
+}
+
 func TestKnownHostsCallbackRejectsUntrustedKey(t *testing.T) {
 	hostSigner, _, _ := mustTestSSHSigner(t)
 	otherSigner, _, _ := mustTestSSHSigner(t)
@@ -184,6 +226,10 @@ type orderedFakeSSHChannel struct {
 	events    []string
 	eventCh   chan string
 	closeOnce sync.Once
+
+	sendRequestStarted chan struct{}
+	sendRequestRelease <-chan struct{}
+	sendRequestOnce    sync.Once
 }
 
 func newOrderedFakeSSHChannel() *orderedFakeSSHChannel {
@@ -227,6 +273,12 @@ func (c *orderedFakeSSHChannel) CloseWrite() error {
 
 func (c *orderedFakeSSHChannel) SendRequest(name string, _ bool, _ []byte) (bool, error) {
 	c.record("request:" + name)
+	if c.sendRequestStarted != nil {
+		c.sendRequestOnce.Do(func() { close(c.sendRequestStarted) })
+	}
+	if c.sendRequestRelease != nil {
+		<-c.sendRequestRelease
+	}
 	return true, nil
 }
 

@@ -154,37 +154,39 @@ func bridgeSSHChannel(req *adapterRequest, downstream ssh.Channel, downstreamReq
 	var wg sync.WaitGroup
 	var upstreamOutboundDone sync.WaitGroup
 	var upstreamStreamsDone sync.WaitGroup
+	var downstreamRequestGate sshRequestGate
 	wg.Add(6)
 	upstreamOutboundDone.Add(3)
 	upstreamStreamsDone.Add(2)
 	go func() {
-		copySSHStream(&wg, upstream, downstream, closeBoth, false, req, bandwidthEgress)
+		copySSHStream(&wg, upstream, downstream, req, bandwidthEgress)
 	}()
 	go func() {
 		defer upstreamOutboundDone.Done()
 		defer upstreamStreamsDone.Done()
-		copySSHStream(&wg, downstream, upstream, closeBoth, false, req, bandwidthIngress)
+		copySSHStream(&wg, downstream, upstream, req, bandwidthIngress)
 	}()
-	go copySSHStream(&wg, upstream.Stderr(), downstream.Stderr(), closeBoth, false, req, bandwidthEgress)
+	go copySSHStream(&wg, upstream.Stderr(), downstream.Stderr(), req, bandwidthEgress)
 	go func() {
 		defer upstreamOutboundDone.Done()
 		defer upstreamStreamsDone.Done()
-		copySSHStream(&wg, downstream.Stderr(), upstream.Stderr(), closeBoth, false, req, bandwidthIngress)
+		copySSHStream(&wg, downstream.Stderr(), upstream.Stderr(), req, bandwidthIngress)
 	}()
-	go forwardSSHRequests(&wg, downstreamRequests, upstream, closeBoth, true, false)
+	go forwardDownstreamSSHRequests(&wg, downstreamRequests, upstream, &downstreamRequestGate)
 	go func() {
 		defer upstreamOutboundDone.Done()
 		forwardUpstreamSSHRequests(&wg, upstreamRequests, downstream, &upstreamStreamsDone)
 	}()
 	go func() {
 		upstreamOutboundDone.Wait()
+		downstreamRequestGate.closeAndWait()
 		_ = downstream.Close()
 	}()
 	wg.Wait()
 	closeBoth()
 }
 
-func copySSHStream(wg *sync.WaitGroup, dst io.Writer, src io.Reader, closeBoth func(), closeOnEOF bool, req *adapterRequest, direction bandwidthDirection) {
+func copySSHStream(wg *sync.WaitGroup, dst io.Writer, src io.Reader, req *adapterRequest, direction bandwidthDirection) {
 	defer wg.Done()
 	writer := dst
 	if req != nil && req.Server != nil {
@@ -194,24 +196,51 @@ func copySSHStream(wg *sync.WaitGroup, dst io.Writer, src io.Reader, closeBoth f
 	if closer, ok := dst.(interface{ CloseWrite() error }); ok {
 		_ = closer.CloseWrite()
 	}
-	if closeOnEOF {
-		closeBoth()
-	}
 }
 
-func forwardSSHRequests(wg *sync.WaitGroup, requests <-chan *ssh.Request, dst ssh.Channel, closeBoth func(), downstreamToUpstream bool, closeOnEnd bool) {
+type sshRequestGate struct {
+	mu      sync.Mutex
+	active  sync.WaitGroup
+	closing bool
+}
+
+func (g *sshRequestGate) begin() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closing {
+		return false
+	}
+	g.active.Add(1)
+	return true
+}
+
+func (g *sshRequestGate) end() {
+	g.active.Done()
+}
+
+func (g *sshRequestGate) closeAndWait() {
+	g.mu.Lock()
+	g.closing = true
+	g.mu.Unlock()
+	g.active.Wait()
+}
+
+func forwardDownstreamSSHRequests(wg *sync.WaitGroup, requests <-chan *ssh.Request, dst ssh.Channel, gate *sshRequestGate) {
 	defer wg.Done()
 	for req := range requests {
-		if downstreamToUpstream && !allowDownstreamSSHRequest(req.Type) {
+		if gate != nil && !gate.begin() {
+			return
+		}
+		if !allowDownstreamSSHRequest(req.Type) {
 			if req.WantReply {
 				_ = req.Reply(false, nil)
 			}
-			continue
+		} else {
+			forwardSSHRequest(req, dst)
 		}
-		forwardSSHRequest(req, dst)
-	}
-	if closeOnEnd {
-		closeBoth()
+		if gate != nil {
+			gate.end()
+		}
 	}
 }
 

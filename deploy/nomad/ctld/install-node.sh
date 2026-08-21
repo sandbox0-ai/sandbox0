@@ -54,7 +54,9 @@ install -d -m 0755 "$(dest /run/sandbox0)" "$(dest /run/sandbox0/nomad-slots)" "
 
 install -m 0755 "$ctld" "$(dest /usr/local/bin/ctld)"
 install -m 0755 "$runsc" "$(dest /usr/local/bin/runsc)"
-install -m 0755 "$driver" "$(dest /opt/nomad/plugins/nomad-driver-sandbox0)"
+rm -f "$(dest /opt/nomad/plugins/nomad-driver-sandbox0)" \
+  "$(dest /opt/nomad/plugins/nomad-driver-sandbox0-gvisor)"
+install -m 0755 "$driver" "$(dest /opt/nomad/plugins/sandbox0-gvisor)"
 install -m 0755 "$asset_dir/ctld-host-check" "$(dest /usr/local/libexec/sandbox0/ctld-host-check)"
 install -m 0755 "$asset_dir/rollout-node.sh" "$(dest /usr/local/libexec/sandbox0/ctld-rollout-node)"
 install -m 0600 "$config" "$(dest /etc/sandbox0/ctld.yaml)"

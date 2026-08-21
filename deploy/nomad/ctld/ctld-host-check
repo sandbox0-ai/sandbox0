@@ -48,7 +48,7 @@ require_root_file /etc/sandbox0/ctld-b.env
 require_root_file /etc/nomad.d/30-sandbox0-gvisor.hcl
 require_root_file /usr/local/bin/ctld
 require_root_file /usr/local/bin/runsc
-require_root_file /opt/nomad/plugins/nomad-driver-sandbox0
+require_root_file /opt/nomad/plugins/sandbox0-gvisor
 for file in \
   /etc/sandbox0/pki/manager-ca.pem \
   /etc/sandbox0/pki/ctld.pem \

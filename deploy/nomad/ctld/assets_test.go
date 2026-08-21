@@ -162,6 +162,18 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 	network := write("network.yaml", "node_name: node-1\n", 0o600)
 	nomadConfig := write("nomad.hcl", "plugin \"sandbox0-gvisor\" {}\n", 0o600)
 	environment := write("ctld.env", "SANDBOX0_NODE_NAME=node-1\n", 0o600)
+	staleDrivers := []string{
+		filepath.Join(root, "opt/nomad/plugins/nomad-driver-sandbox0"),
+		filepath.Join(root, "opt/nomad/plugins/nomad-driver-sandbox0-gvisor"),
+	}
+	if err := os.MkdirAll(filepath.Dir(staleDrivers[0]), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, staleDriver := range staleDrivers {
+		if err := os.WriteFile(staleDriver, []byte("stale"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	command := exec.Command("sh", "./install-node.sh",
 		"--ctld", ctld, "--driver", driver, "--runsc", runsc,
 		"--config", config, "--network-config", network, "--nomad-config", nomadConfig, "--env", environment,
@@ -173,7 +185,7 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 	for _, path := range []string{
 		"usr/local/bin/ctld",
 		"usr/local/bin/runsc",
-		"opt/nomad/plugins/nomad-driver-sandbox0",
+		"opt/nomad/plugins/sandbox0-gvisor",
 		"etc/nomad.d/30-sandbox0-gvisor.hcl",
 		"usr/local/libexec/sandbox0/ctld-host-check",
 		"usr/local/libexec/sandbox0/ctld-rollout-node",
@@ -187,6 +199,11 @@ func TestInstallerProducesBoundedHostLayout(t *testing.T) {
 	} {
 		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
 			t.Fatalf("installed asset %s: %v", path, err)
+		}
+	}
+	for _, staleDriver := range staleDrivers {
+		if _, err := os.Stat(staleDriver); !os.IsNotExist(err) {
+			t.Fatalf("stale misnamed driver remains after install: %v", err)
 		}
 	}
 	info, err := os.Stat(filepath.Join(root, "etc/sandbox0/ctld.yaml"))

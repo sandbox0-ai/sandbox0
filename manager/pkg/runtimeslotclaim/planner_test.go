@@ -512,6 +512,12 @@ func TestPlannerValidatesLogicalInputsBeforeAuthorityMutation(t *testing.T) {
 				request.NetworkPolicy = `{"version":"v1","sandboxId":"sandbox-1","teamId":"team-1","mode":"allow-all","unknown":true}`
 			},
 		},
+		{
+			name: "ingress time beyond trusted clock skew",
+			mutate: func(request *Request) {
+				request.StartedAt = time.Now().Add(maxTrustedIngressClockSkew + time.Minute)
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -573,5 +579,32 @@ func TestPlannerMeasuresTrustedIngressToTerminalProbe(t *testing.T) {
 	if len(fixture.observer.observations) != 1 || fixture.observer.observations[0].Duration != result.Duration ||
 		fixture.observer.observations[0].WithinSLO {
 		t.Fatalf("observation = %+v", fixture.observer.observations)
+	}
+}
+
+func TestPlannerAllowsBoundedIngressClockLeadButMarksSLOMissed(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	managerNow := time.Now().UTC()
+	fixture.planner.now = func() time.Time { return managerNow }
+	fixture.request.StartedAt = managerNow.Add(time.Second)
+	result, err := fixture.planner.Claim(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	if result.WithinSLO {
+		t.Fatalf("bounded future ingress was reported within SLO: %+v", result)
+	}
+	var ingressPhase *PhaseObservation
+	for index := range result.Phases {
+		if result.Phases[index].Phase == PhaseIngressToPlanner {
+			ingressPhase = &result.Phases[index]
+			break
+		}
+	}
+	if ingressPhase == nil || ingressPhase.Succeeded {
+		t.Fatalf("ingress phase = %+v, want bounded clock-skew failure", ingressPhase)
+	}
+	if len(fixture.observer.observations) != 1 || fixture.observer.observations[0].WithinSLO {
+		t.Fatalf("observation = %+v, want successful claim with SLO miss", fixture.observer.observations)
 	}
 }

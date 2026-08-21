@@ -26,8 +26,9 @@ import (
 )
 
 const (
-	defaultClaimTTL = 15 * time.Second
-	defaultSLO      = time.Second
+	defaultClaimTTL            = 15 * time.Second
+	defaultSLO                 = time.Second
+	maxTrustedIngressClockSkew = 5 * time.Second
 )
 
 // Store is the PostgreSQL authority needed by one claim. Get by deterministic
@@ -238,6 +239,7 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	if request.StartedAt.IsZero() {
 		startedAt = callStarted
 	}
+	ingressClockSkewed := startedAt.After(callStarted)
 	observedSlotID := ""
 	phases := make([]PhaseObservation, 0, 9)
 	recordPhase := func(phase string, started time.Time, succeeded bool) {
@@ -250,10 +252,18 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	defer func() {
 		completedAt := p.now().UTC()
 		duration := completedAt.Sub(startedAt)
+		if ingressClockSkewed {
+			// A bounded regional clock lead must not fail an otherwise valid
+			// claim, but it also must not make the SLO appear met. Use the
+			// manager-local elapsed time as a conservative fallback for the
+			// reported duration; the public acceptance gate additionally
+			// requires its monotonic request round trip to stay within budget.
+			duration = max(duration, completedAt.Sub(callStarted))
+		}
 		if duration < 0 {
 			duration = 0
 		}
-		withinSLO := resultErr == nil && duration <= p.slo
+		withinSLO := resultErr == nil && !ingressClockSkewed && duration <= p.slo
 		if result != nil {
 			result.Duration = duration
 			result.WithinSLO = withinSLO
@@ -279,7 +289,9 @@ func (p *Planner) Claim(ctx context.Context, request Request) (result *Result, r
 	if ingressToPlanner < 0 {
 		ingressToPlanner = 0
 	}
-	phases = append(phases, PhaseObservation{Phase: PhaseIngressToPlanner, Duration: ingressToPlanner, Succeeded: true})
+	phases = append(phases, PhaseObservation{
+		Phase: PhaseIngressToPlanner, Duration: ingressToPlanner, Succeeded: !ingressClockSkewed,
+	})
 	ids := p.identities(normalized.OperationID)
 	runtimeRevision := normalized.RuntimeAssignmentRevision
 	policyDigest := normalized.NetworkPolicyDigest
@@ -571,8 +583,8 @@ func (p *Planner) validateRequest(request Request, now time.Time) (normalizedReq
 		request.Runtime.EnvVars[runtimecontrol.EnvSandboxID] != request.SandboxID {
 		return normalizedRequest{}, errors.New("runtime assignment does not match sandbox and team")
 	}
-	if !request.StartedAt.IsZero() && request.StartedAt.After(now) {
-		return normalizedRequest{}, errors.New("regional ingress start time is in the future")
+	if !request.StartedAt.IsZero() && request.StartedAt.After(now.Add(maxTrustedIngressClockSkew)) {
+		return normalizedRequest{}, errors.New("regional ingress start time exceeds the trusted clock-skew bound")
 	}
 	normalized.Runtime = cloneAssignment(request.Runtime)
 	runtimePayload, err := json.Marshal(normalized.Runtime)

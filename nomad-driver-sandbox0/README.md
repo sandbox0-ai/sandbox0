@@ -305,7 +305,10 @@ claim pass by under-reporting command readiness. Any claim,
 cleanup-convergence, successful command-ready sample, or public claim round
 trip above one second fails the gate. The command-ready p50 must be at or below
 500 ms and both command-ready and public round-trip p99 must be at or below one
-second. Cold S3, unclean replay, Nomad refill,
+second. A signed regional ingress timestamp up to five seconds ahead of the
+manager clock is admitted so small host-clock offsets do not break sandbox
+creation, but that sample is forced to `missed`; a larger lead is rejected.
+Cold S3, unclean replay, Nomad refill,
 full-cold-node, and 1/8/32 concurrency results must be recorded as separate
 labeled reports rather than mixed into the hot distribution.
 

@@ -261,10 +261,17 @@ acquire, network prepare, writer issue/bind, node claim, procd probe, and
 command-ready commit without operation, sandbox, or slot labels.
 
 Run the serial gate against the public regional URL with a prewarmed compatible
-pool and hot RootFS working set:
+pool and hot RootFS working set. Build once, record the executable hash, and use
+the same binary for both reports; `go run` is not acceptable evidence because
+it does not preserve the executed artifact:
 
 ```sh
-SANDBOX0_API_TOKEN=... go run ./tools/runtime-slot-slo \
+go build -buildvcs=false -trimpath -o /tmp/runtime-slot-slo ./tools/runtime-slot-slo
+sha256sum /tmp/runtime-slot-slo
+```
+
+```sh
+SANDBOX0_API_TOKEN=... /tmp/runtime-slot-slo \
   --url https://region.example.com/api/v1/sandboxes \
   --template default \
   --batches 1000 \
@@ -279,7 +286,7 @@ SANDBOX0_API_TOKEN=... go run ./tools/runtime-slot-slo \
 The concurrency-8 gate uses at least 100 synchronized batches:
 
 ```sh
-SANDBOX0_API_TOKEN=... go run ./tools/runtime-slot-slo \
+SANDBOX0_API_TOKEN=... /tmp/runtime-slot-slo \
   --url https://region.example.com/api/v1/sandboxes \
   --template default \
   --batches 100 \

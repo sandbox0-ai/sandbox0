@@ -43,7 +43,7 @@ func TestRunAcceptsSynchronizedRegionalClaimDistribution(t *testing.T) {
 			deletes.Add(1)
 			_ = spec.WriteSuccess(writer, http.StatusAccepted, struct{}{})
 		case http.MethodGet:
-			writer.WriteHeader(http.StatusNotFound)
+			_ = spec.WriteError(writer, http.StatusNotFound, spec.CodeNotFound, "sandbox is absent")
 		default:
 			writer.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -99,6 +99,35 @@ func TestRunRejectsCleanupThatNeverConverges(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNoncanonicalCleanupAbsence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodPost:
+			writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=100")
+			writer.Header().Set("Sandbox0-Command-Ready-SLO", "met")
+			_ = spec.WriteSuccess(writer, http.StatusCreated, claimResponse{SandboxID: "sandbox-1"})
+		case http.MethodDelete:
+			_ = spec.WriteSuccess(writer, http.StatusOK, struct{}{})
+		case http.MethodGet:
+			writer.WriteHeader(http.StatusNotFound)
+		default:
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	cfg := config{
+		endpoint: server.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
+		batches: 1, concurrency: 1, requestTimeout: time.Second,
+		cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
+		hardLimit: time.Second, p50Target: 500 * time.Millisecond, cleanup: true, client: server.Client(),
+	}
+	result, err := run(context.Background(), cfg)
+	if err == nil || result.Passed || result.CleanupErrors != 1 ||
+		result.Samples[0].CleanupError != "sandbox sandbox-1 absence response is not a canonical not_found envelope" {
+		t.Fatalf("report=%+v error=%v", result, err)
+	}
+}
+
 func TestRunDoesNotStartNextBatchBeforeCleanupConverges(t *testing.T) {
 	var claims atomic.Int64
 	var firstGets atomic.Int64
@@ -124,7 +153,7 @@ func TestRunDoesNotStartNextBatchBeforeCleanupConverges(t *testing.T) {
 			if request.URL.Path == "/api/v1/sandboxes/sandbox-1" {
 				firstAbsent.Store(true)
 			}
-			writer.WriteHeader(http.StatusNotFound)
+			_ = spec.WriteError(writer, http.StatusNotFound, spec.CodeNotFound, "sandbox is absent")
 		default:
 			writer.WriteHeader(http.StatusMethodNotAllowed)
 		}

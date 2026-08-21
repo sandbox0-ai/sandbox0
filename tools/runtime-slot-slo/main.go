@@ -349,6 +349,10 @@ func cleanupSandbox(ctx context.Context, cfg config, sandboxID string) error {
 		}
 		switch status {
 		case http.StatusNotFound:
+			_, apiErr, decodeErr := spec.DecodeResponse[json.RawMessage](bytes.NewReader(payload))
+			if decodeErr != nil || apiErr == nil || apiErr.Code != spec.CodeNotFound {
+				return fmt.Errorf("sandbox %s absence response is not a canonical not_found envelope", sandboxID)
+			}
 			return nil
 		case http.StatusOK:
 		default:

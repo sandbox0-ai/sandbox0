@@ -293,10 +293,12 @@ SANDBOX0_API_TOKEN=... go run ./tools/runtime-slot-slo \
 The harness performs no hidden claim retries, requires the trusted timing and
 SLO headers on every `201`, and disables ambient HTTP proxies. Outside each
 measured interval it sends public DELETE and polls public GET until `404`;
-acceptance therefore requires the asynchronous terminal worker and physical
-slot cleanup to converge within the configured timeout rather than merely
-accepting deletion intent. Report version 2 records the cleanup distribution
-separately. Any claim, cleanup-convergence, or successful command-ready sample
+the `404` must also contain the canonical public `not_found` envelope, so a
+proxy or route-level fallback page cannot masquerade as cleanup. Acceptance
+therefore requires the asynchronous terminal worker and physical slot cleanup
+to converge within the configured timeout rather than merely accepting
+deletion intent. Report version 2 records the cleanup distribution separately.
+Any claim, cleanup-convergence, or successful command-ready sample
 above one second fails the gate. The command-ready p50 must be at or below 500
 ms and p99 at or below one second. Cold S3, unclean replay, Nomad refill,
 full-cold-node, and 1/8/32 concurrency results must be recorded as separate

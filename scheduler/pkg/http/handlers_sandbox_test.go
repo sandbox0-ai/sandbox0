@@ -396,6 +396,13 @@ func TestCreateSandboxRoutesRequestByHeadroom(t *testing.T) {
 		t.Fatalf("generate ed25519 keypair: %v", err)
 	}
 	startedAt := time.Date(2026, time.August, 20, 8, 9, 10, 123456789, time.UTC)
+	wantAudit := &internalauth.AuditContext{
+		Actor: internalauth.AuditActor{
+			Kind: "human", ID: "user-a", UserID: "user-a", AuthMethod: string(gatewayauthn.AuthMethodJWT),
+		},
+		OperationID: "operation-regional", RequestID: "request-regional",
+		Origin: internalauth.ServiceRegionalGateway, IngressStartedAt: &startedAt,
+	}
 	clusterValidator := internalauth.NewValidator(internalauth.ValidatorConfig{
 		Target: internalauth.ServiceClusterGateway, PublicKey: publicKey,
 		AllowedCallers: []string{internalauth.ServiceScheduler}, ClockSkewTolerance: 5 * time.Second,
@@ -423,10 +430,15 @@ func TestCreateSandboxRoutesRequestByHeadroom(t *testing.T) {
 		if err != nil {
 			t.Fatalf("validate scheduler token: %v", err)
 		}
-		if claims.Audit == nil || claims.Audit.IngressStartedAt == nil ||
+		if claims.Audit == nil || claims.Audit.Actor != wantAudit.Actor ||
+			claims.Audit.OperationID != wantAudit.OperationID || claims.Audit.RequestID != wantAudit.RequestID ||
+			claims.Audit.Origin != wantAudit.Origin || claims.Audit.IngressStartedAt == nil ||
 			!claims.Audit.IngressStartedAt.Equal(startedAt) {
-			t.Fatalf("forwarded audit = %#v, want ingress start %s", claims.Audit, startedAt)
+			t.Fatalf("forwarded audit = %#v, want %#v", claims.Audit, wantAudit)
 		}
+		w.Header().Set("Server-Timing", "sandbox0-command-ready;dur=421.750")
+		w.Header().Set("Sandbox0-Command-Ready-SLO", "met")
+		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"success":true,"data":{"sandbox_id":"sb-b"}}`))
 	}))
 	defer clusterB.Close()
@@ -490,10 +502,7 @@ func TestCreateSandboxRoutesRequestByHeadroom(t *testing.T) {
 		"user-a",
 		internalauth.GenerateOptions{
 			Permissions: []string{gatewayauthn.PermSandboxCreate},
-			Audit: &internalauth.AuditContext{
-				Actor:            internalauth.AuditActor{Kind: "human", UserID: "user-a"},
-				IngressStartedAt: &startedAt,
-			},
+			Audit:       wantAudit,
 		},
 	)
 	if err != nil {
@@ -506,8 +515,14 @@ func TestCreateSandboxRoutesRequestByHeadroom(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Server-Timing"); got != "sandbox0-command-ready;dur=421.750" {
+		t.Fatalf("Server-Timing = %q", got)
+	}
+	if got := resp.Header.Get("Sandbox0-Command-Ready-SLO"); got != "met" {
+		t.Fatalf("Sandbox0-Command-Ready-SLO = %q", got)
 	}
 	if receivedA != 0 {
 		t.Fatalf("cluster-a requests = %d, want 0", receivedA)

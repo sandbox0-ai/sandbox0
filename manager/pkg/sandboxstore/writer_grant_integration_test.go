@@ -1463,12 +1463,6 @@ func TestRootFSWriterCrashAbandonCompletesAbandonedInitialNomadClaimIntegration(
 		})
 	})
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `
-		UPDATE manager.rootfs_writer_grants
-		SET lease_expires_at = NOW() - ($2::bigint * INTERVAL '1 millisecond')
-		WHERE grant_id = $1
-	`, issued.Grant.ID, RootFSWriterCrashAbandonGrace.Milliseconds()+1000)
-	require.NoError(t, err)
 	begin := &BeginRootFSWriterCrashAbandonRequest{
 		GrantID: issued.Grant.ID, WriterEpoch: issued.Grant.WriterEpoch,
 		OperationID: lifecycleID, BindingVersion: RootFSWriterBindingVersion,

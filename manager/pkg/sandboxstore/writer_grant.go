@@ -1151,7 +1151,8 @@ func beginRootFSWriterCrashAbandon(
 	}
 	leaseMature := !record.LeaseExpiresAt.IsZero() &&
 		!record.LeaseExpiresAt.Add(RootFSWriterCrashAbandonGrace).After(record.databaseNow)
-	if !leaseMature && !runtimeMatch.terminating {
+	explicitFence := runtimeMatch.terminating || runtimeMatch.failedClaimCleanup
+	if !leaseMature && !explicitFence {
 		return nil, fmt.Errorf("%w: grant %s remains renewable", ErrRootFSWriterFenceNotMature, normalized.GrantID)
 	}
 	if err := lockRootFSWriterCrashFallbackGeneration(
@@ -1181,7 +1182,7 @@ func beginRootFSWriterCrashAbandon(
 	`, normalized.GrantID, RootFSWriterGrantStateRetiring, normalized.OperationID,
 		RootFSWriterRetireKindCrashAbandon, RootFSWriterGrantStateConsumed,
 		normalized.WriterEpoch, normalized.BindingVersion, normalized.BindingDigest,
-		normalized.NodeUID, normalized.NodeBootID, RootFSWriterCrashAbandonGrace.Milliseconds(), runtimeMatch.terminating)
+		normalized.NodeUID, normalized.NodeBootID, RootFSWriterCrashAbandonGrace.Milliseconds(), explicitFence)
 	if err != nil {
 		return nil, mapRootFSWriterGrantConflict("begin rootfs writer crash abandon", err)
 	}

@@ -173,6 +173,35 @@ func TestRunDoesNotStartNextBatchBeforeCleanupConverges(t *testing.T) {
 	}
 }
 
+func TestRunRejectsReplayedSandboxIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodPost:
+			writer.Header().Set("Server-Timing", "sandbox0-command-ready;dur=100")
+			writer.Header().Set("Sandbox0-Command-Ready-SLO", "met")
+			_ = spec.WriteSuccess(writer, http.StatusCreated, claimResponse{SandboxID: "sandbox-replayed"})
+		case http.MethodDelete:
+			_ = spec.WriteSuccess(writer, http.StatusAccepted, struct{}{})
+		case http.MethodGet:
+			_ = spec.WriteError(writer, http.StatusNotFound, spec.CodeNotFound, "sandbox is absent")
+		default:
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	cfg := config{
+		endpoint: server.URL + "/api/v1/sandboxes", token: "test-token", body: []byte(`{"template":"default"}`),
+		batches: 2, concurrency: 1, requestTimeout: time.Second,
+		cleanupTimeout: time.Second, cleanupPoll: 10 * time.Millisecond,
+		hardLimit: time.Second, p50Target: 500 * time.Millisecond, client: server.Client(),
+	}
+	result, err := run(context.Background(), cfg)
+	if err == nil || result.Passed || result.Errors != 1 ||
+		result.Samples[1].Error != "claim sandbox_id duplicates sample 0" {
+		t.Fatalf("report=%+v error=%v", result, err)
+	}
+}
+
 func TestRunRejectsAnySuccessfulSampleBeyondHardLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.Method {

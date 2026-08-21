@@ -203,6 +203,7 @@ func run(ctx context.Context, cfg config) (report, error) {
 		Samples: make([]sample, cfg.batches*cfg.concurrency),
 	}
 	var cleanupErrors atomic.Int64
+	seenSandboxIDs := make(map[string]int, len(result.Samples))
 	for batch := range cfg.batches {
 		var wait sync.WaitGroup
 		start := make(chan struct{})
@@ -217,6 +218,20 @@ func run(ctx context.Context, cfg config) (report, error) {
 		}
 		close(start)
 		wait.Wait()
+		for lane := range cfg.concurrency {
+			index := batch*cfg.concurrency + lane
+			current := &result.Samples[index]
+			if current.SandboxID == "" {
+				continue
+			}
+			if firstIndex, duplicate := seenSandboxIDs[current.SandboxID]; duplicate {
+				if current.Error == "" {
+					current.Error = fmt.Sprintf("claim sandbox_id duplicates sample %d", firstIndex)
+				}
+				continue
+			}
+			seenSandboxIDs[current.SandboxID] = index
+		}
 		for lane := range cfg.concurrency {
 			current := result.Samples[batch*cfg.concurrency+lane]
 			if current.SandboxID == "" {
@@ -352,6 +367,10 @@ func claim(ctx context.Context, cfg config, index, batch, lane int) sample {
 	decoded, apiErr, err := spec.DecodeResponse[claimResponse](bytes.NewReader(payload))
 	if err != nil || apiErr != nil || decoded == nil || strings.TrimSpace(decoded.SandboxID) == "" {
 		result.Error = fmt.Sprintf("invalid claim response: decode=%v api=%v", err, apiErr)
+		return result
+	}
+	if decoded.SandboxID != strings.TrimSpace(decoded.SandboxID) || len(decoded.SandboxID) > 512 {
+		result.Error = "claim response contains a noncanonical sandbox_id"
 		return result
 	}
 	result.SandboxID = decoded.SandboxID

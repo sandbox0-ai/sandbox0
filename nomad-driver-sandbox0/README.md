@@ -320,7 +320,9 @@ The harness performs no hidden claim retries, requires the trusted timing and
 SLO headers on every `201`, disables ambient HTTP proxies, and rejects HTTP
 redirects instead of moving the bearer token or sample to another route. It
 has no mode that skips terminal cleanup: every successfully decoded claim is
-deleted and observed absent before the next batch can start.
+deleted and observed absent before the next batch can start. Sandbox IDs must
+be canonical and unique across the entire report, so a cached or replayed
+claim response cannot satisfy multiple samples.
 Outside each measured interval it sends public DELETE and polls public GET until `404`;
 the `404` must also contain the canonical public `not_found` envelope, so a
 proxy or route-level fallback page cannot masquerade as cleanup. Acceptance
